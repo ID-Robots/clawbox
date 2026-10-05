@@ -26,6 +26,14 @@ import fs from "fs";
 import path from "./runtime-path";
 import { verifyMcpBearer } from "./mcp-token";
 import { hasOwnerPassword } from "./system-password";
+import { ownerUsername } from "./owner-username";
+import {
+  USERS_CONFIG_KEY,
+  identityFromClaims,
+  parseUserRegistry,
+  registryVersions,
+  type SessionIdentity,
+} from "./session-identity";
 
 function dataDir(): string {
   const root = process.env.CLAWBOX_ROOT
@@ -37,7 +45,11 @@ interface ConfigFacts {
   setupComplete: boolean;
   passwordConfigured: boolean;
   sessionGeneration: number;
+  /** Non-owner users (TASK-1256): username → session version. */
+  users: ReadonlyMap<string, string>;
 }
+
+const NO_USERS: ReadonlyMap<string, string> = new Map();
 
 /**
  * Fail-closed config read. A config.json that is genuinely absent is a
@@ -52,6 +64,7 @@ function readConfigFacts(): ConfigFacts {
       setup_complete?: unknown;
       password_configured?: unknown;
       session_generation?: unknown;
+      [USERS_CONFIG_KEY]?: unknown;
     };
     const gen = typeof parsed.session_generation === "number" && Number.isFinite(parsed.session_generation)
       ? parsed.session_generation
@@ -60,10 +73,11 @@ function readConfigFacts(): ConfigFacts {
       setupComplete: parsed.setup_complete === true,
       passwordConfigured: parsed.password_configured === true,
       sessionGeneration: gen,
+      users: registryVersions(parseUserRegistry(parsed[USERS_CONFIG_KEY], ownerUsername())),
     };
   } catch (err) {
     const missing = (err as NodeJS.ErrnoException)?.code === "ENOENT";
-    return { setupComplete: !missing, passwordConfigured: !missing, sessionGeneration: 0 };
+    return { setupComplete: !missing, passwordConfigured: !missing, sessionGeneration: 0, users: NO_USERS };
   }
 }
 
@@ -96,6 +110,14 @@ function sessionSecret(): string | null {
 }
 
 export interface RequireSessionOptions {
+  /**
+   * Let a signed-in user OTHER than the owner through (TASK-1256). Off by
+   * default: every route behind `requireSession` was written for the owner, so
+   * a non-owner is refused with 403 `owner_only` unless the route says it is
+   * scoped per user. Middleware's own allow-list (src/lib/non-owner-scope.ts)
+   * has to admit the path too.
+   */
+  allowNonOwner?: boolean;
   /**
    * Let the request through while the device is in the genuine first-boot
    * bootstrap window — no password has ever been set, so there is no owner to
@@ -138,30 +160,53 @@ function readSessionCookie(request: Request): string | null {
   }
 }
 
-function verifySignedCookie(cookie: string, secret: string, expectedGen: number): boolean {
+function verifySignedCookie(cookie: string, secret: string, expectedGen: number): Record<string, unknown> | null {
   const dot = cookie.indexOf(".");
-  if (dot < 0) return false;
+  if (dot < 0) return null;
   const payload = cookie.slice(0, dot);
   const sig = cookie.slice(dot + 1);
-  if (!payload || !/^[0-9a-f]{64}$/i.test(sig)) return false;
+  if (!payload || !/^[0-9a-f]{64}$/i.test(sig)) return null;
 
   try {
     const expected = crypto.createHmac("sha256", secret).update(payload).digest("hex");
     const a = Buffer.from(sig.toLowerCase(), "hex");
     const b = Buffer.from(expected, "hex");
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return false;
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
 
     const data = JSON.parse(Buffer.from(payload, "base64url").toString());
-    if (typeof data.exp !== "number" || data.exp <= Math.floor(Date.now() / 1000)) return false;
+    if (typeof data !== "object" || data === null) return null;
+    if (typeof data.exp !== "number" || data.exp <= Math.floor(Date.now() / 1000)) return null;
     // Cookies minted before the last password change are revoked.
-    return (typeof data.gen === "number" ? data.gen : 0) === expectedGen;
+    if ((typeof data.gen === "number" ? data.gen : 0) !== expectedGen) return null;
+    return data as Record<string, unknown>;
   } catch {
-    return false;
+    return null;
   }
 }
 
 /**
- * True when the request carries a valid session cookie or the MCP bearer.
+ * Who the request's session cookie speaks for (TASK-1256), or `null` when it
+ * carries no cookie this box still honours — expired, revoked by a password
+ * change, or issued to a user who has since been removed. Cookie only: the MCP
+ * bearer is the agent, not a person, and is answered by `hasValidSession`.
+ */
+export async function sessionIdentity(request: Request | undefined): Promise<SessionIdentity | null> {
+  if (!request || typeof request.headers?.get !== "function") return null;
+  const cookie = readSessionCookie(request);
+  if (!cookie) return null;
+  const secret = sessionSecret();
+  if (!secret) return null;
+  const facts = readConfigFacts();
+  const claims = verifySignedCookie(cookie, secret, facts.sessionGeneration);
+  if (!claims) return null;
+  return identityFromClaims(claims, ownerUsername(), facts.users);
+}
+
+/**
+ * True when the request carries the MCP bearer or a valid session cookie
+ * issued to the OWNER. A session of another ClawBox user (TASK-1256) is not
+ * one: every caller of this asks "is this the owner" — setup/status trims its
+ * answer for anyone who isn't, and `requireSession` gates owner routes on it.
  *
  * Deliberately does NOT honour `CLAWBOX_TEST_MODE`, unlike `requireSession`
  * below. The two answer different questions: `requireSession` is a GATE ("may
@@ -181,17 +226,23 @@ export async function hasValidSession(request: Request | undefined): Promise<boo
   const authHeader = request.headers.get("authorization");
   if (authHeader && verifyMcpBearer(authHeader)) return true;
 
-  const cookie = readSessionCookie(request);
-  if (!cookie) return false;
-  const secret = sessionSecret();
-  if (!secret) return false;
-  return verifySignedCookie(cookie, secret, readConfigFacts().sessionGeneration);
+  return (await sessionIdentity(request))?.isOwner === true;
+}
+
+/** The 403 a signed-in non-owner gets from an owner route — never a 401, which the desktop reads as "session expired". */
+export function ownerOnlyResponse(): NextResponse {
+  return NextResponse.json(
+    { error: "Only the box owner can do this.", code: "owner_only" },
+    { status: 403 },
+  );
 }
 
 /**
  * Returns a 401 response when the caller may not run this route, or `null`
  * when it may. Mirrors middleware's decision order so the two can't disagree:
- * MCP bearer → session cookie → test mode → bootstrap window.
+ * MCP bearer → session cookie → test mode → bootstrap window. A session of a
+ * ClawBox user other than the owner is answered 403 `owner_only` unless the
+ * route opts in with `allowNonOwner`.
  */
 export async function requireSession(
   request: Request | undefined,
@@ -203,6 +254,11 @@ export async function requireSession(
   // drives the whole wizard over HTTP with no cookie jar. install.sh only
   // writes this flag when it boots under CLAWBOX_TEST_MODE.
   if (process.env.CLAWBOX_TEST_MODE === "1") return null;
+
+  if (await sessionIdentity(request)) {
+    // A valid session that is not the owner's (the owner returned above).
+    return opts.allowNonOwner ? null : ownerOnlyResponse();
+  }
 
   if (opts.allowBootstrap && !(await deviceHasOwner())) return null;
 

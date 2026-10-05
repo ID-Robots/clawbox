@@ -41,7 +41,9 @@ describe("the docked chat's layout", () => {
     // narrowed to phone width keeps the width it was docked at, and the strip
     // was still reserved — pushing the notice column off the left edge and
     // insetting a mascot that is not drawn at all.
-    expect(src).toMatch(/const chatPanelInset = !isMobile && chatPanelWidth > 0 \? chatPanelWidth \+ CHAT_PANEL_GAP : 0;/);
+    // The strip is the width the chat is DRAWN at (held to the main monitor
+    // over a row of monitors, the owner's own width on one screen).
+    expect(src).toMatch(/const chatPanelInset = !isMobile && chatPanelWidth > 0 \? dockedChatWidth\(chatPanelWidth, deskScreens !== null\) \+ CHAT_PANEL_GAP : 0;/);
   });
 
   it("brings a docked chat back after a reload, closed or not", () => {
@@ -81,6 +83,55 @@ describe("the owner-notice ring", () => {
     expect(src).toMatch(/if \(!id \|\| ts < lastSeenTs \|\| ts < freshFrom\) continue;/);
     expect(src).toMatch(/const PENDING_ACTION_MAX_AGE_MS = 60_000;/);
   });
+
+  it("is how a power request reaches the confirmation prompt, without a poll of its own", () => {
+    // PowerApprovalPrompt asked the approval route every 5 s on every owner
+    // desktop, all day, for a request that almost never exists.
+    // src/lib/power-approval.ts now pushes a `power_approval` notice when a
+    // request is asked or settled; the ring turns it into the prompt's event,
+    // and the prompt asks the owner-only route itself — the notice is the
+    // word to ask, never what to show.
+    expect(src).toMatch(/import PowerApprovalPrompt, \{ POWER_APPROVAL_EVENT \} from "@\/components\/PowerApprovalPrompt";/);
+    expect(src).toMatch(/\} else if \(action\.type === "power_approval"\) \{[\s\S]{0,400}?window\.dispatchEvent\(new Event\(POWER_APPROVAL_EVENT\)\);/);
+  });
+});
+
+describe("the always-on polls", () => {
+  // Behind a hidden tab — a phone, a laptop tab left open, the tunnel — the
+  // desktop kept asking the box at the full rate for answers nobody was
+  // reading. Each poll now waits there and asks at once on the way back
+  // (src/lib/visible-interval.ts, unit-tested beside it).
+  it("waits behind a hidden tab, every one of them", () => {
+    expect(src).not.toMatch(/\bsetInterval\(/);
+    expect(src).toMatch(/const stop = setVisibleInterval\(poll, 20000\);/);
+    expect(src).toMatch(/const stop = setVisibleInterval\(checkVersions, 30 \* 60 \* 1000\);/);
+  });
+
+  it("keeps reading the notice ring while hidden, inside the life of an entry", () => {
+    // The ring carries EVENTS (register_webapp is the only way a new web app's
+    // icon reaches an open desktop), dropped once older than a minute: paused
+    // outright, a desktop away for longer would miss them for good.
+    expect(src).toMatch(/const stop = setVisibleInterval\(poll, RING_POLL_MS, \{ hiddenMs: ringHiddenPollMs \}\);/);
+    const visible = Number(src.match(/const RING_POLL_MS = ([0-9_]+);/)?.[1].replace(/_/g, ""));
+    const hidden = Number(src.match(/const RING_HIDDEN_POLL_MS = ([0-9_]+);/)?.[1].replace(/_/g, ""));
+    const ttl = Number(src.match(/const PENDING_ACTION_MAX_AGE_MS = ([0-9_]+);/)?.[1].replace(/_/g, ""));
+    expect(visible).toBe(2000);
+    expect(hidden).toBeGreaterThan(visible);
+    expect(hidden * 2).toBeLessThan(ttl);
+  });
+
+  it("keeps the 2 s while hidden on the box's own screen, where its entries act on what the owner sees", () => {
+    // In the kiosk the desktop is a hidden tab whenever the owner is on another
+    // of the kiosk's tabs, and an `open_app` for an external app or a
+    // `launch: "window"` web app opens a new tab THERE: at 20 s the page the
+    // agent said it had opened arrived up to 20 s later. The monitor session's
+    // app window is the same screen. Elsewhere — a browser tab on a phone or a
+    // laptop — the hidden rate stays 20 s. The question is asked at every tick
+    // (a getter, not a value), because the kiosk bar arrives after mount.
+    expect(src).toMatch(/import \{ isBoxOwnScreen, setVisibleInterval \} from "@\/lib\/visible-interval";/);
+    expect(src).toMatch(/function ringHiddenPollMs\(\): number \{\s*return isBoxOwnScreen\(\) \? RING_POLL_MS : RING_HIDDEN_POLL_MS;\s*\}/);
+    expect(src).not.toMatch(/hiddenMs: RING_HIDDEN_POLL_MS/);
+  });
 });
 
 describe("installed app icons", () => {
@@ -113,7 +164,20 @@ describe("the top-right notices", () => {
     // still lands on the chat's buttons.
     expect(src).toMatch(/const NOTICE_COLUMN_WIDTH = 320;/);
     expect(src).toMatch(/const NOTICE_MARGIN = 16;/);
-    expect(src).toMatch(/className="desktop-notice-stack pointer-events-none fixed top-4 flex w-\[320px\] flex-col gap-3"/);
+    expect(src).toMatch(/className="desktop-notice-stack pointer-events-none fixed flex w-\[320px\] flex-col gap-3"/);
+    // The column's top is the same margin, below the laptop's kiosk bar while
+    // that bar is up (0 everywhere else), and on the main monitor's own top
+    // over a row of monitors (0 everywhere else).
+    expect(src).toMatch(/top: NOTICE_MARGIN \+ kioskBarInset \+ mainIns\.top \}/);
+    expect(src).toMatch(/right: NOTICE_MARGIN \+ noticeRightInset \+ mainIns\.right,/);
+  });
+
+  it("stand exactly where they always did without a monitor layout", () => {
+    // `mainIns` is what monitor mode adds to the column (and the upload
+    // toast): nothing at all on a Jetson or in a browser tab, which have no
+    // layout.
+    expect(src).toMatch(/const mainIns = deskScreens \? mainInsets\(\) : \{ left: 0, top: 0, right: 0, bottom: 0 \};/);
+    expect(src).toMatch(/const mainRect = deskScreens \? mainScreen\(\) : null;/);
   });
 
   it("ask the chat where it is standing only while a card is up", () => {
@@ -215,17 +279,29 @@ describe("the browser's Back button", () => {
 });
 
 describe("the shelf clock", () => {
+  // The shelf's and the power menu's clock live in src/lib/use-desktop-clock.ts
+  // since the performance sweep of 2026-10-02: as state of the desktop root,
+  // every new minute rebuilt the whole desktop to change one label.
+  const clock = fs.readFileSync(path.join(process.cwd(), "src/lib/use-desktop-clock.ts"), "utf8");
+
+  it("is not the desktop root's state any more", () => {
+    expect(src).not.toMatch(/toLocale(Time|Date)String/);
+    expect(src).not.toMatch(/const \[time, setTime\]/);
+    expect(src).not.toMatch(/time=\{time\}/);
+  });
+
   it("is written in the desktop's language, not the browser's", () => {
     // `[]` is navigator.language: a German box opened from an en-US browser
     // showed "09:27 AM" on the shelf and "Monday, September 7" in the power
     // menu, while About's build date beside them was in German.
-    expect(src).not.toMatch(/toLocale(Time|Date)String\(\[\]/);
-    expect(src).toMatch(/now\.toLocaleTimeString\(tag, \{ hour: "2-digit", minute: "2-digit" \}\)/);
-    expect(src).toMatch(/now\.toLocaleDateString\(tag, \{ weekday: "long", month: "long", day: "numeric" \}\)/);
+    expect(clock).not.toMatch(/toLocale(Time|Date)String\(\[\]/);
+    expect(clock).toMatch(/now\.toLocaleTimeString\(tag, \{ hour: "2-digit", minute: "2-digit" \}\)/);
+    expect(clock).toMatch(/now\.toLocaleDateString\(tag, \{ weekday: "long", month: "long", day: "numeric" \}\)/);
     // The locale the desktop already reads, and a re-format once it resolves,
-    // since every provider starts on a provisional "en".
-    expect(src).toMatch(/const \{ t, locale \} = useT\(\);/);
-    expect(src).toMatch(/return \(\) => clearInterval\(interval\);\n  \}, \[locale\]\);/);
+    // since every provider starts on a provisional "en": the tag is the
+    // store's key, so a new one is formatted at once.
+    expect(clock).toMatch(/const \{ locale \} = useT\(\);/);
+    expect(clock).toMatch(/const tag = clockLocaleTag\(locale, typeof navigator === "undefined" \? undefined : navigator\.languages\);/);
   });
 
   // The expression the pin below holds the source to: `locale` is a bare
@@ -237,7 +313,7 @@ describe("the shelf clock", () => {
     // `locale` alone made "09:27 AM" of every English desktop — the en-GB,
     // en-IE and en-ZA browsers that read "09:27" until then included — and
     // ~52px of it inside the phone bar's 40px clock button.
-    expect(src).toMatch(/const tag = navigator\.languages\?\.find\(\(l\) => l\.toLowerCase\(\)\.startsWith\(`\$\{locale\}-`\)\) \?\? locale;/);
+    expect(clock).toMatch(/return languages\?\.find\(\(l\) => l\.toLowerCase\(\)\.startsWith\(`\$\{locale\}-`\)\) \?\? locale;/);
     expect(regionalTag(["en-GB", "en"], "en")).toBe("en-GB");
     // Only a REGIONAL entry is worth taking: a bare "en" ahead of "en-GB"
     // adds nothing over `locale`.
@@ -247,5 +323,51 @@ describe("the shelf clock", () => {
     expect(regionalTag(["en-US", "en"], "de")).toBe("de");
     // A browser with no list at all (an old WebView) is the bare tag.
     expect(regionalTag(undefined, "en")).toBe("en");
+  });
+});
+
+describe("the file-drop overlay over a row of monitors", () => {
+  it("centres its card on the main monitor, and leaves it to the flex centring without a layout", () => {
+    // `fixed inset-0 … justify-center` alone put the card on the seam
+    // between two equal monitors, half of it on each.
+    const overlay = src.match(/\{desktopDragOver && \([\s\S]{0,1200}?files\.dropToUpload/)?.[0] ?? "";
+    // No backdrop blur under the dim (a full-screen blur is redone over the
+    // whole 5120x1440 desktop on every frame the mascot moves beneath it); one
+    // step darker keeps the look.
+    expect(overlay).toMatch(/className="fixed inset-0 flex items-center justify-center bg-black\/65 pointer-events-none"/);
+    expect(overlay).toMatch(/style=\{mainRect \? \{ position: "absolute", left: mainRect\.x \+ mainRect\.width \/ 2, top: mainRect\.y \+ mainRect\.height \/ 2, transform: "translate\(-50%, -50%\)" \} : undefined\}/);
+  });
+});
+
+describe("the desktop's full-screen scrims", () => {
+  it("dim without a backdrop blur, one step darker", () => {
+    // The file-drop overlay and the uninstall confirmation: a blur under a
+    // 60% black scrim is 40% of what is seen, and costs a whole-viewport pass
+    // per frame while anything underneath animates.
+    expect(src).not.toMatch(/backdrop-blur/);
+    expect(src).toMatch(/<div className="fixed inset-0 flex items-center justify-center bg-black\/65" style=\{\{ zIndex: DESKTOP_LAYERS\.modal \}\} onClick=\{dismissUninstall\}>/);
+  });
+});
+
+describe("the launcher and the power menu", () => {
+  // Both are memoized (ChromeLauncher.tsx, SystemTray.tsx); their memo holds
+  // only while every prop keeps its identity. Counted, not just pinned, in
+  // src/tests/components/desktop-shell-renders.test.tsx.
+  it("are handed the launcher's apps as one memoized list, not rebuilt inline", () => {
+    expect(src).toMatch(/const launcherApps = useMemo\(\(\) => allApps/);
+    expect(src).toMatch(/\}\)\), \[allApps, t, isAppPinned\]\);/);
+    expect(src).toMatch(/apps=\{launcherApps\}/);
+    expect(src).not.toMatch(/apps=\{allAppsForLauncher\.map/);
+  });
+
+  it("are handed handlers with one identity for the page's life", () => {
+    expect(src).toMatch(/const closeLauncher = useCallback\(\(\) => setLauncherOpen\(false\), \[\]\);/);
+    expect(src).toMatch(/const closeTray = useCallback\(\(\) => setTrayOpen\(false\), \[\]\);/);
+    const launcher = src.match(/<ChromeLauncher[\s\S]{0,400}?\/>/)?.[0] ?? "";
+    expect(launcher).toMatch(/onClose=\{closeLauncher\}/);
+    // openApp is rebuilt on every window open, focus and move.
+    expect(launcher).toMatch(/onAppClick=\{openAppStable\}/);
+    const tray = src.match(/<SystemTray[\s\S]{0,200}?\/>/)?.[0] ?? "";
+    expect(tray).toMatch(/onClose=\{closeTray\}/);
   });
 });

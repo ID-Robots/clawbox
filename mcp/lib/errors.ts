@@ -10,6 +10,8 @@
 // binary location, and occasionally a token echoed back by an upstream error.
 // Every string that leaves this module passes through scrubPaths() + redact().
 
+import { redactCredentials } from "./redact-credentials";
+
 const CLAWBOX_ROOT = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
 const HOME_DIR = process.env.HOME || "/home/clawbox";
 
@@ -82,7 +84,7 @@ const LONG_HEX_RE = /\b[0-9a-f]{32,}\b/gi;
 
 /** Blank out anything that looks like a credential. */
 export function redact(text: string): string {
-  return text
+  return redactCredentials(text)
     .replace(LABELLED_SECRET_RE, (_m, label: string) => `${label}[REDACTED]`)
     .replace(BEARER_RE, "Bearer [REDACTED]")
     .replace(LONG_HEX_RE, "[REDACTED]");

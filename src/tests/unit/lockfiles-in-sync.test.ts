@@ -1,6 +1,8 @@
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 /**
  * `package-lock.json` must still describe `package.json`.
@@ -30,6 +32,11 @@ import { describe, expect, it } from "vitest";
  * (`resolvedTreeOffenders` below), and it is not a substitute for `npm ci`
  * itself, which also verifies integrity hashes and the whole transitive tree.
  */
+
+// Starts a real process (node, over scripts/check-lockfiles.mjs): vitest's 5 s
+// test and 10 s hook defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const REPO_ROOT = path.resolve(__dirname, "../../..");
 
@@ -221,3 +228,39 @@ function satisfiesSimpleRange(version: string, range: string): boolean {
   else upper = [0, 0, patch + 1];
   return compare(actual, upper) < 0;
 }
+
+describe("scripts/check-lockfiles.mjs — the fast check CI and the pre-commit hook run (TASK-1401)", () => {
+  function check(mutate?: (pkg: Record<string, unknown>) => void): number {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "check-lockfiles-"));
+    try {
+      mkdirSync(path.join(dir, "scripts"));
+      cpSync(path.join(REPO_ROOT, "scripts/check-lockfiles.mjs"), path.join(dir, "scripts/check-lockfiles.mjs"));
+      for (const name of ["bun.lock", "package-lock.json"]) cpSync(path.join(REPO_ROOT, name), path.join(dir, name));
+      const pkg = readJson("package.json");
+      mutate?.(pkg);
+      writeFileSync(path.join(dir, "package.json"), JSON.stringify(pkg, null, 2));
+      execFileSync(process.execPath, [path.join(dir, "scripts/check-lockfiles.mjs")], { stdio: "pipe" });
+      return 0;
+    } catch (err) {
+      return (err as { status?: number }).status ?? -1;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("passes the repository as it is", () => {
+    expect(check()).toBe(0);
+  });
+
+  it("fails a dependency range changed in package.json alone", () => {
+    expect(check((pkg) => { (pkg.dependencies as Record<string, string>).busboy = "^99.0.0"; })).toBe(1);
+  });
+
+  it("fails a dependency added to package.json alone", () => {
+    expect(check((pkg) => { (pkg.devDependencies as Record<string, string>)["left-pad"] = "^1.3.0"; })).toBe(1);
+  });
+
+  it("fails a version bump that left package-lock.json behind", () => {
+    expect(check((pkg) => { pkg.version = "0.0.0-drift"; })).toBe(1);
+  });
+});

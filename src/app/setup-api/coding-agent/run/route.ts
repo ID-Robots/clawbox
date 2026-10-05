@@ -1,13 +1,23 @@
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
 import { hasOwnerSession } from "@/lib/owner-session";
-import { CodingAgentError, MAX_TASK_CHARS, PipelineChoiceError, ProviderChoiceError, httpStatusForCodingError, startRun } from "@/lib/coding-agent";
+import { CodingAgentError, ExperienceChoiceError, MAX_TASK_CHARS, PipelineChoiceError, ProviderChoiceError, httpStatusForCodingError, startRun } from "@/lib/coding-agent";
 
 export const dynamic = "force-dynamic";
 
 /**
  * POST { task, projectId? | directory?, resumeRunId?, provider?, model?,
- * deliverable?, pipeline?, inputs? } → start a coding run.
+ * deliverable?, pipeline?, inputs?, experience? } → start a coding run.
+ *
+ * `experience` is what the training cluster's dispatcher selected from its
+ * experience store for this task — exactly the JSON its
+ * `scripts/query-store.mjs` prints, `{ rules: [{ id, rule, applies, evidence?,
+ * score? }], skill? }`. The box renders it into the run's system prompt as a
+ * delimited block (src/lib/coding-experience.ts) and records which rules
+ * reached it on the run as `experience: { ruleIds, skill, chars }`. A
+ * malformed one is 400 `invalid` with a `code`; absent or null, the run starts
+ * exactly as it did before the field existed. A resume without one carries
+ * the block of the run it resumes.
  *
  * `inputs` names files this run is to be given — the pictures the assistant
  * generated for the task, an attachment that arrived in chat. The device copies
@@ -43,7 +53,7 @@ export async function POST(request: Request) {
   let body: {
     task?: unknown; projectId?: unknown; directory?: unknown; resumeRunId?: unknown;
     provider?: unknown; model?: unknown; deliverable?: unknown; pipeline?: unknown;
-    inputs?: unknown;
+    inputs?: unknown; experience?: unknown;
   };
   try {
     body = await request.json();
@@ -100,6 +110,10 @@ export async function POST(request: Request) {
       // The assistant needs this because it writes its generated media inside
       // its own state directory, which no run may read.
       inputs: body.inputs,
+      // Unvalidated for the reason `pipeline` is: `startRun` reads it through
+      // `readExperienceInput`, which refuses with a stable code, so nothing a
+      // caller sent reaches the run's prompt before that reader has passed it.
+      experience: body.experience,
     });
     return NextResponse.json({ started: true, run }, { status: 202 });
   } catch (err) {
@@ -108,7 +122,9 @@ export async function POST(request: Request) {
       // caller can tell "that pair is not on this box" from "that folder is not
       // allowed" — both are `kind: "invalid"`, and the MCP tool advises on the
       // wrong argument without it. Anything else answers exactly as before.
-      const code = err instanceof ProviderChoiceError || err instanceof PipelineChoiceError ? { code: err.code } : {};
+      const code = err instanceof ProviderChoiceError || err instanceof PipelineChoiceError || err instanceof ExperienceChoiceError
+        ? { code: err.code }
+        : {};
       return NextResponse.json({ error: err.message, kind: err.kind, ...code }, { status: httpStatusForCodingError(err.kind) });
     }
     console.error("[coding-agent/run] failed to start:", err instanceof Error ? err.message : err);

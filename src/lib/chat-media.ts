@@ -209,8 +209,9 @@ function namedFile(url: string): string | null {
 //   /api/chat/media/outgoing/agent%3Amain%3Amain/<uuid>/full#name=report.csv&size=2048
 //
 // For a gateway media URL they are the only name and size there are: the URL
-// ends in "full", and the `/api/*` proxy passes no Content-Length the card
-// could probe for. A fragment rather than a query parameter because it never
+// ends in "full", and the card does not probe the file for them (the `/api/*`
+// proxy does pass the gateway's Content-Length on a download since TASK-892,
+// but asking for it would cost a request per card). A fragment rather than a query parameter because it never
 // reaches a server, so neither the gateway nor `/setup-api/chat/media` is asked
 // anything it was not asked before.
 

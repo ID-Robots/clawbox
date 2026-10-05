@@ -1,0 +1,5 @@
+<!-- Win+Down drops the Guake terminal down from the top of the monitor the
+     pointer is on; again puts it away. -->
+<keybind key="W-Down">
+  <action name="Execute" command="guake -t" />
+</keybind>

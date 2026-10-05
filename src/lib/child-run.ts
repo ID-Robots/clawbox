@@ -26,7 +26,9 @@
  * the next fix landing in one of two identical paths.
  */
 
-import { spawn } from "child_process";
+import { spawn, type ChildProcess } from "child_process";
+import { existsSync } from "fs";
+import path from "./runtime-path";
 
 export interface ChildResult {
   /** The exit code, or null when the process was killed or never started. */
@@ -76,19 +78,114 @@ export interface RunChildOptions {
   input?: string;
 }
 
+const WORKTREE_SEGMENT = `${path.sep}.clawbox${path.sep}worktrees${path.sep}`;
+
+/**
+ * The folder a child actually starts in.
+ *
+ * A missing cwd makes spawn fail with ENOENT — indistinguishable from a missing
+ * binary — and a run's worktree is cleaned up while its PR watcher keeps
+ * polling. Every later `gh pr view` then "could not be read from GitHub" until
+ * the watcher gives up an hour later. `gh` only needs a checkout with the same
+ * remote, so a gone worktree falls back to the repository that owned it. git
+ * does NOT get the fallback: `git push origin HEAD:…` from the owning repo
+ * would push the wrong HEAD.
+ */
+export function resolveCwd(bin: string, cwd: string | undefined): string | undefined {
+  if (!cwd || bin !== "gh" || existsSync(cwd)) return cwd;
+  const at = cwd.indexOf(WORKTREE_SEGMENT);
+  if (at > 0) {
+    const owner = cwd.slice(0, at);
+    if (existsSync(owner)) return owner;
+  }
+  return cwd;
+}
+
 /**
  * Run a command with a deliberate, minimal environment and a hard timeout.
  * Never rejects: every outcome is described in the result.
  */
+/**
+ * The bare command names runChild may start, resolved through the child's PATH.
+ * Every value is a fixed literal, so what is spawned never comes from a caller's
+ * data. Shells are deliberately absent: a shell turns an argument back into a
+ * command line, which is exactly what runChild exists to avoid.
+ */
+const ALLOWED_COMMANDS: Readonly<Record<string, string>> = Object.freeze({
+  git: "git",
+  gh: "gh",
+  ffmpeg: "ffmpeg",
+  pdftotext: "pdftotext",
+  libreoffice: "libreoffice",
+  ss: "ss",
+});
+
+const SHELLS = new Set(["sh", "bash", "dash", "zsh", "ksh", "csh", "tcsh", "fish", "busybox", "env"]);
+
+/**
+ * The executable runChild will actually start for `bin`, or null when it is not
+ * one runChild may start: an allowlisted bare command, or an absolute path to a
+ * program that is not a shell (an installed helper, the Python interpreter, the
+ * running node). Anything else — a relative path, an unknown bare name, a
+ * shell, a control character — is refused.
+ */
+export function resolveBin(bin: string): string | null {
+  if (typeof bin !== "string" || bin.length === 0 || /[\0-\x1f\x7f]/.test(bin)) return null;
+  if (Object.prototype.hasOwnProperty.call(ALLOWED_COMMANDS, bin)) return ALLOWED_COMMANDS[bin];
+  // Plain string checks, not path.*: Turbopack treats path calls on a dynamic
+  // value as file references and traces the whole project tree.
+  if (!bin.startsWith("/") || bin.split("/").some((seg, i) => i > 0 && (seg === "" || seg === "." || seg === ".."))) return null;
+  if (SHELLS.has(bin.slice(bin.lastIndexOf("/") + 1))) return null;
+  return bin;
+}
+
+/**
+ * Run a shell script file (never a command string) under bash. The script must
+ * be an absolute path; its arguments reach it as argv, not as shell text.
+ */
+// A constant, not an inline literal: Turbopack treats spawn("bash", [file]) as
+// a reference to `file` and, for a dynamic path, traces the whole project tree.
+const SCRIPT_RUNNER: string = "bash";
+
+export function runScript(script: string, args: string[], opts: RunChildOptions): Promise<ChildResult> {
+  if (!script.startsWith("/") || /[\0-\x1f\x7f]/.test(script)) {
+    return Promise.resolve(refused(opts, "script path refused"));
+  }
+  // A separate spawn site from runChild's: bash is reachable ONLY from here,
+  // with a fixed literal, never from runChild's allowlist.
+  return collectChild((stdio) => spawn(/* turbopackIgnore: true */ SCRIPT_RUNNER, ["--", script, ...args], {
+    shell: false,
+    cwd: opts.cwd,
+    env: opts.env as unknown as NodeJS.ProcessEnv,
+    stdio,
+  }), opts);
+}
+
+/** A refused start reads exactly like one that failed to start: EACCES, not ENOENT. */
+function refused(opts: RunChildOptions, why: string): ChildResult {
+  return { code: null, stdout: "", stderr: opts.notStarted ?? why, signal: null, timedOut: false, startFailed: true, startError: "EACCES" };
+}
+
 export function runChild(bin: string, args: string[], opts: RunChildOptions): Promise<ChildResult> {
+  const exe = resolveBin(bin);
+  if (exe === null) {
+    return Promise.resolve(refused(opts, "command not permitted"));
+  }
+  return collectChild((stdio) => spawn(/* turbopackIgnore: true */ exe, args, {
+    shell: false,
+    cwd: resolveCwd(bin, opts.cwd),
+    // Cast only because this repo's ProcessEnv augmentation insists on
+    // NODE_ENV, which neither git nor gh has any use for.
+    env: opts.env as unknown as NodeJS.ProcessEnv,
+    stdio,
+  }), opts);
+}
+
+type Stdio = ["ignore" | "pipe", "pipe", "pipe"];
+
+function collectChild(start: (stdio: Stdio) => ChildProcess, opts: RunChildOptions): Promise<ChildResult> {
   return new Promise((resolve) => {
-    const child = spawn(bin, args, {
-      cwd: opts.cwd,
-      // Cast only because this repo's ProcessEnv augmentation insists on
-      // NODE_ENV, which neither git nor gh has any use for.
-      env: opts.env as unknown as NodeJS.ProcessEnv,
-      stdio: [opts.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
-    });
+    const child = start([opts.input === undefined ? "ignore" : "pipe", "pipe", "pipe"]);
     if (opts.input !== undefined && child.stdin) {
       child.stdin.on("error", () => { /* a child that never read it is its exit code's problem */ });
       child.stdin.end(opts.input);

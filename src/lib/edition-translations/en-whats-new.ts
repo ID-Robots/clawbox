@@ -1,7 +1,7 @@
 /**
- * English copy for the desktop's "What's new in 4.1" card (TASK-1059, TASK-1195).
+ * English copy for the desktop's "What's new in 4.2" card (TASK-1059, TASK-1195).
  *
- * The highlights are taken from RELEASE-NOTES-4.1.0.md, trimmed to fit a
+ * The highlights are taken from RELEASE-NOTES-4.2.0.md, trimmed to fit a
  * 320 px card. They name only what the release shipped. When the release notes
  * change, change this too.
  *
@@ -11,24 +11,33 @@
  * picks between them. The catalogue never branches on the edition.
  */
 export const whatsNewEn: Record<string, string> = {
-  "whatsNew.title": "What's new in 4.1",
+  "whatsNew.title": "What's new in 4.2",
   "whatsNew.subtitle": "This box now runs ClawBox {version}.",
-  "whatsNew.highlightsLabel": "Highlights of ClawBox 4.1",
+  "whatsNew.highlightsLabel": "Highlights of ClawBox 4.2",
 
-  "whatsNew.phoneFullscreenTitle": "More of the phone for the chat",
-  "whatsNew.phoneFullscreenBody":
-    "On a phone the chat opens full screen, its header and the message box's options fold away, and the text can be set from 85% to 150%. Both choices are remembered on that phone.",
-  "whatsNew.chatRestoreTitle": "A conversation that cannot reopen says why",
-  "whatsNew.chatRestoreBody":
-    "Reopening a conversation no longer waits without end. When the box cannot bring it back, the chat says why and offers Try again.",
-  "whatsNew.webappDataTitle": "Web apps from before 4.0 find their data",
-  "whatsNew.webappDataBody":
-    "An app you built on an earlier release opens with what it had saved. The box copies that data into the app's own storage and deletes nothing.",
-  "whatsNew.autoMergeTitle": "Coding Agent pull requests merge when green",
-  "whatsNew.autoMergeBody":
-    "With merging switched on, a run hands its pull request to GitHub's auto-merge, so it lands as soon as its required checks pass. A pull request labelled hold, or one into main, is never merged.",
+  "whatsNew.multiUserTitle": "Several people, one ClawBox",
+  "whatsNew.multiUserBody":
+    "The owner adds users in Settings → Users. Each person signs in with their own name and password, and gets a desktop and a Terminal of their own. Settings and installed apps stay with the owner.",
+  "whatsNew.monitorModeTitle": "Monitor mode, with a drop-down terminal",
+  "whatsNew.monitorModeBody":
+    "With the ClawBox desktop session, one desktop spans a row of monitors, arranged in Settings → Monitors. Win+Down drops a terminal down from the top of the screen.",
+  "whatsNew.githubBackupTitle": "Back up project folders to GitHub",
+  "whatsNew.githubBackupBody":
+    "In Files → Projects, Back up copies a folder to a private GitHub repository, with a daily backup if you want one. Files that look like passwords or keys are left out, and you are told which.",
+  "whatsNew.kioskTitle": "Kiosk mode",
+  "whatsNew.kioskBody":
+    "When ClawBox shows its desktop full screen, every page the desktop opens gets a ClawBox bar with tabs, back, forward, reload and an address field, so the desktop is always one click away.",
+  "whatsNew.editionChoiceTitle": "Choose OpenClaw or Hermes at setup",
+  "whatsNew.editionChoiceBody":
+    "During first setup, a new ClawBox asks which assistant it should run, and sets up the one you pick.",
+  "whatsNew.clawkeepTitle": "ClawKeep backups fixed",
+  "whatsNew.clawkeepBody":
+    "Snapshots no longer carry old backup archives along, a link that cannot be archived is skipped and named instead of failing the backup, and a full account no longer turns auto-backup off for good.",
+  "whatsNew.hardwareFixesTitle": "Fixes from hardware testing",
+  "whatsNew.hardwareFixesBody":
+    "Testing 4.2 on real ClawBox hardware found and fixed problems with voice input, spoken replies, the ClawBox AI plugin's Retry, and updating a box left on an older build.",
 
-  "whatsNew.readMore": "Read what's new in 4.1",
+  "whatsNew.readMore": "Read what's new in 4.2",
 
   // The plan section: only the lines the box's plan does not cover yet.
   "whatsNew.planTitle": "Unlock with a ClawBox AI plan",
@@ -39,5 +48,5 @@ export const whatsNewEn: Record<string, string> = {
   "whatsNew.seePlans": "See plans",
 
   "whatsNew.gotIt": "Got it",
-  "whatsNew.dismiss": "Dismiss What's new in 4.1",
+  "whatsNew.dismiss": "Dismiss What's new in 4.2",
 };

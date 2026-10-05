@@ -1,16 +1,19 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { memo, useState, useEffect, useCallback, useRef } from "react";
 import { useT } from "@/lib/i18n";
+import { useSessionUser } from "@/lib/use-session-user";
+import { announceSessionSwitch } from "@/lib/session-switch";
 import CrabWaitMark from "./CrabWaitMark";
+import { mainInsets } from "@/lib/desktop-screens";
+import { useDeskScreens } from "@/lib/use-desk-screens";
+import { useDesktopClock } from "@/lib/use-desktop-clock";
 
 const BRAND_ORANGE = "#fe6e00";
 
 interface SystemTrayProps {
   isOpen: boolean;
   onClose: () => void;
-  date: string;
-  time: string;
 }
 
 type RebootState =
@@ -20,14 +23,37 @@ type RebootState =
   | { phase: "restoring" }
   | { phase: "shutdown" };
 
-export default function SystemTray({
+/**
+ * The power menu's time and date. Read from the desktop clock here, mounted
+ * only while the menu is open, rather than handed down by the desktop — whose
+ * every new minute used to re-render the whole desktop for these two lines and
+ * the shelf's. The same ticker as the shelf's clock, so the two turn the
+ * minute together (see use-desktop-clock.ts).
+ */
+function TrayClock() {
+  const { time, date } = useDesktopClock();
+  return (
+    <div className="p-4 border-b border-white/10">
+      <div className="text-2xl font-medium text-white">{time}</div>
+      <div className="text-sm text-white/60">{date}</div>
+    </div>
+  );
+}
+
+function SystemTray({
   isOpen,
   onClose,
-  date,
-  time,
 }: SystemTrayProps) {
   const { t } = useT();
+  // Multi-user ClawBox OS (TASK-1256): who is signed in, and whether they may
+  // restart or shut down the box (the owner only — the power route says so too).
+  const sessionUser = useSessionUser();
+  const isOwner = sessionUser?.isOwner !== false;
+  const showUser = !!sessionUser && (sessionUser.multiUser || !sessionUser.isOwner);
   const [closing, setClosing] = useState(false);
+  // Above the power button on the main monitor when the desktop is spread over several.
+  const deskScreens = useDeskScreens();
+  const mainIns = deskScreens ? mainInsets() : null;
   const [confirmAction, setConfirmAction] = useState<"shutdown" | "restart" | null>(null);
   const [internet, setInternet] = useState<{ online: boolean; latencyMs: number | null } | null>(null);
   useEffect(() => {
@@ -272,22 +298,21 @@ export default function SystemTray({
             : "opacity-100 translate-y-0 scale-100"
         }`}
         data-testid="system-tray"
-        style={{ transformOrigin: "bottom right" }}
+        style={{ transformOrigin: "bottom right", ...(mainIns ? { right: 8 + mainIns.right, bottom: 64 + mainIns.bottom } : {}) }}
       >
         <div
           className="rounded-xl overflow-hidden"
           style={{
-            background: "rgba(17, 24, 39, 0.95)",
-            backdropFilter: "blur(20px)",
-            WebkitBackdropFilter: "blur(20px)",
+            // No backdrop blur, and a fill that much more opaque — the
+            // launcher's panel, for its reason (ChromeLauncher.tsx): 5% of a
+            // blurred desktop cost a pass over everything beneath on every
+            // frame the mascot moved; 2% of a sharp one is not seen.
+            background: "rgba(17, 24, 39, 0.98)",
             border: "1px solid rgba(255, 255, 255, 0.1)",
           }}
         >
           {/* Date and time */}
-          <div className="p-4 border-b border-white/10">
-            <div className="text-2xl font-medium text-white">{time}</div>
-            <div className="text-sm text-white/60">{date}</div>
-          </div>
+          <TrayClock />
 
           {/* Internet status */}
           {internet && (
@@ -299,9 +324,32 @@ export default function SystemTray({
             </div>
           )}
 
+          {/* Who is signed in — only on a box with more than one user, so a
+              single-user box's tray looks exactly as it always did. */}
+          {showUser && sessionUser && (
+            <div className="px-4 py-3 border-b border-white/10 flex items-center gap-3" data-testid="tray-session-user">
+              <span
+                aria-hidden="true"
+                className="w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold text-white shrink-0"
+                style={{ backgroundColor: isOwner ? BRAND_ORANGE : "#6366f1" }}
+              >
+                {sessionUser.username.charAt(0).toUpperCase()}
+              </span>
+              <div className="min-w-0 flex flex-col">
+                <span className="text-[11px] text-white/50">{t("tray.signedInAs")}</span>
+                <span className="text-sm text-white/90 font-medium truncate">
+                  {sessionUser.username}
+                  {isOwner && <span className="ml-2 text-[10px] uppercase tracking-wider text-[var(--coral-bright)]">{t("users.ownerBadge")}</span>}
+                </span>
+                {!isOwner && <span className="text-[11px] text-white/50 mt-0.5">{t("tray.nonOwnerHint")}</span>}
+              </div>
+            </div>
+          )}
+
           {/* Bottom actions */}
           <div className="p-4 flex flex-col gap-2">
             {powerError && <p role="alert" className="text-xs text-red-400">{powerError}</p>}
+            {isOwner && (
             <div className="grid grid-cols-2 gap-2">
               <button
                 onClick={() => handlePower("restart")}
@@ -322,15 +370,21 @@ export default function SystemTray({
                 <span className="text-sm text-white/80 whitespace-nowrap">{confirmAction === "shutdown" ? t("tray.confirm") : t("tray.shutDown")}</span>
               </button>
             </div>
+            )}
             <button
               onClick={async () => {
                 await fetch("/login-api/logout", { method: "POST" }).catch(() => {});
-                window.location.href = "/login";
+                // The cookie is gone for every tab of this browser, so every
+                // other open desktop, Terminal and app page is told to leave
+                // the session with this one (TASK-1247). `replace`: Back must
+                // not bring back a desktop whose session just ended.
+                announceSessionSwitch("logout");
+                window.location.replace("/login");
               }}
               className="flex items-center justify-center gap-2 h-10 rounded-lg transition-colors cursor-pointer bg-white/10 hover:bg-white/15 w-full"
             >
-              <span className="material-symbols-rounded text-white/70 shrink-0" style={{ fontSize: 16 }}>lock</span>
-              <span className="text-sm text-white/80">{t("tray.lock")}</span>
+              <span className="material-symbols-rounded text-white/70 shrink-0" style={{ fontSize: 16 }}>{showUser ? "switch_account" : "lock"}</span>
+              <span className="text-sm text-white/80">{showUser ? t("tray.switchUser") : t("tray.lock")}</span>
             </button>
           </div>
         </div>
@@ -338,3 +392,8 @@ export default function SystemTray({
     </>
   );
 }
+
+// Memoized: the desktop hands it `isOpen` and a stable `onClose`, so its
+// renders — and while the tray is closed it still runs its hooks — follow the
+// tray's own state, not every render of the desktop.
+export default memo(SystemTray);

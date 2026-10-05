@@ -45,7 +45,9 @@ describe("Tests workflow coverage reporters", () => {
   it("the workflow runs the CI script, sharded and merged, and parses the file json-summary writes", () => {
     // The shard and merge scripts are the CI script plus the flags sharding
     // needs and nothing else — pinned in ci-shards.test.ts.
-    expect(workflow).toMatch(/^\s+run: bun run test:coverage:shard --shard=/m);
+    expect(workflow).toMatch(/^\s+run: bash scripts\/vitest-shard\.sh \$\{\{ matrix\.shard \}\}\//m);
+    // …which runs the shard script and nothing else (and reruns it once; see ci-shards.test.ts).
+    expect(read("scripts/vitest-shard.sh")).toMatch(/^cmd="\$\{VITEST_SHARD_CMD:-bun run test:coverage:shard\}"$/m);
     expect(workflow).toMatch(/^\s+run: bun run test:coverage:merge$/m);
     // vitest's json-summary reporter writes coverage/coverage-summary.json;
     // the parse step's guard and its readFileSync must both name that file.
@@ -173,9 +175,21 @@ describe("the checks CI runs, and their blocking status", () => {
     // Three steps since the suite was sharded (TASK-1127), and each is the
     // same hole: a shard that cannot fail, a completeness check that cannot
     // fail, or a merge that cannot fail each report a green suite that is not.
-    runsBlocking("bun run test:coverage:shard --shard=${{ matrix.shard }}/${{ strategy.job-total }}");
+    runsBlocking("bash scripts/vitest-shard.sh ${{ matrix.shard }}/${{ strategy.job-total }}");
     runsBlocking("bash scripts/check-vitest-shards.sh .vitest-reports");
     runsBlocking("bun run test:coverage:merge");
+  });
+
+  it("checks the lockfiles against package.json, blocking, ahead of the install", () => {
+    // TASK-1401: a manifest change without its lockfiles was told minutes into
+    // a shard. The check runs first in both jobs that install.
+    runsBlocking("node scripts/check-lockfiles.mjs");
+    for (const key of ["checks", "shard"]) {
+      const text = jobsOf(tests).get(key)!;
+      const at = text.indexOf("run: node scripts/check-lockfiles.mjs");
+      expect(at, `${key} does not check the lockfiles`).toBeGreaterThan(-1);
+      expect(at, `${key} checks the lockfiles after installing`).toBeLessThan(text.indexOf("run: bun install --frozen-lockfile"));
+    }
   });
 
   it("checks the sudoers allow-list, blocking", () => {
@@ -195,6 +209,14 @@ describe("the checks CI runs, and their blocking status", () => {
     // check is: a guard that reaches CI only as a side effect of one test file
     // comes off the build the day that file is renamed, with nothing saying so.
     runsBlocking("bun run scripts/i18n-scan.ts");
+  });
+
+  it("shellchecks and self-tests the on-device suite's runner, blocking", () => {
+    // The suite itself needs a lab board (nano-hardware-tests.yml, opt-in by
+    // label); the runner that turns its output into a verdict does not, and a
+    // runner that could not fail would report every board green.
+    runsBlocking("shellcheck -x scripts/nano-tests/*.sh scripts/nano-tests/tests/*.sh");
+    runsBlocking("bash scripts/nano-tests/selftest.sh");
   });
 
   it("runs eslint, and says out loud that it is advisory", () => {
@@ -277,7 +299,8 @@ describe("the checks CI runs, and their blocking status", () => {
     for (const command of [
       "./scripts/check-doc-images.sh", "bun run check:sudoers", "python3 -m unittest discover -s scripts/x64-migration",
       "bun run scripts/i18n-scan.ts", "bun run typecheck:mcp", "bun run check:mcp-tools", "bun run lint",
-      "bun run test:coverage:shard", "bash scripts/check-vitest-shards.sh", "bun run test:coverage:merge",
+      "bash scripts/vitest-shard.sh", "node scripts/check-lockfiles.mjs", "bash scripts/check-vitest-shards.sh", "bun run test:coverage:merge",
+      "shellcheck -x scripts/nano-tests/", "bash scripts/nano-tests/selftest.sh",
     ]) {
       const runners = [...jobs].filter(([, text]) => runsOfEachStep(text).some((body) => body.includes(command))).map(([key]) => key);
       expect(runners.length, `${command} is not run by any step of any job`).toBeGreaterThan(0);

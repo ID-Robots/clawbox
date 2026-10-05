@@ -17,8 +17,23 @@
 // /etc/clawbox does not exist) keep working exactly as before.
 
 import fs from "fs";
+// Relative, not "@/": the MCP stdio process imports this module (mcp/tsconfig.json).
+import path from "./runtime-path";
 
 export type EditionName = "openclaw" | "hermes" | "dual";
+
+/**
+ * The lock value of a box that carries BOTH harnesses and has not been told
+ * which one to run yet — the unified image, before the owner picks an agent in
+ * the setup wizard (TASK-1149, reports/clawbox/unified-image-design-2026-09.md).
+ *
+ * Deliberately NOT an EditionName: nothing harness-specific runs while it is
+ * set, so no reader may treat it as a SKU. `readEditionSource` reports it as
+ * the defaulted "openclaw" answer plus `unselected: true`, which every existing
+ * caller already handles as "nobody said" — the swap refuses, the client never
+ * pins it, the boot-time migrations defer.
+ */
+export const UNSELECTED_EDITION = "unselected";
 
 // Overridable for tests only; production always reads the root-owned path.
 // Redirecting it is not an edition-lock bypass: no request data flows into it,
@@ -27,7 +42,14 @@ export type EditionName = "openclaw" | "hermes" | "dual";
 // redirected path can change the edition LABEL, never unlock the premium switcher.
 const EDITION_FILE = process.env.CLAWBOX_EDITION_FILE || "/etc/clawbox/edition.env";
 
-let cache: { mtimeMs: number; edition: EditionName } | null = null;
+/** The directory the lock lives in; the edition step's root-owned markers sit beside it. */
+export function editionLockDir(): string {
+  return path.dirname(EDITION_FILE);
+}
+
+type LockValue = EditionName | typeof UNSELECTED_EDITION;
+
+let cache: { mtimeMs: number; edition: LockValue; hint: EditionHint | null } | null = null;
 
 function normalizeEdition(raw: string | null | undefined): EditionName | null {
   const value = (raw || "").trim().toLowerCase();
@@ -35,11 +57,25 @@ function normalizeEdition(raw: string | null | undefined): EditionName | null {
   return null;
 }
 
+function normalizeLockValue(raw: string | null | undefined): LockValue | null {
+  const value = (raw || "").trim().toLowerCase();
+  return value === UNSELECTED_EDITION ? UNSELECTED_EDITION : normalizeEdition(value);
+}
+
+/** Which agent the box was prepared for, while it is still `unselected`. */
+export type EditionHint = "openclaw" | "hermes";
+
+function normalizeHint(raw: string | null | undefined): EditionHint | null {
+  const value = (raw || "").trim().toLowerCase();
+  return value === "openclaw" || value === "hermes" ? value : null;
+}
+
 // Minimal systemd EnvironmentFile parser: `KEY=value`, optional `export`,
 // optional surrounding quotes. Anything else in the file is ignored.
-function parseEditionEnvFile(raw: string): string | null {
+function parseEnvValue(raw: string, key: string): string | null {
+  const pattern = new RegExp(`^\\s*(?:export\\s+)?${key}\\s*=\\s*(.*)$`);
   for (const line of raw.split(/\r?\n/)) {
-    const match = /^\s*(?:export\s+)?CLAWBOX_EDITION\s*=\s*(.*)$/.exec(line);
+    const match = pattern.exec(line);
     if (!match) continue;
     let value = match[1].trim();
     if (
@@ -69,11 +105,28 @@ export interface EditionSource {
    * answer was a guess; see telegram-bot-identity.ts.
    */
   defaulted: boolean;
+  /**
+   * Present (and true) only when the root-owned lock reads `unselected`: a
+   * unified-image box whose owner has not picked an agent yet. `edition` is
+   * then the "openclaw" default and `defaulted` is true, so a caller that does
+   * not know this flag treats the box as one nobody named — which it is.
+   */
+  unselected?: true;
+  /**
+   * With `unselected` only: the agent the box was prepared for
+   * (`CLAWBOX_EDITION_HINT` in the lock), which the wizard preselects. A hint
+   * never locks anything.
+   */
+  hint?: EditionHint;
 }
 
 /**
  * The edition this device was installed as. Root-owned file first, environment
  * second, "openclaw" (the native, non-premium SKU) as the safe default.
+ *
+ * `unselected` is honoured from the LOCK only, never from the environment: the
+ * clawbox-writable .env must not be able to put a provisioned box back in
+ * front of the edition step.
  *
  * Cached by mtime — this is called per request from middleware, and the file
  * only changes when the installer re-bakes the lock.
@@ -81,7 +134,15 @@ export interface EditionSource {
 export function readEditionSource(): EditionSource {
   try {
     const parsed = readEditionLock();
-    if (parsed) return { edition: parsed, defaulted: false };
+    if (parsed?.edition === UNSELECTED_EDITION) {
+      return {
+        edition: "openclaw",
+        defaulted: true,
+        unselected: true,
+        ...(parsed.hint ? { hint: parsed.hint } : {}),
+      };
+    }
+    if (parsed) return { edition: parsed.edition, defaulted: false };
   } catch {
     // No /etc/clawbox/edition.env (dev box, CI, pre-3.x install), or one that
     // cannot be opened — fall back to the environment below rather than
@@ -89,6 +150,11 @@ export function readEditionSource(): EditionSource {
   }
   const fromEnv = normalizeEdition(process.env.CLAWBOX_EDITION);
   return fromEnv ? { edition: fromEnv, defaulted: false } : { edition: "openclaw", defaulted: true };
+}
+
+/** True while the box has both harnesses and no chosen agent (the lock reads `unselected`). */
+export function isEditionUnselected(): boolean {
+  return readEditionSource().unselected === true;
 }
 
 /**
@@ -101,15 +167,19 @@ export function readEditionSource(): EditionSource {
  * Null when the lock is not a regular file or names no edition; throws when it
  * cannot be opened or read, which the caller treats the same as missing.
  */
-function readEditionLock(): EditionName | null {
+function readEditionLock(): { edition: LockValue; hint: EditionHint | null } | null {
   const fd = fs.openSync(/* turbopackIgnore: true */ EDITION_FILE, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
   try {
     const stat = fs.fstatSync(fd);
     if (!stat.isFile()) return null;
-    if (cache && cache.mtimeMs === stat.mtimeMs) return cache.edition;
-    const parsed = normalizeEdition(parseEditionEnvFile(fs.readFileSync(fd, "utf-8")));
-    if (parsed) cache = { mtimeMs: stat.mtimeMs, edition: parsed };
-    return parsed;
+    if (cache && cache.mtimeMs === stat.mtimeMs) return { edition: cache.edition, hint: cache.hint };
+    const raw = fs.readFileSync(fd, "utf-8");
+    const edition = normalizeLockValue(parseEnvValue(raw, "CLAWBOX_EDITION"));
+    if (!edition) return null;
+    // The hint means something only before the choice; a locked box ignores it.
+    const hint = edition === UNSELECTED_EDITION ? normalizeHint(parseEnvValue(raw, "CLAWBOX_EDITION_HINT")) : null;
+    cache = { mtimeMs: stat.mtimeMs, edition, hint };
+    return { edition, hint };
   } finally {
     fs.closeSync(fd);
   }

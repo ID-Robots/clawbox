@@ -93,6 +93,8 @@ export interface SetupStatusPublic {
   update_completed: boolean;
   password_configured: boolean;
   setup_progress_step: number | null;
+  /** True only on a unified-image box with no agent chosen yet (TASK-1149). */
+  edition_choice_needed: boolean;
 }
 
 /** The full payload, served only to a caller with a session. */

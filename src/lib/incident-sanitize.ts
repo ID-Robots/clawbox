@@ -11,7 +11,8 @@
  *
  *   - CREDENTIALS BY SHAPE. `claw_…` (ClawBox AI), `sk-…` (OpenAI and every
  *     provider that copied the prefix), `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` and
- *     `github_pat_…` (GitHub), and the value after `Bearer`/`token`/`Authorization`.
+ *     `github_pat_…` (GitHub), `xox?-…` (Slack), `AKIA…`/`ASIA…` (AWS access
+ *     key ids), and the value after `Bearer`/`token`/`Authorization`.
  *     An error message quoting the request that failed is the ordinary way a
  *     token ends up in a stack trace.
  *   - EMAIL ADDRESSES. The mail feature's errors name the mailbox, and the
@@ -85,7 +86,11 @@ const TOKEN_PATTERNS: RegExp[] = [
   /gh[pousr]_[A-Za-z0-9_]{10,}/g,
   /\bclaw_[A-Za-z0-9._~+*/-]{8,}=*/g,
   /\bsk-[A-Za-z0-9._~+*/-]{8,}=*/g,
-  /\bxox[baprs]-[A-Za-z0-9-]{8,}/g,
+  // `xoxe-` is the rotating refresh token Slack hands out beside the others.
+  /\bxox[abeprs]-[A-Za-z0-9-]{8,}/g,
+  // An AWS access key id: a fixed four-letter prefix and sixteen capitals or
+  // digits. Long-term (`AKIA`) and temporary (`ASIA`) alike.
+  /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g,
   // A JWT: three dot-separated base64url runs. Shows up whole in HTTP errors.
   /\beyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}/g,
 ];
@@ -93,8 +98,12 @@ const TOKEN_PATTERNS: RegExp[] = [
 /**
  * `Bearer <value>` on its own, because that is the shape an HTTP error prints.
  * The keyword stays and the value goes: which header failed is the diagnosis.
+ *
+ * A backtick ends the value as a quote does: in Markdown — a pull request's
+ * body (src/lib/publish-redaction.ts) — the value is often inline code, and
+ * taking its closing backtick with it left the rest of the text in code.
  */
-const BEARER_RE = /\bBearer\s+([^\s"'&,;)\]}]{6,})/gi;
+const BEARER_RE = /\bBearer\s+([^\s"'`&,;)\]}]{6,})/gi;
 
 /**
  * `key: value` / `key=value` for the names a credential travels under. A
@@ -102,7 +111,7 @@ const BEARER_RE = /\bBearer\s+([^\s"'&,;)\]}]{6,})/gi;
  * redacted the second half of this box's own "Stopped at the token limit".
  */
 const SECRET_KEYWORD_RE =
-  /\b(token|authorization|api[_-]?key|apikey|password|passwd|secret|access_token|refresh_token|client_secret)\b\s*[:=]\s*(["']?)([^\s"'&,;)\]}]{6,})\2/gi;
+  /\b(token|authorization|api[_-]?key|apikey|password|passwd|secret|access_token|refresh_token|client_secret)\b\s*[:=]\s*(["']?)([^\s"'`&,;)\]}]{6,})\2/gi;
 
 const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 

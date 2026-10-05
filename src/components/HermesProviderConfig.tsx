@@ -10,10 +10,12 @@ import ProviderConnectionLabel from "./ProviderConnectionLabel";
 import ProviderDefaultHero from "./ProviderDefaultHero";
 import { useClawaiDeviceLogin } from "@/hooks/useClawaiDeviceLogin";
 import { useProviderStatus } from "@/hooks/useProviderStatus";
+import { useLlamaCppModels } from "@/hooks/useLlamaCppModels";
 import { copyToClipboard } from "@/lib/clipboard";
 import { useT } from "@/lib/i18n";
 import { notifyHermesModelState, useHermesModelOptions } from "@/hooks/useHermesModelOptions";
 import { notifyProvidersChanged, onProvidersChanged } from "@/lib/ui-events";
+import { openInKiosk } from "@/lib/kiosk-tabs-client";
 import {
   HERMES_PANEL_PROVIDERS,
   CLAWAI_PROVIDER,
@@ -152,6 +154,7 @@ const WIZARD_MIN_CONFIGURING_MS = 2500;
 const CONFIGURING_DONE_DWELL_MS = 900;
 /** A connect that has not landed by then gives the form back. */
 const CONFIGURING_WATCHDOG_MS = 120_000;
+const LOCAL_AI_PROVIDER = "llamacpp";
 const LAST_CONFIGURING_PHASE = GENERIC_CONFIGURING_STEP_KEYS.length - 1;
 
 // The provider registry is shared with the server routes (/setup-api/hermes/*
@@ -240,7 +243,14 @@ export default function HermesProviderConfig({
   const beginConfiguring = useCallback((provider: string) => {
     setConfiguring((current) => current ?? { provider, startedAt: Date.now(), phase: 0, completed: false });
   }, []);
-  const abortConfiguring = useCallback(() => setConfiguring(null), []);
+  // True only while a "use only local AI" activation is still wanted: a
+  // cancel (Start over / watchdog) clears it so a late result cannot advance
+  // or report into a screen the owner already took back.
+  const localActivationRef = useRef(false);
+  const abortConfiguring = useCallback(() => {
+    localActivationRef.current = false;
+    setConfiguring(null);
+  }, []);
   /** The connect landed: mark it, and make sure the overlay is up to carry the
    *  DONE beat — then the wizard advances, Settings returns to the panel. */
   const finishWizardStep = useCallback((provider: string) => {
@@ -741,7 +751,7 @@ export default function HermesProviderConfig({
         // back here (Anthropic's redirect_uri is its own console) — nothing
         // ever redirects back to this origin, which is why the flow survives
         // any tunnel.
-        window.open(data.auth_url, "_blank", "noopener,noreferrer");
+        openInKiosk(data.auth_url);
         setSignin({ stage: "pkce", providerId, sessionId, authUrl: data.auth_url });
       } else if (data.flow === "device_code" && sessionId) {
         const interval =
@@ -954,9 +964,39 @@ export default function HermesProviderConfig({
     );
     return () => timers.forEach(clearTimeout);
   }, [configuringRunning]);
+  // "Skip — I'll use only local AI" is a choice of provider, not a decline: it
+  // used to only advance, leaving Hermes with no inference provider at all.
+  // Configure local AI through the same request the OpenClaw step and
+  // Settings → Local AI → "Make primary" send, and advance only once it landed
+  // (finishWizardStep → overlay DONE beat → onNext); a failure drops the
+  // overlay and keeps the owner here with the reason.
+  const [localStatus, setLocalStatus] = useState<Status>(null);
+  const localAiCallbacks = useMemo(() => ({
+    onSaveSuccess: () => {
+      if (!localActivationRef.current) return;
+      notifyChatHeader();
+      finishWizardStep(LOCAL_AI_PROVIDER);
+    },
+    onSaveError: (message: string) => {
+      if (!localActivationRef.current) return;
+      abortConfiguring();
+      setLocalStatus({ kind: "err", msg: message });
+    },
+    onClearStatus: () => setLocalStatus(null),
+  }), [abortConfiguring, finishWizardStep, notifyChatHeader]);
+  const { llamaCppSaving, activateLocalOnly } = useLlamaCppModels(localAiCallbacks);
+  const handleSkipLocalOnly = useCallback(async () => {
+    setLocalStatus(null);
+    beginConfiguring(LOCAL_AI_PROVIDER);
+    localActivationRef.current = true;
+    await activateLocalOnly();
+  }, [activateLocalOnly, beginConfiguring]);
+
   const configuringProviderName = configuring
     ? (configuring.provider === CLAWAI_PROVIDER
       ? "ClawBox AI"
+      : configuring.provider === LOCAL_AI_PROVIDER
+      ? "Local AI"
       : HERMES_PANEL_PROVIDERS.find((p) => p.id === configuring.provider)?.name ?? configuring.provider)
     : "";
 
@@ -970,7 +1010,7 @@ export default function HermesProviderConfig({
     if (typeof window === "undefined") return;
     const url = `${window.location.protocol}//${window.location.hostname}:8090/env`;
     oauthTabOpenedRef.current = true;
-    window.open(url, "_blank", "noopener,noreferrer");
+    openInKiosk(url);
   }
 
   const selectedDef = useMemo(
@@ -1681,12 +1721,14 @@ export default function HermesProviderConfig({
         {!embedded && (
           <button
             type="button"
-            onClick={() => onNext?.()}
-            className="mt-7 w-full min-h-[40px] px-3 rounded-[var(--r-1)] text-[length:var(--t-2)] font-semibold text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)] transition-colors"
+            onClick={handleSkipLocalOnly}
+            disabled={saving || llamaCppSaving !== false}
+            className="mt-7 w-full min-h-[40px] px-3 rounded-[var(--r-1)] text-[length:var(--t-2)] font-semibold text-[var(--text-muted)] hover:text-[var(--text-primary)] hover:bg-[var(--bg-surface)] transition-colors disabled:cursor-not-allowed disabled:opacity-60"
           >
             {t("ai.skipUseLocalOnly")}
           </button>
         )}
+        {!embedded && statusLine(localStatus)}
         </div>
       </div>
     </div>

@@ -27,7 +27,7 @@ Per-file details, rationale, and test results are in the **commit messages** on 
 
 ## Test box (the unit used all session)
 
-- `clawbox.local` → currently `192.168.50.194` (ethernet `enP8p1s0`) — the user **switched networks** mid-session, so the IP/mDNS may move again; re-resolve `clawbox.local`. Host-key fingerprint: `SHA256:WKCQFKqumBCYbuOcNdxZotXW3U8GKOamU7yl2aEf8Ro`.
+- `clawbox.local` → currently `<box-ip>` (ethernet `enP8p1s0`) — the user **switched networks** mid-session, so the IP/mDNS may move again; re-resolve `clawbox.local`. Host-key fingerprint: `SHA256:WKCQFKqumBCYbuOcNdxZotXW3U8GKOamU7yl2aEf8Ro`.
 - Credentials: this unit uses the **default device password** (see `clawbox-credentials.md` in memory; do not hardcode). SSH **key auth is currently failing** on it — use **plink** (PuTTY; `sshpass` doesn't work on Windows) at `%TEMP%\plink.exe` with `-batch -hostkey <fp> -pw <pw>`. Re-adding the pubkey to `~/.ssh/authorized_keys` restores native `ssh`.
 - State: **reset to Step 1** (`data/config.json` set to `{}`, backed up to `data/config.json.preEthTest.bak`). Running `feature/setup-step1-ethernet-first`. **ClawBox-Setup AP is broadcasting** (a leftover `probe-net` profile with autoconnect=yes was deleted so the single radio is free for the AP).
 - Single-radio gotcha (recurring theme): the WiFi chip reports `interface combinations are not supported` — it can host the setup AP **or** join a network, never both. This underlies the WiFi-connect handoff and the "ClawBox-Setup not visible" issue.

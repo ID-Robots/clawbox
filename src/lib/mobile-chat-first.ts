@@ -41,6 +41,20 @@ export function shouldOpenChatFirst(env: ChatFirstEnvironment): boolean {
   return env.standalone && env.coarsePointer;
 }
 
+/**
+ * Whether opening the chat may put the caret in its message box by itself.
+ *
+ * Not on a phone-sized viewport and not with a finger for a pointer: there a
+ * focused input IS a soft keyboard — Android Chrome raises it, iOS Safari
+ * scrolls the page to the field — so the conversation the owner opened the
+ * chat to read jumped up under a keyboard nobody asked for. There the keyboard
+ * waits for a tap on the input. A big screen with a mouse keeps the caret
+ * waiting where the owner types.
+ */
+export function shouldAutoFocusChatInput(env: Pick<ChatFirstEnvironment, "width" | "coarsePointer">): boolean {
+  return !isPhoneViewport(env.width) && !env.coarsePointer;
+}
+
 /** The display modes a home-screen launch can report, per the manifest's `display` / `display_override`. */
 const INSTALLED_DISPLAY_MODES = ["standalone", "fullscreen", "minimal-ui"] as const;
 

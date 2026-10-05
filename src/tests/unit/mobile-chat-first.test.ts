@@ -3,6 +3,7 @@ import {
   PHONE_MAX_WIDTH,
   isPhoneViewport,
   readChatFirstEnvironment,
+  shouldAutoFocusChatInput,
   shouldOpenChatFirst,
 } from "@/lib/mobile-chat-first";
 
@@ -43,6 +44,43 @@ describe("shouldOpenChatFirst", () => {
     expect(isPhoneViewport(0)).toBe(false);
     expect(isPhoneViewport(Number.NaN)).toBe(false);
     expect(shouldOpenChatFirst({ width: 0, standalone: false, coarsePointer: false })).toBe(false);
+  });
+});
+
+/**
+ * Whether opening the chat may focus its message box by itself: a focused
+ * input on a phone or a touch screen is a soft keyboard nobody asked for, and
+ * the app jumped up under it (TASK-1317). A big screen with a mouse keeps it.
+ */
+describe("shouldAutoFocusChatInput", () => {
+  it("focuses on a big screen with a mouse", () => {
+    expect(shouldAutoFocusChatInput({ width: 1440, coarsePointer: false })).toBe(true);
+    expect(shouldAutoFocusChatInput({ width: PHONE_MAX_WIDTH, coarsePointer: false })).toBe(true);
+  });
+
+  it("leaves the keyboard closed on a phone-sized viewport, whatever the pointer", () => {
+    expect(shouldAutoFocusChatInput({ width: 390, coarsePointer: true })).toBe(false);
+    expect(shouldAutoFocusChatInput({ width: 390, coarsePointer: false })).toBe(false);
+    expect(shouldAutoFocusChatInput({ width: PHONE_MAX_WIDTH - 1, coarsePointer: false })).toBe(false);
+  });
+
+  it("leaves it closed on a touch screen wider than a phone", () => {
+    expect(shouldAutoFocusChatInput({ width: 1024, coarsePointer: true })).toBe(false);
+  });
+
+  it("treats a missing width as no phone, so a mouse still gets the caret", () => {
+    expect(shouldAutoFocusChatInput({ width: 0, coarsePointer: false })).toBe(true);
+    expect(shouldAutoFocusChatInput({ width: Number.NaN, coarsePointer: true })).toBe(false);
+  });
+
+  it("reads the live window through readChatFirstEnvironment", () => {
+    const win = (width: number, coarse: boolean) => ({
+      innerWidth: width,
+      matchMedia: (query: string) => ({ matches: coarse && query === "(pointer: coarse)" }),
+    });
+    expect(shouldAutoFocusChatInput(readChatFirstEnvironment(win(1440, false)))).toBe(true);
+    expect(shouldAutoFocusChatInput(readChatFirstEnvironment(win(390, true)))).toBe(false);
+    expect(shouldAutoFocusChatInput(readChatFirstEnvironment(win(1024, true)))).toBe(false);
   });
 });
 

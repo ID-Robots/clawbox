@@ -376,11 +376,31 @@ export async function subscribeSessionApprovals(
     // ones, which are the record of what happened.
     applyReplay({ cards: [], truncated: false }, key)
   }
+  await subscribeSessionMessages(request, key)
+}
+
+/**
+ * Subscribe to one session's transcript alone — the plain frame, no approvals.
+ *
+ * What a chat that draws no approval cards asks for (the full-page chat), and
+ * the fallback above when the opt-in is refused. From here the socket carries a
+ * `session.message` for every append to the transcript, which is how a reply's
+ * file or picture — stripped from the live `final` — reaches the chat without a
+ * reload (lib/chat-transcript-reconcile.ts).
+ *
+ * Never throws, and says whether the gateway took it.
+ */
+export async function subscribeSessionMessages(
+  request: (method: string, params: unknown) => Promise<unknown>,
+  key: string,
+): Promise<boolean> {
   try {
     await request("sessions.messages.subscribe", { key })
+    return true
   } catch {
     // A gateway that refuses the plain frame too. The chat still sends and
     // streams; the transcript reconciles on the next history read.
+    return false
   }
 }
 

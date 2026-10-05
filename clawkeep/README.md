@@ -29,6 +29,16 @@ The Hermes archiver works from an explicit **allowlist**, so the ~1.5 GB
 out. `clawkeep/hermes.py`'s module docstring is the authoritative list, with the
 reasoning for each inclusion and exclusion.
 
+On OpenClaw the core takes the whole state directory as one asset and has no
+exclude option, so a snapshot would carry every older backup kept inside
+`~/.openclaw`. ClawKeep leaves out archive files in `~/.openclaw/backups/` (any
+depth) and OpenClaw's own `…-openclaw-backup.tar.gz[.enc]` files anywhere in
+the backup: each is set aside for the build by a same-filesystem rename into
+`set-aside/` and put back as the same file the moment the build ends
+(`clawkeep/own_backups.py` has the rule and every crash case). The run records
+what it left out (count and bytes), and any archive file of 256 MiB or more the
+snapshot still carries, in `state.json` before the upload.
+
 > **A snapshot is a credential.** Both editions' archives include the device's
 > provider keys (`~/.hermes/.env`, OpenClaw's `credentials`), because a restore
 > that brought back the config but not the keys would hand the customer a dead
@@ -40,14 +50,27 @@ reasoning for each inclusion and exclusion.
 On the OpenClaw edition the CLI stays the archiver and the authority on what is
 safe to archive; `clawkeep/backup_guard.py` is ClawKeep's own boundary around
 it. Before the call it refuses two sources that would share one archive path,
-and it sets aside the symlinks the CLI would refuse that are regenerable tool
-output: package-manager links, OpenClaw's own plugin links, cache links and
-stale browser locks. Those links are journalled first and put back as soon as
-the archive is built. After a failed call it retries a file that vanished
-mid-walk (bounded, `EXIT_ARCHIVE_BUSY`). It rebuilds a SQLite database whose
-only damage is its indexes, keeping a copy first; any other damage stops the
-run as `EXIT_ARCHIVE_DB_DAMAGED` with the database left untouched. Duplicates
-and links out of the backup end as `EXIT_ARCHIVE_CONFLICT`, naming the
+and — in one walk, all at once — it sets aside every symlink the CLI would
+refuse: an absolute target outside everything the backup contains, an absolute
+target that does not exist, a relative one that climbs out. (An absolute link
+whose target is INSIDE the backup is not refused: the CLI stores it as the
+relative link to that target, and ClawKeep leaves it alone.) Regenerable tool
+output — package-manager links, OpenClaw's own plugin links, cache links and
+stale browser locks — is omitted quietly; every other refused link is SKIPPED:
+the snapshot carries neither it nor what it points at, the backup finishes,
+and the run names it (`last_skipped_links` in `state.json`, the ClawKeep
+screen, `backup_status`, and the snapshot's record in the sidecar manifest —
+the count in the clear, the names sealed with the backup passphrase — which a
+restore reads back into its report). Every set-aside link is journalled first
+and put back as soon as the archive is built; a link is never followed. Should
+the CLI still refuse a link the pre-flight let through, that link and every
+link of its shape go out and the archive is rebuilt, at most twice. After a
+failed call it retries a file that vanished mid-walk (bounded,
+`EXIT_ARCHIVE_BUSY`). It rebuilds a SQLite database whose only damage is its
+indexes, keeping a copy first; any other damage stops the run as
+`EXIT_ARCHIVE_DB_DAMAGED` with the database left untouched. Duplicates, and a
+link that could not be left out (no dry-run to hold it against, an unreadable
+link journal, the rebuilds spent), end as `EXIT_ARCHIVE_CONFLICT`, naming the
 sources. It also wipes a plaintext archive a failed `--verify` left behind.
 The module docstring holds the exact rules.
 
@@ -110,8 +133,10 @@ SSH to the device's listener.
 |---|---|---|---|
 | `/etc/clawkeep/config.toml` | 0644 | root | User-editable config |
 | `/var/lib/clawkeep/token` | 0600 | clawkeep | The `claw_*` portal token |
-| `/var/lib/clawkeep/state.json` | 0600 | clawkeep | Last run result + last cloudBytes |
+| `/var/lib/clawkeep/state.json` | 0600 | clawkeep | Last run result + last cloudBytes, and what the last archive left out / still carried / skipped |
 | `/var/lib/clawkeep/detached-links.json` | 0600 | clawkeep | Links set aside for an archive build still in progress (or killed mid-build); put back by the next run |
+| `/var/lib/clawkeep/set-aside-files.json` | 0600 | clawkeep | The box's own backup archives set aside for a build in progress (or killed mid-build), and where each is held; put back by the build, the next run or the hourly idle tick |
+| `/var/lib/clawkeep/set-aside/run-*/` | 0700 | clawkeep | Where those files are held while the build runs (a `.clawkeep-set-aside/` beside the state dir when the data dir is on another filesystem); empty and removed afterwards |
 | `/var/lib/clawkeep/sqlite-recovery/` | 0700 | clawkeep | A database as found before its indexes were rebuilt (the newest 3 per database) |
 
 > **Note on encryption:** archives are encrypted on the device before upload

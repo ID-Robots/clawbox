@@ -1,0 +1,936 @@
+name: Nano hardware tests
+
+# The on-device suite (scripts/nano-tests/, TASK-1324) on ONE real Jetson from
+# the nano lab: reserve a free board, rebuild it to the commit under test, prove
+# it runs that commit, run the suite, and then — whatever happened, a failure or
+# a cancel included — hand the board to the reflash queue for a clean golden
+# restore (recycle); release is the fallback. Every board `nano-ci reserve`
+# hands out was restored from the golden image and provisioned to beta's head
+# by the lab host's reflash service since its last run (TASK-1365).
+#
+# Everything that needs the real hardware and nothing that the container CI
+# already covers: see docs/nano-hardware-tests.md.
+#
+# Part of the suite of EVERY pull request of ours (TASK-1362), no label needed:
+#   - every pull request into beta or main whose branch is in this repository,
+#     DRAFTS INCLUDED (the coding agent opens most PRs as drafts), when it is
+#     opened or reopened and on every push to it. Marking a draft ready starts
+#     no second run: its head commit has already been tested;
+#   - never while the PR carries the label `skip-nano`, the only opt-out;
+#   - not when the PR changes nothing but documentation (docs/**, docs-site/**,
+#     **/*.md; config/** never counts as documentation): the cheap `plan` job
+#     reads the changed files (scripts/nano-tests/needs-board.sh), and the board
+#     job is then skipped with the reason in plan's job summary and in the PR
+#     comment.
+# `workflow_dispatch` runs it on a BRANCH of this repository. A tag or a commit
+# SHA is taken only when a branch here has exactly that commit as its head (that
+# branch is then used); anything else is refused.
+#
+# The commit under test is handed to the board first (/tmp/nano-ci-want-sha),
+# so `nano-ci rebuild` checks the board reached exactly it, retries once with
+# the memory freed when the build failed (an 8 GB board can run out of heap in
+# `next build`), and only then reports.
+#
+# The board is rebuilt from a BRANCH, never from a SHA: `nano-ci rebuild` hands
+# its ref to the board's scripts/force-update.sh, which checks out
+# origin/<branch> — there is no origin/<sha>, and before this was fixed every
+# run left the board on its old commit. The job passes the PR's head branch and
+# then verifies that the board runs the PR's head commit. If the branch moved
+# on before the board was rebuilt, the run says "superseded" and passes without
+# testing: the newer push has its own run queued behind this one.
+#
+# In parallel: one board job at a time PER PULL REQUEST, never cancelled once
+# it runs. Different PRs run side by side, as many as there are `nano-lab`
+# runner instances on the lab host and FREE, freshly reflashed boards in the
+# lab. The lab host keeps a small pool of CI-only boards that `nano-ci reserve`
+# hands out first. A job that finds no free board asks again with a growing
+# pause (1 min, up to 5) for 30 minutes; then it ends SKIPPED, not failed: "no
+# free board" is the lab's capacity, not a result of this commit. The job stays
+# green with a warning, and the PR comment says "skipped — no free board".
+#
+# Never fork code on the lab host — two layers, both documented in
+# docs/nano-hardware-tests.md:
+#   1. On the lab host: a job-started hook (ACTIONS_RUNNER_HOOK_JOB_STARTED) on
+#      every nano-lab runner instance refuses any job that is not a same-repo
+#      pull request, push or dispatch of ID-Robots/clawbox. A pull_request run
+#      takes its workflow file from the PR, so a fork could rewrite every `if:`
+#      below — the hook is outside its reach. The repository also makes every
+#      outside contributor's run wait for approval: never "Approve and run" a
+#      fork PR.
+#   2. In this file: `plan` and the board job admit a pull_request only when
+#      its head is in THIS repository, and a dispatch only resolves to a branch
+#      of this repository.
+#
+# Everything this workflow writes is public, like the repository (TASK-1366):
+# the log, the job summary, the PR comment and the results artifact. The board
+# is named by its serial and its lab only. Its address is masked in the log
+# the moment the reservation is read and is never printed; everything
+# `nano-ci` prints passes through scripts/public-hygiene.mjs in redact mode,
+# and so do the job summary, the PR comment and the results before they are
+# written or uploaded. Nothing printed names the runner's home folder either:
+# the results folder is relative, and the board job checks out with plain git
+# rather than actions/checkout, which logs the workspace's absolute path.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [beta, main]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch of this repository to test on a lab board (a tag or commit SHA only when a branch has it as its head)"
+        required: true
+        default: beta
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  # Cheap, on GitHub's own runners, and the gate for everything after it: a
+  # `skip-nano` PR or a fork never even starts it. It answers one question —
+  # does this commit need a board? — from the files the PR changes.
+  plan:
+    name: Needs a board?
+    # The gate. A pull_request runs when BOTH of these hold — a draft is no
+    # exception:
+    #   - its head is in this repository (the workflow's own fork fence; the
+    #     runner hook on the lab host is the other layer);
+    #   - it does not carry `skip-nano`, the only opt-out.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       !contains(github.event.pull_request.labels.*.name, 'skip-nano'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      hardware: ${{ steps.classify.outputs.hardware }}
+      reason: ${{ steps.classify.outputs.reason }}
+    steps:
+      - name: Check out the classifier
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          sparse-checkout: scripts/nano-tests/needs-board.sh
+          sparse-checkout-cone-mode: false
+
+      # The changed files AT THE COMMIT UNDER TEST: GitHub's compare of this
+      # event's base and head is the PR's "Files changed" (a three-dot diff from
+      # the merge base), pinned to these SHAs rather than to wherever the PR has
+      # moved since. Both sides of a rename are judged, so code moved into docs/
+      # still needs a board. A compare lists at most 300 files; at 300, or when
+      # the call fails, the list is partial and the PR gets a board — every
+      # doubt does (scripts/nano-tests/needs-board.sh).
+      - name: Classify the changed files
+        id: classify
+        env:
+          EVENT: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            hardware=true
+            reason="dispatched by hand for $INPUT_REF"
+          else
+            compare="$RUNNER_TEMP/compare.json"
+            files="$RUNNER_TEMP/changed-files.txt"
+            partial=()
+            if gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" > "$compare" &&
+               count=$(jq '(.files // []) | length' "$compare") &&
+               jq -r '(.files // [])[] | .filename, (.previous_filename // empty) | gsub("[\r\n]"; "?")' "$compare" > "$files"; then
+              echo "$count changed files between ${BASE_SHA:0:12} and ${HEAD_SHA:0:12}"
+              [ "$count" -lt 300 ] || partial=(--partial)
+            else
+              echo "::warning title=Changed files unknown::could not list the PR's changed files, so it gets a board"
+              : > "$files"
+              partial=(--partial)
+            fi
+            verdict=$(bash scripts/nano-tests/needs-board.sh "${partial[@]}" < "$files") || verdict=""
+            hardware=$(sed -n 's/^hardware=//p' <<<"$verdict")
+            reason=$(sed -n 's/^reason=//p' <<<"$verdict")
+          fi
+          case "$hardware" in
+            true | false) ;;
+            *)
+              hardware=true
+              reason="the classifier gave no verdict, so the PR gets a board"
+              ;;
+          esac
+          {
+            echo "hardware=$hardware"
+            echo "reason=$reason"
+          } >> "$GITHUB_OUTPUT"
+          echo "Needs a board: $hardware ($reason)"
+          if [ "$hardware" = true ]; then
+            echo "**Needs a board:** $reason." >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo "## Nano hardware tests — skipped"
+              echo
+              echo "**No board was taken: $reason.** A pull request that changes nothing but \`docs/**\`, \`docs-site/**\` or \`**/*.md\` (\`config/**\` excepted) skips the on-device suite."
+              echo
+              # The board is rebuilt from a branch, so the hint names the PR's
+              # branch; --ref is where the workflow file lives (main may have
+              # none).
+              echo "To test this PR on a board anyway (its branch, while its head is still \`${HEAD_SHA:0:12}\`): \`gh workflow run nano-hardware-tests.yml --ref $BASE_REF -f ref=$HEAD_REF\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  nano-hardware-tests:
+    name: On-device tests (nano-lab)
+    needs: plan
+    # `plan` carries the gate and the docs-only verdict. The fork fence is
+    # repeated here so the job that runs on the lab host never rests on another
+    # job's `if:` alone (and the runner hook on the lab host is under both).
+    if: >-
+      needs.plan.outputs.hardware == 'true' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository))
+    runs-on: [self-hosted, nano-lab]
+    # One board job at a time PER PULL REQUEST (a dispatch: per ref it was
+    # dispatched from), and a running job is never cancelled by the next one:
+    # its recycle (or the release fallback) must run. A push to the PR queues
+    # behind the PR's own running job; GitHub keeps ONE pending job per group,
+    # so a third push replaces the second, which then shows as cancelled before
+    # it ever took a board — only ever an older commit of the same PR.
+    # Different PRs are different groups and run side by side, bounded by the
+    # number of `nano-lab` runner instances on the lab host (one job each) and
+    # by the FREE boards `nano-ci reserve` finds — only freshly reflashed ones.
+    concurrency:
+      group: nano-lab-pr-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: false
+    # The budget: waiting for a free board 20 + rebuild 20 + health 10 + suite
+    # 40 at the very worst — but the suite's cap shrinks by every minute spent
+    # waiting (never below 20), so the steps before the recycle take at most
+    # ~70 of the 90. The recycle takes seconds: the reflash (~40 min) runs on
+    # the lab host after the job, not inside it, so no room is kept for a
+    # cleanup any more and the rest is headroom for the upload, the summary,
+    # the recycle and the release fallback. A normal run spends ~25.
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      # Relative to the workspace: the job's env is printed at the head of
+      # every step's log, and the workspace's absolute path names the runner
+      # host's home folder.
+      NANO_RESULTS_DIR: results
+    # For the PR comment, which runs on GitHub's runners so that this job, on
+    # the lab host, never holds a token that can write.
+    outputs:
+      serial: ${{ steps.reserve.outputs.serial }}
+      # The reserve step's outcome — `cancelled` when the job was cancelled
+      # while it waited for a free board, `skipped` when the job ended before
+      # the step — and empty only when the job never started at all.
+      reserve: ${{ steps.reserve.outcome }}
+      # `true` when no board was free for the whole wait: the run is skipped.
+      no_board: ${{ steps.reserve.outputs.no_board }}
+      branch: ${{ steps.ref.outputs.branch }}
+      superseded: ${{ steps.verify.outputs.superseded }}
+      board_sha: ${{ steps.verify.outputs.board_sha }}
+      branch_sha: ${{ steps.verify.outputs.branch_sha }}
+      suite: ${{ steps.suite.outcome }}
+      recycle: ${{ steps.recycle.outcome }}
+      release: ${{ steps.release.outcome }}
+      report: ${{ steps.summary.outputs.report }}
+    steps:
+      # Before the checkout, because it decides what is checked out: the BRANCH
+      # the board is rebuilt from and the commit it must then run.
+      # `nano-ci rebuild` hands its ref to the board's scripts/force-update.sh,
+      # which checks out origin/<branch>; a SHA or a tag is no such branch, and
+      # the board stays on its old commit. A pull_request uses its head branch
+      # (in this repository: the fence) and its head commit. A dispatch takes a
+      # branch; a tag or a commit SHA only when a branch of this repository has
+      # exactly that commit as its head, and then that branch. Everything else
+      # is refused — which also keeps a fork's commit, which GitHub serves by
+      # SHA from this repository too, off the lab host. The branch must pass
+      # force-update.sh's own character check before it reaches nano-ci.
+      - name: Resolve the branch under test
+        id: ref
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_REF: ${{ inputs.ref }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          REPO: ${{ github.repository }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          # force-update.sh's CLAWBOX_BRANCH check, and no leading '-' that a
+          # command line could read as an option.
+          branch_ok() { [[ $1 =~ ^[A-Za-z0-9._/-]+$ && $1 != -* ]]; }
+          refuse() {
+            echo "::error title=Refused ref::$1"
+            echo "note=**Not tested:** $1" >> "$GITHUB_OUTPUT"
+            exit 1
+          }
+          if [ "$EVENT" = pull_request ]; then
+            [ "$PR_HEAD_REPO" = "$REPO" ] || refuse "the PR's branch is not in $REPO"
+            branch_ok "$PR_HEAD_REF" || refuse "the PR's head branch is not a name the board's force-update.sh accepts (A-Z a-z 0-9 . _ / -)"
+            [[ $PR_HEAD_SHA =~ ^[0-9a-f]{40}$ ]] || refuse "the PR's head commit is not a commit SHA"
+            branch=$PR_HEAD_REF
+            sha=$PR_HEAD_SHA
+            how="the PR's head branch"
+          else
+            # Not echoed when it fails: it is the one value here nobody checked.
+            [[ $INPUT_REF =~ ^[A-Za-z0-9._/-]+$ ]] || refuse "the dispatched ref is not a branch, tag or commit name"
+            case "$INPUT_REF" in
+              refs/pull/* | pull/* | refs/remotes/*)
+                refuse "$INPUT_REF may be fork code; dispatch a branch of this repository"
+                ;;
+            esac
+            refs="$RUNNER_TEMP/remote-refs.txt"
+            if ! timeout 120 git ls-remote --heads --tags "$REPO_URL" > "$refs"; then
+              echo "::error title=Branches unknown::git ls-remote $REPO_URL failed, so the dispatched ref could not be resolved to a branch"
+              exit 1
+            fi
+            want=any
+            name=$INPUT_REF
+            case "$INPUT_REF" in
+              refs/heads/*) want=branch name=${INPUT_REF#refs/heads/} ;;
+              refs/tags/*) want=tag name=${INPUT_REF#refs/tags/} ;;
+            esac
+            # ls-remote prints "<sha> TAB <ref>", plus "<sha> TAB refs/tags/<t>^{}"
+            # for the commit an annotated tag points at.
+            head_of() { awk -v r="refs/heads/$1" '$2 == r { print $1; exit }' "$refs"; }
+            tag_commit() {
+              awk -v r="refs/tags/$1" '$2 == (r "^{}") { peeled = $1 } $2 == r { plain = $1 } END { print (peeled != "" ? peeled : plain) }' "$refs"
+            }
+            # The usable branches whose head is commit $1, sorted.
+            branches_at() {
+              local b
+              awk -v s="$1" '$1 == s && index($2, "refs/heads/") == 1 { print substr($2, 12) }' "$refs" | sort |
+                while IFS= read -r b; do
+                  if branch_ok "$b"; then printf '%s\n' "$b"; fi
+                done
+            }
+            branch=""
+            sha=""
+            if [ "$want" != tag ] && sha=$(head_of "$name") && [ -n "$sha" ]; then
+              branch=$name
+              how="branch $name"
+            elif [ "$want" != branch ] && target=$(tag_commit "$name") && [ -n "$target" ]; then
+              candidates=$(branches_at "$target")
+              branch=${candidates%%$'\n'*}
+              [ -n "$branch" ] || refuse "tag $name is commit ${target:0:12}, and no branch of $REPO has that commit as its head. The board's force-update.sh checks out only a branch: push one there (git push origin $target:refs/heads/<name>) and dispatch that branch."
+              sha=$target
+              how="tag $name, the head of branch $branch"
+            elif [ "$want" = any ] && [[ ${name,,} =~ ^[0-9a-f]{7,40}$ ]]; then
+              mapfile -t targets < <(awk -v p="${name,,}" 'index($2, "refs/heads/") == 1 && index($1, p) == 1 { print $1 }' "$refs" | sort -u)
+              case ${#targets[@]} in
+                0) refuse "a bare commit SHA cannot be tested: the board's force-update.sh checks out only a branch, and no branch of $REPO has ${name:0:12} as its head. Dispatch the branch, or push one at the commit (git push origin <sha>:refs/heads/<name>)." ;;
+                1) ;;
+                *) refuse "${name} is the start of the head commit of more than one branch; give more of the SHA, or the branch" ;;
+              esac
+              candidates=$(branches_at "${targets[0]}")
+              branch=${candidates%%$'\n'*}
+              [ -n "$branch" ] || refuse "commit ${targets[0]:0:12} is only the head of branches whose names the board's force-update.sh refuses"
+              sha=${targets[0]}
+              how="commit ${name:0:12}, the head of branch $branch"
+            else
+              refuse "$REPO has no branch or tag named $name"
+            fi
+            branch_ok "$branch" || refuse "branch $branch is not a name the board's force-update.sh accepts (A-Z a-z 0-9 . _ / -)"
+            [[ $sha =~ ^[0-9a-f]{40}$ ]] || refuse "could not read the head commit of $branch"
+          fi
+          {
+            echo "branch=$branch"
+            echo "sha=$sha"
+            echo "note=**Branch:** \`$branch\` ($how); the commit under test is \`${sha:0:12}\`."
+          } >> "$GITHUB_OUTPUT"
+          echo "Testing $sha from $how"
+
+      # Plain git, not actions/checkout: that logs the workspace's absolute
+      # path, which names the runner host's home folder, and this log is
+      # public. The workspace outlives a job, so it is emptied first and the
+      # job reads nothing another job left there. No token: the repository is
+      # public (and the job's own token is never persisted on the lab host).
+      - name: Check out the commit under test
+        env:
+          SHA: ${{ steps.ref.outputs.sha }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          here=$(pwd -P)
+          if [ "$here" != "$(cd "$GITHUB_WORKSPACE" && pwd -P)" ] || [ "$here" = / ]; then
+            echo "::error title=Checkout refused::not in the job's workspace"
+            exit 1
+          fi
+          find . -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+          git init -q .
+          if ! timeout 600 git -c protocol.version=2 fetch -q --no-tags --depth=1 "$REPO_URL" "$SHA"; then
+            echo "::error title=Checkout failed::could not fetch ${SHA:0:12} from $REPO_URL"
+            exit 1
+          fi
+          git -c advice.detachedHead=false checkout -q --detach FETCH_HEAD
+          echo "Checked out ${SHA:0:12}"
+
+      # The redactor every later step prints through comes from here — the
+      # commit under test carries it (scripts/public-hygiene.mjs) — and is
+      # copied out of the workspace so that nothing the suite does to the
+      # checkout can take it away from recycle and release.
+      - name: Resolve the commit and check the lab host
+        id: target
+        env:
+          EVENT: ${{ github.event_name }}
+          BRANCH: ${{ steps.ref.outputs.branch }}
+          EXPECTED_SHA: ${{ steps.ref.outputs.sha }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          if [ "$sha" != "$EXPECTED_SHA" ]; then
+            echo "::error::checked out $sha, but the commit under test is $EXPECTED_SHA"
+            exit 1
+          fi
+          missing=""
+          for tool in nano-ci jq timeout base64 node; do
+            command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error title=Lab host not ready::missing on the runner host:$missing"
+            exit 1
+          fi
+          if [ ! -f scripts/public-hygiene.mjs ]; then
+            echo "::error title=No redactor::${sha:0:12} has no scripts/public-hygiene.mjs, which keeps the lab out of this public log; rebase $BRANCH on beta"
+            exit 1
+          fi
+          cp scripts/public-hygiene.mjs "$RUNNER_TEMP/public-hygiene.mjs"
+          # Everything `nano-ci` prints goes through this; the board's address
+          # becomes <board-ip> even where the lab is not on a private range.
+          cat > "$RUNNER_TEMP/nano-redact" <<'EOF'
+          #!/usr/bin/env bash
+          exec node "$RUNNER_TEMP/public-hygiene.mjs" redact --mask-env "NANO_IP=<board-ip>"
+          EOF
+          chmod +x "$RUNNER_TEMP/nano-redact"
+          "$RUNNER_TEMP/nano-redact" < /dev/null
+          if [ "$EVENT" = pull_request ]; then
+            purpose="clawbox PR #$PR_NUMBER $sha"
+          else
+            purpose="clawbox dispatch $BRANCH $sha"
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "purpose=$purpose" >> "$GITHUB_OUTPUT"
+          echo "Testing $sha on a nano-lab board ($purpose)"
+
+      # With other PRs' jobs holding boards, none may be FREE for a while:
+      # `nano-ci reserve` exits 3 then, and is asked again with a growing pause
+      # (1 min, x1.5, at most 5 min) for up to 30 minutes. Then the step ends
+      # with no_board=true and exit 0: every later board step is skipped and the
+      # run is reported as skipped, never as a failure of this commit. The
+      # step's own cap is only a backstop behind that deadline.
+      - name: Reserve a free nano-lab board
+        id: reserve
+        timeout-minutes: 35
+        env:
+          PURPOSE: ${{ steps.target.outputs.purpose }}
+          WAIT_S: "1800"
+          EVERY_S: "60"
+          MAX_EVERY_S: "300"
+        # What `nano-ci reserve` prints, the board's address among it, reaches
+        # the log only through the redactor, and only when something failed.
+        run: |
+          start=$SECONDS
+          tries=0
+          pause=$EVERY_S
+          err="$RUNNER_TEMP/reserve.err"
+          while :; do
+            tries=$((tries + 1))
+            rc=0
+            out=$(nano-ci reserve "$PURPOSE" 2>"$err") || rc=$?
+            [ "$rc" -eq 3 ] || break
+            waited=$((SECONDS - start))
+            if [ "$waited" -ge "$WAIT_S" ]; then
+              {
+                echo "no_board=true"
+                echo "note=**Skipped — no free nano-lab board:** every board stayed leased for $((waited / 60)) min ($tries tries of \`nano-ci reserve\`). This is lab capacity, not a result of this commit; re-run the job to test it on a board."
+              } >> "$GITHUB_OUTPUT"
+              echo "::warning title=Skipped: no free nano-lab board::every board in the lab stayed leased for $((waited / 60)) min ($tries tries); the on-device suite did not run. Re-run this job to test the commit on a board."
+              exit 0
+            fi
+            left=$((WAIT_S - waited))
+            echo "No FREE board yet (try $tries, $((waited / 60)) min waited); asking again in $(((pause < left ? pause : left) + 59) / 60) min, for up to $(((left + 59) / 60)) more min"
+            sleep $((left < pause ? left : pause))
+            pause=$((pause * 3 / 2))
+            [ "$pause" -le "$MAX_EVERY_S" ] || pause=$MAX_EVERY_S
+          done
+          waited=$((SECONDS - start))
+          if [ "$rc" -ne 0 ]; then
+            { printf '%s\n' "$out"; cat "$err"; } | "$RUNNER_TEMP/nano-redact"
+            echo "::error title=nano-ci reserve failed::exit $rc"
+            exit 1
+          fi
+          # "SERIAL IP LAB": the first line of exactly three fields whose second
+          # is an address. A status line the helper prints around it ("leased
+          # until …") must not be read as a serial: every later step, recycle
+          # and release included, would then act on a board that is not ours.
+          line=$(printf '%s\n' "$out" | awk 'NF == 3 && ($2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ || $2 ~ /^[0-9A-Fa-f:]+:[0-9A-Fa-f:]*$/) { print; exit }')
+          read -r serial ip lab <<<"$line"
+          # Masked before anything else is printed: from here on GitHub shows
+          # *** wherever the address would appear in this job's log.
+          if [ -n "${ip:-}" ]; then
+            echo "::add-mask::$ip"
+          fi
+          if ! [[ ${serial:-} =~ ^[A-Za-z0-9._:-]+$ ]]; then
+            { printf '%s\n' "$out"; cat "$err"; } | NANO_IP=${ip:-} "$RUNNER_TEMP/nano-redact"
+            echo "::error title=Unreadable reservation::nano-ci reserve printed no 'SERIAL IP LAB' line (above, redacted); if it leased a board, release it by hand"
+            exit 1
+          fi
+          # The wait comes out of the suite's 40 minutes, never out of the
+          # room the always() steps keep: every started minute of it, down to
+          # 20.
+          suite_minutes=$((40 - (waited + 59) / 60))
+          [ "$suite_minutes" -ge 20 ] || suite_minutes=20
+          # Once `serial` is an output, the recycle step runs (and the release
+          # step, when the recycle did not succeed).
+          {
+            echo "serial=$serial"
+            echo "ip=$ip"
+            echo "lab=$lab"
+            echo "suite_minutes=$suite_minutes"
+          } >> "$GITHUB_OUTPUT"
+          if [ "$tries" -gt 1 ]; then
+            echo "note=Waited $((waited / 60)) min ($tries tries) for a free board, so the suite had $suite_minutes min instead of 40." >> "$GITHUB_OUTPUT"
+          fi
+          echo "Reserved $serial in $lab"
+
+      # From the BRANCH, never the SHA: the board's force-update.sh checks out
+      # origin/<branch>, and there is no origin/<sha>. Whether that put the
+      # board on the commit under test is the verify step's question.
+      - name: Rebuild the board at the commit under test
+        id: rebuild
+        if: steps.reserve.outputs.serial != ''
+        timeout-minutes: 45
+        env:
+          SERIAL: ${{ steps.reserve.outputs.serial }}
+          NANO_IP: ${{ steps.reserve.outputs.ip }}
+          BRANCH: ${{ steps.ref.outputs.branch }}
+          SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          if ! [[ $BRANCH =~ ^[A-Za-z0-9._/-]+$ && $BRANCH != -* ]]; then
+            echo "::error title=Refused ref::no branch the board's force-update.sh accepts"
+            exit 1
+          fi
+          # Where the board is now: a board still there after the rebuild was
+          # never moved, and that is a failure even if the branch moved too.
+          # What ssh says besides (a known-hosts line names the address) is
+          # shown, redacted, only when the commit could not be read.
+          err="$RUNNER_TEMP/ssh.err"
+          before=$(nano-ci ssh "$SERIAL" 'git -C /home/clawbox/clawbox rev-parse HEAD' 2>"$err" | tail -n 1 | tr -d '[:space:]') || true
+          if ! [[ $before =~ ^[0-9a-f]{40}$ ]]; then
+            before=""
+            "$RUNNER_TEMP/nano-redact" < "$err"
+          fi
+          echo "before=$before" >> "$GITHUB_OUTPUT"
+          echo "$SERIAL is at ${before:-an unreadable commit}; rebuilding it from branch $BRANCH, whose head is $SHA"
+          # The commit under test, for `nano-ci rebuild` to check the board
+          # against (and to retry a failed build once before it reports).
+          if ! [[ $SHA =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error title=No commit under test::'$SHA' is not a commit SHA"
+            exit 1
+          fi
+          nano-ci ssh "$SERIAL" "echo $SHA > /tmp/nano-ci-want-sha" 2>&1 | "$RUNNER_TEMP/nano-redact"
+          rc=0
+          nano-ci rebuild "$SERIAL" "$BRANCH" 2>&1 | "$RUNNER_TEMP/nano-redact" || rc=${PIPESTATUS[0]}
+          # 4: the branch moved on and the board is on its new head — the
+          # verify step tells "superseded" from a wrong commit.
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 4 ]; then
+            exit "$rc"
+          fi
+
+      # The rebuild restarts the web server (and the gateway, twice).
+      - name: Wait for the board to come back
+        id: healthy
+        if: steps.reserve.outputs.serial != ''
+        timeout-minutes: 10
+        env:
+          SERIAL: ${{ steps.reserve.outputs.serial }}
+          NANO_IP: ${{ steps.reserve.outputs.ip }}
+        run: |
+          for attempt in $(seq 1 60); do
+            if nano-ci health "$SERIAL" 2>&1 | "$RUNNER_TEMP/nano-redact"; then
+              echo "healthy (check $attempt)"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error title=Board unhealthy::$SERIAL is not healthy 10 minutes after the rebuild"
+          exit 1
+
+      # The board must run the commit under test. One other outcome is not the
+      # board's fault: the branch moved on (a newer push) before the rebuild,
+      # so force-update.sh built the newer head. That run is SUPERSEDED — this
+      # commit goes untested and the step passes with a warning, because the
+      # newer push has its own run, queued behind this one in the PR's
+      # concurrency group. It counts as superseded only when the board did move
+      # (it is not on the commit it had before the rebuild — or, when that
+      # commit could not be read, it is exactly the branch's head now) and the
+      # branch is no longer at the commit under test. Anything else is a wrong
+      # commit.
+      - name: Verify the board runs the commit under test
+        id: verify
+        if: steps.reserve.outputs.serial != ''
+        env:
+          EVENT: ${{ github.event_name }}
+          SERIAL: ${{ steps.reserve.outputs.serial }}
+          NANO_IP: ${{ steps.reserve.outputs.ip }}
+          BRANCH: ${{ steps.ref.outputs.branch }}
+          SHA: ${{ steps.target.outputs.sha }}
+          BEFORE: ${{ steps.rebuild.outputs.before }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          err="$RUNNER_TEMP/ssh.err"
+          board_sha=$(nano-ci ssh "$SERIAL" 'git -C /home/clawbox/clawbox rev-parse HEAD' 2>"$err" | tail -n 1 | tr -d '[:space:]') || true
+          if ! [[ $board_sha =~ ^[0-9a-f]{40}$ ]]; then
+            board_sha=""
+            "$RUNNER_TEMP/nano-redact" < "$err"
+          fi
+          echo "board_sha=$board_sha" >> "$GITHUB_OUTPUT"
+          if [ "$board_sha" = "$SHA" ]; then
+            echo "$SERIAL is at $SHA"
+            exit 0
+          fi
+          branch_sha=""
+          if [ -n "$board_sha" ] && [ "$board_sha" != "$BEFORE" ]; then
+            branch_sha=$(timeout 60 git ls-remote "$REPO_URL" "refs/heads/$BRANCH" | awk -v r="refs/heads/$BRANCH" '$2 == r { print $1; exit }') || branch_sha=""
+            [[ $branch_sha =~ ^[0-9a-f]{40}$ ]] || branch_sha=""
+            echo "branch_sha=$branch_sha" >> "$GITHUB_OUTPUT"
+          fi
+          # Without the commit from before the rebuild, "the board moved" is
+          # only proven when the board is exactly where the branch is now.
+          if [ -n "$branch_sha" ] && [ "$branch_sha" != "$SHA" ] &&
+             { [ -n "$BEFORE" ] || [ "$board_sha" = "$branch_sha" ]; }; then
+            if [ "$EVENT" = pull_request ]; then
+              next="the newer push has its own run, queued behind this one"
+            else
+              next="dispatch $BRANCH again to test its new head"
+            fi
+            msg="$BRANCH moved on from ${SHA:0:12} to ${branch_sha:0:12} before the board was rebuilt, so $SERIAL runs ${board_sha:0:12}. This commit was not tested here; $next."
+            echo "::warning title=Superseded by a newer push::$msg"
+            {
+              echo "superseded=true"
+              echo "note=**Superseded, not tested:** $msg"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -z "$board_sha" ]; then
+            why="its commit could not be read"
+          elif [ "$board_sha" = "$BEFORE" ]; then
+            why="the rebuild left it on the commit it had before"
+          elif [ -z "$branch_sha" ]; then
+            why="the head of $BRANCH could not be read, so this cannot be told from a wrong build"
+          elif [ "$branch_sha" = "$SHA" ]; then
+            why="$BRANCH is still at ${SHA:0:12}, so no newer push explains it"
+          else
+            why="its commit before the rebuild could not be read and it is not the head of $BRANCH (${branch_sha:0:12}) either, so this cannot be told from a rebuild that never moved it"
+          fi
+          echo "::error title=Wrong commit on the board::$SERIAL is at '${board_sha:-nothing}', expected $SHA: $why"
+          echo "note=**Wrong commit on the board:** \`$SERIAL\` is at \`${board_sha:-nothing}\`, expected \`$SHA\` ($why)." >> "$GITHUB_OUTPUT"
+          exit 1
+
+      # Not on a superseded run: the board runs another commit than this one.
+      # NANO_IP is handed to the tests but never printed: run.sh passes every
+      # test's output through the redactor, which turns it into <board-ip>.
+      - name: Run the on-device suite
+        id: suite
+        if: steps.reserve.outputs.serial != '' && steps.verify.outputs.superseded != 'true'
+        timeout-minutes: ${{ fromJSON(steps.reserve.outputs.suite_minutes || '40') }}
+        env:
+          SERIAL: ${{ steps.reserve.outputs.serial }}
+          NANO_IP: ${{ steps.reserve.outputs.ip }}
+          NANO_LAB: ${{ steps.reserve.outputs.lab }}
+          NANO_SHA: ${{ steps.target.outputs.sha }}
+          NANO_RUN_ID: gh${{ github.run_id }}-${{ github.run_attempt }}
+        run: bash scripts/nano-tests/run.sh "$SERIAL"
+
+      # From here on every step is `always()`, which also runs on a cancel —
+      # the run cancelled by hand, or the job's own timeout.
+      #
+      # The artifact is public: every file in results/ goes through the
+      # redactor first (run.sh already redacted the logs as it wrote them;
+      # this is the second line, and it covers summary.json too). Results that
+      # could not be redacted are not uploaded.
+      - name: Redact the suite's results
+        id: redact
+        if: always() && steps.reserve.outputs.serial != ''
+        env:
+          NANO_IP: ${{ steps.reserve.outputs.ip }}
+        run: |
+          if [ -d "$NANO_RESULTS_DIR" ]; then
+            node "$RUNNER_TEMP/public-hygiene.mjs" redact-files --mask-env "NANO_IP=<board-ip>" "$NANO_RESULTS_DIR"
+          fi
+
+      - name: Upload the suite's results
+        if: always() && steps.redact.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nano-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.NANO_RESULTS_DIR }}
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # The job summary, and the same text as an output for the PR comment.
+      - name: Job summary
+        id: summary
+        if: always()
+        env:
+          NANO_SERIAL: ${{ steps.reserve.outputs.serial }}
+          NANO_IP: ${{ steps.reserve.outputs.ip }}
+          NANO_LAB: ${{ steps.reserve.outputs.lab }}
+          NANO_SHA: ${{ steps.target.outputs.sha || steps.ref.outputs.sha || github.event.pull_request.head.sha || inputs.ref }}
+          NANO_OUTCOME: "${{ job.status == 'cancelled' && 'The job was cancelled. ' || '' }}Steps: branch ${{ steps.ref.outcome || 'not run' }} · reserve ${{ steps.reserve.outcome || 'not run' }} · rebuild ${{ steps.rebuild.outcome || 'not run' }} · back up ${{ steps.healthy.outcome || 'not run' }} · commit check ${{ steps.verify.outputs.superseded == 'true' && 'superseded by a newer push' || steps.verify.outcome || 'not run' }} · suite ${{ steps.suite.outcome || 'not run' }}"
+          REF_NOTE: ${{ steps.ref.outputs.note }}
+          RESERVE_NOTE: ${{ steps.reserve.outputs.note }}
+          VERIFY_NOTE: ${{ steps.verify.outputs.note }}
+          CHECKED_OUT: ${{ steps.target.outcome }}
+          SUITE_OUTCOME: ${{ steps.suite.outcome }}
+        run: |
+          raw="$RUNNER_TEMP/nano-report.raw.md"
+          report="$RUNNER_TEMP/nano-report.md"
+          # The runner's workspace outlives a job: before this job's own
+          # checkout it holds another job's files, so neither its summary.sh
+          # nor a results/ the suite did not write this time is read.
+          results=/dev/null
+          case "$SUITE_OUTCOME" in
+            success | failure | cancelled) results="$NANO_RESULTS_DIR/summary.json" ;;
+          esac
+          if [ "$CHECKED_OUT" = success ] && [ -f scripts/nano-tests/summary.sh ]; then
+            bash scripts/nano-tests/summary.sh "$results" > "$raw"
+          else
+            printf '## Nano hardware tests\n\n**The on-device suite did not run.** %s\n' "$NANO_OUTCOME" > "$raw"
+          fi
+          for note in "$REF_NOTE" "$RESERVE_NOTE" "$VERIFY_NOTE"; do
+            if [ -n "$note" ]; then
+              printf '\n%s\n' "$note" >> "$raw"
+            fi
+          done
+          # Public, here and in the PR comment: through the redactor before it
+          # is written anywhere. There is no redactor only when the job
+          # stopped before it was set up — before any board was reserved — and
+          # the text is then this step's own.
+          redactor="$RUNNER_TEMP/public-hygiene.mjs"
+          if [ ! -f "$redactor" ]; then
+            cp "$raw" "$report"
+          elif ! node "$redactor" redact --mask-env "NANO_IP=<board-ip>" < "$raw" > "$report"; then
+            printf '## Nano hardware tests\n\n**The job summary was withheld: the redactor failed.** %s\n' "$NANO_OUTCOME" > "$report"
+          fi
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
+          eof="NANO_REPORT_$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+          {
+            echo "report<<$eof"
+            head -c 50000 "$report"
+            echo
+            echo "$eof"
+          } >> "$GITHUB_OUTPUT"
+
+      # `nano-ci recycle` hands the board from the CI lease to the lab host's
+      # reflash service within seconds and returns 0; it never waits for the
+      # reflash. The service restores the board from the golden image,
+      # provisions it to beta's head, verifies it and releases it FREE with
+      # the "clean" marker that `nano-ci reserve` asks for — or quarantines
+      # it. Once this step succeeds the board is no longer ours.
+      - name: Recycle the board for a clean reflash
+        id: recycle
+        if: always() && steps.reserve.outputs.serial != ''
+        env:
+          SERIAL: ${{ steps.reserve.outputs.serial }}
+          NANO_IP: ${{ steps.reserve.outputs.ip }}
+        # The verdict is nano-ci's exit status, not the redactor's.
+        run: |
+          set +e
+          nano-ci recycle "$SERIAL" 2>&1 | "$RUNNER_TEMP/nano-redact"
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "- Recycled \`$SERIAL\`: handed to the reflash queue for a clean golden restore + beta provision." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::error title=Board recycle failed::nano-ci recycle $SERIAL exited $rc; the board stays leased and is released below"
+            echo "- **Recycle FAILED** for \`$SERIAL\` (exit $rc): the board stays leased and is released below." >> "$GITHUB_STEP_SUMMARY"
+            exit "$rc"
+          fi
+
+      # The fallback path, only when the recycle did not succeed (it failed,
+      # or never finished): the board is still leased to `ci` and must not
+      # stay so. After a recycle that succeeded it belongs to the reflash
+      # service, no longer to `ci`, and the broker would refuse the release.
+      - name: Release the board
+        id: release
+        if: always() && steps.reserve.outputs.serial != '' && steps.recycle.outcome != 'success'
+        env:
+          SERIAL: ${{ steps.reserve.outputs.serial }}
+          NANO_IP: ${{ steps.reserve.outputs.ip }}
+        run: |
+          set +e
+          nano-ci release "$SERIAL" 2>&1 | "$RUNNER_TEMP/nano-redact"
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::error title=Board release failed::nano-ci release $SERIAL exited $rc"
+            exit "$rc"
+          fi
+          echo "- Released \`$SERIAL\`." >> "$GITHUB_STEP_SUMMARY"
+
+  # The results comment: a "Nano hardware tests" section of the one CI Summary
+  # comment the other workflows here edit in place (marker
+  # <!-- clawbox-ci-summary -->) — one comment per PR, rewritten on every run,
+  # never a new one per push.
+  comment:
+    name: PR comment
+    needs: [plan, nano-hardware-tests]
+    # `always()` is load-bearing: without a status function GitHub adds the
+    # implicit `success()`, and a failed board run would leave the section
+    # saying "passed" (pr-tests-coverage.yml has the history). Not for a fork
+    # (its token cannot write; no fork run gets this far anyway), not when the
+    # gate kept `plan` from running (nothing ran), and not for a board job
+    # cancelled while still pending — a newer push to the PR took its place in
+    # the PR's concurrency group, and that run reports. Such a job never ran a
+    # step, so its `reserve` outcome is empty (as is that of a job whose run a
+    # person cancelled while it still waited for a runner instance, which is
+    # skipped here too). An empty `serial` is not that test: a job a person
+    # cancelled while it waited for a free board, or one that timed out before
+    # reserving, has none either, and must still report, or the section would
+    # keep an older commit's result.
+    if: >-
+      always() &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      needs.plan.result != 'skipped' &&
+      !(needs.nano-hardware-tests.result == 'cancelled' && needs.nano-hardware-tests.outputs.reserve == '')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Two runs of one PR never rewrite the section at the same time, and do it
+    # in the order they ran.
+    concurrency:
+      group: nano-lab-comment-${{ github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: false
+    permissions:
+      # PR comments go through the issues API; on a PR `pull-requests: write`
+      # is enough. `contents: read` checks out the redactor.
+      contents: read
+      pull-requests: write
+    steps:
+      # The comment is public: it goes through the same redactor as the job
+      # summary, scripts/public-hygiene.mjs, and that one file is all this job
+      # takes from the PR's tree. (The workflow file itself comes from the PR
+      # too, on a pull_request — the fork fence above is what keeps that ours.)
+      - name: Check out the redactor
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          sparse-checkout: scripts/public-hygiene.mjs
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/github-script@v7
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          HARDWARE: ${{ needs.plan.outputs.hardware }}
+          REASON: ${{ needs.plan.outputs.reason }}
+          BOARD_RESULT: ${{ needs.nano-hardware-tests.result }}
+          SERIAL: ${{ needs.nano-hardware-tests.outputs.serial }}
+          NO_BOARD: ${{ needs.nano-hardware-tests.outputs.no_board }}
+          BRANCH: ${{ needs.nano-hardware-tests.outputs.branch }}
+          SUPERSEDED: ${{ needs.nano-hardware-tests.outputs.superseded }}
+          BOARD_SHA: ${{ needs.nano-hardware-tests.outputs.board_sha }}
+          BRANCH_SHA: ${{ needs.nano-hardware-tests.outputs.branch_sha }}
+          SUITE: ${{ needs.nano-hardware-tests.outputs.suite }}
+          RECYCLE: ${{ needs.nano-hardware-tests.outputs.recycle }}
+          RELEASE: ${{ needs.nano-hardware-tests.outputs.release }}
+          REPORT: ${{ needs.nano-hardware-tests.outputs.report }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        with:
+          script: |
+            const marker = '<!-- clawbox-ci-summary -->';
+            const sectionStart = '<!-- clawbox-ci-nano:start -->';
+            const sectionEnd = '<!-- clawbox-ci-nano:end -->';
+            const env = process.env;
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const commit = `\`${(env.HEAD_SHA || '').slice(0, 12)}\``;
+            const board = env.BOARD_RESULT;
+            const lines = [];
+            let icon;
+            if (env.PLAN_RESULT !== 'success') {
+              icon = '⚠️';
+              lines.push(`- Result: **did not run** at ${commit} — deciding whether this PR needs a board ended \`${env.PLAN_RESULT}\`. See the run.`);
+            } else if (env.NO_BOARD === 'true' && board === 'success') {
+              // Lab capacity, not a verdict on this commit: neutral, never ❌.
+              icon = '⏭️';
+              lines.push(`- Result: **skipped — no free lab board** at ${commit}. The on-device suite did not run; re-run the job to test this commit on a board.`);
+            } else if (env.HARDWARE !== 'true') {
+              icon = '⏭️';
+              lines.push(`- Result: **skipped** at ${commit} — ${env.REASON || 'no board needed'}. No board was taken.`);
+            } else {
+              // A newer push moved the branch before the board was rebuilt: not
+              // a pass and not a hardware failure. The newer push's own run
+              // rewrites this section after it.
+              const superseded = env.SUPERSEDED === 'true' && board === 'success';
+              const short = (sha) => `\`${(sha || '?').slice(0, 12)}\``;
+              // The job's verdict, as e2e-install.yml words it: only a failure
+              // gets ❌, and a cancel is not one.
+              icon = superseded ? '⏭️' : board === 'success' ? '✅' : board === 'failure' ? '❌' : board === 'cancelled' ? '⏹️' : '⚠️';
+              const verdict = superseded ? 'superseded, not tested' : board === 'success' ? 'passed' : board === 'failure' ? 'failed' : (board || 'unknown');
+              lines.push(`- Result: **${verdict}** at ${commit}`);
+              if (superseded) {
+                lines.push(`- \`${env.BRANCH}\` moved on to ${short(env.BRANCH_SHA)} before the board was rebuilt, so the board ran ${short(env.BOARD_SHA)}, not this commit. The newer push has its own run, which reports here.`);
+              }
+              if (env.SERIAL) {
+                const suite = superseded ? 'not run' : env.SUITE === 'success' ? 'passed' : env.SUITE === 'failure' ? 'failed' : 'did not run to the end';
+                // Release is only the fallback: after a recycle that succeeded
+                // it is skipped, because the board is the reflash service's.
+                const recycle = env.RECYCLE === 'failure' ? '**recycle FAILED**' : '**recycle did not finish**';
+                const fate = env.RECYCLE === 'success' ? 'recycled for a clean reflash'
+                  : env.RELEASE === 'success' ? `${recycle}, released`
+                  : env.RELEASE === 'failure' ? `${recycle} and **release FAILED**: board needs a look`
+                  : `${recycle} and **not released**: board needs a look (it stays leased to \`ci\`)`;
+                lines.push(`- Board \`${env.SERIAL}\`: suite ${suite}; ${fate}.`);
+              } else {
+                lines.push('- No board was reserved.');
+              }
+            }
+            lines.push(`- [View run](${runUrl})`);
+            // The board job's summary, minus its own heading; bounded so the
+            // shared comment stays well inside GitHub's 65 536 characters.
+            const report = (env.REPORT || '').replace(/^## Nano hardware tests\s*\n/, '').trim().slice(0, 20000);
+            if (report) {
+              lines.push('', '<details><summary>Board, commit and every test</summary>', '', report, '', '</details>');
+            }
+            // Through the redactor before it is written: a section it cannot
+            // redact is not posted (the job fails instead).
+            const { execFileSync } = require('child_process');
+            const redactor = require('path').join(process.env.GITHUB_WORKSPACE, 'scripts', 'public-hygiene.mjs');
+            const raw = `${sectionStart}\n## ${icon} Nano hardware tests\n${lines.join('\n')}\n${sectionEnd}`;
+            const section = execFileSync(process.execPath, [redactor, 'redact'], { input: raw, encoding: 'utf8' });
+
+            const { owner, repo } = context.repo;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: context.issue.number, per_page: 100,
+            });
+            const existing = comments.find(c => c.user?.type === 'Bot' && c.body?.includes(marker));
+
+            // A function replacement: the report may hold `$&` or `$1`, which a
+            // replacement STRING would expand.
+            const updateSection = (body, start, end, replacement) => {
+              const pattern = new RegExp(`${start}[\\s\\S]*?${end}`);
+              return pattern.test(body) ? body.replace(pattern, () => replacement) : `${body}\n\n${replacement}`;
+            };
+
+            if (existing) {
+              const body = updateSection(existing.body ?? '', sectionStart, sectionEnd, section);
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: context.issue.number, body: `${marker}\n# CI Summary\n\n${section}`,
+              });
+            }

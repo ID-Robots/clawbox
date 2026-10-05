@@ -22,11 +22,14 @@ import fs from "node:fs";
 import path from "node:path";
 import { test, expect } from "@playwright/test";
 import {
+  BASE_URL,
   dockerExec,
   readInstallLog,
-  waitForHttpReady,
 } from "./helpers/container";
 import { getStatus, getStatusAuthed } from "./helpers/setup-api";
+import { READY_ACTION_TIMEOUT, waitForAppReady } from "./helpers/readiness";
+
+test.use(READY_ACTION_TIMEOUT);
 
 const env = loadEnvTest();
 
@@ -48,13 +51,39 @@ test.describe("fresh-install setup wizard (UI)", () => {
     expect(status.password_configured).toBe(false);
   });
 
+  // TASK-1149. This container installs ONE edition, so its lock is fixed and
+  // the wizard's "Choose your assistant" must never ask — the skip logic on a
+  // real install, through the same routes the wizard calls. The POST is the
+  // one-shot rule: a fixed edition answers 409 and nothing is started.
+  test("a per-edition install never asks for an assistant, and refuses a choice", async () => {
+    expect((await getStatus()).edition_choice_needed).toBe(false);
+
+    const get = await fetch(`${BASE_URL}/setup-api/setup/edition`);
+    expect(get.status).toBe(200);
+    const choice = (await get.json()) as Record<string, unknown>;
+    expect(choice).toMatchObject({ needed: false, unselected: false, pending: null, inProgress: false });
+    expect(["openclaw", "hermes", "dual"]).toContain(choice.edition);
+
+    const post = await fetch(`${BASE_URL}/setup-api/setup/edition`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ edition: choice.edition === "hermes" ? "openclaw" : "hermes" }),
+    });
+    expect(post.status).toBe(409);
+    expect(((await post.json()) as { code?: string }).code).toBe("already_chosen");
+    const lock = await dockerExec(["cat", "/etc/clawbox/edition.env"]);
+    expect(lock).toContain(`CLAWBOX_EDITION=${choice.edition}`);
+  });
+
   // One big browser-driven walk. Per-step tests would need shared
   // session/storage state across tests, which Playwright doesn't do by
   // default. A single test keeps the flow readable and lets the error
   // point straight at whichever step broke.
   test("walk through wizard end-to-end", async ({ page }) => {
     test.setTimeout(5 * 60_000);
-    await waitForHttpReady(60_000);
+    // Explicit readiness instead of riding the first click's action timeout:
+    // a box still starting fails here, naming the signal that never came.
+    await waitForAppReady({ timeoutMs: 3 * 60_000, context: "setup wizard" });
     await page.goto("/setup");
 
     // ── Step 1: WiFi / Ethernet ──────────────────────────────────
@@ -66,6 +95,10 @@ test.describe("fresh-install setup wizard (UI)", () => {
     // box's new home-network address — untestable in a container (no real box
     // to probe), tracked in #167.
     await page.getByRole("button", { name: /Continue with Ethernet/i }).click();
+
+    // A box with a fixed edition goes straight on: "Choose your assistant"
+    // (TASK-1149) is only for a unified-image box whose lock is `unselected`.
+    await expect(page.getByTestId("setup-step-edition")).toHaveCount(0);
 
     // ── Step 2: Update (frequently auto-advances) ─────────────────
     const updateStep = page.getByTestId("setup-step-update");

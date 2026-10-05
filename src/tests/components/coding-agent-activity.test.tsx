@@ -223,6 +223,46 @@ describe("useCodingAgentActivity", () => {
     expect(result.current.runs[0].completedAt).toBe(NOW + 12_000);
   });
 
+  it("hands back the SAME list while a poll answers what is already on screen", async () => {
+    // Every poll parses a fresh answer. Handed back as it came, it re-rendered
+    // the whole chat every five seconds for as long as a run was live, to draw
+    // exactly what was already there.
+    vi.useFakeTimers();
+    const other = { ...RUNNING, id: "run-other", task: "Another", startedAt: NOW + 1 };
+    let progress = ["Read src/app.ts"];
+    const fetchMock = vi.fn(async () =>
+      runsResponse([{ ...RUNNING, progress, subagentsByType: { explorer: 1 } }, other]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    let renders = 0;
+    const { result } = renderHook(() => { renders += 1; return useCodingAgentActivity(true); });
+    await act(async () => { await Promise.resolve(); });
+    const first = result.current.runs;
+    expect(first).toHaveLength(2);
+
+    // React may call a component once more to find out that an update
+    // changed nothing (it then bails out of the commit); from there on an
+    // unchanged answer costs no render at all.
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_100); });
+    const settled = renders;
+    for (let i = 0; i < 3; i++) {
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_100); });
+    }
+    expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(5); // still polling: a run is live
+    expect(result.current.runs).toBe(first);
+    expect(renders).toBe(settled);
+
+    // One run moves on: a new list, the run that moved a new object, the one
+    // that did not the very same.
+    progress = ["Read src/app.ts", "Edit src/app.ts"];
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_100); });
+    const moved = result.current.runs;
+    expect(moved).not.toBe(first);
+    expect(moved[0]).not.toBe(first[0]);
+    expect(moved[0].progress).toEqual(["Read src/app.ts", "Edit src/app.ts"]);
+    expect(moved[1]).toBe(first[1]);
+  });
+
   it("keeps badges as the conversation continues, and stops polling once nothing runs", async () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn(async () => runsResponse([{ ...RUNNING, status: "completed", completedAt: NOW + 9_000 }]));

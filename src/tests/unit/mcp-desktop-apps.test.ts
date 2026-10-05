@@ -95,11 +95,37 @@ describe("MCP built-in apps match the desktop registry", () => {
   });
 
   it("lists exactly the desktop registry, edition-gated, in registry order", () => {
-    const registry = apps.map((a) => a.id);
     const hermesOnly: readonly string[] = HERMES_ONLY_APP_IDS;
     const openclawOnly: readonly string[] = OPENCLAW_ONLY_APP_IDS;
+    // On a box with no kiosk (every Jetson — the suite points kiosk.env at
+    // nowhere) the kiosk-only apps are not offered, as the desktop hides them.
+    const registry = apps.filter((a) => !a.kioskOnly).map((a) => a.id);
     expect(idsFor("hermes")).toEqual(registry.filter((id) => !openclawOnly.includes(id)));
     expect(idsFor("openclaw")).toEqual(registry.filter((id) => !hermesOnly.includes(id)));
+    // On the kiosk box, all of them.
+    process.env.CLAWBOX_KIOSK_URL = "http://localhost:3005/";
+    try {
+      const all = apps.map((a) => a.id);
+      expect(idsFor("hermes")).toEqual(all.filter((id) => !openclawOnly.includes(id)));
+      expect(idsFor("openclaw")).toEqual(all.filter((id) => !hermesOnly.includes(id)));
+    } finally {
+      delete process.env.CLAWBOX_KIOSK_URL;
+    }
+  });
+
+  it("marks the same apps kiosk-only as the desktop does, and never offers them off the kiosk", () => {
+    process.env.CLAWBOX_KIOSK_URL = "http://localhost:3005/";
+    let kioskOnlyInMcp: string[];
+    try {
+      kioskOnlyInMcp = builtInApps("openclaw").filter((a) => a.kioskOnly).map((a) => a.id);
+    } finally {
+      delete process.env.CLAWBOX_KIOSK_URL;
+    }
+    expect(kioskOnlyInMcp).toEqual(apps.filter((a) => a.kioskOnly).map((a) => a.id));
+    expect(kioskOnlyInMcp).toContain("web");
+    for (const edition of ["openclaw", "hermes"] as const) {
+      expect(idsFor(edition)).not.toContain("web");
+    }
   });
 
   it("gives every app a name and a description for the agent", () => {
@@ -115,13 +141,20 @@ describe("MCP built-in apps match the desktop registry", () => {
     // `external` decides whether ui_open_app claims the window appeared, so it
     // has to follow the registry rather than a second opinion.
     const externalInRegistry = apps.filter((a) => a.type === "external").map((a) => a.id).sort();
-    const externalInMcp = [
-      ...new Set(
-        (["openclaw", "hermes"] as const).flatMap((edition) =>
-          builtInApps(edition).filter((a) => a.external).map((a) => a.id),
+    // On the kiosk box, so the kiosk-only apps are listed too.
+    process.env.CLAWBOX_KIOSK_URL = "http://localhost:3005/";
+    let externalInMcp: string[];
+    try {
+      externalInMcp = [
+        ...new Set(
+          (["openclaw", "hermes"] as const).flatMap((edition) =>
+            builtInApps(edition).filter((a) => a.external).map((a) => a.id),
+          ),
         ),
-      ),
-    ].sort();
+      ].sort();
+    } finally {
+      delete process.env.CLAWBOX_KIOSK_URL;
+    }
     expect(externalInMcp).toEqual(externalInRegistry);
   });
 });

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { renderHook, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 
 const realFetch = globalThis.fetch;
@@ -249,5 +249,290 @@ describe("useClawboxLogin", () => {
 
     await waitFor(() => expect(vi.mocked(globalThis.fetch).mock.calls.length).toBeGreaterThan(2));
     expect(result.current.allowedModels).toBe(first);
+  });
+});
+
+/**
+ * One poll for every mounted hook.
+ *
+ * The owner's idle desktop mounts this hook twice (the page and
+ * TierUpgradeCelebration), Settings, the full-page chat and the paid-gate
+ * wizards add one each, and every one of them used to run its own chain — the
+ * box answered the same question two to four times a period, a millisecond
+ * apart. These pin that the asking is shared and that nothing a hook SEES is:
+ * every mount still starts loading and is answered by an ask made for it, the
+ * cadence is the shortest any hook asked for, and each hook keeps its own
+ * reading of a failed poll.
+ */
+describe("useClawboxLogin — one shared poll", () => {
+  const STATUS = "/setup-api/ai-models/status";
+  let visibility: DocumentVisibilityState = "visible";
+
+  function statusCalls(): number {
+    return vi.mocked(globalThis.fetch).mock.calls.filter(([url]) => url === STATUS).length;
+  }
+
+  function setVisibility(next: DocumentVisibilityState) {
+    visibility = next;
+    document.dispatchEvent(new Event("visibilitychange"));
+  }
+
+  /** Let every queued promise and zero-delay timer settle under fake timers. */
+  async function flush() {
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+  }
+
+  async function advance(ms: number) {
+    await act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+  }
+
+  beforeEach(() => {
+    visibility = "visible";
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => visibility });
+  });
+
+  afterEach(() => {
+    // jsdom's own getter lives on Document.prototype; dropping the instance
+    // override puts it back.
+    delete (document as unknown as Record<string, unknown>).visibilityState;
+  });
+
+  it("two hooks mounted together ask once, and both are answered", async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({
+      provider: "clawai", clawaiConfigured: true, clawaiAccountTier: "pro",
+    })) as unknown as typeof fetch;
+
+    const { result } = renderHook(() => [useClawboxLogin(), useClawboxLogin()] as const);
+    await waitFor(() => {
+      expect(result.current[0].loading).toBe(false);
+      expect(result.current[1].loading).toBe(false);
+    });
+    expect(result.current[0].tier).toBe("pro");
+    expect(result.current[1].tier).toBe("pro");
+    expect(statusCalls()).toBe(1);
+  });
+
+  it("polls at the shortest interval among the hooks mounted, and stops with the last one", async () => {
+    vi.useFakeTimers();
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({ provider: "openai" })) as unknown as typeof fetch;
+
+    const slow = renderHook(() => useClawboxLogin(30_000));
+    await flush();
+    expect(statusCalls()).toBe(1);
+
+    // A 5 s paid gate opens beside it: it is answered by an ask of its own at
+    // once, and from then on BOTH are answered every 5 s — never less often
+    // than either hook's own chain answered it.
+    const fast = renderHook(() => useClawboxLogin(5_000));
+    await flush();
+    expect(statusCalls()).toBe(2);
+    expect(fast.result.current.loading).toBe(false);
+    await advance(5_000);
+    expect(statusCalls()).toBe(3);
+    await advance(5_000);
+    expect(statusCalls()).toBe(4);
+
+    // The gate closes: the 5 s tick already armed still runs once, then the
+    // poll is back at the 30 s hook's own cadence.
+    fast.unmount();
+    await advance(5_000);
+    expect(statusCalls()).toBe(5);
+    await advance(29_000);
+    expect(statusCalls()).toBe(5);
+    await advance(1_000);
+    expect(statusCalls()).toBe(6);
+
+    slow.unmount();
+    await advance(120_000);
+    expect(statusCalls()).toBe(6);
+  });
+
+  it("a hook mounted later starts loading and is answered by a fresh ask, not by the answer already on screen", async () => {
+    let tier = "flash";
+    globalThis.fetch = vi.fn().mockImplementation(() =>
+      Promise.resolve(jsonResponse({ provider: "clawai", clawaiConfigured: true, clawaiAccountTier: tier })),
+    ) as unknown as typeof fetch;
+
+    const first = renderHook(() => useClawboxLogin());
+    await waitFor(() => expect(first.result.current.tier).toBe("flash"));
+
+    // The owner upgraded on the portal; Settings opens now.
+    tier = "pro";
+    const second = renderHook(() => useClawboxLogin());
+    expect(second.result.current.loading).toBe(true);
+    await waitFor(() => expect(second.result.current.tier).toBe("pro"));
+    // The ask made for the newcomer answers the hook already mounted too.
+    expect(first.result.current.tier).toBe("pro");
+    expect(statusCalls()).toBe(2);
+  });
+
+  it("a hook mounted within a moment of an ask joins it — the page and the tier celebration mount together", async () => {
+    vi.useFakeTimers();
+    const pending: Array<(r: Response) => void> = [];
+    globalThis.fetch = vi.fn().mockImplementation(() =>
+      new Promise<Response>((resolve) => { pending.push(resolve); }),
+    ) as unknown as typeof fetch;
+
+    const page = renderHook(() => useClawboxLogin());
+    await flush();
+    await advance(100);
+    const celebration = renderHook(() => useClawboxLogin());
+    await flush();
+    expect(pending).toHaveLength(1);
+
+    pending[0](jsonResponse({ provider: "clawai", clawaiConfigured: true, clawaiAccountTier: "pro" }));
+    await flush();
+    expect(page.result.current.tier).toBe("pro");
+    expect(celebration.result.current.tier).toBe("pro");
+  });
+
+  it("a hook mounting while an older ask is still out asks afresh, and takes nothing from the older ask", async () => {
+    // The route is slowest right after a sign-in or a plan change — openclaw.json
+    // rewritten, the gateway restarting. A component that mounted then (the
+    // Coding Agent's paid gate, the Providers pitch card) used to join the ask
+    // started seconds before, and showed the tier the owner had just left
+    // until the next poll, up to 30 s later.
+    vi.useFakeTimers();
+    const pending: Array<(r: Response) => void> = [];
+    globalThis.fetch = vi.fn().mockImplementation(() =>
+      new Promise<Response>((resolve) => { pending.push(resolve); }),
+    ) as unknown as typeof fetch;
+    const flash = { provider: "clawai", clawaiConfigured: true, clawaiAccountTier: "flash" };
+    const pro = { provider: "clawai", clawaiConfigured: true, clawaiAccountTier: "pro" };
+
+    const desktop = renderHook(() => useClawboxLogin(30_000));
+    await flush();
+    pending[0](jsonResponse(flash));
+    await flush();
+    expect(desktop.result.current.tier).toBe("flash");
+
+    // The desktop's 30 s ask goes out, and the box is slow to answer it.
+    await advance(30_000);
+    expect(pending).toHaveLength(2);
+    await advance(2_000);
+
+    // The owner has upgraded; the paid gate opens now, and asks for itself.
+    const gate = renderHook(() => useClawboxLogin());
+    await flush();
+    expect(pending).toHaveLength(3);
+
+    // The ask from before it mounted lands first, with the old tier: the
+    // desktop takes it, the gate does not.
+    pending[1](jsonResponse(flash));
+    await flush();
+    expect(desktop.result.current.tier).toBe("flash");
+    expect(gate.result.current.loading).toBe(true);
+
+    pending[2](jsonResponse(pro));
+    await flush();
+    expect(gate.result.current.loading).toBe(false);
+    expect(gate.result.current.tier).toBe("pro");
+    expect(desktop.result.current.tier).toBe("pro");
+  });
+
+  it("times the join on the box's own clock, not the wall clock NTP steps", async () => {
+    // The box has no RTC: its clock steps at NTP sync. Stepped back an hour
+    // while an ask was out, a wall-clock window kept that ask "a moment old"
+    // for the hour, and every hook mounted meanwhile waited on it.
+    vi.useFakeTimers();
+    const pending: Array<(r: Response) => void> = [];
+    globalThis.fetch = vi.fn().mockImplementation(() =>
+      new Promise<Response>((resolve) => { pending.push(resolve); }),
+    ) as unknown as typeof fetch;
+
+    renderHook(() => useClawboxLogin());
+    await flush();
+    expect(pending).toHaveLength(1);
+
+    vi.setSystemTime(Date.now() - 60 * 60_000);
+    await advance(1_000);
+    const late = renderHook(() => useClawboxLogin());
+    await flush();
+    expect(pending).toHaveLength(2);
+
+    pending[1](jsonResponse({ provider: "clawai", clawaiConfigured: true, clawaiAccountTier: "pro" }));
+    await flush();
+    expect(late.result.current.tier).toBe("pro");
+  });
+
+  it("each hook reads a failed poll over its OWN state", async () => {
+    let fail = false;
+    globalThis.fetch = vi.fn().mockImplementation(() =>
+      fail
+        ? Promise.resolve(new Response("nope", { status: 503 }))
+        : Promise.resolve(jsonResponse({ provider: "clawai", clawaiConfigured: true, clawaiAccountTier: "pro" })),
+    ) as unknown as typeof fetch;
+
+    const answered = renderHook(() => useClawboxLogin());
+    await waitFor(() => expect(answered.result.current.loggedIn).toBe(true));
+
+    // A hook whose FIRST answer is a failure reads "not signed in", as it
+    // always did — it is not handed the other hook's earlier answer — while
+    // the hook that had an answer keeps it through the same failure.
+    fail = true;
+    const late = renderHook(() => useClawboxLogin());
+    await waitFor(() => expect(late.result.current.loading).toBe(false));
+    expect(late.result.current.loggedIn).toBe(false);
+    expect(late.result.current.tier).toBeNull();
+    expect(answered.result.current.loggedIn).toBe(true);
+    expect(answered.result.current.tier).toBe("pro");
+  });
+
+  it("drops an answer that lands after every hook left, and the next mount asks again", async () => {
+    const pending: Array<(r: Response) => void> = [];
+    globalThis.fetch = vi.fn().mockImplementation(() =>
+      new Promise<Response>((resolve) => { pending.push(resolve); }),
+    ) as unknown as typeof fetch;
+
+    const gone = renderHook(() => useClawboxLogin());
+    await waitFor(() => expect(pending).toHaveLength(1));
+    gone.unmount();
+
+    // A newcomer does not wait on an ask nobody owns any more.
+    const next = renderHook(() => useClawboxLogin());
+    await waitFor(() => expect(pending).toHaveLength(2));
+    pending[0](jsonResponse({ provider: "clawai", clawaiConfigured: true, clawaiAccountTier: "flash" }));
+    pending[1](jsonResponse({ provider: "clawai", clawaiConfigured: true, clawaiAccountTier: "pro" }));
+    await waitFor(() => expect(next.result.current.loading).toBe(false));
+    expect(next.result.current.tier).toBe("pro");
+  });
+
+  it("asks nothing for a tick that falls due while the page is hidden, and asks on the visible edge", async () => {
+    vi.useFakeTimers();
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({ provider: "openai" })) as unknown as typeof fetch;
+
+    renderHook(() => useClawboxLogin(30_000));
+    await flush();
+    expect(statusCalls()).toBe(1);
+
+    // A phone's tab goes to the background: nothing is asked however long.
+    setVisibility("hidden");
+    await advance(30_000);
+    await advance(10 * 60_000);
+    expect(statusCalls()).toBe(1);
+
+    // Back in view: the tick that fell due is asked at once, and the cadence
+    // carries on from there.
+    setVisibility("visible");
+    await flush();
+    expect(statusCalls()).toBe(2);
+    await advance(30_000);
+    expect(statusCalls()).toBe(3);
+  });
+
+  it("a trip away shorter than the interval asks nothing extra", async () => {
+    vi.useFakeTimers();
+    globalThis.fetch = vi.fn().mockResolvedValue(jsonResponse({ provider: "openai" })) as unknown as typeof fetch;
+
+    renderHook(() => useClawboxLogin(30_000));
+    await flush();
+    setVisibility("hidden");
+    await advance(10_000);
+    setVisibility("visible");
+    await flush();
+    expect(statusCalls()).toBe(1);
+    // The tick armed before the trip is still the next one.
+    await advance(20_000);
+    expect(statusCalls()).toBe(2);
   });
 });

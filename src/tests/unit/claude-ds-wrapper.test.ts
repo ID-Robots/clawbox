@@ -809,3 +809,26 @@ describe("the account the runner chose", () => {
     expect(Object.values(env).some((v) => v.includes("pool-account-key"))).toBe(false);
   });
 });
+
+describe("the optional provider lock", () => {
+  it("leaves a box without a lock file on ClawBox AI, as every customer box is", () => {
+    const run = runWrapper({ CLAUDE_DS_PROVIDER_LOCK: path.join(home, "no-such-lock") });
+    expect(run.status).toBe(0);
+    expect(capturedEnv().ANTHROPIC_BASE_URL).toBe("https://clawbox.com/api/ai/anthropic");
+  });
+
+  it("allows the locked provider and refuses any other one", () => {
+    const lock = path.join(home, "coding-provider-lock");
+    writeFileSync(lock, "anthropic\n", "utf-8");
+    const run = runWrapper({ CLAUDE_DS_PROVIDER_LOCK: lock });
+    expect(run.status).not.toBe(0);
+    expect(run.stderr).toContain("refusing 'clawbox-ai'");
+    expect(existsSync(envDump)).toBe(false);
+  });
+
+  it("lets ClawBox AI run when the lock names it", () => {
+    const lock = path.join(home, "coding-provider-lock");
+    writeFileSync(lock, "clawbox-ai\n", "utf-8");
+    expect(runWrapper({ CLAUDE_DS_PROVIDER_LOCK: lock }).status).toBe(0);
+  });
+});

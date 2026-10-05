@@ -290,7 +290,7 @@ describe("writeDiscordGatewayEnv (env-file injection guard)", () => {
 //   channels.discord: channel is configured, but external plugin "discord" is
 //   installed without explicit trust. Add plugins.entries.discord.enabled=true.
 //
-// Observed on 192.168.50.82: Discord connected at 09:56:37, a config write at
+// Observed on a lab box: Discord connected at 09:56:37, a config write at
 // 09:58:48 dropped `plugins.entries.discord`, and every `channels status` from
 // then on answered `unknown channel: discord` while the panel showed the card
 // as "unknown". Restoring the entry brought the channel straight back to

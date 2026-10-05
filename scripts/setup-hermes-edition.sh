@@ -63,11 +63,15 @@ _norm() { printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr -d "[:space:]\"
 # (install.sh's _normalise_edition applies exactly this rule), so map it the same
 # way. Treating it as *absent* instead would be the dangerous reading: it would
 # clear the refusal and let a typo'd lock be provisioned straight over.
+# `unselected` (the unified image before the owner's choice, TASK-1149) is a
+# value of its own, as in install.sh: a unified box is not an openclaw box, and
+# provisioning Hermes over it is the wizard's step (install.sh --step
+# edition_select, which re-bakes the lock first), never a bare run of this.
 _norm_recorded() {
   local v
   v="$(_norm "${1:-}")"
   case "$v" in
-    openclaw|hermes|dual|"") printf '%s' "$v" ;;
+    openclaw|hermes|dual|unselected|"") printf '%s' "$v" ;;
     *) printf 'openclaw' ;;
   esac
 }

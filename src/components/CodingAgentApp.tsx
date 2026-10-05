@@ -11,6 +11,7 @@ import { foldReviewChecks, type ReviewLoop } from "@/lib/coding-review-state";
 import { useT } from "@/lib/i18n";
 import StatusMessage from "./StatusMessage";
 import CodingAgentSettingsPanel from "./CodingAgentSettingsPanel";
+import CodingRunHistoryPage from "./CodingRunHistoryPage";
 import CodingAgentResetCard from "./CodingAgentResetCard";
 import HelpTip from "./HelpTip";
 import InstalledAppIcon from "./InstalledAppIcon";
@@ -59,6 +60,7 @@ import CodingTeamCard from "./CodingTeamCard";
 import { livePreviewCommand } from "@/lib/coding-run-preview";
 import { copyToClipboard } from "@/lib/clipboard";
 import { taskTitle } from "@/lib/task-title";
+import { monotonicNow } from "@/lib/visible-interval";
 import type { AgentStatus, CodingProviderId, Effort, GitHubState } from "./CodingAgentSettingsPanel";
 import { CODING_PROVIDER_NAME_KEY } from "@/lib/coding-provider";
 
@@ -270,6 +272,24 @@ function elapsedShort(from: number, to: number): string {
 const ARTIFACT_PREVIEW = 4;
 const RUNS_PAGE = 10;
 const POLL_MS = 5_000;
+/**
+ * How often the LIVE poll re-asks whether a GitHub account is connected.
+ * That read is `gh auth status` on the box — a process and a round trip to
+ * api.github.com — and the live poll ran it every 5 s for as long as a run
+ * worked or a pull request waited on its checks: 720 calls to GitHub an hour,
+ * for an answer that changes when the owner signs in or out (which re-reads at
+ * once — `onCodingAgentChanged`, focus, the backup's own re-probe) or when
+ * github.com stops answering. Every read that is not the clock's still asks.
+ * Timed on `monotonicNow()`: the box's wall clock steps at NTP sync, and a
+ * step back stopped the live poll re-reading GitHub for the step's length.
+ */
+const GITHUB_LIVE_POLL_MS = 60_000;
+/** How often the page's clock (`now`) moves while a run is live: the progress bar and the helpers' timers. */
+export const NOW_LIVE_TICK_MS = 1_000;
+/** …and while nothing is: only the "N minutes ago" labels read it then, and a minute is their grain. */
+export const NOW_IDLE_TICK_MS = 60_000;
+/** The four reads `load()` makes. */
+type Reader = "status" | "runs" | "github" | "projects";
 /** How long a two-tap confirmation stays armed before the offer is taken back. */
 const CONFIRM_MS = 5_000;
 
@@ -320,6 +340,8 @@ const SIDEBAR_ITEM = "w-full flex items-center gap-2 rounded-lg px-2 py-1.5 text
 const SIDEBAR_ACTIVE = "bg-white/[0.08] text-[var(--text-primary)]";
 /** How many runs the sidebar lists; the pages list them all. */
 const SIDEBAR_RUNS = 12;
+/** Older runs a window keeps open copies of — the pages it has visited, not the history. */
+const MAX_OLDER_RUNS_HELD = 100;
 /** The window width (px) from which the sidebar is shown beside the page. */
 const SIDEBAR_MIN_WIDTH = 860;
 
@@ -631,7 +653,15 @@ export default function CodingAgentApp() {
   useEffect(() => () => { if (confirmClearTimer.current) clearTimeout(confirmClearTimer.current); }, []);
   // Which face the window shows — see `view` below. The settings page sits
   // over whichever project was open, so Back returns there.
-  const [page, setPage] = useState<"home" | "settings">("home");
+  const [page, setPage] = useState<"home" | "settings" | "history">("home");
+  /**
+   * Older runs this window has opened — from the Run history page, or by id
+   * for a run past the recent thirty. Kept beside `runs` rather than in it:
+   * the poll replaces `runs` wholesale, and these are not on that list.
+   */
+  const [olderRuns, setOlderRuns] = useState<Run[]>([]);
+  /** An archived run to open the Run history page on, when a run page was asked for one. */
+  const [archivedOpenId, setArchivedOpenId] = useState<string | null>(null);
   const [openProjectDir, setOpenProjectDir] = useState<string | null>(null);
   /** The Import panel on the home face: GitHub or a folder on the box. */
   const [importOpen, setImportOpen] = useState(false);
@@ -648,7 +678,27 @@ export default function CodingAgentApp() {
     tRef.current = t;
   }, [t]);
 
-  const load = useCallback(async () => {
+  /** Reads still on their way, by reader — what a tick of the live poll checks before starting another. */
+  const readsOut = useRef<Record<Reader, number>>({ status: 0, runs: 0, github: 0, projects: 0 });
+  /** When the GitHub read was last started, by any caller, on `monotonicNow()`'s clock. */
+  const githubAskedAt = useRef(Number.NEGATIVE_INFINITY);
+
+  /**
+   * `tick` is the live poll's clock (every POLL_MS while a run works). A tick
+   * starts no reader whose previous read is still on its way — on a busy box,
+   * or with github.com not answering (`gh` waits up to a minute), the reads
+   * used to pile up a dozen deep — and asks GitHub only every
+   * GITHUB_LIVE_POLL_MS. Every other caller (mount, focus, Settings saving, an
+   * action's own re-read, the read after a run settles) reads all four, as
+   * it always did.
+   */
+  const load = useCallback(async ({ tick = false }: { tick?: boolean } = {}) => {
+    const out = readsOut.current;
+    const read = (name: Reader, go: () => Promise<void>): Promise<void> => {
+      if (tick && out[name] > 0) return Promise.resolve();
+      out[name] += 1;
+      return go().finally(() => { out[name] -= 1; });
+    };
     // Four reads, each APPLIED AS IT LANDS rather than all four together:
     // the projects read costs the device a `git log` per project and, on a
     // busy box (a run going, a build), takes seconds — and while the four
@@ -656,26 +706,33 @@ export default function CodingAgentApp() {
     // after Pause or Stop had answered (the sweep of 2026-09-07). The runs
     // and the status are what an action's feedback needs, so they must not
     // wait for the slowest reader.
-    const status = fetch("/setup-api/coding-agent/status", { cache: "no-store" }).then(async (s) => {
+    const status = read("status", () => fetch("/setup-api/coding-agent/status", { cache: "no-store" }).then(async (s) => {
       if (!s.ok) throw new Error("status");
       setStatus(await s.json() as AppStatus);
-    });
-    const runs = fetch(`/setup-api/coding-agent/runs?limit=30&artifacts=1`, { cache: "no-store" }).then(async (r) => {
+    }));
+    const runs = read("runs", () => fetch(`/setup-api/coding-agent/runs?limit=30&artifacts=1`, { cache: "no-store" }).then(async (r) => {
       if (!r.ok) return;
       const data = await r.json() as { runs?: Run[] };
       setRuns(Array.isArray(data.runs) ? data.runs : []);
+    }));
+    const githubDue = !tick || monotonicNow() - githubAskedAt.current >= GITHUB_LIVE_POLL_MS;
+    const github = !githubDue ? Promise.resolve() : read("github", () => {
+      githubAskedAt.current = monotonicNow();
+      return fetch("/setup-api/coding-agent/git", { cache: "no-store" }).then(async (g) => {
+        if (g.ok) setGithub(await g.json() as GitHubState);
+      });
     });
-    const github = fetch("/setup-api/coding-agent/git", { cache: "no-store" }).then(async (g) => {
-      if (g.ok) setGithub(await g.json() as GitHubState);
-    });
-    // Read on the same cadence as the runs, and no faster: each project
-    // costs the device a `git log` per poll.
-    const projects = fetch("/setup-api/coding-agent/projects", { cache: "no-store" }).then(async (p) => {
+    // Read on the same cadence as the runs: a row's live dot, the icon a run
+    // draws in its first seconds and a folder a run has just started in all
+    // come from it. The `git log` per project it used to cost every time is
+    // answered from the box's memory while the project's HEAD has not moved
+    // (`lastCommit` in coding-git.ts).
+    const projects = read("projects", () => fetch("/setup-api/coding-agent/projects", { cache: "no-store" }).then(async (p) => {
       if (!p.ok) return;
       const data = await p.json() as { directory?: string | null; projects?: Project[] };
       setProjects(Array.isArray(data.projects) ? data.projects : []);
       setProjectsDir(typeof data.directory === "string" ? data.directory : null);
-    });
+    }));
     try {
       // The status read is the one whose failure is the page's failure; the
       // other three fail quietly, as they always did.
@@ -731,6 +788,7 @@ export default function CodingAgentApp() {
    *  a 503 usually means the probe would answer differently now, and
    *  re-running the whole load would overwrite the run list for no reason. */
   const loadGithub = useCallback(async () => {
+    githubAskedAt.current = monotonicNow();
     try {
       const g = await fetch("/setup-api/coding-agent/git", { cache: "no-store" });
       if (g.ok) setGithub(await g.json() as GitHubState);
@@ -758,7 +816,12 @@ export default function CodingAgentApp() {
   useEffect(() => {
     if (anyRunning) {
       sawRunning.current = true;
-      const id = setInterval(() => { void load(); }, POLL_MS);
+      const id = setInterval(() => {
+        // A page nobody can see reads nothing on the clock: coming back into
+        // view is a full read of its own (the visibility effect above).
+        if (document.visibilityState === "hidden") return;
+        void load({ tick: true });
+      }, POLL_MS);
       return () => clearInterval(id);
     }
     if (!sawRunning.current) return;
@@ -770,11 +833,49 @@ export default function CodingAgentApp() {
   // second while a run is live (as the activity pill does), so the bar
   // moves between polls and render stays pure — a Date.now() in render
   // would freeze the bar for five seconds at a time.
+  //
+  // It keeps ticking while NOTHING is live too, once a minute, because it is
+  // also what re-renders the "N minutes ago" labels (a project's last commit,
+  // a run's "started"/"updated"): `timeAgo` reads the time when the page is
+  // drawn, so a page nothing redraws says "just now" an hour later. The
+  // desktop's own renders — its clock every minute, the pairing poll — used
+  // to redraw this window as a side effect; its windows are memoised now, so
+  // this app has to keep its own time. A minute is the labels' own grain.
+  //
+  // Stopped while the page is hidden (a phone with the desktop in a
+  // background tab draws nothing), and set at once on the way back so the
+  // first frame the owner sees is current rather than up to a minute old.
+  // The same on the box's own screen, which can be hidden too — the kiosk's
+  // desktop tab while the owner is on another of its tabs, a minimised monitor
+  // session window: a clock nobody can see needs no ticks, and the visible
+  // edge sets it at once. The live poll's reads above wait there likewise,
+  // and for the same reason need no exemption: the visible edge re-reads all
+  // four, and nothing they bring acts on the screen while it is away.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (!anyLive) return;
-    const id = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(id);
+    const every = anyLive ? NOW_LIVE_TICK_MS : NOW_IDLE_TICK_MS;
+    let id: ReturnType<typeof setInterval> | null = null;
+    const start = () => {
+      if (id === null) id = setInterval(() => setNow(Date.now()), every);
+    };
+    const stop = () => {
+      if (id !== null) clearInterval(id);
+      id = null;
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") {
+        stop();
+        return;
+      }
+      setNow(Date.now());
+      start();
+    };
+    if (document.visibilityState !== "hidden") start();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [anyLive]);
 
   const readError = async (res: Response, fallback: string) => {
@@ -1007,6 +1108,11 @@ export default function CodingAgentApp() {
       const res = await fetch("/setup-api/coding-agent/runs", { method: "DELETE" });
       if (!res.ok) throw new Error(await readError(res, t("codingAgent.clearFailed")));
       setOpenRunId(null);
+      // Said aloud, not just re-read here: the Run history card on this very
+      // page counts the runs this Clear just deleted or archived, and it
+      // re-reads on this event — without it the card kept "0 archived" and a
+      // disabled Clear archive over an archive the Clear had just filled.
+      notifyCodingAgentChanged();
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : t("codingAgent.clearFailed"));
@@ -1096,9 +1202,40 @@ export default function CodingAgentApp() {
   /** The run whose page is open, once the list has it. A run that was cleared
    *  meanwhile simply has no page — the window falls back to where it was. */
   const openRun = useMemo(
-    () => (openRunId ? runs.find((r) => r.id === openRunId) ?? null : null),
-    [runs, openRunId],
+    () => (openRunId ? runs.find((r) => r.id === openRunId) ?? olderRuns.find((r) => r.id === openRunId) ?? null : null),
+    [runs, olderRuns, openRunId],
   );
+  // A run page asked for (a chat card, the desktop, the Run history page) for
+  // a run the recent list does not hold: an OLDER run a history mode kept, or
+  // one that has since moved to the archive. Asked of the box once per id —
+  // the runs route finds an older run by id, and the archive answers for the
+  // rest — rather than falling back to the home page as if it had been cleared.
+  const lookedUp = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (loading || !openRunId || runs.some((r) => r.id === openRunId) || olderRuns.some((r) => r.id === openRunId)) return;
+    if (lookedUp.current.has(openRunId)) return;
+    lookedUp.current.add(openRunId);
+    const id = openRunId;
+    void (async () => {
+      try {
+        const res = await fetch(`/setup-api/coding-agent/runs?id=${encodeURIComponent(id)}&artifacts=1`, { cache: "no-store" });
+        if (res.ok) {
+          const { run } = await res.json() as { run?: Run };
+          // Held and live runs are the recent list's; the next poll has them.
+          if (run && isSettled(run.status)) setOlderRuns((prev) => [run, ...prev.filter((r) => r.id !== run.id)].slice(0, MAX_OLDER_RUNS_HELD));
+          return;
+        }
+        const archived = await fetch(`/setup-api/coding-agent/history?view=archive&id=${encodeURIComponent(id)}`, { cache: "no-store" });
+        if (archived.ok) {
+          setOpenRunId((current) => (current === id ? null : current));
+          setArchivedOpenId(id);
+          setPage("history");
+        }
+      } catch {
+        // Nothing to add: the page falls back to where it was, as it always did.
+      }
+    })();
+  }, [loading, openRunId, runs, olderRuns]);
   /** The open project's own runs. Home lists no runs of its own any more:
    *  every run works in a folder inside the project folder, and the projects
    *  route lists that folder, so a run always has a project page to live on
@@ -1129,6 +1266,10 @@ export default function CodingAgentApp() {
    */
   const view = page === "settings"
     ? { face: "settings" as const }
+    // Like Settings, reachable whatever state setup is in: the history on the
+    // flash is the owner's whether or not the agent is configured today.
+    : page === "history"
+      ? { face: "history" as const }
     // Before anything else on this window: a box whose owner has not been
     // through setup has no folder for a run to work in and no consent for one
     // to start, so the home page would be a list of things that cannot happen.
@@ -1148,8 +1289,9 @@ export default function CodingAgentApp() {
   const phoneLayout = usePhoneLayout();
   const runBackProjectDir = openRun ? (projects.find((pr) => runBelongsTo(openRun, pr))?.directory ?? null) : null;
   useMobileBack(phoneLayout && page === "settings", () => { disarmClear(); setPage("home"); });
-  useMobileBack(phoneLayout && page !== "settings" && (openRun !== null || openProject !== null), () => { setOpenRunId(null); setOpenProjectDir(null); });
-  useMobileBack(phoneLayout && page !== "settings" && openRun !== null && runBackProjectDir !== null, () => { setOpenRunId(null); setOpenProjectDir(runBackProjectDir); });
+  useMobileBack(phoneLayout && page === "history", () => { setArchivedOpenId(null); setPage("home"); });
+  useMobileBack(phoneLayout && page === "home" && (openRun !== null || openProject !== null), () => { setOpenRunId(null); setOpenProjectDir(null); });
+  useMobileBack(phoneLayout && page === "home" && openRun !== null && runBackProjectDir !== null, () => { setOpenRunId(null); setOpenProjectDir(runBackProjectDir); });
   useMobileBack(phoneLayout && page === "home" && !openRun && !openProject && importOpen, () => setImportOpen(false));
   // Registered last so it sits on top: with the delete dialog open, Back
   // closes the dialog rather than leaving the project underneath it.
@@ -1721,6 +1863,16 @@ export default function CodingAgentApp() {
               <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">settings</span>
               {t("codingAgent.openSettings")}
             </button>
+            <button
+              type="button"
+              onClick={() => { disarmClear(); setArchivedOpenId(null); setPage("history"); }}
+              aria-current={view.face === "history" ? "page" : undefined}
+              data-testid="coding-agent-sidebar-history"
+              className={`${SIDEBAR_ITEM} ${view.face === "history" ? SIDEBAR_ACTIVE : ""}`}
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 18 }} aria-hidden="true">manage_history</span>
+              {t("codingAgent.history.title")}
+            </button>
           </div>
           {projects.length > 0 && (
             <div className="px-3 pt-3 pb-1">
@@ -1883,7 +2035,7 @@ export default function CodingAgentApp() {
               the bottom edge of the scroll area. Same scale as the run page,
               not a new one. */}
           <div className="mt-3 pb-6" data-testid="coding-agent-embedded-settings">
-            <CodingAgentSettingsPanel />
+            <CodingAgentSettingsPanel onOpenHistory={() => { disarmClear(); setArchivedOpenId(null); setPage("history"); }} />
             {/* Three owner tools, one row, symmetric: equal columns, so the
                 buttons are the same width whatever their labels say, each with
                 its explanation on the question mark beside it. The headings
@@ -1936,6 +2088,32 @@ export default function CodingAgentApp() {
               </div>
             </div>
           </div>
+        </>)}
+
+        {view.face === "history" && (<>
+          <CodingAgentBreadcrumb
+            crumbs={[
+              { label: t("codingAgent.navHome"), onClick: () => { setArchivedOpenId(null); setPage("home"); }, testId: "coding-agent-history-crumb-home" },
+              { label: t("codingAgent.history.title") },
+            ]}
+            onBack={() => { setArchivedOpenId(null); setPage("home"); }}
+            backLabel={t("codingAgent.back")}
+            navLabel={t("codingAgent.breadcrumbLabel")}
+            backTestId="coding-agent-history-back"
+          />
+          <CodingRunHistoryPage
+            // A fresh page per archived run asked for, so it opens on that run.
+            key={archivedOpenId ?? "lists"}
+            initialArchivedId={archivedOpenId}
+            liveKept={status?.historyLiveKept ?? 30}
+            onOpenRun={(row) => {
+              const run = row as unknown as Run;
+              setOlderRuns((prev) => [run, ...prev.filter((r) => r.id !== run.id)].slice(0, MAX_OLDER_RUNS_HELD));
+              setOpenProjectDir(null);
+              setOpenRunId(run.id);
+              setPage("home");
+            }}
+          />
         </>)}
 
         {view.face === "wizard" && status && (
@@ -2201,6 +2379,21 @@ export default function CodingAgentApp() {
             </ul>
           )}
         </div>
+        {/* The rail carries Run history in a wide window; a narrow one (the
+            phone) has no rail, so the home page offers it at its foot. */}
+        {!wide && (
+          <div className="mt-4 flex justify-center">
+            <button
+              type="button"
+              onClick={() => { setArchivedOpenId(null); setPage("history"); }}
+              data-testid="coding-agent-home-history"
+              className={BTN_QUIET}
+            >
+              <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">manage_history</span>
+              {t("codingAgent.history.title")}
+            </button>
+          </div>
+        )}
         </>)}
 
         {/* One run, on its own page. */}

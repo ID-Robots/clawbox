@@ -31,6 +31,7 @@ const runner = vi.hoisted(() => ({
   isCodingAgentEnabled: vi.fn(),
   getTeamDynamic: vi.fn(),
   teamSpawnSlot: vi.fn(),
+  suiteSandbox: vi.fn(),
 }));
 /** How many runs a team may have going at once: the box's own number unless a case says otherwise (read on every use, reset before each case). */
 const teamSlots = vi.hoisted(() => ({ value: null as number | null }));
@@ -49,6 +50,8 @@ const plumbing = vi.hoisted(() => ({
   mergeWorkerBranch: vi.fn(),
   removeWorktree: vi.fn(),
   changedFiles: vi.fn(),
+  harvestWorktree: vi.fn(),
+  committableFiles: vi.fn(),
 }));
 vi.mock("@/lib/coding-team-worktree", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/coding-team-worktree")>();
@@ -97,7 +100,7 @@ function fakeRun(input: Record<string, unknown>): Record<string, unknown> {
  * way. Deliberately not called `then` — an object with a `then` field is a
  * thenable, and the fake runner returns these records from an async function.
  */
-let outcomes: Array<Partial<{ status: string; summary: string; resultText: string; error: string; filesTouched: string[]; permissionDenials: number; deniedActions: string[]; denials: Array<{ text: string; rule: string | null; refusal: null; worktreePath?: string }>; worktreeHints: number; commitError: string | null; tokensUsed: number; resumesAs: Record<string, unknown> }>>;
+let outcomes: Array<Partial<{ status: string; summary: string; resultText: string; error: string; filesTouched: string[]; permissionDenials: number; deniedActions: string[]; denials: Array<{ text: string; rule: string | null; refusal: null; worktreePath?: string; fullText?: string }>; worktreeHints: number; commitError: string | null; tokensUsed: number; resumesAs: Record<string, unknown> }>>;
 
 beforeEach(async () => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), "coding-team-"));
@@ -122,11 +125,19 @@ beforeEach(async () => {
     return { ok: false, conflict: next.conflict === true, detail: next.conflict ? "CONFLICT (content): Merge conflict in index.html" : "Merging failed." };
   });
   plumbing.removeWorktree.mockResolvedValue(undefined);
-  plumbing.changedFiles.mockResolvedValue([]);
+  // The normal path: the runner committed the worker's work on its branch. A
+  // case that stages an empty branch says so.
+  plumbing.changedFiles.mockImplementation(async (_dir: string, branch: string) => committedOn(branch));
+  plumbing.harvestWorktree.mockResolvedValue({ ok: true, files: [] });
+  // Every file a worker says it wrote is still there and not ignored.
+  plumbing.committableFiles.mockImplementation(async (_wt: string, files: string[]) => files);
   runner.isCodingAgentEnabled.mockResolvedValue(true);
   // The lead's switch: OFF, as on every box that never touched it.
   runner.getTeamDynamic.mockResolvedValue(false);
   runner.resolveWorkingDirectory.mockResolvedValue({ directory: "/home/clawbox/Projects/site", projectId: null });
+  // The project's own suite runs through `env` instead of `setpriv`, which a
+  // test runner cannot use; only a case with a suite on disk ever asks.
+  runner.suiteSandbox.mockResolvedValue({ bin: "/usr/bin/env", args: ["PYTHONDONTWRITEBYTECODE=1"], env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: root } });
   runner.startRun.mockImplementation(async (input: Record<string, unknown>) => fakeRun(input));
   // A wait settles the run with the next scripted outcome.
   runner.waitForRun.mockImplementation(async (id: string) => {
@@ -167,6 +178,21 @@ beforeEach(async () => {
 afterEach(() => {
   fs.rmSync(root, { recursive: true, force: true });
 });
+
+/**
+ * What the runner committed on a worker's branch (`clawbox/<team>-<task>-<attempt>`):
+ * the files its run touched, or — a worker that reported none — the files its
+ * task named.
+ */
+function committedOn(branch: string): string[] {
+  const m = /^clawbox\/(team-[a-z0-9]{8})-(t\d+)-(\d+)$/.exec(branch);
+  if (!m) return [];
+  const [, teamId, taskId, attempt] = m;
+  const run = [...runs.values()].find((r) => String(r.directory).endsWith(`/.clawbox/worktrees/${taskId}-${attempt}`));
+  const touched = (run?.filesTouched as string[] | undefined) ?? [];
+  if (touched.length) return touched;
+  return team.getTeam(teamId)?.tasks.find((t) => t.task_id === taskId)?.files_hint ?? [];
+}
 
 const PLAN = JSON.stringify([
   { task_description: "Scaffold index.html", files_hint: ["index.html"] },
@@ -356,6 +382,190 @@ describe("a worker in the project itself whose commit failed", () => {
   });
 });
 
+/**
+ * The bench, 2026-09-26: t1 wrote its two files in its worktree and nothing
+ * reached its branch — no commit, and no commit error either. The empty
+ * branch was merged, the task accepted by rule under review "final", and
+ * three tasks built against a contract that was never there; the team failed
+ * at the final review. And the bench again, the same evening: a read-only
+ * final check whose hint named the four files it was to READ wrote nothing,
+ * and was rejected NO CHANGE twice over — the team failed with every
+ * deliverable verified on disk. What the worker's run WROTE decides, never
+ * what its task names.
+ */
+describe("a worker whose branch came home empty", () => {
+  const WORKTREE_T1 = "/home/clawbox/Projects/site/.clawbox/worktrees/t1-1";
+  const contractPlan = (review: string, t1Hint: string[] = ["api-contract.md", "items.json"]) => shaped({ parallelism: 2, review, rationale: "Contract first." }, JSON.stringify([
+    { task_description: "Write api-contract.md and items.json", files_hint: t1Hint },
+    { task_description: "Build server.py against the contract", depends_on: ["t1"], files_hint: ["server.py"] },
+  ]));
+  /** t1's first branch has nothing on it; every other branch has what the runner committed. */
+  const emptyFirstBranch = (after: () => string[] = () => []) => plumbing.changedFiles.mockImplementation(async (_dir: string, branch: string) => (/-t1-1$/.test(branch) ? after() : committedOn(branch)));
+  const logged = (done: Awaited<ReturnType<typeof finished>>, type: string) => done.log.filter((e) => e.type === type).map((e) => e.message);
+
+  it.each([
+    // Wrote both files through its shell: the runner saw none of them.
+    ["through its shell", [] as string[]],
+    // Wrote both with its file tools, and the runner's commit never came.
+    ["with its file tools", ["api-contract.md", "items.json"]],
+  ])("has what the worker left uncommitted (written %s) committed on its branch, with a note, and the task is merged and accepted", async (_how, touched) => {
+    outcomes = [
+      { summary: contractPlan("final") },
+      { summary: "Done — both files delivered and verified.", filesTouched: touched },
+      { summary: "server built", filesTouched: ["server.py"] },
+    ];
+    let harvested = false;
+    emptyFirstBranch(() => (harvested ? ["api-contract.md", "items.json"] : []));
+    plumbing.harvestWorktree.mockImplementation(async () => {
+      harvested = true;
+      return { ok: true, files: ["api-contract.md", "items.json"] };
+    });
+    const board = await team.startTeam({ goal: "API contract, then the server", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    // Harvested in the worker's own worktree, in the runner's message shape.
+    expect(plumbing.harvestWorktree).toHaveBeenCalledTimes(1);
+    const [where, message] = plumbing.harvestWorktree.mock.calls[0] as [string, string];
+    expect(where).toBe(WORKTREE_T1);
+    expect(message).toMatch(/^Coding agent: Your task \(t1 of 2\)/);
+    expect(message).toContain("Done — both files delivered and verified.");
+    expect(message).toContain("Run: run-00000002");
+    expect(logged(done, "note")).toContainEqual("Committed 2 uncommitted file(s) the worker left behind (run-00000002): api-contract.md, items.json");
+    // A note, never an alert — and the branch that now has them is merged:
+    // a branch with a diff is never asked what the worker wrote.
+    expect(done.alerts).toBe(0);
+    expect(plumbing.committableFiles).not.toHaveBeenCalled();
+    expect(JSON.stringify(done.log)).not.toMatch(/NO CHANGE|changed no files/);
+    expect(plumbing.mergeWorkerBranch.mock.calls.map((c) => c[1])).toContain(`clawbox/${board.id}-t1-1`);
+    expect(done.tasks[0]).toMatchObject({ status: "complete", attempts: 1, rejections: 0 });
+    expect(done.finalReview).toMatchObject({ verdict: "accepted" });
+  });
+
+  it.each(["final", "none", "each"])("is rejected NO CHANGE under review %s when its run wrote a file in its worktree, the worktree is clean and the branch empty — one alert, offered once more, never accepted by rule", async (review) => {
+    outcomes = [
+      { summary: contractPlan(review) },
+      { summary: "Done — the contract is written.", filesTouched: ["api-contract.md"] },
+      { summary: "Both files written and committed.", filesTouched: ["api-contract.md", "items.json"] },
+      { summary: "server built", filesTouched: ["server.py"] },
+    ];
+    emptyFirstBranch();
+    const board = await team.startTeam({ goal: "API contract, then the server", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    // The harvest looked first, and found nothing; what the run wrote is still there for git to take.
+    expect(plumbing.harvestWorktree).toHaveBeenCalledWith(WORKTREE_T1, expect.stringMatching(/^Coding agent: /));
+    expect(plumbing.committableFiles).toHaveBeenCalledWith(WORKTREE_T1, ["api-contract.md"]);
+    const t1Reviews = done.log.filter((e) => e.type === "review").map((e) => e.message);
+    expect(t1Reviews[0]).toMatch(/rejected/);
+    expect(t1Reviews[0]).toContain(team.NO_CHANGE);
+    expect(t1Reviews[0]).not.toMatch(/Accepted by rule/);
+    expect(logged(done, "alert")).toEqual(["ALERT: No change from t1 (run-00000002): its branch has no commit, though the worker wrote api-contract.md"]);
+    expect(done.alerts).toBe(1);
+    expect(JSON.stringify(done.log)).not.toContain("changed no files");
+    // Never merged, its worktree given back, and offered once more with the reason.
+    expect(plumbing.mergeWorkerBranch.mock.calls.map((c) => c[1])).not.toContain(`clawbox/${board.id}-t1-1`);
+    expect(plumbing.removeWorktree).toHaveBeenCalledWith("/home/clawbox/Projects/site", WORKTREE_T1);
+    expect(done.tasks[0]).toMatchObject({ status: "complete", attempts: 2, rejections: 1 });
+    const retry = starts.find((s) => role(s) === "worker" && String(s.task).includes("A previous attempt was rejected"));
+    expect(String(retry?.task)).toContain(`A previous attempt was rejected: ${team.NO_CHANGE}`);
+  });
+
+  it("is rejected NO CHANGE too when the task named no file but the worker says it wrote some in its worktree", async () => {
+    outcomes = [
+      { summary: contractPlan("final", []) },
+      { summary: "Wrote the contract.", filesTouched: ["api-contract.md", "../elsewhere.txt", "__pycache__/x.pyc"] },
+      { summary: "Wrote the contract, committed.", filesTouched: ["api-contract.md"] },
+      { summary: "server built", filesTouched: ["server.py"] },
+    ];
+    emptyFirstBranch();
+    const board = await team.startTeam({ goal: "API contract, then the server", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(logged(done, "alert")).toEqual(["ALERT: No change from t1 (run-00000002): its branch has no commit, though the worker wrote api-contract.md"]);
+    expect(done.tasks[0]).toMatchObject({ attempts: 2, rejections: 1 });
+    expect(plumbing.committableFiles).toHaveBeenCalledWith(WORKTREE_T1, ["api-contract.md"]);
+  });
+
+  const NOTHING_CHANGED = "t1 changed no files (run-00000002): its branch is empty and its run wrote nothing git could commit.";
+
+  it.each(["final", "none", "each"])("accepts under review %s a check-only worker whose hint names the files it READS: nothing written, nothing on its branch — a note, no alert, no retry", async (review) => {
+    outcomes = [
+      { summary: contractPlan(review) },
+      { summary: "## Final review: both artifacts PASS. No defects found. No file was rewritten.", filesTouched: [] },
+      { summary: "server built", filesTouched: ["server.py"] },
+    ];
+    emptyFirstBranch();
+    const board = await team.startTeam({ goal: "API contract, then the server", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.tasks[0].files_hint).toEqual(["api-contract.md", "items.json"]);
+    expect(done.tasks[0]).toMatchObject({ status: "complete", attempts: 1, rejections: 0 });
+    // The harvest still looked; with nothing written there is nothing to ask git about.
+    expect(plumbing.harvestWorktree).toHaveBeenCalledWith(WORKTREE_T1, expect.stringMatching(/^Coding agent: /));
+    expect(plumbing.committableFiles).not.toHaveBeenCalled();
+    expect(plumbing.mergeWorkerBranch.mock.calls.map((c) => c[1])).toContain(`clawbox/${board.id}-t1-1`);
+    expect(done.alerts).toBe(0);
+    expect(logged(done, "alert")).toEqual([]);
+    expect(logged(done, "note")).toContainEqual(NOTHING_CHANGED);
+    expect(JSON.stringify(done.log)).not.toContain("NO CHANGE");
+    expect(starts.filter((s) => role(s) === "worker")).toHaveLength(2);
+  });
+
+  it("accepts a check-only task whose written files git could never have taken — a scratch file it deleted, a log the project ignores", async () => {
+    outcomes = [
+      { summary: contractPlan("final", []) },
+      { summary: "End-to-end check passed.", filesTouched: ["e2e_check.py", "e2e.log"] },
+      { summary: "server built", filesTouched: ["server.py"] },
+    ];
+    emptyFirstBranch();
+    plumbing.committableFiles.mockResolvedValueOnce([]);
+    const board = await team.startTeam({ goal: "API contract, then the server", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(plumbing.committableFiles).toHaveBeenCalledWith(WORKTREE_T1, ["e2e_check.py", "e2e.log"]);
+    expect(done.tasks[0]).toMatchObject({ status: "complete", attempts: 1, rejections: 0 });
+    expect(done.alerts).toBe(0);
+    expect(logged(done, "note")).toContainEqual(NOTHING_CHANGED);
+    expect(JSON.stringify(done.log)).not.toContain("NO CHANGE");
+  });
+
+  it("keeps today's verdict for a task that only checks something: no hint, nothing touched, no diff — accepted, with a note", async () => {
+    outcomes = [
+      { summary: contractPlan("final", []) },
+      { summary: "Checked: the site builds and every page loads.", filesTouched: [] },
+      { summary: "server built", filesTouched: ["server.py"] },
+    ];
+    emptyFirstBranch();
+    const board = await team.startTeam({ goal: "API contract, then the server", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.tasks[0]).toMatchObject({ status: "complete", attempts: 1, rejections: 0 });
+    expect(done.tasks[0].review?.notes).toMatch(/Accepted by rule; the team's final review checks the merged result/);
+    expect(done.alerts).toBe(0);
+    expect(logged(done, "note")).toEqual([NOTHING_CHANGED]);
+    expect(JSON.stringify(done.log)).not.toContain("NO CHANGE");
+  });
+
+  it("is rejected NOT COMMITTED when the harvest itself could not commit — the files are not lost silently", async () => {
+    outcomes = [
+      { summary: contractPlan("final") },
+      { summary: "Done — both files delivered and verified.", filesTouched: [] },
+      { summary: "Both files written and committed.", filesTouched: ["api-contract.md", "items.json"] },
+      { summary: "server built", filesTouched: ["server.py"] },
+    ];
+    emptyFirstBranch();
+    plumbing.harvestWorktree.mockResolvedValueOnce({ ok: false, detail: "Committing the files the worker left uncommitted failed: fatal: Unable to create index.lock" });
+    const board = await team.startTeam({ goal: "API contract, then the server", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    const t1Reviews = done.log.filter((e) => e.type === "review").map((e) => e.message);
+    expect(t1Reviews[0]).toMatch(/rejected.*NOT COMMITTED: Committing the files the worker left uncommitted failed.*could not be committed/);
+    expect(logged(done, "alert")).toEqual([expect.stringMatching(/^ALERT: Commit failed for t1 \(run-00000002\): Committing the files/)]);
+    expect(plumbing.mergeWorkerBranch.mock.calls.map((c) => c[1])).not.toContain(`clawbox/${board.id}-t1-1`);
+    expect(done.tasks[0]).toMatchObject({ attempts: 2, rejections: 1 });
+  });
+});
+
 describe("a worker the owner PAUSED", () => {
   it("is waited for, not settled: the resumed run's own result is the task's, and its worktree survives the pause", async () => {
     // Measured on the box (team-zf2uwq1n, 2026-09-06): the orchestrator took
@@ -495,7 +705,9 @@ describe("the review loop", () => {
 
   it("accepts by rule, with an alert, when the reviewer gives no verdict or does not finish", async () => {
     outcomes = [{ summary: PLAN }, { summary: "a", filesTouched: ["index.html"] }, { summary: "b", filesTouched: ["app.js"] }];
-    reviews = [{ summary: "Looks fine to me!" }, { status: "failed", error: "boom" }];
+    // t1's reviewer answers prose twice — the first answer and the one re-ask
+    // (TASK-1323) — so t2's reviewer is the sixth run, not the fifth.
+    reviews = [{ summary: "Looks fine to me!" }, { summary: "Still fine by me." }, { status: "failed", error: "boom" }];
     const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
     const done = await finished(board.id);
     expect(done.status).toBe("done");
@@ -507,9 +719,140 @@ describe("the review loop", () => {
     const alerts = done.log.filter((e) => e.type === "alert").map((e) => e.message);
     expect(alerts).toEqual([
       expect.stringMatching(/reviewer of t1 gave no verdict/),
-      expect.stringMatching(/reviewer of t2 \(run-00000005\) ended failed/),
+      expect.stringMatching(/reviewer of t2 \(run-00000006\) ended failed/),
     ]);
     expect(done.alerts).toBe(2);
+  });
+});
+
+/**
+ * Bench, 2026-09-30: three "answer holds no JSON object" alerts in one bench
+ * — the reviewers had reviewed, only their closing words lacked the object.
+ * Such an answer is asked for once more in the reviewer's own session; only a
+ * second miss is the alert, and it quotes how that answer began.
+ */
+describe("a reviewer that answered without a JSON verdict (TASK-1323)", () => {
+  const reviewerStarts = () => starts.filter((s) => (s.team as { role: string }).role === "reviewer");
+
+  it("is asked once more in its own session, with the short nudge, and its second answer is the verdict — a note, no alert", async () => {
+    const { REVIEWER_BRIEF, REVIEWER_NUDGE } = await import("@/lib/coding-team-reviewer");
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    reviews = [
+      { summary: "I read index.html against the task.\n\nIt has the heading and the form the task asked for, and nothing else changed. Accepting." },
+      { summary: JSON.stringify({ verdict: "accepted", notes: "Heading and form are there." }) },
+    ];
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    // The first answer's reviewer, its re-ask, then t2's reviewer: ONE re-ask.
+    expect(reviewerStarts().map((s) => (s.team as { taskId: string }).taskId)).toEqual(["t1", "t1", "t2"]);
+    expect(starts[3]).toEqual({
+      task: REVIEWER_NUDGE,
+      resumeRunId: "run-00000003",
+      source: "owner",
+      team: { id: board.id, role: "reviewer", taskId: "t1" },
+      readOnly: true,
+      extraBrief: REVIEWER_BRIEF,
+    });
+    expect(REVIEWER_NUDGE).toContain("Answer with the JSON verdict object only, nothing else");
+    expect(done.tasks[0].review).toMatchObject({ verdict: "accepted", notes: "Heading and form are there." });
+    // The card's reviewer link stays on the run that did the review.
+    expect(done.tasks[0].reviewRunId).toBe("run-00000003");
+    expect(done.runs.filter((r) => r.role === "reviewer").map((r) => [r.id, r.taskId])).toEqual([["run-00000003", "t1"], ["run-00000004", "t1"], ["run-00000006", "t2"]]);
+    expect(done.alerts).toBe(0);
+    expect(done.log.filter((e) => e.type === "alert")).toEqual([]);
+    const notes = done.log.filter((e) => e.type === "note");
+    expect(notes).toEqual([expect.objectContaining({
+      task_id: "t1",
+      message: 'The reviewer of t1 answered without a JSON verdict; asking it once more for the verdict alone. It answered: "I read index.html against the task. It has the heading and the form the task asked for, and nothing else changed. Accepting."',
+    })]);
+  });
+
+  it("raises the alert only after a second answer without the object, quoting how that answer began", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    const second = `I already gave my verdict above: the work is fine.\n${"The task is done as asked and nothing beside it broke. ".repeat(8)}`;
+    reviews = [{ summary: "Reviewed; all good." }, { summary: second }];
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(reviewerStarts().map((s) => (s.team as { taskId: string }).taskId)).toEqual(["t1", "t1", "t2"]);
+    expect(done.tasks[0].review).toMatchObject({ verdict: "accepted", notes: "Accepted by rule: The reviewer's answer holds no JSON object." });
+    const head = second.replace(/\s+/g, " ").slice(0, 199);
+    const alerts = done.log.filter((e) => e.type === "alert").map((e) => e.message);
+    expect(alerts).toEqual([`ALERT: The reviewer of t1 gave no verdict: asked twice, it answered no JSON object — "${head}…"`]);
+    expect(done.alerts).toBe(1);
+  });
+
+  it("says why when the re-ask itself does not finish, and never asks a third time", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    reviews = [{ summary: "" }, { status: "failed", error: "boom" }];
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(reviewerStarts()).toHaveLength(3);
+    expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)).toEqual([
+      "ALERT: The reviewer of t1 gave no verdict: The reviewer answered nothing. Asked once more, it (run-00000004) ended failed.",
+    ]);
+    expect(done.tasks[0].review?.notes).toBe("Accepted by rule: The reviewer answered nothing.");
+  });
+
+  it("quotes the first answer in the alert when the re-ask does not finish — after what became of the re-ask, so the board's cut takes only the quote's tail", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    const first = `I read index.html against the task.\n\n${"The heading and the form are there, as the task asked. ".repeat(6)}`;
+    reviews = [{ summary: first }, { status: "failed", error: "boom" }];
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(reviewerStarts()).toHaveLength(3);
+    const alerts = done.log.filter((e) => e.type === "alert").map((e) => e.message);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toMatch(/^ALERT: The reviewer of t1 gave no verdict: The reviewer's answer holds no JSON object\. Asked once more, it \(run-00000004\) ended failed\. It had answered: "I read index\.html against the task\. The heading and the form are there, as the task asked\. /);
+    // One line of 300 characters on the board: the quote is what gives way.
+    expect(alerts[0]).toHaveLength("ALERT: ".length + 300);
+    expect(alerts[0].endsWith("…")).toBe(true);
+    expect(done.tasks[0].review?.notes).toBe("Accepted by rule: The reviewer's answer holds no JSON object.");
+    expect(done.alerts).toBe(1);
+  });
+
+  it("quotes the first answer in the alert when the re-ask could not start", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    reviews = [{ summary: "Reviewed; all good." }];
+    let t1Asks = 0;
+    runner.teamSpawnSlot.mockImplementation(async (who: { role: string; taskId: string | null }) => {
+      if (who.role === "reviewer" && who.taskId === "t1" && ++t1Asks === 2) return { ok: false, wait: false, reason: "The coding agent is switched off." };
+      return { ok: true };
+    });
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    // The review ran; its re-ask never did; t2's reviewer is next.
+    expect(reviewerStarts().map((s) => (s.team as { taskId: string }).taskId)).toEqual(["t1", "t2"]);
+    expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)).toEqual([
+      'ALERT: The reviewer of t1 gave no verdict: The reviewer\'s answer holds no JSON object. Asked once more, it could not start: The coding agent is switched off. It had answered: "Reviewed; all good."',
+    ]);
+    expect(done.tasks[0].review?.notes).toBe("Accepted by rule: The reviewer's answer holds no JSON object.");
+  });
+
+  it("reads a fenced ```json block after prose at once — no re-ask, no note", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    reviews = [{ summary: 'Checked index.html on a 5" phone width and the "Send" button.\n\n```json\n{"verdict": "accepted", "notes": "One nit: spacing."}\n```' }];
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(reviewerStarts()).toHaveLength(2);
+    expect(done.tasks[0].review).toMatchObject({ verdict: "accepted", notes: "One nit: spacing." });
+    expect(done.log.filter((e) => e.type === "note" || e.type === "alert")).toEqual([]);
+  });
+
+  it("does not re-ask an answer whose object is there but wrong: that is what the reviewer said", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    reviews = [{ summary: '{"verdict": "maybe", "notes": "not sure"}' }];
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(reviewerStarts()).toHaveLength(2);
+    expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)).toEqual([
+      'ALERT: The reviewer of t1 gave no verdict: The reviewer\'s verdict is not accepted or rejected ("maybe").',
+    ]);
   });
 });
 
@@ -951,6 +1294,145 @@ describe("a team that works", () => {
     });
   });
 
+  // Bench, 2026-09-26: the harness tells a run its memory is under
+  // `<state>/projects/<its folder>/`, the sandbox refuses the look, and the
+  // alert rejected verified work — most of the night's second attempts.
+  describe("a refused look into the run's own corner of the harness's state", () => {
+    const P = "/home/clawbox/Projects/site";
+    // Where a ClawBox AI run's harness keeps its state (harnessStateDir), whatever the host running this says.
+    const STATE = path.join(os.homedir(), ".claude-ds");
+    const slug = (dir: string) => dir.replace(/[^a-zA-Z0-9]/g, "-");
+    beforeEach(() => { vi.stubEnv("CLAUDE_DS_CONFIG_DIR", ""); });
+    afterEach(() => { vi.unstubAllEnvs(); });
+
+    it("is a note — a listing of its project's folder, a read of its memory, from the project or its worktree — and the task stays clean", async () => {
+      outcomes = [
+        { summary: PLAN },
+        { summary: "index done", filesTouched: ["index.html"], permissionDenials: 2, deniedActions: [`Bash: ls -la ${STATE}/projects/${slug(P)}`, `Read: ${STATE}/projects/${slug(P)}/memory/MEMORY.md`] },
+        { summary: "app done", filesTouched: ["app.js"], permissionDenials: 1, deniedActions: [`Bash: ls ${STATE}/projects/${slug(`${P}/.clawbox/worktrees/t2-1`)}/memory/ 2>/dev/null || echo none`] },
+      ];
+      const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+      const done = await finished(board.id);
+      expect(done.status).toBe("done");
+      expect(done.alerts).toBe(0);
+      expect(done.log.filter((e) => e.type === "note").map((e) => [e.task_id, e.message])).toEqual([
+        ["t1", `Worker run-00000002 was refused 2 read-only action(s) outside its folder: Bash: ls -la ${STATE}/projects/${slug(P)}; Read: ${STATE}/projects/${slug(P)}/memory/MEMORY.md`],
+        ["t2", `Worker run-00000004 was refused 1 read-only action(s) outside its folder: Bash: ls ${STATE}/projects/${slug(`${P}/.clawbox/worktrees/t2-1`)}/memory/ 2>/dev/null || echo none`],
+      ]);
+      expect(starts.map((s) => (s.team as { role: string }).role)).toEqual(["planner", "worker", "reviewer", "worker", "reviewer"]);
+      expect(done.tasks.map((t) => [t.status, t.attempts, t.rejections, t.review?.verdict])).toEqual([["complete", 1, 0, "accepted"], ["complete", 1, 0, "accepted"]]);
+      expect(done.metrics).toMatchObject({ readOnlyRefusals: 3, tasksRejected: 0, tasksAcceptedFirstTry: 2 });
+    });
+
+    it("stays an alert beside another project's state, and for a write to the harness's settings", async () => {
+      outcomes = [
+        { summary: PLAN },
+        // Its own memory, and another project's: the other one decides.
+        { summary: "index done", filesTouched: ["index.html"], permissionDenials: 2, deniedActions: [`Read: ${STATE}/projects/${slug(P)}/memory/MEMORY.md`, `Bash: ls ${STATE}/projects/-home-clawbox-Projects-other/memory`] },
+        // A write outside every folder — but into the harness's own settings.
+        { summary: "index done", filesTouched: ["index.html"], permissionDenials: 1, deniedActions: [`Write: ${STATE}/settings.json`] },
+      ];
+      const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+      const done = await finished(board.id);
+      expect(done.status).toBe("failed");
+      expect(done.alerts).toBe(2);
+      expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)).toEqual([
+        `ALERT: Worker run-00000002 was refused 2 action(s): Read: ${STATE}/projects/${slug(P)}/memory/MEMORY.md; Bash: ls ${STATE}/projects/-home-clawbox-Projects-other/memory`,
+        `ALERT: Worker run-00000003 was refused 1 action(s): Write: ${STATE}/settings.json`,
+      ]);
+      expect(done.log.filter((e) => e.type === "note")).toEqual([]);
+      expect(done.tasks[0]).toMatchObject({ status: "rejected", attempts: 2, rejections: 2 });
+      expect(done.metrics.readOnlyRefusals).toBe(0);
+    });
+
+    it("stays an alert for another session's transcript beside its own", async () => {
+      outcomes = [
+        { summary: PLAN },
+        { summary: "index done", filesTouched: ["index.html"], permissionDenials: 1, deniedActions: [`Read: ${STATE}/projects/${slug(P)}/sess-someone-else.jsonl`] },
+        { summary: "index done", filesTouched: ["index.html"] },
+        { summary: "app done", filesTouched: ["app.js"] },
+      ];
+      const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+      const done = await finished(board.id);
+      expect(done.alerts).toBe(1);
+      expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)).toEqual([
+        `ALERT: Worker run-00000002 was refused 1 action(s): Read: ${STATE}/projects/${slug(P)}/sess-someone-else.jsonl`,
+      ]);
+      expect(done.tasks[0]).toMatchObject({ status: "complete", attempts: 2, rejections: 1 });
+    });
+  });
+
+  // Bench, 2026-09-26: a read-only probe of several statements ran past the
+  // runner's display cut, and its length alone made it an alert.
+  it("judges a long refused probe by its whole text: all of it only looks, a note — a record with only the cut, an alert as before", async () => {
+    const P = "/home/clawbox/Projects/site";
+    const probe = `Bash: M="$CLAWBOX_RUN_ARTIFACTS_DIR/mutation"; P=${P}; ls -la "$M" 2>/dev/null; head -40 "$P/index.html"; grep -n app.js "$P/index.html"; git -C "$P" status --short; diff "$P/index.html" "$M/index.html"`;
+    const cut = probe.slice(0, 160);
+    expect(probe.length).toBeGreaterThan(160);
+    outcomes = [
+      { summary: PLAN },
+      { summary: "index done", filesTouched: ["index.html"], permissionDenials: 1, deniedActions: [cut], denials: [{ text: cut, fullText: probe, rule: null, refusal: null }] },
+      // The same probe on a record that kept only the cut: past it, anything.
+      { summary: "app done", filesTouched: ["app.js"], permissionDenials: 1, deniedActions: [cut] },
+      { summary: "app done", filesTouched: ["app.js"] },
+    ];
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    // Named by the cut the owner reads.
+    expect(done.log.filter((e) => e.type === "note").map((e) => [e.task_id, e.message])).toEqual([
+      ["t1", `Worker run-00000002 was refused 1 read-only action(s) outside its folder: ${cut}`],
+    ]);
+    expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)).toEqual([`ALERT: Worker run-00000004 was refused 1 action(s): ${cut}`]);
+    expect(done.tasks.map((t) => [t.task_id, t.attempts, t.rejections, t.review?.verdict])).toEqual([["t1", 1, 0, "accepted"], ["t2", 2, 1, "accepted"]]);
+  });
+
+  // Bench, 2026-09-26: a verifier wrote a page to try something, removed it,
+  // committed nothing — and the file it had removed counted as straying.
+  it("judges what the worker left: a file it removed before it settled is not a stray — one it left, or a deletion its branch carries, still is", async () => {
+    const P = path.join(root, "site");
+    runner.resolveWorkingDirectory.mockResolvedValue({ directory: P, projectId: null });
+    // Each worktree on disk as its worker left it.
+    const left: Record<string, string[]> = { "t1-1": ["index.html"], "t1-2": ["index.html"], "t2-1": ["app.js", "notes.md"], "t2-2": ["app.js"] };
+    plumbing.addWorkerWorktree.mockImplementation(async (dir: string, teamId: string, taskId: string, attempt: number) => {
+      const wt = path.join(dir, ".clawbox", "worktrees", `${taskId}-${attempt}`);
+      fs.mkdirSync(wt, { recursive: true });
+      for (const f of left[`${taskId}-${attempt}`] ?? []) fs.writeFileSync(path.join(wt, f), "x");
+      return { ok: true, path: wt, branch: `clawbox/${teamId}-${taskId}-${attempt}` };
+    });
+    // A branch that came home empty is harvested first (TASK-1237): what the
+    // worker left in its worktree goes on its branch, and only that.
+    const harvested: Record<string, string[]> = {};
+    plumbing.harvestWorktree.mockImplementation(async (wt: string) => {
+      const key = path.basename(wt);
+      harvested[key] = (left[key] ?? []).filter((f) => fs.existsSync(path.join(wt, f)));
+      return { ok: true, files: harvested[key] };
+    });
+    // t1's first branch deleted a stylesheet the task was not given: that merges.
+    plumbing.changedFiles.mockImplementation(async (_dir: string, branch: string) => {
+      if (branch.endsWith("-t1-1")) return ["index.html", "old.css"];
+      const key = Object.keys(harvested).find((k) => branch.endsWith(`-${k}`));
+      return key ? harvested[key] : [];
+    });
+    outcomes = [
+      { summary: PLAN },
+      { summary: "index done", filesTouched: ["index.html"] },
+      // Committed nothing; its check page is gone from the worktree.
+      { summary: "index done", filesTouched: ["index.html", "check.html"] },
+      // Left its notes behind.
+      { summary: "app done", filesTouched: ["app.js", "notes.md"] },
+      { summary: "app done", filesTouched: ["app.js", "check.html"] },
+    ];
+    const board = await team.startTeam({ goal: "g", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)).toEqual([
+      "ALERT: Worker run-00000002 touched files outside its task: old.css",
+      "ALERT: Worker run-00000005 touched files outside its task: notes.md",
+    ]);
+    expect(done.tasks.map((t) => [t.task_id, t.status, t.attempts, t.rejections, t.review?.verdict])).toEqual([["t1", "complete", 2, 1, "accepted"], ["t2", "complete", 2, 1, "accepted"]]);
+  });
+
   it("fails the team when a worker fails and its dependants can never run, naming both", async () => {
     outcomes = [{ summary: PLAN }, { status: "failed", error: "Stopped at the cost ceiling" }];
     const board = await team.startTeam({ goal: "g", directory: "site", source: "agent" });
@@ -1113,6 +1595,16 @@ describe("the words", () => {
   // __pycache__/calc.cpython-310.pyc, written by CPython importing the very
   // file the task named. Three of those hit the alert ceiling and killed runs
   // whose work the reviewer had already accepted.
+  it("says which files a worker wrote inside its worktree — what its run touched there, never what its task names", () => {
+    const wt = "/p/.clawbox/worktrees/t1-1";
+    expect(team.writtenFiles([
+      "items.json", "./items.json", "docs/", `${wt}/api/contract.md`, `${wt}/`, "/tmp/scratch.txt", "../escape.md", ".", "__pycache__/c.pyc", "node_modules/x/y.js", ".clawbox/state.json",
+    ], `${wt}/`)).toEqual(["items.json", "docs", "api/contract.md"]);
+    // A check that wrote nothing wrote nothing, whatever files its task named to read.
+    expect(team.writtenFiles([], wt)).toEqual([]);
+    expect(team.writtenFiles(["/p/other/index.html", "/tmp/check.py"], wt)).toEqual([]);
+  });
+
   it("does not call a generated artifact a stray file", () => {
     expect(team.outsideHint(["calc.py", "__pycache__/calc.cpython-310.pyc"], ["calc.py"])).toEqual([]);
     expect(team.outsideHint(["src/a.py", "src/__pycache__/a.cpython-311.pyc"], ["src/a.py"])).toEqual([]);
@@ -1124,6 +1616,52 @@ describe("the words", () => {
     // dist/ is generated too, but a task can be asked to produce it, so it
     // is deliberately NOT ignorable: dropping it would lose the work.
     expect(team.outsideHint(["dist/bundle.js"], ["src"])).toEqual(["dist/bundle.js"]);
+  });
+
+  // Bench, 2026-09-26: a verifier wrote __verify_probe.html to try the page,
+  // removed it, and the probe alone rejected a correct task.
+  it("does not call an obvious scratch file a stray file — but a dunder source file still is one", () => {
+    expect(team.outsideHint(["index.html", "__verify_probe.html", "tmp/check.tmp", ".probe-1", "src/.probe"], ["index.html"])).toEqual([]);
+    for (const f of ["__verify_probe.html", "__x", "a/b/__scratch.js", "__probe/", "check.tmp", "out/x.tmp", ".probe", ".probe-page.html"]) {
+      expect(team.isScratchFile(f), f).toBe(true);
+    }
+    for (const f of ["__init__.py", "pkg/__main__.py", "__tests__/a.test.ts", "notes.md", "tmp.js", "probe.html", "a.tmp.js"]) {
+      expect(team.isScratchFile(f), f).toBe(false);
+    }
+    expect(team.outsideHint(["calc.py", "pkg/__init__.py"], ["calc.py"])).toEqual(["pkg/__init__.py"]);
+  });
+
+  it("knows which touched files are gone from the folder — and says nothing when the folder itself is", () => {
+    const dir = path.join(root, "wt");
+    fs.mkdirSync(path.join(dir, "src"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "index.html"), "x");
+    fs.writeFileSync(path.join(dir, "src", "a.js"), "x");
+    // A link the worker left is there, wherever it points.
+    fs.symlinkSync(path.join(dir, "nowhere"), path.join(dir, "link"));
+    fs.writeFileSync(path.join(dir, "file"), "x");
+    expect([...team.vanishedFiles(dir, ["index.html", "src/a.js", "probe.html", "src/gone.js", "link", "file/under-a-file"])]).toEqual(["probe.html", "src/gone.js", "file/under-a-file"]);
+    expect(team.vanishedFiles(path.join(root, "no-such-folder"), ["index.html"]).size).toBe(0);
+    expect(team.vanishedFiles("relative/dir", ["index.html"]).size).toBe(0);
+  });
+
+  // A worker's scratch file is no stray (above), but a red suite's failure
+  // that names one does not point at every task for it (TASK-1321).
+  it("sends a red suite back to the tasks whose hints hold the failing files — a scratch-named file included", () => {
+    type Task = Parameters<Team["suiteSuspects"]>[0][number];
+    const task = (task_id: string, files_hint: string[], attempts = 1): Task =>
+      ({ task_id, files_hint, attempts, status: "complete" }) as Task;
+    const calc = task("t1", ["calc.py"]);
+    const tests = task("t2", ["tests"]);
+    const done = task("t3", ["cli.py"], 2);
+    const ids = (named: string[]) => team.suiteSuspects([calc, tests, done], named).map((t) => t.task_id);
+    expect(ids(["calc.py"])).toEqual(["t1"]);
+    expect(ids(["tests/__probe_test.py"])).toEqual(["t2"]);
+    expect(ids(["calc.py", "__probe_test.py"])).toEqual(["t1"]);
+    // Named by none of them, or no attempt left for the one it names: every task with an attempt left.
+    expect(ids(["__probe_test.py"])).toEqual(["t1", "t2"]);
+    expect(ids(["cli.py"])).toEqual(["t1", "t2"]);
+    expect(team.outsideHint(["__probe_test.py"], ["calc.py"])).toEqual([]);
+    expect(team.outsideHint(["__probe_test.py"], ["calc.py"], { scratch: false })).toEqual(["__probe_test.py"]);
   });
 });
 
@@ -1541,12 +2079,29 @@ describe("the planner's shape", () => {
 
   it("accepts by rule, with an alert, when the final reviewer gives no verdict", async () => {
     outcomes = [{ summary: shaped({ parallelism: 1, review: "final", rationale: "" }, PLAN) }, { summary: "index", filesTouched: ["index.html"] }, { summary: "app", filesTouched: ["app.js"] }];
-    reviews = [{ summary: "Looks great." }];
+    // No verdict in the answer nor in the one re-ask (TASK-1323).
+    reviews = [{ summary: "Looks great." }, { summary: "Still looks great." }];
     const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
     const done = await finished(board.id);
     expect(done.status).toBe("done");
     expect(done.finalReview).toMatchObject({ verdict: "accepted", notes: expect.stringMatching(/^Accepted by rule/) });
     expect(done.log.filter((e) => e.type === "alert").map((e) => e.message)).toEqual([expect.stringMatching(/final reviewer gave no verdict/)]);
+  });
+
+  it("asks the final reviewer once more, in its own session, when its answer holds no JSON object (TASK-1323)", async () => {
+    const { FINAL_REVIEWER_BRIEF, REVIEWER_NUDGE } = await import("@/lib/coding-team-reviewer");
+    outcomes = [{ summary: shaped({ parallelism: 1, review: "final", rationale: "" }, PLAN) }, { summary: "index", filesTouched: ["index.html"] }, { summary: "app", filesTouched: ["app.js"] }];
+    reviews = [{ summary: "The goal is met: index.html and app.js work together." }, { summary: 'Sorry.\n{"verdict": "rejected", "notes": "app.js never loads the form."}' }];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(starts.map(role)).toEqual(["planner", "worker", "worker", "reviewer", "reviewer"]);
+    expect(starts[4]).toEqual({ task: REVIEWER_NUDGE, resumeRunId: "run-00000004", source: "owner", team: { id: board.id, role: "reviewer", taskId: null }, readOnly: true, extraBrief: FINAL_REVIEWER_BRIEF });
+    expect(done.finalReview).toMatchObject({ verdict: "rejected", notes: "app.js never loads the form." });
+    expect(done.status).toBe("failed");
+    expect(done.log.filter((e) => e.type === "alert")).toEqual([]);
+    expect(done.log.filter((e) => e.type === "note").map((e) => e.message)).toEqual([
+      'The final reviewer answered without a JSON verdict; asking it once more for the verdict alone. It answered: "The goal is met: index.html and app.js work together."',
+    ]);
   });
 
   it("trusts the rule alone when the plan asks for review \"none\" — no reviewer run at all", async () => {
@@ -1571,6 +2126,193 @@ describe("the planner's shape", () => {
     expect(done.status).toBe("done");
     expect(done.tasks[0]).toMatchObject({ attempts: 2, rejections: 1 });
     expect(done.metrics).toMatchObject({ tasksRejected: 1, tasksAcceptedFirstTry: 1 });
+  });
+});
+
+describe("the project's own tests on the merged result (TASK-1321)", () => {
+  // The bench's team-cli-tool, cut down: a converter CLI and a unittest suite
+  // for its pairs. The CLI prints the right number and exits 1 — the suite's
+  // failure is the one the team signed off over: "AssertionError: 1 != 0 : 1.609344".
+  const CLI = [
+    "import sys",
+    "FACTORS = {('mi', 'km'): 1.609344, ('km', 'mi'): 1 / 1.609344}",
+    "value, src, dst = float(sys.argv[1]), sys.argv[2], sys.argv[3]",
+    "print(round(value * FACTORS[(src, dst)], 6))",
+    "sys.exit(1)",
+    "",
+  ].join("\n");
+  const CLI_TESTS = [
+    "import subprocess, sys, unittest",
+    "",
+    "def convert(*args):",
+    "    return subprocess.run([sys.executable, 'convert.py', *args], capture_output=True, text=True)",
+    "",
+    "class TestConvert(unittest.TestCase):",
+    "    def test_mi_to_km(self):",
+    "        out = convert('1', 'mi', 'km')",
+    "        self.assertEqual(out.returncode, 0, out.stdout.strip())",
+    "",
+    "    def test_km_to_mi_prints(self):",
+    "        self.assertEqual(convert('1.609344', 'km', 'mi').stdout.strip(), '1.0')",
+    "",
+  ].join("\n");
+  // The same pairs as a module: one pair missing, so the failure's traceback
+  // runs through convert.py as well as through the test.
+  const MODULE = "FACTORS = {('mi', 'km'): 1.609344}\n\ndef convert(value, src, dst):\n    return round(value * FACTORS[(src, dst)], 6)\n";
+  const MODULE_FIXED = "FACTORS = {('mi', 'km'): 1.609344, ('km', 'mi'): 1 / 1.609344}\n\ndef convert(value, src, dst):\n    return round(value * FACTORS[(src, dst)], 6)\n";
+  const MODULE_TESTS = [
+    "import unittest",
+    "from convert import convert",
+    "",
+    "class TestConvert(unittest.TestCase):",
+    "    def test_mi_to_km(self):",
+    "        self.assertEqual(convert(1, 'mi', 'km'), 1.609344)",
+    "",
+    "    def test_km_to_mi(self):",
+    "        self.assertEqual(convert(1.609344, 'km', 'mi'), 1.0)",
+    "",
+  ].join("\n");
+  const SUITE_PLAN = JSON.stringify([
+    { task_description: "Write the converter, convert.py", files_hint: ["convert.py"] },
+    { task_description: "Test every pair in tests/test_convert.py", depends_on: ["t1"], files_hint: ["tests/test_convert.py"] },
+  ]);
+
+  /** The merged result on disk: the team's folder, with what its workers left there. */
+  function project(files: Record<string, string>): string {
+    const dir = path.join(root, "site");
+    for (const [rel, body] of Object.entries(files)) {
+      fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+      fs.writeFileSync(path.join(dir, rel), body);
+    }
+    runner.resolveWorkingDirectory.mockResolvedValue({ directory: dir, projectId: null });
+    return dir;
+  }
+  const notes = (done: { log: Array<{ type: string; message: string }> }) => done.log.filter((e) => e.type === "note").map((e) => e.message);
+
+  it("is not done while the suite is red: the rejection names the failing test, the task it points at is offered once more, and a suite still red fails the team", async () => {
+    project({ "convert.py": CLI, "tests/test_convert.py": CLI_TESTS });
+    outcomes = [
+      // The evidence's shape: workers accepted by rule, one final review over the merged whole.
+      { summary: shaped({ parallelism: 1, review: "final", rationale: "A small tool." }, SUITE_PLAN) },
+      { summary: "Wrote convert.py.", filesTouched: ["convert.py"] },
+      { summary: "Wrote the tests.", filesTouched: ["tests/test_convert.py"] },
+      { summary: "Looked again; the tests are right.", filesTouched: ["tests/test_convert.py"] },
+    ];
+    const board = await team.startTeam({ goal: "A unit converter CLI with a test for every pair", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+
+    expect(done.status).toBe("failed");
+    expect(done.error).toContain("The project's own tests fail on the merged result: python3 -m unittest discover -s tests — Ran 2 tests, FAILED (failures=1)");
+    expect(done.error).toContain("Failing: test_convert.TestConvert.test_mi_to_km");
+    expect(done.error).toContain("AssertionError: 1 != 0 : 1.609344");
+    // The failure named tests/test_convert.py, so t2 went back — once — with the
+    // failing test in the words its next worker read first; no final reviewer
+    // was spent on a red tree.
+    expect(starts.map(role)).toEqual(["planner", "worker", "worker", "worker"]);
+    expect(starts[3].team).toMatchObject({ role: "worker", taskId: "t2" });
+    const retry = String(starts[3].task);
+    expect(retry).toContain("A previous attempt was rejected: The project's own tests fail on the merged result");
+    expect(retry).toContain("Failing: test_convert.TestConvert.test_mi_to_km");
+    expect(retry).toContain("First failure: AssertionError: 1 != 0 : 1.609344");
+    expect(retry).toContain("run `python3 -m unittest discover -s tests` yourself");
+    expect(done.tasks.map((t) => [t.task_id, t.attempts, t.rejections])).toEqual([["t1", 1, 0], ["t2", 2, 1]]);
+    expect(done.log.find((e) => e.type === "review" && e.message.startsWith("Task t2 rejected"))).toMatchObject({ actor: { kind: "reviewer" } });
+    expect(notes(done)).toEqual([
+      expect.stringMatching(/^The project's own tests fail on the merged result: .*test_mi_to_km\. Offered once more: t2\.$/),
+      expect.stringMatching(/^The project's own tests fail on the merged result: .*test_mi_to_km\.$/),
+    ]);
+    expect(done.finalReview).toBeNull();
+    // A red suite is a rejection, never an alert toward the team's ceiling.
+    expect(done.alerts).toBe(0);
+  });
+
+  it("finishes once the re-attempt turns the suite green — whatever the review shape", async () => {
+    const dir = project({ "convert.py": MODULE, "tests/test_convert.py": MODULE_TESTS });
+    outcomes = [
+      { summary: SUITE_PLAN },
+      { summary: "Wrote convert.py.", filesTouched: ["convert.py"] },
+      { summary: "Wrote the tests.", filesTouched: ["tests/test_convert.py"] },
+      { summary: "Added km → mi.", filesTouched: ["convert.py"] },
+      { summary: "The tests stand.", filesTouched: ["tests/test_convert.py"] },
+    ];
+    // t1's second worker is the one that fixes the module.
+    let t1Workers = 0;
+    runner.startRun.mockImplementation(async (input: Record<string, unknown>) => {
+      const who = input.team as { role: string; taskId: string | null };
+      if (who.role === "worker" && who.taskId === "t1" && ++t1Workers === 2) fs.writeFileSync(path.join(dir, "convert.py"), MODULE_FIXED);
+      return fakeRun(input);
+    });
+    const board = await team.startTeam({ goal: "A unit converter", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+
+    expect(done.status).toBe("done");
+    // The KeyError's traceback ran through both files: both tasks went back, in
+    // dependency order, each reviewed as any task is.
+    expect(starts.map(role)).toEqual(["planner", "worker", "reviewer", "worker", "reviewer", "worker", "reviewer", "worker", "reviewer"]);
+    expect(done.tasks.map((t) => [t.task_id, t.status, t.attempts, t.rejections])).toEqual([["t1", "complete", 2, 1], ["t2", "complete", 2, 1]]);
+    expect(String(starts[5].task)).toContain("Failing: test_convert.TestConvert.test_km_to_mi");
+    expect(notes(done)).toEqual([
+      expect.stringMatching(/^The project's own tests fail on the merged result: python3 -m unittest discover -s tests — Ran 2 tests, FAILED \(errors=1\)\. Failing: test_convert\.TestConvert\.test_km_to_mi\. Offered once more: t1, t2\.$/),
+      "The project's own tests pass on the merged result: python3 -m unittest discover -s tests — Ran 2 tests, OK.",
+    ]);
+  });
+
+  it("is accepted when the suite passes, and the final reviewer is told so", async () => {
+    project({ "convert.py": MODULE_FIXED, "tests/__init__.py": "", "tests/test_convert.py": MODULE_TESTS });
+    outcomes = [
+      { summary: shaped({ parallelism: 1, review: "final", rationale: "" }, SUITE_PLAN) },
+      { summary: "Wrote convert.py.", filesTouched: ["convert.py"] },
+      { summary: "Wrote the tests.", filesTouched: ["tests/test_convert.py"] },
+    ];
+    const board = await team.startTeam({ goal: "A unit converter", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+
+    expect(done.status).toBe("done");
+    expect(runner.suiteSandbox).toHaveBeenCalledTimes(1);
+    expect(starts.map(role)).toEqual(["planner", "worker", "worker", "reviewer"]);
+    // tests/ is a package here, so discovery starts at the top.
+    expect(String(starts[3].task)).toContain("The harness ran the project's own tests on the merged result and they pass: python3 -m unittest discover — Ran 2 tests, OK.");
+    expect(done.finalReview).toMatchObject({ verdict: "accepted" });
+    expect(notes(done)).toEqual(["The project's own tests pass on the merged result: python3 -m unittest discover — Ran 2 tests, OK."]);
+    expect(done.tasks.map((t) => t.attempts)).toEqual([1, 1]);
+  });
+
+  it("changes nothing for a project with no test suite", async () => {
+    project({ "index.html": "<!doctype html><title>Site</title>", "app.js": "console.log('hi');\n" });
+    outcomes = [
+      { summary: shaped({ parallelism: 1, review: "final", rationale: "" }, PLAN) },
+      { summary: "index", filesTouched: ["index.html"] },
+      { summary: "app", filesTouched: ["app.js"] },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+
+    expect(done.status).toBe("done");
+    expect(runner.suiteSandbox).not.toHaveBeenCalled();
+    expect(starts.map(role)).toEqual(["planner", "worker", "worker", "reviewer"]);
+    expect(String(starts[3].task)).not.toContain("own tests");
+    expect(notes(done)).toEqual([]);
+    expect(done.finalReview).toMatchObject({ verdict: "accepted" });
+  });
+
+  it("puts a red suite before the lead first, when the team has one", async () => {
+    runner.getTeamDynamic.mockResolvedValue(true);
+    project({ "convert.py": CLI, "tests/test_convert.py": CLI_TESTS });
+    outcomes = [
+      { summary: shaped({ parallelism: 1, review: "final", rationale: "" }, SUITE_PLAN) },
+      { summary: "Wrote convert.py.", filesTouched: ["convert.py"] },
+      { summary: "Wrote the tests.", filesTouched: ["tests/test_convert.py"] },
+      { summary: "Looked again.", filesTouched: ["tests/test_convert.py"] },
+    ];
+    const board = await team.startTeam({ goal: "A unit converter CLI", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+
+    expect(done.status).toBe("failed");
+    // Both workers were accepted clean, so the lead had nothing to decide until the suite spoke.
+    expect(starts.map(role)).toEqual(["planner", "worker", "worker", "lead", "worker"]);
+    expect(starts[3].team).toMatchObject({ role: "lead", taskId: "t2" });
+    expect(String(starts[3].task)).toContain("rejected: The project's own tests fail on the merged result");
+    expect(String(starts[3].task)).toContain("test_convert.TestConvert.test_mi_to_km");
   });
 });
 
@@ -1623,6 +2365,11 @@ describe("the worker's brief: when to use team_message", () => {
     expect(brief.indexOf('to="lead"')).toBeLessThan(brief.indexOf('to="owner_agent"'));
     expect(brief).toContain("Never send a team_message for progress reports");
     expect(brief).toContain("never to acknowledge a message a teammate sent you");
+  });
+
+  it("says the worker's files count only once committed on its branch, and that its own commit is welcome", () => {
+    expect(team.WORKER_BRIEF).toContain("Your files count only once they are committed on your branch");
+    expect(team.WORKER_BRIEF).toContain("a `git add` and `git commit` of your files in your own folder before your final message is welcome");
   });
 
   it("puts scratch files in the evidence folder only — never in /tmp, never beside the project", () => {

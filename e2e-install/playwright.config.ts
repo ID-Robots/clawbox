@@ -40,6 +40,8 @@ export default defineConfig({
     locale: "en-US",
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
+    // Specs that wait on explicit readiness first (helpers/readiness.ts) set
+    // a normal action timeout of their own via `test.use(READY_ACTION_TIMEOUT)`.
     actionTimeout: 60_000,
     navigationTimeout: 120_000,
     ignoreHTTPSErrors: true,

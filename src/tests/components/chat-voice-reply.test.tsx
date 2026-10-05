@@ -457,15 +457,51 @@ describe("spoken replies in the desktop chat", () => {
     supplementAudio = "/home/clawbox/.openclaw/media/outbound/voice-1787260000500---bb.wav";
     render(<ChatPopup isOpen onClose={() => {}} />);
     await typeIntoTheChat();
-    await settleAfterTheTurn();
     // One per reply in this transcript (the chat's opening turn and the typed
     // one), and every one of them the GATEWAY'S clip — not a `blob:` this
     // chat made. A synthesis this chat may also have started has nowhere to go
     // and is released by the ring; what must never happen is the owner being
     // shown two players for one answer.
-    const srcs = screen.queryAllByTestId("chat-audio").map((el) => el.getAttribute("src") ?? "");
+    //
+    // Waited for as a POSITIVE end state first: the turn-status line goes the
+    // moment the first final lands, and the gateway's supplement is a later
+    // frame. Read at a fixed 60 ms after that, a loaded runner could still be
+    // between the two — and a synthesis this chat started could still be on
+    // its way to a bubble.
+    const players = () => screen.queryAllByTestId("chat-audio").map((el) => el.getAttribute("src") ?? "");
+    await waitFor(() => {
+      expect(players()).toHaveLength(2);
+      expect(players().every((src) => src.includes("/setup-api/chat/media"))).toBe(true);
+    });
+    // Then the settle, after which a synthesis this chat started has had its
+    // chance to reach a bubble: a third player still may not appear.
+    await settleAfterTheTurn();
+    const srcs = players();
     expect(srcs).toHaveLength(2);
     expect(srcs.every((src) => src.includes("/setup-api/chat/media"))).toBe(true);
+  });
+
+  it("keeps ONE player when the gateway's clip lands after this chat's own", async () => {
+    // The other side of that race, made certain: the box has already spoken
+    // the reply for this chat and put the clip on the bubble when the
+    // gateway's supplement arrives. Merging the two put both players on one
+    // answer; the gateway's clip takes the bubble instead.
+    replyText = "Fine, thanks.";
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    // The chat's opening turn, answered with no clip from anyone.
+    await screen.findByText("Fine, thanks.", { exact: false });
+    await waitFor(() => expect(screen.queryByTestId("chat-turn-status")).toBeNull());
+    // The typed one: spoken here first, the gateway's own clip long after.
+    supplementAudio = "/home/clawbox/.openclaw/media/outbound/voice-1787260000500---bb.wav";
+    supplementDelayMs = 250;
+    await typeIntoTheChat();
+    await waitFor(() => expect(speakBodies).toEqual([JSON.stringify({ text: "Fine, thanks." })]));
+    await waitFor(() => expect(screen.queryAllByTestId("chat-audio").map((el) => el.getAttribute("src"))).toEqual(["blob:spoken-reply"]));
+    await waitFor(() => {
+      const srcs = screen.queryAllByTestId("chat-audio").map((el) => el.getAttribute("src") ?? "");
+      expect(srcs).toHaveLength(1);
+      expect(srcs[0]).toContain("/setup-api/chat/media");
+    });
   });
 
   it("stays silent while the owner's switch is off, and follows the switch live", async () => {

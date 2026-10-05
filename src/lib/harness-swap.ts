@@ -238,7 +238,15 @@ export function swapRequestPath(): string {
 const SWAP_REQUEST_MAX_BYTES = 256;
 
 export async function writeSwapRequest(target: Harness, now: number = Date.now()): Promise<void> {
-  const envPath = swapRequestPath();
+  await writeEditionRequestFile(swapRequestPath(), target, now);
+}
+
+/**
+ * The writer behind {@link writeSwapRequest}, for any root step that takes its
+ * target edition this way — the setup wizard's `edition_select` (TASK-1149)
+ * writes `data/edition-select.env` through it. Same file class, same rules.
+ */
+export async function writeEditionRequestFile(envPath: string, target: Harness, now: number = Date.now()): Promise<void> {
   const tmpPath = path.join(path.dirname(envPath), `.${path.basename(envPath)}.${randomUUID()}.tmp`);
   try {
     await fs.mkdir(path.dirname(envPath), { recursive: true });
@@ -267,7 +275,11 @@ export interface SwapRequest {
  * so the route never reports a target the step would refuse.
  */
 export async function readSwapRequest(): Promise<SwapRequest | null> {
-  const envPath = swapRequestPath();
+  return readEditionRequestFile(swapRequestPath());
+}
+
+/** The reader behind {@link readSwapRequest}; the gates are the file's, not the swap's. */
+export async function readEditionRequestFile(envPath: string): Promise<SwapRequest | null> {
   // One O_NOFOLLOW handle, judged and read through the same descriptor: a
   // path-level stat followed by readFile lets the file be swapped for a link
   // between the two calls (CodeQL js/file-system-race) — the root reader

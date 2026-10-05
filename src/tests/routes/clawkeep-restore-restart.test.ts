@@ -35,6 +35,7 @@ const h = vi.hoisted(() => ({
   ownerSession: true,
   sameOrigin: true,
   restoreCalls: 0,
+  restoreExtra: {} as Record<string, unknown>,
 }));
 
 // A restore is OWNER-ONLY and same-origin: middleware admits the MCP bearer to
@@ -94,6 +95,7 @@ vi.mock("@/lib/clawkeep", () => ({
       archiveBytes: 4096,
       assets: [],
       skippedMembers: [],
+      ...h.restoreExtra,
     };
   },
 }));
@@ -121,6 +123,7 @@ beforeEach(() => {
   h.ownerSession = true;
   h.sameOrigin = true;
   h.restoreCalls = 0;
+  h.restoreExtra = {};
 });
 
 describe("POST /setup-api/clawkeep/restore — who may ask", () => {
@@ -264,5 +267,22 @@ describe("POST /setup-api/clawkeep/restore — bringing the state holder back", 
     h.edition = "hermes";
     await post();
     expect(h.execCalls.some((c) => c.args.join(" ").includes("clawbox-gateway"))).toBe(false);
+  });
+});
+
+describe("POST /setup-api/clawkeep/restore — what the snapshot never carried", () => {
+  it("passes the links the backup skipped through to the card (TASK-1304)", async () => {
+    const links = [{ path: "~/.openclaw/workspace/docs/catalogue", target: "/srv/shared/catalogue" }];
+    h.restoreExtra = { skippedLinks: links, skippedLinkCount: 4 };
+    const body = await (await post()).json();
+    expect(body.ok).toBe(true);
+    expect(body.skippedLinks).toEqual(links);
+    expect(body.skippedLinkCount).toBe(4);
+  });
+
+  it("answers an empty list for a daemon that predates the field", async () => {
+    const body = await (await post()).json();
+    expect(body.skippedLinks).toEqual([]);
+    expect(body.skippedLinkCount).toBe(0);
   });
 });

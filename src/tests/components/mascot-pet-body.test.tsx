@@ -10,8 +10,9 @@
 
 import { type ComponentProps } from "react";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { render, waitFor, cleanup, fireEvent } from "@/tests/helpers/test-utils";
-import Mascot from "@/components/Mascot";
+import { render, waitFor, cleanup, fireEvent, act } from "@/tests/helpers/test-utils";
+import Mascot, { AMBIENT_FPS } from "@/components/Mascot";
+import { EGG_IDLE_STEPS } from "@/components/EggMascot";
 import PetSprite, { PET_BODY_PX } from "@/components/PetSprite";
 import { invalidatePetStatus } from "@/lib/pet-client";
 import { CODEX_STATE_ROWS, LEGACY_STATE_ROWS } from "@/lib/pet-state-map";
@@ -155,7 +156,7 @@ describe("edition gating", () => {
     await waitFor(() => expect(container.querySelector('[data-pet="vibrant-clawd"]')).toBeTruthy());
     expect(container.querySelector('img[src="/clawbox-crab.png"]')).toBeNull();
     expect(container.querySelector('[data-mascot="egg"]')).toBeNull();
-    const sprite = container.querySelector("[data-pet]") as HTMLElement;
+    const sprite = container.querySelector("[data-pet] [data-pet-strip]") as HTMLElement;
     expect(sprite.style.backgroundImage).toContain("slug=vibrant-clawd");
   });
 
@@ -200,6 +201,20 @@ describe("edition gating", () => {
       .map((el) => el.getAttribute("style") ?? "")
       .join(" ");
     expect(styled).toContain("mascot-");
+  });
+
+  it("pauses the resting crab's bob and steps it on a timer, never a free-running animation", async () => {
+    // A running CSS animation makes the browser produce a frame 60 times a
+    // second, all day; the resting moods are paused and stepped at AMBIENT_FPS.
+    stubPetsRoute({ supported: false, edition: "openclaw", enabled: false, active: null });
+    const { container } = render(<Mascot />);
+    await waitFor(() => expect(container.querySelector('img[src="/clawbox-crab.png"]')).toBeTruthy());
+    const styled = Array.from(container.querySelectorAll("[style]"))
+      .map((el) => el.getAttribute("style") ?? "")
+      .join(" ");
+    expect(styled).toContain("mascot-idle 3s ease-in-out infinite paused");
+    expect(AMBIENT_FPS).toBeGreaterThanOrEqual(10);
+    expect(AMBIENT_FPS).toBeLessThanOrEqual(30);
   });
 
   it("runs no wrapper keyframe on a pet — it animates by stepping frames", async () => {
@@ -489,16 +504,35 @@ describe("edition gating", () => {
     stubPetsRoute(FRESH_HERMES);
     const { container } = render(<Mascot />);
     await waitFor(() => expect(container.querySelector("[data-egg-sprite]")).toBeTruthy());
-    // Frames 9-11 are the crack and the burst. At 56px a cell, any offset at
-    // or beyond -504px is one of them, and a cracking egg on a box where
-    // nothing is hatching would be a lie about the device's state.
-    const css = Array.from(container.querySelectorAll("style"))
-      .map((el) => el.textContent ?? "")
-      .join(" ");
-    const offsets = Array.from(css.matchAll(/background-position-y:(-?\d+)px/g)).map((m) => Number(m[1]));
-    expect(offsets.length).toBeGreaterThan(0);
-    for (const offset of offsets) {
-      expect(Math.abs(offset) / 56).toBeLessThanOrEqual(5);
+    // Frames 9-11 are the crack and the burst. A cracking egg on a box where
+    // nothing is hatching would be a lie about the device's state: the idle
+    // bounce only ever shows frames 0-5.
+    expect(EGG_IDLE_STEPS.length).toBeGreaterThan(0);
+    for (const [frame] of EGG_IDLE_STEPS) expect(frame).toBeLessThanOrEqual(5);
+    // And no CSS animation does the bouncing (one would recalculate style 60
+    // times a second, all day).
+    const sprite = container.querySelector("[data-egg-sprite]") as HTMLElement;
+    expect(sprite.getAttribute("class") ?? "").toBe("");
+    const css = Array.from(container.querySelectorAll("style")).map((el) => el.textContent ?? "").join(" ");
+    expect(css).not.toContain("background-position");
+  });
+
+  it("bounces the egg on a timer through exactly the idle frames", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      stubPetsRoute(FRESH_HERMES);
+      const { container } = render(<Mascot />);
+      await vi.waitFor(() => expect(container.querySelector("[data-egg-sprite]")).toBeTruthy());
+      const sprite = container.querySelector("[data-egg-sprite]") as HTMLElement;
+      const seen = new Set<string>();
+      for (let i = 0; i < 200; i++) {
+        act(() => { vi.advanceTimersByTime(50); });
+        seen.add(sprite.style.backgroundPositionY || "0px");
+      }
+      const frames = [...seen].map((v) => Math.abs(Math.round(parseFloat(v) / 56))).sort((a, b) => a - b);
+      expect(frames).toEqual([0, 1, 2, 3, 4, 5]);
+    } finally {
+      vi.useRealTimers();
     }
   });
 
@@ -726,7 +760,11 @@ describe("PetSprite", () => {
   // jsdom's CSS engine drops several of the shorthands React writes here
   // (`animation`, `background-size`), so assert on the style ATTRIBUTE — the
   // string the browser actually receives — rather than on the parsed CSSOM.
-  const css = (el: HTMLElement) => el.getAttribute("style") ?? "";
+  // The pet is a clip (`[data-pet]`: placement, facing, squash) around the
+  // sprite strip (`[data-pet-strip]`: the sheet and the animation); both are
+  // read together.
+  const css = (el: HTMLElement) =>
+    (el.getAttribute("style") ?? "") + ";" + (el.querySelector("[data-pet-strip]")?.getAttribute("style") ?? "");
 
   it("points at the device's own sprite route, never at the Petdex CDN", async () => {
     const style = css(sprite());
@@ -743,8 +781,61 @@ describe("PetSprite", () => {
     // own grid; 8 cols x 9 rows of that size here.
     expect(style).toContain(`height: ${PET_BODY_PX}px`);
     expect(style).toContain(`background-size: ${8 * (PET_BODY_PX * 192 / 208)}px ${9 * PET_BODY_PX}px`);
-    expect(style).toContain("1100ms");
+    // Six frames over the sheet's 1100 ms loop.
+    expect(sprite().dataset.petFrameMs).toBe(String(Math.round(1100 / 6)));
     expect(style).toContain("pixelated");
+  });
+
+  it("is not a CSS animation: a timer steps the strip's transform", async () => {
+    // Any running CSS animation has the browser recalculate style 60 times a
+    // second; the picture changes six times a second, and only then is there
+    // work (one transform on the strip's own layer).
+    vi.useFakeTimers();
+    try {
+      const el = sprite();
+      const strip = el.querySelector("[data-pet-strip]") as HTMLElement;
+      const step = Number(el.dataset.petFrameMs);
+      expect(css(el)).not.toMatch(/animation/);
+      const seen = [strip.style.transform];
+      for (let i = 0; i < 6; i++) {
+        act(() => { vi.advanceTimersByTime(step); });
+        seen.push(strip.style.transform);
+      }
+      const w = (PET_BODY_PX * 192) / 208;
+      expect(seen.slice(0, 3)).toEqual(["translate(0px, 0px)", `translate(${-w}px, 0px)`, `translate(${-2 * w}px, 0px)`]);
+      // Round the loop: the seventh step is the first frame again.
+      expect(seen[6]).toBe("translate(0px, 0px)");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("holds the first frame under reduced motion and while the desktop is hidden", async () => {
+    vi.useFakeTimers();
+    const realMatch = window.matchMedia;
+    window.matchMedia = ((q: string) => ({ matches: q.includes("reduce"), media: q, addEventListener: () => {}, removeEventListener: () => {} })) as unknown as typeof window.matchMedia;
+    try {
+      const el = sprite();
+      const strip = el.querySelector("[data-pet-strip]") as HTMLElement;
+      act(() => { vi.advanceTimersByTime(5000); });
+      expect(strip.style.transform).toBe("translate(0px, 0px)");
+    } finally {
+      window.matchMedia = realMatch;
+      vi.useRealTimers();
+    }
+    vi.useFakeTimers();
+    const hidden = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+    try {
+      cleanup();
+      const el = sprite();
+      const strip = el.querySelector("[data-pet-strip]") as HTMLElement;
+      act(() => { vi.advanceTimersByTime(5000); });
+      expect(strip.style.transform).toBe("translate(0px, 0px)");
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      hidden.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it("scales the 208px cell by exactly a half, so the frames step on integers", async () => {
@@ -763,11 +854,27 @@ describe("PetSprite", () => {
     expect(el.dataset.petRow).toBe(String(CODEX_STATE_ROWS.indexOf("waving")));
     expect(el.dataset.petFrames).toBe("4");
     // Four frames at the sheet's own frame rate, not four stretched over six.
-    expect(css(el)).toContain(`${Math.round((1100 * 4) / 6)}ms`);
-    // The last drawn column, and no further.
-    const keyframes = waving.container.querySelector("style")?.textContent ?? "";
-    expect(keyframes).toContain(`background-position-x:${-3 * ((PET_BODY_PX * 192) / 208)}px`);
-    expect(keyframes).not.toContain(`background-position-x:${-4 * ((PET_BODY_PX * 192) / 208)}px`);
+    expect(Number(el.dataset.petFrameMs)).toBe(Math.round(Math.round((1100 * 4) / 6) / 4));
+  });
+
+  it("steps through exactly the drawn columns", async () => {
+    vi.useFakeTimers();
+    try {
+      const waving = render(<PetSprite pet={MEASURED_PET} state="dance" facing="right" />);
+      const el = waving.container.querySelector("[data-pet]") as HTMLElement;
+      const strip = el.querySelector("[data-pet-strip]") as HTMLElement;
+      const step = Number(el.dataset.petFrameMs);
+      const xs = new Set<string>([strip.style.transform.split(",")[0]]);
+      for (let i = 0; i < 8; i++) {
+        act(() => { vi.advanceTimersByTime(step); });
+        xs.add(strip.style.transform.split(",")[0]);
+      }
+      const w = (PET_BODY_PX * 192) / 208;
+      // The last drawn column, and no further.
+      expect([...xs].sort()).toEqual([0, 1, 2, 3].map((i) => `translate(${-i * w}px`).sort());
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("puts each frame's own feet on the ground line", async () => {
@@ -775,10 +882,10 @@ describe("PetSprite", () => {
     // a different amount per row, so aligning the cell floated every pet.
     const jumping = render(<PetSprite pet={MEASURED_PET} state="jump" facing="right" />);
     const el = jumping.container.querySelector("[data-pet]") as HTMLElement;
-    const keyframes = jumping.container.querySelector("style")?.textContent ?? "";
     // row 4 insets its art 20 source px; at a half scale that is 10 CSS px of
-    // downward shift, carried by the SAME animation that selects the frame.
-    expect(keyframes).toContain("bottom:-10px");
+    // downward shift, carried by the SAME transform that selects the frame —
+    // and the clip reaches that far below the ground line so it is not cut off.
+    expect(css(el)).toContain("translate(0px, 10px)");
     expect(css(el)).toContain("bottom: -10px");
   });
 

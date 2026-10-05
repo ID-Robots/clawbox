@@ -733,14 +733,28 @@ describe("the ClawBox AI cloud embedder", () => {
       }
     };
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    // The moment the pass arms its pause is observed, not polled for. Every
+    // wall-clock bound on "has it got there yet" (a count of event-loop turns,
+    // then a 10 s deadline) was a race against the real sqlite and filesystem
+    // work ahead of the pause, and lost it on a loaded runner. The fake
+    // `setTimeout` is wrapped so the pass itself says when it is waiting.
+    const fakeSetTimeout = globalThis.setTimeout;
+    let pauseArmed!: () => void;
+    const armed = new Promise<void>((resolve) => { pauseArmed = resolve; });
+    globalThis.setTimeout = ((fn: () => void, ms?: number, ...args: unknown[]) => {
+      const timer = fakeSetTimeout(fn, ms, ...args);
+      if (ms === EMBED_RETRY_MIN_WAIT_MS) pauseArmed();
+      return timer;
+    }) as typeof setTimeout;
     try {
       let settled = false;
       const pass = runLocalIndexPass("full").finally(() => { settled = true; });
-      // Let the pass get as far as arming its retry pause. Bounded, so a pass
-      // that never arms one fails on the assertion below rather than hanging.
-      for (let i = 0; i < 200 && vi.getTimerCount() === 0 && !settled; i += 1) {
-        await new Promise<void>((resolve) => { setImmediate(resolve); });
-      }
+      // A pass that ends without ever pausing fails here rather than hanging.
+      const first = await Promise.race([
+        armed.then(() => "paused" as const),
+        pass.then(() => "ended" as const, () => "ended" as const),
+      ]);
+      expect(first).toBe("paused");
       expect(vi.getTimerCount()).toBe(1);
       const asked = embedCalls.urls.length;
       // A tick SHORT of the floor, and time for a request released early to
@@ -755,6 +769,7 @@ describe("the ClawBox AI cloud embedder", () => {
       expect(embedCalls.urls.length).toBeGreaterThan(asked);
       expect(result.files).toBe(1);
     } finally {
+      globalThis.setTimeout = fakeSetTimeout;
       vi.useRealTimers();
     }
   });

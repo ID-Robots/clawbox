@@ -48,7 +48,11 @@ beforeEach(async () => {
 
 afterEach(async () => {
   delete process.env.CLAWKEEP_DATA_DIR;
-  await fs.rm(tmpDir, { recursive: true, force: true });
+  // Retried: a test that drives a real pass leaves the module's background
+  // status refresh behind it, and `rm -r` over a tree another process is
+  // still touching answers ENOTEMPTY rather than waiting. The suites below
+  // join that refresh before they finish; this is the backstop.
+  await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
 async function lib() {
@@ -1140,14 +1144,27 @@ describe("how far an OpenClaw pass has got", () => {
    * reach the card if the pass is run on a pseudo-terminal with that flag —
    * which is exactly what the bytes below demand. It also writes chunks into
    * a scratch index as it goes, the way a full reindex does.
+   *
+   * It is `memory index` and nothing else. The module refreshes the status
+   * behind a finished pass (`memory status --json`, from the same binary), and
+   * a stand-in that indexed whatever it was asked started a SECOND pass there:
+   * a new scratch index growing in `agents/main/agent` after the run had
+   * settled, racing this file's `afterEach` delete of the directory —
+   * `ENOTEMPTY` on a loaded CI runner, intermittently, in whichever pull
+   * request happened to be running.
    */
-  async function fakeIndexer(total: number): Promise<{ script: string; db: string }> {
+  async function fakeIndexer(total: number, { gated = false } = {}): Promise<{ script: string; db: string; gate: (n: number) => Promise<void> }> {
     const db = path.join(tmpDir, "agents", "main", "agent", "openclaw-agent.sqlite");
     await fs.mkdir(path.dirname(db), { recursive: true });
     const script = path.join(tmpDir, "fake-index.mjs");
+    const gates = path.join(tmpDir, "gates");
+    await fs.mkdir(gates, { recursive: true });
     await fs.writeFile(script, [
       `#!${process.execPath}`,
       "import { DatabaseSync } from 'node:sqlite';",
+      "import { existsSync } from 'node:fs';",
+      // Any other subcommand — the status refresh — answers nothing and touches nothing.
+      "if (process.argv.slice(2, 4).join(' ') !== 'memory index') process.exit(0);",
       "const verbose = process.argv.includes('--verbose');",
       "const tty = process.stderr.isTTY === true;",
       `const scratch = new DatabaseSync(${JSON.stringify(db)} + '.memory-reindex-' + crypto.randomUUID());`,
@@ -1155,42 +1172,66 @@ describe("how far an OpenClaw pass has got", () => {
       "scratch.exec('CREATE TABLE memory_index_chunks (id TEXT PRIMARY KEY)');",
       "const add = scratch.prepare('INSERT INTO memory_index_chunks VALUES (?)');",
       `const total = ${total};`,
+      // Gated: step n waits for the test to have SEEN step n-1 (a file it
+      // writes), rather than for a wall-clock interval. The card's numbers are
+      // sampled by a 1 s poll and a 1.5 s write throttle inside the module, so
+      // a pass paced by sleeps could finish between two samples on a loaded
+      // runner and the test would see one value, or none.
+      `const gated = ${JSON.stringify(gated)};`,
+      `const gates = ${JSON.stringify(gates)};`,
+      "const gate = async (n) => { if (!gated) { await new Promise((r) => setTimeout(r, 400)); return; } const until = Date.now() + 25000; while (!existsSync(gates + '/' + n) && Date.now() < until) await new Promise((r) => setTimeout(r, 20)); };",
       "const say = (done) => { if (tty && verbose) process.stderr.write(`\\r\\x1b[2KIndexing memory files\\u2026 ${done}/${total} \\u00b7 elapsed 0:0${done % 10} ${Math.round(done / total * 100)}%`); };",
       "say(0);",
       "for (let done = 1; done <= total; done += 1) {",
-      "  await new Promise((r) => setTimeout(r, 400));",
+      "  await gate(done - 1);",
       "  add.run('a' + done); add.run('b' + done);",
       "  say(done);",
       "}",
+      "if (gated) await gate(total);",
       "scratch.close();",
       "process.stderr.write('\\r\\x1b[2KMemory index updated (main): ' + total + ' files indexed.\\r\\n');",
       "",
     ].join("\n"), { mode: 0o755 });
-    return { script, db };
+    return { script, db, gate: (n) => fs.writeFile(path.join(gates, String(n)), "") };
   }
 
   it("publishes files done of total and the chunks written while the pass runs, then clears them", async () => {
-    const { script, db } = await fakeIndexer(8);
+    const total = 3;
+    const { script, db, gate } = await fakeIndexer(total, { gated: true });
     process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
     process.env.CLAWKEEP_MEMORY_EMBED_LOCK = path.join(tmpDir, "embed.lock");
     process.env.CLAWKEEP_MEMORY_AGENT_DB = db;
     vi.resetModules();
-    const { startMemoryIndex, readMemoryRunState } = await import("@/lib/clawkeep-memory");
+    const { startMemoryIndex, readMemoryRunState, getMemoryStatus } = await import("@/lib/clawkeep-memory");
     expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
 
+    // Lock-step with the pass: each file is only indexed once the card has
+    // shown the one before it, so every step is observed however slow the
+    // runner is. The last step is also held until the chunk count has landed.
     const seen: Array<{ filesDone: number; filesTotal: number; chunks: number }> = [];
-    for (let i = 0; i < 400; i += 1) {
-      const run = await readMemoryRunState();
-      if (run.status !== "running") break;
-      if (run.progress && run.progress.filesTotal > 0) seen.push(run.progress);
-      await new Promise((r) => setTimeout(r, 50));
+    for (let step = 0; step <= total; step += 1) {
+      const deadline = Date.now() + 20_000;
+      for (;;) {
+        const run = await readMemoryRunState();
+        expect(run.status).toBe("running");
+        if (run.progress && run.progress.filesTotal > 0) {
+          seen.push(run.progress);
+          if (run.progress.filesDone === step && (step < total || run.progress.chunks > 0)) break;
+        }
+        if (Date.now() > deadline) throw new Error(`the card never showed ${step}/${total}: ${JSON.stringify(seen.slice(-3))}`);
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      await gate(step);
     }
     const settled = await settledMemoryRun(tmpDir);
     expect(settled.status).toBe("succeeded");
+    // Join the status refresh the finished run starts, so no process the
+    // module spawned is still running when the directory is removed.
+    await getMemoryStatus();
 
     // A real fraction, with the total the CLI's scan found.
     expect(seen.length).toBeGreaterThan(1);
-    expect(seen.every((p) => p.filesTotal === 8)).toBe(true);
+    expect(seen.every((p) => p.filesTotal === total)).toBe(true);
     expect(seen.every((p) => p.filesDone <= p.filesTotal)).toBe(true);
     // It MOVES — the whole complaint was a bar with no numbers for the length
     // of the pass.
@@ -1210,7 +1251,7 @@ describe("how far an OpenClaw pass has got", () => {
     process.env.CLAWKEEP_MEMORY_AGENT_DB = db;
     process.env.CLAWKEEP_MEMORY_PTY_HOST = path.join(tmpDir, "no-such-script");
     vi.resetModules();
-    const { startMemoryIndex, readMemoryRunState } = await import("@/lib/clawkeep-memory");
+    const { startMemoryIndex, readMemoryRunState, getMemoryStatus } = await import("@/lib/clawkeep-memory");
     expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
     const totals = new Set<number>();
     for (let i = 0; i < 200; i += 1) {
@@ -1221,7 +1262,9 @@ describe("how far an OpenClaw pass has got", () => {
     }
     // The run still happens — only the numbers are missing, and no total is
     // ever invented for it.
-    expect((await settledMemoryRun(tmpDir)).status).toBe("succeeded");
+    expect((await settledMemoryRun(tmpDir, { tries: 1000 })).status).toBe("succeeded");
+    // See above: nothing the module started may outlive the test.
+    await getMemoryStatus();
     expect([...totals]).toEqual([0]);
   });
 });

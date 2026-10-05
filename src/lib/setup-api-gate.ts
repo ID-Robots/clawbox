@@ -56,6 +56,14 @@ export const BOOTSTRAP_ALLOWED_PREFIXES = [
   "/setup-api/wifi/connect-status",
   "/setup-api/wifi/ethernet",
 
+  // Between steps 1 and 2 on a unified-image box — EditionStep ("Choose your
+  // assistant", TASK-1149). POST starts the `edition_select` root step, so it
+  // is the same class as update/run below and is bounded the same way: it
+  // ALSO checks `requireSession({ allowBootstrap: true })` in-handler, and it
+  // is one-shot by construction — it refuses (409) once setup is complete and
+  // on every box whose root-owned lock is not `unselected`.
+  "/setup-api/setup/edition",
+
   // Step 2 — UpdateStep. update/run kicks off the root updater, which is why
   // it ALSO checks `requireSession({ allowBootstrap: true })` in-handler: the
   // moment a password exists this stops being reachable, middleware or not.

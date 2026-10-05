@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from 'react'
 import { useT } from '@/lib/i18n'
 import { announcePetChanged } from '@/lib/pet-client'
 import { CURATED_PETS } from '@/lib/pet-curated'
@@ -39,8 +39,6 @@ const EGG_PX = 56
 /** Where the egg waits if the shelf never turns up — the crab's desktop floor. */
 const DESKTOP_FLOOR_PX = 8
 
-const IDLE_KEYFRAME = 'clawbox-egg-idle'
-const SPRITE_CLASS = 'clawbox-egg-sprite'
 
 /**
  * One long rest, then a fast six-frame bounce, forever (~4.2 s round trip).
@@ -48,7 +46,9 @@ const SPRITE_CLASS = 'clawbox-egg-sprite'
  * Upstream's egg rests on frame 0 for a long randomised gap so it reads as
  * "occasionally stirs" rather than "constantly animating". A lone placeholder
  * has no neighbours to desynchronise from, so the same feel comes from a fixed
- * CSS cycle with no rAF loop and no JS timer.
+ * cycle — stepped by a timer, not a CSS animation: a running CSS animation has
+ * the browser recalculate style 60 times a second for as long as it runs, and
+ * this one runs all day for a picture that changes six times in 4.2 s.
  */
 const IDLE_CYCLE_MS = 4200
 
@@ -75,14 +75,24 @@ const CREME_FILTER = 'brightness(1.14) sepia(0.38) saturate(1.25) contrast(1.05)
  * squash/stretch poses (verified pixel-wise: 0/2/4/6/8 are identical, 1/3/5/7
  * too), and 0-5 is the range upstream itself calls the intact bounce.
  *
- * `step-end` because these are discrete cells — interpolating would slide the
- * sheet and show two half-eggs. Reduced motion is honoured by the global `*`
- * rule in `globals.css` (as `PetSprite` also relies on), which collapses the
- * loop to its frame-0 rest pose.
+ * Discrete cells, never interpolated — sliding the sheet would show two
+ * half-eggs. Reduced motion holds the frame-0 rest pose, and nothing runs
+ * while the desktop is hidden.
  */
+export const EGG_IDLE_STEPS: ReadonlyArray<readonly [frame: number, ms: number]> = [
+  [1, IDLE_CYCLE_MS * 0.02],
+  [2, IDLE_CYCLE_MS * 0.02],
+  [3, IDLE_CYCLE_MS * 0.02],
+  [4, IDLE_CYCLE_MS * 0.02],
+  [5, IDLE_CYCLE_MS * 0.02],
+  [0, IDLE_CYCLE_MS * 0.9],
+]
+/** The first rest, before the first bounce. */
+const IDLE_FIRST_REST_MS = IDLE_CYCLE_MS * 0.85
 /** The hatch: crack, crack wider, burst — the back half of the sheet the idle
- *  loop must never reach on its own. Stepped by JS state, not by a keyframe,
- *  so the "no cracked shell at rest" invariant stays checkable in the CSS. */
+ *  loop must never reach on its own. Stepped by JS state; the idle loop's own
+ *  frames are EGG_IDLE_STEPS, so the "no cracked shell at rest" invariant is
+ *  checkable there. */
 const HATCH_FRAMES = [9, 10, 11]
 const HATCH_FRAME_MS = 280
 /** The pause on the burst frame before the pet takes the shelf. */
@@ -96,14 +106,56 @@ const HATCHING_CLASS = 'clawbox-egg-hatching'
 
 type HatchPhase = 'idle' | 'hatching' | 'burst' | 'fading'
 
-const idleCss = (() => {
-  const at = (frame: number) => `background-position-y:${-frame * EGG_PX}px`
-  return `@keyframes ${IDLE_KEYFRAME}{` +
-    `0%,84%{${at(0)}}85%{${at(1)}}87%{${at(2)}}89%{${at(3)}}91%{${at(4)}}93%{${at(5)}}95%,100%{${at(0)}}` +
-    `}.${SPRITE_CLASS}{animation:${IDLE_KEYFRAME} ${IDLE_CYCLE_MS}ms step-end infinite}` +
-    `@keyframes ${WOBBLE_KEYFRAME}{0%{transform:rotate(-8deg)}50%{transform:rotate(8deg)}100%{transform:rotate(-8deg)}}` +
-    `.${HATCHING_CLASS}{animation:${WOBBLE_KEYFRAME} 340ms ease-in-out infinite;transform-origin:50% 92%}`
-})()
+// Only the hatch's wobble is a CSS animation, and only while it hatches.
+const hatchCss =
+  `@keyframes ${WOBBLE_KEYFRAME}{0%{transform:rotate(-8deg)}50%{transform:rotate(8deg)}100%{transform:rotate(-8deg)}}` +
+  `.${HATCHING_CLASS}{animation:${WOBBLE_KEYFRAME} 340ms ease-in-out infinite;transform-origin:50% 92%}`
+
+/**
+ * The idle bounce on `ref`'s background, by direct writes on a timer (see
+ * EGG_IDLE_STEPS). Off while `active` is false — the burst frame is React's —
+ * and while reduced motion is asked for or the desktop is hidden.
+ *
+ * A LAYOUT effect, and its cleanup leaves the sprite alone. React writes the
+ * burst's first frame in the same commit that turns this off, before the
+ * cleanup runs: a cleanup that put the rest frame back overwrote it, and since
+ * the burst then sets that same frame again, nothing re-rendered it — the hatch
+ * opened on the rest pose instead of the first crack. A passive effect would
+ * also leave the timer armed until after paint, free to write one more bounce
+ * frame over the burst; a layout cleanup clears it inside the commit.
+ */
+function useIdleBounce(ref: RefObject<HTMLSpanElement | null>, active: boolean) {
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el || !active) return
+    let reduce: MediaQueryList | null = null
+    try { reduce = window.matchMedia('(prefers-reduced-motion: reduce)') } catch { reduce = null }
+    let step = -1
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const still = () => document.visibilityState === 'hidden' || reduce?.matches === true
+    const show = (frame: number) => { el.style.backgroundPositionY = `${-frame * EGG_PX}px` }
+    const tick = () => {
+      timer = null
+      if (still()) { step = -1; show(0); return }
+      step = (step + 1) % EGG_IDLE_STEPS.length
+      const [frame, ms] = EGG_IDLE_STEPS[step]
+      show(frame)
+      timer = setTimeout(tick, ms)
+    }
+    const resume = () => {
+      if (still()) { step = -1; show(0); return }
+      if (timer === null) timer = setTimeout(tick, step < 0 ? IDLE_FIRST_REST_MS : EGG_IDLE_STEPS[step][1])
+    }
+    resume()
+    document.addEventListener('visibilitychange', resume)
+    reduce?.addEventListener?.('change', resume)
+    return () => {
+      if (timer !== null) clearTimeout(timer)
+      document.removeEventListener('visibilitychange', resume)
+      reduce?.removeEventListener?.('change', resume)
+    }
+  }, [ref, active])
+}
 
 /**
  * The shelf's top edge, in px up from the viewport bottom.
@@ -202,6 +254,10 @@ export default function EggMascot() {
   const [burstFrame, setBurstFrame] = useState(HATCH_FRAMES[0])
   const [failed, setFailed] = useState(false)
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([])
+  const spriteRef = useRef<HTMLSpanElement>(null)
+  // The burst frame is React's (`backgroundPositionY` below); every other
+  // phase bounces at rest.
+  useIdleBounce(spriteRef, phase !== 'burst')
 
   // The pet's arrival unmounts this component mid-sequence; stale timers must
   // not fire state updates after that.
@@ -297,7 +353,7 @@ export default function EggMascot() {
         pointerEvents: 'none',
       }}
     >
-      <style>{idleCss}</style>
+      <style>{hatchCss}</style>
       {(hinting || failed) && (
         <div
           data-egg-hint
@@ -366,7 +422,7 @@ export default function EggMascot() {
       >
         <span
           data-egg-sprite
-          className={phase === 'burst' ? undefined : SPRITE_CLASS}
+          ref={spriteRef}
           aria-hidden="true"
           style={{
             display: 'block',

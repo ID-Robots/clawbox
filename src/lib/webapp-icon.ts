@@ -160,12 +160,13 @@ export interface WebappIconHints {
 /** Generations in progress, by app id: a repeat caller joins, never re-posts. */
 const inFlight = new Map<string, Promise<WebappIconOutcome>>();
 
-/** The one generation slot: the tail of a chain every generation waits on. */
-let generationSlot: Promise<void> = Promise.resolve();
+/** Is a generation drawing right now? Handed straight from one to the next, so
+ *  it is never false while anything is queued. */
+let generationRunning = false;
 
-/** Every generation admitted and not yet finished — the one running and the
- *  ones behind it. What a bounded caller is judged against. */
-let generationsAdmitted = 0;
+/** Who waits for the slot, by class, each in arrival order. A request is
+ *  always served before any background job that is still waiting. */
+const waitingGenerations: Record<GenerationPriority, Array<() => void>> = { request: [], background: [] };
 
 /** App ids whose last generation failed, and until when they are left alone. */
 const appCooldownUntil = new Map<string, number>();
@@ -462,11 +463,23 @@ export async function ensureIconFile(id: string, hints: WebappIconHints, hooks: 
 export class GenerationSlotBusy extends Error {}
 
 /**
+ * Which queue a generation joins.
+ *
+ * `background` is the icon pipeline: app icons, project icons and favicons,
+ * fire-and-forget, and none of them costs anybody anything by waiting.
+ * `request` is a caller with someone on the other end of a connection — a
+ * run's own `generate_image` — and it is served before every background job
+ * still waiting. Never before the one already drawing: that picture is
+ * already being paid for, and abandoning it would spend the allowance for
+ * nothing.
+ */
+export type GenerationPriority = "request" | "background";
+
+/**
  * Run `fn` when no other generation is running.
  *
- * A promise chain rather than a counter: each caller waits on the previous
- * caller's completion and hands its own to the next, so order is arrival order
- * and a throw inside `fn` releases the slot like a return does.
+ * A throw inside `fn` releases the slot like a return does. Within a class the
+ * order is arrival order; across classes every waiting request goes first.
  *
  * Exported because the ONE slot has to cover every generation this box pays
  * for — icons, project favicons and a run's own pictures alike — or N callers
@@ -478,35 +491,75 @@ export class GenerationSlotBusy extends Error {}
  * case — see the media image route — and one of those queued behind a
  * two-minute upstream budget is a connection and a promise the box cannot
  * reclaim for an answer the caller has already given up on.
+ *
+ * It counts only what the caller would actually wait for. Background jobs
+ * queued behind a request are not ahead of it, so they do not count against
+ * it. They used to: every run with pictures on queues its project's icon at
+ * start, a box with icons still owed queues several more, and a run's first
+ * picture was refused as "busy" in 30 ms behind work it would have jumped
+ * (TASK-1355, seen on lab2).
+ *
+ * The cost is that a steady stream of requests can keep background work
+ * waiting. That is bounded: requests are capped by `maxWaiting` and by each
+ * run's own picture cap, and a run's pictures come a few at a time with the
+ * model's own thinking between them, so the slot falls to the icons in the
+ * gaps.
  */
 export async function withGenerationSlot<T>(
   fn: () => Promise<T>,
-  opts: { maxWaiting?: number } = {},
+  opts: { maxWaiting?: number; priority?: GenerationPriority } = {},
 ): Promise<T> {
-  // Counted at ADMISSION rather than from an in-flight flag, exactly as the
-  // speech queue counts its own: a burst that arrives together has set no
-  // flags yet, and would all be admitted by a test of "is one running".
-  if (opts.maxWaiting !== undefined && generationsAdmitted > opts.maxWaiting) {
+  const priority = opts.priority ?? "background";
+  // Counted at ADMISSION rather than once the caller is running, exactly as
+  // the speech queue counts its own: a burst that arrives together must see
+  // the earlier arrivals already queued, so nothing before this check or the
+  // enqueue below may await.
+  if (opts.maxWaiting !== undefined && generationsAhead(priority) > opts.maxWaiting) {
     throw new GenerationSlotBusy("This box is already generating as much as it can queue.");
   }
-  generationsAdmitted += 1;
-  const previous = generationSlot;
-  let release!: () => void;
-  generationSlot = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  await previous;
+  await takeGenerationSlot(priority);
   try {
     return await fn();
   } finally {
-    generationsAdmitted -= 1;
-    release();
+    releaseGenerationSlot();
   }
+}
+
+/** How many generations a new caller of this class would wait for: the one
+ *  drawing, and the waiting ones it would not jump. */
+function generationsAhead(priority: GenerationPriority): number {
+  const running = generationRunning ? 1 : 0;
+  const requests = waitingGenerations.request.length;
+  return priority === "request" ? running + requests : running + requests + waitingGenerations.background.length;
+}
+
+/** Take the slot now if it is free and nobody is queued, or queue for it. */
+function takeGenerationSlot(priority: GenerationPriority): Promise<void> {
+  if (!generationRunning) {
+    generationRunning = true;
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => {
+    waitingGenerations[priority].push(resolve);
+  });
+}
+
+/**
+ * Hand the slot to the next waiter, requests first, or free it.
+ *
+ * Handed over rather than freed and re-taken: `generationRunning` stays true
+ * across the hand-off, so a caller arriving before the next waiter resumes
+ * queues behind it instead of slipping in.
+ */
+function releaseGenerationSlot(): void {
+  const next = waitingGenerations.request.shift() ?? waitingGenerations.background.shift();
+  if (next) next();
+  else generationRunning = false;
 }
 
 /** For tests: how many generations hold or wait for the slot right now. */
 export function admittedGenerations(): number {
-  return generationsAdmitted;
+  return generationsAhead("background");
 }
 
 /** Is this app, or the whole box, inside a failure pause? */

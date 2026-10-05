@@ -162,7 +162,13 @@ function installOpenclawFetch(state: Record<string, unknown>) {
   );
 }
 
-const providerPill = () => screen.findByRole("button", { name: /^Chat provider:/ });
+// The pill is drawn once the gateway handshake and the model seed have landed:
+// ~0.7 s on an idle machine (median of 25 mounts, max ~1.4 s) and
+// several times that under a full parallel run, where the shared 5 s
+// `asyncUtilTimeout` (src/tests/setup.ts) was seen to run out. A lookup that
+// passes costs the same at any budget, and 10 s is still well inside the
+// suite's 30 s case ceiling, so a pill that never comes still fails here.
+const providerPill = () => screen.findByRole("button", { name: /^Chat provider:/ }, { timeout: 10_000 });
 const modelPill = () => screen.queryByRole("button", { name: /model:/i });
 
 beforeEach(() => {

@@ -1,18 +1,24 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { formatAccountReset } from "@/lib/anthropic-chat-swap";
 import { useT } from "@/lib/i18n";
+import { openInKiosk } from "@/lib/kiosk-tabs-client";
 
 /**
- * Settings → Providers → Anthropic accounts (TASK-902).
+ * Settings → Providers → Anthropic accounts (TASK-902, TASK-1260).
  *
- * More than one Anthropic account on the box, in the owner's order. A coding
- * run uses the first account that can answer; when that one hits its usage
- * limit the run moves to the next and carries on, and the first is used again
- * once its limit resets (src/lib/anthropic-accounts.ts). This card is where
- * the owner sees that happen — which account is in use, which is limited and
- * until when — and where accounts are connected, ordered, renamed,
- * re-authenticated and removed.
+ * More than one Anthropic account on the box, in the owner's order, and ONE of
+ * them active: every Claude consumer on the box — coding runs, the chat's
+ * gateway and its scheduled tasks — uses it. When it hits its usage limit, or
+ * Anthropic refuses its credential, all of them move to the next account
+ * together and the interrupted work carries on (src/lib/anthropic-swap.ts);
+ * the box stays there unless the owner turned on "return to the first
+ * account". This card is where the owner sees that happen — which account is
+ * active, which is limited and until when, the last swap and what each
+ * consumer did about it — and where accounts are connected, ordered (the first
+ * usable one in a new order becomes active), renamed, re-authenticated and
+ * removed.
  *
  * A Claude account is connected through the box's EXISTING Anthropic sign-in
  * (`/setup-api/ai-models/oauth/start` → the owner pastes the code Anthropic
@@ -36,13 +42,69 @@ interface AccountView {
   active: boolean;
 }
 
+type SwapCause = "limit" | "auth" | "reset" | "owner" | "removed" | "added" | "renewed";
+type ConsumerName = "coding" | "gateway" | "retries";
+
+interface ConsumerOutcome {
+  status: "ok" | "skipped" | "failed" | "pending";
+  code: string | null;
+  count: number | null;
+}
+
+interface SwapView {
+  at: number;
+  fromLabel: string | null;
+  toLabel: string | null;
+  cause: SwapCause;
+  limitedUntil: number | null;
+  nextResetAt: number | null;
+  consumers: Partial<Record<ConsumerName, ConsumerOutcome>>;
+}
+
 interface PoolView {
   accounts: AccountView[];
   health: { total: number; healthy: number; limited: number; allLimited: boolean; nextResetAt: number | null };
   activeAccountId: string | null;
   loginAvailable: boolean;
+  /** TASK-1260 — absent from an older server's answer. */
+  returnToPrimary?: boolean;
+  lastSwap?: SwapView | null;
+  /** Whether the chat's gateway follows the pool, and which account it holds. */
+  gateway?: { following: boolean; accountId: string | null; label: string | null } | null;
   /** POST only. */
   verified?: boolean;
+}
+
+const CAUSE_KEY: Record<SwapCause, string> = {
+  limit: "settings.anthropicAccounts.reasonLimitNoTime",
+  auth: "settings.anthropicAccounts.reasonAuth",
+  reset: "settings.anthropicAccounts.reasonReset",
+  owner: "settings.anthropicAccounts.reasonOwner",
+  removed: "settings.anthropicAccounts.reasonRemoved",
+  added: "settings.anthropicAccounts.reasonAdded",
+  renewed: "settings.anthropicAccounts.reasonRenewed",
+};
+
+const CONSUMER_KEY: Record<ConsumerName, string> = {
+  coding: "settings.anthropicAccounts.consumerCoding",
+  gateway: "settings.anthropicAccounts.consumerGateway",
+  retries: "settings.anthropicAccounts.consumerRetries",
+};
+
+/** A consumer's fixed outcome word, as the owner reads it. Never a process's own text. */
+function outcomeKey(outcome: ConsumerOutcome): string {
+  if (outcome.status === "pending") return outcome.code === "waiting_for_reset" ? "settings.anthropicAccounts.outcomeHeld" : "settings.anthropicAccounts.outcomePending";
+  if (outcome.status === "failed") return "settings.anthropicAccounts.outcomeFailed";
+  switch (outcome.code) {
+    case "moved": return "settings.anthropicAccounts.outcomeMoved";
+    case "nothing_running": return "settings.anthropicAccounts.outcomeNothing";
+    case "switched":
+    case "renewed":
+    case "already": return "settings.anthropicAccounts.outcomeSwitched";
+    case "retried": return "settings.anthropicAccounts.outcomeRetried";
+    case "not_transferable": return "settings.anthropicAccounts.outcomeNotTransferable";
+    default: return "settings.anthropicAccounts.outcomeNotAffected";
+  }
 }
 
 /** What the connect panel is doing: adding an account, or signing one in again. */
@@ -62,16 +124,7 @@ const KIND_KEY: Record<AccountKind, string> = {
 };
 
 /** A reset in the owner's own clock, with the weekday when it is not today. */
-function formatReset(at: number, locale: string, now: number): string {
-  const sameDay = new Date(at).toDateString() === new Date(now).toDateString();
-  try {
-    return new Intl.DateTimeFormat(locale, sameDay
-      ? { hour: "2-digit", minute: "2-digit" }
-      : { weekday: "short", hour: "2-digit", minute: "2-digit" }).format(new Date(at));
-  } catch {
-    return new Date(at).toISOString().slice(11, 16);
-  }
-}
+const formatReset = formatAccountReset;
 
 export default function AnthropicAccountsCard() {
   const { t, locale } = useT();
@@ -201,7 +254,10 @@ export default function AnthropicAccountsCard() {
       if (!res.ok) throw new Error(await readError(res));
       const { url } = await res.json() as { url?: unknown };
       if (typeof url !== "string" || !url.startsWith("https://")) throw new Error(t("settings.anthropicAccounts.actionFailed"));
-      window.open(url, "_blank", "noopener,noreferrer");
+      // On the laptop's kiosk Chrome this goes through the kiosk API, so the
+      // desktop's shelf lists the sign-in tab and can bring the owner back to
+      // paste the code; everywhere else it is the same window.open as before.
+      openInKiosk(url);
       setSignInOpened(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : t("settings.anthropicAccounts.actionFailed"));
@@ -264,6 +320,8 @@ export default function AnthropicAccountsCard() {
   const now = Date.now();
   const accounts = view?.accounts ?? [];
   const health = view?.health;
+  const activeAccount = accounts.find((a) => a.id === view?.activeAccountId) ?? null;
+  const lastSwap = view?.lastSwap ?? null;
 
   const summary = !view
     ? null
@@ -326,6 +384,36 @@ export default function AnthropicAccountsCard() {
       <p className="text-[11px] text-[var(--text-muted)] mb-4 leading-relaxed">
         {t("settings.anthropicAccounts.intro")}
       </p>
+
+      {view && accounts.length > 0 && (
+        health?.allLimited ? (
+          <div role="status" className="mb-3 flex items-start gap-2 rounded-xl border border-amber-500/25 bg-amber-500/[0.07] px-3 py-2 text-[11px] text-amber-200" data-testid="anthropic-accounts-all-limited">
+            <span className="material-symbols-rounded shrink-0" style={{ fontSize: 16 }} aria-hidden="true">hourglass_top</span>
+            <span>
+              {health.nextResetAt
+                ? t("settings.anthropicAccounts.allLimitedBanner", { time: formatReset(health.nextResetAt, locale, now) })
+                : t("settings.anthropicAccounts.noneCanAnswer")}
+            </span>
+          </div>
+        ) : activeAccount ? (
+          <p className="mb-3 flex items-start gap-2 text-[11px] text-[var(--text-secondary)]" data-testid="anthropic-accounts-active">
+            <span className="material-symbols-rounded shrink-0 text-emerald-300" style={{ fontSize: 16 }} aria-hidden="true">bolt</span>
+            {/* Where NEW work starts, and — said apart, because it can differ —
+                what the chat is on: it keeps its own sign-in until the box
+                first has to switch, and a run already under way finishes on
+                the account it started on while that one can answer. */}
+            <span>
+              {t("settings.anthropicAccounts.activeNow", { label: activeAccount.label })}
+              {" "}
+              <span data-testid="anthropic-accounts-chat">
+                {view.gateway?.following && view.gateway.label
+                  ? t("settings.anthropicAccounts.activeChatOn", { label: view.gateway.label })
+                  : t("settings.anthropicAccounts.activeChatOwn")}
+              </span>
+            </span>
+          </p>
+        ) : null
+      )}
 
       {!panel && errorAlert && <div className="mb-3">{errorAlert}</div>}
       <div role="status" aria-live="polite" className={note ? "mb-3 rounded-xl border border-amber-500/20 bg-amber-500/[0.06] px-3 py-2 text-[11px] text-amber-200" : ""}>
@@ -458,6 +546,58 @@ export default function AnthropicAccountsCard() {
             );
           })}
         </ol>
+      )}
+
+      {view && accounts.length > 1 && (
+        <label className="mt-3 flex items-start gap-2.5 cursor-pointer select-none" data-testid="anthropic-accounts-return-to-primary">
+          <input
+            type="checkbox"
+            className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--coral-bright)]"
+            checked={view.returnToPrimary === true}
+            disabled={busy !== null}
+            onChange={(e) => void act({ action: "set_return_to_primary", on: e.target.checked }, "preference")}
+          />
+          <span className="min-w-0">
+            <span className="block text-xs text-[var(--text-primary)]">{t("settings.anthropicAccounts.returnToPrimary")}</span>
+            <span className="block text-[11px] text-[var(--text-muted)] leading-relaxed">{t("settings.anthropicAccounts.returnToPrimaryHint")}</span>
+          </span>
+        </label>
+      )}
+
+      {lastSwap && (
+        <div className="mt-3 rounded-xl border border-white/[0.08] px-3 py-2.5" data-testid="anthropic-accounts-last-swap">
+          <p className="text-[10px] font-semibold uppercase tracking-widest text-[var(--text-muted)] mb-1">
+            {t("settings.anthropicAccounts.lastSwapTitle")}
+          </p>
+          <p className="text-xs text-[var(--text-primary)] break-words">
+            <span className="text-[var(--text-muted)]">{formatReset(lastSwap.at, locale, now)}</span>
+            {" · "}
+            {lastSwap.fromLabel ?? t("settings.anthropicAccounts.swapNoAccount")}
+            {" → "}
+            {lastSwap.toLabel ?? t("settings.anthropicAccounts.swapNoAccount")}
+          </p>
+          <p className="text-[11px] text-[var(--text-muted)]">
+            {lastSwap.cause === "limit" && lastSwap.limitedUntil
+              ? t("settings.anthropicAccounts.reasonLimit", { time: formatReset(lastSwap.limitedUntil, locale, now) })
+              : t(CAUSE_KEY[lastSwap.cause] ?? CAUSE_KEY.owner)}
+          </p>
+          {Object.keys(lastSwap.consumers ?? {}).length > 0 && (
+            <ul className="mt-1.5 space-y-0.5 list-none p-0 m-0">
+              {(["coding", "gateway", "retries"] as const).map((name) => {
+                const outcome = lastSwap.consumers?.[name];
+                if (!outcome) return null;
+                return (
+                  <li key={name} className="flex flex-wrap gap-x-1.5 text-[11px]" data-testid={`anthropic-accounts-swap-${name}`}>
+                    <span className="text-[var(--text-secondary)]">{t(CONSUMER_KEY[name])}:</span>
+                    <span className={outcome.status === "failed" ? "text-red-300" : outcome.status === "ok" ? "text-emerald-300" : "text-[var(--text-muted)]"}>
+                      {t(outcomeKey(outcome), { count: outcome.count ?? 0 })}
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
       )}
 
       {panel ? (

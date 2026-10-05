@@ -463,6 +463,7 @@ function healthyOpenclaw(): Record<string, string> {
     "clawbox-root-update@.service": "static:inactive",
     "clawbox-ap-watchdog.service": "static:inactive",
     "clawbox-codex-auth-sync.service": "static:inactive",
+    "clawbox-build-heal.service": "enabled:inactive",
   };
 }
 
@@ -525,6 +526,7 @@ d("step_validate_services sees units belonging to another edition", () => {
       "clawbox-root-update@.service": "static:inactive",
       "clawbox-ap-watchdog.service": "static:inactive",
       "clawbox-codex-auth-sync.service": "static:inactive",
+      "clawbox-build-heal.service": "enabled:inactive",
       "clawbox-gateway.service": "enabled:active",
     };
     const r = runValidator("hermes", hermes);
@@ -538,11 +540,12 @@ d("step_validate_services sees units belonging to another edition", () => {
     const withoutHermes = runValidator("openclaw", healthyOpenclaw());
     const total = /All (\d+) checks healthy/.exec(withoutHermes.stdout)?.[1];
     expect(total).toBeDefined();
-    // 5 active (test mode drops clawbox-ap + clawbox-performance) + 7 installed
-    // (clawbox-embed.service among them, on demand and never enabled) + 1 probe
+    // 5 active (test mode drops clawbox-ap + clawbox-performance) + 8 installed
+    // (clawbox-embed.service among them, on demand and never enabled, and
+    // clawbox-build-heal.service, the boot-time oneshot of TASK-1316) + 1 probe
     // (test mode drops the WiFi probe) + 1 on-device TTS verdict (openclaw
     // only — Hermes has no TTS step) + 3 foreign-unit checks.
-    expect(Number(total)).toBe(17);
+    expect(Number(total)).toBe(18);
   });
 });
 
@@ -708,7 +711,7 @@ describe("the foreign-unit registry", () => {
     // satisfies both, so dual accumulates nothing.
     expect(FOREIGN_REGISTRY).not.toContain("is_hermes_edition");
     expect(INSTALL_SH).toContain('has_hermes_harness() { [ "$CLAWBOX_EDITION" = "hermes" ] || [ "$CLAWBOX_EDITION" = "dual" ]; }');
-    expect(INSTALL_SH).toContain('has_openclaw_harness() { [ "$CLAWBOX_EDITION" != "hermes" ]; }');
+    expect(INSTALL_SH).toContain('has_openclaw_harness() { [ "$CLAWBOX_EDITION" = "openclaw" ] || [ "$CLAWBOX_EDITION" = "dual" ]; }');
   });
 
   it("every ClawBox-shipped harness unit is claimed by exactly one edition", () => {

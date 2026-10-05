@@ -5,7 +5,8 @@ It answers `backup create --dry-run --json` and `backup create --json --output
 three gates the field failures came from, with its sentences verbatim:
 
   * `assertArchiveSymbolicLinkTarget` — an absolute link whose real target is
-    outside every declared asset is refused ("must be relative"); a relative
+    outside every declared asset is refused ("must be relative"), and one whose
+    real target is inside is written as the relative link to it; a relative
     one that lands outside is refused ("outside the declared backup assets");
   * `createVerifiedSqliteSnapshot` — every `*.sqlite` must pass a full
     `integrity_check` and an empty `foreign_key_check`;
@@ -19,6 +20,8 @@ Knobs, all environment variables:
   FAKE_OPENCLAW_LEAVE        "1": a popped failure first publishes the archive
                              into the output dir, as a failed `--verify` does
   FAKE_OPENCLAW_CALLS        a file each call appends its argv to (JSON lines)
+  FAKE_OPENCLAW_NO_ABSOLUTE  "1": a stricter core that refuses EVERY absolute
+                             link, inside the assets or not
 """
 
 from __future__ import annotations
@@ -82,6 +85,9 @@ def main() -> None:
             fail(lines[0])
 
     roots = [a["sourcePath"] for a in assets]
+    no_absolute = os.environ.get("FAKE_OPENCLAW_NO_ABSOLUTE") == "1"
+    #: A member's link text, where the archive stores another than the disk's.
+    rewritten: dict[str, str] = {}
     members: list[tuple[str, str]] = []
     for asset in assets:
         for dirpath, dirnames, filenames in os.walk(asset["sourcePath"]):
@@ -103,11 +109,13 @@ def main() -> None:
                             real = os.path.realpath(link, strict=True)
                         except OSError:
                             real = None
-                        if real is None or not any(inside(real, r) for r in roots):
+                        if (no_absolute or real is None
+                                or not any(inside(real, r) for r in roots)):
                             fail(
                                 "Backup archive write failed: Archive symbolic link target must "
                                 f"be relative: {archive_path(path)} -> {link} (after 1 attempt)",
                             )
+                        rewritten[path] = os.path.relpath(real, dirpath)
                     else:
                         landed = os.path.normpath(os.path.join(dirpath, link))
                         if not any(inside(landed, r) for r in roots):
@@ -136,7 +144,12 @@ def main() -> None:
 
     with tarfile.open(target, "w:gz") as tf:
         for path, name in members:
-            tf.add(path, arcname=name, recursive=False)
+            if path in rewritten:
+                info = tf.gettarinfo(path, arcname=name)
+                info.linkname = rewritten[path]
+                tf.addfile(info)
+            else:
+                tf.add(path, arcname=name, recursive=False)
     print(json.dumps({
         "createdAt": "2026-09-24T03:00:00.000Z",
         "archiveRoot": ROOT,

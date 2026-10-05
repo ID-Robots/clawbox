@@ -134,6 +134,12 @@ function StoreAppIcon({ appId, name, color, size = "w-12 h-12" }: { appId: strin
           src={`/setup-api/apps/icon/${appId}`}
           alt={name}
           className="w-full h-full object-cover"
+          // The catalogue is ~200 cards: fetched all at once, every icon was a
+          // request to the box (and, for an app not installed, upstream), all
+          // decoded on the main thread as the grid opened. Lazy and async,
+          // only the cards on screen pay.
+          loading="lazy"
+          decoding="async"
           onError={() => setFailed(true)}
         />
       )}
@@ -590,7 +596,11 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
         <div className="flex items-center gap-2 flex-1">
           <span className="text-xs text-white/50 shrink-0">{t("store.installing")}</span>
           <div className="flex-1 h-1.5 rounded-full bg-white/10 overflow-hidden min-w-[60px]">
-            <div className="h-full rounded-full" style={{ backgroundColor: BRAND_ORANGE, animation: "indeterminate 1.5s ease-in-out infinite" }} />
+            {/* Two pieces, one bar: globals.css, .indeterminate-bar. */}
+            <div className="indeterminate-bar" style={{ ["--indeterminate-duration" as string]: "1.5s" }}>
+              <div className="rounded-full" style={{ backgroundColor: BRAND_ORANGE }} />
+              <div className="indeterminate-bar-tail rounded-full" style={{ backgroundColor: BRAND_ORANGE }} />
+            </div>
           </div>
         </div>
       );
@@ -661,7 +671,10 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
   // key event was never routed to it. useModalDialog owns Escape, the Tab
   // cycle, focus-in on open and focus-restore on close.
   const confirmModal = confirmInstall && (
-    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 backdrop-blur-sm"
+    // No backdrop blur under the dim: a full-screen blur is redone over the whole
+    // desktop on every frame anything beneath it moves (the mascot always does).
+    // One step darker keeps the look.
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/65"
       onClick={dismissConfirmInstall}>
       <div
         ref={confirmPanelRef}
@@ -937,7 +950,11 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
               return (
                 <div
                   key={app.id}
-                  className={`relative rounded-xl border p-3 transition-all duration-300 ${
+                  // Off-screen cards skip layout and paint until scrolled to:
+                  // the whole catalogue laid out at once was a 150 ms task the
+                  // moment the Store opened. The intrinsic size keeps the
+                  // scrollbar honest before a card has been laid out once.
+                  className={`relative rounded-xl border p-3 transition-all duration-300 [content-visibility:auto] [contain-intrinsic-size:auto_132px] ${
                     isInstalling ? "scale-[0.98]" : ""
                   } ${
                     isError

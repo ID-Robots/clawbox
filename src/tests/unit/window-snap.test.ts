@@ -12,7 +12,9 @@ import {
   getSnapZone,
   shelfHeight,
   SNAP_THRESHOLD,
+  desktopTop,
 } from "@/lib/window-snap";
+import { KIOSK_BAR_VAR } from "@/lib/kiosk-bar-inset";
 
 /**
  * The snap zones are shared by BOTH draggable surfaces on the desktop — the app
@@ -32,6 +34,7 @@ beforeEach(() => {
 
 afterEach(() => {
   document.body.innerHTML = "";
+  document.documentElement.style.removeProperty(KIOSK_BAR_VAR);
 });
 
 describe("shelfHeight", () => {
@@ -165,7 +168,7 @@ describe("fitWindowSize", () => {
     });
   });
 
-  it("fits a window being OPENED beside a docked chat to the strip, with a maximized window's margins", () => {
+  it("fits a window being OPENED beside a docked chat to the strip, one desktop gap in on each side", () => {
     // Files at its 1090px default, centred in the 576px left of an 858px
     // panel, landed with its right 534px — minimize, maximize and close among
     // them — under the chat.
@@ -178,6 +181,55 @@ describe("fitWindowSize", () => {
 
   it("leaves a window that fits the strip at its own size", () => {
     expect(fitWindowSize({ width: 400, height: 600 }, 400 + DESKTOP_GAP)).toEqual({ width: 400, height: 600 });
+  });
+});
+
+/**
+ * The laptop's kiosk: its extension draws a bar across the top of the desktop
+ * page, and says how tall it is on <html>
+ * (src/lib/kiosk-bar-inset.ts). Everything laid against the top edge starts
+ * under it, or its title bar is under a bar that sits above every layer.
+ */
+describe("under the kiosk bar", () => {
+  const BAR = 40;
+  beforeEach(() => {
+    document.documentElement.style.setProperty(KIOSK_BAR_VAR, `${BAR}px`);
+  });
+
+  it("puts the desktop's top under the bar, and at 0 without one", () => {
+    expect(desktopTop()).toBe(BAR);
+    document.documentElement.style.removeProperty(KIOSK_BAR_VAR);
+    expect(desktopTop()).toBe(0);
+  });
+
+  it("snaps below the bar, stopping above the shelf", () => {
+    expect(getSnapRect("top")).toEqual({ x: 0, y: BAR, width: W, height: H - SHELF - BAR });
+    expect(getSnapRect("left")).toEqual({ x: 0, y: BAR, width: W / 2, height: H - SHELF - BAR });
+    const half = (H - SHELF - BAR) / 2;
+    expect(getSnapRect("bottom-right")).toEqual({ x: W / 2, y: BAR + half, width: W / 2, height: half });
+  });
+
+  it("measures the top snap zone from the desktop's top, not the screen's", () => {
+    expect(getSnapZone(500, BAR + SNAP_THRESHOLD)).toBe("top");
+    expect(getSnapZone(500, BAR + SNAP_THRESHOLD + 1)).toBeNull();
+  });
+
+  it("keeps a window's title bar out from under the bar", () => {
+    expect(clampWindowPosition({ x: 100, y: 0, width: 400, height: 300 })).toEqual({ x: 100, y: BAR });
+    expect(clampWindowPosition({ x: 100, y: 200, width: 400, height: 300 })).toEqual({ x: 100, y: 200 });
+  });
+
+  it("fits a window to the strip between the bar and the shelf", () => {
+    expect(fitWindowSize({ width: 400, height: 2000 })).toEqual({ width: 400, height: H - SHELF - BAR });
+  });
+
+  it("ignores a value that is not a bar's height", () => {
+    document.documentElement.style.setProperty(KIOSK_BAR_VAR, "banana");
+    expect(desktopTop()).toBe(0);
+    document.documentElement.style.setProperty(KIOSK_BAR_VAR, "-40px");
+    expect(desktopTop()).toBe(0);
+    document.documentElement.style.setProperty(KIOSK_BAR_VAR, "5000px");
+    expect(desktopTop()).toBe(120);
   });
 });
 

@@ -18,8 +18,10 @@ name: E2E Install
 #   - `core`: every spec but the upgrade — install.sh, the wizard, every app,
 #     the reboot. Every run, every PR.
 #   - `upgrade`: the wizard, then main → this head through the in-app updater.
-#     Every scheduled and dispatched run, and every PR that touches a path the
-#     upgrade depends on (`UPGRADE_PATHS`) — or whose file list cannot be read.
+#     Every scheduled, dispatched and push (beta/main) run, every PR into
+#     main, and every other PR that touches a path the upgrade depends on
+#     (`UPGRADE_PATHS`) — or whose file list cannot be read. A skipped shard
+#     is simply not in the matrix, so the `e2e-install` verdict stays green.
 # The `plan` job decides, and the `e2e-install` check — the one branch
 # protection requires — is the `verdict` job, green only when every shard the
 # plan asked for passed.
@@ -47,6 +49,10 @@ on:
     - cron: "17 3 * * *"
   pull_request:
     types: [opened, synchronize, reopened]
+  # Every push to a release branch runs every shard (TASK-1403): a PR into
+  # beta may skip the upgrade shard, so the merge result gets it here.
+  push:
+    branches: [beta, main]
 
 permissions:
   contents: read
@@ -104,10 +110,15 @@ jobs:
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           CHANGED_FILES: ${{ github.event.pull_request.changed_files }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
           plan() { bun e2e-install/plan-shards.ts "$@"; }
           if [ "$EVENT" != "pull_request" ]; then
+            shards=$(plan --all)
+          elif [ "${BASE_REF:-}" = "main" ]; then
+            # A promotion to main is never path-filtered (TASK-1403).
+            echo "PR into main — running every shard"
             shards=$(plan --all)
           elif ! gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files?per_page=100" \
               --jq '.[] | [.filename, .previous_filename // empty] | @tsv' > "$RUNNER_TEMP/changed.tsv"; then

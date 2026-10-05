@@ -50,8 +50,67 @@ export function shipsOpenclaw(versions: VersionInfo | null): boolean {
   return versions?.edition !== "hermes";
 }
 
+/** How the effective branch was decided — `EffectiveUpdateBranch` in src/lib/updater.ts. */
+type EffectiveBranchSource = "pin-file" | "checkout-branch" | "detached-recovered" | "default" | "unresolved";
+
+interface EffectiveBranch {
+  branch: string;
+  source: EffectiveBranchSource;
+}
+
 interface BranchInfo {
+  /** What `.update-branch` records, or null when nothing is. */
   branch: string | null;
+  /** The branch updates actually follow. Absent from older servers. */
+  effective?: EffectiveBranch | null;
+}
+
+/**
+ * One whole sentence per source, so a translator can place `{branch}` where
+ * their language wants it. "Nothing is recorded" is said wherever it is true:
+ * it is the fact an owner asking "which branch do I enter?" needs.
+ */
+function effectiveBranchText(
+  source: EffectiveBranchSource,
+  tr: (key: string, english: string) => string,
+): string {
+  switch (source) {
+    case "pin-file":
+      return tr("update.effectiveBranchPinned", "Updates follow {branch}, the branch recorded on this box.");
+    case "checkout-branch":
+      return tr(
+        "update.effectiveBranchCheckout",
+        "Updates follow {branch}, the branch this box is checked out on. No branch is recorded.",
+      );
+    case "detached-recovered":
+      return tr(
+        "update.effectiveBranchRecovered",
+        "Updates follow {branch}, worked out from this box's own build. No branch is recorded.",
+      );
+    case "unresolved":
+      // The check looks at main; the update itself refuses to guess a channel
+      // for a box that is not on a branch, and says so when it is started.
+      return tr(
+        "update.effectiveBranchUnresolved",
+        "Checking against {branch}, the release channel. This box is not on a branch and records none, so enter a branch here before updating.",
+      );
+    default:
+      return tr(
+        "update.effectiveBranchDefault",
+        "Updates follow {branch}, the release channel. No branch is recorded on this box.",
+      );
+  }
+}
+
+function readEffectiveBranch(value: unknown): EffectiveBranch | null {
+  const v = value as Partial<EffectiveBranch> | null | undefined;
+  if (!v || typeof v.branch !== "string" || !v.branch) return null;
+  const source: EffectiveBranchSource =
+    v.source === "pin-file" || v.source === "checkout-branch" || v.source === "detached-recovered"
+      || v.source === "unresolved"
+      ? v.source
+      : "default";
+  return { branch: v.branch, source };
 }
 
 const CARD = "rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-deep)]/70 p-5";
@@ -158,6 +217,7 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
   const [refreshing, setRefreshing] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [branch, setBranch] = useState<string | null>(null);
+  const [effectiveBranch, setEffectiveBranch] = useState<EffectiveBranch | null>(null);
   const [branchInput, setBranchInput] = useState("");
   const [branchSaving, setBranchSaving] = useState(false);
   const [branchError, setBranchError] = useState<string | null>(null);
@@ -211,6 +271,7 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
       if (!res.ok) return;
       const data = (await res.json()) as BranchInfo;
       setBranch(data.branch);
+      setEffectiveBranch(readEffectiveBranch(data.effective));
       setBranchInput(data.branch ?? "");
     } catch {
       /* leave defaults */
@@ -380,6 +441,7 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(typeof data.error === "string" ? data.error : `HTTP ${res.status}`);
       setBranch(typeof data.branch === "string" ? data.branch : null);
+      setEffectiveBranch(readEffectiveBranch(data.effective));
       setBranchInput(typeof data.branch === "string" ? data.branch : "");
     } catch (e) {
       setBranchError((e as Error).message);
@@ -559,7 +621,9 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
                 </>
               )}
               <div className="relative w-24 h-24 rounded-full flex items-center justify-center bg-white/[0.04] border border-[var(--border-subtle)]">
-                <span className={`material-symbols-rounded ${hero.iconClass} ${status === "updating" ? "clawkeep-shelf-glow" : ""}`} style={{ fontSize: 56, fontVariationSettings: "'FILL' 1, 'wght' 600" }}>
+                {/* The glow's breathing half is a copy of the glyph (globals.css,
+                    .clawkeep-shelf-glow), which has to be told which glyph. */}
+                <span className={`material-symbols-rounded ${hero.iconClass} ${status === "updating" ? "clawkeep-shelf-glow" : ""}`} style={{ fontSize: 56, fontVariationSettings: "'FILL' 1, 'wght' 600", ["--glow-glyph" as string]: JSON.stringify(hero.icon) }}>
                   {hero.icon}
                 </span>
               </div>
@@ -732,6 +796,16 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
                         {branchSaving ? tr("update.saving", "Saving…") : tr("update.save", "Save")}
                       </button>
                     </div>
+                    {effectiveBranch && (
+                      <p className="mt-2 text-xs text-[var(--text-muted)]" data-testid="update-effective-branch">
+                        <Interpolated
+                          text={effectiveBranchText(effectiveBranch.source, tr)}
+                          slots={{
+                            branch: <code className="bg-[var(--bg-elevated)] px-1 rounded text-gray-200">{effectiveBranch.branch}</code>,
+                          }}
+                        />
+                      </p>
+                    )}
                     {branchError && (
                       <p className="mt-2 text-xs text-red-300">{branchError}</p>
                     )}
@@ -840,7 +914,10 @@ function ConfirmModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
+      // No backdrop blur under the dim: a full-screen blur is redone over the whole
+      // desktop on every frame anything beneath it moves (the mascot always does).
+      // One step darker keeps the look.
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75"
       onClick={onCancel}
     >
       <div

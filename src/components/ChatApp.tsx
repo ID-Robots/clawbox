@@ -6,6 +6,8 @@ import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
 import * as kv from '@/lib/client-kv'
 import { describeChatFailure, describeFallbackReply } from '@/lib/chat-error-text'
 import { RunFailureLedger } from '@/lib/chat-run-failure'
+import { readChatFirstEnvironment, shouldAutoFocusChatInput } from '@/lib/mobile-chat-first'
+import { describeChatSwap, reportAnthropicChatFailure, TurnLedger } from '@/lib/anthropic-chat-swap'
 import { useClawboxLogin } from '@/lib/use-clawbox-login'
 import { PORTAL_LOGIN_URL } from '@/lib/max-subscription'
 import {
@@ -14,6 +16,7 @@ import {
 } from '@/lib/chat-history-cache'
 import { scrollToBottomAfterLayout } from '@/lib/scroll'
 import { useStickToBottom } from '@/lib/use-stick-to-bottom'
+import { samePlainData } from '@/lib/same-plain-data'
 
 import { renderText, audioLabel } from '@/lib/chat-markdown'
 import { PROGRESS_CARD_CHANGED_EVENT, useGatewayProgressCard } from '@/lib/chat-progress-card'
@@ -41,14 +44,32 @@ import { EmailCard, EmailFullView } from '@/lib/chat-email'
 import {
   splitMediaDirectives,
   splitAssistantMedia,
-  extractAudioAttachments,
-  extractFileAttachments,
   boundedAudio,
   boundedFiles,
   mediaFileName,
   isImageMedia,
   mediaUrl,
 } from '@/lib/chat-media'
+// A file the agent sends reaches the live `final` stripped and the stored
+// transcript intact, so this surface learns of the append from the gateway's
+// `session.message` push and re-reads — the mascot chat's own handling, from the
+// module both chats share (TASK-1372).
+import {
+  beginHistoryRead,
+  cancelTranscriptReconcile,
+  claimHistoryRead,
+  isAckOnlyReply,
+  mergeRestoredTranscript,
+  pushedSpokenReply,
+  readLiveReply,
+  scheduleTranscriptReconcile,
+  sessionMessagePush,
+  withAssistantReply,
+  withPushedSpokenReply,
+  type HistoryReadOrder,
+  type ReconcileTimer,
+} from '@/lib/chat-transcript-reconcile'
+import { subscribeSessionMessages } from '@/lib/gateway-approvals'
 // WHICH HARNESS ANSWERS, resolved the one way this product resolves it.
 //
 // This surface is `/app/clawbox` — the page behind "Open in new tab", and the
@@ -90,6 +111,8 @@ import {
   type ChatAttachment,
   type StagingFailure,
 } from '@/lib/chat-attachments'
+import { useChatFileDrop, useChatUploads } from '@/lib/use-chat-drop'
+import { ChatDropOverlay, ChatUploadChips } from './ChatDropUploads'
 import {
   gatewayFrameError,
   isGatewayStartingRefusal,
@@ -104,11 +127,13 @@ import {
   HISTORY_RESTORE_DEADLINE_MS,
   HISTORY_RETRY_DELAYS_MS,
   RESTORE_HANDSHAKE_TIMEOUT_MS,
+  TRANSCRIPT_REFRESH_MS,
   classifyRestoreFailure,
   isRestoreAborted,
   restoreWithRetry,
   type RestoreFailureKind,
 } from '@/lib/chat-session-restore'
+import { CHAT_TABS_ROUTE } from '@/lib/chat-tabs'
 import { useTr } from '@/lib/i18n-floor'
 
 
@@ -128,6 +153,167 @@ interface ChatAppProps {
 const HEADER_REGION_ID = 'chatapp-header-region'
 const TEXT_SIZE_BAR_ID = 'chatapp-text-size-bar'
 const COMPOSER_OPTIONS_ID = 'chatapp-composer-options'
+
+type Translate = (key: string, params?: Record<string, string | number>) => string
+
+// ── One bubble of this page's transcript ──
+//
+// A component of its own so React can SKIP it, for the reason the mascot
+// chat's rows are one (ChatMessageRow.tsx): this page renders on every
+// keystroke in the composer, every streamed chunk and every status change, and
+// while the bubbles were built inline each of those renders parsed the
+// Markdown of every reply in the conversation again and handed React a fresh
+// tree to diff — for a transcript that had not changed. Memoised, a bubble
+// renders again only when what it shows does.
+//
+// Not the mascot chat's row: this page draws its own bubbles (the orange pill,
+// the rounded grey answer, smaller pictures with no preview, no tool chips),
+// and the markup below is the one it drew inline, line for line. The parent
+// still keys rows by position, so a bubble's own state — an open `<details>`,
+// a player mid-clip — stays exactly where it was.
+
+interface ChatAppMessageRowProps {
+  msg: ChatMessage
+  t: Translate
+  onOpenEmail: (uid: number) => void
+}
+
+// The message by VALUE: a history read rebuilds every message object from the
+// box's answer even when only the newest one is new, and compared by identity
+// every reply would be parsed again at the end of every turn. `t` and the
+// opener are stable (the provider's memoised translator, a state setter).
+function sameChatAppRowProps(prev: ChatAppMessageRowProps, next: ChatAppMessageRowProps): boolean {
+  return prev.t === next.t
+    && prev.onOpenEmail === next.onOpenEmail
+    && samePlainData(prev.msg, next.msg)
+}
+
+const ChatAppMessageRow = memo(function ChatAppMessageRow({ msg, t, onOpenEmail }: ChatAppMessageRowProps) {
+  // `MEDIA:` is lifted on the way INTO state — by the shared history
+  // projection and by the live `final` handler — so what is stored
+  // already carries its pictures and clips and the bubble just draws
+  // them. Only the mail directives are derived here, because a card is
+  // fetched when the owner opens it and must not be built from a turn
+  // that is still streaming.
+  const emailRefs = msg.role === 'assistant' ? splitEmailRefs(msg.text) : null
+  const bodyText = emailRefs ? emailRefs.text : msg.text
+  const images = msg.images ?? []
+  const audio = msg.audio ?? []
+  const files = msg.files ?? []
+  return (
+    <div style={{
+      display: 'flex',
+      justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
+    }}>
+      <div style={{
+        maxWidth: '85%',
+        padding: msg.role === 'system' ? '6px 12px' : '8px 14px',
+        borderRadius: msg.role === 'user' ? '14px 14px 4px 14px' : '14px 14px 14px 4px',
+        background: msg.role === 'user'
+          ? 'linear-gradient(135deg, #f97316 0%, #ea580c 100%)'
+          : msg.role === 'system'
+            ? 'rgba(239,68,68,0.15)'
+            : 'rgba(255,255,255,0.06)',
+        color: msg.role === 'user' ? '#fff' : msg.role === 'system' ? '#ef4444' : 'rgba(255,255,255,0.85)',
+        fontSize: 13.5,
+        lineHeight: 1.45,
+        wordBreak: 'break-word',
+      }}>
+        {images.length > 0 && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: bodyText ? 6 : 0 }}>
+            {images.map((src, j) => (
+              // A picture the agent drew IS the message, so it gets a
+              // real alt and is contained rather than cropped; one the
+              // customer sent is announced as theirs, because an
+              // accessible name is read out verbatim. `contain` applies
+              // to both — a sent photo is letterboxed rather than cropped
+              // here, matching the mascot chat.
+              <img
+                key={j}
+                src={src}
+                alt={msg.role === 'user' ? t("chat.sentImage") : t("chat.generatedImage")}
+                style={{ maxWidth: 180, maxHeight: 140, borderRadius: 8, objectFit: 'contain' }}
+              />
+            ))}
+          </div>
+        )}
+        {msg.role === 'user' ? msg.text : renderText(bodyText, t("chat.table"), t("chat.detailsSummary"))}
+        {files.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: bodyText ? 8 : 0, minWidth: 0 }}>
+            {files.map(src => <ChatFileCard key={src} src={src} />)}
+          </div>
+        )}
+        {audio.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: bodyText ? 8 : 0 }}>
+            {/* The same player the mascot chat draws, from the same
+                component: two surfaces showing the same spoken reply must
+                not offer two different controls for it. Keyed by the URL
+                — the harness names every file with a uuid, so
+                re-rendering a transcript cannot hand one player
+                another's audio. */}
+            {audio.map(src => (
+              <SpokenReplyPlayer
+                key={src}
+                src={src}
+                // `bodyText`, never `msg.text`: the stored text still
+                // carries the directives, and a screen reader would read
+                // the absolute media path and the mail ids out loud.
+                label={audioLabel(bodyText, t("chat.audioReply"))}
+                downloadName={mediaFileName(src)}
+              />
+            ))}
+          </div>
+        )}
+        {emailRefs && emailRefs.uids.length > 0 && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: bodyText ? 8 : 0 }}>
+            {emailRefs.uids.map(uid => (
+              <EmailCard key={uid} uid={uid} onOpen={onOpenEmail} t={t} />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}, sameChatAppRowProps)
+
+/**
+ * The reply while it streams in, in the bubble the finished answer gets.
+ *
+ * Memoised on the text for the reason the rows are: the reply has to be parsed
+ * again on every chunk, but not on every keystroke the owner types while it
+ * arrives, nor on any other render of the page.
+ */
+const ChatAppStreamingBubble = memo(function ChatAppStreamingBubble({ text, t }: { text: string; t: Translate }) {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
+      <div style={{
+        maxWidth: '85%', padding: '8px 14px',
+        borderRadius: '14px 14px 14px 4px',
+        background: 'rgba(255,255,255,0.06)',
+        color: 'rgba(255,255,255,0.85)',
+        fontSize: 13.5, lineHeight: 1.45, wordBreak: 'break-word',
+      }}>
+        {/* Stripped at RENDER, not on the way into state: the directive
+            lands in the last chunk before the turn finalises, so without
+            this the bare id sits in the bubble for that moment, and an
+            abort keeps the raw buffer it was holding — so the turn it
+            leaves behind can still become cards and pictures. No cards
+            and no pictures while streaming: half a directive is not an id
+            or a path yet.
+
+            A payload-less `MEDIA:` is deliberately kept as text by
+            `splitMediaDirectives` — a line that names nothing is not
+            swallowed — so a Stop landing exactly on the colon leaves that
+            token in the bubble and in the stored turn. Shown and stored
+            still agree, which is the property that matters; there is no
+            `dropUnfinishedDirective` equivalent for media, and the
+            mascot chat accepts the same token. */}
+        {renderText(streamingEmailRefsText(splitMediaDirectives(text).text), t("chat.table"), t("chat.detailsSummary"))}
+        <span style={{ display: 'inline-block', width: 6, height: 14, background: '#f97316', borderRadius: 1, marginLeft: 2, animation: 'chatapp-blink 1s step-end infinite', verticalAlign: 'text-bottom' }} />
+      </div>
+    </div>
+  )
+})
 
 function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChange }: ChatAppProps) {
   const { t, locale } = useT()
@@ -236,6 +422,9 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
   // Staged ON THE BOX, never held as base64 in the page — see the import note.
   const [pendingAttachments, setPendingAttachments] = useState<ChatAttachment[]>([])
   const [attachmentError, setAttachmentError] = useState<(StagingFailure & { file: string }) | null>(null)
+  // What is still on its way to the box: a chip per file or dropped folder.
+  const uploadTracker = useChatUploads()
+  const beginUpload = uploadTracker.begin
   const fileInputRef = useRef<HTMLInputElement>(null)
   const cameraInputRef = useRef<HTMLInputElement>(null)
 
@@ -249,11 +438,23 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
   // the deferred-reply rationale. Single-flight + cleared on unmount so
   // a burst of acked turns doesn't pile up overlapping fetches.
   const ackOnlyHistoryTimerRef = useRef<number | null>(null)
+  // The coalesced re-read a `session.message` push schedules: one read per
+  // burst of appends, the same 400 ms the mascot chat waits (TASK-1364,
+  // TASK-1372). Cleared on unmount.
+  const transcriptReconcileTimerRef = useRef<ReconcileTimer['current']>(null)
+  // Which history read was asked for last, and which was painted last — so an
+  // answer that arrives after a later one's is dropped (`claimHistoryRead`).
+  const historyReadOrderRef = useRef<HistoryReadOrder>({ issued: 0, applied: 0 })
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const connectedOnceRef = useRef(false)
   // The provider's own refusal rides on the lifecycle frames; see lib/chat-run-failure.ts.
   const runFailureRef = useRef(new RunFailureLedger())
+  // The turns sent, by idempotency key, for the Anthropic account swap
+  // (TASK-1260): a turn that died on the Claude account's limit is sent again,
+  // as it was, on the next account — only when the failed run IS that turn,
+  // and only for words, never for attachments.
+  const turnsRef = useRef(new TurnLedger())
   // A connect the gateway refused only because it is still booting is
   // retried on this ladder; reset once a connect lands.
   const startingRetriesRef = useRef(0)
@@ -430,6 +631,10 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
    * written twice it would show the answer once silently and once playable on
    * whichever path was missed, which is the divergence this whole change is
    * about.
+   *
+   * The fold, and the refusal to append a text-only copy of a reply the
+   * transcript re-read has already painted with its file, are the mascot
+   * chat's own rules (`withAssistantReply`), asked of the latest state.
    */
   const appendAssistantReply = useCallback((
     text: string,
@@ -439,26 +644,17 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
     // than dropped: the transcript this surface replays carries all four, so
     // discarding them here would make the live bubble and the reloaded one
     // disagree the moment anything renders them.
-    extra?: Pick<ChatMessage, 'reasoning' | 'toolCalls' | 'model' | 'provider' | 'files'>,
+    extra?: Pick<ChatMessage, 'reasoning' | 'toolCalls' | 'model' | 'provider' | 'files' | 'unconfirmed'>,
   ) => {
-    setMessages(prev => {
-      const last = prev[prev.length - 1]
-      if (text.length > 0 && audio.length > 0 && images.length === 0 && !(extra?.files?.length)
-          && last && last.role === 'assistant' && last.text === text) {
-        const merged = boundedAudio(last.audio ?? [], audio)
-        if (last.audio?.length === merged.length
-            && last.audio.every((src, i) => src === merged[i])) return prev
-        return [...prev.slice(0, -1), { ...last, audio: merged }]
-      }
-      return [...prev, {
-        role: 'assistant' as const,
-        text: prettifyAssistantText(text),
-        timestamp: Date.now(),
-        images,
-        audio,
-        ...extra,
-      }]
-    })
+    const reply: ChatMessage = {
+      role: 'assistant',
+      text: prettifyAssistantText(text),
+      timestamp: Date.now(),
+      images,
+      audio,
+      ...extra,
+    }
+    setMessages(prev => withAssistantReply(prev, reply))
   }, [])
 
   const loadHistory = useCallback(async (opts?: { restore?: boolean }) => {
@@ -466,6 +662,9 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
     // A harness with no replay has nothing to read, and asking would be a call
     // the adapter's own contract answers `unsupported`.
     if (!transport.capabilities.canListHistory) return
+    // This read's place in line (see `claimHistoryRead` below).
+    const seq = beginHistoryRead(historyReadOrderRef.current)
+    const overtaken = () => historyReadOrderRef.current.applied > seq
     // A RESTORE — the read on the hello, the replay, Try again — is bounded and
     // retried only while the gateway says "not yet" or does not answer; the
     // ack-only refetch stays the single best-effort read it always was
@@ -497,29 +696,37 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
           attemptTimeoutMs: HISTORY_ATTEMPT_TIMEOUT_MS,
           deadlineMs: HISTORY_RESTORE_DEADLINE_MS,
           delaysMs: HISTORY_RETRY_DELAYS_MS,
-          onRetry: () => setRestoreState({ phase: 'retrying' }),
+          // Not over a conversation a later read has already painted.
+          onRetry: () => { if (!overtaken()) setRestoreState({ phase: 'retrying' }) },
         })
         : await read()
       // Any read that answers ends a restore's wait or failure.
       setRestoreState(null)
+      // Three things read now — the restore, the re-read each pushed append
+      // schedules, the ack-only refetch — and they can overlap. An answer that
+      // lost the race to a later read's must not paint the older transcript
+      // over it: that took the stored reply and its card back off the screen.
+      if (!claimHistoryRead(historyReadOrderRef.current, seq)) return
       // Server is canonical for everything it knows about, but a user turn
       // typed between connect-ack and history-arrival ("optimistic local")
-      // hasn't reached the server yet — preserve it by appending any prev
-      // user messages whose timestamp is newer than the last server message.
-      setMessages(prev => {
-        if (prev.length === 0) return chatMsgs
-        const lastServerTs = chatMsgs.length > 0 ? chatMsgs[chatMsgs.length - 1].timestamp : 0
-        const inFlight = prev.filter(m => m.role === 'user' && m.timestamp > lastServerTs)
-        return inFlight.length === 0 ? chatMsgs : [...chatMsgs, ...inFlight]
-      })
+      // hasn't reached the server yet. The mascot chat's merge, shared: such a
+      // turn is recognised by its run's idempotency key rather than by comparing
+      // the browser's clock with the box's — every push re-reads the
+      // conversation (TASK-1364), so a browser running ahead of the box would
+      // otherwise show each of its turns twice. Two things the box may not hold
+      // yet are kept as well: a reply this page painted live (until the box has
+      // a reply for that turn), and this page's own notes (a failed turn, a
+      // fallback model).
+      setMessages(prev => mergeRestoredTranscript(prev, chatMsgs, { keepLocalNotes: true, keepUnconfirmedReplies: true }))
     } catch (err) {
       // Called off: a newer socket, Try again or the page going away owns the
       // conversation now. Nothing to report.
       if (restoreCtl && isRestoreAborted(err)) return
       console.error('Failed to load history:', err)
       // Only a restore ends in the panel: an ordinary refetch failing leaves
-      // the transcript that is already painted, exactly as before.
-      if (restoreCtl) setRestoreState({ phase: 'failed', kind: classifyRestoreFailure(err) })
+      // the transcript that is already painted, exactly as before. Nor does a
+      // restore a later read has already answered for.
+      if (restoreCtl && !overtaken()) setRestoreState({ phase: 'failed', kind: classifyRestoreFailure(err) })
     } finally {
       if (restoreCtl && restoreAbortRef.current === restoreCtl) restoreAbortRef.current = null
     }
@@ -611,6 +818,14 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
           const mainSessionKey = (sessionDefaults?.mainSessionKey as string) || 'main'
           sessionKeyRef.current = mainSessionKey
           setBoundSessionKey(mainSessionKey)
+          // Every append to this conversation, pushed. Without it this page saw
+          // the replies the gateway streams but never a turn the owner typed on
+          // another device or a reply that lands from a channel (TASK-1364) —
+          // nor the file or picture the agent sent, which the live `final` often
+          // lacks and the stored append carries (TASK-1372) — until a reload.
+          // The plain frame: this surface draws no approval cards. Per socket,
+          // so every hello asks again; a gateway without the RPC still streams.
+          void subscribeSessionMessages(wsRequest, mainSessionKey)
           // The restore itself: bounded, and ended with the reason and Try
           // again rather than an empty conversation when it cannot be done.
           void loadHistory({ restore: true })
@@ -733,6 +948,23 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
           return
         }
 
+        // The conversation gained a message — the owner's turn from the phone
+        // (TASK-1364), the agent's reply with its file intact (TASK-1372), a
+        // channel's. A signal to re-read rather than a message to merge, exactly
+        // as the mascot chat treats it: the live `final` may have painted the
+        // same reply without its card, and the re-read replaces it with the
+        // stored one instead of adding a second bubble.
+        if (eventName === 'session.message') {
+          const push = sessionMessagePush(data.payload, sessionKeyRef.current)
+          if (!push) return
+          // A spoken supplement older gateways push here but leave out of
+          // `chat.history` is shown from the push itself.
+          const spoken = pushedSpokenReply(push.message)
+          if (spoken) setMessages(prev => withPushedSpokenReply(prev, spoken))
+          scheduleTranscriptReconcile(transcriptReconcileTimerRef, () => { void loadHistory() })
+          return
+        }
+
         if (eventName === 'chat') {
           const payload = data.payload as Record<string, unknown>
           if (!payload) return
@@ -746,32 +978,27 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
             const text = extractText(msg)
             if (text && !isInterSessionEnvelope(text, msg)) applyStreaming(text)
           } else if (state === 'final') {
-            const raw = extractText(msg)
-            // Split on the way INTO state, as the mascot chat does: a generated
-            // picture arrives as a `MEDIA:` line inside the reply text and a
-            // spoken reply as a structured attachment part (lib/chat-media.ts),
-            // and storing the caption alone is what put an absolute media path
-            // in the transcript. Both shapes are read; neither is guaranteed.
-            const { text, images: directiveImages, audio: directiveAudio, files: directiveFiles } = splitAssistantMedia(raw)
-            const audio = boundedAudio(extractAudioAttachments(msg), directiveAudio)
-            // Every other file the agent sent becomes a download card.
-            const structuredFiles = extractFileAttachments(msg)
-            const images = [...new Set([...directiveImages, ...structuredFiles.images])]
-            const files = boundedFiles(directiveFiles, structuredFiles.files)
+            // Split on the way INTO state, as the mascot chat does and through
+            // the same reader: a generated picture arrives as a `MEDIA:` line
+            // inside the reply text, a spoken reply as a structured attachment
+            // part, and any other file the agent sent by either — each becomes
+            // a picture, a player or a download card. Storing the caption alone
+            // is what put an absolute media path in the transcript.
+            //
+            // The live frame often carries NONE of the media, though: the file
+            // is in the stored append, and the `session.message` push above
+            // re-reads it. Whichever lands first, the reply is shown once — the
+            // re-read replaces a bubble this branch painted without its card,
+            // and this branch adds nothing over a bubble the re-read already
+            // painted with it (`withAssistantReply`).
+            const { raw, text, images, audio, files } = readLiveReply(msg)
             // Suppress protocol sentinels and "Sent." (delivery-mirror ack)
             // from the rendered transcript — the former are markers users
             // shouldn't see, the latter is just a server-side ack that the
             // real reply will follow via the chat.history refetch scheduled
-            // below. `isSentinel` covers NO_REPLY plus any other protocol
-            // sentinel `chat-sentinels.ts` catalogues — same shared check
-            // ChatPopup uses, so the two components can't drift on which
-            // finals count as ack-only.
-            //
-            // A picture or a clip with no caption is a real reply, not an ack:
-            // asking `!text` alone would have thrown it away and refetched
-            // history instead.
-            const isAckOnly = (!text && images.length === 0 && audio.length === 0 && files.length === 0)
-              || /^\s*Sent\.\s*$/.test(text) || isSentinel(text)
+            // below. The same shared check ChatPopup uses, so the two
+            // components can't drift on which finals count as ack-only.
+            const isAckOnly = isAckOnlyReply({ text, images, audio, files })
             // Same suppression as the history path, so the bubble cannot
             // appear in real time either — only the append is skipped, the
             // ack-only refetch below still runs. Asked of the ORIGINAL text: a
@@ -781,7 +1008,10 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
             // Appended through the SHARED renderer, so this bubble and the one
             // an adapter turn resolves with cannot drift.
             if (!isAckOnly && !isInterSessionEnvelope(raw, msg)) {
-              appendAssistantReply(text, images, audio, files.length ? { files } : undefined)
+              // `unconfirmed` until a history read shows the box holds a reply
+              // for this turn: a read answered just before the box stored it
+              // must not take the bubble back off the screen.
+              appendAssistantReply(text, images, audio, { ...(files.length ? { files } : {}), unconfirmed: true })
             }
             applyStreaming('')
             // A reply another model wrote — the picked one failed and the
@@ -844,6 +1074,10 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
                 images: keptMedia.images,
                 audio: boundedAudio(keptMedia.audio),
                 ...(keptMedia.files.length ? { files: boundedFiles(keptMedia.files) } : {}),
+                // The box may never store a partial answer, and the next turn's
+                // history read would then drop it; kept until the box holds a
+                // reply for this turn, which then stands in for it.
+                unconfirmed: true,
               }])
             }
             clearToolCalls()
@@ -854,7 +1088,22 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
               // an operator reading a log and has carried an absolute device
               // path, a session UUID and a `openclaw logs --follow` line into
               // the customer's transcript (TASK-440).
-              setMessages(prev => [...prev, { role: 'system', text: describeChatFailure(payload.errorMessage, runFailureRef.current.settle(payload), failureWordsRef.current), timestamp: Date.now() }])
+              const failureContext = runFailureRef.current.settle(payload)
+              setMessages(prev => [...prev, { role: 'system', text: describeChatFailure(payload.errorMessage, failureContext, failureWordsRef.current), timestamp: Date.now() }])
+              // A Claude account at its limit, or refused (TASK-1260): the box
+              // moves every Claude consumer to the next account and sends the
+              // turn again; the chat says which of those happened.
+              const forKey = sessionKeyRef.current
+              void reportAnthropicChatFailure({
+                errorMessage: payload.errorMessage,
+                context: failureContext,
+                sessionKey: forKey || null,
+                message: turnsRef.current.resendable(payload.runId),
+              }).then((answer) => {
+                const line = describeChatSwap(answer, failureWordsRef.current)
+                // Said in the conversation it happened in, or not at all.
+                if (line && sessionKeyRef.current === forKey) setMessages(prev => [...prev, { role: 'system', text: line, timestamp: Date.now() }])
+              })
             }
           }
         }
@@ -959,6 +1208,7 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
         if (!isCurrent()) return
         setAttachmentError({ ...classifyStagingFailure(status, payload), file: filename })
       }
+      const chip = beginUpload(filename, 'file')
       try {
         const res = await fetch('/setup-api/chat/attachments', { method: 'POST', body: formData })
         const json = await res.json().catch(() => ({} as { name?: string; path?: string }))
@@ -990,9 +1240,26 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
         // rather than the file's. The thrown error itself is never shown — it
         // can carry the request URL.
         fail(undefined, null)
+      } finally {
+        chip.end()
       }
     }))
-  }, [caps])
+  }, [caps, beginUpload])
+
+  // Files and whole folders dragged onto the chat — the mascot chat's own
+  // drop, shared through use-chat-drop so the two surfaces take the same drop.
+  const addFolderAttachment = useCallback((folder: ChatAttachment) => {
+    setPendingAttachments(prev => [...prev, folder])
+  }, [])
+  const drop = useChatFileDrop({
+    enabled: status === 'connected' && (caps.canAttachImages || caps.canAttachDocuments),
+    caps,
+    stageFiles,
+    onFolderStaged: addFolderAttachment,
+    onError: setAttachmentError,
+    generationRef: uploadGenerationRef,
+    tracker: uploadTracker,
+  })
 
   // <input type=file> change handler.
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1060,6 +1327,15 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
     idempotencyKey: string,
   ) => {
     const transport = adapterRef.current
+    turnsRef.current.remember(idempotencyKey, text, attachments.length > 0)
+    // The owner is in the main conversation now, on this page: the phone (or
+    // the desktop) they pick up next opens it (TASK-1364). Best effort.
+    void fetch(CHAT_TABS_ROUTE, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ activity: { key: null } }),
+      signal: AbortSignal.timeout(10_000),
+    }).catch(() => { /* an older box, or offline: nothing changes here */ })
     let result: TurnResult
     try {
       result = await transport.sendTurn({
@@ -1168,16 +1444,19 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
     // strip, which this send has just emptied — the bubble above draws the box's
     // own media ref.
     revokePreviews(staged)
+    // Stamped onto the bubble as well as the request: it is how a history
+    // read recognises the server's copy of this exact turn.
+    const idempotencyKey = uuid()
     setMessages(prev => [...prev, {
       role: 'user',
       text: displayText,
       timestamp: Date.now(),
       images,
+      idempotencyKey,
     }])
     setSending(true)
     applyStreaming('')
 
-    const idempotencyKey = uuid()
     runIdRef.current = idempotencyKey
 
     // Queue ONLY where there is a connection that can be down. The user's
@@ -1257,6 +1536,35 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
     void loadHistory({ restore: true })
   }, [harnessLoaded, caps.hasLiveConnection, caps.canListHistory, loadHistory])
 
+  // A harness with no live connection pushes nothing, so a turn sent from the
+  // phone stayed off this page until a reload. Re-read when the owner comes
+  // back to the window and on a short tick while it is visible — never under a
+  // turn of this page's own or a restore (TASK-1364; the mascot chat does the
+  // same). The gateway pushes `session.message` instead (above).
+  const sendingRef = useRef(false)
+  useEffect(() => { sendingRef.current = sending }, [sending])
+  useEffect(() => {
+    if (!harnessLoaded || caps.hasLiveConnection || !caps.canListHistory) return
+    // One read at a time: on a slow box the tick, a focus and a visibility
+    // change can all land inside one read, and an older answer settling last
+    // would paint over a newer transcript.
+    let inFlight = false
+    const refresh = () => {
+      if (inFlight || document.visibilityState !== 'visible' || !replayedRef.current) return
+      if (sendingRef.current || restoreAbortRef.current) return
+      inFlight = true
+      void loadHistory().finally(() => { inFlight = false })
+    }
+    document.addEventListener('visibilitychange', refresh)
+    window.addEventListener('focus', refresh)
+    const tick = setInterval(refresh, TRANSCRIPT_REFRESH_MS)
+    return () => {
+      document.removeEventListener('visibilitychange', refresh)
+      window.removeEventListener('focus', refresh)
+      clearInterval(tick)
+    }
+  }, [harnessLoaded, caps.hasLiveConnection, caps.canListHistory, loadHistory])
+
   // Tear down on unmount, and only on unmount: `connect` is memoised with no
   // dependencies, so this is where the socket and the deferred refetch were
   // always released.
@@ -1282,6 +1590,7 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
         window.clearTimeout(ackOnlyHistoryTimerRef.current)
         ackOnlyHistoryTimerRef.current = null
       }
+      cancelTranscriptReconcile(transcriptReconcileTimerRef)
       // The starting-retry ladder: cleared only by the NEXT retry until now, so
       // a window closed inside the three-second wait went on reconnecting.
       if (startingRetryTimerRef.current !== null) {
@@ -1291,11 +1600,14 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
     }
   }, [])
 
-  // Focus input when connected
+  // Focus input when connected — on a big screen with a mouse only. On a phone
+  // or a touch screen a focused input is an open soft keyboard, and the chat
+  // jumped up under one before the owner had touched anything (and again on
+  // every reconnect); there the keyboard waits for a tap on the input.
   useEffect(() => {
-    if (status === 'connected') {
-      setTimeout(() => inputRef.current?.focus(), 100)
-    }
+    if (status !== 'connected') return
+    if (!shouldAutoFocusChatInput(readChatFirstEnvironment(window))) return
+    setTimeout(() => inputRef.current?.focus(), 100)
   }, [status])
 
 
@@ -1390,14 +1702,21 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
   const tuckable = phone && attachControls !== null
 
   return (
-    <div style={{
-      width: '100%',
-      height: '100%',
-      display: 'flex',
-      flexDirection: 'column',
-      background: '#0d1117',
-      overflow: 'hidden',
-    }}>
+    <div
+      data-testid="chatapp"
+      {...drop.dropHandlers}
+      style={{
+        width: '100%',
+        height: '100%',
+        display: 'flex',
+        flexDirection: 'column',
+        background: '#0d1117',
+        overflow: 'hidden',
+        // The drop target is drawn over the whole chat.
+        position: 'relative',
+      }}
+    >
+      <ChatDropOverlay active={drop.dragActive} t={t} />
       {/* Fullscreen chat on a phone: the header folds into this strip, whose
           toggle opens it again underneath — see ChatPhoneChrome. */}
       {fullscreenChat && (
@@ -1573,125 +1892,15 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
           </div>
         )}
 
-        {messages.map((msg, i) => {
-          // `MEDIA:` is lifted on the way INTO state — by the shared history
-          // projection and by the live `final` handler — so what is stored
-          // already carries its pictures and clips and the bubble just draws
-          // them. Only the mail directives are derived here, because a card is
-          // fetched when the owner opens it and must not be built from a turn
-          // that is still streaming.
-          const emailRefs = msg.role === 'assistant' ? splitEmailRefs(msg.text) : null
-          const bodyText = emailRefs ? emailRefs.text : msg.text
-          const images = msg.images ?? []
-          const audio = msg.audio ?? []
-          const files = msg.files ?? []
-          return (
-          <div key={i} style={{
-            display: 'flex',
-            justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
-          }}>
-            <div style={{
-              maxWidth: '85%',
-              padding: msg.role === 'system' ? '6px 12px' : '8px 14px',
-              borderRadius: msg.role === 'user' ? '14px 14px 4px 14px' : '14px 14px 14px 4px',
-              background: msg.role === 'user'
-                ? 'linear-gradient(135deg, #f97316 0%, #ea580c 100%)'
-                : msg.role === 'system'
-                  ? 'rgba(239,68,68,0.15)'
-                  : 'rgba(255,255,255,0.06)',
-              color: msg.role === 'user' ? '#fff' : msg.role === 'system' ? '#ef4444' : 'rgba(255,255,255,0.85)',
-              fontSize: 13.5,
-              lineHeight: 1.45,
-              wordBreak: 'break-word',
-            }}>
-              {images.length > 0 && (
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: bodyText ? 6 : 0 }}>
-                  {images.map((src, j) => (
-                    // A picture the agent drew IS the message, so it gets a
-                    // real alt and is contained rather than cropped; one the
-                    // customer sent is announced as theirs, because an
-                    // accessible name is read out verbatim. `contain` applies
-                    // to both — a sent photo is letterboxed rather than cropped
-                    // here, matching the mascot chat.
-                    <img
-                      key={j}
-                      src={src}
-                      alt={msg.role === 'user' ? t("chat.sentImage") : t("chat.generatedImage")}
-                      style={{ maxWidth: 180, maxHeight: 140, borderRadius: 8, objectFit: 'contain' }}
-                    />
-                  ))}
-                </div>
-              )}
-              {msg.role === 'user' ? msg.text : renderText(bodyText, t("chat.table"), t("chat.detailsSummary"))}
-              {files.length > 0 && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: bodyText ? 8 : 0, minWidth: 0 }}>
-                  {files.map(src => <ChatFileCard key={src} src={src} />)}
-                </div>
-              )}
-              {audio.length > 0 && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: bodyText ? 8 : 0 }}>
-                  {/* The same player the mascot chat draws, from the same
-                      component: two surfaces showing the same spoken reply must
-                      not offer two different controls for it. Keyed by the URL
-                      — the harness names every file with a uuid, so
-                      re-rendering a transcript cannot hand one player
-                      another's audio. */}
-                  {audio.map(src => (
-                    <SpokenReplyPlayer
-                      key={src}
-                      src={src}
-                      // `bodyText`, never `msg.text`: the stored text still
-                      // carries the directives, and a screen reader would read
-                      // the absolute media path and the mail ids out loud.
-                      label={audioLabel(bodyText, t("chat.audioReply"))}
-                      downloadName={mediaFileName(src)}
-                    />
-                  ))}
-                </div>
-              )}
-              {emailRefs && emailRefs.uids.length > 0 && (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: bodyText ? 8 : 0 }}>
-                  {emailRefs.uids.map(uid => (
-                    <EmailCard key={uid} uid={uid} onOpen={setOpenEmailUid} t={t} />
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-          )
-        })}
+        {/* One memoised row per message: a render of this page no longer
+            parses the conversation — see ChatAppMessageRow. */}
+        {messages.map((msg, i) => (
+          <ChatAppMessageRow key={i} msg={msg} t={t} onOpenEmail={setOpenEmailUid} />
+        ))}
 
         <ToolCallPills toolCalls={toolCalls} runningLabel={t("chat.running")} />
 
-        {streaming && (
-          <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
-            <div style={{
-              maxWidth: '85%', padding: '8px 14px',
-              borderRadius: '14px 14px 14px 4px',
-              background: 'rgba(255,255,255,0.06)',
-              color: 'rgba(255,255,255,0.85)',
-              fontSize: 13.5, lineHeight: 1.45, wordBreak: 'break-word',
-            }}>
-              {/* Stripped at RENDER, not on the way into state: the directive
-                  lands in the last chunk before the turn finalises, so without
-                  this the bare id sits in the bubble for that moment, and an
-                  abort keeps the raw buffer it was holding — so the turn it
-                  leaves behind can still become cards and pictures. No cards
-                  and no pictures while streaming: half a directive is not an id
-                  or a path yet.
-
-                  A payload-less `MEDIA:` is deliberately kept as text by
-                  `splitMediaDirectives` — a line that names nothing is not
-                  swallowed — so a Stop landing exactly on the colon leaves that
-                  token in the bubble and in the stored turn. Shown and stored
-                  still agree, which is the property that matters; there is no
-                  `dropUnfinishedDirective` equivalent for media, and the
-                  mascot chat accepts the same token. */}
-              {renderText(streamingEmailRefsText(splitMediaDirectives(streaming).text), t("chat.table"), t("chat.detailsSummary"))}
-              <span style={{ display: 'inline-block', width: 6, height: 14, background: '#f97316', borderRadius: 1, marginLeft: 2, animation: 'chatapp-blink 1s step-end infinite', verticalAlign: 'text-bottom' }} />
-            </div>
-          </div>
-        )}
+        {streaming && <ChatAppStreamingBubble text={streaming} t={t} />}
 
         {sending && !streaming && (
           <div style={{ display: 'flex', justifyContent: 'flex-start' }}>
@@ -1787,10 +1996,13 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
             color: '#f59e0b', fontSize: 12, lineHeight: 1.4, flexShrink: 0,
           }}
         >
-          {t(`chat.attachment.error.${attachmentError.reason}`, { name: attachmentError.file })}
+          {t(`chat.attachment.error.${attachmentError.reason}`, { ...attachmentError.params, name: attachmentError.file })}
           {attachmentError.detail ? ` ${attachmentError.detail}` : ''}
         </div>
       )}
+
+      {/* Still on its way to the box. */}
+      <ChatUploadChips uploads={uploadTracker.uploads} onCancel={uploadTracker.cancel} t={t} />
 
       {/* Staged attachments */}
       {pendingAttachments.length > 0 && (
@@ -1810,6 +2022,25 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
                 // that says WHICH file is attached, and a decorative image tells
                 // a screen-reader user nothing at all.
                 <img src={item.previewUrl} alt={t('chat.attachment.previewAlt', { name: item.name })} style={{ width: 56, height: 56, borderRadius: 8, objectFit: 'cover', border: '1px solid rgba(255,255,255,0.1)' }} />
+              ) : item.kind === 'folder' ? (
+                // A dropped folder: its name and how many files it carries.
+                <div
+                  title={item.name}
+                  style={{
+                    width: 56, height: 56, borderRadius: 8,
+                    border: '1px solid rgba(249,115,22,0.35)',
+                    background: 'rgba(249,115,22,0.08)',
+                    color: 'rgba(255,255,255,0.7)', fontSize: 9, lineHeight: 1.2,
+                    padding: 4, overflow: 'hidden', wordBreak: 'break-all',
+                    display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 1,
+                  }}
+                >
+                  <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 18, color: '#f97316' }}>folder</span>
+                  <span style={{ maxHeight: 20, overflow: 'hidden' }}>{item.name}</span>
+                  {typeof item.fileCount === 'number' && (
+                    <span style={{ color: 'rgba(255,255,255,0.45)' }}>{t('chat.attachment.folderFiles', { count: item.fileCount })}</span>
+                  )}
+                </div>
               ) : (
                 <div style={{
                   width: 56, height: 56, borderRadius: 8,

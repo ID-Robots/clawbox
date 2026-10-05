@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# GDM runs this for the "ClawBox Desktop" session: labwc, a stacking Wayland
+# compositor, with the ClawBox desktop as a Chrome app window pinned under
+# everything and the pages it opens as ordinary Chrome windows on top.
+# Installed to /usr/local/bin by install-desktop-session.sh.
+. /etc/clawbox/kiosk.env
+export XKB_DEFAULT_LAYOUT="${CLAWBOX_KIOSK_XKB_LAYOUT:-us}"
+export XDG_CURRENT_DESKTOP=ClawBox
+
+URL="${CLAWBOX_KIOSK_URL:-http://localhost/}"
+# Chrome names an app window chrome-<host>__<path>-<profile dir>; the port is
+# not part of it. "/" is the path the desktop lives on.
+host="${URL#*://}"; host="${host%%/*}"; host="${host%%:*}"
+export CLAWBOX_DESKTOP_APP_ID="chrome-${host}__-Default"
+export CLAWBOX_LABWC_CONF="${XDG_RUNTIME_DIR:-/tmp}/clawbox-labwc"
+BROWSER="${CLAWBOX_DESKTOP_BROWSER:-/usr/local/bin/clawbox-desktop-browser}"
+# The launcher owns the config (the shelf margin follows the desktop's zoom).
+"$BROWSER" --render-config
+
+# Monitor mode is THIS session's, and nothing else's: the web server arranges
+# the monitors (src/lib/monitors.ts) only while the process this file names is
+# alive. Any compositor that speaks wlr-output-management answers wlr-randr —
+# cage, the kiosk session, does too — so a socket alone is no sign of it.
+# `exec` keeps the PID: $$ is labwc's. Replaced whole (a reader never sees half
+# a number), and a stale one from an earlier session names a process gone.
+if [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -d "$XDG_RUNTIME_DIR" ]; then
+  marker="$XDG_RUNTIME_DIR/clawbox-monitor-mode"
+  { printf '%s\n' "$$" > "$marker.$$" && mv -f "$marker.$$" "$marker"; } 2>/dev/null || rm -f "$marker.$$"
+fi
+exec labwc -C "$CLAWBOX_LABWC_CONF" -s "$BROWSER"

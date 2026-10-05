@@ -87,6 +87,45 @@ import {
   stageRunInputs,
 } from "@/lib/coding-run-inputs";
 import {
+  type ArchiveReason,
+  type HistoryPolicy,
+  type HistoryRecord,
+  type HistoryRetentionMode,
+  type OlderRunEntry,
+  CODING_AGENT_HISTORY_LIMIT_CONFIG_KEY,
+  CODING_AGENT_HISTORY_RETENTION_CONFIG_KEY,
+  HISTORY_EXTENDED_LIMITS,
+  HISTORY_LIVE_RUNS_KEPT,
+  HISTORY_MIN_FREE_BYTES,
+  HISTORY_RETENTION_MODES,
+  STANDARD_HISTORY_POLICY,
+  archiveIndex,
+  archiveRun,
+  diskSpace,
+  harnessTranscriptState,
+  hasOlderRuns,
+  historyExportSources,
+  historyPolicyFrom,
+  historyUsage,
+  invalidateUsage,
+  isDiskLow,
+  type DiskSpace,
+  type HarnessTranscriptState,
+  type HistoryUsage,
+  isHistoryExtendedLimit,
+  isHistoryRetentionMode,
+  keepHarnessTranscripts,
+  keepsOlderRuns,
+  olderRunIndex,
+  olderRunsCap,
+  readOlderRunRecord,
+  releaseHarnessTranscripts,
+  removeOlderRun,
+  writeOlderRun,
+  type TranscriptPinResult,
+} from "@/lib/coding-run-history";
+import type { ZipSource } from "@/lib/zip-writer";
+import {
   type CodingPauseMeter,
   type CodingPauseReason,
   type CodingRunStatus,
@@ -102,9 +141,9 @@ import { parseClawaiAllowanceRefusal } from "@/lib/clawai-allowance";
 import {
   HARNESS_FAULT_CONFIG_KEY,
   type HarnessFault,
+  classifyHarnessFailure,
   harnessFaultMessage,
   harnessFaultProblem,
-  isHarnessFault,
   parseHarnessFault,
 } from "@/lib/coding-harness-fault";
 // The runner writes its fixed lines from this table so the surfaces that draw
@@ -126,7 +165,7 @@ import {
   resolveRunProvider,
   type CodingProvider,
 } from "@/lib/coding-provider";
-import { getAnthropicConnection, type AnthropicSource } from "@/lib/coding-anthropic";
+import { getAnthropicConnection, verifyAnthropicKey, type AnthropicSource } from "@/lib/coding-anthropic";
 import { DATA_DIR_PUBLIC_SUBTREES, isInside, isProtectedFilePath, PROTECTED_HOME_DIRS } from "@/lib/file-guard";
 import { beginRunStart, isProjectBeingRemoved } from "@/lib/coding-project-removal-lock";
 import { readClawboxManifest } from "@/lib/clawbox-manifest";
@@ -161,9 +200,11 @@ import { forgetRunSecrets, redactForRun, registerRunSecrets } from "@/lib/secret
 import {
   anotherAccountLikely,
   accountsSnapshot,
+  activeAccountSnapshot,
   markLimited,
   onLimitReset,
   prepareAccount,
+  probeAccountCredential,
   readAccounts,
   removeCredentialHandoffs,
   startAnthropicAccounts,
@@ -171,17 +212,22 @@ import {
   type AnthropicCredential,
   type LimitRecorded,
   type PreparedAccount,
+  type SwapConsumerOutcome,
 } from "@/lib/anthropic-accounts";
 import {
+  detectAnthropicAuthFailure,
   detectAnthropicLimit,
   formatResetClock,
+  isUsable,
   limitUntil,
   pickAccount,
   poolHealth,
   type AnthropicLimit,
   type AnthropicLimitKind,
 } from "@/lib/anthropic-limit";
-import { announceAnthropicLimit, announceCodingAgent } from "@/lib/coding-agent-notify";
+import { registerSwapConsumer } from "@/lib/anthropic-swap";
+import { startGatewaySwap } from "@/lib/anthropic-gateway";
+import { announceCodingAgent } from "@/lib/coding-agent-notify";
 import {
   collectVisualEvidence,
   renderEvidenceSection,
@@ -190,6 +236,7 @@ import {
 } from "@/lib/coding-review-visual";
 import {
   AUTO_MERGE_RETRY_MS,
+  boxHostNames,
   decideAutoMerge,
   decideMerge,
   disableAutoMerge,
@@ -202,6 +249,7 @@ import {
   mergePullRequest,
   NO_CHECKS_GRACE_MS,
   openPullRequest,
+  redactForGitHub,
   updatePullRequestBody,
   // Aliased: this module's own MAX_WAIT_MS is the 120-second status-request
   // limit, a different ceiling for a different wait.
@@ -215,6 +263,14 @@ import {
   type PrFoundBy,
   type PrState,
 } from "@/lib/coding-pr";
+import {
+  composePullRequestBody,
+  isPrBodyTaskMode,
+  prBodyTaskModeFrom,
+  pullRequestTitle,
+  PR_BODY_TASK_MODES,
+  type PrBodyTaskMode,
+} from "@/lib/coding-pr-body";
 import {
   addRunWorktree,
   commitsAhead,
@@ -299,6 +355,14 @@ import {
   type PipelineVerify,
   type StageOutcome,
 } from "@/lib/coding-pipeline";
+import {
+  EXPERIENCE_BLOCK_MAX_CHARS,
+  EXPERIENCE_RULE_ID,
+  readExperienceInput,
+  renderExperience,
+  type ExperienceInputRefusal,
+  type RunExperience,
+} from "@/lib/coding-experience";
 import { closeSessionsForRun } from "@/lib/browser-sessions";
 import { ensureProjectIcon } from "@/lib/project-icon";
 import { webappIconPath } from "@/lib/webapp-icon";
@@ -479,6 +543,16 @@ export const CODING_AGENT_REVIEW_CONFIG_KEY = "coding_agent_review_pass";
  * check passed" is trivially true of zero checks.
  */
 export const CODING_AGENT_AUTO_PR_CONFIG_KEY = "coding_agent_auto_pr";
+
+/**
+ * How much of the run's TASK the pull request the box opens carries:
+ * "summary" (the default — a long task is cut to a one-line summary and its
+ * first ~600 characters), "full-redacted" or "none". Whatever is chosen is
+ * redacted before it is published (src/lib/coding-pr-body.ts and
+ * src/lib/publish-redaction.ts, TASK-1366); the run itself always sees its
+ * whole task.
+ */
+export const CODING_AGENT_PR_BODY_TASK_CONFIG_KEY = "coding_agent_pr_body_includes_task";
 
 /**
  * How many REVIEW ROUNDS a pull request gets after it is opened.
@@ -665,10 +739,15 @@ export const CODING_AGENT_RESET_KEYS = [
   CODING_AGENT_TOKENS_CONFIG_KEY,
   CODING_AGENT_REVIEW_CONFIG_KEY,
   CODING_AGENT_AUTO_PR_CONFIG_KEY,
+  CODING_AGENT_PR_BODY_TASK_CONFIG_KEY,
   CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY,
   CODING_AGENT_AUTO_MERGE_CONFIG_KEY,
   CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY,
   CODING_AGENT_MAX_PARALLEL_CONFIG_KEY,
+  // The retention setting goes back to standard; resetCodingAgentSetup also
+  // hands Claude Code's transcript period back to whoever set it before.
+  CODING_AGENT_HISTORY_RETENTION_CONFIG_KEY,
+  CODING_AGENT_HISTORY_LIMIT_CONFIG_KEY,
   CODING_AGENT_GEN_IMAGES_CONFIG_KEY,
   CODING_AGENT_GEN_AUDIO_CONFIG_KEY,
   CODING_AGENT_REAL_BROWSER_CONFIG_KEY,
@@ -773,8 +852,13 @@ export async function teamSpawnSlot(team: RunTeam, starting = 0): Promise<{ ok: 
 }
 /** Longest a status request may block waiting for a run to finish. */
 export const MAX_WAIT_MS = 120_000;
-/** Runs kept in data/coding-agent-runs.json, newest first. */
-const MAX_RUNS_KEPT = 30;
+/**
+ * Runs kept in data/coding-agent-runs.json, newest first — in EVERY history
+ * mode. A mode that keeps more keeps the rest as older runs, one file each
+ * (src/lib/coding-run-history.ts), because this file is rewritten whole on
+ * every flush.
+ */
+const MAX_RUNS_KEPT = HISTORY_LIVE_RUNS_KEPT;
 /**
  * Progress lines kept per run — and how many of them are the run's FIRST.
  *
@@ -1211,6 +1295,11 @@ export type CodingRunSource = "agent" | "owner";
  * One move of a run from an Anthropic account at its limit to the next one in
  * the owner's order. Labels as they read at the time, so the run's page can say
  * what happened without the pool — and without ever holding a credential.
+ *
+ * `kind` is the limit it hit, or (TASK-1260) `auth` — Anthropic refused the
+ * account's credential — or `moved` — the box's active account moved while the
+ * run was on one that could no longer answer, because another consumer (a
+ * second run, the chat, a cron) hit the limit first.
  */
 export interface AccountSwitch {
   at: number;
@@ -1220,7 +1309,7 @@ export interface AccountSwitch {
   toLabel: string;
   /** When the account it left is expected back; null when the box had to assume. */
   limitedUntil: number | null;
-  kind: AnthropicLimitKind;
+  kind: AnthropicLimitKind | "auth" | "moved";
 }
 
 /** How many switches a record keeps — a night of them, not a history. */
@@ -1242,7 +1331,7 @@ function normalizeAccountSwitches(raw: unknown): AccountSwitch[] {
       toId,
       toLabel,
       limitedUntil: typeof e.limitedUntil === "number" ? e.limitedUntil : null,
-      kind: e.kind === "weekly" || e.kind === "rate" || e.kind === "credit" ? e.kind : "session",
+      kind: e.kind === "weekly" || e.kind === "rate" || e.kind === "credit" || e.kind === "auth" || e.kind === "moved" ? e.kind : "session",
     }];
   }).slice(-MAX_ACCOUNT_SWITCHES);
 }
@@ -1312,6 +1401,25 @@ export interface CodingRun {
   readOnly: boolean;
   /** Words the team appended to the brief — the planner's or a worker's role. */
   extraBrief: string | null;
+  /**
+   * The lessons from the training cluster's experience store this run's system
+   * prompt carried (TASK-1348, src/lib/coding-experience.ts): which rules
+   * reached it, whether the repository's skill document did, and how long the
+   * block was. Null on a run that was given none — every run the dispatcher did
+   * not start, and the baseline the cluster's metric compares against.
+   *
+   * Optional in the type, like `resultText`, so a record built before it
+   * existed still type-checks; normalizeRun and newRunRecord always set it.
+   */
+  experience?: RunExperience | null;
+  /**
+   * The rendered block itself: what every spawn of this run — a retry, an
+   * account switch, a resume — hands the CLI again, and what a run resuming
+   * this one inherits. Kept on the box's own record and left out of what the
+   * routes answer (cloneRun): `experience` says what it held, and the list it
+   * would ride along in is polled every five seconds.
+   */
+  experienceBrief?: string | null;
   /**
    * The pull request this run's work went into, once the auto-PR switch is on.
    *
@@ -1819,6 +1927,14 @@ export interface CodingDenial {
    * from before the hint.
    */
   worktreePath?: string;
+  /**
+   * The refused action's whole text, when `text` is its first MAX_DENIAL_CHARS
+   * only — up to MAX_DENIAL_FULL_CHARS. Never shown: a team judges a refusal by
+   * it (`readOnlyDenial`), because a long read-only probe cut at the display
+   * length could be anything after the cut. Absent when `text` is the whole of
+   * it, and on a record from before it.
+   */
+  fullText?: string;
 }
 
 /** How many finished helpers a run record keeps — the newest; the counts by type keep the total. */
@@ -1927,6 +2043,8 @@ export interface CodingAgentStatus {
   reviewPass: boolean;
   /** The owner's switch for branch -> pull request -> wait for checks -> merge. */
   autoPr: boolean;
+  /** How much of the task that pull request carries, always redacted. */
+  prBodyIncludesTask: PrBodyTaskMode;
   /** How many follow-up turns a pull request's review loop gets. 0 = off. */
   reviewRounds: number;
   /** The range the app offers, so it does not have to guess the bounds. */
@@ -1939,6 +2057,13 @@ export interface CodingAgentStatus {
   /** The range the app offers, so it does not have to guess the bounds. */
   minMaxParallelRuns: number;
   maxMaxParallelRuns: number;
+  /** What the box keeps of finished runs — see src/lib/coding-run-history.ts. */
+  historyRetention: HistoryRetentionMode;
+  /** The extended mode's N, and the choices the app offers for it. */
+  historyLimit: number;
+  historyLimits: number[];
+  /** Runs the live list holds in every mode (the thirty it always held). */
+  historyLiveKept: number;
   /** Attempts a run with a deliverable gets at it, its own first turn included. */
   completionAttempts: number;
   /** The range the app offers, so it does not have to guess the bounds. */
@@ -2073,6 +2198,16 @@ export interface StartRunInput {
    * into every prompt.
    */
   pipeline?: unknown;
+  /**
+   * Lessons from earlier verified runs — the training cluster's experience
+   * store, as its dispatcher selected it for this task — as the CALLER sent
+   * them: unvalidated, read through `readExperienceInput`, which refuses with a
+   * stable code rather than repairing. Rendered into the run's system prompt,
+   * never into its task. Absent or null, the run starts exactly as it did
+   * before the field existed — or, on a resume, carries the block of the run it
+   * resumes.
+   */
+  experience?: unknown;
 }
 
 /** A run's place in a coding team. */
@@ -2401,6 +2536,19 @@ export async function setAutoPr(on: unknown): Promise<boolean> {
   return on;
 }
 
+/** How much of the task the box's pull request carries. Absent means "summary". */
+export async function getPrBodyIncludesTask(): Promise<PrBodyTaskMode> {
+  return prBodyTaskModeFrom(await configGet(CODING_AGENT_PR_BODY_TASK_CONFIG_KEY));
+}
+
+export async function setPrBodyIncludesTask(mode: unknown): Promise<PrBodyTaskMode> {
+  if (!isPrBodyTaskMode(mode)) {
+    throw new CodingAgentError("invalid", `What a pull request includes of the task must be one of: ${PR_BODY_TASK_MODES.join(", ")}.`);
+  }
+  await configSet(CODING_AGENT_PR_BODY_TASK_CONFIG_KEY, mode);
+  return mode;
+}
+
 /** How many review rounds a pull request gets. Absent means the default. */
 export async function getReviewRounds(): Promise<number> {
   const stored = await configGet(CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY);
@@ -2441,6 +2589,73 @@ export async function setMaxParallelRuns(runs: unknown): Promise<number> {
   }
   await configSet(CODING_AGENT_MAX_PARALLEL_CONFIG_KEY, runs);
   return runs;
+}
+
+export { CODING_AGENT_HISTORY_LIMIT_CONFIG_KEY, CODING_AGENT_HISTORY_RETENTION_CONFIG_KEY, HISTORY_EXTENDED_LIMITS, HISTORY_RETENTION_MODES };
+export type { HistoryPolicy, HistoryRetentionMode };
+
+/**
+ * Remember the owner's history setting where the SYNC paths can see it: the
+ * settle decides whether a run's stream log is kept for the archive, and it
+ * cannot await a config read. Refreshed by every read below and by the status
+ * the app polls; empty only in a process that has read neither, where the
+ * settle does what it always did.
+ */
+function rememberHistoryPolicy(policy: HistoryPolicy): HistoryPolicy {
+  store.historyPolicy = policy;
+  return policy;
+}
+
+/** What the box keeps of finished runs. Absent means standard — see coding-run-history.ts. */
+export async function getHistoryPolicy(): Promise<HistoryPolicy> {
+  const [mode, limit] = await Promise.all([
+    configGet(CODING_AGENT_HISTORY_RETENTION_CONFIG_KEY),
+    configGet(CODING_AGENT_HISTORY_LIMIT_CONFIG_KEY),
+  ]);
+  return rememberHistoryPolicy(historyPolicyFrom(mode, limit));
+}
+
+/**
+ * The Claude Code settings files whose transcripts a run leaves behind: the
+ * box's own harness folder (ClawBox AI runs) and the default one an Anthropic
+ * run uses — harnessStateDir, both ways. One file when both are the same.
+ */
+export function harnessSettingsFiles(): string[] {
+  return [...new Set((["clawbox-ai", "anthropic"] as const).map((p) => path.join(harnessStateDir(p), "settings.json")))];
+}
+
+export interface HistoryRetentionChange {
+  policy: HistoryPolicy;
+  /** What happened to Claude Code's transcript period, file by file. */
+  transcripts: TranscriptPinResult[];
+}
+
+/**
+ * Change what the box keeps. Either half may be given; a value this box does
+ * not offer is refused rather than clamped, like the other counted settings.
+ *
+ * Nothing is deleted HERE: a lower limit is applied the next time a run joins
+ * the list (insertRun), so a mis-tap on the select can be taken back before
+ * it costs anything, and the settings card says what the next run will drop.
+ * Claude Code's transcript period follows the mode now, though: kept while the
+ * owner keeps everything, handed back to what it was as soon as they do not.
+ */
+export async function setHistoryRetention(input: { mode?: unknown; limit?: unknown }): Promise<HistoryRetentionChange> {
+  if (input.mode !== undefined && !isHistoryRetentionMode(input.mode)) {
+    throw new CodingAgentError("invalid", `The run history setting must be one of: ${HISTORY_RETENTION_MODES.join(", ")}.`);
+  }
+  if (input.limit !== undefined && !isHistoryExtendedLimit(input.limit)) {
+    throw new CodingAgentError("invalid", `The number of runs to keep must be one of: ${HISTORY_EXTENDED_LIMITS.join(", ")}.`);
+  }
+  const entries: Record<string, unknown> = {};
+  if (input.mode !== undefined) entries[CODING_AGENT_HISTORY_RETENTION_CONFIG_KEY] = input.mode;
+  if (input.limit !== undefined) entries[CODING_AGENT_HISTORY_LIMIT_CONFIG_KEY] = input.limit;
+  if (Object.keys(entries).length > 0) await configSetMany(entries);
+  const policy = await getHistoryPolicy();
+  const transcripts = policy.mode === "everything"
+    ? await keepHarnessTranscripts(harnessSettingsFiles())
+    : await releaseHarnessTranscripts();
+  return { policy, transcripts };
 }
 
 /** The owner's merge switch. Absent means OFF — see the config key. */
@@ -2605,6 +2820,18 @@ export class PipelineChoiceError extends CodingAgentError {
   }
 }
 
+/**
+ * An `experience` field the box refused, with the reason's stable code beside
+ * the shared 400 — so the dispatcher can tell "rule 3's id is malformed" from
+ * "too many rules" without parsing a sentence. See readExperienceInput.
+ */
+export class ExperienceChoiceError extends CodingAgentError {
+  constructor(readonly code: ExperienceInputRefusal, message: string) {
+    super("invalid", message);
+    this.name = "ExperienceChoiceError";
+  }
+}
+
 export function allowRuleContext(): AllowRuleContext {
   return {
     denyRules: [...fileDenyRules(), ...BASH_KILL_DENYLIST, ...BASH_DENYLIST],
@@ -2725,6 +2952,16 @@ export async function resetCodingAgentSetup(): Promise<number> {
   for (const key of CODING_AGENT_RESET_KEYS) {
     await configSet(key, undefined);
   }
+  // The history setting is back to standard, so Claude Code's transcript
+  // period goes back to whatever it was before "keep everything" changed it.
+  // The ARCHIVE is not touched: it is kept data with a Clear of its own, not
+  // a setting — and the owner who archived runs did so to keep them.
+  await releaseHarnessTranscripts().catch((err) => {
+    console.error("[coding-agent] could not hand back Claude Code's transcript period:", err instanceof Error ? err.message : err);
+  });
+  // Standard from here on — the setting was just cleared — so the Clear below
+  // DELETES, as start-over always did, rather than filling the archive.
+  rememberHistoryPolicy(STANDARD_HISTORY_POLICY);
   return clearFinishedRuns();
 }
 
@@ -3420,6 +3657,9 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     running: runningCount(),
     reviewPass: config[CODING_AGENT_REVIEW_CONFIG_KEY] === true,
     autoPr: config[CODING_AGENT_AUTO_PR_CONFIG_KEY] === true,
+    // Absent means "summary": a box that predates the setting stops pasting a
+    // whole task into a public pull request the day it updates.
+    prBodyIncludesTask: prBodyTaskModeFrom(config[CODING_AGENT_PR_BODY_TASK_CONFIG_KEY]),
     // Absent means the DEFAULT here, not zero: a box that predates the loop
     // gets it, which is the point of shipping it on.
     reviewRounds: typeof config[CODING_AGENT_REVIEW_ROUNDS_CONFIG_KEY] === "number"
@@ -3438,6 +3678,16 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     maxParallelRuns: maxParallelRunsFrom(config[CODING_AGENT_MAX_PARALLEL_CONFIG_KEY]),
     minMaxParallelRuns: MIN_MAX_PARALLEL_RUNS,
     maxMaxParallelRuns: MAX_MAX_PARALLEL_RUNS,
+    // Absent means standard — what every box did before the setting existed.
+    ...(() => {
+      const history = rememberHistoryPolicy(historyPolicyFrom(config[CODING_AGENT_HISTORY_RETENTION_CONFIG_KEY], config[CODING_AGENT_HISTORY_LIMIT_CONFIG_KEY]));
+      return {
+        historyRetention: history.mode,
+        historyLimit: history.limit,
+        historyLimits: [...HISTORY_EXTENDED_LIMITS],
+        historyLiveKept: MAX_RUNS_KEPT,
+      };
+    })(),
     generateImages: generateImagesFrom(config[CODING_AGENT_GEN_IMAGES_CONFIG_KEY]),
     generateAudio: generateAudioFrom(config[CODING_AGENT_GEN_AUDIO_CONFIG_KEY]),
     realBrowser: realBrowserFrom(config[CODING_AGENT_REAL_BROWSER_CONFIG_KEY]),
@@ -3533,6 +3783,22 @@ function normalizeTeam(raw: unknown): RunTeam | null {
   return { id: t.id, role: t.role, taskId: typeof t.taskId === "string" ? t.taskId : null };
 }
 
+/**
+ * A stored `experience` summary, rebuilt field by field. Ids this code could
+ * not have written are dropped rather than trusted: the training cluster joins
+ * on them, and a hand-edited record must not credit a rule with a run it never
+ * reached.
+ */
+function parseRunExperience(raw: unknown): RunExperience | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const v = raw as Record<string, unknown>;
+  return {
+    ruleIds: Array.isArray(v.ruleIds) ? v.ruleIds.filter((id): id is string => typeof id === "string" && EXPERIENCE_RULE_ID.test(id)) : [],
+    skill: v.skill === true,
+    chars: typeof v.chars === "number" && Number.isFinite(v.chars) && v.chars >= 0 ? Math.round(v.chars) : 0,
+  };
+}
+
 function normalizePr(raw: unknown): PrState | null {
   if (typeof raw !== "object" || raw === null) return null;
   const v = raw as Partial<Record<keyof PrState, unknown>>;
@@ -3606,6 +3872,10 @@ function normalizeRun(raw: CodingRun): CodingRun {
           // render as nothing beside a refusal that then explains itself twice.
           refusal: isAllowRuleRefusal(d.refusal) ? d.refusal : null,
           ...(typeof d.worktreePath === "string" && path.isAbsolute(d.worktreePath) ? { worktreePath: d.worktreePath } : {}),
+          // Only as what it claims to be: the rest of `text`, within its bound.
+          ...(typeof d.fullText === "string" && d.fullText.length > d.text.length && d.fullText.startsWith(d.text)
+            ? { fullText: d.fullText.slice(0, MAX_DENIAL_FULL_CHARS) }
+            : {}),
         }))
       : [],
     worktreeHints: typeof raw.worktreeHints === "number" && Number.isFinite(raw.worktreeHints) && raw.worktreeHints > 0 ? Math.floor(raw.worktreeHints) : 0,
@@ -3695,6 +3965,12 @@ function normalizeRun(raw: CodingRun): CodingRun {
     team: normalizeTeam(raw.team),
     readOnly: raw.readOnly === true,
     extraBrief: typeof raw.extraBrief === "string" && raw.extraBrief ? raw.extraBrief : null,
+    experience: parseRunExperience(raw.experience),
+    // No longer than the renderer ever writes: a longer one on a hand-edited
+    // record is not a block this box rendered, and it travels into a prompt.
+    experienceBrief: typeof raw.experienceBrief === "string" && raw.experienceBrief && raw.experienceBrief.length <= EXPERIENCE_BLOCK_MAX_CHARS
+      ? raw.experienceBrief
+      : null,
     // Every field must be reconstructed here: normalizeRun builds a fresh
     // object field by field, so anything omitted survives in memory and
     // disappears the next time the file is read.
@@ -4063,6 +4339,24 @@ interface LiveRun {
    */
   sawWriteAttempt: boolean;
   /**
+   * Whether a model has actually answered this spawn: a real assistant
+   * message, main loop or helper, not one the CLI wrote itself ("<synthetic>")
+   * to carry an API error. With `run.tokensUsed`, what tells a model error
+   * in the middle of a run from a harness that never got a model to answer —
+   * only the second is recorded as a harness fault (TASK-1320).
+   */
+  sawModelAnswer: boolean;
+  /**
+   * `run.tokensUsed` when this spawn began, so the verdict above counts what
+   * THIS spawn was billed. The record's bill alone would not do: a resume, an
+   * account switch and a pipeline lap all continue a record that already
+   * carries earlier spawns' tokens, and a resumed spawn refused on its very
+   * first request is the startup case again, not a model error mid-run. The
+   * automatic retry inherits its first attempt's value — one run making a
+   * second try seconds later, at the same work.
+   */
+  tokensAtSpawn: number;
+  /**
    * tool_use ids of sub-agents that have started and not yet reported back.
    * Ids rather than a counter: a tool_result can arrive out of order, and a
    * duplicate must not decrement twice.
@@ -4122,6 +4416,23 @@ interface LiveRun {
    * other account could take the run over — applied when finishRun runs again.
    */
   forcedAccountPause: { resetsAt: string | null; message: string } | null;
+  /**
+   * The HARNESS's own report that Anthropic refused the account's credential
+   * (TASK-1260) — a synthetic message tagged `authentication_failed`, or one
+   * that reads as a 401. Like `limitSignal`, read before the run's own words.
+   */
+  authSignal: string | null;
+  /**
+   * The box's active account moved off the account this run is on, and the
+   * swap ended the process to carry the run on on the new one (TASK-1260).
+   */
+  accountMove: boolean;
+  /**
+   * A failure the account handling decided on after the process had gone — a
+   * refused credential with no account left to move to — applied when
+   * finishRun runs again.
+   */
+  forcedAccountFailure: string | null;
 }
 
 /**
@@ -4173,6 +4484,8 @@ interface RunStore {
   reviewWatchers: Set<string>;
   /** Settle chains a test can wait on — see trackSettleWork. */
   settling: Set<Promise<void>>;
+  /** Runs whose record says settled while their commit is still being made — see waitForRun. */
+  unannounced: Set<string>;
   /** One lifecycle change at a time per run — see transitions. */
   transitions: Map<string, Promise<CodingRun>>;
   /** One pipeline advance at a time per run — see advancePipeline. */
@@ -4185,6 +4498,14 @@ interface RunStore {
    * trusting its own snapshot.
    */
   signature: string | null;
+  /** The runs are registered as a consumer of the box's active Anthropic account (TASK-1260). */
+  swapConsumerArmed?: boolean;
+  /** The pass resuming the runs that waited for an Anthropic reset — one at a time. */
+  anthropicResume?: Promise<string[]>;
+  /** How many times each run was carried on after a refused credential — see MAX_AUTH_SWITCHES. */
+  anthropicAuthRetries?: Map<string, number>;
+  /** The owner's history setting as last read — see rememberHistoryPolicy. */
+  historyPolicy: HistoryPolicy | null;
 }
 
 const store = processStore<RunStore>(RUNS_PATH, () => ({
@@ -4199,10 +4520,12 @@ const store = processStore<RunStore>(RUNS_PATH, () => ({
   prWatchers: new Set<string>(),
   reviewWatchers: new Set<string>(),
   settling: new Set<Promise<void>>(),
+  unannounced: new Set<string>(),
   transitions: new Map<string, Promise<CodingRun>>(),
   pipelineAdvancing: new Map<string, Promise<void>>(),
   startingRuns: 0,
   signature: null,
+  historyPolicy: null,
 }));
 
 const live = store.live;
@@ -4352,6 +4675,11 @@ function detachedState(run: CodingRun, tools: SpawnTools, lostToRestart: boolean
     worktreeTargets: new Map<string, { tool: string; counterpart: string }>(),
     worktreeHinted: new Set<string>(),
     sawWriteAttempt: false,
+    // What the process saw before the restart is gone with it; the record's
+    // `tokensUsed` still speaks for any answer it got, so all of it counts —
+    // the process being reattached is the spawn that billed it.
+    sawModelAnswer: false,
+    tokensAtSpawn: 0,
     sawThinking: false,
     thinkingSeen: 0,
     tools,
@@ -4370,6 +4698,9 @@ function detachedState(run: CodingRun, tools: SpawnTools, lostToRestart: boolean
     limitSignal: null,
     simulatedLimit: null,
     forcedAccountPause: null,
+    authSignal: null,
+    accountMove: false,
+    forcedAccountFailure: null,
     timedOut: false,
     // The harness's segment carries on across the restart, and the result it
     // eventually prints reports that whole segment's totals — which is exactly
@@ -4491,7 +4822,7 @@ function persist(immediate = false): void {
 }
 
 function cloneRun(run: CodingRun): CodingRun {
-  return {
+  const clone: CodingRun = {
     ...run,
     workflowTelemetry: cachedWorkflowTelemetry(transcriptPath(run), run.startedAt, run.completedAt),
     filesTouched: [...run.filesTouched],
@@ -4524,16 +4855,137 @@ function cloneRun(run: CodingRun): CodingRun {
     // Nested two deep — steps, and the evidence under each — so a route holding
     // a clone can neither see nor write the driver's later stages.
     pipeline: run.pipeline ? clonePipeline(run.pipeline) : null,
+    experience: run.experience ? { ...run.experience, ruleIds: [...run.experience.ruleIds] } : null,
   };
+  // The experience block is left out, not copied: it is for the next spawn,
+  // which reads the record itself — see CodingRun.experienceBrief.
+  delete clone.experienceBrief;
+  return clone;
 }
 
 export function getRun(id: string): CodingRun | null {
   const run = loadRuns().find((r) => r.id === id);
-  return run ? cloneRun(run) : null;
+  if (run) return cloneRun(run);
+  // An older run a history mode kept past the live thirty: its own file, read
+  // on demand. Settled by construction — nothing held ever leaves the list.
+  const older = readOlderRun(id);
+  return older ? cloneRun(older) : null;
 }
 
 export function listRuns(limit = MAX_RUNS_KEPT): CodingRun[] {
   return loadRuns().slice(0, Math.max(0, limit)).map(cloneRun);
+}
+
+/** An older run's record off its own file, normalised like the runs file's, or null. */
+function readOlderRun(id: string): CodingRun | null {
+  if (!RUN_ID_RE.test(id) || !hasOlderRuns()) return null;
+  const raw = readOlderRunRecord(id);
+  return isCodingRun(raw) && raw.id === id ? normalizeRun(raw) : null;
+}
+
+/**
+ * A page of the runs a history mode keeps past the live thirty, newest first,
+ * and how many there are. `project` narrows it to one project folder (the
+ * folder the owner knows — see projectDirectoryOf). Read from the older runs'
+ * own files, so the runs file this whole module rewrites every second never
+ * holds them.
+ */
+export function listOlderRuns(options: { offset?: number; limit?: number; project?: string | null } = {}): { runs: CodingRun[]; total: number } {
+  if (!hasOlderRuns()) return { runs: [], total: 0 };
+  const project = options.project ? path.resolve(options.project) : null;
+  const index = olderRunIndex().filter((e) => !project || path.resolve(e.project || e.directory) === project || path.resolve(e.directory) === project);
+  const offset = Math.max(0, Math.floor(options.offset ?? 0));
+  const limit = Math.max(0, Math.floor(options.limit ?? MAX_RUNS_KEPT));
+  const runs = index.slice(offset, offset + limit).flatMap((e) => {
+    const run = readOlderRun(e.id);
+    return run ? [cloneRun(run)] : [];
+  });
+  return { runs, total: index.length };
+}
+
+/** Everything the settings card says about the run history, in one read. */
+export interface RunHistorySummary {
+  mode: HistoryRetentionMode;
+  limit: number;
+  limits: number[];
+  /** Runs the live list holds in every mode. */
+  liveKept: number;
+  counts: { live: number; older: number; archived: number };
+  /** Null when the walk failed; the card then says it could not measure. */
+  usage: HistoryUsage | null;
+  disk: DiskSpace & { minFreeBytes: number; low: boolean };
+  /** Claude Code's transcript period, per settings file the box's runs use. */
+  transcripts: HarnessTranscriptState[];
+}
+
+/** The Claude Code folders a run's transcript lands in (both providers'). */
+function harnessTranscriptDirs(): string[] {
+  return [...new Set((["clawbox-ai", "anthropic"] as const).map((p) => path.join(harnessStateDir(p), "projects")))];
+}
+
+export async function runHistorySummary(): Promise<RunHistorySummary> {
+  const policy = await getHistoryPolicy();
+  const usage = await historyUsage({ runsFile: RUNS_PATH, streamsDir: STREAM_DIR, transcriptDirs: harnessTranscriptDirs() }).catch((err) => {
+    console.error("[coding-agent] could not measure the run history:", err instanceof Error ? err.message : err);
+    return null;
+  });
+  const disk = diskSpace();
+  return {
+    mode: policy.mode,
+    limit: policy.limit,
+    limits: [...HISTORY_EXTENDED_LIMITS],
+    liveKept: MAX_RUNS_KEPT,
+    counts: {
+      live: loadRuns().length,
+      older: hasOlderRuns() ? olderRunIndex().length : 0,
+      archived: archiveIndex().length,
+    },
+    usage,
+    disk: { ...disk, minFreeBytes: HISTORY_MIN_FREE_BYTES, low: isDiskLow(disk) },
+    transcripts: harnessTranscriptState(harnessSettingsFiles()),
+  };
+}
+
+/**
+ * Every file of the run history, for "Export all history" — the live list,
+ * the older runs, their evidence, inputs and transcripts, and the archive. See
+ * historyExportSources for the layout inside the zip.
+ */
+export function historyExportAll(): AsyncGenerator<ZipSource> {
+  const runs = loadRuns();
+  const older = hasOlderRuns() ? olderRunIndex() : [];
+  const policy = store.historyPolicy ?? STANDARD_HISTORY_POLICY;
+  const transcripts = [
+    ...runs.map((r) => ({ id: r.id, file: transcriptPath(r) })),
+    ...older.map((e) => {
+      const run = readOlderRun(e.id);
+      return { id: e.id, file: run ? transcriptPath(run) : null };
+    }),
+  ];
+  return historyExportSources({
+    manifest: {
+      kind: "clawbox-run-history",
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      retention: policy.mode,
+      ...(policy.mode === "extended" ? { limit: policy.limit } : {}),
+      runs: runs.length,
+      olderRuns: older.length,
+      archivedRuns: archiveIndex().length,
+      layout: {
+        "runs.json": "the runs listed on the box, newest first",
+        "older-runs/<runId>.json": "runs kept past the newest thirty (Extended, Keep everything)",
+        "evidence/<runId>/": "each run's evidence folder",
+        "inputs/<runId>/": "the files each run was given",
+        "transcripts/<runId>.jsonl": "Claude Code's transcript of the run, where it still exists",
+        "archive/<runId>/": "archived runs: run.json, archive.json, evidence/, inputs/, transcript.jsonl, stream logs",
+      },
+    },
+    // A snapshot now: the export streams for minutes, and these records are
+    // the very objects the live runs keep writing to.
+    runs: structuredClone(runs),
+    transcripts,
+  });
 }
 
 /**
@@ -4548,7 +5000,7 @@ export function listRuns(limit = MAX_RUNS_KEPT): CodingRun[] {
  * are the account of what the assistant did with a delegated shell, and the
  * party they describe is not the party who should be able to erase them.
  */
-export function clearFinishedRuns(): number {
+export function clearFinishedRuns(policy: HistoryPolicy = store.historyPolicy ?? STANDARD_HISTORY_POLICY): number {
   const list = loadRuns();
   // Paused runs hold a resumable session and drafts never ran — neither is
   // "finished", so the owner's clear-history sweep leaves them alone. A run
@@ -4574,15 +5026,24 @@ export function clearFinishedRuns(): number {
   const keep: CodingRun[] = [];
   const dropped: CodingRun[] = [];
   for (const r of list) (heldOn(r) || isPrPending(r.pr) ? keep : dropped).push(r);
-  const removed = dropped.length;
+  // The older runs a history mode kept are finished runs of this same list,
+  // so the owner's Clear takes them too. Under archive they are ARCHIVED like
+  // everything else leaving the list, which is what that mode promises.
+  const older = hasOlderRuns() ? olderRunIndex() : [];
+  const removed = dropped.length + older.length;
   if (removed === 0) return 0;
-  for (const r of dropped) { removeArtifacts(r.id); removeRunInputs(r.id); }
+  const low = policy.mode === "archive" && isDiskLow(diskSpace());
+  for (const r of dropped) dropRun(r, policy, "cleared", low);
+  for (const e of older) dropOlderRun(e, policy, "cleared", low);
   // Mutate the array the module hands out rather than replacing the binding,
   // so every existing reader sees the same list.
   list.length = 0;
   list.push(...keep);
   persist(true);
-  console.error(`[coding-agent] cleared ${removed} finished run(s) at the owner's request`);
+  // The owner is looking at the figures this changes: a deleted evidence
+  // folder must not be counted for another half-minute out of the cache.
+  invalidateUsage();
+  console.error(`[coding-agent] cleared ${removed} finished run(s) at the owner's request${policy.mode === "archive" && !low ? " into the archive" : ""}`);
   return removed;
 }
 
@@ -4612,11 +5073,20 @@ export function activeRunId(): string | null {
 /**
  * Resolve once the run has finished, or after `timeoutMs`, whichever is first.
  * Lets a status request block instead of polling every few seconds.
+ *
+ * "Finished" is the settle path's word, not the status field's: the record
+ * says `completed` the moment the process is gone, but its work is committed
+ * only after that (finishRun), and the waiters are woken once it is. A wait
+ * that BEGAN in between — a team's next 60-second slice, for a worker that
+ * ended right at the end of the last one — answered at once, and the team
+ * merged a branch the commit had not reached yet, then removed the worktree
+ * with the files in it (team-v0wcl4mj, t1, 2026-09-26). Such a wait now waits
+ * for the wake like any other.
  */
 export function waitForRun(id: string, timeoutMs: number): Promise<CodingRun | null> {
   const run = getRun(id);
   if (!run) return Promise.resolve(null);
-  if (run.status !== "running") return Promise.resolve(run);
+  if (run.status !== "running" && !store.unannounced.has(id)) return Promise.resolve(run);
   const ms = Math.max(0, Math.min(timeoutMs, MAX_WAIT_MS));
   if (ms === 0) return Promise.resolve(run);
   return new Promise((resolve) => {
@@ -4640,6 +5110,7 @@ export function waitForRun(id: string, timeoutMs: number): Promise<CodingRun | n
 }
 
 function wakeWaiters(id: string): void {
+  store.unannounced.delete(id);
   const set = waiters.get(id);
   if (!set) return;
   waiters.delete(id);
@@ -5112,7 +5583,12 @@ const FILE_TOOLS = ["Read", "Edit", "Write", "NotebookEdit", "Glob", "Grep"] as 
 // already on this list, and the two are worth nothing apart. A run is HANDED
 // the secrets the owner ticked for it, as environment variables; reading the
 // file would hand it the ones they did not, including another project's.
-const DATA_SECRET_FILES = ["config.json", "kv.json", ".mcp-token", ".session-secret", "email-pending.json", "email-outcomes.json", "email-approval-prompts.json", "coding-agent-runs.json", "coding-agent-streams", SECRETS_FILE_NAME];
+//
+// coding-agent-history/ and coding-agent-archive/ are every OTHER run's records,
+// inputs and transcripts (src/lib/coding-run-history.ts). Named rather than
+// discovered for the stream logs' reason: the first run to leave the live list
+// creates them, possibly while another run is already working.
+const DATA_SECRET_FILES = ["config.json", "kv.json", ".mcp-token", ".session-secret", "email-pending.json", "email-outcomes.json", "email-approval-prompts.json", "coding-agent-runs.json", "coding-agent-streams", "coding-agent-history", "coding-agent-archive", SECRETS_FILE_NAME];
 
 /**
  * Entries of the harness's state directories (`HARNESS_STATE_SUBTREES`) that
@@ -5367,7 +5843,7 @@ export function buildRunMcpConfig(run: { id: string; directory: string; media?: 
 }
 
 /** The argv handed to the wrapper. Exported for the contract test. */
-export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; reviewedSeparately?: boolean; draftPullRequests?: boolean; allowRules?: readonly string[]; provider?: CodingProvider; streamInput?: boolean; run?: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null } }): string[] {
+export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; experience?: string | null; reviewedSeparately?: boolean; draftPullRequests?: boolean; allowRules?: readonly string[]; provider?: CodingProvider; streamInput?: boolean; run?: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null } }): string[] {
   // A run whose diff a separate review will read is told not to review it
   // twice — see REVIEWER_CLAUSE_SLOT.
   const headless = headlessBrief({ reviewedSeparately: opts.reviewedSeparately === true });
@@ -5389,6 +5865,12 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     // words, never instead of them.
     ...(opts.extraBrief ? [opts.extraBrief] : []),
   ].join(" ");
+  // The lessons from earlier verified runs (src/lib/coding-experience.ts), last
+  // and on their own lines: a delimited block the device rendered from a
+  // validated request, after every word of the device's own. In the system
+  // prompt rather than the task, so the task stays what the caller typed. A
+  // run given none gets the brief above unchanged, byte for byte.
+  const systemPrompt = opts.experience ? `${brief}\n\n${opts.experience}` : brief;
   const args = [
     "-p",
     "--verbose",
@@ -5396,7 +5878,7 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     "--permission-mode", "acceptEdits",
     "--setting-sources", "user",
     "--max-turns", String(opts.maxTurns ?? DEFAULT_MAX_TURNS),
-    "--append-system-prompt", brief,
+    "--append-system-prompt", systemPrompt,
   ];
   // The task still travels on stdin either way; what this changes is the
   // SHAPE of what is written there and whether the pipe is closed behind it.
@@ -5580,6 +6062,8 @@ const runAnthropicCredential: Map<string, RunAnthropicCredential> =
 async function prepareRunAccount(run: CodingRun): Promise<void> {
   runAnthropicCredential.delete(run.id);
   if (run.provider !== "anthropic") return;
+  // A run on the pool is a consumer of its active account, boot hook or not.
+  armCodingSwapConsumer();
   let prepared: PreparedAccount | null = null;
   try {
     ({ prepared } = await prepareAccount({ fallback: true }));
@@ -5873,8 +6357,10 @@ function cleanupRunResources(run: CodingRun, state: LiveRun | null): void {
   }
   // The box's own plumbing, not evidence: the tail has been read by now, and a
   // log kept past the settle is disk the owner never asked to spend. A retry
-  // (finishRun) opens a fresh pair.
-  removeStreamLogs(run.id);
+  // (finishRun) opens a fresh pair. EXCEPT under the archive mode, where the
+  // owner did ask: the log waits beside the run and goes into the archive with
+  // it (dropRun moves it there, or deletes it with the run's other parts).
+  if (store.historyPolicy?.mode !== "archive") removeStreamLogs(run.id);
   // A credential handoff the wrapper never got to read (it died first, or
   // never started) goes with the process it was written for.
   removeCredentialHandoffs(run.id);
@@ -6249,6 +6735,8 @@ interface StreamEvent {
 /** How many refused actions a run keeps. Enough to see the pattern. */
 const MAX_DENIALS_KEPT = 5;
 const MAX_DENIAL_CHARS = 160;
+/** The bound on a refused action's whole text (`CodingDenial.fullText`); mirrored by DENIAL_FULL_TEXT_CUT in coding-team-board.ts. */
+const MAX_DENIAL_FULL_CHARS = 2000;
 
 /**
  * One refused action, as the owner should read it. Claude Code sends
@@ -6270,9 +6758,14 @@ function denialParts(entry: unknown): { tool: string; target: string | null } {
   return { tool, target: target ?? null };
 }
 
-function describeDenial(entry: unknown): string {
+/** A refused action's whole description, uncut. */
+function wholeDenial(entry: unknown): string {
   const { tool, target } = denialParts(entry);
-  return `${tool}: ${target ?? "(no details)"}`.slice(0, MAX_DENIAL_CHARS);
+  return `${tool}: ${target ?? "(no details)"}`;
+}
+
+function describeDenial(entry: unknown): string {
+  return wholeDenial(entry).slice(0, MAX_DENIAL_CHARS);
 }
 
 /**
@@ -6318,11 +6811,14 @@ function denialsFrom(entries: readonly unknown[]): CodingDenial[] {
   let context: AllowRuleContext | null = null;
   return entries.map((entry) => {
     const parts = denialParts(entry);
-    const text = describeDenial(entry);
-    if (!deriveAllowRule(parts)) return { text, rule: null, refusal: null };
+    const whole = wholeDenial(entry);
+    const text = whole.slice(0, MAX_DENIAL_CHARS);
+    // Kept only when the display cut left some of it out.
+    const full = whole.length > text.length ? { fullText: whole.slice(0, MAX_DENIAL_FULL_CHARS) } : {};
+    if (!deriveAllowRule(parts)) return { text, rule: null, refusal: null, ...full };
     context ??= allowRuleContext();
     const { rule, refusal } = suggestAllowRule(parts, context);
-    return { text, rule, refusal };
+    return { text, rule, refusal, ...full };
   });
 }
 
@@ -6549,14 +7045,18 @@ function firstEventText(event: StreamEvent): string | null {
 /** See the call site in handleEvent. */
 function noteAnthropicLimitSignal(state: LiveRun, event: StreamEvent): void {
   const tagged = event.error === "rate_limit" || event.error === "billing_error";
+  const authTagged = event.error === "authentication_failed";
   const synthetic = event.message?.model === "<synthetic>";
-  if (!tagged && !synthetic) return;
+  if (!tagged && !authTagged && !synthetic) return;
   const text = firstEventText(event);
   if (!text) return;
   // A synthetic message is not always a limit (an interrupted request is one
   // too), so an untagged one must read as a limit in its own words; a tagged
   // one IS the CLI saying so, whatever its wording.
   if (tagged || detectAnthropicLimit(text, Date.now())) state.limitSignal = text;
+  // The same for a refused credential (TASK-1260): "Invalid API key · Please
+  // run /login", "OAuth token revoked", a 401.
+  else if (authTagged || detectAnthropicAuthFailure(text)) state.authSignal = text;
 }
 
 function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
@@ -6636,6 +7136,10 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
   }
 
   if (event.type === "assistant") {
+    // A model answered — unless the CLI wrote this message itself to carry an
+    // API error, which is exactly the shape of a harness that never got one to
+    // answer. First, ahead of the billing below and its early return.
+    if (event.message?.model !== "<synthetic>" && !event.error) state.sawModelAnswer = true;
     // Every request pays for the input it carries, so input is summed per turn
     // even though the conversation repeats — that is what a bill counts. Per
     // MESSAGE, not per event: see LiveRun.lastBilledMessageId.
@@ -7255,12 +7759,15 @@ async function maybeOpenPullRequest(finished: CodingRun, ended: "stop" | "pause"
       base = mine.base ?? prBase;
       foundBy = "adopted";
     } else {
+      // Read at the moment it is opened, like the auto-PR switch above: the
+      // owner who changed it while the run worked meant this pull request.
+      const taskMode = await getPrBodyIncludesTask();
       const created = await openPullRequest({
         directory: origin.directory,
         branch: prBranch,
         base: prBase,
-        title: firstLineOf(origin.task),
-        body: prBody(origin, finished),
+        title: pullRequestTitle(origin.task, { hostNames: boxHostNames() }),
+        body: prBody(origin, finished, taskMode),
         // A draft until its checks pass: the watcher readies it then, and that
         // is when CodeRabbit gives the one review it gives a pull request.
         draft: true,
@@ -7416,26 +7923,35 @@ async function adoptRunPullRequest(
   });
 }
 
-/** First line of the task, trimmed to something a PR title can hold. */
+/** First line of the task, trimmed to a title's length, for what stays on the
+ *  box. A pull request's title is `pullRequestTitle`, which redacts. */
 function firstLineOf(task: string): string {
   return taskTitle(task, 72) || "ClawBox coding agent";
 }
 
-function prBody(origin: CodingRun, last: CodingRun): string {
-  const lines = [
-    "Opened by the ClawBox coding agent.",
-    "",
-    `**Task**`,
-    origin.task,
-    "",
-    `Run \`${origin.id}\`${origin.commit ? ` · commit \`${origin.commit}\`` : ""}`,
-  ];
-  if (last.reviewOf) lines.push(`Reviewed by run \`${last.id}\` (automatic review pass).`);
-  if (origin.summary) lines.push("", "**Summary**", origin.summary);
+/**
+ * The pull request's body: composed and redacted in @/lib/coding-pr-body, so
+ * the task, the summary and the evidence below it reach GitHub without the
+ * owner's paths, addresses, names or tokens (TASK-1366). `origin.task` itself
+ * is not touched — it is what the run was given and what its page shows.
+ */
+function prBody(origin: CodingRun, last: CodingRun, taskMode: PrBodyTaskMode): string {
+  const hostNames = boxHostNames();
+  const body = composePullRequestBody({
+    task: origin.task,
+    runId: origin.id,
+    commit: origin.commit,
+    reviewRunId: last.reviewOf ? last.id : null,
+    summary: origin.summary,
+    taskMode,
+  }, { hostNames });
   // What the review pass actually SAW, when it looked. The reviewing run first,
   // because its screenshots are of the finished work; the origin run's own
-  // verification shots after. A body with nothing to show gains nothing.
-  return withEvidenceSection(lines.join("\n"), visualEvidenceSection(last, origin));
+  // verification shots after. A body with nothing to show gains nothing. The
+  // descriptions are the run's own words about its pages, and a page served on
+  // the LAN is described by its address — so they are redacted too.
+  const evidence = visualEvidenceSection(last, origin);
+  return withEvidenceSection(body, evidence === null ? null : redactForGitHub(evidence));
 }
 
 /**
@@ -8176,8 +8692,11 @@ async function resumeReviewAfterFix(finished: CodingRun, ended: "stop" | "pause"
 async function refreshPrEvidence(origin: CodingRun, last: CodingRun): Promise<void> {
   const number = origin.pr?.number;
   if (typeof number !== "number") return;
-  const section = visualEvidenceSection(last, origin);
-  if (!section) return;
+  const found = visualEvidenceSection(last, origin);
+  if (!found) return;
+  // Only the box's own block is redacted: the rest of the body is whatever is
+  // on GitHub now, a person's edits included, and is put back as it was.
+  const section = redactForGitHub(found);
   try {
     const updated = await updatePullRequestBody({
       directory: origin.directory,
@@ -8378,6 +8897,25 @@ async function deliverableSandbox(run: CodingRun): Promise<DeliverableSandbox | 
     bin: setprivPath,
     args: CAPABILITY_DROP_ARGS,
     env: buildRunEnv({ effort: run.effort, artifactsDir: artifactsDir(run.id), inputsDir: runInputsDir(run.id) }),
+  };
+}
+
+/**
+ * The sandbox a coding team runs the project's own test suite in, on its
+ * merged result (`coding-team-suite.ts`, TASK-1321): the harness's own, as for
+ * a deliverable command, with a run's environment and no run behind it — plus
+ * two words for a test runner: CI, so one that would watch for changes runs
+ * once, and no bytecode, so the suite leaves no __pycache__ in the checkout the
+ * team's next merge lands in. Null when `setpriv` cannot be found: the suite is
+ * then not run at all.
+ */
+export async function suiteSandbox(): Promise<DeliverableSandbox | null> {
+  const setprivPath = await findExecutableOnPath(CAPABILITY_DROP_COMMAND);
+  if (!setprivPath) return null;
+  return {
+    bin: setprivPath,
+    args: CAPABILITY_DROP_ARGS,
+    env: { ...buildRunEnv(), CI: "1", PYTHONDONTWRITEBYTECODE: "1" },
   };
 }
 
@@ -9466,18 +10004,18 @@ function earliestAccountReset(refusedId: string | null, until: number): number {
 }
 
 /**
- * Record the limit on the account the run was on, and say so when it left the
- * box with NO account able to answer. Never throws: the run has settled either
- * way, and the pool is the owner's list, not the run's outcome.
+ * Record the limit on the account the run was on. Never throws: the run has
+ * settled either way, and the pool is the owner's list, not the run's outcome.
+ *
+ * The notices are NOT sent from here any more (TASK-1260): recording the limit
+ * moves the box's active account, and src/lib/anthropic-swap.ts announces the
+ * move once — with this run's id — whichever consumer saw the limit first.
  */
 async function recordAccountLimit(run: CodingRun, found: FoundAccountLimit): Promise<LimitRecorded | null> {
   if (!run.anthropicAccount) return null;
   try {
-    const recorded = await markLimited(run.anthropicAccount, found.until, found.limit.kind);
+    const recorded = await markLimited(run.anthropicAccount, found.until, found.limit.kind, { source: "coding", runId: run.id });
     console.error(`[coding-agent] ${run.id}: Anthropic account ${run.anthropicAccount} hit its ${found.limit.kind} limit until ${new Date(found.until).toISOString()}${recorded.health.allLimited ? " — no account left that can answer" : ""}`);
-    if (recorded.becameAllLimited) {
-      void announceAnthropicLimit({ kind: "all_limited", resetAt: recorded.health.nextResetAt, runId: run.id }).catch(() => {});
-    }
     return recorded;
   } catch (err) {
     console.error(`[coding-agent] ${run.id}: could not record the Anthropic account's limit:`, err instanceof Error ? err.message : err);
@@ -9485,16 +10023,49 @@ async function recordAccountLimit(run: CodingRun, found: FoundAccountLimit): Pro
   }
 }
 
+/**
+ * Did the harness say Anthropic refused the account's credential (TASK-1260)?
+ * Its own tagged line first, then the head of the failure — never the
+ * transcript, for the reason `anthropicLimitOf` gives.
+ */
+function anthropicAuthFailureOf(run: CodingRun, state: LiveRun): string | null {
+  for (const text of [state.authSignal, run.error]) {
+    if (text && detectAnthropicAuthFailure(text)) return text.trim().slice(0, 400);
+  }
+  return state.authSignal;
+}
+
+/**
+ * How many times one run may be carried on because its credential was
+ * refused. A 401 the probe cannot pin on the account (Anthropic unreachable, a
+ * CLI that refuses a working token) must not bounce a run round the pool — or
+ * back onto the same account — for ever.
+ */
+const MAX_AUTH_SWITCHES = 3;
+
+/** Why a run is being carried on on another account (TASK-1260 adds the last two). */
+type AccountTrouble =
+  | { kind: "limit"; found: FoundAccountLimit }
+  | { kind: "auth"; text: string }
+  | { kind: "moved" };
+
 /** What a session resumed on another account is told. It already holds the task. */
-function accountSwitchContinuation(run: CodingRun): string {
-  return "Your previous turn was cut off because the Anthropic account this run was using reached its usage limit."
+function accountSwitchContinuation(run: CodingRun, why: AccountTrouble["kind"] = "limit"): string {
+  const cause = why === "auth"
+    ? "Anthropic refused the credential of the account this run was using"
+    : why === "moved"
+      ? "ClawBox moved every Claude consumer on the box to another Anthropic account, because the one this run was using can no longer answer"
+      : "the Anthropic account this run was using reached its usage limit";
+  return `Your previous turn was cut off because ${cause}.`
     + " ClawBox has moved the run to another Anthropic account; the session, the folder, the branch and everything you have done are unchanged."
     + ` Continue the task exactly where the transcript leaves off — do not start over and do not repeat work that is already done. Your evidence folder is ${artifactsDir(run.id)}.`;
 }
 
 /**
- * Move a run whose account hit its limit to the next account and resume it in
- * place — or, when no account can take it, settle it as waiting.
+ * Move a run whose account can no longer answer — at its limit, its credential
+ * refused, or taken out by a swap another consumer caused — to the box's active
+ * account and resume it in place; or, when no account can take it, settle it
+ * as waiting (a reset is coming) or as failed (every account needs the owner).
  *
  * Tracked settle work, run straight after `finishRun` returned with the record
  * back on "running". It re-checks that before it spawns: the owner may have
@@ -9505,17 +10076,30 @@ async function continueOnAnotherAccount(
   run: CodingRun,
   state: LiveRun,
   exitCode: number | null,
-  found: FoundAccountLimit,
+  why: AccountTrouble,
   carriedSecrets: Record<string, string> | undefined,
   carriedAccount: RunAnthropicCredential | undefined,
 ): Promise<void> {
   const fromId = run.anthropicAccount;
   const fromLabel = carriedAccount?.label ?? accountsSnapshot()?.find((a) => a.id === fromId)?.label ?? null;
-  const recorded = await recordAccountLimit(run, found);
+  const exclude = new Set<string>();
+  let recorded: LimitRecorded | null = null;
+  if (why.kind === "limit") {
+    recorded = await recordAccountLimit(run, why.found);
+    if (fromId) exclude.add(fromId);
+  } else if (why.kind === "auth" && fromId) {
+    // Confirmed before the account is taken out: a grant the pool can still
+    // renew was only stale in this process, and the run goes on on the SAME
+    // account with a fresh token. A dead one is marked (which moves the box's
+    // active account); one Anthropic could not be asked about sits this spawn out.
+    const verdict = await probeAccountCredential(fromId, verifyAnthropicKey, { source: "coding", runId: run.id }).catch(() => "unknown" as const);
+    console.error(`[coding-agent] ${run.id}: Anthropic refused account ${fromId}'s credential; asked again, it is ${verdict}`);
+    if (verdict !== "ok") exclude.add(fromId);
+  }
   let prepared: PreparedAccount | null = null;
   let nextResetAt: number | null = recorded?.health.nextResetAt ?? null;
   try {
-    const answer = await prepareAccount({ exclude: new Set(fromId ? [fromId] : []) });
+    const answer = await prepareAccount({ exclude });
     prepared = answer.prepared;
     nextResetAt = answer.health.nextResetAt ?? nextResetAt;
   } catch (err) {
@@ -9526,54 +10110,100 @@ async function continueOnAnotherAccount(
   if (!prepared) {
     // Nobody else can answer after all (another run got there first, or the
     // next account's credential turned out dead). Wait for the first reset,
-    // settled through finishRun's ordinary tail as the pause it is.
-    const resetsAt = nextResetAt ?? found.until;
+    // settled through finishRun's ordinary tail as the pause it is — or, when
+    // no account comes back by itself, fail with the one thing that helps.
+    const resetsAt = nextResetAt ?? (why.kind === "limit" ? why.found.until : null);
+    if (resetsAt === null) {
+      state.forcedAccountFailure = "Anthropic refused the credential of every account this run could use."
+        + " Sign one in again in Settings → Providers → Anthropic accounts, then resume the run.";
+      finishRun(run, state, exitCode);
+      return;
+    }
     pushProgress(run, RUNNER_STEP.accountsWaiting(formatResetClock(resetsAt)));
-    state.forcedAccountPause = { resetsAt: new Date(resetsAt).toISOString(), message: found.text.slice(0, MAX_PAUSE_MESSAGE_CHARS) };
+    const message = why.kind === "limit" ? why.found.text : why.kind === "auth" ? why.text : "Every Anthropic account on this ClawBox is at its usage limit.";
+    state.forcedAccountPause = { resetsAt: new Date(resetsAt).toISOString(), message: message.slice(0, MAX_PAUSE_MESSAGE_CHARS) };
     finishRun(run, state, exitCode);
     return;
   }
 
-  const now = Date.now();
-  const switched: AccountSwitch = {
-    at: now,
-    fromId,
-    fromLabel,
-    toId: prepared.account.id,
-    toLabel: prepared.account.label,
-    limitedUntil: found.until,
-    kind: found.limit.kind,
-  };
-  run.accountSwitches = [...run.accountSwitches, switched].slice(-MAX_ACCOUNT_SWITCHES);
+  const sameAccount = prepared.account.id === fromId;
+  if (!sameAccount) {
+    const switched: AccountSwitch = {
+      at: Date.now(),
+      fromId,
+      fromLabel,
+      toId: prepared.account.id,
+      toLabel: prepared.account.label,
+      limitedUntil: why.kind === "limit" ? why.found.until : null,
+      kind: why.kind === "limit" ? why.found.limit.kind : why.kind,
+    };
+    run.accountSwitches = [...run.accountSwitches, switched].slice(-MAX_ACCOUNT_SWITCHES);
+  }
   run.anthropicAccount = prepared.account.id;
   restoreRunSecrets(run.id, carriedSecrets ?? {}, {
     accountId: prepared.account.id,
     label: prepared.account.label,
     credential: prepared.credential,
   });
-  pushProgress(run, RUNNER_STEP.accountSwitched(fromLabel ?? "the previous account", prepared.account.label, formatResetClock(found.until)));
+  const from = fromLabel ?? "the previous account";
+  if (why.kind === "limit") pushProgress(run, RUNNER_STEP.accountSwitched(from, prepared.account.label, formatResetClock(why.found.until)));
+  else if (why.kind === "auth") pushProgress(run, RUNNER_STEP.accountRefused(from, prepared.account.label));
+  else pushProgress(run, RUNNER_STEP.accountMoved(from, prepared.account.label));
   persist(true);
-  console.error(`[coding-agent] ${run.id}: continuing on Anthropic account ${prepared.account.id} after ${fromId ?? "its account"} hit its ${found.limit.kind} limit`);
-  // One notice per account becoming limited — a second run reporting the same
-  // limit is not news. `recorded` is null only when there was nothing to
-  // record against, and then the switch itself is the news.
-  if (recorded === null || recorded.newlyLimited) {
-    void announceAnthropicLimit({
-      kind: "switched",
-      fromLabel: fromLabel ?? "Anthropic account",
-      toLabel: prepared.account.label,
-      resetAt: found.until,
-      runId: run.id,
-    }).catch(() => {});
-  }
+  console.error(`[coding-agent] ${run.id}: continuing on Anthropic account ${prepared.account.id} after ${fromId ?? "its account"} ${why.kind === "limit" ? `hit its ${why.found.limit.kind} limit` : why.kind === "auth" ? "was refused" : "was swapped out"}`);
   try {
     // The SAME record and session: `continuingRecord`, so the counters add up,
     // and the session's own transcript is where the work is — the task is not
     // replayed into it. A run that never got a session starts it from the task.
-    spawnOrSettle(run, run.sessionId, state.tools, state.settings, run.sessionId ? accountSwitchContinuation(run) : undefined, true);
+    spawnOrSettle(run, run.sessionId, state.tools, state.settings, run.sessionId ? accountSwitchContinuation(run, why.kind) : undefined, true);
   } catch {
     // spawnOrSettle settled the record and said why.
   }
+}
+
+/**
+ * THE CODING RUNS' HALF OF A SWAP (TASK-1260): every live run on an account
+ * that can no longer answer — limited, refused, removed — is ended and carried
+ * on in its own session on the active account (`accountMove`, then the same
+ * continuation a limit takes), and every run waiting for a reset is resumed.
+ * Review passes and team workers are runs like any other; queued runs need
+ * nothing, since each spawn asks the pool for the active account.
+ *
+ * A run on an account that CAN still answer is left alone even when the active
+ * account moved (the owner's new order, "back to the first account"): it would
+ * lose its turn in flight for nothing, and its next spawn takes the new one.
+ */
+function moveRunsOffDeadAccounts(): string[] {
+  const accounts = accountsSnapshot() ?? [];
+  const now = Date.now();
+  const moved: string[] = [];
+  for (const run of loadRuns()) {
+    if (run.status !== "running" || run.provider !== "anthropic" || !run.anthropicAccount) continue;
+    const account = accounts.find((a) => a.id === run.anthropicAccount);
+    if (account && isUsable(account, now)) continue;
+    const state = live.get(run.id);
+    if (!state || state.endRequested !== null || state.accountMove || state.simulatedLimit) continue;
+    state.accountMove = true;
+    endProcess(state);
+    moved.push(run.id);
+  }
+  return moved;
+}
+
+async function applyCodingSwap(): Promise<SwapConsumerOutcome> {
+  if (!activeAccountSnapshot()) return { status: "skipped", code: "no_account", count: null };
+  const moved = moveRunsOffDeadAccounts();
+  const resumed = await resumeRunsWaitingForAnthropic();
+  const count = moved.length + resumed.length;
+  if (count > 0) console.error(`[coding-agent] the Anthropic account swap moved ${moved.length} run(s) and resumed ${resumed.length}`);
+  return { status: "ok", code: count > 0 ? "moved" : "nothing_running", count };
+}
+
+/** Register the runs as a consumer of the box's active account. Idempotent, per process. */
+function armCodingSwapConsumer(): void {
+  if (store.swapConsumerArmed) return;
+  store.swapConsumerArmed = true;
+  registerSwapConsumer({ name: "coding", apply: applyCodingSwap });
 }
 
 /**
@@ -9613,6 +10243,15 @@ function formatCliClock(at: number): string {
  * because the pool is still limited stays exactly as it was.
  */
 export async function resumeRunsWaitingForAnthropic(): Promise<string[]> {
+  // One pass at a time: the reset wake and a swap's fan-out can both ask at
+  // once, and the second pass would only find the first one's runs.
+  const previous = store.anthropicResume ?? Promise.resolve([]);
+  const pass = previous.catch(() => []).then(resumeWaitingOnce);
+  store.anthropicResume = pass;
+  return pass;
+}
+
+async function resumeWaitingOnce(): Promise<string[]> {
   const waiting = loadRuns()
     .filter((r) => r.status === "paused" && r.pauseReason?.kind === "allowance" && r.pauseReason.meter === "anthropic")
     .sort((a, b) => (a.completedAt ?? 0) - (b.completedAt ?? 0));
@@ -9645,6 +10284,14 @@ export async function armAnthropicAccounts(): Promise<void> {
       void resumeRunsWaitingForAnthropic().catch(() => {});
     });
   }
+  // The box-wide swap (TASK-1260): the runs, and the gateway's Claude
+  // subscription with its crons, follow the pool's active account from here.
+  armCodingSwapConsumer();
+  try {
+    startGatewaySwap();
+  } catch (err) {
+    console.error("[coding-agent] could not start the gateway's half of the Anthropic account swap:", err instanceof Error ? err.message : err);
+  }
   await startAnthropicAccounts();
   const accounts = accountsSnapshot() ?? [];
   if (pickAccount(accounts, Date.now())) await resumeRunsWaitingForAnthropic();
@@ -9659,7 +10306,8 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // An Anthropic account at its usage limit, and what to do about it — decided
   // below, acted on after the cleanup (TASK-902).
   let accountLimit: FoundAccountLimit | null = null;
-  let accountDecision: "switch" | "wait" | null = null;
+  let accountAuthText: string | null = null;
+  let accountDecision: "switch" | "wait" | "auth" | "moved" | null = null;
   if (run.status === "running") {
     // The device's own stop — the token limit — has already written why on
     // the record. A result event that slipped out before the kill landed
@@ -9675,6 +10323,16 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       run.resumable = true;
       run.error = null;
       run.pauseReason = { kind: "allowance", meter: "anthropic", resetsAt: state.forcedAccountPause.resetsAt, message: state.forcedAccountPause.message };
+    } else if (state.forcedAccountFailure) {
+      // The credential was refused and no account was left to move the run
+      // to (continueOnAnotherAccount): a failure with the way out in it.
+      run.status = "failed";
+      run.error = state.forcedAccountFailure;
+    } else if (state.accountMove && state.endRequested === null && state.outcome?.status !== "completed") {
+      // The swap ended this process to move the run (moveRunsOffDeadAccounts):
+      // not the work failing — the account switch below carries it on.
+      run.status = "failed";
+      run.error = null;
     } else if (state.simulatedLimit) {
       // The owner's test hook ended this process to stand in for a real limit:
       // settle it exactly as the harness's own limit line would.
@@ -9781,8 +10439,25 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     // paused, with the reset time on the record — for the box to resume it at
     // the first reset. Only a run nobody asked to end, and only on the
     // harness's own limit line (see anthropicLimitOf).
-    if (run.status === "failed" && run.provider === "anthropic" && state.endRequested === null && !state.timedOut) {
-      accountLimit = anthropicLimitOf(run, state);
+    if (run.status === "failed" && run.provider === "anthropic" && state.endRequested === null && !state.timedOut && !state.forcedAccountFailure) {
+      accountLimit = state.accountMove ? null : anthropicLimitOf(run, state);
+      // Refused rather than capped, or moved by a swap (TASK-1260): carried on
+      // too, through the same continuation, after the cleanup below.
+      if (state.accountMove) {
+        accountDecision = "moved";
+      } else if (!accountLimit) {
+        const refused = anthropicAuthFailureOf(run, state);
+        const retries = store.anthropicAuthRetries ?? (store.anthropicAuthRetries = new Map<string, number>());
+        const spent = retries.get(run.id) ?? 0;
+        if (refused && spent < MAX_AUTH_SWITCHES) {
+          // Counted per RUN, not per switch: a refusal the probe cannot pin on
+          // the account carries the run on on the SAME account, which records
+          // no switch — and must still not do it for ever.
+          retries.set(run.id, spent + 1);
+          accountAuthText = refused;
+          accountDecision = "auth";
+        }
+      }
       if (accountLimit) {
         // Decided NOW, synchronously, off what this process knows of the pool:
         // a pause has to be on the record before the cleanup and the settle
@@ -9839,7 +10514,7 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // the review pass, the queue that started the run) is told it finished,
   // because it has not. The move itself is asynchronous (the pool is read and
   // an OAuth token may be renewed), and is tracked like any settle work.
-  if (accountDecision === "switch" && accountLimit) {
+  if ((accountDecision === "switch" && accountLimit) || accountDecision === "auth" || accountDecision === "moved") {
     run.status = "running";
     run.completedAt = null;
     run.exitCode = null;
@@ -9850,9 +10525,17 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     run.resultText = null;
     run.lastActivityAt = Date.now();
     persist(true);
-    trackSettleWork(continueOnAnotherAccount(run, state, exitCode, accountLimit, carriedSecrets, carriedAccount));
+    const why: AccountTrouble = accountDecision === "switch" && accountLimit
+      ? { kind: "limit", found: accountLimit }
+      : accountDecision === "auth"
+        ? { kind: "auth", text: accountAuthText ?? "" }
+        : { kind: "moved" };
+    trackSettleWork(continueOnAnotherAccount(run, state, exitCode, why, carriedSecrets, carriedAccount));
     return;
   }
+  // Not carried on: this stretch of the run is over, and its refused-credential
+  // count goes with it rather than staying in the process for ever.
+  store.anthropicAuthRetries?.delete(run.id);
   if (accountDecision === "wait" && accountLimit) {
     void recordAccountLimit(run, accountLimit);
   }
@@ -9911,6 +10594,14 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       if (carriedSecrets || carriedAccount) restoreRunSecrets(run.id, carriedSecrets ?? {}, carriedAccount);
       try {
         spawnRun(run, null, state.tools, state.settings);
+        // The retry is the same run's second try at the same work, seconds
+        // later: a model that answered the first attempt answered this run,
+        // so the harness-fault verdict below sees both (TASK-1320).
+        const retried = live.get(run.id);
+        if (retried && retried !== state) {
+          retried.tokensAtSpawn = state.tokensAtSpawn;
+          retried.sawModelAnswer = state.sawModelAnswer;
+        }
         return;
       } catch (err) {
         // The retry could not even start; fall through and report the
@@ -9945,7 +10636,23 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   //
   // Not resumable, whatever the result event claimed: the session holds no
   // work, and Claude Code replays a failure that is in the session.
-  if (run.status === "failed" && isHarnessFault(run.error)) {
+  //
+  // And only BEFORE the first answer. The same line after a model has answered
+  // this run proves nothing about the harness — it plainly could get a model
+  // to answer — and recorded, it refused every run for fifteen minutes: a
+  // bench worker 347 s and 563,595 tokens into its task hit one, and the next
+  // 16 team goals were turned away in ~35 ms each on a box that was answering
+  // fine (run-dazazpqx, TASK-1320). That run fails with its own error, whole,
+  // like any other failure of the run, and nothing is remembered.
+  // THIS spawn's bill (and its retry's), not the record's: see tokensAtSpawn.
+  const spawnTokens = Math.max(0, run.tokensUsed - state.tokensAtSpawn);
+  const harnessVerdict = run.status === "failed"
+    ? classifyHarnessFailure(run.error, { tokensUsed: spawnTokens, sawModelAnswer: state.sawModelAnswer })
+    : null;
+  if (harnessVerdict === "run_failure") {
+    console.error(`[coding-agent] ${run.id} hit a model error after the model had answered (${spawnTokens} tokens this spawn); failed as the run's own error, no harness fault recorded`);
+  }
+  if (harnessVerdict === "harness_not_ready") {
     run.failureKind = "harness_not_ready";
     run.error = harnessFaultMessage(run.error);
     run.resumable = false;
@@ -9984,22 +10691,30 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // Read now, not after the commit below: the owner's Kill clears it while the
   // group it named may still be on its way out.
   const leftRunning = run.leftover;
+  // Until the wake below, a wait that begins now waits too (waitForRun): the
+  // status already says settled, the branch does not have the work yet.
+  store.unannounced.add(run.id);
   trackSettleWork((async () => {
-    await recordRunWork(run);
-    // Before "finished", so the owner reads why something left the evidence
-    // folder next to the run that put it there — and before any waiter or
-    // update can find it: see pruneArtifacts. Not while something the run
-    // started is still running: it can still change the folder under the walk.
-    // A run that left something running on purpose is not pruned at all; a
-    // group the cleanup signalled is waited for, up to its SIGKILL and a
-    // margin — something that shrugs off SIGTERM is still there until then.
-    if (!leftRunning && (await groupGone(settledGroup, STOP_GRACE_MS + 1_000))) {
-      const pruned = await pruneArtifacts(run.id);
-      if (pruned.length > 0) pushProgress(run, RUNNER_STEP.evidencePruned(prunedPaths(pruned)));
+    try {
+      await recordRunWork(run);
+      // Before "finished", so the owner reads why something left the evidence
+      // folder next to the run that put it there — and before any waiter or
+      // update can find it: see pruneArtifacts. Not while something the run
+      // started is still running: it can still change the folder under the walk.
+      // A run that left something running on purpose is not pruned at all; a
+      // group the cleanup signalled is waited for, up to its SIGKILL and a
+      // margin — something that shrugs off SIGTERM is still there until then.
+      if (!leftRunning && (await groupGone(settledGroup, STOP_GRACE_MS + 1_000))) {
+        const pruned = await pruneArtifacts(run.id);
+        if (pruned.length > 0) pushProgress(run, RUNNER_STEP.evidencePruned(prunedPaths(pruned)));
+      }
+      pushProgress(run, settled === "paused" ? RUNNER_STEP.paused : RUNNER_STEP.finished(settled));
+      persist(true);
+    } finally {
+      // Woken even when the bookkeeping above threw: a run that is over must
+      // not keep every later wait on it for its whole slice.
+      wakeWaiters(run.id);
     }
-    pushProgress(run, settled === "paused" ? RUNNER_STEP.paused : RUNNER_STEP.finished(settled));
-    persist(true);
-    wakeWaiters(run.id);
     console.error(`[coding-agent] ${run.id} ${settled} after ${Math.round(((run.completedAt ?? Date.now()) - run.startedAt) / 1000)}s (${run.numTurns} turns)`);
     // A team's worker or reviewer ends here: its worktree is the
     // orchestrator's to merge and remove the moment it is woken, its
@@ -10226,7 +10941,7 @@ function spawnRun(
   // from this run's branch when it settles, and then to watch it — see
   // PR_DRAFT_BRIEF.
   const draftPullRequests = run.pr?.phase === "opening";
-  const dropped = buildSpawnArgv(tools.setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, reviewedSeparately, draftPullRequests, allowRules: run.allowRules, provider: run.provider, streamInput, run: { id: run.id, directory: run.directory, media: run.media, team: run.team } }));
+  const dropped = buildSpawnArgv(tools.setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, experience: run.experienceBrief, reviewedSeparately, draftPullRequests, allowRules: run.allowRules, provider: run.provider, streamInput, run: { id: run.id, directory: run.directory, media: run.media, team: run.team } }));
   // One evidence path everywhere — env, MCP config and --add-dir must never
   // disagree about where it is. Creation is best-effort: the MCP layer also
   // mkdirs lazily, so a failure here degrades evidence, never the run.
@@ -10320,6 +11035,8 @@ function spawnRun(
     worktreeTargets: new Map<string, { tool: string; counterpart: string }>(),
     worktreeHinted: new Set<string>(),
     sawWriteAttempt: false,
+    sawModelAnswer: false,
+    tokensAtSpawn: run.tokensUsed,
     sawThinking: false,
     thinkingSeen: 0,
     tools,
@@ -10340,6 +11057,9 @@ function spawnRun(
     limitSignal: null,
     simulatedLimit: null,
     forcedAccountPause: null,
+    authSignal: null,
+    accountMove: false,
+    forcedAccountFailure: null,
     timedOut: false,
     sawResult: continuingRecord,
     sawInit: false,
@@ -10890,6 +11610,9 @@ export async function sweepCodingWorktrees(options: { force?: boolean } = {}): P
 
 export async function startRun(input: StartRunInput): Promise<CodingRun> {
   const task = normalizeTask(input.task, isBoxWrittenTask(input));
+  // Read before anything is held — the slot, the folder — so a malformed
+  // request is a plain 400 that cost the box nothing.
+  const givenExperience = requireExperience(input.experience);
 
   let resumeSessionId: string | null = null;
   let directory: string;
@@ -10994,6 +11717,11 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // owner's current setting could be the weaker of the two.
     if (previous && typeof input.reviewLoopOf === "string") settings.effort = previous.effort;
     await assertProviderReady(settings.provider);
+    // A resume carries the lessons of the run it continues, the way it carries
+    // that run's account and folder — the automatic review pass and every
+    // review-loop round included — unless the caller sent a block of its own.
+    const experience = givenExperience
+      ?? (previous ? { brief: previous.experienceBrief ?? null, record: previous.experience ?? null } : null);
     const run = newRunRecord({
       task,
       directory,
@@ -11008,6 +11736,8 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       team: input.team ?? null,
       readOnly: input.readOnly === true,
       extraBrief: typeof input.extraBrief === "string" && input.extraBrief.trim() ? input.extraBrief.trim() : null,
+      experience: experience?.record ?? null,
+      experienceBrief: experience?.brief ?? null,
     });
     // THE FILES THIS RUN WAS GIVEN, staged before anything else: the task
     // context names the folder, so what is in it has to be true by the time the
@@ -11138,7 +11868,10 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // Before the record is persisted, so the names and the two progress lines are
     // in the first thing the app reads rather than appearing a poll later.
     await prepareRunSecrets(run);
-    insertRun(loadRuns(), run);
+    // Read before the insert, never between it and the write: the insert and
+    // persist are one synchronous step (see the runs store).
+    const history = await getHistoryPolicy();
+    insertRun(loadRuns(), run, history);
     persist(true);
     console.error(`[coding-agent] ${run.id} started by ${run.source} in ${run.directory}`);
     startProjectIcon(run);
@@ -11266,6 +11999,24 @@ function requireDeliverable(input: StartRunInput): Deliverable | null {
   return read.deliverable;
 }
 
+/**
+ * The caller's lessons, validated and rendered, or a thrown `invalid` with the
+ * code saying why not — refused rather than dropped for `requireDeliverable`'s
+ * reason: a dispatcher whose block was quietly ignored would count the run as
+ * one that had the store. Null when the caller sent none.
+ *
+ * `brief` is null when the block rendered to nothing (no rules, no skill);
+ * the record still says the run was given an empty one, which is a different
+ * fact from being given none.
+ */
+function requireExperience(raw: unknown): { brief: string | null; record: RunExperience } | null {
+  const read = readExperienceInput(raw);
+  if (read === null) return null;
+  if (!read.ok) throw new ExperienceChoiceError(read.code, read.error);
+  const rendered = renderExperience(read.experience);
+  return { brief: rendered.text || null, record: rendered.record };
+}
+
 /** The settings a run is spawned with, and the ceiling the device enforces itself. */
 interface RunSettings {
   /** Which account pays — the owner's default, unless the caller named one. */
@@ -11361,6 +12112,8 @@ function newRunRecord(fields: {
   team?: RunTeam | null;
   readOnly?: boolean;
   extraBrief?: string | null;
+  experience?: RunExperience | null;
+  experienceBrief?: string | null;
   deliverable?: Deliverable | null;
   pipeline?: PipelineState | null;
 }): CodingRun {
@@ -11425,6 +12178,8 @@ function newRunRecord(fields: {
     team: fields.team ?? null,
     readOnly: fields.readOnly === true,
     extraBrief: fields.extraBrief ?? null,
+    experience: fields.experience ?? null,
+    experienceBrief: fields.experienceBrief ?? null,
     // No pull request until the aftermath opens one, and no loop until it has.
     pr: null,
     review: null,
@@ -11459,18 +12214,83 @@ function newRunRecord(fields: {
 /**
  * Put a new record at the head of the list, newest first, and make room.
  * Never drops a held run (live, paused, drafted); trims the oldest finished
- * ones. A dropped record takes its evidence folder with it — unreachable
- * artifacts would sit on the flash forever.
+ * ones. What happens to a run that leaves is the owner's history setting
+ * (src/lib/coding-run-history.ts):
+ *
+ *  - standard — deleted with its evidence folder and its inputs, exactly as
+ *    before the setting existed: unreachable artifacts would sit on the flash
+ *    forever.
+ *  - extended / everything — kept as an OLDER run, its record in a file of its
+ *    own and its evidence where it was; the runs file stays at MAX_RUNS_KEPT.
+ *    Extended then trims the older runs to its N, oldest first.
+ *  - archive — moved into the archive, record, evidence, inputs, logs and a
+ *    copy of the transcript together.
+ *
+ * Under the disk guard (below HISTORY_MIN_FREE_BYTES free) a leaving run is
+ * deleted as in standard, whatever the mode, and nothing already kept is
+ * touched: the history stops growing, it is not purged behind the owner's back.
  */
-function insertRun(list: CodingRun[], run: CodingRun): void {
+function insertRun(list: CodingRun[], run: CodingRun, policy: HistoryPolicy = STANDARD_HISTORY_POLICY): void {
   list.unshift(run);
+  retainRuns(list, policy);
+}
+
+function retainRuns(list: CodingRun[], policy: HistoryPolicy): void {
+  // A standard box never asks the disk anything — its trim is the one it
+  // always had.
+  const low = policy.mode !== "standard" && isDiskLow(diskSpace());
   while (list.length > MAX_RUNS_KEPT) {
     const idx = findLastFinished(list);
     if (idx < 0) break;
-    removeArtifacts(list[idx].id);
-    removeRunInputs(list[idx].id);
-    list.splice(idx, 1);
+    const [leaving] = list.splice(idx, 1);
+    if (!low && keepsOlderRuns(policy) && writeOlderRun(leaving as unknown as HistoryRecord)) continue;
+    dropRun(leaving, policy, "trimmed", low);
   }
+  if (low || !hasOlderRuns()) return;
+  // The older runs past what this mode keeps: extended's N, or all of them
+  // under standard and archive (runs kept under a mode the owner has left —
+  // the settings card said the next run would take them).
+  const cap = olderRunsCap(policy, list.length);
+  if (!Number.isFinite(cap)) return;
+  const older = olderRunIndex();
+  for (const entry of older.slice(cap)) dropOlderRun(entry, policy, "trimmed", false);
+}
+
+/**
+ * A run leaving the list for good: archived under the archive mode (unless the
+ * disk is low, or the archive could not take it), deleted otherwise — its
+ * evidence folder, its inputs and any stream log the box still holds for it.
+ */
+function dropRun(run: CodingRun, policy: HistoryPolicy, reason: ArchiveReason, low: boolean): void {
+  if (policy.mode === "archive" && !low) {
+    const archived = archiveRun(run as unknown as HistoryRecord, {
+      evidenceDir: artifactsDir(run.id),
+      inputsDir: runInputsDir(run.id),
+      streamLog: streamLogPath(run.id),
+      stderrLog: stderrLogPath(run.id),
+      transcript: transcriptPath(run),
+    }, reason);
+    if (archived) {
+      console.error(`[coding-agent] ${run.id} moved to the archive`);
+      return;
+    }
+  }
+  removeArtifacts(run.id);
+  removeRunInputs(run.id);
+  removeStreamLogs(run.id);
+}
+
+/** An older run leaving for good — the same two ways as dropRun, and its own file with it. */
+function dropOlderRun(entry: OlderRunEntry, policy: HistoryPolicy, reason: ArchiveReason, low: boolean): void {
+  const run = readOlderRun(entry.id);
+  if (run) dropRun(run, policy, reason, low);
+  else {
+    // A record that no longer parses cannot be archived; what it points at
+    // still goes, so nothing is left on the flash that nothing lists.
+    removeArtifacts(entry.id);
+    removeRunInputs(entry.id);
+  }
+  removeOlderRun(entry.id);
 }
 
 /**
@@ -11711,6 +12531,10 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
   if (run.status !== "paused" && run.status !== "gave_up") {
     throw new CodingAgentError("invalid", "Only a paused run, or one that gave up, can be resumed in place. Start a new run instead.");
   }
+  // The owner's own Resume starts the refused-credential budget afresh
+  // (MAX_AUTH_SWITCHES): refusals from an earlier stretch of the run say
+  // nothing about the accounts the owner may have signed in again since.
+  if (!automatic) store.anthropicAuthRetries?.delete(run.id);
   // The account the session was OPENED on — a resume cannot move to another
   // one, so if that credential is gone the resume is refused rather than
   // quietly re-enacted somewhere else. Handed to the gate rather than checked
@@ -11841,7 +12665,8 @@ export async function createDraftRun(input: StartRunInput): Promise<CodingRun> {
     deliverable: requireDeliverable(input),
   });
   pushProgress(run, RUNNER_STEP.drafted);
-  insertRun(loadRuns(), run);
+  const history = await getHistoryPolicy();
+  insertRun(loadRuns(), run, history);
   persist(true);
   console.error(`[coding-agent] ${run.id} drafted by ${run.source} for ${run.directory}`);
   return cloneRun(run);
@@ -12215,6 +13040,7 @@ export function _resetCodingAgentStateForTests(): Promise<void> {
   store.dirty = false;
   store.runs = null;
   store.signature = null;
+  store.historyPolicy = null;
   // `exitHookInstalled` is deliberately LEFT set: the listener it guards is on
   // `process`, which this cannot take back, and it works against the shared
   // `live` map either way — clearing the flag would add one more listener per
@@ -12225,6 +13051,8 @@ export function _resetCodingAgentStateForTests(): Promise<void> {
   // A start this reset interrupted would otherwise leave its slot held for the
   // life of the process, which is a permanent discount on the limit.
   store.startingRuns = 0;
+  // `anthropicResume` is left as it is: a pass still in flight must stay the
+  // one the next pass waits for.
   return drainForTests(killed, SETTLE_DRAIN_BUDGET_MS);
 }
 
@@ -12257,6 +13085,7 @@ function endEveryLiveRun(): ChildProcess[] {
   }
   live.clear();
   waiters.clear();
+  store.unannounced.clear();
   transitions.clear();
   runSecretEnv.clear();
   // What ends the watchers' loops: a poll already in flight is waited for by
