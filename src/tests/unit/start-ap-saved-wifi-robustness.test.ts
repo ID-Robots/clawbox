@@ -1127,20 +1127,28 @@ describe("C1 elapsed recovery budgets", () => {
   printf "%s\\n" "$*" >> "$NMSTUB/slow-attempts"
   /bin/sleep "$2"
 fi`);
+    let lockedAt = 0;
     if (contended) {
       mkdirSync(path.join(root, "radio-run"));
       writeFileSync(path.join(root, "radio-run", `${IFACE}.lock`), "");
-      // Start an actual owner and wait for its acquired-lock marker.
-      const holder = spawnSync("bash", ["-c", 'exec 9< "$1"; flock -x 9; ( /bin/sleep 2 ) >&- 2>&- <&- &', "test", path.join(root, "radio-run", `${IFACE}.lock`)], { encoding: "utf-8" });
+      // Start an actual owner; it stamps the moment it holds the lock.
+      const stamp = path.join(root, "locked-at");
+      const holder = spawnSync("bash", ["-c", 'exec 9< "$1"; flock -x 9; date +%s%3N > "$2"; ( /bin/sleep 2 ) >&- 2>&- <&- &', "test", path.join(root, "radio-run", `${IFACE}.lock`), stamp], { encoding: "utf-8" });
       expect(holder.status).toBe(0);
+      lockedAt = Number(readFileSync(stamp, "utf-8").trim());
     }
     const began = Date.now();
     const r = runStartAp({ CLIENT_TOTAL_BUDGET: "3", CLIENT_UP_WAIT: "2", SKIP_PRESCAN: "1" });
     expect(r.status, r.stderr).toBe(0);
     const elapsed = Date.now() - began;
     expect(elapsed).toBeLessThan(contended ? 8500 : 6500);
-    // Ownership waiting must not spend the candidate or recovery reserve.
-    if (contended) expect(elapsed).toBeGreaterThanOrEqual(4500);
+    // Ownership waiting must not spend the candidate or recovery reserve. From
+    // the moment the owner held the lock: its 2 s, then at least one whole 2 s
+    // attempt (the budget is whole bash SECONDS, so 2-3 s of it remain) — at
+    // least 4 s. Charged to the budget, the wait leaves ~1 s of attempts
+    // (~3.3 s). Measured from `began`, the owner's head start made the old
+    // 4500 ms floor fail correct runs under load.
+    if (contended) expect(Date.now() - lockedAt).toBeGreaterThanOrEqual(3700);
     const attempts = readFileSync(path.join(nm, "slow-attempts"), "utf-8").trim().split("\n");
     expect(attempts.length).toBeGreaterThan(0);
     expect(attempts.length).toBeLessThan(6);
