@@ -215,3 +215,23 @@ pytest
 ## License
 
 MIT
+
+### Backup quota admission
+
+Before uploading, the runner lists every page of the account's snapshot prefix
+and checks that **current snapshot bytes + the actual encrypted archive bytes <=
+quotaBytes**. The manifest and directory markers remain excluded, matching the
+existing quota accounting. A failed listing stops the upload; a full quota
+reports the required and available bytes. Neither refusal uploads, changes the
+manifest, nor prunes existing snapshots. Retention is still applied only after a
+successful upload, so its potential future savings cannot admit a backup that
+does not fit now. Increase storage or explicitly review/remove unneeded backups
+before retrying. Backup keys are treated as new snapshots, not replacement credit.
+
+A nonblocking `backup-run.lock` serializes backup runs sharing the device data
+directory, including manual/timer overlap. A competing invocation returns a backup
+failure without changing the active run's heartbeat/state. This is **not an atomic
+account-wide reservation**: writers on different devices/data directories, older
+clients, or quota changes after credentials were issued can still race. A hard
+account-wide cap requires a server-side reservation/commit protocol and restricted
+upload capabilities; the current general-purpose S3 credentials cannot enforce it.

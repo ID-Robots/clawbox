@@ -314,6 +314,22 @@ def apply_retention(creds: api.Credentials, keep_last: int) -> list[str]:
 
 
 def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
+    """Only one backup may admit/upload at a time for this device data dir.
+
+    A competing manual/timer run must not mutate the active run's state or
+    heartbeat. Different devices still need server-side quota reservations.
+    """
+    from .backup_guard import exclusive
+    from .token import data_dir
+
+    with exclusive(data_dir() / "backup-run.lock", wait=False) as acquired:
+        if not acquired:
+            log.error("another backup is already running; wait for it to finish and retry")
+            return EXIT_BACKUP_FAILED
+        return _run_once_locked(cfg, token, label=label)
+
+
+def _run_once_locked(cfg: Config, token: str, *, label: str | None = None) -> int:
     """One full backup cycle. Returns a process exit code.
 
     `label` optionally names the resulting snapshot — it's recorded in the
@@ -465,6 +481,43 @@ def run_once(cfg: Config, token: str, *, label: str | None = None) -> int:
             encrypted_size = encrypted_path.stat().st_size
         except OSError as e:
             raise s3.S3Error(f"could not stat encrypted archive: {e}") from e
+
+        # Admission uses the actual ciphertext size and a fresh remote listing,
+        # not the portal's possibly stale heartbeat counter. Never assume that
+        # post-upload retention will free space: doing so would exceed quota
+        # temporarily, and pruning first could destroy the last good backup.
+        # This is not a cross-device reservation; simultaneous writers still
+        # require an atomic server-side admission protocol.
+        admission = _recompute_usage(st, creds)
+        if admission is None:
+            message = (
+                "quota check unavailable: could not verify cloud usage; no backup "
+                "was uploaded or removed. Check connectivity and retry."
+            )
+            log.error(message)
+            ok = _heartbeat_safe(cfg.server, token, status="error", error=message)
+            _stamp_heartbeat(st, ok, "error")
+            state.save(st)
+            return EXIT_NETWORK
+        if admission.cloud_bytes + encrypted_size > creds.quotaBytes:
+            remaining = max(0, creds.quotaBytes - admission.cloud_bytes)
+            message = (
+                f"quota full: encrypted backup needs {encrypted_size} bytes, but only "
+                f"{remaining} bytes remain ({admission.cloud_bytes}/{creds.quotaBytes} "
+                "used). Increase storage or review and remove unneeded snapshots, "
+                "then retry. Nothing was uploaded or removed; retention runs only "
+                "after a successful backup."
+            )
+            log.error(message)
+            ok = _heartbeat_safe(
+                cfg.server, token, status="error", error=message,
+                cloud_bytes=admission.cloud_bytes,
+                snapshot_count=admission.snapshot_count,
+            )
+            _stamp_heartbeat(st, ok, "error")
+            _note_credentials(st, "quota_full")
+            state.save(st)
+            return EXIT_QUOTA_FULL
 
         _stamp_step(st, STEP_UPLOADING)
         # Seed live upload-progress fields so the UI immediately switches from
