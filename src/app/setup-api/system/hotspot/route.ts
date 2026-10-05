@@ -161,17 +161,12 @@ export async function POST(request: Request) {
             "[hotspot] Box is a WiFi client; deferring AP restart to avoid severing the connection"
           );
         } else {
-          await startRootStep("restart_ap");
+          await startRootStep("restart_ap", { timeoutMs: 450_000 });
           apAction = "restarted";
         }
       } else {
         // Stop the AP — run stop-ap.sh directly since clawbox user can execute it
-        const stopScript = path.join(
-          process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox",
-          "scripts",
-          "stop-ap.sh"
-        );
-        await execFileAsync("bash", [stopScript], { timeout: 15_000 });
+        await execFileAsync("bash", ["/usr/local/libexec/clawbox/stop-ap.sh"], { timeout: 240_000 });
       }
     } catch (apErr) {
       console.warn("[hotspot] Failed to toggle AP:", apErr);

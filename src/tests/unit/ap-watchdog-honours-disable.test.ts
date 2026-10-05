@@ -104,6 +104,11 @@ function makeBox(opts: {
 function runWatchdog(
   startAp: string = path.join(root, "libexec", "start-ap.sh"),
 ): { started: boolean; treeStarted: boolean; status: number | null; stderr: string } {
+  writeFileSync(path.join(bin, "systemctl"), `#!/bin/bash
+[ "$*" = "--job-mode=fail --no-block restart clawbox-ap.service" ] || exit 2
+[ -x "${startAp}" ] || { echo "${startAp} missing" >&2; exit 1; }
+bash "${startAp}"
+`, { mode: 0o755 });
   const res = spawnSync("bash", [WATCHDOG], {
     env: {
       ...process.env,
@@ -172,20 +177,16 @@ describe("the AP watchdog tells a drop from a decision", () => {
     // exit 0, so the timer does not paint a failed unit every twenty seconds.
     makeBox({ setupComplete: false, hotspotEnv: null });
     const r = runWatchdog(path.join(root, "libexec", "not-installed.sh"));
-    expect(r).toMatchObject({ started: false, treeStarted: false, status: 0 });
+    expect(r).toMatchObject({ started: false, treeStarted: false, status: 1 });
     expect(r.stderr).toContain("not-installed.sh");
   });
 
-  it("executes the root-owned copy by default and never derives it from CLAWBOX_ROOT", () => {
-    // The default is pinned by reading rather than running, because running it
-    // on a box means the real /usr/local/libexec copy.
+  it("requests only the installed service, never code derived from CLAWBOX_ROOT", () => {
     const src = readFileSync(WATCHDOG, "utf-8");
-    const m = /^START_AP="([^"]*)"$/m.exec(src);
-    expect(m, "START_AP assignment not found").not.toBeNull();
-    expect(m![1]).toBe("${CLAWBOX_START_AP:-/usr/local/libexec/clawbox/start-ap.sh}");
-    expect(m![1]).not.toContain("$ROOT");
-    expect(m![1]).not.toContain("CLAWBOX_ROOT");
+    expect(src).toContain("systemctl --job-mode=fail --no-block restart clawbox-ap.service");
+    expect(src).not.toContain('bash "$START_AP"');
   });
+
 
   it("heals when there is no hotspot.env at all", () => {
     // A box that has never reached the Security step has no env file. Reading

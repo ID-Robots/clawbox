@@ -1290,6 +1290,7 @@ EXPECTED_ACTIVE_SERVICES=(
   clawbox-codex-auth-sync.timer
 )
 EXPECTED_INSTALLED_SERVICES=(
+  clawbox-wifi-failover.service
   clawbox-heartbeat.service
   clawbox-browser.service
   clawbox-embed.service
@@ -8363,6 +8364,9 @@ install_root_libexec() {
   install -d -o root -g root -m 0755 /usr/local/libexec
   install -d -o root -g root -m 0755 "$ROOT_LIBEXEC_DIR"
   local src failed=0
+  for src in wifi-radio.sh wifi-failover.sh; do
+    [ -f "$SRC_DIR/scripts/$src" ] || failed=1
+  done
   # The integrity helper first: the dispatcher installed at the END of this
   # function refuses to run any step unless the manifest this writes verifies.
   # clawbox-user-helper.sh is the multi-user sign-in check and Terminal shell
@@ -8394,17 +8398,35 @@ install_root_libexec() {
   # a clawbox-level foothold was root inside twenty seconds, with no grant and
   # no manifest check on the path (the manifest is consulted only inside the
   # root-step dispatcher, never before systemd's own ExecStart). The tree
-  # copies STAY, executable, for the unprivileged callers: src/lib/network.ts
-  # and the hotspot route run them as clawbox through NetworkManager's polkit
-  # grants. Security scan #21 (the TASK-445 follow-up clawbox-root-step.sh's
+  # copies are also used by the unprivileged web stop/scan/NM writers, which
+  # share radio ownership through wifi-radio.sh. AP startup is requested via
+  # the existing root-step launcher and supervised unit, never a checkout script. Security scan #21 (the TASK-445 follow-up clawbox-root-step.sh's
   # "residual" note pointed at). On the first in-app update carrying the
   # change there is a window between the updater's git reset (new units and
   # scripts in the tree) and post_update's first call here (the copies in
   # libexec): the old unit runs the new ap-watchdog.sh and it stands down
   # rather than fall back to the tree — written down in that script.
+  # Publish the shared dependency BEFORE replacing any of its consumers. On a
+  # first-upgrade copy failure, old units must retain their working entrypoints,
+  # not new scripts which source a missing helper. Unrelated copies/manifest
+  # maintenance still run. step_systemd_services refuses unit publication on
+  # failure; on success it installs the supervised units and daemon-reloads
+  # before the dispatcher is published. Until then new start-ap fails closed
+  # at wifi_inhibit without CLAWBOX_AP_SUPERVISED (no unsupervised mutation).
+  local wifi_helper_ready=0
+  if [ -f "$SRC_DIR/scripts/wifi-radio.sh" ] &&
+     install_root_file "$SRC_DIR/scripts/wifi-radio.sh" "$ROOT_LIBEXEC_DIR/wifi-radio.sh"; then
+    wifi_helper_ready=1
+  else
+    echo "  Error: WiFi helper publication failed; preserving dependent entrypoints" >&2
+    failed=1
+  fi
   for src in optimize-ollama.sh clawbox-desktop-mode.sh clawbox-power-mode.sh \
              clawbox-resource-limits.sh gateway-restart-when-online.sh \
-             start-ap.sh stop-ap.sh ap-watchdog.sh ensure-vnc-on-first-boot.sh; do
+             wifi-failover.sh start-ap.sh stop-ap.sh ap-watchdog.sh ensure-vnc-on-first-boot.sh; do
+    case "$src" in
+      wifi-failover.sh|start-ap.sh|stop-ap.sh) [ "$wifi_helper_ready" -eq 1 ] || continue ;;
+    esac
     if [ -f "$SRC_DIR/scripts/$src" ]; then
       install_root_file "$SRC_DIR/scripts/$src" "$ROOT_LIBEXEC_DIR/$src" || {
         echo "  Error: could not install $ROOT_LIBEXEC_DIR/$src (the copy already there, if any, is untouched)" >&2
@@ -8788,6 +8810,7 @@ step_systemd_services() {
   for svc in "${ALL_SERVICES[@]}"; do
     [[ "$svc" == *@* ]] && continue
     [[ "$svc" == "clawbox-browser.service" ]] && continue
+    [[ "$svc" == "clawbox-wifi-failover.service" ]] && continue
     # On demand only: the local-AI proxy starts the memory embedder on the
     # first search and stops it ten idle minutes later. It has no [Install]
     # section, and enabling it would mean 2 GB resident from boot for nothing.
@@ -8933,6 +8956,22 @@ step_nm_dispatcher() {
   local DISPATCHER_DIR="/etc/NetworkManager/dispatcher.d"
   local SRC="$SRC_DIR/scripts/nm-dispatcher-failover.sh"
   local DEST="$DISPATCHER_DIR/90-clawbox-failover"
+  # Preserve the old hook if the new supervised worker could not be installed.
+  # step_post_update tolerates individual fixup failures; ordering alone is not
+  # proof that the preceding service/libexec refresh actually landed.
+  local dependency
+  for dependency in wifi-radio.sh wifi-failover.sh; do
+    if ! cmp -s "$SRC_DIR/scripts/$dependency" "$ROOT_LIBEXEC_DIR/$dependency"; then
+      echo "  Error: failover dependency $dependency not current; dispatcher unchanged" >&2
+      record_provision_failure nm_dispatcher
+      return 1
+    fi
+  done
+  if ! cmp -s "$SRC_DIR/config/clawbox-wifi-failover.service" /etc/systemd/system/clawbox-wifi-failover.service; then
+    echo "  Error: supervised failover unit not current; dispatcher unchanged" >&2
+    record_provision_failure nm_dispatcher
+    return 1
+  fi
   if [ ! -f "$SRC" ]; then
     echo "  Skipping NM dispatcher: $SRC missing"
     return
@@ -9048,7 +9087,6 @@ step_post_update() {
   # the Hermes gateway removal, which an older update could have undone.
   optional_step edition_lock step_edition_lock
   optional_step set_hostname step_set_hostname
-  optional_step nm_dispatcher step_nm_dispatcher
   optional_step sysctl_linkdown step_sysctl_linkdown
   # Without this call the swapfile would be fresh-install-only, and every box
   # already in the field would keep facing a rebuild with zram alone — which is
@@ -9081,6 +9119,7 @@ step_post_update() {
   # sudoers change the same way. The step is idempotent — cp, daemon-reload,
   # enable — and is exactly what fresh installs already run.
   optional_step systemd_services step_systemd_services
+  optional_step nm_dispatcher step_nm_dispatcher
   # The polkit narrowing, again. step_rebuild_reboot removes the old grant right
   # after its verified rebuild, but a box can reach this step by another road —
   # a hand-run force-update.sh, a heal, an update that stopped after the rebuild
@@ -10627,16 +10666,7 @@ step_restart_ap() {
 
 step_recover() {
   echo "Running ClawBox recovery..."
-  # The root-owned copy, with the tree copy as the fallback ONLY when the
-  # libexec one is absent: recovery is the operator's last resort and must work
-  # on a box mid-migration (new tree, root step not yet run). Same rule as
-  # scripts/recover.sh. Security scan #21.
-  local start_ap="$ROOT_LIBEXEC_DIR/start-ap.sh"
-  if [ ! -x "$start_ap" ]; then
-    echo "  $start_ap missing — falling back to the tree copy (run --step systemd_services to install it)"
-    start_ap="$SRC_DIR/scripts/start-ap.sh"
-  fi
-  bash "$start_ap"
+  systemctl restart clawbox-ap.service
   systemctl restart clawbox-setup.service
   echo "Recovery complete"
 }

@@ -83,7 +83,8 @@ restart_gateway_when_online() {
 # ap-watchdog.sh re-raises it every ~20 s while setup is incomplete, so without
 # this every one of those would start a full wait, hold the lock, and drop a
 # genuine Ethernet request in the meantime.
-if [ "${CONNECTION_ID:-}" = "$AP_PROFILE" ]; then
+if [ -n "${CONNECTION_UUID:-}" ] &&
+   [ "$(nmcli -g 802-11-wireless.mode connection show uuid "$CONNECTION_UUID" 2>/dev/null)" = ap ]; then
   exit 0
 fi
 
@@ -213,58 +214,10 @@ log "Ethernet '$IFACE' down — attempting WiFi failover"
 # into a dead network costs both Telegram accounts until someone notices.
 restart_gateway_when_online "Ethernet '$IFACE' down"
 
-# If the AP is currently active on the WiFi radio, take it down so the radio is free.
-if nmcli -t -f NAME,DEVICE connection show --active | grep -qE "^${AP_PROFILE}:${WIFI_IFACE}$"; then
-  log "Bringing down AP profile '$AP_PROFILE' to free radio"
-  nmcli connection down "$AP_PROFILE" >/dev/null 2>&1 || true
+# systemd coalesces starts while this oneshot is running and owns timeout,
+# cgroup cleanup and journal reporting. Never wait for association in NM's hook.
+if ! systemctl --no-block start clawbox-wifi-failover.service; then
+  log "ERROR: supervised WiFi failover launch failed"
+  exit 1
 fi
-
-# Already on a real WiFi network? Nothing more to do.
-if nmcli -t -f TYPE,STATE,DEVICE device status | grep -qE "^wifi:connected:${WIFI_IFACE}$"; then
-  active_wifi=$(nmcli -t -f NAME,TYPE,DEVICE connection show --active | awk -F: -v i="$WIFI_IFACE" -v ap="$AP_PROFILE" '$2=="802-11-wireless" && $3==i && $1!=ap {print $1; exit}')
-  if [ -n "$active_wifi" ]; then
-    log "Already on WiFi '$active_wifi' — no failover needed"
-    exit 0
-  fi
-fi
-
-# Try saved WiFi profiles in priority order (skip the AP profile itself).
-mapfile -t profiles < <(nmcli -t -f NAME,TYPE,AUTOCONNECT-PRIORITY connection show \
-  | awk -F: -v ap="$AP_PROFILE" '$2=="802-11-wireless" && $1!=ap {print $3":"$1}' \
-  | sort -t: -k1,1 -nr | cut -d: -f2-)
-
-if [ "${#profiles[@]}" -eq 0 ]; then
-  log "No saved WiFi profiles to fail over to"
-  exit 0
-fi
-
-for profile in "${profiles[@]}"; do
-  [ -z "$profile" ] && continue
-  log "Trying WiFi profile '$profile'"
-  if nmcli connection up "$profile" ifname "$WIFI_IFACE" >/dev/null 2>&1; then
-    log "Connected to '$profile' — failover complete"
-    exit 0
-  fi
-done
-
-log "Failover failed — no saved WiFi profile would connect; starting hotspot as recovery"
-
-# Stranded recovery: no saved WiFi reachable, so bring the captive-portal
-# hotspot back up. start-ap.sh honours the user's configured SSID/password
-# and falls back to ClawBox-Setup if none is set.
-#
-# The ROOT-OWNED copy, exactly as $WAITER above: this hook runs as root from
-# NetworkManager's dispatcher.d, and the tree under $CLAWBOX_ROOT is
-# clawbox-writable, so running scripts/start-ap.sh from there was root
-# executing whatever clawbox had put in it. The override is for the tests that
-# stand a witness in for the copy. A box whose libexec copy is missing (an
-# install_root_libexec that has not run yet) gets the WARN below rather than
-# the tree copy. Security scan #21.
-START_AP="${CLAWBOX_START_AP:-/usr/local/libexec/clawbox/start-ap.sh}"
-if [ -x "$START_AP" ]; then
-  bash "$START_AP" >/dev/null 2>&1 &
-  log "Recovery AP launch dispatched"
-else
-  log "WARN: $START_AP missing or not executable — recovery hotspot not started"
-fi
-exit 0
+log "Supervised WiFi failover requested"

@@ -507,6 +507,7 @@ function healthyOpenclaw(): Record<string, string> {
     "clawbox-tunnel.service": "disabled:inactive",
     "clawbox-root-update@.service": "static:inactive",
     "clawbox-ap-watchdog.service": "static:inactive",
+    "clawbox-wifi-failover.service": "static:inactive",
     "clawbox-codex-auth-sync.service": "static:inactive",
     "clawbox-build-heal.service": "enabled:inactive",
   };
@@ -551,12 +552,12 @@ d("the validator now says what to run, not just what is wrong", () => {
     expect(r.stdout).not.toContain("--step edition_foreign_teardown");
   });
 
-  it("still passes a clean openclaw device, with the count unchanged", () => {
+  it("still passes a clean openclaw device with the registered failover worker", () => {
     // The teardown adds no checks — the healthy line must not move.
     const r = runValidator("openclaw", healthyOpenclaw());
     expect(r.status).toBe(0);
-    // 18 with clawbox-embed.service among the installed-but-on-demand units,
+    // 19 with the supervised WiFi worker among the installed-but-on-demand units,
     // and clawbox-build-heal.service (TASK-1316), the boot-time oneshot.
-    expect(r.stdout).toMatch(/All 18 checks healthy/);
+    expect(r.stdout).toMatch(/All 19 checks healthy/);
   });
 });

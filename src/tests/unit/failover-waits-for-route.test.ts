@@ -130,6 +130,8 @@ function makeBox(opts: BoxOptions = {}): void {
   stub("nmcli", `
 echo "nmcli $*" >> ${JSON.stringify(calls)}
 case "$*" in
+  *"GENERAL.STATE device show"*) echo "30 (disconnected)" ;;
+  *"802-11-wireless.mode connection show uuid aaaaaaaa-0000-4000-8000-000000000001"*) echo ap ;;
   *"networking connectivity"*)
     q=${JSON.stringify(path.join(root, "connectivity"))}
     head -n 1 "$q"
@@ -755,7 +757,7 @@ describe("one restart per route recovery, not one per NetworkManager event", () 
     runWaiter("Ethernet 'eth0' up");
     expect(existsSync(stamp)).toBe(true);
 
-    runDispatcher("wlan0", "down", { CONNECTION_ID: "ClawBox-Setup" });
+    runDispatcher("wlan0", "down", { CONNECTION_ID: "ClawBox-Setup", CONNECTION_UUID: "aaaaaaaa-0000-4000-8000-000000000001" });
 
     expect(existsSync(stamp)).toBe(true);
   });
@@ -877,59 +879,23 @@ describe("the dispatcher hands the restart to the waiter rather than firing it",
     expect(deferred()).toHaveLength(0);
   });
 
-  it("raises the recovery hotspot from the root-owned copy, never from the tree", async () => {
-    // Security scan #21. This hook runs as ROOT from NetworkManager's
-    // dispatcher.d, and when no saved WiFi profile will connect it starts the
-    // setup hotspot as a last resort. START_AP used to be derived from
-    // $CLAWBOX_ROOT/scripts — the clawbox-owned tree — so a planted start-ap.sh
-    // there was root code on the next failed failover. The copy it runs now is
-    // the libexec one (the sandbox stands in through CLAWBOX_START_AP, exactly
-    // as it does for the waiter), and a start-ap.sh planted where the old
-    // derivation looked must stay untouched.
+  it("requests the supervised failover unit rather than executing checkout code", () => {
     makeBox({ connectivity: ["none"], defaultRoute: false });
-    // A saved profile that will not come up: the only way to the recovery arm.
-    writeFileSync(path.join(bin, "nmcli"), `#!/usr/bin/env bash
-echo "nmcli $*" >> ${JSON.stringify(path.join(root, "calls.log"))}
-case "$*" in
-  *"networking connectivity"*) echo none ;;
-  *"NAME,TYPE,AUTOCONNECT-PRIORITY"*) echo "Home:802-11-wireless:10" ;;
-  *"connection up"*) exit 1 ;;
-  *) exit 0 ;;
-esac`, { mode: 0o755 });
-    const witness = path.join(root, "libexec", "start-ap.sh");
-    writeFileSync(witness, `#!/usr/bin/env bash\ntouch ${JSON.stringify(path.join(root, "AP-STARTED"))}\n`, { mode: 0o755 });
     writeFileSync(path.join(root, "scripts", "start-ap.sh"),
-      `#!/usr/bin/env bash\ntouch ${JSON.stringify(path.join(root, "TREE-AP-STARTED"))}\n`, { mode: 0o755 });
-
-    runDispatcher("eth0", "down", { CLAWBOX_START_AP: witness });
-
-    // The launch is backgrounded, so allow the child a moment to land.
-    const deadline = Date.now() + 5_000;
-    while (!existsSync(path.join(root, "AP-STARTED")) && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    expect(existsSync(path.join(root, "AP-STARTED")), "the recovery hotspot was not started").toBe(true);
-    expect(existsSync(path.join(root, "TREE-AP-STARTED")), "root ran the clawbox-writable tree copy").toBe(false);
-    expect(journalLines("Recovery AP launch dispatched")).toHaveLength(1);
+      `#!/bin/bash\ntouch ${JSON.stringify(path.join(root, "TREE-AP-STARTED"))}\n`, { mode: 0o755 });
+    runDispatcher("eth0", "down");
+    expect(readFileSync(path.join(root, "calls.log"), "utf-8"))
+      .toContain("systemctl --no-block start clawbox-wifi-failover.service");
+    expect(existsSync(path.join(root, "TREE-AP-STARTED"))).toBe(false);
+    expect(journalLines("Supervised WiFi failover requested")).toHaveLength(1);
   });
 
-  it("says so, rather than reaching for the tree copy, when the root-owned start-ap.sh is missing", async () => {
+  it("reports a refused service launch without falling back to checkout code", () => {
     makeBox({ connectivity: ["none"], defaultRoute: false });
-    writeFileSync(path.join(bin, "nmcli"), `#!/usr/bin/env bash
-case "$*" in
-  *"networking connectivity"*) echo none ;;
-  *"NAME,TYPE,AUTOCONNECT-PRIORITY"*) echo "Home:802-11-wireless:10" ;;
-  *"connection up"*) exit 1 ;;
-  *) exit 0 ;;
-esac`, { mode: 0o755 });
-    writeFileSync(path.join(root, "scripts", "start-ap.sh"),
-      `#!/usr/bin/env bash\ntouch ${JSON.stringify(path.join(root, "TREE-AP-STARTED"))}\n`, { mode: 0o755 });
-
-    runDispatcher("eth0", "down", { CLAWBOX_START_AP: path.join(root, "libexec", "not-installed.sh") });
-
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(existsSync(path.join(root, "TREE-AP-STARTED"))).toBe(false);
-    expect(journalLines("not-installed.sh missing")).toHaveLength(1);
+    writeFileSync(path.join(bin, "systemctl"), "#!/bin/bash\nexit 1\n", { mode: 0o755 });
+    const result = spawnSync("bash", [sandboxDispatcher, "eth0", "down"], { env: env(), encoding: "utf-8", timeout: 25_000 });
+    expect(result.status).toBe(1);
+    expect(journalLines("supervised WiFi failover launch failed")).toHaveLength(1);
   });
 
   it("ignores every transition of the box's own recovery AP", async () => {
@@ -939,7 +905,7 @@ esac`, { mode: 0o755 });
     // a full wait, take the lock, and drop a genuine Ethernet request meanwhile.
     makeBox({ connectivity: ["full"] });
 
-    runDispatcher("wlan0", "up", { CONNECTION_ID: "ClawBox-Setup" });
+    runDispatcher("wlan0", "up", { CONNECTION_ID: "ClawBox-Setup", CONNECTION_UUID: "aaaaaaaa-0000-4000-8000-000000000001" });
 
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(deferred()).toHaveLength(0);
@@ -1066,20 +1032,29 @@ describe("the installer reports what it actually installed", () => {
     return body;
   }
 
-  function runStep(opts: { waiterInstallFails?: boolean; dispatcherInstallFails?: boolean; shape: "update" | "fresh" }) {
+  function runStep(opts: { missingWorker?: boolean; waiterInstallFails?: boolean; dispatcherInstallFails?: boolean; shape: "update" | "fresh" }) {
     const project = path.join(root, "project");
     const dispatcherDir = path.join(root, "dispatcher.d");
     const libexec = path.join(root, "root-libexec");
     mkdirSync(path.join(project, "scripts"), { recursive: true });
     copyFileSync(DISPATCHER, path.join(project, "scripts", "nm-dispatcher-failover.sh"));
     copyFileSync(WAITER, path.join(project, "scripts", "gateway-restart-when-online.sh"));
-
+    mkdirSync(libexec, { recursive: true });
+    mkdirSync(path.join(project, "config"), { recursive: true });
+    for (const name of ["wifi-radio.sh", "wifi-failover.sh"]) {
+      copyFileSync(path.join(REPO, "scripts", name), path.join(project, "scripts", name));
+      if (!opts.missingWorker) copyFileSync(path.join(REPO, "scripts", name), path.join(libexec, name));
+    }
+    const unit = "clawbox-wifi-failover.service";
+    copyFileSync(path.join(REPO, "config", unit), path.join(project, "config", unit));
+    copyFileSync(path.join(REPO, "config", unit), path.join(root, unit));
     const body = shellFunction("step_nm_dispatcher")
-      .replaceAll("/etc/NetworkManager/dispatcher.d", dispatcherDir);
+      .replaceAll("/etc/NetworkManager/dispatcher.d", dispatcherDir)
+      .replaceAll(`/etc/systemd/system/${unit}`, path.join(root, unit));
     // Fail fast rather than write into the developer's or the runner's real
     // dispatcher directory: `replace` with a string pattern rewrites only the
     // first match, so a second literal added later would escape the sandbox.
-    if (body.includes("/etc/NetworkManager")) {
+    if (body.includes("/etc/NetworkManager") || body.includes("/etc/systemd")) {
       throw new Error("step_nm_dispatcher still references a real system path after redirection");
     }
 
@@ -1127,6 +1102,13 @@ describe("the installer reports what it actually installed", () => {
     const r = spawnSync("bash", ["-c", script], { encoding: "utf-8", timeout: 25_000 });
     return { status: r.status, out: `${r.stdout}${r.stderr}`, libexec, dispatcherDir };
   }
+
+  it("does not publish the new hook if service installation left no worker", () => {
+    makeBox();
+    const r = runStep({ missingWorker: true, shape: "update" });
+    expect(r.out).toContain("dependency wifi-radio.sh not current");
+    expect(existsSync(path.join(r.dispatcherDir, "90-clawbox-failover"))).toBe(false);
+  });
 
   it("does not claim the deferred-restart helper is installed when it is not", () => {
     // The false-success class. `install_root_file` returns 1 on both of its
