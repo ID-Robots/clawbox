@@ -11,7 +11,8 @@ import path from "node:path";
  * cloudflared prints on the paths the script cares about, and records the argv
  * and environment it was started with.
  *
- *   - a credential on file → `tunnel --no-autoupdate run --url …`, the token in
+ *   - a credential on file → `tunnel --no-autoupdate --config <empty map> run
+ *     --url …`, the token in
  *     TUNNEL_TOKEN (never argv), https://<hostname> published, mode `named`
  *   - no credential, or a malformed one → the quick tunnel, mode `quick`
  *   - the named run dying inside its first window → the quick tunnel
@@ -158,6 +159,11 @@ async function stop(run: Run) {
 
 const calls = () => (existsSync(callLog) ? readFileSync(callLog, "utf-8") : "");
 
+// The config the script hands cloudflared instead of letting it find one.
+const isolatedConfig = () => cf("isolated-config.yml");
+const namedArgv = () => `argv:tunnel --no-autoupdate --config ${isolatedConfig()} run --url http://localhost:80`;
+const quickArgv = () => `argv:tunnel --no-autoupdate --config ${isolatedConfig()} --url http://localhost:80`;
+
 /** One of the Vm* lines of /proc/<pid>/status, in kB. */
 function procVmKb(pid: number, field: "VmPeak" | "VmSize"): number {
   const status = readFileSync(`/proc/${pid}/status`, "utf-8");
@@ -178,7 +184,7 @@ describe("run-tunnel.sh — named tunnel", () => {
     await waitFor(() => run.output().includes("captured URL"));
 
     expect(readFileSync(cf("tunnel.mode"), "utf-8").trim()).toBe("named");
-    expect(calls()).toContain("argv:tunnel --no-autoupdate run --url http://localhost:80");
+    expect(calls()).toContain(namedArgv());
     expect(calls()).toContain("env:token-ok");
     // The token is never on argv…
     expect(calls()).not.toContain(TOKEN);
@@ -195,11 +201,11 @@ describe("run-tunnel.sh — named tunnel", () => {
     expect(existsSync(cf("named-tunnel"))).toBe(true);
   });
 
-  it("runs the quick tunnel exactly as before when no credential is on file", async () => {
+  it("runs the quick tunnel when no credential is on file", async () => {
     const run = start();
     await waitFor(urlIs(QUICK_URL));
     expect(readFileSync(cf("tunnel.mode"), "utf-8").trim()).toBe("quick");
-    expect(calls()).toBe(`argv:tunnel --no-autoupdate --url http://localhost:80\n`);
+    expect(calls()).toBe(`${quickArgv()}\n`);
     expect(await stop(run)).toBe(0);
   });
 
@@ -296,7 +302,7 @@ describe("run-tunnel.sh — named tunnel", () => {
       if (accepted) {
         await waitFor(urlIs(`https://${HOST}`));
         expect(readFileSync(cf("tunnel.mode"), "utf-8").trim()).toBe("named");
-        expect(calls()).toContain("argv:tunnel --no-autoupdate run --url http://localhost:80");
+        expect(calls()).toContain(namedArgv());
       } else {
         // A rejected credential is not an error: the script falls back quietly.
         await waitFor(urlIs(QUICK_URL));
@@ -332,4 +338,61 @@ describe("run-tunnel.sh — named tunnel", () => {
       await stop(run);
     });
   }
+});
+
+// Volker's report (v4.1.0): with a ~/.cloudflared/config.yml on the box — what a
+// tunnel of the owner's own leaves behind, ending in `- service: http_status:404`
+// — cloudflared served THAT file's ingress instead of --url, and the box's tunnel
+// answered 404 to everything. Measured with cloudflared 2026.1.2 through its
+// metrics /config: no --config → the file's rules; --config <empty map> →
+// exactly [--url]. The fake cannot resolve configs itself, so this pins what the
+// measurement rests on: both runs name the empty map, the named one before
+// `run` (after it, cloudflared rejects the flag and prints its usage).
+describe("run-tunnel.sh — a config.yml of the owner's cannot steer the box's tunnel", () => {
+  const userConfig =
+    "ingress:\n  - hostname: mine.example.com\n    service: http://localhost:8080\n  - service: http_status:404\n";
+
+  function withUserConfig() {
+    const home = path.join(root, "home");
+    mkdirSync(path.join(home, ".cloudflared"), { recursive: true });
+    writeFileSync(path.join(home, ".cloudflared", "config.yml"), userConfig);
+    return { HOME: home };
+  }
+
+  const argvLines = () => calls().split("\n").filter((line) => line.startsWith("argv:"));
+
+  it("hands the quick tunnel an empty config, ahead of --url", async () => {
+    const run = start(withUserConfig());
+    await waitFor(urlIs(QUICK_URL));
+    expect(argvLines()).toEqual([quickArgv()]);
+    expect(readFileSync(isolatedConfig(), "utf-8")).toBe("{}\n");
+    expect(await stop(run)).toBe(0);
+  });
+
+  it("hands the named tunnel the same config, before `run`", async () => {
+    writeCredential();
+    const run = start(withUserConfig());
+    await waitFor(urlIs(`https://${HOST}`));
+    const [argv] = argvLines();
+    expect(argv).toBe(namedArgv());
+    expect(argv.indexOf(" --config ")).toBeLessThan(argv.indexOf(" run "));
+    expect(await stop(run)).toBe(0);
+  });
+
+  it("rewrites whatever was left in its place, so nothing in it can steer the tunnel", async () => {
+    writeFileSync(isolatedConfig(), userConfig);
+    const run = start();
+    await waitFor(urlIs(QUICK_URL));
+    expect(readFileSync(isolatedConfig(), "utf-8")).toBe("{}\n");
+    expect(await stop(run)).toBe(0);
+  });
+
+  it("falls back to /dev/null when the empty config cannot be written", async () => {
+    // A directory where the file goes: the write fails, the isolation must not.
+    mkdirSync(isolatedConfig());
+    const run = start(withUserConfig());
+    await waitFor(urlIs(QUICK_URL));
+    expect(argvLines()).toEqual(["argv:tunnel --no-autoupdate --config /dev/null --url http://localhost:80"]);
+    expect(await stop(run)).toBe(0);
+  });
 });
