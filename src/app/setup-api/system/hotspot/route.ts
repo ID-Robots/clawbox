@@ -4,7 +4,7 @@ import path from "@/lib/runtime-path";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import { get, setMany, getAll } from "@/lib/config-store";
-import { parseNmcliTerseLine } from "@/lib/network";
+import { parseNmcliTerseLine, RESTART_AP_TIMEOUT_MS } from "@/lib/network";
 import { startRootStep } from "@/lib/root-step-runner";
 
 const execFileAsync = promisify(execFile);
@@ -161,7 +161,7 @@ export async function POST(request: Request) {
             "[hotspot] Box is a WiFi client; deferring AP restart to avoid severing the connection"
           );
         } else {
-          await startRootStep("restart_ap", { timeoutMs: 450_000 });
+          await startRootStep("restart_ap", { timeoutMs: RESTART_AP_TIMEOUT_MS });
           apAction = "restarted";
         }
       } else {

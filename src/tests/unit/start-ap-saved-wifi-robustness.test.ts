@@ -1348,3 +1348,220 @@ describe("N8 AP ownership", () => {
     expect(d.recoveryAp).toBe(false);
   });
 });
+
+// PR #1089 review follow-up (CodeRabbit threads on start-ap.sh:316 and
+// wifi-failover.sh:54): what the radio reads while NetworkManager is still
+// bringing it up, or still carrying an activation nmcli stopped waiting for.
+//
+// `state-plan` scripts successive `-g GENERAL.STATE device show` reads: a
+// number is that device state with nothing on the radio, `fail` is a read that
+// errors, `client=<uuid>` is an activation that has landed. An exhausted plan
+// leaves the model as it is. `afterUp` re-plans the moment that client's
+// `connection up` returns: nmcli gives up (exit 3, as on its --wait timeout)
+// with the radio still activating (70), and NetworkManager carries on.
+function nmStatePlan(plan: string[], afterUp?: { uuid: string; plan: string[] }) {
+  writeFileSync(path.join(nm, "state-plan"), plan.join(" ") + "\n");
+  wrapNm(`if [ "$*" = "-g GENERAL.STATE device show ${IFACE}" ]; then
+  next=""; rest=""
+  read -r next rest < "$NMSTUB/state-plan" || true
+  if [ -n "$next" ]; then
+    printf '%s\\n' "$rest" > "$NMSTUB/state-plan"
+    case "$next" in
+      fail) echo "Error: synthetic GENERAL.STATE failure" >&2; exit 10 ;;
+      client=*) printf '%s' "\${next#client=}" > "$NMSTUB/active"; printf 100 > "$NMSTUB/state" ;;
+      *) : > "$NMSTUB/active"; printf '%s' "$next" > "$NMSTUB/state" ;;
+    esac
+  fi
+fi`, afterUp ? `if [[ "$*" == *"connection up uuid ${afterUp.uuid} "* ]]; then
+  : > "$NMSTUB/active"; printf 70 > "$NMSTUB/state"
+  printf '%s\\n' ${JSON.stringify(afterUp.plan.join(" "))} > "$NMSTUB/state-plan"
+  echo "Error: Timeout expired (synthetic); activation continues" >&2
+  rc=3
+fi` : "");
+}
+const traceRows = () => readFileSync(path.join(nm, "trace"), "utf-8").split("\n").filter(Boolean).map((l) => l.split("\t"));
+const sleepCount = (rows: string[][]) => rows.filter((a) => a[0] === "sleep").length;
+/** The script's pauses before the first nmcli call whose argv contains `word`. */
+const sleepsBefore = (word: string) => {
+  const rows = traceRows();
+  const at = rows.findIndex((a) => a[0] === "nmcli" && a.includes(word));
+  return sleepCount(at < 0 ? rows : rows.slice(0, at));
+};
+/** The script's pauses after the first client `connection up`. */
+const sleepsAfterUp = () => {
+  const rows = traceRows();
+  const at = rows.findIndex((a) => a[0] === "nmcli" && a.join(" ").includes("connection up"));
+  expect(at, "no connection up was attempted").toBeGreaterThanOrEqual(0);
+  return sleepCount(rows.slice(at + 1));
+};
+
+describe("PR #1089 review: start-ap.sh admits a radio still coming up only once it settles", () => {
+  const home: Profile = { uuid: HOME, name: "Example-Home", up: "ok" };
+
+  it("waits out an unavailable radio (20) and still joins the saved network", () => {
+    makeBox({ setupComplete: true, profiles: [home] });
+    // The first read is the "already connected?" check before inhibition.
+    nmStatePlan(["20", "20", "20", "30"]);
+    const r = runStartAp();
+    expect(r.status, r.stderr).toBe(0);
+    expect(clientUps(r)).toEqual([HOME]);
+    expect(activeNow()).toBe(HOME);
+    expect(r.calls.filter(isApActivity)).toEqual([]);
+    expect(deviceAc()).toBe("yes");
+    expect(sleepCount(r.trace)).toBe(2);
+  });
+
+  it("waits out a radio NetworkManager has not taken under management yet (10)", () => {
+    makeBox({ setupComplete: true, profiles: [home] });
+    nmStatePlan(["10", "10", "20", "30"]);
+    const r = runStartAp();
+    expect(r.status, r.stderr).toBe(0);
+    expect(clientUps(r)).toEqual([HOME]);
+    expect(activeNow()).toBe(HOME);
+    expect(deviceAc()).toBe("yes");
+  });
+
+  it("waits out an unreadable state and still raises the fallback hotspot", () => {
+    makeBox({ setupComplete: true, profiles: [] });
+    nmStatePlan(["fail", "fail", "fail", "30"]);
+    const r = runStartAp({ SKIP_PRESCAN: "1" });
+    expect(r.status, r.stderr).toBe(0);
+    expect(activeNow()).toBe(HOTSPOT);
+    expect(deviceAc()).toBe("yes");
+    expect(sleepsBefore("add")).toBe(2);
+  });
+
+  it("keeps a saved network NetworkManager joins while the radio is still coming up", () => {
+    makeBox({ setupComplete: true, profiles: [{ ...home, up: "fail" }] });
+    nmStatePlan(["20", "20", `client=${HOME}`]);
+    const r = runStartAp();
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain("during admission");
+    expect(activeNow()).toBe(HOME);
+    expect(clientUps(r)).toEqual([]);
+    expect(r.calls.filter(isApActivity)).toEqual([]);
+    expect(deviceAc()).toBe("yes");
+  });
+
+  it.each([
+    ["stays unavailable (20)", () => writeFileSync(path.join(nm, "state"), "20")],
+    ["stays unreadable", () => nmStatePlan(Array(40).fill("fail"))],
+  ])("still defers a radio that %s — after the same 15 s look, with nothing taken from it", (_, stage) => {
+    makeBox({ setupComplete: true, profiles: [home] });
+    stage();
+    const r = runStartAp();
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("did not settle — deferring");
+    expect(sleepCount(r.trace)).toBe(15);
+    expect(clientUps(r)).toEqual([]);
+    expect(r.calls.filter(isApActivity)).toEqual([]);
+    expect(deviceAc()).toBe("yes");
+  });
+
+  it("does not widen the look to every state: unknown (0) is still deferred at once", () => {
+    makeBox({ setupComplete: true, profiles: [home] });
+    writeFileSync(path.join(nm, "state"), "0");
+    const r = runStartAp();
+    expect(r.status).toBe(1);
+    expect(sleepCount(r.trace)).toBe(0);
+    expect(clientUps(r)).toEqual([]);
+    expect(r.calls.filter(isApActivity)).toEqual([]);
+    expect(deviceAc()).toBe("yes");
+  });
+});
+
+describe("PR #1089 review: wifi-failover.sh waits out an activation in flight before deciding", () => {
+  it("keeps the network an activation already in flight at Ethernet-down lands on", () => {
+    makeBox({ setupComplete: true, profiles: [
+      { uuid: HOME, name: "Example-Home", up: "ok" },
+      { uuid: CAFE, name: "Example-Cafe", up: "fail" },
+    ] });
+    nmStatePlan(["50", "50", `client=${HOME}`]);
+    const d = runDispatcher();
+    expect(d.status).toBe(0);
+    expect(d.journal).toContain(`Already on WiFi UUID ${HOME}`);
+    expect(ups(d.lines)).toEqual([]);
+    expect(d.recoveryAp).toBe(false);
+    expect(activeNow()).toBe(HOME);
+    expect(sleepCount(traceRows())).toBe(2);
+  });
+
+  it("keeps the network an attempt lands on after nmcli stopped waiting for it", () => {
+    makeBox({ setupComplete: true, profiles: [{ uuid: HOME, name: "Example-Home", up: "ok" }] });
+    nmStatePlan([], { uuid: HOME, plan: ["70", "70", `client=${HOME}`] });
+    const d = runDispatcher();
+    expect(d.status).toBe(0);
+    expect(ups(d.lines)).toEqual([`--wait 45 connection up uuid ${HOME} ifname ${IFACE}`]);
+    expect(d.recoveryAp).toBe(false);
+    expect(activeNow()).toBe(HOME);
+    expect(sleepsAfterUp()).toBe(2);
+  });
+
+  it("moves on to the next saved network when that activation then fails", () => {
+    makeBox({ setupComplete: true, profiles: [
+      { uuid: HOME, name: "Example-Home", priority: 10, up: "fail" },
+      { uuid: CAFE, name: "Example-Cafe", priority: 0, up: "ok" },
+    ] });
+    nmStatePlan([], { uuid: HOME, plan: ["70", "70", "30"] });
+    const d = runDispatcher();
+    expect(d.status).toBe(0);
+    expect(ups(d.lines)).toEqual([HOME, CAFE].map((u) => `--wait 45 connection up uuid ${u} ifname ${IFACE}`));
+    expect(activeNow()).toBe(CAFE);
+    expect(d.recoveryAp).toBe(false);
+  });
+
+  it("still raises the recovery hotspot when the only saved network then fails", () => {
+    makeBox({ setupComplete: true, profiles: [{ uuid: HOME, name: "Example-Home", up: "fail" }] });
+    nmStatePlan([], { uuid: HOME, plan: ["70", "70", "30"] });
+    const d = runDispatcher();
+    expect(d.status).toBe(0);
+    expect(ups(d.lines)).toEqual([`--wait 45 connection up uuid ${HOME} ifname ${IFACE}`]);
+    expect(d.journal).toContain("starting hotspot as recovery");
+    expect(d.recoveryAp).toBe(true);
+  });
+
+  it("defers, untouched, an activation still in flight after the bounded look", () => {
+    makeBox({ setupComplete: true, profiles: [
+      { uuid: HOME, name: "Example-Home", priority: 10, up: "fail" },
+      { uuid: CAFE, name: "Example-Cafe", priority: 0, up: "ok" },
+    ] });
+    nmStatePlan([], { uuid: HOME, plan: [] });
+    const d = runDispatcher();
+    expect(d.status).toBe(1);
+    expect(d.journal).toContain("(state 70) — deferring failover");
+    expect(sleepsAfterUp()).toBe(15);
+    expect(ups(d.lines), "a rival was activated over an activation in flight").toEqual([`--wait 45 connection up uuid ${HOME} ifname ${IFACE}`]);
+    expect(d.lines.filter((l) => /connection down /.test(l))).toEqual([]);
+    expect(d.recoveryAp).toBe(false);
+  });
+
+  it("does not wait on, or act over, a radio whose state cannot be read", () => {
+    makeBox({ setupComplete: true, profiles: [{ uuid: HOME, name: "Example-Home", up: "ok" }] });
+    nmStatePlan(Array(5).fill("fail"));
+    const d = runDispatcher();
+    expect(d.status).toBe(1);
+    expect(d.journal).toContain("(state unreadable) — deferring failover");
+    expect(sleepCount(traceRows())).toBe(0);
+    expect(ups(d.lines)).toEqual([]);
+    expect(d.recoveryAp).toBe(false);
+  });
+
+  it("keeps every settle inside the one budget the unit's timeout was sized for", () => {
+    const script = readFileSync(path.join(REPO, "scripts", "wifi-failover.sh"), "utf-8");
+    const unit = readFileSync(path.join(REPO, "config", "clawbox-wifi-failover.service"), "utf-8");
+    const helper = readFileSync(path.join(REPO, "scripts", "wifi-radio.sh"), "utf-8");
+    const lock = Number(helper.match(/flock -x -w (\d+)/)?.[1]);
+    const budgets = [...script.matchAll(/^deadline=\$\(\(SECONDS \+ (\d+)\)\)$/gm)].map((m) => Number(m[1]));
+    const settle = Number(script.match(/^SETTLE_S=(\d+)$/m)?.[1]);
+    const timeout = Number(unit.match(/^TimeoutStartSec=(\d+)$/m)?.[1]);
+    expect(budgets).toEqual([120]);
+    expect(settle).toBeGreaterThan(0);
+    expect(settle).toBeLessThan(45);
+    // Lock wait, then ONE budget for everything after it, then a margin.
+    expect(timeout).toBeGreaterThanOrEqual(lock + budgets[0] + 15);
+    // The budget is running before the first look, which may itself settle,
+    // and every attempt leaves its own settle in reserve.
+    expect(script.indexOf("deadline=$((SECONDS + ")).toBeLessThan(script.indexOf("\nkeep_client_or_defer\n"));
+    expect(script).toContain("remaining=$((deadline - SETTLE_S - SECONDS))");
+  });
+});

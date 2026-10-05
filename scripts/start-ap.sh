@@ -296,6 +296,11 @@ restore_autoconnect() {
 
 # Admit only a positively idle radio (or an AP). A failed identity query on a
 # connected device is UNKNOWN, not permission to replace a possible client.
+# A radio NetworkManager has not finished bringing up (10 unmanaged, 20
+# unavailable — its road to 30 at boot) or whose state could not be read gets
+# the same bounded look as an activation in flight. Post-setup nothing retries
+# this unit (ap-watchdog.sh stands down), so failing on the first look stranded
+# a box with no Ethernet. Still never admitted: unsettled after the bound, defer.
 client_or_idle() {
   local state client elapsed=0
   while :; do
@@ -308,9 +313,13 @@ client_or_idle() {
         if iw dev "$IFACE" info 2>/dev/null | grep -q "type AP"; then return 0; fi
         echo "[AP] Unknown connected WiFi identity — deferring" >&2
         return 1 ;;
-      40|50|60|70|80|90|110)
+      ""|10|20|40|50|60|70|80|90|110)
         if [ "$elapsed" -ge 15 ]; then
-          echo "[AP] WiFi still transitioning — deferring" >&2; return 1
+          case "$state" in
+            ""|10|20) echo "[AP] WiFi state '${state:-unreadable}' did not settle — deferring" >&2 ;;
+            *) echo "[AP] WiFi still transitioning — deferring" >&2 ;;
+          esac
+          return 1
         fi
         sleep 1; elapsed=$((elapsed + 1)) ;;
       *) echo "[AP] Unknown/unavailable WiFi state — deferring" >&2; return 1 ;;
