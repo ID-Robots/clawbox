@@ -1821,3 +1821,58 @@ describe("TASK-1380 residual R2: an activation that outlives the settle window",
     expect(unit).not.toMatch(/^Restart/m);
   });
 });
+
+// The re-run must not become a road around the owner's hotspot switch
+// (TASK-507): pre-setup, the worker's recovery restarts clawbox-ap.service and
+// start-ap.sh honours HOTSPOT_DISABLED only once setup is complete.
+describe("TASK-1380 R2: the deferred-failover re-run honours the owner's hotspot switch", () => {
+  const hotspotEnv = (disabled: string) =>
+    writeFileSync(path.join(root, "data", "hotspot.env"), `HOTSPOT_SSID='ClawBox-Setup'\nHOTSPOT_DISABLED=${disabled}\n`);
+  const leaveMarker = () => {
+    mkdirSync(path.join(root, "radio-run"), { recursive: true });
+    writeFileSync(pendingFile(), "1\n");
+  };
+
+  it("pre-setup, switched off, with a marker: no re-run, so nothing raises the hotspot", () => {
+    makeBox({ setupComplete: false, profiles: [] });
+    hotspotEnv("1");
+    leaveMarker();
+    settle("30");
+    expect(runWatchdog().status).toBe(0);
+    expect(workerExits(), "the worker ran, and its recovery raises a hotspot the owner switched off").toEqual([]);
+    expect(existsSync(path.join(nm, "recovery-ap"))).toBe(false);
+    expect(existsSync(path.join(nm, "watchdog-ap"))).toBe(false);
+    expect(readFileSync(pendingFile(), "utf-8"), "left to age out, not consumed").toBe("1\n");
+  });
+
+  it("pre-setup, switched off, no marker: left alone as before", () => {
+    makeBox({ setupComplete: false, profiles: [] });
+    hotspotEnv("1");
+    settle("30");
+    expect(runWatchdog().status).toBe(0);
+    expect(workerExits()).toEqual([]);
+    expect(existsSync(path.join(nm, "watchdog-ap"))).toBe(false);
+  });
+
+  it("pre-setup, switched on, with a marker: re-run, and the AP left to the worker", () => {
+    makeBox({ setupComplete: false, profiles: [] });
+    hotspotEnv("0");
+    leaveMarker();
+    settle("30");
+    runWatchdog();
+    expect(workerExits()).toEqual([0]);
+    expect(existsSync(path.join(nm, "recovery-ap"))).toBe(true);
+    expect(existsSync(path.join(nm, "watchdog-ap"))).toBe(false);
+  });
+
+  it("post-setup, switched off, with a marker: the saved-client recovery still runs", () => {
+    makeBox({ setupComplete: true, profiles: [{ uuid: HOME, name: "Example-Home", up: "ok" }] });
+    hotspotEnv("1");
+    leaveMarker();
+    settle("30");
+    runWatchdog();
+    expect(workerExits()).toEqual([0]);
+    expect(activeNow()).toBe(HOME);
+    expect(existsSync(pendingFile())).toBe(false);
+  });
+});
