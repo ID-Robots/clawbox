@@ -61,8 +61,21 @@
 # detached; the waiting happens here.
 #
 # Usage: gateway-restart-when-online.sh <reason>
+#        gateway-restart-when-online.sh --connectivity <reason>
+#        gateway-restart-when-online.sh --watch-dip <CONNECTIVITY_STATE>
+#
+# The bare form asks for a restart once a route is proven. `--connectivity` asks
+# the same because NetworkManager's connectivity came back to `full`, which a
+# watched dip can show was never a reconnection; `--watch-dip` is that watch.
+# See "A CONNECTIVITY DIP IS NOT A RECONNECTION" below. An older dispatcher
+# passes the bare form only and is served exactly as before.
 set -u
 
+MODE=restart
+case "${1:-}" in
+  --connectivity) MODE=connectivity; shift ;;
+  --watch-dip) MODE=watch-dip; shift ;;
+esac
 REASON="${1:-network change}"
 LOG_TAG="clawbox-failover"
 
@@ -78,6 +91,10 @@ REARM_FILE="$RUN_DIR/gateway-online-restart.rearm"
 # In the same root-owned tmpfs, and cleared on boot, which is what this wants:
 # the first event after a boot is never a repeat of one before it.
 STAMP_FILE="$RUN_DIR/gateway-online-restart.stamp"
+# The connectivity dip in progress, and the watch's own lock — see the dip
+# section. The dispatcher opens the record and clears it on a carrier drop.
+DIP_FILE="$RUN_DIR/connectivity-dip"
+DIP_LOCK_FILE="$RUN_DIR/connectivity-dip.lock"
 
 log() { logger -t "$LOG_TAG" -- "$*"; }
 
@@ -114,7 +131,12 @@ online() {
   local state
   state="$(nmcli -t networking connectivity 2>/dev/null | tr -d '[:space:]')"
   [ "$state" = "full" ] && return 0
+  public_route_answers
+}
 
+# The box's own half of `online`, without NetworkManager's verdict: what the
+# dip watch below asks while NM is saying something short of `full`.
+public_route_answers() {
   # No route at all is worth answering without spending four seconds on it.
   ip route show default 2>/dev/null | grep -q . || return 1
 
@@ -288,6 +310,94 @@ record_restart_asked_for() {
   fi
 }
 
+# A CONNECTIVITY DIP IS NOT A RECONNECTION.
+#
+# NetworkManager's connectivity check is one HTTP fetch of
+# connectivity-check.ubuntu.com, and on some networks it fails now and then
+# while everything else works. Reported from a customer box on v4.1.0: NM
+# dropping to CONNECTED_SITE and back about every five minutes, the box's own
+# checks passing 20 out of 20 and DNS fine throughout. Each return to `full` is
+# a `connectivity-change FULL`, every one landing outside the coalescing window
+# above asked for — and got — a full gateway restart, and the gateway restarted
+# every 28-30 minutes, dropping the channel accounts and whatever conversation
+# was in flight each time. PR #1089's own hardware soak failed on the same
+# thing with Wi-Fi connected throughout.
+#
+# But `full -> limited -> full` is also what an upstream router reboot looks
+# like with the carrier intact — the case the connectivity arm exists for,
+# where the accounts really did lose their route. NM's verdict cannot tell the
+# two apart; the box's own probe can, at the moment NM reports the dip. So the
+# dip is WATCHED. The dispatcher opens a record when NM drops below `full` and
+# starts this script as `--watch-dip`, which probes the public route at once —
+# `public_route_answers`, the probe `online` uses minus NM's verdict — and every
+# DIP_POLL seconds after, until NM says `full` again. The `--connectivity`
+# request NM's return to `full` makes stands down only when that record shows
+# every probe of the dip answered, on the same route as now, up to moments ago.
+# Anything else — a probe that failed, a route that moved, a carrier that
+# dropped (the dispatcher clears the record), a watch that expired, was killed
+# or never got to probe — restarts exactly as before: standing down is the
+# dangerous half, and a swallowed restart is GH #529.
+#
+# The record is one line in the root-owned tmpfs:
+#   <verdict> <opened> <route key or -> <last probe that answered or ->
+# `open` from the dispatcher, `watching` once a probe answered, `online` when
+# the watch saw NM back at `full`; `outage`, `moved`, `expired` and `unknown`
+# are final and stay until the return to `full` consumes the record, so a
+# second dip event inside the same dip (`limited`, then `portal`) cannot paper
+# over the first one's verdict.
+DIP_POLL="$(positive_int "${CLAWBOX_DIP_POLL:-}" 20)"
+# A LAN that parks NM at `portal` or `limited` for good would otherwise be
+# probed for ever. Past this the verdict is `expired`, which restarts as before.
+DIP_MAX="$(positive_int "${CLAWBOX_DIP_MAX:-}" 900)"
+# How old the last answered probe may be when NM's `full` arrives: the watch
+# may be asleep between two polls, plus the longest probe (2 x 2 s of ping and
+# 8 s of curl), with room to spare.
+DIP_FRESH="$(positive_int "${CLAWBOX_DIP_FRESH:-}" $(( DIP_POLL * 2 + 20 )))"
+# How long the return to `full` waits for the watch's FIRST probe. A dip can be
+# over in seconds — NM re-checks quickly once a check has failed — and both
+# events then arrive before the watch has probed even once. Waiting is what
+# makes the verdict exist; without one, the request restarts.
+DIP_FIRST_WAIT="$(positive_int "${CLAWBOX_DIP_FIRST_WAIT:-}" 20)"
+
+# Reads the record into DIP_VERDICT, DIP_OPENED, DIP_KEY and DIP_LAST_OK.
+read_dip_record() {
+  DIP_VERDICT="" DIP_OPENED="" DIP_KEY="" DIP_LAST_OK=""
+  [ -r "$DIP_FILE" ] || return 1
+  read -r DIP_VERDICT DIP_OPENED DIP_KEY DIP_LAST_OK _ < "$DIP_FILE" 2>/dev/null || true
+  [ -n "$DIP_VERDICT" ]
+}
+
+# Staged and renamed, like the stamp: a half-written line must not read as a
+# verdict. An empty field is written as `-` so the line keeps its four fields.
+write_dip_record() {
+  if { printf '%s %s %s %s\n' "$1" "${2:--}" "${3:--}" "${4:--}" > "$DIP_FILE.new" 2>/dev/null \
+       && mv -f "$DIP_FILE.new" "$DIP_FILE" 2>/dev/null; }; then
+    return 0
+  fi
+  rm -f "$DIP_FILE.new" 2>/dev/null || true
+  log "WARN: could not record the connectivity dip in $DIP_FILE — the return to full will restart the gateway as before"
+  return 1
+}
+
+# True only when the dip on record was proven harmless for the route the box
+# is on NOW. Every unanswerable question answers "no", which restarts.
+dip_was_not_a_reconnection() {
+  local key="${1:-}" tries=0 now="" age=0
+  [ -n "$key" ] || return 1
+  read_dip_record || return 1
+  while [ "$DIP_VERDICT" = open ] && [ "$tries" -lt "$DIP_FIRST_WAIT" ]; do
+    sleep 1
+    tries=$(( tries + 1 ))
+    read_dip_record || return 1
+  done
+  case "$DIP_VERDICT" in watching|online) ;; *) return 1 ;; esac
+  [ "$DIP_KEY" = "$key" ] || return 1
+  case "$DIP_LAST_OK" in ''|*[!0-9]*) return 1 ;; esac
+  now="$(monotonic_seconds)" || return 1
+  age=$(( now - DIP_LAST_OK ))
+  [ "$age" -ge 0 ] && [ "$age" -le "$DIP_FRESH" ]
+}
+
 # `list-unit-files` is the wrong question: it LISTS a masked unit, so it answers
 # "present" on the one edition this guard exists for. Measured read-only on the
 # Hermes box: `clawbox-gateway.service masked enabled`, exit 0.
@@ -316,6 +426,76 @@ if [ "${CLAWBOX_SKIP_UNIT_CHECK:-0}" != "1" ]; then
 fi
 
 mkdir -p "$RUN_DIR" 2>/dev/null || true
+
+# The dip watch. Its own lock, never the restart lock: a dip arrives as several
+# events, and a watch lasting minutes must not turn away a restart request, or
+# queue behind a waiter's two-minute wait. Without flock there is no guard
+# against two watches overwriting each other's verdict, so it does not watch at
+# all — the return to `full` then restarts as before.
+if [ "$MODE" = watch-dip ]; then
+  if ! { command -v flock >/dev/null 2>&1 && : >>"$DIP_LOCK_FILE" 2>/dev/null; }; then
+    log "WARN: no single-watch guard (flock or $DIP_LOCK_FILE unavailable) — not watching the ${REASON} dip; the return to full will restart as before"
+    exit 0
+  fi
+  exec 8>>"$DIP_LOCK_FILE"
+  # Another watch already has this dip.
+  flock -n 8 || exit 0
+  # Nothing to watch unless the dispatcher opened a dip: a carrier drop may
+  # already have cleared it, and a final verdict stands until it is consumed.
+  read_dip_record || exit 0
+  case "$DIP_VERDICT" in open|watching) ;; *) exit 0 ;; esac
+  opened="$DIP_OPENED" key="" probes=0
+  [ "$DIP_KEY" = "-" ] || key="$DIP_KEY"
+  log "NetworkManager reports ${REASON} connectivity — probing whether the public route really went away (every ${DIP_POLL}s, up to ${DIP_MAX}s)"
+  while :; do
+    # Consumed by the return to `full`, or cleared by a carrier drop: the dip
+    # is no longer this watch's to judge.
+    [ -e "$DIP_FILE" ] || exit 0
+    if ! public_route_answers; then
+      write_dip_record outage "$opened" "$key" "$DIP_LAST_OK"
+      log "Connectivity dip (${REASON}): no public route — a real outage; the return to full will restart the gateway"
+      exit 0
+    fi
+    current="$(route_key)"
+    if [ -z "$key" ]; then
+      key="$current"
+    elif [ "$current" != "$key" ]; then
+      write_dip_record moved "$opened" "$key" "$DIP_LAST_OK"
+      log "Connectivity dip (${REASON}): the route moved from $key to ${current:-nothing} — the return to full will restart the gateway"
+      exit 0
+    fi
+    now="$(monotonic_seconds)" || { write_dip_record unknown "$opened" "$key" "-"; exit 0; }
+    probes=$(( probes + 1 ))
+    DIP_LAST_OK="$now"
+    write_dip_record watching "$opened" "$key" "$now" || exit 0
+    if [ "$(nmcli -t networking connectivity 2>/dev/null | tr -d '[:space:]')" = "full" ]; then
+      write_dip_record online "$opened" "$key" "$now" || exit 0
+      log "NetworkManager is back to full and the public route answered all $probes probe(s) of the dip — not a reconnection"
+      exit 0
+    fi
+    case "$opened" in ''|*[!0-9]*) opened="$now" ;; esac
+    if [ $(( now - opened )) -ge "$DIP_MAX" ]; then
+      write_dip_record expired "$opened" "$key" "$now"
+      log "Connectivity dip (${REASON}) outlasted ${DIP_MAX}s — no longer probing; the return to full will restart the gateway as before"
+      exit 0
+    fi
+    sleep "$DIP_POLL"
+  done
+fi
+
+# NetworkManager's return to `full`: no restart when the watch proved the dip
+# was the connectivity check, not the network. Decided BEFORE the restart lock,
+# because waiting for the watch's first probe must not hold that lock and turn
+# away a genuine request — an Ethernet `up` landing meanwhile. The record is
+# consumed either way: whatever it said, it has now been answered.
+if [ "$MODE" = connectivity ] && [ -e "$DIP_FILE" ]; then
+  if dip_was_not_a_reconnection "$(route_key)"; then
+    rm -f "$DIP_FILE" 2>/dev/null || true
+    log "NetworkManager's connectivity is back to full, but the public route answered throughout the dip on the same route — not a reconnection; NOT restarting $UNIT ($REASON)"
+    exit 0
+  fi
+  rm -f "$DIP_FILE" 2>/dev/null || true
+fi
 
 # One waiter at a time. Overlapping NetworkManager events — a carrier that
 # flaps, or eth down followed by wifi up — would otherwise stack several

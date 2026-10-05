@@ -8985,27 +8985,18 @@ step_nm_dispatcher() {
   # returned 0 from its last echo. Same rule step_systemd_services states for
   # itself, for the same reason.
   #
-  # install_root_file, not `cp` + `chown` + `chmod`: NetworkManager may execute
-  # this dispatcher at any instant, including mid-update, and `cp` writes the
-  # LIVE inode with O_TRUNC — which on an existing 0755 file means NM can run a
-  # truncated, still-executable dispatcher that silently does less than half its
-  # job. That is the prefix hazard install_root_file was written for (TASK-584).
-  # It stages `$DEST.new` in the same directory and renames, so NM sees either
-  # the whole old file or the whole new one. The staged name is briefly visible
-  # to NM's scan — `.new` is not one of the suffixes it skips — but the worst
-  # that costs is one extra run of a COMPLETE dispatcher, which the waiter's
-  # lock collapses anyway; a truncated one has no such floor.
-  if ! mkdir -p "$DISPATCHER_DIR" \
-     || ! install_root_file "$SRC" "$DEST" 0755; then
-    echo "  Warning: could not install the NetworkManager failover dispatcher at $DEST" >&2
-    record_provision_failure nm_dispatcher
-    return 1
-  fi
   # The dispatcher is useless without the waiter it defers the gateway restart
   # to, and the waiter must be the ROOT-OWNED copy — root runs it. Installed
   # here as well as in install_root_libexec so an in-app UPDATE, which runs
   # step_nm_dispatcher from step_post_update, gets both halves together rather
   # than a new dispatcher pointing at nothing.
+  #
+  # And the waiter goes FIRST, the dispatcher only once it has landed. The
+  # dispatcher hands the waiter `--watch-dip` and `--connectivity`, which an
+  # older waiter reads as a restart REASON — a new dispatcher in front of an old
+  # waiter would restart the gateway on every connectivity dip, the very loop
+  # it is meant to end. A new waiter still takes an old dispatcher's bare
+  # `<reason>`, so the pairing a failed dispatcher copy leaves behind is safe.
   local WAITER_SRC="$SRC_DIR/scripts/gateway-restart-when-online.sh"
   if [ -f "$WAITER_SRC" ]; then
     # install_root_file returns 1 on both its failure paths and leaves the
@@ -9024,6 +9015,22 @@ step_nm_dispatcher() {
     # A checkout without the script is degraded, not broken: the dispatcher
     # still fails over to WiFi. Reported, and not claimed as installed.
     echo "  Warning: $WAITER_SRC missing — the failover will not restart the gateway"
+  fi
+  # install_root_file, not `cp` + `chown` + `chmod`: NetworkManager may execute
+  # this dispatcher at any instant, including mid-update, and `cp` writes the
+  # LIVE inode with O_TRUNC — which on an existing 0755 file means NM can run a
+  # truncated, still-executable dispatcher that silently does less than half its
+  # job. That is the prefix hazard install_root_file was written for (TASK-584).
+  # It stages `$DEST.new` in the same directory and renames, so NM sees either
+  # the whole old file or the whole new one. The staged name is briefly visible
+  # to NM's scan — `.new` is not one of the suffixes it skips — but the worst
+  # that costs is one extra run of a COMPLETE dispatcher, which the waiter's
+  # lock collapses anyway; a truncated one has no such floor.
+  if ! mkdir -p "$DISPATCHER_DIR" \
+     || ! install_root_file "$SRC" "$DEST" 0755; then
+    echo "  Warning: could not install the NetworkManager failover dispatcher at $DEST" >&2
+    record_provision_failure nm_dispatcher
+    return 1
   fi
   echo "  NetworkManager failover dispatcher installed"
 }

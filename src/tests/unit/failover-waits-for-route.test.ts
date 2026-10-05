@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync, existsSync, copyFileSync, chmodSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -87,6 +87,14 @@ interface BoxOptions {
   dropCarrierDuringRestart?: boolean;
   /** Bring the Ethernet route back once, from inside the poll loop. */
   restoreRouteMidWait?: boolean;
+  /**
+   * Run the dip watch once, from inside the first `sleep` — which is where the
+   * return to `full` waits for the watch's first probe when NetworkManager's
+   * two events arrived before the watch had probed at all.
+   */
+  dipWatchDuringWait?: boolean;
+  /** Replace the routing table with this route once, from inside the poll loop. */
+  moveRouteMidWait?: string;
 }
 
 /** A fake CLAWBOX_ROOT plus a PATH of stubs, so nothing touches a real radio. */
@@ -251,6 +259,15 @@ if [ ! -e "$m" ]; then : > "$m"; : > "$f"; fi`
 m=${JSON.stringify(path.join(root, "route-restored"))}
 if [ ! -e "$m" ]; then : > "$m"; printf '%s\\n' ${JSON.stringify(ETH_ROUTE)} > "$r"; fi`
       : "",
+    opts.moveRouteMidWait
+      ? `r=${JSON.stringify(path.join(root, "routes"))}
+m=${JSON.stringify(path.join(root, "route-moved"))}
+if [ ! -e "$m" ]; then : > "$m"; printf '%s\\n' ${JSON.stringify(opts.moveRouteMidWait)} > "$r"; fi`
+      : "",
+    opts.dipWatchDuringWait
+      ? `m=${JSON.stringify(path.join(root, "dip-watched"))}
+if [ ! -e "$m" ]; then : > "$m"; bash ${JSON.stringify(path.join(root, "libexec", "gateway-restart-when-online.sh"))} --watch-dip LIMITED; fi`
+      : "",
     "true",
   ].filter(Boolean).join("\n"));
   // The dispatcher launches the waiter DETACHED, so a test that let it run
@@ -291,6 +308,16 @@ function runWaiter(reason = "test", extraEnv: Record<string, string> = {}): { st
   });
   expect(r.status).toBe(0);
   return { stdout: r.stdout };
+}
+
+/** The waiter with the dispatcher's full argument list — `--watch-dip`, `--connectivity`. */
+function runWaiterArgs(args: string[], extraEnv: Record<string, string> = {}): void {
+  const r = spawnSync("bash", [path.join(root, "libexec", "gateway-restart-when-online.sh"), ...args], {
+    env: env(extraEnv),
+    encoding: "utf-8",
+    timeout: 25_000,
+  });
+  expect(r.status).toBe(0);
 }
 
 function calls(): string {
@@ -340,10 +367,18 @@ async function deferredEventually(expected: number): Promise<string[]> {
   }
 }
 
+/** Restart REQUESTS the dispatcher launched — a dip watch is not one. */
 function deferred(): string[] {
   return calls()
     .split("\n")
-    .filter((l) => l.startsWith("detached ") && l.includes("gateway-restart-when-online.sh"));
+    .filter((l) => l.startsWith("detached ") && l.includes("gateway-restart-when-online.sh") && !l.includes(" --watch-dip "));
+}
+
+/** Dip watches the dispatcher launched. */
+function dipWatches(): string[] {
+  return calls()
+    .split("\n")
+    .filter((l) => l.startsWith("detached ") && l.includes("gateway-restart-when-online.sh --watch-dip "));
 }
 
 describe("Ethernet failover does not restart the gateway into a dead network", () => {
@@ -993,6 +1028,251 @@ describe("the dispatcher hands the restart to the waiter rather than firing it",
 
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(deferred()).toHaveLength(0);
+    // What it does start is the dip watch — see the describe below.
+    expect(dipWatches()).toEqual([expect.stringContaining("--watch-dip LIMITED")]);
+  });
+
+  it("neither asks nor watches when NetworkManager is not checking at all", async () => {
+    makeBox({ connectivity: ["full"] });
+
+    runDispatcher("eth0", "connectivity-change", { CONNECTIVITY_STATE: "UNKNOWN" });
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(deferred()).toHaveLength(0);
+    expect(dipWatches()).toHaveLength(0);
+    expect(existsSync(path.join(root, "run", "connectivity-dip"))).toBe(false);
+  });
+});
+
+/**
+ * Volker, v4.1.0: NetworkManager's connectivity check dropped to CONNECTED_SITE
+ * and back about every five minutes while the network itself was fine — the
+ * box's own checks 20/20, DNS fine — and every return to `full` restarted the
+ * gateway: one restart every 28-30 minutes, each dropping the channel accounts.
+ * PR #1089's hardware soak failed on the same event with Wi-Fi connected.
+ *
+ * The same `full -> limited -> full` is also an upstream router rebooting with
+ * the carrier intact, which must still restart. What tells them apart is the
+ * box's own probe while NM reports the dip, so these drive the REAL dispatcher
+ * and waiter through both, following each detached launch the dispatcher makes
+ * with the arguments it made it with.
+ */
+describe("a connectivity check that flaps is not a reconnection", () => {
+  const FULL = { CONNECTIVITY_STATE: "FULL" };
+  const LIMITED = { CONNECTIVITY_STATE: "LIMITED" };
+  const WIFI_ROUTE = "default via 198.51.100.1 dev wlan0 proto dhcp src 198.51.100.7 metric 600";
+  const dipFile = () => path.join(root, "run", "connectivity-dip");
+  const dipVerdict = () => (existsSync(dipFile()) ? readFileSync(dipFile(), "utf-8").split(" ")[0] : null);
+
+  let followed = 0;
+  const launches = () =>
+    calls()
+      .split("\n")
+      .filter((l) => l.startsWith("detached ") && l.includes("gateway-restart-when-online.sh"));
+  /**
+   * The launches made so far, once the one just dispatched has landed: the
+   * dispatcher backgrounds it and returns, so its line can arrive a moment later.
+   */
+  function launchesLanded(): string[] {
+    const deadline = Date.now() + 5_000;
+    let made = launches();
+    while (made.length <= followed && Date.now() < deadline) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+      made = launches();
+    }
+    return made;
+  }
+  /** Leave the launch just made unfollowed — another arm's request, not NM's. */
+  function skipDispatches(): void {
+    followed = launchesLanded().length;
+  }
+  /** Run the launch the dispatcher just made, with the arguments it made it with. */
+  function followDispatches(extraEnv: Record<string, string> = {}): void {
+    const made = launchesLanded();
+    for (const line of made.slice(followed)) {
+      const rest = line.slice(line.indexOf("gateway-restart-when-online.sh ") + "gateway-restart-when-online.sh ".length);
+      const flag = /^(--watch-dip|--connectivity) (.*)$/.exec(rest);
+      runWaiterArgs(flag ? [flag[1], flag[2]] : [rest], extraEnv);
+    }
+    followed = made.length;
+  }
+
+  /** NM drops below `full`, then comes back, with the watch polling in between. */
+  function flap(statesDuringDip: string[], extraEnv: Record<string, string> = {}): void {
+    setConnectivity(...statesDuringDip, "full");
+    runDispatcher("eth0", "connectivity-change", LIMITED);
+    followDispatches(extraEnv);
+    setConnectivity("full");
+    runDispatcher("eth0", "connectivity-change", FULL);
+    followDispatches(extraEnv);
+  }
+
+  beforeEach(() => {
+    followed = 0;
+  });
+
+  it("does not restart the gateway on Volker's flap, however often it comes back", async () => {
+    // A one-second window, so beta's coalescing cannot be what hides the loop.
+    const window = { CLAWBOX_RESTART_COALESCE: "1" };
+    makeBox({ defaultRoute: true, pingWorks: true });
+
+    for (let cycle = 0; cycle < 3; cycle++) {
+      flap(["limited", "limited"], window);
+      await new Promise((resolve) => setTimeout(resolve, 1_100));
+    }
+
+    expect(restarts()).toBe(0);
+    expect(journalLines("not a reconnection; NOT restarting")).toHaveLength(3);
+    expect(existsSync(dipFile())).toBe(false);
+  });
+
+  it("still restarts after an outage the dip's probe really saw — the router-reboot shape", () => {
+    // Carrier intact, so no up/down: only NM's connectivity events fire, and
+    // the box's own probe fails while NM reports the dip.
+    makeBox({ defaultRoute: true, pingWorks: false, curlWorks: false });
+
+    flap(["limited"]);
+
+    expect(restarts()).toBe(1);
+    expect(journalLines("no public route — a real outage")).toHaveLength(1);
+    expect(existsSync(dipFile())).toBe(false);
+  });
+
+  it("restarts when the route moved while NetworkManager reported the dip", () => {
+    makeBox({ defaultRoute: true, pingWorks: true });
+    setConnectivity("limited", "full");
+    runDispatcher("eth0", "connectivity-change", LIMITED);
+    followDispatches();
+    expect(dipVerdict()).toBe("online");
+
+    // A failover landed between the watch's last probe and NM's `full`.
+    moveRoute(WIFI_ROUTE);
+    setConnectivity("full");
+    runDispatcher("eth0", "connectivity-change", FULL);
+    followDispatches();
+
+    expect(restarts()).toBe(1);
+  });
+
+  it("restarts when the watch saw the route move during the dip", () => {
+    // Keyed on Ethernet by its first probe; Wi-Fi carries the second.
+    makeBox({ defaultRoute: true, pingWorks: true, moveRouteMidWait: WIFI_ROUTE });
+
+    flap(["limited", "limited"]);
+
+    expect(restarts()).toBe(1);
+    expect(journalLines("the route moved from eth0/192.0.2.1/192.0.2.50 to wlan0/198.51.100.1/198.51.100.7")).toHaveLength(1);
+  });
+
+  it("restarts when the carrier really dropped during a dip the probe had cleared", () => {
+    makeBox({ defaultRoute: true, pingWorks: true });
+    setConnectivity("limited", "full");
+    runDispatcher("eth0", "connectivity-change", LIMITED);
+    followDispatches();
+    expect(dipVerdict()).toBe("online");
+
+    runDispatcher("eth0", "down");
+    expect(existsSync(dipFile())).toBe(false);
+    // Ethernet's own `down` asked for its restart too; follow only NM's `full`.
+    skipDispatches();
+
+    setConnectivity("full");
+    runDispatcher("eth0", "connectivity-change", FULL);
+    followDispatches();
+
+    expect(restarts()).toBe(1);
+  });
+
+  it("does not trust a verdict older than the watch's poll allows", async () => {
+    makeBox({ defaultRoute: true, pingWorks: true });
+    setConnectivity("limited", "full");
+    runDispatcher("eth0", "connectivity-change", LIMITED);
+    followDispatches({ CLAWBOX_DIP_FRESH: "1" });
+    expect(dipVerdict()).toBe("online");
+
+    await new Promise((resolve) => setTimeout(resolve, 2_100));
+    setConnectivity("full");
+    runDispatcher("eth0", "connectivity-change", FULL);
+    followDispatches({ CLAWBOX_DIP_FRESH: "1" });
+
+    expect(restarts()).toBe(1);
+  });
+
+  it("restarts as before once a dip outlasted the watch", () => {
+    makeBox({ defaultRoute: true, pingWorks: true });
+    setConnectivity("limited");
+    runDispatcher("eth0", "connectivity-change", LIMITED);
+    // Opened five seconds ago on the waiter's own clock.
+    const uptime = Math.floor(Number(readFileSync("/proc/uptime", "utf-8").split(" ")[0]));
+    writeFileSync(dipFile(), `open ${uptime - 5} - -\n`);
+    followDispatches({ CLAWBOX_DIP_MAX: "1" });
+    expect(dipVerdict()).toBe("expired");
+
+    setConnectivity("full");
+    runDispatcher("eth0", "connectivity-change", FULL);
+    followDispatches();
+
+    expect(restarts()).toBe(1);
+  });
+
+  it("waits for the watch's first probe when NetworkManager's `full` arrived before it", () => {
+    // A dip over in seconds: both events were dispatched before the watch had
+    // probed once. The return to `full` waits for that probe instead of racing it.
+    makeBox({ connectivity: ["full"], defaultRoute: true, pingWorks: true, dipWatchDuringWait: true });
+    runDispatcher("eth0", "connectivity-change", LIMITED);
+    expect(dipVerdict()).toBe("open");
+    runDispatcher("eth0", "connectivity-change", FULL);
+
+    runWaiterArgs(["--connectivity", "NetworkManager reports full connectivity"]);
+
+    expect(restarts()).toBe(0);
+    expect(existsSync(dipFile())).toBe(false);
+  });
+
+  it("restarts when the watch never probed at all", () => {
+    makeBox({ connectivity: ["full"], defaultRoute: true, pingWorks: true });
+    runDispatcher("eth0", "connectivity-change", LIMITED);
+    expect(dipVerdict()).toBe("open");
+
+    runWaiterArgs(["--connectivity", "NetworkManager reports full connectivity"], { CLAWBOX_DIP_FIRST_WAIT: "2" });
+
+    expect(restarts()).toBe(1);
+  });
+
+  it("restarts on a return to full with no dip on record — the first after a boot", () => {
+    makeBox({ connectivity: ["full"], defaultRoute: true });
+
+    runWaiterArgs(["--connectivity", "NetworkManager reports full connectivity"]);
+
+    expect(restarts()).toBe(1);
+  });
+
+  it("lets no second dip event paper over an outage the first one proved", async () => {
+    makeBox({ defaultRoute: true, pingWorks: false, curlWorks: false });
+    setConnectivity("limited");
+    runDispatcher("eth0", "connectivity-change", LIMITED);
+    followDispatches();
+    expect(dipVerdict()).toBe("outage");
+
+    // NM moves on to `portal` inside the same dip: the verdict stands, and
+    // there is nothing left to watch.
+    runDispatcher("eth0", "connectivity-change", { CONNECTIVITY_STATE: "PORTAL" });
+    expect(dipVerdict()).toBe("outage");
+    // Room for a launch that must not happen to land, then assert it did not.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(dipWatches()).toHaveLength(1);
+
+    setConnectivity("full");
+    runDispatcher("eth0", "connectivity-change", FULL);
+    followDispatches();
+    expect(restarts()).toBe(1);
+  });
+
+  it("keeps the dip record in the root-owned run directory, never the checkout", () => {
+    makeBox({ defaultRoute: true, pingWorks: true });
+    runDispatcher("eth0", "connectivity-change", LIMITED);
+    expect(existsSync(dipFile())).toBe(true);
+    expect(existsSync(path.join(root, "data", "connectivity-dip"))).toBe(false);
   });
 });
 
@@ -1148,6 +1428,19 @@ describe("the installer reports what it actually installed", () => {
     expect(r.out).not.toContain("NetworkManager failover dispatcher installed");
     expect(r.out).toContain("could not install the NetworkManager failover dispatcher");
     expect(r.out).toContain("provision-failure: nm_dispatcher");
+    expect(r.out).toContain("nm_dispatcher step failed");
+  });
+
+  it("does not publish the new dispatcher in front of a waiter that failed to land", () => {
+    // The dispatcher hands the waiter `--watch-dip` and `--connectivity`, and an
+    // older waiter reads either as a restart REASON: a new dispatcher in front
+    // of it would restart the gateway on every connectivity dip, the loop it is
+    // there to end. So the waiter goes first, and its failure keeps the old pair.
+    makeBox();
+
+    const r = runStep({ waiterInstallFails: true, shape: "update" });
+
+    expect(existsSync(path.join(r.dispatcherDir, "90-clawbox-failover"))).toBe(false);
     expect(r.out).toContain("nm_dispatcher step failed");
   });
 

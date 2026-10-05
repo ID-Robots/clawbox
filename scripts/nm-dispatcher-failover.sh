@@ -52,11 +52,20 @@ log() { logger -t "$LOG_TAG" -- "$*"; }
 # dispatchers with a minimal PATH (the reason 99-clawbox-avahi-reload resolves
 # avahi-daemon absolutely), so a missing setsid or a fork failure would
 # otherwise leave no trace anywhere of a restart that never happened.
+#
+# Arguments are the waiter's: `<reason>`, or `--connectivity <reason>`. The
+# reason is always the last one.
 restart_gateway_when_online() {
   if [ ! -x "$WAITER" ]; then
-    log "WARN: $WAITER missing or not executable — gateway not restarted for: $1"
+    log "WARN: $WAITER missing or not executable — gateway not restarted for: ${*: -1}"
     return
   fi
+  launch_waiter "$@"
+  log "Deferred restart dispatched: ${*: -1}"
+}
+
+# The waiter, detached, with whatever arguments it is given.
+launch_waiter() {
   # PATH first so a test harness can stand in for it, then the absolute paths,
   # because a dispatcher's PATH is NM's and not a login shell's.
   local setsid_bin="" candidate
@@ -67,15 +76,50 @@ restart_gateway_when_online() {
     done
   fi
   if [ -n "$setsid_bin" ]; then
-    "$setsid_bin" "$WAITER" "$1" </dev/null >/dev/null 2>&1 &
+    "$setsid_bin" "$WAITER" "$@" </dev/null >/dev/null 2>&1 &
   else
     # Still detached from this shell, but inside the dispatcher's process
     # group, so NetworkManager's own timeout can take it with it. Said out
     # loud: a restart that silently never happened is what GH #529 was.
     log "WARN: setsid not found — the deferred restart may be killed with the dispatcher"
-    "$WAITER" "$1" </dev/null >/dev/null 2>&1 &
+    "$WAITER" "$@" </dev/null >/dev/null 2>&1 &
   fi
-  log "Deferred restart dispatched: $1"
+}
+
+# NetworkManager says connectivity dropped below `full`: open the dip record
+# and hand it to the waiter's watch, which probes whether the public route
+# really went away. See "A CONNECTIVITY DIP IS NOT A RECONNECTION" in the
+# waiter. Opened HERE, synchronously, because NetworkManager runs dispatchers
+# serially: the record then exists before the `full` event that may follow
+# within a second is even dispatched, so the waiter that event starts knows a
+# dip is being judged and waits for the verdict instead of racing the watch.
+#
+# An open or watched dip is left as it is (this is the same dip, carried on),
+# and so is a final verdict, which stands until the return to `full` consumes
+# it. Only a dip that ended clean, or none, is opened afresh.
+DIP_FILE="$RUN_DIR/connectivity-dip"
+watch_connectivity_dip() {
+  local verdict="" up=""
+  [ -x "$WAITER" ] || return 0
+  mkdir -p "$RUN_DIR" 2>/dev/null || true
+  read -r verdict _ < "$DIP_FILE" 2>/dev/null || true
+  case "$verdict" in
+    open|watching) ;;
+    ""|online)
+      # The waiter's own clock: seconds since boot (no RTC on these boards).
+      read -r up _ < /proc/uptime 2>/dev/null || true
+      up="${up%%.*}"
+      case "$up" in ''|*[!0-9]*) up="-" ;; esac
+      if ! { printf 'open %s - -\n' "$up" > "$DIP_FILE.new" 2>/dev/null \
+             && mv -f "$DIP_FILE.new" "$DIP_FILE" 2>/dev/null; }; then
+        rm -f "$DIP_FILE.new" 2>/dev/null || true
+        log "WARN: could not open the connectivity dip record — the return to full will restart the gateway as before"
+        return 0
+      fi
+      ;;
+    *) return 0 ;;
+  esac
+  launch_waiter --watch-dip "$1"
 }
 
 # The AP is not a network this box got onto — it is the one it is offering.
@@ -107,15 +151,26 @@ case "$ACTION" in
     # is worth ASKING about, and `full` is NM's only positive statement:
     # `portal`, `limited` and `unknown` mean "not decided".
     #
-    # Stated honestly, this HALVES the noise rather than removing it — a check
-    # that flaps still dispatches on each return to `full`. What it buys is that
-    # a LAN permanently parked at `portal`/`limited` cannot ask for a restart on
-    # every transition it makes, and a box that never reaches `full` still has
-    # the arms that do not depend on NM's opinion at all: `up`, and the DHCP
-    # lease below.
-    if [ "${CONNECTIVITY_STATE:-}" = "FULL" ]; then
-      restart_gateway_when_online "NetworkManager reports full connectivity"
-    fi
+    # What it buys is that a LAN permanently parked at `portal`/`limited`
+    # cannot ask for a restart on every transition it makes, and a box that
+    # never reaches `full` still has the arms that do not depend on NM's
+    # opinion at all: `up`, and the DHCP lease below.
+    #
+    # A check that flaps still returns to `full` on every flap, though, and
+    # each return used to restart the gateway — every 28-30 minutes on a
+    # customer box whose network never actually went away. So the drop below
+    # `full` is watched, and the return to `full` is asked as `--connectivity`:
+    # the waiter restarts only when the watch did not prove the public route
+    # answered throughout. `UNKNOWN` is NM not checking at all, and opens
+    # nothing; its return to `full` restarts as it always did.
+    case "${CONNECTIVITY_STATE:-}" in
+      FULL)
+        restart_gateway_when_online --connectivity "NetworkManager reports full connectivity"
+        ;;
+      NONE|PORTAL|LIMITED)
+        watch_connectivity_dip "$CONNECTIVITY_STATE"
+        ;;
+    esac
     exit 0
     ;;
   dhcp4-change)
@@ -161,10 +216,13 @@ esac
 # Ethernet still carries the traffic costs one extra restart on the next event,
 # which is bounded by a real `down`, where narrowing it to the interface the
 # record names would cost a swallowed restart the moment the two names disagree.
+#
+# The connectivity dip record goes with it, for the same reason: a carrier that
+# really dropped is a reconnection whatever the dip's probes said before it.
 if [ "$ACTION" = "down" ]; then
   case "$IFACE" in
     eth*|en*|"$WIFI_IFACE")
-      rm -f "$RUN_DIR/gateway-online-restart.stamp" 2>/dev/null || true
+      rm -f "$RUN_DIR/gateway-online-restart.stamp" "$DIP_FILE" 2>/dev/null || true
       ;;
   esac
 fi
