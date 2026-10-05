@@ -102,7 +102,10 @@ watch_connectivity_dip() {
   local verdict="" up=""
   [ -x "$WAITER" ] || return 0
   mkdir -p "$RUN_DIR" 2>/dev/null || true
-  read -r verdict _ < "$DIP_FILE" 2>/dev/null || true
+  # Guarded rather than `2>/dev/null`: a failed `<` reports before a later
+  # redirection applies, and no record is the usual case — every return to
+  # `full` consumes it — so that was an error line per dip in NM's journal.
+  [ -r "$DIP_FILE" ] && read -r verdict _ < "$DIP_FILE" 2>/dev/null || true
   case "$verdict" in
     open|watching) ;;
     ""|online)

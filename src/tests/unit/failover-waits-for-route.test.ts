@@ -1268,6 +1268,24 @@ describe("a connectivity check that flaps is not a reconnection", () => {
     expect(restarts()).toBe(1);
   });
 
+  it("opens a dip without writing an error to NetworkManager's journal", () => {
+    // No record is the usual case: every return to `full` consumes it. A
+    // dispatcher's stderr lands in NetworkManager's journal, so reading the
+    // absent record must not complain on every dip.
+    makeBox({ defaultRoute: true, pingWorks: true });
+    expect(existsSync(dipFile())).toBe(false);
+
+    const r = spawnSync("bash", [sandboxDispatcher, "eth0", "connectivity-change"], {
+      env: env(LIMITED),
+      encoding: "utf-8",
+      timeout: 25_000,
+    });
+
+    expect(r.status).toBe(0);
+    expect(r.stderr).toBe("");
+    expect(dipVerdict()).toBe("open");
+  });
+
   it("keeps the dip record in the root-owned run directory, never the checkout", () => {
     makeBox({ defaultRoute: true, pingWorks: true });
     runDispatcher("eth0", "connectivity-change", LIMITED);
