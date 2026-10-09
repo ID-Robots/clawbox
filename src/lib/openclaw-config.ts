@@ -3135,6 +3135,12 @@ export interface RestartGatewayOptions {
    * legacy-state recovery it exists to perform.
    */
   awaitReady?: boolean;
+  /**
+   * The readiness budget for this one restart, when the caller can afford to
+   * wait longer than {@link gatewayReadyWaitMs} (a background caller nobody is
+   * waiting on). Never shorter than that default.
+   */
+  readyWaitMs?: number;
 }
 
 /**
@@ -3161,7 +3167,8 @@ export interface RestartGatewayOptions {
  */
 async function awaitGatewayReady(options: RestartGatewayOptions): Promise<void> {
   if (options.awaitReady === false) return;
-  const budgetMs = gatewayReadyWaitMs();
+  const requested = options.readyWaitMs;
+  const budgetMs = Math.max(gatewayReadyWaitMs(), Number.isFinite(requested) && requested! > 0 ? requested! : 0);
   // 250 ms, not the updater's 1 500 ms: a person is waiting on this one, and
   // OpenClaw polls the same port at 200 ms for the same question. A loopback
   // connect that is refused costs nothing.

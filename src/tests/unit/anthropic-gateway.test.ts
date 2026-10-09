@@ -67,6 +67,7 @@ function fakeGateway(initial: string | null = "sk-ant-oat01-the-chats-own-sign-i
         state.flushOnRestart = null;
       }
     },
+    reachable: async () => true,
     call: async (method, params) => {
       state.calls.push({ method, params });
       if (method === "cron.list") return { jobs: state.cronJobs };
@@ -206,6 +207,7 @@ describe("a restart that failed, and two writers at once", () => {
       list: () => [{ store: "agent", agentId: "main", profileId: "anthropic:default", type: "oauth", fingerprint: fp(gateway.token!), expires: null }],
       write: (token) => { gateway.token = token.access; return { written: 1, failed: 0 }; },
       restart,
+      reachable: async () => false,
       call: async () => ({}),
     });
     gw.startGatewaySwap();
@@ -220,6 +222,75 @@ describe("a restart that failed, and two writers at once", () => {
     expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: personal.id, pending: false });
     expect(await gw.keepGatewayMirror()).toBe("fresh");
   });
+
+  it("clears the debt without another restart when a slow restart came up after its readiness wait", async () => {
+    const gateway = fakeGateway();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    let up = false;
+    const restart = vi.fn(async (): Promise<void> => { throw new Error("gateway did not come back"); });
+    gw._setGatewayDepsForTests({
+      absent: () => false,
+      list: () => [{ store: "agent", agentId: "main", profileId: "anthropic:default", type: "oauth", fingerprint: fp(gateway.token!), expires: null }],
+      write: (token) => { gateway.token = token.access; return { written: 1, failed: 0 }; },
+      restart,
+      reachable: async () => up,
+      call: async () => ({}),
+    });
+    gw.startGatewaySwap();
+    await pool.markLimited(work.id, Date.now() + H, "session");
+    await swap.whenSwapsSettled();
+    expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: personal.id, pending: true });
+
+    // The gateway finished starting on its own, on the new token.
+    up = true;
+    expect(await gw.keepGatewayMirror()).toBe("resynced");
+    expect(restart).toHaveBeenCalledTimes(1);
+    expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: personal.id, pending: false });
+    expect(await gw.keepGatewayMirror()).toBe("fresh");
+    expect(restart).toHaveBeenCalledTimes(1);
+  });
+
+  it("backs off instead of restarting a gateway that keeps failing every keeper pass", async () => {
+    const gateway = fakeGateway();
+    gw.startGatewaySwap();
+    const { work } = await twoClaudeAccounts();
+    const restart = vi.fn(async (): Promise<void> => { throw new Error("gateway did not come back"); });
+    gw._setGatewayDepsForTests({
+      absent: () => false,
+      list: () => [{ store: "agent", agentId: "main", profileId: "anthropic:default", type: "oauth", fingerprint: fp(gateway.token!), expires: null }],
+      write: (token) => { gateway.token = token.access; return { written: 1, failed: 0 }; },
+      restart,
+      reachable: async () => false,
+      call: async () => ({}),
+    });
+    gw.startGatewaySwap();
+    await pool.markLimited(work.id, Date.now() + H, "session");
+    await swap.whenSwapsSettled();
+    expect(restart).toHaveBeenCalledTimes(1);
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const start = Date.now();
+    const pass = async (atMin: number) => { vi.setSystemTime(start + atMin * 60_000); return gw.keepGatewayMirror(); };
+    // First retry on the next pass.
+    expect(await pass(10)).toBe("failed");
+    expect(restart).toHaveBeenCalledTimes(2);
+    // Then the wait doubles: none at 20 min, one at 30 (20 after the last failure).
+    expect(await pass(20)).toBe("failed");
+    expect(restart).toHaveBeenCalledTimes(2);
+    expect(await pass(30)).toBe("failed");
+    expect(restart).toHaveBeenCalledTimes(3);
+    // Next needs 40 min: none at 60, one at 70.
+    expect(await pass(60)).toBe("failed");
+    expect(restart).toHaveBeenCalledTimes(3);
+    expect(await pass(70)).toBe("failed");
+    expect(restart).toHaveBeenCalledTimes(4);
+    // 80 min: one at 150. 160 min: none at 300, one at 310.
+    const expectAt = async (m: number, n: number) => { await pass(m); expect(restart).toHaveBeenCalledTimes(n); };
+    await expectAt(150, 5);
+    await expectAt(300, 5);
+    await expectAt(310, 6);
+  }, 20_000);
 
   it("makes the keeper wait for a swap in progress instead of mistaking its token for the owner's", async () => {
     const gateway = fakeGateway();
