@@ -105,6 +105,8 @@ interface ScreenshotEditorProps {
   /** Whether the browser's own (exact) capture can be offered for what was not captured. */
   canUseBrowserCapture: boolean;
   onBrowserCapture: () => void;
+  /** Whether there is a desktop to open the Files app on (the standalone page has none). */
+  canShowInFiles: boolean;
 }
 
 type Tool = AnnotationType | "select" | "crop";
@@ -202,7 +204,7 @@ function Divider() {
   return <span className="mx-1 h-6 w-px shrink-0 bg-white/10" aria-hidden />;
 }
 
-function ScreenshotEditor({ image, onBack, onDirtyChange, onSaved, canUseBrowserCapture, onBrowserCapture }: ScreenshotEditorProps) {
+function ScreenshotEditor({ image, onBack, onDirtyChange, onSaved, canUseBrowserCapture, onBrowserCapture, canShowInFiles }: ScreenshotEditorProps) {
   const { t } = useT();
   const measure = useMemo(() => sharedMeasurer(), []);
 
@@ -766,8 +768,9 @@ function ScreenshotEditor({ image, onBack, onDirtyChange, onSaved, canUseBrowser
     textBox = {
       left: textEdit.at.x * zoom,
       top: textEdit.at.y * zoom,
-      width: (block.width + padding * 2 + textEdit.fontSize) * zoom,
-      height: (block.height + padding * 2) * zoom,
+      // + 2: the box's own 1px border, which would otherwise shave the last line.
+      width: (block.width + padding * 2 + textEdit.fontSize) * zoom + 2,
+      height: (block.height + padding * 2) * zoom + 2,
       padding: padding * zoom,
     };
   }
@@ -1174,7 +1177,7 @@ function ScreenshotEditor({ image, onBack, onDirtyChange, onSaved, canUseBrowser
         >
           <Icon name={status.kind === "error" ? "error" : "check_circle"} size={18} className="shrink-0" />
           <span className="min-w-0 flex-1">{status.text}</span>
-          {status.kind === "saved" && (
+          {status.kind === "saved" && canShowInFiles && (
             <button
               type="button"
               onClick={() => dispatchOpenApp("files", { forceNew: true, meta: { path: SCREENSHOTS_DIR } })}

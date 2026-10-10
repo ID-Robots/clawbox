@@ -440,6 +440,11 @@ function cloneElement(el: Element, snap: Snapshot, ctx: Context, parentScroll: P
         if ((el as HTMLOptionElement).selected) clone.setAttribute("selected", "");
         else clone.removeAttribute("selected");
         break;
+      case "source":
+        // In a <picture> the sources are tried before the <img>; an image
+        // document may fetch none of them, so the inlined <img> must be what is left.
+        for (const name of ["srcset", "src", "sizes", "media", "type"]) clone.removeAttribute(name);
+        return clone;
       case "img": {
         const img = el as HTMLImageElement;
         for (const name of ["srcset", "sizes", "loading", "decoding", "crossorigin"]) clone.removeAttribute(name);

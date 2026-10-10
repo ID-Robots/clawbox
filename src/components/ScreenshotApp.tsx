@@ -211,7 +211,10 @@ export default function ScreenshotApp() {
     (mode: CaptureMode, withEngine: CaptureEngineId = engine) => {
       // On the desktop the app sits in a ChromeWindow; on a phone it IS the screen.
       const host = rootRef.current?.closest<HTMLElement>("[data-window-id], .mobile-app-window") ?? null;
-      requestCapture({ mode, delay, engine: withEngine, hide: hideWindow ? host : null });
+      // No delay with the browser's own capture: its prompt would only appear
+      // AFTER the wait (closing the menu the wait was for), and past a few
+      // seconds the browser refuses the call for want of a fresh click.
+      requestCapture({ mode, delay: withEngine === "display" ? 0 : delay, engine: withEngine, hide: hideWindow ? host : null });
     },
     [delay, engine, hideWindow],
   );
@@ -230,7 +233,9 @@ export default function ScreenshotApp() {
   const onDirtyChange = useCallback((dirty: boolean) => {
     dirtyRef.current = dirty;
   }, []);
-  const onBack = useCallback(() => show(null), [show]);
+  // Leaving the editor with a capture still waiting behind it opens that
+  // capture: it was taken on purpose, and going home would drop it unseen.
+  const onBack = useCallback(() => show(queued), [queued, show]);
   const onBrowserCapture = useCallback(() => capture("full", "display"), [capture]);
 
   const formatWhen = (modified: number) => {
@@ -273,6 +278,7 @@ export default function ScreenshotApp() {
             onSaved={loadRecent}
             canUseBrowserCapture={browserCapture}
             onBrowserCapture={onBrowserCapture}
+            canShowInFiles={!ownOverlay}
           />
         </div>
       </div>
@@ -340,15 +346,17 @@ export default function ScreenshotApp() {
           </div>
 
           <div className="mt-4 flex flex-wrap items-center gap-x-5 gap-y-3">
-            <Segmented
-              label={t("screenshot.delay")}
-              value={delay}
-              onChange={setDelay}
-              options={DELAYS.map((seconds) => ({
-                value: seconds as number,
-                label: seconds === 0 ? t("screenshot.delayNone") : t("screenshot.delaySeconds", { seconds }),
-              }))}
-            />
+            {engine === "dom" && (
+              <Segmented
+                label={t("screenshot.delay")}
+                value={delay}
+                onChange={setDelay}
+                options={DELAYS.map((seconds) => ({
+                  value: seconds as number,
+                  label: seconds === 0 ? t("screenshot.delayNone") : t("screenshot.delaySeconds", { seconds }),
+                }))}
+              />
+            )}
             {browserCapture && (
               <Segmented
                 label={t("screenshot.engine")}
@@ -396,7 +404,7 @@ export default function ScreenshotApp() {
           ) : recent.length === 0 ? (
             <p className="py-6 text-center text-sm text-[var(--text-muted)]" data-testid="screenshot-recent-empty">{t("screenshot.recentEmpty")}</p>
           ) : (
-            <ul className="m-0 grid list-none grid-cols-2 gap-3 p-0 sm:grid-cols-3 lg:grid-cols-4" data-testid="screenshot-recent">
+            <ul className="m-0 grid list-none grid-cols-2 gap-3 p-0 sm:grid-cols-3" data-testid="screenshot-recent">
               {recent.map((entry) => (
                 <li key={entry.name} className="overflow-hidden rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)]">
                   <button
@@ -409,13 +417,14 @@ export default function ScreenshotApp() {
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img src={screenshotUrl(entry.name, entry.modified)} alt="" loading="lazy" className="h-full w-full object-contain" />
                   </button>
-                  <div className="flex items-center gap-1 py-1.5 pl-2.5 pr-1">
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-xs text-[var(--text-primary)]" title={entry.name}>{entry.name}</p>
-                      <p className="truncate text-[11px] text-[var(--text-muted)]">
-                        {formatWhen(entry.modified)} · {formatByteSize(entry.size)}
-                      </p>
-                    </div>
+                  {/* The name gets the card's whole width and wraps rather than being cut
+                      short: every name starts "Screenshot_<date>", and it is the time at
+                      its END that tells two of them apart. */}
+                  <p className="px-2.5 pt-1.5 text-xs leading-snug text-[var(--text-primary)] [overflow-wrap:anywhere]">{entry.name}</p>
+                  <div className="flex items-center gap-1 pb-1 pl-2.5 pr-1">
+                    <p className="min-w-0 flex-1 text-[11px] leading-snug text-[var(--text-muted)]">
+                      {formatWhen(entry.modified)} · {formatByteSize(entry.size)}
+                    </p>
                     {confirmDelete === entry.name ? (
                       <button
                         type="button"
@@ -479,15 +488,18 @@ export default function ScreenshotApp() {
                 <Icon name={opening ? "progress_activity" : "upload_file"} size={18} className={opening ? "motion-safe:animate-spin" : ""} />
                 {t("screenshot.openImage")}
               </button>
-              <button
-                type="button"
-                onClick={() => dispatchOpenApp("files", { forceNew: true, meta: { path: SCREENSHOTS_DIR } })}
-                className="flex min-h-10 cursor-pointer items-center gap-2 rounded-lg bg-white/[0.08] px-3 text-sm hover:bg-white/[0.14]"
-                data-testid="screenshot-open-folder"
-              >
-                <Icon name="folder_open" size={18} />
-                {t("screenshot.showInFiles")}
-              </button>
+              {/* Only on the desktop: the standalone page has no window manager to open Files in. */}
+              {!ownOverlay && (
+                <button
+                  type="button"
+                  onClick={() => dispatchOpenApp("files", { forceNew: true, meta: { path: SCREENSHOTS_DIR } })}
+                  className="flex min-h-10 cursor-pointer items-center gap-2 rounded-lg bg-white/[0.08] px-3 text-sm hover:bg-white/[0.14]"
+                  data-testid="screenshot-open-folder"
+                >
+                  <Icon name="folder_open" size={18} />
+                  {t("screenshot.showInFiles")}
+                </button>
+              )}
             </div>
             <p className="mt-3 text-xs leading-relaxed text-[var(--text-muted)]">{t("screenshot.openHint")}</p>
             <input

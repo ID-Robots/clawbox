@@ -75,5 +75,5 @@ export const apps: AppDef[] = [
   // shelf: its keys (Print Screen, Alt+Shift+S) take a capture with the app
   // closed, and the window opens itself on the result. Last in the list so a
   // desktop that already has its icons arranged gains one at the end.
-  { id: "screenshot", name: "app.screenshot", color: "#be123c", type: "screenshot", pinned: false, defaultWidth: 1100, defaultHeight: 740 },
+  { id: "screenshot", name: "app.screenshot", color: "#be123c", type: "screenshot", pinned: false, defaultWidth: 1100, defaultHeight: 680 },
 ];
