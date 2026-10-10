@@ -82,8 +82,28 @@ vi.mock("@/lib/port-probe", async (orig) => ({
 // is the seam: nothing in these tests may spawn a real `hermes`.
 const { mockRunHermesCli } = vi.hoisted(() => ({ mockRunHermesCli: vi.fn() }));
 vi.mock("@/lib/hermes-cli", () => ({ runHermesCli: mockRunHermesCli }));
-const { mockX64Integration } = vi.hoisted(() => ({ mockX64Integration: vi.fn(() => false) }));
-vi.mock("@/lib/x64-integration", () => ({ hasX64DesktopIntegration: mockX64Integration }));
+const { mockX64Integration, mockX64Install } = vi.hoisted(() => ({
+  mockX64Integration: vi.fn(() => false),
+  mockX64Install: vi.fn(() => false),
+}));
+vi.mock("@/lib/x64-integration", () => ({
+  hasX64DesktopIntegration: mockX64Integration,
+  hasX64Install: mockX64Install,
+}));
+// The owner's rebuild and the UI restart on an install-x64.sh PC: both act on
+// THIS process and the real checkout, so they are seams here and are tested on
+// their own (x64-install-update.test.ts). Everything else in that module is real.
+const { mockRebuildAsOwner, mockRestartUiProcess } = vi.hoisted(() => ({
+  mockRebuildAsOwner: vi.fn<(projectDir: string, options?: { onProgress?: (detail: string) => void }) => Promise<void>>(
+    async () => {},
+  ),
+  mockRestartUiProcess: vi.fn((): Promise<never> => new Promise<never>(() => {})),
+}));
+vi.mock("@/lib/x64-install-update", async (orig) => ({
+  ...(await orig<typeof import("@/lib/x64-install-update")>()),
+  rebuildAsOwner: mockRebuildAsOwner,
+  restartUiProcess: mockRestartUiProcess,
+}));
 
 // The TASK-606 marker, mocked so the clears the repair paths owe can be seen.
 // `readPluginRepairs` answers `{}`, which is what the real one answers under
@@ -295,6 +315,9 @@ describe("updater", () => {
     vi.resetModules();
     vi.clearAllMocks();
     mockX64Integration.mockReturnValue(false);
+    mockX64Install.mockReturnValue(false);
+    mockRebuildAsOwner.mockImplementation(async () => {});
+    mockRestartUiProcess.mockImplementation(() => new Promise<never>(() => {}));
     process.env.GATEWAY_HEALTH_WAIT_MS = "1";
     process.env.GATEWAY_RECOVERY_WAIT_MS = "1";
     process.env.GATEWAY_WAIT_INTERVAL_MS = "1";
@@ -2657,6 +2680,238 @@ describe("updater", () => {
       expect(updater.getUpdateState().phase).toBe("failed");
       expect(commands().some((call) => call.includes("restart clawbox-gateway"))).toBe(false);
       expectNoApplianceMaintenance();
+    });
+  });
+
+  /**
+   * A PC installed with install-x64.sh and no integration package. Its root
+   * helper (scripts/x64-migration/clawbox-x64-root-step.sh) has no
+   * bootstrap_updater and no rebuild_reboot, so on the appliance path step 1
+   * exited 64 and every update failed there; the helpers it shipped with also
+   * lacked gateway_setup and post_update, and ran every forwarded installer
+   * step without the user it installs for.
+   */
+  describe("PCs installed with install-x64.sh", () => {
+    beforeEach(() => {
+      // The run state is process-global and a run that reached the restart
+      // waits on it for good, the way a real one waits to be replaced.
+      updater.resetUpdateState();
+      mockX64Install.mockReturnValue(true);
+    });
+
+    function commands() {
+      return mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`);
+    }
+    const rootStep = (step: string) => (call: string) => call.includes(`clawbox-run-root-step.sh ${step}`)
+      || call.includes(`clawbox-run-root-step.sh --no-block ${step}`);
+    /** Nothing the appliance's root contract or Jetson gateway helpers own. */
+    function expectNoApplianceOnlyWork() {
+      const calls = commands();
+      for (const step of ["bootstrap_updater", "fix_git_perms", "rebuild_reboot"]) {
+        expect(calls.some(rootStep(step)), step).toBe(false);
+      }
+      expect(calls.some((call) => call.includes("clawbox-gateway-maintenance.sh")
+        || call.includes("scripts/gateway-pre-start.sh")
+        || call.includes("doctor --fix")
+        || /systemctl\b.*\b(reboot|poweroff)\b/.test(call))).toBe(false);
+    }
+
+    it("syncs and rebuilds as the owner, asks root only for system steps, and restarts only the UI", async () => {
+      setupExecFileMock({ ping: { stdout: "", stderr: "" }, systemctl: { stdout: "", stderr: "" } });
+      updater.startUpdate();
+      await vi.waitFor(() => expect(mockRestartUiProcess).toHaveBeenCalledTimes(1));
+
+      const calls = commands();
+      const ownerFetch = calls.findIndex((call) => call.startsWith("git ")
+        && call.includes("fetch --quiet origin +refs/heads/main:refs/remotes/origin/main"));
+      expect(ownerFetch).toBeGreaterThanOrEqual(0);
+      // Step 1 moves the tree BEFORE the OpenClaw step reads its pin.
+      const ownerReset = calls.findIndex((call) => call.startsWith("git ") && call.endsWith("reset --hard origin/main"));
+      expect(ownerReset).toBeGreaterThan(ownerFetch);
+      expect(ownerReset).toBeLessThan(calls.findIndex(rootStep("openclaw_install")));
+      for (const step of ["apt_update", "chromium_install", "vnc_install", "openclaw_install", "openclaw_patch", "gateway_setup"]) {
+        expect(calls.some(rootStep(step)), step).toBe(true);
+      }
+      expectNoApplianceOnlyWork();
+
+      // The continuation flag carries the serving build, like the appliance's.
+      expect(mockSet).toHaveBeenCalledWith("update_needs_continuation", "rebuilt-build-id");
+      expect(mockRebuildAsOwner).toHaveBeenCalledTimes(1);
+      expect(mockRebuildAsOwner.mock.calls[0][0]).toBe(process.env.CLAWBOX_ROOT);
+      const state = updater.getUpdateState();
+      expect(state.steps.find((s) => s.id === "bootstrap_updater")?.status).toBe("completed");
+      expect(state.steps.find((s) => s.id === "gateway_setup")?.status).toBe("completed");
+      expect(state.steps.find((s) => s.id === "restart")?.status).toBe("running");
+      expect(state.warnings?.some((w) => w.code.startsWith("x64-root-steps-skipped"))).toBe(false);
+    });
+
+    it("skips what the installed root helper cannot run, on ONE card that names the repair", async () => {
+      setupExecFileMock({
+        "clawbox-run-root-step.sh apt_update": new Error("Job for clawbox-root-update@apt_update.service failed"),
+        "clawbox-run-root-step.sh gateway_setup": new Error("Job for clawbox-root-update@gateway_setup.service failed"),
+        "-u clawbox-root-update@apt_update.service": {
+          stdout: "Error: could not resolve an unprivileged install user. Set CLAWBOX_USER=<user>.\n",
+          stderr: "",
+        },
+        "-u clawbox-root-update@gateway_setup.service": {
+          stdout: "clawbox-root-step: step 'gateway_setup' has no implementation on the x64 install\n",
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      updater.startUpdate();
+      await vi.waitFor(() => expect(mockRestartUiProcess).toHaveBeenCalledTimes(1));
+
+      const state = updater.getUpdateState();
+      expect(state.steps.find((s) => s.id === "apt_update")?.status).toBe("completed");
+      expect(state.steps.find((s) => s.id === "gateway_setup")?.status).toBe("completed");
+      // gateway_setup is failFast on the appliance; here the run went on.
+      expect(mockRebuildAsOwner).toHaveBeenCalledTimes(1);
+      const cards = (state.warnings ?? []).filter((w) => w.code.startsWith("x64-root-steps-skipped"));
+      expect(cards).toHaveLength(1);
+      expect(cards[0].code).toBe("x64-root-steps-skipped");
+      expect(cards[0].message).toContain("“Updating system packages”, “Configuring gateway service”");
+      expect(cards[0].message).toContain(`sudo bash ${process.env.CLAWBOX_ROOT}/install-x64.sh --step root_step_contract`);
+      // Persisted, so the half after the restart still shows it.
+      expect(mockSet).toHaveBeenCalledWith("update_warnings", expect.stringContaining("x64-root-steps-skipped"));
+      expectNoApplianceOnlyWork();
+    });
+
+    it("still fails a root step that RAN and failed", async () => {
+      setupExecFileMock({
+        "clawbox-run-root-step.sh openclaw_install": new Error("Job for clawbox-root-update@openclaw_install.service failed"),
+        "show clawbox-root-update@openclaw_install.service -p Result": { stdout: "exit-code\n", stderr: "" },
+        "-u clawbox-root-update@openclaw_install.service": {
+          stdout: "Installed: none, Target: 2026.9.4\nError: OpenClaw installation failed — /home/clawbox/.npm-global/bin/openclaw not found\n",
+          stderr: "",
+        },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      updater.startUpdate();
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+
+      const state = updater.getUpdateState();
+      expect(state.steps.find((s) => s.id === "openclaw_install")?.status).toBe("failed");
+      expect(state.error).toContain("Error: OpenClaw installation failed");
+      expect(state.steps.find((s) => s.id === "restart")?.status).toBe("pending");
+      expect(mockRebuildAsOwner).not.toHaveBeenCalled();
+      expect(state.warnings?.some((w) => w.code.startsWith("x64-root-steps-skipped"))).toBe(false);
+    });
+
+    it("fails the restart step on a failed rebuild, clears the continuation and never restarts", async () => {
+      setupExecFileMock({ ping: { stdout: "", stderr: "" }, systemctl: { stdout: "", stderr: "" } });
+      mockRebuildAsOwner.mockRejectedValue(new Error(
+        "bun run build did not succeed: Error: Build failed because of webpack errors. The previous build was put back.",
+      ));
+      updater.startUpdate();
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+
+      const restart = updater.getUpdateState().steps.find((s) => s.id === "restart");
+      expect(restart?.status).toBe("failed");
+      expect(restart?.error).toBe(
+        "Rebuild failed: bun run build did not succeed: Error: Build failed because of webpack errors. The previous build was put back.",
+      );
+      const flagWrites = mockSet.mock.calls.filter(([key]) => key === "update_needs_continuation").map(([, v]) => v);
+      expect(flagWrites).toEqual(["rebuilt-build-id", undefined]);
+      expect(mockRestartUiProcess).not.toHaveBeenCalled();
+      expectNoApplianceOnlyWork();
+    });
+
+    it("resumes after the UI restart on a new build, whatever an older updater left in the rebuild unit", async () => {
+      // A pre-fix updater dispatched clawbox-root-update@rebuild_reboot on this
+      // PC and it failed (exit 64). That unit is not what built this time.
+      setupExecFileMock({
+        "show clawbox-root-update@rebuild_reboot.service -p Result": { stdout: "failed\n", stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      mockGet.mockImplementation(async (key) => key === "update_needs_continuation" ? "old-build" : undefined);
+      mockRebuiltBox("new-build");
+
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+      const calls = commands();
+      expect(calls.some(rootStep("post_update"))).toBe(true);
+      // A healthy gateway is left alone, and the appliance's plugin retry —
+      // which needs the maintenance helper — is not run.
+      expect(calls.some((call) => call.includes("restart clawbox-gateway"))).toBe(false);
+      expect(mockRetryAfterCoreUpdate).not.toHaveBeenCalled();
+      expectNoApplianceOnlyWork();
+    });
+
+    it("still reports a restart that brought no new build back", async () => {
+      mockGet.mockImplementation(async (key) => key === "update_needs_continuation" ? "same-build" : undefined);
+      mockRebuiltBox("same-build");
+      expect(await updater.checkContinuation()).toBe(false);
+      const state = updater.getUpdateState();
+      expect(state.phase).toBe("failed");
+      expect(state.error).toBe("The device restarted without producing a new build — see the clawbox-setup service log");
+    });
+
+    it("restarts a stopped gateway through its granted unit restart, and diagnoses one that stays down", async () => {
+      mockGet.mockResolvedValue(true);
+      mockGatewayUp.mockImplementation(async () => commands().some((call) => call.includes("restart clawbox-gateway")));
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+      expect(commands().filter((call) => call.includes("/usr/bin/sudo /usr/bin/systemctl restart clawbox-gateway.service"))).toHaveLength(1);
+      expectNoApplianceOnlyWork();
+
+      vi.clearAllMocks();
+      mockX64Install.mockReturnValue(true);
+      setupExecFileMock({ ping: { stdout: "", stderr: "" }, systemctl: { stdout: "", stderr: "" } });
+      mockGet.mockResolvedValue(true);
+      mockGatewayUp.mockResolvedValue(false);
+      updater.resetUpdateState();
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+      expect(updater.getUpdateState().error).toContain("OpenClaw gateway is not listening");
+      expectNoApplianceOnlyWork();
+    });
+
+    it("runs the OpenClaw-only update without the appliance's gateway mask", async () => {
+      setupExecFileMock({ ping: { stdout: "", stderr: "" }, systemctl: { stdout: "", stderr: "" } });
+      expect(updater.startOpenclawUpdate().started).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+      const calls = commands();
+      expect(calls.some(rootStep("openclaw_install"))).toBe(true);
+      expect(calls.filter((call) => call.includes("systemctl restart clawbox-gateway.service"))).toHaveLength(1);
+      expectNoApplianceOnlyWork();
+    });
+
+    it("leaves a PC with the integration package on that package's contract", async () => {
+      mockX64Integration.mockReturnValue(true);
+      setupExecFileMock({ ping: { stdout: "", stderr: "" }, systemctl: { stdout: "", stderr: "" } });
+      updater.startUpdate();
+      await vi.waitFor(() => expect(commands().some(rootStep("bootstrap_updater"))).toBe(true));
+      expect(mockRebuildAsOwner).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("the appliance path is unchanged", () => {
+    beforeEach(() => { updater.resetUpdateState(); });
+
+    it("asks root for bootstrap_updater, fix_git_perms and the rebuild_reboot unit — never the owner's rebuild", async () => {
+      setupExecFileMock({
+        // Refused at the dispatch, so the run settles instead of waiting for a
+        // reboot that a test cannot provide.
+        "--no-block rebuild_reboot": Object.assign(new Error("sudo: a password is required"), {
+          stderr: "sudo: a password is required\n",
+        }),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+      });
+      updater.startUpdate();
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+      const calls = mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`);
+      expect(calls.some((call) => call.includes("clawbox-run-root-step.sh bootstrap_updater"))).toBe(true);
+      expect(calls.some((call) => call.includes("clawbox-run-root-step.sh fix_git_perms"))).toBe(true);
+      expect(calls.some((call) => call.includes("clawbox-run-root-step.sh --no-block rebuild_reboot"))).toBe(true);
+      expect(calls.some((call) => call.includes("fetch --quiet origin +refs/heads/"))).toBe(false);
+      expect(mockRebuildAsOwner).not.toHaveBeenCalled();
+      expect(mockRestartUiProcess).not.toHaveBeenCalled();
+      expect(mockX64Install).toHaveBeenCalled();
     });
   });
 
