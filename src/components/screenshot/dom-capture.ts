@@ -26,6 +26,7 @@
 // copied onto the clone, because none of them are in the markup.
 
 import { type Point, type Rect, type Size, rectsIntersect } from "@/lib/screenshot/geometry";
+import { fetchWithin, withDeadline } from "@/lib/screenshot/fetch-deadline";
 import type { SkippedKind, SkippedSurface } from "@/lib/screenshot/session";
 import {
   type LoadedFonts,
@@ -87,6 +88,8 @@ const MAX_INLINE_BYTES = 12 * 1024 * 1024;
 const MAX_SURFACE_SIDE = 4096;
 const MAX_FRAME_DEPTH = 3;
 const FETCH_TIMEOUT_MS = 8000;
+/** Every wait inside a render is bounded on its own; this bounds their sum, so a capture can never hang. */
+const RENDER_DEADLINE_MS = 30_000;
 
 const FREEZE_CSS =
   "*,*::before,*::after{animation:none!important;transition:none!important;" +
@@ -166,30 +169,21 @@ function blobToDataUrl(blob: Blob): Promise<string | null> {
   });
 }
 
-async function fetchWithTimeout(url: string): Promise<Response | null> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  try {
-    const response = await fetch(url, { cache: "force-cache", signal: controller.signal });
-    return response.ok ? response : null;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
+// The time limit covers the body too (fetch-deadline.ts): a response whose
+// headers arrive and whose body then stalls must not hang the capture.
+function fetchBlob(url: string): Promise<Blob | null> {
+  return fetchWithin(url, FETCH_TIMEOUT_MS, (response) => response.blob(), { cache: "force-cache" });
+}
+
+function fetchText(url: string): Promise<string | null> {
+  return fetchWithin(url, FETCH_TIMEOUT_MS, (response) => response.text(), { cache: "force-cache" });
 }
 
 async function fetchDataUrl(url: string): Promise<string | null> {
   if (url.startsWith("data:")) return url;
-  const response = await fetchWithTimeout(url);
-  if (!response) return null;
-  try {
-    const blob = await response.blob();
-    if (blob.size === 0 || blob.size > MAX_INLINE_BYTES) return null;
-    return await blobToDataUrl(blob);
-  } catch {
-    return null;
-  }
+  const blob = await fetchBlob(url);
+  if (!blob || blob.size === 0 || blob.size > MAX_INLINE_BYTES) return null;
+  return blobToDataUrl(blob);
 }
 
 function inline(url: string, ctx: Context): Promise<string | null> {
@@ -640,8 +634,7 @@ async function sheetText(sheet: CSSStyleSheet): Promise<string> {
     const raw = owner.textContent ?? "";
     if (raw.trim() && !/@import/i.test(raw)) return raw;
   } else if (sheet.href) {
-    const response = await fetchWithTimeout(sheet.href);
-    const raw = response ? await response.text().catch(() => "") : "";
+    const raw = (await fetchText(sheet.href)) ?? "";
     if (raw.trim() && !/@import/i.test(raw)) return raw;
   }
   return rulesText(sheet, 0);
@@ -839,6 +832,10 @@ export async function captureDocument(options: DomCaptureOptions): Promise<DomCa
   } finally {
     options.onRead?.();
   }
-  const bitmap = await renderSnapshot(snap, ctx);
+  const bitmap = await withDeadline(
+    renderSnapshot(snap, ctx),
+    RENDER_DEADLINE_MS,
+    () => new CaptureError("render", "The capture took too long to draw."),
+  );
   return { bitmap, scale, skipped: ctx.skipped };
 }

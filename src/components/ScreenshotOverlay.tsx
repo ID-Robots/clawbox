@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { TOAST_EVENT } from "@/components/ToastHost";
 import { captureScreen, currentCaptureScale } from "@/components/screenshot/capture";
 import { CaptureError, IGNORE_ATTRIBUTE } from "@/components/screenshot/dom-capture";
@@ -8,9 +8,12 @@ import { useT } from "@/lib/i18n";
 import { type Point, type Rect, clampRect, formatSize, isUsableRegion, rectFromPoints } from "@/lib/screenshot/geometry";
 import {
   type CaptureRequest,
+  type OverlayOwner,
   CAPTURE_REQUEST_EVENT,
   openInScreenshot,
+  primaryOverlayId,
   registerOverlay,
+  subscribeOverlays,
 } from "@/lib/screenshot/session";
 import { captureShortcut, createShortcutState, isCaptureShortcutKey } from "@/lib/screenshot/shortcuts";
 import { DESKTOP_LAYERS } from "@/lib/window-snap";
@@ -75,7 +78,7 @@ function settle(): Promise<void> {
   });
 }
 
-function ScreenshotOverlay() {
+function ScreenshotOverlay({ owner = "desktop" }: { owner?: OverlayOwner }) {
   const { t } = useT();
   const tRef = useRef(t);
   tRef.current = t;
@@ -90,7 +93,24 @@ function ScreenshotOverlay() {
   const [drag, setDrag] = useState<{ start: Point; current: Point } | null>(null);
   const [hover, setHover] = useState<Rect | null>(null);
 
-  useEffect(() => registerOverlay(), []);
+  // Registered for as long as it is mounted, ACTING only while it is the one
+  // in charge. Two can be mounted for a moment — a restored Screenshot window
+  // brings its own before the desktop's has appeared — and both listening
+  // would take one Print Screen twice.
+  const registration = useRef<number | null>(null);
+  useEffect(() => {
+    const entry = registerOverlay(owner);
+    registration.current = entry.id;
+    return () => {
+      registration.current = null;
+      entry.release();
+    };
+  }, [owner]);
+  const active = useSyncExternalStore(
+    subscribeOverlays,
+    () => registration.current !== null && primaryOverlayId() === registration.current,
+    () => false,
+  );
 
   // The Screenshot window steps aside for the WHOLE capture — the selection
   // and the countdown too, or it would be sitting on what the owner wants to
@@ -187,6 +207,7 @@ function ScreenshotOverlay() {
 
   // The app's buttons ask through an event; so could anything else on the page.
   useEffect(() => {
+    if (!active) return;
     const onRequest = (event: Event) => {
       const detail = (event as CustomEvent<CaptureRequest>).detail;
       if (!detail || (detail.mode !== "full" && detail.mode !== "region")) return;
@@ -199,12 +220,13 @@ function ScreenshotOverlay() {
     };
     window.addEventListener(CAPTURE_REQUEST_EVENT, onRequest);
     return () => window.removeEventListener(CAPTURE_REQUEST_EVENT, onRequest);
-  }, [begin]);
+  }, [active, begin]);
 
   // The desktop-wide keys. In the capture phase on `window`, so they are seen
   // before the terminal or the remote desktop — which would otherwise send
   // them on to a shell — gets a look.
   useEffect(() => {
+    if (!active) return;
     const state = createShortcutState();
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape" && event.type === "keydown") {
@@ -227,8 +249,10 @@ function ScreenshotOverlay() {
     return () => {
       window.removeEventListener("keydown", onKey, true);
       window.removeEventListener("keyup", onKey, true);
+      // No longer the one in charge (or going away): whatever it was in the middle of asking is dropped.
+      cancel();
     };
-  }, [begin, cancel]);
+  }, [active, begin, cancel]);
 
   // The countdown: one tick a second, then the picture.
   useEffect(() => {
@@ -244,7 +268,7 @@ function ScreenshotOverlay() {
     return () => clearTimeout(timer);
   }, [phase, setPhase, shoot]);
 
-  if (phase.name === "idle") return null;
+  if (!active || phase.name === "idle") return null;
 
   if (phase.name === "capturing") {
     // Nothing on screen while the page is being read. Once it has been, the

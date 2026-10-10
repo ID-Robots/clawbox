@@ -1,10 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Icon } from "@/components/file-icons";
 import ScreenshotEditor, { type EditorImage } from "@/components/ScreenshotEditor";
 import ScreenshotOverlay from "@/components/ScreenshotOverlay";
-import { displayCaptureSupported } from "@/components/screenshot/display-capture";
+import { displayCaptureSupported, prepareDisplayCapture } from "@/components/screenshot/display-capture";
 import { blobToBitmap, resizeBitmap } from "@/components/screenshot/render";
 import { useT } from "@/lib/i18n";
 import { SCREENSHOTS_DIR, formatByteSize, isValidScreenshotName, screenshotUrl } from "@/lib/screenshot/files";
@@ -12,9 +12,10 @@ import { MAX_IMAGE_SIDE, resizeDimensions } from "@/lib/screenshot/geometry";
 import {
   type CaptureEngineId,
   type IncomingImage,
-  overlayMounted,
+  desktopOverlayMounted,
   requestCapture,
   subscribeImages,
+  subscribeOverlays,
   takeImage,
 } from "@/lib/screenshot/session";
 import { type CaptureMode, CAPTURE_SHORTCUTS } from "@/lib/screenshot/shortcuts";
@@ -42,6 +43,9 @@ const DELAYS = [0, 3, 5] as const;
 const OPENABLE = "image/png,image/jpeg,image/webp,image/gif,image/bmp,image/avif";
 
 let imageSeq = 0;
+
+/** For a value that never changes while the page lives. */
+const noSubscription = () => () => {};
 
 function filesUrl(relPath: string): string {
   return `/setup-api/files/${relPath.split("/").map(encodeURIComponent).join("/")}`;
@@ -108,8 +112,21 @@ export default function ScreenshotApp() {
   const [delay, setDelay] = useState<number>(0);
   const [hideWindow, setHideWindow] = useState(true);
   const [engine, setEngine] = useState<CaptureEngineId>("dom");
-  const [browserCapture, setBrowserCapture] = useState(false);
-  const [ownOverlay, setOwnOverlay] = useState(false);
+  // Whether the browser's own capture exists here: a fact of the page's context, read on the client.
+  const browserCapture = useSyncExternalStore(noSubscription, displayCaptureSupported, () => false);
+  // Whether the DESKTOP has its overlay up. Followed, not read once: a window
+  // restored on a refresh can draw before the desktop has learnt its user is
+  // the owner and mounted the overlay. Reading it once left this window with
+  // an overlay of its own beside the desktop's — two takers for one Print
+  // Screen — and with its desktop-only buttons hidden for good.
+  const onDesktop = useSyncExternalStore(subscribeOverlays, desktopOverlayMounted, () => true);
+  /** No desktop under the app (the standalone /app/screenshot page): it brings the overlay itself. */
+  const ownOverlay = !onDesktop;
+
+  // Where the browser's own capture is offered, this tab is marked now so a later frame of it can be recognised.
+  useEffect(() => {
+    if (browserCapture) prepareDisplayCapture();
+  }, [browserCapture]);
 
   const [recent, setRecent] = useState<RecentEntry[] | null>(null);
   const [recentError, setRecentError] = useState(false);
@@ -184,12 +201,6 @@ export default function ScreenshotApp() {
     return subscribeImages(pull);
   }, [accept]);
 
-  useEffect(() => {
-    setBrowserCapture(displayCaptureSupported());
-    // The standalone /app/screenshot page has no desktop under it, so no overlay either.
-    if (!overlayMounted()) setOwnOverlay(true);
-  }, []);
-
   const loadRecent = useCallback(async () => {
     try {
       const response = await fetch("/setup-api/screenshots", { cache: "no-store" });
@@ -246,7 +257,7 @@ export default function ScreenshotApp() {
     }
   };
 
-  const overlay = ownOverlay ? <ScreenshotOverlay /> : null;
+  const overlay = ownOverlay ? <ScreenshotOverlay owner="app" /> : null;
 
   if (current) {
     return (

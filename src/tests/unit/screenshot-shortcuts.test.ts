@@ -6,10 +6,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   type IncomingImage,
+  desktopOverlayMounted,
   offerImage,
   overlayMounted,
+  primaryOverlayId,
   registerOverlay,
   subscribeImages,
+  subscribeOverlays,
   takeImage,
 } from "@/lib/screenshot/session";
 import {
@@ -126,15 +129,81 @@ describe("capture hand-off", () => {
     offSecond();
   });
 
-  it("knows whether the desktop's overlay is mounted", () => {
+  it("knows whether an overlay is mounted, and releases each one once", () => {
     expect(overlayMounted()).toBe(false);
-    const release = registerOverlay();
-    const releaseSecond = registerOverlay();
+    const first = registerOverlay();
+    const second = registerOverlay();
     expect(overlayMounted()).toBe(true);
-    release();
-    release();
+    first.release();
+    first.release();
     expect(overlayMounted()).toBe(true);
-    releaseSecond();
+    second.release();
     expect(overlayMounted()).toBe(false);
+    expect(primaryOverlayId()).toBeNull();
+  });
+});
+
+describe("overlays: several mounted, one in charge", () => {
+  it("tells a window's own overlay from the desktop's", () => {
+    const own = registerOverlay("app");
+    expect(overlayMounted()).toBe(true);
+    expect(desktopOverlayMounted()).toBe(false);
+    const desktop = registerOverlay("desktop");
+    expect(desktopOverlayMounted()).toBe(true);
+    desktop.release();
+    expect(desktopOverlayMounted()).toBe(false);
+    own.release();
+  });
+
+  it("puts the desktop's overlay in charge the moment it appears", () => {
+    // A restored Screenshot window drew first and brought its own overlay ...
+    const own = registerOverlay("app");
+    expect(primaryOverlayId()).toBe(own.id);
+    // ... then the desktop learnt its user is the owner and mounted the real one.
+    const desktop = registerOverlay("desktop");
+    expect(primaryOverlayId()).toBe(desktop.id);
+    // The window lets its own go; the desktop's stays in charge.
+    own.release();
+    expect(primaryOverlayId()).toBe(desktop.id);
+    desktop.release();
+    expect(primaryOverlayId()).toBeNull();
+  });
+
+  it("never has two in charge: of two windows' own overlays only the first acts", () => {
+    const a = registerOverlay("app");
+    const b = registerOverlay("app");
+    expect(primaryOverlayId()).toBe(a.id);
+    expect(primaryOverlayId()).not.toBe(b.id);
+    // When the first goes, the second takes over rather than leaving nobody.
+    a.release();
+    expect(primaryOverlayId()).toBe(b.id);
+    b.release();
+  });
+
+  it("gives every registration its own id", () => {
+    const a = registerOverlay();
+    const b = registerOverlay();
+    expect(a.id).not.toBe(b.id);
+    a.release();
+    b.release();
+  });
+
+  it("announces every registration and release, so a window can follow them", () => {
+    const seen: Array<{ any: boolean; desktop: boolean; primary: number | null }> = [];
+    const off = subscribeOverlays(() => seen.push({ any: overlayMounted(), desktop: desktopOverlayMounted(), primary: primaryOverlayId() }));
+    const own = registerOverlay("app");
+    const desktop = registerOverlay("desktop");
+    own.release();
+    own.release();
+    desktop.release();
+    expect(seen).toEqual([
+      { any: true, desktop: false, primary: own.id },
+      { any: true, desktop: true, primary: desktop.id },
+      { any: true, desktop: true, primary: desktop.id },
+      { any: false, desktop: false, primary: null },
+    ]);
+    off();
+    registerOverlay().release();
+    expect(seen).toHaveLength(4);
   });
 });

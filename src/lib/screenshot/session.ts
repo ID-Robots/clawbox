@@ -56,7 +56,22 @@ export type IncomingImage = IncomingCapture | IncomingFile;
 
 let pending: IncomingImage | null = null;
 const listeners = new Set<() => void>();
-let overlays = 0;
+
+/** Who mounted an overlay: the desktop page itself, or a Screenshot window that found none. */
+export type OverlayOwner = "desktop" | "app";
+
+interface OverlayEntry {
+  id: number;
+  owner: OverlayOwner;
+}
+
+let overlayEntries: OverlayEntry[] = [];
+let overlaySeq = 0;
+const overlayListeners = new Set<() => void>();
+
+function notifyOverlays(): void {
+  for (const listener of Array.from(overlayListeners)) listener();
+}
 
 /** Leaves an image for the app window. A newer one replaces one nobody took. */
 export function offerImage(image: IncomingImage): void {
@@ -90,17 +105,55 @@ export function requestCapture(request: CaptureRequest): void {
   window.dispatchEvent(new CustomEvent<CaptureRequest>(CAPTURE_REQUEST_EVENT, { detail: request }));
 }
 
-/** The overlay says it is there; the app mounts one of its own only when none is. */
-export function registerOverlay(): () => void {
-  overlays += 1;
+export interface OverlayRegistration {
+  id: number;
+  release: () => void;
+}
+
+/**
+ * An overlay says it is there. More than one can be: a Screenshot window that
+ * is restored before the desktop knows its user is the owner finds no overlay
+ * and brings its own, and the desktop's then mounts beside it. Every change
+ * is announced (`subscribeOverlays`), so the window can let its own go, and
+ * only ONE of them ever acts (`primaryOverlayId`) — two would each take the
+ * same Print Screen.
+ */
+export function registerOverlay(owner: OverlayOwner = "desktop"): OverlayRegistration {
+  overlaySeq += 1;
+  const id = overlaySeq;
+  overlayEntries = [...overlayEntries, { id, owner }];
+  notifyOverlays();
   let released = false;
+  return {
+    id,
+    release: () => {
+      if (released) return;
+      released = true;
+      overlayEntries = overlayEntries.filter((entry) => entry.id !== id);
+      notifyOverlays();
+    },
+  };
+}
+
+/** Called whenever an overlay registers or is released. */
+export function subscribeOverlays(listener: () => void): () => void {
+  overlayListeners.add(listener);
   return () => {
-    if (released) return;
-    released = true;
-    overlays -= 1;
+    overlayListeners.delete(listener);
   };
 }
 
 export function overlayMounted(): boolean {
-  return overlays > 0;
+  return overlayEntries.length > 0;
+}
+
+/** Whether the DESKTOP has its overlay up — i.e. there is a desktop under the app at all. */
+export function desktopOverlayMounted(): boolean {
+  return overlayEntries.some((entry) => entry.owner === "desktop");
+}
+
+/** The one overlay that acts: the desktop's when it has one, else the first a window brought. */
+export function primaryOverlayId(): number | null {
+  const desktop = overlayEntries.find((entry) => entry.owner === "desktop");
+  return (desktop ?? overlayEntries[0])?.id ?? null;
 }

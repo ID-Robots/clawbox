@@ -1,13 +1,13 @@
 "use client";
 
-import { useState, useEffect, useCallback, useId, useRef } from "react";
+import { useState, useEffect, useCallback, useId, useRef, useSyncExternalStore } from "react";
 import { useMobileBack, usePhoneLayout } from "@/lib/mobile-back";
 import { useT } from "@/lib/i18n";
 import { useTr } from "@/lib/i18n-floor";
 import { fileExtension, fileIcon, formatSize, Icon } from "./file-icons";
 import CodeEditor from "./CodeEditor";
 import { languageForFile } from "@/lib/code-language";
-import { openInScreenshot, overlayMounted } from "@/lib/screenshot/session";
+import { openInScreenshot, overlayMounted, subscribeOverlays } from "@/lib/screenshot/session";
 import { useMayUseOwnerApis, useSessionUser } from "@/lib/use-session-user";
 import {
   shouldShowBackupSuggestion,
@@ -212,8 +212,17 @@ const PDF_EXT = new Set(["pdf"]);
  * load, on a desktop that has the Screenshot app (its overlay is mounted with
  * the desktop; the standalone /app/files page has no window to open it in).
  */
-function canAnnotate(name: string, size: number | null | undefined): boolean {
-  return ANNOTATE_EXT.has(fileExtension(name)) && (size ?? 0) <= MEDIA_MAX && overlayMounted();
+function canAnnotate(name: string, size: number | null | undefined, screenshotReady: boolean): boolean {
+  return screenshotReady && ANNOTATE_EXT.has(fileExtension(name)) && (size ?? 0) <= MEDIA_MAX;
+}
+
+/**
+ * Whether the Screenshot app can be reached from here. Subscribed, not read
+ * once: the desktop mounts the overlay only after it has learnt its user is
+ * the owner, which can be after a restored Files window has drawn.
+ */
+function useScreenshotReady(): boolean {
+  return useSyncExternalStore(subscribeOverlays, overlayMounted, () => false);
 }
 const VIDEO_EXT = new Set(["mp4", "webm", "ogv", "mov", "m4v"]);
 const AUDIO_EXT = new Set(["mp3", "wav", "ogg", "oga", "m4a", "flac", "aac"]);
@@ -257,6 +266,7 @@ function looksBinary(text: string): boolean {
 export default function FilesApp({ initialPath = "", initialPlace }: { initialPath?: string; initialPlace?: "projects" } = {}) {
   const { t } = useT();
   const tr = useTr();
+  const screenshotReady = useScreenshotReady();
   const startsOnProjects = initialPlace === "projects" && !initialPath;
   const [place, setPlace] = useState<Place>(startsOnProjects ? "projects" : "folder");
   const [projects, setProjects] = useState<ProjectFolder[]>([]);
@@ -1740,7 +1750,7 @@ export default function FilesApp({ initialPath = "", initialPlace }: { initialPa
             x={contextMenu.x}
             y={contextMenu.y}
             onOpen={() => { closeContextMenu(); navigateTo(contextMenu.entry); }}
-            onAnnotate={!multi && contextMenu.entry.type !== "directory" && canAnnotate(contextMenu.entry.name, contextMenu.entry.size)
+            onAnnotate={!multi && contextMenu.entry.type !== "directory" && canAnnotate(contextMenu.entry.name, contextMenu.entry.size, screenshotReady)
               ? () => {
                   closeContextMenu();
                   openInScreenshot({ kind: "file", relPath: entryRelPath(contextMenu.entry), name: contextMenu.entry.name });
@@ -2988,6 +2998,7 @@ function FileViewer({ relPath, entry, onClose, onSaved }: {
   onSaved: () => void;
 }) {
   const { t } = useT();
+  const screenshotReady = useScreenshotReady();
   const initialKind = resolveViewerKind(entry.name, entry.size);
   const [kind, setKind] = useState<ViewerKind>(initialKind);
   const [content, setContent] = useState("");
@@ -3119,7 +3130,7 @@ function FileViewer({ relPath, entry, onClose, onSaved }: {
             <span className="hidden sm:inline">{t("files.save")}</span>
           </button>
         )}
-        {kind === "image" && canAnnotate(entry.name, entry.size) && (
+        {kind === "image" && canAnnotate(entry.name, entry.size, screenshotReady) && (
           <button
             onClick={() => openInScreenshot({ kind: "file", relPath, name: entry.name })}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition-colors bg-white/[0.06] text-[var(--text-primary)] hover:bg-white/[0.12] cursor-pointer"

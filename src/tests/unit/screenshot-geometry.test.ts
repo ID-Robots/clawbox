@@ -22,6 +22,8 @@ import {
   rectsIntersect,
   resizeDimensions,
   scaleRect,
+  sharedTabIsThisTab,
+  sharedTabScale,
   stepZoom,
   toPixelRect,
   translateRect,
@@ -215,5 +217,65 @@ describe("capture scale", () => {
   it("never drops below half, and repairs a missing ratio", () => {
     expect(captureScale({ width: 100_000, height: 100_000 }, 2)).toBe(0.5);
     expect(captureScale({ width: 100, height: 100 }, Number.NaN)).toBe(1);
+  });
+});
+
+describe("a frame the browser shared", () => {
+  const viewport = { width: 1280, height: 800 };
+
+  it("is mapped onto this viewport when it is this tab", () => {
+    expect(sharedTabScale({ surface: "browser", sameTab: true, frame: { width: 1280, height: 800 }, viewport })).toBe(1);
+    expect(sharedTabScale({ surface: "browser", sameTab: true, frame: { width: 2560, height: 1600 }, viewport })).toBe(2);
+  });
+
+  it("is never mapped when the browser says it is another tab, whatever its shape", () => {
+    // Another tab of the same window has exactly this viewport's size.
+    expect(sharedTabScale({ surface: "browser", sameTab: false, frame: { width: 1280, height: 800 }, viewport })).toBeNull();
+    expect(sharedTabScale({ surface: "browser", sameTab: false, frame: { width: 2560, height: 1600 }, viewport })).toBeNull();
+  });
+
+  it("is never mapped for a window or a whole screen", () => {
+    for (const surface of ["window", "monitor", undefined]) {
+      expect(sharedTabScale({ surface, sameTab: true, frame: { width: 1280, height: 800 }, viewport })).toBeNull();
+    }
+  });
+
+  it("must match this viewport on both axes when the browser cannot say whose tab it is", () => {
+    expect(sharedTabScale({ surface: "browser", sameTab: null, frame: { width: 1920, height: 1200 }, viewport })).toBe(1.5);
+    // Same width, different height: a tab of another window.
+    expect(sharedTabScale({ surface: "browser", sameTab: null, frame: { width: 1280, height: 600 }, viewport })).toBeNull();
+    expect(sharedTabScale({ surface: "browser", sameTab: null, frame: { width: 1920, height: 1080 }, viewport })).toBeNull();
+  });
+
+  it("refuses a frame of this tab that no single scale maps onto the viewport", () => {
+    expect(sharedTabScale({ surface: "browser", sameTab: true, frame: { width: 1280, height: 600 }, viewport })).toBeNull();
+  });
+
+  it("allows for a pixel of rounding in the frame", () => {
+    expect(sharedTabScale({ surface: "browser", sameTab: true, frame: { width: 1919, height: 1200 }, viewport })).toBeCloseTo(1.499, 2);
+  });
+
+  it("is this tab only when it carries this tab's own mark", () => {
+    expect(sharedTabIsThisTab({ mark: "clawbox-1", canIdentify: true, seen: "clawbox-1" })).toBe(true);
+    // Another ClawBox tab, another site's tab, and a tab that marks nothing at all.
+    expect(sharedTabIsThisTab({ mark: "clawbox-1", canIdentify: true, seen: "clawbox-2" })).toBe(false);
+    expect(sharedTabIsThisTab({ mark: "clawbox-1", canIdentify: true, seen: "someone-else" })).toBe(false);
+    expect(sharedTabIsThisTab({ mark: "clawbox-1", canIdentify: true, seen: null })).toBe(false);
+  });
+
+  it("cannot say whose tab it is where the browser has no marks", () => {
+    expect(sharedTabIsThisTab({ mark: null, canIdentify: false, seen: null })).toBeNull();
+    expect(sharedTabIsThisTab({ mark: "clawbox-1", canIdentify: false, seen: null })).toBeNull();
+    expect(sharedTabIsThisTab({ mark: null, canIdentify: true, seen: "x" })).toBeNull();
+  });
+
+  it("another tab of the same window is refused although its frame has this viewport's exact size", () => {
+    const sameTab = sharedTabIsThisTab({ mark: "clawbox-1", canIdentify: true, seen: null });
+    expect(sharedTabScale({ surface: "browser", sameTab, frame: { width: 1280, height: 800 }, viewport })).toBeNull();
+  });
+
+  it("refuses an empty frame or viewport", () => {
+    expect(sharedTabScale({ surface: "browser", sameTab: true, frame: { width: 0, height: 0 }, viewport })).toBeNull();
+    expect(sharedTabScale({ surface: "browser", sameTab: true, frame: { width: 1280, height: 800 }, viewport: { width: 0, height: 800 } })).toBeNull();
   });
 });

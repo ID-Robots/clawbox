@@ -220,3 +220,49 @@ export function captureScale(viewport: Size, devicePixelRatio: number, maxPixels
   const budget = Math.sqrt(maxPixels / area);
   return Math.max(0.5, Math.min(dpr, 3, budget));
 }
+
+/**
+ * Whether the tab the browser shared is THIS tab, from the mark this tab set
+ * on itself and the mark the shared frame carries:
+ *
+ *   null   the browser cannot say (no such API here) — only the frame's shape is left to go by
+ *   true   the frame carries this tab's mark
+ *   false  it carries another mark, or none: where marks exist, this tab's own
+ *          frame always has one, so a frame without it is some other tab
+ *
+ * Erring towards false is the safe side: the whole picture is then shown with
+ * a note to crop it, instead of a region silently cut from the wrong tab.
+ */
+export function sharedTabIsThisTab(input: { mark: string | null; canIdentify: boolean; seen: string | null }): boolean | null {
+  if (!input.canIdentify || input.mark === null) return null;
+  return input.seen === input.mark;
+}
+
+/**
+ * Bitmap pixels per CSS pixel of a frame the browser shared, when — and only
+ * when — the frame can be trusted to be THIS tab's viewport. "It is a browser
+ * tab" is not enough: the picker may offer any tab, and a region cut out of
+ * another tab's frame would be the wrong picture presented as the right one.
+ *
+ *   surface   what the browser says it shared ("browser" is a tab)
+ *   sameTab   true / false when the browser can say whose tab it is (the
+ *             capture handle), null when it cannot
+ *
+ * Without that answer the frame must at least match this viewport's shape on
+ * both axes; with it, a frame that does not is still refused, because no
+ * single scale would then map a region onto it.
+ */
+export function sharedTabScale(input: {
+  surface: string | undefined;
+  sameTab: boolean | null;
+  frame: Size;
+  viewport: Size;
+}): number | null {
+  const { surface, sameTab, frame, viewport } = input;
+  if (surface !== "browser" || sameTab === false) return null;
+  if (!(frame.width > 0 && frame.height > 0 && viewport.width > 0 && viewport.height > 0)) return null;
+  const sx = frame.width / viewport.width;
+  const sy = frame.height / viewport.height;
+  if (Math.abs(sx - sy) > 0.02 * Math.max(sx, sy)) return null;
+  return sx;
+}
