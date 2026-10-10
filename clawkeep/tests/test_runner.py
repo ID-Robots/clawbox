@@ -552,10 +552,10 @@ def test_upload_failure_reports_error(isolate_state: Path, tmp_path: Path) -> No
     ):
         rc = runner.run_once(cfg, "claw_x")
     assert rc == runner.EXIT_UPLOAD
-    # Once: the opening recount every run sends with its "running" heartbeat.
+    # Opening recount plus fresh pre-upload admission.
     # The post-upload recount is not reached — there was no upload to count,
     # and the error heartbeat below is the run's last word.
-    assert stats_mock.call_count == 1
+    assert stats_mock.call_count == 2
     assert heartbeats[-1]["status"] == "error"
     assert "AccessDenied" in heartbeats[-1]["error"]
     # Cleanup must still run on the upload failure path — a half-finished
@@ -563,7 +563,7 @@ def test_upload_failure_reports_error(isolate_state: Path, tmp_path: Path) -> No
     assert not archive.path.exists()
 
 
-def test_stats_failure_does_not_fail_run(isolate_state: Path, tmp_path: Path) -> None:
+def test_closing_stats_failure_does_not_fail_run(isolate_state: Path, tmp_path: Path) -> None:
     """Stats is best-effort: a list-objects failure after a successful upload
     must NOT mark the backup as failed — but it must also NOT clobber the
     portal's last-known cloudBytes/snapshotCount with zeros."""
@@ -579,7 +579,7 @@ def test_stats_failure_does_not_fail_run(isolate_state: Path, tmp_path: Path) ->
         patch("clawkeep.runner.api.heartbeat", side_effect=fake_hb),
         patch("clawkeep.runner.openclaw.create_archive", return_value=archive),
         patch("clawkeep.runner.s3.upload"),
-        patch("clawkeep.runner.s3.stats", side_effect=S3Error("ListBucket forbidden")),
+        patch("clawkeep.runner.s3.stats", side_effect=[CloudStats(0, 0), CloudStats(0, 0), S3Error("ListBucket forbidden")]),
     ):
         rc = runner.run_once(cfg, "claw_x")
     assert rc == runner.EXIT_OK
@@ -903,6 +903,7 @@ def test_run_opens_with_a_recount_not_the_counter(
             "clawkeep.runner.s3.stats",
             side_effect=[
                 CloudStats(cloud_bytes=0, snapshot_count=0),        # before upload
+                CloudStats(cloud_bytes=0, snapshot_count=0),        # admission
                 CloudStats(cloud_bytes=12, snapshot_count=1),       # after upload
             ],
         ),
@@ -1065,3 +1066,123 @@ def test_a_vanished_path_the_guard_ruled_out_is_not_retried(
     ))
     assert rc == runner.EXIT_OPENCLAW
     create.assert_called_once()
+
+
+@pytest.mark.parametrize("used,size,quota,allowed", [
+    (60, 39, 100, True),
+    (60, 40, 100, True),
+    (60, 41, 100, False),
+    (0, 101, 100, False),
+    (101, 1, 100, False),
+])
+def test_encrypted_size_admission_preserves_snapshots(
+    isolate_state: Path, tmp_path: Path, used: int, size: int, quota: int, allowed: bool,
+) -> None:
+    from dataclasses import replace
+
+    archive = _archive(tmp_path)
+    existing = {"locked.tar.gz.enc": b"locked", "old.tar.gz.enc": b"last good backup"}
+    before = existing.copy()
+    events = []
+
+    def encrypt(**kw):
+        kw["ciphertext_path"].write_bytes(b"x" * size)
+
+    def upload(creds, *, archive_path, object_name, progress_cb):
+        events.append("upload")
+        existing[object_name] = archive_path.read_bytes()
+
+    with (
+        patch("clawkeep.runner.api.mint_credentials",
+              return_value=replace(CREDS, quotaBytes=quota, cloudBytes=0)),
+        patch("clawkeep.runner.api.heartbeat") as heartbeat,
+        patch("clawkeep.runner.agent.create_archive", return_value=archive),
+        patch("clawkeep.runner.crypto.encrypt_file", side_effect=encrypt),
+        patch("clawkeep.runner.s3.stats", side_effect=[
+            CloudStats(0, 0), CloudStats(used, 2), CloudStats(used + size, 3),
+        ]),
+        patch("clawkeep.runner.s3.upload", side_effect=upload) as put,
+        patch("clawkeep.runner.apply_retention",
+              side_effect=lambda *a: events.append("retention")) as retention,
+        patch("clawkeep.runner.s3.delete_snapshot") as delete,
+        patch("clawkeep.runner.s3.write_manifest") as manifest,
+    ):
+        result = runner.run_once(_cfg(tmp_path), "claw_x")
+    assert {key: existing[key] for key in before} == before
+    delete.assert_not_called()
+    assert not archive.path.exists()
+    assert not archive.path.with_suffix(".gz.enc").exists()
+    final = state.load(isolate_state)
+    assert final.last_step == ""
+    assert final.upload_bytes_total == 0
+    if allowed:
+        assert result == runner.EXIT_OK
+        assert events == ["upload", "retention"]
+        assert used + size <= quota
+        assert final.last_backup_at_ms > 0
+    else:
+        assert result == runner.EXIT_QUOTA_FULL
+        put.assert_not_called()
+        retention.assert_not_called()
+        manifest.assert_not_called()
+        assert existing == before
+        assert final.last_backup_at_ms == 0
+        assert final.quota_full_since_ms > 0
+        error = heartbeat.call_args.kwargs
+        assert error["cloud_bytes"] == used
+        assert f"needs {size} bytes" in error["error"]
+        assert "Nothing was uploaded or removed" in error["error"]
+
+
+def test_admission_fails_closed_when_fresh_listing_fails(isolate_state, tmp_path):
+    archive = _archive(tmp_path)
+    with (
+        patch("clawkeep.runner.api.mint_credentials", return_value=CREDS),
+        patch("clawkeep.runner.api.heartbeat") as heartbeat,
+        patch("clawkeep.runner.agent.create_archive", return_value=archive),
+        patch("clawkeep.runner.s3.stats", side_effect=[CloudStats(0, 2), S3Error("offline")]),
+        patch("clawkeep.runner.s3.upload") as upload,
+        patch("clawkeep.runner.apply_retention") as retention,
+        patch("clawkeep.runner.s3.write_manifest") as manifest,
+    ):
+        assert runner.run_once(_cfg(tmp_path), "claw_x") == runner.EXIT_NETWORK
+    upload.assert_not_called()
+    retention.assert_not_called()
+    manifest.assert_not_called()
+    assert "Check connectivity and retry" in heartbeat.call_args.kwargs["error"]
+    assert state.load(isolate_state).last_snapshot_count == 2
+
+
+def test_competing_run_does_not_admit_or_mutate_active_run(isolate_state, tmp_path):
+    import threading
+
+    entered = threading.Event()
+    release = threading.Event()
+    results = []
+
+    def active(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return runner.EXIT_OK
+
+    state.save(state.State(last_heartbeat_status="running", last_cloud_bytes=75), isolate_state)
+    before = isolate_state.read_bytes()
+    with (
+        patch("clawkeep.runner._run_once_locked", side_effect=active) as cycle,
+        patch("clawkeep.runner.api.heartbeat") as heartbeat,
+    ):
+        first = threading.Thread(target=lambda: results.append(runner.run_once(_cfg(tmp_path), "x")))
+        first.start()
+        try:
+            assert entered.wait(5)
+            assert runner.run_once(_cfg(tmp_path), "x") == runner.EXIT_BACKUP_FAILED
+            assert cycle.call_count == 1
+            assert isolate_state.read_bytes() == before
+            heartbeat.assert_not_called()
+        finally:
+            release.set()
+            first.join(5)
+        assert not first.is_alive()
+        assert results == [runner.EXIT_OK]
+        assert runner.run_once(_cfg(tmp_path), "x") == runner.EXIT_OK
+        assert cycle.call_count == 2
