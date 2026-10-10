@@ -125,9 +125,14 @@ function missingCredential(raw: string): { provider?: string } | null {
  * models failed (N): a/b: … (reason) | c/d: … (reason)` — or null for any
  * other line. The first attempt is the model the chat is set to; the rest are
  * fallbacks, and a fallback with no sign-in is not why the turn failed.
+ *
+ * The run's second `chat` error frame carries the same summary inside the
+ * gateway's wrapper (`⚠️ Agent failed before reply: … To view logs, …`), and
+ * that frame is all there is to read when the first one is gone — a page
+ * reloaded between the two, a run the ledger no longer holds.
  */
 function requestedAttempt(text: string): string | null {
-  const head = /^All models failed \((\d+)\):\s*/i.exec(text);
+  const head = /^(?:Error:\s*)?(?:⚠️?\s*)?(?:Agent failed before reply:\s*)?All models failed \((\d+)\):\s*/i.exec(text);
   if (!head || Number(head[1]) < 2) return null;
   const attempts = text.slice(head[0].length);
   const next = attempts.indexOf(" | ");

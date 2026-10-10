@@ -344,6 +344,32 @@ describe("describeChatFailure — a provider this box has no sign-in for", () =>
       expect(text).not.toMatch(/Anthropic/);
     });
 
+    // The run's second `chat` error frame: the same summary inside the
+    // gateway's wrapper, with no context beside it. It is the only frame left
+    // when the page reloaded between the two or the ledger no longer holds
+    // the run, and the fallback's tag rides along at its end.
+    it("reads the first attempt out of the gateway's wrapped summary too", () => {
+      const wrapped = (firstAttempt: string) =>
+        `⚠️ Agent failed before reply: ${SUMMARY(firstAttempt)} | missing-provider-auth.`
+        + "\nTo view logs, run `openclaw logs --follow` in a terminal.";
+      for (const raw of [wrapped("429 Too many requests."), `Error: ${wrapped("429 Too many requests.")}`]) {
+        for (const text of [describeChatFailure(raw), describeChatFailure(raw, LAST_STEP)]) {
+          expect(text).toMatch(/rate-limiting this box right now/);
+          expect(text).not.toMatch(/no working sign-in/);
+          expect(text).not.toMatch(/Anthropic/);
+          expect(leaks(text)).toBe(false);
+        }
+      }
+      const allowance = describeChatFailure(wrapped("429 Weekly token allowance used up."), LAST_STEP);
+      expect(allowance).toMatch(/this week's ClawBox AI chat allowance is used up/);
+      expect(allowance).not.toMatch(/no working sign-in/);
+
+      // Wrapped or not, the model the chat is set to is still the one asked.
+      const first = 'anthropic/claude-opus-5-5: No API key found for provider "anthropic". (auth) | deepseek/deepseek-v4-flash: 429 Weekly token allowance used up. (rate_limit)';
+      expect(describeChatFailure(`⚠️ Agent failed before reply: All models failed (2): ${first}\nTo view logs, run \`openclaw logs --follow\` in a terminal.`))
+        .toBe(NAMED("Anthropic"));
+    });
+
     it("still says the sign-in is missing when the model the chat is set to is the one without it", () => {
       // A constructed line: on the wire the gateway's 240-character cut usually
       // ends the first attempt before the quoted id, and the rule then has
