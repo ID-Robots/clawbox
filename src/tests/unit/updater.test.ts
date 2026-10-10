@@ -2830,8 +2830,14 @@ describe("updater", () => {
       mockGet.mockImplementation(async (key) => key === "update_needs_continuation" ? "old-build" : undefined);
       mockRebuiltBox("new-build");
 
+      // `true` is the verdict itself: the stale Result was not read as a
+      // failed rebuild (which answers `false` and paints the restart red).
       expect(await updater.checkContinuation()).toBe(true);
-      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+      // Completion is read from what the run WROTE, not from the process-global
+      // state: earlier cases in this file leave appliance runs polling this
+      // very Result query, and the "failed" answered here ends one of them
+      // into that shared state at whatever moment its 5 s poll lands.
+      await vi.waitFor(() => expect(mockSetMany).toHaveBeenCalledWith(expect.objectContaining({ update_completed: true })));
       const calls = commands();
       expect(calls.some(rootStep("post_update"))).toBe(true);
       // A healthy gateway is left alone, and the appliance's plugin retry —
