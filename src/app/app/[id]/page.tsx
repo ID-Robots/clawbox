@@ -41,6 +41,7 @@ const SettingsApp = dynamic(() => import("@/components/SettingsApp"), { ssr: fal
 const AppStore = dynamic(() => import("@/components/AppStore"), { ssr: false });
 const HermesSkillsStore = dynamic(() => import("@/components/HermesSkillsStore"), { ssr: false });
 const MemoryShardApp = dynamic(() => import("@/components/MemoryShardApp"), { ssr: false });
+const ScreenshotApp = dynamic(() => import("@/components/ScreenshotApp"), { ssr: false });
 
 
 // This window is the same app the desktop shows, so its title comes from the
@@ -538,6 +539,8 @@ export default function StandaloneAppPage() {
         return <BrowserApp />;
       case "vnc":
         return <VNCApp />;
+      case "screenshot":
+        return <ScreenshotApp />;
       case "settings":
         return (
           <div className="h-full overflow-y-auto">

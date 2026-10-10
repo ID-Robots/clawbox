@@ -15,7 +15,7 @@ export interface AppDef {
   id: string;
   name: string;
   color: string;
-  type: "settings" | "placeholder" | "external" | "store" | "hermes_skills" | "installed" | "terminal" | "coding" | "files" | "browser" | "vnc" | "webapp" | "setup" | "clawkeep" | "memory_shard" | "system_update" | "chat";
+  type: "settings" | "placeholder" | "external" | "store" | "hermes_skills" | "installed" | "terminal" | "coding" | "files" | "browser" | "vnc" | "webapp" | "setup" | "clawkeep" | "memory_shard" | "system_update" | "chat" | "screenshot";
   url?: string;
   // Webapps only: how the desktop opens it (InstalledMeta.launch).
   launch?: "window";
@@ -71,4 +71,9 @@ export const apps: AppDef[] = [
   // the two URLs together.
   { id: "web", name: "app.web", color: "#0f766e", type: "external", url: "https://duckduckgo.com/", pinned: false, kioskOnly: true },
   { id: "vnc", name: "app.remoteDesktop", color: "#7c3aed", type: "vnc", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
+  // Capture the desktop and mark it up (TASK-1475). On the desktop, off the
+  // shelf: its keys (Print Screen, Alt+Shift+S) take a capture with the app
+  // closed, and the window opens itself on the result. Last in the list so a
+  // desktop that already has its icons arranged gains one at the end.
+  { id: "screenshot", name: "app.screenshot", color: "#be123c", type: "screenshot", pinned: false, defaultWidth: 1100, defaultHeight: 680 },
 ];
