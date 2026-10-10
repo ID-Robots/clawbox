@@ -201,6 +201,189 @@ describe("describeChatFailure — a refused ClawBox AI credential", () => {
 });
 
 /**
+ * A turn the gateway could not even ask the provider about: its auth store
+ * holds no usable sign-in for the model the chat is set to (2026-10-10, a
+ * Claude sign-in the store never received). The strings are the three shapes
+ * one such run put on the wire — the failover detail, the first `chat` error
+ * frame (cut at 240 characters by the gateway) and the second one, sent when
+ * dispatch completes — with only the home directory changed.
+ */
+describe("describeChatFailure — a provider this box has no sign-in for", () => {
+  const RAW =
+    'No API key found for provider "anthropic". Auth store: /home/clawbox/.openclaw/state/openclaw.sqlite'
+    + " (agentDir: /home/clawbox/.openclaw/agents/main/agent). Configure an API key"
+    + " (openclaw models auth paste-api-key --provider anthropic; add --agent <id> for a non-default agent)"
+    + " or copy only portable static auth profiles from the main agentDir.";
+  const FRAME1 = `${(RAW + " | missing-provider-auth").slice(0, 240)}...`;
+  const FRAME2 =
+    "⚠️ Agent failed before reply: " + RAW + " | missing-provider-auth.\nTo view logs, run `openclaw logs --follow` in a terminal.";
+
+  const GENERIC = "That message did not go through. Send it again — the details stayed in this box's log.";
+  const NAMED = (provider: string) =>
+    `That message did not go through — this box has no working sign-in for ${provider}, the provider this chat is set to.`
+    + ` Connect ${provider} again in Settings, under Providers, or pick another model in the header, then send it again.`;
+  const UNNAMED =
+    "That message did not go through — this box has no working sign-in for the provider this chat is set to."
+    + " Connect it again in Settings, under Providers, or pick another model in the header, then send it again.";
+
+  it("says what is wrong and where to fix it, for every shape the failure arrives in", () => {
+    for (const raw of [RAW, FRAME1, FRAME2]) {
+      const shown = [
+        describeChatFailure(raw),
+        describeChatFailure(raw, {}),
+        describeChatFailure(raw, { reason: "auth", model: "anthropic/claude-opus-5-5", detail: RAW }),
+      ];
+      // One failure, one sentence — whatever the frame happened to carry.
+      expect(new Set(shown).size).toBe(1);
+      const text = shown[0];
+      expect(text).toBe(NAMED("Anthropic"));
+      expect(text).toMatch(/Settings/);
+      expect(text).toMatch(/Providers/);
+      expect(text).toMatch(/header/);
+      expect(leaks(text)).toBe(false);
+      expect(text).not.toMatch(/openclaw|sqlite|paste-api-key|missing-provider-auth|agentDir/i);
+      // Not the refused-credential sentence: the gateway tags this `auth`, but
+      // nobody refused anything — the provider was never asked.
+      expect(text).not.toMatch(/not accepting this box's sign-in/);
+      // And not the line the owner actually read, which could never work.
+      expect(text).not.toBe(GENERIC);
+    }
+  });
+
+  it("names no provider when the gateway named none", () => {
+    expect(describeChatFailure("LLM request failed. | missing-provider-auth")).toBe(UNNAMED);
+    expect(describeChatFailure("⚠️ Missing API key for the selected provider on the gateway. Configure provider auth, then try again.")).toBe(UNNAMED);
+  });
+
+  it("falls back to the provider the run named, then to the model's", () => {
+    expect(describeChatFailure("missing-provider-auth", { provider: "openai", model: "anthropic/claude-opus-5-5" })).toBe(NAMED("OpenAI"));
+    expect(describeChatFailure("missing-provider-auth", { model: "anthropic/claude-opus-5-5" })).toBe(NAMED("Anthropic"));
+    // The id in the wording wins over both: it is the store that was looked in.
+    expect(describeChatFailure(RAW, { provider: "openai", model: "google/gemini-3" })).toBe(NAMED("Anthropic"));
+  });
+
+  it("reads the gateway's user copy of the same failure, and labels an id it has no name for", () => {
+    expect(describeChatFailure('⚠️ Missing API key for provider "openai". Configure the gateway auth for that provider, then try again.'))
+      .toBe(NAMED("OpenAI"));
+    expect(describeChatFailure('No API key found for provider "litellm".')).toBe(NAMED("Litellm"));
+  });
+
+  it("never echoes an id that is not a plain provider id", () => {
+    const longId = "a".repeat(200);
+    for (const raw of [
+      'No API key found for provider "../../etc/passwd".',
+      'No API key found for provider "/home/clawbox/.ssh/id_ed25519".',
+      'No API key found for provider "open ai <script>".',
+      `No API key found for provider "${longId}".`,
+    ]) {
+      const text = describeChatFailure(raw);
+      // Still this failure — just with nobody named.
+      expect(text).toBe(UNNAMED);
+      expect(text).not.toMatch(/passwd|id_ed25519|script|aaaa/);
+    }
+  });
+
+  it("is not a rate limit because a folder on the box has 429 in its name", () => {
+    const raw = RAW.replaceAll("/home/clawbox/.openclaw", "/home/clawbox/box-429/.openclaw");
+    expect(describeChatFailure(raw)).toBe(NAMED("Anthropic"));
+    expect(describeChatFailure("LLM request failed.", { reason: "auth", detail: raw })).toBe(NAMED("Anthropic"));
+  });
+
+  it("leaves a sign-in the provider really refused on its own sentence", () => {
+    const refused = "That message did not go through — the AI provider is not accepting this box's sign-in any more. Reconnect it in Settings, under Providers, and send it again.";
+    expect(describeChatFailure("HTTP 401: invalid_api_key", { reason: "auth", provider: "anthropic" })).toBe(refused);
+    expect(describeChatFailure("The agent run failed before producing a reply.", { reason: "auth", provider: "anthropic" })).toBe(refused);
+  });
+
+  it("says so under a reply the fallback wrote, instead of blaming the provider", () => {
+    const note = describeFallbackReply({
+      reason: "auth",
+      model: "anthropic/claude-opus-5-5",
+      detail: RAW,
+      servedModel: "deepseek/deepseek-v4-flash",
+    });
+    expect(note).toBe(
+      "This reply came from deepseek-v4-flash, not claude-opus-5-5: this box has no working sign-in for Anthropic."
+      + " Connect Anthropic again in Settings, under Providers, to get claude-opus-5-5 back.",
+    );
+    expect(note).not.toMatch(/did not accept/);
+    expect(leaks(note ?? "")).toBe(false);
+  });
+
+  // A chain of models: the gateway's summary names every attempt, and the
+  // last step's detail is the LAST fallback's. The frames are a live 2026.9.4
+  // gateway's for a box whose picked model (ClawBox AI's, on its `deepseek`
+  // wire id) hit its weekly allowance and whose fallback list — hand-edited —
+  // ends on a Claude model with no sign-in. The missing sign-in outranked the
+  // allowance and named Anthropic as "the provider this chat is set to".
+  describe("when it is a later fallback that has no sign-in", () => {
+    const SUMMARY = (firstAttempt: string) =>
+      `All models failed (2): deepseek/deepseek-v4-flash: ${firstAttempt} (rate_limit) | anthropic/claude-opus-5-5:`
+      + " Couldn't sign in to anthropic. Your saved login looks expired or no longer works. Run `openclaw models auth log...";
+    const LAST_STEP = {
+      provider: "deepseek",
+      model: "anthropic/claude-opus-5-5",
+      reason: "auth",
+      detail: "Couldn't sign in to anthropic. Your saved login looks expired or no longer works. Run `openclaw models auth login"
+        + ' --provider anthropic` or `openclaw configure`. (No API key found for provider "anthropic". Auth store:'
+        + " /home/clawbox/.openclaw/agents/main/agent/openclaw-agent.sqlite (agentDir: /home/clawbox/.openclaw/…",
+    };
+
+    it("says what stopped the model the chat is set to: its allowance", () => {
+      const text = describeChatFailure(SUMMARY("429 Weekly token allowance used up."), LAST_STEP);
+      expect(text).toMatch(/this week's ClawBox AI chat allowance is used up/);
+      expect(text).not.toMatch(/no working sign-in/);
+      expect(text).not.toMatch(/Anthropic/);
+      expect(leaks(text)).toBe(false);
+    });
+
+    it("…or its rate limit", () => {
+      const text = describeChatFailure(SUMMARY("429 Too many requests."), LAST_STEP);
+      expect(text).toMatch(/rate-limiting this box right now/);
+      expect(text).not.toMatch(/no working sign-in/);
+      expect(text).not.toMatch(/Anthropic/);
+    });
+
+    it("still says the sign-in is missing when the model the chat is set to is the one without it", () => {
+      // A constructed line: on the wire the gateway's 240-character cut usually
+      // ends the first attempt before the quoted id, and the rule then has
+      // nothing to read. Where the id does arrive, the first attempt is asked.
+      const first ='anthropic/claude-opus-5-5: No API key found for provider "anthropic". (auth) | deepseek/deepseek-v4-flash: 429 Weekly token allowance used up. (rate_limit)';
+      expect(describeChatFailure(`All models failed (2): ${first}`, { reason: "rate_limit", model: "deepseek/deepseek-v4-flash", detail: "429 Weekly token allowance used up." }))
+        .toBe(NAMED("Anthropic"));
+    });
+
+    it("reads a chain of ONE, and any line that is no summary, off everything the run said — as before", () => {
+      // One candidate has no "first of several" to prefer: the detail is its own.
+      expect(describeChatFailure("All models failed (1): anthropic/claude-opus-5-5: LLM request failed.", { reason: "auth", detail: RAW }))
+        .toBe(NAMED("Anthropic"));
+      expect(describeChatFailure("The agent run failed before producing a reply.", { reason: "auth", detail: RAW })).toBe(NAMED("Anthropic"));
+    });
+  });
+
+  // The provider id is lifted out of error text and looked up in a table. A
+  // plain object answers `constructor` with Object's own function, which was
+  // printed into the box's sentence as its source text.
+  it("never prints a prototype member's source where a provider's name goes", () => {
+    const shown = [
+      describeChatFailure('Missing API key for provider "constructor"'),
+      describeChatFailure("The agent run failed before producing a reply.", { provider: "anthropic", reason: "auth", detail: 'HTTP 400: upstream said: No API key found for provider "constructor".' }),
+      // The structured path, which reached the same lookup before any id came out of free text.
+      describeChatFailure("The agent run failed before producing a reply.", { provider: "constructor", reason: "format", detail: "HTTP 400: bad request" }),
+      describeFallbackReply({ reason: "auth", provider: "anthropic", model: "claude-opus-5-5", servedModel: "deepseek/deepseek-v4-flash", detail: 'No API key found for provider "constructor".' }) ?? "",
+    ];
+    for (const text of shown) {
+      expect(text).not.toMatch(/native code|function\b|\[object/);
+      expect(leaks(text)).toBe(false);
+    }
+    // Named like any id the table has no label for.
+    expect(shown[0]).toBe(NAMED("Constructor"));
+    expect(shown[1]).toBe(NAMED("Constructor"));
+    expect(shown[3]).toContain("no working sign-in for Constructor");
+  });
+});
+
+/**
  * A ClawBox AI allowance refusal. It also arrives as a 429, and the generic
  * "wait a minute and send it again" is the wrong advice for a window that
  * frees up days from now — so the turn names WHICH allowance is spent and

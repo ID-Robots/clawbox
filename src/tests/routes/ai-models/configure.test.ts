@@ -212,6 +212,16 @@ vi.mock("@/lib/openclaw-core-generation", () => ({
   installedOpenclawCoreGeneration: vi.fn(async () => "v2"),
 }));
 
+// The gateway's own auth store, which a Claude sign-in reads back after a
+// COMPLETED doctor and rewrites when the migration kept what was there. Never
+// the real module in a route test: what the store holds is each case's to say.
+// Unseeded on purpose — every case that leaves the doctor mock at `undefined`
+// must never reach it, and one that does by accident fails on the first read.
+vi.mock("@/lib/openclaw-auth-store", () => ({
+  readGatewayAuthProfile: vi.fn(),
+  putGatewayOAuthProfile: vi.fn(),
+}));
+
 vi.mock("@/lib/local-ai-token", () => ({
   // Stable 64-char hex value so tests can assert on shape without depending
   // on filesystem state. Real impl reads/writes data/.local-ai-token.
@@ -237,6 +247,13 @@ import { getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
 import { getLocalAiToken } from "@/lib/local-ai-token";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 import { forgetProviderEnumerations } from "@/lib/provider-runnable";
+import {
+  putGatewayOAuthProfile,
+  readGatewayAuthProfile,
+  type GatewayAuthProfileRead,
+  type GatewayOAuthBundle,
+} from "@/lib/openclaw-auth-store";
+import { tokenFingerprint } from "@/lib/anthropic-gateway-auth";
 
 const mockSpawn = vi.mocked(childProcess.spawn);
 const mockGetAll = vi.mocked(getAll);
@@ -3679,6 +3696,492 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(warn.mock.calls.some(([first]) => String(first).includes("deepseek provider plugin install did not complete")))
         .toBe(true);
       warn.mockRestore();
+    });
+  });
+
+  /**
+   * The Claude sign-in incident of 2026-10-10. `doctor --fix` answered
+   * "completed" over a migration that only ADDS profile ids: for an id the
+   * store already held it kept the stored profile — on that box a failed OAuth
+   * refresh fence — and archived the file this route had written. "completed"
+   * was the route's only proof, so it answered 200 to 7 of 8 sign-ins while
+   * every chat turn died with "No API key found for provider anthropic".
+   *
+   * The route now asks the gateway's own store what it holds, replaces it in
+   * place when that is not the sign-in, and refuses when it still is not.
+   */
+  describe("a Claude sign-in and what the gateway's auth store holds afterwards", () => {
+    // Placeholders in the real ones' shape — this repository is public.
+    const ACCESS = "sk-ant-oat01-FAKE-access-token-for-tests";
+    const REFRESH = "sk-ant-ort01-FAKE-refresh-token-for-tests";
+    const PROFILE = "anthropic:default";
+    // ONE sentence for every refusal, and it claims nothing about what the
+    // store was left holding: a replace that committed and could not be read
+    // back stays committed, so "nothing was changed" was false on that exit.
+    const NOT_STORED = "The sign-in was accepted, but this device could not confirm that its assistant stored it,"
+      + " so the setup was not finished. Sign in again; if it is refused again, restart the device and retry.";
+
+    type Held = Extract<GatewayAuthProfileRead, { kind: "present" }>;
+    /** What the box of the incident held: core's inert markers, `expires: 1`, made terminal. */
+    const FENCE: Partial<Held> = { fingerprint: null, refreshFingerprint: null, expires: 1, fenced: true, fence: "failed" };
+    /** The same markers while a renewal is in flight — no sign-in either, with the gateway stopped. */
+    const PENDING_FENCE: Partial<Held> = { ...FENCE, fence: "pending" };
+    /** An earlier sign-in, or another account's. */
+    const ANOTHER: Partial<Held> = {
+      fingerprint: "0123456789abcdef",
+      refreshFingerprint: "fedcba9876543210",
+      expires: 1_790_000_000_000,
+    };
+
+    const mockRead = vi.mocked(readGatewayAuthProfile);
+    const mockPut = vi.mocked(putGatewayOAuthProfile);
+
+    beforeEach(() => {
+      // For this block only: vitest.config's `mockReset` hands every other
+      // case in the file its inert `undefined` back.
+      vi.mocked(runOpenclawDoctorFix).mockResolvedValue("completed");
+    });
+
+    function signIn(body: Record<string, unknown> = {}) {
+      return jsonRequest({
+        provider: "anthropic",
+        apiKey: ACCESS,
+        authMode: "subscription",
+        refreshToken: REFRESH,
+        expiresIn: 3600,
+        ...body,
+      });
+    }
+
+    /** The bundle this request wrote to auth-profiles.json: what the migration was handed. */
+    function fileBundle(): GatewayOAuthBundle {
+      const write = mockFs.writeFile.mock.calls.find(([file]) => String(file).includes("auth-profiles.json"));
+      return JSON.parse(write?.[1] as string).profiles[PROFILE];
+    }
+
+    /**
+     * The store holding exactly that bundle, or `instead` of it. Built from
+     * the file at the moment the route ASKS, because `expires` is this
+     * request's own clock and no fixture can know it beforehand.
+     */
+    function holding(instead: Partial<Held> = {}): GatewayAuthProfileRead {
+      const bundle = fileBundle();
+      return {
+        kind: "present",
+        store: "shared",
+        type: "oauth",
+        fingerprint: tokenFingerprint(bundle.access),
+        refreshFingerprint: tokenFingerprint(bundle.refresh),
+        expires: bundle.expires,
+        fenced: false,
+        fence: null,
+        storeUpdatedAtMs: Date.now(),
+        ...instead,
+      };
+    }
+
+    /** One COPY of a profile, as `sharedCopy` carries the shared row's: this sign-in, or `instead` of it. */
+    function copy(instead: Partial<Held> = {}): NonNullable<Held["sharedCopy"]> {
+      const { type, fingerprint, refreshFingerprint, expires, fenced, fence } = holding(instead) as Held;
+      return { type, fingerprint, refreshFingerprint, expires, fenced, fence };
+    }
+
+    /** Every line the request logged at `level`, one string per call. */
+    function logged(spy: { mock: { calls: unknown[][] } }): string[] {
+      return spy.mock.calls.map((args) => args.map(String).join(" "));
+    }
+
+    /** Every `[configure]` warning of the request, one string per line. */
+    function warnings(warn: { mock: { calls: unknown[][] } }): string[] {
+      return warn.mock.calls.map((args) => args.map(String).join(" "));
+    }
+
+    function primaryWasWritten(): boolean {
+      return configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch))
+        .some((command) => command.startsWith("config set agents.defaults.model.primary anthropic/"));
+    }
+
+    it("writes nothing to the store when the migration imported the sign-in", async () => {
+      mockRead.mockImplementation(() => holding());
+
+      const res = await configurePost(signIn());
+
+      expect(res.status).toBe(200);
+      expect(mockRead).toHaveBeenCalledTimes(1);
+      // No `paths`: the module resolves the store itself, at call time.
+      expect(mockRead).toHaveBeenCalledWith(PROFILE);
+      expect(mockPut).not.toHaveBeenCalled();
+      expect(primaryWasWritten()).toBe(true);
+    });
+
+    it.each([
+      ["a failed refresh fence", FENCE, /an OAuth refresh fence \(failed\)/],
+      // With the gateway stopped, a renewal still "in flight" is nobody's: it is replaced like the failed one.
+      ["a pending refresh fence", PENDING_FENCE, /an OAuth refresh fence \(pending\)/],
+      ["another sign-in", ANOTHER, /left as it was: present\)/],
+    ])("replaces %s the migration kept, and says so once", async (_what, kept, said) => {
+      mockRead.mockImplementationOnce(() => holding(kept)).mockImplementation(() => holding());
+      mockPut.mockReturnValue({ ok: true, store: "shared" });
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const res = await configurePost(signIn());
+
+      expect(res.status).toBe(200);
+      expect(mockPut).toHaveBeenCalledTimes(1);
+      // The SAME bundle the legacy file got: one `expires` for both, or the
+      // read-back below could never match what was just written.
+      expect(mockPut).toHaveBeenCalledWith(PROFILE, fileBundle());
+      expect(fileBundle()).toEqual({
+        type: "oauth",
+        provider: "anthropic",
+        access: ACCESS,
+        refresh: REFRESH,
+        expires: expect.any(Number),
+      });
+      // Read, replaced, read again — and only then the rest of the save.
+      expect(mockRead).toHaveBeenCalledTimes(2);
+      expect(mockRead.mock.invocationCallOrder[1]).toBeGreaterThan(mockPut.mock.invocationCallOrder[0]);
+      expect(primaryWasWritten()).toBe(true);
+
+      const lines = warnings(warn);
+      const replaced = lines.filter((line) => line.includes("ClawBox replaced it in place"));
+      expect(replaced).toHaveLength(1);
+      expect(replaced[0]).toMatch(said);
+      expect(replaced[0]).not.toContain("the main agent's own copy");
+      // What was held, never the credential or the fingerprint that stands in for it.
+      for (const secret of [ACCESS, REFRESH, tokenFingerprint(ACCESS), tokenFingerprint(REFRESH)]) {
+        expect(lines.join("\n")).not.toContain(secret);
+      }
+      warn.mockRestore();
+    });
+
+    it("writes the sign-in where the migration stored nothing at that id", async () => {
+      mockRead.mockImplementationOnce(() => ({ kind: "absent", store: "agent" })).mockImplementation(() => holding());
+      mockPut.mockReturnValue({ ok: true, store: "agent" });
+
+      const res = await configurePost(signIn());
+
+      expect(res.status).toBe(200);
+      expect(mockPut).toHaveBeenCalledWith(PROFILE, fileBundle());
+      expect(mockRead).toHaveBeenCalledTimes(2);
+    });
+
+    // "It landed" is five facts at once. Each row breaks exactly one of them
+    // over a store that is otherwise this very sign-in.
+    it.each<[string, Partial<Held>]>([
+      ["another access token", { fingerprint: "0123456789abcdef" }],
+      ["another expiry", { expires: 1_790_000_000_000 }],
+      ["a profile that is not a sign-in", { type: "api_key" }],
+      ["a profile core reads as a fence", { fenced: true }],
+      ["no credential at all", { fingerprint: null }],
+    ])("does not take %s for the sign-in", async (_what, instead) => {
+      mockRead.mockImplementationOnce(() => holding(instead)).mockImplementation(() => holding());
+      mockPut.mockReturnValue({ ok: true, store: "shared" });
+
+      const res = await configurePost(signIn());
+
+      expect(res.status).toBe(200);
+      expect(mockPut).toHaveBeenCalledTimes(1);
+    });
+
+    // The main agent's own copy of the id (openclaw-auth-store.ts): core
+    // resolves it over the shared row, and hands out the shared one instead
+    // when that is usable and expires later. Proven against 2026.9.4 — a gate
+    // that judged the shared row alone answered 200 over a chat that stayed
+    // dead. The read answers the agent's copy and carries the shared row's
+    // beside it; stored means BOTH are this sign-in.
+    describe("on a box whose main agent holds its own copy of the profile", () => {
+      it.each<[string, () => GatewayAuthProfileRead]>([
+        ["the agent's copy is a fence over a shared row that took the sign-in", () => holding({ ...FENCE, sharedCopy: copy() })],
+        ["the agent's copy is the sign-in over a shared row that kept another", () => holding({ sharedCopy: copy(ANOTHER) })],
+        ["the agent's copy is the sign-in over a shared row holding nothing at the id", () => holding({ sharedCopy: null })],
+        ["neither copy is the sign-in", () => holding({ ...ANOTHER, sharedCopy: copy(FENCE) })],
+      ])("replaces when %s", async (_what, first) => {
+        mockRead.mockImplementationOnce(first).mockImplementation(() => holding({ sharedCopy: copy() }));
+        mockPut.mockReturnValue({ ok: true, store: "shared" });
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+        const res = await configurePost(signIn());
+
+        expect(res.status).toBe(200);
+        expect(mockPut).toHaveBeenCalledTimes(1);
+        expect(mockPut).toHaveBeenCalledWith(PROFILE, fileBundle());
+        expect(mockRead).toHaveBeenCalledTimes(2);
+        expect(primaryWasWritten()).toBe(true);
+        // No such box is known in the field; the journal is how the first would be recognised.
+        const replaced = warnings(warn).filter((line) => line.includes("ClawBox replaced it in place"));
+        expect(replaced).toHaveLength(1);
+        expect(replaced[0]).toContain("in the main agent's own copy");
+        warn.mockRestore();
+      });
+
+      it("writes nothing when both copies already are the sign-in", async () => {
+        mockRead.mockImplementation(() => holding({ sharedCopy: copy() }));
+
+        const res = await configurePost(signIn());
+
+        expect(res.status).toBe(200);
+        expect(mockPut).not.toHaveBeenCalled();
+      });
+
+      it.each<[string, () => GatewayAuthProfileRead]>([
+        // What the store module answers when the agent's database refused the write the shared row took.
+        ["the agent's copy is still the fence", () => holding({ ...FENCE, sharedCopy: copy() })],
+        ["the shared row still is not the sign-in", () => holding({ sharedCopy: copy(ANOTHER) })],
+      ])("refuses when, after the replace, %s", async (_what, after) => {
+        mockRead.mockImplementation(after);
+        mockPut.mockReturnValue({ ok: true, store: "shared" });
+        const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+        const res = await configurePost(signIn());
+
+        expect(res.status).toBe(502);
+        await expect(res.json()).resolves.toEqual({ error: NOT_STORED, code: "credential_not_stored" });
+        expect(primaryWasWritten()).toBe(false);
+        error.mockRestore();
+      });
+    });
+
+    it("refuses, with nothing else changed, when the store still does not hold the sign-in", async () => {
+      // Through the server-side handoff, so the file a retry needs is in play.
+      mockFs.readFile.mockImplementation(async (file) =>
+        String(file).endsWith("oauth-device-tokens.json")
+          ? JSON.stringify({
+              provider: "anthropic",
+              access_token: ACCESS,
+              refresh_token: REFRESH,
+              expires_in: 3600,
+              createdAt: Date.now(),
+            })
+          : JSON.stringify({ version: 1, profiles: {} }),
+      );
+      // The write reported success and the store answers the fence all the same.
+      mockRead.mockImplementation(() => holding(FENCE));
+      mockPut.mockReturnValue({ ok: true, store: "shared" });
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const res = await configurePost(jsonRequest({
+        provider: "anthropic",
+        authMode: "subscription",
+        oauthHandoff: true,
+      }));
+      const body = await res.json();
+
+      expect(res.status).toBe(502);
+      expect(body).toEqual({ error: NOT_STORED, code: "credential_not_stored" });
+      // A replace DID commit on this exit, so the sentence may not say otherwise.
+      expect(body.error).not.toMatch(/nothing was changed|kept its previous/i);
+      expect(mockPut).toHaveBeenCalledTimes(1);
+      expect(mockRead).toHaveBeenCalledTimes(2);
+      // The journal says which refusal this was: the profile, what was held,
+      // that the replace committed, and what was held afterwards. This exit
+      // used to log nothing at all.
+      const refusals = logged(error).filter((line) => line.includes("is not in the gateway's auth store"));
+      expect(refusals).toHaveLength(1);
+      expect(refusals[0]).toContain(PROFILE);
+      expect(refusals[0]).toMatch(/the store answered present, an OAuth refresh fence \(failed\) before/);
+      expect(refusals[0]).toMatch(/the replace committed/);
+      expect(refusals[0]).toMatch(/the store answered present, an OAuth refresh fence \(failed\) afterwards/);
+      for (const secret of [ACCESS, REFRESH, tokenFingerprint(ACCESS), tokenFingerprint(REFRESH)]) {
+        expect(logged(error).join("\n")).not.toContain(secret);
+      }
+      error.mockRestore();
+      // Everything a landed save writes comes after the gate, and none of it ran.
+      expect(vi.mocked(runOpenclawConfigSetBatch)).not.toHaveBeenCalled();
+      expect(vi.mocked(runOpenclawConfigSet)).not.toHaveBeenCalled();
+      expect(vi.mocked(setPrimaryModelWithoutCatalogValidation)).not.toHaveBeenCalled();
+      expect(mockSetMany).not.toHaveBeenCalled();
+      expect(mockApplyModelOverrideToAllAgentSessions).not.toHaveBeenCalled();
+      expect(vi.mocked(notifyProviderSetChanged)).not.toHaveBeenCalled();
+      // The handoff tokens stay for the retry the sentence asks for…
+      expect(mockFs.unlink).not.toHaveBeenCalled();
+      // …and this is not the failed-migration rollback: doctor DID complete,
+      // so there is no legacy file left to move aside.
+      expect(mockFs.rename).not.toHaveBeenCalledWith(
+        expect.stringMatching(/auth-profiles\.json$/),
+        expect.stringMatching(/auth-profiles\.json\.failed-/),
+      );
+      // The gateway doctor stopped comes back once, on the credential it had,
+      // and nobody waits on its port for an answer that has already failed.
+      expect(mockRestartGateway).toHaveBeenCalledTimes(1);
+      expect(mockRestartGateway).toHaveBeenCalledWith({ awaitReady: false });
+    });
+
+    it.each(["write-failed", "unreadable"] as const)(
+      "refuses when the replace itself answered %s",
+      async (reason) => {
+        mockRead.mockImplementation(() => holding(ANOTHER));
+        mockPut.mockReturnValue({ ok: false, reason });
+        const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+        const res = await configurePost(signIn());
+        const body = await res.json();
+
+        expect(res.status).toBe(502);
+        expect(body).toEqual({ error: NOT_STORED, code: "credential_not_stored" });
+        expect(mockPut).toHaveBeenCalledTimes(1);
+        // No second look: a replace that did not commit left nothing new to find.
+        expect(mockRead).toHaveBeenCalledTimes(1);
+        expect(vi.mocked(runOpenclawConfigSetBatch)).not.toHaveBeenCalled();
+        expect(mockRestartGateway).toHaveBeenCalledTimes(1);
+        // One line, naming the profile and the store module's own reason.
+        const refusals = logged(error).filter((line) => line.includes("is not in the gateway's auth store"));
+        expect(refusals).toHaveLength(1);
+        expect(refusals[0]).toContain(PROFILE);
+        expect(refusals[0]).toContain(`the replace answered ${reason}`);
+        expect(refusals[0]).toMatch(/the store answered present before/);
+        expect(refusals[0]).toMatch(/the store was not read afterwards/);
+        for (const secret of [ACCESS, REFRESH, tokenFingerprint(ACCESS), tokenFingerprint(REFRESH), String(ANOTHER.fingerprint)]) {
+          expect(logged(error).join("\n")).not.toContain(secret);
+        }
+        error.mockRestore();
+      },
+    );
+
+    it("refuses, without claiming nothing changed, when the replace committed and the store then cannot be read", async () => {
+      mockRead.mockImplementationOnce(() => holding(ANOTHER)).mockImplementation(() => ({ kind: "unreadable", cause: "disk I/O error" }));
+      mockPut.mockReturnValue({ ok: true, store: "shared" });
+      const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const res = await configurePost(signIn());
+      const body = await res.json();
+
+      expect(res.status).toBe(502);
+      expect(body).toEqual({ error: NOT_STORED, code: "credential_not_stored" });
+      expect(body.error).not.toMatch(/nothing was changed|kept its previous/i);
+      const refusals = logged(error).filter((line) => line.includes("is not in the gateway's auth store"));
+      expect(refusals).toHaveLength(1);
+      expect(refusals[0]).toMatch(/the replace committed, and the store answered unreadable afterwards/);
+      error.mockRestore();
+    });
+
+    it("keeps the code when the gateway cannot be restarted after the refusal", async () => {
+      // An update holds a runtime mask on the unit. The offline hint is added
+      // to the sentence; the code a client branches on must survive it.
+      mockRead.mockImplementation(() => holding(FENCE));
+      mockPut.mockReturnValue({ ok: true, store: "shared" });
+      mockRestartGateway.mockRejectedValueOnce(new Error("Unit clawbox-gateway.service is masked."));
+
+      const res = await configurePost(signIn());
+      const body = await res.json();
+
+      expect(res.status).toBe(502);
+      expect(body.code).toBe("credential_not_stored");
+      expect(body.error).toContain(NOT_STORED);
+      expect(body.error).toMatch(/offline until the gateway restarts/);
+    });
+
+    // "Cannot look" is not "looked, and it is not there": a v1 box's store IS
+    // the legacy file, and a core generation this code has not met must not
+    // lock its owner out of signing in.
+    it.each(["no-store", "unreadable"] as const)(
+      "carries on, and says which, when the store answers %s",
+      async (kind) => {
+        mockRead.mockReturnValue({ kind });
+        const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+        const res = await configurePost(signIn());
+
+        expect(res.status).toBe(200);
+        expect(mockRead).toHaveBeenCalledTimes(1);
+        expect(mockPut).not.toHaveBeenCalled();
+        expect(primaryWasWritten()).toBe(true);
+        const unverified = warnings(warn).filter((line) => line.includes("could not verify"));
+        expect(unverified).toHaveLength(1);
+        expect(unverified[0]).toContain(`(${kind})`);
+        warn.mockRestore();
+      },
+    );
+
+    it("says WHY the store could not be read — a build that cannot load sqlite makes this gate inert, and nothing else would show it", async () => {
+      mockRead.mockReturnValue({ kind: "unreadable", cause: "Cannot find module 'node:sqlite'\nRequire stack: forged line" });
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const res = await configurePost(signIn());
+
+      expect(res.status).toBe(200);
+      const unverified = warnings(warn).filter((line) => line.includes("could not verify"));
+      expect(unverified).toHaveLength(1);
+      expect(unverified[0]).toContain("(unreadable)");
+      expect(unverified[0]).toContain("Cannot find module 'node:sqlite'");
+      // On one line: the cause is another module's text.
+      expect(unverified[0]).not.toContain("\n");
+      warn.mockRestore();
+    });
+
+    it("carries on when the store went away between the read and the write", async () => {
+      mockRead.mockImplementation(() => holding(ANOTHER));
+      mockPut.mockReturnValue({ ok: false, reason: "no-store" });
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const res = await configurePost(signIn());
+
+      expect(res.status).toBe(200);
+      expect(mockPut).toHaveBeenCalledTimes(1);
+      expect(warnings(warn).filter((line) => line.includes("could not verify"))).toHaveLength(1);
+      warn.mockRestore();
+    });
+
+    // The gate runs on an explicit "completed" and nothing else. `undefined`
+    // is the load-bearing one: it is what the hand-written openclaw-config
+    // factories across the suite answer, and that inertness is also what keeps
+    // every one of those suites from ever reaching a store.
+    it.each<[string, () => void]>([
+      ["answers nothing (the suite-wide mock default)", () => {
+        vi.mocked(runOpenclawDoctorFix).mockResolvedValue(undefined as never);
+      }],
+      ["throws on a pre-SQLite core, whose legacy file is the store", () => {
+        vi.mocked(runOpenclawDoctorFix).mockRejectedValue(new Error("v1 doctor unavailable"));
+        vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.7.9 (test)\n");
+      }],
+      ["is blocked on a pre-SQLite core", () => {
+        vi.mocked(runOpenclawDoctorFix).mockResolvedValue("blocked-by-service-ownership");
+        vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.7.9 (test)\n");
+      }],
+    ])("never asks the store when doctor %s", async (_what, arm) => {
+      arm();
+
+      const res = await configurePost(signIn());
+
+      expect(res.status).toBe(200);
+      expect(mockRead).not.toHaveBeenCalled();
+      expect(mockPut).not.toHaveBeenCalled();
+    });
+
+    // Claude's sign-in only. The ClawBox AI device login is the row that would
+    // be easy to miss: `clawai/poll` posts it as `authMode: "subscription"`,
+    // so it runs this same doctor — over `deepseek:default`, whose credential
+    // the CLI pastes afterwards.
+    it.each<[string, Record<string, unknown>]>([
+      ["the ChatGPT sign-in", {
+        provider: "openai",
+        apiKey: "access.token.jwt",
+        idToken: "id.token.jwt",
+        authMode: "subscription",
+        refreshToken: "refresh-token",
+        expiresIn: 3600,
+      }],
+      ["the Google sign-in", {
+        provider: "google",
+        apiKey: "access-token",
+        authMode: "subscription",
+        projectId: "my-project-id",
+      }],
+      ["the ClawBox AI device login", {
+        provider: "clawai",
+        apiKey: "claw_token_abc",
+        authMode: "subscription",
+        clawaiTier: "flash",
+      }],
+    ])("never asks the store for %s", async (_what, body) => {
+      const res = await configurePost(jsonRequest(body));
+
+      expect(res.status).toBe(200);
+      // The lane the gate sits on WAS reached, with a completed doctor…
+      expect(vi.mocked(runOpenclawDoctorFix)).toHaveBeenCalledTimes(1);
+      // …and the store was left alone.
+      expect(mockRead).not.toHaveBeenCalled();
+      expect(mockPut).not.toHaveBeenCalled();
     });
   });
 });

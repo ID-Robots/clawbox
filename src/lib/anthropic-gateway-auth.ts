@@ -159,7 +159,7 @@ function rewrite(blob: StoreBlob, token: { access: string; expires: number | nul
   return changed;
 }
 
-function parseBlob(json: unknown): StoreBlob | null {
+export function parseBlob(json: unknown): StoreBlob | null {
   if (typeof json !== "string" || !json) return null;
   try {
     const parsed = JSON.parse(json) as unknown;
@@ -177,7 +177,7 @@ function agentIds(agentsDir: string): string[] {
   }
 }
 
-function isFile(p: string): boolean {
+export function isFile(p: string): boolean {
   try {
     return fs.statSync(p).isFile();
   } catch {
@@ -185,8 +185,11 @@ function isFile(p: string): boolean {
   }
 }
 
-/** core's own rule (`parseSharedAuthStoreOwnership`): exactly `{location: "state-db"}`, else the row is never read. */
-function ownsSharedStore(valueJson: unknown): boolean {
+/**
+ * core's own rule (`parseSharedAuthStoreOwnership`): exactly `{location: "state-db"}`, else the row is never read.
+ * Exported, as parseBlob and isFile are, so openclaw-auth-store.ts resolves the store by this rule and not a copy of it.
+ */
+export function ownsSharedStore(valueJson: unknown): boolean {
   const parsed = parseBlob(valueJson);
   return parsed !== null && Object.keys(parsed).length === 1 && parsed.location === "state-db";
 }

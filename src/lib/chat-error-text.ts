@@ -92,6 +92,49 @@ function isCredentialRejected(raw: string): boolean {
 }
 
 /**
+ * This box holds no sign-in the gateway can use for the provider the chat is
+ * set to — so the provider was never asked.
+ *
+ * 2026-10-10: a Claude sign-in the gateway's store never received left every
+ * turn dying on `No API key found for provider "anthropic". Auth store:
+ * /home/…/openclaw.sqlite … (openclaw models auth paste-api-key …)`. A device
+ * path and a CLI instruction, so the sanitizer dropped it and the owner read
+ * the generic "send it again" — which could never work, however often.
+ *
+ * Matched on the gateway's own wording, like the predicates above: its raw
+ * error, the user copy it renders from that (`Missing API key for provider
+ * "x"`, `… for the selected provider`) and the `missing-provider-auth` tag it
+ * appends. Answers the provider id the wording names, `{}` when it names
+ * none, null when this is some other failure.
+ *
+ * The id is captured through a strict alphabet and nothing looser: the line is
+ * untrusted text on its way into a sentence, and the id is the one part of it
+ * that is echoed. No path, space or slash can ride along — an id that is not
+ * a plain provider id is simply not named.
+ */
+function missingCredential(raw: string): { provider?: string } | null {
+  const named = /\b(?:No API key found|Missing API key) for provider "([a-z0-9][a-z0-9._-]{0,63})"/i.exec(raw);
+  if (named) return { provider: named[1] };
+  return /\b(?:No API key found|Missing API key) for provider\b|\bMissing API key for the selected provider\b|\bmissing-provider-auth\b/i.test(raw)
+    ? {}
+    : null;
+}
+
+/**
+ * The first attempt of the gateway's summary of a chain it walked — `All
+ * models failed (N): a/b: … (reason) | c/d: … (reason)` — or null for any
+ * other line. The first attempt is the model the chat is set to; the rest are
+ * fallbacks, and a fallback with no sign-in is not why the turn failed.
+ */
+function requestedAttempt(text: string): string | null {
+  const head = /^All models failed \((\d+)\):\s*/i.exec(text);
+  if (!head || Number(head[1]) < 2) return null;
+  const attempts = text.slice(head[0].length);
+  const next = attempts.indexOf(" | ");
+  return next >= 0 ? attempts.slice(0, next) : attempts;
+}
+
+/**
  * What the gateway knew about the run when it declared the turn dead — see
  * `chat-run-failure.ts` for where each field comes from on the wire. Every
  * field is optional: a turn can fail before the provider was ever asked.
@@ -132,7 +175,10 @@ const PROVIDER_LABELS: Record<string, string> = {
 function providerLabel(provider: string | undefined): string {
   const id = provider?.trim().toLowerCase();
   if (!id) return "the AI provider";
-  return PROVIDER_LABELS[id] ?? id.charAt(0).toUpperCase() + id.slice(1);
+  // An OWN entry only: the id can come out of error text, and `constructor`
+  // answered Object's own function — printed into the sentence as its source.
+  const known = Object.hasOwn(PROVIDER_LABELS, id) ? PROVIDER_LABELS[id] : undefined;
+  return known ?? id.charAt(0).toUpperCase() + id.slice(1);
 }
 
 /** The provider segment of a `provider/model` reference, when it has one. */
@@ -313,8 +359,16 @@ export function describeFallbackReply(context: ChatRunFailureContext): string | 
   const because = (() => {
     switch (reason) {
       case "auth":
-      case "auth_permanent":
+      case "auth_permanent": {
+        // The same reason token covers a sign-in the box does not have at
+        // all: nobody refused anything, so do not say that somebody did.
+        const missing = missingCredential(context.detail ?? "");
+        if (missing) {
+          const absent = missing.provider ? providerLabel(missing.provider) : provider;
+          return `this box has no working sign-in for ${absent}. Connect ${absent} again in Settings, under Providers, to get ${picked} back.`;
+        }
         return `${provider} did not accept this box's sign-in for ${picked}${quoted}. Reconnect it in Settings, under Providers, to get ${picked} back.`;
+      }
       case "rate_limit":
         return `${provider} is rate-limiting this box for ${picked}. It comes back on its own.`;
       case "model_not_found":
@@ -353,6 +407,21 @@ const RATE_LIMIT = "That message did not go through — the AI provider is rate-
  * one thing they can act on is two taps away.
  */
 const CREDENTIAL_REJECTED = "That message did not go through — the AI provider is not accepting this box's sign-in any more. Reconnect it in Settings, under Providers, and send it again.";
+
+/**
+ * There is no sign-in to refuse (see `missingCredential`). Its own sentence,
+ * not `CREDENTIAL_REJECTED`: the gateway tags this failure `reason=auth` too,
+ * but "not accepting this box's sign-in any more" is false here — nobody was
+ * asked — and "send it again" alone is the advice that cannot work. The two
+ * things that do: connect the provider, or pick a model the box can reach.
+ */
+const NO_SIGN_IN = "That message did not go through — this box has no working sign-in for the provider this chat is set to. Connect it again in Settings, under Providers, or pick another model in the header, then send it again.";
+
+function noSignInSentence(provider: string | undefined): string {
+  if (!provider?.trim()) return NO_SIGN_IN;
+  const name = providerLabel(provider);
+  return `That message did not go through — this box has no working sign-in for ${name}, the provider this chat is set to. Connect ${name} again in Settings, under Providers, or pick another model in the header, then send it again.`;
+}
 
 /**
  * The gateway never ACKNOWLEDGED the turn — the chat's own request timer ran
@@ -445,6 +514,17 @@ export function describeChatFailure(raw: unknown, context?: ChatRunFailureContex
   const evidence = [text, context?.detail ?? "", context?.reason ?? ""].join("\n").trim();
   if (!evidence) return GENERIC;
   if (isSessionTakeover(text)) return TAKEOVER;
+  // Ahead of everything that reads the reason or a status: the gateway tags a
+  // missing sign-in `reason=auth`, which the refused-credential rule below
+  // would answer with a sentence that is false here, and its line quotes a
+  // device path — a folder with 429 in its name would read as a rate limit.
+  //
+  // Of a chain of models, only the FIRST attempt is asked: the last step's
+  // detail is the last fallback's, and a fallback with no sign-in, behind a
+  // picked model that hit its allowance or a rate limit, used to outrank that
+  // and name the fallback's provider as "the provider this chat is set to".
+  const missing = missingCredential(requestedAttempt(text) ?? evidence);
+  if (missing) return noSignInSentence(missing.provider ?? context?.provider ?? providerFromRef(context?.model));
   // Ahead of the rate limit: a spent allowance also arrives as a 429, and the
   // generic "wait a minute" is exactly the wrong advice for a window that frees
   // up days from now. The refusal names which allowance and when, so say that.

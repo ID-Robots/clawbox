@@ -74,6 +74,14 @@ export default defineConfig({
       // allowlist) instead of the fixture under OPENCLAW_HOME. Empty means
       // "no override", so the store follows the floored home above.
       OPENCLAW_STATE_DIR: "",
+      // The FOURTH variable `gatewayAuthPaths()` reads
+      // (src/lib/anthropic-gateway-auth.ts), and the one that names the main
+      // agent's own auth store. With it exported on the runner, every suite
+      // that reaches the Providers status or the chat model list with a Claude
+      // sign-in opened that machine's real agents directory: a fenced profile
+      // there turned `routes/providers/status.test.ts` red. All three readers
+      // spell it `OPENCLAW_AGENTS_DIR || …`, so empty means "no override".
+      OPENCLAW_AGENTS_DIR: "",
     },
     projects: [
       {
