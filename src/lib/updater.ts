@@ -39,7 +39,15 @@ import {
   holderFromAnotherBoot,
   type UpdateLockHolder,
 } from "./update-lock";
-import { hasX64DesktopIntegration } from "./x64-integration";
+import { hasX64DesktopIntegration, hasX64Install } from "./x64-integration";
+import {
+  X64_ROOT_STEPS_SKIPPED,
+  classifyX64RootStepExit,
+  classifyX64RootStepGap,
+  rebuildAsOwner,
+  restartUiProcess,
+  x64SkippedStepsWarning,
+} from "./x64-install-update";
 
 /**
  * "An update was accepted and then lost its process" — written where the lock
@@ -1731,6 +1739,95 @@ async function updateClawBoxAndReboot(): Promise<void> {
   // created root-owned files (e.g. FETCH_HEAD) that block git pull as clawbox.
   await execAsRoot("fix_git_perms", 30_000);
 
+  await syncCheckoutForRebuild();
+
+  // Record the pre-rebuild build identity in the flag: BUILD_ID changes on
+  // every successful `next build`, so the continuation can demand positive
+  // evidence the rebuild actually happened. Without it, a power cycle in the
+  // few seconds between unit failure and our watcher noticing would reset the
+  // unit's systemd state and let the continuation fake a completed update.
+  await set("update_needs_continuation", (await readBuildId()) || "no-previous-build");
+  // Captured before the dispatch, so the failure read below cannot miss a line
+  // the unit wrote in its first moments — nor pick up the previous attempt's.
+  const rebuildDispatchedAt = Date.now();
+  await startRootServiceFireAndForget(REBUILD_ROOT_STEP);
+  await waitForRebuildToTakeOver(rebuildDispatchedAt);
+}
+
+/**
+ * The restart step on a PC installed with install-x64.sh: the same checkout
+ * sync, then the rebuild and the restart as the desktop OWNER — the account
+ * this server runs as — instead of the appliance's `rebuild_reboot` root unit,
+ * which that PC's root helper does not have and whose last act is a reboot.
+ *
+ * No `fix_git_perms` first: on that PC every Git operation in the checkout,
+ * this update's included, runs as its owner, so there is no root-owned file for
+ * it to repair.
+ *
+ * The continuation flag is the appliance's, written the same way and judged the
+ * same way after the restart (a new BUILD_ID or a failed step), so the second
+ * half of the update — post_update and gateway_verify — resumes exactly as it
+ * does after the appliance's reboot. Only the UI restarts; the PC never does.
+ */
+async function updateClawBoxAsOwner(): Promise<void> {
+  await syncCheckoutForRebuild();
+  await set("update_needs_continuation", (await readBuildId()) || "no-previous-build");
+  try {
+    await rebuildAsOwner(PROJECT_DIR, {
+      onProgress: (detail) => {
+        const running = runtime.state.steps[runtime.state.currentStepIndex];
+        if (running?.status === "running") running.detail = detail;
+      },
+    });
+  } catch (err) {
+    // The previous build is back in place (or reclaimed on the next start), so
+    // there is no restart to continue from — the same rule as
+    // waitForRebuildToTakeOver.
+    await set("update_needs_continuation", undefined);
+    throw new Error(`Rebuild failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  await restartUiProcess();
+}
+
+/**
+ * Step 1 on a PC installed with install-x64.sh: fetch the update branch and
+ * move the checkout onto it, as the owner.
+ *
+ * The appliance's `bootstrap_updater` is a root unit that runs install.sh out of
+ * the checkout it just fetched. That PC's root side must never run the
+ * owner-writable checkout (clawbox-x64-root-step.sh says why), so there is no
+ * root equivalent to call — and none is needed: the fetch, the save of local
+ * edits and the reset are all things the owner can do to their own tree. Moving
+ * the tree here, before the package and OpenClaw steps, keeps the appliance's
+ * order: `openclaw_install` reads the NEW release's pin.
+ */
+async function syncCheckoutAsOwner(): Promise<void> {
+  const { local, upstream, source } = await resolveUpdateBranch(PROJECT_DIR);
+  const slash = upstream.indexOf("/");
+  const remote = slash > 0 ? upstream.slice(0, slash) : "";
+  const branch = slash > 0 ? upstream.slice(slash + 1) : "";
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(remote) || !isSafeBranch(branch)) {
+    throw new Error(`This ClawBox cannot fetch its update branch: ${upstream} is not a remote branch the updater can name.`);
+  }
+  console.log(`[Updater] Fetching ${upstream} as the desktop owner (resolved from: ${source})`);
+  const fetched = await reachOrigin(
+    PROJECT_DIR,
+    ["fetch", "--quiet", remote, `+refs/heads/${branch}:refs/remotes/${remote}/${branch}`],
+    { timeout: 120_000 },
+  );
+  if (!fetched.reachable) {
+    throw new Error(fetched.reason ?? `Could not fetch ${upstream}. Check the internet connection and try again.`);
+  }
+  // The code install.sh's step 1 raises for the same save, so the restart
+  // step's own save recognises it the way it does on the appliance.
+  await syncCheckoutToUpstream(local, upstream, "local-edits-saved");
+}
+
+/**
+ * Point the checkout at the update branch for the rebuild that follows — both
+ * hosts' restart step. Repins and the orphan marker first, then the hard sync.
+ */
+async function syncCheckoutForRebuild(): Promise<void> {
   // Throws UnresolvableUpdateBranchError rather than retargeting a device that
   // cannot say which branch it belongs to; this step is failFast, so the owner
   // gets the message instead of a silent channel change.
@@ -1758,6 +1855,14 @@ async function updateClawBoxAndReboot(): Promise<void> {
   // diagnosis has already recorded the state the box arrived in.
   await removeOrphanDeployedSha(PROJECT_DIR);
 
+  await syncCheckoutToUpstream(local, upstream, LOCAL_EDITS_SAVED_BEFORE_RESTART);
+}
+
+/**
+ * Save local edits, then hard-sync the checkout to `upstream`, which must
+ * already be on disk. `savedCode` is the card a save is announced under.
+ */
+async function syncCheckoutToUpstream(local: string, upstream: string, savedCode: string): Promise<void> {
   // Hard-sync to upstream. The device is an appliance — the working tree
   // must always match what we ship, period. Local edits made via SSH /
   // partial earlier updates / branch flips are discarded.
@@ -1816,7 +1921,7 @@ async function updateClawBoxAndReboot(): Promise<void> {
   const alreadyNamed = saved !== null && saved.savedTo !== "git-stash"
     && (runtime.state.warnings ?? []).some((w) => w.message.split(/\s+/).includes(saved.savedTo));
   if (saved && !alreadyNamed) {
-    warnUpdate(LOCAL_EDITS_SAVED_BEFORE_RESTART, saved.message);
+    warnUpdate(savedCode, saved.message);
     await persistWarnings();
   }
   await execGit(PROJECT_DIR, ["reset", "--hard", "HEAD"], gitOptions);
@@ -1827,17 +1932,6 @@ async function updateClawBoxAndReboot(): Promise<void> {
   }
   await execGit(PROJECT_DIR, ["reset", "--hard", upstream], gitOptions);
   await execGit(PROJECT_DIR, ["clean", "-fd"], gitOptions);
-  // Record the pre-rebuild build identity in the flag: BUILD_ID changes on
-  // every successful `next build`, so the continuation can demand positive
-  // evidence the rebuild actually happened. Without it, a power cycle in the
-  // few seconds between unit failure and our watcher noticing would reset the
-  // unit's systemd state and let the continuation fake a completed update.
-  await set("update_needs_continuation", (await readBuildId()) || "no-previous-build");
-  // Captured before the dispatch, so the failure read below cannot miss a line
-  // the unit wrote in its first moments — nor pick up the previous attempt's.
-  const rebuildDispatchedAt = Date.now();
-  await startRootServiceFireAndForget(REBUILD_ROOT_STEP);
-  await waitForRebuildToTakeOver(rebuildDispatchedAt);
 }
 
 // First-time `npm install -g openclaw` on cold Jetson caches routinely runs
@@ -3371,6 +3465,19 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
     if (await waitForGateway(GATEWAY_RECOVERY_WAIT_MS)) return;
     throw new Error("The existing OpenClaw user gateway did not become ready. Check its service logs before retrying the update.");
   }
+  if (hasX64Install(PROJECT_DIR)) {
+    // install-x64.sh's clawbox-gateway.service runs the same pre-start as the
+    // appliance's, so a plain restart already performs every migration that
+    // unit owes. What that PC lacks is the root-owned maintenance helper the
+    // quiesced repair below starts through sudo — and the legacy quarantine's
+    // hard-coded /home/clawbox — so it gets the restart and the diagnosis, not
+    // the appliance's repairs. Its sudoers grant carries this restart.
+    gatewayNeedsRecovery = false;
+    if (!options.restartFirst && await waitForGateway(GATEWAY_HEALTH_WAIT_MS)) return;
+    await restartGateway({ awaitReady: false });
+    if (await waitForGateway(GATEWAY_RECOVERY_WAIT_MS)) return;
+    throw new Error(await describeDeadGateway(await readGatewayJournalTail()));
+  }
   const recoverImmediately = options.restartFirst || gatewayNeedsRecovery;
   gatewayNeedsRecovery = false;
   if (!recoverImmediately && await waitForGateway(GATEWAY_HEALTH_WAIT_MS)) return;
@@ -3437,10 +3544,12 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
  *
  * Not on the x64 desktop package, for the reason `ensureGatewayHealthy` gives:
  * that gateway is the owner's user service, and the appliance's repairs are not
- * its to inherit.
+ * its to inherit. Nor on a PC installed with install-x64.sh: the retry runs
+ * under `withGatewayQuiesced`, whose root-owned maintenance helper that PC does
+ * not have.
  */
 async function retryPluginRepairsLeftByOlderCore(): Promise<void> {
-  if (hasX64DesktopIntegration(PROJECT_DIR)) return;
+  if (hasX64DesktopIntegration(PROJECT_DIR) || hasX64Install(PROJECT_DIR)) return;
   try {
     await retryPluginRepairsAfterCoreUpdate({
       release: currentCoreRelease,
@@ -3757,6 +3866,104 @@ async function execAsRootWithGatewayQuiesced(stepId: string, timeoutMs: number):
       throw err;
     }
   });
+}
+
+/**
+ * The steps a PC installed with install-x64.sh runs as the desktop owner, never
+ * through a root unit: the two that move and rebuild the checkout (see
+ * syncCheckoutAsOwner and updateClawBoxAsOwner).
+ */
+const X64_INSTALL_OWNER_STEPS: ReadonlySet<string> = new Set(["bootstrap_updater", RESTART_STEP_ID]);
+
+/**
+ * Whether this box's restart step rebuilds as the owner (install-x64.sh, no
+ * integration package). For the continuation, which runs on every status poll
+ * and at boot: a host file that cannot be judged answers "no" here — the
+ * appliance's stricter reading — and the next update reports it properly.
+ */
+function rebuiltByOwner(): boolean {
+  try {
+    return !hasX64DesktopIntegration(PROJECT_DIR) && hasX64Install(PROJECT_DIR);
+  } catch {
+    return false;
+  }
+}
+
+/** What one half of a run on such a PC skipped, and the card that says so. */
+interface X64SkippedSteps {
+  code: string;
+  labels: string[];
+}
+
+/** Everything THIS dispatch of a root step wrote, or "" if it cannot be read. */
+async function readRootStepJournal(stepId: string, sinceMs: number): Promise<string> {
+  try {
+    const { stdout } = await execFile(
+      "/usr/bin/journalctl",
+      rootStepJournalArgs(stepId, { sinceMs, lines: 80 }),
+      { timeout: 10_000 },
+    );
+    return String(stdout ?? "");
+  } catch {
+    return "";
+  }
+}
+
+/** `systemctl show <unit> -p ExecMainStatus --value` — kept while a failed unit stays loaded. */
+async function getRootStepExitStatus(stepId: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFile(
+      "/usr/bin/systemctl",
+      ["show", rootStepUnit(stepId), "-p", "ExecMainStatus", "--value"],
+      { timeout: 10_000 },
+    );
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * A root step on a PC installed with install-x64.sh: run it, and when the root
+ * helper installed there cannot run it at all, skip it with one warning instead
+ * of failing the update.
+ *
+ * "Cannot run it at all" is read off what the dispatcher and the installer copy
+ * SAID in this run (classifyX64RootStepGap) — a step it ran and that failed
+ * stays a failure, with the appliance's own failure reading. The launcher
+ * being unreachable is the same answer one level up. Either way nothing on the
+ * root side changed, so going on is safe: these are system-package and
+ * OpenClaw steps, and the part of the update that is ClawBox itself runs as the
+ * owner. A helper that learns a step later (the owner re-runs the installer's
+ * root_step_contract, which the card names) simply starts running it.
+ *
+ * No outer gateway quiesce: the appliance's needs a root-owned maintenance
+ * helper this PC does not have, and install-x64.sh's own OpenClaw step stops
+ * and restarts the gateway around its migration.
+ */
+async function execX64InstallRootStep(step: UpdateStepDef, startedAt: number, skipped: X64SkippedSteps): Promise<void> {
+  try {
+    await execAsRoot(step.id, step.timeoutMs);
+    return;
+  } catch (err) {
+    if (err instanceof BudgetOverrunError) throw err;
+    const launcherUnavailable = (err as { rootStepUnavailable?: boolean } | null)?.rootStepUnavailable === true;
+    const journal = launcherUnavailable ? "" : await readRootStepJournal(step.id, startedAt);
+    const gap = launcherUnavailable
+      ? "launcher"
+      : journal.trim()
+        ? classifyX64RootStepGap(journal)
+        : classifyX64RootStepExit(await getRootStepExitStatus(step.id));
+    if (!gap) throw err;
+    console.warn(`[Updater] ${step.label}: this PC's root helper cannot run ${step.id} (${gap}) — skipped`);
+    if (!skipped.labels.includes(step.label)) skipped.labels.push(step.label);
+    const message = x64SkippedStepsWarning(skipped.labels, PROJECT_DIR);
+    if (!runtime.state.warnings) runtime.state.warnings = [];
+    const card = runtime.state.warnings.find((w) => w.code === skipped.code);
+    if (card) card.message = message;
+    else runtime.state.warnings.push({ code: skipped.code, message });
+    await persistWarnings();
+  }
 }
 
 let cachedTargetVersion: string | null = null;
@@ -4740,7 +4947,13 @@ async function resumeContinuation(): Promise<boolean> {
   // erased by a power cycle; the BUILD_ID can't). Legacy boolean flags (written
   // by the previous updater version) carry no build identity — for those the
   // unit check and the "is there a build at all" check apply.
-  const unitFailed = rootStepResultFailed(await getRootStepResult(REBUILD_ROOT_STEP));
+  //
+  // On a PC installed with install-x64.sh no rebuild unit ran: the owner built
+  // in-process and a failure there clears the flag before it throws. A `failed`
+  // rebuild_reboot Result on such a PC is an older updater's attempt, never
+  // this run's — so only the build identity is evidence there.
+  const ownerRebuilt = rebuiltByOwner();
+  const unitFailed = !ownerRebuilt && rootStepResultFailed(await getRootStepResult(REBUILD_ROOT_STEP));
   const recordedBuildId = typeof needsContinuation === "string" ? needsContinuation : null;
   const currentBuildId = await readBuildId();
   const buildUnchanged = recordedBuildId !== null && recordedBuildId === currentBuildId;
@@ -4752,13 +4965,14 @@ async function resumeContinuation(): Promise<boolean> {
   // 2026-09-04, TASK-709.
   const buildMissing = currentBuildId === "";
   if (unitFailed || buildUnchanged || buildMissing) {
+    const logs = ownerRebuilt ? "the clawbox-setup service log" : "clawbox-root-update@rebuild_reboot logs";
     const message = unitFailed
       // No start time survives the restart this check runs after — see
       // readRootStepFailure.
       ? (await readRootStepFailure(REBUILD_ROOT_STEP, null)) ?? "Rebuild failed before the restart"
       : buildMissing
-        ? "The device restarted with no build at all (.next/BUILD_ID is missing) — see clawbox-root-update@rebuild_reboot logs"
-        : "The device restarted without producing a new build — see clawbox-root-update@rebuild_reboot logs";
+        ? `The device restarted with no build at all (.next/BUILD_ID is missing) — see ${logs}`
+        : `The device restarted without producing a new build — see ${logs}`;
     runtime.state = createInitialState(steps);
     runtime.state.warnings = await restoreWarnings();
     runtime.state.phase = "failed";
@@ -5025,6 +5239,17 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
   // leave Telegram stopped until gateway_verify, which a failed rebuild or
   // rejected core pin never reaches. Resolve once for this run/continuation.
   const desktopIntegration = hasX64DesktopIntegration(PROJECT_DIR);
+  // A PC installed with install-x64.sh and no integration package: its root
+  // helper has no bootstrap_updater or rebuild_reboot, so those two run as the
+  // owner and every other root step is best-effort (execX64InstallRootStep).
+  // An appliance answers false here and runs exactly as before.
+  const x64Install = !desktopIntegration && hasX64Install(PROJECT_DIR);
+  // One card per half of the run: the half after the UI restart is a new
+  // process, and its skips are its own.
+  const x64Skipped: X64SkippedSteps = {
+    code: startFrom === 0 ? X64_ROOT_STEPS_SKIPPED : `${X64_ROOT_STEPS_SKIPPED}:after-restart`,
+    labels: [],
+  };
   // Lock the desktop FIRST, AWAITED, before anything that can take time.
   //
   // It used to sit below the internet check and the drift baseline — up to two
@@ -5242,15 +5467,26 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
     // No guard needed on the write: `watchRootStepProgress` promises no headline
     // after its stopper runs, and the `finally` below stops it before the step
     // is marked anything but running.
-    const stopProgress = step.requiresRoot
+    //
+    // `viaRoot`: the step really goes through a root unit this time. On a PC
+    // installed with install-x64.sh the checkout steps run as the owner, and
+    // that unit's journal and Result then belong to some earlier run.
+    const viaRoot = step.requiresRoot === true && !(x64Install && X64_INSTALL_OWNER_STEPS.has(step.id));
+    const stopProgress = viaRoot
       ? watchRootStepProgress(step.id, stepStartedAt, (headline) => {
           runtime.state.steps[i].detail = headline;
         })
       : null;
 
     try {
-      if (step.customRun) {
+      if (x64Install && step.id === "bootstrap_updater") {
+        await syncCheckoutAsOwner();
+      } else if (x64Install && step.id === RESTART_STEP_ID) {
+        await updateClawBoxAsOwner();
+      } else if (step.customRun) {
         await step.customRun();
+      } else if (step.requiresRoot && x64Install) {
+        await execX64InstallRootStep(step, stepStartedAt, x64Skipped);
       } else if (step.requiresRoot) {
         // Desktop bootstrap also installs a missing Claude CLI. Its HTTPS
         // download alone allows five minutes; use the system-fixup budget.
@@ -5284,7 +5520,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       // A root step that SUCCEEDED can still have skipped a fixup: install.sh's
       // non-fatal steps say so on a `CLAWBOX-WARN:` line, and this is where
       // that reaches the owner instead of only the journal.
-      if (step.requiresRoot) await collectRootStepWarnings(step.id, stepStartedAt);
+      if (viaRoot) await collectRootStepWarnings(step.id, stepStartedAt);
       runtime.state.steps[i].status = "completed";
       console.log(`[Updater] Completed: ${step.label}`);
     } catch (err) {
@@ -5297,7 +5533,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
         // and an overrun is its ORDINARY shape on the repair path (a Hermes
         // clone plus a 3.2 GB model fetch) — so this is the run most likely to
         // have skipped a fixup, and the one where the step is shown green.
-        if (step.requiresRoot) await collectRootStepWarnings(step.id, stepStartedAt);
+        if (viaRoot) await collectRootStepWarnings(step.id, stepStartedAt);
         runtime.state.steps[i].status = "completed";
         console.warn(`[Updater] ${step.label}: ${message} — treating as advisory`);
         continue;
@@ -5311,7 +5547,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       // any line in its journal belong to an earlier run, while the message
       // already says what is wrong and names the command that repairs it.
       const launcherUnavailable = (err as { rootStepUnavailable?: boolean } | null)?.rootStepUnavailable === true;
-      if (step.requiresRoot && !launcherUnavailable && rootStepResultFailed(await getRootStepResult(step.id))) {
+      if (viaRoot && !launcherUnavailable && rootStepResultFailed(await getRootStepResult(step.id))) {
         const rootFailure = await readRootStepFailure(step.id, stepStartedAt);
         if (rootFailure) message = rootFailure;
       }
@@ -5319,7 +5555,7 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       // list of them is the only record of which. Raised as warnings beside the
       // step's own error, never instead of it — `state.steps[i].error` below is
       // untouched.
-      if (step.requiresRoot) await collectRootStepWarnings(step.id, stepStartedAt);
+      if (viaRoot) await collectRootStepWarnings(step.id, stepStartedAt);
       runtime.state.steps[i].status = "failed";
       runtime.state.steps[i].error = message;
       console.error(`[Updater] Failed: ${step.label} — ${message}`);

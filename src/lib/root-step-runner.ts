@@ -26,8 +26,15 @@ const execFile = promisify(execFileCb);
 /** Installed by install.sh::install_root_libexec, root:root 0755. */
 export const ROOT_STEP_LAUNCHER = "/usr/local/libexec/clawbox/clawbox-run-root-step.sh";
 
-/** Written by install-x64.sh; its presence is what makes this a desktop install. */
-const X64_INTEGRATION_FILE = "/etc/clawbox/x64-integration.env";
+/**
+ * Either file makes this an x64 desktop: the integration package's, or the
+ * record install-x64.sh writes beside its root dispatcher (X64_INSTALL_FILE in
+ * x64-integration.ts — spelled out here because several suites mock that
+ * module whole). install-x64.sh never writes the first, so checking it alone
+ * sent an install-x64.sh PC to the appliance's install.sh — whose
+ * systemd_services step would lay Jetson units over the desktop's.
+ */
+const X64_HOST_FILES = ["/etc/clawbox/x64-integration.env", "/etc/clawbox/x64.env"] as const;
 
 /**
  * The ONE command that puts the root side of the launcher contract back — the
@@ -38,7 +45,7 @@ const X64_INTEGRATION_FILE = "/etc/clawbox/x64-integration.env";
 export function rootStepRepairCommand(projectDir: string = process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox"): string {
   let x64 = false;
   try {
-    x64 = fs.existsSync(X64_INTEGRATION_FILE);
+    x64 = X64_HOST_FILES.some((file) => fs.existsSync(file));
   } catch {
     x64 = false;
   }

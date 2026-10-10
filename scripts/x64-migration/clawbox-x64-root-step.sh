@@ -132,8 +132,126 @@ run_noop() {
   echo "clawbox-root-step: $1 is a no-op on the x64 install"
 }
 
+# The install user as a value root may hand to runuser: a plain account name,
+# never root. x64.env is root-owned, so this is a sanity check, not a boundary.
+require_install_user() {
+  case "$CLAWBOX_USER" in
+    ""|root|-*|*[!A-Za-z0-9._-]*)
+      echo "Error: no valid install user is recorded in $ROOT_CONF - run install-x64.sh --step root_step_contract" >&2
+      exit 78
+      ;;
+  esac
+}
+
+# The zone the owner asked for (Settings, or the desktop adopting its browser's
+# zone), from data/timezone.env. That file is owner-writable and this runs as
+# root, so it is read AS THE OWNER, through O_NOFOLLOW|O_NONBLOCK and an inode
+# type check: a symlink or FIFO planted there can neither make root read another
+# file nor hang the step. Prints the zone, nothing when none is recorded, and
+# fails (with the reason on stderr) on anything but the plain file the route
+# writes.
+read_requested_timezone() {
+  /usr/sbin/runuser -u "$CLAWBOX_USER" -- /usr/bin/python3 -I - "$PROJECT_DIR/data/timezone.env" <<'PY'
+import os, stat, sys
+path = sys.argv[1]
+try:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+except FileNotFoundError:
+    sys.exit(0)
+except OSError as err:
+    sys.exit(f"Error: {path} is not the plain file the timezone route writes ({err.strerror}) - refusing to read it.")
+with os.fdopen(fd, "rb") as f:
+    if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+        sys.exit(f"Error: {path} is not the plain file the timezone route writes - refusing to read it.")
+    raw = f.read(513)
+if len(raw) > 512:
+    sys.exit("Error: the timezone request is larger than the route ever writes - refusing to read it.")
+for line in raw.decode("utf-8", "replace").splitlines():
+    line = line.strip()
+    if line.startswith("export "):
+        line = line[len("export "):].lstrip()
+    if line.startswith("TIMEZONE="):
+        value = line[len("TIMEZONE="):]
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        print(value)
+        break
+PY
+}
+
+# install.sh's step_set_timezone, for this PC: the same shape rule as
+# read_configured_timezone, then systemd's own list as the authority for "is
+# this a zone", then timedatectl. No zone recorded is a no-op, never an error.
+run_set_timezone() {
+  local tz zones current
+  require_install_user
+  if ! tz="$(read_requested_timezone)"; then
+    echo "Error: the timezone request was refused - leaving the system zone alone." >&2
+    return 1
+  fi
+  if [ -z "$tz" ]; then
+    echo "clawbox-root-step: no timezone recorded, leaving the system zone alone"
+    return 0
+  fi
+  case "$tz" in
+    /*|-*|*..*|*[!A-Za-z0-9._/+-]*)
+      echo "Error: the recorded timezone is not a zone name - leaving the system zone alone." >&2
+      return 1
+      ;;
+  esac
+  # Captured, then searched: a pipe into `grep -q` under pipefail can report
+  # the writer's SIGPIPE as "not found".
+  zones="$(/usr/bin/timedatectl list-timezones 2>/dev/null)" || zones=""
+  if ! /usr/bin/grep -qxF -- "$tz" <<<"$zones"; then
+    echo "Error: the recorded timezone is not one this PC carries - leaving the system zone alone." >&2
+    return 1
+  fi
+  current="$(/usr/bin/timedatectl show -p Timezone --value 2>/dev/null)" || current=""
+  if [ "$current" = "$tz" ]; then
+    echo "clawbox-root-step: system timezone already $tz"
+    return 0
+  fi
+  if ! /usr/bin/timedatectl set-timezone "$tz"; then
+    echo "Error: timedatectl refused to set the timezone to $tz" >&2
+    return 1
+  fi
+  echo "clawbox-root-step: system timezone set to $tz"
+}
+
+# The updater's "Configuring gateway service". install-x64.sh::
+# step_systemd_services writes this PC's gateway unit with the ports chosen at
+# install time; re-rendering it from a root step that cannot know those choices
+# would reset them. So: confirm the unit is there, reload, and clear a
+# start-limit latch so the updater's own restart can bring the gateway up.
+run_gateway_setup() {
+  if [ ! -f /etc/systemd/system/clawbox-gateway.service ]; then
+    echo "Error: clawbox-gateway.service is not installed - run install-x64.sh --step systemd_services" >&2
+    return 1
+  fi
+  /usr/bin/systemctl daemon-reload
+  /usr/bin/systemctl reset-failed clawbox-gateway.service >/dev/null 2>&1 || true
+  echo "clawbox-root-step: gateway unit present (written by install-x64.sh systemd_services)"
+}
+
+# The updater's "Applying system fixups", after the dashboard restarted. The
+# appliance's post_update redeploys root files out of the new checkout; here
+# every root file comes from install-x64.sh --step root_step_contract, which
+# only the owner runs, so what is left is the owner's timezone. Never fatal: a
+# clock that could not be moved is reported on the update's own card.
+run_post_update() {
+  if ! run_set_timezone; then
+    echo "CLAWBOX-WARN[x64-timezone]: The recorded timezone could not be applied to this PC's clock; set it again in Settings."
+  fi
+  echo "clawbox-root-step: x64 post-update done"
+}
+
 # The steps the x64 installer implements. Everything else is refused loudly: a
 # step that silently does nothing is worse than one that fails.
+#
+# bootstrap_updater and rebuild_reboot are deliberately absent. Both run the
+# CHECKOUT on the appliance, which root must never do here; the updater runs
+# them as the desktop owner instead (src/lib/x64-install-update.ts), and an
+# update on this PC never reboots it.
 INSTALLER_STEPS="
 apt_update chromium_install clawkeep_install ffmpeg_install fix_git_perms
 llamacpp_install ollama_install openclaw_config openclaw_install openclaw_patch
@@ -146,6 +264,15 @@ case "$step" in
     ;;
   set_hostname)
     run_set_hostname
+    ;;
+  set_timezone)
+    run_set_timezone
+    ;;
+  gateway_setup)
+    run_gateway_setup
+    ;;
+  post_update)
+    run_post_update
     ;;
   restart_ap|performance_mode)
     run_noop "$step"
@@ -166,6 +293,13 @@ case "$step" in
       echo "clawbox-root-step: step '$step' has no implementation on the x64 install" >&2
       exit 64
     fi
+    # The installer names its user from `logname` or SUDO_USER, and a unit
+    # systemd starts has neither — so every forwarded step used to stop at
+    # "could not resolve an unprivileged install user". Hand it the user and
+    # the checkout this PC was installed for, from the root-owned record.
+    require_install_user
+    export CLAWBOX_USER
+    export CLAWBOX_DIR="$PROJECT_DIR"
     exec /usr/bin/bash "$ROOT_INSTALLER" --step "$step"
     ;;
 esac

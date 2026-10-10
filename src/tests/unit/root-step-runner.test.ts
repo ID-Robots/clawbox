@@ -44,11 +44,17 @@ function succeed(): void {
 
 const REPAIR = "sudo bash /home/clawbox/clawbox/install.sh --step systemd_services";
 
-/** Answer the one file the repair command depends on, whatever this runner is. */
-function x64Install(present: boolean): void {
+const X64_HOST_FILES = ["/etc/clawbox/x64-integration.env", "/etc/clawbox/x64.env"];
+
+/**
+ * Answer the files the repair command depends on, whatever this runner is —
+ * `present` names which of them exist (`true`: the integration package's).
+ */
+function x64Install(present: boolean | string[]): void {
   const real = fs.existsSync;
+  const existing = present === true ? [X64_HOST_FILES[0]] : present === false ? [] : present;
   vi.spyOn(fs, "existsSync").mockImplementation((p) =>
-    p === "/etc/clawbox/x64-integration.env" ? present : real(p));
+    X64_HOST_FILES.includes(String(p)) ? existing.includes(String(p)) : real(p));
 }
 
 beforeEach(() => {
@@ -119,6 +125,14 @@ describe("rootStepRepairCommand", () => {
 
   it("names the x64 installer's own step on a desktop install", () => {
     x64Install(true);
+    expect(rootStepRepairCommand("/home/me/clawbox")).toBe("sudo bash /home/me/clawbox/install-x64.sh --step root_step_contract"); // public-hygiene: allow synthetic test fixture, not a real host/account/credential
+  });
+
+  it("names it on a PC install-x64.sh set up without the integration package, too", () => {
+    // That installer writes /etc/clawbox/x64.env and never the integration
+    // file, so checking only the latter sent its owner to the APPLIANCE's
+    // install.sh, whose systemd_services step lays Jetson units down.
+    x64Install(["/etc/clawbox/x64.env"]);
     expect(rootStepRepairCommand("/home/me/clawbox")).toBe("sudo bash /home/me/clawbox/install-x64.sh --step root_step_contract"); // public-hygiene: allow synthetic test fixture, not a real host/account/credential
   });
 });

@@ -6,6 +6,8 @@ import { get, set } from "@/lib/config-store";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { startRootStep } from "@/lib/root-step-runner";
+import { hasX64Install } from "@/lib/x64-integration";
+import { x64RootContractRepairCommand } from "@/lib/x64-install-update";
 import {
   TIMEZONE_APPLIED_KEY,
   TIMEZONE_SOURCE_KEY,
@@ -43,6 +45,32 @@ async function readState(): Promise<{
     source: source ?? null,
     applied: !!timezone && appliedZone === timezone,
   };
+}
+
+function projectRoot(): string {
+  return process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox";
+}
+
+/** An install-x64.sh PC for this checkout. A host file that cannot be judged is "no". */
+function onX64Install(): boolean {
+  try {
+    return hasX64Install(projectRoot());
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether `/etc/localtime` already names `tz`. Only the link counts: unlike
+ * readOsTimeZone this never falls back to Node's zone, which is cached per
+ * process and is not the OS's answer.
+ */
+async function osClockAlreadyOn(tz: string): Promise<boolean> {
+  try {
+    return /zoneinfo\/(.+)$/.exec(await fs.readlink("/etc/localtime"))?.[1] === tz;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -254,8 +282,15 @@ async function transition(tz: string, adopting: boolean): Promise<NextResponse> 
   // assistant reads. One landing without the other is HALF a fix, and the owner
   // is told which half is outstanding rather than a flat success.
   let osFailure: string | undefined;
+  const x64Install = onX64Install();
   try {
-    await startRootStep("set_timezone");
+    // A PC installed with install-x64.sh whose clock is ALREADY on this zone —
+    // the usual case, since the browser offering it runs on the same desktop —
+    // has nothing for the root step to do, and the root helper that PC shipped
+    // with had no set_timezone at all: it failed this step on every dashboard
+    // load, because a failed OS leg leaves the marker unset and the adopter
+    // retries. install.sh's step answers "already" for the same state.
+    if (!(x64Install && await osClockAlreadyOn(tz))) await startRootStep("set_timezone");
   } catch (err) {
     console.warn("[timezone] Failed to trigger set_timezone service:", err);
     // NOT "until the next reboot": nothing reads data/timezone.env at boot and
@@ -264,7 +299,10 @@ async function transition(tz: string, adopting: boolean): Promise<NextResponse> 
     // below.
     osFailure = "The device clock could not be changed — the Terminal and the logs stay on the old "
       + "zone. It is not recorded as applied: an adopted zone is retried on the next dashboard load, "
-      + "an explicit one has to be sent again.";
+      + "an explicit one has to be sent again."
+      + (x64Install
+        ? ` If this PC's root helper predates the timezone step, install the current one from the Terminal: ${x64RootContractRepairCommand(projectRoot())}`
+        : "");
   }
   if (!osFailure) {
     // The web server's OWN clock, which the OS leg does not reach: Node fixed

@@ -55,7 +55,10 @@ vi.mock("@/lib/root-step-runner", async (orig) => ({
   }),
 }));
 
-vi.mock("@/lib/x64-integration", () => ({ hasX64DesktopIntegration: vi.fn(() => false) }));
+vi.mock("@/lib/x64-integration", () => ({
+  hasX64DesktopIntegration: vi.fn(() => false),
+  hasX64Install: vi.fn(() => false),
+}));
 
 vi.mock("@/lib/port-probe", async (orig) => ({
   ...(await orig<typeof import("@/lib/port-probe")>()),
