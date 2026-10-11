@@ -562,8 +562,9 @@ export function onCodingRunStarted(listener: () => void): () => void {
 }
 
 /**
- * Settings → Voice saved the spoken-replies switch: `{ autoReply: boolean }`.
- * The open chat listens so its next voice turn honours the new position
- * without a reopen.
+ * Settings → Voice saved the spoken-replies switches:
+ * `{ autoReply: boolean, autoPlayAll: boolean, engines }`. The open chat
+ * listens so its next reply honours the new positions without a reopen; a
+ * field that is absent leaves the chat's reading of it alone.
  */
 export const VOICE_SETTINGS_CHANGED_EVENT = "clawbox:voice-settings-changed";

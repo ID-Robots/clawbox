@@ -418,6 +418,73 @@ describe("status validation", () => {
     }
   });
 
+  /**
+   * "Auto-play every spoken reply", under the switch it depends on: off by
+   * default, and with spoken replies off there is no clip to play, so it is
+   * greyed out and says why instead of offering a flip that does nothing.
+   */
+  it("offers auto-play off by default, greyed out and saying why while spoken replies are off", async () => {
+    mockFetch(status());
+    render(<VoiceOutputPanel active />);
+    const toggle = await screen.findByTestId("voice-auto-play-all");
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+    expect(toggle).toBeDisabled();
+    expect(screen.getByTestId("voice-auto-play-all-hint")).toHaveTextContent(/Spoken replies above/);
+    expect(toggle).toHaveAccessibleDescription(/Spoken replies above/);
+    fireEvent.click(toggle);
+    expect(posts).toEqual([]);
+  });
+
+  it("keeps auto-play's position while spoken replies are off, so turning them back on brings it back", async () => {
+    mockFetch(status({ autoReply: false, autoPlayAll: true }));
+    render(<VoiceOutputPanel active />);
+    const toggle = await screen.findByTestId("voice-auto-play-all");
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    expect(toggle).toBeDisabled();
+  });
+
+  it("posts the auto-play flip once spoken replies are on, adopts the box's answer and tells the chat", async () => {
+    mockFetch(status({ autoReply: true }), { answer: { ...status(), autoReply: true, autoPlayAll: true } });
+    const heard: unknown[] = [];
+    const listener = (e: Event) => heard.push((e as CustomEvent).detail);
+    window.addEventListener("clawbox:voice-settings-changed", listener);
+    try {
+      render(<VoiceOutputPanel active />);
+      const toggle = await screen.findByTestId("voice-auto-play-all");
+      expect(toggle).not.toBeDisabled();
+      expect(toggle).toHaveAttribute("aria-checked", "false");
+      expect(screen.getByTestId("voice-auto-play-all-hint")).toHaveTextContent(/question you typed/);
+      fireEvent.click(toggle);
+      await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/tts", body: { action: "autoPlayAll", enabled: true } }));
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
+      // The open chat learns it with no reload: the same event `autoReply`
+      // rides on, carrying both switches.
+      expect(heard).toHaveLength(1);
+      expect(heard[0]).toMatchObject({ autoReply: true, autoPlayAll: true });
+    } finally {
+      window.removeEventListener("clawbox:voice-settings-changed", listener);
+    }
+  });
+
+  it("follows auto-play when it is moved somewhere else, and only when an event names it", async () => {
+    mockFetch(status({ autoReply: true }));
+    render(<VoiceOutputPanel active />);
+    const toggle = await screen.findByTestId("voice-auto-play-all");
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+    act(() => { window.dispatchEvent(new CustomEvent("clawbox:voice-settings-changed", { detail: { autoPlayAll: true } })); });
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    // A writer that names only spoken replies leaves auto-play where it was.
+    act(() => { window.dispatchEvent(new CustomEvent("clawbox:voice-settings-changed", { detail: { autoReply: true } })); });
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    expect(screen.getByTestId("voice-auto-reply")).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("refuses a status whose auto-play switch is not a boolean", () => {
+    expect(isVoiceStatus(status({ autoPlayAll: true }))).toBe(true);
+    expect(isVoiceStatus(status())).toBe(true);
+    expect(isVoiceStatus(status({ autoPlayAll: "yes" }))).toBe(false);
+  });
+
 });
 
 /**

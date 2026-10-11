@@ -53,16 +53,20 @@ function isDisclosure(value: unknown): boolean {
  * Settings window down (TASK-398); a panel that cannot read the box keeps its
  * last good reading instead.
  */
-/** The tts route's answer: the status, plus the owner's switch for spoken replies. */
-export type VoiceStatusAnswer = VoiceOutputStatus & { autoReply?: boolean };
+/**
+ * The tts route's answer: the status, plus the owner's switch for spoken
+ * replies and the auto-play switch under it.
+ */
+export type VoiceStatusAnswer = VoiceOutputStatus & { autoReply?: boolean; autoPlayAll?: boolean };
 
 export function isVoiceStatus(value: unknown): value is VoiceStatusAnswer {
   if (!value || typeof value !== "object") return false;
   const s = value as Record<string, unknown>;
   if (!["auto", "local", "cloud"].includes(s.choice as string)) return false;
-  // Optional: a status from before the switch existed still renders, with
-  // the switch shown in its default position (on).
+  // Optional: a status from before a switch existed still renders, with that
+  // switch shown in its default position (off).
   if (s.autoReply != null && typeof s.autoReply !== "boolean") return false;
+  if (s.autoPlayAll != null && typeof s.autoPlayAll !== "boolean") return false;
   if (!Array.isArray(s.engines) || !s.engines.every(isEngine)) return false;
   if (typeof s.drifted !== "boolean") return false;
   if (s.warning !== null && typeof s.warning !== "string") return false;
@@ -212,6 +216,9 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
 
   useEffect(() => {
     if (!active) return;
+    // The box's reading is external state the panel synchronises to, and
+    // `load` sets it only once its fetch has answered — never in this tick.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     load();
   }, [active, load]);
 
@@ -228,9 +235,14 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
    */
   useEffect(() => {
     const onChanged = (event: Event) => {
-      const detail = (event as CustomEvent<{ autoReply?: unknown }>).detail;
-      if (typeof detail?.autoReply !== "boolean") return;
-      setStatus((prev) => (prev ? { ...prev, autoReply: detail.autoReply as boolean } : prev));
+      const detail = (event as CustomEvent<{ autoReply?: unknown; autoPlayAll?: unknown }>).detail;
+      // Each switch on its own: a writer that names only one (or an older
+      // one that predates the second) must not move the other.
+      const moved: Partial<VoiceStatusAnswer> = {};
+      if (typeof detail?.autoReply === "boolean") moved.autoReply = detail.autoReply;
+      if (typeof detail?.autoPlayAll === "boolean") moved.autoPlayAll = detail.autoPlayAll;
+      if (Object.keys(moved).length === 0) return;
+      setStatus((prev) => (prev ? { ...prev, ...moved } : prev));
     };
     window.addEventListener(VOICE_SETTINGS_CHANGED_EVENT, onChanged);
     return () => window.removeEventListener(VOICE_SETTINGS_CHANGED_EVENT, onChanged);
@@ -325,7 +337,11 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
       // box answered afterwards — the same rule `post` follows below.
       if (ok && refreshed) {
         window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, {
-          detail: { autoReply: refreshed.autoReply === true, engines: refreshed.engines },
+          detail: {
+            autoReply: refreshed.autoReply === true,
+            autoPlayAll: refreshed.autoPlayAll === true,
+            engines: refreshed.engines,
+          },
         }));
       }
     } catch {
@@ -391,9 +407,11 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
         // speak with — so it hears about every write, not only about
         // `autoReply`. `select` and the ffmpeg repair are what install or
         // retire this box's voice, and a chat docked beside this page kept
-        // showing the old answer until it was closed and reopened.
+        // showing the old answer until it was closed and reopened. The
+        // auto-play switch rides along for the same reason: the chat reads it
+        // the moment the next reply lands, with no reopen in between.
         window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, {
-          detail: { autoReply: data.autoReply === true, engines: data.engines },
+          detail: { autoReply: data.autoReply === true, autoPlayAll: data.autoPlayAll === true, engines: data.engines },
         }));
       }
       if (data && typeof data === "object" && (data as { fallback?: unknown }).fallback) {
@@ -486,6 +504,8 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
   // whose option is greyed out — and a Play that then asked the box to speak
   // with it only produced a refusal to read.
   const canSpeak = engineById(source)?.configured === true;
+  // Auto-play has nothing to play while spoken replies are off.
+  const spokenRepliesOn = status.autoReply === true;
 
   const optionLabel = (engine: VoiceEngine | null, nameKey: string, missingKey: string) =>
     engine?.configured ? t(nameKey) : `${t(nameKey)} — ${t(missingKey)}`;
@@ -640,32 +660,70 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
       </div>
 
       {/* Spoken replies, and the ONLY control for them: the composer's speaker
-          button was taken back out at the owner's word (TASK-782). On by
+          button was taken back out at the owner's word (TASK-782). Off by
           default. The gateway answers the channels (`tts.auto: "inbound"`);
           in the desktop chat the reply's clip is made on the box on every
           harness — asked for by the chat on OpenClaw, attached by the chat
           route on Hermes — so a typed question's reply has a player here too
           and a spoken one plays on its own. The hint says exactly that, which
           is why it is not the one-line label it looks like it could be. */}
-      <div className={`${CARD} ${ROW}`}>
-        <div className="min-w-0">
-          <label htmlFor="voice-auto-reply" className={LABEL}>{t("settings.voice.autoReply")}</label>
-          <p className={`${MUTED} mt-0.5`}>{t("settings.voice.autoReplyHint")}</p>
+      <div className={`${CARD} space-y-4`}>
+        <div className={ROW}>
+          <div className="min-w-0">
+            <label htmlFor="voice-auto-reply" className={LABEL}>{t("settings.voice.autoReply")}</label>
+            <p className={`${MUTED} mt-0.5`}>{t("settings.voice.autoReplyHint")}</p>
+          </div>
+          <button
+            id="voice-auto-reply"
+            type="button"
+            role="switch"
+            aria-checked={status.autoReply === true}
+            disabled={disabled}
+            onClick={() => void post({ action: "autoReply", enabled: status.autoReply !== true })}
+            data-testid="voice-auto-reply"
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 shrink-0 ${
+              status.autoReply === true ? "bg-[var(--coral-bright)]" : "bg-gray-600"
+            }`}
+          >
+            <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${status.autoReply === true ? "translate-x-6" : "translate-x-1"}`} />
+          </button>
         </div>
-        <button
-          id="voice-auto-reply"
-          type="button"
-          role="switch"
-          aria-checked={status.autoReply === true}
-          disabled={disabled}
-          onClick={() => void post({ action: "autoReply", enabled: status.autoReply !== true })}
-          data-testid="voice-auto-reply"
-          className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 shrink-0 ${
-            status.autoReply === true ? "bg-[var(--coral-bright)]" : "bg-gray-600"
-          }`}
-        >
-          <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${status.autoReply === true ? "translate-x-6" : "translate-x-1"}`} />
-        </button>
+
+        {/* Auto-play, under the switch it depends on and in the same card.
+            That a typed question's reply waits on its player is the DEFAULT,
+            not a rule: on, the chat plays it the moment it exists, exactly
+            as it plays a spoken question's. With spoken replies off there is
+            no clip to play, so the switch is greyed out and says why — and
+            keeps its position, so turning spoken replies back on brings the
+            owner's choice back with it. */}
+        <div className={`${ROW} border-t border-[var(--border-subtle)] pt-4`} data-testid="voice-auto-play-all-row">
+          <div className="min-w-0">
+            <label
+              htmlFor="voice-auto-play-all"
+              className={`${LABEL} ${spokenRepliesOn ? "" : "opacity-60"}`}
+            >
+              {t("settings.voice.autoPlayAll")}
+            </label>
+            <p id="voice-auto-play-all-hint" className={`${MUTED} mt-0.5`} data-testid="voice-auto-play-all-hint">
+              {spokenRepliesOn ? t("settings.voice.autoPlayAllHint") : t("settings.voice.autoPlayAllNeedsSpokenReplies")}
+            </p>
+          </div>
+          <button
+            id="voice-auto-play-all"
+            type="button"
+            role="switch"
+            aria-checked={status.autoPlayAll === true}
+            aria-describedby="voice-auto-play-all-hint"
+            disabled={disabled || !spokenRepliesOn}
+            onClick={() => void post({ action: "autoPlayAll", enabled: status.autoPlayAll !== true })}
+            data-testid="voice-auto-play-all"
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shrink-0 ${
+              status.autoPlayAll === true ? "bg-[var(--coral-bright)]" : "bg-gray-600"
+            }`}
+          >
+            <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${status.autoPlayAll === true ? "translate-x-6" : "translate-x-1"}`} />
+          </button>
+        </div>
       </div>
 
       {/* Which VOICE the channels will use, when the box's own cannot reach
