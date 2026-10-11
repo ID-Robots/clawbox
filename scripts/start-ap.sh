@@ -700,10 +700,13 @@ iptables -t nat -D PREROUTING -i "$IFACE" -p tcp --dport 80 ! -d "$AP_IP" -j DNA
 # Enable IP forwarding and NAT masquerade for internet sharing
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
 
-# Find the WAN interface (first connected ethernet). awk reads to the end rather
-# than `exit` at the match: that SIGPIPEs nmcli, and under pipefail and set -e
-# this assignment then ends the script with 141 — right after the AP came up.
-WAN_IFACE=$(nmcli -t -f DEVICE,TYPE,STATE device status | awk -F: '/ethernet:connected/ && !n++ {print $1}')
+# Find the WAN interface (first connected ethernet). Read whole, then matched,
+# as ethernet_connected does: awk's `exit` at the match SIGPIPEd nmcli, and
+# under pipefail and set -e this assignment then ended the script with 141 —
+# right after the AP came up. A lookup that fails or times out is likewise no
+# WAN interface (the warning below), not the end of the script.
+wan_devices="$(nmcli -t -f DEVICE,TYPE,STATE device status)" || wan_devices=""
+WAN_IFACE=$(awk -F: '/ethernet:connected/ && !n++ {print $1}' <<<"$wan_devices")
 if [ -n "$WAN_IFACE" ]; then
   # Ensure MASQUERADE rule exists for hotspot -> internet NAT
   if ! iptables -t nat -C POSTROUTING -o "$WAN_IFACE" -j MASQUERADE 2>/dev/null; then

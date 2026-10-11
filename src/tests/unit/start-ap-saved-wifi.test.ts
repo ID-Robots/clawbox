@@ -94,6 +94,7 @@ const nmEscape = (s: string) => s.replace(/\\/g, "\\\\").replace(/:/g, "\\:");
 //   ap-busy    a uuid NetworkManager autoconnects when the AP's first activation fails
 //   after-fail a uuid NetworkManager autoconnects when a client activation fails
 //   flood      present: `device status` (and iw) go on for 100k rows after the real ones
+//   wan-lookup-fails  present: the DEVICE,TYPE,STATE listing (the WAN lookup) fails
 //   calls      argv of every call, tab-joined, one per line
 //   unsupported  any call this stand-in cannot answer faithfully
 const NMCLI_STUB = `#!/usr/bin/env bash
@@ -165,6 +166,9 @@ case "$1 $2" in
     [ "$fields" = RUNNING ] || unsupported "$@"
     echo running ;;
   "device status")
+    if [ -f "$NM/wan-lookup-fails" ] && [ "$fields" = DEVICE,TYPE,STATE ]; then
+      echo "Error: NetworkManager is not running." >&2; exit 8
+    fi
     wstate=disconnected
     [ "$state" = 100 ] && wstate=connected
     [ "$state" = 20 ] && wstate=unavailable
@@ -318,6 +322,8 @@ function makeBox(opts: {
   afterFail?: string;
   /** `device status` and iw answer with 100k more rows after the real ones. */
   flood?: boolean;
+  /** The WAN lookup's `nmcli -t -f DEVICE,TYPE,STATE device status` fails. */
+  wanLookupFails?: boolean;
 }) {
   root = mkdtempSync(path.join(tmpdir(), "clawbox-start-ap-"));
   nm = path.join(root, "nm");
@@ -347,6 +353,7 @@ function makeBox(opts: {
   if (opts.apBusy) writeFileSync(path.join(nm, "ap-busy"), opts.apBusy);
   if (opts.afterFail) writeFileSync(path.join(nm, "after-fail"), opts.afterFail);
   if (opts.flood) writeFileSync(path.join(nm, "flood"), "");
+  if (opts.wanLookupFails) writeFileSync(path.join(nm, "wan-lookup-fails"), "");
   writeFileSync(path.join(nm, "calls"), "");
 
   writeFileSync(path.join(bin, "nmcli"), NMCLI_STUB, { mode: 0o755 });
@@ -739,6 +746,17 @@ describe("start-ap.sh reads nmcli's and iw's whole answer before deciding", () =
     expect(r.stdout).toContain("Access point active (attempt 1)");
     expect(r.lines.filter((l) => l === `--wait 30 connection up uuid ${HOTSPOT} ifname ${IFACE}`)).toHaveLength(1);
     expectSafeCalls(r);
+  });
+
+  it("a WAN lookup that fails once the hotspot is up means no uplink to share, not a failed start", () => {
+    // Under set -e a failed (or phase-deadline 124) lookup used to end the
+    // script there: no NAT warning, no ap-runtime.env, a failed unit.
+    makeBox({ setupComplete: true, ethernet: true, profiles: [], wanLookupFails: true });
+    const r = runStartAp();
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain("Access point active (attempt 1)");
+    expect(r.stdout).toContain("no WAN interface found");
+    expect(readFileSync(path.join(root, "data", "ap-runtime.env"), "utf-8")).toContain('AP_IP="10.42.0.1"');
   });
 });
 
