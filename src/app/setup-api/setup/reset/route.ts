@@ -361,6 +361,10 @@ const HOME_REMOVE_PATHS = [
   // The launch env file: the previous owner's start page, and which browser
   // profile, port and executable of theirs the app was pointed at.
   ".cache/clawbox/browser.env",
+  // Pictures the owner pasted into the Terminal (src/lib/terminal-paste-store.ts):
+  // screenshots of whatever was on their screen. The store's own pruning runs
+  // only when another picture is pasted, so a reset is what must take them.
+  ".cache/clawbox/terminal-paste",
   // Shell/REPL histories and identity the TerminalApp + agent run_command
   // accumulate; .netrc/.npmrc can carry plaintext credentials.
   ".bash_history",

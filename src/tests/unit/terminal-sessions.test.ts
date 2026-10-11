@@ -289,3 +289,70 @@ describe("envInt", () => {
     expect(envInt(value as string | undefined, 7, 1, 1000)).toBe(expected);
   });
 });
+
+describe("the `foreground` question", () => {
+  // Asked by the Terminal before a plain Ctrl+V becomes a pasted picture. What
+  // the answer IS is terminal-foreground.mjs's business (its own test); here:
+  // who is answered, with what shape, and that the shell hears none of it.
+  const connectWith = (answer: { taker: "claude" | "shell" | null; name: string | null }) => {
+    const registry = createSessionRegistry({ idleMs: 60_000, newId: () => `session-${String(++idCounter).padStart(16, "0")}` });
+    const ptys: FakePty[] = [];
+    const asked: unknown[] = [];
+    const connect = (query: string) => {
+      const ws = new FakeSocket();
+      handleConnection(registry, ws, {
+        owner: OWNER_KEY,
+        params: new URLSearchParams(query),
+        spawn: () => {
+          const pty = new FakePty();
+          ptys.push(pty);
+          return { pty, info: {} };
+        },
+        foreground: (pty: unknown) => { asked.push(pty); return answer; },
+      });
+      return ws;
+    };
+    return { connect, ptys, asked };
+  };
+
+  it("answers the asker with the box's verdict on its own PTY, and sends the shell nothing", () => {
+    const { connect, ptys, asked } = connectWith({ taker: "claude", name: "claude" });
+    const ws = connect("session=new");
+    ws.message({ type: "foreground", id: 7 });
+    expect(ws.sent.at(-1)).toEqual({ type: "foreground", id: 7, taker: "claude", name: "claude" });
+    expect(asked).toEqual([ptys[0]]);
+    expect(ptys[0].written).toEqual([]);
+  });
+
+  it("says no in the same shape", () => {
+    const { connect } = connectWith({ taker: null, name: "vi" });
+    const ws = connect("session=new");
+    ws.message({ type: "foreground", id: 1 });
+    expect(ws.sent.at(-1)).toEqual({ type: "foreground", id: 1, taker: null, name: "vi" });
+  });
+
+  it("answers only the socket that asked", () => {
+    const { connect } = connectWith({ taker: "shell", name: "bash" });
+    const first = connect("session=new");
+    const second = connect(`session=${startedId(first)}`);
+    second.message({ type: "foreground", id: 1 });
+    expect(second.sent.at(-1)).toMatchObject({ type: "foreground", id: 1 });
+    expect(first.types()).not.toContain("foreground");
+  });
+
+  it("hands back no id it was not given as a number", () => {
+    const { connect } = connectWith({ taker: "shell", name: "bash" });
+    const ws = connect("session=new");
+    ws.message({ type: "foreground", id: "7; rm -rf ~" });
+    expect(ws.sent.at(-1)).toMatchObject({ type: "foreground", id: null });
+    ws.message({ type: "foreground" });
+    expect(ws.sent.at(-1)).toMatchObject({ type: "foreground", id: null });
+  });
+
+  it("says no, without throwing, for a PTY it cannot look at (the default reader, off a fake PTY)", () => {
+    const { connect } = setup();
+    const ws = connect("session=new");
+    ws.message({ type: "foreground", id: 3 });
+    expect(ws.sent.at(-1)).toEqual({ type: "foreground", id: 3, taker: null, name: null });
+  });
+});

@@ -34,6 +34,7 @@ import { cachedActiveHarness, fetchHarness } from "@/lib/client-harness";
 import { browserErrorText, runBrowserAction, type BrowserAction } from "@/lib/browser-actions";
 import { autoLaunchSpent, spendAutoLaunch } from "@/lib/browser-auto-launch";
 import ErrorWithFix from "./ErrorWithFix";
+import AgentBrowserIcon from "./AgentBrowserIcon";
 import VNCApp, { type VNCHandle } from "./VNCApp";
 import BrowserSetupWizard from "./BrowserSetupWizard";
 import BrowserSettingsPanel, { type BrowserStatus } from "./BrowserSettingsPanel";
@@ -261,13 +262,9 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
           /app/browser can reach them were unreachable from one. */}
       <div className="shrink-0 flex flex-wrap items-center gap-2 px-4 py-2 border-b border-white/10" data-testid="browser-header">
         <div className="w-6 h-6 rounded-lg flex items-center justify-center shrink-0" style={{ backgroundColor: BRAND_ORANGE }} aria-hidden="true">
-          <svg className="w-3.5 h-3.5" viewBox="0 0 135.47 135.47" aria-hidden="true">
-              <path d="m67.733 67.733 29.33 16.933-29.33 50.8c37.408 0 67.733-30.325 67.733-67.733 0-12.341-3.3168-23.901-9.0837-33.867h-58.65z" fill="#afccf9"/>
-              <path d="m67.733-1e-6c-25.07 0-46.942 13.63-58.654 33.875l29.324 50.792 29.33-16.933v-33.867h58.65c-11.714-20.24-33.583-33.867-58.65-33.867z" fill="#1767d1"/>
-              <path d="m0 67.733c0 37.408 30.324 67.733 67.733 67.733l29.33-50.8-29.33-16.933-29.33 16.933-29.324-50.792c-5.7637 9.9632-9.0794 21.519-9.0794 33.858" fill="#679ef5"/>
-              <path d="m101.6 67.733c0 18.704-15.163 33.867-33.867 33.867-18.704 0-33.867-15.163-33.867-33.867s15.163-33.867 33.867-33.867c18.704 0 33.867 15.163 33.867 33.867" fill="#fff"/>
-              <path d="m95.25 67.733c0 15.197-12.32 27.517-27.517 27.517-15.197 0-27.517-12.32-27.517-27.517 0-15.197 12.32-27.517 27.517-27.517 15.197 0 27.517 12.32 27.517 27.517" fill="#1a74e7"/>
-            </svg>
+          {/* The app's own desktop icon, so the mark in the header is the one
+              the owner clicked. */}
+          <AgentBrowserIcon className="w-4 h-4 text-white" />
         </div>
         {face === "home" ? (
           <>

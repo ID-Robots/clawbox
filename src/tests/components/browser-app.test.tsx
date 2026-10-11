@@ -316,6 +316,8 @@ describe("BrowserApp", () => {
     }
     // The title bar repeated the window's own title; it is gone.
     expect(queryByText("Browser Integration")).toBeNull();
+    // Its mark is the app's own desktop icon, not a Chrome-style roundel.
+    expect(header.contains(getByTestId("agent-browser-icon"))).toBe(true);
     // The paste button no longer floats over the screen.
     expect(document.querySelectorAll('[title="vnc.pasteToRemote"]')).toHaveLength(1);
   });

@@ -423,8 +423,9 @@ describe("POST /setup-api/setup/reset", () => {
     // The security-critical set: SSH keys (authorized_keys would readmit
     // the previous owner even after the password reset), codex OAuth tokens,
     // the AI-browser profile (cookies/sessions), credential-bearing dotfiles,
-    // and the HuggingFace login token.
-    for (const suffix of [".ssh", ".codex", "clawbox-browser", ".netrc", "huggingface/token"]) {
+    // the HuggingFace login token, and the pictures pasted into the Terminal
+    // (screenshots of the previous owner's screen, pruned only by a later paste).
+    for (const suffix of [".ssh", ".codex", "clawbox-browser", ".netrc", "huggingface/token", ".cache/clawbox/terminal-paste"]) {
       const call = mockFs.rm.mock.calls.find(
         ([p]) => typeof p === "string" && p.endsWith(suffix),
       );

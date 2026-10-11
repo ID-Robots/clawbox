@@ -46,6 +46,7 @@ import ChatPopup, { CHAT_PANEL_GAP, noticeColumnInset, type ChatFloatingRect } f
 import ToastHost from "@/components/ToastHost";
 import PowerApprovalPrompt, { POWER_APPROVAL_EVENT } from "@/components/PowerApprovalPrompt";
 import InstalledAppIcon from "@/components/InstalledAppIcon";
+import AgentBrowserIcon from "@/components/AgentBrowserIcon";
 import SetupWizard from "@/components/SetupWizard";
 import { I18nProvider, useT } from "@/lib/i18n";
 import { cleanVersion } from "@/lib/version-utils";
@@ -306,15 +307,7 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
   }
 
   if (id === "browser") {
-    return (
-      <svg className={`${size}`} viewBox="0 0 135.47 135.47">
-        <path d="m67.733 67.733 29.33 16.933-29.33 50.8c37.408 0 67.733-30.325 67.733-67.733 0-12.341-3.3168-23.901-9.0837-33.867h-58.65z" fill="#afccf9"/>
-        <path d="m67.733-1e-6c-25.07 0-46.942 13.63-58.654 33.875l29.324 50.792 29.33-16.933v-33.867h58.65c-11.714-20.24-33.583-33.867-58.65-33.867z" fill="#1767d1"/>
-        <path d="m0 67.733c0 37.408 30.324 67.733 67.733 67.733l29.33-50.8-29.33-16.933-29.33 16.933-29.324-50.792c-5.7637 9.9632-9.0794 21.519-9.0794 33.858" fill="#679ef5"/>
-        <path d="m101.6 67.733c0 18.704-15.163 33.867-33.867 33.867-18.704 0-33.867-15.163-33.867-33.867s15.163-33.867 33.867-33.867c18.704 0 33.867 15.163 33.867 33.867" fill="#fff"/>
-        <path d="m95.25 67.733c0 15.197-12.32 27.517-27.517 27.517-15.197 0-27.517-12.32-27.517-27.517 0-15.197 12.32-27.517 27.517-27.517 15.197 0 27.517 12.32 27.517 27.517" fill="#1a74e7"/>
-      </svg>
-    );
+    return <AgentBrowserIcon className={`${size} text-white`} />;
   }
 
   if (id === "clawbox") {
@@ -380,7 +373,8 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
     "memory-shard": "diamond",
     system_update: "system_update",
     vnc: "desktop_windows",
-    // The globe: the open web, as opposed to `browser`'s Chrome roundel.
+    // The globe: the open web, as opposed to `browser`'s window with the
+    // assistant in it (AgentBrowserIcon).
     web: "language",
     camera: "photo_camera",
     screenshot: "screenshot_monitor",

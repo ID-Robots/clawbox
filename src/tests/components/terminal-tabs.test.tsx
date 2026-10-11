@@ -182,10 +182,15 @@ describe("TerminalTabs", () => {
   it("leaves the shell's own Ctrl keys to the shell", async () => {
     render(<TerminalTabs />);
     await waitFor(() => expect(terms.length).toBe(1));
-    // SIGINT, EOF, readline's delete-word and transpose, nano's next page.
-    for (const k of ["c", "d", "w", "t", "v"]) {
+    // SIGINT, EOF, readline's delete-word and transpose.
+    for (const k of ["c", "d", "w", "t"]) {
       expect(terms[0].press({ ctrlKey: true, key: k }), `Ctrl+${k}`).toBe(true);
     }
+    // Ctrl+V (nano's next page, vim's block select) is the shell's too, by
+    // another road: the browser is let have the key so a PICTURE on the
+    // clipboard can be seen, and the shell is handed its ^V every other time
+    // (terminal-image-paste.test.tsx). Never a tab action, never prevented.
+    expect(terms[0].press({ ctrlKey: true, key: "v" }), "Ctrl+v").toBe(false);
     expect(screen.getAllByRole("tab")).toHaveLength(1);
   });
 
