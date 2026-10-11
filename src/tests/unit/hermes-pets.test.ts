@@ -119,6 +119,32 @@ describe("the pet store", () => {
     expect(pet?.sheetPath.endsWith("spritesheet.png")).toBe(true);
   });
 
+  it("reads the frames a pet may sleep on out of pet.json", async () => {
+    makePet("dozer", { meta: { id: "dozer", spritesheetPath: "spritesheet.webp", sleepFrames: [0, 1, 2] } });
+    const { loadPet } = await loadModule();
+    expect(loadPet("dozer")?.sleepFrames).toEqual([0, 1, 2]);
+  });
+
+  it("loads a pet.json without sleep frames as a pet that holds one frame asleep", async () => {
+    // Every Petdex download is one: the field is ours, and its absence is
+    // never a reason to refuse the pet.
+    makePet("boba");
+    const { loadPet } = await loadModule();
+    const pet = loadPet("boba");
+    expect(pet?.slug).toBe("boba");
+    expect(pet).not.toHaveProperty("sleepFrames");
+  });
+
+  it("drops sleep frames that are not frames, and keeps the pet", async () => {
+    const { loadPet } = await loadModule();
+    for (const [i, bad] of [[], [0, 6], [-1], [0.5], ["0"], "0,1,2", { 0: 0 }, [0, null]].entries()) {
+      makePet(`odd-${i}`, { meta: { id: `odd-${i}`, sleepFrames: bad } });
+      const pet = loadPet(`odd-${i}`);
+      expect(pet?.slug, JSON.stringify(bad)).toBe(`odd-${i}`);
+      expect(pet, JSON.stringify(bad)).not.toHaveProperty("sleepFrames");
+    }
+  });
+
   it("refuses a pet.json that points its spritesheet out of the directory", async () => {
     makePet("escapee", { meta: { id: "escapee", spritesheetPath: "../../../etc/passwd" }, sheet: "" });
     const { loadPet } = await loadModule();

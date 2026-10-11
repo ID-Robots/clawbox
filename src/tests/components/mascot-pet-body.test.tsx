@@ -8,13 +8,15 @@
 //     nothing is installed — the crab is ClawBox's own brand, not a placeholder
 //     for a device running someone else's harness.
 
+import fs from "fs";
+import path from "path";
 import { type ComponentProps } from "react";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { render, waitFor, cleanup, fireEvent, act } from "@/tests/helpers/test-utils";
 import Mascot, { AMBIENT_FPS } from "@/components/Mascot";
 import { EGG_IDLE_STEPS } from "@/components/EggMascot";
 import PetSprite, { PET_BODY_PX } from "@/components/PetSprite";
-import { invalidatePetStatus } from "@/lib/pet-client";
+import { fetchPetStatus, invalidatePetStatus } from "@/lib/pet-client";
 import { CODEX_STATE_ROWS, LEGACY_STATE_ROWS } from "@/lib/pet-state-map";
 import type { PetRowMetrics } from "@/lib/pet-sheet-metrics";
 import { CURATED_PETS } from "@/lib/pet-curated";
@@ -925,6 +927,122 @@ describe("PetSprite", () => {
     const el = sprite();
     expect(el.dataset.petFrames).toBe("6");
     expect(css(el)).toContain("bottom: 0px");
+  });
+
+  describe("asleep", () => {
+    // The crab sleeps on `waiting`, whose frame 3 has its eyes OPEN. Its pack
+    // names the frames with them shut; the sprite steps nothing else.
+    const pack = JSON.parse(
+      fs.readFileSync(path.join(process.cwd(), "public", "pets", "vibrant-clawd", "pet.json"), "utf-8"),
+    ) as { sleepFrames: number[] };
+    const CRAB = { ...BRAND_CRAB, rowMetrics: MEASURED_PET.rowMetrics, sleepFrames: pack.sleepFrames };
+    const w = (PET_BODY_PX * 192) / 208;
+    const frameOf = (strip: HTMLElement) =>
+      Math.round(-parseFloat(strip.style.transform.slice("translate(".length)) / w) || 0;
+    /** Every frame shown over `ms`, sampled each 50 ms. */
+    const watch = (strip: HTMLElement, ms: number) => {
+      const seen = [frameOf(strip)];
+      for (let t = 0; t < ms; t += 50) {
+        act(() => { vi.advanceTimersByTime(50); });
+        seen.push(frameOf(strip));
+      }
+      return seen;
+    };
+
+    it("never opens the crab's eyes, however many loops it sleeps", async () => {
+      vi.useFakeTimers();
+      try {
+        const { container, rerender } = render(<PetSprite pet={CRAB} state="sleep" facing="right" />);
+        const el = container.querySelector("[data-pet]") as HTMLElement;
+        const strip = el.querySelector("[data-pet-strip]") as HTMLElement;
+        expect(el.dataset.petRow).toBe(String(CODEX_STATE_ROWS.indexOf("waiting")));
+        const asleep = watch(strip, 5 * 1100);
+        expect(asleep).not.toContain(3);
+        expect([...new Set(asleep)].sort((a, b) => a - b)).toEqual([...new Set(pack.sleepFrames)].sort((a, b) => a - b));
+        // Each foot offset still rides with its frame.
+        expect(strip.style.transform).toMatch(/, 15px\)$/);
+
+        // Woken: whatever comes next plays its whole row, eyes open.
+        rerender(<PetSprite pet={CRAB} state="idle" facing="right" />);
+        expect(el.dataset.petRow).toBe(String(CODEX_STATE_ROWS.indexOf("idle")));
+        expect([...new Set(watch(strip, 1100))].sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4, 5]);
+
+        // `sass` shares the sleep row awake, and keeps every frame of it.
+        rerender(<PetSprite pet={CRAB} state="sass" facing="right" />);
+        expect(el.dataset.petRow).toBe(String(CODEX_STATE_ROWS.indexOf("waiting")));
+        expect([...new Set(watch(strip, 1100))].sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4, 5]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("holds the first frame of a pet whose pack names no sleep frames — no blink, no timer", async () => {
+      vi.useFakeTimers();
+      try {
+        const { container } = render(<PetSprite pet={MEASURED_PET} state="sleep" facing="right" />);
+        const strip = container.querySelector("[data-pet-strip]") as HTMLElement;
+        expect(strip.style.transform).toBe("translate(0px, 15px)");
+        expect(new Set(watch(strip, 3 * 1100))).toEqual(new Set([0]));
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("holds a sleep frame under reduced motion", async () => {
+      vi.useFakeTimers();
+      const realMatch = window.matchMedia;
+      window.matchMedia = ((q: string) => ({ matches: q.includes("reduce"), media: q, addEventListener: () => {}, removeEventListener: () => {} })) as unknown as typeof window.matchMedia;
+      try {
+        const { container } = render(<PetSprite pet={CRAB} state="sleep" facing="right" />);
+        const strip = container.querySelector("[data-pet-strip]") as HTMLElement;
+        expect(new Set(watch(strip, 2 * 1100))).toEqual(new Set([pack.sleepFrames[0]]));
+      } finally {
+        window.matchMedia = realMatch;
+        vi.useRealTimers();
+      }
+    });
+
+    it("drops sleep frames off the wire that are not frames of the row", async () => {
+      // The route is ours, but a pack's pet.json is not: `pet-client` checks the
+      // list again, against the sheet it describes.
+      for (const bad of [[0, 6], [0, 1.5], ["0"], [], "0,1,2"]) {
+        invalidatePetStatus();
+        stubPetsRoute({ supported: true, edition: "openclaw", placeholder: "crab", enabled: false, active: { ...CRAB, sleepFrames: bad } });
+        const status = await fetchPetStatus();
+        expect(status.active?.slug, JSON.stringify(bad)).toBe("vibrant-clawd");
+        expect(status.active, JSON.stringify(bad)).not.toHaveProperty("sleepFrames");
+      }
+      invalidatePetStatus();
+      stubPetsRoute({ supported: true, edition: "openclaw", placeholder: "crab", enabled: false, active: CRAB });
+      expect((await fetchPetStatus()).active?.sleepFrames).toEqual(pack.sleepFrames);
+    });
+
+    it("shuts the fail-open crab's eyes while it sleeps, and opens them when it wakes", async () => {
+      // No sheet to step: the body is a still PNG, and its eyes are open.
+      vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new Error("offline"))));
+      const { container, getByTestId, rerender } = render(<Mascot />);
+      const still = () => container.querySelector('img[src^="/clawbox-crab"]')?.getAttribute("src");
+      await waitFor(() => expect(still()).toBe("/clawbox-crab.png"));
+      const root = container.querySelector('[data-mascot="crab"]') as HTMLElement;
+
+      fireEvent.contextMenu(root, { clientX: 100, clientY: 600 });
+      fireEvent.click(getByTestId("mascot-context-menu").querySelector("button") as HTMLElement);
+      await waitFor(() => expect(still()).toBe("/clawbox-crab-sleep.png"));
+
+      // Thinking outranks sleep — the shell runs the thinking wobble, and the
+      // face it wobbles must not be asleep.
+      rerender(<Mascot thinking />);
+      await waitFor(() => expect(still()).toBe("/clawbox-crab.png"));
+      rerender(<Mascot />);
+      await waitFor(() => expect(still()).toBe("/clawbox-crab-sleep.png"));
+
+      // A drag-and-drop wakes it.
+      fireEvent.pointerDown(root, { button: 0, pointerId: 1, clientX: 500, clientY: 740 });
+      fireEvent.pointerMove(root, { pointerId: 1, clientX: 600, clientY: 300 });
+      fireEvent.pointerUp(root, { pointerId: 1, clientX: 600, clientY: 300 });
+      await waitFor(() => expect(still()).toBe("/clawbox-crab.png"));
+    });
   });
 
   it("renders whatever geometry a pet declares", async () => {
