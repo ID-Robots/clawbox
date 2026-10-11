@@ -194,6 +194,7 @@ describe("the desktop's requests — only what the signed-in user may ask", () =
         "/setup-api/ai-models/status",
         "/setup-api/clawkeep",
         "/setup-api/system/power/approval",
+        "GET /setup-api/system/battery",
       ]) {
         expect(asked(fragment), fragment).toBe(true);
       }
