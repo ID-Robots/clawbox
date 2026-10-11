@@ -19,7 +19,8 @@ const has = (cmd: string, args: string[]) => spawnSync(cmd, args, { stdio: "igno
 
 describe.skipIf(!has("git", ["--version"]))("scripts/public-hygiene.mjs (node --test)", () => {
   it("passes every unit test", () => {
-    const result = spawnSync("node", ["--test", TESTS], { encoding: "utf-8", timeout: 110_000 });
+    // TAP, named: node 23 and newer default to the spec reporter, which prints no `# fail N` line.
+    const result = spawnSync("node", ["--test", "--test-reporter=tap", TESTS], { encoding: "utf-8", timeout: 110_000 });
     const output = `${result.stdout}\n${result.stderr}`;
     expect(output).toMatch(/^# fail 0$/m);
     expect(result.status, output).toBe(0);
