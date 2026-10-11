@@ -141,6 +141,8 @@ describe("translations", () => {
         "whatsNew",
         // Settings → Users, multi-user ClawBox OS (TASK-1256).
         "users",
+        // The Screenshot app (TASK-1475).
+        "screenshot",
       ]);
 
       for (const key of Object.keys(translations.en)) {

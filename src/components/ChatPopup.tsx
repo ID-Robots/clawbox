@@ -67,7 +67,7 @@ import {
 import { installPendingRefresh } from '@/lib/email-pending-refresh'
 import { describeChatFailure, describeFallbackReply, describeImageFailure, isUnacknowledgedTurn, UNACKNOWLEDGED_TURN_TEXT } from '@/lib/chat-error-text'
 import { describeChatSwap, reportAnthropicChatFailure, TurnLedger } from '@/lib/anthropic-chat-swap'
-import { RunFailureLedger } from '@/lib/chat-run-failure'
+import { RunFailureLedger, withFailureNote } from '@/lib/chat-run-failure'
 import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, VOICE_SETTINGS_CHANGED_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type ChatMessageDetail, type FixErrorContext, dispatchOpenCodingRun } from '@/lib/ui-events'
 import { speechTextFor } from '@/lib/speech-text'
 import { SKILL_CHANGE_EVENT, buildSkillChangeMessage, type SkillChangeEvent } from '@/lib/skill-change-message'
@@ -372,7 +372,8 @@ interface ChatModelState {
     /** The ChatGPT sign-in on this box predates the installed OpenClaw: the
      * credential is intact, the core just cannot route it. Signing in again is
      * the only fix, so the row must not say "set up in Settings" — that sends
-     * the owner to re-enter something they already have. */
+     * the owner to re-enter something they already have. Also a Claude sign-in
+     * whose stored credential is a dead refresh marker (`claudeSignInFenced`). */
     reauthRequired?: boolean
     /** The reasoning-effort levels the GATEWAY published for this model, off
      * its own `models.list` (see `readGatewayThinkingLevels` in
@@ -472,7 +473,7 @@ import {
   extractProviderModelId,
   isModelUsableOnSubscription,
 } from '@/lib/provider-models'
-import { chatgptReferenceProvider } from '@/lib/chatgpt-subscription'
+import { chatgptReferenceProvider, isLegacyChatgptProvider } from '@/lib/chatgpt-subscription'
 import { useProviderCatalog } from '@/hooks/useProviderCatalog'
 // Hermes chat header. Deliberately a separate namespace from the OpenClaw
 // pieces above: Hermes has its own provider slugs, its own model ids and its
@@ -3197,13 +3198,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           // session filter, which is what would otherwise drop the event. The
           // error branch below never runs for a background session, and a
           // history reload cannot recreate what was never stored.
-          // One sentence per failed run, worded once: the ledger's note is
-          // consumed here and reused by the error branch below.
-          const failureContext = state === 'error' ? runFailureRef.current.settle(payload) : undefined
-          const failureText = failureContext
-            ? describeChatFailure(payload.errorMessage, failureContext, failureWordsRef.current)
+          // One sentence per failed run, worded once: the ledger settles the
+          // run here and the error branch below reuses the answer. The gateway
+          // reports a failed run TWICE (see lib/chat-run-failure.ts), so the
+          // ledger also says when this frame is the repeat — worded as the
+          // first was, from the context and the sentence that one carried.
+          const settledError = state === 'error' ? runFailureRef.current.settleError(payload) : undefined
+          const failureContext = settledError?.context
+          const failureText = settledError
+            ? describeChatFailure(settledError.errorMessage, settledError.context, failureWordsRef.current)
             : undefined
-          if (state === 'final' || state === 'aborted' || state === 'error') {
+          // A repeat ends nothing: its run's busy mark went with the first
+          // frame, and one on this key now belongs to a turn sent since.
+          if (state === 'final' || state === 'aborted' || (state === 'error' && !settledError?.repeat)) {
             settleRun(sk, failureText)
           }
           if (sk !== sessionKeyRef.current) return
@@ -3341,6 +3348,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 })
               }, 3_000)
             }
+          } else if (settledError?.repeat) {
+            // The gateway's second `error` frame for a run the first one
+            // already ended, some seven seconds on. The owner may have sent
+            // the next message by now, so nothing of the turn in flight is
+            // touched — no composer, no streaming buffer — and nothing is
+            // reported to the account swap a second time. One thing is still
+            // owed: this chat's history re-read drops its own notes
+            // (`mergeRestoredTranscript`), and one usually lands between the
+            // two frames — so the sentence goes back when it is gone, and only
+            // then (`withFailureNote`, which also puts it under its own turn).
+            const failedRun = settledError.runId
+            if (failedRun && failureText) {
+              const note = { role: 'system' as const, text: failureText, timestamp: Date.now(), failedRun }
+              setMessages(prev => withFailureNote(prev, note))
+            }
           } else if (state === 'aborted' || state === 'error') {
             // Read, clear, THEN append — all three outside any updater, for the
             // same reason as the full-screen chat: React may run an updater
@@ -3367,7 +3389,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
               // an operator reading a log and has carried an absolute device
               // path, a session UUID and a `openclaw logs --follow` line into
               // the customer's transcript (TASK-440).
-              setMessages(prev => [...prev, { role: 'system', text: failureText ?? describeChatFailure(payload.errorMessage, undefined, failureWordsRef.current), timestamp: Date.now() }])
+              // Tagged with its run, so the gateway's repeat of this error
+              // (above) can tell the sentence is already here.
+              setMessages(prev => [...prev, { role: 'system', text: failureText ?? describeChatFailure(payload.errorMessage, undefined, failureWordsRef.current), timestamp: Date.now(), ...(settledError?.runId ? { failedRun: settledError.runId } : {}) }])
               // A Claude account at its limit, or refused (TASK-1260): see ChatApp.
               const forKey = sessionKeyRef.current
               void reportAnthropicChatFailure({
@@ -6067,9 +6091,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         role: 'system',
         // A stale sign-in is not an absent one. The credential is on the box;
         // the installed OpenClaw simply cannot route the way it was filed, and
-        // only a fresh sign-in re-files it.
+        // only a fresh sign-in re-files it. That reason is the ChatGPT row's
+        // alone: a Claude row is greyed the same way when the gateway's store
+        // holds a dead refresh marker for it (2026-10-10), and nothing about
+        // that sign-in predates anything.
         text: target.reauthRequired
-          ? `${target.label} needs you to sign in again — this box's sign-in predates the installed OpenClaw. Opened Settings so you can reconnect it.`
+          ? isLegacyChatgptProvider(target.provider)
+            ? `${target.label} needs you to sign in again — this box's sign-in predates the installed OpenClaw. Opened Settings so you can reconnect it.`
+            : `${target.label} needs you to sign in again — this box's sign-in has stopped working. Opened Settings so you can reconnect it.`
           : `${target.label} is not configured. Opened Settings so you can set it up.`,
         timestamp: Date.now(),
       }])

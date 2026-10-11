@@ -660,7 +660,10 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
     try {
       const { WebglAddon } = await import("@xterm/addon-webgl");
       if (termRef.current !== term || !activeRef.current || !mountedRef.current) return;
-      const addon = new WebglAddon();
+      // `preserveDrawingBuffer`: without it a WebGL canvas reads back empty
+      // once the frame has been shown, and the Screenshot app's capture of a
+      // terminal window would be a blank rectangle (TASK-1475).
+      const addon = new WebglAddon(true);
       // A lost context (the GPU reset, too many contexts on the page) hands
       // the terminal back to the DOM renderer; the next time this tab comes
       // to the front it asks for WebGL again.

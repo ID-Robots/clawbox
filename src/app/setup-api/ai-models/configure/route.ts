@@ -32,6 +32,14 @@ import {
   gatewayReadyWaitMs,
 } from "@/lib/openclaw-config";
 import { waitForGatewayRpcReady } from "@/lib/openclaw-gateway-ws";
+import { tokenFingerprint } from "@/lib/anthropic-gateway-auth";
+import {
+  putGatewayOAuthProfile,
+  readGatewayAuthProfile,
+  type GatewayAuthProfileCopy,
+  type GatewayAuthProfileRead,
+  type GatewayOAuthBundle,
+} from "@/lib/openclaw-auth-store";
 import { enableProviderPluginOps } from "@/lib/provider-plugin-ops";
 import { getActiveHarness } from "@/lib/harness";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
@@ -2977,6 +2985,10 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       await pasteAuthApiKey(ocProvider, config.profileKey, apiKeyValue);
     } else {
       const authProfiles = await readAuthProfiles();
+      // Built ONCE and handed to both the legacy file and the gate under the
+      // doctor call: the gate compares `expires`, and a second `Date.now()`
+      // would make every sign-in look like one the store did not take.
+      let oauthBundle: GatewayOAuthBundle | undefined;
       if (authMode === "subscription") {
         // OAuth credential format expected by OpenClaw:
         // { type: "oauth", provider, access, id?, refresh, expires, projectId? }
@@ -2984,7 +2996,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         // with it, and gateway-pre-start's ~/.codex/auth.json synthesis uses
         // `id` (falling back to `access`). Persisting it keeps the synthesized
         // id_token a valid JWT instead of whatever `access` happens to be.
-        authProfiles.profiles[config.profileKey] = {
+        oauthBundle = {
           type: "oauth",
           provider: ocProvider,
           access: normalizedApiKey,
@@ -2995,6 +3007,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
             : Date.now() + 8 * 60 * 60 * 1000, // default 8h
           ...(projectId ? { projectId } : {}),
         };
+        authProfiles.profiles[config.profileKey] = oauthBundle;
       }
       await writeAuthProfiles(authProfiles);
       // OpenClaw 2 refuses to hydrate this LEGACY file: run the doctor
@@ -3016,6 +3029,11 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // owner to "run `openclaw doctor --fix` from the Terminal" is advice for
       // the command that is blocked, and he can do nothing with it.
       let doctorBlockedBy: OpenclawDoctorFixOutcome | null = null;
+      // Outside the try, for the gate under the catch, which runs on an explicit
+      // "completed" and nothing else: not a doctor that threw (a v1 box carries
+      // on past the catch), not a blocked outcome, and not the `undefined` the
+      // note below exempts.
+      let outcome: OpenclawDoctorFixOutcome | undefined;
       try {
         // TWO rules at once, and they pull in opposite directions.
         //
@@ -3032,7 +3050,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         // and treating it as a refusal turns every one of their ordinary saves
         // into this 502. That inertness is the whole reason these outcomes are
         // returned rather than thrown, and it is load-bearing for the suite.
-        const outcome: OpenclawDoctorFixOutcome | undefined = await runOpenclawDoctorFix();
+        outcome = await runOpenclawDoctorFix();
         if (outcome !== undefined && outcome !== "completed") {
           doctorBlockedBy = outcome;
           // Into the SAME failure path, deliberately: the v1/v2 decision below
@@ -3092,6 +3110,123 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
                 : "Credential migration failed. The subscription sign-in was rolled back — try again, or run 'openclaw doctor --fix' from the Terminal.",
             },
             { status: 502 },
+          );
+        }
+      }
+      // DID THE SIGN-IN LAND? (the incident of 2026-10-10.) "completed" was
+      // this branch's only proof, and it is no proof of the credential: the
+      // core's JSON → sqlite migration only ADDS profile ids its store does
+      // not hold. For an id already there it keeps the stored profile,
+      // archives the file written above and still reports "completed". On the
+      // box this was found on the stored `anthropic:default` was a failed
+      // OAuth refresh fence, which the gateway never uses: this route answered
+      // 200 to 7 of 8 sign-ins while every chat turn died with "No API key
+      // found for provider anthropic".
+      //
+      // So ask the gateway's own store what it holds, and when that is not
+      // this sign-in, write it there and ask again (openclaw-auth-store.ts —
+      // its write wants the gateway stopped, which the doctor call above has
+      // just done). Import, verify, replace in place, verify — in that order,
+      // so the credential that was there is never removed before the new one
+      // is stored.
+      //
+      // "Cannot look" passes; "looked, and it is not there" refuses. No store,
+      // or one this build cannot read, is a core generation this code has not
+      // met — on a v1 box the legacy file IS the store — and refusing a
+      // sign-in nobody can disprove would lock its owner out. A store that
+      // answers and still does not hold the sign-in is the incident itself, so
+      // it is a 502 with nothing below written: the primary, the session pins,
+      // the config-store flags and the OAuth handoff file all come later, and
+      // POST restarts the gateway.
+      //
+      // WHAT A REFUSAL LEAVES is not always what was there, and the sentence
+      // does not say it is: a replace that committed and could not be read
+      // back stays committed — the store module has no undo. Nor is anything
+      // undone when the save fails AFTER this gate: the sign-in is then in the
+      // store under `auth.profiles` metadata the batch below never rewrote,
+      // and on a box that held an API key at this id core accepts neither
+      // until a sign-in completes (review of 2026-10-10, finding 1 — narrow,
+      // healed by the retry both sentences ask for, and recorded here rather
+      // than fixed).
+      //
+      // Claude's sign-in only: it is the profile this was measured on, and the
+      // one ClawBox already rewrites in that row (anthropic-gateway-auth.ts).
+      // The ClawBox AI device login runs this branch too (`clawai/poll` posts
+      // `authMode: "subscription"`) and is kept out by name, not only by the
+      // provider id it rides today: its credential is the CLI paste further
+      // down, which replaces whatever the id holds.
+      if (outcome === "completed" && oauthBundle && ocProvider === "anthropic" && !isClawAI) {
+        const fingerprint = tokenFingerprint(oauthBundle.access);
+        const expires = oauthBundle.expires;
+        const isSignIn = (copy: GatewayAuthProfileCopy) =>
+          copy.type === "oauth"
+          && !copy.fenced
+          && copy.fingerprint === fingerprint
+          && copy.expires === expires;
+        // Where the main agent holds its own copy of the id, core resolves
+        // that one over the shared row — and hands out the shared one instead
+        // when it is usable and expires later. Stored means BOTH are this
+        // sign-in; `sharedCopy` is absent on every box without such a copy.
+        const landed = (read: GatewayAuthProfileRead) =>
+          read.kind === "present"
+          && isSignIn(read)
+          && (read.sharedCopy === undefined || (read.sharedCopy !== null && isSignIn(read.sharedCopy)));
+        // What a read answered, for the journal: never the credential, nor
+        // the fingerprint that stands in for it. A box whose main agent holds
+        // its own copy is said to be one — none is known in the field, and
+        // this line is how the first would be recognised.
+        const held = (read: GatewayAuthProfileRead) =>
+          read.kind !== "present"
+            ? read.kind
+            : `present${read.fence ? `, an OAuth refresh fence (${read.fence})` : ""}`
+              + (read.sharedCopy !== undefined ? ", in the main agent's own copy" : "");
+        const stored = readGatewayAuthProfile(config.profileKey);
+        let cannotLook: "no-store" | "unreadable" | null = null;
+        if (stored.kind === "no-store" || stored.kind === "unreadable") {
+          cannotLook = stored.kind;
+        } else if (!landed(stored)) {
+          const put = putGatewayOAuthProfile(config.profileKey, oauthBundle);
+          // No second look when nothing was committed: there is nothing new to find.
+          const after = put.ok ? readGatewayAuthProfile(config.profileKey) : null;
+          if (!put.ok && put.reason === "no-store") {
+            // The store went between the read and the write: the same answer
+            // as not finding one.
+            cannotLook = "no-store";
+          } else if (after && landed(after)) {
+            console.warn(
+              `[configure] doctor --fix completed without storing the new ${config.profileKey} sign-in`
+              + ` (the gateway's auth store was left as it was: ${held(stored)}); ClawBox replaced it in place`,
+            );
+          } else {
+            // The one line that says WHICH refusal this was. Without it the
+            // 502 left nothing in the journal at all — and the likeliest of
+            // the three, a replace that committed and did not read back, is
+            // the one the store module has no words of its own for.
+            console.error(
+              `[configure] the ${config.profileKey} sign-in is not in the gateway's auth store:`
+              + ` the store answered ${held(stored)} before, the replace ${put.ok ? "committed" : `answered ${put.reason}`},`
+              + ` and the store ${after ? `answered ${held(after)}` : "was not read"} afterwards`,
+            );
+            return NextResponse.json(
+              {
+                // True of every way to get here — nothing written, or written
+                // and not confirmed — so it claims neither.
+                error: "The sign-in was accepted, but this device could not confirm that its assistant stored it,"
+                  + " so the setup was not finished. Sign in again; if it is refused again, restart the device and retry.",
+                code: "credential_not_stored",
+              },
+              { status: 502 },
+            );
+          }
+        }
+        if (cannotLook) {
+          // sqlite's or Node's own words for an unreadable store: a build
+          // where node:sqlite cannot load makes this gate inert on every
+          // sign-in, and this is the only place that would show.
+          const cause = stored.kind === "unreadable" && stored.cause ? `: ${JSON.stringify(logSafe(stored.cause))}` : "";
+          console.warn(
+            `[configure] could not verify that the ${config.profileKey} sign-in reached the gateway's auth store`
+            + ` (${cannotLook})${cause}; carrying on with what doctor --fix reported`,
           );
         }
       }

@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { useTr } from "@/lib/i18n-floor";
+import { captureShortcutKeys } from "@/lib/screenshot/shortcuts";
 import { WINDOW_CHROME } from "@/lib/window-chrome";
 import {
   DEFAULT_TERMINAL_SETTINGS,
@@ -172,6 +173,10 @@ export default function TerminalSettingsSheet({ onClose }: { onClose: () => void
     { label: tr("terminal.prevTab", "Previous tab"), keys: [shortcutLabel("prevTab", mac), shortcutFallbackLabel("prevTab")] },
     { label: tr("terminal.copy", "Copy"), keys: [shortcutLabel("copy", mac)] },
     { label: tr("terminal.paste", "Paste"), keys: [shortcutLabel("paste", mac)] },
+    // The Screenshot app's keys are desktop-wide and reach it from a terminal
+    // too (TASK-1475); this is the one shortcut list the desktop has.
+    { label: tr("screenshot.shortcutFull", "Capture the full screen"), keys: captureShortcutKeys("full") },
+    { label: tr("screenshot.shortcutRegion", "Capture a region"), keys: captureShortcutKeys("region") },
   ];
 
   const isDefault = JSON.stringify(settings) === JSON.stringify(DEFAULT_TERMINAL_SETTINGS);
