@@ -1,6 +1,8 @@
 "use client";
 import { memo, useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
+// Types only: erased at build, so the shelf never bundles the sysfs reader.
+import type { BatteryState, BatteryStatus } from "@/lib/battery";
 import { setVisibleInterval } from "@/lib/visible-interval";
 
 /**
@@ -9,21 +11,9 @@ import { setVisibleInterval } from "@/lib/visible-interval";
  * battery, a signed-out page, a user who is not the owner — the route says so
  * (`available: false`, or a 401/403) and this renders nothing.
  *
- * The answer of GET /setup-api/system/battery (the route owns the contract;
- * declared here so the shelf does not import a server module).
+ * GET /setup-api/system/battery answers a `BatteryStatus`, the type
+ * `readBattery()` returns (src/lib/battery.ts owns the contract).
  */
-type BatteryState = "charging" | "discharging" | "full" | "not_charging" | "unknown";
-
-type BatteryReply =
-  | { available: false }
-  | {
-      available: true;
-      percent: number;
-      state: BatteryState;
-      acOnline: boolean | null;
-      minutesLeft: number | null;
-    };
-
 interface Reading {
   percent: number;
   state: BatteryState;
@@ -59,7 +49,7 @@ function isState(value: unknown): value is BatteryState {
  */
 function toReading(body: unknown): Reading | null {
   if (!body || typeof body !== "object") return null;
-  const reply = body as { [K in keyof Extract<BatteryReply, { available: true }>]?: unknown };
+  const reply = body as { [K in keyof Extract<BatteryStatus, { available: true }>]?: unknown };
   if (reply.available !== true) return null;
   if (typeof reply.percent !== "number" || !Number.isFinite(reply.percent)) return null;
   const minutes = reply.minutesLeft;
