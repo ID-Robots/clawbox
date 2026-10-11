@@ -25,6 +25,8 @@ vi.mock("fs/promises", () => ({
     // absent unless a case configures a browser of the owner's.
     readFile: vi.fn().mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" })),
     access: vi.fn().mockRejectedValue(new Error("ENOENT")),
+    // No symlinks unless a case says so: every path resolves to itself.
+    realpath: vi.fn(async (p: unknown) => String(p)),
   },
 }));
 
@@ -451,6 +453,7 @@ describe("POST /setup-api/setup/reset", () => {
     afterEach(() => {
       mockFs.readFile.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
       mockFs.access.mockRejectedValue(new Error("ENOENT"));
+      mockFs.realpath.mockImplementation((async (p: unknown) => String(p)) as never);
     });
 
     it("is wiped with ClawBox's own profile, and so is the file that named it", async () => {
@@ -471,6 +474,47 @@ describe("POST /setup-api/setup/reset", () => {
       await resetPost();
 
       expect(removed()).not.toContain(`${HOME}/.config`);
+      expect(removed()).toContain(`${HOME}/.config/clawbox-browser`);
+    });
+
+    it("is left alone when a symlink in its path leads outside the home", async () => {
+      // `~/link/Profile`, lexically inside the home, with `link` pointing
+      // at another disk: fs.rm would follow it and delete the profile there.
+      configure(`${HOME}/link/Profile`);
+      mockFs.realpath.mockImplementation((async (p: unknown) =>
+        String(p) === `${HOME}/link/Profile` ? "/srv/elsewhere/Profile" : String(p)) as never);
+      mockFs.access.mockResolvedValue(undefined);
+
+      await resetPost();
+
+      expect(removed().some((p) => p.includes("Profile"))).toBe(false);
+      expect(removed().some((p) => p.includes("elsewhere"))).toBe(false);
+    });
+
+    it("is removed at its resolved location when a symlink in its path stays inside the home", async () => {
+      configure(`${HOME}/link/Profile`);
+      mockFs.realpath.mockImplementation((async (p: unknown) =>
+        String(p) === `${HOME}/link/Profile` ? `${HOME}/.config/chrome-profiles/Profile` : String(p)) as never);
+      mockFs.access.mockResolvedValue(undefined);
+
+      await resetPost();
+
+      // The directory that was checked, not the path that was written.
+      expect(removed()).toContain(`${HOME}/.config/chrome-profiles/Profile`);
+      expect(removed()).not.toContain(`${HOME}/link/Profile`);
+    });
+
+    it("is left alone when it cannot be resolved", async () => {
+      configure(`${HOME}/.config/google-chrome-debug`);
+      mockFs.realpath.mockImplementation((async (p: unknown) => {
+        if (String(p) === `${HOME}/.config/google-chrome-debug`) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+        return String(p);
+      }) as never);
+      mockFs.access.mockResolvedValue(undefined);
+
+      await resetPost();
+
+      expect(removed()).not.toContain(`${HOME}/.config/google-chrome-debug`);
       expect(removed()).toContain(`${HOME}/.config/clawbox-browser`);
     });
 

@@ -483,17 +483,31 @@ const HOME_CONTENT_WIPE_KEEP: ReadonlyArray<{ rel: string; keep: ReadonlySet<str
  * with a `Local State` file at its root. A typo that names `~/.config` or the
  * home itself is skipped and logged, never removed. Read BEFORE the wipe,
  * which removes the file that names it.
+ *
+ * Judged on the RESOLVED path, not the one written: `~/link/Profile` with
+ * `link` pointing outside the home is lexically inside it, and `fs.rm` would
+ * follow that symlink and delete a profile that is not in the home at all.
+ * What is returned is the resolved location, relative to the resolved home,
+ * so the removal names exactly the directory that was checked.
  */
 async function configuredBrowserProfile(): Promise<string | null> {
   const config = await readDesktopBrowserConfig();
   if (config.ownProfile) return null;
-  const rel = path.relative(HOME_DIR, config.profileDir);
+  let home: string;
+  let profile: string;
+  try {
+    [home, profile] = await Promise.all([fs.realpath(HOME_DIR), fs.realpath(config.profileDir)]);
+  } catch {
+    console.warn("[Reset] The configured browser profile could not be resolved; not removing it");
+    return null;
+  }
+  const rel = path.relative(home, profile);
   if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
     console.warn("[Reset] Leaving the configured browser profile outside the home directory in place");
     return null;
   }
   try {
-    await fs.access(path.join(config.profileDir, "Local State"));
+    await fs.access(path.join(profile, "Local State"));
   } catch {
     console.warn("[Reset] The configured browser profile has no Local State file; not removing it");
     return null;
