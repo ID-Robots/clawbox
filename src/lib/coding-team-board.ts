@@ -25,6 +25,7 @@
 
 import fs from "fs";
 import os from "os";
+import type { CiFailure } from "@/lib/coding-ci";
 import path, { untraced } from "@/lib/runtime-path";
 import { randomBytes } from "crypto";
 import { DATA_DIR } from "@/lib/config-store";
@@ -57,7 +58,12 @@ export const MAX_RATIONALE_CHARS = 200;
 /** Log lines of the kinds a teammate should hear about, quoted at the end of the digest. */
 const DIGEST_LOG_LINES = 5;
 
-export type TeamStatus = "planning" | "working" | "reviewing" | "done" | "failed" | "stopped";
+/**
+ * `queued`: asked for while another team was working — persisted, and started
+ * by the box itself in the order asked once the teams ahead of it settle
+ * (coding-team.ts startNextQueuedTeam). Neither working nor settled.
+ */
+export type TeamStatus = "queued" | "planning" | "working" | "reviewing" | "done" | "failed" | "stopped";
 /**
  * `retired` is the lead's: a pending task it decided the goal no longer
  * needs. Terminal, and neither a failure nor a block — a task that waited on
@@ -135,7 +141,7 @@ export interface TeamMetrics {
   readOnlyRefusals: number;
 }
 
-const TEAM_STATUSES: readonly TeamStatus[] = ["planning", "working", "reviewing", "done", "failed", "stopped"];
+const TEAM_STATUSES: readonly TeamStatus[] = ["queued", "planning", "working", "reviewing", "done", "failed", "stopped"];
 const TASK_STATUSES: readonly TaskStatus[] = ["pending", "in_progress", "complete", "failed", "rejected", "retired"];
 const RUN_ROLES: readonly TeamRunRef["role"][] = ["planner", "worker", "reviewer", "lead"];
 
@@ -171,8 +177,85 @@ export interface TeamTask {
   origin: "plan" | "lead";
   /** How many times the task was rejected — by the reviewer, the rule, or a merge that failed. */
   rejections: number;
+  /**
+   * How many of its `attempts` were HELD rather than judged (`holdTask`): a
+   * dependency of it was rejected or reopened after it had started, so the
+   * attempt was stopped or its result set aside through no fault of its own.
+   * Never counted against the task's two tries (`countedAttempts`).
+   */
+  holds: number;
+  /** Why the task is back to pending after a hold, until a worker takes it again — the next worker is told. */
+  hold: TaskHold | null;
+  /**
+   * How many of its `attempts` the team's pull request sent it back for, its
+   * CI red (`reopenForCi`) — bounded by the team's own CI rounds
+   * (MAX_TEAM_CI_ROUNDS), never against the task's two tries.
+   */
+  ciReoffers: number;
   created_at: number;
   updated_at: number;
+}
+
+/** A task set back because a task it depends on was rejected or reopened (`holdTask`). */
+export interface TaskHold {
+  /** The dependency that was reopened. */
+  dependency: string;
+  /** What happened to it, in a line — the reviewer's notes, the suite's failure. */
+  reason: string;
+  /** What the hold did to the task: its running attempt stopped, or its finished result set aside. */
+  was: "in_progress" | "complete";
+  at: number;
+}
+
+/** A task's attempts that count toward its two tries — its holds are not its own failures. */
+export function countedAttempts(task: Pick<TeamTask, "attempts" | "holds"> & { ciReoffers?: number }): number {
+  return Math.max(0, task.attempts - (task.holds ?? 0) - (task.ciReoffers ?? 0));
+}
+
+/**
+ * The pull request a team opened because its goal asked for one
+ * (coding-team.ts teamPullRequest) — the ORCHESTRATOR's, never a worker's:
+ * opened from the team's branch once every task is accepted, the suite is
+ * green and the final review passed, its checks watched, its CI failures
+ * re-offered to the tasks they point at in bounded rounds, and merged only
+ * when the goal asks for the merge and every check passes.
+ *
+ *   checks        — opened or updated; its checks are running
+ *   failed_checks — red: tasks re-offered with the failure, a fix coming
+ *   green         — every check passed; the goal asked for no merge
+ *   merged        — merged by the orchestrator
+ *   left_open     — not merged, and why (`detail`): a conflict, a hold label, no checks at all
+ *   failed        — still red after MAX_TEAM_CI_ROUNDS rounds, or could not be read
+ */
+export interface TeamPr {
+  number: number;
+  url: string;
+  branch: string;
+  base: string;
+  phase: "checks" | "failed_checks" | "green" | "merged" | "left_open" | "failed";
+  checks: { total: number; passed: number; failed: number; pending: number };
+  /** The goal asks for the merge — read once, when the pull request was opened. */
+  merge: boolean;
+  /** Rounds of re-offered tasks its red CI has had. */
+  ciRounds: number;
+  /** Its last red CI, read. */
+  failure: CiFailure | null;
+  detail: string | null;
+  openedAt: number;
+  updatedAt: number;
+}
+
+const TEAM_PR_PHASES: readonly TeamPr["phase"][] = ["checks", "failed_checks", "green", "merged", "left_open", "failed"];
+
+/**
+ * Accepted: complete AND ruled accepted — by the reviewer, or by the rule a
+ * shape without a reviewer runs on. `complete` alone is not enough: a task is
+ * complete the moment its worker settles, before its review, and a dependent
+ * dispatched then was built on work the reviewer went on to reject (seen live,
+ * 2026-10-10).
+ */
+export function isAccepted(task: Pick<TeamTask, "status" | "review">): boolean {
+  return task.status === "complete" && task.review?.verdict === "accepted";
 }
 
 /** One run's part in the team. */
@@ -203,7 +286,7 @@ export interface TeamAgents {
 export interface LogEntry {
   ts: number;
   actor: Actor;
-  type: "team_created" | "task" | "status_update" | "result" | "review" | "alert" | "team_status" | "message" | "shape" | "retire" | "final_review" | "note";
+  type: "team_created" | "task" | "status_update" | "result" | "review" | "alert" | "team_status" | "message" | "shape" | "retire" | "final_review" | "note" | "hold" | "ci" | "pr";
   task_id?: string;
   message: string;
   payload?: Record<string, unknown>;
@@ -277,6 +360,8 @@ export interface TeamBoard {
   lastLeadAt: number;
   /** The one review over the merged result (review mode `final`), once it ruled. */
   finalReview: FinalReview | null;
+  /** The pull request the goal asked for, once the orchestrator opened it; null for a team whose goal asked for none. */
+  pr: TeamPr | null;
   /** The figures, kept current on every save (`teamMetrics`). */
   metrics: TeamMetrics;
   createdAt: number;
@@ -428,6 +513,7 @@ function normalizeBoard(raw: unknown): TeamBoard | null {
     finalReview: finalReview && typeof finalReview === "object" && (finalReview.verdict === "accepted" || finalReview.verdict === "rejected") && typeof finalReview.notes === "string"
       ? { verdict: finalReview.verdict, notes: finalReview.notes, at: typeof finalReview.at === "number" ? finalReview.at : 0 }
       : null,
+    pr: normalizeTeamPr(b.pr),
     metrics: EMPTY_METRICS,
     createdAt: typeof b.createdAt === "number" ? b.createdAt : 0,
     updatedAt: typeof b.updatedAt === "number" ? b.updatedAt : 0,
@@ -491,10 +577,58 @@ function normalizeTask(raw: unknown): TeamTask | null {
     rejections: typeof t.rejections === "number" && Number.isInteger(t.rejections) && t.rejections >= 0
       ? t.rejections
       : (t.status === "rejected" || (typeof t.attempts === "number" && t.attempts > 1) || review?.verdict === "rejected" ? 1 : 0),
+    // A board from before holds had none.
+    holds: typeof t.holds === "number" && Number.isInteger(t.holds) && t.holds >= 0 ? t.holds : 0,
+    hold: normalizeHold(t.hold),
+    ciReoffers: typeof t.ciReoffers === "number" && Number.isInteger(t.ciReoffers) && t.ciReoffers >= 0 ? t.ciReoffers : 0,
     created_at: typeof t.created_at === "number" ? t.created_at : 0,
     updated_at: typeof t.updated_at === "number" ? t.updated_at : 0,
   };
 }
+
+/** A team's pull request off disk, or null — every field checked: its number and branch reach `gh`. */
+function normalizeTeamPr(raw: unknown): TeamPr | null {
+  if (!raw || typeof raw !== "object") return null;
+  const p = raw as Record<string, unknown>;
+  if (typeof p.number !== "number" || !Number.isInteger(p.number) || p.number <= 0) return null;
+  if (typeof p.url !== "string" || typeof p.branch !== "string" || typeof p.base !== "string") return null;
+  if (!(TEAM_PR_PHASES as readonly unknown[]).includes(p.phase)) return null;
+  const c = p.checks && typeof p.checks === "object" ? p.checks as Record<string, unknown> : {};
+  const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : 0);
+  const f = p.failure && typeof p.failure === "object" ? p.failure as Record<string, unknown> : null;
+  const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string").slice(0, 40) : []);
+  return {
+    number: p.number,
+    url: p.url,
+    branch: p.branch,
+    base: p.base,
+    phase: p.phase as TeamPr["phase"],
+    checks: { total: n(c.total), passed: n(c.passed), failed: n(c.failed), pending: n(c.pending) },
+    merge: p.merge === true,
+    ciRounds: n(p.ciRounds),
+    failure: f && typeof f.prNumber === "number"
+      ? { prNumber: f.prNumber, at: n(f.at), checks: strings(f.checks), tests: strings(f.tests), files: strings(f.files), excerpt: typeof f.excerpt === "string" ? f.excerpt.slice(0, 4_000) : "", unread: strings(f.unread) }
+      : null,
+    detail: typeof p.detail === "string" ? p.detail.slice(0, 1_000) : null,
+    openedAt: n(p.openedAt),
+    updatedAt: n(p.updatedAt),
+  };
+}
+
+function normalizeHold(raw: unknown): TaskHold | null {
+  if (!raw || typeof raw !== "object") return null;
+  const h = raw as Record<string, unknown>;
+  if (typeof h.dependency !== "string" || !TASK_ID_RE.test(h.dependency) || typeof h.reason !== "string") return null;
+  return {
+    dependency: h.dependency,
+    reason: h.reason.slice(0, MAX_HOLD_REASON_CHARS),
+    was: h.was === "in_progress" ? "in_progress" : "complete",
+    at: typeof h.at === "number" ? h.at : 0,
+  };
+}
+
+/** A hold's reason, as the board keeps it and the next worker reads it. */
+export const MAX_HOLD_REASON_CHARS = 600;
 
 // ─── Mutations (every one role-checked and logged) ───────────────────────────
 
@@ -525,6 +659,7 @@ export function createBoard(input: { goal: string; projectId: string | null; dir
     dynamic: input.dynamic === true,
     lastLeadAt: 0,
     finalReview: null,
+    pr: null,
     metrics: EMPTY_METRICS,
     createdAt: now,
     updatedAt: now,
@@ -594,6 +729,9 @@ export function postTask(
     reviewRunId: null,
     origin,
     rejections: 0,
+    holds: 0,
+    hold: null,
+    ciReoffers: 0,
     created_at: now,
     updated_at: now,
   };
@@ -657,6 +795,8 @@ export function assignTask(board: TeamBoard, actor: Actor, taskId: string, worke
   const now = Date.now();
   task.assigned_to = workerId;
   task.attempts += 1;
+  // The hold is answered: the worker taking it now was told why in its task text.
+  task.hold = null;
   task.updated_at = now;
   append(board, { ts: now, actor, type: "task", task_id: taskId, message: `Task ${taskId} assigned to ${workerId} (attempt ${task.attempts})` });
   return task;
@@ -693,7 +833,10 @@ export function submitResult(board: TeamBoard, actor: Actor, taskId: string, res
   return task;
 }
 
-/** The Review Loop's verdict. A rejection puts the task back to pending for one more attempt. */
+/**
+ * The Review Loop's verdict. A rejection puts the task back to pending for one
+ * more attempt — counted without its holds, which were never its own doing.
+ */
 export function reviewTask(board: TeamBoard, actor: Actor, taskId: string, verdict: "accepted" | "rejected", notes: string): TeamTask {
   if (actor.kind !== "reviewer") throw new BoardAccessError(actor, "review", `Only the reviewer records a verdict; ${describeActor(actor)} may not.`);
   const task = requireTask(board, taskId);
@@ -702,12 +845,82 @@ export function reviewTask(board: TeamBoard, actor: Actor, taskId: string, verdi
   task.review = { verdict, notes: notes.slice(0, 2_000), at: now };
   if (verdict === "rejected") {
     task.rejections += 1;
-    task.status = task.attempts >= 2 ? "rejected" : "pending";
+    task.status = countedAttempts(task) >= 2 ? "rejected" : "pending";
     task.assigned_to = null;
   }
   task.updated_at = now;
   append(board, { ts: now, actor, type: "review", task_id: taskId, message: `Task ${taskId} ${verdict}${notes ? `: ${firstLine(notes)}` : ""}`, payload: { verdict } });
   return task;
+}
+
+/**
+ * HOLD a task that started on a dependency which has since been rejected or
+ * reopened: the system's, and only for a task that really depends on it and
+ * that started — a running attempt (the orchestrator stops its worker and
+ * sets its work aside first) or a finished one (its result is set aside; what
+ * it merged stays on the team's branch for the next attempt to build on).
+ *
+ * Back to pending, unassigned and unreviewed, so it starts again only once the
+ * dependency is accepted again (`readyTasks`) — on the new merged state. The
+ * attempt is counted as a HOLD, never against the task's two tries, and the
+ * why goes on the board and into the next worker's task text.
+ */
+export function holdTask(board: TeamBoard, actor: Actor, taskId: string, dependency: string, reason: string): TeamTask {
+  if (actor.kind !== "system") throw new BoardAccessError(actor, "hold", `Only the system holds a task; ${describeActor(actor)} may not.`);
+  const task = requireTask(board, taskId);
+  if (task.status !== "in_progress" && task.status !== "complete") throw new Error(`Task ${taskId} is ${task.status}; only a task that started is held.`);
+  if (!task.depends_on.includes(dependency)) throw new Error(`Task ${taskId} does not depend on ${dependency}.`);
+  const was = task.status;
+  const why = firstLine(reason.trim(), MAX_HOLD_REASON_CHARS);
+  const now = Date.now();
+  task.status = "pending";
+  task.assigned_to = null;
+  task.review = null;
+  task.holds += 1;
+  task.hold = { dependency, reason: why, was, at: now };
+  task.updated_at = now;
+  append(board, {
+    ts: now,
+    actor,
+    type: "hold",
+    task_id: taskId,
+    message: `Task ${taskId} held: its dependency ${dependency} was reopened${why ? ` (${firstLine(why, 200)})` : ""}. ${was === "in_progress" ? "Its worker was stopped and its work set aside" : "Its result is set aside"}; it starts again on the new merged state once ${dependency} is accepted.`,
+    payload: { dependency, was },
+  });
+  return task;
+}
+
+/**
+ * The team's pull request came back RED: a task its failure points at goes
+ * back to pending with the failure as its notes — the system's, never a
+ * reviewer's (nobody judged the work), and never against the task's two tries
+ * (`ciReoffers`; the team's CI rounds are the bound). Its next worker reads
+ * the failure as "a previous attempt was rejected"; what started on it is
+ * held, as for any reopening.
+ */
+export function reopenForCi(board: TeamBoard, actor: Actor, taskId: string, notes: string): TeamTask {
+  if (actor.kind !== "system") throw new BoardAccessError(actor, "ci_reopen", `Only the system re-offers a task for the team's CI; ${describeActor(actor)} may not.`);
+  const task = requireTask(board, taskId);
+  if (task.status !== "complete") throw new Error(`Task ${taskId} is ${task.status}; only a complete task is re-offered for the CI.`);
+  const now = Date.now();
+  task.review = { verdict: "rejected", notes: notes.slice(0, 2_000), at: now };
+  task.rejections += 1;
+  task.ciReoffers += 1;
+  task.status = "pending";
+  task.assigned_to = null;
+  task.updated_at = now;
+  append(board, { ts: now, actor, type: "ci", task_id: taskId, message: `Task ${taskId} re-offered for the pull request's failing checks: ${firstLine(notes)}` });
+  return task;
+}
+
+/** The orchestrator records where the team's pull request stands — opened, checked, re-offered, merged. The system's alone. */
+export function recordTeamPr(board: TeamBoard, actor: Actor, pr: TeamPr, note: string): TeamPr {
+  if (actor.kind !== "system") throw new BoardAccessError(actor, "pr", `Only the system records the team's pull request; ${describeActor(actor)} may not.`);
+  const now = Date.now();
+  board.pr = { ...pr, updatedAt: now };
+  board.updatedAt = now;
+  append(board, { ts: now, actor, type: "pr", message: firstLine(note, 600), payload: { number: pr.number, phase: pr.phase } });
+  return board.pr;
 }
 
 /** A guardrail spoke: recorded, counted, never silent. */
@@ -835,12 +1048,44 @@ export function setTeamStatus(board: TeamBoard, actor: Actor, status: TeamStatus
 
 /**
  * Pending tasks whose dependencies are all out of the way, in posting order.
- * A RETIRED dependency is out of the way: the lead decided the goal does not
- * need it, so what waited on it does not wait forever.
+ * Out of the way means ACCEPTED (`isAccepted`) — never merely complete: a
+ * finished task waiting on its reviewer may still be rejected, and a dependent
+ * started on it would build on work that does not stand. A RETIRED dependency
+ * is out of the way too: the lead decided the goal does not need it, so what
+ * waited on it does not wait forever.
  */
 export function readyTasks(board: TeamBoard): TeamTask[] {
-  const done = new Set(board.tasks.filter((t) => t.status === "complete" || t.status === "retired").map((t) => t.task_id));
-  return board.tasks.filter((t) => t.status === "pending" && t.depends_on.every((d) => done.has(d)));
+  return board.tasks.filter((t) => t.status === "pending" && waitingOn(board, t).length === 0);
+}
+
+/** The dependencies of `task` that are not out of the way yet (`readyTasks`), in its own order. */
+export function waitingOn(board: Pick<TeamBoard, "tasks">, task: Pick<TeamTask, "depends_on">): string[] {
+  return task.depends_on.filter((d) => {
+    const dep = board.tasks.find((t) => t.task_id === d);
+    return !dep || (dep.status !== "retired" && !isAccepted(dep));
+  });
+}
+
+/**
+ * The dependencies of `task` that will never be accepted — failed, or rejected
+ * for good — with their status: what a pending task that never ran was waiting
+ * on, said when the team ends.
+ */
+export function blockedBy(board: Pick<TeamBoard, "tasks">, task: Pick<TeamTask, "depends_on">): Array<{ task_id: string; status: TaskStatus }> {
+  return task.depends_on.flatMap((d) => {
+    const dep = board.tasks.find((t) => t.task_id === d);
+    return dep && (dep.status === "failed" || dep.status === "rejected") ? [{ task_id: d, status: dep.status }] : [];
+  });
+}
+
+/**
+ * The tasks a reopened `taskId` sets back: every task that depends on it
+ * directly and that has STARTED (running, or finished whatever its review
+ * said), in posting order. A task further down the chain is set back when the
+ * one it depends on is held — the hold is itself a reopening.
+ */
+export function startedDependents(board: Pick<TeamBoard, "tasks">, taskId: string): TeamTask[] {
+  return board.tasks.filter((t) => t.depends_on.includes(taskId) && (t.status === "in_progress" || t.status === "complete"));
 }
 
 /** True when no task can make progress any more: every task is settled, or the only pending ones wait on a failed task. */
@@ -1156,7 +1401,7 @@ export function teamMetrics(board: TeamBoard, now: number = Date.now()): TeamMet
     tasksPlanned: board.tasks.filter((t) => t.origin !== "lead").length,
     tasksAdded: board.tasks.filter((t) => t.origin === "lead").length,
     tasksRetired: board.tasks.filter((t) => t.status === "retired").length,
-    tasksAcceptedFirstTry: board.tasks.filter((t) => t.status === "complete" && t.review?.verdict === "accepted" && t.attempts === 1).length,
+    tasksAcceptedFirstTry: board.tasks.filter((t) => t.status === "complete" && t.review?.verdict === "accepted" && countedAttempts(t) === 1).length,
     tasksRejected: board.tasks.filter((t) => t.rejections > 0).length,
     tokensUsed: board.runs.reduce((sum, r) => sum + (typeof r.tokens === "number" && Number.isFinite(r.tokens) ? r.tokens : 0), 0),
     wallMs: board.createdAt > 0 ? Math.max(0, ended - board.createdAt) : 0,

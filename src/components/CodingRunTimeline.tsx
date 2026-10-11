@@ -87,6 +87,11 @@ const STEP_KEY: Record<ProgressLabelKey, string> = {
   pauseRequested: "codingAgent.stepPauseRequested",
   resumedByOwner: "codingAgent.stepResumedByOwner",
   drafted: "codingAgent.stepDrafted",
+  queued: "codingAgent.stepQueued",
+  startedFromQueue: "codingAgent.stepStartedFromQueue",
+  queueCanceled: "codingAgent.stepQueueCanceled",
+  ciFailed: "codingAgent.stepCiFailed",
+  ciFix: "codingAgent.stepCiFix",
   startedFromDraft: "codingAgent.stepStartedFromDraft",
   leftoverRunning: "codingAgent.stepLeftoverRunning",
   endedLeftovers: "codingAgent.stepEndedLeftovers",
@@ -105,6 +110,8 @@ const STEP_KEY: Record<ProgressLabelKey, string> = {
   resumedAfterLimit: "codingAgent.stepResumedAfterLimit",
   teamMessageToRun: "codingAgent.stepTeamMessageToRun",
   teamMessageToLead: "codingAgent.stepTeamMessageToLead",
+  messageMidTurn: "codingAgent.stepMessageMidTurn",
+  messageToRun: "codingAgent.stepMessageToRun",
   teamMessageToAssistant: "codingAgent.stepTeamMessageToAssistant",
   pipelineReview: "codingAgent.stepPipelineReview",
   pipelineImprovement: "codingAgent.stepPipelineImprovement",
@@ -131,6 +138,7 @@ const STATUS_KEY: Record<string, string> = {
   stopped: "codingAgent.statusStopped",
   paused: "codingAgent.statusPaused",
   draft: "codingAgent.statusDraft",
+  queued: "codingAgent.statusQueued",
   // The wire format's own snake_case; the catalogue key is camelCase, the way
   // `reviewState.needsOwner` is — translations.test.ts forbids an underscore.
   gave_up: "codingAgent.statusGaveUp",

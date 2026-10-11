@@ -14,6 +14,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { BTN_BASE, BTN_SECONDARY, CARD_SURFACE, INSET_SURFACE, SECTION_LABEL } from "./coding-agent-ui";
 import CodingTeamTree from "./CodingTeamTree";
+import { MAX_TEAM_CI_ROUNDS } from "@/lib/coding-ci-limits";
 import { formatDuration, timeAgo } from "./clawkeep-ui";
 
 export interface TeamTaskView {
@@ -29,6 +30,21 @@ export interface TeamTaskView {
   reviewRunId?: string | null;
   /** Who put it on the board: the plan, or the lead while the team ran. Absent from an older server. */
   origin?: "plan" | "lead";
+  /** Why it is back to pending: a dependency it started on was reopened (coding-team-board.ts holdTask). Absent from an older server. */
+  hold?: { dependency: string; reason: string; was: "in_progress" | "complete"; at: number } | null;
+}
+
+/**
+ * The dependencies a pending task still waits for: every one not yet ACCEPTED
+ * (or retired) — the server's own gate (`readyTasks`), said on the card so a
+ * task sitting pending behind a finished-but-unreviewed one says why.
+ */
+export function waitingFor(task: TeamTaskView, tasks: readonly TeamTaskView[]): string[] {
+  if (task.status !== "pending") return [];
+  return task.depends_on.filter((d) => {
+    const dep = tasks.find((x) => x.task_id === d);
+    return !dep || (dep.status !== "retired" && !(dep.status === "complete" && dep.review?.verdict === "accepted"));
+  });
 }
 
 /** The team's figures, as the server works them out from the board. */
@@ -102,7 +118,9 @@ export interface TeamView {
   goal: string;
   projectId: string | null;
   directory: string;
-  status: "planning" | "working" | "reviewing" | "done" | "failed" | "stopped";
+  status: "queued" | "planning" | "working" | "reviewing" | "done" | "failed" | "stopped";
+  /** A queued team's place in line (1 is next). Absent from an older server, and on any other team. */
+  queuePosition?: number;
   plannerRunId: string | null;
   /** The team's branch in the project and what it forked from; null when the team works in place. */
   branch?: string | null;
@@ -115,6 +133,19 @@ export interface TeamView {
   dynamic?: boolean;
   /** The one review of the merged result, when the shape asked for it. */
   finalReview?: { verdict: "accepted" | "rejected"; notes: string; at: number } | null;
+  /** The pull request the goal asked for, once the orchestrator opened it (coding-team-board.ts TeamPr). Absent from an older server. */
+  pr?: {
+    number: number;
+    url: string;
+    branch: string;
+    base: string;
+    phase: "checks" | "failed_checks" | "green" | "merged" | "left_open" | "failed";
+    checks: { total: number; passed: number; failed: number; pending: number };
+    merge: boolean;
+    ciRounds: number;
+    failure: { tests: string[]; checks: string[] } | null;
+    detail: string | null;
+  } | null;
   metrics?: TeamMetricsView;
   tasks: TeamTaskView[];
   log: TeamLogEntryView[];
@@ -144,12 +175,32 @@ const LOG_SHOWN = 30;
 const MESSAGES_SHOWN = 5;
 
 const STATUS_TONE: Record<TeamView["status"], string> = {
+  queued: "text-indigo-300 border-indigo-300/40",
   planning: "text-sky-300 border-sky-400/40",
   working: "text-amber-400 border-amber-400/40",
   reviewing: "text-violet-300 border-violet-400/40",
   done: "text-emerald-400 border-emerald-400/40",
   failed: "text-red-300 border-red-400/40",
   stopped: "text-[var(--text-muted)] border-white/20",
+};
+
+/** The translation key for a pull request's phase: keys are camelCase. */
+const PR_PHASE_KEY: Record<NonNullable<TeamView["pr"]>["phase"], string> = {
+  checks: "codingAgent.team.prPhase.checks",
+  failed_checks: "codingAgent.team.prPhase.failedChecks",
+  green: "codingAgent.team.prPhase.green",
+  merged: "codingAgent.team.prPhase.merged",
+  left_open: "codingAgent.team.prPhase.leftOpen",
+  failed: "codingAgent.team.prPhase.failed",
+};
+
+const PR_PHASE_TONE: Record<NonNullable<TeamView["pr"]>["phase"], string> = {
+  checks: "text-amber-400 border-amber-400/40",
+  failed_checks: "text-red-300 border-red-400/40",
+  green: "text-emerald-400 border-emerald-400/40",
+  merged: "text-violet-300 border-violet-400/40",
+  left_open: "text-sky-300 border-sky-400/40",
+  failed: "text-red-300 border-red-400/40",
 };
 
 /** The translation key for a task status: keys are camelCase, statuses are the brief's. */
@@ -173,6 +224,11 @@ const TASK_TONE: Record<TeamTaskView["status"], string> = {
 
 function isActive(status: TeamView["status"]): boolean {
   return status === "planning" || status === "working" || status === "reviewing";
+}
+
+/** Not started yet: waiting its turn behind the team that works (coding-team.ts startNextQueuedTeam). */
+function isQueuedTeam(status: TeamView["status"]): boolean {
+  return status === "queued";
 }
 
 /** Compact token counts, the way the runs list writes them: 1.3M, 48k, 950. */
@@ -219,18 +275,25 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
     return () => { request.current++; scope.current++; };
   }, [load]);
 
-  const team = teams[0] ?? null;
+  // The team at work first: one asked for after it waits in the queue, and is
+  // newer, but the board the owner follows is the one moving.
+  const team = teams.find((x) => isActive(x.status)) ?? teams[0] ?? null;
   const active = team ? isActive(team.status) : false;
+  const queuedHere = teams
+    .filter((x) => isQueuedTeam(x.status) && x.id !== team?.id)
+    .sort((a, b) => (a.queuePosition ?? 0) - (b.queuePosition ?? 0));
+  const following = active || (team !== null && isQueuedTeam(team.status)) || queuedHere.length > 0;
 
-  // Follow a team while it works.
+  // Follow a team while it works, or while one waits for its turn.
   useEffect(() => {
-    if (!active) return;
+    if (!following) return;
     const id = setInterval(() => { void load(); }, POLL_MS);
     return () => clearInterval(id);
-  }, [active, load]);
+  }, [following, load]);
 
-  const stop = async () => {
-    if (!team) return;
+  /** Stop the team at work, or — for a queued one — take it out of the queue: the same route, the owner's alone for a queue. */
+  const stop = async (target: TeamView | null = team) => {
+    if (!target) return;
     const startedIn = scope.current;
     setBusy(true);
     setError(null);
@@ -238,7 +301,7 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
       const res = await fetch("/setup-api/coding-agent/team/stop", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ id: team.id }),
+        body: JSON.stringify({ id: target.id }),
       });
       const data = await res.json().catch(() => null) as { team?: TeamView; error?: string } | null;
       if (!res.ok || !data?.team) throw new Error(data?.error ?? t("codingAgent.team.stopFailed"));
@@ -286,10 +349,15 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
         <p className={`${SECTION_LABEL} !mb-0`}>{t("codingAgent.team.title")}</p>
         {team && (
           <span
-            className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${STATUS_TONE[team.status]}`}
+            className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${STATUS_TONE[team.status] ?? STATUS_TONE.stopped}`}
             data-testid="coding-team-status"
           >
             {t(`codingAgent.team.status.${team.status}`)}
+          </span>
+        )}
+        {team && isQueuedTeam(team.status) && team.queuePosition && (
+          <span className="text-[11px] text-indigo-200/90" data-testid="coding-team-queue-position">
+            {t("codingAgent.team.queuePosition", { n: team.queuePosition })}
           </span>
         )}
         {team && team.tasks.length > 0 && (
@@ -308,7 +376,28 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
             {t("codingAgent.team.stop")}
           </button>
         )}
+        {team && isQueuedTeam(team.status) && (
+          <button type="button" onClick={() => void stop()} disabled={busy} data-testid="coding-team-cancel" className={`${BTN_SECONDARY} ml-auto`}>
+            {t("codingAgent.team.cancel")}
+          </button>
+        )}
       </div>
+      {/* The teams waiting behind the one at work, in their order — each
+          starts by itself in its turn, and only the owner takes one out. */}
+      {queuedHere.length > 0 && (
+        <ul className="mt-2 space-y-1" data-testid="coding-team-queue">
+          {queuedHere.map((q) => (
+            <li key={q.id} className="flex items-center gap-2 text-[11px] text-[var(--text-secondary)]" data-testid={`coding-team-queued-${q.id}`}>
+              <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${STATUS_TONE.queued}`}>{t("codingAgent.team.status.queued")}</span>
+              {q.queuePosition && <span className="text-indigo-200/90">{t("codingAgent.team.queuePosition", { n: q.queuePosition })}</span>}
+              <span className="min-w-0 truncate">{q.goal}</span>
+              <button type="button" onClick={() => void stop(q)} disabled={busy} data-testid={`coding-team-cancel-${q.id}`} className={`${BTN_SECONDARY} ml-auto`}>
+                {t("codingAgent.team.cancel")}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
       {/* The team as a tree — who hands to whom — sized by the board: the
           planner, as many workers and reviewers as have worked here, the
           ones at work pulsing; the sentence beneath it. With no team yet
@@ -403,6 +492,33 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
           {team.error && (
             <p className="mt-2 text-[11px] text-red-300 break-words" data-testid="coding-team-reason">{team.error}</p>
           )}
+          {/* The pull request the goal asked for — the orchestrator's: its
+              checks, the rounds its red CI sent tasks back, and how it ended. */}
+          {team.pr && (
+            <div className="mt-2 text-[11px] break-words" data-testid="coding-team-pr" data-phase={team.pr.phase}>
+              <div className="flex items-center gap-2 flex-wrap">
+                <a href={team.pr.url} target="_blank" rel="noreferrer" className="text-[var(--text-secondary)] underline decoration-white/20 hover:text-white">
+                  {t("codingAgent.team.pr", { n: team.pr.number })}
+                </a>
+                <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${PR_PHASE_TONE[team.pr.phase] ?? PR_PHASE_TONE.checks}`}>
+                  {t(PR_PHASE_KEY[team.pr.phase] ?? PR_PHASE_KEY.checks)}
+                </span>
+                {team.pr.checks.total > 0 && (
+                  <span className="text-[var(--text-muted)]">{t("codingAgent.team.prChecks", { passed: team.pr.checks.passed, total: team.pr.checks.total })}</span>
+                )}
+                {team.pr.ciRounds > 0 && (
+                  <span className="text-[var(--text-muted)]" data-testid="coding-team-ci-rounds">{t("codingAgent.team.ciRounds", { n: team.pr.ciRounds, max: MAX_TEAM_CI_ROUNDS })}</span>
+                )}
+                {team.pr.merge && team.pr.phase !== "merged" && (
+                  <span className="text-[var(--text-muted)]">· {t("codingAgent.team.mergeWhenGreen")}</span>
+                )}
+              </div>
+              {team.pr.failure && team.pr.failure.tests.length > 0 && team.pr.phase !== "merged" && team.pr.phase !== "green" && (
+                <p className="mt-1 text-red-300" data-testid="coding-team-ci-failing">{t("codingAgent.team.ciFailing", { tests: team.pr.failure.tests.slice(0, 5).join(", ") })}</p>
+              )}
+              {team.pr.detail && <p className="mt-1 text-[var(--text-muted)]">{team.pr.detail}</p>}
+            </div>
+          )}
           {team.finalReview && (
             <p className="mt-2 text-[11px] break-words" data-testid="coding-team-final-review" data-verdict={team.finalReview.verdict}>
               <span className="text-[var(--text-secondary)]">{t("codingAgent.team.finalReview")}: </span>
@@ -437,6 +553,16 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
                     {task.depends_on.length > 0 && (
                       <span className="text-[11px] text-[var(--text-muted)]">{t("codingAgent.team.after", { ids: task.depends_on.join(", ") })}</span>
                     )}
+                    {task.hold && (
+                      <span className="text-[10px] font-semibold uppercase tracking-wider text-amber-400" data-testid={`coding-team-held-${task.task_id}`}>
+                        {t("codingAgent.team.held", { task: task.hold.dependency })}
+                      </span>
+                    )}
+                    {waitingFor(task, team.tasks).length > 0 && (
+                      <span className="text-[11px] text-amber-200/80" data-testid={`coding-team-waiting-${task.task_id}`}>
+                        {t("codingAgent.team.waitingFor", { ids: waitingFor(task, team.tasks).join(", ") })}
+                      </span>
+                    )}
                     {task.assigned_to && (
                       <button type="button" onClick={() => onOpenRun(task.assigned_to!)} data-testid={`coding-team-worker-${task.task_id}`} title={t("codingAgent.team.roleWorker", { task: task.task_id })} aria-label={`${t("codingAgent.team.roleWorker", { task: task.task_id })} · ${task.assigned_to}`} className="ml-auto text-[11px] font-mono text-[var(--text-muted)] underline decoration-white/20 hover:text-white">
                         {task.assigned_to}
@@ -454,6 +580,9 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
                   )}
                   {task.review?.notes && task.review.verdict === "rejected" && (
                     <p className="mt-1 text-[11px] text-red-300 break-words">{task.review.notes}</p>
+                  )}
+                  {task.hold?.reason && (
+                    <p className="mt-1 text-[11px] text-amber-200/90 break-words">{task.hold.reason}</p>
                   )}
                 </li>
               ))}

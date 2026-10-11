@@ -449,6 +449,12 @@ h6 {
   background: #ef4444;
   box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.6);
 }
+/* Held to talk long enough that letting go sends: it stays pressed in, with a
+   steady ring beside the pulsing one (src/lib/chat-hold-to-talk.ts). */
+.chat-voice-large--held {
+  transform: scale(0.94);
+  box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.45);
+}
 /* The recording ring: 18px of the button's red growing out of its edge and
    fading. It used to animate `box-shadow`, which never runs on the compositor —
    a style recalc and a repaint every frame of a recording. Now it is a disc of

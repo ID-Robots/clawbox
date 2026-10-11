@@ -469,18 +469,37 @@ describe("coding_run_message", () => {
       { runId: "run-k3x9q2ab", text: "use tabs, not spaces" },
       expect.anything(),
     );
+    expect(out.text).toMatch(/^Delivered:/);
     expect(out.text).toMatch(/current session/);
     expect(out.text).toMatch(/do not poll/i);
   });
 
-  it("says it is only QUEUED when the device could not hand it over mid-turn", async () => {
+  it("says it is only QUEUED when the run cannot take it before its next start", async () => {
+    apiPost.mockResolvedValue({ queued: true, delivered: false, delivery: "next_start" });
+    const out = await harness().call("coding_run_message", { run_id: "run-k3x9q2ab", text: "use tabs" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/^Queued:/);
+    expect(out.text).toMatch(/next start/);
+    expect(out.text).toMatch(/do not send it again/i);
+  });
+
+  it("says QUEUED for the end of the tool call under way when the message is in the run's inbox", async () => {
+    apiPost.mockResolvedValue({ queued: true, delivered: false, delivery: "after_tool_call" });
+    const out = await harness().call("coding_run_message", { run_id: "run-k3x9q2ab", text: "use tabs" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/^Queued:/);
+    expect(out.text).toMatch(/mid-turn, the moment the tool call it is running now ends/);
+    expect(out.text).toMatch(/do not send it again/i);
+  });
+
+  it("reads an older device's answer, which has only the boolean", async () => {
     apiPost.mockResolvedValue({ queued: true, delivered: false });
     const out = await harness().call("coding_run_message", { run_id: "run-k3x9q2ab", text: "use tabs" });
     expect(out.isError).toBe(false);
     if (out.isError) return;
-    expect(out.text).toMatch(/queued/i);
-    expect(out.text).toMatch(/next step/);
-    expect(out.text).toMatch(/do not send it again/i);
+    expect(out.text).toMatch(/^Queued:.*next start/);
   });
 
   it("explains an owner-started run instead of reporting a rejected token", async () => {
@@ -848,5 +867,70 @@ describe("coding_secret_list", () => {
     // And it takes no parameters at all: there is nothing to ask it for but
     // the list, and certainly no name whose value it could be asked to read.
     expect(Object.keys(harness().get("coding_secret_list").shape)).toEqual([]);
+  });
+});
+
+describe("a run beyond the box's limit: queued, not refused", () => {
+  it("coding_agent_run says QUEUED with its place, and not to start it again", async () => {
+    apiPost.mockResolvedValue({ started: false, queued: true, run: { ...RUN, status: "queued", queued: { at: 1, position: 2 } } });
+    const out = await harness().call("coding_agent_run", { task: "Add a dark mode toggle", project_id: "site" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/^Queued coding run "run-k3x9q2ab"/);
+    expect(out.text).toMatch(/number 2 in line/);
+    expect(out.text).toMatch(/starts by itself/);
+    expect(out.text).toMatch(/only the owner can cancel it/);
+    expect(out.text).toMatch(/Do NOT start it again/);
+  });
+
+  it("coding_agent_stop leaves a queued run alone: cancelling one is the owner's", async () => {
+    apiGet.mockResolvedValue({ run: { ...RUN, status: "queued", queued: { at: 1, position: 1 } } });
+    const out = await harness().call("coding_agent_stop", { run_id: "run-k3x9q2ab" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/is queued and has not started/);
+    expect(out.text).toMatch(/Only the owner can take it out of the queue/);
+    expect(apiPost).not.toHaveBeenCalled();
+  });
+
+  it("coding_agent_status says where a queued run stands", async () => {
+    apiGet.mockResolvedValue({ run: { ...RUN, status: "queued", completedAt: null, queued: { at: 1, position: 3 } } });
+    const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/Run run-k3x9q2ab: queued \(not started\) — number 3 in line for a slot/);
+  });
+});
+
+describe("a run whose pull request's CI failed", () => {
+  const CI = { prNumber: 7, checks: ["test (20.x)"], tests: ["cart.test.ts > adds the tax"], files: ["src/lib/cart.ts"], unread: [], attempt: 0, fixRunId: null };
+
+  it("coding_agent_status names what failed and says to OFFER a Fix CI run, with the exact call", async () => {
+    apiGet.mockResolvedValue({ run: { ...RUN, ci: CI } });
+    const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/CI failed on pull request #7: test \(20\.x\)\. Failing tests: cart\.test\.ts > adds the tax\./);
+    expect(out.text).toMatch(/Offer the user a Fix CI run \(attempt 1 of 2\): coding_agent_run with resume_run_id "run-k3x9q2ab", fix_ci true/);
+  });
+
+  it("says the attempts are used up rather than offering a third", async () => {
+    apiGet.mockResolvedValue({ run: { ...RUN, ci: { ...CI, attempt: 2 }, ciFixOf: { runId: "run-aaaaaaaa", attempt: 2 } } });
+    const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
+    if (out.isError) throw new Error(JSON.stringify(out.error));
+    expect(out.text).toMatch(/Its 2 Fix CI attempts are used up/);
+    expect(out.text).not.toMatch(/Offer the user a Fix CI/);
+    expect(out.text).toMatch(/A Fix CI continuation of run-aaaaaaaa \(attempt 2 of 2\)/);
+  });
+
+  it("coding_agent_run with fix_ci sends fixCi, and needs resume_run_id", async () => {
+    apiPost.mockResolvedValue({ started: true, run: { ...RUN, status: "running" } });
+    const out = await harness().call("coding_agent_run", { task: "Fix the CI.", resume_run_id: "run-k3x9q2ab", fix_ci: true });
+    expect(out.isError).toBe(false);
+    expect(apiPost).toHaveBeenCalledWith("/setup-api/coding-agent/run", { task: "Fix the CI.", resumeRunId: "run-k3x9q2ab", fixCi: true }, expect.anything());
+    apiPost.mockClear();
+    const refused = await harness().call("coding_agent_run", { task: "Fix the CI.", fix_ci: true });
+    expect(refused.isError).toBe(true);
+    expect(apiPost).not.toHaveBeenCalled();
   });
 });

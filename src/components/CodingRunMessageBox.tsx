@@ -20,10 +20,11 @@ import { BTN_PRIMARY, INSET_SURFACE } from "./coding-agent-ui";
  *
  * What the box can honestly promise depends on the harness, so the card says
  * which happened rather than a flat "sent": a message the harness took in its
- * current session is DELIVERED, and one waiting for the run's next attempt or
- * the owner's Resume is QUEUED. Two words for two facts, because "sent" over a
- * message the run has not seen is the claim that would cost the owner the
- * twenty minutes this card exists to save.
+ * current session is DELIVERED — "mid-turn" when its inbox hook handed it over
+ * after a tool call — and one still waiting, for the end of the tool call
+ * under way, the run's next attempt or the owner's Resume, is QUEUED. Words
+ * for facts, because "sent" over a message the run has not seen is the claim
+ * that would cost the owner the twenty minutes this card exists to save.
  *
  * Its own component rather than more of CodingAgentApp for the reason
  * CodingRunDenials is: it WRITES, it has a state machine worth testing on its
@@ -94,6 +95,7 @@ export default function CodingRunMessageBox({
               className="flex items-start gap-2 text-[11px] text-[var(--text-secondary)]"
               data-testid="coding-agent-run-message-row"
               data-delivered={message.deliveredAt === null ? "false" : "true"}
+              data-via={message.via ?? ""}
             >
               <span
                 className={`shrink-0 text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${
@@ -102,7 +104,11 @@ export default function CodingRunMessageBox({
                     : "text-emerald-300 border-emerald-400/40"
                 }`}
               >
-                {message.deliveredAt === null ? t("codingAgent.message.queued") : t("codingAgent.message.delivered")}
+                {message.deliveredAt === null
+                  ? t("codingAgent.message.queued")
+                  : message.via === "mid_turn"
+                    ? t("codingAgent.message.deliveredMidTurn")
+                    : t("codingAgent.message.delivered")}
               </span>
               <span className="min-w-0 break-words whitespace-pre-wrap">{message.text}</span>
             </li>

@@ -14,9 +14,12 @@ import { installSessionFixture, type SessionFixture } from "@/tests/helpers/sess
 import { saveEnv } from "@/tests/helpers/env";
 
 const startRun = vi.hoisted(() => vi.fn());
+// The route starts through the queue (startOrQueueRun); a start it does not
+// queue is the start the cases below script on `startRun`.
+const startOrQueueRun = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/coding-agent", async () => {
   const actual = await vi.importActual<typeof import("@/lib/coding-agent")>("@/lib/coding-agent");
-  return { ...actual, startRun };
+  return { ...actual, startRun, startOrQueueRun };
 });
 
 const MCP_TOKEN = "mcp-bearer-token-for-the-agent-0123456789";
@@ -49,6 +52,7 @@ beforeEach(async () => {
   vi.resetModules();
   vi.clearAllMocks();
   startRun.mockResolvedValue(RUN);
+  startOrQueueRun.mockImplementation(async (input: unknown) => ({ run: await startRun(input), queued: false }));
   const lib = await import("@/lib/coding-agent");
   CodingAgentError = lib.CodingAgentError;
   ProviderChoiceError = lib.ProviderChoiceError;
@@ -93,7 +97,7 @@ describe("the answer", () => {
   it("is 202 with the run record, at once", async () => {
     const res = await POST(req());
     expect(res.status).toBe(202);
-    expect(await res.json()).toEqual({ started: true, run: RUN });
+    expect(await res.json()).toEqual({ started: true, queued: false, run: RUN });
   });
 
   it("passes the folder and resume id through untouched", async () => {
@@ -263,5 +267,29 @@ describe("the files a run is given", () => {
   it("sends nothing when the caller named nothing, so an absent list stays absent", async () => {
     await POST(req({ body: { task: "Add a dark mode toggle", projectId: "site" } }));
     expect(startRun.mock.calls[0][0].inputs).toBeUndefined();
+  });
+});
+
+describe("a run beyond the limit", () => {
+  it("is QUEUED, not refused: 202 with the queued record and its place, for the bearer as for the owner", async () => {
+    const queuedRun = { ...RUN, status: "queued", queued: { at: 1, position: 2 } };
+    startOrQueueRun.mockResolvedValueOnce({ run: queuedRun, queued: true });
+    const res = await POST(req({ auth: "bearer" }));
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({ started: false, queued: true, run: queuedRun });
+    expect(startOrQueueRun).toHaveBeenCalledWith(expect.objectContaining({ source: "agent" }));
+  });
+
+  it("answers a start that was not queued as it always did", async () => {
+    expect(await (await POST(req())).json()).toEqual({ started: true, queued: false, run: RUN });
+  });
+});
+
+describe("a Fix CI continuation", () => {
+  it("passes fixCi through only as true — what failed is the box's to append", async () => {
+    await POST(req({ body: { task: "Fix the failing CI checks.", resumeRunId: "run-k3x9q2ab", fixCi: true } }));
+    expect(startOrQueueRun).toHaveBeenLastCalledWith(expect.objectContaining({ resumeRunId: "run-k3x9q2ab", fixCi: true }));
+    await POST(req({ body: { task: "Carry on.", resumeRunId: "run-k3x9q2ab", fixCi: "yes" } }));
+    expect(startOrQueueRun.mock.calls[startOrQueueRun.mock.calls.length - 1][0]).not.toHaveProperty("fixCi");
   });
 });

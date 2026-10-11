@@ -95,6 +95,12 @@ export type ProgressLabelKey =
   | "resumedByOwner"
   | "drafted"
   | "startedFromDraft"
+  | "queued"
+  | "startedFromQueue"
+  | "queueCanceled"
+  // Failing CI (src/lib/coding-ci.ts): what failed, and a run fixing it.
+  | "ciFailed"
+  | "ciFix"
   | "leftoverRunning"
   | "endedLeftovers"
   | "ownerEndedLeftovers"
@@ -118,7 +124,11 @@ export type ProgressLabelKey =
   // SENDER's feed; what a run receives is already there as a queued message.
   | "teamMessageToRun"
   | "teamMessageToLead"
-  | "teamMessageToAssistant";
+  | "teamMessageToAssistant"
+  // A message delivered TO this run (src/lib/coding-run-messages.ts): mid-turn
+  // through its inbox hook, or as its next turn / with a start.
+  | "messageMidTurn"
+  | "messageToRun";
 
 export interface ProgressDescription {
   kind: ProgressKind;
@@ -236,6 +246,11 @@ export const RUNNER_STEP = {
   resumedByOwner: "Resumed by the owner",
   drafted: "Drafted — start it when ready",
   startedFromDraft: "Started from a draft",
+  // The run queue (coding-agent.ts startOrQueueRun): every slot was taken.
+  queued: (position: number) => `Queued — number ${position} in line for a slot`,
+  startedFromQueue: "Started from the queue",
+  queueCanceled: "Canceled by the owner before it started",
+  ciFix: (runId: string, attempt: number, max: number) => `Fixing the failed CI of ${runId} (attempt ${attempt} of ${max})`,
   leftoverRunning:
     "Something this run started is still running — a server it left listening? The run's page can end it.",
   endedLeftovers: "Ended what the run had left running",
@@ -469,6 +484,12 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^Resumed by the owner$/, labelKey: "resumedByOwner", icon: "play_circle" },
   { re: /^Drafted — start it when ready$/, labelKey: "drafted", icon: "draft" },
   { re: /^Started from a draft$/, labelKey: "startedFromDraft", icon: "play_arrow" },
+  { re: /^Queued — number (\d+) in line for a slot$/, labelKey: "queued", icon: "hourglass_top", params: (m) => ({ n: Number(m[1]) }) },
+  { re: /^Started from the queue$/, labelKey: "startedFromQueue", icon: "play_arrow" },
+  { re: /^Canceled by the owner before it started$/, labelKey: "queueCanceled", icon: "cancel" },
+  // ciFailureLine (src/lib/coding-ci.ts).
+  { re: /^CI failed on pull request #(\d+): (.+)$/, labelKey: "ciFailed", icon: "error", params: (m) => ({ n: Number(m[1]), what: m[2] }) },
+  { re: /^Fixing the failed CI of (run-[a-z0-9]{8}) \(attempt (\d+) of (\d+)\)$/, labelKey: "ciFix", icon: "build", params: (m) => ({ run: m[1], n: Number(m[2]), max: Number(m[3]) }) },
   { re: /^Something this run started is still running .*$/, labelKey: "leftoverRunning", icon: "dns" },
   { re: /^Ended what the run had left running$/, labelKey: "endedLeftovers", icon: "power_settings_new" },
   { re: /^The owner ended what the run had left running$/, labelKey: "ownerEndedLeftovers", icon: "power_settings_new" },
@@ -502,6 +523,9 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^Team message to (run-[a-z0-9]{8}): (.+)$/, labelKey: "teamMessageToRun", icon: "forum", params: (m) => ({ run: m[1], text: m[2] }) },
   { re: /^Team message to the lead: (.+)$/, labelKey: "teamMessageToLead", icon: "forum", params: (m) => ({ text: m[1] }) },
   { re: /^Team message to the assistant: (.+)$/, labelKey: "teamMessageToAssistant", icon: "forum", params: (m) => ({ text: m[1] }) },
+  // runMessageProgressLine — the mid-turn shape first: the other is its prefix.
+  { re: /^Message to the run, mid-turn: (.+)$/, labelKey: "messageMidTurn", icon: "mark_chat_read", params: (m) => ({ text: m[1] }) },
+  { re: /^Message to the run: (.+)$/, labelKey: "messageToRun", icon: "chat", params: (m) => ({ text: m[1] }) },
 ];
 
 export function describeProgressLine(raw: string): ProgressDescription {
