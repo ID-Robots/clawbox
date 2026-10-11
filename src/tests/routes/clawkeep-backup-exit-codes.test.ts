@@ -242,6 +242,21 @@ describe("a backup the daemon refused before uploading says why, with sizes a pe
     expect(body.error).not.toMatch(/you no longer need/);
   });
 
+  it("does not print a near miss as if the backup had fitted", async () => {
+    // 1.24 GB needed against 1.21 GB free: each rounds to "1.2 GB" on its own.
+    daemon.exitCode = 2;
+    daemonRefuses("quota_full", {
+      needed: 1_331_439_862, used: 5 * GB - 1_299_227_607, quota: 5 * GB,
+    });
+    const nearMiss = (await (await backupPOST(post({}))).json()) as Record<string, string>;
+    expect(nearMiss.error).toMatch(/needs 1\.24 GB, but only 1\.21 GB of the 5\.0 GB/);
+
+    // … and a backup 40 MB larger than the plan is not "5.0 GB, more than (5.0 GB)".
+    daemonRefuses("quota_full", { needed: 5 * GB + 40 * 1024 ** 2, used: 0, quota: 5 * GB });
+    const overPlan = (await (await backupPOST(post({}))).json()) as Record<string, string>;
+    expect(overPlan.error).toMatch(/is 5\.04 GB, more than the whole ClawKeep plan holds \(5\.00 GB\)/);
+  });
+
   it("reads a quota of zero as a plan that holds nothing, not as a missing figure", async () => {
     daemon.exitCode = 2;
     daemonRefuses("quota_full", { needed: 2048, used: 0, quota: 0 });

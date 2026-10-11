@@ -1237,6 +1237,43 @@ def test_sizes_are_written_the_way_the_app_writes_them(n: int, text: str) -> Non
     assert runner._human_bytes(n) == text
 
 
+@pytest.mark.parametrize("a,b,first,second", [
+    # Different figures already: left exactly as `_human_bytes` prints them.
+    (1288490189, 322122547, "1.2 GB", "307 MB"),
+    (2048, 0, "2.0 KB", "0 B"),
+    # The same figure for different amounts gains decimals until they part.
+    (1331439862, 1299227607, "1.24 GB", "1.21 GB"),       # 1.24 vs 1.21 GiB
+    (1288490189, 1288490189 - 2**20, "1.200 GB", "1.199 GB"),
+    (300 * 2**20 + 400_000, 300 * 2**20 - 200_000, "300.4 MB", "299.8 MB"),
+    (5 * 2**30 + 40 * 2**20, 5 * 2**30, "5.04 GB", "5.00 GB"),
+    # The same amount is the same figure, and is not made to look different.
+    (1288490189, 1288490189, "1.2 GB", "1.2 GB"),
+    (0, -5, "0 B", "0 B"),
+    # Closer than three decimals can show: the shared figure, never a byte count.
+    (1288490189, 1288490189 - 100, "1.2 GB", "1.2 GB"),
+])
+def test_two_compared_sizes_never_print_as_the_same_figure_by_rounding(
+    a: int, b: int, first: str, second: str,
+) -> None:
+    assert runner._human_bytes_apart(a, b) == (first, second)
+
+
+def test_a_backup_that_misses_by_a_little_does_not_read_as_if_it_fitted() -> None:
+    """1.24 GB needed against 1.21 GB free used to read "needs 1.2 GB
+    encrypted, but only 1.2 GB of 5.0 GB is free"."""
+    gb = 1024**3
+    needed, free = 1331439862, 1299227607
+    near_miss = runner._quota_refusal_message(needed, 5 * gb - free, 5 * gb)
+    assert "needs 1.24 GB encrypted, but only 1.21 GB of 5.0 GB is free" in near_miss
+
+    just_over_the_plan = runner._quota_refusal_message(5 * gb + 40 * 2**20, 0, 5 * gb)
+    assert "is 5.04 GB encrypted, larger than the account's whole storage (5.00 GB)" in (
+        just_over_the_plan
+    )
+    for sentence in (near_miss, just_over_the_plan):
+        assert " bytes" not in sentence and len(sentence) <= 500
+
+
 def test_the_refusal_sentence_names_the_remedy_that_can_work() -> None:
     """Three shapes, because the remedy differs: delete or upgrade when the
     backup would fit an emptier account, upgrade only when it is larger than

@@ -202,6 +202,11 @@ describe("ChromeShelf", () => {
     expect(say(failed, { kind: "usage_unverified", neededBytes: 5, freeBytes: 0 })).toBe(
       EN["shelf.clawkeepUsageUnverified"],
     );
+    // A near miss — 1.24 GB against 1.21 GB — is not "needs 1.2 GB but only
+    // 1.2 GB is free".
+    expect(say(failed, { kind: "quota_full", neededBytes: 1_331_439_862, freeBytes: 1_299_227_607 })).toBe(
+      "Last ClawKeep backup needs 1.24 GB but only 1.21 GB is free — open to see your options",
+    );
     // No raw byte count, and no unfilled placeholder, ever reaches the shelf.
     for (const title of [say(failed, noRoom), say(failed, { ...noRoom, freeBytes: 0 })]) {
       expect(title).not.toMatch(/\d{7,}|[{}]/);

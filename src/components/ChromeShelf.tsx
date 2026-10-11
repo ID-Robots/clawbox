@@ -6,7 +6,7 @@ import { DESKTOP_LAYERS } from "@/lib/window-snap";
 import { mainInsets } from "@/lib/desktop-screens";
 import { useDeskScreens } from "@/lib/use-desk-screens";
 import type { Protection, ProtectionReason } from "@/lib/clawkeep-protection";
-import { formatBytes } from "@/lib/format-bytes";
+import { formatBytesApart } from "@/lib/format-bytes";
 import { openInKiosk } from "@/lib/kiosk-tabs-client";
 import { useDesktopClock } from "@/lib/use-desktop-clock";
 
@@ -82,10 +82,9 @@ function refusalTitle(
   t: (key: string, params?: Record<string, string | number>) => string,
 ): string {
   if (refusal.kind === "usage_unverified") return t("shelf.clawkeepUsageUnverified");
-  return t("shelf.clawkeepNoRoom", {
-    needed: formatBytes(refusal.neededBytes) ?? "0 B",
-    free: formatBytes(refusal.freeBytes) ?? "0 B",
-  });
+  // Apart, as on the card: never "needs 1.2 GB but only 1.2 GB is free".
+  const [needed, free] = formatBytesApart(refusal.neededBytes, refusal.freeBytes);
+  return t("shelf.clawkeepNoRoom", { needed, free });
 }
 
 interface ShelfApp {

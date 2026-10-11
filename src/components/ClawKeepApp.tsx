@@ -24,6 +24,7 @@ import {
   jsonOrError,
   timeAgo,
 } from "./clawkeep-ui";
+import { formatBytesApart } from "@/lib/format-bytes";
 
 /**
  * Is anything still missing before a backup can run?
@@ -151,13 +152,17 @@ type Translate = (key: string, params?: Record<string, string | number>) => stri
  */
 function refusalText(refusal: BackupRefusal, t: Translate): string {
   if (refusal.kind === "usage_unverified") return t("clawkeep.error.usageUnverified");
-  const needed = formatBytes(refusal.neededBytes);
-  const quota = formatBytes(refusal.quotaBytes);
+  // The two figures a sentence compares are printed apart: a backup that
+  // misses by a little must not read "needs 1.2 GB, but only 1.2 GB is free".
   if (refusal.neededBytes > refusal.quotaBytes) {
+    const [needed, quota] = formatBytesApart(refusal.neededBytes, refusal.quotaBytes);
     return t("clawkeep.error.largerThanPlan", { needed, quota });
   }
-  const free = formatBytes(Math.max(0, refusal.quotaBytes - refusal.usedBytes));
-  return t("clawkeep.error.noRoomFor", { needed, free, quota });
+  const [needed, free] = formatBytesApart(
+    refusal.neededBytes,
+    Math.max(0, refusal.quotaBytes - refusal.usedBytes),
+  );
+  return t("clawkeep.error.noRoomFor", { needed, free, quota: formatBytes(refusal.quotaBytes) });
 }
 
 // Map the daemon's phase id to an i18n key for the progress panel.
