@@ -12,11 +12,15 @@
  * server: Chromium is started by systemd, not by us, so the value is handed to
  * scripts/launch-browser.sh through ~/.cache/clawbox/browser.env — the same
  * mechanism start-vnc.sh already uses to tell that script which display to use.
+ * That file is also where the owner names a browser of their own (profile, CDP
+ * port, executable — src/lib/desktop-browser-config.ts), so writing the start
+ * page keeps every other line of it as it was.
  */
 
 import fs from "fs/promises";
 import path from "@/lib/runtime-path";
 import { get as configGet, set as configSet } from "@/lib/config-store";
+import { CDP_PORT_KEY, EXECUTABLE_KEY, PROFILE_DIR_KEY, browserEnvFile } from "@/lib/desktop-browser-config";
 
 export const BROWSER_SETUP_CONFIG_KEY = "browser_setup_complete";
 export const BROWSER_AUTO_OPEN_CONFIG_KEY = "browser_auto_open";
@@ -27,11 +31,6 @@ export const BROWSER_START_URL_CONFIG_KEY = "browser_start_url";
  *  page (owner's decision, 2026-09-15): the box's browser is driven by the
  *  agent and the owner, and neither needs a search engine loaded first. */
 export const DEFAULT_START_URL = "about:blank";
-
-const CLAWBOX_USER = process.env.SUDO_USER || process.env.USER || "clawbox";
-const HOME = CLAWBOX_USER === "root" ? "/home/clawbox" : `/home/${CLAWBOX_USER}`;
-/** Read by scripts/launch-browser.sh, next to the VNC display it already reads. */
-export const BROWSER_ENV_FILE = path.join(HOME, ".cache", "clawbox", "browser.env");
 
 /**
  * Has the owner been through the wizard?
@@ -113,21 +112,54 @@ export async function setBrowserStartUrl(url: string | null): Promise<string> {
   return next ?? DEFAULT_START_URL;
 }
 
+const START_URL_LINE_RE = /^\s*(?:export\s+)?CLAWBOX_BROWSER_START_URL=/;
+
+/** What ClawBox writes at the top of the file, and recognises as its own on the next write. */
+const HEADER_LINES = [
+  "# Written by ClawBox — Settings → Browser. Read by scripts/launch-browser.sh.",
+  "# To use a browser of your own instead of ClawBox's, set any of these (they are kept",
+  "# whenever ClawBox rewrites this file; an environment variable of the same name wins):",
+  `#   ${PROFILE_DIR_KEY}=~/.config/my-browser-profile`,
+  `#   ${CDP_PORT_KEY}=9222`,
+  `#   ${EXECUTABLE_KEY}=/opt/google/chrome/chrome`,
+];
+const HEADER_SET = new Set(HEADER_LINES);
+
+/**
+ * The launch env file with its start page replaced and every other line — the
+ * owner's own browser settings above all — kept exactly as it was written.
+ */
+export function launchEnvBody(existing: string, startUrl: string): string {
+  const kept = existing
+    .split(/\r?\n/)
+    .filter((line) => !HEADER_SET.has(line) && !START_URL_LINE_RE.test(line));
+  while (kept.length > 0 && kept[kept.length - 1].trim() === "") kept.pop();
+  while (kept.length > 0 && kept[0].trim() === "") kept.shift();
+  return [...HEADER_LINES, ...kept, `CLAWBOX_BROWSER_START_URL='${startUrl}'`].join("\n") + "\n";
+}
+
 /**
  * Hand the start page to the launch script.
  *
  * Best-effort on purpose: a browser that opens on Google instead of the
  * owner's start page is a smaller failure than a browser that refuses to
  * open, so a write that fails is logged and the launch goes ahead.
+ *
+ * A file that exists but cannot be READ is left alone rather than replaced:
+ * rewriting it from nothing would drop the owner's own browser settings, and
+ * a stale start page is the smaller loss.
  */
 export async function writeBrowserLaunchEnv(startUrl: string): Promise<void> {
+  const file = browserEnvFile();
   try {
-    await fs.mkdir(path.dirname(BROWSER_ENV_FILE), { recursive: true });
-    await fs.writeFile(
-      BROWSER_ENV_FILE,
-      `# Written by ClawBox — Settings → Browser. Read by scripts/launch-browser.sh.\nCLAWBOX_BROWSER_START_URL='${startUrl}'\n`,
-      { mode: 0o600 },
-    );
+    let existing = "";
+    try {
+      existing = await fs.readFile(file, "utf-8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") throw err;
+    }
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, launchEnvBody(existing ?? "", startUrl), { mode: 0o600 });
   } catch (err) {
     console.warn("[browser] could not write the launch environment:", err instanceof Error ? err.message : err);
   }

@@ -668,8 +668,10 @@ export const CODING_AGENT_GEN_AUDIO_CONFIG_KEY = "coding_agent_generate_audio";
  * Does a run verify its work in the Chromium on the owner's own SCREEN?
  *
  * /setup-api/browser can drive either of two browsers: the desktop window the
- * owner can watch (attached over CDP on port 18800, started if it is not
- * running) or a headless Chromium of the web server's own. The screen is the
+ * owner can watch (attached over CDP on its configured port — 18800 unless the
+ * owner pointed it at a browser of their own, src/lib/desktop-browser-config.ts
+ * — started if it is not running) or a headless Chromium of the web server's
+ * own. The screen is the
  * point — the owner watches the page the run is checking, live, and the run
  * screenshots exactly what they see.
  *

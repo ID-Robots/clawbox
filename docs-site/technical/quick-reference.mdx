@@ -32,7 +32,7 @@ Inbound is **default-deny** (ufw). "LAN" below means *private IPv4 source ranges
 | 22 | SSH | LAN |
 | 3006 | Terminal WS — an **unauthenticated PTY** if reached directly | **Closed to the LAN** — use the session-gated `/terminal-ws` on port 80 |
 | 5900 / 6080 | VNC / noVNC websockify | localhost only — reach it through `/novnc-ws` on port 80 |
-| 18800 | Chromium CDP (AI browser) | localhost |
+| 18800 | Chromium CDP (AI browser; `CLAWBOX_BROWSER_CDP_PORT` moves it — see [Filesystem](/technical/filesystem#the-desktop-browser)) | localhost |
 | 11434 | Ollama | localhost |
 | 8080 / 8880 | llama.cpp / Kokoro TTS | localhost |
 | 5353/udp · 67/udp · 53 | mDNS (`clawbox.local`) · DHCP on the AP interface · captive-portal DNS | open (5353 from anywhere; 53 from `10.42.0.0/24`, `10.43.0.0/24`) |

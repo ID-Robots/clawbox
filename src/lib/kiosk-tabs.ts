@@ -14,9 +14,10 @@
  * It speaks Chrome's DevTools HTTP endpoints — `/json/list`, `PUT /json/new`,
  * `/json/activate/<id>`, `/json/close/<id>` — on the loopback port
  * `scripts/x64-migration/kiosk/install-kiosk-tabs.sh` gives the launcher
- * (`CLAWBOX_KIOSK_CDP_PORT`, default 18801; the VNC browser's is 18800 and is
- * `src/lib/cdp-probe.ts`'s business). No WebSocket, no Playwright: the four
- * HTTP calls are all this needs.
+ * (`CLAWBOX_KIOSK_CDP_PORT`, default 18801; the VNC browser's is 18800 unless
+ * the owner configured another — `src/lib/desktop-browser-config.ts` — and is
+ * never dialled from here). No WebSocket, no Playwright: the four HTTP calls
+ * are all this needs.
  *
  * A box with no kiosk — every Jetson, a dev machine — never dials the port at
  * all (`kioskConfigured`), and the laptop before its reboot picked the flags
@@ -27,6 +28,7 @@
 import fs from "fs";
 import { envPort } from "./port-probe";
 import { kioskConfigured, kioskEnvFile, type EnvLike } from "./kiosk-env";
+import { readDesktopBrowserConfig } from "./desktop-browser-config";
 
 export { KIOSK_ENV_FILE, kioskConfigured, kioskEnvFile, type EnvLike } from "./kiosk-env";
 
@@ -63,8 +65,17 @@ export function kioskCdpPort(env: EnvLike = process.env): number {
   return envPort(env.CLAWBOX_KIOSK_CDP_PORT, DEFAULT_KIOSK_CDP_PORT);
 }
 
-function cdpEndpoint(): string {
-  return `http://127.0.0.1:${kioskCdpPort()}`;
+/**
+ * The kiosk's endpoint, or null when the desktop (VNC) browser has been put on
+ * the same port (CLAWBOX_BROWSER_CDP_PORT). What answers there is then the
+ * desktop browser, and taking it for the kiosk would list its tabs and send
+ * the owner's sign-in pages to a screen nobody sees — the mistake
+ * kioskConfigured() exists to prevent.
+ */
+async function cdpEndpoint(): Promise<string | null> {
+  const port = kioskCdpPort();
+  if (port === (await readDesktopBrowserConfig()).cdpPort) return null;
+  return `http://127.0.0.1:${port}`;
 }
 
 const KIOSK_URL_LINE_RE = /^\s*(?:export\s+)?CLAWBOX_KIOSK_URL\s*=\s*(.*)$/;
@@ -155,8 +166,10 @@ interface CdpTarget {
 }
 
 async function cdpFetch(path: string, method: "GET" | "PUT" = "GET"): Promise<Response | null> {
+  const endpoint = await cdpEndpoint();
+  if (!endpoint) return null;
   try {
-    return await fetch(`${cdpEndpoint()}${path}`, {
+    return await fetch(`${endpoint}${path}`, {
       method,
       signal: AbortSignal.timeout(CDP_TIMEOUT_MS),
       cache: "no-store",

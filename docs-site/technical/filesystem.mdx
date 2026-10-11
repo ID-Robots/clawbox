@@ -66,7 +66,7 @@ Rows marked **OpenClaw/dual** or **Hermes/dual** exist only on those editions. C
 | Portal device identity (`data/cloudflared/device-id`) | ✅ kept | ⚠️ the file is deleted, but the id is re-derived identically from `/etc/machine-id` — the box reappears in the portal as the same device |
 | Ollama models | ✅ kept | ❌ deleted |
 | Saved Wi-Fi networks | ✅ kept | ❌ deleted (box returns to AP mode) |
-| SSH `authorized_keys`, shell history, browser profile | ✅ kept | ❌ wiped |
+| SSH `authorized_keys`, shell history, browser profile (ClawBox's own, and one of yours the Browser app was pointed at) | ✅ kept | ❌ wiped |
 | System password | ✅ kept | ❌ reset to `clawbox` |
 | Voice models (Whisper/Kokoro caches) | ✅ kept | ✅ kept (can't re-download in AP mode) |
 
@@ -99,6 +99,35 @@ preserved** — including the commented Security and Fallback-Model blocks the f
 Saving a local model in the ClawBox UI is enough to strip them. Treat the file as generated:
 keep your own notes elsewhere, and let the writers serialise through `~/.hermes/config.yaml.lock`
 rather than editing it under them.
+
+## The desktop browser
+
+The Browser app's **Open Browser** starts Chromium on the virtual desktop with its own profile
+(`~/.config/clawbox-browser`) and DevTools port `18800`. If you already use a signed-in browser of
+your own on the remote desktop, point the app at it instead in `~/.cache/clawbox/browser.env`:
+
+```bash
+CLAWBOX_BROWSER_PROFILE_DIR=~/.config/my-browser-profile   # its --user-data-dir
+CLAWBOX_BROWSER_CDP_PORT=9222                               # its --remote-debugging-port
+CLAWBOX_BROWSER_EXECUTABLE=/opt/google/chrome/chrome        # optional: the binary to start it with
+```
+
+ClawBox keeps these lines whenever it rewrites the file (it stores the start page there too), and an
+environment variable of the same name — for example in the checkout's `.env` — overrides each one.
+A value that is not usable (a relative path, a path with spaces, a port below 1024) is ignored with a
+warning in the log, and the default is used.
+
+With a browser of your own configured:
+
+- If it is already running on that profile and port, **Open Browser** brings it forward (or opens your
+  start page as a tab) and the app shows it as running.
+- If it is not running, **Open Browser** starts it there, with remote debugging on that port.
+- ClawBox never closes a browser on your profile that it did not start itself, and never clears another
+  visible browser off its debugging port; only the assistant's own background browser is ever cleared.
+- Chrome refuses remote debugging on its *default* profile, so the profile has to be a directory you pass
+  with `--user-data-dir`, started with `--remote-debugging-port=<the same port>`.
+- A factory reset deletes that profile along with ClawBox's own, if it is a browser profile inside
+  your home directory.
 
 ## Logs
 

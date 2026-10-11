@@ -21,6 +21,10 @@ vi.mock("fs/promises", () => ({
     writeFile: vi.fn(),
     chown: vi.fn(),
     unlink: vi.fn(),
+    // The desktop browser's launch env file (src/lib/desktop-browser-config.ts):
+    // absent unless a case configures a browser of the owner's.
+    readFile: vi.fn().mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" })),
+    access: vi.fn().mockRejectedValue(new Error("ENOENT")),
   },
 }));
 
@@ -425,6 +429,59 @@ describe("POST /setup-api/setup/reset", () => {
       expect(call, `expected fs.rm for path ending '${suffix}'`).toBeDefined();
       expect(call![1]).toMatchObject({ recursive: true, force: true });
     }
+  });
+
+  /**
+   * TASK-1480: the owner can point the Browser app at a browser profile of
+   * their own. It holds what ClawBox's own profile holds — their cookies and
+   * signed-in sessions — so a factory reset removes it as well, and the file
+   * that named it. The path came from a file the owner edits by hand, so the
+   * removal is guarded: inside the home, and a real Chromium profile only.
+   */
+  describe("a browser profile of the owner's own", () => {
+    const HOME = process.env.HOME || "/home/clawbox";
+    const configure = (profileDir: string) => {
+      mockFs.readFile.mockImplementation((async (p: unknown) => {
+        if (String(p) === process.env.CLAWBOX_BROWSER_ENV_FILE) return `CLAWBOX_BROWSER_PROFILE_DIR=${profileDir}\n`;
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      }) as never);
+    };
+    const removed = () => mockFs.rm.mock.calls.map(([p]) => String(p));
+
+    afterEach(() => {
+      mockFs.readFile.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
+      mockFs.access.mockRejectedValue(new Error("ENOENT"));
+    });
+
+    it("is wiped with ClawBox's own profile, and so is the file that named it", async () => {
+      configure(`${HOME}/.config/google-chrome-debug`);
+      mockFs.access.mockResolvedValue(undefined); // it has a `Local State`
+
+      await resetPost();
+
+      expect(removed()).toContain(`${HOME}/.config/google-chrome-debug`);
+      expect(removed()).toContain(`${HOME}/.config/clawbox-browser`);
+      expect(removed()).toContain(`${HOME}/.cache/clawbox/browser.env`);
+    });
+
+    it("is left alone when it is not a Chromium profile — a typo naming a whole folder", async () => {
+      configure(`${HOME}/.config`);
+      mockFs.access.mockRejectedValue(new Error("ENOENT")); // no `Local State`
+
+      await resetPost();
+
+      expect(removed()).not.toContain(`${HOME}/.config`);
+      expect(removed()).toContain(`${HOME}/.config/clawbox-browser`);
+    });
+
+    it("is left alone outside the home directory", async () => {
+      configure("/srv/shared-chrome");
+      mockFs.access.mockResolvedValue(undefined);
+
+      await resetPost();
+
+      expect(removed().some((p) => p.includes("shared-chrome"))).toBe(false);
+    });
   });
 
   it("wipes user file folders but keeps the directories", async () => {

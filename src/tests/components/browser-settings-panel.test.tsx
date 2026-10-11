@@ -112,6 +112,31 @@ describe("BrowserSettingsPanel", () => {
     expect(getByTestId("browser-settings-snap-warning")).toBeInTheDocument();
   });
 
+  /**
+   * TASK-1480: which browser "the browser" is comes from the device — the
+   * owner may have pointed it at a profile and port of their own — and a
+   * browser they started is opened (brought forward), never closed, from here.
+   */
+  it("names the configured profile and port, and offers Open for a browser the owner started", () => {
+    const { getByText, getByTestId, props } = renderPanel({
+      ...STATUS,
+      cdpPort: 9222,
+      profileDir: "/home/clawbox/.config/google-chrome-debug",
+      ownProfile: false,
+      browser: { running: true, pid: 4242, cdpReady: true, external: true },
+    });
+
+    expect(getByText("CDP :9222")).toBeInTheDocument();
+    expect(getByText("/home/clawbox/.config/google-chrome-debug/")).toBeInTheDocument();
+    fireEvent.click(getByTestId("browser-settings-power"));
+    expect(props.onAction).toHaveBeenCalledWith("open-browser");
+  });
+
+  it("still names ClawBox's own profile on a box that reports none", () => {
+    const { getByText } = renderPanel();
+    expect(getByText("~/.config/clawbox-browser/")).toBeInTheDocument();
+  });
+
   it("offers no agent-link switch where the link is permanent", () => {
     const { queryByTestId } = renderPanel({ ...STATUS, alwaysOn: true });
     expect(queryByTestId("browser-settings-link")).toBeNull();

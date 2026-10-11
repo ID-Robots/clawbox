@@ -82,6 +82,58 @@ export async function probeCdp(endpoint: string, origin: string): Promise<CdpSta
   return "down";
 }
 
+/** CDP target ids are hex; anything else never reaches a URL path. */
+const TARGET_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
+
+export type FocusResult = "activated" | "opened" | "unreachable";
+
+/**
+ * Bring a browser that is already running to the owner: the start page as a
+ * new tab when it is a real page no tab is showing yet, otherwise the tab
+ * already showing it (or the first one) activated — which raises its window.
+ *
+ * What "Open Browser" does when the configured browser is already up, which
+ * is usually the owner's own signed-in browser: starting a second one on the
+ * same profile is impossible, and doing nothing left the button looking dead.
+ * The four DevTools HTTP calls are enough; no WebSocket, so the browser's
+ * --remote-allow-origins never matters here.
+ */
+export async function focusCdpBrowser(endpoint: string, startUrl: string): Promise<FocusResult> {
+  const call = async (pathAndQuery: string, method: "GET" | "PUT" = "GET"): Promise<Response | null> => {
+    try {
+      return await fetch(`${endpoint}${pathAndQuery}`, { method, signal: AbortSignal.timeout(2000), cache: "no-store" });
+    } catch {
+      return null;
+    }
+  };
+  const list = await call("/json/list");
+  if (!list?.ok) return "unreachable";
+  let targets: unknown;
+  try {
+    targets = await list.json();
+  } catch {
+    return "unreachable";
+  }
+  const pages = (Array.isArray(targets) ? targets : [])
+    .filter((t): t is { id: string; url: string } =>
+      !!t && typeof t === "object"
+      && (t as { type?: unknown }).type === "page"
+      && typeof (t as { id?: unknown }).id === "string"
+      && TARGET_ID_RE.test((t as { id: string }).id)
+      && typeof (t as { url?: unknown }).url === "string");
+
+  const realPage = /^https?:/i.test(startUrl);
+  const showing = realPage ? pages.find((p) => p.url === startUrl) : undefined;
+  const target = showing ?? (realPage ? undefined : pages[0]);
+  if (target) {
+    const res = await call(`/json/activate/${target.id}`);
+    return res?.ok ? "activated" : "unreachable";
+  }
+  // Chrome dropped GET for /json/new (it changes state); PUT is the verb now.
+  const opened = await call(`/json/new?${encodeURIComponent(realPage ? startUrl : "about:blank")}`, "PUT");
+  return opened?.ok ? "opened" : "unreachable";
+}
+
 /**
  * "pid 67257 (chrome), started by openclaw-gateway" — from `ss -tlnp` and
  * `ps`, for the error message; "" when it cannot be told.

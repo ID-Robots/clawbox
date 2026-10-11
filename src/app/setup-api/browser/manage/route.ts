@@ -10,8 +10,16 @@ import type { OpenClawConfig } from "@/lib/openclaw-config";
 import { openclawIsAbsent, readConfig, restartGateway, runOpenclawConfigSet } from "@/lib/openclaw-config";
 import { CONFIG_ROOT } from "@/lib/config-store";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
-import { findClawboxBrowserPids, terminateClawboxBrowser, terminateForeignCdpBrowser } from "@/lib/process-match";
-import { findPlaywrightChromium } from "@/lib/cdp-probe";
+import {
+  findBrowserPidsStartedByUnit,
+  findCdpPortHolders,
+  findClawboxBrowserPids,
+  inspectClawboxBrowser,
+  terminateClawboxBrowser,
+  terminateForeignCdpBrowser,
+} from "@/lib/process-match";
+import { findPlaywrightChromium, focusCdpBrowser } from "@/lib/cdp-probe";
+import { cdpEndpoint, readDesktopBrowserConfig, type DesktopBrowserConfig } from "@/lib/desktop-browser-config";
 import {
   getBrowserAutoOpen,
   getBrowserSetupComplete,
@@ -22,9 +30,10 @@ import {
 const exec = promisify(execFile);
 const CLAWBOX_USER = process.env.SUDO_USER || process.env.USER || "clawbox";
 const HOME = CLAWBOX_USER === "root" ? "/home/clawbox" : `/home/${CLAWBOX_USER}`;
-const PROFILE_DIR = path.join(HOME, ".config", "clawbox-browser");
 const PLAYWRIGHT_BROWSERS_DIR = path.join(HOME, ".cache", "ms-playwright");
-const CDP_PORT = 18800;
+// The profile, CDP port and executable are the owner's to choose
+// (src/lib/desktop-browser-config.ts) and are read per request, so an edit to
+// the launch env file reaches this route and the launch script together.
 const BROWSER_ENABLED_KEY = "browser:integration-enabled";
 
 /**
@@ -92,6 +101,8 @@ interface ChromiumInfo {
    * isServiceSafeChromium(). Absent when nothing is installed.
    */
   serviceSafe?: boolean;
+  /** The owner named this browser (CLAWBOX_BROWSER_EXECUTABLE) rather than ClawBox finding one. */
+  configured?: boolean;
 }
 
 /**
@@ -140,7 +151,22 @@ async function describeChromium(binPath: string, serviceSafe?: boolean): Promise
   }
 }
 
-async function checkChromium(): Promise<ChromiumInfo> {
+async function checkChromium(config: Pick<DesktopBrowserConfig, "executable">): Promise<ChromiumInfo> {
+  // The owner named their own browser: that one, or nothing. Reporting some
+  // other Chromium as installed would promise a window the launch script
+  // refuses to open — it never starts a different build on the owner's
+  // profile, which could migrate it or lose its sign-ins.
+  if (config.executable) {
+    try {
+      const info = await fs.stat(config.executable);
+      if (!info.isFile()) throw new Error("not a file");
+      await fs.access(config.executable, fsConstants.X_OK);
+    } catch {
+      return { installed: false, path: config.executable, configured: true };
+    }
+    return { ...(await describeChromium(config.executable)), configured: true };
+  }
+
   // Full chrome only: this is the browser the owner will see in a window,
   // and a headless shell cannot open one.
   const playwrightChromium = findPlaywrightChromium(PLAYWRIGHT_BROWSERS_DIR, { preferHeadless: false });
@@ -168,37 +194,83 @@ async function checkChromium(): Promise<ChromiumInfo> {
   return { installed: false };
 }
 
-async function cleanBrowserLocks() {
+/**
+ * Clear the profile's singleton locks — stale ones, left by a browser that
+ * died or by a hostname change. On the OWNER's profile only while no browser
+ * is on it: there the locks may be a live browser's of their own, and taking
+ * them away would let a second browser open the same profile under it.
+ */
+async function cleanBrowserLocks(config: DesktopBrowserConfig) {
+  if (!config.ownProfile && (await findClawboxBrowserPids(config)).length > 0) return;
   await Promise.all(
     ["SingletonLock", "SingletonSocket", "SingletonCookie"].map(f =>
-      fs.unlink(path.join(PROFILE_DIR, f)).catch(() => {})
+      fs.unlink(path.join(config.profileDir, f)).catch(() => {})
     )
   );
 }
 
+interface BrowserState {
+  running: boolean;
+  pid?: number;
+  cdpReady: boolean;
+  /** The assistant's background browser holds the CDP port (TASK-515). */
+  agentBrowsing?: boolean;
+  /** Somebody else's browser — not the assistant's — holds the CDP port. */
+  portTaken?: boolean;
+  /**
+   * The configured browser is open on the owner's profile, but ClawBox did not
+   * start it — the owner did. Close leaves it alone, so the app offers none.
+   */
+  external?: boolean;
+  /**
+   * The owner's browser is open on its profile without answering on the
+   * configured port — started without remote debugging, or on another port.
+   * No amount of waiting makes it answer, so it is not "starting".
+   */
+  noRemoteDebugging?: boolean;
+}
+
 /** Check if browser is running and CDP is accessible */
-async function getBrowserStatus(): Promise<{ running: boolean; pid?: number; cdpReady: boolean; agentBrowsing?: boolean }> {
-  // Identify the browser by its executable + our profile dir, never by a
-  // regex over whole command lines — see src/lib/process-match.ts. The
+async function getBrowserStatus(config: DesktopBrowserConfig): Promise<BrowserState> {
+  // Identify the browser by its executable + the configured profile dir, never
+  // by a regex over whole command lines — see src/lib/process-match.ts. The
   // harness runs each chat turn as `hermes chat -q <user's message>`, so a
   // command-line pattern is matchable from a chat message.
-  const browserMatch = { profileDir: PROFILE_DIR, cdpPort: CDP_PORT };
-
   let cdpReady = false;
   try {
-    const res = await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`, { signal: AbortSignal.timeout(2000) });
+    const res = await fetch(`${cdpEndpoint(config)}/json/version`, { signal: AbortSignal.timeout(2000) });
     cdpReady = res.ok;
   } catch {}
 
-  // "Running" means OUR desktop browser process exists — the one on the
-  // clawbox-browser profile. The CDP port answering is NOT that proof: the
-  // agent's own headless browser binds the same port whenever it browses
-  // before the owner opens the desktop browser, and reporting that as a
-  // running desktop browser (green tick, PID, Close button) was TASK-515.
-  // findClawboxBrowserPids handles its own I/O failures and returns [].
-  const pids = await findClawboxBrowserPids(browserMatch);
-  if (pids.length > 0) return { running: true, pid: pids[0], cdpReady };
-  if (cdpReady) return { running: false, cdpReady: true, agentBrowsing: true };
+  // "Running" means the configured desktop browser process exists — the one
+  // on the configured profile, whoever started it. The CDP port answering is
+  // NOT that proof: the agent's own headless browser binds the same port
+  // whenever it browses before the owner opens the desktop browser, and
+  // reporting that as a running desktop browser (green tick, PID, Close
+  // button) was TASK-515. findClawboxBrowserPids handles its own I/O failures
+  // and returns [].
+  const found = await inspectClawboxBrowser(config);
+  if (found.pids.length > 0) {
+    const state: BrowserState = { running: true, pid: found.pids[0], cdpReady };
+    // On ClawBox's own profile every browser is ClawBox's, as before. On the
+    // owner's, who started it decides what Close may do, and a browser that
+    // was never given the port is not "starting" — it never will answer.
+    if (!config.ownProfile) {
+      if (found.startedByUnit.length === 0) state.external = true;
+      if (!cdpReady && !found.servingPort) state.noRemoteDebugging = true;
+    }
+    return state;
+  }
+  if (cdpReady) {
+    // Something else answers the port. Only a browser identified as a
+    // PERSON's makes it "taken"; anything else is the agent's, as before —
+    // including a holder /proc cannot show us.
+    const holders = await findCdpPortHolders(config);
+    if (holders.other.length > 0 && holders.assistant.length === 0) {
+      return { running: false, cdpReady: true, portTaken: true };
+    }
+    return { running: false, cdpReady: true, agentBrowsing: true };
+  }
   return { running: false, cdpReady: false };
 }
 
@@ -230,9 +302,10 @@ export async function GET() {
     // there is no ~/.openclaw/openclaw.json to hold a tools profile, and the
     // sqlite flag only ever recorded the OpenClaw switch. Skip them rather than
     // derive a "disabled" answer from files this edition does not keep.
+    const desktop = await readDesktopBrowserConfig();
     const [chromium, browser, config, persistedEnabled, autoOpen, startUrl] = await Promise.all([
-      checkChromium(),
-      getBrowserStatus(),
+      checkChromium(desktop),
+      getBrowserStatus(desktop),
       alwaysOn ? Promise.resolve({} as OpenClawConfig) : readOpenClawConfig(),
       alwaysOn ? Promise.resolve(null) : getPersistedBrowserEnabled(),
       getBrowserAutoOpen(),
@@ -246,7 +319,11 @@ export async function GET() {
       browser,
       enabled,
       alwaysOn,
-      cdpPort: CDP_PORT,
+      cdpPort: desktop.cdpPort,
+      // Which profile "the browser" is, and whether it is ClawBox's own or
+      // one of the owner's (src/lib/desktop-browser-config.ts).
+      profileDir: desktop.profileDir,
+      ownProfile: desktop.ownProfile,
       // The wizard's flag, and the two settings the app reads on the same
       // poll it already runs — one answer, so the face it shows and the state
       // it shows can never come from two different moments.
@@ -296,7 +373,9 @@ export async function POST(req: Request) {
           console.warn("[browser] Playwright Chromium install failed:", err);
         }
 
-        const chromium = await checkChromium();
+        // What the install itself produced — ClawBox's own Chromium, never
+        // the owner's configured browser, which this action does not install.
+        const chromium = await checkChromium({ executable: null });
         if (!chromium.installed) {
           throw installError ?? new Error("Chromium install finished but no browser binary was detected");
         }
@@ -305,12 +384,13 @@ export async function POST(req: Request) {
       }
 
       case "enable": {
-        const chromium = await checkChromium();
+        const desktop = await readDesktopBrowserConfig();
+        const chromium = await checkChromium(desktop);
         if (!chromium.installed) {
           return NextResponse.json({ error: "Chromium not installed", code: "chromium_not_installed" }, { status: 400 });
         }
 
-        await fs.mkdir(PROFILE_DIR, { recursive: true });
+        await fs.mkdir(desktop.profileDir, { recursive: true });
 
         // Always-on edition: the profile dir above is the only preparation this
         // action can usefully do. Report the state as it already is instead of
@@ -318,7 +398,7 @@ export async function POST(req: Request) {
         // integrationIsAlwaysOn(). The client hides the button on this edition;
         // this guard is what keeps a stale page or a direct call honest too.
         if (integrationIsAlwaysOn()) {
-          return NextResponse.json({ ok: true, enabled: true, alwaysOn: true, profileDir: PROFILE_DIR });
+          return NextResponse.json({ ok: true, enabled: true, alwaysOn: true, profileDir: desktop.profileDir });
         }
 
         try {
@@ -341,7 +421,7 @@ export async function POST(req: Request) {
           enableRestartOk = false;
         }
 
-        return NextResponse.json({ ok: true, enabled: true, profileDir: PROFILE_DIR, gatewayRestarted: enableRestartOk });
+        return NextResponse.json({ ok: true, enabled: true, profileDir: desktop.profileDir, gatewayRestarted: enableRestartOk });
       }
 
       case "disable": {
@@ -383,17 +463,58 @@ export async function POST(req: Request) {
       }
 
       case "open-browser": {
-        // Already running means OUR desktop browser answers — not merely that
-        // something answers the CDP port (TASK-515: the agent's headless
-        // browser satisfies a port probe, which made this button a no-op that
-        // then reported success).
-        const existing = await getBrowserStatus();
+        const desktop = await readDesktopBrowserConfig();
+        const cdpPort = desktop.cdpPort;
+        const endpoint = cdpEndpoint(desktop);
+        // Already running means the CONFIGURED desktop browser answers — not
+        // merely that something answers the CDP port (TASK-515: the agent's
+        // headless browser satisfies a port probe, which made this button a
+        // no-op that then reported success).
+        const existing = await getBrowserStatus(desktop);
         if (existing.running && existing.cdpReady) {
-          return NextResponse.json({ ok: true, alreadyRunning: true, pid: existing.pid, cdpPort: CDP_PORT });
+          // Ours or the owner's own: bring it to them — the start page as a
+          // tab, or its window forward — instead of answering "already
+          // running" over a window they may not be looking at.
+          const focus = await focusCdpBrowser(endpoint, await getBrowserStartUrl());
+          return NextResponse.json({
+            ok: true,
+            alreadyRunning: true,
+            pid: existing.pid,
+            cdpPort,
+            focused: focus !== "unreachable",
+          });
+        }
+        // The owner's browser is open on the configured profile but not on the
+        // configured port. A second browser cannot share the profile, and the
+        // locks below are that live browser's, not stale ones — so say what
+        // would make it work rather than start anything.
+        if (existing.running && existing.noRemoteDebugging) {
+          return NextResponse.json(
+            {
+              error: `Your browser is open on ${desktop.profileDir} without remote debugging on port ${cdpPort}. Close it and press Open again, or start it with --remote-debugging-port=${cdpPort}.`,
+              code: "profile_in_use",
+            },
+            { status: 409 },
+          );
+        }
+        // Open on the owner's profile with the port, just not answering yet:
+        // it is starting. Never a second browser on someone's profile — the
+        // app's poll sees this one come up.
+        if (existing.running && !desktop.ownProfile) {
+          return NextResponse.json({ ok: true, pid: existing.pid, cdpPort, cdpReady: false });
         }
 
-        const chromium = await checkChromium();
+        const chromium = await checkChromium(desktop);
         if (!chromium.installed || !chromium.path) {
+          if (chromium.configured) {
+            return NextResponse.json(
+              {
+                error: `The browser named in CLAWBOX_BROWSER_EXECUTABLE (${chromium.path}) is not an executable file on this box.`,
+                code: "configured_browser_missing",
+              },
+              { status: 400 },
+            );
+          }
           return NextResponse.json({ error: "Chromium not installed", code: "chromium_not_installed" }, { status: 400 });
         }
         // Refuse in no time rather than start a service that exits 1 and
@@ -409,15 +530,28 @@ export async function POST(req: Request) {
           );
         }
 
+        // A person's browser on the port — the owner's own, on another
+        // profile — is never closed to make room: say the port is taken.
+        if (existing.portTaken) {
+          return NextResponse.json(
+            {
+              error: `Another browser is already using CDP port ${cdpPort}. Close it, or point ClawBox at it with CLAWBOX_BROWSER_PROFILE_DIR and CLAWBOX_BROWSER_CDP_PORT.`,
+              code: "cdp_port_taken",
+            },
+            { status: 409 },
+          );
+        }
+
         // If the agent's headless browser holds the CDP port, the desktop
         // browser could start but never bind it — the two browsers would then
         // permanently diverge (separate profiles, separate logins). The owner
         // explicitly asked for a window, so close the headless one first; the
         // agent relaunches on demand and will attach to the desktop window,
-        // which is the shared-browser state the panel describes.
+        // which is the shared-browser state the panel describes. Only the
+        // assistant's browser is ever closed here (isForeignCdpBrowserArgv).
         if (existing.agentBrowsing) {
-          const cleared = await terminateForeignCdpBrowser({ profileDir: PROFILE_DIR, cdpPort: CDP_PORT });
-          if (cleared > 0) console.log(`[browser] closed ${cleared} headless agent browser process(es) holding CDP :${CDP_PORT}`);
+          const cleared = await terminateForeignCdpBrowser(desktop);
+          if (cleared > 0) console.log(`[browser] closed ${cleared} headless agent browser process(es) holding CDP :${cdpPort}`);
           // Wait for the port to actually free before launching against it. If
           // it never frees, fail honestly — starting the service anyway would
           // let the readiness probe mistake the foreign browser's answer for a
@@ -425,21 +559,21 @@ export async function POST(req: Request) {
           let portFree = false;
           for (let i = 0; i < 5; i++) {
             try {
-              await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`, { signal: AbortSignal.timeout(1000) });
+              await fetch(`${endpoint}/json/version`, { signal: AbortSignal.timeout(1000) });
               await new Promise(r => setTimeout(r, 1000));
             } catch { portFree = true; break; }
           }
           if (!portFree) {
             return NextResponse.json(
-              { error: `The assistant's background browser is still holding CDP port ${CDP_PORT}. Try again in a moment.` },
+              { error: `The assistant's background browser is still holding CDP port ${cdpPort}. Try again in a moment.` },
               { status: 409 },
             );
           }
         }
 
-        await fs.mkdir(PROFILE_DIR, { recursive: true });
+        await fs.mkdir(desktop.profileDir, { recursive: true });
 
-        await cleanBrowserLocks();
+        await cleanBrowserLocks(desktop);
 
         // systemd starts the browser, not us, so the owner's start page has to
         // be on disk before the unit runs — scripts/launch-browser.sh sources
@@ -447,7 +581,7 @@ export async function POST(req: Request) {
         await writeBrowserLaunchEnv(await getBrowserStartUrl());
 
         try {
-          console.log(`[browser] Starting clawbox-browser.service (CDP port ${CDP_PORT})`);
+          console.log(`[browser] Starting clawbox-browser.service (CDP port ${cdpPort})`);
           // Start dedicated service — runs as root, drops to clawbox via runuser
           await exec("/usr/bin/sudo", [
             "/usr/bin/systemctl", "start", "clawbox-browser.service",
@@ -459,12 +593,12 @@ export async function POST(req: Request) {
           for (let i = 0; i < 10; i++) {
             await new Promise(r => setTimeout(r, 1000));
             try {
-              const res = await fetch(`http://127.0.0.1:${CDP_PORT}/json/version`, { signal: AbortSignal.timeout(1000) });
+              const res = await fetch(`${endpoint}/json/version`, { signal: AbortSignal.timeout(1000) });
               if (res.ok) {
                 const version = await res.json();
                 return NextResponse.json({
                   ok: true,
-                  cdpPort: CDP_PORT,
+                  cdpPort,
                   cdpReady: true,
                   browser: version.Browser || version.product,
                 });
@@ -473,9 +607,9 @@ export async function POST(req: Request) {
           }
 
           // CDP didn't respond but process might be running
-          const status = await getBrowserStatus();
+          const status = await getBrowserStatus(desktop);
           if (status.running) {
-            return NextResponse.json({ ok: true, pid: status.pid, cdpPort: CDP_PORT, cdpReady: false });
+            return NextResponse.json({ ok: true, pid: status.pid, cdpPort, cdpReady: false });
           }
           return NextResponse.json({ error: "Browser failed to start. Check /tmp/clawbox-browser.log" }, { status: 500 });
         } catch (err) {
@@ -484,6 +618,22 @@ export async function POST(req: Request) {
       }
 
       case "close-browser": {
+        const desktop = await readDesktopBrowserConfig();
+        // Close stops only what ClawBox started. On the owner's profile, a
+        // browser the unit did not start is the one they opened themselves —
+        // their tabs, their sign-ins — and it stays open.
+        if (!desktop.ownProfile) {
+          const running = await findClawboxBrowserPids(desktop);
+          if (running.length > 0 && (await findBrowserPidsStartedByUnit(desktop)).length === 0) {
+            return NextResponse.json(
+              {
+                error: "This browser was not started by ClawBox, so ClawBox leaves it open. Close it from its own window.",
+                code: "not_started_by_clawbox",
+              },
+              { status: 409 },
+            );
+          }
+        }
         try {
           await exec("/usr/bin/sudo", ["/usr/bin/systemctl", "stop", "clawbox-browser.service"], { timeout: 30000 });
         } catch (err) {
@@ -499,15 +649,15 @@ export async function POST(req: Request) {
         // Finding nothing is the happy path: the unit's KillMode=control-group
         // has usually already reaped the tree. Signal failures are swallowed by
         // terminateClawboxBrowser, so there is nothing here to catch.
-        const signalled = await terminateClawboxBrowser({
-          profileDir: PROFILE_DIR,
-          cdpPort: CDP_PORT,
-        });
+        // On the owner's profile only processes the unit started are
+        // signalled (terminateClawboxBrowser), so one they open from their
+        // desktop meanwhile is not taken down with it.
+        const signalled = await terminateClawboxBrowser(desktop);
         if (signalled > 0) {
           console.log(`[browser] terminated ${signalled} leftover browser process(es)`);
         }
         await new Promise(r => setTimeout(r, 1000));
-        await cleanBrowserLocks();
+        await cleanBrowserLocks(desktop);
         return NextResponse.json({ ok: true });
       }
 

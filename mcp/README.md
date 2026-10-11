@@ -630,7 +630,8 @@ at — while the Coding Agent's real-browser setting is on
 `POST /setup-api/coding-agent/enable { realBrowser }` from the settings panel
 and from the Enable/Skip step of the app's first-run wizard), and an invisible
 Chromium of its own when the setting is off or that window cannot be used
-(another program holding CDP port 18800, a launch that failed). A screenshot
+(another program holding the desktop browser's CDP port — 18800 unless the
+owner configured their own browser — a launch that failed). A screenshot
 from the two is identical, so every reply carries
 `browser: "desktop" | "headless"` and the tools relay it in the header line:
 ONCE per session, and again when a fresh session lands on the other browser — a

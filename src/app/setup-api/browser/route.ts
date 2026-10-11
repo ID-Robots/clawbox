@@ -13,6 +13,8 @@ import { activeRunDirectory, activeRunId, getRun, getRealBrowser } from "@/lib/c
 import type { BrowserKind } from "@/lib/browser-sessions";
 import { closeSession, getSession, openSession, sessionCount, sweepIdle, touchSession } from "@/lib/browser-sessions";
 import { getBrowserStartUrl, writeBrowserLaunchEnv } from "@/lib/browser-setup";
+import { cdpEndpoint, readDesktopBrowserConfig, type DesktopBrowserConfig } from "@/lib/desktop-browser-config";
+import { findBrowserOnPortPids, findClawboxBrowserPids } from "@/lib/process-match";
 import { isInside } from "@/lib/file-guard";
 import { isPrivateIp, lookupWithTimeout } from "@/lib/private-address";
 import { chromiumSandboxArgs } from "@/lib/chromium-sandbox";
@@ -21,8 +23,8 @@ import { logSafe } from "@/lib/log-safe";
 import { describeImage } from "@/lib/vision-describe";
 
 const exec = promisify(execFile);
-const CDP_PORT = 18800;
-const CDP_ENDPOINT = `http://127.0.0.1:${CDP_PORT}`;
+// The desktop browser's CDP port is the owner's to choose
+// (src/lib/desktop-browser-config.ts) and is read for every attach.
 // Every screenshot is bounded: Playwright's default is 30 s, and a renderer
 // wedged on a heavy page (a WebGL scene mid-compile) would otherwise hold the
 // whole request — and the coding run waiting on it — for that long on each
@@ -221,6 +223,11 @@ setInterval(() => {
 // take that session's page down with it.
 let desktopBrowser: import("playwright").Browser | null = null;
 let desktopBrowserPromise: Promise<import("playwright").Browser> | null = null;
+// The endpoint that handle is attached to. The owner can point the desktop
+// browser at another port while the server runs; a handle on the old one is
+// then set aside (never closed — it is somebody's window) and the next
+// session attaches to the configured one.
+let desktopEndpoint: string | null = null;
 // The Chromium WE launched — for a foreign CDP port, a desktop launch that
 // failed, or an owner who switched the screen off. The desktop's is only
 // attached to and must never be closed from here. Ours is headless and
@@ -239,14 +246,32 @@ function closeOwnedBrowserIfIdle(): void {
   console.log("[Browser] Closed the headless Chromium of our own: no session left");
 }
 
+/** How to attach to the desktop browser: its endpoint, and the Origin to send (none for an owner-started browser). */
+interface DesktopAttach {
+  endpoint: string;
+  origin: string | undefined;
+}
+
 /**
  * Ready means OURS: /json/version answering is not enough, because another
  * program's Chromium on this port answers it too and then rejects our
  * Origin on the upgrade (seen live: the OpenClaw gateway's own browser sat
  * on 18800 for hours while this said "ready"). See src/lib/cdp-probe.ts.
+ *
+ * One rejection is still the desktop browser: the owner's own, on the
+ * configured profile and port, started by the owner rather than by
+ * scripts/launch-browser.sh — so without our --remote-allow-origins. Chromium
+ * checks the Origin only when one is sent, so that browser is attached to
+ * without one. It is recognised by its process (configured profile AND
+ * configured port in its argv), never by the answer on the port.
  */
-async function isDesktopBrowserReady(): Promise<boolean> {
-  return (await probeCdp(CDP_ENDPOINT, CDP_ENDPOINT)) === "ours";
+async function desktopCdpState(config: DesktopBrowserConfig): Promise<{ state: "ours" | "foreign" | "down"; attach: DesktopAttach }> {
+  const endpoint = cdpEndpoint(config);
+  const state = await probeCdp(endpoint, endpoint);
+  if (state === "foreign" && (await findBrowserOnPortPids(config)).length > 0) {
+    return { state: "ours", attach: { endpoint, origin: undefined } };
+  }
+  return { state, attach: { endpoint, origin: endpoint } };
 }
 
 /**
@@ -257,16 +282,27 @@ async function isDesktopBrowserReady(): Promise<boolean> {
  * fail; "unavailable" — the launch produced nothing. The last two are not
  * errors here: the caller answers them with the headless browser and says so.
  */
-async function ensureDesktopBrowserRunning(): Promise<"desktop" | "foreign" | "unavailable"> {
-  const state = await probeCdp(CDP_ENDPOINT, CDP_ENDPOINT);
-  if (state === "ours") return "desktop";
-  if (state === "foreign") {
+async function ensureDesktopBrowserRunning(
+  config: DesktopBrowserConfig,
+): Promise<{ where: "desktop"; attach: DesktopAttach } | { where: "foreign" | "unavailable" }> {
+  const cdpPort = config.cdpPort;
+  const first = await desktopCdpState(config);
+  if (first.state === "ours") return { where: "desktop", attach: first.attach };
+  if (first.state === "foreign") {
     // Naming the squatter is ss plus two ps calls — a note for the log, not a
     // step the launch waits on. It never rejects, so nothing is left dangling.
-    void describePortOwner(CDP_PORT).then((owner) => {
-      console.warn(`[Browser] CDP port ${CDP_PORT} is held by another program's Chromium${owner}; using a headless Chromium of our own instead`);
+    void describePortOwner(cdpPort).then((owner) => {
+      console.warn(`[Browser] CDP port ${cdpPort} is held by another program's Chromium${owner}; using a headless Chromium of our own instead`);
     });
-    return "foreign";
+    return { where: "foreign" };
+  }
+
+  // The owner's own browser, open on its profile but not answering on the
+  // port: starting the unit would only hand the start page to it as a stray
+  // tab (a second browser cannot share the profile). Verify headless instead.
+  if (!config.ownProfile && (await findClawboxBrowserPids(config)).length > 0) {
+    console.warn(`[Browser] The owner's browser is open on ${config.profileDir} without CDP on port ${cdpPort}; using a headless Chromium of our own instead`);
+    return { where: "unavailable" };
   }
 
   // systemd starts Chromium, not this server, so the start page has to be on
@@ -290,11 +326,12 @@ async function ensureDesktopBrowserRunning(): Promise<"desktop" | "foreign" | "u
   // it's not up in 6 s it's wedged.
   for (let i = 0; i < 6; i++) {
     await new Promise((resolve) => setTimeout(resolve, 1000));
-    if (await isDesktopBrowserReady()) return "desktop";
+    const next = await desktopCdpState(config);
+    if (next.state === "ours") return { where: "desktop", attach: next.attach };
   }
 
-  console.warn(`[Browser] Desktop Chromium did not come up on CDP port ${CDP_PORT}; using a headless Chromium of our own instead`);
-  return "unavailable";
+  console.warn(`[Browser] Desktop Chromium did not come up on CDP port ${cdpPort}; using a headless Chromium of our own instead`);
+  return { where: "unavailable" };
 }
 
 async function getPlaywright() {
@@ -306,24 +343,27 @@ async function getPlaywright() {
 }
 
 /** Attach to the desktop Chromium over CDP, once, and keep the handle. */
-async function getDesktopBrowser(): Promise<import("playwright").Browser> {
+async function getDesktopBrowser(attach: DesktopAttach): Promise<import("playwright").Browser> {
   if (desktopBrowser?.isConnected()) return desktopBrowser;
   if (desktopBrowserPromise) return desktopBrowserPromise;
 
+  const { endpoint, origin } = attach;
   desktopBrowserPromise = (async () => {
     const pw = await getPlaywright();
     try {
       // 30 s matches Playwright's own default — previously 10 s to fail fast
       // against the Bun-WS hang, which is no longer relevant now that we
       // run under Node.
-      const browser = await pw.chromium.connectOverCDP(CDP_ENDPOINT, {
+      const browser = await pw.chromium.connectOverCDP(endpoint, {
         timeout: 30_000,
         // Chromium gates the CDP WebSocket upgrade on Origin against
         // --remote-allow-origins (pinned to this exact value in
         // scripts/launch-browser.sh). Send a matching Origin so our automation
         // connects while a rebound web page's own origin is rejected — closing
         // the CDP DNS-rebinding takeover. Keep this byte-identical to the flag.
-        headers: { Origin: CDP_ENDPOINT },
+        // None for the owner's own browser (desktopCdpState): it was started
+        // without that flag, so it refuses every Origin, a rebound page's too.
+        ...(origin ? { headers: { Origin: origin } } : {}),
       });
       browser.on("disconnected", () => {
         if (desktopBrowser === browser) desktopBrowser = null;
@@ -333,11 +373,12 @@ async function getDesktopBrowser(): Promise<import("playwright").Browser> {
         console.log("[Browser] Shared CDP connection disconnected; will reconnect on next launch");
       });
       desktopBrowser = browser;
+      desktopEndpoint = endpoint;
       return browser;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error(`[Browser] connectOverCDP(${CDP_ENDPOINT}) failed:`, msg);
-      throw new Error(`Failed to attach to desktop Chromium via CDP at ${CDP_ENDPOINT}: ${msg}`);
+      console.error(`[Browser] connectOverCDP(${endpoint}) failed:`, msg);
+      throw new Error(`Failed to attach to desktop Chromium via CDP at ${endpoint}: ${msg}`);
     } finally {
       desktopBrowserPromise = null;
     }
@@ -418,15 +459,19 @@ async function getOwnBrowser(): Promise<import("playwright").Browser> {
  */
 async function acquireBrowser(): Promise<{ browser: import("playwright").Browser; kind: BrowserKind }> {
   if (await getRealBrowser()) {
+    const config = await readDesktopBrowserConfig();
+    // A handle on a port the owner has since moved away from is set aside,
+    // not closed: it is attached to somebody's window.
+    if (desktopBrowser && desktopEndpoint !== cdpEndpoint(config)) desktopBrowser = null;
     // A handle we already hold is proof the window is up: skip the probe (two
     // round trips, one of them a WebSocket upgrade) on every session but the
     // first.
-    const where = desktopBrowser?.isConnected() || desktopBrowserPromise
-      ? "desktop"
-      : await ensureDesktopBrowserRunning();
-    if (where === "desktop") {
+    const held = desktopBrowser?.isConnected() || desktopBrowserPromise;
+    const found = held ? null : await ensureDesktopBrowserRunning(config);
+    if (held || found?.where === "desktop") {
       try {
-        return { browser: await getDesktopBrowser(), kind: "desktop" };
+        const attach = found?.where === "desktop" ? found.attach : { endpoint: cdpEndpoint(config), origin: cdpEndpoint(config) };
+        return { browser: await getDesktopBrowser(attach), kind: "desktop" };
       } catch (err) {
         console.warn("[Browser] the desktop Chromium could not be driven; using a headless Chromium of our own instead:", err instanceof Error ? err.message : err);
       }
