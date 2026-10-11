@@ -8,6 +8,8 @@ import {
   SPOKEN_REPLY_RETENTION,
 } from "@/lib/harness/media-root";
 import { speakWithHermes } from "@/lib/hermes-tts";
+import { compressSpeech } from "@/lib/tts-compress";
+import { audioExtensionFor, REPLY_FORMAT_MIME, sniffAudioMime } from "@/lib/voice-reply-format";
 
 /**
  * Speaking a Hermes reply aloud, the way the OpenClaw gateway already does.
@@ -52,6 +54,13 @@ const DIR_MODE = 0o700;
 const REPLY_SPEECH_TIMEOUT_MS = 12_000;
 
 /**
+ * How long the turn may spend compressing its clip, on top of the synthesis.
+ * A fifteen-second reply encodes in well under two seconds on an Orin's CPU;
+ * past this the WAV is stored as it came, because the composer is waiting.
+ */
+const REPLY_COMPRESS_TIMEOUT_MS = 5_000;
+
+/**
  * Speak `text` and return the clip's absolute PATH, or null.
  *
  * Null for every failure and for every reason not to try, so the caller has
@@ -91,6 +100,23 @@ export async function speakHermesReply(text: string): Promise<string | null> {
     return null;
   }
 
+  // STORED, and played back later from whatever browser opens this chat —
+  // possibly not the one that asked — so the clip is MP3, the one compressed
+  // format every browser decodes, rather than the Opus the live chat may get.
+  // Hermes' on-box provider writes WAV (install.sh sets `output_format wav`);
+  // that is what gets compressed. Anything else is kept as Hermes made it, and
+  // a WAV that could not be compressed (no ffmpeg) is stored as a WAV.
+  let audio: Uint8Array = spoken.audio;
+  const sniffed = sniffAudioMime(audio);
+  let mime = sniffed ?? spoken.mime;
+  if (sniffed === REPLY_FORMAT_MIME.wav) {
+    const mp3 = await compressSpeech(audio, "mp3", { timeoutMs: REPLY_COMPRESS_TIMEOUT_MS });
+    if (mp3) {
+      audio = mp3;
+      mime = REPLY_FORMAT_MIME.mp3;
+    }
+  }
+
   try {
     const dir = await chatSpokenReplyDir();
     // 0700 and an explicit chmod, like both sibling media directories:
@@ -108,8 +134,8 @@ export async function speakHermesReply(text: string): Promise<string | null> {
     // Both parts are ours: the directory comes from `chatSpokenReplyDir` and
     // the name is a uuid. Nothing the model or the customer influenced reaches
     // this path, which is why it can be written before it is checked.
-    const target = path.join(dir, `${randomUUID()}${extensionFor(spoken.mime)}`);
-    await fsp.writeFile(target, spoken.audio, { mode: 0o600 });
+    const target = path.join(dir, `${randomUUID()}${extensionFor(mime)}`);
+    await fsp.writeFile(target, audio, { mode: 0o600 });
     // Checked AFTER the write, because `resolveInMediaRoot` resolves symlinks
     // and therefore needs the file to exist — it is the reader's guard, and
     // running it on a path that is not there yet always answers null. What it
@@ -152,11 +178,7 @@ export async function speakHermesReply(text: string): Promise<string | null> {
  * WebM clip named that way would vanish on every reply.
  */
 function extensionFor(mime: string): string {
-  if (mime.includes("mpeg") || mime.includes("mp3")) return ".mp3";
-  if (mime.includes("ogg") || mime.includes("opus")) return ".ogg";
-  if (mime.includes("webm")) return ".weba";
-  if (mime.includes("mp4") || mime.includes("m4a")) return ".m4a";
-  if (mime.includes("aac")) return ".aac";
-  if (mime.includes("flac")) return ".flac";
-  return ".wav";
+  // The table itself is shared with every other place a clip is named
+  // (src/lib/voice-reply-format.ts); this comment is why it looks the way it does.
+  return audioExtensionFor(mime);
 }

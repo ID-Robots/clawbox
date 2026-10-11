@@ -35,6 +35,8 @@ import { readConfig } from "@/lib/openclaw-config";
 import { buildVoiceOutputStatus, cloudSpeechTarget, localCommandPath, cloudVoiceFrom, resolvePreferredEngine, type LocalVoiceProbe, type VoiceConfigView, type VoiceEngine, type VoiceEngineId } from "@/lib/voice-output";
 import { readLocalVoice, readVoiceState } from "@/lib/voice-output-store";
 import { DEFAULT_LOCAL_VOICE, isCloudVoiceFor, isLocalVoice } from "@/lib/voice-catalog";
+import { compressSpeech } from "@/lib/tts-compress";
+import { MIN_WAV_BYTES, minAudioBytesFor, REPLY_FORMAT_MIME, sniffAudioMime, type ReplyAudioFormat } from "@/lib/voice-reply-format";
 
 const NO_STORE = { "Cache-Control": "no-store" };
 
@@ -45,9 +47,6 @@ export function refuse(error: string, code: string, status: number, extra: Recor
 const LOCAL_TIMEOUT_MS = 90_000;
 const CLOUD_TIMEOUT_MS = 60_000;
 const DEFAULT_CLOUD_MODEL = "gpt-4o-mini-tts";
-/** Below this a WAV is a header and nothing else — the script's own floor. */
-const MIN_AUDIO_BYTES = 1024;
-
 
 /** Megabytes as the script counts them, said as gigabytes: 2412 → "2.4", 3000 → "3". */
 function gigabytes(mb: number): string {
@@ -108,11 +107,13 @@ export async function speakLocally(config: VoiceConfigView, requestedVoice: unkn
     };
     const run = await runChild(command, ["--voice", voice, "--", text, outputPath], { timeoutMs: LOCAL_TIMEOUT_MS, env });
     const audio = run.code === 0 ? await fs.readFile(outputPath).catch(() => null) : null;
-    if (!audio || audio.byteLength < MIN_AUDIO_BYTES) {
+    // The script only ever writes WAV; a reply is compressed after the chain
+    // (`inReplyFormat`), so this floor is the WAV one.
+    if (!audio || audio.byteLength < MIN_WAV_BYTES) {
       if (run.timedOut) return refuse("The voice on this box took too long.", "local_timeout", 502);
       return localRefusal(run.stderr);
     }
-    return new Response(new Uint8Array(audio), { headers: { "Content-Type": "audio/wav", ...NO_STORE } });
+    return new Response(new Uint8Array(audio), { headers: { "Content-Type": REPLY_FORMAT_MIME.wav, ...NO_STORE } });
   } finally {
     await fs.unlink(outputPath).catch(() => {});
   }
@@ -131,7 +132,31 @@ function speechEndpoint(baseUrl: string): string | null {
   return `${url.origin}${url.pathname.replace(/\/$/, "")}/audio/speech`;
 }
 
-export async function speakInCloud(config: VoiceConfigView, requestedVoice: unknown, text: string): Promise<Response> {
+/**
+ * A refusal that says "not that format" rather than "not you" or "not now".
+ * Opus is in OpenAI's own list, but an OpenAI-compatible proxy is only bound
+ * to its default (MP3); a 401, 403 or 429 would refuse MP3 just the same.
+ */
+function refusedTheFormat(status: number): boolean {
+  return status === 400 || status === 404 || status === 415 || status === 422;
+}
+
+/**
+ * Speak `text` with the cloud voice, in `format`.
+ *
+ * WAV unless told otherwise, and the audition never tells it otherwise: an
+ * audition is one short clip on a click, so the bytes are cheap — and PCM is
+ * the one format no browser can decline to decode, which an audition of a
+ * voice must never be lost to. A REPLY asks for the compressed format the chat
+ * said it can play (src/lib/voice-reply-format.ts), so the cloud does the
+ * compressing and nothing is transcoded on the box.
+ */
+export async function speakInCloud(
+  config: VoiceConfigView,
+  requestedVoice: unknown,
+  text: string,
+  format: ReplyAudioFormat = "wav",
+): Promise<Response> {
   const target = cloudSpeechTarget(config);
   if (!target) return refuse("The cloud voice is not set up on this box.", "cloud_not_set_up", 409);
   // An audition is of ONE voice. A voice this model does not have (tts-1 has
@@ -147,26 +172,35 @@ export async function speakInCloud(config: VoiceConfigView, requestedVoice: unkn
   // only — the same rule the coding harness applies to its proxy URL.
   const endpoint = speechEndpoint(target.baseUrl);
   if (!endpoint) return refuse("The cloud voice's endpoint is not one this box will send its credential to.", "cloud_not_set_up", 409);
+  const ask = (responseFormat: ReplyAudioFormat) => fetch(endpoint, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${target.apiKey}`, "Content-Type": "application/json" },
+    // WAV for an audition, the reply's own format for a reply — see above.
+    body: JSON.stringify({ model: target.model ?? DEFAULT_CLOUD_MODEL, input: text, voice, response_format: responseFormat }),
+    signal: AbortSignal.timeout(CLOUD_TIMEOUT_MS),
+  });
   let res: Response;
+  let asked = format;
   try {
-    res = await fetch(endpoint, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${target.apiKey}`, "Content-Type": "application/json" },
-      // WAV, the same format the on-device engine returns. An audition is one
-      // short clip on a click, so the bytes are cheap — and PCM is the one
-      // format no browser can decline to decode, which an audition of a voice
-      // must never be lost to.
-      body: JSON.stringify({ model: target.model ?? DEFAULT_CLOUD_MODEL, input: text, voice, response_format: "wav" }),
-      signal: AbortSignal.timeout(CLOUD_TIMEOUT_MS),
-    });
+    res = await ask(format);
+    // A proxy that does not do Opus is asked once more for MP3, which every
+    // browser plays and every OpenAI-compatible speech route must serve.
+    if (!res.ok && format === "opus" && refusedTheFormat(res.status)) {
+      asked = "mp3";
+      res = await ask(asked);
+    }
   } catch {
     return refuse("The cloud voice did not answer.", "cloud_no_answer", 502);
   }
   if (!res.ok) return refuse(`The cloud voice refused (HTTP ${res.status}).`, "cloud_refused", 502, { status: res.status });
   const audio = new Uint8Array(await res.arrayBuffer());
-  if (audio.byteLength < MIN_AUDIO_BYTES) return refuse("The cloud voice sent no audio.", "cloud_no_audio", 502);
-  const type = res.headers.get("content-type")?.split(";")[0].trim();
-  return new Response(audio, { headers: { "Content-Type": type?.startsWith("audio/") ? type : "audio/wav", ...NO_STORE } });
+  // Labelled by what the bytes ARE, then by what the cloud said, then by what
+  // was asked for: a proxy that ignored `response_format` still gets the
+  // player the right type, and the floor for the format it actually sent.
+  const stated = res.headers.get("content-type")?.split(";")[0].trim();
+  const type = sniffAudioMime(audio) ?? (stated?.startsWith("audio/") ? stated : REPLY_FORMAT_MIME[asked]);
+  if (audio.byteLength < minAudioBytesFor(type)) return refuse("The cloud voice sent no audio.", "cloud_no_audio", 502);
+  return new Response(audio, { headers: { "Content-Type": type, ...NO_STORE } });
 }
 
 /**
@@ -230,7 +264,7 @@ export function admittedSyntheses(): number {
  * PRIMARY's refusal is the one returned — that is the engine the owner
  * chose, and its message names their next step.
  */
-export type Speaker = (config: VoiceConfigView, requestedVoice: unknown, text: string) => Promise<Response>;
+export type Speaker = (config: VoiceConfigView, requestedVoice: unknown, text: string, format?: ReplyAudioFormat) => Promise<Response>;
 
 export async function speakThroughChain(
   config: VoiceConfigView,
@@ -238,6 +272,7 @@ export async function speakThroughChain(
   choice: "auto" | "local" | "cloud",
   text: string,
   speakers: Record<VoiceEngineId, Speaker> = { local: speakLocally, cloud: speakInCloud },
+  format: ReplyAudioFormat = "wav",
 ): Promise<Response> {
   const preferred = resolvePreferredEngine(choice, engines);
   const order: VoiceEngineId[] = preferred
@@ -247,7 +282,7 @@ export async function speakThroughChain(
   if (usable.length === 0) return refuse("This box has no voice it can use.", "no_voice", 409);
   let first: Response | null = null;
   for (const engine of usable) {
-    const res = await speakers[engine](config, null, text);
+    const res = await speakers[engine](config, null, text, format);
     if (res.ok) {
       const headers = new Headers(res.headers);
       headers.set("X-ClawBox-Voice-Engine", engine);
@@ -282,12 +317,20 @@ export async function speakThroughChain(
  * passed through so a test can watch the ORDER the engines are tried in
  * without a real script or a real cloud key. Nothing on the box passes it.
  *
+ * `format` is what the CHAT's reply travels in (`tts/speak`, from what the
+ * browser said it can play — src/lib/voice-reply-format.ts): the cloud is
+ * asked for it directly, and a WAV from any engine is compressed into it on
+ * the way out (`inReplyFormat`). Absent, the engines answer as they always
+ * have — which is what `generate_audio` wants: it names its own file and
+ * checks the bytes against the extension the run asked for.
+ *
  * Never throws: every failure is one of this module's own `refuse()`
  * responses, so a caller can relay the code and the sentence as they are.
  */
 export async function speakReply(
   text: string,
   speakers?: Record<VoiceEngineId, Speaker>,
+  { format }: { format?: ReplyAudioFormat } = {},
 ): Promise<Response> {
   try {
     // On a box running Hermes the reply is spoken by Hermes' own speech route,
@@ -296,7 +339,8 @@ export async function speakReply(
     if ((await getActiveHarness()) === "hermes") {
       const spoken = await speakWithHermes(text);
       if (!spoken.ok) return refuse("Could not speak that on this box.", spoken.code, spoken.status, spoken.reason ? { reason: spoken.reason } : {});
-      return new Response(spoken.audio, { headers: { "Content-Type": spoken.mime, ...NO_STORE } });
+      const answer = new Response(spoken.audio, { headers: { "Content-Type": spoken.mime, ...NO_STORE } });
+      return format ? await inReplyFormat(answer, format) : answer;
     }
     const [config, models, state] = await Promise.all([readConfig(), buildTtsInventory(), readVoiceState()]);
     const installed = models.filter((m) => m.kind === "tts" && m.installed);
@@ -308,11 +352,46 @@ export async function speakReply(
       engineNames: installed.map((m) => m.name),
     };
     const status = buildVoiceOutputStatus(config, probe, state);
-    return await speakThroughChain(config, status.engines, state.choice, text, speakers ?? { local: speakLocally, cloud: speakInCloud });
+    const chain = speakers ?? { local: speakLocally, cloud: speakInCloud };
+    if (!format) return await speakThroughChain(config, status.engines, state.choice, text, chain);
+    return await inReplyFormat(await speakThroughChain(config, status.engines, state.choice, text, chain, format), format);
   } catch (err) {
     console.warn("[voice-speak] speakReply failed:", err instanceof Error ? err.message : err);
     return refuse("Could not speak that on this box.", "failed", 500);
   }
+}
+
+/**
+ * A spoken reply in the format it is going out in.
+ *
+ * A WAV — Kokoro's only output, and whatever a cloud or Hermes provider that
+ * ignored the ask sent — is compressed into `format` with ffmpeg; anything
+ * else is already as small as its engine made it and passes untouched. The
+ * Content-Type is set from the bytes either way, so the player is never told
+ * one format and handed another. When the compression cannot happen (no
+ * ffmpeg on the box, a missing encoder, a timeout) the WAV goes out as it
+ * came: a larger reply, never a lost one. Every other header — the engine
+ * that spoke, `no-store` — rides along unchanged. Refusals pass straight
+ * through.
+ */
+export async function inReplyFormat(res: Response, format: ReplyAudioFormat): Promise<Response> {
+  if (!res.ok) return res;
+  let audio = new Uint8Array(await res.arrayBuffer());
+  const stated = res.headers.get("content-type")?.split(";")[0].trim();
+  const sniffed = sniffAudioMime(audio);
+  let type = sniffed ?? (stated?.startsWith("audio/") ? stated : REPLY_FORMAT_MIME.wav);
+  // Only bytes that ARE a WAV go to ffmpeg; a label alone is not worth a spawn.
+  if (sniffed === REPLY_FORMAT_MIME.wav && format !== "wav") {
+    const compressed = await compressSpeech(audio, format);
+    if (compressed) {
+      audio = compressed;
+      type = REPLY_FORMAT_MIME[format];
+    }
+  }
+  const headers = new Headers(res.headers);
+  headers.set("Content-Type", type);
+  headers.delete("Content-Length");
+  return new Response(audio, { status: res.status, headers });
 }
 
 async function fileExists(p: string): Promise<boolean> {

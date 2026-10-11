@@ -25,6 +25,12 @@ type Frame = Record<string, unknown>;
 
 const sentFrames: Frame[] = [];
 const speakBodies: string[] = [];
+/**
+ * What the chat asks `tts/speak` for: the words, and the compressed formats
+ * this browser can play (src/lib/voice-reply-format.ts). jsdom's audio element
+ * answers "" to every `canPlayType`, so the list is the MP3 floor alone.
+ */
+const SPEAK_BODY = JSON.stringify({ text: "Fine, thanks.", formats: ["mp3"] });
 /** Every warm-up the chat asked for (the microphone's pre-load of Kokoro). */
 const warmCalls: string[] = [];
 /** Which engine the box says spoke, as the speak route's header names it. */
@@ -305,7 +311,7 @@ describe("spoken replies in the desktop chat", () => {
     render(<ChatPopup isOpen onClose={() => {}} />);
     await speakIntoTheChat();
     // The words, not the Markdown.
-    await waitFor(() => expect(speakBodies).toEqual([JSON.stringify({ text: "Fine, thanks." })]));
+    await waitFor(() => expect(speakBodies).toEqual([SPEAK_BODY]));
     const player = await screen.findByTestId("chat-audio");
     expect(player).toHaveAttribute("src", "blob:spoken-reply");
     await waitFor(() => expect(play).toHaveBeenCalled());
@@ -346,7 +352,7 @@ describe("spoken replies in the desktop chat", () => {
     render(<ChatPopup isOpen onClose={() => {}} />);
     await typeIntoTheChat();
     // The box was asked for the words, exactly as it is for a spoken question.
-    await waitFor(() => expect(speakBodies).toEqual([JSON.stringify({ text: "Fine, thanks." })]));
+    await waitFor(() => expect(speakBodies).toEqual([SPEAK_BODY]));
     // ...and the clip is on the bubble, ready to press.
     const player = await screen.findByTestId("chat-audio");
     expect(player).toHaveAttribute("src", "blob:spoken-reply");
@@ -495,7 +501,7 @@ describe("spoken replies in the desktop chat", () => {
     supplementAudio = "/home/clawbox/.openclaw/media/outbound/voice-1787260000500---bb.wav";
     supplementDelayMs = 250;
     await typeIntoTheChat();
-    await waitFor(() => expect(speakBodies).toEqual([JSON.stringify({ text: "Fine, thanks." })]));
+    await waitFor(() => expect(speakBodies).toEqual([SPEAK_BODY]));
     await waitFor(() => expect(screen.queryAllByTestId("chat-audio").map((el) => el.getAttribute("src"))).toEqual(["blob:spoken-reply"]));
     await waitFor(() => {
       const srcs = screen.queryAllByTestId("chat-audio").map((el) => el.getAttribute("src") ?? "");
@@ -595,7 +601,7 @@ describe("spoken replies in the desktop chat", () => {
     await speakIntoTheChat();
     // The gateway acked with "Sent."; the reply is fetched 3 s later and is
     // owed aloud all the same.
-    await waitFor(() => expect(speakBodies).toEqual([JSON.stringify({ text: "Fine, thanks." })]), { timeout: 8000 });
+    await waitFor(() => expect(speakBodies).toEqual([SPEAK_BODY]), { timeout: 8000 });
   }, 12_000);
 
   /**
