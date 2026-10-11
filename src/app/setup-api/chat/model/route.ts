@@ -37,6 +37,7 @@ import {
 } from "@/lib/provider-models";
 import {
   DISABLED_PROVIDERS_KEY,
+  claudeSignInFenced,
   normalizeProviderId,
   parseDisabledProviders,
   providerRowRunnable,
@@ -101,8 +102,10 @@ interface ChatModelOption {
    */
   disabledByOwner?: true;
   /**
-   * The ChatGPT sign-in on this box predates the installed OpenClaw and cannot
-   * be routed until the owner signs in again (src/lib/chatgpt-subscription.ts).
+   * The sign-in is on the box and the gateway cannot use it until the owner
+   * signs in again: a ChatGPT one that predates the installed OpenClaw
+   * (src/lib/chatgpt-subscription.ts), or a Claude one whose stored credential
+   * is a dead refresh marker (`claudeSignInFenced` in src/lib/provider-status.ts).
    */
   reauthRequired?: true;
   /**
@@ -337,6 +340,27 @@ function refuseStaleChatgptProfile(): NextResponse {
         + "Connect OpenAI again in Settings, then pick the model.",
       kind: "chatgpt_reauth_required",
       provider: CHATGPT_UI_PROVIDER,
+    },
+    { status: 409 },
+  );
+}
+
+/**
+ * The 409 for a model named on a row greyed with `reauthRequired` — today the
+ * Claude sign-in whose stored credential is a dead refresh marker (the ChatGPT
+ * one has `refuseStaleChatgptProfile`, which answers before any row is
+ * consulted). The picker does not post such a row, but the header's MODEL pill
+ * does, and without this the answer was "Selected AI provider is not
+ * configured": a sentence that sends the owner to set up a provider that is
+ * set up. Same shape as the other refusals.
+ */
+function refuseDeadSignIn(option: ChatModelOption): NextResponse {
+  return NextResponse.json(
+    {
+      error: `The ${option.label} sign-in on this box has stopped working and cannot be used for chat. `
+        + "Sign in again in Settings, then pick the model.",
+      kind: "provider_reauth_required",
+      provider: option.provider,
     },
     { status: 409 },
   );
@@ -773,6 +797,17 @@ async function loadChatModelState(preloaded?: OpenClawConfig, read: { gatewayLev
     });
   }
 
+  // A Claude sign-in the gateway will never use is greyed the same way, for
+  // the same reason: the gateway's store holds a dead refresh marker where the
+  // credential was, so an available row is one every turn dies on ("No API key
+  // found for provider anthropic") — and a vanished one reads as "never
+  // connected". Decided by the function the Providers strip asks, so the
+  // header and the strip cannot disagree about it.
+  const claudeOption = configuredPrimaryOptions.get("anthropic");
+  if (claudeOption && claudeSignInFenced(openclawConfig)) {
+    configuredPrimaryOptions.set("anthropic", { ...claudeOption, available: false, reauthRequired: true });
+  }
+
   // When Local-only mode is on, the cloud providers are intentionally
   // disabled — dropping them from the dropdown is the UX that matches
   // the toggle's promise ("Route everything to the local model.
@@ -1196,6 +1231,10 @@ export async function POST(request: Request) {
           (option) => option.provider === parsedProviderNormalized && option.available,
         );
         if (!providerConfigured) {
+          const deadSignIn = state.options.find(
+            (option) => option.provider === parsedProviderNormalized && option.reauthRequired,
+          );
+          if (deadSignIn) return refuseDeadSignIn(deadSignIn);
           return NextResponse.json({ error: "Selected AI provider is not configured" }, { status: 400 });
         }
         // OpenAI-compat providers (OPENAI_COMPAT_PROVIDERS: openrouter, google,

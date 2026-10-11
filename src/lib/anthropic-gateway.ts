@@ -41,7 +41,8 @@
  */
 
 import { DATA_DIR } from "@/lib/config-store";
-import { gatewayIsAbsent, openclawIsAbsent, restartGateway } from "@/lib/openclaw-config";
+import { GATEWAY_PORT, gatewayIsAbsent, openclawIsAbsent, restartGateway } from "@/lib/openclaw-config";
+import { waitForPortOpen } from "@/lib/port-probe";
 import { gatewayWsCall } from "@/lib/openclaw-gateway-ws";
 import { processStore } from "@/lib/process-store";
 import { createSerialLock, type SerialLock } from "@/lib/serial-lock";
@@ -66,14 +67,22 @@ export interface GatewayDeps {
   list: () => GatewayAnthropicProfile[];
   write: (token: { access: string; expires: number | null }) => GatewayWriteResult;
   restart: () => Promise<void>;
+  /** Is the gateway listening right now? One cheap probe, no restart. */
+  reachable: () => Promise<boolean>;
   call: (method: string, params: Record<string, unknown>) => Promise<Record<string, unknown>>;
 }
+
+const SWAP_READY_WAIT_MS = 120_000;
 
 const defaultDeps: GatewayDeps = {
   absent: () => openclawIsAbsent() || gatewayIsAbsent(),
   list: () => listGatewayAnthropicProfiles(),
   write: (token) => writeGatewayAnthropicToken(token),
-  restart: () => restartGateway({ awaitReady: true }),
+  // Nobody waits on a swap's restart, and a gateway with many sessions can
+  // take well over the default 30 s to bind its port: a slow restart reported
+  // as a failure is what made the keeper restart it again and again.
+  restart: () => restartGateway({ awaitReady: true, readyWaitMs: SWAP_READY_WAIT_MS }),
+  reachable: () => waitForPortOpen(GATEWAY_PORT, "127.0.0.1", { timeoutMs: 1_000, intervalMs: 250 }),
   // The in-process socket only: a gateway that is not there is skipped this
   // time rather than paid for with a CLI start-up (seconds on a Jetson) every
   // two minutes.
@@ -96,6 +105,9 @@ interface GatewayRuntime {
    * account would take the swap's token for the owner's own sign-in.
    */
   lock: SerialLock;
+  /** Restarts the keeper tried for a pending move that failed in a row, and when the last one failed. */
+  restartFailures: number;
+  lastRestartFailureAt: number;
 }
 
 function runtime(): GatewayRuntime {
@@ -107,12 +119,40 @@ function runtime(): GatewayRuntime {
     cronWatermark: null,
     busy: false,
     lock: createSerialLock(),
+    restartFailures: 0,
+    lastRestartFailureAt: 0,
   }));
 }
 
 const deps = () => runtime().deps;
 
 const KEEPER_MS = 10 * 60_000;
+/** The longest the keeper waits between restarts it retries for a move whose restart keeps failing. */
+const MAX_RETRY_BACKOFF_MS = 6 * 60 * 60_000;
+
+/**
+ * May the keeper restart the gateway again for a pending move? The first retry
+ * goes on the next pass; after that the wait doubles (20 min, 40 min, ... up
+ * to six hours), so a gateway that genuinely cannot start is not bounced, and
+ * every chat on it killed, every ten minutes forever.
+ */
+function retryAllowed(now: number): boolean {
+  const state = runtime();
+  if (state.restartFailures < 2) return true;
+  const wait = Math.min(KEEPER_MS * 2 ** (state.restartFailures - 1), MAX_RETRY_BACKOFF_MS);
+  return now - state.lastRestartFailureAt >= wait;
+}
+
+function noteRestart(ok: boolean): void {
+  const state = runtime();
+  if (ok) {
+    state.restartFailures = 0;
+    state.lastRestartFailureAt = 0;
+  } else {
+    state.restartFailures += 1;
+    state.lastRestartFailureAt = Date.now();
+  }
+}
 const WATCH_MS = 2 * 60_000;
 /** How far back the first look at the crons reaches: a failure just before a restart still counts. */
 const FIRST_LOOK_BACK_MS = 15 * 60_000;
@@ -153,7 +193,7 @@ export function syncGatewayTo(accountId: string, opts: { restart: boolean }): Pr
 }
 
 /** `syncGatewayTo`'s body, under the gateway lock. */
-async function syncLocked(accountId: string, opts: { restart: boolean }): Promise<SwapConsumerOutcome> {
+async function syncLocked(accountId: string, opts: { restart: boolean; keeper?: boolean }): Promise<SwapConsumerOutcome> {
   const d = deps();
   if (d.absent()) return outcome("skipped", "no_gateway");
   const pool = await readPoolState();
@@ -182,6 +222,16 @@ async function syncLocked(accountId: string, opts: { restart: boolean }): Promis
     await record(false);
     return outcome("ok", "renewed", written);
   }
+  // The keeper finishing a pending move whose token is already in place: a
+  // restart that was only slower than its readiness wait left a gateway that
+  // is up and on this token. Clear the debt; do not restart it again.
+  if (opts.keeper && alreadyThere && mirror?.pending && mirror.accountId === accountId && mirror.fingerprint === fingerprint && await d.reachable()) {
+    await record(false);
+    noteRestart(true);
+    console.error(`[anthropic-gateway] the gateway came up on Anthropic account ${accountId} after all; no further restart`);
+    return outcome("ok", "switched", written);
+  }
+  if (opts.keeper && !retryAllowed(Date.now())) return outcome("failed", "restart_backoff", written);
   // Recorded as OWED before the restart and as done only after it: a restart
   // that fails leaves the keeper something to finish.
   await record(true);
@@ -189,6 +239,7 @@ async function syncLocked(accountId: string, opts: { restart: boolean }): Promis
     await d.restart();
   } catch (err) {
     console.error("[anthropic-gateway] the gateway did not come back after the account swap:", err instanceof Error ? err.message : err);
+    noteRestart(false);
     return outcome("failed", "restart_failed", written);
   }
   // The gateway may have flushed its own copy of the store on the way down.
@@ -197,11 +248,13 @@ async function syncLocked(accountId: string, opts: { restart: boolean }): Promis
     try {
       await d.restart();
     } catch {
+      noteRestart(false);
       return outcome("failed", "restart_failed", written);
     }
     if (d.list().some((p) => p.fingerprint !== fingerprint)) return outcome("failed", "write_lost", written);
   }
   await record(false);
+  noteRestart(true);
   console.error(`[anthropic-gateway] the gateway now runs on Anthropic account ${accountId} (${written} profile(s))`);
   return outcome("ok", "switched", written);
 }
@@ -231,7 +284,7 @@ async function keepLocked(): Promise<KeeperResult> {
     && pool.accounts.find((a) => a.id === pool.activeId)?.kind === "oauth";
   if (behind || mirror.pending) {
     const target = behind && pool.activeId ? pool.activeId : mirror.accountId;
-    return (await syncLocked(target, { restart: true })).status === "ok" ? "resynced" : "failed";
+    return (await syncLocked(target, { restart: true, keeper: true })).status === "ok" ? "resynced" : "failed";
   }
   const profiles = d.list();
   if (profiles.length === 0) {
@@ -444,4 +497,6 @@ export function _setGatewayDepsForTests(overrides: Partial<GatewayDeps> | null):
   state.cronWatermark = null;
   state.busy = false;
   state.lock = createSerialLock();
+  state.restartFailures = 0;
+  state.lastRestartFailureAt = 0;
 }

@@ -135,7 +135,7 @@ Full detail: **[RELEASE-NOTES-4.0.0.md](RELEASE-NOTES-4.0.0.md)**.
 | 🌐 **Browser automation** | AI controls a real browser — fills forms, scrapes data, posts content |
 | 💬 **Multi-platform** | Telegram, Discord, WhatsApp and email — all guided in Settings — plus the built-in web chat |
 | 🗣️ **Voice in and out** | Speak to it, and have replies read back; the voice runs in the cloud or on the box |
-| 💻 **Built-in apps** | Terminal, Coding Agent, file manager, remote desktop, app store or Hermes Skills, AI chat, Memory Shard, ClawKeep backups |
+| 💻 **Built-in apps** | Terminal, Coding Agent, file manager, screenshot tool, remote desktop, app store or Hermes Skills, AI chat, Memory Shard, ClawKeep backups |
 | 🛠️ **Coding Agent** | Delegate a whole task to a headless Claude Code run: it works in a copy of your project, opens a pull request and reviews its own diff |
 | 🌐 **Reachable from anywhere** | A named Cloudflare tunnel gives the box a persistent `<boxHandle>.clawbox.tech` address, with a quick tunnel as fallback |
 | 🗄️ **Backups** | ClawKeep encrypts a snapshot on the device and uploads it to Cloudflare R2 on a daily timer, with restore from the UI |

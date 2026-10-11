@@ -1,12 +1,13 @@
 "use client";
 
-import { useState, useEffect, useCallback, useId, useRef } from "react";
+import { useState, useEffect, useCallback, useId, useRef, useSyncExternalStore } from "react";
 import { useMobileBack, usePhoneLayout } from "@/lib/mobile-back";
 import { useT } from "@/lib/i18n";
 import { useTr } from "@/lib/i18n-floor";
 import { fileExtension, fileIcon, formatSize, Icon } from "./file-icons";
 import CodeEditor from "./CodeEditor";
 import { languageForFile } from "@/lib/code-language";
+import { openInScreenshot, overlayMounted, subscribeOverlays } from "@/lib/screenshot/session";
 import { useMayUseOwnerApis, useSessionUser } from "@/lib/use-session-user";
 import {
   shouldShowBackupSuggestion,
@@ -201,7 +202,28 @@ const TEXT_MAX = 2 * 1024 * 1024;
 const MEDIA_MAX = 50 * 1024 * 1024;
 
 const IMAGE_EXT = new Set(["jpg", "jpeg", "png", "gif", "webp", "bmp", "ico", "avif"]);
+// What the Screenshot app's editor can open for annotation (TASK-1475). Not
+// .ico: an icon is a bundle of sizes, not a picture to mark up.
+const ANNOTATE_EXT = new Set(["jpg", "jpeg", "png", "gif", "webp", "bmp", "avif"]);
 const PDF_EXT = new Set(["pdf"]);
+
+/**
+ * Whether "Annotate" can be offered for this file: a picture small enough to
+ * load, on a desktop that has the Screenshot app (its overlay is mounted with
+ * the desktop; the standalone /app/files page has no window to open it in).
+ */
+function canAnnotate(name: string, size: number | null | undefined, screenshotReady: boolean): boolean {
+  return screenshotReady && ANNOTATE_EXT.has(fileExtension(name)) && (size ?? 0) <= MEDIA_MAX;
+}
+
+/**
+ * Whether the Screenshot app can be reached from here. Subscribed, not read
+ * once: the desktop mounts the overlay only after it has learnt its user is
+ * the owner, which can be after a restored Files window has drawn.
+ */
+function useScreenshotReady(): boolean {
+  return useSyncExternalStore(subscribeOverlays, overlayMounted, () => false);
+}
 const VIDEO_EXT = new Set(["mp4", "webm", "ogv", "mov", "m4v"]);
 const AUDIO_EXT = new Set(["mp3", "wav", "ogg", "oga", "m4a", "flac", "aac"]);
 
@@ -244,6 +266,7 @@ function looksBinary(text: string): boolean {
 export default function FilesApp({ initialPath = "", initialPlace }: { initialPath?: string; initialPlace?: "projects" } = {}) {
   const { t } = useT();
   const tr = useTr();
+  const screenshotReady = useScreenshotReady();
   const startsOnProjects = initialPlace === "projects" && !initialPath;
   const [place, setPlace] = useState<Place>(startsOnProjects ? "projects" : "folder");
   const [projects, setProjects] = useState<ProjectFolder[]>([]);
@@ -1727,6 +1750,12 @@ export default function FilesApp({ initialPath = "", initialPlace }: { initialPa
             x={contextMenu.x}
             y={contextMenu.y}
             onOpen={() => { closeContextMenu(); navigateTo(contextMenu.entry); }}
+            onAnnotate={!multi && contextMenu.entry.type !== "directory" && canAnnotate(contextMenu.entry.name, contextMenu.entry.size, screenshotReady)
+              ? () => {
+                  closeContextMenu();
+                  openInScreenshot({ kind: "file", relPath: entryRelPath(contextMenu.entry), name: contextMenu.entry.name });
+                }
+              : undefined}
             onDownload={() => { closeContextMenu(); downloadEntries(targets); }}
             pinned={contextMenu.entry.type === "directory" && !!pinFor(entryRelPath(contextMenu.entry))}
             onTogglePin={() => { closeContextMenu(); togglePin(entryRelPath(contextMenu.entry)); }}
@@ -2219,8 +2248,10 @@ function ListView({ narrow, ...p }: ItemViewProps & {
 
 // ─── Context Menu ────────────────────────────────────────────────────────────
 
-function ContextMenu({ entry, selectionCount = 1, x, y, onOpen, onDownload, pinned, onTogglePin, onRename, onMove, onSelect, onDelete, onClose }: {
+function ContextMenu({ entry, selectionCount = 1, x, y, onOpen, onAnnotate, onDownload, pinned, onTogglePin, onRename, onMove, onSelect, onDelete, onClose }: {
   entry: FileEntry;
+  /** Pictures only: open it in the Screenshot app's editor. */
+  onAnnotate?: () => void;
   /** More than one: the menu was opened on a multi-selection and acts on all of it. */
   selectionCount?: number;
   x: number;
@@ -2273,6 +2304,7 @@ function ContextMenu({ entry, selectionCount = 1, x, y, onOpen, onDownload, pinn
       }
     } else {
       items.push({ icon: "open_in_new", label: t("files.open"), onClick: onOpen });
+      if (onAnnotate) items.push({ icon: "draw", label: t("screenshot.annotate"), onClick: onAnnotate });
       items.push({ icon: "download", label: t("files.download"), onClick: onDownload });
     }
     items.push({ icon: "edit", label: t("files.rename"), onClick: onRename });
@@ -2966,6 +2998,7 @@ function FileViewer({ relPath, entry, onClose, onSaved }: {
   onSaved: () => void;
 }) {
   const { t } = useT();
+  const screenshotReady = useScreenshotReady();
   const initialKind = resolveViewerKind(entry.name, entry.size);
   const [kind, setKind] = useState<ViewerKind>(initialKind);
   const [content, setContent] = useState("");
@@ -3095,6 +3128,17 @@ function FileViewer({ relPath, entry, onClose, onSaved }: {
           >
             <Icon name={saving ? "progress_activity" : "save"} size={16} className={saving ? "motion-safe:animate-spin" : ""} />
             <span className="hidden sm:inline">{t("files.save")}</span>
+          </button>
+        )}
+        {kind === "image" && canAnnotate(entry.name, entry.size, screenshotReady) && (
+          <button
+            onClick={() => openInScreenshot({ kind: "file", relPath, name: entry.name })}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition-colors bg-white/[0.06] text-[var(--text-primary)] hover:bg-white/[0.12] cursor-pointer"
+            title={t("screenshot.annotate")}
+            data-testid="files-annotate"
+          >
+            <Icon name="draw" size={16} />
+            <span className="hidden sm:inline">{t("screenshot.annotate")}</span>
           </button>
         )}
         <button

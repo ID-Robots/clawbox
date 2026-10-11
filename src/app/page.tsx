@@ -28,6 +28,8 @@ import HermesSkillsStore from "@/components/HermesSkillsStore";
 import FilesApp from "@/components/FilesApp";
 import ClawKeepApp from "@/components/ClawKeepApp";
 import MemoryShardApp from "@/components/MemoryShardApp";
+import ScreenshotApp from "@/components/ScreenshotApp";
+import ScreenshotOverlay from "@/components/ScreenshotOverlay";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
 import SystemUpdateApp from "@/components/SystemUpdateApp";
 import TimezoneAdopter from "@/components/TimezoneAdopter";
@@ -381,6 +383,7 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
     // The globe: the open web, as opposed to `browser`'s Chrome roundel.
     web: "language",
     camera: "photo_camera",
+    screenshot: "screenshot_monitor",
     store: "storefront",
     chat: "chat_bubble",
   };
@@ -512,6 +515,8 @@ const WindowContent = memo(function WindowContent({ app, meta, windowId, termina
       return <BrowserApp onOpenApp={actions.openApp} />;
     case "vnc":
       return <VNCApp />;
+    case "screenshot":
+      return <ScreenshotApp />;
     case "webapp": {
       let webappSrc = "about:blank";
       try { const u = new URL(app.url || "", window.location.origin); if (["http:", "https:"].includes(u.protocol)) webappSrc = u.href; } catch {}
@@ -3225,6 +3230,10 @@ function ChromeDesktopInner() {
           the pairing flow dispatch. Without it ui_notify, `clawbox notify`
           and every server-side owner notice were fired and never shown. */}
       <ToastHost />
+      {/* The Screenshot app's capture keys and its region overlay (TASK-1475),
+          mounted with the desktop so they work with the app's window closed.
+          Owner-only like the app: its saves go through an owner-only route. */}
+      {ownerApis && <ScreenshotOverlay />}
       {deskScreens && <MonitorIdentifyOverlay screens={deskScreens} />}
       {ownerApis && <PowerApprovalPrompt />}
       {noticesUp && (

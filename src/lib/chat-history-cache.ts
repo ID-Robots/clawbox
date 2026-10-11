@@ -45,6 +45,12 @@ export interface ChatMessage {
   // yet. A history read carries it until the server has a reply for its turn
   // (lib/chat-transcript-reconcile.ts, `carryUnconfirmedReplies`).
   unconfirmed?: boolean;
+  // Client-only, on a failed turn's system note in the mascot chat: the run
+  // that failed. The gateway reports one failed run twice
+  // (lib/chat-run-failure.ts), and the tag is how the second report finds the
+  // sentence already on screen — or, a history re-read having dropped it,
+  // knows to put it back. The full-page chat keeps its notes and tags none.
+  failedRun?: string;
   // Which model produced this reply, and the provider behind it — what
   // answered, not what was asked for. Recorded per turn by the Hermes route.
   model?: string;
