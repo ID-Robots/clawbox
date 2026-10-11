@@ -97,6 +97,8 @@ function stubFetch(
     /** A server from before TASK-1366: no field for how much of the task a pull
      *  request carries, so the select must not be drawn. */
     noPrBodyTask?: boolean;
+    /** A server from before the per-role models: no field, so the section is not drawn. */
+    noRoleModels?: boolean;
   } = {},
 ) {
   posts = [];
@@ -120,6 +122,12 @@ function stubFetch(
   let gitAuthorName: string | null = status.gitAuthorName ?? null;
   let gitAuthorEmail: string | null = status.gitAuthorEmail ?? null;
   let prBodyIncludesTask = status.prBodyIncludesTask ?? "summary";
+  // Every role on its default, as a box that never chose answers.
+  const roleModels: Record<string, { model: string; effort: string }> = {
+    planner: { model: "auto", effort: "auto" },
+    worker: { model: "auto", effort: "auto" },
+    reviewer: { model: "auto", effort: "auto" },
+  };
   const payload = () => ({
     enabled: status.enabled,
     ready: status.enabled && status.readiness.ready,
@@ -147,6 +155,7 @@ function stubFetch(
     ...(opts.noMaxParallelRuns ? {} : { maxParallelRuns, minMaxParallelRuns: 1, maxMaxParallelRuns: 4 }),
     ...(opts.noGitAuthor ? {} : { gitAuthorName, gitAuthorEmail, maxGitAuthorChars: 200 }),
     ...(opts.noPrBodyTask ? {} : { prBodyIncludesTask }),
+    ...(opts.noRoleModels ? {} : { roleModels: JSON.parse(JSON.stringify(roleModels)) }),
   });
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
@@ -218,6 +227,11 @@ function stubFetch(
       }
       if (typeof body.autoMerge === "boolean") autoMerge = body.autoMerge;
       if (typeof body.prBodyIncludesTask === "string") prBodyIncludesTask = body.prBodyIncludesTask;
+      if (body.roleModels && typeof body.roleModels === "object") {
+        for (const [role, half] of Object.entries(body.roleModels as Record<string, Record<string, string>>)) {
+          roleModels[role] = { ...roleModels[role], ...half };
+        }
+      }
       if (typeof body.completionAttempts === "number") completionAttempts = body.completionAttempts;
       if (typeof body.maxParallelRuns === "number") {
         if (body.maxParallelRuns < 1 || body.maxParallelRuns > 4) {
@@ -1079,5 +1093,43 @@ describe("the runs-at-once control", () => {
     render(<CodingAgentSettingsPanel />);
     await screen.findByRole("switch", { name: SWITCH });
     expect(screen.queryByTestId("coding-agent-max-parallel-runs")).toBeNull();
+  });
+});
+
+
+describe("a team's model and effort per role", () => {
+  it("draws every role on its default — cheaper for the planner and reviewers, yours for workers — and names the cheaper models", async () => {
+    stubFetch({ enabled: true, readiness: READY, effort: "max" });
+    render(<CodingAgentSettingsPanel />);
+    const planner = await screen.findByTestId("coding-agent-role-planner-model") as HTMLSelectElement;
+    expect(planner.value).toBe("auto");
+    expect(planner.options[0].text).toBe("Default (cheaper model)");
+    expect((screen.getByTestId("coding-agent-role-worker-model") as HTMLSelectElement).options[0].text).toBe("Default (your model)");
+    expect((screen.getByTestId("coding-agent-role-reviewer-effort") as HTMLSelectElement).options[0].text).toBe("Default (at most Very high)");
+    expect((screen.getByTestId("coding-agent-role-worker-effort") as HTMLSelectElement).options[0].text).toBe("Default (your effort)");
+    const section = screen.getByTestId("coding-agent-role-models");
+    expect(section.textContent).toContain("claude-sonnet-5");
+    expect(section.textContent).toContain("deepseek-v4-flash");
+    expect(screen.getByLabelText("Model for Reviewers")).toBe(screen.getByTestId("coding-agent-role-reviewer-model"));
+  });
+
+  it("posts one half of one role at a time and shows what the route saved", async () => {
+    stubFetch({ enabled: true, readiness: READY, effort: "max" });
+    render(<CodingAgentSettingsPanel />);
+    const planner = await screen.findByTestId("coding-agent-role-planner-model") as HTMLSelectElement;
+    fireEvent.change(planner, { target: { value: "standard" } });
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/coding-agent/enable", body: { roleModels: { planner: { model: "standard" } } } }));
+    await waitFor(() => expect((screen.getByTestId("coding-agent-role-planner-model") as HTMLSelectElement).value).toBe("standard"));
+    const effort = screen.getByTestId("coding-agent-role-reviewer-effort") as HTMLSelectElement;
+    fireEvent.change(effort, { target: { value: "low" } });
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/coding-agent/enable", body: { roleModels: { reviewer: { effort: "low" } } } }));
+    await waitFor(() => expect((screen.getByTestId("coding-agent-role-reviewer-effort") as HTMLSelectElement).value).toBe("low"));
+  });
+
+  it("is not drawn for a server that does not answer with the setting", async () => {
+    stubFetch({ enabled: true, readiness: READY }, { noRoleModels: true });
+    render(<CodingAgentSettingsPanel />);
+    await screen.findByTestId("coding-agent-effort");
+    expect(screen.queryByTestId("coding-agent-role-models")).toBeNull();
   });
 });

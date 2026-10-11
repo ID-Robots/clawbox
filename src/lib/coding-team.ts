@@ -68,6 +68,7 @@ import {
   noteTeamMessageSent,
   queueRunMessage,
   resolveWorkingDirectory,
+  SlotsFullError,
   startRun,
   stopRun,
   suiteSandbox,
@@ -78,6 +79,7 @@ import {
   type RunTeam,
 } from "@/lib/coding-agent";
 import { RUNNER_STEP } from "@/lib/coding-agent-progress";
+import { onBatteryPower, teamWorkerCap } from "@/lib/coding-run-cpu";
 import { RunMessageError, teammatePrefix } from "@/lib/coding-run-messages";
 import {
   normalizeTeamMessage,
@@ -118,23 +120,30 @@ import {
   ownHarnessStateDenial,
   readOnlyDenial,
   readyTasks,
+  repoMapText,
   saveBoard,
   setTeamStatus,
   startedDependents,
+  teamAdvice,
   teamAgents,
   teamMetrics,
   TEAM_ID_RE,
   waitingOn,
   type Actor,
   type ReviewMode,
+  type TeamAdvice,
   type TeamAgents,
   type TeamBoard,
   type TeamPr,
   type TeamTask,
 } from "@/lib/coding-team-board";
 
-/** The board as the routes and the app read it: with who worked, counted, the figures as of now, and — while it waits — its place in the queue. */
-export type TeamView = TeamBoard & { agents: TeamAgents; queuePosition?: number };
+/**
+ * The board as the routes and the app read it: with who worked, counted, the
+ * figures as of now, whether a single run would have been cheaper
+ * (`teamAdvice`), and — while it waits — its place in the queue.
+ */
+export type TeamView = TeamBoard & { agents: TeamAgents; advice: TeamAdvice | null; queuePosition?: number };
 import { TeamBus, type Delivered, type TeamMessage } from "@/lib/coding-team-bus";
 import { clippedNote, leadRoom, leadShouldRun, leadTask, parsePlan, parseReplan, PLANNER_BRIEF, REPLAN_BRIEF, replanContext, replanTask } from "@/lib/coding-team-planner";
 
@@ -208,6 +217,12 @@ interface LiveTeam {
    * set back once its worker settles, its work set aside unmerged.
    */
   held: Map<string, { dependency: string; reason: string }>;
+  /**
+   * How many workers may run side by side right now: the plan's shape within
+   * the box's slots, ONE while the box is on battery. A worker's CPU budget is
+   * shared by this many (`StartRunInput.cpuShare`).
+   */
+  workerSlots: number;
   done: Promise<void>;
 }
 
@@ -283,7 +298,7 @@ export async function startTeam(input: StartTeamInput): Promise<TeamView> {
 /** The board's orchestrator, in this process, from its planner to its verdict; the next queued team once it settles. */
 function launchTeam(board: TeamBoard): void {
   const bus = new TeamBus(board);
-  const team: LiveTeam = { board, bus, stopRequested: false, currentRunIds: new Set(), pendingMessages: new Map(), uncountedAlerts: 0, leadTurnsAt: [0, 0], held: new Map(), done: Promise.resolve() };
+  const team: LiveTeam = { board, bus, stopRequested: false, currentRunIds: new Set(), pendingMessages: new Map(), uncountedAlerts: 0, leadTurnsAt: [0, 0], held: new Map(), workerSlots: 1, done: Promise.resolve() };
   // A task reopened — rejected, sent back by the suite, or itself held — sets
   // back whatever started on it, wherever the reopening came from.
   bus.subscribe((delivered) => holdDependents(team, delivered));
@@ -716,9 +731,28 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   // The shape first, when the planner gave one: it is the frame the tasks
   // are read in. No shape is the default team — every slot, a reviewer per task.
   if (plan.shape) bus.send(PLANNER, { type: "shape", ...plan.shape });
+  // The planner's map of what the goal touches, before the tasks: every worker
+  // and reviewer is handed it instead of exploring the project again.
+  if (plan.repoMap) {
+    const { files, entryPoints, testCommands, gotchas } = plan.repoMap;
+    bus.send(PLANNER, { type: "repo_map", files, entry_points: entryPoints, test_commands: testCommands, gotchas });
+  }
   for (const task of plan.tasks) bus.send(PLANNER, { type: "task", ...task });
   // Text over its bound was cut, not refused: one note says so — never an alert.
   if (plan.clipped) bus.send(SYSTEM, { type: "note", text: clippedNote(plan.clipped) });
+
+  // ONE task is one run's worth of work: it runs as one ordinary run, not
+  // inside the team's branch, worktree and reviewer machinery around it.
+  if (plan.tasks.length === 1 && board.tasks.length === 1) {
+    await runAsSingleRun(team, board.tasks[0], source);
+    return;
+  }
+  // Tasks that mostly touch the same files would only queue on each other: the
+  // team goes on, and the card and coding_team_status say a run was cheaper.
+  const advice = teamAdvice(board);
+  if (advice?.reason === "overlap") {
+    bus.send(SYSTEM, { type: "note", text: `${advice.overlap}% of the files this plan's tasks name are named by another task too: they cannot run side by side, and a single run would likely have been cheaper.` });
+  }
 
   // The team's own branch in a folder project: workers get worktrees off it
   // and their branches merge back into it. A code project sits inside the
@@ -743,7 +777,11 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   //    settle in whatever order they finish. In place (no team branch)
   //    there is one slot: two workers in one checkout write over each other.
   const inFlight = new Map<string, Promise<void>>();
-  const slots = board.branch ? Math.max(1, Math.min(MAX_TEAM_WORKERS, board.shape?.parallelism ?? MAX_TEAM_WORKERS)) : 1;
+  const plannedSlots = board.branch ? Math.max(1, Math.min(MAX_TEAM_WORKERS, board.shape?.parallelism ?? MAX_TEAM_WORKERS)) : 1;
+  // On battery (src/lib/coding-run-cpu.ts) ONE worker at a time, read again
+  // before every dispatch: an owner who unplugs mid-team gets the cap for the
+  // workers still to start, and one who plugs back in gets the plan's shape.
+  let onBattery = false;
   // Workers dispatched whose run is not persisted yet (a worktree being
   // added): a reservation the spawn slot counts beside the live runs, for
   // the next worker and for a sibling's reviewer alike, and ONLY until the
@@ -787,6 +825,13 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
         await leadTurn(team, settledTasks, source, () => new Set(inFlight.keys()), () => starting.size);
         continue;
       }
+      const battery = await onBatteryPower();
+      if (battery !== onBattery && plannedSlots > 1) {
+        bus.send(SYSTEM, { type: "note", text: battery ? "The box is on battery: one worker at a time until it is plugged in again." : "The box is plugged in again: workers run side by side as planned." });
+      }
+      onBattery = battery;
+      const slots = teamWorkerCap(plannedSlots, onBattery);
+      team.workerSlots = slots;
       const ready = readyTasks(board).filter((t) => !inFlight.has(t.task_id));
       let waitingForRoom = false;
       for (const task of ready) {
@@ -901,6 +946,69 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
 }
 
 /**
+ * A plan of ONE task, run as what it is: one ordinary run in the project —
+ * its own worktree and branch, the owner's review pass, deliverable check and
+ * pull request, exactly as if the assistant had asked for a single run —
+ * rather than the team's branch, a worker's worktree and a reviewer run around
+ * one run's worth of work. The board follows it: the task is assigned to the
+ * run, its result and outcome are relayed in its name, and the team settles
+ * with it. The run is NOT a team run (no `team` on its record), so nothing
+ * about how it settles differs from any other run the owner has seen.
+ *
+ * A box already running every run the owner allows makes it WAIT for a slot,
+ * as a worker waits for room, up to the run budget — never fail for being
+ * asked at a busy moment.
+ */
+async function runAsSingleRun(team: LiveTeam, task: TeamTask, source: CodingRunSource): Promise<void> {
+  const { board, bus } = team;
+  board.singleRun = true;
+  bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: "The plan has one task, so it runs as one ordinary run — no team branch, worktree or reviewer run around it; the run settles the owner's usual way." });
+  setTeamStatus(board, SYSTEM, "working");
+  saveBoard(board);
+
+  let run: CodingRun | null = null;
+  const waitingSince = Date.now();
+  while (!run) {
+    if (team.stopRequested) return;
+    try {
+      run = await startRun({
+        task: singleRunTask(board, task),
+        projectId: board.projectId,
+        directory: board.directory,
+        source,
+        extraBrief: repoMapBrief(board, null),
+      });
+    } catch (err) {
+      if (err instanceof SlotsFullError && Date.now() - waitingSince < RUN_BUDGET_MS) {
+        await sleep(SLOT_WAIT_MS);
+        continue;
+      }
+      setTeamStatus(board, SYSTEM, "failed", `The run for the plan's one task could not start: ${err instanceof Error ? err.message : String(err)}`);
+      saveBoard(board);
+      return;
+    }
+  }
+  const me = worker(run.id);
+  bus.send(SYSTEM, { type: "assign", task_id: task.task_id, worker_id: run.id });
+  board.runs.push({ id: run.id, role: "worker", taskId: task.task_id });
+  saveBoard(board);
+  bus.send(me, { type: "status_update", task_id: task.task_id, status: "in_progress", worker_id: run.id });
+
+  const settled = await settle(team, run.id);
+  if (team.stopRequested) return;
+  const ok = settled?.status === "completed";
+  const result = settled?.summary?.trim() || settled?.error || (ok ? "(no summary)" : `The run ended ${settled?.status ?? "without a record"}.`);
+  bus.send(me, { type: "result", task_id: task.task_id, result, worker_id: run.id });
+  bus.send(me, { type: "status_update", task_id: task.task_id, status: ok ? "complete" : "failed", worker_id: run.id });
+  if (ok) {
+    bus.send(REVIEWER, { type: "review", task_id: task.task_id, verdict: "accepted", notes: "Ran as a single run: the run's own settle judged it — the owner's review pass, deliverable check and pull request, when switched on." });
+  }
+  if (allComplete(board)) setTeamStatus(board, SYSTEM, "done");
+  else setTeamStatus(board, SYSTEM, "failed", `The run for the plan's one task did not finish: ${settled?.error ?? settled?.status ?? "no run"}.`);
+  saveBoard(board);
+}
+
+/**
  * One task's worker, from worktree to verdict. `starting` is the
  * orchestrator's live set of worker launches not persisted yet, handed on to
  * this task's reviewer; `onStarted` is called once the worker's run is
@@ -943,7 +1051,8 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
       directory,
       source,
       team: { id: board.id, role: "worker", taskId: task.task_id },
-      extraBrief: WORKER_BRIEF,
+      extraBrief: withRepoMap(WORKER_BRIEF, board, worktree?.path ?? null),
+      cpuShare: team.workerSlots,
     });
   } catch (err) {
     if (worktree) await removeWorktree(board.directory, worktree.path);
@@ -1186,7 +1295,7 @@ async function reviewTask(team: LiveTeam, task: TeamTask, source: CodingRunSourc
     const here = (text: string) => toFolderPaths(text, board.directory, board.directory);
     try {
       return await startRun(resumeOf
-        ? { task: REVIEWER_NUDGE, resumeRunId: resumeOf, source, team: role, readOnly: true, extraBrief: REVIEWER_BRIEF }
+        ? { task: REVIEWER_NUDGE, resumeRunId: resumeOf, source, team: role, readOnly: true, extraBrief: withRepoMap(REVIEWER_BRIEF, board, null) }
         : {
           task: reviewerTask({ taskId: task.task_id, description: here(task.task_description), files: work.files, report: here(work.report), goal: board.goal }),
           projectId: board.projectId,
@@ -1194,7 +1303,7 @@ async function reviewTask(team: LiveTeam, task: TeamTask, source: CodingRunSourc
           source,
           team: role,
           readOnly: true,
-          extraBrief: REVIEWER_BRIEF,
+          extraBrief: withRepoMap(REVIEWER_BRIEF, board, null),
         });
     } catch (err) {
       return { reason: err instanceof Error ? err.message : String(err), wait: err instanceof CodingAgentError && err.wait };
@@ -1329,7 +1438,7 @@ async function finalReview(team: LiveTeam, source: CodingRunSource, tests: strin
       source,
       team: { id: board.id, role: "reviewer", taskId: null },
       readOnly: true,
-      extraBrief: FINAL_REVIEWER_BRIEF,
+      extraBrief: withRepoMap(FINAL_REVIEWER_BRIEF, board, null),
     });
   } catch (err) {
     return byRule("the final reviewer could not start.", `No final reviewer: ${err instanceof Error ? err.message : String(err)}`);
@@ -1343,7 +1452,7 @@ async function finalReview(team: LiveTeam, source: CodingRunSource, tests: strin
   }
   const reask = async (runId: string): Promise<CodingRun | { reason: string }> => {
     try {
-      return await startRun({ task: REVIEWER_NUDGE, resumeRunId: runId, source, team: { id: board.id, role: "reviewer", taskId: null }, readOnly: true, extraBrief: FINAL_REVIEWER_BRIEF });
+      return await startRun({ task: REVIEWER_NUDGE, resumeRunId: runId, source, team: { id: board.id, role: "reviewer", taskId: null }, readOnly: true, extraBrief: withRepoMap(FINAL_REVIEWER_BRIEF, board, null) });
     } catch (err) {
       return { reason: err instanceof Error ? err.message : String(err) };
     }
@@ -1552,6 +1661,39 @@ function noteTokens(board: TeamBoard, run: CodingRun | null): void {
 }
 
 // ─── Words ───────────────────────────────────────────────────────────────────
+
+/**
+ * The planner's repo map as a worker's or a reviewer's brief carries it, said
+ * in the reader's own folder (`toFolderPaths`) — a worker in its worktree must
+ * never be handed the project's path. Null with no map.
+ */
+export function repoMapBrief(board: TeamBoard, folder: string | null): string | null {
+  const text = repoMapText(board.repoMap);
+  if (!text) return null;
+  const said = folder && folder !== board.directory ? toFolderPaths(text, board.directory, folder) : text;
+  return `Repo map — the team planner's map of the parts of this project the goal touches. Start from it instead of exploring the project again, and read further only where it is silent:\n${said}`;
+}
+
+/** A role's brief with the repo map after it, when the planner gave one. */
+function withRepoMap(brief: string, board: TeamBoard, folder: string | null): string {
+  const map = repoMapBrief(board, folder);
+  return map ? `${brief}\n\n${map}` : brief;
+}
+
+/**
+ * The task of the ONE run a one-task plan becomes: the owner's goal in their
+ * own words — it is the whole of the work — and the planner's description of
+ * it after, when it says more. Cut at the run route's cap from the end.
+ */
+export function singleRunTask(board: TeamBoard, task: TeamTask): string {
+  const goal = board.goal.trim();
+  const planned = task.task_description.trim();
+  const parts = [goal];
+  if (planned && planned !== goal) parts.push(`The team's planner wrote it up as: ${planned}`);
+  if (task.files_hint.length) parts.push(`Files it is expected to touch: ${task.files_hint.join(", ")}`);
+  const text = parts.join("\n\n");
+  return text.length > MAX_TASK_CHARS ? `${text.slice(0, MAX_TASK_CHARS - 1)}…` : text;
+}
 
 /** Heads the board's digest in a worker's task text. */
 const DIGEST_LABEL = "\n\nThe team's board — every other task, then the latest alerts and messages:\n";
@@ -1967,7 +2109,7 @@ function settleOrphan(board: TeamBoard): TeamBoard {
 /** The board as the routes answer it, with the agent count worked out from it and the figures as of now (a working team's clock runs). */
 function snapshot(board: TeamBoard, queue?: readonly string[]): TeamView {
   const at = board.status === "queued" ? (queue ?? queuedBoards().map((b) => b.id)).indexOf(board.id) : -1;
-  return { ...(JSON.parse(JSON.stringify(board)) as TeamBoard), agents: teamAgents(board), metrics: teamMetrics(board), ...(at >= 0 ? { queuePosition: at + 1 } : {}) };
+  return { ...(JSON.parse(JSON.stringify(board)) as TeamBoard), agents: teamAgents(board), metrics: teamMetrics(board), advice: teamAdvice(board), ...(at >= 0 ? { queuePosition: at + 1 } : {}) };
 }
 
 function firstLine(text: string, max: number): string {

@@ -17,6 +17,7 @@ import {
   setCodingAgentEnabled,
   setCodingGitAuthor,
   setCodingProvider,
+  checkRoleModelsPatch,
   setDefaultDirectory,
   setEffort,
   setMaxTurns,
@@ -31,6 +32,7 @@ import {
   setRealBrowser,
   setReviewPass,
   setReviewRounds,
+  setRoleModels,
   setSetupComplete,
   setTeamDynamic,
   setTokenLimit,
@@ -192,6 +194,7 @@ export async function POST(request: Request) {
     gitAuthorEmail?: unknown;
     historyRetention?: unknown;
     historyLimit?: unknown;
+    roleModels?: unknown;
   };
   const hasEnabled = typeof fields.enabled === "boolean";
   const hasReviewPass = typeof fields.reviewPass === "boolean";
@@ -231,7 +234,10 @@ export async function POST(request: Request) {
   const hasHistoryLimit = "historyLimit" in fields;
   // Presence decides here too, for the same reason as the history setting.
   const hasPrBodyIncludesTask = "prBodyIncludesTask" in fields;
-  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasPrBodyIncludesTask && !hasReviewRounds && !hasAutoMerge && !hasCompletionAttempts && !hasMaxParallelRuns && !hasGenImages && !hasGenAudio && !hasRealBrowser && !hasTeamDynamic && !hasGitAuthorName && !hasGitAuthorEmail && !hasHistoryRetention && !hasHistoryLimit && !clearsFault) {
+  // A team's per-role model and effort (src/lib/coding-role-models.ts):
+  // presence decides, and a wrong shape is refused below, whole.
+  const hasRoleModels = "roleModels" in fields;
+  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasPrBodyIncludesTask && !hasReviewRounds && !hasAutoMerge && !hasCompletionAttempts && !hasMaxParallelRuns && !hasGenImages && !hasGenAudio && !hasRealBrowser && !hasTeamDynamic && !hasGitAuthorName && !hasGitAuthorEmail && !hasHistoryRetention && !hasHistoryLimit && !hasRoleModels && !clearsFault) {
     return NextResponse.json(
       {
         error:
@@ -246,6 +252,7 @@ export async function POST(request: Request) {
           + "{ historyRetention: string, historyLimit?: number }, "
           + "{ gitAuthorName: string | null }, { gitAuthorEmail: string | null }, "
           + "{ prBodyIncludesTask: string }, "
+          + "{ roleModels: { planner?|worker?|reviewer?: { model?, effort? } } }, "
           + "{ setupComplete: boolean }, { autoPr: boolean } or { clearHarnessFault: true }.",
       },
       { status: 400 },
@@ -302,6 +309,11 @@ export async function POST(request: Request) {
       { status: 400 },
     );
   }
+  // The per-role choices, checked whole before any setter runs, like the rest.
+  const roleModelsRefusal = hasRoleModels ? checkRoleModelsPatch(fields.roleModels) : null;
+  if (roleModelsRefusal) {
+    return NextResponse.json({ error: roleModelsRefusal, kind: "invalid" }, { status: 400 });
+  }
 
   try {
     // The family's availability BEFORE the write, read only on requests that
@@ -352,6 +364,10 @@ export async function POST(request: Request) {
     if (hasEffort) {
       const saved = await setEffort(fields.effort as string);
       console.error(`[coding-agent] effort set to ${saved} by the owner`);
+    }
+    if (hasRoleModels) {
+      const saved = await setRoleModels(fields.roleModels);
+      console.error(`[coding-agent] team role models set by the owner: ${JSON.stringify(saved)}`);
     }
     if (hasProvider) {
       const saved = await setCodingProvider(fields.provider as string);

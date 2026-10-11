@@ -551,6 +551,7 @@ describe("teamMetrics", () => {
       tasksAcceptedFirstTry: 2,
       tasksRejected: 2,
       tokensUsed: 12_000,
+      tokensByRole: { planner: 1_200, worker: 9_000, reviewer: 1_500, lead: 300 },
       wallMs: 60_000,
       messagesSent: 5,
       messagesToLead: 1,

@@ -76,6 +76,38 @@ export type AnthropicModel = (typeof ANTHROPIC_MODELS)[number];
 export const DEFAULT_ANTHROPIC_MODEL: AnthropicModel = "claude-opus-5-5";
 
 /**
+ * The CHEAPER model of each provider: what a coding team's planner and
+ * reviewers run on unless the owner says otherwise (src/lib/coding-role-models.ts).
+ * Reading a folder and answering a plan, or reading a diff and answering a
+ * verdict, is not where the most capable model earns its price.
+ *
+ * On `clawbox-ai` it is the plan's flash tier, which EVERY plan may use (the
+ * wrapper's own fallback and its small model — see scripts/claude-ds), so a
+ * box on the Max plan pays for its pro model only where a worker writes code.
+ * It is the one model a `clawbox-ai` run's record may carry
+ * (`isRecordableModel`); a CALLER still cannot name one for that provider.
+ */
+export const ECONOMY_MODELS: Readonly<Record<CodingProvider, string>> = {
+  "clawbox-ai": "deepseek-v4-flash",
+  anthropic: "claude-sonnet-5",
+};
+
+/** The cheaper model of this provider. */
+export function economyModelForProvider(provider: CodingProvider): string {
+  return ECONOMY_MODELS[provider];
+}
+
+/**
+ * May a run of this provider carry this model on its record? Anything the
+ * provider lets a caller name, and its economy model — which, on a provider
+ * whose plan picks the model, only the box itself ever sets.
+ */
+export function isRecordableModel(provider: CodingProvider, model: unknown): model is string {
+  if (typeof model !== "string" || !model) return false;
+  return modelsForProvider(provider).includes(model) || model === ECONOMY_MODELS[provider];
+}
+
+/**
  * The catalogue key that names a provider in the owner's language.
  *
  * A TABLE, not `codingAgent.provider.${id}`. Two reasons, and the first is a

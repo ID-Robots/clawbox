@@ -55,6 +55,19 @@ export const MAX_LEAD_RETIRES = 2;
 export const MAX_DIGEST_CHARS = 2_500;
 /** The planner's one-line reason for the team's shape, as the card shows it. */
 export const MAX_RATIONALE_CHARS = 200;
+/** One list of the planner's repo map holds this many entries… */
+export const MAX_REPO_MAP_ITEMS = 12;
+/** …each at most this long… */
+export const MAX_REPO_MAP_ITEM_CHARS = 200;
+/** …and the whole map, as a worker's brief carries it, at most this long. */
+export const MAX_REPO_MAP_CHARS = 2_000;
+/**
+ * Above this share of a plan's hinted files being shared with another task,
+ * the tasks "mostly overlap": they would queue on the same files, merge into
+ * each other's conflicts, and each pay to read what the others read — one run
+ * would do the same work once (`teamAdvice`).
+ */
+export const OVERLAP_ADVICE_SHARE = 0.6;
 /** Log lines of the kinds a teammate should hear about, quoted at the end of the digest. */
 const DIGEST_LOG_LINES = 5;
 
@@ -90,6 +103,37 @@ export interface TeamShape {
   rationale: string;
 }
 
+/**
+ * The planner's compact map of the parts of the project the goal touches: the
+ * files, where the code starts, how it is tested, and what bites. Put on the
+ * board once and handed to every worker and reviewer in its brief, so a team
+ * of three does not pay for the same exploration three more times.
+ */
+export interface RepoMap {
+  files: string[];
+  entryPoints: string[];
+  testCommands: string[];
+  gotchas: string[];
+}
+
+/**
+ * Why a single run would have been cheaper than this team (`teamAdvice`):
+ * the plan has one task, or its tasks' files mostly overlap — `overlap` is
+ * the share of the plan's hinted files another task names too, in percent.
+ */
+export interface TeamAdvice {
+  reason: "one_task" | "overlap";
+  overlap: number;
+}
+
+/** Tokens the team's runs spent, by the role they ran in. */
+export interface RoleTokens {
+  planner: number;
+  worker: number;
+  reviewer: number;
+  lead: number;
+}
+
 /** The one reviewer run over the merged result, in the `final` review mode. */
 export interface FinalReview {
   verdict: "accepted" | "rejected";
@@ -118,6 +162,8 @@ export interface TeamMetrics {
   tasksRejected: number;
   /** Tokens every run of the team spent, from each run's own record. */
   tokensUsed: number;
+  /** The same tokens by role: what the planner, the workers, the reviewers and the lead each cost. */
+  tokensByRole: RoleTokens;
   /** From the team's creation to its end — or to now, while it works. */
   wallMs: number;
   /**
@@ -286,7 +332,7 @@ export interface TeamAgents {
 export interface LogEntry {
   ts: number;
   actor: Actor;
-  type: "team_created" | "task" | "status_update" | "result" | "review" | "alert" | "team_status" | "message" | "shape" | "retire" | "final_review" | "note" | "hold" | "ci" | "pr";
+  type: "team_created" | "task" | "status_update" | "result" | "review" | "alert" | "team_status" | "message" | "shape" | "retire" | "final_review" | "note" | "hold" | "ci" | "pr" | "repo_map";
   task_id?: string;
   message: string;
   payload?: Record<string, unknown>;
@@ -348,6 +394,13 @@ export interface TeamBoard {
   error: string | null;
   /** The shape the planner gave the team, or null — then it runs the way every team did before (all the slots, a reviewer per task). */
   shape: TeamShape | null;
+  /** The planner's map of what the goal touches, once it gave one; null on a board from before, or a plan without one. */
+  repoMap: RepoMap | null;
+  /**
+   * The plan had ONE task, so it ran as one ordinary run — no team branch, no
+   * worktree, no reviewer run of the team's — and the board followed it.
+   */
+  singleRun: boolean;
   /** The `coding_team_dynamic` switch as it stood when the team started: may a lead add or retire tasks while it runs? */
   dynamic: boolean;
   /**
@@ -508,6 +561,8 @@ function normalizeBoard(raw: unknown): TeamBoard | null {
     error: typeof b.error === "string" ? b.error : null,
     // A board from before the planner could shape a team has none: it ran the default.
     shape: normalizeShape(b.shape),
+    repoMap: normalizeRepoMap(b.repoMap),
+    singleRun: b.singleRun === true,
     dynamic: b.dynamic === true,
     lastLeadAt: typeof b.lastLeadAt === "number" && Number.isFinite(b.lastLeadAt) && b.lastLeadAt > 0 ? b.lastLeadAt : 0,
     finalReview: finalReview && typeof finalReview === "object" && (finalReview.verdict === "accepted" || finalReview.verdict === "rejected") && typeof finalReview.notes === "string"
@@ -522,6 +577,64 @@ function normalizeBoard(raw: unknown): TeamBoard | null {
   // Worked out again rather than trusted from the file: they are the board's, not the file's.
   board.metrics = teamMetrics(board);
   return board;
+}
+
+/**
+ * A repo map as the planner gave it or as a file holds it, bounded: every
+ * list cut to MAX_REPO_MAP_ITEMS entries of MAX_REPO_MAP_ITEM_CHARS on one
+ * line each, blanks and repeats dropped, and the lists cut from the end until
+ * the rendered map fits MAX_REPO_MAP_CHARS. Advice, not a contract: what is not
+ * text is left out, never a reason to refuse a plan. Null when nothing is left.
+ * Takes the planner's snake_case (`entry_points`) and the board's camelCase.
+ */
+export function normalizeRepoMap(raw: unknown): RepoMap | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  const list = (...keys: string[]): string[] => {
+    const value = keys.map((k) => r[k]).find((v) => v !== undefined);
+    if (!Array.isArray(value)) return [];
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const item of value) {
+      if (typeof item !== "string") continue;
+      const line = clip(oneLine(item), MAX_REPO_MAP_ITEM_CHARS);
+      if (!line || seen.has(line)) continue;
+      seen.add(line);
+      out.push(line);
+      if (out.length >= MAX_REPO_MAP_ITEMS) break;
+    }
+    return out;
+  };
+  const map: RepoMap = {
+    files: list("files"),
+    entryPoints: list("entryPoints", "entry_points"),
+    testCommands: list("testCommands", "test_commands"),
+    gotchas: list("gotchas"),
+  };
+  // Over the bound, the longest list gives up its last entry first: one long
+  // list of files must not push out the one test command.
+  const lists = [map.files, map.entryPoints, map.testCommands, map.gotchas];
+  while (repoMapText(map).length > MAX_REPO_MAP_CHARS) {
+    const longest = lists.reduce((a, b) => (b.length > a.length ? b : a));
+    if (!longest.length) break;
+    longest.pop();
+  }
+  return lists.some((l) => l.length) ? map : null;
+}
+
+/**
+ * The map as a run's brief carries it — one line per list, the lists that
+ * are empty left out. "" for no map.
+ */
+export function repoMapText(map: RepoMap | null): string {
+  if (!map) return "";
+  const lines = [
+    map.files.length ? `Files: ${map.files.join("; ")}` : "",
+    map.entryPoints.length ? `Entry points: ${map.entryPoints.join("; ")}` : "",
+    map.testCommands.length ? `Test commands: ${map.testCommands.join("; ")}` : "",
+    map.gotchas.length ? `Gotchas: ${map.gotchas.join("; ")}` : "",
+  ].filter(Boolean);
+  return lines.join("\n");
 }
 
 /** A shape read back from disk: the planner's fields, or null — never a half-shape that would schedule oddly. */
@@ -656,6 +769,8 @@ export function createBoard(input: { goal: string; projectId: string | null; dir
     alerts: 0,
     error: null,
     shape: null,
+    repoMap: null,
+    singleRun: false,
     dynamic: input.dynamic === true,
     lastLeadAt: 0,
     finalReview: null,
@@ -688,6 +803,23 @@ export function setShape(board: TeamBoard, actor: Actor, shape: TeamShape): Team
     payload: { parallelism: shape.parallelism, review: shape.review },
   });
   return board.shape;
+}
+
+/** The Planner maps the parts of the project the goal touches. Nobody else may, and only once. */
+export function setRepoMap(board: TeamBoard, actor: Actor, raw: unknown): RepoMap {
+  if (actor.kind !== "planner") throw new BoardAccessError(actor, "repo_map", `Only the planner maps the project; ${describeActor(actor)} may not.`);
+  if (board.repoMap) throw new Error("The team already has its repo map.");
+  const map = normalizeRepoMap(raw);
+  if (!map) throw new Error("The repo map is empty.");
+  board.repoMap = map;
+  const counts = [
+    map.files.length ? `${map.files.length} file(s)` : "",
+    map.entryPoints.length ? `${map.entryPoints.length} entry point(s)` : "",
+    map.testCommands.length ? `${map.testCommands.length} test command(s)` : "",
+    map.gotchas.length ? `${map.gotchas.length} gotcha(s)` : "",
+  ].filter(Boolean);
+  append(board, { ts: Date.now(), actor, type: "repo_map", message: `Repo map: ${counts.join(", ")}` });
+  return map;
 }
 
 /**
@@ -1377,7 +1509,7 @@ export function boardDigest(board: TeamBoard, forTaskId: string | readonly strin
 const EMPTY_METRICS: TeamMetrics = {
   plannerRuns: 0, workerRuns: 0, reviewerRuns: 0, leadRuns: 0,
   tasksPlanned: 0, tasksAdded: 0, tasksRetired: 0, tasksAcceptedFirstTry: 0, tasksRejected: 0,
-  tokensUsed: 0, wallMs: 0,
+  tokensUsed: 0, tokensByRole: { planner: 0, worker: 0, reviewer: 0, lead: 0 }, wallMs: 0,
   messagesSent: 0, messagesToLead: 0, messagesToSibling: 0, messagesUndelivered: 0,
   readOnlyRefusals: 0,
 };
@@ -1403,7 +1535,8 @@ export function teamMetrics(board: TeamBoard, now: number = Date.now()): TeamMet
     tasksRetired: board.tasks.filter((t) => t.status === "retired").length,
     tasksAcceptedFirstTry: board.tasks.filter((t) => t.status === "complete" && t.review?.verdict === "accepted" && countedAttempts(t) === 1).length,
     tasksRejected: board.tasks.filter((t) => t.rejections > 0).length,
-    tokensUsed: board.runs.reduce((sum, r) => sum + (typeof r.tokens === "number" && Number.isFinite(r.tokens) ? r.tokens : 0), 0),
+    tokensUsed: board.runs.reduce((sum, r) => sum + runTokens(r), 0),
+    tokensByRole: board.runs.reduce<RoleTokens>((by, r) => ({ ...by, [r.role]: by[r.role] + runTokens(r) }), { planner: 0, worker: 0, reviewer: 0, lead: 0 }),
     wallMs: board.createdAt > 0 ? Math.max(0, ended - board.createdAt) : 0,
     messagesSent: messages.length + unreached.length,
     messagesToLead: payloads.filter((p) => p?.to === "lead").length + unreached.filter((u) => u.to === "lead").length,
@@ -1414,6 +1547,57 @@ export function teamMetrics(board: TeamBoard, now: number = Date.now()): TeamMet
       return sum + (typeof n === "number" && Number.isInteger(n) && n > 0 ? n : 0);
     }, 0),
   };
+}
+
+/** One run's tokens as the figures count them: what its record said once it settled, 0 before. */
+function runTokens(r: TeamRunRef): number {
+  return typeof r.tokens === "number" && Number.isFinite(r.tokens) && r.tokens >= 0 ? r.tokens : 0;
+}
+
+/** Path hints compared: no `./`, no trailing slash, forward slashes. */
+function hintKey(hint: string): string {
+  return hint.trim().replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+}
+
+/** Do two hints name overlapping files: the same path, or one a folder holding the other? */
+function hintsOverlap(a: string, b: string): boolean {
+  const x = hintKey(a);
+  const y = hintKey(b);
+  if (!x || !y) return false;
+  return x === y || x.startsWith(`${y}/`) || y.startsWith(`${x}/`);
+}
+
+/**
+ * Whether a SINGLE run would be cheaper than this team, and why — or null.
+ *
+ * A team pays for a planner, a reviewer per task and a worktree per worker on
+ * top of the work; that is money well spent only when the work splits. Two
+ * plans where it does not: ONE task (the team's whole machinery around one
+ * run's worth of work — which is why such a plan now runs as one run), and
+ * tasks whose `files_hint` mostly overlap (OVERLAP_ADVICE_SHARE of the hinted
+ * files named by another task too): they cannot run side by side without
+ * merging into each other, so they run in a queue, each worker re-reading what
+ * the last one changed. Judged on the PLAN — the tasks the planner posted, not
+ * the ones a lead added later — and only where at least two tasks name files.
+ */
+export function teamAdvice(board: Pick<TeamBoard, "tasks">): TeamAdvice | null {
+  const planned = board.tasks.filter((t) => t.origin !== "lead");
+  if (planned.length === 1) return { reason: "one_task", overlap: 100 };
+  const hinted = planned.filter((t) => t.files_hint.some((h) => hintKey(h)));
+  if (hinted.length < 2) return null;
+  let total = 0;
+  let shared = 0;
+  for (const task of hinted) {
+    const others = hinted.filter((t) => t !== task).flatMap((t) => t.files_hint);
+    for (const hint of task.files_hint) {
+      if (!hintKey(hint)) continue;
+      total += 1;
+      if (others.some((o) => hintsOverlap(hint, o))) shared += 1;
+    }
+  }
+  if (total === 0) return null;
+  const share = shared / total;
+  return share >= OVERLAP_ADVICE_SHARE ? { reason: "overlap", overlap: Math.round(share * 100) } : null;
 }
 
 // ─── Internals ───────────────────────────────────────────────────────────────
