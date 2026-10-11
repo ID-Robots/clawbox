@@ -11590,27 +11590,39 @@ EOF
 # alone. Called by the full install AND by step_post_update, so a box in the
 # field is fixed by its next in-app update.
 #
+# A box installed before this step can have a root-owned ~/.config: on a home
+# without one, step_desktop_theme's root `mkdir -p` of ~/.config/autostart
+# created it and chowned only autostart. The user write fails there, so that
+# directory alone (never its contents, never through a symlink) is handed back
+# to clawbox first.
+#
 # The update runs post_update AFTER its own reboot, so by then the session has
 # already started the assistant without a marker to stop it. Writing the marker
 # therefore also ends the copy that is running, instead of leaving it resident
-# until some later boot. Picked by the clawbox uid and the assistant's own
-# command line, anchored at its start: unanchored, `-f` also matched any
-# clawbox process that merely MENTIONS that command line — an agent run whose
-# prompt quotes it, a shell running a script that greps for it.
+# until some later boot — and so does a run that finds the marker already
+# there, since a marker written mid-session (or just before the session's own
+# check started the assistant) stops only the next session's copy. Picked by
+# the clawbox uid and the assistant's own command line, anchored at its start:
+# unanchored, `-f` also matched any clawbox process that merely MENTIONS that
+# command line — an agent run whose prompt quotes it, a shell running a script
+# that greps for it.
 step_gnome_initial_setup_done() {
   local config_dir="$CLAWBOX_HOME/.config"
   local marker="$config_dir/gnome-initial-setup-done"
 
   if [ -e "$marker" ]; then
     echo "  GNOME initial setup already marked done"
-    return 0
+  else
+    if [ -d "$config_dir" ] && [ ! -L "$config_dir" ] \
+      && [ "$(stat -c %U "$config_dir" 2>/dev/null)" != "$CLAWBOX_USER" ]; then
+      chown -h "$CLAWBOX_USER:$CLAWBOX_USER" "$config_dir" || true
+    fi
+    if ! as_clawbox sh -c 'mkdir -p -m 700 "$1" && printf yes > "$2"' sh "$config_dir" "$marker"; then
+      echo "  Warning: could not write $marker — GNOME's first-run assistant will keep starting with the desktop" >&2
+      return 1
+    fi
+    echo "  GNOME initial setup marked done (its first-run assistant no longer starts with the desktop)"
   fi
-
-  if ! as_clawbox sh -c 'mkdir -p -m 700 "$1" && printf yes > "$2"' sh "$config_dir" "$marker"; then
-    echo "  Warning: could not write $marker — GNOME's first-run assistant will keep starting with the desktop" >&2
-    return 1
-  fi
-  echo "  GNOME initial setup marked done (its first-run assistant no longer starts with the desktop)"
 
   if pkill -TERM -u "$CLAWBOX_USER" -f '^(/[^ ]*/)?gnome-initial-setup --existing-user( |$)' 2>/dev/null; then
     echo "  Ended the first-run assistant the running session had already started"

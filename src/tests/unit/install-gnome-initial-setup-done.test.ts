@@ -18,9 +18,11 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
  * wizard replaces. The file is the switch GNOME itself reads.
  *
  * What is pinned here: the step writes the marker, with the content the
- * assistant writes itself, as the device user; it ends the copy the running
- * session already started (the update runs this after its own reboot); a
- * second run touches nothing; and it is wired into BOTH the full install and
+ * assistant writes itself, as the device user; a root-owned `~/.config` left
+ * by an older install is handed back to that user first, and nothing else is;
+ * it ends the copy the running session already started (the update runs this
+ * after its own reboot), also when the marker was already there; a second run
+ * writes nothing; and it is wired into BOTH the full install and
  * `step_post_update`, so a box already in the field is fixed by its next
  * in-app update.
  */
@@ -53,15 +55,24 @@ let marker: string;
  * that went through the user from one root would have made itself. `pkill` is
  * ALWAYS a stub: the real one would end a first-run assistant on the machine
  * running the tests. `pkillRc` is what it answers (1: nothing matched).
+ * `chown` is a stub too, since the tests do not run as root. It logs the call
+ * and makes the directory writable, the way handing it to the user would.
+ * `user` names a device user other than the test's own, so a `~/.config` the
+ * test made looks to the step like one another account owns.
  */
-function runStep({ asClawbox = 'echo "as_clawbox $*" >> "$CALLS"; "$@"', pkillRc = 1 } = {}) {
+function runStep({
+  asClawbox = 'echo "as_clawbox $*" >> "$CALLS"; "$@"',
+  pkillRc = 1,
+  user = "",
+} = {}) {
   const script = [
     "set -euo pipefail",
     `CLAWBOX_HOME=${JSON.stringify(home)}`,
-    'CLAWBOX_USER="$(id -un)"',
+    user ? `CLAWBOX_USER=${JSON.stringify(user)}` : 'CLAWBOX_USER="$(id -un)"',
     `CALLS=${JSON.stringify(calls)}`,
     `as_clawbox() { ${asClawbox}; }`,
     `pkill() { echo "pkill $*" >> "$CALLS"; return ${pkillRc}; }`,
+    'chown() { echo "chown $*" >> "$CALLS"; chmod u+w "${@: -1}"; }',
     extractShellFunction("step_gnome_initial_setup_done"),
     "step_gnome_initial_setup_done",
   ].join("\n");
@@ -70,12 +81,13 @@ function runStep({ asClawbox = 'echo "as_clawbox $*" >> "$CALLS"; "$@"', pkillRc
   return spawnSync("bash", [runner], { encoding: "utf-8", cwd: REPO });
 }
 
-function loggedCalls(prefix: "as_clawbox" | "pkill"): string[] {
+function loggedCalls(prefix: "as_clawbox" | "pkill" | "chown"): string[] {
   if (!fs.existsSync(calls)) return [];
   return fs.readFileSync(calls, "utf-8").split("\n").filter((line) => line.startsWith(`${prefix} `));
 }
 const asClawboxCalls = () => loggedCalls("as_clawbox");
 const pkillCalls = () => loggedCalls("pkill");
+const chownCalls = () => loggedCalls("chown");
 
 d("step_gnome_initial_setup_done marks GNOME's first-run assistant as done", () => {
   beforeEach(() => {
@@ -87,6 +99,13 @@ d("step_gnome_initial_setup_done marks GNOME's first-run assistant as done", () 
   });
 
   afterEach(() => {
+    // The read-only ~/.config of the root-owned case would otherwise stop the
+    // cleanup when the step failed to hand it back.
+    try {
+      fs.chmodSync(path.join(home, ".config"), 0o700);
+    } catch {
+      // No ~/.config in this test.
+    }
     fs.rmSync(sandbox, { recursive: true, force: true });
   });
 
@@ -104,7 +123,53 @@ d("step_gnome_initial_setup_done marks GNOME's first-run assistant as done", () 
     expect(asClawboxCalls()[0]).toContain(marker);
     // A ~/.config the step had to create is private, the way GLib makes it.
     expect(fs.statSync(path.dirname(marker)).mode & 0o777).toBe(0o700);
+    expect(chownCalls()).toHaveLength(0);
     expect(result.stdout).toContain("GNOME initial setup marked done");
+  });
+
+  it("hands a root-owned ~/.config back to the device user before writing, and only ~/.config itself", () => {
+    // What a box installed before this step can have: step_desktop_theme's root
+    // `mkdir -p ~/.config/autostart` made ~/.config and chowned only autostart.
+    // `mkdir -p` as the user does not repair it, so the user write failed.
+    // Here ~/.config is the test user's, which is not the device user named:
+    // to the step, that is a ~/.config another account owns.
+    const configDir = path.dirname(marker);
+    fs.mkdirSync(path.join(configDir, "autostart"), { recursive: true });
+    fs.writeFileSync(path.join(configDir, "autostart", "clawbox-desktop-theme.desktop"), "");
+    fs.chmodSync(configDir, 0o555);
+
+    const result = runStep({ user: "clawbox-device" });
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(fs.readFileSync(marker, "utf-8")).toBe("yes");
+    // Not recursive, and never through a symlink.
+    expect(chownCalls()).toEqual([`chown -h clawbox-device:clawbox-device ${configDir}`]);
+    const log = fs.readFileSync(calls, "utf-8").split("\n");
+    expect(log.findIndex((line) => line.startsWith("chown "))).toBeLessThan(
+      log.findIndex((line) => line.startsWith("as_clawbox ")),
+    );
+  });
+
+  it("leaves a ~/.config that is already the device user's as it is", () => {
+    fs.mkdirSync(path.dirname(marker), { mode: 0o755 });
+
+    const result = runStep();
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(fs.readFileSync(marker, "utf-8")).toBe("yes");
+    expect(chownCalls()).toHaveLength(0);
+  });
+
+  it("never hands over a ~/.config that is a symlink", () => {
+    // Root following one the user planted would chown whatever it points at.
+    const elsewhere = path.join(sandbox, "elsewhere");
+    fs.mkdirSync(elsewhere);
+    fs.symlinkSync(elsewhere, path.dirname(marker));
+
+    const result = runStep({ user: "clawbox-device" });
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(chownCalls()).toHaveLength(0);
   });
 
   it("ends the assistant the running session already started, and only the device user's", () => {
@@ -147,7 +212,7 @@ d("step_gnome_initial_setup_done marks GNOME's first-run assistant as done", () 
     expect(result.stdout).not.toContain("Ended the first-run assistant");
   });
 
-  it("is a no-op on the second run", () => {
+  it("writes nothing on the second run, and only looks for a running assistant", () => {
     expect(runStep().status).toBe(0);
     const past = new Date("2026-01-01T00:00:00Z");
     fs.utimesSync(marker, past, past);
@@ -158,9 +223,13 @@ d("step_gnome_initial_setup_done marks GNOME's first-run assistant as done", () 
     expect(second.status, `${second.stdout}\n${second.stderr}`).toBe(0);
     expect(fs.readFileSync(marker, "utf-8")).toBe("yes");
     expect(fs.statSync(marker).mtimeMs).toBe(past.getTime());
-    // Neither a write through the user nor a signal to anything.
-    expect(fs.readFileSync(calls, "utf-8")).toBe(callsAfterFirst);
+    // No write through the user and no chown: the one new call is the
+    // process check, which found nothing and stays quiet.
+    const newCalls = fs.readFileSync(calls, "utf-8").slice(callsAfterFirst.length).split("\n").filter(Boolean);
+    expect(newCalls).toHaveLength(1);
+    expect(newCalls[0]).toMatch(/^pkill -TERM /);
     expect(second.stdout).toContain("already marked done");
+    expect(second.stdout).not.toContain("Ended the first-run assistant");
   });
 
   it("leaves a marker that is already there alone, whatever it says", () => {
@@ -173,7 +242,24 @@ d("step_gnome_initial_setup_done marks GNOME's first-run assistant as done", () 
     expect(fs.readFileSync(marker, "utf-8")).toBe("owner finished it\n");
     expect(fs.statSync(path.dirname(marker)).mode & 0o777).toBe(0o755);
     expect(asClawboxCalls()).toHaveLength(0);
-    expect(pkillCalls()).toHaveLength(0);
+    expect(chownCalls()).toHaveLength(0);
+  });
+
+  it("still ends a running assistant when the marker is already there", () => {
+    // A marker written mid-session — by an earlier run whose pkill looked just
+    // before the session started the assistant, or by hand — stops only the
+    // NEXT session's copy. The one already running must not survive the run.
+    fs.mkdirSync(path.dirname(marker), { mode: 0o700 });
+    fs.writeFileSync(marker, "yes");
+
+    const result = runStep({ pkillRc: 0 });
+
+    expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
+    expect(fs.readFileSync(marker, "utf-8")).toBe("yes");
+    expect(asClawboxCalls()).toHaveLength(0);
+    expect(pkillCalls()).toHaveLength(1);
+    expect(result.stdout).toContain("already marked done");
+    expect(result.stdout).toContain("Ended the first-run assistant");
   });
 
   it("answers non-zero, and says so, when the marker cannot be written", () => {
