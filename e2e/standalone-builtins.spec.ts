@@ -28,8 +28,33 @@ test("every OpenClaw built-in exposed by Open in new tab has a standalone surfac
     "vnc",
     "openclaw",
   ]) {
+    // On a box whose setup is finished the wizard has nothing to show: once it
+    // has READ the setup state it sends the tab back to the desktop
+    // (`window.location.href = "/"` in SetupWizard). That navigation is the
+    // page's own, and it raced this test both ways. Early, it took the page
+    // away before "Back to Desktop" was looked for. Late, it landed on top of
+    // the next `goto` and aborted it — net::ERR_ABORTED at whichever id came
+    // after `setup`. So the setup state is held back until the surface has
+    // been seen, and the wizard's own navigation is let land before the next
+    // one starts.
+    const leavesByItself = id === "setup";
+    let showSetupState = () => {};
+    if (leavesByItself) {
+      const surfaceSeen = new Promise<void>((resolve) => { showSetupState = resolve; });
+      await page.route("**/setup-api/setup/status", async (route) => {
+        await surfaceSeen;
+        await route.fallback();
+      });
+    }
+
     await page.goto(`/app/${id}`);
     await expect(page.getByText(`App not found: ${id}`), `${id} should render standalone`).toHaveCount(0);
     await expect(page.getByRole("link", { name: "Back to Desktop" })).toBeVisible();
+
+    if (leavesByItself) {
+      showSetupState();
+      await page.waitForURL((url) => !url.pathname.startsWith(`/app/${id}`));
+      await page.unroute("**/setup-api/setup/status");
+    }
   }
 });

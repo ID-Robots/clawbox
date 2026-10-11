@@ -133,7 +133,8 @@ SSH to the device's listener.
 |---|---|---|---|
 | `/etc/clawkeep/config.toml` | 0644 | root | User-editable config |
 | `/var/lib/clawkeep/token` | 0600 | clawkeep | The `claw_*` portal token |
-| `/var/lib/clawkeep/state.json` | 0600 | clawkeep | Last run result + last cloudBytes, and what the last archive left out / still carried / skipped |
+| `/var/lib/clawkeep/state.json` | 0600 | clawkeep | Last run result + last cloudBytes, and what the last archive left out / still carried / skipped, and why the last run refused to upload, if it did |
+| `/var/lib/clawkeep/backup-run.lock` | 0600 | clawkeep | Held (`flock`) by the backup run in progress; an empty file that means nothing when no run holds it |
 | `/var/lib/clawkeep/detached-links.json` | 0600 | clawkeep | Links set aside for an archive build still in progress (or killed mid-build); put back by the next run |
 | `/var/lib/clawkeep/set-aside-files.json` | 0600 | clawkeep | The box's own backup archives set aside for a build in progress (or killed mid-build), and where each is held; put back by the build, the next run or the hourly idle tick |
 | `/var/lib/clawkeep/set-aside/run-*/` | 0700 | clawkeep | Where those files are held while the build runs (a `.clawkeep-set-aside/` beside the state dir when the data dir is on another filesystem); empty and removed afterwards |
@@ -146,6 +147,65 @@ SSH to the device's listener.
 > `needs-passphrase` so the UI can prompt. Uploaded objects end in
 > `.tar.gz.enc`; the legacy plaintext `.tar.gz` form is still *restorable* so
 > old snapshots are not stranded.
+
+## Backup quota admission
+
+Before uploading, the runner lists every page of the account's snapshot prefix
+and checks that **current snapshot bytes + the actual encrypted archive bytes <=
+quotaBytes**. An archive that exactly fills the quota is admitted; one byte more
+is not, and neither is anything against a quota of zero. The manifest and
+directory markers remain excluded, matching the existing quota accounting.
+Backup keys are treated as new snapshots, not replacement credit.
+
+A run that is not admitted ends in one of two ways, and in both it uploads
+nothing, leaves the manifest alone, prunes nothing and removes its own archive
+(plaintext and encrypted) from the staging directory:
+
+| Outcome | Exit code | When |
+|---|---|---|
+| quota full | `EXIT_QUOTA_FULL` (2) | the backup does not fit in what is free |
+| usage unverified | `EXIT_NETWORK` (6) | the prefix could not be listed to its end |
+
+The listing fails closed. It is tried three times, 5 s and 30 s apart, on top
+of the SDK's own retries, because by then the archive has taken minutes to
+hours to build; after that the run refuses rather than upload against a usage
+it could not count. "To its end" is literal: a page that fails part-way, a
+listing that stops while still marked truncated, or an entry with no size is an
+error, never a smaller total. Retention is applied only after a successful
+upload, so what it might free later cannot admit a backup that does not fit
+now — and it is refused on an incomplete listing too, since it forgets the
+lock of every snapshot the listing does not name.
+
+The refusal is written to `state.json` for the app to put into words:
+`last_refusal` (`quota_full` | `usage_unverified`), `last_refusal_at_ms`, and
+the sizes it was decided on — `last_refusal_needed_bytes`,
+`last_refusal_used_bytes`, `last_refusal_quota_bytes`. The next run clears it as
+it starts. It is separate from `quota_full_since_ms`, which records the portal
+refusing to mint credentials. The heartbeat's error text gives the same sizes
+in readable units ("needs 1.2 GB encrypted, but only 300 MB of 5.0 GB is free").
+
+### One run at a time
+
+A backup run holds `backup-run.lock` in the data directory from before it reads
+`state.json` until it has written its last word, so a scheduled run and a manual
+one on the same device cannot overlap. The second to start exits with
+`EXIT_ALREADY_RUNNING` (14) without reading or writing state and without a
+heartbeat — the run in progress keeps its own. It is not queued.
+
+The lock is a `flock`, held by the process rather than by the file: a run that
+crashes or is killed releases it as it dies, the file left behind holds
+nothing, and the archiver and `openssl` child processes are never handed it. If
+the lock file cannot be opened at all (a read-only data directory, a file owned
+by another user) no backup starts and the log says why.
+
+### What this does not do
+
+This is a device-side guard, **not an atomic account-wide reservation**. Writers
+on different devices or data directories, clients older than this check, and a
+quota that changes after the credentials were issued can still race it and take
+the account over its quota. A hard account-wide cap requires a server-side
+reservation/commit protocol and restricted upload capabilities; the current
+general-purpose S3 credentials cannot enforce it.
 
 ## Restoring a backup
 

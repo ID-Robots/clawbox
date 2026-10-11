@@ -30,6 +30,7 @@ import {
 } from "@/lib/clawkeep-protection";
 import { findOpenclawBin } from "@/lib/openclaw-config";
 import { get as configGet, set as configSet } from "@/lib/config-store";
+import { formatBytes, formatBytesApart } from "@/lib/format-bytes";
 import { getEdition } from "@/lib/harness";
 import { backupSourceFor } from "@/lib/harness/backup-source";
 import type { HarnessId } from "@/lib/harness/transport";
@@ -199,6 +200,36 @@ export interface ClawKeepStatus {
    * all. The links stay on the box, untouched. 0 on Hermes. */
   skippedLinks: SkippedLink[];
   skippedLinkCount: number;
+  /** Why the last backup run refused to upload, and the sizes it decided on;
+   * null when it was not refused before the upload. The daemon clears it when
+   * the next run starts, so it only ever describes the latest run — and it is
+   * the reason to show beside `lastHeartbeatStatus === "error"`, not a verdict
+   * of its own. */
+  lastRefusal: BackupRefusal | null;
+}
+
+/** The two ways the daemon's pre-upload admission check turns a backup away
+ * (`clawkeep/clawkeep/state.py`, `REFUSAL_*`). */
+export type BackupRefusalKind = "quota_full" | "usage_unverified";
+
+/**
+ * A backup the daemon would not upload, as it recorded it in state.json
+ * (`last_refusal*`). Byte counts are exact; a reader formats them.
+ *
+ *   - `quota_full`: the encrypted archive (`neededBytes`) does not fit in what
+ *     is free (`quotaBytes - usedBytes`). When `neededBytes > quotaBytes` no
+ *     amount of deleting makes room — only a larger plan does.
+ *   - `usage_unverified`: the account's usage could not be counted, so the
+ *     daemon uploaded nothing rather than guess. `usedBytes` is 0 because it
+ *     is unknown, not because the account is empty.
+ */
+export interface BackupRefusal {
+  kind: BackupRefusalKind;
+  /** When the daemon refused, unix ms. */
+  atMs: number;
+  neededBytes: number;
+  usedBytes: number;
+  quotaBytes: number;
 }
 
 /** One snapshot-sized archive file a backup carries. */
@@ -832,6 +863,8 @@ export async function resetRunningState(): Promise<void> {
     // Not in-flight state: the portal's last word on quota, which the schedule
     // save reads to tell a quota pause from a switch-off (TASK-1211).
     quota_full_since_ms: parsed.quota_full_since_ms ?? 0,
+    // `last_refusal*` is deliberately not carried over: it is the reason beside
+    // the "error" status this reset clears, and has nothing left to explain.
   };
   await writeStateFile(cleaned);
 }
@@ -897,12 +930,34 @@ interface StateFile {
   /** When the portal started refusing credentials for quota; 0 once it mints
    * them again. Written by the daemon (`runner._note_credentials`). */
   quota_full_since_ms?: number;
+  /** Why the last run refused to upload, with its sizes. Written by the
+   * daemon's admission check (`runner._note_refusal`), cleared by the next
+   * run. Read through `stateRefusal`. */
+  last_refusal?: unknown;
+  last_refusal_at_ms?: unknown;
+  last_refusal_needed_bytes?: unknown;
+  last_refusal_used_bytes?: unknown;
+  last_refusal_quota_bytes?: unknown;
 }
 
 /** The daemon writes these; a hand-edited or half-written state.json must not
  * put a string or a negative into a byte count the UI formats. */
 function stateCount(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+/** The refusal state.json records, or null. A kind this build does not know
+ * is no refusal at all: there would be no sentence to show for it. */
+function stateRefusal(state: StateFile): BackupRefusal | null {
+  const kind = state.last_refusal;
+  if (kind !== "quota_full" && kind !== "usage_unverified") return null;
+  return {
+    kind,
+    atMs: stateCount(state.last_refusal_at_ms),
+    neededBytes: stateCount(state.last_refusal_needed_bytes),
+    usedBytes: stateCount(state.last_refusal_used_bytes),
+    quotaBytes: stateCount(state.last_refusal_quota_bytes),
+  };
 }
 
 /** At most five, as the daemon writes them; anything that does not read as
@@ -1326,6 +1381,7 @@ async function readStatus(): Promise<ClawKeepStatus> {
     largeArchiveBytes: stateCount(stateRaw.last_large_archive_bytes),
     skippedLinks: readSkippedLinks(stateRaw.last_skipped_links),
     skippedLinkCount: stateCount(stateRaw.last_skipped_link_count),
+    lastRefusal: stateRefusal(stateRaw),
   };
 }
 
@@ -1361,11 +1417,25 @@ export interface BackupResult {
  * The status is chosen so a client that only looks at the class still gets it
  * right: 4xx where the owner has to do something (re-pair, buy room, set a
  * passphrase), 5xx where the box or the portal failed.
+ *
+ * Two exit codes say two different things each, and `refusal` — what the run
+ * recorded in state.json, see `backupRefusalFor` — is what tells them apart.
+ * EXIT_QUOTA_FULL is the portal refusing credentials for a full account, or
+ * the daemon's own check finding that THIS archive does not fit; the second
+ * knows the sizes and says them. EXIT_NETWORK is the portal being unreachable,
+ * or the account's usage being uncountable with the portal reachable — and
+ * "could not reach the portal" is the wrong thing to say about the second.
  */
-export function backupExitError(exitCode: number): ClawKeepError | null {
+export function backupExitError(
+  exitCode: number,
+  refusal: BackupRefusal | null = null,
+): ClawKeepError | null {
   if (exitCode === 0) return null;
   switch (exitCode) {
     case 2: // EXIT_QUOTA_FULL
+      if (refusal?.kind === "quota_full") {
+        return new ClawKeepError(quotaRefusalSentence(refusal), 507, "quota_full");
+      }
       return new ClawKeepError(
         "The ClawKeep account is out of space — free some snapshots or upgrade the plan",
         507,
@@ -1386,6 +1456,16 @@ export function backupExitError(exitCode: number): ClawKeepError | null {
     case 5: // EXIT_SERVER
       return new ClawKeepError("The ClawKeep portal returned an error", 502, "portal_error");
     case 6: // EXIT_NETWORK
+      if (refusal?.kind === "usage_unverified") {
+        // 503, not 504: nothing timed out and the portal may well be up. The
+        // daemon declined to upload against a usage it could not count.
+        return new ClawKeepError(
+          "ClawKeep could not check how much cloud storage is in use, so the backup was not uploaded"
+            + " — earlier backups are untouched. Check the internet connection and try again",
+          503,
+          "usage_unverified",
+        );
+      }
       return new ClawKeepError("Could not reach the ClawKeep portal", 504, "offline");
     case 7:
       // EXIT_OPENCLAW — building the archive failed, on either edition. The
@@ -1428,6 +1508,16 @@ export function backupExitError(exitCode: number): ClawKeepError | null {
         500,
         "archive_conflict",
       );
+    case 14:
+      // EXIT_ALREADY_RUNNING — the daemon's own single-instance lock: another
+      // run (the scheduled one, or a second click) holds this box's data dir,
+      // and this one left without touching state or heartbeat. Not a failed
+      // backup, so 409 rather than a 5xx: the one in flight is still going.
+      return new ClawKeepError(
+        "Another backup is already running — wait for it to finish, then try again",
+        409,
+        "already_running",
+      );
     case 64: // daemon.py, EX_USAGE — a bad config, before the run begins
       return new ClawKeepError("The ClawKeep configuration is unusable", 500, "config_error");
     case 65:
@@ -1458,6 +1548,56 @@ export function backupExitError(exitCode: number): ClawKeepError | null {
       // is a 502 rather than a 200.
       return new ClawKeepError("The backup did not finish", 502, "backup_failed");
   }
+}
+
+/** A byte count for a sentence: "1.2 GB", and "0 B" where the shared
+ * formatter would omit the figure. */
+function sentenceBytes(bytes: number): string {
+  return formatBytes(bytes) ?? "0 B";
+}
+
+/**
+ * The English sentence for a backup that does not fit, with the sizes. Two
+ * shapes, because the remedy differs: an archive larger than the whole quota
+ * cannot be made room for by deleting snapshots.
+ */
+function quotaRefusalSentence(refusal: BackupRefusal): string {
+  const quota = sentenceBytes(refusal.quotaBytes);
+  const untouched = "nothing was uploaded and earlier backups are untouched";
+  // The two figures a sentence compares are printed apart (`formatBytesApart`):
+  // a backup that misses by a little must not read "needs 1.2 GB, only 1.2 GB free".
+  if (refusal.neededBytes > refusal.quotaBytes) {
+    const [needed, plan] = formatBytesApart(refusal.neededBytes, refusal.quotaBytes);
+    return `This backup is ${needed}, more than the whole ClawKeep plan holds (${plan}) — ${untouched}.`
+      + " Deleting snapshots will not make room for it; upgrade the plan";
+  }
+  const [needed, free] = formatBytesApart(
+    refusal.neededBytes,
+    Math.max(0, refusal.quotaBytes - refusal.usedBytes),
+  );
+  return `This backup needs ${needed}, but only ${free} of the ${quota} of ClawKeep storage is free — ${untouched}.`
+    + " Delete snapshots you no longer need or upgrade the plan, then back up again";
+}
+
+/**
+ * The refusal the daemon recorded for the run that just exited `exitCode`, or
+ * null when that run recorded none.
+ *
+ * Only the two exit codes a refusal ends in are looked up, and only a record
+ * of the matching kind written since the run started counts. The daemon
+ * clears the record as a run begins, so a stale one should not exist — but a
+ * daemon killed before its first save writes nothing, and the last run's
+ * sizes must not be read out as this one's.
+ */
+export async function backupRefusalFor(
+  exitCode: number,
+  startedAtMs: number,
+): Promise<BackupRefusal | null> {
+  const wanted: BackupRefusalKind | null =
+    exitCode === 2 ? "quota_full" : exitCode === 6 ? "usage_unverified" : null;
+  if (!wanted) return null;
+  const refusal = stateRefusal(await readStateFile());
+  return refusal && refusal.kind === wanted && refusal.atMs >= startedAtMs ? refusal : null;
 }
 
 // Cap stdout/stderr capture so a chatty `openclaw backup create` over a

@@ -115,6 +115,8 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "shelf.clawkeepStale": "ClawKeep backup overdue — open to back up now",
     "shelf.clawkeepNotSetUp": "ClawKeep is not set up yet — open to protect this box",
     "shelf.clawkeepFailed": "Last ClawKeep backup failed — open to see why",
+    "shelf.clawkeepNoRoom": "Last ClawKeep backup needs {needed} but only {free} is free — open to see your options",
+    "shelf.clawkeepUsageUnverified": "ClawKeep couldn't check cloud storage, so the last backup wasn't uploaded — open to see why",
     "shelf.clawkeepBlocked": "ClawKeep needs an encryption passphrase — open to set one",
     "shelf.clawkeepNeverBackedUp": "This box has never been backed up — open ClawKeep to protect it",
     "shelf.clawkeepBusy": "ClawKeep backup running — open to see progress",

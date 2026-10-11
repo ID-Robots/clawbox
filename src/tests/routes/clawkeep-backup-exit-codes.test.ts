@@ -1,4 +1,5 @@
 import { EventEmitter } from "node:events";
+import { writeFileSync } from "node:fs";
 import fs from "fs/promises";
 import os from "os";
 import path from "path";
@@ -33,6 +34,10 @@ const daemon = vi.hoisted(() => ({
   exitCode: 0,
   stdout: "",
   stderr: "",
+  /** What the daemon does to its data dir before it exits — it writes
+   * state.json DURING the run, so a fixture seeded beforehand would not be
+   * the run's own. */
+  beforeExit: null as null | (() => void),
 }));
 
 vi.mock("node:child_process", async (importOriginal) => {
@@ -48,6 +53,7 @@ vi.mock("node:child_process", async (importOriginal) => {
     child.stderr = new EventEmitter();
     child.kill = () => {};
     setImmediate(() => {
+      daemon.beforeExit?.();
       if (daemon.stdout) child.stdout.emit("data", Buffer.from(daemon.stdout));
       if (daemon.stderr) child.stderr.emit("data", Buffer.from(daemon.stderr));
       child.emit("close", daemon.exitCode);
@@ -60,6 +66,28 @@ vi.mock("node:child_process", async (importOriginal) => {
 const TEST_ROOT = path.join(os.tmpdir(), `clawbox-clawkeep-exits-${process.pid}-${Date.now()}`);
 const DATA_DIR = path.join(TEST_ROOT, "clawkeep");
 const TOKEN_PATH = path.join(DATA_DIR, "token");
+const STATE_PATH = path.join(DATA_DIR, "state.json");
+
+const GB = 1024 ** 3;
+
+/** Have the daemon record a refusal the way `runner._note_refusal` does:
+ * during the run, stamped with the time it refused. */
+function daemonRefuses(
+  kind: string,
+  sizes: { needed: number; used: number; quota: number },
+  atMs?: number,
+): void {
+  daemon.beforeExit = () => {
+    writeFileSync(STATE_PATH, JSON.stringify({
+      last_heartbeat_status: "error",
+      last_refusal: kind,
+      last_refusal_at_ms: atMs ?? Date.now(),
+      last_refusal_needed_bytes: sizes.needed,
+      last_refusal_used_bytes: sizes.used,
+      last_refusal_quota_bytes: sizes.quota,
+    }));
+  };
+}
 
 /** The daemon's own line for a revoked pairing, as it reaches stderr. */
 const REVOKED_TAIL =
@@ -95,6 +123,8 @@ beforeEach(async () => {
   daemon.exitCode = 0;
   daemon.stdout = "";
   daemon.stderr = "";
+  daemon.beforeExit = null;
+  await fs.rm(STATE_PATH, { force: true });
   // Paired: the token is on disk, which is all the pre-flight looks at.
   await fs.writeFile(TOKEN_PATH, "claw_testtoken", { mode: 0o600 });
 });
@@ -119,7 +149,7 @@ describe("POST /setup-api/clawkeep/backup maps the daemon's EXIT_* taxonomy", ()
   it("never answers 2xx for any non-zero exit the daemon can produce", async () => {
     // The whole taxonomy, plus the two the bridge synthesises itself: 124 for
     // its own kill timer and 127 for a daemon that could not be started.
-    for (const exitCode of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 64, 65, 99, 124, 127]) {
+    for (const exitCode of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 64, 65, 99, 124, 127]) {
       daemon.exitCode = exitCode;
       daemon.stderr = `daemon said something about ${exitCode}`;
       daemon.spawns.length = 0;
@@ -148,6 +178,9 @@ describe("POST /setup-api/clawkeep/backup maps the daemon's EXIT_* taxonomy", ()
       11: { status: 503, code: "archive_busy" },
       12: { status: 500, code: "database_damaged" },
       13: { status: 500, code: "archive_conflict" },
+      // The daemon's run lock: one is already in flight. Not a 5xx — nothing
+      // failed — and not the catch-all a crash (exit 1) lands on.
+      14: { status: 409, code: "already_running" },
     };
     for (const [exit, want] of Object.entries(expected)) {
       daemon.exitCode = Number(exit);
@@ -174,6 +207,164 @@ describe("POST /setup-api/clawkeep/backup maps the daemon's EXIT_* taxonomy", ()
   });
 });
 
+describe("a backup the daemon refused before uploading says why, with sizes a person reads", () => {
+  it("says what the backup needs and what is free when it does not fit", async () => {
+    daemon.exitCode = 2;
+    daemonRefuses("quota_full", { needed: 1_288_490_189, used: 5_046_586_573, quota: 5 * GB });
+
+    const res = await backupPOST(post({}));
+    const body = (await res.json()) as Record<string, unknown>;
+
+    expect(res.status).toBe(507);
+    expect(body.code).toBe("quota_full");
+    expect(body.error).toMatch(/needs 1\.2 GB, but only 307 MB of the 5\.0 GB/);
+    expect(body.error).toMatch(/nothing was uploaded and earlier backups are untouched/);
+    expect(body.error).toMatch(/Delete snapshots you no longer need or upgrade the plan/);
+    // Readable units only — the byte counts are data, never the sentence.
+    expect(body.error).not.toMatch(/\d{7,}/);
+    expect(body.refusal).toMatchObject({
+      kind: "quota_full",
+      neededBytes: 1_288_490_189,
+      usedBytes: 5_046_586_573,
+      quotaBytes: 5 * GB,
+    });
+  });
+
+  it("does not tell the owner to delete snapshots for a backup larger than the whole plan", async () => {
+    daemon.exitCode = 2;
+    daemonRefuses("quota_full", { needed: 6 * GB, used: 2 * GB, quota: 5 * GB });
+
+    const body = (await (await backupPOST(post({}))).json()) as Record<string, string>;
+
+    expect(body.code).toBe("quota_full");
+    expect(body.error).toMatch(/is 6\.0 GB, more than the whole ClawKeep plan holds \(5\.0 GB\)/);
+    expect(body.error).toMatch(/Deleting snapshots will not make room for it; upgrade the plan/);
+    expect(body.error).not.toMatch(/you no longer need/);
+  });
+
+  it("does not print a near miss as if the backup had fitted", async () => {
+    // 1.24 GB needed against 1.21 GB free: each rounds to "1.2 GB" on its own.
+    daemon.exitCode = 2;
+    daemonRefuses("quota_full", {
+      needed: 1_331_439_862, used: 5 * GB - 1_299_227_607, quota: 5 * GB,
+    });
+    const nearMiss = (await (await backupPOST(post({}))).json()) as Record<string, string>;
+    expect(nearMiss.error).toMatch(/needs 1\.24 GB, but only 1\.21 GB of the 5\.0 GB/);
+
+    // … and a backup 40 MB larger than the plan is not "5.0 GB, more than (5.0 GB)".
+    daemonRefuses("quota_full", { needed: 5 * GB + 40 * 1024 ** 2, used: 0, quota: 5 * GB });
+    const overPlan = (await (await backupPOST(post({}))).json()) as Record<string, string>;
+    expect(overPlan.error).toMatch(/is 5\.04 GB, more than the whole ClawKeep plan holds \(5\.00 GB\)/);
+  });
+
+  it("reads a quota of zero as a plan that holds nothing, not as a missing figure", async () => {
+    daemon.exitCode = 2;
+    daemonRefuses("quota_full", { needed: 2048, used: 0, quota: 0 });
+
+    const body = (await (await backupPOST(post({}))).json()) as Record<string, string>;
+
+    expect(body.error).toMatch(/is 2\.0 KB, more than the whole ClawKeep plan holds \(0 B\)/);
+  });
+
+  it("keeps the portal's own quota refusal as it was — it knows no sizes", async () => {
+    // 402 at the credentials mint: the daemon exits 2 before it builds anything
+    // and records no refusal.
+    daemon.exitCode = 2;
+
+    const res = await backupPOST(post({}));
+    const body = (await res.json()) as Record<string, unknown>;
+
+    expect(res.status).toBe(507);
+    expect(body.code).toBe("quota_full");
+    expect(body.error).toBe("The ClawKeep account is out of space — free some snapshots or upgrade the plan");
+    expect(body).not.toHaveProperty("refusal");
+  });
+
+  it("does not read the last run's sizes out as this run's", async () => {
+    // A record from before this run started is another run's: a daemon killed
+    // before its first save leaves the old file exactly as it was.
+    daemon.exitCode = 2;
+    daemonRefuses("quota_full", { needed: 9 * GB, used: 0, quota: 5 * GB }, Date.now() - 60_000);
+
+    const body = (await (await backupPOST(post({}))).json()) as Record<string, unknown>;
+
+    expect(body.error).toBe("The ClawKeep account is out of space — free some snapshots or upgrade the plan");
+    expect(body).not.toHaveProperty("refusal");
+  });
+
+  it("says usage could not be checked, instead of blaming the portal's reachability", async () => {
+    daemon.exitCode = 6;
+    daemonRefuses("usage_unverified", { needed: 3 * GB, used: 0, quota: 5 * GB });
+
+    const res = await backupPOST(post({}));
+    const body = (await res.json()) as Record<string, unknown>;
+
+    expect(res.status).toBe(503);
+    expect(body.code).toBe("usage_unverified");
+    expect(body.error).toMatch(/could not check how much cloud storage is in use/);
+    expect(body.error).toMatch(/earlier backups are untouched/);
+    expect(body.error).not.toMatch(/portal/i);
+    expect(body.refusal).toMatchObject({ kind: "usage_unverified", neededBytes: 3 * GB });
+  });
+
+  it("still says the portal is unreachable when that is what exit 6 meant", async () => {
+    daemon.exitCode = 6;
+
+    const res = await backupPOST(post({}));
+    const body = (await res.json()) as Record<string, unknown>;
+
+    expect({ status: res.status, code: body.code }).toEqual({ status: 504, code: "offline" });
+    expect(body).not.toHaveProperty("refusal");
+  });
+
+  it("only takes a refusal of the kind its exit code can mean", async () => {
+    daemon.exitCode = 6;
+    daemonRefuses("quota_full", { needed: GB, used: 0, quota: GB });
+    const offline = (await (await backupPOST(post({}))).json()) as Record<string, unknown>;
+    expect(offline.code).toBe("offline");
+    expect(offline).not.toHaveProperty("refusal");
+
+    daemon.exitCode = 8; // EXIT_UPLOAD — never a refusal, whatever the file says
+    daemonRefuses("quota_full", { needed: GB, used: 0, quota: GB });
+    const upload = (await (await backupPOST(post({}))).json()) as Record<string, unknown>;
+    expect(upload.code).toBe("upload_failed");
+    expect(upload).not.toHaveProperty("refusal");
+
+    // A kind a newer daemon might add has no sentence here, so it is none.
+    daemon.exitCode = 2;
+    daemonRefuses("something_new", { needed: GB, used: 0, quota: GB });
+    const unknown = (await (await backupPOST(post({}))).json()) as Record<string, unknown>;
+    expect(unknown).not.toHaveProperty("refusal");
+  });
+
+  it("an idle ping reports no refusal — it uploads nothing to refuse", async () => {
+    daemon.exitCode = 6;
+    daemonRefuses("usage_unverified", { needed: GB, used: 0, quota: 5 * GB });
+
+    const body = (await (await backupPOST(post({ idle: true }))).json()) as Record<string, unknown>;
+
+    expect(body.code).toBe("offline");
+    expect(body).not.toHaveProperty("refusal");
+  });
+
+  it("answers a run turned away by another with its own sentence, not a failure's", async () => {
+    daemon.exitCode = 14;
+    daemon.stderr = "another backup is already running on this device";
+
+    const res = await backupPOST(post({}));
+    const body = (await res.json()) as Record<string, unknown>;
+
+    expect(res.status).toBe(409);
+    expect(body.code).toBe("already_running");
+    expect(body.error).toBe("Another backup is already running — wait for it to finish, then try again");
+
+    // … and a crash, which exits 1, is still "did not finish".
+    daemon.exitCode = 1;
+    const crashed = (await (await backupPOST(post({}))).json()) as Record<string, unknown>;
+    expect(crashed.code).toBe("backup_failed");
+  });
+});
+
 describe("the bridge and the daemon agree on the taxonomy", () => {
   it("gives every EXIT_* the daemon defines a code of its own", async () => {
     // TASK-1000 added three; a fourth added to runner.py and not here would
@@ -187,8 +378,14 @@ describe("the bridge and the daemon agree on the taxonomy", () => {
       ([, name, value]) => ({ name, value: Number(value) }),
     );
     expect(codes.map((c) => c.name)).toEqual(
-      expect.arrayContaining(["EXIT_ARCHIVE_BUSY", "EXIT_ARCHIVE_DB_DAMAGED", "EXIT_ARCHIVE_CONFLICT"]),
+      expect.arrayContaining([
+        "EXIT_ARCHIVE_BUSY",
+        "EXIT_ARCHIVE_DB_DAMAGED",
+        "EXIT_ARCHIVE_CONFLICT",
+        "EXIT_ALREADY_RUNNING",
+      ]),
     );
+    expect(codes.find((c) => c.name === "EXIT_ALREADY_RUNNING")?.value).toBe(14);
     // OK is not a failure; BACKUP_FAILED and UNKNOWN ARE the catch-all.
     const specific = codes.filter(
       (c) => !["EXIT_OK", "EXIT_BACKUP_FAILED", "EXIT_UNKNOWN"].includes(c.name),
@@ -198,6 +395,21 @@ describe("the bridge and the daemon agree on the taxonomy", () => {
         name,
         code: "backup_failed",
       });
+    }
+  });
+
+  it("knows the refusal kinds the daemon writes, by the names it writes them under", async () => {
+    // The two sides share state.json and nothing else: a kind renamed in
+    // state.py would simply stop being shown, with no error anywhere.
+    const state = await fs.readFile(
+      path.join(process.cwd(), "clawkeep", "clawkeep", "state.py"),
+      "utf8",
+    );
+    const kinds = [...state.matchAll(/^REFUSAL_[A-Z_]+\s*=\s*"([a-z_]+)"/gm)].map(([, kind]) => kind);
+    expect(kinds.sort()).toEqual(["quota_full", "usage_unverified"]);
+    for (const field of ["last_refusal", "last_refusal_at_ms", "last_refusal_needed_bytes",
+      "last_refusal_used_bytes", "last_refusal_quota_bytes"]) {
+      expect(state).toMatch(new RegExp(`^    ${field}: `, "m"));
     }
   });
 });

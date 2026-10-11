@@ -81,6 +81,23 @@ def test_mint_credentials_malformed_body() -> None:
     assert exc.value.kind == "other"
 
 
+@pytest.mark.parametrize("quota", ["absent", None, "plenty", [], {}])
+def test_credentials_without_a_usable_quota_are_malformed(quota: object) -> None:
+    """The admission check divides the world by `quotaBytes`. An answer that
+    does not state one is not credentials with an unlimited quota — it is a
+    malformed answer, and the run stops before it builds anything."""
+    body = dict(CRED_OK)
+    if quota == "absent":
+        del body["quotaBytes"]
+    else:
+        body["quotaBytes"] = quota
+    with patch("clawkeep.api.requests.post", return_value=_resp(200, body)):
+        with pytest.raises(api.ApiError) as exc:
+            api.mint_credentials("https://s", "claw_x")
+    assert exc.value.kind == "other"
+    assert "malformed /credentials response" in str(exc.value)
+
+
 def test_heartbeat_serialises_optional_fields() -> None:
     captured: dict[str, Any] = {}
 
