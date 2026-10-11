@@ -15,6 +15,11 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 
+// Starts real processes (the hook, `sh`): vitest's 5 s test and 10 s hook
+// defaults are not enough on a loaded CI runner. See
+// src/tests/unit/test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+
 let root: string;
 vi.mock("@/lib/config-store", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/config-store")>();
