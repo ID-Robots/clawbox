@@ -2646,6 +2646,18 @@ describe("the pull request the goal asks for: the orchestrator's, never a worker
     expect(github.mergePullRequest).not.toHaveBeenCalled();
   });
 
+  it("marks a draft ready once, and leaves it open — never polling for ever — when GitHub refuses", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    github.readPullRequest.mockResolvedValue({ ...GREEN, isDraft: true });
+    github.markPullRequestReady.mockResolvedValue({ ok: false, detail: "gh: could not mark it ready." });
+    const board = await team.startTeam({ goal: "Build it, open a pull request and merge it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.pr).toMatchObject({ phase: "left_open", detail: "gh: could not mark it ready." });
+    expect(github.markPullRequestReady).toHaveBeenCalledTimes(1);
+    expect(github.mergePullRequest).not.toHaveBeenCalled();
+  });
+
   it("fails the team with GitHub's reason when the pull request cannot be opened", async () => {
     outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
     github.openPullRequest.mockResolvedValue({ ok: false, detail: "This project has no GitHub remote yet." });

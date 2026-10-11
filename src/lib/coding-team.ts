@@ -1822,6 +1822,9 @@ async function teamPullRequest(team: LiveTeam): Promise<{ kind: "done" } | { kin
   }
 
   const startedAt = Date.now();
+  // When this box marked a draft of it ready: the post-ready grace decideMerge
+  // keeps, and the one ready it makes — a draft again after that is left open.
+  let readyAt: number | null = null;
   for (;;) {
     await sleep(teamPrPollMs);
     if (team.stopRequested) return null;
@@ -1838,15 +1841,24 @@ async function teamPullRequest(team: LiveTeam): Promise<{ kind: "done" } | { kin
       saveBoard(board);
       pr = board.pr;
     }
-    const verdict = decideMerge({ snapshot, waitedMs: Math.min(Date.now() - startedAt, teamPrMaxWaitMs), reviewOk: true, sinceReadyMs: null });
+    const verdict = decideMerge({ snapshot, waitedMs: Math.min(Date.now() - startedAt, teamPrMaxWaitMs), reviewOk: true, sinceReadyMs: readyAt === null ? null : Date.now() - readyAt });
     if (verdict.action === "wait") {
       if (Date.now() - startedAt < teamPrMaxWaitMs) continue;
       record({ ...pr, phase: "left_open", detail: "Gave up waiting for its checks." }, `Pull request #${pr.number}: gave up waiting for its checks after ${Math.round(teamPrMaxWaitMs / 60_000)} minutes; it is left open.`);
       return { kind: "done" };
     }
     if (verdict.action === "ready") {
-      // Somebody made a draft of it: readied, and its checks waited on again.
-      await markPullRequestReady(board.directory, pr.number);
+      // Somebody made a draft of it: readied once, and its checks waited on
+      // again under the same ceiling. A ready GitHub refuses is left open.
+      const readied = Date.now() - startedAt < teamPrMaxWaitMs
+        ? await markPullRequestReady(board.directory, pr.number)
+        : { ok: false as const, detail: "Gave up waiting for its checks." };
+      if (team.stopRequested) return null;
+      if (!readied.ok) {
+        record({ ...pr, phase: "left_open", detail: readied.detail }, `Pull request #${pr.number} is a draft and could not be marked ready; it is left open. ${firstLine(readied.detail, 300)}`);
+        return { kind: "done" };
+      }
+      readyAt = Date.now();
       continue;
     }
     if (verdict.action === "merge") {
