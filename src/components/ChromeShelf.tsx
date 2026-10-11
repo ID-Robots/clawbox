@@ -12,6 +12,7 @@ import { useDesktopClock } from "@/lib/use-desktop-clock";
 import { desktopOverlayMounted, quickCaptureRequest, requestCapture, subscribeOverlays } from "@/lib/screenshot/session";
 import { captureShortcutKeys } from "@/lib/screenshot/shortcuts";
 import { useCanRequestFullscreen, useIsFullscreen } from "@/lib/use-is-fullscreen";
+import BatteryIndicator from "./BatteryIndicator";
 
 /** The reasons that put a shield in an at-risk state. `ok` is not among them. */
 type AtRiskReason = Exclude<ProtectionReason, "ok">;
@@ -548,6 +549,9 @@ export default function ChromeShelf({
               )}
               {!isPortraitPhone && renderShieldButton()}
               {!isPortraitPhone && <ShelfScreenshotButton iconSize={22} />}
+              {/* The laptop's battery, left of the clock as on the desktop
+                  bar; renders nothing on a box without one. */}
+              {!isPortraitPhone && <BatteryIndicator />}
               {!isPortraitPhone && (
                 <button
                   onClick={onTrayClick}
@@ -625,6 +629,8 @@ export default function ChromeShelf({
           )}
           {renderShieldButton()}
           <ShelfScreenshotButton iconSize={18} />
+          {/* The battery on an x64 laptop; nothing anywhere else. */}
+          <BatteryIndicator />
           <button
             onClick={onTrayClick}
             className="hidden sm:flex items-center h-10 px-3 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"

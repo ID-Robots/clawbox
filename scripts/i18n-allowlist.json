@@ -117,6 +117,8 @@
     { "key": "terminal.settings.shellSection", "locales": ["de", "es", "fr", "it", "nl"], "reason": "\"Shell\" is the loanword these languages use — see their own terminal.settings.shell (\"Standard-Shell\", \"Shell par défaut\", …)." },
     { "key": "terminal.statusError", "locales": ["es"], "reason": "\"Error\" is the Spanish word." },
     { "key": "terminal.tab", "locales": ["de", "es", "fr", "nl", "sv"], "reason": "\"Terminal\" is the same word in these languages." },
+    { "key": "tray.batteryHoursMinutes", "locales": ["es", "fr", "it"], "reason": "\"h\" and \"min\" are the hour and minute symbols Spanish, French and Italian write too — see their own chat.progressCard.hoursAgo/minutesAgo." },
+    { "key": "tray.batteryMinutes", "locales": ["es", "fr", "it", "nl", "sv"], "reason": "\"min\" is the minute abbreviation these languages write too — see their own chat.progressCard.minutesAgo." },
     { "key": "tray.internet", "locales": ["de", "es", "fr", "it", "nl", "sv"], "reason": "\"Internet\" is the same word, and \"ms\" is a unit." },
     { "key": "update.agent", "locales": ["de", "fr", "nl", "sv"], "reason": "\"Agent\" is the same word in these languages." },
     { "key": "update.badgeUpdate", "locales": ["de"], "reason": "\"UPDATE\" is the loanword German uses on the badge." },
