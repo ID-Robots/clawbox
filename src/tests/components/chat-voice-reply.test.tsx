@@ -746,7 +746,7 @@ describe("spoken replies in the desktop chat", () => {
     replyText = "Fine, thanks.";
     render(<ChatPopup isOpen onClose={() => {}} />);
     await typeIntoTheChat();
-    await waitFor(() => expect(speakBodies).toEqual([JSON.stringify({ text: "Fine, thanks." })]));
+    await waitFor(() => expect(speakBodies).toEqual([SPEAK_BODY]));
     const player = await screen.findByTestId("chat-audio");
     expect(player).toHaveAttribute("src", "blob:spoken-reply");
     await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
@@ -760,7 +760,7 @@ describe("spoken replies in the desktop chat", () => {
     replyText = "Fine, thanks.";
     render(<ChatPopup isOpen onClose={() => {}} />);
     await typeIntoTheChat();
-    await waitFor(() => expect(speakBodies).toEqual([JSON.stringify({ text: "Fine, thanks." })]));
+    await waitFor(() => expect(speakBodies).toEqual([SPEAK_BODY]));
     expect(await screen.findByTestId("chat-audio")).toHaveAttribute("src", "blob:spoken-reply");
     await settleAfterTheTurn();
     expect(play).not.toHaveBeenCalled();
@@ -786,7 +786,7 @@ describe("spoken replies in the desktop chat", () => {
     replyText = "Fine, thanks.";
     render(<ChatPopup isOpen onClose={() => {}} />);
     await speakIntoTheChat();
-    await waitFor(() => expect(speakBodies).toEqual([JSON.stringify({ text: "Fine, thanks." })]));
+    await waitFor(() => expect(speakBodies).toEqual([SPEAK_BODY]));
     await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
     await settleAfterTheTurn();
     expect(play).toHaveBeenCalledTimes(1);
@@ -898,7 +898,7 @@ describe("spoken replies in the desktop chat", () => {
     replyText = "Fine, thanks.";
     render(<ChatPopup isOpen onClose={() => {}} />);
     await typeIntoTheChat();
-    await waitFor(() => expect(speakBodies).toEqual([JSON.stringify({ text: "Fine, thanks." })]), { timeout: 8000 });
+    await waitFor(() => expect(speakBodies).toEqual([SPEAK_BODY]), { timeout: 8000 });
     await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
     await settleAfterTheTurn();
     expect(play).toHaveBeenCalledTimes(1);
