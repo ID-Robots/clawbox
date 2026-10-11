@@ -30,10 +30,22 @@ vi.mock("@/lib/coding-pr", async (importOriginal) => ({
 }));
 const readReviewSnapshot = vi.hoisted(() => vi.fn());
 const readFailedCheckLogs = vi.hoisted(() => vi.fn());
+const findOpenPullRequestForBranch = vi.hoisted(() => vi.fn());
+const pushBranch = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/coding-review", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-review")>()),
   readReviewSnapshot,
   readFailedCheckLogs,
+  findOpenPullRequestForBranch,
+  pushBranch,
+}));
+// A run's own copy of the project, faked where a resume and a settle reach
+// git: put back from its branch, and "cannot tell" how far ahead it is, which
+// keeps the copy as it is.
+vi.mock("@/lib/coding-run-worktree", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/coding-run-worktree")>()),
+  restoreRunWorktree: vi.fn(async () => true),
+  commitsAhead: vi.fn(async () => null),
 }));
 vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent: vi.fn(async () => undefined) }));
 vi.mock("@/lib/project-icon", () => ({ ensureProjectIcon: vi.fn(async () => ({ icon: "skipped", favicon: false })) }));
@@ -86,6 +98,8 @@ beforeEach(async () => {
   mergePullRequest.mockReset();
   readReviewSnapshot.mockReset();
   readFailedCheckLogs.mockReset();
+  findOpenPullRequestForBranch.mockReset();
+  pushBranch.mockReset();
   vi.resetModules();
   lib = await import("@/lib/coding-agent");
 });
@@ -187,5 +201,79 @@ describe("a Fix CI continuation", () => {
 
   it("needs the run it continues", async () => {
     await expect(lib.startRun({ task: "Fix it.", directory: home, source: "owner", fixCi: true })).rejects.toThrow(/name it in resumeRunId/);
+  });
+});
+
+describe("a Fix CI run's fix reaches the pull request it fixes", () => {
+  const wt = () => path.join(base, "wt");
+
+  beforeEach(async () => {
+    const bin = path.join(home, ".local", "bin");
+    fs.mkdirSync(bin, { recursive: true });
+    fs.mkdirSync(wt(), { recursive: true });
+    fs.writeFileSync(path.join(bin, "claude"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, "claude-ds"), [
+      "#!/usr/bin/env bash",
+      "head -n 1 > /dev/null",
+      `echo '{"type":"system","subtype":"init","session_id":"sess-fix","model":"m"}'`,
+      // It changes a file, as a fix does — what the review pass is started for.
+      `echo "fixed" > "$PWD/cart.js"`,
+      `printf '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"w1","name":"Write","input":{"file_path":"%s/cart.js"}}]}}\\n' "$PWD"`,
+      `echo '${JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "w1", is_error: false }] } })}'`,
+      `echo '${JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, result: "Fixed.", session_id: "sess-fix" })}'`,
+      "exit 0",
+    ].join("\n"), { mode: 0o755 });
+    // The run whose pull request went red, in its own copy of the project.
+    const ci = { prNumber: 7, at: 1, checks: ["test"], tests: [], files: [], excerpt: "", unread: [], attempt: 0, fixRunId: null };
+    const worktree = { path: wt(), branch: `clawbox/${RUN_ID}`, base: "main", project: home, removed: false, branchRemoved: false, result: null };
+    fs.writeFileSync(runsFile(), JSON.stringify([record({ directory: wt(), worktree, ci })]));
+    findOpenPullRequestForBranch.mockResolvedValue({ number: 7, url: "https://github.com/o/r/pull/7", base: "main" });
+    pushBranch.mockResolvedValue({ ok: true });
+    readReviewSnapshot.mockResolvedValue({ error: "not read in this test" });
+  });
+
+  it("pushes on the adopt path — the one a box with the auto-PR switch off takes", async () => {
+    fs.writeFileSync(path.join(root, "data", "config.json"), JSON.stringify({ clawai_token: "t", coding_agent_enabled: true, coding_agent_auto_pr: false }));
+    await reload();
+    const fix = await lib.startRun({ task: "Fix the CI.", resumeRunId: RUN_ID, source: "owner", fixCi: true });
+    await lib.waitForRun(fix.id, 20_000);
+    await vi.waitFor(() => { expect(pushBranch).toHaveBeenCalledWith(wt(), `clawbox/${RUN_ID}`); }, { timeout: 15_000 });
+    expect(pushBranch).toHaveBeenCalledTimes(1);
+  });
+
+  it("pushes when the run settling last is the Fix CI run's review pass", async () => {
+    fs.writeFileSync(path.join(root, "data", "config.json"), JSON.stringify({ clawai_token: "t", coding_agent_enabled: true, coding_agent_auto_pr: false, coding_agent_review_pass: true }));
+    await reload();
+    const fix = await lib.startRun({ task: "Fix the CI.", resumeRunId: RUN_ID, source: "owner", fixCi: true });
+    await lib.waitForRun(fix.id, 20_000);
+    // The review pass is a run of its own; its settle is the one that adopts.
+    await vi.waitFor(() => { expect(lib.listRuns().some((r) => r.reviewOf === fix.id)).toBe(true); }, { timeout: 15_000 });
+    await vi.waitFor(() => { expect(pushBranch).toHaveBeenCalledWith(wt(), `clawbox/${RUN_ID}`); }, { timeout: 20_000 });
+  });
+
+  it("does not push for a continuation that is not a Fix CI", async () => {
+    fs.writeFileSync(path.join(root, "data", "config.json"), JSON.stringify({ clawai_token: "t", coding_agent_enabled: true, coding_agent_auto_pr: false }));
+    await reload();
+    const plain = await lib.startRun({ task: "Carry on.", resumeRunId: RUN_ID, source: "owner" });
+    await lib.waitForRun(plain.id, 20_000);
+    await vi.waitFor(() => { expect(findOpenPullRequestForBranch).toHaveBeenCalled(); }, { timeout: 15_000 });
+    expect(pushBranch).not.toHaveBeenCalled();
+  });
+});
+
+describe("a Fix CI start that cannot spawn", () => {
+  it("gives the failure it claimed back", async () => {
+    const bin = path.join(home, ".local", "bin");
+    fs.mkdirSync(bin, { recursive: true });
+    fs.writeFileSync(path.join(bin, "claude"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, "claude-ds"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+    const ci = { prNumber: 7, at: 1, checks: ["test"], tests: [], files: [], excerpt: "", unread: [], attempt: 0, fixRunId: null };
+    fs.writeFileSync(runsFile(), JSON.stringify([record({ ci })]));
+    // Where the run's stream log goes is a FILE: the spawn throws before any process exists.
+    fs.writeFileSync(path.join(root, "data", "coding-agent-streams"), "not a folder");
+    await reload();
+    await expect(lib.startRun({ task: "Fix the CI.", resumeRunId: RUN_ID, source: "owner", fixCi: true })).rejects.toMatchObject({ kind: "not_ready" });
+    expect(lib.getRun(RUN_ID)?.ci?.fixRunId).toBeNull();
+    expect(lib.ciFixAttempt(lib.getRun(RUN_ID)!, null)).toBe(1);
   });
 });

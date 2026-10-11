@@ -7977,10 +7977,8 @@ async function maybeOpenPullRequest(finished: CodingRun, ended: "stop" | "pause"
     if (mine) {
       // A Fix CI run's work is for the pull request that is already open: its
       // branch goes up, or the checks it was started for never see the fix.
-      if (finished.ciFixOf) {
-        const pushed = await pushBranch(origin.directory, prBranch);
-        if (!pushed.ok) pushProgress(finished, RUNNER_STEP.notMerged(pushed.detail));
-      }
+      // The ORIGIN's mark — the run settling here may be its review pass.
+      if (origin.ciFixOf) await pushFixCiBranch(origin, prBranch);
       number = mine.number;
       url = mine.url;
       // GitHub's answer for the base, not the record's intention: a run that
@@ -8136,6 +8134,9 @@ async function adoptRunPullRequest(
 
   const mine = await findOpenPullRequestForBranch(origin.directory, branch);
   if (!mine) return;
+  // The same push the opening path makes for a Fix CI run: with the auto-PR
+  // switch off this is the one way its fix reaches the pull request.
+  if (origin.ciFixOf) await pushFixCiBranch(origin, branch);
 
   // Re-read: the `gh` call above is a subprocess, and the owner may have
   // cleared the run or a second settle of the chain may have got here first.
@@ -8201,6 +8202,16 @@ function visualEvidenceSection(last: CodingRun, origin: CodingRun): string | nul
 }
 
 /** Record a terminal PR phase on the run and persist it. */
+/**
+ * Push a Fix CI run's branch before its pull request is watched again, so the
+ * checks run on the fix. A push that fails is said in the log, never as a
+ * merge that did not happen: the watcher then reads what GitHub has.
+ */
+async function pushFixCiBranch(origin: CodingRun, branch: string): Promise<void> {
+  const pushed = await pushBranch(origin.directory, branch);
+  if (!pushed.ok) console.error(`[coding-agent] ${origin.id}: could not push the Fix CI branch ${branch}: ${pushed.detail}`);
+}
+
 /**
  * The attempt a "Fix CI" continuation of `previous` would be (1-based), or the
  * refusal: no failed CI on record, a Fix CI already started from this failure
@@ -12324,7 +12335,17 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     persist(true);
     console.error(`[coding-agent] ${run.id} started by ${run.source} in ${run.directory}${waited >= 0 ? " from the queue" : ""}`);
     startProjectIcon(run);
-    spawnOrSettle(run, resumeSessionId, tools, settings);
+    try {
+      spawnOrSettle(run, resumeSessionId, tools, settings);
+    } catch (err) {
+      // It never started, so the failure it claimed is free again (the
+      // queued path's releaseCiClaim, for a start that throws here).
+      if (ciFixOf && previous?.ci?.fixRunId === run.id) {
+        previous.ci = { ...previous.ci, fixRunId: null };
+        persist(true);
+      }
+      throw err;
+    }
     return cloneRun(run);
   } finally {
     releaseDirectory();
