@@ -80,7 +80,7 @@ const PRINT = { key: "PrintScreen", code: "PrintScreen" };
 const CTRL_SHIFT_S = { key: "S", code: "KeyS", ctrlKey: true, shiftKey: true };
 
 /** Print Screen pressed and let go; `false` when anything stopped its default. */
-function pressPrint(target: EventTarget = document.body, mods: KeyboardEventInit = {}) {
+function pressPrint(target: Element = document.body, mods: KeyboardEventInit = {}) {
   const down = fireEvent.keyDown(target, { ...PRINT, ...mods });
   const up = fireEvent.keyUp(target, { ...PRINT, ...mods });
   return down && up;
