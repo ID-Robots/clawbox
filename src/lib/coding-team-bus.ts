@@ -21,16 +21,20 @@ import {
   type Actor,
   type ReviewMode,
   type TeamBoard,
+  type TeamPr,
   type TeamTask,
   type UndeliveredNote,
   BoardAccessError,
   REVIEW_MODES,
   assignTask,
+  holdTask,
   postMessage,
   postNote,
   postTask,
   raiseAlert,
   recordFinalReview,
+  recordTeamPr,
+  reopenForCi,
   retireTask,
   reviewTask,
   saveBoard,
@@ -48,6 +52,12 @@ export type TeamMessage =
   | { type: "result"; task_id: string; result: string; worker_id: string }
   | { type: "review"; task_id: string; verdict: "accepted" | "rejected"; notes: string }
   | { type: "retire"; task_id: string; reason: string }
+  /** The system sets back a task whose dependency was rejected or reopened after it started (holdTask). */
+  | { type: "hold"; task_id: string; dependency: string; reason: string }
+  /** The team's pull request came back red: the system re-offers a task its failure points at (reopenForCi). */
+  | { type: "ci_reopen"; task_id: string; notes: string }
+  /** The system records where the team's pull request stands (recordTeamPr). */
+  | { type: "pr"; pr: TeamPr; note: string }
   | { type: "final_review"; verdict: "accepted" | "rejected"; notes: string }
   | { type: "alert"; reason: string; task_id?: string }
   /** A guardrail line that is not an alert (postNote): the system's only. */
@@ -91,6 +101,22 @@ export function validateMessage(m: unknown): string | null {
     case "retire":
       if (typeof msg.task_id !== "string" || !TASK_ID.test(msg.task_id)) return "A retirement needs a task_id.";
       if (typeof msg.reason !== "string") return "A retirement needs its reason (may be empty).";
+      return null;
+    case "ci_reopen":
+      if (typeof msg.task_id !== "string" || !TASK_ID.test(msg.task_id)) return "A CI re-offer needs a task_id.";
+      if (typeof msg.notes !== "string" || !msg.notes.trim()) return "A CI re-offer needs the failure as its notes.";
+      return null;
+    case "pr": {
+      const pr = msg.pr as Record<string, unknown> | undefined;
+      if (!pr || typeof pr !== "object" || typeof pr.number !== "number" || !Number.isInteger(pr.number) || pr.number <= 0) return "A pull request record needs its number.";
+      if (typeof pr.url !== "string" || typeof pr.branch !== "string" || typeof pr.base !== "string" || typeof pr.phase !== "string") return "A pull request record needs its url, branch, base and phase.";
+      if (typeof msg.note !== "string" || !msg.note.trim()) return "A pull request record needs its note.";
+      return null;
+    }
+    case "hold":
+      if (typeof msg.task_id !== "string" || !TASK_ID.test(msg.task_id)) return "A hold needs a task_id.";
+      if (typeof msg.dependency !== "string" || !TASK_ID.test(msg.dependency)) return "A hold names the dependency that was reopened.";
+      if (typeof msg.reason !== "string") return "A hold needs its reason (may be empty).";
       return null;
     case "final_review":
       if (msg.verdict !== "accepted" && msg.verdict !== "rejected") return "A final review's verdict is accepted or rejected.";
@@ -170,6 +196,9 @@ export class TeamBus {
         case "result": task = submitResult(this.board, actor, message.task_id, message.result); break;
         case "review": task = reviewTask(this.board, actor, message.task_id, message.verdict, message.notes); break;
         case "retire": task = retireTask(this.board, actor, message.task_id, message.reason); break;
+        case "hold": task = holdTask(this.board, actor, message.task_id, message.dependency, message.reason); break;
+        case "ci_reopen": task = reopenForCi(this.board, actor, message.task_id, message.notes); break;
+        case "pr": recordTeamPr(this.board, actor, message.pr, message.note); break;
         case "final_review": recordFinalReview(this.board, actor, message.verdict, message.notes); break;
         case "alert": raiseAlert(this.board, actor, message.reason, message.task_id); break;
         case "note": postNote(this.board, actor, message.text, message.task_id, message.read_only_refusals); break;

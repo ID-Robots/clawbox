@@ -34,6 +34,9 @@ export const RUN_TONE: Record<CodingRunStatus, {
   // Violet, like the app's Start button: a draft is a run waiting to begin,
   // not a stopped one, so it must not share stopped's slate.
   draft: { color: "#c4b5fd", glyph: "✎", chip: "text-violet-300 border-violet-300/40" },
+  // Slate-blue, between a draft and a live run: it will start by itself, in
+  // its turn, when a slot frees — nobody has to press anything.
+  queued: { color: "#a5b4fc", glyph: "⏳", chip: "text-indigo-300 border-indigo-300/40" },
   // Amber, not red: a run that gave up WORKED — its session is intact and
   // Resume carries on in it — so it is unfinished business rather than the
   // broken box `failed`'s red says. Sharing red would have sent the owner

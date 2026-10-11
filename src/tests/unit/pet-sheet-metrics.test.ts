@@ -15,6 +15,7 @@ import {
   fallbackRowMetrics,
   framesPerRow,
   normaliseRowMetrics,
+  normaliseSleepFrames,
   scanRowMetrics,
   type SheetGrid,
 } from "@/lib/pet-sheet-metrics";
@@ -160,5 +161,46 @@ describe("normaliseRowMetrics", () => {
     expect(rows[0].head).toBe(1);
     expect(rows[0].left).toBe(0);
     expect(rows[0].right).toBe(GRID.frameW - 1);
+  });
+});
+
+describe("normaliseSleepFrames", () => {
+  // A pack's `sleepFrames` names the frames of its sleep row with the eyes
+  // shut. Half a list is worse than none: dropping the bad entries could keep
+  // exactly the frame the list was written to leave out.
+  it("keeps a valid list as written, repeats and order included", () => {
+    expect(normaliseSleepFrames([0, 1, 2], 6)).toEqual([0, 1, 2]);
+    expect(normaliseSleepFrames([2, 1, 0, 1], 6)).toEqual([2, 1, 0, 1]);
+    expect(normaliseSleepFrames([5], 6)).toEqual([5]);
+  });
+
+  it("answers null for a pack that declares none", () => {
+    expect(normaliseSleepFrames(undefined, 6)).toBeNull();
+    expect(normaliseSleepFrames(null, 6)).toBeNull();
+  });
+
+  it("rejects the whole list when any entry is not a frame of the row", () => {
+    expect(normaliseSleepFrames([], 6)).toBeNull();
+    expect(normaliseSleepFrames([0, 6], 6)).toBeNull();
+    expect(normaliseSleepFrames([0, -1], 6)).toBeNull();
+    expect(normaliseSleepFrames([0, 1.5], 6)).toBeNull();
+    expect(normaliseSleepFrames([0, "1"], 6)).toBeNull();
+    expect(normaliseSleepFrames([0, Number.NaN], 6)).toBeNull();
+    expect(normaliseSleepFrames([0, null], 6)).toBeNull();
+    expect(normaliseSleepFrames("0,1,2", 6)).toBeNull();
+    expect(normaliseSleepFrames({ 0: 0, length: 1 }, 6)).toBeNull();
+    // Inside the sheet's six, outside the four this row really draws.
+    expect(normaliseSleepFrames([0, 4], 4)).toBeNull();
+    expect(normaliseSleepFrames([0], 0)).toBeNull();
+  });
+
+  it("refuses a list no sleep loop needs", () => {
+    expect(normaliseSleepFrames(new Array(10_000).fill(0), 6)).toBeNull();
+  });
+
+  it("hands back a copy, never the caller's array", () => {
+    const raw = [0, 1, 2];
+    const got = normaliseSleepFrames(raw, 6);
+    expect(got).not.toBe(raw);
   });
 });

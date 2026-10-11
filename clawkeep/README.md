@@ -169,7 +169,11 @@ nothing, leaves the manifest alone, prunes nothing and removes its own archive
 The listing fails closed. It is tried three times, 5 s and 30 s apart, on top
 of the SDK's own retries, because by then the archive has taken minutes to
 hours to build; after that the run refuses rather than upload against a usage
-it could not count. "To its end" is literal: a page that fails part-way, a
+it could not count. All of that is bounded: the admission check ends within
+240 s, waits included, and each usage recount within 150 s, so a store that
+takes the connection and never answers costs a run minutes — not the hour of
+the SDK's per-read timeouts times its retries — and the run lock is free again
+for the next run. "To its end" is literal: a page that fails part-way, a
 listing that stops while still marked truncated, or an entry with no size is an
 error, never a smaller total. Retention is applied only after a successful
 upload, so what it might free later cannot admit a backup that does not fit

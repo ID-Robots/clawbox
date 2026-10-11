@@ -30,6 +30,7 @@ import type { McpContext } from "../lib/context";
 // Pure TypeScript, no Node imports — the one status union every consumer
 // derives from, so this payload cannot fall behind the server's record.
 import type { CodingPauseReason, CodingRunStatus } from "../../src/lib/coding-agent-status";
+import { MAX_CI_FIX_ATTEMPTS, MAX_TEAM_CI_ROUNDS } from "../../src/lib/coding-ci-limits";
 import { PAUSE_METER_NOUN, RUN_STATUSES, isRollingPauseMeter, pauseResetClock, pauseResetInstant } from "../../src/lib/coding-agent-status";
 // Pure too, for the same reason: the review loop's shape and its fold, so the
 // tool cannot describe a state the server never writes.
@@ -266,6 +267,12 @@ interface RunPayload {
   projectId: string | null;
   source: string;
   status: CodingRunStatus;
+  /** A QUEUED run's place: since when, and its 1-based position in line. Absent from an older server. */
+  queued?: { at: number; position?: number } | null;
+  /** Its pull request's FAILED CI, read (src/lib/coding-ci.ts); absent from an older server and on every other run. */
+  ci?: { prNumber: number; checks: string[]; tests: string[]; files: string[]; unread: string[]; attempt: number; fixRunId: string | null } | null;
+  /** This run is a Fix CI continuation of `runId`. */
+  ciFixOf?: { runId: string; attempt: number } | null;
   startedAt: number;
   completedAt: number | null;
   sessionId: string | null;
@@ -521,10 +528,34 @@ function pipelineSentence(pipeline: NonNullable<RunPayload["pipeline"]>, stage: 
   }
 }
 
+/**
+ * A run's failed CI, said with what to do about it: the checks, the failing
+ * tests, and — while attempts are left and none is going — the Fix CI
+ * continuation to OFFER the user (coding_agent_run with resume_run_id and
+ * fix_ci), never to start unasked.
+ */
+function ciSentence(run: RunPayload): string | null {
+  const ci = run.ci;
+  if (!ci) return null;
+  const tests = ci.tests.length ? ` Failing tests: ${ci.tests.slice(0, 8).map((t) => redact(firstLine(t, 120))).join("; ")}${ci.tests.length > 8 ? `; and ${ci.tests.length - 8} more` : ""}.` : "";
+  const files = ci.files.length ? ` Files named: ${ci.files.slice(0, 8).join(", ")}.` : "";
+  const head = `CI failed on pull request #${ci.prNumber}: ${ci.checks.join(", ") || "its checks"}.${tests}${files}`;
+  if (ci.fixRunId) return `${head} A Fix CI run was started from it: ${ci.fixRunId}.`;
+  if (ci.attempt + 1 > MAX_CI_FIX_ATTEMPTS) return `${head} Its ${MAX_CI_FIX_ATTEMPTS} Fix CI attempts are used up: what still fails is the user's to look at — tell them.`;
+  return `${head} Offer the user a Fix CI run (attempt ${ci.attempt + 1} of ${MAX_CI_FIX_ATTEMPTS}): coding_agent_run with resume_run_id "${run.id}", fix_ci true and a one-line task — the box adds what failed. Only if they want it.`;
+}
+
 function describeRun(run: RunPayload, tail: number): string {
   const parts: string[] = [];
   // A draft has not started: elapsed() would measure time since drafting.
-  parts.push(run.status === "draft" ? `Run ${run.id}: draft (not started)` : `Run ${run.id}: ${run.status} after ${elapsed(run)}`);
+  // Nor has a queued run: it says where it stands in line instead.
+  parts.push(
+    run.status === "draft"
+      ? `Run ${run.id}: draft (not started)`
+      : run.status === "queued"
+        ? `Run ${run.id}: queued (not started)${run.queued?.position ? ` — number ${run.queued.position} in line for a slot` : ""}. The ClawBox starts it by itself when a running run ends; only the owner can cancel it.`
+        : `Run ${run.id}: ${run.status} after ${elapsed(run)}`,
+  );
   // Said outright: the task text of a review pass is the harness's fixed
   // brief, and the only other trace of which run it reviewed is a progress
   // line the tail may have cut.
@@ -532,6 +563,9 @@ function describeRun(run: RunPayload, tail: number): string {
   if (run.reviewLoopOf) parts.push(`Review round on the pull request of run ${run.reviewLoopOf}`);
   parts.push(`Task: ${firstLine(run.task)}`);
   parts.push(`Folder: ${run.directory}${run.projectId ? ` (project "${run.projectId}")` : ""}`);
+  if (run.ciFixOf) parts.push(`A Fix CI continuation of ${run.ciFixOf.runId} (attempt ${run.ciFixOf.attempt} of ${MAX_CI_FIX_ATTEMPTS}).`);
+  const ci = ciSentence(run);
+  if (ci) parts.push(ci);
   // A run with a copy of its own works OFF the project's branch, so a reader
   // that went looking in the project folder would find none of its work. Say
   // where it actually is — and, once the copy is gone, that the branch is
@@ -831,7 +865,10 @@ function runRow(run: RunPayload): Record<string, unknown> {
     task: redact(firstLine(run.task, 80)),
     started_by: run.source,
     project: runProject(run),
-    elapsed: run.status === "draft" ? "not started" : elapsed(run),
+    elapsed: run.status === "draft" || run.status === "queued" ? "not started" : elapsed(run),
+    ...(run.status === "queued" && run.queued?.position ? { queue_position: run.queued.position } : {}),
+    ...(run.ci ? { ci_failed: `PR #${run.ci.prNumber}: ${run.ci.checks.length || "some"} check(s)${run.ci.tests.length ? `, ${run.ci.tests.length} failing test(s)` : ""}` } : {}),
+    ...(run.ci && !run.ci.fixRunId && run.ci.attempt + 1 <= MAX_CI_FIX_ATTEMPTS ? { can_fix_ci: true } : {}),
     ...(run.reviewOf ? { review_of: run.reviewOf } : {}),
     ...(run.worktree ? { branch: run.worktree.branch, copy } : {}),
     ...(attempts ? { attempts: run.completionAttempts ? `${attempts} of ${run.completionAttempts}` : attempts } : {}),
@@ -929,7 +966,7 @@ function projectRow(project: ProjectPayload, runs: RunPayload[] | null): Record<
     ...(app ? { app } : {}),
     latest_run: project.latestRun ? `${project.latestRun.id} (${project.latestRun.status})` : "none",
     runs_working: count((r) => r.status === "running"),
-    runs_waiting: count((r) => r.status === "paused" || r.status === "gave_up" || r.status === "draft"),
+    runs_waiting: count((r) => r.status === "paused" || r.status === "gave_up" || r.status === "draft" || r.status === "queued"),
     branches_not_merged: count((r) => !!r.worktree && !r.worktree.removed && r.worktree.result?.kind !== "merged" && r.status !== "running"),
     left_running: count((r) => r.leftover === true),
   };
@@ -975,13 +1012,17 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
         512,
         `Comma-separated relative paths (at most ${MAX_DELIVERABLE_PATHS}) the run MUST leave behind, not empty, e.g. "src/app.js,index.html".`,
       ),
+      fix_ci: zBool(false, "With resume_run_id: fix that run's FAILED pull-request checks; the box appends what failed to the task."),
     },
     { editions: ["openclaw", "hermes"], readOnly: false, openWorld: true, maxChars: 3_000 },
-    async ({ task, project_id, directory, resume_run_id, provider, model, deliverable_files, delivery_pipeline, input_files }: {
+    async ({ task, project_id, directory, resume_run_id, provider, model, deliverable_files, delivery_pipeline, input_files, fix_ci }: {
       task: string; project_id?: string; directory?: string; resume_run_id?: string;
       provider?: string; model?: string; deliverable_files?: string; delivery_pipeline?: boolean;
-      input_files?: string;
+      input_files?: string; fix_ci?: boolean;
     }) => {
+      if (fix_ci === true && !resume_run_id) {
+        throw new ToolError("BAD_ARGUMENT", "fix_ci continues the run whose pull request failed its checks.", "Pass that run's id as resume_run_id with fix_ci.");
+      }
       // No client-side "needs a place to work" guard: the route itself falls
       // back to the owner's stored default folder when neither a project nor
       // a directory is named — the fallback the enable route documents — and
@@ -1014,6 +1055,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       if (project_id) body.projectId = project_id;
       if (directory) body.directory = directory;
       if (resume_run_id) body.resumeRunId = resume_run_id;
+      if (fix_ci === true) body.fixCi = true;
       // Only what the caller actually named travels: sending the resolved
       // default would override the owner's stored choice with this process's
       // idea of it, and silently move a run to another account.
@@ -1040,9 +1082,9 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       // owner's own per-project default, which is the switch that makes the
       // flow automatic for a project they ship from every day.
       if (delivery_pipeline === true) body.pipeline = true;
-      let res: { started?: boolean; run?: RunPayload };
+      let res: { started?: boolean; queued?: boolean; run?: RunPayload };
       try {
-        res = await apiPost<{ started?: boolean; run?: RunPayload }>(
+        res = await apiPost<{ started?: boolean; queued?: boolean; run?: RunPayload }>(
           "/setup-api/coding-agent/run",
           body,
           { timeoutMs: 20_000, rules: RUN_RULES },
@@ -1070,6 +1112,15 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
         throw err;
       }
       const run = res.run;
+      // QUEUED, not refused: the box was already running every run the owner
+      // allows. The run starts by itself, in order, when one ends.
+      if (res.queued && run?.id) {
+        return text(
+          `Queued coding run "${run.id}" for ${run.directory}${run.projectId ? ` (project "${run.projectId}")` : ""}: this ClawBox is already running as many coding runs as the owner allows`
+          + `${run.queued?.position ? `, so it is number ${run.queued.position} in line` : ""}. It starts by itself when a running run ends — after a restart too — and only the owner can cancel it. `
+          + `Do NOT start it again. Tell the user it is queued and stop; coding_run_list shows its place in line.`,
+        );
+      }
       if (!res.started || !run?.id) {
         throw new ToolError(
           "ENDPOINT_DOWN",
@@ -1173,6 +1224,9 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       if (was && was.status === "draft") {
         return text(`Run ${run_id} is a draft that never started, so there is nothing to stop. The owner starts or discards drafts in the Coding Agent app.`);
       }
+      if (was && was.status === "queued") {
+        return text(`Run ${run_id} is queued and has not started, so there is nothing to stop. Only the owner can take it out of the queue, in the Coding Agent app; otherwise it starts by itself when a slot frees. Tell the user that.`);
+      }
       if (was && was.status !== "running") {
         if (was.leftover && end_leftovers === true) {
           await apiPost("/setup-api/coding-agent/kill", { runId: run_id }, { timeoutMs: 15_000, rules: STOP_RULES });
@@ -1215,7 +1269,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
     },
     { editions: ["openclaw", "hermes"], readOnly: false },
     async ({ run_id, text: message }: { run_id: string; text: string }) => {
-      const res = await apiPost<{ queued?: boolean; delivered?: boolean }>(
+      const res = await apiPost<{ queued?: boolean; delivered?: boolean; delivery?: "delivered" | "after_tool_call" | "next_start" }>(
         "/setup-api/coding-agent/message",
         { runId: run_id, text: message },
         { timeoutMs: 15_000, rules: MESSAGE_RULES },
@@ -1227,11 +1281,15 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
           "Call coding_agent_status to see whether the run is still going, and tell the user rather than retrying more than once.",
         );
       }
-      // The two endings mean different things to whoever is waiting, so they
-      // are said apart: one is "it has it", the other is "it will get it".
-      return res.delivered
-        ? text(`Run ${run_id} has been given the message and will take it into account in its current session. Tell the user it is passed on, then stop — do not poll for a reaction.`)
-        : text(`The message is queued for run ${run_id}. This ClawBox could not hand it over mid-turn, so the run receives it at its next step — when it goes back in for another attempt, or when the owner resumes it. Tell the user that, and do not send it again.`);
+      // The endings mean different things to whoever is waiting, so they are
+      // said apart: "delivered" is "it has it"; "queued" is "it will get it",
+      // with when. An older server answers only the boolean.
+      if (res.delivered || res.delivery === "delivered") {
+        return text(`Delivered: run ${run_id} has the message and is taking it into account in its current session. Tell the user it is passed on, then stop — do not poll for a reaction.`);
+      }
+      return res.delivery === "after_tool_call"
+        ? text(`Queued: the message is in run ${run_id}'s inbox and is handed to it mid-turn, the moment the tool call it is running now ends (a long build or test can take a few minutes). Tell the user it is on its way, and do not send it again.`)
+        : text(`Queued: run ${run_id} is not in a turn that can take it now, so it receives the message at its next start — when it goes back in for another attempt, or when the owner resumes it. Tell the user that, and do not send it again.`);
     },
   );
 
@@ -1308,7 +1366,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
           runs: kept,
           ...(omitted ? { not_listed: `${omitted} more matching run(s) did not fit — ask for fewer or filter` } : {}),
           ...(matching.length > limit ? { more: `${matching.length - limit} older matching run(s) not asked for` } : {}),
-          notes: "detached: lives in its own system scope and survives a web-server restart. can_resume: coding_agent_resume carries it on in the same session. left_running: finished but a process it started is still up. copy: where the run's own branch stands — bringing work home is the owner's, on the run's page.",
+          notes: "detached: lives in its own system scope and survives a web-server restart. can_resume: coding_agent_resume carries it on in the same session. left_running: finished but a process it started is still up. copy: where the run's own branch stands — bringing work home is the owner's, on the run's page. queue_position: a queued run's place in line (1 is next); it starts by itself, and only the owner cancels one. can_fix_ci: its pull request's CI failed and a Fix CI run (coding_agent_run with resume_run_id and fix_ci) may be offered to the user.",
         }),
         rows,
         LIST_MAX_CHARS,
@@ -1549,6 +1607,21 @@ interface TeamTaskPayload {
   attempts: number;
   /** Who put it on the board: the plan, or the lead while the team ran. */
   origin?: "plan" | "lead";
+  /** Why it is back to pending: a dependency it started on was reopened. Absent from an older server. */
+  hold?: { dependency: string; reason: string; was: "in_progress" | "complete" } | null;
+}
+
+/**
+ * The dependencies a pending task still waits for — not yet ACCEPTED, nor
+ * retired: the server's own gate (coding-team-board.ts readyTasks), so a task
+ * pending behind a finished but unreviewed one says why.
+ */
+function waitingFor(task: TeamTaskPayload, tasks: readonly TeamTaskPayload[]): string[] {
+  if (task.status !== "pending") return [];
+  return task.depends_on.filter((d) => {
+    const dep = tasks.find((x) => x.task_id === d);
+    return !dep || (dep.status !== "retired" && !(dep.status === "complete" && dep.review?.verdict === "accepted"));
+  });
 }
 
 /** The team's figures, as the server works them out from the board. */
@@ -1582,12 +1655,21 @@ interface TeamPayload {
   /** Whether the team's lead may add or retire tasks while it runs (the owner's switch, when the team started). */
   dynamic?: boolean;
   finalReview?: { verdict: "accepted" | "rejected"; notes: string } | null;
+  /** The pull request the goal asked for, opened by the team's orchestrator. Absent from an older server. */
+  pr?: {
+    number: number; url: string; branch: string; base: string;
+    phase: "checks" | "failed_checks" | "green" | "merged" | "left_open" | "failed";
+    checks: { total: number; passed: number; failed: number; pending: number };
+    merge: boolean; ciRounds: number; failure: { tests: string[]; checks: string[] } | null; detail: string | null;
+  } | null;
   metrics?: TeamMetricsPayload;
   id: string;
   goal: string;
   projectId: string | null;
   directory: string;
-  status: "planning" | "working" | "reviewing" | "done" | "failed" | "stopped";
+  status: "queued" | "planning" | "working" | "reviewing" | "done" | "failed" | "stopped";
+  /** A queued team's place in line (1 is next). Absent from an older server, and on any other team. */
+  queuePosition?: number;
   plannerRunId: string | null;
   tasks: TeamTaskPayload[];
   log: { ts: number; actor: { kind: string; id?: string }; type: string; message: string }[];
@@ -1606,19 +1688,47 @@ const TEAM_RULES: ErrorRule[] = [
     status: 409,
     match: /"kind":\s*"busy"/,
     code: "CONFLICT",
-    message: "A coding team is already working on this ClawBox.",
-    next: "Do not start another. Call coding_team_status to follow it, or coding_team_stop only if the user asks.",
+    message: "This ClawBox already has as many coding teams waiting as it allows.",
+    next: "Do not start another. Call coding_team_status to follow the queue, and tell the user.",
   },
   ...RUN_RULES,
 ];
 
+/** A queued team is the owner's to cancel; the bearer reads the queue and waits. */
+const TEAM_STOP_RULES: ErrorRule[] = [
+  {
+    status: 403,
+    match: /queue/,
+    code: "CONFLICT",
+    message: "That team is waiting in the queue, and only the owner can cancel a queued team.",
+    next: "Tell the user; they can cancel it in the Coding Agent app. Otherwise it starts by itself when the team ahead of it finishes.",
+  },
+];
+
+/** The team's pull request in a sentence — the orchestrator's, opened because the goal asked for one. */
+function teamPrSentence(pr: NonNullable<TeamPayload["pr"]>): string {
+  const checks = pr.checks.total > 0 ? ` ${pr.checks.passed} of ${pr.checks.total} checks passed${pr.checks.pending ? `, ${pr.checks.pending} running` : ""}.` : "";
+  const rounds = pr.ciRounds > 0 ? ` CI fix rounds: ${pr.ciRounds} of ${MAX_TEAM_CI_ROUNDS}.` : "";
+  const failing = pr.failure?.tests.length && pr.phase !== "merged" && pr.phase !== "green" ? ` Failing tests: ${pr.failure.tests.slice(0, 5).map((t) => redact(firstLine(t, 120))).join("; ")}.` : "";
+  const how = {
+    checks: "its checks are running",
+    failed_checks: "its CI failed; the tasks it points at are being fixed",
+    green: "every check passed; the goal asked for no merge, so it is left open for the user",
+    merged: "merged by the team once every check passed",
+    left_open: "left open",
+    failed: "its CI is still red after the team's rounds of fixes",
+  }[pr.phase];
+  return `Pull request #${pr.number} (${pr.url}), ${pr.branch} → ${pr.base}: ${how}.${checks}${rounds}${failing}${pr.merge && pr.phase !== "merged" ? " The goal asks for the merge: the team makes it once every check passes." : ""}${pr.detail ? ` ${redact(firstLine(pr.detail, 200))}` : ""}`;
+}
+
 function describeTeam(team: TeamPayload, withLog: boolean): string {
   const parts: string[] = [];
-  parts.push(`Team ${team.id}: ${team.status}${team.error ? ` — ${team.error}` : ""}`);
+  parts.push(`Team ${team.id}: ${team.status}${team.status === "queued" && team.queuePosition ? ` — number ${team.queuePosition} in line` : ""}${team.error ? ` — ${team.error}` : ""}`);
   parts.push(`Goal: ${redact(firstLine(team.goal, 200))}`);
   parts.push(`Folder: ${team.directory}${team.projectId ? ` (project "${team.projectId}")` : ""}`);
   if (team.plannerRunId) parts.push(`Planner run: ${team.plannerRunId}`);
-  if (team.branch) parts.push(`Branch: ${team.branch} (from ${team.base ?? "the checkout's branch"}); the project page's Create PR compares it.`);
+  if (team.branch) parts.push(`Branch: ${team.branch} (from ${team.base ?? "the checkout's branch"})${team.pr ? "." : "; the project page's Create PR compares it."}`);
+  if (team.pr) parts.push(teamPrSentence(team.pr));
   if (team.agents && team.agents.total > 0) {
     const leads = team.agents.leads ?? 0;
     parts.push(`Agents: ${team.agents.total} — ${team.agents.planner} planner, ${team.agents.workers} worker(s), ${team.agents.reviewers} reviewer(s)${leads > 0 ? `, ${leads} lead turn(s)` : ""}.`);
@@ -1642,7 +1752,9 @@ function describeTeam(team: TeamPayload, withLog: boolean): string {
     parts.push(`Final review: ${team.finalReview.verdict}${team.finalReview.notes ? ` — ${redact(firstLine(team.finalReview.notes, 200))}` : ""}`);
   }
   if (team.tasks.length === 0) {
-    parts.push(team.status === "planning" ? "The planner is still reading the folder and writing the plan." : "No tasks were posted.");
+    parts.push(team.status === "planning"
+      ? "The planner is still reading the folder and writing the plan."
+      : team.status === "queued" ? "Not started: it waits for the team ahead of it to finish." : "No tasks were posted.");
   } else {
     parts.push("Tasks:");
     for (const t of team.tasks) {
@@ -1651,6 +1763,9 @@ function describeTeam(team: TeamPayload, withLog: boolean): string {
       if (t.assigned_to) bits.push(`worker ${t.assigned_to}`);
       if (t.reviewRunId) bits.push(`reviewer ${t.reviewRunId}`);
       if (t.depends_on.length) bits.push(`after ${t.depends_on.join(", ")}`);
+      const waiting = waitingFor(t, team.tasks);
+      if (waiting.length) bits.push(`waiting for ${waiting.join(", ")} to be accepted`);
+      if (t.hold) bits.push(`held: its dependency ${t.hold.dependency} was reopened (${redact(firstLine(t.hold.reason, 160))})`);
       if (t.result) bits.push(`result: ${redact(firstLine(t.result, 200))}`);
       parts.push(`- ${bits.join(" — ")}`);
     }
@@ -1663,7 +1778,9 @@ function describeTeam(team: TeamPayload, withLog: boolean): string {
       parts.push(`- ${new Date(e.ts).toISOString()} ${who}: ${redact(e.message)}`);
     }
   }
-  if (team.status === "planning" || team.status === "working" || team.status === "reviewing") {
+  if (team.status === "queued") {
+    parts.push("Queued: the ClawBox starts it by itself when the team ahead of it finishes, and only the owner can cancel it. Tell the user and stop; check again later with coding_team_status.");
+  } else if (team.status === "planning" || team.status === "working" || team.status === "reviewing") {
     parts.push("Still working. Tell the user and stop; check again later with coding_team_status.");
   } else if (team.status === "done") {
     parts.push("Every task is complete and accepted. Summarise the task results for the user, naming the files.");
@@ -1689,9 +1806,9 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
       const body: Record<string, unknown> = { goal };
       if (project_id) body.projectId = project_id;
       if (directory) body.directory = directory;
-      let res: { started?: boolean; team?: TeamPayload };
+      let res: { started?: boolean; queued?: boolean; team?: TeamPayload };
       try {
-        res = await apiPost<{ started?: boolean; team?: TeamPayload }>("/setup-api/coding-agent/team", body, { timeoutMs: 20_000, rules: TEAM_RULES });
+        res = await apiPost<{ started?: boolean; queued?: boolean; team?: TeamPayload }>("/setup-api/coding-agent/team", body, { timeoutMs: 20_000, rules: TEAM_RULES });
       } catch (err) {
         if (err instanceof ApiError && err.status === 400) {
           throw new ToolError("BAD_ARGUMENT", routeReason(err) ?? "The ClawBox refused that working folder.", WORKING_FOLDER_NEXT);
@@ -1699,6 +1816,13 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
         throw err;
       }
       const team = res.team;
+      if (res.queued && team?.id) {
+        return text(
+          `Queued coding team "${team.id}" for ${team.directory}${team.projectId ? ` (project "${team.projectId}")` : ""}: another team is working on this ClawBox`
+          + `${team.queuePosition ? `, so it is number ${team.queuePosition} in line` : ""}. It starts by itself when the team ahead of it finishes — after a restart too — and only the owner can cancel it. `
+          + "Do NOT start it again. Tell the user it is queued and stop; coding_team_status shows its place.",
+        );
+      }
       if (!res.started || !team?.id) {
         throw new ToolError("ENDPOINT_DOWN", "The ClawBox did not start the team.", "Call coding_team_status to see whether a team appeared; if not, tell the user and do not retry more than once.");
       }
@@ -1726,6 +1850,8 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
         return json(teams.map((t) => ({
           team_id: t.id,
           status: t.status,
+          ...(t.status === "queued" && t.queuePosition ? { queue_position: t.queuePosition } : {}),
+          ...(t.pr ? { pull_request: `#${t.pr.number} ${t.pr.phase}` } : {}),
           goal: redact(firstLine(t.goal, 80)),
           project_id: t.projectId,
           // A retired task will never be done: counted, a finished team read as unfinished.
@@ -1756,7 +1882,7 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
     async ({ team_id }: { team_id: string }) => {
       let data: { team?: TeamPayload };
       try {
-        data = await apiPost<{ team?: TeamPayload }>("/setup-api/coding-agent/team/stop", { id: team_id }, { timeoutMs: 20_000 });
+        data = await apiPost<{ team?: TeamPayload }>("/setup-api/coding-agent/team/stop", { id: team_id }, { timeoutMs: 20_000, rules: TEAM_STOP_RULES });
       } catch (err) {
         if (err instanceof ApiError && err.status === 404) {
           throw new ToolError("NOT_FOUND", "There is no coding team with that id on this ClawBox.", "Call coding_team_status without a team_id to list the teams that exist.");

@@ -11345,6 +11345,13 @@ step_vnc_install() {
   # Jetsons, :0 is GDM's greeter; apps launched into it are covered by
   # the greeter and invisible to VNC viewers. Xvfb :99 gives a clean
   # dedicated surface that matches what the browser service targets.
+  #
+  # x11vnc answers SIGTERM with exit 2, so every stop or restart of this unit
+  # was logged as "Main process exited, code=exited, status=2/INVALIDARGUMENT"
+  # and left it failed. SuccessExitStatus=2 makes that the clean stop it is;
+  # x11vnc also exits 2 on a caught crash signal, so RestartForceExitStatus=2
+  # keeps an exit 2 nobody asked for restarted. step_vnc_refresh writes the
+  # same unit.
   cat > /etc/systemd/system/clawbox-vnc.service <<VNCSVC
 [Unit]
 Description=ClawBox VNC (virtual desktop)
@@ -11357,6 +11364,8 @@ Environment=CLAWBOX_VNC_MODE=virtual
 ExecStart=$PROJECT_DIR/scripts/start-vnc.sh
 Restart=on-failure
 RestartSec=5
+SuccessExitStatus=2
+RestartForceExitStatus=2
 
 [Install]
 WantedBy=multi-user.target
@@ -11495,6 +11504,8 @@ Environment=CLAWBOX_VNC_MODE=virtual
 ExecStart=$PROJECT_DIR/scripts/start-vnc.sh
 Restart=on-failure
 RestartSec=5
+SuccessExitStatus=2
+RestartForceExitStatus=2
 
 [Install]
 WantedBy=multi-user.target

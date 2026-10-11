@@ -16,9 +16,11 @@ import {
   MAX_RUN_MESSAGES_KEPT,
   noteStreamInputRefused,
   noteStreamInputWorked,
+  newRunMessageId,
   normalizeRunMessage,
   parseRunMessages,
   queuedMessages,
+  RUN_MESSAGE_ID_RE,
   RUN_MESSAGE_REFUSAL_KEYS,
   RunMessageError,
   runMessageProgressLine,
@@ -33,7 +35,7 @@ import {
   type RunMessage,
 } from "@/lib/coding-run-messages";
 
-const msg = (text: string, deliveredAt: number | null = null, at = 1_000): RunMessage => ({ at, text, deliveredAt });
+const msg = (text: string, deliveredAt: number | null = null, at = 1_000): RunMessage => ({ id: `m-${String(at).padStart(8, "0")}`, at, text, deliveredAt });
 
 beforeEach(() => _resetStreamInputForTests());
 
@@ -142,6 +144,36 @@ describe("a record off disk", () => {
     // "delivered at some unreadable moment" is read as not delivered — the
     // safe direction: the box owes the message rather than claiming it went.
     expect(parsed[2].deliveredAt).toBeNull();
+  });
+
+  it("keeps a message's id and how it was delivered, and gives a record from before ids one", () => {
+    const parsed = parseRunMessages([
+      { id: "m-abcdef12", at: 1, text: "kept", deliveredAt: 5, via: "mid_turn" },
+      { at: 2, text: "old record", deliveredAt: 6, via: "next_turn" },
+      { id: "not an id", at: 3, text: "renamed", deliveredAt: null, via: "mid_turn" },
+      { id: "m-abcdef13", at: 4, text: "odd way", deliveredAt: 7, via: "carrier pigeon" },
+    ]);
+    expect(parsed[0]).toEqual({ id: "m-abcdef12", at: 1, text: "kept", deliveredAt: 5, via: "mid_turn" });
+    expect(parsed[1].id).toMatch(RUN_MESSAGE_ID_RE);
+    expect(parsed[1].via).toBe("next_turn");
+    // A message still waiting has gone no way yet, whatever the file says.
+    expect(parsed[2].id).toMatch(RUN_MESSAGE_ID_RE);
+    expect(parsed[2]).not.toHaveProperty("via");
+    expect(parsed[3]).not.toHaveProperty("via");
+    expect(new Set(parsed.map((m) => m.id)).size).toBe(4);
+  });
+
+  it("gives every new message its own id", () => {
+    const list = appendRunMessage(appendRunMessage([], "one", 1), "two", 2);
+    expect(list.map((m) => m.id)).toEqual([expect.stringMatching(RUN_MESSAGE_ID_RE), expect.stringMatching(RUN_MESSAGE_ID_RE)]);
+    expect(list[0].id).not.toBe(list[1].id);
+    expect(newRunMessageId()).toMatch(RUN_MESSAGE_ID_RE);
+  });
+
+  it("says on the feed which way a message went", () => {
+    expect(runMessageProgressLine("use port 8080", "mid_turn")).toBe("Message to the run, mid-turn: use port 8080");
+    expect(runMessageProgressLine("use port 8080", "next_turn")).toBe("Message to the run: use port 8080");
+    expect(runMessageProgressLine("use port 8080")).toBe("Message to the run: use port 8080");
   });
 
   it("answers an empty list for anything that is not one", () => {

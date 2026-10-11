@@ -90,7 +90,9 @@ def stub_manifest(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(s3, "read_manifest", lambda creds: {"version": 1, "snapshots": {}})
     monkeypatch.setattr(s3, "write_manifest", lambda creds, manifest: None)
     monkeypatch.setattr(s3, "list_snapshots", lambda creds: [])
-    monkeypatch.setattr(s3, "stats", lambda creds: CloudStats(cloud_bytes=0, snapshot_count=0))
+    monkeypatch.setattr(
+        s3, "stats", lambda creds, timeout=None: CloudStats(cloud_bytes=0, snapshot_count=0),
+    )
 
 
 def test_happy_path(isolate_state: Path, tmp_path: Path) -> None:
@@ -1319,6 +1321,8 @@ def test_a_listing_that_fails_once_is_tried_again_before_refusing(
         ]) as stats_mock,
         patch("clawkeep.runner.s3.upload") as upload,
     ):
+        # A clock that stands still: the admission deadline never runs out here.
+        clock.monotonic.return_value = 0.0
         assert runner.run_once(_cfg(tmp_path), "claw_x") == runner.EXIT_OK
     assert stats_mock.call_count == 5
     assert [call.args[0] for call in clock.sleep.call_args_list] == list(

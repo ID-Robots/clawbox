@@ -17,9 +17,10 @@ import { saveEnv } from "@/tests/helpers/env";
 
 const getRun = vi.hoisted(() => vi.fn());
 const queueRunMessage = vi.hoisted(() => vi.fn());
+const awaitRunMessageDelivery = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/coding-agent", async () => {
   const actual = await vi.importActual<typeof import("@/lib/coding-agent")>("@/lib/coding-agent");
-  return { ...actual, getRun, queueRunMessage };
+  return { ...actual, getRun, queueRunMessage, awaitRunMessageDelivery };
 });
 
 const MCP_TOKEN = "mcp-bearer-token-for-the-agent-0123456789";
@@ -41,7 +42,8 @@ beforeEach(async () => {
   vi.resetModules();
   vi.clearAllMocks();
   getRun.mockReturnValue(AGENT_RUN);
-  queueRunMessage.mockReturnValue({ run: { ...AGENT_RUN, messages: [] }, delivered: true });
+  queueRunMessage.mockReturnValue({ run: { ...AGENT_RUN, messages: [] }, delivered: true, delivery: "delivered", messageId: "m-00000001" });
+  awaitRunMessageDelivery.mockResolvedValue(null);
   const messages = await import("@/lib/coding-run-messages");
   RunMessageError = messages.RunMessageError;
   MAX_RUN_MESSAGE_CHARS = messages.MAX_RUN_MESSAGE_CHARS;
@@ -130,25 +132,61 @@ describe("the gate", () => {
 describe("the answer", () => {
   it("says the harness has it when the message went into the live session", async () => {
     queueRunMessage.mockReturnValue({
-      run: { ...AGENT_RUN, messages: [{ at: 1, text: "hi", deliveredAt: 2 }] },
+      run: { ...AGENT_RUN, messages: [{ id: "m-00000001", at: 1, text: "hi", deliveredAt: 2 }] },
       delivered: true,
+      delivery: "delivered",
+      messageId: "m-00000001",
     });
     const res = await post({ runId: AGENT_RUN.id, text: "hi" });
     const body = await res.json();
     expect(body.queued).toBe(true);
     expect(body.delivered).toBe(true);
+    expect(body.delivery).toBe("delivered");
+    expect(body.messageId).toBe("m-00000001");
     expect(body.run.messages[0].deliveredAt).toBe(2);
     expect(body.limits.maxChars).toBe(MAX_RUN_MESSAGE_CHARS);
+    // Nothing in an inbox, so nothing to wait for.
+    expect(awaitRunMessageDelivery).not.toHaveBeenCalled();
+  });
+
+  it("waits a moment for a message in the run's inbox, and says delivered once its hook took it", async () => {
+    queueRunMessage.mockReturnValue({
+      run: { ...AGENT_RUN, messages: [{ id: "m-00000002", at: 1, text: "hi", deliveredAt: null }] },
+      delivered: false,
+      delivery: "after_tool_call",
+      messageId: "m-00000002",
+    });
+    awaitRunMessageDelivery.mockResolvedValue({ id: "m-00000002", at: 1, text: "hi", deliveredAt: 3, via: "mid_turn" });
+    getRun.mockReturnValue({ ...AGENT_RUN, messages: [{ id: "m-00000002", at: 1, text: "hi", deliveredAt: 3, via: "mid_turn" }] });
+    const body = await (await post({ runId: AGENT_RUN.id, text: "hi" })).json();
+    expect(awaitRunMessageDelivery).toHaveBeenCalledWith(AGENT_RUN.id, "m-00000002", expect.any(Number));
+    expect(body).toMatchObject({ queued: true, delivered: true, delivery: "delivered" });
+    expect(body.run.messages[0]).toMatchObject({ deliveredAt: 3, via: "mid_turn" });
+  });
+
+  it("says it is queued for the end of the tool call under way when the hook has not taken it yet", async () => {
+    queueRunMessage.mockReturnValue({
+      run: { ...AGENT_RUN, messages: [{ id: "m-00000003", at: 1, text: "hi", deliveredAt: null }] },
+      delivered: false,
+      delivery: "after_tool_call",
+      messageId: "m-00000003",
+    });
+    const body = await (await post({ runId: AGENT_RUN.id, text: "hi" })).json();
+    expect(body).toMatchObject({ queued: true, delivered: false, delivery: "after_tool_call" });
   });
 
   it("says it is only QUEUED when the box could not hand it over", async () => {
     queueRunMessage.mockReturnValue({
-      run: { ...AGENT_RUN, messages: [{ at: 1, text: "hi", deliveredAt: null }] },
+      run: { ...AGENT_RUN, messages: [{ id: "m-00000004", at: 1, text: "hi", deliveredAt: null }] },
       delivered: false,
+      delivery: "next_start",
+      messageId: "m-00000004",
     });
     const body = await (await post({ runId: AGENT_RUN.id, text: "hi" })).json();
     expect(body.queued).toBe(true);
     expect(body.delivered).toBe(false);
+    expect(body.delivery).toBe("next_start");
+    expect(awaitRunMessageDelivery).not.toHaveBeenCalled();
   });
 });
 
