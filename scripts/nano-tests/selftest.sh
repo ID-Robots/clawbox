@@ -269,7 +269,7 @@ check "lib.sh parses" bash -n "$LIB"
 check "run.sh parses" bash -n "$RUN"
 check "summary.sh parses" bash -n "$HERE/summary.sh"
 for name in 10-build-identity 20-services 25-gateway-channels 30-chat-turn 40-coding-agent-run 50-memory-pressure \
-  60-media-tools 70-reboot-survival 75-full-reboot 85-update-rollback 90-upgrade-from-release; do
+  60-media-tools 70-reboot-survival 75-full-reboot 76-gnome-initial-setup 85-update-rollback 90-upgrade-from-release; do
   check "tests/$name.sh is there" test -f "$HERE/tests/$name.sh"
 done
 for t in "$HERE"/tests/*; do
