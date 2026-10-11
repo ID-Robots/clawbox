@@ -588,7 +588,7 @@ describe("/setup-api/browser/manage", () => {
    */
   describe("the owner's configured browser", () => {
     const ENV_FILE = process.env.CLAWBOX_BROWSER_ENV_FILE as string;
-    const OWNER_PROFILE = "/home/owner-test/.config/google-chrome-debug";
+    const OWNER_PROFILE = "/home/clawbox/.config/google-chrome-debug";
     const CONFIGURED = `CLAWBOX_BROWSER_START_URL='https://example.com/'\nCLAWBOX_BROWSER_PROFILE_DIR=${OWNER_PROFILE}\nCLAWBOX_BROWSER_CDP_PORT=9222\n`;
     const OWNER_CHROME = `/opt/google/chrome/chrome\0--user-data-dir=${OWNER_PROFILE}\0--remote-debugging-port=9222\0`;
     const DESKTOP_SESSION = "0::/user.slice/user-1000.slice/session-2.scope\n";
@@ -636,7 +636,7 @@ describe("/setup-api/browser/manage", () => {
         throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
       }) as never);
       killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
-      vi.mocked(findPlaywrightChromium).mockReturnValue("/home/owner-test/.cache/ms-playwright/chromium-1180/chrome-linux/chrome");
+      vi.mocked(findPlaywrightChromium).mockReturnValue("/home/clawbox/.cache/ms-playwright/chromium-1180/chrome-linux/chrome");
       mockExec.mockResolvedValue({ stdout: "Chromium 146", stderr: "" });
     });
 
@@ -780,7 +780,7 @@ describe("/setup-api/browser/manage", () => {
       // Nothing configured: ClawBox on its own profile and 18800, and the
       // owner's Chrome (title-rewritten argv, as a live Chrome has) on 18800.
       files = {};
-      processes({ 5150: ["/opt/google/chrome/chrome --user-data-dir=/home/owner-test/.config/google-chrome-debug --remote-debugging-port=18800", DESKTOP_SESSION] });
+      processes({ 5150: ["/opt/google/chrome/chrome --user-data-dir=/home/clawbox/.config/google-chrome-debug --remote-debugging-port=18800", DESKTOP_SESSION] });
       answering(18800);
 
       const status = await (await GET()).json();

@@ -386,7 +386,7 @@ describe("/setup-api/browser", () => {
   });
 
   it("never starts the unit over the owner's browser when it is open without the port — it verifies headless", async () => {
-    process.env.CLAWBOX_BROWSER_PROFILE_DIR = "/home/owner-test/.config/google-chrome-debug";
+    process.env.CLAWBOX_BROWSER_PROFILE_DIR = "/home/clawbox/.config/google-chrome-debug";
     try {
       setDesktopBrowserReady(Number.MAX_SAFE_INTEGER); // nothing ever answers the port
       browserOnProfile.value = [4242];

@@ -39,7 +39,7 @@ const run = promisify(execFile);
 function scriptEnv(home: string, extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   return { NODE_ENV: "test", PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home, ...extra };
 }
-const HOME = "/home/owner-test";
+const HOME = "/home/clawbox";
 
 describe("defaults", () => {
   it("are exactly what was hard-coded before: ClawBox's own profile, port 18800, auto-detected Chromium", () => {
@@ -79,14 +79,14 @@ describe("parseBrowserEnv", () => {
     expect(parseBrowserEnv([
       "# Written by ClawBox",
       "CLAWBOX_BROWSER_START_URL='https://example.com/'",
-      'export CLAWBOX_BROWSER_PROFILE_DIR="/home/owner-test/.config/my-chrome"',
+      'export CLAWBOX_BROWSER_PROFILE_DIR="/home/clawbox/.config/my-chrome"',
       "CLAWBOX_BROWSER_CDP_PORT=9222 # the owner's Chrome",
       "CLAWBOX_BROWSER_EXECUTABLE='/opt/google/chrome/chrome' # theirs",
       "   ",
       "not an assignment",
     ].join("\n"))).toEqual({
       CLAWBOX_BROWSER_START_URL: "https://example.com/",
-      CLAWBOX_BROWSER_PROFILE_DIR: "/home/owner-test/.config/my-chrome",
+      CLAWBOX_BROWSER_PROFILE_DIR: "/home/clawbox/.config/my-chrome",
       CLAWBOX_BROWSER_CDP_PORT: "9222",
       CLAWBOX_BROWSER_EXECUTABLE: "/opt/google/chrome/chrome",
     });
@@ -106,13 +106,13 @@ describe("parseBrowserEnv", () => {
 describe("resolveDesktopBrowserConfig", () => {
   it("takes the owner's profile, port and executable from the file", () => {
     const config = resolveDesktopBrowserConfig({
-      CLAWBOX_BROWSER_PROFILE_DIR: "/home/owner-test/.config/my-chrome/",
+      CLAWBOX_BROWSER_PROFILE_DIR: "/home/clawbox/.config/my-chrome/",
       CLAWBOX_BROWSER_CDP_PORT: "9222",
       CLAWBOX_BROWSER_EXECUTABLE: "/opt/google/chrome/chrome",
     }, {}, HOME);
     expect(config).toMatchObject({
       // The trailing slash is the same directory, written as Chromium's argv will carry it.
-      profileDir: "/home/owner-test/.config/my-chrome",
+      profileDir: "/home/clawbox/.config/my-chrome",
       cdpPort: 9222,
       executable: "/opt/google/chrome/chrome",
       ownProfile: false,
@@ -122,11 +122,11 @@ describe("resolveDesktopBrowserConfig", () => {
 
   it("lets the environment outrank the file, key by key", () => {
     const config = resolveDesktopBrowserConfig(
-      { CLAWBOX_BROWSER_PROFILE_DIR: "/home/owner-test/a", CLAWBOX_BROWSER_CDP_PORT: "9222" },
+      { CLAWBOX_BROWSER_PROFILE_DIR: "/home/clawbox/a", CLAWBOX_BROWSER_CDP_PORT: "9222" },
       { CLAWBOX_BROWSER_CDP_PORT: "9333" },
       HOME,
     );
-    expect(config.profileDir).toBe("/home/owner-test/a");
+    expect(config.profileDir).toBe("/home/clawbox/a");
     expect(config.cdpPort).toBe(9333);
   });
 
@@ -152,10 +152,10 @@ describe("resolveDesktopBrowserConfig", () => {
   it.each([
     ["relative", "chrome-profile"],
     ["the root", "/"],
-    ["with a space", "/home/owner-test/My Profile"],
-    ["with a quote", "/home/owner-test/it's"],
-    ["with a dot-dot segment", "/home/owner-test/../other"],
-    ["with a dot segment", "/home/owner-test/./x"],
+    ["with a space", "/home/clawbox/My Profile"],
+    ["with a quote", "/home/clawbox/it's"],
+    ["with a dot-dot segment", "/home/clawbox/../other"],
+    ["with a dot segment", "/home/clawbox/./x"],
   ])("refuses a profile directory that is %s, for the default and a warning", (_label, raw) => {
     const config = resolveDesktopBrowserConfig({ CLAWBOX_BROWSER_PROFILE_DIR: raw }, {}, HOME);
     expect(config.profileDir).toBe(`${HOME}/.config/clawbox-browser`);
