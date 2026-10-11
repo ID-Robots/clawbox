@@ -937,6 +937,8 @@ describe("CodingAgentApp", () => {
       expect(screen.getByTestId("coding-agent-queue-position-run-queued01")).toHaveTextContent("#2 in line");
       expect(screen.queryByText(/0 turns/)).not.toBeInTheDocument();
       expect(screen.queryByTestId("coding-agent-stop-run-queued01")).toBeNull();
+      // Named for its run, so two queued runs' buttons are told apart by a screen reader.
+      expect(screen.getByTestId("coding-agent-cancel-queued-run-queued01")).toHaveAttribute("aria-label", `${translations.en["codingAgent.cancelQueued"]} · run-queued01`);
       fireEvent.click(screen.getByTestId("coding-agent-cancel-queued-run-queued01"));
       await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/coding-agent/stop", body: { runId: "run-queued01" } }));
     });

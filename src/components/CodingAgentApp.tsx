@@ -1562,6 +1562,7 @@ export default function CodingAgentApp() {
             onClick={() => runAction(run.id, "stop", t("codingAgent.cancelQueuedFailed"))}
             disabled={busy === run.id}
             data-testid={`coding-agent-cancel-queued-${run.id}`}
+            aria-label={`${t("codingAgent.cancelQueued")} · ${run.id}`}
             className={where === "row" ? `${RUN_BUTTON} border-white/10 text-[var(--text-muted)] hover:bg-white/5` : BTN_SECONDARY}
           >
             {t("codingAgent.cancelQueued")}
