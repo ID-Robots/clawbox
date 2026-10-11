@@ -4,9 +4,11 @@ import { speechTextFor, SPEECH_MAX_CHARS } from "@/lib/speech-text";
 import { getVoiceAutoReply } from "@/lib/voice-reply";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { refuse, speakReply, withSpeechQueue } from "@/lib/voice-speak";
+import { pickReplyFormat } from "@/lib/voice-reply-format";
 
 /**
- * POST /setup-api/tts/speak {text} → the reply, spoken, for the desktop chat.
+ * POST /setup-api/tts/speak {text, formats?} → the reply, spoken, for the
+ * desktop chat.
  *
  * A message in the desktop chat reaches the gateway as TEXT — a recording is
  * transcribed on the box first — so `tts.auto: "inbound"` can never fire on a
@@ -22,6 +24,13 @@ import { refuse, speakReply, withSpeechQueue } from "@/lib/voice-speak";
  * the result is capped at SPEECH_MAX_CHARS. Refused while the owner's switch
  * is off: the chat does not ask then, and nothing else should get a spoken
  * reply out of a box whose owner turned them off.
+ *
+ * COMPRESSED, never WAV unless nothing else can be made: `formats` is what the
+ * page's browser said it can play (`playableReplyFormats`), and the answer is
+ * Ogg Opus when Opus is on that list and MP3 otherwise — a request that states
+ * nothing gets MP3, which every browser decodes. The Content-Type names what
+ * the bytes are; on a box without ffmpeg the local engine's WAV goes out as it
+ * came (src/lib/voice-reply-format.ts, src/lib/tts-compress.ts).
  */
 
 export async function POST(req: Request) {
@@ -37,12 +46,13 @@ export async function POST(req: Request) {
   } catch {
     return refuse("Invalid request body", "bad_request", 400);
   }
-  const raw = (body as { text?: unknown } | null)?.text;
+  const { text: raw, formats } = (body ?? {}) as { text?: unknown; formats?: unknown };
   const text = typeof raw === "string" ? speechTextFor(raw, SPEECH_MAX_CHARS) : "";
   if (!text) return refuse("Nothing to say.", "bad_text", 400);
+  const format = pickReplyFormat(formats);
 
   // Waits for an earlier reply rather than refusing: see withSpeechQueue. The
   // synthesis itself is `speakReply` in src/lib/voice-speak.ts — shared with
   // the coding agent's generate_audio so the two cannot drift apart.
-  return withSpeechQueue(() => speakReply(text));
+  return withSpeechQueue(() => speakReply(text, undefined, { format }));
 }

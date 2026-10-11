@@ -121,8 +121,22 @@ import {
   readCaptureAvailability,
   recordingFileName,
   type CaptureAvailability,
+  type VoiceState,
   type VoiceStatus,
 } from '@/lib/chat-voice-input'
+import {
+  HOLD_MIN_MS,
+  HOLD_TO_TALK_KEY,
+  isHoldToTalkKey,
+  isKeyForwardingTarget,
+  releasedOver,
+  stepHold,
+  type Hold,
+  type HoldAction,
+  type HoldEvent,
+  type HoldSource,
+} from '@/lib/chat-hold-to-talk'
+import { playableReplyFormats } from '@/lib/voice-reply-format'
 import {
   type ThinkingLevel,
   type ProviderReasoningConfig,
@@ -224,6 +238,11 @@ const AUTH_BACKOFF_DELAY = 30000
 
 const SPINNER_STYLE: React.CSSProperties = { width: 24, height: 24, border: '2px solid rgba(249,115,22,0.2)', borderTopColor: '#f97316', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }
 // The status line's small sibling of SPINNER_STYLE.
+/**
+ * The mic button is held to talk: no page scroll, text selection or iOS
+ * callout may start under the finger holding it (src/lib/chat-hold-to-talk.ts).
+ */
+const HOLD_SURFACE_STYLE: React.CSSProperties = { touchAction: 'none', userSelect: 'none', WebkitUserSelect: 'none', WebkitTouchCallout: 'none' }
 const TURN_SPINNER_STYLE: React.CSSProperties = { width: 12, height: 12, border: '2px solid rgba(249,115,22,0.25)', borderTopColor: '#f97316', borderRadius: '50%', animation: 'spin 0.8s linear infinite', flexShrink: 0 }
 
 // The chat used to clip up to two sentences out of every assistant reply into
@@ -4420,6 +4439,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // only way to end a capture, so cancel and finish arrive at the same place
   // and something has to tell them apart.
   const cancelledRef = useRef(false)
+  // What the composer says once a cancelled capture has stopped: nothing, as
+  // a rule, or why a held key's recording was thrown away (`short`).
+  const cancelledStatusRef = useRef<VoiceStatus>(IDLE_STATUS)
   // The last recording, kept so a failed transcription can be retried without
   // making the user say it all again.
   const lastAudioRef = useRef<{ blob: Blob; name: string } | null>(null)
@@ -4437,6 +4459,23 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const captureGenerationRef = useRef(0)
   const sendVoiceTranscriptRef = useRef<(text: string) => void>(() => {})
   const transcribeAbortRef = useRef<AbortController | null>(null)
+  // Hold to talk (src/lib/chat-hold-to-talk.ts): the mic button or the
+  // HOLD_TO_TALK_KEY held down. The hold itself lives in a ref, because the
+  // window's key and pointer listeners read it between renders.
+  const holdRef = useRef<Hold>(null)
+  // What the composer SAYS about the hold, set only once it has lasted
+  // HOLD_MIN_MS: before that, letting go is a tap (button) or a brush (key),
+  // and "release to send" would be a promise the release does not keep.
+  const [heldToSend, setHeldToSend] = useState<HoldSource | null>(null)
+  const holdArmTimerRef = useRef<number | null>(null)
+  // The pointerup/pointercancel listeners of a button hold, on the window so a
+  // finger that slides off the button still ends it.
+  const releasePointerListenersRef = useRef<(() => void) | null>(null)
+  // Whether the press a click ends in already did that click's work: a press
+  // that opened the microphone is followed by a click the browser fires at
+  // whatever the button has become by then — Stop.
+  const pointerStartedRef = useRef(false)
+  const voiceStateRef = useRef<VoiceState>('idle')
 
   // ── Spoken replies ────────────────────────────────────────────────────
   //
@@ -4640,7 +4679,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           res = await fetch('/setup-api/tts/speak', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: words }),
+            // The compressed formats this browser can play, best first: the
+            // box answers Opus where it may, MP3 otherwise, and WAV only when
+            // it has no ffmpeg (src/lib/voice-reply-format.ts).
+            body: JSON.stringify({ text: words, formats: playableReplyFormats() }),
             // A deadline, so a stalled synthesis cannot hold the chain of
             // spoken replies forever: the box's own budget is a cold Kokoro
             // (up to 40 s) behind up to three queued replies.
@@ -4885,6 +4927,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       void fetch('/setup-api/tts/warm', { method: 'POST' }).catch(() => { /* the reply cold-starts */ })
     }
     const generation = captureGenerationRef.current
+    // A prompt answered after the capture was let go of: the composer goes back
+    // to idle, unless whatever let go of it has already said something since
+    // (a held key released too soon says why — see cancelRecording).
+    const settledPrompt = (prev: VoiceStatus): VoiceStatus => (prev.state === 'requesting' ? IDLE_STATUS : prev)
     let stream: MediaStream
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true })
@@ -4893,7 +4939,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // open when the panel closes can be denied afterwards, and an error
       // pinned to a panel nobody is looking at is waiting on screen the next
       // time it opens, describing a request that is no longer anyone's.
-      if (captureGenerationRef.current !== generation) { setVoice(IDLE_STATUS); return }
+      if (captureGenerationRef.current !== generation) { setVoice(settledPrompt); return }
       setVoice({ state: 'error', error: classifyCaptureError(err), message: null, canRetry: false })
       return
     }
@@ -4904,7 +4950,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // with. No error is shown: nothing went wrong and, more to the point,
       // there may no longer be anywhere to show it.
       for (const track of stream.getTracks()) track.stop()
-      setVoice(IDLE_STATUS)
+      setVoice(settledPrompt)
       return
     }
     const mimeType = pickRecordingMimeType()
@@ -4922,12 +4968,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     recorderRef.current = recorder
     chunksRef.current = []
     cancelledRef.current = false
+    cancelledStatusRef.current = IDLE_STATUS
     recorder.ondataavailable = (event) => { if (event.data.size > 0) chunksRef.current.push(event.data) }
     recorder.onstop = () => {
       releaseMicrophone()
       const chunks = chunksRef.current
       chunksRef.current = []
-      if (cancelledRef.current) { setVoice(IDLE_STATUS); return }
+      if (cancelledRef.current) { setVoice(cancelledStatusRef.current); return }
       const type = recorder.mimeType || mimeType || 'audio/webm'
       const blob = new Blob(chunks, { type })
       if (blob.size === 0) {
@@ -4972,18 +5019,166 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
   const stopRecording = useCallback(() => {
     const recorder = recorderRef.current
-    cancelledRef.current = false
     if (!recorder || recorder.state === 'inactive') { releaseMicrophone(); setVoice(IDLE_STATUS); return }
+    // Cleared only for a recorder that is really still recording. One that is
+    // already inactive was stopped by a cancel whose `stop` event has not been
+    // delivered yet — a Stop click or a released hold landing in that gap used
+    // to clear the flag here and hand the stop handler audio the user had just
+    // thrown away, which it then uploaded.
+    cancelledRef.current = false
     recorder.stop()
   }, [releaseMicrophone])
 
-  const cancelRecording = useCallback(() => {
+  // `next` is what the composer says once the capture has stopped: idle as a
+  // rule, or the reason a held key's recording was not sent.
+  const cancelRecording = useCallback((next: VoiceStatus = IDLE_STATUS) => {
     cancelledRef.current = true
+    cancelledStatusRef.current = next
     const recorder = recorderRef.current
     lastAudioRef.current = null
     if (recorder && recorder.state !== 'inactive') recorder.stop()
-    else { releaseMicrophone(); setVoice(IDLE_STATUS) }
+    else { releaseMicrophone(); setVoice(next) }
   }, [releaseMicrophone])
+
+  // ── Hold to talk ──────────────────────────────────────────────────────
+  //
+  // The transitions are `stepHold`'s (src/lib/chat-hold-to-talk.ts); this
+  // performs what it decides with the same three functions the buttons use, so
+  // a hold that finishes is a Stop click and a hold that is cancelled is the
+  // Cancel link — nothing here opens or closes the microphone on its own.
+  useEffect(() => { voiceStateRef.current = voice.state }, [voice.state])
+  const startRecordingRef = useRef(startRecording)
+  useEffect(() => { startRecordingRef.current = startRecording }, [startRecording])
+  const runHoldAction = useCallback((action: HoldAction) => {
+    if (action === 'start') void startRecordingRef.current()
+    else if (action === 'finish') stopRecording()
+    else if (action === 'cancel') cancelRecording()
+    else if (action === 'tooShort') cancelRecording({ state: 'error', error: 'short', message: null, canRetry: false })
+  }, [stopRecording, cancelRecording])
+  const applyHold = useCallback((event: HoldEvent) => {
+    const before = holdRef.current
+    const { hold, action } = stepHold(before, event)
+    holdRef.current = hold
+    if (hold !== before) {
+      if (holdArmTimerRef.current !== null) window.clearTimeout(holdArmTimerRef.current)
+      holdArmTimerRef.current = null
+      setHeldToSend(null)
+      if (hold) {
+        holdArmTimerRef.current = window.setTimeout(() => {
+          holdArmTimerRef.current = null
+          if (holdRef.current === hold) setHeldToSend(hold.source)
+        }, HOLD_MIN_MS)
+      } else {
+        releasePointerListenersRef.current?.()
+        releasePointerListenersRef.current = null
+      }
+    }
+    runHoldAction(action)
+  }, [runHoldAction])
+  // A capture that ended some other way while held — Stop or Cancel clicked,
+  // the start refused, the cap reached — ends the hold with it, so the key's
+  // release or a later blur cannot cancel a transcription already on its way.
+  useEffect(() => {
+    if (!holdRef.current || voice.state === 'recording' || voice.state === 'requesting') return
+    applyHold({ type: 'ended' })
+  }, [voice.state, applyHold])
+  /**
+   * The mic button pressed. A press that opens the microphone starts a hold,
+   * and the release is watched on the window rather than the button: the
+   * button turns into Stop under the pointer, and a finger may slide off it.
+   * Any other press (Stop, a disabled button, a second finger) is left to the
+   * click it ends in, exactly as before.
+   */
+  const pressVoiceButton = useCallback((e: React.PointerEvent<HTMLButtonElement>) => {
+    pointerStartedRef.current = false
+    if (e.button !== 0 || e.isPrimary === false) return
+    applyHold({ type: 'press', source: 'pointer', at: Date.now(), voice: voiceStateRef.current })
+    const hold = holdRef.current
+    if (hold?.source !== 'pointer') return
+    pointerStartedRef.current = true
+    const pointerId = e.pointerId
+    const button = e.currentTarget
+    const ours = (ev: PointerEvent) => ev.pointerId === undefined || pointerId === undefined || ev.pointerId === pointerId
+    const onUp = (ev: PointerEvent) => {
+      if (!ours(ev)) return
+      // Let go of over the button — the same element, now Stop, or the Stop
+      // that replaced it — or dragged away from it, which cancels.
+      const over = button.isConnected ? button : document.querySelector<HTMLElement>('[data-testid="voice-stop"]')
+      const inside = over ? releasedOver(over.getBoundingClientRect(), ev.clientX, ev.clientY) : true
+      applyHold({ type: 'release', source: 'pointer', at: Date.now(), voice: voiceStateRef.current, inside })
+    }
+    // Taken away rather than let go of — a scroll that claimed the touch, a
+    // system gesture: nobody chose to send that.
+    const onCancel = (ev: PointerEvent) => { if (ours(ev)) applyHold({ type: 'interrupt' }) }
+    window.addEventListener('pointerup', onUp, true)
+    window.addEventListener('pointercancel', onCancel, true)
+    releasePointerListenersRef.current = () => {
+      window.removeEventListener('pointerup', onUp, true)
+      window.removeEventListener('pointercancel', onCancel, true)
+    }
+  }, [applyHold])
+  /** True for the click a hold-starting press ends in, which has nothing left to do. Keyboard clicks (detail 0) are never it. */
+  const clickWasThePress = useCallback((e: React.MouseEvent) => {
+    if (e.detail === 0 || !pointerStartedRef.current) return false
+    pointerStartedRef.current = false
+    return true
+  }, [])
+  const cancelVoice = useCallback(() => {
+    // The Cancel link during a hold ends the hold with it, so the key's own
+    // release that follows has nothing left to finish.
+    if (holdRef.current) applyHold({ type: 'escape' })
+    else cancelRecording()
+  }, [applyHold, cancelRecording])
+
+  // The key, Escape, and everything that takes a hold away without a release.
+  // On the window's CAPTURE phase, ahead of the chat's own Escape (which would
+  // close the panel) and of anything a focused app does with the key.
+  useEffect(() => {
+    if (!isOpen || !caps.canTranscribe) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (!holdRef.current) return
+        // The hold's Escape: the recording is thrown away and that is all —
+        // the chat stays open.
+        e.preventDefault()
+        e.stopImmediatePropagation()
+        applyHold({ type: 'escape' })
+        return
+      }
+      if (!isHoldToTalkKey(e) || isKeyForwardingTarget(e.target)) return
+      e.preventDefault()
+      // Offered only while the mic button would be: a chat with no
+      // connection cannot send what it hears.
+      if (!e.repeat && statusRef.current !== 'connected') return
+      applyHold({ type: 'press', source: 'key', at: Date.now(), voice: voiceStateRef.current, repeat: e.repeat })
+    }
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key !== HOLD_TO_TALK_KEY || holdRef.current?.source !== 'key') return
+      e.preventDefault()
+      applyHold({ type: 'release', source: 'key', at: Date.now(), voice: voiceStateRef.current })
+    }
+    // A keyup in another window never arrives here, so leaving the window
+    // while holding has to end the hold itself.
+    const onBlur = () => applyHold({ type: 'interrupt' })
+    const onVisibility = () => { if (document.visibilityState === 'hidden') applyHold({ type: 'interrupt' }) }
+    window.addEventListener('keydown', onKeyDown, true)
+    window.addEventListener('keyup', onKeyUp, true)
+    window.addEventListener('blur', onBlur)
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown, true)
+      window.removeEventListener('keyup', onKeyUp, true)
+      window.removeEventListener('blur', onBlur)
+      document.removeEventListener('visibilitychange', onVisibility)
+      // The chat closing (or unmounting) while held: the hold ends here, and
+      // the panel's own close abandons the capture.
+      applyHold({ type: 'interrupt' })
+    }
+  }, [isOpen, caps.canTranscribe, applyHold])
+  useEffect(() => () => {
+    if (holdArmTimerRef.current !== null) window.clearTimeout(holdArmTimerRef.current)
+    releasePointerListenersRef.current?.()
+  }, [])
 
   const retryTranscribe = useCallback(() => {
     const last = lastAudioRef.current
@@ -6877,19 +7072,31 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     </>
   )
   // Compact desktop mic; 44px in-flow phone target with shared recording feedback.
+  //
+  // Both states take a press-and-hold (pressVoiceButton): the button must not
+  // scroll the page, select text or open a long-press menu under a finger
+  // that is holding it to talk.
   const renderVoiceButton = (large: boolean) => {
     if (voice.state === 'recording') {
+      const stopLabel = heldToSend
+        ? (heldToSend === 'key' ? t("chat.voice.holdingKey", { key: HOLD_TO_TALK_KEY }) : t("chat.voice.holding"))
+        : t("chat.voice.stop")
       return (
         <button
-          onClick={stopRecording}
-          title={t("chat.voice.stop")}
-          aria-label={t("chat.voice.stop")}
+          onClick={(e) => { if (!clickWasThePress(e)) stopRecording() }}
+          onPointerDown={pressVoiceButton}
+          onContextMenu={(e) => e.preventDefault()}
+          title={stopLabel}
+          aria-label={stopLabel}
           data-testid="voice-stop"
           data-size={large ? 'large' : 'compact'}
-          className={large ? 'chat-voice-large chat-voice-large--recording' : undefined}
-          style={large ? undefined : {
+          data-held={heldToSend ?? undefined}
+          className={large ? `chat-voice-large chat-voice-large--recording${heldToSend ? ' chat-voice-large--held' : ''}` : undefined}
+          style={large ? HOLD_SURFACE_STYLE : {
+            ...HOLD_SURFACE_STYLE,
             width: 36, height: 36, borderRadius: 10, border: 'none',
-            background: 'rgba(239,68,68,0.25)', color: '#ef4444',
+            background: heldToSend ? 'rgba(239,68,68,0.4)' : 'rgba(239,68,68,0.25)', color: '#ef4444',
+            boxShadow: heldToSend ? '0 0 0 3px rgba(239,68,68,0.35)' : undefined,
             cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
             flexShrink: 0,
           }}
@@ -6904,17 +7111,25 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // cannot perform. It stays clickable so the same reason lands in the
     // status row for anyone who tries.
     const label = captureAvailability === 'insecure' ? t("chat.voice.insecureContext") : t("chat.voice.record")
+    // The hover text also says the button can be held, and which key does the
+    // same — the one place the shortcut is written down.
+    const hint = captureAvailability === 'insecure' ? label : t("chat.voice.recordHint", { key: HOLD_TO_TALK_KEY })
     const icon = voice.state === 'transcribing' ? 'hourglass_top' : 'mic'
+    const record = (e: React.MouseEvent) => { if (!clickWasThePress(e)) void startRecording() }
     if (large) {
       return (
         <button
-          onClick={startRecording}
+          onClick={record}
+          onPointerDown={disabled ? undefined : pressVoiceButton}
+          onContextMenu={(e) => e.preventDefault()}
           disabled={disabled}
-          title={label}
+          title={hint}
           aria-label={label}
+          aria-keyshortcuts={HOLD_TO_TALK_KEY}
           data-testid="voice-record"
           data-size="large"
           className={voice.state === 'transcribing' ? 'chat-voice-large chat-voice-large--busy' : 'chat-voice-large'}
+          style={HOLD_SURFACE_STYLE}
         >
           <span className="material-symbols-rounded" style={{ fontSize: 38 }}>{icon}</span>
         </button>
@@ -6922,13 +7137,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     }
     return (
       <button
-        onClick={startRecording}
+        onClick={record}
+        onPointerDown={disabled ? undefined : pressVoiceButton}
+        onContextMenu={(e) => e.preventDefault()}
         disabled={disabled}
-        title={label}
+        title={hint}
         aria-label={label}
+        aria-keyshortcuts={HOLD_TO_TALK_KEY}
         data-testid="voice-record"
         data-size="compact"
         style={{
+          ...HOLD_SURFACE_STYLE,
           width: 36, height: 36, borderRadius: 10, border: 'none',
           background: 'rgba(255,255,255,0.06)',
           color: voice.state === 'transcribing' ? '#f97316' : 'rgba(255,255,255,0.4)',
@@ -7864,6 +8083,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       {voice.state !== 'idle' && (
         <div
           data-testid="voice-status"
+          data-held={voice.state === 'recording' && heldToSend ? heldToSend : undefined}
           role="status"
           aria-live="polite"
           style={{
@@ -7887,7 +8107,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             ? { flex: 1, whiteSpace: 'normal' }
             : { flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {voice.state === 'requesting' && t("chat.voice.requesting")}
-            {voice.state === 'recording' && <>{t("chat.voice.recording")}{' '}
+            {/* Held long enough that letting go SENDS: said in as many words,
+                with the way out. Before that — and for a click-started
+                capture — the plain "Recording". */}
+            {voice.state === 'recording' && <>{heldToSend === 'key'
+              ? t("chat.voice.holdingKey", { key: HOLD_TO_TALK_KEY })
+              : heldToSend === 'pointer' ? t("chat.voice.holding") : t("chat.voice.recording")}{' '}
               {/* The clock is kept out of the accessibility tree, not out of
                   the page. `role="status"` is implicitly atomic, so a live
                   region re-announces ALL of its text on any change inside it:
@@ -7907,12 +8132,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                 : voice.error === 'insecure' ? t("chat.voice.insecureContext")
                 : voice.error === 'unsupported' ? t("chat.voice.unsupported")
                 : voice.error === 'empty' ? t("chat.voice.nothingHeard")
+                : voice.error === 'short' ? t("chat.voice.tooShort", { key: HOLD_TO_TALK_KEY })
                 : t("chat.voice.failed"))
             )}
           </span>
           {voice.state === 'recording' && (
             <button
-              onClick={cancelRecording}
+              onClick={cancelVoice}
               data-testid="voice-cancel"
               style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', padding: 0, textDecoration: 'underline', fontSize: 11.5 }}
             >{t("chat.voice.cancel")}</button>
