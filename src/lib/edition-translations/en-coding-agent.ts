@@ -333,6 +333,8 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.team.plannerRun": "Planner run",
   "codingAgent.team.planning": "The planner is reading the project and writing the plan…",
   "codingAgent.team.after": "after {ids}",
+  "codingAgent.team.held": "Held — {task} was reopened",
+  "codingAgent.team.waitingFor": "Waiting for {ids} to be accepted",
   "codingAgent.team.log": "Log ({n})",
   "codingAgent.team.status.planning": "Planning",
   "codingAgent.team.status.working": "Working",

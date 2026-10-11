@@ -100,8 +100,10 @@ import { runProjectSuite, suiteFailure, suiteNote, suiteRejection } from "@/lib/
 import { isLive, isSettled } from "@/lib/coding-agent-status";
 import {
   allComplete,
+  blockedBy,
   BoardAccessError,
   boardDigest,
+  countedAttempts,
   createBoard,
   harnessStateDenial,
   isExhausted,
@@ -115,9 +117,11 @@ import {
   readyTasks,
   saveBoard,
   setTeamStatus,
+  startedDependents,
   teamAgents,
   teamMetrics,
   TEAM_ID_RE,
+  waitingOn,
   type Actor,
   type ReviewMode,
   type TeamAgents,
@@ -127,7 +131,7 @@ import {
 
 /** The board as the routes and the app read it: with who worked, counted, and the figures as of now. */
 export type TeamView = TeamBoard & { agents: TeamAgents };
-import { TeamBus, type TeamMessage } from "@/lib/coding-team-bus";
+import { TeamBus, type Delivered, type TeamMessage } from "@/lib/coding-team-bus";
 import { clippedNote, leadRoom, leadShouldRun, leadTask, parsePlan, parseReplan, PLANNER_BRIEF, REPLAN_BRIEF, replanContext, replanTask } from "@/lib/coding-team-planner";
 
 /** A team stops after this many alerts: something is going wrong repeatedly. */
@@ -194,6 +198,12 @@ interface LiveTeam {
    * each time, until MAX_ALERTS stopped a team whose work was fine.
    */
   leadTurnsAt: [number, number];
+  /**
+   * Tasks whose worker is being stopped because a dependency of theirs was
+   * rejected or reopened after they started (`holdDependents`): the task is
+   * set back once its worker settles, its work set aside unmerged.
+   */
+  held: Map<string, { dependency: string; reason: string }>;
   done: Promise<void>;
 }
 
@@ -239,7 +249,10 @@ export async function startTeam(input: StartTeamInput): Promise<TeamView> {
   const board = createBoard({ goal, projectId, directory, source: input.source, dynamic }, input.source === "owner" ? OWNER : SYSTEM);
   saveBoard(board);
   const bus = new TeamBus(board);
-  const team: LiveTeam = { board, bus, stopRequested: false, currentRunIds: new Set(), pendingMessages: new Map(), uncountedAlerts: 0, leadTurnsAt: [0, 0], done: Promise.resolve() };
+  const team: LiveTeam = { board, bus, stopRequested: false, currentRunIds: new Set(), pendingMessages: new Map(), uncountedAlerts: 0, leadTurnsAt: [0, 0], held: new Map(), done: Promise.resolve() };
+  // A task reopened — rejected, sent back by the suite, or itself held — sets
+  // back whatever started on it, wherever the reopening came from.
+  bus.subscribe((delivered) => holdDependents(team, delivered));
   live.set(board.id, team);
   team.done = runTeam(team, input.source)
     .catch((err) => {
@@ -745,7 +758,12 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
     setTeamStatus(board, SYSTEM, "done");
   } else {
     const failed = board.tasks.filter((t) => t.status === "failed" || t.status === "rejected").map((t) => t.task_id);
-    const blocked = board.tasks.filter((t) => t.status === "pending").map((t) => t.task_id);
+    // A task that never ran is said with what it waited on: a dependency that
+    // never got accepted is the whole reason, and "never ran" alone hid it.
+    const blocked = board.tasks.filter((t) => t.status === "pending").map((t) => {
+      const on = blockedBy(board, t);
+      return on.length ? `${t.task_id} (waiting on ${on.map((d) => `${d.task_id}, ${d.status}`).join("; ")})` : t.task_id;
+    });
     setTeamStatus(board, SYSTEM, "failed", `Tasks ${failed.join(", ") || "none"} failed${blocked.length ? `; ${blocked.join(", ")} never ran` : ""}.`);
   }
   saveBoard(board);
@@ -773,9 +791,16 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
   }
   // The owner may have stopped the team while the worktree was being made:
   // a run started now would have no id on the team yet, so Stop could not
-  // reach it. Nothing starts; the worktree goes back.
+  // reach it. Nothing starts; the worktree goes back. So may a dependency
+  // have been reopened meanwhile (`holdDependents`): the task was picked as
+  // ready and is not any more, and it waits again — unstarted, nothing lost.
   if (team.stopRequested) {
     if (worktree) await removeWorktree(board.directory, worktree.path);
+    return false;
+  }
+  const current = board.tasks.find((t) => t.task_id === task.task_id);
+  if (!current || current.status !== "pending" || waitingOn(board, current).length > 0) {
+    if (worktree) await removeWorktree(board.directory, worktree.path, { dropBranch: worktree.branch });
     return false;
   }
 
@@ -806,6 +831,17 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
   if (team.stopRequested) {
     if (worktree) await removeWorktree(board.directory, worktree.path);
     return false;
+  }
+  // HELD while it worked: a dependency was reopened under it and its worker
+  // stopped. Nothing of it is merged — it was built on work that does not
+  // stand — and the task goes back to wait for that dependency, the attempt
+  // counted as a hold rather than against it.
+  const held = team.held.get(task.task_id);
+  if (held) {
+    team.held.delete(task.task_id);
+    if (worktree) await removeWorktree(board.directory, worktree.path);
+    bus.send(SYSTEM, { type: "hold", task_id: task.task_id, dependency: held.dependency, reason: held.reason });
+    return true;
   }
   const ok = settled?.status === "completed";
   let result = settled?.summary?.trim() || settled?.error || (ok ? "(no summary)" : `The run ended ${settled?.status ?? "without a record"}.`);
@@ -980,6 +1016,8 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
     }
     const verdict = await reviewTask(team, task, source, { files, report: result }, starting);
     if (team.stopRequested) return false;
+    // Held while the reviewer read it: the verdict is on a result already set aside.
+    if (!underReview(board, task.task_id)) return true;
     bus.send(REVIEWER, { type: "review", task_id: task.task_id, ...verdict });
   }
   return true;
@@ -1060,12 +1098,16 @@ async function reviewTask(team: LiveTeam, task: TeamTask, source: CodingRunSourc
   board.runs.push({ id: run.id, role: "reviewer", taskId: task.task_id });
   saveBoard(board);
   const settled = await settle(team, run.id);
+  // Held meanwhile (`holdDependents` stops its reviewer too): nothing to rule on, and nothing to alert about.
+  const dropped = { verdict: "accepted" as const, notes: "The task was held during its review." };
+  if (!underReview(board, task.task_id)) return dropped;
   if (settled?.status !== "completed") {
     bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: `The reviewer of ${task.task_id} (${run.id}) ended ${settled?.status ?? "without a record"}.` });
     return { verdict: "accepted", notes: "Accepted by rule: the reviewer did not finish." };
   }
   const answer = await verdictOf(team, settled, `The reviewer of ${task.task_id}`, task.task_id, launch);
   if (answer === null) return { verdict: "accepted", notes: "The team was stopped during the review." };
+  if (!underReview(board, task.task_id)) return dropped;
   if (!answer.ok) {
     bus.send(SYSTEM, { type: "alert", task_id: task.task_id, reason: answer.alert });
     return { verdict: "accepted", notes: `Accepted by rule: ${answer.reason}` };
@@ -1212,7 +1254,14 @@ async function suiteGate(team: LiveTeam, mayReoffer: boolean): Promise<{ reoffer
   bus.send(SYSTEM, { type: "note", text: suiteNote(suite, suspects.map((t) => t.task_id)) });
   if (!suspects.length) return { ...nothing, failed: suiteFailure(suite) };
   const notes = suiteRejection(suite);
-  for (const task of suspects) bus.send(REVIEWER, { type: "review", task_id: task.task_id, verdict: "rejected", notes });
+  // Dependents first (a task is always posted after what it depends on): each
+  // suspect gets the suite's own rejection, and a dependency rejected after
+  // its dependents finds them pending already rather than holding them — a
+  // hold is for the dependents the failure did NOT point at (holdDependents).
+  for (const task of [...suspects].reverse()) {
+    if (!underReview(board, task.task_id)) continue;
+    bus.send(REVIEWER, { type: "review", task_id: task.task_id, verdict: "rejected", notes });
+  }
   return { ...nothing, reoffered: suspects.map((t) => t.task_id) };
 }
 
@@ -1411,6 +1460,12 @@ export function workerTask(board: TeamBoard, task: TeamTask, folder: string | nu
   }
   const head = parts.join("\n\n");
   const rejected = task.attempts > 0 && task.review?.verdict === "rejected" ? `\n\nA previous attempt was rejected: ${here(task.review.notes)}` : "";
+  // Held (`holdTask`): the attempt before this one stood on a dependency that
+  // was reopened since — said with what became of it, so this attempt builds
+  // on the dependency as it is NOW instead of repeating the last one.
+  const held = task.hold
+    ? `\n\nThis task was ${task.hold.was === "complete" ? "done" : "started"} before on top of ${task.hold.dependency}, which has since been reopened${task.hold.reason ? ` (${here(task.hold.reason)})` : ""} and is accepted again now. ${task.hold.was === "complete" ? `What that attempt merged is already in the files: check it against ${task.hold.dependency} as it stands now and redo what no longer fits.` : "That attempt was stopped before it finished and nothing of it was kept; work from the current files."}`
+    : "";
   // Who else is at work, by the run id `team_message` needs: the one way a
   // worker learns which run to tell when it is blocked on a sibling's part.
   // LAST, because the text is cut at MAX_TASK_CHARS from the end: a list a
@@ -1424,14 +1479,14 @@ export function workerTask(board: TeamBoard, task: TeamTask, folder: string | nu
   // worker's folder it can grow (a worktree path is longer than the
   // project's): built once more for the room the growth leaves, and cut
   // only if that is still over.
-  const room = MAX_TASK_CHARS - head.length - DIGEST_LABEL.length - rejected.length - teammates.length;
+  const room = MAX_TASK_CHARS - head.length - DIGEST_LABEL.length - rejected.length - held.length - teammates.length;
   let digest = room > 0 ? here(boardDigest(board, task.task_id, Math.min(MAX_DIGEST_CHARS, room))) : "";
   if (digest.length > room && room > 0) {
     const smaller = room - (digest.length - room);
     digest = smaller > 0 ? here(boardDigest(board, task.task_id, Math.min(MAX_DIGEST_CHARS, smaller))) : "";
     if (digest.length > room) digest = `${digest.slice(0, room - 1)}…`;
   }
-  let text = `${head}${digest ? `${DIGEST_LABEL}${digest}` : ""}${rejected}${teammates}`;
+  let text = `${head}${digest ? `${DIGEST_LABEL}${digest}` : ""}${rejected}${held}${teammates}`;
   if (text.length > MAX_TASK_CHARS) text = `${text.slice(0, MAX_TASK_CHARS - 1)}…`;
   return text;
 }
@@ -1518,9 +1573,67 @@ export function vanishedFiles(dir: string, touched: readonly string[]): Set<stri
  * is not every task's.
  */
 export function suiteSuspects(tasks: TeamTask[], named: string[]): TeamTask[] {
-  const open = tasks.filter((t) => t.status === "complete" && t.attempts < 2);
+  const open = tasks.filter((t) => t.status === "complete" && countedAttempts(t) < 2);
   const pointed = open.filter((t) => named.some((f) => outsideHint([f], t.files_hint, { scratch: false }).length === 0));
   return pointed.length ? pointed : open;
+}
+
+/**
+ * A task went back — its reviewer rejected it, the suite gate reopened it, or
+ * it was itself held — so whatever STARTED on top of it is set back
+ * (`startedDependents`): dispatch waits for an accepted dependency
+ * (`readyTasks`), and a dependent that got going before the dependency fell
+ * through must not finish, or stand, on work that does not.
+ *
+ *  - Running: its worker is stopped and the task held once that worker
+ *    settles (`workTask`), its work never merged. Said on the board now.
+ *  - Finished, reviewed or not: held at once, its result set aside, and a
+ *    reviewer still reading it is stopped — its verdict is dropped.
+ *
+ * A hold is itself a reopening, so the subscriber this runs as carries it on
+ * down the chain. Bounded by the chain: every hold starts at a counted
+ * rejection, and a task has two of those at most.
+ */
+function holdDependents(team: LiveTeam, delivered: Delivered): void {
+  const { board, bus } = team;
+  const m = delivered.message;
+  if (team.stopRequested || isSettledStatus(board.status)) return;
+  const reopened = m.type === "review" && m.verdict === "rejected"
+    ? { id: m.task_id, reason: `rejected — ${firstLine(m.notes, 300)}` }
+    : m.type === "hold"
+      ? { id: m.task_id, reason: `held, because its own dependency ${m.dependency} was reopened` }
+      : null;
+  if (!reopened) return;
+  for (const dependent of startedDependents(board, reopened.id)) {
+    if (dependent.status === "in_progress") {
+      if (team.held.has(dependent.task_id)) continue;
+      team.held.set(dependent.task_id, { dependency: reopened.id, reason: reopened.reason });
+      try {
+        bus.send(SYSTEM, { type: "note", task_id: dependent.task_id, text: `Holding ${dependent.task_id}: its dependency ${reopened.id} was ${reopened.reason}. Its worker ${dependent.assigned_to ?? "(none)"} is being stopped; ${dependent.task_id} starts again once ${reopened.id} is accepted.` });
+      } catch {
+        // Refused by the board: already on it as an alert.
+      }
+      if (dependent.assigned_to) {
+        try { stopRun(dependent.assigned_to); } catch { /* already settled */ }
+      }
+      continue;
+    }
+    const reviewer = dependent.reviewRunId;
+    try {
+      bus.send(SYSTEM, { type: "hold", task_id: dependent.task_id, dependency: reopened.id, reason: reopened.reason });
+    } catch {
+      // Refused by the board: already on it as an alert.
+      continue;
+    }
+    if (reviewer && isHeldRun(reviewer)) {
+      try { stopRun(reviewer); } catch { /* already settled */ }
+    }
+  }
+}
+
+/** Is `taskId` still the finished result its reviewer is reading — not held, not reopened, since? */
+function underReview(board: TeamBoard, taskId: string): boolean {
+  return board.tasks.find((t) => t.task_id === taskId)?.status === "complete";
 }
 
 // ─── Internals ───────────────────────────────────────────────────────────────

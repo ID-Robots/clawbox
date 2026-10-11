@@ -591,6 +591,85 @@ describe("a worker the owner PAUSED", () => {
   });
 });
 
+describe("dependency gating: a dependent starts only on an ACCEPTED dependency", () => {
+  it("does not dispatch a dependent while its dependency's reviewer is still reading it — and builds it on the accepted redo", async () => {
+    // Seen live (2026-10-10): t2 finished while t1's reviewer was still at
+    // work, the loop woke, found t1 "complete" and started t3 on it — and the
+    // reviewer then rejected t1. t3 had been built on work that did not stand.
+    outcomes = [
+      { summary: JSON.stringify([
+        { task_description: "Scaffold index.html", files_hint: ["index.html"] },
+        { task_description: "Write styles.css", files_hint: ["styles.css"] },
+        { task_description: "Wire app.js", depends_on: ["t1"], files_hint: ["app.js"] },
+      ]) },
+      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: "styles done", filesTouched: ["styles.css"] },
+      { summary: "index redone", filesTouched: ["index.html"] },
+      { summary: "app done", filesTouched: ["app.js"] },
+    ];
+    // t1's reviewer is slow — HELD for a poll — and rejects; every later review accepts.
+    reviews = [
+      { status: "paused", resumesAs: { summary: JSON.stringify({ verdict: "rejected", notes: "The form does not submit." }) } } as (typeof reviews)[number],
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+
+    expect(done.status).toBe("done");
+    const order = done.log.map((e) => e.message);
+    const accepted = order.findIndex((m) => m.startsWith("Task t1 accepted"));
+    const t3Assigned = order.findIndex((m) => /^Task t3 assigned/.test(m));
+    expect(order.findIndex((m) => m.startsWith("Task t1 rejected"))).toBeGreaterThan(-1);
+    // t3 was handed out only after t1's redo was accepted — exactly once.
+    expect(accepted).toBeGreaterThan(-1);
+    expect(t3Assigned).toBeGreaterThan(accepted);
+    expect(done.tasks.find((t) => t.task_id === "t3")).toMatchObject({ status: "complete", attempts: 1, holds: 0 });
+    expect(starts.filter((s) => (s.team as { role: string; taskId: string }).role === "worker").map((s) => (s.team as { taskId: string }).taskId)).toEqual(["t1", "t2", "t1", "t3"]);
+  });
+
+  it("holds a finished dependent the suite did not point at when its dependency is sent back, and runs it again on the new merged state", async () => {
+    const dir = path.join(root, "site");
+    fs.mkdirSync(path.join(dir, "tests"), { recursive: true });
+    const MODULE = "FACTORS = {('mi', 'km'): 1.609344}\n\ndef convert(value, src, dst):\n    return round(value * FACTORS[(src, dst)], 6)\n";
+    const FIXED = "FACTORS = {('mi', 'km'): 1.609344, ('km', 'mi'): 1 / 1.609344}\n\ndef convert(value, src, dst):\n    return round(value * FACTORS[(src, dst)], 6)\n";
+    fs.writeFileSync(path.join(dir, "convert.py"), MODULE);
+    fs.writeFileSync(path.join(dir, "tests/test_convert.py"), "import unittest\nfrom convert import convert\n\nclass TestConvert(unittest.TestCase):\n    def test_km_to_mi(self):\n        self.assertEqual(convert(1.609344, 'km', 'mi'), 1.0)\n");
+    runner.resolveWorkingDirectory.mockResolvedValue({ directory: dir, projectId: null });
+    outcomes = [
+      { summary: shaped({ parallelism: 1, review: "each", rationale: "" }, JSON.stringify([
+        { task_description: "Write the converter, convert.py", files_hint: ["convert.py"] },
+        { task_description: "Document it in README.md", depends_on: ["t1"], files_hint: ["README.md"] },
+      ])) },
+      { summary: "Wrote convert.py.", filesTouched: ["convert.py"] },
+      { summary: "Wrote the README.", filesTouched: ["README.md"] },
+      { summary: "Added km → mi.", filesTouched: ["convert.py"] },
+      { summary: "README checked against the new pairs.", filesTouched: ["README.md"] },
+    ];
+    let t1Workers = 0;
+    runner.startRun.mockImplementation(async (input: Record<string, unknown>) => {
+      const who = input.team as { role: string; taskId: string | null };
+      if (who.role === "worker" && who.taskId === "t1" && ++t1Workers === 2) fs.writeFileSync(path.join(dir, "convert.py"), FIXED);
+      return fakeRun(input);
+    });
+    const board = await team.startTeam({ goal: "A unit converter", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+
+    expect(done.status).toBe("done");
+    // The traceback named convert.py: t1 went back as the suite's suspect, and
+    // t2 — accepted, but built on the t1 that was sent back — was HELD: set
+    // back without a rejection, its try not spent, and run again after t1.
+    expect(done.tasks.map((t) => [t.task_id, t.status, t.attempts, t.rejections, t.holds])).toEqual([["t1", "complete", 2, 1, 0], ["t2", "complete", 2, 0, 1]]);
+    const hold = done.log.find((e) => e.type === "hold");
+    expect(hold).toMatchObject({ actor: { kind: "system" }, task_id: "t2" });
+    expect(hold!.message).toMatch(/^Task t2 held: its dependency t1 was reopened \(rejected — The project's own tests fail on the merged result.*\)\. Its result is set aside; it starts again on the new merged state once t1 is accepted\.$/);
+    const workers = starts.filter((s) => (s.team as { role: string }).role === "worker");
+    expect(workers.map((s) => (s.team as { taskId: string }).taskId)).toEqual(["t1", "t2", "t1", "t2"]);
+    expect(String(workers[3].task)).toContain("This task was done before on top of t1, which has since been reopened");
+    expect(String(workers[3].task)).toContain("What that attempt merged is already in the files");
+    // A hold is not a guardrail: no alert.
+    expect(done.alerts).toBe(0);
+  });
+});
+
 describe("a stop that lands while a worker is being made", () => {
   it("starts no worker and gives the worktree back", async () => {
     outcomes = [{ summary: PARALLEL_PLAN }];
@@ -1438,7 +1517,7 @@ describe("a team that works", () => {
     const board = await team.startTeam({ goal: "g", directory: "site", source: "agent" });
     const done = await finished(board.id);
     expect(done.status).toBe("failed");
-    expect(done.error).toBe("Tasks t1 failed; t2 never ran.");
+    expect(done.error).toBe("Tasks t1 failed; t2 (waiting on t1, failed) never ran.");
     expect(done.tasks[0]).toMatchObject({ status: "failed", result: "Stopped at the cost ceiling", review: null });
     expect(starts).toHaveLength(2);
   });

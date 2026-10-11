@@ -29,6 +29,21 @@ export interface TeamTaskView {
   reviewRunId?: string | null;
   /** Who put it on the board: the plan, or the lead while the team ran. Absent from an older server. */
   origin?: "plan" | "lead";
+  /** Why it is back to pending: a dependency it started on was reopened (coding-team-board.ts holdTask). Absent from an older server. */
+  hold?: { dependency: string; reason: string; was: "in_progress" | "complete"; at: number } | null;
+}
+
+/**
+ * The dependencies a pending task still waits for: every one not yet ACCEPTED
+ * (or retired) — the server's own gate (`readyTasks`), said on the card so a
+ * task sitting pending behind a finished-but-unreviewed one says why.
+ */
+export function waitingFor(task: TeamTaskView, tasks: readonly TeamTaskView[]): string[] {
+  if (task.status !== "pending") return [];
+  return task.depends_on.filter((d) => {
+    const dep = tasks.find((x) => x.task_id === d);
+    return !dep || (dep.status !== "retired" && !(dep.status === "complete" && dep.review?.verdict === "accepted"));
+  });
 }
 
 /** The team's figures, as the server works them out from the board. */
@@ -437,6 +452,16 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
                     {task.depends_on.length > 0 && (
                       <span className="text-[11px] text-[var(--text-muted)]">{t("codingAgent.team.after", { ids: task.depends_on.join(", ") })}</span>
                     )}
+                    {task.hold && (
+                      <span className="text-[10px] font-semibold uppercase tracking-wider text-amber-400" data-testid={`coding-team-held-${task.task_id}`}>
+                        {t("codingAgent.team.held", { task: task.hold.dependency })}
+                      </span>
+                    )}
+                    {waitingFor(task, team.tasks).length > 0 && (
+                      <span className="text-[11px] text-amber-200/80" data-testid={`coding-team-waiting-${task.task_id}`}>
+                        {t("codingAgent.team.waitingFor", { ids: waitingFor(task, team.tasks).join(", ") })}
+                      </span>
+                    )}
                     {task.assigned_to && (
                       <button type="button" onClick={() => onOpenRun(task.assigned_to!)} data-testid={`coding-team-worker-${task.task_id}`} title={t("codingAgent.team.roleWorker", { task: task.task_id })} aria-label={`${t("codingAgent.team.roleWorker", { task: task.task_id })} · ${task.assigned_to}`} className="ml-auto text-[11px] font-mono text-[var(--text-muted)] underline decoration-white/20 hover:text-white">
                         {task.assigned_to}
@@ -454,6 +479,9 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
                   )}
                   {task.review?.notes && task.review.verdict === "rejected" && (
                     <p className="mt-1 text-[11px] text-red-300 break-words">{task.review.notes}</p>
+                  )}
+                  {task.hold?.reason && (
+                    <p className="mt-1 text-[11px] text-amber-200/90 break-words">{task.hold.reason}</p>
                   )}
                 </li>
               ))}

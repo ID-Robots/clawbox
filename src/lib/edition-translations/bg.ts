@@ -765,6 +765,8 @@ export const bg: Record<string, string> = {
   "codingAgent.team.plannerRun": "Изпълнение на планировчика",
   "codingAgent.team.planning": "Планировчикът чете проекта и пише плана…",
   "codingAgent.team.after": "след {ids}",
+  "codingAgent.team.held": "Задържана — {task} е върната за доработка",
+  "codingAgent.team.waitingFor": "Чака {ids} да бъде приета",
   "codingAgent.team.log": "Дневник ({n})",
   "codingAgent.team.status.planning": "Планиране",
   "codingAgent.team.status.working": "Работи",

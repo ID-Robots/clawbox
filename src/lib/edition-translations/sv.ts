@@ -775,6 +775,8 @@ export const sv: Record<string, string> = {
   "codingAgent.team.plannerRun": "Planerarens körning",
   "codingAgent.team.planning": "Planeraren läser projektet och skriver planen…",
   "codingAgent.team.after": "efter {ids}",
+  "codingAgent.team.held": "Pausad — {task} öppnades igen",
+  "codingAgent.team.waitingFor": "Väntar på att {ids} godkänns",
   "codingAgent.team.log": "Logg ({n})",
   "codingAgent.team.status.planning": "Planerar",
   "codingAgent.team.status.working": "Arbetar",

@@ -189,6 +189,126 @@ describe("scheduling queries", () => {
   });
 });
 
+describe("dependency gating: a dependent waits for an ACCEPTED dependency", () => {
+  /** t1, and t2 on it, with t1's worker finished — complete, not yet reviewed. */
+  function finishedNotReviewed() {
+    const b = board();
+    lib.postTask(b, PLANNER, { task_description: "Scaffold the page" });
+    lib.postTask(b, PLANNER, { task_description: "Wire the form", depends_on: ["t1"] });
+    lib.assignTask(b, SYSTEM, "t1", "run-aaaaaaaa");
+    lib.updateStatus(b, worker("run-aaaaaaaa"), "t1", "in_progress");
+    lib.updateStatus(b, worker("run-aaaaaaaa"), "t1", "complete");
+    return b;
+  }
+
+  it("does not offer a dependent while its dependency is complete but still under review", () => {
+    const b = finishedNotReviewed();
+    expect(lib.readyTasks(b).map((t) => t.task_id)).toEqual([]);
+    expect(lib.waitingOn(b, b.tasks[1])).toEqual(["t1"]);
+    expect(lib.isAccepted(b.tasks[0])).toBe(false);
+  });
+
+  it("offers it once the reviewer accepts, and never when the reviewer rejects", () => {
+    const accepted = finishedNotReviewed();
+    lib.reviewTask(accepted, REVIEWER, "t1", "accepted", "Looks right.");
+    expect(lib.readyTasks(accepted).map((t) => t.task_id)).toEqual(["t2"]);
+    expect(lib.waitingOn(accepted, accepted.tasks[1])).toEqual([]);
+
+    const rejected = finishedNotReviewed();
+    lib.reviewTask(rejected, REVIEWER, "t1", "rejected", "The form does not submit.");
+    // t1 is offered again; t2 still waits for it.
+    expect(lib.readyTasks(rejected).map((t) => t.task_id)).toEqual(["t1"]);
+  });
+
+  it("names a dependency that will never be accepted", () => {
+    const b = finishedNotReviewed();
+    lib.reviewTask(b, REVIEWER, "t1", "rejected", "No.");
+    lib.assignTask(b, SYSTEM, "t1", "run-cccccccc");
+    lib.updateStatus(b, worker("run-cccccccc"), "t1", "in_progress");
+    lib.updateStatus(b, worker("run-cccccccc"), "t1", "complete");
+    lib.reviewTask(b, REVIEWER, "t1", "rejected", "Still no.");
+    expect(b.tasks[0].status).toBe("rejected");
+    expect(lib.blockedBy(b, b.tasks[1])).toEqual([{ task_id: "t1", status: "rejected" }]);
+    expect(lib.isExhausted(b)).toBe(true);
+  });
+});
+
+describe("holdTask: a dependent set back when its dependency is reopened", () => {
+  /** t1 accepted, t2 (on t1) finished and accepted, t3 (on t2) running. */
+  function chain() {
+    const b = board();
+    lib.postTask(b, PLANNER, { task_description: "Schema" });
+    lib.postTask(b, PLANNER, { task_description: "API", depends_on: ["t1"] });
+    lib.postTask(b, PLANNER, { task_description: "UI", depends_on: ["t2"] });
+    for (const [id, run] of [["t1", "run-aaaaaaaa"], ["t2", "run-bbbbbbbb"]] as const) {
+      lib.assignTask(b, SYSTEM, id, run);
+      lib.updateStatus(b, worker(run), id, "in_progress");
+      lib.updateStatus(b, worker(run), id, "complete");
+      lib.reviewTask(b, REVIEWER, id, "accepted", "");
+    }
+    lib.assignTask(b, SYSTEM, "t3", "run-cccccccc");
+    lib.updateStatus(b, worker("run-cccccccc"), "t3", "in_progress");
+    return b;
+  }
+
+  it("is the system's alone, only for a task that started, and only on a real dependency", () => {
+    const b = chain();
+    for (const who of [PLANNER, REVIEWER, OWNER, worker("run-bbbbbbbb")]) {
+      expect(() => lib.holdTask(b, who, "t2", "t1", "x")).toThrow(lib.BoardAccessError);
+    }
+    expect(() => lib.holdTask(b, SYSTEM, "t1", "t2", "x")).toThrow(/does not depend/);
+    lib.postTask(b, PLANNER, { task_description: "Docs", depends_on: ["t1"] });
+    expect(() => lib.holdTask(b, SYSTEM, "t4", "t1", "x")).toThrow(/only a task that started/);
+  });
+
+  it("sets a finished task back to pending, unreviewed, the attempt counted as a hold, and says why on the board", () => {
+    const b = chain();
+    // The suite gate sends t1 back; t2, built on it, is held.
+    lib.reviewTask(b, REVIEWER, "t1", "rejected", "The suite is red.");
+    const held = lib.holdTask(b, SYSTEM, "t2", "t1", "rejected by the suite: test_api failed");
+    expect(held).toMatchObject({ status: "pending", assigned_to: null, review: null, attempts: 1, holds: 1 });
+    expect(held.hold).toMatchObject({ dependency: "t1", was: "complete", reason: "rejected by the suite: test_api failed" });
+    expect(lib.countedAttempts(held)).toBe(0);
+    const entry = b.log[b.log.length - 1];
+    expect(entry.type).toBe("hold");
+    expect(entry.message).toMatch(/^Task t2 held: its dependency t1 was reopened \(rejected by the suite.*\)\. Its result is set aside; it starts again on the new merged state once t1 is accepted\.$/);
+    // Not offered until t1 is accepted again; t1 itself is.
+    expect(lib.readyTasks(b).map((t) => t.task_id)).toEqual(["t1"]);
+    expect(lib.waitingOn(b, held)).toEqual(["t1"]);
+  });
+
+  it("sets a running task back too, and the next assignment clears the hold", () => {
+    const b = chain();
+    lib.holdTask(b, SYSTEM, "t3", "t2", "held");
+    expect(b.tasks[2]).toMatchObject({ status: "pending", holds: 1, hold: { was: "in_progress" } });
+    expect(b.log[b.log.length - 1].message).toContain("Its worker was stopped and its work set aside");
+    lib.assignTask(b, SYSTEM, "t3", "run-dddddddd");
+    expect(b.tasks[2]).toMatchObject({ hold: null, attempts: 2, holds: 1 });
+  });
+
+  it("never spends a task's two tries on holds: rejected after a hold, it is offered again", () => {
+    const b = chain();
+    lib.holdTask(b, SYSTEM, "t2", "t1", "reopened");
+    lib.assignTask(b, SYSTEM, "t2", "run-eeeeeeee");
+    lib.updateStatus(b, worker("run-eeeeeeee"), "t2", "in_progress");
+    lib.updateStatus(b, worker("run-eeeeeeee"), "t2", "complete");
+    lib.reviewTask(b, REVIEWER, "t2", "rejected", "Wrong field.");
+    // attempts 2, one of them a hold: one counted try, so one more is offered.
+    expect(b.tasks[1]).toMatchObject({ status: "pending", attempts: 2, holds: 1 });
+  });
+
+  it("lists the started dependents of a task and survives a round trip through the file", () => {
+    const b = chain();
+    expect(lib.startedDependents(b, "t1").map((t) => t.task_id)).toEqual(["t2"]);
+    expect(lib.startedDependents(b, "t2").map((t) => t.task_id)).toEqual(["t3"]);
+    lib.holdTask(b, SYSTEM, "t2", "t1", "reopened");
+    lib.saveBoard(b);
+    const back = lib.loadBoard(b.id)!;
+    expect(back.tasks[1]).toMatchObject({ holds: 1, hold: { dependency: "t1", was: "complete", reason: "reopened" } });
+    expect(back.tasks[0]).toMatchObject({ holds: 0, hold: null });
+  });
+});
+
 // ─── TASK-1099: the digest, the lead's changes, the shape, the figures ──────
 
 /** A board whose t1 is done and accepted by the reviewer, t2 working, t3 waiting. */
@@ -394,7 +514,7 @@ describe("teamMetrics", () => {
     ];
     const task = (id: string, extra: Partial<import("@/lib/coding-team-board").TeamTask>) => ({
       task_id: id, task_description: id, assigned_to: null, status: "pending" as const, result: null, depends_on: [], files_hint: [], review: null,
-      attempts: 0, worktree: null, branch: null, reviewRunId: null, origin: "plan" as const, rejections: 0, created_at: 1, updated_at: 1, ...extra,
+      attempts: 0, worktree: null, branch: null, reviewRunId: null, origin: "plan" as const, rejections: 0, holds: 0, hold: null, created_at: 1, updated_at: 1, ...extra,
     });
     b.tasks = [
       task("t1", { status: "complete", attempts: 1, review: { verdict: "accepted", notes: "", at: 1 } }),

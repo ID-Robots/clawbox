@@ -780,6 +780,8 @@ export const ja: Record<string, string> = {
   "codingAgent.team.plannerRun": "プランナーの実行",
   "codingAgent.team.planning": "プランナーがプロジェクトを読み、計画を書いています…",
   "codingAgent.team.after": "{ids} の後",
+  "codingAgent.team.held": "保留中 — {task} が差し戻されました",
+  "codingAgent.team.waitingFor": "{ids} の承認待ち",
   "codingAgent.team.log": "ログ（{n}）",
   "codingAgent.team.status.planning": "計画中",
   "codingAgent.team.status.working": "作業中",

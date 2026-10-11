@@ -789,6 +789,8 @@ export const zh: Record<string, string> = {
   "codingAgent.team.plannerRun": "规划者的运行",
   "codingAgent.team.planning": "规划者正在阅读项目并编写计划…",
   "codingAgent.team.after": "在 {ids} 之后",
+  "codingAgent.team.held": "已暂缓 — {task} 被重新打开",
+  "codingAgent.team.waitingFor": "等待 {ids} 被接受",
   "codingAgent.team.log": "日志（{n}）",
   "codingAgent.team.status.planning": "规划中",
   "codingAgent.team.status.working": "进行中",

@@ -1549,6 +1549,21 @@ interface TeamTaskPayload {
   attempts: number;
   /** Who put it on the board: the plan, or the lead while the team ran. */
   origin?: "plan" | "lead";
+  /** Why it is back to pending: a dependency it started on was reopened. Absent from an older server. */
+  hold?: { dependency: string; reason: string; was: "in_progress" | "complete" } | null;
+}
+
+/**
+ * The dependencies a pending task still waits for — not yet ACCEPTED, nor
+ * retired: the server's own gate (coding-team-board.ts readyTasks), so a task
+ * pending behind a finished but unreviewed one says why.
+ */
+function waitingFor(task: TeamTaskPayload, tasks: readonly TeamTaskPayload[]): string[] {
+  if (task.status !== "pending") return [];
+  return task.depends_on.filter((d) => {
+    const dep = tasks.find((x) => x.task_id === d);
+    return !dep || (dep.status !== "retired" && !(dep.status === "complete" && dep.review?.verdict === "accepted"));
+  });
 }
 
 /** The team's figures, as the server works them out from the board. */
@@ -1651,6 +1666,9 @@ function describeTeam(team: TeamPayload, withLog: boolean): string {
       if (t.assigned_to) bits.push(`worker ${t.assigned_to}`);
       if (t.reviewRunId) bits.push(`reviewer ${t.reviewRunId}`);
       if (t.depends_on.length) bits.push(`after ${t.depends_on.join(", ")}`);
+      const waiting = waitingFor(t, team.tasks);
+      if (waiting.length) bits.push(`waiting for ${waiting.join(", ")} to be accepted`);
+      if (t.hold) bits.push(`held: its dependency ${t.hold.dependency} was reopened (${redact(firstLine(t.hold.reason, 160))})`);
       if (t.result) bits.push(`result: ${redact(firstLine(t.result, 200))}`);
       parts.push(`- ${bits.join(" — ")}`);
     }

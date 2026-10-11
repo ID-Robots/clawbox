@@ -779,6 +779,8 @@ export const nl: Record<string, string> = {
   "codingAgent.team.plannerRun": "Run van de planner",
   "codingAgent.team.planning": "De planner leest het project en schrijft het plan…",
   "codingAgent.team.after": "na {ids}",
+  "codingAgent.team.held": "Aangehouden — {task} is heropend",
+  "codingAgent.team.waitingFor": "Wacht tot {ids} is goedgekeurd",
   "codingAgent.team.log": "Logboek ({n})",
   "codingAgent.team.status.planning": "Plannen",
   "codingAgent.team.status.working": "Bezig",

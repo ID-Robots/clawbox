@@ -790,6 +790,8 @@ export const it: Record<string, string> = {
   "codingAgent.team.plannerRun": "Esecuzione del pianificatore",
   "codingAgent.team.planning": "Il pianificatore sta leggendo il progetto e scrivendo il piano…",
   "codingAgent.team.after": "dopo {ids}",
+  "codingAgent.team.held": "In sospeso — {task} è stata riaperta",
+  "codingAgent.team.waitingFor": "In attesa che {ids} venga accettata",
   "codingAgent.team.log": "Registro ({n})",
   "codingAgent.team.status.planning": "Pianificazione",
   "codingAgent.team.status.working": "Al lavoro",
