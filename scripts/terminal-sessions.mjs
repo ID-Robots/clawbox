@@ -43,6 +43,7 @@
  * attached client, input comes from any of them.
  */
 
+import { foregroundTaker } from "./terminal-foreground.mjs";
 import { randomUUID } from "node:crypto";
 
 /** Characters of output a session keeps for a reattach — about 6,000 lines of 80 columns. */
@@ -375,9 +376,10 @@ function closeQuietly(ws) {
  *   params: URLSearchParams,
  *   spawn: (params: URLSearchParams) => { pty: PtyLike, info: Record<string, unknown> },
  *   log?: (line: string) => void,
+ *   foreground?: (pty: PtyLike) => { taker: "claude" | "shell" | null, name: string | null },
  * }} ctx
  */
-export function handleConnection(registry, ws, { owner, params, spawn, log = () => {} }) {
+export function handleConnection(registry, ws, { owner, params, spawn, log = () => {}, foreground = foregroundTaker }) {
   const endId = params.get("end");
   if (endId !== null) {
     const doomed = SESSION_ID_RE.test(endId) ? registry.get(endId, owner) : null;
@@ -462,6 +464,13 @@ export function handleConnection(registry, ws, { owner, params, spawn, log = () 
         } else {
           log(`[terminal-server] Ignoring invalid resize cols=${msg.cols} rows=${msg.rows}`);
         }
+      } else if (msg?.type === "foreground") {
+        // "May a pasted picture go to what is in front?" (terminal-foreground.mjs).
+        // A question, not input: nothing reaches the PTY. The id is the
+        // asker's, handed back so it can tell its answers apart.
+        const id = Number.isSafeInteger(msg.id) ? msg.id : null;
+        const { taker, name } = foreground(session.pty);
+        client.send(JSON.stringify({ type: "foreground", id, taker, name }));
       }
     } catch (err) {
       // A write to a PTY that is exiting under us.

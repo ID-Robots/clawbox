@@ -5,7 +5,9 @@
  * Nothing here takes a key a shell program needs:
  * - Ctrl+Shift+letter is the terminal convention (GNOME Terminal, Konsole,
  *   Windows Terminal) precisely because the shell has no use for the Shift:
- *   Ctrl+C stays SIGINT, Ctrl+V stays nano's next page and vim's block select,
+ *   Ctrl+C stays SIGINT, Ctrl+V stays nano's next page and vim's block select
+ *   (with one exception, a PICTURE on the clipboard pasted into Claude Code
+ *   or at a shell's prompt: see `isPlainCtrlV`),
  *   Ctrl+T and Ctrl+W stay readline's transpose and delete-word.
  * - Ctrl+Tab has no meaning to a shell or a TUI.
  * - Alt+Shift+T/W and Alt+Shift+PageUp/PageDown are the same tab actions under
@@ -37,6 +39,20 @@ function letterOf(ev: ShortcutKeyEvent): string {
   if (/^[a-z]$/i.test(ev.key)) return ev.key.toLowerCase();
   if (ev.code && /^Key[A-Z]$/.test(ev.code)) return ev.code.slice(3).toLowerCase();
   return "";
+}
+
+/**
+ * Plain Ctrl+V — the shell's own key (readline's quoted insert, vim's block
+ * select), and the ONE key on which a browser hands a page a picture from the
+ * clipboard: Ctrl+Shift+V is the browser's "paste as plain text", whose paste
+ * event carries text and nothing else. The Terminal lets this key through to
+ * the browser to see what the clipboard holds, and gives the shell its ^V back
+ * unless that is a picture AND the program in front takes pictures — Claude
+ * Code, a shell's prompt; never an editor (TerminalApp's paste listener). Not
+ * on a Mac, where Ctrl+V is no paste at all and ⌘V already carries pictures.
+ */
+export function isPlainCtrlV(ev: ShortcutKeyEvent): boolean {
+  return ev.ctrlKey && !ev.shiftKey && !ev.altKey && !ev.metaKey && letterOf(ev) === "v";
 }
 
 export function terminalShortcut(ev: ShortcutKeyEvent, mac: boolean = isMacPlatform()): TerminalShortcut | null {

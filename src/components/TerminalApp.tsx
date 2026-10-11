@@ -56,8 +56,18 @@ import {
   type TerminalFontDef,
   type TerminalSettings,
 } from "@/lib/terminal-settings";
-import { canReadClipboard as clipboardReadable, copyToClipboard, readClipboard } from "@/lib/terminal-clipboard";
-import { isMacPlatform, shortcutLabel, terminalShortcut } from "@/lib/terminal-keys";
+import { canReadClipboard as clipboardReadable, copyToClipboard, readClipboard, readClipboardImages } from "@/lib/terminal-clipboard";
+import { isMacPlatform, isPlainCtrlV, shortcutLabel, terminalShortcut } from "@/lib/terminal-keys";
+import {
+  TERMINAL_PASTE_MAX_BYTES,
+  asPictureTaker,
+  bracketedPaste,
+  pastedImageFiles,
+  pastedText,
+  uploadPastedImage,
+  type PasteUpload,
+  type PictureTaker,
+} from "@/lib/terminal-paste";
 import "@xterm/xterm/css/xterm.css";
 
 type XTerm = import("@xterm/xterm").Terminal;
@@ -483,6 +493,23 @@ const MENU_H = 270;
 
 const IS_MAC = isMacPlatform();
 
+/**
+ * How long a plain Ctrl+V waits for the browser's paste event before the
+ * shell is given its ^V anyway. The event is the key's own default action and
+ * arrives within the same turn; this is for a browser that fires none.
+ */
+const CTRL_V_PASTE_WAIT_MS = 120;
+/** Keys that are only ever held for another key: they are not "the next key". */
+const MODIFIER_KEYS: ReadonlySet<string> = new Set(["Control", "Shift", "Alt", "Meta", "AltGraph", "CapsLock"]);
+/** One paste carries this many pictures at most; a clipboard has one. */
+const MAX_PASTED_IMAGES = 4;
+/** ^V: what a plain Ctrl+V is to the shell. */
+const CTRL_V = "\x16";
+/** How long the box has to answer the `foreground` question before the answer is "no". */
+const FOREGROUND_WAIT_MS = 400;
+/** An answer is reused this long, on `performance.now()`: a held key asks once. */
+const FOREGROUND_REUSE_MS = 500;
+
 function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSettings, onBell, persist = false, session, onSession }: TerminalAppProps) {
   const tr = useTr();
   // Read through a ref for the same reason `initialCommand` is: `connect` must
@@ -585,15 +612,181 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
     setStatus(s);
   }, []);
 
-  const showNotice = useCallback((text: string, error = false) => {
+  // `sticky`: stays until the next notice or `clearNotice` — for work whose
+  // length is not ours to know (a picture on its way to the box).
+  const showNotice = useCallback((text: string, error = false, sticky = false) => {
     if (!mountedRef.current) return;
     if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
+    noticeTimerRef.current = null;
     setNotice((prev) => ({ text, error, id: (prev?.id ?? 0) + 1 }));
+    if (sticky) return;
     noticeTimerRef.current = setTimeout(() => {
       noticeTimerRef.current = null;
       if (mountedRef.current) setNotice(null);
     }, error ? 3200 : 1600);
   }, []);
+  const clearNotice = useCallback(() => {
+    if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
+    noticeTimerRef.current = null;
+    if (mountedRef.current) setNotice(null);
+  }, []);
+
+  /** Bytes for the shell, as a key press would send them. A closed socket drops them. */
+  const sendToShell = useCallback((data: string) => {
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "input", data }));
+  }, []);
+
+  // A plain Ctrl+V the browser has been let have (see the key handler): the
+  // shell is owed its ^V unless the paste event that follows carries a picture
+  // AND the program in front is one that takes pictures.
+  const ctrlVTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Was the keydown itself an auto-repeat? A held key is one paste, not thirty. */
+  const ctrlVRepeatRef = useRef(false);
+  /** Was a Ctrl+V waiting on its paste event? Either way it no longer is. */
+  const takeCtrlV = useCallback((): boolean => {
+    if (ctrlVTimerRef.current === null) return false;
+    clearTimeout(ctrlVTimerRef.current);
+    ctrlVTimerRef.current = null;
+    return true;
+  }, []);
+  // Ctrl+V presses whose paste event DID carry a picture and are waiting to
+  // hear which program is in front. Each is still the shell's ^V until then.
+  const ctrlVOwedRef = useRef<Set<{ settled: boolean }>>(new Set());
+  /** Give the shell every ^V it is still owed — before anything else reaches it. */
+  const flushCtrlV = useCallback(() => {
+    if (takeCtrlV()) sendToShell(CTRL_V);
+    for (const owed of ctrlVOwedRef.current) {
+      if (owed.settled) continue;
+      owed.settled = true;
+      sendToShell(CTRL_V);
+    }
+    ctrlVOwedRef.current.clear();
+  }, [takeCtrlV, sendToShell]);
+  const armCtrlV = useCallback((repeat: boolean) => {
+    // The press before this one got no paste event: its ^V goes first.
+    if (takeCtrlV()) sendToShell(CTRL_V);
+    ctrlVRepeatRef.current = repeat;
+    ctrlVTimerRef.current = setTimeout(() => {
+      ctrlVTimerRef.current = null;
+      sendToShell(CTRL_V);
+    }, CTRL_V_PASTE_WAIT_MS);
+  }, [takeCtrlV, sendToShell]);
+
+  // May a pasted picture go to the program in front? The box says (the PTY
+  // server's `foreground` answer, scripts/terminal-foreground.mjs). One
+  // question on the wire at a time, and an answer is good for a moment: a held
+  // Ctrl+V asks once, not once per repeat.
+  const foregroundRef = useRef<{
+    nextId: number;
+    waiting: Map<number, (taker: PictureTaker) => void>;
+    inFlight: Promise<PictureTaker> | null;
+    last: { taker: PictureTaker; at: number } | null;
+  }>({ nextId: 1, waiting: new Map(), inFlight: null, last: null });
+  const answerForeground = useCallback((id: unknown, taker: unknown) => {
+    const state = foregroundRef.current;
+    if (typeof id !== "number") return;
+    const resolve = state.waiting.get(id);
+    if (!resolve) return;
+    state.waiting.delete(id);
+    resolve(asPictureTaker(taker));
+  }, []);
+  const askForeground = useCallback((): Promise<PictureTaker> => {
+    const state = foregroundRef.current;
+    if (state.last && performance.now() - state.last.at < FOREGROUND_REUSE_MS) return Promise.resolve(state.last.taker);
+    if (state.inFlight) return state.inFlight;
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return Promise.resolve(null);
+    const id = state.nextId++;
+    const asked = new Promise<PictureTaker>((resolve) => {
+      // A server that predates the question never answers it: no, the same
+      // answer as for a program that is not one to give a picture to.
+      const timer = setTimeout(() => { state.waiting.delete(id); resolve(null); }, FOREGROUND_WAIT_MS);
+      state.waiting.set(id, (taker) => { clearTimeout(timer); resolve(taker); });
+    }).then((taker) => {
+      state.inFlight = null;
+      state.last = { taker, at: performance.now() };
+      return taker;
+    });
+    state.inFlight = asked;
+    ws.send(JSON.stringify({ type: "foreground", id }));
+    return asked;
+  }, []);
+
+  /** A picture paste is on its way to the box: a second one waits its turn by not starting. */
+  const pasteBusyRef = useRef(false);
+  /** The box said this user's Terminal cannot be given pictures (a non-owner's shell). */
+  const ownerOnlyRef = useRef(false);
+
+  /**
+   * Paste pictures: each is saved on the box and its path is what the
+   * terminal pastes (src/lib/terminal-paste.ts) — AS A PASTE, which is what
+   * makes Claude Code attach the file instead of reading a path somebody
+   * typed. To Claude Code the markers are sent outright: it always reads
+   * pastes as pastes, while xterm's own idea of the mode is lost by a
+   * reattach whose replay no longer holds the program's start-up. Anything
+   * else gets xterm's paste, marked only if the program asked.
+   * All or nothing: a paste that lost one of its pictures pastes none.
+   * `viaCtrlV`: the shell's key brought it, so a refusal that is about WHO is
+   * asking gives the shell its ^V back instead of leaving the key dead.
+   */
+  const pasteImages = useCallback(async (term: XTerm, images: Blob[], opts: { taker?: PictureTaker; viaCtrlV?: boolean } = {}) => {
+    if (pasteBusyRef.current) return;
+    pasteBusyRef.current = true;
+    try {
+      showNotice(trRef.current("terminal.imageUploading", "Pasting the picture…"), false, true);
+      const taker = opts.taker !== undefined ? opts.taker : await askForeground();
+      const paths: string[] = [];
+      for (const image of images.slice(0, MAX_PASTED_IMAGES)) {
+        const result = await uploadPastedImage(image);
+        if (!result.ok) {
+          if (result.code === "owner_only") {
+            ownerOnlyRef.current = true;
+            if (opts.viaCtrlV) sendToShell(CTRL_V);
+          }
+          showNotice(pasteRefusalText(result.code, trRef.current), true);
+          return;
+        }
+        paths.push(result.path);
+      }
+      if (!mountedRef.current || termRef.current !== term) return;
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        // xterm would take the paste and the closed socket would drop it.
+        showNotice(trRef.current("terminal.imageNoShell", "The shell is not connected, so the picture was not pasted."), true);
+        return;
+      }
+      const text = paths.join(" ");
+      if (taker === "claude") sendToShell(bracketedPaste(text));
+      else term.paste(text);
+      clearNotice();
+    } finally {
+      pasteBusyRef.current = false;
+    }
+  }, [showNotice, clearNotice, askForeground, sendToShell]);
+
+  /**
+   * A plain Ctrl+V whose paste event carried a picture: the picture, where
+   * the program in front takes one — Claude Code, a shell at its prompt —
+   * and the shell's ^V everywhere else. Bracketed-paste mode cannot make that
+   * cut: vim and nano turn it on too, and Ctrl+V there is block select and
+   * next page, so the box is asked, which can see what is reading the
+   * terminal. Until it answers, the press is still a ^V owed to the shell,
+   * and the next key typed takes it first.
+   */
+  const pictureOrCtrlV = useCallback(async (term: XTerm, images: Blob[], repeat: boolean) => {
+    if (ownerOnlyRef.current) { sendToShell(CTRL_V); return; }
+    const owed = { settled: false };
+    ctrlVOwedRef.current.add(owed);
+    const taker = await askForeground();
+    if (owed.settled) return;
+    owed.settled = true;
+    ctrlVOwedRef.current.delete(owed);
+    if (!taker) { sendToShell(CTRL_V); return; }
+    // The picture is already going in (a held key, an impatient second press).
+    if (repeat || pasteBusyRef.current) return;
+    await pasteImages(term, images, { taker, viaCtrlV: true });
+  }, [askForeground, pasteImages, sendToShell]);
 
   /** Copy text; say so unless `quiet` (copy-on-select), and always say when it failed. */
   const copyAndTell = useCallback((text: string, quiet = false) => {
@@ -773,13 +966,57 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
       listen();
       cleanup.push(() => query?.removeEventListener?.("change", onRatio));
     }
+    // Pictures. On the CAPTURE phase of the element xterm lives in, so this
+    // runs before xterm's own paste listeners (its hidden input and its root,
+    // both bubbling), which read text/plain and nothing else.
+    const onPaste = (ev: ClipboardEvent) => {
+      const images = pastedImageFiles(ev.clipboardData);
+      if (takeCtrlV()) {
+        // The paste a plain Ctrl+V produced. That key is the shell's: it is
+        // never a paste of TEXT (that is Ctrl+Shift+V), so the browser's and
+        // xterm's handling both stop here. A picture goes in when the program
+        // in front takes one — Claude Code, a shell's prompt — and every
+        // other time the shell gets the ^V it was always given.
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (images.length > 0) void pictureOrCtrlV(term, images, ctrlVRepeatRef.current);
+        else sendToShell(CTRL_V);
+        return;
+      }
+      // A paste asked for as one: Ctrl+Shift+V, ⌘V, a middle click, the
+      // browser's own menu. Text is xterm's to paste, as it always was.
+      if (pastedText(ev.clipboardData)) return;
+      if (images.length > 0) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        void pasteImages(term, images);
+        return;
+      }
+      // Nothing the event will show us. On Ctrl+Shift+V that is what a
+      // picture looks like — the browser pastes "as plain text" there and
+      // strips everything else — so name the key that does carry one, rather
+      // than send the shell an empty paste and say nothing.
+      if (!IS_MAC && (ev.clipboardData?.types?.length ?? 0) === 0) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        showNotice(trRef.current("terminal.imagePasteHint", "No text to paste. To paste a picture, press {keys}", { keys: "Ctrl+V" }));
+      }
+    };
+    el.addEventListener("paste", onPaste, true);
+    cleanup.push(() => {
+      el.removeEventListener("paste", onPaste, true);
+      takeCtrlV();
+      // Nothing is owed to a terminal that is gone.
+      for (const owed of ctrlVOwedRef.current) owed.settled = true;
+      ctrlVOwedRef.current.clear();
+    });
     if (typeof term.hasSelection === "function") {
       cleanup.push(installTouchSelection(el, term, (x, y) => {
         if (settingsRef.current.copyOnSelect) copyAndTell(term.getSelection(), true);
         setMenu({ x: clampMenuX(x), y: clampMenuY(y), hasSelection: true });
       }));
     }
-  }, [scheduleFit, snapCells, copyAndTell]);
+  }, [scheduleFit, snapCells, copyAndTell, takeCtrlV, pasteImages, pictureOrCtrlV, sendToShell, showNotice]);
 
   const connect = useCallback(async () => {
     if (!mountedRef.current || !containerRef.current) return;
@@ -859,6 +1096,17 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
           if (ev.type === "keydown") reconnectRef.current();
           return false;
         }
+        // Plain Ctrl+V: let the BROWSER have it, so its paste event shows what
+        // the clipboard holds — it is the only key that carries a picture
+        // there (terminal-keys.ts). The paste listener then hands the shell
+        // its ^V, or pastes the picture where the program in front takes
+        // one; the timer is for a browser that fires no paste event at all.
+        if (!IS_MAC && isPlainCtrlV(ev)) {
+          if (ev.type === "keydown") armCtrlV(ev.repeat === true);
+          return false;
+        }
+        // Any other key: a ^V still owed goes first, in the order it was typed.
+        if (ev.type === "keydown" && !MODIFIER_KEYS.has(ev.key)) flushCtrlV();
         const action = terminalShortcut(ev, IS_MAC);
         if (!action) return true;
         // Paste is the browser's own: its paste event on xterm's hidden input
@@ -985,6 +1233,8 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
             pendingCommandRef.current = null;
             ws.send(JSON.stringify({ type: "input", data: `${pending}\r` }));
           }
+        } else if (msg.type === "foreground") {
+          answerForeground(msg.id, msg.taker);
         } else if (msg.type === "attached") {
           // Back on the session this terminal was showing: its scrollback
           // follows as one replay, so the screen starts from nothing rather
@@ -1057,7 +1307,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
         }
       }
     };
-  }, [wsUrl, updateStatus, releaseAfterFailedConnect, wireTerminal, ensureWebgl, snapCells, copyAndTell]);
+  }, [wsUrl, updateStatus, releaseAfterFailedConnect, wireTerminal, ensureWebgl, snapCells, copyAndTell, armCtrlV, flushCtrlV, answerForeground]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -1274,14 +1524,20 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
     closeMenu();
     const term = termRef.current;
     if (!term) return;
-    void readClipboard().then((text) => {
+    void readClipboard().then(async (text) => {
       // Through xterm's own paste so bracketed-paste mode is honoured: a
       // multi-line paste into a shell that asked for it arrives as one
       // paste, not as lines run one by one.
-      if (text) term.paste(text);
+      if (text) {
+        term.paste(text);
+      } else {
+        // No text: a picture, where this origin may read one.
+        const images = await readClipboardImages();
+        if (images.length > 0) void pasteImages(term, images);
+      }
       term.focus();
     });
-  }, [closeMenu]);
+  }, [closeMenu, pasteImages]);
   const menuSelectAll = useCallback(() => {
     termRef.current?.selectAll();
     closeMenu();
@@ -1537,6 +1793,27 @@ function clampMenuY(y: number): number {
   // A menu opened in the lower rows of a window that reaches the shelf put
   // Clear behind it, and the shelf took the click (sweep FT-2).
   return Math.min(y, Math.max(0, window.innerHeight - shelfHeight() - MENU_H));
+}
+
+/** Why a pasted picture did not go in, in the owner's language. */
+function pasteRefusalText(
+  code: Extract<PasteUpload, { ok: false }>["code"],
+  say: (key: string, english: string, params?: Record<string, string | number>) => string,
+): string {
+  switch (code) {
+    case "too_large":
+      return say("terminal.imageTooLarge", "That picture is too large to paste here (the limit is {limit} MB).", {
+        limit: Math.floor(TERMINAL_PASTE_MAX_BYTES / (1024 * 1024)),
+      });
+    case "not_an_image":
+      return say("terminal.imageUnsupported", "Only PNG, JPEG, GIF and WebP pictures can be pasted here.");
+    case "owner_only":
+      return say("terminal.imageOwnerOnly", "Pictures can be pasted in the owner's Terminal only.");
+    case "disk_full":
+      return say("terminal.imageDiskFull", "The box has no room left to save the picture.");
+    default:
+      return say("terminal.imageFailed", "The picture could not be pasted. Try again.");
+  }
 }
 
 const MENU_ITEM = "w-full flex items-center gap-2.5 px-3 py-2 text-sm text-left transition-colors cursor-pointer bg-transparent border-none text-inherit hover:bg-white/[0.06] focus-visible:bg-white/[0.08] focus-visible:outline-none disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-default";
