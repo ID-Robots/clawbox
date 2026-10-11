@@ -3368,7 +3368,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   // a box where the chat is the one that speaks — played, when
                   // the owner switched auto-play on, because this IS the live
                   // landing of the run just closed in this conversation.
-                  if (restored) void voiceReplyRef.current(speakRestored, clipRestored, restored.text, restored.audio ?? [])
+                  //
+                  // ...provided the line read back IS that run's reply. A box
+                  // that has not stored it yet three seconds on answers with
+                  // the owner's question as its newest line, and the newest
+                  // reply is then an older one, on screen since before this
+                  // turn: it is not live, and must not start talking by itself.
+                  const transcript = loaded ?? []
+                  const restoredAt = restored ? transcript.lastIndexOf(restored) : -1
+                  const answersTheQuestion = !transcript.some((m, i) => i > restoredAt && m.role === 'user')
+                  if (restored) void voiceReplyRef.current(speakRestored, clipRestored, restored.text, restored.audio ?? [], { live: answersTheQuestion })
                 })
               }, 3_000)
             }

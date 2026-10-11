@@ -904,4 +904,33 @@ describe("spoken replies in the desktop chat", () => {
     expect(play).toHaveBeenCalledTimes(1);
   }, 15_000);
 
+  it("never plays an OLDER reply when the ack-only refetch comes back before the new one is stored", async () => {
+    // The box acked with "Sent." and, three seconds on, has stored the owner's
+    // question but not yet its answer: the newest reply in what it reads back
+    // is the one from before this turn, clip and all. Not live.
+    autoPlayAllAnswer = true;
+    ackOnly = true;
+    historyMessages = [
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "An older answer." },
+          { type: "attachment", attachment: { url: STORED_CLIP, kind: "audio", label: "voice.wav", mimeType: "audio/wav" } },
+        ],
+        timestamp: 1787250000500,
+      },
+      { role: "user", content: [{ type: "text", text: "how are you" }], timestamp: 1787260000000 },
+    ];
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await screen.findByText("An older answer.", { exact: false });
+    const reads = () => sentFrames.filter((f) => f.method === "chat.history").length;
+    await typeAgain("how are you");
+    const readsAfterTheTurn = reads();
+    // The refetch three seconds after the "Sent." ack has come and gone.
+    await waitFor(() => expect(reads()).toBeGreaterThan(readsAfterTheTurn), { timeout: 8000 });
+    await settleAfterTheTurn();
+    expect(play).not.toHaveBeenCalled();
+    expect(speakBodies).toEqual([]);
+  }, 15_000);
+
 });
