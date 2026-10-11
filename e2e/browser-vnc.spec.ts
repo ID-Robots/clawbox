@@ -17,11 +17,11 @@ test("browser app walks its setup once, then shows the device's screen", async (
   await expect(page.getByTestId("desktop-root")).toBeVisible();
 
   await openLauncher(page);
-  // The launcher paginates its apps; "Browser" sits past the first page. Search
+  // The launcher paginates its apps; "Agent Browser" sits past the first page. Search
   // to filter it onto the current page instead of relying on page order.
   const launcher = page.getByTestId("app-launcher");
-  await launcher.getByRole("textbox").fill("Browser");
-  const browserLauncherButton = launcher.getByRole("button", { name: "Browser" });
+  await launcher.getByRole("textbox").fill("Agent Browser");
+  const browserLauncherButton = launcher.getByRole("button", { name: "Agent Browser" });
   await browserLauncherButton.click();
 
   const browserWindow = page.getByTestId("chrome-window-browser");

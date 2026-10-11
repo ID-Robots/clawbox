@@ -110,8 +110,8 @@ const CDP_DOWN = (opening = false) =>
     "ENDPOINT_DOWN",
     "The desktop browser is not running, so it cannot be controlled.",
     opening
-      ? "Do not call browser_open again. Tell the user to open the Browser app on the ClawBox desktop themselves."
-      : "Call browser_open first. If that fails too, tell the user to open the Browser app on the ClawBox desktop.",
+      ? "Do not call browser_open again. Tell the user to open the Agent Browser app on the ClawBox desktop themselves."
+      : "Call browser_open first. If that fails too, tell the user to open the Agent Browser app on the ClawBox desktop.",
   );
 
 // The launch route refuses addresses on the device's own network BEFORE any

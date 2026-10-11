@@ -100,7 +100,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "app.projects": "Projects",
     "app.store": "Store",
     "app.systemUpdate": "System Update",
-    "app.browser": "Browser",
+    "app.browser": "Agent Browser",
     "app.remoteDesktop": "Remote Desktop",
     "app.web": "Web",
     "app.chat": "Chat",

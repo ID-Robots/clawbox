@@ -534,7 +534,7 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.genAudioHint": "A run can have this box speak a line and save it as a sound file in the project — narration, a greeting, a spoken cue. It uses the same voice as your spoken replies and waits its turn behind them; a run gets at most forty clips.",
   "codingAgent.genAudioFailed": "Could not change the speech setting.",
   "codingAgent.realBrowserLabel": "Verify in this box's browser",
-  "codingAgent.realBrowserHint": "A run checks its work in the Chromium window on this box's screen — the one the Browser app shows — so you can watch the pages it opens. Switched off, it uses an invisible browser instead and nothing appears on the screen. Either way, a run that cannot reach the screen's browser falls back to the invisible one by itself.",
+  "codingAgent.realBrowserHint": "A run checks its work in the Chromium window on this box's screen — the one the Agent Browser app shows — so you can watch the pages it opens. Switched off, it uses an invisible browser instead and nothing appears on the screen. Either way, a run that cannot reach the screen's browser falls back to the invisible one by itself.",
   "codingAgent.realBrowserFailed": "Could not change the browser setting.",
 
   // A run that finished on its own keeps whatever it started — the way an app
@@ -777,7 +777,7 @@ export const codingAgentEn: Record<string, string> = {
   // between the two answers: pages opening on the device's own screen, or
   // nothing at all. Skip is an answer, not a deferral, so it says so.
   "codingAgent.wizardBrowserTitle": "Let runs use this box's browser",
-  "codingAgent.wizardBrowserHint": "When a run needs to check its work in a browser, it can drive the Chromium window on this box's own screen — the one the Browser app shows — so you can watch the pages it opens. Enable installs Chromium if it is missing and opens the window. Skip, and a run browses in an invisible window instead: nothing appears on the screen. Either way, you can change it later in Settings.",
+  "codingAgent.wizardBrowserHint": "When a run needs to check its work in a browser, it can drive the Chromium window on this box's own screen — the one the Agent Browser app shows — so you can watch the pages it opens. Enable installs Chromium if it is missing and opens the window. Skip, and a run browses in an invisible window instead: nothing appears on the screen. Either way, you can change it later in Settings.",
   "codingAgent.wizardBrowserEnable": "Use this box's browser",
   "codingAgent.wizardBrowserOpening": "Opening the browser…",
   "codingAgent.wizardBrowserInstalling": "Installing Chromium — this takes a few minutes…",
