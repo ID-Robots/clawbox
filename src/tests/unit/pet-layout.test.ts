@@ -120,6 +120,60 @@ describe("petFrameTransforms", () => {
   });
 });
 
+describe("a sleeping pet", () => {
+  // The crab sleeps on `waiting`, whose frame 3 has its eyes OPEN; stepped
+  // whole, the row blinked it awake once a loop. Its pack names the frames
+  // with the eyes shut.
+  const CRAB: PetDescriptor = { ...PET, slug: "vibrant-clawd", sleepFrames: [0, 1, 2] };
+  const WAITING = CODEX_STATE_ROWS.indexOf("waiting");
+  const w = 96;
+
+  it("steps only the pack's sleep frames, on the sleep row", () => {
+    const layout = petLayout(CRAB, { state: "sleep", facing: "right" });
+    expect(layout.rowIndex).toBe(WAITING);
+    expect(layout.frames).toBe(6);
+    expect(layout.sequence).toEqual([0, 1, 2]);
+    const frames = petFrameTransforms(layout);
+    expect(frames).toEqual(["translate(0px, 15px)", `translate(${-w}px, 15px)`, `translate(${-2 * w}px, 15px)`]);
+    expect(frames.join()).not.toContain(`translate(${-3 * w}px`);
+  });
+
+  it("spreads the row's loop over the frames it sleeps on", () => {
+    const layout = petLayout(CRAB, { state: "sleep", facing: "right" });
+    // Three of six frames at the row's own rate would fidget twice as fast as
+    // the pet breathes awake; a sleep loop keeps the loop's length instead.
+    expect(petFrameMs(layout)).toBe(Math.round(1100 / 3));
+  });
+
+  it("holds the row's first frame when the pack declares none", () => {
+    const layout = petLayout(PET, { state: "sleep", facing: "right" });
+    expect(layout.rowIndex).toBe(WAITING);
+    expect(layout.sequence).toEqual([0]);
+    expect(petFrameTransforms(layout)).toEqual(["translate(0px, 15px)"]);
+  });
+
+  it("holds the first frame when the list does not fit the row it sleeps on", () => {
+    expect(petLayout({ ...PET, sleepFrames: [0, 6] }, { state: "sleep", facing: "right" }).sequence).toEqual([0]);
+    expect(petLayout({ ...PET, sleepFrames: [] }, { state: "sleep", facing: "right" }).sequence).toEqual([0]);
+    // A row measured shorter than the list was written for.
+    const short = { ...CRAB, sleepFrames: [0, 4], rowMetrics: ROWS.map((r, i) => (i === WAITING ? row(4, [30, 30, 30, 30], 148) : r)) };
+    expect(petLayout(short, { state: "sleep", facing: "right" }).sequence).toEqual([0]);
+  });
+
+  it("wakes onto the whole row of whatever comes next", () => {
+    expect(petLayout(CRAB, { state: "idle", facing: "right" }).sequence).toEqual([0, 1, 2, 3, 4, 5]);
+    // `sass` shares the sleep row, awake: it keeps every frame, blink included.
+    const sass = petLayout(CRAB, { state: "sass", facing: "right" });
+    expect(sass.rowIndex).toBe(WAITING);
+    expect(sass.sequence).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(petFrameMs(sass)).toBe(Math.round(1100 / 6));
+    // Thinking outranks sleep and draws its own row.
+    const thinking = petLayout(CRAB, { state: "sleep", thinking: true, facing: "right" });
+    expect(thinking.rowIndex).toBe(CODEX_STATE_ROWS.indexOf("review"));
+    expect(thinking.sequence).toEqual([0, 1, 2, 3, 4, 5]);
+  });
+});
+
 describe("widestFreeSpan", () => {
   it("returns the whole span when nothing is in the way", () => {
     expect(widestFreeSpan(0, 1440, [])).toEqual({ lo: 0, hi: 1440 });
