@@ -496,7 +496,12 @@ async function configuredBrowserProfile(): Promise<string | null> {
   let home: string;
   let profile: string;
   try {
-    [home, profile] = await Promise.all([fs.realpath(HOME_DIR), fs.realpath(config.profileDir)]);
+    // turbopackIgnore: a path the build cannot evaluate would otherwise be
+    // traced as "any file in the project" and walk data/ (runtime-path.ts).
+    [home, profile] = await Promise.all([
+      fs.realpath(/* turbopackIgnore: true */ HOME_DIR),
+      fs.realpath(/* turbopackIgnore: true */ config.profileDir),
+    ]);
   } catch {
     console.warn("[Reset] The configured browser profile could not be resolved; not removing it");
     return null;
@@ -507,7 +512,7 @@ async function configuredBrowserProfile(): Promise<string | null> {
     return null;
   }
   try {
-    await fs.access(path.join(profile, "Local State"));
+    await fs.access(/* turbopackIgnore: true */ path.join(profile, "Local State"));
   } catch {
     console.warn("[Reset] The configured browser profile has no Local State file; not removing it");
     return null;
