@@ -2499,7 +2499,7 @@ describe("a second team: queued, not refused", () => {
     expect(second).toMatchObject({ status: "queued", queuePosition: 1 });
     // Read back from disk, a queued team is not an orphan of a restart.
     expect(team.getTeam(second.id)).toMatchObject({ status: "queued", queuePosition: 1 });
-    expect(team.listTeams().find((t) => t.id === second.id)?.status).toBe("queued");
+    expect(team.listTeams().find((t) => t.id === second.id)).toMatchObject({ status: "queued", queuePosition: 1 });
     release();
 
     expect((await finished(first.id)).status).toBe("done");

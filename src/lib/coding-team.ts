@@ -393,7 +393,11 @@ export function getTeam(id: string): TeamView | null {
 }
 
 export function listTeams(limit = 20): TeamView[] {
-  return listBoards().slice(0, limit).map((b) => live.get(b.id)?.board ?? settleOrphan(b)).map(snapshot);
+  const boards = listBoards();
+  // The queue's order once per list, from the boards already read — not one
+  // directory scan per queued team.
+  const queue = boards.filter((b) => b.status === "queued").sort((a, b) => a.createdAt - b.createdAt).map((b) => b.id);
+  return boards.slice(0, limit).map((b) => live.get(b.id)?.board ?? settleOrphan(b)).map((b) => snapshot(b, queue));
 }
 
 /** The team a run belongs to, for the run page's chip. */
@@ -1961,8 +1965,8 @@ function settleOrphan(board: TeamBoard): TeamBoard {
 }
 
 /** The board as the routes answer it, with the agent count worked out from it and the figures as of now (a working team's clock runs). */
-function snapshot(board: TeamBoard): TeamView {
-  const at = board.status === "queued" ? queuedBoards().findIndex((b) => b.id === board.id) : -1;
+function snapshot(board: TeamBoard, queue?: readonly string[]): TeamView {
+  const at = board.status === "queued" ? (queue ?? queuedBoards().map((b) => b.id)).indexOf(board.id) : -1;
   return { ...(JSON.parse(JSON.stringify(board)) as TeamBoard), agents: teamAgents(board), metrics: teamMetrics(board), ...(at >= 0 ? { queuePosition: at + 1 } : {}) };
 }
 
