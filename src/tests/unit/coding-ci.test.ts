@@ -12,7 +12,7 @@ const VITEST_LOG = [
   line("\u001b[31m FAIL \u001b[39m src/tests/unit/cart.test.ts > cart > adds the tax"),
   line("AssertionError: expected 10 to be 11"),
   line(" ❯ src/lib/cart.ts:12:3"),
-  line(" ❯ /home/runner/work/shop/shop/src/lib/tax.ts:4:10"),
+  line(" ❯ /home/runner/work/shop/shop/src/lib/tax.ts:4:10"), // public-hygiene: allow GitHub's hosted-runner checkout path, the prefix under test
   line("   at node_modules/vitest/dist/runner.js:1:1"),
   line("See https://github.com/o/r/blob/main/docs/x.md for help"),
   line("##[error]Process completed with exit code 1."),
@@ -20,7 +20,7 @@ const VITEST_LOG = [
 
 const PYTHON_LOG = [
   line("FAIL: test_km_to_mi (test_convert.TestConvert.test_km_to_mi)", "unit", "python -m unittest"),
-  line('  File "/home/runner/work/conv/conv/convert.py", line 4, in convert', "unit", "python -m unittest"),
+  line('  File "/home/runner/work/conv/conv/convert.py", line 4, in convert', "unit", "python -m unittest"), // public-hygiene: allow GitHub's hosted-runner checkout path, the prefix under test
   line("KeyError: ('km', 'mi')", "unit", "python -m unittest"),
 ].join("\n");
 

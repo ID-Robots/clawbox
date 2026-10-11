@@ -65,7 +65,7 @@ export function cleanActionsLog(raw: string): string {
 }
 
 /**
- * A runner's checkout prefix: `/home/runner/work/<repo>/<repo>/` on a hosted
+ * A runner's checkout prefix: `~runner/work/<repo>/<repo>/` on a hosted
  * runner, `/__w/<repo>/<repo>/` in a container job. What follows is the path
  * in the repository.
  */
