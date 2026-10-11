@@ -45,12 +45,15 @@ ANSWER=$(board '
   echo "firstboot $(systemctl show clawbox-firstboot-vnc.service -p ExecMainStartTimestampMonotonic --value 2>/dev/null)"
   journalctl -b --no-pager -o cat _PID=1 "UNIT=$unit" 2>/dev/null | sed "s/^/pid1 /"
 ' "$UNIT")
-if [ -z "$ANSWER" ]; then
-  not_ok "could not read $UNIT on the board over nano-ci ssh"
+STATE=$(grep -m1 '^state ' <<<"$ANSWER")
+if [ -z "$STATE" ]; then
+  # No state line is a hop that failed (board prints what it got instead):
+  # a failure, never the headless skip below.
+  not_ok "could not read $UNIT on the board over nano-ci ssh: $(head -n 1 <<<"$ANSWER" | head -c 200)"
   finish
 fi
 
-read -r _ DEFINED ENABLED ACTIVE NRESTARTS <<<"$(grep -m1 '^state ' <<<"$ANSWER")"
+read -r _ DEFINED ENABLED ACTIVE NRESTARTS <<<"$STATE"
 UPTIME=$(sed -n 's/^uptime //p' <<<"$ANSWER" | head -n 1)
 FIRSTBOOT=$(sed -n 's/^firstboot //p' <<<"$ANSWER" | head -n 1)
 PID1=$(sed -n 's/^pid1 //p' <<<"$ANSWER")
