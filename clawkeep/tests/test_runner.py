@@ -1186,6 +1186,36 @@ def test_encrypted_size_admission_preserves_snapshots(
         assert " bytes" not in error["error"]
 
 
+def test_credentials_that_state_no_quota_stop_the_run_before_it_builds(
+    isolate_state: Path, tmp_path: Path,
+) -> None:
+    """`api.mint_credentials` refuses an answer with no usable `quotaBytes`
+    (tests/test_api.py). Here: that refusal ends the run with nothing built,
+    uploaded or removed — there is no quota to admit a backup against."""
+    with (
+        patch(
+            "clawkeep.runner.api.mint_credentials",
+            side_effect=ApiError("other", "malformed /credentials response: 'quotaBytes'"),
+        ),
+        patch("clawkeep.runner.api.heartbeat") as heartbeat,
+        patch("clawkeep.runner.time.sleep"),
+        patch("clawkeep.runner.agent.create_archive") as create,
+        patch("clawkeep.runner.s3.stats") as stats_mock,
+        patch("clawkeep.runner.s3.upload") as upload,
+        patch("clawkeep.runner.apply_retention") as retention,
+    ):
+        assert runner.run_once(_cfg(tmp_path), "claw_x") == runner.EXIT_UNKNOWN
+    create.assert_not_called()
+    stats_mock.assert_not_called()
+    upload.assert_not_called()
+    retention.assert_not_called()
+    assert heartbeat.call_args.kwargs["status"] == "error"
+    assert "malformed /credentials response" in heartbeat.call_args.kwargs["error"]
+    final = state.load(isolate_state)
+    assert final.last_heartbeat_status == "error"
+    assert final.last_refusal == ""
+
+
 @pytest.mark.parametrize("n,text", [
     (0, "0 B"),
     (-7, "0 B"),
