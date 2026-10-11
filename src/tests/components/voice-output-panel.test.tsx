@@ -479,6 +479,47 @@ describe("status validation", () => {
     expect(screen.getByTestId("voice-auto-reply")).toHaveAttribute("aria-checked", "true");
   });
 
+  it("never lets a read that was out when a switch moved put the old position back", async () => {
+    // What the box answers at the moment it is ASKED: the held read below
+    // carries the state from before the change that lands while it waits.
+    let server = status({ autoReply: true, autoPlayAll: false });
+    let holdNextRead = false;
+    let releaseRead: () => void = () => {};
+    const json = (body: unknown) =>
+      new Response(JSON.stringify(body), { status: 200, headers: { "content-type": "application/json" } });
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL) => {
+      if (input.toString() !== "/setup-api/tts") return json({});
+      const answer = server;
+      if (holdNextRead) {
+        holdNextRead = false;
+        await new Promise<void>((resolve) => { releaseRead = resolve; });
+      }
+      return json(answer);
+    }));
+    const { rerender } = render(<VoiceOutputPanel active />);
+    const toggle = await screen.findByTestId("voice-auto-play-all");
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+
+    // The tab is shown again, and its fresh read is still out when auto-play
+    // is turned on elsewhere — the box has taken it, and the event says so.
+    holdNextRead = true;
+    rerender(<I18nProvider><VoiceOutputPanel active={false} /></I18nProvider>);
+    rerender(<I18nProvider><VoiceOutputPanel active /></I18nProvider>);
+    server = status({ autoReply: true, autoPlayAll: true });
+    act(() => {
+      window.dispatchEvent(new CustomEvent("clawbox:voice-settings-changed", { detail: { autoReply: true, autoPlayAll: true } }));
+    });
+    expect(screen.getByTestId("voice-auto-play-all")).toHaveAttribute("aria-checked", "true");
+
+    // The held read answers "off". It is older than the event and loses: the
+    // panel asks the box again and keeps "on".
+    await act(async () => {
+      releaseRead();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+    expect(screen.getByTestId("voice-auto-play-all")).toHaveAttribute("aria-checked", "true");
+  });
+
   it("refuses a status whose auto-play switch is not a boolean", () => {
     expect(isVoiceStatus(status({ autoPlayAll: true }))).toBe(true);
     expect(isVoiceStatus(status())).toBe(true);

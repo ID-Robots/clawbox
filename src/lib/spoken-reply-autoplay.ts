@@ -23,6 +23,14 @@ export interface TypedReplyAutoPlay {
    * up on a return to a tab whose run finished while the owner was elsewhere.
    */
   live: boolean
+  /**
+   * The owner is at the chat as the reply lands: the popup open and its
+   * browser tab the one on screen. A turn outlives both, and a reply that
+   * finishes after the owner walked away is a clip to press, not a voice
+   * talking to an empty room. (The chat asks again when the sound would
+   * start; see ChatPopup's `onlyWithOwner`.)
+   */
+  present: boolean
   /** The owner's switch, as the box last stated it (off until it says otherwise). */
   autoPlayAll: boolean
   /**
@@ -34,8 +42,8 @@ export interface TypedReplyAutoPlay {
   owedAClip: boolean
 }
 
-export function typedReplyAutoPlays({ asked, live, autoPlayAll, hasClip, owedAClip }: TypedReplyAutoPlay): boolean {
+export function typedReplyAutoPlays({ asked, live, present, autoPlayAll, hasClip, owedAClip }: TypedReplyAutoPlay): boolean {
   // Only ever a clip the reply would have had anyway: the switch decides
   // whether a clip PLAYS, never whether one is made, so it costs no synthesis.
-  return autoPlayAll && asked && live && (hasClip || owedAClip)
+  return autoPlayAll && asked && live && present && (hasClip || owedAClip)
 }

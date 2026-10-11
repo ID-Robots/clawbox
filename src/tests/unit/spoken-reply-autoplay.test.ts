@@ -14,7 +14,7 @@ import { typedReplyAutoPlays, type TypedReplyAutoPlay } from "@/lib/spoken-reply
  */
 
 /** The reply to a question the owner typed, landing live, on a box where the chat makes the clip. */
-const typedLive: TypedReplyAutoPlay = { asked: true, live: true, autoPlayAll: true, hasClip: false, owedAClip: true };
+const typedLive: TypedReplyAutoPlay = { asked: true, live: true, present: true, autoPlayAll: true, hasClip: false, owedAClip: true };
 
 describe("typedReplyAutoPlays", () => {
   it("plays a typed question's reply once the owner switched auto-play on", () => {
@@ -42,6 +42,13 @@ describe("typedReplyAutoPlays", () => {
     // player and waits to be pressed.
     expect(typedReplyAutoPlays({ ...typedLive, live: false })).toBe(false);
     expect(typedReplyAutoPlays({ ...typedLive, live: false, hasClip: true, owedAClip: false })).toBe(false);
+  });
+
+  it("never plays a reply that lands after the owner left the chat", () => {
+    // The popup closed, or its browser tab hidden, while the turn ran: the
+    // reply keeps its clip to press.
+    expect(typedReplyAutoPlays({ ...typedLive, present: false })).toBe(false);
+    expect(typedReplyAutoPlays({ ...typedLive, present: false, hasClip: true, owedAClip: false })).toBe(false);
   });
 
   it("asks for no sound the reply would not have had anyway", () => {

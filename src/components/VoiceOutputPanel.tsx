@@ -191,23 +191,36 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
   const playerRef = useRef<HTMLAudioElement | null>(null);
   const clipUrlRef = useRef<string | null>(null);
+  // Counts the settings events that moved a switch (see the listener below).
+  // A read that was in flight when one landed is OLDER than it — the event
+  // is sent only once the box has taken the change — so `load` reads again
+  // rather than put back a position the owner has just moved.
+  const switchEventsRef = useRef(0);
 
   // Answers what it read, so a caller that CHANGED the box can publish the
   // refreshed facts (see installVoiceNotes); null whenever nothing readable
   // came back and the panel kept its last reading.
   const load = useCallback(async (): Promise<VoiceStatusAnswer | null> => {
     try {
-      const res = await fetch("/setup-api/tts", { cache: "no-store" });
-      const data = await res.json();
-      // Both pieces of state follow the same "keep the last good reading" rule.
-      // Set before the guard, an error body — `res.ok` is never checked — would
-      // read as `channelsUnavailable: false` and quietly clear a note the box
-      // had already given us, while `status` correctly kept its last value.
-      if (!isVoiceStatus(data)) return null;
-      setNoChannelSpeech(channelsUnavailable(data));
-      setNoVoiceNotes(channelVoiceNotesMissing(data));
-      setStatus(data);
-      return data;
+      // Bounded: a read overtaken by an event is asked again, and only a
+      // storm of events could overtake three in a row — then the panel keeps
+      // the reading it has, which the events themselves keep current.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const eventsAtStart = switchEventsRef.current;
+        const res = await fetch("/setup-api/tts", { cache: "no-store" });
+        const data = await res.json();
+        // Both pieces of state follow the same "keep the last good reading" rule.
+        // Set before the guard, an error body — `res.ok` is never checked — would
+        // read as `channelsUnavailable: false` and quietly clear a note the box
+        // had already given us, while `status` correctly kept its last value.
+        if (!isVoiceStatus(data)) return null;
+        if (switchEventsRef.current !== eventsAtStart) continue;
+        setNoChannelSpeech(channelsUnavailable(data));
+        setNoVoiceNotes(channelVoiceNotesMissing(data));
+        setStatus(data);
+        return data;
+      }
+      return null;
     } catch {
       /* keep the last good reading rather than blanking the panel */
       return null;
@@ -242,6 +255,7 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
       if (typeof detail?.autoReply === "boolean") moved.autoReply = detail.autoReply;
       if (typeof detail?.autoPlayAll === "boolean") moved.autoPlayAll = detail.autoPlayAll;
       if (Object.keys(moved).length === 0) return;
+      switchEventsRef.current += 1;
       setStatus((prev) => (prev ? { ...prev, ...moved } : prev));
     };
     window.addEventListener(VOICE_SETTINGS_CHANGED_EVENT, onChanged);
