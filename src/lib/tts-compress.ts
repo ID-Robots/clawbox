@@ -23,10 +23,10 @@
 
 import { promises as fs } from "fs";
 import os from "os";
-import path from "@/lib/runtime-path";
-import { failureDetail, runChild } from "@/lib/child-run";
-import { FFMPEG_BIN } from "@/lib/stt-remux";
-import { MIN_COMPRESSED_BYTES, REPLY_FORMAT_MIME, sniffAudioMime } from "@/lib/voice-reply-format";
+import path from "./runtime-path";
+import { failureDetail, runChild } from "./child-run";
+import { FFMPEG_BIN } from "./stt-remux";
+import { MIN_COMPRESSED_BYTES, REPLY_FORMAT_MIME, sniffAudioMime } from "./voice-reply-format";
 
 export type CompressedFormat = "mp3" | "opus";
 

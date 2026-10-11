@@ -1,15 +1,15 @@
 import fsp from "fs/promises";
-import path from "@/lib/runtime-path";
+import path from "../runtime-path";
 import { randomUUID } from "crypto";
 import {
   chatSpokenReplyDir,
   pruneMediaDir,
   resolveInMediaRoot,
   SPOKEN_REPLY_RETENTION,
-} from "@/lib/harness/media-root";
-import { speakWithHermes } from "@/lib/hermes-tts";
-import { compressSpeech } from "@/lib/tts-compress";
-import { audioExtensionFor, REPLY_FORMAT_MIME, sniffAudioMime } from "@/lib/voice-reply-format";
+} from "./media-root";
+import { speakWithHermes } from "../hermes-tts";
+import { compressSpeech } from "../tts-compress";
+import { audioExtensionFor, REPLY_FORMAT_MIME, sniffAudioMime } from "../voice-reply-format";
 
 /**
  * Speaking a Hermes reply aloud, the way the OpenClaw gateway already does.

@@ -23,20 +23,20 @@
 import { NextResponse } from "next/server";
 import { promises as fs } from "fs";
 import os from "os";
-import path from "@/lib/runtime-path";
+import path from "./runtime-path";
 import crypto from "crypto";
-import { runChild } from "@/lib/child-run";
-import { createSerialLock } from "@/lib/serial-lock";
-import { sanitizeErrorMessage } from "@/lib/safe-error-text";
-import { getActiveHarness } from "@/lib/harness";
-import { speakWithHermes } from "@/lib/hermes-tts";
-import { buildTtsInventory, KOKORO_STAMP } from "@/lib/local-models";
-import { readConfig } from "@/lib/openclaw-config";
-import { buildVoiceOutputStatus, cloudSpeechTarget, localCommandPath, cloudVoiceFrom, resolvePreferredEngine, type LocalVoiceProbe, type VoiceConfigView, type VoiceEngine, type VoiceEngineId } from "@/lib/voice-output";
-import { readLocalVoice, readVoiceState } from "@/lib/voice-output-store";
-import { DEFAULT_LOCAL_VOICE, isCloudVoiceFor, isLocalVoice } from "@/lib/voice-catalog";
-import { compressSpeech } from "@/lib/tts-compress";
-import { MIN_WAV_BYTES, minAudioBytesFor, REPLY_FORMAT_MIME, sniffAudioMime, type ReplyAudioFormat } from "@/lib/voice-reply-format";
+import { runChild } from "./child-run";
+import { createSerialLock } from "./serial-lock";
+import { sanitizeErrorMessage } from "./safe-error-text";
+import { getActiveHarness } from "./harness";
+import { speakWithHermes } from "./hermes-tts";
+import { buildTtsInventory, KOKORO_STAMP } from "./local-models";
+import { readConfig } from "./openclaw-config";
+import { buildVoiceOutputStatus, cloudSpeechTarget, localCommandPath, cloudVoiceFrom, resolvePreferredEngine, type LocalVoiceProbe, type VoiceConfigView, type VoiceEngine, type VoiceEngineId } from "./voice-output";
+import { readLocalVoice, readVoiceState } from "./voice-output-store";
+import { DEFAULT_LOCAL_VOICE, isCloudVoiceFor, isLocalVoice } from "./voice-catalog";
+import { compressSpeech } from "./tts-compress";
+import { MIN_WAV_BYTES, minAudioBytesFor, REPLY_FORMAT_MIME, sniffAudioMime, type ReplyAudioFormat } from "./voice-reply-format";
 
 const NO_STORE = { "Cache-Control": "no-store" };
 
