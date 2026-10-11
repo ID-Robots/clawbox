@@ -72,8 +72,9 @@ export const apps: AppDef[] = [
   { id: "web", name: "app.web", color: "#0f766e", type: "external", url: "https://duckduckgo.com/", pinned: false, kioskOnly: true },
   { id: "vnc", name: "app.remoteDesktop", color: "#7c3aed", type: "vnc", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
   // Capture the desktop and mark it up (TASK-1475). On the desktop, off the
-  // shelf: its keys (Print Screen, Alt+Shift+S) take a capture with the app
-  // closed, and the window opens itself on the result. Last in the list so a
-  // desktop that already has its icons arranged gains one at the end.
+  // shelf: its keys (Print Screen, Ctrl+Shift+S, Alt+Shift+S) and the tray's
+  // Screenshot button (TASK-1491) take a capture with the app closed, and the
+  // window opens itself on the result. Last in the list so a desktop that
+  // already has its icons arranged gains one at the end.
   { id: "screenshot", name: "app.screenshot", color: "#be123c", type: "screenshot", pinned: false, defaultWidth: 1100, defaultHeight: 680 },
 ];

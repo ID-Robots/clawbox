@@ -12,19 +12,22 @@ import {
   CAPTURE_REQUEST_EVENT,
   openInScreenshot,
   primaryOverlayId,
+  quickCaptureRequest,
   registerOverlay,
   subscribeOverlays,
 } from "@/lib/screenshot/session";
-import { captureShortcut, createShortcutState, isCaptureShortcutKey } from "@/lib/screenshot/shortcuts";
+import { captureShortcut, createShortcutState, isCaptureShortcutKey, isTypingTarget } from "@/lib/screenshot/shortcuts";
 import { DESKTOP_LAYERS } from "@/lib/window-snap";
 
 /**
  * The Screenshot app's presence on the desktop (TASK-1475): its capture keys,
  * the region selector and the countdown. Mounted once with the desktop, so a
  * capture can be taken with the app's window closed — the window opens itself
- * on the result.
+ * on the result. The shelf's Screenshot button asks it through the same
+ * request event the app's own buttons use (TASK-1491).
  *
  *   Print Screen          the whole screen
+ *   Ctrl + Shift + S      the whole screen, where Print Screen never reaches the page
  *   Shift + Print Screen  a region
  *   Alt + Shift + S       a region, where Print Screen never reaches the page
  *
@@ -223,8 +226,11 @@ function ScreenshotOverlay({ owner = "desktop" }: { owner?: OverlayOwner }) {
   }, [active, begin]);
 
   // The desktop-wide keys. In the capture phase on `window`, so they are seen
-  // before the terminal or the remote desktop — which would otherwise send
-  // them on to a shell — gets a look.
+  // before the remote desktop — which would otherwise send them on to the
+  // machine it shows — gets a look. Not while the owner is typing (TASK-1491):
+  // in a text field, an editable element or a terminal the keys are left to
+  // what has the focus, untouched. A capture already under way is never
+  // joined by a second: `begin` turns away anything but an idle overlay.
   useEffect(() => {
     if (!active) return;
     const state = createShortcutState();
@@ -238,11 +244,11 @@ function ScreenshotOverlay({ owner = "desktop" }: { owner?: OverlayOwner }) {
         }
         return;
       }
-      if (!isCaptureShortcutKey(event)) return;
+      if (!isCaptureShortcutKey(event) || isTypingTarget(event.target)) return;
       event.preventDefault();
       event.stopPropagation();
       const mode = captureShortcut(event, state);
-      if (mode) begin({ mode, delay: 0, engine: "dom", hide: null });
+      if (mode) begin(quickCaptureRequest(mode));
     };
     window.addEventListener("keydown", onKey, true);
     window.addEventListener("keyup", onKey, true);
