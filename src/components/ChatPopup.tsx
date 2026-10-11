@@ -1206,6 +1206,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         stopped: t("codingAgent.chatStopped"),
         paused: t("codingAgent.chatPaused"),
         draft: t("codingAgent.chatDraft"),
+        // Waiting for a slot: the box runs as many at once as the owner allows.
+        queued: t("codingAgent.chatQueued"),
         // A run that worked and did not leave the deliverable behind: its own
         // word, because "did not finish" would read as a fault and the one
         // thing that helps here is opening it and resuming.

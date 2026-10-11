@@ -869,3 +869,35 @@ describe("coding_secret_list", () => {
     expect(Object.keys(harness().get("coding_secret_list").shape)).toEqual([]);
   });
 });
+
+describe("a run beyond the box's limit: queued, not refused", () => {
+  it("coding_agent_run says QUEUED with its place, and not to start it again", async () => {
+    apiPost.mockResolvedValue({ started: false, queued: true, run: { ...RUN, status: "queued", queued: { at: 1, position: 2 } } });
+    const out = await harness().call("coding_agent_run", { task: "Add a dark mode toggle", project_id: "site" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/^Queued coding run "run-k3x9q2ab"/);
+    expect(out.text).toMatch(/number 2 in line/);
+    expect(out.text).toMatch(/starts by itself/);
+    expect(out.text).toMatch(/only the owner can cancel it/);
+    expect(out.text).toMatch(/Do NOT start it again/);
+  });
+
+  it("coding_agent_stop leaves a queued run alone: cancelling one is the owner's", async () => {
+    apiGet.mockResolvedValue({ run: { ...RUN, status: "queued", queued: { at: 1, position: 1 } } });
+    const out = await harness().call("coding_agent_stop", { run_id: "run-k3x9q2ab" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/is queued and has not started/);
+    expect(out.text).toMatch(/Only the owner can take it out of the queue/);
+    expect(apiPost).not.toHaveBeenCalled();
+  });
+
+  it("coding_agent_status says where a queued run stands", async () => {
+    apiGet.mockResolvedValue({ run: { ...RUN, status: "queued", completedAt: null, queued: { at: 1, position: 3 } } });
+    const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/Run run-k3x9q2ab: queued \(not started\) — number 3 in line for a slot/);
+  });
+});

@@ -385,3 +385,50 @@ describe("the team's shape, its lead and its figures (TASK-1099)", () => {
     expect(final).toHaveTextContent("app.js never loads.");
   });
 });
+
+describe("dependency gating and holds on the board", () => {
+  it("says what a pending task waits for, and why a held one went back", async () => {
+    teams = [{
+      ...WORKING,
+      tasks: [
+        { task_id: "t1", task_description: "Scaffold index.html", assigned_to: "run-00000002", status: "complete", result: "Built it.", depends_on: [], review: null, attempts: 1 },
+        { task_id: "t2", task_description: "Wire app.js", assigned_to: null, status: "pending", result: null, depends_on: ["t1"], review: null, attempts: 1, hold: { dependency: "t1", reason: "rejected — the form does not submit", was: "complete", at: 1 } },
+        { task_id: "t3", task_description: "Docs", assigned_to: null, status: "pending", result: null, depends_on: [], review: null, attempts: 0 },
+      ],
+    }];
+    stub();
+    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    // t1 is finished but not reviewed yet: t2 waits for it to be ACCEPTED.
+    expect(await screen.findByTestId("coding-team-waiting-t2")).toHaveTextContent("Waiting for t1 to be accepted");
+    expect(screen.getByTestId("coding-team-held-t2")).toHaveTextContent("Held — t1 was reopened");
+    expect(within(screen.getByTestId("coding-team-task-t2")).getByText("rejected — the form does not submit")).toBeInTheDocument();
+    expect(screen.queryByTestId("coding-team-waiting-t3")).toBeNull();
+  });
+});
+
+describe("a team waiting in the queue", () => {
+  it("shows the team at work first, the queued one behind it with its place, and cancels it for the owner", async () => {
+    const queued: TeamView = { ...WORKING, id: "team-queued01", goal: "Then build the reports", status: "queued", queuePosition: 1, tasks: [], log: [], alerts: 0, plannerRunId: null, createdAt: Date.now() };
+    teams = [queued, WORKING];
+    stub();
+    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    expect(await screen.findByTestId("coding-team-status")).toHaveTextContent("Working");
+    const row = await screen.findByTestId("coding-team-queued-team-queued01");
+    expect(row).toHaveTextContent("Queued");
+    expect(row).toHaveTextContent("#1 in line");
+    expect(row).toHaveTextContent("Then build the reports");
+    fireEvent.click(screen.getByTestId("coding-team-cancel-team-queued01"));
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/coding-agent/team/stop", body: { id: "team-queued01" } }));
+  });
+
+  it("shows a queued team on its own with its place and a Cancel, not a Stop", async () => {
+    teams = [{ ...WORKING, status: "queued", queuePosition: 2, tasks: [], log: [], alerts: 0, plannerRunId: null }];
+    stub();
+    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    expect(await screen.findByTestId("coding-team-status")).toHaveTextContent("Queued");
+    expect(screen.getByTestId("coding-team-queue-position")).toHaveTextContent("#2 in line");
+    expect(screen.queryByTestId("coding-team-stop")).toBeNull();
+    fireEvent.click(screen.getByTestId("coding-team-cancel"));
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/coding-agent/team/stop", body: { id: WORKING.id } }));
+  });
+});

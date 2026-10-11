@@ -117,7 +117,9 @@ export interface TeamView {
   goal: string;
   projectId: string | null;
   directory: string;
-  status: "planning" | "working" | "reviewing" | "done" | "failed" | "stopped";
+  status: "queued" | "planning" | "working" | "reviewing" | "done" | "failed" | "stopped";
+  /** A queued team's place in line (1 is next). Absent from an older server, and on any other team. */
+  queuePosition?: number;
   plannerRunId: string | null;
   /** The team's branch in the project and what it forked from; null when the team works in place. */
   branch?: string | null;
@@ -159,6 +161,7 @@ const LOG_SHOWN = 30;
 const MESSAGES_SHOWN = 5;
 
 const STATUS_TONE: Record<TeamView["status"], string> = {
+  queued: "text-indigo-300 border-indigo-300/40",
   planning: "text-sky-300 border-sky-400/40",
   working: "text-amber-400 border-amber-400/40",
   reviewing: "text-violet-300 border-violet-400/40",
@@ -188,6 +191,11 @@ const TASK_TONE: Record<TeamTaskView["status"], string> = {
 
 function isActive(status: TeamView["status"]): boolean {
   return status === "planning" || status === "working" || status === "reviewing";
+}
+
+/** Not started yet: waiting its turn behind the team that works (coding-team.ts startNextQueuedTeam). */
+function isQueuedTeam(status: TeamView["status"]): boolean {
+  return status === "queued";
 }
 
 /** Compact token counts, the way the runs list writes them: 1.3M, 48k, 950. */
@@ -234,18 +242,25 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
     return () => { request.current++; scope.current++; };
   }, [load]);
 
-  const team = teams[0] ?? null;
+  // The team at work first: one asked for after it waits in the queue, and is
+  // newer, but the board the owner follows is the one moving.
+  const team = teams.find((x) => isActive(x.status)) ?? teams[0] ?? null;
   const active = team ? isActive(team.status) : false;
+  const queuedHere = teams
+    .filter((x) => isQueuedTeam(x.status) && x.id !== team?.id)
+    .sort((a, b) => (a.queuePosition ?? 0) - (b.queuePosition ?? 0));
+  const following = active || (team !== null && isQueuedTeam(team.status)) || queuedHere.length > 0;
 
-  // Follow a team while it works.
+  // Follow a team while it works, or while one waits for its turn.
   useEffect(() => {
-    if (!active) return;
+    if (!following) return;
     const id = setInterval(() => { void load(); }, POLL_MS);
     return () => clearInterval(id);
-  }, [active, load]);
+  }, [following, load]);
 
-  const stop = async () => {
-    if (!team) return;
+  /** Stop the team at work, or — for a queued one — take it out of the queue: the same route, the owner's alone for a queue. */
+  const stop = async (target: TeamView | null = team) => {
+    if (!target) return;
     const startedIn = scope.current;
     setBusy(true);
     setError(null);
@@ -253,7 +268,7 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
       const res = await fetch("/setup-api/coding-agent/team/stop", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ id: team.id }),
+        body: JSON.stringify({ id: target.id }),
       });
       const data = await res.json().catch(() => null) as { team?: TeamView; error?: string } | null;
       if (!res.ok || !data?.team) throw new Error(data?.error ?? t("codingAgent.team.stopFailed"));
@@ -301,10 +316,15 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
         <p className={`${SECTION_LABEL} !mb-0`}>{t("codingAgent.team.title")}</p>
         {team && (
           <span
-            className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${STATUS_TONE[team.status]}`}
+            className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${STATUS_TONE[team.status] ?? STATUS_TONE.stopped}`}
             data-testid="coding-team-status"
           >
             {t(`codingAgent.team.status.${team.status}`)}
+          </span>
+        )}
+        {team && isQueuedTeam(team.status) && team.queuePosition && (
+          <span className="text-[11px] text-indigo-200/90" data-testid="coding-team-queue-position">
+            {t("codingAgent.team.queuePosition", { n: team.queuePosition })}
           </span>
         )}
         {team && team.tasks.length > 0 && (
@@ -323,7 +343,28 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
             {t("codingAgent.team.stop")}
           </button>
         )}
+        {team && isQueuedTeam(team.status) && (
+          <button type="button" onClick={() => void stop()} disabled={busy} data-testid="coding-team-cancel" className={`${BTN_SECONDARY} ml-auto`}>
+            {t("codingAgent.team.cancel")}
+          </button>
+        )}
       </div>
+      {/* The teams waiting behind the one at work, in their order — each
+          starts by itself in its turn, and only the owner takes one out. */}
+      {queuedHere.length > 0 && (
+        <ul className="mt-2 space-y-1" data-testid="coding-team-queue">
+          {queuedHere.map((q) => (
+            <li key={q.id} className="flex items-center gap-2 text-[11px] text-[var(--text-secondary)]" data-testid={`coding-team-queued-${q.id}`}>
+              <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${STATUS_TONE.queued}`}>{t("codingAgent.team.status.queued")}</span>
+              {q.queuePosition && <span className="text-indigo-200/90">{t("codingAgent.team.queuePosition", { n: q.queuePosition })}</span>}
+              <span className="min-w-0 truncate">{q.goal}</span>
+              <button type="button" onClick={() => void stop(q)} disabled={busy} data-testid={`coding-team-cancel-${q.id}`} className={`${BTN_SECONDARY} ml-auto`}>
+                {t("codingAgent.team.cancel")}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
       {/* The team as a tree — who hands to whom — sized by the board: the
           planner, as many workers and reviewers as have worked here, the
           ones at work pulsing; the sentence beneath it. With no team yet

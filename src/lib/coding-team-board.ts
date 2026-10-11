@@ -57,7 +57,12 @@ export const MAX_RATIONALE_CHARS = 200;
 /** Log lines of the kinds a teammate should hear about, quoted at the end of the digest. */
 const DIGEST_LOG_LINES = 5;
 
-export type TeamStatus = "planning" | "working" | "reviewing" | "done" | "failed" | "stopped";
+/**
+ * `queued`: asked for while another team was working — persisted, and started
+ * by the box itself in the order asked once the teams ahead of it settle
+ * (coding-team.ts startNextQueuedTeam). Neither working nor settled.
+ */
+export type TeamStatus = "queued" | "planning" | "working" | "reviewing" | "done" | "failed" | "stopped";
 /**
  * `retired` is the lead's: a pending task it decided the goal no longer
  * needs. Terminal, and neither a failure nor a block — a task that waited on
@@ -135,7 +140,7 @@ export interface TeamMetrics {
   readOnlyRefusals: number;
 }
 
-const TEAM_STATUSES: readonly TeamStatus[] = ["planning", "working", "reviewing", "done", "failed", "stopped"];
+const TEAM_STATUSES: readonly TeamStatus[] = ["queued", "planning", "working", "reviewing", "done", "failed", "stopped"];
 const TASK_STATUSES: readonly TaskStatus[] = ["pending", "in_progress", "complete", "failed", "rejected", "retired"];
 const RUN_ROLES: readonly TeamRunRef["role"][] = ["planner", "worker", "reviewer", "lead"];
 

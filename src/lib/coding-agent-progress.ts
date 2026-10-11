@@ -95,6 +95,9 @@ export type ProgressLabelKey =
   | "resumedByOwner"
   | "drafted"
   | "startedFromDraft"
+  | "queued"
+  | "startedFromQueue"
+  | "queueCanceled"
   | "leftoverRunning"
   | "endedLeftovers"
   | "ownerEndedLeftovers"
@@ -240,6 +243,10 @@ export const RUNNER_STEP = {
   resumedByOwner: "Resumed by the owner",
   drafted: "Drafted — start it when ready",
   startedFromDraft: "Started from a draft",
+  // The run queue (coding-agent.ts startOrQueueRun): every slot was taken.
+  queued: (position: number) => `Queued — number ${position} in line for a slot`,
+  startedFromQueue: "Started from the queue",
+  queueCanceled: "Canceled by the owner before it started",
   leftoverRunning:
     "Something this run started is still running — a server it left listening? The run's page can end it.",
   endedLeftovers: "Ended what the run had left running",
@@ -473,6 +480,9 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^Resumed by the owner$/, labelKey: "resumedByOwner", icon: "play_circle" },
   { re: /^Drafted — start it when ready$/, labelKey: "drafted", icon: "draft" },
   { re: /^Started from a draft$/, labelKey: "startedFromDraft", icon: "play_arrow" },
+  { re: /^Queued — number (\d+) in line for a slot$/, labelKey: "queued", icon: "hourglass_top", params: (m) => ({ n: Number(m[1]) }) },
+  { re: /^Started from the queue$/, labelKey: "startedFromQueue", icon: "play_arrow" },
+  { re: /^Canceled by the owner before it started$/, labelKey: "queueCanceled", icon: "cancel" },
   { re: /^Something this run started is still running .*$/, labelKey: "leftoverRunning", icon: "dns" },
   { re: /^Ended what the run had left running$/, labelKey: "endedLeftovers", icon: "power_settings_new" },
   { re: /^The owner ended what the run had left running$/, labelKey: "ownerEndedLeftovers", icon: "power_settings_new" },

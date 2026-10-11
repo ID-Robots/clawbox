@@ -266,6 +266,8 @@ interface RunPayload {
   projectId: string | null;
   source: string;
   status: CodingRunStatus;
+  /** A QUEUED run's place: since when, and its 1-based position in line. Absent from an older server. */
+  queued?: { at: number; position?: number } | null;
   startedAt: number;
   completedAt: number | null;
   sessionId: string | null;
@@ -524,7 +526,14 @@ function pipelineSentence(pipeline: NonNullable<RunPayload["pipeline"]>, stage: 
 function describeRun(run: RunPayload, tail: number): string {
   const parts: string[] = [];
   // A draft has not started: elapsed() would measure time since drafting.
-  parts.push(run.status === "draft" ? `Run ${run.id}: draft (not started)` : `Run ${run.id}: ${run.status} after ${elapsed(run)}`);
+  // Nor has a queued run: it says where it stands in line instead.
+  parts.push(
+    run.status === "draft"
+      ? `Run ${run.id}: draft (not started)`
+      : run.status === "queued"
+        ? `Run ${run.id}: queued (not started)${run.queued?.position ? ` — number ${run.queued.position} in line for a slot` : ""}. The ClawBox starts it by itself when a running run ends; only the owner can cancel it.`
+        : `Run ${run.id}: ${run.status} after ${elapsed(run)}`,
+  );
   // Said outright: the task text of a review pass is the harness's fixed
   // brief, and the only other trace of which run it reviewed is a progress
   // line the tail may have cut.
@@ -831,7 +840,8 @@ function runRow(run: RunPayload): Record<string, unknown> {
     task: redact(firstLine(run.task, 80)),
     started_by: run.source,
     project: runProject(run),
-    elapsed: run.status === "draft" ? "not started" : elapsed(run),
+    elapsed: run.status === "draft" || run.status === "queued" ? "not started" : elapsed(run),
+    ...(run.status === "queued" && run.queued?.position ? { queue_position: run.queued.position } : {}),
     ...(run.reviewOf ? { review_of: run.reviewOf } : {}),
     ...(run.worktree ? { branch: run.worktree.branch, copy } : {}),
     ...(attempts ? { attempts: run.completionAttempts ? `${attempts} of ${run.completionAttempts}` : attempts } : {}),
@@ -929,7 +939,7 @@ function projectRow(project: ProjectPayload, runs: RunPayload[] | null): Record<
     ...(app ? { app } : {}),
     latest_run: project.latestRun ? `${project.latestRun.id} (${project.latestRun.status})` : "none",
     runs_working: count((r) => r.status === "running"),
-    runs_waiting: count((r) => r.status === "paused" || r.status === "gave_up" || r.status === "draft"),
+    runs_waiting: count((r) => r.status === "paused" || r.status === "gave_up" || r.status === "draft" || r.status === "queued"),
     branches_not_merged: count((r) => !!r.worktree && !r.worktree.removed && r.worktree.result?.kind !== "merged" && r.status !== "running"),
     left_running: count((r) => r.leftover === true),
   };
@@ -1040,9 +1050,9 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       // owner's own per-project default, which is the switch that makes the
       // flow automatic for a project they ship from every day.
       if (delivery_pipeline === true) body.pipeline = true;
-      let res: { started?: boolean; run?: RunPayload };
+      let res: { started?: boolean; queued?: boolean; run?: RunPayload };
       try {
-        res = await apiPost<{ started?: boolean; run?: RunPayload }>(
+        res = await apiPost<{ started?: boolean; queued?: boolean; run?: RunPayload }>(
           "/setup-api/coding-agent/run",
           body,
           { timeoutMs: 20_000, rules: RUN_RULES },
@@ -1070,6 +1080,15 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
         throw err;
       }
       const run = res.run;
+      // QUEUED, not refused: the box was already running every run the owner
+      // allows. The run starts by itself, in order, when one ends.
+      if (res.queued && run?.id) {
+        return text(
+          `Queued coding run "${run.id}" for ${run.directory}${run.projectId ? ` (project "${run.projectId}")` : ""}: this ClawBox is already running as many coding runs as the owner allows`
+          + `${run.queued?.position ? `, so it is number ${run.queued.position} in line` : ""}. It starts by itself when a running run ends — after a restart too — and only the owner can cancel it. `
+          + `Do NOT start it again. Tell the user it is queued and stop; coding_run_list shows its place in line.`,
+        );
+      }
       if (!res.started || !run?.id) {
         throw new ToolError(
           "ENDPOINT_DOWN",
@@ -1172,6 +1191,9 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       }
       if (was && was.status === "draft") {
         return text(`Run ${run_id} is a draft that never started, so there is nothing to stop. The owner starts or discards drafts in the Coding Agent app.`);
+      }
+      if (was && was.status === "queued") {
+        return text(`Run ${run_id} is queued and has not started, so there is nothing to stop. Only the owner can take it out of the queue, in the Coding Agent app; otherwise it starts by itself when a slot frees. Tell the user that.`);
       }
       if (was && was.status !== "running") {
         if (was.leftover && end_leftovers === true) {
@@ -1312,7 +1334,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
           runs: kept,
           ...(omitted ? { not_listed: `${omitted} more matching run(s) did not fit — ask for fewer or filter` } : {}),
           ...(matching.length > limit ? { more: `${matching.length - limit} older matching run(s) not asked for` } : {}),
-          notes: "detached: lives in its own system scope and survives a web-server restart. can_resume: coding_agent_resume carries it on in the same session. left_running: finished but a process it started is still up. copy: where the run's own branch stands — bringing work home is the owner's, on the run's page.",
+          notes: "detached: lives in its own system scope and survives a web-server restart. can_resume: coding_agent_resume carries it on in the same session. left_running: finished but a process it started is still up. copy: where the run's own branch stands — bringing work home is the owner's, on the run's page. queue_position: a queued run's place in line (1 is next); it starts by itself, and only the owner cancels one.",
         }),
         rows,
         LIST_MAX_CHARS,
@@ -1606,7 +1628,9 @@ interface TeamPayload {
   goal: string;
   projectId: string | null;
   directory: string;
-  status: "planning" | "working" | "reviewing" | "done" | "failed" | "stopped";
+  status: "queued" | "planning" | "working" | "reviewing" | "done" | "failed" | "stopped";
+  /** A queued team's place in line (1 is next). Absent from an older server, and on any other team. */
+  queuePosition?: number;
   plannerRunId: string | null;
   tasks: TeamTaskPayload[];
   log: { ts: number; actor: { kind: string; id?: string }; type: string; message: string }[];
@@ -1625,15 +1649,26 @@ const TEAM_RULES: ErrorRule[] = [
     status: 409,
     match: /"kind":\s*"busy"/,
     code: "CONFLICT",
-    message: "A coding team is already working on this ClawBox.",
-    next: "Do not start another. Call coding_team_status to follow it, or coding_team_stop only if the user asks.",
+    message: "This ClawBox already has as many coding teams waiting as it allows.",
+    next: "Do not start another. Call coding_team_status to follow the queue, and tell the user.",
   },
   ...RUN_RULES,
 ];
 
+/** A queued team is the owner's to cancel; the bearer reads the queue and waits. */
+const TEAM_STOP_RULES: ErrorRule[] = [
+  {
+    status: 403,
+    match: /queue/,
+    code: "CONFLICT",
+    message: "That team is waiting in the queue, and only the owner can cancel a queued team.",
+    next: "Tell the user; they can cancel it in the Coding Agent app. Otherwise it starts by itself when the team ahead of it finishes.",
+  },
+];
+
 function describeTeam(team: TeamPayload, withLog: boolean): string {
   const parts: string[] = [];
-  parts.push(`Team ${team.id}: ${team.status}${team.error ? ` — ${team.error}` : ""}`);
+  parts.push(`Team ${team.id}: ${team.status}${team.status === "queued" && team.queuePosition ? ` — number ${team.queuePosition} in line` : ""}${team.error ? ` — ${team.error}` : ""}`);
   parts.push(`Goal: ${redact(firstLine(team.goal, 200))}`);
   parts.push(`Folder: ${team.directory}${team.projectId ? ` (project "${team.projectId}")` : ""}`);
   if (team.plannerRunId) parts.push(`Planner run: ${team.plannerRunId}`);
@@ -1661,7 +1696,9 @@ function describeTeam(team: TeamPayload, withLog: boolean): string {
     parts.push(`Final review: ${team.finalReview.verdict}${team.finalReview.notes ? ` — ${redact(firstLine(team.finalReview.notes, 200))}` : ""}`);
   }
   if (team.tasks.length === 0) {
-    parts.push(team.status === "planning" ? "The planner is still reading the folder and writing the plan." : "No tasks were posted.");
+    parts.push(team.status === "planning"
+      ? "The planner is still reading the folder and writing the plan."
+      : team.status === "queued" ? "Not started: it waits for the team ahead of it to finish." : "No tasks were posted.");
   } else {
     parts.push("Tasks:");
     for (const t of team.tasks) {
@@ -1685,7 +1722,9 @@ function describeTeam(team: TeamPayload, withLog: boolean): string {
       parts.push(`- ${new Date(e.ts).toISOString()} ${who}: ${redact(e.message)}`);
     }
   }
-  if (team.status === "planning" || team.status === "working" || team.status === "reviewing") {
+  if (team.status === "queued") {
+    parts.push("Queued: the ClawBox starts it by itself when the team ahead of it finishes, and only the owner can cancel it. Tell the user and stop; check again later with coding_team_status.");
+  } else if (team.status === "planning" || team.status === "working" || team.status === "reviewing") {
     parts.push("Still working. Tell the user and stop; check again later with coding_team_status.");
   } else if (team.status === "done") {
     parts.push("Every task is complete and accepted. Summarise the task results for the user, naming the files.");
@@ -1711,9 +1750,9 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
       const body: Record<string, unknown> = { goal };
       if (project_id) body.projectId = project_id;
       if (directory) body.directory = directory;
-      let res: { started?: boolean; team?: TeamPayload };
+      let res: { started?: boolean; queued?: boolean; team?: TeamPayload };
       try {
-        res = await apiPost<{ started?: boolean; team?: TeamPayload }>("/setup-api/coding-agent/team", body, { timeoutMs: 20_000, rules: TEAM_RULES });
+        res = await apiPost<{ started?: boolean; queued?: boolean; team?: TeamPayload }>("/setup-api/coding-agent/team", body, { timeoutMs: 20_000, rules: TEAM_RULES });
       } catch (err) {
         if (err instanceof ApiError && err.status === 400) {
           throw new ToolError("BAD_ARGUMENT", routeReason(err) ?? "The ClawBox refused that working folder.", WORKING_FOLDER_NEXT);
@@ -1721,6 +1760,13 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
         throw err;
       }
       const team = res.team;
+      if (res.queued && team?.id) {
+        return text(
+          `Queued coding team "${team.id}" for ${team.directory}${team.projectId ? ` (project "${team.projectId}")` : ""}: another team is working on this ClawBox`
+          + `${team.queuePosition ? `, so it is number ${team.queuePosition} in line` : ""}. It starts by itself when the team ahead of it finishes — after a restart too — and only the owner can cancel it. `
+          + "Do NOT start it again. Tell the user it is queued and stop; coding_team_status shows its place.",
+        );
+      }
       if (!res.started || !team?.id) {
         throw new ToolError("ENDPOINT_DOWN", "The ClawBox did not start the team.", "Call coding_team_status to see whether a team appeared; if not, tell the user and do not retry more than once.");
       }
@@ -1748,6 +1794,7 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
         return json(teams.map((t) => ({
           team_id: t.id,
           status: t.status,
+          ...(t.status === "queued" && t.queuePosition ? { queue_position: t.queuePosition } : {}),
           goal: redact(firstLine(t.goal, 80)),
           project_id: t.projectId,
           // A retired task will never be done: counted, a finished team read as unfinished.
@@ -1778,7 +1825,7 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
     async ({ team_id }: { team_id: string }) => {
       let data: { team?: TeamPayload };
       try {
-        data = await apiPost<{ team?: TeamPayload }>("/setup-api/coding-agent/team/stop", { id: team_id }, { timeoutMs: 20_000 });
+        data = await apiPost<{ team?: TeamPayload }>("/setup-api/coding-agent/team/stop", { id: team_id }, { timeoutMs: 20_000, rules: TEAM_STOP_RULES });
       } catch (err) {
         if (err instanceof ApiError && err.status === 404) {
           throw new ToolError("NOT_FOUND", "There is no coding team with that id on this ClawBox.", "Call coding_team_status without a team_id to list the teams that exist.");

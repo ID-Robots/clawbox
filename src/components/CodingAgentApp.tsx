@@ -95,6 +95,8 @@ interface Run {
   projectId: string | null;
   source: "agent" | "owner";
   status: CodingRunStatus;
+  /** A QUEUED run's place: since when, and its 1-based position in line. Absent from an older server. */
+  queued?: { at: number; position?: number } | null;
   startedAt: number;
   completedAt: number | null;
   summary: string | null;
@@ -1526,6 +1528,16 @@ export default function CodingAgentApp() {
   /** A row's glyph buttons — terminal, back up, details — one size, one row. */
   const ROW_ICON_BUTTON = "h-7 w-7 inline-flex items-center justify-center rounded-lg border border-white/10 text-[var(--text-secondary)] hover:bg-white/5 hover:text-white disabled:opacity-50";
 
+  // The run page's own buttons, as handlers of the component: the page is
+  // drawn inside a render-time function, where the compiler reads a direct
+  // `runAction` call as touching its refs during render.
+  /** End what a settled run left running — the leftover card's one button. */
+  const killLeftovers = (id: string) => runAction(id, "kill", t("codingAgent.killLeftoverFailed"));
+  /** Remove the run's own copy of the project — the worktree card's button. */
+  const removeRunCopy = (id: string) => runAction(id, "worktree", t("codingAgent.worktreeRemoveFailed"));
+  /** Resume after "Allow next time" — the denials card's button. */
+  const resumeRunNow = (id: string) => runAction(id, "resume", t("codingAgent.resumeFailed"));
+
   const runControls = (run: Run, where: "row" | "page") => {
     const action = RUN_ACTION[run.status];
     // Resume in a terminal is for a run that has STOPPED; a live run's
@@ -1536,6 +1548,20 @@ export default function CodingAgentApp() {
     const secondary = small ? `${RUN_BUTTON} border-white/10 text-[var(--text-primary)] hover:bg-white/5` : BTN_SECONDARY;
     return (
       <>
+        {/* A queued run starts by itself in its turn; the one thing to do to
+            it is take it out of the queue — the owner's alone, which is who
+            this app is for. */}
+        {run.status === "queued" && (
+          <button
+            type="button"
+            onClick={() => runAction(run.id, "stop", t("codingAgent.cancelQueuedFailed"))}
+            disabled={busy === run.id}
+            data-testid={`coding-agent-cancel-queued-${run.id}`}
+            className={where === "row" ? `${RUN_BUTTON} border-white/10 text-[var(--text-muted)] hover:bg-white/5` : BTN_SECONDARY}
+          >
+            {t("codingAgent.cancelQueued")}
+          </button>
+        )}
         {action && (
           <button
             type="button"
@@ -1649,7 +1675,7 @@ export default function CodingAgentApp() {
               // (the runner overwrites it at start), so a duration would be
               // time-since-drafting, which the "updated" line already says —
               // and the effort it will run with is read at start.
-              const started = run.status !== "draft";
+              const started = run.status !== "draft" && run.status !== "queued";
               const reviewedBy = runs.find((r) => r.reviewOf === run.id);
               return (
                 <li
@@ -1671,6 +1697,11 @@ export default function CodingAgentApp() {
                           {run.status === "running" && <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" aria-hidden="true" />}
                           {statusLabel(run.status)}
                         </span>
+                        {run.status === "queued" && run.queued?.position && (
+                          <span className="text-[11px] text-indigo-200/90" data-testid={`coding-agent-queue-position-${run.id}`}>
+                            {t("codingAgent.queuePosition", { n: run.queued.position })}
+                          </span>
+                        )}
                         {/* A run at high effort can be silent for minutes on
                             its first turn. Show that it is thinking, so quiet
                             never reads as stuck. */}
@@ -2400,7 +2431,7 @@ export default function CodingAgentApp() {
         {view.face === "run" && (() => {
           const run = view.run;
           const tone = RUN_TONE[run.status];
-          const started = run.status !== "draft";
+          const started = run.status !== "draft" && run.status !== "queued";
           const mainOutcome = runOutcome(run.status);
           const project = projects.find((pr) => runBelongsTo(run, pr)) ?? null;
           // Its project folder has been removed. The record is kept — see
@@ -2477,6 +2508,11 @@ export default function CodingAgentApp() {
                     {run.status === "running" && <span className="h-1.5 w-1.5 rounded-full bg-current animate-pulse" aria-hidden="true" />}
                     {statusLabel(run.status)}
                   </span>
+                  {run.status === "queued" && run.queued?.position && (
+                    <span className="text-[11px] text-indigo-200/90" data-testid="coding-agent-run-queue-position">
+                      {t("codingAgent.queuePosition", { n: run.queued.position })}
+                    </span>
+                  )}
                   {run.status === "running" && (run.thinkingTokens ?? 0) > 0 && (
                     <span data-testid="coding-agent-thinking" className="text-[10px] font-semibold border rounded-full px-2 py-0.5 text-violet-300 border-violet-400/40">
                       {t("codingAgent.thinking", { n: run.thinkingTokens ?? 0 })}
@@ -2586,7 +2622,7 @@ export default function CodingAgentApp() {
                     <span className="text-[11px] text-[var(--text-secondary)]">{t("codingAgent.leftoverRunning")}</span>
                     <button
                       type="button"
-                      onClick={() => runAction(run.id, "kill", t("codingAgent.killLeftoverFailed"))}
+                      onClick={() => killLeftovers(run.id)}
                       disabled={busy === run.id}
                       data-testid={`coding-agent-kill-${run.id}`}
                       className={`${BTN_SECONDARY} ml-auto`}
@@ -2611,7 +2647,7 @@ export default function CodingAgentApp() {
                     worktree={run.worktree}
                     pullRequestOpen={Boolean(run.pr && run.pr.phase !== "failed")}
                     busy={busy === run.id}
-                    onRemove={() => runAction(run.id, "worktree", t("codingAgent.worktreeRemoveFailed"))}
+                    onRemove={() => removeRunCopy(run.id)}
                     onChanged={() => { void load(); }}
                   />
                 )}
@@ -3092,7 +3128,7 @@ export default function CodingAgentApp() {
                 deniedActions={run.deniedActions}
                 resumable={run.status === "paused"}
                 onAllowed={() => notifyCodingAgentChanged()}
-                onResume={() => void runAction(run.id, "resume", t("codingAgent.resumeFailed"))}
+                onResume={() => void resumeRunNow(run.id)}
               />
 
                 </aside>

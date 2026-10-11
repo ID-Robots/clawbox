@@ -1536,7 +1536,7 @@ describe("a team that works", () => {
 });
 
 describe("the gates", () => {
-  it("refuses while the switch is off, an empty goal, and a second team at once", async () => {
+  it("refuses while the switch is off and an empty goal, and QUEUES a second team at once", async () => {
     runner.isCodingAgentEnabled.mockResolvedValueOnce(false);
     await expect(team.startTeam({ goal: "g", source: "agent" })).rejects.toMatchObject({ kind: "disabled" });
     await expect(team.startTeam({ goal: "   ", source: "agent" })).rejects.toMatchObject({ kind: "invalid" });
@@ -1545,7 +1545,11 @@ describe("the gates", () => {
     runner.waitForRun.mockImplementationOnce(() => new Promise((r) => { release = () => r(runs.get("run-00000001")); }));
     const first = await team.startTeam({ goal: "g", source: "agent" });
     expect(team.activeTeamId()).toBe(first.id);
-    await expect(team.startTeam({ goal: "another", source: "agent" })).rejects.toMatchObject({ kind: "busy" });
+    const second = await team.startTeam({ goal: "another", source: "agent" });
+    expect(second).toMatchObject({ status: "queued", queuePosition: 1 });
+    expect(team.activeTeamId()).toBe(first.id);
+    // Taken out again by the owner, so this case goes on as it always did.
+    expect(team.cancelQueuedTeam(second.id).status).toBe("stopped");
     outcomes = [{ summary: "nope" }];
     Object.assign(runs.get("run-00000001")!, { status: "completed", summary: "nope" });
     release();
@@ -2453,5 +2457,78 @@ describe("the worker's brief: when to use team_message", () => {
 
   it("puts scratch files in the evidence folder only — never in /tmp, never beside the project", () => {
     expect(team.WORKER_BRIEF).toContain("Scratch files go in your evidence folder only — never in /tmp, never beside the project. A write anywhere else is refused, and a refused write counts against your task.");
+  });
+});
+
+describe("a second team: queued, not refused", () => {
+  const ONE_TASK = JSON.stringify([{ task_description: "Scaffold index.html", files_hint: ["index.html"] }]);
+
+  it("waits on disk with its place while one works, and starts by itself when that one settles", async () => {
+    outcomes = [
+      { summary: ONE_TASK },
+      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: ONE_TASK },
+      { summary: "index done again", filesTouched: ["index.html"] },
+    ];
+    // The first team's planner holds until the second has been asked for.
+    let release: () => void = () => {};
+    const plain = runner.waitForRun.getMockImplementation()!;
+    runner.waitForRun.mockImplementationOnce((id: string) => new Promise((r) => { release = () => r(plain(id, 0)); }));
+    const first = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const second = await team.startTeam({ goal: "Build it again", directory: "site", source: "agent" });
+    expect(second).toMatchObject({ status: "queued", queuePosition: 1 });
+    // Read back from disk, a queued team is not an orphan of a restart.
+    expect(team.getTeam(second.id)).toMatchObject({ status: "queued", queuePosition: 1 });
+    expect(team.listTeams().find((t) => t.id === second.id)?.status).toBe("queued");
+    release();
+
+    expect((await finished(first.id)).status).toBe("done");
+    const done = await finished(second.id);
+    expect(done.status).toBe("done");
+    expect(done.log.map((e) => e.message)).toEqual(expect.arrayContaining([
+      `Team → queued: Waiting for team ${first.id} to finish`,
+      "Team → planning: Its turn in the queue came",
+    ]));
+    expect(done.queuePosition).toBeUndefined();
+  });
+
+  it("is taken out of the queue by the owner's cancel alone, never by a stop", async () => {
+    let release: () => void = () => {};
+    runner.waitForRun.mockImplementationOnce(() => new Promise((r) => { release = () => r(runs.get("run-00000001")); }));
+    const first = await team.startTeam({ goal: "g", source: "owner" });
+    const second = await team.startTeam({ goal: "h", source: "agent" });
+    expect(() => team.stopTeam(second.id)).toThrow(/Only the owner can cancel a queued team/);
+    const canceled = team.cancelQueuedTeam(second.id);
+    expect(canceled.status).toBe("stopped");
+    expect(canceled.log[canceled.log.length - 1]).toMatchObject({ actor: { kind: "owner" }, message: "Team → stopped: Canceled by the owner before it started" });
+    Object.assign(runs.get("run-00000001")!, { status: "completed", summary: "nope" });
+    outcomes = [{ summary: "nope" }];
+    release();
+    await finished(first.id);
+    // Canceled stays canceled: nothing started it when the box came free.
+    expect(team.getTeam(second.id)?.status).toBe("stopped");
+  });
+
+  it("is started at boot when it was waiting at a restart", async () => {
+    // What a restart leaves: a queued board on disk and no team in this process.
+    const board = await import("@/lib/coding-team-board");
+    const queued = board.createBoard({ goal: "Build it", projectId: null, directory: "/home/clawbox/Projects/site", source: "owner" }, { kind: "owner" });
+    board.setTeamStatus(queued, { kind: "system" }, "queued", "Waiting for team team-00000000 to finish");
+    board.saveBoard(queued);
+    outcomes = [{ summary: ONE_TASK }, { summary: "index done", filesTouched: ["index.html"] }];
+    expect(team.getTeam(queued.id)?.status).toBe("queued");
+    const started = await team.startNextQueuedTeam();
+    expect(started?.id).toBe(queued.id);
+    expect((await finished(queued.id)).status).toBe("done");
+  });
+
+  it("waits while the coding agent is switched off rather than failing", async () => {
+    const board = await import("@/lib/coding-team-board");
+    const queued = board.createBoard({ goal: "Build it", projectId: null, directory: "/home/clawbox/Projects/site", source: "owner" }, { kind: "owner" });
+    board.setTeamStatus(queued, { kind: "system" }, "queued", "Waiting");
+    board.saveBoard(queued);
+    runner.isCodingAgentEnabled.mockResolvedValue(false);
+    expect(await team.startNextQueuedTeam()).toBeNull();
+    expect(team.getTeam(queued.id)?.status).toBe("queued");
   });
 });

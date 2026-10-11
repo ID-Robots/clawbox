@@ -129,8 +129,8 @@ import {
   type TeamTask,
 } from "@/lib/coding-team-board";
 
-/** The board as the routes and the app read it: with who worked, counted, and the figures as of now. */
-export type TeamView = TeamBoard & { agents: TeamAgents };
+/** The board as the routes and the app read it: with who worked, counted, the figures as of now, and — while it waits — its place in the queue. */
+export type TeamView = TeamBoard & { agents: TeamAgents; queuePosition?: number };
 import { TeamBus, type Delivered, type TeamMessage } from "@/lib/coding-team-bus";
 import { clippedNote, leadRoom, leadShouldRun, leadTask, parsePlan, parseReplan, PLANNER_BRIEF, REPLAN_BRIEF, replanContext, replanTask } from "@/lib/coding-team-planner";
 
@@ -209,6 +209,16 @@ interface LiveTeam {
 
 const live = new Map<string, LiveTeam>();
 
+/**
+ * Teams that may wait at once behind the one working. One team works at a
+ * time — the box has one shell budget — and a queue is a promise to start
+ * each of them unattended, in order; beyond this the caller is told to wait.
+ */
+export const MAX_QUEUED_TEAMS = 5;
+/** How soon a queued team is looked at again when its turn came while the coding agent was switched off. */
+const TEAM_QUEUE_RETRY_MS = 60_000;
+let teamQueueRetry: NodeJS.Timeout | null = null;
+
 /** Planner runs a team will pay for before giving up on getting an array. */
 const MAX_PLANNER_ATTEMPTS = 3;
 
@@ -226,9 +236,12 @@ export function activeTeamId(): string | null {
 }
 
 /**
- * Start a team on a goal. Refuses while the switch is off, while another
- * team is working (one team, one worker at a time — the box has one shell
- * budget), and for a folder a run could not be pointed at.
+ * Start a team on a goal — or QUEUE it, while another team is working (one
+ * team at a time: the box has one shell budget) or others already wait: the
+ * board is saved `queued` and started by the box itself, in the order asked,
+ * when the teams ahead of it settle (`startNextQueuedTeam`), across a restart
+ * too. Refuses while the switch is off, for a folder a run could not be
+ * pointed at, and past MAX_QUEUED_TEAMS waiting.
  */
 export async function startTeam(input: StartTeamInput): Promise<TeamView> {
   if (!(await isCodingAgentEnabled())) {
@@ -237,24 +250,41 @@ export async function startTeam(input: StartTeamInput): Promise<TeamView> {
   const goal = typeof input.goal === "string" ? input.goal.trim() : "";
   if (!goal) throw new CodingAgentError("invalid", "A team needs a goal.");
   if (goal.length > MAX_TASK_CHARS) throw new CodingAgentError("invalid", `The goal is too long (${goal.length} > ${MAX_TASK_CHARS} characters).`);
-  const busy = activeTeamId();
-  if (busy) throw new CodingAgentError("busy", `Team ${busy} is still working; wait for it to finish or stop it first.`);
   const { directory, projectId } = await resolveWorkingDirectory({ projectId: input.projectId ?? null, directory: input.directory ?? null });
   // The lead's switch, as it stands NOW: kept on the board, so an owner who
-  // flips it while this team works changes the next team, not this one.
+  // flips it while this team works changes the next team, not this one. A
+  // queued team reads it again when its turn comes.
   const dynamic = await getTeamDynamic();
+  // Read after the last await, with the board made in the same synchronous
+  // step: two asks arriving together cannot both find the box free.
+  const busy = activeTeamId();
+  const waiting = queuedBoards();
+  if ((busy || waiting.length) && waiting.length >= MAX_QUEUED_TEAMS) {
+    throw new CodingAgentError("busy", `There are already ${MAX_QUEUED_TEAMS} coding teams waiting on this ClawBox. Wait for the queue to move, or ask the owner to cancel one.`);
+  }
 
   // The owner's team is created in the owner's name; the assistant's by the
   // system on its behalf — the audit says which, and the routes gate on it.
   const board = createBoard({ goal, projectId, directory, source: input.source, dynamic }, input.source === "owner" ? OWNER : SYSTEM);
+  if (busy || waiting.length) {
+    setTeamStatus(board, SYSTEM, "queued", busy ? `Waiting for team ${busy} to finish` : `Waiting behind ${waiting.length} queued team(s)`);
+    saveBoard(board);
+    return snapshot(board);
+  }
   saveBoard(board);
+  launchTeam(board);
+  return snapshot(board);
+}
+
+/** The board's orchestrator, in this process, from its planner to its verdict; the next queued team once it settles. */
+function launchTeam(board: TeamBoard): void {
   const bus = new TeamBus(board);
   const team: LiveTeam = { board, bus, stopRequested: false, currentRunIds: new Set(), pendingMessages: new Map(), uncountedAlerts: 0, leadTurnsAt: [0, 0], held: new Map(), done: Promise.resolve() };
   // A task reopened — rejected, sent back by the suite, or itself held — sets
   // back whatever started on it, wherever the reopening came from.
   bus.subscribe((delivered) => holdDependents(team, delivered));
   live.set(board.id, team);
-  team.done = runTeam(team, input.source)
+  team.done = runTeam(team, board.source)
     .catch((err) => {
       if (!isSettledStatus(board.status)) {
         setTeamStatus(board, SYSTEM, "failed", err instanceof Error ? err.message : String(err));
@@ -264,7 +294,61 @@ export async function startTeam(input: StartTeamInput): Promise<TeamView> {
     .finally(() => {
       // Kept in the map only while it works; a settled team is read from disk.
       if (isSettledStatus(board.status)) live.delete(board.id);
+      // The box is free: the queue's next team, in its turn.
+      void startNextQueuedTeam().catch((err) => {
+        console.error("[coding-team] could not start the next queued team:", err instanceof Error ? err.message : err);
+      });
     });
+}
+
+/** The queued boards in the order they start in: the order they were asked for. */
+function queuedBoards(): TeamBoard[] {
+  return listBoards().filter((b) => b.status === "queued").sort((a, b) => a.createdAt - b.createdAt);
+}
+
+/**
+ * Start the oldest QUEUED team, when no team is working — after a team
+ * settles, and at boot (src/instrumentation.ts), since the queue is on disk.
+ * With the coding agent switched off it keeps its place and is looked at
+ * again in a minute. Answers the team it started, or null.
+ */
+export async function startNextQueuedTeam(): Promise<TeamView | null> {
+  if (activeTeamId() || !queuedBoards().length) return null;
+  if (!(await isCodingAgentEnabled())) {
+    if (!teamQueueRetry) {
+      teamQueueRetry = setTimeout(() => {
+        teamQueueRetry = null;
+        void startNextQueuedTeam().catch(() => undefined);
+      }, TEAM_QUEUE_RETRY_MS);
+      teamQueueRetry.unref?.();
+    }
+    return null;
+  }
+  const dynamic = await getTeamDynamic();
+  // Looked at again after the awaits, and launched in the same synchronous
+  // step: two settles racing here must not start two teams.
+  if (activeTeamId()) return null;
+  const next = queuedBoards()[0];
+  if (!next) return null;
+  next.dynamic = dynamic;
+  setTeamStatus(next, SYSTEM, "planning", "Its turn in the queue came");
+  saveBoard(next);
+  launchTeam(next);
+  return snapshot(next);
+}
+
+/**
+ * Take a team out of the queue before it starts — the OWNER's gesture alone
+ * (the stop route lets only the owner's session reach it; the MCP bearer may
+ * queue a team and read the queue, never cancel). A team no longer queued is
+ * answered as it is.
+ */
+export function cancelQueuedTeam(id: string): TeamView {
+  const board = live.get(id)?.board ?? loadBoard(id);
+  if (!board) throw new CodingAgentError("not_found", "There is no coding team with that id.");
+  if (board.status !== "queued") return snapshot(board);
+  setTeamStatus(board, OWNER, "stopped", "Canceled by the owner before it started");
+  saveBoard(board);
   return snapshot(board);
 }
 
@@ -275,6 +359,10 @@ export function stopTeam(id: string): TeamView {
     const board = loadBoard(id);
     if (!board) throw new CodingAgentError("not_found", "There is no coding team with that id.");
     if (isSettledStatus(board.status)) return snapshot(board);
+    // Nothing is running: taking it out of the queue is the owner's (cancelQueuedTeam).
+    if (board.status === "queued") {
+      throw new CodingAgentError("invalid", "That team is queued and has not started. Only the owner can cancel a queued team, from the Coding Agent app.");
+    }
     // A team from before a restart: settle it now.
     setTeamStatus(board, SYSTEM, "failed", "The web server restarted while the team was working.");
     saveBoard(board);
@@ -546,6 +634,8 @@ async function postToOwnerAgent(
 /** Tests only. */
 export function _resetCodingTeamStateForTests(): void {
   live.clear();
+  if (teamQueueRetry) clearTimeout(teamQueueRetry);
+  teamQueueRetry = null;
 }
 
 // ─── The loop ────────────────────────────────────────────────────────────────
@@ -1642,9 +1732,9 @@ function isSettledStatus(status: TeamBoard["status"]): boolean {
   return isSettledTeamStatus(status);
 }
 
-/** A board that says "working" with nobody working — the web server restarted under it. */
+/** A board that says "working" with nobody working — the web server restarted under it. A queued one is not: it waits on disk for its turn. */
 function settleOrphan(board: TeamBoard): TeamBoard {
-  if (isSettledStatus(board.status) || live.has(board.id)) return board;
+  if (isSettledStatus(board.status) || live.has(board.id) || board.status === "queued") return board;
   setTeamStatus(board, SYSTEM, "failed", "The web server restarted while the team was working.");
   saveBoard(board);
   return board;
@@ -1652,7 +1742,8 @@ function settleOrphan(board: TeamBoard): TeamBoard {
 
 /** The board as the routes answer it, with the agent count worked out from it and the figures as of now (a working team's clock runs). */
 function snapshot(board: TeamBoard): TeamView {
-  return { ...(JSON.parse(JSON.stringify(board)) as TeamBoard), agents: teamAgents(board), metrics: teamMetrics(board) };
+  const at = board.status === "queued" ? queuedBoards().findIndex((b) => b.id === board.id) : -1;
+  return { ...(JSON.parse(JSON.stringify(board)) as TeamBoard), agents: teamAgents(board), metrics: teamMetrics(board), ...(at >= 0 ? { queuePosition: at + 1 } : {}) };
 }
 
 function firstLine(text: string, max: number): string {

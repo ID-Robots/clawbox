@@ -1814,6 +1814,41 @@ export interface CodingRun {
    * on a record from before, and for a spawn whose hook script was missing.
    */
   midTurn?: boolean;
+  /**
+   * A QUEUED run's place in the queue: since when it waits, and what it is
+   * started with when its turn comes. Null on every other record. A clone
+   * (`cloneRun`) carries the 1-based `position` instead of the request.
+   */
+  queued?: RunQueueEntry | null;
+}
+
+/**
+ * What a QUEUED run is started with when its turn comes: the caller's own
+ * request as the run route took it (`new`), or the owner's Start on a draft
+ * (`draft`, which is the record itself). Kept as asked and validated again at
+ * the start, by the one reader every start goes through.
+ */
+export interface QueuedStart {
+  kind: "new" | "draft";
+  task?: string;
+  projectId?: string | null;
+  directory?: string | null;
+  resumeRunId?: string | null;
+  provider?: unknown;
+  model?: unknown;
+  deliverable?: unknown;
+  pipeline?: unknown;
+  inputs?: unknown;
+  experience?: unknown;
+}
+
+export interface RunQueueEntry {
+  /** When it was queued: the order the queue starts runs in. */
+  at: number;
+  /** Absent from a clone: the request stays on the record. */
+  start?: QueuedStart;
+  /** 1-based, worked out when a clone is made — never stored. */
+  position?: number;
 }
 
 /**
@@ -2150,6 +2185,12 @@ export interface StartRunInput {
   directory?: string | null;
   resumeRunId?: string | null;
   source: CodingRunSource;
+  /**
+   * Internal: the queue's own start (`startQueuedRun`). The run takes the
+   * QUEUED record's id, place and messages, so whoever was told "run-x is
+   * queued" goes on following run-x.
+   */
+  queuedRunId?: string | null;
   /** Internal: set only by the automatic review pass, naming the run under review. */
   reviewOf?: string | null;
   /** Internal: set only by the review loop, naming the run whose pull request
@@ -2259,6 +2300,19 @@ export class CodingAgentError extends Error {
   constructor(readonly kind: CodingAgentErrorKind, message: string, readonly wait = false) {
     super(message);
     this.name = "CodingAgentError";
+  }
+}
+
+/**
+ * Refused ONLY because the box is already running every run the owner allows
+ * (`coding_agent_max_parallel_runs`): the one refusal the run queue turns into
+ * a QUEUED run instead (`startOrQueueRun`). Still a `busy` CodingAgentError for
+ * every caller that does not queue — a team's run, the review pass.
+ */
+export class SlotsFullError extends CodingAgentError {
+  constructor(message: string) {
+    super("busy", message);
+    this.name = "SlotsFullError";
   }
 }
 
@@ -2611,6 +2665,8 @@ export async function setMaxParallelRuns(runs: unknown): Promise<number> {
     throw new CodingAgentError("invalid", `The number of runs at once must be between ${MIN_MAX_PARALLEL_RUNS} and ${MAX_MAX_PARALLEL_RUNS}.`);
   }
   await configSet(CODING_AGENT_MAX_PARALLEL_CONFIG_KEY, runs);
+  // A higher limit is room the queue may take at once.
+  void pumpRunQueue();
   return runs;
 }
 
@@ -4060,6 +4116,30 @@ function normalizeRun(raw: CodingRun): CodingRun {
     // file it comes from is one a restore or a hand edit can have touched.
     messages: parseRunMessages((raw as { messages?: unknown }).messages),
     midTurn: (raw as { midTurn?: unknown }).midTurn === true,
+    queued: (raw as { status?: unknown }).status === "queued" ? parseQueueEntry((raw as { queued?: unknown }).queued) : null,
+  };
+}
+
+/** A queued run's entry off disk, or a bare one (its turn by when the file says it was asked, no request) — never a crash. */
+function parseQueueEntry(raw: unknown): RunQueueEntry {
+  const e = raw && typeof raw === "object" ? raw as { at?: unknown; start?: unknown } : {};
+  const start = e.start && typeof e.start === "object" ? e.start as Record<string, unknown> : {};
+  const text = (v: unknown) => (typeof v === "string" ? v : null);
+  return {
+    at: typeof e.at === "number" && Number.isFinite(e.at) ? e.at : 0,
+    start: {
+      kind: start.kind === "new" ? "new" : "draft",
+      ...(typeof start.task === "string" ? { task: start.task } : {}),
+      projectId: text(start.projectId),
+      directory: text(start.directory),
+      resumeRunId: text(start.resumeRunId),
+      provider: start.provider,
+      model: start.model,
+      deliverable: start.deliverable,
+      pipeline: start.pipeline,
+      inputs: start.inputs,
+      experience: start.experience,
+    },
   };
 }
 
@@ -4543,6 +4623,11 @@ interface RunStore {
   anthropicAuthRetries?: Map<string, number>;
   /** The owner's history setting as last read — see rememberHistoryPolicy. */
   historyPolicy: HistoryPolicy | null;
+  /** The run queue's pass in flight, and whether a slot freed while it ran — see pumpRunQueue. */
+  queuePump?: Promise<string[]>;
+  queuePumpAgain?: boolean;
+  /** The queue's next look when it stopped for something that clears by itself (the switch, readiness). */
+  queueRetry?: NodeJS.Timeout | null;
 }
 
 const store = processStore<RunStore>(RUNS_PATH, () => ({
@@ -4899,6 +4984,9 @@ function cloneRun(run: CodingRun): CodingRun {
     // a clone can neither see nor write the driver's later stages.
     pipeline: run.pipeline ? clonePipeline(run.pipeline) : null,
     experience: run.experience ? { ...run.experience, ruleIds: [...run.experience.ruleIds] } : null,
+    // Where it stands, never what it asked for: the request (inputs, an
+    // experience block) is the runner's to start it with, not a reader's.
+    queued: run.queued ? { at: run.queued.at, position: queuePosition(run.id) ?? undefined } : null,
   };
   // The experience block is left out, not copied: it is for the next spawn,
   // which reads the record itself — see CodingRun.experienceBrief.
@@ -10797,6 +10885,8 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       // Woken even when the bookkeeping above threw: a run that is over must
       // not keep every later wait on it for its whole slice.
       wakeWaiters(run.id);
+      // A slot is free: the queue's next run, in its turn.
+      void pumpRunQueue();
     }
     console.error(`[coding-agent] ${run.id} ${settled} after ${Math.round(((run.completedAt ?? Date.now()) - run.startedAt) / 1000)}s (${run.numTurns} turns)`);
     // A team's worker or reviewer ends here: its worktree is the
@@ -11923,7 +12013,9 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // review-loop round included — unless the caller sent a block of its own.
     const experience = givenExperience
       ?? (previous ? { brief: previous.experienceBrief ?? null, record: previous.experience ?? null } : null);
+    const queuedRunId = typeof input.queuedRunId === "string" ? input.queuedRunId : null;
     const run = newRunRecord({
+      ...(queuedRunId ? { id: queuedRunId } : {}),
       task,
       directory,
       projectId,
@@ -12072,9 +12164,27 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // Read before the insert, never between it and the write: the insert and
     // persist are one synchronous step (see the runs store).
     const history = await getHistoryPolicy();
-    insertRun(loadRuns(), run, history);
+    const list = loadRuns();
+    // A QUEUED run's turn: this record takes the queued one's place, with what
+    // it was told while it waited and the steps it already showed — never a
+    // second row beside it. Gone from the queue meanwhile (the owner canceled
+    // it while this start was on its way), it does not start at all.
+    const waited = queuedRunId ? list.findIndex((r) => r.id === queuedRunId) : -1;
+    if (queuedRunId && (waited < 0 || list[waited].status !== "queued")) {
+      throw new CodingAgentError("invalid", "That queued run is no longer waiting: it was canceled or has already started.");
+    }
+    if (waited >= 0) {
+      const before = list[waited];
+      run.messages = before.messages;
+      run.progress = [...before.progress, ...run.progress];
+      run.progressAt = [...before.progressAt, ...run.progressAt];
+      pushProgress(run, RUNNER_STEP.startedFromQueue);
+      list[waited] = run;
+    } else {
+      insertRun(list, run, history);
+    }
     persist(true);
-    console.error(`[coding-agent] ${run.id} started by ${run.source} in ${run.directory}`);
+    console.error(`[coding-agent] ${run.id} started by ${run.source} in ${run.directory}${waited >= 0 ? " from the queue" : ""}`);
     startProjectIcon(run);
     spawnOrSettle(run, resumeSessionId, tools, settings);
     return cloneRun(run);
@@ -12301,11 +12411,13 @@ async function applyProviderChoice(
 
 /** A fresh run record: every counter at zero, nothing seen yet. */
 function newRunRecord(fields: {
+  /** The id a QUEUED record already gave out (startQueuedRun); a fresh one otherwise. */
+  id?: string;
   task: string;
   directory: string;
   projectId: string | null;
   source: CodingRunSource;
-  status: "running" | "draft";
+  status: "running" | "draft" | "queued";
   settings: RunSettings;
   reviewOf?: string | null;
   reviewLoopOf?: string | null;
@@ -12319,7 +12431,7 @@ function newRunRecord(fields: {
   pipeline?: PipelineState | null;
 }): CodingRun {
   const now = Date.now();
-  const id = newRunId();
+  const id = fields.id ?? newRunId();
   return {
     id,
     task: fields.task,
@@ -12545,6 +12657,11 @@ function requestEnd(run: CodingRun, state: LiveRun, kind: "stop" | "pause"): voi
 export function stopRun(id: string): CodingRun {
   const run = loadRuns().find((r) => r.id === id);
   if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
+  // A queued run has no process to stop; taking it out of the queue is the
+  // OWNER's (cancelQueuedRun, behind the owner gate of the stop route).
+  if (run.status === "queued") {
+    throw new CodingAgentError("invalid", "That run is queued and has not started. Only the owner can cancel a queued run, from the Coding Agent app.");
+  }
   if (run.status === "paused") {
     // No process to signal — the pause already ended it. Stopping a paused
     // run is the owner closing the book on it.
@@ -12587,6 +12704,8 @@ export function stopRun(id: string): CodingRun {
     stopPipelineFor(run, "The run was stopped, so the pipeline stopped here.");
     persist(true);
     wakeWaiters(id);
+    // It held a slot on paper: the queue's next run may have it now.
+    void pumpRunQueue();
     return cloneRun(run);
   }
   requestEnd(run, state, "stop");
@@ -12905,14 +13024,25 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
   const run = loadRuns().find((r) => r.id === id);
   if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
   if (run.status === "running") return cloneRun(run);
-  if (run.status !== "draft") throw new CodingAgentError("invalid", "Only a drafted run can be started this way.");
+  // A draft the owner started while the box was full waits in the queue as
+  // itself, and the queue starts it here (startQueuedRun).
+  const fromQueue = run.status === "queued" && run.queued?.start?.kind === "draft";
+  if (run.status !== "draft" && !fromQueue) throw new CodingAgentError("invalid", "Only a drafted run can be started this way.");
+  // In order: a draft started while runs wait for a slot goes behind them.
+  if (!fromQueue && hasQueuedRuns()) return queueDraft(run);
   // The account this draft named, not whatever the default is now. Checked
   // before the record is flipped to "running": a draft for an account whose
   // key the owner has since removed should be refused with a sentence, not
   // spawned into a wrapper that dies.
   // Held from the gate to the flip below, like every other start — see
-  // `startingRuns`.
-  const releaseSlot = await assertCanSpawn(run.team ?? null, run.provider);
+  // `startingRuns`. Every slot taken: queued, not refused.
+  let releaseSlot: () => void;
+  try {
+    releaseSlot = await assertCanSpawn(run.team ?? null, run.provider);
+  } catch (err) {
+    if (err instanceof SlotsFullError && !fromQueue) return queueDraft(run);
+    throw err;
+  }
   // Held beside the slot — see `startRun`. A draft that starts reaches the same
   // folder a removal may be about to take, and by the same synchronous claim.
   let releaseDirectory: () => void = () => {};
@@ -12938,11 +13068,12 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
     run.media = { images: settings.generateImages, audio: settings.generateAudio };
     run.completionAttempts = settings.completionAttempts;
     run.status = "running";
+    run.queued = null;
     run.startedAt = Date.now();
     run.lastActivityAt = Date.now();
     // The bar the draft was created with, now that it is actually starting.
     openAttempt(run);
-    pushProgress(run, RUNNER_STEP.startedFromDraft);
+    pushProgress(run, fromQueue ? RUNNER_STEP.startedFromQueue : RUNNER_STEP.startedFromDraft);
     // Resolved now and not when the draft was written: a draft can sit for days,
     // and the secrets a run gets are the ones ticked at the moment it starts.
     await prepareRunSecrets(run);
@@ -12955,6 +13086,242 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
     releaseDirectory();
     releaseSlot();
   }
+}
+
+// ─── The run queue ───────────────────────────────────────────────────────────
+
+/**
+ * Runs that may wait for a slot at once. A queue is a promise to start each
+ * of them, unattended, in order; beyond this, the caller is told to wait.
+ */
+export const MAX_QUEUED_RUNS = 10;
+/** How soon the queue looks again after it stopped for something that clears by itself — the switch off, the harness not ready. */
+export const QUEUE_RETRY_MS = 60_000;
+/** Refusals that are the BOX's state, not the run's: the queue waits them out rather than failing the run. */
+const QUEUE_WAITS: ReadonlySet<CodingAgentErrorKind> = new Set(["disabled", "not_ready", "limited", "busy"]);
+
+function hasQueuedRuns(): boolean {
+  return loadRuns().some((r) => r.status === "queued");
+}
+
+/** The queued runs in the order they start in: the order they were asked for. */
+function queuedRuns(): CodingRun[] {
+  return loadRuns().filter((r) => r.status === "queued").sort((a, b) => (a.queued?.at ?? 0) - (b.queued?.at ?? 0));
+}
+
+/** A queued run's place in line, 1 being next; null for anything not queued. */
+export function queuePosition(id: string): number | null {
+  const at = queuedRuns().findIndex((r) => r.id === id);
+  return at < 0 ? null : at + 1;
+}
+
+/**
+ * Start a run, or QUEUE it when the box is already running every run the
+ * owner allows: the run route's start (owner and MCP bearer alike), so a
+ * second ask is never refused with CONFLICT for want of a slot. In order — a
+ * start while runs are waiting goes behind them, even when a slot just freed.
+ * Every other refusal (the switch, readiness, a bad folder) is still a refusal.
+ */
+export async function startOrQueueRun(input: StartRunInput): Promise<{ run: CodingRun; queued: boolean }> {
+  if (!hasQueuedRuns()) {
+    try {
+      return { run: await startRun(input), queued: false };
+    } catch (err) {
+      if (!(err instanceof SlotsFullError)) throw err;
+    }
+  }
+  const run = await queueRun(input);
+  // Room may have come free between the refusal and the queue.
+  void pumpRunQueue();
+  return { run, queued: true };
+}
+
+/**
+ * The QUEUED record: validated the way a start is — the task, the folder (or
+ * the run it continues), the account, the deliverable, the experience block —
+ * so a request the box would refuse is refused NOW, to the caller who can fix
+ * it, not when its turn comes hours later. Persisted with the request it is
+ * started with; nothing is staged, branched or spawned until then.
+ */
+async function queueRun(input: StartRunInput): Promise<CodingRun> {
+  if (!(await isCodingAgentEnabled())) {
+    throw new CodingAgentError("disabled", "The coding agent is switched off. The owner can turn it on in the Coding Agent app on the ClawBox desktop.");
+  }
+  const task = normalizeTask(input.task, isBoxWrittenTask(input));
+  requireExperience(input.experience);
+  if (queuedRuns().length >= MAX_QUEUED_RUNS) {
+    throw new CodingAgentError("busy", `There are already ${MAX_QUEUED_RUNS} coding runs waiting for a slot on this ClawBox. Wait for the queue to move, or ask the owner to cancel one.`);
+  }
+  const resumeRunId = typeof input.resumeRunId === "string" ? input.resumeRunId.trim() : "";
+  let directory: string;
+  let projectId: string | null;
+  let inherited: { provider: CodingProvider; model: string | null } | null = null;
+  if (resumeRunId) {
+    const previous = loadRuns().find((r) => r.id === resumeRunId) ?? null;
+    if (!previous) throw new CodingAgentError("not_found", "There is no coding run with that id to resume.");
+    if (!previous.sessionId && input.freshSession !== true) {
+      throw new CodingAgentError("invalid", "That run never started a Claude Code session, so it cannot be resumed. Start a new run instead.");
+    }
+    directory = previous.directory;
+    projectId = previous.projectId;
+    inherited = { provider: previous.provider, model: previous.requestedModel };
+  } else {
+    ({ directory, projectId } = await resolveWorkingDirectory(input));
+  }
+  const settings = await applyProviderChoice(await readRunSettings(), input, inherited);
+  const run = newRunRecord({ task, directory, projectId, source: input.source, status: "queued", settings, deliverable: requireDeliverable(input) });
+  run.queued = {
+    at: Date.now(),
+    start: {
+      kind: "new",
+      task: input.task,
+      projectId: typeof input.projectId === "string" ? input.projectId : null,
+      directory: typeof input.directory === "string" ? input.directory : null,
+      resumeRunId: resumeRunId || null,
+      provider: input.provider,
+      model: input.model,
+      deliverable: input.deliverable,
+      pipeline: input.pipeline,
+      inputs: input.inputs,
+      experience: input.experience,
+    },
+  };
+  pushProgress(run, RUNNER_STEP.queued(queuedRuns().length + 1));
+  insertRun(loadRuns(), run, await getHistoryPolicy());
+  persist(true);
+  console.error(`[coding-agent] ${run.id} queued by ${run.source} for ${run.directory}`);
+  return cloneRun(run);
+}
+
+/** A draft the owner started while every slot was taken: the same record, waiting its turn. */
+function queueDraft(run: CodingRun): CodingRun {
+  const position = queuedRuns().length + 1;
+  run.status = "queued";
+  run.queued = { at: Date.now(), start: { kind: "draft" } };
+  pushProgress(run, RUNNER_STEP.queued(position));
+  persist(true);
+  void pumpRunQueue();
+  return cloneRun(run);
+}
+
+/** The queue's start of one run: the request it was queued with, under the id it was given. */
+function startQueuedRun(id: string): Promise<CodingRun> {
+  return singleFlight(id, async () => {
+    const run = loadRuns().find((r) => r.id === id);
+    if (!run || run.status !== "queued") throw new CodingAgentError("invalid", "That queued run is no longer waiting: it was canceled or has already started.");
+    const start = run.queued?.start;
+    // Straight to the draft's own start, not through startDraftRun: this IS
+    // the transition for the id, and asking for it again would wait on itself.
+    if (!start || start.kind === "draft") return startDraftRunOnce(id);
+    return startRun({
+      task: start.task ?? run.task,
+      projectId: start.projectId ?? null,
+      directory: start.directory ?? null,
+      resumeRunId: start.resumeRunId ?? null,
+      provider: start.provider,
+      model: start.model,
+      deliverable: start.deliverable,
+      pipeline: start.pipeline,
+      inputs: start.inputs,
+      experience: start.experience,
+      source: run.source,
+      queuedRunId: id,
+    });
+  });
+}
+
+/**
+ * Start what the queue holds, in order, while there are slots. Called when a
+ * run settles (finishRun), when one stopped without ever settling, when the
+ * owner raises the limit, after a run is queued, and at boot — the queue is
+ * on disk, so it survives a restart and is picked up where it was.
+ *
+ * One pass at a time; a slot that frees during a pass makes it look again.
+ * A run whose start the BOX refuses for now (the switch, readiness, a limit)
+ * keeps its place and the queue looks again in QUEUE_RETRY_MS; one refused for
+ * itself (its folder is gone, its request no longer valid) is settled failed
+ * with the reason, and the next one goes.
+ */
+export function pumpRunQueue(): Promise<string[]> {
+  if (store.queuePump) {
+    store.queuePumpAgain = true;
+    return store.queuePump;
+  }
+  const pass = (async () => {
+    const started: string[] = [];
+    do {
+      store.queuePumpAgain = false;
+      for (;;) {
+        const next = queuedRuns()[0];
+        if (!next) break;
+        try {
+          await startQueuedRun(next.id);
+          started.push(next.id);
+        } catch (err) {
+          // Every slot is taken: its turn comes when a run settles.
+          if (err instanceof SlotsFullError) break;
+          if (err instanceof CodingAgentError && QUEUE_WAITS.has(err.kind)) {
+            armQueueRetry();
+            break;
+          }
+          failQueuedRun(next.id, err);
+        }
+      }
+    } while (store.queuePumpAgain);
+    return started;
+  })().finally(() => {
+    store.queuePump = undefined;
+  });
+  store.queuePump = pass;
+  return pass;
+}
+
+function armQueueRetry(): void {
+  if (store.queueRetry) return;
+  store.queueRetry = setTimeout(() => {
+    store.queueRetry = null;
+    void pumpRunQueue();
+  }, QUEUE_RETRY_MS);
+  store.queueRetry.unref?.();
+}
+
+/** A queued run its turn could not start, for a reason of its own: settled failed, saying why, on its own page. */
+function failQueuedRun(id: string, err: unknown): void {
+  const run = loadRuns().find((r) => r.id === id);
+  if (!run || run.status !== "queued") return;
+  run.status = "failed";
+  run.queued = null;
+  run.error = `Its turn in the queue came, and it could not start: ${err instanceof Error ? err.message : String(err)}`.slice(0, MAX_ERROR_CHARS);
+  run.completedAt = Date.now();
+  pushProgress(run, RUNNER_STEP.finished("failed"));
+  persist(true);
+  wakeWaiters(id);
+}
+
+/**
+ * Take a run out of the queue before it starts — the OWNER's gesture alone
+ * (the stop route lets only the owner's session reach this; the MCP bearer may
+ * queue and read, never cancel). A start already under way for it is waited
+ * for first: then it is running, and Stop is the way to end it.
+ */
+export async function cancelQueuedRun(id: string): Promise<CodingRun> {
+  const inFlight = transitions.get(id);
+  if (inFlight) await inFlight.catch(() => undefined);
+  const run = loadRuns().find((r) => r.id === id);
+  if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
+  if (run.status !== "queued") {
+    if (run.status === "running") throw new CodingAgentError("invalid", "That run has already left the queue and started. Stop it instead.");
+    return cloneRun(run);
+  }
+  run.status = "stopped";
+  run.queued = null;
+  run.error = "Canceled by the owner before it started.";
+  run.completedAt = Date.now();
+  pushProgress(run, RUNNER_STEP.queueCanceled);
+  persist(true);
+  wakeWaiters(id);
+  console.error(`[coding-agent] ${run.id} canceled in the queue by the owner`);
+  return cloneRun(run);
 }
 
 /** Discard a draft. Only drafts: everything else is history and history stays. */
@@ -13074,8 +13441,7 @@ async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProv
   // not reached their record yet — see `startingRuns`.
   const going = active.length + store.startingRuns;
   if (going >= limit) {
-    throw new CodingAgentError(
-      "busy",
+    throw new SlotsFullError(
       limit === 1 && active.length > 0
         ? `A coding run is already in progress (${active[0].id}). Wait for it or stop it first.`
         : `This ClawBox is already starting or running ${going} coding runs at once, which is all it allows. Wait for one to finish, stop one, or raise the limit in the Coding Agent settings.`,
@@ -13275,6 +13641,9 @@ export function _resetCodingAgentStateForTests(): Promise<void> {
   // A start this reset interrupted would otherwise leave its slot held for the
   // life of the process, which is a permanent discount on the limit.
   store.startingRuns = 0;
+  if (store.queueRetry) clearTimeout(store.queueRetry);
+  store.queueRetry = null;
+  store.queuePumpAgain = false;
   // `anthropicResume` is left as it is: a pass still in flight must stay the
   // one the next pass waits for.
   return drainForTests(killed, SETTLE_DRAIN_BUDGET_MS);

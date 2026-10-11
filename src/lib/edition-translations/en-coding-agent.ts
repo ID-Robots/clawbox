@@ -342,6 +342,9 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.team.status.done": "Done",
   "codingAgent.team.status.failed": "Failed",
   "codingAgent.team.status.stopped": "Stopped",
+  "codingAgent.team.status.queued": "Queued",
+  "codingAgent.team.queuePosition": "#{n} in line",
+  "codingAgent.team.cancel": "Cancel",
   "codingAgent.team.task.pending": "Pending",
   "codingAgent.team.task.inProgress": "In progress",
   "codingAgent.team.task.complete": "Complete",
@@ -396,6 +399,14 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.discardFailed": "The draft could not be discarded.",
   "codingAgent.statusPaused": "Paused",
   "codingAgent.statusDraft": "Draft",
+  "codingAgent.statusQueued": "Queued",
+  "codingAgent.chatQueued": "Coding run queued",
+  "codingAgent.queuePosition": "#{n} in line",
+  "codingAgent.cancelQueued": "Cancel",
+  "codingAgent.cancelQueuedFailed": "Could not take the run out of the queue.",
+  "codingAgent.stepQueued": "Queued — number {n} in line for a slot",
+  "codingAgent.stepStartedFromQueue": "Started from the queue",
+  "codingAgent.stepQueueCanceled": "Canceled by the owner before it started",
   // The run worked, reported itself done, and what it had to leave behind is
   // not there. Its own word because the alternatives both mislead: "Did not
   // finish" reads as a broken box, and "Stopped" is the owner's own gesture.

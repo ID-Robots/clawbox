@@ -121,7 +121,7 @@ describe("coding_team_run", () => {
     expect(off).toMatchObject({ code: "CONFLICT", message: expect.stringMatching(/switched off/) });
     apiPost.mockRejectedValueOnce(new ApiError(409, JSON.stringify({ error: "busy", kind: "busy" })));
     const busy = await refused("coding_team_run", { goal: "g" });
-    expect(busy).toMatchObject({ code: "CONFLICT", message: expect.stringMatching(/already working/), next: expect.stringMatching(/Do not start another/) });
+    expect(busy).toMatchObject({ code: "CONFLICT", message: expect.stringMatching(/as many coding teams waiting as it allows/), next: expect.stringMatching(/Do not start another/) });
   });
 
   it("passes a refused folder through as the route's own sentence", async () => {
@@ -214,5 +214,31 @@ describe("coding_team_status — shape, lead and figures (TASK-1099)", () => {
     apiGet.mockResolvedValueOnce({ team: TEAM });
     const text = await ok("coding_team_status", { team_id: TEAM.id, log: 0 });
     expect(text).not.toMatch(/Shape:|Lead:|Metrics:|Final review:/);
+  });
+});
+
+describe("a second team: queued, not refused", () => {
+  it("coding_team_run says QUEUED with its place", async () => {
+    apiPost.mockResolvedValueOnce({ started: false, queued: true, team: { ...TEAM, status: "queued", queuePosition: 1, tasks: [] } });
+    const text = await ok("coding_team_run", { goal: "Build it" });
+    expect(text).toMatch(/^Queued coding team "team-k3x9q2ab"/);
+    expect(text).toMatch(/number 1 in line/);
+    expect(text).toMatch(/only the owner can cancel it/);
+  });
+
+  it("coding_team_status lists a queued team's place and says what it waits for", async () => {
+    apiGet.mockResolvedValueOnce({ teams: [{ ...TEAM, status: "queued", queuePosition: 2, tasks: [] }] });
+    const list = JSON.parse(await ok("coding_team_status", { log: 0 })) as Array<Record<string, unknown>>;
+    expect(list[0]).toMatchObject({ status: "queued", queue_position: 2 });
+    apiGet.mockResolvedValueOnce({ team: { ...TEAM, status: "queued", queuePosition: 2, tasks: [] } });
+    const one = await ok("coding_team_status", { team_id: TEAM.id, log: 0 });
+    expect(one).toMatch(/^Team team-k3x9q2ab: queued — number 2 in line/);
+    expect(one).toMatch(/only the owner can cancel it/);
+  });
+
+  it("coding_team_stop explains that a queued team is the owner's to cancel", async () => {
+    apiPost.mockRejectedValueOnce(new ApiError(403, JSON.stringify({ error: "That team is waiting in the queue; only the owner can cancel a queued team.", kind: "owner_only" })));
+    const out = await refused("coding_team_stop", { team_id: TEAM.id });
+    expect(out).toMatchObject({ code: "CONFLICT", message: expect.stringMatching(/only the owner can cancel a queued team/), next: expect.stringMatching(/Coding Agent app/) });
   });
 });

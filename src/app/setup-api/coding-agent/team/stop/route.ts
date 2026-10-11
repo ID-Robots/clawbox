@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { CodingAgentError, httpStatusForCodingError } from "@/lib/coding-agent";
-import { getTeam, stopTeam } from "@/lib/coding-team";
+import { cancelQueuedTeam, getTeam, stopTeam } from "@/lib/coding-team";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { requireSession } from "@/lib/route-auth";
 
@@ -10,7 +10,9 @@ export const dynamic = "force-dynamic";
  * POST { id } → { team } — stop a coding team: the board goes to `stopped`
  * and the worker in flight is stopped with it. Session-gated like `stop` on
  * a run, with the same owner gate: the assistant may stop a team it started;
- * an owner's team answers 403 `owner_only` to the bearer.
+ * an owner's team answers 403 `owner_only` to the bearer. A QUEUED team is
+ * taken out of the queue instead (`cancelQueuedTeam`) — by the OWNER only,
+ * whoever queued it: the bearer may queue and read, never cancel.
  */
 export async function POST(request: Request) {
   const unauthorized = await requireSession(request);
@@ -26,7 +28,12 @@ export async function POST(request: Request) {
   try {
     const team = getTeam(id);
     if (!team) return NextResponse.json({ error: "There is no coding team with that id.", kind: "not_found" }, { status: 404 });
-    if (team.source === "owner" && !(await hasOwnerSession(request))) {
+    const owner = await hasOwnerSession(request);
+    if (team.status === "queued") {
+      if (!owner) return NextResponse.json({ error: "That team is waiting in the queue; only the owner can cancel a queued team.", kind: "owner_only" }, { status: 403 });
+      return NextResponse.json({ team: cancelQueuedTeam(id) });
+    }
+    if (team.source === "owner" && !owner) {
       return NextResponse.json({ error: "That team was started by the owner; only the owner can stop it.", kind: "owner_only" }, { status: 403 });
     }
     return NextResponse.json({ team: stopTeam(id) });

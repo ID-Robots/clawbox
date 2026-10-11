@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const team = vi.hoisted(() => ({
   startTeam: vi.fn(),
   stopTeam: vi.fn(),
+  cancelQueuedTeam: vi.fn(),
   getTeam: vi.fn(),
   listTeams: vi.fn(),
 }));
@@ -94,7 +95,7 @@ describe("POST", () => {
   it("starts a team for the agent, recording the source, and answers 202 with the board", async () => {
     const res = await POST(req("team", { goal: "Build it", directory: "site" }));
     expect(res.status).toBe(202);
-    expect(await res.json()).toEqual({ started: true, team: BOARD });
+    expect(await res.json()).toEqual({ started: true, queued: false, team: BOARD });
     expect(team.startTeam).toHaveBeenCalledWith({ goal: "Build it", projectId: null, directory: "site", source: "agent" });
   });
 
@@ -119,6 +120,31 @@ describe("POST", () => {
     requireSession.mockResolvedValueOnce(new Response("{}", { status: 401 }));
     expect((await POST(req("team", { goal: "g" }))).status).toBe(401);
     expect(team.startTeam).not.toHaveBeenCalled();
+  });
+});
+
+describe("a second team", () => {
+  it("is answered QUEUED, with its place, not refused", async () => {
+    const queued = { ...BOARD, status: "queued", queuePosition: 1 };
+    team.startTeam.mockResolvedValueOnce(queued);
+    const res = await POST(req("team", { goal: "Build it" }));
+    expect(res.status).toBe(202);
+    expect(await res.json()).toEqual({ started: false, queued: true, team: queued });
+  });
+
+  it("is canceled by the owner alone — the bearer that queued it may not", async () => {
+    const queued = { ...BOARD, status: "queued", queuePosition: 1 };
+    team.getTeam.mockReturnValue(queued);
+    team.cancelQueuedTeam.mockReturnValue({ ...queued, status: "stopped" });
+    const refused = await STOP(req("team/stop", { id: BOARD.id }));
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toMatchObject({ kind: "owner_only", error: expect.stringMatching(/only the owner can cancel a queued team/) });
+    hasOwnerSession.mockResolvedValue(true);
+    const ok = await STOP(req("team/stop", { id: BOARD.id }));
+    expect(ok.status).toBe(200);
+    expect((await ok.json()).team.status).toBe("stopped");
+    expect(team.cancelQueuedTeam).toHaveBeenCalledWith(BOARD.id);
+    expect(team.stopTeam).not.toHaveBeenCalled();
   });
 });
 

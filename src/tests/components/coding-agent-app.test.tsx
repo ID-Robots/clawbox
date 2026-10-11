@@ -925,6 +925,22 @@ describe("CodingAgentApp", () => {
       expect(await screen.findByText(/Nothing real was found/)).toBeInTheDocument();
     });
 
+    it("shows a QUEUED run with its place in line and a Cancel — no Stop, no clock", async () => {
+      const queued = {
+        ...RUN, id: "run-queued01", status: "queued", completedAt: null, summary: null,
+        numTurns: 0, filesTouched: [], permissionDenials: 0, queued: { at: Date.now(), position: 2 },
+      };
+      stubFetch({ enabled: true, readiness: READY }, [queued], { projects: [SITE_PROJECT] });
+      render(<CodingAgentApp />);
+      await openRuns();
+      expect(await screen.findByTestId("coding-agent-status-run-queued01")).toHaveTextContent(translations.en["codingAgent.statusQueued"]);
+      expect(screen.getByTestId("coding-agent-queue-position-run-queued01")).toHaveTextContent("#2 in line");
+      expect(screen.queryByText(/0 turns/)).not.toBeInTheDocument();
+      expect(screen.queryByTestId("coding-agent-stop-run-queued01")).toBeNull();
+      fireEvent.click(screen.getByTestId("coding-agent-cancel-queued-run-queued01"));
+      await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/coding-agent/stop", body: { runId: "run-queued01" } }));
+    });
+
     it("tells the desktop when it starts a drafted run, so an open chat looks for it", async () => {
       const draft = { ...RUN, id: "run-draft001", status: "draft", completedAt: null, summary: null };
       stubFetch({ enabled: true, readiness: READY }, [draft], { projects: [SITE_PROJECT] });

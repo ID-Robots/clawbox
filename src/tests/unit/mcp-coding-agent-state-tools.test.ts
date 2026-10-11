@@ -545,3 +545,15 @@ describe("coding_project_status", () => {
     expect(out.error.next).toMatch(/site, notes/);
   });
 });
+
+describe("coding_run_list and the queue", () => {
+  it("gives a queued run its place in line, and no elapsed time", async () => {
+    apiGet.mockResolvedValue({ runs: [{ ...RUN, id: "run-queued01", status: "queued", completedAt: null, queued: { at: 1, position: 1 } }] });
+    const out = await harness().call("coding_run_list", { status: "queued" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    const { runs, notes } = JSON.parse(out.text) as { runs: Record<string, unknown>[]; notes: string };
+    expect(runs[0]).toMatchObject({ run_id: "run-queued01", status: "queued", queue_position: 1, elapsed: "not started" });
+    expect(notes).toMatch(/queue_position/);
+  });
+});

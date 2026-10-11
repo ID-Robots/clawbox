@@ -16,12 +16,16 @@ export const dynamic = "force-dynamic";
  *                                 try/rejected, tokens, wall time, team messages
  *                                 sent/to the lead/to a sibling/undelivered) as of now
  * GET                           → { teams } — the recent boards, newest first
- * POST { goal, projectId | directory } → 202 { started: true, team }
+ * POST { goal, projectId | directory } → 202 { started: true, team }, or —
+ *                                 while another team works — 202 { started:
+ *                                 false, queued: true, team } with the board in
+ *                                 status `queued` and its `queuePosition`
  *
  * Session-gated like the runs. POST is admitted to the owner's cookie AND
  * the MCP bearer — the assistant is the party that usually delegates a goal —
  * but the owner's switch (`coding-agent/enable`, owner-only) gates it the way
- * it gates every run, and a team is refused while another works. `source`
+ * it gates every run, and a team asked for while another works is QUEUED and
+ * started by the box in its turn (coding-team.ts startNextQueuedTeam). `source`
  * records who asked, the way a run does, and is what the reads and the stop
  * gate on: the bearer reaches only the teams it started (403 `owner_only`
  * otherwise, and an owner's teams are left out of its listing), the owner
@@ -62,7 +66,8 @@ export async function POST(request: Request) {
       directory: typeof body.directory === "string" ? body.directory : null,
       source: (await hasOwnerSession(request)) ? "owner" : "agent",
     });
-    return NextResponse.json({ started: true, team }, { status: 202 });
+    const queued = team.status === "queued";
+    return NextResponse.json({ started: !queued, queued, team }, { status: 202 });
   } catch (err) {
     if (err instanceof CodingAgentError) {
       return NextResponse.json({ error: err.message, kind: err.kind }, { status: httpStatusForCodingError(err.kind) });
