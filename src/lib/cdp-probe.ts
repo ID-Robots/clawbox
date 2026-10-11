@@ -149,6 +149,21 @@ export function parsePortOwner(ssOutput: string, port: number): { pid: number; c
   return { comm: m[1], pid: Number(m[2]) };
 }
 
+/**
+ * The pid listening on `port` on this box, or null when `ss` cannot say. The
+ * listener, not merely a process that was ASKED for the port: a Chromium
+ * started with --remote-debugging-port on a port somebody else already holds
+ * runs on without CDP, and the answer on that port is the other one's.
+ */
+export async function portOwnerPid(port: number): Promise<number | null> {
+  try {
+    const ss = await exec("ss", ["-tlnp"], { timeout: 3000 });
+    return parsePortOwner(ss.stdout, port)?.pid ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function describePortOwner(port: number): Promise<string> {
   try {
     const ss = await exec("ss", ["-tlnp"], { timeout: 3000 });

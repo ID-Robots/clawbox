@@ -712,6 +712,22 @@ describe("/setup-api/browser/manage", () => {
       expect(fs.unlink).not.toHaveBeenCalled();
     });
 
+    it("does not credit the owner's browser with another browser's answer on its port", async () => {
+      // Open on the profile WITHOUT the port; something else answers 9222.
+      processes({ 4242: [`/opt/google/chrome/chrome\0--user-data-dir=${OWNER_PROFILE}\0`, DESKTOP_SESSION] });
+      answering(9222);
+
+      const status = await (await GET()).json();
+      expect(status.browser).toMatchObject({ running: true, cdpReady: false, noRemoteDebugging: true });
+
+      const res = await post("open-browser");
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe("profile_in_use");
+      // Nothing of the other browser's was brought forward as if it were the owner's.
+      expect(focusCdpBrowser).not.toHaveBeenCalled();
+      expect(started()).toBe(false);
+    });
+
     it("waits for an owner browser that has the port but is not answering yet, never starting a second one on its profile", async () => {
       processes({ 4242: [OWNER_CHROME, DESKTOP_SESSION] });
       answering();

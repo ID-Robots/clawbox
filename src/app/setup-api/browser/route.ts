@@ -5,7 +5,7 @@ import { NextResponse } from "next/server";
 import { execFile } from "child_process";
 import path from "@/lib/runtime-path";
 import { promisify } from "util";
-import { describePortOwner, findPlaywrightChromium, probeCdp } from "@/lib/cdp-probe";
+import { describePortOwner, findPlaywrightChromium, portOwnerPid, probeCdp } from "@/lib/cdp-probe";
 import net from "net";
 import fs from "fs";
 import { fileURLToPath, pathToFileURL } from "url";
@@ -268,8 +268,14 @@ interface DesktopAttach {
 async function desktopCdpState(config: DesktopBrowserConfig): Promise<{ state: "ours" | "foreign" | "down"; attach: DesktopAttach }> {
   const endpoint = cdpEndpoint(config);
   const state = await probeCdp(endpoint, endpoint);
-  if (state === "foreign" && (await findBrowserOnPortPids(config)).length > 0) {
-    return { state: "ours", attach: { endpoint, origin: undefined } };
+  if (state === "foreign") {
+    // The configured browser must be the one LISTENING, not merely one that
+    // was given the port: started on a port another browser already held, it
+    // runs on without CDP, and the answer would be that other browser's.
+    const [pids, listener] = await Promise.all([findBrowserOnPortPids(config), portOwnerPid(config.cdpPort)]);
+    if (listener !== null && pids.includes(listener)) {
+      return { state: "ours", attach: { endpoint, origin: undefined } };
+    }
   }
   return { state, attach: { endpoint, origin: endpoint } };
 }

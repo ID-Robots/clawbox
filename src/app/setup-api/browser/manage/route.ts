@@ -257,7 +257,12 @@ async function getBrowserStatus(config: DesktopBrowserConfig): Promise<BrowserSt
     // was never given the port is not "starting" — it never will answer.
     if (!config.ownProfile) {
       if (found.startedByUnit.length === 0) state.external = true;
-      if (!cdpReady && !found.servingPort) state.noRemoteDebugging = true;
+      // Never given the port, so whatever answers there is SOME OTHER
+      // browser: not this one's readiness, and not one for Open to focus.
+      if (!found.servingPort) {
+        state.cdpReady = false;
+        state.noRemoteDebugging = true;
+      }
     }
     return state;
   }
