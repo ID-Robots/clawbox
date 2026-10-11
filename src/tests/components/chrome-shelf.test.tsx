@@ -397,3 +397,199 @@ describe("the phone bar", () => {
     expect(onChatClick).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("the fullscreen button", () => {
+  // The shelf offers fullscreen only while there is one to enter. It used to
+  // turn into an "exit fullscreen" button and stay on the bar — a control
+  // nobody needs on a screen the desktop already fills (the browser's own
+  // gesture leaves), and on the box's own screen the one button that could
+  // take the desktop OUT of the mode it is meant to be in.
+  const baseProps = {
+    apps: [makeApp("settings", "Settings")],
+    onAppClick: vi.fn(),
+    onLauncherClick: vi.fn(),
+    onTrayClick: vi.fn(),
+  };
+  const realMatchMedia = window.matchMedia;
+
+  function setWindowSize(key: "innerWidth" | "innerHeight" | "outerWidth" | "outerHeight", value: number) {
+    Object.defineProperty(window, key, { value, configurable: true });
+  }
+
+  /** The page's own fullscreen: `document.fullscreenElement`, and its event. */
+  function setFullscreenElement(el: Element | null) {
+    Object.defineProperty(document, "fullscreenElement", { value: el, configurable: true });
+    act(() => {
+      document.dispatchEvent(new Event("fullscreenchange"));
+    });
+  }
+
+  /** The browser's fullscreen (F11, `--kiosk`): only the media query says so. */
+  function mockDisplayModeFullscreen(initial: boolean) {
+    const listeners = new Set<() => void>();
+    const list = {
+      matches: initial,
+      media: "(display-mode: fullscreen)",
+      addEventListener: (_: string, fn: () => void) => listeners.add(fn),
+      removeEventListener: (_: string, fn: () => void) => listeners.delete(fn),
+    };
+    vi.mocked(window.matchMedia).mockImplementation((query: string) =>
+      (query === list.media ? list : { matches: false, media: query, addEventListener: vi.fn(), removeEventListener: vi.fn() }) as unknown as MediaQueryList,
+    );
+    return {
+      set(matches: boolean) {
+        list.matches = matches;
+        act(() => listeners.forEach((fn) => fn()));
+      },
+      listeners,
+    };
+  }
+
+  beforeEach(() => {
+    // A page that is the whole window, as under F11: no browser chrome.
+    setWindowSize("innerWidth", 1024);
+    setWindowSize("innerHeight", 768);
+    setWindowSize("outerWidth", 1024);
+    setWindowSize("outerHeight", 768);
+  });
+
+  afterEach(() => {
+    Object.defineProperty(window, "matchMedia", { value: realMatchMedia, configurable: true, writable: true });
+    delete (document as { fullscreenElement?: unknown }).fullscreenElement;
+    delete (document.documentElement as { requestFullscreen?: unknown }).requestFullscreen;
+  });
+
+  it("is offered, named, while the page is not fullscreen — and asks for it", () => {
+    const requestFullscreen = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(document.documentElement, "requestFullscreen", { value: requestFullscreen, configurable: true });
+    render(<ChromeShelf {...baseProps} />);
+
+    const button = screen.getByTestId("shelf-fullscreen-button");
+    expect(button).toHaveAttribute("title", EN["shelf.fullscreen"]);
+    expect(button).toHaveAttribute("aria-label", EN["shelf.fullscreen"]);
+    fireEvent.click(button);
+    expect(requestFullscreen).toHaveBeenCalledTimes(1);
+  });
+
+  it("does nothing, rather than throw, where the browser has no element fullscreen", () => {
+    // An iPhone's Safari: `requestFullscreen` is not there to call.
+    expect("requestFullscreen" in document.documentElement).toBe(false);
+    render(<ChromeShelf {...baseProps} />);
+
+    expect(() => fireEvent.click(screen.getByTestId("shelf-fullscreen-button"))).not.toThrow();
+  });
+
+  it("leaves the bar once the page is fullscreen, and comes back when it is not", () => {
+    render(<ChromeShelf {...baseProps} />);
+    expect(screen.getByTestId("shelf-fullscreen-button")).toBeInTheDocument();
+
+    setFullscreenElement(document.documentElement);
+    expect(screen.queryByTestId("shelf-fullscreen-button")).not.toBeInTheDocument();
+    // Nothing takes its place: no exit button, under any name.
+    expect(document.body.textContent).not.toContain("fullscreen_exit");
+    // The buttons either side of it are untouched.
+    expect(screen.getByTestId("shelf-tray-button")).toBeInTheDocument();
+    expect(screen.getByTestId("shelf-power-button")).toBeInTheDocument();
+
+    setFullscreenElement(null);
+    expect(screen.getByTestId("shelf-fullscreen-button")).toBeInTheDocument();
+  });
+
+  it("is not drawn at all on a page that mounts already fullscreen", () => {
+    Object.defineProperty(document, "fullscreenElement", { value: document.documentElement, configurable: true });
+    render(<ChromeShelf {...baseProps} />);
+
+    expect(screen.queryByTestId("shelf-fullscreen-button")).not.toBeInTheDocument();
+  });
+
+  it("is hidden while the BROWSER is fullscreen (F11, a kiosk window), where no element is", () => {
+    // `document.fullscreenElement` is null under F11 and `--kiosk`; the button
+    // there offered a fullscreen the screen already had.
+    const displayMode = mockDisplayModeFullscreen(true);
+    render(<ChromeShelf {...baseProps} />);
+    expect(screen.queryByTestId("shelf-fullscreen-button")).not.toBeInTheDocument();
+
+    displayMode.set(false);
+    expect(screen.getByTestId("shelf-fullscreen-button")).toBeInTheDocument();
+
+    displayMode.set(true);
+    expect(screen.queryByTestId("shelf-fullscreen-button")).not.toBeInTheDocument();
+  });
+
+  it("counts a zoomed page as the whole window: zoom scales both axes alike", () => {
+    // Measured on the box's own screen at 110%: 1920×1080 outside, 1745×982 in.
+    setWindowSize("outerWidth", 1920);
+    setWindowSize("outerHeight", 1080);
+    setWindowSize("innerWidth", 1745);
+    setWindowSize("innerHeight", 982);
+    mockDisplayModeFullscreen(true);
+    render(<ChromeShelf {...baseProps} />);
+
+    expect(screen.queryByTestId("shelf-fullscreen-button")).not.toBeInTheDocument();
+  });
+
+  it("stays while a fullscreen browser WINDOW still shows its toolbar, and goes when the toolbar does", () => {
+    // A Mac's green-button fullscreen keeps the tab strip and address bar and
+    // still answers `display-mode: fullscreen`. The button is the only thing
+    // on the page that makes the desktop fill that screen.
+    setWindowSize("outerWidth", 1440);
+    setWindowSize("outerHeight", 900);
+    setWindowSize("innerWidth", 1440);
+    setWindowSize("innerHeight", 813);
+    mockDisplayModeFullscreen(true);
+    render(<ChromeShelf {...baseProps} />);
+    expect(screen.getByTestId("shelf-fullscreen-button")).toBeInTheDocument();
+
+    // "Always Show Toolbar in Full Screen" switched off: no query changes,
+    // only the page's size.
+    setWindowSize("innerHeight", 900);
+    act(() => {
+      window.dispatchEvent(new Event("resize"));
+    });
+    expect(screen.queryByTestId("shelf-fullscreen-button")).not.toBeInTheDocument();
+  });
+
+  it("stops listening when the shelf goes away", () => {
+    const displayMode = mockDisplayModeFullscreen(false);
+    const added = vi.spyOn(document, "addEventListener");
+    const removed = vi.spyOn(document, "removeEventListener");
+    const { unmount } = render(<ChromeShelf {...baseProps} />);
+    expect(displayMode.listeners.size).toBe(1);
+    const onFullscreenChange = added.mock.calls.filter(([type]) => type === "fullscreenchange").map(([, fn]) => fn);
+    expect(onFullscreenChange).toHaveLength(1);
+
+    unmount();
+    expect(displayMode.listeners.size).toBe(0);
+    expect(removed.mock.calls.some(([type, fn]) => type === "fullscreenchange" && fn === onFullscreenChange[0])).toBe(true);
+    added.mockRestore();
+    removed.mockRestore();
+  });
+
+  it("follows the same rule on the phone bar", () => {
+    setWindowSize("innerWidth", 390);
+    setWindowSize("innerHeight", 844);
+    render(<ChromeShelf {...baseProps} />);
+    expect(screen.getByTestId("shelf-mobile-apps")).toBeInTheDocument();
+    expect(screen.getByTestId("shelf-fullscreen-button")).toBeInTheDocument();
+
+    setFullscreenElement(document.documentElement);
+    expect(screen.queryByTestId("shelf-fullscreen-button")).not.toBeInTheDocument();
+    expect(screen.getByTestId("shelf-power-button")).toBeInTheDocument();
+  });
+
+  it("stays on the bar where the browser has no matchMedia at all", () => {
+    Object.defineProperty(window, "matchMedia", { value: undefined, configurable: true, writable: true });
+    render(<ChromeShelf {...baseProps} />);
+
+    expect(screen.getByTestId("shelf-fullscreen-button")).toBeInTheDocument();
+  });
+
+  it("stays on the bar where matchMedia throws", () => {
+    vi.mocked(window.matchMedia).mockImplementation(() => {
+      throw new Error("no media queries here");
+    });
+    render(<ChromeShelf {...baseProps} />);
+
+    expect(screen.getByTestId("shelf-fullscreen-button")).toBeInTheDocument();
+  });
+});

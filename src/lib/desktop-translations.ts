@@ -133,7 +133,6 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "clawkeep.upgrade.description": "ClawKeep encrypts your ClawBox data and syncs it to your portal account. Pro plan gets 5 GB; Max plan gets 50 GB.",
     "remoteControl.upgrade.featureName": "Remote Desktop",
     "remoteControl.upgrade.description": "Remote Desktop publishes a secure tunnel from this ClawBox to your portal account so you can reach it from anywhere. Available on Pro and Max plans.",
-    "shelf.exitFullscreen": "Exit Fullscreen",
     "shelf.fullscreen": "Fullscreen",
     "shelf.power": "Power",
     "shelf.focus": "Focus",

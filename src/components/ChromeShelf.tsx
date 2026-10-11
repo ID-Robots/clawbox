@@ -11,6 +11,7 @@ import { openInKiosk } from "@/lib/kiosk-tabs-client";
 import { useDesktopClock } from "@/lib/use-desktop-clock";
 import { desktopOverlayMounted, quickCaptureRequest, requestCapture, subscribeOverlays } from "@/lib/screenshot/session";
 import { captureShortcutKeys } from "@/lib/screenshot/shortcuts";
+import { useIsFullscreen } from "@/lib/use-is-fullscreen";
 
 /** The reasons that put a shield in an at-risk state. `ok` is not among them. */
 type AtRiskReason = Exclude<ProtectionReason, "ok">;
@@ -205,7 +206,7 @@ export default function ChromeShelf({
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; app: ShelfApp } | null>(null);
   const [shelfMenu, setShelfMenu] = useState<{ x: number; y: number } | null>(null);
   const openedAt = useRef(0);
-  const [isFullscreen, setIsFullscreen] = useState(false);
+  const isFullscreen = useIsFullscreen();
   const [isMobile, setIsMobile] = useState(false);
   // Phone portrait: hide the ClawKeep shield and the clock to fit the bar.
   // The chat crab STAYS — a phone lands in the chat and this is its way back
@@ -223,20 +224,15 @@ export default function ChromeShelf({
     };
     checkLayout();
     window.addEventListener("resize", checkLayout);
-    const onFsChange = () => setIsFullscreen(!!document.fullscreenElement);
-    document.addEventListener("fullscreenchange", onFsChange);
     return () => {
       window.removeEventListener("resize", checkLayout);
-      document.removeEventListener("fullscreenchange", onFsChange);
     };
   }, []);
 
-  const toggleFullscreen = useCallback(() => {
-    if (document.fullscreenElement) {
-      document.exitFullscreen().catch(() => {});
-    } else {
-      document.documentElement.requestFullscreen().catch(() => {});
-    }
+  const enterFullscreen = useCallback(() => {
+    // Optional all the way: an iPhone's Safari has no element fullscreen, and
+    // a tap there must do nothing rather than throw.
+    document.documentElement.requestFullscreen?.()?.catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -278,11 +274,26 @@ export default function ChromeShelf({
   const unpinnedApps = isMobile
     ? apps.filter(a => a.isOpen && !pinnedApps.some(p => p.id === a.id))
     : apps.filter(a => a.isPinned === false);
+  // Offered only while there is a fullscreen to ENTER. Once the page fills the
+  // screen — its own request, F11, or a kiosk's window — the button is gone
+  // rather than turned into "Exit": leaving is the browser's own gesture (Esc
+  // or F11 with a keyboard, the system's back or swipe on a touch screen).
+  const renderFullscreenButton = (iconSize: number) => !isFullscreen && (
+    <button
+      onClick={enterFullscreen}
+      className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
+      title={t("shelf.fullscreen")}
+      aria-label={t("shelf.fullscreen")}
+      data-testid="shelf-fullscreen-button"
+    >
+      <span className="material-symbols-rounded text-white/60" style={{ fontSize: iconSize }}>fullscreen</span>
+    </button>
+  );
   // Priority: restoring (orange) > backup running (green) > lapsed (amber)
   // > never-protected (red) > ok.
   // Restore is the rarer, longer, more user-blocking operation, so it wins
   // even if a backup heartbeat happens to be in flight at the same time.
-  const renderUserBadge = (size: number) => sessionUser && (
+  const renderUserBadge =(size: number) => sessionUser && (
     <button
       onClick={onPowerClick}
       className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
@@ -546,15 +557,7 @@ export default function ChromeShelf({
                   <ShelfClock className="text-xs text-white/80 font-medium tabular-nums" />
                 </button>
               )}
-              <button
-                onClick={toggleFullscreen}
-                className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
-                title={isFullscreen ? t("shelf.exitFullscreen") : t("shelf.fullscreen")}
-              >
-                <span className="material-symbols-rounded text-white/60" style={{ fontSize: 20 }}>
-                  {isFullscreen ? "fullscreen_exit" : "fullscreen"}
-                </span>
-              </button>
+              {renderFullscreenButton(20)}
               {renderUserBadge(22)}
               <button
                 onClick={onPowerClick}
@@ -629,15 +632,7 @@ export default function ChromeShelf({
           >
             <ShelfClock className="text-sm text-white/80 font-medium" />
           </button>
-          <button
-            onClick={toggleFullscreen}
-            className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
-            title={isFullscreen ? t("shelf.exitFullscreen") : t("shelf.fullscreen")}
-          >
-            <span className="material-symbols-rounded text-white/60" style={{ fontSize: 18 }}>
-              {isFullscreen ? "fullscreen_exit" : "fullscreen"}
-            </span>
-          </button>
+          {renderFullscreenButton(18)}
           {renderUserBadge(22)}
           <button
             onClick={onPowerClick}
