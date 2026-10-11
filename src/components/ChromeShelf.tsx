@@ -1,6 +1,6 @@
 "use client";
 
-import { ReactNode, useState, useEffect, useRef, useCallback } from "react";
+import { ReactNode, useState, useEffect, useRef, useCallback, useSyncExternalStore } from "react";
 import { useT } from "@/lib/i18n";
 import { DESKTOP_LAYERS } from "@/lib/window-snap";
 import { mainInsets } from "@/lib/desktop-screens";
@@ -9,6 +9,8 @@ import type { Protection, ProtectionReason } from "@/lib/clawkeep-protection";
 import { formatBytesApart } from "@/lib/format-bytes";
 import { openInKiosk } from "@/lib/kiosk-tabs-client";
 import { useDesktopClock } from "@/lib/use-desktop-clock";
+import { desktopOverlayMounted, quickCaptureRequest, requestCapture, subscribeOverlays } from "@/lib/screenshot/session";
+import { captureShortcutKeys } from "@/lib/screenshot/shortcuts";
 
 /** The reasons that put a shield in an at-risk state. `ok` is not among them. */
 type AtRiskReason = Exclude<ProtectionReason, "ok">;
@@ -150,6 +152,35 @@ interface ChromeShelfProps {
 function ShelfClock({ className }: { className: string }) {
   const { time } = useDesktopClock();
   return <span className={className}>{time}</span>;
+}
+
+/**
+ * The Screenshot app's button in the tray (TASK-1491): one click takes the
+ * whole screen, as Print Screen does, through the request the app's own
+ * capture buttons send — the window need not be open, it opens itself on the
+ * result. Drawn only while the desktop's capture overlay is mounted (the
+ * owner's desktop, like the app), since nothing else would answer the click.
+ */
+function ShelfScreenshotButton({ iconSize }: { iconSize: number }) {
+  const { t } = useT();
+  const available = useSyncExternalStore(subscribeOverlays, desktopOverlayMounted, () => false);
+  if (!available) return null;
+  const [key, fallback] = captureShortcutKeys("full");
+  const label = t("screenshot.trayTooltip", { key, fallback });
+  return (
+    <button
+      type="button"
+      onClick={() => requestCapture(quickCaptureRequest("full"))}
+      className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
+      title={label}
+      aria-label={label}
+      data-testid="shelf-screenshot-button"
+    >
+      <span className="material-symbols-rounded text-white/60" style={{ fontSize: iconSize }} aria-hidden="true">
+        screenshot_monitor
+      </span>
+    </button>
+  );
 }
 
 export default function ChromeShelf({
@@ -503,6 +534,7 @@ export default function ChromeShelf({
                 </button>
               )}
               {!isPortraitPhone && renderShieldButton()}
+              {!isPortraitPhone && <ShelfScreenshotButton iconSize={22} />}
               {!isPortraitPhone && (
                 <button
                   onClick={onTrayClick}
@@ -587,6 +619,7 @@ export default function ChromeShelf({
             </button>
           )}
           {renderShieldButton()}
+          <ShelfScreenshotButton iconSize={18} />
           <button
             onClick={onTrayClick}
             className="hidden sm:flex items-center h-10 px-3 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"

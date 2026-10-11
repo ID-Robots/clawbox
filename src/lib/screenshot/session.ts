@@ -105,6 +105,15 @@ export function requestCapture(request: CaptureRequest): void {
   window.dispatchEvent(new CustomEvent<CaptureRequest>(CAPTURE_REQUEST_EVENT, { detail: request }));
 }
 
+/**
+ * The capture the desktop's own controls take — the keys and the shelf's
+ * button: no delay, the built-in renderer, nothing hidden. The app's window
+ * has its own settings for these; the desktop has none.
+ */
+export function quickCaptureRequest(mode: CaptureMode): CaptureRequest {
+  return { mode, delay: 0, engine: "dom", hide: null };
+}
+
 export interface OverlayRegistration {
   id: number;
   release: () => void;

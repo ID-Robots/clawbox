@@ -1,7 +1,7 @@
 /**
  * The Screenshot app's desktop-wide keys and its hand-offs (TASK-1475): which
  * key event asks for which capture, and how a finished capture waits for the
- * app window that takes it.
+ * app window that takes it. Ctrl+Shift+S and the typing check are TASK-1491.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -10,6 +10,7 @@ import {
   offerImage,
   overlayMounted,
   primaryOverlayId,
+  quickCaptureRequest,
   registerOverlay,
   subscribeImages,
   subscribeOverlays,
@@ -20,8 +21,11 @@ import {
   CAPTURE_SHORTCUTS,
   captureShortcut,
   captureShortcutKeys,
+  type TargetLike,
+  TERMINAL_SELECTOR,
   createShortcutState,
   isCaptureShortcutKey,
+  isTypingTarget,
 } from "@/lib/screenshot/shortcuts";
 import { screenshotEn } from "@/lib/screenshot-translations";
 
@@ -72,25 +76,110 @@ describe("capture shortcuts", () => {
     expect(captureShortcut({ ...key("keydown", "s", { altKey: true, shiftKey: true }), code: undefined }, createShortcutState())).toBe("region");
   });
 
+  it("Ctrl + Shift + S captures the full screen, once per press — for where Print Screen never arrives", () => {
+    const state = createShortcutState();
+    const combo = { ctrlKey: true, shiftKey: true };
+    expect(captureShortcut({ ...key("keydown", "S", combo), code: "KeyS" }, state)).toBe("full");
+    expect(captureShortcut({ ...key("keydown", "S", combo), code: "KeyS", repeat: true }, state)).toBeNull();
+    expect(captureShortcut({ ...key("keyup", "S", combo), code: "KeyS" }, state)).toBeNull();
+    expect(isCaptureShortcutKey({ ...key("keydown", "S", combo), code: "KeyS" })).toBe(true);
+    // A Cyrillic layout reports its own letter; the physical key is still S.
+    expect(captureShortcut({ ...key("keydown", "Ы", combo), code: "KeyS" }, createShortcutState())).toBe("full");
+  });
+
   it("ignores neighbouring combinations", () => {
     const state = createShortcutState();
     const s = (mods: Partial<KeyLike>) => ({ ...key("keydown", "s", mods), code: "KeyS" });
     expect(captureShortcut(s({}), state)).toBeNull();
     expect(captureShortcut(s({ altKey: true }), state)).toBeNull();
     expect(captureShortcut(s({ shiftKey: true }), state)).toBeNull();
+    // Plain Ctrl+S is an editor's Save, never a capture.
+    expect(captureShortcut(s({ ctrlKey: true }), state)).toBeNull();
     expect(captureShortcut(s({ altKey: true, shiftKey: true, ctrlKey: true }), state)).toBeNull();
     expect(captureShortcut(s({ altKey: true, shiftKey: true, metaKey: true }), state)).toBeNull();
+    expect(captureShortcut(s({ ctrlKey: true, shiftKey: true, metaKey: true }), state)).toBeNull();
+    expect(captureShortcut(s({ metaKey: true, shiftKey: true }), state)).toBeNull();
     expect(captureShortcut({ ...key("keydown", "a", { altKey: true, shiftKey: true }), code: "KeyA" }, state)).toBeNull();
+    expect(captureShortcut({ ...key("keydown", "a", { ctrlKey: true, shiftKey: true }), code: "KeyA" }, state)).toBeNull();
     expect(isCaptureShortcutKey(s({ altKey: true, shiftKey: true }))).toBe(true);
     expect(isCaptureShortcutKey(s({ shiftKey: true }))).toBe(false);
+    expect(isCaptureShortcutKey(s({ ctrlKey: true }))).toBe(false);
+    expect(isCaptureShortcutKey(s({ ctrlKey: true, altKey: true, shiftKey: true }))).toBe(false);
+  });
+
+  it("does not collide with the Terminal's own Ctrl+Shift and Alt+Shift keys", () => {
+    const state = createShortcutState();
+    for (const letter of ["C", "V", "T", "W"]) {
+      for (const mods of [{ ctrlKey: true, shiftKey: true }, { altKey: true, shiftKey: true }]) {
+        const event = { ...key("keydown", letter, mods), code: `Key${letter}` };
+        expect(captureShortcut(event, state), `${JSON.stringify(mods)} ${letter}`).toBeNull();
+        expect(isCaptureShortcutKey(event)).toBe(false);
+      }
+    }
   });
 
   it("lists every shortcut for help, with a label that exists", () => {
-    expect(CAPTURE_SHORTCUTS.map((s) => s.keys)).toEqual([["Print Screen"], ["Shift+Print Screen", "Alt+Shift+S"]]);
+    expect(CAPTURE_SHORTCUTS.map((s) => s.keys)).toEqual([["Print Screen", "Ctrl+Shift+S"], ["Shift+Print Screen", "Alt+Shift+S"]]);
     for (const shortcut of CAPTURE_SHORTCUTS) expect(screenshotEn[shortcut.labelKey], shortcut.labelKey).toBeTruthy();
-    expect(captureShortcutKeys("full")).toEqual(["Print Screen"]);
+    expect(captureShortcutKeys("full")).toEqual(["Print Screen", "Ctrl+Shift+S"]);
     expect(captureShortcutKeys("region")).toEqual(["Shift+Print Screen", "Alt+Shift+S"]);
   });
+
+  it("asks the desktop's quick capture: no delay, the built-in renderer, nothing hidden", () => {
+    expect(quickCaptureRequest("full")).toEqual({ mode: "full", delay: 0, engine: "dom", hide: null });
+    expect(quickCaptureRequest("region")).toEqual({ mode: "region", delay: 0, engine: "dom", hide: null });
+  });
+});
+
+describe("typing: where the capture keys stand aside", () => {
+  /** An element as the check sees it; `inside` lists the selectors an ancestor would match. */
+  function el(tagName: string, extra: Partial<TargetLike> = {}, inside: string[] = []): TargetLike {
+    return {
+      tagName,
+      closest: (selectors: string) => (selectors.split(",").some((s) => inside.includes(s.trim())) ? {} : null),
+      ...extra,
+    };
+  }
+
+  it("counts text fields, text areas and editable elements as typing", () => {
+    expect(isTypingTarget(el("INPUT"))).toBe(true);
+    for (const type of ["text", "search", "email", "url", "password", "number", "tel", "date"]) {
+      expect(isTypingTarget(el("INPUT", { type })), type).toBe(true);
+    }
+    expect(isTypingTarget(el("textarea"))).toBe(true);
+    expect(isTypingTarget(el("DIV", { isContentEditable: true }))).toBe(true);
+    // A DOM that does not answer isContentEditable is asked by attribute, the element's or an ancestor's.
+    expect(isTypingTarget(el("SPAN", {}, ['[contenteditable="true"]']))).toBe(true);
+    expect(isTypingTarget(el("P", {}, ['[contenteditable=""]']))).toBe(true);
+  });
+
+  it("counts a terminal as typing — xterm, the Terminal app around it and its window", () => {
+    const selectors = TERMINAL_SELECTOR.split(",").map((s) => s.trim());
+    expect(selectors).toContain(".xterm");
+    expect(selectors).toContain('[data-testid="chrome-window-terminal"]');
+    for (const selector of selectors) expect(isTypingTarget(el("DIV", { isContentEditable: false }, [selector])), selector).toBe(true);
+    // xterm's input is itself a text area.
+    expect(isTypingTarget(el("TEXTAREA", {}, [".xterm"]))).toBe(true);
+  });
+
+  it("does not count controls that take no text, or the desktop itself", () => {
+    for (const type of ["checkbox", "radio", "button", "submit", "range", "color", "file"]) {
+      expect(isTypingTarget(el("INPUT", { type })), type).toBe(false);
+    }
+    expect(isTypingTarget(el("BUTTON", { isContentEditable: false }))).toBe(false);
+    expect(isTypingTarget(el("BODY", { isContentEditable: false }))).toBe(false);
+    expect(isTypingTarget(el("CANVAS", { isContentEditable: false }))).toBe(false);
+    // An element a browser says is not editable stays so, whatever an attribute selector would say.
+    expect(isTypingTarget(el("DIV", { isContentEditable: false }, ['[contenteditable="true"]']))).toBe(false);
+    expect(isTypingTarget(null)).toBe(false);
+    expect(isTypingTarget(undefined)).toBe(false);
+    expect(isTypingTarget(windowLike())).toBe(false);
+  });
+
+  /** The window: an event target with no tag and no `closest`. */
+  function windowLike(): unknown {
+    return { addEventListener: () => {} };
+  }
 });
 
 describe("capture hand-off", () => {
