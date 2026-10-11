@@ -3,13 +3,19 @@ import { memo, useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
 // Types only: erased at build, so the shelf never bundles the sysfs reader.
 import type { BatteryState, BatteryStatus } from "@/lib/battery";
+import { useMayUseOwnerApis } from "@/lib/use-session-user";
 import { setVisibleInterval } from "@/lib/visible-interval";
 
 /**
  * The battery in the shelf's tray: a glyph and the percentage, on a laptop
  * running the x64 edition. Everywhere else — a Jetson, a desktop with no
- * battery, a signed-out page, a user who is not the owner — the route says so
- * (`available: false`, or a 401/403) and this renders nothing.
+ * battery, a signed-out page — the route says so (`available: false`, or a
+ * 401) and this renders nothing.
+ *
+ * The route is the owner's. Another ClawBox user's desktop does not ask at
+ * all: like every owner-only desktop poll, this waits on
+ * `useMayUseOwnerApis()` (src/lib/use-session-user.ts), so it sends nothing
+ * the server would only refuse with a 403.
  *
  * GET /setup-api/system/battery answers a `BatteryStatus`, the type
  * `readBattery()` returns (src/lib/battery.ts owns the contract).
@@ -75,9 +81,12 @@ function glyphFor({ state, percent }: Reading): string {
 
 const BatteryIndicator = memo(function BatteryIndicator() {
   const { t } = useT();
+  // `null` until /users/me has answered; the poll starts only on `true`.
+  const ownerApis = useMayUseOwnerApis() === true;
   const [reading, setReading] = useState<Reading | null>(null);
 
   useEffect(() => {
+    if (!ownerApis) return;
     let stopped = false;
     let inFlight = false;
     // Set once the box has said there is no battery to show here (or refused
@@ -118,7 +127,7 @@ const BatteryIndicator = memo(function BatteryIndicator() {
       stopped = true;
       stopPoll();
     };
-  }, []);
+  }, [ownerApis]);
 
   if (!reading) return null;
 

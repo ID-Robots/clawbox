@@ -5,12 +5,16 @@
  * with no battery — answers `available: false`, and a page that is signed out
  * or not the owner's is refused (401/403). Each of those, and a failed request,
  * must cost exactly ONE request and draw nothing: no glyph, no console line,
- * no poll left asking every minute for the life of the page.
+ * no poll left asking every minute for the life of the page. A desktop the box
+ * has said is another ClawBox user's costs none: the route is the owner's.
  *
- * The component is rendered with a `t` that answers the KEY with its
- * parameters, so the title is checked for what it says rather than for the
- * English wording, and the poll is installed through a recorder around the
- * real `setVisibleInterval` so its cadence and its stop can both be seen.
+ * The owner gate (`useMayUseOwnerApis`) is a store the case sets, so the
+ * fetch mock sees only the battery route and "not known yet" can turn into
+ * "the owner" mid-case. The component is rendered with a `t` that answers
+ * the KEY with its parameters, so the title is checked for what it says
+ * rather than for the English wording, and the poll is installed through a
+ * recorder around the real `setVisibleInterval` so its cadence and its stop
+ * can both be seen.
  */
 import { readFileSync } from "fs";
 import path from "path";
@@ -28,12 +32,28 @@ const h = vi.hoisted(() => {
     // Off: the recorder only records, and a test drives `tick` itself.
     // On: the real interval runs underneath, on fake timers.
     real: false,
+    // What `useMayUseOwnerApis()` answers: `null` until /users/me has.
+    owner: { value: true as boolean | null, listeners: new Set<() => void>() },
   };
 });
 
 vi.mock("@/lib/i18n", () => ({
   useT: () => ({ t: h.t }),
 }));
+
+vi.mock("@/lib/use-session-user", async () => {
+  const { useSyncExternalStore } = await import("react");
+  const subscribe = (listener: () => void) => {
+    h.owner.listeners.add(listener);
+    return () => { h.owner.listeners.delete(listener); };
+  };
+  return { useMayUseOwnerApis: () => useSyncExternalStore(subscribe, () => h.owner.value) };
+});
+
+function setOwnerApis(value: boolean | null) {
+  h.owner.value = value;
+  for (const listener of h.owner.listeners) listener();
+}
 
 vi.mock("@/lib/visible-interval", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/visible-interval")>();
@@ -81,10 +101,39 @@ function glyph() {
 beforeEach(() => {
   h.installs.length = 0;
   h.real = false;
+  h.owner.value = true;
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("BatteryIndicator — only the owner's desktop asks", () => {
+  it("asks nothing and draws nothing on another ClawBox user's desktop", async () => {
+    setOwnerApis(false);
+    const fetchMock = stubFetch(reply(reading(50, "discharging")));
+    const { container } = render(<BatteryIndicator />);
+    await act(async () => {});
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(h.installs).toHaveLength(0);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("waits until the box has said who is signed in, then asks once and polls", async () => {
+    setOwnerApis(null);
+    const fetchMock = stubFetch(reply(reading(50, "discharging")));
+    render(<BatteryIndicator />);
+    await act(async () => {});
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(h.installs).toHaveLength(0);
+
+    await act(async () => { setOwnerApis(true); });
+    expect(await screen.findByText("50%")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(URL_PATH, { cache: "no-store" });
+    expect(h.installs).toHaveLength(1);
+    expect(h.installs[0].ms).toBe(60_000);
+  });
 });
 
 describe("BatteryIndicator — no battery to show", () => {
