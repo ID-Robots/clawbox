@@ -109,6 +109,13 @@ export function browserErrorText(
     chromium_not_installed: "browser.errorNotInstalled",
     chromium_not_service_safe: "browser.errorNotServiceSafe",
     agent_holds_cdp: "browser.errorAgentHoldsCdp",
+    // The owner's own browser (src/lib/desktop-browser-config.ts): a person's
+    // browser on the port, theirs open without remote debugging, the one they
+    // named missing, and one they started that ClawBox will not close.
+    cdp_port_taken: "browser.errorPortTaken",
+    profile_in_use: "browser.errorProfileInUse",
+    configured_browser_missing: "browser.errorConfiguredMissing",
+    not_started_by_clawbox: "browser.errorNotOursToClose",
     unreachable: "browser.errorUnreachable",
     owner_only: "browser.errorOwnerOnly",
     cross_origin: "browser.errorOwnerOnly",

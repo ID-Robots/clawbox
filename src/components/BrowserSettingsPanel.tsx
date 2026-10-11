@@ -46,6 +46,15 @@ export interface BrowserStatus {
      * used to render this as "Chromium is running on the desktop" (TASK-515).
      */
     agentBrowsing?: boolean;
+    /** A browser that is not the assistant's — a person's — holds the CDP port. */
+    portTaken?: boolean;
+    /**
+     * The browser is the owner's own and they started it, not ClawBox: Close
+     * would leave it open, so the app offers Open (which brings it forward).
+     */
+    external?: boolean;
+    /** Open on the owner's profile, but never started with the CDP port: not "starting". */
+    noRemoteDebugging?: boolean;
   };
   enabled: boolean;
   /**
@@ -57,6 +66,10 @@ export interface BrowserStatus {
    */
   alwaysOn?: boolean;
   cdpPort?: number;
+  /** The configured profile directory (src/lib/desktop-browser-config.ts). */
+  profileDir?: string;
+  /** False when that profile is the owner's own rather than ClawBox's. */
+  ownProfile?: boolean;
   /** False only while the owner still has the setup wizard in front of them. */
   setupComplete?: boolean;
   /** Whether opening this app opens Chromium. */
@@ -154,6 +167,7 @@ export default function BrowserSettingsPanel({
   const alwaysOn = status?.alwaysOn ?? false;
   const isEnabled = status?.enabled ?? false;
   const running = status?.browser?.running ?? false;
+  const closable = running && !status?.browser?.external;
   const busyAnywhere = busy !== null || actionLoading !== null;
 
   return (
@@ -213,7 +227,7 @@ export default function BrowserSettingsPanel({
                   {alwaysOn ? "browser_open · browser_navigate · browser_screenshot" : "tools profile: full"}
                 </span>
                 <span className="font-mono text-[11px] text-[var(--text-muted)]">CDP :{status?.cdpPort ?? 18800}</span>
-                <span className="font-mono text-[11px] text-[var(--text-muted)]">~/.config/clawbox-browser/</span>
+                <span className="font-mono text-[11px] text-[var(--text-muted)] break-all">{status?.profileDir ? `${status.profileDir}/` : "~/.config/clawbox-browser/"}</span>
               </div>
             )}
           </div>
@@ -244,18 +258,20 @@ export default function BrowserSettingsPanel({
                 : t("browser.settings.notRunning")}
             </p>
           </div>
+          {/* A browser the owner started themselves is not ClawBox's to close
+              (the route refuses): Open brings it forward instead. */}
           <button
             type="button"
-            onClick={() => onAction(running ? "close-browser" : "open-browser")}
+            onClick={() => onAction(closable ? "close-browser" : "open-browser")}
             disabled={busyAnywhere || !isEnabled || !chromium?.installed}
             data-testid="browser-settings-power"
-            className={running ? BTN_DANGER : BTN_PRIMARY}
+            className={closable ? BTN_DANGER : BTN_PRIMARY}
           >
             {actionLoading === "open-browser"
               ? t("browser.opening")
               : actionLoading === "close-browser"
                 ? t("browser.closing")
-                : running ? t("browser.closeBrowser") : t("browser.openBrowser")}
+                : closable ? t("browser.closeBrowser") : t("browser.openBrowser")}
           </button>
         </div>
 

@@ -376,4 +376,49 @@ describe("BrowserApp", () => {
     // The stable code, said in the owner's language — not the route's English.
     expect((await findAllByText("Only the snap build is installed.")).length).toBeGreaterThan(0);
   });
+
+  /**
+   * TASK-1480: the owner's own signed-in browser, on a profile and port they
+   * configured, opened by them rather than by ClawBox. It is Running — and it
+   * is not ClawBox's to close, so the header offers Open (which brings it
+   * forward) where Close would have been.
+   */
+  describe("the owner's own browser", () => {
+    const OWNER_STATUS = {
+      ...READY_STATUS,
+      cdpPort: 9222,
+      profileDir: "/home/clawbox/.config/google-chrome-debug",
+      ownProfile: false,
+      browser: { running: true, pid: 4242, cdpReady: true, external: true },
+    };
+
+    it("is Running, offers Open rather than Close, and is never auto-launched over", async () => {
+      const fetchMock = stubDevice(OWNER_STATUS);
+      const { findByTestId, queryByTestId } = render(<BrowserApp />);
+
+      expect(await findByTestId("browser-state")).toHaveTextContent("Running · PID 4242");
+      expect(await findByTestId("browser-open")).toBeEnabled();
+      expect(queryByTestId("browser-close")).toBeNull();
+      expect(postedActions(fetchMock)).toEqual([]);
+
+      fireEvent.click(await findByTestId("browser-open"));
+      await waitFor(() => expect(postedActions(fetchMock)).toEqual(["open-browser"]));
+    });
+
+    it("says it is running without remote debugging rather than 'Starting' for ever", async () => {
+      stubDevice({ ...OWNER_STATUS, browser: { running: true, pid: 4242, cdpReady: false, external: true, noRemoteDebugging: true } });
+      const { findByTestId, queryByText } = render(<BrowserApp />);
+
+      expect(await findByTestId("browser-state")).toHaveTextContent("browser.runningNoDebugging");
+      expect(queryByText("Starting Chromium…")).toBeNull();
+    });
+
+    it("still offers Close for the owner's browser when ClawBox started it", async () => {
+      stubDevice({ ...OWNER_STATUS, browser: { running: true, pid: 4242, cdpReady: true } });
+      const { findByTestId, queryByTestId } = render(<BrowserApp />);
+
+      expect(await findByTestId("browser-close")).toBeInTheDocument();
+      expect(queryByTestId("browser-open")).toBeNull();
+    });
+  });
 });

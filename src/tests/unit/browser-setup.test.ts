@@ -13,10 +13,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 // vi.hoisted, because the module under test is imported statically below: the
 // mock factories run during that import, before a plain `const` at this level
 // has been initialised.
-const { store, mkdir, writeFile } = vi.hoisted(() => ({
+const { store, mkdir, writeFile, readFile } = vi.hoisted(() => ({
   store: new Map<string, unknown>(),
   mkdir: vi.fn(async () => undefined),
   writeFile: vi.fn(async () => undefined),
+  readFile: vi.fn(async (): Promise<string> => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); }),
 }));
 
 vi.mock("@/lib/config-store", () => ({
@@ -27,13 +28,14 @@ vi.mock("@/lib/config-store", () => ({
   }),
 }));
 
-vi.mock("fs/promises", () => ({ default: { mkdir, writeFile } }));
+vi.mock("fs/promises", () => ({ default: { mkdir, writeFile, readFile } }));
 
 import {
   DEFAULT_START_URL,
   getBrowserAutoOpen,
   getBrowserSetupComplete,
   getBrowserStartUrl,
+  launchEnvBody,
   normalizeStartUrl,
   readBrowserSetupFlag,
   setBrowserAutoOpen,
@@ -47,6 +49,8 @@ describe("browser setup state", () => {
     store.clear();
     writeFile.mockClear();
     writeFile.mockResolvedValue(undefined);
+    readFile.mockReset();
+    readFile.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
   });
 
   it("treats a box that already has a working browser as set up", async () => {
@@ -106,5 +110,48 @@ describe("browser setup state", () => {
   it("does not let a failed env write stop a launch", async () => {
     writeFile.mockRejectedValueOnce(new Error("read-only filesystem"));
     await expect(writeBrowserLaunchEnv("https://example.com/")).resolves.toBeUndefined();
+  });
+
+  /**
+   * TASK-1480: the same file names the owner's own browser — profile, CDP
+   * port, executable (src/lib/desktop-browser-config.ts). Writing the start
+   * page used to replace the whole file, which would have quietly pointed the
+   * app back at ClawBox's own empty browser the next time anyone pressed Open.
+   */
+  it("keeps the owner's own browser settings, and their comments, when it writes the start page", async () => {
+    readFile.mockResolvedValue([
+      "# Written by ClawBox — Settings → Browser. Read by scripts/launch-browser.sh.",
+      "CLAWBOX_BROWSER_START_URL='https://old.example/'",
+      "# my Chrome",
+      "CLAWBOX_BROWSER_PROFILE_DIR=~/.config/google-chrome-debug",
+      "CLAWBOX_BROWSER_CDP_PORT=9222",
+      "",
+    ].join("\n"));
+
+    await writeBrowserLaunchEnv("https://example.com/start");
+
+    const [, body] = writeFile.mock.calls[0] as unknown as [string, string];
+    expect(body).toContain("# my Chrome\nCLAWBOX_BROWSER_PROFILE_DIR=~/.config/google-chrome-debug\nCLAWBOX_BROWSER_CDP_PORT=9222\n");
+    expect(body).toContain("CLAWBOX_BROWSER_START_URL='https://example.com/start'");
+    expect(body).not.toContain("old.example");
+    // ClawBox's header once, not once per write.
+    expect(body.match(/# Written by ClawBox/g)).toHaveLength(1);
+  });
+
+  it("documents the owner's keys in a file it starts from nothing", () => {
+    const body = launchEnvBody("", "about:blank");
+    expect(body).toContain("CLAWBOX_BROWSER_PROFILE_DIR=");
+    expect(body).toContain("CLAWBOX_BROWSER_CDP_PORT=");
+    expect(body).toContain("CLAWBOX_BROWSER_EXECUTABLE=");
+    // …as comments: nothing is configured until the owner says so.
+    expect(body.split("\n").filter((l) => /^CLAWBOX_BROWSER_/.test(l))).toEqual(["CLAWBOX_BROWSER_START_URL='about:blank'"]);
+    // Rewriting its own output changes nothing.
+    expect(launchEnvBody(body, "about:blank")).toBe(body);
+  });
+
+  it("leaves a file it cannot read alone rather than rewrite the owner's settings away", async () => {
+    readFile.mockRejectedValue(Object.assign(new Error("EACCES"), { code: "EACCES" }));
+    await expect(writeBrowserLaunchEnv("https://example.com/")).resolves.toBeUndefined();
+    expect(writeFile).not.toHaveBeenCalled();
   });
 });

@@ -38,6 +38,17 @@ export default defineConfig({
       // /etc/clawbox/kiosk.env and see a kiosk CI never has. Tests that want
       // one set CLAWBOX_KIOSK_URL.
       CLAWBOX_KIOSK_ENV_FILE: "/nonexistent/clawbox-test-kiosk.env",
+      // And for the desktop browser's launch env file
+      // (src/lib/desktop-browser-config.ts): on a box whose owner pointed the
+      // Browser app at a profile and port of their own, the suite would read
+      // that box's ~/.cache/clawbox/browser.env and assert against its port.
+      // The path keeps the real file's tail, so a test that checks where the
+      // start page is written still recognises it. The three keys are blanked
+      // for the same reason — an empty value is "not set".
+      CLAWBOX_BROWSER_ENV_FILE: "/nonexistent/clawbox-test-home/.cache/clawbox/browser.env",
+      CLAWBOX_BROWSER_PROFILE_DIR: "",
+      CLAWBOX_BROWSER_CDP_PORT: "",
+      CLAWBOX_BROWSER_EXECUTABLE: "",
       // The same hermetic principle for device STATE: config-store falls back
       // to the real /home/clawbox/clawbox when CLAWBOX_ROOT is unset, so a
       // test that imports the real modules without re-pointing the root reads

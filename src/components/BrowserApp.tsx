@@ -114,10 +114,16 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
 
   const browserRunning = status?.browser?.running ?? false;
   const cdpReady = status?.browser?.cdpReady ?? false;
+  // The owner's own browser, open on its profile but never given the CDP
+  // port: running, and never going to answer — not "starting".
+  const noRemoteDebugging = browserRunning && (status?.browser?.noRemoteDebugging ?? false);
+  // A browser the owner started themselves: ClawBox does not close it, so the
+  // header offers Open (which brings it forward) rather than Close.
+  const closable = browserRunning && !(status?.browser?.external ?? false);
   // A launch is in flight, or a process exists that has not bound its port
   // yet. Both are "something is happening, wait", and both want the faster
   // poll and the pill over the screen.
-  const starting = actionLoading === "open-browser" || (browserRunning && !cdpReady);
+  const starting = actionLoading === "open-browser" || (browserRunning && !cdpReady && !noRemoteDebugging);
 
   // One read on mount. Its own effect so that a change of cadence below does
   // not fire a second one milliseconds after the first.
@@ -230,11 +236,13 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
 
   const stateLabel = starting
     ? t("browser.startingChromium")
-    : browserRunning
-      ? t("browser.settings.runningPid", { pid: status?.browser?.pid ?? "?" })
-      : agentBrowsing
-        ? t("browser.agentBrowsingShort", { harness: harnessLabel })
-        : t("browser.settings.notRunning");
+    : noRemoteDebugging
+      ? t("browser.runningNoDebugging")
+      : browserRunning
+        ? t("browser.settings.runningPid", { pid: status?.browser?.pid ?? "?" })
+        : agentBrowsing
+          ? t("browser.agentBrowsingShort", { harness: harnessLabel })
+          : t("browser.settings.notRunning");
 
   return (
     <div className="h-full flex flex-col bg-[var(--bg-deep)] text-white">
@@ -279,7 +287,7 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
         <div className="flex-1" />
         {face === "home" && (
           <>
-            {browserRunning ? (
+            {closable ? (
               <button
                 type="button"
                 onClick={() => void doAction("close-browser")}

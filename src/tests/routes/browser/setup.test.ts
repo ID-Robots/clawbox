@@ -24,7 +24,12 @@ vi.mock("@/lib/config-store", () => ({
 
 const writeFile = vi.fn(async (...args: unknown[]) => { void args; });
 vi.mock("fs/promises", () => ({
-  default: { mkdir: vi.fn(async () => undefined), writeFile },
+  default: {
+    mkdir: vi.fn(async () => undefined),
+    writeFile,
+    // No launch env file yet: the write starts it from nothing.
+    readFile: vi.fn(async () => { throw Object.assign(new Error("ENOENT"), { code: "ENOENT" }); }),
+  },
 }));
 
 import { hasOwnerSession } from "@/lib/owner-session";

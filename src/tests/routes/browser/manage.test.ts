@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("child_process", () => ({
   execFile: vi.fn(),
@@ -18,8 +18,9 @@ vi.mock("fs/promises", () => ({
     // size and bytes through ONE handle, so the route opens rather than stats.
     open: vi.fn().mockRejectedValue(new Error("ENOENT")),
     stat: vi.fn().mockRejectedValue(new Error("ENOENT")),
-    // The start page handed to scripts/launch-browser.sh.
-    readFile: vi.fn().mockRejectedValue(new Error("ENOENT")),
+    // The launch env file (src/lib/desktop-browser-config.ts) — absent, as
+    // on a box that never configured a browser of the owner's.
+    readFile: vi.fn().mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" })),
     writeFile: vi.fn().mockResolvedValue(undefined),
   },
 }));
@@ -47,6 +48,9 @@ vi.mock("@/lib/sqlite-store", () => ({
 // leaks into "not installed".
 vi.mock("@/lib/cdp-probe", () => ({
   findPlaywrightChromium: vi.fn().mockReturnValue(null),
+  // Bringing an already-running browser forward (unit-tested in
+  // src/tests/unit/cdp-probe.test.ts against a fake Chromium).
+  focusCdpBrowser: vi.fn().mockResolvedValue("activated"),
 }));
 
 const mockFetch = vi.fn();
@@ -54,7 +58,7 @@ vi.stubGlobal("fetch", mockFetch);
 
 import { openclawIsAbsent, readConfig, restartGateway, runOpenclawConfigSet } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
-import { findPlaywrightChromium } from "@/lib/cdp-probe";
+import { findPlaywrightChromium, focusCdpBrowser } from "@/lib/cdp-probe";
 import fs from "fs/promises";
 import path from "path";
 import { promisify } from "util";
@@ -80,9 +84,10 @@ describe("/setup-api/browser/manage", () => {
     vi.mocked(fs.unlink).mockResolvedValue(undefined);
     vi.mocked(fs.open).mockRejectedValue(new Error("ENOENT"));
     vi.mocked(fs.stat).mockRejectedValue(new Error("ENOENT"));
-    vi.mocked(fs.readFile).mockRejectedValue(new Error("ENOENT"));
+    vi.mocked(fs.readFile).mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
     vi.mocked(fs.writeFile).mockResolvedValue(undefined);
     vi.mocked(findPlaywrightChromium).mockReturnValue(null);
+    vi.mocked(focusCdpBrowser).mockResolvedValue("activated");
     mockFetch.mockRejectedValue(new Error("connection refused"));
     mockExec = vi.fn();
     vi.mocked(promisify).mockReturnValue(mockExec as never);
@@ -235,7 +240,9 @@ describe("/setup-api/browser/manage", () => {
       expect(body.chromium.serviceSafe).toBe(true);
       // The browser binary itself is never read to answer this: it is a
       // hundred megabytes and cannot be a snap shim.
-      expect(fs.readFile).not.toHaveBeenCalled();
+      // (The only file read is the launch env file, for which browser this is.)
+      expect(vi.mocked(fs.readFile).mock.calls.map(([p]) => String(p)))
+        .toEqual([process.env.CLAWBOX_BROWSER_ENV_FILE]);
     });
 
     it("handles errors gracefully", async () => {
@@ -571,6 +578,237 @@ describe("/setup-api/browser/manage", () => {
 
       expect(res.status).toBe(200);
       expect(body.ok).toBe(true);
+    });
+  });
+  /**
+   * TASK-1480: "Open Browser" on a box whose owner already runs a signed-in
+   * Chrome of their own, on its own profile and port, named in the launch env
+   * file (src/lib/desktop-browser-config.ts). /proc is faked through the same
+   * fs/promises mock process-match reads it with.
+   */
+  describe("the owner's configured browser", () => {
+    const ENV_FILE = process.env.CLAWBOX_BROWSER_ENV_FILE as string;
+    const OWNER_PROFILE = "/home/clawbox/.config/google-chrome-debug";
+    const CONFIGURED = `CLAWBOX_BROWSER_START_URL='https://example.com/'\nCLAWBOX_BROWSER_PROFILE_DIR=${OWNER_PROFILE}\nCLAWBOX_BROWSER_CDP_PORT=9222\n`;
+    const OWNER_CHROME = `/opt/google/chrome/chrome\0--user-data-dir=${OWNER_PROFILE}\0--remote-debugging-port=9222\0`;
+    const DESKTOP_SESSION = "0::/user.slice/user-1000.slice/session-2.scope\n";
+    const BROWSER_UNIT = "0::/system.slice/clawbox-browser.service\n";
+
+    let files: Record<string, string>;
+    let killSpy: ReturnType<typeof vi.spyOn>;
+
+    /** pid → [cmdline, cgroup] */
+    function processes(table: Record<number, [string, string]>) {
+      for (const [pid, [cmdline, cgroup]] of Object.entries(table)) {
+        files[`/proc/${pid}/cmdline`] = cmdline;
+        files[`/proc/${pid}/cgroup`] = cgroup;
+      }
+      vi.mocked(fs.readdir).mockImplementation((async (dir: unknown) => {
+        if (String(dir) === "/proc") return Object.keys(table);
+        throw new Error("ENOENT");
+      }) as never);
+    }
+
+    /** CDP answers on these ports only. */
+    function answering(...ports: number[]) {
+      mockFetch.mockImplementation(async (url: unknown) => {
+        if (ports.some((port) => String(url).startsWith(`http://127.0.0.1:${port}/`))) {
+          return { ok: true, json: async () => ({ Browser: "Chrome/146" }) } as never;
+        }
+        throw new Error("connection refused");
+      });
+    }
+
+    const post = (action: string) => POST(new Request("http://localhost/setup-api/browser/manage", {
+      method: "POST",
+      body: JSON.stringify({ action }),
+    }));
+    const started = () => mockExec.mock.calls.some((call: unknown[]) =>
+      Array.isArray(call[1]) && (call[1] as string[]).includes("start") && (call[1] as string[]).includes("clawbox-browser.service"));
+    const stopped = () => mockExec.mock.calls.some((call: unknown[]) =>
+      Array.isArray(call[1]) && (call[1] as string[]).includes("stop") && (call[1] as string[]).includes("clawbox-browser.service"));
+
+    beforeEach(() => {
+      files = { [ENV_FILE]: CONFIGURED };
+      vi.mocked(fs.readFile).mockImplementation((async (p: unknown) => {
+        const key = String(p);
+        if (key in files) return files[key];
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      }) as never);
+      killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+      vi.mocked(findPlaywrightChromium).mockReturnValue("/home/clawbox/.cache/ms-playwright/chromium-1180/chrome-linux/chrome");
+      mockExec.mockResolvedValue({ stdout: "Chromium 146", stderr: "" });
+    });
+
+    afterEach(() => {
+      killSpy.mockRestore();
+    });
+
+    it("reports the owner's running browser as Running, on its own profile and port", async () => {
+      processes({ 4242: [OWNER_CHROME, DESKTOP_SESSION] });
+      answering(9222);
+
+      const body = await (await GET()).json();
+
+      expect(body.cdpPort).toBe(9222);
+      expect(body.profileDir).toBe(OWNER_PROFILE);
+      expect(body.ownProfile).toBe(false);
+      expect(body.browser).toEqual({ running: true, pid: 4242, cdpReady: true, external: true });
+      // Nothing was asked of ClawBox's own port.
+      expect(mockFetch.mock.calls.every((call: unknown[]) => !String(call[0]).includes(":18800"))).toBe(true);
+    });
+
+    it("Open brings the running browser forward instead of starting another", async () => {
+      processes({ 4242: [OWNER_CHROME, DESKTOP_SESSION] });
+      answering(9222);
+
+      const res = await post("open-browser");
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body).toMatchObject({ ok: true, alreadyRunning: true, pid: 4242, cdpPort: 9222, focused: true });
+      expect(focusCdpBrowser).toHaveBeenCalledWith("http://127.0.0.1:9222", "about:blank");
+      expect(started()).toBe(false);
+      expect(fs.unlink).not.toHaveBeenCalled();
+      expect(killSpy).not.toHaveBeenCalled();
+    });
+
+    it("Close leaves a browser the owner started open, and says why", async () => {
+      processes({ 4242: [OWNER_CHROME, DESKTOP_SESSION] });
+      answering(9222);
+
+      const res = await post("close-browser");
+      const body = await res.json();
+
+      expect(res.status).toBe(409);
+      expect(body.code).toBe("not_started_by_clawbox");
+      expect(stopped()).toBe(false);
+      expect(killSpy).not.toHaveBeenCalled();
+      expect(fs.unlink).not.toHaveBeenCalled();
+    });
+
+    it("Close stops the owner's browser when ClawBox's unit is what started it", async () => {
+      processes({ 4242: [OWNER_CHROME, BROWSER_UNIT] });
+      answering(9222);
+
+      const res = await post("close-browser");
+
+      expect(res.status).toBe(200);
+      expect(stopped()).toBe(true);
+      expect(killSpy).toHaveBeenCalledWith(4242, "SIGTERM");
+    });
+
+    it("says the browser is open without remote debugging rather than 'starting', and never touches its locks", async () => {
+      processes({ 4242: [`/opt/google/chrome/chrome\0--user-data-dir=${OWNER_PROFILE}\0`, DESKTOP_SESSION] });
+      answering();
+
+      const status = await (await GET()).json();
+      expect(status.browser).toMatchObject({ running: true, cdpReady: false, noRemoteDebugging: true, external: true });
+
+      const res = await post("open-browser");
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe("profile_in_use");
+      expect(started()).toBe(false);
+      expect(fs.unlink).not.toHaveBeenCalled();
+    });
+
+    it("does not credit the owner's browser with another browser's answer on its port", async () => {
+      // Open on the profile WITHOUT the port; something else answers 9222.
+      processes({ 4242: [`/opt/google/chrome/chrome\0--user-data-dir=${OWNER_PROFILE}\0`, DESKTOP_SESSION] });
+      answering(9222);
+
+      const status = await (await GET()).json();
+      expect(status.browser).toMatchObject({ running: true, cdpReady: false, noRemoteDebugging: true });
+
+      const res = await post("open-browser");
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe("profile_in_use");
+      // Nothing of the other browser's was brought forward as if it were the owner's.
+      expect(focusCdpBrowser).not.toHaveBeenCalled();
+      expect(started()).toBe(false);
+    });
+
+    it("waits for an owner browser that has the port but is not answering yet, never starting a second one on its profile", async () => {
+      processes({ 4242: [OWNER_CHROME, DESKTOP_SESSION] });
+      answering();
+
+      const res = await post("open-browser");
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ ok: true, pid: 4242, cdpPort: 9222, cdpReady: false });
+      expect(started()).toBe(false);
+      expect(fs.unlink).not.toHaveBeenCalled();
+    });
+
+    it("starts the owner's browser through the unit when it is not running, keeping their settings in the launch file", async () => {
+      processes({});
+      let probes = 0;
+      mockFetch.mockImplementation(async (url: unknown) => {
+        if (!String(url).startsWith("http://127.0.0.1:9222/")) throw new Error("connection refused");
+        probes += 1;
+        if (probes === 1) throw new Error("connection refused");
+        return { ok: true, json: async () => ({ Browser: "Chrome/146" }) } as never;
+      });
+
+      const res = await post("open-browser");
+      const body = await res.json();
+
+      expect(body).toMatchObject({ ok: true, cdpPort: 9222, cdpReady: true });
+      expect(started()).toBe(true);
+      const [file, written] = vi.mocked(fs.writeFile).mock.calls[0] as unknown as [string, string];
+      expect(file).toBe(ENV_FILE);
+      expect(written).toContain(`CLAWBOX_BROWSER_PROFILE_DIR=${OWNER_PROFILE}`);
+      expect(written).toContain("CLAWBOX_BROWSER_CDP_PORT=9222");
+      expect(written).toContain("CLAWBOX_BROWSER_START_URL='about:blank'");
+      expect(fs.mkdir).toHaveBeenCalledWith(OWNER_PROFILE, { recursive: true });
+    });
+
+    it("refuses at once when the browser the owner named is not there", async () => {
+      files[ENV_FILE] = `${CONFIGURED}CLAWBOX_BROWSER_EXECUTABLE=/opt/google/chrome/chrome\n`;
+      processes({});
+      answering();
+
+      const res = await post("open-browser");
+      const body = await res.json();
+
+      expect(res.status).toBe(400);
+      expect(body.code).toBe("configured_browser_missing");
+      expect(started()).toBe(false);
+    });
+
+    it("never clears a person's browser holding ClawBox's own port — it reports the port taken", async () => {
+      // Nothing configured: ClawBox on its own profile and 18800, and the
+      // owner's Chrome (title-rewritten argv, as a live Chrome has) on 18800.
+      files = {};
+      processes({ 5150: ["/opt/google/chrome/chrome --user-data-dir=/home/clawbox/.config/google-chrome-debug --remote-debugging-port=18800", DESKTOP_SESSION] });
+      answering(18800);
+
+      const status = await (await GET()).json();
+      expect(status.browser).toEqual({ running: false, cdpReady: true, portTaken: true });
+
+      const res = await post("open-browser");
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe("cdp_port_taken");
+      expect(killSpy).not.toHaveBeenCalled();
+      expect(started()).toBe(false);
+    });
+
+    it("still clears the assistant's headless browser off the port, as before (TASK-515)", async () => {
+      files = {};
+      processes({ 6060: [`/usr/bin/chromium\0--headless=new\0--user-data-dir=/home/clawbox/.openclaw/browser/openclaw/user-data\0--remote-debugging-port=18800\0`, DESKTOP_SESSION] });
+      let calls = 0;
+      mockFetch.mockImplementation(async () => {
+        calls += 1;
+        // Status sees it; after the SIGTERM the port is free; then ours answers.
+        if (calls === 2) throw new Error("connection refused");
+        return { ok: true, json: async () => ({ Browser: "Chrome/146" }) } as never;
+      });
+
+      const res = await post("open-browser");
+
+      expect(res.status).toBe(200);
+      expect(killSpy).toHaveBeenCalledWith(6060, "SIGTERM");
+      expect(started()).toBe(true);
     });
   });
 });

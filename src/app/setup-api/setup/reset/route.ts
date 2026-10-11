@@ -21,6 +21,7 @@ import fs from "fs/promises";
 import path from "@/lib/runtime-path";
 import crypto from "crypto";
 import { startRootStep } from "@/lib/root-step-runner";
+import { readDesktopBrowserConfig } from "@/lib/desktop-browser-config";
 
 const execFile = promisify(execFileCb);
 
@@ -354,8 +355,12 @@ const HOME_REMOVE_PATHS = [
   // OAuth tokens synthesized by gateway-pre-start.sh for the codex app-server.
   ".codex",
   // AI-browser Chromium profile: cookies, logged-in sessions, history
-  // (PROFILE in scripts/launch-browser.sh).
+  // (PROFILE in scripts/launch-browser.sh). A profile of the owner's own that
+  // they pointed the app at goes too — configuredBrowserProfile() below.
   ".config/clawbox-browser",
+  // The launch env file: the previous owner's start page, and which browser
+  // profile, port and executable of theirs the app was pointed at.
+  ".cache/clawbox/browser.env",
   // Shell/REPL histories and identity the TerminalApp + agent run_command
   // accumulate; .netrc/.npmrc can carry plaintext credentials.
   ".bash_history",
@@ -468,6 +473,54 @@ const HOME_CONTENT_WIPE_KEEP: ReadonlyArray<{ rel: string; keep: ReadonlySet<str
 ];
 
 /**
+ * The owner's own browser profile, when they pointed the Browser app at one
+ * (CLAWBOX_BROWSER_PROFILE_DIR, src/lib/desktop-browser-config.ts), relative
+ * to the home — removed for the reason ClawBox's own profile is: it holds
+ * their cookies and signed-in sessions.
+ *
+ * Guarded, because the path came from a file the owner edits by hand: only a
+ * directory strictly inside the home, and only a real Chromium profile — one
+ * with a `Local State` file at its root. A typo that names `~/.config` or the
+ * home itself is skipped and logged, never removed. Read BEFORE the wipe,
+ * which removes the file that names it.
+ *
+ * Judged on the RESOLVED path, not the one written: `~/link/Profile` with
+ * `link` pointing outside the home is lexically inside it, and `fs.rm` would
+ * follow that symlink and delete a profile that is not in the home at all.
+ * What is returned is the resolved location, relative to the resolved home,
+ * so the removal names exactly the directory that was checked.
+ */
+async function configuredBrowserProfile(): Promise<string | null> {
+  const config = await readDesktopBrowserConfig();
+  if (config.ownProfile) return null;
+  let home: string;
+  let profile: string;
+  try {
+    // turbopackIgnore: a path the build cannot evaluate would otherwise be
+    // traced as "any file in the project" and walk data/ (runtime-path.ts).
+    [home, profile] = await Promise.all([
+      fs.realpath(/* turbopackIgnore: true */ HOME_DIR),
+      fs.realpath(/* turbopackIgnore: true */ config.profileDir),
+    ]);
+  } catch {
+    console.warn("[Reset] The configured browser profile could not be resolved; not removing it");
+    return null;
+  }
+  const rel = path.relative(home, profile);
+  if (!rel || rel.startsWith("..") || path.isAbsolute(rel)) {
+    console.warn("[Reset] Leaving the configured browser profile outside the home directory in place");
+    return null;
+  }
+  try {
+    await fs.access(/* turbopackIgnore: true */ path.join(profile, "Local State"));
+  } catch {
+    console.warn("[Reset] The configured browser profile has no Local State file; not removing it");
+    return null;
+  }
+  return rel;
+}
+
+/**
  * Wipe previous-owner state from the home directory so a factory-reset
  * device matches a fresh flash, not just a fresh ClawBox config. Returns
  * failure strings (same contract as removeDirectoryContents) — a survivor
@@ -475,8 +528,10 @@ const HOME_CONTENT_WIPE_KEEP: ReadonlyArray<{ rel: string; keep: ReadonlySet<str
  */
 async function wipeHomeUserState(): Promise<string[]> {
   const failures: string[] = [];
+  const ownerProfile = await configuredBrowserProfile();
+  const removePaths = ownerProfile ? [...HOME_REMOVE_PATHS, ownerProfile] : HOME_REMOVE_PATHS;
   await Promise.all(
-    HOME_REMOVE_PATHS.map((rel) =>
+    removePaths.map((rel) =>
       fs.rm(path.join(HOME_DIR, rel), { recursive: true, force: true }).catch((err) => {
         failures.push(`${rel}: ${err}`);
       }),
