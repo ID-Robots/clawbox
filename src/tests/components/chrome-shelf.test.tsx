@@ -451,6 +451,8 @@ describe("the fullscreen button", () => {
     setWindowSize("innerHeight", 768);
     setWindowSize("outerWidth", 1024);
     setWindowSize("outerHeight", 768);
+    // A browser that can be asked for fullscreen; jsdom is not one.
+    Object.defineProperty(document.documentElement, "requestFullscreen", { value: () => Promise.resolve(), configurable: true });
   });
 
   afterEach(() => {
@@ -471,9 +473,21 @@ describe("the fullscreen button", () => {
     expect(requestFullscreen).toHaveBeenCalledTimes(1);
   });
 
-  it("does nothing, rather than throw, where the browser has no element fullscreen", () => {
-    // An iPhone's Safari: `requestFullscreen` is not there to call.
+  it("is not offered where the browser cannot be asked for fullscreen", () => {
+    // An iPhone's Safari has no element fullscreen: the button did nothing.
+    delete (document.documentElement as { requestFullscreen?: unknown }).requestFullscreen;
     expect("requestFullscreen" in document.documentElement).toBe(false);
+    render(<ChromeShelf {...baseProps} />);
+
+    expect(screen.queryByTestId("shelf-fullscreen-button")).not.toBeInTheDocument();
+    // The rest of the bar is as it was.
+    expect(screen.getByTestId("shelf-tray-button")).toBeInTheDocument();
+    expect(screen.getByTestId("shelf-power-button")).toBeInTheDocument();
+  });
+
+  it("does not throw when the request answers no promise", () => {
+    // Older engines returned nothing from requestFullscreen().
+    Object.defineProperty(document.documentElement, "requestFullscreen", { value: () => undefined, configurable: true });
     render(<ChromeShelf {...baseProps} />);
 
     expect(() => fireEvent.click(screen.getByTestId("shelf-fullscreen-button"))).not.toThrow();

@@ -72,3 +72,20 @@ const serverSnapshot = () => false;
 export function useIsFullscreen(): boolean {
   return useSyncExternalStore(subscribe, isFullscreen, serverSnapshot);
 }
+
+/**
+ * Can this browser be ASKED for fullscreen at all? An iPhone's Safari has no
+ * element fullscreen: a button that offers it there does nothing.
+ */
+export function canRequestFullscreen(): boolean {
+  return typeof document !== "undefined" && typeof document.documentElement?.requestFullscreen === "function";
+}
+
+// A browser does not grow the API while a page is open.
+const neverChanges = () => () => {};
+const serverCan = () => true;
+
+/** `canRequestFullscreen()`, read after hydration (the server cannot know, and says yes). */
+export function useCanRequestFullscreen(): boolean {
+  return useSyncExternalStore(neverChanges, canRequestFullscreen, serverCan);
+}

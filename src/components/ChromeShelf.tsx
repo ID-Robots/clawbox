@@ -11,7 +11,7 @@ import { openInKiosk } from "@/lib/kiosk-tabs-client";
 import { useDesktopClock } from "@/lib/use-desktop-clock";
 import { desktopOverlayMounted, quickCaptureRequest, requestCapture, subscribeOverlays } from "@/lib/screenshot/session";
 import { captureShortcutKeys } from "@/lib/screenshot/shortcuts";
-import { useIsFullscreen } from "@/lib/use-is-fullscreen";
+import { useCanRequestFullscreen, useIsFullscreen } from "@/lib/use-is-fullscreen";
 
 /** The reasons that put a shield in an at-risk state. `ok` is not among them. */
 type AtRiskReason = Exclude<ProtectionReason, "ok">;
@@ -207,6 +207,7 @@ export default function ChromeShelf({
   const [shelfMenu, setShelfMenu] = useState<{ x: number; y: number } | null>(null);
   const openedAt = useRef(0);
   const isFullscreen = useIsFullscreen();
+  const canFullscreen = useCanRequestFullscreen();
   const [isMobile, setIsMobile] = useState(false);
   // Phone portrait: hide the ClawKeep shield and the clock to fit the bar.
   // The chat crab STAYS — a phone lands in the chat and this is its way back
@@ -230,8 +231,8 @@ export default function ChromeShelf({
   }, []);
 
   const enterFullscreen = useCallback(() => {
-    // Optional all the way: an iPhone's Safari has no element fullscreen, and
-    // a tap there must do nothing rather than throw.
+    // Optional all the way: the button is not drawn where the API is missing,
+    // and a call that answers no promise must not throw either.
     document.documentElement.requestFullscreen?.()?.catch(() => {});
   }, []);
 
@@ -274,11 +275,12 @@ export default function ChromeShelf({
   const unpinnedApps = isMobile
     ? apps.filter(a => a.isOpen && !pinnedApps.some(p => p.id === a.id))
     : apps.filter(a => a.isPinned === false);
-  // Offered only while there is a fullscreen to ENTER. Once the page fills the
+  // Offered only while there is a fullscreen to ENTER, in a browser that can
+  // be asked for one (an iPhone's Safari cannot). Once the page fills the
   // screen — its own request, F11, or a kiosk's window — the button is gone
   // rather than turned into "Exit": leaving is the browser's own gesture (Esc
   // or F11 with a keyboard, the system's back or swipe on a touch screen).
-  const renderFullscreenButton = (iconSize: number) => !isFullscreen && (
+  const renderFullscreenButton = (iconSize: number) => canFullscreen && !isFullscreen && (
     <button
       onClick={enterFullscreen}
       className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"

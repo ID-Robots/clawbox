@@ -326,6 +326,24 @@ describe("Ctrl+V stays the shell's key", () => {
     expect(uploads).toHaveLength(0);
   });
 
+  it("asks the box again once anything has been sent to the shell: the last answer was about what was running THEN", async () => {
+    // A picture goes into Claude Code; the owner opens an editor from it and
+    // presses Ctrl+V there a moment later, the picture still on the clipboard.
+    const term = await mount();
+    term.press(ctrlV);
+    paste(clipboard({ images: [picture()] }));
+    await waitFor(() => expect(inputs()).toEqual([asPaste(SAVED)]));
+    expect(foregroundAsked).toBe(1);
+
+    foreground = null;
+    term.press(ctrlV);
+    paste(clipboard({ images: [picture()] }));
+    await waitFor(() => expect(inputs()).toEqual([asPaste(SAVED), CTRL_V]));
+    // Asked afresh, well inside the time an answer is otherwise reused for.
+    expect(foregroundAsked).toBe(2);
+    expect(uploads).toHaveLength(1);
+  });
+
   it("asks the box once for a key held down in an editor, and gives every repeat its ^V", async () => {
     foreground = null;
     const term = await mount();

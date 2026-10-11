@@ -631,10 +631,18 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
     if (mountedRef.current) setNotice(null);
   }, []);
 
+  // Counts what the shell has been sent. An answer to "which program is in
+  // front?" is only good while this stands still: anything typed can start
+  // or leave a program. A ^V does neither — it is every editor's and every
+  // prompt's own key — so it is not counted, which is what lets a held Ctrl+V
+  // ask the box once rather than once per repeat.
+  const inputGenerationRef = useRef(0);
   /** Bytes for the shell, as a key press would send them. A closed socket drops them. */
   const sendToShell = useCallback((data: string) => {
     const ws = wsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "input", data }));
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (data !== CTRL_V) inputGenerationRef.current += 1;
+    ws.send(JSON.stringify({ type: "input", data }));
   }, []);
 
   // A plain Ctrl+V the browser has been let have (see the key handler): the
@@ -681,7 +689,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
     nextId: number;
     waiting: Map<number, (taker: PictureTaker) => void>;
     inFlight: Promise<PictureTaker> | null;
-    last: { taker: PictureTaker; at: number } | null;
+    last: { taker: PictureTaker; at: number; generation: number } | null;
   }>({ nextId: 1, waiting: new Map(), inFlight: null, last: null });
   const answerForeground = useCallback((id: unknown, taker: unknown) => {
     const state = foregroundRef.current;
@@ -693,7 +701,10 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
   }, []);
   const askForeground = useCallback((): Promise<PictureTaker> => {
     const state = foregroundRef.current;
-    if (state.last && performance.now() - state.last.at < FOREGROUND_REUSE_MS) return Promise.resolve(state.last.taker);
+    const generation = inputGenerationRef.current;
+    if (state.last && state.last.generation === generation && performance.now() - state.last.at < FOREGROUND_REUSE_MS) {
+      return Promise.resolve(state.last.taker);
+    }
     if (state.inFlight) return state.inFlight;
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return Promise.resolve(null);
@@ -705,7 +716,9 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
       state.waiting.set(id, (taker) => { clearTimeout(timer); resolve(taker); });
     }).then((taker) => {
       state.inFlight = null;
-      state.last = { taker, at: performance.now() };
+      // Filed under what had been typed when it was ASKED: input sent while
+      // the question was out makes it a miss for whoever asks next.
+      state.last = { taker, at: performance.now(), generation };
       return taker;
     });
     state.inFlight = asked;
@@ -1218,6 +1231,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
       // Forward terminal input → server
       inputDisposableRef.current = term.onData((data: string) => {
         if (ws.readyState === WebSocket.OPEN) {
+          inputGenerationRef.current += 1;
           ws.send(JSON.stringify({ type: "input", data }));
         }
       });
@@ -1231,6 +1245,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
           const pending = pendingCommandRef.current;
           if (pending && ws.readyState === WebSocket.OPEN) {
             pendingCommandRef.current = null;
+            inputGenerationRef.current += 1;
             ws.send(JSON.stringify({ type: "input", data: `${pending}\r` }));
           }
         } else if (msg.type === "foreground") {
@@ -1592,6 +1607,7 @@ function TerminalInner({ initialCommand, active = true, onTabAction, onOpenSetti
       else if (e.ctrlKey && e.key.length === 1) data = String.fromCharCode(e.key.toUpperCase().charCodeAt(0) - 64);
       if (data) {
         e.preventDefault();
+        inputGenerationRef.current += 1;
         ws.send(JSON.stringify({ type: "input", data }));
       }
     }
