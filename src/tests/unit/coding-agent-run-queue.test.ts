@@ -213,3 +213,31 @@ describe("a draft the owner starts while every slot is taken", () => {
     expect(lib.getRun(draft.id)!.progress).toEqual(expect.arrayContaining(["Started from the queue"]));
   });
 });
+
+describe("a Fix CI continuation that waits in the queue", () => {
+  it("gives the failure back when the owner cancels it, so Fix CI can be offered again", async () => {
+    // A finished run whose pull request's CI failed.
+    fs.writeFileSync(flag, "go");
+    const p = await lib.startOrQueueRun({ task: "build it", directory: "alpha", source: "owner" });
+    await finished(p.run.id);
+    const file = path.join(root, "data", "coding-agent-runs.json");
+    const list = JSON.parse(fs.readFileSync(file, "utf-8")) as Array<Record<string, unknown>>;
+    for (const r of list) if (r.id === p.run.id) r.ci = { prNumber: 7, at: 1, checks: ["test"], tests: [], files: [], excerpt: "", unread: [], attempt: 0, fixRunId: null };
+    fs.writeFileSync(file, JSON.stringify(list), "utf-8");
+    await lib._resetCodingAgentStateForTests();
+    vi.resetModules();
+    lib = await import("@/lib/coding-agent");
+    fs.rmSync(flag, { force: true });
+
+    // The box is full, so the Fix CI waits — and claims the failure while it does.
+    await lib.startOrQueueRun({ task: "busy", directory: "beta", source: "owner" });
+    const fix = await lib.startOrQueueRun({ task: "Fix the CI.", resumeRunId: p.run.id, source: "owner", fixCi: true });
+    expect(fix.queued).toBe(true);
+    expect(lib.getRun(p.run.id)?.ci?.fixRunId).toBe(fix.run.id);
+
+    await lib.cancelQueuedRun(fix.run.id);
+    // Never started: the failure is free again, and a new Fix CI is not refused.
+    expect(lib.getRun(p.run.id)?.ci?.fixRunId).toBeNull();
+    expect(lib.ciFixAttempt(lib.getRun(p.run.id)!, null)).toBe(1);
+  });
+});

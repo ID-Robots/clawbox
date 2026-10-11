@@ -13340,6 +13340,19 @@ async function queueRun(input: StartRunInput): Promise<CodingRun> {
   return cloneRun(run);
 }
 
+/**
+ * A queued Fix CI continuation that leaves the queue without ever starting —
+ * the owner canceled it, or its turn came and it could not start — gives back
+ * the failure it claimed when it was queued (`queueRun`), so a Fix CI can be
+ * offered for it again. One that started keeps it: it did its attempt.
+ */
+function releaseCiClaim(run: CodingRun): void {
+  const start = run.queued?.start;
+  if (start?.kind !== "new" || start.fixCi !== true || !start.resumeRunId) return;
+  const previous = loadRuns().find((r) => r.id === start.resumeRunId);
+  if (previous?.ci?.fixRunId === run.id) previous.ci = { ...previous.ci, fixRunId: null };
+}
+
 /** A draft the owner started while every slot was taken: the same record, waiting its turn. */
 function queueDraft(run: CodingRun): CodingRun {
   const position = queuedRuns().length + 1;
@@ -13437,6 +13450,7 @@ function armQueueRetry(): void {
 function failQueuedRun(id: string, err: unknown): void {
   const run = loadRuns().find((r) => r.id === id);
   if (!run || run.status !== "queued") return;
+  releaseCiClaim(run);
   run.status = "failed";
   run.queued = null;
   run.error = `Its turn in the queue came, and it could not start: ${err instanceof Error ? err.message : String(err)}`.slice(0, MAX_ERROR_CHARS);
@@ -13461,6 +13475,7 @@ export async function cancelQueuedRun(id: string): Promise<CodingRun> {
     if (run.status === "running") throw new CodingAgentError("invalid", "That run has already left the queue and started. Stop it instead.");
     return cloneRun(run);
   }
+  releaseCiClaim(run);
   run.status = "stopped";
   run.queued = null;
   run.error = "Canceled by the owner before it started.";
