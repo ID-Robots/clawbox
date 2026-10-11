@@ -38,6 +38,11 @@ export default defineConfig({
       // /etc/clawbox/kiosk.env and see a kiosk CI never has. Tests that want
       // one set CLAWBOX_KIOSK_URL.
       CLAWBOX_KIOSK_ENV_FILE: "/nonexistent/clawbox-test-kiosk.env",
+      // And for its battery (src/lib/battery.ts): on that laptop the suite
+      // would read the real /sys/class/power_supply and see a battery — at
+      // whatever charge it had that minute — that CI never has. Tests that
+      // want one pass `root` (or set this) to a fixture of their own.
+      CLAWBOX_POWER_SUPPLY_DIR: "/nonexistent/clawbox-test-power-supply",
       // And for the desktop browser's launch env file
       // (src/lib/desktop-browser-config.ts): on a box whose owner pointed the
       // Browser app at a profile and port of their own, the suite would read
