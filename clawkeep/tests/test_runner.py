@@ -501,7 +501,11 @@ def test_archive_session_race_retries_then_succeeds(
                 archive,
             ],
         ) as create,
-        patch("clawkeep.runner.time.sleep") as sleep,
+        # The runner's own `time`, not `time.sleep` itself: this run also
+        # encrypts with a real openssl, and `subprocess` waits for a child that
+        # is slow to exit by calling `time.sleep` — on a loaded machine those
+        # calls landed in the mock and failed the count below.
+        patch("clawkeep.runner.time") as clock,
         patch("clawkeep.runner.s3.upload"),
         patch("clawkeep.runner.s3.stats", return_value=CloudStats(0, 1)),
     ):
@@ -509,7 +513,7 @@ def test_archive_session_race_retries_then_succeeds(
 
     assert rc == runner.EXIT_OK
     assert create.call_count == 2
-    sleep.assert_called_once_with(1.0)
+    clock.sleep.assert_called_once_with(1.0)
 
 
 def test_archive_non_race_error_is_not_retried(
@@ -1266,7 +1270,9 @@ def test_a_listing_that_fails_once_is_tried_again_before_refusing(
         patch("clawkeep.runner.api.mint_credentials", return_value=CREDS),
         patch("clawkeep.runner.api.heartbeat") as heartbeat,
         patch("clawkeep.runner.agent.create_archive", return_value=archive),
-        patch("clawkeep.runner.time.sleep") as sleep,
+        # The runner's own `time`: a real openssl runs here too (see
+        # test_archive_session_race_retries_then_succeeds).
+        patch("clawkeep.runner.time") as clock,
         patch("clawkeep.runner.s3.stats", side_effect=[
             CloudStats(10, 1),            # opening recount
             S3Error("connection reset"),  # admission, first try
@@ -1278,7 +1284,9 @@ def test_a_listing_that_fails_once_is_tried_again_before_refusing(
     ):
         assert runner.run_once(_cfg(tmp_path), "claw_x") == runner.EXIT_OK
     assert stats_mock.call_count == 5
-    assert [call.args[0] for call in sleep.call_args_list] == list(runner.ADMISSION_LIST_DELAYS)
+    assert [call.args[0] for call in clock.sleep.call_args_list] == list(
+        runner.ADMISSION_LIST_DELAYS,
+    )
     upload.assert_called_once()
     assert [call.kwargs["status"] for call in heartbeat.call_args_list] == ["running", "ok"]
     final = state.load(isolate_state)
@@ -1431,6 +1439,52 @@ def test_a_later_failure_of_another_kind_drops_the_old_refusal(isolate_state, tm
     assert final.last_heartbeat_status == "error"
     assert final.last_refusal == ""
     assert final.last_refusal_needed_bytes == 0
+
+
+def test_a_run_that_ends_at_a_revoked_pairing_drops_the_old_refusal_and_nothing_else(
+    isolate_state: Path, tmp_path: Path,
+) -> None:
+    """A revoked pairing ends the run with no heartbeat and no stamp — there
+    was no portal exchange to record. But the run did start and was not
+    refused for space, so the panel must not go on saying "needs 1.2 GB, only
+    300 MB free" about an account the owner may have emptied since."""
+    refused = state.State(
+        last_heartbeat_at_ms=111, last_heartbeat_status="error", last_backup_at_ms=42,
+        last_cloud_bytes=80, last_snapshot_count=3,
+        last_refusal=state.REFUSAL_QUOTA_FULL, last_refusal_at_ms=111,
+        last_refusal_needed_bytes=30, last_refusal_used_bytes=80, last_refusal_quota_bytes=100,
+    )
+    state.save(refused, isolate_state)
+    with (
+        patch(
+            "clawkeep.runner.api.mint_credentials",
+            side_effect=ApiError("auth", "Token revoked", 401),
+        ),
+        patch("clawkeep.runner.api.heartbeat") as heartbeat,
+    ):
+        assert runner.run_once(_cfg(tmp_path), "claw_x") == runner.EXIT_AUTH_REVOKED
+    heartbeat.assert_not_called()
+    final = state.load(isolate_state)
+    assert final.last_refusal == ""
+    assert final.last_refusal_needed_bytes == 0
+    # Everything else is as the refused run left it.
+    assert (final.last_heartbeat_at_ms, final.last_heartbeat_status) == (111, "error")
+    assert (final.last_backup_at_ms, final.last_cloud_bytes) == (42, 80)
+    assert final.last_snapshot_count == 3
+
+    # With no refusal on record the file is not touched at all, as before.
+    before = isolate_state.read_bytes()
+    stamp = isolate_state.stat().st_mtime_ns
+    with (
+        patch(
+            "clawkeep.runner.api.mint_credentials",
+            side_effect=ApiError("auth", "Token revoked", 401),
+        ),
+        patch("clawkeep.runner.api.heartbeat"),
+    ):
+        assert runner.run_once(_cfg(tmp_path), "claw_x") == runner.EXIT_AUTH_REVOKED
+    assert isolate_state.read_bytes() == before
+    assert isolate_state.stat().st_mtime_ns == stamp
 
 
 def test_state_round_trips_a_refusal_and_survives_a_garbled_one(tmp_path: Path) -> None:

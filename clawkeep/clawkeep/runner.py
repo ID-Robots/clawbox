@@ -482,7 +482,9 @@ def _run_once_locked(cfg: Config, token: str, *, label: str | None = None) -> in
     """
     st = state.load()
     # Whatever the last run was refused for, this run answers for itself: every
-    # branch below that saves `st` saves it without the old refusal.
+    # branch below that saves `st` saves it without the old refusal, and the
+    # one branch that saves nothing else (a revoked pairing) saves that.
+    had_refusal = bool(st.last_refusal)
     _clear_refusal(st)
 
     # Encryption gate — refuse to run if no passphrase is set. The user-
@@ -515,7 +517,12 @@ def _run_once_locked(cfg: Config, token: str, *, label: str | None = None) -> in
     except ApiError as e:
         if e.kind == "auth":
             log.error("auth failed: %s — token may be revoked, run 'clawkeep pair' again", e)
-            # No portal exchange happened — don't heartbeat or stamp state.
+            # No portal exchange happened — don't heartbeat or stamp state. The
+            # last run's refusal is not this run's, though: left on disk, the
+            # app went on quoting the sizes of a backup that was not even
+            # attempted this time. Only that is written, and only if it was there.
+            if had_refusal:
+                state.save(st)
             return EXIT_AUTH_REVOKED
         msg_prefix = {"quota_full": "quota full", "tier": "tier", "server": "server"}.get(e.kind)
         prefixed = f"{msg_prefix}: {e}" if msg_prefix else str(e)
