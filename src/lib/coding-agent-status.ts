@@ -18,7 +18,7 @@
  * to one and not the other used to compile, and the mismatch was found at
  * the restart that dropped the record.
  */
-export const RUN_STATUSES = ["running", "completed", "failed", "stopped", "paused", "draft", "gave_up"] as const;
+export const RUN_STATUSES = ["running", "completed", "failed", "stopped", "paused", "draft", "gave_up", "queued"] as const;
 
 export type CodingRunStatus = (typeof RUN_STATUSES)[number];
 
@@ -212,11 +212,23 @@ export function isLive(status: CodingRunStatus): boolean {
 
 /**
  * Held by the owner, not history: a live run, a paused one waiting to be
- * resumed, a draft waiting to be started. Never cleared, never trimmed to
- * make room, never picked as "the last finished run".
+ * resumed, a draft waiting to be started, a QUEUED one waiting for a slot.
+ * Never cleared, never trimmed to make room, never picked as "the last
+ * finished run".
  */
 export function isHeld(status: CodingRunStatus): boolean {
-  return status === "running" || status === "paused" || status === "draft";
+  return status === "running" || status === "paused" || status === "draft" || status === "queued";
+}
+
+/**
+ * Waiting for a slot: the box was already running every run it allows
+ * (`coding_agent_max_parallel_runs`) when this one was asked for, so it was
+ * QUEUED rather than refused — persisted, started by the box itself, in the
+ * order asked, when a run ends. Not live (no process, no slot), and not
+ * settled. Only the owner cancels one.
+ */
+export function isQueued(status: CodingRunStatus): boolean {
+  return status === "queued";
 }
 
 /** Over, one way or another — what the history list and the review pass look at. */

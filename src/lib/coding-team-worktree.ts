@@ -343,11 +343,17 @@ function leftovers(porcelain: string): { files: string[]; left: string[] } {
   return { files: [...paths].filter((p) => !never(p)), left: [...paths].filter(never) };
 }
 
-/** The worktree's files go; its branch stays as history. */
-export function removeWorktree(dir: string, worktreePath: string): Promise<void> {
+/**
+ * The worktree's files go; its branch stays as history — unless it is named in
+ * `dropBranch`: a worktree made for an attempt that never started (its task
+ * stopped being ready while it was made) leaves no history, and its branch
+ * name is the one the task's next attempt will ask for.
+ */
+export function removeWorktree(dir: string, worktreePath: string, opts: { dropBranch?: string } = {}): Promise<void> {
   return withDirLock(dir, async () => {
     await git(dir, ["worktree", "remove", "--force", worktreePath]);
     await git(dir, ["worktree", "prune"]);
+    if (opts.dropBranch) await git(dir, ["branch", "-D", opts.dropBranch]);
   });
 }
 

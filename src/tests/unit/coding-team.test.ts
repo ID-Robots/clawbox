@@ -57,6 +57,26 @@ vi.mock("@/lib/coding-team-worktree", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/coding-team-worktree")>();
   return { ...actual, ...plumbing };
 });
+// GitHub, faked where the orchestrator reaches it: a team whose goal asks for
+// a pull request opens, reads, pushes and merges through these. A team whose
+// goal asks for none never calls them.
+const github = vi.hoisted(() => ({
+  openPullRequest: vi.fn(),
+  readPullRequest: vi.fn(),
+  mergePullRequest: vi.fn(),
+  markPullRequestReady: vi.fn(),
+  pushBranch: vi.fn(),
+  readReviewSnapshot: vi.fn(),
+  readFailedCheckLogs: vi.fn(),
+}));
+vi.mock("@/lib/coding-pr", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/coding-pr")>();
+  return { ...actual, openPullRequest: github.openPullRequest, readPullRequest: github.readPullRequest, mergePullRequest: github.mergePullRequest, markPullRequestReady: github.markPullRequestReady };
+});
+vi.mock("@/lib/coding-review", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/coding-review")>();
+  return { ...actual, pushBranch: github.pushBranch, readReviewSnapshot: github.readReviewSnapshot, readFailedCheckLogs: github.readFailedCheckLogs };
+});
 
 type Team = typeof import("@/lib/coding-team");
 let team: Team;
@@ -588,6 +608,85 @@ describe("a worker the owner PAUSED", () => {
     expect(plumbing.mergeWorkerBranch.mock.calls.map((c) => c[1]).filter((b: string) => /-t1-1$/.test(b))).toHaveLength(1);
     // …and t2, which depends on t1, ran.
     expect(done.tasks.find((t) => t.task_id === "t2")).toMatchObject({ status: "complete" });
+  });
+});
+
+describe("dependency gating: a dependent starts only on an ACCEPTED dependency", () => {
+  it("does not dispatch a dependent while its dependency's reviewer is still reading it — and builds it on the accepted redo", async () => {
+    // Seen live (2026-10-10): t2 finished while t1's reviewer was still at
+    // work, the loop woke, found t1 "complete" and started t3 on it — and the
+    // reviewer then rejected t1. t3 had been built on work that did not stand.
+    outcomes = [
+      { summary: JSON.stringify([
+        { task_description: "Scaffold index.html", files_hint: ["index.html"] },
+        { task_description: "Write styles.css", files_hint: ["styles.css"] },
+        { task_description: "Wire app.js", depends_on: ["t1"], files_hint: ["app.js"] },
+      ]) },
+      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: "styles done", filesTouched: ["styles.css"] },
+      { summary: "index redone", filesTouched: ["index.html"] },
+      { summary: "app done", filesTouched: ["app.js"] },
+    ];
+    // t1's reviewer is slow — HELD for a poll — and rejects; every later review accepts.
+    reviews = [
+      { status: "paused", resumesAs: { summary: JSON.stringify({ verdict: "rejected", notes: "The form does not submit." }) } } as (typeof reviews)[number],
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+
+    expect(done.status).toBe("done");
+    const order = done.log.map((e) => e.message);
+    const accepted = order.findIndex((m) => m.startsWith("Task t1 accepted"));
+    const t3Assigned = order.findIndex((m) => /^Task t3 assigned/.test(m));
+    expect(order.findIndex((m) => m.startsWith("Task t1 rejected"))).toBeGreaterThan(-1);
+    // t3 was handed out only after t1's redo was accepted — exactly once.
+    expect(accepted).toBeGreaterThan(-1);
+    expect(t3Assigned).toBeGreaterThan(accepted);
+    expect(done.tasks.find((t) => t.task_id === "t3")).toMatchObject({ status: "complete", attempts: 1, holds: 0 });
+    expect(starts.filter((s) => (s.team as { role: string; taskId: string }).role === "worker").map((s) => (s.team as { taskId: string }).taskId)).toEqual(["t1", "t2", "t1", "t3"]);
+  });
+
+  it("holds a finished dependent the suite did not point at when its dependency is sent back, and runs it again on the new merged state", async () => {
+    const dir = path.join(root, "site");
+    fs.mkdirSync(path.join(dir, "tests"), { recursive: true });
+    const MODULE = "FACTORS = {('mi', 'km'): 1.609344}\n\ndef convert(value, src, dst):\n    return round(value * FACTORS[(src, dst)], 6)\n";
+    const FIXED = "FACTORS = {('mi', 'km'): 1.609344, ('km', 'mi'): 1 / 1.609344}\n\ndef convert(value, src, dst):\n    return round(value * FACTORS[(src, dst)], 6)\n";
+    fs.writeFileSync(path.join(dir, "convert.py"), MODULE);
+    fs.writeFileSync(path.join(dir, "tests/test_convert.py"), "import unittest\nfrom convert import convert\n\nclass TestConvert(unittest.TestCase):\n    def test_km_to_mi(self):\n        self.assertEqual(convert(1.609344, 'km', 'mi'), 1.0)\n");
+    runner.resolveWorkingDirectory.mockResolvedValue({ directory: dir, projectId: null });
+    outcomes = [
+      { summary: shaped({ parallelism: 1, review: "each", rationale: "" }, JSON.stringify([
+        { task_description: "Write the converter, convert.py", files_hint: ["convert.py"] },
+        { task_description: "Document it in README.md", depends_on: ["t1"], files_hint: ["README.md"] },
+      ])) },
+      { summary: "Wrote convert.py.", filesTouched: ["convert.py"] },
+      { summary: "Wrote the README.", filesTouched: ["README.md"] },
+      { summary: "Added km → mi.", filesTouched: ["convert.py"] },
+      { summary: "README checked against the new pairs.", filesTouched: ["README.md"] },
+    ];
+    let t1Workers = 0;
+    runner.startRun.mockImplementation(async (input: Record<string, unknown>) => {
+      const who = input.team as { role: string; taskId: string | null };
+      if (who.role === "worker" && who.taskId === "t1" && ++t1Workers === 2) fs.writeFileSync(path.join(dir, "convert.py"), FIXED);
+      return fakeRun(input);
+    });
+    const board = await team.startTeam({ goal: "A unit converter", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+
+    expect(done.status).toBe("done");
+    // The traceback named convert.py: t1 went back as the suite's suspect, and
+    // t2 — accepted, but built on the t1 that was sent back — was HELD: set
+    // back without a rejection, its try not spent, and run again after t1.
+    expect(done.tasks.map((t) => [t.task_id, t.status, t.attempts, t.rejections, t.holds])).toEqual([["t1", "complete", 2, 1, 0], ["t2", "complete", 2, 0, 1]]);
+    const hold = done.log.find((e) => e.type === "hold");
+    expect(hold).toMatchObject({ actor: { kind: "system" }, task_id: "t2" });
+    expect(hold!.message).toMatch(/^Task t2 held: its dependency t1 was reopened \(rejected — The project's own tests fail on the merged result.*\)\. Its result is set aside; it starts again on the new merged state once t1 is accepted\.$/);
+    const workers = starts.filter((s) => (s.team as { role: string }).role === "worker");
+    expect(workers.map((s) => (s.team as { taskId: string }).taskId)).toEqual(["t1", "t2", "t1", "t2"]);
+    expect(String(workers[3].task)).toContain("This task was done before on top of t1, which has since been reopened");
+    expect(String(workers[3].task)).toContain("What that attempt merged is already in the files");
+    // A hold is not a guardrail: no alert.
+    expect(done.alerts).toBe(0);
   });
 });
 
@@ -1438,7 +1537,7 @@ describe("a team that works", () => {
     const board = await team.startTeam({ goal: "g", directory: "site", source: "agent" });
     const done = await finished(board.id);
     expect(done.status).toBe("failed");
-    expect(done.error).toBe("Tasks t1 failed; t2 never ran.");
+    expect(done.error).toBe("Tasks t1 failed; t2 (waiting on t1, failed) never ran.");
     expect(done.tasks[0]).toMatchObject({ status: "failed", result: "Stopped at the cost ceiling", review: null });
     expect(starts).toHaveLength(2);
   });
@@ -1457,7 +1556,7 @@ describe("a team that works", () => {
 });
 
 describe("the gates", () => {
-  it("refuses while the switch is off, an empty goal, and a second team at once", async () => {
+  it("refuses while the switch is off and an empty goal, and QUEUES a second team at once", async () => {
     runner.isCodingAgentEnabled.mockResolvedValueOnce(false);
     await expect(team.startTeam({ goal: "g", source: "agent" })).rejects.toMatchObject({ kind: "disabled" });
     await expect(team.startTeam({ goal: "   ", source: "agent" })).rejects.toMatchObject({ kind: "invalid" });
@@ -1466,7 +1565,11 @@ describe("the gates", () => {
     runner.waitForRun.mockImplementationOnce(() => new Promise((r) => { release = () => r(runs.get("run-00000001")); }));
     const first = await team.startTeam({ goal: "g", source: "agent" });
     expect(team.activeTeamId()).toBe(first.id);
-    await expect(team.startTeam({ goal: "another", source: "agent" })).rejects.toMatchObject({ kind: "busy" });
+    const second = await team.startTeam({ goal: "another", source: "agent" });
+    expect(second).toMatchObject({ status: "queued", queuePosition: 1 });
+    expect(team.activeTeamId()).toBe(first.id);
+    // Taken out again by the owner, so this case goes on as it always did.
+    expect(team.cancelQueuedTeam(second.id).status).toBe("stopped");
     outcomes = [{ summary: "nope" }];
     Object.assign(runs.get("run-00000001")!, { status: "completed", summary: "nope" });
     release();
@@ -2374,5 +2477,206 @@ describe("the worker's brief: when to use team_message", () => {
 
   it("puts scratch files in the evidence folder only — never in /tmp, never beside the project", () => {
     expect(team.WORKER_BRIEF).toContain("Scratch files go in your evidence folder only — never in /tmp, never beside the project. A write anywhere else is refused, and a refused write counts against your task.");
+  });
+});
+
+describe("a second team: queued, not refused", () => {
+  const ONE_TASK = JSON.stringify([{ task_description: "Scaffold index.html", files_hint: ["index.html"] }]);
+
+  it("waits on disk with its place while one works, and starts by itself when that one settles", async () => {
+    outcomes = [
+      { summary: ONE_TASK },
+      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: ONE_TASK },
+      { summary: "index done again", filesTouched: ["index.html"] },
+    ];
+    // The first team's planner holds until the second has been asked for.
+    let release: () => void = () => {};
+    const plain = runner.waitForRun.getMockImplementation()!;
+    runner.waitForRun.mockImplementationOnce((id: string) => new Promise((r) => { release = () => r(plain(id, 0)); }));
+    const first = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const second = await team.startTeam({ goal: "Build it again", directory: "site", source: "agent" });
+    expect(second).toMatchObject({ status: "queued", queuePosition: 1 });
+    // Read back from disk, a queued team is not an orphan of a restart.
+    expect(team.getTeam(second.id)).toMatchObject({ status: "queued", queuePosition: 1 });
+    expect(team.listTeams().find((t) => t.id === second.id)).toMatchObject({ status: "queued", queuePosition: 1 });
+    release();
+
+    expect((await finished(first.id)).status).toBe("done");
+    const done = await finished(second.id);
+    expect(done.status).toBe("done");
+    expect(done.log.map((e) => e.message)).toEqual(expect.arrayContaining([
+      `Team → queued: Waiting for team ${first.id} to finish`,
+      "Team → planning: Its turn in the queue came",
+    ]));
+    expect(done.queuePosition).toBeUndefined();
+  });
+
+  it("is taken out of the queue by the owner's cancel alone, never by a stop", async () => {
+    let release: () => void = () => {};
+    runner.waitForRun.mockImplementationOnce(() => new Promise((r) => { release = () => r(runs.get("run-00000001")); }));
+    const first = await team.startTeam({ goal: "g", source: "owner" });
+    const second = await team.startTeam({ goal: "h", source: "agent" });
+    expect(() => team.stopTeam(second.id)).toThrow(/Only the owner can cancel a queued team/);
+    const canceled = team.cancelQueuedTeam(second.id);
+    expect(canceled.status).toBe("stopped");
+    expect(canceled.log[canceled.log.length - 1]).toMatchObject({ actor: { kind: "owner" }, message: "Team → stopped: Canceled by the owner before it started" });
+    Object.assign(runs.get("run-00000001")!, { status: "completed", summary: "nope" });
+    outcomes = [{ summary: "nope" }];
+    release();
+    await finished(first.id);
+    // Canceled stays canceled: nothing started it when the box came free.
+    expect(team.getTeam(second.id)?.status).toBe("stopped");
+  });
+
+  it("is started at boot when it was waiting at a restart", async () => {
+    // What a restart leaves: a queued board on disk and no team in this process.
+    const board = await import("@/lib/coding-team-board");
+    const queued = board.createBoard({ goal: "Build it", projectId: null, directory: "/home/clawbox/Projects/site", source: "owner" }, { kind: "owner" });
+    board.setTeamStatus(queued, { kind: "system" }, "queued", "Waiting for team team-00000000 to finish");
+    board.saveBoard(queued);
+    outcomes = [{ summary: ONE_TASK }, { summary: "index done", filesTouched: ["index.html"] }];
+    expect(team.getTeam(queued.id)?.status).toBe("queued");
+    const started = await team.startNextQueuedTeam();
+    expect(started?.id).toBe(queued.id);
+    expect((await finished(queued.id)).status).toBe("done");
+  });
+
+  it("waits while the coding agent is switched off rather than failing", async () => {
+    const board = await import("@/lib/coding-team-board");
+    const queued = board.createBoard({ goal: "Build it", projectId: null, directory: "/home/clawbox/Projects/site", source: "owner" }, { kind: "owner" });
+    board.setTeamStatus(queued, { kind: "system" }, "queued", "Waiting");
+    board.saveBoard(queued);
+    runner.isCodingAgentEnabled.mockResolvedValue(false);
+    expect(await team.startNextQueuedTeam()).toBeNull();
+    expect(team.getTeam(queued.id)?.status).toBe("queued");
+  });
+});
+
+
+describe("the pull request the goal asks for: the orchestrator's, never a worker's", () => {
+  const GREEN = { state: "OPEN", mergeable: "MERGEABLE", checks: { total: 2, passed: 2, failed: 0, pending: 0 }, noChecks: false, isDraft: false, labels: [] };
+  const RED = { state: "OPEN", mergeable: "MERGEABLE", checks: { total: 2, passed: 1, failed: 1, pending: 0 }, noChecks: false, isDraft: false, labels: [] };
+  const PENDING = { ...GREEN, checks: { total: 2, passed: 1, failed: 0, pending: 1 } };
+  const FAILING = { name: "test (20.x)", state: "fail", url: "https://github.com/o/r/actions/runs/9/job/1" };
+  const LOG = "test (20.x)\tRun\t2026-10-11T10:00:00.1Z  FAIL  app.test.js > the form > submits\ntest (20.x)\tRun\t2026-10-11T10:00:00.2Z  ❯ app.js:3:1";
+
+  beforeEach(() => {
+    team._setTeamPrTimingForTests(5, 60_000);
+    github.openPullRequest.mockResolvedValue({ ok: true, number: 41, url: "https://github.com/o/r/pull/41" });
+    github.mergePullRequest.mockResolvedValue({ ok: true });
+    github.pushBranch.mockResolvedValue({ ok: true });
+    github.readReviewSnapshot.mockResolvedValue({ checks: [FAILING] });
+    github.readFailedCheckLogs.mockResolvedValue([{ check: FAILING, log: LOG }]);
+  });
+
+  it("opens it only once every task is accepted, and merges it when the goal asks and every check passes", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    github.readPullRequest.mockResolvedValueOnce(PENDING).mockResolvedValue(GREEN);
+    const board = await team.startTeam({ goal: "Build it, open a pull request and merge it when CI is green", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+
+    expect(done.status).toBe("done");
+    expect(github.openPullRequest).toHaveBeenCalledTimes(1);
+    expect(github.openPullRequest.mock.calls[0][0]).toMatchObject({ directory: "/home/clawbox/Projects/site", branch: `clawbox/${board.id}`, base: "master", title: "Coding team: Build it, open a pull request and merge it when CI is green" });
+    expect(github.mergePullRequest).toHaveBeenCalledTimes(1);
+    expect(github.mergePullRequest).toHaveBeenCalledWith("/home/clawbox/Projects/site", 41);
+    expect(done.pr).toMatchObject({ number: 41, phase: "merged", merge: true, ciRounds: 0 });
+    // After both acceptances, never before.
+    const messages = done.log.map((e) => e.message);
+    const opened = messages.findIndex((m) => m.startsWith("Opened pull request #41"));
+    expect(opened).toBeGreaterThan(messages.findIndex((m) => m.startsWith("Task t2 accepted")));
+    expect(messages).toContain("Merged pull request #41: every task accepted, the suite green, the final review passed and every check green.");
+  });
+
+  it("leaves it open, green, when the goal asked for a pull request and no merge", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    github.readPullRequest.mockResolvedValue(GREEN);
+    const board = await team.startTeam({ goal: "Build it and open a PR", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.pr).toMatchObject({ phase: "green", merge: false });
+    expect(github.mergePullRequest).not.toHaveBeenCalled();
+  });
+
+  it("opens none for a goal that asks for none", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    expect((await finished(board.id)).pr).toBeNull();
+    expect(github.openPullRequest).not.toHaveBeenCalled();
+  });
+
+  it("re-offers the task a red CI points at, with the failure, pushes the fix and watches again", async () => {
+    outcomes = [
+      { summary: PLAN },
+      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: "app done", filesTouched: ["app.js"] },
+      { summary: "app fixed", filesTouched: ["app.js"] },
+    ];
+    github.readPullRequest.mockResolvedValueOnce(RED).mockResolvedValue(GREEN);
+    const board = await team.startTeam({ goal: "Build it, open a PR and merge it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+
+    expect(done.status).toBe("done");
+    expect(done.pr).toMatchObject({ phase: "merged", ciRounds: 1 });
+    expect(done.pr?.failure).toMatchObject({ tests: ["app.test.js > the form > submits"], files: ["app.test.js", "app.js"] });
+    // t2's hint is app.js: it — and only it — went back, not counted against its tries.
+    expect(done.tasks.map((t) => [t.task_id, t.status, t.attempts, t.ciReoffers])).toEqual([["t1", "complete", 1, 0], ["t2", "complete", 2, 1]]);
+    const workers = starts.filter((s) => (s.team as { role: string }).role === "worker");
+    expect(workers.map((s) => (s.team as { taskId: string }).taskId)).toEqual(["t1", "t2", "t2"]);
+    const retry = String(workers[2].task);
+    expect(retry).toContain("A previous attempt was rejected: CI failed on pull request #41: test (20.x); failing tests: app.test.js > the form > submits.");
+    expect(retry).toMatch(/Do not push: the team's orchestrator pushes the fix/);
+    expect(github.pushBranch).toHaveBeenCalledTimes(1);
+    expect(github.pushBranch).toHaveBeenCalledWith("/home/clawbox/Projects/site", `clawbox/${board.id}`);
+    expect(done.log.find((e) => e.type === "ci")).toMatchObject({ actor: { kind: "system" }, task_id: "t2" });
+    // A red CI is not a guardrail: no alert.
+    expect(done.alerts).toBe(0);
+  });
+
+  it("fails the team, naming what still fails, after MAX_TEAM_CI_ROUNDS rounds of red", async () => {
+    outcomes = [{ summary: PLAN }, ...Array.from({ length: 6 }, (_, i) => ({ summary: `work ${i}`, filesTouched: [i === 0 ? "index.html" : "app.js"] }))];
+    github.readPullRequest.mockResolvedValue(RED);
+    const board = await team.startTeam({ goal: "Build it and open a PR", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("failed");
+    expect(done.error).toBe("The pull request's CI is still red after 2 rounds of fixes: CI failed on pull request #41: test (20.x); failing tests: app.test.js > the form > submits.");
+    expect(done.pr).toMatchObject({ phase: "failed", ciRounds: 2 });
+    expect(github.pushBranch).toHaveBeenCalledTimes(2);
+    expect(github.mergePullRequest).not.toHaveBeenCalled();
+  });
+
+  it("marks a draft ready once, and leaves it open — never polling for ever — when GitHub refuses", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    github.readPullRequest.mockResolvedValue({ ...GREEN, isDraft: true });
+    github.markPullRequestReady.mockResolvedValue({ ok: false, detail: "gh: could not mark it ready." });
+    const board = await team.startTeam({ goal: "Build it, open a pull request and merge it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.pr).toMatchObject({ phase: "left_open", detail: "gh: could not mark it ready." });
+    expect(github.markPullRequestReady).toHaveBeenCalledTimes(1);
+    expect(github.mergePullRequest).not.toHaveBeenCalled();
+  });
+
+  it("fails the team with GitHub's reason when the pull request cannot be opened", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    github.openPullRequest.mockResolvedValue({ ok: false, detail: "This project has no GitHub remote yet." });
+    const board = await team.startTeam({ goal: "Build it and open a pull request", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("failed");
+    expect(done.error).toBe("The goal asks for a pull request, and it could not be opened: This project has no GitHub remote yet.");
+  });
+});
+
+describe("a goal that asks for a pull request, in a project with no branch of its own", () => {
+  it("says on the board that none is opened, rather than skipping it in silence", async () => {
+    runner.resolveWorkingDirectory.mockResolvedValue({ directory: "/home/clawbox/clawbox/data/code-projects/site", projectId: "site" });
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    const board = await team.startTeam({ goal: "Build it and open a PR", projectId: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.pr).toBeNull();
+    expect(github.openPullRequest).not.toHaveBeenCalled();
+    expect(done.log.map((e) => e.message)).toContain("The goal asks for a pull request, but this team works in place (a code project, no branch of its own), so none is opened: the work stays in the project.");
   });
 });

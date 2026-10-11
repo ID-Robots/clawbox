@@ -1,13 +1,20 @@
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
 import { hasOwnerSession } from "@/lib/owner-session";
-import { CodingAgentError, ExperienceChoiceError, MAX_TASK_CHARS, PipelineChoiceError, ProviderChoiceError, httpStatusForCodingError, startRun } from "@/lib/coding-agent";
+import { CodingAgentError, ExperienceChoiceError, MAX_TASK_CHARS, PipelineChoiceError, ProviderChoiceError, httpStatusForCodingError, startOrQueueRun } from "@/lib/coding-agent";
 
 export const dynamic = "force-dynamic";
 
 /**
  * POST { task, projectId? | directory?, resumeRunId?, provider?, model?,
- * deliverable?, pipeline?, inputs?, experience? } → start a coding run.
+ * deliverable?, pipeline?, inputs?, experience?, fixCi? } → start a coding run.
+ *
+ * `fixCi: true` with `resumeRunId` is a "Fix CI" continuation: the run named
+ * had its pull request fail its checks (the record's `ci`), and the box
+ * appends what failed — the checks, the failing tests, the files, the tail of
+ * the failed jobs' logs — to `task`. Refused (400 `invalid`) without such a
+ * failure on record, for a failure a Fix CI was already started from, and past
+ * the chain's MAX_CI_FIX_ATTEMPTS.
  *
  * `experience` is what the training cluster's dispatcher selected from its
  * experience store for this task — exactly the JSON its
@@ -35,7 +42,11 @@ export const dynamic = "force-dynamic";
  * are a sentence for the owner rather than something to retry.
  *
  * Answers 202 immediately with the run record; the work continues in the
- * background and is polled through GET /setup-api/coding-agent/runs. The MCP
+ * background and is polled through GET /setup-api/coding-agent/runs. When the
+ * box is already running every run the owner allows, the run is QUEUED rather
+ * than refused (`startOrQueueRun`): 202 `{ started: false, queued: true, run }`,
+ * the record in status `queued` with its `queued.position`, started by the box
+ * itself in order as runs end — across a restart too. The MCP
  * client's default timeout is 8 s and OpenClaw reaps the MCP process after
  * ten idle minutes, so holding this request open for the run was never an
  * option.
@@ -53,7 +64,7 @@ export async function POST(request: Request) {
   let body: {
     task?: unknown; projectId?: unknown; directory?: unknown; resumeRunId?: unknown;
     provider?: unknown; model?: unknown; deliverable?: unknown; pipeline?: unknown;
-    inputs?: unknown; experience?: unknown;
+    inputs?: unknown; experience?: unknown; fixCi?: unknown;
   };
   try {
     body = await request.json();
@@ -79,7 +90,7 @@ export async function POST(request: Request) {
   const source = (await hasOwnerSession(request)) ? "owner" : "agent";
 
   try {
-    const run = await startRun({
+    const { run, queued } = await startOrQueueRun({
       task,
       projectId: typeof body.projectId === "string" ? body.projectId : null,
       directory: typeof body.directory === "string" ? body.directory : null,
@@ -114,8 +125,11 @@ export async function POST(request: Request) {
       // `readExperienceInput`, which refuses with a stable code, so nothing a
       // caller sent reaches the run's prompt before that reader has passed it.
       experience: body.experience,
+      // Only ever `true` or absent: what failed is the box's to append, from
+      // its own record of the named run — never the caller's.
+      ...(body.fixCi === true ? { fixCi: true } : {}),
     });
-    return NextResponse.json({ started: true, run }, { status: 202 });
+    return NextResponse.json({ started: !queued, queued, run }, { status: 202 });
   } catch (err) {
     if (err instanceof CodingAgentError) {
       // The provider/model refusal carries a `code` beside the shared 400, so a
