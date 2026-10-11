@@ -876,6 +876,7 @@ export const zh: Record<string, string> = {
   "codingAgent.stepCiFix": "正在修复 {run} 失败的 CI（第 {n} 次，共 {max} 次）",
   "codingAgent.ci.title": "拉取请求 #{n} 的 CI 失败",
   "codingAgent.ci.checks": "失败的检查：{checks}",
+  "codingAgent.ci.files": "失败涉及的文件：{files}",
   "codingAgent.ci.tests": "失败的测试（{n}）：",
   "codingAgent.ci.unread": "无法读取以下检查的日志：{checks}",
   "codingAgent.ci.log": "失败任务日志的末尾",

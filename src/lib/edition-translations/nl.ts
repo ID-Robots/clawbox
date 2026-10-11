@@ -866,6 +866,7 @@ export const nl: Record<string, string> = {
   "codingAgent.stepCiFix": "De mislukte CI van {run} wordt gerepareerd (poging {n} van {max})",
   "codingAgent.ci.title": "CI mislukt op pull request #{n}",
   "codingAgent.ci.checks": "Mislukte controles: {checks}",
+  "codingAgent.ci.files": "Bestanden die de fout noemt: {files}",
   "codingAgent.ci.tests": "Mislukte tests ({n}):",
   "codingAgent.ci.unread": "Geen log leesbaar voor: {checks}",
   "codingAgent.ci.log": "Het einde van het log van de mislukte jobs",

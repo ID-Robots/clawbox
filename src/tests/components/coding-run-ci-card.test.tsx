@@ -46,7 +46,8 @@ describe("CodingRunCiCard", () => {
     expect(screen.getByTestId("coding-agent-run-ci")).toHaveTextContent("CI failed on pull request #7");
     expect(screen.getByTestId("coding-agent-ci-checks")).toHaveTextContent("Failing checks: test (20.x), lint");
     expect(screen.getByTestId("coding-agent-ci-tests")).toHaveTextContent("Failing tests (1):src/tests/unit/cart.test.ts > cart > adds the tax");
-    expect(screen.getByText("src/lib/cart.ts")).toBeInTheDocument();
+    // Labelled, so the list is never read as one more failing test.
+    expect(screen.getByTestId("coding-agent-ci-files")).toHaveTextContent("Files the failure names: src/lib/cart.ts");
     expect(screen.getByText("No log could be read for: lint")).toBeInTheDocument();
     expect(screen.getByTestId("coding-agent-ci-log")).toHaveTextContent("AssertionError: expected 10 to be 11");
   });

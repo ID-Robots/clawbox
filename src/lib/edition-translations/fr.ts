@@ -866,6 +866,7 @@ export const fr: Record<string, string> = {
   "codingAgent.stepCiFix": "Correction de la CI échouée de {run} (essai {n} sur {max})",
   "codingAgent.ci.title": "La CI a échoué sur la pull request #{n}",
   "codingAgent.ci.checks": "Vérifications en échec : {checks}",
+  "codingAgent.ci.files": "Fichiers nommés par l'échec : {files}",
   "codingAgent.ci.tests": "Tests en échec ({n}) :",
   "codingAgent.ci.unread": "Aucun journal lisible pour : {checks}",
   "codingAgent.ci.log": "La fin du journal des tâches en échec",

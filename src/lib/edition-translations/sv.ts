@@ -862,6 +862,7 @@ export const sv: Record<string, string> = {
   "codingAgent.stepCiFix": "Lagar den misslyckade CI:n för {run} (försök {n} av {max})",
   "codingAgent.ci.title": "CI misslyckades på pull request #{n}",
   "codingAgent.ci.checks": "Misslyckade kontroller: {checks}",
+  "codingAgent.ci.files": "Filer som felet nämner: {files}",
   "codingAgent.ci.tests": "Misslyckade tester ({n}):",
   "codingAgent.ci.unread": "Ingen logg kunde läsas för: {checks}",
   "codingAgent.ci.log": "Slutet av loggen för de misslyckade jobben",

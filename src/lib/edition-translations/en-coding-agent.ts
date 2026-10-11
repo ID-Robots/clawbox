@@ -422,6 +422,7 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.stepCiFix": "Fixing the failed CI of {run} (attempt {n} of {max})",
   "codingAgent.ci.title": "CI failed on pull request #{n}",
   "codingAgent.ci.checks": "Failing checks: {checks}",
+  "codingAgent.ci.files": "Files the failure names: {files}",
   "codingAgent.ci.tests": "Failing tests ({n}):",
   "codingAgent.ci.unread": "No log could be read for: {checks}",
   "codingAgent.ci.log": "The end of the failed jobs' log",

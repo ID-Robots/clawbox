@@ -852,6 +852,7 @@ export const bg: Record<string, string> = {
   "codingAgent.stepCiFix": "Поправка на проваления CI на {run} (опит {n} от {max})",
   "codingAgent.ci.title": "CI се провали на pull request #{n}",
   "codingAgent.ci.checks": "Неуспешни проверки: {checks}",
+  "codingAgent.ci.files": "Файлове, посочени в грешката: {files}",
   "codingAgent.ci.tests": "Неуспешни тестове ({n}):",
   "codingAgent.ci.unread": "Не можа да се прочете лог за: {checks}",
   "codingAgent.ci.log": "Краят на лога на неуспешните задачи",

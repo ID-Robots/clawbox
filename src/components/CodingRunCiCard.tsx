@@ -97,7 +97,9 @@ export default function CodingRunCiCard({
         </div>
       )}
       {ci.files.length > 0 && (
-        <p className="mt-1 text-[11px] text-[var(--text-muted)] break-words font-mono">{ci.files.join(", ")}</p>
+        <p className="mt-1 text-[11px] text-[var(--text-secondary)] break-words" data-testid="coding-agent-ci-files">
+          {t("codingAgent.ci.files", { files: ci.files.join(", ") })}
+        </p>
       )}
       {ci.unread.length > 0 && (
         <p className="mt-1 text-[11px] text-amber-300/90">{t("codingAgent.ci.unread", { checks: ci.unread.join(", ") })}</p>

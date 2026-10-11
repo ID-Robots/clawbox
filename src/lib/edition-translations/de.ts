@@ -865,6 +865,7 @@ export const de: Record<string, string> = {
   "codingAgent.stepCiFix": "Behebe das fehlgeschlagene CI von {run} (Versuch {n} von {max})",
   "codingAgent.ci.title": "CI im Pull-Request #{n} fehlgeschlagen",
   "codingAgent.ci.checks": "Fehlgeschlagene Prüfungen: {checks}",
+  "codingAgent.ci.files": "Dateien, die der Fehler nennt: {files}",
   "codingAgent.ci.tests": "Fehlgeschlagene Tests ({n}):",
   "codingAgent.ci.unread": "Kein Log lesbar für: {checks}",
   "codingAgent.ci.log": "Das Ende des Logs der fehlgeschlagenen Jobs",

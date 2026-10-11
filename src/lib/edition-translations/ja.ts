@@ -867,6 +867,7 @@ export const ja: Record<string, string> = {
   "codingAgent.stepCiFix": "{run} の失敗した CI を修正中 ({max} 回中 {n} 回目)",
   "codingAgent.ci.title": "プルリクエスト #{n} の CI が失敗しました",
   "codingAgent.ci.checks": "失敗したチェック: {checks}",
+  "codingAgent.ci.files": "失敗が示すファイル: {files}",
   "codingAgent.ci.tests": "失敗したテスト ({n}):",
   "codingAgent.ci.unread": "ログを読めなかったチェック: {checks}",
   "codingAgent.ci.log": "失敗したジョブのログの末尾",
