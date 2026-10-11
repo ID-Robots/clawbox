@@ -95,6 +95,11 @@ interface BoxOptions {
   dipWatchDuringWait?: boolean;
   /** Replace the routing table with this route once, from inside the poll loop. */
   moveRouteMidWait?: string;
+  /**
+   * Once, from inside the poll loop: the route goes away AND the dip record can
+   * no longer be written — the watch sees the outage but cannot record it.
+   */
+  outageUnrecordableMidWait?: boolean;
 }
 
 /** A fake CLAWBOX_ROOT plus a PATH of stubs, so nothing touches a real radio. */
@@ -267,6 +272,11 @@ if [ ! -e "$m" ]; then : > "$m"; printf '%s\\n' ${JSON.stringify(opts.moveRouteM
     opts.dipWatchDuringWait
       ? `m=${JSON.stringify(path.join(root, "dip-watched"))}
 if [ ! -e "$m" ]; then : > "$m"; bash ${JSON.stringify(path.join(root, "libexec", "gateway-restart-when-online.sh"))} --watch-dip LIMITED; fi`
+      : "",
+    // A directory where the record is staged: the next write of it fails.
+    opts.outageUnrecordableMidWait
+      ? `m=${JSON.stringify(path.join(root, "outage-unrecordable"))}
+if [ ! -e "$m" ]; then : > "$m"; : > ${JSON.stringify(path.join(root, "routes"))}; mkdir -p ${JSON.stringify(path.join(root, "run", "connectivity-dip.new"))}; fi`
       : "",
     "true",
   ].filter(Boolean).join("\n"));
@@ -1238,6 +1248,52 @@ describe("a connectivity check that flaps is not a reconnection", () => {
     runWaiterArgs(["--connectivity", "NetworkManager reports full connectivity"], { CLAWBOX_DIP_FIRST_WAIT: "2" });
 
     expect(restarts()).toBe(1);
+  });
+
+  it("restarts when the watch saw an outage it could not record", () => {
+    // The first probe answered (`watching`); the second found no route, and the
+    // write of that `outage` failed. What is left on record is fresh and on the
+    // same route — but the watch that wrote it has stopped, so it is not a verdict.
+    makeBox({ defaultRoute: true, pingWorks: true, outageUnrecordableMidWait: true });
+    setConnectivity("limited");
+    runDispatcher("eth0", "connectivity-change", LIMITED);
+    followDispatches();
+    expect(dipVerdict()).toBe("watching");
+    expect(journalLines("could not record the connectivity dip")).toHaveLength(1);
+
+    // The route is back by the time NetworkManager says `full`.
+    moveRoute(ETH_ROUTE);
+    setConnectivity("full");
+    runDispatcher("eth0", "connectivity-change", FULL);
+    followDispatches();
+
+    expect(restarts()).toBe(1);
+    expect(existsSync(dipFile())).toBe(false);
+  });
+
+  it("trusts a `watching` verdict while its watch is still running between probes", async () => {
+    // The usual flap: NetworkManager's `full` lands while the watch sleeps
+    // between two polls — its last probe answered and it still holds the dip lock.
+    makeBox({ connectivity: ["full"], defaultRoute: true, pingWorks: true });
+    const lock = path.join(root, "run", "connectivity-dip.lock");
+    const holder = spawn("bash", ["-c", 'exec 8>>"$0" && flock -n 8 && echo held && exec sleep 20', lock], {
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        holder.stdout.once("data", () => resolve());
+        holder.once("exit", () => reject(new Error("could not take the dip lock")));
+      });
+      const uptime = Math.floor(Number(readFileSync("/proc/uptime", "utf-8").split(" ")[0]));
+      writeFileSync(dipFile(), `watching ${uptime - 5} eth0/192.0.2.1/192.0.2.50 ${uptime}\n`);
+
+      runWaiterArgs(["--connectivity", "NetworkManager reports full connectivity"]);
+
+      expect(restarts()).toBe(0);
+      expect(journalLines("not a reconnection; NOT restarting")).toHaveLength(1);
+    } finally {
+      holder.kill("SIGKILL");
+    }
   });
 
   it("restarts on a return to full with no dip on record — the first after a boot", () => {

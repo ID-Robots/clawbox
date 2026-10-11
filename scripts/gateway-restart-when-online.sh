@@ -334,13 +334,14 @@ record_restart_asked_for() {
 # request NM's return to `full` makes stands down only when that record shows
 # every probe of the dip answered, on the same route as now, up to moments ago.
 # Anything else — a probe that failed, a route that moved, a carrier that
-# dropped (the dispatcher clears the record), a watch that expired, was killed
-# or never got to probe — restarts exactly as before: standing down is the
-# dangerous half, and a swallowed restart is GH #529.
+# dropped (the dispatcher clears the record), a watch that expired, was killed,
+# never got to probe or could not record what it saw — restarts exactly as
+# before: standing down is the dangerous half, and a swallowed restart is GH #529.
 #
 # The record is one line in the root-owned tmpfs:
 #   <verdict> <opened> <route key or -> <last probe that answered or ->
-# `open` from the dispatcher, `watching` once a probe answered, `online` when
+# `open` from the dispatcher, `watching` once a probe answered (a verdict only
+# while that watch is still running — see dip_watch_running), `online` when
 # the watch saw NM back at `full`; `outage`, `moved`, `expired` and `unknown`
 # are final and stay until the return to `full` consumes the record, so a
 # second dip event inside the same dip (`limited`, then `portal`) cannot paper
@@ -379,6 +380,19 @@ write_dip_record() {
   return 1
 }
 
+# True while a dip watch is running: it holds the dip lock from before its
+# first probe until it exits. Taking the lock for a moment is the question, and
+# `-E` gives a lock that is HELD its own exit code, apart from every other
+# failure (no flock, a lock file that cannot be opened), which all answer "not
+# running". Without flock no watch ran at all: it refuses to watch unguarded.
+dip_watch_running() {
+  local rc=0
+  command -v flock >/dev/null 2>&1 || return 1
+  [ -e "$DIP_LOCK_FILE" ] || return 1
+  flock -n -E 75 "$DIP_LOCK_FILE" true 2>/dev/null || rc=$?
+  [ "$rc" -eq 75 ]
+}
+
 # True only when the dip on record was proven harmless for the route the box
 # is on NOW. Every unanswerable question answers "no", which restarts.
 dip_was_not_a_reconnection() {
@@ -390,7 +404,24 @@ dip_was_not_a_reconnection() {
     tries=$(( tries + 1 ))
     read_dip_record || return 1
   done
-  case "$DIP_VERDICT" in watching|online) ;; *) return 1 ;; esac
+  case "$DIP_VERDICT" in
+    online) ;;
+    watching)
+      # A dip still being judged, so it is the watch's word only while the
+      # watch is running. One that stops records how the dip ended — `online`,
+      # or a verdict that restarts — unless that write failed: then this
+      # `watching` is all that is left of a watch that may have seen the outage
+      # (or the moved route, or the expiry) it could not record. A stopped
+      # watch's `watching` restarts. Read once more first: the watch writes
+      # `online` before it lets go of the lock, so one that finished cleanly a
+      # moment ago is on record by now.
+      if ! dip_watch_running; then
+        read_dip_record || return 1
+        [ "$DIP_VERDICT" = online ] || return 1
+      fi
+      ;;
+    *) return 1 ;;
+  esac
   [ "$DIP_KEY" = "$key" ] || return 1
   case "$DIP_LAST_OK" in ''|*[!0-9]*) return 1 ;; esac
   now="$(monotonic_seconds)" || return 1
