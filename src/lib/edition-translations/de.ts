@@ -1107,6 +1107,7 @@ export const de: Record<string, string> = {
   "codingAgent.message.sending": "Wird gesendet…",
   "codingAgent.message.queued": "In Warteschlange",
   "codingAgent.message.delivered": "Zugestellt",
+  "codingAgent.message.deliveredMidTurn": "Während der Arbeit zugestellt",
   "codingAgent.message.failed": "Die Nachricht konnte nicht an den Lauf gesendet werden.",
   "codingAgent.message.errorEmpty": "Geben Sie etwas zum Senden ein.",
   "codingAgent.message.errorTooLong": "Diese Nachricht ist zu lang: höchstens {max} Zeichen.",
@@ -1511,6 +1512,8 @@ export const de: Record<string, string> = {
   "codingAgent.stepTeamMessageToRun": "Nachricht an {run}: {text}",
   "codingAgent.stepTeamMessageToLead": "Nachricht an die Teamleitung: {text}",
   "codingAgent.stepTeamMessageToAssistant": "Nachricht an den Assistenten: {text}",
+  "codingAgent.stepMessageMidTurn": "Nachricht während der Arbeit zugestellt: {text}",
+  "codingAgent.stepMessageToRun": "Nachricht an den Lauf: {text}",
   // What's new in 4.2 (TASK-1059, TASK-1195)
   "whatsNew.title": "Neu in 4.2",
   "whatsNew.subtitle": "Auf dieser ClawBox läuft jetzt ClawBox {version}.",

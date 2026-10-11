@@ -1094,6 +1094,7 @@ export const bg: Record<string, string> = {
   "codingAgent.message.sending": "Изпраща се…",
   "codingAgent.message.queued": "На опашка",
   "codingAgent.message.delivered": "Доставено",
+  "codingAgent.message.deliveredMidTurn": "Доставено по време на работа",
   "codingAgent.message.failed": "Съобщението не можа да бъде изпратено към изпълнението.",
   "codingAgent.message.errorEmpty": "Въведете нещо за изпращане.",
   "codingAgent.message.errorTooLong": "Съобщението е твърде дълго: най-много {max} знака.",
@@ -1498,6 +1499,8 @@ export const bg: Record<string, string> = {
   "codingAgent.stepTeamMessageToRun": "Съобщение към {run}: {text}",
   "codingAgent.stepTeamMessageToLead": "Съобщение към водещия на екипа: {text}",
   "codingAgent.stepTeamMessageToAssistant": "Съобщение към асистента: {text}",
+  "codingAgent.stepMessageMidTurn": "Съобщение, доставено по време на работа: {text}",
+  "codingAgent.stepMessageToRun": "Съобщение към изпълнението: {text}",
   // What's new in 4.2 (TASK-1059, TASK-1195)
   "whatsNew.title": "Какво ново в 4.2",
   "whatsNew.subtitle": "Тази ClawBox вече работи с ClawBox {version}.",

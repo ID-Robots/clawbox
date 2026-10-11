@@ -118,7 +118,11 @@ export type ProgressLabelKey =
   // SENDER's feed; what a run receives is already there as a queued message.
   | "teamMessageToRun"
   | "teamMessageToLead"
-  | "teamMessageToAssistant";
+  | "teamMessageToAssistant"
+  // A message delivered TO this run (src/lib/coding-run-messages.ts): mid-turn
+  // through its inbox hook, or as its next turn / with a start.
+  | "messageMidTurn"
+  | "messageToRun";
 
 export interface ProgressDescription {
   kind: ProgressKind;
@@ -502,6 +506,9 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^Team message to (run-[a-z0-9]{8}): (.+)$/, labelKey: "teamMessageToRun", icon: "forum", params: (m) => ({ run: m[1], text: m[2] }) },
   { re: /^Team message to the lead: (.+)$/, labelKey: "teamMessageToLead", icon: "forum", params: (m) => ({ text: m[1] }) },
   { re: /^Team message to the assistant: (.+)$/, labelKey: "teamMessageToAssistant", icon: "forum", params: (m) => ({ text: m[1] }) },
+  // runMessageProgressLine — the mid-turn shape first: the other is its prefix.
+  { re: /^Message to the run, mid-turn: (.+)$/, labelKey: "messageMidTurn", icon: "mark_chat_read", params: (m) => ({ text: m[1] }) },
+  { re: /^Message to the run: (.+)$/, labelKey: "messageToRun", icon: "chat", params: (m) => ({ text: m[1] }) },
 ];
 
 export function describeProgressLine(raw: string): ProgressDescription {

@@ -1215,7 +1215,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
     },
     { editions: ["openclaw", "hermes"], readOnly: false },
     async ({ run_id, text: message }: { run_id: string; text: string }) => {
-      const res = await apiPost<{ queued?: boolean; delivered?: boolean }>(
+      const res = await apiPost<{ queued?: boolean; delivered?: boolean; delivery?: "delivered" | "after_tool_call" | "next_start" }>(
         "/setup-api/coding-agent/message",
         { runId: run_id, text: message },
         { timeoutMs: 15_000, rules: MESSAGE_RULES },
@@ -1227,11 +1227,15 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
           "Call coding_agent_status to see whether the run is still going, and tell the user rather than retrying more than once.",
         );
       }
-      // The two endings mean different things to whoever is waiting, so they
-      // are said apart: one is "it has it", the other is "it will get it".
-      return res.delivered
-        ? text(`Run ${run_id} has been given the message and will take it into account in its current session. Tell the user it is passed on, then stop — do not poll for a reaction.`)
-        : text(`The message is queued for run ${run_id}. This ClawBox could not hand it over mid-turn, so the run receives it at its next step — when it goes back in for another attempt, or when the owner resumes it. Tell the user that, and do not send it again.`);
+      // The endings mean different things to whoever is waiting, so they are
+      // said apart: "delivered" is "it has it"; "queued" is "it will get it",
+      // with when. An older server answers only the boolean.
+      if (res.delivered || res.delivery === "delivered") {
+        return text(`Delivered: run ${run_id} has the message and is taking it into account in its current session. Tell the user it is passed on, then stop — do not poll for a reaction.`);
+      }
+      return res.delivery === "after_tool_call"
+        ? text(`Queued: the message is in run ${run_id}'s inbox and is handed to it mid-turn, the moment the tool call it is running now ends (a long build or test can take a few minutes). Tell the user it is on its way, and do not send it again.`)
+        : text(`Queued: run ${run_id} is not in a turn that can take it now, so it receives the message at its next start — when it goes back in for another attempt, or when the owner resumes it. Tell the user that, and do not send it again.`);
     },
   );
 

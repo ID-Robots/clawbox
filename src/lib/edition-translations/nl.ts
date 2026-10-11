@@ -1108,6 +1108,7 @@ export const nl: Record<string, string> = {
   "codingAgent.message.sending": "Versturen…",
   "codingAgent.message.queued": "In wachtrij",
   "codingAgent.message.delivered": "Bezorgd",
+  "codingAgent.message.deliveredMidTurn": "Tijdens de beurt bezorgd",
   "codingAgent.message.failed": "Kon dat bericht niet naar de run sturen.",
   "codingAgent.message.errorEmpty": "Typ iets om te versturen.",
   "codingAgent.message.errorTooLong": "Dat bericht is te lang: maximaal {max} tekens.",
@@ -1512,6 +1513,8 @@ export const nl: Record<string, string> = {
   "codingAgent.stepTeamMessageToRun": "Bericht aan {run}: {text}",
   "codingAgent.stepTeamMessageToLead": "Bericht aan de teamleiding: {text}",
   "codingAgent.stepTeamMessageToAssistant": "Bericht aan de assistent: {text}",
+  "codingAgent.stepMessageMidTurn": "Bericht tijdens de beurt bezorgd: {text}",
+  "codingAgent.stepMessageToRun": "Bericht aan de run: {text}",
   // What's new in 4.2 (TASK-1059, TASK-1195)
   "whatsNew.title": "Nieuw in 4.2",
   "whatsNew.subtitle": "Deze ClawBox draait nu ClawBox {version}.",

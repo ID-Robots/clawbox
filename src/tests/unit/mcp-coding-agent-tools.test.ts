@@ -469,18 +469,37 @@ describe("coding_run_message", () => {
       { runId: "run-k3x9q2ab", text: "use tabs, not spaces" },
       expect.anything(),
     );
+    expect(out.text).toMatch(/^Delivered:/);
     expect(out.text).toMatch(/current session/);
     expect(out.text).toMatch(/do not poll/i);
   });
 
-  it("says it is only QUEUED when the device could not hand it over mid-turn", async () => {
+  it("says it is only QUEUED when the run cannot take it before its next start", async () => {
+    apiPost.mockResolvedValue({ queued: true, delivered: false, delivery: "next_start" });
+    const out = await harness().call("coding_run_message", { run_id: "run-k3x9q2ab", text: "use tabs" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/^Queued:/);
+    expect(out.text).toMatch(/next start/);
+    expect(out.text).toMatch(/do not send it again/i);
+  });
+
+  it("says QUEUED for the end of the tool call under way when the message is in the run's inbox", async () => {
+    apiPost.mockResolvedValue({ queued: true, delivered: false, delivery: "after_tool_call" });
+    const out = await harness().call("coding_run_message", { run_id: "run-k3x9q2ab", text: "use tabs" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/^Queued:/);
+    expect(out.text).toMatch(/mid-turn, the moment the tool call it is running now ends/);
+    expect(out.text).toMatch(/do not send it again/i);
+  });
+
+  it("reads an older device's answer, which has only the boolean", async () => {
     apiPost.mockResolvedValue({ queued: true, delivered: false });
     const out = await harness().call("coding_run_message", { run_id: "run-k3x9q2ab", text: "use tabs" });
     expect(out.isError).toBe(false);
     if (out.isError) return;
-    expect(out.text).toMatch(/queued/i);
-    expect(out.text).toMatch(/next step/);
-    expect(out.text).toMatch(/do not send it again/i);
+    expect(out.text).toMatch(/^Queued:.*next start/);
   });
 
   it("explains an owner-started run instead of reporting a rejected token", async () => {

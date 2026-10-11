@@ -1109,6 +1109,7 @@ export const ja: Record<string, string> = {
   "codingAgent.message.sending": "送信中…",
   "codingAgent.message.queued": "待機中",
   "codingAgent.message.delivered": "配信済み",
+  "codingAgent.message.deliveredMidTurn": "作業中に配信済み",
   "codingAgent.message.failed": "この実行にメッセージを送信できませんでした。",
   "codingAgent.message.errorEmpty": "送信する内容を入力してください。",
   "codingAgent.message.errorTooLong": "メッセージが長すぎます: 最大 {max} 文字です。",
@@ -1512,6 +1513,8 @@ export const ja: Record<string, string> = {
   "codingAgent.stepTeamMessageToRun": "{run} へのメッセージ：{text}",
   "codingAgent.stepTeamMessageToLead": "チームリーダーへのメッセージ：{text}",
   "codingAgent.stepTeamMessageToAssistant": "アシスタントへのメッセージ：{text}",
+  "codingAgent.stepMessageMidTurn": "作業中にメッセージを届けました: {text}",
+  "codingAgent.stepMessageToRun": "実行へのメッセージ: {text}",
   // What's new in 4.2 (TASK-1059, TASK-1195)
   "whatsNew.title": "4.2 の新機能",
   "whatsNew.subtitle": "この ClawBox は ClawBox {version} で動作しています。",

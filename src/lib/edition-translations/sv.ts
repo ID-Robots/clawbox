@@ -1104,6 +1104,7 @@ export const sv: Record<string, string> = {
   "codingAgent.message.sending": "Skickar…",
   "codingAgent.message.queued": "I kö",
   "codingAgent.message.delivered": "Levererat",
+  "codingAgent.message.deliveredMidTurn": "Levererat mitt i arbetet",
   "codingAgent.message.failed": "Kunde inte skicka meddelandet till körningen.",
   "codingAgent.message.errorEmpty": "Skriv något att skicka.",
   "codingAgent.message.errorTooLong": "Meddelandet är för långt: högst {max} tecken.",
@@ -1508,6 +1509,8 @@ export const sv: Record<string, string> = {
   "codingAgent.stepTeamMessageToRun": "Meddelande till {run}: {text}",
   "codingAgent.stepTeamMessageToLead": "Meddelande till teamets ledare: {text}",
   "codingAgent.stepTeamMessageToAssistant": "Meddelande till assistenten: {text}",
+  "codingAgent.stepMessageMidTurn": "Meddelande levererat mitt i arbetet: {text}",
+  "codingAgent.stepMessageToRun": "Meddelande till körningen: {text}",
   // What's new in 4.2 (TASK-1059, TASK-1195)
   "whatsNew.title": "Nytt i 4.2",
   "whatsNew.subtitle": "Den här ClawBoxen kör nu ClawBox {version}.",

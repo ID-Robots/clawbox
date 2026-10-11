@@ -1118,6 +1118,7 @@ export const zh: Record<string, string> = {
   "codingAgent.message.sending": "发送中…",
   "codingAgent.message.queued": "排队中",
   "codingAgent.message.delivered": "已送达",
+  "codingAgent.message.deliveredMidTurn": "已在运行中送达",
   "codingAgent.message.failed": "无法向该运行发送这条消息。",
   "codingAgent.message.errorEmpty": "请输入要发送的内容。",
   "codingAgent.message.errorTooLong": "这条消息太长：最多 {max} 个字符。",
@@ -1520,6 +1521,8 @@ export const zh: Record<string, string> = {
   "codingAgent.stepTeamMessageToRun": "发给 {run} 的消息：{text}",
   "codingAgent.stepTeamMessageToLead": "发给团队负责人的消息：{text}",
   "codingAgent.stepTeamMessageToAssistant": "发给助手的消息：{text}",
+  "codingAgent.stepMessageMidTurn": "已在运行中送达消息：{text}",
+  "codingAgent.stepMessageToRun": "发给运行的消息：{text}",
   // What's new in 4.2 (TASK-1059, TASK-1195)
   "whatsNew.title": "4.2 新功能",
   "whatsNew.subtitle": "这台 ClawBox 现在运行的是 ClawBox {version}。",

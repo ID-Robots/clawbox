@@ -393,7 +393,20 @@ import {
   streamJsonUserTurn,
   STREAM_INPUT_REFUSED,
   type RunMessage,
+  type RunMessageDelivery,
+  type RunMessageVia,
 } from "@/lib/coding-run-messages";
+import {
+  clearReceipts,
+  ensureRunInbox,
+  inboxPending,
+  inboxReceipts,
+  postToInbox,
+  reclaimInbox,
+  removeRunInbox,
+  runHookScriptPath,
+  runHookSettings,
+} from "@/lib/coding-run-inbox";
 
 // ─── Tunables ────────────────────────────────────────────────────────────────
 
@@ -1789,10 +1802,18 @@ export interface CodingRun {
    * scoped run outlives it, and its queue must outlive it too.
    *
    * Empty on every record written before this field. See
-   * src/lib/coding-run-messages.ts for the bounds and the two ways one is
+   * src/lib/coding-run-messages.ts for the bounds and the three ways one is
    * delivered.
    */
   messages: RunMessage[];
+  /**
+   * The current spawn was given its inbox hook (src/lib/coding-run-inbox.ts):
+   * a message sent now reaches it after the tool call it is in. On the record
+   * rather than only in memory, because a run reattached after a restart still
+   * has its hook and its inbox, and only the record can say so. Absent (false)
+   * on a record from before, and for a spawn whose hook script was missing.
+   */
+  midTurn?: boolean;
 }
 
 /**
@@ -4038,6 +4059,7 @@ function normalizeRun(raw: CodingRun): CodingRun {
     // is written to the harness's stdin and drawn on the run's page, and the
     // file it comes from is one a restore or a hand edit can have touched.
     messages: parseRunMessages((raw as { messages?: unknown }).messages),
+    midTurn: (raw as { midTurn?: unknown }).midTurn === true,
   };
 }
 
@@ -4258,6 +4280,19 @@ interface LiveRun {
   streamInput: boolean;
   /** Whether this process still holds the harness's stdin open. */
   stdinOpen: boolean;
+  /**
+   * The spawn has its inbox hook (CodingRun.midTurn): a message posted to its
+   * inbox is handed to the model after the tool call it is in.
+   */
+  midTurn: boolean;
+  /**
+   * A turn is under way, so the hook will run again: from the spawn to its
+   * result event, and again from a next turn written on stdin. A message sent
+   * outside one goes the next-turn or next-start way instead.
+   */
+  turnOpen: boolean;
+  /** Message ids this process put in the run's inbox and has no receipt for yet — what the tail looks for. */
+  inboxPosted: Set<string>;
   /**
    * The harness turned `--input-format stream-json` away before it ever spoke.
    * Makes the one automatic retry apply — running plain, which is the whole
@@ -4663,10 +4698,14 @@ function detachedState(run: CodingRun, tools: SpawnTools, lostToRestart: boolean
     unitWatch: null,
     stderrPath: null,
     scopeRefused: false,
-    // The pipes died with the server that opened them: a reattached run's
-    // queue waits for the next attempt or resume.
+    // The pipes died with the server that opened them — but not its hook: a
+    // reattached run with an inbox still takes a message mid-turn, and what
+    // was waiting in it when the last server went is still looked for.
     streamInput: false,
     stdinOpen: false,
+    midTurn: run.midTurn === true,
+    turnOpen: true,
+    inboxPosted: new Set<string>(run.midTurn === true ? safeInboxPending(run.id) : []),
     streamInputRefused: false,
     lostToRestart,
     openSubagents: new Map<string, ActiveSubagent>(),
@@ -4738,6 +4777,8 @@ function reattach(run: CodingRun, tools: SpawnTools): void {
   const state = detachedState(run, tools, false);
   live.set(run.id, state);
   followStream(run, state);
+  // What its hook handed over while no server was watching.
+  collectInboxReceipts(run, state);
   installExitHook();
   let settled = false;
   const settle = () => {
@@ -5367,9 +5408,40 @@ const REVIEWER_CLAUSE_HELPER = "before your final report, send the reviewer over
 const REVIEWER_CLAUSE_SEPARATE = "your changes get a separate, automatic adversarial review on this device — do not send the reviewer helper over your own work; spend that time on the tester.";
 
 /** The brief for a run whose changes are (or are not) reviewed separately. */
-export function headlessBrief(opts: { reviewedSeparately: boolean }): string {
-  return HEADLESS_BRIEF_TEMPLATE.replace(REVIEWER_CLAUSE_SLOT, opts.reviewedSeparately ? REVIEWER_CLAUSE_SEPARATE : REVIEWER_CLAUSE_HELPER);
+export function headlessBrief(opts: { reviewedSeparately: boolean; team?: boolean }): string {
+  const brief = HEADLESS_BRIEF_TEMPLATE.replace(REVIEWER_CLAUSE_SLOT, opts.reviewedSeparately ? REVIEWER_CLAUSE_SEPARATE : REVIEWER_CLAUSE_HELPER);
+  // A team's run is told the opposite of PR_AUTO_MERGE_BRIEF, in its place: a
+  // team goal that asks for a merge is the ORCHESTRATOR's to carry out, once,
+  // at the end — never a worker's, whatever its task text quotes of the goal.
+  return opts.team ? brief.replace(PR_AUTO_MERGE_BRIEF, TEAM_NO_MERGE_BRIEF) : brief;
 }
+
+/**
+ * What a coding team's run is told about pull requests, instead of
+ * PR_AUTO_MERGE_BRIEF. Seen live: a worker whose task text quoted a goal
+ * ending "…and merge the PR" merged it itself, mid-team, before the other
+ * tasks were in. `TEAM_MERGE_DENYLIST` and the hook's merge guard refuse the
+ * commands; this says why, so the run does not spend its turns on them.
+ */
+export const TEAM_NO_MERGE_BRIEF =
+  "You are one run of a coding team. Never merge a pull request, never push, and never turn on auto-merge — whatever your task or the team's goal says. The team's orchestrator opens and merges the pull request itself, once every task is accepted, the project's tests pass, the final review passed and every check is green; `gh pr merge`, `gh api` and `git push` are refused to you. Commit your work in your own folder and say in your final message what is ready.";
+
+/**
+ * The commands a coding team's run is refused outright (`--disallowedTools`):
+ * merging a pull request, and the roads around it — the API (`gh api`, the
+ * REST merge endpoint and the GraphQL mutation alike) and a push, which is a
+ * merge by other means. A worker's branch reaches the team's branch through the
+ * orchestrator's local merge, so a team run has no use for any of them. The
+ * prefix rules are the first fence; the hook's PreToolUse merge guard
+ * (scripts/coding-run-hook.mjs) reads the whole command line for the same
+ * shapes inside `bash -c`, after `&&` or behind `env`.
+ */
+export const TEAM_MERGE_DENYLIST: readonly string[] = [
+  "Bash(gh pr merge:*)",
+  "Bash(gh api:*)",
+  "Bash(git push:*)",
+  "Bash(hub merge:*)",
+];
 
 /**
  * What every run that can write is told about a pull request its task wants
@@ -5845,10 +5917,10 @@ export function buildRunMcpConfig(run: { id: string; directory: string; media?: 
 }
 
 /** The argv handed to the wrapper. Exported for the contract test. */
-export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; experience?: string | null; reviewedSeparately?: boolean; draftPullRequests?: boolean; allowRules?: readonly string[]; provider?: CodingProvider; streamInput?: boolean; run?: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null } }): string[] {
+export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; experience?: string | null; reviewedSeparately?: boolean; draftPullRequests?: boolean; allowRules?: readonly string[]; provider?: CodingProvider; streamInput?: boolean; hookSettings?: string | null; run?: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null } }): string[] {
   // A run whose diff a separate review will read is told not to review it
-  // twice — see REVIEWER_CLAUSE_SLOT.
-  const headless = headlessBrief({ reviewedSeparately: opts.reviewedSeparately === true });
+  // twice — see REVIEWER_CLAUSE_SLOT. A team's run is told it never merges.
+  const headless = headlessBrief({ reviewedSeparately: opts.reviewedSeparately === true, team: Boolean(opts.run?.team) });
   const brief = [
     // A read-only run has no Bash, no browser and no Write: the brief that
     // describes them would spend its steps on calls that are refused.
@@ -5906,6 +5978,10 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     // (measured on run-yuyqta4t: pomodoro-verification.md refused).
     args.push("--add-dir", artifactsDir(opts.run.id));
   }
+  // The run's hooks (src/lib/coding-run-inbox.ts): its inbox, read after every
+  // tool call, and a team run's merge guard. Inline JSON, like the MCP config:
+  // `--settings` is read whatever `--setting-sources` says.
+  if (opts.hookSettings) args.push("--settings", opts.hookSettings);
   // The three tool flags are variadic and swallow any positional that follows,
   // which is why the task travels on stdin and these come last.
   args.push("--tools", opts.readOnly ? READ_ONLY_TOOLS : toolsFor(true, opts.effort));
@@ -5955,7 +6031,7 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     // outranks an allow rule: without handing them over here, an owner rule for
     // the harness's own project notes would sit in argv underneath the
     // wholesale `~/.claude-ds/**` deny and grant exactly nothing.
-    args.push("--disallowedTools", ...fileDenyRules(allowRules), ...(opts.readOnly ? [] : BASH_KILL_DENYLIST));
+    args.push("--disallowedTools", ...fileDenyRules(allowRules), ...(opts.readOnly ? [] : BASH_KILL_DENYLIST), ...(opts.run?.team && !opts.readOnly ? TEAM_MERGE_DENYLIST : []));
   }
   return args;
 }
@@ -10300,6 +10376,11 @@ export async function armAnthropicAccounts(): Promise<void> {
 }
 
 function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): void {
+  // The process is gone and its hook with it: what the hook handed over is
+  // recorded, the rest is queued again for the next start (settleRunInbox),
+  // and the inbox goes — a respawn makes a fresh one.
+  settleRunInbox(run, state);
+  removeRunInbox(run.id);
   // The run's process tree is gone, so nothing it spawned is still working —
   // whatever the stream did or did not say about each sub-agent.
   state.openSubagents.clear();
@@ -10885,7 +10966,11 @@ function drainStream(run: CodingRun, state: LiveRun): void {
 function followStream(run: CodingRun, state: LiveRun): void {
   state.stream = { path: streamLogPath(run.id), offset: run.streamOffset, buffer: "", decoder: new StringDecoder("utf8") };
   state.stderrPath = stderrLogPath(run.id);
-  state.streamTimer = setInterval(() => drainStream(run, state), STREAM_POLL_MS);
+  state.streamTimer = setInterval(() => {
+    drainStream(run, state);
+    // The hook's receipts, while there is anything in the inbox to look for.
+    if (state.inboxPosted.size > 0) collectInboxReceipts(run, state);
+  }, STREAM_POLL_MS);
   state.streamTimer.unref();
 }
 
@@ -10943,7 +11028,13 @@ function spawnRun(
   // from this run's branch when it settles, and then to watch it — see
   // PR_DRAFT_BRIEF.
   const draftPullRequests = run.pr?.phase === "opening";
-  const dropped = buildSpawnArgv(tools.setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, experience: run.experienceBrief, reviewedSeparately, draftPullRequests, allowRules: run.allowRules, provider: run.provider, streamInput, run: { id: run.id, directory: run.directory, media: run.media, team: run.team } }));
+  // The run's inbox and hooks (src/lib/coding-run-inbox.ts). Whatever the
+  // previous spawn's hook did not take is the queue's again first — that
+  // process is gone, and the queue below is delivered this spawn's way.
+  settleRunInbox(run, null);
+  const hookSettings = spawnHookSettings(run);
+  run.midTurn = hookSettings !== null && hookSettings.inbox;
+  const dropped = buildSpawnArgv(tools.setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, experience: run.experienceBrief, reviewedSeparately, draftPullRequests, allowRules: run.allowRules, provider: run.provider, streamInput, hookSettings: hookSettings?.json ?? null, run: { id: run.id, directory: run.directory, media: run.media, team: run.team } }));
   // One evidence path everywhere — env, MCP config and --add-dir must never
   // disagree about where it is. Creation is best-effort: the MCP layer also
   // mkdirs lazily, so a failure here degrades evidence, never the run.
@@ -11027,6 +11118,9 @@ function spawnRun(
     // Set once the first turn has actually been written below; a spawn whose
     // stdin threw never had an open pipe to close.
     stdinOpen: false,
+    midTurn: run.midTurn === true,
+    turnOpen: true,
+    inboxPosted: new Set<string>(),
     streamInputRefused: false,
     lostToRestart: false,
     openSubagents: new Map<string, ActiveSubagent>(),
@@ -11130,9 +11224,10 @@ function spawnRun(
       state.stdinOpen = true;
       child.stdin?.write(streamJsonUserTurn(firstTurn));
       // Anything queued before the process existed — a message sent to a
-      // draft, or one that raced the start — goes in right behind the task
-      // rather than waiting for the first turn to end.
-      flushRunMessages(run, state);
+      // draft, or one that raced the start — goes to the inbox, for the
+      // first tool call; with no hook, in right behind the task rather than
+      // waiting for the first turn to end.
+      deliverRunMessages(run, state);
     } else {
       // No pipe to write to later, so anything already queued rides out with
       // the task itself — the boundary delivery, applied at the one boundary
@@ -11144,7 +11239,7 @@ function spawnRun(
         child.stdin.end(note ? `${firstTurn}\n\n${note}` : firstTurn);
         // Only once the bytes are on the pipe: with no stdin at all nothing
         // was said, and the queue is still the box's to deliver.
-        noteMessagesDelivered(run, waiting);
+        noteMessagesDelivered(run, waiting, "with_start");
       }
     }
   } catch {
@@ -11160,18 +11255,20 @@ function spawnRun(
  * the card, and the feed line is what makes the same fact visible in the
  * transcript preview and on the timeline.
  */
-function noteMessagesDelivered(run: CodingRun, messages: readonly RunMessage[]): void {
-  const now = Date.now();
+function noteMessagesDelivered(run: CodingRun, messages: readonly RunMessage[], via: RunMessageVia, at = Date.now()): void {
   let marked = 0;
   for (const message of messages) {
     if (message.deliveredAt !== null) continue;
-    message.deliveredAt = now;
+    message.deliveredAt = at;
+    message.via = via;
     // pushProgress scrubs the owner's secrets out of the line and caps it,
     // like every other step in the feed.
-    pushProgress(run, runMessageProgressLine(message.text));
+    pushProgress(run, runMessageProgressLine(message.text, via));
     marked += 1;
   }
-  if (marked > 0) persist();
+  // At once, not debounced: a mark that died with the process would deliver
+  // the message a second time at the next spawn.
+  if (marked > 0) persist(true);
 }
 
 /** Different paths one spawn is pointed at before the box stops saying it: a run that keeps missing its folder is told a few times, not thirty. */
@@ -11195,7 +11292,7 @@ const MAX_WORKTREE_HINTS = 3;
  * no longer reach it.
  */
 function hintWorktree(run: CodingRun, state: LiveRun, tool: string, counterpart: string, flush = true): void {
-  if (!state.streamInput || !state.stdinOpen) return;
+  if (!(state.midTurn && state.turnOpen) && !(state.streamInput && state.stdinOpen)) return;
   if (state.worktreeHinted.has(counterpart) || state.worktreeHinted.size >= MAX_WORKTREE_HINTS) return;
   state.worktreeHinted.add(counterpart);
   try {
@@ -11206,7 +11303,7 @@ function hintWorktree(run: CodingRun, state: LiveRun, tool: string, counterpart:
     return;
   }
   persist(true);
-  if (flush) flushRunMessages(run, state);
+  if (flush) deliverRunMessages(run, state);
 }
 
 /**
@@ -11237,8 +11334,106 @@ function flushRunMessages(run: CodingRun, state: LiveRun): number {
   }
   // Marked only once the bytes are on the pipe — "delivered" is a claim the
   // owner reads, and a message still in the queue is one the box owes them.
-  noteMessagesDelivered(run, sent);
+  noteMessagesDelivered(run, sent, "next_turn");
+  if (sent.length) state.turnOpen = true;
   return sent.length;
+}
+
+/**
+ * Hand what is queued to the run the quickest way it has NOW: its inbox while
+ * a turn is under way and the spawn has the hook (after the tool call it is
+ * in), else its stdin as the next turn. Answers how the queue went.
+ */
+function deliverRunMessages(run: CodingRun, state: LiveRun): RunMessageDelivery {
+  if (state.midTurn && state.turnOpen && postQueuedToInbox(run, state) > 0) return "after_tool_call";
+  if (state.midTurn && state.turnOpen && state.inboxPosted.size > 0) return "after_tool_call";
+  return flushRunMessages(run, state) > 0 ? "delivered" : "next_start";
+}
+
+/** The spawn's `--settings` hooks, or null when the hook script is not in this checkout. */
+function spawnHookSettings(run: CodingRun): { json: string; inbox: boolean } | null {
+  const script = runHookScriptPath();
+  if (!fs.existsSync(script)) return null;
+  let inbox: string | null = null;
+  try {
+    inbox = ensureRunInbox(run.id);
+  } catch (err) {
+    console.error(`[coding-agent] ${run.id}: no inbox:`, err instanceof Error ? err.message : err);
+  }
+  const json = runHookSettings({ node: process.execPath, script, inbox, mergeGuard: run.team !== null && !run.readOnly });
+  return json ? { json, inbox: inbox !== null } : null;
+}
+
+/** The ids waiting in a run's inbox; none for an inbox that cannot be read. */
+function safeInboxPending(runId: string): string[] {
+  try {
+    return inboxPending(runId);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Put every queued message this process has not put in the inbox yet there,
+ * framed the way the harness reads a message (runMessageTurn). Answers how
+ * many went in; a write that failed leaves its message queued.
+ */
+function postQueuedToInbox(run: CodingRun, state: LiveRun): number {
+  let posted = 0;
+  for (const message of queuedMessages(run.messages)) {
+    if (state.inboxPosted.has(message.id)) continue;
+    if (!postToInbox(run.id, { id: message.id, at: message.at, context: runMessageTurn(message.text, message.from) })) break;
+    state.inboxPosted.add(message.id);
+    posted += 1;
+  }
+  return posted;
+}
+
+/**
+ * What the run's hook handed over since the last look: marked delivered,
+ * mid-turn, at the moment the hook took it, and said on the run's feed — then
+ * the receipts go. Called from the tail while anything is in the inbox, and
+ * on the way into a settle.
+ */
+function collectInboxReceipts(run: CodingRun, state: LiveRun | null): number {
+  let receipts: Array<{ id: string; at: number }>;
+  try {
+    receipts = inboxReceipts(run.id);
+  } catch {
+    return 0;
+  }
+  if (!receipts.length) return 0;
+  let marked = 0;
+  for (const receipt of receipts) {
+    state?.inboxPosted.delete(receipt.id);
+    const message = run.messages.find((m) => m.id === receipt.id);
+    if (!message || message.deliveredAt !== null) continue;
+    noteMessagesDelivered(run, [message], "mid_turn", receipt.at);
+    marked += 1;
+  }
+  // Recorded (persisted at once by noteMessagesDelivered) before the receipt
+  // goes: a receipt outlives a crash in between, a lost mark would not.
+  clearReceipts(run.id, receipts.map((r) => r.id));
+  return marked;
+}
+
+/**
+ * The hook can only hand a message over while a turn is going. At a turn's
+ * end, a settle, and before a spawn delivers the queue its own way, whatever
+ * it took is recorded and whatever it did not is taken BACK — still queued on
+ * the record, for the next turn or the next start. One rename decides between
+ * the hook and this, so a message is never both.
+ */
+function settleRunInbox(run: CodingRun, state: LiveRun | null): void {
+  try {
+    collectInboxReceipts(run, state);
+    reclaimInbox(run.id);
+    // A receipt the hook wrote between the two looks.
+    collectInboxReceipts(run, state);
+  } catch {
+    // An inbox that cannot be read holds nothing the record does not.
+  }
+  state?.inboxPosted.clear();
 }
 
 /**
@@ -11252,6 +11447,10 @@ function flushRunMessages(run: CodingRun, state: LiveRun): number {
  */
 function afterTurn(run: CodingRun, state: LiveRun): void {
   if (!state.streamInput || !state.stdinOpen) return;
+  // The turn is over, so the hook will not run again until the next one:
+  // what it did not take goes as that next turn instead.
+  state.turnOpen = false;
+  settleRunInbox(run, state);
   if (flushRunMessages(run, state) > 0) return;
   closeRunStdin(state);
 }
@@ -12280,6 +12479,7 @@ function dropRun(run: CodingRun, policy: HistoryPolicy, reason: ArchiveReason, l
   removeArtifacts(run.id);
   removeRunInputs(run.id);
   removeStreamLogs(run.id);
+  removeRunInbox(run.id);
 }
 
 /** An older run leaving for good — the same two ways as dropRun, and its own file with it. */
@@ -12417,7 +12617,7 @@ export function stopRun(id: string): CodingRun {
  * that button exists. Anything genuinely over is refused, because a queue
  * nothing will ever read is worse than a plain "no".
  */
-export function queueRunMessage(id: string, text: unknown): { run: CodingRun; delivered: boolean } {
+export function queueRunMessage(id: string, text: unknown): { run: CodingRun; delivered: boolean; delivery: RunMessageDelivery; messageId: string } {
   const run = loadRuns().find((r) => r.id === id);
   if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
   if (!holdsResumableSession(run.status)) {
@@ -12430,12 +12630,34 @@ export function queueRunMessage(id: string, text: unknown): { run: CodingRun; de
   // rules, then the queue's bound — which the route answers verbatim.
   const message = normalizeRunMessage(text);
   run.messages = appendRunMessage(run.messages, message, Date.now());
+  const messageId = run.messages[run.messages.length - 1].id;
   // Written before anything is attempted: a delivery that fails must still
   // leave the message on the record, waiting.
   persist(true);
-  const state = live.get(id);
-  const delivered = state ? flushRunMessages(run, state) > 0 : false;
-  return { run: cloneRun(run), delivered };
+  const state = run.status === "running" ? live.get(id) : undefined;
+  const delivery: RunMessageDelivery = state ? deliverRunMessages(run, state) : "next_start";
+  return { run: cloneRun(run), delivered: delivery === "delivered", delivery, messageId };
+}
+
+/**
+ * Wait a moment for a message sent to a run's inbox to be taken by its hook —
+ * the route's way of answering "delivered" for a run between two quick tool
+ * calls, rather than "after the tool call" when it is already over. Answers
+ * the message's record once it is delivered, or null at the deadline (still
+ * in the inbox: the hook hands it over after the call under way).
+ */
+export async function awaitRunMessageDelivery(runId: string, messageId: string, timeoutMs: number): Promise<RunMessage | null> {
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  for (;;) {
+    const run = loadRuns().find((r) => r.id === runId);
+    const state = live.get(runId);
+    if (run && state && state.inboxPosted.size > 0) collectInboxReceipts(run, state);
+    const message = run?.messages.find((m) => m.id === messageId);
+    if (!message) return null;
+    if (message.deliveredAt !== null) return { ...message };
+    if (Date.now() >= deadline || run?.status !== "running") return null;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
 }
 
 /**

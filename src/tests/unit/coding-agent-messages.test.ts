@@ -341,3 +341,132 @@ describe("what queueRunMessage refuses", () => {
     expect(lib.getRun(draft.id)?.messages).toEqual([]);
   });
 });
+
+describe("delivery MID-TURN, through the run's inbox hook", () => {
+  const goFile = () => path.join(base, "go");
+  const hookOut = () => path.join(base, "hook-out.json");
+  const laterTurns = () => path.join(base, "later-turns.txt");
+  /** The PostToolUse hook command the runner put in `--settings`, run the way Claude Code runs one: `sh -c`, the hook input on stdin. */
+  const RUN_THE_HOOK = [
+    `CMD=$(node -e 'const a=process.argv.slice(1); const s=JSON.parse(a[a.indexOf("--settings")+1]); process.stdout.write(s.hooks.PostToolUse[0].hooks[0].command)' -- "$@")`,
+    `printf '%s' '{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"npm test"}}' | sh -c "$CMD" >> "${"__HOOK_OUT__"}"`,
+  ].join("\n");
+  const waitForGo = () => `for i in $(seq 1 200); do [ -f "${goFile()}" ] && break; sleep 0.05; done`;
+
+  beforeEach(() => {
+    ready();
+    makeProject("site");
+    // The hook script in this checkout, where the runner looks for it.
+    fs.mkdirSync(path.join(root, "scripts"), { recursive: true });
+    fs.copyFileSync(path.resolve(__dirname, "../../../scripts/coding-run-hook.mjs"), path.join(root, "scripts", "coding-run-hook.mjs"));
+  });
+
+  it("hands a message to the run after the tool call it is in — once, never again as a next turn", async () => {
+    // Reads the task, makes a "tool call" once the test says go, runs the
+    // hook after it, finishes the turn — and keeps whatever else comes on
+    // stdin until the box closes it.
+    installWrapper([
+      "head -n 1 > /dev/null",
+      `echo '${INIT}'`,
+      waitForGo(),
+      RUN_THE_HOOK.replace("__HOOK_OUT__", hookOut()),
+      `echo '${RESULT}'`,
+      `cat > "${laterTurns()}"`,
+      "exit 0",
+    ].join("\n"));
+    const run = await lib.startRun({ task: "build it", projectId: "site", source: "owner" });
+    await vi.waitFor(() => { expect(lib.getRun(run.id)?.progress.join("\n")).toContain("Started"); }, { timeout: 15_000 });
+
+    const answer = lib.queueRunMessage(run.id, "use tabs, not spaces");
+    // In the inbox, for the end of the tool call under way — not yet "delivered".
+    expect(answer.delivery).toBe("after_tool_call");
+    expect(answer.delivered).toBe(false);
+    const pending = fs.readdirSync(path.join(root, "data", "coding-agent-inbox", run.id, "pending"));
+    expect(pending).toEqual([expect.stringMatching(new RegExp(`-${answer.messageId}\\.json$`))]);
+
+    fs.writeFileSync(goFile(), "");
+    const settled = await finished(run.id);
+
+    // The hook handed it over, framed as guidance, as the harness's additionalContext…
+    const out = JSON.parse(fs.readFileSync(hookOut(), "utf-8")) as { hookSpecificOutput: { hookEventName: string; additionalContext: string } };
+    expect(out.hookSpecificOutput.hookEventName).toBe("PostToolUse");
+    expect(out.hookSpecificOutput.additionalContext).toContain("use tabs, not spaces");
+    expect(out.hookSpecificOutput.additionalContext).toMatch(/do not start over/i);
+    // …and nowhere else: not as a next turn on stdin.
+    expect(fs.readFileSync(laterTurns(), "utf-8")).not.toContain("use tabs");
+    // The record and the timeline say how it went.
+    expect(settled.messages).toHaveLength(1);
+    expect(settled.messages[0]).toMatchObject({ id: answer.messageId, via: "mid_turn" });
+    expect(typeof settled.messages[0].deliveredAt).toBe("number");
+    expect(settled.progress.join("\n")).toContain("Message to the run, mid-turn: use tabs, not spaces");
+    expect(settled.midTurn).toBe(true);
+    // The spawn had its hook; the inbox went with the run.
+    const argv = lastArgv();
+    const settings = JSON.parse(argv[argv.indexOf("--settings") + 1]) as { hooks: Record<string, unknown> };
+    expect(Object.keys(settings.hooks)).toEqual(["PostToolUse"]);
+    expect(fs.existsSync(path.join(root, "data", "coding-agent-inbox", run.id))).toBe(false);
+  });
+
+  it("takes back what the hook did not get to before the turn ended and writes it as the next turn instead — never both", async () => {
+    // No tool call in the first turn; one in the second, whose hook must find nothing.
+    installWrapper([
+      "head -n 1 > /dev/null",
+      `echo '${INIT}'`,
+      waitForGo(),
+      `echo '${RESULT}'`,
+      `head -n 1 > "${laterTurns()}"`,
+      RUN_THE_HOOK.replace("__HOOK_OUT__", hookOut()),
+      `echo '${RESULT}'`,
+      "cat > /dev/null",
+      "exit 0",
+    ].join("\n"));
+    const run = await lib.startRun({ task: "build it", projectId: "site", source: "owner" });
+    await vi.waitFor(() => { expect(lib.getRun(run.id)?.progress.join("\n")).toContain("Started"); }, { timeout: 15_000 });
+    expect(lib.queueRunMessage(run.id, "use tabs").delivery).toBe("after_tool_call");
+    fs.writeFileSync(goFile(), "");
+    const settled = await finished(run.id);
+
+    const turns = decodeHarnessTurns(fs.readFileSync(laterTurns(), "utf-8"));
+    expect(turns).toHaveLength(1);
+    expect(turns[0]).toContain("use tabs");
+    expect(fs.readFileSync(hookOut(), "utf-8")).toBe("");
+    expect(settled.messages[0]).toMatchObject({ via: "next_turn" });
+    expect(settled.progress.join("\n")).toContain("Message to the run: use tabs");
+    expect(settled.progress.join("\n")).not.toContain("mid-turn");
+  });
+
+  it("keeps a message the run ended without reading queued for its next start, out of the inbox", async () => {
+    messages.noteStreamInputRefused();
+    installWrapper([`cat > /dev/null`, `echo '${INIT}'`, waitForGo(), `echo '${RESULT}'`, "exit 0"].join("\n"));
+    const run = await lib.startRun({ task: "build it", projectId: "site", source: "owner" });
+    await vi.waitFor(() => { expect(lib.getRun(run.id)?.progress.join("\n")).toContain("Started"); }, { timeout: 15_000 });
+    expect(lib.queueRunMessage(run.id, "use tabs").delivery).toBe("after_tool_call");
+    fs.writeFileSync(goFile(), "");
+    const settled = await finished(run.id);
+    expect(settled.messages[0].deliveredAt).toBeNull();
+    expect(settled.messages[0]).not.toHaveProperty("via");
+    expect(fs.existsSync(path.join(root, "data", "coding-agent-inbox", run.id))).toBe(false);
+  });
+
+  it("waits a moment for the hook in the answer the route gives", async () => {
+    installWrapper([
+      "head -n 1 > /dev/null",
+      `echo '${INIT}'`,
+      waitForGo(),
+      RUN_THE_HOOK.replace("__HOOK_OUT__", hookOut()),
+      `echo '${RESULT}'`,
+      "cat > /dev/null",
+      "exit 0",
+    ].join("\n"));
+    const run = await lib.startRun({ task: "build it", projectId: "site", source: "owner" });
+    await vi.waitFor(() => { expect(lib.getRun(run.id)?.progress.join("\n")).toContain("Started"); }, { timeout: 15_000 });
+    const answer = lib.queueRunMessage(run.id, "use tabs");
+    // Nothing takes it within a short wait while the run sits in its tool call…
+    expect(await lib.awaitRunMessageDelivery(run.id, answer.messageId, 300)).toBeNull();
+    // …and the wait sees it the moment the hook does.
+    const waiting = lib.awaitRunMessageDelivery(run.id, answer.messageId, 10_000);
+    fs.writeFileSync(goFile(), "");
+    expect(await waiting).toMatchObject({ id: answer.messageId, via: "mid_turn" });
+    await finished(run.id);
+  });
+});

@@ -36,8 +36,8 @@ function stubFetch(answer: () => Response) {
   }));
 }
 
-const queued = (text: string): RunMessage => ({ at: 1_000, text, deliveredAt: null });
-const delivered = (text: string): RunMessage => ({ at: 1_000, text, deliveredAt: 2_000 });
+const queued = (text: string): RunMessage => ({ id: "m-queued01", at: 1_000, text, deliveredAt: null });
+const delivered = (text: string): RunMessage => ({ id: "m-delivrd1", at: 1_000, text, deliveredAt: 2_000 });
 
 beforeEach(() => { calls = []; });
 afterEach(() => { vi.unstubAllGlobals(); });
