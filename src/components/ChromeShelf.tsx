@@ -6,6 +6,7 @@ import { DESKTOP_LAYERS } from "@/lib/window-snap";
 import { mainInsets } from "@/lib/desktop-screens";
 import { useDeskScreens } from "@/lib/use-desk-screens";
 import type { Protection, ProtectionReason } from "@/lib/clawkeep-protection";
+import { formatBytesApart } from "@/lib/format-bytes";
 import { openInKiosk } from "@/lib/kiosk-tabs-client";
 import { useDesktopClock } from "@/lib/use-desktop-clock";
 
@@ -63,6 +64,29 @@ const AT_RISK_TITLE_KEY: Record<AtRiskReason, string> = {
   never: "shelf.clawkeepNeverBackedUp",
 };
 
+/** A backup the daemon would not upload — see `useClawkeepShieldStatus`. */
+interface ShieldRefusal {
+  kind: "quota_full" | "usage_unverified";
+  neededBytes: number;
+  freeBytes: number;
+}
+
+/**
+ * What the shield says for a backup that was REFUSED rather than one that
+ * broke. "Last backup failed — open to see why" is true of it and useless: the
+ * owner of a full account is told nothing they can act on until they open the
+ * window. The sizes are the ones the ClawKeep card prints, in the same units.
+ */
+function refusalTitle(
+  refusal: ShieldRefusal,
+  t: (key: string, params?: Record<string, string | number>) => string,
+): string {
+  if (refusal.kind === "usage_unverified") return t("shelf.clawkeepUsageUnverified");
+  // Apart, as on the card: never "needs 1.2 GB but only 1.2 GB is free".
+  const [needed, free] = formatBytesApart(refusal.neededBytes, refusal.freeBytes);
+  return t("shelf.clawkeepNoRoom", { needed, free });
+}
+
 interface ShelfApp {
   id: string;
   name: string;
@@ -97,6 +121,9 @@ interface ChromeShelfProps {
     unconfigured?: boolean;
     busy: boolean;
     restoring: boolean;
+    /** Why the last backup was refused, when it was. Said only beside an
+     *  `error` verdict — it is that verdict's reason, not one of its own. */
+    refusal?: ShieldRefusal | null;
   };
   onPinApp?: (id: string) => void;
   onUnpinApp?: (id: string) => void;
@@ -253,8 +280,11 @@ export default function ChromeShelf({
   // been set up. It gets its own invitation and a calm colour instead of the
   // red alert a genuinely missed backup earns.
   const needsSetup = clawAiAuthenticated && !atRisk && !!clawkeepStatus.unconfigured;
+  const refusal = atRisk && protection!.reason === "error" ? clawkeepStatus.refusal ?? null : null;
   const baseTitle = !clawAiAuthenticated
     ? t("shelf.connectClawBoxAI")
+    : refusal
+    ? refusalTitle(refusal, t)
     : atRisk
     ? t(AT_RISK_TITLE_KEY[protection!.reason as AtRiskReason])
     : needsSetup

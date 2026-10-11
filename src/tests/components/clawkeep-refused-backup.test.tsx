@@ -1,6 +1,9 @@
+import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import ChromeShelf from "@/components/ChromeShelf";
 import ClawKeepApp from "@/components/ClawKeepApp";
+import { useClawkeepShieldStatus } from "@/hooks/useClawkeepShieldStatus";
 import { I18nProvider } from "@/lib/i18n";
 
 /**
@@ -13,11 +16,15 @@ import { I18nProvider } from "@/lib/i18n";
  * this window as a sentence about something else: "out of space" with no
  * sizes, "could not reach ClawKeep", "the backup did not finish".
  *
- * Two places have to say it. The banner, for the owner who pressed the button
- * — and the card itself, for the nightly run nobody was watching: the banner
- * is cleared by the next status poll, and "one retry and we'll lock it back
- * down" on a full account sends the owner to a button that can only refuse
- * again.
+ * Two places in the window have to say it. The banner, for the owner who
+ * pressed the button — and the card itself, for the nightly run nobody was
+ * watching: the banner is cleared by the next status poll, and "one retry and
+ * we'll lock it back down" on a full account sends the owner to a button that
+ * can only refuse again.
+ *
+ * And one outside it: the shelf's shield, which is all the owner sees until
+ * they open the window. "Last ClawKeep backup failed — open to see why" was
+ * the generic failure this work exists to replace.
  */
 
 const GB = 1024 ** 3;
@@ -65,7 +72,24 @@ interface Fixture {
   locale?: string;
 }
 
-function mount(fixture: Fixture) {
+/** The desktop's shelf as `src/app/page.tsx` wires it: the real hook's answer
+ *  handed whole to the real shelf. */
+function ShelfWithShield() {
+  const status = useClawkeepShieldStatus();
+  return (
+    <ChromeShelf
+      apps={[]}
+      onAppClick={() => {}}
+      onLauncherClick={() => {}}
+      onTrayClick={() => {}}
+      onClawKeepShieldClick={() => {}}
+      clawAiAuthenticated
+      clawkeepStatus={status}
+    />
+  );
+}
+
+function mount(fixture: Fixture, ui: ReactNode = <ClawKeepApp />) {
   let backedUp = false;
   vi.stubGlobal(
     "fetch",
@@ -86,7 +110,7 @@ function mount(fixture: Fixture) {
       return { ok: true, status: 200, json: async () => ({}) };
     }),
   );
-  return render(<I18nProvider><ClawKeepApp /></I18nProvider>);
+  return render(<I18nProvider>{ui}</I18nProvider>);
 }
 
 const refusedStatus = (lastRefusal: unknown) => ({ ...BASE, lastHeartbeatStatus: "error", lastRefusal });
@@ -130,6 +154,14 @@ describe("the ClawKeep card, after a run nobody was watching was refused", () =>
     expect(reason).toContain("This backup is 6.0 GB — more than your whole ClawKeep plan holds (5.0 GB).");
     expect(reason).toContain("Deleting snapshots won't make room for it; upgrade the plan");
     expect(reason).not.toContain("you no longer need");
+  }, 15_000);
+
+  it("does not print a backup just over the plan as the plan's own size", async () => {
+    mount({ status: refusedStatus({ ...NO_ROOM, neededBytes: 5 * GB + 40 * 1024 ** 2, usedBytes: 0 }) });
+
+    expect(await shownReason()).toContain(
+      "This backup is 5.04 GB — more than your whole ClawKeep plan holds (5.00 GB).",
+    );
   }, 15_000);
 
   it("says a plan with no storage holds nothing, rather than leaving the figure out", async () => {
@@ -178,6 +210,67 @@ describe("the ClawKeep card, after a run nobody was watching was refused", () =>
       );
     }, { timeout: 5000 });
     expect(screen.getByText("Schutz abgelaufen")).toBeTruthy();
+  }, 15_000);
+});
+
+describe("the shelf's shield, for the same refused run", () => {
+  const shieldTitle = () => screen.getByTestId("shelf-clawkeep-shield-button").getAttribute("title");
+
+  it("names what the backup needs and what is free — the card's own figures", async () => {
+    mount({ status: refusedStatus(NO_ROOM) }, <><ShelfWithShield /><ClawKeepApp /></>);
+
+    await waitFor(() => {
+      expect(shieldTitle()).toBe(
+        "Last ClawKeep backup needs 1.2 GB but only 307 MB is free — open to see your options",
+      );
+    }, { timeout: 5000 });
+    const shield = screen.getByTestId("shelf-clawkeep-shield-button");
+    expect(shield.getAttribute("aria-label")).toBe(shieldTitle());
+    // The window it opens says the same two figures.
+    expect(await shownReason()).toContain("needs 1.2 GB, but only 307 MB");
+  }, 15_000);
+
+  it("and the card agree on a near miss, and neither prints it as a fit", async () => {
+    // 1.24 GB needed against 1.21 GB free: rounded apart, both said "1.2 GB".
+    const nearMiss = { ...NO_ROOM, neededBytes: 1_331_439_862, usedBytes: 5 * GB - 1_299_227_607 };
+    mount({ status: refusedStatus(nearMiss) }, <><ShelfWithShield /><ClawKeepApp /></>);
+
+    await waitFor(() => {
+      expect(shieldTitle()).toBe(
+        "Last ClawKeep backup needs 1.24 GB but only 1.21 GB is free — open to see your options",
+      );
+    }, { timeout: 5000 });
+    expect(await shownReason()).toContain(
+      "This backup needs 1.24 GB, but only 1.21 GB of your 5.0 GB of ClawKeep storage is free.",
+    );
+  }, 15_000);
+
+  it("says usage could not be checked", async () => {
+    mount({ status: refusedStatus(UNVERIFIED) }, <ShelfWithShield />);
+
+    await waitFor(() => {
+      expect(shieldTitle()).toBe(
+        "ClawKeep couldn't check cloud storage, so the last backup wasn't uploaded — open to see why",
+      );
+    }, { timeout: 5000 });
+  }, 15_000);
+
+  it("keeps the plain failure line when the run recorded no refusal", async () => {
+    mount({ status: refusedStatus(null) }, <ShelfWithShield />);
+
+    await waitFor(() => {
+      expect(shieldTitle()).toBe("Last ClawKeep backup failed — open to see why");
+    }, { timeout: 5000 });
+  }, 15_000);
+
+  it("says it in the owner's language", async () => {
+    mount({ status: refusedStatus(NO_ROOM), locale: "de" }, <ShelfWithShield />);
+
+    await waitFor(() => {
+      expect(shieldTitle()).toBe(
+        "Letzte ClawKeep-Sicherung benötigt 1.2 GB, frei sind nur 307 MB — öffnen, um die Möglichkeiten zu sehen",
+      );
+    }, { timeout: 5000 });
   }, 15_000);
 });
 

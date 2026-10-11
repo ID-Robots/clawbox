@@ -153,6 +153,18 @@ function watchClawkeepStatus(watch: (result: ClawkeepStatusResult) => void): () 
   return () => { statusWatchers.delete(watch); };
 }
 
+/**
+ * Why the daemon would not upload the last backup, as much of it as a tooltip
+ * can say: the account cannot hold it (`quota_full`, with what the backup
+ * needs and what is free), or its usage could not be counted
+ * (`usage_unverified`). Exact bytes; the shelf formats them.
+ */
+export interface ShieldRefusal {
+  kind: "quota_full" | "usage_unverified";
+  neededBytes: number;
+  freeBytes: number;
+}
+
 export interface ClawkeepShieldStatus {
   /** The shared protection verdict. Null until the first answer arrives, and
    *  for a box that has never been paired — that one is an invitation, not a
@@ -161,6 +173,24 @@ export interface ClawkeepShieldStatus {
   unconfigured: boolean;
   busy: boolean;
   restoring: boolean;
+  /** The refusal the last status carried, or null. It is the reason behind an
+   *  `error` verdict and nothing more — the shelf says it only beside one, as
+   *  the ClawKeep card does. */
+  refusal: ShieldRefusal | null;
+}
+
+/** `lastRefusal` off an untrusted status body, or null for anything that is
+ *  not one of the two kinds the shelf has a sentence for. */
+function readShieldRefusal(value: unknown): ShieldRefusal | null {
+  if (typeof value !== "object" || value === null) return null;
+  const raw = value as Record<string, unknown>;
+  if (raw.kind !== "quota_full" && raw.kind !== "usage_unverified") return null;
+  const bytes = (n: unknown) => (typeof n === "number" && Number.isFinite(n) && n > 0 ? n : 0);
+  return {
+    kind: raw.kind,
+    neededBytes: bytes(raw.neededBytes),
+    freeBytes: Math.max(0, bytes(raw.quotaBytes) - bytes(raw.usedBytes)),
+  };
 }
 
 /**
@@ -204,6 +234,7 @@ export function useClawkeepShieldStatus(enabled: boolean = true): ClawkeepShield
   const [unconfigured, setUnconfigured] = useState(false);
   const [busy, setBusy] = useState(false);
   const [restoring, setRestoring] = useState(false);
+  const [refusal, setRefusal] = useState<ShieldRefusal | null>(null);
   // The last facts that arrived, so the verdict can keep ageing without new ones.
   const facts = useRef<ProtectionInput | null>(null);
 
@@ -265,7 +296,11 @@ export function useClawkeepShieldStatus(enabled: boolean = true): ClawkeepShield
       if (!res?.ok) return;
       // Partial: this is an untrusted response, and asserting more about it
       // than the wire guarantees is how a missing field becomes a verdict.
-      let data: Partial<ProtectionInput> & { paired?: boolean; restoring?: boolean };
+      let data: Partial<ProtectionInput> & {
+        paired?: boolean;
+        restoring?: boolean;
+        lastRefusal?: unknown;
+      };
       try {
         data = await res.json() as typeof data;
       } catch {
@@ -302,6 +337,17 @@ export function useClawkeepShieldStatus(enabled: boolean = true): ClawkeepShield
         publish(input, now);
       }
       setRestoring(!!data.restoring);
+      // The same object while nothing about it changed, as the verdict is: an
+      // idle desktop polling every 5 s must not re-render for it.
+      const nextRefusal = notPaired ? null : readShieldRefusal(data.lastRefusal);
+      setRefusal((prev) => (
+        prev && nextRefusal
+          && prev.kind === nextRefusal.kind
+          && prev.neededBytes === nextRefusal.neededBytes
+          && prev.freeBytes === nextRefusal.freeBytes
+          ? prev
+          : nextRefusal
+      ));
       // Fresh facts, whoever asked for them: the next look is 5 s from these.
       arm();
     };
@@ -320,5 +366,5 @@ export function useClawkeepShieldStatus(enabled: boolean = true): ClawkeepShield
     };
   }, [publish, enabled]);
 
-  return { protection, unconfigured, busy, restoring };
+  return { protection, unconfigured, busy, restoring, refusal };
 }

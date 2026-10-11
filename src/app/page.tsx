@@ -1122,6 +1122,7 @@ function ChromeDesktopInner() {
     unconfigured: clawkeepUnconfigured,
     busy: clawkeepBusy,
     restoring: clawkeepRestoring,
+    refusal: clawkeepRefusal,
   } = useClawkeepShieldStatus(ownerApis);
 
   // Memoized with the wallpaper layers below, which take it as a dependency.
@@ -3877,7 +3878,7 @@ function ChromeDesktopInner() {
           openSettingsSection("system");
         }}
         onClawKeepShieldClick={isOwner ? openClawKeepOrAiProvider : undefined}
-        clawkeepStatus={{ protection: clawkeepProtection, unconfigured: clawkeepUnconfigured, busy: clawkeepBusy, restoring: clawkeepRestoring }}
+        clawkeepStatus={{ protection: clawkeepProtection, unconfigured: clawkeepUnconfigured, busy: clawkeepBusy, restoring: clawkeepRestoring, refusal: clawkeepRefusal }}
         onPowerClick={() => {
           setLauncherOpen(false);
           setTrayOpen((prev) => !prev);

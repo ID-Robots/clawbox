@@ -243,6 +243,31 @@ def _human_bytes(n: int) -> str:
     return f"{value:.1f} {units[unit]}"
 
 
+def _human_bytes_apart(a: int, b: int) -> tuple[str, str]:
+    """Two sizes one sentence sets against each other — "needs X but only Y is
+    free" — as figures that differ whenever the sizes do (`formatBytesApart` in
+    src/lib/format-bytes.ts, which the app's own sentences use).
+
+    Each is what `_human_bytes` prints, unless both round to the same figure
+    while being different amounts: 1.24 GB against 1.21 GB read "needs 1.2 GB,
+    but only 1.2 GB is free". Both then gain decimals, up to three, until they
+    part. Amounts closer than that keep the shared figure rather than fall
+    back to a byte count."""
+    first, second = _human_bytes(a), _human_bytes(b)
+    if first != second or max(a, 0) == max(b, 0):
+        return first, second
+    units = ("B", "KB", "MB", "GB", "TB")
+    unit, scale = 0, 1
+    while a / scale >= 1024 and unit < len(units) - 1:
+        scale *= 1024
+        unit += 1
+    for digits in (1, 2, 3):
+        x, y = (f"{n / scale:.{digits}f} {units[unit]}" for n in (a, b))
+        if x != y:
+            return x, y
+    return first, second
+
+
 def _admission_usage(st: state.State, creds: api.Credentials) -> s3.CloudStats | None:
     """What the prefix holds right now, for the admission check — or None when
     that cannot be established.
@@ -306,14 +331,16 @@ def _quota_refusal_message(needed: int, used: int, quota: int) -> str:
             f"in the portal, then retry. {kept}."
         )
     if needed > quota:
+        backup, plan = _human_bytes_apart(needed, quota)
         return (
-            f"quota full: this backup is {_human_bytes(needed)} encrypted, larger than the "
-            f"account's whole storage ({_human_bytes(quota)}). Removing snapshots cannot "
+            f"quota full: this backup is {backup} encrypted, larger than the "
+            f"account's whole storage ({plan}). Removing snapshots cannot "
             f"make room for it; increase storage, then retry. {kept}."
         )
+    backup, free = _human_bytes_apart(needed, max(0, quota - used))
     return (
-        f"quota full: this backup needs {_human_bytes(needed)} encrypted, but only "
-        f"{_human_bytes(max(0, quota - used))} of {_human_bytes(quota)} is free "
+        f"quota full: this backup needs {backup} encrypted, but only "
+        f"{free} of {_human_bytes(quota)} is free "
         f"({_human_bytes(used)} used). Increase storage or review and remove unneeded "
         f"snapshots, then retry. {kept}; retention runs only after a successful backup."
     )

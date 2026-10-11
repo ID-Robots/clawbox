@@ -30,7 +30,7 @@ import {
 } from "@/lib/clawkeep-protection";
 import { findOpenclawBin } from "@/lib/openclaw-config";
 import { get as configGet, set as configSet } from "@/lib/config-store";
-import { formatBytes } from "@/lib/format-bytes";
+import { formatBytes, formatBytesApart } from "@/lib/format-bytes";
 import { getEdition } from "@/lib/harness";
 import { backupSourceFor } from "@/lib/harness/backup-source";
 import type { HarnessId } from "@/lib/harness/transport";
@@ -1562,14 +1562,19 @@ function sentenceBytes(bytes: number): string {
  * cannot be made room for by deleting snapshots.
  */
 function quotaRefusalSentence(refusal: BackupRefusal): string {
-  const needed = sentenceBytes(refusal.neededBytes);
   const quota = sentenceBytes(refusal.quotaBytes);
   const untouched = "nothing was uploaded and earlier backups are untouched";
+  // The two figures a sentence compares are printed apart (`formatBytesApart`):
+  // a backup that misses by a little must not read "needs 1.2 GB, only 1.2 GB free".
   if (refusal.neededBytes > refusal.quotaBytes) {
-    return `This backup is ${needed}, more than the whole ClawKeep plan holds (${quota}) — ${untouched}.`
+    const [needed, plan] = formatBytesApart(refusal.neededBytes, refusal.quotaBytes);
+    return `This backup is ${needed}, more than the whole ClawKeep plan holds (${plan}) — ${untouched}.`
       + " Deleting snapshots will not make room for it; upgrade the plan";
   }
-  const free = sentenceBytes(Math.max(0, refusal.quotaBytes - refusal.usedBytes));
+  const [needed, free] = formatBytesApart(
+    refusal.neededBytes,
+    Math.max(0, refusal.quotaBytes - refusal.usedBytes),
+  );
   return `This backup needs ${needed}, but only ${free} of the ${quota} of ClawKeep storage is free — ${untouched}.`
     + " Delete snapshots you no longer need or upgrade the plan, then back up again";
 }
