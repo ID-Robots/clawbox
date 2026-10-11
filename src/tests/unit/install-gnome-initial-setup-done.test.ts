@@ -30,8 +30,10 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 const REPO = path.resolve(__dirname, "../../..");
 const INSTALL_SH = fs.readFileSync(path.join(REPO, "install.sh"), "utf-8");
 
+// Linux only, as install.sh is: the step reads the owner with GNU `stat -c`,
+// which BSD stat rejects, so on macOS every ~/.config would look foreign.
 const CAN_RUN =
-  process.platform !== "win32"
+  process.platform === "linux"
   && spawnSync("bash", ["-c", "true"], { stdio: "ignore" }).status === 0;
 const d = CAN_RUN ? describe : describe.skip;
 
