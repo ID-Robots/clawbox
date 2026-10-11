@@ -81,15 +81,42 @@ export function notesProjectDir(directory: string): string {
 export function readRunNotes(directory: string): string {
   try {
     if (!ownNotesDir(notesProjectDir(directory), { create: false })) return "";
-    const file = runNotesPath(directory);
-    const stat = fs.lstatSync(file);
     // A link could point the box's read at any file the web server can see,
-    // and its text would travel into a run's prompt.
-    if (!stat.isFile()) return "";
-    const text = fs.readFileSync(file, "utf8");
-    return clipNotes(text.replace(/\r\n/g, "\n").trim());
+    // and its text would travel into a run's prompt. Bounded: what is past the
+    // cap is cut anyway, and a huge file must not be read whole on a spawn.
+    const text = readOwnFile(runNotesPath(directory), MAX_RUN_NOTES_CHARS * 4);
+    return text === null ? "" : clipNotes(text.replace(/\r\n/g, "\n").trim());
   } catch {
     return "";
+  }
+}
+
+/**
+ * A regular file's text, read through ONE descriptor opened without following
+ * a link — the check and the read are the same file, never a name looked at
+ * twice — and at most `maxBytes` of it. Null for a link, a non-file or no file.
+ */
+function readOwnFile(file: string, maxBytes: number, opts: { refuseLarger?: boolean } = {}): string | null {
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile()) return null;
+    if (opts.refuseLarger && stat.size > maxBytes) return null;
+    const buf = Buffer.alloc(Math.min(stat.size, maxBytes));
+    let read = 0;
+    while (read < buf.length) {
+      const n = fs.readSync(fd, buf, read, buf.length - read, read);
+      if (n === 0) break;
+      read += n;
+    }
+    return buf.subarray(0, read).toString("utf8");
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch { /* already gone */ }
+    }
   }
 }
 
@@ -285,9 +312,9 @@ export function mergeLessons(notes: string, proposed: readonly unknown[], runId:
 export function readLessonProposal(evidenceDir: string): unknown[] | null {
   const file = path.join(evidenceDir, LESSONS_FILE);
   try {
-    const stat = fs.lstatSync(file);
-    if (!stat.isFile() || stat.size > MAX_PROPOSAL_BYTES) return null;
-    const raw = JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
+    const text = readOwnFile(file, MAX_PROPOSAL_BYTES, { refuseLarger: true });
+    if (text === null) return null;
+    const raw = JSON.parse(text) as unknown;
     if (Array.isArray(raw)) return raw;
     if (raw && typeof raw === "object" && Array.isArray((raw as { lessons?: unknown }).lessons)) {
       return (raw as { lessons: unknown[] }).lessons;

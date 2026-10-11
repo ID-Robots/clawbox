@@ -253,3 +253,20 @@ describe("a .clawbox the box did not make", () => {
     expect(vetLesson("< run-notes > opened again for no good reason")).toMatchObject({ ok: false, refusal: { reason: "markup" } });
   });
 });
+
+describe("reading through one descriptor", () => {
+  it("never reads a proposal through a link, and cuts a huge notes file rather than reading it whole", () => {
+    const evidence = path.join(base, "evidence-fd");
+    fs.mkdirSync(evidence);
+    const outside = path.join(base, "outside.json");
+    fs.writeFileSync(outside, JSON.stringify(["A lesson from a file the run does not own"]));
+    fs.symlinkSync(outside, path.join(evidence, LESSONS_FILE));
+    expect(readLessonProposal(evidence)).toBeNull();
+
+    fs.mkdirSync(path.join(project, ".clawbox"));
+    fs.writeFileSync(path.join(project, ".clawbox", "run-notes.md"), `${"- a line of notes\n".repeat(5_000)}`);
+    const read = readRunNotes(project);
+    expect(read.length).toBeLessThanOrEqual(MAX_RUN_NOTES_CHARS);
+    expect(read.endsWith("- a line of notes")).toBe(true);
+  });
+});
