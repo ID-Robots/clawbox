@@ -72,6 +72,54 @@ describe("useClawkeepShieldStatus", () => {
     expect(result.current.protection).toEqual({ state: "lapsed", reason: "stale" });
   });
 
+  it("hands the shelf the refusal behind a failed run, and drops it when the box moves on", async () => {
+    // 1.2 GB needed against 4.7 GB used of 5.0 GB: 307 MB free.
+    const lastRefusal = {
+      kind: "quota_full", atMs: Date.now(),
+      neededBytes: 1_288_490_189, usedBytes: 5_046_586_573, quotaBytes: 5_368_709_120,
+    };
+    let body: Record<string, unknown> = {
+      ...boxWithBackupAged(HOUR), lastHeartbeatStatus: "error", lastRefusal,
+    };
+    vi.stubGlobal("fetch", vi.fn<FakeFetch>(async () => ({ ok: true, status: 200, json: async () => body })));
+
+    const { result } = renderHook(() => useClawkeepShieldStatus());
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(result.current.protection).toEqual({ state: "lapsed", reason: "error" });
+    expect(result.current.refusal).toEqual({
+      kind: "quota_full", neededBytes: 1_288_490_189, freeBytes: 322_122_547,
+    });
+
+    // The same answer again is the same object: an idle desktop polling every
+    // 5 s must not re-render the shelf for it.
+    const first = result.current.refusal;
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(result.current.refusal).toBe(first);
+
+    // Over quota before the backup is "nothing free", never a negative figure;
+    // usage that could not be counted has no free figure to give.
+    body = { ...body, lastRefusal: { ...lastRefusal, usedBytes: 6_000_000_000 } };
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(result.current.refusal).toEqual({ kind: "quota_full", neededBytes: 1_288_490_189, freeBytes: 0 });
+    body = { ...body, lastRefusal: { kind: "usage_unverified", neededBytes: 9, usedBytes: 0, quotaBytes: 0 } };
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(result.current.refusal).toEqual({ kind: "usage_unverified", neededBytes: 9, freeBytes: 0 });
+
+    // A kind this build has no sentence for, garbage, and an older server that
+    // sends nothing are all "no refusal".
+    for (const other of [{ kind: "made_up", neededBytes: 1 }, "quota_full", 7, undefined]) {
+      body = { ...body, lastRefusal: other };
+      await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+      expect(result.current.refusal).toBeNull();
+    }
+
+    // The next run backs the box up: the daemon cleared the record.
+    body = { ...boxWithBackupAged(0), lastRefusal: null };
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(result.current.protection).toEqual({ state: "protected", reason: "ok" });
+    expect(result.current.refusal).toBeNull();
+  });
+
   it("never publishes a verdict before an answer has arrived", async () => {
     vi.stubGlobal("fetch", vi.fn<FakeFetch>(async () => { throw new Error("offline"); }));
 

@@ -10,7 +10,17 @@ import type { Protection } from "@/lib/clawkeep-protection";
 vi.mock("@/lib/i18n", async () => {
   const { desktopTranslations } = await import("@/lib/desktop-translations");
   return {
-    useT: () => ({ t: (key: string) => desktopTranslations.en[key] ?? key }),
+    // Placeholders are filled as the real `t` fills them, so a sentence that
+    // carries a figure is asserted with the figure in it.
+    useT: () => ({
+      t: (key: string, params?: Record<string, string | number>) => {
+        let text = desktopTranslations.en[key] ?? key;
+        for (const [name, value] of Object.entries(params ?? {})) {
+          text = text.replaceAll(`{${name}}`, String(value));
+        }
+        return text;
+      },
+    }),
   };
 });
 
@@ -154,6 +164,57 @@ describe("ChromeShelf", () => {
     ]);
     expect(new Set(said).size).toBe(said.length);
     expect(say({ state: "protected", reason: "ok" })).toBe(EN["shelf.openClawKeep"]);
+  });
+
+  it("says why a backup was REFUSED, with sizes, instead of a bare \"failed\"", () => {
+    // The daemon would not upload: the account cannot hold the backup, or its
+    // usage could not be counted. "Last backup failed — open to see why" told
+    // the owner of a full account nothing they could act on from the shelf.
+    const say = (protection: Protection, refusal: unknown) => {
+      const { unmount } = render(
+        <ChromeShelf
+          {...baseProps}
+          onClawKeepShieldClick={vi.fn()}
+          clawAiAuthenticated
+          clawkeepStatus={{
+            protection, unconfigured: false, busy: false, restoring: false,
+            refusal: refusal as never,
+          }}
+        />,
+      );
+      const shield = screen.getByTestId("shelf-clawkeep-shield-button");
+      const title = shield.getAttribute("title");
+      expect(shield).toHaveAttribute("aria-label", title as string);
+      unmount();
+      return title;
+    };
+    const failed: Protection = { state: "lapsed", reason: "error" };
+    // 1.2 GB needed, 307 MB free — the figures the ClawKeep card prints.
+    const noRoom = { kind: "quota_full", neededBytes: 1_288_490_189, freeBytes: 322_122_547 };
+
+    expect(say(failed, noRoom)).toBe(
+      "Last ClawKeep backup needs 1.2 GB but only 307 MB is free — open to see your options",
+    );
+    // Nothing free at all is "0 B", not a missing figure.
+    expect(say(failed, { ...noRoom, freeBytes: 0 })).toBe(
+      "Last ClawKeep backup needs 1.2 GB but only 0 B is free — open to see your options",
+    );
+    expect(say(failed, { kind: "usage_unverified", neededBytes: 5, freeBytes: 0 })).toBe(
+      EN["shelf.clawkeepUsageUnverified"],
+    );
+    // No raw byte count, and no unfilled placeholder, ever reaches the shelf.
+    for (const title of [say(failed, noRoom), say(failed, { ...noRoom, freeBytes: 0 })]) {
+      expect(title).not.toMatch(/\d{7,}|[{}]/);
+    }
+
+    // A failure that recorded no refusal keeps the sentence it had …
+    expect(say(failed, null)).toBe(EN["shelf.clawkeepFailed"]);
+    expect(say(failed, undefined)).toBe(EN["shelf.clawkeepFailed"]);
+    // … and a refusal is the reason behind an "error", never a verdict of its
+    // own: a box that has moved on, or lapsed for another reason, says that.
+    expect(say({ state: "protected", reason: "ok" }, noRoom)).toBe(EN["shelf.openClawKeep"]);
+    expect(say({ state: "lapsed", reason: "stale" }, noRoom)).toBe(EN["shelf.clawkeepStale"]);
+    expect(say({ state: "lapsed", reason: "blocked" }, noRoom)).toBe(EN["shelf.clawkeepBlocked"]);
   });
 
   it("lets a live verdict win over unconfigured if both ever arrive together", () => {
