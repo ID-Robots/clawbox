@@ -141,8 +141,21 @@ wait_for_nm || true
 # a wired (Ethernet) uplink is present the device already has connectivity, so we
 # keep the radio for the hotspot instead of joining saved WiFi. This is what lets
 # "just plug in Ethernet" bring the hotspot up — no need to forget the network.
+#
+# This and iface_is_ap read the whole answer, then match it. `nmcli | grep -q`
+# is not deterministic here: grep exits at its first match, nmcli or iw still
+# writing the rest dies of SIGPIPE, and under pipefail the check reads false.
 ethernet_connected() {
-  nmcli -t -f TYPE,STATE device status 2>/dev/null | grep -q '^ethernet:connected'
+  local devices
+  devices="$(nmcli -t -f TYPE,STATE device status 2>/dev/null)" || return 1
+  grep -q '^ethernet:connected' <<<"$devices"
+}
+
+# iw reports the radio in AP mode.
+iface_is_ap() {
+  local info
+  info="$(iw dev "$IFACE" info 2>/dev/null)" || return 1
+  grep -q "type AP" <<<"$info"
 }
 
 # ─── Saved WiFi client profiles ──────────────────────────────────────────────
@@ -310,7 +323,7 @@ client_or_idle() {
       30|120) return 0 ;;
       100)
         if client="$(active_client)"; then stay_on_client "$client" "during admission"; fi
-        if iw dev "$IFACE" info 2>/dev/null | grep -q "type AP"; then return 0; fi
+        if iface_is_ap; then return 0; fi
         echo "[AP] Unknown connected WiFi identity — deferring" >&2
         return 1 ;;
       ""|10|20|40|50|60|70|80|90|110)
@@ -660,7 +673,7 @@ for ap_attempt in $(seq 1 "$AP_UP_RETRIES"); do
   fi
   if nmcli --wait 30 connection up uuid "$AP_UUID" ifname "$IFACE" 2>&1; then
     wait_for_interface || true
-    if iw dev "$IFACE" info 2>/dev/null | grep -q "type AP"; then
+    if iface_is_ap; then
       echo "[AP] Access point active (attempt $ap_attempt)"
       ap_up_ok=true
       break
@@ -687,8 +700,10 @@ iptables -t nat -D PREROUTING -i "$IFACE" -p tcp --dport 80 ! -d "$AP_IP" -j DNA
 # Enable IP forwarding and NAT masquerade for internet sharing
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
 
-# Find the WAN interface (first connected ethernet)
-WAN_IFACE=$(nmcli -t -f DEVICE,TYPE,STATE device status | awk -F: '/ethernet:connected/{print $1; exit}')
+# Find the WAN interface (first connected ethernet). awk reads to the end rather
+# than `exit` at the match: that SIGPIPEs nmcli, and under pipefail and set -e
+# this assignment then ends the script with 141 — right after the AP came up.
+WAN_IFACE=$(nmcli -t -f DEVICE,TYPE,STATE device status | awk -F: '/ethernet:connected/ && !n++ {print $1}')
 if [ -n "$WAN_IFACE" ]; then
   # Ensure MASQUERADE rule exists for hotspot -> internet NAT
   if ! iptables -t nat -C POSTROUTING -o "$WAN_IFACE" -j MASQUERADE 2>/dev/null; then

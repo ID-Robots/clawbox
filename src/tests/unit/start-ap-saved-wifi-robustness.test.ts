@@ -208,8 +208,9 @@ case "$1 $2" in
     wstate=disconnected
     [ "$state" = 100 ] && wstate=connected
     [ "$state" = 20 ] && wstate=unavailable
-    # One write, as nmcli does: start-ap.sh reads this through \`grep -q\` under
-    # pipefail, and a stub writing line by line could take a SIGPIPE there.
+    # bash's printf writes this a line at a time, as nmcli writes a long listing
+    # in several writes; start-ap.sh reads it whole (start-ap-saved-wifi.test.ts
+    # floods it to prove that).
     listing="$(while IFS=: read -r D T S; do
       out=""; sep=""
       for f in $(printf '%s' "$fields" | tr , ' '); do

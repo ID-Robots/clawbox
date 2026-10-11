@@ -182,7 +182,9 @@ chat_turn() {
     reply=$(printf '%s' "$json" | jq -r '
       [ (.result.payloads // [])[]?.text, .result.text, .reply, .text ]
       | map(select(type == "string")) | join("\n")' 2>/dev/null)
-    if [ "$rc" -eq 0 ] && printf '%s' "$reply" | grep -qF "$marker"; then
+    # A here-string: `printf | grep -q` can SIGPIPE printf on a multi-line
+    # reply, which under pipefail reads as no answer.
+    if [ "$rc" -eq 0 ] && grep -qF "$marker" <<<"$reply"; then
       ok "chat turn answered \"$marker\" (attempt $attempt)"
       return 0
     fi

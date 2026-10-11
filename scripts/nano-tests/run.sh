@@ -164,7 +164,7 @@ SKIP_RE='#[[:space:]]*skip([[:space:]]|$)'
 
 # verdict LOG EXIT_CODE ELAPSED LIMIT -> sets STATUS (pass|fail|skip) and REASON.
 verdict() {
-  local log=$1 rc=$2 elapsed=$3 limit=$4 line
+  local log=$1 rc=$2 elapsed=$3 limit=$4 line oks
   if [ "$rc" -eq 124 ] || { [ "$rc" -eq 137 ] && [ "$elapsed" -ge "$limit" ]; }; then
     STATUS=fail; REASON="timed out after ${limit}s"; return
   fi
@@ -181,7 +181,11 @@ verdict() {
     REASON="exited $rc${line:+: $line}"
     return
   fi
-  if grep -E "$OK_RE" "$log" | grep -q -v -i -E "$SKIP_RE"; then
+  # Read whole, then matched: a `grep -q` on the pipe can SIGPIPE the first
+  # grep on a long log, which under pipefail reads as no plain ok line. The
+  # -n test: a here-string of nothing is one empty line, and -v would pick it.
+  oks=$(grep -E "$OK_RE" "$log")
+  if [ -n "$oks" ] && grep -q -v -i -E "$SKIP_RE" <<<"$oks"; then
     STATUS=pass; REASON=""; return
   fi
   line=$(grep -E "$OK_RE" "$log" | grep -m 1 -i -E "$SKIP_RE")

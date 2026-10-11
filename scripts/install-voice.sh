@@ -953,8 +953,10 @@ whisper_model_cached() {
   # mistaken for a snapshot.
   snapshot="$(find -L "$WHISPER_HF_CACHE/snapshots" -mindepth 1 -maxdepth 1 -type d -print -quit 2>/dev/null)"
   [ -n "$snapshot" ] || return 1
+  # `-print -quit`: find stops at the first one itself, so `grep -q` cannot
+  # SIGPIPE it mid-list (a false "no empty blob" under pipefail).
   if [ -d "$WHISPER_HF_CACHE/blobs" ] \
-    && find "$WHISPER_HF_CACHE/blobs" -maxdepth 1 -type f -empty 2>/dev/null | grep -q .; then
+    && find "$WHISPER_HF_CACHE/blobs" -maxdepth 1 -type f -empty -print -quit 2>/dev/null | grep -q .; then
     return 1
   fi
   for artifact in config.json preprocessor_config.json model.bin tokenizer.json; do
@@ -1621,9 +1623,10 @@ install_kokoro_packages || { KOKORO_FULL_OK=false; echo "  Warning: Kokoro packa
 # ── Step 5: Pre-download models ─────────────────────────────────────────────
 
 echo "[5/7] Pre-downloading Whisper model (base)..."
-# Clear corrupted cache (0-byte blobs from failed/rate-limited HF downloads)
+# Clear corrupted cache (0-byte blobs from failed/rate-limited HF downloads).
+# `-print -quit` as in whisper_model_cached: `grep -q` must not SIGPIPE find.
 WHISPER_CACHE="$WHISPER_HF_CACHE"
-if [ -d "$WHISPER_CACHE/blobs" ] && find "$WHISPER_CACHE/blobs" -maxdepth 1 -type f -empty | grep -q .; then
+if [ -d "$WHISPER_CACHE/blobs" ] && find "$WHISPER_CACHE/blobs" -maxdepth 1 -type f -empty -print -quit | grep -q .; then
   echo "  Clearing corrupted Whisper model cache..."
   rm -rf "$WHISPER_CACHE"
 fi
