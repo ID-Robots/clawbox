@@ -15,6 +15,7 @@ const inventoryMock = vi.hoisted(() => vi.fn());
 const stateMock = vi.hoisted(() => vi.fn());
 const harnessMock = vi.hoisted(() => vi.fn());
 const hermesSpeakMock = vi.hoisted(() => vi.fn());
+const compressMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/lib/openclaw-config", () => ({
   openclawIsAbsent: () => false,
@@ -30,6 +31,7 @@ vi.mock("@/lib/voice-output-store", () => ({
 }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: (...a: unknown[]) => harnessMock(...a) }));
 vi.mock("@/lib/hermes-tts", () => ({ speakWithHermes: (...a: unknown[]) => hermesSpeakMock(...a) }));
+vi.mock("@/lib/tts-compress", () => ({ compressSpeech: (...a: unknown[]) => compressMock(...a) }));
 // The local engine's script is "present" as far as the probe can tell.
 vi.mock("fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("fs")>();
@@ -69,6 +71,7 @@ beforeEach(() => {
   stateMock.mockReset().mockResolvedValue({ choice: "auto" });
   harnessMock.mockReset().mockResolvedValue("openclaw");
   hermesSpeakMock.mockReset();
+  compressMock.mockReset();
 });
 
 describe("speakReply", () => {
@@ -125,5 +128,57 @@ describe("speakReply", () => {
     expect(res.status).toBe(500);
     expect((await res.json()).code).toBe("failed");
     warn.mockRestore();
+  });
+});
+
+/**
+ * The chat's spoken reply is COMPRESSED (`tts/speak` passes the format the
+ * browser can play); the coding agent's `generate_audio` names no format and
+ * gets what the engine made, exactly as before — it checks the bytes against
+ * the extension the run asked for.
+ */
+describe("speakReply in the reply's format", () => {
+  const WAV = new Uint8Array(Buffer.concat([Buffer.from("RIFF\0\0\0\0WAVEfmt "), Buffer.alloc(4096, 1)]));
+  const MP3 = new Uint8Array(Buffer.concat([Buffer.from("ID3\x04\0"), Buffer.alloc(3000, 2)]));
+  const wavFrom = (order: string[], id: string) => async (_c: unknown, _v: unknown, _t: string, format?: string) => {
+    order.push(`${id}:${format}`);
+    return new Response(new Uint8Array(WAV), { headers: { "Content-Type": "audio/wav" } });
+  };
+
+  it("compresses Kokoro's WAV into MP3 and names the engine that spoke", async () => {
+    stateMock.mockResolvedValue({ choice: "local" });
+    compressMock.mockResolvedValue(MP3);
+    const order: string[] = [];
+    const res = await speakReply("Hello", { local: wavFrom(order, "local"), cloud: wavFrom(order, "cloud") }, { format: "mp3" });
+    expect(order).toEqual(["local:mp3"]);
+    expect(compressMock).toHaveBeenCalledWith(expect.any(Uint8Array), "mp3");
+    expect(res.headers.get("Content-Type")).toBe("audio/mpeg");
+    expect(res.headers.get("X-ClawBox-Voice-Engine")).toBe("local");
+  });
+
+  it("answers the WAV when the box has no ffmpeg — a bigger reply, not a lost one", async () => {
+    stateMock.mockResolvedValue({ choice: "local" });
+    compressMock.mockResolvedValue(null);
+    const res = await speakReply("Hello", { local: wavFrom([], "local"), cloud: wavFrom([], "cloud") }, { format: "opus" });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Content-Type")).toBe("audio/wav");
+    expect((await res.arrayBuffer()).byteLength).toBe(WAV.byteLength);
+  });
+
+  it("compresses a Hermes WAV too", async () => {
+    harnessMock.mockResolvedValue("hermes");
+    hermesSpeakMock.mockResolvedValue({ ok: true, audio: WAV, mime: "audio/wav" });
+    compressMock.mockResolvedValue(MP3);
+    const res = await speakReply("Hello", undefined, { format: "mp3" });
+    expect(res.headers.get("Content-Type")).toBe("audio/mpeg");
+  });
+
+  it("leaves the engines' own output alone for a caller that names no format (generate_audio)", async () => {
+    stateMock.mockResolvedValue({ choice: "local" });
+    const order: string[] = [];
+    const res = await speakReply("Hello", { local: wavFrom(order, "local"), cloud: wavFrom(order, "cloud") });
+    expect(order).toEqual(["local:wav"]);
+    expect(compressMock).not.toHaveBeenCalled();
+    expect(res.headers.get("Content-Type")).toBe("audio/wav");
   });
 });

@@ -86,6 +86,27 @@ describe("POST /setup-api/tts/speak", () => {
     expect(speakReplyMock).not.toHaveBeenCalled();
   });
 
+  it("speaks Opus for a browser that said it plays Opus", async () => {
+    const { POST } = await route();
+    await POST(post({ text: "hello", formats: ["opus", "mp3"] }));
+    expect(speakReplyMock.mock.calls[0][2]).toEqual({ format: "opus" });
+  });
+
+  it("speaks MP3 to a browser that did not list Opus, and to a request that stated nothing", async () => {
+    const { POST } = await route();
+    await POST(post({ text: "hello", formats: ["mp3"] }));
+    await POST(post({ text: "hello" }));
+    await POST(post({ text: "hello", formats: "opus" }));
+    expect(speakReplyMock.mock.calls.map((c) => c[2])).toEqual([{ format: "mp3" }, { format: "mp3" }, { format: "mp3" }]);
+  });
+
+  it("relays the Content-Type of what was spoken", async () => {
+    speakReplyMock.mockImplementation(async () => new Response(new Uint8Array(4096), { headers: { "Content-Type": "audio/mpeg" } }));
+    const { POST } = await route();
+    const res = await POST(post({ text: "hello", formats: ["mp3"] }));
+    expect(res.headers.get("Content-Type")).toBe("audio/mpeg");
+  });
+
   it("has nothing to say for a reply that is only markup", async () => {
     const { POST } = await route();
     const res = await POST(post({ text: "MEDIA: /a.png" }));
