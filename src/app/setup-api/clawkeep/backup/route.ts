@@ -1,6 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { ClawKeepError, backupExitError, clawKeepErrorBody, runBackup } from "@/lib/clawkeep";
+import {
+  ClawKeepError,
+  backupExitError,
+  backupRefusalFor,
+  clawKeepErrorBody,
+  runBackup,
+} from "@/lib/clawkeep";
 import { recheckQuotaHold } from "@/lib/clawkeep-scheduler";
 
 export const dynamic = "force-dynamic";
@@ -34,6 +40,13 @@ export const dynamic = "force-dynamic";
 // sentence. No failure leaves here as 2xx, and no FAILURE carries `stderrTail`:
 // that is the daemon's log line, written for an operator, and it has put an
 // absolute device path in front of the customer.
+//
+// A backup the daemon REFUSED before uploading — the account cannot hold it, or
+// its usage could not be counted — also carries `refusal`: the kind and the
+// exact byte counts the daemon decided on, read from state.json. The sentence
+// already says them in readable units; the numbers are there so the app can
+// say the same thing in the owner's language instead of showing the English.
+// A second run while one is in flight is 409 `already_running`.
 //
 // The 200 still carries it, deliberately and with a known cost: `clawkeepd`
 // logs through `logging.basicConfig`, i.e. stderr, so a backup that SUCCEEDED
@@ -79,8 +92,11 @@ export async function POST(request: NextRequest) {
       }
       label = obj.label;
     }
+    const startedAtMs = Date.now();
     const result = await runBackup({ idle, label });
-    const failure = backupExitError(result.exitCode);
+    // An idle ping uploads nothing, so it has no refusal of its own to report.
+    const refusal = idle ? null : await backupRefusalFor(result.exitCode, startedAtMs);
+    const failure = backupExitError(result.exitCode, refusal);
     if (failure) {
       // The daemon's output stays in the server log, where an operator can
       // read it; the owner gets the sentence and the code.
@@ -88,7 +104,11 @@ export async function POST(request: NextRequest) {
         `[clawkeep] backup exited ${result.exitCode}: ${result.stderr.slice(-2000)}`,
       );
       return NextResponse.json(
-        { ...clawKeepErrorBody(failure, "Backup failed"), exitCode: result.exitCode },
+        {
+          ...clawKeepErrorBody(failure, "Backup failed"),
+          exitCode: result.exitCode,
+          ...(refusal ? { refusal } : {}),
+        },
         { status: failure.status, headers: { "Cache-Control": "no-store" } },
       );
     }

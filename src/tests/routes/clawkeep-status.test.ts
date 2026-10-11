@@ -118,6 +118,63 @@ describe("GET /setup-api/clawkeep", () => {
     expect(body).toMatchObject({ skippedLinks: [], skippedLinkCount: 0 });
   });
 
+  it("carries why the last run refused to upload, with the sizes it decided on", async () => {
+    // Written by the daemon's admission check (clawkeep/state.py), read by the
+    // dashboard for a run nobody was watching and by `backup_status`.
+    const statePath = path.join(DATA_DIR, "state.json");
+    await fs.writeFile(statePath, JSON.stringify({
+      last_heartbeat_status: "error",
+      last_refusal: "quota_full",
+      last_refusal_at_ms: 1_760_000_000_000,
+      last_refusal_needed_bytes: 1_288_490_189,
+      last_refusal_used_bytes: 5_046_586_573,
+      last_refusal_quota_bytes: 5_368_709_120,
+    }));
+
+    const body = await (await GET()).json();
+    expect(body.lastHeartbeatStatus).toBe("error");
+    expect(body.lastRefusal).toEqual({
+      kind: "quota_full",
+      atMs: 1_760_000_000_000,
+      neededBytes: 1_288_490_189,
+      usedBytes: 5_046_586_573,
+      quotaBytes: 5_368_709_120,
+    });
+
+    // No refusal, a kind this build has no sentence for, and garbage where the
+    // sizes go: none of them may reach a byte formatter as anything but 0.
+    await fs.writeFile(statePath, JSON.stringify({ last_heartbeat_status: "ok" }));
+    expect((await (await GET()).json()).lastRefusal).toBeNull();
+    await fs.writeFile(statePath, JSON.stringify({ last_refusal: "made_up", last_refusal_needed_bytes: 5 }));
+    expect((await (await GET()).json()).lastRefusal).toBeNull();
+    await fs.writeFile(statePath, JSON.stringify({
+      last_refusal: "usage_unverified",
+      last_refusal_needed_bytes: "lots",
+      last_refusal_used_bytes: -3,
+      last_refusal_quota_bytes: null,
+    }));
+    expect((await (await GET()).json()).lastRefusal).toEqual({
+      kind: "usage_unverified", atMs: 0, neededBytes: 0, usedBytes: 0, quotaBytes: 0,
+    });
+  });
+
+  it("clearing a stuck spinner clears the refusal that went with the error", async () => {
+    const statePath = path.join(DATA_DIR, "state.json");
+    await fs.writeFile(statePath, JSON.stringify({
+      last_heartbeat_status: "error",
+      last_backup_at_ms: 42,
+      last_refusal: "quota_full",
+      last_refusal_needed_bytes: 9,
+    }));
+
+    await clawkeep.resetRunningState();
+
+    const body = await (await GET()).json();
+    expect(body.lastBackupAtMs).toBe(42);
+    expect(body.lastHeartbeatStatus).toBe("");
+    expect(body.lastRefusal).toBeNull();
+  });
+
   it("returns 500 with a structured error when getStatus throws", async () => {
     const spy = vi.spyOn(clawkeep, "getStatus").mockRejectedValueOnce(new Error("disk full"));
     const res = await GET();

@@ -968,6 +968,112 @@ describe("ClawKeep is gated on the edition that can actually run it", () => {
     expect(out.error.next).toMatch(/do not retry/i);
   });
 
+  it("does not call a box unpaired because a backup is already running", async () => {
+    // 409 `already_running` is the daemon's run lock turning a second run
+    // away. The bare 409 rule below it says "not set up — pair it in
+    // Settings", which would send the owner to re-pair a box that is, at that
+    // moment, backing itself up. Order in BACKUP_RULES is the contract.
+    apiPost.mockRejectedValue(
+      new ApiError(
+        409,
+        JSON.stringify({
+          error: "Another backup is already running — wait for it to finish, then try again",
+          code: "already_running",
+          exitCode: 14,
+        }),
+      ),
+    );
+
+    const out = await system("openclaw").call("backup_now", {});
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("CONFLICT");
+    expect(out.error.message).toMatch(/already running/i);
+    expect(out.error.message).not.toMatch(/not set up/i);
+    expect(out.error.next).toMatch(/do not start another one/i);
+    expect(out.error.next).not.toMatch(/pair/i);
+  });
+
+  it("says usage could not be checked rather than retrying into it", async () => {
+    // 503 had only `daemon_missing` and `archive_busy`; unmatched, this fell to
+    // the catch-all's "retry once" — a second archive built to be refused.
+    apiPost.mockRejectedValue(
+      new ApiError(
+        503,
+        JSON.stringify({
+          error: "ClawKeep could not check how much cloud storage is in use, so the backup was not uploaded",
+          code: "usage_unverified",
+          refusal: { kind: "usage_unverified", neededBytes: 1_288_490_189, usedBytes: 0, quotaBytes: 5_368_709_120 },
+        }),
+      ),
+    );
+
+    const out = await system("openclaw").call("backup_now", {});
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.message).toMatch(/could not check how much cloud storage is in use/i);
+    expect(out.error.message).toMatch(/nothing was changed/i);
+    expect(out.error.next).toMatch(/do not start another one/i);
+    expect(out.error.next).toMatch(/internet connection/i);
+  });
+
+  it("points the agent at the sizes when a backup does not fit", async () => {
+    apiPost.mockRejectedValue(
+      new ApiError(
+        507,
+        JSON.stringify({
+          error: "This backup needs 1.2 GB, but only 307 MB of the 5.0 GB of ClawKeep storage is free",
+          code: "quota_full",
+          refusal: { kind: "quota_full", neededBytes: 1_288_490_189, usedBytes: 5_046_586_573, quotaBytes: 5_368_709_120 },
+        }),
+      ),
+    );
+
+    const out = await system("openclaw").call("backup_now", {});
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.next).toMatch(/backup_status/);
+    expect(out.error.next).toMatch(/lastRefusal/);
+    expect(out.error.next).toMatch(/do not retry/i);
+  });
+
+  it("backup_status says why the last run was refused, and how to read its sizes", async () => {
+    const refused = {
+      paired: true, supportedOnEdition: true, lastBackupAtMs: Date.now() - 3_600_000,
+      lastHeartbeatStatus: "error",
+      schedule: { enabled: true, frequency: "daily" },
+      lastRefusal: { kind: "quota_full", atMs: Date.now(), neededBytes: 1_288_490_189, usedBytes: 5_046_586_573, quotaBytes: 5_368_709_120 },
+    };
+    apiGet.mockResolvedValue(refused);
+    const full = await system("openclaw").call("backup_status", {});
+    if (full.isError) throw new Error("backup_status failed");
+    const parsed = JSON.parse(full.text) as { notes: string[]; lastRefusal: unknown; protection: unknown };
+    expect(parsed.protection).toEqual({ state: "lapsed", reason: "error" });
+    // The numbers travel as data; the note says what they are and what helps.
+    expect(parsed.lastRefusal).toEqual(refused.lastRefusal);
+    const note = parsed.notes.find((n) => n.startsWith("lastRefusal:"));
+    expect(note).toMatch(/does not fit in the account/);
+    expect(note).toMatch(/in bytes/);
+    expect(note).toMatch(/only a larger plan helps/);
+    expect(note).not.toMatch(/\d{7,}/);
+
+    apiGet.mockResolvedValue({
+      ...refused,
+      lastRefusal: { kind: "usage_unverified", atMs: Date.now(), neededBytes: 9, usedBytes: 0, quotaBytes: 10 },
+    });
+    const unverified = await system("openclaw").call("backup_status", {});
+    if (unverified.isError) throw new Error("backup_status failed");
+    expect((JSON.parse(unverified.text).notes as string[]).join("\n")).toMatch(
+      /could not check how much cloud storage is in use/,
+    );
+
+    // A refusal the box has since moved on from explains nothing current.
+    apiGet.mockResolvedValue({ ...refused, lastHeartbeatStatus: "ok" });
+    const moved = await system("openclaw").call("backup_status", {});
+    if (moved.isError) throw new Error("backup_status failed");
+    expect((JSON.parse(moved.text).notes as string[]).join("\n")).not.toMatch(/lastRefusal/);
+  });
+
   it("tells the agent to get the box paired when backup_now hits an unpaired one", async () => {
     // The route refuses an unpaired box with 409 `not_paired` before it spawns
     // the daemon, and BACKUP_RULES is what turns that into an instruction the

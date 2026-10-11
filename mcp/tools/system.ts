@@ -198,6 +198,16 @@ const BACKUP_RULES: ErrorRule[] = [
     next: "Tell the user to check that it exists and is mode 600 — this is not a re-pairing. Do not retry.",
   },
   {
+    // The daemon's own single-instance lock: the scheduled run, or an earlier
+    // call, is still going, and this one left without touching anything.
+    // Ahead of the bare 409 below, which would call the box unpaired.
+    status: 409,
+    match: /"code"\s*:\s*"already_running"/,
+    code: "CONFLICT",
+    message: "A backup is already running on this device, so this one did not start.",
+    next: "Do not start another one. Tell the user a backup is in progress, and call backup_list later to confirm it landed.",
+  },
+  {
     status: 409,
     code: "CONFLICT",
     message: "Cloud backup is not set up on this device.",
@@ -228,7 +238,17 @@ const BACKUP_RULES: ErrorRule[] = [
     match: /"code"\s*:\s*"quota_full"/,
     code: "CONFLICT",
     message: "The ClawKeep account is out of space.",
-    next: "Tell the user to free some snapshots or upgrade the plan. Do not retry.",
+    next: "Call backup_status: when it carries lastRefusal, tell the user those sizes. Then tell them to free some snapshots or upgrade the plan. Do not retry.",
+  },
+  {
+    // The device counts what the account holds before it uploads, and uploads
+    // nothing when it cannot: the portal may be reachable and the storage not.
+    status: 503,
+    match: /"code"\s*:\s*"usage_unverified"/,
+    code: "ENDPOINT_DOWN",
+    message:
+      "The backup was not uploaded: the device could not check how much cloud storage is in use. Nothing was changed.",
+    next: "Do not start another one now. Tell the user to check the internet connection and try again later.",
   },
   {
     status: 503,
@@ -297,6 +317,14 @@ interface BackupStatusBody extends Partial<ProtectionInput> {
   paired?: boolean;
   /** Auto-backup paused for a full account; absent from older servers. */
   scheduleQuotaHoldSinceMs?: number;
+  /** Why the last run would not upload, in exact bytes; null when it was not
+   * refused before the upload, absent from older servers. */
+  lastRefusal?: {
+    kind?: string;
+    neededBytes?: number;
+    usedBytes?: number;
+    quotaBytes?: number;
+  } | null;
   /** The box's own backup archives the last archive left out (TASK-1301). */
   leftOutCount?: number;
   leftOutBytes?: number;
@@ -370,6 +398,26 @@ function backupNotes(body: BackupStatusBody, protection: Protection | null): str
       "Auto-backup is paused, not off: it was switched off while the ClawKeep account was full "
       + "(scheduleQuotaHoldSinceMs). The box checks the account hourly and switches auto-backup back on by "
       + "itself, with the same schedule, as soon as the account accepts backups again.",
+    );
+  }
+  // Why the last run was turned away, beside the "error" it explains. The
+  // numbers stay in the body, as everywhere above; the note says how to read
+  // them and which remedy can work.
+  if (body.lastHeartbeatStatus === "error" && body.lastRefusal?.kind === "quota_full") {
+    notes.push(
+      "lastRefusal: the last backup was NOT uploaded because it does not fit in the account. neededBytes is the "
+      + "encrypted backup, quotaBytes the plan and usedBytes what the account held, all in bytes — say them in "
+      + "GB or MB. If neededBytes is larger than quotaBytes only a larger plan helps; otherwise the user can "
+      + "delete snapshots they no longer need or upgrade. Nothing was uploaded or removed; earlier backups are "
+      + "untouched. Starting another backup will be refused the same way.",
+    );
+  }
+  if (body.lastHeartbeatStatus === "error" && body.lastRefusal?.kind === "usage_unverified") {
+    notes.push(
+      "lastRefusal: the last backup was NOT uploaded because the device could not check how much cloud storage "
+      + "is in use, so it uploaded nothing rather than guess (usedBytes is 0 because it is unknown). Nothing "
+      + "was removed; earlier backups are untouched. Tell the user to check the internet connection; the next "
+      + "scheduled run tries again.",
     );
   }
   // What the last archive left out, and what it still carried. Nothing is
@@ -852,11 +900,11 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
           // A 12 GB backup runs for well over an hour (TASK-675), so this
           // abort is the NORMAL outcome for the box this tool matters most
           // on — and the generic "Retry once" would start a second full
-          // archive-and-upload beside the first. `clawkeepd` has no
-          // single-instance guard of any kind, so nothing downstream would
-          // stop it. `mcp/tools/email.ts` catches the same class by hand for
-          // `email_send`; this is that idea as an option, so a route no
-          // longer has to wrap its own call to say it.
+          // archive-and-upload. The daemon now refuses that second run itself
+          // (`already_running`, in BACKUP_RULES), but only after this tool
+          // had told the agent to make it. `mcp/tools/email.ts` catches the
+          // same class by hand for `email_send`; this is that idea as an
+          // option, so a route no longer has to wrap its own call to say it.
           //
           // It names `backup_list`, as the description above does, and NOT
           // `backup_status`: that tool answers from `deriveProtection`, which
