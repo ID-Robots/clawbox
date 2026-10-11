@@ -147,6 +147,7 @@ while read -r kind a b; do
       note "clawbox GNOME session up ${a}s" ;;
     marker)
       SAW_MARKER=1
+      # shellcheck disable=SC2088  # literal text: the board user's path, never expanded
       if [ "$a" = missing ]; then
         not_ok "~/.config/gnome-initial-setup-done is missing after boot"
       elif [ "$a" = clawbox ] && [ "$b" = yes ]; then
