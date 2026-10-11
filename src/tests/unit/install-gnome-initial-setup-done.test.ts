@@ -115,8 +115,29 @@ d("step_gnome_initial_setup_done marks GNOME's first-run assistant as done", () 
     expect(result.status, `${result.stdout}\n${result.stderr}`).toBe(0);
     expect(pkillCalls()).toHaveLength(1);
     const user = spawnSync("id", ["-un"], { encoding: "utf-8" }).stdout.trim();
-    expect(pkillCalls()[0]).toBe(`pkill -TERM -u ${user} -f gnome-initial-setup --existing-user`);
+    expect(pkillCalls()[0]).toMatch(new RegExp(`^pkill -TERM -u ${user} -f \\S`));
     expect(result.stdout).toContain("Ended the first-run assistant");
+  });
+
+  it("matches the assistant's own command line, never one that only mentions it", () => {
+    // Unanchored, `pkill -f` also signalled any clawbox process whose command
+    // line CONTAINS the text — an agent run whose prompt quotes it, a shell
+    // running a script that looks for it. Checked with grep -E: pkill's
+    // pattern is a POSIX extended regex searched in the command line.
+    const pattern = /pkill -TERM -u "\$CLAWBOX_USER" -f '([^']+)'/.exec(
+      extractShellFunction("step_gnome_initial_setup_done"),
+    )?.[1];
+    expect(pattern).toBeDefined();
+    const matches = (cmdline: string) =>
+      spawnSync("grep", ["-Eq", "--", pattern as string], { input: `${cmdline}\n` }).status === 0;
+
+    expect(matches("/usr/libexec/gnome-initial-setup --existing-user")).toBe(true);
+    expect(matches("gnome-initial-setup --existing-user")).toBe(true);
+    expect(matches("/usr/libexec/gnome-initial-setup --existing-user --force")).toBe(true);
+    expect(matches("claude -p fix the gnome-initial-setup --existing-user leak")).toBe(false);
+    expect(matches("bash -c pgrep -f 'gnome-initial-setup --existing-user'")).toBe(false);
+    expect(matches("/usr/libexec/gnome-initial-setup-copy-worker")).toBe(false);
+    expect(matches("/usr/libexec/gnome-initial-setup")).toBe(false);
   });
 
   it("is quiet about the assistant when none was running", () => {
@@ -169,6 +190,10 @@ d("step_gnome_initial_setup_done marks GNOME's first-run assistant as done", () 
     expect(postUpdate).toContain("optional_step gnome_initial_setup_done step_gnome_initial_setup_done");
 
     const fullInstall = INSTALL_SH.slice(INSTALL_SH.indexOf("# ── Full Install Mode"));
-    expect(fullInstall).toMatch(/^step_gnome_initial_setup_done \|\| /m);
+    const call = fullInstall.search(/^step_gnome_initial_setup_done \|\| /m);
+    expect(call).toBeGreaterThan(0);
+    // Before the theme step, whose root `mkdir -p ~/.config/autostart` would
+    // leave a missing ~/.config root-owned and the marker unwritable as clawbox.
+    expect(call).toBeLessThan(fullInstall.search(/^step_desktop_theme$/m));
   });
 });

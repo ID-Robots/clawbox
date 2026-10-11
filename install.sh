@@ -11594,7 +11594,9 @@ EOF
 # already started the assistant without a marker to stop it. Writing the marker
 # therefore also ends the copy that is running, instead of leaving it resident
 # until some later boot. Picked by the clawbox uid and the assistant's own
-# command line, so no other account's process can match.
+# command line, anchored at its start: unanchored, `-f` also matched any
+# clawbox process that merely MENTIONS that command line — an agent run whose
+# prompt quotes it, a shell running a script that greps for it.
 step_gnome_initial_setup_done() {
   local config_dir="$CLAWBOX_HOME/.config"
   local marker="$config_dir/gnome-initial-setup-done"
@@ -11610,7 +11612,7 @@ step_gnome_initial_setup_done() {
   fi
   echo "  GNOME initial setup marked done (its first-run assistant no longer starts with the desktop)"
 
-  if pkill -TERM -u "$CLAWBOX_USER" -f 'gnome-initial-setup --existing-user' 2>/dev/null; then
+  if pkill -TERM -u "$CLAWBOX_USER" -f '^(/[^ ]*/)?gnome-initial-setup --existing-user( |$)' 2>/dev/null; then
     echo "  Ended the first-run assistant the running session had already started"
   fi
 }
@@ -12390,10 +12392,12 @@ log "Installing VNC server..."
 step_vnc_install
 
 log "Applying ClawBox desktop theme..."
-step_desktop_theme
 # Under the same heading, so the step count stays what it is. Non-fatal: GNOME's
-# first-run assistant costs memory, not function.
+# first-run assistant costs memory, not function. BEFORE step_desktop_theme: on
+# a home with no ~/.config, that step's root `mkdir -p` of ~/.config/autostart
+# leaves ~/.config itself root-owned, and the marker is written as clawbox.
 step_gnome_initial_setup_done || echo "  Warning: gnome_initial_setup_done step failed (non-fatal)"
+step_desktop_theme
 
 # Belt-and-suspenders PATH stanza — covers update runs that early-return out
 # of step_openclaw_install / step_ai_tools_install when those tools are

@@ -133,6 +133,10 @@ AFTER=$(board '
   if [ -f "$m" ]; then echo "marker $(stat -c %U "$m") $(cat "$m")"; else echo "marker missing"; fi
   echo "assistant $(pgrep -u "$uid" -af "gnome-initial-[s]etup( |\$)" | tr "\n" ";")"
 ')
+# Both verdicts must be answered: a board that said nothing here (an ssh hop
+# lost right after the reboot) would otherwise pass on the oks printed above.
+SAW_MARKER=0
+SAW_ASSISTANT=0
 while read -r kind a b; do
   case "$kind" in
     session)
@@ -142,6 +146,7 @@ while read -r kind a b; do
       fi
       note "clawbox GNOME session up ${a}s" ;;
     marker)
+      SAW_MARKER=1
       if [ "$a" = missing ]; then
         not_ok "~/.config/gnome-initial-setup-done is missing after boot"
       elif [ "$a" = clawbox ] && [ "$b" = yes ]; then
@@ -150,6 +155,7 @@ while read -r kind a b; do
         not_ok "~/.config/gnome-initial-setup-done is ${a}'s and holds \"$b\""
       fi ;;
     assistant)
+      SAW_ASSISTANT=1
       if [ -z "$a" ]; then
         ok "no gnome-initial-setup process for clawbox after boot"
       else
@@ -157,6 +163,8 @@ while read -r kind a b; do
       fi ;;
   esac
 done <<<"$AFTER"
+[ "$SAW_MARKER" = 1 ] || not_ok "the board did not report the marker after boot"
+[ "$SAW_ASSISTANT" = 1 ] || not_ok "the board did not report its gnome-initial-setup processes after boot"
 
 # Leave the board ready for the tests after this one; 75-full-reboot owns the
 # boot-time readiness verdict, so this is a note, not a result.
