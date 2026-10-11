@@ -973,6 +973,9 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
 
           const state = payload.state as string
           const msg = payload.message
+          // The gateway reports a failed run TWICE (lib/chat-run-failure.ts):
+          // the ledger settles it once, and says when this frame is the repeat.
+          const settledError = state === 'error' ? runFailureRef.current.settleError(payload) : undefined
 
           if (state === 'delta') {
             const text = extractText(msg)
@@ -1040,6 +1043,15 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
                 void loadHistory()
               }, 3_000)
             }
+          } else if (settledError?.repeat) {
+            // The second `error` frame for a run the first one already ended,
+            // some seven seconds on. The owner may have sent the next message
+            // by now: nothing of the turn in flight is touched, and nothing is
+            // reported to the account swap again. Nor is anything owed the
+            // transcript: the sentence is still on screen, because this chat's
+            // history reads carry its notes (`keepLocalNotes`) and nothing
+            // else here takes one away. The mascot chat, whose re-read drops
+            // them, is the one that puts it back.
           } else if (state === 'aborted' || state === 'error') {
             // Read, clear, THEN append — all three outside any updater. This
             // append used to sit inside `setStreaming(prev => …)`, where React
@@ -1088,7 +1100,7 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
               // an operator reading a log and has carried an absolute device
               // path, a session UUID and a `openclaw logs --follow` line into
               // the customer's transcript (TASK-440).
-              const failureContext = runFailureRef.current.settle(payload)
+              const failureContext = settledError?.context
               setMessages(prev => [...prev, { role: 'system', text: describeChatFailure(payload.errorMessage, failureContext, failureWordsRef.current), timestamp: Date.now() }])
               // A Claude account at its limit, or refused (TASK-1260): the box
               // moves every Claude consumer to the next account and sends the

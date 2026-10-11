@@ -457,6 +457,37 @@ describe("failed gateway turns", () => {
     expect((await pool.readAccounts()).find((a) => a.id === work.id)?.status).toBe("ok");
   });
 
+  it("tells the chat of no move when the pool's only account is the Terminal's `claude` sign-in, which the gateway cannot carry", async () => {
+    const gateway = fakeGateway();
+    gw.startGatewaySwap();
+    // 2026-10-10: the owner had signed `claude` in from the Terminal and
+    // connected nothing else, the gateway's own stored sign-in was unusable,
+    // and the chat was told 13 times that the box had "moved everything that
+    // uses Claude" to that sign-in.
+    fs.mkdirSync(path.join(root, "home", ".claude"), { recursive: true });
+    fs.writeFileSync(path.join(root, "home", ".claude", ".credentials.json"), JSON.stringify({ claudeAiOauth: { accessToken: "sk-ant-oat01-FAKE-terminal-sign-in" } }));
+    const [login] = await pool.readAccounts();
+    expect(login.kind).toBe("login");
+    await swap.whenSwapsSettled();
+
+    const outcome = await gw.reportChatFailure({
+      errorMessage: 'No API key found for provider "anthropic". Auth store: /home/clawbox/.openclaw/state/openclaw.sqlite (agentDir: /home/clawbox/.openclaw/agents/main/agent).',
+      reason: "auth",
+      provider: "anthropic",
+      sessionKey: "agent:main:main",
+      message: "Summarise my inbox",
+    });
+    expect(outcome).toMatchObject({ handled: true, kind: "auth", activeId: null, activeLabel: null, allLimited: false, retry: "none" });
+    // Nothing was written, nothing restarted, the turn not sent again.
+    expect(gateway.writes).toEqual([]);
+    expect(gateway.restarts).toBe(0);
+    expect(gateway.calls.filter((c) => c.method === "chat.send")).toEqual([]);
+    const view = await pool.describePool();
+    expect(view.activeAccountId).toBe(login.id);
+    expect(view.gateway.following).toBe(false);
+    expect(view.lastSwap?.consumers.gateway).toEqual({ status: "skipped", code: "not_transferable", count: null });
+  });
+
   it("ignores another provider's failure", async () => {
     fakeGateway();
     await twoClaudeAccounts();
