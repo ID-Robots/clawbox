@@ -7,6 +7,9 @@ runner-level integration is already covered by test_runner.py via mocks.
 
 from __future__ import annotations
 
+import socket
+import time
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -171,6 +174,37 @@ def test_stats_translates_botocore_error() -> None:
     with patch("clawkeep.s3._client", return_value=fake_client):
         with pytest.raises(s3.S3Error, match="list_objects_v2 failed"):
             s3.stats(CREDS)
+
+
+def test_a_listing_nobody_answers_ends_at_its_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A store that takes the connection and never answers. botocore's timeouts
+    are per read and its retries multiply them, so without `timeout` one LIST
+    against it held a backup run for about 19 minutes."""
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    monkeypatch.setenv("no_proxy", "127.0.0.1")
+    # Listening, so the kernel completes every handshake; never accepted, so
+    # no request is ever read, let alone answered.
+    with socket.create_server(("127.0.0.1", 0)) as silent:
+        creds = replace(CREDS, endpoint=f"http://127.0.0.1:{silent.getsockname()[1]}")
+        started = time.monotonic()
+        with pytest.raises(s3.S3Error, match="did not finish within 0.5s"):
+            s3.stats(creds, timeout=0.5)
+        assert time.monotonic() - started < 2.0
+
+
+def test_listing_calls_retry_less_than_transfers() -> None:
+    fake_client = MagicMock()
+    fake_client.get_paginator.return_value.paginate.return_value = iter([{"Contents": []}])
+    with patch("clawkeep.s3._client", return_value=fake_client) as build:
+        s3.stats(CREDS)
+    assert build.call_args.kwargs["max_attempts"] == s3.LIST_MAX_ATTEMPTS
+    assert s3.LIST_MAX_ATTEMPTS < s3.MAX_ATTEMPTS
+    # With a timeout, the client's own timeouts fit inside it.
+    fake_client.get_paginator.return_value.paginate.return_value = iter([{"Contents": []}])
+    with patch("clawkeep.s3._client", return_value=fake_client) as build:
+        s3.stats(CREDS, timeout=5.0)
+    assert build.call_args.kwargs["connect_timeout"] == 5.0
+    assert build.call_args.kwargs["read_timeout"] == 5.0
 
 
 def test_list_snapshots_strips_prefix_and_sorts_newest_first() -> None:

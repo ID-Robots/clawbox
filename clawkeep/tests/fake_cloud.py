@@ -15,6 +15,8 @@ Knobs, all plain attributes on :class:`FakeCloud`:
   quota_bytes     what `/credentials` reports as `quotaBytes`
   page_size       keys per listing page (small, so a listing has several)
   fail_listing    True: every listing answers 500 InternalError
+  hang_listing    an Event every listing waits on, then drops the connection
+                  unanswered: a store that takes the request and never replies
   hold_uploads    an Event a snapshot PUT waits on before it is stored
 """
 
@@ -46,6 +48,7 @@ class FakeCloud:
         self.quota_bytes = quota_bytes
         self.page_size = page_size
         self.fail_listing = False
+        self.hang_listing: threading.Event | None = None
         self.hold_uploads: threading.Event | None = None
         self.upload_arrived = threading.Event()
         #: Full object key → what is stored there.
@@ -68,6 +71,8 @@ class FakeCloud:
         return self
 
     def __exit__(self, *exc: object) -> None:
+        if self.hang_listing is not None:
+            self.hang_listing.set()
         if self.hold_uploads is not None:
             self.hold_uploads.set()
         self._server.shutdown()
@@ -263,6 +268,11 @@ def _handler_for(cloud: FakeCloud) -> type[BaseHTTPRequestHandler]:
             if not key and "list-type" in query:
                 token = query.get("continuation-token", [""])[0]
                 cloud._note("LIST", token)
+                hang = cloud.hang_listing
+                if hang is not None:
+                    hang.wait(60)
+                    self.close_connection = True
+                    return
                 if cloud.fail_listing:
                     self._s3_error(500, "InternalError", "We encountered an internal error.")
                     return

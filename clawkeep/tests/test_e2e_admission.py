@@ -300,6 +300,67 @@ def test_a_backup_is_refused_when_the_listing_is_unavailable(
     assert box.state().last_heartbeat_status == "ok"
 
 
+def test_a_listing_that_never_answers_ends_the_run_within_its_deadlines(
+    box: Box, cloud: FakeCloud, history: dict, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The storage takes the connection and never answers a LIST. The run must
+    refuse exactly as it does for a listing that fails, and let go of the run
+    lock — which every "Back up now" and scheduled slot meet meanwhile — within
+    its listing deadlines, not the hour botocore's per-read timeouts times its
+    retries came to."""
+    # Deadlines a test can wait out; the run's own are minutes. Not `raising`:
+    # a runner without them fails this test by overrunning, not on a name.
+    monkeypatch.setattr(runner, "USAGE_RECOUNT_DEADLINE", 1.0, raising=False)
+    monkeypatch.setattr(runner, "ADMISSION_LIST_DEADLINE", 2.0, raising=False)
+    monkeypatch.setattr(runner, "ADMISSION_LIST_DELAYS", (0.2, 0.2))
+    hang = threading.Event()
+    cloud.hang_listing = hang
+    # Both deadlines, plus the archive build and encryption: seconds here, and
+    # far short of the 120 s a single unanswered read used to wait.
+    bound = runner.USAGE_RECOUNT_DEADLINE + runner.ADMISSION_LIST_DEADLINE + 15.0
+
+    results: list[int] = []
+    started = time.monotonic()
+    first = threading.Thread(target=lambda: results.append(box.run()), daemon=True)
+    first.start()
+    first.join(bound)
+    took = time.monotonic() - started
+    assert not first.is_alive(), f"the run still held the run lock after {took:.0f}s"
+    assert results == [runner.EXIT_NETWORK]
+
+    # Fail-closed: not a byte written, every snapshot and the manifest as they
+    # were, and no usage reported that nobody counted.
+    assert cloud.contents() == history
+    assert cloud.writes() == []
+    assert cloud.count("LIST") >= 2  # the opening recount, then admission
+    running, refused = cloud.heartbeats
+    assert running["status"] == "running"
+    assert "cloudBytes" not in running
+    assert refused["status"] == "error"
+    assert refused["error"].startswith("quota check unavailable: ")
+    assert "cloudBytes" not in refused
+
+    final = box.state()
+    assert final.last_heartbeat_status == "error"
+    assert final.last_backup_at_ms == 0
+    assert final.last_step == ""
+    assert final.last_refusal == state.REFUSAL_USAGE_UNVERIFIED
+    assert final.last_refusal_needed_bytes > 0
+    assert final.last_refusal_quota_bytes == cloud.quota_bytes
+    assert box.left_in_staging() == []
+
+    # The run lock is free again, and once the storage answers the next run is
+    # an ordinary backup.
+    with backup_guard.exclusive(box.data / runner.RUN_LOCK_NAME, wait=False) as acquired:
+        assert acquired
+    cloud.hang_listing = None
+    hang.set()
+    assert box.run() == runner.EXIT_OK
+    assert len(set(cloud.snapshots()) - set(SEEDED)) == 1
+    assert box.state().last_refusal == ""
+    assert box.state().last_heartbeat_status == "ok"
+
+
 def test_a_second_run_during_an_upload_leaves_the_first_alone(
     box: Box, cloud: FakeCloud, history: dict,
 ) -> None:

@@ -73,11 +73,21 @@ RUN_LOCK_NAME = "backup-run.lock"
 # The listing the admission check decides on is tried this many times, this
 # far apart, before the run fails closed. By then the box has spent minutes to
 # hours building and encrypting the archive, so one failed LIST must not throw
-# that away; botocore's own retries (`s3._client`) already sit inside each
-# attempt, so three spaced attempts ride out a link that drops for a moment
-# without holding a broken run open for long.
+# that away; botocore's own retries (`s3.LIST_MAX_ATTEMPTS`) already sit inside
+# each attempt, so three spaced attempts ride out a link that drops for a
+# moment without holding a broken run open for long (ADMISSION_LIST_DEADLINE).
 ADMISSION_LIST_ATTEMPTS = 3
 ADMISSION_LIST_DELAYS = (5.0, 30.0)
+
+# A store that takes the connection and never answers a LIST must not hold the
+# run — and with it the run lock, so every "Back up now" and scheduled slot —
+# for long: one such LIST used to cost botocore's retries about 19 minutes, and
+# a run asked four times. So a usage recount may take this long, and the
+# admission check this long in all, its attempts and the waits between them,
+# before the listing counts as failed. Both leave room for one full
+# `s3.READ_TIMEOUT`, so a slow store that does answer is still counted.
+USAGE_RECOUNT_DEADLINE = 150.0
+ADMISSION_LIST_DEADLINE = 240.0
 
 
 def _create_archive_with_race_retry(cfg: Config, staging: Path) -> openclaw.Archive:
@@ -216,10 +226,11 @@ def _recompute_usage(st: state.State, creds: api.Credentials) -> s3.CloudStats |
 
     Best-effort by design: a failed LIST leaves `st` and the caller's payload
     untouched, so a transient network error can't clobber the portal's
-    last-known usage with a zero. Callers persist `st` themselves.
+    last-known usage with a zero. One that has not ended within
+    USAGE_RECOUNT_DEADLINE has failed. Callers persist `st` themselves.
     """
     try:
-        cloud = s3.stats(creds)
+        cloud = s3.stats(creds, timeout=USAGE_RECOUNT_DEADLINE)
     except s3.S3Error as e:
         log.warning("cloud usage recompute failed (continuing): %s", e)
         return None
@@ -275,24 +286,32 @@ def _admission_usage(st: state.State, creds: api.Credentials) -> s3.CloudStats |
     Unlike the opening and closing recounts this one decides something: None
     refuses the upload. So it is retried (ADMISSION_LIST_ATTEMPTS), and it
     takes `s3.stats`' word for "complete": a listing that failed part-way or
-    stopped early is an error there, never a smaller total. A count that
+    stopped early is an error there, never a smaller total. All of it, waits
+    included, ends by ADMISSION_LIST_DEADLINE: each attempt gets what is left
+    of it, and a wait that would use the rest up is not started. A count that
     succeeds is recorded on `st` like any other; a failed one leaves `st`
     alone. Callers persist `st` themselves.
     """
+    deadline = time.monotonic() + ADMISSION_LIST_DEADLINE
     for attempt in range(ADMISSION_LIST_ATTEMPTS):
         try:
-            cloud = s3.stats(creds)
+            cloud = s3.stats(creds, timeout=deadline - time.monotonic())
         except s3.S3Error as e:
-            last = attempt + 1 >= ADMISSION_LIST_ATTEMPTS
+            delay: float | None = None
+            if attempt + 1 < ADMISSION_LIST_ATTEMPTS:
+                delay = ADMISSION_LIST_DELAYS[attempt]
+                if delay >= deadline - time.monotonic():
+                    delay = None
             log.warning(
                 "could not list cloud usage before the upload (attempt %d/%d)%s: %s",
                 attempt + 1,
                 ADMISSION_LIST_ATTEMPTS,
-                "" if last else f"; trying again in {ADMISSION_LIST_DELAYS[attempt]:.0f}s",
+                "" if delay is None else f"; trying again in {delay:.0f}s",
                 e,
             )
-            if not last:
-                time.sleep(ADMISSION_LIST_DELAYS[attempt])
+            if delay is None:
+                return None
+            time.sleep(delay)
             continue
         st.last_cloud_bytes = cloud.cloud_bytes
         st.last_snapshot_count = cloud.snapshot_count
@@ -690,10 +709,10 @@ def _run_once_locked(cfg: Config, token: str, *, label: str | None = None) -> in
         admission = _admission_usage(st, creds)
         if admission is None:
             message = (
-                "quota check unavailable: could not verify cloud usage after "
-                f"{ADMISSION_LIST_ATTEMPTS} attempts, so this backup "
-                f"({_human_bytes(encrypted_size)} encrypted) was not uploaded. Nothing was "
-                "uploaded or removed. Check connectivity and retry."
+                "quota check unavailable: could not verify cloud usage within "
+                f"{ADMISSION_LIST_ATTEMPTS} attempts and {ADMISSION_LIST_DEADLINE:.0f}s, so "
+                f"this backup ({_human_bytes(encrypted_size)} encrypted) was not uploaded. "
+                "Nothing was uploaded or removed. Check connectivity and retry."
             )
             log.error(message)
             ok = _heartbeat_safe(cfg.server, token, status="error", error=message)
