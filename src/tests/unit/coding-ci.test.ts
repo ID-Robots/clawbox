@@ -116,6 +116,11 @@ describe("what a team's goal asks for", () => {
     ["Open a PR and get it merged once CI passes", true, true],
     ["Ship it: open a pull request, auto-merge", true, true],
     ["Update the docs without merging anything", false, false],
+    // A negator however far before the merge, in its clause, is a refusal.
+    ["Open a PR, do not under any circumstances merge it", true, false],
+    ["Open a pull request and never, whatever the checks say, merge it", true, false],
+    // …but not one in another clause, nor a word that only starts like one.
+    ["Notify the team. Open a PR and merge it when CI is green", true, true],
   ])("%s → PR %s, merge %s", (goal, pr, merge) => {
     expect(goalWantsPullRequest(goal)).toBe(pr);
     expect(goalWantsMerge(goal)).toBe(merge);

@@ -189,7 +189,9 @@ export function goalWantsPullRequest(goal: string): boolean {
  */
 export function goalWantsMerge(goal: string): boolean {
   if (!/\bmerg(?:e|es|ed|ing)\b|\bauto-?merge\b/i.test(goal)) return false;
-  if (/\b(?:do\s+not|don['’]?t|never|without|no|not|nor|but\s+not)\s+(?:\w+\s+){0,3}?merg/i.test(goal)) return false;
+  // Fail-closed: any negator earlier in the same clause as the merge — "do not
+  // under any circumstances merge it" — is a refusal.
+  if (/\b(?:do\s+not|don['’]?t|never|without|no|not|nor)\b[^.;\n]*\bmerg/i.test(goal)) return false;
   if (/\bunmerged\b|\bfor\s+review\s+only\b|\bleave\s+(?:it|the\s+(?:pr|pull\s+request))\s+open\b/i.test(goal)) return false;
   // About the pull request, never any merge: "merge the two config files"
   // is a task for the code, and reading it as consent to merge would publish
