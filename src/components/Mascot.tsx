@@ -2187,7 +2187,8 @@ function ClawBoxMascot({ onTap, frozen, thinking, onPositionChange, rightInset }
               />
             </>
           ) : (
-            <img src={state === 'sleep' ? CRAB_SLEEP_SRC : '/clawbox-crab.png'} alt="" draggable={false} style={{
+            // Thinking outranks sleep, as it does for `bodyAnim` and the pet.
+            <img src={state === 'sleep' && !thinking ? CRAB_SLEEP_SRC : '/clawbox-crab.png'} alt="" draggable={false} style={{
               position: 'absolute', bottom: CRAB_ART_BOTTOM_PX, left: (CRAB_BODY_PX - CRAB_ART_PX) / 2,
               width: CRAB_ART_PX, height: CRAB_ART_PX, objectFit: 'contain',
             }} />

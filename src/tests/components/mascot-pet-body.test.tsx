@@ -1021,13 +1021,20 @@ describe("PetSprite", () => {
     it("shuts the fail-open crab's eyes while it sleeps, and opens them when it wakes", async () => {
       // No sheet to step: the body is a still PNG, and its eyes are open.
       vi.stubGlobal("fetch", vi.fn(() => Promise.reject(new Error("offline"))));
-      const { container, getByTestId } = render(<Mascot />);
+      const { container, getByTestId, rerender } = render(<Mascot />);
       const still = () => container.querySelector('img[src^="/clawbox-crab"]')?.getAttribute("src");
       await waitFor(() => expect(still()).toBe("/clawbox-crab.png"));
       const root = container.querySelector('[data-mascot="crab"]') as HTMLElement;
 
       fireEvent.contextMenu(root, { clientX: 100, clientY: 600 });
       fireEvent.click(getByTestId("mascot-context-menu").querySelector("button") as HTMLElement);
+      await waitFor(() => expect(still()).toBe("/clawbox-crab-sleep.png"));
+
+      // Thinking outranks sleep — the shell runs the thinking wobble, and the
+      // face it wobbles must not be asleep.
+      rerender(<Mascot thinking />);
+      await waitFor(() => expect(still()).toBe("/clawbox-crab.png"));
+      rerender(<Mascot />);
       await waitFor(() => expect(still()).toBe("/clawbox-crab-sleep.png"));
 
       // A drag-and-drop wakes it.
