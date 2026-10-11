@@ -271,39 +271,76 @@ def _last_modified_ms(value: object) -> int:
     return 0
 
 
-def stats(creds: Credentials) -> CloudStats:
-    """Sum sizes + count objects under the prefix.
+def _snapshot_objects(creds: Credentials) -> list[tuple[str, dict[str, Any]]]:
+    """Every snapshot object under the prefix as `(name, listing entry)`, or
+    `S3Error` — never part of the answer.
 
-    This — not any counter the portal keeps — is what the account actually
-    holds. One LIST answers it, which is why the runner can afford to ask on
-    every heartbeat instead of trusting a number that only ever goes stale.
+    The one walk `stats` and `list_snapshots` share, so the two readings of
+    "what is in the prefix" apply the same exclusions in the same order and
+    can never disagree: the sidecar manifest is bookkeeping, not a backup, and
+    a zero-byte "directory marker" (MinIO and some R2 lifecycles emit them) is
+    not a snapshot either.
+
+    All of it or nothing, because both callers act on the total. A backup is
+    admitted against the usage this adds up to, and retention forgets the
+    manifest entry — the lock included — of every name it does not return; a
+    listing that stopped early would under-count the one and unlock snapshots
+    for the other. The paginator follows `NextContinuationToken` and raises on
+    a failed page, but it ENDS QUIETLY on a page that says `IsTruncated` and
+    carries no token, so that page is refused here. An entry without a usable
+    size is refused for the same reason: counted as 0 it is usage that was
+    never added up.
     """
     try:
         from botocore.exceptions import BotoCoreError, ClientError
     except ImportError as e:  # pragma: no cover
         raise S3Error("boto3/botocore not installed") from e
 
+    where = f"s3://{creds.bucket}/{creds.prefix}"
     cli = _client(creds)
-    total = 0
-    count = 0
+    out: list[tuple[str, dict[str, Any]]] = []
+    truncated = False
     try:
         paginator = cli.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=creds.bucket, Prefix=creds.prefix):
+            truncated = bool(page.get("IsTruncated"))
             for obj in page.get("Contents", []) or []:
                 name = _strip_prefix(creds.prefix, str(obj.get("Key", "")))
-                # Same two exclusions `list_snapshots` applies, in the same
-                # order, so the usage the panel derives from a listing and the
-                # usage a backup run reports can never disagree:
-                # the sidecar manifest is bookkeeping, not a backup, and a
-                # zero-byte "directory marker" is not a snapshot either.
                 if not name or name.endswith("/"):
                     continue
                 if name == MANIFEST_OBJECT:
                     continue
-                total += int(obj.get("Size", 0))
-                count += 1
+                size = obj.get("Size")
+                if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+                    raise S3Error(
+                        f"list_objects_v2 for {where} returned an entry without a usable "
+                        "size; the listing cannot be added up",
+                    )
+                out.append((name, obj))
     except (BotoCoreError, ClientError) as e:
-        raise S3Error(f"list_objects_v2 failed for s3://{creds.bucket}/{creds.prefix}: {e}") from e
+        raise S3Error(f"list_objects_v2 failed for {where}: {e}") from e
+    if truncated:
+        raise S3Error(
+            f"list_objects_v2 for {where} ended on a truncated page with no continuation "
+            "token; the listing is incomplete",
+        )
+    return out
+
+
+def stats(creds: Credentials) -> CloudStats:
+    """Sum sizes + count objects under the prefix.
+
+    This — not any counter the portal keeps — is what the account actually
+    holds. One LIST answers it, which is why the runner can afford to ask on
+    every heartbeat instead of trusting a number that only ever goes stale.
+    A listing that cannot be read to its end is an `S3Error`, not a smaller
+    number (`_snapshot_objects`).
+    """
+    total = 0
+    count = 0
+    for _name, obj in _snapshot_objects(creds):
+        total += obj["Size"]
+        count += 1
     return CloudStats(cloud_bytes=total, snapshot_count=count)
 
 
@@ -331,50 +368,28 @@ def list_snapshots(creds: Credentials) -> list[Snapshot]:
     restores the most recent backup, so it goes at the top of the list and
     we don't need a client-side sort.
     """
-    try:
-        from botocore.exceptions import BotoCoreError, ClientError
-    except ImportError as e:  # pragma: no cover
-        raise S3Error("boto3/botocore not installed") from e
-
     # Manifest annotations are merged in below. A read failure here would be
     # surfaced as S3Error; a *missing* manifest yields an empty mapping so
     # every snapshot reads back as unnamed + unlocked (back-compat).
     manifest = read_manifest(creds)
     entries = manifest.get("snapshots", {})
 
-    cli = _client(creds)
     out: list[Snapshot] = []
-    try:
-        paginator = cli.get_paginator("list_objects_v2")
-        for page in paginator.paginate(Bucket=creds.bucket, Prefix=creds.prefix):
-            for obj in page.get("Contents", []) or []:
-                key = str(obj.get("Key", ""))
-                if not key:
-                    continue
-                name = _strip_prefix(creds.prefix, key)
-                # Skip "directory marker" objects (zero-byte, key ends with /) —
-                # MinIO/some R2 lifecycles emit them, but they're not snapshots.
-                if not name or name.endswith("/"):
-                    continue
-                # The sidecar manifest is never itself a snapshot.
-                if name == MANIFEST_OBJECT:
-                    continue
-                entry = entries.get(name) if isinstance(entries, dict) else None
-                label: Optional[str] = None
-                locked = False
-                if isinstance(entry, dict):
-                    raw_label = entry.get("label")
-                    label = raw_label if isinstance(raw_label, str) and raw_label else None
-                    locked = bool(entry.get("locked", False))
-                out.append(Snapshot(
-                    name=name,
-                    size_bytes=int(obj.get("Size", 0)),
-                    last_modified_ms=_last_modified_ms(obj.get("LastModified")),
-                    label=label,
-                    locked=locked,
-                ))
-    except (BotoCoreError, ClientError) as e:
-        raise S3Error(f"list_objects_v2 failed for s3://{creds.bucket}/{creds.prefix}: {e}") from e
+    for name, obj in _snapshot_objects(creds):
+        entry = entries.get(name) if isinstance(entries, dict) else None
+        label: Optional[str] = None
+        locked = False
+        if isinstance(entry, dict):
+            raw_label = entry.get("label")
+            label = raw_label if isinstance(raw_label, str) and raw_label else None
+            locked = bool(entry.get("locked", False))
+        out.append(Snapshot(
+            name=name,
+            size_bytes=obj["Size"],
+            last_modified_ms=_last_modified_ms(obj.get("LastModified")),
+            label=label,
+            locked=locked,
+        ))
 
     out.sort(key=lambda s: s.last_modified_ms, reverse=True)
     return out

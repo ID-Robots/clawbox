@@ -338,6 +338,137 @@ def test_stats_excludes_manifest() -> None:
     assert result.snapshot_count == 2
 
 
+# ── a listing is all of the prefix, or it is an error ───────────────────────
+
+def _paged_client(pages: list[dict]) -> MagicMock:
+    fake_client = MagicMock()
+    fake_client.get_paginator.return_value.paginate.return_value = iter(pages)
+    return fake_client
+
+
+def test_stats_follows_truncated_pages_to_the_last_one() -> None:
+    pages = [
+        {"IsTruncated": True, "NextContinuationToken": "t1",
+         "Contents": [{"Key": _key("a.tar.gz.enc"), "Size": 100}]},
+        {"IsTruncated": True, "NextContinuationToken": "t2", "Contents": []},
+        {"IsTruncated": False,
+         "Contents": [{"Key": _key("b.tar.gz.enc"), "Size": 23}]},
+    ]
+    with patch("clawkeep.s3._client", return_value=_paged_client(pages)):
+        assert s3.stats(CREDS) == s3.CloudStats(cloud_bytes=123, snapshot_count=2)
+
+
+@pytest.mark.parametrize("read", [s3.stats, s3.list_snapshots])
+def test_a_listing_that_ends_while_still_truncated_is_refused(read) -> None:
+    """The paginator stops quietly on a page that says there is more and
+    carries no token to fetch it with. The objects on the pages never fetched
+    are usage a backup would be admitted against — and snapshots whose lock
+    retention would forget — so the half that did arrive is not an answer."""
+    pages = [
+        {"IsTruncated": True,   # … and no NextContinuationToken
+         "Contents": [{"Key": _key("a.tar.gz.enc"), "Size": 100}]},
+    ]
+    with (
+        patch("clawkeep.s3._client", return_value=_paged_client(pages)),
+        patch("clawkeep.s3.read_manifest", return_value={"version": 1, "snapshots": {}}),
+    ):
+        with pytest.raises(s3.S3Error, match="incomplete"):
+            read(CREDS)
+
+
+def test_the_real_paginator_is_the_one_that_stops_quietly() -> None:
+    """The claim above, against botocore itself rather than a stand-in: a
+    truncated page with no token ends the real paginator without an error.
+    If botocore ever starts raising here, this fails and the guard can go."""
+    import boto3
+    from botocore.stub import Stubber
+
+    client = boto3.client(
+        "s3", region_name="auto", endpoint_url="https://storage.invalid",
+        aws_access_key_id="k", aws_secret_access_key="s",
+    )
+    listed = {"Bucket": CREDS.bucket, "Prefix": CREDS.prefix}
+    with Stubber(client) as stub:
+        stub.add_response(
+            "list_objects_v2",
+            {"IsTruncated": True, "Contents": [{"Key": _key("a.tar.gz.enc"), "Size": 100}]},
+            listed,
+        )
+        with patch("clawkeep.s3._client", return_value=client):
+            with pytest.raises(s3.S3Error, match="incomplete"):
+                s3.stats(CREDS)
+        stub.assert_no_pending_responses()
+
+
+def test_the_real_paginator_follows_continuation_tokens() -> None:
+    import boto3
+    from botocore.stub import Stubber
+
+    client = boto3.client(
+        "s3", region_name="auto", endpoint_url="https://storage.invalid",
+        aws_access_key_id="k", aws_secret_access_key="s",
+    )
+    listed = {"Bucket": CREDS.bucket, "Prefix": CREDS.prefix}
+    with Stubber(client) as stub:
+        stub.add_response(
+            "list_objects_v2",
+            {"IsTruncated": True, "NextContinuationToken": "page-2",
+             "Contents": [{"Key": _key("a.tar.gz.enc"), "Size": 100}]},
+            listed,
+        )
+        stub.add_response(
+            "list_objects_v2",
+            {"IsTruncated": False,
+             "Contents": [{"Key": _key("b.tar.gz.enc"), "Size": 11}]},
+            {**listed, "ContinuationToken": "page-2"},
+        )
+        with patch("clawkeep.s3._client", return_value=client):
+            assert s3.stats(CREDS) == s3.CloudStats(cloud_bytes=111, snapshot_count=2)
+        stub.assert_no_pending_responses()
+
+
+def test_a_page_that_fails_part_way_is_not_a_smaller_total() -> None:
+    from botocore.exceptions import ClientError
+
+    def pages():
+        yield {"IsTruncated": True, "NextContinuationToken": "t1",
+               "Contents": [{"Key": _key("a.tar.gz.enc"), "Size": 100}]}
+        raise ClientError(
+            {"Error": {"Code": "InternalError", "Message": "try again"}}, "ListObjectsV2",
+        )
+
+    fake_client = MagicMock()
+    fake_client.get_paginator.return_value.paginate.return_value = pages()
+    with patch("clawkeep.s3._client", return_value=fake_client):
+        with pytest.raises(s3.S3Error, match="list_objects_v2 failed"):
+            s3.stats(CREDS)
+
+
+@pytest.mark.parametrize("entry", [
+    {"Key": _key("a.tar.gz.enc")},                  # no size at all
+    {"Key": _key("a.tar.gz.enc"), "Size": None},
+    {"Key": _key("a.tar.gz.enc"), "Size": "100"},
+    {"Key": _key("a.tar.gz.enc"), "Size": -1},
+    {"Key": _key("a.tar.gz.enc"), "Size": True},
+])
+def test_an_entry_without_a_usable_size_is_not_counted_as_zero(entry: dict) -> None:
+    pages = [{"Contents": [{"Key": _key("b.tar.gz.enc"), "Size": 5}, entry]}]
+    with patch("clawkeep.s3._client", return_value=_paged_client(pages)):
+        with pytest.raises(s3.S3Error, match="usable size"):
+            s3.stats(CREDS)
+
+
+def test_an_empty_prefix_is_a_complete_listing_of_nothing() -> None:
+    """The first backup: R2 answers one page with no `Contents` key at all."""
+    with patch("clawkeep.s3._client", return_value=_paged_client([{"IsTruncated": False}])):
+        assert s3.stats(CREDS) == s3.CloudStats(cloud_bytes=0, snapshot_count=0)
+    with (
+        patch("clawkeep.s3._client", return_value=_paged_client([{"KeyCount": 0}])),
+        patch("clawkeep.s3.read_manifest", return_value={"version": 1, "snapshots": {}}),
+    ):
+        assert s3.list_snapshots(CREDS) == []
+
+
 def test_download_calls_get_with_correct_key(tmp_path: Path) -> None:
     fake_client = MagicMock()
     dest = tmp_path / "snap.tar.gz"
