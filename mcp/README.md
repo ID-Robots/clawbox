@@ -734,12 +734,12 @@ unnoticed is how a device ends up in a posture nobody chose.
 
 | Tool | What it does |
 |---|---|
-| `coding_agent_run` | Hand a whole task to a background Claude Code run in one folder. Answers a run id at once. |
+| `coding_agent_run` | Hand a whole task to a background Claude Code run in one folder. Answers a run id at once — or, while the box runs every run the owner allows, a QUEUED run id and its place in line (it starts by itself; only the owner cancels it). `fix_ci` with `resume_run_id`: a Fix CI continuation of a run whose pull request's checks failed. |
 | `coding_agent_status` | One run in full — its summary, deliverable, pull request, deployment, plan — or, with no `run_id`, the recent ids. `wait_seconds` blocks up to two minutes. |
-| `coding_run_message` | STEER a run that is still going: queue plain text for it (≤ 4,000 chars, ≤ 20 waiting). Says whether the run has it now or gets it at its next step. |
-| `coding_run_list` | Every run at a glance (≤ 30): status, who started it, project, branch and whether that work is home, attempts and the deliverable verdict, why a paused one is paused, `detached`, unread messages, `left_running`. Filter by `status` / `project`. |
+| `coding_run_message` | STEER a run that is still going: queue plain text for it (≤ 4,000 chars, ≤ 20 waiting). Says "Delivered" (the run has it, mid-turn after a tool call or as its next turn) or "Queued" and when — the end of the tool call under way, or its next start. |
+| `coding_run_list` | Every run at a glance (≤ 30): status, who started it, project, branch and whether that work is home, attempts and the deliverable verdict, why a paused one is paused, `detached`, unread messages, `left_running`, a queued run's `queue_position`, a failed CI (`ci_failed`, `can_fix_ci`). Filter by `status` / `project`. |
 | `coding_agent_resume` | The Resume button, for a `paused` or `gave_up` run the AGENT started — optionally telling it something first (`message`). |
-| `coding_agent_stop` | Stop a running run (detached ones included); close a paused one for good; with `end_leftovers`, end what a finished run left running. |
+| `coding_agent_stop` | Stop a running run (detached ones included); close a paused one for good; with `end_leftovers`, end what a finished run left running. A queued run is not stopped: taking it out of the queue is the owner's. |
 | `coding_project_status` | The project matrix: kind, how to name it to `coding_agent_run`, last commit, desktop/server app, latest run, runs working / waiting / not merged / left running. Name one for its runs and pipeline default. |
 | `coding_secret_list` | Names — never values — of the owner's stored secrets and whether runs get them. |
 
@@ -969,9 +969,20 @@ run holds the box, the switch is off) is an alert that does not count
 toward the three. `coding_team_run` is for a goal that spans
 several parts; `coding_agent_run` is still the tool for one focused change.
 `coding_team_status` answers the plan, each task's status, worker, reviewer
-and result, the alerts, the team's branch, `agents` (planner, workers,
-reviewers, total — who worked), and what to tell the user; `log: 1` adds the
-last lines of the audit log. Every agent is a coding run, so the sandbox and
+and result — and for a pending one what it is waiting for, or why it was
+held — the alerts, the team's branch, its pull request, `agents` (planner,
+workers, reviewers, total — who worked), and what to tell the user; `log: 1`
+adds the last lines of the audit log. A task starts only once every
+`depends_on` task is ACCEPTED (not merely finished); a dependency rejected or
+reopened after a dependent started HOLDS the dependent — its worker stopped
+or its result set aside — said on the board, and it runs again on the new
+merged state. A team's runs never merge or push (`gh pr merge`, `gh api`,
+`git push` are refused to them); when the goal asks for a pull request the
+ORCHESTRATOR opens it once every task is accepted, the suite is green and the
+final review passed, re-offers the tasks a red CI points at (two rounds at
+most) and merges only when the goal asks and every check passes. A second
+team is QUEUED behind the one working (`queue_position` in the list; the
+owner alone cancels one) and starts by itself, after a restart too. Every agent is a coding run, so the sandbox and
 the ceilings above apply unchanged; the one-run-at-a-time rule is between
 STRANGERS — a team's own runs share the box, a run of anyone else waits.
 
@@ -980,10 +991,27 @@ polling. `coding_agent_stop` posts `{ runId }` (the stop route keeps `{ id }`
 as an alias from its launch shape). `coding_run_message` is how a run that is
 still going is STEERED rather than stopped: the text is queued on the run's
 record (at most 20 waiting, 4,000 characters each, plain text) and delivered
-either as the harness's next user turn — the runs spawn with Claude Code's
-`--input-format stream-json` — or, on a box whose harness refuses that, folded
-into the continuation of its next attempt or the owner's Resume. The tool says
-which of the two happened. The owner's own input is on the run's page in the
+exactly one of three ways (`via` on the record, a line on the run's timeline):
+MID-TURN — every run spawns with a PostToolUse hook (`--settings`,
+`scripts/coding-run-hook.mjs`) that hands whatever is in the run's inbox
+(`data/coding-agent-inbox/<runId>`) to the model as `additionalContext` right
+after the tool call it is in, a reattached run included; as the NEXT TURN on
+stdin (`--input-format stream-json`) when the turn ended before a tool call
+took it; or folded into the continuation of its next attempt or the owner's
+Resume. The route waits up to 4 s for the hook, and the tool says "Delivered"
+or "Queued" with when.
+
+A run asked for while the box already runs `coding_agent_max_parallel_runs`
+is QUEUED, not refused: a record in status `queued` (persisted, so a restart
+keeps it) started by the box in the order asked, under the same id, when a
+run ends; `coding_run_list` shows its `queue_position`. The bearer may queue
+and read the queue; only the owner cancels (the stop route answers the bearer
+403 `owner_only` for a queued run). A run whose pull request went RED has the
+failed jobs' logs read (`gh run view --log-failed`, bounded), the failing
+tests and files named on the record (`ci`), and `coding_agent_status` says to
+OFFER a Fix CI run — `coding_agent_run` with `resume_run_id` and `fix_ci`; the
+box appends what failed to the task — at most two along the chain, one per
+failure. The owner's own input is on the run's page in the
 Coding Agent app; a run the OWNER started answers the MCP bearer 403 here, as
 it does for stop and resume, and a browser request from another site is
 refused 403 `cross_origin` (a header-less caller such as this server is not). The summary it returns is model-authored and labelled as information,
