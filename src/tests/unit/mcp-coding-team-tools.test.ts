@@ -242,3 +242,15 @@ describe("a second team: queued, not refused", () => {
     expect(out).toMatchObject({ code: "CONFLICT", message: expect.stringMatching(/only the owner can cancel a queued team/), next: expect.stringMatching(/Coding Agent app/) });
   });
 });
+
+describe("a team's pull request", () => {
+  it("coding_team_status says where it stands, its CI rounds and what still fails", async () => {
+    const pr = { number: 41, url: "https://github.com/o/r/pull/41", branch: "clawbox/team-k3x9q2ab", base: "main", phase: "failed_checks", checks: { total: 2, passed: 1, failed: 1, pending: 0 }, merge: true, ciRounds: 1, failure: { tests: ["app.test.js > submits"], checks: ["test"] }, detail: null };
+    apiGet.mockResolvedValueOnce({ team: { ...TEAM, branch: "clawbox/team-k3x9q2ab", base: "main", pr } });
+    const text = await ok("coding_team_status", { team_id: TEAM.id, log: 0 });
+    expect(text).toMatch(/Pull request #41 \(https:\/\/github\.com\/o\/r\/pull\/41\), clawbox\/team-k3x9q2ab → main: its CI failed; the tasks it points at are being fixed\. 1 of 2 checks passed\. CI fix rounds: 1 of 2\. Failing tests: app\.test\.js > submits\. The goal asks for the merge/);
+    apiGet.mockResolvedValueOnce({ teams: [{ ...TEAM, pr }] });
+    const list = JSON.parse(await ok("coding_team_status", { log: 0 })) as Array<Record<string, unknown>>;
+    expect(list[0]).toMatchObject({ pull_request: "#41 failed_checks" });
+  });
+});

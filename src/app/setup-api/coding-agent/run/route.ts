@@ -7,7 +7,14 @@ export const dynamic = "force-dynamic";
 
 /**
  * POST { task, projectId? | directory?, resumeRunId?, provider?, model?,
- * deliverable?, pipeline?, inputs?, experience? } → start a coding run.
+ * deliverable?, pipeline?, inputs?, experience?, fixCi? } → start a coding run.
+ *
+ * `fixCi: true` with `resumeRunId` is a "Fix CI" continuation: the run named
+ * had its pull request fail its checks (the record's `ci`), and the box
+ * appends what failed — the checks, the failing tests, the files, the tail of
+ * the failed jobs' logs — to `task`. Refused (400 `invalid`) without such a
+ * failure on record, for a failure a Fix CI was already started from, and past
+ * the chain's MAX_CI_FIX_ATTEMPTS.
  *
  * `experience` is what the training cluster's dispatcher selected from its
  * experience store for this task — exactly the JSON its
@@ -57,7 +64,7 @@ export async function POST(request: Request) {
   let body: {
     task?: unknown; projectId?: unknown; directory?: unknown; resumeRunId?: unknown;
     provider?: unknown; model?: unknown; deliverable?: unknown; pipeline?: unknown;
-    inputs?: unknown; experience?: unknown;
+    inputs?: unknown; experience?: unknown; fixCi?: unknown;
   };
   try {
     body = await request.json();
@@ -118,6 +125,9 @@ export async function POST(request: Request) {
       // `readExperienceInput`, which refuses with a stable code, so nothing a
       // caller sent reaches the run's prompt before that reader has passed it.
       experience: body.experience,
+      // Only ever `true` or absent: what failed is the box's to append, from
+      // its own record of the named run — never the caller's.
+      ...(body.fixCi === true ? { fixCi: true } : {}),
     });
     return NextResponse.json({ started: !queued, queued, run }, { status: 202 });
   } catch (err) {

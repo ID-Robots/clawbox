@@ -303,6 +303,7 @@ import {
   REVIEW_NO_CHECKS_GRACE_MS,
   reviewPollIntervalMs,
   reviewProblems,
+  type ReviewCheck,
   type ReviewLoop,
   type ReviewSnapshot,
 } from "@/lib/coding-review";
@@ -396,6 +397,7 @@ import {
   type RunMessageDelivery,
   type RunMessageVia,
 } from "@/lib/coding-run-messages";
+import { ciFailureLine, ciFixNotes, MAX_CI_FIX_ATTEMPTS, readCiFailure, type CiFailure } from "@/lib/coding-ci";
 import {
   clearReceipts,
   ensureRunInbox,
@@ -1820,6 +1822,22 @@ export interface CodingRun {
    * (`cloneRun`) carries the 1-based `position` instead of the request.
    */
   queued?: RunQueueEntry | null;
+  /**
+   * The pull request's FAILED CI, read when its watcher stopped on failing
+   * checks (src/lib/coding-ci.ts): which checks, which tests, which files, the
+   * tail of the failed logs. What the run's page and coding_agent_status offer
+   * a "Fix CI" continuation from. `attempt` is how many Fix CI continuations
+   * led to this run (0 for the one that opened the pull request); `fixRunId`
+   * the continuation started from it, once one was. Absent on every other run.
+   */
+  ci?: RunCi | null;
+  /** This run is a "Fix CI" continuation of `runId`, attempt n of MAX_CI_FIX_ATTEMPTS. */
+  ciFixOf?: { runId: string; attempt: number } | null;
+}
+
+export interface RunCi extends CiFailure {
+  attempt: number;
+  fixRunId: string | null;
 }
 
 /**
@@ -1830,6 +1848,8 @@ export interface CodingRun {
  */
 export interface QueuedStart {
   kind: "new" | "draft";
+  /** A Fix CI continuation — see StartRunInput.fixCi. */
+  fixCi?: boolean;
   task?: string;
   projectId?: string | null;
   directory?: string | null;
@@ -2191,6 +2211,13 @@ export interface StartRunInput {
    * queued" goes on following run-x.
    */
   queuedRunId?: string | null;
+  /**
+   * A "Fix CI" continuation of `resumeRunId`: that run's pull request failed
+   * its checks (CodingRun.ci), and the box appends what failed to this task.
+   * Refused without a recorded failure, and past MAX_CI_FIX_ATTEMPTS along
+   * the chain — never a loop pushing fixes at a red CI for ever.
+   */
+  fixCi?: boolean;
   /** Internal: set only by the automatic review pass, naming the run under review. */
   reviewOf?: string | null;
   /** Internal: set only by the review loop, naming the run whose pull request
@@ -4117,7 +4144,35 @@ function normalizeRun(raw: CodingRun): CodingRun {
     messages: parseRunMessages((raw as { messages?: unknown }).messages),
     midTurn: (raw as { midTurn?: unknown }).midTurn === true,
     queued: (raw as { status?: unknown }).status === "queued" ? parseQueueEntry((raw as { queued?: unknown }).queued) : null,
+    ci: parseRunCi((raw as { ci?: unknown }).ci),
+    ciFixOf: parseCiFixOf((raw as { ciFixOf?: unknown }).ciFixOf),
   };
+}
+
+/** A run's CI failure off disk, or null — rendered on its page and quoted to the next run, so re-read, never trusted. */
+function parseRunCi(raw: unknown): RunCi | null {
+  if (!raw || typeof raw !== "object") return null;
+  const c = raw as Record<string, unknown>;
+  if (typeof c.prNumber !== "number" || !Number.isInteger(c.prNumber) || c.prNumber <= 0) return null;
+  const strings = (v: unknown, max: number) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string").slice(0, max) : []);
+  return {
+    prNumber: c.prNumber,
+    at: typeof c.at === "number" ? c.at : 0,
+    checks: strings(c.checks, 40),
+    tests: strings(c.tests, 40),
+    files: strings(c.files, 40),
+    excerpt: typeof c.excerpt === "string" ? c.excerpt.slice(0, 4_000) : "",
+    unread: strings(c.unread, 40),
+    attempt: typeof c.attempt === "number" && Number.isInteger(c.attempt) && c.attempt >= 0 ? c.attempt : 0,
+    fixRunId: typeof c.fixRunId === "string" && RUN_ID_RE.test(c.fixRunId) ? c.fixRunId : null,
+  };
+}
+
+function parseCiFixOf(raw: unknown): { runId: string; attempt: number } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const f = raw as Record<string, unknown>;
+  if (typeof f.runId !== "string" || !RUN_ID_RE.test(f.runId)) return null;
+  return { runId: f.runId, attempt: typeof f.attempt === "number" && Number.isInteger(f.attempt) && f.attempt > 0 ? f.attempt : 1 };
 }
 
 /** A queued run's entry off disk, or a bare one (its turn by when the file says it was asked, no request) — never a crash. */
@@ -4139,6 +4194,7 @@ function parseQueueEntry(raw: unknown): RunQueueEntry {
       pipeline: start.pipeline,
       inputs: start.inputs,
       experience: start.experience,
+      ...(start.fixCi === true ? { fixCi: true } : {}),
     },
   };
 }
@@ -4987,6 +5043,8 @@ function cloneRun(run: CodingRun): CodingRun {
     // Where it stands, never what it asked for: the request (inputs, an
     // experience block) is the runner's to start it with, not a reader's.
     queued: run.queued ? { at: run.queued.at, position: queuePosition(run.id) ?? undefined } : null,
+    ci: run.ci ? { ...run.ci, checks: [...run.ci.checks], tests: [...run.ci.tests], files: [...run.ci.files], unread: [...run.ci.unread] } : null,
+    ciFixOf: run.ciFixOf ? { ...run.ciFixOf } : null,
   };
   // The experience block is left out, not copied: it is for the next spawn,
   // which reads the record itself — see CodingRun.experienceBrief.
@@ -7917,6 +7975,12 @@ async function maybeOpenPullRequest(finished: CodingRun, ended: "stop" | "pause"
     let base = prBase;
     let foundBy: PrFoundBy;
     if (mine) {
+      // A Fix CI run's work is for the pull request that is already open: its
+      // branch goes up, or the checks it was started for never see the fix.
+      if (finished.ciFixOf) {
+        const pushed = await pushBranch(origin.directory, prBranch);
+        if (!pushed.ok) pushProgress(finished, RUNNER_STEP.notMerged(pushed.detail));
+      }
       number = mine.number;
       url = mine.url;
       // GitHub's answer for the base, not the record's intention: a run that
@@ -8137,6 +8201,58 @@ function visualEvidenceSection(last: CodingRun, origin: CodingRun): string | nul
 }
 
 /** Record a terminal PR phase on the run and persist it. */
+/**
+ * The attempt a "Fix CI" continuation of `previous` would be (1-based), or the
+ * refusal: no failed CI on record, a Fix CI already started from this failure
+ * (but the queued one itself, when it starts), or the chain's attempts used
+ * up. Bounded: the failure of each fix is what offers the next, and only
+ * MAX_CI_FIX_ATTEMPTS of them.
+ */
+export function ciFixAttempt(previous: Pick<CodingRun, "ci" | "ciFixOf">, queuedRunId: string | null): number {
+  if (!previous.ci) {
+    throw new CodingAgentError("invalid", "That run's pull request has no failed CI on record, so there is nothing for a Fix CI run to fix.");
+  }
+  if (previous.ci.fixRunId && previous.ci.fixRunId !== queuedRunId) {
+    throw new CodingAgentError("invalid", `A Fix CI run was already started from that failure (${previous.ci.fixRunId}). Follow that one instead.`);
+  }
+  const attempt = (previous.ciFixOf?.attempt ?? 0) + 1;
+  if (attempt > MAX_CI_FIX_ATTEMPTS) {
+    throw new CodingAgentError("invalid", `That pull request has had its ${MAX_CI_FIX_ATTEMPTS} Fix CI runs; what still fails is the owner's to look at.`);
+  }
+  return attempt;
+}
+
+/**
+ * The pull request a run watched ended on FAILING checks: read the failing
+ * jobs' logs (bounded — readFailedCheckLogs), name the failing tests and the
+ * files, and put it on the record (CodingRun.ci) and its feed, for the run's
+ * page and coding_agent_status to offer a "Fix CI" continuation from. `known`
+ * is the checks list the caller already holds; without it GitHub is asked.
+ * Best effort: a failure that cannot be read leaves the run as it was.
+ */
+async function noteCiFailure(runId: string, prNumber: number, known?: readonly ReviewCheck[]): Promise<void> {
+  try {
+    const run = loadRuns().find((r) => r.id === runId);
+    if (!run) return;
+    let checks = known?.length ? [...known] : null;
+    if (!checks) {
+      const snapshot = await readReviewSnapshot(run.directory, prNumber);
+      checks = "error" in snapshot ? [] : snapshot.checks;
+    }
+    const failed = checks.filter((c) => c.state === "fail");
+    if (!failed.length) return;
+    const logs = await readFailedCheckLogs(run.directory, failed);
+    const current = loadRuns().find((r) => r.id === runId);
+    if (!current) return;
+    const failure = readCiFailure(prNumber, logs);
+    current.ci = { ...failure, attempt: current.ciFixOf?.attempt ?? 0, fixRunId: null };
+    pushProgress(current, ciFailureLine(failure));
+    persist(true);
+  } catch (err) {
+    console.error(`[coding-agent] ${runId}: could not read the failed CI:`, err instanceof Error ? err.message : err);
+  }
+}
+
 function settlePr(run: CodingRun, phase: "merged" | "blocked" | "failed", detail: string | null): void {
   if (!run.pr) return;
   run.pr = { ...run.pr, phase, detail, endedAt: Date.now() };
@@ -8390,6 +8506,8 @@ function watchPullRequest(runId: string): void {
       return;
     }
     if (verdict.action === "block") {
+      // Failing checks: what failed is read and offered as a Fix CI first.
+      if (snapshot.checks.failed > 0) await noteCiFailure(runId, prNumber);
       // Re-read: reconcileAutoMerge may have waited on `gh`.
       const current = loadRuns().find((r) => r.id === runId);
       if (current?.pr?.phase === "waiting") settlePr(current, "blocked", withAutoMergeNote(verdict.detail, autoMergeState));
@@ -8493,6 +8611,11 @@ function settleReview(
   if (!run.review) return;
   const said = detail ?? (state === "clean" ? REVIEW_CLEAN_DETAIL : null);
   run.review = { ...run.review, state, detail: said, lastPolledAt: Date.now() };
+  // Over to the owner with checks still failing: what failed is read and
+  // offered as a Fix CI, the way the checks watcher's red ending is.
+  if (state === "needs_owner" && run.review.prNumber && run.review.checks.some((c) => c.state === "fail")) {
+    trackSettleWork(noteCiFailure(run.id, run.review.prNumber, run.review.checks));
+  }
   if (isPrPending(run.pr)) {
     // "blocked" is the pull request phase for BOTH endings that leave it open:
     // green-and-waiting-for-you and out-of-rounds. The review state beside it
@@ -11900,7 +12023,9 @@ export async function sweepCodingWorktrees(options: { force?: boolean } = {}): P
 // ─── Public operations ───────────────────────────────────────────────────────
 
 export async function startRun(input: StartRunInput): Promise<CodingRun> {
-  const task = normalizeTask(input.task, isBoxWrittenTask(input));
+  let task = normalizeTask(input.task, isBoxWrittenTask(input));
+  /** A Fix CI continuation's place in its chain — see StartRunInput.fixCi. */
+  let ciFixOf: { runId: string; attempt: number } | null = null;
   // Read before anything is held — the slot, the folder — so a malformed
   // request is a plain 400 that cost the box nothing.
   const givenExperience = requireExperience(input.experience);
@@ -11963,6 +12088,12 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       if (!previous.sessionId && input.freshSession !== true) {
         throw new CodingAgentError("invalid", "That run never started a Claude Code session, so it cannot be resumed. Start a new run instead.");
       }
+      // Fix CI: what failed goes after the caller's words — the box's own text
+      // from GitHub's logs, clipped the way a box-written task is.
+      if (input.fixCi === true) {
+        ciFixOf = { runId: previous.id, attempt: ciFixAttempt(previous, input.queuedRunId ?? null) };
+        task = normalizeTask(`${task}\n\n${ciFixNotes(previous.ci!, { push: true })}`, true);
+      }
       // The session lives in the wrapper's state dir keyed by the folder it ran
       // in, so a resume always happens where the original run happened — which
       // for a run with a worktree is the worktree. A settle removes the worktree
@@ -11993,6 +12124,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
         : previous.resumable || previous.status === "completed" ? previous.sessionId : null;
       inherited = { provider: previous.provider, model: previous.requestedModel };
     } else {
+      if (input.fixCi === true) throw new CodingAgentError("invalid", "A Fix CI run continues the run whose pull request failed: name it in resumeRunId.");
       ({ directory, projectId } = await resolveWorkingDirectory(input));
       releaseDirectory = assertDirectoryFree(directory, undefined, input.team ?? null, input.readOnly === true);
     }
@@ -12038,6 +12170,10 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // is reported to the run (and drawn on its page) rather than losing the
     // task it was an input to.
     await stageInputs(run, input.inputs);
+    if (ciFixOf) {
+      run.ciFixOf = ciFixOf;
+      pushProgress(run, RUNNER_STEP.ciFix(ciFixOf.runId, ciFixOf.attempt, MAX_CI_FIX_ATTEMPTS));
+    }
     if (run.reviewOf) pushProgress(run, RUNNER_STEP.reviewPass(run.reviewOf));
     else if (run.reviewLoopOf) pushProgress(run, RUNNER_STEP.reviewLoopTurn(run.reviewLoopOf, run.reviewRound));
     else if (resumeSessionId) pushProgress(run, RUNNER_STEP.resuming);
@@ -12173,6 +12309,8 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     if (queuedRunId && (waited < 0 || list[waited].status !== "queued")) {
       throw new CodingAgentError("invalid", "That queued run is no longer waiting: it was canceled or has already started.");
     }
+    // The failure it fixes now names it, so it is never offered twice.
+    if (ciFixOf && previous?.ci) previous.ci = { ...previous.ci, fixRunId: run.id };
     if (waited >= 0) {
       const before = list[waited];
       run.messages = before.messages;
@@ -13156,20 +13294,28 @@ async function queueRun(input: StartRunInput): Promise<CodingRun> {
   let directory: string;
   let projectId: string | null;
   let inherited: { provider: CodingProvider; model: string | null } | null = null;
+  let fixing: CodingRun | null = null;
   if (resumeRunId) {
     const previous = loadRuns().find((r) => r.id === resumeRunId) ?? null;
     if (!previous) throw new CodingAgentError("not_found", "There is no coding run with that id to resume.");
     if (!previous.sessionId && input.freshSession !== true) {
       throw new CodingAgentError("invalid", "That run never started a Claude Code session, so it cannot be resumed. Start a new run instead.");
     }
+    if (input.fixCi === true) {
+      ciFixAttempt(previous, null);
+      fixing = previous;
+    }
     directory = previous.directory;
     projectId = previous.projectId;
     inherited = { provider: previous.provider, model: previous.requestedModel };
   } else {
+    if (input.fixCi === true) throw new CodingAgentError("invalid", "A Fix CI run continues the run whose pull request failed: name it in resumeRunId.");
     ({ directory, projectId } = await resolveWorkingDirectory(input));
   }
   const settings = await applyProviderChoice(await readRunSettings(), input, inherited);
   const run = newRunRecord({ task, directory, projectId, source: input.source, status: "queued", settings, deliverable: requireDeliverable(input) });
+  // Claimed now, so the failure is not offered a second Fix CI while this one waits.
+  if (fixing?.ci) fixing.ci = { ...fixing.ci, fixRunId: run.id };
   run.queued = {
     at: Date.now(),
     start: {
@@ -13184,6 +13330,7 @@ async function queueRun(input: StartRunInput): Promise<CodingRun> {
       pipeline: input.pipeline,
       inputs: input.inputs,
       experience: input.experience,
+      ...(input.fixCi === true ? { fixCi: true } : {}),
     },
   };
   pushProgress(run, RUNNER_STEP.queued(queuedRuns().length + 1));
@@ -13224,6 +13371,7 @@ function startQueuedRun(id: string): Promise<CodingRun> {
       pipeline: start.pipeline,
       inputs: start.inputs,
       experience: start.experience,
+      fixCi: start.fixCi === true,
       source: run.source,
       queuedRunId: id,
     });

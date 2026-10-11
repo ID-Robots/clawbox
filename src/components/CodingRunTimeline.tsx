@@ -90,6 +90,8 @@ const STEP_KEY: Record<ProgressLabelKey, string> = {
   queued: "codingAgent.stepQueued",
   startedFromQueue: "codingAgent.stepStartedFromQueue",
   queueCanceled: "codingAgent.stepQueueCanceled",
+  ciFailed: "codingAgent.stepCiFailed",
+  ciFix: "codingAgent.stepCiFix",
   startedFromDraft: "codingAgent.stepStartedFromDraft",
   leftoverRunning: "codingAgent.stepLeftoverRunning",
   endedLeftovers: "codingAgent.stepEndedLeftovers",

@@ -901,3 +901,36 @@ describe("a run beyond the box's limit: queued, not refused", () => {
     expect(out.text).toMatch(/Run run-k3x9q2ab: queued \(not started\) — number 3 in line for a slot/);
   });
 });
+
+describe("a run whose pull request's CI failed", () => {
+  const CI = { prNumber: 7, checks: ["test (20.x)"], tests: ["cart.test.ts > adds the tax"], files: ["src/lib/cart.ts"], unread: [], attempt: 0, fixRunId: null };
+
+  it("coding_agent_status names what failed and says to OFFER a Fix CI run, with the exact call", async () => {
+    apiGet.mockResolvedValue({ run: { ...RUN, ci: CI } });
+    const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toMatch(/CI failed on pull request #7: test \(20\.x\)\. Failing tests: cart\.test\.ts > adds the tax\./);
+    expect(out.text).toMatch(/Offer the user a Fix CI run \(attempt 1 of 2\): coding_agent_run with resume_run_id "run-k3x9q2ab", fix_ci true/);
+  });
+
+  it("says the attempts are used up rather than offering a third", async () => {
+    apiGet.mockResolvedValue({ run: { ...RUN, ci: { ...CI, attempt: 2 }, ciFixOf: { runId: "run-aaaaaaaa", attempt: 2 } } });
+    const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
+    if (out.isError) throw new Error(JSON.stringify(out.error));
+    expect(out.text).toMatch(/Its 2 Fix CI attempts are used up/);
+    expect(out.text).not.toMatch(/Offer the user a Fix CI/);
+    expect(out.text).toMatch(/A Fix CI continuation of run-aaaaaaaa \(attempt 2 of 2\)/);
+  });
+
+  it("coding_agent_run with fix_ci sends fixCi, and needs resume_run_id", async () => {
+    apiPost.mockResolvedValue({ started: true, run: { ...RUN, status: "running" } });
+    const out = await harness().call("coding_agent_run", { task: "Fix the CI.", resume_run_id: "run-k3x9q2ab", fix_ci: true });
+    expect(out.isError).toBe(false);
+    expect(apiPost).toHaveBeenCalledWith("/setup-api/coding-agent/run", { task: "Fix the CI.", resumeRunId: "run-k3x9q2ab", fixCi: true }, expect.anything());
+    apiPost.mockClear();
+    const refused = await harness().call("coding_agent_run", { task: "Fix the CI.", fix_ci: true });
+    expect(refused.isError).toBe(true);
+    expect(apiPost).not.toHaveBeenCalled();
+  });
+});

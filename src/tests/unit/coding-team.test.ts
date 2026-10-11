@@ -57,6 +57,26 @@ vi.mock("@/lib/coding-team-worktree", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/coding-team-worktree")>();
   return { ...actual, ...plumbing };
 });
+// GitHub, faked where the orchestrator reaches it: a team whose goal asks for
+// a pull request opens, reads, pushes and merges through these. A team whose
+// goal asks for none never calls them.
+const github = vi.hoisted(() => ({
+  openPullRequest: vi.fn(),
+  readPullRequest: vi.fn(),
+  mergePullRequest: vi.fn(),
+  markPullRequestReady: vi.fn(),
+  pushBranch: vi.fn(),
+  readReviewSnapshot: vi.fn(),
+  readFailedCheckLogs: vi.fn(),
+}));
+vi.mock("@/lib/coding-pr", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/coding-pr")>();
+  return { ...actual, openPullRequest: github.openPullRequest, readPullRequest: github.readPullRequest, mergePullRequest: github.mergePullRequest, markPullRequestReady: github.markPullRequestReady };
+});
+vi.mock("@/lib/coding-review", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/coding-review")>();
+  return { ...actual, pushBranch: github.pushBranch, readReviewSnapshot: github.readReviewSnapshot, readFailedCheckLogs: github.readFailedCheckLogs };
+});
 
 type Team = typeof import("@/lib/coding-team");
 let team: Team;
@@ -2530,5 +2550,121 @@ describe("a second team: queued, not refused", () => {
     runner.isCodingAgentEnabled.mockResolvedValue(false);
     expect(await team.startNextQueuedTeam()).toBeNull();
     expect(team.getTeam(queued.id)?.status).toBe("queued");
+  });
+});
+
+
+describe("the pull request the goal asks for: the orchestrator's, never a worker's", () => {
+  const GREEN = { state: "OPEN", mergeable: "MERGEABLE", checks: { total: 2, passed: 2, failed: 0, pending: 0 }, noChecks: false, isDraft: false, labels: [] };
+  const RED = { state: "OPEN", mergeable: "MERGEABLE", checks: { total: 2, passed: 1, failed: 1, pending: 0 }, noChecks: false, isDraft: false, labels: [] };
+  const PENDING = { ...GREEN, checks: { total: 2, passed: 1, failed: 0, pending: 1 } };
+  const FAILING = { name: "test (20.x)", state: "fail", url: "https://github.com/o/r/actions/runs/9/job/1" };
+  const LOG = "test (20.x)\tRun\t2026-10-11T10:00:00.1Z  FAIL  app.test.js > the form > submits\ntest (20.x)\tRun\t2026-10-11T10:00:00.2Z  ❯ app.js:3:1";
+
+  beforeEach(() => {
+    team._setTeamPrTimingForTests(5, 60_000);
+    github.openPullRequest.mockResolvedValue({ ok: true, number: 41, url: "https://github.com/o/r/pull/41" });
+    github.mergePullRequest.mockResolvedValue({ ok: true });
+    github.pushBranch.mockResolvedValue({ ok: true });
+    github.readReviewSnapshot.mockResolvedValue({ checks: [FAILING] });
+    github.readFailedCheckLogs.mockResolvedValue([{ check: FAILING, log: LOG }]);
+  });
+
+  it("opens it only once every task is accepted, and merges it when the goal asks and every check passes", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    github.readPullRequest.mockResolvedValueOnce(PENDING).mockResolvedValue(GREEN);
+    const board = await team.startTeam({ goal: "Build it, open a pull request and merge it when CI is green", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+
+    expect(done.status).toBe("done");
+    expect(github.openPullRequest).toHaveBeenCalledTimes(1);
+    expect(github.openPullRequest.mock.calls[0][0]).toMatchObject({ directory: "/home/clawbox/Projects/site", branch: `clawbox/${board.id}`, base: "master", title: "Coding team: Build it, open a pull request and merge it when CI is green" });
+    expect(github.mergePullRequest).toHaveBeenCalledTimes(1);
+    expect(github.mergePullRequest).toHaveBeenCalledWith("/home/clawbox/Projects/site", 41);
+    expect(done.pr).toMatchObject({ number: 41, phase: "merged", merge: true, ciRounds: 0 });
+    // After both acceptances, never before.
+    const messages = done.log.map((e) => e.message);
+    const opened = messages.findIndex((m) => m.startsWith("Opened pull request #41"));
+    expect(opened).toBeGreaterThan(messages.findIndex((m) => m.startsWith("Task t2 accepted")));
+    expect(messages).toContain("Merged pull request #41: every task accepted, the suite green, the final review passed and every check green.");
+  });
+
+  it("leaves it open, green, when the goal asked for a pull request and no merge", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    github.readPullRequest.mockResolvedValue(GREEN);
+    const board = await team.startTeam({ goal: "Build it and open a PR", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.pr).toMatchObject({ phase: "green", merge: false });
+    expect(github.mergePullRequest).not.toHaveBeenCalled();
+  });
+
+  it("opens none for a goal that asks for none", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    expect((await finished(board.id)).pr).toBeNull();
+    expect(github.openPullRequest).not.toHaveBeenCalled();
+  });
+
+  it("re-offers the task a red CI points at, with the failure, pushes the fix and watches again", async () => {
+    outcomes = [
+      { summary: PLAN },
+      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: "app done", filesTouched: ["app.js"] },
+      { summary: "app fixed", filesTouched: ["app.js"] },
+    ];
+    github.readPullRequest.mockResolvedValueOnce(RED).mockResolvedValue(GREEN);
+    const board = await team.startTeam({ goal: "Build it, open a PR and merge it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+
+    expect(done.status).toBe("done");
+    expect(done.pr).toMatchObject({ phase: "merged", ciRounds: 1 });
+    expect(done.pr?.failure).toMatchObject({ tests: ["app.test.js > the form > submits"], files: ["app.test.js", "app.js"] });
+    // t2's hint is app.js: it — and only it — went back, not counted against its tries.
+    expect(done.tasks.map((t) => [t.task_id, t.status, t.attempts, t.ciReoffers])).toEqual([["t1", "complete", 1, 0], ["t2", "complete", 2, 1]]);
+    const workers = starts.filter((s) => (s.team as { role: string }).role === "worker");
+    expect(workers.map((s) => (s.team as { taskId: string }).taskId)).toEqual(["t1", "t2", "t2"]);
+    const retry = String(workers[2].task);
+    expect(retry).toContain("A previous attempt was rejected: CI failed on pull request #41: test (20.x); failing tests: app.test.js > the form > submits.");
+    expect(retry).toMatch(/Do not push: the team's orchestrator pushes the fix/);
+    expect(github.pushBranch).toHaveBeenCalledTimes(1);
+    expect(github.pushBranch).toHaveBeenCalledWith("/home/clawbox/Projects/site", `clawbox/${board.id}`);
+    expect(done.log.find((e) => e.type === "ci")).toMatchObject({ actor: { kind: "system" }, task_id: "t2" });
+    // A red CI is not a guardrail: no alert.
+    expect(done.alerts).toBe(0);
+  });
+
+  it("fails the team, naming what still fails, after MAX_TEAM_CI_ROUNDS rounds of red", async () => {
+    outcomes = [{ summary: PLAN }, ...Array.from({ length: 6 }, (_, i) => ({ summary: `work ${i}`, filesTouched: [i === 0 ? "index.html" : "app.js"] }))];
+    github.readPullRequest.mockResolvedValue(RED);
+    const board = await team.startTeam({ goal: "Build it and open a PR", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("failed");
+    expect(done.error).toBe("The pull request's CI is still red after 2 rounds of fixes: CI failed on pull request #41: test (20.x); failing tests: app.test.js > the form > submits.");
+    expect(done.pr).toMatchObject({ phase: "failed", ciRounds: 2 });
+    expect(github.pushBranch).toHaveBeenCalledTimes(2);
+    expect(github.mergePullRequest).not.toHaveBeenCalled();
+  });
+
+  it("fails the team with GitHub's reason when the pull request cannot be opened", async () => {
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    github.openPullRequest.mockResolvedValue({ ok: false, detail: "This project has no GitHub remote yet." });
+    const board = await team.startTeam({ goal: "Build it and open a pull request", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("failed");
+    expect(done.error).toBe("The goal asks for a pull request, and it could not be opened: This project has no GitHub remote yet.");
+  });
+});
+
+describe("a goal that asks for a pull request, in a project with no branch of its own", () => {
+  it("says on the board that none is opened, rather than skipping it in silence", async () => {
+    runner.resolveWorkingDirectory.mockResolvedValue({ directory: "/home/clawbox/clawbox/data/code-projects/site", projectId: "site" });
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    const board = await team.startTeam({ goal: "Build it and open a PR", projectId: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.pr).toBeNull();
+    expect(github.openPullRequest).not.toHaveBeenCalled();
+    expect(done.log.map((e) => e.message)).toContain("The goal asks for a pull request, but this team works in place (a code project, no branch of its own), so none is opened: the work stays in the project.");
   });
 });

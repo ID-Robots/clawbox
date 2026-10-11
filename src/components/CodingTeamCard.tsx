@@ -14,6 +14,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { BTN_BASE, BTN_SECONDARY, CARD_SURFACE, INSET_SURFACE, SECTION_LABEL } from "./coding-agent-ui";
 import CodingTeamTree from "./CodingTeamTree";
+import { MAX_TEAM_CI_ROUNDS } from "@/lib/coding-ci-limits";
 import { formatDuration, timeAgo } from "./clawkeep-ui";
 
 export interface TeamTaskView {
@@ -132,6 +133,19 @@ export interface TeamView {
   dynamic?: boolean;
   /** The one review of the merged result, when the shape asked for it. */
   finalReview?: { verdict: "accepted" | "rejected"; notes: string; at: number } | null;
+  /** The pull request the goal asked for, once the orchestrator opened it (coding-team-board.ts TeamPr). Absent from an older server. */
+  pr?: {
+    number: number;
+    url: string;
+    branch: string;
+    base: string;
+    phase: "checks" | "failed_checks" | "green" | "merged" | "left_open" | "failed";
+    checks: { total: number; passed: number; failed: number; pending: number };
+    merge: boolean;
+    ciRounds: number;
+    failure: { tests: string[]; checks: string[] } | null;
+    detail: string | null;
+  } | null;
   metrics?: TeamMetricsView;
   tasks: TeamTaskView[];
   log: TeamLogEntryView[];
@@ -168,6 +182,25 @@ const STATUS_TONE: Record<TeamView["status"], string> = {
   done: "text-emerald-400 border-emerald-400/40",
   failed: "text-red-300 border-red-400/40",
   stopped: "text-[var(--text-muted)] border-white/20",
+};
+
+/** The translation key for a pull request's phase: keys are camelCase. */
+const PR_PHASE_KEY: Record<NonNullable<TeamView["pr"]>["phase"], string> = {
+  checks: "codingAgent.team.prPhase.checks",
+  failed_checks: "codingAgent.team.prPhase.failedChecks",
+  green: "codingAgent.team.prPhase.green",
+  merged: "codingAgent.team.prPhase.merged",
+  left_open: "codingAgent.team.prPhase.leftOpen",
+  failed: "codingAgent.team.prPhase.failed",
+};
+
+const PR_PHASE_TONE: Record<NonNullable<TeamView["pr"]>["phase"], string> = {
+  checks: "text-amber-400 border-amber-400/40",
+  failed_checks: "text-red-300 border-red-400/40",
+  green: "text-emerald-400 border-emerald-400/40",
+  merged: "text-violet-300 border-violet-400/40",
+  left_open: "text-sky-300 border-sky-400/40",
+  failed: "text-red-300 border-red-400/40",
 };
 
 /** The translation key for a task status: keys are camelCase, statuses are the brief's. */
@@ -458,6 +491,33 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
           </p>
           {team.error && (
             <p className="mt-2 text-[11px] text-red-300 break-words" data-testid="coding-team-reason">{team.error}</p>
+          )}
+          {/* The pull request the goal asked for — the orchestrator's: its
+              checks, the rounds its red CI sent tasks back, and how it ended. */}
+          {team.pr && (
+            <div className="mt-2 text-[11px] break-words" data-testid="coding-team-pr" data-phase={team.pr.phase}>
+              <div className="flex items-center gap-2 flex-wrap">
+                <a href={team.pr.url} target="_blank" rel="noreferrer" className="text-[var(--text-secondary)] underline decoration-white/20 hover:text-white">
+                  {t("codingAgent.team.pr", { n: team.pr.number })}
+                </a>
+                <span className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${PR_PHASE_TONE[team.pr.phase] ?? PR_PHASE_TONE.checks}`}>
+                  {t(PR_PHASE_KEY[team.pr.phase] ?? PR_PHASE_KEY.checks)}
+                </span>
+                {team.pr.checks.total > 0 && (
+                  <span className="text-[var(--text-muted)]">{t("codingAgent.team.prChecks", { passed: team.pr.checks.passed, total: team.pr.checks.total })}</span>
+                )}
+                {team.pr.ciRounds > 0 && (
+                  <span className="text-[var(--text-muted)]" data-testid="coding-team-ci-rounds">{t("codingAgent.team.ciRounds", { n: team.pr.ciRounds, max: MAX_TEAM_CI_ROUNDS })}</span>
+                )}
+                {team.pr.merge && team.pr.phase !== "merged" && (
+                  <span className="text-[var(--text-muted)]">· {t("codingAgent.team.mergeWhenGreen")}</span>
+                )}
+              </div>
+              {team.pr.failure && team.pr.failure.tests.length > 0 && team.pr.phase !== "merged" && team.pr.phase !== "green" && (
+                <p className="mt-1 text-red-300" data-testid="coding-team-ci-failing">{t("codingAgent.team.ciFailing", { tests: team.pr.failure.tests.slice(0, 5).join(", ") })}</p>
+              )}
+              {team.pr.detail && <p className="mt-1 text-[var(--text-muted)]">{team.pr.detail}</p>}
+            </div>
           )}
           {team.finalReview && (
             <p className="mt-2 text-[11px] break-words" data-testid="coding-team-final-review" data-verdict={team.finalReview.verdict}>

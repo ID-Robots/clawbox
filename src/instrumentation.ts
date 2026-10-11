@@ -420,7 +420,9 @@ export async function register() {
         })
         try {
           // eslint-disable-next-line @typescript-eslint/no-require-imports
-          require('./lib/coding-team').startNextQueuedTeam()
+          require('./lib/coding-team').startNextQueuedTeam().catch((err: unknown) => {
+            console.error('[instrumentation] Could not start the queued coding team:', err instanceof Error ? err.message : err)
+          })
         } catch (err) {
           console.error('[instrumentation] Could not start the queued coding team:', err instanceof Error ? err.message : err)
         }

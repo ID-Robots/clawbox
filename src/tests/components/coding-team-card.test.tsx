@@ -432,3 +432,23 @@ describe("a team waiting in the queue", () => {
     await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/coding-agent/team/stop", body: { id: WORKING.id } }));
   });
 });
+
+describe("the team's pull request", () => {
+  it("shows the pull request the goal asked for: its phase, checks, CI rounds and what fails", async () => {
+    teams = [{
+      ...WORKING,
+      status: "working",
+      pr: { number: 41, url: "https://github.com/o/r/pull/41", branch: "clawbox/team-k3x9q2ab", base: "main", phase: "failed_checks", checks: { total: 2, passed: 1, failed: 1, pending: 0 }, merge: true, ciRounds: 1, failure: { tests: ["app.test.js > submits"], checks: ["test"] }, detail: null },
+    }];
+    stub();
+    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    const pr = await screen.findByTestId("coding-team-pr");
+    expect(pr).toHaveAttribute("data-phase", "failed_checks");
+    expect(pr).toHaveTextContent("Team pull request #41");
+    expect(pr).toHaveTextContent("CI failed");
+    expect(pr).toHaveTextContent("1 of 2 checks passed");
+    expect(screen.getByTestId("coding-team-ci-rounds")).toHaveTextContent("CI fix rounds: 1 of 2");
+    expect(pr).toHaveTextContent("merges when every check passes");
+    expect(screen.getByTestId("coding-team-ci-failing")).toHaveTextContent("Failing: app.test.js > submits");
+  });
+});

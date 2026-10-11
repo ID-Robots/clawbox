@@ -284,3 +284,12 @@ describe("a run beyond the limit", () => {
     expect(await (await POST(req())).json()).toEqual({ started: true, queued: false, run: RUN });
   });
 });
+
+describe("a Fix CI continuation", () => {
+  it("passes fixCi through only as true — what failed is the box's to append", async () => {
+    await POST(req({ body: { task: "Fix the failing CI checks.", resumeRunId: "run-k3x9q2ab", fixCi: true } }));
+    expect(startOrQueueRun).toHaveBeenLastCalledWith(expect.objectContaining({ resumeRunId: "run-k3x9q2ab", fixCi: true }));
+    await POST(req({ body: { task: "Carry on.", resumeRunId: "run-k3x9q2ab", fixCi: "yes" } }));
+    expect(startOrQueueRun.mock.calls[startOrQueueRun.mock.calls.length - 1][0]).not.toHaveProperty("fixCi");
+  });
+});

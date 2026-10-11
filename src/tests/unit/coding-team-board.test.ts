@@ -514,7 +514,7 @@ describe("teamMetrics", () => {
     ];
     const task = (id: string, extra: Partial<import("@/lib/coding-team-board").TeamTask>) => ({
       task_id: id, task_description: id, assigned_to: null, status: "pending" as const, result: null, depends_on: [], files_hint: [], review: null,
-      attempts: 0, worktree: null, branch: null, reviewRunId: null, origin: "plan" as const, rejections: 0, holds: 0, hold: null, created_at: 1, updated_at: 1, ...extra,
+      attempts: 0, worktree: null, branch: null, reviewRunId: null, origin: "plan" as const, rejections: 0, holds: 0, hold: null, ciReoffers: 0, created_at: 1, updated_at: 1, ...extra,
     });
     b.tasks = [
       task("t1", { status: "complete", attempts: 1, review: { verdict: "accepted", notes: "", at: 1 } }),
@@ -950,5 +950,37 @@ describe("ownHarnessStateDenial", () => {
     expect(lib.ownHarnessStateDenial(`Read: ${MINE_WT}/sess-own.jsonl`, { ...OWN, sessionId: null })).toBe(false);
     // Another run's corner is not this one's.
     expect(lib.ownHarnessStateDenial(`Read: ${MINE}/memory/MEMORY.md`, { ...OWN, folders: ["/home/clawbox/Projects/other"] })).toBe(false);
+  });
+});
+
+describe("the team's pull request on the board", () => {
+  function accepted() {
+    const b = board();
+    lib.postTask(b, PLANNER, { task_description: "Wire app.js", files_hint: ["app.js"] });
+    lib.assignTask(b, SYSTEM, "t1", "run-aaaaaaaa");
+    lib.updateStatus(b, worker("run-aaaaaaaa"), "t1", "in_progress");
+    lib.updateStatus(b, worker("run-aaaaaaaa"), "t1", "complete");
+    lib.reviewTask(b, REVIEWER, "t1", "accepted", "");
+    return b;
+  }
+  const PR = { number: 41, url: "https://github.com/o/r/pull/41", branch: "clawbox/team-x", base: "main", phase: "checks" as const, checks: { total: 2, passed: 1, failed: 0, pending: 1 }, merge: true, ciRounds: 0, failure: null, detail: null, openedAt: 1, updatedAt: 1 };
+
+  it("is recorded by the system alone, and survives a round trip through the file", () => {
+    const b = accepted();
+    expect(() => lib.recordTeamPr(b, REVIEWER, PR, "x")).toThrow(lib.BoardAccessError);
+    lib.recordTeamPr(b, SYSTEM, PR, "Opened pull request #41.");
+    expect(b.log[b.log.length - 1]).toMatchObject({ type: "pr", message: "Opened pull request #41.", payload: { number: 41, phase: "checks" } });
+    lib.saveBoard(b);
+    expect(lib.loadBoard(b.id)!.pr).toMatchObject({ number: 41, phase: "checks", merge: true, checks: { pending: 1 } });
+  });
+
+  it("re-offers a finished task for a red CI — the system's, with the failure as its notes, never against its two tries", () => {
+    const b = accepted();
+    expect(() => lib.reopenForCi(b, REVIEWER, "t1", "CI failed")).toThrow(lib.BoardAccessError);
+    const t = lib.reopenForCi(b, SYSTEM, "t1", "CI failed on pull request #41: test.");
+    expect(t).toMatchObject({ status: "pending", ciReoffers: 1, rejections: 1, review: { verdict: "rejected", notes: "CI failed on pull request #41: test." } });
+    expect(lib.countedAttempts(t)).toBe(0);
+    expect(b.log[b.log.length - 1]).toMatchObject({ type: "ci", actor: { kind: "system" }, task_id: "t1" });
+    expect(() => lib.reopenForCi(b, SYSTEM, "t1", "again")).toThrow(/only a complete task/);
   });
 });

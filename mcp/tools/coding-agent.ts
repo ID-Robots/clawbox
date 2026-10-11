@@ -30,6 +30,7 @@ import type { McpContext } from "../lib/context";
 // Pure TypeScript, no Node imports — the one status union every consumer
 // derives from, so this payload cannot fall behind the server's record.
 import type { CodingPauseReason, CodingRunStatus } from "../../src/lib/coding-agent-status";
+import { MAX_CI_FIX_ATTEMPTS, MAX_TEAM_CI_ROUNDS } from "../../src/lib/coding-ci-limits";
 import { PAUSE_METER_NOUN, RUN_STATUSES, isRollingPauseMeter, pauseResetClock, pauseResetInstant } from "../../src/lib/coding-agent-status";
 // Pure too, for the same reason: the review loop's shape and its fold, so the
 // tool cannot describe a state the server never writes.
@@ -268,6 +269,10 @@ interface RunPayload {
   status: CodingRunStatus;
   /** A QUEUED run's place: since when, and its 1-based position in line. Absent from an older server. */
   queued?: { at: number; position?: number } | null;
+  /** Its pull request's FAILED CI, read (src/lib/coding-ci.ts); absent from an older server and on every other run. */
+  ci?: { prNumber: number; checks: string[]; tests: string[]; files: string[]; unread: string[]; attempt: number; fixRunId: string | null } | null;
+  /** This run is a Fix CI continuation of `runId`. */
+  ciFixOf?: { runId: string; attempt: number } | null;
   startedAt: number;
   completedAt: number | null;
   sessionId: string | null;
@@ -523,6 +528,23 @@ function pipelineSentence(pipeline: NonNullable<RunPayload["pipeline"]>, stage: 
   }
 }
 
+/**
+ * A run's failed CI, said with what to do about it: the checks, the failing
+ * tests, and — while attempts are left and none is going — the Fix CI
+ * continuation to OFFER the user (coding_agent_run with resume_run_id and
+ * fix_ci), never to start unasked.
+ */
+function ciSentence(run: RunPayload): string | null {
+  const ci = run.ci;
+  if (!ci) return null;
+  const tests = ci.tests.length ? ` Failing tests: ${ci.tests.slice(0, 8).map((t) => redact(firstLine(t, 120))).join("; ")}${ci.tests.length > 8 ? `; and ${ci.tests.length - 8} more` : ""}.` : "";
+  const files = ci.files.length ? ` Files named: ${ci.files.slice(0, 8).join(", ")}.` : "";
+  const head = `CI failed on pull request #${ci.prNumber}: ${ci.checks.join(", ") || "its checks"}.${tests}${files}`;
+  if (ci.fixRunId) return `${head} A Fix CI run was started from it: ${ci.fixRunId}.`;
+  if (ci.attempt + 1 > MAX_CI_FIX_ATTEMPTS) return `${head} Its ${MAX_CI_FIX_ATTEMPTS} Fix CI attempts are used up: what still fails is the user's to look at — tell them.`;
+  return `${head} Offer the user a Fix CI run (attempt ${ci.attempt + 1} of ${MAX_CI_FIX_ATTEMPTS}): coding_agent_run with resume_run_id "${run.id}", fix_ci true and a one-line task — the box adds what failed. Only if they want it.`;
+}
+
 function describeRun(run: RunPayload, tail: number): string {
   const parts: string[] = [];
   // A draft has not started: elapsed() would measure time since drafting.
@@ -541,6 +563,9 @@ function describeRun(run: RunPayload, tail: number): string {
   if (run.reviewLoopOf) parts.push(`Review round on the pull request of run ${run.reviewLoopOf}`);
   parts.push(`Task: ${firstLine(run.task)}`);
   parts.push(`Folder: ${run.directory}${run.projectId ? ` (project "${run.projectId}")` : ""}`);
+  if (run.ciFixOf) parts.push(`A Fix CI continuation of ${run.ciFixOf.runId} (attempt ${run.ciFixOf.attempt} of ${MAX_CI_FIX_ATTEMPTS}).`);
+  const ci = ciSentence(run);
+  if (ci) parts.push(ci);
   // A run with a copy of its own works OFF the project's branch, so a reader
   // that went looking in the project folder would find none of its work. Say
   // where it actually is — and, once the copy is gone, that the branch is
@@ -842,6 +867,8 @@ function runRow(run: RunPayload): Record<string, unknown> {
     project: runProject(run),
     elapsed: run.status === "draft" || run.status === "queued" ? "not started" : elapsed(run),
     ...(run.status === "queued" && run.queued?.position ? { queue_position: run.queued.position } : {}),
+    ...(run.ci ? { ci_failed: `PR #${run.ci.prNumber}: ${run.ci.checks.length || "some"} check(s)${run.ci.tests.length ? `, ${run.ci.tests.length} failing test(s)` : ""}` } : {}),
+    ...(run.ci && !run.ci.fixRunId && run.ci.attempt + 1 <= MAX_CI_FIX_ATTEMPTS ? { can_fix_ci: true } : {}),
     ...(run.reviewOf ? { review_of: run.reviewOf } : {}),
     ...(run.worktree ? { branch: run.worktree.branch, copy } : {}),
     ...(attempts ? { attempts: run.completionAttempts ? `${attempts} of ${run.completionAttempts}` : attempts } : {}),
@@ -985,13 +1012,17 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
         512,
         `Comma-separated relative paths (at most ${MAX_DELIVERABLE_PATHS}) the run MUST leave behind, not empty, e.g. "src/app.js,index.html".`,
       ),
+      fix_ci: zBool(false, "With resume_run_id: fix that run's FAILED pull-request checks; the box appends what failed to the task."),
     },
     { editions: ["openclaw", "hermes"], readOnly: false, openWorld: true, maxChars: 3_000 },
-    async ({ task, project_id, directory, resume_run_id, provider, model, deliverable_files, delivery_pipeline, input_files }: {
+    async ({ task, project_id, directory, resume_run_id, provider, model, deliverable_files, delivery_pipeline, input_files, fix_ci }: {
       task: string; project_id?: string; directory?: string; resume_run_id?: string;
       provider?: string; model?: string; deliverable_files?: string; delivery_pipeline?: boolean;
-      input_files?: string;
+      input_files?: string; fix_ci?: boolean;
     }) => {
+      if (fix_ci === true && !resume_run_id) {
+        throw new ToolError("BAD_ARGUMENT", "fix_ci continues the run whose pull request failed its checks.", "Pass that run's id as resume_run_id with fix_ci.");
+      }
       // No client-side "needs a place to work" guard: the route itself falls
       // back to the owner's stored default folder when neither a project nor
       // a directory is named — the fallback the enable route documents — and
@@ -1024,6 +1055,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       if (project_id) body.projectId = project_id;
       if (directory) body.directory = directory;
       if (resume_run_id) body.resumeRunId = resume_run_id;
+      if (fix_ci === true) body.fixCi = true;
       // Only what the caller actually named travels: sending the resolved
       // default would override the owner's stored choice with this process's
       // idea of it, and silently move a run to another account.
@@ -1334,7 +1366,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
           runs: kept,
           ...(omitted ? { not_listed: `${omitted} more matching run(s) did not fit — ask for fewer or filter` } : {}),
           ...(matching.length > limit ? { more: `${matching.length - limit} older matching run(s) not asked for` } : {}),
-          notes: "detached: lives in its own system scope and survives a web-server restart. can_resume: coding_agent_resume carries it on in the same session. left_running: finished but a process it started is still up. copy: where the run's own branch stands — bringing work home is the owner's, on the run's page. queue_position: a queued run's place in line (1 is next); it starts by itself, and only the owner cancels one.",
+          notes: "detached: lives in its own system scope and survives a web-server restart. can_resume: coding_agent_resume carries it on in the same session. left_running: finished but a process it started is still up. copy: where the run's own branch stands — bringing work home is the owner's, on the run's page. queue_position: a queued run's place in line (1 is next); it starts by itself, and only the owner cancels one. can_fix_ci: its pull request's CI failed and a Fix CI run (coding_agent_run with resume_run_id and fix_ci) may be offered to the user.",
         }),
         rows,
         LIST_MAX_CHARS,
@@ -1623,6 +1655,13 @@ interface TeamPayload {
   /** Whether the team's lead may add or retire tasks while it runs (the owner's switch, when the team started). */
   dynamic?: boolean;
   finalReview?: { verdict: "accepted" | "rejected"; notes: string } | null;
+  /** The pull request the goal asked for, opened by the team's orchestrator. Absent from an older server. */
+  pr?: {
+    number: number; url: string; branch: string; base: string;
+    phase: "checks" | "failed_checks" | "green" | "merged" | "left_open" | "failed";
+    checks: { total: number; passed: number; failed: number; pending: number };
+    merge: boolean; ciRounds: number; failure: { tests: string[]; checks: string[] } | null; detail: string | null;
+  } | null;
   metrics?: TeamMetricsPayload;
   id: string;
   goal: string;
@@ -1666,13 +1705,30 @@ const TEAM_STOP_RULES: ErrorRule[] = [
   },
 ];
 
+/** The team's pull request in a sentence — the orchestrator's, opened because the goal asked for one. */
+function teamPrSentence(pr: NonNullable<TeamPayload["pr"]>): string {
+  const checks = pr.checks.total > 0 ? ` ${pr.checks.passed} of ${pr.checks.total} checks passed${pr.checks.pending ? `, ${pr.checks.pending} running` : ""}.` : "";
+  const rounds = pr.ciRounds > 0 ? ` CI fix rounds: ${pr.ciRounds} of ${MAX_TEAM_CI_ROUNDS}.` : "";
+  const failing = pr.failure?.tests.length && pr.phase !== "merged" && pr.phase !== "green" ? ` Failing tests: ${pr.failure.tests.slice(0, 5).map((t) => redact(firstLine(t, 120))).join("; ")}.` : "";
+  const how = {
+    checks: "its checks are running",
+    failed_checks: "its CI failed; the tasks it points at are being fixed",
+    green: "every check passed; the goal asked for no merge, so it is left open for the user",
+    merged: "merged by the team once every check passed",
+    left_open: "left open",
+    failed: "its CI is still red after the team's rounds of fixes",
+  }[pr.phase];
+  return `Pull request #${pr.number} (${pr.url}), ${pr.branch} → ${pr.base}: ${how}.${checks}${rounds}${failing}${pr.merge && pr.phase !== "merged" ? " The goal asks for the merge: the team makes it once every check passes." : ""}${pr.detail ? ` ${redact(firstLine(pr.detail, 200))}` : ""}`;
+}
+
 function describeTeam(team: TeamPayload, withLog: boolean): string {
   const parts: string[] = [];
   parts.push(`Team ${team.id}: ${team.status}${team.status === "queued" && team.queuePosition ? ` — number ${team.queuePosition} in line` : ""}${team.error ? ` — ${team.error}` : ""}`);
   parts.push(`Goal: ${redact(firstLine(team.goal, 200))}`);
   parts.push(`Folder: ${team.directory}${team.projectId ? ` (project "${team.projectId}")` : ""}`);
   if (team.plannerRunId) parts.push(`Planner run: ${team.plannerRunId}`);
-  if (team.branch) parts.push(`Branch: ${team.branch} (from ${team.base ?? "the checkout's branch"}); the project page's Create PR compares it.`);
+  if (team.branch) parts.push(`Branch: ${team.branch} (from ${team.base ?? "the checkout's branch"})${team.pr ? "." : "; the project page's Create PR compares it."}`);
+  if (team.pr) parts.push(teamPrSentence(team.pr));
   if (team.agents && team.agents.total > 0) {
     const leads = team.agents.leads ?? 0;
     parts.push(`Agents: ${team.agents.total} — ${team.agents.planner} planner, ${team.agents.workers} worker(s), ${team.agents.reviewers} reviewer(s)${leads > 0 ? `, ${leads} lead turn(s)` : ""}.`);
@@ -1795,6 +1851,7 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
           team_id: t.id,
           status: t.status,
           ...(t.status === "queued" && t.queuePosition ? { queue_position: t.queuePosition } : {}),
+          ...(t.pr ? { pull_request: `#${t.pr.number} ${t.pr.phase}` } : {}),
           goal: redact(firstLine(t.goal, 80)),
           project_id: t.projectId,
           // A retired task will never be done: counted, a finished team read as unfinished.

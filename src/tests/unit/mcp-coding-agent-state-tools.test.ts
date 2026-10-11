@@ -557,3 +557,16 @@ describe("coding_run_list and the queue", () => {
     expect(notes).toMatch(/queue_position/);
   });
 });
+
+describe("coding_run_list and a failed CI", () => {
+  it("marks a run whose pull request's CI failed, and whether a Fix CI may be offered", async () => {
+    const ci = { prNumber: 7, checks: ["test"], tests: ["a", "b"], files: [], unread: [], attempt: 0, fixRunId: null };
+    apiGet.mockResolvedValue({ runs: [{ ...RUN, id: "run-cifail01", ci }, { ...RUN, id: "run-cifail02", ci: { ...ci, fixRunId: "run-fixfix01" } }] });
+    const out = await harness().call("coding_run_list", {});
+    if (out.isError) throw new Error(JSON.stringify(out.error));
+    const { runs } = JSON.parse(out.text) as { runs: Record<string, unknown>[] };
+    expect(runs[0]).toMatchObject({ ci_failed: "PR #7: 1 check(s), 2 failing test(s)", can_fix_ci: true });
+    expect(runs[1]).toMatchObject({ ci_failed: "PR #7: 1 check(s), 2 failing test(s)" });
+    expect(runs[1]).not.toHaveProperty("can_fix_ci");
+  });
+});

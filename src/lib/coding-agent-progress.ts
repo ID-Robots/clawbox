@@ -98,6 +98,9 @@ export type ProgressLabelKey =
   | "queued"
   | "startedFromQueue"
   | "queueCanceled"
+  // Failing CI (src/lib/coding-ci.ts): what failed, and a run fixing it.
+  | "ciFailed"
+  | "ciFix"
   | "leftoverRunning"
   | "endedLeftovers"
   | "ownerEndedLeftovers"
@@ -247,6 +250,7 @@ export const RUNNER_STEP = {
   queued: (position: number) => `Queued — number ${position} in line for a slot`,
   startedFromQueue: "Started from the queue",
   queueCanceled: "Canceled by the owner before it started",
+  ciFix: (runId: string, attempt: number, max: number) => `Fixing the failed CI of ${runId} (attempt ${attempt} of ${max})`,
   leftoverRunning:
     "Something this run started is still running — a server it left listening? The run's page can end it.",
   endedLeftovers: "Ended what the run had left running",
@@ -483,6 +487,9 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^Queued — number (\d+) in line for a slot$/, labelKey: "queued", icon: "hourglass_top", params: (m) => ({ n: Number(m[1]) }) },
   { re: /^Started from the queue$/, labelKey: "startedFromQueue", icon: "play_arrow" },
   { re: /^Canceled by the owner before it started$/, labelKey: "queueCanceled", icon: "cancel" },
+  // ciFailureLine (src/lib/coding-ci.ts).
+  { re: /^CI failed on pull request #(\d+): (.+)$/, labelKey: "ciFailed", icon: "error", params: (m) => ({ n: Number(m[1]), what: m[2] }) },
+  { re: /^Fixing the failed CI of (run-[a-z0-9]{8}) \(attempt (\d+) of (\d+)\)$/, labelKey: "ciFix", icon: "build", params: (m) => ({ run: m[1], n: Number(m[2]), max: Number(m[3]) }) },
   { re: /^Something this run started is still running .*$/, labelKey: "leftoverRunning", icon: "dns" },
   { re: /^Ended what the run had left running$/, labelKey: "endedLeftovers", icon: "power_settings_new" },
   { re: /^The owner ended what the run had left running$/, labelKey: "ownerEndedLeftovers", icon: "power_settings_new" },

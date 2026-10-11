@@ -23,6 +23,7 @@ import { openNewAppCard } from "@/lib/ui-events";
 import { githubRepoName, githubWebUrl } from "@/lib/github-url";
 import CodingRunTimeline from "./CodingRunTimeline";
 import CodingRunDenials, { type RunDenial } from "./CodingRunDenials";
+import CodingRunCiCard, { type RunCiView } from "./CodingRunCiCard";
 import CodingRunInputs, { type RunInputs } from "./CodingRunInputs";
 import CodingRunMessageBox from "./CodingRunMessageBox";
 import CodingRunWorktreeCard, { type RunWorktreeView } from "./CodingRunWorktreeCard";
@@ -97,6 +98,10 @@ interface Run {
   status: CodingRunStatus;
   /** A QUEUED run's place: since when, and its 1-based position in line. Absent from an older server. */
   queued?: { at: number; position?: number } | null;
+  /** Its pull request's FAILED CI, read — what the Fix CI card offers from. Absent from an older server. */
+  ci?: RunCiView | null;
+  /** A Fix CI continuation of another run. */
+  ciFixOf?: { runId: string; attempt: number } | null;
   startedAt: number;
   completedAt: number | null;
   summary: string | null;
@@ -2813,6 +2818,20 @@ export default function CodingAgentApp() {
 
               {deliverableCard(run)}
               {reviewCard(run)}
+              {/* The pull request's failed CI, read, and the Fix CI it offers. */}
+              {run.ci && (
+                <CodingRunCiCard
+                  runId={run.id}
+                  ci={run.ci}
+                  settled={isSettled(run.status)}
+                  onStarted={(id) => {
+                    notifyCodingRunStarted();
+                    void load();
+                    showRun(id);
+                  }}
+                  runChip={(id) => runChip(id, id, `coding-agent-ci-fix-chip-${id}`)}
+                />
+              )}
               {/* ABOVE the deployment card: the pipeline is the authority on
                   whether this run is actually finished, and the deployment
                   below is one of its stages. On the STANDALONE page the two
