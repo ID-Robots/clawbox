@@ -77,8 +77,15 @@ export type DiagramSource =
   | { kind: "team"; team: TeamView }
   | { kind: "run"; run: DiagramRun };
 
-/** Below this width (px) the panel opens under the chart, as a sheet, instead of beside it. */
+/**
+ * Below this width (px) the panel opens under the chart, as a sheet, instead of
+ * beside it — and above it too whenever the chart would not fit beside the
+ * panel, so the panel never covers or squeezes the chart it describes.
+ */
 export const SHEET_BELOW = 640;
+/** The panel's width beside the chart (21rem), and the gap between them. */
+const PANEL_WIDTH = 336;
+const PANEL_GAP = 16;
 /** Below this width the chart is drawn closer together. */
 export const COMPACT_BELOW = 520;
 /** How many of an agent's newest steps the panel lists. */
@@ -289,7 +296,6 @@ export default function CodingAgentDiagram({ source, runOf, onOpenRun, onChanged
   const svg = useRef<SVGSVGElement>(null);
   useSteppedFlow(svg);
   const width = useMeasuredWidth(wrap);
-  const sheet = width > 0 && width < SHEET_BELOW;
   const compact = width > 0 && width < COMPACT_BELOW;
 
   const lookup = useCallback(
@@ -301,6 +307,9 @@ export default function CodingAgentDiagram({ source, runOf, onOpenRun, onChanged
     [source, lookup, compact],
   );
   const layout = useMemo(() => layoutGraph(graph, compact ? GEOMETRY_COMPACT : GEOMETRY), [graph, compact]);
+  // The card's own padding (2rem across) is inside the measured width.
+  const room = width - (bare ? 0 : 32) - PANEL_WIDTH - PANEL_GAP;
+  const sheet = width > 0 && (width < SHEET_BELOW || room < layout.width);
   const has = useCallback((key: string | null): key is string => key !== null && graph.nodes.some((n) => n.key === key), [graph]);
 
   const [selected, setSelected] = useState<string | null>(initialSelected);
@@ -590,6 +599,11 @@ function AgentPanel({ id, node, team, supplied, parentRun, refreshKey, isCurrent
   onChanged?: () => void;
 }) {
   const { t } = useT();
+  const panel = useRef<HTMLElement>(null);
+  // Under the chart, the sheet may open below the fold: bring it up.
+  useEffect(() => {
+    if (sheet) panel.current?.scrollIntoView?.({ block: "nearest" });
+  }, [sheet]);
   const { run, loading } = useRunRecord(node.runId, supplied, refreshKey);
   const [messaging, setMessaging] = useState(false);
   const [stopping, setStopping] = useState(false);
@@ -661,9 +675,10 @@ function AgentPanel({ id, node, team, supplied, parentRun, refreshKey, isCurrent
       role="region"
       aria-label={fullName(t, node, run ?? parentRun)}
       onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); onClose(); } }}
+      ref={panel}
       className={sheet
-        ? `sticky bottom-0 z-10 rounded-t-2xl border border-white/[0.1] bg-[var(--win-ground)] shadow-[0_-12px_32px_rgba(0,0,0,0.45)] px-4 pt-2 pb-3`
-        : `w-[21rem] max-w-[45%] shrink-0 ${INSET_SURFACE} px-4 py-3`}
+        ? "rounded-2xl border border-white/[0.1] bg-black/30 px-4 pt-2 pb-3"
+        : `w-[21rem] shrink-0 ${INSET_SURFACE} px-4 py-3`}
       data-testid="coding-agent-node-panel"
       data-key={node.key}
       data-role={node.role}
@@ -698,7 +713,8 @@ function AgentPanel({ id, node, team, supplied, parentRun, refreshKey, isCurrent
 
       {/* NOW — the one line the owner opened this for. */}
       <div className="mt-3">
-        <p className={label}>{t("codingAgent.diagram.now")}</p>
+        {/* Now, while it works; once it has stopped, the last thing it did. */}
+        <p className={label}>{t(run && !isHeld(run.status) ? "codingAgent.diagram.lastStep" : "codingAgent.diagram.now")}</p>
         <p className="mt-1 flex items-start gap-1.5 text-[12.5px] leading-snug text-[var(--text-primary)]" aria-live="polite" data-testid="coding-agent-node-panel-now">{nowLine}</p>
       </div>
 

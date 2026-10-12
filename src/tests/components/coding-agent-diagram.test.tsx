@@ -208,6 +208,7 @@ describe("the panel: what an agent is doing now", () => {
     expect(within(panel).getByTestId("coding-agent-node-panel-title")).toHaveTextContent(t("codingAgent.team.roleWorker", { task: "t2" }));
     expect(within(panel).getByTestId("coding-agent-node-panel-state")).toHaveTextContent(t("codingAgent.diagram.state.working"));
     expect(within(panel).getByTestId("coding-agent-node-panel-now")).toHaveTextContent("step 13");
+    expect(panel).toHaveTextContent(t("codingAgent.diagram.now"));
     expect(within(panel).getAllByTestId("coding-agent-node-panel-steps-step")).toHaveLength(10);
     expect(within(panel).getByTestId("coding-agent-node-panel-elapsed")).toHaveTextContent(/Elapsed \d+m/);
     const figures = within(panel).getByTestId("coding-agent-node-panel-figures");
@@ -251,6 +252,9 @@ describe("the panel: what an agent is doing now", () => {
     expect(panel).toHaveTextContent("Build the invoice app");
     expect(panel).toHaveTextContent(t("codingAgent.diagram.planned", { n: 3 }));
     expect(within(panel).getByTestId("coding-agent-node-panel-title")).toHaveTextContent(t("codingAgent.team.rolePlanner"));
+    // It has finished: the panel says what it did last, not what it does "now".
+    expect(panel).toHaveTextContent(t("codingAgent.diagram.lastStep"));
+    expect(within(panel).getByTestId("coding-agent-node-panel-now")).toHaveTextContent(t("codingAgent.diagram.nothingYet"));
   });
 
   it("says a task nobody has taken is waiting, and on whom", () => {
