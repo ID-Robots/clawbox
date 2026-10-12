@@ -22,7 +22,13 @@
 # shellcheck source=scripts/nano-tests/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
-board_api GET /setup-api/browser/manage
+# An earlier test may have rebooted the board a moment ago, and nothing before
+# this one waits for the web server itself: give it a minute to answer.
+for _ in 1 2 3 4 5 6; do
+  board_api GET /setup-api/browser/manage
+  [ "$API_STATUS" = 200 ] && break
+  sleep 10
+done
 if [ "$API_STATUS" != 200 ]; then
   not_ok "GET /setup-api/browser/manage answered $API_STATUS: $(api_error)"
   finish
