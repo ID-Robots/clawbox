@@ -9116,6 +9116,9 @@ step_post_update() {
   # unit + autocutsel package. Devices installed before the display-:99 move
   # and the clipboard-sync addition get both here without needing a reinstall.
   optional_step vnc_refresh step_vnc_refresh
+  # Without this call the marker would be fresh-install-only, and every box
+  # already in the field would keep GNOME's first-run assistant resident.
+  optional_step gnome_initial_setup_done step_gnome_initial_setup_done
   # Reinstall the unit files from config/ + daemon-reload. Without this, unit
   # changes only ever reached FRESH installs: the in-app update runs
   # bootstrap_updater -> ... -> post_update and never re-copies
@@ -11580,6 +11583,63 @@ EOF
   echo "  ClawBox desktop background configured"
 }
 
+# GNOME's own first-run assistant, `gnome-initial-setup --existing-user`.
+#
+# The GNOME session starts it for any user without
+# ~/.config/gnome-initial-setup-done — its autostart entry runs only
+# `unless-exists gnome-initial-setup-done` — and nothing on a ClawBox ever wrote
+# it. Nobody finishes the assistant either, so it never wrote the file itself:
+# every box kept it resident from session start, 120-170 MB RSS on an 8 GB
+# board (five lab boards, after a reboot and after an idle hour). ClawBox has
+# its own setup wizard; GNOME's has no purpose here.
+#
+# The file is the switch GNOME itself reads, so writing it is the whole fix: no
+# package removed, no distro autostart file edited. "yes" is what the assistant
+# writes when it finishes. Written AS THE USER, because ~/.config is the clawbox
+# account's to rewrite and root writing into it would follow any symlink planted
+# there. Idempotent: a marker that already exists — whatever it says — is left
+# alone. Called by the full install AND by step_post_update, so a box in the
+# field is fixed by its next in-app update.
+#
+# A box installed before this step can have a root-owned ~/.config: on a home
+# without one, step_desktop_theme's root `mkdir -p` of ~/.config/autostart
+# created it and chowned only autostart. The user write fails there, so that
+# directory alone (never its contents, never through a symlink) is handed back
+# to clawbox first.
+#
+# The update runs post_update AFTER its own reboot, so by then the session has
+# already started the assistant without a marker to stop it. Writing the marker
+# therefore also ends the copy that is running, instead of leaving it resident
+# until some later boot — and so does a run that finds the marker already
+# there, since a marker written mid-session (or just before the session's own
+# check started the assistant) stops only the next session's copy. Picked by
+# the clawbox uid and the assistant's own command line, anchored at its start:
+# unanchored, `-f` also matched any clawbox process that merely MENTIONS that
+# command line — an agent run whose prompt quotes it, a shell running a script
+# that greps for it.
+step_gnome_initial_setup_done() {
+  local config_dir="$CLAWBOX_HOME/.config"
+  local marker="$config_dir/gnome-initial-setup-done"
+
+  if [ -e "$marker" ]; then
+    echo "  GNOME initial setup already marked done"
+  else
+    if [ -d "$config_dir" ] && [ ! -L "$config_dir" ] \
+      && [ "$(stat -c %U "$config_dir" 2>/dev/null)" != "$CLAWBOX_USER" ]; then
+      chown -h "$CLAWBOX_USER:$CLAWBOX_USER" "$config_dir" || true
+    fi
+    if ! as_clawbox sh -c 'mkdir -p -m 700 "$1" && printf yes > "$2"' sh "$config_dir" "$marker"; then
+      echo "  Warning: could not write $marker — GNOME's first-run assistant will keep starting with the desktop" >&2
+      return 1
+    fi
+    echo "  GNOME initial setup marked done (its first-run assistant no longer starts with the desktop)"
+  fi
+
+  if pkill -TERM -u "$CLAWBOX_USER" -f '^(/[^ ]*/)?gnome-initial-setup --existing-user( |$)' 2>/dev/null; then
+    echo "  Ended the first-run assistant the running session had already started"
+  fi
+}
+
 step_ffmpeg_install() {
   wait_for_apt
   apt-get install -y ffmpeg
@@ -12355,6 +12415,11 @@ log "Installing VNC server..."
 step_vnc_install
 
 log "Applying ClawBox desktop theme..."
+# Under the same heading, so the step count stays what it is. Non-fatal: GNOME's
+# first-run assistant costs memory, not function. BEFORE step_desktop_theme: on
+# a home with no ~/.config, that step's root `mkdir -p` of ~/.config/autostart
+# leaves ~/.config itself root-owned, and the marker is written as clawbox.
+step_gnome_initial_setup_done || echo "  Warning: gnome_initial_setup_done step failed (non-fatal)"
 step_desktop_theme
 
 # Belt-and-suspenders PATH stanza — covers update runs that early-return out
