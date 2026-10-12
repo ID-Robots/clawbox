@@ -5,7 +5,10 @@ import fs from "fs";
 import net from "net";
 import os from "os";
 import path from "path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// Real processes (a node child and `ss`): see test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 /**
  * scripts/app-port.js — "is this port the project's own listener", which the
