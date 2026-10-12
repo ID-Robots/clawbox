@@ -490,9 +490,9 @@ describe("AIModelsStep variants", () => {
     expect(getByRole("button", { name: "Connect to OpenRouter" })).toBeInTheDocument();
   });
 
-  // xAI (Grok): an API-key provider like Google and OpenRouter — one auth
-  // option, so no Subscription tab — saved through the same configure call,
-  // naming the catalogue's cold-start default. The key is an obvious fake.
+  // xAI (Grok), API Key tab: saved through the same configure call as Google
+  // and OpenRouter, naming the catalogue's cold-start default. The key is an
+  // obvious fake.
   it("offers xAI Grok as an API-key provider and saves it through configure", async () => {
     const fetchMock = vi.mocked(fetch);
     const { getByRole, getByText, queryByRole, container } = render(
@@ -512,9 +512,16 @@ describe("AIModelsStep variants", () => {
     expect(getByText("Grok models by xAI")).toBeInTheDocument();
     fireEvent.click(getByRole("radio", { name: /xAI Grok/i }));
 
+    // Two tabs: the sign-in opens first, like OpenAI's and Anthropic's, and is
+    // offered although the box lists no configured OAuth client — ClawBox's
+    // own route serves it.
+    expect(getByRole("button", { name: "ai.subscription" })).toBeInTheDocument();
+    fireEvent.click(getByRole("button", { name: "ai.apiKey" }));
+
     expect(getByRole("button", { name: "Connect to xAI Grok" })).toBeInTheDocument();
-    // API key only.
-    expect(queryByRole("button", { name: /Subscription/i })).toBeNull();
+    // Both modes share one credential slot, and the tab says so.
+    expect(getByText("ai.xaiReplacesSignIn")).toBeInTheDocument();
+    expect(queryByRole("button", { name: "ai.xaiSignInButton" })).toBeNull();
 
     const keyInput = container.querySelector("input[type=password], input[type=text]");
     expect(keyInput).not.toBeNull();
@@ -540,6 +547,150 @@ describe("AIModelsStep variants", () => {
     // The catalogue's cold-start default, bare: the configure route adds the
     // `xai/` prefix itself.
     expect(sent.model).toBe("grok-4.6");
+  });
+
+  // xAI (Grok), Subscription tab: the core's own CLI runs the sign-in and the
+  // panel relays its link and code. When the CLI finishes, the ordinary
+  // subscription save runs — with no credential in it, because there is none
+  // for the browser to carry.
+  describe("the xAI sign-in", () => {
+    type Answer = Record<string, unknown>;
+
+    function mockXaiLogin(answers: { start: Answer; polls?: Answer[] }) {
+      const polls = [...(answers.polls ?? [])];
+      const actions: string[] = [];
+      vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+        if (url.includes("/setup-api/ai-models/oauth/providers")) {
+          return { ok: true, json: async () => ({ providers: [] }) } as unknown as Response;
+        }
+        if (url.includes("/setup-api/ai-models/xai-login")) {
+          const action = String(JSON.parse(String(init?.body ?? "{}")).action);
+          actions.push(action);
+          if (action === "start") return { ok: true, status: 200, json: async () => answers.start } as unknown as Response;
+          if (action === "poll") {
+            const next = polls.shift() ?? { status: "pending", verificationUrl: null, userCode: null };
+            return { ok: true, status: 200, json: async () => next } as unknown as Response;
+          }
+          return { ok: true, status: 200, json: async () => ({ ok: true }) } as unknown as Response;
+        }
+        if (url.includes("/setup-api/ai-models/configure")) {
+          return { ok: true, json: async () => ({ success: true }) } as unknown as Response;
+        }
+        return { ok: true, json: async () => ({}) } as unknown as Response;
+      });
+      return actions;
+    }
+
+    async function openXaiSubscription() {
+      const view = render(
+        <AIModelsStep
+          providerIds={["clawai", "openai", "anthropic", "google", "openrouter", "xai"]}
+          defaultProviderId="clawai"
+          title="Connect AI Provider"
+          description="Primary provider"
+        />,
+      );
+      await waitFor(() => {
+        expect(fetch).toHaveBeenCalledWith("/setup-api/ai-models/oauth/providers");
+      });
+      fireEvent.click(view.getByRole("button", { name: /Show more providers/i }));
+      fireEvent.click(view.getByRole("radio", { name: /xAI Grok/i }));
+      return view;
+    }
+
+    const configureBodies = () => vi.mocked(fetch).mock.calls
+      .filter(([input]) => typeof input === "string" && input.includes("/setup-api/ai-models/configure"))
+      .map(([, init]) => JSON.parse(String((init as RequestInit | undefined)?.body ?? "{}")));
+
+    it("shows the link and the code, then saves once the sign-in completes", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const actions = mockXaiLogin({
+          start: { status: "pending", verificationUrl: "https://example.test/device", userCode: "ABCD-1234" },
+          polls: [
+            { status: "pending", verificationUrl: "https://example.test/device", userCode: "ABCD-1234" },
+            { status: "complete" },
+          ],
+        });
+        const { getByRole, getByText, findByTestId, queryByRole } = await openXaiSubscription();
+
+        // The tab says what signing in does to a saved key, before the click.
+        expect(getByText("ai.xaiReplacesKey")).toBeInTheDocument();
+        // No generic Connect button under a tab that drives its own.
+        expect(queryByRole("button", { name: "Connect to xAI Grok" })).toBeNull();
+        fireEvent.click(getByRole("button", { name: "ai.xaiSignInButton" }));
+
+        expect((await findByTestId("xai-user-code")).textContent).toBe("ABCD-1234");
+        const link = getByRole("link", { name: "Open authorization page" });
+        expect(link.getAttribute("href")).toBe("https://example.test/device");
+        expect(link.getAttribute("target")).toBe("_blank");
+        expect(getByText("Waiting for authorization...")).toBeInTheDocument();
+        expect(configureBodies()).toHaveLength(0);
+
+        await act(async () => { await vi.advanceTimersByTimeAsync(3_100); });
+        await act(async () => { await vi.advanceTimersByTimeAsync(3_100); });
+
+        await waitFor(() => expect(configureBodies()).toHaveLength(1));
+        expect(configureBodies()[0]).toMatchObject({
+          provider: "xai",
+          authMode: "subscription",
+          scope: "primary",
+          model: "grok-4.6",
+        });
+        // No credential rides the browser.
+        expect(configureBodies()[0].apiKey).toBeUndefined();
+        expect(actions).toEqual(["start", "poll", "poll"]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("shows a failure with the CLI's own output, and offers a fresh start", async () => {
+      mockXaiLogin({
+        start: {
+          status: "failed",
+          detail: "The sign-in did not show a verification link. This is what OpenClaw printed:",
+          output: "? Choose an account",
+        },
+      });
+      const { getByRole, findByRole, getByText } = await openXaiSubscription();
+      fireEvent.click(getByRole("button", { name: "ai.xaiSignInButton" }));
+
+      const alert = await findByRole("alert");
+      expect(alert.textContent).toContain("did not show a verification link");
+      expect(getByText("? Choose an account")).toBeInTheDocument();
+      expect(getByRole("button", { name: "Get a new code" })).toBeInTheDocument();
+      expect(configureBodies()).toHaveLength(0);
+    });
+
+    it("cancels the sign-in on request and goes back to the start button", async () => {
+      const actions = mockXaiLogin({
+        start: { status: "pending", verificationUrl: "https://example.test/device", userCode: "ABCD-1234" },
+      });
+      const { getByRole, findByTestId, findByRole } = await openXaiSubscription();
+      fireEvent.click(getByRole("button", { name: "ai.xaiSignInButton" }));
+      await findByTestId("xai-user-code");
+
+      fireEvent.click(getByRole("button", { name: "cancel" }));
+
+      expect(await findByRole("button", { name: "ai.xaiSignInButton" })).toBeInTheDocument();
+      await waitFor(() => expect(actions).toContain("cancel"));
+      expect(configureBodies()).toHaveLength(0);
+    });
+
+    it("still shows the link when the CLI printed no separate code", async () => {
+      mockXaiLogin({
+        start: { status: "pending", verificationUrl: "https://example.test/device?x=1", userCode: null },
+      });
+      const { getByRole, findByText, queryByTestId } = await openXaiSubscription();
+      fireEvent.click(getByRole("button", { name: "ai.xaiSignInButton" }));
+
+      expect(await findByText("ai.xaiSignInNoCode")).toBeInTheDocument();
+      expect(queryByTestId("xai-user-code")).toBeNull();
+      expect(getByRole("link", { name: "Open authorization page" }).getAttribute("href"))
+        .toBe("https://example.test/device?x=1");
+    });
   });
 
   it("uses the skip action to continue setup without posting empty credentials", async () => {

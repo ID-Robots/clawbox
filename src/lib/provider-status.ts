@@ -174,8 +174,8 @@ const OPENCLAW_PANEL_PROVIDERS: readonly { id: string; label: string }[] = [
   { id: "anthropic", label: "Anthropic Claude" },
   { id: "google", label: "Google Gemini" },
   { id: "openrouter", label: "OpenRouter" },
-  // Last, so every row above keeps its place. API key only: ClawBox offers no
-  // xAI sign-in lane, and the bundled plugin's own OAuth is a Terminal path.
+  // Last, so every row above keeps its place. An API key or a SuperGrok / X
+  // Premium sign-in, both at `xai:default` — either makes the row connected.
   { id: "xai", label: "xAI Grok" },
 ];
 

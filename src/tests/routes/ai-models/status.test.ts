@@ -127,6 +127,19 @@ describe("/setup-api/ai-models/status", () => {
     expect(body.clawaiTier).toBeNull();
   });
 
+  it("reports the xAI sign-in as oauth mode, so the panel can tell it from a key", async () => {
+    // What the configure route leaves after a Grok sign-in: the same profile
+    // id as the API key, with `mode: "oauth"`.
+    mockReadConfig.mockResolvedValue({
+      auth: { profiles: { "xai:default": { provider: "xai", mode: "oauth" } } },
+      agents: { defaults: { model: { primary: "xai/grok-4.6" } } },
+    } as never);
+    const body = await (await GET()).json();
+    expect(body.connected).toBe(true);
+    expect(body.provider).toBe("xai");
+    expect(body.mode).toBe("oauth");
+  });
+
   it("matches the active profile to the primary model when fallback profiles exist", async () => {
     // Simulates a device that previously had Anthropic OAuth configured and
     // then switched to ClawBox AI — both profiles remain in the file but the
