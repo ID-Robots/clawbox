@@ -246,8 +246,10 @@ export async function POST(req: Request) {
     // exactly as it did with `force`, which only ever swallowed ENOENT.
     // An app that is going must not stay on the internet: its public link
     // (TASK-1478) is disabled first, and the folder is removed under the same
-    // lock link creation takes, so no link can appear in between. A failure
-    // of the disable itself never fails the uninstall.
+    // lock link creation takes, so no link can appear in between. When the
+    // link list cannot be read or rewritten the uninstall fails here with the
+    // folder still in place: removing it would leave the link stored, live
+    // again for whatever is next deployed under the same id.
     let webappRemoved = false;
     await disablePublicLink(appId, "app_uninstalled", async () => {
       try {

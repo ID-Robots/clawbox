@@ -175,4 +175,39 @@ describe("disabling", () => {
     expect(await disablePublicLink("notes")).toBe(false);
     expect((await DELETE(req("DELETE", {}))).status).toBe(400);
   });
+
+  it("an unreadable list stops an uninstall before the app is removed", async () => {
+    // A directory where the list should be: reading it fails (EISDIR), as an
+    // unreadable file would, whoever the tests run as.
+    fs.mkdirSync(path.join(LINKS_DIR, "links.json"), { recursive: true });
+    const during = vi.fn(async () => undefined);
+    await expect(disablePublicLink("notes", "app_uninstalled", during)).rejects.toThrow();
+    expect(during).not.toHaveBeenCalled();
+  });
+
+  it("a list that cannot be rewritten stops an uninstall before the app is removed", async () => {
+    await createPublicLink({ appId: "notes", mode: "permanent" });
+    // The atomic write's rename over links.json fails once.
+    const rename = vi.spyOn(fs.promises, "rename").mockRejectedValueOnce(Object.assign(new Error("EIO"), { code: "EIO" }));
+    const during = vi.fn(async () => undefined);
+    try {
+      await expect(disablePublicLink("notes", "app_uninstalled", during)).rejects.toThrow("EIO");
+    } finally {
+      rename.mockRestore();
+    }
+    expect(during).not.toHaveBeenCalled();
+    expect(serving.readLinks(ROOT)).toHaveLength(1);
+  });
+
+  it("an entry the serving side would serve without apiAllow is one the owner can see and disable", async () => {
+    await createPublicLink({ appId: "notes", mode: "permanent" });
+    const file = path.join(LINKS_DIR, "links.json");
+    const stored = JSON.parse(fs.readFileSync(file, "utf-8"));
+    delete stored.links[0].apiAllow;
+    fs.writeFileSync(file, JSON.stringify(stored), { mode: 0o600 });
+    expect(serving.readLinks(ROOT)).toHaveLength(1);
+    expect((await listPublicLinks())[0]).toMatchObject({ appId: "notes", apiAllow: [] });
+    expect(await disablePublicLink("notes")).toBe(true);
+    expect(serving.readLinks(ROOT)).toHaveLength(0);
+  });
 });

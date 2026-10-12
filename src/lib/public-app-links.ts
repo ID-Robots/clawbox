@@ -95,17 +95,40 @@ export function parseApiAllow(input: unknown): string[] {
   return out;
 }
 
-function isStored(raw: unknown): raw is StoredPublicLink {
-  if (!raw || typeof raw !== "object") return false;
+/**
+ * A stored link, or null. At least as lenient as the serving side's
+ * validLink (a missing `apiAllow` is an empty one there too): every entry it
+ * would serve must be one this side sees, or the owner could never disable it.
+ */
+function asStored(raw: unknown): StoredPublicLink | null {
+  if (!raw || typeof raw !== "object") return null;
   const l = raw as Record<string, unknown>;
-  return typeof l.id === "string" && typeof l.appId === "string" && (l.mode === "temporary" || l.mode === "permanent")
-    && typeof l.token === "string" && typeof l.createdAt === "number" && Array.isArray(l.apiAllow);
+  if (!(typeof l.id === "string" && typeof l.appId === "string" && (l.mode === "temporary" || l.mode === "permanent")
+    && typeof l.token === "string" && typeof l.createdAt === "number")) return null;
+  const apiAllow = l.apiAllow === undefined || l.apiAllow === null ? [] : l.apiAllow;
+  if (!Array.isArray(apiAllow)) return null;
+  return { ...(l as unknown as StoredPublicLink), apiAllow: apiAllow as string[] };
 }
 
+/**
+ * The stored links. No file is no links. A file that is not a link list is
+ * none either — the serving side serves nothing from it, and the next write
+ * replaces it, so none of its records can come back. A file that cannot be
+ * READ throws: it may hold a live link, and saying "nothing here" would let
+ * an uninstall go ahead with that link still stored.
+ */
 async function readStored(): Promise<StoredPublicLink[]> {
+  let text: string;
   try {
-    const parsed = JSON.parse(await fs.readFile(linksFile(), "utf-8")) as { links?: unknown };
-    return Array.isArray(parsed.links) ? parsed.links.filter(isStored) : [];
+    text = await fs.readFile(linksFile(), "utf-8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return [];
+    throw err;
+  }
+  try {
+    const parsed = JSON.parse(text) as { links?: unknown };
+    if (!Array.isArray(parsed?.links)) return [];
+    return parsed.links.map(asStored).filter((l): l is StoredPublicLink => l !== null);
   } catch {
     return [];
   }
@@ -246,8 +269,11 @@ export async function createPublicLink(input: CreatePublicLinkInput, now = Date.
  * Disable an app's link. Immediate: the serving side refuses it on the next
  * request. True when there was one. `during`, when given, runs under the same
  * lock right after (uninstall removes the app's folder there), so no link can
- * be created for the app in between; its errors propagate, the disable's own
- * do not.
+ * be created for the app in between.
+ *
+ * When the list cannot be read or rewritten, this throws BEFORE `during`: an
+ * uninstall that went ahead would leave the link stored, and an app deployed
+ * again under the same id would be public on the old token.
  */
 export async function disablePublicLink(appId: string, reason = "disabled", during?: () => Promise<void>): Promise<boolean> {
   if (!APP_ID_RE.test(appId)) {
@@ -255,19 +281,13 @@ export async function disablePublicLink(appId: string, reason = "disabled", duri
     return false;
   }
   return withLinks(async () => {
-    let had = false;
-    try {
-      const links = await readStored();
-      const gone = links.filter((l) => l.appId === appId);
-      if (gone.length > 0) {
-        await writeStored(links.filter((l) => l.appId !== appId));
-        for (const l of gone) await audit(reason, { link: l.id, app: appId });
-        had = true;
-      }
-    } catch (err) {
-      if (!during) throw err;
+    const links = await readStored();
+    const gone = links.filter((l) => l.appId === appId);
+    if (gone.length > 0) {
+      await writeStored(links.filter((l) => l.appId !== appId));
+      for (const l of gone) await audit(reason, { link: l.id, app: appId });
     }
     if (during) await during();
-    return had;
+    return gone.length > 0;
   });
 }

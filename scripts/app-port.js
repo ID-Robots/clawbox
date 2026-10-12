@@ -26,13 +26,43 @@ function isProxyablePort(port) {
   return typeof port === "number" && Number.isInteger(port) && port >= 1024 && port <= 65535;
 }
 
+function cwdInside(pid, real) {
+  try {
+    const rel = path.relative(real, fs.readlinkSync(`/proc/${pid}/cwd`));
+    return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+  } catch {
+    return false;
+  }
+}
+
+/** Is the socket with this inode still LISTENing on `port`? Two small /proc reads, no process spawned. */
+function socketStillListening(port, inode) {
+  const hexPort = port.toString(16).toUpperCase().padStart(4, "0");
+  for (const table of ["/proc/net/tcp", "/proc/net/tcp6"]) {
+    let text;
+    try { text = fs.readFileSync(table, "utf-8"); } catch { continue; }
+    for (const line of text.split("\n")) {
+      const f = line.trim().split(/\s+/);
+      // sl local_address rem_address st … inode (field 9); 0A = LISTEN
+      if (f[3] === "0A" && f[1] && f[1].endsWith(`:${hexPort}`) && f[9] === inode) return true;
+    }
+  }
+  return false;
+}
+
 function appListenerOwned(port, directory) {
   const key = `${port}:${directory}`;
   const cached = appListenerVerdicts.get(key);
-  if (cached && Date.now() - cached.at < (cached.owned ? APP_LISTENER_TTL_MS : APP_LISTENER_REFUSAL_TTL_MS)) return cached.owned;
-  let owned = false;
+  if (cached && !cached.owned && Date.now() - cached.at < APP_LISTENER_REFUSAL_TTL_MS) return false;
+  // A "yes" is only reused while it is provably still the same socket of the
+  // same project process: the app may exit and something else bind its port,
+  // and a cached yes would hand that process the app's traffic — on a public
+  // link, the internet's. Checked on every use, without spawning `ss`.
+  if (cached && cached.owned && Date.now() - cached.at < APP_LISTENER_TTL_MS
+    && cached.inode && socketStillListening(port, cached.inode) && cwdInside(cached.pid, cached.real)) return true;
+  let verdict = { owned: false, at: Date.now() };
   try {
-    const out = execFileSync("ss", ["-H", "-l", "-t", "-n", "-p", `sport = :${port}`], { encoding: "utf-8", timeout: 5000, env: { PATH: process.env.PATH || "/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C" } });
+    const out = execFileSync("ss", ["-H", "-l", "-t", "-n", "-p", "-e", `sport = :${port}`], { encoding: "utf-8", timeout: 5000, env: { PATH: process.env.PATH || "/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C" } });
     let real = directory;
     try { real = fs.realpathSync(directory); } catch {}
     // Only a row bound where 127.0.0.1 reaches it vouches for the port.
@@ -40,19 +70,17 @@ function appListenerOwned(port, directory) {
       const local = row.trim().split(/\s+/)[3] || "";
       const host = local.slice(0, local.lastIndexOf(":"));
       return ["127.0.0.1", "0.0.0.0", "*", "[::]", "::", "[::1]"].includes(host);
-    }).join("\n");
-    for (const m of reachable.matchAll(/pid=(\d+)/g)) {
-      try {
-        const cwd = fs.readlinkSync(`/proc/${m[1]}/cwd`);
-        const rel = path.relative(real, cwd);
-        if (rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))) { owned = true; break; }
-      } catch {}
+    });
+    for (const row of reachable) {
+      const inode = (/\bino:(\d+)/.exec(row) || [])[1] || null;
+      const pid = [...row.matchAll(/pid=(\d+)/g)].map((m) => m[1]).find((p) => cwdInside(p, real));
+      if (pid) { verdict = { owned: true, at: Date.now(), pid, inode, real }; break; }
     }
   } catch {
-    owned = false;
+    verdict = { owned: false, at: Date.now() };
   }
-  appListenerVerdicts.set(key, { owned, at: Date.now() });
-  return owned;
+  appListenerVerdicts.set(key, verdict);
+  return verdict.owned;
 }
 
 /**
