@@ -33,6 +33,7 @@
  * The OWNER reads, edits and clears the file on the project page
  * (`setup-api/coding-agent/run-notes`, `writeRunNotes`, `clearRunNotes`).
  */
+import { randomBytes } from "crypto";
 import fs from "fs";
 import path from "./runtime-path";
 import { redactCredentialShapes } from "./incident-sanitize";
@@ -184,7 +185,6 @@ export function clearRunNotes(directory: string): void {
 
 async function saveNotes(project: string, notes: string): Promise<void> {
   const dir = path.join(project, RUN_NOTES_DIR);
-  const file = path.join(dir, RUN_NOTES_FILE);
   try {
     if (!ownNotesDir(project, { create: true })) {
       throw new Error(`${RUN_NOTES_DIR} in the project is not a folder of its own`);
@@ -192,16 +192,68 @@ async function saveNotes(project: string, notes: string): Promise<void> {
     // `.clawbox/` out of `git status` BEFORE the file exists in it: a run that
     // ran `git add -A` in between would otherwise commit the notes.
     await excludeWorktrees(project);
-    if (!notes) {
-      fs.rmSync(file, { force: true });
-      return;
-    }
-    const tmp = `${file}.${process.pid}.tmp`;
-    fs.writeFileSync(tmp, `${notes}\n`, { mode: 0o644 });
-    fs.renameSync(tmp, file);
+    writeNotesFile(dir, notes ? `${notes}\n` : null);
   } catch (err) {
     throw new RunNotesError("write_failed", `Could not save the run notes: ${err instanceof Error ? err.message : String(err)}`);
   }
+}
+
+/** A sibling name nobody can plant ahead of the write: random, per write. */
+function scratchName(): string {
+  return `.run-notes-${process.pid}-${randomBytes(8).toString("hex")}.tmp`;
+}
+
+/**
+ * The notes file replaced whole — or removed, for `text` null — without ever
+ * following a link (the pattern of `writeProjectFile` in coding-project-tree.ts).
+ *
+ * A run in a folder project writes that project, so it can plant links in
+ * `.clawbox/`. So the folder is opened ONCE, with O_NOFOLLOW, and everything
+ * after goes through that descriptor (`/proc/self/fd/<fd>`): the folder
+ * checked is the folder written. The new text lands in a sibling created fresh
+ * — O_CREAT | O_EXCL | O_NOFOLLOW, so it can never open anything already at
+ * that name, a planted link included — then fsync'ed and given the notes'
+ * name in one rename, which replaces a link at that name rather than writing
+ * through it. The sibling is removed on any failure.
+ *
+ * @param scratch the sibling's name; a test names one it planted a link at
+ */
+function writeNotesFile(dir: string, text: string | null, scratch: string = scratchName()): void {
+  let dirFd: number | null = null;
+  let pending: string | null = null;
+  try {
+    dirFd = fs.openSync(dir, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW);
+    const via = `/proc/self/fd/${dirFd}`;
+    if (text === null) {
+      // Unlinking a link removes the link, never what it points at.
+      fs.rmSync(path.join(via, RUN_NOTES_FILE), { force: true });
+      return;
+    }
+    const bytes = Buffer.from(text, "utf8");
+    const fd = fs.openSync(path.join(via, scratch), fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o644);
+    pending = scratch;
+    try {
+      let written = 0;
+      while (written < bytes.length) written += fs.writeSync(fd, bytes, written, bytes.length - written, written);
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(path.join(via, scratch), path.join(via, RUN_NOTES_FILE));
+    pending = null;
+  } finally {
+    if (pending !== null && dirFd !== null) {
+      try { fs.unlinkSync(path.join(`/proc/self/fd/${dirFd}`, pending)); } catch { /* never made */ }
+    }
+    if (dirFd !== null) {
+      try { fs.closeSync(dirFd); } catch { /* already closed */ }
+    }
+  }
+}
+
+/** Test seam: `writeNotesFile` with a sibling name the test chose. */
+export function _writeNotesFileForTests(dir: string, text: string | null, scratch: string): void {
+  writeNotesFile(dir, text, scratch);
 }
 
 /**

@@ -28,6 +28,7 @@ import {
   settleRunNotes,
   vetLesson,
   writeRunNotes,
+  _writeNotesFileForTests,
 } from "@/lib/coding-run-notes";
 import { _resetRunSecretsForTests, registerRunSecrets } from "@/lib/secret-redact";
 
@@ -268,5 +269,51 @@ describe("reading through one descriptor", () => {
     const read = readRunNotes(project);
     expect(read.length).toBeLessThanOrEqual(MAX_RUN_NOTES_CHARS);
     expect(read.endsWith("- a line of notes")).toBe(true);
+  });
+});
+
+describe("the write never follows a link a run planted in .clawbox", () => {
+  let outside: string;
+  const clawbox = () => path.join(project, ".clawbox");
+  beforeEach(() => {
+    outside = path.join(base, "victim.txt");
+    fs.writeFileSync(outside, "the owner's own file\n");
+    fs.mkdirSync(path.join(project, ".clawbox"), { recursive: true });
+  });
+
+  it("does not write through a link at the old, predictable scratch name", async () => {
+    // What the write used to open with a plain writeFileSync: `<file>.<pid>.tmp`.
+    fs.symlinkSync(outside, path.join(clawbox(), `run-notes.md.${process.pid}.tmp`));
+    await writeRunNotes(project, "- Tests: bun run test");
+    expect(fs.readFileSync(outside, "utf8")).toBe("the owner's own file\n");
+    expect(fs.readFileSync(path.join(clawbox(), "run-notes.md"), "utf8")).toBe("- Tests: bun run test\n");
+    expect(fs.lstatSync(path.join(clawbox(), "run-notes.md")).isSymbolicLink()).toBe(false);
+  });
+
+  it("refuses rather than follows a link planted at the very scratch name it is about to create", () => {
+    fs.symlinkSync(outside, path.join(clawbox(), ".run-notes-planted.tmp"));
+    expect(() => _writeNotesFileForTests(clawbox(), "- a note\n", ".run-notes-planted.tmp")).toThrow(/EEXIST/);
+    expect(fs.readFileSync(outside, "utf8")).toBe("the owner's own file\n");
+    expect(fs.existsSync(path.join(clawbox(), "run-notes.md"))).toBe(false);
+    // The planted link is left as it was: it is not the box's to remove.
+    expect(fs.lstatSync(path.join(clawbox(), ".run-notes-planted.tmp")).isSymbolicLink()).toBe(true);
+  });
+
+  it("replaces a link planted at the notes' own name instead of writing through it, and a clear removes only the link", async () => {
+    fs.symlinkSync(outside, path.join(clawbox(), "run-notes.md"));
+    await writeRunNotes(project, "- Port 3100 for the dev server");
+    expect(fs.readFileSync(outside, "utf8")).toBe("the owner's own file\n");
+    expect(fs.lstatSync(path.join(clawbox(), "run-notes.md")).isFile()).toBe(true);
+    fs.rmSync(path.join(clawbox(), "run-notes.md"));
+    fs.symlinkSync(outside, path.join(clawbox(), "run-notes.md"));
+    await writeRunNotes(project, "");
+    expect(fs.existsSync(outside)).toBe(true);
+    expect(fs.existsSync(path.join(clawbox(), "run-notes.md"))).toBe(false);
+  });
+
+  it("leaves no scratch file behind, written or refused", async () => {
+    await writeRunNotes(project, "- one");
+    await writeRunNotes(project, "- two");
+    expect(fs.readdirSync(clawbox()).filter((n) => n.endsWith(".tmp"))).toEqual([]);
   });
 });
