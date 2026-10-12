@@ -608,6 +608,8 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
   const HERMES_ENTRIES = [
     "hermes-agent",
     "bin",
+    "installs",
+    "tools",
     // Upstream's install-failure marker. It suppresses the tirith download for
     // 24 h, so a reset that kept it would leave a box that IS online unable to
     // re-fetch the scanner for another day.
@@ -630,9 +632,11 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
   // future narrowing that kept `tirith` and removed its neighbour would
   // otherwise slip through.
   const HERMES_BIN_ENTRIES = ["tirith", "future-helper"];
-  // The reset preserves the agent install and the bin/ the scanner lives in.
-  // Everything else under ~/.hermes is previous-owner state and must go.
-  const KEPT_ENTRIES = ["hermes-agent", "bin"];
+  // The reset preserves the agent install — the checkout, plus (from Hermes
+  // v0.21.7) the venv in installs/ and the interpreter in tools/ — and the bin/
+  // the scanner lives in. Everything else under ~/.hermes is previous-owner
+  // state and must go.
+  const KEPT_ENTRIES = ["hermes-agent", "bin", "installs", "tools"];
   const SECRET_ENTRIES = HERMES_ENTRIES.filter((e) => !KEPT_ENTRIES.includes(e));
 
   const rmTargets = () =>
