@@ -288,16 +288,16 @@ describe("step_hermes_install installs one pinned Hermes release", () => {
     expect(urlLine).not.toContain("/main/");
   });
 
-  it("passes --commit AND --force-commit, with the pin as an argument", () => {
+  it("passes --commit, and not the --force-commit upstream removed, with the pin as an argument", () => {
     const installLine = HERMES_CODE.split(NL).find((l) => l.includes("curl -fsSL"));
     expect(installLine).toBeDefined();
     // `bash -s --` is what carries flags through the pipe to the script.
     expect(installLine).toContain("bash -s --");
     expect(installLine).toContain('--commit "$2"');
-    // Without --force-commit the upstream installer fast-forwards main FIRST
-    // and then skips the pin as "already newer" — a tag is always older than
-    // the main it was cut from, so the pin would silently do nothing.
-    expect(installLine).toContain("--force-commit");
+    // The pinned installer (v0.21.7+) checks `--commit` out on fresh clones and
+    // on reruns alike, and rejects `--force-commit` as an unknown option, which
+    // would fail every install.
+    expect(installLine).not.toContain("--force-commit");
     expect(installLine).toContain('"$installer_url" "$pin"');
     // Never spliced into the `bash -c` string — same rule the URL follows.
     expect(installLine).not.toMatch(/'[^']*\$pin[^']*'/);
@@ -1027,7 +1027,7 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
   });
 
   it("an install that lands off the pin is reported, not rolled back", () => {
-    // What upstream dropping --force-commit would look like from here. The
+    // What upstream changing how --commit pins would look like from here. The
     // agent runs, so restoring the copy we moved aside — unpinned too — would
     // only cost the owner the newer tree. Say so loudly instead.
     giveShim();

@@ -4634,16 +4634,17 @@ step_hermes_install() {
   # deliberately no `--max-time`, because a clone-and-venv install killed
   # half-way is how a box ends up with the husk the block above exists to clear.
   #
-  # `--force-commit` is not optional. For an existing checkout the upstream
-  # installer fetches, checks out and fast-forwards its branch (main) FIRST
-  # and only then applies `--commit`, skipping it with "Ignoring --commit …:
-  # the checkout is already newer" whenever the pin is an ancestor of what it
-  # just pulled — which is always, a tag being older than the main it was cut
-  # from. Without the flag the pin is a silent no-op on every install,
-  # including fresh ones, and boxes keep landing on random main commits.
+  # `--commit` alone pins. Since v0.21.7 the upstream installer checks the
+  # pin out itself on BOTH paths: a fresh clone is materialised detached at
+  # the commit, and a rerun over an existing checkout fetches its branch and
+  # then checks the commit out ("Pinning <sha>"), refusing a commit that is not
+  # on the branch. The `--force-commit` flag earlier pins needed for the second
+  # path is gone from that installer, which answers it with "unknown option"
+  # and exits 1, so passing it would fail every install. The HEAD check below
+  # still proves the pin took.
   # `bash -s --` is what gets the flags through the pipe to the script.
   runuser -u "$CLAWBOX_USER" -- bash -o pipefail -c \
-    'curl -fsSL --connect-timeout 15 --retry 3 --retry-connrefused "$1" | bash -s -- --commit "$2" --force-commit' \
+    'curl -fsSL --connect-timeout 15 --retry 3 --retry-connrefused "$1" | bash -s -- --commit "$2"' \
     _ "$installer_url" "$pin" \
     || echo "  Warning: Hermes install failed (non-fatal) — install it manually then re-run install.sh"
 
@@ -4685,8 +4686,8 @@ step_hermes_install() {
       _hermes_off_pin=1
       # The agent RUNS, so it is NOT rolled back: a working unpinned agent is
       # worth more than the copy moved aside, which was unpinned too. Loud,
-      # because it means the pin did not take — upstream dropping
-      # `--force-commit` would look exactly like this — and the next update
+      # because it means the pin did not take — upstream changing
+      # how `--commit` pins would look exactly like this — and the next update
       # will pay for the whole upgrade again.
       echo "  Warning: Hermes installed ($installed) but HEAD is ${at_commit:-unknown}, not the pin $pin" >&2
     fi
