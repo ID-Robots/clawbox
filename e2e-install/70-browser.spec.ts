@@ -75,16 +75,22 @@ test.describe("browser + VNC happy path", () => {
     expect(state.browser.cdpReady).toBe(true);
   });
 
-  /** `<pid> <profile dir>` per top-level browser process serving a DevTools port. */
+  /**
+   * `<pid> <profile dir>` per top-level browser process serving a DevTools
+   * port. The command line is read as ONE string: a running Chromium rewrites
+   * its children's into a single space-joined argument, so a per-argument
+   * match would miss their `--type=` and count every renderer.
+   */
   async function devtoolsBrowsers(): Promise<string[]> {
     const out = await dockerExec(
       ["bash", "-c", `
         for d in /proc/[0-9]*; do
           [ -r "$d/cmdline" ] || continue
-          args=$(tr "\\0" "\\n" < "$d/cmdline" 2>/dev/null)
-          grep -q -- "^--remote-debugging-port=" <<<"$args" || continue
-          grep -q -- "^--type=" <<<"$args" && continue
-          echo "\${d#/proc/} $(sed -n "s/^--user-data-dir=//p" <<<"$args" | head -n 1)"
+          args=" $(tr '\\0' ' ' < "$d/cmdline" 2>/dev/null)"
+          case "$args" in *" --remote-debugging-port="*) ;; *) continue ;; esac
+          case "$args" in *" --type="*) continue ;; esac
+          prof=$(grep -o -- '--user-data-dir=[^ ]*' <<<"$args" | head -n 1)
+          echo "\${d#/proc/} \${prof#--user-data-dir=}"
         done`],
       { user: "clawbox" },
     );

@@ -46,13 +46,17 @@ note "the Browser app names profile $PROFILE, DevTools port $PORT"
 # given ninety to show its browser.
 # shellcheck disable=SC2016  # expanded on the board
 SURVEY='
+  # The command line is read as ONE string: a running Chromium rewrites the
+  # command lines of its child processes into a single space-joined argument,
+  # so a per-argument match would miss their --type= and count every renderer.
   survey() {
     for d in /proc/[0-9]*; do
       [ -r "$d/cmdline" ] || continue
-      args=$(tr "\0" "\n" < "$d/cmdline" 2>/dev/null)
-      grep -q -- "^--remote-debugging-port=" <<<"$args" || continue
-      grep -q -- "^--type=" <<<"$args" && continue
-      echo "top ${d#/proc/} $(sed -n "s/^--user-data-dir=//p" <<<"$args" | head -n 1)"
+      args=" $(tr "\0" " " < "$d/cmdline" 2>/dev/null)"
+      case "$args" in *" --remote-debugging-port="*) ;; *) continue ;; esac
+      case "$args" in *" --type="*) continue ;; esac
+      prof=$(grep -o -- "--user-data-dir=[^ ]*" <<<"$args" | head -n 1)
+      echo "top ${d#/proc/} ${prof#--user-data-dir=}"
     done
   }
   for _ in $(seq 1 18); do
