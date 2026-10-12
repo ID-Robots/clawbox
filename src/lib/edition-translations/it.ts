@@ -555,7 +555,7 @@ export const it: Record<string, string> = {
   "codingAgent.chatMore": "+{n} altre",
   "codingAgent.chatBusy": "al lavoro",
   "codingAgent.chatDismiss": "Nascondi questa scheda",
-  "codingAgent.chatRestore": "Mostra di nuovo l'esecuzione di codice",
+  "codingAgent.chatRestore": "Mostra di nuovo le esecuzioni di codice completate",
   "codingAgent.noticeOpen": "Apri l'agente di codice",
   "codingAgent.noticeDismiss": "Ignora",
   "codingAgent.switchLabel": "Consenti all'assistente di delegare il lavoro di programmazione",

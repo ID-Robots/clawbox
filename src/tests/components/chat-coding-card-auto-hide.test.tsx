@@ -63,6 +63,19 @@ vi.mock("@/lib/use-coding-agent-activity", async (importOriginal) => {
   };
 });
 
+// The owner's put-away cards (src/lib/use-dismissed-coding-runs.ts), kept in a
+// plain map so a × in one test is not still put away in the next.
+const kv = vi.hoisted(() => ({ cache: new Map<string, string>() }));
+vi.mock("@/lib/client-kv", () => ({
+  init: async () => {},
+  get: (key: string) => kv.cache.get(key) ?? null,
+  getJSON: () => null,
+  set: (key: string, value: string) => { kv.cache.set(key, value); },
+  setJSON: () => {},
+  remove: () => {},
+  flush: () => {},
+}));
+
 function installFetch() {
   vi.stubGlobal(
     "fetch",
@@ -85,6 +98,7 @@ function installFetch() {
 beforeEach(() => {
   resetHarnessCache();
   window.localStorage.clear();
+  kv.cache.clear();
   Element.prototype.scrollIntoView = vi.fn();
   vi.stubGlobal(
     "WebSocket",
@@ -248,5 +262,85 @@ describe("a coding-run card that finished cleanly leaves on its own", () => {
     advance(5_000);
     expect(cardTitles()).toEqual([expect.stringContaining("Beta task")]);
     expect(document.activeElement).toBe(betaView);
+  });
+});
+
+/**
+ * The chip and the owner's ×, side by side: the chip is for the cards that
+ * left on their own and for nothing else — a card the owner put away stays
+ * away (src/lib/use-dismissed-coding-runs.ts, chat-coding-card-dismiss.test.tsx).
+ */
+describe("the 🤖 chip and the cards put away with ×", () => {
+  const dismissOf = (card: HTMLElement) => card.querySelector<HTMLButtonElement>('[data-testid="coding-agent-activity-dismiss"]')!;
+  const RESTORE = translations.en["codingAgent.chatRestore"];
+
+  it("brings back the card that left on its own, and never the one put away with ×", async () => {
+    await open([
+      run("run-alpha", "Alpha task", "running"),
+      run("run-beta", "Beta task", "running"),
+      run("run-gamma", "Gamma task", "running"),
+    ]);
+    push([
+      run("run-alpha", "Alpha task", "completed"),
+      run("run-beta", "Beta task", "running"),
+      run("run-gamma", "Gamma task", "running"),
+    ]);
+    advance(5_000);
+    expect(cardTitles()).toEqual([expect.stringContaining("Beta task"), expect.stringContaining("Gamma task")]);
+
+    fireEvent.click(dismissOf(cards()[0]));
+    expect(cardTitles()).toEqual([expect.stringContaining("Gamma task")]);
+
+    const chip = screen.getByTestId("coding-agent-restore");
+    // Named for what it does now: the finished runs, not every hidden card.
+    expect(chip).toHaveAttribute("aria-label", RESTORE);
+    expect(chip).toHaveAttribute("title", RESTORE);
+    fireEvent.click(chip);
+    // Alpha is back in its place, first; Beta is not.
+    expect(cardTitles()).toEqual([expect.stringContaining("Alpha task"), expect.stringContaining("Gamma task")]);
+    expect(screen.queryByTestId("coding-agent-restore")).not.toBeInTheDocument();
+  });
+
+  it("draws no chip when the only card gone was put away with × while it counted down", async () => {
+    await open([run("run-alpha", "Alpha task", "running"), run("run-beta", "Beta task", "running")]);
+    push([run("run-alpha", "Alpha task", "completed"), run("run-beta", "Beta task", "running")]);
+    expect(cards()[0]).toHaveClass("coding-agent-autohide");
+    fireEvent.click(dismissOf(cards()[0]));
+    expect(cardTitles()).toEqual([expect.stringContaining("Beta task")]);
+
+    advance(5_000);
+    expect(cardTitles()).toEqual([expect.stringContaining("Beta task")]);
+    expect(screen.queryByTestId("coding-agent-restore")).not.toBeInTheDocument();
+  });
+
+  it("keeps a card put away with × away when its run goes back to running", async () => {
+    await open([run("run-alpha", "Alpha task", "running"), run("run-beta", "Beta task", "running")]);
+    push([run("run-alpha", "Alpha task", "completed"), run("run-beta", "Beta task", "running")]);
+    fireEvent.click(dismissOf(cards()[0]));
+    push([run("run-alpha", "Alpha task", "running"), run("run-beta", "Beta task", "running")]);
+    expect(cardTitles()).toEqual([expect.stringContaining("Beta task")]);
+  });
+
+  it("hands the focus to the chip when × takes the last card and the chip is there", async () => {
+    await open([run("run-alpha", "Alpha task", "running"), run("run-beta", "Beta task", "running")]);
+    push([run("run-alpha", "Alpha task", "completed"), run("run-beta", "Beta task", "running")]);
+    advance(5_000);
+    const betaClose = dismissOf(cards()[0]);
+    act(() => { betaClose.focus(); });
+    fireEvent.click(betaClose);
+    expect(cards()).toHaveLength(0);
+    expect(document.activeElement).toBe(screen.getByTestId("coding-agent-restore"));
+  });
+
+  it("hands the focus from the chip to the first card it brings back", async () => {
+    await open([run("run-alpha", "Alpha task", "running"), run("run-beta", "Beta task", "running")]);
+    push([run("run-alpha", "Alpha task", "completed"), run("run-beta", "Beta task", "running")]);
+    advance(5_000);
+    const chip = screen.getByTestId("coding-agent-restore");
+    act(() => { chip.focus(); });
+    fireEvent.click(chip);
+    expect(screen.queryByTestId("coding-agent-restore")).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(cards()[0].querySelector('[data-testid="coding-agent-activity-toggle"]'));
+    expect(cards()[0]).toHaveAttribute("data-run-id", "run-alpha");
   });
 });
