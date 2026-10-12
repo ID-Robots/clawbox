@@ -144,6 +144,47 @@ const STATUS_KEY: Record<string, string> = {
   gave_up: "codingAgent.statusGaveUp",
 };
 
+type Translate = (key: string, params?: Record<string, string | number>) => string;
+
+/**
+ * A translated string with an English floor.
+ *
+ * `t` answers the KEY itself for a string the pack has not got, and these
+ * keys reach a box whose locale file may predate them (an older pack, or a
+ * translations chunk that failed to load while the box was offline). A raw
+ * "codingAgent.stepCommitted" on the timeline would be worse than the
+ * English the runner wrote, so a missing key falls back to `step.label` —
+ * the same sentence, already filled in.
+ */
+function word(t: Translate, key: string, english: string, params?: Record<string, string | number>): string {
+  const said = t(key, params);
+  return said === key ? english : said;
+}
+
+/** A step's chip text in the owner's language. */
+function stepLabel(t: Translate, step: ProgressDescription): string {
+  if (!step.labelKey) return step.label;
+  const params = step.params && step.params.status !== undefined
+    // The status word is a run status, and the app already has all six.
+    ? { ...step.params, status: word(t, STATUS_KEY[String(step.params.status)] ?? "", String(step.params.status)) }
+    : step.params;
+  return word(t, STEP_KEY[step.labelKey], step.label, params);
+}
+
+function stepDetail(t: Translate, step: ProgressDescription): string | undefined {
+  return step.counts ? `${step.counts.done}/${step.counts.total} ${t("codingAgent.chatDone")}` : step.detail;
+}
+
+/**
+ * One progress line as the timeline words it — its glyph, its kind, the chip's
+ * text and the detail beside it — for a surface that shows a single step
+ * outside the timeline (the agent diagram's "Now"), so the two never disagree.
+ */
+export function describeStep(t: Translate, line: string): { icon: string; kind: ProgressDescription["kind"]; label: string; detail: string | null } {
+  const step = describeProgressLine(line);
+  return { icon: step.icon, kind: step.kind, label: stepLabel(t, step), detail: stepDetail(t, step) ?? null };
+}
+
 /** The chat card's chip tones, as the app's classes. */
 const TONE: Record<ProgressDescription["kind"], string> = {
   tool: "bg-sky-400/[0.14] text-sky-200",
@@ -228,30 +269,8 @@ export default function CodingRunTimeline({ lines, times = [], startedAt, live, 
     const since = startedAt !== undefined ? sinceStart(times[i], startedAt) : null;
     return [clock, since].filter(Boolean).join(" · ") || null;
   };
-  /**
-   * A translated string with an English floor.
-   *
-   * `t` answers the KEY itself for a string the pack has not got, and these
-   * keys reach a box whose locale file may predate them (an older pack, or a
-   * translations chunk that failed to load while the box was offline). A raw
-   * "codingAgent.stepCommitted" on the timeline would be worse than the
-   * English the runner wrote, so a missing key falls back to `step.label` —
-   * the same sentence, already filled in.
-   */
-  const word = (key: string, english: string, params?: Record<string, string | number>) => {
-    const said = t(key, params);
-    return said === key ? english : said;
-  };
-  const label = (step: ProgressDescription) => {
-    if (!step.labelKey) return step.label;
-    const params = step.params && step.params.status !== undefined
-      // The status word is a run status, and the app already has all six.
-      ? { ...step.params, status: word(STATUS_KEY[String(step.params.status)] ?? "", String(step.params.status)) }
-      : step.params;
-    return word(STEP_KEY[step.labelKey], step.label, params);
-  };
-  const detail = (step: ProgressDescription) =>
-    step.counts ? `${step.counts.done}/${step.counts.total} ${t("codingAgent.chatDone")}` : step.detail;
+  const label = (step: ProgressDescription) => stepLabel(t, step);
+  const detail = (step: ProgressDescription) => stepDetail(t, step);
   return (
     <div className={embedded ? "" : `mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid={testId} data-live={live || undefined}>
       <p className={SECTION_LABEL}>

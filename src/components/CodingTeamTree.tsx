@@ -92,9 +92,10 @@ const FLOW_ANIMATION = "ct-art-flow";
  * connector), not per step, and a step only WRITES: reading a CSS animation's
  * state flushes style, and a read between two writes made every step a style
  * recalc per connector — measured at 209 recalcs a second, worse than the 60
- * this replaces. Writes alone are one recalc per step.
+ * this replaces. Writes alone are one recalc per step. The agent diagram
+ * (CodingAgentDiagram) steps its own connectors with it too.
  */
-function useSteppedFlow(rootRef: RefObject<SVGSVGElement | null>) {
+export function useSteppedFlow(rootRef: RefObject<SVGSVGElement | null>) {
   const stale = useRef(true);
   useLayoutEffect(() => { stale.current = true; });
   useEffect(() => {

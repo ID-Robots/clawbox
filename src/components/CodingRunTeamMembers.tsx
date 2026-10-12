@@ -3,6 +3,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 import { isLive, isSettled, type CodingRunStatus } from "@/lib/coding-agent-status";
+import { setVisibleInterval } from "@/lib/visible-interval";
 import CodingTeamTree from "./CodingTeamTree";
 import CodingAgentRosterRow from "./CodingAgentRosterRow";
 
@@ -12,7 +13,7 @@ export interface MemberRun {
   status: CodingRunStatus;
 }
 
-interface BoardRun {
+export interface BoardRun {
   id: string;
   role: "planner" | "worker" | "reviewer" | "lead";
   taskId: string | null;
@@ -32,7 +33,7 @@ interface BoardRun {
  * Polled while this run is live, because teammates start and settle beside it;
  * read once when it has settled.
  */
-export default function CodingRunTeamMembers({ teamId, runId, runs, live, onOpenRun, whileUnknown, pollMs = 5000 }: {
+export default function CodingRunTeamMembers({ teamId, runId, runs, live, onOpenRun, whileUnknown, pollMs = 5000, tree = true, cast }: {
   teamId: string;
   /** The run whose page this is: counted in the tree, left out of the list. */
   runId: string;
@@ -48,10 +49,25 @@ export default function CodingRunTeamMembers({ teamId, runId, runs, live, onOpen
   whileUnknown?: ReactNode;
   /** How often the board is re-read while the run is live. */
   pollMs?: number;
+  /**
+   * Draw the board's tree above the rows. The run page's agent chart draws
+   * the team itself now (CodingAgentDiagram), and this list sits under it in
+   * Details, so the page passes false rather than draw the team twice.
+   */
+  tree?: boolean;
+  /**
+   * The board's cast list when the host has already read it — then this card
+   * reads nothing of its own. Absent (or null while the host has none), the
+   * card reads the board itself, as it always did.
+   */
+  cast?: BoardRun[] | null;
 }) {
   const { t } = useT();
-  const [members, setMembers] = useState<BoardRun[] | null>(null);
+  const [fetched, setMembers] = useState<BoardRun[] | null>(null);
+  const given = cast ?? null;
+  const members = given ?? fetched;
   useEffect(() => {
+    if (given) return;
     let cancelled = false;
     // Reads can overlap when one is slow: only the newest one's answer
     // lands, so an older reply cannot put back what a newer one replaced.
@@ -68,9 +84,10 @@ export default function CodingRunTeamMembers({ teamId, runId, runs, live, onOpen
     };
     void read();
     if (!live) return () => { cancelled = true; };
-    const id = setInterval(() => void read(), pollMs);
-    return () => { cancelled = true; clearInterval(id); };
-  }, [teamId, live, pollMs]);
+    // Not while nobody can see the page: the visible edge reads it again.
+    const stop = setVisibleInterval(() => void read(), pollMs);
+    return () => { cancelled = true; stop(); };
+  }, [teamId, live, pollMs, given]);
   if (!members || members.length === 0) return <>{whileUnknown}</>;
   const statusOf = (id: string) => runs.find((r) => r.id === id)?.status ?? null;
   const roleLabel = (m: BoardRun) => m.role === "planner"
@@ -88,7 +105,7 @@ export default function CodingRunTeamMembers({ teamId, runId, runs, live, onOpen
     <div className="mt-2" data-testid="coding-agent-run-team-members" data-working={working}>
       {/* The board, in the Team tab's own drawing — sized by THIS team, so a
           node lights up as a teammate picks its task up. */}
-      <div className="flex justify-center">
+      {tree && <div className="flex justify-center">
         <CodingTeamTree
           workers={of("worker").length}
           activeWorkers={of("worker").filter((m) => isAt(m.id)).length}
@@ -98,7 +115,7 @@ export default function CodingRunTeamMembers({ teamId, runId, runs, live, onOpen
           leads={of("lead").length}
           leadActive={of("lead").some((m) => isAt(m.id))}
         />
-      </div>
+      </div>}
       <ul className="mt-2 space-y-0.5">
         {others.map((m) => {
           const status = statusOf(m.id);
