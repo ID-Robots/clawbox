@@ -149,14 +149,17 @@ export default function AIProviderIcon({
     );
   }
 
-  // xAI — a stylised mark, not the official logo: a white diagonal stroke
-  // crossed by a short one on a near-black disc, in the spirit of the other
-  // hand-drawn marks below (z.ai, Kimi).
+  // xAI — the company's own mark (the slashed X), white on a near-black disc
+  // so it reads on the dark provider cards like the other marks here.
   if (normalized === "xai") {
     return (
       <SvgFrame size={size} className={className}>
-        <circle cx="12" cy="12" r="9" fill="#0B0B0F" />
-        <path d="M8 7l8 10M16 7l-3.2 4" stroke="#F9FAFB" strokeWidth="1.7" strokeLinecap="round" fill="none" />
+        <circle cx="12" cy="12" r="10" fill="#0B0B0F" />
+        <path
+          transform="translate(12 12) scale(0.56) translate(-12 -12)"
+          d="M6.469 8.776L16.512 23h-4.464L2.005 8.776H6.47zm-.004 7.9l2.233 3.164L6.467 23H2l4.465-6.324zM22 2.582V23h-3.659V7.764L22 2.582zM22 1l-9.952 14.095-2.233-3.163L17.533 1H22z"
+          fill="#F9FAFB"
+        />
       </SvgFrame>
     );
   }
