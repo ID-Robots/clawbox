@@ -503,8 +503,13 @@ describe("CodingAgentApp", () => {
     // a stranger.
     await screen.findByTestId("coding-agent-project-site");
     expect(screen.queryByTestId("coding-agent-runs-toggle")).toBeNull();
-    expect(screen.queryByText("somewhere else")).toBeNull();
-    expect(screen.queryByText("inside the project")).toBeNull();
+    // The agents come first (2026-10-12): with nothing at work, the newest
+    // run's chart — one chart, never a list of runs.
+    const agents = screen.getByTestId("coding-agent-live-agents");
+    expect(agents).toHaveAttribute("data-live", "0");
+    expect(agents.querySelectorAll('[data-testid^="coding-agent-live-run-"][data-shape]')).toHaveLength(1);
+    expect(screen.queryAllByText("somewhere else").every((el) => agents.contains(el))).toBe(true);
+    expect(screen.queryAllByText("inside the project").every((el) => agents.contains(el))).toBe(true);
 
     fireEvent.click(screen.getByTestId("coding-agent-project-site"));
     expect(await screen.findByTestId("coding-agent-project-page")).toBeInTheDocument();
@@ -532,8 +537,9 @@ describe("CodingAgentApp", () => {
 
     fireEvent.click(screen.getByTestId("coding-agent-project-back"));
     expect(screen.queryByTestId("coding-agent-project-page")).toBeNull();
-    expect(screen.queryByText("inside the project")).toBeNull();
-    expect(screen.queryByText("somewhere else")).toBeNull();
+    const home = screen.getByTestId("coding-agent-live-agents");
+    expect(screen.queryAllByText("inside the project").every((el) => home.contains(el))).toBe(true);
+    expect(screen.queryAllByText("somewhere else").every((el) => home.contains(el))).toBe(true);
   });
 
   it("shows nothing about runs on home when every run is filed under a project", async () => {
@@ -1361,8 +1367,17 @@ describe("CodingAgentApp", () => {
       // was only one more number to keep right.
       expect(screen.queryByTestId("coding-agent-run-agents-count")).toBeNull();
       expect(within(card).getByText(t("codingAgent.agentMain"))).toBeInTheDocument();
-      // A solo run still gets the picture — the three columns it has.
-      expect(within(card).getByTestId("coding-team-tree")).toHaveAttribute("data-shape", "run");
+      // The list sits folded under the chart (Details), and the chart draws
+      // the same agents first: the run itself and its three helpers — the one
+      // still out at work, the refused one rejected, the explorer done.
+      expect(screen.getByTestId("coding-agent-run-details")).toContainElement(card);
+      const chart = screen.getByTestId("coding-agent-run-diagram");
+      expect(chart).toHaveAttribute("data-shape", "run");
+      const nodes = within(chart).getAllByTestId("coding-agent-node");
+      expect(nodes.map((n) => [n.getAttribute("data-role"), n.getAttribute("data-state")])).toEqual([
+        ["run", "working"], ["helper", "done"], ["helper", "rejected"], ["helper", "working"],
+      ]);
+      expect(nodes[0]).toHaveAttribute("data-current", "true");
       const live = within(card).getAllByTestId("coding-agent-subagent-live");
       expect(live).toHaveLength(1);
       expect(live[0].textContent).toContain("Review the toggle");

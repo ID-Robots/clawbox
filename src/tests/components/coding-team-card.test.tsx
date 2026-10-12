@@ -110,19 +110,33 @@ describe("with no team yet", () => {
 });
 
 describe("with a team working here", () => {
-  it("sizes the tree by the board: the workers who worked, the ones at work pulsing", async () => {
+  it("draws the team as a chart: one node per agent on the cast list, the one at work pulsing", async () => {
     stub();
-    teams = [{ ...WORKING, agents: { planner: 1, workers: 5, reviewers: 3, total: 9 } }];
+    teams = [{
+      ...WORKING,
+      agents: { planner: 1, workers: 2, reviewers: 1, total: 4 },
+      runs: [
+        { id: "run-00000001", role: "planner", taskId: null },
+        { id: "run-00000002", role: "worker", taskId: "t1" },
+        { id: "run-00000004", role: "reviewer", taskId: "t1" },
+        { id: "run-00000003", role: "worker", taskId: "t2" },
+      ],
+    }];
     render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
-    const tree = await screen.findByTestId("coding-team-tree");
-    // Nine agents stated, nine drawn: the planner, five workers, three reviewers.
-    expect(tree).toHaveAttribute("data-workers", "5");
-    expect(tree).toHaveAttribute("data-reviewers", "3");
-    expect(within(tree).getAllByTestId("coding-team-tree-worker")).toHaveLength(5);
-    expect(within(tree).getAllByTestId("coding-team-tree-reviewer")).toHaveLength(3);
-    // t2 is in progress: one worker at work; t1 is complete and reviewed: no reviewer deciding.
-    expect(tree).toHaveAttribute("data-active", "1");
-    expect(tree).toHaveAttribute("data-active-reviewers", "0");
+    const chart = await screen.findByTestId("coding-team-diagram");
+    // The chart replaced the tree: four agents stated, four nodes drawn.
+    expect(screen.queryByTestId("coding-team-tree")).toBeNull();
+    const nodes = within(chart).getAllByTestId("coding-agent-node");
+    expect(nodes.map((n) => n.getAttribute("data-key"))).toEqual(["run-00000001", "run-00000002", "run-00000004", "run-00000003"]);
+    // t1 is complete and accepted; t2 is in progress — the one node at work.
+    expect(nodes.map((n) => n.getAttribute("data-state"))).toEqual(["done", "accepted", "accepted", "working"]);
+    expect(chart.querySelectorAll('[data-testid="coding-agent-node"][data-active]')).toHaveLength(1);
+    // The words that used to stand above the board are one click away, not gone.
+    const details = screen.getByTestId("coding-team-details");
+    expect(details.tagName).toBe("DETAILS");
+    expect(details).not.toHaveAttribute("open");
+    expect(within(details).getByTestId("coding-team-board")).toBeInTheDocument();
+    expect(within(details).getByTestId("coding-team-agents")).toBeInTheDocument();
   });
 
   it("says who worked and on which branch, and links each task's reviewer beside its worker", async () => {
@@ -325,6 +339,16 @@ describe("the team's shape, its lead and its figures (TASK-1099)", () => {
     dynamic: true,
     finalReview: { verdict: "accepted", notes: "", at: 5 },
     metrics: METRICS,
+    runs: [
+      { id: "run-00000001", role: "planner", taskId: null },
+      { id: "run-00000002", role: "worker", taskId: "t1" },
+      { id: "run-00000005", role: "worker", taskId: "t2" },
+      { id: "run-00000007", role: "lead", taskId: "t1" },
+      { id: "run-00000003", role: "worker", taskId: "t2" },
+      { id: "run-00000008", role: "lead", taskId: "t2" },
+      { id: "run-00000009", role: "worker", taskId: "t4" },
+      { id: "run-00000006", role: "reviewer", taskId: null },
+    ],
     tasks: [
       { ...WORKING.tasks[0] },
       { ...WORKING.tasks[1], status: "complete", review: { verdict: "accepted", notes: "", at: 2 }, attempts: 2 },
@@ -361,8 +385,17 @@ describe("the team's shape, its lead and its figures (TASK-1099)", () => {
     const final = screen.getByTestId("coding-team-final-review");
     expect(final).toHaveAttribute("data-verdict", "accepted");
     expect(final).toHaveTextContent(`${t("codingAgent.team.finalReview")}: ${t("codingAgent.team.review.accepted")}`);
-    // The tree draws the lead's turns under the planner.
-    expect(screen.getByTestId("coding-team-tree")).toHaveAttribute("data-leads", "2");
+    // The chart draws the lead's turns beside the planner, t2's rejected
+    // first attempt before its accepted second, the retired task as done, and
+    // the one review of the merged result in a lane of its own.
+    const chart = screen.getByTestId("coding-team-diagram");
+    const node = (key: string) => chart.querySelector(`[data-testid="coding-agent-node"][data-key="${key}"]`);
+    expect(chart.querySelectorAll('[data-testid="coding-agent-node"][data-role="lead"]')).toHaveLength(2);
+    expect(node("run-00000005")).toHaveAttribute("data-state", "rejected");
+    expect(node("run-00000003")).toHaveAttribute("data-attempt", "2");
+    expect(node("run-00000003")).toHaveAttribute("data-state", "accepted");
+    expect(node("task:t3")).toHaveAttribute("data-state", "done");
+    expect(node("run-00000006")).toHaveAttribute("data-state", "accepted");
   });
 
   it("says nothing of a shape for a default team, and waits for a worker before the figures while it plans", async () => {
@@ -373,7 +406,12 @@ describe("the team's shape, its lead and its figures (TASK-1099)", () => {
     expect(screen.queryByTestId("coding-team-shape")).toBeNull();
     expect(screen.queryByTestId("coding-team-metrics")).toBeNull();
     expect(screen.queryByTestId("coding-team-final-review")).toBeNull();
-    expect(screen.getByTestId("coding-team-tree")).toHaveAttribute("data-leads", "0");
+    // The planner is the one agent yet, and it is at work; no lead has had a turn.
+    const chart = screen.getByTestId("coding-team-diagram");
+    const nodes = within(chart).getAllByTestId("coding-agent-node");
+    expect(nodes).toHaveLength(1);
+    expect(nodes[0]).toHaveAttribute("data-role", "planner");
+    expect(nodes[0]).toHaveAttribute("data-state", "working");
   });
 
   it("shows a rejected final review with its notes", async () => {
