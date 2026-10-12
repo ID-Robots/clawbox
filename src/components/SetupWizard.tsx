@@ -472,6 +472,33 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
     void persistSetupProgress(step);
   }, [persistSetupProgress]);
 
+  // Leaving the update step. A box can reach it with an owner's password
+  // already on the account — the update itself asks for it — and the security
+  // step can only SET a first password: it has no field for the current one,
+  // so its save was refused and the wizard stopped there. The page-load resume
+  // already goes past that step for such a box; this is the same rule for an
+  // owner who arrives from the step before it. An unreadable status keeps the
+  // old order.
+  // One status read per departure: a second call while the first is still
+  // waiting would let whichever answer lands last pick the step.
+  const leavingUpdateRef = useRef(false);
+  const leaveUpdateStep = useCallback(async () => {
+    if (leavingUpdateRef.current) return;
+    leavingUpdateRef.current = true;
+    let passwordConfigured = false;
+    try {
+      const res = await fetch("/setup-api/setup/status");
+      if (res.ok) {
+        const data = await res.json();
+        passwordConfigured = data?.password_configured === true;
+      }
+    } catch {
+      // Fall through to the security step.
+    }
+    leavingUpdateRef.current = false;
+    goToStep(passwordConfigured ? 4 : 3);
+  }, [goToStep]);
+
   const startCompletion = useCallback(() => {
     void persistSetupProgress(6);
     setCompletionError(null);
@@ -820,7 +847,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
             )}
             {choosingAssistant && <EditionStep />}
             {currentStep === 2 && !choosingAssistant && (
-              <UpdateStep onNext={() => goToStep(3)} />
+              <UpdateStep onNext={() => void leaveUpdateStep()} />
             )}
             {currentStep === 3 && !choosingAssistant && (
               <CredentialsStep onNext={() => goToStep(4)} hermes={isHermesEdition} />
