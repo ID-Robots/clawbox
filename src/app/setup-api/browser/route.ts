@@ -549,7 +549,13 @@ export async function POST(req: Request) {
       // then closed that tab; with a page per run, closeSessionsForRun ends
       // exactly what the run opened and never the owner's.
       const runId = requestedRunId ?? activeRunId();
-      const page = runId ? await context.newPage() : (context.pages().at(-1) ?? await context.newPage());
+      // The same goes for every session on the DESKTOP browser, run or not:
+      // it is the owner's browser too, so the last page in it may be the tab
+      // they are reading. The assistant opens a tab of its own and closes only
+      // that. Our own headless browser has no owner to step on, and reusing
+      // its one page keeps it from collecting blank tabs.
+      const ownPage = Boolean(runId) || kind === "desktop";
+      const page = ownPage ? await context.newPage() : (context.pages().at(-1) ?? await context.newPage());
       await installNavGuard(page as unknown as GuardablePage, runId);
       installDownloadCapture(page as unknown as DownloadablePage, runId);
       await page.bringToFront().catch(() => {});
@@ -560,7 +566,7 @@ export async function POST(req: Request) {
         if (!nav.ok) {
           // A page opened for this run and never registered is a tab nothing
           // would ever close — the sweep only knows sessions.
-          if (runId) await page.close().catch(() => {});
+          if (ownPage) await page.close().catch(() => {});
           return NextResponse.json({ error: nav.error }, { status: 400 });
         }
         await page.goto(nav.url, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});

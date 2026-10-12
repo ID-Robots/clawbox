@@ -50,10 +50,24 @@ describe("defaults", () => {
       cdpPort: 18800,
       executable: null,
       ownProfile: true,
+      // One browser per box is the default: the assistant shares this one.
+      agentIsolated: false,
       warnings: [],
     });
     expect(defaultProfileDir(HOME)).toBe(`${HOME}/.config/clawbox-browser`);
     expect(cdpEndpoint(config)).toBe("http://127.0.0.1:18800");
+  });
+
+  it("gives the assistant a browser of its own only when the owner asks for one", () => {
+    expect(resolveDesktopBrowserConfig({ CLAWBOX_BROWSER_AGENT_ISOLATED: "1" }, {}, HOME).agentIsolated).toBe(true);
+    expect(resolveDesktopBrowserConfig({ CLAWBOX_BROWSER_AGENT_ISOLATED: "TRUE" }, {}, HOME).agentIsolated).toBe(true);
+    expect(resolveDesktopBrowserConfig({ CLAWBOX_BROWSER_AGENT_ISOLATED: "0" }, {}, HOME).agentIsolated).toBe(false);
+    // The environment outranks the file, as for every other key.
+    expect(resolveDesktopBrowserConfig({ CLAWBOX_BROWSER_AGENT_ISOLATED: "1" }, { CLAWBOX_BROWSER_AGENT_ISOLATED: "off" }, HOME).agentIsolated).toBe(false);
+    // Unusable is a warning and the default — sharing — never a guess.
+    const odd = resolveDesktopBrowserConfig({ CLAWBOX_BROWSER_AGENT_ISOLATED: "maybe" }, {}, HOME);
+    expect(odd.agentIsolated).toBe(false);
+    expect(odd.warnings).toHaveLength(1);
   });
 
   it("keeps the launch env file where the launch script has always read it", () => {
@@ -271,6 +285,10 @@ describe.runIf(process.platform === "linux")("scripts/launch-browser.sh agrees w
     { name: "a zero-padded port", file: "CLAWBOX_BROWSER_CDP_PORT=09222\n" },
     { name: "a relative executable", file: "CLAWBOX_BROWSER_EXECUTABLE=google-chrome\n" },
     { name: "an inline comment", file: "CLAWBOX_BROWSER_CDP_PORT=9444 # mine\n" },
+    { name: "an isolated assistant browser", file: "CLAWBOX_BROWSER_AGENT_ISOLATED=1\n" },
+    { name: "isolated spelled as a word", file: "CLAWBOX_BROWSER_AGENT_ISOLATED='Yes'\n" },
+    { name: "isolated switched off by the environment", file: "CLAWBOX_BROWSER_AGENT_ISOLATED=1\n", env: { CLAWBOX_BROWSER_AGENT_ISOLATED: "0" } },
+    { name: "an unusable isolated value", file: "CLAWBOX_BROWSER_AGENT_ISOLATED=maybe\n" },
   ];
 
   it.each(cases)("$name", async ({ file, env }) => {
@@ -279,6 +297,7 @@ describe.runIf(process.platform === "linux")("scripts/launch-browser.sh agrees w
       PROFILE: resolved.profileDir,
       CDP_PORT: String(resolved.cdpPort),
       EXECUTABLE: resolved.executable ?? "",
+      AGENT_ISOLATED: resolved.agentIsolated ? "1" : "0",
     });
   });
 });
