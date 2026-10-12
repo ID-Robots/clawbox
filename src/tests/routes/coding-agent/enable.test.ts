@@ -589,3 +589,35 @@ describe("the paid-plan gate", () => {
     expect(setEffort).toHaveBeenCalledWith("low");
   });
 });
+
+describe("a team's model and effort per role", () => {
+  it("saves the owner's choice through the real validator", async () => {
+    const res = await POST(request({ cookie: ownerCookie(), body: { roleModels: { planner: { model: "standard", effort: "max" } } } }));
+    expect(res.status).toBe(200);
+    expect(configSet).toHaveBeenCalledWith("coding_agent_role_models", { planner: { model: "standard", effort: "max" } });
+  });
+
+  it("puts a half back to the role's default with \"auto\"", async () => {
+    vi.mocked(configGet).mockImplementation(async (key: string) =>
+      key === "clawai_plan_tier" ? "flash" : key === "coding_agent_role_models" ? { planner: { model: "standard", effort: "max" } } : undefined);
+    const res = await POST(request({ cookie: ownerCookie(), body: { roleModels: { planner: { model: "auto" } } } }));
+    expect(res.status).toBe(200);
+    expect(configSet).toHaveBeenCalledWith("coding_agent_role_models", { planner: { effort: "max" } });
+  });
+
+  it("refuses an edit it does not understand BEFORE any setting in the same body is written", async () => {
+    const res = await POST(request({ cookie: ownerCookie(), body: { effort: "low", roleModels: { planner: { model: "cheapest" } } } }));
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.kind).toBe("invalid");
+    expect(body.error).toMatch(/roleModels\.planner\.model/);
+    expect(setEffort).not.toHaveBeenCalled();
+    expect(configSet).not.toHaveBeenCalled();
+  });
+
+  it("is the owner's alone: the MCP bearer cannot change what a team's runs cost", async () => {
+    const res = await POST(request({ bearer: "any-valid-looking-token-value", body: { roleModels: { worker: { model: "economy" } } } }));
+    expect(res.status).toBe(403);
+    expect(configSet).not.toHaveBeenCalled();
+  });
+});

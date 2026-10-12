@@ -161,6 +161,7 @@ import {
   codingProviderFrom,
   defaultModelForProvider,
   isCodingProvider,
+  isRecordableModel,
   modelsForProvider,
   resolveRunProvider,
   type CodingProvider,
@@ -378,7 +379,19 @@ import {
   stopUnit,
   unitActive,
   buildScopeArgv,
+  RUN_NICE,
 } from "@/lib/coding-run-unit";
+import { cpuBudgetBrief, hostCpuCount, MAX_CPU_BUDGET, onBatteryPower, RUN_CPU_BUDGET_ENV, runCpuBudget } from "@/lib/coding-run-cpu";
+import { LESSON_CHANNEL_BRIEF, readRunNotes, runNotesBlock, settleRunNotes } from "@/lib/coding-run-notes";
+import {
+  applyRoleModelsPatch,
+  CODING_AGENT_ROLE_MODELS_CONFIG_KEY,
+  modelRoleOf,
+  resolveRoleRun,
+  roleModelsFrom,
+  roleModelsView,
+  type RoleModels,
+} from "@/lib/coding-role-models";
 import {
   appendRunMessage,
   noteStreamInputRefused,
@@ -1419,6 +1432,18 @@ export interface CodingRun {
   /** Words the team appended to the brief — the planner's or a worker's role. */
   extraBrief: string | null;
   /**
+   * How many parallel jobs this run's builds and tests may use
+   * (src/lib/coding-run-cpu.ts): worked out at start from the box's CPUs, the
+   * runs sharing them and whether it is on battery, then frozen like the
+   * effort, so a retry or a completion attempt keeps to the same number. In
+   * its environment as CLAWBOX_RUN_CPU_BUDGET and in its brief.
+   *
+   * Optional in the type so a record built before it existed still
+   * type-checks; normalizeRun and newRunRecord always set it (null on an old
+   * record, which then gets the lone-run budget at its next spawn).
+   */
+  cpuBudget?: number | null;
+  /**
    * The lessons from the training cluster's experience store this run's system
    * prompt carried (TASK-1348, src/lib/coding-experience.ts): which rules
    * reached it, whether the repository's skill document did, and how long the
@@ -2182,6 +2207,8 @@ export interface CodingAgentStatus {
   effort: CodingEffort;
   /** The levels the app should show — see OFFERED_EFFORT_LEVELS. */
   effortLevels: readonly CodingEffort[];
+  /** A team's per-role model tier and effort, "auto" for the role's default (src/lib/coding-role-models.ts). */
+  roleModels: ReturnType<typeof roleModelsView>;
   /** Folders in the default project folder the assistant may work in. */
   projectFolders: string[];
   /** The ceilings a run stops at, so the app can show them without guessing. */
@@ -2248,6 +2275,12 @@ export interface StartRunInput {
   readOnly?: boolean;
   /** Internal: appended to the headless brief — the role the team gave this run. */
   extraBrief?: string | null;
+  /**
+   * Internal: how many runs share the box's CPU budget with this one — a
+   * team's workers side by side. The runs live on the box when it starts are
+   * counted anyway; this is for the siblings that have not started yet.
+   */
+  cpuShare?: number | null;
   /**
    * Absolute paths of files this run is to be GIVEN — the pictures the
    * assistant generated for the task, an attachment that arrived in chat.
@@ -2615,6 +2648,29 @@ export async function setEffort(effort: string): Promise<CodingEffort> {
   }
   await configSet(CODING_AGENT_EFFORT_CONFIG_KEY, effort);
   return effort;
+}
+
+/** The owner's per-role model and effort choices for a team (src/lib/coding-role-models.ts); {} on a box that never chose. */
+export async function getRoleModels(): Promise<RoleModels> {
+  return roleModelsFrom(await configGet(CODING_AGENT_ROLE_MODELS_CONFIG_KEY));
+}
+
+/**
+ * The owner's edit to the per-role choices, checked WHOLE before anything is
+ * written — the enable route calls `checkRoleModelsPatch` in its
+ * refuse-before-any-write block and this after it.
+ */
+export async function setRoleModels(patch: unknown): Promise<RoleModels> {
+  const next = applyRoleModelsPatch(await getRoleModels(), patch);
+  if (!next.ok) throw new CodingAgentError("invalid", next.error);
+  await configSet(CODING_AGENT_ROLE_MODELS_CONFIG_KEY, next.value);
+  return next.value;
+}
+
+/** Why the patch would be refused, or null — the same check `setRoleModels` makes, without a write. */
+export function checkRoleModelsPatch(patch: unknown): string | null {
+  const checked = applyRoleModelsPatch({}, patch);
+  return checked.ok ? null : checked.error;
 }
 
 /** The owner's switch for the automatic review pass. Absent means OFF. */
@@ -3711,7 +3767,10 @@ const STORED_MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._[\]-]{0,63}$/;
  */
 function normalizeRequestedModel(provider: unknown, raw: unknown): string | null {
   const resolved = codingProviderFrom(provider);
-  if (modelsForProvider(resolved).length === 0) return defaultModelForProvider(resolved);
+  // A provider whose plan picks the model carries none — except its economy
+  // model, which only the box itself sets, on a team's planner or reviewer
+  // (src/lib/coding-role-models.ts).
+  if (modelsForProvider(resolved).length === 0) return isRecordableModel(resolved, raw) ? raw : defaultModelForProvider(resolved);
   if (typeof raw === "string" && STORED_MODEL_RE.test(raw)) return raw;
   return defaultModelForProvider(resolved);
 }
@@ -3823,6 +3882,9 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     effortLevels: OFFERED_EFFORT_LEVELS.includes(effort)
       ? OFFERED_EFFORT_LEVELS
       : (EFFORT_LEVELS.filter((l) => OFFERED_EFFORT_LEVELS.includes(l) || l === effort) as readonly CodingEffort[]),
+    // Every role, every half, "auto" where nothing is stored — a box that
+    // never chose answers all "auto" and runs on the role defaults.
+    roleModels: roleModelsView(roleModelsFrom(config[CODING_AGENT_ROLE_MODELS_CONFIG_KEY])),
     projectFolders,
     maxTurns: maxTurnsFrom(config[CODING_AGENT_TURNS_CONFIG_KEY]),
     minMaxTurns: MIN_MAX_TURNS,
@@ -4071,6 +4133,7 @@ function normalizeRun(raw: CodingRun): CodingRun {
     team: normalizeTeam(raw.team),
     readOnly: raw.readOnly === true,
     extraBrief: typeof raw.extraBrief === "string" && raw.extraBrief ? raw.extraBrief : null,
+    cpuBudget: typeof raw.cpuBudget === "number" && Number.isInteger(raw.cpuBudget) && raw.cpuBudget >= 1 && raw.cpuBudget <= MAX_CPU_BUDGET ? raw.cpuBudget : null,
     experience: parseRunExperience(raw.experience),
     // No longer than the renderer ever writes: a longer one on a hand-edited
     // record is not a block this box rendered, and it travels into a prompt.
@@ -6063,7 +6126,7 @@ export function buildRunMcpConfig(run: { id: string; directory: string; media?: 
 }
 
 /** The argv handed to the wrapper. Exported for the contract test. */
-export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; experience?: string | null; reviewedSeparately?: boolean; draftPullRequests?: boolean; allowRules?: readonly string[]; provider?: CodingProvider; streamInput?: boolean; hookSettings?: string | null; run?: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null } }): string[] {
+export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; experience?: string | null; reviewedSeparately?: boolean; draftPullRequests?: boolean; allowRules?: readonly string[]; provider?: CodingProvider; streamInput?: boolean; hookSettings?: string | null; cpuBudget?: number | null; runNotes?: string | null; lessonChannel?: boolean; run?: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null } }): string[] {
   // A run whose diff a separate review will read is told not to review it
   // twice — see REVIEWER_CLAUSE_SLOT. A team's run is told it never merges.
   const headless = headlessBrief({ reviewedSeparately: opts.reviewedSeparately === true, team: Boolean(opts.run?.team) });
@@ -6080,17 +6143,24 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     ...(opts.run?.media?.images && !opts.readOnly ? [MEDIA_BRIEF_IMAGES] : []),
     ...(opts.run?.media?.audio && !opts.readOnly ? [MEDIA_BRIEF_AUDIO] : []),
     ...(opts.draftPullRequests && !opts.readOnly ? [PR_DRAFT_BRIEF] : []),
+    // The run's share of the CPU (src/lib/coding-run-cpu.ts). Not for a
+    // read-only run: it runs no command, so it starts no build to cap.
+    ...(typeof opts.cpuBudget === "number" && opts.cpuBudget >= 1 && !opts.readOnly ? [cpuBudgetBrief(opts.cpuBudget)] : []),
+    // How a writing run adds a lesson to its project's run notes
+    // (src/lib/coding-run-notes.ts); a read-only run cannot write one.
+    ...(opts.lessonChannel && !opts.readOnly ? [LESSON_CHANNEL_BRIEF] : []),
     // A team's role for this run — the planner's "answer with a JSON array",
     // a worker's "this is your task among these" — after the device's own
     // words, never instead of them.
     ...(opts.extraBrief ? [opts.extraBrief] : []),
   ].join(" ");
-  // The lessons from earlier verified runs (src/lib/coding-experience.ts), last
-  // and on their own lines: a delimited block the device rendered from a
-  // validated request, after every word of the device's own. In the system
+  // The project's run notes (src/lib/coding-run-notes.ts) — what earlier runs
+  // in this project learned and the owner kept — then the lessons from earlier
+  // verified runs (src/lib/coding-experience.ts), last and on their own lines:
+  // delimited blocks after every word of the device's own. In the system
   // prompt rather than the task, so the task stays what the caller typed. A
-  // run given none gets the brief above unchanged, byte for byte.
-  const systemPrompt = opts.experience ? `${brief}\n\n${opts.experience}` : brief;
+  // run given neither gets the brief above unchanged, byte for byte.
+  const systemPrompt = [brief, opts.runNotes, opts.experience].filter((part): part is string => Boolean(part)).join("\n\n");
   const args = [
     "-p",
     "--verbose",
@@ -6364,7 +6434,7 @@ export function previewScriptPath(): string {
   return path.join(CONFIG_ROOT, "scripts", "clawbox-preview.mjs");
 }
 
-export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string; inputsDir?: string; provider?: CodingProvider; model?: string | null; secrets?: Record<string, string> } = {}): Record<string, string> {
+export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string; inputsDir?: string; provider?: CodingProvider; model?: string | null; cpuBudget?: number | null; secrets?: Record<string, string> } = {}): Record<string, string> {
   const home = homeDir();
   const user = process.env.USER || process.env.LOGNAME || path.basename(home);
   const env: Record<string, string> = {
@@ -6413,6 +6483,12 @@ export function buildRunEnv(opts: { effort?: CodingEffort; artifactsDir?: string
   // it is a CLAWBOX_ name, which setSecret refuses, so the owner's secret store
   // cannot point a run's preview at something else. See previewScriptPath.
   env.CLAWBOX_PREVIEW = previewScriptPath();
+  // How many parallel jobs the run's builds and tests may start
+  // (src/lib/coding-run-cpu.ts) — the number its brief tells it to pass to
+  // `--maxWorkers` and `-j`. A CLAWBOX_ name, so no stored secret can raise it.
+  if (typeof opts.cpuBudget === "number" && Number.isInteger(opts.cpuBudget) && opts.cpuBudget >= 1) {
+    env[RUN_CPU_BUDGET_ENV] = String(opts.cpuBudget);
+  }
   // The owner's secrets, LAST and never over the top of anything above.
   //
   // Resolved by the caller (`prepareRunSecrets`) because it is a disk read and
@@ -11002,6 +11078,16 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   trackSettleWork((async () => {
     try {
       await recordRunWork(run);
+      // The lessons the run proposed for its project's notes
+      // (src/lib/coding-run-notes.ts), vetted and merged before anyone waiting
+      // on it is woken — a team's next worker reads them. Not for a pause: the
+      // run is not over, and its next spawn may still change its mind.
+      if (settled !== "paused") {
+        const notes = await settleRunNotes(run, artifactsDir(run.id)).catch(() => ({ added: [], refused: [] }));
+        if (notes.added.length || notes.refused.length) {
+          console.error(`[coding-agent] ${run.id}: run notes +${notes.added.length}${notes.refused.length ? `, refused ${notes.refused.map((r) => r.reason).join(", ")}` : ""}`);
+        }
+      }
       // Before "finished", so the owner reads why something left the evidence
       // folder next to the run that put it there — and before any waiter or
       // update can find it: see pruneArtifacts. Not while something the run
@@ -11258,7 +11344,13 @@ function spawnRun(
   settleRunInbox(run, null);
   const hookSettings = spawnHookSettings(run);
   run.midTurn = hookSettings !== null && hookSettings.inbox;
-  const dropped = buildSpawnArgv(tools.setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, experience: run.experienceBrief, reviewedSeparately, draftPullRequests, allowRules: run.allowRules, provider: run.provider, streamInput, hookSettings: hookSettings?.json ?? null, run: { id: run.id, directory: run.directory, media: run.media, team: run.team } }));
+  // The CPU budget frozen at start; a record from before it existed gets the
+  // lone-run figure rather than none.
+  const cpuBudget = run.cpuBudget ?? runCpuBudget({ cpus: hostCpuCount() });
+  // The project's run notes, read at EVERY spawn (src/lib/coding-run-notes.ts):
+  // a completion attempt or a resume sees a lesson the owner added meanwhile.
+  const runNotes = runNotesBlock(readRunNotes(run.directory));
+  const dropped = buildSpawnArgv(tools.setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, experience: run.experienceBrief, reviewedSeparately, draftPullRequests, allowRules: run.allowRules, provider: run.provider, streamInput, hookSettings: hookSettings?.json ?? null, cpuBudget, runNotes, lessonChannel: !run.readOnly, run: { id: run.id, directory: run.directory, media: run.media, team: run.team } }));
   // One evidence path everywhere — env, MCP config and --add-dir must never
   // disagree about where it is. Creation is best-effort: the MCP layer also
   // mkdirs lazily, so a failure here degrades evidence, never the run.
@@ -11287,7 +11379,7 @@ function spawnRun(
   // from a `close` handler and cannot read the disk (restoreRunSecrets).
   // Absent — `undefined`, which the merge loop reads as nothing — for every
   // run on a box that has not switched injection on.
-  const runEnv = buildRunEnv({ effort: settings.effort, artifactsDir: evidenceDir, inputsDir: runInputsDir(run.id), provider: run.provider, model: run.requestedModel, secrets: runSecretEnv.get(run.id) });
+  const runEnv = buildRunEnv({ effort: settings.effort, artifactsDir: evidenceDir, inputsDir: runInputsDir(run.id), provider: run.provider, model: run.requestedModel, cpuBudget, secrets: runSecretEnv.get(run.id) });
   // The Anthropic account this spawn is on (prepareRunSecrets chose it). Its
   // credential goes into a one-shot 0600 file the wrapper reads and deletes
   // before exec; only the file's PATH is in the environment — the credential
@@ -11324,6 +11416,17 @@ function spawnRun(
     // alive for the server's life.
     fs.closeSync(logs.out);
     fs.closeSync(logs.err);
+  }
+  // A run with no scope of its own gets the scope's nice level by hand, so the
+  // desktop is preferred over it either way. Set on the harness before it has
+  // forked anything worth the name; every child inherits it. Best effort: a
+  // run that could not be reniced still runs.
+  if (!unit && typeof child.pid === "number") {
+    try {
+      os.setPriority(child.pid, RUN_NICE);
+    } catch {
+      // Not ours to renice (a pid already gone): the run settles on its own.
+    }
   }
 
   const state: LiveRun = {
@@ -12150,6 +12253,16 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // and on the fresh path — where the run has no memory to lean on — the
     // owner's current setting could be the weaker of the two.
     if (previous && typeof input.reviewLoopOf === "string") settings.effort = previous.effort;
+    // A TEAM's run gets its role's model and effort (src/lib/coding-role-models.ts):
+    // a planner, a lead and a reviewer the provider's cheaper model and at most
+    // `xhigh` unless the owner chose otherwise; a worker the owner's own. A
+    // resume keeps the model its session was opened on (applyProviderChoice
+    // already carried it) and takes only the effort.
+    if (input.team) {
+      const role = resolveRoleRun(modelRoleOf(input.team.role), settings.provider, settings.model, settings.effort, await getRoleModels());
+      settings.effort = role.effort;
+      if (!inherited) settings.model = role.model;
+    }
     await assertProviderReady(settings.provider);
     // A resume carries the lessons of the run it continues, the way it carries
     // that run's account and folder — the automatic review pass and every
@@ -12157,6 +12270,12 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     const experience = givenExperience
       ?? (previous ? { brief: previous.experienceBrief ?? null, record: previous.experience ?? null } : null);
     const queuedRunId = typeof input.queuedRunId === "string" ? input.queuedRunId : null;
+    // This run's share of the CPU (src/lib/coding-run-cpu.ts): the runs that
+    // write going now, this one, and the siblings a team means to start beside
+    // it, whichever is more. A read-only run runs no build and is not counted.
+    const writersLive = loadRuns().filter((r) => isLive(r.status) && !r.readOnly && r.id !== queuedRunId).length;
+    const cpuShare = typeof input.cpuShare === "number" && Number.isFinite(input.cpuShare) && input.cpuShare >= 1 ? Math.floor(input.cpuShare) : 1;
+    const cpuBudget = runCpuBudget({ cpus: hostCpuCount(), concurrent: Math.max(cpuShare, writersLive + 1), onBattery: await onBatteryPower() });
     const run = newRunRecord({
       ...(queuedRunId ? { id: queuedRunId } : {}),
       task,
@@ -12172,6 +12291,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       team: input.team ?? null,
       readOnly: input.readOnly === true,
       extraBrief: typeof input.extraBrief === "string" && input.extraBrief.trim() ? input.extraBrief.trim() : null,
+      cpuBudget,
       experience: experience?.record ?? null,
       experienceBrief: experience?.brief ?? null,
     });
@@ -12584,6 +12704,7 @@ function newRunRecord(fields: {
   team?: RunTeam | null;
   readOnly?: boolean;
   extraBrief?: string | null;
+  cpuBudget?: number | null;
   experience?: RunExperience | null;
   experienceBrief?: string | null;
   deliverable?: Deliverable | null;
@@ -12650,6 +12771,7 @@ function newRunRecord(fields: {
     team: fields.team ?? null,
     readOnly: fields.readOnly === true,
     extraBrief: fields.extraBrief ?? null,
+    cpuBudget: fields.cpuBudget ?? null,
     experience: fields.experience ?? null,
     experienceBrief: fields.experienceBrief ?? null,
     // No pull request until the aftermath opens one, and no loop until it has.
@@ -13221,6 +13343,8 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
     // overwrite a choice the draft was created with; the others have no per-run
     // form and can only have come from the owner's stored default anyway.
     const settings = await readRunSettings();
+    const writersLive = loadRuns().filter((r) => isLive(r.status) && !r.readOnly && r.id !== run.id).length;
+    run.cpuBudget = runCpuBudget({ cpus: hostCpuCount(), concurrent: writersLive + 1, onBattery: await onBatteryPower() });
     run.effort = settings.effort;
     run.maxTurns = settings.maxTurns;
     run.tokenLimit = settings.tokenLimit;

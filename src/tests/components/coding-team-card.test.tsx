@@ -452,3 +452,54 @@ describe("the team's pull request", () => {
     expect(screen.getByTestId("coding-team-ci-failing")).toHaveTextContent("Failing: app.test.js > submits");
   });
 });
+
+describe("what each role cost, the repo map, and whether a single run was cheaper", () => {
+  const METRICS = { plannerRuns: 1, workerRuns: 2, reviewerRuns: 2, leadRuns: 0, tasksPlanned: 2, tasksAdded: 0, tasksRetired: 0, tasksAcceptedFirstTry: 2, tasksRejected: 0, tokensUsed: 163_000, tokensByRole: { planner: 12_000, worker: 140_000, reviewer: 11_000, lead: 0 }, wallMs: 60_000 };
+
+  it("shows the tokens by role, the planner's repo map and the overlap advice", async () => {
+    teams = [{
+      ...WORKING,
+      status: "done",
+      alerts: 0,
+      metrics: METRICS,
+      advice: { reason: "overlap", overlap: 83 },
+      repoMap: { files: ["index.html — the page", "app.js"], entryPoints: ["index.html"], testCommands: ["npm test"], gotchas: [] },
+      tasks: WORKING.tasks.map((x) => ({ ...x, status: "complete" as const, review: { verdict: "accepted" as const, notes: "", at: 1 } })),
+    }];
+    stub();
+    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={vi.fn()} />);
+    const roles = await screen.findByTestId("coding-team-role-tokens");
+    expect(within(roles).getByTestId("coding-team-role-tokens-planner")).toHaveTextContent(t("codingAgent.team.tokensPlanner", { n: "12k" }));
+    expect(within(roles).getByTestId("coding-team-role-tokens-workers")).toHaveTextContent(t("codingAgent.team.tokensWorkers", { n: "140k" }));
+    expect(within(roles).getByTestId("coding-team-role-tokens-reviewers")).toHaveTextContent(t("codingAgent.team.tokensReviewers", { n: "11k" }));
+    // A team with no lead turn shows no lead figure.
+    expect(within(roles).queryByTestId("coding-team-role-tokens-lead")).toBeNull();
+    const advice = screen.getByTestId("coding-team-advice");
+    expect(advice).toHaveAttribute("data-reason", "overlap");
+    expect(advice).toHaveTextContent(t("codingAgent.team.adviceOverlap", { n: 83 }));
+    const map = screen.getByTestId("coding-team-repo-map");
+    expect(map).toHaveTextContent(t("codingAgent.team.repoMap"));
+    expect(within(map).getByTestId("coding-team-repo-map-files")).toHaveTextContent("index.html — the page");
+    expect(within(map).getByTestId("coding-team-repo-map-tests")).toHaveTextContent("npm test");
+    // An empty list is left out rather than drawn with nothing under it.
+    expect(within(map).queryByTestId("coding-team-repo-map-gotchas")).toBeNull();
+  });
+
+  it("says a one-task plan ran as one run, and says nothing for a plan that split well or a server that predates it", async () => {
+    teams = [{ ...WORKING, status: "done", singleRun: true, advice: { reason: "one_task", overlap: 100 }, tasks: [{ ...WORKING.tasks[0] }] }];
+    stub();
+    const { unmount } = render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={vi.fn()} />);
+    const advice = await screen.findByTestId("coding-team-advice");
+    expect(advice).toHaveAttribute("data-reason", "single_run");
+    expect(advice).toHaveTextContent(t("codingAgent.team.adviceSingleRun"));
+    unmount();
+
+    teams = [{ ...WORKING, advice: null, metrics: { ...METRICS, tokensByRole: undefined } }];
+    stub();
+    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={vi.fn()} />);
+    await screen.findByTestId("coding-team-board");
+    expect(screen.queryByTestId("coding-team-advice")).toBeNull();
+    expect(screen.queryByTestId("coding-team-role-tokens")).toBeNull();
+    expect(screen.queryByTestId("coding-team-repo-map")).toBeNull();
+  });
+});

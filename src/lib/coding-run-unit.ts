@@ -44,6 +44,24 @@ export const RUN_UNIT_PREFIX = "clawbox-run-";
 export const RUN_MEMORY_HIGH = "3G";
 export const RUN_MEMORY_MAX = "4G";
 
+/**
+ * The CPU and disk share one run gets, against the default 100 every other
+ * unit has — the desktop's session, the web server, the gateway. A WEIGHT, not
+ * a quota: it only bites under contention, so a lone run on an idle box still
+ * gets every core, while a team pushing the load past the core count yields
+ * to the things the owner is looking at (a team once drove a 4-core/8-thread
+ * laptop to load 27 and the desktop stopped repainting). See
+ * `coding-run-cpu.ts` for the other half, the budget a run is told to keep to.
+ *
+ * `IOWeight` only takes effect where the user manager has the `io` controller
+ * delegated, which stock systemd does not do; systemd accepts the property
+ * either way. `RUN_NICE` is what reaches the disk there too: the kernel's I/O
+ * schedulers derive a process's best-effort I/O priority from its nice level.
+ */
+export const RUN_CPU_WEIGHT = 20;
+export const RUN_IO_WEIGHT = 20;
+export const RUN_NICE = 10;
+
 /** A run id as it may appear in a unit name: the generator's own alphabet. */
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
@@ -113,6 +131,14 @@ export function buildScopeArgv(
       `MemoryHigh=${RUN_MEMORY_HIGH}`,
       "-p",
       `MemoryMax=${RUN_MEMORY_MAX}`,
+      "-p",
+      `CPUWeight=${RUN_CPU_WEIGHT}`,
+      "-p",
+      `IOWeight=${RUN_IO_WEIGHT}`,
+      // A scope has no Nice= property (it is an exec setting); systemd-run sets
+      // the priority on its own process before exec'ing the harness, so every
+      // child the run forks inherits it.
+      `--nice=${RUN_NICE}`,
       "--",
       bin,
       ...argv,

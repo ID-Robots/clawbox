@@ -30,10 +30,13 @@ import {
   MAX_LEAD_ADDS,
   MAX_LEAD_RETIRES,
   MAX_RATIONALE_CHARS,
+  MAX_REPO_MAP_ITEMS,
   MAX_TASK_DESCRIPTION_CHARS,
   MAX_TEAM_TASKS,
+  normalizeRepoMap,
   REVIEW_MODES,
   type LogEntry,
+  type RepoMap,
   type ReviewMode,
   type TaskStatus,
   type TeamBoard,
@@ -58,8 +61,9 @@ const TASK_RULES = [
 export const PLANNER_BRIEF = [
   "You are the PLANNER of a small coding team working unattended in this folder. Your job is to split ONE goal into a few independent, concrete tasks that separate workers will carry out in parallel when independent, each in its own fresh session with no memory of yours.",
   "Read the folder first — map what exists, what the goal touches and what a worker would need to know — but change NOTHING: you may not edit, create, delete or run anything that writes.",
-  `Answer with ONLY a JSON object, no prose before or after: {"shape": {"parallelism": 1 to ${MAX_TEAM_WORKERS}, "review": "each" | "final" | "none", "rationale": string}, "tasks": [at most ${MAX_TEAM_TASKS} objects {"task_description": string, "depends_on": ["t1", ...], "files_hint": ["path", ...]}]}. Each task_description is at most ${MAX_TASK_DESCRIPTION_CHARS} characters and the rationale at most ${MAX_RATIONALE_CHARS}; longer text is cut. If a task needs more than that, split it into two tasks.`,
-  "Tasks are numbered t1, t2, … in the order you list them; depends_on names EARLIER tasks — listed before it — that a task must wait for. Prefer 2–5 tasks; one task is fine for a small goal.",
+  `Answer with ONLY a JSON object, no prose before or after: {"shape": {"parallelism": 1 to ${MAX_TEAM_WORKERS}, "review": "each" | "final" | "none", "rationale": string}, "repo_map": {"files": ["path — what it is", ...], "entry_points": [...], "test_commands": [...], "gotchas": [...]}, "tasks": [at most ${MAX_TEAM_TASKS} objects {"task_description": string, "depends_on": ["t1", ...], "files_hint": ["path", ...]}]}. Each task_description is at most ${MAX_TASK_DESCRIPTION_CHARS} characters and the rationale at most ${MAX_RATIONALE_CHARS}; longer text is cut. If a task needs more than that, split it into two tasks.`,
+  `repo_map is your compact map of the parts of the project the goal touches, written for the workers: the files that matter with a few words each, where the code starts (entry points), the exact commands that build and test it, and the gotchas you found — at most ${MAX_REPO_MAP_ITEMS} one-line entries per list. Every worker and reviewer is handed it instead of exploring the project again, so make it the map you would want to be given.`,
+  "Tasks are numbered t1, t2, … in the order you list them; depends_on names EARLIER tasks — listed before it — that a task must wait for. Prefer 2–5 tasks only where the parts are truly independent. A plan of ONE task runs as a single ordinary run, the cheapest shape: a goal one session can do in one go is one task. Tasks that edit mostly the same files cannot run side by side and only add cost — make them one task.",
   ...TASK_RULES,
   `Size the team to the goal in shape: parallelism is how many workers may run side by side; review is "each" (a reviewer checks every task), "final" (one reviewer checks the merged result at the end) or "none" (only the automatic check that a worker was refused nothing and stayed inside its files); rationale says why in at most ${MAX_RATIONALE_CHARS} characters.`,
   'A one-file fix is ONE task with parallelism 1 and review "final". Tasks on independent files may run in parallel — parallelism up to the number of tasks that can run at once. A migration, or any chain where each step builds on the last, runs serially: parallelism 1, each task depending on the one before.',
@@ -103,6 +107,12 @@ export interface PlanParse {
   tasks: PlannedTask[];
   /** The team's shape as the planner gave it, or null — a bare array, or no shape: the default team. */
   shape: TeamShape | null;
+  /**
+   * The planner's map of what the goal touches, bounded, or null. Advice for
+   * the workers rather than a contract: a map that is not usable is left out,
+   * never a reason to refuse a plan whose tasks are fine.
+   */
+  repoMap: RepoMap | null;
   /** Every field cut to its bound; absent when nothing was. */
   clipped?: ClippedField[];
 }
@@ -138,6 +148,7 @@ export function parsePlan(text: string | null | undefined): PlanParse | PlanFail
   const problems: string[] = [];
   const clipped: ClippedField[] = [];
   let shape: TeamShape | null = null;
+  let repoMap: RepoMap | null = null;
   let list: unknown = raw;
   if (!Array.isArray(raw)) {
     if (!isObject(raw)) return { ok: false, reason: "The planner's answer is not a JSON array." };
@@ -149,6 +160,7 @@ export function parsePlan(text: string | null | undefined): PlanParse | PlanFail
       if (read.ok) shape = read.shape;
       else problems.push(...read.problems);
     }
+    repoMap = normalizeRepoMap(raw.repo_map);
   }
   const items = list as unknown[];
   if (items.length === 0) return { ok: false, reason: "The planner produced no tasks." };
@@ -177,7 +189,7 @@ export function parsePlan(text: string | null | undefined): PlanParse | PlanFail
   // planner is asked again.
   const forward = forwardDependencies(tasks, 0);
   if (forward.length) return { ok: false, reason: joinProblems(forward) };
-  return { ok: true, tasks, shape, ...(clipped.length ? { clipped } : {}) };
+  return { ok: true, tasks, shape, repoMap, ...(clipped.length ? { clipped } : {}) };
 }
 
 /** Every dependency of a task (numbered from `t{offset + 1}`) on one listed after it, as the fault the planner or lead must fix. */

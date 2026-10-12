@@ -38,6 +38,7 @@ import {
   retireTask,
   reviewTask,
   saveBoard,
+  setRepoMap,
   setShape,
   submitResult,
   updateStatus,
@@ -47,6 +48,8 @@ import { MAX_TEAM_MESSAGE_CHARS, NOTED_REFUSALS, TEAM_MESSAGE_TARGETS, type Team
 export type TeamMessage =
   | { type: "task"; task_description: string; depends_on?: string[]; files_hint?: string[]; origin?: "plan" | "lead"; note?: string }
   | { type: "shape"; parallelism: number; review: ReviewMode; rationale: string }
+  /** The planner's map of what the goal touches (setRepoMap): every worker and reviewer is handed it. */
+  | { type: "repo_map"; files: string[]; entry_points: string[]; test_commands: string[]; gotchas: string[] }
   | { type: "assign"; task_id: string; worker_id: string }
   | { type: "status_update"; task_id: string; status: "in_progress" | "complete" | "failed"; worker_id: string }
   | { type: "result"; task_id: string; result: string; worker_id: string }
@@ -97,6 +100,12 @@ export function validateMessage(m: unknown): string | null {
       if (typeof msg.parallelism !== "number" || !Number.isInteger(msg.parallelism) || msg.parallelism < 1) return "A shape's parallelism is a whole number of at least 1.";
       if (!(REVIEW_MODES as readonly unknown[]).includes(msg.review)) return `A shape's review is ${REVIEW_MODES.join(", ")}.`;
       if (typeof msg.rationale !== "string") return "A shape needs its rationale (may be empty).";
+      return null;
+    case "repo_map":
+      for (const field of ["files", "entry_points", "test_commands", "gotchas"]) {
+        const list = msg[field];
+        if (!Array.isArray(list) || !list.every((x) => typeof x === "string")) return `A repo map's ${field} is a list of text.`;
+      }
       return null;
     case "retire":
       if (typeof msg.task_id !== "string" || !TASK_ID.test(msg.task_id)) return "A retirement needs a task_id.";
@@ -191,6 +200,7 @@ export class TeamBus {
       switch (message.type) {
         case "task": task = postTask(this.board, actor, message); break;
         case "shape": setShape(this.board, actor, { parallelism: message.parallelism, review: message.review, rationale: message.rationale }); break;
+        case "repo_map": setRepoMap(this.board, actor, { files: message.files, entry_points: message.entry_points, test_commands: message.test_commands, gotchas: message.gotchas }); break;
         case "assign": task = assignTask(this.board, actor, message.task_id, message.worker_id); break;
         case "status_update": task = updateStatus(this.board, actor, message.task_id, message.status); break;
         case "result": task = submitResult(this.board, actor, message.task_id, message.result); break;

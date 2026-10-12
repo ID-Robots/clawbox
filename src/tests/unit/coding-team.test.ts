@@ -42,6 +42,14 @@ vi.mock("@/lib/coding-agent", async (importOriginal) => {
 // A roomy box: the spawn slot reads it once a worker is starting, and the
 // host's own meminfo is neither the fixture nor the same on every runner.
 vi.mock("@/lib/mem-available", () => ({ memAvailableMb: vi.fn(async () => 8000) }));
+// Plugged in, unless a case unplugs it: the host's own charger is neither the
+// fixture nor the same on every runner (a laptop on battery would serialise
+// every team in this file).
+const power = vi.hoisted(() => ({ onBattery: false }));
+vi.mock("@/lib/coding-run-cpu", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/coding-run-cpu")>();
+  return { ...actual, onBatteryPower: vi.fn(async () => power.onBattery) };
+});
 // The git plumbing, faked: a branch is "made", a worktree "added", a merge
 // "done" — scripted per call so a conflict can be staged.
 const plumbing = vi.hoisted(() => ({
@@ -135,6 +143,7 @@ beforeEach(async () => {
   waitsBeforeSettle = 1;
   liveWorkersAtStart = {};
   teamSlots.value = null;
+  power.onBattery = false;
   vi.resetModules();
   vi.clearAllMocks();
   plumbing.ensureTeamBranch.mockImplementation(async (_dir: string, teamId: string) => ({ ok: true, branch: `clawbox/${teamId}`, base: "master" }));
@@ -2013,7 +2022,9 @@ describe("the lead (coding_team_dynamic)", () => {
     const board = await team.startTeam({ goal: "Fix the typo", directory: "site", source: "owner" });
     const done = await finished(board.id);
     expect(done.status).toBe("done");
-    expect(starts.map(role)).toEqual(["planner", "worker", "reviewer"]);
+    // A one-task plan is one ordinary run (no team role): no reviewer, no lead.
+    expect(starts.map((s) => (s.team as { role: string } | null)?.role ?? "run")).toEqual(["planner", "run"]);
+    expect(done.metrics.leadRuns).toBe(0);
   });
 
   it("spends no run on a task accepted clean — no blocker, no message to the lead — and logs nothing for the skip", async () => {
@@ -2678,5 +2689,142 @@ describe("a goal that asks for a pull request, in a project with no branch of it
     expect(done.pr).toBeNull();
     expect(github.openPullRequest).not.toHaveBeenCalled();
     expect(done.log.map((e) => e.message)).toContain("The goal asks for a pull request, but this team works in place (a code project, no branch of its own), so none is opened: the work stays in the project.");
+  });
+});
+
+
+describe("cost: run or team, the repo map, tokens per role, and the battery", () => {
+  const roleOf = (s: Record<string, unknown>) => (s.team as { role: string } | null)?.role ?? "run";
+  const MAP = { files: ["index.html — the page", "app.js — its script"], entry_points: ["index.html"], test_commands: ["npm test -- --maxWorkers=1"], gotchas: ["app.js is loaded as a module"] };
+
+  it("runs a ONE-task plan as one ordinary run — no team branch, worktree or reviewer — and the board follows it", async () => {
+    outcomes = [
+      { summary: JSON.stringify({ repo_map: MAP, tasks: [{ task_description: "Fix the typo in README.md", files_hint: ["README.md"] }] }), tokensUsed: 9_000 },
+      { summary: "Fixed the typo in README.md.", filesTouched: ["/home/clawbox/Projects/site/README.md"], tokensUsed: 41_000 },
+    ];
+    const board = await team.startTeam({ goal: "Fix the typo in the readme", directory: "site", source: "agent" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(starts.map(roleOf)).toEqual(["planner", "run"]);
+    const single = starts[1];
+    // An ordinary run: in the project, the owner's goal first, the planner's map in its brief.
+    expect(single).toMatchObject({ directory: "/home/clawbox/Projects/site", source: "agent" });
+    expect(single.team).toBeUndefined();
+    expect(single.readOnly).toBeUndefined();
+    expect(String(single.task).split("\n")[0]).toBe("Fix the typo in the readme");
+    expect(String(single.task)).toContain("The team's planner wrote it up as: Fix the typo in README.md");
+    expect(String(single.extraBrief)).toContain("Test commands: npm test -- --maxWorkers=1");
+    expect(plumbing.ensureTeamBranch).not.toHaveBeenCalled();
+    expect(plumbing.addWorkerWorktree).not.toHaveBeenCalled();
+    expect(done.branch).toBeNull();
+    expect(done.singleRun).toBe(true);
+    expect(done.advice).toEqual({ reason: "one_task", overlap: 100 });
+    expect(done.tasks[0]).toMatchObject({ status: "complete", assigned_to: "run-00000002", result: "Fixed the typo in README.md.", review: { verdict: "accepted" } });
+    expect(done.log.map((e) => e.message)).toEqual(expect.arrayContaining([expect.stringMatching(/one task, so it runs as one ordinary run/)]));
+    expect(done.metrics.tokensByRole).toEqual({ planner: 9_000, worker: 41_000, reviewer: 0, lead: 0 });
+  });
+
+  it("fails the team with the run when that one run does not finish", async () => {
+    outcomes = [
+      { summary: JSON.stringify([{ task_description: "Fix the typo in README.md", files_hint: ["README.md"] }]) },
+      { status: "failed", error: "The harness exited." },
+    ];
+    const board = await team.startTeam({ goal: "Fix the typo", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("failed");
+    expect(done.error).toMatch(/did not finish: The harness exited/);
+    expect(done.tasks[0].status).toBe("failed");
+  });
+
+  it("hands the planner's repo map to every worker, said in its own worktree, and to every reviewer", async () => {
+    outcomes = [
+      { summary: JSON.stringify({ repo_map: { ...MAP, files: ["/home/clawbox/Projects/site/index.html — the page"] }, tasks: JSON.parse(PLAN) }) },
+      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: "app done", filesTouched: ["app.js"] },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.repoMap?.testCommands).toEqual(["npm test -- --maxWorkers=1"]);
+    const workers = starts.filter((s) => roleOf(s) === "worker");
+    const reviewers = starts.filter((s) => roleOf(s) === "reviewer");
+    expect(workers).toHaveLength(2);
+    expect(reviewers).toHaveLength(2);
+    for (const w of workers) {
+      expect(String(w.extraBrief)).toContain(team.WORKER_BRIEF);
+      expect(String(w.extraBrief)).toContain("Repo map — the team planner's map");
+      // The project's path, said in the worker's own copy of it.
+      expect(String(w.extraBrief)).toMatch(/\/\.clawbox\/worktrees\/t\d-1\/index\.html — the page/);
+    }
+    for (const r of reviewers) expect(String(r.extraBrief)).toContain("Test commands: npm test -- --maxWorkers=1");
+  });
+
+  it("starts ONE worker at a time on battery, says so, and shares no CPU budget it does not have", async () => {
+    power.onBattery = true;
+    outcomes = [
+      { summary: PARALLEL_PLAN },
+      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: "styles done", filesTouched: ["styles.css"] },
+      { summary: "app done", filesTouched: ["app.js"] },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    const workers = starts.filter((s) => roleOf(s) === "worker");
+    expect(workers).toHaveLength(3);
+    // Nobody started beside a worker still going.
+    const workerIds = [...runs.values()].filter((r) => (r.team as { role?: string } | null)?.role === "worker").map((r) => String(r.id));
+    expect(workerIds.map((id) => liveWorkersAtStart[id])).toEqual([0, 0, 0]);
+    expect(workers.every((w) => w.cpuShare === 1)).toBe(true);
+    expect(done.log.map((e) => e.message)).toContain("The box is on battery: one worker at a time until it is plugged in again.");
+  });
+
+  it("on mains, shares the CPU budget between the workers the plan allows side by side", async () => {
+    outcomes = [
+      { summary: PARALLEL_PLAN },
+      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: "styles done", filesTouched: ["styles.css"] },
+      { summary: "app done", filesTouched: ["app.js"] },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    const workers = starts.filter((s) => roleOf(s) === "worker");
+    expect(workers.every((w) => w.cpuShare === 3)).toBe(true);
+    expect(done.log.map((e) => e.message).filter((m) => /battery/.test(m))).toEqual([]);
+  });
+
+  it("puts each role's tokens on the figures", async () => {
+    outcomes = [
+      { summary: PLAN, tokensUsed: 10_000 },
+      { summary: "index done", filesTouched: ["index.html"], tokensUsed: 60_000 },
+      { summary: "app done", filesTouched: ["app.js"], tokensUsed: 30_000 },
+    ];
+    reviews = [
+      { summary: JSON.stringify({ verdict: "accepted", notes: "" }), tokensUsed: 4_000 },
+      { summary: JSON.stringify({ verdict: "accepted", notes: "" }), tokensUsed: 5_000 },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.metrics.tokensByRole).toEqual({ planner: 10_000, worker: 90_000, reviewer: 9_000, lead: 0 });
+    expect(done.metrics.tokensUsed).toBe(109_000);
+  });
+
+  it("says, on the board and in its advice, when a plan's tasks mostly touch the same files", async () => {
+    outcomes = [
+      { summary: JSON.stringify([
+        { task_description: "Add the header to index.html", files_hint: ["index.html", "styles.css"] },
+        { task_description: "Add the footer to index.html", depends_on: ["t1"], files_hint: ["index.html", "styles.css"] },
+      ]) },
+      { summary: "header done", filesTouched: ["index.html"] },
+      { summary: "footer done", filesTouched: ["index.html"] },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.singleRun).toBe(false);
+    expect(done.advice).toEqual({ reason: "overlap", overlap: 100 });
+    expect(done.log.map((e) => e.message)).toEqual(expect.arrayContaining([expect.stringMatching(/^100% of the files this plan's tasks name are named by another task too/)]));
   });
 });

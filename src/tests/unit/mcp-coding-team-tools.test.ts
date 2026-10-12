@@ -254,3 +254,65 @@ describe("a team's pull request", () => {
     expect(list[0]).toMatchObject({ pull_request: "#41 failed_checks" });
   });
 });
+
+describe("run or team, and what each role cost", () => {
+  it("says in the run tool's own description when a single run is the cheaper tool", () => {
+    const description = harness().get("coding_team_run").description;
+    expect(description).toMatch(/Prefer ONE coding_agent_run/);
+    expect(description).toMatch(/one focused change/);
+    expect(description).toMatch(/edit mostly the same files/);
+    expect(description).toMatch(/one-task plan runs as one run/);
+  });
+
+  it("tells the assistant at the start that a one-task plan runs as one run and that the status will say so", async () => {
+    apiPost.mockResolvedValue({ started: true, team: { ...TEAM, status: "planning", tasks: [] } });
+    const text = await ok("coding_team_run", { goal: "Build the invoice app", directory: "invoice" });
+    expect(text).toMatch(/one task it runs as one ordinary run/);
+    expect(text).toMatch(/when a single run would have been cheaper/);
+  });
+
+  it("answers the advice, the single run and the tokens per role in coding_team_status", async () => {
+    apiGet.mockResolvedValue({
+      team: {
+        ...TEAM,
+        status: "done",
+        advice: { reason: "overlap", overlap: 83 },
+        repoMap: { files: ["index.html"], entryPoints: ["index.html"], testCommands: ["npm test"], gotchas: [] },
+        metrics: { plannerRuns: 1, workerRuns: 2, reviewerRuns: 2, leadRuns: 0, tasksPlanned: 2, tasksAdded: 0, tasksRetired: 0, tasksAcceptedFirstTry: 2, tasksRejected: 0, tokensUsed: 163000, tokensByRole: { planner: 12000, worker: 140000, reviewer: 11000, lead: 0 }, wallMs: 60000 },
+      },
+    });
+    const text = await ok("coding_team_status", { team_id: TEAM.id });
+    expect(text).toContain("tokens 163000 (planner 12000, workers 140000, reviewers 11000, lead 0)");
+    expect(text).toMatch(/Advice: 83% of the files this plan's tasks name are shared with another task/);
+    expect(text).toMatch(/a single coding_agent_run would likely have been cheaper/);
+    expect(text).toMatch(/Repo map \(the planner's, handed to every worker\): 1 file\(s\).*tests: npm test/);
+
+    apiGet.mockResolvedValue({ team: { ...TEAM, status: "done", singleRun: true, advice: { reason: "one_task", overlap: 100 } } });
+    const single = await ok("coding_team_status", { team_id: TEAM.id });
+    expect(single).toMatch(/Single run: the plan had one task, so it ran as one ordinary coding run/);
+    expect(single).not.toMatch(/Advice:/);
+
+    apiGet.mockResolvedValue({ team: { ...TEAM, status: "working", advice: { reason: "one_task", overlap: 100 } } });
+    expect(await ok("coding_team_status", { team_id: TEAM.id })).toMatch(/Advice: the plan has one task — a single coding_agent_run would have been cheaper/);
+  });
+
+  it("marks a single run and the advice in the list of teams", async () => {
+    apiGet.mockResolvedValue({ teams: [
+      { ...TEAM, id: "team-aaaaaaaa", singleRun: true },
+      { ...TEAM, id: "team-bbbbbbbb", advice: { reason: "overlap", overlap: 70 } },
+      { ...TEAM, id: "team-cccccccc" },
+    ] });
+    const rows = JSON.parse(await ok("coding_team_status", {})) as Array<Record<string, unknown>>;
+    expect(rows[0].single_run).toBe(true);
+    expect(rows[1].advice).toBe("a single run would have been cheaper: 70% of the files overlap");
+    expect(rows[2]).not.toHaveProperty("advice");
+    expect(rows[2]).not.toHaveProperty("single_run");
+  });
+
+  it("reads an older server's answer, which has none of it, as before", async () => {
+    apiGet.mockResolvedValue({ team: { ...TEAM, metrics: { plannerRuns: 1, workerRuns: 1, reviewerRuns: 0, leadRuns: 0, tasksPlanned: 2, tasksAdded: 0, tasksRetired: 0, tasksAcceptedFirstTry: 0, tasksRejected: 0, tokensUsed: 500, wallMs: 1000 } } });
+    const text = await ok("coding_team_status", { team_id: TEAM.id });
+    expect(text).toContain("tokens 500; wall 1 s.");
+    expect(text).not.toMatch(/Advice|Single run|Repo map/);
+  });
+});

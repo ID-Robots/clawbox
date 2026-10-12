@@ -58,6 +58,7 @@ import VNCApp from "./VNCApp";
 import CodingAgentBreadcrumb from "./CodingAgentBreadcrumb";
 import CodingProjectWorkspace from "./CodingProjectWorkspace";
 import CodingTeamCard from "./CodingTeamCard";
+import CodingRunNotesCard from "./CodingRunNotesCard";
 import { livePreviewCommand } from "@/lib/coding-run-preview";
 import { copyToClipboard } from "@/lib/clipboard";
 import { taskTitle } from "@/lib/task-title";
@@ -3297,6 +3298,14 @@ export default function CodingAgentApp() {
                   )}
                 </span>
               </div>
+              {/* What earlier runs here learned (src/lib/coding-run-notes.ts):
+                  every run and team role reads it; the owner reads, edits and
+                  clears it here. Keyed like the team card, by the whole scope. */}
+              <CodingRunNotesCard
+                key={`notes-${p.directory}|${p.kind === "codeProject" ? p.folder : ""}`}
+                directory={p.directory}
+                projectId={p.kind === "codeProject" ? p.folder : null}
+              />
               {/* Four tabs, each with the whole width: the folder, what changed,
                   the runs, the team. The runs sat in a 22rem rail before and
                   their rows wrapped three deep. */}

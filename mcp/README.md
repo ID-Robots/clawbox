@@ -986,6 +986,39 @@ owner alone cancels one) and starts by itself, after a restart too. Every agent 
 the ceilings above apply unchanged; the one-run-at-a-time rule is between
 STRANGERS — a team's own runs share the box, a run of anyone else waits.
 
+What a team COSTS is on its answer too. The planner and the reviewers (and
+the lead) run on the provider's cheaper model — `claude-sonnet-5` on
+Anthropic, the plan's `deepseek-v4-flash` on ClawBox AI — at no more than
+`xhigh` effort; workers keep the owner's model and effort; the owner may
+override either half per role in the Coding Agent settings
+(`coding_agent_role_models`, `src/lib/coding-role-models.ts`). The planner's
+plan carries a `repo_map` (files, entry points, test commands, gotchas) that
+goes on the board and into every worker's and reviewer's brief, so they do
+not re-explore. `coding_team_status` adds the tokens per role to its metrics,
+the repo map's size and test command, and the RUN-OR-TEAM advice: a plan of
+ONE task runs as one ordinary run (`singleRun`, no team branch, worktree or
+reviewer run — the run settles the owner's usual way), and a plan whose
+tasks' `files_hint` mostly overlap (60 % or more of the hinted files named by
+another task too) is said to have been cheaper as a single run; the list
+marks both (`single_run`, `advice`). `coding_team_run`'s description says
+when to prefer one `coding_agent_run`, and its answer that a one-task plan
+runs as one. On battery (the charger's sysfs `online` is 0) a team starts one
+worker at a time, said on its log.
+
+Every run, team or not, gets a CPU budget — `CLAWBOX_RUN_CPU_BUDGET`, half
+the box's logical CPUs shared between the writing runs going at once (a
+quarter on battery), and a sentence in its brief naming `--maxWorkers`, `-j`
+and the like — and its scope a lower share (`CPUWeight=20`, `IOWeight=20`,
+`--nice=10`) so the desktop and the box's web server stay responsive. And
+every run reads its project's RUN NOTES (`<project>/.clawbox/run-notes.md`,
+outside the worktrees and in `info/exclude`) in its system prompt; a writing
+run may propose up to five one-line lessons in
+`$CLAWBOX_RUN_ARTIFACTS_DIR/run-notes.json`, which the settle step merges —
+deduplicated, under a 4,000-character cap, never a credential, an injected
+secret, an e-mail address or a link off the box. The owner reads, edits and
+clears them on the project page; the bearer may read them
+(`coding-agent/run-notes`) but never write them.
+
 `coding_agent_status` can block (`wait_seconds`, up to two minutes) instead of
 polling. `coding_agent_stop` posts `{ runId }` (the stop route keeps `{ id }`
 as an alias from its launch shape). `coding_run_message` is how a run that is

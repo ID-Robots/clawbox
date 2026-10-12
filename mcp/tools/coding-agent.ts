@@ -1636,6 +1636,8 @@ interface TeamMetricsPayload {
   tasksAcceptedFirstTry: number;
   tasksRejected: number;
   tokensUsed: number;
+  /** The tokens by the role that spent them. Absent from an older server. */
+  tokensByRole?: { planner: number; worker: number; reviewer: number; lead: number };
   wallMs: number;
   /** Absent from an older server. */
   messagesSent?: number;
@@ -1654,6 +1656,12 @@ interface TeamPayload {
   shape?: { parallelism: number; review: "each" | "final" | "none"; rationale: string } | null;
   /** Whether the team's lead may add or retire tasks while it runs (the owner's switch, when the team started). */
   dynamic?: boolean;
+  /** Why a single run would have been cheaper than this team, or null. Absent from an older server. */
+  advice?: { reason: "one_task" | "overlap"; overlap: number } | null;
+  /** The plan had one task, so it ran as one ordinary run. Absent from an older server. */
+  singleRun?: boolean;
+  /** The planner's map of what the goal touches. Absent from an older server, and before the plan. */
+  repoMap?: { files: string[]; entryPoints: string[]; testCommands: string[]; gotchas: string[] } | null;
   finalReview?: { verdict: "accepted" | "rejected"; notes: string } | null;
   /** The pull request the goal asked for, opened by the team's orchestrator. Absent from an older server. */
   pr?: {
@@ -1721,6 +1729,24 @@ function teamPrSentence(pr: NonNullable<TeamPayload["pr"]>): string {
   return `Pull request #${pr.number} (${pr.url}), ${pr.branch} → ${pr.base}: ${how}.${checks}${rounds}${failing}${pr.merge && pr.phase !== "merged" ? " The goal asks for the merge: the team makes it once every check passes." : ""}${pr.detail ? ` ${redact(firstLine(pr.detail, 200))}` : ""}`;
 }
 
+/**
+ * Whether a single coding_agent_run would have been cheaper than this team,
+ * in the words the assistant passes on — or null. A one-task plan already ran
+ * as one run; a plan whose tasks mostly touch the same files is worth a
+ * single run next time.
+ */
+export function teamAdviceSentence(team: Pick<TeamPayload, "advice" | "singleRun">): string | null {
+  if (team.singleRun) {
+    return "Single run: the plan had one task, so it ran as one ordinary coding run (the cheapest shape) rather than a team. For a goal like this, coding_agent_run is the cheaper tool next time.";
+  }
+  const advice = team.advice;
+  if (!advice) return null;
+  if (advice.reason === "one_task") {
+    return "Advice: the plan has one task — a single coding_agent_run would have been cheaper than a team.";
+  }
+  return `Advice: ${advice.overlap}% of the files this plan's tasks name are shared with another task, so they cannot run side by side — a single coding_agent_run would likely have been cheaper. Prefer one next time for a goal like this.`;
+}
+
 function describeTeam(team: TeamPayload, withLog: boolean): string {
   const parts: string[] = [];
   parts.push(`Team ${team.id}: ${team.status}${team.status === "queued" && team.queuePosition ? ` — number ${team.queuePosition} in line` : ""}${team.error ? ` — ${team.error}` : ""}`);
@@ -1742,11 +1768,18 @@ function describeTeam(team: TeamPayload, withLog: boolean): string {
     parts.push(
       `Metrics: runs planner ${m.plannerRuns}, worker ${m.workerRuns}, reviewer ${m.reviewerRuns}, lead ${m.leadRuns}; `
       + `tasks planned ${m.tasksPlanned}, added ${m.tasksAdded}, retired ${m.tasksRetired}, accepted first try ${m.tasksAcceptedFirstTry}, rejected ${m.tasksRejected}; `
-      + `tokens ${m.tokensUsed}; wall ${Math.round(m.wallMs / 1000)} s.`
+      + `tokens ${m.tokensUsed}${m.tokensByRole ? ` (planner ${m.tokensByRole.planner}, workers ${m.tokensByRole.worker}, reviewers ${m.tokensByRole.reviewer}, lead ${m.tokensByRole.lead})` : ""}; wall ${Math.round(m.wallMs / 1000)} s.`
       + (typeof m.messagesSent === "number"
         ? ` Messages: ${m.messagesSent} sent — ${m.messagesToLead ?? 0} to the lead, ${m.messagesToSibling ?? 0} to a sibling, ${m.messagesUndelivered ?? 0} not delivered.`
         : ""),
     );
+  }
+  const advice = teamAdviceSentence(team);
+  if (advice) parts.push(advice);
+  if (team.repoMap) {
+    const map = team.repoMap;
+    const counts = [`${map.files.length} file(s)`, `${map.entryPoints.length} entry point(s)`, `${map.testCommands.length} test command(s)`, `${map.gotchas.length} gotcha(s)`];
+    parts.push(`Repo map (the planner's, handed to every worker): ${counts.join(", ")}${map.testCommands.length ? ` — tests: ${redact(firstLine(map.testCommands.join("; "), 200))}` : ""}.`);
   }
   if (team.finalReview) {
     parts.push(`Final review: ${team.finalReview.verdict}${team.finalReview.notes ? ` — ${redact(firstLine(team.finalReview.notes, 200))}` : ""}`);
@@ -1795,7 +1828,7 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
 
   reg.tool(
     "coding_team_run",
-    "Hand a LARGER goal that spans several parts or files to a coding team: a planner splits it into tasks, workers do them in separate Claude Code sessions and a reviewer checks each. For one focused change use coding_agent_run instead. The team works in the background inside ONE folder and takes a while; follow it with coding_team_status.",
+    "Hand a LARGER goal with several INDEPENDENT parts to a coding team: a planner splits it, workers do the tasks in separate sessions, a reviewer checks each. Prefer ONE coding_agent_run, which is cheaper, for one focused change or parts that edit mostly the same files; a one-task plan runs as one run anyway. Works in the background in ONE folder; follow it with coding_team_status.",
     {
       goal: zText(MAX_GOAL_CHARS, "What to build or change, as a whole: the outcome and any constraints, not a task list. The planner writes the tasks."),
       project_id: zOptText(64, "A code project id from code_project_list. Give this OR directory."),
@@ -1826,9 +1859,13 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
       if (!res.started || !team?.id) {
         throw new ToolError("ENDPOINT_DOWN", "The ClawBox did not start the team.", "Call coding_team_status to see whether a team appeared; if not, tell the user and do not retry more than once.");
       }
+      const advice = teamAdviceSentence(team);
       return text(
         `Started coding team "${team.id}" in ${team.directory}${team.projectId ? ` (project "${team.projectId}")` : ""}. `
         + "The planner is reading the folder; workers follow — side by side in a folder project, one at a time in a code project. This takes a while. "
+        + (advice
+          ? `${advice} `
+          : "If the plan comes back with one task it runs as one ordinary run, and coding_team_status says so — and says when a single run would have been cheaper. ")
         + "Tell the user it is running and stop — check on it later with coding_team_status.",
       );
     },
@@ -1858,6 +1895,7 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
           tasks: t.tasks.filter((x) => x.status !== "retired").length,
           complete: t.tasks.filter((x) => x.status === "complete").length,
           alerts: t.alerts,
+          ...(t.singleRun ? { single_run: true } : t.advice ? { advice: t.advice.reason === "one_task" ? "a single run would have been cheaper: one task" : `a single run would have been cheaper: ${t.advice.overlap}% of the files overlap` } : {}),
         })));
       }
       let data: { team?: TeamPayload };

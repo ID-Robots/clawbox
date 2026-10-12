@@ -59,6 +59,8 @@ export interface TeamMetricsView {
   tasksAcceptedFirstTry: number;
   tasksRejected: number;
   tokensUsed: number;
+  /** The same tokens by the role that spent them. Absent from an older server. */
+  tokensByRole?: { planner: number; worker: number; reviewer: number; lead: number };
   wallMs: number;
 }
 
@@ -131,6 +133,12 @@ export interface TeamView {
   shape?: { parallelism: number; review: "each" | "final" | "none"; rationale: string } | null;
   /** The lead's switch as it stood when the team started. */
   dynamic?: boolean;
+  /** Why a single run would have been cheaper (coding-team-board.ts teamAdvice), or null. Absent from an older server. */
+  advice?: { reason: "one_task" | "overlap"; overlap: number } | null;
+  /** The plan had one task, so it ran as one ordinary run. Absent from an older server. */
+  singleRun?: boolean;
+  /** The planner's map of what the goal touches, handed to every worker. Absent from an older server, and before the plan. */
+  repoMap?: { files: string[]; entryPoints: string[]; testCommands: string[]; gotchas: string[] } | null;
   /** The one review of the merged result, when the shape asked for it. */
   finalReview?: { verdict: "accepted" | "rejected"; notes: string; at: number } | null;
   /** The pull request the goal asked for, once the orchestrator opened it (coding-team-board.ts TeamPr). Absent from an older server. */
@@ -460,6 +468,32 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
           {team.metrics.tasksRetired > 0 && <span>· {t("codingAgent.team.metricRetired", { n: team.metrics.tasksRetired })}</span>}
         </p>
       )}
+      {/* What each role cost: the planner and the reviewers run on a cheaper
+          model by default (src/lib/coding-role-models.ts), and this is where
+          the owner sees whether that holds for their goals. */}
+      {team && team.metrics?.tokensByRole && team.metrics.tokensUsed > 0 && (
+        <p className="mt-0.5 text-[11px] text-[var(--text-muted)] flex items-center gap-x-2 gap-y-0.5 flex-wrap" data-testid="coding-team-role-tokens">
+          <span className="material-symbols-rounded align-[-2px]" style={{ fontSize: 14 }} aria-hidden="true">toll</span>
+          <span data-testid="coding-team-role-tokens-planner">{t("codingAgent.team.tokensPlanner", { n: compactTokens(team.metrics.tokensByRole.planner) })}</span>
+          <span data-testid="coding-team-role-tokens-workers">· {t("codingAgent.team.tokensWorkers", { n: compactTokens(team.metrics.tokensByRole.worker) })}</span>
+          <span data-testid="coding-team-role-tokens-reviewers">· {t("codingAgent.team.tokensReviewers", { n: compactTokens(team.metrics.tokensByRole.reviewer) })}</span>
+          {team.metrics.tokensByRole.lead > 0 && <span data-testid="coding-team-role-tokens-lead">· {t("codingAgent.team.tokensLead", { n: compactTokens(team.metrics.tokensByRole.lead) })}</span>}
+        </p>
+      )}
+      {/* Whether a single run would have been cheaper: a one-task plan ran as
+          one run, and tasks whose files mostly overlap only queue on each other. */}
+      {team && (team.singleRun || team.advice) && (
+        <p className="mt-1.5 text-[11px] text-sky-200/90 flex items-start gap-1.5" data-testid="coding-team-advice" data-reason={team.singleRun ? "single_run" : team.advice?.reason}>
+          <span className="material-symbols-rounded align-[-2px] shrink-0" style={{ fontSize: 14 }} aria-hidden="true">lightbulb</span>
+          <span>
+            {team.singleRun
+              ? t("codingAgent.team.adviceSingleRun")
+              : team.advice?.reason === "one_task"
+                ? t("codingAgent.team.adviceOneTask")
+                : t("codingAgent.team.adviceOverlap", { n: team.advice?.overlap ?? 0 })}
+          </span>
+        </p>
+      )}
 
       {/* Asking for a team happens in the chat, the way every other task
           does: the Create App card, on this project, with the team switch
@@ -491,6 +525,33 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
           </p>
           {team.error && (
             <p className="mt-2 text-[11px] text-red-300 break-words" data-testid="coding-team-reason">{team.error}</p>
+          )}
+          {/* The planner's map of what the goal touches — the one every worker
+              and reviewer is handed instead of exploring the project again. */}
+          {team.repoMap && (
+            <details className={`mt-2 ${INSET_SURFACE} px-3 py-2 text-[11px]`} data-testid="coding-team-repo-map">
+              <summary className="cursor-pointer text-[var(--text-secondary)] select-none">
+                <span className="material-symbols-rounded align-[-3px] mr-1" style={{ fontSize: 14 }} aria-hidden="true">map</span>
+                {t("codingAgent.team.repoMap")}
+              </summary>
+              <dl className="mt-1.5 space-y-1">
+                {([
+                  ["files", "codingAgent.team.repoMapFiles", team.repoMap.files],
+                  ["entry", "codingAgent.team.repoMapEntryPoints", team.repoMap.entryPoints],
+                  ["tests", "codingAgent.team.repoMapTests", team.repoMap.testCommands],
+                  ["gotchas", "codingAgent.team.repoMapGotchas", team.repoMap.gotchas],
+                ] as const).filter(([, , items]) => items.length > 0).map(([id, key, items]) => (
+                  <div key={id} data-testid={`coding-team-repo-map-${id}`}>
+                    <dt className="text-[var(--text-muted)]">{t(key)}</dt>
+                    <dd className="text-[var(--text-secondary)] break-words">
+                      <ul className="list-disc pl-4">
+                        {items.map((item) => <li key={item} className={id === "files" || id === "tests" ? "font-mono" : undefined}>{item}</li>)}
+                      </ul>
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            </details>
           )}
           {/* The pull request the goal asked for — the orchestrator's: its
               checks, the rounds its red CI sent tasks back, and how it ended. */}

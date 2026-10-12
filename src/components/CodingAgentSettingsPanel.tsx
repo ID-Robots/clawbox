@@ -3,7 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { notifyCodingAgentChanged } from "@/lib/ui-events";
-import { CODING_PROVIDER_NAME_KEY } from "@/lib/coding-provider";
+import { CODING_PROVIDER_NAME_KEY, ECONOMY_MODELS } from "@/lib/coding-provider";
+import { MODEL_ROLES, ROLE_AUTO, ROLE_DEFAULTS, ROLE_MODEL_TIERS, type ModelRole } from "@/lib/coding-role-models";
 import StatusMessage from "./StatusMessage";
 import DeviceCodeCard from "./DeviceCodeCard";
 import CodingAgentRulesCard from "./CodingAgentRulesCard";
@@ -165,6 +166,12 @@ export interface AgentStatus {
    *  Optional: an older server does not answer with it. OFF by default, so
    *  the fallback below is `?? false`. */
   teamDynamic?: boolean;
+  /**
+   * A team's model tier and effort per role, "auto" for the role's default
+   * (src/lib/coding-role-models.ts). Optional: a server that predates the
+   * setting answers without it, and the section is not drawn there.
+   */
+  roleModels?: Record<ModelRole, { model: string; effort: string }>;
   /** May a run draw pictures, and may the box draw the project's icon and
    *  favicon? Optional: an older server does not answer with it. ON by
    *  default, so the fallback below is `?? true`, not `?? false`. */
@@ -361,6 +368,9 @@ export default function CodingAgentSettingsPanel({
   // GitHub read that threw took the switch down with it — the panel sat
   // disabled over a perfectly good status because gh could not be asked.
   useEffect(() => {
+    // The panel's first read: it has no other moment to ask, and each answer
+    // is one render.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadStatus();
     void loadGithub();
   }, [loadStatus, loadGithub]);
@@ -973,6 +983,75 @@ export default function CodingAgentSettingsPanel({
             onChange={(next) => void saveSetting({ teamDynamic: next }, "teamDynamic", t("codingAgent.teamDynamicFailed"))}
           />
         </div>
+
+        {/* What each role of a team runs on. A planner reads and plans, a
+            reviewer reads and judges; only workers write the code — so the
+            first two default to the provider's cheaper model and at most
+            Extra high effort, and workers keep the owner's own. "Default"
+            stores nothing: a box that never opens this runs on the defaults. */}
+        {status?.roleModels && (
+          <div className="mt-4" data-testid="coding-agent-role-models">
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs font-medium text-[var(--text-secondary)]">{t("codingAgent.roleModelsLabel")}</span>
+              <HelpTip
+                text={t("codingAgent.roleModelsHint", { anthropic: ECONOMY_MODELS.anthropic, clawbox: ECONOMY_MODELS["clawbox-ai"] })}
+                label={t("codingAgent.roleModelsLabel")}
+                testId="coding-agent-role-models-help"
+              />
+            </div>
+            {/* One row per role whose two selects share the width and wrap
+                under the name in a narrow window — a fixed width cut the
+                labels off ("Default (cheaper mo…"), and German's run longer. */}
+            <div className="mt-1.5 space-y-1.5">
+              {MODEL_ROLES.map((role) => {
+                const current = status.roleModels![role];
+                const defaults = ROLE_DEFAULTS[role];
+                const roleName = t(`codingAgent.roleModels.${role}`);
+                const levels = status.effortLevels.includes(current.effort as Effort) || current.effort === ROLE_AUTO
+                  ? status.effortLevels
+                  : [...status.effortLevels, current.effort as Effort];
+                return (
+                  <div key={role} className="flex flex-wrap items-center gap-x-2 gap-y-1" data-testid={`coding-agent-role-${role}`}>
+                    <span className="w-24 shrink-0 text-[11px] text-[var(--text-secondary)]">{roleName}</span>
+                    <select
+                      value={current.model}
+                      disabled={saving}
+                      aria-label={t("codingAgent.roleModelFor", { role: roleName })}
+                      data-testid={`coding-agent-role-${role}-model`}
+                      onChange={(e) => void saveSetting({ roleModels: { [role]: { model: e.target.value } } }, `roleModels.${role}`, t("codingAgent.roleModelsFailed"))}
+                      className={`text-base sm:text-xs ${FIELD} flex-1 min-w-[11rem]`}
+                    >
+                      <option value={ROLE_AUTO}>{t(defaults.model === "economy" ? "codingAgent.roleModel.autoEconomy" : "codingAgent.roleModel.autoStandard")}</option>
+                      {ROLE_MODEL_TIERS.map((tier) => (
+                        <option key={tier} value={tier}>{t(`codingAgent.roleModel.${tier}`)}</option>
+                      ))}
+                    </select>
+                    <select
+                      value={current.effort}
+                      disabled={saving}
+                      aria-label={t("codingAgent.roleEffortFor", { role: roleName })}
+                      data-testid={`coding-agent-role-${role}-effort`}
+                      onChange={(e) => void saveSetting({ roleModels: { [role]: { effort: e.target.value } } }, `roleModels.${role}`, t("codingAgent.roleModelsFailed"))}
+                      className={`text-base sm:text-xs ${FIELD} flex-1 min-w-[13rem]`}
+                    >
+                      <option value={ROLE_AUTO}>
+                        {defaults.effortCap
+                          ? t("codingAgent.roleEffort.autoCapped", { level: t(`codingAgent.effort.${defaults.effortCap}`) })
+                          : t("codingAgent.roleEffort.autoOwner")}
+                      </option>
+                      {levels.map((level) => (
+                        <option key={level} value={level}>{t(`codingAgent.effort.${level}`)}</option>
+                      ))}
+                    </select>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="mt-1.5 text-[11px] text-[var(--text-muted)] leading-relaxed">
+              {t("codingAgent.roleModelsHint", { anthropic: ECONOMY_MODELS.anthropic, clawbox: ECONOMY_MODELS["clawbox-ai"] })}
+            </p>
+          </div>
+        )}
 
         {/* The two media switches. Under the review pass because they are
             about what a run may SPEND rather than how it works, and both are

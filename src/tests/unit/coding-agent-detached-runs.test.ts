@@ -270,7 +270,7 @@ afterEach(async () => {
 });
 
 describe("the scope prefix", () => {
-  it("carries the memory caps and leaves the capability drop untouched behind the --", async () => {
+  it("carries the memory caps and the lower CPU/IO share, and leaves the capability drop untouched behind the --", async () => {
     const units: UnitLib = await import("@/lib/coding-run-unit");
     const { bin, argv } = units.buildScopeArgv(
       "/usr/bin/systemd-run",
@@ -289,6 +289,12 @@ describe("the scope prefix", () => {
       `MemoryHigh=${units.RUN_MEMORY_HIGH}`,
       "-p",
       `MemoryMax=${units.RUN_MEMORY_MAX}`,
+      // The desktop and the web server first under contention (coding-run-cpu.ts).
+      "-p",
+      `CPUWeight=${units.RUN_CPU_WEIGHT}`,
+      "-p",
+      `IOWeight=${units.RUN_IO_WEIGHT}`,
+      `--nice=${units.RUN_NICE}`,
     ]);
     // The security boundary is what follows: the cgroup prefix must not have
     // reordered, dropped or wrapped any of it.
@@ -411,6 +417,9 @@ describe("spawning", () => {
     expect(asked[0]).toContain(`--unit=clawbox-run-${started.id}-`);
     expect(asked[0]).toContain("MemoryHigh=3G");
     expect(asked[0]).toContain("MemoryMax=4G");
+    expect(asked[0]).toContain("CPUWeight=20");
+    expect(asked[0]).toContain("IOWeight=20");
+    expect(asked[0]).toContain("--nice=10");
     expect(asked[0]).toContain("--collect");
 
     const settled = await lib.waitForRun(started.id, 25_000);

@@ -253,7 +253,7 @@ describe("parsePlan — the shape", () => {
   ];
 
   it("accepts the bare array (no shape: the default team) and the wrapped object, fenced or not", () => {
-    expect(parsePlan(JSON.stringify(tasks))).toEqual({ ok: true, shape: null, tasks: [{ task_description: "Fix the off-by-one in pager.ts", depends_on: [], files_hint: ["src/pager.ts"] }] });
+    expect(parsePlan(JSON.stringify(tasks))).toEqual({ ok: true, shape: null, repoMap: null, tasks: [{ task_description: "Fix the off-by-one in pager.ts", depends_on: [], files_hint: ["src/pager.ts"] }] });
     const wrapped = { shape: { parallelism: 1, review: "final", rationale: "A one-file fix." }, tasks };
     for (const text of [JSON.stringify(wrapped), `The plan:\n\`\`\`json\n${JSON.stringify(wrapped, null, 2)}\n\`\`\`\nDone.`, `Plan [v1]: ${JSON.stringify(wrapped)} [end]`]) {
       const out = parsePlan(text);
