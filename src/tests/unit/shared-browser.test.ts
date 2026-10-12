@@ -67,7 +67,7 @@ describe("applySharedBrowserBlock", () => {
         enabled: true,
         ssrfPolicy: { allowPrivateNetwork: false },
         defaultProfile: "openclaw",
-        profiles: { work: { cdpUrl: "http://10.0.0.5:9222" } },
+        profiles: { work: { cdpUrl: "http://192.0.2.5:9222" } },
       },
     };
     expect(applySharedBrowserBlock(config, desktop())).toBe(true);
@@ -76,7 +76,7 @@ describe("applySharedBrowserBlock", () => {
       ssrfPolicy: { allowPrivateNetwork: false },
       defaultProfile: SHARED_PROFILE,
       profiles: {
-        work: { cdpUrl: "http://10.0.0.5:9222" },
+        work: { cdpUrl: "http://192.0.2.5:9222" },
         [SHARED_PROFILE]: { cdpUrl: "http://127.0.0.1:18800", attachOnly: true },
       },
     });
@@ -84,7 +84,7 @@ describe("applySharedBrowserBlock", () => {
 
   it("leaves a default profile the owner chose themselves", () => {
     const config: Record<string, unknown> = {
-      browser: { defaultProfile: "work", profiles: { work: { cdpUrl: "http://10.0.0.5:9222" } } },
+      browser: { defaultProfile: "work", profiles: { work: { cdpUrl: "http://192.0.2.5:9222" } } },
     };
     expect(applySharedBrowserBlock(config, desktop())).toBe(true);
     const browser = config.browser as { defaultProfile: string; profiles: Record<string, unknown> };
@@ -104,10 +104,10 @@ describe("applySharedBrowserBlock", () => {
 
   describe("the escape hatch", () => {
     it("takes out what it wrote, and only that", () => {
-      const config: Record<string, unknown> = { browser: { enabled: true, profiles: { work: { cdpUrl: "http://10.0.0.5:9222" } } } };
+      const config: Record<string, unknown> = { browser: { enabled: true, profiles: { work: { cdpUrl: "http://192.0.2.5:9222" } } } };
       applySharedBrowserBlock(config, desktop());
       expect(applySharedBrowserBlock(config, desktop({ agentIsolated: true }))).toBe(true);
-      expect(config.browser).toEqual({ enabled: true, profiles: { work: { cdpUrl: "http://10.0.0.5:9222" } } });
+      expect(config.browser).toEqual({ enabled: true, profiles: { work: { cdpUrl: "http://192.0.2.5:9222" } } });
     });
 
     it("removes the whole block when nothing else was in it", () => {
