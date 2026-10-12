@@ -23,12 +23,15 @@ import RunProgressBar, { RUN_TONE } from "./RunProgressBar";
  *
  * It stays unless the OWNER puts it away. A run lasts many minutes and its
  * card is the last thing in the transcript, so it sat under every new message
- * for the whole of that time. The × in the header row hides the card; the
- * chat then draws one small round 🤖 chip at the bottom-right of the
- * transcript that brings it back, in its original place. The card does not
- * own that state: ChatPopup keeps the dismissed run ids (a Set, like its
- * `expandedLong`) and simply does not render a dismissed run's card, so a
- * restored card is the same card in the same position, not a copy appended
+ * for the whole of that time. The × in the header row hides the card FOR
+ * GOOD — finished or still running, across a closed chat, a switched tab, a
+ * reload and another window. The card does not own that state: ChatPopup
+ * keeps the dismissed run ids in the owner's kv store
+ * (src/lib/use-dismissed-coding-runs.ts) and simply does not render a
+ * dismissed run's card. The chat's small round 🤖 chip at the bottom-right of
+ * the transcript does NOT bring these back; it is only for cards that left on
+ * their own after a clean finish (src/lib/use-coding-run-auto-hide.ts), and a
+ * card it restores is the same card in the same position, not a copy appended
  * at the end.
  *
  * The elapsed time ticks while the run is in flight and freezes at the total
@@ -228,8 +231,9 @@ export default function CodingAgentActivityPill(
      */
     onPreview?: (src: string, alt: string) => void;
     /**
-     * Put the card away. The chat owns the dismissed set (see the note at the
-     * top), so the card only asks; with no handler there is no × at all.
+     * Put the card away for good. The chat owns the dismissed set (see the
+     * note at the top), so the card only asks; with no handler there is no ×
+     * at all.
      */
     onDismiss?: () => void;
     /**

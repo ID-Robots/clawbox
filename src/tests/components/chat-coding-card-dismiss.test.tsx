@@ -1,9 +1,11 @@
 import type { ReactNode } from "react";
+import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@/tests/helpers/test-utils";
+import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import ChatPopup from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { translations } from "@/lib/translations";
+import { DISMISSED_CODING_RUNS_KEY } from "@/lib/use-dismissed-coding-runs";
 
 // See chat-header-close-button.test.tsx for why a ChatPopup mount gets 30 s.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
@@ -18,17 +20,21 @@ vi.mock("@/lib/i18n", async (importOriginal) => {
 });
 
 /**
- * Putting a coding-run card away, and getting it back.
+ * Putting a coding-run card away — for good.
  *
  * The owner's ask: a run lasts many minutes and its card is the last thing in
  * the transcript, so it sat under every new message for the whole of that
- * time. The × on a card hides it; one small round 🤖 chip at the bottom-right
- * of the transcript brings it back. The chat owns the dismissed set — keyed
- * by run id, like `expandedLong` — and only FILTERS the list of cards, so a
- * restored card is the same card in its original place.
+ * time. The × on a card hides it. Their report after that: the card came back
+ * — the set was React state, emptied when the chat closed and lost on a
+ * reload, and the 🤖 chip brought it back with the cards that left on their
+ * own. Now the run id is in the owner's kv store
+ * (src/lib/use-dismissed-coding-runs.ts) and the chip is only for cards that
+ * left on their own (chat-coding-card-auto-hide.test.tsx).
  *
  * The device's run record is stubbed at the hook: what is under test is the
- * chat's own state, not the poll.
+ * chat's own state, not the poll. client-kv — the page's copy of the store —
+ * is a plain map, and `/setup-api/kv?key=…` — the device's — is answered in
+ * fetch.
  */
 const NOW = Date.now();
 const run = (id: string, task: string, status: "running" | "completed") => ({
@@ -47,11 +53,40 @@ vi.mock("@/lib/use-coding-agent-activity", async (importOriginal) => {
   return { ...actual, useCodingAgentActivity: () => ({ runs: RUNS, nudge: vi.fn() }) };
 });
 
+// Plain functions over hoisted state: this suite runs with `mockReset`.
+const kv = vi.hoisted(() => ({
+  cache: new Map<string, string>(),
+  device: null as string | null,
+  deviceFails: false,
+  cacheFails: false,
+}));
+
+vi.mock("@/lib/client-kv", () => ({
+  init: async () => {},
+  get: (key: string) => {
+    if (kv.cacheFails) throw new Error("cache unreadable");
+    return kv.cache.get(key) ?? null;
+  },
+  getJSON: () => null,
+  set: (key: string, value: string) => {
+    kv.cache.set(key, value);
+    // What a flush would deliver: this page's write lands on the device.
+    if (key === DISMISSED_CODING_RUNS_KEY) kv.device = value;
+  },
+  setJSON: () => {},
+  remove: () => {},
+  flush: () => {},
+}));
+
 function installFetch() {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: unknown) => {
       const url = String(input);
+      if (url.startsWith(`/setup-api/kv?key=${DISMISSED_CODING_RUNS_KEY}`)) {
+        if (kv.deviceFails) throw new TypeError("Failed to fetch");
+        return { ok: true, json: async () => ({ key: DISMISSED_CODING_RUNS_KEY, value: kv.device }) };
+      }
       if (url.includes("/setup-api/harness/active")) {
         return { ok: true, json: async () => ({ active: "hermes", edition: "hermes" }) };
       }
@@ -69,6 +104,10 @@ function installFetch() {
 beforeEach(() => {
   resetHarnessCache();
   window.localStorage.clear();
+  kv.cache.clear();
+  kv.device = null;
+  kv.deviceFails = false;
+  kv.cacheFails = false;
   Element.prototype.scrollIntoView = vi.fn();
   vi.stubGlobal(
     "WebSocket",
@@ -90,7 +129,8 @@ afterEach(() => {
 const cards = () => screen.queryAllByTestId("coding-agent-activity");
 const cardTitles = () => cards().map((el) => el.querySelector('[data-testid="coding-agent-activity-toggle"]')?.textContent ?? "");
 const DISMISS = translations.en["codingAgent.chatDismiss"];
-const RESTORE = translations.en["codingAgent.chatRestore"];
+const storedIds = () => JSON.parse(kv.device ?? "null");
+const dismissOf = (card: HTMLElement) => card.querySelector<HTMLButtonElement>('[data-testid="coding-agent-activity-dismiss"]')!;
 
 describe("dismissing a coding-run card in the chat", () => {
   it("draws every run as a card, and no restore chip while none is put away", async () => {
@@ -101,55 +141,151 @@ describe("dismissing a coding-run card in the chat", () => {
     expect(screen.queryByTestId("coding-agent-restore")).not.toBeInTheDocument();
   });
 
-  it("× hides THAT card and leaves one round chip; the chip brings the card back where it was", async () => {
+  it("× hides THAT card, keeps its run id in the owner's store, and draws no chip that would bring it back", async () => {
     render(<ChatPopup isOpen onClose={() => {}} />);
     await screen.findAllByTestId("coding-agent-activity");
 
-    // Put the first (finished) card away.
     const closes = screen.getAllByRole("button", { name: DISMISS });
     expect(closes).toHaveLength(2);
     fireEvent.click(closes[0]);
 
     expect(cards()).toHaveLength(1);
     expect(cardTitles()[0]).toContain("Beta task");
-    const chip = screen.getByTestId("coding-agent-restore");
-    expect(chip).toHaveAttribute("aria-label", RESTORE);
-    // Round, and a thumb target: at least ~40px each way.
-    expect(chip.style.borderRadius).toBe("50%");
-    expect(parseInt(chip.style.width, 10)).toBeGreaterThanOrEqual(40);
-    expect(parseInt(chip.style.height, 10)).toBeGreaterThanOrEqual(40);
-    // At the END of the transcript, after the card that is still shown, and
-    // stuck to the scrollport's bottom rather than floating over the newest
-    // message.
-    const row = screen.getByTestId("coding-agent-restore-row");
-    expect(row.parentElement).toBe(screen.getByTestId("chat-transcript"));
-    expect(cards()[0].compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(row.style.position).toBe("sticky");
-
-    // Bring it back: same card, same place — first, not appended last.
-    fireEvent.click(chip);
-    expect(cards()).toHaveLength(2);
-    expect(cardTitles()[0]).toContain("Alpha task");
-    expect(cardTitles()[1]).toContain("Beta task");
+    expect(storedIds()).toEqual(["run-alpha"]);
     expect(screen.queryByTestId("coding-agent-restore")).not.toBeInTheDocument();
   });
 
-  it("one chip however many cards are put away, and one tap restores them all", async () => {
-    render(<ChatPopup isOpen onClose={() => {}} />);
+  it("stays hidden when the chat closes and opens again", async () => {
+    const { rerender } = render(<ChatPopup isOpen onClose={() => {}} />);
     await screen.findAllByTestId("coding-agent-activity");
-    for (const close of screen.getAllByRole("button", { name: DISMISS })) fireEvent.click(close);
-    expect(cards()).toHaveLength(0);
-    expect(screen.getAllByTestId("coding-agent-restore")).toHaveLength(1);
-    fireEvent.click(screen.getByTestId("coding-agent-restore"));
-    expect(cards()).toHaveLength(2);
+    fireEvent.click(screen.getAllByRole("button", { name: DISMISS })[0]);
+    expect(cards()).toHaveLength(1);
+
+    rerender(<ChatPopup isOpen={false} onClose={() => {}} />);
+    rerender(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => expect(cards()).toHaveLength(1));
+    expect(cardTitles()[0]).toContain("Beta task");
+    // And the read of the device that comes with opening leaves it gone too.
+    await act(async () => {});
+    expect(cards()).toHaveLength(1);
+    expect(screen.queryByTestId("coding-agent-restore")).not.toBeInTheDocument();
   });
 
-  it("× does not open the card it is on", async () => {
+  it("stays hidden on a fresh mount — a reload — that reads it from the store", async () => {
+    const first = render(<ChatPopup isOpen onClose={() => {}} />);
+    await screen.findAllByTestId("coding-agent-activity");
+    fireEvent.click(screen.getAllByRole("button", { name: DISMISS })[0]);
+    first.unmount();
+
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await screen.findAllByTestId("coding-agent-activity");
+    expect(cards()).toHaveLength(1);
+    expect(cardTitles()[0]).toContain("Beta task");
+  });
+
+  it("hides a card another window put away, once the chat reads the device", async () => {
+    kv.device = JSON.stringify(["run-beta"]);
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => expect(cardTitles()).toEqual([expect.stringContaining("Alpha task")]));
+  });
+
+  it("a card whose run is still in flight goes for good as well", async () => {
+    const { rerender } = render(<ChatPopup isOpen onClose={() => {}} />);
+    await screen.findAllByTestId("coding-agent-activity");
+    expect(cards()[1]).toHaveAttribute("data-status", "running");
+    fireEvent.click(dismissOf(cards()[1]));
+    expect(cardTitles()).toEqual([expect.stringContaining("Alpha task")]);
+    expect(storedIds()).toEqual(["run-beta"]);
+
+    rerender(<ChatPopup isOpen={false} onClose={() => {}} />);
+    rerender(<ChatPopup isOpen onClose={() => {}} />);
+    await act(async () => {});
+    expect(cardTitles()).toEqual([expect.stringContaining("Alpha task")]);
+  });
+
+  it("× on one card leaves the other as it was, closed", async () => {
     render(<ChatPopup isOpen onClose={() => {}} />);
     await screen.findAllByTestId("coding-agent-activity");
     fireEvent.click(screen.getAllByRole("button", { name: DISMISS })[1]);
-    fireEvent.click(screen.getByTestId("coding-agent-restore"));
     const toggles = screen.getAllByTestId("coding-agent-activity-toggle");
-    for (const toggle of toggles) expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggles).toHaveLength(1);
+    expect(toggles[0]).toHaveAttribute("aria-expanded", "false");
+  });
+
+  describe("the keyboard focus after ×", () => {
+    it("goes to the next card's ×, then the one before, then the transcript — never <body>", async () => {
+      render(<ChatPopup isOpen onClose={() => {}} />);
+      await screen.findAllByTestId("coding-agent-activity");
+      const transcript = screen.getByTestId("chat-transcript");
+
+      const alphaClose = dismissOf(cards()[0]);
+      act(() => alphaClose.focus());
+      fireEvent.click(alphaClose);
+      expect(cards()).toHaveLength(1);
+      expect(document.activeElement).toBe(dismissOf(cards()[0]));
+      expect(cards()[0]).toHaveAttribute("data-run-id", "run-beta");
+
+      fireEvent.click(document.activeElement!);
+      expect(cards()).toHaveLength(0);
+      expect(document.activeElement).toBe(transcript);
+    });
+
+    it("goes to the card before when the last card is put away", async () => {
+      render(<ChatPopup isOpen onClose={() => {}} />);
+      await screen.findAllByTestId("coding-agent-activity");
+      const betaClose = dismissOf(cards()[1]);
+      act(() => betaClose.focus());
+      fireEvent.click(betaClose);
+      expect(document.activeElement).toBe(dismissOf(cards()[0]));
+      expect(cards()[0]).toHaveAttribute("data-run-id", "run-alpha");
+    });
+
+    it("is moved when it was nowhere — a browser that does not focus a pressed button", async () => {
+      render(<ChatPopup isOpen onClose={() => {}} />);
+      await screen.findAllByTestId("coding-agent-activity");
+      act(() => (document.activeElement as HTMLElement | null)?.blur());
+      expect(document.activeElement).toBe(document.body);
+      fireEvent.click(dismissOf(cards()[0]));
+      expect(document.activeElement).toBe(dismissOf(cards()[0]));
+    });
+
+    it("is left alone when it is somewhere else in the chat", async () => {
+      render(<ChatPopup isOpen onClose={() => {}} />);
+      await screen.findAllByTestId("coding-agent-activity");
+      const betaToggle = cards()[1].querySelector<HTMLButtonElement>('[data-testid="coding-agent-activity-toggle"]')!;
+      act(() => betaToggle.focus());
+      fireEvent.click(dismissOf(cards()[0]));
+      expect(document.activeElement).toBe(betaToggle);
+    });
+  });
+
+  describe("a store that cannot be read shows the cards", () => {
+    it("the page's copy throwing", async () => {
+      kv.cacheFails = true;
+      render(<ChatPopup isOpen onClose={() => {}} />);
+      expect(await screen.findAllByTestId("coding-agent-activity")).toHaveLength(2);
+    });
+
+    it("the page's copy damaged", async () => {
+      kv.cache.set(DISMISSED_CODING_RUNS_KEY, "{not a list");
+      render(<ChatPopup isOpen onClose={() => {}} />);
+      expect(await screen.findAllByTestId("coding-agent-activity")).toHaveLength(2);
+    });
+
+    it("the device unreachable", async () => {
+      kv.deviceFails = true;
+      render(<ChatPopup isOpen onClose={() => {}} />);
+      await screen.findAllByTestId("coding-agent-activity");
+      await act(async () => {});
+      expect(cards()).toHaveLength(2);
+    });
+
+    it("the device's copy damaged", async () => {
+      kv.device = '"everything"';
+      render(<ChatPopup isOpen onClose={() => {}} />);
+      await screen.findAllByTestId("coding-agent-activity");
+      await act(async () => {});
+      expect(cards()).toHaveLength(2);
+    });
   });
 });

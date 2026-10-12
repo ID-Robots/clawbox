@@ -540,7 +540,7 @@ export const sv: Record<string, string> = {
   "codingAgent.chatMore": "+{n} till",
   "codingAgent.chatBusy": "arbetar",
   "codingAgent.chatDismiss": "Dölj det här kortet",
-  "codingAgent.chatRestore": "Visa kodkörningen igen",
+  "codingAgent.chatRestore": "Visa avslutade kodkörningar igen",
   "codingAgent.noticeOpen": "Öppna kodagenten",
   "codingAgent.noticeDismiss": "Stäng",
   "codingAgent.switchLabel": "Låt assistenten delegera programmeringsarbete",
