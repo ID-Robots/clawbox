@@ -132,7 +132,7 @@ Three cgroup v2 memory guards ship as `50-clawbox-memory.conf` drop-ins, written
 
 **Hermes / dual editions**
 
-- **Hermes** is installed at `~/.local/bin/hermes` (a shim into `~/.hermes/hermes-agent/venv`), with its configuration and pooled-auth credential store under `~/.hermes`.
+- **Hermes** is installed at `~/.local/bin/hermes` (a shim into the agent at `~/.hermes/hermes-agent`, whose Python environment lives under `~/.hermes/installs/`), with its configuration and pooled-auth credential store under `~/.hermes`.
 - **Config** lives in `~/.hermes/config.yaml`. Every writer does a full read-modify-write, so hand-added comments and formatting in that file are not preserved — treat it as generated state.
 - **MCP**: `scripts/register-mcp.sh` writes `mcp_servers.clawbox` into `~/.hermes/config.yaml` at every web-server boot and at install time.
 - **Dashboard**: reachable through the ClawBox desktop (Hermes app) via the session-gated proxy on port `8090`; there is no Control UI and `/chat` 404s.

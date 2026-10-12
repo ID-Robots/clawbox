@@ -4424,6 +4424,52 @@ hermes_dashboard_restart_after_install() {
   return 0
 }
 
+# The interpreter the Hermes agent runs on, or nothing when it has none.
+#
+# Up to v0.21.1 that was always `<agent_dir>/venv/bin/python`. From v0.21.7
+# the upstream installer hands dependencies to its own package manager, which
+# builds content-addressed environments outside the checkout and records the
+# selected one in `<hermes_home>/installs/<key>/facts.json`
+# (`packages.venv.environment`), `<key>` being the first 16 hex digits of the
+# sha256 of the checkout's real path; `~/.local/bin/hermes` now execs a
+# launcher in `<agent_dir>/.hermes/bin` instead of the venv. This follows
+# upstream's own `selected_venv` (pm/environments.py): a recorded environment
+# must sit under that key's `environments/` and carry a `pyvenv.cfg`, and a
+# record that fails that is an answer of NOTHING, not a licence to fall back;
+# only with no record does the in-tree `venv` of an older install answer.
+# Read-only and standard-library only, so it is safe as root over a clawbox
+# tree (`-I`, and the script comes from stdin, so no __pycache__ is written).
+# scripts/setup-hermes-edition.sh carries the same function; a unit test keeps
+# the two identical.
+hermes_venv_python() {
+  python3 -I - "$1" "$2" 2>/dev/null <<'PY'
+import hashlib, json, os, sys
+agent, home = sys.argv[1], sys.argv[2]
+key = hashlib.sha256(os.path.realpath(agent).encode()).hexdigest()[:16]
+state = os.path.join(home, "installs", key)
+try:
+    with open(os.path.join(state, "facts.json"), encoding="utf-8-sig") as fh:
+        recorded = json.load(fh).get("packages", {}).get("venv", {}).get("environment")
+except FileNotFoundError:
+    recorded = None
+except (OSError, ValueError, AttributeError):
+    sys.exit(1)
+if recorded is None:
+    venv = os.path.join(agent, "venv")
+else:
+    if not isinstance(recorded, str):
+        sys.exit(1)
+    venv = os.path.realpath(recorded)
+    generations = os.path.realpath(os.path.join(state, "environments"))
+    if not venv.startswith(generations + os.sep) or not os.path.isfile(os.path.join(venv, "pyvenv.cfg")):
+        sys.exit(1)
+python = os.path.join(venv, "bin", "python")
+if not os.access(python, os.X_OK):
+    sys.exit(1)
+print(python)
+PY
+}
+
 # Install the Hermes agent (git-based install into ~/.hermes). Needed by every
 # edition that runs Hermes — the hermes SKU and the premium dual SKU (which was
 # previously skipped here, so a dual box got the switcher but no second
@@ -4432,7 +4478,8 @@ step_hermes_install() {
   installs_hermes_harness || return 0
   local shim="$CLAWBOX_HOME/.local/bin/hermes"
   local agent_dir="$CLAWBOX_HOME/.hermes/hermes-agent"
-  local venv_python="$agent_dir/venv/bin/python"
+  local venv_python
+  venv_python="$(hermes_venv_python "$agent_dir" "$CLAWBOX_HOME/.hermes")" || venv_python=""
   local installed=""
   local pin="$HERMES_PIN_COMMIT"
   # Whether an upgrade this step performed landed somewhere other than the pin.
@@ -4647,6 +4694,9 @@ step_hermes_install() {
     'curl -fsSL --connect-timeout 15 --retry 3 --retry-connrefused "$1" | bash -s -- --commit "$2"' \
     _ "$installer_url" "$pin" \
     || echo "  Warning: Hermes install failed (non-fatal) — install it manually then re-run install.sh"
+  # Asked again: the install just chose (or moved) the environment, and from
+  # v0.21.7 its path changes with every dependency set.
+  venv_python="$(hermes_venv_python "$agent_dir" "$CLAWBOX_HOME/.hermes")" || venv_python=""
 
   # Verify rather than assume. The installer is fetched over the network and is
   # non-fatal above, so a silent failure here would otherwise be discovered by
@@ -4776,7 +4826,10 @@ step_hermes_install() {
   # skipped fixup and cannot fail the update with it, so the honest answer is
   # now safe to give: the shim has to be runnable.
   # The same two-part test the step's own probe makes (a shim alone is a
-  # four-line wrapper and proves nothing about the agent under ~/.hermes).
+  # small wrapper and proves nothing about the agent under ~/.hermes). Asked
+  # once more, because the branch above may just have put the previous agent
+  # back, and its environment is not the one the failed install left.
+  venv_python="$(hermes_venv_python "$agent_dir" "$CLAWBOX_HOME/.hermes")" || venv_python=""
   if [ -x "$shim" ] && [ -x "$venv_python" ]; then
     # Runnable — and `$_hermes_off_pin` is the second half of the answer: an
     # install that landed off the pin leaves the box working on a build we do
@@ -5352,7 +5405,8 @@ HARNESS_SWAP_PROBE_SAID=""
 # thrown away it left the owner a red modal with no reason on it.
 harness_swap_hermes_runnable() {
   local shim="$CLAWBOX_HOME/.local/bin/hermes"
-  local venv_python="$CLAWBOX_HOME/.hermes/hermes-agent/venv/bin/python"
+  local venv_python
+  venv_python="$(hermes_venv_python "$CLAWBOX_HOME/.hermes/hermes-agent" "$CLAWBOX_HOME/.hermes")" || venv_python=""
   local said
   HARNESS_SWAP_PROBE_SAID=""
   if [ ! -x "$shim" ]; then

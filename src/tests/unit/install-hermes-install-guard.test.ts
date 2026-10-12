@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { execFileSync, spawnSync } from "node:child_process";
-import fs, { readFileSync } from "node:fs";
-import os from "node:os";
+import { createHash } from "node:crypto";
+import fs, { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import os, { tmpdir } from "node:os";
 import path from "node:path";
 
 /**
@@ -161,10 +162,17 @@ describe("step_hermes_install treats a shim without an agent as NOT installed", 
     );
   });
 
-  it("requires the venv interpreter the shim execs", () => {
-    // The shim's line 4 execs this path; its absence is the whole failure mode.
+  it("requires the venv interpreter the shim runs on, asked again after installing and before the verdict", () => {
+    // The agent's interpreter is the whole failure mode. Since v0.21.7 its path
+    // is chosen by upstream's package manager and changes with every
+    // dependency set, so it is resolved (hermes_venv_python) before the probe
+    // AND again after the install, never hard-coded.
     expect(HERMES_CODE).toContain("$CLAWBOX_HOME/.hermes/hermes-agent");
-    expect(HERMES_CODE).toMatch(/venv_python="\$agent_dir\/venv\/bin\/python"/);
+    const resolves = HERMES_CODE.split(NL).filter((l) =>
+      /venv_python="\$\(hermes_venv_python "\$agent_dir" "\$CLAWBOX_HOME\/\.hermes"\)" \|\| venv_python=""/.test(l),
+    );
+    expect(resolves).toHaveLength(3);
+    expect(HERMES_CODE).not.toMatch(/venv_python="\$agent_dir\/venv\/bin\/python"/);
     expect(HERMES_CODE).toMatch(/\[\s+-x\s+"\$venv_python"\s+\]/);
   });
 
@@ -714,6 +722,7 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
       "sed -n '/^unit_is_coming_up() {/,/^}/p' \"$4\" > \"$1/fn.sh\"",
       "sed -n '/^hermes_dashboard_restart_warn() {/,/^}/p' \"$4\" >> \"$1/fn.sh\"",
       "sed -n '/^hermes_dashboard_restart_after_install() {/,/^}/p' \"$4\" >> \"$1/fn.sh\"",
+      "sed -n '/^hermes_venv_python() {/,/^}/p' \"$4\" >> \"$1/fn.sh\"",
       "sed -n '/^step_hermes_install() {/,/^}/p' \"$4\" >> \"$1/fn.sh\"",
       '. "$1/fn.sh"',
       // Merged, because the warnings that matter here are all on stderr.
@@ -1450,7 +1459,7 @@ describe("setup-hermes-edition.sh does not repeat the shim-only check", () => {
     // was present and executable, so this check passed and the edition setup
     // continued on a device with no agent behind it.
     expect(SETUP_HERMES).toContain(
-      'HERMES_VENV_PYTHON="$CLAWBOX_HOME/.hermes/hermes-agent/venv/bin/python"',
+      'HERMES_VENV_PYTHON="$(hermes_venv_python "$CLAWBOX_HOME/.hermes/hermes-agent" "$CLAWBOX_HOME/.hermes")" || HERMES_VENV_PYTHON=""',
     );
     const guard = SETUP_HERMES.split(NL).find((l) => l.includes('[ ! -x "$HERMES_BIN" ]'));
     expect(guard).toBeDefined();
@@ -1526,5 +1535,92 @@ describe.skipIf(!hasBash)("its call sites, where errexit is live", () => {
     const r = afterFailedStep("step_hermes_install");
     expect(r.code).not.toBe(0);
     expect(r.out).not.toContain("PROVISIONING VERDICT REACHED");
+  });
+});
+
+/**
+ * Where the agent's interpreter lives. Up to v0.21.1 it was always
+ * `<agent_dir>/venv/bin/python`; from v0.21.7 upstream's package manager builds
+ * it outside the checkout and records it in
+ * `<hermes_home>/installs/<sha256(realpath(agent_dir))[:16]>/facts.json`.
+ * Measured on a Nano after a v0.21.7 install: no `<agent_dir>/venv` at all,
+ * the record naming `installs/<key>/environments/<id>/venv`.
+ */
+describe("hermes_venv_python finds the interpreter in either layout", () => {
+  const SETUP_HERMES = readFileSync(path.join(REPO, "scripts/setup-hermes-edition.sh"), "utf-8");
+  const sliceFn = (src: string) => {
+    const lines = src.split(NL);
+    const start = lines.findIndex((l) => l === "hermes_venv_python() {");
+    const end = lines.findIndex((l, i) => i > start && l === "}");
+    return lines.slice(start, end + 1).join(NL);
+  };
+  const FN = sliceFn(INSTALL_SH);
+
+  let home: string;
+  let agent: string;
+  beforeEach(() => {
+    home = mkdtempSync(path.join(tmpdir(), "hermes-venv-"));
+    agent = path.join(home, "hermes-agent");
+    mkdirSync(agent, { recursive: true });
+  });
+  afterEach(() => rmSync(home, { recursive: true, force: true }));
+
+  const exe = (p: string) => {
+    mkdirSync(path.dirname(p), { recursive: true });
+    writeFileSync(p, "#!/bin/sh\n");
+    chmodSync(p, 0o755);
+  };
+  const key = () => createHash("sha256").update(realpathSync(agent)).digest("hex").slice(0, 16);
+  const record = (environment: unknown) => {
+    const state = path.join(home, "installs", key());
+    mkdirSync(state, { recursive: true });
+    writeFileSync(path.join(state, "facts.json"), JSON.stringify({ packages: { venv: { environment } }, schema: 1 }));
+  };
+  const generation = (id: string, cfg = true) => {
+    const venv = path.join(home, "installs", key(), "environments", id, "venv");
+    exe(path.join(venv, "bin", "python"));
+    if (cfg) writeFileSync(path.join(venv, "pyvenv.cfg"), "home = /x\n");
+    return venv;
+  };
+  const resolve = () => {
+    const r = spawnSync("bash", ["-c", `${FN}\nhermes_venv_python "$1" "$2"`, "bash", agent, home], { encoding: "utf-8" });
+    return { status: r.status, out: (r.stdout ?? "").trim() };
+  };
+
+  it("is one function, identical in install.sh and setup-hermes-edition.sh", () => {
+    expect(FN).toMatch(/^hermes_venv_python\(\) \{/);
+    expect(sliceFn(SETUP_HERMES)).toBe(FN);
+  });
+
+  it("answers the in-tree venv of an install that predates the package manager", () => {
+    exe(path.join(agent, "venv", "bin", "python"));
+    expect(resolve()).toEqual({ status: 0, out: path.join(agent, "venv", "bin", "python") });
+  });
+
+  it("answers the environment the package manager recorded, over an in-tree venv", () => {
+    exe(path.join(agent, "venv", "bin", "python"));
+    const venv = generation("abc");
+    record(venv);
+    expect(resolve()).toEqual({ status: 0, out: path.join(realpathSync(venv), "bin", "python") });
+  });
+
+  it("answers nothing for a record outside this install's environments", () => {
+    exe(path.join(agent, "venv", "bin", "python"));
+    const elsewhere = path.join(home, "elsewhere", "venv");
+    exe(path.join(elsewhere, "bin", "python"));
+    writeFileSync(path.join(elsewhere, "pyvenv.cfg"), "");
+    record(elsewhere);
+    expect(resolve()).toEqual({ status: 1, out: "" });
+  });
+
+  it("answers nothing for a recorded environment without pyvenv.cfg, or an unreadable record", () => {
+    record(generation("abc", false));
+    expect(resolve().status).toBe(1);
+    writeFileSync(path.join(home, "installs", key(), "facts.json"), "{not json");
+    expect(resolve().status).toBe(1);
+  });
+
+  it("answers nothing when there is no interpreter at all", () => {
+    expect(resolve()).toEqual({ status: 1, out: "" });
   });
 });
