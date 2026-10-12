@@ -308,6 +308,32 @@ describe("the panel: what an agent is doing now", () => {
     expect(fetches.find((f) => f.url === "/setup-api/coding-agent/stop")?.body).toEqual({ runId: "run-work0002" });
   });
 
+  it("says a refused Stop above the buttons, and brings it on screen", async () => {
+    const answered = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+      if (input.toString() === "/setup-api/coding-agent/stop") return json({ error: "That run was started by the owner; only the owner can stop it.", kind: "owner_only" }, 403);
+      return answered(input, init);
+    }));
+    // jsdom has no scrollIntoView: lend one for this test and take it back after.
+    const original = Element.prototype.scrollIntoView;
+    const shown = vi.fn();
+    Element.prototype.scrollIntoView = shown;
+    try {
+      const { onChanged } = renderTeam();
+      fireEvent.click(node("run-work0002"));
+      fireEvent.click(await screen.findByTestId("coding-agent-node-panel-stop"));
+      const alert = await screen.findByRole("alert");
+      expect(alert).toHaveTextContent("only the owner can stop it");
+      // Before the row of buttons in the panel, not after it.
+      const actions = screen.getByTestId("coding-agent-node-panel-actions");
+      expect(alert.compareDocumentPosition(actions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(shown).toHaveBeenCalled();
+      expect(onChanged).not.toHaveBeenCalled();
+    } finally {
+      Element.prototype.scrollIntoView = original;
+    }
+  });
+
   it("offers no Stop to a session that is not the owner's", async () => {
     isOwner = false;
     renderTeam();
@@ -320,8 +346,31 @@ describe("the panel: what an agent is doing now", () => {
     renderTeam({ runOf: (id) => (id === "run-plan0001" ? undefined : RUNS[id]) });
     fireEvent.click(node("run-plan0001"));
     expect(screen.getByTestId("coding-agent-node-panel-now")).toHaveTextContent(t("codingAgent.diagram.loading"));
+    // The planner is done by the board's word: not "now", even before its record lands.
+    expect(screen.getByTestId("coding-agent-node-panel-now-label")).toHaveTextContent(t("codingAgent.diagram.lastStep"));
     await waitFor(() => expect(screen.getByTestId("coding-agent-node-panel-now")).toHaveTextContent("fetched step"));
     expect(fetches.some((f) => f.url === "/setup-api/coding-agent/runs?id=run-plan0001")).toBe(true);
+  });
+
+  it("asks once for a run the box no longer has, however often the host reads again", async () => {
+    const answered = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url.startsWith("/setup-api/coding-agent/runs?id=")) {
+        fetches.push({ url });
+        return json({ error: "There is no coding run with that id." }, 404);
+      }
+      return answered(input, init);
+    }));
+    const runOf = (id: string) => (id === "run-plan0001" ? undefined : RUNS[id]);
+    const view = render(<CodingAgentDiagram source={{ kind: "team", team: TEAM }} runOf={runOf} onOpenRun={vi.fn()} refreshKey={1} />);
+    fireEvent.click(node("run-plan0001"));
+    await waitFor(() => expect(screen.getByTestId("coding-agent-node-panel-now")).toHaveTextContent(t("codingAgent.diagram.noRecord")));
+    // The host's live poll moves on twice; the answer would not change.
+    for (const k of [2, 3]) view.rerender(<CodingAgentDiagram source={{ kind: "team", team: TEAM }} runOf={runOf} onOpenRun={vi.fn()} refreshKey={k} />);
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    expect(fetches.filter((f) => f.url === "/setup-api/coding-agent/runs?id=run-plan0001")).toHaveLength(1);
+    expect(screen.getByTestId("coding-agent-node-panel-now")).toHaveTextContent(t("codingAgent.diagram.noRecord"));
   });
 
   it("opens as a sheet under the chart in a narrow window", () => {

@@ -235,8 +235,11 @@ export function resetDiagramOwnerCache(): void {
  * on a clock of its own.
  */
 function useRunRecord(runId: string | null, supplied: DiagramRun | undefined, refreshKey: unknown): { run: DiagramRun | null; loading: boolean } {
-  const [fetched, setFetched] = useState<{ id: string; run: DiagramRun | null } | null>(null);
-  const settledId = fetched && fetched.run && !isHeld(fetched.run.status) ? fetched.id : null;
+  const [fetched, setFetched] = useState<{ id: string; run: DiagramRun | null; gone?: boolean } | null>(null);
+  // Nothing more to learn: the run has settled, or the box said it has no
+  // such run (404) — asking again on every read of the host would only
+  // repeat the answer. A failed read is asked again.
+  const settledId = fetched && (fetched.gone || (fetched.run && !isHeld(fetched.run.status))) ? fetched.id : null;
   useEffect(() => {
     if (!runId || supplied || settledId === runId) return;
     let cancelled = false;
@@ -244,7 +247,7 @@ function useRunRecord(runId: string | null, supplied: DiagramRun | undefined, re
       try {
         const res = await fetch(`/setup-api/coding-agent/runs?id=${encodeURIComponent(runId)}`, { cache: "no-store" });
         const data = await res.json().catch(() => null) as { run?: DiagramRun } | null;
-        if (!cancelled) setFetched({ id: runId, run: res.ok && data?.run ? data.run : null });
+        if (!cancelled) setFetched({ id: runId, run: res.ok && data?.run ? data.run : null, gone: res.status === 404 });
       } catch {
         if (!cancelled) setFetched({ id: runId, run: null });
       }
@@ -608,6 +611,13 @@ function AgentPanel({ id, node, team, supplied, parentRun, refreshKey, isCurrent
   const [messaging, setMessaging] = useState(false);
   const [stopping, setStopping] = useState(false);
   const [stopError, setStopError] = useState<string | null>(null);
+  // A refused Stop says so where the owner is looking: above the buttons, and
+  // brought on screen — under them, in a sheet, it sat below the fold and the
+  // press looked like nothing happened.
+  const stopErrorRef = useRef<HTMLParagraphElement>(null);
+  useEffect(() => {
+    if (stopError) stopErrorRef.current?.scrollIntoView?.({ block: "nearest" });
+  }, [stopError]);
   const live = run ? isLive(run.status) : false;
   const stoppable = run !== null && isHeld(run.status) && run.status !== "draft";
   const owner = useOwnerSession(stoppable);
@@ -713,8 +723,10 @@ function AgentPanel({ id, node, team, supplied, parentRun, refreshKey, isCurrent
 
       {/* NOW — the one line the owner opened this for. */}
       <div className="mt-3">
-        {/* Now, while it works; once it has stopped, the last thing it did. */}
-        <p className={label}>{t(run && !isHeld(run.status) ? "codingAgent.diagram.lastStep" : "codingAgent.diagram.now")}</p>
+        {/* Now, while it works; once it has stopped, the last thing it did —
+            by its run when the panel has it, else by the node's own state,
+            so a finished agent whose record is still loading is not "now". */}
+        <p className={label} data-testid="coding-agent-node-panel-now-label">{t((run ? !isHeld(run.status) : node.state !== "queued" && !isActiveState(node.state)) ? "codingAgent.diagram.lastStep" : "codingAgent.diagram.now")}</p>
         <p className="mt-1 flex items-start gap-1.5 text-[12.5px] leading-snug text-[var(--text-primary)]" aria-live="polite" data-testid="coding-agent-node-panel-now">{nowLine}</p>
       </div>
 
@@ -793,8 +805,9 @@ function AgentPanel({ id, node, team, supplied, parentRun, refreshKey, isCurrent
         </div>
       )}
 
+      {stopError && <p ref={stopErrorRef} className="mt-3 text-[11px] text-red-300 break-words" role="alert" data-testid="coding-agent-node-panel-error">{stopError}</p>}
       {/* What you can do from here. */}
-      <div className="mt-3 flex flex-wrap items-center gap-2">
+      <div className="mt-3 flex flex-wrap items-center gap-2" data-testid="coding-agent-node-panel-actions">
         {openTarget && openTarget !== current && (
           <button type="button" className={BTN_SECONDARY} onClick={() => onOpenRun(openTarget)} data-testid="coding-agent-node-panel-open">
             <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">open_in_new</span>
@@ -814,7 +827,6 @@ function AgentPanel({ id, node, team, supplied, parentRun, refreshKey, isCurrent
           </button>
         )}
       </div>
-      {stopError && <p className="mt-2 text-[11px] text-red-300" role="alert" data-testid="coding-agent-node-panel-error">{stopError}</p>}
       {messaging && run && <div className="mt-2"><CodingRunMessageBox runId={run.id} messages={run.messages} onSent={onChanged} /></div>}
     </section>
   );
