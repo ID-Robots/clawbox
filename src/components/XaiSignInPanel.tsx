@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { copyToClipboard } from "@/lib/clipboard";
 
 /**
  * The xAI (Grok) Subscription tab: a SuperGrok / X Premium sign-in.
@@ -56,6 +57,21 @@ async function callRoute(action: "start" | "poll" | "cancel", signal?: AbortSign
   return { status: "failed", detail: error || `The sign-in request failed (${res.status}).` };
 }
 
+/** True only when the route CONFIRMED it stopped the sign-in (`{ ok: true }`). */
+async function cancelRoute(): Promise<boolean> {
+  try {
+    const res = await fetch(ROUTE, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "cancel" }),
+    });
+    const data = (await res.json().catch(() => null)) as { ok?: unknown } | null;
+    return res.ok && data?.ok === true;
+  } catch {
+    return false;
+  }
+}
+
 export default function XaiSignInPanel({
   t,
   startLabel,
@@ -72,7 +88,17 @@ export default function XaiSignInPanel({
   const [polling, setPolling] = useState(false);
   const [tick, setTick] = useState(0);
   const controllerRef = useRef<AbortController | null>(null);
+  // Bumped by every cleanup of the poll effect, so a poll answer that comes
+  // back after its effect was torn down (a re-render, a stop) is dropped
+  // instead of re-arming or ending a sign-in a newer poll already settled.
+  const pollGeneration = useRef(0);
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelFailed, setCancelFailed] = useState(false);
   const mounted = useRef(true);
+  // The parent passes a new callback on every render; read it through a ref so
+  // `apply` — and with it the poll effect — stays put across those renders.
+  const onSignedInRef = useRef(onSignedIn);
+  useEffect(() => { onSignedInRef.current = onSignedIn; }, [onSignedIn]);
   // Is a CLI of ours possibly still running on the box? Read on unmount.
   const inFlight = useRef(false);
 
@@ -89,7 +115,7 @@ export default function XaiSignInPanel({
       inFlight.current = false;
       stop();
       setState({ kind: "idle" });
-      onSignedIn();
+      onSignedInRef.current();
       return false;
     }
     if (answer.status === "failed") {
@@ -107,22 +133,30 @@ export default function XaiSignInPanel({
       }
       : { kind: "starting" });
     return true;
-  }, [onSignedIn, stop]);
+  }, [stop]);
 
   useEffect(() => {
     if (!polling) return;
+    const generation = pollGeneration.current;
+    const controller = new AbortController();
     const timer = setTimeout(async () => {
-      const controller = new AbortController();
       controllerRef.current = controller;
       try {
-        if (apply(await callRoute("poll", controller.signal))) setTick((n) => n + 1);
+        const answer = await callRoute("poll", controller.signal);
+        if (generation !== pollGeneration.current) return;
+        if (apply(answer)) setTick((n) => n + 1);
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") return;
+        if (generation !== pollGeneration.current) return;
         // A network blip is not the end of a sign-in the CLI is still running.
         if (mounted.current) setTick((n) => n + 1);
       }
     }, POLL_MS);
-    return () => clearTimeout(timer);
+    return () => {
+      pollGeneration.current += 1;
+      clearTimeout(timer);
+      controller.abort();
+    };
   }, [apply, polling, tick]);
 
   const start = useCallback(async () => {
@@ -141,11 +175,22 @@ export default function XaiSignInPanel({
     }
   }, [apply, stop]);
 
-  const cancel = useCallback(() => {
+  // The CLI keeps running until the route says it stopped it, so the panel
+  // does too: `inFlight` (and the unmount cancel it arms) is cleared only on
+  // `{ ok: true }`, and a cancel that did not land says so and can be retried.
+  const cancel = useCallback(async () => {
+    setCancelling(true);
+    setCancelFailed(false);
+    const confirmed = await cancelRoute();
+    if (!mounted.current) return;
+    setCancelling(false);
+    if (!confirmed) {
+      setCancelFailed(true);
+      return;
+    }
     inFlight.current = false;
     stop();
     setState({ kind: "idle" });
-    void callRoute("cancel").catch(() => {});
   }, [stop]);
 
   // Leaving the tab ends the sign-in, so no CLI is left waiting on a code
@@ -155,17 +200,18 @@ export default function XaiSignInPanel({
     return () => {
       mounted.current = false;
       controllerRef.current?.abort();
-      if (inFlight.current) void callRoute("cancel").catch(() => {});
+      if (inFlight.current) void cancelRoute();
     };
   }, []);
 
   const copyCode = useCallback(async (code: string) => {
-    try {
-      await navigator.clipboard.writeText(code);
+    // The shared helper: `navigator.clipboard` does not exist on the box's
+    // plain-HTTP origin, and the helper falls back to a selected textarea.
+    // The code is select-all text either way, so a failed copy still leaves
+    // copying by hand.
+    if (await copyToClipboard(code)) {
       setCopied(true);
       setTimeout(() => { if (mounted.current) setCopied(false); }, 1500);
-    } catch {
-      // The code is select-all text; copying by hand still works.
     }
   }, []);
 
@@ -200,7 +246,7 @@ export default function XaiSignInPanel({
         <div className="flex items-center gap-2 text-[length:var(--t-2)] text-[var(--text-secondary)]">
           <span className="inline-block w-3.5 h-3.5 border-2 border-[var(--coral-bright)] border-t-transparent rounded-full animate-spin" />
           {t("ai.xaiSignInStarting")}
-          <button type="button" onClick={cancel} className={`ml-auto ${QUIET_LINK_CLASS}`}>
+          <button type="button" onClick={() => void cancel()} disabled={cancelling} className={`ml-auto ${QUIET_LINK_CLASS}`}>
             {t("cancel")}
           </button>
         </div>
@@ -254,7 +300,12 @@ export default function XaiSignInPanel({
             <span className="inline-block w-3.5 h-3.5 border-2 border-[var(--coral-bright)] border-t-transparent rounded-full animate-spin" />
             {t("ai.waitingAuth")}
           </div>
-          <button type="button" onClick={cancel} className={`mt-2 ${QUIET_LINK_CLASS}`}>
+          {cancelFailed && (
+            <p role="alert" className="mt-2 text-[length:var(--t-2)] text-[var(--text-primary)]">
+              {t("ai.xaiCancelFailed")}
+            </p>
+          )}
+          <button type="button" onClick={() => void cancel()} disabled={cancelling} className={`mt-2 ${QUIET_LINK_CLASS}`}>
             {t("cancel")}
           </button>
         </div>

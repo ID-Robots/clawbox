@@ -246,7 +246,12 @@ export function ptyCommand(bin: string, args: string[]): { file: string; args: s
 export const xaiLoginSpawn = {
   spawn: (bin: string, args: string[]): ChildProcess => {
     const pty = ptyCommand(bin, args);
-    return spawn(pty.file, pty.args, {
+    // `turbopackIgnore`, as on the spawn in src/lib/openclaw-config.ts: the
+    // file and its arguments are runtime values, and Turbopack otherwise tries
+    // to trace them as module references — which walks the whole project,
+    // including the box's runtime `data/`, and fails the production build on
+    // a symlink there that leaves the tree.
+    return spawn(/* turbopackIgnore: true */ pty.file, pty.args, {
       // Its own process group, so cancel and timeout can end `script`, the
       // shell it starts and the CLI under it in one signal.
       detached: true,

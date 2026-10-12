@@ -681,6 +681,60 @@ describe("AIModelsStep variants", () => {
       expect(configureBodies()).toHaveLength(0);
     });
 
+    it("keeps the sign-in open, and says so, when the box did not confirm the cancel", async () => {
+      const actions = mockXaiLogin({
+        start: { status: "pending", verificationUrl: "https://example.test/device", userCode: "ABCD-1234", expiresInMinutes: 30 },
+      });
+      const fetchMock = vi.mocked(fetch);
+      const base = fetchMock.getMockImplementation()!;
+      let refuse = true;
+      fetchMock.mockImplementation(async (input, init) => {
+        const body = String((init as RequestInit | undefined)?.body ?? "");
+        if (refuse && body.includes('"cancel"')) {
+          actions.push("cancel");
+          return { ok: false, status: 500, json: async () => ({ status: "failed", detail: "boom" }) } as unknown as Response;
+        }
+        return base(input, init);
+      });
+      const { getByRole, findByTestId, findByRole, queryByRole } = await openXaiSubscription();
+      fireEvent.click(getByRole("button", { name: "ai.xaiSignInButton" }));
+      await findByTestId("xai-user-code");
+
+      fireEvent.click(getByRole("button", { name: "cancel" }));
+      expect((await findByRole("alert")).textContent).toBe("ai.xaiCancelFailed");
+      // Still waiting on the code, and the cancel can be tried again.
+      expect(queryByRole("button", { name: "ai.xaiSignInButton" })).toBeNull();
+
+      refuse = false;
+      fireEvent.click(getByRole("button", { name: "cancel" }));
+      expect(await findByRole("button", { name: "ai.xaiSignInButton" })).toBeInTheDocument();
+      expect(actions.filter((a) => a === "cancel").length).toBe(2);
+    });
+
+    it("copies the code through the shared helper, which works without navigator.clipboard", async () => {
+      // The box serves plain HTTP, where `navigator.clipboard` is undefined.
+      const clipboard = Object.getOwnPropertyDescriptor(navigator, "clipboard");
+      Object.defineProperty(navigator, "clipboard", { value: undefined, configurable: true });
+      const exec = vi.fn(() => true);
+      Object.defineProperty(document, "execCommand", { value: exec, configurable: true });
+      try {
+        mockXaiLogin({
+          start: { status: "pending", verificationUrl: "https://example.test/device", userCode: "ABCD-1234", expiresInMinutes: 30 },
+        });
+        const { getByRole, findByTestId, findByRole } = await openXaiSubscription();
+        fireEvent.click(getByRole("button", { name: "ai.xaiSignInButton" }));
+        await findByTestId("xai-user-code");
+
+        fireEvent.click(getByRole("button", { name: "Copy" }));
+
+        expect(await findByRole("button", { name: "Copied!" })).toBeInTheDocument();
+        expect(exec).toHaveBeenCalledWith("copy");
+      } finally {
+        if (clipboard) Object.defineProperty(navigator, "clipboard", clipboard);
+        else delete (navigator as unknown as Record<string, unknown>).clipboard;
+      }
+    });
+
     it("still shows the link when the CLI printed no separate code", async () => {
       mockXaiLogin({
         start: { status: "pending", verificationUrl: "https://example.test/device?x=1", userCode: null },
