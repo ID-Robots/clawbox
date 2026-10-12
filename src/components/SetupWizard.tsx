@@ -479,7 +479,12 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
   // already goes past that step for such a box; this is the same rule for an
   // owner who arrives from the step before it. An unreadable status keeps the
   // old order.
+  // One status read per departure: a second call while the first is still
+  // waiting would let whichever answer lands last pick the step.
+  const leavingUpdateRef = useRef(false);
   const leaveUpdateStep = useCallback(async () => {
+    if (leavingUpdateRef.current) return;
+    leavingUpdateRef.current = true;
     let passwordConfigured = false;
     try {
       const res = await fetch("/setup-api/setup/status");
@@ -490,6 +495,7 @@ function SetupWizardInner({ onComplete }: SetupWizardProps = {}) {
     } catch {
       // Fall through to the security step.
     }
+    leavingUpdateRef.current = false;
     goToStep(passwordConfigured ? 4 : 3);
   }, [goToStep]);
 
