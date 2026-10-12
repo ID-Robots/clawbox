@@ -86,63 +86,13 @@ function terminalHeadersFor(gate, identity) {
 // origin and carries no cookie — which is why, exactly as the proxy does,
 // the port's LISTENER must be the project's own (a process of this user
 // running from inside the project folder) before anything is forwarded.
-const APP_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
-const APP_LISTENER_TTL_MS = 30_000;
-const appListenerVerdicts = new Map();
-function readJsonSync(file) {
-  try { return JSON.parse(fs.readFileSync(file, "utf-8")); } catch { return null; }
-}
-function isProxyablePort(port) {
-  return typeof port === "number" && Number.isInteger(port) && port >= 1024 && port <= 65535;
-}
-function appListenerOwned(port, directory) {
-  const key = `${port}:${directory}`;
-  const cached = appListenerVerdicts.get(key);
-  if (cached && Date.now() - cached.at < (cached.owned ? APP_LISTENER_TTL_MS : 3000)) return cached.owned;
-  let owned = false;
-  try {
-    const out = require("child_process").execFileSync("ss", ["-H", "-l", "-t", "-n", "-p", `sport = :${port}`], { encoding: "utf-8", timeout: 5000, env: { PATH: process.env.PATH || "/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C" } });
-    let real = directory;
-    try { real = fs.realpathSync(directory); } catch {}
-    // Only a row bound where 127.0.0.1 reaches it vouches for the port.
-    const reachable = out.split("\n").filter((row) => {
-      const local = row.trim().split(/\s+/)[3] || "";
-      const host = local.slice(0, local.lastIndexOf(":"));
-      return ["127.0.0.1", "0.0.0.0", "*", "[::]", "::", "[::1]"].includes(host);
-    }).join("\n");
-    for (const m of reachable.matchAll(/pid=(\d+)/g)) {
-      try {
-        const cwd = fs.readlinkSync(`/proc/${m[1]}/cwd`);
-        const rel = path.relative(real, cwd);
-        if (rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel))) { owned = true; break; }
-      } catch {}
-    }
-  } catch {
-    owned = false;
-  }
-  appListenerVerdicts.set(key, { owned, at: Date.now() });
-  return owned;
-}
+// The check itself lives in scripts/app-port.js, shared with the public app
+// links (scripts/public-app-links.js).
+const { resolveRegisteredApp } = require("./scripts/app-port.js");
 function resolveAppPort(reqUrl) {
   const m = /^\/apps\/([^/?]+)/.exec(reqUrl);
-  if (!m || !APP_ID_RE.test(m[1])) return null;
-  const id = m[1];
-  const root = process.env.CLAWBOX_ROOT || __dirname;
-  const meta = readJsonSync(path.join(root, "data", "webapps", id, "meta.json"));
-  if (!meta || !isProxyablePort(meta.port)) return null;
-  // The project folder: on the registration, or — for one that predates the
-  // field — the folder of that id under the owner's project folder or the
-  // code projects, the way src/lib/app-proxy.ts's projectFolderFor answers.
-  let directory = typeof meta.directory === "string" && path.isAbsolute(meta.directory) ? meta.directory : null;
-  if (!directory) {
-    const config = readJsonSync(path.join(root, "data", "config.json"));
-    const projects = config && typeof config.coding_agent_default_directory === "string" && path.isAbsolute(config.coding_agent_default_directory) ? config.coding_agent_default_directory : null;
-    for (const candidate of [...(projects ? [path.join(projects, id)] : []), path.join(root, "data", "code-projects", id)]) {
-      try { if (fs.statSync(candidate).isDirectory()) { directory = candidate; break; } } catch {}
-    }
-  }
-  if (!directory || !appListenerOwned(meta.port, directory)) return null;
-  return { port: meta.port, strip: meta.stripBasePath === true, id };
+  if (!m) return null;
+  return resolveRegisteredApp(process.env.CLAWBOX_ROOT || __dirname, m[1]);
 }
 
 function resolveUpgradeTarget(reqUrl) {
@@ -1096,3 +1046,15 @@ require("./.next/standalone/server.js");
 // (scripts/process-title.js says why — a run's `pkill -f next-server` took
 // the box down on 2026-09-05).
 require("./scripts/process-title.js").guardProcessTitle();
+
+// Public app links (TASK-1478): one loopback listener and one quick tunnel per
+// app the owner published from the desktop, each serving that app and nothing
+// else. Best-effort: a failure here never takes the desktop down.
+try {
+  const publicLinks = require("./scripts/public-app-links.js").startPublicAppLinks({
+    root: process.env.CLAWBOX_ROOT || __dirname,
+  });
+  process.on("exit", () => publicLinks.stop());
+} catch (err) {
+  console.warn("[production-server] Public app links did not start:", err.message);
+}

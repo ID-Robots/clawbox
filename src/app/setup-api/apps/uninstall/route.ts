@@ -8,6 +8,7 @@ import { refreshSkillsCache } from "@/lib/openclaw-skill-info";
 import { kvDelete } from "@/lib/kv-store";
 import { WEBAPPS_DIR } from "@/lib/code-projects";
 import { safeAppId, webappIconPath } from "@/lib/webapp-icon";
+import { disablePublicLink } from "@/lib/public-app-links";
 
 export const dynamic = "force-dynamic";
 
@@ -235,6 +236,11 @@ export async function POST(req: Request) {
     // URL, while the desktop said the app was gone. code_project_delete's own
     // guidance ("any copy already installed on the desktop stays until it is
     // removed with app_uninstall") promises this removal.
+    // An app that is going must not stay on the internet: its public link
+    // (TASK-1478) is disabled first, so the tunnel is torn down even when the
+    // folder removal below fails. Best-effort — an uninstall never fails on it.
+    await disablePublicLink(appId, "app_uninstalled").catch(() => false);
+
     const webappRoot = path.resolve(WEBAPPS_DIR);
     const webappDir = path.resolve(webappRoot, appId);
     if (!webappDir.startsWith(webappRoot + path.sep)) {
