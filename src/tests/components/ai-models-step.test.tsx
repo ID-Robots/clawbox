@@ -607,9 +607,9 @@ describe("AIModelsStep variants", () => {
       vi.useFakeTimers({ shouldAdvanceTime: true });
       try {
         const actions = mockXaiLogin({
-          start: { status: "pending", verificationUrl: "https://example.test/device", userCode: "ABCD-1234" },
+          start: { status: "pending", verificationUrl: "https://example.test/device", userCode: "ABCD-1234", expiresInMinutes: 30 },
           polls: [
-            { status: "pending", verificationUrl: "https://example.test/device", userCode: "ABCD-1234" },
+            { status: "pending", verificationUrl: "https://example.test/device", userCode: "ABCD-1234", expiresInMinutes: 30 },
             { status: "complete" },
           ],
         });
@@ -626,6 +626,8 @@ describe("AIModelsStep variants", () => {
         expect(link.getAttribute("href")).toBe("https://example.test/device");
         expect(link.getAttribute("target")).toBe("_blank");
         expect(getByText("Waiting for authorization...")).toBeInTheDocument();
+        // The CLI's own lifetime, not the ChatGPT flow's fixed sentence.
+        expect(getByText("ai.xaiCodeExpires")).toBeInTheDocument();
         expect(configureBodies()).toHaveLength(0);
 
         await act(async () => { await vi.advanceTimersByTimeAsync(3_100); });

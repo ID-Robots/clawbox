@@ -21,14 +21,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 type LoginAnswer =
   | { status: "starting" }
-  | { status: "pending"; verificationUrl: string | null; userCode: string | null }
+  | { status: "pending"; verificationUrl: string | null; userCode: string | null; expiresInMinutes?: number }
   | { status: "complete" }
   | { status: "failed"; detail: string; output?: string };
 
 type PanelState =
   | { kind: "idle" }
   | { kind: "starting" }
-  | { kind: "pending"; verificationUrl: string | null; userCode: string | null }
+  // The CLI's own lifetime for the code (30 min on 2026.9.4), not a constant.
+  | { kind: "pending"; verificationUrl: string | null; userCode: string | null; expiresInMinutes: number }
   | { kind: "failed"; detail: string; output?: string };
 
 const POLL_MS = 3_000;
@@ -60,7 +61,7 @@ export default function XaiSignInPanel({
   startLabel,
   onSignedIn,
 }: {
-  t: (key: string) => string;
+  t: (key: string, params?: Record<string, string | number>) => string;
   startLabel: string;
   onSignedIn: () => void;
 }) {
@@ -98,7 +99,12 @@ export default function XaiSignInPanel({
       return false;
     }
     setState(answer.status === "pending"
-      ? { kind: "pending", verificationUrl: answer.verificationUrl, userCode: answer.userCode }
+      ? {
+        kind: "pending",
+        verificationUrl: answer.verificationUrl,
+        userCode: answer.userCode,
+        expiresInMinutes: answer.expiresInMinutes ?? 30,
+      }
       : { kind: "starting" });
     return true;
   }, [onSignedIn, stop]);
@@ -231,7 +237,7 @@ export default function XaiSignInPanel({
                     {copied ? t("copied") : t("copy")}
                   </button>
                 </div>
-                <p className="mt-2 text-[length:var(--t-2)] text-[var(--text-muted)]">{t("ai.codeExpires")}</p>
+                <p className="mt-2 text-[length:var(--t-2)] text-[var(--text-muted)]">{t("ai.xaiCodeExpires", { minutes: state.expiresInMinutes })}</p>
               </>
             ) : (
               <p className="text-[length:var(--t-2)] text-[var(--text-secondary)] mt-4">{t("ai.xaiSignInNoCode")}</p>

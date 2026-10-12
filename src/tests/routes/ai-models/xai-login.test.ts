@@ -50,21 +50,30 @@ describe("POST /setup-api/ai-models/xai-login", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual(PENDING);
     // A box with no xAI profile has nothing to replace.
-    expect(mocks.startXaiLogin).toHaveBeenCalledWith({ replaceExisting: false });
+    expect(mocks.startXaiLogin).toHaveBeenCalledWith({ replaceExisting: false, signInAlreadyStored: false });
   });
 
   it("replaces an existing xAI credential — a key or an older sign-in", async () => {
     mocks.readXaiStoredProfiles.mockResolvedValue([{ id: "xai:default", type: "api_key" }]);
     await POST(post({ action: "start" }));
 
-    expect(mocks.startXaiLogin).toHaveBeenCalledWith({ replaceExisting: true });
+    // A key is replaced; it is not a sign-in, so the store may still prove
+    // this login landed.
+    expect(mocks.startXaiLogin).toHaveBeenCalledWith({ replaceExisting: true, signInAlreadyStored: false });
+  });
+
+  it("leaves a re-sign-in to the CLI's exit code, not the store", async () => {
+    mocks.readXaiStoredProfiles.mockResolvedValue([{ id: "xai:default", type: "oauth" }]);
+    await POST(post({ action: "start" }));
+
+    expect(mocks.startXaiLogin).toHaveBeenCalledWith({ replaceExisting: true, signInAlreadyStored: true });
   });
 
   it("treats an unreadable store as something to replace", async () => {
     mocks.readXaiStoredProfiles.mockResolvedValue(null);
     await POST(post({ action: "start" }));
 
-    expect(mocks.startXaiLogin).toHaveBeenCalledWith({ replaceExisting: true });
+    expect(mocks.startXaiLogin).toHaveBeenCalledWith({ replaceExisting: true, signInAlreadyStored: true });
   });
 
   it("answers a start that failed with the failure and the CLI's own lines", async () => {

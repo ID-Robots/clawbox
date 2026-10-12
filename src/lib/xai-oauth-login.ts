@@ -10,7 +10,7 @@
 // itself, so the only thing ClawBox can do — and the only thing it should —
 // is run the CLI that drives it:
 //
-//   openclaw models auth login --provider xai --method oauth --device-code
+//   openclaw models auth login --provider xai --method oauth
 //     --profile-id xai:default [--force]
 //
 // and relay what the CLI prints (a verification URL and a one-time code) to
@@ -18,14 +18,38 @@
 // in src/lib/coding-github.ts has the same shape — one login in flight, module
 // state, start/poll/cancel — and this file keeps that shape on purpose.
 //
-// THE OUTPUT FORMAT IS ASSUMED, NOT MEASURED. Nothing in this repository has
-// read the plugin's device-code output, so `parseXaiDeviceLogin` is written to
-// tolerate any reasonable wording: it takes the first URL it sees (preferring
-// one that looks like a verification page) and a code from a `user_code=`
-// query parameter, a "code: XXXX-XXXX" label, or a bare `XXXX-XXXX` token.
-// What it must never do is hang: a login that has printed nothing usable by
-// `PARSE_DEADLINE_MS` is failed, and every failure carries the CLI's own last
-// lines so the owner (and whoever reads the report) sees what it said.
+// MEASURED ON A BOX (OpenClaw 2026.9.4), and each of these was a wrong first
+// guess:
+//
+//  * `--device-code` cannot be combined with `--method oauth` ("--device-code
+//    cannot be combined with --method unless method is device-code.", exit 1).
+//    The oauth method already IS the device-code flow for xai.
+//  * Without a terminal the command refuses outright ("models auth login
+//    requires an interactive TTY", exit 1). It runs under a pseudo-terminal —
+//    util-linux `script`, see `xaiLoginSpawn`. node-pty is installed on the
+//    boxes but only ever loaded by the standalone terminal server, never by a
+//    Next route, and pulling a native addon into the route bundle is a bigger
+//    change than this sign-in is worth.
+//  * Under a terminal the output is a clack-style TUI: cursor codes, CR without
+//    LF, box-drawing rails, and a spinner that redraws its line a character at
+//    a time. The prompt, once that is cleaned, reads:
+//
+//      xAI OAuth Open this URL in your LOCAL browser and enter the code below.
+//      URL: <https://accounts.x.ai/oauth2/device?user_code=WXYZ-1234>
+//      Code: WXYZ-1234 Code expires in 30 minutes. Never share it.
+//      Open this URL in your LOCAL browser:https://accounts.x.ai/oauth2/device
+//
+//    followed by "Waiting for xAI device authorization..." until approval.
+//    `parseXaiDeviceLogin` is pinned against that sample (and a raw form of
+//    it) in src/tests/unit/xai-oauth-login.test.ts, and always reads the WHOLE
+//    accumulated buffer, because words arrive split across redraws.
+//
+// STILL UNMEASURED: what the CLI prints after the owner approves, or when xAI
+// refuses (no SuperGrok / X Premium). Success is therefore read two ways —
+// exit code 0, or the sign-in appearing in the store while the process is
+// still running — and any other exit is a failure that carries the CLI's own
+// last lines. A login that never shows a link fails at `PARSE_DEADLINE_MS`
+// with the same evidence. It never hangs.
 //
 // No credential passes through here. The CLI prints a URL and a short code the
 // owner types on another device; the token it receives stays in the CLI.
@@ -44,40 +68,65 @@ export const XAI_PROFILE_ID = "xai:default";
 const PARSE_DEADLINE_MS = 60_000;
 
 /**
- * How long the whole login may stay open. Device codes are typically valid for
- * a quarter of an hour; past that the code on the owner's screen is dead
- * whatever the CLI is still doing.
+ * How long the code lives when the CLI does not say. It does say — "Code
+ * expires in 30 minutes." on 2026.9.4 — and its own number wins
+ * (`expiresInMinutes`); this is only the floor for a wording we cannot read.
  */
-const LOGIN_LIFETIME_MS = 15 * 60_000;
+const DEFAULT_CODE_LIFETIME_MIN = 30;
 
 /** How long `start` waits for the first useful answer before it replies. */
 const START_WAIT_MS = 30_000;
 
+/**
+ * How often a poll may ask the STORE whether the sign-in has landed while the
+ * CLI is still running. One `models auth list` is a CLI cold start (~10 s on a
+ * Jetson), so it is throttled and never more than one at a time.
+ */
+const STORE_CHECK_EVERY_MS = 20_000;
+
 /** How much of the CLI's own output a failure may carry. */
-const OUTPUT_TAIL_LINES = 4;
-const OUTPUT_TAIL_CHARS = 500;
+const OUTPUT_TAIL_CHARS = 400;
 
 export interface XaiDeviceLoginPrompt {
   verificationUrl: string | null;
   userCode: string | null;
+  /** The code's lifetime in minutes, when the CLI states it. */
+  expiresInMinutes: number | null;
 }
 
 // Terminal control sequences: colour, cursor moves, OSC hyperlinks. The same
 // pattern src/lib/openclaw-index-progress.ts strips from another CLI's output.
 const TERMINAL_CONTROL_RE = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b[@-Z\\-_]/g;
+/** Box drawing, block elements and the clack spinner/step glyphs (◇ ◒ ◐ ◓ ◑ ●…). */
+const TUI_GLYPH_RE = /[─-▟■-◿☀-⛿✓✔✖✗]/g;
+/** Other C0 controls the TUI emits (BEL, backspace, cursor show/hide leftovers). */
+const C0_RE = /[\x00-\x08\x0b-\x1f\x7f]/g;
 
+// `<` and `>` end a URL: the TUI prints it as `URL: <https://…>`.
 const URL_RE = /https?:\/\/[^\s<>"'`]+/gi;
 /** A URL that reads like the page the owner approves the code on. */
 const VERIFICATION_HINT_RE = /device|verif|activate|code|oauth|auth|login|sign/i;
 /** Codes are short, uppercase-ish groups: `ABCD-EFGH`, `ABCD1234`, `WDJB-MJHT`. */
 const CODE_TOKEN = "[A-Z0-9]{3,}(?:-[A-Z0-9]{3,})+|[A-Z0-9]{6,12}";
-/** "code: XXXX-XXXX", "user code XXXX-XXXX", "enter the code\n  XXXX-XXXX". */
-const LABELLED_CODE_RE = new RegExp(`\\bcode\\b[^A-Za-z0-9\\n]{0,20}\\n?\\s{0,20}(${CODE_TOKEN})\\b`, "i");
+/** "Code: XXXX-XXXX", "user code XXXX-XXXX", "enter the code   XXXX-XXXX". */
+const LABELLED_CODE_RE = new RegExp(`\\bcode\\b[^A-Za-z0-9]{0,20}(${CODE_TOKEN})\\b`, "gi");
 /** A bare grouped code anywhere, uppercase only so ordinary words never match. */
 const BARE_CODE_RE = /\b([A-Z0-9]{4}-[A-Z0-9]{4})\b/;
+const EXPIRES_RE = /expires?\s+in\s+(\d{1,3})\s*min/i;
 
-export function stripTerminalControl(text: string): string {
-  return text.replace(TERMINAL_CONTROL_RE, "").replace(/\r/g, "\n");
+/**
+ * The TUI's output as one line of prose: escapes stripped, every CR/LF and
+ * every rail, box and spinner glyph turned into a space, runs of space
+ * collapsed. Exported for the failure tail, which wants the same reading.
+ */
+export function cleanTuiOutput(text: string): string {
+  return text
+    .replace(TERMINAL_CONTROL_RE, "")
+    .replace(/[\r\n\t]/g, " ")
+    .replace(TUI_GLYPH_RE, " ")
+    .replace(C0_RE, "")
+    .replace(/ {2,}/g, " ")
+    .trim();
 }
 
 function trimUrl(raw: string): string {
@@ -86,53 +135,77 @@ function trimUrl(raw: string): string {
 }
 
 /**
- * Read a verification URL and a user code out of whatever the CLI has printed
- * so far. Pure, and the ONLY place the output format is assumed — see the
- * header. Either half may be null; the caller decides what is enough.
+ * Read a verification URL, a user code and the code's lifetime out of
+ * EVERYTHING the CLI has printed so far. Pure, and the only place the output
+ * format is read — see the header for the measured sample. Any field may be
+ * null; the caller decides what is enough.
  */
 export function parseXaiDeviceLogin(output: string): XaiDeviceLoginPrompt {
-  const text = stripTerminalControl(output);
-  const urls = Array.from(text.matchAll(URL_RE), (m) => trimUrl(m[0]));
-  const verificationUrl = urls.find((url) => VERIFICATION_HINT_RE.test(url)) ?? urls[0] ?? null;
+  const text = cleanTuiOutput(output);
+  const urls: string[] = [];
+  for (const match of text.matchAll(URL_RE)) {
+    // A URL that runs to the very end of what has arrived may still be
+    // arriving — the TUI redraws a character at a time — so only a TERMINATED
+    // one is taken. The CLI always prints more after its URLs.
+    if ((match.index ?? 0) + match[0].length >= text.length) continue;
+    urls.push(trimUrl(match[0]));
+  }
+  const withCode = urls.find((url) => /[?&](?:user_)?code=/i.test(url));
+  const verificationUrl = withCode
+    ?? urls.find((url) => VERIFICATION_HINT_RE.test(url))
+    ?? urls[0]
+    ?? null;
 
   let userCode: string | null = null;
   if (verificationUrl) {
     try {
-      const fromQuery = new URL(verificationUrl).searchParams.get("user_code")
-        ?? new URL(verificationUrl).searchParams.get("code");
+      const params = new URL(verificationUrl).searchParams;
+      const fromQuery = params.get("user_code") ?? params.get("code");
       if (fromQuery && new RegExp(`^(?:${CODE_TOKEN})$`, "i").test(fromQuery)) userCode = fromQuery.toUpperCase();
     } catch {
       // Not a parseable URL — the label and bare-token reads below still apply.
     }
   }
-  // The label is read on the text with the URLs removed, so a `code` in a
+  // The label is read on the text with every URL removed, so a `code` in a
   // query string or path is never mistaken for the code itself.
-  const prose = urls.reduce((out, url) => out.split(url).join(" "), text);
+  const prose = Array.from(text.matchAll(URL_RE), (m) => m[0])
+    .reduce((out, url) => out.split(url).join(" "), text);
   if (!userCode) {
-    const labelled = LABELLED_CODE_RE.exec(prose)?.[1];
-    // Uppercase only, as printed: "code expires in 15 minutes" is a word.
-    if (labelled && labelled === labelled.toUpperCase()) userCode = labelled;
+    for (const match of prose.matchAll(LABELLED_CODE_RE)) {
+      // Uppercase only, as printed: "Code expires in 30 minutes" is a word.
+      if (match[1] === match[1].toUpperCase()) {
+        userCode = match[1];
+        break;
+      }
+    }
   }
   if (!userCode) userCode = BARE_CODE_RE.exec(prose)?.[1] ?? null;
-  return { verificationUrl, userCode };
+
+  const minutes = Number(EXPIRES_RE.exec(prose)?.[1]);
+  return {
+    verificationUrl,
+    userCode,
+    expiresInMinutes: Number.isFinite(minutes) && minutes > 0 ? minutes : null,
+  };
 }
 
-/** The last few lines the CLI printed, cleaned, for a failure the owner can read. */
+/** The tail of what the CLI printed, cleaned, for a failure the owner can read. */
 export function outputTail(output: string): string {
-  const lines = stripTerminalControl(output)
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean);
-  const tail = lines.slice(-OUTPUT_TAIL_LINES).join("\n");
-  return tail.length > OUTPUT_TAIL_CHARS ? tail.slice(-OUTPUT_TAIL_CHARS) : tail;
+  const text = cleanTuiOutput(output);
+  return text.length > OUTPUT_TAIL_CHARS ? `…${text.slice(-OUTPUT_TAIL_CHARS)}` : text;
 }
 
 export type XaiLoginPoll =
   /** The CLI is running and has not printed a URL yet. */
   | { status: "starting" }
   /** Waiting for the owner to approve the code. */
-  | { status: "pending"; verificationUrl: string | null; userCode: string | null }
-  /** The CLI exited 0: the plugin stored the sign-in. */
+  | {
+    status: "pending";
+    verificationUrl: string | null;
+    userCode: string | null;
+    expiresInMinutes: number;
+  }
+  /** The plugin stored the sign-in (the CLI exited 0, or the store shows it). */
   | { status: "complete" }
   | { status: "failed"; detail: string; output?: string };
 
@@ -140,38 +213,64 @@ interface PendingLogin {
   child: ChildProcess;
   output: string;
   startedAt: number;
+  /** Whether `xai:default` already held a sign-in when this login began. */
+  signInAlreadyStored: boolean;
   /** Set once, when the process ends or is given up on. */
   result: XaiLoginPoll | null;
   timers: ReturnType<typeof setTimeout>[];
+  /** When the code's lifetime timer was armed from the CLI's own number. */
+  lifetimeFromCli: boolean;
+  lastStoreCheckAt: number;
+  storeCheck: Promise<void> | null;
 }
 
 /** One login in flight, as for the GitHub device flow: a second start replaces the first. */
 let pending: PendingLogin | null = null;
 
+/** POSIX single-quoting for the one string `script -c` hands to a shell. */
+function shellQuote(arg: string): string {
+  return `'${arg.replace(/'/g, `'\\''`)}'`;
+}
+
+/**
+ * The pseudo-terminal wrapper: util-linux `script`, quiet (-q), flushing every
+ * write (-f), exiting with the command's own status (-e), discarding the
+ * typescript (`/dev/null`). Every argument here is a literal of this module or
+ * the resolved binary path, and each is quoted all the same.
+ */
+export function ptyCommand(bin: string, args: string[]): { file: string; args: string[] } {
+  return { file: "script", args: ["-qfec", [bin, ...args].map(shellQuote).join(" "), "/dev/null"] };
+}
+
 /** Indirection so tests can supply a fake child process. */
 export const xaiLoginSpawn = {
-  spawn: (bin: string, args: string[]): ChildProcess =>
-    spawn(bin, args, {
-      // stdin stays OPEN and silent: a CLI that stops on a prompt then waits,
-      // and the parse deadline reports it, instead of reading EOF and doing
-      // something nobody chose.
+  spawn: (bin: string, args: string[]): ChildProcess => {
+    const pty = ptyCommand(bin, args);
+    return spawn(pty.file, pty.args, {
+      // Its own process group, so cancel and timeout can end `script`, the
+      // shell it starts and the CLI under it in one signal.
+      detached: true,
+      // stdin stays OPEN and silent: the pty session expects it, and a CLI
+      // that stops on a prompt then waits for the parse deadline to report it
+      // instead of reading EOF and doing something nobody chose.
       stdio: ["pipe", "pipe", "pipe"],
       env: {
         ...process.env,
         HOME: process.env.HOME ?? "/home/clawbox",
-        NO_COLOR: "1",
-        FORCE_COLOR: "0",
+        // A wide terminal, so the URL is not wrapped across rows.
+        COLUMNS: "200",
+        TERM: process.env.TERM || "xterm",
       },
-    }),
+    });
+  },
 };
 
-/** The exact argv, exported so the tests and the report name one command. */
+/** The exact argv `openclaw` gets, exported so the tests and the report name one command. */
 export function xaiLoginArgs(replaceExisting: boolean): string[] {
   return [
     "models", "auth", "login",
     "--provider", "xai",
     "--method", "oauth",
-    "--device-code",
     "--profile-id", XAI_PROFILE_ID,
     // Only when the store already holds an xAI profile: `--force` drops the
     // existing xai profiles before signing in, which is what switching from an
@@ -187,31 +286,58 @@ function settle(login: PendingLogin, result: XaiLoginPoll): void {
   login.timers = [];
 }
 
+/** End the whole process group: `script`, its shell and the CLI under it. */
 function kill(child: ChildProcess): void {
-  try {
-    child.kill("SIGTERM");
-  } catch {
-    // already gone
-  }
-  const hard = setTimeout(() => {
-    try { child.kill("SIGKILL"); } catch { /* already gone */ }
-  }, 3_000);
+  const signal = (sig: NodeJS.Signals) => {
+    try {
+      if (typeof child.pid === "number") process.kill(-child.pid, sig);
+      else child.kill(sig);
+    } catch {
+      // Already gone — or the group is, and the leader is all that is left.
+      try { child.kill(sig); } catch { /* already gone */ }
+    }
+  };
+  signal("SIGTERM");
+  const hard = setTimeout(() => signal("SIGKILL"), 3_000);
   hard.unref?.();
+}
+
+function armLifetime(login: PendingLogin, minutes: number): void {
+  const timer = setTimeout(() => {
+    settle(login, { status: "failed", detail: "The sign-in code expired. Start again for a fresh one." });
+    kill(login.child);
+  }, minutes * 60_000);
+  timer.unref?.();
+  login.timers.push(timer);
 }
 
 /** What the login in flight looks like right now, without waiting. */
 function snapshot(login: PendingLogin): XaiLoginPoll {
   if (login.result) return login.result;
   const prompt = parseXaiDeviceLogin(login.output);
-  if (prompt.verificationUrl) return { status: "pending", ...prompt };
+  if (prompt.verificationUrl) {
+    return {
+      status: "pending",
+      verificationUrl: prompt.verificationUrl,
+      userCode: prompt.userCode,
+      expiresInMinutes: prompt.expiresInMinutes ?? DEFAULT_CODE_LIFETIME_MIN,
+    };
+  }
   return { status: "starting" };
 }
 
 /**
  * Start a sign-in, replacing any one in flight, and answer with the first
  * useful state: the URL and code, a failure, or (on a slow box) `starting`.
+ *
+ * `signInAlreadyStored` says the store held an xAI sign-in at `xai:default`
+ * before this login began. A sign-in found in the store later then proves
+ * nothing, so only the CLI's exit code may complete such a login.
  */
-export async function startXaiLogin(opts: { replaceExisting: boolean }): Promise<XaiLoginPoll> {
+export async function startXaiLogin(opts: {
+  replaceExisting: boolean;
+  signInAlreadyStored?: boolean;
+}): Promise<XaiLoginPoll> {
   cancelXaiLogin();
   let child: ChildProcess;
   try {
@@ -219,12 +345,34 @@ export async function startXaiLogin(opts: { replaceExisting: boolean }): Promise
   } catch (err) {
     return { status: "failed", detail: `Could not start the OpenClaw sign-in: ${err instanceof Error ? err.message : String(err)}` };
   }
-  const login: PendingLogin = { child, output: "", startedAt: Date.now(), result: null, timers: [] };
+  const login: PendingLogin = {
+    child,
+    output: "",
+    startedAt: Date.now(),
+    signInAlreadyStored: opts.signInAlreadyStored === true,
+    result: null,
+    timers: [],
+    lifetimeFromCli: false,
+    lastStoreCheckAt: 0,
+    storeCheck: null,
+  };
   pending = login;
 
   const append = (chunk: Buffer | string) => {
-    // Bounded: a CLI that loops on a progress line must not grow this forever.
-    login.output = (login.output + chunk.toString()).slice(-20_000);
+    // Bounded: the spinner redraws forever, and must not grow this without
+    // limit. The prompt is printed once, near the start, so the HEAD is kept
+    // and only the tail beyond it is trimmed.
+    const next = login.output + chunk.toString();
+    login.output = next.length > 40_000 ? next.slice(0, 20_000) + next.slice(-20_000) : next;
+    // The code's lifetime as the CLI states it, armed once from the moment it
+    // is read; until then the default timer below stands.
+    if (!login.lifetimeFromCli && !login.result) {
+      const minutes = parseXaiDeviceLogin(login.output).expiresInMinutes;
+      if (minutes) {
+        login.lifetimeFromCli = true;
+        armLifetime(login, minutes);
+      }
+    }
   };
   child.stdout?.on("data", append);
   child.stderr?.on("data", append);
@@ -245,7 +393,7 @@ export async function startXaiLogin(opts: { replaceExisting: boolean }): Promise
     });
   });
 
-  login.timers.push(setTimeout(() => {
+  const deadline = setTimeout(() => {
     if (login.result || parseXaiDeviceLogin(login.output).verificationUrl) return;
     settle(login, {
       status: "failed",
@@ -253,17 +401,17 @@ export async function startXaiLogin(opts: { replaceExisting: boolean }): Promise
       output: outputTail(login.output) || "(nothing)",
     });
     kill(child);
-  }, PARSE_DEADLINE_MS));
-  login.timers.push(setTimeout(() => {
-    settle(login, { status: "failed", detail: "The sign-in code expired. Start again for a fresh one." });
-    kill(child);
-  }, LOGIN_LIFETIME_MS));
-  for (const timer of login.timers) timer.unref?.();
+  }, PARSE_DEADLINE_MS);
+  deadline.unref?.();
+  login.timers.push(deadline);
+  // The fallback lifetime, a little past the default code life so a CLI that
+  // states its own number (and so arms the timer above) always ends first.
+  armLifetime(login, DEFAULT_CODE_LIFETIME_MIN + 1);
 
   // Wait for something worth showing, but never longer than START_WAIT_MS:
   // past that the browser polls, exactly as it does after a pending answer.
-  const deadline = Date.now() + START_WAIT_MS;
-  while (Date.now() < deadline) {
+  const until = Date.now() + START_WAIT_MS;
+  while (Date.now() < until) {
     const now = snapshot(login);
     if (now.status !== "starting") return now;
     if (pending !== login) return { status: "failed", detail: "The sign-in was replaced by another one." };
@@ -272,10 +420,34 @@ export async function startXaiLogin(opts: { replaceExisting: boolean }): Promise
   return snapshot(login);
 }
 
+/**
+ * Has the sign-in landed in the store while the CLI is still running? What the
+ * CLI prints after approval has not been measured, and a CLI that lingers
+ * after storing the credential must not leave the owner on "waiting". Only
+ * counted for a login that did not start with a sign-in already there.
+ */
+function checkStoreInBackground(login: PendingLogin): void {
+  if (login.signInAlreadyStored || login.result || login.storeCheck) return;
+  if (Date.now() - login.lastStoreCheckAt < STORE_CHECK_EVERY_MS) return;
+  login.lastStoreCheckAt = Date.now();
+  login.storeCheck = readXaiStoredProfiles()
+    .then((rows) => {
+      if (rows?.some((row) => row.id === XAI_PROFILE_ID && row.type === "oauth") && !login.result) {
+        settle(login, { status: "complete" });
+        kill(login.child);
+      }
+    })
+    .catch(() => {})
+    .finally(() => { login.storeCheck = null; });
+}
+
 /** One poll of the login in flight. */
 export function pollXaiLogin(): XaiLoginPoll {
   if (!pending) return { status: "failed", detail: "No sign-in is in progress. Start again." };
   const now = snapshot(pending);
+  // Only once the prompt is on screen: before that there is nothing the owner
+  // could have approved.
+  if (now.status === "pending") checkStoreInBackground(pending);
   // A finished login is answered once more and then forgotten, so a stale tab
   // cannot replay "complete" after the next start.
   if (now.status === "complete" || now.status === "failed") pending = null;

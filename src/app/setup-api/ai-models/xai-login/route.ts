@@ -69,8 +69,18 @@ export async function POST(request: Request) {
       // the owner starts. An unreadable store is treated as "something there":
       // without `--force` a login onto an occupied profile id may be refused,
       // and that refusal would be the worse surprise.
+      //
+      // Measured on a box: a cancelled or timed-out attempt leaves no profile
+      // behind, so a box with nothing stored gets no `--force` and loses
+      // nothing either way.
       const stored = await readXaiStoredProfiles();
-      const out = await startXaiLogin({ replaceExisting: stored === null || stored.length > 0 });
+      const out = await startXaiLogin({
+        replaceExisting: stored === null || stored.length > 0,
+        // A sign-in already at the id cannot later prove THIS login landed;
+        // the lib then waits for the CLI's own exit code.
+        signInAlreadyStored: stored === null
+          || stored.some((row) => row.id === "xai:default" && row.type === "oauth"),
+      });
       return NextResponse.json(out, { status: out.status === "failed" ? 502 : 200 });
     }
     if (verb === "poll") {
