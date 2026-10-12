@@ -422,11 +422,12 @@ describe("the supervisor", () => {
     expect(check()).toBe(true);
   }
 
-  it("runs one loopback listener and one tunnel per live link, and tears both down on disable", async () => {
+  it("runs one loopback listener and one tunnel per live link; on disable answers 410, then tears both down", async () => {
     const tunnels: { tunnel: FakeTunnel; port: number; config: string }[] = [];
     const sup = links.startPublicAppLinks({
       root,
       pollMs: 20,
+      goneGraceMs: 400,
       resolveApp: () => ({ id: APP, port: appPort, strip: false }),
       spawnTunnel: (port: number, config: string) => {
         const tunnel = new FakeTunnel();
@@ -446,8 +447,12 @@ describe("the supervisor", () => {
       expect((await ask(`/apps/${APP}/`, { port: tunnels[0].port })).status).toBe(200);
 
       writeLinks([]);
-      await until(() => tunnels[0].tunnel.killed.includes("SIGTERM"));
+      // During the grace the address stays and says the link is gone.
+      expect((await ask(`/apps/${APP}/`, { port: tunnels[0].port })).status).toBe(410);
       await until(() => !(LINK_ID in JSON.parse(fs.readFileSync(runtimeFile, "utf-8"))));
+      expect(tunnels[0].tunnel.killed).toHaveLength(0);
+      expect((await ask(`/apps/${APP}/`, { port: tunnels[0].port })).status).toBe(410);
+      await until(() => tunnels[0].tunnel.killed.includes("SIGTERM"));
       await expect(ask(`/apps/${APP}/`, { port: tunnels[0].port })).rejects.toThrow();
       const auditLog = fs.readFileSync(links.linkPaths(root).audit, "utf-8");
       expect(auditLog).toContain("\"published\"");
@@ -461,7 +466,7 @@ describe("the supervisor", () => {
   it("stops the tunnel of a temporary link when it expires and never starts an expired one", async () => {
     const tunnels: FakeTunnel[] = [];
     writeLinks([link({ mode: "temporary", expiresAt: Date.now() + 150 }), link({ id: "aaaaaaaaaaaaaaaa", appId: "old", mode: "temporary", expiresAt: Date.now() - 1 })]);
-    const sup = links.startPublicAppLinks({ root, pollMs: 20, spawnTunnel: () => { const t = new FakeTunnel(); tunnels.push(t); return t; } });
+    const sup = links.startPublicAppLinks({ root, pollMs: 20, goneGraceMs: 0, spawnTunnel: () => { const t = new FakeTunnel(); tunnels.push(t); return t; } });
     try {
       await until(() => tunnels.length === 1);
       await until(() => tunnels[0].killed.includes("SIGTERM"));

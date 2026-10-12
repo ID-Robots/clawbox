@@ -58,6 +58,8 @@ const RATE_PER_VISITOR = 300;
 const RATE_PER_LINK = 3000;
 const BAD_TOKEN_PER_VISITOR = 10;
 const RATE_MAP_MAX = 10_000;
+/** How long a disabled or expired link's address keeps answering 410 before its tunnel stops. */
+const GONE_GRACE_MS = 10 * 60_000;
 const HOP_BY_HOP = new Set(["connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade", "host", "proxy-connection"]);
 const WRITE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 const STATIC_TYPES = {
@@ -569,7 +571,7 @@ const QUICK_URL_RE = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/i;
 function writeRuntime(root, entries) {
   const { dir, runtime } = linkPaths(root);
   const body = {};
-  for (const [id, e] of entries) body[id] = { appId: e.link.appId, url: e.url, state: e.state, updatedAt: e.updatedAt };
+  for (const [id, e] of entries) if (e.goneAt === undefined) body[id] = { appId: e.link.appId, url: e.url, state: e.state, updatedAt: e.updatedAt };
   try {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     const tmp = `${runtime}.${process.pid}.tmp`;
@@ -588,6 +590,7 @@ function startPublicAppLinks(options = {}) {
   const root = options.root;
   const bin = options.cloudflaredBin || process.env.CLOUDFLARED_BIN || "/usr/local/bin/cloudflared";
   const pollMs = options.pollMs || 1000;
+  const goneGraceMs = options.goneGraceMs ?? GONE_GRACE_MS;
   const spawnTunnel = options.spawnTunnel || ((port, configFile) => spawn(bin, ["tunnel", "--no-autoupdate", "--config", configFile, "--url", `http://127.0.0.1:${port}`], { stdio: ["ignore", "pipe", "pipe"] }));
   const paths = linkPaths(root);
   const entries = new Map();
@@ -676,6 +679,7 @@ function startPublicAppLinks(options = {}) {
       if (entry.server.closeAllConnections) entry.server.closeAllConnections();
     } catch {}
     audit(root, "tunnel_stopped", { link: entry.link.id, app: entry.link.appId, reason });
+
   }
 
   function reconcile() {
@@ -685,9 +689,20 @@ function startPublicAppLinks(options = {}) {
     const live = new Map(all.filter((l) => !isExpired(l, t) && appPresent(root, l.appId)).map((l) => [l.id, l]));
     let changed = false;
     for (const entry of [...entries.values()]) {
-      if (!live.has(entry.link.id)) {
+      if (live.has(entry.link.id)) continue;
+      // A link that just went away keeps its address for a while, answering
+      // nothing but 410 (the handler refuses it on the very next request), so
+      // a visitor is told it was disabled or expired instead of meeting a dead
+      // hostname. Then the listener and the tunnel go.
+      if (entry.goneAt === undefined) {
         const stored = all.find((l) => l.id === entry.link.id);
-        stopEntry(entry, !stored ? "disabled" : isExpired(stored, t) ? "expired" : "app_missing");
+        entry.goneAt = t;
+        entry.goneReason = !stored ? "disabled" : isExpired(stored, t) ? "expired" : "app_missing";
+        audit(root, entry.goneReason, { link: entry.link.id, app: entry.link.appId });
+        changed = true;
+      }
+      if (t - entry.goneAt >= goneGraceMs) {
+        stopEntry(entry, entry.goneReason);
         changed = true;
       }
     }
@@ -724,6 +739,7 @@ module.exports = {
   TOKEN_PARAM,
   MAX_BODY_BYTES,
   BAD_TOKEN_PER_VISITOR,
+  GONE_GRACE_MS,
   RATE_PER_VISITOR,
   linkPaths,
   validLink,
