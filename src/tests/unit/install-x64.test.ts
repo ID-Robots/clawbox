@@ -446,12 +446,41 @@ describe("install-x64.sh shared-host preflight", () => {
     expect(managed.stdout).toContain("systemctl stop clawbox-browser.service");
     expect(managed.stdout).toContain("systemctl --runtime mask clawbox-gateway.service");
     expect(managed.stdout).toContain("systemctl enable --now ollama.service");
+    // Remote Control's tunnel: the four verbs src/lib/cloudflared.ts uses, on
+    // the unit name it passes, in both modes — the tunnel is not a desktop
+    // service.
+    for (const verb of ["restart", "stop", "enable", "disable"]) {
+      expect(managed.stdout).toContain(`systemctl ${verb} clawbox-tunnel.service`);
+    }
+    expect(managed.stdout).not.toContain("systemctl start clawbox-tunnel.service");
 
     const skipped = runRule("1");
     expect(skipped.status).toBe(0);
     expect(skipped.stdout).not.toContain("clawbox-browser.service");
     expect(skipped.stdout).toContain("systemctl --runtime mask clawbox-gateway.service");
     expect(skipped.stdout).toContain("systemctl enable --now ollama.service");
+    expect(skipped.stdout).toContain("systemctl restart clawbox-tunnel.service");
+  });
+
+  it("installs cloudflared itself and ships the tunnel unit, so Remote Control works on x64", () => {
+    // Settings → Remote Control's Install button starts the cloudflared_install
+    // root step; on x64 the dispatcher refused it as "no implementation" and the
+    // installer had no step, no unit and no sudo grant for it (seen on the
+    // owner's laptop, 2026-10-12).
+    expect(SOURCE).toContain("step_cloudflared_install() {");
+    expect(SOURCE).toContain("  vnc_install ffmpeg_install cloudflared_install fix_git_perms clawkeep_install");
+    expect(SOURCE).toContain('local tunnel_unit="/etc/systemd/system/clawbox-tunnel.service"');
+    expect(SOURCE).toContain("ExecStart=$PROJECT_DIR/scripts/run-tunnel.sh");
+    expect(SOURCE).toContain("Environment=LOCAL_SERVICE_URL=http://localhost:$PORT");
+    // Root downloads the binary itself — never the install user's setup-tunnel.sh.
+    const body = SOURCE.slice(SOURCE.indexOf("step_cloudflared_install() {"), SOURCE.indexOf("\n}\n", SOURCE.indexOf("step_cloudflared_install() {")));
+    expect(body).not.toContain("setup-tunnel.sh");
+    expect(body).toContain("sha256sum --check");
+    // Written, never enabled at install (the sudoers line grants the panel's
+    // own `enable`; the installer's enable lines must not name it).
+    expect(SOURCE).not.toMatch(/systemctl enable "\$GATEWAY_SERVICE"[^\n]*clawbox-tunnel/);
+    const dispatcher = readFileSync(path.resolve(process.cwd(), "scripts/x64-migration/clawbox-x64-root-step.sh"), "utf8");
+    expect(dispatcher).toMatch(/INSTALLER_STEPS="[^"]*\bcloudflared_install\b/);
   });
 });
 

@@ -135,7 +135,7 @@ run_noop() {
 # The steps the x64 installer implements. Everything else is refused loudly: a
 # step that silently does nothing is worse than one that fails.
 INSTALLER_STEPS="
-apt_update chromium_install clawkeep_install ffmpeg_install fix_git_perms
+apt_update chromium_install clawkeep_install cloudflared_install ffmpeg_install fix_git_perms
 llamacpp_install ollama_install openclaw_config openclaw_install openclaw_patch
 openclaw_setup vnc_install
 "
