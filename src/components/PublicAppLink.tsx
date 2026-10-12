@@ -323,7 +323,7 @@ function LinkPasswordManager({
       {isProtected && justSet && !editing && (
         <div style={{ display: "grid", gap: 6 }}>
           <div style={{ display: "flex", gap: 8 }}>
-            <input readOnly value={justSet} data-testid="public-link-password-value" onFocus={(e) => e.currentTarget.select()} style={{ ...FIELD, flex: 1, minWidth: 0, fontFamily: "ui-monospace, monospace" }} />
+            <input readOnly value={justSet} aria-label={t("publicLink.password.legend")} data-testid="public-link-password-value" onFocus={(e) => e.currentTarget.select()} style={{ ...FIELD, flex: 1, minWidth: 0, fontFamily: "ui-monospace, monospace" }} />
             <button type="button" data-testid="public-link-password-value-copy" onClick={() => { void navigator.clipboard?.writeText(justSet); setCopied(true); }} style={QUIET}>
               {copied ? t("publicLink.copied") : t("publicLink.password.copy")}
             </button>
@@ -334,7 +334,7 @@ function LinkPasswordManager({
       {changed && !editing && <p data-testid="public-link-password-changed" style={NOTE}>{t("publicLink.password.changedNote")}</p>}
       {editing ? (
         <>
-          <LinkPasswordField value={value} onChange={setValue} />
+          <LinkPasswordField value={value} onChange={(next) => { setValue(next); setError(null); }} />
           {error && <p role="alert" data-testid="public-link-password-error" style={{ margin: 0, fontSize: 12, color: "#fca5a5" }}>{error}</p>}
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
             <button type="button" data-testid="public-link-password-cancel" onClick={() => { setEditing(false); setValue(""); setError(null); }} style={QUIET}>{t("cancel")}</button>
@@ -443,7 +443,7 @@ export function PublicLinkDialog({
           <div style={{ marginTop: 14 }}>
             {link.url ? (
               <>
-                <input readOnly value={link.url} data-testid="public-link-url" onFocus={(e) => e.currentTarget.select()} style={{ ...field, width: "100%" }} />
+                <input readOnly value={link.url} aria-label={t("publicLink.copy")} data-testid="public-link-url" onFocus={(e) => e.currentTarget.select()} style={{ ...field, width: "100%" }} />
                 <p data-testid="public-link-address-note" style={{ margin: "8px 0 0", fontSize: 12, lineHeight: 1.5, color: "rgba(255,255,255,0.6)" }}>{t("publicLink.addressChanges")}</p>
               </>
             ) : (
@@ -510,7 +510,7 @@ export function PublicLinkDialog({
               </div>
               {protection === null && <p data-testid="public-link-protection-choose" style={NOTE}>{t("publicLink.password.choose")}</p>}
               {protection === "none" && <p data-testid="public-link-protection-none-note" style={NOTE}>{t("publicLink.password.noneNote")}</p>}
-              {protection === "password" && <LinkPasswordField value={password} onChange={setPassword} />}
+              {protection === "password" && <LinkPasswordField value={password} onChange={(value) => { setPassword(value); setError(null); }} />}
             </div>
             <label style={{ display: "grid", gap: 6, fontSize: 12, color: "rgba(255,255,255,0.7)" }}>
               {t("publicLink.api")}

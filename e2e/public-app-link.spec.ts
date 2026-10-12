@@ -157,6 +157,8 @@ test("a link is created with a password of its own, which is then changed and re
   await dialog.getByTestId("public-link-password-generate").click();
   await expect(input).toHaveAttribute("type", "text");
   const generated = await input.inputValue();
+  // The refusal was about the password that is no longer in the field.
+  await expect(dialog.getByTestId("public-link-error")).toHaveCount(0);
   expect(generated).toMatch(/^[A-HJ-NP-Za-km-z2-9]{20}$/);
   await dialog.getByTestId("public-link-submit").click();
 
@@ -165,6 +167,7 @@ test("a link is created with a password of its own, which is then changed and re
   await expect(dialog.getByTestId("public-link-password-status")).toHaveText(/Password protected/);
   // The one moment the password can still be copied.
   await expect(dialog.getByTestId("public-link-password-value")).toHaveValue(generated);
+  await expect(dialog.getByTestId("public-link-password-value")).toHaveAccessibleName("Password");
   await expect(dialog.getByTestId("public-link-password-save-now")).toBeVisible();
   await dialog.getByTestId("public-link-close").click();
 
