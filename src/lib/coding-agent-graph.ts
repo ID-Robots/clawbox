@@ -286,13 +286,19 @@ export function teamGraph(team: GraphTeam, runOf: (id: string) => GraphRunInfo |
         ...(task.reviewRunId ? [{ id: task.reviewRunId, role: "reviewer" as const, taskId }] : []),
       ];
     }
-    const workers = entries.filter((r) => r.role === "worker").map((r) => r.id);
+    // What this lane draws: a run is one node, wherever the board names it
+    // twice — twice on this task, or already drawn in an earlier lane or the
+    // root row. The attempts and the current attempt are counted from this
+    // same list, or a duplicate would shift every attempt after it by one.
+    const seen = new Set(nodes.map((n) => n.key));
+    const drawn = entries.filter((r) => (seen.has(r.id) ? false : (seen.add(r.id), true)));
+    const workers = drawn.filter((r) => r.role === "worker").map((r) => r.id);
     const currentWorker = task.assigned_to && workers.includes(task.assigned_to) ? task.assigned_to : workers[workers.length - 1] ?? null;
     const currentAttempt = currentWorker ? workers.indexOf(currentWorker) + 1 : 0;
     // An earlier attempt was superseded by a rejection — unless the task was
     // ever held or re-offered for CI, when it may have been set aside instead.
     const earlierRejected = (task.holds ?? 0) + (task.ciReoffers ?? 0) === 0;
-    const reviewerLive = entries.some((r) => r.role === "reviewer" && statusOf(r.id) === "running");
+    const reviewerLive = drawn.some((r) => r.role === "reviewer" && statusOf(r.id) === "running");
     const perTaskReview = !team.shape || team.shape.review === "each";
 
     const workerState = (id: string, attempt: number): AgentState => {
@@ -331,10 +337,8 @@ export function teamGraph(team: GraphTeam, runOf: (id: string) => GraphRunInfo |
     let step = 0;
     let attempt = 0;
     let prev: AgentNode | null = null;
-    const lastReviewer = [...entries].reverse().find((r) => r.role === "reviewer")?.id ?? null;
-    for (const r of entries) {
-      // A run is one node, wherever the board names it twice.
-      if (nodes.some((n) => n.key === r.id)) continue;
+    const lastReviewer = [...drawn].reverse().find((r) => r.role === "reviewer")?.id ?? null;
+    for (const r of drawn) {
       if (r.role === "worker") attempt++;
       const node: AgentNode = r.role === "worker"
         ? { key: r.id, runId: r.id, role: "worker", taskId, attempt, state: workerState(r.id, attempt), placeholder: false, lane, step: step++ }

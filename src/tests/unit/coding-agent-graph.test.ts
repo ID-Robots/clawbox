@@ -189,6 +189,38 @@ describe("teamGraph — one node per real agent", () => {
     expect(stateOf(g2, "run-fin00001")).toBe("rejected");
   });
 
+  it("numbers attempts from the runs it draws when the board names a worker twice", () => {
+    // The cast list names w1 twice; w1 is ONE node, so w2 is attempt 2 — and
+    // the current one, by the board's own assignment.
+    const dup = (task: Task, extra: NonNullable<GraphTeam["runs"]> = []): GraphTeam => ({
+      ...EIGHT,
+      runs: [
+        { id: "run-planxx01", role: "planner", taskId: null },
+        { id: "run-w1dup001", role: "worker", taskId: "t1" },
+        { id: "run-w1dup001", role: "worker", taskId: "t1" },
+        { id: "run-w2dup001", role: "worker", taskId: "t1" },
+        ...extra,
+      ],
+      plannerRunId: "run-planxx01",
+      tasks: [task],
+    });
+    const settled = (id: string): GraphRunInfo | undefined => (id.startsWith("run-w") ? { id, status: "completed" } : undefined);
+    const lane = (g: AgentGraph) => g.nodes.filter((n) => n.taskId === "t1").map((n) => [n.key, n.attempt, n.state]);
+
+    // Its work is in and waiting for its reviewer.
+    const inReview = teamGraph(dup(task("t1", "complete", { assigned_to: "run-w2dup001", attempts: 2 })), settled);
+    expect(lane(inReview)).toEqual([["run-w1dup001", 1, "rejected"], ["run-w2dup001", 2, "reviewing"]]);
+    // At work, and the app holds no record of it yet: the board says in progress.
+    const atWork = teamGraph(dup(task("t1", "in_progress", { assigned_to: "run-w2dup001", attempts: 2 })), () => undefined);
+    expect(lane(atWork)).toEqual([["run-w1dup001", 1, "rejected"], ["run-w2dup001", 2, "working"]]);
+    // Its reviewer ruled on attempt 2, and the verdict lands on both.
+    const ruled = teamGraph(
+      dup(task("t1", "complete", { assigned_to: "run-w2dup001", attempts: 2, review: { verdict: "accepted" }, reviewRunId: "run-r2dup001" }), [{ id: "run-r2dup001", role: "reviewer", taskId: "t1" }]),
+      settled,
+    );
+    expect(lane(ruled)).toEqual([["run-w1dup001", 1, "rejected"], ["run-w2dup001", 2, "accepted"], ["run-r2dup001", 2, "accepted"]]);
+  });
+
   it("falls back to the task's own worker and reviewer for a board from before the cast list", () => {
     const old = teamGraph({ ...EIGHT, runs: undefined }, runOf);
     expect(old.root.map((n) => n.key)).toEqual(["run-p0000001"]);
