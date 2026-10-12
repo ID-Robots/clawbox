@@ -31,8 +31,12 @@
  *   5. the link's secret — `?k=<token>` once (exchanged for a host-only,
  *      Secure, HttpOnly cookie on the link's own origin, then redirected
  *      away so the token leaves the address bar), the cookie afterwards;
- *   6. the app's own path (`/apps/<id>/…` for a server app);
- *   7. the method policy: GET/HEAD of anything but the app's `/api` tree by
+ *   6. the link's password, when the owner set one (TASK-1515): until the
+ *      visitor has typed it, every request is answered by a small password
+ *      page this listener writes itself — never by the app, its files or its
+ *      allow-listed API paths;
+ *   7. the app's own path (`/apps/<id>/…` for a server app);
+ *   8. the method policy: GET/HEAD of anything but the app's `/api` tree by
  *      default; `/api`, and any write, only under a prefix the owner
  *      allow-listed for this link. WebSocket upgrades are refused.
  */
@@ -50,6 +54,21 @@ const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
 const API_ALLOW_RE = /^\/[A-Za-z0-9._~\-/]{0,200}$/;
 const COOKIE_NAME = "__Host-cbshare";
 const TOKEN_PARAM = "k";
+/** The cookie a visitor holds after typing the link's password (TASK-1515). */
+const UNLOCK_COOKIE_NAME = "__Host-cbshare-pw";
+/** Where the password page posts. A dot segment: no app file or route is ever served from one. */
+const UNLOCK_PATH = "/.link/unlock";
+const UNLOCK_MAX_AGE_S = 12 * 60 * 60;
+const UNLOCK_BODY_MAX = 4096;
+const PASSWORD_MAX_LENGTH = 128;
+const PASSWORD_HASH_RE = /^scrypt\$(\d{4,7})\$(\d{1,2})\$(\d{1,2})\$([A-Za-z0-9_-]{22,64})\$([A-Za-z0-9_-]{43,86})$/;
+const UNLOCK_KEY_RE = /^[A-Za-z0-9_-]{43}$/;
+/** Password attempts, right or wrong, in one window: per visitor of a link, and per link. */
+const PASSWORD_WINDOW_MS = 15 * 60_000;
+const PASSWORD_TRIES_PER_VISITOR = 5;
+const PASSWORD_TRIES_PER_LINK = 20;
+/** Hashes waiting behind the one that is running; more than this and the answer is 429. */
+const PASSWORD_QUEUE_MAX = 4;
 const MAX_URL_LENGTH = 4096;
 const MAX_BODY_BYTES = 10 * 1024 * 1024;
 const HEADERS_TIMEOUT_MS = 120_000;
@@ -128,7 +147,39 @@ function validLink(raw) {
   if (mode === "permanent" && expiresAt !== null && expiresAt !== undefined) return null;
   const apiAllow = validApiAllow(raw.apiAllow ?? []);
   if (!apiAllow) return null;
-  return { id, appId, mode, token, createdAt, expiresAt: mode === "temporary" ? expiresAt : null, apiAllow };
+  // A password record that cannot be used makes the whole link unusable: a
+  // link the owner protected is never served as an open one.
+  let password = null;
+  if (raw.password !== undefined && raw.password !== null) {
+    password = validPassword(raw.password);
+    if (!password) return null;
+  }
+  return { id, appId, mode, token, createdAt, expiresAt: mode === "temporary" ? expiresAt : null, apiAllow, password };
+}
+
+/** `scrypt$N$r$p$salt$key` (base64url salt and key) taken apart, or null. */
+function parsePasswordHash(hash) {
+  const m = typeof hash === "string" ? PASSWORD_HASH_RE.exec(hash) : null;
+  if (!m) return null;
+  const N = Number(m[1]);
+  const r = Number(m[2]);
+  const p = Number(m[3]);
+  // Bounds on what a file may ask this process to compute: N a power of two
+  // up to 2^17, and at most 256 MB of work memory.
+  if (N < 16384 || N > 131072 || (N & (N - 1)) !== 0 || r < 8 || r > 16 || p < 1 || p > 4) return null;
+  const salt = Buffer.from(m[4], "base64url");
+  const key = Buffer.from(m[5], "base64url");
+  if (salt.length < 16 || key.length < 32) return null;
+  return { N, r, p, salt, key };
+}
+
+/** The stored password of a link: its slow hash and the key its unlock cookies are signed with. */
+function validPassword(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const { hash, key } = raw;
+  if (!parsePasswordHash(hash)) return null;
+  if (typeof key !== "string" || !UNLOCK_KEY_RE.test(key)) return null;
+  return { hash, key };
 }
 
 const linkCache = new Map();
@@ -282,11 +333,15 @@ function cookieValue(header, name) {
 }
 
 /** The request's Cookie header with the link's own cookie (and any ClawBox session a client invents) taken out. */
+function isLinkCookie(name) {
+  return name === COOKIE_NAME || name === UNLOCK_COOKIE_NAME || name === "clawbox_session";
+}
+
 function appCookies(header) {
   if (!header) return null;
   const kept = String(header).split(";").map((p) => p.trim()).filter((p) => {
     const name = p.split("=")[0].trim();
-    return p && name !== COOKIE_NAME && name !== "clawbox_session";
+    return p && !isLinkCookie(name);
   });
   return kept.length ? kept.join("; ") : null;
 }
@@ -295,12 +350,17 @@ function appCookies(header) {
 
 function createLimiter(now = () => Date.now()) {
   const buckets = new Map();
-  function hit(key, max) {
+  function hit(key, max, windowMs = RATE_WINDOW_MS) {
     const t = now();
     let b = buckets.get(key);
-    if (!b || t - b.start >= RATE_WINDOW_MS) {
-      if (buckets.size >= RATE_MAP_MAX) buckets.clear();
-      b = { start: t, count: 0 };
+    if (!b || t - b.start >= b.windowMs) {
+      // Full: the short-lived request counters go first. A password lock-out
+      // is only dropped when those alone do not make room.
+      if (buckets.size >= RATE_MAP_MAX) {
+        for (const [k, old] of buckets) if (old.windowMs <= RATE_WINDOW_MS) buckets.delete(k);
+        if (buckets.size >= RATE_MAP_MAX) buckets.clear();
+      }
+      b = { start: t, count: 0, windowMs };
       buckets.set(key, b);
     }
     b.count += 1;
@@ -308,9 +368,140 @@ function createLimiter(now = () => Date.now()) {
   }
   function count(key) {
     const b = buckets.get(key);
-    return b && now() - b.start < RATE_WINDOW_MS ? b.count : 0;
+    return b && now() - b.start < b.windowMs ? b.count : 0;
   }
-  return { hit, count };
+  /** Take one hit back (a password attempt that turned out right). */
+  function refund(key) {
+    const b = buckets.get(key);
+    if (b && b.count > 0) b.count -= 1;
+  }
+  return { hit, count, refund };
+}
+
+// ── The link's password (TASK-1515) ──────────────────────────────────────────
+
+/** Does `password` hash to the stored `hash`? Slow on purpose; the comparison is constant-time. */
+function verifyPasswordHash(password, hash) {
+  return new Promise((resolve) => {
+    const parsed = parsePasswordHash(hash);
+    if (!parsed || typeof password !== "string") return resolve(false);
+    const { N, r, p, salt, key } = parsed;
+    crypto.scrypt(password.normalize("NFC"), salt, key.length, { N, r, p, maxmem: 256 * 1024 * 1024 }, (err, derived) => {
+      if (err || !derived || derived.length !== key.length) return resolve(false);
+      resolve(crypto.timingSafeEqual(derived, key));
+    });
+    return undefined;
+  });
+}
+
+function unlockMac(link, exp) {
+  return crypto.createHmac("sha256", Buffer.from(link.password.key, "base64url")).update(`unlock.v1.${link.id}.${exp}`).digest("base64url");
+}
+
+/**
+ * The unlock cookie: `v1.<expiry, seconds>.<HMAC>`, signed with a key that
+ * belongs to this link's CURRENT password. A new password is a new key, so
+ * every cookie issued before the change stops verifying; a cookie of another
+ * link never verifies here (different key, and the link id is in the MAC).
+ */
+function unlockCookieValue(link, nowMs) {
+  let exp = Math.floor(nowMs / 1000) + UNLOCK_MAX_AGE_S;
+  if (link.mode === "temporary") exp = Math.min(exp, Math.ceil(link.expiresAt / 1000));
+  return { value: `v1.${exp}.${unlockMac(link, exp)}`, maxAge: Math.max(1, exp - Math.floor(nowMs / 1000)) };
+}
+
+function unlocked(link, cookie, nowMs) {
+  if (!link.password || typeof cookie !== "string") return false;
+  const parts = cookie.split(".");
+  if (parts.length !== 3 || parts[0] !== "v1" || !/^\d{1,12}$/.test(parts[1])) return false;
+  const exp = Number(parts[1]);
+  if (exp * 1000 <= nowMs) return false;
+  return timingSafeTokenEqual(parts[2], unlockMac(link, exp));
+}
+
+/** The password page's words. The visitor's browser language picks one; English otherwise. */
+const PASSWORD_PAGE_TEXT = {
+  en: ["Password required", "This page is protected. Enter the password to continue.", "Password", "Continue", "Wrong password. Try again.", "Too many attempts. Try again later."],
+  bg: ["Нужна е парола", "Тази страница е защитена. Въведете паролата, за да продължите.", "Парола", "Продължи", "Грешна парола. Опитайте отново.", "Твърде много опити. Опитайте по-късно."],
+  de: ["Passwort erforderlich", "Diese Seite ist geschützt. Geben Sie das Passwort ein, um fortzufahren.", "Passwort", "Weiter", "Falsches Passwort. Versuchen Sie es erneut.", "Zu viele Versuche. Versuchen Sie es später erneut."],
+  es: ["Se requiere contraseña", "Esta página está protegida. Introduce la contraseña para continuar.", "Contraseña", "Continuar", "Contraseña incorrecta. Inténtalo de nuevo.", "Demasiados intentos. Inténtalo más tarde."],
+  fr: ["Mot de passe requis", "Cette page est protégée. Saisissez le mot de passe pour continuer.", "Mot de passe", "Continuer", "Mot de passe incorrect. Réessayez.", "Trop de tentatives. Réessayez plus tard."],
+  it: ["Password richiesta", "Questa pagina è protetta. Inserisci la password per continuare.", "Password", "Continua", "Password errata. Riprova.", "Troppi tentativi. Riprova più tardi."],
+  ja: ["パスワードが必要です", "このページは保護されています。続行するにはパスワードを入力してください。", "パスワード", "続行", "パスワードが違います。もう一度お試しください。", "試行回数が多すぎます。しばらくしてからお試しください。"],
+  nl: ["Wachtwoord vereist", "Deze pagina is beveiligd. Voer het wachtwoord in om door te gaan.", "Wachtwoord", "Doorgaan", "Onjuist wachtwoord. Probeer het opnieuw.", "Te veel pogingen. Probeer het later opnieuw."],
+  sv: ["Lösenord krävs", "Den här sidan är skyddad. Ange lösenordet för att fortsätta.", "Lösenord", "Fortsätt", "Fel lösenord. Försök igen.", "För många försök. Försök igen senare."],
+  zh: ["需要密码", "此页面受保护。请输入密码以继续。", "密码", "继续", "密码错误，请重试。", "尝试次数过多，请稍后再试。"],
+};
+
+function pageLanguage(header) {
+  for (const part of String(header || "").split(",")) {
+    const tag = part.split(";")[0].trim().slice(0, 2).toLowerCase();
+    if (Object.prototype.hasOwnProperty.call(PASSWORD_PAGE_TEXT, tag)) return tag;
+  }
+  return "en";
+}
+
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
+}
+
+/**
+ * The password page. Written here, whole: no asset, script, font or name of
+ * the box or of the app, so a visitor without the password learns only that
+ * there is one. `problem` is "wrong", "locked" or nothing.
+ */
+function passwordPage(lang, next, problem) {
+  const [title, intro, label, button, wrong, locked] = PASSWORD_PAGE_TEXT[lang] || PASSWORD_PAGE_TEXT.en;
+  const note = problem === "wrong" ? wrong : problem === "locked" ? locked : "";
+  return `<!doctype html>
+<html lang="${lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex, nofollow"><title>${escapeHtml(title)}</title>
+<style>html{color-scheme:light dark}body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;font:16px/1.5 system-ui,sans-serif;background:Canvas;color:CanvasText}main{width:min(22rem,100% - 3rem)}h1{font-size:1.25rem;margin:0 0 .5rem}p{margin:0 0 1rem}label{display:block;font-size:.875rem;margin-bottom:.25rem}input,button{font:inherit;box-sizing:border-box;width:100%;padding:.6rem .7rem;border-radius:.5rem;border:1px solid GrayText}button{margin-top:.75rem;cursor:pointer;font-weight:600}.e{color:#c62828;font-size:.875rem}@media (prefers-color-scheme:dark){.e{color:#ff8a80}}</style></head>
+<body><main><h1>${escapeHtml(title)}</h1><p>${escapeHtml(intro)}</p>${note ? `<p class="e" role="alert">${escapeHtml(note)}</p>` : ""}
+<form method="post" action="${UNLOCK_PATH}"><input type="hidden" name="next" value="${escapeHtml(next)}"><label for="p">${escapeHtml(label)}</label><input id="p" name="password" type="password" autocomplete="off" maxlength="${PASSWORD_MAX_LENGTH}" required autofocus${problem === "locked" ? " disabled" : ""}><button type="submit"${problem === "locked" ? " disabled" : ""}>${escapeHtml(button)}</button></form></main></body></html>
+`;
+}
+
+const PASSWORD_PAGE_HEADERS = {
+  "content-type": "text/html; charset=utf-8",
+  "cache-control": "no-store",
+  "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY",
+  "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+};
+
+function sendPasswordPage(req, res, status, next, problem, extra = {}) {
+  const body = Buffer.from(passwordPage(pageLanguage(req.headers["accept-language"]), next, problem), "utf-8");
+  // `connection: close` for the same reason as refuse(): what the visitor sent is not read.
+  res.writeHead(status, { ...PASSWORD_PAGE_HEADERS, "content-length": String(body.length), connection: "close", ...SECURITY_HEADERS, ...extra });
+  res.end(String(req.method).toUpperCase() === "HEAD" ? undefined : body);
+}
+
+/** The request body as text, or null when it is larger than `max` bytes or the connection fails. */
+function readSmallBody(req, max) {
+  return new Promise((resolve) => {
+    if (Number(req.headers["content-length"] || 0) > max) return resolve(null);
+    const chunks = [];
+    let seen = 0;
+    let done = false;
+    const finish = (value) => { if (!done) { done = true; resolve(value); } };
+    req.on("data", (chunk) => {
+      seen += chunk.length;
+      if (seen > max) return finish(null);
+      chunks.push(chunk);
+      return undefined;
+    });
+    req.on("end", () => finish(Buffer.concat(chunks).toString("utf-8")));
+    req.on("error", () => finish(null));
+    req.on("close", () => finish(null));
+    return undefined;
+  });
+}
+
+/** Where to send the visitor after the password: a canonical path on this origin, or the top. */
+function safeNext(raw) {
+  const target = typeof raw === "string" ? canonicalTarget(raw) : null;
+  if (!target || target.path.startsWith(UNLOCK_PATH)) return "/";
+  return `${target.path}${target.search}`;
 }
 
 // ── The handler ──────────────────────────────────────────────────────────────
@@ -344,8 +535,67 @@ function createLinkHandler(linkId, opts) {
   const root = opts.root;
   const resolveApp = opts.resolveApp || resolveRegisteredApp;
   const requireHttps = opts.requireHttps !== false;
-  const limiter = opts.limiter || createLimiter();
   const now = opts.now || (() => Date.now());
+  const limiter = opts.limiter || createLimiter(now);
+  // One password hash at a time per link: each costs tens of megabytes and a
+  // noticeable slice of a core, and a visitor must not be able to stack them.
+  let hashQueue = Promise.resolve();
+  let hashWaiting = 0;
+
+  /**
+   * A password typed into the password page. The attempt is counted BEFORE
+   * the hash runs (so parallel guesses cannot outrun the limit) and taken back
+   * only when it was right. The link is read again after the hash: one that
+   * was disabled, expired or given another password in the meantime is not
+   * unlocked by an answer to the old one.
+   */
+  async function unlockAttempt(req, res, link, visitor) {
+    const site = req.headers["sec-fetch-site"];
+    if (typeof site === "string" && site !== "same-origin" && site !== "none") return refuse(res, 403, "Forbidden.");
+    if (!/^application\/x-www-form-urlencoded\b/i.test(String(req.headers["content-type"] || ""))) return refuse(res, 415, "Unsupported media type.");
+    const body = await readSmallBody(req, UNLOCK_BODY_MAX);
+    if (body === null) return refuse(res, 413, "Request too large.");
+    const form = new URLSearchParams(body);
+    const next = safeNext(form.get("next"));
+    const password = form.get("password") || "";
+
+    const visitorKey = `pw:${link.id}:${visitor}`;
+    const linkKey = `pwl:${link.id}`;
+    if (limiter.count(visitorKey) >= PASSWORD_TRIES_PER_VISITOR || limiter.count(linkKey) >= PASSWORD_TRIES_PER_LINK || hashWaiting >= PASSWORD_QUEUE_MAX) {
+      return sendPasswordPage(req, res, 429, next, "locked", { "retry-after": String(PASSWORD_WINDOW_MS / 1000) });
+    }
+    limiter.hit(visitorKey, Infinity, PASSWORD_WINDOW_MS);
+    limiter.hit(linkKey, Infinity, PASSWORD_WINDOW_MS);
+
+    let ok = false;
+    if (password.length > 0 && password.length <= PASSWORD_MAX_LENGTH) {
+      hashWaiting += 1;
+      const turn = hashQueue.then(() => verifyPasswordHash(password, link.password.hash));
+      hashQueue = turn.catch(() => false);
+      try {
+        ok = await turn;
+      } catch {
+        ok = false;
+      } finally {
+        hashWaiting -= 1;
+      }
+    }
+    const current = liveLink(root, linkId, now());
+    if (!current) return refuse(res, 410, "This public link has been disabled or has expired.");
+    if (!ok || !current.password || current.password.hash !== link.password.hash || current.password.key !== link.password.key) {
+      return sendPasswordPage(req, res, 401, next, "wrong");
+    }
+    limiter.refund(visitorKey);
+    limiter.refund(linkKey);
+    const cookie = unlockCookieValue(current, now());
+    res.writeHead(303, {
+      location: next,
+      "set-cookie": `${UNLOCK_COOKIE_NAME}=${cookie.value}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${cookie.maxAge}`,
+      "cache-control": "no-store",
+      ...SECURITY_HEADERS,
+    });
+    return res.end();
+  }
 
   return function handle(req, res) {
     const link = liveLink(root, linkId, now());
@@ -390,6 +640,25 @@ function createLinkHandler(linkId, opts) {
     if (!timingSafeTokenEqual(cookieValue(req.headers.cookie, COOKIE_NAME), link.token)) {
       limiter.hit(`bad:${link.id}:${visitor}`, Infinity);
       return refuse(res, 404, "Not found.");
+    }
+
+    // The password, when the owner set one: in front of everything below —
+    // the app's pages, its files and its allow-listed API paths alike.
+    if (link.password && !unlocked(link, cookieValue(req.headers.cookie, UNLOCK_COOKIE_NAME), now())) {
+      if (target.path === UNLOCK_PATH) {
+        if (method !== "POST") return refuse(res, 405, "Method not allowed.");
+        unlockAttempt(req, res, link, visitor).catch(() => refuse(res, 500, "Something went wrong."));
+        return undefined;
+      }
+      if (method !== "GET" && method !== "HEAD") return refuse(res, 401, "Password required.");
+      const locked = limiter.count(`pw:${link.id}:${visitor}`) >= PASSWORD_TRIES_PER_VISITOR || limiter.count(`pwl:${link.id}`) >= PASSWORD_TRIES_PER_LINK;
+      return sendPasswordPage(req, res, 401, safeNext(`${target.path}${target.search}`), locked ? "locked" : undefined);
+    }
+    // Already unlocked (a second tab, the back button): the form's address
+    // leads back into the app rather than to a 404.
+    if (link.password && target.path === UNLOCK_PATH) {
+      res.writeHead(303, { location: "/", "cache-control": "no-store", ...SECURITY_HEADERS });
+      return res.end();
     }
 
     const app = resolveApp(root, link.appId);
@@ -452,7 +721,7 @@ function proxyToApp(req, res, link, app, target, method) {
       if (key === "set-cookie") {
         const kept = (Array.isArray(value) ? value : [value]).filter((c) => {
           const name = String(c).split("=")[0].trim();
-          return name !== COOKIE_NAME && name !== "clawbox_session";
+          return !isLinkCookie(name);
         });
         if (kept.length) out[key] = kept;
         continue;
@@ -736,6 +1005,12 @@ function startPublicAppLinks(options = {}) {
 
 module.exports = {
   COOKIE_NAME,
+  UNLOCK_COOKIE_NAME,
+  UNLOCK_PATH,
+  PASSWORD_TRIES_PER_VISITOR,
+  PASSWORD_TRIES_PER_LINK,
+  PASSWORD_WINDOW_MS,
+  verifyPasswordHash,
   TOKEN_PARAM,
   MAX_BODY_BYTES,
   BAD_TOKEN_PER_VISITOR,

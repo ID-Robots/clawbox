@@ -3915,6 +3915,7 @@ function ChromeDesktopInner() {
           appName={installedMeta[publicLinkDialogApp]?.name ?? publicLinkDialogApp}
           link={publicAppLinks.links[publicLinkDialogApp]}
           onCreate={publicAppLinks.create}
+          onSetPassword={publicAppLinks.setPassword}
           onClose={() => setPublicLinkDialogApp(null)}
         />
       )}
@@ -4021,6 +4022,7 @@ function ChromeDesktopInner() {
                     link={publicAppLinks.links[ctxMenu.appId!]}
                     onCreate={() => setPublicLinkDialogApp(ctxMenu.appId!)}
                     onDisable={() => { void publicAppLinks.disable(ctxMenu.appId!); }}
+                    onPassword={() => setPublicLinkDialogApp(ctxMenu.appId!)}
                   />
                   <div className="border-t border-white/10 my-1" />
                 </>

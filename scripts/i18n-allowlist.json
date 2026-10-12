@@ -63,6 +63,7 @@
     { "key": "progress.telegram", "locales": "*", "reason": "Telegram is a brand name." },
     { "key": "progress.update", "locales": ["de", "nl"], "reason": "\"Update\" is the loanword in German and Dutch." },
     { "key": "progress.wifi", "locales": "*", "reason": "WiFi is a trademark." },
+    { "key": "publicLink.password.legend", "locales": ["it"], "reason": "Italian uses \"Password\"." },
     { "key": "remoteControl.onlineTitle", "locales": ["de", "it", "nl", "sv"], "reason": "\"Tunnel\" and \"online\" are both the same words in these languages." },
     { "key": "screenshot.toolEllipse", "locales": ["de", "fr"], "reason": "\"Ellipse\" is the German and French word." },
     { "key": "screenshot.toolRect", "locales": ["fr"], "reason": "\"Rectangle\" is the French word." },
