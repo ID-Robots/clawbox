@@ -1174,7 +1174,7 @@ SWAPFILE_PRIORITY=1
 BUN="$CLAWBOX_HOME/.bun/bin/bun"
 NPM_PREFIX="$CLAWBOX_HOME/.npm-global"
 OPENCLAW_BIN="$NPM_PREFIX/bin/openclaw"
-OPENCLAW_VERSION="2026.9.4"
+OPENCLAW_VERSION="2026.10.2"
 
 # Pinned Hermes agent release, in the same spirit as $OPENCLAW_VERSION above:
 # the fleet runs the build WE chose instead of whatever
@@ -1195,8 +1195,8 @@ OPENCLAW_VERSION="2026.9.4"
 # Bump the default in a PR, ship it through beta -> main, and the fleet
 # follows on its next update.
 #
-# Current pin: upstream tag v2026.9.7 == "Hermes Agent v0.21.1" (TASK-784).
-HERMES_PIN_COMMIT="${HERMES_PIN_COMMIT:-2237be355906fbe6065ce1815711eee52b2d646e}"
+# Current pin: upstream tag v0.21.7 == "Hermes Agent v0.21.7".
+HERMES_PIN_COMMIT="${HERMES_PIN_COMMIT:-71d34bad1045610252eda02ee79549436896e784}"
 
 # WHO OWNS THE GATEWAY SERVICE, said to the core rather than left for it to
 # guess. ClawBox supervises the gateway itself, as the SYSTEM unit

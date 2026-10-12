@@ -238,7 +238,7 @@ describe("install.sh / install-x64.sh Node engine table", () => {
     // version on the new core. Nothing can derive these — they exist for the
     // moment the shared file is unavailable — so this case is the guard.
     const pinned = readFileSync(path.join(REPO, "config/openclaw-target.txt"), "utf-8").trim();
-    expect(pinned).toBe("2026.9.4");
+    expect(pinned).toBe("2026.10.2");
     for (const [name, source] of Object.entries(INSTALLERS)) {
       expect(source, name).toContain(`OPENCLAW_VERSION="${pinned}"`);
     }
