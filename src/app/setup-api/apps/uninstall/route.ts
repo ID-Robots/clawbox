@@ -8,6 +8,7 @@ import { refreshSkillsCache } from "@/lib/openclaw-skill-info";
 import { kvDelete } from "@/lib/kv-store";
 import { WEBAPPS_DIR } from "@/lib/code-projects";
 import { safeAppId, webappIconPath } from "@/lib/webapp-icon";
+import { disablePublicLink } from "@/lib/public-app-links";
 
 export const dynamic = "force-dynamic";
 
@@ -243,13 +244,21 @@ export async function POST(req: Request) {
     // Without `force`, so the removal itself says whether there was a webapp
     // here — the fact the report below needs. Every other failure still throws,
     // exactly as it did with `force`, which only ever swallowed ENOENT.
+    // An app that is going must not stay on the internet: its public link
+    // (TASK-1478) is disabled first, and the folder is removed under the same
+    // lock link creation takes, so no link can appear in between. When the
+    // link list cannot be read or rewritten the uninstall fails here with the
+    // folder still in place: removing it would leave the link stored, live
+    // again for whatever is next deployed under the same id.
     let webappRemoved = false;
-    try {
-      await fs.rm(webappDir, { recursive: true });
-      webappRemoved = true;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") throw err;
-    }
+    await disablePublicLink(appId, "app_uninstalled", async () => {
+      try {
+        await fs.rm(webappDir, { recursive: true });
+        webappRemoved = true;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") throw err;
+      }
+    });
 
     // `false` is "this box has a skills root and nothing of that name was in
     // it", and `mcp/tools/desktop.ts` says that out loud: "there was no skill

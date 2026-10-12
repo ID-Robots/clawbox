@@ -79,6 +79,7 @@ import { readChatFirstEnvironment, shouldOpenChatFirst } from "@/lib/mobile-chat
 import { runMobileBack, useMobileBackDepth } from "@/lib/mobile-back";
 import { isBoxOwnScreen, setVisibleInterval } from "@/lib/visible-interval";
 import { samePairingRequests, sameSelection, type PairingRequestCard } from "@/lib/desktop-shell-equality";
+import { PublicLinkBadge, PublicLinkDialog, PublicLinkMenuItems, usePublicAppLinks } from "@/components/PublicAppLink";
 import {
   layoutIcons,
   layoutsEqual,
@@ -1660,6 +1661,17 @@ function ChromeDesktopInner() {
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; appId?: string; isGroup?: boolean } | null>(null);
 
   const ctxMenuOpenedAt = useRef(0);
+  // Public app links (TASK-1478): the owner's only, and only for webapps.
+  // `ownerApis`, the strict owner signal: a second user's desktop must not ask
+  // for a route that answers them 403, nor be offered a link it cannot make.
+  const publicAppLinks = usePublicAppLinks(ownerApis);
+  const [publicLinkDialogApp, setPublicLinkDialogApp] = useState<string | null>(null);
+  const refreshPublicAppLinks = publicAppLinks.refresh;
+  const ctxMenuAppId = ctxMenu?.appId;
+  // The menu shows a link's state, so it asks again each time it opens on an icon.
+  useEffect(() => {
+    if (ctxMenuAppId) void refreshPublicAppLinks();
+  }, [ctxMenuAppId, refreshPublicAppLinks]);
   const longPressTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   const longPressFired = useRef(false);
   const isTouchDevice = typeof window !== "undefined" && "ontouchstart" in window;
@@ -3527,9 +3539,10 @@ function ChromeDesktopInner() {
               >
                 <div
                   className="w-14 h-14 rounded-2xl flex items-center justify-center shadow-lg ring-1 ring-black/20 transition-transform duration-200 group-hover:scale-105 group-active:scale-95"
-                  style={{ backgroundColor: app.color }}
+                  style={{ backgroundColor: app.color, position: "relative" }}
                 >
                   <InstalledAppIcon appId={app.id} iconUrl={app.iconUrl} name={app.name} size="w-7 h-7" />
+                  {publicAppLinks.links[app.id] && <PublicLinkBadge appId={app.id} />}
                 </div>
                 <span className="text-[13px] leading-tight text-white font-semibold text-center line-clamp-2 break-words hyphens-auto max-w-[80px] min-h-[calc(2*13px*1.25)]" style={{ textShadow: "0 1px 4px rgba(0,0,0,1), 0 0 10px rgba(0,0,0,0.8), 0 0 20px rgba(0,0,0,0.4)" }}>
                   {app.name}
@@ -3895,6 +3908,17 @@ function ChromeDesktopInner() {
       />
 
 
+      {publicLinkDialogApp && (
+        <PublicLinkDialog
+          open
+          appId={publicLinkDialogApp}
+          appName={installedMeta[publicLinkDialogApp]?.name ?? publicLinkDialogApp}
+          link={publicAppLinks.links[publicLinkDialogApp]}
+          onCreate={publicAppLinks.create}
+          onClose={() => setPublicLinkDialogApp(null)}
+        />
+      )}
+
       {/* Context menu. No backdrop blur under its fill: #2d2d2d is opaque, so
           the blur could not be seen, and it was still a render pass re-run
           whenever anything beneath it moved — the crab, a pet. */}
@@ -3991,6 +4015,16 @@ function ChromeDesktopInner() {
                 </button>
               )}
               <div className="border-t border-white/10 my-1" />
+              {ownerApis && !ctxMenu.appId!.startsWith("desktop-") && !!installedMeta[ctxMenu.appId!]?.webappUrl && (
+                <>
+                  <PublicLinkMenuItems
+                    link={publicAppLinks.links[ctxMenu.appId!]}
+                    onCreate={() => setPublicLinkDialogApp(ctxMenu.appId!)}
+                    onDisable={() => { void publicAppLinks.disable(ctxMenu.appId!); }}
+                  />
+                  <div className="border-t border-white/10 my-1" />
+                </>
+              )}
               {!ctxMenu.appId!.startsWith("desktop-") && (
                 <>
                   <button onClick={() => {
