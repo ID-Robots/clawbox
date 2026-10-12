@@ -191,6 +191,14 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
   // starting point never earns a "restarting" line.
   const deviceNameRef = useRef<string | null>(null);
   const apStateRef = useRef<{ active: boolean; blockedBy: string | null } | null>(null);
+  // The system password this mount has already saved, if any. The save is
+  // three requests, and the password is the second: when the hotspot request
+  // after it fails, the owner is still on this screen with a password the box
+  // now holds. The route asks for the current password from then on, which
+  // this step has no field for, so a second Save answered "Current password is
+  // required" and the wizard could not be finished. A retry therefore skips a
+  // password it already set, and re-proves it when the owner changed the field.
+  const savedPasswordRef = useRef<string | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -350,12 +358,16 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
       if (controller.signal.aborted) return;
 
       // Save system password if provided
-      if (submission.password) {
+      if (submission.password && submission.password !== savedPasswordRef.current) {
         setProgressKey("credentials.progressPassword");
         const res = await fetch("/setup-api/system/credentials", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ password: submission.password }),
+          body: JSON.stringify(
+            savedPasswordRef.current
+              ? { password: submission.password, currentPassword: savedPasswordRef.current }
+              : { password: submission.password },
+          ),
           signal: controller.signal,
         });
         if (controller.signal.aborted) return;
@@ -367,6 +379,7 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
           });
           return;
         }
+        savedPasswordRef.current = submission.password;
       }
 
       // Save hotspot settings
