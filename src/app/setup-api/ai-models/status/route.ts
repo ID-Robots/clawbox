@@ -34,6 +34,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   openai: "OpenAI GPT",
   google: "Google Gemini",
   openrouter: "OpenRouter",
+  xai: "xAI Grok",
   ollama: "Ollama Local",
   llamacpp: "llama.cpp Local",
   // Hermes' id for the on-device model. Without an entry here the raw

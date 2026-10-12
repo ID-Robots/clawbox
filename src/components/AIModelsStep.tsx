@@ -39,6 +39,7 @@ import { useProviderStatus } from "@/hooks/useProviderStatus";
 import ClawboxAiPlanPicker from "./ClawboxAiPlanPicker";
 import ClawboxAiDeviceLogin from "./ClawboxAiDeviceLogin";
 import { useClawaiDeviceLogin } from "@/hooks/useClawaiDeviceLogin";
+import XaiSignInPanel from "@/components/XaiSignInPanel";
 import { cachedEdition, fetchHarness } from "@/lib/client-harness";
 // Tier data + the ClawBox AI card/row/device-login now live in shared modules so
 // the Hermes provider panel renders the SAME experience instead of a lookalike.
@@ -254,10 +255,42 @@ const PROVIDERS: Provider[] = [
       },
     ],
   },
+  {
+    id: "xai",
+    name: "xAI Grok",
+    description: "Grok models by xAI",
+    authOptions: [
+      {
+        // A SuperGrok / X Premium sign-in, run by the core's own xai plugin
+        // through `/setup-api/ai-models/xai-login` (XaiSignInPanel). Not in
+        // OAUTH_PROVIDERS or DEVICE_AUTH_PROVIDERS: ClawBox holds no OAuth
+        // client for xAI, so like ClawBox AI's it is never gated on the
+        // upstream OAuth list (SELF_SERVED_SUBSCRIPTIONS).
+        mode: "subscription",
+        label: "Subscription",
+        placeholder: "",
+        hint: "Sign in with your SuperGrok or X Premium subscription.",
+      },
+      {
+        mode: "token",
+        label: "API Key",
+        placeholder: "xai-...",
+        hint: "Get your API key from the xAI Console.",
+        tokenUrl: "https://console.x.ai",
+        tokenUrlLabel: "Get API Key",
+      },
+    ],
+  },
 ];
 
 // Providers that use device code flow instead of redirect-based OAuth
 const DEVICE_AUTH_PROVIDERS = new Set(["openai"]);
+
+// Subscription tabs served by ClawBox's own routes rather than by a configured
+// third-party OAuth client, so `/oauth/providers` (`availableOAuth`) does not
+// gate them: ClawBox AI's device login (/clawai/start + /clawai/poll) and the
+// xAI sign-in, which the core's xai plugin runs (/xai-login).
+const SELF_SERVED_SUBSCRIPTIONS: ReadonlySet<string> = new Set(["clawai", "xai"]);
 
 // One recipe for the filled action, written once. The press is a 2% scale on
 // :active — the pointer is already on the control, so the feedback belongs
@@ -867,7 +900,7 @@ export default function AIModelsStep({
     if (!providerId) return [];
     const provider = allowedProviders.find((p) => p.id === providerId);
     return provider?.authOptions.filter((opt) => {
-      if (opt.mode === "subscription" && availableOAuth !== null && providerId !== "clawai") {
+      if (opt.mode === "subscription" && availableOAuth !== null && !SELF_SERVED_SUBSCRIPTIONS.has(providerId)) {
         // ClawBox AI's Subscription tab is served by our own routes
         // (/clawai/start + /clawai/poll) so the upstream OAuth provider
         // list doesn't gate it. Other providers stay gated since their
@@ -1092,7 +1125,7 @@ export default function AIModelsStep({
   const selected = allowedProviders.find((p) => p.id === selectedProvider);
   // Filter out subscription option for providers whose OAuth isn't configured on the backend
   const effectiveAuthOptions = selected?.authOptions.filter((opt) => {
-    if (opt.mode === "subscription" && availableOAuth !== null && selected.id !== "clawai") {
+    if (opt.mode === "subscription" && availableOAuth !== null && !SELF_SERVED_SUBSCRIPTIONS.has(selected.id)) {
       // ClawBox AI's Subscription tab routes through our own
       // /clawai/start + /clawai/poll endpoints — there's no third-party
       // OAuth client to gate on, so the upstream `availableOAuth` list
@@ -1581,6 +1614,7 @@ export default function AIModelsStep({
     openai: t("ai.gptModels"),
     google: t("ai.geminiModels"),
     openrouter: t("ai.multiProvider"),
+    xai: t("ai.grokModels"),
     ollama: t("ai.runLocally"),
     llamacpp: "GGUF + llama.cpp for 8GB devices",
   };
@@ -2246,7 +2280,16 @@ export default function AIModelsStep({
             )}
 
             {isSubscription ? (
-              useDeviceAuth ? renderDeviceAuth() : renderRedirectOAuth()
+              selected.id === "xai" ? (
+                <XaiSignInPanel
+                  t={t}
+                  startLabel={t("ai.xaiSignInButton")}
+                  // No token to hand over — the plugin stored it — so this is
+                  // the ordinary subscription save with an empty body, which
+                  // the configure route finishes for xAI (see `isXaiSignIn`).
+                  onSignedIn={() => void saveOAuthToken({})}
+                />
+              ) : useDeviceAuth ? renderDeviceAuth() : renderRedirectOAuth()
             ) : (
               /* Standard API Key Flow */
               <div>
@@ -2292,6 +2335,12 @@ export default function AIModelsStep({
                   </button>
                 </div>
                 <p className="mt-2 text-[length:var(--t-2)] leading-[1.5] text-[var(--text-muted)]">{activeAuth.hint}</p>
+                {/* Both xAI modes live at one credential slot, so a key saved
+                    here takes the place of a Grok sign-in — said before the
+                    owner saves, not after. */}
+                {selected.id === "xai" && (
+                  <p className="mt-1 text-[length:var(--t-2)] leading-[1.5] text-[var(--text-muted)]">{t("ai.xaiReplacesSignIn")}</p>
+                )}
               </div>
             )}
             {renderProviderModelPicker()}
@@ -2428,7 +2477,7 @@ export default function AIModelsStep({
           ) : selected?.id === "llamacpp" ? (
             null /* llama.cpp has its own button above */
           ) : isSubscription ? (
-            useDeviceAuth ? (
+            useDeviceAuth || selected?.id === "xai" ? (
               /* Device auth has no manual submit button — it auto-completes via polling */
               null
             ) : (
