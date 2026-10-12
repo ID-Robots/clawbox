@@ -446,7 +446,7 @@ export default function CodingAgentDiagram({ source, runOf, onOpenRun, onChanged
                   onClick={() => { setFocusKey(n.key); setSelected((s) => (s === n.key ? null : n.key)); }}
                   onKeyDown={(e) => onNodeKey(e, n.key)}
                   onFocus={() => setFocusKey(n.key)}
-                  className="group absolute flex flex-col items-center gap-0.5 rounded-xl outline-none cursor-pointer"
+                  className="group absolute flex flex-col items-center gap-1.5 rounded-xl outline-none cursor-pointer"
                   style={{ left: p.x - g.labelWidth / 2, top: p.y - R, width: g.labelWidth }}
                   data-testid="coding-agent-node"
                   data-key={n.key}
@@ -470,9 +470,9 @@ export default function CodingAgentDiagram({ source, runOf, onOpenRun, onChanged
                     }}
                   >
                     {/* The pulse: a ring that breathes while the agent works. */}
-                    {live && <span className="ct-art-live absolute -inset-[5px] rounded-full border" style={{ borderColor: color, opacity: 0.55 }} aria-hidden="true" />}
+                    {live && <span className="ct-art-live absolute -inset-[3px] rounded-full border" style={{ borderColor: color, opacity: 0.55 }} aria-hidden="true" />}
                     {/* This page's own run: a second, dashed ring. */}
-                    {isCurrent && <span className="absolute -inset-[7px] rounded-full border border-dashed border-white/50" aria-hidden="true" />}
+                    {isCurrent && <span className="absolute -inset-[5px] rounded-full border border-dashed border-white/50" aria-hidden="true" />}
                     <span className="material-symbols-rounded" style={{ fontSize: R, color: n.placeholder ? "var(--text-muted)" : "var(--text-primary)" }} aria-hidden="true">{ROLE_ICON[n.role]}</span>
                     <span
                       className="absolute -right-1 -bottom-1 grid place-items-center rounded-full border border-black/60"

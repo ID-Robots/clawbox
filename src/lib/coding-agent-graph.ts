@@ -422,7 +422,11 @@ export function runGraph(run: GraphRun, opts: { perRow?: number } = {}): AgentGr
 // ─── Layout ───────────────────────────────────────────────────────────────────
 
 export interface Geometry {
-  /** A node's circle. */
+  /**
+   * A node's circle. Its label sits 6 px under it and is 12 px tall, and the
+   * rings drawn around a node (the pulse, "this run") reach 5 px out, so a row
+   * must be at least 2 × radius + 18 + 5 + a little apart.
+   */
   radius: number;
   /** The label under a node, centred on it. */
   labelWidth: number;
@@ -439,7 +443,7 @@ export interface Geometry {
 
 export const GEOMETRY: Geometry = { radius: 18, labelWidth: 80, step: 92, row: 60, indent: 26, chipWidth: 46, chipHeight: 20, pad: 12 };
 /** Narrow windows: the same outline, closer together. */
-export const GEOMETRY_COMPACT: Geometry = { radius: 16, labelWidth: 62, step: 70, row: 54, indent: 20, chipWidth: 40, chipHeight: 20, pad: 8 };
+export const GEOMETRY_COMPACT: Geometry = { radius: 16, labelWidth: 62, step: 70, row: 56, indent: 20, chipWidth: 40, chipHeight: 20, pad: 8 };
 
 export interface PlacedNode {
   x: number;
@@ -594,7 +598,8 @@ export function layoutGraph(graph: AgentGraph, geometry: Geometry = GEOMETRY): G
 
   const rows = graph.lanes.length + 1;
   const width = Math.ceil(Math.max(px + g.labelWidth / 2, colX(Math.max(0, maxStep)) + g.labelWidth / 2) + g.pad);
-  const height = Math.ceil(rowY(rows - 1) + R + 18 + g.pad);
+  // The last row's label is the bottom: no pad under it, the card has its own.
+  const height = Math.ceil(rowY(rows - 1) + R + 18 + 4);
   return { width, height, geometry: g, nodes, lanes, trunks, edges };
 }
 

@@ -247,10 +247,10 @@ describe("runGraph — a run and its helpers", () => {
   });
 });
 
-/** Every node's footprint — its circle and the label under it. */
+/** Every node's footprint — its circle with the rings drawn around it (5 px), and the label under it (6 px gap, 12 px tall). */
 function boxes(layout: GraphLayout) {
   const g = layout.geometry;
-  return Object.entries(layout.nodes).map(([key, p]) => ({ key, x0: p.x - g.labelWidth / 2, x1: p.x + g.labelWidth / 2, y0: p.y - g.radius, y1: p.y + g.radius + 16 }));
+  return Object.entries(layout.nodes).map(([key, p]) => ({ key, x0: p.x - g.labelWidth / 2, x1: p.x + g.labelWidth / 2, y0: p.y - g.radius - 5, y1: p.y + g.radius + 18 }));
 }
 
 describe("layoutGraph — nothing overlaps, however many tasks and attempts", () => {
