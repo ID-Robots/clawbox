@@ -61,7 +61,8 @@ Rows marked **OpenClaw/dual** or **Hermes/dual** exist only on those editions. C
 | `~/.clawkeep` (backup pairing) | ✅ kept | ❌ wiped |
 | `~/.codex` (Codex CLI auth and state) | ✅ kept | ❌ wiped |
 | `~/.local/share/codex` (the Codex CLI binary itself) | ✅ kept, replaced when the pinned version moves | ✅ kept (a 117 MB download the box cannot make in AP mode) |
-| `~/Documents`, `~/Downloads`, `~/Desktop` | ✅ kept | ❌ contents wiped, directories kept |
+| `~/Documents`, `~/Downloads`, `~/Desktop`, `~/Projects` (the coding agent's work folder), `~/Music`, `~/Pictures`, `~/Videos`, `~/Public`, `~/Templates` | ✅ kept | ❌ contents wiped, directories kept |
+| Loose files directly in the home folder (`~/notes.txt`, …) | ✅ kept | ❌ wiped, except `.bashrc`, `.profile`, `.bash_logout`, `.xsessionrc` and `.sudo_as_admin_successful`; folders and symlinks in the home folder are not touched by this step |
 | User crontab | ✅ kept | ❌ cleared |
 | Portal device identity (`data/cloudflared/device-id`) | ✅ kept | ⚠️ the file is deleted, but the id is re-derived identically from `/etc/machine-id` — the box reappears in the portal as the same device |
 | Ollama models | ✅ kept | ❌ deleted |
