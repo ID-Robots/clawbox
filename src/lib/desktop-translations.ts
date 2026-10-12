@@ -170,6 +170,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "publicLink.duration.24h": "24 hours",
     "publicLink.duration.7d": "7 days",
     "publicLink.permanentNote": "Stays on until you disable it. The address changes when the box restarts.",
+    "publicLink.addressChanges": "The address changes if the box restarts.",
     "publicLink.api": "App API paths visitors may use (optional)",
     "publicLink.apiHint": "By default visitors can only view the app. List paths like /api/scores to let them send data to it.",
     "publicLink.createButton": "Create link",

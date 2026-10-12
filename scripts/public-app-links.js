@@ -134,27 +134,36 @@ const linkCache = new Map();
 /** Every valid link in links.json — re-read whenever the file changes (one stat per call otherwise). */
 function readLinks(root) {
   const file = linkPaths(root).links;
-  let sig;
+  // One descriptor for both the signature and the read, so what is parsed is
+  // exactly what was stat-ed.
+  let fd;
   try {
-    const st = fs.statSync(file);
-    sig = `${st.ino}:${st.size}:${st.mtimeMs}`;
+    fd = fs.openSync(file, "r");
   } catch {
     linkCache.set(file, { sig: "missing", links: [] });
     return [];
   }
-  const cached = linkCache.get(file);
-  if (cached && cached.sig === sig) return cached.links;
-  let links = [];
   try {
-    const parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
-    const list = parsed && Array.isArray(parsed.links) ? parsed.links : [];
-    links = list.map(validLink).filter(Boolean);
+    const st = fs.fstatSync(fd);
+    const sig = `${st.ino}:${st.size}:${st.mtimeMs}`;
+    const cached = linkCache.get(file);
+    if (cached && cached.sig === sig) return cached.links;
+    let links = [];
+    try {
+      const parsed = JSON.parse(fs.readFileSync(fd, "utf-8"));
+      const list = parsed && Array.isArray(parsed.links) ? parsed.links : [];
+      links = list.map(validLink).filter(Boolean);
+    } catch {
+      // An unreadable list serves nothing: fail closed.
+      links = [];
+    }
+    linkCache.set(file, { sig, links });
+    return links;
   } catch {
-    // An unreadable list serves nothing: fail closed.
-    links = [];
+    return [];
+  } finally {
+    try { fs.closeSync(fd); } catch {}
   }
-  linkCache.set(file, { sig, links });
-  return links;
 }
 
 function isExpired(link, now) {

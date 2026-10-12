@@ -126,6 +126,7 @@ export function PublicLinkMenuItems({
         <span className="material-symbols-rounded" style={{ fontSize: 14 }}>public</span>
         {url ? statusLine(t, link, locale) : t("publicLink.starting")}
       </div>
+      <div data-testid="ctx-public-link-address-note" className="px-4 pb-1.5 text-[11px] text-white/60">{t("publicLink.addressChanges")}</div>
       {url && (
         <>
           <button onClick={() => { void navigator.clipboard?.writeText(url); }} data-testid="ctx-public-link-copy" className={ROW}>
@@ -226,6 +227,7 @@ export function PublicLinkDialog({
             {link.url ? (
               <>
                 <input readOnly value={link.url} data-testid="public-link-url" onFocus={(e) => e.currentTarget.select()} style={{ ...field, width: "100%" }} />
+                <p data-testid="public-link-address-note" style={{ margin: "8px 0 0", fontSize: 12, lineHeight: 1.5, color: "rgba(255,255,255,0.6)" }}>{t("publicLink.addressChanges")}</p>
                 <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
                   <button type="button" onClick={onClose} data-testid="public-link-close" style={quiet}>{t("publicLink.done")}</button>
                   <button
