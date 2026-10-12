@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   startXaiLogin: vi.fn(),
   pollXaiLogin: vi.fn(),
   cancelXaiLogin: vi.fn(),
+  claimXaiLoginAttempt: vi.fn(() => 7),
   readXaiStoredProfiles: vi.fn(),
   openclawIsAbsent: vi.fn(() => false),
 }));
@@ -17,6 +18,7 @@ vi.mock("@/lib/xai-oauth-login", () => ({
   startXaiLogin: mocks.startXaiLogin,
   pollXaiLogin: mocks.pollXaiLogin,
   cancelXaiLogin: mocks.cancelXaiLogin,
+  claimXaiLoginAttempt: mocks.claimXaiLoginAttempt,
   readXaiStoredProfiles: mocks.readXaiStoredProfiles,
 }));
 
@@ -50,7 +52,7 @@ describe("POST /setup-api/ai-models/xai-login", () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual(PENDING);
     // A box with no xAI profile has nothing to replace.
-    expect(mocks.startXaiLogin).toHaveBeenCalledWith({ replaceExisting: false, signInAlreadyStored: false });
+    expect(mocks.startXaiLogin).toHaveBeenCalledWith({ replaceExisting: false, signInAlreadyStored: false, attempt: 7 });
   });
 
   it("replaces an existing xAI credential — a key or an older sign-in", async () => {
@@ -59,21 +61,32 @@ describe("POST /setup-api/ai-models/xai-login", () => {
 
     // A key is replaced; it is not a sign-in, so the store may still prove
     // this login landed.
-    expect(mocks.startXaiLogin).toHaveBeenCalledWith({ replaceExisting: true, signInAlreadyStored: false });
+    expect(mocks.startXaiLogin).toHaveBeenCalledWith({ replaceExisting: true, signInAlreadyStored: false, attempt: 7 });
   });
 
   it("leaves a re-sign-in to the CLI's exit code, not the store", async () => {
     mocks.readXaiStoredProfiles.mockResolvedValue([{ id: "xai:default", type: "oauth" }]);
     await POST(post({ action: "start" }));
 
-    expect(mocks.startXaiLogin).toHaveBeenCalledWith({ replaceExisting: true, signInAlreadyStored: true });
+    expect(mocks.startXaiLogin).toHaveBeenCalledWith({ replaceExisting: true, signInAlreadyStored: true, attempt: 7 });
   });
 
   it("treats an unreadable store as something to replace", async () => {
     mocks.readXaiStoredProfiles.mockResolvedValue(null);
     await POST(post({ action: "start" }));
 
-    expect(mocks.startXaiLogin).toHaveBeenCalledWith({ replaceExisting: true, signInAlreadyStored: true });
+    expect(mocks.startXaiLogin).toHaveBeenCalledWith({ replaceExisting: true, signInAlreadyStored: true, attempt: 7 });
+  });
+
+  it("claims its attempt before reading the store, and starts with it", async () => {
+    await POST(post({ action: "start" }));
+
+    // The read is a CLI cold start; a cancel that lands during it must find
+    // the attempt already claimed, so the start then spawns nothing.
+    expect(mocks.claimXaiLoginAttempt).toHaveBeenCalledTimes(1);
+    expect(mocks.claimXaiLoginAttempt.mock.invocationCallOrder[0])
+      .toBeLessThan(mocks.readXaiStoredProfiles.mock.invocationCallOrder[0]);
+    expect(mocks.startXaiLogin).toHaveBeenCalledWith(expect.objectContaining({ attempt: 7 }));
   });
 
   it("answers a start that failed with the failure and the CLI's own lines", async () => {
