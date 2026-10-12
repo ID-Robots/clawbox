@@ -61,6 +61,7 @@ vi.mock("@/lib/config-store", () => ({
 }));
 
 vi.mock("@/lib/code-projects", () => ({
+  APP_ID_RE: /^[a-zA-Z0-9_-]{1,64}$/,
   get WEBAPPS_DIR() {
     return path.join(dataDir, "webapps");
   },

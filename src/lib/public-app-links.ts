@@ -219,10 +219,11 @@ export async function createPublicLink(input: CreatePublicLinkInput, now = Date.
   // Only an app that is on the desktop as a webapp — a one-file app or a
   // registered server app — has a folder here. Built-ins and store skills
   // have none and cannot be published.
-  const index = await fs.stat(path.join(webappPath(appId), "index.html")).catch(() => null);
-  if (!index?.isFile()) throw new PublicLinkError("Only an app the Coding Agent built can be shared.", 404, "not_shareable");
-
+  // Checked under the lock that uninstall also holds while it removes the
+  // folder, so a link can never be stored for an app that is going away.
   return withLinks(async () => {
+    const index = await fs.stat(path.join(webappPath(appId), "index.html")).catch(() => null);
+    if (!index?.isFile()) throw new PublicLinkError("Only an app the Coding Agent built can be shared.", 404, "not_shareable");
     const links = await pruneExpired(await readStored(), now);
     if (links.some((l) => l.appId === appId)) throw new PublicLinkError("This app already has a public link.", 409, "exists");
     if (links.length >= MAX_LINKS) throw new PublicLinkError(`At most ${MAX_LINKS} apps can be public at once.`, 409, "too_many");
@@ -241,15 +242,32 @@ export async function createPublicLink(input: CreatePublicLinkInput, now = Date.
   });
 }
 
-/** Disable an app's link. Immediate: the serving side refuses it on the next request. True when there was one. */
-export async function disablePublicLink(appId: string, reason = "disabled"): Promise<boolean> {
-  if (!APP_ID_RE.test(appId)) return false;
+/**
+ * Disable an app's link. Immediate: the serving side refuses it on the next
+ * request. True when there was one. `during`, when given, runs under the same
+ * lock right after (uninstall removes the app's folder there), so no link can
+ * be created for the app in between; its errors propagate, the disable's own
+ * do not.
+ */
+export async function disablePublicLink(appId: string, reason = "disabled", during?: () => Promise<void>): Promise<boolean> {
+  if (!APP_ID_RE.test(appId)) {
+    if (during) await during();
+    return false;
+  }
   return withLinks(async () => {
-    const links = await readStored();
-    const gone = links.filter((l) => l.appId === appId);
-    if (gone.length === 0) return false;
-    await writeStored(links.filter((l) => l.appId !== appId));
-    for (const l of gone) await audit(reason, { link: l.id, app: appId });
-    return true;
+    let had = false;
+    try {
+      const links = await readStored();
+      const gone = links.filter((l) => l.appId === appId);
+      if (gone.length > 0) {
+        await writeStored(links.filter((l) => l.appId !== appId));
+        for (const l of gone) await audit(reason, { link: l.id, app: appId });
+        had = true;
+      }
+    } catch (err) {
+      if (!during) throw err;
+    }
+    if (during) await during();
+    return had;
   });
 }

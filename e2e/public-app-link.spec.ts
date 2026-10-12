@@ -65,7 +65,7 @@ test("an app is published from its icon's menu, shown as public, and disabled fr
   await dialog.getByTestId("public-link-duration").selectOption(String(60));
   await dialog.getByTestId("public-link-submit").click();
 
-  expect(posted).toEqual([{ appId: "notes", mode: "temporary", ttlMinutes: 60 }]);
+  await expect.poll(() => posted).toEqual([{ appId: "notes", mode: "temporary", ttlMinutes: 60 }]);
   await expect(dialog.getByTestId("public-link-url")).toHaveValue(URL, { timeout: 15_000 });
   await dialog.getByTestId("public-link-close").click();
   await expect(page.getByTestId("public-link-badge-notes")).toBeVisible();

@@ -236,11 +236,6 @@ export async function POST(req: Request) {
     // URL, while the desktop said the app was gone. code_project_delete's own
     // guidance ("any copy already installed on the desktop stays until it is
     // removed with app_uninstall") promises this removal.
-    // An app that is going must not stay on the internet: its public link
-    // (TASK-1478) is disabled first, so the tunnel is torn down even when the
-    // folder removal below fails. Best-effort — an uninstall never fails on it.
-    await disablePublicLink(appId, "app_uninstalled").catch(() => false);
-
     const webappRoot = path.resolve(WEBAPPS_DIR);
     const webappDir = path.resolve(webappRoot, appId);
     if (!webappDir.startsWith(webappRoot + path.sep)) {
@@ -249,13 +244,19 @@ export async function POST(req: Request) {
     // Without `force`, so the removal itself says whether there was a webapp
     // here — the fact the report below needs. Every other failure still throws,
     // exactly as it did with `force`, which only ever swallowed ENOENT.
+    // An app that is going must not stay on the internet: its public link
+    // (TASK-1478) is disabled first, and the folder is removed under the same
+    // lock link creation takes, so no link can appear in between. A failure
+    // of the disable itself never fails the uninstall.
     let webappRemoved = false;
-    try {
-      await fs.rm(webappDir, { recursive: true });
-      webappRemoved = true;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") throw err;
-    }
+    await disablePublicLink(appId, "app_uninstalled", async () => {
+      try {
+        await fs.rm(webappDir, { recursive: true });
+        webappRemoved = true;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") throw err;
+      }
+    });
 
     // `false` is "this box has a skills root and nothing of that name was in
     // it", and `mcp/tools/desktop.ts` says that out loud: "there was no skill

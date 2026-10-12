@@ -170,10 +170,19 @@ function isExpired(link, now) {
   return link.mode === "temporary" && link.expiresAt <= now;
 }
 
+/** Is the app's desktop folder still there? A link to a removed app is never served. */
+function appPresent(root, appId) {
+  try {
+    return fs.statSync(path.join(root, "data", "webapps", appId)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 /** The link with this id while it may still be served, else null. */
 function liveLink(root, id, now = Date.now()) {
   const link = readLinks(root).find((l) => l.id === id);
-  if (!link || isExpired(link, now)) return null;
+  if (!link || isExpired(link, now) || !appPresent(root, link.appId)) return null;
   return link;
 }
 
@@ -205,6 +214,9 @@ function canonicalTarget(rawUrl) {
   const search = q === -1 ? "" : rawUrl.slice(q);
   if (/[\\;\0#]/.test(rawPath)) return null;
   if (/%(2f|5c|2e|00|3b|23|3f)/i.test(rawPath)) return null;
+  // Percent-encoded unreserved characters (`%61pi` for `api`) would let the
+  // path policy see one route while the app routes another: refuse them.
+  if (/%(3[0-9]|4[1-9a-f]|5[0-9a]|6[1-9a-f]|7[0-9a]|2d|5f|7e)/i.test(rawPath)) return null;
   let decoded;
   try {
     decoded = decodeURIComponent(rawPath);
@@ -248,8 +260,13 @@ function methodAllowed(link, method, rest) {
 }
 
 function timingSafeTokenEqual(given, expected) {
-  if (typeof given !== "string" || given.length !== expected.length) return false;
-  return crypto.timingSafeEqual(Buffer.from(given), Buffer.from(expected));
+  if (typeof given !== "string") return false;
+  // Byte lengths, not string lengths: timingSafeEqual throws on a mismatch,
+  // and a multibyte character makes the two differ.
+  const a = Buffer.from(given);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
 }
 
 function cookieValue(header, name) {
@@ -609,15 +626,19 @@ function startPublicAppLinks(options = {}) {
     };
     if (child.stdout) child.stdout.on("data", onData);
     if (child.stderr) child.stderr.on("data", onData);
-    child.on("error", () => {});
-    child.on("exit", () => {
+    // `error` (e.g. the binary is missing) and `exit` share one guarded path,
+    // so a failed spawn is retried and a restart is never scheduled twice.
+    const onGone = (err) => {
       if (entry.child !== child) return;
       entry.child = null;
+      if (err) console.warn(`[public-app-links] cloudflared failed: ${err.message}`);
       if (!stopped && entries.has(entry.link.id)) {
         touch(entry, "restarting", null);
         scheduleRestart(entry);
       }
-    });
+    };
+    child.on("error", (err) => onGone(err));
+    child.on("exit", () => onGone(null));
     return undefined;
   }
 
@@ -661,12 +682,12 @@ function startPublicAppLinks(options = {}) {
     if (stopped) return;
     const t = Date.now();
     const all = readLinks(root);
-    const live = new Map(all.filter((l) => !isExpired(l, t)).map((l) => [l.id, l]));
+    const live = new Map(all.filter((l) => !isExpired(l, t) && appPresent(root, l.appId)).map((l) => [l.id, l]));
     let changed = false;
     for (const entry of [...entries.values()]) {
       if (!live.has(entry.link.id)) {
         const stored = all.find((l) => l.id === entry.link.id);
-        stopEntry(entry, stored ? "expired" : "disabled");
+        stopEntry(entry, !stored ? "disabled" : isExpired(stored, t) ? "expired" : "app_missing");
         changed = true;
       }
     }

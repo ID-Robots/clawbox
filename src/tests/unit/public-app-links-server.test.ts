@@ -133,6 +133,14 @@ describe("the link's secret", () => {
     expect(seen).toHaveLength(0);
   });
 
+  it("answers 404, and keeps running, for a token of the right length with a multibyte character", async () => {
+    const odd = `${TOKEN.slice(0, 42)}é`;
+    expect((await ask(`/apps/${APP}/?k=${encodeURIComponent(odd)}`, { cookie: false })).status).toBe(404);
+    expect((await ask(`/apps/${APP}/`, { headers: { cookie: `${links.COOKIE_NAME}=${odd}` } })).status).toBe(404);
+    expect((await ask(`/apps/${APP}/`)).status).toBe(200);
+    expect(seen).toHaveLength(1);
+  });
+
   it("exchanges ?k= for a host-only Secure HttpOnly cookie and redirects the token out of the URL", async () => {
     const res = await ask(`/apps/${APP}/?k=${TOKEN}&tab=2`, { cookie: false });
     expect(res.status).toBe(303);
@@ -286,6 +294,12 @@ describe("revocation and expiry are the server's", () => {
     expect((await ask(`/apps/${APP}/?k=${TOKEN}`, { cookie: false })).status).toBe(410);
   });
 
+  it("an app whose folder is gone is not served", async () => {
+    fs.rmSync(path.join(root, "data", "webapps", APP), { recursive: true, force: true });
+    expect((await ask(`/apps/${APP}/`)).status).toBe(410);
+    expect(seen).toHaveLength(0);
+  });
+
   it("a re-created link for the same app does not revive the old token", async () => {
     writeLinks([link({ id: "fedcba9876543210", token: OTHER_TOKEN })]);
     expect((await ask(`/apps/${APP}/`)).status).toBe(410);
@@ -354,7 +368,7 @@ describe("the policy functions", () => {
   it("canonicalTarget", () => {
     expect(links.canonicalTarget("/apps/a/x?y=1")).toEqual({ path: "/apps/a/x", search: "?y=1" });
     expect(links.canonicalTarget("/apps/a/")).toEqual({ path: "/apps/a/", search: "" });
-    for (const bad of ["apps/a", "/a/../b", "/a//b", "/a/%2e%2e/b", "/a/%2Fb", "/a\\b", "/a;b", "/a/%zz", `/${"a".repeat(5000)}`]) {
+    for (const bad of ["apps/a", "/a/../b", "/a//b", "/a/%2e%2e/b", "/a/%2Fb", "/a\\b", "/a;b", "/a/%zz", `/apps/${APP}/%61pi/notes`, "/a/%7e", `/${"a".repeat(5000)}`]) {
       expect(links.canonicalTarget(bad), bad).toBeNull();
     }
   });
