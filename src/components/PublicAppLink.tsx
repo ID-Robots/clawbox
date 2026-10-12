@@ -19,8 +19,47 @@ export interface PublicLinkInfo {
   createdAt: number;
   expiresAt: number | null;
   apiAllow: string[];
+  /** Visitors are asked for a password. The password itself is never sent back. */
+  passwordProtected?: boolean;
   state: "starting" | "live" | "restarting" | "offline";
   url: string | null;
+}
+
+/** Why the server refused: its message, and its code when it gave one. */
+export interface PublicLinkFailure {
+  message: string;
+  code?: string;
+}
+
+export interface PublicLinkCreateInput {
+  appId: string;
+  mode: "temporary" | "permanent";
+  ttlMinutes?: number;
+  apiAllow?: string[];
+  password?: string;
+}
+
+export const MIN_LINK_PASSWORD_LENGTH = 8;
+const MAX_LINK_PASSWORD_LENGTH = 128;
+// No 0/O, 1/l/I: a generated password is read out and typed by other people.
+const PASSWORD_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+
+/** A random 20-character password (about 116 bits), from the browser's CSPRNG. */
+export function generateLinkPassword(): string {
+  const limit = 256 - (256 % PASSWORD_ALPHABET.length);
+  let out = "";
+  while (out.length < 20) {
+    const bytes = crypto.getRandomValues(new Uint8Array(32));
+    for (const b of bytes) {
+      if (b < limit && out.length < 20) out += PASSWORD_ALPHABET[b % PASSWORD_ALPHABET.length];
+    }
+  }
+  return out;
+}
+
+async function failureOf(res: Response): Promise<PublicLinkFailure> {
+  const body = await readJson(res);
+  return { message: typeof body.error === "string" ? body.error : "error", ...(typeof body.code === "string" ? { code: body.code } : {}) };
 }
 
 const ENDPOINT = "/setup-api/apps/public-link";
@@ -74,12 +113,17 @@ export function usePublicAppLinks(enabled: boolean) {
     return () => { timers.forEach((timer) => { clearTimeout(timer); clearInterval(timer); }); };
   }, [enabled, pending, nextExpiry, refresh]);
 
-  const create = useCallback(async (input: { appId: string; mode: "temporary" | "permanent"; ttlMinutes?: number; apiAllow?: string[] }): Promise<string | null> => {
+  const create = useCallback(async (input: PublicLinkCreateInput): Promise<PublicLinkFailure | null> => {
     const res = await fetch(ENDPOINT, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) });
-    if (!res.ok) {
-      const body = await readJson(res);
-      return typeof body.error === "string" ? body.error : "error";
-    }
+    if (!res.ok) return failureOf(res);
+    await refresh();
+    return null;
+  }, [refresh]);
+
+  /** Set or change the link's password (a string), or remove it (null). The link stays the same. */
+  const setPassword = useCallback(async (appId: string, password: string | null): Promise<PublicLinkFailure | null> => {
+    const res = await fetch(ENDPOINT, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ appId, password }) });
+    if (!res.ok) return failureOf(res);
     await refresh();
     return null;
   }, [refresh]);
@@ -90,7 +134,7 @@ export function usePublicAppLinks(enabled: boolean) {
     return res.ok;
   }, [refresh]);
 
-  return { links, refresh, create, disable };
+  return { links, refresh, create, disable, setPassword };
 }
 
 function statusLine(t: (key: string, params?: Record<string, string | number>) => string, link: PublicLinkInfo, locale?: string): string {
@@ -106,10 +150,13 @@ export function PublicLinkMenuItems({
   link,
   onCreate,
   onDisable,
+  onPassword,
 }: {
   link: PublicLinkInfo | undefined;
   onCreate: () => void;
   onDisable: () => void;
+  /** Opens the dialog, where the link's password is set, changed or removed. */
+  onPassword: () => void;
 }) {
   const { t, locale } = useT();
   if (!link) {
@@ -126,6 +173,10 @@ export function PublicLinkMenuItems({
         <span className="material-symbols-rounded" style={{ fontSize: 14 }}>public</span>
         {url ? statusLine(t, link, locale) : t("publicLink.starting")}
       </div>
+      <div data-testid="ctx-public-link-password-status" className="px-4 pb-1 text-[11px] text-white/75 flex items-center gap-1.5">
+        <span className="material-symbols-rounded" aria-hidden style={{ fontSize: 13 }}>{link.passwordProtected ? "lock" : "lock_open"}</span>
+        {t(link.passwordProtected ? "publicLink.password.statusOn" : "publicLink.password.statusOff")}
+      </div>
       <div data-testid="ctx-public-link-address-note" className="px-4 pb-1.5 text-[11px] text-white/60">{t("publicLink.addressChanges")}</div>
       {url && (
         <>
@@ -137,6 +188,9 @@ export function PublicLinkMenuItems({
           </button>
         </>
       )}
+      <button onClick={onPassword} data-testid="ctx-public-link-password" className={ROW}>
+        <span className="material-symbols-rounded" style={{ fontSize: 16 }}>password</span> {t("publicLink.password.manage")}
+      </button>
       <button onClick={onDisable} data-testid="ctx-public-link-disable" className={`${ROW} text-red-400`}>
         <span className="material-symbols-rounded" style={{ fontSize: 16 }}>public_off</span> {t("publicLink.disable")}
       </button>
@@ -165,20 +219,170 @@ const DURATIONS: { minutes: number; key: string }[] = [
   { minutes: 7 * 24 * 60, key: "publicLink.duration.7d" },
 ];
 
-/** "Create public link": temporary or permanent, and — closed by default — which of the app's API paths visitors may use. */
+const FIELD = { background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 9, color: "rgba(255,255,255,0.9)", fontSize: 12.5, padding: "7px 10px" } as const;
+const QUIET = { padding: "7px 14px", borderRadius: 9, fontSize: 12.5, cursor: "pointer", background: "rgba(255,255,255,0.08)", border: "none", color: "rgba(255,255,255,0.75)" } as const;
+const PRIMARY = { padding: "7px 14px", borderRadius: 9, fontSize: 12.5, cursor: "pointer", background: "#f97316", border: "none", color: "#1c1207", fontWeight: 600 } as const;
+const NOTE = { margin: 0, fontSize: 11.5, lineHeight: 1.45, color: "rgba(255,255,255,0.55)" } as const;
+
+type Translate = (key: string, params?: Record<string, string | number>) => string;
+
+function failureText(t: Translate, failure: PublicLinkFailure): string {
+  if (failure.code === "password_too_short") return t("publicLink.password.errShort", { min: MIN_LINK_PASSWORD_LENGTH });
+  if (failure.code === "password_is_system") return t("publicLink.password.errSame");
+  return failure.message === "error" ? t("publicLink.error") : failure.message;
+}
+
+/**
+ * Where the owner types (or generates) a NEW password for one link. It never
+ * asks for the ClawBox password, and `autoComplete="new-password"` keeps the
+ * browser from offering the saved one.
+ */
+function LinkPasswordField({ value, onChange }: { value: string; onChange: (value: string) => void }) {
+  const { t } = useT();
+  const [visible, setVisible] = useState(false);
+  const [copied, setCopied] = useState(false);
+  return (
+    <div style={{ display: "grid", gap: 6 }}>
+      <label style={{ display: "grid", gap: 6, fontSize: 12, color: "rgba(255,255,255,0.7)" }}>
+        {t("publicLink.password.label")}
+        <input
+          data-testid="public-link-password-input"
+          type={visible ? "text" : "password"}
+          value={value}
+          onChange={(e) => { onChange(e.target.value); setCopied(false); }}
+          maxLength={MAX_LINK_PASSWORD_LENGTH}
+          autoComplete="new-password"
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+          style={{ ...FIELD, width: "100%", fontFamily: visible ? "ui-monospace, monospace" : undefined }}
+        />
+      </label>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <button type="button" data-testid="public-link-password-generate" onClick={() => { onChange(generateLinkPassword()); setVisible(true); setCopied(false); }} style={QUIET}>
+          {t("publicLink.password.generate")}
+        </button>
+        <button type="button" data-testid="public-link-password-toggle" aria-pressed={visible} onClick={() => setVisible((v) => !v)} style={QUIET}>
+          {t(visible ? "publicLink.password.hide" : "publicLink.password.show")}
+        </button>
+        <button type="button" data-testid="public-link-password-copy" disabled={!value} onClick={() => { void navigator.clipboard?.writeText(value); setCopied(true); }} style={{ ...QUIET, opacity: value ? 1 : 0.5 }}>
+          {copied ? t("publicLink.copied") : t("publicLink.password.copy")}
+        </button>
+      </div>
+      <p data-testid="public-link-password-rule" style={NOTE}>{t("publicLink.password.rule", { min: MIN_LINK_PASSWORD_LENGTH })}</p>
+    </div>
+  );
+}
+
+/** For a link that exists: whether it has a password, and the buttons to add, change or remove one. */
+function LinkPasswordManager({
+  appId,
+  link,
+  justSet,
+  onSetPassword,
+  onJustSet,
+}: {
+  appId: string;
+  link: PublicLinkInfo;
+  /** The password set in this dialog a moment ago: shown until the dialog closes, because it cannot be read back. */
+  justSet: string | null;
+  onSetPassword: (appId: string, password: string | null) => Promise<PublicLinkFailure | null>;
+  onJustSet: (password: string | null) => void;
+}) {
+  const { t } = useT();
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [changed, setChanged] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const isProtected = link.passwordProtected === true;
+
+  const apply = async (password: string | null) => {
+    setBusy(true);
+    setError(null);
+    const failure = await onSetPassword(appId, password).catch((): PublicLinkFailure => ({ message: "error" }));
+    setBusy(false);
+    if (failure) {
+      setError(failureText(t, failure));
+      return;
+    }
+    setChanged(password !== null && isProtected);
+    onJustSet(password);
+    setCopied(false);
+    setEditing(false);
+    setValue("");
+  };
+
+  return (
+    <div data-testid="public-link-password-section" style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid rgba(255,255,255,0.1)", display: "grid", gap: 10 }}>
+      <div data-testid="public-link-password-status" style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: isProtected ? "#6ee7b7" : "rgba(255,255,255,0.75)" }}>
+        <span className="material-symbols-rounded" aria-hidden style={{ fontSize: 16 }}>{isProtected ? "lock" : "lock_open"}</span>
+        {t(isProtected ? "publicLink.password.statusOn" : "publicLink.password.statusOff")}
+      </div>
+      {isProtected && justSet && !editing && (
+        <div style={{ display: "grid", gap: 6 }}>
+          <div style={{ display: "flex", gap: 8 }}>
+            <input readOnly value={justSet} aria-label={t("publicLink.password.legend")} data-testid="public-link-password-value" onFocus={(e) => e.currentTarget.select()} style={{ ...FIELD, flex: 1, minWidth: 0, fontFamily: "ui-monospace, monospace" }} />
+            <button type="button" data-testid="public-link-password-value-copy" onClick={() => { void navigator.clipboard?.writeText(justSet); setCopied(true); }} style={QUIET}>
+              {copied ? t("publicLink.copied") : t("publicLink.password.copy")}
+            </button>
+          </div>
+          <p data-testid="public-link-password-save-now" style={NOTE}>{t("publicLink.password.saveNow")}</p>
+        </div>
+      )}
+      {changed && !editing && <p data-testid="public-link-password-changed" style={NOTE}>{t("publicLink.password.changedNote")}</p>}
+      {editing ? (
+        <>
+          <LinkPasswordField value={value} onChange={(next) => { setValue(next); setError(null); }} />
+          {error && <p role="alert" data-testid="public-link-password-error" style={{ margin: 0, fontSize: 12, color: "#fca5a5" }}>{error}</p>}
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <button type="button" data-testid="public-link-password-cancel" onClick={() => { setEditing(false); setValue(""); setError(null); }} style={QUIET}>{t("cancel")}</button>
+            <button type="button" data-testid="public-link-password-save" disabled={busy || value.length < MIN_LINK_PASSWORD_LENGTH} onClick={() => { void apply(value); }} style={{ ...PRIMARY, opacity: busy || value.length < MIN_LINK_PASSWORD_LENGTH ? 0.6 : 1 }}>
+              {t("publicLink.password.save")}
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          {error && <p role="alert" data-testid="public-link-password-error" style={{ margin: 0, fontSize: 12, color: "#fca5a5" }}>{error}</p>}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button type="button" data-testid="public-link-password-edit" disabled={busy} onClick={() => { setEditing(true); setError(null); }} style={QUIET}>
+              {t(isProtected ? "publicLink.password.change" : "publicLink.password.add")}
+            </button>
+            {isProtected && (
+              <button type="button" data-testid="public-link-password-remove" disabled={busy} onClick={() => { void apply(null); }} style={{ ...QUIET, color: "#fca5a5" }}>
+                {t("publicLink.password.remove")}
+              </button>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * "Create public link": temporary or permanent, with or without a password
+ * (the owner has to pick one of the two), and — closed by default — which of
+ * the app's API paths visitors may use. For a link that exists: its address
+ * and its password.
+ */
 export function PublicLinkDialog({
   open,
   appId,
   appName,
   link,
   onCreate,
+  onSetPassword,
   onClose,
 }: {
   open: boolean;
   appId: string;
   appName: string;
   link: PublicLinkInfo | undefined;
-  onCreate: (input: { appId: string; mode: "temporary" | "permanent"; ttlMinutes?: number; apiAllow?: string[] }) => Promise<string | null>;
+  onCreate: (input: PublicLinkCreateInput) => Promise<PublicLinkFailure | null>;
+  onSetPassword: (appId: string, password: string | null) => Promise<PublicLinkFailure | null>;
   onClose: () => void;
 }) {
   const { t } = useT();
@@ -186,24 +390,37 @@ export function PublicLinkDialog({
   const [mode, setMode] = useState<"temporary" | "permanent">("temporary");
   const [minutes, setMinutes] = useState(DURATIONS[1].minutes);
   const [api, setApi] = useState("");
+  // No default: whether a link needs a password is the owner's call, every time.
+  const [protection, setProtection] = useState<"none" | "password" | null>(null);
+  const [password, setPassword] = useState("");
+  const [justSet, setJustSet] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
   if (!open || typeof document === "undefined") return null;
 
+  const ready = protection === "none" || (protection === "password" && password.length >= MIN_LINK_PASSWORD_LENGTH);
+
   const submit = async () => {
+    if (!ready) return;
     setBusy(true);
     setError(null);
     const apiAllow = api.split(/[\s,]+/).map((p) => p.trim()).filter(Boolean);
-    const failure = await onCreate({ appId, mode, ...(mode === "temporary" ? { ttlMinutes: minutes } : {}), ...(apiAllow.length ? { apiAllow } : {}) }).catch(() => "error");
+    const withPassword = protection === "password";
+    const failure = await onCreate({ appId, mode, ...(mode === "temporary" ? { ttlMinutes: minutes } : {}), ...(apiAllow.length ? { apiAllow } : {}), ...(withPassword ? { password } : {}) }).catch((): PublicLinkFailure => ({ message: "error" }));
     setBusy(false);
-    if (failure) setError(failure === "error" ? t("publicLink.error") : failure);
+    if (failure) {
+      setError(failureText(t, failure));
+      return;
+    }
+    if (withPassword) setJustSet(password);
+    setPassword("");
   };
 
-  const field = { background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 9, color: "rgba(255,255,255,0.9)", fontSize: 12.5, padding: "7px 10px" } as const;
-  const quiet = { padding: "7px 14px", borderRadius: 9, fontSize: 12.5, cursor: "pointer", background: "rgba(255,255,255,0.08)", border: "none", color: "rgba(255,255,255,0.75)" } as const;
-  const primary = { padding: "7px 14px", borderRadius: 9, fontSize: 12.5, cursor: "pointer", background: "#f97316", border: "none", color: "#1c1207", fontWeight: 600 } as const;
+  const field = FIELD;
+  const quiet = QUIET;
+  const primary = PRIMARY;
 
   return createPortal(
     <div onClick={onClose} data-testid="public-link-overlay" style={{ position: "fixed", inset: 0, zIndex: 10020, background: "rgba(0,0,0,0.62)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
@@ -214,7 +431,7 @@ export function PublicLinkDialog({
         aria-label={t("publicLink.title", { name: appName })}
         data-testid="public-link-dialog"
         onClick={(e) => e.stopPropagation()}
-        style={{ width: "min(440px, 100%)", borderRadius: 14, background: "#1c1c22", border: "1px solid rgba(255,255,255,0.1)", boxShadow: "0 8px 40px rgba(0,0,0,0.6)", padding: "18px 20px", color: "rgba(255,255,255,0.9)" }}
+        style={{ width: "min(440px, 100%)", maxHeight: "calc(100vh - 48px)", overflowY: "auto", borderRadius: 14, background: "#1c1c22", border: "1px solid rgba(255,255,255,0.1)", boxShadow: "0 8px 40px rgba(0,0,0,0.6)", padding: "18px 20px", color: "rgba(255,255,255,0.9)" }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
           <span className="material-symbols-rounded" aria-hidden style={{ fontSize: 22, color: "#f97316" }}>public</span>
@@ -226,28 +443,26 @@ export function PublicLinkDialog({
           <div style={{ marginTop: 14 }}>
             {link.url ? (
               <>
-                <input readOnly value={link.url} data-testid="public-link-url" onFocus={(e) => e.currentTarget.select()} style={{ ...field, width: "100%" }} />
+                <input readOnly value={link.url} aria-label={t("publicLink.copy")} data-testid="public-link-url" onFocus={(e) => e.currentTarget.select()} style={{ ...field, width: "100%" }} />
                 <p data-testid="public-link-address-note" style={{ margin: "8px 0 0", fontSize: 12, lineHeight: 1.5, color: "rgba(255,255,255,0.6)" }}>{t("publicLink.addressChanges")}</p>
-                <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
-                  <button type="button" onClick={onClose} data-testid="public-link-close" style={quiet}>{t("publicLink.done")}</button>
-                  <button
-                    type="button"
-                    data-testid="public-link-copy"
-                    onClick={() => { void navigator.clipboard?.writeText(link.url ?? ""); setCopied(true); }}
-                    style={primary}
-                  >
-                    {copied ? t("publicLink.copied") : t("publicLink.copy")}
-                  </button>
-                </div>
               </>
             ) : (
-              <>
-                <p data-testid="public-link-starting" style={{ margin: 0, fontSize: 12.5, color: "rgba(255,255,255,0.8)" }}>{t("publicLink.starting")}</p>
-                <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 14 }}>
-                  <button type="button" onClick={onClose} data-testid="public-link-close" style={quiet}>{t("publicLink.done")}</button>
-                </div>
-              </>
+              <p data-testid="public-link-starting" style={{ margin: 0, fontSize: 12.5, color: "rgba(255,255,255,0.8)" }}>{t("publicLink.starting")}</p>
             )}
+            <LinkPasswordManager appId={appId} link={link} justSet={justSet} onSetPassword={onSetPassword} onJustSet={setJustSet} />
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
+              <button type="button" onClick={onClose} data-testid="public-link-close" style={quiet}>{t("publicLink.done")}</button>
+              {link.url && (
+                <button
+                  type="button"
+                  data-testid="public-link-copy"
+                  onClick={() => { void navigator.clipboard?.writeText(link.url ?? ""); setCopied(true); }}
+                  style={primary}
+                >
+                  {copied ? t("publicLink.copied") : t("publicLink.copy")}
+                </button>
+              )}
+            </div>
           </div>
         ) : (
           <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
@@ -276,6 +491,27 @@ export function PublicLinkDialog({
             ) : (
               <p style={{ margin: 0, fontSize: 12, lineHeight: 1.5, color: "rgba(255,255,255,0.6)" }}>{t("publicLink.permanentNote")}</p>
             )}
+            <div style={{ display: "grid", gap: 8 }}>
+              <span id="public-link-protection-label" style={{ fontSize: 12, color: "rgba(255,255,255,0.7)" }}>{t("publicLink.password.legend")}</span>
+              <div role="radiogroup" aria-labelledby="public-link-protection-label" style={{ display: "flex", gap: 8 }}>
+                {(["password", "none"] as const).map((p) => (
+                  <button
+                    key={p}
+                    type="button"
+                    role="radio"
+                    aria-checked={protection === p}
+                    data-testid={`public-link-protection-${p}`}
+                    onClick={() => { setProtection(p); setError(null); }}
+                    style={{ ...quiet, flex: 1, background: protection === p ? "rgba(249,115,22,0.22)" : quiet.background, color: protection === p ? "#fdba74" : quiet.color, outline: protection === p ? "1px solid rgba(249,115,22,0.6)" : "none" }}
+                  >
+                    {t(p === "password" ? "publicLink.password.require" : "publicLink.password.none")}
+                  </button>
+                ))}
+              </div>
+              {protection === null && <p data-testid="public-link-protection-choose" style={NOTE}>{t("publicLink.password.choose")}</p>}
+              {protection === "none" && <p data-testid="public-link-protection-none-note" style={NOTE}>{t("publicLink.password.noneNote")}</p>}
+              {protection === "password" && <LinkPasswordField value={password} onChange={(value) => { setPassword(value); setError(null); }} />}
+            </div>
             <label style={{ display: "grid", gap: 6, fontSize: 12, color: "rgba(255,255,255,0.7)" }}>
               {t("publicLink.api")}
               <input data-testid="public-link-api" value={api} onChange={(e) => setApi(e.target.value)} placeholder="/api/scores" spellCheck={false} autoCapitalize="off" autoCorrect="off" style={field} />
@@ -284,7 +520,7 @@ export function PublicLinkDialog({
             {error && <p role="alert" data-testid="public-link-error" style={{ margin: 0, fontSize: 12, color: "#fca5a5" }}>{error}</p>}
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
               <button type="button" onClick={onClose} data-testid="public-link-cancel" style={quiet}>{t("cancel")}</button>
-              <button type="button" disabled={busy} onClick={() => { void submit(); }} data-testid="public-link-submit" style={{ ...primary, opacity: busy ? 0.6 : 1 }}>
+              <button type="button" disabled={busy || !ready} onClick={() => { void submit(); }} data-testid="public-link-submit" style={{ ...primary, opacity: busy || !ready ? 0.6 : 1 }}>
                 {t("publicLink.createButton")}
               </button>
             </div>

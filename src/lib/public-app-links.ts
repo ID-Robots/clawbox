@@ -17,21 +17,31 @@
  *   - one link per app, at most MAX_LINKS at once (each is a tunnel process on
  *     an 8 GB board);
  *   - the app's `/api` tree and every write stay closed unless the owner names
- *     a prefix in `apiAllow`.
+ *     a prefix in `apiAllow`;
+ *   - a link may carry a password of its own (TASK-1515). Only its salted
+ *     scrypt hash is stored, next to a random key the serving side signs
+ *     unlock cookies with. Setting, changing or removing it never touches the
+ *     link's id or token, so the address stays the same; a change makes a new
+ *     key, so everyone who had typed the old password is asked again.
  */
-import { randomBytes } from "crypto";
+import { randomBytes, scrypt } from "crypto";
 import fs from "fs/promises";
 import path from "@/lib/runtime-path";
 import { DATA_DIR } from "@/lib/config-store";
 import { APP_ID_RE, webappPath } from "@/lib/code-projects";
 import { isReservedAppId } from "@/lib/webapp-registry";
 import { createSerialLock } from "@/lib/serial-lock";
+import { PASSWORD_CONTROL_CHAR_RE, verifyPassword } from "@/lib/auth";
 
 export const MAX_LINKS = 5;
 export const MIN_TTL_MINUTES = 1;
 export const MAX_TTL_MINUTES = 30 * 24 * 60;
 export const MAX_API_ALLOW = 16;
 const API_ALLOW_RE = /^\/[A-Za-z0-9._~\-/]{0,200}$/;
+export const MIN_PASSWORD_LENGTH = 8;
+export const MAX_PASSWORD_LENGTH = 128;
+/** scrypt cost of a link password: 32 MB and three passes per guess (an OWASP-listed setting). */
+const SCRYPT = { N: 32768, r: 8, p: 3, keyLength: 32, saltLength: 16 } as const;
 
 export type PublicLinkMode = "temporary" | "permanent";
 
@@ -43,6 +53,16 @@ export interface StoredPublicLink {
   createdAt: number;
   expiresAt: number | null;
   apiAllow: string[];
+  /** Present when visitors must type a password. Never the password itself. */
+  password?: StoredLinkPassword | null;
+}
+
+export interface StoredLinkPassword {
+  /** `scrypt$N$r$p$<salt>$<key>`, salt and key base64url. */
+  hash: string;
+  /** What the serving side signs unlock cookies with. New with every password. */
+  key: string;
+  setAt: number;
 }
 
 /** What the desktop is told about a link. */
@@ -52,6 +72,8 @@ export interface PublicLinkView {
   createdAt: number;
   expiresAt: number | null;
   apiAllow: string[];
+  /** Whether visitors are asked for a password. The password itself is not kept anywhere. */
+  passwordProtected: boolean;
   /** `starting` until the tunnel has a hostname; `offline` when the serving side has no record of it. */
   state: "starting" | "live" | "restarting" | "offline";
   /** The full link to hand out — tunnel origin, the app's path and the token — once there is one. */
@@ -141,6 +163,44 @@ async function writeStored(links: StoredPublicLink[]): Promise<void> {
   await fs.rename(tmp, linksFile());
 }
 
+function hasPassword(link: StoredPublicLink): boolean {
+  return link.password !== undefined && link.password !== null;
+}
+
+/**
+ * A link password as the owner typed it, checked — or a PublicLinkError.
+ *
+ * It must not be the ClawBox password: a link password is handed to
+ * strangers. The check is the login page's own (unix_chkpwd for the box
+ * account), asked by the owner's session only; when the helper cannot answer
+ * it says "no match" and the password is accepted, so this is a courtesy on
+ * top of the dialog's warning and not a gate anything else depends on.
+ */
+async function checkedPassword(input: unknown): Promise<string> {
+  if (typeof input !== "string") throw new PublicLinkError("The password must be text.", 400, "bad_password");
+  const password = input.normalize("NFC");
+  if (PASSWORD_CONTROL_CHAR_RE.test(password)) throw new PublicLinkError("The password contains characters that cannot be typed.", 400, "bad_password");
+  if (password.length < MIN_PASSWORD_LENGTH) throw new PublicLinkError(`The password needs at least ${MIN_PASSWORD_LENGTH} characters.`, 400, "password_too_short");
+  if (password.length > MAX_PASSWORD_LENGTH) throw new PublicLinkError(`The password can have at most ${MAX_PASSWORD_LENGTH} characters.`, 400, "password_too_long");
+  if (await verifyPassword(password).catch(() => false)) {
+    throw new PublicLinkError("That is your ClawBox password. A link password must be a different one.", 400, "password_is_system");
+  }
+  return password;
+}
+
+/** The record stored for a password: a fresh salt, the slow hash, a fresh unlock key. */
+async function hashedPassword(password: string, now: number): Promise<StoredLinkPassword> {
+  const salt = randomBytes(SCRYPT.saltLength);
+  const derived = await new Promise<Buffer>((resolve, reject) => {
+    scrypt(password, salt, SCRYPT.keyLength, { N: SCRYPT.N, r: SCRYPT.r, p: SCRYPT.p, maxmem: 256 * 1024 * 1024 }, (err, key) => (err ? reject(err) : resolve(key)));
+  });
+  return {
+    hash: `scrypt$${SCRYPT.N}$${SCRYPT.r}$${SCRYPT.p}$${salt.toString("base64url")}$${derived.toString("base64url")}`,
+    key: randomBytes(32).toString("base64url"),
+    setAt: now,
+  };
+}
+
 async function audit(event: string, fields: Record<string, unknown>): Promise<void> {
   try {
     await fs.mkdir(dir(), { recursive: true, mode: 0o700 });
@@ -208,6 +268,7 @@ export async function listPublicLinks(now = Date.now()): Promise<PublicLinkView[
         createdAt: l.createdAt,
         expiresAt: l.expiresAt,
         apiAllow: l.apiAllow,
+        passwordProtected: hasPassword(l),
         state: origin && state === "live" ? "live" : state === "live" ? "starting" : state,
         url: origin && state === "live" ? publicLinkUrl(origin, l, await isServerApp(l.appId)) : null,
       });
@@ -221,6 +282,8 @@ export interface CreatePublicLinkInput {
   mode: unknown;
   ttlMinutes?: unknown;
   apiAllow?: unknown;
+  /** A password for this link, or nothing for an open one. */
+  password?: unknown;
 }
 
 /** Publish an app. One link per app; a desktop webapp (data/webapps/<id>/) only. */
@@ -238,6 +301,8 @@ export async function createPublicLink(input: CreatePublicLinkInput, now = Date.
     expiresAt = now + ttl * 60_000;
   }
   const apiAllow = parseApiAllow(input.apiAllow);
+  // Hashed before the lock is taken: it is slow, and nothing it needs is shared.
+  const password = input.password === undefined || input.password === null ? null : await hashedPassword(await checkedPassword(input.password), now);
 
   // Only an app that is on the desktop as a webapp — a one-file app or a
   // registered server app — has a folder here. Built-ins and store skills
@@ -258,10 +323,34 @@ export async function createPublicLink(input: CreatePublicLinkInput, now = Date.
       createdAt: now,
       expiresAt,
       apiAllow,
+      ...(password ? { password } : {}),
     };
     await writeStored([...links, link]);
-    await audit("created", { link: link.id, app: appId, mode, expiresAt, apiAllow });
-    return { appId, mode, createdAt: now, expiresAt, apiAllow, state: "starting", url: null };
+    await audit("created", { link: link.id, app: appId, mode, expiresAt, apiAllow, password: password !== null });
+    return { appId, mode, createdAt: now, expiresAt, apiAllow, passwordProtected: password !== null, state: "starting", url: null };
+  });
+}
+
+/**
+ * Set, change (a string) or remove (null) the password of an app's link. The
+ * link itself — id, token, address, expiry — is untouched. True when the link
+ * is password-protected afterwards.
+ */
+export async function setPublicLinkPassword(appId: unknown, input: unknown, now = Date.now()): Promise<boolean> {
+  if (typeof appId !== "string" || !APP_ID_RE.test(appId)) throw new PublicLinkError("Unknown app.", 400, "bad_app");
+  const password = input === null ? null : await hashedPassword(await checkedPassword(input), now);
+  return withLinks(async () => {
+    const links = await pruneExpired(await readStored(), now);
+    const link = links.find((l) => l.appId === appId);
+    if (!link) throw new PublicLinkError("This app has no public link.", 404, "no_link");
+    const had = hasPassword(link);
+    if (!password && !had) return false;
+    const { password: _old, ...rest } = link;
+    void _old;
+    const next: StoredPublicLink = password ? { ...rest, password } : rest;
+    await writeStored(links.map((l) => (l === link ? next : l)));
+    await audit(password ? (had ? "password_changed" : "password_set") : "password_removed", { link: link.id, app: appId });
+    return password !== null;
   });
 }
 

@@ -5,11 +5,14 @@ import path from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("@/lib/route-auth", () => ({ sessionIdentity: vi.fn() }));
+// The box account's password check (unix_chkpwd) — never the real helper here.
+vi.mock("@/lib/auth", async (original) => ({ ...(await original<typeof import("@/lib/auth")>()), verifyPassword: vi.fn(async () => false) }));
 
 import { sessionIdentity } from "@/lib/route-auth";
+import { verifyPassword } from "@/lib/auth";
 import { DATA_DIR } from "@/lib/config-store";
-import { DELETE, GET, POST } from "@/app/setup-api/apps/public-link/route";
-import { MAX_LINKS, createPublicLink, disablePublicLink, listPublicLinks, parseApiAllow } from "@/lib/public-app-links";
+import { DELETE, GET, PATCH, POST } from "@/app/setup-api/apps/public-link/route";
+import { MAX_LINKS, createPublicLink, disablePublicLink, listPublicLinks, parseApiAllow, setPublicLinkPassword } from "@/lib/public-app-links";
 
 /**
  * TASK-1478 — the owner's half of public app links: who may publish, what is
@@ -18,8 +21,9 @@ import { MAX_LINKS, createPublicLink, disablePublicLink, listPublicLinks, parseA
  */
 const require_ = createRequire(import.meta.url);
 const serving = require_("../../../../scripts/public-app-links.js") as {
-  readLinks: (root: string) => { id: string; appId: string; token: string }[];
+  readLinks: (root: string) => { id: string; appId: string; token: string; password: { hash: string; key: string } | null }[];
   validLink: (raw: unknown) => unknown;
+  verifyPasswordHash: (password: string, hash: string) => Promise<boolean>;
 };
 
 const ROOT = path.dirname(DATA_DIR);
@@ -47,6 +51,7 @@ beforeEach(() => {
   fs.rmSync(DATA_DIR, { recursive: true, force: true });
   makeApp("notes");
   vi.mocked(sessionIdentity).mockResolvedValue(owner);
+  vi.mocked(verifyPassword).mockReset().mockResolvedValue(false);
   delete process.env.CLAWBOX_TEST_MODE;
 });
 
@@ -209,5 +214,149 @@ describe("disabling", () => {
     expect((await listPublicLinks())[0]).toMatchObject({ appId: "notes", apiAllow: [] });
     expect(await disablePublicLink("notes")).toBe(true);
     expect(serving.readLinks(ROOT)).toHaveLength(0);
+  });
+});
+
+/** TASK-1515 — a password of the link's own, chosen by the owner. */
+describe("a link password", () => {
+  const PASSWORD = "tulip-harbor-93-quiet";
+  const stored = () => JSON.parse(fs.readFileSync(path.join(LINKS_DIR, "links.json"), "utf-8")).links as Record<string, unknown>[];
+  const everythingOnDisk = () => fs.readdirSync(LINKS_DIR).map((f) => fs.readFileSync(path.join(LINKS_DIR, f), "utf-8")).join("\n");
+
+  it("is stored as a salted scrypt hash the serving side verifies — never as text, in the list or the audit log", async () => {
+    const res = await POST(req("POST", { appId: "notes", mode: "permanent", password: PASSWORD }));
+    expect(res.status).toBe(201);
+    const body = await res.json();
+    expect(body.link.passwordProtected).toBe(true);
+    expect(JSON.stringify(body)).not.toContain(PASSWORD);
+
+    const record = stored()[0].password as { hash: string; key: string; setAt: number };
+    expect(record.hash).toMatch(/^scrypt\$32768\$8\$3\$[A-Za-z0-9_-]{22}\$[A-Za-z0-9_-]{43}$/);
+    expect(record.key).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(everythingOnDisk()).not.toContain(PASSWORD);
+    expect(fs.statSync(path.join(LINKS_DIR, "links.json")).mode & 0o777).toBe(0o600);
+
+    const served = serving.readLinks(ROOT);
+    expect(served).toHaveLength(1);
+    expect(served[0].password).toEqual({ hash: record.hash, key: record.key });
+    expect(await serving.verifyPasswordHash(PASSWORD, record.hash)).toBe(true);
+    expect(await serving.verifyPasswordHash(`${PASSWORD}x`, record.hash)).toBe(false);
+  });
+
+  it("the list says only that there is one — no hash, no key", async () => {
+    await createPublicLink({ appId: "notes", mode: "permanent", password: PASSWORD });
+    const res = await GET(req("GET"));
+    const text = JSON.stringify(await res.json());
+    expect(text).toContain("\"passwordProtected\":true");
+    expect(text).not.toMatch(/scrypt|"hash"|"key"|"password"/);
+  });
+
+  it("a link made without one is open, and the box password is never consulted", async () => {
+    const res = await POST(req("POST", { appId: "notes", mode: "permanent" }));
+    expect((await res.json()).link.passwordProtected).toBe(false);
+    expect("password" in stored()[0]).toBe(false);
+    expect(serving.readLinks(ROOT)[0].password).toBeNull();
+    expect(verifyPassword).not.toHaveBeenCalled();
+    expect((await listPublicLinks())[0].passwordProtected).toBe(false);
+  });
+
+  it("refuses a password that is too short, too long, not text or not typeable — and publishes nothing", async () => {
+    for (const [password, code] of [["short", "password_too_short"], ["x".repeat(129), "password_too_long"], [12345678, "bad_password"], ["line\nbreak-long-enough", "bad_password"], ["", "password_too_short"]] as const) {
+      const res = await POST(req("POST", { appId: "notes", mode: "permanent", password }));
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe(code);
+    }
+    expect(serving.readLinks(ROOT)).toHaveLength(0);
+  });
+
+  it("refuses the ClawBox password as a link password", async () => {
+    vi.mocked(verifyPassword).mockResolvedValue(true);
+    const res = await POST(req("POST", { appId: "notes", mode: "permanent", password: PASSWORD }));
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.code).toBe("password_is_system");
+    expect(JSON.stringify(body)).not.toContain(PASSWORD);
+    expect(verifyPassword).toHaveBeenCalledWith(PASSWORD);
+    expect(serving.readLinks(ROOT)).toHaveLength(0);
+
+    await createPublicLink({ appId: "notes", mode: "permanent" });
+    expect((await PATCH(req("PATCH", { appId: "notes", password: PASSWORD }))).status).toBe(400);
+    expect(serving.readLinks(ROOT)[0].password).toBeNull();
+  });
+
+  it("accepts the password when the box cannot say whether it is its own", async () => {
+    vi.mocked(verifyPassword).mockRejectedValue(new Error("helper missing"));
+    expect((await POST(req("POST", { appId: "notes", mode: "permanent", password: PASSWORD }))).status).toBe(201);
+  });
+
+  it("is added, changed and removed without changing the link", async () => {
+    await createPublicLink({ appId: "notes", mode: "temporary", ttlMinutes: 60, apiAllow: ["/api/scores"] });
+    const before = serving.readLinks(ROOT)[0];
+    const same = () => {
+      const now = serving.readLinks(ROOT)[0];
+      expect({ id: now.id, token: now.token, appId: now.appId }).toEqual({ id: before.id, token: before.token, appId: before.appId });
+      expect(stored()[0]).toMatchObject({ mode: "temporary", apiAllow: ["/api/scores"] });
+      return now;
+    };
+
+    let res = await PATCH(req("PATCH", { appId: "notes", password: PASSWORD }));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, passwordProtected: true });
+    const first = same().password!;
+    expect(await serving.verifyPasswordHash(PASSWORD, first.hash)).toBe(true);
+
+    res = await PATCH(req("PATCH", { appId: "notes", password: "a-second-password" }));
+    expect(await res.json()).toEqual({ ok: true, passwordProtected: true });
+    const second = same().password!;
+    expect(second.hash).not.toBe(first.hash);
+    // A new unlock key: whoever typed the old password is asked again.
+    expect(second.key).not.toBe(first.key);
+    expect(await serving.verifyPasswordHash(PASSWORD, second.hash)).toBe(false);
+    expect(await serving.verifyPasswordHash("a-second-password", second.hash)).toBe(true);
+
+    res = await PATCH(req("PATCH", { appId: "notes", password: null }));
+    expect(await res.json()).toEqual({ ok: true, passwordProtected: false });
+    expect(same().password).toBeNull();
+    expect("password" in stored()[0]).toBe(false);
+
+    const audit = fs.readFileSync(path.join(LINKS_DIR, "audit.log"), "utf-8");
+    for (const event of ["password_set", "password_changed", "password_removed"]) expect(audit).toContain(`"${event}"`);
+    expect(everythingOnDisk()).not.toContain(PASSWORD);
+    expect(everythingOnDisk()).not.toContain("a-second-password");
+  });
+
+  it("is the owner's to change: no session and the agent's bearer 401, another user 403", async () => {
+    await createPublicLink({ appId: "notes", mode: "permanent", password: PASSWORD });
+    const before = stored()[0].password;
+    vi.mocked(sessionIdentity).mockResolvedValue(null);
+    expect((await PATCH(req("PATCH", { appId: "notes", password: null }))).status).toBe(401);
+    vi.mocked(sessionIdentity).mockResolvedValue(member);
+    expect((await PATCH(req("PATCH", { appId: "notes", password: null }))).status).toBe(403);
+    expect(stored()[0].password).toEqual(before);
+  });
+
+  it("a request that does not name the password changes nothing", async () => {
+    await createPublicLink({ appId: "notes", mode: "permanent", password: PASSWORD });
+    const before = stored()[0].password;
+    for (const body of [{ appId: "notes" }, { appId: "notes", password: 5 }, { appId: "notes", password: undefined }]) {
+      expect((await PATCH(req("PATCH", body))).status).toBe(400);
+    }
+    expect((await PATCH(new Request("http://box/setup-api/apps/public-link", { method: "PATCH", body: "not json" }))).status).toBe(400);
+    expect(stored()[0].password).toEqual(before);
+  });
+
+  it("needs a link to set a password on", async () => {
+    const res = await PATCH(req("PATCH", { appId: "notes", password: PASSWORD }));
+    expect(res.status).toBe(404);
+    expect((await res.json()).code).toBe("no_link");
+    expect((await PATCH(req("PATCH", { appId: "../etc", password: PASSWORD }))).status).toBe(400);
+    await expect(setPublicLinkPassword("notes", null)).rejects.toMatchObject({ code: "no_link" });
+  });
+
+  it("goes with the link: disabling removes it, and a new link starts without one", async () => {
+    await createPublicLink({ appId: "notes", mode: "permanent", password: PASSWORD });
+    expect((await DELETE(req("DELETE", { appId: "notes" }))).status).toBe(200);
+    await createPublicLink({ appId: "notes", mode: "permanent" });
+    expect(serving.readLinks(ROOT)[0].password).toBeNull();
   });
 });
