@@ -102,7 +102,9 @@ disable_feature() {
   fi
   n="${line%%:*}"
   list="${line#*:  --disable-features=}"
-  if printf '%s\n' "${list//,/$'\n'}" | grep -qxF -- "$name"; then return; fi
+  # A here-string: `printf | grep -q` can SIGPIPE printf under pipefail, which
+  # reads as "not listed" and adds the feature a second time.
+  if grep -qxF -- "$name" <<<"${list//,/$'\n'}"; then return; fi
   [ "$changed" -eq 1 ] || cp -a "$LAUNCHER" "$LAUNCHER.bak"
   changed=1
   sed -i "${n}s/\$/${list:+,}$name/" "$LAUNCHER"

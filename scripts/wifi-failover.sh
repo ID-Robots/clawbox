@@ -18,8 +18,11 @@ wifi_recover || exit 1
 WIFI_IFACE="$RADIO_IFACE"
 AP_PROFILE=ClawBox-Setup
 log() { echo "[WiFi-failover] $*"; }
-# Events may have queued behind an AP startup. Recheck the live uplink.
-if nmcli -t -f TYPE,STATE device status | grep -q '^ethernet:connected$'; then exit 0; fi
+# Events may have queued behind an AP startup. Recheck the live uplink. Read
+# whole, then matched: `nmcli | grep -q` SIGPIPEs nmcli whenever grep exits
+# while nmcli is still writing, and under pipefail that reads as no uplink.
+devices="$(nmcli -t -f TYPE,STATE device status)" || devices=""
+if grep -q '^ethernet:connected$' <<<"$devices"; then exit 0; fi
 
 # One budget for everything done with the radio once it is owned: an
 # activation already in flight, the AP release, every candidate and the settle

@@ -4089,7 +4089,10 @@ if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
     _authdoc_rc=0
     _authdoc_out="$(timeout 180 "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null 2>&1)" || _authdoc_rc=$?
     printf '%s\n' "$_authdoc_out"
-    if printf '%s\n' "$_authdoc_out" | grep -q 'Legacy exec approvals exist at'; then
+    # A here-string, not `printf | grep -q`: printf still writing the lines
+    # after the match when grep exits is SIGPIPE, a false "not blocked" under
+    # pipefail, and that fails this boot in the elif below.
+    if grep -q 'Legacy exec approvals exist at' <<<"$_authdoc_out"; then
       echo "  WARN: openclaw doctor is blocked by a legacy exec approvals file, so the auth profiles were NOT migrated; starting the gateway anyway rather than failing this boot" >&2
     elif [ "$_authdoc_rc" -ne 0 ]; then
       echo "  ERROR: OpenClaw 2 auth-profile migration failed" >&2

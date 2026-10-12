@@ -76,10 +76,12 @@ graphical_active() {
 # `Requires=multi-user.target` and reaches the display manager through
 # `Wants=display-manager.service`. Asking only about Requires made both the
 # repair and the --check warning silent no-ops on the very box they were
-# written for. Ask for both, once, from one place.
+# written for. Ask for both, once, from one place. Read whole, then matched:
+# `grep -q` on the pipe can SIGPIPE systemctl, a false "no" under pipefail.
 graphical_target_wants_display_manager() {
-  systemctl show "$GRAPHICAL_TARGET" -p Wants -p Requires 2>/dev/null \
-    | grep -q 'display-manager\.service'
+  local deps
+  deps="$(systemctl show "$GRAPHICAL_TARGET" -p Wants -p Requires 2>/dev/null)" || return 1
+  grep -q 'display-manager\.service' <<<"$deps"
 }
 
 display_manager_state() {

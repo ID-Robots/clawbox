@@ -93,6 +93,8 @@ const nmEscape = (s: string) => s.replace(/\\/g, "\\\\").replace(/:/g, "\\:");
 //   late       a uuid NetworkManager autoconnects during the pre-AP scan's rescan
 //   ap-busy    a uuid NetworkManager autoconnects when the AP's first activation fails
 //   after-fail a uuid NetworkManager autoconnects when a client activation fails
+//   flood      present: `device status` (and iw) go on for 100k rows after the real ones
+//   wan-lookup-fails  present: the DEVICE,TYPE,STATE listing (the WAN lookup) fails
 //   calls      argv of every call, tab-joined, one per line
 //   unsupported  any call this stand-in cannot answer faithfully
 const NMCLI_STUB = `#!/usr/bin/env bash
@@ -164,11 +166,14 @@ case "$1 $2" in
     [ "$fields" = RUNNING ] || unsupported "$@"
     echo running ;;
   "device status")
+    if [ -f "$NM/wan-lookup-fails" ] && [ "$fields" = DEVICE,TYPE,STATE ]; then
+      echo "Error: NetworkManager is not running." >&2; exit 8
+    fi
     wstate=disconnected
     [ "$state" = 100 ] && wstate=connected
     [ "$state" = 20 ] && wstate=unavailable
-    # One write, as nmcli does: start-ap.sh reads this through \`grep -q\` under
-    # pipefail, and a stub writing line by line could take a SIGPIPE there.
+    # bash's printf writes this a line at a time, as nmcli writes a long listing
+    # in several writes: a reader that stops at its first match can SIGPIPE it.
     listing="$(while IFS=: read -r D T S; do
       out=""; sep=""
       for f in $(printf '%s' "$fields" | tr , ' '); do
@@ -182,7 +187,9 @@ $IFC:wifi:$wstate
 lo:loopback:unmanaged
 EOF
 )"
-    printf '%s\\n' "$listing" ;;
+    printf '%s\\n' "$listing"
+    # Far past the pipe buffer, so such a reader SIGPIPEs this every time.
+    if [ -f "$NM/flood" ]; then yes "$(printf '%s\\n' "$listing" | tail -n 1)" | head -n 100000; fi ;;
   "device show")
     [ "$3" = "$IFC" ] || { echo "Error: Device '$3' not found." >&2; exit 10; }
     if [ "$fields" = GENERAL.AUTOCONNECT ]; then
@@ -297,6 +304,7 @@ m=""
 t=managed
 [ "$m" = ap ] && t=AP
 printf 'Interface ${IFACE}\\n\\ttype %s\\n' "$t"
+if [ -f "$NMSTUB/flood" ]; then yes $'\\ttxpower 20.00 dBm' | head -n 100000; fi
 `;
 
 let root: string;
@@ -312,6 +320,10 @@ function makeBox(opts: {
   late?: string;
   apBusy?: string;
   afterFail?: string;
+  /** `device status` and iw answer with 100k more rows after the real ones. */
+  flood?: boolean;
+  /** The WAN lookup's `nmcli -t -f DEVICE,TYPE,STATE device status` fails. */
+  wanLookupFails?: boolean;
 }) {
   root = mkdtempSync(path.join(tmpdir(), "clawbox-start-ap-"));
   nm = path.join(root, "nm");
@@ -340,6 +352,8 @@ function makeBox(opts: {
   if (opts.late) writeFileSync(path.join(nm, "late"), opts.late);
   if (opts.apBusy) writeFileSync(path.join(nm, "ap-busy"), opts.apBusy);
   if (opts.afterFail) writeFileSync(path.join(nm, "after-fail"), opts.afterFail);
+  if (opts.flood) writeFileSync(path.join(nm, "flood"), "");
+  if (opts.wanLookupFails) writeFileSync(path.join(nm, "wan-lookup-fails"), "");
   writeFileSync(path.join(nm, "calls"), "");
 
   writeFileSync(path.join(bin, "nmcli"), NMCLI_STUB, { mode: 0o755 });
@@ -676,6 +690,73 @@ describe("start-ap.sh keeps the hotspot behaviour it had", () => {
     const r = runStartAp();
     expect(r.status).toBe(0);
     expect(r.lines).toContain(`--wait 30 connection up uuid ${HOTSPOT} ifname ${IFACE}`);
+  });
+});
+
+// A reader that stops at its first match — `grep -q`, or awk's `exit` — closes
+// the pipe while nmcli or iw may still be writing. The writer dies of SIGPIPE,
+// and under the script's `pipefail` the pipeline is then 141: a check reads
+// "no Ethernet" or "not in AP mode", and an assignment ends the script under
+// `set -e`. That is how "with an Ethernet uplink" above failed on some runs.
+// With `flood` the answers go on for 100k rows after the matching one, so such
+// a reader loses every time instead of sometimes.
+describe("start-ap.sh reads nmcli's and iw's whole answer before deciding", () => {
+  it("the flooded stand-ins SIGPIPE a reader that stops at its first match", () => {
+    makeBox({ setupComplete: true, ethernet: true, profiles: [{ uuid: GARAGE_AP, name: "Garage-Hotspot", mode: "ap" }], active: GARAGE_AP, flood: true });
+    const underPipefail = (pipeline: string) =>
+      spawnSync("bash", ["-c", `set -o pipefail; ${pipeline}`], {
+        env: { ...process.env, PATH: `${path.join(root, "bin")}:${process.env.PATH ?? ""}`, NMSTUB: nm },
+        encoding: "utf-8",
+      }).status;
+    // The pipelines start-ap.sh had, against these stand-ins: 141, not "maybe".
+    expect(underPipefail("nmcli -t -f TYPE,STATE device status 2>/dev/null | grep -q '^ethernet:connected'")).toBe(141);
+    expect(underPipefail(`iw dev ${IFACE} info 2>/dev/null | grep -q "type AP"`)).toBe(141);
+    expect(underPipefail("nmcli -t -f DEVICE,TYPE,STATE device status | awk -F: '/ethernet:connected/{print $1; exit}'")).toBe(141);
+  });
+
+  it("with an Ethernet uplink, sees it, hosts the hotspot and shares the uplink", () => {
+    makeBox({
+      setupComplete: true,
+      ethernet: true,
+      profiles: [{ uuid: HOME, name: "Example-Home", up: "ok" }],
+      active: HOME,
+      flood: true,
+    });
+    const r = runStartAp();
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain("Ethernet uplink present");
+    expect(r.stdout).not.toContain("skipping AP mode");
+    expect(r.calls.filter(isClientUp)).toEqual([]);
+    expect(r.stdout).toContain("Access point active (attempt 1)");
+    expect(r.stdout).toContain(`NAT masquerade enabled (${IFACE} -> eth0)`);
+    expect(existsSync(path.join(root, "data", "ap-runtime.env"))).toBe(true);
+    expectSafeCalls(r);
+  });
+
+  it("admits a radio iw reports in AP mode, and confirms the hotspot came up", () => {
+    makeBox({
+      setupComplete: true,
+      profiles: [{ uuid: GARAGE_AP, name: "Garage-Hotspot", mode: "ap", up: "ok" }],
+      active: GARAGE_AP,
+      flood: true,
+    });
+    const r = runStartAp();
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stderr).not.toContain("Unknown connected WiFi identity");
+    expect(r.stdout).toContain("Access point active (attempt 1)");
+    expect(r.lines.filter((l) => l === `--wait 30 connection up uuid ${HOTSPOT} ifname ${IFACE}`)).toHaveLength(1);
+    expectSafeCalls(r);
+  });
+
+  it("a WAN lookup that fails once the hotspot is up means no uplink to share, not a failed start", () => {
+    // Under set -e a failed (or phase-deadline 124) lookup used to end the
+    // script there: no NAT warning, no ap-runtime.env, a failed unit.
+    makeBox({ setupComplete: true, ethernet: true, profiles: [], wanLookupFails: true });
+    const r = runStartAp();
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout).toContain("Access point active (attempt 1)");
+    expect(r.stdout).toContain("no WAN interface found");
+    expect(readFileSync(path.join(root, "data", "ap-runtime.env"), "utf-8")).toContain('AP_IP="10.42.0.1"');
   });
 });
 
