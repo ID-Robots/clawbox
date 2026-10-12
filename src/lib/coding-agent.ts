@@ -303,6 +303,7 @@ import {
   REVIEW_NO_CHECKS_GRACE_MS,
   reviewPollIntervalMs,
   reviewProblems,
+  type ReviewCheck,
   type ReviewLoop,
   type ReviewSnapshot,
 } from "@/lib/coding-review";
@@ -393,7 +394,21 @@ import {
   streamJsonUserTurn,
   STREAM_INPUT_REFUSED,
   type RunMessage,
+  type RunMessageDelivery,
+  type RunMessageVia,
 } from "@/lib/coding-run-messages";
+import { ciFailureLine, ciFixNotes, MAX_CI_FIX_ATTEMPTS, readCiFailure, type CiFailure } from "@/lib/coding-ci";
+import {
+  clearReceipts,
+  ensureRunInbox,
+  inboxPending,
+  inboxReceipts,
+  postToInbox,
+  reclaimInbox,
+  removeRunInbox,
+  runHookScriptPath,
+  runHookSettings,
+} from "@/lib/coding-run-inbox";
 
 // ─── Tunables ────────────────────────────────────────────────────────────────
 
@@ -1789,10 +1804,71 @@ export interface CodingRun {
    * scoped run outlives it, and its queue must outlive it too.
    *
    * Empty on every record written before this field. See
-   * src/lib/coding-run-messages.ts for the bounds and the two ways one is
+   * src/lib/coding-run-messages.ts for the bounds and the three ways one is
    * delivered.
    */
   messages: RunMessage[];
+  /**
+   * The current spawn was given its inbox hook (src/lib/coding-run-inbox.ts):
+   * a message sent now reaches it after the tool call it is in. On the record
+   * rather than only in memory, because a run reattached after a restart still
+   * has its hook and its inbox, and only the record can say so. Absent (false)
+   * on a record from before, and for a spawn whose hook script was missing.
+   */
+  midTurn?: boolean;
+  /**
+   * A QUEUED run's place in the queue: since when it waits, and what it is
+   * started with when its turn comes. Null on every other record. A clone
+   * (`cloneRun`) carries the 1-based `position` instead of the request.
+   */
+  queued?: RunQueueEntry | null;
+  /**
+   * The pull request's FAILED CI, read when its watcher stopped on failing
+   * checks (src/lib/coding-ci.ts): which checks, which tests, which files, the
+   * tail of the failed logs. What the run's page and coding_agent_status offer
+   * a "Fix CI" continuation from. `attempt` is how many Fix CI continuations
+   * led to this run (0 for the one that opened the pull request); `fixRunId`
+   * the continuation started from it, once one was. Absent on every other run.
+   */
+  ci?: RunCi | null;
+  /** This run is a "Fix CI" continuation of `runId`, attempt n of MAX_CI_FIX_ATTEMPTS. */
+  ciFixOf?: { runId: string; attempt: number } | null;
+}
+
+export interface RunCi extends CiFailure {
+  attempt: number;
+  fixRunId: string | null;
+}
+
+/**
+ * What a QUEUED run is started with when its turn comes: the caller's own
+ * request as the run route took it (`new`), or the owner's Start on a draft
+ * (`draft`, which is the record itself). Kept as asked and validated again at
+ * the start, by the one reader every start goes through.
+ */
+export interface QueuedStart {
+  kind: "new" | "draft";
+  /** A Fix CI continuation — see StartRunInput.fixCi. */
+  fixCi?: boolean;
+  task?: string;
+  projectId?: string | null;
+  directory?: string | null;
+  resumeRunId?: string | null;
+  provider?: unknown;
+  model?: unknown;
+  deliverable?: unknown;
+  pipeline?: unknown;
+  inputs?: unknown;
+  experience?: unknown;
+}
+
+export interface RunQueueEntry {
+  /** When it was queued: the order the queue starts runs in. */
+  at: number;
+  /** Absent from a clone: the request stays on the record. */
+  start?: QueuedStart;
+  /** 1-based, worked out when a clone is made — never stored. */
+  position?: number;
 }
 
 /**
@@ -2129,6 +2205,19 @@ export interface StartRunInput {
   directory?: string | null;
   resumeRunId?: string | null;
   source: CodingRunSource;
+  /**
+   * Internal: the queue's own start (`startQueuedRun`). The run takes the
+   * QUEUED record's id, place and messages, so whoever was told "run-x is
+   * queued" goes on following run-x.
+   */
+  queuedRunId?: string | null;
+  /**
+   * A "Fix CI" continuation of `resumeRunId`: that run's pull request failed
+   * its checks (CodingRun.ci), and the box appends what failed to this task.
+   * Refused without a recorded failure, and past MAX_CI_FIX_ATTEMPTS along
+   * the chain — never a loop pushing fixes at a red CI for ever.
+   */
+  fixCi?: boolean;
   /** Internal: set only by the automatic review pass, naming the run under review. */
   reviewOf?: string | null;
   /** Internal: set only by the review loop, naming the run whose pull request
@@ -2238,6 +2327,19 @@ export class CodingAgentError extends Error {
   constructor(readonly kind: CodingAgentErrorKind, message: string, readonly wait = false) {
     super(message);
     this.name = "CodingAgentError";
+  }
+}
+
+/**
+ * Refused ONLY because the box is already running every run the owner allows
+ * (`coding_agent_max_parallel_runs`): the one refusal the run queue turns into
+ * a QUEUED run instead (`startOrQueueRun`). Still a `busy` CodingAgentError for
+ * every caller that does not queue — a team's run, the review pass.
+ */
+export class SlotsFullError extends CodingAgentError {
+  constructor(message: string) {
+    super("busy", message);
+    this.name = "SlotsFullError";
   }
 }
 
@@ -2590,6 +2692,8 @@ export async function setMaxParallelRuns(runs: unknown): Promise<number> {
     throw new CodingAgentError("invalid", `The number of runs at once must be between ${MIN_MAX_PARALLEL_RUNS} and ${MAX_MAX_PARALLEL_RUNS}.`);
   }
   await configSet(CODING_AGENT_MAX_PARALLEL_CONFIG_KEY, runs);
+  // A higher limit is room the queue may take at once.
+  void pumpRunQueue();
   return runs;
 }
 
@@ -4038,6 +4142,60 @@ function normalizeRun(raw: CodingRun): CodingRun {
     // is written to the harness's stdin and drawn on the run's page, and the
     // file it comes from is one a restore or a hand edit can have touched.
     messages: parseRunMessages((raw as { messages?: unknown }).messages),
+    midTurn: (raw as { midTurn?: unknown }).midTurn === true,
+    queued: (raw as { status?: unknown }).status === "queued" ? parseQueueEntry((raw as { queued?: unknown }).queued) : null,
+    ci: parseRunCi((raw as { ci?: unknown }).ci),
+    ciFixOf: parseCiFixOf((raw as { ciFixOf?: unknown }).ciFixOf),
+  };
+}
+
+/** A run's CI failure off disk, or null — rendered on its page and quoted to the next run, so re-read, never trusted. */
+function parseRunCi(raw: unknown): RunCi | null {
+  if (!raw || typeof raw !== "object") return null;
+  const c = raw as Record<string, unknown>;
+  if (typeof c.prNumber !== "number" || !Number.isInteger(c.prNumber) || c.prNumber <= 0) return null;
+  const strings = (v: unknown, max: number) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string").slice(0, max) : []);
+  return {
+    prNumber: c.prNumber,
+    at: typeof c.at === "number" ? c.at : 0,
+    checks: strings(c.checks, 40),
+    tests: strings(c.tests, 40),
+    files: strings(c.files, 40),
+    excerpt: typeof c.excerpt === "string" ? c.excerpt.slice(0, 4_000) : "",
+    unread: strings(c.unread, 40),
+    attempt: typeof c.attempt === "number" && Number.isInteger(c.attempt) && c.attempt >= 0 ? c.attempt : 0,
+    fixRunId: typeof c.fixRunId === "string" && RUN_ID_RE.test(c.fixRunId) ? c.fixRunId : null,
+  };
+}
+
+function parseCiFixOf(raw: unknown): { runId: string; attempt: number } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const f = raw as Record<string, unknown>;
+  if (typeof f.runId !== "string" || !RUN_ID_RE.test(f.runId)) return null;
+  return { runId: f.runId, attempt: typeof f.attempt === "number" && Number.isInteger(f.attempt) && f.attempt > 0 ? f.attempt : 1 };
+}
+
+/** A queued run's entry off disk, or a bare one (its turn by when the file says it was asked, no request) — never a crash. */
+function parseQueueEntry(raw: unknown): RunQueueEntry {
+  const e = raw && typeof raw === "object" ? raw as { at?: unknown; start?: unknown } : {};
+  const start = e.start && typeof e.start === "object" ? e.start as Record<string, unknown> : {};
+  const text = (v: unknown) => (typeof v === "string" ? v : null);
+  return {
+    at: typeof e.at === "number" && Number.isFinite(e.at) ? e.at : 0,
+    start: {
+      kind: start.kind === "new" ? "new" : "draft",
+      ...(typeof start.task === "string" ? { task: start.task } : {}),
+      projectId: text(start.projectId),
+      directory: text(start.directory),
+      resumeRunId: text(start.resumeRunId),
+      provider: start.provider,
+      model: start.model,
+      deliverable: start.deliverable,
+      pipeline: start.pipeline,
+      inputs: start.inputs,
+      experience: start.experience,
+      ...(start.fixCi === true ? { fixCi: true } : {}),
+    },
   };
 }
 
@@ -4258,6 +4416,19 @@ interface LiveRun {
   streamInput: boolean;
   /** Whether this process still holds the harness's stdin open. */
   stdinOpen: boolean;
+  /**
+   * The spawn has its inbox hook (CodingRun.midTurn): a message posted to its
+   * inbox is handed to the model after the tool call it is in.
+   */
+  midTurn: boolean;
+  /**
+   * A turn is under way, so the hook will run again: from the spawn to its
+   * result event, and again from a next turn written on stdin. A message sent
+   * outside one goes the next-turn or next-start way instead.
+   */
+  turnOpen: boolean;
+  /** Message ids this process put in the run's inbox and has no receipt for yet — what the tail looks for. */
+  inboxPosted: Set<string>;
   /**
    * The harness turned `--input-format stream-json` away before it ever spoke.
    * Makes the one automatic retry apply — running plain, which is the whole
@@ -4508,6 +4679,11 @@ interface RunStore {
   anthropicAuthRetries?: Map<string, number>;
   /** The owner's history setting as last read — see rememberHistoryPolicy. */
   historyPolicy: HistoryPolicy | null;
+  /** The run queue's pass in flight, and whether a slot freed while it ran — see pumpRunQueue. */
+  queuePump?: Promise<string[]>;
+  queuePumpAgain?: boolean;
+  /** The queue's next look when it stopped for something that clears by itself (the switch, readiness). */
+  queueRetry?: NodeJS.Timeout | null;
 }
 
 const store = processStore<RunStore>(RUNS_PATH, () => ({
@@ -4663,10 +4839,14 @@ function detachedState(run: CodingRun, tools: SpawnTools, lostToRestart: boolean
     unitWatch: null,
     stderrPath: null,
     scopeRefused: false,
-    // The pipes died with the server that opened them: a reattached run's
-    // queue waits for the next attempt or resume.
+    // The pipes died with the server that opened them — but not its hook: a
+    // reattached run with an inbox still takes a message mid-turn, and what
+    // was waiting in it when the last server went is still looked for.
     streamInput: false,
     stdinOpen: false,
+    midTurn: run.midTurn === true,
+    turnOpen: true,
+    inboxPosted: new Set<string>(run.midTurn === true ? safeInboxPending(run.id) : []),
     streamInputRefused: false,
     lostToRestart,
     openSubagents: new Map<string, ActiveSubagent>(),
@@ -4738,6 +4918,8 @@ function reattach(run: CodingRun, tools: SpawnTools): void {
   const state = detachedState(run, tools, false);
   live.set(run.id, state);
   followStream(run, state);
+  // What its hook handed over while no server was watching.
+  collectInboxReceipts(run, state);
   installExitHook();
   let settled = false;
   const settle = () => {
@@ -4858,6 +5040,11 @@ function cloneRun(run: CodingRun): CodingRun {
     // a clone can neither see nor write the driver's later stages.
     pipeline: run.pipeline ? clonePipeline(run.pipeline) : null,
     experience: run.experience ? { ...run.experience, ruleIds: [...run.experience.ruleIds] } : null,
+    // Where it stands, never what it asked for: the request (inputs, an
+    // experience block) is the runner's to start it with, not a reader's.
+    queued: run.queued ? { at: run.queued.at, position: queuePosition(run.id) ?? undefined } : null,
+    ci: run.ci ? { ...run.ci, checks: [...run.ci.checks], tests: [...run.ci.tests], files: [...run.ci.files], unread: [...run.ci.unread] } : null,
+    ciFixOf: run.ciFixOf ? { ...run.ciFixOf } : null,
   };
   // The experience block is left out, not copied: it is for the next spawn,
   // which reads the record itself — see CodingRun.experienceBrief.
@@ -5367,9 +5554,40 @@ const REVIEWER_CLAUSE_HELPER = "before your final report, send the reviewer over
 const REVIEWER_CLAUSE_SEPARATE = "your changes get a separate, automatic adversarial review on this device — do not send the reviewer helper over your own work; spend that time on the tester.";
 
 /** The brief for a run whose changes are (or are not) reviewed separately. */
-export function headlessBrief(opts: { reviewedSeparately: boolean }): string {
-  return HEADLESS_BRIEF_TEMPLATE.replace(REVIEWER_CLAUSE_SLOT, opts.reviewedSeparately ? REVIEWER_CLAUSE_SEPARATE : REVIEWER_CLAUSE_HELPER);
+export function headlessBrief(opts: { reviewedSeparately: boolean; team?: boolean }): string {
+  const brief = HEADLESS_BRIEF_TEMPLATE.replace(REVIEWER_CLAUSE_SLOT, opts.reviewedSeparately ? REVIEWER_CLAUSE_SEPARATE : REVIEWER_CLAUSE_HELPER);
+  // A team's run is told the opposite of PR_AUTO_MERGE_BRIEF, in its place: a
+  // team goal that asks for a merge is the ORCHESTRATOR's to carry out, once,
+  // at the end — never a worker's, whatever its task text quotes of the goal.
+  return opts.team ? brief.replace(PR_AUTO_MERGE_BRIEF, TEAM_NO_MERGE_BRIEF) : brief;
 }
+
+/**
+ * What a coding team's run is told about pull requests, instead of
+ * PR_AUTO_MERGE_BRIEF. Seen live: a worker whose task text quoted a goal
+ * ending "…and merge the PR" merged it itself, mid-team, before the other
+ * tasks were in. `TEAM_MERGE_DENYLIST` and the hook's merge guard refuse the
+ * commands; this says why, so the run does not spend its turns on them.
+ */
+export const TEAM_NO_MERGE_BRIEF =
+  "You are one run of a coding team. Never merge a pull request, never push, and never turn on auto-merge — whatever your task or the team's goal says. The team's orchestrator opens and merges the pull request itself, once every task is accepted, the project's tests pass, the final review passed and every check is green; `gh pr merge`, `gh api` and `git push` are refused to you. Commit your work in your own folder and say in your final message what is ready.";
+
+/**
+ * The commands a coding team's run is refused outright (`--disallowedTools`):
+ * merging a pull request, and the roads around it — the API (`gh api`, the
+ * REST merge endpoint and the GraphQL mutation alike) and a push, which is a
+ * merge by other means. A worker's branch reaches the team's branch through the
+ * orchestrator's local merge, so a team run has no use for any of them. The
+ * prefix rules are the first fence; the hook's PreToolUse merge guard
+ * (scripts/coding-run-hook.mjs) reads the whole command line for the same
+ * shapes inside `bash -c`, after `&&` or behind `env`.
+ */
+export const TEAM_MERGE_DENYLIST: readonly string[] = [
+  "Bash(gh pr merge:*)",
+  "Bash(gh api:*)",
+  "Bash(git push:*)",
+  "Bash(hub merge:*)",
+];
 
 /**
  * What every run that can write is told about a pull request its task wants
@@ -5845,10 +6063,10 @@ export function buildRunMcpConfig(run: { id: string; directory: string; media?: 
 }
 
 /** The argv handed to the wrapper. Exported for the contract test. */
-export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; experience?: string | null; reviewedSeparately?: boolean; draftPullRequests?: boolean; allowRules?: readonly string[]; provider?: CodingProvider; streamInput?: boolean; run?: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null } }): string[] {
+export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; experience?: string | null; reviewedSeparately?: boolean; draftPullRequests?: boolean; allowRules?: readonly string[]; provider?: CodingProvider; streamInput?: boolean; hookSettings?: string | null; run?: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null } }): string[] {
   // A run whose diff a separate review will read is told not to review it
-  // twice — see REVIEWER_CLAUSE_SLOT.
-  const headless = headlessBrief({ reviewedSeparately: opts.reviewedSeparately === true });
+  // twice — see REVIEWER_CLAUSE_SLOT. A team's run is told it never merges.
+  const headless = headlessBrief({ reviewedSeparately: opts.reviewedSeparately === true, team: Boolean(opts.run?.team) });
   const brief = [
     // A read-only run has no Bash, no browser and no Write: the brief that
     // describes them would spend its steps on calls that are refused.
@@ -5906,6 +6124,10 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     // (measured on run-yuyqta4t: pomodoro-verification.md refused).
     args.push("--add-dir", artifactsDir(opts.run.id));
   }
+  // The run's hooks (src/lib/coding-run-inbox.ts): its inbox, read after every
+  // tool call, and a team run's merge guard. Inline JSON, like the MCP config:
+  // `--settings` is read whatever `--setting-sources` says.
+  if (opts.hookSettings) args.push("--settings", opts.hookSettings);
   // The three tool flags are variadic and swallow any positional that follows,
   // which is why the task travels on stdin and these come last.
   args.push("--tools", opts.readOnly ? READ_ONLY_TOOLS : toolsFor(true, opts.effort));
@@ -5955,7 +6177,7 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     // outranks an allow rule: without handing them over here, an owner rule for
     // the harness's own project notes would sit in argv underneath the
     // wholesale `~/.claude-ds/**` deny and grant exactly nothing.
-    args.push("--disallowedTools", ...fileDenyRules(allowRules), ...(opts.readOnly ? [] : BASH_KILL_DENYLIST));
+    args.push("--disallowedTools", ...fileDenyRules(allowRules), ...(opts.readOnly ? [] : BASH_KILL_DENYLIST), ...(opts.run?.team && !opts.readOnly ? TEAM_MERGE_DENYLIST : []));
   }
   return args;
 }
@@ -7753,6 +7975,10 @@ async function maybeOpenPullRequest(finished: CodingRun, ended: "stop" | "pause"
     let base = prBase;
     let foundBy: PrFoundBy;
     if (mine) {
+      // A Fix CI run's work is for the pull request that is already open: its
+      // branch goes up, or the checks it was started for never see the fix.
+      // The ORIGIN's mark — the run settling here may be its review pass.
+      if (origin.ciFixOf) await pushFixCiBranch(origin, prBranch);
       number = mine.number;
       url = mine.url;
       // GitHub's answer for the base, not the record's intention: a run that
@@ -7908,6 +8134,9 @@ async function adoptRunPullRequest(
 
   const mine = await findOpenPullRequestForBranch(origin.directory, branch);
   if (!mine) return;
+  // The same push the opening path makes for a Fix CI run: with the auto-PR
+  // switch off this is the one way its fix reaches the pull request.
+  if (origin.ciFixOf) await pushFixCiBranch(origin, branch);
 
   // Re-read: the `gh` call above is a subprocess, and the owner may have
   // cleared the run or a second settle of the chain may have got here first.
@@ -7973,6 +8202,68 @@ function visualEvidenceSection(last: CodingRun, origin: CodingRun): string | nul
 }
 
 /** Record a terminal PR phase on the run and persist it. */
+/**
+ * Push a Fix CI run's branch before its pull request is watched again, so the
+ * checks run on the fix. A push that fails is said in the log, never as a
+ * merge that did not happen: the watcher then reads what GitHub has.
+ */
+async function pushFixCiBranch(origin: CodingRun, branch: string): Promise<void> {
+  const pushed = await pushBranch(origin.directory, branch);
+  if (!pushed.ok) console.error(`[coding-agent] ${origin.id}: could not push the Fix CI branch ${branch}: ${pushed.detail}`);
+}
+
+/**
+ * The attempt a "Fix CI" continuation of `previous` would be (1-based), or the
+ * refusal: no failed CI on record, a Fix CI already started from this failure
+ * (but the queued one itself, when it starts), or the chain's attempts used
+ * up. Bounded: the failure of each fix is what offers the next, and only
+ * MAX_CI_FIX_ATTEMPTS of them.
+ */
+export function ciFixAttempt(previous: Pick<CodingRun, "ci" | "ciFixOf">, queuedRunId: string | null): number {
+  if (!previous.ci) {
+    throw new CodingAgentError("invalid", "That run's pull request has no failed CI on record, so there is nothing for a Fix CI run to fix.");
+  }
+  if (previous.ci.fixRunId && previous.ci.fixRunId !== queuedRunId) {
+    throw new CodingAgentError("invalid", `A Fix CI run was already started from that failure (${previous.ci.fixRunId}). Follow that one instead.`);
+  }
+  const attempt = (previous.ciFixOf?.attempt ?? 0) + 1;
+  if (attempt > MAX_CI_FIX_ATTEMPTS) {
+    throw new CodingAgentError("invalid", `That pull request has had its ${MAX_CI_FIX_ATTEMPTS} Fix CI runs; what still fails is the owner's to look at.`);
+  }
+  return attempt;
+}
+
+/**
+ * The pull request a run watched ended on FAILING checks: read the failing
+ * jobs' logs (bounded — readFailedCheckLogs), name the failing tests and the
+ * files, and put it on the record (CodingRun.ci) and its feed, for the run's
+ * page and coding_agent_status to offer a "Fix CI" continuation from. `known`
+ * is the checks list the caller already holds; without it GitHub is asked.
+ * Best effort: a failure that cannot be read leaves the run as it was.
+ */
+async function noteCiFailure(runId: string, prNumber: number, known?: readonly ReviewCheck[]): Promise<void> {
+  try {
+    const run = loadRuns().find((r) => r.id === runId);
+    if (!run) return;
+    let checks = known?.length ? [...known] : null;
+    if (!checks) {
+      const snapshot = await readReviewSnapshot(run.directory, prNumber);
+      checks = "error" in snapshot ? [] : snapshot.checks;
+    }
+    const failed = checks.filter((c) => c.state === "fail");
+    if (!failed.length) return;
+    const logs = await readFailedCheckLogs(run.directory, failed);
+    const current = loadRuns().find((r) => r.id === runId);
+    if (!current) return;
+    const failure = readCiFailure(prNumber, logs);
+    current.ci = { ...failure, attempt: current.ciFixOf?.attempt ?? 0, fixRunId: null };
+    pushProgress(current, ciFailureLine(failure));
+    persist(true);
+  } catch (err) {
+    console.error(`[coding-agent] ${runId}: could not read the failed CI:`, err instanceof Error ? err.message : err);
+  }
+}
+
 function settlePr(run: CodingRun, phase: "merged" | "blocked" | "failed", detail: string | null): void {
   if (!run.pr) return;
   run.pr = { ...run.pr, phase, detail, endedAt: Date.now() };
@@ -8226,6 +8517,8 @@ function watchPullRequest(runId: string): void {
       return;
     }
     if (verdict.action === "block") {
+      // Failing checks: what failed is read and offered as a Fix CI first.
+      if (snapshot.checks.failed > 0) await noteCiFailure(runId, prNumber);
       // Re-read: reconcileAutoMerge may have waited on `gh`.
       const current = loadRuns().find((r) => r.id === runId);
       if (current?.pr?.phase === "waiting") settlePr(current, "blocked", withAutoMergeNote(verdict.detail, autoMergeState));
@@ -8329,6 +8622,11 @@ function settleReview(
   if (!run.review) return;
   const said = detail ?? (state === "clean" ? REVIEW_CLEAN_DETAIL : null);
   run.review = { ...run.review, state, detail: said, lastPolledAt: Date.now() };
+  // Over to the owner with checks still failing: what failed is read and
+  // offered as a Fix CI, the way the checks watcher's red ending is.
+  if (state === "needs_owner" && run.review.prNumber && run.review.checks.some((c) => c.state === "fail")) {
+    trackSettleWork(noteCiFailure(run.id, run.review.prNumber, run.review.checks));
+  }
   if (isPrPending(run.pr)) {
     // "blocked" is the pull request phase for BOTH endings that leave it open:
     // green-and-waiting-for-you and out-of-rounds. The review state beside it
@@ -10300,6 +10598,11 @@ export async function armAnthropicAccounts(): Promise<void> {
 }
 
 function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): void {
+  // The process is gone and its hook with it: what the hook handed over is
+  // recorded, the rest is queued again for the next start (settleRunInbox),
+  // and the inbox goes — a respawn makes a fresh one.
+  settleRunInbox(run, state);
+  removeRunInbox(run.id);
   // The run's process tree is gone, so nothing it spawned is still working —
   // whatever the stream did or did not say about each sub-agent.
   state.openSubagents.clear();
@@ -10716,6 +11019,8 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       // Woken even when the bookkeeping above threw: a run that is over must
       // not keep every later wait on it for its whole slice.
       wakeWaiters(run.id);
+      // A slot is free: the queue's next run, in its turn.
+      void pumpRunQueue();
     }
     console.error(`[coding-agent] ${run.id} ${settled} after ${Math.round(((run.completedAt ?? Date.now()) - run.startedAt) / 1000)}s (${run.numTurns} turns)`);
     // A team's worker or reviewer ends here: its worktree is the
@@ -10885,7 +11190,11 @@ function drainStream(run: CodingRun, state: LiveRun): void {
 function followStream(run: CodingRun, state: LiveRun): void {
   state.stream = { path: streamLogPath(run.id), offset: run.streamOffset, buffer: "", decoder: new StringDecoder("utf8") };
   state.stderrPath = stderrLogPath(run.id);
-  state.streamTimer = setInterval(() => drainStream(run, state), STREAM_POLL_MS);
+  state.streamTimer = setInterval(() => {
+    drainStream(run, state);
+    // The hook's receipts, while there is anything in the inbox to look for.
+    if (state.inboxPosted.size > 0) collectInboxReceipts(run, state);
+  }, STREAM_POLL_MS);
   state.streamTimer.unref();
 }
 
@@ -10943,7 +11252,13 @@ function spawnRun(
   // from this run's branch when it settles, and then to watch it — see
   // PR_DRAFT_BRIEF.
   const draftPullRequests = run.pr?.phase === "opening";
-  const dropped = buildSpawnArgv(tools.setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, experience: run.experienceBrief, reviewedSeparately, draftPullRequests, allowRules: run.allowRules, provider: run.provider, streamInput, run: { id: run.id, directory: run.directory, media: run.media, team: run.team } }));
+  // The run's inbox and hooks (src/lib/coding-run-inbox.ts). Whatever the
+  // previous spawn's hook did not take is the queue's again first — that
+  // process is gone, and the queue below is delivered this spawn's way.
+  settleRunInbox(run, null);
+  const hookSettings = spawnHookSettings(run);
+  run.midTurn = hookSettings !== null && hookSettings.inbox;
+  const dropped = buildSpawnArgv(tools.setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, experience: run.experienceBrief, reviewedSeparately, draftPullRequests, allowRules: run.allowRules, provider: run.provider, streamInput, hookSettings: hookSettings?.json ?? null, run: { id: run.id, directory: run.directory, media: run.media, team: run.team } }));
   // One evidence path everywhere — env, MCP config and --add-dir must never
   // disagree about where it is. Creation is best-effort: the MCP layer also
   // mkdirs lazily, so a failure here degrades evidence, never the run.
@@ -11027,6 +11342,9 @@ function spawnRun(
     // Set once the first turn has actually been written below; a spawn whose
     // stdin threw never had an open pipe to close.
     stdinOpen: false,
+    midTurn: run.midTurn === true,
+    turnOpen: true,
+    inboxPosted: new Set<string>(),
     streamInputRefused: false,
     lostToRestart: false,
     openSubagents: new Map<string, ActiveSubagent>(),
@@ -11130,9 +11448,10 @@ function spawnRun(
       state.stdinOpen = true;
       child.stdin?.write(streamJsonUserTurn(firstTurn));
       // Anything queued before the process existed — a message sent to a
-      // draft, or one that raced the start — goes in right behind the task
-      // rather than waiting for the first turn to end.
-      flushRunMessages(run, state);
+      // draft, or one that raced the start — goes to the inbox, for the
+      // first tool call; with no hook, in right behind the task rather than
+      // waiting for the first turn to end.
+      deliverRunMessages(run, state);
     } else {
       // No pipe to write to later, so anything already queued rides out with
       // the task itself — the boundary delivery, applied at the one boundary
@@ -11144,7 +11463,7 @@ function spawnRun(
         child.stdin.end(note ? `${firstTurn}\n\n${note}` : firstTurn);
         // Only once the bytes are on the pipe: with no stdin at all nothing
         // was said, and the queue is still the box's to deliver.
-        noteMessagesDelivered(run, waiting);
+        noteMessagesDelivered(run, waiting, "with_start");
       }
     }
   } catch {
@@ -11160,18 +11479,20 @@ function spawnRun(
  * the card, and the feed line is what makes the same fact visible in the
  * transcript preview and on the timeline.
  */
-function noteMessagesDelivered(run: CodingRun, messages: readonly RunMessage[]): void {
-  const now = Date.now();
+function noteMessagesDelivered(run: CodingRun, messages: readonly RunMessage[], via: RunMessageVia, at = Date.now()): void {
   let marked = 0;
   for (const message of messages) {
     if (message.deliveredAt !== null) continue;
-    message.deliveredAt = now;
+    message.deliveredAt = at;
+    message.via = via;
     // pushProgress scrubs the owner's secrets out of the line and caps it,
     // like every other step in the feed.
-    pushProgress(run, runMessageProgressLine(message.text));
+    pushProgress(run, runMessageProgressLine(message.text, via));
     marked += 1;
   }
-  if (marked > 0) persist();
+  // At once, not debounced: a mark that died with the process would deliver
+  // the message a second time at the next spawn.
+  if (marked > 0) persist(true);
 }
 
 /** Different paths one spawn is pointed at before the box stops saying it: a run that keeps missing its folder is told a few times, not thirty. */
@@ -11195,7 +11516,7 @@ const MAX_WORKTREE_HINTS = 3;
  * no longer reach it.
  */
 function hintWorktree(run: CodingRun, state: LiveRun, tool: string, counterpart: string, flush = true): void {
-  if (!state.streamInput || !state.stdinOpen) return;
+  if (!(state.midTurn && state.turnOpen) && !(state.streamInput && state.stdinOpen)) return;
   if (state.worktreeHinted.has(counterpart) || state.worktreeHinted.size >= MAX_WORKTREE_HINTS) return;
   state.worktreeHinted.add(counterpart);
   try {
@@ -11206,7 +11527,7 @@ function hintWorktree(run: CodingRun, state: LiveRun, tool: string, counterpart:
     return;
   }
   persist(true);
-  if (flush) flushRunMessages(run, state);
+  if (flush) deliverRunMessages(run, state);
 }
 
 /**
@@ -11237,8 +11558,106 @@ function flushRunMessages(run: CodingRun, state: LiveRun): number {
   }
   // Marked only once the bytes are on the pipe — "delivered" is a claim the
   // owner reads, and a message still in the queue is one the box owes them.
-  noteMessagesDelivered(run, sent);
+  noteMessagesDelivered(run, sent, "next_turn");
+  if (sent.length) state.turnOpen = true;
   return sent.length;
+}
+
+/**
+ * Hand what is queued to the run the quickest way it has NOW: its inbox while
+ * a turn is under way and the spawn has the hook (after the tool call it is
+ * in), else its stdin as the next turn. Answers how the queue went.
+ */
+function deliverRunMessages(run: CodingRun, state: LiveRun): RunMessageDelivery {
+  if (state.midTurn && state.turnOpen && postQueuedToInbox(run, state) > 0) return "after_tool_call";
+  if (state.midTurn && state.turnOpen && state.inboxPosted.size > 0) return "after_tool_call";
+  return flushRunMessages(run, state) > 0 ? "delivered" : "next_start";
+}
+
+/** The spawn's `--settings` hooks, or null when the hook script is not in this checkout. */
+function spawnHookSettings(run: CodingRun): { json: string; inbox: boolean } | null {
+  const script = runHookScriptPath();
+  if (!fs.existsSync(script)) return null;
+  let inbox: string | null = null;
+  try {
+    inbox = ensureRunInbox(run.id);
+  } catch (err) {
+    console.error(`[coding-agent] ${run.id}: no inbox:`, err instanceof Error ? err.message : err);
+  }
+  const json = runHookSettings({ node: process.execPath, script, inbox, mergeGuard: run.team !== null && !run.readOnly });
+  return json ? { json, inbox: inbox !== null } : null;
+}
+
+/** The ids waiting in a run's inbox; none for an inbox that cannot be read. */
+function safeInboxPending(runId: string): string[] {
+  try {
+    return inboxPending(runId);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Put every queued message this process has not put in the inbox yet there,
+ * framed the way the harness reads a message (runMessageTurn). Answers how
+ * many went in; a write that failed leaves its message queued.
+ */
+function postQueuedToInbox(run: CodingRun, state: LiveRun): number {
+  let posted = 0;
+  for (const message of queuedMessages(run.messages)) {
+    if (state.inboxPosted.has(message.id)) continue;
+    if (!postToInbox(run.id, { id: message.id, at: message.at, context: runMessageTurn(message.text, message.from) })) break;
+    state.inboxPosted.add(message.id);
+    posted += 1;
+  }
+  return posted;
+}
+
+/**
+ * What the run's hook handed over since the last look: marked delivered,
+ * mid-turn, at the moment the hook took it, and said on the run's feed — then
+ * the receipts go. Called from the tail while anything is in the inbox, and
+ * on the way into a settle.
+ */
+function collectInboxReceipts(run: CodingRun, state: LiveRun | null): number {
+  let receipts: Array<{ id: string; at: number }>;
+  try {
+    receipts = inboxReceipts(run.id);
+  } catch {
+    return 0;
+  }
+  if (!receipts.length) return 0;
+  let marked = 0;
+  for (const receipt of receipts) {
+    state?.inboxPosted.delete(receipt.id);
+    const message = run.messages.find((m) => m.id === receipt.id);
+    if (!message || message.deliveredAt !== null) continue;
+    noteMessagesDelivered(run, [message], "mid_turn", receipt.at);
+    marked += 1;
+  }
+  // Recorded (persisted at once by noteMessagesDelivered) before the receipt
+  // goes: a receipt outlives a crash in between, a lost mark would not.
+  clearReceipts(run.id, receipts.map((r) => r.id));
+  return marked;
+}
+
+/**
+ * The hook can only hand a message over while a turn is going. At a turn's
+ * end, a settle, and before a spawn delivers the queue its own way, whatever
+ * it took is recorded and whatever it did not is taken BACK — still queued on
+ * the record, for the next turn or the next start. One rename decides between
+ * the hook and this, so a message is never both.
+ */
+function settleRunInbox(run: CodingRun, state: LiveRun | null): void {
+  try {
+    collectInboxReceipts(run, state);
+    reclaimInbox(run.id);
+    // A receipt the hook wrote between the two looks.
+    collectInboxReceipts(run, state);
+  } catch {
+    // An inbox that cannot be read holds nothing the record does not.
+  }
+  state?.inboxPosted.clear();
 }
 
 /**
@@ -11252,6 +11671,10 @@ function flushRunMessages(run: CodingRun, state: LiveRun): number {
  */
 function afterTurn(run: CodingRun, state: LiveRun): void {
   if (!state.streamInput || !state.stdinOpen) return;
+  // The turn is over, so the hook will not run again until the next one:
+  // what it did not take goes as that next turn instead.
+  state.turnOpen = false;
+  settleRunInbox(run, state);
   if (flushRunMessages(run, state) > 0) return;
   closeRunStdin(state);
 }
@@ -11611,7 +12034,9 @@ export async function sweepCodingWorktrees(options: { force?: boolean } = {}): P
 // ─── Public operations ───────────────────────────────────────────────────────
 
 export async function startRun(input: StartRunInput): Promise<CodingRun> {
-  const task = normalizeTask(input.task, isBoxWrittenTask(input));
+  let task = normalizeTask(input.task, isBoxWrittenTask(input));
+  /** A Fix CI continuation's place in its chain — see StartRunInput.fixCi. */
+  let ciFixOf: { runId: string; attempt: number } | null = null;
   // Read before anything is held — the slot, the folder — so a malformed
   // request is a plain 400 that cost the box nothing.
   const givenExperience = requireExperience(input.experience);
@@ -11674,6 +12099,12 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       if (!previous.sessionId && input.freshSession !== true) {
         throw new CodingAgentError("invalid", "That run never started a Claude Code session, so it cannot be resumed. Start a new run instead.");
       }
+      // Fix CI: what failed goes after the caller's words — the box's own text
+      // from GitHub's logs, clipped the way a box-written task is.
+      if (input.fixCi === true) {
+        ciFixOf = { runId: previous.id, attempt: ciFixAttempt(previous, input.queuedRunId ?? null) };
+        task = normalizeTask(`${task}\n\n${ciFixNotes(previous.ci!, { push: true })}`, true);
+      }
       // The session lives in the wrapper's state dir keyed by the folder it ran
       // in, so a resume always happens where the original run happened — which
       // for a run with a worktree is the worktree. A settle removes the worktree
@@ -11704,6 +12135,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
         : previous.resumable || previous.status === "completed" ? previous.sessionId : null;
       inherited = { provider: previous.provider, model: previous.requestedModel };
     } else {
+      if (input.fixCi === true) throw new CodingAgentError("invalid", "A Fix CI run continues the run whose pull request failed: name it in resumeRunId.");
       ({ directory, projectId } = await resolveWorkingDirectory(input));
       releaseDirectory = assertDirectoryFree(directory, undefined, input.team ?? null, input.readOnly === true);
     }
@@ -11724,7 +12156,9 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // review-loop round included — unless the caller sent a block of its own.
     const experience = givenExperience
       ?? (previous ? { brief: previous.experienceBrief ?? null, record: previous.experience ?? null } : null);
+    const queuedRunId = typeof input.queuedRunId === "string" ? input.queuedRunId : null;
     const run = newRunRecord({
+      ...(queuedRunId ? { id: queuedRunId } : {}),
       task,
       directory,
       projectId,
@@ -11747,6 +12181,10 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // is reported to the run (and drawn on its page) rather than losing the
     // task it was an input to.
     await stageInputs(run, input.inputs);
+    if (ciFixOf) {
+      run.ciFixOf = ciFixOf;
+      pushProgress(run, RUNNER_STEP.ciFix(ciFixOf.runId, ciFixOf.attempt, MAX_CI_FIX_ATTEMPTS));
+    }
     if (run.reviewOf) pushProgress(run, RUNNER_STEP.reviewPass(run.reviewOf));
     else if (run.reviewLoopOf) pushProgress(run, RUNNER_STEP.reviewLoopTurn(run.reviewLoopOf, run.reviewRound));
     else if (resumeSessionId) pushProgress(run, RUNNER_STEP.resuming);
@@ -11873,11 +12311,41 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // Read before the insert, never between it and the write: the insert and
     // persist are one synchronous step (see the runs store).
     const history = await getHistoryPolicy();
-    insertRun(loadRuns(), run, history);
+    const list = loadRuns();
+    // A QUEUED run's turn: this record takes the queued one's place, with what
+    // it was told while it waited and the steps it already showed — never a
+    // second row beside it. Gone from the queue meanwhile (the owner canceled
+    // it while this start was on its way), it does not start at all.
+    const waited = queuedRunId ? list.findIndex((r) => r.id === queuedRunId) : -1;
+    if (queuedRunId && (waited < 0 || list[waited].status !== "queued")) {
+      throw new CodingAgentError("invalid", "That queued run is no longer waiting: it was canceled or has already started.");
+    }
+    // The failure it fixes now names it, so it is never offered twice.
+    if (ciFixOf && previous?.ci) previous.ci = { ...previous.ci, fixRunId: run.id };
+    if (waited >= 0) {
+      const before = list[waited];
+      run.messages = before.messages;
+      run.progress = [...before.progress, ...run.progress];
+      run.progressAt = [...before.progressAt, ...run.progressAt];
+      pushProgress(run, RUNNER_STEP.startedFromQueue);
+      list[waited] = run;
+    } else {
+      insertRun(list, run, history);
+    }
     persist(true);
-    console.error(`[coding-agent] ${run.id} started by ${run.source} in ${run.directory}`);
+    console.error(`[coding-agent] ${run.id} started by ${run.source} in ${run.directory}${waited >= 0 ? " from the queue" : ""}`);
     startProjectIcon(run);
-    spawnOrSettle(run, resumeSessionId, tools, settings);
+    try {
+      spawnOrSettle(run, resumeSessionId, tools, settings);
+    } catch (err) {
+      // It never started, so the failure it claimed is free again (the
+      // queued path's releaseCiClaim, for a start that throws here).
+      if (ciFixOf && previous?.ci?.fixRunId === run.id) {
+        previous.ci = { ...previous.ci, fixRunId: null };
+        persist(true);
+      }
+      throw err;
+    }
     return cloneRun(run);
   } finally {
     releaseDirectory();
@@ -12102,11 +12570,13 @@ async function applyProviderChoice(
 
 /** A fresh run record: every counter at zero, nothing seen yet. */
 function newRunRecord(fields: {
+  /** The id a QUEUED record already gave out (startQueuedRun); a fresh one otherwise. */
+  id?: string;
   task: string;
   directory: string;
   projectId: string | null;
   source: CodingRunSource;
-  status: "running" | "draft";
+  status: "running" | "draft" | "queued";
   settings: RunSettings;
   reviewOf?: string | null;
   reviewLoopOf?: string | null;
@@ -12120,7 +12590,7 @@ function newRunRecord(fields: {
   pipeline?: PipelineState | null;
 }): CodingRun {
   const now = Date.now();
-  const id = newRunId();
+  const id = fields.id ?? newRunId();
   return {
     id,
     task: fields.task,
@@ -12280,6 +12750,7 @@ function dropRun(run: CodingRun, policy: HistoryPolicy, reason: ArchiveReason, l
   removeArtifacts(run.id);
   removeRunInputs(run.id);
   removeStreamLogs(run.id);
+  removeRunInbox(run.id);
 }
 
 /** An older run leaving for good — the same two ways as dropRun, and its own file with it. */
@@ -12345,6 +12816,11 @@ function requestEnd(run: CodingRun, state: LiveRun, kind: "stop" | "pause"): voi
 export function stopRun(id: string): CodingRun {
   const run = loadRuns().find((r) => r.id === id);
   if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
+  // A queued run has no process to stop; taking it out of the queue is the
+  // OWNER's (cancelQueuedRun, behind the owner gate of the stop route).
+  if (run.status === "queued") {
+    throw new CodingAgentError("invalid", "That run is queued and has not started. Only the owner can cancel a queued run, from the Coding Agent app.");
+  }
   if (run.status === "paused") {
     // No process to signal — the pause already ended it. Stopping a paused
     // run is the owner closing the book on it.
@@ -12387,6 +12863,8 @@ export function stopRun(id: string): CodingRun {
     stopPipelineFor(run, "The run was stopped, so the pipeline stopped here.");
     persist(true);
     wakeWaiters(id);
+    // It held a slot on paper: the queue's next run may have it now.
+    void pumpRunQueue();
     return cloneRun(run);
   }
   requestEnd(run, state, "stop");
@@ -12417,7 +12895,7 @@ export function stopRun(id: string): CodingRun {
  * that button exists. Anything genuinely over is refused, because a queue
  * nothing will ever read is worse than a plain "no".
  */
-export function queueRunMessage(id: string, text: unknown): { run: CodingRun; delivered: boolean } {
+export function queueRunMessage(id: string, text: unknown): { run: CodingRun; delivered: boolean; delivery: RunMessageDelivery; messageId: string } {
   const run = loadRuns().find((r) => r.id === id);
   if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
   if (!holdsResumableSession(run.status)) {
@@ -12430,12 +12908,34 @@ export function queueRunMessage(id: string, text: unknown): { run: CodingRun; de
   // rules, then the queue's bound — which the route answers verbatim.
   const message = normalizeRunMessage(text);
   run.messages = appendRunMessage(run.messages, message, Date.now());
+  const messageId = run.messages[run.messages.length - 1].id;
   // Written before anything is attempted: a delivery that fails must still
   // leave the message on the record, waiting.
   persist(true);
-  const state = live.get(id);
-  const delivered = state ? flushRunMessages(run, state) > 0 : false;
-  return { run: cloneRun(run), delivered };
+  const state = run.status === "running" ? live.get(id) : undefined;
+  const delivery: RunMessageDelivery = state ? deliverRunMessages(run, state) : "next_start";
+  return { run: cloneRun(run), delivered: delivery === "delivered", delivery, messageId };
+}
+
+/**
+ * Wait a moment for a message sent to a run's inbox to be taken by its hook —
+ * the route's way of answering "delivered" for a run between two quick tool
+ * calls, rather than "after the tool call" when it is already over. Answers
+ * the message's record once it is delivered, or null at the deadline (still
+ * in the inbox: the hook hands it over after the call under way).
+ */
+export async function awaitRunMessageDelivery(runId: string, messageId: string, timeoutMs: number): Promise<RunMessage | null> {
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  for (;;) {
+    const run = loadRuns().find((r) => r.id === runId);
+    const state = live.get(runId);
+    if (run && state && state.inboxPosted.size > 0) collectInboxReceipts(run, state);
+    const message = run?.messages.find((m) => m.id === messageId);
+    if (!message) return null;
+    if (message.deliveredAt !== null) return { ...message };
+    if (Date.now() >= deadline || run?.status !== "running") return null;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
 }
 
 /**
@@ -12683,14 +13183,25 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
   const run = loadRuns().find((r) => r.id === id);
   if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
   if (run.status === "running") return cloneRun(run);
-  if (run.status !== "draft") throw new CodingAgentError("invalid", "Only a drafted run can be started this way.");
+  // A draft the owner started while the box was full waits in the queue as
+  // itself, and the queue starts it here (startQueuedRun).
+  const fromQueue = run.status === "queued" && run.queued?.start?.kind === "draft";
+  if (run.status !== "draft" && !fromQueue) throw new CodingAgentError("invalid", "Only a drafted run can be started this way.");
+  // In order: a draft started while runs wait for a slot goes behind them.
+  if (!fromQueue && hasQueuedRuns()) return queueDraft(run);
   // The account this draft named, not whatever the default is now. Checked
   // before the record is flipped to "running": a draft for an account whose
   // key the owner has since removed should be refused with a sentence, not
   // spawned into a wrapper that dies.
   // Held from the gate to the flip below, like every other start — see
-  // `startingRuns`.
-  const releaseSlot = await assertCanSpawn(run.team ?? null, run.provider);
+  // `startingRuns`. Every slot taken: queued, not refused.
+  let releaseSlot: () => void;
+  try {
+    releaseSlot = await assertCanSpawn(run.team ?? null, run.provider);
+  } catch (err) {
+    if (err instanceof SlotsFullError && !fromQueue) return queueDraft(run);
+    throw err;
+  }
   // Held beside the slot — see `startRun`. A draft that starts reaches the same
   // folder a removal may be about to take, and by the same synchronous claim.
   let releaseDirectory: () => void = () => {};
@@ -12716,11 +13227,12 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
     run.media = { images: settings.generateImages, audio: settings.generateAudio };
     run.completionAttempts = settings.completionAttempts;
     run.status = "running";
+    run.queued = null;
     run.startedAt = Date.now();
     run.lastActivityAt = Date.now();
     // The bar the draft was created with, now that it is actually starting.
     openAttempt(run);
-    pushProgress(run, RUNNER_STEP.startedFromDraft);
+    pushProgress(run, fromQueue ? RUNNER_STEP.startedFromQueue : RUNNER_STEP.startedFromDraft);
     // Resolved now and not when the draft was written: a draft can sit for days,
     // and the secrets a run gets are the ones ticked at the moment it starts.
     await prepareRunSecrets(run);
@@ -12733,6 +13245,267 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
     releaseDirectory();
     releaseSlot();
   }
+}
+
+// ─── The run queue ───────────────────────────────────────────────────────────
+
+/**
+ * Runs that may wait for a slot at once. A queue is a promise to start each
+ * of them, unattended, in order; beyond this, the caller is told to wait.
+ */
+export const MAX_QUEUED_RUNS = 10;
+/** How soon the queue looks again after it stopped for something that clears by itself — the switch off, the harness not ready. */
+export const QUEUE_RETRY_MS = 60_000;
+/** Refusals that are the BOX's state, not the run's: the queue waits them out rather than failing the run. */
+const QUEUE_WAITS: ReadonlySet<CodingAgentErrorKind> = new Set(["disabled", "not_ready", "limited", "busy"]);
+
+function hasQueuedRuns(): boolean {
+  return loadRuns().some((r) => r.status === "queued");
+}
+
+/** The queued runs in the order they start in: the order they were asked for. */
+function queuedRuns(): CodingRun[] {
+  return loadRuns().filter((r) => r.status === "queued").sort((a, b) => (a.queued?.at ?? 0) - (b.queued?.at ?? 0));
+}
+
+/** A queued run's place in line, 1 being next; null for anything not queued. */
+export function queuePosition(id: string): number | null {
+  const at = queuedRuns().findIndex((r) => r.id === id);
+  return at < 0 ? null : at + 1;
+}
+
+/**
+ * Start a run, or QUEUE it when the box is already running every run the
+ * owner allows: the run route's start (owner and MCP bearer alike), so a
+ * second ask is never refused with CONFLICT for want of a slot. In order — a
+ * start while runs are waiting goes behind them, even when a slot just freed.
+ * Every other refusal (the switch, readiness, a bad folder) is still a refusal.
+ */
+export async function startOrQueueRun(input: StartRunInput): Promise<{ run: CodingRun; queued: boolean }> {
+  if (!hasQueuedRuns()) {
+    try {
+      return { run: await startRun(input), queued: false };
+    } catch (err) {
+      if (!(err instanceof SlotsFullError)) throw err;
+    }
+  }
+  const run = await queueRun(input);
+  // Room may have come free between the refusal and the queue.
+  void pumpRunQueue();
+  return { run, queued: true };
+}
+
+/**
+ * The QUEUED record: validated the way a start is — the task, the folder (or
+ * the run it continues), the account, the deliverable, the experience block —
+ * so a request the box would refuse is refused NOW, to the caller who can fix
+ * it, not when its turn comes hours later. Persisted with the request it is
+ * started with; nothing is staged, branched or spawned until then.
+ */
+async function queueRun(input: StartRunInput): Promise<CodingRun> {
+  if (!(await isCodingAgentEnabled())) {
+    throw new CodingAgentError("disabled", "The coding agent is switched off. The owner can turn it on in the Coding Agent app on the ClawBox desktop.");
+  }
+  const task = normalizeTask(input.task, isBoxWrittenTask(input));
+  requireExperience(input.experience);
+  if (queuedRuns().length >= MAX_QUEUED_RUNS) {
+    throw new CodingAgentError("busy", `There are already ${MAX_QUEUED_RUNS} coding runs waiting for a slot on this ClawBox. Wait for the queue to move, or ask the owner to cancel one.`);
+  }
+  const resumeRunId = typeof input.resumeRunId === "string" ? input.resumeRunId.trim() : "";
+  let directory: string;
+  let projectId: string | null;
+  let inherited: { provider: CodingProvider; model: string | null } | null = null;
+  let fixing: CodingRun | null = null;
+  if (resumeRunId) {
+    const previous = loadRuns().find((r) => r.id === resumeRunId) ?? null;
+    if (!previous) throw new CodingAgentError("not_found", "There is no coding run with that id to resume.");
+    if (!previous.sessionId && input.freshSession !== true) {
+      throw new CodingAgentError("invalid", "That run never started a Claude Code session, so it cannot be resumed. Start a new run instead.");
+    }
+    if (input.fixCi === true) {
+      ciFixAttempt(previous, null);
+      fixing = previous;
+    }
+    directory = previous.directory;
+    projectId = previous.projectId;
+    inherited = { provider: previous.provider, model: previous.requestedModel };
+  } else {
+    if (input.fixCi === true) throw new CodingAgentError("invalid", "A Fix CI run continues the run whose pull request failed: name it in resumeRunId.");
+    ({ directory, projectId } = await resolveWorkingDirectory(input));
+  }
+  const settings = await applyProviderChoice(await readRunSettings(), input, inherited);
+  const run = newRunRecord({ task, directory, projectId, source: input.source, status: "queued", settings, deliverable: requireDeliverable(input) });
+  // Claimed now, so the failure is not offered a second Fix CI while this one waits.
+  if (fixing?.ci) fixing.ci = { ...fixing.ci, fixRunId: run.id };
+  run.queued = {
+    at: Date.now(),
+    start: {
+      kind: "new",
+      task: input.task,
+      projectId: typeof input.projectId === "string" ? input.projectId : null,
+      directory: typeof input.directory === "string" ? input.directory : null,
+      resumeRunId: resumeRunId || null,
+      provider: input.provider,
+      model: input.model,
+      deliverable: input.deliverable,
+      pipeline: input.pipeline,
+      inputs: input.inputs,
+      experience: input.experience,
+      ...(input.fixCi === true ? { fixCi: true } : {}),
+    },
+  };
+  pushProgress(run, RUNNER_STEP.queued(queuedRuns().length + 1));
+  insertRun(loadRuns(), run, await getHistoryPolicy());
+  persist(true);
+  console.error(`[coding-agent] ${run.id} queued by ${run.source} for ${run.directory}`);
+  return cloneRun(run);
+}
+
+/**
+ * A queued Fix CI continuation that leaves the queue without ever starting —
+ * the owner canceled it, or its turn came and it could not start — gives back
+ * the failure it claimed when it was queued (`queueRun`), so a Fix CI can be
+ * offered for it again. One that started keeps it: it did its attempt.
+ */
+function releaseCiClaim(run: CodingRun): void {
+  const start = run.queued?.start;
+  if (start?.kind !== "new" || start.fixCi !== true || !start.resumeRunId) return;
+  const previous = loadRuns().find((r) => r.id === start.resumeRunId);
+  if (previous?.ci?.fixRunId === run.id) previous.ci = { ...previous.ci, fixRunId: null };
+}
+
+/** A draft the owner started while every slot was taken: the same record, waiting its turn. */
+function queueDraft(run: CodingRun): CodingRun {
+  const position = queuedRuns().length + 1;
+  run.status = "queued";
+  run.queued = { at: Date.now(), start: { kind: "draft" } };
+  pushProgress(run, RUNNER_STEP.queued(position));
+  persist(true);
+  void pumpRunQueue();
+  return cloneRun(run);
+}
+
+/** The queue's start of one run: the request it was queued with, under the id it was given. */
+function startQueuedRun(id: string): Promise<CodingRun> {
+  return singleFlight(id, async () => {
+    const run = loadRuns().find((r) => r.id === id);
+    if (!run || run.status !== "queued") throw new CodingAgentError("invalid", "That queued run is no longer waiting: it was canceled or has already started.");
+    const start = run.queued?.start;
+    // Straight to the draft's own start, not through startDraftRun: this IS
+    // the transition for the id, and asking for it again would wait on itself.
+    if (!start || start.kind === "draft") return startDraftRunOnce(id);
+    return startRun({
+      task: start.task ?? run.task,
+      projectId: start.projectId ?? null,
+      directory: start.directory ?? null,
+      resumeRunId: start.resumeRunId ?? null,
+      provider: start.provider,
+      model: start.model,
+      deliverable: start.deliverable,
+      pipeline: start.pipeline,
+      inputs: start.inputs,
+      experience: start.experience,
+      fixCi: start.fixCi === true,
+      source: run.source,
+      queuedRunId: id,
+    });
+  });
+}
+
+/**
+ * Start what the queue holds, in order, while there are slots. Called when a
+ * run settles (finishRun), when one stopped without ever settling, when the
+ * owner raises the limit, after a run is queued, and at boot — the queue is
+ * on disk, so it survives a restart and is picked up where it was.
+ *
+ * One pass at a time; a slot that frees during a pass makes it look again.
+ * A run whose start the BOX refuses for now (the switch, readiness, a limit)
+ * keeps its place and the queue looks again in QUEUE_RETRY_MS; one refused for
+ * itself (its folder is gone, its request no longer valid) is settled failed
+ * with the reason, and the next one goes.
+ */
+export function pumpRunQueue(): Promise<string[]> {
+  if (store.queuePump) {
+    store.queuePumpAgain = true;
+    return store.queuePump;
+  }
+  const pass = (async () => {
+    const started: string[] = [];
+    do {
+      store.queuePumpAgain = false;
+      for (;;) {
+        const next = queuedRuns()[0];
+        if (!next) break;
+        try {
+          await startQueuedRun(next.id);
+          started.push(next.id);
+        } catch (err) {
+          // Every slot is taken: its turn comes when a run settles.
+          if (err instanceof SlotsFullError) break;
+          if (err instanceof CodingAgentError && QUEUE_WAITS.has(err.kind)) {
+            armQueueRetry();
+            break;
+          }
+          failQueuedRun(next.id, err);
+        }
+      }
+    } while (store.queuePumpAgain);
+    return started;
+  })().finally(() => {
+    store.queuePump = undefined;
+  });
+  store.queuePump = pass;
+  return pass;
+}
+
+function armQueueRetry(): void {
+  if (store.queueRetry) return;
+  store.queueRetry = setTimeout(() => {
+    store.queueRetry = null;
+    void pumpRunQueue();
+  }, QUEUE_RETRY_MS);
+  store.queueRetry.unref?.();
+}
+
+/** A queued run its turn could not start, for a reason of its own: settled failed, saying why, on its own page. */
+function failQueuedRun(id: string, err: unknown): void {
+  const run = loadRuns().find((r) => r.id === id);
+  if (!run || run.status !== "queued") return;
+  releaseCiClaim(run);
+  run.status = "failed";
+  run.queued = null;
+  run.error = `Its turn in the queue came, and it could not start: ${err instanceof Error ? err.message : String(err)}`.slice(0, MAX_ERROR_CHARS);
+  run.completedAt = Date.now();
+  pushProgress(run, RUNNER_STEP.finished("failed"));
+  persist(true);
+  wakeWaiters(id);
+}
+
+/**
+ * Take a run out of the queue before it starts — the OWNER's gesture alone
+ * (the stop route lets only the owner's session reach this; the MCP bearer may
+ * queue and read, never cancel). A start already under way for it is waited
+ * for first: then it is running, and Stop is the way to end it.
+ */
+export async function cancelQueuedRun(id: string): Promise<CodingRun> {
+  const inFlight = transitions.get(id);
+  if (inFlight) await inFlight.catch(() => undefined);
+  const run = loadRuns().find((r) => r.id === id);
+  if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
+  if (run.status !== "queued") {
+    if (run.status === "running") throw new CodingAgentError("invalid", "That run has already left the queue and started. Stop it instead.");
+    return cloneRun(run);
+  }
+  releaseCiClaim(run);
+  run.status = "stopped";
+  run.queued = null;
+  run.error = "Canceled by the owner before it started.";
+  run.completedAt = Date.now();
+  pushProgress(run, RUNNER_STEP.queueCanceled);
+  persist(true);
+  wakeWaiters(id);
+  console.error(`[coding-agent] ${run.id} canceled in the queue by the owner`);
+  return cloneRun(run);
 }
 
 /** Discard a draft. Only drafts: everything else is history and history stays. */
@@ -12852,8 +13625,7 @@ async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProv
   // not reached their record yet — see `startingRuns`.
   const going = active.length + store.startingRuns;
   if (going >= limit) {
-    throw new CodingAgentError(
-      "busy",
+    throw new SlotsFullError(
       limit === 1 && active.length > 0
         ? `A coding run is already in progress (${active[0].id}). Wait for it or stop it first.`
         : `This ClawBox is already starting or running ${going} coding runs at once, which is all it allows. Wait for one to finish, stop one, or raise the limit in the Coding Agent settings.`,
@@ -13053,6 +13825,9 @@ export function _resetCodingAgentStateForTests(): Promise<void> {
   // A start this reset interrupted would otherwise leave its slot held for the
   // life of the process, which is a permanent discount on the limit.
   store.startingRuns = 0;
+  if (store.queueRetry) clearTimeout(store.queueRetry);
+  store.queueRetry = null;
+  store.queuePumpAgain = false;
   // `anthropicResume` is left as it is: a pass still in flight must stay the
   // one the next pass waits for.
   return drainForTests(killed, SETTLE_DRAIN_BUDGET_MS);

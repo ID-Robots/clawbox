@@ -57,6 +57,7 @@ import {
 } from "@/lib/pet-state-map";
 import {
   fallbackRowMetrics,
+  normaliseSleepFrames,
   scanRowMetrics,
   type PetRowMetrics,
   type SheetGrid,
@@ -136,6 +137,10 @@ export interface InstalledPet {
   createdBy: string;
   /** Loaded from `public/pets/` — shipped with ClawBox, never downloaded. */
   builtin: boolean;
+  /** `sleepFrames` from pet.json: the frames of the sleep row with the eyes
+   *  shut (see `normaliseSleepFrames`). Absent when the pack declares none or
+   *  declares something invalid — the mascot then holds the row's first frame. */
+  sleepFrames?: number[];
 }
 
 export interface PetGeometry {
@@ -166,6 +171,8 @@ export interface PetDescriptor extends PetGeometry {
    * body it was written to protect.
    */
   brand: boolean;
+  /** The pack's `sleepFrames`, when it declares valid ones. */
+  sleepFrames?: number[];
 }
 
 /**
@@ -246,6 +253,9 @@ function loadPetFrom(dir: string, slug: string): InstalledPet | null {
   }
   const sheetPath = resolveSheet(dir, meta);
   if (!sheetPath) return null;
+  // Checked against the most frames any row steps; the browser checks it again
+  // against the frames the sleep row really draws.
+  const sleepFrames = normaliseSleepFrames(meta.sleepFrames, FRAMES_PER_STATE);
   return {
     slug,
     displayName: String(meta.displayName || slug),
@@ -257,6 +267,7 @@ function loadPetFrom(dir: string, slug: string): InstalledPet | null {
     // the Hermes arm copies the pack into its own store when the pet is picked
     // (see selectPet), and that copy is still the pet ClawBox ships.
     builtin: isBuiltinPet(slug),
+    ...(sleepFrames ? { sleepFrames } : {}),
   };
 }
 
@@ -541,6 +552,7 @@ export async function activePetDescriptor(
       // The BODY, not how it was reached: picking the crab from the gallery
       // and landing on it by default must read the same to the mascot.
       brand: pet.slug === VIBRANT_CLAWD_SLUG,
+      ...(pet.sleepFrames ? { sleepFrames: pet.sleepFrames } : {}),
     };
   } catch (err) {
     console.warn("[pets] could not resolve the active pet:", err);

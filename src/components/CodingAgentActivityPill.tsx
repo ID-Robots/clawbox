@@ -84,7 +84,9 @@ const CHIP_TONE: Record<ProgressDescription["kind"], React.CSSProperties> = {
 };
 
 /** One word per status — every status, so a new one cannot ship unlabelled. */
-export interface CodingAgentCardLabels extends Record<CodingRunStatus, string> {
+export interface CodingAgentCardLabels extends Record<Exclude<CodingRunStatus, "queued">, string> {
+  /** A run waiting for a slot; a host from before it falls back to its draft word. */
+  queued?: string;
   /** The owner-started variant of "running". */
   runningOwner: string;
   /** Follows "≈ 12 min" under the progress bar. */
@@ -251,7 +253,9 @@ export default function CodingAgentActivityPill(
   const tone = RUN_TONE[run.status];
   // A run the OWNER started says so, so the assistant is not credited with
   // work the person at the desk kicked off.
-  const label = live && run.source === "owner" ? labels.runningOwner : labels[run.status];
+  const label = live && run.source === "owner"
+    ? labels.runningOwner
+    : run.status === "queued" ? (labels.queued ?? labels.draft) : labels[run.status];
   const took = elapsed(run.startedAt, live ? now : (run.completedAt ?? now));
   const title = firstLine(run.task) || run.projectId || label;
 

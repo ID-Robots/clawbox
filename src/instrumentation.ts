@@ -412,6 +412,20 @@ export async function register() {
         codingAgent.armAnthropicAccounts().catch((err: unknown) => {
           console.error('[instrumentation] Could not arm the Anthropic account pool:', err instanceof Error ? err.message : err)
         })
+        // The run queue and the team queue are on disk: what waited when the
+        // last server went starts now, in its turn, once the reconciliation
+        // has said which runs still hold a slot. Own catches, like the rest.
+        codingAgent.pumpRunQueue().catch((err: unknown) => {
+          console.error('[instrumentation] Could not start the queued coding runs:', err instanceof Error ? err.message : err)
+        })
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          require('./lib/coding-team').startNextQueuedTeam().catch((err: unknown) => {
+            console.error('[instrumentation] Could not start the queued coding team:', err instanceof Error ? err.message : err)
+          })
+        } catch (err) {
+          console.error('[instrumentation] Could not start the queued coding team:', err instanceof Error ? err.message : err)
+        }
       })
   } catch (err) {
     console.error('[instrumentation] Could not reconcile coding runs:', err instanceof Error ? err.message : err)

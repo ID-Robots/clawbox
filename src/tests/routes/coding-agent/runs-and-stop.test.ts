@@ -16,9 +16,10 @@ const clearFinishedRuns = vi.hoisted(() => vi.fn());
 const listRuns = vi.hoisted(() => vi.fn());
 const waitForRun = vi.hoisted(() => vi.fn());
 const stopRun = vi.hoisted(() => vi.fn());
+const cancelQueuedRun = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/coding-agent", async () => {
   const actual = await vi.importActual<typeof import("@/lib/coding-agent")>("@/lib/coding-agent");
-  return { ...actual, getRun, listRuns, waitForRun, stopRun, clearFinishedRuns };
+  return { ...actual, getRun, listRuns, waitForRun, stopRun, clearFinishedRuns, cancelQueuedRun };
 });
 
 const RUN = { id: "run-k3x9q2ab", status: "completed", summary: "done", source: "agent" };
@@ -166,6 +167,20 @@ describe("POST stop", () => {
     expect(res.status).toBe(200);
     expect((await res.json()).run.status).toBe("stopped");
     expect(stopRun).toHaveBeenCalledWith("run-k3x9q2ab");
+  });
+
+  it("takes a QUEUED run out of the queue for the owner alone — never for the bearer, whoever queued it", async () => {
+    getRun.mockReturnValue({ ...RUN, status: "queued", source: "agent" });
+    cancelQueuedRun.mockResolvedValue({ ...RUN, status: "stopped", source: "agent" });
+    const refused = await stop({ id: "run-k3x9q2ab" }, "bearer");
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toMatchObject({ kind: "owner_only", error: expect.stringMatching(/only the owner can cancel a queued run/) });
+    expect(cancelQueuedRun).not.toHaveBeenCalled();
+    const ok = await stop({ id: "run-k3x9q2ab" }, "cookie");
+    expect(ok.status).toBe(200);
+    expect((await ok.json()).run.status).toBe("stopped");
+    expect(cancelQueuedRun).toHaveBeenCalledWith("run-k3x9q2ab");
+    expect(stopRun).not.toHaveBeenCalled();
   });
 
   it("answers a JSON 404 for an unknown run", async () => {

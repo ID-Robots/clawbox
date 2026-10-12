@@ -10,6 +10,7 @@ import { petFrameFor, type MascotStateName } from "@/lib/pet-state-map";
 import {
   fallbackRow,
   framesPerRow,
+  normaliseSleepFrames,
   type PetRowMetrics,
   type SheetGrid,
 } from "@/lib/pet-sheet-metrics";
@@ -56,6 +57,11 @@ export interface PetLayout {
   mirror: boolean;
   /** Real frames in this row — NOT a sheet-wide constant. */
   frames: number;
+  /** The frames to step, in order: the whole row, except while the pet SLEEPS.
+   *  Then it is the pack's `sleepFrames`, or the row's first frame alone — the
+   *  crab's sleep row opens its eyes in frame 3, and a sleeping pet must not
+   *  blink. */
+  sequence: number[];
   /** Source px -> CSS px. */
   scale: number;
   /** One cell, in CSS px. */
@@ -116,13 +122,20 @@ export function petLayout(pet: PetDescriptor, pose: PetPose, bodyPx = PET_BODY_P
 
   const frames = Math.max(1, Math.min(metrics.frames, metrics.bottom.length));
   const offsets = metrics.bottom.slice(0, frames).map((b) => Math.round(b * scale));
+  // Thinking wins over sleep (petFrameFor), and its row has no reason to hold.
+  // Checked against the frames this row really draws, so a list written for a
+  // longer row holds the first frame instead of stepping onto a blank cell.
+  const sequence =
+    pose.state === "sleep" && !pose.thinking
+      ? (normaliseSleepFrames(pet.sleepFrames, frames) ?? [0])
+      : Array.from({ length: frames }, (_, i) => i);
   const headPx = Math.round(metrics.head * scale);
   const artInsetPx = Math.round(Math.min(metrics.left, metrics.right) * scale);
 
   const perRow = framesPerRow(grid);
   const loopMs = Math.max(1, Math.round((pet.loopMs * frames) / perRow));
 
-  return { rowIndex, mirror, frames, scale, dispW, dispH, offsets, headPx, artInsetPx, loopMs };
+  return { rowIndex, mirror, frames, sequence, scale, dispW, dispH, offsets, headPx, artInsetPx, loopMs };
 }
 
 /**
@@ -140,13 +153,16 @@ export function petLayout(pet: PetDescriptor, pose: PetPose, bodyPx = PET_BODY_P
  * per step and nothing in between.
  */
 export function petFrameTransforms(layout: PetLayout): string[] {
-  const { frames, dispW, offsets } = layout;
-  return Array.from({ length: frames }, (_, i) => `translate(${-i * dispW}px, ${offsets[i]}px)`);
+  const { sequence, dispW, offsets } = layout;
+  return sequence.map((i) => `translate(${-i * dispW}px, ${offsets[i]}px)`);
 }
 
-/** How long each frame of a row is shown: the row's loop split evenly. */
+/** How long each frame is shown: the row's loop split evenly over the frames
+ *  it steps. A sleep loop of three frames from a six-frame row therefore
+ *  breathes at half the row's pace; no loop steps faster than its row. */
 export function petFrameMs(layout: PetLayout): number {
-  return Math.max(16, Math.round(layout.loopMs / Math.max(1, layout.frames)));
+  const steps = Math.min(layout.sequence.length, layout.frames);
+  return Math.max(16, Math.round(layout.loopMs / Math.max(1, steps)));
 }
 
 /** A closed horizontal interval, in viewport px. */
