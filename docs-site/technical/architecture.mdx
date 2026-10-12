@@ -52,7 +52,7 @@ Everything runs under systemd. The two you will interact with most are **clawbox
 | `clawbox-ap` | Wi-Fi hotspot **ClawBox-Setup** for first-boot setup (oneshot) | — | oneshot |
 | `clawbox-ap-watchdog.timer` | Re-raises the hotspot until setup completes (every 20 s) | — | timer |
 | `clawbox-vnc` / `clawbox-websockify` | Xvfb virtual display `:99` + x11vnc + noVNC proxy | 5900 / 6080 | on-failure |
-| `clawbox-browser` | Desktop Chromium with CDP for AI browsing (started on demand) | 18800 (CDP) | no |
+| `clawbox-browser` | The box's one Chromium, shared by the owner (remote desktop) and the assistant (CDP); kept running by `clawbox-setup` | 18800 (CDP) | no |
 | `clawbox-heartbeat.timer` + `clawbox-heartbeat.service` | Every 5 min the timer runs the oneshot, which curls `/setup-api/portal/heartbeat-tick` on loopback. The web app then POSTs to the portal — but only when a ClawBox AI token *and* a tunnel URL both exist ([details](/technical/networking#portal-heartbeat)) | — | timer + oneshot |
 | `clawbox-tunnel` | Optional Cloudflare Quick Tunnel → port 80 | — | always |
 | `clawbox-performance` | Applies the persisted Jetson power profile at boot (see [Power profile and memory guards](#power-profile-and-memory-guards)) | — | oneshot |
@@ -75,7 +75,7 @@ The GNOME desktop is **shipped and on by default**. Turning it off is a setting,
 
 **Settings → System → Desktop environment** posts to `/setup-api/system/desktop`, which runs the root-owned `clawbox-desktop-mode.sh`. Off sets the boot target to `multi-user.target` and disables the display manager; on sets it back to `graphical.target`. **The change applies at the next reboot**, and the UI says so: tearing the graphical session down under a logged-in user would kill their Remote Desktop view and any Chromium the agent is driving. Running headless gives back roughly 700 MB.
 
-The automation browser is unaffected either way — `clawbox-browser.service` has no `[Install]` section, so it is only ever started on demand, never at boot.
+The browser is unaffected either way. `clawbox-browser.service` has no `[Install]` section: the web server (`clawbox-setup`) starts it after boot and keeps it running, because it is the one browser the owner and the assistant share (see [The desktop browser](/technical/filesystem#the-desktop-browser)).
 
 ### Power profile and memory guards
 

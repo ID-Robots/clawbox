@@ -557,6 +557,15 @@ describe("/setup-api/browser", () => {
       expect(closed.browser).toBe("desktop");
     });
 
+    it("opens a tab of its own in the desktop browser instead of borrowing the owner's last one", async () => {
+      // The desktop browser is the owner's too: `pages().at(-1)` there may be
+      // the tab they are reading, and the session's close would then close it.
+      mockContext.newPage.mockClear();
+      const { body } = await launchSession();
+      expect(body.browser).toBe("desktop");
+      expect(mockContext.newPage).toHaveBeenCalledTimes(1);
+    });
+
     it("goes straight to the headless Chromium when it is off, without touching the owner's screen", async () => {
       realBrowser.value = false;
 
