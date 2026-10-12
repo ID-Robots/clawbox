@@ -132,6 +132,49 @@ describe("BrowserSettingsPanel", () => {
     expect(props.onAction).toHaveBeenCalledWith("open-browser");
   });
 
+  /**
+   * One browser per box: the window is the assistant's browser too and is kept
+   * running, so the panel says so, offers Open (bring it forward) and never
+   * Close, and drops the open-by-itself switch that no longer decides anything.
+   */
+  it("says the browser is shared with the assistant and offers no Close for it", () => {
+    const { getByTestId, queryByTestId, props } = renderPanel({
+      ...STATUS,
+      sharedWithAssistant: true,
+      browser: { running: true, pid: 4242, cdpReady: true, shared: true },
+    });
+
+    expect(getByTestId("browser-settings-shared")).toHaveTextContent("browser.settings.sharedHint");
+    expect(queryByTestId("browser-settings-legacy-profile")).toBeNull();
+    expect(queryByTestId("browser-settings-auto-open")).toBeNull();
+    fireEvent.click(getByTestId("browser-settings-power"));
+    expect(props.onAction).toHaveBeenCalledWith("open-browser");
+  });
+
+  it("tells the owner where the assistant's old profile is when its sign-ins did not come along", () => {
+    const { getByTestId } = renderPanel({
+      ...STATUS,
+      sharedWithAssistant: true,
+      legacyAgentProfile: "/home/clawbox/.openclaw/browser/openclaw/user-data",
+      browser: { running: true, pid: 4242, cdpReady: true, shared: true },
+    });
+
+    expect(getByTestId("browser-settings-legacy-profile")).toHaveTextContent("browser.settings.legacyProfileNote");
+  });
+
+  it("keeps Close and the open-by-itself switch where the assistant has a browser of its own", () => {
+    const { getByTestId, queryByTestId, props } = renderPanel({
+      ...STATUS,
+      sharedWithAssistant: false,
+      browser: { running: true, pid: 4242, cdpReady: true },
+    });
+
+    expect(queryByTestId("browser-settings-shared")).toBeNull();
+    expect(getByTestId("browser-settings-auto-open")).toBeInTheDocument();
+    fireEvent.click(getByTestId("browser-settings-power"));
+    expect(props.onAction).toHaveBeenCalledWith("close-browser");
+  });
+
   it("still names ClawBox's own profile on a box that reports none", () => {
     const { getByText } = renderPanel();
     expect(getByText("~/.config/clawbox-browser/")).toBeInTheDocument();

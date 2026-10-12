@@ -54,6 +54,7 @@ export default defineConfig({
       CLAWBOX_BROWSER_PROFILE_DIR: "",
       CLAWBOX_BROWSER_CDP_PORT: "",
       CLAWBOX_BROWSER_EXECUTABLE: "",
+      CLAWBOX_BROWSER_AGENT_ISOLATED: "",
       // The same hermetic principle for device STATE: config-store falls back
       // to the real /home/clawbox/clawbox when CLAWBOX_ROOT is unset, so a
       // test that imports the real modules without re-pointing the root reads

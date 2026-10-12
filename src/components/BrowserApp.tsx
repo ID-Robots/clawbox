@@ -120,7 +120,9 @@ export default function BrowserApp({ onOpenApp }: BrowserAppProps) {
   const noRemoteDebugging = browserRunning && (status?.browser?.noRemoteDebugging ?? false);
   // A browser the owner started themselves: ClawBox does not close it, so the
   // header offers Open (which brings it forward) rather than Close.
-  const closable = browserRunning && !(status?.browser?.external ?? false);
+  // Nor the box's one browser, which the assistant shares and the keeper
+  // keeps running (src/lib/shared-browser.ts).
+  const closable = browserRunning && !(status?.browser?.external ?? false) && !(status?.browser?.shared ?? false);
   // A launch is in flight, or a process exists that has not bound its port
   // yet. Both are "something is happening, wait", and both want the faster
   // poll and the pill over the screen.

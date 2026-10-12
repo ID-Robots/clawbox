@@ -116,6 +116,8 @@ export function browserErrorText(
     profile_in_use: "browser.errorProfileInUse",
     configured_browser_missing: "browser.errorConfiguredMissing",
     not_started_by_clawbox: "browser.errorNotOursToClose",
+    // The box's one browser, shared with the assistant (src/lib/shared-browser.ts).
+    shared_browser: "browser.errorSharedBrowser",
     unreachable: "browser.errorUnreachable",
     owner_only: "browser.errorOwnerOnly",
     cross_origin: "browser.errorOwnerOnly",

@@ -98,6 +98,10 @@ describe("/setup-api/browser/manage", () => {
     POST = mod.POST;
   });
 
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   describe("GET", () => {
     it("returns status when chromium not installed and browser not running", async () => {
       const res = await GET();
@@ -325,7 +329,22 @@ describe("/setup-api/browser/manage", () => {
       expect(sqliteSet).toHaveBeenCalledWith("browser:integration-enabled", "false");
     });
 
-    it("handles close-browser action", async () => {
+    it("refuses close-browser on the box's one browser, shared with the assistant", async () => {
+      const req = new Request("http://localhost/setup-api/browser/manage", {
+        method: "POST",
+        body: JSON.stringify({ action: "close-browser" }),
+      });
+      const res = await POST(req);
+      const body = await res.json();
+      expect(res.status).toBe(409);
+      expect(body.code).toBe("shared_browser");
+      // Nothing was stopped, signalled or unlocked.
+      expect(mockExec.mock.calls.some((call: unknown[]) => Array.isArray(call[1]) && (call[1] as string[]).includes("stop"))).toBe(false);
+      expect(fs.unlink).not.toHaveBeenCalled();
+    });
+
+    it("handles close-browser action where the assistant has a browser of its own", async () => {
+      vi.stubEnv("CLAWBOX_BROWSER_AGENT_ISOLATED", "1");
       const mockExec = vi.fn().mockRejectedValue(new Error("not running"));
       vi.mocked(promisify).mockReturnValue(mockExec as never);
       const req = new Request("http://localhost/setup-api/browser/manage", {
@@ -335,6 +354,18 @@ describe("/setup-api/browser/manage", () => {
       const res = await POST(req);
       const body = await res.json();
       expect(body.ok).toBe(true);
+    });
+
+    it("says in the status whether the browser is shared with the assistant", async () => {
+      const shared = await (await GET()).json();
+      expect(shared.sharedWithAssistant).toBe(true);
+      expect(shared.browser.shared).toBe(true);
+      expect(shared.legacyAgentProfile).toBeNull();
+
+      vi.stubEnv("CLAWBOX_BROWSER_AGENT_ISOLATED", "1");
+      const isolated = await (await GET()).json();
+      expect(isolated.sharedWithAssistant).toBe(false);
+      expect(isolated.browser.shared).toBeUndefined();
     });
 
     it("handles open-browser without chromium", async () => {
@@ -567,6 +598,7 @@ describe("/setup-api/browser/manage", () => {
     });
 
     it("leaves the desktop browser controls alone", async () => {
+      vi.stubEnv("CLAWBOX_BROWSER_AGENT_ISOLATED", "1");
       mockExec.mockResolvedValue({ stdout: "", stderr: "" });
       const req = new Request("http://localhost/setup-api/browser/manage", {
         method: "POST",
@@ -653,7 +685,7 @@ describe("/setup-api/browser/manage", () => {
       expect(body.cdpPort).toBe(9222);
       expect(body.profileDir).toBe(OWNER_PROFILE);
       expect(body.ownProfile).toBe(false);
-      expect(body.browser).toEqual({ running: true, pid: 4242, cdpReady: true, external: true });
+      expect(body.browser).toEqual({ running: true, pid: 4242, cdpReady: true, external: true, shared: true });
       // Nothing was asked of ClawBox's own port.
       expect(mockFetch.mock.calls.every((call: unknown[]) => !String(call[0]).includes(":18800"))).toBe(true);
     });
@@ -673,7 +705,21 @@ describe("/setup-api/browser/manage", () => {
       expect(killSpy).not.toHaveBeenCalled();
     });
 
+    it("Close never stops the owner's browser while it is the one the assistant shares", async () => {
+      processes({ 4242: [OWNER_CHROME, BROWSER_UNIT] });
+      answering(9222);
+
+      const res = await post("close-browser");
+
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe("shared_browser");
+      expect(stopped()).toBe(false);
+      expect(killSpy).not.toHaveBeenCalled();
+      expect(fs.unlink).not.toHaveBeenCalled();
+    });
+
     it("Close leaves a browser the owner started open, and says why", async () => {
+      files[ENV_FILE] = `${CONFIGURED}CLAWBOX_BROWSER_AGENT_ISOLATED=1\n`;
       processes({ 4242: [OWNER_CHROME, DESKTOP_SESSION] });
       answering(9222);
 
@@ -688,6 +734,7 @@ describe("/setup-api/browser/manage", () => {
     });
 
     it("Close stops the owner's browser when ClawBox's unit is what started it", async () => {
+      files[ENV_FILE] = `${CONFIGURED}CLAWBOX_BROWSER_AGENT_ISOLATED=1\n`;
       processes({ 4242: [OWNER_CHROME, BROWSER_UNIT] });
       answering(9222);
 
@@ -784,7 +831,7 @@ describe("/setup-api/browser/manage", () => {
       answering(18800);
 
       const status = await (await GET()).json();
-      expect(status.browser).toEqual({ running: false, cdpReady: true, portTaken: true });
+      expect(status.browser).toEqual({ running: false, cdpReady: true, portTaken: true, shared: true });
 
       const res = await post("open-browser");
       expect(res.status).toBe(409);

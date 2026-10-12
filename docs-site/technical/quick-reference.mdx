@@ -73,7 +73,7 @@ Also closed at the firewall: **631** CUPS (left running — loopback printing st
 
 ## Services (systemd)
 
-**Every edition:** `clawbox-setup` (web, port 80) · `clawbox-ap` (+`-watchdog.timer`) · `clawbox-vnc` + `clawbox-websockify` · `clawbox-browser` (CDP, on demand) · `clawbox-heartbeat.timer` (+ `.service`) · `clawbox-tunnel` (optional, off by default) · `clawbox-performance` · `clawbox-embed` (memory-search embedder, on demand) · `clawbox-root-update@<step>` (privileged installer steps) · `ollama`.
+**Every edition:** `clawbox-setup` (web, port 80) · `clawbox-ap` (+`-watchdog.timer`) · `clawbox-vnc` + `clawbox-websockify` · `clawbox-browser` (the one shared browser, CDP; kept running) · `clawbox-heartbeat.timer` (+ `.service`) · `clawbox-tunnel` (optional, off by default) · `clawbox-performance` · `clawbox-embed` (memory-search embedder, on demand) · `clawbox-root-update@<step>` (privileged installer steps) · `ollama`.
 
 **OpenClaw / dual:** `clawbox-gateway` (pre-start self-heal script).
 **Hermes / dual:** `clawbox-hermes-dashboard` · `clawbox-hermes-dashboard-proxy`. On Hermes the gateway unit is **masked** — an active `clawbox-gateway` there is a hard install failure.
