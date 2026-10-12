@@ -1150,7 +1150,7 @@ is also what Hermes' circuit breaker counts against every ClawBox tool:
 |---|---|---|
 | Coding agent switch and settings, secrets, permissions, Anthropic/GitHub sign-in, reset | `coding-agent/enable`, `secrets`, `permissions`, `anthropic`, `github-login`, `reset` | consent to a delegated shell and to the owner's credentials |
 | Pipeline default | `POST/PUT …/pipeline` | a switch a tool could flip would make the owner's answer temporary |
-| Bringing a run's branch home, the file tree's writes, project import/delete | `coding-agent/merge`, `PUT …/tree`, `projects/*` | the owner's repository and folders |
+| The file tree's writes, project import/delete | `PUT …/tree`, `projects/*` | the owner's repository and folders |
 | Pause, discard a draft, remove a run's copy | `…/pause`, `DELETE …/draft`, `…/worktree` | agent-callable for the agent's own runs but left out: owner gestures `coding_agent_stop` already covers |
 | Reindex, Memory Shard switch/folders/provider/schedule/reset | `clawkeep/memory/*` writes | an hours-long re-embed of the owner's documents |
 | Installing or removing Kokoro, Whisper, embeddings, models | `tts/install`, `whisper`, `embed/install`, `ollama/*`, `llamacpp/models` | root install steps, gigabytes of downloads |

@@ -13,11 +13,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { setVisibleInterval } from "@/lib/visible-interval";
-import { BTN_BASE, BTN_SECONDARY, CARD_SURFACE, INSET_SURFACE, SECTION_LABEL } from "./coding-agent-ui";
+import { BTN_BASE, BTN_SECONDARY, CARD_SURFACE, INSET_SURFACE } from "./coding-agent-ui";
 import CodingTeamTree from "./CodingTeamTree";
 import CodingAgentDiagram, { DiagramDetails, type DiagramRun } from "./CodingAgentDiagram";
 import { MAX_TEAM_CI_ROUNDS } from "@/lib/coding-ci-limits";
-import { formatDuration, timeAgo } from "./clawkeep-ui";
+import { timeAgo } from "./clawkeep-ui";
 
 export interface TeamTaskView {
   task_id: string;
@@ -263,13 +263,6 @@ function isQueuedTeam(status: TeamView["status"]): boolean {
   return status === "queued";
 }
 
-/** Compact token counts, the way the runs list writes them: 1.3M, 48k, 950. */
-function compactTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
-  return String(Math.max(0, Math.round(n)));
-}
-
 export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan, runs }: Props) {
   const { t } = useT();
   const [teams, setTeams] = useState<TeamView[]>([]);
@@ -350,11 +343,6 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
 
   const runOf = useCallback((id: string) => runs?.find((r) => r.id === id), [runs]);
 
-  const done = team ? team.tasks.filter((x) => x.status === "complete").length : 0;
-  // A retired task will never be done — the lead decided the goal does not
-  // need it — so it is not in the count either: a finished team with one
-  // retired read "3 of 4 tasks done" beside its Done badge.
-  const counted = team ? team.tasks.filter((x) => x.status !== "retired").length : 0;
   const messages = team ? team.log.map((e) => ({ e, m: teamMessageOf(e) })).filter((x): x is { e: TeamLogEntryView; m: TeamMessageView } => x.m !== null) : [];
   const inbox = messages.filter(({ m }) => m.to === "lead");
 
@@ -379,9 +367,11 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
 
   return (
     <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-team-card">
+      {/* No section label: the tab this card is the whole of already says
+          Team with the same glyph, and the chart under this row draws the
+          task count and the figures. The row is the status, the alerts and
+          Stop. */}
       <div className="flex items-center gap-2 flex-wrap">
-        <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 16 }} aria-hidden="true">groups</span>
-        <p className={`${SECTION_LABEL} !mb-0`}>{t("codingAgent.team.title")}</p>
         {team && (
           <span
             className={`text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 ${TEAM_STATUS_TONE[team.status] ?? TEAM_STATUS_TONE.stopped}`}
@@ -395,17 +385,11 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
             {t("codingAgent.team.queuePosition", { n: team.queuePosition })}
           </span>
         )}
-        {team && team.tasks.length > 0 && (
-          <span className="text-[11px] text-[var(--text-muted)]" data-testid="coding-team-progress">
-            {t("codingAgent.team.progress", { done, total: counted })}
-          </span>
-        )}
         {team && team.alerts > 0 && (
           <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-amber-400 border-amber-400/40" data-testid="coding-team-alerts">
             {t("codingAgent.team.alerts", { n: team.alerts })}
           </span>
         )}
-        {teams.length > 1 && <span className="text-[11px] text-[var(--text-muted)]">· {t("codingAgent.team.earlier", { n: teams.length - 1 })}</span>}
         {active && (
           <button type="button" onClick={() => void stop()} disabled={busy} data-testid="coding-team-stop" className={`${BTN_SECONDARY} ml-auto`}>
             {t("codingAgent.team.stop")}
@@ -437,6 +421,11 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
           it is in, the ones at work pulsing; a click on one says what it is
           doing now (CodingAgentDiagram). With no team yet, the shape a team
           takes, and the sentence that explains it. */}
+      {/* One line of the goal above the chart: what the team is doing is
+          the first thing to know, and the board's full copy is a click away. */}
+      {team && (
+        <p className="mt-2 text-xs text-[var(--text-secondary)] truncate" title={team.goal} data-testid="coding-team-goal">{team.goal}</p>
+      )}
       {team ? (
         <CodingAgentDiagram
           source={{ kind: "team", team }}
@@ -473,20 +462,6 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
       {team?.error && (
         <p className="mt-2 text-[11px] text-red-300 break-words" data-testid="coding-team-reason">{team.error}</p>
       )}
-      {/* Whether a single run would have been cheaper: a one-task plan ran as
-          one run, and tasks whose files mostly overlap only queue on each other. */}
-      {team && (team.singleRun || team.advice) && (
-        <p className="mt-1.5 text-[11px] text-sky-200/90 flex items-start gap-1.5" data-testid="coding-team-advice" data-reason={team.singleRun ? "single_run" : team.advice?.reason}>
-          <span className="material-symbols-rounded align-[-2px] shrink-0" style={{ fontSize: 14 }} aria-hidden="true">lightbulb</span>
-          <span>
-            {team.singleRun
-              ? t("codingAgent.team.adviceSingleRun")
-              : team.advice?.reason === "one_task"
-                ? t("codingAgent.team.adviceOneTask")
-                : t("codingAgent.team.adviceOverlap", { n: team.advice?.overlap ?? 0 })}
-          </span>
-        </p>
-      )}
       {/* The pull request the goal asked for — the orchestrator's: its
           checks, the rounds its red CI sent tasks back, and how it ended. */}
       {team?.pr && (
@@ -514,109 +489,43 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
           {team.pr.detail && <p className="mt-1 text-[var(--text-muted)]">{team.pr.detail}</p>}
         </div>
       )}
-      {/* Everything the card said in words — how the team works, who worked,
-          its shape and its figures, the board, the messages and the log —
-          folded under the chart: nothing is gone, it is one click away. */}
+      {/* What the chart cannot draw — the branch, the planner's run, every
+          task in full with its result and verdict, the messages and the log,
+          and the advice on whether one run would have done — folded under
+          it: the words that repeated the chart's figures are gone. */}
       {team && (
         <DiagramDetails testId="coding-team-details">
-          <p className="text-[11px] text-[var(--text-muted)] leading-relaxed">{t("codingAgent.team.help")}</p>
-          {/* Who worked, and where: the owner asked to see how many agents a
-              run had. Planner, workers (an attempt is a new worker), reviewers,
-              and the lead's turns when it had any. */}
-          {team.agents && team.agents.total > 0 && (
-            <p className="mt-1.5 text-[11px] text-[var(--text-secondary)]" data-testid="coding-team-agents">
-              <span className="material-symbols-rounded align-[-2px] mr-1" style={{ fontSize: 14 }} aria-hidden="true">smart_toy</span>
-              {(team.agents.leads ?? 0) > 0
-                ? t("codingAgent.team.agentsWithLead", { total: team.agents.total, planner: team.agents.planner, workers: team.agents.workers, reviewers: team.agents.reviewers, leads: team.agents.leads ?? 0 })
-                : t("codingAgent.team.agents", { total: team.agents.total, planner: team.agents.planner, workers: team.agents.workers, reviewers: team.agents.reviewers })}
-              {team.branch && (
-                <span className="text-[var(--text-muted)]"> · {t("codingAgent.team.branch", { branch: team.branch, base: team.base ?? "" })}</span>
-              )}
+          {team.branch && (
+            <p className="text-[11px] text-[var(--text-secondary)]" data-testid="coding-team-branch">
+              <span className="material-symbols-rounded align-[-2px] mr-1" style={{ fontSize: 14 }} aria-hidden="true">fork_right</span>
+              {t("codingAgent.team.branch", { branch: team.branch, base: team.base ?? "" })}
             </p>
           )}
-          {/* The shape the planner chose for this goal — how many side by side,
-              how the work is reviewed, and why — and whether the lead may change
-              the plan while the team runs. A team shaped by default says nothing. */}
-          {(team.shape || team.dynamic) && (
-            <p className="mt-1 text-[11px] text-[var(--text-secondary)] flex items-center gap-1.5 flex-wrap" data-testid="coding-team-shape">
-              <span className="material-symbols-rounded align-[-2px]" style={{ fontSize: 14 }} aria-hidden="true">account_tree</span>
-              {team.shape && (
-                <span>
-                  {t("codingAgent.team.shape", { n: team.shape.parallelism })} · {t(`codingAgent.team.reviewMode.${team.shape.review}`)}
-                  {team.shape.rationale && <span className="text-[var(--text-muted)]"> — {team.shape.rationale}</span>}
-                </span>
-              )}
-              {team.dynamic && (
-                <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-violet-300 border-violet-400/40" data-testid="coding-team-dynamic">
-                  {t("codingAgent.team.leadOn")}
-                </span>
-              )}
-            </p>
-          )}
-          {/* The team's figures: what it cost and how well its shape fitted the
-              goal — the same numbers the status tool and the bench read. */}
-          {team.metrics && (team.metrics.workerRuns > 0 || !active) && (
-            <p className="mt-1 text-[11px] text-[var(--text-muted)] flex items-center gap-x-2 gap-y-0.5 flex-wrap" data-testid="coding-team-metrics" title={t("codingAgent.team.metricsTitle")}>
-              <span className="material-symbols-rounded align-[-2px]" style={{ fontSize: 14 }} aria-hidden="true">monitoring</span>
-              <span data-testid="coding-team-metric-tokens">{t("codingAgent.team.metricTokens", { n: compactTokens(team.metrics.tokensUsed) })}</span>
-              <span>· {t("codingAgent.team.metricTime", { time: formatDuration(team.metrics.wallMs) })}</span>
-              <span data-testid="coding-team-metric-first-try">· {t("codingAgent.team.metricFirstTry", { n: team.metrics.tasksAcceptedFirstTry, total: team.metrics.tasksPlanned + team.metrics.tasksAdded - team.metrics.tasksRetired })}</span>
-              {team.metrics.tasksRejected > 0 && <span>· {t("codingAgent.team.metricRejected", { n: team.metrics.tasksRejected })}</span>}
-              {team.metrics.tasksAdded > 0 && <span>· {t("codingAgent.team.metricAdded", { n: team.metrics.tasksAdded })}</span>}
-              {team.metrics.tasksRetired > 0 && <span>· {t("codingAgent.team.metricRetired", { n: team.metrics.tasksRetired })}</span>}
-            </p>
-          )}
-          {/* What each role cost: the planner and the reviewers run on a cheaper
-              model by default (src/lib/coding-role-models.ts), and this is where
-              the owner sees whether that holds for their goals. */}
-          {team.metrics?.tokensByRole && team.metrics.tokensUsed > 0 && (
-            <p className="mt-0.5 text-[11px] text-[var(--text-muted)] flex items-center gap-x-2 gap-y-0.5 flex-wrap" data-testid="coding-team-role-tokens">
-              <span className="material-symbols-rounded align-[-2px]" style={{ fontSize: 14 }} aria-hidden="true">toll</span>
-              <span data-testid="coding-team-role-tokens-planner">{t("codingAgent.team.tokensPlanner", { n: compactTokens(team.metrics.tokensByRole.planner) })}</span>
-              <span data-testid="coding-team-role-tokens-workers">· {t("codingAgent.team.tokensWorkers", { n: compactTokens(team.metrics.tokensByRole.worker) })}</span>
-              <span data-testid="coding-team-role-tokens-reviewers">· {t("codingAgent.team.tokensReviewers", { n: compactTokens(team.metrics.tokensByRole.reviewer) })}</span>
-              {team.metrics.tokensByRole.lead > 0 && <span data-testid="coding-team-role-tokens-lead">· {t("codingAgent.team.tokensLead", { n: compactTokens(team.metrics.tokensByRole.lead) })}</span>}
+          {/* Whether a single run would have been cheaper: a one-task plan ran as
+              one run, and tasks whose files mostly overlap only queue on each other. */}
+          {(team.singleRun || team.advice) && (
+            <p className="mt-1.5 text-[11px] text-sky-200/90 flex items-start gap-1.5" data-testid="coding-team-advice" data-reason={team.singleRun ? "single_run" : team.advice?.reason}>
+              <span className="material-symbols-rounded align-[-2px] shrink-0" style={{ fontSize: 14 }} aria-hidden="true">lightbulb</span>
+              <span>
+                {team.singleRun
+                  ? t("codingAgent.team.adviceSingleRun")
+                  : team.advice?.reason === "one_task"
+                    ? t("codingAgent.team.adviceOneTask")
+                    : t("codingAgent.team.adviceOverlap", { n: team.advice?.overlap ?? 0 })}
+              </span>
             </p>
           )}
           {/* The board. */}
           <div className="mt-3" data-testid="coding-team-board" data-team-id={team.id}>
             <p className="text-xs text-[var(--text-secondary)] break-words">{team.goal}</p>
             <p className="mt-0.5 text-[11px] text-[var(--text-muted)] flex items-center gap-1 flex-wrap">
-              <span className="font-mono">{team.id}</span>
-              <span>· {timeAgo(team.createdAt, t)}</span>
+              <span>{timeAgo(team.createdAt, t)}</span>
               {team.plannerRunId && (
                 <button type="button" onClick={() => onOpenRun(team.plannerRunId!)} data-testid="coding-team-planner" className="underline decoration-white/20 hover:text-white">
                   {t("codingAgent.team.plannerRun")}
                 </button>
               )}
             </p>
-            {/* The planner's map of what the goal touches — the one every worker
-                and reviewer is handed instead of exploring the project again. */}
-            {team.repoMap && (
-              <details className={`mt-2 ${INSET_SURFACE} px-3 py-2 text-[11px]`} data-testid="coding-team-repo-map">
-                <summary className="cursor-pointer text-[var(--text-secondary)] select-none">
-                  <span className="material-symbols-rounded align-[-3px] mr-1" style={{ fontSize: 14 }} aria-hidden="true">map</span>
-                  {t("codingAgent.team.repoMap")}
-                </summary>
-                <dl className="mt-1.5 space-y-1">
-                  {([
-                    ["files", "codingAgent.team.repoMapFiles", team.repoMap.files],
-                    ["entry", "codingAgent.team.repoMapEntryPoints", team.repoMap.entryPoints],
-                    ["tests", "codingAgent.team.repoMapTests", team.repoMap.testCommands],
-                    ["gotchas", "codingAgent.team.repoMapGotchas", team.repoMap.gotchas],
-                  ] as const).filter(([, , items]) => items.length > 0).map(([id, key, items]) => (
-                    <div key={id} data-testid={`coding-team-repo-map-${id}`}>
-                      <dt className="text-[var(--text-muted)]">{t(key)}</dt>
-                      <dd className="text-[var(--text-secondary)] break-words">
-                        <ul className="list-disc pl-4">
-                          {items.map((item) => <li key={item} className={id === "files" || id === "tests" ? "font-mono" : undefined}>{item}</li>)}
-                        </ul>
-                      </dd>
-                    </div>
-                  ))}
-                </dl>
-              </details>
-            )}
             {team.finalReview && (
               <p className="mt-2 text-[11px] break-words" data-testid="coding-team-final-review" data-verdict={team.finalReview.verdict}>
                 <span className="text-[var(--text-secondary)]">{t("codingAgent.team.finalReview")}: </span>

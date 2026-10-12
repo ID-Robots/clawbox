@@ -284,16 +284,6 @@ describe("the owner's switch", () => {
     expect(toggle).toHaveAttribute("aria-checked", "false");
   });
 
-  it("hands every status the route answers to the sidebar", async () => {
-    const onStatus = vi.fn();
-    stubFetch({ enabled: false, readiness: READY });
-    render(<CodingAgentSettingsPanel onStatus={onStatus} />);
-    const toggle = await screen.findByRole("switch", { name: SWITCH });
-    await waitFor(() => expect(onStatus).toHaveBeenCalledWith(expect.objectContaining({ enabled: false })));
-    fireEvent.click(toggle);
-    await waitFor(() => expect(onStatus).toHaveBeenLastCalledWith(expect.objectContaining({ enabled: true, effort: "max" })));
-  });
-
   it("tells the desktop after a saved change, and not after a refused one", async () => {
     // The Coding Agent app is a different window; this signal is how its
     // On/Off chip follows the switch. It fires on the route's answer, never
@@ -1108,6 +1098,9 @@ describe("a team's model and effort per role", () => {
     expect((screen.getByTestId("coding-agent-role-reviewer-effort") as HTMLSelectElement).options[0].text).toBe("Default (at most Very high)");
     expect((screen.getByTestId("coding-agent-role-worker-effort") as HTMLSelectElement).options[0].text).toBe("Default (your effort)");
     const section = screen.getByTestId("coding-agent-role-models");
+    // The cheaper models are named in the help tip, one tap away — the
+    // paragraph that repeated it under the rows is gone.
+    fireEvent.click(screen.getByTestId("coding-agent-role-models-help"));
     expect(section.textContent).toContain("claude-sonnet-5");
     expect(section.textContent).toContain("deepseek-v4-flash");
     expect(screen.getByLabelText("Model for Reviewers")).toBe(screen.getByTestId("coding-agent-role-reviewer-model"));

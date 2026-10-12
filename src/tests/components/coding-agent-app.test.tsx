@@ -252,18 +252,6 @@ function stubFetch(
       posts.push({ url, body: JSON.parse(String(init.body)) });
       return json({ run: { ...RUN, status: "stopped" } });
     }
-    if (url === "/setup-api/coding-agent/merge" && init?.method === "POST") {
-      const body = JSON.parse(String(init.body)) as { runId: string };
-      posts.push({ url, body });
-      // The merge landed: the copy is gone and the record says where the work
-      // went, which is what the card redraws from.
-      runs = (runs as { id: string; worktree?: Record<string, unknown> | null }[]).map(
-        (r) => (r.id === body.runId && r.worktree
-          ? { ...r, worktree: { ...r.worktree, removed: true, result: { kind: "merged", reason: null, detail: null, base: "main", commit: "9f1c0ab3d4e5f60718293a4b5c6d7e8f90a1b2c3" } } }
-          : r),
-      );
-      return json({ merged: true, base: "main", commit: "9f1c0ab3d4e5f60718293a4b5c6d7e8f90a1b2c3", run: (runs as { id: string }[]).find((r) => r.id === body.runId) });
-    }
     if (url === "/setup-api/coding-agent/worktree" && init?.method === "POST") {
       const body = JSON.parse(String(init.body)) as { runId: string };
       posts.push({ url, body });
@@ -703,16 +691,21 @@ describe("CodingAgentApp", () => {
   });
 
   describe("recent runs", () => {
-    it("opens a project on its Runs tab — first in the row, selected by default — with the count on the tab, and never a toggle", async () => {
+    it("opens a project on its Team tab — first in the row, selected by default — with the runs one tab over, counted, and never a toggle", async () => {
       stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
       render(<CodingAgentApp />);
       fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
       await screen.findByTestId("coding-agent-project-page");
+      // The team first (the owner's ask, 2026-10-12), then the runs.
+      const team = screen.getByTestId("coding-agent-workspace-team");
       const tab = screen.getByTestId("coding-agent-workspace-runs");
-      expect(tab).toHaveAttribute("aria-selected", "true");
-      expect(screen.getAllByRole("tab")[0]).toBe(tab);
-      expect(await screen.findByTestId("coding-agent-project-runs")).toBeInTheDocument();
+      expect(team).toHaveAttribute("aria-selected", "true");
+      expect(screen.getAllByRole("tab")[0]).toBe(team);
+      expect(screen.getAllByRole("tab")[1]).toBe(tab);
       expect(tab.textContent).toContain("(1)");
+      expect(screen.getByTestId("coding-agent-project-runs").closest("[role=tabpanel]")).toHaveAttribute("hidden");
+      fireEvent.click(tab);
+      expect(tab).toHaveAttribute("aria-selected", "true");
       expect(await screen.findByText("Add a dark mode toggle")).toBeInTheDocument();
       expect(screen.queryByTestId("coding-agent-runs-toggle")).toBeNull();
       // The other tabs keep the list mounted but hidden.
@@ -1572,24 +1565,25 @@ describe("CodingAgentApp", () => {
       await waitFor(() => {
         expect(posts).toContainEqual({ url: "/setup-api/coding-agent/worktree", body: { runId: RUN.id } });
       });
-      // Once it is gone the card goes with it: there is nothing left to remove.
-      await waitFor(() => { expect(screen.queryByTestId("coding-agent-run-worktree")).toBeNull(); });
+      // Once the copy is gone the button goes with it — but the line stays,
+      // because the work is still on the branch and not in the project.
+      await waitFor(() => { expect(screen.queryByTestId(`coding-agent-worktree-remove-${RUN.id}`)).toBeNull(); });
+      expect(screen.getByTestId("coding-agent-run-worktree").textContent).toContain("clawbox/run-k3x9q2ab");
     });
 
     /**
-     * The run page's half of the bring-home gesture. The card itself is
-     * covered in coding-run-worktree-card.test.tsx; what is pinned here is
-     * that the run page hands it the record, that pressing the button reaches
-     * the merge route with this run's id, and that the card follows the
-     * re-read record afterwards.
+     * The run page's half of "where is the work": the settle removes the copy
+     * and keeps the branch, so for unmerged work the page draws the line
+     * WITHOUT a copy on disk — the branch and the reason, nothing to press.
+     * The card itself is covered in coding-run-worktree-card.test.tsx.
      */
-    it("offers to bring a settled run's unmerged work home, and follows the record afterwards", async () => {
+    it("says where a settled run's unmerged work is once its copy is gone, and offers nothing to press", async () => {
       const worktree = {
         path: "/home/clawbox/Projects/site/.clawbox/worktrees/run-k3x9q2ab",
         branch: "clawbox/run-k3x9q2ab",
         base: "main",
         project: "/home/clawbox/Projects/site",
-        removed: false,
+        removed: true,
         branchRemoved: false,
         result: { kind: "unmerged", reason: "dirty", detail: "the project folder has uncommitted changes of its own" },
       };
@@ -1600,15 +1594,30 @@ describe("CodingAgentApp", () => {
       await screen.findByTestId("coding-agent-run-page");
       const card = await screen.findByTestId("coding-agent-run-worktree");
       expect(card.getAttribute("data-state")).toBe("dirty");
-      expect(card.textContent).toContain(translations.en["codingAgent.bringHomeDirty"]
+      expect(card.textContent).toContain(translations.en["codingAgent.worktreeUnmergedDirty"]
         .replaceAll("{branch}", worktree.branch).replaceAll("{base}", worktree.base));
+      expect(within(card).queryByRole("button")).toBeNull();
+      expect(screen.queryByTestId(`coding-agent-worktree-remove-${RUN.id}`)).toBeNull();
+    });
 
-      fireEvent.click(screen.getByTestId(`coding-agent-bring-home-${RUN.id}`));
-      await waitFor(() => {
-        expect(posts).toContainEqual({ url: "/setup-api/coding-agent/merge", body: { runId: RUN.id } });
-      });
-      // The copy went with the merge, so the whole card goes with it.
-      await waitFor(() => { expect(screen.queryByTestId("coding-agent-run-worktree")).toBeNull(); });
+    it("draws no such line for a run whose work was merged home and whose copy is gone", async () => {
+      const worktree = {
+        path: "/home/clawbox/Projects/site/.clawbox/worktrees/run-k3x9q2ab",
+        branch: "clawbox/run-k3x9q2ab",
+        base: "main",
+        project: "/home/clawbox/Projects/site",
+        removed: true,
+        branchRemoved: false,
+        result: { kind: "merged", reason: null, detail: null, base: "main", commit: "9f1c0ab3d4e5f60718293a4b5c6d7e8f90a1b2c3" },
+      };
+      stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, worktree }], { projects: [SITE_PROJECT] });
+      render(<CodingAgentApp />);
+      await openRuns();
+      fireEvent.click(await screen.findByTestId(`coding-agent-details-${RUN.id}`));
+      await screen.findByTestId("coding-agent-run-page");
+      // The timeline already says "merged into main"; a line under the title
+      // saying it again was one of the things this pass took off the page.
+      expect(screen.queryByTestId("coding-agent-run-worktree")).toBeNull();
     });
 
     it("shows no such card for a run that worked in the project folder itself, or one still going", async () => {
@@ -2948,5 +2957,39 @@ describe("the live poll", () => {
     expect(runsReads()).toBe(before + 1);
     expect(reads("/setup-api/coding-agent/git")).toBe(2);
     expect(reads("/setup-api/coding-agent/projects")).toBe(2);
+  });
+});
+
+describe("the whole task", () => {
+  /**
+   * The rest of a long task opens in a dialog of its own, drawn as Markdown
+   * (src/components/CodingTaskDialog.tsx) — not unfolded as raw text inside
+   * the header card, which is what "Show the whole task" used to do.
+   */
+  it("opens the whole task in a dialog from the run's page, and closes it again", async () => {
+    const long = { ...RUN, task: "Add a dark mode toggle\n\n## What is left\n\n1. Read the settings page\n2. Add the switch" };
+    stubFetch({ enabled: true, readiness: READY }, [long], { projects: [SITE_PROJECT] });
+    render(<CodingAgentApp />);
+    await openRuns();
+    fireEvent.click(await screen.findByTestId(`coding-agent-details-${RUN.id}`));
+    const page = await screen.findByTestId("coding-agent-run-page");
+    // The title is the first line; the rest is behind the button, not on the page.
+    expect(within(page).getByTestId("coding-agent-run-title").textContent).toBe("Add a dark mode toggle");
+    expect(screen.queryByTestId("coding-agent-task-dialog")).toBeNull();
+    fireEvent.click(within(page).getByTestId("coding-agent-run-task-open"));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveAccessibleName("Add a dark mode toggle");
+    expect(within(dialog).getByTestId("coding-agent-task-dialog-body").querySelector("h2")?.textContent).toBe("What is left");
+    fireEvent.click(within(dialog).getByTestId("coding-agent-task-dialog-close"));
+    await waitFor(() => { expect(screen.queryByTestId("coding-agent-task-dialog")).toBeNull(); });
+  });
+
+  it("offers no such button for a one-line task", async () => {
+    stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
+    render(<CodingAgentApp />);
+    await openRuns();
+    fireEvent.click(await screen.findByTestId(`coding-agent-details-${RUN.id}`));
+    const page = await screen.findByTestId("coding-agent-run-page");
+    expect(within(page).queryByTestId("coding-agent-run-task-open")).toBeNull();
   });
 });

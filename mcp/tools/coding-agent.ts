@@ -795,16 +795,16 @@ function worktreeState(run: RunPayload): string | null {
   const wt = run.worktree;
   if (!wt) return null;
   if (wt.result?.kind === "merged") return `merged into ${wt.result.base ?? wt.base}`;
+  // Not merged home: the settle removes the files and keeps the branch, and
+  // the reason it could not merge rides along so the assistant can tell the
+  // owner where the work is and why it is not in the project.
+  const why = wt.result?.kind === "unmerged" && wt.result.detail ? redact(wt.result.detail.slice(0, 160)) : null;
   if (wt.removed) {
-    return wt.branchRemoved
-      ? "removed with its branch — the run left nothing on it"
-      : `files removed; the work is kept on branch ${wt.branch}`;
+    if (wt.branchRemoved) return "removed with its branch — the run left nothing on it";
+    return `files removed; the work is kept on branch ${wt.branch}${why ? ` — not merged: ${why}` : ""}`;
   }
   if (run.status === "running") return "in use";
-  if (wt.result?.kind === "unmerged") {
-    const why = wt.result.detail ? `: ${redact(wt.result.detail.slice(0, 160))}` : "";
-    return `kept, could not be merged home${why}`;
-  }
+  if (wt.result?.kind === "unmerged") return `kept, could not be merged home${why ? `: ${why}` : ""}`;
   return "kept, not merged home yet";
 }
 

@@ -69,10 +69,12 @@ const STATUS_GLYPH: Record<ChangeStatus, { letter: string; className: string }> 
 
 export default function CodingProjectWorkspace({ query, live, initialRef = null, initialTab, fill = false, filesDirectory, runs, runsCount = 0, runsLive = false, team }: Props) {
   const { t } = useT();
-  // The project page opens on its RUNS — what the owner comes to a project
-  // for — and the files and the changes are one tab away; a host that hands
-  // no runs (a run's own page) opens on the files.
-  const [tab, setTab] = useState<WorkspaceTab>(initialTab ?? (runs ? "runs" : "files"));
+  // The project page opens on its TEAM — the agents at work, which is what
+  // the owner opens a project to see (2026-10-12: "Coding team needs to be
+  // the first tab, before Runs") — then the runs, the files and the changes
+  // one tab away; a host that hands no team opens on the runs, and one that
+  // hands neither (a run's own page) on the files.
+  const [tab, setTab] = useState<WorkspaceTab>(initialTab ?? (team ? "team" : runs ? "runs" : "files"));
   const tabClass = (id: WorkspaceTab) => (tab === id ? SEGMENT_ON : SEGMENT_OFF);
   const panelClass = fill ? "flex-1 min-h-0 flex flex-col" : undefined;
   // The pane's height: a fixed cap inside a scrolling page, or the column's
@@ -85,7 +87,23 @@ export default function CodingProjectWorkspace({ query, live, initialRef = null,
         {/* The runs and the team are tabs too, not a rail: the rail was
             22rem wide, and a run's row in it wrapped its title three deep
             and its figures six. Every tab has the whole width now — and the
-            runs come FIRST: they are what the owner opens a project for. */}
+            TEAM comes first, then the runs: the agents are what the owner
+            opens a project for. */}
+        {team && (
+          <button
+            type="button"
+            role="tab"
+            id="coding-agent-workspace-tab-team"
+            aria-selected={tab === "team"}
+            aria-controls="coding-agent-workspace-pane-team"
+            onClick={() => setTab("team")}
+            data-testid="coding-agent-workspace-team"
+            className={tabClass("team")}
+          >
+            <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">groups</span>
+            {t("codingAgent.teamTab")}
+          </button>
+        )}
         {runs && (
           <button
             type="button"
@@ -129,21 +147,6 @@ export default function CodingProjectWorkspace({ query, live, initialRef = null,
           <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">difference</span>
           {t("codingAgent.changesTab")}
         </button>
-        {team && (
-          <button
-            type="button"
-            role="tab"
-            id="coding-agent-workspace-tab-team"
-            aria-selected={tab === "team"}
-            aria-controls="coding-agent-workspace-pane-team"
-            onClick={() => setTab("team")}
-            data-testid="coding-agent-workspace-team"
-            className={tabClass("team")}
-          >
-            <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">groups</span>
-            {t("codingAgent.teamTab")}
-          </button>
-        )}
       </div>
       {/* Both panes stay mounted: a tree that was opened three folders deep
           would otherwise fold every time the owner glanced at the diff. */}

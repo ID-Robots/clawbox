@@ -11860,9 +11860,17 @@ function liveRunsIn(directory: string): CodingRun[] {
 /**
  * What becomes of the run's worktree now that the chain it belongs to is over.
  *
- * THE RULE (the owner's): the tree goes only when the branch is merged or the
- * run left nothing on it. Anything else is work nobody has looked at, and the
- * tree stays with the card offering to remove it.
+ * THE RULE (the owner's, 2026-10-12): once the chain is over, the FILES go
+ * and the BRANCH stays. A run's work is its commits, and a worktree is only a
+ * checkout of them — git puts it back from the branch in a second when a
+ * resume, a review round or a Fix CI continuation needs it (`reopenWorktree`
+ * → `restoreRunWorktree`). Until this rule the tree stayed whenever the merge
+ * home was refused, and on a box whose owner keeps any uncommitted change in
+ * a project folder that is EVERY run: one project had ten copies of itself,
+ * 617 MB, under `.clawbox/worktrees/`, each one the files of a branch that
+ * was already safe in git. The old exception for a pull request (keep the
+ * tree, the review loop works in it) goes for the same reason — the loop's
+ * continuation is a `startRun({ resumeRunId })`, which restores the tree.
  *
  * In order:
  *   - somebody is still working in it (the automatic review pass, another go
@@ -11873,12 +11881,18 @@ function liveRunsIn(directory: string): CodingRun[] {
  *     comes back here when the chain is actually over;
  *   - the branch holds nothing — remove the tree AND the branch, which is
  *     the common ending for a run that investigated and changed nothing;
- *   - a pull request owns the branch — keep the tree, because the review loop
- *     hands the harness more turns in it and a merge would take the commits
- *     away from the pull request they are open as;
+ *   - a pull request owns the branch — remove the tree, keep the branch: the
+ *     work goes home through the request, and a local merge would take the
+ *     commits away from it;
  *   - otherwise merge it home into the project's base branch and remove the
  *     tree. A merge the project cannot take (it moved, it is dirty, it
- *     conflicts) keeps the tree and says why.
+ *     conflicts) is RECORDED on the run so the page can say which, and the
+ *     tree still goes — the work is on the branch, where the Changes tab and
+ *     `git merge` both find it.
+ *
+ * Only two things keep a tree on disk now: git could not say what is on its
+ * branch (no answer is not permission to delete), or the removal itself
+ * failed — and those are what the page's Remove copy is for.
  *
  * Never throws: this is the settle path, and a run whose tree could not be
  * tidied is still a run that finished.
@@ -11920,9 +11934,20 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
       persist(true);
       return;
     }
-    if (run.pr && run.pr.phase !== "failed") {
-      pushProgress(run, RUNNER_STEP.worktreeKept(`${wt.branch} is open as a pull request`));
+    // The files go either way from here; only the SENTENCE differs. Recorded
+    // only if they are actually gone (see the `ahead === 0` branch above).
+    const park = async (reason: string): Promise<void> => {
+      if (!(await removeRunWorktree(wt.project, wt.path))) {
+        pushProgress(run, RUNNER_STEP.worktreeKept(`${reason}, and the copy could not be removed`));
+        persist(true);
+        return;
+      }
+      wt.removed = true;
+      pushProgress(run, RUNNER_STEP.worktreeParked(wt.branch, reason));
       persist(true);
+    };
+    if (run.pr && run.pr.phase !== "failed") {
+      await park("it is open as a pull request");
       return;
     }
     const merged = await mergeRunBranch({
@@ -11932,11 +11957,10 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
       message: `Coding agent ${run.id}: ${taskTitle(run.task, 72)}`,
     });
     if (!merged.ok) {
-      // Recorded, not just logged: this is the state the card reads to say
-      // what is in the way and offer to bring the work home once it is not.
+      // Recorded, not just logged: this is the state the run's page reads to
+      // say the work is on the branch and why it is not in the project.
       wt.result = { kind: "unmerged", reason: merged.reason, detail: merged.detail, base: null, commit: null };
-      pushProgress(run, RUNNER_STEP.worktreeKept(merged.detail));
-      persist(true);
+      await park(merged.detail);
       return;
     }
     wt.result = { kind: "merged", reason: null, detail: null, base: wt.base, commit: merged.commit };
@@ -11956,93 +11980,11 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
 }
 
 /**
- * What the owner's **Bring the work home** answers with.
- *
- * A blocker is NOT an exception: it is the expected ending on a box whose
- * owner keeps uncommitted work in a project folder, and the caller has to be
- * able to show WHICH one it was and what clears it. So the refusal comes back
- * as a value with a stable `reason`, and the run record travels with it either
- * way — the card redraws from the box's own answer rather than from a second
- * poll, exactly as Remove copy already does.
- */
-export type BringHomeOutcome =
-  | { ok: true; merged: boolean; base: string; commit: string | null; run: CodingRun }
-  | { ok: false; reason: MergeHomeBlocker; detail: string; run: CodingRun };
-
-/**
- * The owner's **Bring the work home** button: merge a settled run's branch
- * into the project it was asked to work in.
- *
- * WHY. The settle already tries this, and refuses conservatively — the
- * project folder has uncommitted changes of its own, it has been moved to
- * another branch, the merge conflicts. Each refusal leaves the run saying
- * `completed` with its work reachable only as `clawbox/<runId>`, and the only
- * control on the card was Remove copy: a dead end, and on a box whose owner
- * keeps any uncommitted change in a project folder it is EVERY run. This is
- * the explicit gesture that finishes the job once the blocker is gone.
- *
- * WHAT IT WILL NOT DO. Exactly what the settle will not do, because the
- * project checkout is the owner's: it never stashes, discards, forces or
- * resets anything. It re-runs `mergeRunBranch`, which re-checks each
- * precondition, and answers the same reason when the blocker is still there.
- * The owner commits or stashes their own work, or switches the project back to
- * the base branch, and presses it again.
- */
-export async function bringRunWorkHome(id: string): Promise<BringHomeOutcome> {
-  const run = loadRuns().find((r) => r.id === id);
-  if (!run) throw new CodingAgentError("not_found", "There is no coding run with that id.");
-  const wt = run.worktree;
-  if (!wt) throw new CodingAgentError("invalid", "That run worked in the project folder itself, so its work is already there.");
-  if (wt.branchRemoved) throw new CodingAgentError("invalid", "That run left nothing on its branch, so there is no work to bring home.");
-  // A live run is still writing into that tree and committing to that branch:
-  // merging half of it home is exactly the race worktrees exist to stop.
-  if (isLive(run.status) || liveRunsIn(wt.path).length > 0) {
-    throw new CodingAgentError("busy", "A run is still working in that copy of the project. Stop it first.");
-  }
-  const ahead = await commitsAhead(wt.project, wt.branch, wt.base);
-  if (ahead === null) {
-    throw new CodingAgentError("invalid", `Git could not say what is on ${wt.branch}. The project may have moved or the branch may be gone.`);
-  }
-  if (ahead === 0) {
-    // Already home, or there was never anything on it. Either way the card
-    // must stop offering to bring it home — so the verdict is recorded rather
-    // than the call quietly succeeding against an unchanged record.
-    wt.result = { kind: "merged", reason: null, detail: null, base: wt.base, commit: null };
-    persist(true);
-    return { ok: true, merged: false, base: wt.base, commit: null, run: cloneRun(run) };
-  }
-  const merged = await mergeRunBranch({
-    projectDir: wt.project,
-    branch: wt.branch,
-    base: wt.base,
-    message: `Coding agent ${run.id}: ${taskTitle(run.task, 72)}`,
-  });
-  if (!merged.ok) {
-    wt.result = { kind: "unmerged", reason: merged.reason, detail: merged.detail, base: null, commit: null };
-    pushProgress(run, RUNNER_STEP.worktreeKept(merged.detail));
-    persist(true);
-    return { ok: false, reason: merged.reason, detail: merged.detail, run: cloneRun(run) };
-  }
-  wt.result = { kind: "merged", reason: null, detail: null, base: wt.base, commit: merged.commit };
-  // The copy goes with the merge, as it does at settle — its commits are in
-  // the project now. A removal git refuses is not a failed bring-home: the
-  // work IS home, and Remove copy is what answers the files left behind.
-  if (await removeRunWorktree(wt.project, wt.path).catch(() => false)) {
-    wt.removed = true;
-    pushProgress(run, RUNNER_STEP.worktreeMerged(wt.base));
-  } else {
-    pushProgress(run, RUNNER_STEP.worktreeKept(`it was merged into ${wt.base} but could not be removed`));
-  }
-  persist(true);
-  return { ok: true, merged: true, base: wt.base, commit: merged.commit, run: cloneRun(run) };
-}
-
-/**
  * The owner's Remove worktree button: take the files away whatever is on the
  * branch.
  *
  * Deliberately keeps the BRANCH. The button exists for a tree the settle
- * refused to remove, which by definition holds commits nothing else has —
+ * could not remove, which by definition holds commits nothing else has —
  * removing the files is reclaiming disk, and deleting the commits with them
  * would be a different, unrecoverable act behind the same word.
  */

@@ -64,6 +64,7 @@ const STEP_KEY: Record<ProgressLabelKey, string> = {
   worktreeMerged: "codingAgent.stepWorktreeMerged",
   worktreeRemoved: "codingAgent.stepWorktreeRemoved",
   worktreeKept: "codingAgent.stepWorktreeKept",
+  worktreeParked: "codingAgent.stepWorktreeParked",
   evidencePruned: "codingAgent.stepEvidencePruned",
   workingOnBranch: "codingAgent.stepWorkingOnBranch",
   noPullRequest: "codingAgent.stepNoPullRequest",
@@ -206,6 +207,8 @@ interface Props {
   working?: { label: string; busy: string; tokens?: string; duration?: string };
   /** Inside another card (the live card's Timeline tab): no card of its own. */
   embedded?: boolean;
+  /** A settled run's log: a card folded to its heading, opened on a click. */
+  folded?: boolean;
   testId?: string;
 }
 
@@ -237,7 +240,7 @@ function sinceStart(at: number, startedAt: number): string {
   return `+${m}m ${sec - m * 60}s`;
 }
 
-export default function CodingRunTimeline({ lines, times = [], startedAt, live, working, embedded = false, testId = "coding-agent-run-activity" }: Props) {
+export default function CodingRunTimeline({ lines, times = [], startedAt, live, working, embedded = false, folded = false, testId = "coding-agent-run-activity" }: Props) {
   const { t } = useT();
   const list = useRef<HTMLOListElement>(null);
   // Hydrated or not — every hook before the early return below.
@@ -271,9 +274,14 @@ export default function CodingRunTimeline({ lines, times = [], startedAt, live, 
   };
   const label = (step: ProgressDescription) => stepLabel(t, step);
   const detail = (step: ProgressDescription) => stepDetail(t, step);
+  // Folded, the card is a <details> and its heading the <summary>: one
+  // heading either way, and the steps stay in the DOM for a reader that
+  // wants them (a closed <details> keeps its children mounted).
+  const Card = folded ? "details" : "div";
+  const Heading = folded ? "summary" : "p";
   return (
-    <div className={embedded ? "" : `mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid={testId} data-live={live || undefined}>
-      <p className={SECTION_LABEL}>
+    <Card className={embedded ? "" : `mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid={testId} data-live={live || undefined} data-folded={folded || undefined}>
+      <Heading className={`${SECTION_LABEL}${folded ? " cursor-pointer list-none" : ""}`}>
         {t("codingAgent.timelineTitle")}
         <span className="rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-semibold leading-none text-[var(--text-secondary)]">{lines.length}</span>
         {live && working && (
@@ -292,7 +300,7 @@ export default function CodingRunTimeline({ lines, times = [], startedAt, live, 
           </span>
         )}
         {live && !working && <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" aria-hidden="true" />}
-      </p>
+      </Heading>
       {/* Oldest first, the newest at the bottom where a live run adds to it;
           capped in height so a long run stays a card, and scrolled to its end
           so the step happening now is the one on screen. */}
@@ -367,6 +375,6 @@ export default function CodingRunTimeline({ lines, times = [], startedAt, live, 
           );
         })}
       </ol>
-    </div>
+    </Card>
   );
 }
