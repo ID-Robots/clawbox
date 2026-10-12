@@ -265,6 +265,8 @@ PY
   clawkeep_install)
     as_owner /bin/bash -c 'pipx install --force "$1/clawkeep" && pipx inject clawkeep "boto3>=1.34"' _ "$PROJECT_DIR"
     ;;
-  cloudflared_install) test -x /usr/local/bin/cloudflared ;;
+  # Out of the verified MIRROR, like the coding harness: root-established bytes,
+  # never the desktop checkout.
+  cloudflared_install) /bin/bash "$MIRROR/scripts/setup-tunnel.sh" ;;
   *) echo "Error: $step is not supported by this desktop integration" >&2; exit 64 ;;
 esac
