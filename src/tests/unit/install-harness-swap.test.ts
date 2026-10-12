@@ -88,6 +88,7 @@ const SWAP_FUNCTIONS = [
   "harness_swap_say_failed",
   "harness_swap_last_line",
   "harness_swap_hermes_runnable",
+  "hermes_venv_python",
   "harness_swap_openclaw_runnable",
   "harness_swap_print_probe",
   "harness_swap_to_hermes",

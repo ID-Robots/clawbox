@@ -23,7 +23,7 @@ Rows marked **OpenClaw/dual** or **Hermes/dual** exist only on those editions. C
 | `…/clawbox/.next/` | Production build output (`BUILD_ID` = fingerprint of the running build) |
 | `~/.openclaw/` — **OpenClaw/dual** | **OpenClaw state**: `openclaw.json` (gateway config), `agents/` (per-agent credentials — exact paths in the table below), `credentials/` (Telegram pairing approvals), `workspace/` (agent working dir), `npm/` (plugins) |
 | `~/.hermes/` — **Hermes/dual** | **Hermes state** — the Hermes equivalent of `~/.openclaw`, and the densest secret store on the box: `config.yaml` (0600 — billing token, dashboard session signing secret, scrypt password hash, `mcp_servers.clawbox`), `config.yaml.bak-*`, `.env` (provider keys), `auth.json` (OAuth tokens), `memories/`, `sessions/`, `skills/`, `pairing/`, `cron/`, `logs/`, `state.db`, `hermes-agent/` — the agent checkout + Python venv — and `bin/tirith`, the upstream pre-exec shell scanner the agent downloads on first use |
-| `~/.local/bin/hermes` — **Hermes/dual** | 4-line shim that execs `~/.hermes/hermes-agent/venv/bin/python` |
+| `~/.local/bin/hermes` — **Hermes/dual** | Small shim into the agent's launcher under `~/.hermes/hermes-agent`; its Python environment lives under `~/.hermes/installs/` and its interpreter under `~/.hermes/tools/`, both kept by factory reset |
 | `/etc/clawbox/edition.env` | Root-owned edition lock (`openclaw` \| `hermes` \| `dual`) — the authority for the SKU; survives updates **and** factory reset |
 | `~/.codex/auth.json` | Codex CLI auth (kept in sync with the agent copies) |
 | `~/.clawkeep/` | ClawKeep backup state: portal `token`, `config.toml`, `state.json`, encryption `passphrase`, `schedule.json` |

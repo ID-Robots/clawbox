@@ -67,10 +67,10 @@ const DATA_KEEP: ReadonlyArray<{ rel: string; keep?: ReadonlySet<string> }> = [
 ];
 const DATA_KEEP_NAMES = new Set(DATA_KEEP.map((entry) => entry.rel));
 
-// The two named exceptions to the ~/.hermes wipe. Neither is owner state and
-// neither can be re-fetched on a reset device — it reboots into AP mode with no
-// internet. Rationale for both is at the HOME_CONTENT_WIPE_KEEP entry below.
-const HERMES_KEEP = new Set(["hermes-agent", "bin"]);
+// The named exceptions to the ~/.hermes wipe. None is owner state and none can
+// be re-fetched on a reset device — it reboots into AP mode with no internet.
+// Rationale for each is at the HOME_CONTENT_WIPE_KEEP entry below.
+const HERMES_KEEP = new Set(["hermes-agent", "bin", "installs", "tools"]);
 
 /** Delete all Ollama models so a factory reset starts with a clean slate. */
 async function deleteOllamaModels(): Promise<void> {
@@ -404,8 +404,9 @@ const HOME_CONTENT_WIPE_KEEP: ReadonlyArray<{ rel: string; keep: ReadonlySet<str
     // is a wipe with ONE exception, not a keep-list.
     //
     // That exception is hermes-agent/, and it is not owner state at all. It is
-    // the AGENT INSTALL — a git checkout of NousResearch/hermes-agent plus the
-    // Python venv that ~/.local/bin/hermes (a 4-line shim) execs. Deleting it
+    // the AGENT INSTALL — a git checkout of NousResearch/hermes-agent plus (up
+    // to v0.21.1) the Python venv that ~/.local/bin/hermes (a 4-line shim)
+    // execs; from v0.21.7 that venv and its interpreter moved, see below. Deleting it
     // was the factory-reset defect this exception fixes: the shim survives the
     // wipe (it lives in ~/.local/bin), so a reset box was left with a `hermes`
     // command whose interpreter no longer existed:
@@ -439,6 +440,17 @@ const HOME_CONTENT_WIPE_KEEP: ReadonlyArray<{ rel: string; keep: ReadonlySet<str
     // invisible to --porcelain. Re-provisioning the agent from upstream after
     // a reset is the real fix, and it needs network this device does not have
     // at reset time.
+    //
+    // From Hermes v0.21.7 the agent install is no longer one directory. The
+    // upstream package manager builds the agent's venv in installs/ (selected by
+    // installs/<key>/facts.json) and keeps the Python the launcher execs, plus
+    // uv, node and the agent's browser, in tools/; ~/.local/bin/hermes now
+    // execs a launcher in hermes-agent/.hermes/bin that runs
+    // tools/python-<version>/bin/python3. Kept with hermes-agent/ for the same
+    // reason: measured on a Nano, leaving out tools/ makes `hermes` fail with
+    // "python3: not found", and leaving out installs/ leaves it no
+    // dependencies. Both are upstream artifacts — hashes, interpreters,
+    // packages — with no owner data in them.
     //
     // The second exception is bin/, and it is the same category. It holds the
     // upstream `tirith` binary the agent runs BEFORE every shell command
