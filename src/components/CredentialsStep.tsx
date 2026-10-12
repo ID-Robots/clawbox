@@ -199,6 +199,14 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
   // required" and the wizard could not be finished. A retry therefore skips a
   // password it already set, and re-proves it when the owner changed the field.
   const savedPasswordRef = useRef<string | null>(null);
+  // The submission whose save ended on the "saved, but the hotspot did not
+  // restart" notice. That notice is held on screen on purpose — nothing
+  // advances past it on a timer — but the only control under it was Save,
+  // which re-ran the same save into the same notice: on a box whose radio
+  // cannot host a hotspot at all there was no way forward. While the fields
+  // still hold exactly what was saved, the button is Continue instead. Any
+  // edit makes it a save again.
+  const [warnedSubmissionKey, setWarnedSubmissionKey] = useState<string | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -303,6 +311,10 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
   /** The button's (and Enter's) action: validate, then ask before saving. */
   const requestSave = () => {
     if (saving || pending) return;
+    if (continuesPastWarning) {
+      onNext();
+      return;
+    }
     const submission = validate();
     if (!submission) return;
     setStatus(null);
@@ -450,6 +462,7 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
 
       if (apWarning) {
         setStatus({ type: "info", message: apWarning });
+        setWarnedSubmissionKey(JSON.stringify(submission));
         // No auto-advance: the one thing that must not happen here is the
         // message being replaced by the next step before it has been read.
         return;
@@ -543,6 +556,21 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
   const systemSecretMissing = !password || !confirmPassword;
   const hotspotSecretOutstanding = hotspotEnabled && hotspotSecretMissing;
   const incomplete = systemSecretMissing || hotspotSecretOutstanding;
+
+  // What Save would send right now, built the way `validate` builds it, so it
+  // can be compared with the submission the hotspot notice was shown for.
+  const currentSubmission: CredentialsSubmission = {
+    hostname: normalizedHostname,
+    password,
+    hotspotEnabled,
+    hotspotName: hotspotEnabled ? hotspotName.trim() : "ClawBox-Setup",
+    hotspotPassword: hotspotEnabled ? hotspotPassword : "",
+  };
+  const continuesPastWarning =
+    warnedSubmissionKey !== null
+    && password === confirmPassword
+    && (!hotspotEnabled || hotspotPassword === confirmHotspotPassword)
+    && JSON.stringify(currentSubmission) === warnedSubmissionKey;
   const blocked = saving || incomplete;
 
   // Why the button will not move, in the same words as the fields it is
@@ -980,7 +1008,11 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
                 className="inline-block w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin"
               />
             )}
-            {saving ? t("saving") : t("credentials.saveAndContinue")}
+            {saving
+              ? t("saving")
+              : continuesPastWarning
+                ? t("continue")
+                : t("credentials.saveAndContinue")}
           </button>
           {/* Beside the button, not buried up the form: the reason is only
               useful where the owner is looking when nothing happens. `status`

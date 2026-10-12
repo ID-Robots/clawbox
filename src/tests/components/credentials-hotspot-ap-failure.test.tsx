@@ -128,6 +128,36 @@ describe("Step 3 — a hotspot save whose AP toggle failed", () => {
     expect(onNext).not.toHaveBeenCalled();
   });
 
+  // The notice is held on purpose, but the only control under it was Save,
+  // which ran the same save into the same notice. On a box whose radio cannot
+  // host a hotspot at all, that was the end of the wizard.
+  it("turns the button into Continue once the warning is up, without saving again", async () => {
+    const onNext = vi.fn();
+    await saveStep(onNext);
+    await waitFor(() => expect(screen.getByText(AP_WARNING)).toBeInTheDocument());
+    const postsBefore = fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === "POST").length;
+
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(onNext).toHaveBeenCalledTimes(1);
+    expect(
+      fetchMock.mock.calls.filter(([, init]) => (init as RequestInit | undefined)?.method === "POST"),
+    ).toHaveLength(postsBefore);
+  });
+
+  it("goes back to a save as soon as a field is edited", async () => {
+    const onNext = vi.fn();
+    await saveStep(onNext);
+    await waitFor(() => expect(screen.getByText(AP_WARNING)).toBeInTheDocument());
+
+    const hotspot = document.querySelector<HTMLInputElement>("#hotspot-password")!;
+    fireEvent.change(hotspot, { target: { value: "Different-1234" } });
+
+    expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Save & Continue" })).toBeInTheDocument();
+    expect(onNext).not.toHaveBeenCalled();
+  });
+
   it("carries the warning into the reconnect when the device was also renamed", async () => {
     // The one combination where the message would otherwise be lost: this
     // origin is about to stop answering, so the reconnect cannot wait for the
