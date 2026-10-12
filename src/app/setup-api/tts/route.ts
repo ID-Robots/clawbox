@@ -33,7 +33,13 @@ import { readLocalVoice, readVoiceState, writeLocalVoice, writeVoiceState } from
 import { isCloudVoice, isCloudVoiceFor, isLocalVoice, isVoiceLanguage } from "@/lib/voice-catalog";
 import { createSerialLock } from "@/lib/serial-lock";
 import { wireLocalVoice } from "@/lib/voice-local-wiring";
-import { getVoiceAutoReply, setVoiceAutoReply, ttsAutoModeFor } from "@/lib/voice-reply";
+import {
+  getVoiceAutoPlayAll,
+  getVoiceAutoReply,
+  setVoiceAutoPlayAll,
+  setVoiceAutoReply,
+  ttsAutoModeFor,
+} from "@/lib/voice-reply";
 import { clearOwnerChoice, noteOwnerChoice, readChoiceSource, restoreChoiceSource } from "@/lib/clawai-cloud-choice";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
@@ -44,6 +50,9 @@ import { logSafe } from "@/lib/log-safe";
  * POST /setup-api/tts {select}   → pick Auto / On this box / ClawBox cloud
  * POST /setup-api/tts {voice}    → which voice an engine speaks with
  * POST /setup-api/tts {language} → the sample sentence's language on the Voice tab
+ * POST /setup-api/tts {autoReply}   → spoken replies on or off (owner only)
+ * POST /setup-api/tts {autoPlayAll} → whether every spoken reply in the chat
+ *                                     plays by itself (owner only)
  *
  * GET touches only the filesystem. The openclaw CLI costs 8-12 s of cold start
  * on an Orin Nano (see runOpenclawConfigSet's note), which is fine for an
@@ -57,10 +66,10 @@ import { logSafe } from "@/lib/log-safe";
 const NO_STORE = { "Cache-Control": "no-store" };
 
 /**
- * The four things POST does, as a list rather than a chain of `!==`.
+ * The things POST does, as a list rather than a chain of `!==`.
  *
  * The value the handler uses is SELECTED OUT OF THIS ARRAY, not the body's copy
- * of one of these words. Both spell the same four things and no request can
+ * of one of these words. Both spell the same things and no request can
  * tell them apart — but the failure line below names the action, and a string
  * read off `request.json()` is what CodeQL reports as `js/log-injection`
  * (TASK-723). A value that came out of a literal array is not the request's
@@ -73,7 +82,13 @@ const NO_STORE = { "Cache-Control": "no-store" };
  * `logSafe` alone is not a barrier that query recognises (the note in
  * ai-models/configure/route.ts says so, and it is right); `JSON.stringify` is.
  */
-const ACTIONS = ["select", "voice", "language", "autoReply"] as const;
+const ACTIONS = ["select", "voice", "language", "autoReply", "autoPlayAll"] as const;
+
+/**
+ * The owner's own switches: whether the box answers with a voice at all, and
+ * whether the chat plays every such answer by itself. See the gate in POST.
+ */
+const OWNER_ONLY_ACTIONS: ReadonlySet<(typeof ACTIONS)[number]> = new Set(["autoReply", "autoPlayAll"]);
 
 function refuse(error: string, code: string, status: number) {
   return NextResponse.json({ error, code }, { status, headers: NO_STORE });
@@ -135,20 +150,28 @@ type VoiceStatusBody = VoiceOutputStatus & {
   channels: typeof CHANNELS_UNSUPPORTED | { supportedOnEdition: true; voiceNoteReady: boolean };
   /** The owner's switch for spoken replies (src/lib/voice-reply.ts). */
   autoReply: boolean;
+  /**
+   * The owner's second switch: the chat plays a typed question's reply by
+   * itself too. Stored on its own, so it keeps its position while spoken
+   * replies are off — when it does nothing.
+   */
+  autoPlayAll: boolean;
 };
 
 async function status(): Promise<VoiceStatusBody> {
   const harness = await getActiveHarness();
-  const [{ config, probe }, state, localVoice, autoReply] = await Promise.all([
+  const [{ config, probe }, state, localVoice, autoReply, autoPlayAll] = await Promise.all([
     probeBox(harness),
     readVoiceState().then(withUiLanguage),
     readLocalVoice(),
     getVoiceAutoReply(),
+    getVoiceAutoPlayAll(),
   ]);
   return {
     ...buildVoiceOutputStatus(config, probe, state, localVoice),
     channels: await channelsSpeak(harness),
     autoReply,
+    autoPlayAll,
   };
 }
 
@@ -169,6 +192,21 @@ async function handleAutoReply(enabled: unknown) {
     await runOpenclawConfigSet([`${await ttsConfigHome()}.auto`, ttsAutoModeFor(enabled)]);
   }
   await setVoiceAutoReply(enabled);
+  return NextResponse.json(await status(), { headers: NO_STORE });
+}
+
+/**
+ * Whether the desktop chat plays every spoken reply by itself, a typed
+ * question's included. The chat's business alone: the gateway's `tts.auto`
+ * stays `inbound`, because a typed question on a channel still gets a typed
+ * answer, so nothing is written outside the config store and every harness
+ * takes the same path.
+ */
+async function handleAutoPlayAll(enabled: unknown) {
+  if (typeof enabled !== "boolean") {
+    return refuse("Say whether every spoken reply plays by itself.", "bad_request", 400);
+  }
+  await setVoiceAutoPlayAll(enabled);
   return NextResponse.json(await status(), { headers: NO_STORE });
 }
 
@@ -519,13 +557,16 @@ export async function POST(req: Request) {
   // words off the box — is the person's decision, and the agent holds the
   // MCP bearer the middleware also admits here (same rule as the stt route);
   // the cookie rides on a POST any other site fires at the box (same-origin.ts).
-  if (action === "autoReply" && !(await hasOwnerSession(req))) {
+  // The auto-play switch under it takes the same gate: whether the box starts
+  // talking at whoever is at the desk is the owner's call just the same.
+  const ownerOnly = OWNER_ONLY_ACTIONS.has(action);
+  if (ownerOnly && !(await hasOwnerSession(req))) {
     return NextResponse.json(
       { error: "Changing spoken replies needs a signed-in browser session.", kind: "owner_only", code: "owner_only" },
       { status: 403, headers: NO_STORE },
     );
   }
-  if (action === "autoReply" && !isSameOriginRequest(req)) {
+  if (ownerOnly && !isSameOriginRequest(req)) {
     return NextResponse.json(
       { error: "Changing spoken replies only works from this ClawBox's own pages.", kind: "cross_origin", code: "cross_origin" },
       { status: 403, headers: NO_STORE },
@@ -543,6 +584,7 @@ export async function POST(req: Request) {
     if (action === "voice") return await handleVoice(engine, voice);
     if (action === "language") return await handleLanguage(language);
     if (action === "autoReply") return await handleAutoReply(enabled);
+    if (action === "autoPlayAll") return await handleAutoPlayAll(enabled);
     return await handleSelect(choice as VoiceChoice);
   } catch (err) {
     // THE ERROR, NOT THE ACTION, is what CodeQL reported here (#464), and the

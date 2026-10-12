@@ -68,6 +68,45 @@ describe("the switch", () => {
   });
 });
 
+describe("the auto-play switch", () => {
+  it("is off on a box that has never stored it", async () => {
+    // A box that predates the switch, or one whose owner never touched it:
+    // nothing stored, and a typed question's reply keeps waiting to be pressed.
+    const { getVoiceAutoPlayAll, VOICE_AUTO_PLAY_ALL_KEY } = await lib();
+    expect(await getVoiceAutoPlayAll()).toBe(false);
+    expect(getMock).toHaveBeenCalledWith(VOICE_AUTO_PLAY_ALL_KEY);
+  });
+
+  it("reads anything but a stored `true` as off", async () => {
+    const { getVoiceAutoPlayAll } = await lib();
+    for (const stored of ["true", "on", 1, null, {}, false]) {
+      getMock.mockResolvedValue(stored);
+      expect(await getVoiceAutoPlayAll()).toBe(false);
+    }
+  });
+
+  it("round-trips the owner's answer under its own key, beside spoken replies", async () => {
+    const store = new Map<string, unknown>();
+    getMock.mockImplementation(async (key: string) => store.get(key));
+    setMock.mockImplementation(async (key: string, value: unknown) => { store.set(key, value); });
+    const {
+      getVoiceAutoPlayAll, setVoiceAutoPlayAll, getVoiceAutoReply,
+      VOICE_AUTO_PLAY_ALL_KEY, VOICE_AUTO_REPLY_KEY,
+    } = await lib();
+    expect(VOICE_AUTO_PLAY_ALL_KEY).not.toBe(VOICE_AUTO_REPLY_KEY);
+
+    await setVoiceAutoPlayAll(true);
+    expect(setMock).toHaveBeenCalledWith(VOICE_AUTO_PLAY_ALL_KEY, true);
+    expect(await getVoiceAutoPlayAll()).toBe(true);
+    // Its own key: spoken replies did not move with it.
+    expect(await getVoiceAutoReply()).toBe(false);
+
+    await setVoiceAutoPlayAll(false);
+    expect(store.get(VOICE_AUTO_PLAY_ALL_KEY)).toBe(false);
+    expect(await getVoiceAutoPlayAll()).toBe(false);
+  });
+});
+
 describe("ensureVoiceAutoReplyMode", () => {
   it("seeds off into the v2 home on a fresh box — no stored switch, no mode", async () => {
     // The default is off, so a box that has never been asked is seeded the

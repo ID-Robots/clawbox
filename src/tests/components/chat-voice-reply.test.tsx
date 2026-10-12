@@ -56,6 +56,23 @@ let replyAudio: string | null = null;
  */
 let supplementAudio: string | null = null;
 let supplementDelayMs = 3;
+/**
+ * Settings → Voice → "Auto-play every spoken reply", as `/setup-api/tts`
+ * states it; `undefined` sends no field at all — a server from before it.
+ */
+let autoPlayAllAnswer: boolean | undefined = undefined;
+/** When set, what `chat.history` answers: a conversation the box already stored. */
+let historyMessages: unknown[] | null = null;
+/** When set, the gateway delivers every final TWICE, as a replay can. */
+let duplicateFinal = false;
+/** How long after a turn is sent its final lands — long enough, when raised, for the owner to leave mid-turn. */
+let finalDelayMs = 1;
+/** When set, every read of `/setup-api/tts` is held until it resolves: a status read still in flight. */
+let ttsGate: Promise<void> | null = null;
+/** The page's visibility, as the chat reads it. */
+let pageVisibility: DocumentVisibilityState = "visible";
+/** Every socket the chat opened, newest last — so a test can drop one. */
+const sockets: FakeGatewayWs[] = [];
 
 class FakeGatewayWs {
   static readonly CONNECTING = 0;
@@ -70,6 +87,7 @@ class FakeGatewayWs {
   onopen: (() => void) | null = null;
 
   constructor(public url: string) {
+    sockets.push(this);
     setTimeout(() => this.emit({ type: "event", event: "connect.challenge", payload: { nonce: "test-nonce" } }), 0);
   }
 
@@ -88,6 +106,10 @@ class FakeGatewayWs {
       return;
     }
     if (frame.method === "chat.history") {
+      if (historyMessages) {
+        this.respond(id, { messages: historyMessages });
+        return;
+      }
       // After an ack-only turn, the stored reply is what history answers.
       const stored = ackOnly && sentFrames.some((f) => f.method === "chat.send")
         ? [{ role: "assistant", content: [{ type: "text", text: replyText }], timestamp: 1787260001000 }]
@@ -103,7 +125,7 @@ class FakeGatewayWs {
     }
     const runId = `run-${sentFrames.length}`;
     this.respond(id, { runId, status: "started" });
-    setTimeout(() => this.emit({
+    const final = {
       type: "event",
       event: "chat",
       payload: {
@@ -125,7 +147,9 @@ class FakeGatewayWs {
           timestamp: 1787260000000,
         },
       },
-    }), 1);
+    };
+    setTimeout(() => this.emit(final), finalDelayMs);
+    if (duplicateFinal) setTimeout(() => this.emit(final), finalDelayMs + 5);
     if (supplementAudio) {
       setTimeout(() => this.emit({
         type: "event",
@@ -222,14 +246,16 @@ function installFetch() {
       if (url.includes("/setup-api/tts")) {
         ttsReads += 1;
         if (ttsRefuses) return { ok: false, status: 500, json: async () => ({ error: "boom" }) };
-        return {
-          ok: true,
-          json: async () => ({
-            choice: "auto",
-            autoReply: autoReplyAnswer,
-            ...(ttsEngines ? { engines: ttsEngines } : {}),
-          }),
+        // What the box says at the moment it is ASKED: a read held below
+        // answers with the state from before anything changed meanwhile.
+        const answer = {
+          choice: "auto",
+          autoReply: autoReplyAnswer,
+          ...(autoPlayAllAnswer !== undefined ? { autoPlayAll: autoPlayAllAnswer } : {}),
+          ...(ttsEngines ? { engines: ttsEngines } : {}),
         };
+        if (ttsGate) await ttsGate;
+        return { ok: true, json: async () => answer };
       }
       return { ok: true, json: async () => ({}) };
     }),
@@ -279,6 +305,14 @@ describe("spoken replies in the desktop chat", () => {
     replyAudio = null;
     supplementAudio = null;
     supplementDelayMs = 3;
+    autoPlayAllAnswer = undefined;
+    historyMessages = null;
+    duplicateFinal = false;
+    finalDelayMs = 1;
+    ttsGate = null;
+    pageVisibility = "visible";
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => pageVisibility });
+    sockets.length = 0;
     resetHarnessCache();
     window.localStorage.clear();
     Element.prototype.scrollIntoView = vi.fn();
@@ -300,6 +334,7 @@ describe("spoken replies in the desktop chat", () => {
     if (originalPaused) Object.defineProperty(MEDIA, "paused", originalPaused);
     else delete (MEDIA as unknown as Record<string, unknown>).paused;
     _resetSpokenReplyPlaybackForTests();
+    delete (document as unknown as Record<string, unknown>).visibilityState;
     URL.createObjectURL = originalCreate;
     URL.revokeObjectURL = originalRevoke;
     vi.unstubAllGlobals();
@@ -682,6 +717,318 @@ describe("spoken replies in the desktop chat", () => {
     const detached = play.mock.contexts[play.mock.contexts.length - 1] as HTMLMediaElement;
     fireEvent.click(await screen.findByTestId("voice-record"));
     expect(media.isPlaying(detached)).toBe(false);
+  });
+
+  // ── Auto-play every spoken reply ──────────────────────────────────────
+  //
+  // Settings → Voice's second switch: on, a TYPED question's reply plays by
+  // itself exactly as a spoken one's does. Off — the default, and what a box
+  // that predates the switch reads — everything above holds unchanged. Every
+  // case counts `play` after a settle: one reply is one playback at most, and
+  // a reply the owner did not just ask for in this tab is none.
+
+  /** A clip the box stored with a reply, in the shape the harness attaches it. */
+  const STORED_CLIP = "/home/clawbox/.openclaw/media/outbound/voice-1787250000000---cc.wav";
+  const storedConversation = () => [
+    { role: "user", content: [{ type: "text", text: "how are you" }], timestamp: 1787250000000 },
+    {
+      role: "assistant",
+      content: [
+        { type: "text", text: "Fine, thanks." },
+        { type: "attachment", attachment: { url: STORED_CLIP, kind: "audio", label: "voice.wav", mimeType: "audio/wav" } },
+      ],
+      timestamp: 1787250000500,
+    },
+  ];
+  const sends = () => sentFrames.filter((f) => f.method === "chat.send").length;
+
+  /** One more typed question, after the first: waits for ITS send and ITS turn to end. */
+  async function typeAgain(question: string) {
+    const before = sends();
+    const textarea = await screen.findByRole("textbox");
+    await waitFor(() => expect(textarea).not.toBeDisabled());
+    fireEvent.change(textarea, { target: { value: question } });
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    await waitFor(() => expect(sends()).toBe(before + 1));
+    await waitFor(() => expect(screen.queryByTestId("chat-turn-status")).toBeNull());
+  }
+
+  it("plays a typed question's reply by itself once the owner switched auto-play on", async () => {
+    autoPlayAllAnswer = true;
+    replyText = "Fine, thanks.";
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await typeIntoTheChat();
+    await waitFor(() => expect(speakBodies).toEqual([SPEAK_BODY]));
+    const player = await screen.findByTestId("chat-audio");
+    expect(player).toHaveAttribute("src", "blob:spoken-reply");
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+    // The chat's own opener was not the owner asking: its reply stays silent.
+    await settleAfterTheTurn();
+    expect(play).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves a typed question's reply on its player while auto-play is off", async () => {
+    autoPlayAllAnswer = false;
+    replyText = "Fine, thanks.";
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await typeIntoTheChat();
+    await waitFor(() => expect(speakBodies).toEqual([SPEAK_BODY]));
+    expect(await screen.findByTestId("chat-audio")).toHaveAttribute("src", "blob:spoken-reply");
+    await settleAfterTheTurn();
+    expect(play).not.toHaveBeenCalled();
+  });
+
+  it("plays the clip a typed reply arrived with, and asks for none", async () => {
+    // Hermes' chat route attaches the clip inside the turn; so can a gateway.
+    autoPlayAllAnswer = true;
+    replyText = "Fine, thanks.";
+    replyAudio = "/home/clawbox/.openclaw/media/outbound/voice-1787260000000---aa.wav";
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await typeIntoTheChat();
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+    expect((play.mock.contexts[0] as HTMLMediaElement).src).toContain("/setup-api/chat/media");
+    await settleAfterTheTurn();
+    expect(speakBodies).toEqual([]);
+    // The opener's reply carried a clip too, and was never the owner's question.
+    expect(play).toHaveBeenCalledTimes(1);
+  });
+
+  it("answers a spoken question exactly as before with auto-play on", async () => {
+    autoPlayAllAnswer = true;
+    replyText = "Fine, thanks.";
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await speakIntoTheChat();
+    await waitFor(() => expect(speakBodies).toEqual([SPEAK_BODY]));
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+    await settleAfterTheTurn();
+    expect(play).toHaveBeenCalledTimes(1);
+    expect(speakBodies).toHaveLength(1);
+  });
+
+  it("says press play when the browser refuses to start a typed reply on its own", async () => {
+    autoPlayAllAnswer = true;
+    play.mockImplementation(async () => { throw new DOMException("blocked", "NotAllowedError"); });
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await typeIntoTheChat();
+    await screen.findByTestId("chat-audio-blocked");
+  });
+
+  it("does nothing while spoken replies are off, whatever auto-play says", async () => {
+    autoReplyAnswer = false;
+    autoPlayAllAnswer = true;
+    replyText = "Fine, thanks.";
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await typeIntoTheChat();
+    await settleAfterTheTurn();
+    expect(speakBodies).toEqual([]);
+    expect(play).not.toHaveBeenCalled();
+  });
+
+  it("follows the switch live: the next typed reply plays with no reload", async () => {
+    autoPlayAllAnswer = false;
+    replyText = "Fine, thanks.";
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await typeIntoTheChat();
+    await waitFor(() => expect(speakBodies).toHaveLength(1));
+    await settleAfterTheTurn();
+    expect(play).not.toHaveBeenCalled();
+
+    // Settings → Voice turned auto-play on while the chat was open.
+    act(() => {
+      window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, { detail: { autoReply: true, autoPlayAll: true } }));
+    });
+    await typeAgain("and tomorrow?");
+    await waitFor(() => expect(speakBodies).toHaveLength(2));
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+
+    // ...and off again: the next one waits on its player.
+    act(() => {
+      window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, { detail: { autoReply: true, autoPlayAll: false } }));
+    });
+    await typeAgain("and the day after?");
+    await waitFor(() => expect(speakBodies).toHaveLength(3));
+    await settleAfterTheTurn();
+    expect(play).toHaveBeenCalledTimes(1);
+  });
+
+  it("never starts a reply that is already in the history when the chat opens", async () => {
+    autoPlayAllAnswer = true;
+    historyMessages = storedConversation();
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    // The stored clip is on screen — the history HAS painted — and silent.
+    await screen.findByTestId("chat-audio");
+    await settleAfterTheTurn();
+    expect(play).not.toHaveBeenCalled();
+    expect(speakBodies).toEqual([]);
+  });
+
+  it("plays a reply delivered twice only once", async () => {
+    autoPlayAllAnswer = true;
+    duplicateFinal = true;
+    replyText = "Fine, thanks.";
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await typeIntoTheChat();
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+    await settleAfterTheTurn();
+    expect(play).toHaveBeenCalledTimes(1);
+    expect(speakBodies).toHaveLength(1);
+  });
+
+  it("plays nothing again after a reconnect, or when the stored reply is pushed and read back", async () => {
+    autoPlayAllAnswer = true;
+    replyText = "Fine, thanks.";
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await typeIntoTheChat();
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+
+    // The gateway bounces under the chat, which reconnects on its own.
+    const frames = (method: string) => sentFrames.filter((f) => f.method === method).length;
+    const connectsBefore = frames("connect");
+    act(() => { sockets[sockets.length - 1].onclose?.(); });
+    await waitFor(() => expect(frames("connect")).toBeGreaterThan(connectsBefore), { timeout: 10_000 });
+
+    // ...and pushes the conversation as it stored it, the reply's clip
+    // included, which the chat reads back from the history.
+    historyMessages = storedConversation();
+    const historyBefore = frames("chat.history");
+    const stored = storedConversation()[1];
+    act(() => {
+      sockets[sockets.length - 1].emit({ type: "event", event: "session.message", payload: { sessionKey: "agent:main:main", message: stored } });
+    });
+    await waitFor(() => expect(frames("chat.history")).toBeGreaterThan(historyBefore), { timeout: 10_000 });
+    await settleAfterTheTurn();
+    expect(play).toHaveBeenCalledTimes(1);
+    expect(speakBodies).toHaveLength(1);
+  }, 25_000);
+
+  it("plays a typed reply that only arrived through the history refetch after an ack-only final", async () => {
+    // The live landing of the run just closed in this conversation, read from
+    // history because the gateway acked with "Sent." — the same rule the
+    // spoken question's reply follows above.
+    autoPlayAllAnswer = true;
+    ackOnly = true;
+    replyText = "Fine, thanks.";
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await typeIntoTheChat();
+    await waitFor(() => expect(speakBodies).toEqual([SPEAK_BODY]), { timeout: 8000 });
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+    await settleAfterTheTurn();
+    expect(play).toHaveBeenCalledTimes(1);
+  }, 15_000);
+
+  it("never plays an OLDER reply when the ack-only refetch comes back before the new one is stored", async () => {
+    // The box acked with "Sent." and, three seconds on, has stored the owner's
+    // question but not yet its answer: the newest reply in what it reads back
+    // is the one from before this turn, clip and all. Not live.
+    autoPlayAllAnswer = true;
+    ackOnly = true;
+    historyMessages = [
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "An older answer." },
+          { type: "attachment", attachment: { url: STORED_CLIP, kind: "audio", label: "voice.wav", mimeType: "audio/wav" } },
+        ],
+        timestamp: 1787250000500,
+      },
+      { role: "user", content: [{ type: "text", text: "how are you" }], timestamp: 1787260000000 },
+    ];
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await screen.findByText("An older answer.", { exact: false });
+    const reads = () => sentFrames.filter((f) => f.method === "chat.history").length;
+    await typeAgain("how are you");
+    const readsAfterTheTurn = reads();
+    // The refetch three seconds after the "Sent." ack has come and gone.
+    await waitFor(() => expect(reads()).toBeGreaterThan(readsAfterTheTurn), { timeout: 8000 });
+    await settleAfterTheTurn();
+    expect(play).not.toHaveBeenCalled();
+    expect(speakBodies).toEqual([]);
+  }, 15_000);
+
+  it("lets a settings change win over a status read that was already out", async () => {
+    // The chat opened and asked the box; before the answer came back, the
+    // owner turned auto-play OFF in Settings -> Voice. The read's answer is
+    // from before that change, and must not put the switch back on.
+    autoPlayAllAnswer = true;
+    replyText = "Fine, thanks.";
+    let openGate: () => void = () => {};
+    ttsGate = new Promise<void>((resolve) => { openGate = resolve; });
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => expect(ttsReads).toBeGreaterThan(0));
+    autoPlayAllAnswer = false;
+    act(() => {
+      window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, { detail: { autoReply: true, autoPlayAll: false } }));
+    });
+    await act(async () => { openGate(); });
+    ttsGate = null;
+    await typeIntoTheChat();
+    // Spoken replies are on, so the reply still gets its clip — to press.
+    await waitFor(() => expect(speakBodies).toEqual([SPEAK_BODY]));
+    await settleAfterTheTurn();
+    expect(play).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Send a typed question whose reply lands `finalDelayMs` later, and do
+   * `leave` while it is out. Waits for the chat's own opener to settle first,
+   * so the send counted is the owner's.
+   */
+  async function typeThenLeave(leave: () => void) {
+    await waitFor(() => expect(sends()).toBeGreaterThanOrEqual(1));
+    await waitFor(() => expect(screen.queryByTestId("chat-turn-status")).toBeNull());
+    finalDelayMs = 400;
+    const before = sends();
+    const textarea = await screen.findByRole("textbox");
+    await waitFor(() => expect(textarea).not.toBeDisabled());
+    fireEvent.change(textarea, { target: { value: "how are you" } });
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    await waitFor(() => expect(sends()).toBe(before + 1));
+    act(() => { leave(); });
+  }
+
+  it("leaves a typed reply on its player when the owner closed the chat before it landed", async () => {
+    autoPlayAllAnswer = true;
+    replyText = "Fine, thanks.";
+    const { rerender } = render(<ChatPopup isOpen onClose={() => {}} />);
+    await typeThenLeave(() => rerender(<ChatPopup isOpen={false} onClose={() => {}} />));
+    // The reply landed with the popup closed: its clip is made, silently.
+    await waitFor(() => expect(speakBodies).toEqual([SPEAK_BODY]), { timeout: 5000 });
+    await settleAfterTheTurn();
+    expect(play).not.toHaveBeenCalled();
+  });
+
+  it("leaves a typed reply on its player when the owner's tab was hidden before it landed", async () => {
+    autoPlayAllAnswer = true;
+    replyText = "Fine, thanks.";
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await typeThenLeave(() => { pageVisibility = "hidden"; });
+    await waitFor(() => expect(speakBodies).toEqual([SPEAK_BODY]), { timeout: 5000 });
+    expect(await screen.findByTestId("chat-audio")).toHaveAttribute("src", "blob:spoken-reply");
+    await settleAfterTheTurn();
+    expect(play).not.toHaveBeenCalled();
+  });
+
+  it("asks again before the sound starts: a tab hidden while the clip was made stays silent", async () => {
+    // The reply landed with the owner at the chat, so it was going to play —
+    // "Speaking the reply…" is up — but the owner switched tabs while the box
+    // was still making the sound. The clip goes on its bubble; nothing plays.
+    autoPlayAllAnswer = true;
+    replyText = "Fine, thanks.";
+    let releaseSpeak: () => void = () => {};
+    const held = new Promise<void>((resolve) => { releaseSpeak = resolve; });
+    const inner = globalThis.fetch as unknown as (i: unknown, init?: RequestInit) => Promise<unknown>;
+    vi.stubGlobal("fetch", vi.fn(async (input: unknown, init?: RequestInit) => {
+      if (String(input).includes("/setup-api/tts/speak")) await held;
+      return inner(input, init);
+    }));
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await typeIntoTheChat();
+    await screen.findByTestId("chat-speaking-reply");
+    pageVisibility = "hidden";
+    releaseSpeak();
+    await waitFor(() => expect(screen.getByTestId("chat-audio")).toHaveAttribute("src", "blob:spoken-reply"));
+    await settleAfterTheTurn();
+    expect(play).not.toHaveBeenCalled();
   });
 
 });

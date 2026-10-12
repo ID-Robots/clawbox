@@ -15,8 +15,16 @@
  *    transcribed on the box and sent as text, so `inboundAudio` is never true
  *    for a turn from this surface and `tts.auto: "inbound"` cannot fire on any
  *    reply here, typed or spoken. The chat asks /setup-api/tts/speak for the
- *    reply's audio itself — playing it when the question was spoken, and
- *    putting it on the bubble to press when it was typed.
+ *    reply's audio itself — playing it when the question was spoken, and, by
+ *    default, putting it on the bubble to press when it was typed.
+ *
+ * "By default" because a second switch under the first, "Auto-play every
+ * spoken reply" (`voice_auto_play_all`, also OFF unless the owner turns it on),
+ * has the chat play a TYPED question's reply by itself too, exactly as a
+ * spoken one's. It belongs to the desktop chat alone and reaches no gateway:
+ * a channel's typed question still gets a typed answer. It means nothing
+ * while spoken replies are off — there is no clip to play then — and the
+ * Voice tab greys it out in that state rather than forgetting it.
  *
  * The switch lives in ClawBox's own config store, like the transcription
  * preference: the Hermes edition has no openclaw.json and its desktop chat
@@ -51,6 +59,25 @@ export async function getVoiceAutoReply(): Promise<boolean> {
 
 export async function setVoiceAutoReply(enabled: boolean): Promise<void> {
   await set(VOICE_AUTO_REPLY_KEY, enabled);
+}
+
+/** The config-store key of the second switch: auto-play every spoken reply. */
+export const VOICE_AUTO_PLAY_ALL_KEY = "voice_auto_play_all";
+
+/**
+ * Whether the desktop chat plays a TYPED question's reply by itself, the way
+ * it plays a spoken one's. Off unless the owner switched it on, by the same
+ * rule as the switch above: only a stored `true` plays. A box that predates
+ * the switch has nothing stored and stays exactly as it was — a box that
+ * started talking at someone who typed is the worse mistake.
+ */
+export async function getVoiceAutoPlayAll(): Promise<boolean> {
+  const stored = await get(VOICE_AUTO_PLAY_ALL_KEY);
+  return stored === true;
+}
+
+export async function setVoiceAutoPlayAll(enabled: boolean): Promise<void> {
+  await set(VOICE_AUTO_PLAY_ALL_KEY, enabled);
 }
 
 /** The gateway's auto-TTS mode for the switch's position. */

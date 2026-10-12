@@ -42,8 +42,8 @@ function bodyOf(source: string, anchor: string): string {
 describe("POST /setup-api/tts — the action that reaches the journal", () => {
   const source = fs.readFileSync(ROUTE, "utf8");
 
-  it("keeps the four actions as one list", () => {
-    // A fifth action added to the switch below but not to this list is refused
+  it("keeps the actions as one list", () => {
+    // A new action added to the switch below but not to this list is refused
     // at the door, which is the failure an operator can see. The reverse — a
     // name added here and handled nowhere — falls through to `handleSelect`,
     // so the list is the door and the door is the list.
@@ -61,7 +61,7 @@ describe("POST /setup-api/tts — the action that reaches the journal", () => {
       .map((entry) => entry.trim())
       .filter(Boolean);
 
-    expect(names).toEqual(['"select"', '"voice"', '"language"', '"autoReply"']);
+    expect(names).toEqual(['"select"', '"voice"', '"language"', '"autoReply"', '"autoPlayAll"']);
     // `as const` is what gives the `.find` below its literal union — without it
     // `action` widens to `string` and the four handlers lose their narrowing.
     expect(source.slice(end, end + 12)).toContain("as const");

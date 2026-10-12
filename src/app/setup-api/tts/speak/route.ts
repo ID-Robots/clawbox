@@ -14,7 +14,8 @@ import { pickReplyFormat } from "@/lib/voice-reply-format";
  * transcribed on the box first — so `tts.auto: "inbound"` can never fire on a
  * reply to one, whether it was typed or spoken. The chat asks here instead,
  * with the reply's text, and renders what comes back beside the bubble (played
- * at once for a spoken question, left to press for a typed one). Through the
+ * at once for a spoken question; left to press for a typed one by default,
+ * played as well when the owner switched auto-play on). Through the
  * CHAIN — the
  * engine the Voice tab put first, then the other — because the owner wants to
  * hear the answer, not audition an engine (that is `tts/sample`).

@@ -203,7 +203,9 @@ const PLAYBACK_MAX_MS = 150_000
 /**
  * A turn waiting its go: what to send, and where it came from.
  *
- * `voice` — the owner SPOKE it, so the reply is spoken back aloud.
+ * `voice` — the owner SPOKE it, so the reply is spoken back aloud. (A typed
+ *   one's reply is played too when the owner switched auto-play on — see
+ *   voiceReply; that rides on `asked`.)
  * `asked` — the owner's own words, typed or spoken, as opposed to a line the
  *   UI composed for them (the New App handoff, Fix-My-Error, the question
  *   after a skill change). Only the first kind is owed a clip: nobody is
@@ -462,6 +464,7 @@ function getProviderPillText(option: ChatModelState['options'][number]): string 
 }
 
 import { claimSpokenReply, releaseSpokenReply, spokenReplyInterruptions, stopSpokenReply } from '@/lib/spoken-reply-playback'
+import { typedReplyAutoPlays } from '@/lib/spoken-reply-autoplay'
 import SnapPreviewOverlay from '@/components/SnapPreviewOverlay'
 import { DESKTOP_GAP, DESKTOP_LAYERS, clampFloatingRect, desktopTop, dockedChatMaxWidth, dockedChatWidth, getSnapRect, MIN_DOCKED_CHAT_WIDTH, getSnapZone, snapTargetAt, type SnapTarget } from '@/lib/window-snap'
 import { useKioskBarInset } from '@/lib/kiosk-bar-inset'
@@ -1007,8 +1010,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // Give a reply that is already on screen its voice — the same decision the
   // live final makes (see voiceReply). Two paths reach it through this ref:
   // the ack-only history refetch and a switch back to a tab whose turn
-  // finished while the owner was elsewhere.
-  const voiceReplyRef = useRef<(aloud: boolean, asked: boolean, text: string, audio: string[]) => Promise<void>>(async () => {})
+  // finished while the owner was elsewhere (`live: false`).
+  const voiceReplyRef = useRef<(aloud: boolean, asked: boolean, text: string, audio: string[], opts?: { live?: boolean }) => Promise<void>>(async () => {})
   // Bumped whenever the spoken replies are released (the transcript cleared,
   // the panel gone): a synthesis still in flight then belongs to a
   // conversation that no longer exists, and must create nothing.
@@ -3364,8 +3367,19 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
                   const restored = [...(loaded ?? [])].reverse().find(m => m.role === 'assistant')
                   // Both owings, exactly as the live final settles them: aloud
                   // for a spoken question, a clip to press for a typed one on
-                  // a box where the chat is the one that speaks.
-                  if (restored) void voiceReplyRef.current(speakRestored, clipRestored, restored.text, restored.audio ?? [])
+                  // a box where the chat is the one that speaks — played, when
+                  // the owner switched auto-play on, because this IS the live
+                  // landing of the run just closed in this conversation.
+                  //
+                  // ...provided the line read back IS that run's reply. A box
+                  // that has not stored it yet three seconds on answers with
+                  // the owner's question as its newest line, and the newest
+                  // reply is then an older one, on screen since before this
+                  // turn: it is not live, and must not start talking by itself.
+                  const transcript = loaded ?? []
+                  const restoredAt = restored ? transcript.lastIndexOf(restored) : -1
+                  const answersTheQuestion = !transcript.some((m, i) => i > restoredAt && m.role === 'user')
+                  if (restored) void voiceReplyRef.current(speakRestored, clipRestored, restored.text, restored.audio ?? [], { live: answersTheQuestion })
                 })
               }, 3_000)
             }
@@ -4089,7 +4103,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // never painted into this popup, so nothing has spent the mark. Both marks
     // self-clear — the way OUT of a tab re-stashes the live refs, which that
     // same path empties — so a second return to the same tab finds nothing owed
-    // and cannot buy a second synthesis of a reply already read.
+    // and cannot buy a second synthesis of a reply already read. A clip to
+    // PRESS even with auto-play on: that reply finished while the owner was in
+    // another conversation, and only one landing live in front of them starts
+    // talking by itself (`live: false` below).
     const clipOnReturn = !stillRunning && Boolean(stash?.askedTurnKey)
     setUnreadKeys(prev => {
       if (!prev.has(key)) return prev
@@ -4105,7 +4122,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (sessionKeyRef.current !== key) return
     if (speakOnReturn || clipOnReturn) {
       const restored = [...(loaded ?? [])].reverse().find(m => m.role === 'assistant')
-      if (restored) void voiceReplyRef.current(speakOnReturn, clipOnReturn, restored.text, restored.audio ?? [])
+      if (restored) void voiceReplyRef.current(speakOnReturn, clipOnReturn, restored.text, restored.audio ?? [], { live: false })
     }
     const storedError = tabErrorsRef.current.get(key)
     if (storedError) {
@@ -4481,14 +4498,15 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
 
   // ── Spoken replies ────────────────────────────────────────────────────
   //
-  // Replies get a voice (Settings → Voice, on by default). The OpenClaw
+  // Replies get a voice (Settings → Voice, off by default). The OpenClaw
   // gateway cannot do this half for THIS surface: a recording is transcribed
   // on the box and sent as text, so its own `tts.auto: "inbound"` never sees a
   // voice message here and attaches nothing to any reply in this chat. So the
   // chat asks — /setup-api/tts/speak for the words, rendered through the same
   // player a harness-attached clip gets. A SPOKEN question's reply plays as
-  // soon as the sound exists (the chat remembers which run it started); a
-  // typed one gets the player and nothing more. Where a clip is already on the
+  // soon as the sound exists (the chat remembers which run it started); by
+  // default a typed one gets the player and nothing more — the owner's
+  // auto-play switch (below) plays it too. Where a clip is already on the
   // reply — Hermes, whose chat route attaches it inside the turn — nothing is
   // asked for at all.
   // OFF until the box says otherwise: spoken replies are off by default
@@ -4497,6 +4515,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const [voiceAutoReply, setVoiceAutoReply] = useState(false)
   const voiceAutoReplyRef = useRef(false)
   useEffect(() => { voiceAutoReplyRef.current = voiceAutoReply }, [voiceAutoReply])
+  // Settings → Voice → "Auto-play every spoken reply": a TYPED question's
+  // reply plays by itself too (see voiceReply). Off until the box says
+  // otherwise, by the same rule as the switch above — and only a body that
+  // states it moves it, so a box that predates the switch leaves it off. A
+  // ref and not state: nothing renders it, and a landing reply reads it.
+  const voiceAutoPlayAllRef = useRef(false)
+  // Whether the owner is at the chat right now: the popup open and its tab
+  // the one on screen. Auto-play asks twice — when a typed question's reply
+  // lands, and again the moment its sound would start — because a turn
+  // outlives both: this surface stays mounted behind the desktop with its
+  // socket open after the popup closes, and a hidden tab keeps receiving. A
+  // reply that lands without the owner keeps its clip on the bubble to press.
+  const chatOpenRef = useRef(isOpen)
+  useEffect(() => { chatOpenRef.current = isOpen }, [isOpen])
+  const ownerAtTheChat = useCallback(() => chatOpenRef.current && document.visibilityState === 'visible', [])
   // Whether the box has a voice to speak WITH, as it last said. `null` while
   // nothing is known — see speechEngineAvailable. A ref rather than state:
   // nothing renders it, and a reply arriving reads it from a callback.
@@ -4513,10 +4546,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // time, and two replies landing seconds apart must both be heard.
   const speakChainRef = useRef<Promise<void>>(Promise.resolve())
   // SILENT clips queue separately, and the separation is the point. A clip for
-  // a typed reply is nobody's wait — it can take a cold Kokoro's 20-40 s
-  // without anyone noticing — while a spoken question's answer is a person
-  // holding still listening for it. One queue for both put three unheard
-  // syntheses in front of the one the owner was waiting for.
+  // a typed reply is, by default, nobody's wait — it can take a cold Kokoro's
+  // 20-40 s without anyone noticing — while a spoken question's answer is a
+  // person holding still listening for it. One queue for both put three
+  // unheard syntheses in front of the one the owner was waiting for. (With
+  // auto-play on, a typed reply IS somebody's wait, and takes the queue above.)
   const clipChainRef = useRef<Promise<void>>(Promise.resolve())
   // Whether the box is making the sound right now, and for how long. A cold
   // Kokoro is 13-19 s on an Orin and the reply is already on screen by then,
@@ -4540,6 +4574,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   useEffect(() => {
     if (!isOpen) return
     let active = true
+    // A settings event that lands while the read below is in flight is NEWER
+    // than the read's answer: Settings -> Voice announces a change only after
+    // the box has taken it. Applied in arrival order, a read that started
+    // first could put back a switch the owner had just turned off — and the
+    // chat would then auto-play replies against the saved choice. The event
+    // carries every fact the read would set, so the read simply loses.
+    let settingsMovedSinceRead = false
     // The switch, read when the panel opens — and ONLY the switch. This also
     // read a top-level `supportedOnEdition`, which the route has never sent
     // (it nests that fact under `channels`), so the test was inert; worse, it
@@ -4548,14 +4589,17 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // through its own harness. `autoReply` alone decides.
     fetch('/setup-api/tts', { cache: 'no-store' })
       .then(res => (res.ok ? res.json() : null))
-      .then((data: { autoReply?: unknown; engines?: unknown } | null) => {
-        if (!active) return
+      .then((data: { autoReply?: unknown; autoPlayAll?: unknown; engines?: unknown } | null) => {
+        if (!active || settingsMovedSinceRead) return
         // Only a body that actually STATES the switch moves it. A refusal or a
         // server error answers an error object, and `data?.autoReply !== false`
         // read that as ON — so `speakReply` went on to synthesise for a state
         // nothing confirmed. "Keep the last reading" has to mean the last real
         // one, and before there is one the switch is off, as on the box.
         if (typeof data?.autoReply === 'boolean') setVoiceAutoReply(data.autoReply)
+        // The auto-play switch by the same rule: a server that predates it
+        // says nothing, and nothing said is off.
+        if (typeof data?.autoPlayAll === 'boolean') voiceAutoPlayAllRef.current = data.autoPlayAll
         // Only a body that LISTS engines moves this, exactly as the event path
         // below does. A refusal or an error object has no `engines` key, and
         // reading that as "nothing known" would put a box that had already
@@ -4569,8 +4613,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // silent until the page was reloaded — and, worse, left one that had lost
     // it asked for a clip on every single reply.
     const onChanged = (e: Event) => {
-      const detail = (e as CustomEvent<{ autoReply?: unknown; engines?: unknown }>).detail
+      const detail = (e as CustomEvent<{ autoReply?: unknown; autoPlayAll?: unknown; engines?: unknown }>).detail
+      settingsMovedSinceRead = true
       if (typeof detail?.autoReply === 'boolean') setVoiceAutoReply(detail.autoReply)
+      if (typeof detail?.autoPlayAll === 'boolean') voiceAutoPlayAllRef.current = detail.autoPlayAll
       if (detail && 'engines' in detail) voiceCanSpeakRef.current = speechEngineAvailable(detail.engines)
     }
     window.addEventListener(VOICE_SETTINGS_CHANGED_EVENT, onChanged)
@@ -4623,14 +4669,23 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
    *
    * `play` is what separates the two reasons this runs. A SPOKEN question is
    * owed an answer out loud, so its reply plays as soon as the sound exists.
-   * A typed one is owed a clip to press and nothing more — the bubble's own
-   * player renders it — so the sound is made, attached and left alone: a box
-   * that started talking at a customer who typed would be a worse bug than
-   * the silence this fixes. Nothing is claimed on screen in that case either,
-   * because "Speaking the reply…" would be describing something that is not
-   * going to happen.
+   * By default a typed one is owed a clip to press and nothing more — the
+   * bubble's own player renders it — so the sound is made, attached and left
+   * alone: a box that started talking at a customer who typed, unasked, would
+   * be a worse bug than the silence this fixes. Nothing is claimed on screen
+   * in that case either, because "Speaking the reply…" would be describing
+   * something that is not going to happen. That is the default and not a
+   * rule: an owner who switched auto-play on HAS asked, and voiceReply then
+   * calls this with `play` for a typed question's reply too — and with
+   * `onlyWithOwner`, so the sound still starts only if the owner is at the
+   * chat when it does (see ownerAtTheChat); otherwise the clip stays on its
+   * bubble, as it would have by default.
    */
-  const speakReply = useCallback(async (text: string, audio: string[], { play = true }: { play?: boolean } = {}) => {
+  const speakReply = useCallback(async (
+    text: string,
+    audio: string[],
+    { play = true, onlyWithOwner = false }: { play?: boolean; onlyWithOwner?: boolean } = {},
+  ) => {
     if (!voiceAutoReplyRef.current) return
     const words = audio.length > 0 ? '' : speechTextFor(text)
     if (audio.length === 0 && !words) return
@@ -4643,7 +4698,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // new prompt or presses another bubble while this one waits its turn, it
     // is still made and put on its bubble, but it does not start talking.
     const interruptions = spokenReplyInterruptions()
-    const aloud = () => play && spokenReplyInterruptions() === interruptions
+    const aloud = () => play && spokenReplyInterruptions() === interruptions && (!onlyWithOwner || ownerAtTheChat())
     const chainRef = play ? speakChainRef : clipChainRef
     const previous = chainRef.current
     let release: () => void = () => {}
@@ -4755,7 +4810,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       if (aloud()) await playReply(url)
     } catch { /* the reply is on screen; the voice was a bonus */ }
     finally { release() }
-  }, [playReply])
+  }, [playReply, ownerAtTheChat])
   /**
    * Whether the CHAT owes this reply a clip nobody else will make.
    *
@@ -4781,14 +4836,51 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
    * else is a TYPED question's reply: on Hermes it already arrives with its
    * clip attached by the chat route, while on OpenClaw nothing in the turn's
    * path makes one — which is why the owner's switch appeared to do nothing on
-   * that edition. So it is made here, and put on the bubble to press rather
-   * than played.
+   * that edition. So it is made here, and by default put on the bubble to
+   * press rather than played.
+   *
+   * By default, not by rule: with Settings → Voice → "Auto-play every spoken
+   * reply" on (`voiceAutoPlayAllRef`), a typed question's reply takes the
+   * spoken one's path instead — the clip that came with it, or the one the
+   * chat owes it, played the moment it exists, through the same queue and
+   * with the same "press play" line when the browser refuses. Two limits keep
+   * that from becoming a box that talks on its own:
+   *  - only a reply that would have had a clip anyway. The switch decides
+   *    whether a clip PLAYS, never whether one is made, so it costs no
+   *    synthesis, and a line the UI composed (`asked` unset) stays as it was.
+   *  - only one landing `live` in the conversation the owner is in. `asked`
+   *    is THIS tab's one-shot mark, spent by the caller, so a re-delivered
+   *    final, a reconnect, a history reload or another device showing the
+   *    same conversation never finds it; and a reply that finished in a
+   *    conversation the owner had left (`live: false`, the tab-return path)
+   *    keeps its player and waits to be pressed.
+   *  - only while the owner is AT the chat — the popup open, its tab on
+   *    screen — when the reply lands and again when its sound would start
+   *    (`onlyWithOwner`). A turn the owner walked away from finishes into a
+   *    clip to press, never a voice in an empty room.
    */
-  const voiceReply = useCallback(async (aloud: boolean, asked: boolean, text: string, audio: string[]) => {
+  const voiceReply = useCallback(async (
+    aloud: boolean,
+    asked: boolean,
+    text: string,
+    audio: string[],
+    { live = true }: { live?: boolean } = {},
+  ) => {
     if (aloud) { await speakReply(text, audio); return }
+    if (typedReplyAutoPlays({
+      asked,
+      live,
+      present: ownerAtTheChat(),
+      autoPlayAll: voiceAutoPlayAllRef.current,
+      hasClip: audio.length > 0,
+      owedAClip: chatOwesAClip(asked, audio),
+    })) {
+      await speakReply(text, audio, { onlyWithOwner: true })
+      return
+    }
     if (!chatOwesAClip(asked, audio)) return
     await speakReply(text, [], { play: false })
-  }, [speakReply, chatOwesAClip])
+  }, [speakReply, chatOwesAClip, ownerAtTheChat])
   const maybeSpeakReply = useCallback(async (runKey: string | null, text: string, audio: string[]) => {
     // Both marks are read and SPENT here, so a final the gateway re-delivers
     // cannot buy a second synthesis of the same words.

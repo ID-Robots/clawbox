@@ -61,12 +61,16 @@ vi.mock("@/lib/voice-local-wiring", () => ({
 
 const autoReplyMock = vi.fn();
 const setAutoReplyMock = vi.fn();
+const autoPlayAllMock = vi.fn();
+const setAutoPlayAllMock = vi.fn();
 vi.mock("@/lib/voice-reply", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/voice-reply")>();
   return {
     ...actual,
     getVoiceAutoReply: (...a: unknown[]) => autoReplyMock(...a),
     setVoiceAutoReply: (...a: unknown[]) => setAutoReplyMock(...a),
+    getVoiceAutoPlayAll: (...a: unknown[]) => autoPlayAllMock(...a),
+    setVoiceAutoPlayAll: (...a: unknown[]) => setAutoPlayAllMock(...a),
   };
 });
 
@@ -107,10 +111,10 @@ async function route() {
   return await import("@/app/setup-api/tts/route");
 }
 
-function post(body: unknown) {
+function post(body: unknown, headers: Record<string, string> = {}) {
   return new Request("http://box/setup-api/tts", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...headers },
     body: JSON.stringify(body),
   });
 }
@@ -130,6 +134,8 @@ beforeEach(() => {
   wireMock.mockReset().mockResolvedValue({ ok: true, provider: {} });
   autoReplyMock.mockReset().mockResolvedValue(false);
   setAutoReplyMock.mockReset().mockResolvedValue(undefined);
+  autoPlayAllMock.mockReset().mockResolvedValue(false);
+  setAutoPlayAllMock.mockReset().mockResolvedValue(undefined);
   ownerMock.mockReset().mockResolvedValue(true);
 });
 
@@ -181,6 +187,95 @@ describe("spoken replies", () => {
     const res = await POST(post({ action: "autoReply", enabled: false }));
     expect(res.status).toBe(500);
     expect(setAutoReplyMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * "Auto-play every spoken reply": the switch under spoken replies that has the
+ * desktop chat play a TYPED question's reply by itself too. The chat's alone —
+ * nothing reaches the gateway — and the owner's alone, behind the same gate
+ * as the switch it sits under.
+ */
+describe("auto-play every spoken reply", () => {
+  it("reports autoPlayAll:false for a box that never stored it, through the real reader", async () => {
+    const real = await vi.importActual<typeof import("@/lib/voice-reply")>("@/lib/voice-reply");
+    autoPlayAllMock.mockImplementation(real.getVoiceAutoPlayAll);
+    preferenceMock.mockResolvedValue(undefined);
+    const { GET } = await route();
+    const body = await (await GET()).json();
+    expect(body.autoPlayAll).toBe(false);
+    expect(preferenceMock).toHaveBeenCalledWith(real.VOICE_AUTO_PLAY_ALL_KEY);
+  });
+
+  it("reports the stored position beside the spoken-replies switch", async () => {
+    autoReplyMock.mockResolvedValue(true);
+    autoPlayAllMock.mockResolvedValue(true);
+    const { GET } = await route();
+    const body = await (await GET()).json();
+    expect(body).toMatchObject({ autoReply: true, autoPlayAll: true });
+  });
+
+  it("stores the owner's answer and answers the new status, writing nothing to the gateway", async () => {
+    const { POST } = await route();
+    autoPlayAllMock.mockResolvedValue(true);
+    let res = await POST(post({ action: "autoPlayAll", enabled: true }));
+    expect(res.status).toBe(200);
+    expect(setAutoPlayAllMock).toHaveBeenCalledWith(true);
+    expect((await res.json()).autoPlayAll).toBe(true);
+
+    autoPlayAllMock.mockResolvedValue(false);
+    res = await POST(post({ action: "autoPlayAll", enabled: false }));
+    expect(res.status).toBe(200);
+    expect(setAutoPlayAllMock).toHaveBeenLastCalledWith(false);
+    expect((await res.json()).autoPlayAll).toBe(false);
+    // A channel's typed question still gets a typed answer: `tts.auto` and the
+    // spoken-replies switch are not this action's to touch.
+    expect(configSetMock).not.toHaveBeenCalled();
+    expect(setAutoReplyMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses a body that does not say on or off", async () => {
+    const { POST } = await route();
+    for (const enabled of ["true", 1, null, undefined]) {
+      const res = await POST(post({ action: "autoPlayAll", enabled }));
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe("bad_request");
+    }
+    expect(setAutoPlayAllMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses the switch to the MCP bearer", async () => {
+    ownerMock.mockResolvedValue(false);
+    const { POST } = await route();
+    const res = await POST(post({ action: "autoPlayAll", enabled: true }));
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe("owner_only");
+    expect(setAutoPlayAllMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["autoReply", "autoPlayAll"] as const)("refuses %s from another site's page, even with the owner's cookie", async (action) => {
+    const { POST } = await route();
+    const res = await POST(post({ action, enabled: true }, { host: "box", origin: "http://evil.example" }));
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe("cross_origin");
+    expect(setAutoPlayAllMock).not.toHaveBeenCalled();
+    expect(setAutoReplyMock).not.toHaveBeenCalled();
+    expect(configSetMock).not.toHaveBeenCalled();
+  });
+
+  it("takes the switch from the box's own page", async () => {
+    const { POST } = await route();
+    const res = await POST(post({ action: "autoPlayAll", enabled: true }, { host: "box", origin: "http://box" }));
+    expect(res.status).toBe(200);
+    expect(setAutoPlayAllMock).toHaveBeenCalledWith(true);
+  });
+
+  it("answers a store that will not take the write with the route's own refusal", async () => {
+    setAutoPlayAllMock.mockRejectedValue(new Error("EROFS"));
+    const { POST } = await route();
+    const res = await POST(post({ action: "autoPlayAll", enabled: true }));
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("cannot_change");
   });
 });
 
