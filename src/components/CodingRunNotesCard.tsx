@@ -36,6 +36,10 @@ export default function CodingRunNotesCard({ directory, projectId }: Props) {
   const [confirmClear, setConfirmClear] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The read failed: what is on disk is UNKNOWN, not empty. The card must not
+  // say "no notes yet", and must not offer an editor whose Save would write an
+  // empty draft over notes it could not read.
+  const [unreadable, setUnreadable] = useState(false);
   // A read that started for another project must not paint over this one.
   const scope = useRef(0);
 
@@ -54,15 +58,18 @@ export default function CodingRunNotesCard({ directory, projectId }: Props) {
       const res = await fetch(`/setup-api/coding-agent/run-notes?${query}`, { cache: "no-store" });
       if (mine !== scope.current) return;
       if (!res.ok) {
-        setNotes("");
+        setNotes(null);
+        setUnreadable(true);
         setError(t("codingAgent.runNotes.loadFailed"));
         return;
       }
       take(await res.json() as NotesAnswer);
+      setUnreadable(false);
       setError(null);
     } catch {
       if (mine === scope.current) {
-        setNotes("");
+        setNotes(null);
+        setUnreadable(true);
         setError(t("codingAgent.runNotes.loadFailed"));
       }
     }
@@ -137,7 +144,9 @@ export default function CodingRunNotesCard({ directory, projectId }: Props) {
         <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">sticky_note_2</span>
         <span className="text-[var(--text-secondary)]">{t("codingAgent.runNotes.title")}</span>
         <span data-testid="coding-run-notes-count">
-          {notes === null ? "…" : lessons > 0 ? t("codingAgent.runNotes.lines", { n: lessons }) : t("codingAgent.runNotes.none")}
+          {notes === null
+            ? (unreadable ? <span className="text-red-300" role="alert" data-testid="coding-run-notes-error">{t("codingAgent.runNotes.loadFailed")}</span> : "…")
+            : lessons > 0 ? t("codingAgent.runNotes.lines", { n: lessons }) : t("codingAgent.runNotes.none")}
         </span>
       </summary>
       <div className="mt-2 space-y-2">
@@ -150,6 +159,12 @@ export default function CodingRunNotesCard({ directory, projectId }: Props) {
               <p className="text-[var(--text-muted)] italic" data-testid="coding-run-notes-empty">{t("codingAgent.runNotes.empty")}</p>
             ) : null}
             <div className="flex items-center gap-2 flex-wrap">
+              {unreadable && (
+                <button type="button" onClick={() => void load()} disabled={busy} data-testid="coding-run-notes-retry" className={BTN_SECONDARY}>
+                  <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">refresh</span>
+                  {t("retry")}
+                </button>
+              )}
               <button type="button" onClick={() => { setDraft(notes ?? ""); setConfirmClear(false); setError(null); }} disabled={busy || notes === null} data-testid="coding-run-notes-edit" className={BTN_SECONDARY}>
                 <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">edit</span>
                 {t("codingAgent.runNotes.edit")}
@@ -199,7 +214,8 @@ export default function CodingRunNotesCard({ directory, projectId }: Props) {
             </div>
           </>
         )}
-        {error && <p className="text-red-300" role="alert" data-testid="coding-run-notes-error">{error}</p>}
+        {/* A failed read is said once, on the folded line, where it is seen open or shut. */}
+        {error && !unreadable && <p className="text-red-300" role="alert" data-testid="coding-run-notes-error">{error}</p>}
       </div>
     </details>
   );

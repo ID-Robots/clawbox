@@ -999,7 +999,10 @@ export default function CodingAgentSettingsPanel({
                 testId="coding-agent-role-models-help"
               />
             </div>
-            <div className="mt-1.5 grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-x-2 gap-y-1.5">
+            {/* One row per role whose two selects share the width and wrap
+                under the name in a narrow window — a fixed width cut the
+                labels off ("Default (cheaper mo…"), and German's run longer. */}
+            <div className="mt-1.5 space-y-1.5">
               {MODEL_ROLES.map((role) => {
                 const current = status.roleModels![role];
                 const defaults = ROLE_DEFAULTS[role];
@@ -1008,15 +1011,15 @@ export default function CodingAgentSettingsPanel({
                   ? status.effortLevels
                   : [...status.effortLevels, current.effort as Effort];
                 return (
-                  <div key={role} className="contents" data-testid={`coding-agent-role-${role}`}>
-                    <span className="min-w-0 truncate text-[11px] text-[var(--text-secondary)]">{roleName}</span>
+                  <div key={role} className="flex flex-wrap items-center gap-x-2 gap-y-1" data-testid={`coding-agent-role-${role}`}>
+                    <span className="w-24 shrink-0 text-[11px] text-[var(--text-secondary)]">{roleName}</span>
                     <select
                       value={current.model}
                       disabled={saving}
                       aria-label={t("codingAgent.roleModelFor", { role: roleName })}
                       data-testid={`coding-agent-role-${role}-model`}
                       onChange={(e) => void saveSetting({ roleModels: { [role]: { model: e.target.value } } }, `roleModels.${role}`, t("codingAgent.roleModelsFailed"))}
-                      className={`text-base sm:text-xs ${FIELD} w-40`}
+                      className={`text-base sm:text-xs ${FIELD} flex-1 min-w-[11rem]`}
                     >
                       <option value={ROLE_AUTO}>{t(defaults.model === "economy" ? "codingAgent.roleModel.autoEconomy" : "codingAgent.roleModel.autoStandard")}</option>
                       {ROLE_MODEL_TIERS.map((tier) => (
@@ -1029,7 +1032,7 @@ export default function CodingAgentSettingsPanel({
                       aria-label={t("codingAgent.roleEffortFor", { role: roleName })}
                       data-testid={`coding-agent-role-${role}-effort`}
                       onChange={(e) => void saveSetting({ roleModels: { [role]: { effort: e.target.value } } }, `roleModels.${role}`, t("codingAgent.roleModelsFailed"))}
-                      className={`text-base sm:text-xs ${FIELD} w-44`}
+                      className={`text-base sm:text-xs ${FIELD} flex-1 min-w-[13rem]`}
                     >
                       <option value={ROLE_AUTO}>
                         {defaults.effortCap

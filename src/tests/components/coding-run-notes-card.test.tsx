@@ -110,9 +110,20 @@ describe("the run notes card", () => {
     expect(calls.find((c) => c.method === "DELETE")?.url).toBe(`/setup-api/coding-agent/run-notes?directory=${encodeURIComponent(DIR)}`);
   });
 
-  it("says when the notes could not be read", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => json({ error: "nope" }, 500)));
+  it("says when the notes could not be read — never 'no notes yet', and never an editor that would save over them", async () => {
+    let failing = true;
+    vi.stubGlobal("fetch", vi.fn(async () => (failing ? json({ error: "nope" }, 500) : json({ notes, maxChars: 4000, file: ".clawbox/run-notes.md" }))));
     render(<CodingRunNotesCard directory={DIR} projectId={null} />);
     expect(await screen.findByTestId("coding-run-notes-error")).toHaveTextContent(t("codingAgent.runNotes.loadFailed"));
+    expect(screen.getByTestId("coding-run-notes-count")).toHaveTextContent(t("codingAgent.runNotes.loadFailed"));
+    expect(screen.queryByTestId("coding-run-notes-empty")).toBeNull();
+    expect(screen.getByTestId("coding-run-notes-edit")).toBeDisabled();
+    // Try again: the notes that were there all along.
+    failing = false;
+    fireEvent.click(screen.getByTestId("coding-run-notes-retry"));
+    expect(await screen.findByTestId("coding-run-notes-text")).toHaveTextContent("tsc needs NODE_OPTIONS=--max-old-space-size=6144");
+    expect(screen.queryByTestId("coding-run-notes-error")).toBeNull();
+    expect(screen.queryByTestId("coding-run-notes-retry")).toBeNull();
+    expect(screen.getByTestId("coding-run-notes-edit")).not.toBeDisabled();
   });
 });
