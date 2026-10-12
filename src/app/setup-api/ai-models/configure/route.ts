@@ -113,6 +113,7 @@ import {
   ANTHROPIC_DEFAULT_MODEL_ID,
   GOOGLE_DEFAULT_MODEL_ID,
   OPENAI_DEFAULT_MODEL_ID,
+  XAI_DEFAULT_MODEL_ID,
   ANTHROPIC_MODELS,
   extractProviderModelId,
   routesSubscriptionNatively,
@@ -238,6 +239,14 @@ const PROVIDERS: Record<string, ProviderConfig> = {
     // in src/lib/openrouter-models.ts.
     defaultModel: `openrouter/${OPENROUTER_DEFAULT_MODEL_ID}`,
     profileKey: "openrouter:default",
+  },
+  xai: {
+    // API key only, and no `subscriptionOverride`: ClawBox offers no xAI
+    // sign-in. The key is pasted to `xai:default` like every other API-key
+    // provider, and the turn is routed by the core's bundled `xai` plugin —
+    // see the `else` branch at step 7, which this provider takes on purpose.
+    defaultModel: `xai/${XAI_DEFAULT_MODEL_ID}`,
+    profileKey: "xai:default",
   },
   ollama: {
     defaultModel: "ollama/llama3.2:3b",
@@ -2383,6 +2392,11 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // openrouter branch below — every save that reaches it is key-based), and
     // the ClawBox AI profile is written by this route alone. It is one CLI cold
     // start, and this is the wizard's critical path.
+    //
+    // xAI is NOT skipped, although ClawBox offers it no sign-in either: the
+    // bundled plugin carries its own OAuth (`openclaw models auth login
+    // --provider xai`), and a Terminal sign-in filed at `xai:default` is
+    // exactly what the paste below would silently replace.
     if (
       authMode !== "subscription"
       && !isOllama && !isLlamaCpp && !isClawAI && !isOpenRouter
@@ -2691,6 +2705,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         "anthropic",
         "openai",
         "google",
+        "xai",
       ]);
       if (supportedProviders.has(targetProvider)) {
         if (!isValidModelId(targetProvider, requestedModel)) {
@@ -2947,6 +2962,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     //   * openai (ChatGPT) → `models auth login --provider openai` (the OAuth bundle below is its output)
     //   * google        → --auth-choice gemini-api-key --gemini-api-key
     //   * openrouter    → --auth-choice openrouter-api-key --openrouter-api-key
+    //   * xai           → --auth-choice xai-api-key --xai-api-key
     //   * deepseek      → no canonical onboard equivalent today; we use
     //                     a custom proxy URL + DeepSeek-compatible API
     //                     so direct write is unavoidable until OpenClaw
@@ -3948,6 +3964,19 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     } else {
       // Switching away from Ollama/ClawBox AI — reset models.mode so cloud providers
       // auto-detect their model catalog normally.
+      //
+      // xAI lands here ON PURPOSE, beside the OpenAI API key, rather than in an
+      // `applyCloudProviderTransport` branch like google and openrouter. Those
+      // two get an openai-compat override because their native route could not
+      // be made to work (openrouter has no plugin; google's plugin failed auth
+      // at call time). xAI's is a bundled, enabled-by-default plugin that takes
+      // the key from the agent auth store `paste-api-key` just wrote, on its own
+      // `openai-responses` transport — an override here would pin it to
+      // `openai-completions` with the key frozen inline and shadow the plugin's
+      // own catalogue. NOT YET PROVEN ON A DEVICE with a real xAI key; if the
+      // plugin turns out to fail at call time the way google's did, the
+      // override is the fallback, and it would also need `xai` in chat/model's
+      // OPENAI_COMPAT_PROVIDERS.
       try {
         await runCommand(OPENCLAW_BIN, [
           "config", "set", "models.mode", "merge",

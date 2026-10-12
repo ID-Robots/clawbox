@@ -254,6 +254,25 @@ const PROVIDERS: Provider[] = [
       },
     ],
   },
+  {
+    // API key only. The core's bundled xai plugin also offers an OAuth sign-in,
+    // but ClawBox has no device-code or redirect flow for it (it is absent
+    // from OAUTH_PROVIDERS and DEVICE_AUTH_PROVIDERS), so there is no
+    // Subscription tab to offer.
+    id: "xai",
+    name: "xAI Grok",
+    description: "Grok models by xAI",
+    authOptions: [
+      {
+        mode: "token",
+        label: "API Key",
+        placeholder: "xai-...",
+        hint: "Get your API key from the xAI Console.",
+        tokenUrl: "https://console.x.ai",
+        tokenUrlLabel: "Get API Key",
+      },
+    ],
+  },
 ];
 
 // Providers that use device code flow instead of redirect-based OAuth
@@ -1581,6 +1600,7 @@ export default function AIModelsStep({
     openai: t("ai.gptModels"),
     google: t("ai.geminiModels"),
     openrouter: t("ai.multiProvider"),
+    xai: t("ai.grokModels"),
     ollama: t("ai.runLocally"),
     llamacpp: "GGUF + llama.cpp for 8GB devices",
   };

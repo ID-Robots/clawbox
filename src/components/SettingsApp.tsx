@@ -4154,7 +4154,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
 
             <I18nProvider><AIModelsStep
               embedded
-              providerIds={["clawai", "openai", "anthropic", "google", "openrouter"]}
+              providerIds={["clawai", "openai", "anthropic", "google", "openrouter", "xai"]}
               defaultProviderId="clawai"
               currentProviderId={aiProvider?.provider ?? null}
               currentModel={aiProvider?.model ?? null}

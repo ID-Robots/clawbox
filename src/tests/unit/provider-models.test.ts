@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  CATALOG_PROVIDERS,
   PROVIDER_CATALOGS,
   fetchProviderCatalog,
   getProviderCatalog,
+  isCatalogProvider,
   isNonChatModelId,
   isValidModelId,
   parseModelSlug,
@@ -52,6 +54,23 @@ describe("provider-models", () => {
       expect(opus5?.hint?.startsWith("Default")).toBe(false);
     });
 
+    // xAI (Grok): the cold-start list is the two ids the core's bundled xai
+    // plugin leads its manifest with, and the default is the first of them.
+    it("carries an xai catalogue whose default is a row it lists", () => {
+      const catalog = getProviderCatalog("xai");
+      expect(catalog?.provider).toBe("xai");
+      expect(catalog?.defaultModelId).toBe("grok-4.6");
+      expect(catalog?.models.map((m) => m.id)).toEqual(["grok-4.6", "grok-4.5"]);
+      expect(catalog?.allowCustom).toBe(true);
+      expect(
+        (catalog?.models ?? []).filter((m) => m.hint?.startsWith("Default")).map((m) => m.id),
+      ).toEqual(["grok-4.6"]);
+      // The live-catalogue gate and the curated table have to agree, or the
+      // picker asks the route for a provider it then calls unknown.
+      expect(isCatalogProvider("xai")).toBe(true);
+      expect(CATALOG_PROVIDERS).toContain("xai");
+    });
+
     it("does not return inherited Object prototype members", () => {
       expect(getProviderCatalog("toString")).toBeNull();
       expect(getProviderCatalog("constructor")).toBeNull();
@@ -87,6 +106,13 @@ describe("provider-models", () => {
       expect(isValidModelId("openai", "openai/gpt-5")).toBe(false);
       expect(isValidModelId("openrouter", "anthropic/claude-haiku-4.5")).toBe(true);
       expect(isValidModelId("openrouter", "anthropic/claude/")).toBe(false);
+    });
+
+    it("takes xai ids on the generic no-slash shape", () => {
+      expect(isValidModelId("xai", "grok-4.6")).toBe(true);
+      expect(isValidModelId("xai", "grok-4.20-0309-reasoning")).toBe(true);
+      expect(isValidModelId("xai", "xai/grok-4.6")).toBe(false);
+      expect(isValidModelId("xai", "")).toBe(false);
     });
   });
 

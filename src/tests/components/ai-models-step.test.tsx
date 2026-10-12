@@ -21,6 +21,7 @@ vi.mock("@/lib/i18n", () => ({
         "ai.gptModels": "GPT models by OpenAI",
         "ai.geminiModels": "Gemini models by Google",
         "ai.multiProvider": "Multi-provider AI gateway",
+        "ai.grokModels": "Grok models by xAI",
         "ai.runLocally": "Run AI models locally on device",
         "ai.showMore": "Show more providers...",
         "ai.openAuthPage": "Open authorization page",
@@ -487,6 +488,58 @@ describe("AIModelsStep variants", () => {
 
     pickProvider(/OpenRouter/i);
     expect(getByRole("button", { name: "Connect to OpenRouter" })).toBeInTheDocument();
+  });
+
+  // xAI (Grok): an API-key provider like Google and OpenRouter — one auth
+  // option, so no Subscription tab — saved through the same configure call,
+  // naming the catalogue's cold-start default. The key is an obvious fake.
+  it("offers xAI Grok as an API-key provider and saves it through configure", async () => {
+    const fetchMock = vi.mocked(fetch);
+    const { getByRole, getByText, queryByRole, container } = render(
+      <AIModelsStep
+        providerIds={["clawai", "openai", "anthropic", "google", "openrouter", "xai"]}
+        defaultProviderId="clawai"
+        title="Connect AI Provider"
+        description="Primary provider"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith("/setup-api/ai-models/oauth/providers");
+    });
+
+    fireEvent.click(getByRole("button", { name: /Show more providers/i }));
+    expect(getByText("Grok models by xAI")).toBeInTheDocument();
+    fireEvent.click(getByRole("radio", { name: /xAI Grok/i }));
+
+    expect(getByRole("button", { name: "Connect to xAI Grok" })).toBeInTheDocument();
+    // API key only.
+    expect(queryByRole("button", { name: /Subscription/i })).toBeNull();
+
+    const keyInput = container.querySelector("input[type=password], input[type=text]");
+    expect(keyInput).not.toBeNull();
+    expect((keyInput as HTMLInputElement).placeholder).toBe("xai-...");
+    fireEvent.change(keyInput as HTMLInputElement, { target: { value: "xai-test-key-not-real" } });
+    fireEvent.click(getByRole("button", { name: "Connect to xAI Grok" }));
+
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(([input]) => typeof input === "string" && input.includes("/setup-api/ai-models/configure")),
+      ).toBe(true);
+    });
+    const configureCall = fetchMock.mock.calls.find(
+      ([input]) => typeof input === "string" && input.includes("/setup-api/ai-models/configure"),
+    );
+    const sent = JSON.parse(String((configureCall?.[1] as RequestInit | undefined)?.body ?? "{}"));
+    expect(sent).toMatchObject({
+      provider: "xai",
+      apiKey: "xai-test-key-not-real",
+      authMode: "token",
+      scope: "primary",
+    });
+    // The catalogue's cold-start default, bare: the configure route adds the
+    // `xai/` prefix itself.
+    expect(sent.model).toBe("grok-4.6");
   });
 
   it("uses the skip action to continue setup without posting empty credentials", async () => {

@@ -30,7 +30,7 @@ describe("chat-reasoning", () => {
 
     it("exposes a uniform off/low/medium/high ladder for every cloud provider", () => {
       const uniform = ["off", "low", "medium", "high"];
-      for (const provider of ["openai", "codex", "anthropic", "google", "deepseek", "clawai", "openrouter"]) {
+      for (const provider of ["openai", "codex", "anthropic", "google", "deepseek", "clawai", "openrouter", "xai"]) {
         expect(getProviderReasoningConfig(provider).levels).toEqual(uniform);
       }
     });
@@ -185,7 +185,7 @@ describe("chat-reasoning", () => {
     it("never returns a level the resolved provider rejects", () => {
       const providers = [
         "openai", "codex", "anthropic", "google",
-        "deepseek", "clawai", "openrouter", "llamacpp",
+        "deepseek", "clawai", "openrouter", "xai", "llamacpp",
       ];
       const desired: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max", "adaptive"];
       for (const provider of providers) {

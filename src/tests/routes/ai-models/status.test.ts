@@ -106,6 +106,27 @@ describe("/setup-api/ai-models/status", () => {
     expect(body.providerLabel).toBe("OpenAI GPT");
   });
 
+  it("reports an xai api-key box as connected, with the label the panel uses", async () => {
+    mockReadConfig.mockResolvedValue({
+      auth: {
+        profiles: {
+          "xai:default": { provider: "xai", mode: "api_key" },
+        },
+      },
+      agents: { defaults: { model: { primary: "xai/grok-4.6" } } },
+    } as never);
+    const res = await GET();
+    const body = await res.json();
+    expect(body.connected).toBe(true);
+    expect(body.provider).toBe("xai");
+    expect(body.providerLabel).toBe("xAI Grok");
+    expect(body.mode).toBe("api_key");
+    expect(body.model).toBe("xai/grok-4.6");
+    // Nothing ClawBox-AI-shaped is implied by an xAI key.
+    expect(body.clawaiConfigured).toBe(false);
+    expect(body.clawaiTier).toBeNull();
+  });
+
   it("matches the active profile to the primary model when fallback profiles exist", async () => {
     // Simulates a device that previously had Anthropic OAuth configured and
     // then switched to ClawBox AI — both profiles remain in the file but the

@@ -327,6 +327,33 @@ export const GOOGLE_MODELS: readonly ProviderModelOption[] = [
  */
 export const GOOGLE_DEFAULT_MODEL_ID = "gemini-2.5-flash";
 
+// xAI (Grok) API-key models — cold-start display only, like every list here.
+// Unlike GOOGLE_MODELS these are NOT seeded into a `models.providers.xai`
+// override: the core bundles an `xai` provider plugin (base URL
+// https://api.x.ai/v1, `openai-responses`, `enabledByDefault: true`) whose own
+// manifest catalogue is what routes a turn, so the configure route writes the
+// key and the primary and leaves transport to the plugin, the way it does for
+// an OpenAI API key. The live list is `openclaw models list --provider xai
+// --all --json`, which answers `count: 0` until a key is on the box — the
+// picker shows these two until that enumeration lands.
+export const XAI_MODELS: readonly ProviderModelOption[] = [
+  { id: "grok-4.6", label: "Grok 4.6", hint: "Default. Newest flagship." },
+  { id: "grok-4.5", label: "Grok 4.5", hint: "Previous generation." },
+] as const;
+
+/**
+ * The xAI model this box lands on when nothing named one.
+ *
+ * The fourth of the set, for the reason the Google one gives: the configure
+ * route's PROVIDERS table, chat/model's DEFAULT_PROVIDER_MODELS and
+ * PROVIDER_CATALOGS all need it, and chat/model's copy is written to
+ * `agents.defaults.model.primary` by `POST /setup-api/providers/default`. It is
+ * the row the bundled plugin's manifest names first (2026.9.4); a later core
+ * that tags another row `default` outranks it in the picker only, exactly as
+ * for the other providers.
+ */
+export const XAI_DEFAULT_MODEL_ID = "grok-4.6";
+
 // ClawBox AI tiers — surfaced via the secondary model picker after
 // consolidating Flash/Pro into one "ClawBox AI" provider row in the
 // chat dropdown. Model ids are the upstream DeepSeek slugs since
@@ -339,8 +366,9 @@ export const CLAWAI_MODELS: readonly ProviderModelOption[] = [
 ] as const;
 
 // Provider IDs the live-catalog route knows how to fetch from upstream
-// (`openclaw models list --provider <p>` for the first four; OpenRouter's
-// own /api/v1/models for the last). Single source of truth so the route's
+// (`openclaw models list --provider <p>` for the CLI-backed ones — anthropic,
+// openai, google, xai; OpenRouter's own /api/v1/models for openrouter; a
+// constant for clawai; nothing at all for codex). Single source of truth so the route's
 // allowlist, the AIModelsStep `catalogProvider` memo, and the chat-popup
 // header dropdown all gate on the same set.
 /**
@@ -477,7 +505,9 @@ export function subscriptionSurfaceLabel(provider: string): string | null {
   return entry.surfaceProvider ?? null;
 }
 
-export const CATALOG_PROVIDERS = ["clawai", "anthropic", "openai", "codex", "google", "openrouter"] as const;
+// `xai` last, so the catalog route's boot warmup — staggered 5 s per entry in
+// this order — keeps every older provider on the slot it had.
+export const CATALOG_PROVIDERS = ["clawai", "anthropic", "openai", "codex", "google", "openrouter", "xai"] as const;
 export type CatalogProvider = typeof CATALOG_PROVIDERS[number];
 
 export function isCatalogProvider(provider: string | null | undefined): provider is CatalogProvider {
@@ -539,6 +569,12 @@ export const PROVIDER_CATALOGS = Object.freeze({
     provider: "openrouter",
     models: OPENROUTER_CURATED_MODELS,
     defaultModelId: OPENROUTER_DEFAULT_MODEL_ID,
+    allowCustom: true,
+  },
+  xai: {
+    provider: "xai",
+    models: XAI_MODELS,
+    defaultModelId: XAI_DEFAULT_MODEL_ID,
     allowCustom: true,
   },
 } satisfies Record<string, ProviderCatalog>);

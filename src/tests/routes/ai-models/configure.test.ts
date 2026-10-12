@@ -521,6 +521,7 @@ describe("POST /setup-api/ai-models/configure", () => {
       { provider: "openai", apiKey: "sk-openai-test" },
       { provider: "google", apiKey: "AIza-test" },
       { provider: "openrouter", apiKey: "sk-or-test" },
+      { provider: "xai", apiKey: "xai-test" },
     ];
 
     it.each(coldStarts)(
@@ -2195,6 +2196,80 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     // ...and the managed auth profile is api_key with the inline key.
     expect(pasteStdin("google:default")).toContain("AIzaTestKey123");
+  });
+
+  // xAI (Grok) is the one API-key cloud provider besides OpenAI that is NOT
+  // routed through an openai-compat override: the core bundles an `xai` plugin
+  // (enabled by default, `openai-responses` on api.x.ai), which reads the key
+  // from the agent auth store `models auth paste-api-key` writes. An override
+  // would pin it to openai-completions with the key frozen inline and shadow
+  // the plugin's own catalogue. The key below is an obvious fake.
+  it("configures xai through the bundled plugin: key pasted, no provider override", async () => {
+    const res = await configurePost(jsonRequest({
+      provider: "xai",
+      apiKey: "xai-test-key-not-real",
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+
+    const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+    expect(commands).toContain("config set agents.defaults.model.primary xai/grok-4.6");
+    expect(commands).toContain('config set auth.profiles.xai:default {"provider":"xai","mode":"api_key"} --json');
+    // No `models.providers.xai` at all — routing is the plugin's.
+    expect(commands.some((command) => command.includes("models.providers.xai"))).toBe(false);
+    expect(findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), "models.providers.xai")).toBeUndefined();
+
+    // The credential rides stdin into the CLI's own store, under the provider
+    // id the plugin registers.
+    const paste = pasteCallFor("xai:default");
+    expect(paste?.[0]).toEqual(expect.arrayContaining(["--provider", "xai"]));
+    expect(pasteStdin("xai:default")).toContain("xai-test-key-not-real");
+    // ...and never appears in a config write.
+    expect(commands.some((command) => command.includes("xai-test-key-not-real"))).toBe(false);
+
+    expect(mockSetMany).toHaveBeenCalledWith(expect.objectContaining({
+      ai_model_configured: true,
+      ai_model_provider: "xai",
+    }));
+    expect(mockRestartGateway).toHaveBeenCalled();
+  });
+
+  it("honors an xai model picked by the user", async () => {
+    const res = await configurePost(jsonRequest({
+      provider: "xai",
+      apiKey: "xai-test-key-not-real",
+      model: "grok-4.5",
+    }));
+
+    expect(res.status).toBe(200);
+
+    const commands = configSetCommands(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch));
+    expect(commands).toContain("config set agents.defaults.model.primary xai/grok-4.5");
+  });
+
+  it("rejects a malformed xai model id before any write", async () => {
+    const res = await configurePost(jsonRequest({
+      provider: "xai",
+      apiKey: "xai-test-key-not-real",
+      model: "x-ai/grok 4",
+    }));
+    const body = await res.json();
+
+    expect(res.status).toBe(400);
+    expect(body.error).toMatch(/Invalid xai model ID/);
+    expect(pasteCallFor("xai:default")).toBeUndefined();
+  });
+
+  it("refuses a ClawBox AI key pasted into the xai provider", async () => {
+    const res = await configurePost(jsonRequest({
+      provider: "xai",
+      apiKey: "claw_not-a-real-token",
+    }));
+
+    expect(res.status).toBe(400);
+    expect(pasteCallFor("xai:default")).toBeUndefined();
   });
 
   it("configures anthropic as an openai-compat provider with the key inline", async () => {

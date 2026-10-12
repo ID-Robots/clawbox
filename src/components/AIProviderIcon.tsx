@@ -149,6 +149,18 @@ export default function AIProviderIcon({
     );
   }
 
+  // xAI — a stylised mark, not the official logo: a white diagonal stroke
+  // crossed by a short one on a near-black disc, in the spirit of the other
+  // hand-drawn marks below (z.ai, Kimi).
+  if (normalized === "xai") {
+    return (
+      <SvgFrame size={size} className={className}>
+        <circle cx="12" cy="12" r="9" fill="#0B0B0F" />
+        <path d="M8 7l8 10M16 7l-3.2 4" stroke="#F9FAFB" strokeWidth="1.7" strokeLinecap="round" fill="none" />
+      </SvgFrame>
+    );
+  }
+
   if (normalized === "ollama") {
     return (
       <SvgFrame size={size} className={className}>

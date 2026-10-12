@@ -1081,6 +1081,80 @@ describe("/setup-api/chat/model", () => {
     expect(body.activeModel).toBe("openrouter/mistralai/mistral-large");
   });
 
+  // xAI (Grok) is routed by the core's bundled plugin: the configure route
+  // writes the `xai:default` profile and the primary and NO
+  // `models.providers.xai`. So the row is built from the profile alone, and a
+  // pick must not go looking for a provider entry to extend.
+  const xaiConfig = (primary: string) => ({
+    auth: {
+      profiles: {
+        "deepseek:default": { provider: "deepseek", mode: "api_key" },
+        "xai:default": { provider: "xai", mode: "api_key" },
+      },
+    },
+    models: {
+      mode: "merge",
+      providers: {
+        deepseek: { models: [{ id: "deepseek-v4-flash", name: "ClawBox AI Flash" }] },
+      },
+    },
+    agents: { defaults: { model: { primary } } },
+  });
+
+  it("offers an xAI row from the api-key profile, on Grok's default model", async () => {
+    vi.mocked(readConfig).mockResolvedValue(xaiConfig("deepseek/deepseek-v4-flash") as never);
+
+    const response = await GET();
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    const row = body.options.find((option: { provider: string | null }) => option.provider === "xai");
+    expect(row).toMatchObject({
+      label: "xAI Grok",
+      model: "xai/grok-4.6",
+      available: true,
+      isLocal: false,
+      settingsSection: "ai",
+    });
+  });
+
+  it("switches to an xai model without touching models.providers.xai", async () => {
+    vi.mocked(readConfig)
+      .mockResolvedValueOnce(xaiConfig("deepseek/deepseek-v4-flash") as never)
+      .mockResolvedValue(xaiConfig("xai/grok-4.5") as never);
+
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "xai/grok-4.5" }),
+    }));
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(runOpenclawConfigSet).toHaveBeenCalledWith([
+      "agents.defaults.model.primary",
+      "xai/grok-4.5",
+    ]);
+    expect(body.activeModel).toBe("xai/grok-4.5");
+    // Not an openai-compat provider: nothing is auto-extended, and the "isn't
+    // fully configured" 409 that guards that path cannot fire.
+    const touchedProviderEntry = vi.mocked(runOpenclawConfigSet).mock.calls.some(
+      ([args]) => Array.isArray(args) && String(args[0]).startsWith("models.providers.xai"),
+    );
+    expect(touchedProviderEntry).toBe(false);
+  });
+
+  it("refuses an xai model when no xai credential is configured", async () => {
+    const response = await POST(new Request("http://localhost/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "xai/grok-4.6" }),
+    }));
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: "Selected AI provider is not configured" });
+  });
+
   it("rejects ChatGPT subscription Pro/API-only Codex models before gateway restart", async () => {
     vi.mocked(readConfig).mockResolvedValue({
       auth: { profiles: { "openai:chatgpt": { provider: "openai", mode: "oauth" } } },
