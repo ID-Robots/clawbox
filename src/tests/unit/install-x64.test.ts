@@ -409,7 +409,10 @@ describe("install-x64.sh shared-host preflight", () => {
     // TASK-445 / TASK-733 boundary).
     expect(dispatcher).toContain("run_chpasswd");
     expect(dispatcher).toContain("/usr/sbin/chpasswd");
-    expect(dispatcher).toContain('exec /usr/bin/bash "$ROOT_INSTALLER" --step "$step"');
+    // …and hands it the user and folder it read from /etc/clawbox/x64.env:
+    // a unit systemd started has no logname and no SUDO_USER, and without
+    // these the installer copy refused every step from the web server.
+    expect(dispatcher).toContain('exec /usr/bin/env CLAWBOX_USER="$CLAWBOX_USER" CLAWBOX_DIR="$PROJECT_DIR" /usr/bin/bash "$ROOT_INSTALLER" --step "$step"');
     expect(dispatcher).not.toContain('exec /usr/bin/bash "$PROJECT_DIR/install-x64.sh"');
     // The wizard asks for these on every install and x64 has neither.
     expect(dispatcher).toContain("is a no-op on the x64 install");
