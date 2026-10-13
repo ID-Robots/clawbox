@@ -130,6 +130,25 @@ describe("POST /setup-api/hermes/chat", () => {
     expect(prompt).toContain(`[Attached file: ${staged("notes.txt")}]`);
     expect(prompt).toContain("what is the secret word?");
     expect(args).not.toContain("--image");
+    // A small text file is quoted too: the box's own small model does not
+    // reliably open a path with a tool.
+    expect(prompt).toContain("the secret word is otter");
+    expect(prompt.indexOf("the secret word is otter")).toBeLessThan(prompt.indexOf("what is the secret word?"));
+  });
+
+  it("names a document it does not quote: too large, or not text", async () => {
+    fs.writeFileSync(staged("big.txt"), "x".repeat(20 * 1024));
+    fs.writeFileSync(staged("scan.pdf"), Buffer.from([0x25, 0x50, 0x44, 0x46, 0x00, 0x01]));
+    fs.writeFileSync(staged("fake.txt"), Buffer.from([0x00, 0xff, 0xfe, 0x00]));
+    await post({ message: "summarise", documentPaths: [staged("big.txt"), staged("scan.pdf"), staged("fake.txt")] });
+    const args = lastArgs();
+    const prompt = args[args.indexOf("-q") + 1];
+    for (const name of ["big.txt", "scan.pdf", "fake.txt"]) {
+      expect(prompt).toContain(`[Attached file: ${staged(name)}]`);
+      expect(prompt).not.toContain(`contents of ${name}`);
+    }
+    expect(prompt).not.toContain("xxxxxxxxxx");
+    expect(prompt).toContain("Open the file at that path");
   });
 
   it("refuses a document path outside the staging root", async () => {

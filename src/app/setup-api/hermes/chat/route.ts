@@ -42,6 +42,7 @@ import { isSlashCommandMessage } from "@/lib/chat-slash-commands";
 import { runHermesSlashCommand, withSessionModelNote } from "@/lib/hermes-slash-exec";
 import { DESKTOP_TRANSCRIPT_KEY, transcriptKeyIsSafe } from "@/lib/harness/transcript-key";
 import { resolveInMediaRoot } from "@/lib/harness/media-root";
+import { hermesDocumentPrompt } from "@/lib/harness/hermes-document-prompt";
 import { mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
 import { splitEmailRefs } from "@/lib/chat-email-refs";
 import { extractReasoningPanels, stripAgentStatusFrames } from "@/lib/hermes-reasoning-panel";
@@ -1224,9 +1225,11 @@ export async function POST(request: Request) {
   // Re-resolved against the staging root exactly as the pictures are: the
   // agent opens any readable absolute path it is handed. Named ahead of the
   // message, one `[Attached file: …]` line each, the line the OpenClaw adapter
-  // writes; the agent reads them with its `file` tools. Without this a
-  // document was refused in the composer, the message went out anyway, and the
-  // agent searched the disk for a file it had been told was attached.
+  // writes; the agent reads them with its `file` tools, and a small text file
+  // is quoted under its line as well so the box's own small model needs no
+  // tool call to read it (hermes-document-prompt.ts). Without this a document
+  // was refused in the composer, the message went out anyway, and the agent
+  // searched the disk for a file it had been told was attached.
   const requestedDocuments = Array.isArray(body.documentPaths)
     ? body.documentPaths.filter((entry): entry is string => typeof entry === "string").slice(0, MAX_IMAGES_PER_TURN)
     : [];
@@ -1235,12 +1238,12 @@ export async function POST(request: Request) {
     const safe = await resolveInMediaRoot(requested);
     if (safe && !documentPaths.includes(safe) && !imagePaths.includes(safe)) documentPaths.push(safe);
   }
-  const documentLines = documentPaths.map((p) => `[Attached file: ${p}]`).join("\n");
+  const documentLines = await hermesDocumentPrompt(documentPaths);
 
   const promptWithImages = [
     documentLines,
     extraImages.length ? `${safeMessage}\n\n${extraImages.join("\n")}` : safeMessage,
-  ].filter(Boolean).join("\n");
+  ].filter(Boolean).join("\n\n");
 
   // ── The transcript ──────────────────────────────────────────────────────
   //
