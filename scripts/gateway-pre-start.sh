@@ -7875,7 +7875,12 @@ try:
 except (OSError, ValueError, AttributeError):
     raw = None
 if isinstance(raw, str):
-    cleaned = re.sub(r"\s", " ", raw)
+    # Whitespace by category, not `\s`: Python's and JavaScript's differ, and
+    # this must match personaOwnerName() byte for byte.
+    cleaned = "".join(
+        " " if unicodedata.category(c)[0] == "Z" or c in "\t\n\v\f\r" else c
+        for c in raw
+    )
     cleaned = "".join(
         c for c in cleaned if unicodedata.category(c)[0] in "LMN" or c in " .'-"
     )

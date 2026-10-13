@@ -152,12 +152,15 @@ async function setupComplete(): Promise<boolean> {
  * free text that lands in the agent's system prompt, so only what a name needs
  * survives: letters, marks, digits, spaces and `.'-`. Anything longer than the
  * tool's own 64-character cap is not a name. The Python twin in
- * scripts/gateway-pre-start.sh applies the same rule.
+ * scripts/gateway-pre-start.sh applies the same rule, so every step is spelled
+ * in Unicode categories rather than either language's `\s`: the two disagree
+ * (JavaScript's includes U+FEFF, Python's includes U+001C-001F and U+0085), and
+ * the two USER.md writers must not.
  */
 export function personaOwnerName(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
   const name = raw
-    .replace(/\s/gu, " ")
+    .replace(/[\p{Z}\t\n\v\f\r]/gu, " ")
     .replace(/[^\p{L}\p{M}\p{N} .'-]/gu, "")
     .replace(/ {2,}/g, " ")
     .trim();
@@ -272,8 +275,9 @@ export async function retireOnboardingRitual(): Promise<boolean> {
  *
  * Written to a temporary file and LINKED into place: the link fails with EEXIST
  * if another writer got there first, and a write cut short (a full eMMC) never
- * leaves a fragment under the real name. A rename is the fallback for a
- * filesystem without hard links, taken only while the name is still free.
+ * leaves a fragment under the real name. On a filesystem without hard links
+ * the fallback is an EXCLUSIVE copy, which also fails rather than replace a
+ * USER.md another writer created in the meantime — a rename would not.
  */
 async function writeIfMissing(file: string, text: string): Promise<void> {
   const tmp = `${file}.clawbox-${process.pid}.tmp`;
@@ -281,8 +285,9 @@ async function writeIfMissing(file: string, text: string): Promise<void> {
     await fs.writeFile(tmp, text, "utf-8");
     await fs.link(tmp, file).catch(async (err: NodeJS.ErrnoException) => {
       if (err.code === "EEXIST") return;
-      if (await pathPresent(file)) return;
-      await fs.rename(tmp, file);
+      await fs.copyFile(tmp, file, fsSync.constants.COPYFILE_EXCL).catch((copyErr: NodeJS.ErrnoException) => {
+        if (copyErr.code !== "EEXIST") throw copyErr;
+      });
     });
   } finally {
     await fs.rm(tmp, { force: true }).catch(() => {});
