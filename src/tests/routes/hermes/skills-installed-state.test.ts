@@ -181,3 +181,59 @@ describe("parseDisabledSkillList tolerates whatever the CLI prints", () => {
     expect(Array.from(parseDisabledSkillList(raw)).sort()).toEqual(expected);
   });
 });
+
+/**
+ * 2026-10-13 smoke test: Skills → Installed (58) on a Jetson listed
+ * apple-notes, apple-reminders and the other macOS-only skills Hermes bundles.
+ * Hermes never loads a skill whose `platforms` leaves Linux out, so a bundled
+ * one is not something this box has.
+ */
+describe("bundled skills that cannot run on this device", () => {
+  async function writePlatformSkill(rel: string, name: string, platforms: string): Promise<void> {
+    const dir = path.join(skillsDir(), rel);
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(
+      path.join(dir, "SKILL.md"),
+      `---\nname: ${name}\ndescription: ${name}\nplatforms: ${platforms}\n---\n\nbody\n`,
+    );
+  }
+
+  async function writeBundled(names: string[]): Promise<void> {
+    await fs.writeFile(path.join(skillsDir(), ".bundled_manifest"), names.map((n) => `${n}:abc123`).join("\n"));
+  }
+
+  it("leaves a bundled macOS-only skill out of the list and the counts", async () => {
+    await writePlatformSkill("apple/apple-notes", "apple-notes", "[macos]");
+    await writePlatformSkill("productivity/airtable", "airtable", "[linux, macos]");
+    await writeSkill("productivity/obsidian", "obsidian");
+    await writeBundled(["apple-notes", "airtable", "obsidian"]);
+
+    const body = await installed();
+    expect(body.skills.map((s) => s.id).sort()).toEqual(["airtable", "obsidian"]);
+    expect(body.counts.total).toBe(2);
+    expect(body.counts.builtin).toBe(2);
+    expect(body.counts.incompatible).toBe(0);
+    expect(body.counts.unavailable).toBe(1);
+    expect(body.categories.some((c) => c.id === "apple")).toBe(false);
+  });
+
+  it("keeps a macOS-only skill the owner installed, so it can be seen and removed", async () => {
+    await writePlatformSkill("mac-thing", "mac-thing", "[macos]");
+    await writeBundled(["airtable"]);
+    await writeLock({ "mac-thing": { name: "mac-thing", source: "github", identifier: "someone/mac-thing" } });
+
+    const body = await installed();
+    expect(body.skills.map((s) => s.id)).toEqual(["mac-thing"]);
+    expect(body.counts.incompatible).toBe(1);
+    expect(body.counts.unavailable).toBe(0);
+  });
+
+  it("keeps a macOS-only skill that is on disk but not in the bundle", async () => {
+    // Local, hand-placed: not provably Hermes's own, so not ours to hide.
+    await writePlatformSkill("mine/mac-local", "mac-local", "[macos]");
+    await writeBundled(["airtable"]);
+
+    const body = await installed();
+    expect(body.skills.map((s) => s.id)).toEqual(["mac-local"]);
+  });
+});
