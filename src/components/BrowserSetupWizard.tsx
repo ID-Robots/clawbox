@@ -88,6 +88,27 @@ export default function BrowserSetupWizard({
     onDone(opened);
   };
 
+  /**
+   * Walk in, and say so on the device first.
+   *
+   * With no stored answer the device reports setup as finished the moment the
+   * browser WORKS — Chromium there and the link on (getBrowserSetupComplete).
+   * That is right for a box that was set up before the wizard existed, and it
+   * is exactly what step 2 makes true: enabling the link flipped the window to
+   * its home face on the next poll and step 3 never appeared. Storing "not
+   * finished" as the owner walks in makes the explicit flag the answer until
+   * one of the two ways out of step 3 stores "finished".
+   *
+   * A failed write does not keep anyone at the door: the steps work the same,
+   * the window only risks the early flip this is here to stop.
+   */
+  const start = async () => {
+    setBusy("start");
+    await saveBrowserSetup({ setupComplete: false });
+    setBusy(null);
+    setStep("chromium");
+  };
+
   /** Opening it IS finishing: the home face behind this wizard is the screen
    *  the window appears on, so there is nothing left to press afterwards. */
   const openAndFinish = async () => {
@@ -129,7 +150,8 @@ export default function BrowserSetupWizard({
             <div className="mt-7 flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => setStep("chromium")}
+                onClick={() => void start()}
+                disabled={busy !== null}
                 data-testid="browser-wizard-start"
                 className={BTN_PRIMARY}
               >
