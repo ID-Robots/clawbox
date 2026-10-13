@@ -402,8 +402,23 @@ describe("an account Anthropic refuses mid-run (TASK-1260)", () => {
     const run = await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner", provider: "anthropic" })).id);
 
     expect(run.status).toBe("failed");
-    expect(run.error).toMatch(/refused the credential of every account/);
+    expect(run.error).toMatch(/refused the credential this run was using/);
     expect(run.error).not.toMatch(/offline/);
+  });
+
+  it("does not call a sign-in that only could not be checked again refused for good", async () => {
+    installWrapper(["auth", "ok"]);
+    makeProject("site");
+    // The only account: its token ran out mid-run while the box was offline, so the renewal that would confirm it cannot be made.
+    await pool.addOAuthAccount({ label: "Only", email: "only@example.com", tokens: { access: "only-access", refresh: "refresh-only", expires: Date.now() + 8 * 3_600_000 } });
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => { throw new TypeError("fetch failed"); }));
+
+    const run = await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner", provider: "anthropic" })).id);
+
+    expect(run.status).toBe("failed");
+    expect(run.error).not.toMatch(/refused the credential of every account/);
+    expect(run.error).toMatch(/could not be checked again/);
+    expect((await pool.readAccounts())[0].status).toBe("ok");
   });
 
   it("does not bounce a run for ever on a refusal nobody can pin on the account", async () => {

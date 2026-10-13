@@ -10477,6 +10477,8 @@ async function continueOnAnotherAccount(
   const fromLabel = carriedAccount?.label ?? accountsSnapshot()?.find((a) => a.id === fromId)?.label ?? null;
   const exclude = new Set<string>();
   let recorded: LimitRecorded | null = null;
+  // What asking Anthropic about a refused credential answered, when it was asked.
+  let authVerdict: "ok" | "dead" | "unknown" | null = null;
   if (why.kind === "limit") {
     recorded = await recordAccountLimit(run, why.found);
     if (fromId) exclude.add(fromId);
@@ -10492,6 +10494,7 @@ async function continueOnAnotherAccount(
       ? await markCredentialProblem(fromId, "revoked", { source: "coding", runId: run.id }).then(() => "dead" as const, () => "unknown" as const)
       : await probeAccountCredential(fromId, verifyAnthropicKey, { source: "coding", runId: run.id }).catch(() => "unknown" as const);
     console.error(`[coding-agent] ${run.id}: Anthropic refused account ${fromId}'s credential; ${disabled ? "its organization switched it off, so" : "asked again,"} it is ${verdict}`);
+    authVerdict = verdict;
     if (verdict !== "ok") exclude.add(fromId);
   }
   let prepared: PreparedAccount | null = null;
@@ -10527,8 +10530,12 @@ async function continueOnAnotherAccount(
         : otherAccountOk
           ? "Another Anthropic account could take this run over, but its sign-in could not be renewed or read just now; the box may be offline."
             + " Start the run again once the box is back online."
-          : "Anthropic refused the credential of every account this run could use."
-            + " Sign one in again in Settings → Providers → Anthropic accounts, then start the run again.";
+          : authVerdict === "unknown"
+            // Refused in the run, and asking again got no answer — its grant may well be fine.
+            ? "Anthropic refused the credential this run was using, and it could not be checked again just now."
+              + " If the account was signed out, sign it in again in Settings → Providers → Anthropic accounts; then start the run again."
+            : "Anthropic refused the credential of every account this run could use."
+              + " Sign one in again in Settings → Providers → Anthropic accounts, then start the run again.";
       finishRun(run, state, exitCode);
       return;
     }

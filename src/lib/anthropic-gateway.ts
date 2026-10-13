@@ -218,11 +218,14 @@ async function syncLocked(accountId: string, opts: { restart: boolean; keeper?: 
     if (result.written === 0) return outcome("failed", "write_failed");
     written = result.written;
   }
-  // When the gateway was put on THIS account — kept across a renewal or a
-  // re-sync of the same account, so a turn that ran on it just before is still
-  // its turn when a failure is attributed (gatewayAccountAt).
-  const movedAt = mirror?.accountId === accountId ? mirror.at : Date.now();
-  const record = (pending: boolean) => setGatewayMirror({ accountId, fingerprint, expiresAt: token.expires, at: movedAt, pending });
+  // When the gateway was put on THIS account, for attributing failures
+  // (gatewayAccountAt): kept across a renewal or a re-sync of a SETTLED move to
+  // the same account, so a turn that ran on it just before is still its turn;
+  // stamped afresh at each record otherwise, so a move that was still owed —
+  // the old account's token possibly back in the store — counts from when it
+  // actually landed.
+  const keptAt = mirror && mirror.accountId === accountId && !mirror.pending ? mirror.at : null;
+  const record = (pending: boolean) => setGatewayMirror({ accountId, fingerprint, expiresAt: token.expires, at: keptAt ?? Date.now(), pending });
   if (!opts.restart) {
     await record(false);
     return outcome("ok", "renewed", written);
@@ -379,7 +382,7 @@ export function mentionsAnthropic(text: string | null | undefined): boolean {
  * when the gateway put its own copy back on the way down, and not for an agent
  * whose store the box could not write — while the agents whose stores did take
  * it are still blamed, since `write_lost` leaves `pending` set for good. An
- * unknown agent is judged on every store.
+ * unknown agent is judged on every store core reads.
  *
  * Null blames no pool account; the failure still goes through the swap, and a
  * held retry runs again on the account the gateway is on now.
@@ -387,7 +390,11 @@ export function mentionsAnthropic(text: string | null | undefined): boolean {
 function gatewayAccountAt(mirror: GatewayMirror | null, ranAt: number, agentId: string | null, profiles: () => GatewayAnthropicProfile[]): string | null {
   if (!mirror || ranAt < mirror.at) return null;
   if (!mirror.pending) return mirror.accountId;
-  const read = agentId === null ? profiles() : profiles().filter((p) => p.agentId === agentId || p.store === "shared");
+  // What core reads for that agent: its own store and the base it reads
+  // through (main's store, the shared row) — never a retired auth-profiles.json,
+  // which runtime does not use.
+  const stores = profiles().filter((p) => p.store !== "json");
+  const read = agentId === null ? stores : stores.filter((p) => p.agentId === agentId || p.agentId === "main" || p.store === "shared");
   return read.length > 0 && read.every((p) => p.fingerprint === mirror.fingerprint) ? mirror.accountId : null;
 }
 

@@ -526,6 +526,73 @@ describe("failed gateway turns", () => {
     expect((await pool.readAccounts()).find((a) => a.id === personal.id)?.status).toBe("limited");
   });
 
+  it("while the restart is owed, judges an agent on the stores it reads through — main's, never a retired JSON file", async () => {
+    const gateway = fakeGateway();
+    const { work, personal } = await twoClaudeAccounts();
+    gw._setGatewayDepsForTests({
+      absent: () => false,
+      // main's sqlite took the token; a legacy auth-profiles.json beside it did not (runtime never reads it),
+      // and the "ops" agent's own store cannot be written.
+      list: () => [
+        { store: "agent", agentId: "main", profileId: "anthropic:default", type: "oauth", fingerprint: fp(gateway.token!), expires: null },
+        { store: "json", agentId: "main", profileId: "anthropic:default", type: "oauth", fingerprint: fp("sk-ant-oat01-the-chats-own-sign-in"), expires: null },
+        { store: "agent", agentId: "ops", profileId: "anthropic:default", type: "oauth", fingerprint: fp("sk-ant-oat01-the-chats-own-sign-in"), expires: null },
+      ],
+      write: (token) => { gateway.token = token.access; return { written: 1, failed: 1 }; },
+      restart: async () => undefined,
+      reachable: async () => true,
+      call: async (method, params) => {
+        gateway.calls.push({ method, params });
+        return method === "cron.list" ? { jobs: gateway.cronJobs } : { ok: true };
+      },
+    });
+    gw.startGatewaySwap();
+    await pool.markLimited(work.id, Date.now() + H, "session");
+    await swap.whenSwapsSettled();
+    expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: personal.id, pending: true });
+
+    // "helper" has no profile of its own: it reads through main's store, which holds Personal's token.
+    const now = Date.now() + 5_000;
+    gateway.cronJobs = [{ id: "helper-digest", agentId: "helper", state: { lastStatus: "error", lastError: LIMIT, lastRunAtMs: now - 1_000 } }];
+    await gw.scanGatewayCrons(now);
+    expect((await pool.readAccounts()).find((a) => a.id === personal.id)?.status).toBe("limited");
+  });
+
+  it("does not blame the account a pending move has just completed onto for a run that failed before it completed", async () => {
+    const gateway = fakeGateway();
+    const { work, personal } = await twoClaudeAccounts();
+    let putBack = true;
+    gw._setGatewayDepsForTests({
+      absent: () => false,
+      list: () => [{ store: "agent", agentId: "main", profileId: "anthropic:default", type: "oauth", fingerprint: fp(gateway.token!), expires: null }],
+      write: (token) => { gateway.token = token.access; return { written: 1, failed: 0 }; },
+      // The first restart puts the gateway's own (Work) copy back and fails; the keeper's goes through.
+      restart: async () => { if (putBack) { putBack = false; gateway.token = "sk-ant-oat01-work"; throw new Error("gateway did not come back"); } },
+      reachable: async () => false,
+      call: async (method, params) => {
+        gateway.calls.push({ method, params });
+        return method === "cron.list" ? { jobs: gateway.cronJobs } : { ok: true };
+      },
+    });
+    gw.startGatewaySwap();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const T0 = Date.now();
+    await pool.markLimited(work.id, T0 + H, "session");
+    await swap.whenSwapsSettled();
+    expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: personal.id, pending: true });
+
+    // A heartbeat fails on Work while the store still holds Work's token…
+    gateway.cronJobs = [{ id: "heartbeat-main", agentId: "main", state: { lastStatus: "error", lastError: LIMIT, lastRunAtMs: T0 + 9 * 60_000 } }];
+    // …the keeper then finishes the move…
+    vi.setSystemTime(T0 + 10 * 60_000);
+    expect(await gw.keepGatewayMirror()).toBe("resynced");
+    expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: personal.id, pending: false });
+    // …and the scan after it must not take Work's failure for Personal's.
+    vi.setSystemTime(T0 + 11 * 60_000);
+    await gw.scanGatewayCrons(T0 + 11 * 60_000);
+    expect((await pool.readAccounts()).find((a) => a.id === personal.id)?.status).toBe("ok");
+  });
+
   it("sends a failed chat turn again into its session after a real limit's swap", async () => {
     const gateway = fakeGateway();
     gw.startGatewaySwap();
