@@ -69,6 +69,21 @@ The OpenClaw AI agent controls the entire device through MCP (Model Context Prot
 
 ---
 
+## ✨ New in 4.3
+
+| | |
+|---|---|
+| 📸 **Screenshots, built in** | The new **Screenshot** app captures the whole screen, an area or one window and lets you mark the picture up before it is saved to the Screenshots folder in **Files**. **Print Screen**, **Ctrl+Shift+S** or the button beside the clock takes one in a single step. |
+| 🌐 **One browser for you and your assistant** | The assistant now uses the browser on the box's own desktop, shown in **Agent Browser**. Sign in to a site there once and the assistant can use it, and you can watch it work; it opens and closes only its own tabs. |
+| 🔗 **Share an app with a public link** | Right-click an app the Coding Agent built and choose **Create public link**. Visitors reach only that app, for a set time or until you disable the link, with an optional password. |
+| 🤖 **xAI Grok, and model changes without a restart** | On OpenClaw, xAI Grok works with an API key or a SuperGrok or X Premium sign-in. Changing the model, or switching Local AI on or off, no longer restarts the assistant in most cases. |
+| 🎙️ **Hold to talk** | Hold the chat's microphone button, or **F8**, while you speak and let go to send. Spoken replies download several times smaller, and **Settings → Voice** can play every reply aloud. |
+| 🧩 **The Coding Agent, on a live chart** | The Coding Agent opens on a chart of its agents at work. Message a run while it works, let extra runs and teams wait in line, and hand a pull request with failing checks back with **Fix CI**. |
+| 🔁 **Switching between Anthropic accounts, fixed** | An account is no longer marked expired because the box was off or offline, an account whose organization switched off subscription access is left at once, and a failure counts only against the account the assistant was really using. |
+| 🛠️ **Smaller things** | **Settings → Appearance** sets the remote desktop to 1280 × 720, 1600 × 900 or 1920 × 1080. When the cloud voice does not answer, a spoken reply gives up in about 20 seconds and says so, and the chat shows coding runs started elsewhere without a reload. |
+
+Full detail, and how to upgrade: **[RELEASE-NOTES-4.3.0.md](RELEASE-NOTES-4.3.0.md)**.
+
 ## ✨ New in 4.2
 
 | | |
@@ -81,7 +96,7 @@ The OpenClaw AI agent controls the entire device through MCP (Model Context Prot
 | 🛟 **ClawKeep backups fixed** | Snapshots no longer carry old backup archives along, a link that cannot be archived is skipped instead of failing the backup, and a full account no longer turns auto-backup off for good. |
 | 🛠️ **Fixes from hardware testing** | Testing on real ClawBox hardware found and fixed problems with voice input, spoken replies, the ClawBox AI plugin's **Retry**, and updating a box left on an older build. |
 
-Full detail, and how to upgrade: **[RELEASE-NOTES-4.2.0.md](RELEASE-NOTES-4.2.0.md)**.
+Full detail: **[RELEASE-NOTES-4.2.0.md](RELEASE-NOTES-4.2.0.md)**.
 
 ## ✨ New in 4.1
 

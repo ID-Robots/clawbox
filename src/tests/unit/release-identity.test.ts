@@ -12,15 +12,15 @@ import { displayVersion, releaseLineOf, WHATS_NEW_RELEASE } from "@/lib/whats-ne
  *
  * The release build still called itself 4.0.0 on real boxes, and its What's new
  * card was keyed "4.0", so an owner who had closed the 4.0 card would never
- * have been shown 4.1's. 4.2 is the first release made the same way since: an
- * owner who closed the 4.1 card is shown 4.2's. The surfaces are:
+ * have been shown 4.1's. 4.2 and 4.3 were made the same way since: an owner
+ * who closed the 4.2 card is shown 4.3's. The surfaces are:
  *
  *   package.json ─┬─ readClawboxVersion() → /setup-api/update/versions → System Update, About
  *                 ├─ next.config.ts NEXT_PUBLIC_APP_VERSION → About until that route answers
  *                 └─ /setup-api/whats-new version, and WHATS_NEW_RELEASE → the card
  *
- * A minor bump (`npm version 4.3.0`) without a new card fails here, on purpose:
- * the card would otherwise go on announcing 4.2, or show nothing at all.
+ * A minor bump (`npm version 4.4.0`) without a new card fails here, on purpose:
+ * the card would otherwise go on announcing 4.3, or show nothing at all.
  */
 
 // Imports next.config and the updater: longer than vitest's 5 s default on a
@@ -29,7 +29,7 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const REPO_ROOT = path.resolve(__dirname, "../../..");
 const PACKAGE_VERSION = (JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf-8")) as { version: string }).version;
-const PREVIOUS_RELEASE = "4.1";
+const PREVIOUS_RELEASE = "4.2";
 
 vi.mock("@/lib/edition-source", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/edition-source")>()),
@@ -37,8 +37,8 @@ vi.mock("@/lib/edition-source", async (importOriginal) => ({
 }));
 
 describe("the release the box ships", () => {
-  it("is 4.2.0", () => {
-    expect(PACKAGE_VERSION).toBe("4.2.0");
+  it("is 4.3.0", () => {
+    expect(PACKAGE_VERSION).toBe("4.3.0");
   });
 
   it("is the release line the What's new card announces", () => {
@@ -55,7 +55,7 @@ describe("About, System Update, the update status API and the card agree", () =>
 
   beforeEach(() => {
     // A box whose checkout is this one: the shipped package.json, and an owner
-    // who closed the 4.1 card on the previous build.
+    // who closed the 4.2 card on the previous build.
     root = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-release-identity-"));
     fs.copyFileSync(path.join(REPO_ROOT, "package.json"), path.join(root, "package.json"));
     fs.mkdirSync(path.join(root, "data"));
@@ -141,19 +141,36 @@ describe("the release-facing documents follow the release", () => {
   });
 
   it("the previous release's notes still describe the previous release", () => {
-    const notes = read("RELEASE-NOTES-4.1.0.md");
-    expect(notes.split("\n")[0]).toBe("# ClawBox 4.1.0");
-    expect(notes).toContain("**OpenClaw is pinned to 2026.9.4** (state schema 17).");
-    expect(notes).toContain("After the update the desktop shows **What's new in 4.1**");
+    const notes = read("RELEASE-NOTES-4.2.0.md");
+    expect(notes.split("\n")[0]).toBe("# ClawBox 4.2.0");
+    expect(notes).toContain("Previous release: v4.1.0, 25 September 2026. 78 commits.");
+    expect(notes).toContain("- **Several people, one ClawBox.** The owner adds users in Settings → Users.");
+    expect(notes).toContain("- None. A dismissal of the 4.1 card is kept but no longer hides anything");
+    // Seven highlights, as it shipped: the 4.3 copy went into 4.3's own notes.
+    expect(notes).toContain("- **Choose OpenClaw or Hermes at setup.**");
+    expect(notes).not.toMatch(/Screenshot|Agent Browser|public link|Grok/);
   });
 
-  it("the release before it is left as it shipped too", () => {
-    const notes = read("RELEASE-NOTES-4.0.0.md");
-    expect(notes.split("\n")[0]).toBe("# ClawBox 4.0.0");
-    expect(notes).toContain("OpenClaw is pinned to 2026.9.3.");
+  it("the releases before it are left as they shipped too", () => {
+    const notes41 = read("RELEASE-NOTES-4.1.0.md");
+    expect(notes41.split("\n")[0]).toBe("# ClawBox 4.1.0");
+    expect(notes41).toContain("**OpenClaw is pinned to 2026.9.4** (state schema 17).");
+    expect(notes41).toContain("After the update the desktop shows **What's new in 4.1**");
+
+    const notes40 = read("RELEASE-NOTES-4.0.0.md");
+    expect(notes40.split("\n")[0]).toBe("# ClawBox 4.0.0");
+    expect(notes40).toContain("OpenClaw is pinned to 2026.9.3.");
+  });
+
+  it("this release's notes name the release they follow", () => {
+    expect(read(`RELEASE-NOTES-${PACKAGE_VERSION}.md`)).toContain(`Previous release: v${PREVIOUS_RELEASE}.0, 5 October 2026.`);
   });
 
   it("the README still links the previous release's notes", () => {
-    expect(read("README.md")).toContain("](RELEASE-NOTES-4.1.0.md)");
+    expect(read("README.md")).toContain("](RELEASE-NOTES-4.2.0.md)");
+  });
+
+  it("the docs page marks the previous release as released", () => {
+    expect(read("docs-site/whats-new.mdx")).toMatch(/^## ClawBox 4\.2\n\n\*\*Released October 5, 2026\*\*$/m);
   });
 });

@@ -361,7 +361,7 @@ describe("an account Anthropic refuses mid-run (TASK-1260)", () => {
     const work = await pool.addOAuthAccount({ label: "Work", email: "work@example.com", tokens: tokens("work-access") });
     const personal = await pool.addOAuthAccount({ label: "Personal", email: "me@example.com", tokens: tokens("personal-access") });
     // The grant renews fine: a probe would have kept the account and put the run straight back on it.
-    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ access_token: "renewed", refresh_token: "r2", expires_in: 28_800 }), { status: 200 }));
+    const fetchMock = vi.fn<(url: string) => Promise<Response>>(async () => new Response(JSON.stringify({ access_token: "renewed", refresh_token: "r2", expires_in: 28_800 }), { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
     const run = await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner", provider: "anthropic" })).id);
@@ -381,7 +381,7 @@ describe("an account Anthropic refuses mid-run (TASK-1260)", () => {
     await pool.addOAuthAccount({ label: "Work", email: "work@example.com", tokens: { access: "work-access", refresh: "refresh-work", expires: hours(8) } });
     // Its token ran out while the box was offline; the grant behind it is fine.
     await pool.addOAuthAccount({ label: "Personal", email: "me@example.com", tokens: { access: "personal-access", refresh: "refresh-personal", expires: hours(-0.1) } });
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => { throw new TypeError("fetch failed"); }));
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("fetch failed"); }));
 
     const run = await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner", provider: "anthropic" })).id);
 
@@ -397,7 +397,7 @@ describe("an account Anthropic refuses mid-run (TASK-1260)", () => {
     makeProject("site");
     await pool.addApiKeyAccount({ label: "Only", key: KEY_A });
     // Anthropic refused the key in the run; the check afterwards only got a 503, so the account stays listed as fine.
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => new Response("{}", { status: 503 })));
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 503 })));
 
     const run = await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner", provider: "anthropic" })).id);
 
@@ -411,7 +411,7 @@ describe("an account Anthropic refuses mid-run (TASK-1260)", () => {
     makeProject("site");
     // The only account: its token ran out mid-run while the box was offline, so the renewal that would confirm it cannot be made.
     await pool.addOAuthAccount({ label: "Only", email: "only@example.com", tokens: { access: "only-access", refresh: "refresh-only", expires: Date.now() + 8 * 3_600_000 } });
-    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => { throw new TypeError("fetch failed"); }));
+    vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("fetch failed"); }));
 
     const run = await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner", provider: "anthropic" })).id);
 
