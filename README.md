@@ -79,6 +79,8 @@ The OpenClaw AI agent controls the entire device through MCP (Model Context Prot
 | 🤖 **xAI Grok, and model changes without a restart** | On OpenClaw, xAI Grok works with an API key or a SuperGrok or X Premium sign-in. Changing the model, or switching Local AI on or off, no longer restarts the assistant in most cases. |
 | 🎙️ **Hold to talk** | Hold the chat's microphone button, or **F8**, while you speak and let go to send. Spoken replies download several times smaller, and **Settings → Voice** can play every reply aloud. |
 | 🧩 **The Coding Agent, on a live chart** | The Coding Agent opens on a chart of its agents at work. Message a run while it works, let extra runs and teams wait in line, and hand a pull request with failing checks back with **Fix CI**. |
+| 🔁 **Switching between Anthropic accounts, fixed** | An account is no longer marked expired because the box was off or offline, an account whose organization switched off subscription access is left at once, and a failure counts only against the account the assistant was really using. |
+| 🛠️ **Smaller things** | **Settings → Appearance** sets the remote desktop to 1280 × 720, 1600 × 900 or 1920 × 1080. When the cloud voice does not answer, a spoken reply gives up in about 20 seconds and says so, and the chat shows coding runs started elsewhere without a reload. |
 
 Full detail, and how to upgrade: **[RELEASE-NOTES-4.3.0.md](RELEASE-NOTES-4.3.0.md)**.
 

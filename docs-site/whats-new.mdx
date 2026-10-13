@@ -104,8 +104,28 @@ checks fail, the run's page shows what failed and **Fix CI** starts a run that f
 Each project keeps run notes of what earlier runs learned, which you can view and edit on the
 project page.
 
+### Switching between Anthropic accounts, fixed
+
+- An account is no longer marked expired because the box could not reach Anthropic to renew
+  its sign-in, for example after the box was off. The box tries again on the next request;
+  only Anthropic itself refusing the sign-in takes an account out.
+- An account whose organization has switched off Claude subscription access for Claude Code
+  is marked **Needs re-authentication** straight away, and the chat and coding runs move to
+  the next account.
+- The account the box switches to is used right away, and a failure is counted only against
+  the account the assistant was really running on, so a switch is not undone by a failure
+  that came from the account before it.
+
+See [Multiple Anthropic Accounts](/guides/anthropic-accounts).
+
 ### Smaller things
 
+- **Settings → Appearance → Remote desktop resolution** sets the remote desktop to
+  1280 × 720, 1600 × 900 or 1920 × 1080. Changing it restarts the remote desktop briefly.
+- When the cloud voice does not answer, a spoken reply gives up after about 20 seconds and a
+  line under the reply says so, instead of a silent minute.
+- A coding run started from another browser or device shows its card in the open chat within
+  about half a minute, without a reload.
 - In the Terminal, Ctrl+V pastes a picture into Claude Code as an attachment.
 - On a laptop, the tray shows the battery level beside the clock.
 - On the ClawBox desktop session, a **Google Chrome** icon opens your own Chrome as a window
@@ -113,6 +133,8 @@ project page.
 - Pressing Stop in the chat leaves a grey "Stopped." line under the reply.
 - On Hermes, documents attached in the chat reach the assistant.
 - When ClawKeep refuses a backup, it says why, with the sizes involved.
+- On your own x64 machine, a Cloudflare Tunnel download that stalls no longer holds up the
+  install.
 - OpenClaw is updated to 2026.10.2 and Hermes Agent to v0.21.7.
 
 ## ClawBox 4.2

@@ -1,12 +1,13 @@
 # ClawBox 4.3.0
 
-Previous release: v4.2.0, 5 October 2026. 117 commits.
+Previous release: v4.2.0, 5 October 2026. 122 commits.
 
 4.3 adds a Screenshot app and gives you and your assistant one shared browser.
 An app the Coding Agent built can now be shared through a public link. xAI Grok
 joins the AI providers, most model changes no longer restart the assistant, you
 can hold to talk, and the Coding Agent shows its agents at work on a live
-chart. Wi-Fi, updates, backups and first setup get a long list of fixes.
+chart. Wi-Fi, updates, backups, first setup and switching between Anthropic
+accounts get a long list of fixes.
 
 ## Highlights
 
@@ -113,6 +114,12 @@ chart. Wi-Fi, updates, backups and first setup get a long list of fixes.
 - On the ClawBox desktop session, a **Google Chrome** icon opens your own
   Chrome, with your own profile, as a window on the box's screen. A second
   click opens another window.
+- **Remote desktop resolution**, in Settings → Appearance, sets the size of the
+  remote desktop: 1280 × 720, which stays the default, 1600 × 900 or
+  1920 × 1080. Changing it restarts the remote desktop briefly and closes the
+  apps open on it, so you are asked first. The choice is kept across restarts
+  and updates, and it does not apply while the remote desktop mirrors a
+  physical screen.
 
 ### Coding Agent
 
@@ -239,6 +246,9 @@ chart. Wi-Fi, updates, backups and first setup get a long list of fixes.
   box's user has tunnel settings of their own.
 - **Install Cloudflare Tunnel** in Settings → Remote Control works on every
   kind of ClawBox install; some refused it.
+- On ClawBox installed on your own x64 machine, a Cloudflare Tunnel download
+  that stalls no longer holds up the install or **Install Cloudflare Tunnel**:
+  it gives up within minutes with a warning, and the button can try again.
 
 ### Updates
 
@@ -257,10 +267,48 @@ chart. Wi-Fi, updates, backups and first setup get a long list of fixes.
   no assistant: the cloud defaults wait until the assistant answers.
 - The ClawBox AI sign-in no longer reports a time-out for a sign-in that
   worked.
-- With several Anthropic accounts, a slow-starting assistant is no longer
-  restarted over and over.
 - The Telegram card no longer says the channel is active when the bot is not
   receiving messages, for example after its token was rejected.
+
+### Switching between Anthropic accounts
+
+- An account is no longer marked expired because the box could not reach
+  Anthropic to renew its sign-in, for example after the box was switched off
+  or before its network was up after a restart. The box tries again on the
+  next request, and only Anthropic itself refusing the sign-in takes an account
+  out. Before, such a box needed every account signed in again.
+- When an account's organization has switched off Claude subscription access
+  for Claude Code, the account is marked **Needs re-authentication** straight
+  away, and the chat and coding runs move to the next account instead of going
+  back to it. A sign-in Anthropic reports as revoked is checked with Anthropic
+  and, when it really is dead, moves them on too.
+- The account the box switches to is used right away, instead of sitting out
+  the cool-down of the account before it.
+- A failed chat reply or scheduled task counts against an account only when
+  the assistant was really running on that account. Right after a switch, a
+  failure that still came from the previous account no longer takes the new
+  one out, and an account that reached its limit still moves on.
+- A slow-starting assistant is no longer restarted over and over, and neither
+  is one whose switch could not be saved: the box waits longer before each new
+  try.
+- A coding run that cannot be moved to another account now says so plainly:
+  that the box may be offline when another account is still usable, and in
+  every case that the run has to be started again. It no longer says every
+  account refused it and asks you to sign in again over accounts the card shows
+  as fine.
+
+### Chat and voice
+
+- When the cloud voice does not answer, a spoken reply gives up after about 20
+  seconds, instead of showing "Speaking the reply…" for a whole minute and then
+  going quiet without a word. A short line under the reply says the voice is
+  not answering, or that it could not speak that reply, and it goes away once
+  the conversation moves on. A reply whose audio breaks off part way says so
+  too.
+- A coding run started somewhere other than this chat, such as another browser
+  or device, now shows its card in the open chat within about half a minute,
+  without a reload. One failed check no longer stops the chat from looking
+  until the page is reloaded.
 
 ### Factory reset
 
