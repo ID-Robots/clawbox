@@ -175,10 +175,10 @@ describe("falling through to the store", () => {
     );
   });
 
-  it("answers 404 when the store has none either", async () => {
+  it("answers 204, not an error, when the store has none either", async () => {
     const res = await get(APP_ID);
-    expect(res.status).toBe(404);
-    expect((await res.json()).error).toBe("Icon not found");
+    expect(res.status).toBe(204);
+    expect(await res.text()).toBe("");
   });
 
   it("prefers the local copy and never asks the store for it", async () => {
