@@ -415,6 +415,15 @@ describe("BrowserApp", () => {
       expect(queryByText("Starting Chromium…")).toBeNull();
     });
 
+    it("offers Open, never Close, for the box's one browser shared with the assistant", async () => {
+      const fetchMock = stubDevice({ ...OWNER_STATUS, browser: { running: true, pid: 4242, cdpReady: true, shared: true } });
+      const { findByTestId, queryByTestId } = render(<BrowserApp />);
+
+      expect(await findByTestId("browser-open")).toBeEnabled();
+      expect(queryByTestId("browser-close")).toBeNull();
+      expect(postedActions(fetchMock)).toEqual([]);
+    });
+
     it("still offers Close for the owner's browser when ClawBox started it", async () => {
       stubDevice({ ...OWNER_STATUS, browser: { running: true, pid: 4242, cdpReady: true } });
       const { findByTestId, queryByTestId } = render(<BrowserApp />);

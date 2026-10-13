@@ -174,6 +174,9 @@ const OPENCLAW_PANEL_PROVIDERS: readonly { id: string; label: string }[] = [
   { id: "anthropic", label: "Anthropic Claude" },
   { id: "google", label: "Google Gemini" },
   { id: "openrouter", label: "OpenRouter" },
+  // Last, so every row above keeps its place. An API key or a SuperGrok / X
+  // Premium sign-in, both at `xai:default` — either makes the row connected.
+  { id: "xai", label: "xAI Grok" },
 ];
 
 const LOCAL_PROVIDER_LABELS: Record<string, string> = {
@@ -606,6 +609,7 @@ const CATALOGUES_BY_ROW: ReadonlyMap<string, readonly string[]> = new Map(
     anthropic: ["anthropic"],
     google: ["google"],
     openrouter: ["openrouter"],
+    xai: ["xai"],
   }),
 );
 

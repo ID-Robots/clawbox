@@ -533,8 +533,9 @@ describe("POST /setup-api/setup/reset", () => {
     await resetPost();
 
     // Documents/Downloads/Desktop are content-wiped via readdir+rm (the
-    // Files app expects the dirs to exist), not rm'd wholesale.
-    for (const dir of ["Documents", "Downloads", "Desktop"]) {
+    // Files app expects the dirs to exist), not rm'd wholesale — and so are
+    // ~/Projects (the coding agent's work folder) and the other XDG folders.
+    for (const dir of ["Documents", "Downloads", "Desktop", "Projects", "Music", "Pictures", "Videos", "Public", "Templates"]) {
       const call = mockFs.readdir.mock.calls.find(
         ([p]) => typeof p === "string" && p.endsWith(dir),
       );
@@ -608,6 +609,8 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
   const HERMES_ENTRIES = [
     "hermes-agent",
     "bin",
+    "installs",
+    "tools",
     // Upstream's install-failure marker. It suppresses the tirith download for
     // 24 h, so a reset that kept it would leave a box that IS online unable to
     // re-fetch the scanner for another day.
@@ -630,9 +633,11 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
   // future narrowing that kept `tirith` and removed its neighbour would
   // otherwise slip through.
   const HERMES_BIN_ENTRIES = ["tirith", "future-helper"];
-  // The reset preserves the agent install and the bin/ the scanner lives in.
-  // Everything else under ~/.hermes is previous-owner state and must go.
-  const KEPT_ENTRIES = ["hermes-agent", "bin"];
+  // The reset preserves the agent install — the checkout, plus (from Hermes
+  // v0.21.7) the venv in installs/ and the interpreter in tools/ — and the bin/
+  // the scanner lives in. Everything else under ~/.hermes is previous-owner
+  // state and must go.
+  const KEPT_ENTRIES = ["hermes-agent", "bin", "installs", "tools"];
   const SECRET_ENTRIES = HERMES_ENTRIES.filter((e) => !KEPT_ENTRIES.includes(e));
 
   const rmTargets = () =>
@@ -1087,5 +1092,165 @@ describe("POST /setup-api/setup/reset — a non-directory where a directory belo
     } finally {
       await realFs.rm(tmp, { recursive: true, force: true });
     }
+  });
+});
+
+/**
+ * The owner's files outside the folders the reset used to know about.
+ *
+ * Reproduced on a device: a factory reset emptied Documents, Downloads,
+ * Desktop, ~/.openclaw and data/, but the previous owner's code in ~/Projects
+ * (the coding agent's work folder) and a loose ~/notes.txt were still there for
+ * the next owner, and so were Music, Pictures, Videos, Public and Templates.
+ *
+ * These run the real handler over a scratch home on the REAL filesystem, so
+ * what they check is what is left on disk rather than which strings reached a
+ * mocked `fs.rm`. Every path outside that home — data/, ~/.openclaw — stays
+ * mocked exactly as in the cases above.
+ */
+describe("POST /setup-api/setup/reset — ~/Projects and loose files in the home root", () => {
+  let resetPost: () => Promise<Response>;
+  let session: SessionFixture;
+  let realFs: typeof import("fs/promises");
+  let nodePath: typeof import("path");
+  let home: string;
+
+  const at = (rel: string) => nodePath.join(home, rel);
+  const inHome = (p: unknown) => typeof p === "string" && (p === home || p.startsWith(`${home}/`));
+  const exists =(rel: string) => realFs.lstat(at(rel)).then(() => true, () => false);
+  async function plant(rel: string, content = "previous owner\n") {
+    await realFs.mkdir(nodePath.dirname(at(rel)), { recursive: true });
+    await realFs.writeFile(at(rel), content);
+  }
+
+  // The shell and session dotfiles the box itself needs.
+  const KEPT_DOTFILES = [".bashrc", ".profile", ".bash_logout", ".xsessionrc", ".sudo_as_admin_successful"];
+
+  beforeEach(async () => {
+    vi.resetModules();
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ models: [] }),
+    }));
+
+    realFs = await vi.importActual<typeof import("fs/promises")>("fs/promises");
+    nodePath = await vi.importActual<typeof import("path")>("path");
+    const os = await vi.importActual<typeof import("os")>("os");
+    home = await realFs.mkdtemp(nodePath.join(os.tmpdir(), "clawbox-reset-home-"));
+    // Read when the route module loads, which is below.
+    vi.stubEnv("HOME", home);
+    vi.stubGlobal("process", { ...process, getuid: () => 1000, getgid: () => 1000 });
+
+    mockFs.lstat.mockImplementation(((p: string) =>
+      inHome(p)
+        ? realFs.lstat(p)
+        : Promise.resolve({ isDirectory: () => true, isSymbolicLink: () => false })) as unknown as typeof fs.lstat);
+    mockFs.readdir.mockImplementation(((p: string, opts?: object) =>
+      inHome(p) ? realFs.readdir(p, opts as never) : Promise.resolve([])) as unknown as typeof fs.readdir);
+    mockFs.rm.mockImplementation(((p: string, opts?: object) =>
+      inHome(p) ? realFs.rm(p, opts) : Promise.resolve()) as unknown as typeof fs.rm);
+    mockFs.mkdir.mockResolvedValue(undefined);
+    mockFs.writeFile.mockResolvedValue();
+    mockFs.chown.mockResolvedValue();
+    mockFs.unlink.mockResolvedValue();
+    mockResetUpdateState.mockReturnValue();
+    setupExecFileMock({ nmcli: { stdout: "", stderr: "" }, systemctl: { stdout: "", stderr: "" } });
+
+    session = installSessionFixture();
+    const mod = await import("@/app/setup-api/setup/reset/route");
+    resetPost = () => mod.POST(new Request("http://localhost/setup-api/setup/reset", {
+      method: "POST",
+      headers: { Cookie: session.cookie, "Content-Type": "application/json" },
+      body: JSON.stringify({ password: "hunter2", confirm: "RESET" }),
+    }));
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    vi.clearAllMocks();
+    session.cleanup();
+    await realFs.rm(home, { recursive: true, force: true });
+  });
+
+  it("empties ~/Projects and the other user folders, and keeps the folders", async () => {
+    await plant("Projects/my-app/src/index.ts", "export const secret = 'previous owner';\n");
+    await plant("Projects/my-app/.git/config");
+    await plant("Projects/scratch.py");
+    for (const dir of ["Music", "Pictures", "Videos", "Public", "Templates"]) {
+      await plant(`${dir}/from-the-previous-owner`);
+    }
+
+    const res = await resetPost();
+
+    expect(res.status).toBe(200);
+    expect(await exists("Projects/my-app/src/index.ts")).toBe(false);
+    for (const dir of ["Projects", "Music", "Pictures", "Videos", "Public", "Templates"]) {
+      expect(await realFs.readdir(at(dir)), `expected ~/${dir} to be emptied`).toEqual([]);
+      expect((await realFs.lstat(at(dir))).isDirectory(), `expected ~/${dir} itself to stay`).toBe(true);
+    }
+  });
+
+  it("removes loose files in the home root, but not the box's dotfiles or any directory", async () => {
+    await plant("notes.txt");
+    // Remove-by-default: an unlisted dotfile goes too, not just visible files.
+    await plant(".some-future-token");
+    for (const dotfile of KEPT_DOTFILES) await plant(dotfile, `# ${dotfile} as flashed\n`);
+    // What the box runs on, and must come back up with.
+    const SYSTEM_FILES = [
+      "clawbox/package.json",
+      "llama.cpp/build/bin/llama-server",
+      ".npm-global/bin/openclaw",
+      ".bun/bin/bun",
+      ".local/bin/hermes",
+      ".cache/huggingface/hub/whisper.bin",
+    ];
+    for (const rel of SYSTEM_FILES) await plant(rel);
+    // A link in the home root is left as it is, and so is what it points at.
+    const elsewhere = `${home}-elsewhere`;
+    await realFs.mkdir(elsewhere);
+    await realFs.writeFile(nodePath.join(elsewhere, "keepme.txt"), "not in the home\n");
+    await realFs.symlink(elsewhere, at("linked-folder"));
+
+    try {
+      const res = await resetPost();
+
+      expect(res.status).toBe(200);
+      expect(await exists("notes.txt"), "a loose file in the home root survived the reset").toBe(false);
+      expect(await exists(".some-future-token")).toBe(false);
+      for (const dotfile of KEPT_DOTFILES) {
+        expect(await realFs.readFile(at(dotfile), "utf8"), `expected ~/${dotfile} to survive`)
+          .toBe(`# ${dotfile} as flashed\n`);
+      }
+      for (const rel of SYSTEM_FILES) {
+        expect(await exists(rel), `expected ~/${rel} to survive`).toBe(true);
+      }
+      expect((await realFs.lstat(at("linked-folder"))).isSymbolicLink()).toBe(true);
+      expect(await realFs.readdir(elsewhere)).toEqual(["keepme.txt"]);
+    } finally {
+      await realFs.rm(elsewhere, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a loose file it cannot remove and leaves the box reachable", async () => {
+    await plant("notes.txt");
+    mockFs.rm.mockImplementation(((p: string, opts?: object) =>
+      p === at("notes.txt")
+        ? Promise.reject(new Error("EACCES: permission denied"))
+        : inHome(p) ? realFs.rm(p, opts) : Promise.resolve()) as unknown as typeof fs.rm);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const res = await resetPost();
+    const body = await res.json();
+    await vi.advanceTimersByTimeAsync(2_000);
+    warnSpy.mockRestore();
+
+    expect(res.status).toBe(500);
+    expect(JSON.stringify(body.failures)).toContain("notes.txt");
+    const commands = mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args ?? []).join(" ")}`);
+    expect(commands.some((c) => c.includes("reboot"))).toBe(false);
   });
 });

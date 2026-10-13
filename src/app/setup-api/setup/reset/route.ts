@@ -67,10 +67,10 @@ const DATA_KEEP: ReadonlyArray<{ rel: string; keep?: ReadonlySet<string> }> = [
 ];
 const DATA_KEEP_NAMES = new Set(DATA_KEEP.map((entry) => entry.rel));
 
-// The two named exceptions to the ~/.hermes wipe. Neither is owner state and
-// neither can be re-fetched on a reset device — it reboots into AP mode with no
-// internet. Rationale for both is at the HOME_CONTENT_WIPE_KEEP entry below.
-const HERMES_KEEP = new Set(["hermes-agent", "bin"]);
+// The named exceptions to the ~/.hermes wipe. None is owner state and none can
+// be re-fetched on a reset device — it reboots into AP mode with no internet.
+// Rationale for each is at the HOME_CONTENT_WIPE_KEEP entry below.
+const HERMES_KEEP = new Set(["hermes-agent", "bin", "installs", "tools"]);
 
 /** Delete all Ollama models so a factory reset starts with a clean slate. */
 async function deleteOllamaModels(): Promise<void> {
@@ -387,7 +387,23 @@ const HOME_REMOVE_PATHS = [
 ];
 // User-visible folders the Files app exposes (and recreates empty on demand):
 // wipe the contents, keep the directories.
-const HOME_CONTENT_WIPE_DIRS = ["Documents", "Downloads", "Desktop"];
+//
+// Projects is the coding agent's default work folder — the owner's code, their
+// repositories and every app the agent built for them — and the rest are the
+// standard XDG user folders. They used to be missing from this list, so a reset
+// box handed the next owner the previous one's projects, music, pictures and
+// videos.
+const HOME_CONTENT_WIPE_DIRS = [
+  "Documents",
+  "Downloads",
+  "Desktop",
+  "Projects",
+  "Music",
+  "Pictures",
+  "Videos",
+  "Public",
+  "Templates",
+];
 
 // Directories wiped entry-by-entry with a NAMED exception list. Same
 // remove-everything default as HOME_REMOVE_PATHS — the exception is spelled
@@ -404,8 +420,9 @@ const HOME_CONTENT_WIPE_KEEP: ReadonlyArray<{ rel: string; keep: ReadonlySet<str
     // is a wipe with ONE exception, not a keep-list.
     //
     // That exception is hermes-agent/, and it is not owner state at all. It is
-    // the AGENT INSTALL — a git checkout of NousResearch/hermes-agent plus the
-    // Python venv that ~/.local/bin/hermes (a 4-line shim) execs. Deleting it
+    // the AGENT INSTALL — a git checkout of NousResearch/hermes-agent plus (up
+    // to v0.21.1) the Python venv that ~/.local/bin/hermes (a 4-line shim)
+    // execs; from v0.21.7 that venv and its interpreter moved, see below. Deleting it
     // was the factory-reset defect this exception fixes: the shim survives the
     // wipe (it lives in ~/.local/bin), so a reset box was left with a `hermes`
     // command whose interpreter no longer existed:
@@ -439,6 +456,17 @@ const HOME_CONTENT_WIPE_KEEP: ReadonlyArray<{ rel: string; keep: ReadonlySet<str
     // invisible to --porcelain. Re-provisioning the agent from upstream after
     // a reset is the real fix, and it needs network this device does not have
     // at reset time.
+    //
+    // From Hermes v0.21.7 the agent install is no longer one directory. The
+    // upstream package manager builds the agent's venv in installs/ (selected by
+    // installs/<key>/facts.json) and keeps the Python the launcher execs, plus
+    // uv, node and the agent's browser, in tools/; ~/.local/bin/hermes now
+    // execs a launcher in hermes-agent/.hermes/bin that runs
+    // tools/python-<version>/bin/python3. Kept with hermes-agent/ for the same
+    // reason: measured on a Nano, leaving out tools/ makes `hermes` fail with
+    // "python3: not found", and leaving out installs/ leaves it no
+    // dependencies. Both are upstream artifacts — hashes, interpreters,
+    // packages — with no owner data in them.
     //
     // The second exception is bin/, and it is the same category. It holds the
     // upstream `tirith` binary the agent runs BEFORE every shell command
@@ -475,6 +503,60 @@ const HOME_CONTENT_WIPE_KEEP: ReadonlyArray<{ rel: string; keep: ReadonlySet<str
     keep: HERMES_KEEP,
   },
 ];
+
+// Loose files directly in the home root — a ~/notes.txt, an export saved next
+// to the folders above, whatever the agent wrote there. Nothing listed them, so
+// a reset box used to hand them to the next owner. Wiped with a NAMED exception
+// list, the same remove-everything default as HOME_CONTENT_WIPE_KEEP: a file
+// that appears here tomorrow is removed unless somebody adds it below.
+//
+// Regular files ONLY. The directories in the home root (the ClawBox checkout,
+// llama.cpp/, .npm-global, .bun, .local, .cache …) are what the box runs on and
+// stay with the lists above, and a symlink is left as it is.
+const HOME_ROOT_FILE_KEEP = new Set([
+  // The shell start-up files from /etc/skel. install.sh appends the
+  // ~/.npm-global/bin and ~/.local/bin PATH entries to .bashrc, and the
+  // Terminal's login shell reaches it through .profile: without them `claude`,
+  // `codex`, `openclaw` and `hermes` are not found, and nothing on a reset box
+  // writes them back.
+  ".bashrc",
+  ".profile",
+  ".bash_logout",
+  // Sourced by the X session at login.
+  ".xsessionrc",
+  // Ubuntu's marker that silences the sudo hint on every login shell.
+  ".sudo_as_admin_successful",
+]);
+
+/**
+ * Remove the loose regular files directly in the home root, except
+ * HOME_ROOT_FILE_KEEP. Same failure contract as removeDirectoryContents: a
+ * survivor is reported, never thrown.
+ */
+async function removeLooseHomeFiles(): Promise<string[]> {
+  let names: string[];
+  try {
+    const entries = await fs.readdir(/* turbopackIgnore: true */ HOME_DIR, { withFileTypes: true });
+    names = entries
+      .filter((entry) => entry.isFile() && !HOME_ROOT_FILE_KEEP.has(entry.name))
+      .map((entry) => entry.name);
+  } catch (err: unknown) {
+    if (isEnoent(err)) return [];
+    return [`${HOME_DIR}: ${err}`];
+  }
+  // No `recursive`: a file swapped for a directory after the readdir fails to
+  // remove and is reported, rather than taking a directory with it.
+  const results = await Promise.allSettled(
+    names.map((name) => fs.rm(path.join(HOME_DIR, name), { force: true })),
+  );
+  const failures = results
+    .map((r, i) => r.status === "rejected" ? `${names[i]}: ${r.reason}` : null)
+    .filter((f): f is string => f !== null);
+  if (failures.length > 0) {
+    console.warn(`[Reset] Failed to remove ${failures.length} file(s) in ${HOME_DIR}:`, failures);
+  }
+  return failures;
+}
 
 /**
  * The owner's own browser profile, when they pointed the Browser app at one
@@ -549,6 +631,7 @@ async function wipeHomeUserState(): Promise<string[]> {
     const dirFailures = await removeDirectoryContents(path.join(HOME_DIR, rel), keep);
     failures.push(...dirFailures.map((f) => labelFailure(rel, f)));
   }
+  failures.push(...(await removeLooseHomeFiles()));
   // Agent-scheduled cron jobs. `crontab -r` exits non-zero when there is no
   // crontab — that's the desired end state, not a failure; anything else
   // (missing binary, cron.deny) leaves a persistence vector and gets logged.

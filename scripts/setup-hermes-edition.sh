@@ -30,11 +30,56 @@ CLAWBOX_USER="${CLAWBOX_USER:-clawbox}"
 CLAWBOX_HOME="$(getent passwd "$CLAWBOX_USER" | cut -d: -f6)"
 CLAWBOX_HOME="${CLAWBOX_HOME:-/home/$CLAWBOX_USER}"
 HERMES_BIN="${HERMES_BIN:-$CLAWBOX_HOME/.local/bin/hermes}"
-HERMES_VENV_PYTHON="$CLAWBOX_HOME/.hermes/hermes-agent/venv/bin/python"
 EDITION_FILE="/etc/clawbox/edition.env"
 EDITION_DROPIN="/etc/systemd/system/clawbox-setup.service.d/edition.conf"
 
 log() { echo "[hermes-edition] $*"; }
+
+# The interpreter the Hermes agent runs on, or nothing when it has none.
+#
+# Up to v0.21.1 that was always `<agent_dir>/venv/bin/python`. From v0.21.7
+# the upstream installer hands dependencies to its own package manager, which
+# builds content-addressed environments outside the checkout and records the
+# selected one in `<hermes_home>/installs/<key>/facts.json`
+# (`packages.venv.environment`), `<key>` being the first 16 hex digits of the
+# sha256 of the checkout's real path; `~/.local/bin/hermes` now execs a
+# launcher in `<agent_dir>/.hermes/bin` instead of the venv. This follows
+# upstream's own `selected_venv` (pm/environments.py): a recorded environment
+# must sit under that key's `environments/` and carry a `pyvenv.cfg`, and a
+# record that fails that is an answer of NOTHING, not a licence to fall back;
+# only with no record does the in-tree `venv` of an older install answer.
+# Read-only and standard-library only, so it is safe as root over a clawbox
+# tree (`-I`, and the script comes from stdin, so no __pycache__ is written).
+# install.sh carries the same function; a unit test keeps the two identical.
+hermes_venv_python() {
+  python3 -I - "$1" "$2" 2>/dev/null <<'PY'
+import hashlib, json, os, sys
+agent, home = sys.argv[1], sys.argv[2]
+key = hashlib.sha256(os.path.realpath(agent).encode()).hexdigest()[:16]
+state = os.path.join(home, "installs", key)
+try:
+    with open(os.path.join(state, "facts.json"), encoding="utf-8-sig") as fh:
+        recorded = json.load(fh).get("packages", {}).get("venv", {}).get("environment")
+except FileNotFoundError:
+    recorded = None
+except (OSError, ValueError, AttributeError):
+    sys.exit(1)
+if recorded is None:
+    venv = os.path.join(agent, "venv")
+else:
+    if not isinstance(recorded, str):
+        sys.exit(1)
+    venv = os.path.realpath(recorded)
+    generations = os.path.realpath(os.path.join(state, "environments"))
+    if not venv.startswith(generations + os.sep) or not os.path.isfile(os.path.join(venv, "pyvenv.cfg")):
+        sys.exit(1)
+python = os.path.join(venv, "bin", "python")
+if not os.access(python, os.X_OK):
+    sys.exit(1)
+print(python)
+PY
+}
+HERMES_VENV_PYTHON="$(hermes_venv_python "$CLAWBOX_HOME/.hermes/hermes-agent" "$CLAWBOX_HOME/.hermes")" || HERMES_VENV_PYTHON=""
 
 # Every failure is recorded rather than swallowed. Previously every step here
 # degraded to a WARNING and install.sh wrapped the whole script in
@@ -153,14 +198,14 @@ esac
 log "edition: $EDITION"
 
 # ── 1. Sanity: Hermes must be present (this edition runs on it). ────────────
-# BOTH halves, deliberately. $HERMES_BIN is a 4-line shim that execs
-# $HERMES_VENV_PYTHON, and it lives outside ~/.hermes — so a factory reset that
+# BOTH halves, deliberately. $HERMES_BIN is a small shim into the agent under
+# ~/.hermes, which runs on $HERMES_VENV_PYTHON, and it lives outside ~/.hermes — so a factory reset that
 # removed the agent left the shim executable and this check passing on a device
 # whose `hermes` command could not start. That is the same shim-only test that
 # made install.sh report "Hermes already installed ()"; fail loudly here instead
 # of continuing into a Hermes setup with no Hermes.
 if [ ! -x "$HERMES_BIN" ] || [ ! -x "$HERMES_VENV_PYTHON" ]; then
-  fail "Hermes agent not runnable ($HERMES_BIN -> $HERMES_VENV_PYTHON) — run: sudo bash $PROJECT_DIR/install.sh --step hermes_install"
+  fail "Hermes agent not runnable ($HERMES_BIN -> ${HERMES_VENV_PYTHON:-no Python environment}) — run: sudo bash $PROJECT_DIR/install.sh --step hermes_install"
 fi
 
 # ── 2. Shared-identity bridge ───────────────────────────────────────────────

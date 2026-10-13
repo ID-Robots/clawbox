@@ -35,7 +35,7 @@ vi.mock("@/lib/openclaw-config", () => ({
 const DATA_DIR = `/tmp/clawbox-catalog-empty-enumeration-test-${process.pid}`;
 vi.mock("@/lib/config-store", () => ({ DATA_DIR: `/tmp/clawbox-catalog-empty-enumeration-test-${process.pid}` }));
 
-import { GET } from "@/app/setup-api/ai-models/catalog/route";
+import { GET, notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 
 const mockSpawn = vi.mocked(childProcess.spawn);
 
@@ -124,6 +124,52 @@ describe("catalog — a clean empty enumeration is an answer, not a failure", ()
     await get("google", "&refresh=1");
 
     expect(await recordedCount("google")).toBe(2);
+  });
+
+  // xAI (Grok) rides the same CLI enumeration as every other plugin-backed
+  // provider, and both of its answers matter: the bundled plugin lists nothing
+  // until a key is on the box, and its full catalogue afterwards. One test,
+  // because it is one sequence — and the hinge between the two halves is the
+  // call the configure route makes after it has pasted the key.
+  it("serves the curated Grok rows until a key is saved, then the box's own xai enumeration", async () => {
+    mockList({ count: 0, models: [] });
+    await get("xai", "&refresh=1");
+
+    // The clean zero is the box's answer and is recorded as one...
+    expect(await recordedCount("xai")).toBe(0);
+    // ...and what the picker gets is the cold-start list, never stamped as an
+    // enumeration, with a custom id still allowed.
+    const before = await get("xai");
+    expect((before.models as { id: string }[]).map((m) => m.id)).toEqual(["grok-4.6", "grok-4.5"]);
+    expect(before.defaultModelId).toBe("grok-4.6");
+    expect(before.allowCustom).toBe(true);
+    expect(before.source).not.toBe("live");
+
+    // The key lands. `notifyProviderSetChanged` forgets the recorded zero and
+    // re-enumerates, without waiting out any backoff.
+    mockList({
+      count: 3,
+      models: [
+        { key: "xai/grok-4.6", name: "Grok 4.6", contextWindow: 500_000, available: true, tags: ["default"] },
+        { key: "xai/grok-4.5", name: "Grok 4.5", contextWindow: 500_000, available: true, tags: [] },
+        { key: "xai/grok-4.3", name: "Grok 4.3", contextWindow: 1_000_000, available: true, tags: [] },
+      ],
+    });
+    notifyProviderSetChanged("xai");
+
+    let after: Record<string, unknown> = {};
+    await vi.waitFor(async () => {
+      after = await get("xai");
+      expect(after.source).toBe("live");
+    }, { timeout: 4000, interval: 25 });
+    const ids = (after.models as { id: string }[]).map((m) => m.id);
+    // A row the curated list never named is offered: the enumeration decides.
+    expect(ids).toEqual(expect.arrayContaining(["grok-4.6", "grok-4.5", "grok-4.3"]));
+    expect(after.defaultModelId).toBe("grok-4.6");
+    await vi.waitFor(() => expect(readRecord().xai?.models).toBe(3), { timeout: 4000, interval: 25 });
+    // The CLI was asked about the provider id the plugin registers.
+    expect(mockSpawn.mock.calls.some(([, args]) =>
+      Array.isArray(args) && args.join(" ") === "models list --provider xai --all --json")).toBe(true);
   });
 
   it("records NOTHING when `models` is not a list at all", async () => {

@@ -20,6 +20,9 @@ import {
 } from "@/lib/process-match";
 import { findPlaywrightChromium, focusCdpBrowser } from "@/lib/cdp-probe";
 import { cdpEndpoint, readDesktopBrowserConfig, type DesktopBrowserConfig } from "@/lib/desktop-browser-config";
+import { cleanBrowserLocks } from "@/lib/shared-browser-runtime";
+import { PROFILE_MIGRATION_KEY, type ProfileMigrationRecord } from "@/lib/shared-browser";
+import { get as configGet } from "@/lib/config-store";
 import {
   getBrowserAutoOpen,
   getBrowserSetupComplete,
@@ -194,21 +197,6 @@ async function checkChromium(config: Pick<DesktopBrowserConfig, "executable">): 
   return { installed: false };
 }
 
-/**
- * Clear the profile's singleton locks — stale ones, left by a browser that
- * died or by a hostname change. On the OWNER's profile only while no browser
- * is on it: there the locks may be a live browser's of their own, and taking
- * them away would let a second browser open the same profile under it.
- */
-async function cleanBrowserLocks(config: DesktopBrowserConfig) {
-  if (!config.ownProfile && (await findClawboxBrowserPids(config)).length > 0) return;
-  await Promise.all(
-    ["SingletonLock", "SingletonSocket", "SingletonCookie"].map(f =>
-      fs.unlink(path.join(config.profileDir, f)).catch(() => {})
-    )
-  );
-}
-
 interface BrowserState {
   running: boolean;
   pid?: number;
@@ -228,6 +216,13 @@ interface BrowserState {
    * No amount of waiting makes it answer, so it is not "starting".
    */
   noRemoteDebugging?: boolean;
+  /**
+   * This is the box's ONE browser, shared with the assistant and kept running
+   * (src/lib/shared-browser.ts). Close would take the assistant's browser away
+   * with the owner's window, so the app offers none and the route refuses it.
+   * Absent only on a box whose owner chose the isolated assistant browser.
+   */
+  shared?: boolean;
 }
 
 /** Check if browser is running and CDP is accessible */
@@ -318,6 +313,13 @@ export async function GET() {
     ]);
 
     const enabled = alwaysOn || (persistedEnabled ?? (config.tools?.profile === "full"));
+    if (!desktop.agentIsolated) browser.shared = true;
+    // What the one-time profile migration found, for the panel's notice: only
+    // the outcome that left sign-ins behind is worth a sentence.
+    const migration = (await configGet(PROFILE_MIGRATION_KEY).catch(() => null)) as ProfileMigrationRecord | null;
+    const legacyAgentProfile = !desktop.agentIsolated && migration?.outcome === "kept-separate"
+      ? migration.agentProfiles?.[0] ?? null
+      : null;
 
     return NextResponse.json({
       chromium,
@@ -329,6 +331,12 @@ export async function GET() {
       // one of the owner's (src/lib/desktop-browser-config.ts).
       profileDir: desktop.profileDir,
       ownProfile: desktop.ownProfile,
+      // One browser for the owner and the assistant (the default), or the
+      // assistant on a hidden browser of its own (the escape hatch).
+      sharedWithAssistant: !desktop.agentIsolated,
+      // Set when this box had a separate assistant profile whose sign-ins did
+      // not come along: where that profile is kept.
+      legacyAgentProfile,
       // The wizard's flag, and the two settings the app reads on the same
       // poll it already runs — one answer, so the face it shows and the state
       // it shows can never come from two different moments.
@@ -624,6 +632,18 @@ export async function POST(req: Request) {
 
       case "close-browser": {
         const desktop = await readDesktopBrowserConfig();
+        // The one browser of the box is the assistant's too: stopping it here
+        // would end whatever the assistant is doing in it, and the keeper
+        // would only start it again. The owner closes tabs, not the browser.
+        if (!desktop.agentIsolated) {
+          return NextResponse.json(
+            {
+              error: "This browser is shared with your assistant and stays running. Close the tabs you no longer need instead.",
+              code: "shared_browser",
+            },
+            { status: 409 },
+          );
+        }
         // Close stops only what ClawBox started. On the owner's profile, a
         // browser the unit did not start is the one they opened themselves —
         // their tabs, their sign-ins — and it stays open.

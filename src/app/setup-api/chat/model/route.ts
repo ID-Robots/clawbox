@@ -32,6 +32,7 @@ import {
   ANTHROPIC_DEFAULT_MODEL_ID,
   GOOGLE_DEFAULT_MODEL_ID,
   OPENAI_DEFAULT_MODEL_ID,
+  XAI_DEFAULT_MODEL_ID,
   isValidModelId,
   parseModelSlug,
 } from "@/lib/provider-models";
@@ -186,16 +187,22 @@ const PROVIDER_LABELS: Record<string, string> = {
   codex: "OpenAI Codex",
   google: "Google Gemini",
   openrouter: "OpenRouter",
+  xai: "xAI Grok",
   ollama: "Ollama Local",
   llamacpp: "Gemma 4 Local",
   deepseek: "ClawBox AI",
 };
 
-const PROVIDER_ORDER = ["clawai", "openai", "anthropic", "google", "openrouter"] as const;
+const PROVIDER_ORDER = ["clawai", "openai", "anthropic", "google", "openrouter", "xai"] as const;
 // Providers ClawBox configures as explicit openai-completions entries (see
 // ai-models/configure). Their `models.providers.<p>.models` list must contain
 // the chosen id or the gateway silently falls back, so the chat-header switch
 // below auto-extends that list when a freshly-picked model isn't seeded.
+//
+// NOT xai: ai-models/configure leaves it to the core's bundled `xai` plugin,
+// whose own catalogue resolves any id — the same reason clawai/openai/codex
+// are absent. There is no `models.providers.xai` entry to extend, and adding
+// it here would answer every Grok pick with the "isn't fully configured" 409.
 const OPENAI_COMPAT_PROVIDERS = new Set<string>(["openrouter", "google", "anthropic"]);
 // ClawBox AI chat uses the existing Flash alias. The former Pro alias also
 // serves Flash 4.1, so remembered plan choices do not select another model.
@@ -206,6 +213,7 @@ const DEFAULT_PROVIDER_MODELS: Record<string, string> = {
   openai: `openai/${OPENAI_DEFAULT_MODEL_ID}`,
   google: `google/${GOOGLE_DEFAULT_MODEL_ID}`,
   openrouter: `openrouter/${OPENROUTER_DEFAULT_MODEL_ID}`,
+  xai: `xai/${XAI_DEFAULT_MODEL_ID}`,
 };
 
 // The ChatGPT allowlist lives in @/lib/subscription-surface: the wizard/
