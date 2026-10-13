@@ -382,6 +382,29 @@ describe("the panel: what an agent is doing now", () => {
   });
 });
 
+describe("the turn count of a run that is still working", () => {
+  // The CLI reports its turns once, with the final result. Until then the
+  // record carries 0, and "0 turns" beside "5 files changed" was a number the
+  // box did not have.
+  const LIVE = run("run-live0001", { status: "running", completedAt: null, numTurns: 0 });
+
+  it("is not shown as 0 while the run works", () => {
+    render(<CodingAgentDiagram source={{ kind: "run", run: LIVE }} current="run-live0001" onOpenRun={vi.fn()} />);
+    expect(screen.getByTestId("coding-agent-diagram-figures")).toBeInTheDocument();
+    expect(screen.queryByTestId("coding-agent-diagram-turns")).toBeNull();
+    fireEvent.click(screen.getAllByTestId("coding-agent-node")[0]);
+    expect(within(screen.getByTestId("coding-agent-node-panel")).queryByTestId("coding-agent-node-panel-turns")).toBeNull();
+  });
+
+  it("is shown once the run has one, and for a finished run even at 0", () => {
+    const { unmount } = render(<CodingAgentDiagram source={{ kind: "run", run: { ...LIVE, numTurns: 9 } }} current="run-live0001" onOpenRun={vi.fn()} />);
+    expect(screen.getByTestId("coding-agent-diagram-turns")).toHaveTextContent(t("codingAgent.diagram.turns", { n: 9 }));
+    unmount();
+    render(<CodingAgentDiagram source={{ kind: "run", run: { ...LIVE, status: "failed", completedAt: NOW } }} current="run-live0001" onOpenRun={vi.fn()} />);
+    expect(screen.getByTestId("coding-agent-diagram-turns")).toHaveTextContent(t("codingAgent.diagram.turns", { n: 0 }));
+  });
+});
+
 describe("the chart of one run", () => {
   const SOLO = run("run-solo0001", {
     status: "running",
