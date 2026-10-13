@@ -1,13 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { apiGet, apiPost } = vi.hoisted(() => ({ apiGet: vi.fn(), apiPost: vi.fn() }));
+const { apiGet, apiPost, apiTry } = vi.hoisted(() => ({ apiGet: vi.fn(), apiPost: vi.fn(), apiTry: vi.fn() }));
 
 // Registration and the ui_open_app handler are what this file exercises; the
 // device calls behind them (the KV write, the installed-apps read) are stubbed.
 vi.mock("../../../mcp/lib/api", () => ({
   apiGet,
   apiPost,
-  apiTry: async () => null,
+  apiTry,
   API_BASE: "http://127.0.0.1:80",
   CLAWBOX_ROOT: "/home/clawbox/clawbox",
 }));
@@ -60,6 +60,7 @@ const ctx = (edition: "openclaw" | "hermes"): McpContext => ({
 beforeEach(() => {
   apiPost.mockResolvedValue({});
   apiGet.mockResolvedValue({ installed_apps: [] });
+  apiTry.mockResolvedValue(null);
 });
 
 describe("MCP built-in apps match the desktop registry", () => {
@@ -167,12 +168,35 @@ describe("ui_open_app accepts every id it advertises", () => {
     it(`opens each built-in on ${edition} instead of rejecting the id`, async () => {
       const h = captureRegistrar(edition);
       registerDesktopTools(h.reg, ctx(edition));
-      for (const app of builtInApps(edition)) {
+      // Google Chrome's own gate (the live desktop-session check) is pinned below.
+      for (const app of builtInApps(edition).filter((a) => !a.desktopSession)) {
         const outcome = await h.call("ui_open_app", { app_id: app.id });
         expect(outcome.isError, `${app.id}: ${JSON.stringify(outcome)}`).toBe(false);
       }
     });
   }
+
+  it("offers and opens Google Chrome only while the desktop session can open it", async () => {
+    const h = captureRegistrar("openclaw");
+    registerDesktopTools(h.reg, ctx("openclaw"));
+    const listed = async () => {
+      const out = await h.call("ui_list_apps", {});
+      return JSON.stringify(out).includes("Google Chrome");
+    };
+
+    apiTry.mockResolvedValue({ available: false });
+    const refused = await h.call("ui_open_app", { app_id: "chrome" });
+    expect(refused.isError).toBe(true);
+    if (refused.isError) expect(refused.error.code).toBe("NOT_SUPPORTED_HERE");
+    expect(await listed()).toBe(false);
+
+    apiTry.mockResolvedValue(null); // server unreachable: not available either
+    expect((await h.call("ui_open_app", { app_id: "chrome" })).isError).toBe(true);
+
+    apiTry.mockResolvedValue({ available: true });
+    expect((await h.call("ui_open_app", { app_id: "chrome" })).isError).toBe(false);
+    expect(await listed()).toBe(true);
+  });
 
   it("still refuses an id no app claims, and a malformed installed id", async () => {
     const h = captureRegistrar("hermes");

@@ -7,6 +7,7 @@ import {
   chromeEnv,
   chromeUrl,
   DEFAULT_CHROME_URL,
+  escapeSystemdArgv,
   desktopChromeStatus,
   findChrome,
   launchDesktopChrome,
@@ -112,5 +113,13 @@ describe("onBoxScreen", () => {
     expect(onBoxScreen("[::1]")).toBe(true);
     expect(onBoxScreen("192.0.2.20")).toBe(false);
     expect(onBoxScreen("clawbox.local")).toBe(false);
+  });
+});
+
+describe("escapeSystemdArgv", () => {
+  it("doubles every dollar so systemd hands Chrome the URL unexpanded", () => {
+    expect(escapeSystemdArgv(["--new-window", "https://example.com/$HOME?a=${USER}&b=$$"]))
+      .toEqual(["--new-window", "https://example.com/$$HOME?a=$${USER}&b=$$$$"]);
+    expect(escapeSystemdArgv(["https://example.com/"])).toEqual(["https://example.com/"]);
   });
 });

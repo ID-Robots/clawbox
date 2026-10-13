@@ -16,10 +16,13 @@ vi.mock("@/lib/desktop-chrome", () => ({
   launchDesktopChrome: vi.fn(async (url: unknown) => {
     h.calls.push(url);
     if (!h.available) return { ok: false, available: false };
+    if (url === "https://example.com/fail") {
+      return { ok: false, available: true, error: "Google Chrome could not be started: ENOENT", code: "launch_failed" };
+    }
     if (url !== undefined && (typeof url !== "string" || !/^https?:/.test(url))) {
       return { ok: false, available: true, error: "Only http(s) pages can be opened", code: "invalid_url" };
     }
-    return { ok: true, available: true };
+    return { ok: true, available: true, survivesRestart: true };
   }),
 }));
 
@@ -73,5 +76,11 @@ describe("POST /setup-api/desktop/chrome", () => {
     const res = await POST(post());
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ available: false, ok: false });
+  });
+
+  it("is a 500, never a 200, when Chrome could not be started", async () => {
+    const r = await POST(post(JSON.stringify({ url: "https://example.com/fail" })));
+    expect(r.status).toBe(500);
+    expect(await r.json()).toMatchObject({ ok: false, available: true, code: "launch_failed" });
   });
 });

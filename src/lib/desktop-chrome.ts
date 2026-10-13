@@ -16,7 +16,9 @@
  * it goes into a transient unit of the user's systemd manager
  * (`systemd-run --user`) rather than the server's own cgroup — a restart of
  * the web server would otherwise take the owner's browser, tabs and all, with
- * it. Without a user manager it is a detached child, which is the best there is.
+ * it. Without a user manager it is a detached child of the server, which DOES
+ * share the server's cgroup and dies with a restart: the launch says so
+ * (`survivesRestart: false`) rather than promising otherwise.
  *
  * WHEN. Only while the ClawBox Desktop session is up (`monitorModeSession`)
  * on a box with a kiosk (`kioskConfigured`) and a Chrome to start: every
@@ -42,7 +44,7 @@ export interface DesktopChromeStatus {
 }
 
 export type DesktopChromeLaunch =
-  | { ok: true; available: true }
+  | { ok: true; available: true; survivesRestart: boolean }
   | { ok: false; available: false }
   | { ok: false; available: true; error: string; code: string };
 
@@ -149,10 +151,44 @@ export function chromeEnv(display: WaylandDisplay, env: NodeJS.ProcessEnv = proc
   };
 }
 
-function runDetached(bin: string, argv: string[], env: NodeJS.ProcessEnv): void {
-  const child = spawn(/* turbopackIgnore: true */ bin, argv, { env, detached: true, stdio: "ignore" });
-  child.on("error", () => {});
-  child.unref();
+/**
+ * systemd expands `$NAME` / `${NAME}` in a unit's command line, so a page URL
+ * such as `https://example.com/$HOME` would reach Chrome rewritten; `$$` is its
+ * literal dollar. Only for the systemd-run path — the direct spawn gets argv as is.
+ */
+export function escapeSystemdArgv(argv: string[]): string[] {
+  return argv.map((a) => a.replace(/\$/g, "$$$$"));
+}
+
+/**
+ * Start `bin` as a detached child of THIS process. Resolves once the process
+ * exists (`spawn`), rejects when it could not be started (`error`), so a
+ * missing or unrunnable binary is a failed launch, not a 200. The child stays
+ * in the web server's cgroup: a service restart takes it along.
+ */
+function runDetached(bin: string, argv: string[], env: NodeJS.ProcessEnv): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(/* turbopackIgnore: true */ bin, argv, { env, detached: true, stdio: "ignore" });
+    child.once("error", reject);
+    child.once("spawn", () => {
+      child.unref();
+      resolve();
+    });
+  });
+}
+
+async function launchDetached(bin: string, argv: string[], env: NodeJS.ProcessEnv): Promise<DesktopChromeLaunch> {
+  try {
+    await runDetached(bin, argv, env);
+    return { ok: true, available: true, survivesRestart: false };
+  } catch (err) {
+    return {
+      ok: false,
+      available: true,
+      error: `Google Chrome could not be started: ${err instanceof Error ? err.message : String(err)}`,
+      code: "launch_failed",
+    };
+  }
 }
 
 /** Open Google Chrome on the desktop session's screen, on `url` (http(s); Google when absent). */
@@ -168,10 +204,7 @@ export async function launchDesktopChrome(rawUrl?: unknown): Promise<DesktopChro
   const systemdRun = fs.existsSync(/* turbopackIgnore: true */ `${display.runtimeDir}/bus`)
     ? await findSystemdTool("systemd-run")
     : null;
-  if (!systemdRun) {
-    runDetached(chrome, argv, env);
-    return { ok: true, available: true };
-  }
+  if (!systemdRun) return launchDetached(chrome, argv, env);
 
   // NODE_ENV is the server's, not the browser's.
   const setenv = Object.entries(env)
@@ -181,17 +214,18 @@ export async function launchDesktopChrome(rawUrl?: unknown): Promise<DesktopChro
   return new Promise((resolve) => {
     execFile(
       /* turbopackIgnore: true */ systemdRun,
-      ["--user", `--unit=${unit}`, "--collect", "--quiet", ...setenv, "--", chrome, ...argv],
+      // Type=exec: systemd-run returns only once Chrome's execve() succeeded,
+      // so a binary that cannot start fails here instead of answering success.
+      ["--user", `--unit=${unit}`, "--collect", "--quiet", "--property=Type=exec", ...setenv, "--", chrome, ...escapeSystemdArgv(argv)],
       { env, timeout: LAUNCH_TIMEOUT_MS },
       (err: Error | null) => {
         if (!err) {
-          resolve({ ok: true, available: true });
+          resolve({ ok: true, available: true, survivesRestart: true });
           return;
         }
         // The user manager refused the unit: still the owner's browser, just
-        // tied to the web server's lifetime.
-        runDetached(chrome, argv, env);
-        resolve({ ok: true, available: true });
+        // tied to the web server's lifetime (and reported as such).
+        void launchDetached(chrome, argv, env).then(resolve);
       },
     );
   });

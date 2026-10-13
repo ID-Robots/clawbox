@@ -11,7 +11,7 @@ import { ApiError, ToolError, type ErrorRule } from "../lib/errors";
 import { fitRows } from "../lib/guard";
 import { json, LIST_MAX_CHARS, text, type Registrar } from "../lib/register";
 import { INSTALLED_APP_ID_RE, zBool, zConfirm, zEnumOf, zInstalledAppId, zInt, zOptText, zSlug, zText } from "../lib/schema";
-import { builtInApps, openedAppNotice, UNKNOWN_HARNESS_NOTE, type McpContext } from "../lib/context";
+import { builtInApps, desktopChromeAvailable, openedAppNotice, UNKNOWN_HARNESS_NOTE, type McpContext } from "../lib/context";
 import { HARNESS_ONLY_APP_IDS, isInstalledAppVisible } from "../../src/lib/desktop-app-editions";
 import type { InstalledHermesSkill } from "../../src/lib/hermes-skills";
 
@@ -191,6 +191,15 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
             `Call ui_list_apps to see what exists here. Built-in ids: ${appLine}.`,
           );
       }
+      // Google Chrome opens only on the ClawBox Desktop session's screen; off it
+      // the desktop has no icon and ignores the action, so say so instead.
+      if (apps.find((a) => a.id === app_id)?.desktopSession && !(await desktopChromeAvailable())) {
+        throw new ToolError(
+          "NOT_SUPPORTED_HERE",
+          `"${app_id}" is not available right now: it opens only on the ClawBox Desktop session's screen, with Google Chrome installed.`,
+          "Tell the user; to show a page anywhere else, use browser_open.",
+        );
+      }
       await pushUiAction({ type: "open_app", appId: app_id });
       if (app_id === "browser") {
         return text("Opened the Browser Setup panel. That is the settings panel — to actually browse the web, use browser_open.");
@@ -213,7 +222,8 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
     // rather than left to the slicer.
     { editions: ["openclaw", "hermes"], readOnly: true, profile: "core", maxChars: LIST_MAX_CHARS },
     async () => {
-      const builtIn = apps.map((a) => ({ id: a.id, name: a.name, what: a.description }));
+      const chromeOk = apps.some((a) => a.desktopSession) ? await desktopChromeAvailable() : true;
+      const builtIn = apps.filter((a) => chromeOk || !a.desktopSession).map((a) => ({ id: a.id, name: a.name, what: a.description }));
       const installed = (await installedAppIds(ctx.appHarness)).map((id) => ({ id: `installed-${id}`, name: id }));
       // On Hermes the agent's own capabilities come from the skills store, not
       // from ~/.openclaw/skills (which does not exist there — listing it was

@@ -19,7 +19,7 @@ import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 import { spawnSync } from "child_process";
 import { installEdition, resolveAppHarness, type Ed } from "./lib/edition";
-import { builtInApps, openedAppLine, UNKNOWN_HARNESS_NOTE } from "./lib/context";
+import { liveBuiltInApps, openedAppLine, UNKNOWN_HARNESS_NOTE } from "./lib/context";
 import { HARNESS_ONLY_APP_IDS, isInstalledAppVisible } from "../src/lib/desktop-app-editions";
 import { INSTALLED_APP_ID_RE } from "./lib/schema";
 
@@ -246,7 +246,7 @@ async function main() {
     // other harness's apps — a false success on the CLI sibling of the list
     // `app list` below prints from.
     const harness = await openHarness();
-    const builtIn = builtInApps(harness);
+    const builtIn = await liveBuiltInApps(harness);
     const openable = builtIn.map((a) => a.id);
     const isInstalled = appId.startsWith("installed-");
     if (isInstalled) {
@@ -321,7 +321,7 @@ async function main() {
           ? `Built-in apps (${edition} edition):`
           : `Built-in apps (${edition} edition, running ${harness}):`,
     );
-    for (const app of builtInApps(harness)) console.log(`  ${app.id} — ${app.name}`);
+    for (const app of await liveBuiltInApps(harness)) console.log(`  ${app.id} — ${app.name}`);
     if (harness === null) console.log(`  (${UNKNOWN_HARNESS_NOTE})`);
 
   } else if (cmd === "edition") {

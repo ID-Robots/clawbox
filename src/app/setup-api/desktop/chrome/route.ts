@@ -54,7 +54,8 @@ export async function POST(req: Request) {
     return NextResponse.json({ available: false, ok: false }, { status: 503, headers: NO_STORE });
   }
   if (!result.ok) {
-    return NextResponse.json({ available: true, ok: false, error: result.error, code: result.code }, { status: 400, headers: NO_STORE });
+    const status = result.code === "invalid_url" ? 400 : 500;
+    return NextResponse.json({ available: true, ok: false, error: result.error, code: result.code }, { status, headers: NO_STORE });
   }
-  return NextResponse.json({ available: true, ok: true }, { headers: NO_STORE });
+  return NextResponse.json({ available: true, ok: true, survivesRestart: result.survivesRestart }, { headers: NO_STORE });
 }
