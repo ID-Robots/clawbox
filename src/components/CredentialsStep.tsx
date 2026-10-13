@@ -111,6 +111,36 @@ function SectionHead({ children }: { children: ReactNode }) {
   );
 }
 
+/** Typed, and shorter than the 8 characters both passwords need. */
+function fieldTooShort(value: string): boolean {
+  return value.length > 0 && value.length < 8;
+}
+
+/**
+ * The repeat field disagrees with the password — judged while it is being
+ * typed, so a repeat that is still a correct PREFIX is not called a mismatch
+ * one keystroke in.
+ */
+function confirmMismatch(value: string, confirm: string): boolean {
+  if (!confirm || value === confirm) return false;
+  return confirm.length >= value.length || !value.startsWith(confirm);
+}
+
+/** What is wrong with the field above it. Polite: it changes with every keystroke. */
+function FieldError({ id, children }: { id: string; children: ReactNode }) {
+  return (
+    <p
+      id={id}
+      role="status"
+      data-testid={id}
+      className="m-0 mt-[var(--s-2)] text-red-400"
+      style={{ fontSize: "var(--t-2)", lineHeight: "var(--lh-tight)" }}
+    >
+      {children}
+    </p>
+  );
+}
+
 function FieldLabel({ htmlFor, children }: { htmlFor: string; children: ReactNode }) {
   return (
     <label
@@ -557,6 +587,24 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
   const hotspotSecretOutstanding = hotspotEnabled && hotspotSecretMissing;
   const incomplete = systemSecretMissing || hotspotSecretOutstanding;
 
+  // What is wrong with a password AS IT IS TYPED, said under the field it is
+  // wrong in. `validate` only speaks when Save is pressed, and Save is
+  // unavailable while any other field is still empty — so a system password
+  // that was too short or did not match got no message at all, and the only
+  // words on screen were the hint about the hotspot password (2026-10-13
+  // smoke test). The same keys `validate` uses, so the two cannot disagree.
+  const systemPasswordError = fieldTooShort(password) ? "credentials.passwordMinLength" : null;
+  const systemConfirmError = confirmMismatch(password, confirmPassword) ? "credentials.passwordsDontMatch" : null;
+  const hotspotPasswordError =
+    hotspotEnabled && fieldTooShort(hotspotPassword) ? "credentials.hotspotPasswordMinLength" : null;
+  const hotspotConfirmError =
+    hotspotEnabled && confirmMismatch(hotspotPassword, confirmHotspotPassword)
+      ? "credentials.hotspotPasswordsDontMatch"
+      : null;
+  const fieldErrorMessages = [systemPasswordError, systemConfirmError, hotspotPasswordError, hotspotConfirmError]
+    .filter((key): key is string => key !== null)
+    .map((key) => t(key));
+
   // What Save would send right now, built the way `validate` builds it, so it
   // can be compared with the submission the hotspot notice was shown for.
   const currentSubmission: CredentialsSubmission = {
@@ -577,15 +625,21 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
   // waiting on. A disabled control that explains nothing is the whole defect:
   // the only clue used to be a grey "Minimum 8 characters" on a collapsed row
   // the owner had no reason to open.
-  const blockedReasonKey = saving
+  //
+  // A system password that is WRONG outranks a hotspot password that is merely
+  // not typed yet: the owner is looking at the field they just filled, and a
+  // hint about a different password reads as the answer to it.
+  // Only while the button IS unavailable: once every field is filled the
+  // message under the field is the whole story, and Save answers for itself.
+  const blockedReasonKey = saving || !incomplete
     ? null
-    : systemSecretMissing && hotspotSecretOutstanding
+    : systemSecretMissing && hotspotSecretOutstanding && !systemPasswordError && !systemConfirmError
       ? "credentials.blockedBoth"
-      : systemSecretMissing
+      : systemPasswordError ?? systemConfirmError ?? (systemSecretMissing
         ? "credentials.blockedSystem"
         : hotspotSecretOutstanding
           ? "credentials.blockedHotspot"
-          : null;
+          : hotspotPasswordError ?? hotspotConfirmError);
 
   // The second half of the disclosure's promise (see `hotspotSecretOpen`):
   // both system passwords in and the hotspot secret still empty means this is
@@ -730,7 +784,9 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
               }}
               placeholder={t("credentials.minChars")}
               autoComplete="new-password"
-              className={`${FIELD} ${FIELD_PAD_REVEAL} ${inputBorder(touched && !password)}`}
+              aria-invalid={systemPasswordError ? true : undefined}
+              aria-describedby={systemPasswordError ? "cred-password-error" : undefined}
+              className={`${FIELD} ${FIELD_PAD_REVEAL} ${inputBorder((touched && !password) || Boolean(systemPasswordError))}`}
               style={{ ...T_FIELD, ...FIELD_MOTION }}
             />
             <button
@@ -742,6 +798,7 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
               {showPassword ? EyeClosed : EyeOpen}
             </button>
           </div>
+          {systemPasswordError && <FieldError id="cred-password-error">{t(systemPasswordError)}</FieldError>}
         </div>
 
         <div className="mb-[var(--s-6)]">
@@ -757,7 +814,9 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
               }}
               placeholder={t("credentials.reenterPassword")}
               autoComplete="new-password"
-              className={`${FIELD} ${FIELD_PAD_REVEAL} ${inputBorder(touched && !confirmPassword)}`}
+              aria-invalid={systemConfirmError ? true : undefined}
+              aria-describedby={systemConfirmError ? "cred-confirm-error" : undefined}
+              className={`${FIELD} ${FIELD_PAD_REVEAL} ${inputBorder((touched && !confirmPassword) || Boolean(systemConfirmError))}`}
               style={{ ...T_FIELD, ...FIELD_MOTION }}
             />
             <button
@@ -769,6 +828,7 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
               {showConfirm ? EyeClosed : EyeOpen}
             </button>
           </div>
+          {systemConfirmError && <FieldError id="cred-confirm-error">{t(systemConfirmError)}</FieldError>}
         </div>
 
         {/* ── Hotspot ──
@@ -933,7 +993,9 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
                     if (e.key === "Enter") requestSave();
                   }}
                   placeholder={t("credentials.minChars")}
-                  className={`${FIELD} ${FIELD_PAD_REVEAL} ${inputBorder(touched && (!hotspotPassword || hotspotPassword !== confirmHotspotPassword))}`}
+                  aria-invalid={hotspotPasswordError ? true : undefined}
+                  aria-describedby={hotspotPasswordError ? "hotspot-password-error" : undefined}
+                  className={`${FIELD} ${FIELD_PAD_REVEAL} ${inputBorder((touched && (!hotspotPassword || hotspotPassword !== confirmHotspotPassword)) || Boolean(hotspotPasswordError))}`}
                   style={{ ...T_FIELD, ...FIELD_MOTION }}
                 />
                 <button
@@ -945,6 +1007,7 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
                   {showHotspotPassword ? EyeClosed : EyeOpen}
                 </button>
               </div>
+              {hotspotPasswordError && <FieldError id="hotspot-password-error">{t(hotspotPasswordError)}</FieldError>}
 
               <div className="mt-[var(--s-3)]">
                 <FieldLabel htmlFor="hotspot-confirm">
@@ -960,7 +1023,9 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
                       if (e.key === "Enter") requestSave();
                     }}
                     placeholder={t("credentials.reenterHotspot")}
-                    className={`${FIELD} ${FIELD_PAD_REVEAL} ${inputBorder(touched && hotspotPassword !== confirmHotspotPassword)}`}
+                    aria-invalid={hotspotConfirmError ? true : undefined}
+                    aria-describedby={hotspotConfirmError ? "hotspot-confirm-error" : undefined}
+                    className={`${FIELD} ${FIELD_PAD_REVEAL} ${inputBorder((touched && hotspotPassword !== confirmHotspotPassword) || Boolean(hotspotConfirmError))}`}
                     style={{ ...T_FIELD, ...FIELD_MOTION }}
                   />
                   <button
@@ -972,12 +1037,15 @@ export default function CredentialsStep({ onNext, hermes = false }: CredentialsS
                     {showConfirmHotspot ? EyeClosed : EyeOpen}
                   </button>
                 </div>
+                {hotspotConfirmError && <FieldError id="hotspot-confirm-error">{t(hotspotConfirmError)}</FieldError>}
               </div>
             </div>
           )}
         </div>
 
-        {status && (
+        {/* A refusal `validate` words exactly as a field already does is not
+            said twice: the sentence is under the field it is about. */}
+        {status && !(status.type === "error" && fieldErrorMessages.includes(status.message)) && (
           <StatusMessage type={status.type} message={status.message} />
         )}
 
