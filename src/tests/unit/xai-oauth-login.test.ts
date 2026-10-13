@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { EventEmitter } from "events";
 import type { ChildProcess } from "child_process";
 
@@ -18,6 +18,7 @@ vi.mock("@/lib/openclaw-config", () => ({
 import { spawnOpenclawCli } from "@/lib/openclaw-config";
 import {
   cancelXaiLogin,
+  claimXaiLoginAttempt,
   cleanTuiOutput,
   outputTail,
   parseXaiDeviceLogin,
@@ -181,6 +182,7 @@ describe("the command", () => {
 });
 
 type FakeChild = EventEmitter & {
+  pid?: number;
   stdout: EventEmitter;
   stderr: EventEmitter;
   kill: ReturnType<typeof vi.fn>;
@@ -197,7 +199,11 @@ function fakeChild(): FakeChild {
 describe("the login in flight", () => {
   let child: FakeChild;
   const realSpawn = xaiLoginSpawn.spawn;
+  const realProcesses = xaiLoginSpawn.processes;
   let spawnArgs: string[] = [];
+  // Every signal the lib sends by pid is recorded here and never delivered:
+  // the pids below are made up, and must not reach a real process.
+  let signals: MockInstance<typeof process.kill>;
 
   beforeEach(() => {
     vi.useFakeTimers();
@@ -207,12 +213,15 @@ describe("the login in flight", () => {
       spawnArgs = args;
       return child as unknown as ChildProcess;
     };
+    signals = vi.spyOn(process, "kill").mockImplementation(() => true);
   });
 
   afterEach(() => {
     cancelXaiLogin();
     xaiLoginSpawn.spawn = realSpawn;
+    xaiLoginSpawn.processes = realProcesses;
     vi.useRealTimers();
+    signals.mockRestore();
   });
 
   /** Start, let the CLI "print" something, and collect start's answer. */
@@ -222,6 +231,33 @@ describe("the login in flight", () => {
     await vi.advanceTimersByTimeAsync(250);
     return started;
   }
+
+  /** Let `ms` pass with the browser polling, as the open panel does. */
+  async function polledFor(ms: number) {
+    for (let left = ms; left > 0; left -= 60_000) {
+      pollXaiLogin();
+      await vi.advanceTimersByTimeAsync(Math.min(60_000, left));
+    }
+  }
+
+  /**
+   * The tree a real login runs as: `script` (the child, `pid`), the CLI it
+   * starts in the pty's own session (`pid + 1`), and a process the CLI started
+   * (`pid + 2`) — plus somebody else's process beside them.
+   */
+  function processTree(pid: number, table: { pid: number; ppid: number; startTime: string }[] = []) {
+    child.pid = pid;
+    table.push(
+      { pid, ppid: process.pid, startTime: `${pid}0` },
+      { pid: pid + 1, ppid: pid, startTime: `${pid}1` },
+      { pid: pid + 2, ppid: pid + 1, startTime: `${pid}2` },
+      { pid: 999, ppid: 1, startTime: "9990" },
+    );
+    xaiLoginSpawn.processes = () => table;
+    return table;
+  }
+
+  const PROMPT = "Open https://example.test/device\nCode: ABCD-1234\n";
 
   it("answers start with the URL and code as soon as the CLI prints them", async () => {
     const answer = await startWith(() => {
@@ -300,7 +336,7 @@ describe("the login in flight", () => {
     });
     expect(pollXaiLogin()).toMatchObject({ status: "pending", expiresInMinutes: 10 });
 
-    await vi.advanceTimersByTimeAsync(9 * 60_000);
+    await polledFor(9 * 60_000);
     expect(pollXaiLogin().status).toBe("pending");
     await vi.advanceTimersByTimeAsync(60_000 + 1_000);
 
@@ -312,7 +348,7 @@ describe("the login in flight", () => {
     await startWith(() => {
       child.stdout.emit("data", Buffer.from("Open https://example.test/device\nCode: ABCD-1234\n"));
     });
-    await vi.advanceTimersByTimeAsync(29 * 60_000);
+    await polledFor(29 * 60_000);
     expect(pollXaiLogin().status).toBe("pending");
     await vi.advanceTimersByTimeAsync(3 * 60_000);
 
@@ -376,6 +412,99 @@ describe("the login in flight", () => {
 
     expect(first.kill).toHaveBeenCalledWith("SIGTERM");
     expect(second).toMatchObject({ status: "pending", userCode: "WXYZ-5678" });
+  });
+
+  // `script` starts the CLI in the pty's own session, so the signal to
+  // `script`'s process group never reaches it, and a CLI that catches the
+  // SIGTERM `script` passes on (clack's spinner does) and the pty's hangup
+  // outlives it. Seen on a box: a cancelled sign-in left its
+  // `openclaw models auth login` running.
+  it("stops the CLI under the pseudo-terminal on cancel, SIGKILL after the grace period", async () => {
+    processTree(4100);
+    await startWith(() => { child.stdout.emit("data", Buffer.from(PROMPT)); });
+    cancelXaiLogin();
+
+    expect(signals).toHaveBeenCalledWith(-4100, "SIGTERM");
+    expect(signals).toHaveBeenCalledWith(4101, "SIGTERM");
+    expect(signals).toHaveBeenCalledWith(4102, "SIGTERM");
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(signals).toHaveBeenCalledWith(4101, "SIGKILL");
+    expect(signals).toHaveBeenCalledWith(4102, "SIGKILL");
+    expect(signals).toHaveBeenCalledWith(-4100, "SIGKILL");
+    expect(signals).not.toHaveBeenCalledWith(999, expect.anything());
+    expect(pollXaiLogin()).toMatchObject({ status: "failed", detail: expect.stringContaining("No sign-in") });
+  });
+
+  it("never SIGKILLs a pid that is no longer the process it was", async () => {
+    const table = processTree(4100);
+    await startWith(() => { child.stdout.emit("data", Buffer.from(PROMPT)); });
+    cancelXaiLogin();
+    // 4102 exits on the SIGTERM and its pid is handed to something new.
+    table[2] = { pid: 4102, ppid: 1, startTime: "77777" };
+    await vi.advanceTimersByTimeAsync(3_000);
+
+    expect(signals).toHaveBeenCalledWith(4101, "SIGKILL");
+    expect(signals).not.toHaveBeenCalledWith(4102, "SIGKILL");
+  });
+
+  it("stops the first login's CLI, not only its `script`, when a second one starts", async () => {
+    const table = processTree(4100);
+    await startWith(() => { child.stdout.emit("data", Buffer.from(PROMPT)); });
+    child = fakeChild();
+    processTree(4200, table);
+    const second = await startWith(() => {
+      child.stdout.emit("data", Buffer.from("Open https://example.test/device\nCode: WXYZ-5678\n"));
+    });
+    await vi.advanceTimersByTimeAsync(3_000);
+
+    expect(signals).toHaveBeenCalledWith(4101, "SIGTERM");
+    expect(signals).toHaveBeenCalledWith(4101, "SIGKILL");
+    expect(signals).toHaveBeenCalledWith(4102, "SIGKILL");
+    // The new login is left running.
+    expect(signals).not.toHaveBeenCalledWith(-4200, expect.anything());
+    expect(signals).not.toHaveBeenCalledWith(4201, expect.anything());
+    expect(second).toMatchObject({ status: "pending", userCode: "WXYZ-5678" });
+    expect(pollXaiLogin()).toMatchObject({ status: "pending", userCode: "WXYZ-5678" });
+  });
+
+  it("stops a login nobody has polled for five minutes — a page that left without a word", async () => {
+    processTree(4100);
+    await startWith(() => { child.stdout.emit("data", Buffer.from(PROMPT)); });
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(pollXaiLogin().status).toBe("pending");
+
+    // Five minutes from the START, but only four from the last poll.
+    await vi.advanceTimersByTimeAsync(4 * 60_000);
+    expect(signals).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(60_000 + 1_000);
+    expect(signals).toHaveBeenCalledWith(-4100, "SIGTERM");
+    expect(signals).toHaveBeenCalledWith(4101, "SIGTERM");
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(signals).toHaveBeenCalledWith(4101, "SIGKILL");
+
+    expect(pollXaiLogin()).toMatchObject({ status: "failed", detail: expect.stringContaining("stopped checking") });
+    expect(pollXaiLogin()).toMatchObject({ status: "failed", detail: expect.stringContaining("No sign-in") });
+  });
+
+  it("starts no CLI for a sign-in cancelled, or superseded, before it reached the spawn", async () => {
+    // The route reads the store first — a CLI cold start, ~10 s on a Jetson —
+    // while the panel shows "starting" and its Cancel.
+    const spawn = vi.fn(() => child as unknown as ChildProcess);
+    xaiLoginSpawn.spawn = spawn;
+    const cancelled = claimXaiLoginAttempt();
+    cancelXaiLogin();
+    expect(await startXaiLogin({ replaceExisting: false, attempt: cancelled })).toMatchObject({ status: "failed" });
+
+    const older = claimXaiLoginAttempt();
+    const newer = claimXaiLoginAttempt();
+    expect(await startXaiLogin({ replaceExisting: false, attempt: older })).toMatchObject({ status: "failed" });
+    expect(spawn).not.toHaveBeenCalled();
+
+    const started = startXaiLogin({ replaceExisting: false, attempt: newer });
+    child.stdout.emit("data", Buffer.from(PROMPT));
+    await vi.advanceTimersByTimeAsync(250);
+    expect(await started).toMatchObject({ status: "pending", userCode: "ABCD-1234" });
+    expect(spawn).toHaveBeenCalledTimes(1);
   });
 
   it("answers a spawn that throws as a failure, not an exception", async () => {

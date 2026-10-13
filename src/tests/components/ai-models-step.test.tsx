@@ -681,6 +681,24 @@ describe("AIModelsStep variants", () => {
       expect(configureBodies()).toHaveLength(0);
     });
 
+    it("cancels the sign-in when the page itself is left, with a request that outlives the page", async () => {
+      const actions = mockXaiLogin({
+        start: { status: "pending", verificationUrl: "https://example.test/device", userCode: "ABCD-1234" },
+      });
+      const { getByRole, findByTestId } = await openXaiSubscription();
+      fireEvent.click(getByRole("button", { name: "ai.xaiSignInButton" }));
+      await findByTestId("xai-user-code");
+
+      // A reload, a link or a closed tab unmounts nothing; `pagehide` is all
+      // the panel hears.
+      window.dispatchEvent(new Event("pagehide"));
+
+      await waitFor(() => expect(actions).toContain("cancel"));
+      const cancel = vi.mocked(fetch).mock.calls
+        .find(([, init]) => String((init as RequestInit | undefined)?.body ?? "").includes('"cancel"'));
+      expect((cancel?.[1] as RequestInit).keepalive).toBe(true);
+    });
+
     it("keeps the sign-in open, and says so, when the box did not confirm the cancel", async () => {
       const actions = mockXaiLogin({
         start: { status: "pending", verificationUrl: "https://example.test/device", userCode: "ABCD-1234", expiresInMinutes: 30 },

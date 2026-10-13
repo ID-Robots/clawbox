@@ -55,6 +55,7 @@
 // owner types on another device; the token it receives stays in the CLI.
 
 import { spawn, type ChildProcess } from "child_process";
+import { readdirSync, readFileSync } from "fs";
 import { findOpenclawBin, spawnOpenclawCli } from "@/lib/openclaw-config";
 
 /** The one profile id the xAI credential lives under, either mode. */
@@ -86,6 +87,16 @@ const STORE_CHECK_EVERY_MS = 20_000;
 
 /** How much of the CLI's own output a failure may carry. */
 const OUTPUT_TAIL_CHARS = 400;
+
+/**
+ * How long a login may go unpolled before it counts as abandoned and is
+ * stopped. The panel polls every 3 s while it is open, and says `cancel` when
+ * it is left; this is for the page that went without saying (a crashed or
+ * killed browser, a dropped network). Generous because a phone may freeze the
+ * tab while the owner signs in to X on the approval page — a login that is
+ * approved meanwhile completes on the CLI's own exit, unpolled.
+ */
+const ABANDONED_AFTER_MS = 5 * 60_000;
 
 export interface XaiDeviceLoginPrompt {
   verificationUrl: string | null;
@@ -222,10 +233,26 @@ interface PendingLogin {
   lifetimeFromCli: boolean;
   lastStoreCheckAt: number;
   storeCheck: Promise<void> | null;
+  /** When the browser last asked after this login (start, then every poll). */
+  lastPolledAt: number;
 }
 
 /** One login in flight, as for the GitHub device flow: a second start replaces the first. */
 let pending: PendingLogin | null = null;
+
+/**
+ * Bumped by every start and every cancel. The route reads the store before it
+ * starts the CLI — a CLI cold start, ~10 s on a Jetson — and a cancel (or a
+ * newer start) that lands in that window has no process to stop yet. The
+ * start then finds the count moved on and does not spawn one.
+ */
+let attempts = 0;
+
+/** Claim a sign-in attempt, before anything slow on the way to `startXaiLogin`. */
+export function claimXaiLoginAttempt(): number {
+  attempts += 1;
+  return attempts;
+}
 
 /** POSIX single-quoting for the one string `script -c` hands to a shell. */
 function shellQuote(arg: string): string {
@@ -242,8 +269,43 @@ export function ptyCommand(bin: string, args: string[]): { file: string; args: s
   return { file: "script", args: ["-qfec", [bin, ...args].map(shellQuote).join(" "), "/dev/null"] };
 }
 
-/** Indirection so tests can supply a fake child process. */
+/** One row of the process table: its parent, and the start time that tells a reused pid apart. */
+interface ProcessRow {
+  pid: number;
+  ppid: number;
+  startTime: string;
+}
+
+/**
+ * The process table, from /proc (fields counted from the last `)`, as
+ * src/lib/update-lock.ts reads them: the command name may hold spaces and
+ * brackets). Empty where there is no /proc to read.
+ */
+function readProcessTable(): ProcessRow[] {
+  let names: string[];
+  try {
+    names = readdirSync("/proc");
+  } catch {
+    return [];
+  }
+  const rows: ProcessRow[] = [];
+  for (const name of names) {
+    if (!/^\d+$/.test(name)) continue;
+    try {
+      const stat = readFileSync(`/proc/${name}/stat`, "utf-8");
+      const after = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+      // Field 3 is the first after the name: ppid (4) is index 1, starttime (22) index 19.
+      rows.push({ pid: Number(name), ppid: Number(after[1]), startTime: after[19] ?? "" });
+    } catch {
+      // Gone between the listing and the read.
+    }
+  }
+  return rows;
+}
+
+/** Indirection so tests can supply a fake child process and the process table around it. */
 export const xaiLoginSpawn = {
+  processes: (): ProcessRow[] => readProcessTable(),
   spawn: (bin: string, args: string[]): ChildProcess => {
     const pty = ptyCommand(bin, args);
     // `turbopackIgnore`, as on the spawn in src/lib/openclaw-config.ts: the
@@ -291,9 +353,47 @@ function settle(login: PendingLogin, result: XaiLoginPoll): void {
   login.timers = [];
 }
 
-/** End the whole process group: `script`, its shell and the CLI under it. */
+/** Every process under `root` in `table`, by pid, with its start time. */
+function descendantsOf(root: number, table: ProcessRow[]): Map<number, string> {
+  const found = new Map<number, string>();
+  const queue = [root];
+  while (queue.length > 0) {
+    const parent = queue.shift();
+    for (const row of table) {
+      if (row.ppid !== parent || row.pid === root || found.has(row.pid)) continue;
+      found.set(row.pid, row.startTime);
+      queue.push(row.pid);
+    }
+  }
+  return found;
+}
+
+/**
+ * End `script`, its shell and the CLI under it.
+ *
+ * `script`'s own process group is not enough: it starts the shell in a NEW
+ * SESSION (the pty's), so the group holds `script` alone. `script` passes
+ * SIGTERM on to its child and waits; a CLI that catches SIGTERM (clack's
+ * spinner does, and only stops spinning) and the SIGHUP of the pty closing
+ * outlives `script` as an orphan nobody signals again, still holding the
+ * sign-in. So the tree under `script` is read while `script` is still its
+ * parent, and each process in it gets the same signals; SIGKILL only reaches
+ * a pid that is still the process it was (same start time).
+ */
 function kill(child: ChildProcess): void {
+  const tree = new Map<number, string>();
   const signal = (sig: NodeJS.Signals) => {
+    const table = typeof child.pid === "number" ? xaiLoginSpawn.processes() : [];
+    // Each look adds what is under `script` now — but once `script` has
+    // exited its pid may be someone else's, and nothing new is taken.
+    if (typeof child.pid === "number" && child.exitCode == null && child.signalCode == null) {
+      for (const [pid, startTime] of descendantsOf(child.pid, table)) tree.set(pid, startTime);
+    }
+    const startTimes = new Map(table.map((row) => [row.pid, row.startTime]));
+    for (const [pid, startTime] of tree) {
+      if (startTimes.get(pid) !== startTime) continue;
+      try { process.kill(pid, sig); } catch { /* already gone */ }
+    }
     try {
       if (typeof child.pid === "number") process.kill(-child.pid, sig);
       else child.kill(sig);
@@ -312,6 +412,26 @@ function armLifetime(login: PendingLogin, minutes: number): void {
     settle(login, { status: "failed", detail: "The sign-in code expired. Start again for a fresh one." });
     kill(login.child);
   }, minutes * 60_000);
+  timer.unref?.();
+  login.timers.push(timer);
+}
+
+/** Stop a login the browser has stopped asking after (`ABANDONED_AFTER_MS`). */
+function armAbandoned(login: PendingLogin, delayMs: number): void {
+  const timer = setTimeout(() => {
+    login.timers = login.timers.filter((t) => t !== timer);
+    if (login.result) return;
+    const idle = Date.now() - login.lastPolledAt;
+    if (idle < ABANDONED_AFTER_MS) {
+      armAbandoned(login, ABANDONED_AFTER_MS - idle);
+      return;
+    }
+    settle(login, {
+      status: "failed",
+      detail: "The sign-in was stopped because this page stopped checking on it. Start again for a fresh code.",
+    });
+    kill(login.child);
+  }, delayMs);
   timer.unref?.();
   login.timers.push(timer);
 }
@@ -338,11 +458,18 @@ function snapshot(login: PendingLogin): XaiLoginPoll {
  * `signInAlreadyStored` says the store held an xAI sign-in at `xai:default`
  * before this login began. A sign-in found in the store later then proves
  * nothing, so only the CLI's exit code may complete such a login.
+ *
+ * `attempt`, from `claimXaiLoginAttempt`, is refused — nothing spawned — when
+ * a cancel or a newer start has come in since it was claimed.
  */
 export async function startXaiLogin(opts: {
   replaceExisting: boolean;
   signInAlreadyStored?: boolean;
+  attempt?: number;
 }): Promise<XaiLoginPoll> {
+  if (opts.attempt !== undefined && opts.attempt !== attempts) {
+    return { status: "failed", detail: "The sign-in was cancelled, or replaced by another one, before it started." };
+  }
   cancelXaiLogin();
   let child: ChildProcess;
   try {
@@ -360,6 +487,7 @@ export async function startXaiLogin(opts: {
     lifetimeFromCli: false,
     lastStoreCheckAt: 0,
     storeCheck: null,
+    lastPolledAt: Date.now(),
   };
   pending = login;
 
@@ -412,6 +540,7 @@ export async function startXaiLogin(opts: {
   // The fallback lifetime, a little past the default code life so a CLI that
   // states its own number (and so arms the timer above) always ends first.
   armLifetime(login, DEFAULT_CODE_LIFETIME_MIN + 1);
+  armAbandoned(login, ABANDONED_AFTER_MS);
 
   // Wait for something worth showing, but never longer than START_WAIT_MS:
   // past that the browser polls, exactly as it does after a pending answer.
@@ -449,6 +578,7 @@ function checkStoreInBackground(login: PendingLogin): void {
 /** One poll of the login in flight. */
 export function pollXaiLogin(): XaiLoginPoll {
   if (!pending) return { status: "failed", detail: "No sign-in is in progress. Start again." };
+  pending.lastPolledAt = Date.now();
   const now = snapshot(pending);
   // Only once the prompt is on screen: before that there is nothing the owner
   // could have approved.
@@ -461,6 +591,7 @@ export function pollXaiLogin(): XaiLoginPoll {
 
 /** Stop the login in flight, if any. The code on the owner's screen goes unused. */
 export function cancelXaiLogin(): void {
+  attempts += 1;
   const login = pending;
   pending = null;
   if (!login) return;

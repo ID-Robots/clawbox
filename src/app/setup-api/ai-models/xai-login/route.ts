@@ -4,6 +4,7 @@ import { logSafe } from "@/lib/log-safe";
 import { openclawIsAbsent } from "@/lib/openclaw-config";
 import {
   cancelXaiLogin,
+  claimXaiLoginAttempt,
   pollXaiLogin,
   readXaiStoredProfiles,
   startXaiLogin,
@@ -73,6 +74,11 @@ export async function POST(request: Request) {
       // Measured on a box: a cancelled or timed-out attempt leaves no profile
       // behind, so a box with nothing stored gets no `--force` and loses
       // nothing either way.
+      //
+      // The attempt is claimed BEFORE the store read, a CLI cold start: a
+      // cancel that lands meanwhile (the panel offers one while it says
+      // "starting") then keeps this start from spawning a CLI nobody polls.
+      const attempt = claimXaiLoginAttempt();
       const stored = await readXaiStoredProfiles();
       const out = await startXaiLogin({
         replaceExisting: stored === null || stored.length > 0,
@@ -80,6 +86,7 @@ export async function POST(request: Request) {
         // the lib then waits for the CLI's own exit code.
         signInAlreadyStored: stored === null
           || stored.some((row) => row.id === "xai:default" && row.type === "oauth"),
+        attempt,
       });
       return NextResponse.json(out, { status: out.status === "failed" ? 502 : 200 });
     }

@@ -64,6 +64,8 @@ async function cancelRoute(): Promise<boolean> {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action: "cancel" }),
+      // Sent as the page goes too (`pagehide`), and must outlive it.
+      keepalive: true,
     });
     const data = (await res.json().catch(() => null)) as { ok?: unknown } | null;
     return res.ok && data?.ok === true;
@@ -194,11 +196,19 @@ export default function XaiSignInPanel({
   }, [stop]);
 
   // Leaving the tab ends the sign-in, so no CLI is left waiting on a code
-  // nobody is looking at.
+  // nobody is looking at. Leaving the PAGE — a reload, a link, a closed tab or
+  // window — unmounts nothing, so `pagehide` says it as well.
   useEffect(() => {
     mounted.current = true;
+    const onPageHide = () => {
+      if (!inFlight.current) return;
+      inFlight.current = false;
+      void cancelRoute();
+    };
+    window.addEventListener("pagehide", onPageHide);
     return () => {
       mounted.current = false;
+      window.removeEventListener("pagehide", onPageHide);
       controllerRef.current?.abort();
       if (inFlight.current) void cancelRoute();
     };
