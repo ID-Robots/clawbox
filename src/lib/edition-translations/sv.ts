@@ -1014,7 +1014,7 @@ export const sv: Record<string, string> = {
   "codingAgent.genAudioHint": "En körning får låta boxen tala in en mening i en ljudfil i sitt projekt, med rösten för dina talade svar — som mest fyrtio per körning.",
   "codingAgent.genAudioFailed": "Talinställningen kunde inte ändras.",
   "codingAgent.realBrowserLabel": "Verifiera i boxens webbläsare",
-  "codingAgent.realBrowserHint": "En körning kontrollerar sitt arbete i Chromium på den här boxens skärm, där du kan se på; avstängt använder den en osynlig webbläsare.",
+  "codingAgent.realBrowserHint": "En körning kontrollerar sitt arbete i Chromium på den här boxens skärm, där du kan se på i appen Agentwebbläsare; avstängt använder den en osynlig webbläsare.",
   "codingAgent.realBrowserFailed": "Webbläsarinställningen kunde inte ändras.",
   "codingAgent.leftoverRunning": "Något som den här körningen startade är fortfarande igång.",
   "codingAgent.killLeftover": "Avsluta det",

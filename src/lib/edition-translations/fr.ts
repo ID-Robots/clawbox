@@ -1018,7 +1018,7 @@ export const fr: Record<string, string> = {
   "codingAgent.genAudioHint": "Une exécution peut faire prononcer une phrase par cette box et l'enregistrer comme fichier son dans son projet, avec la voix de vos réponses parlées — quarante au maximum par exécution.",
   "codingAgent.genAudioFailed": "Le réglage de la voix n'a pas pu être modifié.",
   "codingAgent.realBrowserLabel": "Vérifier dans le navigateur de cette box",
-  "codingAgent.realBrowserHint": "Une exécution vérifie son travail dans le Chromium affiché sur l'écran de cette box, où vous pouvez regarder ; désactivé, elle passe par un navigateur invisible.",
+  "codingAgent.realBrowserHint": "Une exécution vérifie son travail dans le Chromium affiché sur l'écran de cette box, que vous pouvez regarder dans l'application Navigateur de l'agent ; désactivé, elle passe par un navigateur invisible.",
   "codingAgent.realBrowserFailed": "Le réglage du navigateur n'a pas pu être modifié.",
   "codingAgent.leftoverRunning": "Quelque chose que cette exécution a lancé tourne encore.",
   "codingAgent.killLeftover": "Y mettre fin",

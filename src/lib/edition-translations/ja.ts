@@ -1019,7 +1019,7 @@ export const ja: Record<string, string> = {
   "codingAgent.genAudioHint": "実行はこのボックスに一文を読み上げさせ、プロジェクト内の音声ファイルとして保存できます。読み上げ返信と同じ声を使い、1 回の実行につき最大 40 クリップまでです。",
   "codingAgent.genAudioFailed": "音声の設定を変更できませんでした。",
   "codingAgent.realBrowserLabel": "このボックスのブラウザーで確認する",
-  "codingAgent.realBrowserHint": "実行はこのボックスの画面にある Chromium で自分の成果を確認するので、その様子を見られます。オフにすると、見えないブラウザーを使います。",
+  "codingAgent.realBrowserHint": "実行はこのボックスの画面にある Chromium で自分の成果を確認し、その様子は「エージェントブラウザ」アプリで見られます。オフにすると、見えないブラウザーを使います。",
   "codingAgent.realBrowserFailed": "ブラウザーの設定を変更できませんでした。",
   "codingAgent.leftoverRunning": "この実行が起動した何かがまだ動いています。",
   "codingAgent.killLeftover": "終了する",

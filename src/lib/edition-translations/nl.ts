@@ -1018,7 +1018,7 @@ export const nl: Record<string, string> = {
   "codingAgent.genAudioHint": "Een run mag deze box een zin laten uitspreken in een geluidsbestand in zijn project, met de stem van je gesproken antwoorden — hoogstens veertig per run.",
   "codingAgent.genAudioFailed": "De spraakinstelling kon niet worden gewijzigd.",
   "codingAgent.realBrowserLabel": "Controleren in de browser van deze box",
-  "codingAgent.realBrowserHint": "Een run controleert zijn werk in de Chromium op het scherm van deze box, waar je kunt meekijken; uitgeschakeld gebruikt hij een onzichtbare browser.",
+  "codingAgent.realBrowserHint": "Een run controleert zijn werk in de Chromium op het scherm van deze box, waar je in de Agentbrowser-app kunt meekijken; uitgeschakeld gebruikt hij een onzichtbare browser.",
   "codingAgent.realBrowserFailed": "De browserinstelling kon niet worden gewijzigd.",
   "codingAgent.leftoverRunning": "Iets dat deze run heeft gestart, draait nog.",
   "codingAgent.killLeftover": "Beëindigen",

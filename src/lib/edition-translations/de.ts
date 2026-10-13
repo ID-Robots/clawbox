@@ -1017,7 +1017,7 @@ export const de: Record<string, string> = {
   "codingAgent.genAudioHint": "Ein Lauf darf diese Box einen Satz in eine Audiodatei in seinem Projekt sprechen lassen, mit der Stimme Ihrer gesprochenen Antworten — höchstens vierzig pro Lauf.",
   "codingAgent.genAudioFailed": "Die Spracheinstellung konnte nicht geändert werden.",
   "codingAgent.realBrowserLabel": "Im Browser dieser Box prüfen",
-  "codingAgent.realBrowserHint": "Ein Lauf prüft seine Arbeit im Chromium auf dem Bildschirm dieser Box, wo Sie zusehen können; ausgeschaltet nutzt er einen unsichtbaren Browser.",
+  "codingAgent.realBrowserHint": "Ein Lauf prüft seine Arbeit im Chromium auf dem Bildschirm dieser Box, dem Sie in der Agent-Browser-App zusehen können; ausgeschaltet nutzt er einen unsichtbaren Browser.",
   "codingAgent.realBrowserFailed": "Die Browsereinstellung konnte nicht geändert werden.",
   "codingAgent.leftoverRunning": "Etwas, das dieser Lauf gestartet hat, läuft noch.",
   "codingAgent.killLeftover": "Beenden",

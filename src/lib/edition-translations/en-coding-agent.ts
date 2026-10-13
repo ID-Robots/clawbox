@@ -598,7 +598,7 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.genAudioHint": "A run may have this box speak a line into a sound file in its project, in your spoken-reply voice \u2014 at most forty per run.",
   "codingAgent.genAudioFailed": "Could not change the speech setting.",
   "codingAgent.realBrowserLabel": "Verify in this box's browser",
-  "codingAgent.realBrowserHint": "A run checks its work in the Chromium on this box's screen, where you can watch; off, it uses an invisible browser.",
+  "codingAgent.realBrowserHint": "A run checks its work in the Chromium on this box's screen, which you can watch in the Agent Browser app; off, it uses an invisible browser.",
   "codingAgent.realBrowserFailed": "Could not change the browser setting.",
 
   // A run that finished on its own keeps whatever it started — the way an app

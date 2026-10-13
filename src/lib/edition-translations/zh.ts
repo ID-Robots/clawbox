@@ -1028,7 +1028,7 @@ export const zh: Record<string, string> = {
   "codingAgent.genAudioHint": "运行可以让这台设备用你的语音回复嗓音念出一句话，保存为项目里的声音文件——单次运行最多四十段。",
   "codingAgent.genAudioFailed": "无法更改语音设置。",
   "codingAgent.realBrowserLabel": "在这台设备的浏览器中验证",
-  "codingAgent.realBrowserHint": "运行会在这台设备屏幕上的 Chromium 里检查自己的成果，你可以在旁观看；关闭后，它改用看不见的浏览器。",
+  "codingAgent.realBrowserHint": "运行会在这台设备屏幕上的 Chromium 里检查自己的成果，你可以在“助手浏览器”应用里旁观；关闭后，它改用看不见的浏览器。",
   "codingAgent.realBrowserFailed": "无法更改浏览器设置。",
   "codingAgent.leftoverRunning": "这次运行启动的某个进程仍在运行。",
   "codingAgent.killLeftover": "结束它",

@@ -1013,7 +1013,7 @@ export const es: Record<string, string> = {
   "codingAgent.genAudioHint": "Una ejecución puede hacer que esta caja pronuncie una frase y la guarde como archivo de sonido en su proyecto, con la voz de tus respuestas habladas: como mucho cuarenta por ejecución.",
   "codingAgent.genAudioFailed": "No se pudo cambiar el ajuste de voz.",
   "codingAgent.realBrowserLabel": "Verificar en el navegador de esta caja",
-  "codingAgent.realBrowserHint": "Una ejecución comprueba su trabajo en el Chromium de la pantalla de esta caja, donde puedes mirar; desactivado, usa un navegador invisible.",
+  "codingAgent.realBrowserHint": "Una ejecución comprueba su trabajo en el Chromium de la pantalla de esta caja, que puedes mirar en la app Navegador del agente; desactivado, usa un navegador invisible.",
   "codingAgent.realBrowserFailed": "No se pudo cambiar el ajuste del navegador.",
   "codingAgent.leftoverRunning": "Algo que inició esta ejecución sigue en marcha.",
   "codingAgent.killLeftover": "Terminarlo",
