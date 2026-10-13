@@ -11,6 +11,11 @@ VNC_PORT="${VNC_PORT:-5900}"
 VNC_MODE="${CLAWBOX_VNC_MODE:-auto}"
 STATE_DIR="${HOME}/.cache/clawbox"
 STATE_FILE="${STATE_DIR}/vnc-display.env"
+RESOLUTION_FILE="${HOME}/.config/clawbox/vnc-resolution.env"
+# Presets the Settings UI offers (src/lib/vnc-resolution.ts). Anything else
+# falls back to the default so a hand-edited file cannot reach Xvfb's argv.
+VNC_RESOLUTIONS="1280x720 1600x900 1920x1080"
+DEFAULT_VNC_RESOLUTION="1280x720"
 THEME_SCRIPT="$(cd "$(dirname "$0")" && pwd)/apply-desktop-theme.sh"
 
 display_ready() {
@@ -29,10 +34,50 @@ record_vnc_display() {
   mkdir -p "$STATE_DIR"
   {
     printf 'CLAWBOX_VNC_DISPLAY=%s\n' "$display"
+    if [ -n "${VNC_RESOLUTION:-}" ]; then
+      printf 'CLAWBOX_VNC_GEOMETRY=%s\n' "$VNC_RESOLUTION"
+    fi
     if [ -n "$auth" ]; then
       printf 'CLAWBOX_VNC_XAUTHORITY=%s\n' "$auth"
     fi
   } > "$STATE_FILE"
+}
+
+# Echo the saved resolution if it is one of the presets, else the default.
+read_vnc_resolution() {
+  local file="$1" value=""
+  if [ -f "$file" ]; then
+    value=$(sed -n 's/^CLAWBOX_VNC_RESOLUTION=\([0-9x]*\)$/\1/p' "$file" | tail -1)
+  fi
+  case " $VNC_RESOLUTIONS " in
+    *" $value "*) [ -n "$value" ] && { echo "$value"; return 0; } ;;
+  esac
+  echo "$DEFAULT_VNC_RESOLUTION"
+}
+
+# Geometry (WxH) of the running display, empty if unknown. Asks X first
+# (xwininfo, from x11-utils, may be absent on a fresh install), then falls back
+# to the geometry the previous run recorded in the state file.
+running_geometry() {
+  local geo=""
+  if command -v xwininfo >/dev/null 2>&1; then
+    geo=$(xwininfo -display "$1" -root 2>/dev/null | sed -n 's/^ *-geometry \([0-9]*x[0-9]*\).*/\1/p')
+  fi
+  if [ -z "$geo" ] && [ -f "$STATE_FILE" ] && grep -qx "CLAWBOX_VNC_DISPLAY=$1" "$STATE_FILE"; then
+    geo=$(sed -n 's/^CLAWBOX_VNC_GEOMETRY=\([0-9]*x[0-9]*\)$/\1/p' "$STATE_FILE" | tail -1)
+  fi
+  echo "$geo"
+}
+
+# Decide whether a running Xvfb must be replaced: prints "restart" when the
+# running geometry is known and differs from the wanted one, else "keep".
+xvfb_action() {
+  local running="$1" wanted="$2"
+  if [ -n "$running" ] && [ "$running" != "$wanted" ]; then
+    echo restart
+  else
+    echo keep
+  fi
 }
 
 # ─── Try to mirror the physical/GDM display :0 ───────────────────────────────
@@ -63,10 +108,29 @@ fi
 # ─── Virtual desktop ─────────────────────────────────────────────────────────
 
 VDISPLAY=99
-echo "[vnc] Starting virtual desktop on :${VDISPLAY}"
+VNC_RESOLUTION="$(read_vnc_resolution "$RESOLUTION_FILE")"
+echo "[vnc] Starting virtual desktop on :${VDISPLAY} at ${VNC_RESOLUTION}"
+
+# An Xvfb that outlived a previous run is reused, unless the saved resolution
+# changed since it started — then it is replaced. The :0 mirror path above
+# never gets here, so the setting does not apply to it.
+if display_ready ":${VDISPLAY}" \
+  && [ "$(xvfb_action "$(running_geometry ":${VDISPLAY}")" "$VNC_RESOLUTION")" = restart ]; then
+  echo "[vnc] Resolution changed — restarting Xvfb :${VDISPLAY}"
+  pkill -f "^Xvfb :${VDISPLAY}( |$)" 2>/dev/null || true
+  for _ in $(seq 1 30); do
+    display_ready ":${VDISPLAY}" || break
+    sleep 0.1
+  done
+  # Still up: do not carry on at the old size or record the new geometry.
+  if display_ready ":${VDISPLAY}"; then
+    echo "[vnc] Error: Xvfb :${VDISPLAY} did not stop within 3s; not starting at ${VNC_RESOLUTION}" >&2
+    exit 1
+  fi
+fi
 
 if ! display_ready ":${VDISPLAY}"; then
-  Xvfb ":${VDISPLAY}" -screen 0 1280x720x24 &
+  Xvfb ":${VDISPLAY}" -screen 0 "${VNC_RESOLUTION}x24" &
   # Poll for Xvfb readiness instead of a fixed sleep
   for _ in $(seq 1 50); do
     if display_ready ":${VDISPLAY}"; then

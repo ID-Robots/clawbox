@@ -29,6 +29,8 @@ vi.mock("os", async (importOriginal) => {
 });
 
 const SESSION_SECRET = "7c".repeat(32);
+/** A block page a proxy or a CDN answers in Anthropic's place: a 403, and nothing Anthropic wrote. */
+const CHALLENGE_PAGE = "<!DOCTYPE html><html><head><title>Just a moment...</title></head><body>Checking your browser before accessing the site.</body></html>";
 const LEGACY_KEY = "sk-ant-api03-legacy-owner-key-0123456789";
 const SECOND_KEY = "sk-ant-api03-second-account-key-987654321";
 
@@ -291,6 +293,25 @@ describe("OAuth accounts", () => {
     await pool.addOAuthAccount({ label: "Max", email: "m@example.com", tokens: tokens("live-access", 60 * 60_000) });
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("ENOTFOUND")));
     expect((await pool.prepareAccount()).prepared?.credential).toEqual({ kind: "oauth", secret: "live-access" });
+  });
+
+  // A box that was off overnight boots with every access token ended, and the
+  // first queued run asks for a renewal before Wi-Fi or DNS is up.
+  it("keeps an account whose token ran out while Anthropic could not be reached, and renews it once the network is back", async () => {
+    const account = await pool.addOAuthAccount({ label: "Max", email: "m@example.com", tokens: tokens("ended-access", -60_000) });
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("fetch failed", { cause: Object.assign(new Error("getaddrinfo ENOTFOUND"), { code: "ENOTFOUND" }) })));
+    expect((await pool.prepareAccount()).prepared).toBeNull();
+    expect((await pool.readAccounts()).find((a) => a.id === account.id)?.status).toBe("ok");
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ access_token: "fresh-access", refresh_token: "fresh-refresh", expires_in: 28_800 }), { status: 200 })));
+    expect((await pool.prepareAccount()).prepared?.credential).toEqual({ kind: "oauth", secret: "fresh-access" });
+  });
+
+  it("does not take a page from something in between for Anthropic refusing the grant", async () => {
+    const account = await pool.addOAuthAccount({ label: "Max", email: "m@example.com", tokens: tokens("ended-access", -60_000) });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(CHALLENGE_PAGE, { status: 403, headers: { "content-type": "text/html" } })));
+    expect((await pool.prepareAccount()).prepared).toBeNull();
+    expect((await pool.readAccounts()).find((a) => a.id === account.id)?.status).toBe("ok");
   });
 
   it("treats the same email again as the same account signing in again", async () => {
@@ -578,6 +599,13 @@ describe("asking Anthropic whether a refused credential is really dead", () => {
     expect((await pool.readAccounts())[0].status).toBe("ok");
   });
 
+  it("marks nothing when the token endpoint answers with a page Anthropic did not write", async () => {
+    const account = await pool.addOAuthAccount({ label: "Max", email: "max@example.com", tokens: tokens("live-access", 8 * 3_600_000) });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(CHALLENGE_PAGE, { status: 403, headers: { "content-type": "text/html" } })));
+    expect(await pool.probeAccountCredential(account.id, async () => "ok")).toBe("unknown");
+    expect((await pool.readAccounts())[0].status).toBe("ok");
+  });
+
   it("checks an API key the way the key form does", async () => {
     const account = await pool.addApiKeyAccount({ label: "Key", key: LEGACY_KEY });
     const verify = vi.fn(async () => "rejected" as const);
@@ -596,6 +624,14 @@ describe("asking Anthropic whether a refused credential is really dead", () => {
     const later = new Date(Date.now() + 5_000);
     fs.utimesSync(credentials, later, later);
     expect((await pool.readAccounts())[0].status).toBe("ok");
+  });
+});
+
+describe("whether a run has an account to use at all", () => {
+  it("does not call the pool connected when its only account cannot answer until the owner signs it in again", async () => {
+    const account = await pool.addOAuthAccount({ label: "Max", email: "max@example.com", tokens: { access: "a", refresh: "r", expires: Date.now() + 3_600_000 } });
+    await pool.markCredentialProblem(account.id, "expired");
+    expect(await pool.poolHasCredential()).toMatchObject({ any: false, hasOAuth: false });
   });
 });
 

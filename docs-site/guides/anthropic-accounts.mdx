@@ -52,7 +52,13 @@ chat already uses by itself.
 - **A refused sign-in moves everything too.** If Anthropic refuses an account (a 401,
   a revoked sign-in or key), the box first checks with Anthropic. If the sign-in really
   is dead, the account is marked **Needs re-authentication** and everything moves on. If
-  it was only a stale token, the account stays in use.
+  it was only a stale token, the account stays in use. If the account's organization has
+  switched off Claude subscription access for Claude Code, there is nothing to check: the
+  account is marked **Needs re-authentication** straight away.
+- **A sign-in that cannot be renewed right now is left alone.** When the box cannot reach
+  Anthropic to renew a sign-in (no network yet after a restart, a timeout, a page from a
+  network filter in Anthropic's place), the account keeps its state and the box tries
+  again on the next request. Only Anthropic itself refusing the sign-in takes it out.
 - **The box stays where it moved to.** When the first account's limit resets, the box
   keeps using the account it switched to until that one runs out too. That saves a
   restart of the chat for nothing. To go back to the first account as soon as it resets,

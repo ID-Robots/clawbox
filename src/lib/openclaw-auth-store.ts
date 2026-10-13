@@ -60,14 +60,17 @@
  */
 
 import path from "./runtime-path";
-import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 import { openSqlite } from "./openclaw-session-store";
 import {
+  AUTH_STATE_CELLS,
+  clearUsageStats,
   gatewayAuthPaths,
   isFile,
   ownsSharedStore,
   parseBlob,
+  readRow,
   tokenFingerprint,
+  type AuthStoreCell as Cell,
   type GatewayAuthPaths,
 } from "./anthropic-gateway-auth";
 
@@ -167,57 +170,26 @@ export function isOAuthRefreshFence(entry: unknown): boolean {
   return oauthRefreshFenceState(entry) !== null;
 }
 
-/** One JSON cell of an OpenClaw store: its table, its row, and the statements that read and replace it. */
-interface Cell {
-  table: string;
-  key: string;
-  select: string;
-  update: string;
-}
-
 const SHARED_SELECT = "SELECT value_json AS json, updated_at_ms AS at FROM config_machine_state WHERE state_key = ?";
 const SHARED_UPDATE = "UPDATE config_machine_state SET value_json = ?, updated_at_ms = ? WHERE state_key = ?";
 
 const OWNERSHIP = { table: "config_machine_state", key: "auth.sharedStore", select: SHARED_SELECT };
 
-/** Per store: the credentials (`store`) and, in the same database, their usage stats and cooldowns (`state`). */
-const CELLS: Record<GatewayAuthStoreKind, { store: Cell; state: Cell }> = {
-  shared: {
-    store: { table: "config_machine_state", key: "authProfiles.store", select: SHARED_SELECT, update: SHARED_UPDATE },
-    state: { table: "config_machine_state", key: "authProfiles.state", select: SHARED_SELECT, update: SHARED_UPDATE },
-  },
+/**
+ * Per store, the row its credentials are in. Their usage stats and cooldowns
+ * are in a row of their own beside it, AUTH_STATE_CELLS[kind] — looked up when
+ * a write runs, not here, so that loading this module reads nothing from
+ * another (see "a store that cannot be used" in its suite).
+ */
+const STORE_CELLS: Record<GatewayAuthStoreKind, Cell> = {
+  shared: { table: "config_machine_state", key: "authProfiles.store", select: SHARED_SELECT, update: SHARED_UPDATE },
   agent: {
-    store: {
-      table: "auth_profile_store",
-      key: "primary",
-      select: "SELECT store_json AS json, updated_at AS at FROM auth_profile_store WHERE store_key = ?",
-      update: "UPDATE auth_profile_store SET store_json = ?, updated_at = ? WHERE store_key = ?",
-    },
-    state: {
-      table: "auth_profile_state",
-      key: "primary",
-      select: "SELECT state_json AS json, updated_at AS at FROM auth_profile_state WHERE state_key = ?",
-      update: "UPDATE auth_profile_state SET state_json = ?, updated_at = ? WHERE state_key = ?",
-    },
+    table: "auth_profile_store",
+    key: "primary",
+    select: "SELECT store_json AS json, updated_at AS at FROM auth_profile_store WHERE store_key = ?",
+    update: "UPDATE auth_profile_store SET store_json = ?, updated_at = ? WHERE store_key = ?",
   },
 };
-
-/** One row of an OpenClaw store: its JSON text and the timestamp column beside it. */
-interface StoredRow {
-  json: unknown;
-  at: unknown;
-}
-
-/**
- * The cell's row, or undefined when its table or its row is not there — asked
- * of sqlite_master first, the way core does, so "no such table" is an answer
- * and only a database that cannot be asked throws.
- */
-function readRow(db: DatabaseSyncType, cell: Pick<Cell, "table" | "key" | "select">): StoredRow | undefined {
-  const table = db.prepare("SELECT type FROM sqlite_master WHERE name = ?").get(cell.table) as { type?: unknown } | undefined;
-  if (table?.type !== "table") return undefined;
-  return db.prepare(cell.select).get(cell.key) as StoredRow | undefined;
-}
 
 /** A row's timestamp column, when it holds a number. */
 const stampOf = (at: unknown): number | null => (typeof at === "number" && Number.isFinite(at) ? at : null);
@@ -240,7 +212,7 @@ function findStore(paths: GatewayAuthPaths): Found | null {
     const db = openSqlite(paths.sharedDb, true);
     try {
       if (ownsSharedStore(readRow(db, OWNERSHIP)?.json)) {
-        const row = readRow(db, CELLS.shared.store);
+        const row = readRow(db, STORE_CELLS.shared);
         return row ? { store: "shared", dbPath: paths.sharedDb, json: row.json, at: stampOf(row.at) } : null;
       }
     } finally {
@@ -251,7 +223,7 @@ function findStore(paths: GatewayAuthPaths): Found | null {
   if (!isFile(dbPath)) return null;
   const db = openSqlite(dbPath, true);
   try {
-    const row = readRow(db, CELLS.agent.store);
+    const row = readRow(db, STORE_CELLS.agent);
     return row ? { store: "agent", dbPath, json: row.json, at: stampOf(row.at) } : null;
   } finally {
     db.close();
@@ -284,7 +256,7 @@ function findAgentLocalCopy(paths: GatewayAuthPaths, profileId: string): { entry
   if (!isFile(dbPath)) return null;
   const db = openSqlite(dbPath, true);
   try {
-    const row = readRow(db, CELLS.agent.store);
+    const row = readRow(db, STORE_CELLS.agent);
     const blob = row ? (parseBlob(row.json) as Json | null) : null;
     const profiles = blob && profilesOf(blob);
     const entry = profiles ? profileAt(profiles, profileId) : null;
@@ -417,29 +389,23 @@ function wellFormed(bundle: unknown): bundle is GatewayOAuthBundle {
  * made — `false` then says the row holds none (any more), with nothing written.
  * Without it `false` is a row this module cannot rewrite.
  */
-function replaceProfile(dbPath: string, cells: { store: Cell; state: Cell }, profileId: string, bundle: GatewayOAuthBundle, existingOnly: boolean): boolean {
+function replaceProfile(dbPath: string, kind: GatewayAuthStoreKind, profileId: string, bundle: GatewayOAuthBundle, existingOnly: boolean): boolean {
+  const store = STORE_CELLS[kind];
   const db = openSqlite(dbPath, false);
   let open = false;
   try {
     db.exec("BEGIN IMMEDIATE");
     open = true;
     // Read again under the lock; the look that led here was before it. No blob to rewrite here is no write, and no row is made.
-    const blob = parseBlob(readRow(db, cells.store)?.json) as Json | null;
+    const blob = parseBlob(readRow(db, store)?.json) as Json | null;
     const profiles = blob && profilesOf(blob);
     if (!blob || !profiles) return false;
     if (existingOnly && !profileAt(profiles, profileId)) return false;
     profiles[profileId] = bundle;
     blob.profiles = profiles;
     const now = Date.now();
-    db.prepare(cells.store.update).run(JSON.stringify(blob), now, cells.store.key);
-    // The stats under this id are the credential's that was here: left in
-    // place, its cooldown keeps the new one unused until it runs out.
-    const state = parseBlob(readRow(db, cells.state)?.json) as Json | null;
-    const stats = state?.usageStats;
-    if (state && stats && typeof stats === "object" && Object.hasOwn(stats, profileId)) {
-      delete (stats as Json)[profileId];
-      db.prepare(cells.state.update).run(JSON.stringify(state), now, cells.state.key);
-    }
+    db.prepare(store.update).run(JSON.stringify(blob), now, store.key);
+    clearUsageStats(db, AUTH_STATE_CELLS[kind], [profileId], now);
     db.exec("COMMIT");
     open = false;
     return true;
@@ -484,10 +450,10 @@ export function putGatewayOAuthProfile(profileId: string, bundle: GatewayOAuthBu
     // Looked for BEFORE anything is written: an agent database that cannot be asked fails the put whole.
     const local = found.store === "shared" && findAgentLocalCopy(where, profileId) !== null;
     reason = "write-failed";
-    if (!replaceProfile(found.dbPath, CELLS[found.store], profileId, bundle, false)) return { ok: false, reason: "unreadable" };
+    if (!replaceProfile(found.dbPath, found.store, profileId, bundle, false)) return { ok: false, reason: "unreadable" };
     if (local) {
       writing = "the main agent's own copy of the profile (the shared row took the sign-in)";
-      replaceProfile(mainAgentDb(where), CELLS.agent, profileId, bundle, true);
+      replaceProfile(mainAgentDb(where), "agent", profileId, bundle, true);
     }
     return { ok: true, store: found.store };
   } catch (err) {

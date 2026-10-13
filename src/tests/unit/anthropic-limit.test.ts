@@ -167,6 +167,9 @@ describe("detectAnthropicAuthFailure", () => {
     'Failed to authenticate. API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"OAuth token has expired."}}',
     '401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}',
     "OAuth token has been revoked",
+    // Field wordings (TASK-1235, TASK-1271): bare, with no JSON around them and no "/login".
+    "OAuth access token has been revoked",
+    "Your organization has disabled Claude subscription access for Claude Code",
   ])("recognises %j as Anthropic refusing the credential", (text) => {
     expect(detectAnthropicAuthFailure(text)).toBe(true);
   });
@@ -195,6 +198,16 @@ describe("classifyAnthropicFailure", () => {
   it("answers auth for a refused credential and null for anything else", () => {
     expect(classifyAnthropicFailure("Invalid API key · Please run /login", AT_2227_SOFIA)).toEqual({ type: "auth" });
     expect(classifyAnthropicFailure("The agent run failed before producing a reply.", AT_2227_SOFIA)).toBeNull();
+  });
+
+  it("answers an account its organisation has switched off as refused for good, and a revoked token as one to ask about", () => {
+    // The token behind it renews perfectly well, so asking Anthropic about the
+    // credential would keep the account in; it cannot serve until the owner acts.
+    expect(classifyAnthropicFailure("Your organization has disabled Claude subscription access for Claude Code", AT_2227_SOFIA))
+      .toEqual({ type: "auth", permanent: true });
+    expect(classifyAnthropicFailure('API Error: 403 {"type":"error","error":{"type":"permission_error","message":"Your organization has disabled Claude subscription access for Claude Code"}}', AT_2227_SOFIA))
+      .toEqual({ type: "auth", permanent: true });
+    expect(classifyAnthropicFailure("OAuth access token has been revoked", AT_2227_SOFIA)).toEqual({ type: "auth" });
   });
 
   it("takes the gateway's failover reason when its own copy carries no provider words", () => {

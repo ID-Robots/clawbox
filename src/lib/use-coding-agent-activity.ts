@@ -48,12 +48,14 @@ import { samePlainData } from "@/lib/same-plain-data";
  * No steady-state timer. It probes once when the chat opens, again whenever
  * `nudge()` is called (which the chat does the moment a coding-agent tool call
  * goes past, and this hook does itself when the desktop says a run started or
- * the tab comes back into view), and polls only while a run is actually in
- * flight — plus ONE round after the last live run settled, because the runner
+ * the tab comes back into view), polls every five seconds only while a run is
+ * actually in flight, and otherwise re-asks once every IDLE_POLL_MS while the
+ * chat is open and visible — runs started from the API, MCP, another session
+ * or the review pass send this tab no event — plus ONE round after the last live run settled, because the runner
  * persists the settled record before it commits the work and starts the
  * automatic review pass, so the poll that saw the finish cannot yet have seen
  * the run that follows it. An idle box is asked once per chat open and then
- * left alone.
+ * asked twice a minute, and a closed chat or hidden tab not at all.
  */
 
 export type { CodingRunStatus };
@@ -175,6 +177,8 @@ function toTodos(raw: unknown): CodingTodo[] {
 
 /** How often to re-ask while a run is actually in flight. */
 const POLL_MS = 5_000;
+/** How often to re-ask while nothing is in flight and the chat is visible. */
+export const IDLE_POLL_MS = 30_000;
 /** Enough to catch a run even if a couple of others finished meanwhile. */
 const LOOK_BACK = 5;
 /** Progress lines a card lists when expanded. */
@@ -302,6 +306,15 @@ export function useCodingAgentActivity(active: boolean): {
     // that follows its settling is owed only then.
     let sawLive = false;
 
+    // A run started where this chat cannot see it (the API or MCP, another
+    // session, the automatic review pass) fires no event here. So while the
+    // chat is open and the tab visible, ask again slowly. A hidden tab is not
+    // asked; the visibilitychange nudge re-probes when it comes back.
+    const scheduleIdle = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      timer = setTimeout(() => { void read(); }, IDLE_POLL_MS);
+    };
+
     const read = async () => {
       try {
         // `artifacts=1` on EVERY poll, not only for the runs a card has
@@ -355,11 +368,15 @@ export function useCodingAgentActivity(active: boolean): {
         } else if (sawLive) {
           sawLive = false;
           timer = setTimeout(() => { void read(); }, POLL_MS);
+        } else {
+          scheduleIdle();
         }
       } catch {
         // The device is the source of truth and it did not answer. Leave the
         // badges already on screen alone rather than rewriting history from a
-        // failed request — and do not schedule another.
+        // failed request — but do not go silent for good either: one blip
+        // used to stop all polling until the page was reloaded.
+        if (alive) scheduleIdle();
       }
     };
 

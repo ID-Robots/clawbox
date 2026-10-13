@@ -10,7 +10,8 @@
  *  2. ONLY THE CREDENTIAL. The profile's type and id stay; other providers'
  *     profiles, and an anthropic API-key profile, are untouched; nothing is
  *     created where there was nothing.
- *  3. NEVER THE REFRESH TOKEN, and the old account's cooldown goes with it.
+ *  3. NEVER THE REFRESH TOKEN, and the old account's cooldown goes with it —
+ *     from the STATE row core 2026.10.2 keeps it in, beside the store.
  */
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import fs from "fs";
@@ -36,6 +37,10 @@ function agentDir(id: string): string {
   return dir;
 }
 
+/**
+ * The CREDENTIALS as core 2026.10.2 persists them: `{version, profiles}` and
+ * nothing else (`buildPersistedAuthProfileSecretsStore`).
+ */
 function storeBlob(extra: Record<string, unknown> = {}) {
   return {
     version: 1,
@@ -44,55 +49,81 @@ function storeBlob(extra: Record<string, unknown> = {}) {
       "openai:chatgpt": { type: "oauth", provider: "openai", access: "openai-access", refresh: "openai-refresh", expires: 2_000 },
       "anthropic:manual": { type: "api_key", provider: "anthropic", key: "sk-ant-api03-a-key" },
     },
-    usageStats: {
-      "anthropic:default": { cooldownUntil: 9_999_999_999_999, errorCount: 3 },
-      "openai:chatgpt": { errorCount: 1 },
-    },
     ...extra,
   };
 }
 
-function writeAgentDb(id: string, blob: unknown): string {
+/**
+ * The runtime STATE beside them, a row of its own — order, last-good, usage
+ * stats and cooldowns (`buildPersistedAuthProfileState`) — which core merges
+ * OVER the credentials when it loads the store.
+ */
+function stateBlob() {
+  return {
+    version: 1,
+    order: { anthropic: ["anthropic:default", "anthropic:manual"] },
+    usageStats: {
+      "anthropic:default": { cooldownUntil: 9_999_999_999_999, errorCount: 3 },
+      "openai:chatgpt": { errorCount: 1 },
+    },
+  };
+}
+
+/** The legacy auth-profiles.json, which carried both in one file. */
+function legacyFileBlob() {
+  return { ...storeBlob(), usageStats: stateBlob().usageStats };
+}
+
+const AGENT_STORE_DDL = "CREATE TABLE auth_profile_store (store_key TEXT NOT NULL PRIMARY KEY, store_json TEXT NOT NULL, updated_at INTEGER NOT NULL) STRICT";
+const AGENT_STATE_DDL = "CREATE TABLE auth_profile_state (state_key TEXT NOT NULL PRIMARY KEY, state_json TEXT NOT NULL, updated_at INTEGER NOT NULL) STRICT";
+const SHARED_DDL = "CREATE TABLE config_machine_state (state_key TEXT NOT NULL PRIMARY KEY, value_json TEXT NOT NULL, updated_at_ms INTEGER NOT NULL) STRICT";
+
+/** An agent database as 2026.10.2 lays it out; `state: null` is one with no state row. */
+function writeAgentDb(id: string, blob: unknown, state: unknown = stateBlob()): string {
   const file = path.join(agentDir(id), "openclaw-agent.sqlite");
   const db = new DatabaseSync(file);
-  db.exec("CREATE TABLE auth_profile_store (store_key TEXT PRIMARY KEY, store_json TEXT NOT NULL, updated_at INTEGER NOT NULL)");
+  db.exec(AGENT_STORE_DDL);
+  db.exec(AGENT_STATE_DDL);
   db.prepare("INSERT INTO auth_profile_store VALUES (?, ?, ?)").run("primary", JSON.stringify(blob), 1);
+  if (state !== null) db.prepare("INSERT INTO auth_profile_state VALUES (?, ?, ?)").run("primary", JSON.stringify(state), 1);
   db.close();
   return file;
 }
 
-/** A store blob as the assertions read it. */
+/** A store or state blob as the assertions read it. */
 interface Blob {
   version?: number;
   profiles: Record<string, Record<string, unknown>>;
-  usageStats: Record<string, unknown>;
+  order?: unknown;
+  usageStats?: Record<string, unknown>;
 }
 
-function readAgentDb(file: string): Blob {
+function readJsonCell(file: string, sql: string): Blob | undefined {
   const db = new DatabaseSync(file, { readOnly: true });
-  const row = db.prepare("SELECT store_json FROM auth_profile_store WHERE store_key = 'primary'").get() as { store_json: string };
+  const row = db.prepare(sql).get() as { json: string } | undefined;
   db.close();
-  return JSON.parse(row.store_json);
+  return row ? JSON.parse(row.json) : undefined;
 }
 
-function writeSharedDb(owned: boolean, blob: unknown): string {
+const readAgentDb = (file: string): Blob => readJsonCell(file, "SELECT store_json AS json FROM auth_profile_store WHERE store_key = 'primary'")!;
+const readAgentState = (file: string) => readJsonCell(file, "SELECT state_json AS json FROM auth_profile_state WHERE state_key = 'primary'");
+
+function writeSharedDb(owned: boolean, blob: unknown, state: unknown = stateBlob()): string {
   const dir = path.join(home, "state");
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, "openclaw.sqlite");
   const db = new DatabaseSync(file);
-  db.exec("CREATE TABLE config_machine_state (state_key TEXT PRIMARY KEY, value_json TEXT NOT NULL)");
-  if (owned) db.prepare("INSERT INTO config_machine_state VALUES (?, ?)").run("auth.sharedStore", JSON.stringify({ location: "state-db" }));
-  db.prepare("INSERT INTO config_machine_state VALUES (?, ?)").run("authProfiles.store", JSON.stringify(blob));
+  db.exec(SHARED_DDL);
+  const put = db.prepare("INSERT INTO config_machine_state VALUES (?, ?, ?)");
+  if (owned) put.run("auth.sharedStore", JSON.stringify({ location: "state-db" }), 1);
+  put.run("authProfiles.store", JSON.stringify(blob), 1);
+  if (state !== null) put.run("authProfiles.state", JSON.stringify(state), 1);
   db.close();
   return file;
 }
 
-function readSharedDb(file: string): Blob {
-  const db = new DatabaseSync(file, { readOnly: true });
-  const row = db.prepare("SELECT value_json FROM config_machine_state WHERE state_key = 'authProfiles.store'").get() as { value_json: string };
-  db.close();
-  return JSON.parse(row.value_json);
-}
+const readSharedDb = (file: string): Blob => readJsonCell(file, "SELECT value_json AS json FROM config_machine_state WHERE state_key = 'authProfiles.store'")!;
+const readSharedState = (file: string) => readJsonCell(file, "SELECT value_json AS json FROM config_machine_state WHERE state_key = 'authProfiles.state'");
 
 beforeEach(() => {
   home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-gw-auth-")));
@@ -142,23 +173,39 @@ describe("putting the active account in", () => {
   it("replaces the access token everywhere, empties the refresh token and drops the old account's cooldown", () => {
     const main = writeAgentDb("main", storeBlob());
     const legacy = path.join(agentDir("legacy"), "auth-profiles.json");
-    fs.writeFileSync(legacy, JSON.stringify(storeBlob()), { mode: 0o600 });
+    fs.writeFileSync(legacy, JSON.stringify(legacyFileBlob()), { mode: 0o600 });
     const shared = writeSharedDb(true, storeBlob());
     const expires = Date.now() + 8 * 3_600_000;
 
     expect(writeGatewayAnthropicToken({ access: NEW, expires }, paths)).toEqual({ written: 3, failed: 0 });
 
-    for (const blob of [readAgentDb(main), JSON.parse(fs.readFileSync(legacy, "utf-8")) as Blob, readSharedDb(shared)]) {
+    const legacyAfter = JSON.parse(fs.readFileSync(legacy, "utf-8")) as Blob;
+    for (const blob of [readAgentDb(main), legacyAfter, readSharedDb(shared)]) {
       expect(blob.profiles["anthropic:default"]).toEqual({ type: "oauth", provider: "anthropic", access: NEW, refresh: "", expires });
       // Everything else exactly as core left it.
       expect(blob.profiles["openai:chatgpt"]).toEqual({ type: "oauth", provider: "openai", access: "openai-access", refresh: "openai-refresh", expires: 2_000 });
       expect(blob.profiles["anthropic:manual"]).toEqual({ type: "api_key", provider: "anthropic", key: "sk-ant-api03-a-key" });
-      expect(blob.usageStats["anthropic:default"]).toBeUndefined();
-      expect(blob.usageStats["openai:chatgpt"]).toEqual({ errorCount: 1 });
       expect(blob.version).toBe(1);
     }
+    // The cooldown is where core reads it: the state row beside each store
+    // (and, in the legacy file, the file itself). The new account must not sit
+    // out the old one's; nothing else in that row moves.
+    for (const state of [readAgentState(main), readSharedState(shared), legacyAfter]) {
+      expect(state?.usageStats?.["anthropic:default"]).toBeUndefined();
+      expect(state?.usageStats?.["openai:chatgpt"]).toEqual({ errorCount: 1 });
+    }
+    expect(readAgentState(main)?.order).toEqual(stateBlob().order);
+    expect(readSharedState(shared)?.order).toEqual(stateBlob().order);
     expect((fs.statSync(legacy).mode & 0o777).toString(8)).toBe("600");
     expect(listGatewayAnthropicProfiles(paths).every((p) => p.fingerprint === tokenFingerprint(NEW))).toBe(true);
+  });
+
+  it("makes no state row where core keeps none", () => {
+    const main = writeAgentDb("main", storeBlob(), null);
+    const shared = writeSharedDb(true, storeBlob(), null);
+    expect(writeGatewayAnthropicToken({ access: NEW, expires: 1 }, paths)).toEqual({ written: 2, failed: 0 });
+    expect(readAgentState(main)).toBeUndefined();
+    expect(readSharedState(shared)).toBeUndefined();
   });
 
   it("leaves `expires` out when the account did not say, rather than keeping the old account's", () => {
@@ -185,6 +232,7 @@ describe("putting the active account in", () => {
     const shared = writeSharedDb(false, storeBlob());
     writeGatewayAnthropicToken({ access: NEW, expires: 1 }, paths);
     expect(readSharedDb(shared).profiles["anthropic:default"].access).toBe(OLD);
+    expect(readSharedState(shared)).toEqual(stateBlob());
   });
 
   it("counts a store it cannot write and still writes the rest", () => {

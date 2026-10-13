@@ -107,6 +107,7 @@ export function detectAnthropicLimit(text: string | null | undefined, now: numbe
  *   Failed to authenticate. API Error: 401 {"type":"error","error":{"type":"authentication_error",…}}
  *   401 {"type":"error","error":{"type":"authentication_error","message":"OAuth token has expired."}}
  *   invalid x-api-key
+ *   OAuth access token has been revoked          (bare, as a run reported it; TASK-1235)
  *
  * A 401 is NOT a limit: the account is not coming back by itself at a reset,
  * it needs the owner (or a renewal). So it is its own answer, and the caller
@@ -115,21 +116,44 @@ export function detectAnthropicLimit(text: string | null | undefined, now: numbe
  */
 // Anthropic's and the CLI's OWN words only — never a bare "401 Unauthorized",
 // which is also what a package registry says to a run that is publishing.
-const AUTH_RE = /(?:\bauthentication_error\b|invalid (?:x-api-key|api key|bearer token)|oauth token (?:has )?(?:expired|been revoked|revoked)|please run \/login|failed to authenticate)/i;
+const AUTH_RE = /(?:\bauthentication_error\b|invalid (?:x-api-key|api key|bearer token)|oauth (?:access )?token (?:has )?(?:expired|been revoked|revoked)|please run \/login|failed to authenticate)/i;
+
+/**
+ * Anthropic refusing the ACCOUNT rather than its token: the organisation a
+ * subscription belongs to has switched Claude Code off for it. Seen in the
+ * field (TASK-1271) as "Your organization has disabled Claude subscription
+ * access for Claude Code", two seconds into a run. Not a limit — nothing lifts
+ * it at a reset — and not a stale token either: the grant renews perfectly
+ * well, so confirming it the way a 401 is confirmed would keep the account in
+ * and put the work straight back on it. Only the owner (or that
+ * organisation's admin) can bring it back.
+ */
+const ACCOUNT_DISABLED_RE = /\borgani[sz]ation has disabled\b[^\n.]{0,40}\bsubscription access\b/i;
 
 /**
  * Is this failure Anthropic refusing the credential itself (a 401, a revoked
- * grant)? Only the head, for the reason `detectAnthropicLimit` gives.
+ * grant) or the account behind it? Only the head, for the reason
+ * `detectAnthropicLimit` gives.
  */
 export function detectAnthropicAuthFailure(text: string | null | undefined): boolean {
   if (typeof text !== "string") return false;
   const head = text.trim().slice(0, HEAD_CHARS);
-  return head !== "" && AUTH_RE.test(head);
+  return head !== "" && (AUTH_RE.test(head) || ACCOUNT_DISABLED_RE.test(head));
+}
+
+/** Is it the account switched off for good (see ACCOUNT_DISABLED_RE)? Only the head. */
+export function detectAnthropicAccountDisabled(text: string | null | undefined): boolean {
+  return typeof text === "string" && ACCOUNT_DISABLED_RE.test(text.trim().slice(0, HEAD_CHARS));
 }
 
 export type AnthropicFailure =
   | { type: "limit"; limit: AnthropicLimit }
-  | { type: "auth" }
+  /**
+   * `permanent`: refused for good (an account its organisation switched off).
+   * There is nothing to confirm — the token would renew — so the caller takes
+   * the account out as it is, instead of asking Anthropic about the credential.
+   */
+  | { type: "auth"; permanent?: true }
   /**
    * A bare rate limit — no usage-limit wording, no reset time — from a caller
    * that did NOT retry it first (`transientRate`). It may be a per-minute
@@ -167,6 +191,7 @@ export function classifyAnthropicFailure(
   const limit = detectAnthropicLimit(text, now, opts.timeZone);
   if (limit && opts.transientRate && limit.kind === "rate" && limit.resetsAt === null) return { type: "throttled" };
   if (limit) return { type: "limit", limit };
+  if (detectAnthropicAccountDisabled(text)) return { type: "auth", permanent: true };
   if (detectAnthropicAuthFailure(text)) return { type: "auth" };
   const reason = typeof opts.reason === "string" ? opts.reason.trim().toLowerCase() : "";
   const words = typeof text === "string" ? text.trim().slice(0, HEAD_CHARS) : "";
@@ -322,9 +347,11 @@ export function limitUntil(limit: AnthropicLimit | null, now: number): number {
  *
  *  - `ok`: can answer.
  *  - `limited`: at a usage cap until `limitedUntil`; back by itself after that.
- *  - `expired`: its credential needs renewing before it can answer (an OAuth
- *    access token this box could not refresh right now, a `claude` sign-in that
- *    is gone). Not a limit, and nothing brings it back but a working credential.
+ *  - `expired`: its credential has run out and the box holds nothing to renew
+ *    it with (an OAuth token past its end with no refresh token, a `claude`
+ *    sign-in that is gone). A renewal that merely could not reach Anthropic
+ *    marks nothing. Not a limit, and nothing brings it back but a working
+ *    credential.
  *  - `revoked`: Anthropic refused the credential outright. The owner has to
  *    re-authenticate.
  */

@@ -1060,6 +1060,48 @@ type RefreshResult =
   | { ok: true; tokens: OAuthTokens }
   | { ok: false; reason: "rejected" | "unreachable" };
 
+/**
+ * What makes a refused renewal Anthropic refusing the GRANT itself: OpenClaw's
+ * own list (`classifyOAuthRefreshFailureReason`, 2026.10.2), which is how its
+ * core decides the same question for the profiles it renews.
+ */
+const GRANT_REFUSED_SIGNALS = [
+  "refresh_token_reused",
+  "refresh_token_expired",
+  "invalid_grant",
+  "token_invalidated",
+  "sign_in_again",
+  "signing in again",
+  "sign in again",
+  "log in again",
+  "invalid_refresh_token",
+  "invalid refresh token",
+  "revoked",
+];
+
+/**
+ * Did Anthropic's OAuth error body say the grant is dead? Read only out of a
+ * JSON body (RFC 6749's `error` / `error_description`, or the API's nested
+ * `error.type` / `error.message`): a status alone is not a verdict, because a
+ * proxy's or a CDN's challenge page answers 403 too.
+ */
+async function grantRefused(res: Response): Promise<boolean> {
+  let body: unknown;
+  try {
+    body = JSON.parse(await res.text());
+  } catch {
+    return false;
+  }
+  if (!body || typeof body !== "object") return false;
+  const b = body as Record<string, unknown>;
+  const nested = b.error && typeof b.error === "object" ? (b.error as Record<string, unknown>) : null;
+  const words = [b.error, b.error_description, nested?.type, nested?.message]
+    .filter((v): v is string => typeof v === "string")
+    .join(" ")
+    .toLowerCase();
+  return GRANT_REFUSED_SIGNALS.some((signal) => words.includes(signal));
+}
+
 /** The same token endpoint and client the box's sign-in uses — nothing parallel. */
 export async function refreshOAuthTokens(refresh: string, now: number = Date.now()): Promise<RefreshResult> {
   const config = OAUTH_PROVIDERS.anthropic;
@@ -1070,8 +1112,7 @@ export async function refreshOAuthTokens(refresh: string, now: number = Date.now
       body: JSON.stringify({ grant_type: "refresh_token", refresh_token: refresh, client_id: config.clientId }),
       signal: AbortSignal.timeout(REFRESH_TIMEOUT_MS),
     });
-    if (res.status === 400 || res.status === 401 || res.status === 403) return { ok: false, reason: "rejected" };
-    if (!res.ok) return { ok: false, reason: "unreachable" };
+    if (!res.ok) return { ok: false, reason: res.status >= 400 && res.status < 500 && await grantRefused(res) ? "rejected" : "unreachable" };
     const body = await res.json() as { access_token?: unknown; refresh_token?: unknown; expires_in?: unknown };
     if (typeof body.access_token !== "string" || !body.access_token) return { ok: false, reason: "unreachable" };
     return {
@@ -1121,7 +1162,8 @@ function credentialLock(id: string): SerialLock {
 
 /**
  * The credential for ONE account, renewed if it is an OAuth token near its end.
- * Null — with the account marked — when it cannot answer.
+ * Null when it cannot answer — with the account marked only when the account
+ * itself is at fault, never for a renewal that could not be made.
  */
 function credentialFor(account: AnthropicAccount, now: number): Promise<AnthropicCredential | null> {
   return credentialLock(account.id)(() => readCredential(account, now));
@@ -1166,7 +1208,12 @@ async function readCredential(account: AnthropicAccount, now: number): Promise<A
   // The token the box already holds is still worth a run when it has life in
   // it — a refresh that failed for want of a network is not the account's fault.
   if (stillGood) return { kind: "oauth", secret: tokens.access };
-  await markCredentialProblem(account.id, refreshed.reason === "rejected" ? "revoked" : "expired").catch(() => {});
+  // Only Anthropic refusing the GRANT takes the account out. A renewal that
+  // could not be made — offline, DNS not up yet after a boot, a timeout, a
+  // challenge page in Anthropic's place — leaves the account as it is: marked
+  // `expired` it was never asked again, and every grant on a box that booted
+  // before its network had to be signed in again by hand.
+  if (refreshed.reason === "rejected") await markCredentialProblem(account.id, "revoked").catch(() => {});
   return null;
 }
 
@@ -1490,7 +1537,9 @@ export async function describePool(): Promise<AnthropicPoolView> {
 export async function poolHasCredential(): Promise<{ any: boolean; hasKey: boolean; hasLogin: boolean; hasOAuth: boolean; first: AnthropicAccountKind | null }> {
   const accounts = await readAccounts();
   const now = Date.now();
-  const live = accounts.filter((a) => a.status !== "revoked" && !(a.kind === "login" && a.status === "expired"));
+  // Neither `expired` nor `revoked` is ever handed to a run (see isUsable):
+  // counted as live, an account that needs the owner read as "connected".
+  const live = accounts.filter((a) => a.status !== "revoked" && a.status !== "expired");
   const usable = pickAccount(accounts, now) ?? live[0] ?? null;
   return {
     any: live.length > 0,

@@ -200,6 +200,52 @@ const SPOKEN_REPLIES_KEPT = 12
 const SPEAK_REPLY_TIMEOUT_MS = 150_000
 /** The longest one spoken reply holds the queue while playing (a capped reply is ~100 s of speech). */
 const PLAYBACK_MAX_MS = 150_000
+/**
+ * The refusals of `tts/speak` that mean "not now" rather than "not this": the
+ * voice did not answer (a hung cloud, a Kokoro past its deadline) or the box
+ * is still busy with earlier replies. The chat says so as "try again".
+ */
+const SPEAK_NO_ANSWER_CODES = new Set(['cloud_no_answer', 'local_timeout', 'busy'])
+
+/** The `code` a refused spoken reply states, when it states one. */
+async function replyRefusalCode(res: Response): Promise<string | null> {
+  try {
+    const code = ((await res.json()) as { code?: unknown } | null)?.code
+    return typeof code === 'string' ? code : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The reply a spoken-reply failure belongs to: its words, and its bubble's
+ * timestamp — or, when that bubble was not painted yet as the failure landed
+ * (`timestamp: null`), `after`, the length the transcript had then. A bubble
+ * not painted yet can only be appended at or past that point, so it is the
+ * FIRST bubble with these words from there on, and any later one is another
+ * reply.
+ */
+export type SpeakFailureBubble = { text: string; timestamp: number | null; after: number }
+
+/**
+ * Whether the line saying a reply could not be spoken still belongs on
+ * screen: the newest bubble that is not one of the chat's own notices is the
+ * very reply it failed for (see SpeakFailureBubble).
+ */
+export function speakFailureIsNewest(
+  messages: readonly { role: string; text: string; timestamp: number }[],
+  failure: SpeakFailureBubble,
+): boolean {
+  const theReply = (m: { role: string; text: string }) => m.role === 'assistant' && m.text === failure.text
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]
+    if (m.role === 'system') continue
+    if (!theReply(m)) return false
+    if (failure.timestamp !== null) return m.timestamp === failure.timestamp
+    return messages.findIndex((candidate, j) => j >= failure.after && theReply(candidate)) === i
+  }
+  return false
+}
 
 /**
  * A turn waiting its go: what to send, and where it came from.
@@ -4644,6 +4690,26 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // the previous one's ended still counts from 0 — what resetting the counter
   // here did.
   const [speakingSince, setSpeakingSince] = useState<number | null>(null)
+  // A reply that was going to be spoken aloud and could not be: the words it
+  // was for, and whether the voice simply did not answer (the cloud hung, the
+  // box's own deadline, the network) rather than refused. Without it the
+  // "Speaking…" line just vanished and the owner, listening, heard nothing
+  // and was told nothing. Shown only while that reply is still the newest in
+  // the conversation (see speakFailureShown), and dropped the moment the next
+  // reply starts speaking.
+  // The bubble is named by its text AND its timestamp — or, when it was not
+  // painted yet as the failure landed, by where the transcript ended then —
+  // so a LATER reply with the same words ("Done." twice) never inherits the
+  // line (see speakFailureIsNewest).
+  const [speakFailure, setSpeakFailure] = useState<(SpeakFailureBubble & { noAnswer: boolean }) | null>(null)
+  // Under the reply it failed for, and only while that reply is the newest
+  // word in the conversation: the owner's next message, another reply, or a
+  // cleared or switched conversation takes the line away without anything
+  // having to remember to. The chat's own notices ('system') do not count.
+  const speakFailureShown = useMemo(
+    () => (speakFailure ? speakFailureIsNewest(messages, speakFailure) : false),
+    [speakFailure, messages],
+  )
   // The two things a player cannot say for itself, by the object URL they
   // belong to: which replies the CLOUD voice spoke (the owner picked the box's
   // own voice and is owed the fact when it could not answer), and which ones
@@ -4806,12 +4872,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       const waiting = messagesRef.current.filter(m => m.role === 'assistant' && m.text === text)
       if (!play && waiting.length > 0 && waiting.every(m => (m.audio?.length ?? 0) > 0)) return
       let res: Response | null = null
+      let blob: Blob | null = null
       // From here until the bytes are in hand the box is working on the sound,
       // and the wait is on screen. Set after the queue has let this reply
       // through, so "Speaking…" never counts the seconds an EARLIER reply was
       // taking; cleared in the same breath as the response, so the line goes
       // the moment the player takes over.
-      if (aloud()) setSpeakingSince(Date.now())
+      if (aloud()) {
+        setSpeakFailure(null)
+        setSpeakingSince(Date.now())
+      }
       try {
         for (let attempt = 0; attempt < 3; attempt++) {
           res = await fetch('/setup-api/tts/speak', {
@@ -4829,17 +4899,49 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           if (res.status !== 429) break
           await new Promise((resolve) => setTimeout(resolve, 3000 * (attempt + 1)))
         }
+        // The bytes too, inside the same wait: a connection that breaks
+        // halfway through the audio is as much "no answer" as one that never
+        // started, and ends in the same line rather than in silence.
+        if (res?.ok) blob = await res.blob()
+      } catch {
+        // The chat's own deadline or the network: no answer at all.
+        res = null
       } finally {
         setSpeakingSince(null)
       }
-      if (!res || !res.ok) return
+      if (!res || !res.ok || !blob) {
+        // SAID, where it used to be swallowed: a reply the owner was waiting
+        // to hear ends in a line under it rather than in silence. Not for a
+        // clip nobody was waiting on, not for one the owner has moved on from
+        // (aloud() reads both), and not once the owner has switched spoken
+        // replies off meanwhile — the box's `switched_off`, or the switch
+        // here turned off while the box was still trying: neither is a
+        // failure worth a word.
+        if (speechGenerationRef.current === generation && voiceAutoReplyRef.current && aloud()) {
+          const code = res ? await replyRefusalCode(res) : null
+          if (code !== 'switched_off' && voiceAutoReplyRef.current) {
+            // The reply's bubble, by its timestamp. One not painted yet as
+            // this lands is named by where the transcript ends now instead:
+            // its bubble is the first with these words from there on, so a
+            // later reply that says the same thing never inherits the line.
+            const transcript = messagesRef.current
+            const bubble = [...transcript].reverse().find(m => m.role === 'assistant' && m.text === text)
+            setSpeakFailure({
+              text,
+              timestamp: bubble?.timestamp ?? null,
+              after: transcript.length,
+              noAnswer: !res || res.status === 429 || SPEAK_NO_ANSWER_CODES.has(code ?? ''),
+            })
+          }
+        }
+        return
+      }
       // WHICH voice spoke. The chain falls through to the cloud whenever the
       // box's own engine cannot answer (no headroom, no engine, a wedged
       // server), and an owner who chose "This box" has no other way to learn
       // that the words went off the box for this reply — the sound is the same
       // either way. Absent on an older server: then nothing is claimed.
       const engine = res.headers.get('X-ClawBox-Voice-Engine')
-      const blob = await res.blob()
       // The transcript this reply belonged to may have gone while the box
       // was speaking: then nothing is created, stored or played.
       if (speechGenerationRef.current !== generation) return
@@ -8103,6 +8205,24 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           >
             <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 15 }}>graphic_eq</span>
             <SpeakingReplyLabel since={speakingSince} t={t} />
+          </div>
+        )}
+
+        {/* The line above, when the voice could not speak the reply after all:
+            it ends in a word rather than in silence. Where the speaking line
+            was, so it reads as that wait's outcome. */}
+        {speakingSince === null && speakFailure && speakFailureShown && (
+          <div
+            data-testid="chat-speak-failed"
+            role="status"
+            style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 2px', fontSize: 12, color: 'rgba(251,146,60,0.9)' }}
+          >
+            <span className="material-symbols-rounded" aria-hidden="true" style={{ fontSize: 15 }}>volume_off</span>
+            <span>
+              {speakFailure.noAnswer
+                ? tr('chat.speakFailed.noAnswer', 'Voice is not answering right now — try again in a moment.')
+                : tr('chat.speakFailed.refused', 'The voice could not speak this reply.')}
+            </span>
           </div>
         )}
 
