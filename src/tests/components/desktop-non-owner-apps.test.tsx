@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import ChromeDesktop from "@/app/page";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { _resetSessionUserForTest } from "@/lib/use-session-user";
@@ -32,6 +32,7 @@ const OWNER = { username: "clawbox", isOwner: true, multiUser: true };
 const ALICE = { username: "alice", isOwner: false, multiUser: true };
 let me: unknown = {};
 let updateLocked = false;
+let signedOut = false;
 
 function answer(body: unknown, headers: Record<string, string> = {}) {
   return {
@@ -46,6 +47,11 @@ function answer(body: unknown, headers: Record<string, string> = {}) {
 function installFetch() {
   vi.stubGlobal("fetch", vi.fn(async (input: unknown) => {
     const url = String(input);
+    // The middleware's answer to a session the box no longer accepts, on every
+    // /setup-api request alike.
+    if (signedOut && url.includes("/setup-api/")) {
+      return { ok: false, status: 401, headers: new Headers(), json: async () => ({ error: "Unauthorized" }), text: async () => "" };
+    }
     if (url.includes("/setup-api/users/me")) return answer(me, updateLocked ? { [UPDATE_LOCK_HEADER]: "1" } : {});
     if (url.includes("/setup-api/setup/status")) return answer({ setup_complete: true });
     if (url.includes("/setup-api/harness/active")) return answer({ active: "openclaw", edition: "openclaw", activeKnown: true });
@@ -93,6 +99,7 @@ beforeEach(() => {
   mounted.mascot = 0;
   mounted.timezone = 0;
   updateLocked = false;
+  signedOut = false;
   installFetch();
   // The launcher asks matchMedia on its focus timer; the setup file's mock
   // loses its implementation to `mockReset` between cases.
@@ -246,6 +253,86 @@ describe("the desktop's requests — only what the signed-in user may ask", () =
       expect(asked("/setup-api/kv")).toBe(false);
     } finally {
       if (saved) Object.defineProperty(window, "location", saved);
+    }
+  });
+});
+
+describe("a desktop whose session is gone", () => {
+  // The poll the desktop makes anyway (the notice ring for the owner,
+  // /users/me for another user) is answered 401 once the session has expired
+  // or been revoked. An open page never navigates, so without this it stayed a
+  // frozen desktop and kept asking every route it polls, refused each time.
+  function stubLocation() {
+    const saved = Object.getOwnPropertyDescriptor(window, "location");
+    const real = window.location;
+    const replace = vi.fn();
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: {
+        href: real.href,
+        origin: real.origin,
+        protocol: real.protocol,
+        host: real.host,
+        hostname: real.hostname,
+        port: real.port,
+        pathname: real.pathname,
+        search: real.search,
+        hash: real.hash,
+        assign: vi.fn(),
+        reload: vi.fn(),
+        replace,
+        toString: () => real.href,
+      },
+    });
+    return { replace, restore: () => { if (saved) Object.defineProperty(window, "location", saved); } };
+  }
+
+  it("the owner's desktop goes to the login page, carrying where it was", async () => {
+    me = OWNER;
+    const { replace, restore } = stubLocation();
+    try {
+      render(<ChromeDesktop />);
+      expect(await screen.findByTestId("shelf-user-badge")).toBeInTheDocument();
+      await waitFor(() => expect(asked("/setup-api/kv")).toBe(true), { timeout: 6_000 });
+      signedOut = true;
+      await waitFor(() => expect(replace).toHaveBeenCalledWith("/login?redirect=%2F"), { timeout: 6_000 });
+    } finally {
+      restore();
+    }
+  });
+
+  it("a second ClawBox user's desktop does too, off its own poll", async () => {
+    me = ALICE;
+    const { replace, restore } = stubLocation();
+    try {
+      render(<ChromeDesktop />);
+      expect(await screen.findByTestId("shelf-user-badge")).toBeInTheDocument();
+      signedOut = true;
+      await waitFor(() => expect(replace).toHaveBeenCalledWith("/login?redirect=%2F"), { timeout: 6_000 });
+    } finally {
+      restore();
+    }
+  });
+
+  it("a second ClawBox user's ordinary desktop is not sent to login", async () => {
+    // Their session is fine; the owner-only routes answer them 403, never
+    // 401, and the desktop must stay where it is (TASK-1256).
+    me = ALICE;
+    const { replace, restore } = stubLocation();
+    try {
+      render(<ChromeDesktop />);
+      expect(await screen.findByTestId("shelf-user-badge")).toBeInTheDocument();
+      // Wait for the desktop's own /users/me poll (the one that would carry a
+      // 401) to be made and answered, rather than for a fixed time.
+      const polls = () => requests().filter((r) => r.url.pathname === "/setup-api/users/me").length;
+      const before = polls();
+      await waitFor(() => expect(polls()).toBeGreaterThan(before), { timeout: 6_000 });
+      const results = vi.mocked(fetch).mock.results;
+      await Promise.all(results.map((r) => r.value));
+      await act(async () => {});
+      expect(replace).not.toHaveBeenCalled();
+    } finally {
+      restore();
     }
   });
 });
