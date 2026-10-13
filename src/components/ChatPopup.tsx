@@ -218,6 +218,26 @@ async function replyRefusalCode(res: Response): Promise<string | null> {
 }
 
 /**
+ * Whether the line saying a reply could not be spoken still belongs on
+ * screen: the newest bubble that is not one of the chat's own notices is the
+ * reply it failed for — the same words, and the same timestamp when the
+ * failure knew it (null: the bubble was not painted yet as it landed).
+ */
+export function speakFailureIsNewest(
+  messages: readonly { role: string; text: string; timestamp: number }[],
+  failure: { text: string; timestamp: number | null },
+): boolean {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]
+    if (m.role === 'system') continue
+    return m.role === 'assistant'
+      && m.text === failure.text
+      && (failure.timestamp === null || m.timestamp === failure.timestamp)
+  }
+  return false
+}
+
+/**
  * A turn waiting its go: what to send, and where it came from.
  *
  * `voice` — the owner SPOKE it, so the reply is spoken back aloud. (A typed
@@ -4667,20 +4687,18 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // and was told nothing. Shown only while that reply is still the newest in
   // the conversation (see speakFailureShown), and dropped the moment the next
   // reply starts speaking.
-  const [speakFailure, setSpeakFailure] = useState<{ text: string; noAnswer: boolean } | null>(null)
+  // The bubble is named by its text AND its timestamp (null when the bubble
+  // was not painted yet as the failure landed), so a LATER reply with the
+  // same words — "Done." twice — does not inherit the line.
+  const [speakFailure, setSpeakFailure] = useState<{ text: string; timestamp: number | null; noAnswer: boolean } | null>(null)
   // Under the reply it failed for, and only while that reply is the newest
   // word in the conversation: the owner's next message, another reply, or a
   // cleared or switched conversation takes the line away without anything
   // having to remember to. The chat's own notices ('system') do not count.
-  const speakFailureShown = useMemo(() => {
-    if (!speakFailure) return false
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const m = messages[i]
-      if (m.role === 'system') continue
-      return m.role === 'assistant' && m.text === speakFailure.text
-    }
-    return false
-  }, [speakFailure, messages])
+  const speakFailureShown = useMemo(
+    () => (speakFailure ? speakFailureIsNewest(messages, speakFailure) : false),
+    [speakFailure, messages],
+  )
   // The two things a player cannot say for itself, by the object URL they
   // belong to: which replies the CLOUD voice spoke (the owner picked the box's
   // own voice and is owed the fact when it could not answer), and which ones
@@ -4884,7 +4902,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         if (speechGenerationRef.current === generation && aloud()) {
           const code = res ? await replyRefusalCode(res) : null
           if (code !== 'switched_off') {
-            setSpeakFailure({ text, noAnswer: !res || res.status === 429 || SPEAK_NO_ANSWER_CODES.has(code ?? '') })
+            const bubble = [...messagesRef.current].reverse().find(m => m.role === 'assistant' && m.text === text)
+            setSpeakFailure({
+              text,
+              timestamp: bubble?.timestamp ?? null,
+              noAnswer: !res || res.status === 429 || SPEAK_NO_ANSWER_CODES.has(code ?? ''),
+            })
           }
         }
         return

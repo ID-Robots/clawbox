@@ -173,7 +173,7 @@ function whenAborted(signal: AbortSignal): Promise<never> {
   return aborted;
 }
 
-type CloudAnswer = { res: Response; audio: Uint8Array };
+type CloudAnswer = { res: Response; audio: Uint8Array<ArrayBuffer> };
 
 /**
  * One request to the cloud's speech route, held to both deadlines: its

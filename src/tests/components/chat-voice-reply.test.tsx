@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
-import ChatPopup from "@/components/ChatPopup";
+import ChatPopup, { speakFailureIsNewest } from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { VOICE_SETTINGS_CHANGED_EVENT } from "@/lib/ui-events";
 import { _resetSpokenReplyPlaybackForTests } from "@/lib/spoken-reply-playback";
@@ -687,6 +687,23 @@ describe("spoken replies in the desktop chat", () => {
       fireEvent.change(textarea, { target: { value: "never mind" } });
       fireEvent.keyDown(textarea, { key: "Enter" });
       await waitFor(() => expect(screen.queryByTestId("chat-speak-failed")).toBeNull());
+    });
+
+    it("keeps the line on the reply it failed for, not on a later one with the same words", () => {
+      const failed = { role: "assistant", text: "Done.", timestamp: 1000 };
+      const asked = { role: "user", text: "and the other one", timestamp: 2000 };
+      const sameWords = { role: "assistant", text: "Done.", timestamp: 3000 };
+      const notice = { role: "system", text: "Stopped.", timestamp: 4000 };
+      const failure = { text: "Done.", timestamp: 1000 };
+      expect(speakFailureIsNewest([failed], failure)).toBe(true);
+      // The chat's own notices do not move it off its reply...
+      expect(speakFailureIsNewest([failed, notice], failure)).toBe(true);
+      // ...the owner's next message does, and a later "Done." does not bring it back.
+      expect(speakFailureIsNewest([failed, asked], failure)).toBe(false);
+      expect(speakFailureIsNewest([failed, asked, sameWords], failure)).toBe(false);
+      // A failure that landed before its bubble was painted matches by the words alone.
+      expect(speakFailureIsNewest([failed], { text: "Done.", timestamp: null })).toBe(true);
+      expect(speakFailureIsNewest([], failure)).toBe(false);
     });
   });
 
