@@ -29,9 +29,19 @@
  * coding-run-unit.ts: a plain child sits in the web server's cgroup and is
  * killed with it at the end of every in-app update), and as a detached child
  * otherwise.
+ *
+ * WHAT IT RUNS WITH. The run's PATH, behind the web server's own node when the
+ * list does not name its folder, then every place node and bun live that the
+ * run's fixed list does not name (`startSearchPath`). The run found
+ * them through its shell's profile — nvm, a tarball node the web server's own
+ * unit puts on its PATH — and `/bin/sh -c` has no profile: with the run's list
+ * alone, `npm start` on such a box exited 127 before anything listened. When a
+ * start does stop, what it printed is in the answer (`startOutputLine`), so
+ * the run's feed says "bun: not found" rather than only an exit code.
  */
 import { spawn, type ChildProcess } from "child_process";
 import fs from "fs";
+import os from "os";
 import path from "@/lib/runtime-path";
 import { listenerOwnedBy, registerServerApp, type RegisterOutcome } from "@/lib/app-proxy";
 import { APP_ID_RE } from "@/lib/code-projects";
@@ -69,6 +79,129 @@ export function buildAppScopeArgv(systemdRunPath: string, id: string, stamp: str
   };
 }
 
+/** Where a JavaScript toolchain may be on this box, beyond the run's own PATH. */
+export interface ToolchainPlaces {
+  /** The user's home: `~/.bun`, `~/.nvm` and `~/.npm-global` are under it. */
+  home: string;
+  /** The runtime the web server itself runs on: a node that is certainly there, with npm beside it. */
+  execPath: string;
+  /** The web server's own PATH. The x64 installer's unit puts its tarball node on it. */
+  envPath: string;
+  /** `$BUN_INSTALL`, when bun was installed somewhere else. */
+  bunInstall?: string | null;
+  /** `$NVM_DIR`, when nvm lives somewhere else. */
+  nvmDir?: string | null;
+}
+
+const VERSION_RE = /^v?(\d+)\.(\d+)\.(\d+)/;
+
+/** Every node nvm installed, newest first: the one a fresh shell most likely has. */
+function nvmNodeBins(nvmDir: string): string[] {
+  const versions = path.join(nvmDir, "versions", "node");
+  let names: string[];
+  try {
+    names = fs.readdirSync(versions);
+  } catch {
+    return [];
+  }
+  return names
+    .map((name) => ({ name, parts: VERSION_RE.exec(name)?.slice(1).map(Number) }))
+    .filter((entry): entry is { name: string; parts: number[] } => Array.isArray(entry.parts))
+    .sort((a, b) => b.parts[0] - a.parts[0] || b.parts[1] - a.parts[1] || b.parts[2] - a.parts[2])
+    .map((entry) => path.join(versions, entry.name, "bin"));
+}
+
+/**
+ * The PATH a start command runs with. Exported for its test.
+ *
+ * The run's PATH keeps its own order, so a command it resolves resolves to
+ * the same binary here — with one exception. The folder of the node the web
+ * server runs on goes IN FRONT when the run's list does not name it: the x64
+ * installer unpacks its own node precisely because the distro's is too old,
+ * and leaves that one in /usr/bin or /usr/local/bin, where the run's list
+ * would find it first (and npm's `#!/usr/bin/env node` with it). On the usual
+ * box that folder is /usr/bin, already on the list, and nothing moves.
+ *
+ * What follows only fills the gaps, in the order a shell would most likely
+ * have found them: bun, nvm, npm's global prefix, the FHS directories, and
+ * the web server's own PATH last. Empty and relative entries are dropped,
+ * because the command runs in the project folder and they would resolve
+ * inside it.
+ */
+export function startSearchPath(searchPath: string, places: ToolchainPlaces): string {
+  const run = searchPath.split(":");
+  const ownNode = path.dirname(places.execPath);
+  const candidates = [
+    ...(run.includes(ownNode) ? [] : [ownNode]),
+    ...run,
+    places.bunInstall ? path.join(places.bunInstall, "bin") : "",
+    path.join(places.home, ".bun", "bin"),
+    ...nvmNodeBins(places.nvmDir || path.join(places.home, ".nvm")),
+    path.join(places.home, ".npm-global", "bin"),
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    ...places.envPath.split(":"),
+  ];
+  const dirs: string[] = [];
+  for (const dir of candidates) {
+    if (dir && path.isAbsolute(dir) && !dirs.includes(dir)) dirs.push(dir);
+  }
+  return dirs.join(":");
+}
+
+/** How much of a failed start's log is read back: its last few screens. */
+const OUTPUT_TAIL_BYTES = 16_384;
+/** How long the line taken from it may be. The feed caps a whole step at 160 characters anyway. */
+const OUTPUT_LINE_MAX = 200;
+const ANSI_RE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
+const CONTROL_RE = /[\u0000-\u001f\u007f]/g;
+/** The shell's own name in front of its complaint: dash's "/bin/sh: 1: ", bash's "bash: line 1: ". */
+const SHELL_SAYS_RE = /^(?:\/(?:usr\/)?bin\/)?(?:sh|dash|bash):(?: line)? \d+: /;
+/** A line that reads like the reason a start stopped. */
+const TROUBLE_RE = /error|not found|cannot|can't|could not|couldn't|failed|denied|no such|missing|EADDRINUSE|EACCES|ENOENT/i;
+
+/**
+ * The one line of a failed start's output that says why. Exported for its test.
+ *
+ * The FIRST line that reads like an error, not the last: node prints its stack
+ * and then its version banner after the error, and npm repeats the exit code
+ * after the shell's "node: not found". An error line that only introduces the
+ * next one ("error when starting preview server:") takes that line with it.
+ * The last line when nothing reads like an error; null when there was no
+ * output at all.
+ */
+export function startOutputLine(output: string): string | null {
+  const lines = output
+    .replace(ANSI_RE, "")
+    .split(/\r?\n|\r/)
+    .map((line) => line.replace(CONTROL_RE, " ").replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  if (lines.length === 0) return null;
+  let at = lines.findIndex((line) => TROUBLE_RE.test(line));
+  if (at < 0) at = lines.length - 1;
+  let said = lines[at].replace(SHELL_SAYS_RE, "");
+  if (said.endsWith(":") && at + 1 < lines.length) said = `${said} ${lines[at + 1]}`;
+  return said.length > OUTPUT_LINE_MAX ? `${said.slice(0, OUTPUT_LINE_MAX - 1)}…` : said;
+}
+
+/** The end of a start's log, or nothing when it cannot be read. */
+async function readOutputTail(file: string): Promise<string> {
+  const handle = await fs.promises.open(file, "r").catch(() => null);
+  if (!handle) return "";
+  try {
+    const { size } = await handle.stat();
+    const length = Math.min(size, OUTPUT_TAIL_BYTES);
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, size - length);
+    return buffer.subarray(0, bytesRead).toString("utf-8");
+  } catch {
+    return "";
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
+
 export type StartOutcome = { ok: true } | { ok: false; detail: string };
 
 export interface StartServerAppInput {
@@ -76,7 +209,7 @@ export interface StartServerAppInput {
   /** The project folder: the working directory, and the folder the listener must run from. */
   directory: string;
   manifest: ClawboxManifest;
-  /** The PATH the command is resolved with — the caller's run PATH, so `bun` and `npm` are found. */
+  /** The run's PATH, which the command is resolved with first (`startSearchPath` adds where node and bun live beyond it). */
   searchPath: string;
   /** For the tests: never ask systemd for a scope. */
   noScope?: boolean;
@@ -117,7 +250,13 @@ async function startOnce(input: StartServerAppInput): Promise<StartOutcome> {
     HOME: home,
     USER: user,
     LOGNAME: user,
-    PATH: searchPath,
+    PATH: startSearchPath(searchPath, {
+      home: os.homedir(),
+      execPath: process.execPath,
+      envPath: process.env.PATH ?? "",
+      bunInstall: process.env.BUN_INSTALL,
+      nvmDir: process.env.NVM_DIR,
+    }),
     LANG: process.env.LANG || "C.UTF-8",
     PORT: String(port),
   });
@@ -164,7 +303,13 @@ async function startOnce(input: StartServerAppInput): Promise<StartOutcome> {
       return { ok: false, detail: `the box started it (${command}) and nothing of the project's answered on port ${port} within ${Math.round(waitMs / 1000)} seconds.` };
     }
   }
-  return { ok: false, detail: `the box started it (${command}) and it stopped${exited === null ? "" : ` with exit code ${exited}`} before anything listened on port ${port}.` };
+  const code = exited === null ? "" : ` with exit code ${exited}`;
+  // What it printed takes the command's place (the owner can read that in
+  // clawbox.json): the feed keeps 160 characters of a step, and a long start
+  // command in front would leave none of them for "bun: not found".
+  const said = startOutputLine(await readOutputTail(logFile));
+  if (said) return { ok: false, detail: `its start command stopped${code} before listening: ${said}` };
+  return { ok: false, detail: `the box started it (${command}) and it stopped${code} before anything listened on port ${port}.` };
 }
 
 /** How long a start that is being ended gets to go quietly before it is killed. */
