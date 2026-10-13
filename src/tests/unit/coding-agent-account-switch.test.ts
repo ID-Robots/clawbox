@@ -392,6 +392,20 @@ describe("an account Anthropic refuses mid-run (TASK-1260)", () => {
     expect(calls()).toHaveLength(1);
   });
 
+  it("still says the credential was refused when the run's own account was refused and nothing else can answer", async () => {
+    installWrapper(["auth", "ok"]);
+    makeProject("site");
+    await pool.addApiKeyAccount({ label: "Only", key: KEY_A });
+    // Anthropic refused the key in the run; the check afterwards only got a 503, so the account stays listed as fine.
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => new Response("{}", { status: 503 })));
+
+    const run = await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner", provider: "anthropic" })).id);
+
+    expect(run.status).toBe("failed");
+    expect(run.error).toMatch(/refused the credential of every account/);
+    expect(run.error).not.toMatch(/offline/);
+  });
+
   it("does not bounce a run for ever on a refusal nobody can pin on the account", async () => {
     installWrapper(["auth", "auth", "auth", "auth", "auth", "ok"]);
     makeProject("site");

@@ -218,7 +218,11 @@ async function syncLocked(accountId: string, opts: { restart: boolean; keeper?: 
     if (result.written === 0) return outcome("failed", "write_failed");
     written = result.written;
   }
-  const record = (pending: boolean) => setGatewayMirror({ accountId, fingerprint, expiresAt: token.expires, at: Date.now(), pending });
+  // When the gateway was put on THIS account — kept across a renewal or a
+  // re-sync of the same account, so a turn that ran on it just before is still
+  // its turn when a failure is attributed (gatewayAccountAt).
+  const movedAt = mirror?.accountId === accountId ? mirror.at : Date.now();
+  const record = (pending: boolean) => setGatewayMirror({ accountId, fingerprint, expiresAt: token.expires, at: movedAt, pending });
   if (!opts.restart) {
     await record(false);
     return outcome("ok", "renewed", written);
@@ -321,6 +325,8 @@ interface CronJobView {
   lastStatus: string | null;
   lastError: string | null;
   lastRunAtMs: number | null;
+  /** The agent the job runs as: core's resolved owner, else the one declared. */
+  agentId: string | null;
 }
 
 /** `cron.list`'s jobs, read defensively: the fields core has used for a job's last run, flat or under `state`. */
@@ -337,11 +343,13 @@ export function parseCronJobs(payload: unknown): CronJobView[] {
     const status = state.lastStatus ?? state.lastRunStatus;
     const error = state.lastError;
     const at = state.lastRunAtMs ?? state.lastRunAt;
+    const agent = typeof job.effectiveAgentId === "string" ? job.effectiveAgentId : job.agentId;
     jobs.push({
       id,
       lastStatus: typeof status === "string" ? status : null,
       lastError: typeof error === "string" && error ? error : null,
       lastRunAtMs: typeof at === "number" && Number.isFinite(at) ? at : null,
+      agentId: typeof agent === "string" && agent ? agent : null,
     });
   }
   return jobs;
@@ -360,28 +368,32 @@ export function mentionsAnthropic(text: string | null | undefined): boolean {
 }
 
 /**
- * How long a `pending` mirror means "the restart onto it is under way": the
- * swap's two restarts, each waited on for SWAP_READY_WAIT_MS, and their
- * read-backs. Past that nothing is in flight any more — the restart failed, or
- * a store the box cannot write disagreed (`write_lost`, which leaves `pending`
- * set for good) — and the token is in the stores the box could write, which
- * core re-reads by itself without a restart.
+ * The pool account a gateway turn of `agentId` that ran at `ranAt` failed on:
+ * where the box put the gateway, for a turn that ran once it was there. One
+ * that ran before the move ran on the account the gateway has just left
+ * (usually the very account whose limit caused the move).
+ *
+ * While the restart onto it is owed (`pending`), the mirror says what the box
+ * WROTE, not what the agent runs on: the turn is blamed on it only when every
+ * store that agent reads holds that token, which core re-reads by itself. Not
+ * when the gateway put its own copy back on the way down, and not for an agent
+ * whose store the box could not write — while the agents whose stores did take
+ * it are still blamed, since `write_lost` leaves `pending` set for good. An
+ * unknown agent is judged on every store.
+ *
+ * Null blames no pool account; the failure still goes through the swap, and a
+ * held retry runs again on the account the gateway is on now.
  */
-const PENDING_SETTLE_MS = 2 * SWAP_READY_WAIT_MS + 60_000;
-
-/**
- * The pool account a gateway turn that ran at `ranAt` failed on: where the box
- * put the gateway — but only for a turn that ran once it was there. One that
- * ran before the move ran on the account the gateway has just left (usually
- * the very account whose limit caused the move), and while the restart onto
- * the new one is under way (`pending`, see PENDING_SETTLE_MS) the gateway may
- * not be on it yet. Null blames no pool account; the failure still goes
- * through the swap, and a held retry runs again on the account the gateway is
- * on now.
- */
-function gatewayAccountAt(mirror: GatewayMirror | null, ranAt: number): string | null {
+function gatewayAccountAt(mirror: GatewayMirror | null, ranAt: number, agentId: string | null, profiles: () => GatewayAnthropicProfile[]): string | null {
   if (!mirror || ranAt < mirror.at) return null;
-  return !mirror.pending || ranAt - mirror.at >= PENDING_SETTLE_MS ? mirror.accountId : null;
+  if (!mirror.pending) return mirror.accountId;
+  const read = agentId === null ? profiles() : profiles().filter((p) => p.agentId === agentId || p.store === "shared");
+  return read.length > 0 && read.every((p) => p.fingerprint === mirror.fingerprint) ? mirror.accountId : null;
+}
+
+/** The agent a chat session belongs to, from its key (`agent:<id>:…`). */
+function agentOfSession(sessionKey: string | null): string | null {
+  return sessionKey ? /^agent:([^:]+):/.exec(sessionKey)?.[1] ?? null : null;
 }
 
 /** One look at the gateway's crons. Answers how many failures it reported. */
@@ -390,7 +402,8 @@ export async function scanGatewayCrons(now: number = Date.now()): Promise<number
   const state = runtime();
   if (d.absent()) return 0;
   const pool = await readPoolState();
-  if (pool.accounts.length === 0 || d.list().length === 0) return 0;
+  const profiles = d.list();
+  if (pool.accounts.length === 0 || profiles.length === 0) return 0;
   let payload: Record<string, unknown>;
   try {
     payload = await d.call("cron.list", { includeDisabled: false });
@@ -406,7 +419,7 @@ export async function scanGatewayCrons(now: number = Date.now()): Promise<number
     if (job.lastStatus !== "error" || !mentionsAnthropic(job.lastError)) continue;
     // Also what keeps the first look after a boot, which reaches back
     // FIRST_LOOK_BACK_MS, from blaming runs older than the move.
-    const accountId = gatewayAccountAt(pool.gateway, job.lastRunAtMs);
+    const accountId = gatewayAccountAt(pool.gateway, job.lastRunAtMs, job.agentId, () => profiles);
     const result = await reportAnthropicFailure({
       text: job.lastError,
       source: "cron",
@@ -457,12 +470,12 @@ export async function reportChatFailure(input: ChatFailure): Promise<FailureOutc
     || (provider === null && mentionsAnthropic(`${detail ?? ""} ${errorMessage ?? ""}`));
   if (!anthropic) return null;
   const pool = await readPoolState();
-  // Reported as the turn fails, and a swap's restart ends every turn in
-  // flight: a report after the move is the new account's — once it is there.
-  const accountId = gatewayAccountAt(pool.gateway, Date.now());
   const sessionKey = text(input.sessionKey, 300);
   const message = text(input.message, 32_000);
   const d = deps();
+  // Reported as the turn fails, and a swap's restart ends every turn in
+  // flight: a report after the move is the new account's — once it is there.
+  const accountId = gatewayAccountAt(pool.gateway, Date.now(), agentOfSession(sessionKey), () => d.list());
   return reportAnthropicFailure({
     // The provider's own words first: the gateway's copy says "rate limit"
     // without the time the account comes back.

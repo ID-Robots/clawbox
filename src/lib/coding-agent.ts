@@ -10496,12 +10496,15 @@ async function continueOnAnotherAccount(
   }
   let prepared: PreparedAccount | null = null;
   let nextResetAt: number | null = recorded?.health.nextResetAt ?? null;
-  let anyAccountOk = false;
+  // Could another account than the one(s) just left behind answer, as far as
+  // the pool knows? Null when the pool could not be read at all.
+  let otherAccountOk: boolean | null = null;
   try {
     const answer = await prepareAccount({ exclude });
     prepared = answer.prepared;
     nextResetAt = answer.health.nextResetAt ?? nextResetAt;
-    anyAccountOk = answer.health.healthy > 0;
+    const now = Date.now();
+    otherAccountOk = (accountsSnapshot() ?? []).some((a) => !exclude.has(a.id) && isUsable(a, now));
   } catch (err) {
     console.error(`[coding-agent] ${run.id}: the Anthropic account pool could not be read:`, err instanceof Error ? err.message : err);
   }
@@ -10514,14 +10517,18 @@ async function continueOnAnotherAccount(
     // no account comes back by itself, fail with the one thing that helps.
     const resetsAt = nextResetAt ?? (why.kind === "limit" ? why.found.until : null);
     if (resetsAt === null) {
-      // An account that can answer is still on the list: its sign-in only
-      // could not be renewed (or read) just now, which marks nothing. "Refused,
-      // sign in again" would be false — and the card shows every account fine.
-      state.forcedAccountFailure = anyAccountOk
-        ? "No Anthropic account could take this run over just now: a sign-in could not be renewed, so the box may be offline."
-          + " No account was refused; resume the run once the box is back online."
-        : "Anthropic refused the credential of every account this run could use."
-          + " Sign one in again in Settings → Providers → Anthropic accounts, then resume the run.";
+      // Another account that can answer is still on the list: its sign-in only
+      // could not be renewed (or read) just now, which marks nothing — so
+      // "refused, sign in again" would be false while the card shows it fine.
+      // A failed run cannot be resumed in place (resumeRun takes a paused or
+      // gave-up one), so the way out is a new start, never "resume".
+      state.forcedAccountFailure = otherAccountOk === null
+        ? "The Anthropic account list could not be read, so the run could not be moved to another account. Start the run again in a moment."
+        : otherAccountOk
+          ? "Another Anthropic account could take this run over, but its sign-in could not be renewed or read just now; the box may be offline."
+            + " Start the run again once the box is back online."
+          : "Anthropic refused the credential of every account this run could use."
+            + " Sign one in again in Settings → Providers → Anthropic accounts, then start the run again.";
       finishRun(run, state, exitCode);
       return;
     }
