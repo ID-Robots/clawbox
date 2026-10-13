@@ -454,6 +454,7 @@ const PROVIDER_PILL_LABEL: Record<string, string> = {
   'OpenAI Codex': 'Codex',
   'Google Gemini': 'Gemini',
   'OpenRouter': 'OpenRouter',
+  'xAI Grok': 'Grok',
   'Ollama Local': 'Ollama',
   'Gemma 4 Local': 'Gemma 4',
 }

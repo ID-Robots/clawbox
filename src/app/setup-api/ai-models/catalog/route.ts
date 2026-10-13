@@ -1610,8 +1610,8 @@ export function refreshInBackground(
  * The ONE entry point for every route that mutates the provider set, so the
  * openclaw-side id mapping and the two "is this a change this route can act
  * on?" tests exist once rather than once per caller. `ocProvider` is the
- * openclaw id (`anthropic`, `openai`, `codex`, `google`, `deepseek`); the
- * catalogue calls ClawBox AI `clawai`.
+ * openclaw id (`anthropic`, `openai`, `codex`, `google`, `xai`, `deepseek`);
+ * the catalogue calls ClawBox AI `clawai`.
  *
  * Two kinds of provider are dropped here rather than at each call site:
  *

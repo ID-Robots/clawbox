@@ -113,6 +113,7 @@ import {
   ANTHROPIC_DEFAULT_MODEL_ID,
   GOOGLE_DEFAULT_MODEL_ID,
   OPENAI_DEFAULT_MODEL_ID,
+  XAI_DEFAULT_MODEL_ID,
   ANTHROPIC_MODELS,
   extractProviderModelId,
   routesSubscriptionNatively,
@@ -120,6 +121,7 @@ import {
 import { DISABLED_PROVIDERS_KEY, normalizeProviderId, parseDisabledProviders } from "@/lib/provider-status";
 import { setProviderEnabled } from "@/lib/provider-enablement";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
+import { readXaiStoredProfiles } from "@/lib/xai-oauth-login";
 import { forgetProviderEnumerations } from "@/lib/provider-runnable";
 import {
   EXPLICIT_MODEL_PICKS_KEY,
@@ -238,6 +240,17 @@ const PROVIDERS: Record<string, ProviderConfig> = {
     // in src/lib/openrouter-models.ts.
     defaultModel: `openrouter/${OPENROUTER_DEFAULT_MODEL_ID}`,
     profileKey: "openrouter:default",
+  },
+  xai: {
+    // No `subscriptionOverride`: both modes live at the SAME profile id and
+    // write the same `xai/<id>` primary. An API key is pasted to `xai:default`
+    // like every other API-key provider; a SuperGrok / X Premium sign-in is
+    // stored there by the plugin's own `models auth login` (see
+    // src/lib/xai-oauth-login.ts) and this route only finishes it. Either way
+    // the turn is routed by the core's bundled `xai` plugin — see the `else`
+    // branch at step 7, which this provider takes on purpose.
+    defaultModel: `xai/${XAI_DEFAULT_MODEL_ID}`,
+    profileKey: "xai:default",
   },
   ollama: {
     defaultModel: "ollama/llama3.2:3b",
@@ -2255,8 +2268,14 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     const isOpenRouter = provider === "openrouter";
     const isGoogle = provider === "google";
     const isAnthropic = provider === "anthropic";
+    // The xAI SIGN-IN carries no credential in the request at all: the core's
+    // xai plugin stored it during `openclaw models auth login`, driven by
+    // `/setup-api/ai-models/xai-login`. This save is the second half — the
+    // primary and everything after the credential write — and it proves the
+    // sign-in is in the store before it writes anything (step 1).
+    const isXaiSignIn = provider === "xai" && authMode === "subscription";
     const isLocalScope = scope === "local";
-    if (!provider || (!normalizedApiKey && !isOllama && !isLlamaCpp && !isClawAI)) {
+    if (!provider || (!normalizedApiKey && !isOllama && !isLlamaCpp && !isClawAI && !isXaiSignIn)) {
       return NextResponse.json(
         { error: "Provider is required; API key required for non-local providers" },
         { status: 400 }
@@ -2383,9 +2402,20 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // openrouter branch below — every save that reaches it is key-based), and
     // the ClawBox AI profile is written by this route alone. It is one CLI cold
     // start, and this is the wizard's critical path.
+    //
+    // xAI is skipped too, and NOT because it has no sign-in: ClawBox offers
+    // one (the panel's Subscription tab, through `/setup-api/ai-models/xai-
+    // login`), and it lives at the same `xai:default` id this paste writes.
+    // Picking the API Key tab and saving IS the owner switching from that
+    // sign-in to a key — the panel says so on that tab when the box is signed
+    // in — so refusing it here would leave the switch with no way to happen
+    // from the UI. The paste replaces the row, exactly as `--force` on the
+    // sign-in replaces a key in the other direction. Anthropic keeps the guard:
+    // there the sign-in and the key are offered side by side and the refusal
+    // is the only thing between a stray paste and a lost subscription.
     if (
       authMode !== "subscription"
-      && !isOllama && !isLlamaCpp && !isClawAI && !isOpenRouter
+      && !isOllama && !isLlamaCpp && !isClawAI && !isOpenRouter && provider !== "xai"
     ) {
       await assertNoSignInAt(config.profileKey);
     }
@@ -2691,6 +2721,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         "anthropic",
         "openai",
         "google",
+        "xai",
       ]);
       if (supportedProviders.has(targetProvider)) {
         if (!isValidModelId(targetProvider, requestedModel)) {
@@ -2947,6 +2978,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     //   * openai (ChatGPT) → `models auth login --provider openai` (the OAuth bundle below is its output)
     //   * google        → --auth-choice gemini-api-key --gemini-api-key
     //   * openrouter    → --auth-choice openrouter-api-key --openrouter-api-key
+    //   * xai           → --auth-choice xai-api-key --xai-api-key
     //   * deepseek      → no canonical onboard equivalent today; we use
     //                     a custom proxy URL + DeepSeek-compatible API
     //                     so direct write is unavoidable until OpenClaw
@@ -2962,7 +2994,28 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // the gateway's auth-profile schema. If
     // OpenClaw bumps the schema and we see profile-rejected errors in
     // production, the migration target is `openclaw onboard`.
-    if (authMode !== "subscription") {
+    if (isXaiSignIn) {
+      // Nothing to write: the plugin already stored the sign-in. What this
+      // save must not do is report success over a login that did not land —
+      // the CLI's exit code is the only evidence the xai-login route has, so
+      // ask the store, the same reader the API-key guard uses. "Looked, and it
+      // is not there" refuses before anything is written; "could not look"
+      // passes, as it does for that guard, because refusing a sign-in nobody
+      // can disprove would lock its owner out.
+      const stored = await readXaiStoredProfiles();
+      if (stored && !stored.some((row) => row.id === config.profileKey && row.type === "oauth")) {
+        return NextResponse.json(
+          {
+            error: "The xAI sign-in did not reach this box's credential store. Sign in again.",
+            code: "xai_sign_in_missing",
+          },
+          { status: 409 },
+        );
+      }
+      if (!stored) {
+        console.warn("[configure] could not read the auth store to confirm the xAI sign-in; saving anyway");
+      }
+    } else if (authMode !== "subscription") {
       // Every API-key credential goes through `models auth paste-api-key`
       // (stdin): on OpenClaw 2 a hand-written auth-profiles.json is a LEGACY
       // store the gateway refuses to hydrate — AuthProfileMigrationRequired
@@ -3948,6 +4001,19 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     } else {
       // Switching away from Ollama/ClawBox AI — reset models.mode so cloud providers
       // auto-detect their model catalog normally.
+      //
+      // xAI lands here ON PURPOSE, beside the OpenAI API key, rather than in an
+      // `applyCloudProviderTransport` branch like google and openrouter. Those
+      // two get an openai-compat override because their native route could not
+      // be made to work (openrouter has no plugin; google's plugin failed auth
+      // at call time). xAI's is a bundled, enabled-by-default plugin that takes
+      // the key from the agent auth store `paste-api-key` just wrote, on its own
+      // `openai-responses` transport — an override here would pin it to
+      // `openai-completions` with the key frozen inline and shadow the plugin's
+      // own catalogue. NOT YET PROVEN ON A DEVICE with a real xAI key; if the
+      // plugin turns out to fail at call time the way google's did, the
+      // override is the fallback, and it would also need `xai` in chat/model's
+      // OPENAI_COMPAT_PROVIDERS.
       try {
         await runCommand(OPENCLAW_BIN, [
           "config", "set", "models.mode", "merge",

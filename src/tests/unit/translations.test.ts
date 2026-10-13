@@ -143,6 +143,8 @@ describe("translations", () => {
         "users",
         // The Screenshot app (TASK-1475).
         "screenshot",
+        // Public app links from a desktop icon's menu (TASK-1478).
+        "publicLink",
       ]);
 
       for (const key of Object.keys(translations.en)) {

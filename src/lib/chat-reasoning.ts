@@ -71,6 +71,11 @@ export const REASONING_BY_PROVIDER: Record<string, ProviderReasoningConfig> = {
   // same default: a fresh ClawBox AI session runs at Medium.
   clawai: { levels: UNIFORM_LEVELS, default: "medium" },
   openrouter: { levels: UNIFORM_LEVELS, default: "medium" },
+  // The bundled plugin's manifest marks every current Grok chat model
+  // `reasoning: true` except the explicit `-non-reasoning` variant; the
+  // gateway's own per-model `thinkingLevels` (chat/model's
+  // readGatewayThinkingLevels) override this ladder wherever it states one.
+  xai: { levels: UNIFORM_LEVELS, default: "medium" },
   // Local Gemma (llama.cpp) exposes no reasoning-effort control — the gateway
   // rejects any thinkingLevel other than `off` ("thinkingLevel … is not
   // supported for llamacpp/gemma… (use off)"). Declaring it off-only hides the

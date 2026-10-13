@@ -26,6 +26,8 @@ export async function repairOpenclawConfig(repairs: {
   ensureMicrosoftTtsExcluded: () => Promise<boolean>
   /** Seeds `tts.auto` for the spoken-replies switch on a box that predates it. */
   ensureVoiceAutoReplyMode?: () => Promise<boolean>
+  /** Points the gateway's browser tool at the box's one browser (src/lib/shared-browser.ts). */
+  ensureSharedBrowserProfile?: () => Promise<boolean>
   restartGateway: (options?: { awaitReady?: boolean }) => Promise<void>
 }): Promise<void> {
   const steps: Array<[label: string, run: () => Promise<boolean>]> = [
@@ -33,6 +35,7 @@ export async function repairOpenclawConfig(repairs: {
     ['exclude Microsoft TTS', repairs.ensureMicrosoftTtsExcluded],
   ]
   if (repairs.ensureVoiceAutoReplyMode) steps.push(['seed the spoken-replies mode', repairs.ensureVoiceAutoReplyMode])
+  if (repairs.ensureSharedBrowserProfile) steps.push(['share the desktop browser with the assistant', repairs.ensureSharedBrowserProfile])
   let changed = false
   for (const [label, run] of steps) {
     try {
@@ -163,6 +166,28 @@ export async function seedProcessTimeZone(deps: {
 }
 
 /**
+ * The one-browser profile migration with this box's readers
+ * (src/lib/shared-browser.ts has the rule; this only hands it the box).
+ */
+function sharedBrowserMigration(set: (key: string, value: unknown) => Promise<void>) {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { agentProfileMigration, PROFILE_MIGRATION_KEY } = require('./lib/shared-browser')
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { desktopBrowserVersion, releaseBrowserProfile } = require('./lib/shared-browser-runtime')
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { readDesktopBrowserConfig } = require('./lib/desktop-browser-config')
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { OPENCLAW_HOME } = require('./lib/openclaw-config')
+  return agentProfileMigration({
+    readDesktop: () => readDesktopBrowserConfig(),
+    openclawHome: OPENCLAW_HOME,
+    releaseProfile: releaseBrowserProfile,
+    desktopBrowserVersion,
+    record: (value: unknown) => set(PROFILE_MIGRATION_KEY, value),
+  })
+}
+
+/**
  * Next.js calls this once per server start, in both runtimes. Everything
  * below is Node-only and loaded through `require()` so the Edge bundle never
  * sees it; each hook fails on its own and none of them may stop the boot.
@@ -220,7 +245,34 @@ export async function register() {
   // One-time repairs of openclaw.json, in sequence — see repairOpenclawConfig
   // for why they must not run together. Never awaited: boot goes on. Never
   // rejects: every step inside catches for itself.
-  const configRepaired = repairOpenclawConfig({ ensureLocalAiProxyUrls, ensureMicrosoftTtsExcluded, ensureVoiceAutoReplyMode, restartGateway })
+  //
+  // The browser repair, the profile migration and the keeper further down are
+  // for the DEVICE's own account only, like the git identity above: under
+  // `bun run dev` on a developer's machine they would rewrite that person's
+  // gateway config, copy their browser profile and close a headless browser
+  // of theirs that happened to sit on the port.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const onDeviceAccount = process.env.HOME === require('./lib/coding-git-factory-identity').CLAWBOX_ACCOUNT_HOME
+  let ensureSharedBrowserProfile: (() => Promise<boolean>) | undefined
+  if (onDeviceAccount) {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const shared = require('./lib/shared-browser')
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { readConfig, writeConfig, openclawIsAbsent } = require('./lib/openclaw-config')
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { readDesktopBrowserConfig } = require('./lib/desktop-browser-config')
+      ensureSharedBrowserProfile = () => shared.ensureSharedBrowserProfile({
+        readConfig,
+        writeConfig,
+        readDesktop: () => readDesktopBrowserConfig(),
+        gatewayAbsent: openclawIsAbsent,
+      })
+    } catch (err) {
+      console.error('[instrumentation] Could not load the shared-browser repair:', err instanceof Error ? err.message : err)
+    }
+  }
+  const configRepaired = repairOpenclawConfig({ ensureLocalAiProxyUrls, ensureMicrosoftTtsExcluded, ensureVoiceAutoReplyMode, ensureSharedBrowserProfile, restartGateway })
   try {
     // An update that rebooted the box still has its second half to run. Ask
     // here, so it starts whether or not anyone opens the Update page — see
@@ -313,12 +365,31 @@ export async function register() {
         // Before any webapp is served: the record it writes is what lets the
         // webapps route put the legacy-storage layer in front of an old app.
         legacyWebappStorageMigration({ migrate: () => migrateLegacyWebappStorage() }),
+        // One browser profile for the owner and the assistant. BEFORE the
+        // keeper below starts the browser: which profile survives depends on
+        // whether the desktop one exists yet, and starting the browser is
+        // what creates it.
+        ...(onDeviceAccount ? [sharedBrowserMigration(set)] : []),
       ],
       { get, set },
     )
     if (ran.length > 0) console.log(`[instrumentation] Ran ${ran.length} one-shot migration(s): ${ran.join(', ')}`)
   } catch (err) {
     console.error('[instrumentation] Could not run the one-shot migrations:', err instanceof Error ? err.message : err)
+  }
+  if (onDeviceAccount) {
+    try {
+      // The box's one browser, kept up: the gateway attaches to it and never
+      // starts one, so a reboot or a closed window ends here. After the
+      // migration above, which decides the profile it starts on.
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { startSharedBrowserKeeper } = require('./lib/shared-browser')
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { sharedBrowserKeeperDeps } = require('./lib/shared-browser-runtime')
+      startSharedBrowserKeeper(sharedBrowserKeeperDeps())
+    } catch (err) {
+      console.error('[instrumentation] Could not start the shared-browser keeper:', err instanceof Error ? err.message : err)
+    }
   }
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports

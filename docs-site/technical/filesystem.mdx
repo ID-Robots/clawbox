@@ -23,7 +23,7 @@ Rows marked **OpenClaw/dual** or **Hermes/dual** exist only on those editions. C
 | `…/clawbox/.next/` | Production build output (`BUILD_ID` = fingerprint of the running build) |
 | `~/.openclaw/` — **OpenClaw/dual** | **OpenClaw state**: `openclaw.json` (gateway config), `agents/` (per-agent credentials — exact paths in the table below), `credentials/` (Telegram pairing approvals), `workspace/` (agent working dir), `npm/` (plugins) |
 | `~/.hermes/` — **Hermes/dual** | **Hermes state** — the Hermes equivalent of `~/.openclaw`, and the densest secret store on the box: `config.yaml` (0600 — billing token, dashboard session signing secret, scrypt password hash, `mcp_servers.clawbox`), `config.yaml.bak-*`, `.env` (provider keys), `auth.json` (OAuth tokens), `memories/`, `sessions/`, `skills/`, `pairing/`, `cron/`, `logs/`, `state.db`, `hermes-agent/` — the agent checkout + Python venv — and `bin/tirith`, the upstream pre-exec shell scanner the agent downloads on first use |
-| `~/.local/bin/hermes` — **Hermes/dual** | 4-line shim that execs `~/.hermes/hermes-agent/venv/bin/python` |
+| `~/.local/bin/hermes` — **Hermes/dual** | Small shim into the agent's launcher under `~/.hermes/hermes-agent`; its Python environment lives under `~/.hermes/installs/` and its interpreter under `~/.hermes/tools/`, both kept by factory reset |
 | `/etc/clawbox/edition.env` | Root-owned edition lock (`openclaw` \| `hermes` \| `dual`) — the authority for the SKU; survives updates **and** factory reset |
 | `~/.codex/auth.json` | Codex CLI auth (kept in sync with the agent copies) |
 | `~/.clawkeep/` | ClawKeep backup state: portal `token`, `config.toml`, `state.json`, encryption `passphrase`, `schedule.json` |
@@ -61,7 +61,8 @@ Rows marked **OpenClaw/dual** or **Hermes/dual** exist only on those editions. C
 | `~/.clawkeep` (backup pairing) | ✅ kept | ❌ wiped |
 | `~/.codex` (Codex CLI auth and state) | ✅ kept | ❌ wiped |
 | `~/.local/share/codex` (the Codex CLI binary itself) | ✅ kept, replaced when the pinned version moves | ✅ kept (a 117 MB download the box cannot make in AP mode) |
-| `~/Documents`, `~/Downloads`, `~/Desktop` | ✅ kept | ❌ contents wiped, directories kept |
+| `~/Documents`, `~/Downloads`, `~/Desktop`, `~/Projects` (the coding agent's work folder), `~/Music`, `~/Pictures`, `~/Videos`, `~/Public`, `~/Templates` | ✅ kept | ❌ contents wiped, directories kept |
+| Loose files directly in the home folder (`~/notes.txt`, …) | ✅ kept | ❌ wiped, except `.bashrc`, `.profile`, `.bash_logout`, `.xsessionrc` and `.sudo_as_admin_successful`; folders and symlinks in the home folder are not touched by this step |
 | User crontab | ✅ kept | ❌ cleared |
 | Portal device identity (`data/cloudflared/device-id`) | ✅ kept | ⚠️ the file is deleted, but the id is re-derived identically from `/etc/machine-id` — the box reappears in the portal as the same device |
 | Ollama models | ✅ kept | ❌ deleted |
@@ -102,9 +103,44 @@ rather than editing it under them.
 
 ## The desktop browser
 
-The Browser app's **Open Browser** starts Chromium on the virtual desktop with its own profile
-(`~/.config/clawbox-browser`) and DevTools port `18800`. If you already use a signed-in browser of
-your own on the remote desktop, point the app at it instead in `~/.cache/clawbox/browser.env`:
+A ClawBox has **one browser**. The Chromium you see on the remote desktop and the browser your
+assistant drives are the same process, on the same profile (`~/.config/clawbox-browser`) and the same
+DevTools port (`18800`), started by `clawbox-browser.service`:
+
+- A site you sign in to on the remote desktop is a site the assistant can use, and you can watch what
+  it does there. It keeps your theme, bookmarks and extensions, because it is your browser.
+- The assistant opens **tabs of its own** and closes only those. It does not navigate or close the tab
+  you are using.
+- The browser is kept running. It comes back after a reboot, and within about twenty seconds if you
+  close its window. **Open Browser** brings the window forward; the Browser app has no Close for it.
+  Close the tabs you no longer need instead.
+
+**Updating from a version with two browsers.** Earlier versions gave the assistant a hidden browser
+with a profile of its own under `~/.openclaw/browser/`. On the first start after the update, once:
+
+| On the box | What happens |
+|---|---|
+| Only the desktop profile exists | Nothing changes for you. |
+| Only the assistant's profile exists (you never opened the Browser app) | It is **copied** to `~/.config/clawbox-browser` and becomes the one profile, sign-ins included. |
+| Both exist | Your desktop profile is used as it is. The assistant's profile is **left on disk, untouched**, and no longer used. Sites that only the assistant was signed in to need one sign-in in the shared browser. **Settings → Browser** shows where the old profile is. |
+
+Two Chromium profiles cannot be merged safely, which is why the third case asks for a sign-in instead
+of guessing. The assistant's old profile is never deleted by the update. It is also not copied when it
+was written by a newer Chromium than the desktop one.
+
+**A separate assistant browser (escape hatch).** To give the assistant a hidden browser of its own
+again, with its own sign-ins, add this line to `~/.cache/clawbox/browser.env` and restart the box:
+
+```bash
+CLAWBOX_BROWSER_AGENT_ISOLATED=1
+```
+
+The desktop browser is then opened and closed by hand from the Browser app, as before, and the
+assistant's old profile under `~/.openclaw/browser/` is used again. Remove the line to go back to one
+browser.
+
+**A browser of your own.** If you already use a signed-in browser of your own on the remote desktop,
+make *that* the one browser in the same file:
 
 ```bash
 CLAWBOX_BROWSER_PROFILE_DIR=~/.config/my-browser-profile   # its --user-data-dir
@@ -117,7 +153,7 @@ environment variable of the same name — for example in the checkout's `.env` �
 A value that is not usable (a relative path, a path with spaces, a port below 1024) is ignored with a
 warning in the log, and the default is used.
 
-With a browser of your own configured:
+With a browser of your own configured, the assistant attaches to it on that port, and:
 
 - If it is already running on that profile and port, **Open Browser** brings it forward (or opens your
   start page as a tab) and the app shows it as running.

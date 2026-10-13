@@ -20,7 +20,7 @@
 import fs from "fs/promises";
 import path from "@/lib/runtime-path";
 import { get as configGet, set as configSet } from "@/lib/config-store";
-import { CDP_PORT_KEY, EXECUTABLE_KEY, PROFILE_DIR_KEY, browserEnvFile } from "@/lib/desktop-browser-config";
+import { AGENT_ISOLATED_KEY, CDP_PORT_KEY, EXECUTABLE_KEY, PROFILE_DIR_KEY, browserEnvFile } from "@/lib/desktop-browser-config";
 
 export const BROWSER_SETUP_CONFIG_KEY = "browser_setup_complete";
 export const BROWSER_AUTO_OPEN_CONFIG_KEY = "browser_auto_open";
@@ -122,6 +122,8 @@ const HEADER_LINES = [
   `#   ${PROFILE_DIR_KEY}=~/.config/my-browser-profile`,
   `#   ${CDP_PORT_KEY}=9222`,
   `#   ${EXECUTABLE_KEY}=/opt/google/chrome/chrome`,
+  "# This browser is shared with the assistant. For a separate, hidden assistant browser:",
+  `#   ${AGENT_ISOLATED_KEY}=1`,
 ];
 const HEADER_SET = new Set(HEADER_LINES);
 

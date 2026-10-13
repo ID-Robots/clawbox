@@ -128,7 +128,8 @@ fi
 ENV_PROFILE_DIR="$(trim "${CLAWBOX_BROWSER_PROFILE_DIR:-}")"
 ENV_CDP_PORT="$(trim "${CLAWBOX_BROWSER_CDP_PORT:-}")"
 ENV_EXECUTABLE="$(trim "${CLAWBOX_BROWSER_EXECUTABLE:-}")"
-unset CLAWBOX_BROWSER_PROFILE_DIR CLAWBOX_BROWSER_CDP_PORT CLAWBOX_BROWSER_EXECUTABLE
+ENV_AGENT_ISOLATED="$(trim "${CLAWBOX_BROWSER_AGENT_ISOLATED:-}")"
+unset CLAWBOX_BROWSER_PROFILE_DIR CLAWBOX_BROWSER_CDP_PORT CLAWBOX_BROWSER_EXECUTABLE CLAWBOX_BROWSER_AGENT_ISOLATED
 
 if [ -f "$BROWSER_STATE_FILE" ]; then
   # shellcheck disable=SC1090
@@ -140,6 +141,7 @@ START_URL="${CLAWBOX_BROWSER_START_URL:-$DEFAULT_START_URL}"
 [ -n "$ENV_PROFILE_DIR" ] && CLAWBOX_BROWSER_PROFILE_DIR="$ENV_PROFILE_DIR"
 [ -n "$ENV_CDP_PORT" ] && CLAWBOX_BROWSER_CDP_PORT="$ENV_CDP_PORT"
 [ -n "$ENV_EXECUTABLE" ] && CLAWBOX_BROWSER_EXECUTABLE="$ENV_EXECUTABLE"
+[ -n "$ENV_AGENT_ISOLATED" ] && CLAWBOX_BROWSER_AGENT_ISOLATED="$ENV_AGENT_ISOLATED"
 
 # A value that is set but unusable is a warning and the default, never a guess
 # — the web server applies the same rule, so both always name the same profile
@@ -169,8 +171,20 @@ if [[ -n "${CLAWBOX_BROWSER_EXECUTABLE:-}" && ! "$CLAWBOX_BROWSER_EXECUTABLE" =~
   fi
 fi
 
+# The escape hatch from "one browser per box" (src/lib/shared-browser.ts):
+# 1 gives the assistant a hidden browser of its own again. Anything but a
+# plain yes or no is a warning and the default, which is sharing this one.
+AGENT_ISOLATED=0
+if [[ -n "${CLAWBOX_BROWSER_AGENT_ISOLATED:-}" && ! "$CLAWBOX_BROWSER_AGENT_ISOLATED" =~ ^[[:space:]]*$ ]]; then
+  case "$(trim "$CLAWBOX_BROWSER_AGENT_ISOLATED" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on) AGENT_ISOLATED=1 ;;
+    0|false|no|off) AGENT_ISOLATED=0 ;;
+    *) echo "CLAWBOX_BROWSER_AGENT_ISOLATED must be 1 or 0; sharing the desktop browser with the assistant" >&2 ;;
+  esac
+fi
+
 if [ "${1:-}" = "--print-config" ]; then
-  printf 'PROFILE=%s\nCDP_PORT=%s\nEXECUTABLE=%s\n' "$PROFILE" "$CDP_PORT" "$CONFIGURED_EXECUTABLE"
+  printf 'PROFILE=%s\nCDP_PORT=%s\nEXECUTABLE=%s\nAGENT_ISOLATED=%s\n' "$PROFILE" "$CDP_PORT" "$CONFIGURED_EXECUTABLE" "$AGENT_ISOLATED"
   exit 0
 fi
 

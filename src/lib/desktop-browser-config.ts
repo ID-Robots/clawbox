@@ -11,7 +11,7 @@
  * Browser" started a second, empty, signed-out window beside it, and the app
  * said "Not running" while the owner's browser was open.
  *
- * Where it lives: three keys in the launch env file the start page already
+ * Where it lives: three keys (and the AGENT_ISOLATED_KEY switch below) in the launch env file the start page already
  * goes through (written by browser-setup.ts, sourced by the launch script),
  * each overridable from the environment — the web server's unit and the
  * browser's unit both load the checkout's `.env`, so a line there reaches both:
@@ -37,6 +37,14 @@ export type EnvLike = Record<string, string | undefined>;
 export const PROFILE_DIR_KEY = "CLAWBOX_BROWSER_PROFILE_DIR";
 export const CDP_PORT_KEY = "CLAWBOX_BROWSER_CDP_PORT";
 export const EXECUTABLE_KEY = "CLAWBOX_BROWSER_EXECUTABLE";
+/**
+ * The escape hatch from "one browser per box". Absent — the default, on every
+ * box — the browser on the remote desktop IS the assistant's browser: one
+ * process, one profile, one CDP endpoint (src/lib/shared-browser.ts). Set to
+ * `1`, the assistant goes back to a hidden browser of its own with its own
+ * sign-ins, and the desktop browser is again opened and closed by hand.
+ */
+export const AGENT_ISOLATED_KEY = "CLAWBOX_BROWSER_AGENT_ISOLATED";
 /** Points the launch env file somewhere else — the suite points it at nowhere. */
 export const ENV_FILE_OVERRIDE_KEY = "CLAWBOX_BROWSER_ENV_FILE";
 
@@ -69,6 +77,12 @@ export interface DesktopBrowserConfig {
    * kill it, and nothing may touch its lock files, unless ClawBox started it.
    */
   ownProfile: boolean;
+  /**
+   * The owner asked for the assistant to keep a separate, hidden browser
+   * (AGENT_ISOLATED_KEY). False on every box that did not ask: the desktop
+   * browser is shared with the assistant and kept running.
+   */
+  agentIsolated: boolean;
   /** Why a configured value was set aside for its default; empty when none was. */
   warnings: string[];
 }
@@ -138,6 +152,14 @@ export function normalizeExecutable(raw: string, home = BROWSER_HOME): string | 
   return expanded;
 }
 
+/** `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`, any case; null for anything else. */
+export function parseSwitch(raw: string): boolean | null {
+  const value = raw.trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(value)) return true;
+  if (["0", "false", "no", "off"].includes(value)) return false;
+  return null;
+}
+
 /**
  * The configuration from the file's values and the environment.
  *
@@ -183,7 +205,15 @@ export function resolveDesktopBrowserConfig(
     if (!executable) warnings.push(`${EXECUTABLE_KEY} must be an absolute path; finding Chromium automatically`);
   }
 
-  return { profileDir, cdpPort, executable, ownProfile: profileDir === fallbackProfile, warnings };
+  let agentIsolated = false;
+  const rawIsolated = pick(AGENT_ISOLATED_KEY);
+  if (rawIsolated !== null) {
+    const flag = parseSwitch(rawIsolated);
+    if (flag === null) warnings.push(`${AGENT_ISOLATED_KEY} must be 1 or 0; sharing the desktop browser with the assistant`);
+    else agentIsolated = flag;
+  }
+
+  return { profileDir, cdpPort, executable, ownProfile: profileDir === fallbackProfile, agentIsolated, warnings };
 }
 
 /**
