@@ -3,7 +3,8 @@ export const dynamic = "force-dynamic";
 import { NextResponse } from "next/server";
 import { get, setMany } from "@/lib/config-store";
 import { stopLocalAiProvider } from "@/lib/local-ai-runtime";
-import { readConfig as readOpenClawConfig, inferConfiguredLocalModel, restartGateway, runOpenclawConfigSet, openclawIsAbsent } from "@/lib/openclaw-config";
+import { readConfig as readOpenClawConfig, inferConfiguredLocalModel, runOpenclawConfigSet, openclawIsAbsent } from "@/lib/openclaw-config";
+import { readGatewayConfigBaseline, restartGatewayAnsweringEarly, settleConfigWrite } from "@/lib/gateway-hot-apply";
 import { getActiveHarness } from "@/lib/harness";
 import { HermesLocalRemovalError, removeLocalAiFromHermes } from "@/lib/hermes-local-ai";
 
@@ -68,12 +69,14 @@ export async function POST(request: Request) {
     // over a write that succeeded. It also resolves the binary per call, so a
     // web server that started mid-reinstall does not freeze a stale path.
     let warning: string | null = null;
-    // Set below, answered after the restart: the branch also fires on a
-    // licensed `dual` box running Hermes, where OpenClaw exists and its gateway
-    // does too — so returning from inside it would drop the fallback warning
-    // and skip the restart that makes the clear above take effect.
+    // Set below, answered after the gateway has the clear: the branch also
+    // fires on a licensed `dual` box running Hermes, where OpenClaw exists and
+    // its gateway does too — so returning from inside it would drop the
+    // fallback warning and skip making the clear above take effect.
     let hermesUnregisterFailed = false;
-    if (!openclawIsAbsent()) {
+    const openclawPresent = !openclawIsAbsent();
+    const gatewayBaseline = openclawPresent ? await readGatewayConfigBaseline() : null;
+    if (openclawPresent) {
       const cleared = await runOpenclawConfigSet(
         ["agents.defaults.model.fallbacks", JSON.stringify([]), "--json"],
         { cwd: CLAWBOX_HOME_DIR, env: { ...process.env, HOME: CLAWBOX_HOME_DIR } },
@@ -106,8 +109,8 @@ export async function POST(request: Request) {
       //
       // The failure is ANSWERED rather than logged. On this SKU the unregister
       // is the only step that reaches the customer: the OpenClaw clear above is
-      // skipped (no binary) and the restart below returns immediately (no
-      // gateway unit), so a swallowed failure left `providers.clawlocal` in
+      // skipped (no binary) and there is no OpenClaw gateway to apply
+      // anything to, so a swallowed failure left `providers.clawlocal` in
       // config.yaml and the route still said `{success:true}` — Settings showed
       // Local AI off while Hermes' own pickers went on offering the stopped
       // model, and the owner learned otherwise from a chat turn. The steps that
@@ -129,10 +132,26 @@ export async function POST(request: Request) {
       }
     }
 
-    // No readiness wait: this answer is discarded, and the route answers
-    // `{success:true}` for the config change either way — so the poll would only
-    // add up to the whole budget to an owner's "Turn off Local AI" click.
-    await restartGateway({ awaitReady: false }).catch(() => {});
+    // The clear is `agents.defaults.model.fallbacks`, which the gateway
+    // hot-applies: this used to restart clawbox-gateway on every "Turn off Local
+    // AI" click to make it take effect (TASK-1535). The restart stays only as
+    // the fallback for a gateway that could not confirm the change, answered
+    // early and never awaited for readiness — the route answers `{success:true}`
+    // for the config change either way. Nothing to do on the Hermes-only
+    // edition, which has no OpenClaw gateway.
+    if (openclawPresent) {
+      const settlement = await settleConfigWrite({
+        before: config,
+        after: await readOpenClawConfig(),
+        baseline: gatewayBaseline,
+        label: "local-ai",
+      });
+      if (settlement === "restart-required") {
+        await restartGatewayAnsweringEarly().catch((err) => {
+          console.error("[local-ai] Gateway restart after turning Local AI off failed:", err);
+        });
+      }
+    }
 
     if (hermesUnregisterFailed) {
       // The panel paints `error` red on a non-2xx and never looks at `warning`

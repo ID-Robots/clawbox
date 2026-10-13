@@ -97,6 +97,10 @@ const { parseFullyQualifiedModelImpl, LLAMACPP_PROXY_BASE_URL } = vi.hoisted(() 
   LLAMACPP_PROXY_BASE_URL: "http://127.0.0.1/setup-api/local-ai/llamacpp/v1",
 }));
 
+// The gateway applies a save live unless a test says otherwise (TASK-1535):
+// classification real, gateway I/O mocked — see the helper.
+vi.mock("@/lib/gateway-hot-apply", async (importOriginal) =>
+  (await import("@/tests/helpers/gateway-hot-apply")).gatewayHotApplyMock(importOriginal));
 vi.mock("@/lib/openclaw-config", () => ({
   // A REAL class, not `vi.fn()` and not an omitted export: the configure route
   // narrows on `instanceof GatewayNotReadyError` to tell "the gateway has not
@@ -283,13 +287,17 @@ describe("POST /setup-api/ai-models/configure — ClawBox AI vision model", () =
     return res;
   }
 
-  it("runs on a configured box, so the restart waits for the gateway", async () => {
-    // The branch this file's cases actually describe, said out loud. It used
-    // to be chosen by a filesystem miss (no config.json under the test root →
-    // `setupComplete: false` → the first-run wizard's `awaitReady: false`),
-    // which is the opposite of what a Settings-side vision case exercises.
-    await connectClawai();
-    expect(restartGateway).toHaveBeenCalledWith({ awaitReady: true });
+  it("restarts only for the provider plugin it installed, and answers before the gateway is back", async () => {
+    // The branch this file's cases actually describe, said out loud. The vision
+    // writes are `agents.defaults.*` / `models.*`, which the gateway hot-applies
+    // (TASK-1535); what still restarts it here is the box this suite models,
+    // which has no ClawBox AI provider plugin on disk until this save installs
+    // it. The restart is answered early: never a wait for the port.
+    const { awaitGatewayHotApply } = await import("@/lib/gateway-hot-apply");
+    const res = await connectClawai();
+    expect((await res.json()).gatewayRestarting).toBe(true);
+    expect(awaitGatewayHotApply).not.toHaveBeenCalled();
+    expect(restartGateway).toHaveBeenCalledWith({ awaitReady: false });
   });
 
   it("registers a vision entry that advertises image input", async () => {

@@ -19,6 +19,7 @@ import {
   writeLlamaCppPid,
 } from "@/lib/llamacpp-server";
 import { startRootStep } from "@/lib/root-step-runner";
+import { waitForGatewayBack } from "@/lib/gateway-hot-apply";
 import { rootStepJournalArgs, rootStepUnit } from "@/lib/root-step-journal";
 
 const MODEL_ID_RE = /^[a-zA-Z0-9._:-]+$/;
@@ -213,10 +214,21 @@ function startLlamaCpp(spec: ReturnType<typeof getLlamaCppLaunchSpec>, alias: st
   );
 }
 
+// How long the stream follows a gateway restart the configure route answered
+// before it was over. A restart is stop + pre-start + core start-up, 50-60 s on
+// a board; three times that before the stream stops waiting and calls the
+// install done anyway (the gateway comes back on its own — it is not a failure).
+const GATEWAY_BACK_WAIT_MS = 180_000;
+const GATEWAY_BACK_HEARTBEAT_MS = 10_000;
+// Keeps "applying configuration" in it, so the overlay holds the step it is on
+// (`getLlamaCppOverlayProgress`) and shows the rest as detail.
+const GATEWAY_RESTARTING_STATUS = `Applying configuration${INSTALL_STATUS_SEPARATOR}the assistant is restarting to load it...`;
+
 async function configureLlamaCpp(
   alias: string,
   scope: ConfigureScope,
   activate: boolean,
+  onStatus: (status: string) => void,
 ): Promise<{ ok: boolean; error?: string }> {
   const req = new Request("http://localhost/setup-api/ai-models/configure", {
     method: "POST",
@@ -233,6 +245,31 @@ async function configureLlamaCpp(
   const body = await res.json().catch(() => ({}));
   if (!res.ok || !body?.success) {
     return { ok: false, error: body?.error || "Failed to configure llama.cpp" };
+  }
+  // The configure route applies a llama.cpp save without restarting the
+  // gateway; when it did have to restart, it answered before the gateway was
+  // back (TASK-1535). This stream is already open and painting progress, so it
+  // follows the restart itself: "configured" should mean the assistant can use
+  // the model, and a heartbeat line keeps the step visibly alive meanwhile.
+  if (body?.gatewayRestarting === true) {
+    // From a timer, so a stream the reader has already closed must not throw
+    // out of it: an exception there is an uncaught one for the whole server.
+    const say = () => {
+      try {
+        onStatus(GATEWAY_RESTARTING_STATUS);
+      } catch {
+        /* the page went away; the wait below still bounds this */
+      }
+    };
+    say();
+    const heartbeat = setInterval(say, GATEWAY_BACK_HEARTBEAT_MS);
+    try {
+      if (!(await waitForGatewayBack(GATEWAY_BACK_WAIT_MS))) {
+        console.warn("[llamacpp/install] the gateway was not back from its restart in time; it finishes on its own");
+      }
+    } finally {
+      clearInterval(heartbeat);
+    }
   }
   return { ok: true };
 }
@@ -278,7 +315,7 @@ export async function POST(request: Request) {
         // runtime that was answering the whole time.
         if (existingModels.length > 0) {
           emit(controller, { status: "llama.cpp is already running. Applying configuration..." });
-          const configured = await configureLlamaCpp(alias, scope, activate);
+          const configured = await configureLlamaCpp(alias, scope, activate, (status) => emit(controller, { status }));
           if (!configured.ok) {
             emit(controller, { error: configured.error });
             controller.close();
@@ -358,7 +395,7 @@ export async function POST(request: Request) {
           // the readiness signal, because one GGUF backs every alias.
           if (models.length > 0) {
             emit(controller, { status: "llama.cpp is ready. Applying ClawBox configuration..." });
-            const configured = await configureLlamaCpp(alias, scope, activate);
+            const configured = await configureLlamaCpp(alias, scope, activate, (status) => emit(controller, { status }));
             if (!configured.ok) {
               emit(controller, { error: configured.error });
               controller.close();

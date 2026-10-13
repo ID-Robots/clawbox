@@ -25,7 +25,7 @@ describe("/setup-api/gateway/health", () => {
     isPortOpenMock.mockResolvedValue(true);
     const res = await GET();
     const body = await res.json();
-    expect(body).toEqual({ available: true, port: 18789 });
+    expect(body).toEqual({ available: true, port: 18789, restarting: false });
     expect(isPortOpenMock).toHaveBeenCalledWith(18789, "127.0.0.1", 1000);
   });
 
@@ -33,6 +33,21 @@ describe("/setup-api/gateway/health", () => {
     isPortOpenMock.mockResolvedValue(false);
     const res = await GET();
     const body = await res.json();
-    expect(body).toEqual({ available: false, port: 18789 });
+    expect(body).toEqual({ available: false, port: 18789, restarting: false });
+  });
+
+  it("is not available while a restart this server issued is still in flight (TASK-1535)", async () => {
+    // The old process still listens while systemd stops it; a page following a
+    // restart it was answered early about must not take that for "back".
+    const { markGatewayRestartBegun } = await import("@/lib/gateway-restart-tracker");
+    isPortOpenMock.mockResolvedValue(true);
+    const over = markGatewayRestartBegun();
+    try {
+      expect(await (await GET()).json()).toEqual({ available: false, port: 18789, restarting: true });
+      expect(isPortOpenMock).not.toHaveBeenCalled();
+    } finally {
+      over();
+    }
+    expect(await (await GET()).json()).toEqual({ available: true, port: 18789, restarting: false });
   });
 });

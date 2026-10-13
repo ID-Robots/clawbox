@@ -49,6 +49,10 @@ vi.mock("@/lib/config-store", () => ({
   set: vi.fn(async () => {}),
 }));
 
+// The gateway applies a save live unless a test says otherwise (TASK-1535):
+// classification real, gateway I/O mocked — see the helper.
+vi.mock("@/lib/gateway-hot-apply", async (importOriginal) =>
+  (await import("@/tests/helpers/gateway-hot-apply")).gatewayHotApplyMock(importOriginal));
 vi.mock("@/lib/openclaw-config", () => ({
   // A REAL class, not `vi.fn()` and not an omitted export: the configure route
   // narrows on `instanceof GatewayNotReadyError` to tell "the gateway has not
@@ -209,11 +213,17 @@ describe("POST /setup-api/ai-models/configure — hermes edition", () => {
   });
 
   /** Assert that nothing in this call reached the OpenClaw CLI. */
-  function expectNoOpenclawSpawn() {
+  async function expectNoOpenclawSpawn() {
     expect(mockRunOpenclawConfigSet).not.toHaveBeenCalled();
     expect(mockRunOpenclawConfigSetBatch).not.toHaveBeenCalled();
     expect(mockRestartGateway).not.toHaveBeenCalled();
     expect(mockSpawn).not.toHaveBeenCalled();
+    // No OpenClaw gateway on this edition, so nothing asks one for its config
+    // or waits for one to apply anything (TASK-1535).
+    const hot = await import("@/lib/gateway-hot-apply");
+    expect(hot.readGatewayConfigBaseline).not.toHaveBeenCalled();
+    expect(hot.awaitGatewayHotApply).not.toHaveBeenCalled();
+    expect(hot.restartGatewayAnsweringEarly).not.toHaveBeenCalled();
   }
 
   it("switches the local model (Gemma) through Hermes without spawning openclaw", async () => {
@@ -229,7 +239,7 @@ describe("POST /setup-api/ai-models/configure — hermes edition", () => {
       local_ai_configured: true,
       local_ai_provider: "llamacpp",
     }));
-    expectNoOpenclawSpawn();
+    await expectNoOpenclawSpawn();
   });
 
   // A device that already has a cloud provider must NOT be hijacked by merely
@@ -270,7 +280,7 @@ describe("POST /setup-api/ai-models/configure — hermes edition", () => {
       openclawProvider: "anthropic",
       apiKey: "sk-ant-test",
     });
-    expectNoOpenclawSpawn();
+    await expectNoOpenclawSpawn();
   });
 
   it("configures ClawBox AI through Hermes, not openclaw", async () => {
@@ -283,7 +293,7 @@ describe("POST /setup-api/ai-models/configure — hermes edition", () => {
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
     expect(mockApplyClawaiToHermes).toHaveBeenCalled();
-    expectNoOpenclawSpawn();
+    await expectNoOpenclawSpawn();
   });
 
   it("refuses an Ollama model under the 64K floor before anything is written", async () => {
@@ -355,7 +365,7 @@ describe("POST /setup-api/ai-models/configure — hermes edition", () => {
     expect(mockApplyLocalAiToHermes).toHaveBeenCalledWith(
       expect.objectContaining({ provider: "ollama", model: "qwen3:8b", makeDefault: true }),
     );
-    expectNoOpenclawSpawn();
+    await expectNoOpenclawSpawn();
   });
 
   it("never reads a handoff-filled apiKey slot as a local model id", async () => {
@@ -407,7 +417,7 @@ describe("POST /setup-api/ai-models/configure — hermes edition", () => {
     expect(res.ok).toBe(false);
     expect(body.error).toBe("local model id is malformed");
     expect(String(body.error).toLowerCase()).not.toContain("credential");
-    expectNoOpenclawSpawn();
+    await expectNoOpenclawSpawn();
   });
 
   it("returns an honest, non-credential message for a provider with no Hermes API-key home", async () => {
@@ -420,6 +430,6 @@ describe("POST /setup-api/ai-models/configure — hermes edition", () => {
 
     expect(res.ok).toBe(false);
     expect(String(body.error).toLowerCase()).not.toContain("credential");
-    expectNoOpenclawSpawn();
+    await expectNoOpenclawSpawn();
   });
 });

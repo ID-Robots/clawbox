@@ -5,6 +5,10 @@ vi.mock("@/lib/config-store", () => ({
   setMany: vi.fn(),
 }));
 
+// The gateway applies a switch live unless a test says otherwise (TASK-1535):
+// classification real, gateway I/O mocked — see the helper.
+vi.mock("@/lib/gateway-hot-apply", async (importOriginal) =>
+  (await import("@/tests/helpers/gateway-hot-apply")).gatewayHotApplyMock(importOriginal));
 vi.mock("@/lib/openclaw-config", () => ({
   inferConfiguredLocalModel: vi.fn(),
   readConfig: vi.fn(),
@@ -93,13 +97,53 @@ describe("POST /setup-api/local-ai", () => {
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
     expect(mockStopLocalAiProvider).toHaveBeenCalledWith("llamacpp");
-    expect(mockRestartGateway).toHaveBeenCalled();
+    // The fallback clear hot-applies: the gateway is waited for, never
+    // restarted (TASK-1535).
+    const hot = await import("@/lib/gateway-hot-apply");
+    expect(hot.settleConfigWrite).toHaveBeenCalledWith(expect.objectContaining({ label: "local-ai" }));
+    expect(mockRestartGateway).not.toHaveBeenCalled();
     expect(mockSetMany).toHaveBeenCalledWith({
       local_ai_configured: false,
       local_ai_provider: undefined,
       local_ai_model: undefined,
       local_ai_configured_at: undefined,
     });
+  });
+
+  it("restarts the gateway — without waiting for it — only when it could not take the clear live", async () => {
+    const hot = await import("@/lib/gateway-hot-apply");
+    vi.mocked(hot.settleConfigWrite).mockResolvedValueOnce("restart-required");
+
+    const res = await localAiPost(jsonRequest({ action: "disable" }));
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).success).toBe(true);
+    expect(hot.restartGatewayAnsweringEarly).toHaveBeenCalledTimes(1);
+    expect(mockRestartGateway).toHaveBeenCalledWith({ awaitReady: false });
+  });
+
+  it("answers success when that fallback restart is refused: the stop and the clear landed", async () => {
+    const hot = await import("@/lib/gateway-hot-apply");
+    vi.mocked(hot.settleConfigWrite).mockResolvedValueOnce("restart-required");
+    mockRestartGateway.mockRejectedValue(new Error("Unit clawbox-gateway.service is masked."));
+
+    const res = await localAiPost(jsonRequest({ action: "disable" }));
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).success).toBe(true);
+  });
+
+  it("asks no gateway anything on the Hermes-only edition", async () => {
+    mockOpenclawIsAbsent.mockReturnValue(true);
+    mockGetActiveHarness.mockResolvedValue("hermes");
+    const hot = await import("@/lib/gateway-hot-apply");
+
+    const res = await localAiPost(jsonRequest({ action: "disable" }));
+
+    expect(res.status).toBe(200);
+    expect(hot.readGatewayConfigBaseline).not.toHaveBeenCalled();
+    expect(hot.settleConfigWrite).not.toHaveBeenCalled();
+    expect(mockRestartGateway).not.toHaveBeenCalled();
   });
 
   it("stops the runtime our own store knows about when OpenClaw's config is silent", async () => {
@@ -245,7 +289,9 @@ describe("POST /setup-api/local-ai", () => {
     // there, so the fallback sentence has to ride in `error` or be lost.
     expect(body.error).toMatch(/removing it from Hermes could not be confirmed/);
     expect(body.error).toMatch(/fallback model list/i);
-    expect(mockRestartGateway).toHaveBeenCalled();
+    // OpenClaw is present on a dual box, so its gateway is still settled.
+    const hot = await import("@/lib/gateway-hot-apply");
+    expect(hot.settleConfigWrite).toHaveBeenCalled();
   });
 
   it("does not touch Hermes on an OpenClaw box", async () => {

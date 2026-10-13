@@ -36,6 +36,10 @@ vi.mock("@/lib/openclaw-session-store", () => ({
   readSessionEntries: vi.fn(() => []),
 }));
 
+// The gateway applies a switch live unless a test says otherwise (TASK-1535):
+// classification real, gateway I/O mocked — see the helper.
+vi.mock("@/lib/gateway-hot-apply", async (importOriginal) =>
+  (await import("@/tests/helpers/gateway-hot-apply")).gatewayHotApplyMock(importOriginal));
 vi.mock("@/lib/openclaw-config", () => ({
   // A REAL class: the route narrows on `instanceof GatewayNotReadyError` to
   // keep "the gateway has not finished binding" out of a sentence that says the
@@ -56,7 +60,7 @@ vi.mock("@/lib/openclaw-config", () => ({
 }));
 
 import { get, setMany } from "@/lib/config-store";
-import { GatewayNotReadyError, restartGateway, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
+import { restartGateway, runOpenclawConfigSetBatch } from "@/lib/openclaw-config";
 import { notifyProviderSetChanged } from "@/app/setup-api/ai-models/catalog/route";
 
 const UNKNOWN_MODEL =
@@ -114,36 +118,62 @@ describe("POST /setup-api/local-ai/exclusive — restoring the saved primary and
     body: JSON.stringify({ enabled: false }),
   }));
 
-  it("restores the saved Anthropic primary in ONE batch that switches its plugin on first, then restarts", async () => {
+  it("restores the saved Anthropic primary in ONE batch that switches its plugin on first, and applies it live", async () => {
+    const hot = await import("@/lib/gateway-hot-apply");
     const response = await turnOff();
     const body = await response.json();
 
     expect(body.error).toBeUndefined();
     expect(response.status).toBe(200);
     expect(body.enabled).toBe(false);
+    expect(body.warning).toBeUndefined();
     expect(runOpenclawConfigSetBatch).toHaveBeenCalledTimes(1);
     expect(vi.mocked(runOpenclawConfigSetBatch).mock.calls[0][0]).toEqual([
       ENABLE_OP,
       ["agents.defaults.model.primary", JSON.stringify("anthropic/claude-sonnet-5"), "--json"],
     ]);
-    expect(orderOf(vi.mocked(runOpenclawConfigSetBatch))).toBeLessThan(orderOf(vi.mocked(restartGateway)));
+    // TASK-1535: the primary, the fallbacks and the plugin switch all
+    // hot-apply. The toggle waits for the gateway to take them, after the
+    // batch, and never restarts it — a restart here was 50 s of dead chat that
+    // ran past what the browser would wait for.
+    expect(orderOf(vi.mocked(runOpenclawConfigSetBatch))).toBeLessThan(orderOf(vi.mocked(hot.settleConfigWrite)));
+    expect(vi.mocked(hot.settleConfigWrite)).toHaveBeenCalledWith(expect.objectContaining({
+      baseline: { hash: "baseline-hash" },
+      label: "local-only",
+    }));
+    expect(restartGateway).not.toHaveBeenCalled();
+    expect(hot.restartGatewayAnsweringEarly).not.toHaveBeenCalled();
   });
 
-  it("does not say the restart failed over a gateway that is still coming back", async () => {
-    // TASK-608. `warning` is rendered by LocalAiPanel in its amber "the change
-    // landed" notice, so the sentence has to be true of a change that landed.
-    // The raw message here was `Gateway restart failed: gateway did not come
-    // back` — a failure claim over a `systemctl restart` that returned 0.
-    vi.mocked(restartGateway).mockRejectedValue(new GatewayNotReadyError());
+  it("restarts — answered early — only when the gateway could not take the switch live", async () => {
+    const hot = await import("@/lib/gateway-hot-apply");
+    vi.mocked(hot.settleConfigWrite).mockResolvedValueOnce("restart-required");
 
     const body = await (await turnOff()).json();
 
     expect(body.enabled).toBe(false);
-    expect(body.warning).toMatch(/has not finished restarting/);
-    expect(body.warning).not.toMatch(/restart failed/i);
+    expect(hot.restartGatewayAnsweringEarly).toHaveBeenCalledTimes(1);
+    expect(restartGateway).toHaveBeenCalledWith({ awaitReady: false });
+    // `warning` is rendered by LocalAiPanel in its amber "the change landed"
+    // notice: true of a change that landed, and not a failure claim.
+    expect(body.warning).toMatch(/restarting/);
+    expect(body.warning).not.toMatch(/restart failed|did not come back/i);
+  });
+
+  it("adds no restart of its own over a gateway already restarting by itself", async () => {
+    const hot = await import("@/lib/gateway-hot-apply");
+    vi.mocked(hot.settleConfigWrite).mockResolvedValueOnce("gateway-restarting");
+
+    const body = await (await turnOff()).json();
+
+    expect(body.enabled).toBe(false);
+    expect(hot.restartGatewayAnsweringEarly).not.toHaveBeenCalled();
+    expect(body.warning).toMatch(/restarting/);
   });
 
   it("still says so when the restart was refused, without leaking the CLI error", async () => {
+    const hot = await import("@/lib/gateway-hot-apply");
+    vi.mocked(hot.settleConfigWrite).mockResolvedValueOnce("restart-required");
     vi.mocked(restartGateway).mockRejectedValue(new Error("Unit clawbox-gateway.service is masked."));
 
     const body = await (await turnOff()).json();
