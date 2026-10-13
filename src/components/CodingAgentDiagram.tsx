@@ -517,6 +517,20 @@ export default function CodingAgentDiagram({ source, runOf, onOpenRun, onChanged
   );
 }
 
+/**
+ * Is there a turn count to show for this run yet?
+ *
+ * The count is the CLI's own and arrives with its final result event (see the
+ * note at `numTurns` in coding-agent.ts: a live per-event count was tried and
+ * does not reproduce it). So a run that is still working carries 0, and the
+ * chip said "0 turns" beside "5 files changed · 109k tokens" for the whole
+ * length of the run. No number is the true answer until there is one; a run
+ * that was resumed keeps the turns of the segments it has already finished.
+ */
+function turnsKnown(run: DiagramRun): boolean {
+  return (run.numTurns ?? 0) > 0 || !isLive(run.status);
+}
+
 /** The chart's figures as chips and bars: how far the tasks are, what each role spent, how long it has been. */
 function DiagramFigures({ source, lookup }: { source: DiagramSource; lookup: (id: string) => DiagramRun | undefined }) {
   const { t } = useT();
@@ -530,7 +544,7 @@ function DiagramFigures({ source, lookup }: { source: DiagramSource; lookup: (id
     const end = run.completedAt ?? (isLive(run.status) ? now : null);
     return (
       <div className="mt-1 flex flex-wrap items-center gap-1.5" data-testid="coding-agent-diagram-figures">
-        <span className={chip} data-testid="coding-agent-diagram-turns">{icon("swap_vert")}{t("codingAgent.diagram.turns", { n: run.numTurns ?? 0 })}</span>
+        {turnsKnown(run) && <span className={chip} data-testid="coding-agent-diagram-turns">{icon("swap_vert")}{t("codingAgent.diagram.turns", { n: run.numTurns ?? 0 })}</span>}
         <span className={chip}>{icon("description")}{t("codingAgent.diagram.files", { n: run.filesTouched?.length ?? 0 })}</span>
         {(run.tokensUsed ?? 0) > 0 && <span className={chip}>{icon("data_usage")}{t("codingAgent.team.metricTokens", { n: compactCount(run.tokensUsed ?? 0) })}</span>}
         {end !== null && <span className={chip}>{icon("timer")}{clock(end - run.startedAt)}</span>}
@@ -732,7 +746,7 @@ function AgentPanel({ id, node, team, supplied, parentRun, refreshKey, isCurrent
 
       {run && (
         <div className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px] text-[var(--text-secondary)]" data-testid="coding-agent-node-panel-figures">
-          <span className="rounded-full bg-white/[0.05] px-2 py-0.5">{t("codingAgent.diagram.turns", { n: run.numTurns ?? 0 })}</span>
+          {turnsKnown(run) && <span className="rounded-full bg-white/[0.05] px-2 py-0.5" data-testid="coding-agent-node-panel-turns">{t("codingAgent.diagram.turns", { n: run.numTurns ?? 0 })}</span>}
           {(run.tokensUsed ?? 0) > 0 && <span className="rounded-full bg-white/[0.05] px-2 py-0.5">{t("codingAgent.team.metricTokens", { n: compactCount(run.tokensUsed ?? 0) })}</span>}
           <span className="rounded-full bg-white/[0.05] px-2 py-0.5">{t("codingAgent.diagram.files", { n: files.length })}</span>
         </div>
