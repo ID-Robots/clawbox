@@ -111,7 +111,10 @@ or a port is dead the next morning. Three things make it work:
 1. Write clawbox.json at the project's root, the ClawBox app manifest:
      { "name": "Tinder Clone", "description": "…", "kind": "server", "port": 4230, "start": "bun run dev" }
    The box reads the port from it and puts the app on the desktop when the
-   run settles; the same file marks the repository as a ClawBox app.
+   run settles — if nothing is listening on the port by then, it runs "start"
+   in the project folder itself, so always name it, and make it the command
+   that SERVES the app (build first if it serves a build). The same file marks
+   the repository as a ClawBox app.
 2. Serve the app under the base path /apps/<folder> — the path reaches it
    unchanged. Next.js: basePath: "/apps/<folder>" in next.config; Vite:
    base: "/apps/<folder>/"; Express: app.use("/apps/<folder>", router).

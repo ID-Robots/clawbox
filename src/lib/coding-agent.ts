@@ -171,6 +171,7 @@ import { DATA_DIR_PUBLIC_SUBTREES, isInside, isProtectedFilePath, PROTECTED_HOME
 import { beginRunStart, isProjectBeingRemoved } from "@/lib/coding-project-removal-lock";
 import { readClawboxManifest } from "@/lib/clawbox-manifest";
 import { registerServerApp } from "@/lib/app-proxy";
+import { registerOrStartServerApp } from "@/lib/app-server-start";
 import { APP_ID_RE } from "@/lib/code-projects";
 import { taskTitle } from "@/lib/task-title";
 import { planGateFor, type PlanGate } from "@/lib/paid-plan-gate";
@@ -7900,8 +7901,10 @@ async function reviewAndShip(run: CodingRun, ended: "stop" | "pause" | null): Pr
  * A project whose clawbox.json declares a `port` goes on the desktop when a
  * run in it settles: its icon opens `/apps/<folder>/`, which the box proxies
  * to that port (src/lib/app-proxy.ts). The manifest IS the registration —
- * no tool call, no host or port in any link. A review pass or a team's run
- * re-reads nothing: the run that wrote the manifest did this.
+ * no tool call, no host or port in any link — and when it names a `start`
+ * command the box runs it for a server the run has already stopped. A review
+ * pass or a team's run re-reads nothing: the run that wrote the manifest did
+ * this.
  */
 async function registerProjectApp(run: CodingRun): Promise<void> {
   if (run.reviewOf || run.reviewLoopOf || run.readOnly || run.team) return;
@@ -7916,7 +7919,17 @@ async function registerProjectApp(run: CodingRun): Promise<void> {
   try {
     const manifest = await readClawboxManifest(run.directory);
     if (!manifest?.port) return;
-    const outcome = await registerServerApp({ id, directory: project, manifest });
+    // A run ends what it started, its own server included, so "nothing is
+    // listening" is the ORDINARY state here, not a fault: the box starts the
+    // app from the manifest's `start` and registers it (app-server-start.ts).
+    // Only when the project folder carries the same manifest — a run that
+    // worked in a copy whose changes are not in the project yet has nothing
+    // there to start.
+    const inProject = project === run.directory ? manifest : await readClawboxManifest(project);
+    const startable = inProject?.port === manifest.port && inProject?.start === manifest.start;
+    const outcome = startable
+      ? await registerOrStartServerApp({ id, directory: project, manifest, searchPath: runnerPath() })
+      : await registerServerApp({ id, directory: project, manifest });
     pushProgress(run, outcome.ok
       ? RUNNER_STEP.onDesktop(manifest.name, id, manifest.port)
       : RUNNER_STEP.notOnDesktop(manifest.port, `${outcome.detail.charAt(0).toLowerCase()}${outcome.detail.slice(1)}`));
