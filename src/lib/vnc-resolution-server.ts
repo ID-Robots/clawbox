@@ -5,7 +5,7 @@
 import { randomUUID } from "crypto";
 import { promises as fs } from "fs";
 import os from "os";
-import path from "path";
+import path from "./runtime-path";
 import { normalizeVncResolution, type VncResolution } from "./vnc-resolution";
 
 export function vncResolutionEnvPath(home: string = os.homedir()): string {
