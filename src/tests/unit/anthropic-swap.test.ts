@@ -298,6 +298,24 @@ describe("a failure another consumer reports", () => {
     expect((await pool.readAccounts())[0].status).toBe("revoked");
   });
 
+  it("takes out an account its organisation has switched off without asking about its token, and moves on", async () => {
+    const tokens = (access: string) => ({ access, refresh: `refresh-${access}`, expires: Date.now() + 8 * 3_600_000 });
+    const work = await pool.addOAuthAccount({ label: "Work Max", email: "work@example.com", tokens: tokens("work-access") });
+    const personal = await pool.addOAuthAccount({ label: "Personal Max", email: "me@example.com", tokens: tokens("personal-access") });
+    followingGateway();
+    // The grant renews fine — a probe would call the account healthy and keep it in.
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ access_token: "renewed", refresh_token: "r2", expires_in: 28_800 }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const outcome = await swap.reportAnthropicFailure({
+      text: 'API Error: 403 {"type":"error","error":{"type":"permission_error","message":"Your organization has disabled Claude subscription access for Claude Code"}}',
+      source: "chat",
+      accountId: work.id,
+    });
+    expect(outcome).toMatchObject({ handled: true, kind: "auth", activeId: personal.id });
+    expect((await pool.readAccounts()).find((a) => a.id === work.id)?.status).toBe("revoked");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("keeps an account on a bare rate limit, sends the turn again a minute later, and swaps only when it comes back", async () => {
     const { work, personal } = await twoAccounts();
     followingGateway();

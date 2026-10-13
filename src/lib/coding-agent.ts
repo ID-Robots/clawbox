@@ -203,6 +203,7 @@ import {
   anotherAccountLikely,
   accountsSnapshot,
   activeAccountSnapshot,
+  markCredentialProblem,
   markLimited,
   onLimitReset,
   prepareAccount,
@@ -217,6 +218,7 @@ import {
   type SwapConsumerOutcome,
 } from "@/lib/anthropic-accounts";
 import {
+  detectAnthropicAccountDisabled,
   detectAnthropicAuthFailure,
   detectAnthropicLimit,
   formatResetClock,
@@ -10483,8 +10485,13 @@ async function continueOnAnotherAccount(
     // renew was only stale in this process, and the run goes on on the SAME
     // account with a fresh token. A dead one is marked (which moves the box's
     // active account); one Anthropic could not be asked about sits this spawn out.
-    const verdict = await probeAccountCredential(fromId, verifyAnthropicKey, { source: "coding", runId: run.id }).catch(() => "unknown" as const);
-    console.error(`[coding-agent] ${run.id}: Anthropic refused account ${fromId}'s credential; asked again, it is ${verdict}`);
+    // An account its organisation switched off is not asked about: its grant
+    // renews fine, so the probe would keep it and put the run straight back on it.
+    const disabled = detectAnthropicAccountDisabled(why.text);
+    const verdict = disabled
+      ? await markCredentialProblem(fromId, "revoked", { source: "coding", runId: run.id }).then(() => "dead" as const, () => "unknown" as const)
+      : await probeAccountCredential(fromId, verifyAnthropicKey, { source: "coding", runId: run.id }).catch(() => "unknown" as const);
+    console.error(`[coding-agent] ${run.id}: Anthropic refused account ${fromId}'s credential; ${disabled ? "its organization switched it off, so" : "asked again,"} it is ${verdict}`);
     if (verdict !== "ok") exclude.add(fromId);
   }
   let prepared: PreparedAccount | null = null;
