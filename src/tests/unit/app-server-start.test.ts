@@ -160,6 +160,18 @@ describe("a box whose node is not on the run's fixed PATH", () => {
     expect(outcome).toEqual({ ok: true });
   });
 
+  it("runs it on the box's own node, not an older one the run's list names first", async () => {
+    // The x64 installer unpacks its own node because the distro's is too old,
+    // and leaves that one where it was — in a folder the run's list names.
+    const runPath = runPathIn(base);
+    const older = path.join(base, ".local", "bin");
+    fs.mkdirSync(older, { recursive: true });
+    fs.writeFileSync(path.join(older, "node"), "#!/bin/sh\necho \"SyntaxError: Unexpected token '?'\" >&2\nexit 1\n", { mode: 0o755 });
+    const port = await freePort();
+    const outcome = await start.registerOrStartServerApp({ id: "hello-app", directory: project, manifest: manifestFor(port, "node server.js"), searchPath: runPath, noScope: true });
+    expect(outcome).toEqual({ ok: true });
+  });
+
   it("says what the start command printed when it stopped", async () => {
     const port = await freePort();
     const command = "clawbox-nope run preview --port 4176 --host 127.0.0.1 --base /apps/hello-app/ --strictPort";
@@ -176,7 +188,7 @@ describe("a box whose node is not on the run's fixed PATH", () => {
 });
 
 describe("the PATH a start command runs with", () => {
-  it("keeps the run's own PATH first and adds where node and bun live beyond it", () => {
+  it("keeps the run's own PATH in its order and adds where node and bun live beyond it", () => {
     for (const version of ["v18.20.4", "v22.11.0", "v20.9.0"]) fs.mkdirSync(path.join(base, ".nvm", "versions", "node", version, "bin"), { recursive: true });
     const value = start.startSearchPath("/run/a:/run/b", {
       home: base,
@@ -186,10 +198,12 @@ describe("the PATH a start command runs with", () => {
     });
     const nvm = (version: string) => path.join(base, ".nvm", "versions", "node", version, "bin");
     expect(value.split(":")).toEqual([
+      // The node the web server itself runs on, in front when the run's list
+      // does not name its folder: an older node in a folder it does name
+      // would otherwise win, and npm's `#!/usr/bin/env node` with it.
+      "/opt/node/bin",
       "/run/a",
       "/run/b",
-      // The node the web server itself runs on: it is there, and npm beside it.
-      "/opt/node/bin",
       "/opt/bun/bin",
       path.join(base, ".bun", "bin"),
       // Newest first.
@@ -205,8 +219,14 @@ describe("the PATH a start command runs with", () => {
     ]);
   });
 
+  it("leaves the box's node folder where the run's list already has it", () => {
+    // The usual box: node in /usr/bin, which the run's list names after the home folders.
+    const value = start.startSearchPath("/home/u/.bun/bin:/usr/local/bin:/usr/bin:/bin", { home: "/home/u", execPath: "/usr/bin/node", envPath: "" });
+    expect(value.split(":").slice(0, 4)).toEqual(["/home/u/.bun/bin", "/usr/local/bin", "/usr/bin", "/bin"]);
+  });
+
   it("drops empty and relative entries, which would resolve against the project folder", () => {
-    const value = start.startSearchPath(":/run/a:.:bin", { home: base, execPath: "/opt/node/bin/node", envPath: "::./node_modules/.bin" });
+    const value = start.startSearchPath(":/run/a:.:bin", { home: base, execPath: "/run/a/node", envPath: "::./node_modules/.bin" });
     expect(value.split(":")).not.toContain("");
     expect(value.split(":").every((dir) => path.isAbsolute(dir))).toBe(true);
     expect(value.split(":")[0]).toBe("/run/a");

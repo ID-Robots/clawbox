@@ -30,8 +30,9 @@
  * killed with it at the end of every in-app update), and as a detached child
  * otherwise.
  *
- * WHAT IT RUNS WITH. The run's PATH first, then every place node and bun live
- * that the run's fixed list does not name (`startSearchPath`). The run found
+ * WHAT IT RUNS WITH. The run's PATH, behind the web server's own node when the
+ * list does not name its folder, then every place node and bun live that the
+ * run's fixed list does not name (`startSearchPath`). The run found
  * them through its shell's profile — nvm, a tarball node the web server's own
  * unit puts on its PATH — and `/bin/sh -c` has no profile: with the run's list
  * alone, `npm start` on such a box exited 127 before anything listened. When a
@@ -113,17 +114,26 @@ function nvmNodeBins(nvmDir: string): string[] {
 /**
  * The PATH a start command runs with. Exported for its test.
  *
- * The run's PATH comes first and in its own order, so a command it resolves
- * resolves to the same binary here. What follows only fills the gaps, in the
- * order a shell would most likely have found them: the node the web server
- * runs on, bun, nvm, npm's global prefix, the FHS directories, and the web
- * server's own PATH last. Empty and relative entries are dropped, because the
- * command runs in the project folder and they would resolve inside it.
+ * The run's PATH keeps its own order, so a command it resolves resolves to
+ * the same binary here — with one exception. The folder of the node the web
+ * server runs on goes IN FRONT when the run's list does not name it: the x64
+ * installer unpacks its own node precisely because the distro's is too old,
+ * and leaves that one in /usr/bin or /usr/local/bin, where the run's list
+ * would find it first (and npm's `#!/usr/bin/env node` with it). On the usual
+ * box that folder is /usr/bin, already on the list, and nothing moves.
+ *
+ * What follows only fills the gaps, in the order a shell would most likely
+ * have found them: bun, nvm, npm's global prefix, the FHS directories, and
+ * the web server's own PATH last. Empty and relative entries are dropped,
+ * because the command runs in the project folder and they would resolve
+ * inside it.
  */
 export function startSearchPath(searchPath: string, places: ToolchainPlaces): string {
+  const run = searchPath.split(":");
+  const ownNode = path.dirname(places.execPath);
   const candidates = [
-    ...searchPath.split(":"),
-    path.dirname(places.execPath),
+    ...(run.includes(ownNode) ? [] : [ownNode]),
+    ...run,
     places.bunInstall ? path.join(places.bunInstall, "bin") : "",
     path.join(places.home, ".bun", "bin"),
     ...nvmNodeBins(places.nvmDir || path.join(places.home, ".nvm")),
