@@ -22,6 +22,13 @@ export interface PersonaFiles {
 /** The file OpenClaw seeds to arm its first-conversation ritual. */
 const BOOTSTRAP_FILENAME = "BOOTSTRAP.md";
 
+/**
+ * Where a retired BOOTSTRAP.md is kept: inside the workspace, so it travels with
+ * it, but in a directory OpenClaw never injects. scripts/gateway-pre-start.sh
+ * retires into the same place.
+ */
+export const RETIRED_RITUAL_DIRNAME = ".clawbox-retired";
+
 // Where OpenClaw actually keeps the workspace, rather than where it usually
 // does. `agents.defaults.workspace` in openclaw.json wins when it is set — the
 // same resolution getSkillsDir() performs in openclaw-config.ts and the one
@@ -114,10 +121,177 @@ export async function personaWritesAllowed(harness: Harness): Promise<boolean> {
  *
  * Hermes runs no such ritual (see above), so it is never armed there — a Hermes
  * box has no introduction for a greeting to start.
+ *
+ * Never armed on a box whose setup wizard is complete either (TASK-1528): a
+ * set-up box answers its first chat message like any other, and
+ * `retireOnboardingRitual` takes the file away. Asked of the setup flag as well
+ * as the file so a retirement that has not landed yet — an updated box before
+ * its first heartbeat, a write that failed — still never has the chat send the
+ * opener that starts the ritual, in this tab or any new one.
  */
 export async function onboardingRitualArmed(harness: Harness): Promise<boolean> {
   if (harness === "hermes") return false;
+  if (await setupComplete()) return false;
   return fileExists(path.join(openclawWorkspaceDir(), BOOTSTRAP_FILENAME));
+}
+
+/** Has the owner finished the setup wizard? A store that cannot be read says no. */
+async function setupComplete(): Promise<boolean> {
+  try {
+    return (await config.get("setup_complete")) === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The owner's name as it may appear in USER.md, or null.
+ *
+ * The setup wizard does not ask for a name; `pref:ui_user_name` is written by
+ * the agent's `preferences_set` (or was, by the retired Settings field). It is
+ * free text that lands in the agent's system prompt, so only what a name needs
+ * survives: letters, marks, digits, spaces and `.'-`. Anything longer than the
+ * tool's own 64-character cap is not a name. The Python twin in
+ * scripts/gateway-pre-start.sh applies the same rule, so every step is spelled
+ * in Unicode categories rather than either language's `\s`: the two disagree
+ * (JavaScript's includes U+FEFF, Python's includes U+001C-001F and U+0085), and
+ * the two USER.md writers must not.
+ */
+export function personaOwnerName(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const name = raw
+    .replace(/[\p{Z}\t\n\v\f\r]/gu, " ")
+    .replace(/[^\p{L}\p{M}\p{N} .'-]/gu, "")
+    .replace(/ {2,}/g, " ")
+    .trim();
+  if (!name || [...name].length > 64) return null;
+  return name;
+}
+
+/**
+ * The USER.md ClawBox starts on a set-up box whose workspace has none.
+ *
+ * Its first job is to exist and to differ from OpenClaw's own template: that is
+ * what OpenClaw reads as "already configured", so it never seeds its stock
+ * ritual into the workspace. The note is for the agent — OpenClaw's IDENTITY.md
+ * template still says to fill it in "during your first conversation", and this
+ * file is injected into every session. Byte-for-byte what
+ * scripts/gateway-pre-start.sh writes; the test there compares the two.
+ */
+export function clawboxUserMd(name: string | null): string {
+  const value = name ? ` ${name}` : "";
+  return [
+    "# USER.md - About Your Human",
+    "",
+    "_ClawBox started this file when the owner finished setting up the box. Fill it in as you learn about them._",
+    "",
+    `- **Name:**${value}`,
+    `- **What to call them:**${value}`,
+    "- **Timezone:**",
+    "- **Notes:**",
+    "",
+    "## Context",
+    "",
+    "_The owner has already set this box up. Answer their first message like any other: no introductions, and no",
+    "asking what to call you or them. When they mention their name or how they like to be addressed, record it here._",
+    "",
+  ].join("\n");
+}
+
+async function pathPresent(file: string): Promise<boolean> {
+  return fs.lstat(file).then(() => true, () => false);
+}
+
+/**
+ * End OpenClaw's first-conversation ritual for good on a box whose setup wizard
+ * is complete (TASK-1528).
+ *
+ * The ritual asks what to call the assistant and what to call the owner, and
+ * while BOOTSTRAP.md is on disk OpenClaw injects it into every new session — so
+ * an owner who never played it through met it again in every new chat tab. The
+ * product ruling is that a set-up box answers its first message normally.
+ *
+ * Two steps, in this order:
+ *
+ *   1. USER.md is put in place if the workspace has none (`clawboxUserMd`). A
+ *      USER.md that differs from OpenClaw's template is what tells it the
+ *      workspace is configured; without one, a workspace OpenClaw has not yet
+ *      seen would have the stock ritual seeded in place of the one we retire.
+ *      Never written over an existing file: that one is the agent's.
+ *   2. BOOTSTRAP.md is MOVED, never deleted, into RETIRED_RITUAL_DIRNAME. Once
+ *      it is gone OpenClaw stamps the workspace complete and does not seed it
+ *      again. Skipped when step 1 could not leave a USER.md behind.
+ *
+ * Only while OpenClaw is the harness in play. On a dual box running Hermes,
+ * a USER.md here would make clawbox-identity-sync.sh read the OpenClaw
+ * workspace as introduced, and a canonical identity still marked provisional
+ * would then be overwritten from it — the USER.md Hermes has been keeping,
+ * replaced by this template. The switch to OpenClaw (`harness/select`), the
+ * heartbeat after it and the gateway's ExecStartPre do the work instead.
+ *
+ * Returns true only when a BOOTSTRAP.md was retired. Never throws: the
+ * heartbeat, the harness switch and the wizard's last step call it, and none of
+ * them should fail over a text file.
+ */
+export async function retireOnboardingRitual(): Promise<boolean> {
+  try {
+    const store = await config.getAll();
+    if (store.setup_complete !== true) return false;
+    if ((await getActiveHarness()) !== "openclaw") return false;
+
+    const workspace = openclawWorkspaceDir();
+    await fs.mkdir(workspace, { recursive: true });
+
+    const userFile = path.join(workspace, "USER.md");
+    if (!(await pathPresent(userFile))) {
+      await writeIfMissing(userFile, clawboxUserMd(personaOwnerName(store[`${PREFERENCE_KEY_PREFIX}ui_user_name`])));
+    }
+
+    const bootstrap = path.join(workspace, BOOTSTRAP_FILENAME);
+    if (!(await pathPresent(bootstrap))) return false;
+    if (!(await pathPresent(userFile))) return false;
+
+    const retiredDir = path.join(workspace, RETIRED_RITUAL_DIRNAME);
+    await fs.mkdir(retiredDir, { recursive: true });
+    let target = path.join(retiredDir, BOOTSTRAP_FILENAME);
+    if (await pathPresent(target)) {
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      target = path.join(retiredDir, `BOOTSTRAP-${stamp}.md`);
+    }
+    await fs.rename(bootstrap, target);
+    console.log(`[onboarding] Setup is complete; retired the first-conversation ritual to ${target}`);
+    return true;
+  } catch (err) {
+    console.error(
+      "[onboarding] Could not retire the first-conversation ritual:",
+      err instanceof Error ? err.message : err,
+    );
+    return false;
+  }
+}
+
+/**
+ * Create `file` with `text` unless something is already there.
+ *
+ * Written to a temporary file and LINKED into place: the link fails with EEXIST
+ * if another writer got there first, and a write cut short (a full eMMC) never
+ * leaves a fragment under the real name. On a filesystem without hard links
+ * the fallback is an EXCLUSIVE copy, which also fails rather than replace a
+ * USER.md another writer created in the meantime — a rename would not.
+ */
+async function writeIfMissing(file: string, text: string): Promise<void> {
+  const tmp = `${file}.clawbox-${process.pid}.tmp`;
+  try {
+    await fs.writeFile(tmp, text, "utf-8");
+    await fs.link(tmp, file).catch(async (err: NodeJS.ErrnoException) => {
+      if (err.code === "EEXIST") return;
+      await fs.copyFile(tmp, file, fsSync.constants.COPYFILE_EXCL).catch((copyErr: NodeJS.ErrnoException) => {
+        if (copyErr.code !== "EEXIST") throw copyErr;
+      });
+    });
+  } finally {
+    await fs.rm(tmp, { force: true }).catch(() => {});
+  }
 }
 
 /**

@@ -7813,9 +7813,136 @@ PY
 # the directory the gateway would create it on the first turn and seed the
 # stock ritual before we ever got a say. An empty workspace directory is not
 # itself evidence of a configured agent, so creating it changes nothing else.
+#
+# NEVER ON A SET-UP BOX (TASK-1528). Once the setup wizard is complete the box
+# answers its first chat message like any other: no introductions, no "what
+# should I call you". So the seed is for a box whose wizard is still running,
+# and on a set-up box this block does the opposite — it RETIRES a ritual that
+# is still pending, which is how boxes updated with one armed stop running it.
+# The wizard's last step and the five-minute heartbeat do the same from the app
+# (retireOnboardingRitual in src/lib/language-persona.ts); this is the boot
+# path, and the one that covers a workspace OpenClaw creates after setup — a
+# switch from Hermes, a workspace someone emptied.
+#
+# Retiring is two steps, in this order. USER.md first, if there is none: a
+# USER.md that differs from OpenClaw's template is what makes it treat the
+# workspace as configured, so taking BOOTSTRAP.md away from a workspace it has
+# not seen yet without one would have it seed its STOCK ritual in place of ours.
+# Then BOOTSTRAP.md is MOVED, never deleted, into .clawbox-retired/ inside the
+# workspace, where OpenClaw injects nothing; with it gone OpenClaw stamps the
+# workspace complete. A USER.md that is already there is the agent's and is
+# never rewritten. The USER.md written here is byte-for-byte clawboxUserMd() in
+# src/lib/language-persona.ts; the onboarding test drives both and compares.
 CLAWBOX_BOOTSTRAP_SRC="$CLAWBOX_ROOT/config/clawbox-bootstrap.md"
 CLAWBOX_BOOTSTRAP_DST="$CLAWBOX_WORKSPACE/BOOTSTRAP.md"
-if [ -r "$CLAWBOX_BOOTSTRAP_SRC" ] \
+CLAWBOX_SETUP_STORE="${CLAWBOX_DEVICE_STORE:-$CLAWBOX_ROOT/data/config.json}"
+CLAWBOX_SETUP_DONE=0
+# A grep, like update_owns_box: the store is JSON.stringify's `"key": value`.
+# A store that cannot be read says "not set up", which keeps today's behaviour.
+if [ -r "$CLAWBOX_SETUP_STORE" ] \
+  && grep -Eq '"setup_complete"[[:space:]]*:[[:space:]]*true' "$CLAWBOX_SETUP_STORE" 2>/dev/null; then
+  CLAWBOX_SETUP_DONE=1
+fi
+# Not while Hermes is the harness in play on a dual box, whose OpenClaw gateway
+# keeps running beside it. A USER.md here would have clawbox-identity-sync.sh
+# read this workspace as introduced and, with the canonical identity still
+# marked provisional, copy it over the USER.md Hermes has been keeping. The
+# switch back to OpenClaw retires the ritual from the app (harness/select) —
+# this start read the store before that switch was persisted.
+if [ "$CLAWBOX_SETUP_DONE" = 1 ] \
+  && grep -Eq '"active_harness"[[:space:]]*:[[:space:]]*"hermes"' "$CLAWBOX_SETUP_STORE" 2>/dev/null; then
+  echo "  Setup is complete and Hermes is the active harness: the OpenClaw workspace waits for the switch back"
+elif [ "$CLAWBOX_SETUP_DONE" = 1 ]; then
+  CLAWBOX_USER_MD="$CLAWBOX_WORKSPACE/USER.md"
+  if [ ! -e "$CLAWBOX_USER_MD" ] && [ ! -L "$CLAWBOX_USER_MD" ]; then
+    # Written whole to a temporary name and LINKED into place, so a write cut
+    # short (a full eMMC) never leaves a fragment under the real name, and a
+    # USER.md that appeared in the meantime is never replaced (`ln` refuses).
+    CLAWBOX_USER_TMP="$CLAWBOX_USER_MD.clawbox-$$.tmp"
+    if mkdir -p "$CLAWBOX_WORKSPACE" 2>/dev/null \
+      && CLAWBOX_SETUP_STORE="$CLAWBOX_SETUP_STORE" CLAWBOX_USER_OUT="$CLAWBOX_USER_TMP" python3 - <<'PY_USER'
+import json, os, re, unicodedata
+
+# The owner's name, if the agent ever stored one: the setup wizard does not ask.
+# Free text that lands in the agent's system prompt, so the same rule as
+# personaOwnerName() in src/lib/language-persona.ts — letters, marks, digits,
+# spaces and .'- only, and nothing longer than the 64 characters the
+# preferences_set tool accepts.
+name = None
+try:
+    with open(os.environ.get("CLAWBOX_SETUP_STORE", ""), encoding="utf-8") as fh:
+        raw = json.load(fh).get("pref:ui_user_name")
+except (OSError, ValueError, AttributeError):
+    raw = None
+if isinstance(raw, str):
+    # Whitespace by category, not `\s`: Python's and JavaScript's differ, and
+    # this must match personaOwnerName() byte for byte.
+    cleaned = "".join(
+        " " if unicodedata.category(c)[0] == "Z" or c in "\t\n\v\f\r" else c
+        for c in raw
+    )
+    cleaned = "".join(
+        c for c in cleaned if unicodedata.category(c)[0] in "LMN" or c in " .'-"
+    )
+    cleaned = re.sub(r" {2,}", " ", cleaned).strip()
+    if cleaned and len(cleaned) <= 64:
+        name = cleaned
+value = " " + name if name else ""
+
+text = "\n".join([
+    "# USER.md - About Your Human",
+    "",
+    "_ClawBox started this file when the owner finished setting up the box. Fill it in as you learn about them._",
+    "",
+    "- **Name:**" + value,
+    "- **What to call them:**" + value,
+    "- **Timezone:**",
+    "- **Notes:**",
+    "",
+    "## Context",
+    "",
+    "_The owner has already set this box up. Answer their first message like any other: no introductions, and no",
+    "asking what to call you or them. When they mention their name or how they like to be addressed, record it here._",
+    "",
+])
+with open(os.environ["CLAWBOX_USER_OUT"], "w", encoding="utf-8") as fh:
+    fh.write(text)
+PY_USER
+    then
+      # `mv -n` is the fallback for a filesystem without hard links; it, too,
+      # never replaces a file that is already there.
+      if ln "$CLAWBOX_USER_TMP" "$CLAWBOX_USER_MD" 2>/dev/null \
+        || { [ ! -e "$CLAWBOX_USER_MD" ] && mv -n "$CLAWBOX_USER_TMP" "$CLAWBOX_USER_MD" 2>/dev/null \
+          && [ -e "$CLAWBOX_USER_MD" ]; }; then
+        echo "  Setup is complete: started USER.md so OpenClaw treats the workspace as configured"
+      elif [ ! -e "$CLAWBOX_USER_MD" ]; then
+        echo "  WARNING: could not write USER.md; the first-conversation ritual stays until the next start" >&2
+      fi
+    else
+      echo "  WARNING: could not write USER.md; the first-conversation ritual stays until the next start" >&2
+    fi
+    rm -f "$CLAWBOX_USER_TMP" 2>/dev/null || true
+    unset CLAWBOX_USER_TMP
+  fi
+  if { [ -e "$CLAWBOX_BOOTSTRAP_DST" ] || [ -L "$CLAWBOX_BOOTSTRAP_DST" ]; } \
+    && { [ -e "$CLAWBOX_USER_MD" ] || [ -L "$CLAWBOX_USER_MD" ]; }; then
+    CLAWBOX_RETIRED_DIR="$CLAWBOX_WORKSPACE/.clawbox-retired"
+    CLAWBOX_RETIRED_DST="$CLAWBOX_RETIRED_DIR/BOOTSTRAP.md"
+    if [ -e "$CLAWBOX_RETIRED_DST" ] || [ -L "$CLAWBOX_RETIRED_DST" ]; then
+      CLAWBOX_RETIRED_DST="$CLAWBOX_RETIRED_DIR/BOOTSTRAP-$(date -u +%Y-%m-%dT%H-%M-%S)-$$.md"
+    fi
+    # `mv -n`: a move, never a delete, and never over an earlier retired copy.
+    if mkdir -p "$CLAWBOX_RETIRED_DIR" 2>/dev/null \
+      && mv -n "$CLAWBOX_BOOTSTRAP_DST" "$CLAWBOX_RETIRED_DST" 2>/dev/null \
+      && [ ! -e "$CLAWBOX_BOOTSTRAP_DST" ]; then
+      echo "  Setup is complete: retired the first-conversation ritual to $CLAWBOX_RETIRED_DST"
+    else
+      echo "  WARNING: could not retire BOOTSTRAP.md; the first-conversation ritual may still run" >&2
+    fi
+    unset CLAWBOX_RETIRED_DIR CLAWBOX_RETIRED_DST
+  fi
+  unset CLAWBOX_USER_MD
+elif [ -r "$CLAWBOX_BOOTSTRAP_SRC" ] \
   && [ ! -e "$CLAWBOX_BOOTSTRAP_DST" ] \
   && [ ! -e "$CLAWBOX_WORKSPACE/USER.md" ] \
   && [ ! -e "$CLAWBOX_WORKSPACE/IDENTITY.md" ] \

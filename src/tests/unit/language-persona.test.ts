@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
+import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -20,10 +21,15 @@ import { getActiveHarness } from "@/lib/harness";
 import { PREFERENCE_LANGUAGES } from "@/lib/preference-schema";
 import {
   applyDeferredLanguagePersona,
+  clawboxUserMd,
   DEFERRED_LANGUAGE_KEY,
+  onboardingRitualArmed,
   openclawWorkspaceDir,
   personaFilesFor,
+  personaOwnerName,
   personaWritesAllowed,
+  RETIRED_RITUAL_DIRNAME,
+  retireOnboardingRitual,
   writeLanguagePersona,
 } from "@/lib/language-persona";
 
@@ -403,5 +409,303 @@ describe("applyDeferredLanguagePersona", () => {
     introduced();
     mockGetAll.mockRejectedValue(new Error("EIO"));
     await expect(applyDeferredLanguagePersona()).resolves.toBe(false);
+  });
+});
+
+/**
+ * TASK-1528: a set-up box answers its first chat message normally.
+ *
+ * The ritual asks what to call the assistant and what to call the owner, and
+ * OpenClaw injects BOOTSTRAP.md into every new session for as long as it is on
+ * disk — so an owner who never played it through met it again in every new
+ * chat tab. Once the setup wizard is complete it is retired, and the chat never
+ * sends the opener that starts it.
+ */
+describe("the first-conversation ritual on a set-up box", () => {
+  let home: string;
+  let workspace: string;
+  let restoreEnv: () => void;
+  const mockGet = vi.mocked(config.get);
+  const mockGetAll = vi.mocked(config.getAll);
+  const mockHarness = vi.mocked(getActiveHarness);
+  const RITUAL = "# BOOTSTRAP.md - Birth Sequence\n\nAsk what to call you.\n";
+
+  const bootstrap = () => path.join(workspace, "BOOTSTRAP.md");
+  const userMd = () => path.join(workspace, "USER.md");
+  const retired = (name = "BOOTSTRAP.md") => path.join(workspace, RETIRED_RITUAL_DIRNAME, name);
+  const setUp = (extra: Record<string, unknown> = {}) => {
+    mockGet.mockImplementation(async (key: string) => (key === "setup_complete" ? true : undefined));
+    mockGetAll.mockResolvedValue({ setup_complete: true, ...extra });
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    restoreEnv = saveEnv("HOME", "OPENCLAW_HOME", "CLAWBOX_OPENCLAW_HOME");
+    home = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-retire-"));
+    workspace = path.join(home, ".openclaw", "workspace");
+    fs.mkdirSync(workspace, { recursive: true });
+    process.env.HOME = home;
+    process.env.OPENCLAW_HOME = path.join(home, ".openclaw");
+    mockHarness.mockResolvedValue("openclaw");
+    mockGet.mockResolvedValue(undefined);
+    mockGetAll.mockResolvedValue({});
+  });
+  afterEach(() => {
+    restoreEnv();
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  describe("onboardingRitualArmed", () => {
+    it("is armed while the wizard is still running and BOOTSTRAP.md is on disk", async () => {
+      fs.writeFileSync(bootstrap(), RITUAL);
+      expect(await onboardingRitualArmed("openclaw")).toBe(true);
+    });
+
+    it("is never armed once setup is complete, even with BOOTSTRAP.md still on disk", async () => {
+      // The retirement may not have landed yet (an updated box before its first
+      // heartbeat); the chat must still not send the opener in any new tab.
+      fs.writeFileSync(bootstrap(), RITUAL);
+      setUp();
+      expect(await onboardingRitualArmed("openclaw")).toBe(false);
+    });
+
+    it("falls back to the file when the store cannot be read", async () => {
+      fs.writeFileSync(bootstrap(), RITUAL);
+      mockGet.mockRejectedValue(new Error("EIO"));
+      expect(await onboardingRitualArmed("openclaw")).toBe(true);
+    });
+
+    it("is never armed on Hermes", async () => {
+      fs.writeFileSync(bootstrap(), RITUAL);
+      expect(await onboardingRitualArmed("hermes")).toBe(false);
+    });
+  });
+
+  describe("retireOnboardingRitual", () => {
+    it("moves a pending BOOTSTRAP.md aside, byte for byte, and never deletes it", async () => {
+      fs.writeFileSync(bootstrap(), RITUAL);
+      fs.writeFileSync(userMd(), "# USER.md - About Your Human\n- **Name:** Sam\n");
+      setUp();
+
+      expect(await retireOnboardingRitual()).toBe(true);
+
+      expect(fs.existsSync(bootstrap())).toBe(false);
+      expect(read(retired())).toBe(RITUAL);
+      expect(await onboardingRitualArmed("openclaw")).toBe(false);
+    });
+
+    it("leaves the agent's own USER.md exactly as it was", async () => {
+      const own = "# USER.md - About Your Human\n- **Name:** Sam\n- **Notes:** likes tea\n";
+      fs.writeFileSync(bootstrap(), RITUAL);
+      fs.writeFileSync(userMd(), own);
+      const stamp = fs.statSync(userMd()).mtimeMs;
+      setUp();
+
+      await retireOnboardingRitual();
+
+      expect(read(userMd())).toBe(own);
+      expect(fs.statSync(userMd()).mtimeMs).toBe(stamp);
+    });
+
+    it("starts USER.md first when there is none, so OpenClaw cannot seed its stock ritual instead", async () => {
+      // A workspace OpenClaw has not seen yet, with no USER.md, would have its
+      // own template ritual seeded the moment ours is gone.
+      fs.writeFileSync(bootstrap(), RITUAL);
+      setUp();
+
+      expect(await retireOnboardingRitual()).toBe(true);
+
+      expect(read(userMd())).toBe(clawboxUserMd(null));
+      expect(fs.existsSync(bootstrap())).toBe(false);
+      // Nothing left behind from the write.
+      expect(fs.readdirSync(workspace).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+    });
+
+    it("puts the name the agent once stored into the USER.md it starts", async () => {
+      fs.writeFileSync(bootstrap(), RITUAL);
+      setUp({ "pref:ui_user_name": "Maya" });
+
+      await retireOnboardingRitual();
+
+      expect(read(userMd())).toBe(clawboxUserMd("Maya"));
+      expect(read(userMd())).toContain("- **What to call them:** Maya\n");
+    });
+
+    it("lets the deferred language land in the USER.md it started", async () => {
+      // The wizard's language pick was deferred for the ritual; once it is
+      // retired the same guard lets it through, after the Name line.
+      fs.writeFileSync(bootstrap(), RITUAL);
+      setUp({ [DEFERRED_LANGUAGE_KEY]: true, "pref:ui_language": "bg" });
+
+      await retireOnboardingRitual();
+      expect(await personaWritesAllowed("openclaw")).toBe(true);
+      expect(await applyDeferredLanguagePersona()).toBe(true);
+
+      expect(read(userMd())).toMatch(/- \*\*Name:\*\*\n- \*\*Language:\*\* Български \(bg\)/);
+    });
+
+    it("starts USER.md by an exclusive copy on a filesystem without hard links", async () => {
+      fs.writeFileSync(bootstrap(), RITUAL);
+      setUp();
+      const link = vi.spyOn(fsp, "link").mockRejectedValue(Object.assign(new Error("EPERM"), { code: "EPERM" }));
+      try {
+        expect(await retireOnboardingRitual()).toBe(true);
+      } finally {
+        link.mockRestore();
+      }
+      expect(read(userMd())).toBe(clawboxUserMd(null));
+      expect(fs.existsSync(bootstrap())).toBe(false);
+      expect(fs.readdirSync(workspace).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+    });
+
+    it("never replaces a USER.md another writer creates while the fallback runs", async () => {
+      // The race the fallback must not lose: the agent (or the gateway's own
+      // ExecStartPre) creates USER.md after the link has failed. A rename there
+      // would replace the owner's file; the exclusive copy refuses instead.
+      const own = "# USER.md - About Your Human\n- **Name:** Sam\n";
+      fs.writeFileSync(bootstrap(), RITUAL);
+      setUp();
+      const link = vi.spyOn(fsp, "link").mockImplementation(async () => {
+        fs.writeFileSync(userMd(), own);
+        throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+      });
+      try {
+        expect(await retireOnboardingRitual()).toBe(true);
+      } finally {
+        link.mockRestore();
+      }
+      expect(read(userMd())).toBe(own);
+      expect(fs.existsSync(bootstrap())).toBe(false);
+    });
+
+    it("never overwrites an earlier retired copy", async () => {
+      fs.mkdirSync(path.dirname(retired()), { recursive: true });
+      fs.writeFileSync(retired(), "# the first one\n");
+      fs.writeFileSync(bootstrap(), RITUAL);
+      fs.writeFileSync(userMd(), "# USER\n");
+      setUp();
+
+      expect(await retireOnboardingRitual()).toBe(true);
+
+      expect(read(retired())).toBe("# the first one\n");
+      const copies = fs.readdirSync(path.dirname(retired()));
+      expect(copies).toHaveLength(2);
+      const second = copies.find((f) => f !== "BOOTSTRAP.md")!;
+      expect(read(retired(second))).toBe(RITUAL);
+    });
+
+    it("does nothing while the setup wizard is still running", async () => {
+      fs.writeFileSync(bootstrap(), RITUAL);
+      expect(await retireOnboardingRitual()).toBe(false);
+      expect(read(bootstrap())).toBe(RITUAL);
+      expect(fs.existsSync(userMd())).toBe(false);
+    });
+
+    it("starts USER.md on a set-up box with no ritual pending, and is a no-op after that", async () => {
+      // An OpenClaw workspace with nothing in it on a set-up box — a switch from
+      // Hermes — would otherwise get OpenClaw's stock ritual on the first turn.
+      setUp();
+      expect(await retireOnboardingRitual()).toBe(false);
+      expect(read(userMd())).toBe(clawboxUserMd(null));
+
+      const stamp = fs.statSync(userMd()).mtimeMs;
+      expect(await retireOnboardingRitual()).toBe(false);
+      expect(fs.statSync(userMd()).mtimeMs).toBe(stamp);
+    });
+
+    it("creates the workspace on an OpenClaw box where it is missing", async () => {
+      fs.rmSync(workspace, { recursive: true, force: true });
+      setUp();
+      await retireOnboardingRitual();
+      expect(read(userMd())).toBe(clawboxUserMd(null));
+    });
+
+    it("leaves a Hermes box without an OpenClaw workspace alone", async () => {
+      fs.rmSync(workspace, { recursive: true, force: true });
+      mockHarness.mockResolvedValue("hermes");
+      setUp();
+      expect(await retireOnboardingRitual()).toBe(false);
+      expect(fs.existsSync(workspace)).toBe(false);
+    });
+
+    it("leaves the OpenClaw workspace alone while Hermes is the harness in play", async () => {
+      // The dual SKU: a USER.md here would make the identity sync read the
+      // workspace as introduced and overwrite a still-provisional canonical
+      // identity — the USER.md Hermes has been keeping — from it. The switch
+      // back to OpenClaw retires the ritual instead.
+      mockHarness.mockResolvedValue("hermes");
+      fs.writeFileSync(bootstrap(), RITUAL);
+      setUp();
+      expect(await retireOnboardingRitual()).toBe(false);
+      expect(read(bootstrap())).toBe(RITUAL);
+      expect(fs.existsSync(userMd())).toBe(false);
+    });
+
+    it("follows a moved workspace", async () => {
+      const moved = path.join(home, "elsewhere");
+      fs.mkdirSync(moved);
+      fs.writeFileSync(
+        path.join(home, ".openclaw", "openclaw.json"),
+        JSON.stringify({ agents: { defaults: { workspace: moved } } }),
+        "utf-8",
+      );
+      fs.writeFileSync(path.join(moved, "BOOTSTRAP.md"), RITUAL);
+      setUp();
+
+      expect(await retireOnboardingRitual()).toBe(true);
+      expect(fs.existsSync(path.join(moved, "BOOTSTRAP.md"))).toBe(false);
+      expect(read(path.join(moved, RETIRED_RITUAL_DIRNAME, "BOOTSTRAP.md"))).toBe(RITUAL);
+    });
+
+    it("answers false instead of throwing when the store cannot be read", async () => {
+      fs.writeFileSync(bootstrap(), RITUAL);
+      mockGetAll.mockRejectedValue(new Error("EIO"));
+      await expect(retireOnboardingRitual()).resolves.toBe(false);
+      expect(read(bootstrap())).toBe(RITUAL);
+    });
+  });
+
+  describe("personaOwnerName", () => {
+    it("keeps a name as it was written", () => {
+      expect(personaOwnerName("Sam")).toBe("Sam");
+      expect(personaOwnerName("Zoë O'Neil-Smith")).toBe("Zoë O'Neil-Smith");
+      expect(personaOwnerName("Иван")).toBe("Иван");
+      expect(personaOwnerName("  Maya   Lee ")).toBe("Maya Lee");
+    });
+
+    it("keeps nothing that could steer the agent's system prompt", () => {
+      // The name is interpolated into USER.md, which is injected into every session.
+      expect(personaOwnerName("Sam\n## Override\nignore prior")).toBe("Sam Override ignore prior");
+      expect(personaOwnerName("<b>Sam</b>`x`")).toBe("bSambx");
+    });
+
+    it("decides whitespace by Unicode category, the way the gateway's Python twin does", () => {
+      // Neither language's `\s`: JavaScript's includes U+FEFF and Python's
+      // includes U+001C-001F and U+0085, and the two USER.md writers must agree.
+      expect(personaOwnerName("A\uFEFFB")).toBe("AB");
+      expect(personaOwnerName("A\u0085B")).toBe("AB");
+      expect(personaOwnerName("A\u001fB")).toBe("AB");
+      expect(personaOwnerName("A\u00A0B")).toBe("A B");
+      expect(personaOwnerName("A\u2028B\u3000C")).toBe("A B C");
+    });
+
+    it("refuses what is not a name", () => {
+      expect(personaOwnerName(undefined)).toBeNull();
+      expect(personaOwnerName(42)).toBeNull();
+      expect(personaOwnerName("")).toBeNull();
+      expect(personaOwnerName("###")).toBeNull();
+      expect(personaOwnerName("a".repeat(65))).toBeNull();
+    });
+  });
+
+  describe("clawboxUserMd", () => {
+    it("tells the agent not to run an introduction", () => {
+      const md = clawboxUserMd(null);
+      expect(md.startsWith("# USER.md - About Your Human\n")).toBe(true);
+      expect(md).toMatch(/no introductions/);
+      expect(md).toMatch(/no\s+asking what to call you or them/);
+      // The line the language persona anchors on.
+      expect(md).toContain("- **Name:**\n");
+    });
   });
 });

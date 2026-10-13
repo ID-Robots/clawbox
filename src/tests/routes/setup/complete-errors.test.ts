@@ -7,6 +7,11 @@ vi.mock("@/lib/config-store", () => ({
   setMany: vi.fn(),
 }));
 
+vi.mock("@/lib/language-persona", () => ({
+  retireOnboardingRitual: vi.fn(async () => false),
+  applyDeferredLanguagePersona: vi.fn(async () => false),
+}));
+
 vi.mock("@/lib/auth", () => ({
   getSessionSigningSecret: vi.fn(),
   createSessionCookie: vi.fn(),

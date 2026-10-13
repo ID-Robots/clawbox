@@ -22,7 +22,7 @@ const liveness = {
   mayRestart: vi.fn(),
   markRestarted: vi.fn(),
 };
-const persona = { applyDeferredLanguagePersona: vi.fn() };
+const persona = { applyDeferredLanguagePersona: vi.fn(), retireOnboardingRitual: vi.fn() };
 
 vi.mock("@/lib/language-persona", () => persona);
 vi.mock("@/lib/cloudflared", () => cloudflared);
@@ -45,6 +45,7 @@ beforeEach(() => {
   liveness.mayRestart.mockReturnValue(true);
   cloudflared.startTunnelService.mockResolvedValue({ bootPersisted: true, bootPersistWarning: null });
   persona.applyDeferredLanguagePersona.mockResolvedValue(false);
+  persona.retireOnboardingRitual.mockResolvedValue(false);
   // Default for the behavioural tests below: the systemd unit, presenting the
   // install's internal token.
   internalToken.isInternalRequest.mockReturnValue(true);
@@ -232,5 +233,44 @@ describe("the deferred language pick", () => {
     const res = await tick();
     expect(res.status).toBe(401);
     expect(persona.applyDeferredLanguagePersona).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * TASK-1528: a set-up box runs no first-conversation ritual. A box updated
+ * while one was still pending, and whose gateway has not restarted since, has
+ * nothing but this tick to retire it — and the language payback waits on
+ * exactly that retirement, so it has to come first.
+ */
+describe("the pending first-conversation ritual", () => {
+  it("is retired on every tick, before the language payback", async () => {
+    cloudflared.readTunnelUrl.mockResolvedValue("https://alive.trycloudflare.com");
+    liveness.checkTunnelLiveness.mockResolvedValue("alive");
+
+    await tick();
+    expect(persona.retireOnboardingRitual).toHaveBeenCalledTimes(1);
+    expect(persona.retireOnboardingRitual.mock.invocationCallOrder[0]).toBeLessThan(
+      persona.applyDeferredLanguagePersona.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("is retired on the dead-tunnel path too", async () => {
+    cloudflared.readTunnelUrl.mockResolvedValue("https://dead.trycloudflare.com");
+    liveness.checkTunnelLiveness.mockResolvedValue("dead");
+
+    const res = await tick();
+    expect(res.status).toBe(200);
+    expect(persona.retireOnboardingRitual).toHaveBeenCalledTimes(1);
+  });
+
+  it("is not touched for a caller the tick refuses", async () => {
+    internalToken.isInternalRequest.mockReturnValue(false);
+    routeAuth.requireSession.mockResolvedValue(
+      NextResponse.json({ error: "Authentication required" }, { status: 401 }),
+    );
+
+    const res = await tick();
+    expect(res.status).toBe(401);
+    expect(persona.retireOnboardingRitual).not.toHaveBeenCalled();
   });
 });
