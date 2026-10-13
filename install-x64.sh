@@ -1307,11 +1307,14 @@ step_cloudflared_install() {
   # A failed download or a bad checksum is a WARNING, as on the appliance:
   # the box still installs, and the Remote Control panel's button runs this
   # step again on demand.
-  if ! curl -fsSL --retry 3 --retry-delay 2 -o "$tmp" "$url"; then
+  # `--connect-timeout` bounds a black hole and `--speed-time` a transfer that
+  # has stopped moving (under 1 byte/s for a minute); `--retry` retries both.
+  # No `--max-time`, which would fail a download that is merely slow.
+  if ! curl -fsSL --connect-timeout 15 --speed-limit 1 --speed-time 60 --retry 3 --retry-delay 2 -o "$tmp" "$url"; then
     echo "  WARNING: cloudflared download failed ($url); remote control will be unavailable until installed" >&2
     rm -f "$tmp" "$meta" "$sums"; return 0
   fi
-  if ! curl -fsSL --retry 3 --retry-delay 2 -H "Accept: application/vnd.github+json" -o "$meta" "$meta_url"; then
+  if ! curl -fsSL --connect-timeout 15 --speed-limit 1 --speed-time 60 --retry 3 --retry-delay 2 -H "Accept: application/vnd.github+json" -o "$meta" "$meta_url"; then
     echo "  WARNING: could not fetch the cloudflared ${version} release metadata; not installing an unverified binary" >&2
     rm -f "$tmp" "$meta" "$sums"; return 0
   fi
