@@ -45,7 +45,21 @@ export function refuse(error: string, code: string, status: number, extra: Recor
 }
 
 const LOCAL_TIMEOUT_MS = 90_000;
-const CLOUD_TIMEOUT_MS = 60_000;
+/**
+ * How long one cloud request may take to answer AT ALL — its response headers.
+ * An OpenAI-compatible speech route streams: the headers leave as soon as the
+ * synthesis has started, long before the last byte. A server that accepted the
+ * connection and has said nothing after this long is not going to; the chat
+ * used to show "Speaking the reply…" for a whole minute over exactly that.
+ */
+export const CLOUD_FIRST_BYTE_TIMEOUT_MS = 10_000;
+/**
+ * One cloud request, from asking to its last byte. Once the headers are in,
+ * the body has whatever is left of this: room for the longest reply the chat
+ * sends (SPEECH_MAX_CHARS, a minute and a half of speech), and still an end to
+ * a stream that stalls halfway.
+ */
+export const CLOUD_RESPONSE_TIMEOUT_MS = 45_000;
 const DEFAULT_CLOUD_MODEL = "gpt-4o-mini-tts";
 
 /** Megabytes as the script counts them, said as gigabytes: 2412 → "2.4", 3000 → "3". */
@@ -141,6 +155,62 @@ function refusedTheFormat(status: number): boolean {
   return status === 400 || status === 404 || status === 415 || status === 422;
 }
 
+/** The cloud did not answer one request. `started`: its headers had come, and the body never finished. */
+class CloudSilence extends Error {
+  constructor(readonly started: boolean) {
+    super(started ? "the cloud voice stopped sending" : "the cloud voice did not answer");
+  }
+}
+
+/** Rejects once `signal` aborts; never settles otherwise. */
+function whenAborted(signal: AbortSignal): Promise<never> {
+  const aborted = new Promise<never>((_, reject) => {
+    signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+  });
+  // Raced below, and a race that has already settled still owns it; this is
+  // for the one path that never reaches a race (a fetch that throws at once).
+  aborted.catch(() => {});
+  return aborted;
+}
+
+type CloudAnswer = { res: Response; audio: Uint8Array };
+
+/**
+ * One request to the cloud's speech route, held to both deadlines: its
+ * headers within CLOUD_FIRST_BYTE_TIMEOUT_MS, the whole answer within
+ * CLOUD_RESPONSE_TIMEOUT_MS. A 2xx comes back with its bytes read; a refusal
+ * comes back with none, its body cancelled — only its status is ever used.
+ * Throws `CloudSilence` when the cloud did not answer in time or the
+ * connection failed.
+ *
+ * The deadlines are RACED as well as handed to `fetch` as its signal: the
+ * signal tears a real request down, and the race makes sure nothing waits on
+ * one that does not listen to it.
+ */
+async function askCloudOnce(endpoint: string, init: RequestInit): Promise<CloudAnswer> {
+  const controller = new AbortController();
+  const gaveUp = whenAborted(controller.signal);
+  const firstByte = setTimeout(() => controller.abort(), CLOUD_FIRST_BYTE_TIMEOUT_MS);
+  const whole = setTimeout(() => controller.abort(), CLOUD_RESPONSE_TIMEOUT_MS);
+  let started = false;
+  try {
+    const res = await Promise.race([fetch(endpoint, { ...init, signal: controller.signal }), gaveUp]);
+    started = true;
+    clearTimeout(firstByte);
+    if (!res.ok) {
+      res.body?.cancel().catch(() => {});
+      return { res, audio: new Uint8Array(0) };
+    }
+    return { res, audio: new Uint8Array(await Promise.race([res.arrayBuffer(), gaveUp])) };
+  } catch {
+    controller.abort();
+    throw new CloudSilence(started);
+  } finally {
+    clearTimeout(firstByte);
+    clearTimeout(whole);
+  }
+}
+
 /**
  * Speak `text` with the cloud voice, in `format`.
  *
@@ -150,6 +220,19 @@ function refusedTheFormat(status: number): boolean {
  * voice must never be lost to. A REPLY asks for the compressed format the chat
  * said it can play (src/lib/voice-reply-format.ts), so the cloud does the
  * compressing and nothing is transcoded on the box.
+ *
+ * A cloud that does not answer is given up on quickly, and said so
+ * (`cloud_no_answer`): the chat shows "Speaking the reply…" for exactly as
+ * long as this takes, and a server that took the connection and sent nothing
+ * used to hold that line for a silent minute. Each request has to start
+ * answering within CLOUD_FIRST_BYTE_TIMEOUT_MS and finish within
+ * CLOUD_RESPONSE_TIMEOUT_MS (askCloudOnce); one that never answered at all is
+ * asked again ONCE, for the whole call. Worst case, then: at most three
+ * requests — the one asked for, the single retry, and the MP3 one a refused
+ * Opus earns — of which only the last can run past its headers, since a
+ * refusal ends at its headers and an answer that started is never asked
+ * again. That is at most 2 × 10 s + 45 s = 65 s, against 2 × 60 s before; a
+ * cloud that never answers is given up on after 2 × 10 s = 20 s.
  */
 export async function speakInCloud(
   config: VoiceConfigView,
@@ -172,28 +255,41 @@ export async function speakInCloud(
   // only — the same rule the coding harness applies to its proxy URL.
   const endpoint = speechEndpoint(target.baseUrl);
   if (!endpoint) return refuse("The cloud voice's endpoint is not one this box will send its credential to.", "cloud_not_set_up", 409);
-  const ask = (responseFormat: ReplyAudioFormat) => fetch(endpoint, {
+  const request = (responseFormat: ReplyAudioFormat): RequestInit => ({
     method: "POST",
     headers: { Authorization: `Bearer ${target.apiKey}`, "Content-Type": "application/json" },
     // WAV for an audition, the reply's own format for a reply — see above.
     body: JSON.stringify({ model: target.model ?? DEFAULT_CLOUD_MODEL, input: text, voice, response_format: responseFormat }),
-    signal: AbortSignal.timeout(CLOUD_TIMEOUT_MS),
   });
-  let res: Response;
+  // The one retry, shared by every request below so it cannot multiply with
+  // the format fallback. Only for a request the cloud never started answering
+  // (no headers in time, or the connection failed): a refusal is an answer,
+  // and a body that stalled has already had its generous share.
+  let retried = false;
+  const ask = async (responseFormat: ReplyAudioFormat): Promise<CloudAnswer> => {
+    try {
+      return await askCloudOnce(endpoint, request(responseFormat));
+    } catch (err) {
+      if (retried || (err instanceof CloudSilence && err.started)) throw err;
+      retried = true;
+      return await askCloudOnce(endpoint, request(responseFormat));
+    }
+  };
+  let answer: CloudAnswer;
   let asked = format;
   try {
-    res = await ask(format);
+    answer = await ask(format);
     // A proxy that does not do Opus is asked once more for MP3, which every
     // browser plays and every OpenAI-compatible speech route must serve.
-    if (!res.ok && format === "opus" && refusedTheFormat(res.status)) {
+    if (!answer.res.ok && format === "opus" && refusedTheFormat(answer.res.status)) {
       asked = "mp3";
-      res = await ask(asked);
+      answer = await ask(asked);
     }
   } catch {
     return refuse("The cloud voice did not answer.", "cloud_no_answer", 502);
   }
+  const { res, audio } = answer;
   if (!res.ok) return refuse(`The cloud voice refused (HTTP ${res.status}).`, "cloud_refused", 502, { status: res.status });
-  const audio = new Uint8Array(await res.arrayBuffer());
   // Labelled by what the bytes ARE, then by what the cloud said, then by what
   // was asked for: a proxy that ignored `response_format` still gets the
   // player the right type, and the floor for the format it actually sent.
