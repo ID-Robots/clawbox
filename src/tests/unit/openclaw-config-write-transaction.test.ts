@@ -302,6 +302,36 @@ describe("when the one write cannot be made", () => {
     expect(events).toEqual(["inner looked", "outer: rethrown refused"]);
   });
 
+  it("keeps a fatal failure a flush surfaces inside an UNRELATED boundary fatal — that boundary's catch is not the write's", async () => {
+    // The configure route flushes before a key paste, and that paste can sit
+    // inside `ensureFallbackModel`'s best-effort boundary. A write staged
+    // earlier with no boundary of its own (the step-3 batch) failing in that
+    // flush is the save's failure, not the fallback's warning.
+    writeFile({ models: {} });
+    await refusePatchesTouching("providers");
+    state.cliRefuse = (argv) => (argv.join(" ").includes("models.providers.bad") ? "refused" : null);
+    const caught: unknown[] = [];
+    await expect(lib.withConfigWriteScope(async () => {
+      const tx = lib.beginConfigWriteTransaction("test");
+      await lib.runOpenclawConfigSet(["models.providers.bad", JSON.stringify({ x: 1 }), "--json"]);
+      await lib.configWriteBoundary({ onError: (err) => { caught.push(err); } }, () => lib.flushConfigWrites());
+      await tx.commit();
+    })).rejects.toThrow(/refused/);
+    expect(caught).toEqual([]);
+  });
+
+  it("throws a fatal flush failure from the commit even when something swallowed it on the way", async () => {
+    writeFile({ models: {} });
+    await refusePatchesTouching("providers");
+    state.cliRefuse = (argv) => (argv.join(" ").includes("models.providers.bad") ? "refused" : null);
+    await expect(lib.withConfigWriteScope(async () => {
+      const tx = lib.beginConfigWriteTransaction("test");
+      await lib.runOpenclawConfigSet(["models.providers.bad", JSON.stringify({ x: 1 }), "--json"]);
+      await lib.flushConfigWrites().catch(() => {});
+      await tx.commit();
+    })).rejects.toThrow(/refused/);
+  });
+
   it("lets a handler write while the commit runs — the configure route's write-past-the-refusal", async () => {
     writeFile({ models: {} });
     await refusePatchesTouching("providers");

@@ -746,6 +746,8 @@ export class ConfigWriteTransaction {
   private staged: StagedConfigWrite[] = [];
   private state: "open" | "settling" | "closed" = "open";
   private settledAs: ConfigWriteSettlement | null = null;
+  /** The failure no boundary took, from a flush that closed the transaction. */
+  private fatal: unknown = null;
 
   /** `label` names the transaction in the journal; a literal, never request text. */
   constructor(readonly label: string) {}
@@ -795,6 +797,12 @@ export class ConfigWriteTransaction {
    * Make what is staged so far, and stay open. A fatal failure — one no
    * boundary takes — closes the transaction and is thrown: what follows it in
    * the request must not be staged into a commit that has already failed.
+   *
+   * The failure is the REQUEST's. A flush runs wherever the request happens to
+   * be — inside a best-effort boundary around a key paste, say — and that
+   * boundary's `catch` is not the failed write's: {@link configWriteBoundary}
+   * rethrows it untouched, and {@link commit} throws it again if anything
+   * swallowed it on the way.
    */
   async flush(): Promise<void> {
     if (this.state !== "open" || this.staged.length === 0) return;
@@ -808,7 +816,10 @@ export class ConfigWriteTransaction {
       this.state = "open";
     } catch (err) {
       this.state = "closed";
-      throw err;
+      const fatal = err instanceof Object ? err : new Error(String(err));
+      fatalConfigWriteFailures.add(fatal);
+      this.fatal = fatal;
+      throw fatal;
     }
   }
 
@@ -819,6 +830,7 @@ export class ConfigWriteTransaction {
     } finally {
       this.state = "closed";
     }
+    if (this.fatal) throw this.fatal;
   }
 
   /** Close without writing what is staged. */
@@ -914,7 +926,9 @@ export async function configWriteBoundary(
   } catch (err) {
     node.open = false;
     node.failed = true;
-    if (!handlers.onError) throw err;
+    // A failure a flush inside `body` met in a write no boundary took — staged
+    // before this boundary, or outside it — is the request's, not this catch's.
+    if (!handlers.onError || (err instanceof Object && fatalConfigWriteFailures.has(err))) throw err;
     // A flush inside `body` already handed this boundary a failure.
     if (!node.aborted) await handlers.onError(err);
     return;
@@ -1083,6 +1097,9 @@ interface ConfigWriteScopeStore {
 
 const configWriteScopeStorage = new AsyncLocalStorage<ConfigWriteScopeStore>();
 const configWriteBoundaryStorage = new AsyncLocalStorage<ConfigWriteBoundaryNode>();
+
+/** Failures a flush threw because no boundary took them — see {@link ConfigWriteTransaction.flush}. */
+const fatalConfigWriteFailures = new WeakSet<object>();
 
 /**
  * The request a transaction may be opened in. Wrapped around a route's whole

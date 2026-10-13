@@ -329,7 +329,7 @@ describe("what is left for the CLI", () => {
   it("a uid that is not this process's, a cwd or an env", async () => {
     writeFile({});
     await lib.runOpenclawConfigSet(["models.mode", "merge"], { uid: (process.getuid?.() ?? 0) + 1 });
-    await lib.runOpenclawConfigSet(["models.mode", "merge"], { env: { HOME: "/elsewhere" } });
+    await lib.runOpenclawConfigSet(["models.mode", "merge"], { env: { HOME: "/elsewhere" } as unknown as NodeJS.ProcessEnv });
     expect(state.gateway!.calls).toEqual([]);
     expect(cliCalls()).toHaveLength(2);
   });
