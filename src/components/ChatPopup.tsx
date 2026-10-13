@@ -479,7 +479,7 @@ import {
   classifyStagingFailure,
   createPreviewUrl,
   isPreviewableImage,
-  partitionAttachments,
+  partitionAttachments, refusalReason,
   revokePreviews,
   type StagingFailure,
 } from '@/lib/chat-attachments'
@@ -4333,7 +4333,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // documents — rather than failing silently.
     const { accepted, refused } = partitionAttachments(files, caps)
     if (refused.length > 0) {
-      setAttachmentError({ reason: 'imagesOnly', detail: null, file: refused[0].name || '' })
+      setAttachmentError({ reason: refusalReason(refused[0]), detail: null, file: refused[0].name || '' })
     }
     if (accepted.length === 0) return
     // Which composer these uploads belong to. Closing the chat bumps it, so a

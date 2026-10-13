@@ -20,6 +20,17 @@ import {
 } from "./transport";
 
 /**
+ * Whether a staged attachment is a picture for `--image`. The browser's MIME
+ * label first; a file it could not label is judged by its extension, the same
+ * set Hermes' own path resolver treats as a picture.
+ */
+function isImageAttachment(a: { type: string; path: string }): boolean {
+  if (typeof a.type === "string" && a.type) return a.type.startsWith("image/");
+  return /\.(png|jpe?g|gif|webp|bmp|avif)$/i.test(a.path);
+}
+
+
+/**
  * The Hermes side of the transport: one HTTP turn per message, threaded by a
  * session id the box echoes back.
  *
@@ -428,6 +439,8 @@ export class HermesAdapter implements HarnessAdapter {
       // configuration still says claude-fable-5." Configuration is never
       // message content; the message is now exactly what the customer typed.
       const outbound = req.text;
+      const imageAttachments = req.attachments.filter((a) => isImageAttachment(a));
+      const documentAttachments = req.attachments.filter((a) => !isImageAttachment(a));
       const res = await this.fetchImpl(CHAT_ROUTE, {
         method: "POST",
         headers: {
@@ -441,8 +454,13 @@ export class HermesAdapter implements HarnessAdapter {
           // Staged absolute paths. The route re-resolves every one of them
           // against the staging root before any of it reaches argv — this side
           // is a convenience, not a check.
-          ...(req.attachments.length
-            ? { imagePaths: req.attachments.map((a) => a.path) }
+          // Pictures ride `--image`; anything else is named in the prompt for
+          // the agent's file tools (the route writes the line).
+          ...(imageAttachments.length
+            ? { imagePaths: imageAttachments.map((a) => a.path) }
+            : {}),
+          ...(documentAttachments.length
+            ? { documentPaths: documentAttachments.map((a) => a.path) }
             : {}),
           ...(model ? { model } : {}),
           ...(provider ? { provider } : {}),

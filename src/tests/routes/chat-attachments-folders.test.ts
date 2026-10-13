@@ -19,6 +19,23 @@ vi.mock("@/lib/harness", async (importOriginal) => ({
   getActiveHarness: async () => harness,
 }));
 
+/**
+ * A harness with no way to open a document. Both editions read documents
+ * since 2026-10-13 (Hermes with its own file tools), so the route's second
+ * gate is exercised against a capability table that says no.
+ */
+let documentsOff = false;
+vi.mock("@/lib/harness/capabilities", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/harness/capabilities")>();
+  return {
+    ...actual,
+    capabilitiesFor: (...args: Parameters<typeof actual.capabilitiesFor>) => {
+      const caps = actual.capabilitiesFor(...args);
+      return documentsOff ? { ...caps, canAttachDocuments: false } : caps;
+    },
+  };
+});
+
 const BOUNDARY = "----clawboxfolderboundary";
 const BATCH = "0123456789abcdef0123456789abcdef";
 
@@ -139,8 +156,13 @@ describe("/setup-api/chat/attachments — a dropped folder", () => {
 
   it("still refuses a document inside a folder on a pictures-only box", async () => {
     harness = "hermes";
+    documentsOff = true;
     vi.resetModules();
     POST = (await import("@/app/setup-api/chat/attachments/route")).POST;
-    expect((await stage("site/notes.txt")).status).toBe(415);
+    try {
+      expect((await stage("site/notes.txt")).status).toBe(415);
+    } finally {
+      documentsOff = false;
+    }
   });
 });

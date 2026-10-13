@@ -485,6 +485,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.attachment.error.session": "Your session expired. Reload the page and attach {name} again.",
     "chat.attachment.error.box": "This ClawBox could not save {name}. Try attaching it again.",
     "chat.attachment.error.imagesOnly": "This ClawBox can look at pictures, but not documents yet, so {name} was not attached.",
+    "chat.attachment.error.noPictures": "This ClawBox cannot look at pictures yet, so {name} was not attached.",
     "chat.attachment.dropHint": "Drop files or folders to attach",
     "chat.attachment.dropLimits": "Up to {count} files and {size} per drop, {fileSize} per file",
     "chat.attachment.reading": "Reading the dropped files…",

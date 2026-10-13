@@ -368,10 +368,32 @@ describe("HermesAdapter", () => {
     ]);
   });
 
+  it("sends a document as documentPaths, never as an image", async () => {
+    // The route names it in the prompt for the agent's file tools; `--image`
+    // would hand a text file to the vision path.
+    const { adapter, calls } = makeAdapter(ok({ text: "otter", sessionId: "s1" }));
+    await adapter.sendTurn({
+      text: "what is in this file?",
+      attachments: [
+        { name: "a.png", path: "/home/clawbox/clawbox/data/chat-media/chat-attachments/a.png", type: "image/png" },
+        { name: "notes.txt", path: "/home/clawbox/clawbox/data/chat-media/chat-attachments/notes.txt", type: "text/plain" },
+        { name: "data", path: "/home/clawbox/clawbox/data/chat-media/chat-attachments/data", type: "" },
+      ],
+      idempotencyKey: "k",
+    });
+    expect(calls[0].body.imagePaths).toEqual(["/home/clawbox/clawbox/data/chat-media/chat-attachments/a.png"]);
+    expect(calls[0].body.documentPaths).toEqual([
+      "/home/clawbox/clawbox/data/chat-media/chat-attachments/notes.txt",
+      "/home/clawbox/clawbox/data/chat-media/chat-attachments/data",
+    ]);
+    expect(calls[0].body.message).toBe("what is in this file?");
+  });
+
   it("sends no imagePaths field at all on an ordinary turn", async () => {
     const { adapter, calls } = makeAdapter(ok({ text: "hi", sessionId: "s1" }));
     await adapter.sendTurn({ text: "hello", attachments: [], idempotencyKey: "k" });
     expect(calls[0].body).not.toHaveProperty("imagePaths");
+    expect(calls[0].body).not.toHaveProperty("documentPaths");
     expect(calls[0].body).not.toHaveProperty("displayText");
   });
 

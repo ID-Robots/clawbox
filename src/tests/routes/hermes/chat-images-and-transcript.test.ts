@@ -114,6 +114,41 @@ describe("POST /setup-api/hermes/chat", () => {
     vi.clearAllMocks();
   });
 
+  // ── Documents ─────────────────────────────────────────────────────────────
+  //
+  // 2026-10-13 smoke test: a text file could not be attached, the message went
+  // out anyway, and the agent searched the disk for it. A document is now named
+  // in the prompt the way the OpenClaw adapter names one, for the agent's own
+  // file tools — and never on `--image`.
+
+  it("names a staged document in the prompt, never on --image", async () => {
+    fs.writeFileSync(staged("notes.txt"), "the secret word is otter");
+    const res = await post({ message: "what is the secret word?", documentPaths: [staged("notes.txt")] });
+    expect(res.status).toBe(200);
+    const args = lastArgs();
+    const prompt = args[args.indexOf("-q") + 1];
+    expect(prompt).toContain(`[Attached file: ${staged("notes.txt")}]`);
+    expect(prompt).toContain("what is the secret word?");
+    expect(args).not.toContain("--image");
+  });
+
+  it("refuses a document path outside the staging root", async () => {
+    const outside = path.join(root, "secret.txt");
+    fs.writeFileSync(outside, "nope");
+    await post({ message: "read it", documentPaths: [outside, "../../etc/passwd"] });
+    const args = lastArgs();
+    const prompt = args[args.indexOf("-q") + 1];
+    expect(prompt).not.toContain("Attached file");
+    expect(prompt).not.toContain(outside);
+  });
+
+  it("shows the document in the transcript as the composer labels it", async () => {
+    fs.writeFileSync(staged("notes.txt"), "the secret word is otter");
+    await post({ message: "what is the secret word?", documentPaths: [staged("notes.txt")] });
+    const user = transcript().find((entry) => entry.role === "user");
+    expect(user.text).toBe("📎 notes.txt\nwhat is the secret word?");
+  });
+
   // ── Images ────────────────────────────────────────────────────────────────
 
   it("puts the first image on the flag the agent documents", async () => {
