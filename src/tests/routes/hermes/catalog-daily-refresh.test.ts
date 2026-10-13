@@ -76,7 +76,10 @@ vi.mock("@/lib/hermes-clawai", () => ({ reconcileClawaiModelsWithHermes: vi.fn(a
 
 // Everything the heartbeat tick does that is not this. The tunnel is alive, so
 // the route takes its ordinary path.
-vi.mock("@/lib/language-persona", () => ({ applyDeferredLanguagePersona: vi.fn(async () => false) }));
+vi.mock("@/lib/language-persona", () => ({
+  applyDeferredLanguagePersona: vi.fn(async () => false),
+  retireOnboardingRitual: vi.fn(async () => false),
+}));
 vi.mock("@/lib/cloudflared", () => ({
   readTunnelUrl: vi.fn(async () => "https://example.trycloudflare.com"),
   startTunnelService: vi.fn(async () => ({ bootPersisted: true, bootPersistWarning: null })),

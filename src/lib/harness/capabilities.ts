@@ -100,8 +100,10 @@ export interface HarnessFacts {
    * conversation, a restored side tab and a reset session are all empty too,
    * and the chat used to greet itself on every one of them.
    *
-   * False on Hermes, which runs no such ritual, and false on every box that has
-   * already been introduced — which is nearly all of them after first boot.
+   * False on Hermes, which runs no such ritual, on every box that has already
+   * been introduced, and on every box whose setup wizard is complete
+   * (TASK-1528): a set-up box answers its first message normally, so the chat
+   * never sends the opener there.
    */
   onboardingArmed: boolean;
 }

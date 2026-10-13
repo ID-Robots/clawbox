@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { setMany } from "@/lib/config-store";
 import { getSessionSigningSecret, createSessionCookie, getSessionGeneration } from "@/lib/auth";
 import { requireSession } from "@/lib/route-auth";
+import { applyDeferredLanguagePersona, retireOnboardingRitual } from "@/lib/language-persona";
 
 export async function POST(request: Request) {
   // Second line of defence, the same one setup/reset carries. Middleware's
@@ -26,6 +27,14 @@ export async function POST(request: Request) {
       setup_completed_at: timestamp,
       setup_progress_step: undefined,
     });
+
+    // A set-up box answers its first chat message normally (TASK-1528): end
+    // the first-conversation ritual the gateway armed at first boot, then pay
+    // the persona the language the wizard's picker had to defer for it. Both
+    // never throw, and both are repeated by the heartbeat and the gateway's
+    // ExecStartPre, so a failure here costs minutes, not the setup.
+    await retireOnboardingRitual();
+    await applyDeferredLanguagePersona();
 
     // Auto-login after first setup so user isn't shown the login screen
     const res = NextResponse.json({ success: true });

@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { PREFERENCE_LANGUAGES } from "@/lib/preference-schema";
-import { writeLanguagePersona } from "@/lib/language-persona";
+import { clawboxUserMd, personaOwnerName, writeLanguagePersona } from "@/lib/language-persona";
 
 /**
  * OpenClaw decides on the agent's FIRST reply whether to run its
@@ -146,7 +146,12 @@ describe("config/clawbox-bootstrap.md", () => {
 describe("gateway-pre-start: the bootstrap seed", () => {
   const ws = () => path.join(dir, "workspace");
   const bootstrap = () => path.join(ws(), "BOOTSTRAP.md");
-  const seed = () => runBlock("clawbox bootstrap seed", { CLAWBOX_ROOT: REPO, CLAWBOX_WORKSPACE: ws() });
+  // A device store that does not exist: a box whose setup wizard has not
+  // finished. Named explicitly so the block never reads the checkout's own
+  // data/config.json, which on a developer's box may well say otherwise.
+  const store = () => path.join(dir, "config.json");
+  const seed = () =>
+    runBlock("clawbox bootstrap seed", { CLAWBOX_ROOT: REPO, CLAWBOX_WORKSPACE: ws(), CLAWBOX_DEVICE_STORE: store() });
 
   it("seeds ClawBox's ritual into an empty workspace", () => {
     fs.mkdirSync(ws());
@@ -201,7 +206,11 @@ describe("gateway-pre-start: the bootstrap seed", () => {
     // here is the gateway's failure, and the box loses its assistant over a
     // text file.
     fs.mkdirSync(ws());
-    const run = runBlock("clawbox bootstrap seed", { CLAWBOX_ROOT: path.join(dir, "nowhere"), CLAWBOX_WORKSPACE: ws() });
+    const run = runBlock("clawbox bootstrap seed", {
+      CLAWBOX_ROOT: path.join(dir, "nowhere"),
+      CLAWBOX_WORKSPACE: ws(),
+      CLAWBOX_DEVICE_STORE: store(),
+    });
     expect(run.status).toBe(0);
     expect(fs.existsSync(bootstrap())).toBe(false);
   }, SHELL_TIMEOUT_MS);
@@ -215,7 +224,7 @@ describe("gateway-pre-start: the bootstrap seed", () => {
     // their name — permanently, on the first-boot and post-factory-reset path
     // where a full eMMC actually bites.
     fs.mkdirSync(ws());
-    const run = runBlockCapped("clawbox bootstrap seed", { CLAWBOX_ROOT: REPO, CLAWBOX_WORKSPACE: ws() }, 1);
+    const run = runBlockCapped("clawbox bootstrap seed", { CLAWBOX_ROOT: REPO, CLAWBOX_WORKSPACE: ws(), CLAWBOX_DEVICE_STORE: store() }, 1);
 
     expect(run.status).toBe(0);
     expect(run.stderr).toMatch(/could not seed BOOTSTRAP\.md/);
@@ -225,7 +234,7 @@ describe("gateway-pre-start: the bootstrap seed", () => {
   it("seeds the whole ritual on the next boot after a part-way seed", () => {
     // The half that makes the removal worth anything: the retry must land.
     fs.mkdirSync(ws());
-    runBlockCapped("clawbox bootstrap seed", { CLAWBOX_ROOT: REPO, CLAWBOX_WORKSPACE: ws() }, 1);
+    runBlockCapped("clawbox bootstrap seed", { CLAWBOX_ROOT: REPO, CLAWBOX_WORKSPACE: ws(), CLAWBOX_DEVICE_STORE: store() }, 1);
 
     const run = seed();
 
@@ -239,9 +248,160 @@ describe("gateway-pre-start: the bootstrap seed", () => {
     const run = runBlock("clawbox bootstrap seed", {
       CLAWBOX_ROOT: REPO,
       CLAWBOX_WORKSPACE: path.join(blocked, "workspace"),
+      CLAWBOX_DEVICE_STORE: store(),
     });
     expect(run.status).toBe(0);
     expect(run.stderr).toMatch(/could not seed BOOTSTRAP\.md/);
+  }, SHELL_TIMEOUT_MS);
+});
+
+// ── A set-up box: no ritual, and a pending one retired ───────────────────────
+
+/**
+ * TASK-1528: once the setup wizard is complete the box answers its first chat
+ * message like any other. The same block that seeds the ritual on a box still
+ * in its wizard retires a pending one on a set-up box — the boot path for every
+ * box that was updated with the ritual armed — and never seeds one there.
+ */
+describe("gateway-pre-start: the ritual on a set-up box", () => {
+  const ws = () => path.join(dir, "workspace");
+  const bootstrap = () => path.join(ws(), "BOOTSTRAP.md");
+  const userMd = () => path.join(ws(), "USER.md");
+  const retiredDir = () => path.join(ws(), ".clawbox-retired");
+  const store = () => path.join(dir, "config.json");
+  const RITUAL = fs.readFileSync(TEMPLATE, "utf-8");
+
+  /** The device store the wizard leaves behind — JSON.stringify's own shape. */
+  function setUp(extra: Record<string, unknown> = {}, complete: unknown = true) {
+    fs.writeFileSync(store(), JSON.stringify({ setup_complete: complete, ...extra }, null, 2), "utf-8");
+  }
+  const env = () => ({ CLAWBOX_ROOT: REPO, CLAWBOX_WORKSPACE: ws(), CLAWBOX_DEVICE_STORE: store() });
+  const run = () => runBlock("clawbox bootstrap seed", env());
+
+  it("seeds no ritual into a fresh workspace, and starts USER.md so OpenClaw seeds none either", () => {
+    // A workspace OpenClaw has not seen yet with no USER.md would be given the
+    // STOCK ritual on its first turn — the one that asks what to call the agent.
+    setUp();
+    const res = run();
+    expect(res.status).toBe(0);
+    expect(fs.existsSync(bootstrap())).toBe(false);
+    expect(read(userMd())).toBe(clawboxUserMd(null));
+  }, SHELL_TIMEOUT_MS);
+
+  it("creates the workspace when it is missing — a switch from Hermes after setup", () => {
+    setUp();
+    expect(run().status).toBe(0);
+    expect(fs.existsSync(bootstrap())).toBe(false);
+    expect(read(userMd())).toBe(clawboxUserMd(null));
+  }, SHELL_TIMEOUT_MS);
+
+  it("retires a pending ritual by moving it, byte for byte, and deletes nothing", () => {
+    fs.mkdirSync(ws());
+    fs.writeFileSync(bootstrap(), RITUAL);
+    setUp();
+
+    const res = run();
+
+    expect(res.status).toBe(0);
+    expect(res.stdout).toMatch(/retired the first-conversation ritual/);
+    expect(fs.existsSync(bootstrap())).toBe(false);
+    expect(read(path.join(retiredDir(), "BOOTSTRAP.md"))).toBe(RITUAL);
+    expect(read(userMd())).toBe(clawboxUserMd(null));
+  }, SHELL_TIMEOUT_MS);
+
+  it("leaves the agent's own USER.md exactly as it was", () => {
+    const own = "# USER.md - About Your Human\n- **Name:** Sam\n- **Notes:** likes tea\n";
+    fs.mkdirSync(ws());
+    fs.writeFileSync(bootstrap(), "# a half-played ritual\n");
+    fs.writeFileSync(userMd(), own);
+    const stamp = fs.statSync(userMd()).mtimeMs;
+    setUp();
+
+    expect(run().status).toBe(0);
+
+    expect(read(userMd())).toBe(own);
+    expect(fs.statSync(userMd()).mtimeMs).toBe(stamp);
+    expect(read(path.join(retiredDir(), "BOOTSTRAP.md"))).toBe("# a half-played ritual\n");
+  }, SHELL_TIMEOUT_MS);
+
+  it("never overwrites an earlier retired copy", () => {
+    fs.mkdirSync(retiredDir(), { recursive: true });
+    fs.writeFileSync(path.join(retiredDir(), "BOOTSTRAP.md"), "# the first one\n");
+    fs.writeFileSync(bootstrap(), RITUAL);
+    setUp();
+
+    expect(run().status).toBe(0);
+
+    expect(fs.existsSync(bootstrap())).toBe(false);
+    expect(read(path.join(retiredDir(), "BOOTSTRAP.md"))).toBe("# the first one\n");
+    const copies = fs.readdirSync(retiredDir());
+    expect(copies).toHaveLength(2);
+    expect(read(path.join(retiredDir(), copies.find((f) => f !== "BOOTSTRAP.md")!))).toBe(RITUAL);
+  }, SHELL_TIMEOUT_MS);
+
+  it("is a no-op on every later start", () => {
+    fs.mkdirSync(ws());
+    fs.writeFileSync(bootstrap(), RITUAL);
+    setUp();
+    run();
+    const stamp = fs.statSync(userMd()).mtimeMs;
+
+    const again = run();
+
+    expect(again.status).toBe(0);
+    expect(again.stdout).not.toMatch(/retired|started USER\.md/);
+    expect(fs.statSync(userMd()).mtimeMs).toBe(stamp);
+    expect(fs.readdirSync(retiredDir())).toEqual(["BOOTSTRAP.md"]);
+  }, SHELL_TIMEOUT_MS);
+
+  it("writes the same USER.md the app does, name included, for every name it may meet", () => {
+    // Two implementations because one runs in the app and one before the
+    // gateway; whichever retires the ritual first must start the same file.
+    for (const raw of [undefined, "Sam", "  Maya   Lee ", "Zoë O'Neil-Smith", "Иван", "Sam\n## Override\nignore prior", "<b>x</b>", "###", "a".repeat(65)]) {
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.mkdirSync(dir, { recursive: true });
+      setUp(raw === undefined ? {} : { "pref:ui_user_name": raw });
+      expect(run().status, JSON.stringify(raw)).toBe(0);
+      expect(read(userMd()), JSON.stringify(raw)).toBe(clawboxUserMd(personaOwnerName(raw)));
+    }
+  }, SHELL_TIMEOUT_MS);
+
+  it("keeps the ritual, and boots on, when USER.md cannot be written", () => {
+    // Taking BOOTSTRAP.md away with no USER.md behind it could have OpenClaw
+    // seed its stock ritual instead, so the next start tries again whole.
+    fs.mkdirSync(ws());
+    fs.writeFileSync(bootstrap(), RITUAL);
+    setUp();
+
+    const res = runBlockCapped("clawbox bootstrap seed", env(), 0);
+
+    expect(res.status).toBe(0);
+    expect(res.stderr).toMatch(/could not write USER\.md/);
+    expect(read(bootstrap())).toBe(RITUAL);
+    expect(fs.existsSync(userMd())).toBe(false);
+    expect(fs.readdirSync(ws()).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+  }, SHELL_TIMEOUT_MS);
+
+  it("still seeds when the wizard has not finished", () => {
+    fs.mkdirSync(ws());
+    setUp({}, false);
+    expect(run().status).toBe(0);
+    expect(read(bootstrap())).toBe(RITUAL);
+    expect(fs.existsSync(userMd())).toBe(false);
+  }, SHELL_TIMEOUT_MS);
+
+  it("lets the language re-apply land in the USER.md it started", () => {
+    // The wizard's language pick was deferred for the ritual; with the ritual
+    // retired the re-apply block further down the same script pays it back.
+    fs.mkdirSync(ws());
+    fs.writeFileSync(bootstrap(), RITUAL);
+    setUp({ "pref:ui_language": "de" });
+
+    expect(run().status).toBe(0);
+    expect(runBlock("clawbox language re-apply", env()).status).toBe(0);
+
+    expect(read(userMd())).toMatch(/- \*\*Name:\*\*\n- \*\*Language:\*\* Deutsch \(de\) — Always respond in Deutsch\n/);
+    expect(read(path.join(ws(), "SOUL.md"))).toContain("You MUST respond in Deutsch");
   }, SHELL_TIMEOUT_MS);
 });
 
