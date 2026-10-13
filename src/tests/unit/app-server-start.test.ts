@@ -12,6 +12,7 @@ import os from "os";
 import path from "path";
 import type { AddressInfo } from "net";
 import { saveEnv } from "@/tests/helpers/env";
+import { RUNNER_STEP } from "@/lib/coding-agent-progress";
 
 // Starts real servers and asks `ss` about them.
 vi.setConfig({ testTimeout: 60_000, hookTimeout: 30_000 });
@@ -140,6 +141,112 @@ describe("an app whose server the run has already stopped", () => {
     const [a, b] = await Promise.all([start.startServerApp(input), start.startServerApp(input)]);
     expect(a).toEqual({ ok: true });
     expect(b).toEqual({ ok: true });
+  });
+});
+
+describe("a box whose node is not on the run's fixed PATH", () => {
+  // The run's list names the home folders and the FHS ones. node from nvm,
+  // or from a tarball the web server's own unit puts on its PATH, is on
+  // neither — the run's shell found it through its profile, and `/bin/sh -c`
+  // used to answer "node: not found" and exit 127.
+  const runPathIn = (home: string) => [".bun/bin", ".npm-global/bin", ".local/bin"].map((dir) => path.join(home, dir)).join(":");
+
+  it("still finds node for the start command", async () => {
+    const nvmBin = path.join(base, ".nvm", "versions", "node", "v22.11.0", "bin");
+    fs.mkdirSync(nvmBin, { recursive: true });
+    fs.symlinkSync(process.execPath, path.join(nvmBin, "node"));
+    const port = await freePort();
+    const outcome = await start.registerOrStartServerApp({ id: "hello-app", directory: project, manifest: manifestFor(port, "node server.js"), searchPath: runPathIn(base), noScope: true });
+    expect(outcome).toEqual({ ok: true });
+  });
+
+  it("says what the start command printed when it stopped", async () => {
+    const port = await freePort();
+    const command = "clawbox-nope run preview --port 4176 --host 127.0.0.1 --base /apps/hello-app/ --strictPort";
+    const outcome = await start.registerOrStartServerApp({ id: "hello-app", directory: project, manifest: manifestFor(port, command), searchPath: runPathIn(base), noScope: true });
+    expect(outcome).toMatchObject({ ok: false, reason: "not_listening" });
+    const detail = (outcome as { detail: string }).detail;
+    expect(detail).toContain("exit code 127");
+    // The shell's own words, without the shell's "/bin/sh: 1: " in front.
+    expect(detail).toMatch(/: clawbox-nope: (command )?not found$/);
+    // And they survive the feed's cap on one line, even behind a long command.
+    const line = RUNNER_STEP.notOnDesktop(port, detail);
+    expect(line.length).toBeLessThanOrEqual(160);
+  });
+});
+
+describe("the PATH a start command runs with", () => {
+  it("keeps the run's own PATH first and adds where node and bun live beyond it", () => {
+    for (const version of ["v18.20.4", "v22.11.0", "v20.9.0"]) fs.mkdirSync(path.join(base, ".nvm", "versions", "node", version, "bin"), { recursive: true });
+    const value = start.startSearchPath("/run/a:/run/b", {
+      home: base,
+      execPath: "/opt/node/bin/node",
+      envPath: "/usr/sbin:/usr/bin:/run/a:/opt/node/bin",
+      bunInstall: "/opt/bun",
+    });
+    const nvm = (version: string) => path.join(base, ".nvm", "versions", "node", version, "bin");
+    expect(value.split(":")).toEqual([
+      "/run/a",
+      "/run/b",
+      // The node the web server itself runs on: it is there, and npm beside it.
+      "/opt/node/bin",
+      "/opt/bun/bin",
+      path.join(base, ".bun", "bin"),
+      // Newest first.
+      nvm("v22.11.0"),
+      nvm("v20.9.0"),
+      nvm("v18.20.4"),
+      path.join(base, ".npm-global", "bin"),
+      "/usr/local/bin",
+      "/usr/bin",
+      "/bin",
+      // The web server's own PATH last, and nothing twice.
+      "/usr/sbin",
+    ]);
+  });
+
+  it("drops empty and relative entries, which would resolve against the project folder", () => {
+    const value = start.startSearchPath(":/run/a:.:bin", { home: base, execPath: "/opt/node/bin/node", envPath: "::./node_modules/.bin" });
+    expect(value.split(":")).not.toContain("");
+    expect(value.split(":").every((dir) => path.isAbsolute(dir))).toBe(true);
+    expect(value.split(":")[0]).toBe("/run/a");
+  });
+});
+
+describe("what a failed start printed, as one line", () => {
+  it("is the shell's complaint, without the shell", () => {
+    expect(start.startOutputLine("/bin/sh: 1: bun: not found\n")).toBe("bun: not found");
+    expect(start.startOutputLine("bash: line 1: npm: command not found\n")).toBe("npm: command not found");
+  });
+
+  it("is the error, not the stack or the version banner after it", () => {
+    const crash = [
+      "node:internal/modules/cjs/loader:1228",
+      "  throw err;",
+      "  ^",
+      "",
+      "Error: Cannot find module 'express'",
+      "Require stack:",
+      "- /srv/app/server.js",
+      "    at Module._resolveFilename (node:internal/modules/cjs/loader:1225:15)",
+      "",
+      "Node.js v22.11.0",
+    ].join("\n");
+    expect(start.startOutputLine(crash)).toBe("Error: Cannot find module 'express'");
+  });
+
+  it("follows an error that only introduces the next line", () => {
+    expect(start.startOutputLine("\x1b[31merror when starting preview server:\x1b[39m\nError: listen EADDRINUSE: address already in use 127.0.0.1:4176\n"))
+      .toBe("error when starting preview server: Error: listen EADDRINUSE: address already in use 127.0.0.1:4176");
+  });
+
+  it("is the last line when nothing reads like an error, and nothing when there was no output", () => {
+    expect(start.startOutputLine("> app@1.0.0 start\n> node server.js\n\nbye\n")).toBe("bye");
+    expect(start.startOutputLine("\n  \n")).toBeNull();
+  });
+
+  it("is bounded", () => {
+    expect(start.startOutputLine(`Error: ${"x".repeat(5_000)}`)!.length).toBeLessThanOrEqual(200);
   });
 });
 
