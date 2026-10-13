@@ -2,7 +2,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { spawnSync } from "child_process";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_VNC_RESOLUTION,
   VNC_RESOLUTIONS,
@@ -11,6 +11,9 @@ import {
 } from "@/lib/vnc-resolution";
 import { vncResolutionEnvPath, writeVncResolutionEnv } from "@/lib/vnc-resolution-server";
 import { validatePreference } from "@/lib/preference-schema";
+
+// The start-script cases run real bash processes.
+vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const SCRIPT = fs.readFileSync(path.join(process.cwd(), "scripts", "start-vnc.sh"), "utf8");
 
