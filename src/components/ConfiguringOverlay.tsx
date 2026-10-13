@@ -34,6 +34,21 @@ export const GENERIC_CONFIGURING_STEP_KEYS = [
   "ai.almostReady",
 ] as const;
 
+/**
+ * The same checklist on a Hermes-edition box, which has no OpenClaw gateway
+ * (the unit is masked): what restarts there is the Hermes agent, so the third
+ * row names that. "Restarting gateway" described a service the device does
+ * not run (2026-10-13 smoke test). Same length and order as the generic list —
+ * the timers index into it by position.
+ */
+export const HERMES_CONFIGURING_STEP_KEYS = [
+  "ai.credentialsVerified",
+  "ai.updatingConfig",
+  "wizard.completionHermesStarting",
+  "ai.warmingUp",
+  "ai.almostReady",
+] as const;
+
 export function ConfiguringOverlay({
   provider,
   providerName,
