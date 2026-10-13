@@ -403,6 +403,8 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.downloadFile": "Download file",
     "chat.fileFromAssistant": "File from the assistant",
     "chat.speakingReply": "Speaking the reply… {seconds}s",
+    "chat.speakFailed.noAnswer": "Voice is not answering right now — try again in a moment.",
+    "chat.speakFailed.refused": "The voice could not speak this reply.",
     "chat.spokenByCloud": "Spoken by the cloud voice",
     "chat.progressCard.title": "Task progress",
     "chat.progressCard.updated": "Updated {ago}",

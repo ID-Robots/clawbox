@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
-import ChatPopup from "@/components/ChatPopup";
+import ChatPopup, { speakFailureIsNewest } from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { VOICE_SETTINGS_CHANGED_EVENT } from "@/lib/ui-events";
 import { _resetSpokenReplyPlaybackForTests } from "@/lib/spoken-reply-playback";
@@ -600,6 +600,161 @@ describe("spoken replies in the desktop chat", () => {
     await screen.findByTestId("chat-speaking-reply");
     releaseSpeak();
     await waitFor(() => expect(screen.queryByTestId("chat-speaking-reply")).toBeNull());
+  });
+
+  /**
+   * ...and when the box could not make the sound after all, it SAYS so.
+   *
+   * A cloud voice that took the connection and sent nothing used to hold
+   * "Speaking the reply…" for a minute, and then the line simply went: the
+   * owner, listening for an answer, heard nothing and was told nothing. The
+   * box now gives up on a silent cloud in seconds (src/lib/voice-speak.ts)
+   * and answers the refusal; the chat turns that into a line under the reply.
+   */
+  describe("when the voice cannot speak the reply", () => {
+    /** `tts/speak` answers with `answer` — or, as a function, throws what it throws. */
+    function speakAnswers(answer: Record<string, unknown> | (() => never)) {
+      const inner = globalThis.fetch as unknown as (i: unknown, init?: RequestInit) => Promise<unknown>;
+      vi.stubGlobal("fetch", vi.fn(async (input: unknown, init?: RequestInit) => {
+        if (String(input).includes("/setup-api/tts/speak")) {
+          speakBodies.push(String(init?.body ?? ""));
+          if (typeof answer === "function") answer();
+          return answer;
+        }
+        return inner(input, init);
+      }));
+    }
+    const refusal = (status: number, code: string) => ({
+      ok: false,
+      status,
+      headers: new Headers(),
+      json: async () => ({ error: "the English sentence", code }),
+    });
+
+    it("says the voice is not answering when the box gave up on a silent cloud, and stops saying it is speaking", async () => {
+      speakAnswers(refusal(502, "cloud_no_answer"));
+      render(<ChatPopup isOpen onClose={() => {}} />);
+      await speakIntoTheChat();
+      const line = await screen.findByTestId("chat-speak-failed");
+      expect(line).toHaveTextContent("Voice is not answering right now — try again in a moment.");
+      expect(line).toHaveAttribute("role", "status");
+      expect(screen.queryByTestId("chat-speaking-reply")).toBeNull();
+      expect(play).not.toHaveBeenCalled();
+    });
+
+    it("says the same when the chat's own ask never came back", async () => {
+      speakAnswers(() => { throw new DOMException("The operation timed out.", "TimeoutError"); });
+      render(<ChatPopup isOpen onClose={() => {}} />);
+      await speakIntoTheChat();
+      expect(await screen.findByTestId("chat-speak-failed")).toHaveTextContent("Voice is not answering right now");
+      expect(screen.queryByTestId("chat-speaking-reply")).toBeNull();
+    });
+
+    it("says so when the box answered but the audio broke off on the way", async () => {
+      speakAnswers({
+        ok: true,
+        status: 200,
+        headers: new Headers({ "X-ClawBox-Voice-Engine": "cloud" }),
+        blob: async () => { throw new TypeError("network error"); },
+      });
+      render(<ChatPopup isOpen onClose={() => {}} />);
+      await speakIntoTheChat();
+      expect(await screen.findByTestId("chat-speak-failed")).toHaveTextContent("Voice is not answering right now");
+      expect(screen.queryByTestId("chat-speaking-reply")).toBeNull();
+      expect(play).not.toHaveBeenCalled();
+    });
+
+    it("says nothing when the owner switches spoken replies off while the box is still trying", async () => {
+      let answer: (value: unknown) => void = () => {};
+      const held = new Promise((resolve) => { answer = resolve; });
+      const inner = globalThis.fetch as unknown as (i: unknown, init?: RequestInit) => Promise<unknown>;
+      vi.stubGlobal("fetch", vi.fn(async (input: unknown, init?: RequestInit) => {
+        if (String(input).includes("/setup-api/tts/speak")) {
+          speakBodies.push(String(init?.body ?? ""));
+          return held;
+        }
+        return inner(input, init);
+      }));
+      render(<ChatPopup isOpen onClose={() => {}} />);
+      await speakIntoTheChat();
+      await screen.findByTestId("chat-speaking-reply");
+      act(() => { window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, { detail: { autoReply: false } })); });
+      // The box gives up on its silent cloud only after the switch went off.
+      await act(async () => { answer(refusal(502, "cloud_no_answer")); });
+      await waitFor(() => expect(screen.queryByTestId("chat-speaking-reply")).toBeNull());
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+      expect(screen.queryByTestId("chat-speak-failed")).toBeNull();
+    });
+
+    it("says the voice could not speak it when the box refused for another reason", async () => {
+      speakAnswers(refusal(502, "local_failed"));
+      render(<ChatPopup isOpen onClose={() => {}} />);
+      await speakIntoTheChat();
+      expect(await screen.findByTestId("chat-speak-failed")).toHaveTextContent("The voice could not speak this reply.");
+    });
+
+    it("says nothing when the owner switched spoken replies off meanwhile — that is not a failure", async () => {
+      speakAnswers(refusal(409, "switched_off"));
+      render(<ChatPopup isOpen onClose={() => {}} />);
+      await speakIntoTheChat();
+      await waitFor(() => expect(speakBodies).toEqual([SPEAK_BODY]));
+      await waitFor(() => expect(screen.queryByTestId("chat-speaking-reply")).toBeNull());
+      expect(screen.queryByTestId("chat-speak-failed")).toBeNull();
+    });
+
+    it("says nothing for a typed question's clip, which nobody was waiting to hear", async () => {
+      speakAnswers(refusal(502, "cloud_no_answer"));
+      replyText = "Fine, thanks.";
+      render(<ChatPopup isOpen onClose={() => {}} />);
+      await typeIntoTheChat();
+      await waitFor(() => expect(speakBodies).toEqual([SPEAK_BODY]));
+      // Give a failure line every chance to appear before saying it did not.
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+      expect(screen.queryByTestId("chat-speak-failed")).toBeNull();
+    });
+
+    it("takes the line away once the conversation moves on", async () => {
+      speakAnswers(refusal(502, "cloud_no_answer"));
+      render(<ChatPopup isOpen onClose={() => {}} />);
+      await speakIntoTheChat();
+      await screen.findByTestId("chat-speak-failed");
+      const textarea = await screen.findByRole("textbox");
+      await waitFor(() => expect(textarea).not.toBeDisabled());
+      fireEvent.change(textarea, { target: { value: "never mind" } });
+      fireEvent.keyDown(textarea, { key: "Enter" });
+      await waitFor(() => expect(screen.queryByTestId("chat-speak-failed")).toBeNull());
+    });
+
+    it("keeps the line on the reply it failed for, not on a later one with the same words", () => {
+      const failed = { role: "assistant", text: "Done.", timestamp: 1000 };
+      const asked = { role: "user", text: "and the other one", timestamp: 2000 };
+      const sameWords = { role: "assistant", text: "Done.", timestamp: 3000 };
+      const notice = { role: "system", text: "Stopped.", timestamp: 4000 };
+      const failure = { text: "Done.", timestamp: 1000, after: 1 };
+      expect(speakFailureIsNewest([failed], failure)).toBe(true);
+      // The chat's own notices do not move it off its reply...
+      expect(speakFailureIsNewest([failed, notice], failure)).toBe(true);
+      // ...the owner's next message does, and a later "Done." does not bring it back.
+      expect(speakFailureIsNewest([failed, asked], failure)).toBe(false);
+      expect(speakFailureIsNewest([failed, asked, sameWords], failure)).toBe(false);
+      expect(speakFailureIsNewest([], failure)).toBe(false);
+    });
+
+    it("finds a reply that was not painted yet when it failed by where the transcript ended, never by its words alone", () => {
+      const earlier = { role: "assistant", text: "Done.", timestamp: 500 };
+      const question = { role: "user", text: "and now?", timestamp: 900 };
+      const failed = { role: "assistant", text: "Done.", timestamp: 1000 };
+      const asked = { role: "user", text: "and the other one", timestamp: 2000 };
+      const sameWords = { role: "assistant", text: "Done.", timestamp: 3000 };
+      // The transcript held two lines when the failure landed; the reply's
+      // bubble was appended after them.
+      const failure = { text: "Done.", timestamp: null, after: 2 };
+      expect(speakFailureIsNewest([earlier, question, failed], failure)).toBe(true);
+      // A later reply with the same words is another reply, not this one.
+      expect(speakFailureIsNewest([earlier, question, failed, asked, sameWords], failure)).toBe(false);
+      // Nor is the earlier one, before the bubble has been painted at all.
+      expect(speakFailureIsNewest([earlier], { ...failure, after: 1 })).toBe(false);
+    });
   });
 
   it("says which voice spoke when it was not the box's own", async () => {
