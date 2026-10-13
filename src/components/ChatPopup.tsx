@@ -218,21 +218,31 @@ async function replyRefusalCode(res: Response): Promise<string | null> {
 }
 
 /**
+ * The reply a spoken-reply failure belongs to: its words, and its bubble's
+ * timestamp — or, when that bubble was not painted yet as the failure landed
+ * (`timestamp: null`), `after`, the length the transcript had then. A bubble
+ * not painted yet can only be appended at or past that point, so it is the
+ * FIRST bubble with these words from there on, and any later one is another
+ * reply.
+ */
+export type SpeakFailureBubble = { text: string; timestamp: number | null; after: number }
+
+/**
  * Whether the line saying a reply could not be spoken still belongs on
  * screen: the newest bubble that is not one of the chat's own notices is the
- * reply it failed for — the same words, and the same timestamp when the
- * failure knew it (null: the bubble was not painted yet as it landed).
+ * very reply it failed for (see SpeakFailureBubble).
  */
 export function speakFailureIsNewest(
   messages: readonly { role: string; text: string; timestamp: number }[],
-  failure: { text: string; timestamp: number | null },
+  failure: SpeakFailureBubble,
 ): boolean {
+  const theReply = (m: { role: string; text: string }) => m.role === 'assistant' && m.text === failure.text
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i]
     if (m.role === 'system') continue
-    return m.role === 'assistant'
-      && m.text === failure.text
-      && (failure.timestamp === null || m.timestamp === failure.timestamp)
+    if (!theReply(m)) return false
+    if (failure.timestamp !== null) return m.timestamp === failure.timestamp
+    return messages.findIndex((candidate, j) => j >= failure.after && theReply(candidate)) === i
   }
   return false
 }
@@ -4687,10 +4697,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // and was told nothing. Shown only while that reply is still the newest in
   // the conversation (see speakFailureShown), and dropped the moment the next
   // reply starts speaking.
-  // The bubble is named by its text AND its timestamp (null when the bubble
-  // was not painted yet as the failure landed), so a LATER reply with the
-  // same words — "Done." twice — does not inherit the line.
-  const [speakFailure, setSpeakFailure] = useState<{ text: string; timestamp: number | null; noAnswer: boolean } | null>(null)
+  // The bubble is named by its text AND its timestamp — or, when it was not
+  // painted yet as the failure landed, by where the transcript ended then —
+  // so a LATER reply with the same words ("Done." twice) never inherits the
+  // line (see speakFailureIsNewest).
+  const [speakFailure, setSpeakFailure] = useState<(SpeakFailureBubble & { noAnswer: boolean }) | null>(null)
   // Under the reply it failed for, and only while that reply is the newest
   // word in the conversation: the owner's next message, another reply, or a
   // cleared or switched conversation takes the line away without anything
@@ -4861,6 +4872,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       const waiting = messagesRef.current.filter(m => m.role === 'assistant' && m.text === text)
       if (!play && waiting.length > 0 && waiting.every(m => (m.audio?.length ?? 0) > 0)) return
       let res: Response | null = null
+      let blob: Blob | null = null
       // From here until the bytes are in hand the box is working on the sound,
       // and the wait is on screen. Set after the queue has let this reply
       // through, so "Speaking…" never counts the seconds an EARLIER reply was
@@ -4887,25 +4899,37 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
           if (res.status !== 429) break
           await new Promise((resolve) => setTimeout(resolve, 3000 * (attempt + 1)))
         }
+        // The bytes too, inside the same wait: a connection that breaks
+        // halfway through the audio is as much "no answer" as one that never
+        // started, and ends in the same line rather than in silence.
+        if (res?.ok) blob = await res.blob()
       } catch {
         // The chat's own deadline or the network: no answer at all.
         res = null
       } finally {
         setSpeakingSince(null)
       }
-      if (!res || !res.ok) {
+      if (!res || !res.ok || !blob) {
         // SAID, where it used to be swallowed: a reply the owner was waiting
         // to hear ends in a line under it rather than in silence. Not for a
         // clip nobody was waiting on, not for one the owner has moved on from
-        // (aloud() reads both), and not for the owner's own switch turned off
-        // meanwhile — that is not a failure.
-        if (speechGenerationRef.current === generation && aloud()) {
+        // (aloud() reads both), and not once the owner has switched spoken
+        // replies off meanwhile — the box's `switched_off`, or the switch
+        // here turned off while the box was still trying: neither is a
+        // failure worth a word.
+        if (speechGenerationRef.current === generation && voiceAutoReplyRef.current && aloud()) {
           const code = res ? await replyRefusalCode(res) : null
-          if (code !== 'switched_off') {
-            const bubble = [...messagesRef.current].reverse().find(m => m.role === 'assistant' && m.text === text)
+          if (code !== 'switched_off' && voiceAutoReplyRef.current) {
+            // The reply's bubble, by its timestamp. One not painted yet as
+            // this lands is named by where the transcript ends now instead:
+            // its bubble is the first with these words from there on, so a
+            // later reply that says the same thing never inherits the line.
+            const transcript = messagesRef.current
+            const bubble = [...transcript].reverse().find(m => m.role === 'assistant' && m.text === text)
             setSpeakFailure({
               text,
               timestamp: bubble?.timestamp ?? null,
+              after: transcript.length,
               noAnswer: !res || res.status === 429 || SPEAK_NO_ANSWER_CODES.has(code ?? ''),
             })
           }
@@ -4918,7 +4942,6 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // that the words went off the box for this reply — the sound is the same
       // either way. Absent on an older server: then nothing is claimed.
       const engine = res.headers.get('X-ClawBox-Voice-Engine')
-      const blob = await res.blob()
       // The transcript this reply belonged to may have gone while the box
       // was speaking: then nothing is created, stored or played.
       if (speechGenerationRef.current !== generation) return

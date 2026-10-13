@@ -650,6 +650,42 @@ describe("spoken replies in the desktop chat", () => {
       expect(screen.queryByTestId("chat-speaking-reply")).toBeNull();
     });
 
+    it("says so when the box answered but the audio broke off on the way", async () => {
+      speakAnswers({
+        ok: true,
+        status: 200,
+        headers: new Headers({ "X-ClawBox-Voice-Engine": "cloud" }),
+        blob: async () => { throw new TypeError("network error"); },
+      });
+      render(<ChatPopup isOpen onClose={() => {}} />);
+      await speakIntoTheChat();
+      expect(await screen.findByTestId("chat-speak-failed")).toHaveTextContent("Voice is not answering right now");
+      expect(screen.queryByTestId("chat-speaking-reply")).toBeNull();
+      expect(play).not.toHaveBeenCalled();
+    });
+
+    it("says nothing when the owner switches spoken replies off while the box is still trying", async () => {
+      let answer: (value: unknown) => void = () => {};
+      const held = new Promise((resolve) => { answer = resolve; });
+      const inner = globalThis.fetch as unknown as (i: unknown, init?: RequestInit) => Promise<unknown>;
+      vi.stubGlobal("fetch", vi.fn(async (input: unknown, init?: RequestInit) => {
+        if (String(input).includes("/setup-api/tts/speak")) {
+          speakBodies.push(String(init?.body ?? ""));
+          return held;
+        }
+        return inner(input, init);
+      }));
+      render(<ChatPopup isOpen onClose={() => {}} />);
+      await speakIntoTheChat();
+      await screen.findByTestId("chat-speaking-reply");
+      act(() => { window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, { detail: { autoReply: false } })); });
+      // The box gives up on its silent cloud only after the switch went off.
+      await act(async () => { answer(refusal(502, "cloud_no_answer")); });
+      await waitFor(() => expect(screen.queryByTestId("chat-speaking-reply")).toBeNull());
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+      expect(screen.queryByTestId("chat-speak-failed")).toBeNull();
+    });
+
     it("says the voice could not speak it when the box refused for another reason", async () => {
       speakAnswers(refusal(502, "local_failed"));
       render(<ChatPopup isOpen onClose={() => {}} />);
@@ -694,16 +730,30 @@ describe("spoken replies in the desktop chat", () => {
       const asked = { role: "user", text: "and the other one", timestamp: 2000 };
       const sameWords = { role: "assistant", text: "Done.", timestamp: 3000 };
       const notice = { role: "system", text: "Stopped.", timestamp: 4000 };
-      const failure = { text: "Done.", timestamp: 1000 };
+      const failure = { text: "Done.", timestamp: 1000, after: 1 };
       expect(speakFailureIsNewest([failed], failure)).toBe(true);
       // The chat's own notices do not move it off its reply...
       expect(speakFailureIsNewest([failed, notice], failure)).toBe(true);
       // ...the owner's next message does, and a later "Done." does not bring it back.
       expect(speakFailureIsNewest([failed, asked], failure)).toBe(false);
       expect(speakFailureIsNewest([failed, asked, sameWords], failure)).toBe(false);
-      // A failure that landed before its bubble was painted matches by the words alone.
-      expect(speakFailureIsNewest([failed], { text: "Done.", timestamp: null })).toBe(true);
       expect(speakFailureIsNewest([], failure)).toBe(false);
+    });
+
+    it("finds a reply that was not painted yet when it failed by where the transcript ended, never by its words alone", () => {
+      const earlier = { role: "assistant", text: "Done.", timestamp: 500 };
+      const question = { role: "user", text: "and now?", timestamp: 900 };
+      const failed = { role: "assistant", text: "Done.", timestamp: 1000 };
+      const asked = { role: "user", text: "and the other one", timestamp: 2000 };
+      const sameWords = { role: "assistant", text: "Done.", timestamp: 3000 };
+      // The transcript held two lines when the failure landed; the reply's
+      // bubble was appended after them.
+      const failure = { text: "Done.", timestamp: null, after: 2 };
+      expect(speakFailureIsNewest([earlier, question, failed], failure)).toBe(true);
+      // A later reply with the same words is another reply, not this one.
+      expect(speakFailureIsNewest([earlier, question, failed, asked, sameWords], failure)).toBe(false);
+      // Nor is the earlier one, before the bubble has been painted at all.
+      expect(speakFailureIsNewest([earlier], { ...failure, after: 1 })).toBe(false);
     });
   });
 
