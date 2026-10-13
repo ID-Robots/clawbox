@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import ChromeDesktop from "@/app/page";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { _resetSessionUserForTest } from "@/lib/use-session-user";
@@ -322,7 +322,14 @@ describe("a desktop whose session is gone", () => {
     try {
       render(<ChromeDesktop />);
       expect(await screen.findByTestId("shelf-user-badge")).toBeInTheDocument();
-      await wait(2_600);
+      // Wait for the desktop's own /users/me poll (the one that would carry a
+      // 401) to be made and answered, rather than for a fixed time.
+      const polls = () => requests().filter((r) => r.url.pathname === "/setup-api/users/me").length;
+      const before = polls();
+      await waitFor(() => expect(polls()).toBeGreaterThan(before), { timeout: 6_000 });
+      const results = vi.mocked(fetch).mock.results;
+      await Promise.all(results.map((r) => r.value));
+      await act(async () => {});
       expect(replace).not.toHaveBeenCalled();
     } finally {
       restore();
