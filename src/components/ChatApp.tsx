@@ -1769,7 +1769,7 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
           borderBottom: '1px solid rgba(249,115,22,0.15)',
           flexShrink: 0,
         }}>
-          <img src="/clawbox-crab.png" alt="" style={{ width: 14, height: 14, objectFit: 'contain', opacity: 0.7 }} />
+          <img src={harnessId === 'hermes' ? '/hermes-agent.png' : '/clawbox-crab.png'} alt="" style={{ width: 14, height: 14, objectFit: 'contain', opacity: 0.7 }} />
           <span style={{ fontSize: 13, fontWeight: 500, color: 'rgba(255,255,255,0.7)', flex: 1 }}>{t("chat.title")}</span>
           {/* A connection indicator is honest only where there IS a connection
               that can be down. On a harness with no socket the adapter reports
@@ -1869,7 +1869,7 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
 
         {status === 'connected' && messages.length === 0 && !streaming && !restoreState && (
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', flex: 1, gap: 12, color: 'rgba(255,255,255,0.3)', fontSize: 13, padding: '0 16px' }}>
-            <img src="/clawbox-crab.png" alt="" style={{ width: 25, height: 25, objectFit: 'contain', opacity: 0.4 }} />
+            <img src={harnessId === 'hermes' ? '/hermes-agent.png' : '/clawbox-crab.png'} alt="" style={{ width: 25, height: 25, objectFit: 'contain', opacity: 0.4 }} />
             <span>{t("chat.saySomething")}</span>
             {!clawboxLogin.loading && !clawboxLogin.loggedIn && !welcomeDismissed && (
               <div style={{
