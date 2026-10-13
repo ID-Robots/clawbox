@@ -433,3 +433,63 @@ describe("BrowserApp", () => {
     });
   });
 });
+
+describe("BrowserApp setup on a box that has never been asked", () => {
+  beforeEach(() => {
+    resetHarnessCache();
+    resetBrowserAutoLaunch();
+  });
+
+  /**
+   * The device as the manage route really answers it: with no stored flag,
+   * setup counts as finished once the browser works (Chromium there AND the
+   * link on — getBrowserSetupComplete). Step 2 is what turns the link on, so a
+   * wizard that never stored "not finished" flipped to the home face on the
+   * very next status read and step 3 was never shown.
+   */
+  function stubFreshDevice() {
+    let flag: boolean | null = null;
+    let enabled = false;
+    const status = () => ({
+      chromium: { installed: true, path: "/opt/cft/chrome", version: "Google Chrome for Testing 153", serviceSafe: true },
+      browser: { running: false, pid: null, cdpReady: false },
+      enabled,
+      cdpPort: 18800,
+      setupComplete: flag ?? enabled,
+      autoOpen: true,
+      startUrl: "about:blank",
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : null;
+      if (url.includes("/setup-api/harness/active")) return json({ active: "openclaw", edition: "openclaw" });
+      if (url.includes("/setup-api/browser/manage")) {
+        if (init?.method === "POST" && body?.action === "enable") enabled = true;
+        return json(init?.method === "POST" ? { ok: true } : status());
+      }
+      if (url.includes("/setup-api/browser/setup")) {
+        if (typeof body?.setupComplete === "boolean") flag = body.setupComplete;
+        return json({ setupComplete: flag ?? false, autoOpen: true, startUrl: "about:blank" });
+      }
+      if (url.includes("/setup-api/vnc")) return json({ available: true, wsPort: 6080 });
+      return json({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  it("shows step 3 after step 2 turns the link on", async () => {
+    stubFreshDevice();
+    const { findByTestId, queryByTestId } = render(<BrowserApp />);
+
+    fireEvent.click(await findByTestId("browser-wizard-start"));
+    fireEvent.click(await findByTestId("browser-wizard-next"));
+    fireEvent.click(await findByTestId("browser-wizard-link"));
+    // The link is on (the device now "works"), and the window is still the wizard.
+    await findByTestId("browser-wizard-link-done");
+    fireEvent.click(await findByTestId("browser-wizard-next-open"));
+
+    expect(await findByTestId("browser-wizard-open")).toBeInTheDocument();
+    expect(queryByTestId("browser-state")).toBeNull();
+  });
+});

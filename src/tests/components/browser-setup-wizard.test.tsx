@@ -65,8 +65,10 @@ describe("BrowserSetupWizard", () => {
 
     fireEvent.click(getByTestId("browser-wizard-start"));
     expect(await findByTestId("browser-wizard-chromium-ready")).toBeInTheDocument();
-    // Nothing is written on the way through: the flag is the last step's job.
-    expect(posts(fetchMock, "/setup-api/browser/setup")).toEqual([]);
+    // Walking in stores "not finished" — without it the device counts setup
+    // as done once step 2 has turned the link on, and step 3 is skipped.
+    // "Finished" is still the last step's job.
+    expect(posts(fetchMock, "/setup-api/browser/setup")).toEqual([{ setupComplete: false }]);
 
     fireEvent.click(getByTestId("browser-wizard-next"));
     fireEvent.click(await findByTestId("browser-wizard-link"));
@@ -77,7 +79,28 @@ describe("BrowserSetupWizard", () => {
 
     await waitFor(() => expect(onDone).toHaveBeenCalledWith(true));
     expect(posts(fetchMock, "/setup-api/browser/manage")).toEqual([{ action: "enable" }, { action: "open-browser" }]);
-    expect(posts(fetchMock, "/setup-api/browser/setup")).toEqual([{ setupComplete: true }]);
+    expect(posts(fetchMock, "/setup-api/browser/setup")).toEqual([{ setupComplete: false }, { setupComplete: true }]);
+  });
+
+  it("unlocks Next as soon as the device reports the link on, without waiting for the slow request", async () => {
+    // Turning the link on restarts the gateway: the POST stays open for most
+    // of a minute after the status already says `enabled`.
+    fetchMock.mockImplementation(async (input?: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).includes("/setup-api/browser/manage") && init?.method === "POST") return new Promise(() => undefined);
+      return { ok: true, status: 200, json: async () => ({ ok: true }) };
+    });
+    const props = { harnessLabel: "OpenClaw", onChanged: vi.fn(), onDone: vi.fn() };
+    const { getByTestId, findByTestId, rerender } = render(<BrowserSetupWizard status={STATUS} {...props} />);
+    fireEvent.click(getByTestId("browser-wizard-start"));
+    fireEvent.click(await findByTestId("browser-wizard-next"));
+    fireEvent.click(await findByTestId("browser-wizard-link"));
+    await waitFor(() => expect(getByTestId("browser-wizard-next-open")).toBeDisabled());
+
+    // The window's poll sees the link on while the request is still open.
+    rerender(<BrowserSetupWizard status={{ ...STATUS, enabled: true }} {...props} />);
+
+    expect(await findByTestId("browser-wizard-link-done")).toBeInTheDocument();
+    await waitFor(() => expect(getByTestId("browser-wizard-next-open")).toBeEnabled());
   });
 
   it("has no agent-link step where the link is permanent", async () => {

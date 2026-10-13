@@ -284,10 +284,32 @@ fi
 # of what --disable-gpu did) but let the GPU process run SwiftShader for
 # WebGL. --enable-unsafe-swiftshader is the switch recent Chromium requires
 # before it will hand a page a software WebGL context.
+# Chrome for Testing — the Playwright build this box prefers — puts a banner
+# over every window: "Chrome for Testing vNNN is only for automated testing…
+# Download Chrome". On this box the browser IS driven by automation, and the
+# banner only takes a strip of the owner's screen to tell them to install
+# something else. `--test-type=gpu` is what Chromium checks before it adds that
+# infobar (measured on a Jetson, Chrome for Testing 153: gone with it, there
+# without). Only for that build: a browser the owner named keeps exactly the
+# flags it always had.
+is_chrome_for_testing() {
+  local version
+  version="$("$1" --version 2>/dev/null || true)"
+  case "$version" in
+    *"Chrome for Testing"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+BUILD_FLAGS=()
+if is_chrome_for_testing "$CHROMIUM"; then
+  BUILD_FLAGS=(--test-type=gpu)
+fi
+
 echo "Starting Chromium from $CHROMIUM on DISPLAY=$DISPLAY with CDP port $CDP_PORT"
 exec env DISPLAY="$DISPLAY" HOME="$HOME" DBUS_SESSION_BUS_ADDRESS="disabled:" \
   "$CHROMIUM" \
   "${SANDBOX_FLAGS[@]}" \
+  "${BUILD_FLAGS[@]}" \
   --remote-debugging-port="$CDP_PORT" \
   --remote-allow-origins="http://127.0.0.1:${CDP_PORT}" \
   --user-data-dir="$PROFILE" \
