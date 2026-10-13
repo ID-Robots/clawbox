@@ -106,10 +106,12 @@ describe("registration", () => {
     expect(h.get("coding_agent_resume").opts.readOnly).toBe(false);
   });
 
-  it("offers no tool for an owner's switch or the owner's bring-home", () => {
-    // enable, the pipeline
-    // default and merge are owner-session routes: a tool for any of them could
-    // only be refused, and would make the owner's answer temporary if it were not.
+  it("offers no tool for an owner's switch, nor any merge into the owner's project", () => {
+    // enable and the pipeline default are owner-session routes: a tool for
+    // either could only be refused, and would make the owner's answer
+    // temporary if it were not. A merge of a run's branch into the project
+    // folder is not a route at all any more (the settle does its own,
+    // conservatively), and no tool may grow one.
     const names = harness().names();
     for (const word of ["enable", "merge", "promote", "permission", "toggle"]) {
       expect(names.some((n) => n.includes(word))).toBe(false);

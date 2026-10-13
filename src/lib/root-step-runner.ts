@@ -132,7 +132,13 @@ export async function startRootStep(
   if (opts.noBlock) argv.push("--no-block");
   argv.push(step);
   try {
-    await execFile("/usr/bin/sudo", argv, { timeout: opts.timeoutMs ?? 30_000 });
+    // A cwd of its own, never the web server's: that is `.next/standalone`,
+    // which a rebuild replaces under a server still running (a hand-run
+    // `bun run build`, the in-app update's own build before its restart),
+    // and a child spawned from a deleted directory dies on `getcwd` before
+    // the launcher runs. The launcher is an absolute path and reads nothing
+    // relative, so `/` is the honest working directory.
+    await execFile("/usr/bin/sudo", argv, { cwd: "/", timeout: opts.timeoutMs ?? 30_000 });
   } catch (err) {
     const what = err instanceof Error ? launcherRefusal(err as ExecError) : null;
     if (what) throw new RootStepUnavailableError(step, what, err as ExecError);

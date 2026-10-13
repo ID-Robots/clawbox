@@ -5,7 +5,6 @@ import { useT } from "@/lib/i18n";
 import { formatBytes } from "@/lib/format-bytes";
 import { onCodingAgentChanged } from "@/lib/ui-events";
 import type { HistoryRetentionMode } from "@/lib/coding-run-history";
-import HelpTip from "./HelpTip";
 import StatusMessage from "./StatusMessage";
 import { BTN_DANGER, BTN_SECONDARY, CARD, FIELD } from "./coding-agent-ui";
 
@@ -13,7 +12,8 @@ import { BTN_DANGER, BTN_SECONDARY, CARD, FIELD } from "./coding-agent-ui";
  * The Run history card on the Coding Agent's settings page (TASK-1178): what
  * the box keeps of finished runs, what that weighs, whether the disk guard is
  * holding the history back, and the two whole-history actions — Export all and
- * Clear archive.
+ * Clear archive. Kept lean on purpose: the mode's hint is the one sentence
+ * of explanation, and the page itself is reached from the app's rail.
  *
  * The SETTING is saved through the settings panel's own write chain (`onSave`,
  * POST /setup-api/coding-agent/enable) like every other setting there; the
@@ -78,7 +78,6 @@ export default function CodingRunHistoryCard({
   saving,
   onSave,
   error,
-  onOpenHistory,
 }: {
   mode: HistoryRetentionMode;
   limit: number;
@@ -89,8 +88,6 @@ export default function CodingRunHistoryCard({
   onSave: (patch: Record<string, unknown>) => Promise<unknown>;
   /** The panel's refusal for this card's slot, drawn under the controls. */
   error: ReactNode;
-  /** Open the Run history page. Absent where there is no page to open. */
-  onOpenHistory?: () => void;
 }) {
   const { t, locale } = useT();
   const [summary, setSummary] = useState<RunHistorySummaryWire | null>(null);
@@ -127,7 +124,9 @@ export default function CodingRunHistoryCard({
   }, []);
 
   // Again after every save: the transcript period and the warning both follow
-  // the setting the server now holds.
+  // the setting the server now holds. The card's first read, like the panel's:
+  // it has no other moment to ask, and each answer is one render.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void refresh(); }, [refresh, mode, limit]);
   // And whenever the coding agent says it changed — the app's Clear history
   // (on the same page) deletes or archives runs this card counts.
@@ -159,8 +158,9 @@ export default function CodingRunHistoryCard({
         <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">history</span>
         <h3 className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-widest">{t("codingAgent.history.title")}</h3>
       </div>
-      <p className="text-[11px] text-[var(--text-muted)] mt-1 leading-relaxed">{t("codingAgent.history.hint")}</p>
 
+      {/* No paragraph under the title: the mode's own hint below says what the
+          chosen setting keeps, which is all the owner opened this for. */}
       <div className="flex items-start justify-between gap-4 mt-4">
         <label htmlFor="coding-agent-history-mode" className="text-xs font-medium text-[var(--text-secondary)]">
           {t("codingAgent.history.modeLabel")}
@@ -233,23 +233,20 @@ export default function CodingRunHistoryCard({
         </ul>
       )}
 
-      <div className="mt-4 rounded-lg bg-black/25 border border-white/[0.06] px-3 py-2" data-testid="coding-agent-history-usage">
+      {/* One line, not an inset of two: what it weighs, the counts and the
+          free space, read together. */}
+      <p className="mt-3 text-[11px] text-[var(--text-muted)] leading-relaxed" data-testid="coding-agent-history-usage">
         {summary?.usage ? (
           <>
-            <p className="text-xs text-[var(--text-primary)]">
-              {t("codingAgent.history.usage", { size: bytes(summary.usage.total) })}
-            </p>
-            <p className="text-[11px] text-[var(--text-muted)] mt-0.5">
-              {t("codingAgent.history.usageCounts", { live: summary.counts.live, older: summary.counts.older, archived: summary.counts.archived })}
-              {summary.disk.freeBytes !== null && <> · {t("codingAgent.history.usageFree", { free: bytes(summary.disk.freeBytes) })}</>}
-            </p>
+            {t("codingAgent.history.usage", { size: bytes(summary.usage.total) })}
+            {" "}
+            {t("codingAgent.history.usageCounts", { live: summary.counts.live, older: summary.counts.older, archived: summary.counts.archived })}
+            {summary.disk.freeBytes !== null && <> · {t("codingAgent.history.usageFree", { free: bytes(summary.disk.freeBytes) })}</>}
           </>
         ) : (
-          <p className="text-[11px] text-[var(--text-muted)]">
-            {summaryFailed || summary ? t("codingAgent.history.usageUnknown") : t("codingAgent.history.usageMeasuring")}
-          </p>
+          summaryFailed || summary ? t("codingAgent.history.usageUnknown") : t("codingAgent.history.usageMeasuring")
         )}
-      </div>
+      </p>
 
       {summary?.disk.low && (
         <p role="alert" className="mt-2 flex items-start gap-1.5 text-[11px] text-amber-300 leading-relaxed" data-testid="coding-agent-history-low-disk">
@@ -260,38 +257,30 @@ export default function CodingRunHistoryCard({
 
       {error}
 
+      {/* The two whole-history actions, each saying what it does in its own
+          label: Export all history is a download, Clear archive asks twice and
+          names the count. There is no "Open run history" button — the app's
+          rail has the page, and here it was one more thing to read past. */}
       <div className="mt-4 flex flex-wrap items-center gap-2">
-        {onOpenHistory && (
-          <button type="button" onClick={onOpenHistory} className={BTN_SECONDARY} data-testid="coding-agent-history-open">
-            <span className="material-symbols-rounded" style={{ fontSize: 15 }} aria-hidden="true">manage_history</span>
-            {t("codingAgent.history.open")}
-          </button>
-        )}
-        <span className="inline-flex items-center gap-1">
-          <a
-            href="/setup-api/coding-agent/history/export"
-            download
-            className={BTN_SECONDARY}
-            data-testid="coding-agent-history-export"
-          >
-            <span className="material-symbols-rounded" style={{ fontSize: 15 }} aria-hidden="true">download</span>
-            {t("codingAgent.history.exportAll")}
-          </a>
-          <HelpTip text={t("codingAgent.history.exportAllHint")} label={t("codingAgent.history.exportAll")} testId="coding-agent-history-export-help" />
-        </span>
-        <span className="inline-flex items-center gap-1">
-          <button
-            type="button"
-            onClick={() => { if (confirmClear) { disarm(); void clearArchive(); } else arm(); }}
-            onBlur={disarm}
-            disabled={clearing || archived === 0}
-            className={confirmClear ? BTN_DANGER : BTN_SECONDARY}
-            data-testid="coding-agent-history-clear-archive"
-          >
-            {confirmClear ? t("codingAgent.history.clearArchiveConfirm", { count: archived }) : t("codingAgent.history.clearArchive")}
-          </button>
-          <HelpTip text={t("codingAgent.history.clearArchiveHint")} label={t("codingAgent.history.clearArchive")} testId="coding-agent-history-clear-help" />
-        </span>
+        <a
+          href="/setup-api/coding-agent/history/export"
+          download
+          className={BTN_SECONDARY}
+          data-testid="coding-agent-history-export"
+        >
+          <span className="material-symbols-rounded" style={{ fontSize: 15 }} aria-hidden="true">download</span>
+          {t("codingAgent.history.exportAll")}
+        </a>
+        <button
+          type="button"
+          onClick={() => { if (confirmClear) { disarm(); void clearArchive(); } else arm(); }}
+          onBlur={disarm}
+          disabled={clearing || archived === 0}
+          className={confirmClear ? BTN_DANGER : BTN_SECONDARY}
+          data-testid="coding-agent-history-clear-archive"
+        >
+          {confirmClear ? t("codingAgent.history.clearArchiveConfirm", { count: archived }) : t("codingAgent.history.clearArchive")}
+        </button>
       </div>
       {clearNote && (
         <div className="mt-2" data-testid="coding-agent-history-clear-note">

@@ -1256,6 +1256,84 @@ step_ffmpeg_install() {
   fi
 }
 
+# The SHA256 GitHub publishes for one asset of a release: from the release
+# JSON in $1, the asset whose "name" is exactly $2, its "digest". Parsed as
+# JSON, so neither field order nor whitespace decides it; prints nothing when
+# there is no such asset or it carries no sha256 digest.
+github_release_asset_sha256() {
+  python3 -I - "$1" "$2" <<'PY'
+import json, re, sys
+try:
+    with open(sys.argv[1]) as fh:
+        release = json.load(fh)
+except Exception:
+    sys.exit(0)
+assets = release.get("assets") if isinstance(release, dict) else None
+for item in assets if isinstance(assets, list) else []:
+    if isinstance(item, dict) and item.get("name") == sys.argv[2]:
+        digest = item.get("digest")
+        match = re.fullmatch(r"sha256:([0-9a-fA-F]{64})", digest) if isinstance(digest, str) else None
+        if match:
+            print(match.group(1).lower())
+        break
+PY
+}
+
+# Cloudflare Tunnel (cloudflared), the binary Settings → Remote Control
+# starts. The appliance's step runs scripts/setup-tunnel.sh; here the same
+# download is INLINED, because this function runs out of the root-owned
+# installer copy and root never executes a file the install user can write
+# (TASK-733). Same release pin, same published-SHA256 check, same idempotence:
+# a binary already in place is left alone.
+step_cloudflared_install() {
+  local install_path="/usr/local/bin/cloudflared"
+  local version="${CLOUDFLARED_VERSION:-2026.3.0}"
+  if [ -x "$install_path" ] && [ -z "${CLOUDFLARED_FORCE_REINSTALL:-}" ]; then
+    echo "  cloudflared already installed at $install_path"
+    "$install_path" --version 2>/dev/null || true
+    return 0
+  fi
+  local cf_arch
+  case "$(uname -m)" in
+    x86_64|amd64) cf_arch="amd64" ;;
+    aarch64|arm64) cf_arch="arm64" ;;
+    *) echo "  cloudflared: unsupported architecture $(uname -m); remote control will be unavailable" >&2; return 0 ;;
+  esac
+  local asset="cloudflared-linux-${cf_arch}"
+  local url="https://github.com/cloudflare/cloudflared/releases/download/${version}/${asset}"
+  local meta_url="https://api.github.com/repos/cloudflare/cloudflared/releases/tags/${version}"
+  local tmp meta sums expected
+  tmp="$(mktemp)"; meta="$(mktemp)"; sums="$(mktemp)"
+  # A failed download or a bad checksum is a WARNING, as on the appliance:
+  # the box still installs, and the Remote Control panel's button runs this
+  # step again on demand.
+  # `--connect-timeout` bounds a black hole and `--speed-time` a transfer that
+  # has stopped moving (under 1 byte/s for a minute); `--retry` retries both.
+  # No `--max-time`, which would fail a download that is merely slow.
+  if ! curl -fsSL --connect-timeout 15 --speed-limit 1 --speed-time 60 --retry 3 --retry-delay 2 -o "$tmp" "$url"; then
+    echo "  WARNING: cloudflared download failed ($url); remote control will be unavailable until installed" >&2
+    rm -f "$tmp" "$meta" "$sums"; return 0
+  fi
+  if ! curl -fsSL --connect-timeout 15 --speed-limit 1 --speed-time 60 --retry 3 --retry-delay 2 -H "Accept: application/vnd.github+json" -o "$meta" "$meta_url"; then
+    echo "  WARNING: could not fetch the cloudflared ${version} release metadata; not installing an unverified binary" >&2
+    rm -f "$tmp" "$meta" "$sums"; return 0
+  fi
+  expected="$(github_release_asset_sha256 "$meta" "$asset" || true)"
+  if [ -z "$expected" ]; then
+    echo "  WARNING: no published SHA256 for ${asset} in ${version}; not installing an unverified binary" >&2
+    rm -f "$tmp" "$meta" "$sums"; return 0
+  fi
+  printf '%s  %s\n' "$expected" "$tmp" > "$sums"
+  if ! sha256sum --check --status "$sums"; then
+    echo "  WARNING: cloudflared SHA256 mismatch for ${asset}; not installing" >&2
+    rm -f "$tmp" "$meta" "$sums"; return 0
+  fi
+  chmod 0755 "$tmp"
+  mv "$tmp" "$install_path"
+  rm -f "$meta" "$sums"
+  echo "  cloudflared installed: $("$install_path" --version 2>/dev/null || echo "$version")"
+}
+
 step_fix_git_perms() {
   chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$PROJECT_DIR/.git"
   echo "  Fixed .git ownership"
@@ -1270,6 +1348,10 @@ x64_sudoers_rule() {
   if [ "$SKIP_DESKTOP_SERVICES" != "1" ]; then
     printf '%s' ", /usr/bin/systemctl start clawbox-browser.service, /usr/bin/systemctl stop clawbox-browser.service"
   fi
+  # Remote Control: the web server starts, stops, enables and disables the
+  # tunnel unit — the exact verbs and the exact unit name src/lib/cloudflared.ts
+  # passes, never a `start` (a restart is what it uses) and never a wildcard.
+  printf '%s' ", /usr/bin/systemctl restart clawbox-tunnel.service, /usr/bin/systemctl stop clawbox-tunnel.service, /usr/bin/systemctl enable clawbox-tunnel.service, /usr/bin/systemctl disable clawbox-tunnel.service"
   printf '%s\n' ", /usr/bin/systemctl enable --now ollama.service, /usr/bin/systemctl start ollama.service, /usr/bin/systemctl stop ollama.service"
 }
 
@@ -1413,6 +1495,7 @@ step_systemd_services() {
   local vnc_unit="/etc/systemd/system/clawbox-vnc.service"
   local websockify_unit="/etc/systemd/system/clawbox-websockify.service"
   local browser_unit="/etc/systemd/system/clawbox-browser.service"
+  local tunnel_unit="/etc/systemd/system/clawbox-tunnel.service"
 
   cat > "$gateway_unit" <<EOF
 [Unit]
@@ -1441,6 +1524,40 @@ RestartPreventExitStatus=78
 SuccessExitStatus=0 143
 TimeoutStartSec=600
 TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  # The Quick Tunnel behind Settings → Remote Control. Written, never enabled:
+  # the panel's Start is what enables it (sudoers below grants exactly the
+  # verbs src/lib/cloudflared.ts uses), and a tunnel enabled by default would
+  # loop forever on a box without cloudflared. The appliance ships this unit
+  # as config/clawbox-tunnel.service with its user and paths hard-wired; this
+  # box's are the installer's own.
+  cat > "$tunnel_unit" <<EOF
+[Unit]
+Description=ClawBox Cloudflare Quick Tunnel
+After=network-online.target $UI_SERVICE
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$CLAWBOX_USER
+WorkingDirectory=$PROJECT_DIR
+Environment=HOME=$CLAWBOX_HOME
+Environment=USER=$CLAWBOX_USER
+Environment=CLAWBOX_ROOT=$PROJECT_DIR
+Environment=LOCAL_SERVICE_URL=http://localhost:$PORT
+ExecStart=$PROJECT_DIR/scripts/run-tunnel.sh
+Restart=always
+RestartSec=5
+SuccessExitStatus=143 SIGTERM
+TimeoutStartSec=30
+TimeoutStopSec=15
+NoNewPrivileges=yes
+PrivateTmp=yes
+MemoryMax=256M
 
 [Install]
 WantedBy=multi-user.target
@@ -1869,7 +1986,7 @@ DISPATCH_STEPS=(
   openclaw_setup openclaw_install openclaw_patch openclaw_config
   directories_permissions
   ollama_install llamacpp_install chromium_install ai_tools_install
-  vnc_install ffmpeg_install fix_git_perms clawkeep_install
+  vnc_install ffmpeg_install cloudflared_install fix_git_perms clawkeep_install
   systemd_services root_step_contract start_gateway start_ui
 )
 
@@ -1893,7 +2010,7 @@ fi
 
 # ── Full Install Mode ───────────────────────────────────────────────────────
 
-TOTAL_STEPS=17
+TOTAL_STEPS=18
 step=0
 log() {
   step=$((step + 1))
@@ -1945,6 +2062,9 @@ step_vnc_install
 
 log "Installing ffmpeg..."
 step_ffmpeg_install
+
+log "Installing Cloudflare Tunnel (cloudflared)..."
+step_cloudflared_install
 
 log "Installing ClawKeep CLI..."
 step_clawkeep_install

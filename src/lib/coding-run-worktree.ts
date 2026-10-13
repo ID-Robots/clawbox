@@ -357,6 +357,21 @@ export async function commitsAhead(projectDir: string, branch: string, base: str
 }
 
 /**
+ * Does the worktree hold changes its branch does not — staged, modified, or
+ * untracked and not ignored? `commitsAhead` cannot see them (a commit that
+ * failed after its `git add -A` leaves the work staged and the branch where
+ * it was), and `removeRunWorktree` forces them away. The `node_modules` at its
+ * root is left out: that is the project's own, linked in by
+ * `linkSharedNodeModules`, and git lists a link as untracked whatever a
+ * `node_modules/` ignore line says. Null means git could not say.
+ */
+export async function worktreeHasChanges(worktreePath: string): Promise<boolean | null> {
+  const r = await gitIn(path.resolve(worktreePath), ["status", "--porcelain", "--untracked-files=normal", "--", ".", ":(exclude)node_modules"]);
+  if (!ok(r)) return null;
+  return out(r) !== "";
+}
+
+/**
  * Is every commit on `branch` already reachable from somewhere that keeps it?
  *
  * `base` first, because that is where a settle merges a run's work. The

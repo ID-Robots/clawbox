@@ -26,7 +26,8 @@ import CodingRunDenials, { type RunDenial } from "./CodingRunDenials";
 import CodingRunCiCard, { type RunCiView } from "./CodingRunCiCard";
 import CodingRunInputs, { type RunInputs } from "./CodingRunInputs";
 import CodingRunMessageBox from "./CodingRunMessageBox";
-import CodingRunWorktreeCard, { type RunWorktreeView } from "./CodingRunWorktreeCard";
+import CodingRunWorktreeCard, { worktreeCardApplies, type RunWorktreeView } from "./CodingRunWorktreeCard";
+import CodingTaskDialog from "./CodingTaskDialog";
 import type { RunMessage } from "@/lib/coding-run-messages";
 import RunProgressBar, { RUN_TONE } from "./RunProgressBar";
 // The "3h ago" the rest of the desktop speaks — ClawKeep's helper and its
@@ -606,12 +607,13 @@ export default function CodingAgentApp() {
   // summary and the files off the page; the card shows a few and the rest
   // on request. Keyed by run so the next run's page starts folded.
   const [artifactsOpenFor, setArtifactsOpenFor] = useState<string | null>(null);
+  // The run whose whole task is open in its dialog (null: none).
+  const [taskOpenFor, setTaskOpenFor] = useState<string | null>(null);
   // Runs are behind a button: the answer to "is this on and does it work" is
   // the whole point of opening this window, and a list of past runs pushed it
   // below the fold.
   // Open by default: the history is the reason the window gets opened once
   // the switch is already on.
-  const [showRuns, setShowRuns] = useState(true);
   const [runsShown, setRunsShown] = useState(RUNS_PAGE);
   const [github, setGithub] = useState<GitHubState | null>(null);
   // Decided once: the route does not change under a mounted window. The
@@ -964,7 +966,6 @@ export default function CodingAgentApp() {
       // startHarnessTest.
       const started = await startHarnessTest(status?.defaultDirectory ?? null, t);
       if (!started.ok) throw new Error(started.error);
-      setShowRuns(true);
       // The live view opens on the run as soon as its transcript exists.
       pendingLiveOpen.current = started.runId;
       // The chat's run card only probes when told: an open chat would
@@ -1530,6 +1531,24 @@ export default function CodingAgentApp() {
       : deliverable.kind === "paths"
         ? t("codingAgent.deliverablePaths", { files: deliverable.paths.join(", ") })
         : t("codingAgent.deliverableCommand", { command: deliverable.command });
+    // Met: one line. A three-line card saying "it is there" on every finished
+    // run was one of the cards the owner asked to lose; what it had to leave
+    // behind and the verdict still read, inline.
+    if (check?.ok) {
+      return (
+        <p className="mt-3 px-1 text-[11px] text-[var(--text-muted)] break-words flex items-start gap-1.5" data-testid="coding-agent-deliverable" data-state="met">
+          <span className="material-symbols-rounded text-emerald-400 shrink-0" style={{ fontSize: 14 }} aria-hidden="true">check_circle</span>
+          <span>
+            <span data-testid="coding-agent-deliverable-verdict">{t("codingAgent.deliverableMet")}</span>
+            {" "}
+            <span data-testid="coding-agent-deliverable-what">{what}</span>
+            {attempts > 1 && run.completionAttempts != null && (
+              <span data-testid="coding-agent-deliverable-attempts"> · {t("codingAgent.deliverableAttempts", { n: attempts, max: run.completionAttempts })}</span>
+            )}
+          </span>
+        </p>
+      );
+    }
     return (
       <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-deliverable" data-state={check ? (check.ok ? "met" : "missing") : "pending"}>
         <p className={SECTION_LABEL}>{t("codingAgent.deliverableTitle")}</p>
@@ -1756,26 +1775,6 @@ export default function CodingAgentApp() {
                             {t("codingAgent.thinking", { n: run.thinkingTokens ?? 0 })}
                           </span>
                         )}
-                        {/* One green dot per sub-agent, so the fan-out is
-                            visible at a glance. Filled while working, hollow
-                            once done. */}
-                        {(run.subagentsTotal ?? 0) > 0 && (
-                          <span
-                            className="flex items-center gap-1"
-                            data-testid="coding-agent-subagent-dots"
-                            title={Object.entries(run.subagentsByType ?? {}).map(([k, n]) => `${n}× ${k}`).join(", ")}
-                          >
-                            {Array.from({ length: Math.min(run.subagentsTotal ?? 0, 12) }).map((_, i) => (
-                              <span
-                                key={i}
-                                className={`inline-block h-2 w-2 rounded-full ${
-                                  i < (run.subagentsActive ?? 0) ? "bg-emerald-400 animate-pulse" : "bg-emerald-400/35"
-                                }`}
-                              />
-                            ))}
-                            <span className="text-[10px] font-semibold text-emerald-400 ml-0.5">{run.subagentsTotal}</span>
-                          </span>
-                        )}
                         {prChip(run)}
                         {/* A review pass names the run it reviewed, and that
                             run names its reviewer. */}
@@ -1784,8 +1783,6 @@ export default function CodingAgentApp() {
                     ? t("codingAgent.reviewLoopRoundOf", { round: run.reviewRound, id: run.reviewLoopOf })
                     : t("codingAgent.reviewLoopOf", { id: run.reviewLoopOf }), "coding-agent-review-loop-of")}
                         {reviewedBy && runChip(reviewedBy.id, t("codingAgent.reviewedBy", { id: reviewedBy.id }), "coding-agent-reviewed-by")}
-                        {run.projectId && <span className="text-[11px] text-[var(--text-muted)]">{run.projectId}</span>}
-                        <span className="text-[11px] font-mono text-[var(--text-muted)] opacity-60">{run.id}</span>
                       </div>
                       <p className="text-xs text-[var(--text-primary)] mt-1 break-words">
                         {run.reviewOf ? t("codingAgent.reviewPassTitle", { id: run.reviewOf }) : firstLine(run.task, 80)}
@@ -1796,8 +1793,6 @@ export default function CodingAgentApp() {
                         {run.source === "owner" ? t("codingAgent.startedByOwner") : t("codingAgent.startedByAgent")}
                         {started && run.effort && ` · ${t(`codingAgent.effort.${run.effort}`)}`}
                         {(run.tokensUsed ?? 0) > 0 && ` · ${tokens(run.tokensUsed ?? 0)} ${t("codingAgent.tokensWord")}`}
-                        {(run.subagentsTotal ?? 0) > 0
-                          && ` · ${Object.entries(run.subagentsByType ?? {}).map(([k, n]) => `${n}× ${k}`).join(", ")}`}
                         {run.permissionDenials > 0 && (
                           <span className="text-amber-400"> · {t("codingAgent.denials", { n: run.permissionDenials })}</span>
                         )}
@@ -1811,12 +1806,11 @@ export default function CodingAgentApp() {
                           className="mt-1"
                         />
                       )}
-                      {/* Which models did the work, and how fresh this is. */}
-                      {((run.modelsUsed?.length ?? 0) > 0 || run.lastActivityAt) && (
+                      {/* How fresh this is. The models are on the run's page
+                          (the longest strings a row used to carry). */}
+                      {run.lastActivityAt && (
                         <p className="text-[11px] text-[var(--text-muted)] opacity-60 mt-0.5" data-testid="coding-agent-run-stats">
-                          {(run.modelsUsed?.length ?? 0) > 0 && run.modelsUsed?.join(" + ")}
-                          {(run.modelsUsed?.length ?? 0) > 0 && run.lastActivityAt ? " · " : ""}
-                          {run.lastActivityAt && `${t("codingAgent.updated")} ${timeAgo(run.lastActivityAt, t)}`}
+                          {t("codingAgent.updated")} {timeAgo(run.lastActivityAt, t)}
                         </p>
                       )}
                     </div>
@@ -1839,20 +1833,6 @@ export default function CodingAgentApp() {
                       </button>
                     </div>
                   </div>
-                  {/* Which helpers are out and what each is doing — a count
-                      alone does not say whether the run is stuck on one
-                      search or fanned across three files. */}
-                  {(run.activeSubagents?.length ?? 0) > 0 && (
-                    <ul className="mt-2 space-y-1" data-testid="coding-agent-active-subagents">
-                      {run.activeSubagents?.map((a, i) => (
-                        <li key={i} className="flex items-start gap-2 text-[11px]">
-                          <span className="material-symbols-rounded text-sky-400 animate-pulse shrink-0" style={{ fontSize: 13 }} aria-hidden="true">sync</span>
-                          <span className="text-sky-300 font-medium shrink-0">{a.type}</span>
-                          <span className="text-[var(--text-muted)] break-words min-w-0">{a.description}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  )}
                 </li>
               );
             })}
@@ -1870,34 +1850,6 @@ export default function CodingAgentApp() {
         </button>
       )}
     </>
-  );
-
-  const runsSection = (
-    <div className="mt-4">
-      <button
-        type="button"
-        onClick={() => { setShowRuns((v) => !v); setRunsShown(RUNS_PAGE); }}
-        aria-expanded={showRuns}
-        data-testid="coding-agent-runs-toggle"
-        className={`w-full flex items-center justify-between gap-2 ${CARD_SURFACE} px-3 py-2 text-xs text-[var(--text-primary)] hover:bg-white/[0.06] transition-colors`}
-      >
-        <span className="flex items-center gap-2">
-          <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 16 }} aria-hidden="true">history</span>
-          {t("codingAgent.projectRuns")}
-          {visibleRuns.length > 0 && <span className="text-[var(--text-muted)]">({visibleRuns.length})</span>}
-          {anyRunning && (
-            <span className="text-[10px] font-semibold uppercase tracking-wider text-amber-400 border border-amber-400/40 rounded-full px-2 py-0.5">
-              {t("codingAgent.statusRunning")}
-            </span>
-          )}
-        </span>
-        <span className="material-symbols-rounded text-[var(--text-muted)]" style={{ fontSize: 18 }} aria-hidden="true">
-          {showRuns ? "expand_less" : "expand_more"}
-        </span>
-      </button>
-
-      {showRuns && runsList}
-    </div>
   );
 
   return (
@@ -2464,21 +2416,6 @@ export default function CodingAgentApp() {
             </ul>
           )}
         </div>
-        {/* The rail carries Run history in a wide window; a narrow one (the
-            phone) has no rail, so the home page offers it at its foot. */}
-        {!wide && (
-          <div className="mt-4 flex justify-center">
-            <button
-              type="button"
-              onClick={() => { setArchivedOpenId(null); setPage("history"); }}
-              data-testid="coding-agent-home-history"
-              className={BTN_QUIET}
-            >
-              <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">manage_history</span>
-              {t("codingAgent.history.title")}
-            </button>
-          </div>
-        )}
         </>)}
 
         {/* One run, on its own page. */}
@@ -2523,6 +2460,23 @@ export default function CodingAgentApp() {
           const activityAt = run.progressAt?.length === run.progress.length ? run.progressAt : [];
           const title = run.reviewOf ? t("codingAgent.reviewPassTitle", { id: run.reviewOf }) : firstLine(run.task, 160);
           const fullTask = !run.reviewOf && run.task.trim() !== firstLine(run.task, 160) ? run.task : null;
+          // The summary is the run's closing message, and that is markdown.
+          // Drawn through the chat's renderer, which builds elements from
+          // the text and never injects HTML — what lets agent-written words
+          // on to the owner's screen at all. Placed FIRST on a settled run
+          // and after the live card while it works.
+          const summaryCard = (
+            <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`}>
+              <p className={SECTION_LABEL}>{t("codingAgent.summaryTitle")}</p>
+              <CodingRunSummary
+                key={run.id}
+                runId={run.id}
+                report={reportFile?.name ?? null}
+                summary={run.summary}
+                live={isLive(run.status)}
+              />
+            </div>
+          );
           return (
             <div className="mt-4 pb-6" data-testid="coding-agent-run-page" data-run-id={run.id}>
               <CodingAgentBreadcrumb
@@ -2664,11 +2618,6 @@ export default function CodingAgentApp() {
                       {t("codingAgent.queuePosition", { n: run.queued.position })}
                     </span>
                   )}
-                  {run.status === "running" && (run.thinkingTokens ?? 0) > 0 && (
-                    <span data-testid="coding-agent-thinking" className="text-[10px] font-semibold border rounded-full px-2 py-0.5 text-violet-300 border-violet-400/40">
-                      {t("codingAgent.thinking", { n: run.thinkingTokens ?? 0 })}
-                    </span>
-                  )}
                   {prChip(run)}
                   {run.team && (
                     <span
@@ -2710,11 +2659,22 @@ export default function CodingAgentApp() {
                 </div>
                 {prDetail(run)}
                 <h2 className="mt-2 text-sm font-semibold text-[var(--text-primary)] break-words" data-testid="coding-agent-run-title">{title}</h2>
+                {/* The rest of the task opens in a dialog of its own, rendered
+                    as Markdown — a `<details>` that unfolded raw text into the
+                    header card was the owner's complaint (2026-10-12). */}
                 {fullTask && (
-                  <details className="mt-1">
-                    <summary className="text-[11px] text-[var(--text-muted)] cursor-pointer">{t("codingAgent.fullTask")}</summary>
-                    <p className="mt-1 text-xs text-[var(--text-secondary)] whitespace-pre-wrap break-words max-h-48 overflow-y-auto">{run.task}</p>
-                  </details>
+                  <button
+                    type="button"
+                    onClick={() => setTaskOpenFor(run.id)}
+                    data-testid="coding-agent-run-task-open"
+                    className="mt-1 inline-flex items-center gap-1 text-[11px] text-[var(--text-muted)] hover:text-white"
+                  >
+                    <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">open_in_full</span>
+                    {t("codingAgent.fullTask")}
+                  </button>
+                )}
+                {fullTask && taskOpenFor === run.id && (
+                  <CodingTaskDialog title={title} task={fullTask} runId={run.id} onClose={() => setTaskOpenFor(null)} />
                 )}
                 <p className="text-[11px] text-[var(--text-muted)] mt-1.5 flex items-center gap-1 flex-wrap">
                   <span>{run.source === "owner" ? t("codingAgent.startedByOwner") : t("codingAgent.startedByAgent")}</span>
@@ -2729,23 +2689,7 @@ export default function CodingAgentApp() {
                       · {t("codingAgent.runProvider", { provider: t(CODING_PROVIDER_NAME_KEY[run.provider]) })}
                     </span>
                   )}
-                  {run.lastActivityAt && <span>· {t("codingAgent.updated")} {timeAgo(run.lastActivityAt, t)}</span>}
-                  {(run.modelsUsed?.length ?? 0) > 0 && <span>· {run.modelsUsed?.join(" + ")}</span>}
                 </p>
-                <button
-                  type="button"
-                  onClick={() => void copyFolder(run.id)}
-                  title={t("codingAgent.copyId")}
-                  aria-label={t("codingAgent.copyId")}
-                  data-testid="coding-agent-run-copy-id"
-                  className="mt-1 flex items-center gap-1 text-[11px] font-mono text-[var(--text-muted)] opacity-70 hover:opacity-100 hover:text-white"
-                >
-                  {run.id}
-                  <span className="material-symbols-rounded" style={{ fontSize: 12 }} aria-hidden="true">
-                    {copiedFolder === run.id ? "check" : "content_copy"}
-                  </span>
-                  {copiedFolder === run.id && <span className="font-sans">{t("codingAgent.copied")}</span>}
-                </button>
                 {isLive(run.status) && (
                   <RunProgressBar
                     estimate={estimateRunProgress(run, now)}
@@ -2782,24 +2726,18 @@ export default function CodingAgentApp() {
                     </button>
                   </div>
                 )}
-                {/* The run's own copy of the project, while it is still on
-                    disk — and, the reason the card is its own component now,
-                    WHERE ITS WORK IS. A settle removes the copy when the branch
-                    was merged home or the run left nothing on it; anything else
-                    — a project with uncommitted changes of its own, one since
-                    moved to another branch, a merge that conflicted, a pull
-                    request still open — stays. For the first three the work is
-                    on a branch and not in the project, and the card offers to
-                    bring it home rather than leaving Remove copy as the only
-                    move. */}
-                {run.worktree && !run.worktree.removed && isSettled(run.status) && (
+                {/* WHERE THE RUN'S WORK IS, in one line: merged home, open as
+                    a pull request, or on its branch and why it is not in the
+                    project (the settle removes the copy either way and keeps
+                    the branch). Remove copy only while a copy is still on
+                    disk, which is now the exception. */}
+                {run.worktree && isSettled(run.status) && worktreeCardApplies(run.worktree, Boolean(run.pr && run.pr.phase !== "failed")) && (
                   <CodingRunWorktreeCard
                     runId={run.id}
                     worktree={run.worktree}
                     pullRequestOpen={Boolean(run.pr && run.pr.phase !== "failed")}
                     busy={busy === run.id}
                     onRemove={() => removeRunCopy(run.id)}
-                    onChanged={() => { void load(); }}
                   />
                 )}
                 {/* WHY it is paused, when the answer is not "somebody asked".
@@ -2960,7 +2898,12 @@ export default function CodingAgentApp() {
                   </div>
                 );
               })()}
-              {!isLive(run.status) && <CodingRunTimeline lines={activity} times={activityAt} startedAt={run.startedAt} live={false} />}
+              {/* Settled: the summary is what the page is for, so it comes
+                  first; the timeline — the tallest thing on a finished run,
+                  sixty rows the owner scrolled past to reach one paragraph —
+                  is under it, folded. */}
+              {!isLive(run.status) && summaryCard}
+              {!isLive(run.status) && <CodingRunTimeline lines={activity} times={activityAt} startedAt={run.startedAt} live={false} folded />}
 
               {deliverableCard(run)}
               {reviewCard(run)}
@@ -2995,28 +2938,17 @@ export default function CodingAgentApp() {
                 />
               )}
 
-              {/* The summary is the run's closing message, and that is
-                  markdown. Drawn through the chat's renderer, which builds
-                  elements from the text and never injects HTML — what lets
-                  agent-written words on to the owner's screen at all. */}
-              <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`}>
-                <p className={SECTION_LABEL}>{t("codingAgent.summaryTitle")}</p>
-                <CodingRunSummary
-                  key={run.id}
-                  runId={run.id}
-                  report={reportFile?.name ?? null}
-                  summary={run.summary}
-                  live={isLive(run.status)}
-                />
-              </div>
+              {isLive(run.status) && summaryCard}
 
-              {/* The plan, as the run last wrote it. */}
+              {/* The plan, as the run last wrote it: open while the run works
+                  (what is left), folded once it has settled (every row ticked
+                  and struck through, which the summary already says). */}
               {todos.length > 0 && (
-                <div className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-run-plan">
-                  <p className={SECTION_LABEL}>
+                <details className={`mt-3 ${CARD_SURFACE} px-4 py-3`} data-testid="coding-agent-run-plan" open={isLive(run.status) || undefined}>
+                  <summary className={`${SECTION_LABEL} cursor-pointer list-none`}>
                     {t("codingAgent.planTitle")}
                     <span className="rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-semibold leading-none text-[var(--text-secondary)]">{todosDone}/{todos.length}</span>
-                  </p>
+                  </summary>
                   <ul className="mt-2 space-y-1">
                     {todos.map((item, i) => (
                       <li key={i} className="flex items-start gap-2 text-xs">
@@ -3035,7 +2967,7 @@ export default function CodingAgentApp() {
                       </li>
                     ))}
                   </ul>
-                </div>
+                </details>
               )}
 
               {/* The run's evidence: screenshots it took while verifying its
@@ -3182,6 +3114,20 @@ export default function CodingAgentApp() {
                     <StatLine label={t("codingAgent.deniedTitle")} value={String(run.permissionDenials)} testId="coding-agent-stat-denied" />
                   )}
                 </dl>
+                <button
+                  type="button"
+                  onClick={() => void copyFolder(run.id)}
+                  title={t("codingAgent.copyId")}
+                  aria-label={t("codingAgent.copyId")}
+                  data-testid="coding-agent-run-copy-id"
+                  className="mt-2 flex items-center gap-1 text-[11px] font-mono text-[var(--text-muted)] opacity-70 hover:opacity-100 hover:text-white"
+                >
+                  {run.id}
+                  <span className="material-symbols-rounded" style={{ fontSize: 12 }} aria-hidden="true">
+                    {copiedFolder === run.id ? "check" : "content_copy"}
+                  </span>
+                  {copiedFolder === run.id && <span className="font-sans">{t("codingAgent.copied")}</span>}
+                </button>
               </div>
 
               {/* The files this run was GIVEN, and the folder they are in —
@@ -3189,7 +3135,9 @@ export default function CodingAgentApp() {
                   need. Above the refusals on purpose: the commonest refusal
                   this feature answers is a read of a file that should have
                   been handed over, and the answer is right here. */}
-              <CodingRunInputs inputs={run.inputs} />
+              {((run.inputs?.files?.length ?? 0) > 0 || (run.inputs?.refused?.length ?? 0) > 0) && (
+                <CodingRunInputs inputs={run.inputs} />
+              )}
 
               {/* What was refused, spelled out — and, where this box can
                   answer it, an "Allow next time" beside it. */}
@@ -3242,16 +3190,6 @@ export default function CodingAgentApp() {
                 {p.kind === "codeProject" && (
                   <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-[var(--text-muted)] border-white/20">
                     {t("codingAgent.codeProject")}
-                  </span>
-                )}
-                {p.onDesktop && (
-                  <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-sky-300 border-sky-400/40">
-                    {t("codingAgent.onDesktop")}
-                  </span>
-                )}
-                {projectLive && (
-                  <span className="text-[10px] font-semibold uppercase tracking-wider border rounded-full px-2 py-0.5 text-amber-400 border-amber-400/40">
-                    {t("codingAgent.runInProgress")}
                   </span>
                 )}
                 {p.onDesktop && (

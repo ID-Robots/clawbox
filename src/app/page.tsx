@@ -47,6 +47,7 @@ import ToastHost from "@/components/ToastHost";
 import PowerApprovalPrompt, { POWER_APPROVAL_EVENT } from "@/components/PowerApprovalPrompt";
 import InstalledAppIcon from "@/components/InstalledAppIcon";
 import AgentBrowserIcon from "@/components/AgentBrowserIcon";
+import GoogleChromeIcon from "@/components/GoogleChromeIcon";
 import SetupWizard from "@/components/SetupWizard";
 import { I18nProvider, useT } from "@/lib/i18n";
 import { cleanVersion } from "@/lib/version-utils";
@@ -62,6 +63,7 @@ import { KIOSK_PAGES_APP_ID, kioskPageTabs, openInKiosk, useKioskTabs } from "@/
 import { useKioskBarInset } from "@/lib/kiosk-bar-inset";
 import { mainInsets, mainScreen } from "@/lib/desktop-screens";
 import { useDeskScreens } from "@/lib/use-desk-screens";
+import { DESKTOP_CHROME_APP_ID, openDesktopChrome, useDesktopChrome } from "@/lib/desktop-chrome-client";
 import { useMonitorLayoutSync } from "@/lib/use-monitor-layout";
 import MonitorIdentifyOverlay from "@/components/MonitorIdentifyOverlay";
 import { NON_OWNER_APP_IDS, OWNER_ONLY_NOTICE, installedAppIdsFor } from "@/lib/non-owner-scope";
@@ -168,6 +170,17 @@ const PENDING_ACTION_MAX_AGE_MS = 60_000;
 
 // How often the owner-notice ring is read while the page is on screen.
 const RING_POLL_MS = 2_000;
+/**
+ * Where a desktop whose session the box no longer accepts goes: the login
+ * page, carrying the path it was on the way the middleware does for a
+ * navigation (`redirect` is the pathname alone — never the query, which a
+ * notice or a deep link may still be sitting in — so the two agree and the
+ * person lands back where they were).
+ */
+function signedOutLoginPage(pathname: string = window.location.pathname): string {
+  const params = new URLSearchParams({ redirect: pathname || "/" });
+  return `/login?${params.toString()}`;
+}
 // How often the owner-notice ring is still read while the page is HIDDEN (a
 // phone or a laptop tab in the background). Not paused like the other polls:
 // the ring delivers EVENTS — `register_webapp` is the only way a new web app's
@@ -311,6 +324,10 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
 
   if (id === "browser") {
     return <AgentBrowserIcon className={`${size} text-white`} />;
+  }
+
+  if (id === DESKTOP_CHROME_APP_ID) {
+    return <GoogleChromeIcon className={size} />;
   }
 
   if (id === "clawbox") {
@@ -701,6 +718,9 @@ function ChromeDesktopInner() {
   // polled only on the kiosk itself: every other box — every Jetson — sends
   // nothing.
   const kiosk = useKioskTabs(ownerApis && onKiosk);
+  // The ClawBox Desktop session's own screen, with a Chrome to start: the
+  // Google Chrome icon (src/lib/desktop-chrome-client.ts). Hidden elsewhere.
+  const desktopChrome = useDesktopChrome(ownerApis);
   // A stable callback on its own, so the shelf's click handler can depend on
   // it rather than on the whole `kiosk` object, a new one every render.
   const activateKioskTab = kiosk.activate;
@@ -840,9 +860,13 @@ function ChromeDesktopInner() {
   const harnessHiddenAppIds = useMemo<string[]>(
     () => isOwner
       // A kiosk-only app (Web) exists on the laptop's kiosk desktop alone.
-      ? [...hiddenAppIdsForHarness(activeHarness), ...(onKiosk ? [] : apps.filter((a) => a.kioskOnly).map((a) => a.id))]
+      ? [
+          ...hiddenAppIdsForHarness(activeHarness),
+          ...(onKiosk ? [] : apps.filter((a) => a.kioskOnly).map((a) => a.id)),
+          ...(desktopChrome ? [] : [DESKTOP_CHROME_APP_ID]),
+        ]
       : apps.map((a) => a.id).filter((id) => !NON_OWNER_APP_IDS.includes(id)),
-    [activeHarness, isOwner, onKiosk],
+    [activeHarness, isOwner, onKiosk, desktopChrome],
   );
 
   // ─── Desktop shortcuts for built-in apps ───
@@ -2258,6 +2282,12 @@ function ChromeDesktopInner() {
       } catch {}
     }
 
+    if (app.type === "chrome") {
+      // A native window on the screen, not a desktop window.
+      void openDesktopChrome();
+      return;
+    }
+
     if (app.type === "chat") {
       setChatOpen(true);
       // Also when it is ALREADY open: the chat now takes its turn in the focus
@@ -2556,6 +2586,19 @@ function ChromeDesktopInner() {
         // middleware would bounce straight back, so it must not be in history.
         if (res.headers.get(UPDATE_LOCK_HEADER) === "1") {
           window.location.replace(UPDATING_PAGE);
+          return;
+        }
+        // The session is gone — expired, or revoked by a password change on
+        // another device. A page that is already open never navigates, so the
+        // middleware's /login redirect never reaches it either: it sat here as
+        // a frozen desktop while this poll, the shield's, the chat's and the
+        // notices' kept asking eight routes every one to two seconds and were
+        // refused on every one (measured on a tunnel client, 2026-10-13: a
+        // third of the box's requests, for an hour). Read off the same
+        // request, like the lock above; a 403 is NOT this — the session is
+        // fine and the desktop is simply not the owner's (TASK-1256).
+        if (res.status === 401) {
+          window.location.replace(signedOutLoginPage());
           return;
         }
         if (res.ok && ownerApiAccess) {

@@ -71,6 +71,7 @@ export type ProgressLabelKey =
   | "worktreeMerged"
   | "worktreeRemoved"
   | "worktreeKept"
+  | "worktreeParked"
   | "evidencePruned"
   | "workingOnBranch"
   | "noPullRequest"
@@ -305,8 +306,10 @@ export const RUNNER_STEP = {
   worktree: (branch: string, base: string) => `Working in its own copy of the project on ${branch}, forked from ${base}`,
   worktreeMerged: (base: string) => `Merged into ${base} and the run's copy of the project removed`,
   worktreeRemoved: "The run's copy of the project was removed; it left nothing on its branch",
-  /** Why the copy is still on disk: unmerged work, a conflict, a pull request that owns the branch. */
+  /** Why the copy is still on disk: it could not be removed, or git could not say what is on its branch. */
   worktreeKept: (reason: string) => `The run's copy of the project was kept: ${reason}`,
+  /** The files went, the branch did not: the work was not merged home (a dirty project, a conflict, a pull request that owns the branch), so the branch is where it stays. */
+  worktreeParked: (branch: string, reason: string) => `The run's copy of the project was removed; its work is kept on ${branch} — ${reason}`,
   /**
    * What the settle took out of the run's evidence folder (pruneArtifacts in
    * coding-agent-artifacts.ts): an environment a run built there, or a link
@@ -460,6 +463,7 @@ const RUNNER_PATTERNS: RunnerPattern[] = [
   { re: /^Merged into (.+) and the run's copy of the project removed$/, labelKey: "worktreeMerged", icon: "merge", params: (m) => ({ base: m[1] }) },
   { re: /^The run's copy of the project was removed; it left nothing on its branch$/, labelKey: "worktreeRemoved", icon: "delete_sweep" },
   { re: /^The run's copy of the project was kept: (.+)$/, labelKey: "worktreeKept", icon: "inventory_2", params: (m) => ({ reason: m[1] }) },
+  { re: /^The run's copy of the project was removed; its work is kept on (\S+) — (.+)$/, labelKey: "worktreeParked", icon: "account_tree", params: (m) => ({ branch: m[1], reason: m[2] }) },
   { re: /^Removed from the evidence folder, where environments and links out of it do not belong: (.+)$/, labelKey: "evidencePruned", icon: "delete_sweep", params: (m) => ({ paths: m[1] }) },
   { re: /^Working on (.+), for a pull request into (.+)$/, labelKey: "workingOnBranch", icon: "call_split", params: (m) => ({ branch: m[1], base: m[2] }) },
   { re: /^No pull request: (.+)$/, labelKey: "noPullRequest", icon: "block", params: (m) => ({ reason: m[1] }) },
