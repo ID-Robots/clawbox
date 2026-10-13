@@ -220,9 +220,9 @@ describe("the PATH a start command runs with", () => {
   });
 
   it("leaves the box's node folder where the run's list already has it", () => {
-    // The usual box: node in /usr/bin, which the run's list names after the home folders.
-    const value = start.startSearchPath("/home/u/.bun/bin:/usr/local/bin:/usr/bin:/bin", { home: "/home/u", execPath: "/usr/bin/node", envPath: "" });
-    expect(value.split(":").slice(0, 4)).toEqual(["/home/u/.bun/bin", "/usr/local/bin", "/usr/bin", "/bin"]);
+    // The usual box: node in /usr/bin, which the run's list names after the user folders.
+    const value = start.startSearchPath("/opt/u/.bun/bin:/usr/local/bin:/usr/bin:/bin", { home: "/opt/u", execPath: "/usr/bin/node", envPath: "" });
+    expect(value.split(":").slice(0, 4)).toEqual(["/opt/u/.bun/bin", "/usr/local/bin", "/usr/bin", "/bin"]);
   });
 
   it("drops empty and relative entries, which would resolve against the project folder", () => {
