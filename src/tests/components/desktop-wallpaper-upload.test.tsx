@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import ChromeDesktop from "@/app/page";
 import { resetHarnessCache } from "@/lib/client-harness";
+import { UI_LANGUAGE_READ } from "@/lib/ui-language-read";
 
 // The desktop is the whole shell, and this suite is about ONE handler in it.
 // Mounting the mascot (a rAF walk loop) and the chat popup (6 500 lines, a
@@ -77,6 +78,8 @@ let activeHarness = "openclaw";
 let savedOpacity: number | null = 100;
 /** Whether the device could actually RESOLVE its harness, or `active` is its own default. */
 let activeKnown = true;
+/** The box's `ui_language`, or null for a box that holds none (the browser's language wins). */
+let savedLanguage: string | null = null;
 /** Every preference body the desktop POSTed, in order. */
 const saved: Record<string, unknown>[] = [];
 
@@ -100,6 +103,9 @@ function installFetch() {
     if (url.includes("/setup-api/setup/status")) return answer({ setup_complete: true });
     if (url.includes("/setup-api/harness/active")) {
       return answer({ active: activeHarness, edition: activeHarness, activeKnown });
+    }
+    if (url.includes(UI_LANGUAGE_READ.url)) {
+      return answer(savedLanguage === null ? {} : { ui_language: savedLanguage });
     }
     if (url.includes("/setup-api/preferences?all=1")) {
       return answer({ wp_id: savedWallpaperId, ...(savedOpacity === null ? {} : { wp_opacity: savedOpacity }) });
@@ -149,6 +155,7 @@ beforeEach(() => {
   savedOpacity = 100;
   activeHarness = "openclaw";
   activeKnown = true;
+  savedLanguage = null;
   saved.length = 0;
   resetHarnessCache();
   // jsdom does not implement it at all, so `vi.spyOn` cannot be used and
@@ -209,6 +216,30 @@ describe("uploading a wallpaper", () => {
     });
 
     expect(await screen.findByText(/not a picture/i, {}, PAINTS_SOON)).toBeTruthy();
+    expect(storedWallpapers()).toEqual(WP);
+  });
+
+  // TASK-1520: the refusal reached the owner as the raw key
+  // "settings.wallpaperNotImage". The toast must say it in the box's language.
+  it.each([
+    ["de", /Diese Datei ist kein Bild/],
+    ["ja", /このファイルは画像ではない/],
+  ])("says the refusal in the box's language (%s), never as the raw key", async (locale, expected) => {
+    savedLanguage = locale;
+    await mountDesktop(WP[2]);
+    await waitFor(() => expect(document.documentElement.getAttribute("lang")).toBe(locale), PAINTS_SOON);
+    // The locale's copy is layered on in an effect after the switch.
+    await vi.dynamicImportSettled();
+    await act(async () => {});
+
+    fireEvent.change(uploadInput(), {
+      target: { files: [new File(["just a note"], "smoke-note.txt", { type: "text/plain" })] },
+    });
+
+    const toast = await screen.findByTestId("toast-host", {}, PAINTS_SOON);
+    await waitFor(() => expect(toast.textContent).toMatch(expected), PAINTS_SOON);
+    expect(toast.textContent).not.toContain("settings.wallpaperNotImage");
+    expect(toast.textContent).not.toMatch(/not a picture/i);
     expect(storedWallpapers()).toEqual(WP);
   });
 
