@@ -115,6 +115,18 @@ describe("an app whose server the run has already stopped", () => {
     expect(() => process.kill(pid, 0)).toThrow();
   });
 
+  it("kills a silent start that ignores the request to stop", async () => {
+    const port = await freePort();
+    const marker = path.join(project, "stubborn.pid");
+    // The shell ignores SIGTERM and stays in the foreground.
+    const command = "trap '' TERM; echo $$ > stubborn.pid; while :; do sleep 1; done";
+    const outcome = await start.startServerApp({ id: "hello-app", directory: project, manifest: manifestFor(port, command), searchPath, noScope: true, waitMs: 1_500 });
+    expect(outcome.ok).toBe(false);
+    const pid = Number(fs.readFileSync(marker, "utf-8"));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(() => process.kill(pid, 0)).toThrow();
+  });
+
   it("starts nothing without a start command: the refusal is the old one", async () => {
     const port = await freePort();
     const outcome = await start.registerOrStartServerApp({ id: "hello-app", directory: project, manifest: manifestFor(port, null), searchPath, noScope: true });

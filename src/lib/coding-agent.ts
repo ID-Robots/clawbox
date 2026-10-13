@@ -7926,9 +7926,11 @@ async function registerProjectApp(run: CodingRun): Promise<void> {
     // worked in a copy whose changes are not in the project yet has nothing
     // there to start.
     const inProject = project === run.directory ? manifest : await readClawboxManifest(project);
-    const startable = inProject?.port === manifest.port && inProject?.start === manifest.start;
+    // What is started is the PROJECT's server, so what is registered for it is
+    // the project's manifest too (its name, its `stripBasePath`), not a copy's.
+    const startable = inProject && inProject.port === manifest.port && inProject.start === manifest.start;
     const outcome = startable
-      ? await registerOrStartServerApp({ id, directory: project, manifest, searchPath: runnerPath() })
+      ? await registerOrStartServerApp({ id, directory: project, manifest: inProject, searchPath: runnerPath() })
       : await registerServerApp({ id, directory: project, manifest });
     pushProgress(run, outcome.ok
       ? RUNNER_STEP.onDesktop(manifest.name, id, manifest.port)

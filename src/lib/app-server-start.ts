@@ -160,11 +160,38 @@ async function startOnce(input: StartServerAppInput): Promise<StartOutcome> {
     if (!gone) {
       // Still running and still silent: end what we started, by its own
       // process group, rather than leave a half-started server behind.
-      if (typeof child.pid === "number") { try { process.kill(-child.pid, "SIGTERM"); } catch { /* already gone */ } }
+      if (typeof child.pid === "number") await endProcessGroup(child.pid);
       return { ok: false, detail: `the box started it (${command}) and nothing of the project's answered on port ${port} within ${Math.round(waitMs / 1000)} seconds.` };
     }
   }
   return { ok: false, detail: `the box started it (${command}) and it stopped${exited === null ? "" : ` with exit code ${exited}`} before anything listened on port ${port}.` };
+}
+
+/** How long a start that is being ended gets to go quietly before it is killed. */
+const END_GRACE_MS = 3_000;
+
+function groupAlive(pgid: number): boolean {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * End a process group we started: asked first, then made to. A signal is a
+ * request — a start command that ignores SIGTERM would otherwise be reported
+ * as ended while it kept running.
+ */
+async function endProcessGroup(pgid: number): Promise<void> {
+  try { process.kill(-pgid, "SIGTERM"); } catch { return; }
+  const deadline = Date.now() + END_GRACE_MS;
+  while (Date.now() < deadline) {
+    if (!groupAlive(pgid)) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  try { process.kill(-pgid, "SIGKILL"); } catch { /* gone in the meantime */ }
 }
 
 /**
