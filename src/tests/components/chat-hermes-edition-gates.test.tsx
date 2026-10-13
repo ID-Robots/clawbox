@@ -100,6 +100,17 @@ describe("what the composer offers when the box cannot do it", () => {
     expect(screen.queryByTestId("voice-record")).toBeNull();
   });
 
+  it("never asks the OpenClaw model store, which answers 409 on this edition", async () => {
+    // 2026-10-13 smoke test: a red `409 GET /setup-api/chat/model` in the
+    // console on every chat open. The chat's model lives in Hermes's own store
+    // (`modelStore: 'harness'`); that route says `wrong_store` by design.
+    await mountHermesChat(box);
+    await waitFor(() => expect(box.fetchedUrls.some((u) => u.includes("/setup-api/hermes/models"))).toBe(true));
+    window.dispatchEvent(new Event("focus"));
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(box.fetchedUrls.filter((u) => u.includes("/setup-api/chat/model"))).toEqual([]);
+  });
+
   it("never opens a gateway socket on a box that runs no gateway", async () => {
     await mountHermesChat(box);
     expect(box.socketsOpened).toBe(0);
