@@ -166,9 +166,14 @@ export function capabilitiesFor(id: HarnessId, facts: HarnessFacts): HarnessCapa
       // answer at all. The composer promising something the box half-does is
       // the failure this table exists to stop.
       canAttachImages: facts.hermesSupportsImages && facts.hermesHasVisionRoute,
-      // `--image` is image-only, and the agent's own path-in-prompt resolver
-      // matches picture extensions by design. A document has no way in.
-      canAttachDocuments: false,
+      // A document rides the way it does on OpenClaw: staged on the box and
+      // named in the message as `[Attached file: /abs/path]`, which the agent
+      // opens with its own `file` tools (in the slim local-model toolset too,
+      // local-model-profile.ts). `--image` stays pictures-only. Until
+      // 2026-10-13 this was false: the composer refused the file, the message
+      // went out without it, and the agent searched the disk for a file it
+      // was told was attached.
+      canAttachDocuments: true,
       maxAttachmentsPerTurn: MAX_ATTACHMENTS.hermes,
       // The transcription route is edition-neutral — it posts to the ClawBox
       // AI proxy, which both editions can reach. What a Hermes box may lack is

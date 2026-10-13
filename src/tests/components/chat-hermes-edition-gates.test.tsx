@@ -65,15 +65,22 @@ afterEach(() => {
 });
 
 describe("what the composer offers when the box cannot do it", () => {
-  it("offers no attach button where a staged file could not reach the model", async () => {
+  /** What the composer's hidden file picker will take. */
+  const pickerAccept = () =>
+    document.querySelector<HTMLInputElement>("input[type='file'][multiple]")?.accept ?? null;
+
+  it("offers documents but no pictures where a staged picture could not reach the model", async () => {
     // `hermesSupportsImages: false` on the box — the installed agent takes no
     // image on a turn, so staging one would put a chip on screen for a file the
-    // model never sees.
+    // model never sees. A DOCUMENT does reach it (named in the prompt, opened
+    // with the agent's file tools), so the button is there for those alone.
     await mountHermesChat(box);
-    expect(screen.queryByTitle("Attach file")).toBeNull();
+    await screen.findByTitle("Attach file");
+    expect(pickerAccept()).not.toContain("image/");
+    expect(pickerAccept()).toContain(".txt");
   });
 
-  it("offers no attach button where the picture would arrive but nothing could see it", async () => {
+  it("offers documents but no pictures where the picture would arrive but nothing could see it", async () => {
     // The half that shipped wrong. `hermes chat --image` exists on an unlinked
     // box, so the flag probe says yes — but with no `auxiliary.vision` model
     // configured, `image_routing.py` has no route to fall back to for a chat
@@ -83,14 +90,16 @@ describe("what the composer offers when the box cannot do it", () => {
     box.facts.hermesSupportsImages = true;
     box.facts.hermesHasVisionRoute = false;
     await mountHermesChat(box);
-    expect(screen.queryByTitle("Attach file")).toBeNull();
+    await screen.findByTitle("Attach file");
+    expect(pickerAccept()).not.toContain("image/");
   });
 
-  it("DOES offer the attach button once the picture can both arrive and be seen", async () => {
+  it("DOES offer pictures once the picture can both arrive and be seen", async () => {
     box.facts.hermesSupportsImages = true;
     box.facts.hermesHasVisionRoute = true;
     await mountHermesChat(box);
     await screen.findByTitle("Attach file");
+    expect(pickerAccept()).toContain("image/*");
   });
 
   it("offers no microphone on a box with no transcription credential", async () => {

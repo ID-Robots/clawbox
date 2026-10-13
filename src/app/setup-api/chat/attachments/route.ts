@@ -133,14 +133,13 @@ function asBadUpload(err: unknown): unknown {
 // `partitionAttachments` already refuses these in the composer, and refusing
 // there is the better place: nothing is uploaded, nothing is written to the
 // customer's disk, and the reason can be shown next to the file. This is the
-// second gate, for a request that did not come from that composer -- verified
-// as reachable by POSTing a text/plain document to a Hermes box, which answered
-// 200 and staged it.
+// second gate, for a request that did not come from that composer.
 //
-// The file would then be named in a turn that cannot carry it: `hermes chat
-// --image` is image-only and `image_routing.py:extract_image_refs()` matches
-// picture extensions by design, so a staged document is disk the box will never
-// hand back. Nothing is gained by keeping it.
+// Both editions read documents today (Hermes since 2026-10-13: the file is
+// named in the prompt as `[Attached file: …]` and opened with the agent's own
+// file tools), so the gate is held for a harness whose table says no. Such a
+// file would be named in a turn that cannot carry it, and nothing is gained by
+// keeping it.
 //
 // Deliberately NOT gated on `canAttachImages`. That capability is per-box (it
 // depends on the installed agent's flag and on a configured vision route), and

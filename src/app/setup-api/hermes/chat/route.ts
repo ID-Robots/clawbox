@@ -42,6 +42,7 @@ import { isSlashCommandMessage } from "@/lib/chat-slash-commands";
 import { runHermesSlashCommand, withSessionModelNote } from "@/lib/hermes-slash-exec";
 import { DESKTOP_TRANSCRIPT_KEY, transcriptKeyIsSafe } from "@/lib/harness/transcript-key";
 import { resolveInMediaRoot } from "@/lib/harness/media-root";
+import { hermesDocumentPrompt } from "@/lib/harness/hermes-document-prompt";
 import { mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
 import { splitEmailRefs } from "@/lib/chat-email-refs";
 import { extractReasoningPanels, stripAgentStatusFrames } from "@/lib/hermes-reasoning-panel";
@@ -998,6 +999,12 @@ export async function POST(request: Request) {
     displayText?: string;
     /** Absolute paths of staged images to attach to this turn. */
     imagePaths?: unknown;
+    /**
+     * Absolute paths of staged DOCUMENTS. Named in the prompt as
+     * `[Attached file: /abs/path]` — OpenClaw's shape — for the agent's file
+     * tools to open; never `--image`.
+     */
+    documentPaths?: unknown;
     model?: string;
     provider?: string;
     reasoning?: string;
@@ -1240,9 +1247,30 @@ export async function POST(request: Request) {
   }
   const [firstImage, ...extraImages] = imagePaths;
 
-  const promptWithImages = extraImages.length
-    ? `${safeMessage}\n\n${extraImages.join("\n")}`
-    : safeMessage;
+  // ── Documents ───────────────────────────────────────────────────────────
+  //
+  // Re-resolved against the staging root exactly as the pictures are: the
+  // agent opens any readable absolute path it is handed. Named ahead of the
+  // message, one `[Attached file: …]` line each, the line the OpenClaw adapter
+  // writes; the agent reads them with its `file` tools, and a small text file
+  // is quoted under its line as well so the box's own small model needs no
+  // tool call to read it (hermes-document-prompt.ts). Without this a document
+  // was refused in the composer, the message went out anyway, and the agent
+  // searched the disk for a file it had been told was attached.
+  const requestedDocuments = Array.isArray(body.documentPaths)
+    ? body.documentPaths.filter((entry): entry is string => typeof entry === "string").slice(0, MAX_IMAGES_PER_TURN)
+    : [];
+  const documentPaths: string[] = [];
+  for (const requested of requestedDocuments) {
+    const safe = await resolveInMediaRoot(requested);
+    if (safe && !documentPaths.includes(safe) && !imagePaths.includes(safe)) documentPaths.push(safe);
+  }
+  const documentLines = await hermesDocumentPrompt(documentPaths);
+
+  const promptWithImages = [
+    documentLines,
+    extraImages.length ? `${safeMessage}\n\n${extraImages.join("\n")}` : safeMessage,
+  ].filter(Boolean).join("\n\n");
 
   // ── The transcript ──────────────────────────────────────────────────────
   //
@@ -1251,11 +1279,14 @@ export async function POST(request: Request) {
   // — rather than vanishing or, worse, leaving an answer to nothing. It is also
   // why this is written here and not in the browser: a customer who closes the
   // tab on a 600-second turn still gets the exchange back on their next visit.
+  const shownText = typeof body.displayText === "string" && body.displayText.trim()
+    ? body.displayText.trim()
+    : message;
   await appendTranscript({
     role: "user",
-    text: typeof body.displayText === "string" && body.displayText.trim()
-      ? body.displayText.trim()
-      : message,
+    // A document is shown as the composer labels it (`📎 name`), the way the
+    // OpenClaw history relabels its `[Attached file: …]` lines.
+    text: [...documentPaths.map((p) => `📎 ${path.basename(p)}`), shownText].join("\n"),
     timestamp: Date.now(),
     ...(imagePaths.length ? { media: imagePaths.map((p) => mediaUrl(p)) } : {}),
   }, sessionKey);
@@ -1286,7 +1317,7 @@ export async function POST(request: Request) {
   // attachment, the user turn above has already been recorded WITH its media,
   // and a branch that ran the command and dropped the file would show the owner
   // their screenshot in the transcript over an answer that never saw it.
-  if (imagePaths.length === 0 && isSlashCommandMessage(message)) {
+  if (imagePaths.length === 0 && documentPaths.length === 0 && isSlashCommandMessage(message)) {
     const ran = await runHermesSlashCommand({
       command: message.trim(),
       ...(rawSessionId ? { sessionId: rawSessionId } : {}),

@@ -106,7 +106,7 @@ import {
   attachmentAcceptAttribute,
   classifyStagingFailure,
   createPreviewUrl,
-  partitionAttachments,
+  partitionAttachments, refusalReason,
   revokePreviews,
   type ChatAttachment,
   type StagingFailure,
@@ -1200,7 +1200,7 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
     // from.
     const { accepted, refused } = partitionAttachments(files, caps)
     if (refused.length > 0) {
-      setAttachmentError({ reason: 'imagesOnly', detail: null, file: refused[0].name || '' })
+      setAttachmentError({ reason: refusalReason(refused[0]), detail: null, file: refused[0].name || '' })
     }
     if (accepted.length === 0) return
     const stampBase = Date.now()
