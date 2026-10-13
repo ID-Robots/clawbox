@@ -409,7 +409,10 @@ describe("install-x64.sh shared-host preflight", () => {
     // TASK-445 / TASK-733 boundary).
     expect(dispatcher).toContain("run_chpasswd");
     expect(dispatcher).toContain("/usr/sbin/chpasswd");
-    expect(dispatcher).toContain('exec /usr/bin/bash "$ROOT_INSTALLER" --step "$step"');
+    // …and hands it the user and folder it read from /etc/clawbox/x64.env:
+    // a unit systemd started has no logname and no SUDO_USER, and without
+    // these the installer copy refused every step from the web server.
+    expect(dispatcher).toContain('exec /usr/bin/env CLAWBOX_USER="$CLAWBOX_USER" CLAWBOX_DIR="$PROJECT_DIR" /usr/bin/bash "$ROOT_INSTALLER" --step "$step"');
     expect(dispatcher).not.toContain('exec /usr/bin/bash "$PROJECT_DIR/install-x64.sh"');
     // The wizard asks for these on every install and x64 has neither.
     expect(dispatcher).toContain("is a no-op on the x64 install");
@@ -446,12 +449,101 @@ describe("install-x64.sh shared-host preflight", () => {
     expect(managed.stdout).toContain("systemctl stop clawbox-browser.service");
     expect(managed.stdout).toContain("systemctl --runtime mask clawbox-gateway.service");
     expect(managed.stdout).toContain("systemctl enable --now ollama.service");
+    // Remote Control's tunnel: the four verbs src/lib/cloudflared.ts uses, on
+    // the unit name it passes, in both modes — the tunnel is not a desktop
+    // service.
+    for (const verb of ["restart", "stop", "enable", "disable"]) {
+      expect(managed.stdout).toContain(`systemctl ${verb} clawbox-tunnel.service`);
+    }
+    expect(managed.stdout).not.toContain("systemctl start clawbox-tunnel.service");
 
     const skipped = runRule("1");
     expect(skipped.status).toBe(0);
     expect(skipped.stdout).not.toContain("clawbox-browser.service");
     expect(skipped.stdout).toContain("systemctl --runtime mask clawbox-gateway.service");
     expect(skipped.stdout).toContain("systemctl enable --now ollama.service");
+    expect(skipped.stdout).toContain("systemctl restart clawbox-tunnel.service");
+  });
+
+  it("installs cloudflared itself and ships the tunnel unit, so Remote Control works on x64", () => {
+    // Settings → Remote Control's Install button starts the cloudflared_install
+    // root step; on x64 the dispatcher refused it as "no implementation" and the
+    // installer had no step, no unit and no sudo grant for it (seen on the
+    // owner's laptop, 2026-10-12).
+    expect(SOURCE).toContain("step_cloudflared_install() {");
+    expect(SOURCE).toContain("  vnc_install ffmpeg_install cloudflared_install fix_git_perms clawkeep_install");
+    expect(SOURCE).toContain('local tunnel_unit="/etc/systemd/system/clawbox-tunnel.service"');
+    expect(SOURCE).toContain("ExecStart=$PROJECT_DIR/scripts/run-tunnel.sh");
+    expect(SOURCE).toContain("Environment=LOCAL_SERVICE_URL=http://localhost:$PORT");
+    // Root downloads the binary itself — never the install user's setup-tunnel.sh.
+    const body = SOURCE.slice(SOURCE.indexOf("step_cloudflared_install() {"), SOURCE.indexOf("\n}\n", SOURCE.indexOf("step_cloudflared_install() {")));
+    expect(body).not.toContain("setup-tunnel.sh");
+    expect(body).toContain("sha256sum --check");
+    // Written, never enabled at install (the sudoers line grants the panel's
+    // own `enable`; the installer's enable lines must not name it).
+    expect(SOURCE).not.toMatch(/systemctl enable "\$GATEWAY_SERVICE"[^\n]*clawbox-tunnel/);
+    const dispatcher = readFileSync(path.resolve(process.cwd(), "scripts/x64-migration/clawbox-x64-root-step.sh"), "utf8");
+    expect(dispatcher).toMatch(/INSTALLER_STEPS="[^"]*\bcloudflared_install\b/);
+  });
+});
+
+/** `github_release_asset_sha256`, sliced from the installer so it cannot drift. */
+function releaseDigestFunction(): string {
+  const start = SOURCE.indexOf("github_release_asset_sha256() {");
+  const end = SOURCE.indexOf("\nPY\n}\n", start);
+  if (start < 0 || end < 0) throw new Error("release digest function not found");
+  return SOURCE.slice(start, end + "\nPY\n}\n".length);
+}
+
+describe.skipIf(!hasPython3)("install-x64.sh cloudflared release digest", () => {
+  const ASSET = "cloudflared-linux-amd64";
+  const SHA = "ab".repeat(32);
+  const OTHER = "cd".repeat(32);
+  let root: string;
+  beforeEach(() => {
+    root = mkdtempSync(path.join(tmpdir(), "clawbox-x64-digest-"));
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  function digestOf(meta: string): { status: number | null; out: string } {
+    const file = path.join(root, "release.json");
+    writeFileSync(file, meta);
+    const r = spawnSync("bash", ["-c", [
+      "set -euo pipefail",
+      releaseDigestFunction(),
+      `github_release_asset_sha256 "$1" "$2"`,
+    ].join("\n"), "bash", file, ASSET], { encoding: "utf-8", timeout: 30_000 });
+    return { status: r.status, out: r.stdout.trim() };
+  }
+
+  it("is what the cloudflared step checks the download against", () => {
+    const body = SOURCE.slice(SOURCE.indexOf("step_cloudflared_install() {"), SOURCE.indexOf("\n}\n", SOURCE.indexOf("step_cloudflared_install() {")));
+    expect(body).toContain('expected="$(github_release_asset_sha256 "$meta" "$asset" || true)"');
+    expect(body).toContain("sha256sum --check");
+    expect(body).not.toMatch(/grep -F -A \d+ "\\"name\\"/);
+  });
+
+  it("reads GitHub's pretty-printed release, name before digest", () => {
+    const meta = JSON.stringify({ tag_name: "2026.3.0", assets: [
+      { name: `${ASSET}.deb`, digest: `sha256:${OTHER}` },
+      { name: ASSET, size: 1, digest: `sha256:${SHA}` },
+    ] }, null, 2);
+    expect(digestOf(meta)).toEqual({ status: 0, out: SHA });
+  });
+
+  it("reads compact JSON with the digest ahead of the name", () => {
+    const meta = `{"assets":[{"digest":"sha256:${OTHER}","name":"${ASSET}-fips"},{"digest":"sha256:${SHA}","name":"${ASSET}"}]}`;
+    expect(digestOf(meta)).toEqual({ status: 0, out: SHA });
+  });
+
+  it("finds nothing — so the step installs nothing — without an exact name or a sha256 digest", () => {
+    expect(digestOf(JSON.stringify({ assets: [{ name: `${ASSET}.deb`, digest: `sha256:${OTHER}` }] }))).toEqual({ status: 0, out: "" });
+    expect(digestOf(JSON.stringify({ assets: [{ name: ASSET, digest: null }] }))).toEqual({ status: 0, out: "" });
+    expect(digestOf(JSON.stringify({ assets: [{ name: ASSET, digest: `md5:${"ab".repeat(16)}` }] }))).toEqual({ status: 0, out: "" });
+    expect(digestOf(JSON.stringify({ message: "API rate limit exceeded" }))).toEqual({ status: 0, out: "" });
+    expect(digestOf("<html>not json</html>")).toEqual({ status: 0, out: "" });
   });
 });
 

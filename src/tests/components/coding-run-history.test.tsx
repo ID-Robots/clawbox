@@ -1,6 +1,6 @@
 /**
  * The Run history card on the Coding Agent's settings page and the Run history
- * page (TASK-1178): what they say, what they send, and what they open.
+ * page (TASK-1178): what they say, what they send, and what the page opens.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
@@ -84,7 +84,8 @@ describe("CodingRunHistoryCard", () => {
     expect(screen.getByTestId("coding-agent-history-usage").textContent).toContain("20.0 GB free");
     expect(screen.queryByTestId("coding-agent-history-limit")).toBeNull();
     expect(screen.queryByTestId("coding-agent-history-low-disk")).toBeNull();
-    // No button to a page this host does not have.
+    // No "Open run history" button: the app's rail has the page, and the card
+    // never draws one (it used to, for a host that passed a callback).
     expect(screen.queryByTestId("coding-agent-history-open")).toBeNull();
     expect(screen.getByTestId("coding-agent-history-export").getAttribute("href")).toBe("/setup-api/coding-agent/history/export");
     expect((screen.getByTestId("coding-agent-history-clear-archive") as HTMLButtonElement).disabled).toBe(true);
@@ -96,7 +97,7 @@ describe("CodingRunHistoryCard", () => {
   it("offers N under extended, and warns what the next run will delete", async () => {
     stubFetch(() => json(summary({ mode: "extended", counts: { live: 30, older: 120, archived: 0 } })));
     const onSave = vi.fn(async () => ({}));
-    render(<CodingRunHistoryCard mode="extended" limit={100} limits={[100, 300, 1000]} liveKept={30} saving={false} onSave={onSave} error={null} onOpenHistory={() => {}} />);
+    render(<CodingRunHistoryCard mode="extended" limit={100} limits={[100, 300, 1000]} liveKept={30} saving={false} onSave={onSave} error={null} />);
     const limit = screen.getByTestId("coding-agent-history-limit") as HTMLSelectElement;
     expect(Array.from(limit.options).map((o) => o.textContent)).toEqual(["100 runs", "300 runs", "1000 runs"]);
     await waitFor(() => expect(screen.getByTestId("coding-agent-history-pending").textContent).toBe(
@@ -104,7 +105,8 @@ describe("CodingRunHistoryCard", () => {
     ));
     fireEvent.change(limit, { target: { value: "300" } });
     expect(onSave).toHaveBeenCalledWith({ historyLimit: 300 });
-    expect(screen.getByTestId("coding-agent-history-open")).toBeTruthy();
+    // Never drawn, whatever the mode.
+    expect(screen.queryByTestId("coding-agent-history-open")).toBeNull();
   });
 
   it("says where the transcripts stand under keep everything, and warns when the disk is low", async () => {

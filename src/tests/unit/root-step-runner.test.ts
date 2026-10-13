@@ -66,6 +66,10 @@ describe("startRootStep", () => {
     await startRootStep("bootstrap_updater", { noBlock: true });
     expect(mockExecFile.mock.calls[0][0]).toBe("/usr/bin/sudo");
     expect(mockExecFile.mock.calls[0][1]).toEqual(["-n", ROOT_STEP_LAUNCHER, "--no-block", "bootstrap_updater"]);
+    // A cwd of its own: the server's is `.next/standalone`, which a rebuild
+    // replaces under it, and a child spawned from a deleted directory dies
+    // on getcwd before the launcher runs.
+    expect(mockExecFile.mock.calls[0][2]).toMatchObject({ cwd: "/" });
   });
 
   it.each([

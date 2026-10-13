@@ -135,7 +135,7 @@ run_noop() {
 # The steps the x64 installer implements. Everything else is refused loudly: a
 # step that silently does nothing is worse than one that fails.
 INSTALLER_STEPS="
-apt_update chromium_install clawkeep_install ffmpeg_install fix_git_perms
+apt_update chromium_install clawkeep_install cloudflared_install ffmpeg_install fix_git_perms
 llamacpp_install ollama_install openclaw_config openclaw_install openclaw_patch
 openclaw_setup vnc_install
 "
@@ -166,6 +166,12 @@ case "$step" in
       echo "clawbox-root-step: step '$step' has no implementation on the x64 install" >&2
       exit 64
     fi
-    exec /usr/bin/bash "$ROOT_INSTALLER" --step "$step"
+    # The installer resolves its user from `logname`/SUDO_USER, and a unit
+    # systemd started has neither — every installer-backed step from the web
+    # server failed "could not resolve an unprivileged install user" until the
+    # values this dispatcher reads out of $ROOT_CONF were handed over (seen on
+    # the owner's laptop, 2026-10-12). CLAWBOX_DIR is the installer's own name
+    # for the project folder.
+    exec /usr/bin/env CLAWBOX_USER="$CLAWBOX_USER" CLAWBOX_DIR="$PROJECT_DIR" /usr/bin/bash "$ROOT_INSTALLER" --step "$step"
     ;;
 esac

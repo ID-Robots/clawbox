@@ -363,7 +363,7 @@ describe("a run's own copy of the project", () => {
     expect(lib.getRun(worked.id)?.worktree?.branchRemoved).toBe(false);
   });
 
-  it("keeps the copy when the merge cannot be made, and says why", async () => {
+  it("removes the copy but keeps the branch when the merge cannot be made, records why, and touches nothing of the owner's", async () => {
     const dir = makeGitProject("alpha");
     installWrapper([...wrote("shared.txt"), `echo '${result("wrote a file")}'`, "exit 0"].join("\n"));
     const started = await lib.startRun({ task: "make a file", directory: "alpha", source: "owner" });
@@ -372,19 +372,108 @@ describe("a run's own copy of the project", () => {
     fs.writeFileSync(path.join(dir, "mine.txt"), "the owner's\n");
     await finished(started.id);
     await vi.waitFor(() => {
-      expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(/copy of the project was kept/);
+      expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(/copy of the project was removed; its work is kept on/);
+    }, { timeout: 20_000 });
+    const run = lib.getRun(started.id)!;
+    // The FILES are gone — a tree per refused merge was ten copies of one
+    // project on the owner's box — and the BRANCH is where the work stays.
+    expect(run.worktree?.removed).toBe(true);
+    expect(run.worktree?.branchRemoved).toBe(false);
+    expect(fs.existsSync(run.directory)).toBe(false);
+    expect(run.worktree?.result).toMatchObject({ kind: "unmerged", reason: "dirty" });
+    expect(run.progress.join("\n")).toMatch(/uncommitted changes of its own/);
+    expect(fs.readFileSync(path.join(dir, "mine.txt"), "utf8")).toBe("the owner's\n");
+    expect(fs.existsSync(path.join(dir, "shared.txt"))).toBe(false);
+    expect(git(dir, "show", "--name-only", "--format=", run.worktree!.branch).trim()).toBe("shared.txt");
+  });
+
+  /**
+   * The settle forces a tree away, and `commitsAhead` counts the branch only.
+   * Work that never reached the branch — staged by a commit that then failed,
+   * or written and never committed — lives in the tree alone, so the tree
+   * stays. Each removal is guarded: nothing ahead, refused merge, merged.
+   */
+  it("keeps the copy, and its branch, when the run's commit failed with the work staged in it", async () => {
+    const dir = makeGitProject("alpha");
+    // `--no-verify` skips pre-commit and commit-msg, not prepare-commit-msg:
+    // refusing there fails the commit AFTER `git add -A` staged the file, so
+    // the branch gets nothing and the tree holds the work.
+    const hook = path.join(dir, ".git", "hooks", "prepare-commit-msg");
+    fs.mkdirSync(path.dirname(hook), { recursive: true });
+    fs.writeFileSync(hook, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    installWrapper([...wrote("made.txt"), `echo '${result("wrote a file")}'`, "exit 0"].join("\n"));
+    const started = await lib.startRun({ task: "make a file", directory: "alpha", source: "owner" });
+    await finished(started.id);
+    await vi.waitFor(() => {
+      expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(/copy of the project was kept: the run's commit failed/);
+    }, { timeout: 20_000 });
+    const run = lib.getRun(started.id)!;
+    expect(run.commitError).toBeTruthy();
+    expect(run.worktree?.removed).toBe(false);
+    expect(run.worktree?.branchRemoved).toBe(false);
+    expect(git(dir, "branch", "--list", run.worktree!.branch)).toContain(run.worktree!.branch);
+    expect(git(run.directory, "diff", "--cached", "--name-only")).toBe("made.txt");
+    expect(run.progress.join("\n")).not.toMatch(/copy of the project was removed/);
+  });
+
+  it("keeps the copy when the merge is refused but the tree holds work its branch does not", async () => {
+    const dir = makeGitProject("alpha");
+    // One file committed through the run's own shell — the branch is ahead —
+    // and a second left beside it, never committed.
+    installWrapper([
+      'echo "kept" > "$PWD/kept.txt"',
+      'git -C "$PWD" add kept.txt && git -C "$PWD" -c user.name=t -c user.email=t@x commit -q -m "the run\'s own commit"',
+      'echo "draft" > "$PWD/draft.txt"',
+      `echo '${result("committed one file")}'`,
+      "exit 0",
+    ].join("\n"));
+    const started = await lib.startRun({ task: "make two files", directory: "alpha", source: "owner" });
+    fs.writeFileSync(path.join(dir, "mine.txt"), "the owner's\n");
+    await finished(started.id);
+    await vi.waitFor(() => {
+      expect(lib.getRun(started.id)?.progress.join("\n"))
+        .toMatch(/copy of the project was kept: it holds changes that are not committed to its branch; the project folder has uncommitted changes of its own/);
     }, { timeout: 20_000 });
     const run = lib.getRun(started.id)!;
     expect(run.worktree?.removed).toBe(false);
-    expect(fs.existsSync(run.directory)).toBe(true);
-    expect(run.progress.join("\n")).toMatch(/uncommitted changes of its own/);
-    expect(fs.readFileSync(path.join(dir, "mine.txt"), "utf8")).toBe("the owner's\n");
+    expect(run.worktree?.result).toMatchObject({ kind: "unmerged", reason: "dirty" });
+    expect(fs.readFileSync(path.join(run.directory, "draft.txt"), "utf8")).toBe("draft\n");
+    expect(git(dir, "show", "--name-only", "--format=", run.worktree!.branch).trim()).toBe("kept.txt");
+  });
 
-    // …and the owner's own Remove takes the files while the branch keeps the work.
-    const after = await lib.removeRunWorktreeFor(started.id);
-    expect(after.worktree?.removed).toBe(true);
-    expect(fs.existsSync(run.directory)).toBe(false);
-    expect(git(dir, "show", "--name-only", "--format=", after.worktree!.branch).trim()).toBe("shared.txt");
+  it("keeps the copy after a merge when the tree still holds work the merge did not take", async () => {
+    const dir = makeGitProject("alpha");
+    installWrapper([
+      'echo "kept" > "$PWD/kept.txt"',
+      'git -C "$PWD" add kept.txt && git -C "$PWD" -c user.name=t -c user.email=t@x commit -q -m "the run\'s own commit"',
+      'echo "draft" > "$PWD/draft.txt"',
+      `echo '${result("committed one file")}'`,
+      "exit 0",
+    ].join("\n"));
+    const started = await lib.startRun({ task: "make two files", directory: "alpha", source: "owner" });
+    await finished(started.id);
+    await vi.waitFor(() => {
+      expect(lib.getRun(started.id)?.progress.join("\n"))
+        .toMatch(/copy of the project was kept: it was merged into master, but it holds changes that are not committed to its branch/);
+    }, { timeout: 20_000 });
+    const run = lib.getRun(started.id)!;
+    expect(run.worktree?.removed).toBe(false);
+    expect(run.worktree?.result).toMatchObject({ kind: "merged", base: "master" });
+    expect(fs.existsSync(path.join(dir, "kept.txt"))).toBe(true);
+    expect(fs.readFileSync(path.join(run.directory, "draft.txt"), "utf8")).toBe("draft\n");
+  });
+
+  it("still removes a copy whose only stray entry is the project's own linked node_modules", async () => {
+    const dir = makeGitProject("alpha");
+    fs.mkdirSync(path.join(dir, "node_modules"));
+    const started = await lib.startRun({ task: "just look", directory: "alpha", source: "owner" });
+    expect(fs.lstatSync(path.join(started.directory, "node_modules")).isSymbolicLink()).toBe(true);
+    await finished(started.id);
+    await vi.waitFor(() => { expect(lib.getRun(started.id)?.worktree?.removed).toBe(true); }, { timeout: 20_000 });
+    expect(fs.existsSync(started.directory)).toBe(false);
+    expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(/copy of the project was removed; it left nothing on its branch/);
+    // The link went, never what it pointed at.
+    expect(fs.existsSync(path.join(dir, "node_modules"))).toBe(true);
   });
 
   it("refuses Remove for a run that worked in the project folder itself", async () => {
@@ -449,13 +538,19 @@ describe("the weekly worktree sweep", () => {
   it("prunes a fortnight-old copy whose branch is merged, and marks the record so a resume rebuilds it", async () => {
     const dir = makeGitProject("alpha");
     installWrapper([...wrote("made.txt"), `echo '${result("wrote a file")}'`, "exit 0"].join("\n"));
-    // The owner's stray file blocks the settle's merge, so the copy survives it.
+    // The owner's stray file blocks the settle's merge, so the work stays on
+    // the branch — and the settle removes the copy regardless now, so the
+    // stale copy the sweep exists for is put back by hand: a box that
+    // restarted mid-settle, or a tree the owner checked out again.
     fs.writeFileSync(path.join(dir, "mine.txt"), "the owner's\n");
     const started = await lib.startRun({ task: "make a file", directory: "alpha", source: "owner" });
     await finished(started.id);
     await vi.waitFor(() => {
-      expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(/copy of the project was kept/);
+      expect(lib.getRun(started.id)?.worktree?.removed).toBe(true);
     }, { timeout: 20_000 });
+    git(dir, "worktree", "prune");
+    git(dir, "worktree", "add", started.directory, `clawbox/${started.id}`);
+    expect(fs.existsSync(started.directory)).toBe(true);
 
     // The owner merges it themselves, later, and the copy goes stale.
     git(dir, "add", "-A");

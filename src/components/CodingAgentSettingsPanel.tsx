@@ -18,16 +18,20 @@ import type { PrBodyTaskMode } from "@/lib/coding-pr-body";
 import HelpTip from "./HelpTip";
 import { PaidPlanNotice } from "./PaidFeatureGate";
 import { enableBlockedBy, type PlanGate } from "@/lib/paid-plan-gate";
-import { BTN_SECONDARY, CARD, FIELD, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
+import { BTN_SECONDARY, CARD, FIELD, SECTION_LABEL, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
 
 /**
  * Settings → Coding Agent: everything the owner DECIDES about delegated
  * Claude Code runs (src/lib/coding-agent.ts), in one place.
  *
- * The switch, the default project folder, how hard a run thinks, the two
- * ceilings a run stops at, the automatic review pass, the GitHub account
- * its work is backed up to — and, right under it, the ClawBox Improvement
- * Program, whose reports go out on that same GitHub credential.
+ * The switch, the default project folder, who pays, how hard a run thinks and
+ * the three switches that decide what a run does with its work sit in the
+ * open; everything else — the ceilings, the pull-request details, the team
+ * settings, the media switches — is behind one "Advanced" fold, closed by
+ * default, because nineteen controls in one column with a paragraph behind
+ * each was the page the owner called overwhelming. Under the card: the run
+ * history, the allow-list, the secrets, the Anthropic account and the GitHub
+ * account its work is backed up to.
  * These used to sit at the top of the Coding Agent desktop app, above the
  * run history; the owner wanted the app to be about the runs and the
  * settings to live with the other settings. The app keeps the readiness
@@ -245,23 +249,15 @@ export function devicePollSeconds(raw: unknown): number {
 // role so the many call sites below read unchanged.
 const SMALL_BUTTON = BTN_SECONDARY;
 
-export default function CodingAgentSettingsPanel({
-  onReset,
-  onStatus,
-  onOpenHistory,
-}: {
-  /** Open the Coding Agent's Run history page, from the Run history card.
-   *  Absent where this panel is not inside the app, and the card then draws
-   *  no button for it. */
+// Accepted and unused: the app still passes `onOpenHistory`, from when the Run
+// history card carried an "Open run history" button. That button went with the
+// owner's "delete useless UI" — the rail's Run history entry opens the same
+// page — and the prop is kept in the type so the host needs no edit; nothing
+// here reads it. (`onReset` and `onStatus` were declared here too and never
+// passed by anyone; both are gone.)
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- accepted for the host, read by nothing
+export default function CodingAgentSettingsPanel(_props: {
   onOpenHistory?: () => void;
-  /** Called after a successful reset, so the host can leave this page: the
-   *  settings it describes no longer exist and the window's front door is the
-   *  setup wizard again. */
-  onReset?: () => void;
-  /** Every status the route answers with, as it arrives — the sidebar's
-   *  "On · Max effort" subtitle is read off the same payload this panel
-   *  renders, so the two can never disagree. */
-  onStatus?: (status: AgentStatus) => void;
 }) {
   const { t } = useT();
   const [status, setStatus] = useState<AgentStatus | null>(null);
@@ -309,23 +305,14 @@ export default function CodingAgentSettingsPanel({
   const [authorNameDraft, setAuthorNameDraft] = useState<string | null>(null);
   const [authorEmailDraft, setAuthorEmailDraft] = useState<string | null>(null);
 
-  // `load` must not re-run because a translation function or a parent's
-  // callback was re-created: a refetch on every render would overwrite a
-  // freshly toggled switch with the stale status it read a moment earlier.
-  // Read both through refs instead, synchronised after commit so a discarded
-  // render never leaks into them.
+  // `load` must not re-run because a translation function was re-created: a
+  // refetch on every render would overwrite a freshly toggled switch with the
+  // stale status it read a moment earlier. Read it through a ref instead,
+  // synchronised after commit so a discarded render never leaks into it.
   const tRef = useRef(t);
-  const onStatusRef = useRef(onStatus);
   useEffect(() => {
     tRef.current = t;
-    onStatusRef.current = onStatus;
-  }, [t, onStatus]);
-
-  /** The one place a status lands: the panel and the sidebar see the same one. */
-  const publish = useCallback((next: AgentStatus) => {
-    setStatus(next);
-    onStatusRef.current?.(next);
-  }, []);
+  }, [t]);
 
   /** The switch and the settings — the half of the panel that must render
    *  whatever GitHub is doing. */
@@ -334,7 +321,7 @@ export default function CodingAgentSettingsPanel({
       const s = await fetch("/setup-api/coding-agent/status", { cache: "no-store" });
       if (!s.ok) throw new Error("status");
       const next = await s.json() as AgentStatus;
-      publish(next);
+      setStatus(next);
       setDirDraft(prev => (prev === null ? (next.defaultDirectory ?? "") : prev));
       setTurnsDraft(prev => (prev === null ? String(next.maxTurns ?? "") : prev));
       setTokensDraft(prev => (prev === null ? (next.tokenLimit == null ? "" : String(next.tokenLimit)) : prev));
@@ -345,7 +332,7 @@ export default function CodingAgentSettingsPanel({
     } finally {
       setLoading(false);
     }
-  }, [publish]);
+  }, []);
 
   /** The GitHub card's answer, on its own: the re-probe below wants this one
    *  refreshed and nothing else — re-running the status load on a timer would
@@ -462,7 +449,7 @@ export default function CodingAgentSettingsPanel({
    * the whole re-read status — and ONE AT A TIME. The route answers the
    * status as of its own write, so two writes in flight at once could land in
    * either order, and the older answer would then overwrite the newer state
-   * on screen (and, through `publish`, in the sidebar). The controls are
+   * on screen. The controls are
    * disabled while a write is pending, and a write that slips in anyway (a
    * blur and a click in the same tick) is queued, not raced.
    *
@@ -482,7 +469,7 @@ export default function CodingAgentSettingsPanel({
         });
         if (!res.ok) throw new Error(await readError(res, failMsg));
         const next = await res.json() as AgentStatus;
-        publish(next);
+        setStatus(next);
         // The Coding Agent app is another window; its On/Off chip and its
         // readiness checklist follow what was just saved.
         notifyCodingAgentChanged();
@@ -505,8 +492,8 @@ export default function CodingAgentSettingsPanel({
   /**
    * A status re-read, behind whatever write is in flight.
    *
-   * `loadStatus` ends in the same `publish` the writes do, so it is a writer
-   * of the panel's state and the sidebar's in every sense that matters here.
+   * `loadStatus` ends in the same `setStatus` the writes do, so it is a writer
+   * of the panel's state in every sense that matters here.
    * Fired straight from the Anthropic card while a provider write was still
    * on the wire, its GET could be ANSWERED from before that write landed and
    * then overwrite the newer provider on screen — the exact ordering
@@ -733,80 +720,6 @@ export default function CodingAgentSettingsPanel({
           {errorIn("dir")}
         </div>
 
-        {/* WHO THE BOX COMMITS AS. Drawn only by a server that answers with the
-            limit, so an older box shows nothing rather than two fields whose
-            Save it would refuse as an unknown body.
-
-            Left blank, a project's own git config decides and the placeholder
-            catches what is left — which is what every box did before this
-            existed. It is worth filling in for one concrete reason, and the
-            hint says it: a host's GitHub integration refuses a deployment
-            whose git author cannot deploy the project, so the box's own
-            bookkeeping commits fail the check on a pull request it opened. */}
-        {typeof status?.maxGitAuthorChars === "number" && (
-          <div className="mt-4" data-testid="coding-agent-commit-author">
-            <span className="text-xs font-medium text-[var(--text-secondary)]">
-              {t("codingAgent.commitAuthorTitle")}
-            </span>
-            <div className="grid gap-2 mt-1.5 sm:grid-cols-2">
-              <div>
-                <label htmlFor="coding-agent-author-name" className="sr-only">
-                  {t("codingAgent.commitAuthorNameLabel")}
-                </label>
-                <input
-                  id="coding-agent-author-name"
-                  type="text"
-                  value={authorNameDraft ?? ""}
-                  onChange={(e) => setAuthorNameDraft(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") void saveGitAuthor(); }}
-                  placeholder={t("codingAgent.commitAuthorNamePlaceholder")}
-                  aria-label={t("codingAgent.commitAuthorNameLabel")}
-                  maxLength={status.maxGitAuthorChars}
-                  spellCheck={false}
-                  data-testid="coding-agent-author-name"
-                  className={`w-full min-w-0 text-base sm:text-xs ${FIELD}`}
-                />
-              </div>
-              <div>
-                <label htmlFor="coding-agent-author-email" className="sr-only">
-                  {t("codingAgent.commitAuthorEmailLabel")}
-                </label>
-                <input
-                  id="coding-agent-author-email"
-                  type="email"
-                  value={authorEmailDraft ?? ""}
-                  onChange={(e) => setAuthorEmailDraft(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") void saveGitAuthor(); }}
-                  placeholder={t("codingAgent.commitAuthorEmailPlaceholder")}
-                  aria-label={t("codingAgent.commitAuthorEmailLabel")}
-                  maxLength={status.maxGitAuthorChars}
-                  spellCheck={false}
-                  autoComplete="off"
-                  data-testid="coding-agent-author-email"
-                  className={`w-full min-w-0 text-base sm:text-xs ${FIELD}`}
-                />
-              </div>
-            </div>
-            <div className="flex items-center gap-2 mt-2">
-              <button
-                type="button"
-                onClick={() => void saveGitAuthor()}
-                disabled={saving
-                  || ((authorNameDraft ?? "") === (status?.gitAuthorName ?? "")
-                    && (authorEmailDraft ?? "") === (status?.gitAuthorEmail ?? ""))}
-                data-testid="coding-agent-author-save"
-                className={BTN_SECONDARY}
-              >
-                {t("codingAgent.commitAuthorSave")}
-              </button>
-            </div>
-            <p className="mt-1.5 text-[11px] text-[var(--text-muted)] leading-relaxed">
-              {t("codingAgent.commitAuthorHint")}
-            </p>
-            {errorIn("gitAuthor")}
-          </div>
-        )}
-
         {/* WHICH ACCOUNT PAYS. Drawn only by a server that answers with the
             list, so an older box shows nothing rather than a picker with one
             option in it. Switching to a provider that is not connected is
@@ -845,9 +758,6 @@ export default function CodingAgentSettingsPanel({
                 );
               })}
             </div>
-            <p className="mt-1.5 text-[11px] text-[var(--text-muted)] leading-relaxed">
-              {t(status?.provider === "anthropic" ? "codingAgent.providerHintAnthropic" : "codingAgent.providerHintClawbox")}
-            </p>
             {/* An EXPLICIT false only: a server that predates the field sends
                 nothing, and a box whose Anthropic access is perfectly fine
                 must not be told it is missing by a `!undefined`. */}
@@ -884,53 +794,6 @@ export default function CodingAgentSettingsPanel({
           </div>
         </div>
 
-        {/* The ceilings a run stops at — both the owner's to set. There is no
-            time limit and no price limit: a run ends when it finishes, runs
-            out of steps, hits a token ceiling if one is set, or goes quiet.
-            Saved on blur and on Enter, so a half-typed number is never sent. */}
-        <div className="grid grid-cols-2 gap-3 mt-4">
-          <div>
-            <label htmlFor="coding-agent-turns" className="text-xs font-medium text-[var(--text-secondary)]">
-              {t("codingAgent.turnsLabel")}
-            </label>
-            <input
-              id="coding-agent-turns"
-              type="number"
-              inputMode="numeric"
-              min={status?.minMaxTurns ?? 10}
-              max={status?.maxMaxTurns ?? 2000}
-              value={turnsDraft ?? ""}
-              onChange={(e) => setTurnsDraft(e.target.value)}
-              onBlur={() => void saveTurns()}
-              onKeyDown={(e) => { if (e.key === "Enter") void saveTurns(); }}
-              disabled={saving}
-              data-testid="coding-agent-turns"
-              className={`w-full mt-1.5 text-base sm:text-xs ${FIELD}`}
-            />
-            {errorIn("turns")}
-          </div>
-          <div>
-            <label htmlFor="coding-agent-tokens" className="text-xs font-medium text-[var(--text-secondary)]">
-              {t("codingAgent.tokensLabel")}
-            </label>
-            <input
-              id="coding-agent-tokens"
-              type="number"
-              inputMode="numeric"
-              min={status?.minTokenLimit ?? 10000}
-              placeholder={t("codingAgent.tokensPlaceholder")}
-              value={tokensDraft ?? ""}
-              onChange={(e) => setTokensDraft(e.target.value)}
-              onBlur={() => void saveTokens()}
-              onKeyDown={(e) => { if (e.key === "Enter") void saveTokens(); }}
-              disabled={saving}
-              data-testid="coding-agent-tokens"
-              className={`w-full mt-1.5 text-base sm:text-xs ${FIELD}`}
-            />
-            {errorIn("tokens")}
-          </div>
-        </div>
-
         {/* The automatic review pass: one more run, in the same session, after
             every completed run that changed files. It used to be reachable
             only by POSTing the field — an owner could neither find it nor
@@ -958,150 +821,9 @@ export default function CodingAgentSettingsPanel({
           />
         </div>
 
-        {/* The coding team's lead: after each worker settles, one short
-            read-only run may add a task or retire a pending one. Off by
-            default — each turn is a paid run, and the plan the owner saw
-            posted then moves under a running team. Read when a team starts,
-            so it never changes a team already at work. */}
-        <div className="flex items-start justify-between gap-4 mt-4">
-          <div className="min-w-0 flex items-center gap-1.5">
-            <span className="text-xs font-medium text-[var(--text-secondary)]">
-              {t("codingAgent.teamDynamicLabel")}
-            </span>
-            <HelpTip
-              text={t("codingAgent.teamDynamicHint")}
-              label={t("codingAgent.teamDynamicLabel")}
-              testId="coding-agent-team-dynamic-help"
-            />
-          </div>
-          <Switch
-            checked={status?.teamDynamic ?? false}
-            busy={busy === "teamDynamic"}
-            disabled={!status || saving}
-            label={t("codingAgent.teamDynamicLabel")}
-            testId="coding-agent-team-dynamic"
-            onChange={(next) => void saveSetting({ teamDynamic: next }, "teamDynamic", t("codingAgent.teamDynamicFailed"))}
-          />
-        </div>
-
-        {/* What each role of a team runs on. A planner reads and plans, a
-            reviewer reads and judges; only workers write the code — so the
-            first two default to the provider's cheaper model and at most
-            Extra high effort, and workers keep the owner's own. "Default"
-            stores nothing: a box that never opens this runs on the defaults. */}
-        {status?.roleModels && (
-          <div className="mt-4" data-testid="coding-agent-role-models">
-            <div className="flex items-center gap-1.5">
-              <span className="text-xs font-medium text-[var(--text-secondary)]">{t("codingAgent.roleModelsLabel")}</span>
-              <HelpTip
-                text={t("codingAgent.roleModelsHint", { anthropic: ECONOMY_MODELS.anthropic, clawbox: ECONOMY_MODELS["clawbox-ai"] })}
-                label={t("codingAgent.roleModelsLabel")}
-                testId="coding-agent-role-models-help"
-              />
-            </div>
-            {/* One row per role whose two selects share the width and wrap
-                under the name in a narrow window — a fixed width cut the
-                labels off ("Default (cheaper mo…"), and German's run longer. */}
-            <div className="mt-1.5 space-y-1.5">
-              {MODEL_ROLES.map((role) => {
-                const current = status.roleModels![role];
-                const defaults = ROLE_DEFAULTS[role];
-                const roleName = t(`codingAgent.roleModels.${role}`);
-                const levels = status.effortLevels.includes(current.effort as Effort) || current.effort === ROLE_AUTO
-                  ? status.effortLevels
-                  : [...status.effortLevels, current.effort as Effort];
-                return (
-                  <div key={role} className="flex flex-wrap items-center gap-x-2 gap-y-1" data-testid={`coding-agent-role-${role}`}>
-                    <span className="w-24 shrink-0 text-[11px] text-[var(--text-secondary)]">{roleName}</span>
-                    <select
-                      value={current.model}
-                      disabled={saving}
-                      aria-label={t("codingAgent.roleModelFor", { role: roleName })}
-                      data-testid={`coding-agent-role-${role}-model`}
-                      onChange={(e) => void saveSetting({ roleModels: { [role]: { model: e.target.value } } }, `roleModels.${role}`, t("codingAgent.roleModelsFailed"))}
-                      className={`text-base sm:text-xs ${FIELD} flex-1 min-w-[11rem]`}
-                    >
-                      <option value={ROLE_AUTO}>{t(defaults.model === "economy" ? "codingAgent.roleModel.autoEconomy" : "codingAgent.roleModel.autoStandard")}</option>
-                      {ROLE_MODEL_TIERS.map((tier) => (
-                        <option key={tier} value={tier}>{t(`codingAgent.roleModel.${tier}`)}</option>
-                      ))}
-                    </select>
-                    <select
-                      value={current.effort}
-                      disabled={saving}
-                      aria-label={t("codingAgent.roleEffortFor", { role: roleName })}
-                      data-testid={`coding-agent-role-${role}-effort`}
-                      onChange={(e) => void saveSetting({ roleModels: { [role]: { effort: e.target.value } } }, `roleModels.${role}`, t("codingAgent.roleModelsFailed"))}
-                      className={`text-base sm:text-xs ${FIELD} flex-1 min-w-[13rem]`}
-                    >
-                      <option value={ROLE_AUTO}>
-                        {defaults.effortCap
-                          ? t("codingAgent.roleEffort.autoCapped", { level: t(`codingAgent.effort.${defaults.effortCap}`) })
-                          : t("codingAgent.roleEffort.autoOwner")}
-                      </option>
-                      {levels.map((level) => (
-                        <option key={level} value={level}>{t(`codingAgent.effort.${level}`)}</option>
-                      ))}
-                    </select>
-                  </div>
-                );
-              })}
-            </div>
-            <p className="mt-1.5 text-[11px] text-[var(--text-muted)] leading-relaxed">
-              {t("codingAgent.roleModelsHint", { anthropic: ECONOMY_MODELS.anthropic, clawbox: ECONOMY_MODELS["clawbox-ai"] })}
-            </p>
-          </div>
-        )}
-
-        {/* The two media switches. Under the review pass because they are
-            about what a run may SPEND rather than how it works, and both are
-            on unless the owner says otherwise — the pictures one also draws
-            the project's own icon and favicon. */}
-        <div className="flex items-start justify-between gap-4 mt-4">
-          <div className="min-w-0 flex items-center gap-1.5">
-            <span className="text-xs font-medium text-[var(--text-secondary)]">
-              {t("codingAgent.genImagesLabel")}
-            </span>
-            <HelpTip
-              text={t("codingAgent.genImagesHint")}
-              label={t("codingAgent.genImagesLabel")}
-              testId="coding-agent-gen-images-help"
-            />
-          </div>
-          <Switch
-            checked={status?.generateImages ?? true}
-            busy={busy === "genImages"}
-            disabled={!status || saving}
-            label={t("codingAgent.genImagesLabel")}
-            testId="coding-agent-gen-images"
-            onChange={(next) => void saveSetting({ generateImages: next }, "genImages", t("codingAgent.genImagesFailed"))}
-          />
-        </div>
-
-        <div className="flex items-start justify-between gap-4 mt-4">
-          <div className="min-w-0 flex items-center gap-1.5">
-            <span className="text-xs font-medium text-[var(--text-secondary)]">
-              {t("codingAgent.genAudioLabel")}
-            </span>
-            <HelpTip
-              text={t("codingAgent.genAudioHint")}
-              label={t("codingAgent.genAudioLabel")}
-              testId="coding-agent-gen-audio-help"
-            />
-          </div>
-          <Switch
-            checked={status?.generateAudio ?? true}
-            busy={busy === "genAudio"}
-            disabled={!status || saving}
-            label={t("codingAgent.genAudioLabel")}
-            testId="coding-agent-gen-audio"
-            onChange={(next) => void saveSetting({ generateAudio: next }, "genAudio", t("codingAgent.genAudioFailed"))}
-          />
-        </div>
-
-        {/* Which browser a run checks its work in. Beside the media switches
-            because it is the same kind of answer — what a run may use, not how
-            it works — and ON unless the owner says otherwise: `?? true`, since
+        {/* Which browser a run checks its work in. In the open rather than in
+            the fold because it puts a window on the owner's SCREEN — and ON
+            unless the owner says otherwise: `?? true`, since
             a server that predates the field is a box that IS driving the
             screen, and rendering it off would invite the owner to switch on
             something that was never off. Off is not a loss of browsing: the
@@ -1127,10 +849,11 @@ export default function CodingAgentSettingsPanel({
           />
         </div>
 
-
         {/* Branch -> pull request -> wait for Actions -> merge. Under the
             review pass because it runs after it, and the review's verdict is
-            one of the things that gates the merge. */}
+            one of the things that gates the merge. The switch stays in the
+            open; what the pull request then carries, how many review rounds
+            it gets and whether it is merged are in the fold below. */}
         <div className="flex items-start justify-between gap-4 mt-4">
           <div className="min-w-0 flex items-center gap-1.5">
             <span className="text-xs font-medium text-[var(--text-secondary)]">
@@ -1152,177 +875,461 @@ export default function CodingAgentSettingsPanel({
           />
         </div>
 
-        {/* How much of the task that pull request shows (TASK-1366). Its
-            sentence is on the card rather than behind a help tip: it is the
-            one place the owner learns the box takes their paths, addresses
-            and tokens out before publishing. Hidden on a server that does not
-            answer with the field, like the counted settings below. */}
-        {typeof status?.prBodyIncludesTask === "string" && (
-          <div className="mt-4">
-            <div className="flex items-start justify-between gap-4">
-              <label htmlFor="coding-agent-pr-body-task" className="min-w-0 text-xs font-medium text-[var(--text-secondary)]">
-                {t("codingAgent.prBodyIncludesTaskLabel")}
-              </label>
-              <select
-                id="coding-agent-pr-body-task"
-                value={status.prBodyIncludesTask}
-                disabled={saving}
-                data-testid="coding-agent-pr-body-task"
-                onChange={(e) => void saveSetting({ prBodyIncludesTask: e.target.value }, "prBodyIncludesTask", t("codingAgent.prBodyIncludesTaskFailed"))}
-                className={`text-base sm:text-xs ${FIELD} w-44 shrink-0`}
-              >
-                {(Object.keys(PR_BODY_TASK_LABEL_KEY) as PrBodyTaskMode[]).map((id) => (
-                  <option key={id} value={id}>{t(PR_BODY_TASK_LABEL_KEY[id])}</option>
-                ))}
-              </select>
+        {/* Everything else, folded. The card had nineteen controls stacked
+            with no grouping, each behind a paragraph of help; the owner asked
+            for less. What stays above is what a box is set up with — the
+            switch, the folder, who pays, how hard, and the three switches
+            that decide what a run DOES with its work. The ceilings, the
+            pull-request details, the team settings and the media switches
+            are here, closed by default, in four short groups. A native
+            <details>, so the fold costs no state and a find-in-page still
+            opens it. The settings error line is drawn OUTSIDE it, below, so
+            a refusal from a folded control is seen whether or not the fold
+            is open. */}
+        <details className="group mt-5 border-t border-white/[0.07] pt-4" data-testid="coding-agent-settings-advanced">
+          <summary className="inline-flex cursor-pointer list-none items-center gap-1.5 text-xs font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--coral-ring)] [&::-webkit-details-marker]:hidden">
+            <span className="material-symbols-rounded transition-transform group-open:rotate-180" style={{ fontSize: 16 }} aria-hidden="true">expand_more</span>
+            {t("codingAgent.settingsAdvanced")}
+          </summary>
+          <div className="mt-5">
+            <p className={SECTION_LABEL}>{t("codingAgent.settingsGroupCeilings")}</p>
+            {/* The ceilings a run stops at — both the owner's to set. There is no
+                time limit and no price limit: a run ends when it finishes, runs
+                out of steps, hits a token ceiling if one is set, or goes quiet.
+                Saved on blur and on Enter, so a half-typed number is never sent. */}
+            <div className="grid grid-cols-2 gap-3 mt-4">
+              <div>
+                <label htmlFor="coding-agent-turns" className="text-xs font-medium text-[var(--text-secondary)]">
+                  {t("codingAgent.turnsLabel")}
+                </label>
+                <input
+                  id="coding-agent-turns"
+                  type="number"
+                  inputMode="numeric"
+                  min={status?.minMaxTurns ?? 10}
+                  max={status?.maxMaxTurns ?? 2000}
+                  value={turnsDraft ?? ""}
+                  onChange={(e) => setTurnsDraft(e.target.value)}
+                  onBlur={() => void saveTurns()}
+                  onKeyDown={(e) => { if (e.key === "Enter") void saveTurns(); }}
+                  disabled={saving}
+                  data-testid="coding-agent-turns"
+                  className={`w-full mt-1.5 text-base sm:text-xs ${FIELD}`}
+                />
+                {errorIn("turns")}
+              </div>
+              <div>
+                <label htmlFor="coding-agent-tokens" className="text-xs font-medium text-[var(--text-secondary)]">
+                  {t("codingAgent.tokensLabel")}
+                </label>
+                <input
+                  id="coding-agent-tokens"
+                  type="number"
+                  inputMode="numeric"
+                  min={status?.minTokenLimit ?? 10000}
+                  placeholder={t("codingAgent.tokensPlaceholder")}
+                  value={tokensDraft ?? ""}
+                  onChange={(e) => setTokensDraft(e.target.value)}
+                  onBlur={() => void saveTokens()}
+                  onKeyDown={(e) => { if (e.key === "Enter") void saveTokens(); }}
+                  disabled={saving}
+                  data-testid="coding-agent-tokens"
+                  className={`w-full mt-1.5 text-base sm:text-xs ${FIELD}`}
+                />
+                {errorIn("tokens")}
+              </div>
             </div>
-            <p className="mt-1.5 text-[11px] text-[var(--text-muted)] leading-relaxed">
-              {t("codingAgent.prBodyIncludesTaskHint")}
-            </p>
-          </div>
-        )}
 
-        {/* What happens to that pull request AFTER it is opened: CI going red,
-            review comments, a conflict with a sibling merge. Each round is one
-            follow-up turn in the run's own session, so the number is a budget
-            and not a timer. Hidden altogether on a server that does not answer
-            with the field — a control over a setting the box has no route for
-            would save nothing. */}
-        {typeof status?.reviewRounds === "number" && (
-          <>
+            {/* How many goes a run gets at the thing it was asked to DELIVER —
+                a ceiling on the run like the two above it, and hidden on a
+                server that answers with no field, like them. */}
+            {typeof status?.completionAttempts === "number" && (
+              <>
+                <div className="flex items-start justify-between gap-4 mt-4">
+                  <div className="min-w-0 flex items-center gap-1.5">
+                    <label htmlFor="coding-agent-completion-attempts" className="text-xs font-medium text-[var(--text-secondary)]">
+                      {t("codingAgent.completionAttemptsLabel")}
+                    </label>
+                    <HelpTip
+                      text={t("codingAgent.completionAttemptsHint")}
+                      label={t("codingAgent.completionAttemptsLabel")}
+                      testId="coding-agent-completion-attempts-help"
+                    />
+                  </div>
+                  {/* A select, for the reason the rounds above are one: six values,
+                      nothing to hold as a draft, nothing typeable the route refuses. */}
+                  <select
+                    id="coding-agent-completion-attempts"
+                    value={String(status.completionAttempts)}
+                    disabled={saving}
+                    data-testid="coding-agent-completion-attempts"
+                    onChange={(e) => void saveSetting({ completionAttempts: Number(e.target.value) }, "completionAttempts", t("codingAgent.completionAttemptsFailed"))}
+                    className={`text-base sm:text-xs ${FIELD} w-28`}
+                  >
+                    {Array.from(
+                      { length: (status.maxCompletionAttempts ?? 6) - (status.minCompletionAttempts ?? 1) + 1 },
+                      (_, i) => (status.minCompletionAttempts ?? 1) + i,
+                    ).map((n) => (
+                      <option key={n} value={n}>{String(n)}</option>
+                    ))}
+                  </select>
+                </div>
+                {errorIn("completionAttempts")}
+              </>
+            )}
+
+            {/* How many runs at once. Each one works in a copy of the project on
+                a branch of its own, so this is a question about the box's memory
+                rather than about the filesystem — which is why it is a number the
+                owner may raise and not a switch. Hidden on a server that answers
+                with no field, like the two above. */}
+            {typeof status?.maxParallelRuns === "number" && (
+              <>
+                <div className="flex items-start justify-between gap-4 mt-4">
+                  <div className="min-w-0 flex items-center gap-1.5">
+                    <label htmlFor="coding-agent-max-parallel-runs" className="text-xs font-medium text-[var(--text-secondary)]">
+                      {t("codingAgent.maxParallelRunsLabel")}
+                    </label>
+                    <HelpTip
+                      text={t("codingAgent.maxParallelRunsHint")}
+                      label={t("codingAgent.maxParallelRunsLabel")}
+                      testId="coding-agent-max-parallel-runs-help"
+                    />
+                  </div>
+                  <select
+                    id="coding-agent-max-parallel-runs"
+                    value={String(status.maxParallelRuns)}
+                    disabled={saving}
+                    data-testid="coding-agent-max-parallel-runs"
+                    onChange={(e) => void saveSetting({ maxParallelRuns: Number(e.target.value) }, "maxParallelRuns", t("codingAgent.maxParallelRunsFailed"))}
+                    className={`text-base sm:text-xs ${FIELD} w-28`}
+                  >
+                    {Array.from(
+                      { length: (status.maxMaxParallelRuns ?? 4) - (status.minMaxParallelRuns ?? 1) + 1 },
+                      (_, i) => (status.minMaxParallelRuns ?? 1) + i,
+                    ).map((n) => (
+                      <option key={n} value={n}>{String(n)}</option>
+                    ))}
+                  </select>
+                </div>
+                {errorIn("maxParallelRuns")}
+              </>
+            )}
+          </div>
+          <div className="mt-5">
+            <p className={SECTION_LABEL}>{t("codingAgent.settingsGroupPullRequest")}</p>
+            {/* How much of the task that pull request shows (TASK-1366). Its
+                sentence is on the card rather than behind a help tip: it is the
+                one place the owner learns the box takes their paths, addresses
+                and tokens out before publishing. Hidden on a server that does not
+                answer with the field, like the counted settings above. */}
+            {typeof status?.prBodyIncludesTask === "string" && (
+              <div className="mt-4">
+                <div className="flex items-start justify-between gap-4">
+                  <label htmlFor="coding-agent-pr-body-task" className="min-w-0 text-xs font-medium text-[var(--text-secondary)]">
+                    {t("codingAgent.prBodyIncludesTaskLabel")}
+                  </label>
+                  <select
+                    id="coding-agent-pr-body-task"
+                    value={status.prBodyIncludesTask}
+                    disabled={saving}
+                    data-testid="coding-agent-pr-body-task"
+                    onChange={(e) => void saveSetting({ prBodyIncludesTask: e.target.value }, "prBodyIncludesTask", t("codingAgent.prBodyIncludesTaskFailed"))}
+                    className={`text-base sm:text-xs ${FIELD} w-44 shrink-0`}
+                  >
+                    {(Object.keys(PR_BODY_TASK_LABEL_KEY) as PrBodyTaskMode[]).map((id) => (
+                      <option key={id} value={id}>{t(PR_BODY_TASK_LABEL_KEY[id])}</option>
+                    ))}
+                  </select>
+                </div>
+                <p className="mt-1.5 text-[11px] text-[var(--text-muted)] leading-relaxed">
+                  {t("codingAgent.prBodyIncludesTaskHint")}
+                </p>
+              </div>
+            )}
+
+            {/* What happens to that pull request AFTER it is opened: CI going red,
+                review comments, a conflict with a sibling merge. Each round is one
+                follow-up turn in the run's own session, so the number is a budget
+                and not a timer. Hidden altogether on a server that does not answer
+                with the field — a control over a setting the box has no route for
+                would save nothing. */}
+            {typeof status?.reviewRounds === "number" && (
+              <>
+                <div className="flex items-start justify-between gap-4 mt-4">
+                  <div className="min-w-0 flex items-center gap-1.5">
+                    <label htmlFor="coding-agent-review-rounds" className="text-xs font-medium text-[var(--text-secondary)]">
+                      {t("codingAgent.reviewRoundsLabel")}
+                    </label>
+                    <HelpTip
+                      text={t("codingAgent.reviewRoundsHint")}
+                      label={t("codingAgent.reviewRoundsLabel")}
+                      testId="coding-agent-review-rounds-help"
+                    />
+                  </div>
+                  {/* A select rather than a number field: the range is six values,
+                      so there is no draft to hold, nothing to save on blur, and
+                      nothing the owner can type that the route would refuse. */}
+                  <select
+                    id="coding-agent-review-rounds"
+                    value={String(status.reviewRounds)}
+                    disabled={saving}
+                    data-testid="coding-agent-review-rounds"
+                    onChange={(e) => void saveSetting({ reviewRounds: Number(e.target.value) }, "reviewRounds", t("codingAgent.reviewRoundsFailed"))}
+                    className={`text-base sm:text-xs ${FIELD} w-28`}
+                  >
+                    {Array.from(
+                      { length: (status.maxReviewRounds ?? 6) - (status.minReviewRounds ?? 0) + 1 },
+                      (_, i) => (status.minReviewRounds ?? 0) + i,
+                    ).map((n) => (
+                      <option key={n} value={n}>
+                        {n === 0 ? t("codingAgent.reviewRoundsOff") : String(n)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                {errorIn("reviewRounds")}
+
+                <div className="flex items-start justify-between gap-4 mt-4">
+                  <div className="min-w-0 flex items-center gap-1.5">
+                    <span className="text-xs font-medium text-[var(--text-secondary)]">
+                      {t("codingAgent.autoMergeLabel")}
+                    </span>
+                    <HelpTip
+                      text={t("codingAgent.autoMergeHint")}
+                      label={t("codingAgent.autoMergeLabel")}
+                      testId="coding-agent-auto-merge-help"
+                    />
+                  </div>
+                  <Switch
+                    checked={status?.autoMerge ?? false}
+                    busy={busy === "autoMerge"}
+                    disabled={!status || saving}
+                    label={t("codingAgent.autoMergeLabel")}
+                    testId="coding-agent-auto-merge"
+                    onChange={(next) => void saveSetting({ autoMerge: next }, "autoMerge", t("codingAgent.autoMergeFailed"))}
+                  />
+                </div>
+              </>
+            )}
+
+            {/* WHO THE BOX COMMITS AS. Drawn only by a server that answers with the
+                limit, so an older box shows nothing rather than two fields whose
+                Save it would refuse as an unknown body.
+
+                Left blank, a project's own git config decides and the placeholder
+                catches what is left — which is what every box did before this
+                existed. It is worth filling in for one concrete reason, and the
+                hint says it: a host's GitHub integration refuses a deployment
+                whose git author cannot deploy the project, so the box's own
+                bookkeeping commits fail the check on a pull request it opened. */}
+            {typeof status?.maxGitAuthorChars === "number" && (
+              <div className="mt-4" data-testid="coding-agent-commit-author">
+                <span className="text-xs font-medium text-[var(--text-secondary)]">
+                  {t("codingAgent.commitAuthorTitle")}
+                </span>
+                <div className="grid gap-2 mt-1.5 sm:grid-cols-2">
+                  <div>
+                    <label htmlFor="coding-agent-author-name" className="sr-only">
+                      {t("codingAgent.commitAuthorNameLabel")}
+                    </label>
+                    <input
+                      id="coding-agent-author-name"
+                      type="text"
+                      value={authorNameDraft ?? ""}
+                      onChange={(e) => setAuthorNameDraft(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") void saveGitAuthor(); }}
+                      placeholder={t("codingAgent.commitAuthorNamePlaceholder")}
+                      aria-label={t("codingAgent.commitAuthorNameLabel")}
+                      maxLength={status.maxGitAuthorChars}
+                      spellCheck={false}
+                      data-testid="coding-agent-author-name"
+                      className={`w-full min-w-0 text-base sm:text-xs ${FIELD}`}
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="coding-agent-author-email" className="sr-only">
+                      {t("codingAgent.commitAuthorEmailLabel")}
+                    </label>
+                    <input
+                      id="coding-agent-author-email"
+                      type="email"
+                      value={authorEmailDraft ?? ""}
+                      onChange={(e) => setAuthorEmailDraft(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === "Enter") void saveGitAuthor(); }}
+                      placeholder={t("codingAgent.commitAuthorEmailPlaceholder")}
+                      aria-label={t("codingAgent.commitAuthorEmailLabel")}
+                      maxLength={status.maxGitAuthorChars}
+                      spellCheck={false}
+                      autoComplete="off"
+                      data-testid="coding-agent-author-email"
+                      className={`w-full min-w-0 text-base sm:text-xs ${FIELD}`}
+                    />
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 mt-2">
+                  <button
+                    type="button"
+                    onClick={() => void saveGitAuthor()}
+                    disabled={saving
+                      || ((authorNameDraft ?? "") === (status?.gitAuthorName ?? "")
+                        && (authorEmailDraft ?? "") === (status?.gitAuthorEmail ?? ""))}
+                    data-testid="coding-agent-author-save"
+                    className={BTN_SECONDARY}
+                  >
+                    {t("codingAgent.commitAuthorSave")}
+                  </button>
+                </div>
+                <p className="mt-1.5 text-[11px] text-[var(--text-muted)] leading-relaxed">
+                  {t("codingAgent.commitAuthorHint")}
+                </p>
+                {errorIn("gitAuthor")}
+              </div>
+            )}
+          </div>
+          <div className="mt-5">
+            <p className={SECTION_LABEL}>{t("codingAgent.settingsGroupTeams")}</p>
+            {/* The coding team's lead: after each worker settles, one short
+                read-only run may add a task or retire a pending one. Off by
+                default — each turn is a paid run, and the plan the owner saw
+                posted then moves under a running team. Read when a team starts,
+                so it never changes a team already at work. */}
             <div className="flex items-start justify-between gap-4 mt-4">
               <div className="min-w-0 flex items-center gap-1.5">
-                <label htmlFor="coding-agent-review-rounds" className="text-xs font-medium text-[var(--text-secondary)]">
-                  {t("codingAgent.reviewRoundsLabel")}
-                </label>
+                <span className="text-xs font-medium text-[var(--text-secondary)]">
+                  {t("codingAgent.teamDynamicLabel")}
+                </span>
                 <HelpTip
-                  text={t("codingAgent.reviewRoundsHint")}
-                  label={t("codingAgent.reviewRoundsLabel")}
-                  testId="coding-agent-review-rounds-help"
+                  text={t("codingAgent.teamDynamicHint")}
+                  label={t("codingAgent.teamDynamicLabel")}
+                  testId="coding-agent-team-dynamic-help"
                 />
               </div>
-              {/* A select rather than a number field: the range is six values,
-                  so there is no draft to hold, nothing to save on blur, and
-                  nothing the owner can type that the route would refuse. */}
-              <select
-                id="coding-agent-review-rounds"
-                value={String(status.reviewRounds)}
-                disabled={saving}
-                data-testid="coding-agent-review-rounds"
-                onChange={(e) => void saveSetting({ reviewRounds: Number(e.target.value) }, "reviewRounds", t("codingAgent.reviewRoundsFailed"))}
-                className={`text-base sm:text-xs ${FIELD} w-28`}
-              >
-                {Array.from(
-                  { length: (status.maxReviewRounds ?? 6) - (status.minReviewRounds ?? 0) + 1 },
-                  (_, i) => (status.minReviewRounds ?? 0) + i,
-                ).map((n) => (
-                  <option key={n} value={n}>
-                    {n === 0 ? t("codingAgent.reviewRoundsOff") : String(n)}
-                  </option>
-                ))}
-              </select>
+              <Switch
+                checked={status?.teamDynamic ?? false}
+                busy={busy === "teamDynamic"}
+                disabled={!status || saving}
+                label={t("codingAgent.teamDynamicLabel")}
+                testId="coding-agent-team-dynamic"
+                onChange={(next) => void saveSetting({ teamDynamic: next }, "teamDynamic", t("codingAgent.teamDynamicFailed"))}
+              />
             </div>
-            {errorIn("reviewRounds")}
+
+            {/* What each role of a team runs on. A planner reads and plans, a
+                reviewer reads and judges; only workers write the code — so the
+                first two default to the provider's cheaper model and at most
+                Extra high effort, and workers keep the owner's own. "Default"
+                stores nothing: a box that never opens this runs on the defaults. */}
+            {status?.roleModels && (
+              <div className="mt-4" data-testid="coding-agent-role-models">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-xs font-medium text-[var(--text-secondary)]">{t("codingAgent.roleModelsLabel")}</span>
+                  <HelpTip
+                    text={t("codingAgent.roleModelsHint", { anthropic: ECONOMY_MODELS.anthropic, clawbox: ECONOMY_MODELS["clawbox-ai"] })}
+                    label={t("codingAgent.roleModelsLabel")}
+                    testId="coding-agent-role-models-help"
+                  />
+                </div>
+                {/* One row per role whose two selects share the width and wrap
+                    under the name in a narrow window — a fixed width cut the
+                    labels off ("Default (cheaper mo…"), and German's run longer. */}
+                <div className="mt-1.5 space-y-1.5">
+                  {MODEL_ROLES.map((role) => {
+                    const current = status.roleModels![role];
+                    const defaults = ROLE_DEFAULTS[role];
+                    const roleName = t(`codingAgent.roleModels.${role}`);
+                    const levels = status.effortLevels.includes(current.effort as Effort) || current.effort === ROLE_AUTO
+                      ? status.effortLevels
+                      : [...status.effortLevels, current.effort as Effort];
+                    return (
+                      <div key={role} className="flex flex-wrap items-center gap-x-2 gap-y-1" data-testid={`coding-agent-role-${role}`}>
+                        <span className="w-24 shrink-0 text-[11px] text-[var(--text-secondary)]">{roleName}</span>
+                        <select
+                          value={current.model}
+                          disabled={saving}
+                          aria-label={t("codingAgent.roleModelFor", { role: roleName })}
+                          data-testid={`coding-agent-role-${role}-model`}
+                          onChange={(e) => void saveSetting({ roleModels: { [role]: { model: e.target.value } } }, `roleModels.${role}`, t("codingAgent.roleModelsFailed"))}
+                          className={`text-base sm:text-xs ${FIELD} flex-1 min-w-[11rem]`}
+                        >
+                          <option value={ROLE_AUTO}>{t(defaults.model === "economy" ? "codingAgent.roleModel.autoEconomy" : "codingAgent.roleModel.autoStandard")}</option>
+                          {ROLE_MODEL_TIERS.map((tier) => (
+                            <option key={tier} value={tier}>{t(`codingAgent.roleModel.${tier}`)}</option>
+                          ))}
+                        </select>
+                        <select
+                          value={current.effort}
+                          disabled={saving}
+                          aria-label={t("codingAgent.roleEffortFor", { role: roleName })}
+                          data-testid={`coding-agent-role-${role}-effort`}
+                          onChange={(e) => void saveSetting({ roleModels: { [role]: { effort: e.target.value } } }, `roleModels.${role}`, t("codingAgent.roleModelsFailed"))}
+                          className={`text-base sm:text-xs ${FIELD} flex-1 min-w-[13rem]`}
+                        >
+                          <option value={ROLE_AUTO}>
+                            {defaults.effortCap
+                              ? t("codingAgent.roleEffort.autoCapped", { level: t(`codingAgent.effort.${defaults.effortCap}`) })
+                              : t("codingAgent.roleEffort.autoOwner")}
+                          </option>
+                          {levels.map((level) => (
+                            <option key={level} value={level}>{t(`codingAgent.effort.${level}`)}</option>
+                          ))}
+                        </select>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+          </div>
+          <div className="mt-5">
+            <p className={SECTION_LABEL}>{t("codingAgent.settingsGroupMedia")}</p>
+            {/* The two media switches. In the fold because they are about what
+                a run may SPEND rather than how it works, and both are
+                on unless the owner says otherwise — the pictures one also draws
+                the project's own icon and favicon. */}
+            <div className="flex items-start justify-between gap-4 mt-4">
+              <div className="min-w-0 flex items-center gap-1.5">
+                <span className="text-xs font-medium text-[var(--text-secondary)]">
+                  {t("codingAgent.genImagesLabel")}
+                </span>
+                <HelpTip
+                  text={t("codingAgent.genImagesHint")}
+                  label={t("codingAgent.genImagesLabel")}
+                  testId="coding-agent-gen-images-help"
+                />
+              </div>
+              <Switch
+                checked={status?.generateImages ?? true}
+                busy={busy === "genImages"}
+                disabled={!status || saving}
+                label={t("codingAgent.genImagesLabel")}
+                testId="coding-agent-gen-images"
+                onChange={(next) => void saveSetting({ generateImages: next }, "genImages", t("codingAgent.genImagesFailed"))}
+              />
+            </div>
 
             <div className="flex items-start justify-between gap-4 mt-4">
               <div className="min-w-0 flex items-center gap-1.5">
                 <span className="text-xs font-medium text-[var(--text-secondary)]">
-                  {t("codingAgent.autoMergeLabel")}
+                  {t("codingAgent.genAudioLabel")}
                 </span>
                 <HelpTip
-                  text={t("codingAgent.autoMergeHint")}
-                  label={t("codingAgent.autoMergeLabel")}
-                  testId="coding-agent-auto-merge-help"
+                  text={t("codingAgent.genAudioHint")}
+                  label={t("codingAgent.genAudioLabel")}
+                  testId="coding-agent-gen-audio-help"
                 />
               </div>
               <Switch
-                checked={status?.autoMerge ?? false}
-                busy={busy === "autoMerge"}
+                checked={status?.generateAudio ?? true}
+                busy={busy === "genAudio"}
                 disabled={!status || saving}
-                label={t("codingAgent.autoMergeLabel")}
-                testId="coding-agent-auto-merge"
-                onChange={(next) => void saveSetting({ autoMerge: next }, "autoMerge", t("codingAgent.autoMergeFailed"))}
+                label={t("codingAgent.genAudioLabel")}
+                testId="coding-agent-gen-audio"
+                onChange={(next) => void saveSetting({ generateAudio: next }, "genAudio", t("codingAgent.genAudioFailed"))}
               />
             </div>
-          </>
-        )}
-
-        {/* How many goes a run gets at the thing it was asked to DELIVER.
-            Beside the pull-request controls because the commonest deliverable
-            IS the pull request those switches ask for, and hidden on a server
-            that answers with no field, like the rounds above. */}
-        {typeof status?.completionAttempts === "number" && (
-          <>
-            <div className="flex items-start justify-between gap-4 mt-4">
-              <div className="min-w-0 flex items-center gap-1.5">
-                <label htmlFor="coding-agent-completion-attempts" className="text-xs font-medium text-[var(--text-secondary)]">
-                  {t("codingAgent.completionAttemptsLabel")}
-                </label>
-                <HelpTip
-                  text={t("codingAgent.completionAttemptsHint")}
-                  label={t("codingAgent.completionAttemptsLabel")}
-                  testId="coding-agent-completion-attempts-help"
-                />
-              </div>
-              {/* A select, for the reason the rounds above are one: six values,
-                  nothing to hold as a draft, nothing typeable the route refuses. */}
-              <select
-                id="coding-agent-completion-attempts"
-                value={String(status.completionAttempts)}
-                disabled={saving}
-                data-testid="coding-agent-completion-attempts"
-                onChange={(e) => void saveSetting({ completionAttempts: Number(e.target.value) }, "completionAttempts", t("codingAgent.completionAttemptsFailed"))}
-                className={`text-base sm:text-xs ${FIELD} w-28`}
-              >
-                {Array.from(
-                  { length: (status.maxCompletionAttempts ?? 6) - (status.minCompletionAttempts ?? 1) + 1 },
-                  (_, i) => (status.minCompletionAttempts ?? 1) + i,
-                ).map((n) => (
-                  <option key={n} value={n}>{String(n)}</option>
-                ))}
-              </select>
-            </div>
-            {errorIn("completionAttempts")}
-          </>
-        )}
-
-        {/* How many runs at once. Each one works in a copy of the project on
-            a branch of its own, so this is a question about the box's memory
-            rather than about the filesystem — which is why it is a number the
-            owner may raise and not a switch. Hidden on a server that answers
-            with no field, like the two above. */}
-        {typeof status?.maxParallelRuns === "number" && (
-          <>
-            <div className="flex items-start justify-between gap-4 mt-4">
-              <div className="min-w-0 flex items-center gap-1.5">
-                <label htmlFor="coding-agent-max-parallel-runs" className="text-xs font-medium text-[var(--text-secondary)]">
-                  {t("codingAgent.maxParallelRunsLabel")}
-                </label>
-                <HelpTip
-                  text={t("codingAgent.maxParallelRunsHint")}
-                  label={t("codingAgent.maxParallelRunsLabel")}
-                  testId="coding-agent-max-parallel-runs-help"
-                />
-              </div>
-              <select
-                id="coding-agent-max-parallel-runs"
-                value={String(status.maxParallelRuns)}
-                disabled={saving}
-                data-testid="coding-agent-max-parallel-runs"
-                onChange={(e) => void saveSetting({ maxParallelRuns: Number(e.target.value) }, "maxParallelRuns", t("codingAgent.maxParallelRunsFailed"))}
-                className={`text-base sm:text-xs ${FIELD} w-28`}
-              >
-                {Array.from(
-                  { length: (status.maxMaxParallelRuns ?? 4) - (status.minMaxParallelRuns ?? 1) + 1 },
-                  (_, i) => (status.minMaxParallelRuns ?? 1) + i,
-                ).map((n) => (
-                  <option key={n} value={n}>{String(n)}</option>
-                ))}
-              </select>
-            </div>
-            {errorIn("maxParallelRuns")}
-          </>
-        )}
+          </div>
+        </details>
 
         {errorIn("settings")}
       </div>
@@ -1339,7 +1346,6 @@ export default function CodingAgentSettingsPanel({
           saving={saving}
           onSave={(patch) => saveSetting(patch, "history", t("codingAgent.history.saveFailed"))}
           error={errorIn("history")}
-          onOpenHistory={onOpenHistory}
         />
       )}
 

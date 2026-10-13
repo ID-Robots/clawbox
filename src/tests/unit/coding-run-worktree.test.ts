@@ -22,6 +22,7 @@ import {
   restoreRunWorktree,
   runWorktreePath,
   sweepRunWorktrees,
+  worktreeHasChanges,
 } from "@/lib/coding-run-worktree";
 
 // Starts a real process (git): vitest's 5 s test and 10 s hook defaults are
@@ -241,6 +242,43 @@ describe("a run's worktree", () => {
     await removeRunWorktree(dir, made.path);
     expect(await deleteRunBranch(dir, made.branch)).toBe(true);
     expect(await branchExists(dir, made.branch)).toBe(false);
+  });
+
+  /**
+   * What a settle asks before it forces a tree away: `commitsAhead` sees only
+   * the branch, and a commit that failed after `git add -A` leaves the work
+   * staged in the tree with the branch where it was.
+   */
+  it("says whether the tree holds work its branch does not, never counting the linked node_modules", async () => {
+    // The box excludes `node_modules/` with a trailing slash, which a symlink
+    // does not match: git lists the worktree's link as untracked.
+    fs.mkdirSync(path.join(dir, "node_modules"));
+    const made = await addRunWorktree({ projectDir: dir, runId: "run-unsaved0", protectedRoot: PROTECTED });
+    if (!made.ok) throw new Error(made.detail);
+    expect(fs.lstatSync(path.join(made.path, "node_modules")).isSymbolicLink()).toBe(true);
+    expect(git(made.path, "status", "--porcelain")).toContain("node_modules");
+    expect(await worktreeHasChanges(made.path)).toBe(false);
+
+    fs.writeFileSync(path.join(made.path, "draft.txt"), "untracked\n");
+    expect(await worktreeHasChanges(made.path)).toBe(true);
+    git(made.path, "add", "draft.txt");
+    // Staged and never committed: the branch holds nothing, the tree does.
+    expect(await commitsAhead(dir, made.branch, made.base)).toBe(0);
+    expect(await worktreeHasChanges(made.path)).toBe(true);
+    git(made.path, "commit", "-q", "-m", "draft");
+    expect(await worktreeHasChanges(made.path)).toBe(false);
+    fs.writeFileSync(path.join(made.path, "index.html"), "<h1>Edited</h1>\n");
+    expect(await worktreeHasChanges(made.path)).toBe(true);
+
+    // Not a repository git will answer for: no answer, which a settle reads
+    // as "keep it".
+    const stranger = fs.mkdtempSync(path.join(os.tmpdir(), "run-wt-stranger-"));
+    try {
+      expect(await worktreeHasChanges(stranger)).toBeNull();
+      expect(await worktreeHasChanges(path.join(stranger, "gone"))).toBeNull();
+    } finally {
+      fs.rmSync(stranger, { recursive: true, force: true });
+    }
   });
 });
 
