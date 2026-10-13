@@ -1256,6 +1256,29 @@ step_ffmpeg_install() {
   fi
 }
 
+# The SHA256 GitHub publishes for one asset of a release: from the release
+# JSON in $1, the asset whose "name" is exactly $2, its "digest". Parsed as
+# JSON, so neither field order nor whitespace decides it; prints nothing when
+# there is no such asset or it carries no sha256 digest.
+github_release_asset_sha256() {
+  python3 -I - "$1" "$2" <<'PY'
+import json, re, sys
+try:
+    with open(sys.argv[1]) as fh:
+        release = json.load(fh)
+except Exception:
+    sys.exit(0)
+assets = release.get("assets") if isinstance(release, dict) else None
+for item in assets if isinstance(assets, list) else []:
+    if isinstance(item, dict) and item.get("name") == sys.argv[2]:
+        digest = item.get("digest")
+        match = re.fullmatch(r"sha256:([0-9a-fA-F]{64})", digest) if isinstance(digest, str) else None
+        if match:
+            print(match.group(1).lower())
+        break
+PY
+}
+
 # Cloudflare Tunnel (cloudflared), the binary Settings → Remote Control
 # starts. The appliance's step runs scripts/setup-tunnel.sh; here the same
 # download is INLINED, because this function runs out of the root-owned
@@ -1292,7 +1315,7 @@ step_cloudflared_install() {
     echo "  WARNING: could not fetch the cloudflared ${version} release metadata; not installing an unverified binary" >&2
     rm -f "$tmp" "$meta" "$sums"; return 0
   fi
-  expected="$(grep -F -A 40 "\"name\": \"$asset\"" "$meta" | sed -n 's/.*"digest": "sha256:\([0-9a-f][0-9a-f]*\)".*/\1/p' | head -n 1)"
+  expected="$(github_release_asset_sha256 "$meta" "$asset" || true)"
   if [ -z "$expected" ]; then
     echo "  WARNING: no published SHA256 for ${asset} in ${version}; not installing an unverified binary" >&2
     rm -f "$tmp" "$meta" "$sums"; return 0

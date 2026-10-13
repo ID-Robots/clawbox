@@ -487,6 +487,66 @@ describe("install-x64.sh shared-host preflight", () => {
   });
 });
 
+/** `github_release_asset_sha256`, sliced from the installer so it cannot drift. */
+function releaseDigestFunction(): string {
+  const start = SOURCE.indexOf("github_release_asset_sha256() {");
+  const end = SOURCE.indexOf("\nPY\n}\n", start);
+  if (start < 0 || end < 0) throw new Error("release digest function not found");
+  return SOURCE.slice(start, end + "\nPY\n}\n".length);
+}
+
+describe.skipIf(!hasPython3)("install-x64.sh cloudflared release digest", () => {
+  const ASSET = "cloudflared-linux-amd64";
+  const SHA = "ab".repeat(32);
+  const OTHER = "cd".repeat(32);
+  let root: string;
+  beforeEach(() => {
+    root = mkdtempSync(path.join(tmpdir(), "clawbox-x64-digest-"));
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  function digestOf(meta: string): { status: number | null; out: string } {
+    const file = path.join(root, "release.json");
+    writeFileSync(file, meta);
+    const r = spawnSync("bash", ["-c", [
+      "set -euo pipefail",
+      releaseDigestFunction(),
+      `github_release_asset_sha256 "$1" "$2"`,
+    ].join("\n"), "bash", file, ASSET], { encoding: "utf-8", timeout: 30_000 });
+    return { status: r.status, out: r.stdout.trim() };
+  }
+
+  it("is what the cloudflared step checks the download against", () => {
+    const body = SOURCE.slice(SOURCE.indexOf("step_cloudflared_install() {"), SOURCE.indexOf("\n}\n", SOURCE.indexOf("step_cloudflared_install() {")));
+    expect(body).toContain('expected="$(github_release_asset_sha256 "$meta" "$asset" || true)"');
+    expect(body).toContain("sha256sum --check");
+    expect(body).not.toMatch(/grep -F -A \d+ "\\"name\\"/);
+  });
+
+  it("reads GitHub's pretty-printed release, name before digest", () => {
+    const meta = JSON.stringify({ tag_name: "2026.3.0", assets: [
+      { name: `${ASSET}.deb`, digest: `sha256:${OTHER}` },
+      { name: ASSET, size: 1, digest: `sha256:${SHA}` },
+    ] }, null, 2);
+    expect(digestOf(meta)).toEqual({ status: 0, out: SHA });
+  });
+
+  it("reads compact JSON with the digest ahead of the name", () => {
+    const meta = `{"assets":[{"digest":"sha256:${OTHER}","name":"${ASSET}-fips"},{"digest":"sha256:${SHA}","name":"${ASSET}"}]}`;
+    expect(digestOf(meta)).toEqual({ status: 0, out: SHA });
+  });
+
+  it("finds nothing — so the step installs nothing — without an exact name or a sha256 digest", () => {
+    expect(digestOf(JSON.stringify({ assets: [{ name: `${ASSET}.deb`, digest: `sha256:${OTHER}` }] }))).toEqual({ status: 0, out: "" });
+    expect(digestOf(JSON.stringify({ assets: [{ name: ASSET, digest: null }] }))).toEqual({ status: 0, out: "" });
+    expect(digestOf(JSON.stringify({ assets: [{ name: ASSET, digest: `md5:${"ab".repeat(16)}` }] }))).toEqual({ status: 0, out: "" });
+    expect(digestOf(JSON.stringify({ message: "API rate limit exceeded" }))).toEqual({ status: 0, out: "" });
+    expect(digestOf("<html>not json</html>")).toEqual({ status: 0, out: "" });
+  });
+});
+
 describe("install-x64.sh pinned-target read", () => {
   let root: string;
   beforeEach(() => {
