@@ -196,7 +196,10 @@ const ChatAppMessageRow = memo(function ChatAppMessageRow({ msg, t, onOpenEmail 
   // fetched when the owner opens it and must not be built from a turn
   // that is still streaming.
   const emailRefs = msg.role === 'assistant' ? splitEmailRefs(msg.text) : null
-  const bodyText = emailRefs ? emailRefs.text : msg.text
+  // Where the owner pressed Stop: neutral, and worded here so a marker replayed
+  // from the box's transcript reads in the chat's current language.
+  const isStopped = msg.role === 'system' && msg.variant === 'stopped'
+  const bodyText = isStopped ? t("chat.stopped") : emailRefs ? emailRefs.text : msg.text
   const images = msg.images ?? []
   const audio = msg.audio ?? []
   const files = msg.files ?? []
@@ -211,10 +214,12 @@ const ChatAppMessageRow = memo(function ChatAppMessageRow({ msg, t, onOpenEmail 
         borderRadius: msg.role === 'user' ? '14px 14px 4px 14px' : '14px 14px 14px 4px',
         background: msg.role === 'user'
           ? 'linear-gradient(135deg, #f97316 0%, #ea580c 100%)'
-          : msg.role === 'system'
+          : isStopped
+            ? 'rgba(255,255,255,0.04)'
+            : msg.role === 'system'
             ? 'rgba(239,68,68,0.15)'
             : 'rgba(255,255,255,0.06)',
-        color: msg.role === 'user' ? '#fff' : msg.role === 'system' ? '#ef4444' : 'rgba(255,255,255,0.85)',
+        color: msg.role === 'user' ? '#fff' : isStopped ? 'rgba(255,255,255,0.55)' : msg.role === 'system' ? '#ef4444' : 'rgba(255,255,255,0.85)',
         fontSize: 13.5,
         lineHeight: 1.45,
         wordBreak: 'break-word',
@@ -1092,6 +1097,9 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
                 unconfirmed: true,
               }])
             }
+            // Say that the reply was stopped: a question with nothing under
+            // it read as an answer that got lost (2026-10-13 smoke test).
+            if (state === 'aborted') setMessages(msgs => [...msgs, { role: 'system', text: 'Stopped.', timestamp: Date.now(), variant: 'stopped' }])
             clearToolCalls()
             runIdRef.current = null
             setSending(false)
@@ -1394,7 +1402,11 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
       clearToolCalls()
       setSending(false)
       runIdRef.current = null
-      if (!failure) return
+      if (!failure) {
+        // The owner pressed Stop; the Hermes route records the same marker.
+        setMessages(prev => [...prev, { role: 'system', text: 'Stopped.', timestamp: Date.now(), variant: 'stopped' }])
+        return
+      }
       setMessages(prev => [...prev, { role: 'system', text: failure, timestamp: Date.now() }])
       return
     }

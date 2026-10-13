@@ -255,6 +255,36 @@ describe("a streamed chat turn", () => {
     expect(appendMock.mock.calls.map((c) => c[0]).some((r) => r.variant === "error")).toBe(true);
   });
 
+  it("records a stopped turn: what was streamed, then a stopped marker", async () => {
+    // 2026-10-13 smoke test: after a Stop the transcript held only the
+    // question, so a reload showed a reply that looked lost.
+    const made = fakeTurn({ deltas: [] });
+    made.handle.run = async (onDelta: (chunk: string) => void) => {
+      onDelta("Once upon ");
+      onDelta("a time");
+      throw new DOMException("aborted", "AbortError");
+    };
+    openTurnMock.mockResolvedValue(made.handle);
+    const events = await readEvents(await POST(post({ message: "Tell me a story" })));
+    // Not a failure: no `error` frame, and no error record.
+    expect(events.some(([name]) => name === "error")).toBe(false);
+    const records = appendMock.mock.calls.map((c) => c[0]);
+    expect(records.some((r) => r.variant === "error")).toBe(false);
+    const tail = records.slice(-2);
+    expect(tail[0]).toMatchObject({ role: "assistant", text: "Once upon a time" });
+    expect(tail[1]).toMatchObject({ role: "system", variant: "stopped" });
+    expect(made.closed.value).toBe(true);
+  });
+
+  it("records only the marker when the turn was stopped before any answer", async () => {
+    const made = fakeTurn({ fail: new DOMException("aborted", "AbortError") as unknown as Error });
+    openTurnMock.mockResolvedValue(made.handle);
+    await readEvents(await POST(post({ message: "Tell me a story" })));
+    const records = appendMock.mock.calls.map((c) => c[0]);
+    expect(records.filter((r) => r.role === "assistant")).toEqual([]);
+    expect(records[records.length - 1]).toMatchObject({ role: "system", variant: "stopped" });
+  });
+
   it("closes the turn even when it threw", async () => {
     const made = fakeTurn({ fail: new Error("dashboard stream went quiet") });
     openTurnMock.mockResolvedValue(made.handle);

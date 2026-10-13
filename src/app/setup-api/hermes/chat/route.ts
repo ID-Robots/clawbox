@@ -714,9 +714,15 @@ function streamTurn(
       // the store could not be read, and a missing baseline is not a baseline.
       // One small read against a store this route opens once more anyway.
       const usageBefore = requestNamedProvider ? null : await readHermesUsageMarks(threaded);
+      // The answer so far, so that a Stop can record what the owner had
+      // already been shown (see the abort branch below).
+      let streamed = "";
       try {
         const final = await turn.run(
-          (chunk) => send("delta", { text: chunk }),
+          (chunk) => {
+            streamed += chunk;
+            send("delta", { text: chunk });
+          },
           // Exhaustive on `kind`, deliberately, rather than "tool or else".
           // The `else` branch was an assumption that every non-tool activity is
           // a status line, and the day a third kind arrived it emitted one as
@@ -867,6 +873,11 @@ function streamTurn(
             variant: "error",
           }, sessionKey);
           send("error", { error: detail });
+        } else {
+          // The owner pressed Stop. The chat keeps the fragment it was
+          // showing and marks the stop; without the same two records here a
+          // reload showed the bare question, as if the reply had been lost.
+          await recordStoppedTurn(sessionKey, streamed);
         }
       } finally {
         turn.close();
@@ -895,6 +906,22 @@ function streamTurn(
 
 function isAbort(err: unknown): boolean {
   return err instanceof DOMException && err.name === "AbortError";
+}
+
+/**
+ * Write down a turn the owner stopped: whatever part of the answer had been
+ * streamed to them, then a `stopped` marker the chat words in its own
+ * language. Never throws — the request is already gone, and a transcript that
+ * cannot be written must not turn a Stop into an unhandled rejection.
+ */
+async function recordStoppedTurn(sessionKey: string, partial: string): Promise<void> {
+  try {
+    const kept = partial.trim();
+    if (kept) await appendTranscript({ role: "assistant", text: kept, timestamp: Date.now() }, sessionKey);
+    await appendTranscript({ role: "system", text: "Stopped.", timestamp: Date.now(), variant: "stopped" }, sessionKey);
+  } catch (err) {
+    console.error("[hermes chat] could not record a stopped turn", err instanceof Error ? err.message : err);
+  }
 }
 
 /**
@@ -1396,9 +1423,10 @@ export async function POST(request: Request) {
     return NextResponse.json(answered);
   } catch (err) {
     if (err instanceof DOMException && err.name === "AbortError") {
-      // Client hit Stop / disconnected; the child was already killed. Nothing
-      // is recorded: the user cancelled, and the question they typed is already
-      // in the transcript above where an unanswered question belongs.
+      // Client hit Stop / disconnected; the child was already killed. The CLI
+      // answers whole, so there is no fragment to keep — only the marker, so
+      // the question does not read as a reply that got lost.
+      await recordStoppedTurn(sessionKey, "");
       return new NextResponse(null, { status: 499 });
     }
     const detail = err instanceof Error ? err.message : "Hermes chat failed";

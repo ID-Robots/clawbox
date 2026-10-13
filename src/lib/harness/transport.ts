@@ -374,7 +374,7 @@ export interface TurnResult {
  * eventually drops a field — the attachments, the spoken audio, or the
  * idempotency key that lets a reconcile recognise an in-flight turn.
  */
-export type HistoryMessage = ChatMessage & { variant?: "success" | "error" };
+export type HistoryMessage = ChatMessage & { variant?: "success" | "error" | "stopped" };
 
 export interface HistoryOptions {
   /** Newest-last, capped here. Defaults to 50 — today's gateway limit. */

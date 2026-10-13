@@ -55,6 +55,9 @@ export interface ChatMessage {
   // answered, not what was asked for. Recorded per turn by the Hermes route.
   model?: string;
   provider?: string;
+  // On a `system` row only. "stopped" marks where the owner pressed Stop: the
+  // row is worded by the chat (`chat.stopped`) and drawn neutral, not red.
+  variant?: "success" | "error" | "stopped";
 }
 
 /** The gateway suffixes its stored copy by role; the client holds the bare run id. */
