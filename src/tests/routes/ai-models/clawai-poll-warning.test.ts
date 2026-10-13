@@ -136,6 +136,47 @@ describe("the device-code finaliser carries the configure's warning", () => {
     expect(completedSession()?.warning).toBe(`${SWEEP_WARNING} Saved. The assistant is restarting.`);
   });
 
+  it("never waits past the poll's own configuring window", async () => {
+    // The poll answers "setup timed out" for a session still configuring after
+    // three minutes. A configure that already spent most of that (a slow
+    // `doctor --fix`) must not have the gateway wait run it out: the sign-in
+    // landed, so it completes with the notice instead.
+    const realNow = Date.now.bind(Date);
+    let skew = 0;
+    const clock = vi.spyOn(Date, "now").mockImplementation(() => realNow() + skew);
+    try {
+      mockConfigure.mockImplementation(async () => {
+        skew = 170_000;
+        return new Response(
+          JSON.stringify({ success: true, gatewayRestarting: true, restartingNotice: "Saved. The assistant is restarting." }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      });
+
+      await finalise();
+
+      await vi.waitFor(() => expect(completedSession()?.status).toBe("complete"));
+      expect(waitForGatewayBack).not.toHaveBeenCalled();
+      expect(completedSession()?.warning).toBe("Saved. The assistant is restarting.");
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("bounds the gateway wait by the time left in the configuring window", async () => {
+    mockConfigure.mockResolvedValue(new Response(
+      JSON.stringify({ success: true, gatewayRestarting: true }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    ));
+
+    await finalise();
+
+    await vi.waitFor(() => expect(waitForGatewayBack).toHaveBeenCalledTimes(1));
+    const budget = vi.mocked(waitForGatewayBack).mock.calls[0][0];
+    expect(budget).toBeGreaterThan(0);
+    expect(budget).toBeLessThanOrEqual(90_000);
+  });
+
   it("does not wait on a save the gateway applied live", async () => {
     mockConfigure.mockResolvedValue(new Response(
       JSON.stringify({ success: true }),
