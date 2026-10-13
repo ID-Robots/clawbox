@@ -280,6 +280,7 @@ import {
   removeRunWorktree,
   restoreRunWorktree,
   sweepRunWorktrees,
+  worktreeHasChanges,
   type MergeHomeBlocker,
 } from "@/lib/coding-run-worktree";
 import { worktreeHintFor, worktreeHintText } from "@/lib/coding-worktree-paths";
@@ -11890,9 +11891,10 @@ function liveRunsIn(directory: string): CodingRun[] {
  *     tree still goes — the work is on the branch, where the Changes tab and
  *     `git merge` both find it.
  *
- * Only two things keep a tree on disk now: git could not say what is on its
- * branch (no answer is not permission to delete), or the removal itself
- * failed — and those are what the page's Remove copy is for.
+ * Only three things keep a tree on disk now: git could not say what is on its
+ * branch (no answer is not permission to delete), the tree holds work its
+ * branch does not (`unsavedWork` below), or the removal itself failed — and
+ * those are what the page's Remove copy is for.
  *
  * Never throws: this is the settle path, and a run whose tree could not be
  * tidied is still a run that finished.
@@ -11915,7 +11917,25 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
       persist(true);
       return;
     }
+    // Asked before EVERY removal below. `commitsAhead` counts the branch only,
+    // and `removeRunWorktree` forces: a commit that failed after its
+    // `git add -A` leaves the work staged in the tree, and a run that wrote
+    // through its shell without committing leaves it untracked there. Either
+    // way the tree is the only copy, so it stays — as it does when git cannot
+    // say. The answer is why it stays, or null when nothing would be lost.
+    const unsavedWork = async (): Promise<string | null> => {
+      if (run.commitError) return "the run's commit failed, so it may hold work its branch does not";
+      const changed = await worktreeHasChanges(wt.path);
+      if (changed === null) return "git could not say whether it holds uncommitted changes";
+      return changed ? "it holds changes that are not committed to its branch" : null;
+    };
     if (ahead === 0) {
+      const unsaved = await unsavedWork();
+      if (unsaved) {
+        pushProgress(run, RUNNER_STEP.worktreeKept(unsaved));
+        persist(true);
+        return;
+      }
       // Recorded only if the files are actually gone: git can refuse the
       // removal (a busy file, an index lock), and a record that claimed the
       // copy had gone would leave the disk unreclaimed with nothing to retry
@@ -11934,9 +11954,16 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
       persist(true);
       return;
     }
-    // The files go either way from here; only the SENTENCE differs. Recorded
-    // only if they are actually gone (see the `ahead === 0` branch above).
+    // The files go either way from here, unless they hold unsaved work; only
+    // the SENTENCE differs. Recorded only if they are actually gone (see the
+    // `ahead === 0` branch above).
     const park = async (reason: string): Promise<void> => {
+      const unsaved = await unsavedWork();
+      if (unsaved) {
+        pushProgress(run, RUNNER_STEP.worktreeKept(`${unsaved}; ${reason}`));
+        persist(true);
+        return;
+      }
       if (!(await removeRunWorktree(wt.project, wt.path))) {
         pushProgress(run, RUNNER_STEP.worktreeKept(`${reason}, and the copy could not be removed`));
         persist(true);
@@ -11964,6 +11991,13 @@ async function settleRunWorktree(run: CodingRun): Promise<void> {
       return;
     }
     wt.result = { kind: "merged", reason: null, detail: null, base: wt.base, commit: merged.commit };
+    // The merge took the branch home, not what the tree holds beside it.
+    const unsaved = await unsavedWork();
+    if (unsaved) {
+      pushProgress(run, RUNNER_STEP.worktreeKept(`it was merged into ${wt.base}, but ${unsaved}`));
+      persist(true);
+      return;
+    }
     if (!(await removeRunWorktree(wt.project, wt.path))) {
       // The work IS home — the merge landed — so this is only the copy left
       // behind, and the card's Remove is what answers it.

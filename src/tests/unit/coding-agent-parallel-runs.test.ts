@@ -387,6 +387,95 @@ describe("a run's own copy of the project", () => {
     expect(git(dir, "show", "--name-only", "--format=", run.worktree!.branch).trim()).toBe("shared.txt");
   });
 
+  /**
+   * The settle forces a tree away, and `commitsAhead` counts the branch only.
+   * Work that never reached the branch — staged by a commit that then failed,
+   * or written and never committed — lives in the tree alone, so the tree
+   * stays. Each removal is guarded: nothing ahead, refused merge, merged.
+   */
+  it("keeps the copy, and its branch, when the run's commit failed with the work staged in it", async () => {
+    const dir = makeGitProject("alpha");
+    // `--no-verify` skips pre-commit and commit-msg, not prepare-commit-msg:
+    // refusing there fails the commit AFTER `git add -A` staged the file, so
+    // the branch gets nothing and the tree holds the work.
+    const hook = path.join(dir, ".git", "hooks", "prepare-commit-msg");
+    fs.mkdirSync(path.dirname(hook), { recursive: true });
+    fs.writeFileSync(hook, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    installWrapper([...wrote("made.txt"), `echo '${result("wrote a file")}'`, "exit 0"].join("\n"));
+    const started = await lib.startRun({ task: "make a file", directory: "alpha", source: "owner" });
+    await finished(started.id);
+    await vi.waitFor(() => {
+      expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(/copy of the project was kept: the run's commit failed/);
+    }, { timeout: 20_000 });
+    const run = lib.getRun(started.id)!;
+    expect(run.commitError).toBeTruthy();
+    expect(run.worktree?.removed).toBe(false);
+    expect(run.worktree?.branchRemoved).toBe(false);
+    expect(git(dir, "branch", "--list", run.worktree!.branch)).toContain(run.worktree!.branch);
+    expect(git(run.directory, "diff", "--cached", "--name-only")).toBe("made.txt");
+    expect(run.progress.join("\n")).not.toMatch(/copy of the project was removed/);
+  });
+
+  it("keeps the copy when the merge is refused but the tree holds work its branch does not", async () => {
+    const dir = makeGitProject("alpha");
+    // One file committed through the run's own shell — the branch is ahead —
+    // and a second left beside it, never committed.
+    installWrapper([
+      'echo "kept" > "$PWD/kept.txt"',
+      'git -C "$PWD" add kept.txt && git -C "$PWD" -c user.name=t -c user.email=t@x commit -q -m "the run\'s own commit"',
+      'echo "draft" > "$PWD/draft.txt"',
+      `echo '${result("committed one file")}'`,
+      "exit 0",
+    ].join("\n"));
+    const started = await lib.startRun({ task: "make two files", directory: "alpha", source: "owner" });
+    fs.writeFileSync(path.join(dir, "mine.txt"), "the owner's\n");
+    await finished(started.id);
+    await vi.waitFor(() => {
+      expect(lib.getRun(started.id)?.progress.join("\n"))
+        .toMatch(/copy of the project was kept: it holds changes that are not committed to its branch; the project folder has uncommitted changes of its own/);
+    }, { timeout: 20_000 });
+    const run = lib.getRun(started.id)!;
+    expect(run.worktree?.removed).toBe(false);
+    expect(run.worktree?.result).toMatchObject({ kind: "unmerged", reason: "dirty" });
+    expect(fs.readFileSync(path.join(run.directory, "draft.txt"), "utf8")).toBe("draft\n");
+    expect(git(dir, "show", "--name-only", "--format=", run.worktree!.branch).trim()).toBe("kept.txt");
+  });
+
+  it("keeps the copy after a merge when the tree still holds work the merge did not take", async () => {
+    const dir = makeGitProject("alpha");
+    installWrapper([
+      'echo "kept" > "$PWD/kept.txt"',
+      'git -C "$PWD" add kept.txt && git -C "$PWD" -c user.name=t -c user.email=t@x commit -q -m "the run\'s own commit"',
+      'echo "draft" > "$PWD/draft.txt"',
+      `echo '${result("committed one file")}'`,
+      "exit 0",
+    ].join("\n"));
+    const started = await lib.startRun({ task: "make two files", directory: "alpha", source: "owner" });
+    await finished(started.id);
+    await vi.waitFor(() => {
+      expect(lib.getRun(started.id)?.progress.join("\n"))
+        .toMatch(/copy of the project was kept: it was merged into master, but it holds changes that are not committed to its branch/);
+    }, { timeout: 20_000 });
+    const run = lib.getRun(started.id)!;
+    expect(run.worktree?.removed).toBe(false);
+    expect(run.worktree?.result).toMatchObject({ kind: "merged", base: "master" });
+    expect(fs.existsSync(path.join(dir, "kept.txt"))).toBe(true);
+    expect(fs.readFileSync(path.join(run.directory, "draft.txt"), "utf8")).toBe("draft\n");
+  });
+
+  it("still removes a copy whose only stray entry is the project's own linked node_modules", async () => {
+    const dir = makeGitProject("alpha");
+    fs.mkdirSync(path.join(dir, "node_modules"));
+    const started = await lib.startRun({ task: "just look", directory: "alpha", source: "owner" });
+    expect(fs.lstatSync(path.join(started.directory, "node_modules")).isSymbolicLink()).toBe(true);
+    await finished(started.id);
+    await vi.waitFor(() => { expect(lib.getRun(started.id)?.worktree?.removed).toBe(true); }, { timeout: 20_000 });
+    expect(fs.existsSync(started.directory)).toBe(false);
+    expect(lib.getRun(started.id)?.progress.join("\n")).toMatch(/copy of the project was removed; it left nothing on its branch/);
+    // The link went, never what it pointed at.
+    expect(fs.existsSync(path.join(dir, "node_modules"))).toBe(true);
+  });
+
   it("refuses Remove for a run that worked in the project folder itself", async () => {
     makePlainProject("plain");
     const started = await lib.startRun({ task: "look", directory: "plain", source: "owner" });
