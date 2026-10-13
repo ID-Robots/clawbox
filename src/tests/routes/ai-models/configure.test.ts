@@ -133,11 +133,29 @@ vi.mock("@/lib/openclaw-gateway-ws", () => ({
   GatewayRpcError: class GatewayRpcError extends Error {},
 }));
 
+// Every key paste runs unless a test says the store already holds the key
+// (TASK-1535) — the predicate itself is `openclaw-api-key-paste.test.ts`'s.
+vi.mock("@/lib/openclaw-api-key-paste", () => ({ apiKeyPasteChangesNothing: vi.fn(() => false) }));
+
 // The gateway applies a save live unless a test says otherwise (TASK-1535):
 // classification real, gateway I/O mocked — see the helper.
 vi.mock("@/lib/gateway-hot-apply", async (importOriginal) =>
   (await import("@/tests/helpers/gateway-hot-apply")).gatewayHotApplyMock(importOriginal));
-vi.mock("@/lib/openclaw-config", () => ({
+vi.mock("@/lib/openclaw-config", async () => ({
+  ...(await import("./config-write-passthrough")).configWritePassthrough,
+  // Spies over the passthrough, for "one openclaw.json write per save" below:
+  // where the route opens its transaction, commits it, and flushes it.
+  withConfigWriteScope: vi.fn(async <T>(body: () => Promise<T>): Promise<T> => body()),
+  beginConfigWriteTransaction: vi.fn((label: string) => ({
+    label,
+    isOpen: false,
+    pending: 0,
+    committedAs: null as string | null,
+    commit: vi.fn(async () => {}),
+    flush: vi.fn(async () => {}),
+    abandon: vi.fn(),
+  })),
+  flushConfigWrites: vi.fn(async () => {}),
   DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR: 24000,
   // Pure helper — mirror the real implementation (unit-tested in
   // openclaw-config.test.ts) so the configure route computes a real reserve.
@@ -250,7 +268,11 @@ import { inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway
   spawnOpenclawCli,
   setProviderPlugins,
   GatewayNotReadyError,
+  beginConfigWriteTransaction,
+  flushConfigWrites,
+  withConfigWriteScope,
 } from "@/lib/openclaw-config";
+import { apiKeyPasteChangesNothing } from "@/lib/openclaw-api-key-paste";
 import { configSetCalls, configSetCommands, failConfigSetsMatching, findConfigSet } from "./config-set-calls";
 import { getDefaultLlamaCppModel, getLlamaCppContextWindow, getLlamaCppMaxTokens, getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
 import { getLocalAiProxyBaseUrl } from "@/lib/local-ai-runtime";
@@ -4590,6 +4612,141 @@ describe("POST /setup-api/ai-models/configure", () => {
       // …and the store was left alone.
       expect(mockRead).not.toHaveBeenCalled();
       expect(mockPut).not.toHaveBeenCalled();
+    });
+  });
+
+  /**
+   * ONE openclaw.json write per save (TASK-1535). A ClawBox AI re-save was
+   * measured at 50 s on a board: four rounds of CLI writes (a key paste, a
+   * batch, the same paste again, another batch), each a 5-14 s CLI start and
+   * a gateway reload. The route now stages steps 3-8b in the request's config
+   * write transaction and commits it once; what the commit does with the
+   * staged writes is `openclaw-config-write-transaction.test.ts`'s. Here: that
+   * the route opens it, commits it after its LAST write and before it asks the
+   * gateway to apply the save, announces catalogue changes only after it, and
+   * leaves out a key paste that would change nothing.
+   */
+  describe("one openclaw.json write per save (TASK-1535)", () => {
+    const orderOf = (mock: { mock: { invocationCallOrder: number[] } }) => mock.mock.invocationCallOrder;
+
+    it("commits the request's transaction once, after its last config write and before the gateway applies it", async () => {
+      // The provider plugin is on disk: nothing is installed, the save is applied live.
+      mockFs.access.mockResolvedValue(undefined);
+      vi.mocked(setProviderPlugins).mockResolvedValue("anthropic");
+      const hot = await import("@/lib/gateway-hot-apply");
+
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "portal-token-123" }));
+      expect(res.status).toBe(200);
+
+      expect(vi.mocked(withConfigWriteScope)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(beginConfigWriteTransaction)).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(beginConfigWriteTransaction)).toHaveBeenCalledWith("configure");
+      const tx = vi.mocked(beginConfigWriteTransaction).mock.results[0].value as unknown as {
+        commit: { mock: { invocationCallOrder: number[] } };
+      };
+      expect(orderOf(tx.commit)).toHaveLength(1);
+      const committedAt = orderOf(tx.commit)[0];
+
+      const writes = [
+        ...orderOf(vi.mocked(runOpenclawConfigSet)),
+        ...orderOf(vi.mocked(runOpenclawConfigSetBatch)),
+        ...orderOf(vi.mocked(runOpenclawConfigUnset)),
+        ...orderOf(vi.mocked(setProviderPlugins)),
+      ];
+      expect(writes.length).toBeGreaterThan(1);
+      expect(Math.max(...writes)).toBeLessThan(committedAt);
+      expect(orderOf(vi.mocked(hot.awaitGatewayHotApply))[0]).toBeGreaterThan(committedAt);
+      // The plugin flip and the provider's own catalogue are announced once
+      // they are in the file, not while they are staged.
+      expect(vi.mocked(notifyProviderSetChanged)).toHaveBeenCalledWith("anthropic");
+      expect(Math.min(...orderOf(vi.mocked(notifyProviderSetChanged)))).toBeGreaterThan(committedAt);
+    });
+
+    it("leaves out a key paste that would change nothing — both of a ClawBox AI re-save's", async () => {
+      vi.mocked(apiKeyPasteChangesNothing).mockReturnValue(true);
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "portal-token-123" }));
+      expect(res.status).toBe(200);
+      expect(vi.mocked(apiKeyPasteChangesNothing)).toHaveBeenCalledWith(
+        expect.objectContaining({ provider: "deepseek", profileId: "deepseek:default", key: "portal-token-123" }),
+      );
+      expect(pasteCallFor("deepseek:default")).toBeUndefined();
+    });
+
+    it("skips the sign-in guard's CLI start for a key the store already holds: there is no sign-in at that id to lose", async () => {
+      vi.mocked(apiKeyPasteChangesNothing).mockReturnValue(true);
+      const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-ant-api03-test" }));
+      expect(res.status).toBe(200);
+      const listed = vi.mocked(spawnOpenclawCli).mock.calls.some(
+        (call) => Array.isArray(call[0]) && call[0].join(" ").includes("models auth list"),
+      );
+      expect(listed).toBe(false);
+      expect(pasteCallFor("anthropic:default")).toBeUndefined();
+    });
+
+    it("still asks the sign-in guard before a paste that would change something", async () => {
+      const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-ant-api03-test" }));
+      expect(res.status).toBe(200);
+      const listed = vi.mocked(spawnOpenclawCli).mock.calls.some(
+        (call) => Array.isArray(call[0]) && call[0].join(" ").includes("models auth list"),
+      );
+      expect(listed).toBe(true);
+      expect(pasteCallFor("anthropic:default")).toBeDefined();
+    });
+
+    it("pastes a key the store does not hold, landing what the save staged before it first", async () => {
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "portal-token-123" }));
+      expect(res.status).toBe(200);
+      const paste = vi.mocked(spawnOpenclawCli).mock.calls.findIndex(
+        (call) => Array.isArray(call[0]) && call[0].includes("paste-api-key"),
+      );
+      expect(paste).toBeGreaterThan(-1);
+      expect(pasteStdin("deepseek:default")).toContain("portal-token-123");
+      const pastedAt = vi.mocked(spawnOpenclawCli).mock.invocationCallOrder[paste];
+      expect(orderOf(vi.mocked(flushConfigWrites)).some((at) => at < pastedAt)).toBe(true);
+    });
+
+    function committingAs(committedAs: string) {
+      vi.mocked(beginConfigWriteTransaction).mockImplementationOnce((label: string) => ({
+        label,
+        isOpen: false,
+        pending: 0,
+        committedAs,
+        commit: vi.fn(async () => {}),
+        flush: vi.fn(async () => {}),
+        abandon: vi.fn(),
+      }) as unknown as ReturnType<typeof beginConfigWriteTransaction>);
+    }
+
+    it("names a changed primary that is in no model list when the save went through the gateway, which does not check model ids", async () => {
+      committingAs("gateway");
+      const res = await configurePost(jsonRequest({
+        provider: "openrouter",
+        apiKey: "sk-or-v1-test",
+        model: "acme/no-such-model",
+      }));
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.warning).toContain("openrouter/acme/no-such-model is in no model list this box has for openrouter");
+      // It does not claim a refusal that never happened.
+      expect(body.warning).not.toContain("refused");
+    });
+
+    it.each(["unchanged", "one-by-one"])("says nothing of the kind when the commit was %s", async (how) => {
+      committingAs(how);
+      const res = await configurePost(jsonRequest({
+        provider: "openrouter",
+        apiKey: "sk-or-v1-test",
+        model: "acme/no-such-model",
+      }));
+      expect(res.status).toBe(200);
+      expect((await res.json()).warning ?? "").not.toContain("is in no model list");
+    });
+
+    it("says nothing for a primary the lists know", async () => {
+      committingAs("gateway");
+      const res = await configurePost(jsonRequest({ provider: "openrouter", apiKey: "sk-or-v1-test" }));
+      expect(res.status).toBe(200);
+      expect((await res.json()).warning ?? "").not.toContain("is in no model list");
     });
   });
 });

@@ -145,19 +145,36 @@ describe("gatewayWsChatSendMain", () => {
 });
 
 describe("gatewayWsPatchConfig", () => {
-  it("reads the hash, then patches with the raw merge and answers what changed", async () => {
+  it("patches against the revision the caller read, with the raw merge, and answers what changed", async () => {
     const port = await fakeGateway((method, params) => {
-      if (method === "config.get") return { ok: true, payload: { hash: "hmac-abc", config: {} } };
       if (method === "config.patch") return params.baseHash === "hmac-abc" && typeof params.raw === "string"
         ? { ok: true, payload: { ok: true, noop: false, changedPaths: ["agents.defaults.model.primary"] } }
         : { ok: false, error: { code: "BAD", message: "shape" } };
       return { ok: false, error: { code: "NOT_FOUND" } };
     });
     await load(port);
-    const out = await lib.gatewayWsPatchConfig({ agents: { defaults: { model: { primary: "anthropic/claude-opus-5" } } } });
+    const out = await lib.gatewayWsPatchConfig(
+      { agents: { defaults: { model: { primary: "anthropic/claude-opus-5" } } } },
+      { baseHash: "hmac-abc" },
+    );
     expect(out).toEqual({ noop: false, changedPaths: ["agents.defaults.model.primary"] });
-    const patch = seen.find((s) => s.method === "config.patch")?.params as { raw: string };
+    // ONE call: the caller read the revision it built the patch from, and a
+    // `config.get` here would vouch for a file the patch was not computed from.
+    expect(seen.map((s) => s.method)).toEqual(["connect", "config.patch"]);
+    const patch = seen.find((s) => s.method === "config.patch")?.params as { raw: string; replacePaths?: unknown };
     expect(JSON.parse(patch.raw)).toEqual({ agents: { defaults: { model: { primary: "anthropic/claude-opus-5" } } } });
+    expect(patch.replacePaths).toBeUndefined();
+  });
+
+  it("names the arrays it replaces on purpose", async () => {
+    const port = await fakeGateway(() => ({ ok: true, payload: { ok: true, noop: false, changedPaths: [] } }));
+    await load(port);
+    await lib.gatewayWsPatchConfig(
+      { agents: { defaults: { model: { fallbacks: [] } } } },
+      { baseHash: "h", replacePaths: ["agents.defaults.model.fallbacks"] },
+    );
+    const patch = seen.find((s) => s.method === "config.patch")?.params as { replacePaths?: unknown };
+    expect(patch.replacePaths).toEqual(["agents.defaults.model.fallbacks"]);
   });
 });
 

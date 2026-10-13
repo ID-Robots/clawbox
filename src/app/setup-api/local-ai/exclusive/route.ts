@@ -86,11 +86,13 @@ function snapshotOverrides(session: Record<string, unknown>): SessionOverrideSna
 // That half-applied state is visible in the UI as a failed toggle while
 // the user's chat actually continues routing to the cloud fallback.
 /**
- * One `config set --batch-json` for every model write of a toggle: the CLI
- * takes 10-12 s per invocation on a Jetson (so the helper's default timeout
- * stays), and a batch is applied to one snapshot and validated as a whole, so
- * the primary and the fallbacks land together or not at all — the half-applied
- * state the header above describes cannot come from here.
+ * ONE write for every model write of a toggle, applied to one snapshot and
+ * validated as a whole, so the primary and the fallbacks land together or not
+ * at all — the half-applied state the header above describes cannot come from
+ * here. Through the running gateway it is one exact `config.patch` (the
+ * fallbacks array included, TASK-1535), which answers once the gateway has
+ * applied it; without one it is the `config set --batch-json` it always was,
+ * at 10-12 s per CLI start on a Jetson (so the helper's default timeout stays).
  */
 async function setConfigBatch(ops: OpenclawConfigSetArgs[]) {
   await runOpenclawConfigSetBatch(ops);
