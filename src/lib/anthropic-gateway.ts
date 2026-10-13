@@ -50,6 +50,7 @@ import {
   gatewayCredentialFor,
   readPoolState,
   setGatewayMirror,
+  type GatewayMirror,
   type SwapConsumerOutcome,
 } from "@/lib/anthropic-accounts";
 import {
@@ -251,7 +252,14 @@ async function syncLocked(accountId: string, opts: { restart: boolean; keeper?: 
       noteRestart(false);
       return outcome("failed", "restart_failed", written);
     }
-    if (d.list().some((p) => p.fingerprint !== fingerprint)) return outcome("failed", "write_lost", written);
+    if (d.list().some((p) => p.fingerprint !== fingerprint)) {
+      // Two restarts and a store still holds another token — one it can read
+      // and not write (root-owned, locked). Counted as a restart that failed,
+      // or the keeper bounces the gateway, and every chat on it, twice every
+      // pass for ever instead of backing off.
+      noteRestart(false);
+      return outcome("failed", "write_lost", written);
+    }
   }
   await record(false);
   noteRestart(true);
@@ -351,6 +359,19 @@ export function mentionsAnthropic(text: string | null | undefined): boolean {
   return typeof text === "string" && ANTHROPIC_WORDS_RE.test(text.slice(0, 600));
 }
 
+/**
+ * The pool account a gateway turn that ran at `ranAt` failed on: where the box
+ * put the gateway — but only for a turn that ran once it was there. One that
+ * ran before the move ran on the account the gateway has just left (usually
+ * the very account whose limit caused the move), and while the restart onto
+ * the new one is still owed (`pending`) the gateway may not be on it yet.
+ * Null blames no pool account; the failure still goes through the swap, and a
+ * held retry runs again on the account the gateway is on now.
+ */
+function gatewayAccountAt(mirror: GatewayMirror | null, ranAt: number): string | null {
+  return mirror && !mirror.pending && ranAt >= mirror.at ? mirror.accountId : null;
+}
+
 /** One look at the gateway's crons. Answers how many failures it reported. */
 export async function scanGatewayCrons(now: number = Date.now()): Promise<number> {
   const d = deps();
@@ -371,7 +392,9 @@ export async function scanGatewayCrons(now: number = Date.now()): Promise<number
     if (job.lastRunAtMs === null || job.lastRunAtMs <= since) continue;
     newest = Math.max(newest, job.lastRunAtMs);
     if (job.lastStatus !== "error" || !mentionsAnthropic(job.lastError)) continue;
-    const accountId = pool.gateway?.accountId ?? null;
+    // Also what keeps the first look after a boot, which reaches back
+    // FIRST_LOOK_BACK_MS, from blaming runs older than the move.
+    const accountId = gatewayAccountAt(pool.gateway, job.lastRunAtMs);
     const result = await reportAnthropicFailure({
       text: job.lastError,
       source: "cron",
@@ -422,7 +445,9 @@ export async function reportChatFailure(input: ChatFailure): Promise<FailureOutc
     || (provider === null && mentionsAnthropic(`${detail ?? ""} ${errorMessage ?? ""}`));
   if (!anthropic) return null;
   const pool = await readPoolState();
-  const accountId = pool.gateway?.accountId ?? null;
+  // Reported as the turn fails, and a swap's restart ends every turn in
+  // flight: a report after the move is the new account's — once it is there.
+  const accountId = gatewayAccountAt(pool.gateway, Date.now());
   const sessionKey = text(input.sessionKey, 300);
   const message = text(input.message, 32_000);
   const d = deps();
