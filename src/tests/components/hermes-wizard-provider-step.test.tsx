@@ -264,6 +264,20 @@ describe("connecting ClawBox AI on the wizard — the same progress overlay as O
     await waitFor(() => expect(onNext).toHaveBeenCalledTimes(1), { timeout: 2_500 });
   }, 10_000);
 
+  it("names the Hermes agent in the checklist, never a gateway the edition does not run", async () => {
+    // 2026-10-13 smoke test: the overlay said "Restarting gateway" on a box
+    // whose gateway unit is masked.
+    render(<HermesProviderConfig testId="hermes-ai" onNext={vi.fn()} />);
+    await screen.findByRole("button", { name: /Get device code/i });
+    act(() => loginCallbacks.onConfiguring?.());
+
+    const rows = screen.getAllByRole("listitem").filter((row) => row.hasAttribute("data-step-state"));
+    const labels = rows.map((row) => row.textContent ?? "");
+    expect(labels).toHaveLength(5);
+    expect(labels.some((label) => /gateway/i.test(label))).toBe(false);
+    expect(labels[2]).toMatch(/Starting the Hermes agent/);
+  });
+
   it("gives the form back when the owner cancels a connect that is taking too long", async () => {
     render(<HermesProviderConfig testId="hermes-ai" onNext={vi.fn()} />);
     await screen.findByRole("button", { name: /Get device code/i });

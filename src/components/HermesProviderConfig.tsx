@@ -5,7 +5,7 @@ import ClawboxAiProviderRow from "./ClawboxAiProviderRow";
 import ProviderRadioRow from "./ProviderRadioRow";
 import ClawboxAiPlanPicker from "./ClawboxAiPlanPicker";
 import ClawboxAiDeviceLogin from "./ClawboxAiDeviceLogin";
-import { ConfiguringOverlay, CONFIGURING_STEP_DELAYS, GENERIC_CONFIGURING_STEP_KEYS } from "./ConfiguringOverlay";
+import { ConfiguringOverlay, CONFIGURING_STEP_DELAYS, HERMES_CONFIGURING_STEP_KEYS } from "./ConfiguringOverlay";
 import ProviderConnectionLabel from "./ProviderConnectionLabel";
 import ProviderDefaultHero from "./ProviderDefaultHero";
 import { useClawaiDeviceLogin } from "@/hooks/useClawaiDeviceLogin";
@@ -155,7 +155,7 @@ const CONFIGURING_DONE_DWELL_MS = 900;
 /** A connect that has not landed by then gives the form back. */
 const CONFIGURING_WATCHDOG_MS = 120_000;
 const LOCAL_AI_PROVIDER = "llamacpp";
-const LAST_CONFIGURING_PHASE = GENERIC_CONFIGURING_STEP_KEYS.length - 1;
+const LAST_CONFIGURING_PHASE = HERMES_CONFIGURING_STEP_KEYS.length - 1;
 
 // The provider registry is shared with the server routes (/setup-api/hermes/*
 // imports it), so it cannot call `t` — but a row's `description` is copy, not
@@ -202,7 +202,7 @@ export default function HermesProviderConfig({
     phase: number;
     completed: boolean;
   } | null>(null);
-  const configuringSteps = useMemo(() => GENERIC_CONFIGURING_STEP_KEYS.map((key) => t(key)), [t]);
+  const configuringSteps = useMemo(() => HERMES_CONFIGURING_STEP_KEYS.map((key) => t(key)), [t]);
 
   // Seeded from the DEVICE's configured provider by the mount effect below;
   // "openrouter" is only the pre-resolution placeholder. Under REQ 1's scoping
