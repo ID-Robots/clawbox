@@ -819,6 +819,9 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "settings.title": "Settings",
     "settings.wallpaper": "Wallpaper",
     "settings.upload": "Upload",
+    // The desktop's toast (src/app/page.tsx) and the standalone Settings page
+    // say this when the Upload tile was handed a file that is not a picture.
+    "settings.wallpaperNotImage": "That file is not a picture, so the wallpaper was not changed. Choose a PNG, JPEG or WebP image.",
     "settings.display": "Display",
     "settings.fitMode": "Fit Mode",
     "settings.fill": "fill",
