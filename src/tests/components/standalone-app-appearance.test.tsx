@@ -375,6 +375,21 @@ describe("/app/settings — Appearance", () => {
     expect(clicked).toHaveBeenCalled();
   });
 
+  it("refuses a file that is not a picture, says so and stores nothing", async () => {
+    // 2026-10-13 smoke test: a text file was stored as a wallpaper and the
+    // desktop painted black. This route has the same Upload tile.
+    render(<StandaloneAppPage />);
+    await waitFor(() => expect(screen.getByTestId("ui-custom").textContent).toBe("0"));
+
+    fireEvent.change(screen.getByTestId("standalone-wallpaper-upload"), {
+      target: { files: [new File(["just a note"], "smoke-note.txt", { type: "text/plain" })] },
+    });
+
+    expect(await screen.findByTestId("standalone-wallpaper-refused")).toBeTruthy();
+    expect(screen.getByTestId("ui-custom").textContent).toBe("0");
+    expect(localStorage.getItem("clawbox-custom-wallpapers")).toBeNull();
+  });
+
   it("offers the HERMES branding and no ClawBox one on a Hermes box", async () => {
     // The built-in list is edition-scoped (owner ruling 2026-09-06). This route
     // is the phone's Settings, so it must scope it the same way the desktop

@@ -66,10 +66,12 @@ import { useMonitorLayoutSync } from "@/lib/use-monitor-layout";
 import MonitorIdentifyOverlay from "@/components/MonitorIdentifyOverlay";
 import { NON_OWNER_APP_IDS, OWNER_ONLY_NOTICE, installedAppIdsFor } from "@/lib/non-owner-scope";
 import { customWallpaperId, customWallpaperIndex, wallpaperIdAfterDelete } from "@/lib/custom-wallpapers";
+import { isShowableCustomWallpaper, readWallpaperFile, useUndecodableImage } from "@/lib/wallpaper-image";
 import {
   brandingHarness,
   brandWallpaperId,
   builtinWallpapers,
+  defaultWallpaperId,
   paintedWallpaperOpacity,
   renderedWallpaperId as resolveRenderedWallpaperId,
 } from "@/lib/builtin-wallpapers";
@@ -1207,11 +1209,22 @@ function ChromeDesktopInner() {
   // So the fallback lives here, in the render, and nowhere else. `wallpaperId`
   // — the value the debounced write sends — only ever changes on an explicit
   // choice: picking a tile, uploading, or deleting the picture in use.
-  const renderedWallpaperId = resolveRenderedWallpaperId(
-    wallpaperId,
-    wallpaperHarness,
-    customWallpapersLoaded ? customWallpapers.length : null,
-  );
+  //
+  // A third unshowable case sits beside the two the resolver knows: a slot
+  // that EXISTS but does not hold a picture — a text file an older build let
+  // through the Upload tile, or one that does not decode. It painted a black
+  // desktop; it paints the default instead, and like the others it is healed
+  // in the render and never written (src/lib/wallpaper-image.ts).
+  const savedCustomIdx = wallpaperId === null ? null : customWallpaperIndex(wallpaperId);
+  const savedCustomWp = savedCustomIdx === null ? undefined : customWallpapers[savedCustomIdx];
+  const savedCustomUndecodable = useUndecodableImage(savedCustomWp);
+  const renderedWallpaperId = savedCustomWp !== undefined && !isShowableCustomWallpaper(savedCustomWp, savedCustomUndecodable)
+    ? defaultWallpaperId(wallpaperHarness)
+    : resolveRenderedWallpaperId(
+      wallpaperId,
+      wallpaperHarness,
+      customWallpapersLoaded ? customWallpapers.length : null,
+    );
   const currentWallpaper = wallpapers.find(w => w.id === renderedWallpaperId) || wallpapers[0];
   // The strength the picture is painted at and the slider shows: the saved
   // value, else the wallpaper's own default (an uploaded picture has none —
@@ -1255,9 +1268,16 @@ function ChromeDesktopInner() {
   const handleWallpaperUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = reader.result as string;
+    e.target.value = "";
+    // `accept="image/*"` is a hint the picker's "All files" filter walks past,
+    // so the file is checked here: declared as an image AND decoded by the
+    // browser. A text file used to be stored and selected, and the desktop
+    // went black (src/lib/wallpaper-image.ts).
+    void readWallpaperFile(file).then((dataUrl) => {
+      if (dataUrl === null) {
+        window.dispatchEvent(new CustomEvent(TOAST_EVENT, { detail: { message: t("settings.wallpaperNotImage") } }));
+        return;
+      }
       // Computed from the ref, not from inside a `setCustomWallpapers` updater.
       // React may run an updater twice, and this one wrote localStorage and
       // called two other setters from inside it — the side-effect-in-an-updater
@@ -1275,10 +1295,8 @@ function ChromeDesktopInner() {
       if (!storeCustomWallpapers(next, "Could not save that wallpaper — this browser is not letting the page store them.")) return;
       setWallpaperId(customWallpaperId(next.length - 1));
       setWpOpacity(100);
-    };
-    reader.readAsDataURL(file);
-    e.target.value = "";
-  }, [storeCustomWallpapers]);
+    });
+  }, [storeCustomWallpapers, t]);
 
   // ─── Chat (mascot click toggles chat popup) ───
   const [chatOpen, setChatOpen] = useState(false);
