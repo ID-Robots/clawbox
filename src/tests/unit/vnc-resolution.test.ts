@@ -8,9 +8,8 @@ import {
   VNC_RESOLUTIONS,
   isVncResolution,
   normalizeVncResolution,
-  vncResolutionEnvPath,
-  writeVncResolutionEnv,
 } from "@/lib/vnc-resolution";
+import { vncResolutionEnvPath, writeVncResolutionEnv } from "@/lib/vnc-resolution-server";
 import { validatePreference } from "@/lib/preference-schema";
 
 const SCRIPT = fs.readFileSync(path.join(process.cwd(), "scripts", "start-vnc.sh"), "utf8");
@@ -30,6 +29,32 @@ function runShell(body: string): string {
   const r = spawnSync("bash", ["-c", prelude + body], { encoding: "utf8" });
   expect(r.status).toBe(0);
   return r.stdout.trim();
+}
+
+/**
+ * Run the script's own "replace a running Xvfb" block with stubbed X tools.
+ * `display_ready` is true while a flag file exists; `stops` decides whether
+ * the stubbed pkill takes the display down.
+ */
+function runXvfbReplace(stops: boolean) {
+  const block = SCRIPT.match(/^if display_ready ":\$\{VDISPLAY\}" \\\n[\s\S]*?^fi$/m);
+  if (!block) throw new Error("Xvfb replacement block not found in start-vnc.sh");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vnc-replace-"));
+  const flag = path.join(dir, "ready");
+  fs.writeFileSync(flag, "");
+  const body = [
+    shellFunction("xvfb_action"),
+    `FLAG=${JSON.stringify(flag)}`,
+    "VDISPLAY=99",
+    "VNC_RESOLUTION=1920x1080",
+    'display_ready() { [ -e "$FLAG" ]; }',
+    "running_geometry() { echo 1280x720; }",
+    "sleep() { :; }",
+    stops ? 'pkill() { rm -f "$FLAG"; }' : "pkill() { :; }",
+    block[0],
+    "echo continued",
+  ].join("\n");
+  return spawnSync("bash", ["-c", body], { encoding: "utf8" });
 }
 
 describe("VNC resolution validation", () => {
@@ -54,10 +79,36 @@ describe("VNC resolution validation", () => {
     expect(validatePreference("desktop_vnc_resolution", "4000x4000").ok).toBe(false);
   });
 
+  it("keeps the shared module browser-safe and the writer in the server module", () => {
+    const shared = fs.readFileSync(path.join(process.cwd(), "src/lib/vnc-resolution.ts"), "utf8");
+    expect(shared).not.toMatch(/from\s+["'](node:)?(fs|os|path|child_process|crypto)["']/);
+    const component = fs.readFileSync(path.join(process.cwd(), "src/components/VncResolutionSetting.tsx"), "utf8");
+    expect(component).not.toContain("vnc-resolution-server");
+  });
+
   it("writes the env file the start script reads", async () => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "vnc-res-"));
     await writeVncResolutionEnv("1600x900", home);
     expect(fs.readFileSync(vncResolutionEnvPath(home), "utf8")).toBe("CLAWBOX_VNC_RESOLUTION=1600x900\n");
+  });
+
+  it("gives overlapping writes their own temp file and leaves none behind", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "vnc-res-"));
+    const values = ["1280x720", "1600x900", "1920x1080", "1600x900", "1280x720", "1920x1080"] as const;
+    await Promise.all(values.map((v) => writeVncResolutionEnv(v, home)));
+    const dir = path.dirname(vncResolutionEnvPath(home));
+    expect(fs.readdirSync(dir)).toEqual(["vnc-resolution.env"]);
+    expect(fs.readFileSync(vncResolutionEnvPath(home), "utf8")).toMatch(/^CLAWBOX_VNC_RESOLUTION=(1280x720|1600x900|1920x1080)\n$/);
+  });
+
+  it("removes its temp file when the rename fails", async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "vnc-res-"));
+    // A non-empty directory where the file should go: the rename cannot land.
+    const target = vncResolutionEnvPath(home);
+    fs.mkdirSync(target, { recursive: true });
+    fs.writeFileSync(path.join(target, "keep"), "");
+    await expect(writeVncResolutionEnv("1920x1080", home)).rejects.toThrow();
+    expect(fs.readdirSync(path.dirname(target))).toEqual(["vnc-resolution.env"]);
   });
 
   it("keeps the shell allowlist in sync with the TypeScript one", () => {
@@ -87,6 +138,18 @@ describe("start-vnc.sh resolution handling", () => {
     expect(runShell("xvfb_action 1280x720 1280x720")).toBe("keep");
     expect(runShell("xvfb_action '' 1920x1080")).toBe("keep");
     expect(runShell("xvfb_action 1280x720 1920x1080")).toBe("restart");
+  });
+
+  it("fails instead of carrying on at the old size when the old Xvfb will not stop", () => {
+    const stuck = runXvfbReplace(false);
+    expect(stuck.status).toBe(1);
+    expect(stuck.stderr).toContain("did not stop");
+    expect(stuck.stdout).not.toContain("continued");
+
+    const stopped = runXvfbReplace(true);
+    expect(stopped.status).toBe(0);
+    expect(stopped.stderr).toBe("");
+    expect(stopped.stdout).toContain("continued");
   });
 
   it("starts Xvfb with the chosen resolution at depth 24 and records it", () => {

@@ -11,11 +11,15 @@ import {
   VNC_RESOLUTION_PREF,
   isVncResolution,
   normalizeVncResolution,
-  writeVncResolutionEnv,
 } from "@/lib/vnc-resolution";
+import { writeVncResolutionEnv } from "@/lib/vnc-resolution-server";
 
 const exec = promisify(execFile);
 const PREF_KEY = `pref:${VNC_RESOLUTION_PREF}`;
+// The resolution clawbox-vnc was last successfully restarted at from here.
+// Absent until the first change; the service then runs the saved preference,
+// which start-vnc.sh read when it started.
+const APPLIED_KEY = "vnc_resolution_applied";
 
 // GET /setup-api/vnc/resolution -> { resolution, options, default }
 export async function GET(req: Request) {
@@ -30,9 +34,11 @@ export async function GET(req: Request) {
 
 // POST /setup-api/vnc/resolution { resolution: "1600x900" }
 //
-// Saves the preference, writes the env file start-vnc.sh reads, then restarts
-// clawbox-vnc so the virtual desktop comes back at the new size. Unchanged
-// values are saved but do not restart anything.
+// Writes the env file start-vnc.sh reads, saves the preference, then restarts
+// clawbox-vnc so the virtual desktop comes back at the new size. A failed save
+// leaves both stores as they were. A value the desktop already runs at is
+// saved without a restart; one whose last restart failed is restarted again,
+// and a failed restart answers 500 (the value itself stays saved).
 export async function POST(req: Request) {
   const denied = await requireSession(req);
   if (denied) return denied;
@@ -52,15 +58,29 @@ export async function POST(req: Request) {
   }
 
   const previous = normalizeVncResolution(await config.get(PREF_KEY));
-  await config.set(PREF_KEY, value);
+  const storedApplied = await config.get(APPLIED_KEY);
+  const applied = isVncResolution(storedApplied) ? storedApplied : previous;
+
+  // The env file first: if it cannot be written, the preference is untouched.
   try {
     await writeVncResolutionEnv(value);
   } catch (err) {
     console.warn("[vnc] could not write the resolution file:", err instanceof Error ? err.message : err);
     return NextResponse.json({ error: "Could not save the resolution for the desktop service" }, { status: 500 });
   }
+  try {
+    // One write: the marker is pinned to the size the desktop runs at now, so
+    // a failed restart below is still known as unapplied on the next try.
+    await config.setMany({ [PREF_KEY]: value, [APPLIED_KEY]: applied });
+  } catch (err) {
+    console.warn("[vnc] could not save the resolution preference:", err instanceof Error ? err.message : err);
+    await writeVncResolutionEnv(previous).catch((restoreErr) => {
+      console.warn("[vnc] could not restore the resolution file:", restoreErr instanceof Error ? restoreErr.message : restoreErr);
+    });
+    return NextResponse.json({ error: "Could not save the resolution" }, { status: 500 });
+  }
 
-  if (previous === value) {
+  if (applied === value) {
     return NextResponse.json({ resolution: value, restarted: false });
   }
 
@@ -74,7 +94,16 @@ export async function POST(req: Request) {
     await restartVncUnit();
   } catch (err) {
     console.warn("[vnc] could not restart clawbox-vnc.service:", err instanceof Error ? err.message : err);
-    return NextResponse.json({ resolution: value, restarted: false, restartFailed: true });
+    return NextResponse.json(
+      { error: "Saved, but the remote desktop could not be restarted", resolution: value, restarted: false, restartFailed: true },
+      { status: 500 },
+    );
+  }
+  try {
+    await config.set(APPLIED_KEY, value);
+  } catch (err) {
+    // The restart happened; a lost marker only costs one extra restart on retry.
+    console.warn("[vnc] could not record the applied resolution:", err instanceof Error ? err.message : err);
   }
   return NextResponse.json({ resolution: value, restarted: true });
 }

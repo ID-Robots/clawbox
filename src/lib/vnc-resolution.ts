@@ -12,10 +12,9 @@
 // ~/.config/clawbox/ — outside the install tree (the updater never touches it)
 // and outside ~/.cache (which may be cleared), so it survives reboot and update.
 // The script re-validates that value against the same list.
-
-import { promises as fs } from "fs";
-import os from "os";
-import path from "path";
+//
+// This module is shared with the Settings UI, so it must stay browser-safe: no
+// Node built-ins. The env-file writer lives in ./vnc-resolution-server.
 
 export const VNC_RESOLUTIONS = ["1280x720", "1600x900", "1920x1080"] as const;
 export type VncResolution = (typeof VNC_RESOLUTIONS)[number];
@@ -31,17 +30,4 @@ export function isVncResolution(value: unknown): value is VncResolution {
 /** Anything not on the allowlist falls back to the default. */
 export function normalizeVncResolution(value: unknown): VncResolution {
   return isVncResolution(value) ? value : DEFAULT_VNC_RESOLUTION;
-}
-
-export function vncResolutionEnvPath(home: string = os.homedir()): string {
-  return path.join(home, ".config", "clawbox", "vnc-resolution.env");
-}
-
-/** Write the file scripts/start-vnc.sh reads. Atomic (temp + rename). */
-export async function writeVncResolutionEnv(value: VncResolution, home?: string): Promise<void> {
-  const file = vncResolutionEnvPath(home);
-  await fs.mkdir(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.tmp`;
-  await fs.writeFile(tmp, `CLAWBOX_VNC_RESOLUTION=${normalizeVncResolution(value)}\n`, "utf8");
-  await fs.rename(tmp, file);
 }

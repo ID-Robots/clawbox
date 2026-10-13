@@ -1,8 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { DEFAULT_VNC_RESOLUTION, VNC_RESOLUTIONS, isVncResolution, type VncResolution } from "@/lib/vnc-resolution";
+
+const ENDPOINT = "/setup-api/vnc/resolution";
 
 const LABELS: Record<VncResolution, string> = {
   "1280x720": "1280 × 720 (720p)",
@@ -10,43 +12,66 @@ const LABELS: Record<VncResolution, string> = {
   "1920x1080": "1920 × 1080 (1080p)",
 };
 
+/** The persisted resolution, or null if it could not be read. */
+async function fetchSavedResolution(): Promise<VncResolution | null> {
+  try {
+    const res = await fetch(ENDPOINT, { cache: "no-store" });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return isVncResolution(data?.resolution) ? data.resolution : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Settings -> Appearance -> Display: virtual remote-desktop resolution (TASK-1479). */
 export default function VncResolutionSetting() {
   const { t } = useT();
   const [value, setValue] = useState<VncResolution>(DEFAULT_VNC_RESOLUTION);
   const [status, setStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  // Each read or submit takes a ticket; only the latest one may set state, so
+  // the mount-time read cannot overwrite a selection submitted after it began.
+  const opRef = useRef(0);
 
   useEffect(() => {
-    let cancelled = false;
-    fetch("/setup-api/vnc/resolution", { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (!cancelled && data && isVncResolution(data.resolution)) setValue(data.resolution);
-      })
-      .catch(() => {});
-    return () => { cancelled = true; };
+    const op = ++opRef.current;
+    let unmounted = false;
+    void fetchSavedResolution().then((saved) => {
+      if (saved && !unmounted && op === opRef.current) setValue(saved);
+    });
+    return () => { unmounted = true; };
   }, []);
 
   const onChange = async (next: string) => {
     if (!isVncResolution(next) || next === value) return;
     // Restarting the virtual display closes every window on it.
     if (!window.confirm(t("settings.vncResolutionConfirm"))) return;
+    const op = ++opRef.current;
     const prev = value;
     setValue(next);
     setStatus("saving");
+    let ok = false;
     try {
-      const res = await fetch("/setup-api/vnc/resolution", {
+      const res = await fetch(ENDPOINT, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ resolution: next }),
       });
-      const data = res.ok ? await res.json() : null;
-      if (!data || data.restartFailed) throw new Error("save failed");
-      setStatus("saved");
+      ok = res.ok;
     } catch {
-      setValue(prev);
-      setStatus("error");
+      ok = false;
     }
+    if (op !== opRef.current) return;
+    if (ok) {
+      setStatus("saved");
+      return;
+    }
+    // A failed restart still keeps the new value saved, so show what is stored
+    // rather than assume the save was undone.
+    const saved = await fetchSavedResolution();
+    if (op !== opRef.current) return;
+    setValue(saved ?? prev);
+    setStatus("error");
   };
 
   return (

@@ -122,6 +122,11 @@ if display_ready ":${VDISPLAY}" \
     display_ready ":${VDISPLAY}" || break
     sleep 0.1
   done
+  # Still up: do not carry on at the old size or record the new geometry.
+  if display_ready ":${VDISPLAY}"; then
+    echo "[vnc] Error: Xvfb :${VDISPLAY} did not stop within 3s; not starting at ${VNC_RESOLUTION}" >&2
+    exit 1
+  fi
 fi
 
 if ! display_ready ":${VDISPLAY}"; then
