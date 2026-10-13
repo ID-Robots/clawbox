@@ -65,6 +65,7 @@ const APP_DESCRIPTIONS: Record<string, Omit<DesktopApp, "id">> = {
   store: { name: "Store", description: "App store" },
   browser: { name: "Browser Setup", description: "Browser integration panel, not the browsing window" },
   web: { name: "Web", description: "The web: a search start page in a browser tab, with the kiosk's address bar", external: true, kioskOnly: true },
+  chrome: { name: "Google Chrome", description: "The owner's own Google Chrome as a native window on the ClawBox Desktop session's screen (only there; elsewhere the desktop has no such icon)" },
   vnc: { name: "Remote Desktop", description: "VNC viewer" },
   screenshot: { name: "Screenshot", description: "Capture the ClawBox desktop or a region of it, annotate the picture, save it into the Screenshots folder" },
 };
