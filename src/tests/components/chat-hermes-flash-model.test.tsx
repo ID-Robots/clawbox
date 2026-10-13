@@ -102,7 +102,11 @@ describe("Hermes ClawBox AI chat model", () => {
       model: "deepseek-v4-flash",
       message: "Use the current Flash model",
     });
-    expect(openclawModelReads).toBeGreaterThan(0);
+    // Neither read nor written: the chat's model is Hermes's own, and the
+    // OpenClaw store answers 409 on this edition, so it is not asked at all.
+    // (It used to be read and ignored, which is what left a 409 in the
+    // console on every chat open.)
+    expect(openclawModelReads).toBe(0);
     expect(openclawModelPosts).toEqual([]);
     expect(box.socketsOpened).toBe(0);
   });
