@@ -18,7 +18,7 @@ import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-ut
 import { cleanup, renderHook } from "@testing-library/react";
 import { translations } from "@/lib/translations";
 import CodingAgentActivityPill from "@/components/CodingAgentActivityPill";
-import { artifactUrl, isCodingAgentTool, useCodingAgentActivity } from "@/lib/use-coding-agent-activity";
+import { artifactUrl, IDLE_POLL_MS, isCodingAgentTool, useCodingAgentActivity } from "@/lib/use-coding-agent-activity";
 import { notifyCodingRunStarted } from "@/lib/ui-events";
 
 const NOW = Date.now();
@@ -263,7 +263,7 @@ describe("useCodingAgentActivity", () => {
     expect(moved[1]).toBe(first[1]);
   });
 
-  it("keeps badges as the conversation continues, and stops polling once nothing runs", async () => {
+  it("keeps badges as the conversation continues, and drops to the slow idle check once nothing runs", async () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn(async () => runsResponse([{ ...RUNNING, status: "completed", completedAt: NOW + 9_000 }]));
     vi.stubGlobal("fetch", fetchMock);
@@ -274,12 +274,14 @@ describe("useCodingAgentActivity", () => {
     await act(async () => { await Promise.resolve(); });
     const calls = fetchMock.mock.calls.length;
 
-    // Messages keep arriving and the chat re-renders: the badge stays, and no
-    // timer is quietly ticking behind it.
+    // Messages keep arriving and the chat re-renders: the badge stays, and
+    // only the slow idle check asks — not the five-second poll.
     rerender({ open: true });
-    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(IDLE_POLL_MS - 100); });
     expect(result.current.runs).toHaveLength(1);
     expect(fetchMock.mock.calls.length).toBe(calls);
+    await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+    expect(fetchMock.mock.calls.length).toBe(calls + 1);
   });
 
   it("asks once more after a run it watched settles — the review pass starts after the record is written", async () => {
@@ -301,8 +303,60 @@ describe("useCodingAgentActivity", () => {
     expect(fetchMock).toHaveBeenCalledTimes(2); // saw it settle
     await act(async () => { await vi.advanceTimersByTimeAsync(5_100); });
     expect(fetchMock).toHaveBeenCalledTimes(3); // the one round owed
-    await act(async () => { await vi.advanceTimersByTimeAsync(60_000); });
-    expect(fetchMock).toHaveBeenCalledTimes(3); // and nothing after it
+    await act(async () => { await vi.advanceTimersByTimeAsync(IDLE_POLL_MS - 1_000); });
+    expect(fetchMock).toHaveBeenCalledTimes(3); // then only the slow idle check
+  });
+
+  it("finds a run started where the chat cannot see it — API, MCP, another session — with the idle check, no refresh", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(async () => runsResponse([]));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useCodingAgentActivity(true));
+    await act(async () => { await Promise.resolve(); });
+    expect(result.current.runs).toHaveLength(0);
+
+    // No event, no nudge: the run simply appears on the device.
+    fetchMock.mockImplementation(async () => runsResponse([{ ...RUNNING, startedAt: Date.now() }]));
+    await act(async () => { await vi.advanceTimersByTimeAsync(IDLE_POLL_MS + 100); });
+    expect(result.current.runs).toHaveLength(1);
+    expect(result.current.runs[0].status).toBe("running");
+  });
+
+  it("keeps checking after a failed request — one blip used to stop polling until a reload", async () => {
+    vi.useFakeTimers();
+    let fail = true;
+    const fetchMock = vi.fn(async () => {
+      if (fail) throw new Error("offline");
+      return runsResponse([RUNNING]);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useCodingAgentActivity(true));
+    await act(async () => { await Promise.resolve(); });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    fail = false;
+    await act(async () => { await vi.advanceTimersByTimeAsync(IDLE_POLL_MS + 100); });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.current.runs).toHaveLength(1);
+  });
+
+  it("does not idle-check a hidden tab — coming back into view re-asks instead", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(async () => runsResponse([]));
+    vi.stubGlobal("fetch", fetchMock);
+    const visibility = Object.getOwnPropertyDescriptor(document, "visibilityState");
+    Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true });
+    try {
+      renderHook(() => useCodingAgentActivity(true));
+      await act(async () => { await Promise.resolve(); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(IDLE_POLL_MS * 3); });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      if (visibility) Object.defineProperty(document, "visibilityState", visibility);
+      else delete (document as { visibilityState?: unknown }).visibilityState;
+    }
   });
 
   it("asks again when the desktop says a run started — begun from the Coding Agent app while the chat sat open", async () => {
