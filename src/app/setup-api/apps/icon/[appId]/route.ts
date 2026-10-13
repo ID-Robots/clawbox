@@ -38,6 +38,19 @@ function knownMissing(appId: string): boolean {
 // that switching a category and back does not re-request every missing one.
 const MISSING_HEADERS = { "Cache-Control": "public, max-age=600" };
 
+/**
+ * "This listing has no picture" — the ordinary answer for most of the
+ * catalogue, which names a letter, not an image, for each app (the store's
+ * `icon` field), so the Store cannot know before asking. It used to be a 404,
+ * and the browser logs every failed image as an error: one console line and
+ * one red request per card, ~33 per search. A 204 is not an error to the
+ * browser, and an <img> with no bytes still fires `error`, which is what puts
+ * the letter tile in its place — the same picture as before, without the noise.
+ */
+function noIcon(): NextResponse {
+  return new NextResponse(null, { status: 204, headers: MISSING_HEADERS });
+}
+
 async function isInstalled(appId: string): Promise<boolean> {
   try {
     const list = (await configGetAll())["pref:installed_apps"];
@@ -104,9 +117,7 @@ export async function GET(
     // Not cached locally
   }
 
-  if (knownMissing(appId)) {
-    return NextResponse.json({ error: "Icon not found" }, { status: 404, headers: MISSING_HEADERS });
-  }
+  if (knownMissing(appId)) return noIcon();
 
   // Proxy from the remote store. The desktop cannot load clawbox.com itself
   // (CSP img-src, and the store proxy rule), so every card's icon comes
@@ -139,7 +150,7 @@ export async function GET(
     }
     if (res.status === 404) {
       rememberMissing(appId);
-      return NextResponse.json({ error: "Icon not found" }, { status: 404, headers: MISSING_HEADERS });
+      return noIcon();
     }
   } catch {
     // Remote failed

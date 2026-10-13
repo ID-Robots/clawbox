@@ -141,12 +141,14 @@ describe("/setup-api/apps/icon/[appId]", () => {
   it("remembers an icon the store does not have and stops asking for it", async () => {
     noLocalIcon();
     mockFetch.mockResolvedValue({ ok: false, status: 404 });
+    // No picture is an answer, not an error: a 204, which the browser does
+    // not log, and which still makes the <img> fall back to its letter tile.
     const first = await icon();
-    expect(first.status).toBe(404);
+    expect(first.status).toBe(204);
     expect(first.headers.get("Cache-Control")).toBe("public, max-age=600");
 
     const second = await icon();
-    expect(second.status).toBe(404);
+    expect(second.status).toBe(204);
     expect(second.headers.get("Cache-Control")).toBe("public, max-age=600");
     expect(mockFetch).toHaveBeenCalledTimes(1);
 
