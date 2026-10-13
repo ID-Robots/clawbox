@@ -39,6 +39,31 @@ function decodeText(bytes: Buffer): string | null {
 }
 
 /**
+ * The whole file when it is no larger than `limit`, else null. ONE open and a
+ * bounded read from that handle — never a size check followed by a read of
+ * the path, which a file swapped in between would walk straight past.
+ */
+async function readAtMost(file: string, limit: number): Promise<Buffer | null> {
+  let handle: fsp.FileHandle | undefined;
+  try {
+    handle = await fsp.open(file, "r");
+    const buffer = Buffer.alloc(limit + 1);
+    let read = 0;
+    while (read < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, read, buffer.length - read, read);
+      if (bytesRead === 0) break;
+      read += bytesRead;
+    }
+    return read > limit ? null : buffer.subarray(0, read);
+  } catch {
+    // Aged out of staging, or unreadable: named, like any other.
+    return null;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+/**
  * The lines that go ahead of the owner's message for `documentPaths`, which
  * the caller has ALREADY resolved against the staging root. Never throws: a
  * file that cannot be read is still named.
@@ -51,14 +76,11 @@ export async function hermesDocumentPrompt(documentPaths: readonly string[]): Pr
     const name = path.basename(file);
     let quoted: string | null = null;
     if (TEXT_EXTENSIONS.has(path.extname(file).toLowerCase())) {
-      try {
-        const { size } = await fsp.stat(file);
-        if (size > 0 && size <= INLINE_DOCUMENT_MAX_BYTES && size <= budget) {
-          quoted = decodeText(await fsp.readFile(file));
-          if (quoted !== null) budget -= size;
-        }
-      } catch {
-        // Aged out of staging, or unreadable: named below, like any other.
+      const limit = Math.min(INLINE_DOCUMENT_MAX_BYTES, budget);
+      const bytes = limit > 0 ? await readAtMost(file, limit) : null;
+      if (bytes && bytes.length > 0) {
+        quoted = decodeText(bytes);
+        if (quoted !== null) budget -= bytes.length;
       }
     }
     blocks.push(
