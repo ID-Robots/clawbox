@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
 import {
   browserErrorText,
@@ -61,7 +61,9 @@ export default function BrowserSetupWizard({
     setBusy(key);
     setError(null);
     const result = await runBrowserAction(action);
-    setBusy(null);
+    // Only this action's own busy mark: the effect below may have cleared it
+    // already and the owner may be in the middle of the next step.
+    setBusy((current) => (current === key ? null : current));
     if (!result.ok) {
       setError(browserErrorText(t, result));
       return false;
@@ -69,6 +71,15 @@ export default function BrowserSetupWizard({
     onChanged();
     return true;
   };
+
+  // Turning the link on restarts the gateway, and the request that asked for
+  // it stays open for most of a minute after the device already reports the
+  // link as on. The step shows its green tick by then, so its Next must not
+  // sit disabled behind a request whose answer is already known — the same
+  // rule the window applies to its own buttons (BrowserApp's actionLoading).
+  useEffect(() => {
+    if (busy === "enable" && enabled) setBusy(null);
+  }, [busy, enabled]);
 
   /**
    * Mark setup finished. Both ways out of the last step end here — opening the
