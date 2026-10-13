@@ -27,6 +27,7 @@ import { DatabaseSync } from "node:sqlite";
 import { saveEnv } from "@/tests/helpers/env";
 import { tokenFingerprint, type GatewayAuthPaths } from "@/lib/anthropic-gateway-auth";
 import {
+  gatewayAuthStoreHoldsApiKey,
   isOAuthRefreshFence,
   oauthRefreshFenceState,
   putGatewayOAuthProfile,
@@ -853,6 +854,57 @@ describe("a store that cannot be used", () => {
       vi.resetModules();
     }
     expect([STORES.shared.store(), STORES.shared.state()]).toEqual(before);
+  });
+});
+
+/**
+ * Whether a key paste would change the store (TASK-1535): the configure route
+ * leaves out a `models auth paste-api-key` that would write exactly what is
+ * there. Only a positive answer skips a paste, so everything uncertain must
+ * answer false.
+ */
+describe("gatewayAuthStoreHoldsApiKey", () => {
+  const KEY_ID = "deepseek:default";
+  const KEY = "claw_FAKE-the-portal-token";
+  const apiKey = (patch: Record<string, unknown> = {}) => ({ type: "api_key", provider: "deepseek", key: KEY, ...patch });
+  const holds = (key = KEY) => gatewayAuthStoreHoldsApiKey(KEY_ID, "deepseek", key, paths);
+
+  for (const kind of ["shared", "agent"] as const) {
+    it(`answers true for exactly this key in the ${kind} store, and false for another`, () => {
+      STORES[kind].build({ version: 1, profiles: { [KEY_ID]: apiKey(), ...OTHERS } });
+      expect(holds()).toBe(true);
+      expect(holds("claw_FAKE-a-different-token")).toBe(false);
+    });
+  }
+
+  it("answers false for anything that is not this provider's plain key", () => {
+    for (const entry of [
+      apiKey({ provider: "openai" }),
+      apiKey({ type: "token", token: KEY }),
+      { ...apiKey(), keyRef: { source: "env", provider: "default", id: "KEY" } },
+      oauth(KEY, OLD_REFRESH, EXPIRES),
+      fence(),
+    ]) {
+      fs.rmSync(path.join(home, "agents"), { recursive: true, force: true });
+      STORES.agent.build({ version: 1, profiles: { [KEY_ID]: entry } });
+      expect(holds()).toBe(false);
+    }
+  });
+
+  it("answers false with no store, an empty one, or one that cannot be read", () => {
+    expect(holds()).toBe(false);
+    STORES.agent.build({ version: 1, profiles: {} });
+    expect(holds()).toBe(false);
+    fs.writeFileSync(agentDbPath, GARBAGE);
+    expect(holds()).toBe(false);
+  });
+
+  it("asks the main agent's own copy too under shared ownership: both have to hold it", () => {
+    STORES.shared.build({ version: 1, profiles: { [KEY_ID]: apiKey() } });
+    agentDb({ version: 1, profiles: { [KEY_ID]: apiKey({ key: "claw_FAKE-a-stale-copy" }) } });
+    expect(holds()).toBe(false);
+    exec(agentDbPath, `UPDATE auth_profile_store SET store_json = '${JSON.stringify({ version: 1, profiles: { [KEY_ID]: apiKey() } })}'`);
+    expect(holds()).toBe(true);
   });
 });
 

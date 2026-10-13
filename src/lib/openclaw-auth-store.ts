@@ -350,6 +350,49 @@ export function readGatewayAuthProfile(profileId: string, paths?: GatewayAuthPat
 }
 
 /**
+ * Does the store the gateway resolves hold EXACTLY this API key at
+ * `profileId`, for `provider` — in every copy a turn could be answered from?
+ * (TASK-1535)
+ *
+ * What `openclaw models auth paste-api-key --profile-id <id>` puts there is
+ * `{type: "api_key", provider, key}` (core's `saveModelProviderApiKey`, which
+ * keeps the profile's other metadata and leaves its usage stats alone). A store
+ * that already holds that — the shared row, and the main agent's own copy where
+ * there is one (see the header) — gains nothing from the paste but its 5-14 s
+ * CLI start, and a settings save that re-sends the credential the box already
+ * has used to pay that twice. Everything else answers false and the paste runs
+ * as it always did: a `keyRef` (a key behind a SecretRef), any other type, a
+ * fence, another provider, a different key, no store, a store that cannot be
+ * read. Never throws; the key is compared here and nothing about it leaves.
+ */
+export function gatewayAuthStoreHoldsApiKey(
+  profileId: string,
+  provider: string,
+  key: string,
+  paths?: GatewayAuthPaths,
+): boolean {
+  const wanted = provider.trim().toLowerCase();
+  const holdsKey = (entry: Json | null): boolean => !!entry
+    && entry.type === "api_key"
+    && typeof entry.provider === "string" && entry.provider.trim().toLowerCase() === wanted
+    && typeof entry.key === "string" && entry.key !== "" && entry.key === key
+    && entry.keyRef === undefined;
+  try {
+    const where = paths ?? gatewayAuthPaths();
+    const found = findStore(where);
+    if (!found) return false;
+    const blob = parseBlob(found.json) as Json | null;
+    const profiles = blob && profilesOf(blob);
+    if (!profiles || !holdsKey(profileAt(profiles, profileId))) return false;
+    if (found.store !== "shared") return true;
+    const local = findAgentLocalCopy(where, profileId);
+    return local === null || holdsKey(local.entry);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * A sign-in worth storing: an access token, a refresh STRING (empty is what a
  * sign-in that returned none is written as) and a real expiry. A marker is
  * refused with the rest — writing one would rebuild the incident by hand.

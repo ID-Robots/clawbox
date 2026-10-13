@@ -53,7 +53,8 @@ vi.mock("@/lib/config-store", () => ({
 // classification real, gateway I/O mocked — see the helper.
 vi.mock("@/lib/gateway-hot-apply", async (importOriginal) =>
   (await import("@/tests/helpers/gateway-hot-apply")).gatewayHotApplyMock(importOriginal));
-vi.mock("@/lib/openclaw-config", () => ({
+vi.mock("@/lib/openclaw-config", async () => ({
+  ...(await import("./config-write-passthrough")).configWritePassthrough,
   // A REAL class, not `vi.fn()` and not an omitted export: the configure route
   // narrows on `instanceof GatewayNotReadyError` to tell "the gateway has not
   // finished coming back" from "the restart was refused", and `instanceof

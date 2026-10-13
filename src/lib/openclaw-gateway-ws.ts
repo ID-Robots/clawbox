@@ -249,26 +249,32 @@ async function callAfterHello(
 }
 
 /**
- * Write config through the gateway: `config.get` for the current file hash,
- * then `config.patch` with the merge. The gateway validates, writes the file
- * and hot-applies what it can — the same write `openclaw config set` makes,
- * minus the process. Answers what changed; `noop` when nothing did.
+ * Write config through the gateway: one `config.patch` with the merge, against
+ * the revision the caller read (`baseHash`, from `config.get`). The gateway
+ * refuses it as a conflict when the file changed since, validates the merged
+ * config, writes the file and — for a change it hot-applies — answers once the
+ * running gateway has applied it: the same write `openclaw config set` makes,
+ * minus the process. `replacePaths` names the arrays the patch replaces on
+ * purpose (`docs/gateway/configuration/config-rpc.md` in the pinned core).
+ * Answers what changed; `noop` when nothing did.
+ *
+ * The caller reads the revision, rather than this function, because the caller
+ * builds the patch from what it read: `openclaw-config.ts` diffs the file
+ * against the config it wants, and a hash taken after that read could vouch
+ * for a file the patch was not computed from.
  */
 export async function gatewayWsPatchConfig(
   patch: Record<string, unknown>,
-  options: GatewayWsCallOptions & { replacePaths?: string[] } = {},
+  options: GatewayWsCallOptions & { baseHash: string; replacePaths?: string[] },
 ): Promise<{ noop: boolean; changedPaths: string[] }> {
-  const current = await gatewayWsCall("config.get", {}, options);
-  const baseHash = current.hash;
-  if (typeof baseHash !== "string" || !baseHash) throw new GatewayRpcError("config.get returned no hash", "NO_HASH");
   const result = await gatewayWsCall(
     "config.patch",
     {
-      baseHash,
+      baseHash: options.baseHash,
       raw: JSON.stringify(patch),
       ...(options.replacePaths?.length ? { replacePaths: options.replacePaths } : {}),
     },
-    options,
+    { timeoutMs: options.timeoutMs },
   );
   const changed = Array.isArray(result.changedPaths) ? result.changedPaths.filter((p): p is string => typeof p === "string") : [];
   return { noop: result.noop === true, changedPaths: changed };
