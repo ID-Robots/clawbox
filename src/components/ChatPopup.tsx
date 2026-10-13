@@ -2656,6 +2656,16 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // owed a retry (see refreshChatModelState).
   const canPatchSessionDefaultsRef = useRef(false)
   useEffect(() => { canPatchSessionDefaultsRef.current = caps.canPatchSessionDefaults }, [caps])
+  // Whether this box's chat provider and model live in the store
+  // `/setup-api/chat/model` serves. On Hermes they are the harness's own
+  // (`modelStore: 'harness'`) and that route answers 409 `wrong_store` by
+  // design, so asking it on every open, focus and minute only put a red 409
+  // in the console (2026-10-13 smoke test). Nothing is asked until the
+  // harness is known: the default adapter is OpenClaw's, and a guess would ask
+  // the wrong store on the first open of a Hermes box.
+  const chatModelStoreHere = harnessLoaded && caps.modelStore === 'openclaw-config'
+  const chatModelStoreHereRef = useRef(false)
+  useEffect(() => { chatModelStoreHereRef.current = chatModelStoreHere }, [chatModelStoreHere])
   // The agent's "Task progress" card for the conversation on screen — the
   // gateway's `progressCard.get`, re-read on (re)connect, on a tab switch and
   // on every `progressCard.changed` for this session (TASK-896). Only the
@@ -2797,6 +2807,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const refreshChatModelState = useCallback(async () => {
+    if (!chatModelStoreHereRef.current) return
     try {
       const res = await fetch('/setup-api/chat/model', { cache: 'no-store' })
       if (!res.ok) return
@@ -3705,9 +3716,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   useEffect(() => { connectRef.current = connect }, [connect])
 
   useEffect(() => {
-    if (!isOpen) return
+    if (!isOpen || !chatModelStoreHere) return
     refreshChatModelState()
-  }, [isOpen, refreshChatModelState])
+  }, [isOpen, chatModelStoreHere, refreshChatModelState])
 
   // Re-read the provider/model list the moment anything reports a provider
   // change, so a provider connected in Settings while this popup is open is
