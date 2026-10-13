@@ -61,7 +61,7 @@ describe("parseChromeArgs / buildChromeArgv", () => {
   });
 
   it("puts the page last, in a new Wayland window", () => {
-    const argv = buildChromeArgv("https://example.com/", { CLAWBOX_DESKTOP_CHROME_ARGS: "--x" } as NodeJS.ProcessEnv);
+    const argv = buildChromeArgv("https://example.com/", { NODE_ENV: "test", CLAWBOX_DESKTOP_CHROME_ARGS: "--x" } as NodeJS.ProcessEnv);
     expect(argv).toEqual(["--x", "--ozone-platform=wayland", "--new-window", "https://example.com/"]);
   });
 });
@@ -83,9 +83,9 @@ describe("chromeEnv", () => {
 describe("findChrome", () => {
   it("takes CLAWBOX_DESKTOP_CHROME when it is an executable, and nothing when it is not", () => {
     const bin = fakeChrome();
-    expect(findChrome({ CLAWBOX_DESKTOP_CHROME: bin } as NodeJS.ProcessEnv)).toBe(bin);
-    expect(findChrome({ CLAWBOX_DESKTOP_CHROME: path.join(tmp, "nope") } as NodeJS.ProcessEnv)).toBeNull();
-    expect(findChrome({ CLAWBOX_DESKTOP_CHROME: "chrome" } as NodeJS.ProcessEnv)).toBeNull();
+    expect(findChrome({ NODE_ENV: "test", CLAWBOX_DESKTOP_CHROME: bin } as NodeJS.ProcessEnv)).toBe(bin);
+    expect(findChrome({ NODE_ENV: "test", CLAWBOX_DESKTOP_CHROME: path.join(tmp, "nope") } as NodeJS.ProcessEnv)).toBeNull();
+    expect(findChrome({ NODE_ENV: "test", CLAWBOX_DESKTOP_CHROME: "chrome" } as NodeJS.ProcessEnv)).toBeNull();
   });
 });
 

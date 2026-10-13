@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@/tests/helpers/test-utils";
+import { fireEvent, render, screen, within } from "@/tests/helpers/test-utils";
 import SettingsApp, { type UISettings } from "@/components/SettingsApp";
 
 // The whole settings app mounts here — every panel and every status fetch.
@@ -56,6 +56,11 @@ describe("Settings → Appearance language picker", () => {
 
   afterEach(() => vi.unstubAllGlobals());
 
+  // Appearance also holds a native <select> whose <option>s share the role,
+  // so option queries are scoped to the language listbox.
+  const languageOptions = () => within(screen.getByRole("listbox")).getAllByRole("option");
+  const selectedLanguage = () => within(screen.getByRole("listbox")).getByRole("option", { selected: true });
+
   function openPicker() {
     render(<SettingsApp ui={defaultUi} />);
     fireEvent.click(screen.getByRole("button", { name: /settings\.appearance/ }));
@@ -69,11 +74,11 @@ describe("Settings → Appearance language picker", () => {
     expect(trigger).toHaveAttribute("aria-expanded", "true");
 
     const listbox = screen.getByRole("listbox");
-    const options = screen.getAllByRole("option");
+    const options = languageOptions();
     expect(listbox).toContainElement(options[0]);
     expect(options.length).toBeGreaterThan(1);
     expect(options.filter((option) => option.getAttribute("aria-selected") === "true")).toHaveLength(1);
-    expect(screen.getByRole("option", { selected: true })).toHaveTextContent("English");
+    expect(selectedLanguage()).toHaveTextContent("English");
   });
 
   it("closes on Escape and hands focus back to the trigger", () => {
@@ -92,7 +97,7 @@ describe("Settings → Appearance language picker", () => {
   // languages was Tab, and nothing ever moved focus off the trigger.
   it("walks the rows with the arrow keys, one tab stop for the whole list", () => {
     openPicker();
-    const options = screen.getAllByRole("option");
+    const options = languageOptions();
     // Opens standing on the language in use, which is the row the arrows
     // start from.
     expect(options[0]).toHaveFocus();
@@ -100,27 +105,27 @@ describe("Settings → Appearance language picker", () => {
     expect(options[1]).toHaveAttribute("tabindex", "-1");
 
     fireEvent.keyDown(screen.getByRole("listbox"), { key: "ArrowDown" });
-    expect(screen.getAllByRole("option")[1]).toHaveFocus();
+    expect(languageOptions()[1]).toHaveFocus();
 
     fireEvent.keyDown(screen.getByRole("listbox"), { key: "End" });
-    const last = screen.getAllByRole("option").length - 1;
-    expect(screen.getAllByRole("option")[last]).toHaveFocus();
+    const last = languageOptions().length - 1;
+    expect(languageOptions()[last]).toHaveFocus();
 
     // Past the end it wraps rather than sticking, the way HeaderDropdown does.
     fireEvent.keyDown(screen.getByRole("listbox"), { key: "ArrowDown" });
-    expect(screen.getAllByRole("option")[0]).toHaveFocus();
+    expect(languageOptions()[0]).toHaveFocus();
 
     fireEvent.keyDown(screen.getByRole("listbox"), { key: "ArrowUp" });
-    expect(screen.getAllByRole("option")[last]).toHaveFocus();
+    expect(languageOptions()[last]).toHaveFocus();
 
     fireEvent.keyDown(screen.getByRole("listbox"), { key: "Home" });
-    expect(screen.getAllByRole("option")[0]).toHaveFocus();
+    expect(languageOptions()[0]).toHaveFocus();
   });
 
   it("picks the row the arrows are on with Enter, and closes back onto the trigger", () => {
     const trigger = openPicker();
     fireEvent.keyDown(screen.getByRole("listbox"), { key: "ArrowDown" });
-    const second = screen.getAllByRole("option")[1];
+    const second = languageOptions()[1];
     const chosen = second.textContent;
     fireEvent.keyDown(screen.getByRole("listbox"), { key: "Enter" });
 
@@ -138,7 +143,7 @@ describe("Settings → Appearance language picker", () => {
     const trigger = screen.getByRole("button", { name: /English/ });
     fireEvent.keyDown(trigger, { key: "ArrowDown" });
     expect(screen.getByRole("listbox")).toBeInTheDocument();
-    expect(screen.getByRole("option", { selected: true })).toHaveFocus();
+    expect(selectedLanguage()).toHaveFocus();
   });
 
   it("still closes on a click outside", () => {
