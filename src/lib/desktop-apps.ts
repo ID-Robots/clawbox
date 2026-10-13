@@ -15,7 +15,7 @@ export interface AppDef {
   id: string;
   name: string;
   color: string;
-  type: "settings" | "placeholder" | "external" | "store" | "hermes_skills" | "installed" | "terminal" | "coding" | "files" | "browser" | "vnc" | "webapp" | "setup" | "clawkeep" | "memory_shard" | "system_update" | "chat" | "screenshot";
+  type: "settings" | "placeholder" | "external" | "store" | "hermes_skills" | "installed" | "terminal" | "coding" | "files" | "browser" | "vnc" | "webapp" | "setup" | "clawkeep" | "memory_shard" | "system_update" | "chat" | "screenshot" | "chrome";
   url?: string;
   // Webapps only: how the desktop opens it (InstalledMeta.launch).
   launch?: "window";
@@ -70,6 +70,11 @@ export const apps: AppDef[] = [
   // its own new tabs on the same start page; the kiosk extension test holds
   // the two URLs together.
   { id: "web", name: "app.web", color: "#0f766e", type: "external", url: "https://duckduckgo.com/", pinned: false, kioskOnly: true },
+  // The owner's own Google Chrome as a native window on the ClawBox Desktop
+  // session's screen (src/lib/desktop-chrome.ts): their profile and logins,
+  // not the kiosk's. Drawn only on that screen while the session is up
+  // (`useDesktopChrome`); every other desktop hides it.
+  { id: "chrome", name: "Google Chrome", color: "#f1f3f4", type: "chrome", pinned: false },
   { id: "vnc", name: "app.remoteDesktop", color: "#7c3aed", type: "vnc", pinned: false, defaultWidth: 1000, defaultHeight: 700 },
   // Capture the desktop and mark it up (TASK-1475). On the desktop, off the
   // shelf: its keys (Print Screen, Ctrl+Shift+S, Alt+Shift+S) and the tray's

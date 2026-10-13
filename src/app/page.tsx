@@ -47,6 +47,7 @@ import ToastHost from "@/components/ToastHost";
 import PowerApprovalPrompt, { POWER_APPROVAL_EVENT } from "@/components/PowerApprovalPrompt";
 import InstalledAppIcon from "@/components/InstalledAppIcon";
 import AgentBrowserIcon from "@/components/AgentBrowserIcon";
+import GoogleChromeIcon from "@/components/GoogleChromeIcon";
 import SetupWizard from "@/components/SetupWizard";
 import { I18nProvider, useT } from "@/lib/i18n";
 import { cleanVersion } from "@/lib/version-utils";
@@ -62,6 +63,7 @@ import { KIOSK_PAGES_APP_ID, kioskPageTabs, openInKiosk, useKioskTabs } from "@/
 import { useKioskBarInset } from "@/lib/kiosk-bar-inset";
 import { mainInsets, mainScreen } from "@/lib/desktop-screens";
 import { useDeskScreens } from "@/lib/use-desk-screens";
+import { DESKTOP_CHROME_APP_ID, openDesktopChrome, useDesktopChrome } from "@/lib/desktop-chrome-client";
 import { useMonitorLayoutSync } from "@/lib/use-monitor-layout";
 import MonitorIdentifyOverlay from "@/components/MonitorIdentifyOverlay";
 import { NON_OWNER_APP_IDS, OWNER_ONLY_NOTICE, installedAppIdsFor } from "@/lib/non-owner-scope";
@@ -322,6 +324,10 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
 
   if (id === "browser") {
     return <AgentBrowserIcon className={`${size} text-white`} />;
+  }
+
+  if (id === DESKTOP_CHROME_APP_ID) {
+    return <GoogleChromeIcon className={size} />;
   }
 
   if (id === "clawbox") {
@@ -712,6 +718,9 @@ function ChromeDesktopInner() {
   // polled only on the kiosk itself: every other box — every Jetson — sends
   // nothing.
   const kiosk = useKioskTabs(ownerApis && onKiosk);
+  // The ClawBox Desktop session's own screen, with a Chrome to start: the
+  // Google Chrome icon (src/lib/desktop-chrome-client.ts). Hidden elsewhere.
+  const desktopChrome = useDesktopChrome(ownerApis);
   // A stable callback on its own, so the shelf's click handler can depend on
   // it rather than on the whole `kiosk` object, a new one every render.
   const activateKioskTab = kiosk.activate;
@@ -851,9 +860,13 @@ function ChromeDesktopInner() {
   const harnessHiddenAppIds = useMemo<string[]>(
     () => isOwner
       // A kiosk-only app (Web) exists on the laptop's kiosk desktop alone.
-      ? [...hiddenAppIdsForHarness(activeHarness), ...(onKiosk ? [] : apps.filter((a) => a.kioskOnly).map((a) => a.id))]
+      ? [
+          ...hiddenAppIdsForHarness(activeHarness),
+          ...(onKiosk ? [] : apps.filter((a) => a.kioskOnly).map((a) => a.id)),
+          ...(desktopChrome ? [] : [DESKTOP_CHROME_APP_ID]),
+        ]
       : apps.map((a) => a.id).filter((id) => !NON_OWNER_APP_IDS.includes(id)),
-    [activeHarness, isOwner, onKiosk],
+    [activeHarness, isOwner, onKiosk, desktopChrome],
   );
 
   // ─── Desktop shortcuts for built-in apps ───
@@ -2267,6 +2280,12 @@ function ChromeDesktopInner() {
           return;
         }
       } catch {}
+    }
+
+    if (app.type === "chrome") {
+      // A native window on the screen, not a desktop window.
+      void openDesktopChrome();
+      return;
     }
 
     if (app.type === "chat") {
