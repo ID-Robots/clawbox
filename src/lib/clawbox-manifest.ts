@@ -18,7 +18,7 @@
  *     "description": "Swipe on profiles…",    // for the list and the icon prompt (≤ 300)
  *     "kind": "server",                       // server | webapp | site | tool
  *     "port": 4230,                           // a server app's local port; the box proxies /apps/<folder>/ to it
- *     "start": "bun run dev",                 // how to start it (≤ 200), for a person or a run to read
+ *     "start": "bun run dev",                 // how to start it (≤ 200): the box runs it in the project folder when a run settles and nothing listens on the port
  *     "stripBasePath": false                  // true: the proxy sends "/" upstream instead of "/apps/<folder>/"
  *   }
  *

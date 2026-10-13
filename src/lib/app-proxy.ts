@@ -225,11 +225,14 @@ export function _resetListenerCacheForTests(): void {
  * own processes, which is what a run's server is — and nothing for another
  * user's, which is how the box's own port 80 and a root daemon are refused.
  */
-export async function listenerOwnedBy(port: number, directory: string): Promise<ListenerVerdict> {
+export async function listenerOwnedBy(port: number, directory: string, opts: { fresh?: boolean } = {}): Promise<ListenerVerdict> {
   const key = `${port}:${directory}`;
   const cached = verdicts.get(key);
   const now = Date.now();
-  if (cached && now - cached.at < (cached.verdict === "owned" ? LISTENER_CHECK_TTL_MS : LISTENER_REFUSAL_TTL_MS)) return cached.verdict;
+  // `fresh` is for the one caller that has just started the server itself and
+  // is waiting for it (app-server-start.ts): a three-second-old "nothing is
+  // listening" is the answer it is trying to get past.
+  if (!opts.fresh && cached && now - cached.at < (cached.verdict === "owned" ? LISTENER_CHECK_TTL_MS : LISTENER_REFUSAL_TTL_MS)) return cached.verdict;
   const verdict = await checkListener(port, directory);
   verdicts.set(key, { verdict, at: now });
   return verdict;
