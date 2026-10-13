@@ -96,6 +96,10 @@ vi.mock("@/lib/openclaw-gateway-ws", () => ({
   GatewayRpcError: class GatewayRpcError extends Error {},
 }));
 
+// The gateway applies a save live unless a test says otherwise (TASK-1535):
+// classification real, gateway I/O mocked — see the helper.
+vi.mock("@/lib/gateway-hot-apply", async (importOriginal) =>
+  (await import("@/tests/helpers/gateway-hot-apply")).gatewayHotApplyMock(importOriginal));
 vi.mock("@/lib/openclaw-config", () => ({
   // A REAL class, not `vi.fn()` and not an omitted export: the configure route
   // narrows on `instanceof GatewayNotReadyError` to tell "the gateway has not

@@ -73,6 +73,31 @@ describe("restartGateway waits for the gateway to listen again", () => {
     expect(host).toBe("127.0.0.1");
   });
 
+  it("reports itself in flight for the whole restart, refused or not (TASK-1535)", async () => {
+    // `/setup-api/gateway/health` reads this so the OLD process, still
+    // listening while systemd stops it, is not taken for the gateway being back.
+    const { restartGateway } = await load("openclaw");
+    const { gatewayRestartInFlight } = await import("@/lib/gateway-restart-tracker");
+    let during: boolean | null = null;
+    execFileMock.mockImplementation((_cmd: string, args: string[], _opts: unknown, cb: ExecCallback) => {
+      if (args.includes("restart")) during = gatewayRestartInFlight();
+      cb(null, { stdout: "", stderr: "" });
+    });
+
+    expect(gatewayRestartInFlight()).toBe(false);
+    await restartGateway({ awaitReady: false });
+    expect(during).toBe(true);
+    expect(gatewayRestartInFlight()).toBe(false);
+
+    execFileMock.mockImplementation((_cmd: string, args: string[], _opts: unknown, cb: ExecCallback) => {
+      cb(args.includes("restart") ? new Error("Unit clawbox-gateway.service is masked.") : null, { stdout: "", stderr: "" });
+    });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await expect(restartGateway({ awaitReady: false })).rejects.toThrow(/masked/);
+    errorSpy.mockRestore();
+    expect(gatewayRestartInFlight()).toBe(false);
+  });
+
   it("resolves as soon as the port opens", async () => {
     const { restartGateway } = await load("openclaw");
     await expect(restartGateway()).resolves.toBeUndefined();

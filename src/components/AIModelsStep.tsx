@@ -6,6 +6,7 @@ import OllamaModelPanel from "./OllamaModelPanel";
 import LlamaCppModelPanel from "./LlamaCppModelPanel";
 import { notifyProvidersChanged } from "@/lib/ui-events";
 import { humanizeApiError } from "@/lib/api-error-message";
+import { waitForGatewayAfterRestart } from "@/lib/wait-for-gateway";
 import { isClawboxAiImageModelId } from "@/lib/clawbox-ai-models";
 import HermesProviderConfig from "./HermesProviderConfig";
 import { parseAuthInput, tryCloseOAuthWindow } from "@/lib/oauth-utils";
@@ -817,6 +818,31 @@ export default function AIModelsStep({
     completeConfiguring();
   }, [completeConfiguring, configureScope, resetClawaiLogin]);
 
+  /**
+   * Finish a configure the server has answered.
+   *
+   * A save that had to restart the gateway — a subscription sign-in, whose
+   * credential migration stops it — is answered as soon as the restart is
+   * underway (`gatewayRestarting`, TASK-1535), because holding the request
+   * until the gateway was back ran it past what the browser and the tunnel
+   * would wait for. Settings keeps the configuring overlay up until
+   * /setup-api/gateway/health says the gateway is back, so "configured" still
+   * means the chat can use it; the server's notice joins the warning only when
+   * it is not back within the wait. The wizard does not wait here: its next
+   * steps do not need the gateway, and its completion step waits for it anyway.
+   */
+  const finishConfigure = useCallback(async (data: Record<string, unknown>, signal: AbortSignal) => {
+    let warning = data.warning;
+    if (embedded && data.gatewayRestarting === true) {
+      const back = await waitForGatewayAfterRestart({ signal });
+      if (signal.aborted) return;
+      if (!back && typeof data.restartingNotice === "string" && data.restartingNotice.trim()) {
+        warning = [typeof warning === "string" ? warning.trim() : "", data.restartingNotice].filter(Boolean).join(" ");
+      }
+    }
+    showSuccessAndContinue(warning);
+  }, [embedded, showSuccessAndContinue]);
+
   // Wire the device-login hook's terminal callbacks now that the overlay
   // helpers exist. Going through the ref (rather than passing them to the hook
   // directly) keeps the hook above them in source order without a forward
@@ -1110,7 +1136,7 @@ export default function AIModelsStep({
       const data = await res.json();
       if (controller.signal.aborted) return;
       if (data.success) {
-        showSuccessAndContinue(data.warning);
+        await finishConfigure(data, controller.signal);
       } else {
         showError(humanizeApiError(data.error, "Failed to configure"));
       }
@@ -1120,7 +1146,7 @@ export default function AIModelsStep({
     } finally {
       if (!controller.signal.aborted) setSaving(false);
     }
-  }, [configureScope, extractError, showConfiguring, showError, showSuccessAndContinue]);
+  }, [configureScope, extractError, finishConfigure, showConfiguring, showError]);
 
   const selected = allowedProviders.find((p) => p.id === selectedProvider);
   // Filter out subscription option for providers whose OAuth isn't configured on the backend
@@ -1381,7 +1407,7 @@ export default function AIModelsStep({
       const saveData = await saveRes.json();
       if (controller.signal.aborted) return;
       if (saveData.success) {
-        showSuccessAndContinue(saveData.warning);
+        await finishConfigure(saveData, controller.signal);
       } else {
         showError(humanizeApiError(saveData.error, "Failed to save token"));
       }
@@ -1389,7 +1415,7 @@ export default function AIModelsStep({
       if (err instanceof DOMException && err.name === "AbortError") return;
       showError(`Failed: ${err instanceof Error ? err.message : err}`);
     }
-  }, [configureScope, extractError, getRequestedCatalogModelId, noUsableCatalogModel, selectedProvider, showConfiguring, showError, showSuccessAndContinue, t]);
+  }, [configureScope, extractError, finishConfigure, getRequestedCatalogModelId, noUsableCatalogModel, selectedProvider, showConfiguring, showError, t]);
 
   // --- Device auth flow (OpenAI, Google) ---
 
@@ -1960,11 +1986,12 @@ export default function AIModelsStep({
       // wizard branch discards whatever `saveWarning` holds. There are two
       // producers, and neither is worth stopping a first-run wizard for.
       //
-      // The gateway warning is unreachable here: since TASK-608 the configure
-      // route passes `awaitReady: false` when setup is not complete, so
-      // `GatewayNotReadyError` is never produced on this screen. Deliberate —
-      // a slow gateway must not stop a first-run wizard, and the box recovers
-      // within seconds. A gateway that never comes back is not silent either;
+      // There is no gateway warning to lose: the configure route never waits
+      // for a restarted gateway (TASK-1535 — it answers once the restart is
+      // underway, and most saves no longer restart at all), and only Settings
+      // waits for it on the page. Deliberate — a slow gateway must not stop a
+      // first-run wizard, and the box recovers within seconds. A gateway that
+      // never comes back is not silent either;
       // it surfaces at the chat the wizard hands off to, which cannot open a
       // session without one. (The ChatGPT-order warning is a Settings-only
       // state and really does reappear there.)

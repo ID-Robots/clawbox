@@ -12,6 +12,7 @@ import {
   readClawAiSession,
   writeClawAiSession,
 } from "@/lib/clawai-connect";
+import { waitForGatewayBack } from "@/lib/gateway-hot-apply";
 
 export const dynamic = "force-dynamic";
 
@@ -23,6 +24,12 @@ const CLAWBOX_AI_DEVICE_POLL_URL =
 // on the background configure and surfaces a retryable error. A gateway
 // restart takes ~50 s; 3 min leaves comfortable headroom for a slow Jetson.
 const CONFIGURING_TIMEOUT_MS = 3 * 60 * 1000;
+
+// How long the background configure follows the gateway restart a sign-in
+// ends in before it calls the session complete anyway. Inside
+// CONFIGURING_TIMEOUT_MS with the configure's own writes in front of it, so the
+// page is never told a sign-in failed that is only waiting on the gateway.
+const GATEWAY_BACK_WAIT_MS = 90 * 1000;
 
 interface UpstreamPollResponse {
   status?: string;
@@ -172,11 +179,32 @@ async function runConfigureInBackground(session: ClawAiConnectSession, accessTok
     // of these boxes. Best effort: an unreadable body is a save that landed,
     // never an error, so it costs the warning and nothing else.
     let warning: string | null = null;
+    let gatewayRestarting = false;
+    let restartingNotice: string | null = null;
     try {
-      const configured = await configureResponse.json() as { warning?: unknown };
+      const configured = await configureResponse.json() as {
+        warning?: unknown;
+        gatewayRestarting?: unknown;
+        restartingNotice?: unknown;
+      };
       if (typeof configured.warning === "string" && configured.warning.trim()) warning = configured.warning;
+      gatewayRestarting = configured.gatewayRestarting === true;
+      if (typeof configured.restartingNotice === "string" && configured.restartingNotice.trim()) {
+        restartingNotice = configured.restartingNotice;
+      }
     } catch (err) {
       console.warn("[clawai/poll] Could not read the configure answer's warning:", err instanceof Error ? err.message : err);
+    }
+
+    // The sign-in restarts the gateway (its credential migration stops it), and
+    // the configure route answers before the gateway is back (TASK-1535). This
+    // runs off any request, so it can wait: the session stays "configuring" —
+    // which the page already paints as progress — until the assistant answers
+    // again, and "complete" keeps meaning a box the owner can chat with. A
+    // gateway slower than the wait is not a failure: the sign-in landed, and the
+    // notice says it is still coming back.
+    if (gatewayRestarting && !(await waitForGatewayBack(GATEWAY_BACK_WAIT_MS))) {
+      warning = [warning, restartingNotice].filter(Boolean).join(" ") || null;
     }
 
     await writeClawAiSession({

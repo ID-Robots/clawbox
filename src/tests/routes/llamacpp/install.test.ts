@@ -38,6 +38,12 @@ vi.mock("@/lib/local-ai-runtime", () => ({
   stopLocalAiProvider: vi.fn(),
 }));
 
+// A configure that restarted the gateway answers before it is back; the stream
+// follows it (TASK-1535).
+vi.mock("@/lib/gateway-hot-apply", () => ({
+  waitForGatewayBack: vi.fn(async () => true),
+}));
+
 const mockSpawn = vi.mocked(childProcess.spawn);
 const mockExecFile = vi.mocked(childProcess.execFile);
 const mockFs = vi.mocked(fsp);
@@ -174,6 +180,60 @@ describe("POST /setup-api/llamacpp/install", () => {
     expect(mockConfigureAiModel).toHaveBeenCalled();
     expect(text).toContain("already running");
     expect(text).toContain("\"success\":true");
+  });
+
+  it("follows a gateway restart the configure answered early, and only then says configured", async () => {
+    const { waitForGatewayBack } = await import("@/lib/gateway-hot-apply");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ data: [{ id: "gemma4-e2b-it-q4_0" }] }),
+    }));
+    mockConfigureAiModel.mockResolvedValue(
+      NextResponse.json({ success: true, gatewayRestarting: true, restartingNotice: "Saved. Restarting." }),
+    );
+
+    const res = await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0" }));
+    const lines = (await readStream(res)).trim().split("\n").map((line) => JSON.parse(line));
+
+    expect(waitForGatewayBack).toHaveBeenCalledTimes(1);
+    const restarting = lines.findIndex((line) => typeof line.status === "string" && /restarting/.test(line.status));
+    const success = lines.findIndex((line) => line.success === true);
+    expect(restarting).toBeGreaterThanOrEqual(0);
+    // Keeps the overlay on its "applying configuration" step.
+    expect(lines[restarting].status).toMatch(/^Applying configuration/);
+    expect(success).toBeGreaterThan(restarting);
+  });
+
+  it("does not wait for a gateway the configure applied the change to live", async () => {
+    const { waitForGatewayBack } = await import("@/lib/gateway-hot-apply");
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ data: [{ id: "gemma4-e2b-it-q4_0" }] }),
+    }));
+
+    const text = await readStream(await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0" })));
+
+    expect(text).toContain("\"success\":true");
+    expect(waitForGatewayBack).not.toHaveBeenCalled();
+  });
+
+  it("still finishes the install when the restarted gateway is slower than its wait", async () => {
+    const { waitForGatewayBack } = await import("@/lib/gateway-hot-apply");
+    vi.mocked(waitForGatewayBack).mockResolvedValueOnce(false);
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ data: [{ id: "gemma4-e2b-it-q4_0" }] }),
+    }));
+    mockConfigureAiModel.mockResolvedValue(NextResponse.json({ success: true, gatewayRestarting: true }));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    const text = await readStream(await installPost(jsonRequest({ model: "gemma4-e2b-it-q4_0" })));
+
+    // A slow gateway is not a failed install: the model is configured, and the
+    // gateway comes back on its own.
+    expect(text).toContain("\"success\":true");
+    expect(text).not.toContain("\"error\"");
+    warn.mockRestore();
   });
 
   /**

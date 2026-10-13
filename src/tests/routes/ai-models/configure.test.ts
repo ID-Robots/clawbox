@@ -13,6 +13,11 @@ vi.mock("child_process", () => ({
 
 vi.mock("fs/promises", () => ({
   default: {
+    // Whether the ClawBox AI provider plugin is on disk
+    // (`deepseekPluginOnDisk`). Not there unless a test says so — the box the
+    // TASK-1302 cases describe — which also makes a ClawBox AI save one of the
+    // few that still restart the gateway (TASK-1535).
+    access: vi.fn(),
     readFile: vi.fn(),
     writeFile: vi.fn(),
     rename: vi.fn(),
@@ -27,9 +32,10 @@ vi.mock("fs/promises", () => ({
 const readSetupGateFacts = vi.fn<() => { setupComplete: boolean; passwordConfigured: boolean }>();
 
 // PARTIAL mock — only the setup-gate read is replaceable. The configure route
-// asks it whether the first-run wizard is still driving the box, which decides
-// whether step 9 waits for the gateway to bind; everything else in route-auth
-// (session checks other modules in this graph import) keeps its real behaviour.
+// no longer asks it (since TASK-1535 step 9 never waits for a restarted
+// gateway to bind, wizard or not); it stays replaceable so a case can pin
+// either shape of box. Everything else in route-auth (session checks other
+// modules in this graph import) keeps its real behaviour.
 vi.mock("@/lib/route-auth", async () => {
   const actual = await vi.importActual<typeof import("@/lib/route-auth")>("@/lib/route-auth");
   return { ...actual, readSetupGateFacts: () => readSetupGateFacts() };
@@ -127,6 +133,10 @@ vi.mock("@/lib/openclaw-gateway-ws", () => ({
   GatewayRpcError: class GatewayRpcError extends Error {},
 }));
 
+// The gateway applies a save live unless a test says otherwise (TASK-1535):
+// classification real, gateway I/O mocked — see the helper.
+vi.mock("@/lib/gateway-hot-apply", async (importOriginal) =>
+  (await import("@/tests/helpers/gateway-hot-apply")).gatewayHotApplyMock(importOriginal));
 vi.mock("@/lib/openclaw-config", () => ({
   DEFAULT_COMPACTION_RESERVE_TOKENS_FLOOR: 24000,
   // Pure helper — mirror the real implementation (unit-tested in
@@ -333,6 +343,7 @@ describe("POST /setup-api/ai-models/configure", () => {
     vi.resetModules();
     vi.clearAllMocks();
 
+    mockFs.access.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
     mockFs.readFile.mockResolvedValue(JSON.stringify({ version: 1, profiles: {} }));
     mockFs.writeFile.mockResolvedValue();
     mockFs.rename.mockResolvedValue();
@@ -586,23 +597,64 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(body.error).toBe("ClawBox AI token is required");
   });
 
-  it("applies the ClawBox AI cloud defaults only once the gateway answers", async () => {
-    // The applier writes openclaw.json; landing that under a gateway that is
-    // still starting makes it exit EX_CONFIG and stay down.
+  it("restarts for the provider plugin a first ClawBox AI save installs, and only then", async () => {
+    // The cloud defaults follow the restarted gateway on a detached chain; it
+    // is waited out here so it cannot land in the next case's mock.
     const apply = vi.fn().mockResolvedValue({ moved: [], failed: [] });
     vi.doMock("@/lib/clawai-cloud-defaults", () => ({ applyClawaiCloudDefaults: apply }));
-    let ready!: (value: boolean) => void;
-    const gw = await import("@/lib/openclaw-gateway-ws");
-    vi.mocked(gw.waitForGatewayRpcReady).mockImplementation(
-      () => new Promise<boolean>((resolve) => { ready = resolve; }),
-    );
+    try {
+      const hot = await import("@/lib/gateway-hot-apply");
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "portal-token-123" }));
+
+      expect(res.status).toBe(200);
+      expect((await res.json()).gatewayRestarting).toBe(true);
+      // Plugin code arriving on disk is the one plugin change still restarted for.
+      expect(hot.awaitGatewayHotApply).not.toHaveBeenCalled();
+      expect(mockRestartGateway).toHaveBeenCalledTimes(1);
+      expect(mockRestartGateway).toHaveBeenCalledWith({ awaitReady: false });
+      await vi.waitFor(() => expect(apply).toHaveBeenCalled());
+    } finally {
+      vi.doUnmock("@/lib/clawai-cloud-defaults");
+    }
+  });
+
+  it("applies the ClawBox AI cloud defaults only once a restarted gateway answers", async () => {
+    // The applier writes openclaw.json; landing that under a gateway that is
+    // still starting makes it exit EX_CONFIG and stay down. The save is
+    // answered before the restart is over (TASK-1535), so the applier follows
+    // the restarted gateway answering, not the answer.
+    const apply = vi.fn().mockResolvedValue({ moved: [], failed: [] });
+    vi.doMock("@/lib/clawai-cloud-defaults", () => ({ applyClawaiCloudDefaults: apply }));
+    const hot = await import("@/lib/gateway-hot-apply");
+    vi.mocked(hot.awaitGatewayHotApply).mockResolvedValueOnce({ applied: false, why: "not-confirmed" });
+    let back!: (value: boolean) => void;
+    vi.mocked(hot.restartGatewayAnsweringEarly).mockResolvedValueOnce({
+      back: new Promise<boolean>((resolve) => { back = resolve; }),
+    });
     try {
       const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "portal-token-123" }));
       expect(res.status).toBe(200);
+      expect((await res.json()).gatewayRestarting).toBe(true);
       await new Promise((r) => setTimeout(r, 20));
       expect(apply).not.toHaveBeenCalled();
-      ready(true);
+      back(true);
       await vi.waitFor(() => expect(apply).toHaveBeenCalledWith(expect.objectContaining({ trigger: "link" })));
+    } finally {
+      vi.doUnmock("@/lib/clawai-cloud-defaults");
+    }
+  });
+
+  it("applies the ClawBox AI cloud defaults at once when the gateway took the save live", async () => {
+    const apply = vi.fn().mockResolvedValue({ moved: [], failed: [] });
+    vi.doMock("@/lib/clawai-cloud-defaults", () => ({ applyClawaiCloudDefaults: apply }));
+    // The provider plugin is already on disk, so nothing is installed and the
+    // save applies live.
+    mockFs.access.mockResolvedValue(undefined);
+    try {
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "portal-token-123" }));
+      expect(res.status).toBe(200);
+      await vi.waitFor(() => expect(apply).toHaveBeenCalledWith(expect.objectContaining({ trigger: "link" })));
+      expect(mockRestartGateway).not.toHaveBeenCalled();
     } finally {
       vi.doUnmock("@/lib/clawai-cloud-defaults");
     }
@@ -1053,14 +1105,19 @@ describe("POST /setup-api/ai-models/configure", () => {
    * that window, hit "Gateway not reachable (ECONNREFUSED)" and be swallowed
    * as non-fatal — on a box (2026-09-18) the main session kept its ClawBox AI
    * pin while the box default became GPT-6 Astra. The sweep must follow the
-   * restart AND the gateway answering RPC, and a sweep that still could not
-   * run must be said in the answer.
+   * restart AND the gateway answering RPC. Since TASK-1535 the answer goes out
+   * once the restart is underway, and the sweep follows the gateway on its own.
    */
   it("re-points open chats only after the gateway it stopped answers again", async () => {
     const { waitForGatewayRpcReady } = await import("@/lib/openclaw-gateway-ws");
+    const hot = await import("@/lib/gateway-hot-apply");
     const order: string[] = [];
     vi.mocked(restartGateway).mockImplementation(async () => { order.push("restart"); });
     vi.mocked(waitForGatewayRpcReady).mockImplementation(async () => { order.push("ready"); return true; });
+    vi.mocked(hot.restartGatewayAnsweringEarly).mockImplementationOnce(async () => {
+      await restartGateway({ awaitReady: false });
+      return { back: waitForGatewayRpcReady(60_000) };
+    });
     mockApplyModelOverrideToAllAgentSessions.mockImplementation(async () => { order.push("sweep"); return { filesUpdated: 1, sessionsUpdated: 1, refused: [] } as unknown as Awaited<ReturnType<typeof applyModelOverrideToAllAgentSessions>>; });
 
     const res = await configurePost(jsonRequest({
@@ -1074,19 +1131,23 @@ describe("POST /setup-api/ai-models/configure", () => {
     const body = await res.json();
 
     expect(res.status).toBe(200);
+    expect(body.gatewayRestarting).toBe(true);
     expect(body.warning ?? "").not.toMatch(/keeps its previous model/);
+    // The credential migration stopped the gateway: no hot apply is waited for.
+    expect(hot.awaitGatewayHotApply).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(order).toEqual(["restart", "ready", "sweep"]));
     expect(mockApplyModelOverrideToAllAgentSessions).toHaveBeenCalledWith(
       expect.objectContaining({ provider: "openai", modelId: "gpt-5.5", source: "user" }),
     );
-    expect(order).toEqual(["restart", "ready", "sweep"]);
   });
 
-  it("still owes the deferred sweep its attempt and its warning when the port never came back", async () => {
-    const { waitForGatewayRpcReady } = await import("@/lib/openclaw-gateway-ws");
-    const { GatewayNotReadyError } = await import("@/lib/openclaw-config");
-    vi.mocked(restartGateway).mockRejectedValueOnce(new GatewayNotReadyError());
-    let resolveReady: (ready: boolean) => void = () => {};
-    vi.mocked(waitForGatewayRpcReady).mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolveReady = resolve; }));
+  it("answers before the restarted gateway is back, and sweeps once it answers", async () => {
+    const hot = await import("@/lib/gateway-hot-apply");
+    let back: (ready: boolean) => void = () => {};
+    vi.mocked(hot.restartGatewayAnsweringEarly).mockImplementationOnce(async () => {
+      await restartGateway({ awaitReady: false });
+      return { back: new Promise<boolean>((resolve) => { back = resolve; }) };
+    });
 
     const res = await configurePost(jsonRequest({
       provider: "openai",
@@ -1098,20 +1159,23 @@ describe("POST /setup-api/ai-models/configure", () => {
     }));
     const body = await res.json();
 
-    // Answered at once, with both facts: the gateway is not back, and the open
-    // chats keep their model for now.
+    // Answered at once, and not as a failure: nothing failed, the gateway is
+    // coming back. The page follows it (`gatewayRestarting`).
     expect(res.status).toBe(200);
-    expect(body.warning).toMatch(/has not finished restarting/);
-    expect(body.warning).toMatch(/keeps its previous model/);
+    expect(body.gatewayRestarting).toBe(true);
+    expect(body.warning ?? "").not.toMatch(/has not finished restarting|keeps its previous model/);
     expect(mockApplyModelOverrideToAllAgentSessions).not.toHaveBeenCalled();
     // …and the sweep still follows the gateway when it does come back.
-    resolveReady(true);
+    back(true);
     await vi.waitFor(() => expect(mockApplyModelOverrideToAllAgentSessions).toHaveBeenCalledTimes(1));
   });
 
-  it("says so when the open chats could not be re-pointed after the restart", async () => {
-    const { waitForGatewayRpcReady } = await import("@/lib/openclaw-gateway-ws");
-    vi.mocked(waitForGatewayRpcReady).mockResolvedValueOnce(false);
+  it("does not sweep against a restarted gateway that never answered", async () => {
+    const hot = await import("@/lib/gateway-hot-apply");
+    vi.mocked(hot.restartGatewayAnsweringEarly).mockImplementationOnce(async () => {
+      await restartGateway({ awaitReady: false });
+      return { back: Promise.resolve(false) };
+    });
 
     const res = await configurePost(jsonRequest({
       provider: "openai",
@@ -1121,18 +1185,87 @@ describe("POST /setup-api/ai-models/configure", () => {
       refreshToken: "refresh-token",
       expiresIn: 3600,
     }));
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).success).toBe(true);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(mockApplyModelOverrideToAllAgentSessions).not.toHaveBeenCalled();
+  });
+
+  it("re-points open chats only after the gateway confirmed a live apply", async () => {
+    const hot = await import("@/lib/gateway-hot-apply");
+    const order: string[] = [];
+    vi.mocked(hot.awaitGatewayHotApply).mockImplementationOnce(async () => {
+      order.push("applied");
+      return { applied: true, how: "hot-reload" };
+    });
+    mockApplyModelOverrideToAllAgentSessions.mockImplementation(async () => {
+      order.push("sweep");
+      return { filesUpdated: 0, sessionsUpdated: 1, sessionsSkipped: 0 };
+    });
+
+    const res = await configurePost(jsonRequest({ provider: "openai", apiKey: "sk-test-key" }));
+
+    expect(res.status).toBe(200);
+    // Awaited inside the request: a sweep that could not run is said in it.
+    expect(order).toEqual(["applied", "sweep"]);
+    expect(mockRestartGateway).not.toHaveBeenCalled();
+  });
+
+  it("follows a gateway that restarts by itself instead of adding a restart of its own", async () => {
+    const hot = await import("@/lib/gateway-hot-apply");
+    const { waitForGatewayRpcReady } = await import("@/lib/openclaw-gateway-ws");
+    vi.mocked(hot.awaitGatewayHotApply).mockResolvedValueOnce({ applied: false, why: "gateway-restarting" });
+
+    const res = await configurePost(jsonRequest({ provider: "openai", apiKey: "sk-test-key" }));
     const body = await res.json();
 
     expect(res.status).toBe(200);
-    expect(body.success).toBe(true);
-    expect(body.warning).toMatch(/keeps its previous model/);
-    // The wait a PERSON pays is the port budget and no more — the tunnel in
-    // front of this box gives up at ~100 s, and a save that landed reported as
-    // a failure is the worse answer. Past it the sentence goes out and the
-    // sweep still follows the gateway: the budget expiring means "slow", not
-    // "never".
-    expect(vi.mocked(waitForGatewayRpcReady).mock.calls[0][0]).toBe(30000);
+    expect(body.gatewayRestarting).toBe(true);
+    expect(hot.restartGatewayAnsweringEarly).not.toHaveBeenCalled();
+    expect(mockRestartGateway).not.toHaveBeenCalled();
+    expect(waitForGatewayRpcReady).toHaveBeenCalledWith(60000);
     await vi.waitFor(() => expect(mockApplyModelOverrideToAllAgentSessions).toHaveBeenCalledTimes(1));
+  });
+
+  it("restarts for a rotated gateway token, which only a restart applies", async () => {
+    const hot = await import("@/lib/gateway-hot-apply");
+    // openclaw.json before the save holds a weak token; the route rotates it.
+    let written = false;
+    vi.mocked(runOpenclawConfigSetBatch).mockImplementation(async () => { written = true; });
+    mockReadOpenClawConfig.mockImplementation(async () => (written
+      ? { gateway: { auth: { mode: "token", token: "b".repeat(64) } } }
+      : { gateway: { auth: { mode: "token", token: "clawbox" } } }));
+
+    const res = await configurePost(jsonRequest({ provider: "openai", apiKey: "sk-test-key" }));
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).gatewayRestarting).toBe(true);
+    expect(hot.awaitGatewayHotApply).not.toHaveBeenCalled();
+    expect(mockRestartGateway).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not restart when the only differences are ones the gateway hot-applies", async () => {
+    const hot = await import("@/lib/gateway-hot-apply");
+    let written = false;
+    vi.mocked(runOpenclawConfigSetBatch).mockImplementation(async () => { written = true; });
+    mockReadOpenClawConfig.mockImplementation(async () => {
+      const profiles: Record<string, { provider: string; mode: string }> = written
+        ? { "openai:default": { provider: "openai", mode: "api_key" } }
+        : {};
+      return {
+        gateway: { auth: { mode: "token", token: "b".repeat(64) } },
+        agents: { defaults: { model: { primary: written ? "openai/gpt-5.5" : "deepseek/deepseek-v4-flash" } } },
+        auth: { profiles },
+        meta: { lastTouchedAt: written ? "later" : "earlier" },
+      };
+    });
+
+    const res = await configurePost(jsonRequest({ provider: "openai", apiKey: "sk-test-key" }));
+
+    expect(res.status).toBe(200);
+    expect(mockRestartGateway).not.toHaveBeenCalled();
+    expect(hot.awaitGatewayHotApply).toHaveBeenCalledWith(expect.objectContaining({ configChanged: true }));
   });
 
   /**
@@ -1584,8 +1717,13 @@ describe("POST /setup-api/ai-models/configure", () => {
    * a box that needed ten more seconds. A restart that was REFUSED is a
    * different fact and keeps the 502 below.
    */
-  it("keeps a configure that landed when only the gateway has not come back yet", async () => {
-    mockRestartGateway.mockRejectedValue(new GatewayNotReadyError("gateway did not come back"));
+  it("answers a save whose restart is underway without waiting for the gateway", async () => {
+    // TASK-1535: a Settings save held through the stop, the pre-start and the
+    // core start-up took 125 s on a board and was reported as a gateway that
+    // "did not come back". A restart that systemd TOOK is answered at once; the
+    // page follows the gateway itself.
+    const hot = await import("@/lib/gateway-hot-apply");
+    vi.mocked(hot.awaitGatewayHotApply).mockResolvedValueOnce({ applied: false, why: "not-confirmed" });
 
     const res = await configurePost(jsonRequest({
       provider: "anthropic",
@@ -1595,36 +1733,50 @@ describe("POST /setup-api/ai-models/configure", () => {
 
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
-    expect(body.warning).toMatch(/gateway/i);
-  });
-
-  it("waits for the gateway to come back on a box past the wizard", async () => {
-    // Settings renders the "has not finished restarting" notice, so there the
-    // readiness answer has a reader and is worth the budget.
-    const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test" }));
-
-    expect(res.status).toBe(200);
-    expect(mockRestartGateway).toHaveBeenCalledWith({ awaitReady: true });
-  });
-
-  it("does not wait for the gateway during the first-run wizard", async () => {
-    // TASK-608 / M2. `setup_complete` is written at the end of the wizard, so
-    // its absence is the first-run path — the one AIModelsStep discards the
-    // warning on, and the one e2e-install measured at 52.9 s (23 s of writes,
-    // then the whole 30 s budget, expired). Waiting there buys latency only.
-    readSetupGateFacts.mockReturnValue({ setupComplete: false, passwordConfigured: true });
-
-    const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test" }));
-
-    expect(res.status).toBe(200);
-    expect((await res.json()).success).toBe(true);
+    expect(body.gatewayRestarting).toBe(true);
+    expect(body.restartingNotice).toMatch(/restarting/i);
+    expect(body.warning ?? "").not.toMatch(/has not finished restarting|did not come back/);
+    expect(hot.restartGatewayAnsweringEarly).toHaveBeenCalledTimes(1);
+    // The fallback restart never waits for the port inside the request.
     expect(mockRestartGateway).toHaveBeenCalledWith({ awaitReady: false });
   });
 
-  it("still reports a refused restart during the first-run wizard", async () => {
-    // Skipping the poll must not swallow the fact that nothing is coming: the
-    // exec failure is still a 502, wizard or not.
-    readSetupGateFacts.mockReturnValue({ setupComplete: false, passwordConfigured: true });
+  it("applies a save the gateway hot-reloads without restarting it", async () => {
+    const hot = await import("@/lib/gateway-hot-apply");
+    const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test" }));
+    const body = await res.json();
+
+    expect(res.status).toBe(200);
+    expect(body.success).toBe(true);
+    expect(body.gatewayRestarting).toBeUndefined();
+    expect(mockRestartGateway).not.toHaveBeenCalled();
+    expect(hot.restartGatewayAnsweringEarly).not.toHaveBeenCalled();
+    // Waited for with the baseline taken before any write, and with the auth
+    // state refreshed: the paste wrote the credential store from outside the
+    // gateway.
+    expect(hot.awaitGatewayHotApply).toHaveBeenCalledWith(expect.objectContaining({
+      baseline: { hash: "baseline-hash" },
+      credentialsWritten: true,
+    }));
+  });
+
+  it("restarts only once the gateway could not confirm the save, and says it is restarting", async () => {
+    const hot = await import("@/lib/gateway-hot-apply");
+    vi.mocked(hot.awaitGatewayHotApply).mockResolvedValueOnce({ applied: false, why: "gateway-down" });
+
+    const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test" }));
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).gatewayRestarting).toBe(true);
+    expect(vi.mocked(hot.awaitGatewayHotApply).mock.invocationCallOrder[0])
+      .toBeLessThan(vi.mocked(hot.restartGatewayAnsweringEarly).mock.invocationCallOrder[0]);
+  });
+
+  it("still reports a refused restart", async () => {
+    // Answering early must not swallow the fact that nothing is coming: a
+    // restart systemd refused (a unit masked by an update) is still a 502.
+    const hot = await import("@/lib/gateway-hot-apply");
+    vi.mocked(hot.awaitGatewayHotApply).mockResolvedValueOnce({ applied: false, why: "not-confirmed" });
     mockRestartGateway.mockRejectedValue(new Error("Unit clawbox-gateway.service is masked."));
 
     const res = await configurePost(jsonRequest({ provider: "anthropic", apiKey: "sk-test" }));
@@ -1634,6 +1786,8 @@ describe("POST /setup-api/ai-models/configure", () => {
   });
 
   it("returns 502 when gateway restart fails", async () => {
+    const hot = await import("@/lib/gateway-hot-apply");
+    vi.mocked(hot.awaitGatewayHotApply).mockResolvedValueOnce({ applied: false, why: "not-confirmed" });
     mockRestartGateway.mockRejectedValue(new Error("Gateway restart failed"));
 
     const res = await configurePost(jsonRequest({
@@ -1907,13 +2061,80 @@ describe("POST /setup-api/ai-models/configure", () => {
     expect(providerDef.apiKey).toBe("stored-portal-token");
   });
 
-  it("restarts gateway after configuration", async () => {
+  /**
+   * The cloud voice's credential used to reach its entry only through the
+   * restart that ended every save (the boot script arms the entry with the
+   * portal token). A save the gateway applies live has to carry the new token
+   * over itself — on the entry provably ours, and on nothing else (TASK-1535).
+   */
+  describe("the ClawBox AI cloud voice's credential", () => {
+    const voice = (apiKey: string, stamped = true) => ({
+      baseUrl: "https://clawbox.com/api/ai",
+      model: "speech",
+      apiKey,
+      ...(stamped ? { clawboxManaged: true } : {}),
+    });
+    const keyWrite = (home: string) =>
+      findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), `${home}.providers.openai.apiKey`);
+
+    it("moves the voice entry it armed to the new portal token", async () => {
+      mockGetAll.mockResolvedValue({ clawai_token: "old-portal-token" });
+      mockReadOpenClawConfig.mockResolvedValue({ tts: { providers: { openai: voice("old-portal-token") } } });
+
+      const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "new-portal-token" }));
+
+      expect(res.status).toBe(200);
+      expect(keyWrite("tts")?.value).toBe("new-portal-token");
+      expect(keyWrite("messages.tts")).toBeUndefined();
+    });
+
+    it("moves the pre-OpenClaw-2 home the same way", async () => {
+      mockGetAll.mockResolvedValue({ clawai_token: "old-portal-token" });
+      mockReadOpenClawConfig.mockResolvedValue({ messages: { tts: { providers: { openai: voice("old-portal-token") } } } });
+
+      await configurePost(jsonRequest({ provider: "clawai", apiKey: "new-portal-token" }));
+
+      expect(keyWrite("messages.tts")?.value).toBe("new-portal-token");
+    });
+
+    it("leaves a speech key that is not the one this box stored alone, stamp or not", async () => {
+      mockGetAll.mockResolvedValue({ clawai_token: "old-portal-token" });
+      mockReadOpenClawConfig.mockResolvedValue({ tts: { providers: { openai: voice("sk-owner-key") } } });
+
+      await configurePost(jsonRequest({ provider: "clawai", apiKey: "new-portal-token" }));
+
+      expect(keyWrite("tts")).toBeUndefined();
+    });
+
+    it("leaves an unstamped entry alone even when it holds our old token", async () => {
+      mockGetAll.mockResolvedValue({ clawai_token: "old-portal-token" });
+      mockReadOpenClawConfig.mockResolvedValue({ tts: { providers: { openai: voice("old-portal-token", false) } } });
+
+      await configurePost(jsonRequest({ provider: "clawai", apiKey: "new-portal-token" }));
+
+      expect(keyWrite("tts")).toBeUndefined();
+    });
+
+    it("writes nothing when the token did not change", async () => {
+      mockGetAll.mockResolvedValue({ clawai_token: "same-portal-token" });
+      mockReadOpenClawConfig.mockResolvedValue({ tts: { providers: { openai: voice("same-portal-token") } } });
+
+      await configurePost(jsonRequest({ provider: "clawai", apiKey: "same-portal-token" }));
+
+      expect(keyWrite("tts")).toBeUndefined();
+    });
+  });
+
+  it("does not restart the gateway after a configuration it applied live", async () => {
     await configurePost(jsonRequest({
       provider: "anthropic",
       apiKey: "sk-test",
     }));
 
-    expect(mockRestartGateway).toHaveBeenCalled();
+    // TASK-1535: auth.profiles, models.*, agents.defaults.model.* and
+    // plugins.entries.* all hot-apply; the restart this used to pin cost every
+    // save 50-60 s of dead chat.
+    expect(mockRestartGateway).not.toHaveBeenCalled();
   });
 
   it("configures llama.cpp provider definition in openclaw", async () => {
@@ -2233,7 +2454,9 @@ describe("POST /setup-api/ai-models/configure", () => {
       ai_model_configured: true,
       ai_model_provider: "xai",
     }));
-    expect(mockRestartGateway).toHaveBeenCalled();
+    // Applied live: the bundled plugin reads the pasted key once the gateway
+    // refreshes its auth state, no restart (TASK-1535).
+    expect(mockRestartGateway).not.toHaveBeenCalled();
   });
 
   it("honors an xai model picked by the user", async () => {
@@ -2279,7 +2502,7 @@ describe("POST /setup-api/ai-models/configure", () => {
   describe("the xAI sign-in", () => {
     const storeAnswer = (profiles: unknown[]) => JSON.stringify({ profiles });
 
-    it("finishes a sign-in the store holds: oauth profile metadata, primary, restart — and no paste", async () => {
+    it("finishes a sign-in the store holds: oauth profile metadata, primary, applied live — and no paste", async () => {
       vi.mocked(spawnOpenclawCli).mockResolvedValueOnce(
         storeAnswer([{ id: "xai:default", provider: "xai", type: "oauth" }]),
       );
@@ -2306,7 +2529,9 @@ describe("POST /setup-api/ai-models/configure", () => {
         ai_model_configured: true,
         ai_model_provider: "xai",
       }));
-      expect(mockRestartGateway).toHaveBeenCalled();
+      // The xAI sign-in is not migrated by `doctor --fix` (the core wrote it to
+      // its own store), so nothing stops the gateway and nothing restarts it.
+      expect(mockRestartGateway).not.toHaveBeenCalled();
     });
 
     it("writes the model the owner picked", async () => {
@@ -3757,13 +3982,18 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(vi.mocked(runOpenclawConfigSet).mock.calls.some(([args]) => isEnable(args))).toBe(false);
 
       // The OFF half of the gate stays after the write (a no-op for Anthropic,
-      // but its place is what keeps a live primary's plugin on), and a plugin
-      // enabled by the batch loads on the next gateway start, so the restart
-      // that already ends the save has to stay after all of it.
+      // but its place is what keeps a live primary's plugin on), and what makes
+      // the gateway serve the save — the hot-apply wait, or the restart a
+      // subscription sign-in's credential migration still needs — has to come
+      // after all of it.
       const writtenAt = orderOf(vi.mocked(runOpenclawConfigSetBatch), (args) => (args[0] as string[][]).some(carriesAnthropicPrimary));
       const gatedAt = orderOf(vi.mocked(setProviderPlugins), (args) => args[0] === "anthropic");
       expect(writtenAt).toBeLessThan(gatedAt);
-      expect(gatedAt).toBeLessThan(orderOf(mockRestartGateway));
+      const hot = await import("@/lib/gateway-hot-apply");
+      const settledAt = "authMode" in body
+        ? orderOf(mockRestartGateway)
+        : orderOf(vi.mocked(hot.awaitGatewayHotApply));
+      expect(gatedAt).toBeLessThan(settledAt);
     });
 
     it("re-lands the enable with the rest of the batch when the catalog refuses the primary", async () => {

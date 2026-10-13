@@ -28,9 +28,13 @@ vi.mock("@/lib/hermes-clawai", () => ({
   ClawaiApplyError: class ClawaiApplyError extends Error {},
 }));
 vi.mock("@/lib/clawbox-ai-portal-tier", () => ({ fetchPortalTier: vi.fn() }));
+// The sign-in restarts the gateway, and the configure answers before it is back
+// (TASK-1535); the finaliser follows it before calling the session complete.
+vi.mock("@/lib/gateway-hot-apply", () => ({ waitForGatewayBack: vi.fn(async () => true) }));
 
 import { readClawAiSession, writeClawAiSession } from "@/lib/clawai-connect";
 import { POST as configurePost } from "@/app/setup-api/ai-models/configure/route";
+import { waitForGatewayBack } from "@/lib/gateway-hot-apply";
 
 const mockReadSession = vi.mocked(readClawAiSession);
 const mockWriteSession = vi.mocked(writeClawAiSession);
@@ -95,6 +99,53 @@ describe("the device-code finaliser carries the configure's warning", () => {
     await finalise();
 
     expect(completedSession()?.warning).toBeNull();
+  });
+
+  it("keeps the session configuring until a restarted gateway is back, then completes without a notice", async () => {
+    let back!: (ready: boolean) => void;
+    vi.mocked(waitForGatewayBack).mockImplementationOnce(() => new Promise<boolean>((resolve) => { back = resolve; }));
+    mockConfigure.mockResolvedValue(new Response(
+      JSON.stringify({ success: true, gatewayRestarting: true, restartingNotice: "Saved. The assistant is restarting." }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    ));
+
+    await finalise();
+
+    // "complete" keeps meaning a box the owner can chat with.
+    expect(completedSession()).toBeUndefined();
+    back(true);
+    await vi.waitFor(() => expect(completedSession()?.status).toBe("complete"));
+    expect(completedSession()?.warning).toBeNull();
+  });
+
+  it("completes with the restarting notice when the gateway is slower than the wait", async () => {
+    vi.mocked(waitForGatewayBack).mockResolvedValueOnce(false);
+    mockConfigure.mockResolvedValue(new Response(
+      JSON.stringify({
+        success: true,
+        warning: SWEEP_WARNING,
+        gatewayRestarting: true,
+        restartingNotice: "Saved. The assistant is restarting.",
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    ));
+
+    await finalise();
+
+    await vi.waitFor(() => expect(completedSession()?.status).toBe("complete"));
+    expect(completedSession()?.warning).toBe(`${SWEEP_WARNING} Saved. The assistant is restarting.`);
+  });
+
+  it("does not wait on a save the gateway applied live", async () => {
+    mockConfigure.mockResolvedValue(new Response(
+      JSON.stringify({ success: true }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    ));
+
+    await finalise();
+
+    expect(waitForGatewayBack).not.toHaveBeenCalled();
+    expect(completedSession()?.status).toBe("complete");
   });
 
   it("answers the warning to the poll that is waiting on it", async () => {

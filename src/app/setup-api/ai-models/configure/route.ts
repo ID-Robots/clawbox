@@ -5,7 +5,6 @@ import { spawn } from "child_process";
 import fs from "fs/promises";
 import path, { untraced } from "@/lib/runtime-path";
 import { getAll, setMany } from "@/lib/config-store";
-import { readSetupGateFacts } from "@/lib/route-auth";
 import { HANDOFF_TOKENS_PATH, HANDOFF_TTL_MS } from "@/lib/oauth-handoff";
 import {
   restartGateway,
@@ -28,10 +27,16 @@ import {
   openclawIsAbsent,
   OpenclawUnavailableError,
   type OpenClawConfig,
-  GatewayNotReadyError,
   gatewayReadyWaitMs,
 } from "@/lib/openclaw-config";
 import { waitForGatewayRpcReady } from "@/lib/openclaw-gateway-ws";
+import {
+  awaitGatewayHotApply,
+  diffConfigPaths,
+  readGatewayConfigBaseline,
+  restartGatewayAnsweringEarly,
+  restartRequiredPaths,
+} from "@/lib/gateway-hot-apply";
 import { tokenFingerprint } from "@/lib/anthropic-gateway-auth";
 import {
   putGatewayOAuthProfile,
@@ -1767,6 +1772,65 @@ async function configureClawboxAi(
   return true;
 }
 
+/**
+ * The ClawBox AI cloud voice's credential, carried over to a new portal token
+ * (TASK-1535).
+ *
+ * `gateway-pre-start.sh` arms the voice entry (`tts.providers.openai`, or
+ * `messages.tts.providers.openai` before OpenClaw 2) with the portal token and
+ * stamps it `clawboxManaged`. A token change used to reach that entry only
+ * because this save ended in a gateway restart, which ran the boot script
+ * again; a save the gateway hot-applies does not, and the voice would have gone
+ * on presenting the old account's token until the next restart.
+ *
+ * So the one field the token feeds is moved here, and ONLY on an entry that is
+ * provably ours twice over: our stamp, and exactly the token this box stored
+ * before the save. Anything else — an owner's own speech route, an entry the
+ * stamp survived on but whose key is no longer ours — is left to the boot
+ * script's ownership rules, as is arming or withdrawing the voice itself
+ * (`_clawai_route_is_ours` in that script; `@/lib/clawai-cloud-defaults` says why
+ * a second opinion on those must not live here). Rewriting our own field with
+ * our own new value is the worst this can do. `tts` hot-applies.
+ */
+async function clawaiSpeechKeyRefresh(
+  previousToken: string,
+  token: string,
+): Promise<ConfigSetGroup | null> {
+  if (!previousToken || !token || previousToken === token) return null;
+  let current: OpenClawConfig;
+  try {
+    current = await readOpenClawConfig();
+  } catch {
+    return null;
+  }
+  const ops: OpenclawConfigSetArgs[] = [];
+  for (const home of ["tts", "messages.tts"]) {
+    let node: unknown = current;
+    for (const key of [...home.split("."), "providers", "openai"]) {
+      node = node && typeof node === "object" && !Array.isArray(node)
+        ? (node as Record<string, unknown>)[key]
+        : undefined;
+    }
+    const speech = node && typeof node === "object" && !Array.isArray(node)
+      ? (node as Record<string, unknown>)
+      : null;
+    if (speech?.clawboxManaged !== true || speech.apiKey !== previousToken) continue;
+    ops.push([`${home}.providers.openai.apiKey`, token]);
+  }
+  if (ops.length === 0) return null;
+  return {
+    ops,
+    onApplied: () => console.log("[AI Config] Moved the ClawBox AI cloud voice to the new portal token"),
+    // Non-fatal: the chat works without it, and the next gateway start writes
+    // the same field from the same token.
+    onError: (err) =>
+      console.warn(
+        "[AI Config] Failed to move the ClawBox AI cloud voice to the new portal token:",
+        err instanceof Error ? logSafe(err.message) : err,
+      ),
+  };
+}
+
 async function setFallbackModels(models: string[]) {
   await runCommand(OPENCLAW_BIN, [
     "config",
@@ -2048,15 +2112,18 @@ async function applyCloudProviderTransport(opts: {
  * until a reboot or a later save that happened to succeed (F-07).
  */
 type GatewayState =
-  /** Nothing touched it: every early exit, and the API-key path before step 9. */
+  /**
+   * Nothing restarted it: every early exit, and every save the running gateway
+   * applied live at step 9 (TASK-1535).
+   */
   | "untouched"
   /** Stopped for `doctor --fix`; no later step has restarted it. */
   | "stopped-for-doctor"
   /**
-   * Step 9 issued its restart. It came up; or it had not finished coming up and
-   * step 9 answered its own 200 with a warning; or the restart was refused and
-   * step 9 answered its own 502. Either way the gateway is not left stopped, so
-   * the wrapper below has nothing to restore.
+   * Step 9 issued its restart. systemd took it and step 9 answered its own 200
+   * while the gateway comes back; or the restart was refused and step 9
+   * answered its own 502. Either way the gateway is not left stopped by this
+   * request, so the wrapper below has nothing to restore.
    */
   | "restart-issued";
 
@@ -2066,6 +2133,10 @@ type GatewayTracker = { state: GatewayState };
 /** Folded into the error the owner sees when the restore itself fails. */
 const GATEWAY_OFFLINE_HINT =
   "The assistant is offline until the gateway restarts — use Restart in the system tray.";
+
+/** Said when a save that needed a restart was answered before the gateway was back. */
+const GATEWAY_RESTARTING_NOTICE =
+  "Saved. The assistant is restarting to apply it and will be back in about a minute.";
 
 export async function POST(request: Request) {
   const gateway: GatewayTracker = { state: "untouched" };
@@ -2389,6 +2460,20 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // step 8d rather than threaded through each branch, so a branch added
     // later cannot forget it (TASK-668).
     const modelsModeBefore = await readModelsMode();
+
+    // openclaw.json and the running gateway's view of it, BEFORE this save
+    // writes anything — what step 9 compares against to decide whether the
+    // gateway can apply the save while it keeps serving, or has to restart for
+    // it (TASK-1535). Taken here for the same reason `modelsModeBefore` is: one
+    // snapshot, compared once, so a branch added later cannot forget it. Not on
+    // the Hermes-only edition, which has neither the file nor the gateway and
+    // never reaches step 9.
+    const configBeforeSave: OpenClawConfig | null = openclawIsAbsent()
+      ? null
+      : await Promise.resolve()
+        .then(() => readOpenClawConfig())
+        .catch(() => ({} as OpenClawConfig));
+    const gatewayBaseline = openclawIsAbsent() ? null : await readGatewayConfigBaseline();
 
     // BEFORE anything is written, and before this request has put anything of
     // its own in the store — a refusal is not a failure and must not leave a
@@ -2742,7 +2827,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
 
     // ── Hermes edition: no openclaw binary exists here ──────────────────────
     // Everything below configures OpenClaw — it writes ~/.openclaw, runs
-    // `openclaw config set …`, and restarts the gateway. On the Hermes SKU there
+    // `openclaw config set …`, and has the gateway apply it. On the Hermes SKU there
     // is no openclaw binary, so the API-key path used to fail with `spawn
     // openclaw ENOENT` and then blame the user's credentials, while the local
     // (Gemma) switch failed the same way. Route to Hermes' own config store
@@ -3418,6 +3503,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // effort: a failed install falls through to the direct primary write
     // below and the gateway's own readiness report names the missing plugin
     // loudly.
+    let providerPluginInstalled = false;
     if (isClawAI) {
       // On disk from EITHER registry, for the running core (TASK-1302): a
       // ClawHub install lands in `extensions/deepseek/`, an npm one under
@@ -3428,6 +3514,9 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         const plugin = await installDeepseekProviderPlugin();
         if (plugin.installed) {
           console.log(`[AI Config] deepseek provider plugin installed (${plugin.installed})`);
+          // Plugin code that was not on disk when the gateway started: one of
+          // the changes step 9 still restarts for.
+          providerPluginInstalled = true;
           // The plugin the boot script may have marked for repair is on disk
           // again, and this route goes on to write the provider itself — so
           // this IS the outcome, and the "Needs repair" badge on the ClawBox AI
@@ -3857,12 +3946,13 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
                 err instanceof Error ? logSafe(err.message) : err,
               ),
           };
+      const speechKeyGroup = await clawaiSpeechKeyRefresh(previousClawaiToken, clawboxAiToken);
       const clawboxAiConfigured = await configureClawboxAi(
         false,
         clawboxAiToken,
         {
           requiredOps: [["models.mode", "merge"]],
-          groups: [fallbackGroup],
+          groups: speechKeyGroup ? [fallbackGroup, speechKeyGroup] : [fallbackGroup],
           // Answered HERE, from the snapshot taken before this request's own
           // `setMany` — see the field's docblock. `previousClawaiToken` is the
           // same value the ClawKeep account-switch guard below reads, so a
@@ -4040,18 +4130,20 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     //    (skip for local-only local-AI setups that leave the primary
     //    alone).
     //
-    //    NOT while the gateway is stopped. A sign-in that went through the
-    //    auth-profile migration stopped the gateway for `doctor` above and
-    //    nothing restarts it before step 9, so this sweep used to run into
-    //    "Gateway not reachable (ECONNREFUSED)" and be swallowed as non-fatal
+    //    RUN AT STEP 9, once the gateway serves this save — never here. A
+    //    sign-in that went through the auth-profile migration stopped the
+    //    gateway for `doctor` above, and a sweep run against it went into
+    //    "Gateway not reachable (ECONNREFUSED)" and was swallowed as non-fatal
     //    — on a box (2026-09-18) the main session kept its old ClawBox AI pin
     //    while the box default became GPT-6 Astra, and every turn ran on the
-    //    pin under a header that said Astra. The sweep is deferred past the
-    //    restart, and past the gateway ANSWERING, not merely listening.
+    //    pin under a header that said Astra. And a gateway that has not applied
+    //    the save yet may not know the model the sweep pins (a llama.cpp row
+    //    this save just wrote). So the sweep follows the hot apply's
+    //    acknowledgment, or the restarted gateway ANSWERING, not merely
+    //    listening (TASK-1535).
     //
-    //    Decided HERE, outside the closure, because the deferral decision below
-    //    has to know it: a save that will sweep nothing must not hold Settings
-    //    for the readiness budget, and must never report a failed sweep about
+    //    Decided HERE, outside the closure, because step 9 has to know it: a
+    //    save that will sweep nothing must never report a failed sweep about
     //    one that was never going to run.
     const sweepTarget = isLocalScope && !shouldPromoteLocalToPrimary
       ? null
@@ -4089,15 +4181,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         return false;
       }
     };
-    let sessionSweepDeferred = false;
     let sessionSweepFailed = false;
-    if (sweepTarget) {
-      if (gateway.state === "stopped-for-doctor") {
-        sessionSweepDeferred = true;
-      } else {
-        sessionSweepFailed = !(await sweepSessionsToPrimary());
-      }
-    }
 
     // 8b. The OFF half of the gate: switch the anthropic plugin off only when
     //     nothing on the box could use it — the primary is elsewhere AND no
@@ -4146,8 +4230,9 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // ~/.codex/auth.json, which gateway-pre-start.sh synthesizes from this
     // OAuth profile (write-if-missing). On an explicit (re)login, clear the
     // stale file so the restart below regenerates it with the fresh token —
-    // afterward the Codex app-server owns its own refresh, so we don't touch
-    // it again.
+    // a ChatGPT sign-in always restarts at step 9, because it went through the
+    // `doctor --fix` stop above — and afterward the Codex app-server owns its
+    // own refresh, so we don't touch it again.
     //
     // Every agent's `codex-home/auth.json` goes with it. That file is the
     // Codex app-server's own CODEX_HOME copy, and scripts/codex-auth-mirror.js
@@ -4187,120 +4272,133 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // — see the subscription branch — so nothing here executes against an
     // un-migrated auth store.)
 
-    // 9. Restart OpenClaw gateway so it picks up the new auth profile and model
-    gateway.state = "restart-issued";
-    let gatewayWarning: string | undefined;
-    // `setup_complete` flips at the very end of the wizard
-    // (/setup-api/setup/complete), so "not true" is exactly "the first-run
-    // wizard is still driving this box".
+    // 9. Make the running gateway serve this save — WITHOUT restarting it
+    //    wherever the core can apply the save live (TASK-1535).
     //
-    // Read through route-auth, NOT through the config-store snapshot above.
-    // `readConfig()` there is fail-OPEN — a damaged config.json reads as `{}` —
-    // and route-auth exists precisely to say that must not decide this key: it
-    // fails CLOSED, so an unreadable config is "provisioned", which is also
-    // what `/setup-api/setup/status` and middleware serve. Fail open here and a
-    // box whose config.json is truncated renders Settings while this route
-    // treats it as the wizard and silently drops the notice Settings is the one
-    // branch that renders. Re-read per request; nothing is cached.
-    const firstRunWizard = !readSetupGateFacts().setupComplete;
-    // The sweep that follows the gateway with NOBODY waiting on its answer: the
-    // wizard, and a Settings save whose own budget ran out. One definition for
-    // both, so they cannot drift, and `.catch` on it — this file's own rule for
-    // every detached call (see the two restores in the POST wrapper and the
-    // cloud-defaults applier below), and under Node an unhandled rejection is a
-    // dead process.
+    //    This step used to restart clawbox-gateway on every save, "so it picks
+    //    up the new auth profile and model". The pinned core does both by
+    //    itself: its config reload (`hybrid`, the default) hot-applies agents,
+    //    models, auth.profiles, auth.order and plugins.entries.*, and the CLI
+    //    paste that wrote the credential asks the running gateway to rebuild its
+    //    auth state (`models.authRefresh`). The restart cost every save 50-60 s
+    //    of dead chat, and one measured on a board took 125 s and then told the
+    //    owner the gateway "did not come back".
     //
-    // Twice the port budget, because nothing is holding a request open for it:
-    // the whole point of detaching is that the answer may take longer than a
-    // person will wait. Derived from the same operator knob (`gatewayReadyWaitMs`,
-    // `GATEWAY_READY_WAIT_MS`) so a box that needs longer gets longer here too.
-    const scheduleDeferredSweep = () => {
-      void waitForGatewayRpcReady(gatewayReadyWaitMs() * 2)
-        .then((ready) => (ready ? sweepSessionsToPrimary() : false))
-        .catch((err) => {
-          // The save has LANDED by the time this runs, and its answer has gone
-          // out. A rejection here must not take the web server down over a
-          // sweep whose failure the owner has already been told about.
-          console.warn(
-            "[configure] the deferred session sweep could not run:",
-            err instanceof Error ? logSafe(err.message) : err,
-          );
-        });
-    };
-    try {
-      // The readiness answer is worth waiting for only where something reads
-      // it, and in the wizard nothing does: AIModelsStep's wizard branch logs
-      // `warning` and calls onNext() (Settings is the branch that renders it),
-      // and llamacpp/install, clawai/poll and useOllamaModels all drop it too.
-      // The cost is not theoretical — e2e-install measured THIS request at
-      // 52 894 ms on a cold first boot: ~23 s of config writes and `systemctl
-      // restart`, then the whole 30 s budget, expired. So first boot pays the
-      // full budget for a value with no consumer, on the one path where the
-      // budget is not even enough to answer. Skip the port poll there, exactly
-      // as /setup-api/system/hostname does for its own discarded answer.
-      //
-      // Only the poll is skipped, never the restart: a REFUSED restart still
-      // throws from the exec below and still 502s, in the wizard too. And a
-      // gateway that never comes back is not silent either — the chat the
-      // wizard hands off to cannot open a session without one.
-      await restartGateway({ awaitReady: !firstRunWizard });
-      if (sessionSweepDeferred) {
-        // The port is open once `awaitReady` returns; the RPC is not. In the
-        // wizard the answer has no consumer and no session to speak of, so the
-        // sweep follows readiness in the background; in Settings it is waited
-        // for, because the chat the owner returns to is the one being re-pointed.
-        //
-        // BOUNDED by the same budget the port wait above uses, and no longer:
-        // this box is reachable through the Cloudflare tunnel, whose origin
-        // gives up at ~100 s, and a save that landed reported as "Failed to
-        // configure" is the false failure this wait must not create. Past the
-        // budget the answer goes out saying the pins are still there, and the
-        // sweep follows the gateway on its own — "slow" is not "never".
-        if (firstRunWizard) {
-          scheduleDeferredSweep();
-        } else if (await waitForGatewayRpcReady(gatewayReadyWaitMs())) {
-          sessionSweepFailed = !(await sweepSessionsToPrimary());
-        } else {
-          sessionSweepFailed = true;
-          scheduleDeferredSweep();
-        }
+    //    So the restart is kept for what still needs one, and nothing else:
+    //      - the gateway was STOPPED above for the `doctor --fix` credential
+    //        migration (every subscription sign-in but xAI's); systemd does not
+    //        start a stopped unit by itself, and the ChatGPT sign-in's Codex
+    //        mirrors are regenerated by the boot script on that start;
+    //      - plugin code was installed (the ClawBox AI provider plugin);
+    //      - a setting only a restart applies changed — `gateway.auth.*` when
+    //        the token is rotated, and anything the core's reload table does not
+    //        name (`restartRequiredPaths` diffs openclaw.json against the
+    //        snapshot taken before step 1).
+    //    Everything else waits, bounded, for the gateway to report the new
+    //    config revision applied, then sweeps the open chats. A gateway that
+    //    does not confirm in time is restarted after all: the restart is the
+    //    fallback, never a step skipped on hope.
+    const configAfterSave = await Promise.resolve()
+      .then(() => readOpenClawConfig())
+      .catch(() => ({} as OpenClawConfig));
+    const restartReasons: string[] = [];
+    if (gateway.state === "stopped-for-doctor") {
+      restartReasons.push("it was stopped for the credential migration");
+    }
+    if (providerPluginInstalled) {
+      restartReasons.push("a provider plugin was installed");
+    }
+    const restartPaths = restartRequiredPaths(configBeforeSave ?? {}, configAfterSave ?? {});
+    if (restartPaths.length > 0) {
+      restartReasons.push(`restart-only settings changed (${restartPaths.join(", ")})`);
+    }
+
+    // Resolves once the gateway serves the save and answers RPCs: at once for a
+    // hot apply, after the restart otherwise. What has to follow the gateway —
+    // the session sweep on a restart, the cloud defaults below — chains on it.
+    let gatewayBack: Promise<boolean> = Promise.resolve(true);
+    let gatewayRestarting = false;
+    if (restartReasons.length === 0) {
+      const hot = await awaitGatewayHotApply({
+        baseline: gatewayBaseline,
+        configChanged: diffConfigPaths(configBeforeSave ?? {}, configAfterSave ?? {}).length > 0,
+        // Every OpenClaw save reaching this step has written a credential or a
+        // selection through the CLI (the paste at step 1 or in the ClawBox AI
+        // pass), and `models.authRefresh` is the core's call for exactly that.
+        credentialsWritten: true,
+      });
+      if (hot.applied) {
+        console.log(`[configure] the gateway applied the save without a restart (${hot.how})`);
+        // Awaited: the chat the owner returns to is the one being re-pointed,
+        // and a sweep that could not run is said in this answer.
+        if (sweepTarget) sessionSweepFailed = !(await sweepSessionsToPrimary());
+      } else if (hot.why === "gateway-restarting") {
+        // The core took the save as one only a restart applies and is doing it
+        // itself (hybrid mode). A second restart of ours would only make it
+        // longer; follow that one instead.
+        console.log("[configure] the gateway is restarting by itself to apply the save");
+        gatewayRestarting = true;
+        gatewayBack = waitForGatewayRpcReady(gatewayReadyWaitMs() * 2).catch(() => false);
+      } else {
+        restartReasons.push(`the gateway did not confirm the change (${hot.why})`);
       }
-    } catch (err) {
-      console.error("[configure] Gateway restart failed after configuring", ocProvider, ":", err instanceof Error ? logSafe(err.message) : err);
-      // A gateway that has not finished coming back is NOT a failed configure.
-      // The provider, the credential and the model are all written by the time
-      // this runs; only the wait gave up. This 502 predates the readiness wait,
-      // when it could fire only if `systemctl restart` itself failed — the wait
-      // widened it to "the port did not open inside 30 s", which is a state the
-      // box recovers from on its own, and reporting it as a failure stops the
-      // first-boot wizard dead at the AI step and tells the owner to reboot a
-      // box that needed ten more seconds.
-      //
-      // A restart that was REFUSED is a different fact: nothing is coming, and
-      // the owner does have to act. That one keeps the 502.
-      if (!(err instanceof GatewayNotReadyError)) {
+    }
+    if (restartReasons.length > 0) {
+      console.log(`[configure] restarting the gateway: ${restartReasons.join("; ")}`);
+      gateway.state = "restart-issued";
+      try {
+        // ANSWERED EARLY. The request returns once systemd has taken the restart;
+        // the page waits for the gateway itself (`gatewayRestarting` below, and
+        // /setup-api/gateway/health, which reports a restart still in flight as
+        // unavailable). Holding the request through the stop, the pre-start and
+        // the core start-up is what ran it past the ~100 s the tunnel in front
+        // of this box allows — and what turned a save that had landed into
+        // "gateway did not come back".
+        //
+        // `back` waits twice the port budget for the RPC behind it, because
+        // nobody is holding a request open for it; derived from the same
+        // operator knob (`gatewayReadyWaitMs`, `GATEWAY_READY_WAIT_MS`).
+        const restart = await restartGatewayAnsweringEarly();
+        gatewayRestarting = true;
+        gatewayBack = restart.back;
+      } catch (err) {
+        // A restart that was REFUSED (a masked unit during an update, a missing
+        // one): nothing is coming, and the owner does have to act. The provider,
+        // the credential and the model are all written by now.
+        console.error("[configure] Gateway restart failed after configuring", ocProvider, ":", err instanceof Error ? logSafe(err.message) : err);
         return NextResponse.json(
           { error: "AI model configured but gateway failed to restart. Try rebooting the device." },
           { status: 502 },
         );
       }
-      gatewayWarning = "Saved, but the gateway has not finished restarting — the new model applies once it is serving again.";
-      // The port never came back inside the budget, so the deferred sweep
-      // has not run either: say so now, and still let it follow the gateway
-      // when it does come back rather than leaving the pins for good.
-      if (sessionSweepDeferred) {
-        sessionSweepFailed = true;
-        scheduleDeferredSweep();
-      }
+    }
+    if (gatewayRestarting && sweepTarget) {
+      // The sweep follows the restarted gateway ANSWERING, with nobody waiting
+      // on it: the answer below has already gone out. `.catch` on it — this
+      // file's rule for every detached call, and under Node an unhandled
+      // rejection is a dead process.
+      void gatewayBack
+        .then((ready) => (ready ? sweepSessionsToPrimary() : false))
+        .then((swept) => {
+          if (!swept) {
+            console.warn("[configure] open chats could not be re-pointed after the restart; they keep their previous model");
+          }
+        })
+        .catch((err) => {
+          console.warn(
+            "[configure] the deferred session sweep could not run:",
+            err instanceof Error ? logSafe(err.message) : err,
+          );
+        });
     }
 
     // THE CLOUD DEFAULTS (the owner's decision of 2026-09-14). A ClawBox AI
     // save is the moment the box either gains a subscription or changes the one
     // it has, and the cloud voice, cloud transcription and cloud embeddings all
-    // follow from what that subscription covers. Asked for HERE, after the
-    // gateway restart above, because two of the three writes go through the
-    // openclaw CLI and the entry for the cloud voice is written by
-    // `gateway-pre-start.sh` on the way back up.
+    // follow from what that subscription covers. Asked for HERE, after step 9,
+    // because two of the three writes go through the openclaw CLI and the
+    // entry for the cloud voice is written by `gateway-pre-start.sh` when a
+    // restart brings the gateway back.
     //
     // Best effort, and never awaited for its answer: the save has landed, and
     // the applier's own contract is that it never rejects and never demotes.
@@ -4315,9 +4413,10 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // sat on a save that had already landed. Nothing in the answer depends on
     // it, and the boot hook re-runs the same pass 45 s into every start.
     //
-    // AFTER THE GATEWAY ANSWERS. In the wizard the restart above does not wait
-    // for readiness, so the applier's openclaw.json writes (voice provider,
-    // memory embedder) used to land while the gateway was still starting. The
+    // AFTER THE GATEWAY ANSWERS (`gatewayBack`: at once after a hot apply, once
+    // the restarted gateway answers otherwise). A restart is answered before it
+    // is over, and the applier's openclaw.json writes (voice provider, memory
+    // embedder) used to land while the gateway was still starting. The
     // gateway treats a config that changes under its startup migrations as
     // unusable and exits with EX_CONFIG (78), which the unit deliberately does
     // not restart — a freshly linked box finished the wizard with no gateway
@@ -4328,7 +4427,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // Started inside a promise so even a synchronous throw from the wait
       // stays on this detached chain and never reaches the answer.
       void Promise.resolve()
-        .then(() => waitForGatewayRpcReady(gatewayReadyWaitMs() * 2))
+        .then(() => gatewayBack)
         .catch(() => false)
         .then(() => import("@/lib/clawai-cloud-defaults"))
         .then(({ applyClawaiCloudDefaults }) =>
@@ -4352,8 +4451,8 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
 
     // Configuration fully applied — now consume the OAuth handoff file (if any).
     // Deferring the unlink to here means a failure that returned EARLY left the
-    // file intact, so the client can retry within the TTL. A gateway that has
-    // not finished restarting is not one of those: it falls through to here and
+    // file intact, so the client can retry within the TTL. A gateway that is
+    // still restarting is not one of those: it falls through to here and
     // consumes the file, which is right — the configure landed, and a retry
     // would redo a completed save.
     if (pendingHandoffTokensPath) {
@@ -4366,12 +4465,18 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     const sessionSweepWarning = sessionSweepFailed
       ? "Saved, but a chat that was already open keeps its previous model — pick the model again in its header."
       : undefined;
-    const warning = [chatgptOrderWarning, unvalidatedPrimaryWarning, hermesWarning, gatewayWarning, sessionSweepWarning]
+    const warning = [chatgptOrderWarning, unvalidatedPrimaryWarning, hermesWarning, sessionSweepWarning]
       .filter(Boolean)
       .join(" ");
     return NextResponse.json({
       success: true,
       ...(warning ? { warning } : {}),
+      // The save landed and the gateway is coming back from a restart this
+      // answer did not wait for. Settings holds its "Restarting gateway" row
+      // until /setup-api/gateway/health says it is back, and shows the notice
+      // only if it is not back within its own wait; callers that do not wait
+      // can show it as it is. Not a warning: nothing failed.
+      ...(gatewayRestarting ? { gatewayRestarting: true, restartingNotice: GATEWAY_RESTARTING_NOTICE } : {}),
       // The plan may have moved while the model deliberately did not (TASK-713).
       // Reported so the plan card can say so, rather than answering 200 over a
       // screen where nothing appears to have happened.

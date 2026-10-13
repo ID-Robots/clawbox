@@ -17,6 +17,7 @@ import { DISABLED_PROVIDERS_KEY, parseDisabledProviders } from "@/lib/provider-s
 import { ANTHROPIC_PLUGIN_ENABLED_KEY } from "@/lib/provider-plugin-ops";
 import { isDiscordSnowflake, isSafeDiscordToken } from "@/lib/discord-api";
 import { envPort, waitForPortOpen } from "@/lib/port-probe";
+import { markGatewayRestartBegun } from "@/lib/gateway-restart-tracker";
 import { getLocalAiToken } from "@/lib/local-ai-token";
 import { LEGACY_EXEC_APPROVALS_RE } from "@/lib/openclaw-doctor-blocker";
 import {
@@ -2862,11 +2863,10 @@ export async function clearTelegramPairingState(account = "default"): Promise<vo
 // plugin runtime)"), and a plugin flipped through the gateway's own
 // `config.patch` was measured applying in 400 ms with the process id unchanged
 // (a box, 2026-09-17). So `src/app/setup-api/chat/model/route.ts` restarts
-// nothing. The ONE caller that still does is
-// `src/app/setup-api/ai-models/configure/route.ts`, and not for this write:
-// that route also rewrites provider entries and auth profiles during a
-// first-run save, where one restart is cheaper than reasoning about which of
-// the keys in that batch hot-applies.
+// nothing, and since TASK-1535 neither does
+// `src/app/setup-api/ai-models/configure/route.ts` for a save whose changes
+// all hot-apply: it classifies the batch with the core's reload table
+// (`@/lib/gateway-hot-apply`) instead of restarting to be safe.
 
 /**
  * Does this box hold an Anthropic credential the owner has not switched off —
@@ -3216,6 +3216,19 @@ export function gatewayRestartGeneration(): number {
 
 export async function restartGateway(options: RestartGatewayOptions = {}): Promise<void> {
   if (gatewayIsAbsent()) return;
+  // Held for the whole call, so `/setup-api/gateway/health` does not call the
+  // OLD process "available" while systemd is still stopping it — the window a
+  // page waiting on a restart it was answered early about would otherwise
+  // mistake for the gateway being back (see `@/lib/gateway-restart-tracker`).
+  const restartOver = markGatewayRestartBegun();
+  try {
+    await restartGatewayOnce(options);
+  } finally {
+    restartOver();
+  }
+}
+
+async function restartGatewayOnce(options: RestartGatewayOptions): Promise<void> {
   // The FIRST of the two bumps — see gatewayRestartCount. Before the restart,
   // so a row read from the gateway that is about to go down is already stale.
   gatewayRestartCount += 1;
