@@ -26,10 +26,13 @@ const CLAWBOX_AI_DEVICE_POLL_URL =
 const CONFIGURING_TIMEOUT_MS = 3 * 60 * 1000;
 
 // How long the background configure follows the gateway restart a sign-in
-// ends in before it calls the session complete anyway. Inside
-// CONFIGURING_TIMEOUT_MS with the configure's own writes in front of it, so the
-// page is never told a sign-in failed that is only waiting on the gateway.
+// ends in before it calls the session complete anyway — and never past what is
+// left of CONFIGURING_TIMEOUT_MS, less a margin for the session write: the
+// configure's own writes (its `doctor --fix` alone may take minutes) come
+// first, and a wait that outlived the window would have the poll below answer
+// "setup timed out" over a sign-in that landed.
 const GATEWAY_BACK_WAIT_MS = 90 * 1000;
+const CONFIGURING_TIMEOUT_MARGIN_MS = 15 * 1000;
 
 interface UpstreamPollResponse {
   status?: string;
@@ -203,8 +206,15 @@ async function runConfigureInBackground(session: ClawAiConnectSession, accessTok
     // again, and "complete" keeps meaning a box the owner can chat with. A
     // gateway slower than the wait is not a failure: the sign-in landed, and the
     // notice says it is still coming back.
-    if (gatewayRestarting && !(await waitForGatewayBack(GATEWAY_BACK_WAIT_MS))) {
-      warning = [warning, restartingNotice].filter(Boolean).join(" ") || null;
+    if (gatewayRestarting) {
+      const configuringFor = Date.now() - (session.configuringStartedAt ?? session.createdAt);
+      const waitMs = Math.min(
+        GATEWAY_BACK_WAIT_MS,
+        CONFIGURING_TIMEOUT_MS - CONFIGURING_TIMEOUT_MARGIN_MS - configuringFor,
+      );
+      if (!(waitMs > 0 && (await waitForGatewayBack(waitMs)))) {
+        warning = [warning, restartingNotice].filter(Boolean).join(" ") || null;
+      }
     }
 
     await writeClawAiSession({
