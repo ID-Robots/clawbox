@@ -46,6 +46,7 @@ import { processStore } from "@/lib/process-store";
 import {
   SWAP_CONSUMERS,
   activeAccountSnapshot,
+  markCredentialProblem,
   markLimited,
   onActiveChange,
   probeAccountCredential,
@@ -461,6 +462,10 @@ export async function reportAnthropicFailure(report: FailureReport): Promise<Fai
     if (known && report.accountId) {
       if (failure.type === "limit") {
         await markLimited(report.accountId, limitUntil(failure.limit, now), failure.limit.kind, { source: report.source });
+      } else if (failure.permanent) {
+        // Refused for good (its organisation switched it off): the token would
+        // renew, so there is nothing to confirm — it is out until the owner acts.
+        await markCredentialProblem(report.accountId, "revoked", { source: report.source });
       } else {
         // Confirmed first: a token the pool can still renew was only stale
         // where it was used, and the account stays in.

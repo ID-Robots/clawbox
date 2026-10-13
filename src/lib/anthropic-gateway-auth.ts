@@ -41,7 +41,12 @@
  * `usageStats[<id>]` and skips the profile until the cooldown ends. The same
  * profile id now holds a different account, so its stats are the old account's
  * and are cleared — otherwise the gateway would sit out the old account's
- * cooldown on the new one.
+ * cooldown on the new one. Since OpenClaw 2026.9 they are NOT in the store
+ * blob: each sqlite store keeps them in a STATE row of its own beside it
+ * (`auth_profile_state` / `authProfiles.state`), which core merges over the
+ * credentials when it loads them, so that row is cleared in the same
+ * transaction as the write — by the one rule openclaw-auth-store.ts uses too
+ * (clearUsageStats, below). Only the legacy JSON file still carries them inline.
  *
  * Runs as the web server's own user — the gateway's (see restartGateway) — so
  * a write never leaves a store or its WAL owned by anyone else.
@@ -50,6 +55,7 @@
 import crypto from "crypto";
 import fs from "fs";
 import os from "os";
+import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 import path from "@/lib/runtime-path";
 import { openSqlite } from "@/lib/openclaw-session-store";
 
@@ -137,11 +143,11 @@ function describe(blob: StoreBlob | null, store: GatewayStoreKind, agentId: stri
   return out;
 }
 
-/** Put the token into every subscription profile of one blob; answers how many it changed. */
-function rewrite(blob: StoreBlob, token: { access: string; expires: number | null }): number {
+/** Put the token into every subscription profile of one blob; answers the ids it changed. */
+function rewrite(blob: StoreBlob, token: { access: string; expires: number | null }): string[] {
   const profiles = blob.profiles;
-  if (!profiles || typeof profiles !== "object") return 0;
-  let changed = 0;
+  if (!profiles || typeof profiles !== "object") return [];
+  const changed: string[] = [];
   for (const [profileId, entry] of Object.entries(profiles)) {
     const type = subscriptionType(profileId, entry);
     if (!type) continue;
@@ -153,8 +159,9 @@ function rewrite(blob: StoreBlob, token: { access: string; expires: number | nul
     }
     if (token.expires !== null) entry.expires = token.expires;
     else delete entry.expires;
+    // The legacy file's own copy of the stats; a sqlite store's are in its state row.
     if (blob.usageStats && typeof blob.usageStats === "object") delete blob.usageStats[profileId];
-    changed += 1;
+    changed.push(profileId);
   }
   return changed;
 }
@@ -196,6 +203,63 @@ export function ownsSharedStore(valueJson: unknown): boolean {
 
 const SHARED_STORE_KEY = "authProfiles.store";
 const SHARED_OWNERSHIP_KEY = "auth.sharedStore";
+
+/** One JSON cell of an OpenClaw store: its table, its row, and the statements that read and replace it. */
+export interface AuthStoreCell {
+  table: string;
+  key: string;
+  select: string;
+  update: string;
+}
+
+/** Per sqlite store, the row its usage stats and cooldowns are in (see the header). */
+export const AUTH_STATE_CELLS: Record<"shared" | "agent", AuthStoreCell> = {
+  shared: {
+    table: "config_machine_state",
+    key: "authProfiles.state",
+    select: "SELECT value_json AS json, updated_at_ms AS at FROM config_machine_state WHERE state_key = ?",
+    update: "UPDATE config_machine_state SET value_json = ?, updated_at_ms = ? WHERE state_key = ?",
+  },
+  agent: {
+    table: "auth_profile_state",
+    key: "primary",
+    select: "SELECT state_json AS json, updated_at AS at FROM auth_profile_state WHERE state_key = ?",
+    update: "UPDATE auth_profile_state SET state_json = ?, updated_at = ? WHERE state_key = ?",
+  },
+};
+
+/** One row of an OpenClaw store: its JSON text and the timestamp column beside it. */
+export interface StoredRow {
+  json: unknown;
+  at: unknown;
+}
+
+/**
+ * The cell's row, or undefined when its table or its row is not there — asked
+ * of sqlite_master first, the way core does, so "no such table" is an answer
+ * and only a database that cannot be asked throws.
+ */
+export function readRow(db: DatabaseSyncType, cell: Pick<AuthStoreCell, "table" | "key" | "select">): StoredRow | undefined {
+  const table = db.prepare("SELECT type FROM sqlite_master WHERE name = ?").get(cell.table) as { type?: unknown } | undefined;
+  if (table?.type !== "table") return undefined;
+  return db.prepare(cell.select).get(cell.key) as StoredRow | undefined;
+}
+
+/**
+ * Drop `profileIds`' usage stats from a store's state row, inside the caller's
+ * transaction. The stats under an id are the credential's that was there:
+ * left in place, its cooldown keeps the new one unused until it runs out.
+ * Writes nothing when the row holds none of them, and creates no table or row.
+ */
+export function clearUsageStats(db: DatabaseSyncType, cell: AuthStoreCell, profileIds: readonly string[], now: number): void {
+  const state = parseBlob(readRow(db, cell)?.json);
+  const stats = state?.usageStats;
+  if (!state || !stats || typeof stats !== "object") return;
+  const held = profileIds.filter((id) => Object.hasOwn(stats, id));
+  if (held.length === 0) return;
+  for (const id of held) delete stats[id];
+  db.prepare(cell.update).run(JSON.stringify(state), now, cell.key);
+}
 
 /** Every Claude subscription profile the gateway could read, across every agent and store. */
 export function listGatewayAnthropicProfiles(paths: GatewayAuthPaths = gatewayAuthPaths()): GatewayAnthropicProfile[] {
@@ -242,8 +306,12 @@ export function listGatewayAnthropicProfiles(paths: GatewayAuthPaths = gatewayAu
   return found;
 }
 
-/** One IMMEDIATE read-modify-write of a JSON blob in a sqlite row; answers the profiles changed, or throws. */
-function rewriteRow(dbPath: string, select: string, update: string, key: string, token: { access: string; expires: number | null }, withTimestamp: boolean): number {
+/**
+ * One IMMEDIATE read-modify-write of a JSON blob in a sqlite row, and the
+ * changed profiles' cooldowns out of `state` in the same transaction — they
+ * land together or not at all. Answers the profiles changed, or throws.
+ */
+function rewriteRow(dbPath: string, select: string, update: string, key: string, token: { access: string; expires: number | null }, withTimestamp: boolean, state: AuthStoreCell): number {
   const db = openSqlite(dbPath, false);
   let open = false;
   try {
@@ -251,14 +319,16 @@ function rewriteRow(dbPath: string, select: string, update: string, key: string,
     open = true;
     const row = db.prepare(select).get(key) as Record<string, unknown> | undefined;
     const blob = parseBlob(row ? Object.values(row)[0] : null);
-    const changed = blob ? rewrite(blob, token) : 0;
-    if (changed > 0) {
-      if (withTimestamp) db.prepare(update).run(JSON.stringify(blob), Date.now(), key);
+    const changed = blob ? rewrite(blob, token) : [];
+    if (changed.length > 0) {
+      const now = Date.now();
+      if (withTimestamp) db.prepare(update).run(JSON.stringify(blob), now, key);
       else db.prepare(update).run(JSON.stringify(blob), key);
+      clearUsageStats(db, state, changed, now);
     }
     db.exec("COMMIT");
     open = false;
-    return changed;
+    return changed.length;
   } finally {
     if (open) {
       try {
@@ -288,7 +358,7 @@ export function writeGatewayAnthropicToken(
     if (isFile(jsonPath)) {
       try {
         const blob = parseBlob(fs.readFileSync(jsonPath, "utf-8"));
-        const changed = blob ? rewrite(blob, token) : 0;
+        const changed = blob ? rewrite(blob, token).length : 0;
         if (changed > 0) {
           const tmp = `${jsonPath}.tmp.${process.pid}.${crypto.randomBytes(4).toString("hex")}`;
           fs.writeFileSync(tmp, JSON.stringify(blob, null, 2), { mode: 0o600 });
@@ -309,6 +379,7 @@ export function writeGatewayAnthropicToken(
         "primary",
         token,
         true,
+        AUTH_STATE_CELLS.agent,
       );
     } catch {
       failed += 1;
@@ -336,6 +407,7 @@ export function writeGatewayAnthropicToken(
           SHARED_STORE_KEY,
           token,
           false,
+          AUTH_STATE_CELLS.shared,
         );
       } catch {
         failed += 1;

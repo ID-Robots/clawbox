@@ -67,6 +67,9 @@ const OK_RESULT = JSON.stringify({ type: "result", subtype: "success", is_error:
 const AUTH_LINE = "Invalid API key · Please run /login";
 const SYNTHETIC_AUTH = JSON.stringify({ type: "assistant", error: "authentication_failed", message: { model: "<synthetic>", content: [{ type: "text", text: AUTH_LINE }] } });
 const AUTH_RESULT = JSON.stringify({ type: "result", subtype: "success", is_error: true, result: AUTH_LINE, num_turns: 1 });
+/** What a run on a subscription its organisation switched off ended with (TASK-1271): the line, untagged. */
+const DISABLED_LINE = "Your organization has disabled Claude subscription access for Claude Code";
+const DISABLED_RESULT = JSON.stringify({ type: "result", subtype: "success", is_error: true, result: DISABLED_LINE, num_turns: 1 });
 
 function callsLog(): string {
   return path.join(base, "calls.log");
@@ -86,7 +89,7 @@ function calls(): { n: number; cred: string; args: string }[] {
  * (works until something ends it). It reads — and deletes — the credential
  * handoff exactly as the real wrapper does, and logs what it was handed.
  */
-function installWrapper(plan: readonly ("limit" | "ok" | "hang" | "auth")[]): void {
+function installWrapper(plan: readonly ("limit" | "ok" | "hang" | "auth" | "disabled")[]): void {
   fs.writeFileSync(path.join(base, "plan"), `${plan.join("\n")}\n`);
   fs.writeFileSync(path.join(binDir, "claude"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
   fs.writeFileSync(
@@ -103,6 +106,7 @@ function installWrapper(plan: readonly ("limit" | "ok" | "hang" | "auth")[]): vo
       'case "$mode" in',
       `  limit) printf '%s\\n' ${sq(INIT)} ${sq(SYNTHETIC_LIMIT)} ${sq(LIMIT_RESULT)}; exit 1 ;;`,
       `  auth) printf '%s\\n' ${sq(INIT)} ${sq(SYNTHETIC_AUTH)} ${sq(AUTH_RESULT)}; exit 1 ;;`,
+      `  disabled) printf '%s\\n' ${sq(INIT)} ${sq(DISABLED_RESULT)}; exit 1 ;;`,
       `  hang) printf '%s\\n' ${sq(INIT)}; sleep 30; exit 0 ;;`,
       `  *) printf '%s\\n' ${sq(INIT)} ${sq(OK_RESULT)}; exit 0 ;;`,
       "esac",
@@ -348,6 +352,73 @@ describe("an account Anthropic refuses mid-run (TASK-1260)", () => {
     expect(run.status).toBe("failed");
     expect(run.error).toMatch(/Anthropic refused the credential of every account/);
     expect(calls()).toHaveLength(1);
+  });
+
+  it("takes out an account its organisation switched off without asking Anthropic, and carries the run on on the next", async () => {
+    installWrapper(["disabled", "ok"]);
+    makeProject("site");
+    const tokens = (access: string) => ({ access, refresh: `refresh-${access}`, expires: Date.now() + 8 * 3_600_000 });
+    const work = await pool.addOAuthAccount({ label: "Work", email: "work@example.com", tokens: tokens("work-access") });
+    const personal = await pool.addOAuthAccount({ label: "Personal", email: "me@example.com", tokens: tokens("personal-access") });
+    // The grant renews fine: a probe would have kept the account and put the run straight back on it.
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ access_token: "renewed", refresh_token: "r2", expires_in: 28_800 }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const run = await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner", provider: "anthropic" })).id);
+
+    expect(run.status).toBe("completed");
+    expect(run.anthropicAccount).toBe(personal.id);
+    expect(run.accountSwitches).toEqual([expect.objectContaining({ fromId: work.id, toId: personal.id, kind: "auth" })]);
+    expect(calls()[1].cred).toBe("oauth:personal-access:");
+    expect((await pool.readAccounts()).find((a) => a.id === work.id)?.status).toBe("revoked");
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/oauth/token"))).toEqual([]);
+  });
+
+  it("does not tell the owner every account was refused when the next one's sign-in only could not be renewed", async () => {
+    installWrapper(["auth", "ok"]);
+    makeProject("site");
+    const hours = (n: number) => Date.now() + n * 3_600_000;
+    await pool.addOAuthAccount({ label: "Work", email: "work@example.com", tokens: { access: "work-access", refresh: "refresh-work", expires: hours(8) } });
+    // Its token ran out while the box was offline; the grant behind it is fine.
+    await pool.addOAuthAccount({ label: "Personal", email: "me@example.com", tokens: { access: "personal-access", refresh: "refresh-personal", expires: hours(-0.1) } });
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => { throw new TypeError("fetch failed"); }));
+
+    const run = await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner", provider: "anthropic" })).id);
+
+    expect(run.status).toBe("failed");
+    expect(run.error).not.toMatch(/refused the credential of every account/);
+    expect(run.error).toMatch(/could not be renewed/);
+    expect((await pool.readAccounts()).map((a) => a.status)).toEqual(["ok", "ok"]);
+    expect(calls()).toHaveLength(1);
+  });
+
+  it("still says the credential was refused when the run's own account was refused and nothing else can answer", async () => {
+    installWrapper(["auth", "ok"]);
+    makeProject("site");
+    await pool.addApiKeyAccount({ label: "Only", key: KEY_A });
+    // Anthropic refused the key in the run; the check afterwards only got a 503, so the account stays listed as fine.
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => new Response("{}", { status: 503 })));
+
+    const run = await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner", provider: "anthropic" })).id);
+
+    expect(run.status).toBe("failed");
+    expect(run.error).toMatch(/refused the credential this run was using/);
+    expect(run.error).not.toMatch(/offline/);
+  });
+
+  it("does not call a sign-in that only could not be checked again refused for good", async () => {
+    installWrapper(["auth", "ok"]);
+    makeProject("site");
+    // The only account: its token ran out mid-run while the box was offline, so the renewal that would confirm it cannot be made.
+    await pool.addOAuthAccount({ label: "Only", email: "only@example.com", tokens: { access: "only-access", refresh: "refresh-only", expires: Date.now() + 8 * 3_600_000 } });
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => { throw new TypeError("fetch failed"); }));
+
+    const run = await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner", provider: "anthropic" })).id);
+
+    expect(run.status).toBe("failed");
+    expect(run.error).not.toMatch(/refused the credential of every account/);
+    expect(run.error).toMatch(/could not be checked again/);
+    expect((await pool.readAccounts())[0].status).toBe("ok");
   });
 
   it("does not bounce a run for ever on a refusal nobody can pin on the account", async () => {

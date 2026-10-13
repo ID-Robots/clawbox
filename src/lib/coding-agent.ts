@@ -203,6 +203,7 @@ import {
   anotherAccountLikely,
   accountsSnapshot,
   activeAccountSnapshot,
+  markCredentialProblem,
   markLimited,
   onLimitReset,
   prepareAccount,
@@ -217,6 +218,7 @@ import {
   type SwapConsumerOutcome,
 } from "@/lib/anthropic-accounts";
 import {
+  detectAnthropicAccountDisabled,
   detectAnthropicAuthFailure,
   detectAnthropicLimit,
   formatResetClock,
@@ -10476,6 +10478,8 @@ async function continueOnAnotherAccount(
   const fromLabel = carriedAccount?.label ?? accountsSnapshot()?.find((a) => a.id === fromId)?.label ?? null;
   const exclude = new Set<string>();
   let recorded: LimitRecorded | null = null;
+  // What asking Anthropic about a refused credential answered, when it was asked.
+  let authVerdict: "ok" | "dead" | "unknown" | null = null;
   if (why.kind === "limit") {
     recorded = await recordAccountLimit(run, why.found);
     if (fromId) exclude.add(fromId);
@@ -10484,30 +10488,55 @@ async function continueOnAnotherAccount(
     // renew was only stale in this process, and the run goes on on the SAME
     // account with a fresh token. A dead one is marked (which moves the box's
     // active account); one Anthropic could not be asked about sits this spawn out.
-    const verdict = await probeAccountCredential(fromId, verifyAnthropicKey, { source: "coding", runId: run.id }).catch(() => "unknown" as const);
-    console.error(`[coding-agent] ${run.id}: Anthropic refused account ${fromId}'s credential; asked again, it is ${verdict}`);
+    // An account its organisation switched off is not asked about: its grant
+    // renews fine, so the probe would keep it and put the run straight back on it.
+    const disabled = detectAnthropicAccountDisabled(why.text);
+    const verdict = disabled
+      ? await markCredentialProblem(fromId, "revoked", { source: "coding", runId: run.id }).then(() => "dead" as const, () => "unknown" as const)
+      : await probeAccountCredential(fromId, verifyAnthropicKey, { source: "coding", runId: run.id }).catch(() => "unknown" as const);
+    console.error(`[coding-agent] ${run.id}: Anthropic refused account ${fromId}'s credential; ${disabled ? "its organization switched it off, so" : "asked again,"} it is ${verdict}`);
+    authVerdict = verdict;
     if (verdict !== "ok") exclude.add(fromId);
   }
   let prepared: PreparedAccount | null = null;
   let nextResetAt: number | null = recorded?.health.nextResetAt ?? null;
+  // Could another account than the one(s) just left behind answer, as far as
+  // the pool knows? Null when the pool could not be read at all.
+  let otherAccountOk: boolean | null = null;
   try {
     const answer = await prepareAccount({ exclude });
     prepared = answer.prepared;
     nextResetAt = answer.health.nextResetAt ?? nextResetAt;
+    const now = Date.now();
+    otherAccountOk = (accountsSnapshot() ?? []).some((a) => !exclude.has(a.id) && isUsable(a, now));
   } catch (err) {
     console.error(`[coding-agent] ${run.id}: the Anthropic account pool could not be read:`, err instanceof Error ? err.message : err);
   }
   if (run.status !== "running" || live.has(run.id)) return;
 
   if (!prepared) {
-    // Nobody else can answer after all (another run got there first, or the
-    // next account's credential turned out dead). Wait for the first reset,
+    // Nobody else can answer after all (the next account's credential turned
+    // out dead, or could not be renewed just now). Wait for the first reset,
     // settled through finishRun's ordinary tail as the pause it is — or, when
     // no account comes back by itself, fail with the one thing that helps.
     const resetsAt = nextResetAt ?? (why.kind === "limit" ? why.found.until : null);
     if (resetsAt === null) {
-      state.forcedAccountFailure = "Anthropic refused the credential of every account this run could use."
-        + " Sign one in again in Settings → Providers → Anthropic accounts, then resume the run.";
+      // Another account that can answer is still on the list: its sign-in only
+      // could not be renewed (or read) just now, which marks nothing — so
+      // "refused, sign in again" would be false while the card shows it fine.
+      // A failed run cannot be resumed in place (resumeRun takes a paused or
+      // gave-up one), so the way out is a new start, never "resume".
+      state.forcedAccountFailure = otherAccountOk === null
+        ? "The Anthropic account list could not be read, so the run could not be moved to another account. Start the run again in a moment."
+        : otherAccountOk
+          ? "Another Anthropic account could take this run over, but its sign-in could not be renewed or read just now; the box may be offline."
+            + " Start the run again once the box is back online."
+          : authVerdict === "unknown"
+            // Refused in the run, and asking again got no answer — its grant may well be fine.
+            ? "Anthropic refused the credential this run was using, and it could not be checked again just now."
+              + " If the account was signed out, sign it in again in Settings → Providers → Anthropic accounts; then start the run again."
+            : "Anthropic refused the credential of every account this run could use."
+              + " Sign one in again in Settings → Providers → Anthropic accounts, then start the run again.";
       finishRun(run, state, exitCode);
       return;
     }

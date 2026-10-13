@@ -292,6 +292,42 @@ describe("a restart that failed, and two writers at once", () => {
     await expectAt(310, 6);
   }, 20_000);
 
+  it("backs off the same way when a store it cannot write keeps the old token through every restart", async () => {
+    const gateway = fakeGateway();
+    const { work } = await twoClaudeAccounts();
+    const restart = vi.fn(async (): Promise<void> => undefined);
+    gw._setGatewayDepsForTests({
+      absent: () => false,
+      // A second agent's store that a `sudo openclaw …` left root-owned: it is
+      // read, never written, and holds the chat's old sign-in for good.
+      list: () => [
+        { store: "agent", agentId: "main", profileId: "anthropic:default", type: "oauth", fingerprint: fp(gateway.token!), expires: null },
+        { store: "agent", agentId: "ops", profileId: "anthropic:default", type: "oauth", fingerprint: fp("sk-ant-oat01-the-chats-own-sign-in"), expires: null },
+      ],
+      write: (token) => { gateway.token = token.access; return { written: 1, failed: 1 }; },
+      restart,
+      reachable: async () => true,
+      call: async () => ({}),
+    });
+    gw.startGatewaySwap();
+    await pool.markLimited(work.id, Date.now() + H, "session");
+    await swap.whenSwapsSettled();
+    expect((await pool.describePool()).lastSwap?.consumers.gateway).toMatchObject({ status: "failed", code: "write_lost" });
+    expect(restart).toHaveBeenCalledTimes(2);
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const start = Date.now();
+    const pass = async (atMin: number) => { vi.setSystemTime(start + atMin * 60_000); return gw.keepGatewayMirror(); };
+    expect(await pass(10)).toBe("failed");
+    expect(restart).toHaveBeenCalledTimes(4);
+    // Not twice more every ten minutes for ever, each restart killing every
+    // chat on the box: the keeper waits, as it does for a restart that fails.
+    expect(await pass(20)).toBe("failed");
+    expect(restart).toHaveBeenCalledTimes(4);
+    expect(await pass(30)).toBe("failed");
+    expect(restart).toHaveBeenCalledTimes(6);
+  }, 20_000);
+
   it("makes the keeper wait for a swap in progress instead of mistaking its token for the owner's", async () => {
     const gateway = fakeGateway();
     const { work, personal } = await twoClaudeAccounts();
@@ -360,9 +396,9 @@ describe("failed gateway turns", () => {
     const gateway = fakeGateway();
     gw.startGatewaySwap();
     const { work, personal } = await twoClaudeAccounts();
-    // The gateway already follows account #1.
+    // The gateway already follows account #1 — and has for a while when the heartbeat runs.
     await gw.syncGatewayTo(work.id, { restart: false });
-    const now = Date.now();
+    const now = Date.now() + 5_000;
     gateway.cronJobs = [
       { id: "heartbeat-main", state: { lastStatus: "error", lastError: LIMIT, lastRunAtMs: now - 1_000 } },
       { id: "daily-digest", state: { lastStatus: "ok", lastRunAtMs: now - 2_000 } },
@@ -377,6 +413,184 @@ describe("failed gateway turns", () => {
 
     // Looked at once: the next pass does not report the same run again.
     expect(await gw.scanGatewayCrons(now + 1)).toBe(0);
+  });
+
+  it("still blames the account for a run just before its own token was renewed in the gateway", async () => {
+    const gateway = fakeGateway();
+    gw.startGatewaySwap();
+    const { work } = await twoClaudeAccounts();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const T = Date.now();
+    vi.setSystemTime(T - 60 * 60_000);
+    await gw.syncGatewayTo(work.id, { restart: false });
+    // The pool renewed Work's grant elsewhere; the gateway is handed the new token at T. Same account, not a move.
+    await pool.replaceCredential(work.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-work-v2"), email: "work@example.com" });
+    vi.setSystemTime(T);
+    expect(await gw.syncGatewayTo(work.id, { restart: false })).toMatchObject({ status: "ok", code: "renewed" });
+    gateway.cronJobs = [{ id: "heartbeat-main", state: { lastStatus: "error", lastError: LIMIT, lastRunAtMs: T - 60_000 } }];
+    vi.setSystemTime(T + 30_000);
+    await gw.scanGatewayCrons(T + 30_000);
+    expect((await pool.readAccounts()).find((a) => a.id === work.id)).toMatchObject({ status: "limited", limitKind: "weekly" });
+  });
+
+  it("does not blame the account the gateway has just moved to for cron runs that ran on the one before", async () => {
+    const gateway = fakeGateway();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const T = Date.now();
+    vi.setSystemTime(T - 10 * 60_000);
+    await gw.syncGatewayTo(work.id, { restart: false });
+    // The chat hit Work's limit at T, and the swap moved the gateway to Personal…
+    vi.setSystemTime(T);
+    await pool.markLimited(work.id, T + H, "weekly", { source: "chat" });
+    await swap.whenSwapsSettled();
+    expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: personal.id, pending: false });
+    // …while two heartbeats had already failed on Work a minute before.
+    gateway.cronJobs = [
+      { id: "heartbeat-main", state: { lastStatus: "error", lastError: LIMIT, lastRunAtMs: T - 60_000 } },
+      { id: "heartbeat-ops", state: { lastStatus: "error", lastError: LIMIT, lastRunAtMs: T - 55_000 } },
+    ];
+    vi.setSystemTime(T + 30_000);
+    await gw.scanGatewayCrons(T + 30_000);
+
+    expect((await pool.readAccounts()).find((a) => a.id === personal.id)?.status).toBe("ok");
+    expect((await pool.readPoolState()).activeId).toBe(personal.id);
+    // Each is still run once more — on the account the gateway is on now.
+    expect(gateway.calls.filter((c) => c.method === "cron.run").map((c) => c.params.id).sort()).toEqual(["heartbeat-main", "heartbeat-ops"]);
+  });
+
+  it("blames no account for a cron run or a chat turn while the restart is owed and the store does not hold the new token", async () => {
+    const gateway = fakeGateway();
+    const { work, personal } = await twoClaudeAccounts();
+    const workToken = "sk-ant-oat01-work";
+    gw._setGatewayDepsForTests({
+      absent: () => false,
+      list: () => [{ store: "agent", agentId: "main", profileId: "anthropic:default", type: "oauth", fingerprint: fp(gateway.token!), expires: null }],
+      write: (token) => { gateway.token = token.access; return { written: 1, failed: 0 }; },
+      // The gateway put its own (Work) copy back on the way down, then did not come back.
+      restart: async () => { gateway.token = workToken; throw new Error("gateway did not come back"); },
+      reachable: async () => false,
+      call: async (method, params) => {
+        gateway.calls.push({ method, params });
+        return method === "cron.list" ? { jobs: gateway.cronJobs } : { ok: true };
+      },
+    });
+    gw.startGatewaySwap();
+    await pool.markLimited(work.id, Date.now() + H, "session");
+    await swap.whenSwapsSettled();
+    // The restart is owed and the store holds Work's token again: the gateway may still be on Work.
+    expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: personal.id, pending: true });
+    expect(gateway.token).toBe(workToken);
+
+    const now = Date.now() + 5_000;
+    gateway.cronJobs = [{ id: "heartbeat-main", state: { lastStatus: "error", lastError: LIMIT, lastRunAtMs: now - 1_000 } }];
+    await gw.scanGatewayCrons(now);
+    await gw.reportChatFailure({ detail: `HTTP 429: ${LIMIT}`, reason: "rate_limit", provider: "anthropic", sessionKey: "agent:main:main", message: "Summarise my inbox" });
+
+    expect((await pool.readAccounts()).find((a) => a.id === personal.id)?.status).toBe("ok");
+  });
+
+  it("while the restart is owed, blames the new account for an agent whose stores hold its token — not for the one whose store it cannot write", async () => {
+    const gateway = fakeGateway();
+    const { work, personal } = await twoClaudeAccounts();
+    gw._setGatewayDepsForTests({
+      absent: () => false,
+      // As in the back-off case above: the "ops" agent's store is read, never written.
+      list: () => [
+        { store: "agent", agentId: "main", profileId: "anthropic:default", type: "oauth", fingerprint: fp(gateway.token!), expires: null },
+        { store: "agent", agentId: "ops", profileId: "anthropic:default", type: "oauth", fingerprint: fp("sk-ant-oat01-the-chats-own-sign-in"), expires: null },
+      ],
+      write: (token) => { gateway.token = token.access; return { written: 1, failed: 1 }; },
+      restart: async () => undefined,
+      reachable: async () => true,
+      call: async (method, params) => {
+        gateway.calls.push({ method, params });
+        return method === "cron.list" ? { jobs: gateway.cronJobs } : { ok: true };
+      },
+    });
+    gw.startGatewaySwap();
+    await pool.markLimited(work.id, Date.now() + H, "session");
+    await swap.whenSwapsSettled();
+    // write_lost leaves the move owed for good.
+    expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: personal.id, pending: true });
+
+    // A cron of the agent whose store still holds the old sign-in did not run on Personal…
+    const now = Date.now() + 5_000;
+    gateway.cronJobs = [{ id: "ops-digest", agentId: "ops", state: { lastStatus: "error", lastError: LIMIT, lastRunAtMs: now - 1_000 } }];
+    await gw.scanGatewayCrons(now);
+    expect((await pool.readAccounts()).find((a) => a.id === personal.id)?.status).toBe("ok");
+
+    // …while the main chat, whose stores took Personal's token, did — and hit Personal's own limit.
+    await gw.reportChatFailure({ detail: `HTTP 429: ${LIMIT}`, reason: "rate_limit", provider: "anthropic", sessionKey: "agent:main:main" });
+    expect((await pool.readAccounts()).find((a) => a.id === personal.id)?.status).toBe("limited");
+  });
+
+  it("while the restart is owed, judges an agent on the stores it reads through — main's, never a retired JSON file", async () => {
+    const gateway = fakeGateway();
+    const { work, personal } = await twoClaudeAccounts();
+    gw._setGatewayDepsForTests({
+      absent: () => false,
+      // main's sqlite took the token; a legacy auth-profiles.json beside it did not (runtime never reads it),
+      // and the "ops" agent's own store cannot be written.
+      list: () => [
+        { store: "agent", agentId: "main", profileId: "anthropic:default", type: "oauth", fingerprint: fp(gateway.token!), expires: null },
+        { store: "json", agentId: "main", profileId: "anthropic:default", type: "oauth", fingerprint: fp("sk-ant-oat01-the-chats-own-sign-in"), expires: null },
+        { store: "agent", agentId: "ops", profileId: "anthropic:default", type: "oauth", fingerprint: fp("sk-ant-oat01-the-chats-own-sign-in"), expires: null },
+      ],
+      write: (token) => { gateway.token = token.access; return { written: 1, failed: 1 }; },
+      restart: async () => undefined,
+      reachable: async () => true,
+      call: async (method, params) => {
+        gateway.calls.push({ method, params });
+        return method === "cron.list" ? { jobs: gateway.cronJobs } : { ok: true };
+      },
+    });
+    gw.startGatewaySwap();
+    await pool.markLimited(work.id, Date.now() + H, "session");
+    await swap.whenSwapsSettled();
+    expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: personal.id, pending: true });
+
+    // "helper" has no profile of its own: it reads through main's store, which holds Personal's token.
+    const now = Date.now() + 5_000;
+    gateway.cronJobs = [{ id: "helper-digest", agentId: "helper", state: { lastStatus: "error", lastError: LIMIT, lastRunAtMs: now - 1_000 } }];
+    await gw.scanGatewayCrons(now);
+    expect((await pool.readAccounts()).find((a) => a.id === personal.id)?.status).toBe("limited");
+  });
+
+  it("does not blame the account a pending move has just completed onto for a run that failed before it completed", async () => {
+    const gateway = fakeGateway();
+    const { work, personal } = await twoClaudeAccounts();
+    let putBack = true;
+    gw._setGatewayDepsForTests({
+      absent: () => false,
+      list: () => [{ store: "agent", agentId: "main", profileId: "anthropic:default", type: "oauth", fingerprint: fp(gateway.token!), expires: null }],
+      write: (token) => { gateway.token = token.access; return { written: 1, failed: 0 }; },
+      // The first restart puts the gateway's own (Work) copy back and fails; the keeper's goes through.
+      restart: async () => { if (putBack) { putBack = false; gateway.token = "sk-ant-oat01-work"; throw new Error("gateway did not come back"); } },
+      reachable: async () => false,
+      call: async (method, params) => {
+        gateway.calls.push({ method, params });
+        return method === "cron.list" ? { jobs: gateway.cronJobs } : { ok: true };
+      },
+    });
+    gw.startGatewaySwap();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const T0 = Date.now();
+    await pool.markLimited(work.id, T0 + H, "session");
+    await swap.whenSwapsSettled();
+    expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: personal.id, pending: true });
+
+    // A heartbeat fails on Work while the store still holds Work's token…
+    gateway.cronJobs = [{ id: "heartbeat-main", agentId: "main", state: { lastStatus: "error", lastError: LIMIT, lastRunAtMs: T0 + 9 * 60_000 } }];
+    // …the keeper then finishes the move…
+    vi.setSystemTime(T0 + 10 * 60_000);
+    expect(await gw.keepGatewayMirror()).toBe("resynced");
+    expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: personal.id, pending: false });
+    // …and the scan after it must not take Work's failure for Personal's.
+    vi.setSystemTime(T0 + 11 * 60_000);
+    await gw.scanGatewayCrons(T0 + 11 * 60_000);
+    expect((await pool.readAccounts()).find((a) => a.id === personal.id)?.status).toBe("ok");
   });
 
   it("sends a failed chat turn again into its session after a real limit's swap", async () => {
@@ -497,12 +711,15 @@ describe("failed gateway turns", () => {
   it("reads cron jobs whatever shape core gives them", () => {
     expect(gw.parseCronJobs({ jobs: [
       { id: "a", state: { lastStatus: "error", lastError: "x", lastRunAtMs: 5 } },
-      { jobId: "b", lastRunStatus: "ok", lastRunAt: 6 },
+      { jobId: "b", lastRunStatus: "ok", lastRunAt: 6, agentId: "ops" },
+      // The owner core resolved wins over the one declared.
+      { id: "c", agentId: "legacy", effectiveAgentId: "main", state: { lastStatus: "ok", lastRunAtMs: 7 } },
       { name: "no id" },
       null,
     ] })).toEqual([
-      { id: "a", lastStatus: "error", lastError: "x", lastRunAtMs: 5 },
-      { id: "b", lastStatus: "ok", lastError: null, lastRunAtMs: 6 },
+      { id: "a", lastStatus: "error", lastError: "x", lastRunAtMs: 5, agentId: null },
+      { id: "b", lastStatus: "ok", lastError: null, lastRunAtMs: 6, agentId: "ops" },
+      { id: "c", lastStatus: "ok", lastError: null, lastRunAtMs: 7, agentId: "main" },
     ]);
     expect(gw.parseCronJobs(null)).toEqual([]);
   });
