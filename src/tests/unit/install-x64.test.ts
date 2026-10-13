@@ -479,6 +479,11 @@ describe("install-x64.sh shared-host preflight", () => {
     const body = SOURCE.slice(SOURCE.indexOf("step_cloudflared_install() {"), SOURCE.indexOf("\n}\n", SOURCE.indexOf("step_cloudflared_install() {")));
     expect(body).not.toContain("setup-tunnel.sh");
     expect(body).toContain("sha256sum --check");
+    // An optional step: a dead or stalled link must reach the warning path
+    // rather than hold the whole install, on both requests.
+    const curls = body.split("\n").filter((l) => /^\s*if ! curl /.test(l));
+    expect(curls).toHaveLength(2);
+    for (const l of curls) expect(l).toMatch(/--connect-timeout 15 --speed-limit 1 --speed-time 60 --retry 3/);
     // Written, never enabled at install (the sudoers line grants the panel's
     // own `enable`; the installer's enable lines must not name it).
     expect(SOURCE).not.toMatch(/systemctl enable "\$GATEWAY_SERVICE"[^\n]*clawbox-tunnel/);
