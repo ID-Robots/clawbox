@@ -168,6 +168,17 @@ const PENDING_ACTION_MAX_AGE_MS = 60_000;
 
 // How often the owner-notice ring is read while the page is on screen.
 const RING_POLL_MS = 2_000;
+/**
+ * Where a desktop whose session the box no longer accepts goes: the login
+ * page, carrying the path it was on the way the middleware does for a
+ * navigation (`redirect` is the pathname alone — never the query, which a
+ * notice or a deep link may still be sitting in — so the two agree and the
+ * person lands back where they were).
+ */
+function signedOutLoginPage(pathname: string = window.location.pathname): string {
+  const params = new URLSearchParams({ redirect: pathname || "/" });
+  return `/login?${params.toString()}`;
+}
 // How often the owner-notice ring is still read while the page is HIDDEN (a
 // phone or a laptop tab in the background). Not paused like the other polls:
 // the ring delivers EVENTS — `register_webapp` is the only way a new web app's
@@ -2556,6 +2567,19 @@ function ChromeDesktopInner() {
         // middleware would bounce straight back, so it must not be in history.
         if (res.headers.get(UPDATE_LOCK_HEADER) === "1") {
           window.location.replace(UPDATING_PAGE);
+          return;
+        }
+        // The session is gone — expired, or revoked by a password change on
+        // another device. A page that is already open never navigates, so the
+        // middleware's /login redirect never reaches it either: it sat here as
+        // a frozen desktop while this poll, the shield's, the chat's and the
+        // notices' kept asking eight routes every one to two seconds and were
+        // refused on every one (measured on a tunnel client, 2026-10-13: a
+        // third of the box's requests, for an hour). Read off the same
+        // request, like the lock above; a 403 is NOT this — the session is
+        // fine and the desktop is simply not the owner's (TASK-1256).
+        if (res.status === 401) {
+          window.location.replace(signedOutLoginPage());
           return;
         }
         if (res.ok && ownerApiAccess) {
