@@ -68,7 +68,7 @@ describe("parseChromeArgs / buildChromeArgv", () => {
 describe("chromeEnv", () => {
   it("points at the session's display and carries none of the server's secrets", () => {
     const env = chromeEnv({ runtimeDir: "/run/user/1000", display: "wayland-0" }, {
-      HOME: "/home/u",
+      HOME: "/var/empty",
       PATH: "/usr/bin",
       NODE_ENV: "test",
       SECRET_TOKEN: "s",
@@ -110,7 +110,7 @@ describe("onBoxScreen", () => {
     expect(onBoxScreen("localhost")).toBe(true);
     expect(onBoxScreen("127.0.0.1")).toBe(true);
     expect(onBoxScreen("[::1]")).toBe(true);
-    expect(onBoxScreen("192.168.1.20")).toBe(false);
+    expect(onBoxScreen("192.0.2.20")).toBe(false);
     expect(onBoxScreen("clawbox.local")).toBe(false);
   });
 });
