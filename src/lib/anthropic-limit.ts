@@ -347,9 +347,11 @@ export function limitUntil(limit: AnthropicLimit | null, now: number): number {
  *
  *  - `ok`: can answer.
  *  - `limited`: at a usage cap until `limitedUntil`; back by itself after that.
- *  - `expired`: its credential needs renewing before it can answer (an OAuth
- *    access token this box could not refresh right now, a `claude` sign-in that
- *    is gone). Not a limit, and nothing brings it back but a working credential.
+ *  - `expired`: its credential has run out and the box holds nothing to renew
+ *    it with (an OAuth token past its end with no refresh token, a `claude`
+ *    sign-in that is gone). A renewal that merely could not reach Anthropic
+ *    marks nothing. Not a limit, and nothing brings it back but a working
+ *    credential.
  *  - `revoked`: Anthropic refused the credential outright. The owner has to
  *    re-authenticate.
  */

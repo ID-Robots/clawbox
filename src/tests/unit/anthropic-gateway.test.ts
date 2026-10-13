@@ -470,6 +470,35 @@ describe("failed gateway turns", () => {
     expect((await pool.readAccounts()).find((a) => a.id === personal.id)?.status).toBe("ok");
   });
 
+  it("blames the account again once the restart has been owed longer than any restart takes — a store it cannot write never clears it", async () => {
+    const gateway = fakeGateway();
+    const { work, personal } = await twoClaudeAccounts();
+    gw._setGatewayDepsForTests({
+      absent: () => false,
+      // As in the back-off case above: another agent's store is read, never written.
+      list: () => [
+        { store: "agent", agentId: "main", profileId: "anthropic:default", type: "oauth", fingerprint: fp(gateway.token!), expires: null },
+        { store: "agent", agentId: "ops", profileId: "anthropic:default", type: "oauth", fingerprint: fp("sk-ant-oat01-the-chats-own-sign-in"), expires: null },
+      ],
+      write: (token) => { gateway.token = token.access; return { written: 1, failed: 1 }; },
+      restart: async () => undefined,
+      reachable: async () => true,
+      call: async () => ({ ok: true }),
+    });
+    gw.startGatewaySwap();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const T = Date.now();
+    await pool.markLimited(work.id, T + H, "session");
+    await swap.whenSwapsSettled();
+    expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: personal.id, pending: true });
+
+    // The main chat runs on Personal — its stores took the token, and core
+    // reads them by itself — and later hits Personal's own limit.
+    vi.setSystemTime(T + 10 * 60_000);
+    await gw.reportChatFailure({ detail: `HTTP 429: ${LIMIT}`, reason: "rate_limit", provider: "anthropic" });
+    expect((await pool.readAccounts()).find((a) => a.id === personal.id)?.status).toBe("limited");
+  });
+
   it("sends a failed chat turn again into its session after a real limit's swap", async () => {
     const gateway = fakeGateway();
     gw.startGatewaySwap();

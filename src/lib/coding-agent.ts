@@ -10496,24 +10496,32 @@ async function continueOnAnotherAccount(
   }
   let prepared: PreparedAccount | null = null;
   let nextResetAt: number | null = recorded?.health.nextResetAt ?? null;
+  let anyAccountOk = false;
   try {
     const answer = await prepareAccount({ exclude });
     prepared = answer.prepared;
     nextResetAt = answer.health.nextResetAt ?? nextResetAt;
+    anyAccountOk = answer.health.healthy > 0;
   } catch (err) {
     console.error(`[coding-agent] ${run.id}: the Anthropic account pool could not be read:`, err instanceof Error ? err.message : err);
   }
   if (run.status !== "running" || live.has(run.id)) return;
 
   if (!prepared) {
-    // Nobody else can answer after all (another run got there first, or the
-    // next account's credential turned out dead). Wait for the first reset,
+    // Nobody else can answer after all (the next account's credential turned
+    // out dead, or could not be renewed just now). Wait for the first reset,
     // settled through finishRun's ordinary tail as the pause it is — or, when
     // no account comes back by itself, fail with the one thing that helps.
     const resetsAt = nextResetAt ?? (why.kind === "limit" ? why.found.until : null);
     if (resetsAt === null) {
-      state.forcedAccountFailure = "Anthropic refused the credential of every account this run could use."
-        + " Sign one in again in Settings → Providers → Anthropic accounts, then resume the run.";
+      // An account that can answer is still on the list: its sign-in only
+      // could not be renewed (or read) just now, which marks nothing. "Refused,
+      // sign in again" would be false — and the card shows every account fine.
+      state.forcedAccountFailure = anyAccountOk
+        ? "No Anthropic account could take this run over just now: a sign-in could not be renewed, so the box may be offline."
+          + " No account was refused; resume the run once the box is back online."
+        : "Anthropic refused the credential of every account this run could use."
+          + " Sign one in again in Settings → Providers → Anthropic accounts, then resume the run.";
       finishRun(run, state, exitCode);
       return;
     }

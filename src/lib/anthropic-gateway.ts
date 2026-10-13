@@ -360,16 +360,28 @@ export function mentionsAnthropic(text: string | null | undefined): boolean {
 }
 
 /**
+ * How long a `pending` mirror means "the restart onto it is under way": the
+ * swap's two restarts, each waited on for SWAP_READY_WAIT_MS, and their
+ * read-backs. Past that nothing is in flight any more — the restart failed, or
+ * a store the box cannot write disagreed (`write_lost`, which leaves `pending`
+ * set for good) — and the token is in the stores the box could write, which
+ * core re-reads by itself without a restart.
+ */
+const PENDING_SETTLE_MS = 2 * SWAP_READY_WAIT_MS + 60_000;
+
+/**
  * The pool account a gateway turn that ran at `ranAt` failed on: where the box
  * put the gateway — but only for a turn that ran once it was there. One that
  * ran before the move ran on the account the gateway has just left (usually
  * the very account whose limit caused the move), and while the restart onto
- * the new one is still owed (`pending`) the gateway may not be on it yet.
- * Null blames no pool account; the failure still goes through the swap, and a
- * held retry runs again on the account the gateway is on now.
+ * the new one is under way (`pending`, see PENDING_SETTLE_MS) the gateway may
+ * not be on it yet. Null blames no pool account; the failure still goes
+ * through the swap, and a held retry runs again on the account the gateway is
+ * on now.
  */
 function gatewayAccountAt(mirror: GatewayMirror | null, ranAt: number): string | null {
-  return mirror && !mirror.pending && ranAt >= mirror.at ? mirror.accountId : null;
+  if (!mirror || ranAt < mirror.at) return null;
+  return !mirror.pending || ranAt - mirror.at >= PENDING_SETTLE_MS ? mirror.accountId : null;
 }
 
 /** One look at the gateway's crons. Answers how many failures it reported. */

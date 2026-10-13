@@ -374,6 +374,24 @@ describe("an account Anthropic refuses mid-run (TASK-1260)", () => {
     expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/oauth/token"))).toEqual([]);
   });
 
+  it("does not tell the owner every account was refused when the next one's sign-in only could not be renewed", async () => {
+    installWrapper(["auth", "ok"]);
+    makeProject("site");
+    const hours = (n: number) => Date.now() + n * 3_600_000;
+    await pool.addOAuthAccount({ label: "Work", email: "work@example.com", tokens: { access: "work-access", refresh: "refresh-work", expires: hours(8) } });
+    // Its token ran out while the box was offline; the grant behind it is fine.
+    await pool.addOAuthAccount({ label: "Personal", email: "me@example.com", tokens: { access: "personal-access", refresh: "refresh-personal", expires: hours(-0.1) } });
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async () => { throw new TypeError("fetch failed"); }));
+
+    const run = await settled((await lib.startRun({ task: "build", projectId: "site", source: "owner", provider: "anthropic" })).id);
+
+    expect(run.status).toBe("failed");
+    expect(run.error).not.toMatch(/refused the credential of every account/);
+    expect(run.error).toMatch(/could not be renewed/);
+    expect((await pool.readAccounts()).map((a) => a.status)).toEqual(["ok", "ok"]);
+    expect(calls()).toHaveLength(1);
+  });
+
   it("does not bounce a run for ever on a refusal nobody can pin on the account", async () => {
     installWrapper(["auth", "auth", "auth", "auth", "auth", "ok"]);
     makeProject("site");
