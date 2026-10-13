@@ -3,10 +3,10 @@
  * /updating screen's "What's new" panel.
  *
  * What is pinned here:
- *  - the real 4.2.0, 4.1.0 and 4.0.0 notes in this checkout (which are also the
- *    GitHub release bodies) give their Highlights, joined across wrapped lines
- *    and without a single Markdown mark, and the 4.2.0 ones are word for word
- *    the desktop card's English copy;
+ *  - the real 4.3.0, 4.2.0, 4.1.0 and 4.0.0 notes in this checkout (which are
+ *    also the GitHub release bodies) give their Highlights, joined across
+ *    wrapped lines and without a single Markdown mark, and the 4.3.0 ones are
+ *    word for word the desktop card's English copy;
  *  - the 3.9 shape (`**Title** — body`) splits the same way;
  *  - notes with no Highlights section — the older "What's Changed" PR lists —
  *    give NOTHING, so the panel shows its fallback rather than PR titles;
@@ -31,6 +31,29 @@ const notes = (version: string) =>
   fs.readFileSync(path.join(process.cwd(), `RELEASE-NOTES-${version}.md`), "utf-8");
 
 describe("parseReleaseHighlights on the releases this repo shipped", () => {
+  it("reads the six 4.3.0 highlights, title and body, in order, all of them within the panel's handful", () => {
+    const highlights = parseReleaseHighlights(notes("4.3.0"));
+    expect(highlights.map((h) => h.title)).toEqual([
+      "Screenshots, built in",
+      "One browser for you and your assistant",
+      "Share an app with a public link",
+      "xAI Grok, and model changes without a restart",
+      "Hold to talk",
+      "The Coding Agent, on a live chart",
+    ]);
+    // Six, and nothing past the panel's cap was cut to get there.
+    expect(parseReleaseHighlights(notes("4.3.0"), 100)).toEqual(highlights);
+    expect(highlights.length).toBeLessThanOrEqual(MAX_HIGHLIGHTS);
+    // Wrapped lines are joined with single spaces, and "Settings → Voice" is
+    // text, not Markdown, and survives.
+    expect(highlights[4].body).toMatch(/ Settings → Voice can play every reply aloud, /);
+    for (const h of highlights) {
+      expect(`${h.title} ${h.body}`).not.toMatch(/\*\*|`|\s{2}/);
+      expect(h.title.length).toBeLessThan(MAX_TITLE_CHARS);
+      expect(h.body.length).toBeLessThan(MAX_BODY_CHARS);
+    }
+  });
+
   it("reads the seven 4.2.0 highlights, title and body, in order, all of them within the panel's handful", () => {
     const highlights = parseReleaseHighlights(notes("4.2.0"));
     expect(highlights.map((h) => h.title)).toEqual([
@@ -75,7 +98,7 @@ describe("parseReleaseHighlights on the releases this repo shipped", () => {
     // and its fallback (the card's keys) must say the same thing.
     const { whatsNewEn } = await import("@/lib/edition-translations/en-whats-new");
     const { WHATS_NEW_HIGHLIGHTS } = await import("@/lib/whats-new");
-    expect(parseReleaseHighlights(notes("4.2.0"))).toEqual(
+    expect(parseReleaseHighlights(notes("4.3.0"))).toEqual(
       WHATS_NEW_HIGHLIGHTS.map((item) => ({ title: whatsNewEn[item.title], body: whatsNewEn[item.body] })),
     );
   });

@@ -15,8 +15,11 @@ the entry says so.
 Entries are grouped by release, newest first.
 
 <Columns cols={2}>
-  <Card title="4.2" href="#clawbox-42" icon="sparkles">
-    Current release candidate: several users on one box, monitor mode, kiosk mode and GitHub backup.
+  <Card title="4.3" href="#clawbox-43" icon="sparkles">
+    Current release candidate: screenshots, one shared browser, public app links and xAI Grok.
+  </Card>
+  <Card title="4.2" href="#clawbox-42" icon="users">
+    Several users on one box, monitor mode, kiosk mode and GitHub backup.
   </Card>
   <Card title="4.1" href="#clawbox-41" icon="mobile">
     A fuller chat on phones, reliable conversation restores and auto-merging pull requests.
@@ -34,11 +37,87 @@ Looking for your installed version? Open **Settings → About**. To update, open
 **Settings → System Update**.
 </Tip>
 
-## ClawBox 4.2
+## ClawBox 4.3
 
 <Note>
-**Release status:** 4.2.0 is being validated on beta devices before the stable release.
+**Release status:** 4.3.0 is being validated on beta devices before the stable release.
 </Note>
+
+ClawBox 4.3 adds a Screenshot app and gives you and your assistant one shared browser. An
+app the Coding Agent built can now be shared through a public link. xAI Grok joins the AI
+providers, most model changes no longer restart the assistant, you can hold to talk, and the
+Coding Agent shows its agents at work on a live chart. After updating, the desktop shows a
+**What's new in 4.3** card. Choose **Got it** to hide it on all your browsers.
+
+### Screenshots, built in
+
+The new **Screenshot** app captures the whole screen, an area or a single window, right away
+or after a delay. Mark the picture up in its editor, then save it as PNG or JPG to the
+Screenshots folder, which the **Files** app shows. Print Screen or Ctrl+Shift+S takes the
+whole screen and Shift+Print Screen or Alt+Shift+S an area, anywhere on the desktop and with
+the app closed, and the **Screenshot** button beside the clock does the same in one click.
+The keys are left alone while you type in a text field or a Terminal.
+
+### One browser for you and your assistant
+
+The browser on the box's desktop and the browser your assistant uses are now the same
+browser, shown in **Agent Browser** (the app called Browser before 4.3). Sign in to a site
+there once and the assistant can use it, and you can watch what it does. The assistant opens
+its own tabs and leaves yours alone. The browser stays running, so closing it in Agent
+Browser no longer stops it. If your assistant had signed in to sites in its old hidden
+browser, sign in to them once in the shared one; Agent Browser's settings show where the old
+profile is kept. See [The desktop browser](/technical/filesystem#the-desktop-browser) for the
+details and for how to get a separate assistant browser back.
+
+### Share an app with a public link
+
+Right-click an app the Coding Agent built, on the desktop, and choose **Create public link**:
+**Temporary**, which stops working after the time you choose, or **Permanent**, which stays on
+until you disable it. Visitors reach only that app, never your desktop, files or other apps,
+and by default they can only view it. Choose **Require a password** to give the link a
+password of its own, which you can change or remove later without changing the link. The
+link's address changes when the box restarts.
+
+### xAI Grok, and model changes without a restart
+
+On the OpenClaw edition, Settings and the setup wizard list **xAI Grok**: paste an API key,
+or choose **Sign in with Grok** and approve the sign-in with your SuperGrok or X Premium
+subscription on any device. Changing the model, installing or switching Local AI, and the
+local-only switch now take effect without restarting the assistant wherever the change can be
+applied live, so the chat no longer goes quiet for a minute each time.
+
+### Hold to talk
+
+Hold the chat's microphone button while you speak and let go to send; a quick click still
+starts and stops a recording. Holding **F8** while the chat is open does the same, and Esc
+cancels. Spoken replies download several times smaller, and **Auto-play every spoken reply**
+in **Settings → Voice** plays the reply to a question you typed aloud as well. See
+[Chat](/guides/chat).
+
+### The Coding Agent, on a live chart
+
+The Coding Agent opens on a chart of its agents at work: the planner, each worker, each
+reviewer and the lead. Choose one to see what it is doing, open its run page, message it or
+stop it. A message to a working run reaches it right after the step under way. Runs and
+teams beyond the box's limit wait in line instead of being refused. When a pull request's
+checks fail, the run's page shows what failed and **Fix CI** starts a run that fixes it.
+Each project keeps run notes of what earlier runs learned, which you can view and edit on the
+project page.
+
+### Smaller things
+
+- In the Terminal, Ctrl+V pastes a picture into Claude Code as an attachment.
+- On a laptop, the tray shows the battery level beside the clock.
+- On the ClawBox desktop session, a **Google Chrome** icon opens your own Chrome as a window
+  on the box's screen.
+- Pressing Stop in the chat leaves a grey "Stopped." line under the reply.
+- On Hermes, documents attached in the chat reach the assistant.
+- When ClawKeep refuses a backup, it says why, with the sizes involved.
+- OpenClaw is updated to 2026.10.2 and Hermes Agent to v0.21.7.
+
+## ClawBox 4.2
+
+**Released October 5, 2026**
 
 ClawBox 4.2 lets several people share one box, each with a user of their own. It spreads
 the desktop over several monitors, adds a drop-down terminal and a proper kiosk mode.
@@ -54,17 +133,6 @@ password, and gets a desktop and a Terminal of their own; their Terminal runs as
 account on the box. Settings, installed apps and the assistant stay with the owner. The
 sign-in page only asks which user you are on a box that has more than one, and removing a
 user signs them out everywhere.
-
-### One browser for you and your assistant
-
-The browser on the remote desktop and the browser your assistant uses are now the same
-browser. Sign in to a site there once and the assistant can use it, and you can watch what it
-does. The assistant opens its own tabs and leaves yours alone. The browser stays running, so
-the Browser app no longer has a Close button for it. If your assistant had signed in to sites
-in its old hidden browser, sign in to them once in the shared one; **Settings → Browser**
-shows where the old profile is kept. See
-[The desktop browser](/technical/filesystem#the-desktop-browser) for the details and for how
-to get a separate assistant browser back.
 
 ### Monitor mode, with a drop-down terminal
 
