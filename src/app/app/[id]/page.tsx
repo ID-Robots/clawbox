@@ -8,11 +8,13 @@ import Link from "next/link";
 import { resolveHarnessProbe } from "@/lib/harness-probe";
 import { mayUseOwnerApis } from "@/lib/use-session-user";
 import { useFollowSessionSwitch } from "@/lib/session-switch";
-import { customWallpaperId, wallpaperIdAfterDelete } from "@/lib/custom-wallpapers";
+import { customWallpaperId, customWallpaperIndex, wallpaperIdAfterDelete } from "@/lib/custom-wallpapers";
+import { isShowableCustomWallpaper, readWallpaperFile, useUndecodableImage } from "@/lib/wallpaper-image";
 import {
   brandingHarness,
   brandWallpaperId,
   builtinWallpapers,
+  defaultWallpaperId,
   paintedWallpaperOpacity,
   renderedWallpaperId as resolveRenderedWallpaperId,
 } from "@/lib/builtin-wallpapers";
@@ -200,11 +202,20 @@ function useAppearance(enabled: boolean, wallpaperHarness: string | null) {
   // This browser's list is read synchronously into the state above, so it is
   // never "not read yet" here — the desktop's third argument is what carries
   // that case.
-  const renderedWallpaperId = resolveRenderedWallpaperId(
-    wallpaperId,
-    wallpaperHarness,
-    customWallpapers.length,
-  );
+  //
+  // A slot that exists but holds no picture (a text file an older build let
+  // through, or one that does not decode) shows the default — the desktop's
+  // rule, healed in the render and never written.
+  const savedCustomIdx = wallpaperId === null ? null : customWallpaperIndex(wallpaperId);
+  const savedCustomWp = savedCustomIdx === null ? undefined : customWallpapers[savedCustomIdx];
+  const savedCustomUndecodable = useUndecodableImage(savedCustomWp);
+  const renderedWallpaperId = savedCustomWp !== undefined && !isShowableCustomWallpaper(savedCustomWp, savedCustomUndecodable)
+    ? defaultWallpaperId(wallpaperHarness)
+    : resolveRenderedWallpaperId(
+      wallpaperId,
+      wallpaperHarness,
+      customWallpapers.length,
+    );
 
   // Painted, not persisted: the wallpaper's own default while the box holds
   // no `wp_opacity`, an uploaded picture having none of its own — the
@@ -241,23 +252,31 @@ function useAppearance(enabled: boolean, wallpaperHarness: string | null) {
   // commit; arming here leaves every later change — the owner's — saved.
   useEffect(() => { if (hydrated) loaded.current = true; }, [hydrated]);
 
+  // Set when the picked file was not a picture; the page shows it as an alert
+  // (there is no toast surface on this route) and the next pick clears it.
+  const [uploadRefused, setUploadRefused] = useState(false);
   const onUploadFile = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const next = [...customRef.current, reader.result as string];
+    e.target.value = "";
+    setUploadRefused(false);
+    // The desktop's check: declared as an image and decoded by the browser.
+    void readWallpaperFile(file).then((dataUrl) => {
+      if (dataUrl === null) {
+        setUploadRefused(true);
+        return;
+      }
+      const next = [...customRef.current, dataUrl];
       // The picture is not there to be selected unless it was stored.
       if (!storeCustomWallpapers(next)) return;
       setWallpaperId(customWallpaperId(next.length - 1));
       setWpOpacity(100);
-    };
-    reader.readAsDataURL(file);
-    e.target.value = "";
+    });
   }, [storeCustomWallpapers]);
 
   return {
     uploadRef,
+    uploadRefused,
     onUploadFile,
     ui: {
       // What is on screen, not what the box holds. `wp_id` is box-wide and the
@@ -339,6 +358,20 @@ function AppNotFound({ id }: { id: string }) {
   return (
     <div className="h-full flex items-center justify-center text-white/50 text-sm">
       {text}
+    </div>
+  );
+}
+
+/** Said when the file picked as a wallpaper was not a picture. Inside the provider, like the others. */
+function WallpaperRefusedNotice() {
+  const { t } = useT();
+  return (
+    <div
+      role="alert"
+      data-testid="standalone-wallpaper-refused"
+      className="fixed bottom-4 left-1/2 -translate-x-1/2 max-w-[90vw] rounded-lg bg-[var(--bg-elevated)] border border-white/10 px-4 py-2 text-sm text-white shadow-lg"
+    >
+      {t("settings.wallpaperNotImage")}
     </div>
   );
 }
@@ -557,6 +590,7 @@ export default function StandaloneAppPage() {
               data-testid="standalone-wallpaper-upload"
               onChange={appearance.onUploadFile}
             />
+            {appearance.uploadRefused && <WallpaperRefusedNotice />}
           </div>
         );
       case "store":

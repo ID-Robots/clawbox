@@ -912,6 +912,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     // wallpaper and saved-network buttons named themselves in English too.
     "settings.customWallpaper": "Custom {n}",
     "settings.removeCustomWallpaper": "Remove custom {n}",
+    "settings.wallpaperNotImage": "That file is not a picture, so the wallpaper was not changed. Choose a PNG, JPEG or WebP image.",
     "settings.editPassword": "Edit password",
     "settings.editPasswordFor": "Edit the password for {name}",
     "settings.forgetNetwork": "Forget",
@@ -1817,6 +1818,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     // wallpaper and saved-network buttons named themselves in English too.
     "settings.customWallpaper": "Собствен {n}",
     "settings.removeCustomWallpaper": "Премахни собствен {n}",
+    "settings.wallpaperNotImage": "Този файл не е изображение и тапетът не е сменен. Изберете PNG, JPEG или WebP изображение.",
     "settings.editPassword": "Промяна на паролата",
     "settings.editPasswordFor": "Промяна на паролата за {name}",
     "settings.forgetNetwork": "Забрави",
@@ -2722,6 +2724,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     // wallpaper and saved-network buttons named themselves in English too.
     "settings.customWallpaper": "Eigenes {n}",
     "settings.removeCustomWallpaper": "Eigenes {n} entfernen",
+    "settings.wallpaperNotImage": "Diese Datei ist kein Bild, der Hintergrund wurde nicht geändert. Wähle ein PNG-, JPEG- oder WebP-Bild.",
     "settings.editPassword": "Passwort ändern",
     "settings.editPasswordFor": "Passwort für {name} ändern",
     "settings.forgetNetwork": "Entfernen",
@@ -3624,6 +3627,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     // wallpaper and saved-network buttons named themselves in English too.
     "settings.customWallpaper": "Personalizado {n}",
     "settings.removeCustomWallpaper": "Quitar personalizado {n}",
+    "settings.wallpaperNotImage": "Ese archivo no es una imagen, así que el fondo no se ha cambiado. Elige una imagen PNG, JPEG o WebP.",
     "settings.editPassword": "Cambiar contraseña",
     "settings.editPasswordFor": "Cambiar la contraseña de {name}",
     "settings.forgetNetwork": "Olvidar",
@@ -4526,6 +4530,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     // wallpaper and saved-network buttons named themselves in English too.
     "settings.customWallpaper": "Personnalisé {n}",
     "settings.removeCustomWallpaper": "Supprimer personnalisé {n}",
+    "settings.wallpaperNotImage": "Ce fichier n'est pas une image, le fond d'écran n'a donc pas été modifié. Choisissez une image PNG, JPEG ou WebP.",
     "settings.editPassword": "Modifier le mot de passe",
     "settings.editPasswordFor": "Modifier le mot de passe de {name}",
     "settings.forgetNetwork": "Oublier",
@@ -5428,6 +5433,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     // wallpaper and saved-network buttons named themselves in English too.
     "settings.customWallpaper": "Personalizzato {n}",
     "settings.removeCustomWallpaper": "Rimuovi personalizzato {n}",
+    "settings.wallpaperNotImage": "Questo file non è un'immagine, quindi lo sfondo non è stato cambiato. Scegli un'immagine PNG, JPEG o WebP.",
     "settings.editPassword": "Modifica password",
     "settings.editPasswordFor": "Modifica la password di {name}",
     "settings.forgetNetwork": "Dimentica",
@@ -6330,6 +6336,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     // wallpaper and saved-network buttons named themselves in English too.
     "settings.customWallpaper": "カスタム {n}",
     "settings.removeCustomWallpaper": "カスタム {n} を削除",
+    "settings.wallpaperNotImage": "このファイルは画像ではないため、壁紙は変更されませんでした。PNG、JPEG、WebP の画像を選んでください。",
     "settings.editPassword": "パスワードを変更",
     "settings.editPasswordFor": "{name} のパスワードを変更",
     "settings.forgetNetwork": "削除",
@@ -7232,6 +7239,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     // wallpaper and saved-network buttons named themselves in English too.
     "settings.customWallpaper": "Eigen {n}",
     "settings.removeCustomWallpaper": "Eigen {n} verwijderen",
+    "settings.wallpaperNotImage": "Dit bestand is geen afbeelding, dus de achtergrond is niet gewijzigd. Kies een PNG-, JPEG- of WebP-afbeelding.",
     "settings.editPassword": "Wachtwoord wijzigen",
     "settings.editPasswordFor": "Wachtwoord van {name} wijzigen",
     "settings.forgetNetwork": "Vergeten",
@@ -8134,6 +8142,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     // wallpaper and saved-network buttons named themselves in English too.
     "settings.customWallpaper": "Egen {n}",
     "settings.removeCustomWallpaper": "Ta bort egen {n}",
+    "settings.wallpaperNotImage": "Den här filen är ingen bild, så bakgrunden ändrades inte. Välj en PNG-, JPEG- eller WebP-bild.",
     "settings.editPassword": "Ändra lösenord",
     "settings.editPasswordFor": "Ändra lösenordet för {name}",
     "settings.forgetNetwork": "Glöm",
@@ -9036,6 +9045,7 @@ const setupTranslations: Record<Locale, Record<string, string>> = {
     // wallpaper and saved-network buttons named themselves in English too.
     "settings.customWallpaper": "自定义 {n}",
     "settings.removeCustomWallpaper": "移除自定义 {n}",
+    "settings.wallpaperNotImage": "该文件不是图片，壁纸未更改。请选择 PNG、JPEG 或 WebP 图片。",
     "settings.editPassword": "修改密码",
     "settings.editPasswordFor": "修改 {name} 的密码",
     "settings.forgetNetwork": "忘记",

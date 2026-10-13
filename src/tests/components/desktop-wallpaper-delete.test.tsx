@@ -199,6 +199,16 @@ beforeEach(() => {
     }),
   });
   installFetch();
+  // The Upload tile decodes a file before it stores it (wallpaper-image.ts),
+  // and jsdom's `Image` never loads anything: every picture decodes here.
+  vi.stubGlobal("Image", class {
+    onload: (() => void) | null = null;
+    naturalWidth = 4;
+    naturalHeight = 4;
+    set src(_value: string) {
+      queueMicrotask(() => this.onload?.());
+    }
+  });
 });
 
 afterEach(() => {
