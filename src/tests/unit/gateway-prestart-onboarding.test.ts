@@ -382,6 +382,40 @@ describe("gateway-pre-start: the ritual on a set-up box", () => {
     expect(fs.readdirSync(ws()).filter((f) => f.endsWith(".tmp"))).toEqual([]);
   }, SHELL_TIMEOUT_MS);
 
+  it("leaves the workspace alone while Hermes is the active harness on a dual box", () => {
+    // The OpenClaw gateway keeps running beside Hermes there. A USER.md here
+    // would have the identity sync read the workspace as introduced and copy
+    // it over a still-provisional canonical USER.md — the one Hermes keeps.
+    fs.mkdirSync(ws());
+    fs.writeFileSync(bootstrap(), RITUAL);
+    setUp({ active_harness: "hermes" });
+
+    const res = run();
+
+    expect(res.status).toBe(0);
+    expect(read(bootstrap())).toBe(RITUAL);
+    expect(fs.existsSync(userMd())).toBe(false);
+    expect(fs.existsSync(retiredDir())).toBe(false);
+  }, SHELL_TIMEOUT_MS);
+
+  it("seeds nothing into a fresh workspace while Hermes is active either", () => {
+    setUp({ active_harness: "hermes" });
+    expect(run().status).toBe(0);
+    expect(fs.existsSync(bootstrap())).toBe(false);
+    expect(fs.existsSync(userMd())).toBe(false);
+  }, SHELL_TIMEOUT_MS);
+
+  it("retires as usual once OpenClaw is the active harness again", () => {
+    fs.mkdirSync(ws());
+    fs.writeFileSync(bootstrap(), RITUAL);
+    setUp({ active_harness: "openclaw" });
+
+    expect(run().status).toBe(0);
+
+    expect(fs.existsSync(bootstrap())).toBe(false);
+    expect(read(path.join(retiredDir(), "BOOTSTRAP.md"))).toBe(RITUAL);
+  }, SHELL_TIMEOUT_MS);
+
   it("still seeds when the wizard has not finished", () => {
     fs.mkdirSync(ws());
     setUp({}, false);

@@ -7843,7 +7843,16 @@ if [ -r "$CLAWBOX_SETUP_STORE" ] \
   && grep -Eq '"setup_complete"[[:space:]]*:[[:space:]]*true' "$CLAWBOX_SETUP_STORE" 2>/dev/null; then
   CLAWBOX_SETUP_DONE=1
 fi
-if [ "$CLAWBOX_SETUP_DONE" = 1 ]; then
+# Not while Hermes is the harness in play on a dual box, whose OpenClaw gateway
+# keeps running beside it. A USER.md here would have clawbox-identity-sync.sh
+# read this workspace as introduced and, with the canonical identity still
+# marked provisional, copy it over the USER.md Hermes has been keeping. The
+# switch back to OpenClaw retires the ritual from the app (harness/select) —
+# this start read the store before that switch was persisted.
+if [ "$CLAWBOX_SETUP_DONE" = 1 ] \
+  && grep -Eq '"active_harness"[[:space:]]*:[[:space:]]*"hermes"' "$CLAWBOX_SETUP_STORE" 2>/dev/null; then
+  echo "  Setup is complete and Hermes is the active harness: the OpenClaw workspace waits for the switch back"
+elif [ "$CLAWBOX_SETUP_DONE" = 1 ]; then
   CLAWBOX_USER_MD="$CLAWBOX_WORKSPACE/USER.md"
   if [ ! -e "$CLAWBOX_USER_MD" ] && [ ! -L "$CLAWBOX_USER_MD" ]; then
     # Written whole to a temporary name and LINKED into place, so a write cut

@@ -593,14 +593,17 @@ describe("the first-conversation ritual on a set-up box", () => {
       expect(fs.existsSync(workspace)).toBe(false);
     });
 
-    it("still retires the ritual in an OpenClaw workspace on a Hermes box", async () => {
-      // The dual SKU: the OpenClaw half was seeded before the owner settled on
-      // Hermes, and a later switch back must not meet the ritual.
+    it("leaves the OpenClaw workspace alone while Hermes is the harness in play", async () => {
+      // The dual SKU: a USER.md here would make the identity sync read the
+      // workspace as introduced and overwrite a still-provisional canonical
+      // identity — the USER.md Hermes has been keeping — from it. The switch
+      // back to OpenClaw retires the ritual instead.
       mockHarness.mockResolvedValue("hermes");
       fs.writeFileSync(bootstrap(), RITUAL);
       setUp();
-      expect(await retireOnboardingRitual()).toBe(true);
-      expect(fs.existsSync(bootstrap())).toBe(false);
+      expect(await retireOnboardingRitual()).toBe(false);
+      expect(read(bootstrap())).toBe(RITUAL);
+      expect(fs.existsSync(userMd())).toBe(false);
     });
 
     it("follows a moved workspace", async () => {

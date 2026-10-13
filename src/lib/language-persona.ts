@@ -219,21 +219,25 @@ async function pathPresent(file: string): Promise<boolean> {
  *      it is gone OpenClaw stamps the workspace complete and does not seed it
  *      again. Skipped when step 1 could not leave a USER.md behind.
  *
- * A Hermes box whose OpenClaw workspace does not exist is left alone — the
- * gateway's ExecStartPre does the same work if the box ever switches. Returns
- * true only when a BOOTSTRAP.md was retired. Never throws: the heartbeat and the
- * wizard's last step call it, and neither should fail over a text file.
+ * Only while OpenClaw is the harness in play. On a dual box running Hermes,
+ * a USER.md here would make clawbox-identity-sync.sh read the OpenClaw
+ * workspace as introduced, and a canonical identity still marked provisional
+ * would then be overwritten from it — the USER.md Hermes has been keeping,
+ * replaced by this template. The switch to OpenClaw (`harness/select`), the
+ * heartbeat after it and the gateway's ExecStartPre do the work instead.
+ *
+ * Returns true only when a BOOTSTRAP.md was retired. Never throws: the
+ * heartbeat, the harness switch and the wizard's last step call it, and none of
+ * them should fail over a text file.
  */
 export async function retireOnboardingRitual(): Promise<boolean> {
   try {
     const store = await config.getAll();
     if (store.setup_complete !== true) return false;
+    if ((await getActiveHarness()) !== "openclaw") return false;
 
     const workspace = openclawWorkspaceDir();
-    if (!(await pathPresent(workspace))) {
-      if ((await getActiveHarness()) !== "openclaw") return false;
-      await fs.mkdir(workspace, { recursive: true });
-    }
+    await fs.mkdir(workspace, { recursive: true });
 
     const userFile = path.join(workspace, "USER.md");
     if (!(await pathPresent(userFile))) {
