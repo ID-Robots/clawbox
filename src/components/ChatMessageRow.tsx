@@ -31,7 +31,7 @@ import { samePlainData } from '@/lib/same-plain-data'
 // exactly where it was.
 
 /** The popup's message: the stored one, plus the colour of a system notice. */
-export type ChatRowMessage = BaseChatMessage & { variant?: 'success' | 'error' }
+export type ChatRowMessage = BaseChatMessage & { variant?: 'success' | 'error' | 'stopped' }
 
 type Translate = (key: string, params?: Record<string, string | number>) => string
 
@@ -85,6 +85,10 @@ function ChatMessageRowImpl({
   msg, longKey, expanded, onToggleExpand, served, t, onPreview, onOpenEmail, cloudSpoken, autoplayBlocked,
 }: ChatMessageRowProps) {
   const isSuccess = msg.variant === 'success';
+  // Where the owner pressed Stop. Not a verdict, so neither green nor red, and
+  // worded here rather than stored: the marker a box replays from its
+  // transcript has to read in the language the chat is in NOW.
+  const isStopped = msg.role === 'system' && msg.variant === 'stopped';
   const isUser = msg.role === 'user';
   const isSystem = msg.role === 'system';
   // Messages the agent pointed at, as `EMAIL:<uid>` lines in the reply.
@@ -94,7 +98,7 @@ function ChatMessageRowImpl({
   // owner's mail out of the cached transcript, which is where it very
   // deliberately does not belong.
   const emailRefs = msg.role === 'assistant' ? splitEmailRefs(msg.text) : null;
-  const bodyText = emailRefs ? emailRefs.text : msg.text;
+  const bodyText = isStopped ? t('chat.stopped') : emailRefs ? emailRefs.text : msg.text;
   // A long paste folds behind "Show more": the paste is the owner's
   // own text, and the answer should not sit a page of it away.
   const isLongUser = isUser && bodyText.length > USER_CLAMP_CHARS;
@@ -126,8 +130,8 @@ function ChatMessageRowImpl({
         padding: '6px 12px',
         borderRadius: 10,
         background: 'rgba(255,255,255,0.02)',
-        border: `1px solid ${isSuccess ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.3)'}`,
-        color: isSuccess ? '#86efac' : '#fca5a5',
+        border: `1px solid ${isStopped ? 'rgba(255,255,255,0.12)' : isSuccess ? 'rgba(34,197,94,0.25)' : 'rgba(239,68,68,0.3)'}`,
+        color: isStopped ? 'rgba(255,255,255,0.55)' : isSuccess ? '#86efac' : '#fca5a5',
         fontSize: 12.5,
         lineHeight: 1.45,
         wordBreak: 'break-word',

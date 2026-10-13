@@ -225,6 +225,36 @@ describe("Stop on a Hermes box", () => {
     ).toBeTruthy();
   });
 
+  it("marks where the reply was stopped, under what was kept", async () => {
+    // 2026-10-13 smoke test: a stopped turn left nothing to say it had been
+    // stopped. The marker is a neutral row, worded by the chat (`chat.stopped`).
+    const textarea = await mount();
+    await send(textarea, "Tell me a story");
+    await push(frame("delta", { text: REPLY }));
+    fireEvent.click(screen.getByTitle("chat.stop"));
+
+    await waitFor(() => expect(screen.queryByTitle("chat.stop")).toBeNull());
+    const answer = await screen.findByText(REPLY);
+    const marker = await screen.findByText("chat.stopped");
+    expect(
+      answer.compareDocumentPosition(marker) & Node.DOCUMENT_POSITION_FOLLOWING,
+      "the stopped marker came before the answer it ended",
+    ).toBeTruthy();
+    expect(occurrences("chat.stopped")).toBe(1);
+  });
+
+  it("marks the stop when no part of the answer had arrived yet", async () => {
+    // The case the smoke test hit: Stop a few seconds in, while the model is
+    // still thinking. The question used to stand alone, as if the reply were lost.
+    const textarea = await mount();
+    await send(textarea, "Tell me a story");
+    fireEvent.click(screen.getByTitle("chat.stop"));
+
+    await waitFor(() => expect(screen.queryByTitle("chat.stop")).toBeNull());
+    expect(await screen.findByText("chat.stopped")).toBeTruthy();
+    expect(screen.queryByText(/^Error: /)).toBeNull();
+  });
+
   it("shows no error line for a Stop the owner asked for", async () => {
     const textarea = await mount();
     await send(textarea, "Tell me a story");

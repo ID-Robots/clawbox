@@ -367,7 +367,15 @@ export function noticeColumnInset(
 
 // `system`-role messages render as colored pill banners; `variant` picks
 // the colour (red error, green confirmation). Ignored for user/assistant.
-type ChatMessage = BaseChatMessage & { variant?: 'success' | 'error' }
+type ChatMessage = BaseChatMessage & { variant?: 'success' | 'error' | 'stopped' }
+
+/**
+ * The line left where the owner pressed Stop. `ChatMessageRow` words it from
+ * the variant; the text is only the fallback a surface without one would show.
+ */
+export function stoppedMarker(): ChatMessage {
+  return { role: 'system', text: 'Stopped.', timestamp: Date.now(), variant: 'stopped' }
+}
 
 // One selectable entry in the Hermes provider pill, as reported by
 // /setup-api/hermes/models (which reads Hermes' live dashboard). Only rows the
@@ -3471,6 +3479,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             if (kept.trim() && !isSentinel(streamingEmailRefsText(kept))) {
               setMessages(msgs => [...msgs, { role: 'assistant', text: kept, timestamp: Date.now() }])
             }
+            // A Stop used to leave the question with nothing under it — no
+            // partial answer when none had arrived yet, and no sign the reply
+            // was stopped rather than lost (2026-10-13 smoke test).
+            if (state === 'aborted') setMessages(msgs => [...msgs, stoppedMarker()])
             clearToolCalls()
             runIdRef.current = null
             sendingRef.current = false; setSending(false)
@@ -5942,7 +5954,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // rather than only on the happy one.
       void settleEmailDrafts()
       runIdRef.current = null
-      if (!failure) return
+      if (!failure) {
+        // The owner pressed Stop: say so under whatever was kept, so a
+        // question with no answer does not read as a reply that got lost.
+        // The Hermes route records the same marker in its transcript.
+        setMessages(prev => [...prev, stoppedMarker()])
+        return
+      }
       setMessages(prev => [...prev, { role: 'system', text: failure, timestamp: Date.now() }])
       // The gateway never acknowledged the turn: the conversation is busy
       // behind something else on the box (TASK-1158 — held for 40 minutes on a

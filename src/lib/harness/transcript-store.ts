@@ -150,8 +150,11 @@ export interface TranscriptRecord {
   provider?: string;
   /** The run this record belongs to, so a reconcile can match it to a bubble. */
   turnId?: string;
-  /** Only ever "error", and only on a record that reports a failed turn. */
-  variant?: "error";
+  /**
+   * "error" on a record that reports a failed turn; "stopped" on the marker
+   * left where the owner pressed Stop (the chat words it in their language).
+   */
+  variant?: "error" | "stopped";
 }
 
 /**
@@ -478,6 +481,7 @@ function parseRecord(line: string): TranscriptRecord | null {
     ...(typeof row.provider === "string" && row.provider ? { provider: row.provider } : {}),
     ...(typeof row.turnId === "string" && row.turnId ? { turnId: row.turnId } : {}),
     ...(row.variant === "error" ? { variant: "error" as const } : {}),
+    ...(row.variant === "stopped" ? { variant: "stopped" as const } : {}),
   };
 }
 

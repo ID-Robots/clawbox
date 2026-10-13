@@ -441,6 +441,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "chat.tabRestart": "New session",
     "chat.greetingPlaceholder": "Waiting for the Claw to wake up…",
     "chat.stop": "Stop",
+    "chat.stopped": "Stopped.",
     "chat.send": "Send",
     "chat.retry": "Retry",
     "chat.restore.restoring": "Restoring this conversation…",
