@@ -6,6 +6,7 @@ import { APP_GROUND, BTN_PRIMARY, BTN_SECONDARY } from "./coding-agent-ui";
 import {
   API,
   PRODUCT_NAME,
+  announceVaultChanged,
   TABS,
   TAB_ICONS,
   errorText,
@@ -73,6 +74,7 @@ export default function PrimeRadiantApp() {
     if (signal?.aborted) return;
     setStatus(after);
     setPhase(after.initialised ? "ready" : "failed");
+    if (after.initialised) announceVaultChanged();
   }, []);
 
   const fail = useCallback((err: unknown, signal?: AbortSignal) => {
@@ -94,6 +96,7 @@ export default function PrimeRadiantApp() {
   const changed = useCallback(() => {
     setRevision((r) => r + 1);
     void prJson<PrimeRadiantStatus>(`${API}/status`).then(setStatus).catch(() => undefined);
+    announceVaultChanged();
   }, []);
 
   const retryInit = () => {

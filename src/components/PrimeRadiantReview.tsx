@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { BTN_PRIMARY, BTN_QUIET, BTN_SECONDARY, CARD_SURFACE, FIELD, INSET_SURFACE, SEGMENTED_TRACK, SEGMENT_OFF, SEGMENT_ON } from "./coding-agent-ui";
 import {
@@ -48,33 +48,35 @@ export default function PrimeRadiantReview({ revision, onChanged, onOpenPage, on
   const [held, setHeld] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
+  /** Bumped by every read; only the newest one may draw (a filter change or a resolve overtakes the rest). */
+  const latest = useRef(0);
+
   /** One read of the queue and of the held nights, applied together. */
   const load = useCallback((signal?: AbortSignal) => {
+    const id = ++latest.current;
     const queue = prJson<ReviewList>(`${API}/review?status=${status}&limit=100`, { signal });
     // The banner is a pointer; without the nightly list there is nothing to point at.
     const nightly = prJson<{ runs: RunRecord[] }>(`${API}/nightly`, { signal }).catch(() => null);
     return Promise.all([queue, nightly])
       .then(([answer, night]) => {
+        if (id !== latest.current) return;
         setList(answer);
         setError(null);
         if (night) setHeld((night.runs ?? []).filter((r) => r.status === "held" && r.branch).length);
       })
       .catch((err) => {
-        if ((err as Error)?.name === "AbortError") return;
+        if ((err as Error)?.name === "AbortError" || id !== latest.current) return;
         setError(errorText(err, t));
       });
   }, [status, t]);
 
+  // A resolve calls `onChanged`, which bumps `revision`: this re-reads,
+  // abortably, rather than a second unaborted read racing a filter change.
   useEffect(() => {
     const ctl = new AbortController();
     void load(ctl.signal);
     return () => ctl.abort();
   }, [load, revision]);
-
-  const settled = () => {
-    onChanged();
-    void load();
-  };
 
   return (
     <div className="space-y-3" data-testid="prime-radiant-review">
@@ -113,7 +115,7 @@ export default function PrimeRadiantReview({ revision, onChanged, onOpenPage, on
       <ul className="space-y-3">
         {list?.items.map((item) => (
           <li key={item.id}>
-            <ReviewCard item={item} onSettled={settled} onOpenPage={onOpenPage} />
+            <ReviewCard item={item} onSettled={onChanged} onOpenPage={onOpenPage} />
           </li>
         ))}
       </ul>

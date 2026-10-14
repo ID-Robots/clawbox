@@ -59,10 +59,12 @@ export default function PrimeRadiantBrowse({ domains, revision, selected, onSele
     q.set("limit", "500");
     try {
       const answer = await prJson<{ total: number; pages: PageListEntry[] }>(`${API}/pages?${q}`, { signal });
+      // The filters moved on while this answer was in flight: it is not theirs.
+      if (signal.aborted) return;
       setList(answer);
       setError(null);
     } catch (err) {
-      if ((err as Error)?.name === "AbortError") return;
+      if ((err as Error)?.name === "AbortError" || signal.aborted) return;
       setError(errorText(err, t));
     }
   }, [filters, t]);
@@ -80,7 +82,11 @@ export default function PrimeRadiantBrowse({ domains, revision, selected, onSele
     if (!selected) return;
     const ctl = new AbortController();
     prJson<PageDetail>(pageUrl(`${API}/pages`, selected), { signal: ctl.signal })
-      .then((p) => { setPage(p); setPageError(null); })
+      .then((p) => {
+        if (ctl.signal.aborted) return;
+        setPage(p);
+        setPageError(null);
+      })
       .catch((err) => {
         if ((err as Error)?.name === "AbortError") return;
         setPageError({ path: selected, message: errorText(err, t) });

@@ -6,6 +6,7 @@ import { BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, CARD_SURFACE, INSET_SURFACE, SE
 import PrimeRadiantFolderPicker from "./PrimeRadiantFolderPicker";
 import {
   API,
+  PrimeRadiantError,
   errorText,
   formatUsd,
   formatWhen,
@@ -94,9 +95,18 @@ export default function PrimeRadiantIngest({ onChanged }: { onChanged: () => voi
           if (job.status === "running") setRunning(job);
           else finished(job);
         })
-        .catch(() => undefined);
+        .catch((err) => {
+          // The box no longer has the job (its state was wiped): nothing will
+          // ever settle it, so stop asking and show the list as it is. Any
+          // other failure is a box still coming back — keep polling.
+          if (err instanceof PrimeRadiantError && err.status === 404) {
+            detach();
+            setRunning(null);
+            void loadJobs();
+          }
+        });
     }, 2000);
-  }, [finished]);
+  }, [finished, detach, loadJobs]);
 
   /** Follow a job: SSE where the browser has it, a 2 s read of the job otherwise. */
   const follow = useCallback((job: IngestJob) => {

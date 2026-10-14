@@ -109,9 +109,18 @@ function labelKey(): Buffer {
  * Keyed, so the hash cannot be used to guess what was redacted.
  */
 export function sourceLabel(abs: string): string {
-  const r = redactPath(abs, { homeDir: os.homedir() });
+  return redactedLabel(abs, abs, os.homedir());
+}
+
+/**
+ * `display` redacted as a path, with the keyed tag of `identity` (the real
+ * file) appended when redaction changed it — the one rule behind a folder
+ * file's label and a dropped file's (`upload/<batch>/<name>`).
+ */
+export function redactedLabel(display: string, identity: string, homeDir?: string): string {
+  const r = redactPath(display, { homeDir });
   if (r.kinds.length === 0) return r.text;
-  const tag = crypto.createHmac("sha256", labelKey()).update(abs).digest("hex").slice(0, 12);
+  const tag = crypto.createHmac("sha256", labelKey()).update(identity).digest("hex").slice(0, 12);
   return `${r.text}#${tag}`;
 }
 

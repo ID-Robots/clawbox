@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { ConfirmDialog } from "./clawkeep-ui";
 import { BTN_DANGER, BTN_SECONDARY, CARD_SURFACE, FIELD, INSET_SURFACE } from "./coding-agent-ui";
@@ -42,6 +42,12 @@ export default function PrimeRadiantHistory({ initialPage, revision, onChanged, 
   const [confirm, setConfirm] = useState<CommitInfo | null>(null);
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<string | null>(null);
+  /**
+   * Held from the first Confirm until the revert answers. A ref, not `busy`:
+   * a double click fires both handlers before React re-renders, and each
+   * would read `busy` as false and POST a second, non-idempotent revert.
+   */
+  const reverting = useRef(false);
 
   useEffect(() => {
     const ctl = new AbortController();
@@ -55,7 +61,11 @@ export default function PrimeRadiantHistory({ initialPage, revision, onChanged, 
     if (!path) return;
     const ctl = new AbortController();
     prJson<{ commits: CommitInfo[] }>(pageUrl(`${API}/history`, path), { signal: ctl.signal })
-      .then((a) => { setCommits(a.commits ?? []); setError(null); })
+      .then((a) => {
+        if (ctl.signal.aborted) return;
+        setCommits(a.commits ?? []);
+        setError(null);
+      })
       .catch((err) => {
         if ((err as Error)?.name === "AbortError") return;
         setCommits(null);
@@ -68,7 +78,7 @@ export default function PrimeRadiantHistory({ initialPage, revision, onChanged, 
     if (!selected || !path) return;
     const ctl = new AbortController();
     prJson<DiffResult>(`${API}/diff?${new URLSearchParams({ commit: selected, path })}`, { signal: ctl.signal })
-      .then(setDiff)
+      .then((d) => { if (!ctl.signal.aborted) setDiff(d); })
       .catch((err) => {
         if ((err as Error)?.name === "AbortError") return;
         setDiff(null);
@@ -79,7 +89,8 @@ export default function PrimeRadiantHistory({ initialPage, revision, onChanged, 
 
   const revert = async (commit: CommitInfo) => {
     setConfirm(null);
-    if (!path) return;
+    if (!path || reverting.current) return;
+    reverting.current = true;
     setBusy(true);
     setError(null);
     setDone(null);
@@ -95,6 +106,7 @@ export default function PrimeRadiantHistory({ initialPage, revision, onChanged, 
         : "";
       setError(findings ? `${errorText(err, t)} (${findings})` : errorText(err, t));
     } finally {
+      reverting.current = false;
       setBusy(false);
     }
   };

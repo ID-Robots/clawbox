@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { CARD_SURFACE, INSET_SURFACE, SECTION_LABEL } from "./coding-agent-ui";
 import { API, errorText, formatCount, formatUsd, formatWhen, prJson, type CostSummary } from "./prime-radiant-ui";
@@ -15,6 +15,8 @@ import { API, errorText, formatCount, formatUsd, formatWhen, prJson, type CostSu
  */
 export default function PrimeRadiantCosts({ revision }: { revision: number }) {
   const { t, locale } = useT();
+  /** The "by run" heading names the table (two Costs windows must not share an id). */
+  const byRunId = useId();
   const [summary, setSummary] = useState<CostSummary | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -61,12 +63,12 @@ export default function PrimeRadiantCosts({ revision }: { revision: number }) {
           )}
 
           <section className={`${CARD_SURFACE} p-3`}>
-            <h3 className={SECTION_LABEL}>{t("primeRadiant.costs.byRun")}</h3>
+            <h3 id={byRunId} className={SECTION_LABEL}>{t("primeRadiant.costs.byRun")}</h3>
             {summary.byRun.length === 0 ? (
               <p className="mt-2 text-xs text-[var(--text-muted)]">{t("primeRadiant.costs.none")}</p>
             ) : (
               <div className="mt-2 overflow-x-auto">
-                <table className="w-full text-xs" data-testid="prime-radiant-cost-runs">
+                <table aria-labelledby={byRunId} className="w-full text-xs" data-testid="prime-radiant-cost-runs">
                   <thead className="text-[10px] uppercase tracking-wider text-[var(--text-muted)]">
                     <tr>
                       <th className="text-left font-medium py-1 pr-2">{t("primeRadiant.costs.run")}</th>

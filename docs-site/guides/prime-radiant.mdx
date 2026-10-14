@@ -28,8 +28,9 @@ The **Add documents** tab takes them two ways:
   converted **on the box**. Copies, caches, build folders and version-control folders
   are left out, and a document that is already in the wiki is recognised by its content
   and not written twice.
-- **By dropping files** onto the drop zone, up to 9 MB each. Larger files go in through
-  their folder.
+- **By dropping files** onto the drop zone, up to 9 MB each. A larger file goes in
+  through its folder, which reads documents up to 40 MB; a bigger one is skipped as too
+  large.
 
 Progress shows live: how many files are written, skipped or failed, and the pages made
 so far. **Stop** ends the import; what was already written stays. A file that still
@@ -40,7 +41,7 @@ again** retries exactly those files.
 To write a page, the text of each document is sent to ClawBox AI. Before anything
 leaves the box, Prime Radiant removes what looks like a secret — bank account and card
 numbers, API keys, private keys, passwords — and masks e-mail addresses and phone
-numbers, in the text and in the file names.
+numbers, in the text and in file and folder names, a dropped file's name included.
 </Warning>
 
 ## Reading the wiki

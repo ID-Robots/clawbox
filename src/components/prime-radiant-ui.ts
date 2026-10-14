@@ -36,6 +36,16 @@ export type {
 
 export const API = "/setup-api/prime-radiant";
 
+/**
+ * Fired on the page when this window made or changed the vault, so another
+ * window on the same desktop (Memory Shard's source line) reads it again.
+ */
+export const PRIME_RADIANT_CHANGED_EVENT = "clawbox:prime-radiant-changed";
+
+export function announceVaultChanged(): void {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(PRIME_RADIANT_CHANGED_EVENT));
+}
+
 /** A product name, the same in every language (like ClawKeep). */
 export const PRODUCT_NAME = "Prime Radiant";
 
@@ -67,7 +77,11 @@ export async function prJson<T>(url: string, init?: RequestInit): Promise<T> {
   let body: unknown = null;
   try {
     body = await res.json();
-  } catch {
+  } catch (err) {
+    // Aborted while the body was still arriving: that is the caller's abort,
+    // not an empty answer — read as `null` it would be handed on as data.
+    if ((err as Error)?.name === "AbortError") throw err;
+    if (init?.signal?.aborted) throw new DOMException("The request was aborted.", "AbortError");
     body = null;
   }
   if (!res.ok) {

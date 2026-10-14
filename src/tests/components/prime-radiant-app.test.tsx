@@ -2,6 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import PrimeRadiantApp from "@/components/PrimeRadiantApp";
 import { I18nProvider } from "@/lib/i18n";
+import { OPEN_APP_EVENT } from "@/lib/ui-events";
+import { PRIME_RADIANT_CHANGED_EVENT, prJson } from "@/components/prime-radiant-ui";
+import { stubLocation } from "@/tests/helpers/session-switch";
 
 /**
  * The Prime Radiant window over a fake set of its routes: the first open
@@ -114,6 +117,9 @@ interface Call { url: string; method: string; body: unknown }
 let status: Record<string, unknown>;
 let calls: Call[];
 let searchStatus: number;
+let searchAnswer: Record<string, unknown>;
+/** A held answer for `GET review?status=…`, released by the test. */
+let reviewGate: Promise<void> | null;
 let reviewItems: unknown[];
 let nightlyRuns: unknown[];
 let ingestJobs: unknown[];
@@ -139,12 +145,13 @@ function installFetch() {
     if (url === `${p}/pages/entities/acme-widgets.md`) return ok(PAGE);
     if (url.startsWith(`${p}/search?`)) {
       if (searchStatus === 404) return ok({ error: "Not found" }, 404);
-      return ok({
-        initialised: true, shardEnabled: true, indexing: false,
-        results: [{ source: "prime-radiant", path: "entities/acme-widgets.md", id: "sales/acme-widgets/hq-city", kind: "claim", type: "entity", title: "Acme Widgets Ltd", snippet: "Based in Springfield.", score: 0.92, verified: true }],
-      });
+      return ok(searchAnswer);
     }
-    if (url.startsWith(`${p}/review?`)) return ok({ total: reviewItems.length, counts: { open: reviewItems.length, later: 0, resolved: 0 }, items: reviewItems });
+    if (url.startsWith(`${p}/review?`)) {
+      if (reviewGate && url.includes("status=open")) await reviewGate;
+      const items = reviewItems;
+      return ok({ total: items.length, counts: { open: items.length, later: 0, resolved: 0 }, items });
+    }
     if (url.startsWith(`${p}/review/`) && method === "POST") {
       reviewItems = [];
       return ok({ item: { ...REVIEW_ITEM, status: "resolved" }, commit: "abc1234", retired: [] });
@@ -207,6 +214,16 @@ beforeEach(() => {
   status = { ...STATUS };
   calls = [];
   searchStatus = 200;
+  // The route's real shape: the index leads every chunk with the page title.
+  searchAnswer = {
+    initialised: true, shardEnabled: true, indexing: false,
+    index: { exists: true, pages: 2, chunks: 5, identity: "valid", needsFullScan: false, builtAt: 1 },
+    results: [{
+      source: "prime-radiant", path: "entities/acme-widgets.md", id: "sales/acme-widgets/hq-city", kind: "claim", type: "entity",
+      title: "Acme Widgets Ltd", snippet: "Acme Widgets Ltd: Based in Springfield.", score: 0.92, similarity: 0.82, verified: true,
+    }],
+  };
+  reviewGate = null;
   reviewItems = [REVIEW_ITEM];
   nightlyRuns = [];
   ingestJobs = [];
@@ -268,6 +285,26 @@ describe("PrimeRadiantApp", () => {
     expect(await screen.findByTestId("prime-radiant-review-empty")).toBeInTheDocument();
   });
 
+  it("never lets a late read for one filter draw over another's queue", async () => {
+    await mount();
+    await openTab("review");
+    await screen.findByTestId("prime-radiant-review-item");
+    // The resolve's re-read of the OPEN queue hangs; meanwhile the owner moves to Later.
+    let release: () => void = () => undefined;
+    reviewGate = new Promise<void>((r) => { release = r; });
+    fireEvent.click(screen.getByTestId("prime-radiant-review-later"));
+    await waitFor(() => expect(calls.some((c) => c.url.includes("/resolve"))).toBe(true));
+    reviewItems = [];
+    fireEvent.click(screen.getByTestId("prime-radiant-review-status-later"));
+    await waitFor(() => expect(calls.some((c) => c.url.includes("status=later"))).toBe(true));
+    expect(await screen.findByTestId("prime-radiant-review-empty")).toBeInTheDocument();
+    // The open queue's answer arrives late, still holding the item: it is not drawn.
+    reviewItems = [REVIEW_ITEM];
+    await act(async () => { release(); await new Promise((r) => setTimeout(r, 20)); });
+    expect(screen.queryByTestId("prime-radiant-review-item")).toBeNull();
+    expect(screen.getByTestId("prime-radiant-review-empty")).toBeInTheDocument();
+  });
+
   it("writes a new answer, and sets an item aside for later", async () => {
     await mount();
     await openTab("review");
@@ -293,8 +330,32 @@ describe("PrimeRadiantApp", () => {
     await openTab("search");
     fireEvent.change(screen.getByTestId("prime-radiant-search-q"), { target: { value: "headquarters" } });
     fireEvent.click(screen.getByTestId("prime-radiant-search-go"));
-    fireEvent.click(await screen.findByTestId("prime-radiant-search-hit"));
+    const hit = await screen.findByTestId("prime-radiant-search-hit");
+    expect(calls.find((c) => c.url.includes("/search?"))?.url).toContain("limit=20");
+    // The title is the row's; the snippet drops the lead the index gave it.
+    expect(hit).toHaveTextContent("Based in Springfield.");
+    expect(hit.textContent?.match(/Acme Widgets Ltd/g)).toHaveLength(1);
+    expect(hit).toHaveTextContent("sales/acme-widgets/hq-city");
+    expect(hit).toHaveTextContent("92%");
+    fireEvent.click(hit);
     expect(await screen.findByTestId("prime-radiant-page")).toBeInTheDocument();
+  });
+
+  it("says when Memory Shard is off and when the index is still being built", async () => {
+    await mount();
+    await openTab("search");
+    searchAnswer = { initialised: true, shardEnabled: false, indexing: false, results: [] };
+    fireEvent.change(screen.getByTestId("prime-radiant-search-q"), { target: { value: "widgets" } });
+    fireEvent.click(screen.getByTestId("prime-radiant-search-go"));
+    await waitFor(() => expect(screen.getByTestId("prime-radiant-search-notice")).toHaveAttribute("data-notice", "shardOff"));
+
+    searchAnswer = {
+      initialised: true, shardEnabled: true, indexing: true,
+      index: { exists: false, pages: 0, chunks: 0, identity: "missing", needsFullScan: true, builtAt: null }, results: [],
+    };
+    fireEvent.click(screen.getByTestId("prime-radiant-search-go"));
+    await waitFor(() => expect(screen.getByTestId("prime-radiant-search-notice")).toHaveAttribute("data-notice", "indexing"));
+    expect(screen.queryByTestId("prime-radiant-search-hit")).toBeNull();
   });
 
   it("says search is not on this box yet when the route is missing", async () => {
@@ -322,11 +383,29 @@ describe("PrimeRadiantApp", () => {
     });
   });
 
+  it("sends one undo however fast Confirm is pressed twice", async () => {
+    await mount();
+    fireEvent.click(await screen.findByTestId("prime-radiant-page-row"));
+    fireEvent.click(await screen.findByTestId("prime-radiant-page-history"));
+    const commit = await screen.findByTestId("prime-radiant-commit");
+    fireEvent.click(within(commit).getByTestId("prime-radiant-revert"));
+    const confirm = within(await screen.findByRole("dialog")).getAllByRole("button").at(-1) as HTMLElement;
+    // Both clicks land before React re-renders, as a fast double click can.
+    act(() => {
+      confirm.click();
+      confirm.click();
+    });
+    await waitFor(() => expect(calls.some((c) => c.url.endsWith("/revert"))).toBe(true));
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    expect(calls.filter((c) => c.url.endsWith("/revert"))).toHaveLength(1);
+  });
+
   it("lists costs as estimates and names embeddings as not measured", async () => {
     await mount();
     await openTab("costs");
     expect(await screen.findByTestId("prime-radiant-cost-not-measured")).toHaveTextContent(/not measured/i);
     expect(screen.getByTestId("prime-radiant-cost-runs")).toHaveTextContent("1,200");
+    expect(screen.getByRole("table", { name: "By run" })).toBe(screen.getByTestId("prime-radiant-cost-runs"));
   });
 
   it("merges a held night from the nightly card", async () => {
@@ -398,6 +477,24 @@ describe("PrimeRadiantApp", () => {
     expect(FakeEventSource.last?.closed).toBe(true);
   });
 
+  it("stops polling a job the box no longer has after the stream drops", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    await mount();
+    await openTab("ingest");
+    fireEvent.click(await screen.findByTestId("prime-radiant-ingest-folders-add"));
+    fireEvent.click(await screen.findByTestId("prime-radiant-ingest-folders-use"));
+    fireEvent.click(screen.getByTestId("prime-radiant-ingest-start"));
+    await screen.findByTestId("prime-radiant-ingest-running");
+    // The stream drops; the job read that follows answers 404 (the fake has no job-run GET).
+    act(() => { FakeEventSource.last?.onerror?.(); });
+    await waitFor(() => expect(screen.queryByTestId("prime-radiant-ingest-running")).toBeNull(), { timeout: 5000 });
+    const reads = () => calls.filter((c) => c.url.endsWith("/ingest/job-run") && c.method === "GET").length;
+    const seen = reads();
+    expect(seen).toBe(1);
+    await act(async () => { await new Promise((r) => setTimeout(r, 2300)); });
+    expect(reads()).toBe(seen);
+  });
+
   it("lists a job's dead letters and retries them", async () => {
     ingestJobs = [DEAD_JOB];
     await mount();
@@ -419,6 +516,42 @@ describe("PrimeRadiantShardSource", () => {
     await waitFor(() => expect(line).toHaveTextContent("Prime Radiant wiki (pages: 2)"));
   });
 
+  it("reads again when a Prime Radiant window makes the wiki", async () => {
+    status = { ...STATUS, initialised: false };
+    const { default: PrimeRadiantShardSource } = await import("@/components/PrimeRadiantShardSource");
+    render(<I18nProvider><PrimeRadiantShardSource /></I18nProvider>);
+    await waitFor(() => expect(calls.some((c) => c.url.endsWith("/prime-radiant/status"))).toBe(true));
+    expect(screen.queryByTestId("memory-shard-prime-radiant-source")).toBeNull();
+    status = { ...STATUS };
+    act(() => { window.dispatchEvent(new Event(PRIME_RADIANT_CHANGED_EVENT)); });
+    expect(await screen.findByTestId("memory-shard-prime-radiant-source")).toHaveTextContent("pages: 2");
+  });
+
+  it("opens the wiki as a window on the desktop and navigates on the standalone page", async () => {
+    const { default: PrimeRadiantShardSource } = await import("@/components/PrimeRadiantShardSource");
+    const opened: string[] = [];
+    const onOpen = (e: Event) => opened.push((e as CustomEvent<{ appId: string }>).detail.appId);
+    window.addEventListener(OPEN_APP_EVENT, onOpen);
+    try {
+      const view = render(<I18nProvider><PrimeRadiantShardSource /></I18nProvider>);
+      fireEvent.click(await screen.findByTestId("memory-shard-prime-radiant-open"));
+      expect(opened).toEqual(["prime-radiant"]);
+      view.unmount();
+
+      const location = stubLocation("/app/memory-shard");
+      try {
+        render(<I18nProvider><PrimeRadiantShardSource /></I18nProvider>);
+        fireEvent.click(await screen.findByTestId("memory-shard-prime-radiant-open"));
+        expect(location.assign).toHaveBeenCalledWith("/app/prime-radiant");
+        expect(opened).toEqual(["prime-radiant"]);
+      } finally {
+        location.restore();
+      }
+    } finally {
+      window.removeEventListener(OPEN_APP_EVENT, onOpen);
+    }
+  });
+
   it("draws nothing before the wiki is created", async () => {
     status = { ...STATUS, initialised: false };
     const { default: PrimeRadiantShardSource } = await import("@/components/PrimeRadiantShardSource");
@@ -426,5 +559,20 @@ describe("PrimeRadiantShardSource", () => {
     await waitFor(() => expect(calls.some((c) => c.url.endsWith("/prime-radiant/status"))).toBe(true));
     expect(screen.queryByTestId("memory-shard-prime-radiant-source")).toBeNull();
     expect(calls.some((c) => c.url.endsWith("/init"))).toBe(false);
+  });
+});
+
+describe("prJson", () => {
+  it("reports an abort that lands while the body is arriving as an abort, not as an empty answer", async () => {
+    const ctl = new AbortController();
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        ctl.abort();
+        throw new SyntaxError("Unexpected end of JSON input");
+      },
+    })));
+    await expect(prJson("/setup-api/prime-radiant/pages", { signal: ctl.signal })).rejects.toMatchObject({ name: "AbortError" });
   });
 });

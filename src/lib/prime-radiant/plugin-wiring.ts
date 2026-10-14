@@ -29,6 +29,7 @@ import {
   type OpenClawConfig,
   type OpenclawConfigSetArgs,
 } from "@/lib/openclaw-config";
+import { processStore } from "@/lib/process-store";
 import path from "@/lib/runtime-path";
 import { vaultDir } from "./paths";
 
@@ -126,8 +127,27 @@ export type WiringResult = WiringPlan & { wrote: boolean };
 
 const FORCEABLE: ReadonlySet<WiringConflict> = new Set(["plugin-disabled", "other-vault-mode", "other-vault-path"]);
 
+/**
+ * One wiring at a time, process-wide: two windows opening the app together
+ * would otherwise both read the unwired config, both plan the same batch and
+ * both write it (two gateway restarts). Chained, the second one plans against
+ * what the first one wrote and writes nothing. In `processStore` because the
+ * routes and the boot layer compile this module twice.
+ */
+const wiringQueue = processStore("prime-radiant:wiring", () => ({ tail: Promise.resolve() as Promise<unknown> }));
+
 /** Make the plugin read the vault. One batched config write, or none. */
-export async function ensureMemoryWikiWiring(options: EnsureWiringOptions = {}): Promise<WiringResult> {
+export function ensureMemoryWikiWiring(options: EnsureWiringOptions = {}): Promise<WiringResult> {
+  const run = wiringQueue.tail.then(
+    () => wireOnce(options),
+    () => wireOnce(options),
+  );
+  // A failed write is its caller's to report, never the next caller's to inherit.
+  wiringQueue.tail = run.catch(() => undefined);
+  return run;
+}
+
+async function wireOnce(options: EnsureWiringOptions): Promise<WiringResult> {
   const vault = options.vault ?? vaultDir();
   const plan = await memoryWikiWiringStatus(vault);
   if (plan.state === "wired" || plan.state === "unavailable") return { ...plan, wrote: false };

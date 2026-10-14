@@ -37,7 +37,7 @@ export const UPLOAD_BATCH_TTL_MS = 24 * 60 * 60 * 1000;
 
 const HEX = "0123456789abcdef";
 const BATCH_HEX = 16;
-const NAME_CHARS = /[A-Za-z0-9._ -]/;
+const NAME_CHARS = /[A-Za-z0-9._ +()-]/;
 const MAX_NAME_CHARS = 120;
 
 export function uploadsRoot(): string {

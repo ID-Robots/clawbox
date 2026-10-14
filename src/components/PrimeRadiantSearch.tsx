@@ -29,6 +29,22 @@ interface SearchAnswer {
 type Notice = "unavailable" | "shardOff" | "indexing" | "noResults" | null;
 
 /**
+ * The index stores every chunk led by its page's title (`Title\n\nbody…`,
+ * `Title: claim`) so a chunk from the middle of a page still says what it is
+ * about. The row already shows the title, so the snippet drops that lead.
+ */
+function snippetBody(hit: Pick<SearchHit, "title" | "snippet">): string {
+  const title = hit.title.trim();
+  const text = hit.snippet;
+  if (title) {
+    for (const lead of [`${title}\n\n`, `${title}: `]) {
+      if (text.startsWith(lead)) return text.slice(lead.length).trim();
+    }
+  }
+  return text.trim();
+}
+
+/**
  * Search: the vault through Memory Shard's engine (`GET search`). Memory Shard
  * is the search engine; Prime Radiant is one of its sources, so with Memory
  * Shard switched off there is nothing to search and the tab says so. A server
@@ -115,7 +131,7 @@ export default function PrimeRadiantSearch({ onOpenPage }: { onOpenPage: (path: 
                     {hit.type ? ` · ${t(`primeRadiant.type.${hit.type}`)}` : ""}
                   </span>
                 </div>
-                <p className="mt-0.5 text-xs text-[var(--text-secondary)] line-clamp-2">{hit.snippet}</p>
+                <p className="mt-0.5 text-xs text-[var(--text-secondary)] line-clamp-2">{snippetBody(hit)}</p>
                 <p className="mt-0.5 text-[11px] text-[var(--text-muted)] font-mono truncate">
                   {hit.kind === "claim" ? hit.id : hit.path} · {t("primeRadiant.search.score", { value: percent(hit.score) })}
                 </p>
