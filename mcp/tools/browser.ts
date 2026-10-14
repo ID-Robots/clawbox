@@ -114,11 +114,24 @@ const CDP_DOWN = (opening = false) =>
       : "Call browser_open first. If that fails too, tell the user to open the Agent Browser app on the ClawBox desktop.",
   );
 
+// Inside a run the route opens a loopback port only when this run is serving
+// it, and answers any other with 400 "Blocked loopback address (not served by
+// this run)". The fix is to serve the project from the run itself: the preview
+// helper's listeners are the run's own, so the PREVIEW_URL it prints opens.
+const RUN_LOOPBACK_RULE: ErrorRule = {
+  status: 400,
+  match: /blocked loopback address/i,
+  code: "BAD_ARGUMENT",
+  message: "Nothing this run started is serving that loopback address, so the browser will not open it.",
+  next: 'Do not retry that address. Start the app with node "$CLAWBOX_PREVIEW" --ttl 900 in your working folder, then open the PREVIEW_URL it prints.',
+};
+
 // The launch route refuses addresses on the device's own network BEFORE any
 // browser starts, with 400 "Blocked internal address". That is an argument
 // problem the agent can fix; reporting it as "the browser is not running" sent
 // it back to browser_open with the same url, forever.
 const LAUNCH_RULES: ErrorRule[] = [
+  RUN_LOOPBACK_RULE,
   {
     status: 400,
     match: /blocked internal address/i,
@@ -133,6 +146,15 @@ const LAUNCH_RULES: ErrorRule[] = [
     next: "Pass a full public address starting with https://, and do not retry the one that was refused.",
   },
 ];
+
+/**
+ * The preview helper is given to runs only. The assistant's own server can
+ * still meet the loopback refusal (a launch while a run is live is tagged with
+ * that run), and is told what it can act on: the address was refused.
+ */
+function launchRules(): ErrorRule[] {
+  return runContext() ? LAUNCH_RULES : LAUNCH_RULES.filter((rule) => rule !== RUN_LOOPBACK_RULE);
+}
 
 // The describe route's own refusals are argument problems, not an outage:
 // mapping them keeps a small model from retrying the same path forever.
@@ -237,7 +259,7 @@ async function ensureSession(url?: string, opening = false): Promise<string> {
   statedBrowser = null;
   let reply: BrowserReply;
   try {
-    reply = await browserCall("launch", { ...(url ? { url } : {}) }, LAUNCH_RULES);
+    reply = await browserCall("launch", { ...(url ? { url } : {}) }, launchRules());
   } catch (err) {
     // A mapped refusal is the device's real answer and is the ONLY thing the
     // agent can act on. Only a genuine "nothing answered" becomes CDP_DOWN.

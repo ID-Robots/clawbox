@@ -87,6 +87,20 @@ function liveBrowserRun(id: string) {
   return run?.status === "running" ? run : null;
 }
 
+/**
+ * The loopback names a run's preview can be served on — the URL parser has
+ * already folded 127.1, 0x7f.0.0.1 and the long forms of ::1 into these.
+ * Other 127/8 addresses fall to the private-address check like the LAN does.
+ */
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+/**
+ * A run asking for a loopback port it does not serve is told so in words of
+ * its own: "internal address" sent runs off to find a public URL, when the
+ * fix is to serve the project from the run itself (scripts/clawbox-preview.mjs).
+ */
+const UNOWNED_LOOPBACK = "Blocked loopback address (not served by this run)";
+
 async function resolveNavUrl(url: string, runId?: string | null): Promise<NavDecision> {
   let parsed: URL;
   try {
@@ -100,7 +114,14 @@ async function resolveNavUrl(url: string, runId?: string | null): Promise<NavDec
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     return { ok: false, error: `Blocked URL scheme: ${parsed.protocol} (only http/https allowed)` };
   }
-  if (runId && await ownsLocalPreview(parsed, liveBrowserRun(runId))) return { ok: true, url };
+  // The one loopback exception to SEC-4: the live run's own server, its
+  // listeners proven to be the run's on every navigation and asset origin
+  // (src/lib/coding-local-preview.ts). LAN, link-local and *.localhost never are.
+  if (runId && LOOPBACK_HOSTS.has(parsed.hostname)) {
+    return await ownsLocalPreview(parsed, liveBrowserRun(runId))
+      ? { ok: true, url }
+      : { ok: false, error: UNOWNED_LOOPBACK };
+  }
   const host = parsed.hostname.replace(/^\[|\]$/g, "");
   if (host === "localhost" || host.endsWith(".localhost")) return { ok: false, error: "Blocked internal host" };
   if (net.isIP(host)) {

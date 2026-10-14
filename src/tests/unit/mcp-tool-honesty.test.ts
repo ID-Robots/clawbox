@@ -519,6 +519,52 @@ describe("browser_open — a refused address is not a dead browser", () => {
     expect(out.error.next).not.toMatch(/call browser_open/i);
   });
 
+  /**
+   * Inside a run the route opens a loopback port only when the run serves it.
+   * "Private network, ask for a public address" sent the run looking for a URL
+   * it could never get; the answer is to serve the project with the helper the
+   * run is given and open what it prints.
+   */
+  it("sends a run refused an unowned loopback port to the preview helper", async () => {
+    vi.stubEnv("CLAWBOX_RUN_DIR", HOME);
+    vi.stubEnv("CLAWBOX_RUN_ARTIFACTS_DIR", path.join(HOME, "run-aaaaaaaa"));
+    try {
+      apiPost.mockRejectedValue(new ApiError(400, JSON.stringify({ error: "Blocked loopback address (not served by this run)" })));
+      const out = await browser().call("browser_open", { url: "http://127.0.0.1:3000/" });
+      expect(out.isError).toBe(true);
+      if (!out.isError) return;
+      expect(out.error.code).toBe("BAD_ARGUMENT");
+      expect(out.error.message).toMatch(/loopback/i);
+      expect(out.error.next).toContain('node "$CLAWBOX_PREVIEW" --ttl 900');
+      expect(out.error.next).toMatch(/PREVIEW_URL/);
+      expect(out.error.next).not.toMatch(/call browser_open/i);
+
+      // The private-network rule is untouched inside a run.
+      apiPost.mockRejectedValue(new ApiError(400, JSON.stringify({ error: "Blocked internal address" })));
+      const lan = await browser().call("browser_open", { url: "http://10.0.0.1:3000/" }); // public-hygiene: allow synthetic private address the route must refuse, not a real host
+      if (!lan.isError) throw new Error("expected a refusal");
+      expect(lan.error.message).toMatch(/private network/i);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("never names the run-only preview helper to the assistant", async () => {
+    vi.stubEnv("CLAWBOX_RUN_DIR", "");
+    vi.stubEnv("CLAWBOX_RUN_ARTIFACTS_DIR", "");
+    try {
+      apiPost.mockRejectedValue(new ApiError(400, JSON.stringify({ error: "Blocked loopback address (not served by this run)" })));
+      const out = await browser().call("browser_open", { url: "http://127.0.0.1:3000/" });
+      expect(out.isError).toBe(true);
+      if (!out.isError) return;
+      expect(out.error.code).toBe("BAD_ARGUMENT");
+      expect(out.error.next).not.toMatch(/CLAWBOX_PREVIEW|PREVIEW_URL/);
+      expect(out.error.next).not.toMatch(/call browser_open/i);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("still reports a genuinely dead browser as ENDPOINT_DOWN", async () => {
     apiPost.mockRejectedValue(new Error("fetch failed"));
 
