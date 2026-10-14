@@ -13,7 +13,7 @@
  * keeps the legacy behaviour.
  */
 import fs from "fs";
-import path from "path";
+import path from "@/lib/runtime-path";
 
 export function deviceEtcDir(): string {
   return process.env.CLAWBOX_ETC || "/etc/clawbox";
