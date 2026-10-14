@@ -163,6 +163,27 @@ CREATE TABLE IF NOT EXISTS judged_pairs (
 );
 `;
 
+/**
+ * Run `fn` in one transaction. A failed ROLLBACK (SQLite may already have
+ * ended the transaction after an I/O or disk-full error) is logged and never
+ * replaces the error that caused it.
+ */
+export function runInTransaction<T>(db: DatabaseSync, fn: () => T): T {
+  db.exec("BEGIN");
+  try {
+    const out = fn();
+    db.exec("COMMIT");
+    return out;
+  } catch (err) {
+    try {
+      db.exec("ROLLBACK");
+    } catch (rollbackErr) {
+      console.warn(`[prime-radiant] rollback failed: ${rollbackErr instanceof Error ? rollbackErr.message : "error"}`);
+    }
+    throw err;
+  }
+}
+
 /** Open (creating and migrating as needed) the state database for `vault`. Caller closes it. */
 export function openStateDb(vault: string): DatabaseSync {
   const file = stateDbPathFor(vault);
@@ -180,15 +201,10 @@ export function openStateDb(vault: string): DatabaseSync {
     ];
     for (const [target, sql] of steps) {
       if (version >= target) continue;
-      db.exec("BEGIN");
-      try {
+      runInTransaction(db, () => {
         db.exec(sql);
         db.exec(`PRAGMA user_version = ${target}`);
-        db.exec("COMMIT");
-      } catch (err) {
-        db.exec("ROLLBACK");
-        throw err;
-      }
+      });
     }
   } catch (err) {
     try {
@@ -234,14 +250,9 @@ export function recordRetired(vault: string, ids: ReadonlyArray<{ id: string; pa
        ON CONFLICT(id) DO UPDATE SET state = 'retired', updated_at = excluded.updated_at,
          retired_at = COALESCE(claim_registry.retired_at, excluded.retired_at)`,
     );
-    db.exec("BEGIN");
-    try {
+    runInTransaction(db, () => {
       for (const { id, page } of ids) stmt.run(id, page, at, at);
-      db.exec("COMMIT");
-    } catch (err) {
-      db.exec("ROLLBACK");
-      throw err;
-    }
+    });
   });
 }
 
@@ -256,13 +267,8 @@ export function syncActiveClaims(vault: string, claims: ReadonlyArray<{ id: stri
        ON CONFLICT(id) DO UPDATE SET page = excluded.page, updated_at = excluded.updated_at
        WHERE claim_registry.state = 'active'`,
     );
-    db.exec("BEGIN");
-    try {
+    runInTransaction(db, () => {
       for (const c of claims) stmt.run(c.id, c.page, c.updatedAt);
-      db.exec("COMMIT");
-    } catch (err) {
-      db.exec("ROLLBACK");
-      throw err;
-    }
+    });
   });
 }

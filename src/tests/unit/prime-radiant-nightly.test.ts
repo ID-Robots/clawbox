@@ -198,6 +198,30 @@ describe("nightly pass", () => {
     await expect(mergeHeldNight("dream/2026-05-20")).rejects.toBeInstanceOf(HeldNightError);
   });
 
+  it("a second held night gets its own lint items: an item an earlier night raised cannot clear it", async () => {
+    await ensureVault();
+    await vaultOperation("seed: long page", async (tx) => {
+      await tx.write("concepts/long.md", pageText({ title: "Long", claims: [claim("acme-sales/long/fact", "A long page fact.")] }, `${"Acme widgets. ".repeat(1000)}\n`));
+      await tx.write("index.md", "# Index\n\n- [[concepts/long]]\n");
+    });
+    const opus: OpusClient = {
+      model: "claude-opus-5-5",
+      complete: async () => ({ text: '[{"k":0,"verdict":"ok","claims":[],"note":"fine"}]', model: "claude-opus-5-5", usage: { promptTokens: 1000, completionTokens: 50, cacheHitTokens: 0 } }),
+    };
+    const s = settings({ opus: { ...defaultSettings().opus, enabled: true, capUsd: 5 } });
+    const night = (day: number) =>
+      runNightly("manual", deps({ settings: { ...s, ingest: { ...s.ingest, folders: [] } }, opus, online: async () => false, random: () => 0, now: () => new Date(2026, 4, day, 3, 0) }));
+    const first = await night(20);
+    const second = await night(21);
+    expect(first?.status).toBe("held");
+    expect(second?.status).toBe("held");
+    const lint = listReviewItems(vaultDir(), { kind: "lint" }).items;
+    expect(lint.some((i) => i.runId === first!.id)).toBe(true);
+    expect(lint.some((i) => i.runId === second!.id)).toBe(true);
+    // The first night's items are still open; the second night's are its own.
+    await expect(mergeHeldNight("dream/2026-05-21")).rejects.toMatchObject({ code: "open_items" });
+  });
+
   it("runs one pass at a time", async () => {
     await ensureVault();
     const first = await startNightly("manual", deps({ online: async () => false }));

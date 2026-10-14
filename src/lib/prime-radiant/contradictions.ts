@@ -22,7 +22,6 @@
  * SERVER ONLY.
  */
 
-import crypto from "crypto";
 import { processStore } from "@/lib/process-store";
 import { estimateUsd, type CostRates } from "./cost-rates";
 import { completeWithRetry, FlashCallError, flashClient, stubEnabled, type FlashClient, type RetryOptions } from "./flash-client";
@@ -30,7 +29,7 @@ import { recordCost } from "./ingest-store";
 import { buildJudgePrompt, JUDGE_VERDICTS, parseJudgeResponse, type JudgeVerdict } from "./judge";
 import { redactText } from "./redact";
 import { addReviewItem, type ReviewItem } from "./review-store";
-import { stateDbExists, withStateDb } from "./state-db";
+import { runInTransaction, stateDbExists, withStateDb } from "./state-db";
 import type { VaultSnapshot } from "./vault";
 
 export const KNN_K = 5;
@@ -72,8 +71,7 @@ export function createHashEmbedder(dims = 256): ClaimEmbedder {
       return texts.map((t) => {
         const v = new Float32Array(dims);
         for (const w of t.toLowerCase().match(/[a-z]{3,}/g) ?? []) {
-          const h = crypto.createHash("sha256").update(w).digest();
-          v[h.readUInt32BE(0) % dims] += 1;
+          v[parseInt(cacheKey(w).slice(0, 8), 16) % dims] += 1;
         }
         let sum = 0;
         for (const x of v) sum += x * x;
@@ -169,14 +167,72 @@ export function nearestPairs(
   return [...seen.values()].sort((x, y) => y.score - x.score);
 }
 
+/**
+ * A cache key for a claim text: cyrb128 (four 32-bit lanes, 128 bits). Not a
+ * cryptographic hash and not meant as one — it only names an already-redacted
+ * text in the vector and verdict caches, where a collision costs one stale
+ * cache hit, never a secret.
+ */
+function cacheKey(text: string): string {
+  let h1 = 1779033703;
+  let h2 = 3144134277;
+  let h3 = 1013904242;
+  let h4 = 2773480762;
+  for (let i = 0; i < text.length; i++) {
+    const k = text.charCodeAt(i);
+    h1 = h2 ^ Math.imul(h1 ^ k, 597399067);
+    h2 = h3 ^ Math.imul(h2 ^ k, 2869860233);
+    h3 = h4 ^ Math.imul(h3 ^ k, 951274213);
+    h4 = h1 ^ Math.imul(h4 ^ k, 2716044179);
+  }
+  h1 = Math.imul(h3 ^ (h1 >>> 18), 597399067);
+  h2 = Math.imul(h4 ^ (h2 >>> 22), 2869860233);
+  h3 = Math.imul(h1 ^ (h3 >>> 17), 951274213);
+  h4 = Math.imul(h2 ^ (h4 >>> 19), 2716044179);
+  h1 ^= h2 ^ h3 ^ h4;
+  h2 ^= h1;
+  h3 ^= h1;
+  h4 ^= h1;
+  return [h1, h2, h3, h4].map((h) => (h >>> 0).toString(16).padStart(8, "0")).join("");
+}
+
 export function textHash(text: string): string {
-  return crypto.createHash("sha256").update(text).digest("hex").slice(0, 32);
+  return cacheKey(text);
 }
 
 /** One key per unordered pair of TEXTS: the same two statements are judged once. */
 export function pairHash(a: string, b: string): string {
   const [x, y] = [textHash(a), textHash(b)].sort();
-  return crypto.createHash("sha256").update(`${x}|${y}`).digest("hex").slice(0, 32);
+  return cacheKey(`${x}|${y}`);
+}
+
+/** Queries per slice of the kNN search; the event loop is yielded between slices. */
+export const KNN_QUERY_CHUNK = 64;
+
+/**
+ * {@link nearestPairs} in slices of queries, yielding to the event loop
+ * between them: a first night's full pass is tens of thousands of queries,
+ * and one synchronous call would stall every request the web server answers.
+ * Same pairs, same order as one call; stops early when `signal` aborts.
+ */
+export async function nearestPairsYielding(
+  claims: readonly Pick<PassClaim, "id" | "page">[],
+  vectors: readonly Float32Array[],
+  queries: readonly number[],
+  k = KNN_K,
+  signal?: AbortSignal,
+  chunk = KNN_QUERY_CHUNK,
+): Promise<CandidatePair[]> {
+  const merged = new Map<string, CandidatePair>();
+  for (let at = 0; at < queries.length; at += chunk) {
+    if (signal?.aborted) break;
+    for (const p of nearestPairs(claims, vectors, queries.slice(at, at + chunk), k)) {
+      const key = `${p.a}:${p.b}`;
+      if (!merged.has(key)) merged.set(key, p);
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  return [...merged.values()].sort((x, y) => y.score - x.score);
 }
 
 // ── the pass ──────────────────────────────────────────────────────────────
@@ -256,14 +312,9 @@ function storeVectors(vault: string, identity: string, rows: ReadonlyArray<{ id:
       `INSERT INTO claim_embeddings (claim_id, text_hash, identity, dims, vec, at) VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT(claim_id, identity) DO UPDATE SET text_hash = excluded.text_hash, dims = excluded.dims, vec = excluded.vec, at = excluded.at`,
     );
-    db.exec("BEGIN");
-    try {
+    runInTransaction(db, () => {
       for (const r of rows) stmt.run(r.id, r.hash, identity, r.vec.length, new Uint8Array(r.vec.buffer, r.vec.byteOffset, r.vec.byteLength), at);
-      db.exec("COMMIT");
-    } catch (err) {
-      db.exec("ROLLBACK");
-      throw err;
-    }
+    });
   });
 }
 
@@ -287,14 +338,9 @@ function storeJudged(vault: string, rows: ReadonlyArray<{ hash: string; verdict:
       `INSERT INTO judged_pairs (pair_hash, verdict, why, at) VALUES (?, ?, ?, ?)
        ON CONFLICT(pair_hash) DO UPDATE SET verdict = excluded.verdict, why = excluded.why, at = excluded.at`,
     );
-    db.exec("BEGIN");
-    try {
+    runInTransaction(db, () => {
       for (const r of rows) stmt.run(r.hash, r.verdict, r.why, at);
-      db.exec("COMMIT");
-    } catch (err) {
-      db.exec("ROLLBACK");
-      throw err;
-    }
+    });
   });
 }
 
@@ -373,7 +419,7 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
     return result;
   }
 
-  let pairs = nearestPairs(claims, vectors, queries, options.k ?? KNN_K);
+  let pairs = await nearestPairsYielding(claims, vectors, queries, options.k ?? KNN_K, options.signal);
   result.pairs = pairs.length;
   if (pairs.length > MAX_JUDGED_PAIRS) {
     pairs = pairs.slice(0, MAX_JUDGED_PAIRS);

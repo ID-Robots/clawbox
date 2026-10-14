@@ -65,7 +65,7 @@ module here is SERVER ONLY unless it says "pure".
 
 ## Routes (`src/app/setup-api/prime-radiant/`)
 
-All owner-only through `requireSession`, `force-dynamic`, `Cache-Control: no-store`, failures as `{ error, code }`. The GETs NEVER create the vault (no folder, no repository, no state database, no config write); the app calls `POST init` when status says `initialised: false`. There is no boot hook.
+Every route needs a session through `requireSession`; who may call it is listed per endpoint below (owner-only unless it says otherwise — `POST review` also takes the MCP bearer). All are `force-dynamic`, `Cache-Control: no-store`, failures as `{ error, code }`. The GETs NEVER create the vault (no folder, no repository, no state database, no config write); the app calls `POST init` when status says `initialised: false`. There is no boot hook.
 
 - `POST init` — `ensureVault()` + `ensureMemoryWikiWiring()`, idempotent: `{ created, plugin: { state, …, wrote } }`. Owner cookie AND same origin (the MCP bearer gets 403 `owner_only`, a cross-site page 403 `cross_origin`), because it writes openclaw.json. 500 `vault_unavailable` when the vault cannot be made, `wiring_failed` when the vault is made and the config write failed.
 - `GET status` — `initialised`, the vault's counts, git head, memory-wiki wiring state (reported, never written), lint summary. Not initialised → zero counts, `git: { branch: null, head: null, commits: 0 }`, a clean lint.

@@ -176,14 +176,15 @@ async function changedPages(vault: string, base: string, head: string): Promise<
   return (await changedPaths(vault, base, head)).filter((p) => isKnowledgePage(p)).sort();
 }
 
-function lintItem(vault: string, f: LintFinding, runId: string, at: string): boolean {
+/** Keyed by branch as {@link touchItem} is: an item another night raised must not stand in for this night's. */
+function lintItem(vault: string, f: LintFinding, branch: string, runId: string, at: string): boolean {
   return addReviewItem(
     vault,
     {
       kind: "lint",
       pages: [f.path],
-      evidence: [{ kind: "lint", verdict: f.rule, note: f.message, page: f.path }],
-      dedupeKey: `lint:${f.rule}:${f.path}`,
+      evidence: [{ kind: "lint", verdict: f.rule, note: f.message, page: f.path, source: branch }],
+      dedupeKey: `lint:${branch}:${f.rule}:${f.path}`,
       runId,
     },
     at,
@@ -394,7 +395,7 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
     const errors = report.findings.filter((f) => f.severity === "error");
     summary.lint = { errors: report.errors, warnings: report.warnings, checked: report.checked };
     const at = now().toISOString();
-    for (const f of errors) if (lintItem(vault, f, run.id, at)) summary.reviewItems.raised++;
+    for (const f of errors) if (lintItem(vault, f, branch, run.id, at)) summary.reviewItems.raised++;
 
     // 6. gate
     const touches = await verifiedTouches(vault, VAULT_MAIN_BRANCH, branch);

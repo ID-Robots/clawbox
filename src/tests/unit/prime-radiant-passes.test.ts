@@ -12,6 +12,7 @@ import {
   collectClaims,
   createHashEmbedder,
   nearestPairs,
+  nearestPairsYielding,
   pairHash,
   runContradictionPass,
   type ClaimEmbedder,
@@ -26,6 +27,7 @@ import { vaultDir } from "@/lib/prime-radiant/paths";
 import { listReviewItems } from "@/lib/prime-radiant/review-store";
 import { readCostSummary } from "@/lib/prime-radiant/runs";
 import { readSettings, readSettingsPatch, SettingsError, writeSettings } from "@/lib/prime-radiant/settings";
+import { runInTransaction } from "@/lib/prime-radiant/state-db";
 import { readPage, readVaultSnapshot, vaultOperation } from "@/lib/prime-radiant/vault";
 import { claim, pageText, snapshot } from "../helpers/prime-radiant-fixtures";
 
@@ -93,9 +95,44 @@ describe("contradiction pass: pieces", () => {
     expect(pairs.map((p) => [p.a, p.b])).toEqual([[1, 2], [0, 2]]);
   });
 
+  it("finds the same pairs in slices that yield as in one synchronous call, and stops on abort", async () => {
+    let seed = 7;
+    const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648) - 0.5;
+    const claims = Array.from({ length: 40 }, (_, i) => ({ id: `a/c${i}/f`, page: `p${i % 9}` }));
+    const vectors = claims.map(() => Float32Array.from({ length: 8 }, rnd));
+    const queries = claims.map((_, i) => i);
+    const once = nearestPairs(claims, vectors, queries, 3);
+    expect(await nearestPairsYielding(claims, vectors, queries, 3, undefined, 4)).toEqual(once);
+    const stop = new AbortController();
+    stop.abort();
+    expect(await nearestPairsYielding(claims, vectors, queries, 3, stop.signal, 4)).toEqual([]);
+  });
+
+  it("a failed ROLLBACK never hides the error that caused it", () => {
+    const calls: string[] = [];
+    const db = {
+      exec(sql: string) {
+        calls.push(sql);
+        if (sql === "ROLLBACK") throw new Error("no transaction is active");
+      },
+    } as unknown as Parameters<typeof runInTransaction>[0];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    expect(() =>
+      runInTransaction(db, () => {
+        throw new Error("disk full");
+      }),
+    ).toThrow("disk full");
+    expect(calls).toEqual(["BEGIN", "ROLLBACK"]);
+    expect(warn).toHaveBeenCalledTimes(1);
+    warn.mockRestore();
+    expect(runInTransaction(db, () => 3)).toBe(3);
+    expect(calls.slice(2)).toEqual(["BEGIN", "COMMIT"]);
+  });
+
   it("hashes a pair the same both ways round", () => {
     expect(pairHash("x", "y")).toBe(pairHash("y", "x"));
     expect(pairHash("x", "y")).not.toBe(pairHash("x", "z"));
+    expect(pairHash("x", "y")).toMatch(/^[0-9a-f]{32}$/);
   });
 
   it("reads the judge's answer strictly", () => {
