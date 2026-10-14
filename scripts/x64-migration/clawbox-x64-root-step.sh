@@ -293,13 +293,14 @@ case "$step" in
       echo "clawbox-root-step: step '$step' has no implementation on the x64 install" >&2
       exit 64
     fi
-    # The installer names its user from `logname` or SUDO_USER, and a unit
-    # systemd starts has neither — so every forwarded step used to stop at
-    # "could not resolve an unprivileged install user". Hand it the user and
-    # the checkout this PC was installed for, from the root-owned record.
+    # The installer resolves its user from `logname`/SUDO_USER, and a unit
+    # systemd started has neither — every installer-backed step from the web
+    # server failed "could not resolve an unprivileged install user" until the
+    # values this dispatcher reads out of $ROOT_CONF were handed over (seen on
+    # the owner's laptop, 2026-10-12). CLAWBOX_DIR is the installer's own name
+    # for the project folder. require_install_user refuses an empty, root or
+    # malformed name before root hands it to the installer.
     require_install_user
-    export CLAWBOX_USER
-    export CLAWBOX_DIR="$PROJECT_DIR"
-    exec /usr/bin/bash "$ROOT_INSTALLER" --step "$step"
+    exec /usr/bin/env CLAWBOX_USER="$CLAWBOX_USER" CLAWBOX_DIR="$PROJECT_DIR" /usr/bin/bash "$ROOT_INSTALLER" --step "$step"
     ;;
 esac
