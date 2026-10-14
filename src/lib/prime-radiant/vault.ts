@@ -9,6 +9,7 @@
  */
 
 import fs from "fs/promises";
+import { constants as fsConstants } from "fs";
 import path, { untraced } from "@/lib/runtime-path";
 import { parsePage, serializePage, pageSummary, type ParsedPage } from "./frontmatter";
 import { hasVerification, type PageFrontmatter } from "./schema";
@@ -145,24 +146,31 @@ export async function ensureVault(vault: string = vaultDir()): Promise<{ created
 
 async function readPageAt(vault: string, rel: string): Promise<VaultPage | null> {
   const abs = pageAbsPath(vault, rel);
-  let st;
+  // One handle for the check and the read: O_NOFOLLOW refuses a symlink, and
+  // fstat/readFile on the same descriptor cannot race a swap of the path.
+  let handle;
   try {
-    st = await fs.lstat(abs);
+    handle = await fs.open(abs, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
   } catch {
     return null;
   }
-  if (!st.isFile() || st.isSymbolicLink()) return null;
-  if (st.size > MAX_PAGE_FILE_BYTES) {
-    return {
-      path: rel,
-      text: "",
-      bytes: st.size,
-      mtimeMs: st.mtimeMs,
-      parsed: { ok: false, errors: [{ field: "", message: "file is too large to read" }], body: "", raw: null },
-    };
+  try {
+    const st = await handle.stat();
+    if (!st.isFile()) return null;
+    if (st.size > MAX_PAGE_FILE_BYTES) {
+      return {
+        path: rel,
+        text: "",
+        bytes: st.size,
+        mtimeMs: st.mtimeMs,
+        parsed: { ok: false, errors: [{ field: "", message: "file is too large to read" }], body: "", raw: null },
+      };
+    }
+    const text = await handle.readFile("utf8");
+    return { path: rel, text, bytes: st.size, mtimeMs: st.mtimeMs, parsed: parsePage(text) };
+  } finally {
+    await handle.close();
   }
-  const text = await fs.readFile(abs, "utf8");
-  return { path: rel, text, bytes: st.size, mtimeMs: st.mtimeMs, parsed: parsePage(text) };
 }
 
 /** One page by vault-relative path, or null when absent (or not a safe page path). */

@@ -20,7 +20,7 @@ const MIXED = "Ab3dE5gH7jK9mN1pQ3rS5tU7vW9xY1zA3bC5";
 
 describe("redaction", () => {
   it("replaces private keys whole", () => {
-    const pem = ["-----BEGIN RSA PRIVATE KEY-----", "MIIEowIBAAKCAQEA" + "x".repeat(40), "-----END RSA PRIVATE KEY-----"].join("\n");
+    const pem = ["-----BEGIN RSA PRIVATE KEY-----", "MIIEowIBAAKCAQEA" + "x".repeat(40), "-----END RSA PRIVATE KEY-----"].join("\n"); // public-hygiene: allow synthetic redaction fixture
     const r = redactText(`before\n${pem}\nafter`);
     expect(r.text).toBe(`before\n${placeholder("PRIVATE_KEY")}\nafter`);
     expect(r.kinds).toEqual(["PRIVATE_KEY"]);
@@ -119,10 +119,10 @@ describe("redaction", () => {
   });
 
   it("redacts paths: the home folder and any segment", () => {
-    expect(redactPath("/home/someone/Documents/acme.pdf").text).toBe("~/Documents/acme.pdf");
-    expect(redactPath("/Users/someone/x.md").text).toBe("~/x.md");
+    expect(redactPath("/home/someone/Documents/acme.pdf").text).toBe("~/Documents/acme.pdf"); // public-hygiene: allow synthetic redaction fixture
+    expect(redactPath("/Users/someone/x.md").text).toBe("~/x.md"); // public-hygiene: allow synthetic redaction fixture
     expect(redactPath("/srv/box/data/notes.md", { homeDir: "/srv/box" }).text).toBe("~/data/notes.md");
-    const r = redactPath("/home/someone/invoices/orders@example.com/4111 1111 1111 1111.pdf");
+    const r = redactPath("/home/someone/invoices/orders@example.com/4111 1111 1111 1111.pdf"); // public-hygiene: allow synthetic redaction fixture
     expect(r.text).toBe(`~/invoices/${placeholder("EMAIL")}/${placeholder("CARD")}.pdf`);
     expect(r.kinds).toEqual(["CARD", "EMAIL"]);
   });
