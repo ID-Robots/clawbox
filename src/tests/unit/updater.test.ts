@@ -1025,6 +1025,53 @@ describe("updater", () => {
       const postStep = updater.getUpdateState().steps.find((step) => step.id === "post_update");
       expect(postStep?.status).toBe("failed");
       expect(postStep?.error, `the reason does not name the fixup that failed:\n${journal}`).toMatch(/^Error: .*openclaw_tts/);
+      // The owner reads this line: the step, not an operator's command or path.
+      expect(postStep?.error).not.toMatch(/sudo|\/home\//);
+    });
+
+    it("never hands the owner the dispatch verdict's banner or run id as the reason", async () => {
+      // A step that recorded a fixup's failure and then died on its own without
+      // an `Error:` line ends its journal with the dispatch trap's banner and
+      // `[provision-…]` markers. root-step-follow.ts never treated those as a
+      // reason; this reader took the last of them, the run id.
+      const journal = [
+        "  Polkit rules installed (NetworkManager only; root steps go through sudo)",
+        "  Copying the voice units",
+        "  ############################################################",
+        "  # PROVISIONING INCOMPLETE — step post_update reported errors.",
+        "  # Steps that failed: openclaw_tts",
+        "  # Re-run:  sudo bash /home/clawbox/clawbox/install.sh --step openclaw_tts",
+        "  ############################################################",
+        "[provision-status] INCOMPLETE (openclaw_tts)",
+        "[provision-run] 20261013T183500Z-4242",
+        "clawbox-root-update@post_update.service: Main process exited, code=exited, status=1/FAILURE",
+        "clawbox-root-update@post_update.service: Failed with result 'exit-code'.",
+        "",
+      ].join("\n");
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": new Error("systemctl failed"),
+        "show clawbox-root-update@post_update.service": { stdout: "failed\n", stderr: "" },
+        "/usr/bin/journalctl": { stdout: journal, stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().phase).toBe("failed");
+      });
+
+      const postStep = updater.getUpdateState().steps.find((step) => step.id === "post_update");
+      expect(postStep?.error).toBe("Copying the voice units");
     });
 
     it("does NOT claim memory for a SIGKILL the journal does not attribute", async () => {

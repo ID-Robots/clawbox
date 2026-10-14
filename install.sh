@@ -4470,45 +4470,66 @@ print(python)
 PY
 }
 
-# The Hermes messaging gateway, re-rendered for the agent that is on disk NOW.
+# The Hermes messaging gateway, kept on the agent that is on disk NOW.
 #
 # `hermes gateway install` writes ~/.config/systemd/user/hermes-gateway.service
 # with an ExecStart INSIDE the agent install (`<agent_dir>/venv/bin/python` up
 # to v0.21.1, a launcher under `<agent_dir>/.hermes/bin` from v0.21.7), and
-# nothing in the pinned upgrade rewrites it: the upstream installer offers
+# nothing in the pinned upgrade re-renders it: the upstream installer offers
 # `gateway install --if-missing` only when it has a terminal. The gateway kept
 # running on deleted files, so the update looked healthy, and its next restart
 # crash-looped for good (`status=203/EXEC … venv/bin/python: No such file or
 # directory`, Telegram dead) — every Hermes box, 2026-10-14.
 #
-# HARNESS-FIRST: `gateway install --force` is Hermes' own re-render from its
-# own generator, and what healed the box by hand. `--no-start-now
-# --no-start-on-login` keep it to the definition: whether the gateway runs and
-# whether it starts at boot stay as they were. (Hermes' `gateway run` and
-# `gateway restart` re-render a stale unit too, but a unit whose interpreter is
-# gone reaches neither.)
+# HARNESS-FIRST, both halves Hermes' own, run as the clawbox user from the
+# shim — the NEW agent's CLI, so a unit whose interpreter is gone is no
+# obstacle:
+#   * `gateway install --no-start-now --no-start-on-login` re-renders the unit
+#     only when Hermes' own comparison calls it outdated (`systemd_unit_is_current`),
+#     and changes neither whether the gateway runs nor whether it starts at boot;
+#   * `gateway restart` drains the gateway (SIGUSR1, so a turn in flight finishes
+#     and chat hears "restarting", not "shutting down") and waits for the new
+#     one. The web server restarts this unit the same way (hermes-telegram.ts).
+# Hermes answers 0 over a restart it could not confirm (a missing linger, a
+# wait that ran out), so whether the gateway is up is asked of systemd after
+# it: active, a main pid, the same pid a settle later.
 #
 # `$1` is 1 when this run replaced the agent — the gateway is on deleted files
-# and is bounced whatever the unit says — and 0 on the early return of a box
-# already on the pin, where every box an earlier update upgraded now sits; there
-# a unit Hermes leaves byte-identical means nothing to pick up, and no restart.
+# and is bounced whatever the unit says — and 0 for a runnable agent it found,
+# where only a unit Hermes had to repair is a reason to bounce: that is every box
+# an earlier update upgraded, crash-looping. Only a gateway that was running or
+# trying to be (`activating` is the crash loop) is restarted. A failure is a
+# CLAWBOX-WARN, never this step's return — the agent install worked.
 #
-# `restart`, never `start` (a no-op for a gateway still on the old tree), and
-# only for one that was running or trying to (`activating` is the crash loop).
-# Proven, not assumed: active, a main pid, the same pid a settle later. A
-# failure is a CLAWBOX-WARN, never this step's return — the agent install
-# worked. The USER unit only, what every shipped box has (the system install
-# needs a sudo refused on purpose, src/lib/hermes-telegram.ts); and
-# has_hermes_harness, because on `unselected` the gateway is a foreign unit.
+# A SYSTEM unit (written by `sudo hermes gateway install --system`, the only
+# installer ClawBox had from 2026-08-11 to 2026-09-07) is only READ: rendering it
+# would mean running the clawbox-owned shim as root. An ExecStart whose program
+# is gone is reported with the repair. has_hermes_harness, because on
+# `unselected` the gateway is a foreign unit.
+HERMES_GATEWAY_SYSTEM_UNIT="/etc/systemd/system/hermes-gateway.service"
 hermes_gateway_refresh_after_install() {
   local replaced="${1:-0}" unit=hermes-gateway.service
   local unit_file="$CLAWBOX_HOME/.config/systemd/user/$unit"
-  local uid before_unit out state before_pid pid settled settle
+  local system_unit="${HERMES_GATEWAY_SYSTEM_UNIT:-}"
+  local uid before_unit out state before_pid pid settled settle program
   has_hermes_harness || return 0
-  [ -f "$unit_file" ] || return 0
+  if [ ! -f "$unit_file" ]; then
+    [ -n "$system_unit" ] && [ -f "$system_unit" ] || return 0
+    program="$(sed -n 's/^ExecStart=[-@:+!]*//p' "$system_unit" | head -1)"
+    program="${program%% *}"
+    program="${program//\"/}"
+    if [ -n "$program" ] && [ ! -x "$program" ]; then
+      echo "CLAWBOX-WARN[hermes-gateway-not-restarted]: the system-wide $unit starts $program, which the Hermes install no longer has, so Telegram and the other channels are down; 'sudo systemctl disable --now $unit', then as the clawbox user 'hermes gateway install --start-now --start-on-login', repairs it"
+    fi
+    return 0
+  fi
   uid="$(id -u "$CLAWBOX_USER" 2>/dev/null)" || return 0
   gw_systemctl() {
     runuser -u "$CLAWBOX_USER" -- env XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user "$@"
+  }
+  gw_hermes() {
+    runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" XDG_RUNTIME_DIR="/run/user/$uid" \
+      "$CLAWBOX_HOME/.local/bin/hermes" gateway "$@" </dev/null 2>&1
   }
   gw_warn() {
     echo "CLAWBOX-WARN[hermes-gateway-not-restarted]: $unit $1 — Telegram and the other channels may be down; as the clawbox user, 'hermes gateway install --force && hermes gateway restart' repairs it"
@@ -4516,8 +4537,7 @@ hermes_gateway_refresh_after_install() {
 
   before_unit="$(cat "$unit_file" 2>/dev/null || true)"
   state="$(gw_systemctl is-active "$unit" 2>/dev/null || true)"
-  if ! out="$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" XDG_RUNTIME_DIR="/run/user/$uid" \
-    "$CLAWBOX_HOME/.local/bin/hermes" gateway install --force --no-start-now --no-start-on-login 2>&1)"; then
+  if ! out="$(gw_hermes install --no-start-now --no-start-on-login)"; then
     # Restarting onto a unit that still names the old interpreter would turn a
     # gateway serving from the old tree into a crash loop.
     gw_warn "could not be re-rendered for the current agent${out:+ ($(printf '%s\n' "$out" | tail -1))}"
@@ -4535,8 +4555,8 @@ hermes_gateway_refresh_after_install() {
   esac
 
   before_pid="$(gw_systemctl show "$unit" -p MainPID --value 2>/dev/null || true)"
-  if ! gw_systemctl restart "$unit" >/dev/null 2>&1; then
-    gw_warn "could not be restarted"
+  if ! out="$(gw_hermes restart)"; then
+    gw_warn "could not be restarted${out:+ ($(printf '%s\n' "$out" | tail -1))}"
     return 0
   fi
   # The same settle resume_paused_engines and the dashboard restart use.
@@ -4663,13 +4683,15 @@ step_hermes_install() {
   # checkout that is not a git repository must fall through, not abort.
   local at_commit=""
   if [ -n "$installed" ]; then
+    # The agent that runs now gets the gateway unit it needs, whatever this step
+    # does next: a box an EARLIER update upgraded is here with a unit still
+    # naming the old interpreter, and the returns below that keep this agent
+    # (on the pin, installer unreachable, nothing moved aside) would leave it.
+    hermes_gateway_refresh_after_install 0
     at_commit=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
       git -C "$agent_dir" rev-parse HEAD 2>/dev/null) || at_commit=""
     if [ "$at_commit" = "$pin" ]; then
       echo "  Hermes already installed at the pinned commit ($installed)"
-      # A box an EARLIER update upgraded is here, with a gateway unit still
-      # naming the old interpreter. See the function.
-      hermes_gateway_refresh_after_install 0
       return 0
     fi
     # A working agent on the wrong commit takes the SAME path the unrunnable
@@ -12419,8 +12441,10 @@ if [ "${1:-}" = "--step" ]; then
         # The sub-step's own error is printed long before a step like
         # post_update ends, and without this the owner was shown whatever
         # fixup happened to print last. A step that failed by itself keeps its
-        # own error.
-        echo "Error: ${PROVISION_FAILURES[*]} did not complete — re-run: sudo bash $PROJECT_DIR/install.sh --step $(provision_repair_step "${PROVISION_FAILURES[0]}")" >&2
+        # own error. The owner reads this line, so no command or path: the
+        # re-run is on the banner's own line above (harness_swap_say_failed's
+        # rule).
+        echo "Error: these setup steps did not complete: ${PROVISION_FAILURES[*]}" >&2
         rc=1
       fi
     fi

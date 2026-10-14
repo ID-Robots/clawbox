@@ -15,11 +15,11 @@ import path from "node:path";
  *
  *   status=203/EXEC … ~/.hermes/hermes-agent/venv/bin/python: No such file or directory
  *
- * 43 restarts, Telegram dead. `hermes gateway install --force` — Hermes' own
- * re-render — is what healed the box. These tests drive the REAL
- * step_hermes_install against a fake HOME, a stub `hermes` that re-renders the
- * unit the way the real one does, and a stub systemd, and look at what was
- * asked and what was proven.
+ * 43 restarts, Telegram dead. Hermes' own `gateway install` re-renders the unit
+ * and its own `gateway restart` drains and restarts the gateway. These tests
+ * drive the REAL step_hermes_install against a fake HOME, a stub `hermes` that
+ * re-renders the unit for whichever agent is on disk, and a stub systemd, and
+ * look at what was asked and what was proven.
  */
 
 // Starts a real bash: vitest's 5 s test default is not enough on a loaded CI
@@ -35,6 +35,7 @@ const hasBash = spawnSync("bash", ["--version"], { stdio: "ignore" }).status ===
 const PIN = (INSTALL_SH.split(NL).find((l) => l.startsWith("HERMES_PIN_COMMIT="))?.match(/[0-9a-f]{40}/) ?? [""])[0];
 const OTHER_COMMIT = "0".repeat(39) + "1";
 const UNIT = "hermes-gateway.service";
+const INSTALL_CALL = "gateway install --no-start-now --no-start-on-login";
 
 let tmp: string;
 beforeEach(() => {
@@ -58,53 +59,68 @@ function writeExec(file: string, lines: string[]) {
 interface Scenario {
   /** HEAD of the agent on disk: the pin (no upgrade) or not (the step upgrades it). */
   head: string;
-  /** The unit on disk before the step; null for a box that never installed a gateway. */
+  /** The user unit on disk before the step; null for a box that never installed one. */
   unit?: string | null;
+  /** What `gateway install` renders for an agent OFF the pin; default: the unit on disk. */
+  rendersOffPin?: string;
+  /** What it renders for the pinned agent. */
+  renders?: string;
   /** What `systemctl --user is-active` says before the step: `activating` is the crash loop. */
   gwState?: "active" | "activating" | "inactive" | "failed";
-  /** What it says once restarted. */
+  /** What it says once Hermes has restarted it. */
   gwAfter?: "active" | "activating";
-  /** What `hermes gateway install` writes, and how it exits. */
-  renders?: string;
   installRc?: number;
+  restartRc?: number;
+  /** Whether the reachability precheck for the upstream installer answers. */
+  reachable?: boolean;
   /** false: the box's edition does not run Hermes (`unselected` carries the agent on disk). */
   runsHermes?: boolean;
+  /** A system-scope unit's ExecStart program, when the box has one. */
+  systemUnitStarts?: string;
 }
 
 function run(s: Scenario) {
   const {
     head,
     unit = staleUnit(),
+    renders = currentUnit(),
     gwState = "active",
     gwAfter = "active",
-    renders = currentUnit(),
     installRc = 0,
+    restartRc = 0,
+    reachable = true,
     runsHermes = true,
+    systemUnitStarts,
   } = s;
+  const rendersOffPin = s.rendersOffPin ?? unit ?? "";
   const agent = path.join(tmp, ".hermes", "hermes-agent");
   const shim = path.join(tmp, ".local", "bin", "hermes");
   const fakePy = path.join(tmp, "fake-py");
   writeExec(fakePy, ["#!/bin/sh", "echo 'Hermes 9.9.9'"]);
-  // The CLI: answers the step's probes, and re-renders the unit the way the
-  // real `gateway install` does — into ~/.config/systemd/user, from HOME.
-  const shimTemplate = path.join(tmp, "shim-template");
-  writeExec(shimTemplate, [
+  // The CLI: answers the step's probes, renders the unit for the agent that is
+  // on disk into ~/.config/systemd/user (from HOME), and restarts.
+  writeExec(shim, [
     "#!/bin/sh",
     'case "$1" in',
     "  --help) exit 0 ;;",
     "  --version) echo 'Hermes 9.9.9'; exit 0 ;;",
     "  gateway)",
-    '    printf "%s|HOME=%s|XDG=%s\\n" "$*" "${HOME:-}" "${XDG_RUNTIME_DIR:-}" >> "$GW_LOG"',
-    '    [ "$GW_INSTALL_RC" = 0 ] || { echo "✗ could not write the unit" >&2; exit "$GW_INSTALL_RC"; }',
-    '    mkdir -p "$HOME/.config/systemd/user"',
-    '    printf "%s" "$GW_RENDERS" > "$HOME/.config/systemd/user/hermes-gateway.service"',
-    "    exit 0 ;;",
+    '    [ -t 0 ] && stdin=tty || stdin=closed',
+    '    printf "%s|HOME=%s|XDG=%s|stdin=%s\\n" "$*" "${HOME:-}" "${XDG_RUNTIME_DIR:-}" "$stdin" >> "$GW_LOG"',
+    '    case "$2" in',
+    "      install)",
+    '        [ "$GW_INSTALL_RC" = 0 ] || { echo "✗ could not write the unit" >&2; exit "$GW_INSTALL_RC"; }',
+    '        mkdir -p "$HOME/.config/systemd/user"',
+    '        if [ "$(cat "$AGENT_DIR/.fake-head")" = "$PIN" ]; then r="$GW_RENDERS"; else r="$GW_RENDERS_OFF_PIN"; fi',
+    '        printf "%s" "$r" > "$HOME/.config/systemd/user/hermes-gateway.service"',
+    "        exit 0 ;;",
+    "      restart)",
+    '        [ "$GW_RESTART_RC" = 0 ] || { echo "✗ Gateway service restart failed." >&2; exit "$GW_RESTART_RC"; }',
+    '        touch "$SYSD/restarted"; exit 0 ;;',
+    "    esac ;;",
     "esac",
     "exit 0",
   ]);
-  fs.mkdirSync(path.dirname(shim), { recursive: true });
-  fs.copyFileSync(shimTemplate, shim);
-  fs.chmodSync(shim, 0o755);
   fs.mkdirSync(path.join(agent, "venv", "bin"), { recursive: true });
   fs.copyFileSync(fakePy, path.join(agent, "venv", "bin", "python"));
   fs.chmodSync(path.join(agent, "venv", "bin", "python"), 0o755);
@@ -113,12 +129,17 @@ function run(s: Scenario) {
     fs.mkdirSync(path.dirname(unitFile()), { recursive: true });
     fs.writeFileSync(unitFile(), unit);
   }
+  const systemUnit = path.join(tmp, "etc-system", UNIT);
+  if (systemUnitStarts !== undefined) {
+    fs.mkdirSync(path.dirname(systemUnit), { recursive: true });
+    fs.writeFileSync(systemUnit, `[Service]${NL}User=clawbox${NL}ExecStart=${systemUnitStarts} -m hermes_cli.main gateway run${NL}`);
+  }
 
   const bin = path.join(tmp, "bin");
   // The reachability precheck, then the installer: lays down an agent on the pin.
   writeExec(path.join(bin, "curl"), [
     "#!/bin/sh",
-    'case " $* " in *" -o /dev/null "*) exit 0 ;; esac',
+    'case " $* " in *" -o /dev/null "*) exit "$PRECHECK_RC" ;; esac',
     'mkdir -p "$AGENT_DIR/venv/bin"',
     'cp "$FAKE_PY" "$AGENT_DIR/venv/bin/python"',
     'printf %s "$PIN" > "$AGENT_DIR/.fake-head"',
@@ -126,8 +147,8 @@ function run(s: Scenario) {
   ]);
   writeExec(path.join(bin, "git"), ["#!/bin/sh", '[ -f "$2/.fake-head" ] || exit 128', 'cat "$2/.fake-head"']);
   // systemd. The dashboard units are not installed in these scenarios; the
-  // gateway's USER unit answers from the scenario, and after `restart` from
-  // its outcome. Every call is logged.
+  // gateway's USER unit answers from the scenario, and once Hermes has
+  // restarted it, from the outcome. Every call is logged.
   writeExec(path.join(bin, "systemctl"), [
     "#!/bin/sh",
     'printf "%s|XDG=%s\\n" "$*" "${XDG_RUNTIME_DIR:-}" >> "$SYSTEMCTL_LOG"',
@@ -138,7 +159,6 @@ function run(s: Scenario) {
     'case "$1" in',
     '  is-active) echo "$live"; [ "$live" = active ] && exit 0; exit 3 ;;',
     '  show) echo "$pid"; exit 0 ;;',
-    '  restart) touch "$SYSD/restarted"; exit 0 ;;',
     "esac",
     "exit 0",
   ]);
@@ -148,6 +168,7 @@ function run(s: Scenario) {
     "set -euo pipefail",
     'CLAWBOX_HOME="$1"',
     'CLAWBOX_USER="$(id -un)"',
+    `HERMES_GATEWAY_SYSTEM_UNIT="${systemUnit}"`,
     `has_hermes_harness() { return ${runsHermes ? 0 : 1}; }`,
     "installs_hermes_harness() { return 0; }",
     'runuser() { shift 2; if [ "$1" = "--" ]; then shift; fi; "$@"; }',
@@ -174,9 +195,12 @@ function run(s: Scenario) {
         FAKE_PY: fakePy,
         PIN,
         HERMES_PIN_COMMIT: PIN,
+        PRECHECK_RC: reachable ? "0" : "7",
         GW_LOG: path.join(tmp, "gw-log"),
         GW_INSTALL_RC: String(installRc),
+        GW_RESTART_RC: String(restartRc),
         GW_RENDERS: renders,
+        GW_RENDERS_OFF_PIN: rendersOffPin,
         GW_STATE: gwState,
         GW_AFTER: gwAfter,
         SYSD: path.join(tmp, "sysd"),
@@ -191,13 +215,15 @@ function run(s: Scenario) {
     out = `${err.stdout ?? ""}${err.stderr ?? ""}`;
   }
   const lines = (f: string) => (fs.existsSync(f) ? fs.readFileSync(f, "utf8").split(NL).filter(Boolean) : []);
+  const gatewayCalls = lines(path.join(tmp, "gw-log"));
   const userCalls = lines(path.join(tmp, "systemctl-log")).filter((l) => l.startsWith("--user "));
   return {
     code,
     out,
-    gatewayCalls: lines(path.join(tmp, "gw-log")),
+    gatewayCalls,
+    installs: gatewayCalls.filter((l) => l.startsWith("gateway install ")),
+    restarts: gatewayCalls.filter((l) => l.startsWith("gateway restart")),
     userCalls,
-    restarted: userCalls.some((l) => l.startsWith(`--user restart ${UNIT}`)),
     unitNow: fs.existsSync(unitFile()) ? fs.readFileSync(unitFile(), "utf8") : null,
   };
 }
@@ -205,22 +231,25 @@ function run(s: Scenario) {
 const uid = () => String(process.getuid?.() ?? "");
 
 describe.skipIf(!hasBash)("the Hermes gateway follows the agent an update installs", () => {
-  it("re-renders the unit through Hermes after an upgrade and restarts the gateway onto it", () => {
+  it("re-renders the unit through Hermes after an upgrade and has Hermes restart the gateway onto it", () => {
     const r = run({ head: OTHER_COMMIT });
 
     expect(r.code, r.out).toBe(0);
-    // Hermes' own re-render, as the clawbox user, definition only: whether the
-    // gateway runs and whether it starts at boot stay what they were.
-    expect(r.gatewayCalls, `the gateway unit was never re-rendered after the upgrade:\n${r.out}`).toEqual([
-      `gateway install --force --no-start-now --no-start-on-login|HOME=${tmp}|XDG=/run/user/${uid()}`,
-    ]);
+    // Hermes' own re-render, as the clawbox user, the definition only — whether
+    // the gateway runs and starts at boot stay what they were — with no
+    // terminal for a prompt to hide on. Asked of the agent found (nothing to
+    // repair) and of the one installed.
+    const call = `${INSTALL_CALL}|HOME=${tmp}|XDG=/run/user/${uid()}|stdin=closed`;
+    expect(r.installs, `the gateway unit was never re-rendered after the upgrade:\n${r.out}`).toEqual([call, call]);
     expect(r.unitNow).toBe(currentUnit());
-    // RESTART, never start: start is a no-op for a gateway still running on
-    // the deleted tree, which is how the first update looked healthy.
-    expect(r.restarted, `the gateway was left on the deleted agent:\n${r.out}`).toBe(true);
-    expect(r.userCalls.some((l) => l.startsWith(`--user start ${UNIT}`))).toBe(false);
-    for (const call of r.userCalls) expect(call).toContain(`XDG=/run/user/${uid()}`);
-    // Proven running, not assumed from an exit code.
+    // Hermes' own drain-restart, once; never a raw systemctl bounce or a
+    // `start`, which is a no-op for a gateway on the deleted tree.
+    expect(r.restarts, `the gateway was left on the deleted agent:\n${r.out}`).toEqual([
+      `gateway restart|HOME=${tmp}|XDG=/run/user/${uid()}|stdin=closed`,
+    ]);
+    expect(r.userCalls.some((l) => /^--user (restart|start|try-restart) /.test(l))).toBe(false);
+    for (const c of r.userCalls) expect(c).toContain(`XDG=/run/user/${uid()}`);
+    // Proven running, not assumed from Hermes' exit code.
     expect(r.out).toMatch(/Restarted hermes-gateway\.service on the current agent \(main pid 4444 -> 5555, still up 1s later\)/);
     expect(r.out).not.toMatch(/CLAWBOX-WARN\[hermes-gateway/);
   });
@@ -233,21 +262,30 @@ describe.skipIf(!hasBash)("the Hermes gateway follows the agent an update instal
 
     expect(r.code, r.out).toBe(0);
     expect(r.out).toMatch(/already installed at the pinned commit/);
-    expect(r.gatewayCalls, `a crash-looping gateway was left on the stale unit:\n${r.out}`).toHaveLength(1);
+    expect(r.installs, `a crash-looping gateway was left on the stale unit:\n${r.out}`).toHaveLength(1);
     expect(r.unitNow).toBe(currentUnit());
-    expect(r.restarted).toBe(true);
+    expect(r.restarts).toHaveLength(1);
     expect(r.out).toMatch(/Restarted hermes-gateway\.service on the current agent \(main pid 0 -> 5555/);
+  });
+
+  it("heals the unit of an off-pin agent the step leaves in place when the installer is unreachable", () => {
+    const r = run({ head: OTHER_COMMIT, reachable: false, gwState: "activating", rendersOffPin: currentUnit() });
+
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toMatch(/cannot reach the Hermes installer/);
+    expect(r.unitNow, `the stale unit survived an update that could not upgrade:\n${r.out}`).toBe(currentUnit());
+    expect(r.restarts).toHaveLength(1);
   });
 
   it("does not bounce a healthy gateway on an update that changed nothing under it", () => {
     // Every update reaches the early return. Hermes answers whether its unit
-    // is current; a unit that comes back byte-identical over an agent that did
-    // not move is a gateway with nothing to pick up.
-    const r = run({ head: PIN, unit: currentUnit(), renders: currentUnit() });
+    // is current; a unit it leaves byte-identical over an agent that did not
+    // move is a gateway with nothing to pick up.
+    const r = run({ head: PIN, unit: currentUnit() });
 
     expect(r.code, r.out).toBe(0);
-    expect(r.gatewayCalls).toHaveLength(1);
-    expect(r.restarted, `a healthy gateway was restarted for nothing:\n${r.out}`).toBe(false);
+    expect(r.installs).toHaveLength(1);
+    expect(r.restarts, `a healthy gateway was restarted for nothing:\n${r.out}`).toEqual([]);
   });
 
   it("re-renders a stopped gateway's unit but never starts it", () => {
@@ -255,29 +293,34 @@ describe.skipIf(!hasBash)("the Hermes gateway follows the agent an update instal
 
     expect(r.code, r.out).toBe(0);
     expect(r.unitNow).toBe(currentUnit());
-    expect(r.restarted, `a stopped gateway was started by an update:\n${r.out}`).toBe(false);
-    expect(r.userCalls.some((l) => l.startsWith(`--user start ${UNIT}`))).toBe(false);
+    expect(r.restarts, `a stopped gateway was started by an update:\n${r.out}`).toEqual([]);
+    expect(r.userCalls.some((l) => /^--user (restart|start) /.test(l))).toBe(false);
     expect(r.out).toMatch(/hermes-gateway\.service re-rendered for the current agent; it was inactive and is left that way/);
   });
 
-  it("says so, without failing the step, when the gateway does not stay up", () => {
-    // The agent install worked; a gateway that will not come back is the
-    // owner's to hear about on the update's own status, not a failed fixup.
+  it("says so, without failing the step, when Hermes answers 0 over a gateway that did not stay up", () => {
     const r = run({ head: OTHER_COMMIT, gwAfter: "activating" });
 
     expect(r.code, r.out).toBe(0);
-    expect(r.restarted).toBe(true);
+    expect(r.restarts).toHaveLength(1);
     expect(r.out).toMatch(/^CLAWBOX-WARN\[hermes-gateway-not-restarted\]: hermes-gateway\.service did not stay up after the restart \(systemd says activating, main pid 0\)/m);
     expect(r.out).not.toMatch(/Restarted hermes-gateway\.service on the current agent/);
   });
 
+  it("says so when Hermes refuses the restart", () => {
+    const r = run({ head: OTHER_COMMIT, restartRc: 1 });
+
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toMatch(/^CLAWBOX-WARN\[hermes-gateway-not-restarted\]: hermes-gateway\.service could not be restarted \(✗ Gateway service restart failed\.\)/m);
+  });
+
   it("leaves the gateway alone when Hermes could not re-render its unit", () => {
-    // Restarting onto a unit that still names a deleted interpreter would
-    // turn a gateway running on the old tree into a crash loop.
+    // Restarting onto a unit that still names a deleted interpreter would turn
+    // a gateway running on the old tree into a crash loop.
     const r = run({ head: OTHER_COMMIT, installRc: 1 });
 
     expect(r.code, r.out).toBe(0);
-    expect(r.restarted, `the gateway was restarted onto a unit Hermes could not rewrite:\n${r.out}`).toBe(false);
+    expect(r.restarts, `the gateway was restarted onto a unit Hermes could not rewrite:\n${r.out}`).toEqual([]);
     expect(r.out).toMatch(/^CLAWBOX-WARN\[hermes-gateway-not-restarted\]: hermes-gateway\.service could not be re-rendered for the current agent \(✗ could not write the unit\)/m);
   });
 
@@ -297,5 +340,26 @@ describe.skipIf(!hasBash)("the Hermes gateway follows the agent an update instal
     expect(r.code, r.out).toBe(0);
     expect(r.gatewayCalls).toEqual([]);
     expect(r.userCalls).toEqual([]);
+  });
+
+  it("reports a system-wide unit whose program the install no longer has, and runs no Hermes for it", () => {
+    // `sudo hermes gateway install --system` was the only installer from
+    // 2026-08-11 to 2026-09-07. Rendering that unit would mean running the
+    // clawbox-owned shim as root, so it is only read.
+    const gone = `${tmp}/.hermes/hermes-agent/venv/bin/python-gone`;
+    const r = run({ head: OTHER_COMMIT, unit: null, systemUnitStarts: gone });
+
+    expect(r.code, r.out).toBe(0);
+    expect(r.gatewayCalls).toEqual([]);
+    expect(r.out).toContain(
+      `CLAWBOX-WARN[hermes-gateway-not-restarted]: the system-wide hermes-gateway.service starts ${gone}, which the Hermes install no longer has`,
+    );
+  });
+
+  it("says nothing about a system-wide unit whose program is still there", () => {
+    const r = run({ head: OTHER_COMMIT, unit: null, systemUnitStarts: path.join(tmp, "fake-py") });
+
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).not.toMatch(/CLAWBOX-WARN\[hermes-gateway/);
   });
 });

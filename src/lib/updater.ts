@@ -710,7 +710,7 @@ import { currentCoreRelease } from "./plugin-repair-run";
 // InvocationID` cannot answer it (systemd has collected the instance by the
 // time anyone asks), and the same read is owed to the follow in
 // root-step-follow.ts.
-import { rootStepJournalArgs, rootStepUnit } from "./root-step-journal";
+import { DISPATCH_VERDICT_LINE, rootStepJournalArgs, rootStepUnit } from "./root-step-journal";
 
 // Ceiling for the rebuild/restart hand-off: bun build alone runs minutes on a
 // Jetson, plus the config/redeploy steps before it and the reboot after.
@@ -873,7 +873,8 @@ function getStepFailureLine(logText: string, unit: string): string | null {
     .filter(Boolean)
     .filter((line) => !line.startsWith(`${unit}:`)
       && !SYSTEMD_LIFECYCLE_LINE.test(line)
-      && !SESSION_BOOKKEEPING_LINE.test(line));
+      && !SESSION_BOOKKEEPING_LINE.test(line)
+      && !DISPATCH_VERDICT_LINE.test(line));
   for (let i = lines.length - 1; i >= 0; i--) {
     if (/^(?:error|fatal)\b/i.test(lines[i])) return lines[i];
   }

@@ -68,7 +68,7 @@ Also closed at the firewall: **631** CUPS (left running — loopback printing st
 | `~/.local/bin/hermes` | Harness shim into the agent at `~/.hermes/hermes-agent` |
 | `~/.hermes/config.yaml` | Harness config + `mcp_servers.clawbox` (0600). Every writer rewrites the whole file — comments are not preserved |
 | `~/.hermes/.env`, `~/.hermes/auth.json` | **Provider keys and OAuth tokens** |
-| `~/.hermes/hermes-agent/` | The agent checkout + venv — **kept** by factory reset |
+| `~/.hermes/hermes-agent/`, `installs/`, `tools/` | The agent checkout, its Python environment and its interpreter — **kept** by factory reset |
 | `data/.hermes-dashboard-pw` | Dashboard auth material |
 
 ## Services (systemd)
