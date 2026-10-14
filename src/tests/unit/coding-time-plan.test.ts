@@ -13,10 +13,16 @@ import {
   checkExtraItem,
   cutFromBottom,
   estimateAccuracyLine,
+  EXTRA_ITEM_ESTIMATE_MS,
+  EXTRA_SCOPE_DIRS,
   EXTRA_WORK_KINDS,
+  extraWorkPrompt,
+  extraWorkScope,
   isBehindEstimate,
+  lastExtraClaim,
   MAX_ESTIMATE_MS,
   MAX_EXTRA_FILES,
+  MAX_EXTRA_ITEMS,
   MAX_EXTRA_SUMMARY_CHARS,
   mustHaveFits,
   nextItemAllowed,
@@ -109,6 +115,76 @@ describe("checkExtraItem", () => {
 
   it("refuses files that are not a list", () => {
     expect(checkExtraItem({ kind: "tests", files: "src/tests/unit/a.ts" as unknown as string[] }, scope).ok).toBe(false);
+  });
+
+  it("lets a test or doc file sit beside a scoped file, but no other new file", () => {
+    const flat = ["app.js", "lib/parse.ts"];
+    expect(checkExtraItem({ kind: "tests", files: ["app.test.js"] }, flat)).toEqual({ ok: true });
+    expect(checkExtraItem({ kind: "tests", files: ["lib/parse.spec.ts", "lib/test_parse.py"] }, flat)).toEqual({ ok: true });
+    expect(checkExtraItem({ kind: "docs", files: ["lib/NOTES.md"] }, flat)).toEqual({ ok: true });
+    expect(checkExtraItem({ kind: "fixes", files: ["server.js"] }, flat).ok).toBe(false);
+    expect(checkExtraItem({ kind: "tests", files: ["other/app.test.js"] }, flat).ok).toBe(false);
+  });
+});
+
+describe("extraWorkScope", () => {
+  it("is the task's files, their folders, and the repo's test and doc places", () => {
+    expect(extraWorkScope(["index.html", "src/lib/parse.ts", "./src/lib/parse.ts", "src/lib/fmt.ts"])).toEqual([
+      "index.html",
+      "src/lib/parse.ts",
+      "src/lib/",
+      "src/lib/fmt.ts",
+      ...EXTRA_SCOPE_DIRS,
+      "README.md",
+      "CHANGELOG.md",
+    ]);
+  });
+
+  it("adds nothing for a path outside the repo, and never the whole repo", () => {
+    const scope = extraWorkScope(["/home/someone/.bashrc", "../up.txt", "", 42]);
+    expect(scope).toEqual([...EXTRA_SCOPE_DIRS, "README.md", "CHANGELOG.md"]);
+    expect(scope).not.toContain("/");
+    expect(checkExtraItem({ kind: "fixes", files: ["src/app.ts"] }, scope).ok).toBe(false);
+  });
+});
+
+describe("lastExtraClaim", () => {
+  it("reads the claim a reply ends on, its correction over an earlier one", () => {
+    expect(lastExtraClaim("Added tests.\nEXTRA: tests — covered the parser")).toEqual({ type: "extra", kind: "tests", summary: "covered the parser" });
+    expect(lastExtraClaim("EXTRA: tests — first try\nOn second thought nothing helped.\nNOTHING_LEFT — all covered")).toEqual({ type: "nothing_left", reason: "all covered" });
+    expect(lastExtraClaim("EXTRA: refactor — moved things")).toEqual({ type: "invalid", error: expect.stringContaining('"refactor" is not a kind') });
+  });
+
+  it("finds none in a reply that makes none, or in no reply", () => {
+    expect(lastExtraClaim("Built the page. Verify by opening index.html.")).toBeNull();
+    expect(lastExtraClaim("")).toBeNull();
+    expect(lastExtraClaim(null)).toBeNull();
+  });
+});
+
+describe("extraWorkPrompt", () => {
+  it("names the spare time, the allowlist and nothing else, the scope, what is done, and the closing line", () => {
+    const prompt = extraWorkPrompt({ leftMs: 12 * MIN, cutoff: "Wed 14 Oct, 18:20 (Europe/Sofia)", scope: ["index.html", "tests/"], done: ["tests: covered the title"], n: 2 });
+    expect(prompt).toContain(`EXTRA WORK, item 2 of at most ${MAX_EXTRA_ITEMS}.`);
+    expect(prompt).toContain("12 minutes are left before the safety margin at Wed 14 Oct, 18:20 (Europe/Sofia)");
+    for (const kind of EXTRA_WORK_KINDS) expect(prompt).toContain(`- ${kind}: `);
+    expect(prompt).toContain("No new features, no unrelated refactors");
+    expect(prompt).toContain("scope: index.html, tests/.");
+    expect(prompt).toContain('Already done, so not again: "tests: covered the title".');
+    expect(prompt).toContain('"EXTRA: <kind> — <what you did>"');
+    expect(prompt).toContain('"NOTHING_LEFT — <why>"');
+  });
+
+  it("shows a long scope in part and says how much more there is", () => {
+    const scope = Array.from({ length: 40 }, (_, i) => `f${i}.ts`);
+    const prompt = extraWorkPrompt({ leftMs: 30 * MIN, cutoff: "later", scope, done: [], n: 1 });
+    expect(prompt).toContain("f29.ts (and 10 more)");
+    expect(prompt).not.toContain("f30.ts");
+    expect(prompt).not.toContain("Already done");
+  });
+
+  it("plans one item as five minutes", () => {
+    expect(EXTRA_ITEM_ESTIMATE_MS).toBe(5 * MIN);
   });
 });
 

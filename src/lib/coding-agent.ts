@@ -443,6 +443,7 @@ import {
   safeTimeZone,
   safetyMarginMs,
   summarizeTimeRecords,
+  TIME_STOP_REASONS,
   timeRecord,
   type BudgetChip,
   type TimeBudget,
@@ -450,7 +451,18 @@ import {
   type TimeRecordSummary,
   type TimeStopReason,
 } from "@/lib/coding-time-budget";
-import { estimateAccuracyLine, mustHaveFits, parseEstimateMinutes } from "@/lib/coding-time-plan";
+import {
+  checkExtraItem,
+  estimateAccuracyLine,
+  EXTRA_ITEM_ESTIMATE_MS,
+  extraWorkPrompt,
+  extraWorkScope,
+  lastExtraClaim,
+  MAX_EXTRA_ITEMS,
+  mustHaveFits,
+  nextItemAllowed,
+  parseEstimateMinutes,
+} from "@/lib/coding-time-plan";
 import { appendTimeRecord, loadTimeRecords, readTimeRecordSummary, type TimeRecordPayload } from "@/lib/coding-time-record";
 import { readOsTimeZone } from "@/lib/timezone";
 
@@ -1906,6 +1918,12 @@ export interface CodingRun {
    */
   timeBudget?: TimeBudget | null;
   /**
+   * The extra work a budgeted run did with time to spare (finishExtraRound):
+   * the scope it was held to, how many items it did, the round under way, and
+   * why the extra phase ended. ABSENT on a run that never had spare time.
+   */
+  extraWork?: RunExtraWork;
+  /**
    * How that budget is being spent — the time record kept in the run's
    * evidence folder (src/lib/coding-time-record.ts), summarized afresh when a
    * reader asks: the estimate, the checkpoints, why it stopped. Never stored on
@@ -1913,6 +1931,24 @@ export interface CodingRun {
    * only on a run with a budget whose record exists — ABSENT otherwise.
    */
   timeRecord?: TimeRecordPayload;
+}
+
+/** A budgeted run's extra phase — see CodingRun.extraWork. */
+export interface RunExtraWork {
+  /** What extra work may touch: the task's own files and folders, tests, docs (extraWorkScope). */
+  scope: string[];
+  /** The extra items done and recorded. */
+  items: string[];
+  /**
+   * The round under way: which item it is, when it began, how many files the
+   * run had touched by then (the round's own are the ones after), and the
+   * task's own closing words, put back when the round ends — the card and the
+   * pull request read the work's report, not an extra item's one line. Null
+   * between rounds.
+   */
+  round: { n: number; startedAt: number; touchedBefore: number; summary: string | null; resultText: string | null } | null;
+  /** Why the extra phase ended — null while it may go on. */
+  stop: TimeStopReason | null;
 }
 
 export interface RunCi extends CiFailure {
@@ -4312,7 +4348,32 @@ function normalizeRun(raw: CodingRun): CodingRun {
     // Only on a run that has one, so a record without a budget reads back
     // exactly as it did before the field existed.
     ...withTimeBudget(readTimeBudget((raw as { timeBudget?: unknown }).timeBudget)),
+    ...withExtraWork(parseExtraWork((raw as { extraWork?: unknown }).extraWork)),
   };
+}
+
+/** The most of the task's closing words an extra round keeps aside, to put back when it ends. */
+const MAX_EXTRA_KEPT_TEXT_CHARS = 64 * 1024;
+
+/** `{ extraWork }` when the run has an extra phase, `{}` when not — absent, never null. */
+function withExtraWork(extra: RunExtraWork | null | undefined): { extraWork?: RunExtraWork } {
+  return extra ? { extraWork: extra } : {};
+}
+
+/** A run's extra phase off disk, or null — re-read, never trusted, like every list on the record. */
+function parseExtraWork(raw: unknown): RunExtraWork | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const o = raw as Record<string, unknown>;
+  const strings = (v: unknown, max: number) =>
+    Array.isArray(v) ? v.filter((s): s is string => typeof s === "string" && s.length > 0 && s.length <= 500).slice(0, max) : [];
+  const r = o.round as Record<string, unknown> | null | undefined;
+  const count = (v: unknown) => (typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : null);
+  const text = (v: unknown) => (typeof v === "string" ? v.slice(0, MAX_EXTRA_KEPT_TEXT_CHARS) : null);
+  const round = r && typeof r === "object" && count(r.n) !== null && count(r.startedAt) !== null && count(r.touchedBefore) !== null
+    ? { n: r.n as number, startedAt: r.startedAt as number, touchedBefore: r.touchedBefore as number, summary: text(r.summary), resultText: text(r.resultText) }
+    : null;
+  const stop = typeof o.stop === "string" && (TIME_STOP_REASONS as readonly string[]).includes(o.stop) ? (o.stop as TimeStopReason) : null;
+  return { scope: strings(o.scope, 1_000), items: strings(o.items, MAX_EXTRA_ITEMS), round, stop };
 }
 
 /** `{ timeBudget }` when there is one, `{}` when not — the field is absent on a run without a budget, never null. */
@@ -5249,6 +5310,9 @@ function cloneRun(run: CodingRun): CodingRun {
     ciFixOf: run.ciFixOf ? { ...run.ciFixOf } : null,
     // Its own copy, and still absent on a run without one.
     ...withTimeBudget(run.timeBudget ? { ...run.timeBudget } : null),
+    ...withExtraWork(run.extraWork
+      ? { scope: [...run.extraWork.scope], items: [...run.extraWork.items], round: run.extraWork.round ? { ...run.extraWork.round } : null, stop: run.extraWork.stop }
+      : null),
   };
   // The experience block is left out, not copied: it is for the next spawn,
   // which reads the record itself — see CodingRun.experienceBrief.
@@ -11267,6 +11331,14 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // account is what the owner reads before deciding whether to resume. After
   // the retry decision above, so a restarted run never files its first
   // attempt's words; never throwing, so the record settles regardless.
+  //
+  // A budgeted run that finished with time to spare goes on in place with ONE
+  // extra item from the allowlist at a time (finishExtraRound) — read before
+  // the report, since an extra round's one closing line is not the run's
+  // report and is put back to the task's own. Decided now, synchronously, so
+  // the record's close and the finish notice below are held for it; the round
+  // itself starts after this one's commit, below — one commit per item.
+  const extraNext = finishExtraRound(run, state);
   if (run.resultText || run.summary) writeRunReport(run.id, run.resultText || run.summary!);
 
   // The COMMIT before anyone is told. Waiters — the team orchestrator above
@@ -11287,9 +11359,36 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // Until the wake below, a wait that begins now waits too (waitForRun): the
   // status already says settled, the branch does not have the work yet.
   store.unannounced.add(run.id);
+  // Set once the run is back at work on an extra item: it is not over, so no
+  // waiter is woken, no queue pumped, and nothing after the work runs yet.
+  let continued = false;
   trackSettleWork((async () => {
     try {
       await recordRunWork(run);
+      if (extraNext) {
+        const next = await startExtraRound(run);
+        if (next === "started") {
+          continued = true;
+          return;
+        }
+        // The spawn itself failed: spawnOrSettle settled the record as failed,
+        // closed its time record and woke the waiters. The notice is left.
+        if (next === "failed") {
+          void announceCodingAgent(cloneRun(run)).catch((err: unknown) => {
+            console.error("[coding-agent] announce failed:", err instanceof Error ? err.message : err);
+          });
+          return;
+        }
+        // No further item after all: the run ends here, as finishRun would
+        // have ended it — its record closed and its notice sent, unless the
+        // deliverable gate holds both for its own verdict.
+        if (!deliverableGateApplies(run) && !pipelineOwnsRun(run)) {
+          settleBudgetRecord(run);
+          void announceCodingAgent(cloneRun(run)).catch((err: unknown) => {
+            console.error("[coding-agent] announce failed:", err instanceof Error ? err.message : err);
+          });
+        }
+      }
       // The lessons the run proposed for its project's notes
       // (src/lib/coding-run-notes.ts), vetted and merged before anyone waiting
       // on it is woken — a team's next worker reads them. Not for a pause: the
@@ -11315,10 +11414,13 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       persist(true);
     } finally {
       // Woken even when the bookkeeping above threw: a run that is over must
-      // not keep every later wait on it for its whole slice.
-      wakeWaiters(run.id);
-      // A slot is free: the queue's next run, in its turn.
-      void pumpRunQueue();
+      // not keep every later wait on it for its whole slice. One back at work
+      // on an extra item is not over, and keeps its slot.
+      if (!continued) {
+        wakeWaiters(run.id);
+        // A slot is free: the queue's next run, in its turn.
+        void pumpRunQueue();
+      }
     }
     console.error(`[coding-agent] ${run.id} ${settled} after ${Math.round(((run.completedAt ?? Date.now()) - run.startedAt) / 1000)}s (${run.numTurns} turns)`);
     // A team's worker or reviewer ends here: its worktree is the
@@ -11343,7 +11445,10 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // actually over.
   // A budgeted run's time record by the same rule: closed where the notice is
   // sent (and by announceGatedRun / announcePipeline where it is held), and
-  // noted — not closed — for a pause, which Resume carries on from.
+  // noted — not closed — for a pause, which Resume carries on from. Both are
+  // held for an extra item about to start: the settle chain above sends them
+  // if it does not.
+  if (extraNext) return;
   if (run.status === "paused" || (!deliverableGateApplies(run) && !pipelineOwnsRun(run))) settleBudgetRecord(run);
   if (run.status !== "paused" && !deliverableGateApplies(run) && !pipelineOwnsRun(run)) {
     void announceCodingAgent(cloneRun(run)).catch((err: unknown) => {
@@ -13781,9 +13886,9 @@ function idleStopReason(run: CodingRun, clock: BudgetClock): TimeStopReason {
   return settledStopReason(run, clock);
 }
 
-/** Why a settled run stopped: done, the box's own stop (deadline, spend ceiling, token limit), the owner, a failure. */
+/** Why a settled run stopped: done (or why its extra work ended), the box's own stop (deadline, spend ceiling, token limit), the owner, a failure. */
 function settledStopReason(run: CodingRun, clock: BudgetClock): TimeStopReason {
-  if (run.status === "completed") return "done";
+  if (run.status === "completed") return run.extraWork?.stop ?? "done";
   if (run.status === "stopped") return clock.stopReason ?? "stopped";
   if (run.status === "paused" || run.status === "gave_up") return idleStopReason(run, clock);
   return "failed";
@@ -13881,6 +13986,7 @@ export function budgetReportSection(summary: TimeRecordSummary, tz: string): str
     `- Stopped: ${summary.stopReason ? `${STOP_WORDS[summary.stopReason]} (${summary.stopReason})` : "not yet"}`,
     `- ${estimateAccuracyLine(summary)}`,
     ...(summary.skipped.length ? [`- Skipped: ${summary.skipped.join("; ")}`] : []),
+    ...(summary.extras.length ? [`- Extra work with time to spare: ${summary.extras.join("; ")}`] : []),
   ].join("\n");
 }
 
@@ -14045,6 +14151,217 @@ export function _setBudgetCheckpointMsForTests(ms: number | null): void {
 function checkpointEveryMs(): number {
   const ms = store.budgetCheckpointMs;
   return typeof ms === "number" && ms > 0 ? ms : BUDGET_CHECKPOINT_MS;
+}
+
+// ─── Time budget: the spare time, used ───────────────────────────────────────
+//
+// A budgeted run that finishes its task early does not just stop: the owner
+// gave it until the deadline, so it goes on — in place, the same record and
+// session — with ONE small extra item at a time from the allowlist
+// (coding-time-plan.ts: tests, fixes, edge cases, docs, a verify pass), inside
+// the task's own files, one commit each. The SERVER bounds it:
+//  - an item starts only while it can finish before the safety margin and
+//    the budget's spend ceiling and the owner's token limit still hold
+//    (nextItemAllowed, EXTRA_ITEM_ESTIMATE_MS), and at most MAX_EXTRA_ITEMS;
+//  - each round's closing line is read (lastExtraClaim): an `EXTRA:` item on
+//    the allowlist whose files are in scope (checkExtraItem) is recorded; one
+//    that is not ends the phase, said why; `NOTHING_LEFT` is a good ending;
+//  - the margin's message and the deadline's clean stop apply as they do to
+//    the task itself (BudgetClock).
+// Why the phase ended is the time record's stop reason (settledStopReason):
+// nothing_left, time, cost, token_cap — or done. Only after it do the review
+// pass, the pull request and the deliverable's gate run (reviewAndShip), so
+// the extras are part of what they see.
+
+/** Why no further extra item may start now — or null when one may. */
+function extraGate(run: CodingRun, clock: BudgetClock, now: number): { reason: TimeStopReason; why: string } | null {
+  const items = run.extraWork?.items.length ?? 0;
+  if (items >= MAX_EXTRA_ITEMS) return { reason: "done", why: `${items} extra items is the most one run does` };
+  if (typeof run.tokenLimit === "number" && run.tokensUsed >= run.tokenLimit) {
+    return { reason: "token_cap", why: `the owner's token limit (${run.tokenLimit}) is reached` };
+  }
+  const allowed = nextItemAllowed(clock.budget, now, run.tokensUsed, EXTRA_ITEM_ESTIMATE_MS);
+  if (allowed.ok) return null;
+  if (allowed.reason === "cost") return { reason: "cost", why: `the budget's spend ceiling (${clock.budget.tokenCap} tokens) is reached` };
+  const left = Math.max(0, marginCutoffMs(clock.budget) - now);
+  return { reason: "time", why: `${formatDuration(left)} is left before the safety margin, less than the ${formatDuration(EXTRA_ITEM_ESTIMATE_MS)} an item takes` };
+}
+
+/** The extra phase is over: why, on the record, the timeline and the time record. */
+function endExtraPhase(run: CodingRun, clock: BudgetClock, reason: TimeStopReason, why: string, now: number): void {
+  const extra = run.extraWork;
+  if (!extra || extra.stop) return;
+  extra.stop = reason;
+  extra.round = null;
+  pushProgress(run, `Time budget: the extra work ends — ${why}.`);
+  persist();
+  void writeBudgetRecords(run.id, clock.budget, [
+    timeRecord("note", `Extra work ended after ${extra.items.length} item${extra.items.length === 1 ? "" : "s"}: ${why}`, now, { runId: run.id, reason, tokensUsed: run.tokensUsed }),
+  ]);
+}
+
+/**
+ * finishRun's half, synchronous: the extra round that just ended (if one was
+ * under way) is read and recorded, and whether ANOTHER item is due is decided.
+ * True when one is: finishRun then holds the record's close and the finish
+ * notice, and its settle chain starts the round (startExtraRound) after this
+ * one's commit. A paused round keeps its place — Resume carries it on.
+ */
+function finishExtraRound(run: CodingRun, state: LiveRun): boolean {
+  const clock = clockFor(run);
+  if (!clock) return false;
+  const now = Date.now();
+  const extra = run.extraWork;
+  if (extra?.round && run.status !== "paused") {
+    const round = extra.round;
+    extra.round = null;
+    if (run.status === "completed") {
+      const claim = lastExtraClaim(run.resultText ?? run.summary);
+      // The task's own closing words go back: the card, report and pull
+      // request read the work's report, not an extra item's one line.
+      run.summary = round.summary;
+      run.resultText = round.resultText;
+      const files = run.filesTouched.slice(round.touchedBefore);
+      if (claim?.type === "extra") {
+        const check = checkExtraItem({ kind: claim.kind, files }, extra.scope);
+        if (check.ok) {
+          const item = `${claim.kind}: ${claim.summary}`;
+          extra.items.push(item);
+          pushProgress(run, `Time budget: extra item ${round.n} done — ${item}.`);
+          void writeBudgetRecords(run.id, clock.budget, [
+            timeRecord("extra", item, now, { runId: run.id, actualMs: Math.max(0, now - round.startedAt), tokensUsed: run.tokensUsed }),
+          ]);
+        } else {
+          extra.stop = "done";
+          pushProgress(run, `Time budget: extra item ${round.n} was not counted — ${check.error} The extra work ends here.`);
+          void writeBudgetRecords(run.id, clock.budget, [
+            timeRecord("note", `Extra item ${round.n} refused (${claim.kind}: ${claim.summary}): ${check.error}`, now, { runId: run.id, tokensUsed: run.tokensUsed }),
+          ]);
+        }
+      } else if (claim?.type === "nothing_left") {
+        extra.stop = "nothing_left";
+        const why = claim.reason ? ` — ${claim.reason}` : "";
+        pushProgress(run, `Time budget: nothing valuable is left to do${why}. The run ends early.`);
+        void writeBudgetRecords(run.id, clock.budget, [
+          timeRecord("note", `Extra work: nothing valuable left after ${extra.items.length} item${extra.items.length === 1 ? "" : "s"}${why}`, now, { runId: run.id, reason: "nothing_left", tokensUsed: run.tokensUsed }),
+        ]);
+      } else {
+        extra.stop = "done";
+        const why = claim?.type === "invalid" ? claim.error : 'Its reply ended on neither an "EXTRA:" nor a "NOTHING_LEFT" line.';
+        pushProgress(run, `Time budget: extra item ${round.n} was not counted — ${why} The extra work ends here.`);
+        void writeBudgetRecords(run.id, clock.budget, [
+          timeRecord("note", `Extra item ${round.n} not counted: ${why}`, now, { runId: run.id, tokensUsed: run.tokensUsed }),
+        ]);
+      }
+    } else if (!extra.stop) {
+      // Stopped or failed mid-item: the deadline's stop, a ceiling, the owner.
+      extra.stop = clock.stopReason ?? (run.status === "stopped" ? "stopped" : "failed");
+      void writeBudgetRecords(run.id, clock.budget, [
+        timeRecord("note", `Extra item ${round.n} did not finish: the run ${run.status === "gave_up" ? "gave up" : run.status}`, now, { runId: run.id, tokensUsed: run.tokensUsed }),
+      ]);
+    }
+    persist();
+  }
+
+  // Another item? Only for the run that did the task — not a review, a
+  // review-loop round, a team's run, a read-only one or a pipeline's — that
+  // completed on its own, with a session to carry on in and a clock still
+  // keeping its deadline.
+  if (run.status !== "completed" || state.endRequested !== null || !run.sessionId) return false;
+  if (run.team || run.readOnly || run.reviewOf !== null || run.reviewLoopOf !== null || pipelineOwnsRun(run)) return false;
+  if (!clock.enforced || clock.closed || clock.wrapping || run.extraWork?.stop) return false;
+  const gate = extraGate(run, clock, now);
+  if (gate) {
+    if (run.extraWork) {
+      endExtraPhase(run, clock, gate.reason, gate.why, now);
+    } else {
+      void writeBudgetRecords(run.id, clock.budget, [
+        timeRecord("note", `Done; no extra work: ${gate.why}`, now, { runId: run.id, tokensUsed: run.tokensUsed }),
+      ]);
+    }
+    return false;
+  }
+  if (!run.extraWork) {
+    run.extraWork = { scope: extraWorkScope(run.filesTouched), items: [], round: null, stop: null };
+    const left = formatDuration(Math.max(0, marginCutoffMs(clock.budget) - now));
+    pushProgress(run, `Time budget: the task is done with ${left} to spare before the safety margin — using it for extra checks, tests and fixes inside the task's own files.`);
+    void writeBudgetRecords(run.id, clock.budget, [
+      timeRecord("note", `Extra work: the task finished with ${left} left before the safety margin; the spare time goes to the extra-work allowlist`, now, { runId: run.id, tokensUsed: run.tokensUsed }),
+    ]);
+    persist();
+  }
+  return true;
+}
+
+/**
+ * Start the next extra item, in place: the same gates a start passes, then
+ * `--resume` on the run's own session with the extra-work prompt on stdin
+ * (startCompletionAttempt's spawn). "declined" when no item may start after
+ * all — the time, a ceiling or a gate moved while the commit landed — with the
+ * phase ended and said why; "failed" when the spawn itself failed and
+ * spawnOrSettle settled the record.
+ */
+async function startExtraRound(run: CodingRun): Promise<"started" | "declined" | "failed"> {
+  const extra = run.extraWork;
+  const clock = clockFor(run);
+  if (!extra || !clock || extra.stop || !run.sessionId) return "declined";
+  if (run.status !== "completed") return "declined";
+  const gate = extraGate(run, clock, Date.now());
+  if (gate) {
+    endExtraPhase(run, clock, gate.reason, gate.why, Date.now());
+    return "declined";
+  }
+  let tools: SpawnTools;
+  let releaseSlot: (() => void) | null = null;
+  try {
+    releaseSlot = await assertCanSpawn(null);
+    tools = await requireSpawnTools();
+    run.directory = await realDirectory(run.directory);
+  } catch (err) {
+    releaseSlot?.();
+    endExtraPhase(run, clock, "done", `the next extra item could not start: ${err instanceof Error ? err.message : String(err)}`, Date.now());
+    return "declined";
+  }
+  releaseSlot?.();
+  // The owner may have acted while the gates were awaited.
+  if (run.status !== "completed" || clock.closed || extra.stop) return "declined";
+
+  const now = Date.now();
+  const n = extra.items.length + 1;
+  const cutoff = marginCutoffMs(clock.budget);
+  const zone = budgetZone();
+  extra.round = { n, startedAt: now, touchedBefore: run.filesTouched.length, summary: run.summary, resultText: run.resultText ?? null };
+  run.status = "running";
+  run.completedAt = null;
+  run.exitCode = null;
+  run.error = null;
+  run.pauseReason = null;
+  run.leftover = false;
+  run.lastActivityAt = now;
+  pushProgress(run, `Time budget: extra item ${n} — ${formatDuration(cutoff - now)} left before the safety margin.`);
+  await prepareRunSecrets(run);
+  persist(true);
+  void writeBudgetRecords(run.id, clock.budget, [
+    timeRecord("note", `Extra item ${n} began, ${formatDuration(cutoff - now)} before the safety margin`, now, { runId: run.id, tokensUsed: run.tokensUsed }),
+  ]);
+  console.error(`[coding-agent] ${run.id} extra item ${n} with ${Math.round((cutoff - now) / 60_000)} min before the margin`);
+  try {
+    spawnOrSettle(
+      run,
+      run.sessionId,
+      tools,
+      { effort: run.effort, maxTurns: run.maxTurns },
+      extraWorkPrompt({ leftMs: cutoff - now, cutoff: `${formatLocalDeadline(cutoff, zone)} (${zone})`, scope: extra.scope, done: extra.items, n }),
+      true,
+    );
+    return "started";
+  } catch {
+    // spawnOrSettle settled the record as failed and said why.
+    extra.round = null;
+    extra.stop = "failed";
+    persist(true);
+    return "failed";
+  }
 }
 
 /**

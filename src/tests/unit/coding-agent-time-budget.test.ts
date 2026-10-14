@@ -15,7 +15,8 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { saveEnv } from "@/tests/helpers/env";
-import { readFirstTurn } from "@/tests/helpers/fake-harness";
+import { execFileSync } from "child_process";
+import { decodeHarnessStdin, readFirstTurn } from "@/tests/helpers/fake-harness";
 import type { TimeBudget, TimeRecordSummary } from "@/lib/coding-time-budget";
 
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
@@ -218,7 +219,10 @@ describe("a budgeted run that finishes", () => {
 
     await vi.waitFor(() => { expect(record(run.id)?.stopReason).toBe("done"); }, { timeout: 5000 });
     const summary = record(run.id)!;
-    expect(summary.records.map((r) => r.kind)).toEqual(["budget", "start", "plan", "skip", "finish", "stop"]);
+    // Done with time to spare: one extra item was asked for, and a reply that
+    // named none ended the extra work (see "spare time" below) — notes only.
+    expect(summary.records.map((r) => r.kind).filter((k) => k !== "note")).toEqual(["budget", "start", "plan", "skip", "finish", "stop"]);
+    expect(notes(run.id).some((t) => /^Extra item 1 not counted: Its reply ended on neither/.test(t))).toBe(true);
     expect(summary.estimateMs).toBe(15 * 60_000);
     expect(summary.skipped).toEqual(["the e2e suite — the budget is short"]);
     expect(summary.records[0].text).toMatch(/^Budget set when the run was started: Until the test is over/);
@@ -482,6 +486,176 @@ describe("wrapUpRun", () => {
     const started = await lib.startRun({ task: "build", projectId: "site", source: "owner" });
     const done = await settled(started.id);
     expect((await lib.wrapUpRun(done.id, "time"))?.status).toBe("completed");
+  });
+});
+
+describe("spare time, used: the extra work after an early finish", () => {
+  const spawnsFile = () => path.join(base, "spawns");
+  const turnFile = (n: number) => path.join(base, `turn-${n}.txt`);
+  const argvAt = (n: number) => fs.readFileSync(path.join(base, `argv-${n}.txt`), "utf-8");
+
+  function toolWrite(file: string, id: string): string[] {
+    return [
+      JSON.stringify({ type: "assistant", message: { id: `msg_${id}`, model: "deepseek-v4-flash", content: [{ type: "tool_use", id, name: "Write", input: { file_path: file } }] } }),
+      JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, content: "ok" }] } }),
+    ];
+  }
+
+  function result(text: string, usage?: Record<string, number>): string {
+    return JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, result: text, session_id: "sess-abc-123", ...(usage ? { usage } : {}) });
+  }
+
+  /**
+   * A wrapper that answers each spawn with its own round: round n writes its
+   * files on disk (so the commit after it has something to record), prints its
+   * events and its closing result. Spawns past the last round repeat it.
+   */
+  function installRounds(rounds: { files?: string[]; events?: string[]; result: string }[]): void {
+    rounds.forEach((r, n) => {
+      const lines = [INIT, ...(r.files ?? []).flatMap((f, i) => toolWrite(f, `w${n}_${i}`)), ...(r.events ?? []), r.result];
+      fs.writeFileSync(path.join(base, `round-${n}.jsonl`), `${lines.join("\n")}\n`);
+      fs.writeFileSync(path.join(base, `round-${n}.sh`), (r.files ?? []).map((f) => `mkdir -p "$(dirname '${f}')" && echo "round ${n}" > '${f}'`).join("\n") + "\n");
+    });
+    const last = rounds.length - 1;
+    fs.writeFileSync(path.join(binDir, "claude"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+    fs.writeFileSync(
+      path.join(binDir, "claude-ds"),
+      [
+        "#!/usr/bin/env bash",
+        `n=$(cat "${spawnsFile()}" 2>/dev/null || echo 0)`,
+        `echo $((n + 1)) > "${spawnsFile()}"`,
+        `printf '%s\\n' "$@" > "${base}/argv-$n.txt"`,
+        `head -n 1 > "${base}/turn-$n.txt"`,
+        `r=$n; [ "$r" -gt ${last} ] && r=${last}`,
+        `. "${base}/round-$r.sh"`,
+        `cat "${base}/round-$r.jsonl"`,
+        "exit 0",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+  }
+
+  const spawns = () => Number(fs.readFileSync(spawnsFile(), "utf-8").trim());
+  const told = (n: number) => decodeHarnessStdin(fs.readFileSync(turnFile(n), "utf-8"));
+
+  it("does one allowlisted item at a time in the same session, records each, and ends early on NOTHING_LEFT", async () => {
+    ready();
+    installRounds([
+      { files: ["index.html"], result: result("Built the page.") },
+      { files: ["tests/page.test.js"], result: result("Added a test for the title.\nEXTRA: tests — covered the page's title") },
+      { result: result("Checked it all again.\nNOTHING_LEFT — the page is covered and verified") },
+    ]);
+    makeProject("site");
+    const started = await lib.startRun({ task: "build the page", projectId: "site", source: "owner", timeBudget: budget(30 * 60_000, 0) });
+    const run = await settled(started.id);
+
+    // Woken once, at the very end: the extra rounds are the same run going on.
+    expect(run.status).toBe("completed");
+    expect(spawns()).toBe(3);
+    // The work's own report stays the run's summary, not an extra item's line.
+    expect(run.summary).toBe("Built the page.");
+    expect(run.extraWork).toMatchObject({ items: ["tests: covered the page's title"], round: null, stop: "nothing_left" });
+    expect(run.extraWork?.scope).toEqual(expect.arrayContaining(["index.html", "tests/", "docs/", "README.md"]));
+
+    // Each extra item was asked for in the run's own session, with the allowlist and the scope.
+    expect(argvAt(1)).toContain("--resume");
+    expect(told(1)).toContain("EXTRA WORK, item 1 of at most 8.");
+    expect(told(1)).toContain("- tests: tests for the code this work changed");
+    expect(told(1)).toContain("no file outside this task's scope: index.html, test/, tests/");
+    expect(told(2)).toContain("EXTRA WORK, item 2 of at most 8.");
+    expect(told(2)).toContain(`Already done, so not again: "tests: covered the page's title".`);
+
+    await vi.waitFor(() => { expect(record(run.id)?.stopReason).toBe("nothing_left"); }, { timeout: 5000 });
+    const summary = record(run.id)!;
+    expect(summary.extras).toEqual(["tests: covered the page's title"]);
+    const extra = summary.records.find((r) => r.kind === "extra")!;
+    expect(typeof extra.actualMs).toBe("number");
+    expect(notes(run.id).some((t) => /^Extra work: the task finished with \d+ minutes left before the safety margin/.test(t))).toBe(true);
+    expect(notes(run.id).some((t) => /^Extra work: nothing valuable left after 1 item — the page is covered and verified$/.test(t))).toBe(true);
+    expect(kinds(run.id).filter((k) => k === "stop")).toHaveLength(1);
+    // One commit for the work, one for the extra item.
+    const dir = path.join(root, "data", "code-projects", "site");
+    await vi.waitFor(() => {
+      const count = execFileSync("git", ["-C", dir, "rev-list", "--count", "HEAD"], { encoding: "utf-8" }).trim();
+      expect(Number(count)).toBeGreaterThanOrEqual(2);
+    }, { timeout: 5000 });
+    await vi.waitFor(() => {
+      const report = fs.readFileSync(path.join(root, "data", "coding-agent-artifacts", run.id, "report.md"), "utf-8");
+      expect(report).toMatch(/^Built the page\./);
+      expect(report).toContain("- Stopped: nothing valuable was left to do (nothing_left)");
+      expect(report).toContain("- Extra work with time to spare: tests: covered the page's title");
+    }, { timeout: 5000 });
+  });
+
+  it("does not count an item that touched a file outside the task's scope, and ends the extra work there", async () => {
+    ready();
+    installRounds([
+      { files: ["index.html"], result: result("Built the page.") },
+      { files: ["server/billing.js"], result: result("EXTRA: fixes — tidied the billing server") },
+    ]);
+    makeProject("site");
+    const started = await lib.startRun({ task: "build the page", projectId: "site", source: "owner", timeBudget: budget(30 * 60_000, 0) });
+    const run = await settled(started.id);
+    expect(run.status).toBe("completed");
+    expect(spawns()).toBe(2);
+    expect(run.extraWork).toMatchObject({ items: [], stop: "done" });
+    expect(run.progress.some((l) => /extra item 1 was not counted — "server\/billing\.js" is outside this task's files/.test(l))).toBe(true);
+    await vi.waitFor(() => { expect(record(run.id)?.stopReason).toBe("done"); }, { timeout: 5000 });
+    expect(record(run.id)?.extras).toEqual([]);
+    expect(notes(run.id).some((t) => /^Extra item 1 refused \(fixes: tidied the billing server\): "server\/billing\.js" is outside/.test(t))).toBe(true);
+  });
+
+  it("does not count a kind that is not on the allowlist", async () => {
+    ready();
+    installRounds([
+      { files: ["index.html"], result: result("Built the page.") },
+      { result: result("EXTRA: feature — added a dark mode") },
+    ]);
+    makeProject("site");
+    const started = await lib.startRun({ task: "build the page", projectId: "site", source: "owner", timeBudget: budget(30 * 60_000, 0) });
+    const run = await settled(started.id);
+    expect(spawns()).toBe(2);
+    expect(run.extraWork).toMatchObject({ items: [], stop: "done" });
+    await vi.waitFor(() => { expect(notes(run.id).some((t) => /^Extra item 1 not counted: "feature" is not a kind of extra work/.test(t))).toBe(true); }, { timeout: 5000 });
+  });
+
+  it("starts no extra item when it could not finish before the safety margin", async () => {
+    ready();
+    installRounds([{ files: ["index.html"], result: result("Built the page.") }]);
+    makeProject("site");
+    // 32 minutes long, 20 gone: the 10-minute margin begins in 2 minutes — less than an item takes.
+    const started = await lib.startRun({ task: "build the page", projectId: "site", source: "owner", timeBudget: budget(12 * 60_000, 20 * 60_000) });
+    const run = await settled(started.id);
+    expect(run.status).toBe("completed");
+    expect(spawns()).toBe(1);
+    expect(run).not.toHaveProperty("extraWork");
+    await vi.waitFor(() => { expect(record(run.id)?.stopReason).toBe("done"); }, { timeout: 5000 });
+    expect(notes(run.id).some((t) => /^Done; no extra work: \d+ minutes? is left before the safety margin, less than the 5 minutes an item takes$/.test(t))).toBe(true);
+  });
+
+  it("stops at the budget's spend ceiling during an extra item, recorded as cost", async () => {
+    ready();
+    installRounds([
+      { files: ["index.html"], result: result("Built the page.") },
+      { events: [assistantText("working on tests", { input_tokens: 80_000, output_tokens: 10 }, "msg_x")], result: result("EXTRA: tests — more tests") },
+    ]);
+    makeProject("site");
+    const started = await lib.startRun({ task: "build the page", projectId: "site", source: "owner", timeBudget: budget(30 * 60_000, 0, { tokenCap: 50_000 }) });
+    const run = await settled(started.id);
+    expect(run.status).toBe("stopped");
+    expect(run.extraWork?.stop).toBe("cost");
+    await vi.waitFor(() => { expect(record(run.id)?.stopReason).toBe("cost"); }, { timeout: 5000 });
+  });
+
+  it("does no extra work for a run without a budget", async () => {
+    ready();
+    installRounds([{ files: ["index.html"], result: result("Built the page.") }]);
+    makeProject("site");
+    const started = await lib.startRun({ task: "build the page", projectId: "site", source: "owner" });
+    const run = await settled(started.id);
+    expect(run.status).toBe("completed");
+    expect(spawns()).toBe(1);
+    expect(run).not.toHaveProperty("extraWork");
   });
 });
 

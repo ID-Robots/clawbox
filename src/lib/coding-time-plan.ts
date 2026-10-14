@@ -44,6 +44,18 @@ export const MAX_EXTRA_FILES = 50;
 export const MAX_EXTRA_SUMMARY_CHARS = 200;
 /** Only this much of a line is read for a claim. */
 const MAX_CLAIM_LINE_CHARS = 1_000;
+/** What one extra item is planned to take: none starts unless this much is left before the safety margin. */
+export const EXTRA_ITEM_ESTIMATE_MS = 5 * MINUTE_MS;
+/** The most extra items one run or team does, however much time is left: spare time is bounded work, not a second task. */
+export const MAX_EXTRA_ITEMS = 8;
+/** The most scope entries an extra-work prompt lists; the server checks against all of them. */
+const MAX_SCOPE_SHOWN = 30;
+/** Where a repo keeps its tests and docs: extra work may add to them as well as to the task's own files. */
+export const EXTRA_SCOPE_DIRS = ["test/", "tests/", "__tests__/", "spec/", "docs/"] as const;
+/** A repo's own top-level notes, which "docs for the change" may touch. */
+const EXTRA_SCOPE_ROOT_DOCS = ["README.md", "CHANGELOG.md"] as const;
+/** A test or a doc file by its name: "app.test.ts", "app_spec.rb", "test_app.py", "NOTES.md". */
+const TEST_OR_DOC_FILE_RE = /(?:[._-](?:test|spec)\.[A-Za-z0-9]+$|^test_[^/]+$|\.(?:md|mdx|rst|txt)$)/u;
 
 /** "Edge cases", "edge-cases", "EDGE_CASES" → "edge_cases"; anything not on the allowlist → null. */
 export function readExtraKind(raw: unknown): ExtraWorkKind | null {
@@ -70,11 +82,39 @@ function normalizeRepoPath(raw: unknown): string | null {
   return parts.join("/") + (dir ? "/" : "");
 }
 
+/** "src/a/b.ts" → "src/a/"; a file at the top of the repo → "". */
+function dirOf(file: string): string {
+  const at = file.lastIndexOf("/");
+  return at < 0 ? "" : file.slice(0, at + 1);
+}
+
+/**
+ * The scope extra work stays inside, from the files the task itself changed:
+ * each of those files, the folder each one is in (not the repo's top level —
+ * that would be everything), the repo's usual test and doc folders, and its
+ * top-level README and CHANGELOG. Repo-relative, in one spelling, no repeats;
+ * a path outside the repo (absolute, `..`) adds nothing.
+ */
+export function extraWorkScope(touched: readonly unknown[]): string[] {
+  const scope = new Set<string>();
+  for (const raw of touched) {
+    const file = normalizeRepoPath(raw);
+    if (!file || file.endsWith("/")) continue;
+    scope.add(file);
+    const dir = dirOf(file);
+    if (dir) scope.add(dir);
+  }
+  for (const dir of EXTRA_SCOPE_DIRS) scope.add(dir);
+  for (const doc of EXTRA_SCOPE_ROOT_DOCS) scope.add(doc);
+  return [...scope];
+}
+
 /**
  * May this extra item be done? Its kind must be on the allowlist
  * (EXTRA_WORK_KINDS) and every file it touches inside the task's scope — a
- * file named in `scopeFiles`, or one under a directory named there with a
- * trailing "/". An item touching no file (a "verify" pass) needs no scope.
+ * file named in `scopeFiles`, one under a directory named there with a
+ * trailing "/", or a test or doc file beside a scoped file ("app.test.js" next
+ * to "app.js"). An item touching no file (a "verify" pass) needs no scope.
  * Extra time is for the work that was asked for, never for new work.
  */
 export function checkExtraItem(
@@ -92,7 +132,11 @@ export function checkExtraItem(
     return { ok: false, error: `An extra item may touch at most ${MAX_EXTRA_FILES} files; this one names ${files.length}. Split it into smaller steps.` };
   }
   const scope = scopeFiles.map(normalizeRepoPath).filter((p): p is string => p !== null);
-  const inScope = (file: string) => scope.some((s) => (s.endsWith("/") ? file.startsWith(s) : file === s));
+  const besideScoped = (file: string) => {
+    const name = file.slice(dirOf(file).length);
+    return TEST_OR_DOC_FILE_RE.test(name) && scope.some((s) => !s.endsWith("/") && dirOf(s) === dirOf(file));
+  };
+  const inScope = (file: string) => scope.some((s) => (s.endsWith("/") ? file.startsWith(s) : file === s)) || besideScoped(file);
   for (const raw of files) {
     const file = normalizeRepoPath(raw);
     const shown = typeof raw === "string" ? raw.trim().slice(0, 120) : String(raw).slice(0, 40);
@@ -154,6 +198,64 @@ export function parseExtraClaim(line: string): ExtraClaim | null {
   const summary = cleanClaimText(m[2], MAX_EXTRA_SUMMARY_CHARS);
   if (!summary) return { type: "invalid", error: `The extra ${kind} item does not say what was done. ${usage}` };
   return { type: "extra", kind, summary };
+}
+
+/** The most lines of one reply read for a claim — from its end, where the prompt asks for it. */
+const MAX_CLAIM_SCAN_LINES = 200;
+
+/**
+ * The claim a reply ends on: the LAST claim line in it (the prompt asks for
+ * one, at the end) — or null when it makes none. A reply that names a claim
+ * and then corrects it is read by its correction.
+ */
+export function lastExtraClaim(text: unknown): ExtraClaim | null {
+  if (typeof text !== "string" || !text) return null;
+  const lines = text.split(/\r?\n/);
+  for (let i = lines.length - 1, seen = 0; i >= 0 && seen < MAX_CLAIM_SCAN_LINES; i--, seen++) {
+    const claim = parseExtraClaim(lines[i]);
+    if (claim) return claim;
+  }
+  return null;
+}
+
+/** What each allowlisted kind means, in the words the prompt uses. */
+const EXTRA_KIND_WORDS: Record<ExtraWorkKind, string> = {
+  tests: "tests for the code this work changed",
+  fixes: "lint, type or build fixes in that code",
+  edge_cases: "edge cases and error handling in that code",
+  docs: "docs for the change",
+  verify: "re-running or verifying the real job (run it again, check its output)",
+};
+
+/**
+ * The prompt for ONE extra item, in English like the rest of the brief: the
+ * time to spare, the allowlist and nothing beside it, the scope, the items
+ * already done (so none is done twice), and the one closing line the server
+ * reads — `EXTRA: <kind> — <what>` or `NOTHING_LEFT — <why>`. The server
+ * enforces all of it (lastExtraClaim, checkExtraItem, nextItemAllowed); the
+ * prompt only explains.
+ */
+export function extraWorkPrompt(opts: {
+  /** Time left before the safety margin, ms. */
+  leftMs: number;
+  /** When the margin begins, as the owner reads it ("Tue 14 Oct, 18:40"). */
+  cutoff: string;
+  scope: readonly string[];
+  /** The extra items already done, oldest first. */
+  done: readonly string[];
+  /** Which extra item this is, from 1. */
+  n: number;
+}): string {
+  const shown = opts.scope.slice(0, MAX_SCOPE_SHOWN);
+  const more = opts.scope.length > shown.length ? ` (and ${opts.scope.length - shown.length} more)` : "";
+  const scope = shown.length ? `${shown.join(", ")}${more}` : "the files this work already changed";
+  const done = opts.done.length ? ` Already done, so not again: ${opts.done.map((d) => `"${d}"`).join("; ")}.` : "";
+  return [
+    `EXTRA WORK, item ${opts.n} of at most ${MAX_EXTRA_ITEMS}. The task is done and committed, and ${formatDuration(opts.leftMs)} are left before the safety margin at ${opts.cutoff}. ClawBox gives that spare time to ONE small extra item, from this list only:`,
+    ...EXTRA_WORK_KINDS.map((k) => `- ${k}: ${EXTRA_KIND_WORDS[k]}`),
+    `No new features, no unrelated refactors, and no file outside this task's scope: ${scope}. A test or doc file beside one of those files is in scope too. Keep the item small enough to finish in about ${formatDuration(EXTRA_ITEM_ESTIMATE_MS)}, and commit it as one commit whose message names it.${done}`,
+    `End your reply with exactly one line: "EXTRA: <kind> — <what you did>", with <kind> one of ${EXTRA_WORK_KINDS.join(", ")}. If nothing on the list is worth doing, change nothing and end with "NOTHING_LEFT — <why>" instead: that is a good answer, not a failure.`,
+  ].join("\n");
 }
 
 // ─── Estimates ───────────────────────────────────────────────────────────────
