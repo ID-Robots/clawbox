@@ -3,6 +3,7 @@ import { CodingAgentError, httpStatusForCodingError } from "@/lib/coding-agent";
 import { getTeam, listTeams, startTeam } from "@/lib/coding-team";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { requireSession } from "@/lib/route-auth";
+import { budgetAnswer, resolveStartBudget } from "@/lib/coding-time-budget-server";
 
 export const dynamic = "force-dynamic";
 
@@ -16,10 +17,17 @@ export const dynamic = "force-dynamic";
  *                                 try/rejected, tokens, wall time, team messages
  *                                 sent/to the lead/to a sibling/undelivered) as of now
  * GET                           → { teams } — the recent boards, newest first
- * POST { goal, projectId | directory } → 202 { started: true, team }, or —
+ * POST { goal, projectId | directory, budget? } → 202 { started: true, team }, or —
  *                                 while another team works — 202 { started:
  *                                 false, queued: true, team } with the board in
- *                                 status `queued` and its `queuePosition`
+ *                                 status `queued` and its `queuePosition`.
+ *                                 `budget` as the run route takes it (a chip, a
+ *                                 length, an end time, { preset: "custom", end,
+ *                                 start? } or "none"); it beats the goal's own
+ *                                 words, which beat the owner's default. The
+ *                                 board and the answer carry the resolved
+ *                                 `timeBudget`; an unreadable, past or >14-day
+ *                                 one is 400 `invalid`, `code: "budget"`.
  *
  * Session-gated like the runs. POST is admitted to the owner's cookie AND
  * the MCP bearer — the assistant is the party that usually delegates a goal —
@@ -59,15 +67,24 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
   if (!body || typeof body !== "object") return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
+  const goal = typeof body.goal === "string" ? body.goal : "";
+  // The picker's budget, else the goal's words, else the owner's default —
+  // resolved on the box's clock and kept on the board as an absolute deadline.
+  const resolved = await resolveStartBudget({ explicit: body.budget, text: goal, applyDefault: true });
+  if (!resolved.ok) {
+    return NextResponse.json({ error: resolved.error, kind: "invalid", code: "budget" }, { status: 400 });
+  }
   try {
     const team = await startTeam({
-      goal: typeof body.goal === "string" ? body.goal : "",
+      goal,
       projectId: typeof body.projectId === "string" ? body.projectId : null,
       directory: typeof body.directory === "string" ? body.directory : null,
       source: (await hasOwnerSession(request)) ? "owner" : "agent",
+      // Absent without one: a team without a budget starts exactly as before.
+      ...(resolved.budget ? { timeBudget: resolved.budget } : {}),
     });
     const queued = team.status === "queued";
-    return NextResponse.json({ started: !queued, queued, team }, { status: 202 });
+    return NextResponse.json({ started: !queued, queued, team, ...budgetAnswer(resolved) }, { status: 202 });
   } catch (err) {
     if (err instanceof CodingAgentError) {
       return NextResponse.json({ error: err.message, kind: err.kind }, { status: httpStatusForCodingError(err.kind) });

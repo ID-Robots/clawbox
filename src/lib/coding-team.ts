@@ -103,6 +103,7 @@ import { ciFailureLine, ciFixNotes, goalWantsMerge, goalWantsPullRequest, MAX_TE
 import { decideMerge, markPullRequestReady, mergePullRequest, openPullRequest, readPullRequest } from "@/lib/coding-pr";
 import { pushBranch, readFailedCheckLogs, readReviewSnapshot } from "@/lib/coding-review";
 import { isLive, isSettled } from "@/lib/coding-agent-status";
+import type { TimeBudget } from "@/lib/coding-time-budget";
 import {
   allComplete,
   blockedBy,
@@ -181,6 +182,12 @@ export interface StartTeamInput {
   projectId?: string | null;
   directory?: string | null;
   source: CodingRunSource;
+  /**
+   * The time budget the route resolved (src/lib/coding-time-budget.ts):
+   * absolute, so a team that waits in the queue spends its wait against it.
+   * Kept on the board; absent, the team works as every team did before.
+   */
+  timeBudget?: TimeBudget | null;
 }
 
 interface LiveTeam {
@@ -284,7 +291,7 @@ export async function startTeam(input: StartTeamInput): Promise<TeamView> {
 
   // The owner's team is created in the owner's name; the assistant's by the
   // system on its behalf — the audit says which, and the routes gate on it.
-  const board = createBoard({ goal, projectId, directory, source: input.source, dynamic }, input.source === "owner" ? OWNER : SYSTEM);
+  const board = createBoard({ goal, projectId, directory, source: input.source, dynamic, timeBudget: input.timeBudget ?? null }, input.source === "owner" ? OWNER : SYSTEM);
   if (busy || waiting.length) {
     setTeamStatus(board, SYSTEM, "queued", busy ? `Waiting for team ${busy} to finish` : `Waiting behind ${waiting.length} queued team(s)`);
     saveBoard(board);

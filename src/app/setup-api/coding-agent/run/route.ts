@@ -2,12 +2,49 @@ import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { CodingAgentError, ExperienceChoiceError, MAX_TASK_CHARS, PipelineChoiceError, ProviderChoiceError, httpStatusForCodingError, startOrQueueRun } from "@/lib/coding-agent";
+import { startTeam } from "@/lib/coding-team";
+import { needsTeam } from "@/lib/coding-time-budget";
+import { budgetAnswer, resolveStartBudget } from "@/lib/coding-time-budget-server";
 
 export const dynamic = "force-dynamic";
 
 /**
+ * What only a single run can carry: a team takes a goal and a folder, so a
+ * request naming any of these stays one run even with a long budget, rather
+ * than reaching a team that would silently drop the files, the bar or the
+ * account it asked for.
+ */
+const RUN_ONLY_FIELDS = ["inputs", "deliverable", "pipeline", "experience", "provider", "model"] as const;
+
+/** Did the caller actually send this field? An empty list, `false` or `""` is not a request for anything. */
+function sent(v: unknown): boolean {
+  return v !== undefined && v !== null && v !== false && v !== "" && !(Array.isArray(v) && v.length === 0);
+}
+
+/**
  * POST { task, projectId? | directory?, resumeRunId?, provider?, model?,
- * deliverable?, pipeline?, inputs?, experience?, fixCi? } → start a coding run.
+ * deliverable?, pipeline?, inputs?, experience?, fixCi?, budget? } → start a
+ * coding run — or, for a budget over 30 minutes, a coding TEAM.
+ *
+ * `budget` is how long the work may take (src/lib/coding-time-budget.ts): a
+ * chip ("30m", "1h", "morning", "1d"), a length ("90m"), an end time (ISO
+ * 8601; without an offset it is the box's local time), `{ preset: "custom",
+ * end, start? }`, or "none" — the object shapes may add a spend ceiling,
+ * `tokenCap`, and a budget over two hours without one takes the owner's
+ * token cap. It beats a budget the task's words state ("you
+ * have 2 hours", "work until tomorrow morning"), which beats the owner's
+ * default (`coding_agent_default_budget`, never applied to a resume or a Fix
+ * CI). One that is not a budget, ends in the past or is more than 14 days away
+ * is 400 `invalid` with `code: "budget"` and a sentence saying what is taken.
+ * The answer carries the resolved `timeBudget` (an absolute deadline) when
+ * there is one; without one, the run and the answer are exactly as before.
+ *
+ * A budget LONGER than 30 minutes starts a coding team on the task instead
+ * (`startTeam`): 202 `{ started, queued, team, routedToTeam: true, timeBudget }`.
+ * Not for a resume or a Fix CI — they continue one run's session — and not for
+ * a request carrying something only a run can (RUN_ONLY_FIELDS): that stays
+ * one run with its budget, and the answer says so (`routedToTeam: false`,
+ * `routeNote`).
  *
  * `fixCi: true` with `resumeRunId` is a "Fix CI" continuation: the run named
  * had its pull request fail its checks (the record's `ci`), and the box
@@ -64,7 +101,7 @@ export async function POST(request: Request) {
   let body: {
     task?: unknown; projectId?: unknown; directory?: unknown; resumeRunId?: unknown;
     provider?: unknown; model?: unknown; deliverable?: unknown; pipeline?: unknown;
-    inputs?: unknown; experience?: unknown; fixCi?: unknown;
+    inputs?: unknown; experience?: unknown; fixCi?: unknown; budget?: unknown;
   };
   try {
     body = await request.json();
@@ -89,11 +126,45 @@ export async function POST(request: Request) {
   // clicking in Settings holds a cookie, the agent holds the bearer.
   const source = (await hasOwnerSession(request)) ? "owner" : "agent";
 
+  // A continuation picks up one run's session: never a team, and never the
+  // owner's default — only a budget it is given, or one its words state.
+  const continuing = (typeof body.resumeRunId === "string" && body.resumeRunId !== "") || body.fixCi === true;
+  const resolved = await resolveStartBudget({ explicit: body.budget, text: task, applyDefault: !continuing });
+  if (!resolved.ok) {
+    return NextResponse.json({ error: resolved.error, kind: "invalid", code: "budget" }, { status: 400 });
+  }
+  const timeBudget = resolved.budget;
+  const projectId = typeof body.projectId === "string" ? body.projectId : null;
+  const directory = typeof body.directory === "string" ? body.directory : null;
+  let routeNote: string | null = null;
+  if (timeBudget && needsTeam(timeBudget) && !continuing) {
+    const runOnly = RUN_ONLY_FIELDS.filter((f) => sent(body[f]));
+    if (runOnly.length) {
+      routeNote = `A budget over 30 minutes normally starts a coding team, but this request names ${runOnly.join(", ")}, which only a single run carries — so it runs as one run with the budget.`;
+    } else {
+      try {
+        const team = await startTeam({ goal: task, projectId, directory, source, timeBudget });
+        const queued = team.status === "queued";
+        console.error(`[coding-agent/run] a time budget over 30 minutes: started team ${team.id} instead of a run`);
+        return NextResponse.json({ started: !queued, queued, team, routedToTeam: true, ...budgetAnswer(resolved) }, { status: 202 });
+      } catch (err) {
+        if (err instanceof CodingAgentError) {
+          return NextResponse.json({ error: err.message, kind: err.kind }, { status: httpStatusForCodingError(err.kind) });
+        }
+        console.error("[coding-agent/run] failed to start the team:", err instanceof Error ? err.message : err);
+        return NextResponse.json(
+          { error: err instanceof Error ? err.message : "Could not start the coding team" },
+          { status: 500 },
+        );
+      }
+    }
+  }
+
   try {
     const { run, queued } = await startOrQueueRun({
       task,
-      projectId: typeof body.projectId === "string" ? body.projectId : null,
-      directory: typeof body.directory === "string" ? body.directory : null,
+      projectId,
+      directory,
       resumeRunId: typeof body.resumeRunId === "string" ? body.resumeRunId : null,
       // Passed through untouched: startRun validates the pair, so this route
       // cannot accept a combination the MCP tool would refuse, or the reverse.
@@ -128,8 +199,14 @@ export async function POST(request: Request) {
       // Only ever `true` or absent: what failed is the box's to append, from
       // its own record of the named run — never the caller's.
       ...(body.fixCi === true ? { fixCi: true } : {}),
+      // Resolved above, on the box's clock: an absolute deadline, frozen on the
+      // record. Absent without one, so such a run starts exactly as before.
+      ...(timeBudget ? { timeBudget } : {}),
     });
-    return NextResponse.json({ started: !queued, queued, run }, { status: 202 });
+    return NextResponse.json(
+      { started: !queued, queued, run, ...budgetAnswer(resolved), ...(routeNote ? { routedToTeam: false, routeNote } : {}) },
+      { status: 202 },
+    );
   } catch (err) {
     if (err instanceof CodingAgentError) {
       // The provider/model refusal carries a `code` beside the shared 400, so a

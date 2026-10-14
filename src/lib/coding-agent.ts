@@ -426,6 +426,7 @@ import {
   runHookScriptPath,
   runHookSettings,
 } from "@/lib/coding-run-inbox";
+import { BUDGET_PRESET_CHIPS, isBudgetChip, readTimeBudget, type BudgetChip, type TimeBudget } from "@/lib/coding-time-budget";
 
 // ─── Tunables ────────────────────────────────────────────────────────────────
 
@@ -731,6 +732,15 @@ export const CODING_AGENT_REAL_BROWSER_CONFIG_KEY = "coding_agent_real_browser";
  * never changes a team already at work.
  */
 export const CODING_TEAM_DYNAMIC_CONFIG_KEY = "coding_team_dynamic";
+
+/**
+ * The owner's DEFAULT time budget: one of the chips (src/lib/coding-time-budget.ts),
+ * or absent for none. It applies to a run or team started through the routes
+ * when neither the picker nor the task's words named a budget — never to a
+ * resume or a Fix CI continuation, which go on with what they were asked.
+ * Absent means no budget, which is how every run worked before the setting.
+ */
+export const CODING_AGENT_DEFAULT_BUDGET_CONFIG_KEY = "coding_agent_default_budget";
 
 /**
 
@@ -1862,6 +1872,13 @@ export interface CodingRun {
   ci?: RunCi | null;
   /** This run is a "Fix CI" continuation of `runId`, attempt n of MAX_CI_FIX_ATTEMPTS. */
   ciFixOf?: { runId: string; attempt: number } | null;
+  /**
+   * How long the owner let this run work: an absolute deadline and the label
+   * they chose (src/lib/coding-time-budget.ts). Resolved by the route from the
+   * picker, the task's words or the owner's default, and frozen here. ABSENT
+   * on a run without one — such a run works exactly as every run did before.
+   */
+  timeBudget?: TimeBudget | null;
 }
 
 export interface RunCi extends CiFailure {
@@ -1889,6 +1906,8 @@ export interface QueuedStart {
   pipeline?: unknown;
   inputs?: unknown;
   experience?: unknown;
+  /** The budget the route resolved — absolute, so the time spent waiting counts against it. */
+  timeBudget?: unknown;
 }
 
 export interface RunQueueEntry {
@@ -2184,6 +2203,10 @@ export interface CodingAgentStatus {
   realBrowser: boolean;
   /** May a coding team's lead add or retire tasks while the team runs? Off unless the owner said so. */
   teamDynamic: boolean;
+  /** The time budget a start gets when nothing else named one: a chip id, or null for none. */
+  defaultTimeBudget: BudgetChip | null;
+  /** The box's own IANA zone — what "box-local" means for a budget, so the start UI previews the deadline the box will store. */
+  timeZone: string;
   /** The owner's standing permission rules, in the order they saved them. */
   allowRules: string[];
   /** How many they may keep, so the editor can say so without guessing. */
@@ -2336,6 +2359,13 @@ export interface StartRunInput {
    * resumes.
    */
   experience?: unknown;
+  /**
+   * The time budget the ROUTE resolved (src/lib/coding-time-budget.ts) — the
+   * picker, the task's words or the owner's default, already an absolute
+   * deadline. Re-read through `readTimeBudget` here, so a malformed one is no
+   * budget rather than a run that cannot start. Absent: no budget, as before.
+   */
+  timeBudget?: TimeBudget | null;
 }
 
 /** A run's place in a coding team. */
@@ -2923,6 +2953,29 @@ export async function setTeamDynamic(on: unknown): Promise<boolean> {
   }
   await configSet(CODING_TEAM_DYNAMIC_CONFIG_KEY, on);
   return on;
+}
+
+/** The owner's default time budget off a raw config value: a chip, or null for none. */
+function defaultTimeBudgetFrom(raw: unknown): BudgetChip | null {
+  return isBudgetChip(raw) ? raw : null;
+}
+
+/** The owner's default time budget — a chip, or null when they set none. See its config key. */
+export async function getDefaultTimeBudget(): Promise<BudgetChip | null> {
+  return defaultTimeBudgetFrom(await configGet(CODING_AGENT_DEFAULT_BUDGET_CONFIG_KEY));
+}
+
+/** Set the default time budget to a chip, or clear it with null. A custom period is per start, never a default. */
+export async function setDefaultTimeBudget(preset: unknown): Promise<BudgetChip | null> {
+  if (preset === null) {
+    await configSet(CODING_AGENT_DEFAULT_BUDGET_CONFIG_KEY, undefined);
+    return null;
+  }
+  if (!isBudgetChip(preset)) {
+    throw new CodingAgentError("invalid", `The default time budget must be one of: ${BUDGET_PRESET_CHIPS.join(", ")} — or null for none.`);
+  }
+  await configSet(CODING_AGENT_DEFAULT_BUDGET_CONFIG_KEY, preset);
+  return preset;
 }
 
 /**
@@ -3807,9 +3860,13 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
   const defaultDirectory = defaultDirectoryFrom(config[CODING_AGENT_DIR_CONFIG_KEY]);
   const effort = effortFrom(config[CODING_AGENT_EFFORT_CONFIG_KEY]);
   const provider = codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]);
-  const [readiness, projectFolders] = await Promise.all([
+  const [readiness, projectFolders, timeZone] = await Promise.all([
     readinessWith(config.clawai_token, config[HARNESS_FAULT_CONFIG_KEY], provider),
     defaultDirectory ? readFolderNames(defaultDirectory) : Promise.resolve([]),
+    // Loaded on demand: the zone module reaches into both harnesses' config
+    // writers, which nothing else in this file needs. Never fatal — a box
+    // that cannot read its zone answers UTC, as `readOsTimeZone` itself does.
+    import("@/lib/timezone").then((m) => m.readOsTimeZone()).catch(() => "UTC"),
   ]);
   return {
     enabled,
@@ -3861,6 +3918,8 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     generateAudio: generateAudioFrom(config[CODING_AGENT_GEN_AUDIO_CONFIG_KEY]),
     realBrowser: realBrowserFrom(config[CODING_AGENT_REAL_BROWSER_CONFIG_KEY]),
     teamDynamic: config[CODING_TEAM_DYNAMIC_CONFIG_KEY] === true,
+    defaultTimeBudget: defaultTimeBudgetFrom(config[CODING_AGENT_DEFAULT_BUDGET_CONFIG_KEY]),
+    timeZone,
     // The home, so a harness-project rule is still on the list the panels
     // read; the full context's directory walk is not worth it here.
     allowRules: normalizeAllowRules(config[CODING_AGENT_ALLOW_RULES_CONFIG_KEY], allowRuleHomeContext()),
@@ -4213,7 +4272,15 @@ function normalizeRun(raw: CodingRun): CodingRun {
     queued: (raw as { status?: unknown }).status === "queued" ? parseQueueEntry((raw as { queued?: unknown }).queued) : null,
     ci: parseRunCi((raw as { ci?: unknown }).ci),
     ciFixOf: parseCiFixOf((raw as { ciFixOf?: unknown }).ciFixOf),
+    // Only on a run that has one, so a record without a budget reads back
+    // exactly as it did before the field existed.
+    ...withTimeBudget(readTimeBudget((raw as { timeBudget?: unknown }).timeBudget)),
   };
+}
+
+/** `{ timeBudget }` when there is one, `{}` when not — the field is absent on a run without a budget, never null. */
+function withTimeBudget(budget: TimeBudget | null | undefined): { timeBudget?: TimeBudget } {
+  return budget ? { timeBudget: budget } : {};
 }
 
 /** A run's CI failure off disk, or null — rendered on its page and quoted to the next run, so re-read, never trusted. */
@@ -4262,6 +4329,7 @@ function parseQueueEntry(raw: unknown): RunQueueEntry {
       inputs: start.inputs,
       experience: start.experience,
       ...(start.fixCi === true ? { fixCi: true } : {}),
+      ...withTimeBudget(readTimeBudget(start.timeBudget)),
     },
   };
 }
@@ -5112,6 +5180,8 @@ function cloneRun(run: CodingRun): CodingRun {
     queued: run.queued ? { at: run.queued.at, position: queuePosition(run.id) ?? undefined } : null,
     ci: run.ci ? { ...run.ci, checks: [...run.ci.checks], tests: [...run.ci.tests], files: [...run.ci.files], unread: [...run.ci.unread] } : null,
     ciFixOf: run.ciFixOf ? { ...run.ciFixOf } : null,
+    // Its own copy, and still absent on a run without one.
+    ...withTimeBudget(run.timeBudget ? { ...run.timeBudget } : null),
   };
   // The experience block is left out, not copied: it is for the next spawn,
   // which reads the record itself — see CodingRun.experienceBrief.
@@ -12314,6 +12384,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       cpuBudget,
       experience: experience?.record ?? null,
       experienceBrief: experience?.brief ?? null,
+      timeBudget: readTimeBudget(input.timeBudget),
     });
     // THE FILES THIS RUN WAS GIVEN, staged before anything else: the task
     // context names the folder, so what is in it has to be true by the time the
@@ -12729,6 +12800,7 @@ function newRunRecord(fields: {
   experienceBrief?: string | null;
   deliverable?: Deliverable | null;
   pipeline?: PipelineState | null;
+  timeBudget?: TimeBudget | null;
 }): CodingRun {
   const now = Date.now();
   const id = fields.id ?? newRunId();
@@ -12822,6 +12894,8 @@ function newRunRecord(fields: {
     completionAttempts: fields.settings.completionAttempts,
     // Nobody has told it anything yet.
     messages: [],
+    // Absent without one, so a run without a budget is the record it always was.
+    ...withTimeBudget(fields.timeBudget),
   };
 }
 
@@ -13478,7 +13552,8 @@ async function queueRun(input: StartRunInput): Promise<CodingRun> {
     ({ directory, projectId } = await resolveWorkingDirectory(input));
   }
   const settings = await applyProviderChoice(await readRunSettings(), input, inherited);
-  const run = newRunRecord({ task, directory, projectId, source: input.source, status: "queued", settings, deliverable: requireDeliverable(input) });
+  const timeBudget = readTimeBudget(input.timeBudget);
+  const run = newRunRecord({ task, directory, projectId, source: input.source, status: "queued", settings, deliverable: requireDeliverable(input), timeBudget });
   // Claimed now, so the failure is not offered a second Fix CI while this one waits.
   if (fixing?.ci) fixing.ci = { ...fixing.ci, fixRunId: run.id };
   run.queued = {
@@ -13496,6 +13571,7 @@ async function queueRun(input: StartRunInput): Promise<CodingRun> {
       inputs: input.inputs,
       experience: input.experience,
       ...(input.fixCi === true ? { fixCi: true } : {}),
+      ...withTimeBudget(timeBudget),
     },
   };
   pushProgress(run, RUNNER_STEP.queued(queuedRuns().length + 1));
@@ -13552,6 +13628,8 @@ function startQueuedRun(id: string): Promise<CodingRun> {
       fixCi: start.fixCi === true,
       source: run.source,
       queuedRunId: id,
+      // The deadline it was queued with: absolute, so the wait counts against it.
+      ...withTimeBudget(readTimeBudget(start.timeBudget)),
     });
   });
 }
