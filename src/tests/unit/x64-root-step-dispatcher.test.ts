@@ -154,6 +154,21 @@ describe("the update's own root steps", () => {
     expect(r.out).toMatch(/^CLAWBOX-WARN\[x64-timezone\]: /m);
   });
 
+  it("post_update only warns when no valid install user is recorded", () => {
+    // require_install_user exits 78; inside post_update that must stay a
+    // warning, never end the step.
+    fs.writeFileSync(
+      path.join(sandbox, "x64.env"),
+      `CLAWBOX_USER=root\nPROJECT_DIR=${project}\nROOT_INSTALLER=${path.join(sandbox, "bin", "installer")}\n`,
+    );
+    writeRequest("TIMEZONE=America/New_York\n");
+    const r = run("post_update");
+    expect(r.status).toBe(0);
+    expect(r.out).toMatch(/^CLAWBOX-WARN\[x64-timezone\]: /m);
+    expect(r.out).toContain("clawbox-root-step: x64 post-update done");
+    expect(setCalls()).toEqual([]);
+  });
+
   it("gateway_setup checks the installed unit instead of rewriting it", () => {
     const missing = run("gateway_setup");
     expect(missing.status).toBe(1);

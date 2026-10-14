@@ -239,7 +239,9 @@ run_gateway_setup() {
 # only the owner runs, so what is left is the owner's timezone. Never fatal: a
 # clock that could not be moved is reported on the update's own card.
 run_post_update() {
-  if ! run_set_timezone; then
+  # In a subshell: require_install_user ends its shell with `exit 78`, and an
+  # exit inside a function would end this whole step, not just the timezone.
+  if ! ( run_set_timezone ); then
     echo "CLAWBOX-WARN[x64-timezone]: The recorded timezone could not be applied to this PC's clock; set it again in Settings."
   fi
   echo "clawbox-root-step: x64 post-update done"

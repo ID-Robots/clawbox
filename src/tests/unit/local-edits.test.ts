@@ -203,14 +203,24 @@ d("preserveLocalEdits over a tree with no scripts/ directory", () => {
 });
 
 describe("updateClawBoxAndReboot saves before it resets and cleans", () => {
+  const fnBody = (signature: string) => {
+    const start = UPDATER_TS.indexOf(signature);
+    expect(start).toBeGreaterThan(-1);
+    return UPDATER_TS.slice(start, UPDATER_TS.indexOf("\n}\n", start));
+  };
+
   it("calls preserveLocalEdits before its first reset, and raises the saved-to card", () => {
-    const start = UPDATER_TS.indexOf("async function updateClawBoxAndReboot()");
-    const body = UPDATER_TS.slice(start, UPDATER_TS.indexOf("\n}\n", start));
+    // The restart step (appliance and install-x64.sh PC alike) syncs through
+    // syncCheckoutForRebuild -> syncCheckoutToUpstream, which owns the save.
+    expect(fnBody("async function updateClawBoxAndReboot()")).toContain("await syncCheckoutForRebuild()");
+    expect(fnBody("async function syncCheckoutForRebuild()"))
+      .toContain("syncCheckoutToUpstream(local, upstream, LOCAL_EDITS_SAVED_BEFORE_RESTART)");
+    const body = fnBody("async function syncCheckoutToUpstream(");
     const saveAt = body.indexOf("await preserveLocalEdits(PROJECT_DIR)");
     expect(saveAt).toBeGreaterThan(-1);
     expect(saveAt).toBeLessThan(body.indexOf('["reset", "--hard", "HEAD"]'));
     expect(saveAt).toBeLessThan(body.indexOf('["clean", "-fd"]'));
-    expect(body).toContain("warnUpdate(LOCAL_EDITS_SAVED_BEFORE_RESTART, saved.message)");
+    expect(body).toContain("warnUpdate(savedCode, saved.message)");
     // A card code of its own: step 1's save arrives as `local-edits-saved`, and
     // warnUpdate keeps the first card per code.
     expect(UPDATER_TS).toMatch(/const LOCAL_EDITS_SAVED_BEFORE_RESTART = "local-edits-saved:[a-z]+"/);
