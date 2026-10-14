@@ -3078,6 +3078,28 @@ describe("a budgeted team works to its deadline", () => {
     expect(record.records.filter((r) => r.kind === "stop").map((r) => r.reason)).toEqual(["time"]);
   });
 
+  it("starts no task once the safety margin has begun: what was not started is left out, and the stop is time", async () => {
+    outcomes = [{
+      summary: plan([
+        { task_description: "Scaffold index.html", files_hint: ["index.html"], estimate_minutes: 10 },
+        { task_description: "Wire app.js", depends_on: ["t1"], files_hint: ["app.js"], estimate_minutes: 10 },
+      ]),
+    }];
+    holdTasks.add("t1");
+    const started = await team.startTeam({ goal: "Build it", directory: "site", source: "owner", timeBudget: budget(2 * HOUR) });
+    await vi.waitFor(() => { expect(workerRun("t1")).toBeDefined(); }, { timeout: 5000 });
+    // Past the cutoff (2 hours less a 12-minute margin), short of the deadline; then t1 finishes.
+    offset += 110 * MIN;
+    workerRun("t1")!.held = false;
+    const done = await finished(started.id);
+    await closed(started.id);
+    expect(runner.wrapUpRun).not.toHaveBeenCalled();
+    expect(done.tasks.map((t) => [t.task_id, t.status])).toEqual([["t1", "complete"], ["t2", "retired"]]);
+    expect(done.skipped?.find((s) => s.taskId === "t2")?.text).toMatch(/^the safety margin began at .+ before it could start: Wire app\.js$/);
+    expect(workerStarts().filter((s) => (s.team as { taskId?: string | null }).taskId === "t2")).toHaveLength(0);
+    expect(team.getTeam(started.id)?.timeStop).toBe("time");
+  });
+
   it("stops at the budget's spend ceiling, summed over the team's runs, and records cost", async () => {
     outcomes = [{ summary: plan([{ task_description: "Scaffold index.html", files_hint: ["index.html"], estimate_minutes: 10 }, { task_description: "Wire app.js", depends_on: ["t1"], files_hint: ["app.js"], estimate_minutes: 10 }]) }];
     holdTasks.add("t1");

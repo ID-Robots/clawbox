@@ -431,6 +431,7 @@ import {
   budgetDurationMs,
   describeBudget,
   elapsedMs,
+  fitsBeforeCutoff,
   formatDuration,
   formatLocalDeadline,
   HOUR_MS,
@@ -9390,6 +9391,13 @@ async function maybeStartReviewPass(finished: CodingRun): Promise<ReviewPassOutc
   // The switch as it stood when THIS run started — the same decision its
   // brief was written from — never the switch as it stands now.
   if (!finished.reviewPass) return "skipped";
+  // A budgeted run inside its safety margin starts nothing new: the margin is
+  // for committing and the pull request, and a pass is a run of its own.
+  if (finished.timeBudget && !fitsBeforeCutoff(finished.timeBudget, Date.now())) {
+    pushProgress(finished, "Time budget: no review pass — the safety margin has begun, so nothing new starts.");
+    persist();
+    return "skipped";
+  }
   try {
     const review = await startRun({
       task: reviewPassTask(finished),
@@ -11338,7 +11346,8 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // report and is put back to the task's own. Decided now, synchronously, so
   // the record's close and the finish notice below are held for it; the round
   // itself starts after this one's commit, below — one commit per item.
-  const extraNext = finishExtraRound(run, state);
+  const extraRound = finishExtraRound(run, state);
+  const extraNext = extraRound.next;
   if (run.resultText || run.summary) writeRunReport(run.id, run.resultText || run.summary!);
 
   // The COMMIT before anyone is told. Waiters — the team orchestrator above
@@ -11429,7 +11438,9 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     // request — the assets, review pass and PR below would run in a folder
     // that is gone. The planner works in the project itself and keeps them.
     if (run.team && run.team.role !== "planner") return;
-    await reviewAndShip(run, state.endRequested);
+    // An extra item the deadline or a ceiling cut off ended no WORK: the task
+    // was done, so its pull request and the deliverable's check go on.
+    await reviewAndShip(run, extraRound.boxEnded ? null : state.endRequested);
   })());
   // A pause is the owner's own gesture — no finish notice for it.
   //
@@ -14207,11 +14218,15 @@ function endExtraPhase(run: CodingRun, clock: BudgetClock, reason: TimeStopReaso
  * notice, and its settle chain starts the round (startExtraRound) after this
  * one's commit. A paused round keeps its place — Resume carries it on.
  */
-function finishExtraRound(run: CodingRun, state: LiveRun): boolean {
+function finishExtraRound(run: CodingRun, state: LiveRun): { next: boolean; boxEnded: boolean } {
   const clock = clockFor(run);
-  if (!clock) return false;
+  if (!clock) return { next: false, boxEnded: false };
   const now = Date.now();
   const extra = run.extraWork;
+  // The box itself (the deadline, a ceiling) cut an extra item off: the run's
+  // settle goes on as a completed run's — its pull request included — rather
+  // than as one the owner stopped.
+  let boxEnded = false;
   if (extra?.round && run.status !== "paused") {
     const round = extra.round;
     extra.round = null;
@@ -14254,10 +14269,23 @@ function finishExtraRound(run: CodingRun, state: LiveRun): boolean {
         ]);
       }
     } else if (!extra.stop) {
-      // Stopped or failed mid-item: the deadline's stop, a ceiling, the owner.
+      // Stopped or failed mid-item: the deadline's stop, a ceiling, the owner,
+      // the harness. The TASK was done and committed before the item began, so
+      // the run stays what it was — completed, with the task's own report —
+      // and why the extra work ended is the record's stop reason; what the
+      // item left in the folder is committed below like any settle's.
+      const ended = run.status === "gave_up" ? "gave up" : run.status;
       extra.stop = clock.stopReason ?? (run.status === "stopped" ? "stopped" : "failed");
+      run.status = "completed";
+      run.error = null;
+      run.failureKind = null;
+      run.resumable = false;
+      run.summary = round.summary;
+      run.resultText = round.resultText;
+      boxEnded = clock.stopReason !== null;
+      pushProgress(run, `Time budget: extra item ${round.n} ended ${ended} (${extra.stop}); the task itself was done and committed.`);
       void writeBudgetRecords(run.id, clock.budget, [
-        timeRecord("note", `Extra item ${round.n} did not finish: the run ${run.status === "gave_up" ? "gave up" : run.status}`, now, { runId: run.id, tokensUsed: run.tokensUsed }),
+        timeRecord("note", `Extra item ${round.n} did not finish: it ended ${ended}`, now, { runId: run.id, reason: extra.stop, tokensUsed: run.tokensUsed }),
       ]);
     }
     persist();
@@ -14267,9 +14295,10 @@ function finishExtraRound(run: CodingRun, state: LiveRun): boolean {
   // review-loop round, a team's run, a read-only one or a pipeline's — that
   // completed on its own, with a session to carry on in and a clock still
   // keeping its deadline.
-  if (run.status !== "completed" || state.endRequested !== null || !run.sessionId) return false;
-  if (run.team || run.readOnly || run.reviewOf !== null || run.reviewLoopOf !== null || pipelineOwnsRun(run)) return false;
-  if (!clock.enforced || clock.closed || clock.wrapping || run.extraWork?.stop) return false;
+  const done = { next: false, boxEnded };
+  if (run.status !== "completed" || state.endRequested !== null || !run.sessionId) return done;
+  if (run.team || run.readOnly || run.reviewOf !== null || run.reviewLoopOf !== null || pipelineOwnsRun(run)) return done;
+  if (!clock.enforced || clock.closed || clock.wrapping || run.extraWork?.stop) return done;
   const gate = extraGate(run, clock, now);
   if (gate) {
     if (run.extraWork) {
@@ -14279,7 +14308,7 @@ function finishExtraRound(run: CodingRun, state: LiveRun): boolean {
         timeRecord("note", `Done; no extra work: ${gate.why}`, now, { runId: run.id, tokensUsed: run.tokensUsed }),
       ]);
     }
-    return false;
+    return done;
   }
   if (!run.extraWork) {
     run.extraWork = { scope: extraWorkScope(run.filesTouched), items: [], round: null, stop: null };
@@ -14290,7 +14319,7 @@ function finishExtraRound(run: CodingRun, state: LiveRun): boolean {
     ]);
     persist();
   }
-  return true;
+  return { next: true, boxEnded };
 }
 
 /**
