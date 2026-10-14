@@ -38,9 +38,20 @@ describe("reading the windows", () => {
     })).toEqual({ exhausted: true, resetsAt: at("2026-10-20T00:00:00Z"), kind: "weekly" });
   });
 
-  it("counts a window a few points short of full as spent — the request that would cross it is refused before it reads 100", () => {
-    expect(parseAnthropicUsage({ five_hour: { utilization: 96, resets_at: "2026-10-14T18:10:00Z" } }))
+  it("counts the session window a few points short of full as spent — the request that would cross it is refused before it reads 100", () => {
+    expect(parseAnthropicUsage({ five_hour: { utilization: 96, resets_at: "2026-10-14T18:10:00Z" }, seven_day: { utilization: 40, resets_at: "2026-10-19T09:00:00Z" } }))
       .toEqual({ exhausted: true, resetsAt: at("2026-10-14T18:10:00Z"), kind: "session" });
+  });
+
+  it("never sets an account aside until a WEEK resets over a week that still has room", () => {
+    // The five-hour window capped, the week at 92 %: back in hours, not days.
+    expect(parseAnthropicUsage({
+      five_hour: { utilization: 100, resets_at: "2026-10-14T18:10:00Z" },
+      seven_day: { utilization: 92, resets_at: "2026-10-19T09:00:00Z" },
+    })).toEqual({ exhausted: true, resetsAt: at("2026-10-14T18:10:00Z"), kind: "session" });
+    // A throttle on an account whose week is high is no limit at all.
+    expect(parseAnthropicUsage({ five_hour: { utilization: 30, resets_at: null }, seven_day: { utilization: 95, resets_at: "2026-10-19T09:00:00Z" } }))
+      .toEqual({ exhausted: false, resetsAt: null, kind: "session" });
   });
 
   it("is no limit when every window has room, whatever else the answer holds", () => {

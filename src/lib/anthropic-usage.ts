@@ -42,49 +42,47 @@ function parseReset(value: unknown): number | null {
   return Number.isFinite(at) ? at : null;
 }
 
+/** A window that is spent: Anthropic's own percentage at or over 100. */
+const FULL_PERCENT = 100;
+
 /**
- * A window that counts as spent. Not 100: Anthropic refuses the request that
- * "would exceed your account's rate limit", so the window that refused can
- * still read a few points short when it is asked a moment later. This is only
- * asked after core rotated off the account on a rate limit, so an account
- * this close to its cap is not answering anyway; reading it as a throttle
- * would leave the pool on it while every new session hits it again. 90 is
- * where the owner's own swapper (clx) calls a window spent on the same
- * endpoint.
+ * The session window refuses a few points short of full: Anthropic turns away
+ * the request that "would exceed your account's rate limit", so asked a moment
+ * later the five-hour window that refused can still read 9x %. Only that
+ * window, and only when nothing is full: a WEEK at 92 % is a week with room,
+ * and taking an account out until its weekly reset over it would lose it for
+ * days to a session window that is back in hours.
  */
-const SPENT_PERCENT = 90;
+const SESSION_REFUSES_PERCENT = 90;
 
 /**
  * The reading of one `/api/oauth/usage` answer, the windows core's parser
  * reads (`parseClaudeUsage`): `five_hour`, `seven_day`, the model weeks, and
- * every active entry of `limits[]`. Pure.
+ * every active entry of `limits[]`. Spent: every window at 100 % — the latest
+ * of their resets is when the account answers again — else the session
+ * window when it is at 90 % or more. Pure.
  */
 export function parseAnthropicUsage(body: unknown): AnthropicUsageReading {
   const usage = isRecord(body) ? body : {};
-  const spent: { resetsAt: number | null; weekly: boolean }[] = [];
-  const windows: [unknown, boolean][] = [
-    [usage.five_hour, false],
-    [usage.seven_day, true],
-    [usage.seven_day_opus, true],
-    [usage.seven_day_sonnet, true],
-  ];
-  for (const [window, weekly] of windows) {
-    if (!isRecord(window)) continue;
-    const percent = window.utilization;
-    if (typeof percent === "number" && Number.isFinite(percent) && percent >= SPENT_PERCENT) spent.push({ resetsAt: parseReset(window.resets_at), weekly });
+  const windows: { percent: number; resetsAt: number | null; weekly: boolean }[] = [];
+  const add = (percent: unknown, resetsAt: unknown, weekly: boolean) => {
+    if (typeof percent === "number" && Number.isFinite(percent)) windows.push({ percent, resetsAt: parseReset(resetsAt), weekly });
+  };
+  for (const [window, weekly] of [[usage.five_hour, false], [usage.seven_day, true], [usage.seven_day_opus, true], [usage.seven_day_sonnet, true]] as const) {
+    if (isRecord(window)) add(window.utilization, window.resets_at, weekly);
   }
   for (const limit of Array.isArray(usage.limits) ? usage.limits : []) {
     if (!isRecord(limit) || limit.is_active === false) continue;
-    const percent = typeof limit.percent === "number" ? limit.percent : limit.utilization;
-    if (typeof percent !== "number" || !Number.isFinite(percent) || percent < SPENT_PERCENT) continue;
     const kind = typeof limit.kind === "string" ? limit.kind.toLowerCase() : "";
-    spent.push({ resetsAt: parseReset(limit.resets_at), weekly: kind !== "session" && kind !== "five_hour" });
+    add(typeof limit.percent === "number" ? limit.percent : limit.utilization, limit.resets_at, kind !== "session" && kind !== "five_hour");
   }
-  const resets = spent.map((s) => s.resetsAt).filter((at): at is number => at !== null);
+  const full = windows.filter((w) => w.percent >= FULL_PERCENT);
+  const spent = full.length > 0 ? full : windows.filter((w) => !w.weekly && w.percent >= SESSION_REFUSES_PERCENT);
+  const resets = spent.map((w) => w.resetsAt).filter((at): at is number => at !== null);
   return {
     exhausted: spent.length > 0,
     resetsAt: resets.length > 0 ? Math.max(...resets) : null,
-    kind: spent.some((s) => s.weekly) ? "weekly" : "session",
+    kind: spent.some((w) => w.weekly) ? "weekly" : "session",
   };
 }
 

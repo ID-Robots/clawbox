@@ -55,11 +55,6 @@ vi.mock("@/lib/openclaw-config", async (importOriginal) => ({
   readConfigStrict: vi.fn(async () => h.config),
   restartGateway: vi.fn(async () => { h.restarts += 1; }),
   spawnOpenclawCli: vi.fn(async (args: string[], options: { stdinData?: string } = {}) => fakeCli(args, options.stdinData)),
-  // The box's own resolver (pinned in its suite), over this test's config.
-  openclawSkillsAgentArgs: vi.fn(async () => {
-    const entries = (h.config.agents as { entries?: Record<string, unknown> } | undefined)?.entries;
-    return entries && Object.keys(entries).length > 1 ? ["--agent", "main"] : [];
-  }),
 }));
 
 const H = 3_600_000;
@@ -315,7 +310,8 @@ describe("the chat on the box's Claude accounts (TASK-1260, 2026-10-14)", () => 
   });
 
   it("names the agent on every core verb when the box has more than one — the CLI refuses a mutation without it there", async () => {
-    h.config = { ...h.config, agents: { ...(h.config.agents as Record<string, unknown>), entries: { main: {}, research: {} } } };
+    // core's legacy roster form: `agents.list`.
+    h.config = { ...h.config, agents: { ...(h.config.agents as Record<string, unknown>), list: [{ id: "main" }, { id: "research" }] } };
     gw.startGatewaySwap();
     await twoClaudeAccounts();
     await swap.whenSwapsSettled();

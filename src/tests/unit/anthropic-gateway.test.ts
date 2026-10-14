@@ -68,12 +68,14 @@ function fakeCore() {
     /** Ids whose paste core refuses, whatever `refusePaste` says. */
     refusePasteOf: new Set<string>(),
     refuseOrder: false,
+    /** The `--agent` arguments openclaw.json's roster calls for; null: no `main` in it. */
+    agent: [] as string[] | null,
     /** `paste-token` wrote the profile, then could not tell the running gateway and exited non-zero. */
     pasteExitsAfterWrite: false,
   };
   gw._setGatewayDepsForTests({
     absent: () => false,
-    chat: async () => (core.chatOnClaude === null ? null : { onAnthropic: core.chatOnClaude, configOrder: core.configOrder !== null }),
+    chat: async () => (core.chatOnClaude === null ? null : { onAnthropic: core.chatOnClaude, configOrder: core.configOrder !== null, agent: core.agent }),
     read: () => core.readable
       ? {
         kind: "present",
@@ -334,6 +336,46 @@ describe("what the move needs, and what can wait for the keeper", () => {
     expect(core.order).toEqual(["anthropic:default"]);
   });
 
+  it("keeps the chat named on the account the order really leads with while the active one's write is owed", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    // Personal's token is renewed elsewhere and core will not take it; the owner puts Personal first.
+    await pool.replaceCredential(personal.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-personal-v2"), email: "me@example.com" });
+    core.refusePasteOf.add(p(personal.id));
+    core.refuseOrder = true;
+    await pool.reorderAccounts([personal.id, work.id]);
+    await swap.whenSwapsSettled();
+    // Not on the new active account yet — but on the pool, not "does not use these accounts".
+    expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: work.id, pending: true });
+    expect((await pool.describePool()).gateway.following).toBe(true);
+  });
+
+  it("says the chat is off the accounts as soon as they are out, even with the order's cleanup still owed", async () => {
+    const core = fakeCore();
+    await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    core.chatOnClaude = false;
+    core.refuseOrder = true;
+    expect(await gw.keepGatewayMirror()).toBe("synced");
+    expect([...core.profiles.keys()]).toEqual(["anthropic:default"]);
+    expect((await pool.describePool()).gateway.following).toBe(false);
+    // The keeper finishes it.
+    core.refuseOrder = false;
+    await gw.syncGatewayNow();
+    expect(core.order).toBeNull();
+  });
+
+  it("writes nothing to a roster without a `main` agent, and says so instead of looping", async () => {
+    const core = fakeCore();
+    core.agent = null;
+    await twoClaudeAccounts();
+    expect(await gw.syncGatewayNow()).toEqual({ status: "skipped", code: "agent_unsupported", count: null });
+    expect(core.pastes).toEqual([]);
+    expect(await gw.putChatOnPool(async () => ({ ok: true }))).toMatchObject({ ok: false, code: "agent_unsupported", status: 409 });
+  });
+
   it("leaves an order the owner had in openclaw.json before the pool came", async () => {
     const core = fakeCore();
     core.configOrder = ["anthropic:default"];
@@ -408,6 +450,19 @@ describe("what core saw", () => {
     core.failures[p(personal.id)] = { ...rateLimited(now - 60_000), cooldownReason: null, cooldownUntil: null };
     expect(await gw.noteGatewayCooldowns(now)).toBe(0);
     expect((await pool.readAccounts()).every((a) => a.status === "ok")).toBe(true);
+  });
+
+  it("reads a newer rate limit over a refusal left on record from an earlier failure", async () => {
+    const core = fakeCore();
+    const { work } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    const resetsAt = Date.now() + 2 * H;
+    core.usage.set("sk-ant-oat01-work", spent(resetsAt));
+    const now = Date.now();
+    // An old permanent-auth disable (over), then a real rate limit 45 s ago.
+    core.failures[p(work.id)] = { ...rateLimited(now - 45_000, now - 15_000), disabledUntil: now - 60 * 60_000, disabledReason: "auth_permanent" };
+    expect(await gw.noteGatewayCooldowns(now)).toBe(1);
+    expect((await pool.readAccounts()).find((a) => a.id === work.id)).toMatchObject({ status: "limited", limitedUntil: resetsAt });
   });
 
   it("leaves an account in when Anthropic says none of its windows is spent — a throttle core's own cooldown covers", async () => {

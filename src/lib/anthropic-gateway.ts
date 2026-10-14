@@ -70,7 +70,7 @@
  */
 
 import { DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store";
-import { gatewayIsAbsent, openclawIsAbsent, openclawSkillsAgentArgs, readConfigStrict, runOpenclawConfigUnset, spawnOpenclawCli } from "@/lib/openclaw-config";
+import { gatewayIsAbsent, openclawIsAbsent, readConfigStrict, runOpenclawConfigUnset, spawnOpenclawCli } from "@/lib/openclaw-config";
 import { gatewayWsCall } from "@/lib/openclaw-gateway-ws";
 import { processStore } from "@/lib/process-store";
 import { createSerialLock, type SerialLock } from "@/lib/serial-lock";
@@ -109,15 +109,15 @@ export interface GatewayDeps {
    * an Anthropic one, and is there a CONFIG `auth.order.anthropic`. Null when
    * the file could not be read.
    */
-  chat: () => Promise<{ onAnthropic: boolean; configOrder: boolean } | null>;
+  chat: () => Promise<ChatConfig | null>;
   /** What core's store holds for Anthropic: the profiles, the stored order, the failures. */
   read: () => GatewayProviderAuthRead;
-  /** Core's writer: one `token` profile, the access token on stdin. */
-  paste: (profileId: string, token: { access: string; expires: number | null }) => Promise<void>;
+  /** Core's writer: one `token` profile, the access token on stdin. `agent`: the `--agent` arguments (ChatConfig). */
+  paste: (profileId: string, token: { access: string; expires: number | null }, agent: readonly string[]) => Promise<void>;
   /** Core's removal of one profile, its order and config entries. */
-  logout: (profileId: string) => Promise<void>;
+  logout: (profileId: string, agent: readonly string[]) => Promise<void>;
   /** Core's stored order for Anthropic; an empty list clears it. */
-  order: (profileIds: readonly string[]) => Promise<void>;
+  order: (profileIds: readonly string[], agent: readonly string[]) => Promise<void>;
   /** Drop openclaw.json's `auth.order.anthropic` — only ever one the pool's own pastes created. */
   unsetConfigOrder: () => Promise<void>;
   /** Anthropic's usage windows for one account. Null: could not be asked. */
@@ -128,13 +128,42 @@ export interface GatewayDeps {
 /** A Jetson CLI cold start is 5-14 s; a busy one is given room. */
 const CLI_TIMEOUT_MS = 60_000;
 
+/** openclaw.json, as far as this module reads it. */
+export interface ChatConfig {
+  /** The chat's primary model is an Anthropic one. */
+  onAnthropic: boolean;
+  /** There is a CONFIG `auth.order.anthropic`. */
+  configOrder: boolean;
+  /**
+   * The `--agent` arguments every `models auth` verb needs to write the store
+   * this module reads — the `main` agent's — or null when the CLI's agent is
+   * not `main` (a roster without it), which this module does not write.
+   */
+  agent: string[] | null;
+}
+
 /**
- * Every `models auth` verb names the agent when the config holds more than one
- * — the CLI refuses a mutation without it there (`resolveSoleAgentId`) — and
- * the same one the store reader reads (`main`).
+ * The agent roster as core reads it (`readAgentRosterProperty`): the keys of
+ * `agents.entries` when that is set, else the ids of `agents.list`; none at
+ * all is core's implicit `main`. A mutation with several agents and no
+ * `--agent` is refused (`resolveSoleAgentId`), and a sole agent other than
+ * `main` is written to ITS store while this module reads `main`'s.
  */
-async function modelsAuth(args: string[], stdinData?: string): Promise<void> {
-  await spawnOpenclawCli(["models", "auth", ...args, ...await openclawSkillsAgentArgs()], {
+function agentArgsOf(agents: unknown): string[] | null {
+  const a = agents && typeof agents === "object" ? (agents as Record<string, unknown>) : {};
+  const entries = a.entries;
+  const ids = entries && typeof entries === "object" && !Array.isArray(entries)
+    ? Object.keys(entries)
+    : Array.isArray(a.list)
+      ? a.list.flatMap((entry) => (entry && typeof entry === "object" && typeof (entry as { id?: unknown }).id === "string" ? [(entry as { id: string }).id] : []))
+      : [];
+  if (ids.length === 0) return [];
+  if (!ids.includes("main")) return null;
+  return ids.length > 1 ? ["--agent", "main"] : [];
+}
+
+async function modelsAuth(args: string[], agent: readonly string[], stdinData?: string): Promise<void> {
+  await spawnOpenclawCli(["models", "auth", ...args, ...agent], {
     timeoutMs: CLI_TIMEOUT_MS,
     ...(stdinData !== undefined ? { stdinData } : {}),
   });
@@ -150,21 +179,22 @@ const defaultDeps: GatewayDeps = {
       return {
         onAnthropic: typeof primary === "string" && primary.trim().toLowerCase().startsWith(`${PROVIDER}/`),
         configOrder: !!order && typeof order === "object" && Object.hasOwn(order, PROVIDER),
+        agent: agentArgsOf(config.agents),
       };
     } catch {
       return null;
     }
   },
   read: () => readGatewayProviderAuth(PROVIDER),
-  paste: async (profileId, token) => {
+  paste: async (profileId, token, agent) => {
     const args = ["paste-token", "--provider", PROVIDER, "--profile-id", profileId];
     // Core stores the end itself, so it stops offering the profile at the
     // moment the token stops working — whatever the keeper is doing.
     if (token.expires !== null) args.push("--expires-in", `${Math.max(60, Math.floor((token.expires - Date.now()) / 1000))}s`);
-    await modelsAuth(args, `${token.access}\n`);
+    await modelsAuth(args, agent, `${token.access}\n`);
   },
-  logout: (profileId) => modelsAuth(["logout", profileId, "--yes"]),
-  order: (profileIds) => modelsAuth(profileIds.length > 0 ? ["order", "set", "--provider", PROVIDER, ...profileIds] : ["order", "clear", "--provider", PROVIDER]),
+  logout: (profileId, agent) => modelsAuth(["logout", profileId, "--yes"], agent),
+  order: (profileIds, agent) => modelsAuth(profileIds.length > 0 ? ["order", "set", "--provider", PROVIDER, ...profileIds] : ["order", "clear", "--provider", PROVIDER], agent),
   unsetConfigOrder: () => runOpenclawConfigUnset(`auth.order.${PROVIDER}`),
   usage: (access) => fetchAnthropicUsage(access),
   // The in-process socket only: a gateway that is not there is skipped this
@@ -274,10 +304,15 @@ async function readOrderMarker(): Promise<OrderMarker> {
   return { stored: v.stored === true, config: v.config === true };
 }
 
+/** Never throws: a marker that could not be written is said, and never fails a move that landed. */
 async function writeOrderMarker(next: OrderMarker): Promise<void> {
-  const before = await readOrderMarker();
-  if (before.stored === next.stored && before.config === next.config) return;
-  await configSet(ORDER_MARKER_KEY, next.stored || next.config ? { ...next } : undefined);
+  try {
+    const before = await readOrderMarker();
+    if (before.stored === next.stored && before.config === next.config) return;
+    await configSet(ORDER_MARKER_KEY, next.stored || next.config ? { ...next } : undefined);
+  } catch (err) {
+    console.error("[anthropic-gateway] could not record which account orders the pool wrote:", err instanceof Error ? err.message : err);
+  }
 }
 
 /**
@@ -303,6 +338,11 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
   // Unknown is not "off": a config that could not be read must not take the
   // chat's accounts away.
   if (chat === null) return outcome("failed", "config_unreadable");
+  if (chat.agent === null) {
+    console.error("[anthropic-gateway] the gateway's agent roster has no `main` agent; the pool's accounts are not written to another agent's store");
+    return outcome("skipped", "agent_unsupported");
+  }
+  const agent = chat.agent;
   let changed = 0;
   // What a CLI call answered is not the proof — `paste-token` ends by telling
   // the running gateway, and that can fail over a profile it did write. The
@@ -320,7 +360,7 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
 
   if (!(opts.force || chat.onAnthropic) || wanted.length === 0) {
     const why = !(opts.force || chat.onAnthropic) ? "not_subscription" : pool.accounts.some((a) => a.kind === "oauth") ? "no_account" : "not_transferable";
-    return takeOut(d, ours, pool, why, attempt, () => changed);
+    return takeOut(d, ours, pool, why, agent, attempt, () => changed);
   }
 
   // Every account's current access token, in where it is not already.
@@ -335,11 +375,19 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
     const fingerprint = tokenFingerprint(token.access);
     tokens.set(id, { fingerprint, expires: token.expires });
     if (ours.some((p) => p.profileId === id && p.fingerprint === fingerprint)) continue;
-    if (await attempt(`account ${account.id}'s token`, () => d.paste(id, token))) pasted += 1;
+    if (await attempt(`account ${account.id}'s token`, () => d.paste(id, token, agent))) pasted += 1;
+  }
+  // What the pool wrote, recorded the moment it is seen, so taking the pool
+  // out later undoes exactly that: a CONFIG order core's paste created beside
+  // a sign-in of another mode (there was none before).
+  const marker = await readOrderMarker();
+  if (!marker.config && !chat.configOrder && pasted > 0 && (await d.chat())?.configOrder === true) {
+    marker.config = true;
+    await writeOrderMarker(marker);
   }
   // Out: accounts that left the pool or can no longer answer (needs the owner).
   const unwanted = ours.filter((p) => !wanted.some((a) => poolProfileId(a.id) === p.profileId));
-  for (const profile of unwanted) await attempt(`taking ${profile.profileId} out`, () => d.logout(profile.profileId));
+  for (const profile of unwanted) await attempt(`taking ${profile.profileId} out`, () => d.logout(profile.profileId, agent));
 
   // Read back. A profile still holding an older token stays in the order —
   // that token answers until it ends, and an explicit order is core's whole
@@ -360,7 +408,7 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
   const order = gatewayOrder(pool, held, otherProfiles(after), now);
   let final = after;
   if (!sameList(after.order, order)) {
-    await attempt("the account order", () => d.order(order));
+    await attempt("the account order", () => d.order(order, agent));
     const reread = d.read();
     if (reread.kind !== "present") return outcome("failed", "write_lost", changed);
     final = reread;
@@ -368,10 +416,7 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
   const orderLanded = sameList(final.order ?? (order.length === 0 ? [] : null), order);
   if (!orderLanded) owed.push("order");
 
-  // What the pool wrote, so taking it out later undoes exactly that.
-  const marker = await readOrderMarker();
-  const configCreated = !chat.configOrder && pasted > 0 && (await d.chat())?.configOrder === true;
-  await writeOrderMarker({ stored: marker.stored || orderLanded, config: marker.config || configCreated });
+  if (orderLanded && !marker.stored) await writeOrderMarker({ ...marker, stored: true });
 
   // The account the gateway must lead with: the active one, when the gateway
   // can hold it; else the first it holds (an API key or the Terminal sign-in
@@ -384,16 +429,23 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
   const targetHeld = targetId ? final.profiles.find((p) => p.profileId === targetId) : undefined;
   const targetToken = targetId ? tokens.get(targetId) : undefined;
   const leadOk = !!targetHeld && final.order?.[0] === targetId && (!targetToken || targetHeld.fingerprint === targetToken.fingerprint);
-  if (target && targetHeld?.fingerprint) {
+  // The mirror names the pool account core's stored order actually leads
+  // with — the target once its write and the order have landed — `pending`
+  // until they have. Null only when the gateway holds none of the pool's
+  // accounts at all.
+  const leadingId = (final.order ?? []).find((id) => held.has(id)) ?? (targetHeld ? targetId : null) ?? [...held][0] ?? null;
+  const leading = leadingId ? pool.accounts.find((a) => poolProfileId(a.id) === leadingId) ?? null : null;
+  const leadingHeld = leadingId ? final.profiles.find((p) => p.profileId === leadingId) : undefined;
+  if (leading && leadingHeld?.fingerprint) {
     const mirror = pool.gateway;
-    const fingerprint = targetHeld.fingerprint;
-    const expiresAt = targetToken?.expires ?? targetHeld.expires;
+    const fingerprint = leadingHeld.fingerprint;
+    const expiresAt = (leadingId === targetId ? targetToken?.expires : tokens.get(leadingId ?? "")?.expires) ?? leadingHeld.expires;
     const pending = !leadOk;
     // When the gateway's order started leading with THIS account: kept while
     // it does, so the card's "since" means what it says. Written only when it
     // changed — the keeper passes every ten minutes.
-    if (!mirror || mirror.accountId !== target.id || mirror.fingerprint !== fingerprint || mirror.expiresAt !== expiresAt || mirror.pending !== pending) {
-      await setGatewayMirror({ accountId: target.id, fingerprint, expiresAt, at: mirror && mirror.accountId === target.id ? mirror.at : now, pending });
+    if (!mirror || mirror.accountId !== leading.id || mirror.fingerprint !== fingerprint || mirror.expiresAt !== expiresAt || mirror.pending !== pending) {
+      await setGatewayMirror({ accountId: leading.id, fingerprint, expiresAt, at: mirror && mirror.accountId === leading.id ? mirror.at : now, pending });
     }
   } else if (pool.gateway) {
     await setGatewayMirror(null);
@@ -421,6 +473,7 @@ async function takeOut(
   ours: readonly { profileId: string }[],
   pool: PoolState,
   why: string,
+  agent: readonly string[],
   attempt: (what: string, work: () => Promise<void>) => Promise<boolean>,
   changed: () => number,
 ): Promise<SwapConsumerOutcome> {
@@ -429,10 +482,10 @@ async function takeOut(
     if (pool.gateway) await setGatewayMirror(null);
     return outcome("skipped", why);
   }
-  for (const profile of ours) await attempt(`taking ${profile.profileId} out`, () => d.logout(profile.profileId));
+  for (const profile of ours) await attempt(`taking ${profile.profileId} out`, () => d.logout(profile.profileId, agent));
   if (marker.stored) {
     const now = d.read();
-    if (now.kind === "present" && now.order !== null) await attempt("clearing the account order", () => d.order([]));
+    if (now.kind === "present" && now.order !== null) await attempt("clearing the account order", () => d.order([], agent));
   }
   if (marker.config) await attempt("openclaw.json's account order", () => d.unsetConfigOrder());
   const left = d.read();
@@ -441,8 +494,14 @@ async function takeOut(
   const storedLeft = marker.stored && left.kind === "present" && left.order !== null;
   const configLeft = marker.config && (await d.chat())?.configOrder !== false;
   await writeOrderMarker({ stored: storedLeft, config: configLeft });
-  if (owed.length > 0 || storedLeft || configLeft) return outcome("failed", "write_failed", changed());
+  if (owed.length > 0) return outcome("failed", "write_failed", changed());
+  // The accounts are out: the chat no longer runs on them, whatever is left
+  // of the orders, which the marker keeps for the keeper to finish.
   if (pool.gateway) await setGatewayMirror(null);
+  if (storedLeft || configLeft) {
+    console.error("[anthropic-gateway] the pool's accounts are out of the gateway; the account order it wrote is still owed");
+    return outcome("skipped", "order_owed", changed() > 0 ? changed() : null);
+  }
   if (changed() > 0) console.error(`[anthropic-gateway] the pool's accounts are out of the gateway (${why})`);
   return outcome("skipped", why, changed() > 0 ? changed() : null);
 }
@@ -470,7 +529,7 @@ export async function syncGatewayNow(): Promise<SwapConsumerOutcome> {
 
 export type UseForChatResult =
   | { ok: true; outcome: SwapConsumerOutcome }
-  | { ok: false; code: "no_gateway" | "no_claude_account" | "gateway_write_failed" | "model_not_set"; error: string; status: number };
+  | { ok: false; code: "no_gateway" | "no_claude_account" | "agent_unsupported" | "gateway_write_failed" | "model_not_set"; error: string; status: number };
 
 /**
  * The accounts card's "Use these accounts for the chat too": the pool's Claude
@@ -488,6 +547,9 @@ export async function putChatOnPool(setModel: () => Promise<{ ok: true } | { ok:
       return { ok: false, code: "no_claude_account", error: "No Anthropic subscription account on this box can answer: the chat can only use one signed in here.", status: 409 } as const;
     }
     const synced = await syncLocked({ force: true });
+    if (synced.code === "agent_unsupported") {
+      return { ok: false, code: "agent_unsupported", error: "This box's assistant runs as an agent other than main, which the accounts cannot be given to from here.", status: 409 } as const;
+    }
     if (synced.status !== "ok" && synced.code !== "not_transferable") {
       return { ok: false, code: "gateway_write_failed", error: "The Anthropic accounts could not be given to the chat. See the box's log.", status: 502 } as const;
     }
@@ -507,18 +569,40 @@ export async function putChatOnPool(setModel: () => Promise<{ ok: true } | { ok:
 
 /**
  * Core's failure state for a pool profile, as the pool reads it: a limit, a
- * refused credential, or nothing worth acting on. Read from the REASON core
- * keeps until the profile's next success, never from whether its window is
- * still running — the first rate limit after a success cools a profile for
- * only 30 seconds, and a look that came later would have missed it.
+ * refused credential, or nothing worth acting on. Read from the REASONS core
+ * keeps until the profile's next success, not only while a window runs — the
+ * first rate limit after a success cools a profile for 30 seconds, and a look
+ * that came later must still see it. A window still running says what core is
+ * doing about the profile now; with every window over, `cooldownReason` —
+ * which core rewrites on every failure that is not a disable — names the
+ * newest failure, ahead of a disable or a block left over from an earlier one.
  */
-function coreFailureOf(failure: ProfileFailureState): { kind: "limit"; limitKind: AnthropicLimitKind; until: number } | { kind: "auth" } | null {
-  if (failure.blockedUntil !== null) return { kind: "limit", limitKind: "session", until: failure.blockedUntil };
-  if (failure.disabledReason === "billing" && failure.disabledUntil !== null) return { kind: "limit", limitKind: "credit", until: failure.disabledUntil };
-  if (failure.disabledReason === "auth_permanent") return { kind: "auth" };
-  if (failure.cooldownReason === "rate_limit" && failure.cooldownUntil !== null) return { kind: "limit", limitKind: "rate", until: failure.cooldownUntil };
-  if (failure.cooldownReason === "auth") return { kind: "auth" };
-  return null;
+function coreFailureOf(failure: ProfileFailureState, now: number): { kind: "limit"; limitKind: AnthropicLimitKind; until: number } | { kind: "auth" } | null {
+  const running = (until: number | null): until is number => until !== null && until > now;
+  const disabled = (until: number) => (failure.disabledReason === "billing"
+    ? { kind: "limit" as const, limitKind: "credit" as const, until }
+    : failure.disabledReason === "auth_permanent" ? { kind: "auth" as const } : null);
+  const cooled = (until: number) => (failure.cooldownReason === "rate_limit"
+    ? { kind: "limit" as const, limitKind: "rate" as const, until }
+    : failure.cooldownReason === "auth" ? { kind: "auth" as const } : null);
+  if (running(failure.blockedUntil)) return { kind: "limit", limitKind: "session", until: failure.blockedUntil };
+  if (running(failure.disabledUntil)) {
+    const seen = disabled(failure.disabledUntil);
+    if (seen) return seen;
+  }
+  if (running(failure.cooldownUntil)) {
+    const seen = cooled(failure.cooldownUntil);
+    if (seen) return seen;
+  }
+  if (failure.cooldownUntil !== null) {
+    const seen = cooled(failure.cooldownUntil);
+    if (seen) return seen;
+  }
+  if (failure.disabledUntil !== null) {
+    const seen = disabled(failure.disabledUntil);
+    if (seen) return seen;
+  }
+  return failure.blockedUntil !== null ? { kind: "limit", limitKind: "session", until: failure.blockedUntil } : null;
 }
 
 /**
@@ -543,7 +627,7 @@ async function noteCooldownsLocked(now: number): Promise<number> {
     const failure = store.failures[profileId];
     const at = failure?.lastFailureAt ?? null;
     if (!failure || at === null || at <= (seenBy.get(profileId) ?? now - FIRST_LOOK_BACK_MS)) continue;
-    const seen = coreFailureOf(failure);
+    const seen = coreFailureOf(failure, now);
     if (!seen) continue;
     try {
       if (seen.kind === "auth") {
@@ -627,7 +711,7 @@ export function keepGatewayMirror(): Promise<KeeperResult> {
     const state = runtime();
     if (state.keeperFailures >= 2 && now - state.keeperFailedAt < Math.min(KEEPER_MS * 2 ** (state.keeperFailures - 1), MAX_KEEPER_BACKOFF_MS)) return "failed";
     const result = await syncLocked();
-    const failing = result.status === "failed";
+    const failing = result.status === "failed" || result.code === "order_owed";
     state.keeperFailures = failing ? state.keeperFailures + 1 : 0;
     state.keeperFailedAt = failing ? now : 0;
     if (result.status === "failed") return "failed";
