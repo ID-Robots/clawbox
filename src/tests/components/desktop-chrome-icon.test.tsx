@@ -147,6 +147,7 @@ describe("the Google Chrome icon in Monitor Mode", () => {
     await waitFor(() => expect(launches()).toEqual([{}]));
     await wait(50);
     expect(screen.queryByText(/Google Chrome is not installed/)).toBeNull();
+    expect(windowOpen).not.toHaveBeenCalled();
   });
 
   it("does not call a Chrome installed since the page loaded 'not installed' when it fails to start", async () => {
