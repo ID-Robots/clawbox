@@ -656,6 +656,16 @@ an HTML file from the run's working folder (`CLAWBOX_RUN_DIR`): the ONLY
 `file://` the browser route accepts, and only while that run is the active
 one, realpath-checked on both sides.
 
+A run's captures come only from the tab the run itself opened. With no live
+session `browser_view_local` launches straight into a new tab at the file;
+otherwise it navigates the run's own tab. A reply for any page but the
+requested file archives nothing and fails with `CONFLICT`. `browser_screenshot`
+with no tab open is refused (`NOT_FOUND`, open a page first) instead of
+launching a blank one. On the route side, a desktop session's tab is raised
+before every capture, and a tab that was closed answers 410 and drops the
+session. A request carrying `codingRunId` may only use a session launched
+with that same id.
+
 ### Media, inside a coding-agent run only
 `generate_image` · `generate_audio`
 

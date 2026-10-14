@@ -243,23 +243,33 @@ async function browserCall(
   return apiPost<BrowserReply>("/setup-api/browser", { action, ...params, ...(runContext() && /^run-[a-z0-9]{8}$/.test(path.basename(runContext()!.artifactsDir)) ? { codingRunId: path.basename(runContext()!.artifactsDir) } : {}) }, { timeoutMs, rules });
 }
 
-/** Attach to the live window, reusing the session when it is still alive. */
-async function ensureSession(url?: string, opening = false): Promise<string> {
-  if (sessionId) {
-    try {
-      const alive = await browserCall("screenshot", { sessionId });
-      if (!alive.error) return sessionId;
-    } catch {
-      // Session died with the window — fall through and launch a new one.
-    }
-    sessionId = null;
+/**
+ * The session from an earlier call, while its tab is still open; else null.
+ *
+ * The route answers 410 for a desktop tab that was closed (by the owner, or by
+ * the page itself) and drops the session, so a dead tab is never mistaken for
+ * a live one — and never replaced by whatever tab is in front now.
+ */
+async function liveSession(): Promise<string | null> {
+  if (!sessionId) return null;
+  try {
+    const alive = await browserCall("screenshot", { sessionId });
+    if (!alive.error) return sessionId;
+  } catch {
+    // Session died with its tab or the window.
   }
+  sessionId = null;
+  return null;
+}
+
+/** Open a new tab of this caller's own, at `url` when one is given. */
+async function launchSession(url?: string, opening = false, rules: ErrorRule[] = launchRules()): Promise<string> {
   // A fresh launch may land on the other Chromium — the desktop window can
   // have gone away, or come back — so the next reply says which one again.
   statedBrowser = null;
   let reply: BrowserReply;
   try {
-    reply = await browserCall("launch", { ...(url ? { url } : {}) }, launchRules());
+    reply = await browserCall("launch", { ...(url ? { url } : {}) }, rules);
   } catch (err) {
     // A mapped refusal is the device's real answer and is the ONLY thing the
     // agent can act on. Only a genuine "nothing answered" becomes CDP_DOWN.
@@ -269,6 +279,54 @@ async function ensureSession(url?: string, opening = false): Promise<string> {
   if (!reply.sessionId) throw CDP_DOWN(opening);
   sessionId = reply.sessionId;
   return sessionId;
+}
+
+/** Attach to the live window, reusing the session when it is still alive. */
+async function ensureSession(url?: string, opening = false): Promise<string> {
+  return (await liveSession()) ?? launchSession(url, opening);
+}
+
+/**
+ * Inside a run, browser_screenshot captures the tab THIS run opened and
+ * nothing else — so with none open there is nothing of the run's to show.
+ * Launching a blank tab to answer would hand back about:blank as "the page".
+ */
+const NO_RUN_PAGE = () =>
+  new ToolError(
+    "NOT_FOUND",
+    "This run has no page open in the browser, so there is nothing of its own to capture.",
+    "Open a page first: browser_view_local for a file in your working folder, or browser_open on the PREVIEW_URL your preview prints. Then call browser_screenshot.",
+  );
+
+/**
+ * The address the route opens for a file in the working folder: its real
+ * path, the same resolution resolveFileNavUrl in the browser route makes.
+ */
+function realFileUrl(abs: string): string {
+  let real = path.resolve(abs);
+  try {
+    real = fs.realpathSync(abs);
+  } catch {
+    // Not there: the route refuses it before anything is shown.
+  }
+  return pathToFileURL(real).href;
+}
+
+/**
+ * Whether the page the browser answered with is the file that was asked for.
+ * Query and fragment are the page's own to change (a hash router, a
+ * replaceState); the file is the address without them.
+ */
+function showsFile(replyUrl: string | undefined, fileUrl: string): boolean {
+  if (!replyUrl) return false;
+  try {
+    const shown = new URL(replyUrl);
+    shown.search = "";
+    shown.hash = "";
+    return shown.href === fileUrl;
+  } catch {
+    return false;
+  }
 }
 
 async function act(action: string, params: Record<string, unknown> = {}): Promise<BrowserReply> {
@@ -368,8 +426,28 @@ export function registerBrowserTools(reg: Registrar): void {
       async ({ path: given }: { path: string }) => {
         const abs = path.isAbsolute(given) ? given : path.join(run.workingDir, given);
         const fileUrl = pathToFileURL(abs).href;
-        const id = await ensureSession();
-        const reply = await browserCall("navigate", { sessionId: id, url: fileUrl, ...describeParam() }, viewLocalRules);
+        // The file opens in a tab of this run's own: straight into a new one
+        // when there is no live session — never a blank launch first, which
+        // left the desktop's foremost tab as the page in question — or in the
+        // run's existing tab otherwise.
+        const live = await liveSession();
+        let reply: BrowserReply;
+        if (live) {
+          reply = await browserCall("navigate", { sessionId: live, url: fileUrl, ...describeParam() }, viewLocalRules);
+        } else {
+          const id = await launchSession(fileUrl, false, [...viewLocalRules, ...launchRules()]);
+          reply = await browserCall("screenshot", { sessionId: id, ...describeParam() });
+        }
+        // What is archived is the page the run asked for or nothing: a shot
+        // of some other page, reported as the run's own work, is worse than
+        // none at all.
+        if (!showsFile(reply.url, realFileUrl(abs))) {
+          throw new ToolError(
+            "CONFLICT",
+            `The browser showed a different page (${reply.url || "no address"}) instead of ${given}, so no screenshot was kept.`,
+            "Call browser_view_local once more. If the same thing happens, the file itself sends the browser elsewhere; open the address it goes to instead.",
+          );
+        }
         return pageResult(`Viewing ${given}.`, reply);
       },
     );
@@ -465,7 +543,12 @@ export function registerBrowserTools(reg: Registrar): void {
     "Take a picture of the page loaded in the desktop browser, to see what it says before acting on it.",
     {},
     { editions: ["openclaw", "hermes"], family: "browser", readOnly: true },
-    async () => pageResult("The page currently in the browser.", await act("screenshot", describeParam())),
+    async () => {
+      if (!runContext()) return pageResult("The page currently in the browser.", await act("screenshot", describeParam()));
+      const id = await liveSession();
+      if (!id) throw NO_RUN_PAGE();
+      return pageResult("The page currently in the browser.", await browserCall("screenshot", { sessionId: id, ...describeParam() }));
+    },
   );
 
   reg.tool(

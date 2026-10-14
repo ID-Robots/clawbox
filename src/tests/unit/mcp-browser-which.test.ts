@@ -32,6 +32,8 @@ type Which = "desktop" | "headless" | undefined;
 
 /** What the route answers with, one browser at a time. */
 let answering: Which = "desktop";
+/** The address the session's tab is on: the last one a launch or navigate named. */
+let at = "https://example.test/";
 
 /** A fresh module each time: the stated browser is module state, as it is per session. */
 async function browserTools(): Promise<CaptureHarness> {
@@ -49,11 +51,13 @@ beforeEach(() => {
   delete process.env.CLAWBOX_RUN_DIR;
   delete process.env.CLAWBOX_RUN_ARTIFACTS_DIR;
   answering = "desktop";
-  apiPost.mockImplementation(async (_route: string, body: { action: string }) => {
+  at = "https://example.test/";
+  apiPost.mockImplementation(async (_route: string, body: { action: string; url?: string }) => {
     const which = answering ? { browser: answering } : {};
+    if (body.url) at = body.url;
     if (body.action === "launch") return { sessionId: "browser-1", ...which };
     if (body.action === "close") return { ok: true };
-    return { url: "https://example.test/", title: "Example", description: "A page.", ...which };
+    return { url: at, title: "Example", description: "A page.", ...which };
   });
 });
 

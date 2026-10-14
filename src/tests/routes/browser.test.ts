@@ -15,6 +15,7 @@ const mockPage = vi.hoisted(() => ({
   title: vi.fn().mockResolvedValue("Google"),
   screenshot: vi.fn().mockResolvedValue(Buffer.from("PNG")),
   bringToFront: vi.fn().mockResolvedValue(undefined),
+  isClosed: vi.fn().mockReturnValue(false),
   mouse: {
     click: vi.fn().mockResolvedValue(undefined),
     dblclick: vi.fn().mockResolvedValue(undefined),
@@ -188,6 +189,7 @@ describe("/setup-api/browser", () => {
     mockPage.title.mockResolvedValue("Google");
     mockPage.screenshot.mockResolvedValue(Buffer.from("PNG"));
     mockPage.bringToFront.mockResolvedValue(undefined);
+    mockPage.isClosed.mockReturnValue(false);
     mockPage.mouse.click.mockResolvedValue(undefined);
     mockPage.mouse.dblclick.mockResolvedValue(undefined);
     mockPage.mouse.move.mockResolvedValue(undefined);

@@ -129,6 +129,10 @@ function instructionsFor(edition: Ed, profile: Profile): string {
     // injection guard.
     return [
       "These tools drive the Chromium on the ClawBox this run executes on. Use browser_view_local to check a page you built in your working folder: screenshots are archived to the run's evidence folder and come back to you as a written description, because your model cannot see images.",
+      // The capture is of the run's own tab only (mcp/tools/browser.ts), so a
+      // browser_screenshot before anything is open is refused: said up front,
+      // that is a step the run does not spend finding out.
+      "Each page opens in a tab of this run's own, and only that tab is ever captured: open one with browser_view_local or browser_open before calling browser_screenshot.",
       // Named only where they are registered: the owner's two switches decide,
       // and describing a tool this run does not have is how a step is wasted.
       "Where generate_image and generate_audio are listed, they are how this device draws a picture and speaks a line into your project. Both spend something of the owner's, so use them for the few assets that carry the work; a refusal that names an allowance or a busy voice is an answer, not a fault.",

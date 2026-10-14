@@ -93,10 +93,16 @@ describe("waiting longer than the backend", () => {
   it("gives a described capture the long timeout and a plain one the short", async () => {
     const h = browserTools();
     await h.call("browser_close");
+    // Inside a run a screenshot is of the run's own tab, so one is opened first.
+    expect((await h.call("browser_open", { url: "https://example.test/" })).isError).toBe(false);
     expect((await h.call("browser_screenshot")).isError).toBe(false);
     const described = postsTo("/setup-api/browser", (b) => b.action === "screenshot" && b.describe === true);
-    expect(described).toHaveLength(1);
-    expect(described[0][1]?.timeoutMs).toBe(DESCRIBE_CALL_TIMEOUT_MS);
+    expect(described).toHaveLength(2);
+    expect(described.every(([, options]) => options?.timeoutMs === DESCRIBE_CALL_TIMEOUT_MS)).toBe(true);
+    // The liveness check before the screenshot is a plain capture.
+    const plain = postsTo("/setup-api/browser", (b) => b.action === "screenshot" && b.describe !== true);
+    expect(plain).toHaveLength(1);
+    expect(plain[0][1]?.timeoutMs).toBeLessThan(DESCRIBE_CALL_TIMEOUT_MS);
     const launch = postsTo("/setup-api/browser", (b) => b.action === "launch");
     expect(launch).toHaveLength(1);
     expect(launch[0][1]?.timeoutMs).toBeLessThan(DESCRIBE_CALL_TIMEOUT_MS);

@@ -11,7 +11,7 @@ import fs from "fs";
 import { fileURLToPath, pathToFileURL } from "url";
 import { activeRunDirectory, activeRunId, getRun, getRealBrowser } from "@/lib/coding-agent";
 import type { BrowserKind } from "@/lib/browser-sessions";
-import { closeSession, getSession, openSession, sessionCount, sweepIdle, touchSession } from "@/lib/browser-sessions";
+import { closeSession, dropSession, getSession, openSession, sessionCount, sweepIdle, touchSession } from "@/lib/browser-sessions";
 import { getBrowserStartUrl, writeBrowserLaunchEnv } from "@/lib/browser-setup";
 import { cdpEndpoint, readDesktopBrowserConfig, type DesktopBrowserConfig } from "@/lib/desktop-browser-config";
 import { findBrowserOnPortPids, findClawboxBrowserPids } from "@/lib/process-match";
@@ -428,6 +428,37 @@ class BrowserUnavailableError extends Error {
   }
 }
 
+/** The session's own tab is gone: answered 410, the session already dropped. */
+class BrowserTabClosedError extends Error {
+  constructor() {
+    super("Browser tab was closed");
+    this.name = "BrowserTabClosedError";
+  }
+}
+
+/**
+ * Put the session's OWN tab in front before it is captured.
+ *
+ * The desktop browser is the owner's too, and its foremost tab can be anything
+ * they are reading. A capture is only ever taken of the page the session
+ * opened — and a tab the owner (or the page itself) closed is not quietly
+ * replaced by whatever is in front now: the session is dropped and the caller
+ * is told, so it opens a new tab instead of reporting a page it never opened.
+ * The headless browser has nobody else's tabs to raise its page above.
+ */
+async function frontSessionTab(
+  page: import("playwright").Page,
+  sessionId: string,
+  kind: BrowserKind,
+): Promise<void> {
+  if (kind !== "desktop") return;
+  if (page.isClosed()) {
+    dropSession(sessionId);
+    throw new BrowserTabClosedError();
+  }
+  await page.bringToFront().catch(() => {});
+}
+
 
 /** Launch a headless Chromium of our own, once, and keep the handle. */
 async function getOwnBrowser(): Promise<import("playwright").Browser> {
@@ -568,7 +599,10 @@ export async function POST(req: Request) {
       // A run gets a page of its OWN. Borrowing `pages().at(-1)` meant a
       // delegated run drove whatever the owner was reading and the idle sweep
       // then closed that tab; with a page per run, closeSessionsForRun ends
-      // exactly what the run opened and never the owner's.
+      // exactly what the run opened and never the owner's. That page — the
+      // one newPage() hands back here — is the ONLY page this session ever
+      // captures: a run's page is never picked from `pages()`, whose last
+      // entry on the desktop is whatever tab happens to be in front.
       const runId = requestedRunId ?? activeRunId();
       // The same goes for every session on the DESKTOP browser, run or not:
       // it is the owner's browser too, so the last page in it may be the tab
@@ -593,8 +627,11 @@ export async function POST(req: Request) {
         await page.goto(nav.url, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => {});
       }
 
-      const id = openSession(page, runId, kind);
+      // `requestedRunId`, not `runId`: a launch tagged with the active run
+      // because it named none is not the run's own — see BrowserSession.
+      const id = openSession(page, runId, kind, requestedRunId ?? null);
 
+      await frontSessionTab(page, id, kind);
       const screenshot = await page.screenshot({ type: "png", timeout: SCREENSHOT_TIMEOUT_MS }).catch(() => null);
 
       return NextResponse.json({
@@ -615,13 +652,19 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "No active browser session" }, { status: 400 });
     }
 
-    if (requestedRunId !== undefined && session.runId !== requestedRunId) {
+    // Against the id the session was LAUNCHED with, not the run it was tagged
+    // with: a page the assistant or the owner opened while this run was live
+    // is not the run's to drive or capture.
+    if (requestedRunId !== undefined && session.codingRunId !== requestedRunId) {
       return NextResponse.json({ error: "Browser session belongs to another run" }, { status: 403 });
     }
     touchSession(sessionId as string);
     const { page } = session;
+    // Every capture below is of this session's own tab, raised first.
+    const front = () => frontSessionTab(page, sessionId as string, session.browser);
 
     const respond = async (skipScreenshot = false) => {
+      if (!skipScreenshot) await front();
       const screenshot = skipScreenshot ? null : await page.screenshot({ type: "png", timeout: SCREENSHOT_TIMEOUT_MS }).catch(() => null);
       return {
         url: page.url(),
@@ -648,6 +691,7 @@ export async function POST(req: Request) {
       // trip scales with upload size (measured on this box: a full PNG frame
       // ~10-30 s, the same frame as a small JPEG ~3 s), while the PNG in
       // `reply` stays what the caller archives into the evidence folder.
+      await front();
       const jpeg = await page.screenshot({ type: "jpeg", quality: 60, timeout: SCREENSHOT_TIMEOUT_MS }).catch(() => null);
       const described = jpeg
         ? await describeImage(jpeg.toString("base64"), undefined, "image/jpeg")
@@ -790,6 +834,10 @@ export async function POST(req: Request) {
     // can fix, and the code is the one every other surface already words.
     if (err instanceof BrowserUnavailableError) {
       return NextResponse.json({ error: err.message, code: err.code }, { status: 400 });
+    }
+    // Gone, not failed: the caller's next step is a new tab, not a retry.
+    if (err instanceof BrowserTabClosedError) {
+      return NextResponse.json({ error: err.message }, { status: 410 });
     }
     const message = err instanceof Error ? err.message : "Internal error";
     return NextResponse.json({ error: message }, { status: 500 });

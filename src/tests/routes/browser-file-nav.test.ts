@@ -26,6 +26,7 @@ const mocks = vi.hoisted(() => ({
     title: vi.fn(async () => "Page"),
     screenshot: vi.fn(async () => Buffer.from("PNG")),
     bringToFront: vi.fn(async () => undefined),
+    isClosed: vi.fn(() => false),
     evaluate: vi.fn(async () => false),
     close: vi.fn(async () => undefined),
   },
