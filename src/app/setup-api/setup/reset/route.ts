@@ -10,6 +10,8 @@ import { resetUpdateState } from "@/lib/updater";
 import { DATA_DIR } from "@/lib/config-store";
 import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
 import { requestSshPolicy } from "@/lib/ssh-policy";
+import { isProvisionedDevice } from "@/lib/device-provisioning";
+import { LEGACY_IMAGE_PASSWORD } from "@/lib/system-password";
 import { CHPASSWD_INPUT_PATH, CHPASSWD_STEP, chpasswdRecord } from "@/lib/chpasswd";
 import { getSystemUsername } from "@/lib/auth";
 import { FACTORY_RESET_CONFIRMATION, isFactoryResetConfirmed } from "@/lib/factory-reset";
@@ -645,6 +647,31 @@ async function wipeHomeUserState(): Promise<string[]> {
 }
 
 /**
+ * The factory reset of boxes set up before per-device provisioning, exactly as
+ * it was: put the legacy image password back so the box matches its
+ * as-flashed state, and leave SSH alone. Best-effort, like the new path.
+ */
+async function resetSystemPasswordToLegacyDefault(): Promise<void> {
+  try {
+    await fs.mkdir(path.dirname(CHPASSWD_INPUT_PATH), { recursive: true });
+    await fs.writeFile(
+      CHPASSWD_INPUT_PATH,
+      chpasswdRecord(getSystemUsername(), LEGACY_IMAGE_PASSWORD),
+      { mode: 0o600 },
+    );
+    await startRootStep(CHPASSWD_STEP, { timeoutMs: 30_000 });
+    console.log("[Reset] System password reset to factory default");
+  } catch (err) {
+    // The input file carries a plaintext credential — scrub it on failure.
+    await fs.unlink(CHPASSWD_INPUT_PATH).catch(() => {});
+    console.error(
+      "[Reset][SECURITY] System password NOT reset — prior password still active until CredentialsStep runs:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+/**
  * Remove the owner's Linux password and switch SSH off, so a factory-reset
  * device is nobody's again. Without this the only thing the reset clears is
  * the `password_configured` flag — the SSH/sudo password stays whatever the
@@ -663,6 +690,13 @@ async function wipeHomeUserState(): Promise<string[]> {
  * directory the wizard then writes its own state into.
  */
 async function removeOwnerPasswordAndSsh(): Promise<void> {
+  // TASK-1572: a box set up before per-device provisioning keeps the factory
+  // reset it always had — the legacy image password back, SSH untouched — so
+  // an update changes nothing for existing owners, their support path included.
+  if (!isProvisionedDevice()) {
+    await resetSystemPasswordToLegacyDefault();
+    return;
+  }
   try {
     await requestSshPolicy("factory_reset");
     console.log("[Reset] Owner password removed and SSH disabled");

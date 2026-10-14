@@ -6,8 +6,8 @@ import path from "path";
 import { LEGACY_IMAGE_PASSWORD } from "@/lib/system-password";
 
 /**
- * SSH off by default — the root side (install.sh::step_ssh_policy and
- * step_ssh_policy_apply). These run the real functions out of install.sh with
+ * SSH off by default on provisioned boxes — the root side
+ * (install.sh::step_ssh_policy). These run the real functions out of install.sh with
  * passwd, runuser, systemctl and usermod replaced by recorders on PATH, and the
  * policy file moved onto a temp tree.
  */
@@ -36,6 +36,11 @@ let project: string;
 let bin: string;
 let policyFile: string;
 let log: string;
+let etcDir: string;
+const markProvisioned = () => {
+  fs.mkdirSync(etcDir, { recursive: true });
+  fs.writeFileSync(path.join(etcDir, "provisioned"), "provisioned\n");
+};
 
 /**
  * passwdStatus: what `passwd -S` reports (P / L / NP / "" for a failure).
@@ -56,12 +61,13 @@ function run(fn: string, opts: { passwdStatus: string; chkpwdExit: number }) {
   }
   const fns = [
     "ssh_owner_password_state", "write_ssh_policy", "read_ssh_policy", "ssh_service_off",
-    "step_ssh_policy", "step_ssh_policy_apply",
+    "step_ssh_policy",
   ].map(shellFunction).join("\n");
   const script = [
     "set -uo pipefail",
     `PATH="${bin}:$PATH"`,
     `PROJECT_DIR="${project}"`,
+    `CLAWBOX_ETC="${etcDir}"`,
     'CLAWBOX_USER="clawbox"',
     `SSH_POLICY_FILE="${policyFile}"`,
     `SSH_LEGACY_IMAGE_PASSWORD="${LEGACY_IMAGE_PASSWORD}"`,
@@ -87,6 +93,7 @@ beforeEach(() => {
   bin = path.join(tmp, "bin");
   policyFile = path.join(tmp, "etc", "ssh-policy");
   log = path.join(tmp, "calls");
+  etcDir = path.join(tmp, "etc");
   fs.mkdirSync(path.join(project, "data"), { recursive: true });
   fs.mkdirSync(bin);
 });
@@ -156,7 +163,16 @@ d("install.sh::step_ssh_policy", () => {
     expect(calls()).toContain("systemctl disable --now ssh.socket");
   });
 
+  it("factory_reset refuses a box set up before per-device provisioning", () => {
+    request("factory_reset");
+    const r = run("step_ssh_policy", OWNER);
+    expect(r.status).toBe(66);
+    expect(calls()).not.toMatch(/usermod|systemctl/);
+    expect(policy()).toBeNull();
+  });
+
   it("factory_reset removes the password hash entirely and switches SSH off", () => {
+    markProvisioned();
     request("factory_reset");
     const r = run("step_ssh_policy", OWNER);
     expect(r.status).toBe(0);
@@ -185,48 +201,11 @@ d("install.sh::step_ssh_policy", () => {
   });
 });
 
-d("install.sh::step_ssh_policy_apply (every update)", () => {
-  it("keeps SSH exactly as it was on an owned box from before the policy", () => {
-    const r = run("step_ssh_policy_apply", OWNER);
-    expect(r.status).toBe(0);
-    expect(policy()).toBe("enabled");
-    expect(calls()).not.toContain("systemctl");
-  });
-
-  it("never takes SSH away when the owner check cannot run, and records nothing", () => {
-    run("step_ssh_policy_apply", UNKNOWN);
-    // No guess becomes permanent: the next update decides again.
-    expect(policy()).toBeNull();
-    expect(calls()).not.toContain("systemctl");
-  });
-
-  it("switches SSH off on an unowned box (legacy password or none)", () => {
-    for (const state of [LEGACY, NO_PASSWORD]) {
-      fs.rmSync(policyFile, { force: true });
-      fs.rmSync(log, { force: true });
-      run("step_ssh_policy_apply", state);
-      expect(policy()).toBe("disabled");
-      expect(calls()).toContain("systemctl disable --now ssh");
-    }
-  });
-
-  it("holds SSH off when the policy says disabled, even for an owner", () => {
-    fs.mkdirSync(path.dirname(policyFile), { recursive: true });
-    fs.writeFileSync(policyFile, "disabled\n");
-    run("step_ssh_policy_apply", OWNER);
-    expect(calls()).toContain("systemctl disable --now ssh");
-  });
-
-  it("holds SSH off when nobody owns the box, even with the policy enabled", () => {
-    fs.mkdirSync(path.dirname(policyFile), { recursive: true });
-    fs.writeFileSync(policyFile, "enabled\n");
-    run("step_ssh_policy_apply", LEGACY);
-    expect(calls()).toContain("systemctl disable --now ssh");
-    expect(policy()).toBe("enabled");
-  });
-
-  it("runs on every update", () => {
+d("updates never touch SSH (TASK-1572)", () => {
+  it("has no per-update SSH migration", () => {
+    expect(INSTALL_SH).not.toContain("step_ssh_policy_apply");
+    expect(INSTALL_SH).not.toContain("ssh_policy_apply");
     const post = shellFunction("step_post_update");
-    expect(post).toContain("optional_step ssh_policy_apply step_ssh_policy_apply");
+    expect(post).not.toMatch(/ssh_policy|ssh_service_off|disable --now ssh/);
   });
 });

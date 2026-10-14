@@ -20,10 +20,11 @@ it, and never turns SSH on while the account still carries it.
 
 ## SSH
 
-SSH is **off by default**. The owner turns it on (and off) in **Settings → System → Remote access
-(SSH)**, re-entering the current password; it cannot be turned on before an owner password exists.
-The choice is kept in `/etc/clawbox/ssh-policy` and re-applied on every update; a box from before
-this setting that already had an owner password keeps SSH as it was. Factory reset turns it off.
+On boxes made with per-device credentials (sticker QR), SSH is **off by default**. The owner turns
+it on (and off) in **Settings → System → Remote access (SSH)**, re-entering the current password; it
+cannot be turned on before an owner password exists. The choice is kept in `/etc/clawbox/ssh-policy`.
+Updates never change SSH: a box made before per-device credentials keeps its SSH state, password
+and factory-reset behaviour exactly as they were. On a per-device box a factory reset turns SSH off.
 
 ## Browser login flow
 

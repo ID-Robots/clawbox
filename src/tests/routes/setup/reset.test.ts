@@ -30,6 +30,13 @@ vi.mock("fs/promises", () => ({
   },
 }));
 
+// Most tests run on a provisioned box (the per-device flow); the legacy
+// factory reset of boxes set up before it is covered explicitly below.
+const provisioned = vi.hoisted(() => ({ value: true }));
+vi.mock("@/lib/device-provisioning", () => ({
+  isProvisionedDevice: () => provisioned.value,
+}));
+
 vi.mock("@/lib/updater", () => ({
   resetUpdateState: vi.fn(),
 }));
@@ -377,6 +384,25 @@ describe("POST /setup-api/setup/reset", () => {
     // wrote is just an inert text file. Through the root-owned launcher.
     expect(vi.mocked(startRootStep)).toHaveBeenCalledWith("ssh_policy", expect.anything());
     expect(vi.mocked(startRootStep)).not.toHaveBeenCalledWith("chpasswd", expect.anything());
+  });
+
+  it("keeps the old reset on a box set up before per-device provisioning: legacy password back, SSH untouched", async () => {
+    provisioned.value = false;
+    try {
+      await resetPost();
+      const writes = mockFs.writeFile.mock.calls.filter(
+        ([p]) => typeof p === "string" && p.endsWith(".chpasswd-input"),
+      );
+      expect(writes).toHaveLength(1);
+      expect(String(writes[0][1])).toMatch(/^[a-z_][a-z0-9_-]*:clawbox\n$/);
+      expect(vi.mocked(startRootStep)).toHaveBeenCalledWith("chpasswd", expect.anything());
+      expect(vi.mocked(startRootStep)).not.toHaveBeenCalledWith("ssh_policy", expect.anything());
+      expect(
+        mockFs.writeFile.mock.calls.some(([p]) => typeof p === "string" && p.endsWith(".ssh-policy-request")),
+      ).toBe(false);
+    } finally {
+      provisioned.value = true;
+    }
   });
 
   it("falls back to an unknowable random password when the ssh_policy step is unavailable", async () => {

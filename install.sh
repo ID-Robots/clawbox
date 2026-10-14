@@ -9292,7 +9292,6 @@ step_post_update() {
   # already in the field would keep its wide-open INPUT policy — which is the
   # entire finding. Idempotent: the script converges its own rules on each run.
   optional_step firewall step_firewall
-  optional_step ssh_policy_apply step_ssh_policy_apply
   # Without this call the persistent journal would be fresh-install-only, and
   # every already-shipped box would keep losing its whole log on each reboot.
   optional_step persistent_journal step_persistent_journal
@@ -10598,8 +10597,10 @@ step_chpasswd() {
 
 # ── SSH policy ───────────────────────────────────────────────────────────────
 #
-# SSH is OFF by default and only an owner turns it on (Settings → System →
-# Remote access). The decision is persisted root-side in /etc/clawbox/ssh-policy
+# SSH is OFF by default on provisioned boxes (scripts/provision-device.sh) and
+# only an owner turns it on (Settings → System → Remote access). No update
+# touches SSH: a box set up before per-device provisioning keeps its SSH state
+# exactly as it is until its owner uses the switch. The decision is persisted root-side in /etc/clawbox/ssh-policy
 # (`enabled` | `disabled`), outside data/, so a factory reset's data/ wipe does
 # not decide it — the reset asks for `factory_reset` below instead.
 #
@@ -10697,6 +10698,13 @@ step_ssh_policy() {
       echo "  SSH disabled"
       ;;
     factory_reset)
+      # Provisioned boxes only. A box set up before per-device provisioning
+      # keeps its old factory reset (the web side resets it the old way), so
+      # this refuses rather than take its password and SSH away.
+      if [ ! -f "${CLAWBOX_ETC:-/etc/clawbox}/provisioned" ]; then
+        echo "Error: factory_reset SSH policy is for provisioned boxes only" >&2
+        exit 66
+      fi
       # No password at all — neither a default nor the previous owner's — so
       # the box is unowned (`passwd -S` reads L) and the wizard can claim it.
       usermod -p '!' "$CLAWBOX_USER"
@@ -10709,34 +10717,6 @@ step_ssh_policy() {
       exit 64
       ;;
   esac
-}
-
-# Every update (step_post_update), idempotent. A box from before the policy
-# has no file: one whose account carries an owner's password keeps SSH exactly
-# as it was (nothing is started or stopped); an unowned one — no password, or
-# only the public legacy one — gets `disabled`. Then SSH is held off whenever
-# the policy says so or nobody owns the box. "Could not tell" counts as owned
-# here, so a failed check never takes SSH away from an owner.
-step_ssh_policy_apply() {
-  local state=0 policy
-  ssh_owner_password_state || state=$?
-  policy="$(read_ssh_policy)"
-  if [ "$policy" != enabled ] && [ "$policy" != disabled ]; then
-    if [ "$state" -eq 2 ]; then
-      # Could not tell whether an owner set a password: change nothing and
-      # record nothing, so the next update decides again instead of a guess
-      # becoming permanent in either direction.
-      echo "  SSH policy undecided (password state unreadable); left as is"
-      return 0
-    fi
-    if [ "$state" -eq 1 ]; then policy=disabled; else policy=enabled; fi
-    write_ssh_policy "$policy"
-    echo "  SSH policy recorded: $policy"
-  fi
-  if [ "$policy" = disabled ] || [ "$state" -eq 1 ]; then
-    ssh_service_off || true
-    echo "  SSH is off (policy $policy)"
-  fi
 }
 
 # ── ClawBox users (TASK-1256) ────────────────────────────────────────────────
@@ -12632,9 +12612,10 @@ DISPATCH_STEPS=(
   # and on no web or UI list — the web server it heals cannot start it.
   heal_build
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
-  # SSH off by default: ssh_policy is the owner's switch and the factory reset,
-  # ssh_policy_apply the idempotent per-update policy, on no web or UI list.
-  ssh_policy ssh_policy_apply
+  # SSH off by default on provisioned boxes: ssh_policy is the owner's switch
+  # and the factory reset. No update ever changes SSH (TASK-1572: a box set up
+  # before this flow keeps its SSH exactly as it is).
+  ssh_policy
   # Settings → Users, multi-user ClawBox OS: TASK-1256. On WEB_ROOT_STEPS, never on the UI list.
   user_add user_remove
   directories_permissions captive_portal_dns desktop_theme
