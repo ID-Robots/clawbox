@@ -4,7 +4,9 @@ import { memo, useCallback, useEffect, useRef, useState, useSyncExternalStore } 
 import { TOAST_EVENT } from "@/components/ToastHost";
 import { captureScreen, currentCaptureScale } from "@/components/screenshot/capture";
 import { CaptureError, IGNORE_ATTRIBUTE } from "@/components/screenshot/dom-capture";
+import { bitmapToBlob } from "@/components/screenshot/render";
 import { useT } from "@/lib/i18n";
+import { canCopyImages, copyPngToClipboard } from "@/lib/screenshot/clipboard";
 import { type Point, type Rect, clampRect, formatSize, isUsableRegion, rectFromPoints } from "@/lib/screenshot/geometry";
 import {
   type CaptureRequest,
@@ -30,6 +32,9 @@ import { DESKTOP_LAYERS } from "@/lib/window-snap";
  *   Ctrl + Shift + S      the whole screen, where Print Screen never reaches the page
  *   Shift + Print Screen  a region
  *   Alt + Shift + S       a region, where Print Screen never reaches the page
+ *
+ * A region — however it was asked for — also lands on the clipboard by
+ * itself, as a PNG; the whole screen does not.
  *
  * Everything this component draws carries `data-screenshot-ignore`, which the
  * built-in renderer skips, and is unmounted before the picture is taken, which
@@ -132,6 +137,30 @@ function ScreenshotOverlay({ owner = "desktop" }: { owner?: OverlayOwner }) {
   }, []);
   useEffect(() => unhide, [unhide]);
 
+  // A region's copy to the clipboard. The browser lets a page write there only
+  // from inside a gesture, so the write STARTS at the pointer-up that finishes
+  // the selection — on a PNG promised there and delivered by `shoot` once the
+  // picture has been taken. A cancelled countdown or a failed capture turns
+  // the copy down instead, and so does a missing clipboard: all quietly, the
+  // capture itself carrying on exactly as it would have without one.
+  const pendingCopy = useRef<{ resolve: (png: Promise<Blob>) => void; reject: (reason: Error) => void } | null>(null);
+  const dropCopy = useCallback((reason: string) => {
+    const copy = pendingCopy.current;
+    pendingCopy.current = null;
+    copy?.reject(new Error(reason));
+  }, []);
+  const copyWhenTaken = useCallback(() => {
+    dropCopy("Another region was picked.");
+    if (!canCopyImages()) return;
+    const png = new Promise<Blob>((resolve, reject) => {
+      pendingCopy.current = { resolve, reject };
+    });
+    copyPngToClipboard(png).then(
+      () => window.dispatchEvent(new CustomEvent(TOAST_EVENT, { detail: { message: tRef.current("screenshot.copied") } })),
+      () => {},
+    );
+  }, [dropCopy]);
+
   const shoot = useCallback(
     async (request: CaptureRequest, region: Rect | null) => {
       setPhase({ name: "capturing", request, region, read: false });
@@ -149,6 +178,11 @@ function ScreenshotOverlay({ owner = "desktop" }: { owner?: OverlayOwner }) {
           blockedLabel: tRef.current("screenshot.notCaptured"),
           onRead: restore,
         });
+        const copy = pendingCopy.current;
+        pendingCopy.current = null;
+        // Only the region that was picked: not a whole screen that came back instead of it.
+        if (copy && region && shot.regionApplied) copy.resolve(bitmapToBlob(shot.bitmap, "png"));
+        else copy?.reject(new Error("The region was not applied."));
         openInScreenshot({
           kind: "capture",
           bitmap: shot.bitmap,
@@ -167,11 +201,12 @@ function ScreenshotOverlay({ owner = "desktop" }: { owner?: OverlayOwner }) {
         console.error("[screenshot] capture failed:", err instanceof Error ? err.message : err);
         window.dispatchEvent(new CustomEvent(TOAST_EVENT, { detail: { message: tRef.current(key) } }));
       } finally {
+        dropCopy("The capture failed.");
         unhide();
         setPhase(IDLE);
       }
     },
-    [hide, setPhase, unhide],
+    [dropCopy, hide, setPhase, unhide],
   );
 
   const proceed = useCallback(
@@ -202,11 +237,12 @@ function ScreenshotOverlay({ owner = "desktop" }: { owner?: OverlayOwner }) {
   const cancel = useCallback(() => {
     const now = phaseRef.current;
     if (now.name !== "selecting" && now.name !== "countdown") return;
+    dropCopy("The capture was cancelled.");
     setDrag(null);
     setHover(null);
     unhide();
     setPhase(IDLE);
-  }, [setPhase, unhide]);
+  }, [dropCopy, setPhase, unhide]);
 
   // The app's buttons ask through an event; so could anything else on the page.
   useEffect(() => {
@@ -369,13 +405,12 @@ function ScreenshotOverlay({ owner = "desktop" }: { owner?: OverlayOwner }) {
         if (!drag) return;
         const rect = clampRect(rectFromPoints(drag.start, { x: e.clientX, y: e.clientY }), viewport);
         setDrag(null);
-        if (isUsableRegion(rect)) {
-          proceed(request, rect);
-          return;
-        }
         // A press without a drag: the window under it, if there is one.
-        const picked = windowRectAt(e.clientX, e.clientY);
-        if (picked) proceed(request, picked);
+        const picked = isUsableRegion(rect) ? rect : windowRectAt(e.clientX, e.clientY);
+        if (!picked) return;
+        // Here, inside the gesture that finished the selection, or the browser refuses the write.
+        copyWhenTaken();
+        proceed(request, picked);
       }}
       onPointerCancel={() => setDrag(null)}
     >

@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useT } from "@/lib/i18n";
 import { browserErrorText, saveBrowserSetup, type BrowserAction } from "@/lib/browser-actions";
 import StatusMessage from "./StatusMessage";
+import VncResolutionSetting from "./VncResolutionSetting";
 import { BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, CARD, FIELD } from "./coding-agent-ui";
 
 /**
@@ -357,6 +358,11 @@ export default function BrowserSettingsPanel({
           <button type="button" onClick={onOpenVnc} className={BTN_SECONDARY} data-testid="browser-settings-open-vnc">
             {t("browser.openInVNC")}
           </button>
+        </div>
+
+        {/* ── How big that screen is (virtual display only). ── */}
+        <div className="mt-4 border-t border-[var(--border-subtle)] pt-4" data-testid="browser-settings-vnc-resolution">
+          <VncResolutionSetting />
         </div>
       </div>
 

@@ -9,7 +9,8 @@ vi.mock("@/lib/i18n", () => ({
 }));
 
 /**
- * Settings -> remote desktop resolution. The control must show what is
+ * Agent Browser -> Settings -> remote desktop resolution (beside Open in VNC;
+ * it used to sit in Settings -> Appearance). The control must show what is
  * actually stored: a slow mount-time read cannot overwrite a newer pick, and a
  * failed apply reconciles with the server instead of assuming a rollback.
  */

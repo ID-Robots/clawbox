@@ -38,7 +38,7 @@ import { readActiveTelegramBot } from "@/lib/telegram-bot-identity";
 import { isTelegramBotToken, sendTelegramBotMessage } from "@/lib/telegram-owner-send";
 import type { CodingRun } from "@/lib/coding-agent";
 import { formatResetClock } from "@/lib/anthropic-limit";
-import { OPEN_AI_PROVIDERS_SETTINGS } from "@/lib/notify-action";
+import { OPEN_ANTHROPIC_ACCOUNTS_SETTINGS } from "@/lib/notify-action";
 
 const MAX_TOAST_CHARS = 280;
 /** Telegram's own limit is 4096; the template never gets near it. */
@@ -250,7 +250,7 @@ export function buildAnthropicLimitNotice(notice: AnthropicLimitNotice, timeZone
 export async function announceAnthropicLimit(notice: AnthropicLimitNotice): Promise<void> {
   const message = buildAnthropicLimitNotice(notice);
   try {
-    await pushPendingAction({ type: "notify", message: message.slice(0, MAX_TOAST_CHARS), action: OPEN_AI_PROVIDERS_SETTINGS });
+    await pushPendingAction({ type: "notify", message: message.slice(0, MAX_TOAST_CHARS), action: OPEN_ANTHROPIC_ACCOUNTS_SETTINGS });
   } catch (err) {
     console.error("[anthropic-accounts] desktop notice failed:", err instanceof Error ? err.message : err);
   }

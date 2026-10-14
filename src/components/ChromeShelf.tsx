@@ -157,22 +157,23 @@ function ShelfClock({ className }: { className: string }) {
 }
 
 /**
- * The Screenshot app's button in the tray (TASK-1491): one click takes the
- * whole screen, as Print Screen does, through the request the app's own
- * capture buttons send — the window need not be open, it opens itself on the
- * result. Drawn only while the desktop's capture overlay is mounted (the
- * owner's desktop, like the app), since nothing else would answer the click.
+ * The Screenshot app's button in the tray (TASK-1491): one click starts a
+ * region selection, as Shift+Print Screen does, through the request the app's
+ * own capture buttons send — the window need not be open, it opens itself on
+ * the result. Its name gives the region keys, the ones it stands for. Drawn
+ * only while the desktop's capture overlay is mounted (the owner's desktop,
+ * like the app), since nothing else would answer the click.
  */
 function ShelfScreenshotButton({ iconSize }: { iconSize: number }) {
   const { t } = useT();
   const available = useSyncExternalStore(subscribeOverlays, desktopOverlayMounted, () => false);
   if (!available) return null;
-  const [key, fallback] = captureShortcutKeys("full");
+  const [key, fallback] = captureShortcutKeys("region");
   const label = t("screenshot.trayTooltip", { key, fallback });
   return (
     <button
       type="button"
-      onClick={() => requestCapture(quickCaptureRequest("full"))}
+      onClick={() => requestCapture(quickCaptureRequest("region"))}
       className="flex items-center justify-center w-10 h-10 rounded-full hover:bg-white/10 active:bg-white/15 transition-colors cursor-pointer"
       title={label}
       aria-label={label}

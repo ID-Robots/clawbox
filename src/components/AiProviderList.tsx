@@ -1,8 +1,9 @@
 "use client";
 
-import { Fragment, useCallback, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import AIProviderIcon from "./AIProviderIcon";
+import AnthropicAccountsCard from "./AnthropicAccountsCard";
 import ClawboxAiUsageCard from "./ClawboxAiUsageCard";
 import PluginRepairNotice from "./PluginRepairNotice";
 import ProviderConnectionLabel from "./ProviderConnectionLabel";
@@ -27,7 +28,21 @@ import type { ProviderStatusRow } from "@/lib/provider-status";
  * component only reflects them.
  */
 
-export default function AiProviderList() {
+interface AiProviderListProps {
+  /**
+   * A deep link asked to see the Anthropic accounts — the coding agent's
+   * usage-limit notices do (`OPEN_ANTHROPIC_ACCOUNTS_SETTINGS`). While true,
+   * the list opens the accounts disclosure and brings the Anthropic row into
+   * view as soon as that row is on screen, then says so through
+   * `onAnthropicAccountsShown`. Settings clears the ask there, so that coming
+   * back to this page later — which remounts the list — is not taken for the
+   * same notice again.
+   */
+  showAnthropicAccounts?: boolean;
+  onAnthropicAccountsShown?: () => void;
+}
+
+export default function AiProviderList({ showAnthropicAccounts = false, onAnthropicAccountsShown }: AiProviderListProps = {}) {
   const { t } = useT();
   const { summary, loading, error, settingDefault, defaultError, defaultWarning, setDefault, refresh } = useProviderStatus();
   const [toggling, setToggling] = useState<string | null>(null);
@@ -41,6 +56,20 @@ export default function AiProviderList() {
    * is no hidden-but-rendered state here.
    */
   const [usageOpen, setUsageOpen] = useState(false);
+  /**
+   * Whether the Anthropic accounts are open — the same rule as the allowances
+   * above: COLLAPSED BY DEFAULT, not persisted, and collapsed means unmounted,
+   * which is what stops the card's own 30-second re-read of the pool. The one
+   * thing that opens it without a click is a deep link asking for it.
+   */
+  const [accountsOpen, setAccountsOpen] = useState(false);
+  /**
+   * Bumped with `accountsOpen` by a deep link. The effect that scrolls only
+   * READS it, so it runs once per ask, after the commit that put the panel in
+   * the DOM — and never sets state of its own.
+   */
+  const [revealRequest, setRevealRequest] = useState(0);
+  const anthropicRowRef = useRef<HTMLLIElement | null>(null);
 
   const setEnabled = useCallback(async (row: ProviderStatusRow, enabled: boolean) => {
     setToggling(row.id);
@@ -95,6 +124,39 @@ export default function AiProviderList() {
   // know about is shown rather than hidden behind everyone else's spinner.
   const awaitingProbe = rows.length === 0
     && (summary?.providers ?? []).some((row) => row.state === "checking");
+
+  const hasAnthropicRow = rows.some((row) => row.id === "anthropic");
+  // Whether an Anthropic row could still turn up: before the first read, or
+  // while the box is still probing that one provider. A deep link waits that
+  // out rather than being spent on a list that has not finished arriving.
+  const anthropicPending = loading
+    || (summary?.providers ?? []).some((row) => row.id === "anthropic" && row.state === "checking");
+
+  // The usage-limit notices land here asking for the accounts. Opened and
+  // scrolled to once the row is on screen; on a box with no Anthropic sign-in
+  // there is no row and so nothing to show, and the ask is spent all the same.
+  useEffect(() => {
+    if (!showAnthropicAccounts) return;
+    if (hasAnthropicRow) {
+      // A request from outside is external state the list synchronises to,
+      // like ChromeWindow's maximize signal.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setAccountsOpen(true);
+      setRevealRequest((n) => n + 1);
+    } else if (anthropicPending) {
+      return;
+    }
+    onAnthropicAccountsShown?.();
+  }, [showAnthropicAccounts, hasAnthropicRow, anthropicPending, onAnthropicAccountsShown]);
+
+  // A pass of its own so the scroll runs AFTER the commit that mounted the
+  // panel: aligned to the row's top, the card under it comes into view with it.
+  useEffect(() => {
+    if (!revealRequest) return;
+    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches === true;
+    // Guarded: jsdom ships an Element without it.
+    anthropicRowRef.current?.scrollIntoView?.({ block: "start", behavior: reduceMotion ? "auto" : "smooth" });
+  }, [revealRequest]);
 
   return (
     <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="ai-provider-list">
@@ -193,6 +255,14 @@ export default function AiProviderList() {
             // that holds a sign-in — so on a box with no ClawBox AI credential
             // there is no row, and therefore no button either.
             const hasUsage = row.id === "clawai" && row.enabled;
+            // The Anthropic accounts the coding agent spends, in the owner's
+            // order (TASK-902), likewise hang off their provider's row instead
+            // of standing open as a card below the connect panel. Same gate on
+            // the row existing — accounts need an Anthropic sign-in, so no row
+            // means no accounts UI — but NOT on `row.enabled`: that switch only
+            // takes Anthropic out of the CHAT's routing, and coding runs go on
+            // drawing on this pool with it off.
+            const hasAccounts = row.id === "anthropic";
             return (
               <Fragment key={row.id}>
               {/* Stacked below `sm:`, one line above it. At 390 px the row had
@@ -201,7 +271,11 @@ export default function AiProviderList() {
                   could give — the name — gave: "OpenAI G…", "Anthropic Cla…".
                   The controls go under the name at phone widths instead, and
                   the name is allowed to wrap there rather than be clipped. */}
-              <li className="flex flex-col @md:flex-row @md:items-center gap-2 @md:gap-3 px-3 py-2.5" data-testid={`ai-provider-${row.id}`}>
+              <li
+                ref={hasAccounts ? anthropicRowRef : undefined}
+                className="flex flex-col @md:flex-row @md:items-center gap-2 @md:gap-3 px-3 py-2.5"
+                data-testid={`ai-provider-${row.id}`}
+              >
                 <span className="flex items-center gap-3 min-w-0 @md:flex-1">
                   <span className={`flex items-center justify-center w-9 h-9 rounded-lg shrink-0 bg-white/[0.06] ${row.enabled ? "" : "opacity-40"}`}>
                     <AIProviderIcon provider={row.id} size={20} />
@@ -261,7 +335,12 @@ export default function AiProviderList() {
                   </span>
                 </span>
 
-                <span className="flex items-center gap-3 shrink-0 self-start @md:self-auto" data-testid={`ai-provider-controls-${row.id}`}>
+                {/* `flex-wrap` for the Anthropic row in a narrow pane: its
+                    accounts button, Make-default and the switch are wider
+                    together than a 300 px window's row, and a line that cannot
+                    wrap is clipped by the list's `overflow-hidden`. A wide pane
+                    keeps them on one line — this span does not shrink there. */}
+                <span className="flex flex-wrap items-center gap-3 shrink-0 self-start @md:self-auto" data-testid={`ai-provider-controls-${row.id}`}>
                   {hasUsage && (
                     <SettingsDisclosureButton
                       open={usageOpen}
@@ -273,6 +352,18 @@ export default function AiProviderList() {
                       controls="clawai-usage-panel"
                       variant="inline"
                       testId="clawai-usage-toggle"
+                    />
+                  )}
+
+                  {hasAccounts && (
+                    <SettingsDisclosureButton
+                      open={accountsOpen}
+                      onToggle={() => setAccountsOpen((open) => !open)}
+                      // The card's own heading, translated in every locale.
+                      label={t("settings.anthropicAccounts.title")}
+                      controls="anthropic-accounts-panel"
+                      variant="inline"
+                      testId="anthropic-accounts-toggle"
                     />
                   )}
 
@@ -317,6 +408,14 @@ export default function AiProviderList() {
               {hasUsage && usageOpen && (
                 <li className="p-3 bg-black/10" id="clawai-usage-panel" data-testid="clawai-usage-panel">
                   <ClawboxAiUsageCard />
+                </li>
+              )}
+
+              {/* The same mechanism for the accounts: mounted only while open,
+                  so the card's pool re-read stops with the collapse. */}
+              {hasAccounts && accountsOpen && (
+                <li className="p-3 bg-black/10" id="anthropic-accounts-panel" data-testid="anthropic-accounts-panel">
+                  <AnthropicAccountsCard />
                 </li>
               )}
               </Fragment>

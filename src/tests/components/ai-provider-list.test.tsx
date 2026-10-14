@@ -8,6 +8,7 @@
  * provider's switch is LOCKED — nothing on this card may re-route the chat
  * behind the owner's back.
  */
+import type { ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import { I18nProvider } from "@/lib/i18n";
@@ -38,11 +39,22 @@ let posts: { url: string; body: unknown }[] = [];
 /** How many times the ClawBox AI usage card has asked the portal for figures.
  *  Zero is the contract while its panel is shut. */
 let usageCalls = 0;
+/** How many times the Anthropic accounts card has read the pool — likewise zero while shut. */
+let accountsCalls = 0;
+
+/** One account in the pool: enough for the card to draw its list. Its contents are `anthropic-accounts-card-*.test.tsx`'s. */
+const ACCOUNTS_POOL = {
+  accounts: [{ id: "aaaaaaaa", label: "Work Max", email: null, kind: "oauth", status: "ok", limitedUntil: null, priority: 1, active: true }],
+  health: { total: 1, healthy: 1, limited: 0, allLimited: false, nextResetAt: null },
+  activeAccountId: "aaaaaaaa",
+  loginAvailable: false,
+};
 
 /** The box's answers to every call this list makes, in one stub. */
-function stubFetch(rows = ROWS, opts: { refuse?: { status: number; error: string }; locale?: string; defaultAnswer?: { body: unknown; status?: number }; unattachedRepairs?: unknown[]; unrunnable?: string[] } = {}) {
+function stubFetch(rows = ROWS, opts: { refuse?: { status: number; error: string }; locale?: string; defaultAnswer?: { body: unknown; status?: number }; unattachedRepairs?: unknown[]; unrunnable?: string[]; statusGate?: Promise<void> } = {}) {
   posts = [];
   usageCalls = 0;
+  accountsCalls = 0;
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
     const json = (body: unknown, status = 200) =>
@@ -54,11 +66,18 @@ function stubFetch(rows = ROWS, opts: { refuse?: { status: number; error: string
       usageCalls += 1;
       return json({ available: false, reason: "unreachable" });
     }
+    // The accounts card's own read, now that it hangs off the Anthropic row.
+    if (url.startsWith("/setup-api/anthropic/accounts")) {
+      accountsCalls += 1;
+      return json(ACCOUNTS_POOL);
+    }
     // The I18nProvider's one read: which language the owner picked.
     if (url.startsWith("/setup-api/preferences")) {
       return json(opts.locale ? { ui_language: opts.locale } : {});
     }
     if (url.startsWith("/setup-api/providers/status")) {
+      // Held back on request, for the case that has to see the list still loading.
+      if (opts.statusGate) await opts.statusGate;
       return json({
         harness: "openclaw",
         providers: rows,
@@ -83,8 +102,8 @@ function stubFetch(rows = ROWS, opts: { refuse?: { status: number; error: string
 }
 
 /** The list as Settings mounts it: inside the app's I18nProvider. */
-function renderList() {
-  return render(<I18nProvider><AiProviderList /></I18nProvider>);
+function renderList(props: ComponentProps<typeof AiProviderList> = {}) {
+  return render(<I18nProvider><AiProviderList {...props} /></I18nProvider>);
 }
 
 afterEach(() => {
@@ -609,5 +628,171 @@ describe("AiProviderList — the ClawBox AI usage disclosure", () => {
     await screen.findByTestId("ai-provider-openai");
     expect(screen.queryByTestId("ai-provider-clawai")).not.toBeInTheDocument();
     expect(screen.queryByTestId("clawai-usage-toggle")).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * The Anthropic accounts the coding agent spends (TASK-902) used to be a card
+ * of their own below the connect panel, always open and re-reading the pool
+ * every 30 seconds for anyone who opened Providers. They now hang off the
+ * Anthropic row behind a button, shut until asked for — the same shape as the
+ * ClawBox AI allowances above, and shut means UNMOUNTED for the same reason.
+ *
+ * The one thing that opens them without a click is the usage-limit notice: it
+ * lands here asking for them, and the list opens the disclosure and brings the
+ * row into view.
+ */
+describe("AiProviderList — the Anthropic accounts disclosure", () => {
+  const originalScroll = Object.getOwnPropertyDescriptor(Element.prototype, "scrollIntoView");
+  let scrolled: { el: Element; opts: unknown }[] = [];
+
+  beforeEach(() => {
+    scrolled = [];
+    // jsdom has no layout, and so no scrollIntoView of its own to observe.
+    Object.defineProperty(Element.prototype, "scrollIntoView", {
+      configurable: true,
+      writable: true,
+      value(this: Element, opts?: unknown) { scrolled.push({ el: this, opts }); },
+    });
+  });
+  afterEach(() => {
+    if (originalScroll) Object.defineProperty(Element.prototype, "scrollIntoView", originalScroll);
+    else delete (Element.prototype as Partial<Element>).scrollIntoView;
+  });
+
+  it("offers the button on the Anthropic row and on no other — switched off included", async () => {
+    // ROWS has Anthropic switched off. That switch takes it out of the CHAT's
+    // routing only; coding runs still draw on the pool, so the button stays.
+    stubFetch();
+    renderList();
+
+    await screen.findByTestId("ai-provider-anthropic");
+    const toggle = screen.getByTestId("anthropic-accounts-toggle");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle).toHaveAttribute("aria-controls", "anthropic-accounts-panel");
+    expect(toggle).toHaveTextContent(translations.en["settings.anthropicAccounts.title"]);
+    expect(screen.getByTestId("ai-provider-controls-anthropic")).toContainElement(toggle);
+    expect(screen.getByTestId("ai-provider-controls-clawai")).not.toContainElement(toggle);
+    expect(screen.getAllByTestId("anthropic-accounts-toggle")).toHaveLength(1);
+  });
+
+  it("is shut on arrival, and the pool is not read while it is", async () => {
+    stubFetch();
+    renderList();
+
+    await screen.findByTestId("anthropic-accounts-toggle");
+    expect(screen.queryByTestId("anthropic-accounts-panel")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("anthropic-accounts")).not.toBeInTheDocument();
+    expect(accountsCalls).toBe(0);
+    // Nothing asked for it, so nothing moved the page either.
+    expect(scrolled).toEqual([]);
+  });
+
+  it("mounts the card under the row when opened and drops it again when shut", async () => {
+    stubFetch();
+    renderList();
+
+    const toggle = await screen.findByTestId("anthropic-accounts-toggle");
+    fireEvent.click(toggle);
+
+    const panel = await screen.findByTestId("anthropic-accounts-panel");
+    expect(panel).toHaveAttribute("id", "anthropic-accounts-panel");
+    // A list item of its own, straight after the Anthropic row.
+    expect(panel.tagName).toBe("LI");
+    expect(screen.getByTestId("ai-provider-anthropic").nextElementSibling).toBe(panel);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    // The real card, reading the real pool.
+    expect((await screen.findAllByText("Work Max")).length).toBeGreaterThan(0);
+    expect(panel).toContainElement(screen.getByTestId("anthropic-accounts"));
+    expect(accountsCalls).toBeGreaterThan(0);
+    const asked = accountsCalls;
+    // A click is the owner's own doing: the page is not scrolled for it.
+    expect(scrolled).toEqual([]);
+
+    fireEvent.click(toggle);
+    await waitFor(() => expect(screen.queryByTestId("anthropic-accounts-panel")).not.toBeInTheDocument());
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    await act(async () => { await Promise.resolve(); });
+    expect(accountsCalls).toBe(asked);
+  });
+
+  it("opening one disclosure leaves the other shut", async () => {
+    stubFetch();
+    renderList();
+
+    fireEvent.click(await screen.findByTestId("anthropic-accounts-toggle"));
+    await screen.findByTestId("anthropic-accounts-panel");
+    expect(screen.getByTestId("clawai-usage-toggle")).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByTestId("clawai-usage-panel")).not.toBeInTheDocument();
+    expect(usageCalls).toBe(0);
+  });
+
+  it("shows no accounts UI at all on a box with no Anthropic sign-in", async () => {
+    stubFetch([
+      { id: "clawai", label: "ClawBox AI", state: "connected", isDefault: true, section: "ai", enabled: true },
+      { id: "anthropic", label: "Anthropic", state: "disconnected", isDefault: false, section: "ai", enabled: true },
+    ]);
+    renderList();
+
+    await screen.findByTestId("ai-provider-clawai");
+    expect(screen.queryByTestId("ai-provider-anthropic")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("anthropic-accounts-toggle")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("anthropic-accounts-panel")).not.toBeInTheDocument();
+    expect(accountsCalls).toBe(0);
+  });
+
+  it("opens the accounts and brings the Anthropic row into view when a notice asks for them", async () => {
+    stubFetch();
+    const shown = vi.fn();
+    renderList({ showAnthropicAccounts: true, onAnthropicAccountsShown: shown });
+
+    const panel = await screen.findByTestId("anthropic-accounts-panel");
+    expect(screen.getByTestId("anthropic-accounts-toggle")).toHaveAttribute("aria-expanded", "true");
+    expect(panel).toContainElement(screen.getByTestId("anthropic-accounts"));
+    // The ROW is what is scrolled to, top-aligned, so the card under it comes
+    // into view with it — and only once the panel is in the DOM.
+    await waitFor(() => expect(scrolled.length).toBeGreaterThan(0));
+    expect(scrolled[0].el).toBe(screen.getByTestId("ai-provider-anthropic"));
+    expect(scrolled[0].opts).toMatchObject({ block: "start" });
+    // And it says so, which is how Settings clears the ask.
+    expect(shown).toHaveBeenCalled();
+
+    // Still the owner's to shut.
+    fireEvent.click(screen.getByTestId("anthropic-accounts-toggle"));
+    await waitFor(() => expect(screen.queryByTestId("anthropic-accounts-panel")).not.toBeInTheDocument());
+  });
+
+  it("keeps the ask while the list is still being read, and acts on it once the row arrives", async () => {
+    let release!: () => void;
+    const statusGate = new Promise<void>((resolve) => { release = resolve; });
+    stubFetch(ROWS, { statusGate });
+    const shown = vi.fn();
+    renderList({ showAnthropicAccounts: true, onAnthropicAccountsShown: shown });
+
+    await screen.findByTestId("ai-provider-list-loading");
+    await act(async () => { await Promise.resolve(); });
+    // Not spent on a list that has not answered yet.
+    expect(shown).not.toHaveBeenCalled();
+    expect(scrolled).toEqual([]);
+
+    await act(async () => { release(); });
+    expect(await screen.findByTestId("anthropic-accounts-panel")).toBeInTheDocument();
+    await waitFor(() => expect(shown).toHaveBeenCalled());
+    expect(scrolled[0]?.el).toBe(screen.getByTestId("ai-provider-anthropic"));
+  });
+
+  it("spends the ask, and shows and scrolls nothing, where there is no Anthropic row", async () => {
+    stubFetch([
+      { id: "clawai", label: "ClawBox AI", state: "connected", isDefault: true, section: "ai", enabled: true },
+    ]);
+    const shown = vi.fn();
+    renderList({ showAnthropicAccounts: true, onAnthropicAccountsShown: shown });
+
+    await screen.findByTestId("ai-provider-clawai");
+    await waitFor(() => expect(shown).toHaveBeenCalled());
+    expect(screen.queryByTestId("anthropic-accounts-toggle")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("anthropic-accounts-panel")).not.toBeInTheDocument();
+    expect(scrolled).toEqual([]);
+    expect(accountsCalls).toBe(0);
   });
 });
