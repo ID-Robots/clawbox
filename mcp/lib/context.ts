@@ -38,10 +38,11 @@ export interface DesktopApp {
   kioskOnly?: boolean;
   /**
    * Openable only while the ClawBox Desktop session is up with a Chrome to
-   * start — the same rule the desktop draws the icon by, answered live by
-   * GET /setup-api/desktop/chrome. Off that session the app is neither listed
-   * nor accepted (`liveBuiltInApps`), so `ui_open_app` cannot claim a window
-   * the desktop never shows.
+   * start, answered live by GET /setup-api/desktop/chrome. Off that session
+   * the app is neither listed nor accepted (`liveBuiltInApps`), so
+   * `ui_open_app` cannot claim a window the desktop never shows. On it with
+   * no Chrome installed the desktop still draws the icon (a click says how
+   * to install Chrome), but nothing would open, so the agent is not offered it.
    */
   desktopSession?: boolean;
 }
@@ -90,8 +91,9 @@ export function builtInApps(edition: Ed | null): DesktopApp[] {
 
 /** Whether the ClawBox Desktop session can open Google Chrome right now (false when the server cannot say). */
 export async function desktopChromeAvailable(): Promise<boolean> {
-  const body = await apiTry<{ available?: unknown }>("/setup-api/desktop/chrome", { timeoutMs: 5_000 });
-  return body?.available === true;
+  const body = await apiTry<{ available?: unknown; installed?: unknown }>("/setup-api/desktop/chrome", { timeoutMs: 5_000 });
+  // `installed` is absent from a server that answered `available` only with a Chrome to start.
+  return body?.available === true && body.installed !== false;
 }
 
 /** `builtInApps`, minus the `desktopSession` apps when that session cannot open them now. */

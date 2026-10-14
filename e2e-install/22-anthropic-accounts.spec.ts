@@ -19,13 +19,19 @@
  *      data/ in the clear afterwards.
  *   4. The route's own test hook sets account #1 aside at its session limit;
  *      account #2 becomes the one in use.
- *   5. The card shows both, #1 "Limited until …", #2 "In use", and the
- *      owner's move and two-tap remove work from it.
- *   6. Clearing the limit hands #1 back.
+ *   5. With no Anthropic sign-in on the box, Settings → Providers has no
+ *      Anthropic row and so no accounts UI at all — the pool alone does not
+ *      put it there (the owner's decision: the accounts hang off the
+ *      provider's row).
+ *   6. With one, the card opens from the disclosure on the Anthropic row and
+ *      shows both, #1 "Limited until …", #2 "In use", and the owner's move
+ *      and two-tap remove work from it.
+ *   7. Clearing the limit hands #1 back.
  *
  * Runs at NN=22, after settings (20) and before the desktop smoke (25), and
- * removes every account it made, so 35-mcp's `anthropic_accounts` call and
- * 80-chat see the pool the way they would have without it.
+ * removes every account it made — and the Anthropic sign-in it staged for the
+ * row, when the box had none — so 35-mcp's `anthropic_accounts` call and
+ * 80-chat see the pool and the providers the way they would have without it.
  *
  * The strings staged as "tokens" below are not credentials: nothing anywhere
  * accepts them, and no request in this spec goes to Anthropic.
@@ -40,6 +46,17 @@ const DATA_DIR = "/home/clawbox/clawbox/data";
 const HANDOFF_PATH = `${DATA_DIR}/oauth-device-tokens.json`;
 /** src/lib/mcp-token.ts TOKEN_PATH on an installed box. */
 const MCP_TOKEN_PATH = `${DATA_DIR}/.mcp-token`;
+/** The managed core's CLI (src/lib/openclaw-config.ts findOpenclawBin), as 07-runtime-pin runs it. */
+const OPENCLAW_BIN = "/home/clawbox/.npm-global/bin/openclaw";
+/**
+ * The profile an Anthropic sign-in leaves in openclaw.json — what
+ * /setup-api/providers/status (src/lib/provider-status.ts) reads the Anthropic
+ * row from. The configure route writes the same shape (`{provider, mode}` at
+ * `auth.profiles.<provider>:default`); the credential itself is not needed for
+ * the row, and staging only the profile leaves nothing behind once it is unset.
+ */
+const ANTHROPIC_PROFILE_PATH = "auth.profiles.anthropic:default";
+const ANTHROPIC_PROFILE = JSON.stringify({ provider: "anthropic", mode: "api_key" });
 
 const WORK = { label: "E2E Work Max", email: "e2e-work@example.com", access: "e2e-anthropic-accounts-not-a-token-work" };
 const PERSONAL = { label: "E2E Personal Max", email: "e2e-personal@example.com", access: "e2e-anthropic-accounts-not-a-token-personal" };
@@ -59,6 +76,10 @@ interface AccountView {
   active: boolean;
 }
 
+interface ProvidersView {
+  providers: { id: string; state: string }[];
+}
+
 interface PoolView {
   accounts: AccountView[];
   health: { total: number; healthy: number; limited: number; needsAttention: number; allLimited: boolean; nextResetAt: number | null };
@@ -75,6 +96,10 @@ test.describe("Anthropic account pool (TASK-902)", () => {
   /** Accounts that were there before this spec — left exactly as they were. */
   let before: AccountView[] = [];
   const ids = { work: "", personal: "" };
+  /** The box already had an Anthropic sign-in (its row on Providers): this spec neither stages nor removes one. */
+  let anthropicSignedInBefore = false;
+  /** This spec staged the Anthropic profile, and takes it back out in afterAll. */
+  let stagedSignIn = false;
 
   const get = async (headers: Record<string, string> = { cookie }) =>
     fetch(`${BASE_URL}${ROUTE}`, { headers });
@@ -98,6 +123,18 @@ test.describe("Anthropic account pool (TASK-902)", () => {
     expect(res.status, `${String(body.action)} → ${await res.clone().text()}`).toBe(200);
     return (await res.json()) as PoolView;
   };
+
+  /** Whether Settings → Providers draws an Anthropic row, by the route that list reads. */
+  const anthropicRowListed = async (): Promise<boolean> => {
+    const res = await fetch(`${BASE_URL}/setup-api/providers/status`, { headers: { cookie } });
+    expect(res.status, await res.clone().text()).toBe(200);
+    const view = (await res.json()) as ProvidersView;
+    return view.providers.some((row) => row.id === "anthropic" && (row.state === "connected" || row.state === "needs-reauth"));
+  };
+
+  /** `openclaw <args>` as the box's own user, the way the web server runs it. */
+  const openclaw = (args: string[]) =>
+    dockerExec(["bash", "-lc", `${OPENCLAW_BIN} "$@"`, "openclaw", ...args], { user: "clawbox", timeoutMs: 120_000 });
 
   const byId = (view: PoolView, id: string) => {
     const account = view.accounts.find((a) => a.id === id);
@@ -134,6 +171,7 @@ test.describe("Anthropic account pool (TASK-902)", () => {
     test.skip(!status.setup_complete, "setup did not complete — the accounts card lives on a finished box");
     cookie = await loginSessionCookie();
     before = (await pool()).accounts;
+    anthropicSignedInBefore = await anthropicRowListed();
   });
 
   test.afterAll(async () => {
@@ -144,6 +182,10 @@ test.describe("Anthropic account pool (TASK-902)", () => {
       expect([200, 404]).toContain(res.status);
     }
     await dockerExec(["rm", "-f", HANDOFF_PATH], { user: "clawbox" });
+    if (stagedSignIn) {
+      await openclaw(["config", "unset", ANTHROPIC_PROFILE_PATH]);
+      await expect.poll(anthropicRowListed, { timeout: 30_000 }).toBe(false);
+    }
   });
 
   test("the pool's state is the owner's and the MCP bearer's to read, and nobody else's", async () => {
@@ -256,7 +298,23 @@ test.describe("Anthropic account pool (TASK-902)", () => {
     }
   });
 
+  test("with no Anthropic sign-in, Settings → Providers has no Anthropic row and no accounts UI", async ({ page }) => {
+    test.skip(anthropicSignedInBefore, "this box already has an Anthropic sign-in");
+    // The pool holds two accounts by now; they alone do not put the accounts
+    // on Providers — no Anthropic row, no disclosure, no card.
+    const settingsWindow = await openProviders(page);
+    await expect(settingsWindow.getByTestId("ai-provider-anthropic")).toHaveCount(0);
+    await expect(settingsWindow.getByTestId("anthropic-accounts-toggle")).toHaveCount(0);
+    await expect(settingsWindow.getByTestId("anthropic-accounts")).toHaveCount(0);
+  });
+
   test("Settings → Providers shows both accounts, the limited one with its reset time, and the owner's controls work", async ({ page }) => {
+    if (!anthropicSignedInBefore) {
+      // The Anthropic sign-in the row stands for: its profile in openclaw.json.
+      await openclaw(["config", "set", ANTHROPIC_PROFILE_PATH, ANTHROPIC_PROFILE, "--json"]);
+      stagedSignIn = true;
+      await expect.poll(anthropicRowListed, { timeout: 30_000 }).toBe(true);
+    }
     const card = await openAccountsCard(page);
 
     const workRow = card.getByTestId(`anthropic-account-${ids.work}`);
@@ -302,8 +360,8 @@ test.describe("Anthropic account pool (TASK-902)", () => {
   });
 });
 
-/** Sign in if needed, open Settings from the launcher and go to Providers. Answers the accounts card. */
-async function openAccountsCard(page: Page) {
+/** Sign in if needed, open Settings from the launcher and go to Providers, once its list has loaded. Answers the Settings window. */
+async function openProviders(page: Page) {
   await page.goto(BASE_URL, { waitUntil: "domcontentloaded" });
   if (page.url().includes("/login")) {
     await page.fill('input[type="password"]', SETUP_PASSWORD);
@@ -326,8 +384,28 @@ async function openAccountsCard(page: Page) {
   const settingsWindow = page.getByTestId("chrome-window-settings");
   await expect(settingsWindow).toBeVisible({ timeout: 10_000 });
   await settingsWindow.getByRole("navigation").getByRole("button", { name: /Providers/ }).click();
+  await expect(settingsWindow.getByTestId("ai-provider-list")).toBeVisible();
+  await expect(settingsWindow.getByTestId("ai-provider-list-loading")).toHaveCount(0);
+  return settingsWindow;
+}
 
-  const card = settingsWindow.getByTestId("anthropic-accounts");
+/**
+ * Providers, then the Anthropic row's accounts disclosure: collapsed by
+ * default, the card mounted under the row only while it is open
+ * (src/components/AiProviderList.tsx). Answers the accounts card.
+ */
+async function openAccountsCard(page: Page) {
+  const settingsWindow = await openProviders(page);
+  const row = settingsWindow.getByTestId("ai-provider-anthropic");
+  await row.scrollIntoViewIfNeeded();
+  const toggle = row.getByTestId("anthropic-accounts-toggle");
+  await expect(toggle).toBeVisible();
+  // Collapsed unless a deep link (a usage-limit notice) already opened it, and
+  // a second click would close it again.
+  if ((await toggle.getAttribute("aria-expanded")) !== "true") await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+
+  const card = settingsWindow.getByTestId("anthropic-accounts-panel").getByTestId("anthropic-accounts");
   await card.scrollIntoViewIfNeeded();
   await expect(card).toBeVisible();
   return card;

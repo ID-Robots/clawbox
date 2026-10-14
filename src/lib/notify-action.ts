@@ -48,32 +48,65 @@ const NOTIFY_ACTION_PHRASE_KEYS: Record<NotifyActionApp, string> = {
 /** The `t` of `useT()` — handed in rather than imported, so this module stays free of React. */
 export type NotifyTranslate = (key: string, params?: Record<string, string | number>) => string;
 
-/** One allowlisted destination: which app, and which section of it. */
+/**
+ * A block INSIDE a section that a notice may also ask to have opened and
+ * brought into view once the section lands — and, like the destinations, a
+ * closed set. Each one names the single pair it lives on, so a focus can only
+ * ever ride on its own section: `parseNotifyAction` drops one that arrives on
+ * any other.
+ *
+ * The receiving end is SettingsApp's deep-link listener, which hands the ask to
+ * the component that draws the block. Adding a focus here also needs it there.
+ */
+export const NOTIFY_ACTION_FOCUS = {
+  /** The Anthropic accounts, behind the disclosure on the Providers list's Anthropic row. */
+  anthropicAccounts: { open: "settings", section: "ai" },
+} as const;
+
+export type NotifyActionFocus = keyof typeof NOTIFY_ACTION_FOCUS;
+
+/** One allowlisted destination: which app, which section of it, and optionally which block in that section. */
 export type NotifyAction = {
-  [App in NotifyActionApp]: { open: App; section: keyof (typeof NOTIFY_ACTION_TARGETS)[App] };
+  [App in NotifyActionApp]: {
+    open: App;
+    section: keyof (typeof NOTIFY_ACTION_TARGETS)[App];
+    focus?: NotifyActionFocus;
+  };
 }[NotifyActionApp];
 
 /** The email queue's destination. */
 export const OPEN_EMAIL_SETTINGS: NotifyAction = { open: "settings", section: "email" };
 
-/** Settings → Providers, where the Anthropic accounts are — for the account-limit notices (TASK-902). */
-export const OPEN_AI_PROVIDERS_SETTINGS: NotifyAction = { open: "settings", section: "ai" };
+/**
+ * Settings → Providers with the Anthropic accounts open and scrolled into view
+ * — for the account-limit notices (TASK-902). The accounts are collapsed behind
+ * a button on the Anthropic row by default, so the section alone would land the
+ * owner on a list with the one thing the notice is about folded away.
+ */
+export const OPEN_ANTHROPIC_ACCOUNTS_SETTINGS: NotifyAction = { open: "settings", section: "ai", focus: "anthropicAccounts" };
 
 /**
  * The allowlisted pair this value names, or null.
  *
  * Answers with the TABLE's pair rather than the caller's object: a valid pair
- * arriving with an `href`, a draft id or any other field loses them here.
+ * arriving with an `href`, a draft id or any other field loses them here. A
+ * `focus` survives only when the focus table names it AND names this very
+ * pair as its home; any other one is dropped like any other extra field, and
+ * the pair still opens its section.
  */
 export function parseNotifyAction(value: unknown): NotifyAction | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const { open, section } = value as { open?: unknown; section?: unknown };
+  const { open, section, focus } = value as { open?: unknown; section?: unknown; focus?: unknown };
   if (typeof open !== "string" || typeof section !== "string") return null;
   // hasOwn, not `in`: these strings come from JSON on disk, and `constructor`
   // or `toString` would otherwise resolve against the prototype.
   if (!Object.hasOwn(NOTIFY_ACTION_TARGETS, open)) return null;
   const sections: Record<string, string> = NOTIFY_ACTION_TARGETS[open as NotifyActionApp];
   if (!Object.hasOwn(sections, section)) return null;
+  if (typeof focus === "string" && Object.hasOwn(NOTIFY_ACTION_FOCUS, focus)) {
+    const home = NOTIFY_ACTION_FOCUS[focus as NotifyActionFocus];
+    if (home.open === open && home.section === section) return { open, section, focus } as NotifyAction;
+  }
   return { open, section } as NotifyAction;
 }
 

@@ -7,15 +7,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
  * lib is ever called (nobody else may start a browser on the owner's screen).
  */
 
-const h = vi.hoisted(() => ({ ownerSession: true, sameOrigin: true, available: true, calls: [] as unknown[] }));
+const h = vi.hoisted(() => ({ ownerSession: true, sameOrigin: true, available: true, installed: true, calls: [] as unknown[] }));
 
 vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: vi.fn(async () => h.ownerSession) }));
 vi.mock("@/lib/same-origin", () => ({ isSameOriginRequest: vi.fn(() => h.sameOrigin) }));
 vi.mock("@/lib/desktop-chrome", () => ({
-  desktopChromeStatus: vi.fn(() => ({ available: h.available })),
+  CHROME_NOT_INSTALLED: "not_installed",
+  desktopChromeStatus: vi.fn(() => (h.available ? { available: true, installed: h.installed } : { available: false })),
   launchDesktopChrome: vi.fn(async (url: unknown) => {
     h.calls.push(url);
     if (!h.available) return { ok: false, available: false };
+    if (!h.installed) return { ok: false, available: true, error: "Google Chrome is not installed on this ClawBox", code: "not_installed" };
     if (url === "https://example.com/fail") {
       return { ok: false, available: true, error: "Google Chrome could not be started: ENOENT", code: "launch_failed" };
     }
@@ -40,16 +42,24 @@ beforeEach(() => {
   h.ownerSession = true;
   h.sameOrigin = true;
   h.available = true;
+  h.installed = true;
   h.calls.length = 0;
 });
 
 describe("GET /setup-api/desktop/chrome", () => {
   it("answers availability with a 200 either way", async () => {
-    expect(await (await GET()).json()).toEqual({ available: true });
+    expect(await (await GET()).json()).toEqual({ available: true, installed: true });
     h.available = false;
     const res = await GET();
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ available: false });
+  });
+
+  it("says the icon belongs on the session's screen even with no Chrome installed", async () => {
+    h.installed = false;
+    const res = await GET();
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ available: true, installed: false });
   });
 });
 
@@ -76,6 +86,19 @@ describe("POST /setup-api/desktop/chrome", () => {
     const res = await POST(post());
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({ available: false, ok: false });
+  });
+
+  it("is a 503 not_installed, never a launch, on the session with no Chrome", async () => {
+    h.installed = false;
+    const res = await POST(post());
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({
+      available: true,
+      installed: false,
+      ok: false,
+      error: "Google Chrome is not installed on this ClawBox",
+      code: "not_installed",
+    });
   });
 
   it("is a 500, never a 200, when Chrome could not be started", async () => {

@@ -1,18 +1,21 @@
 export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
-import { desktopChromeStatus, launchDesktopChrome } from "@/lib/desktop-chrome";
+import { CHROME_NOT_INSTALLED, desktopChromeStatus, launchDesktopChrome } from "@/lib/desktop-chrome";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 
 /**
- * GET  /setup-api/desktop/chrome            → { available }
+ * GET  /setup-api/desktop/chrome            → { available, installed? }
  * POST /setup-api/desktop/chrome { url? }   → opens Google Chrome on the screen
  *
  * The desktop's Google Chrome icon (src/lib/desktop-chrome.ts). `available`
- * is true only while the ClawBox Desktop session is up and a Chrome is
- * installed; every other box answers false with a 200 and the POST answers the
- * same shape with a 503 — the normal state of most boxes, not an error.
+ * is true only while the ClawBox Desktop session is up; every other box
+ * answers false with a 200 and the POST answers the same shape with a 503 —
+ * the normal state of most boxes, not an error. On the session, `installed`
+ * says whether there is a Chrome to start; with none the icon is still drawn
+ * and the POST is a 503 `not_installed` (with `installed: false`), which the
+ * desktop turns into a toast saying how to install it.
  *
  * The POST is the OWNER's (cookie, never the MCP bearer) and OUR PAGE's (same
  * origin): it starts a program on the owner's screen, and a cross-site POST
@@ -52,6 +55,12 @@ export async function POST(req: Request) {
   const result = await launchDesktopChrome(body.url);
   if (!result.available) {
     return NextResponse.json({ available: false, ok: false }, { status: 503, headers: NO_STORE });
+  }
+  if (!result.ok && result.code === CHROME_NOT_INSTALLED) {
+    return NextResponse.json(
+      { available: true, installed: false, ok: false, error: result.error, code: result.code },
+      { status: 503, headers: NO_STORE },
+    );
   }
   if (!result.ok) {
     const status = result.code === "invalid_url" ? 400 : 500;

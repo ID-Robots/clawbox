@@ -21,9 +21,13 @@
  * (`survivesRestart: false`) rather than promising otherwise.
  *
  * WHEN. Only while the ClawBox Desktop session is up (`monitorModeSession`)
- * on a box with a kiosk (`kioskConfigured`) and a Chrome to start: every
- * Jetson, and the laptop under any other session, answers `available: false`
- * and the desktop draws no icon.
+ * on a box with a kiosk (`kioskConfigured`): every Jetson, and the laptop
+ * under any other session, answers `available: false` and the desktop draws
+ * no icon. On that session the icon is drawn whether or not a Chrome is
+ * installed (`installed`): with none, a click says how to install it (the
+ * installer's `google_chrome_install` step) rather than leaving the owner to
+ * wonder where the icon went, and the launch answers `not_installed` instead
+ * of starting anything.
  *
  * What the owner may set, in the web server's environment:
  *  - `CLAWBOX_DESKTOP_CHROME` — the binary (default: the first of
@@ -39,9 +43,14 @@ import { kioskConfigured } from "./kiosk-env";
 import { findWaylandDisplays, monitorModeSession, type WaylandDisplay } from "./monitors";
 import { findSystemdTool } from "./coding-run-unit";
 
-export interface DesktopChromeStatus {
-  available: boolean;
-}
+/**
+ * `available`: the icon belongs on this desktop (the session is up on a kiosk
+ * box). `installed`: there is a Chrome to start — asked only where the icon is.
+ */
+export type DesktopChromeStatus = { available: false } | { available: true; installed: boolean };
+
+/** The launch's answer on the session with no Chrome to start. */
+export const CHROME_NOT_INSTALLED = "not_installed";
 
 export type DesktopChromeLaunch =
   | { ok: true; available: true; survivesRestart: boolean }
@@ -117,7 +126,8 @@ export function desktopSessionDisplay(): WaylandDisplay | null {
 }
 
 export function desktopChromeStatus(): DesktopChromeStatus {
-  return { available: desktopSessionDisplay() !== null && findChrome() !== null };
+  if (desktopSessionDisplay() === null) return { available: false };
+  return { available: true, installed: findChrome() !== null };
 }
 
 /** http(s) only; anything else is refused rather than handed to Chrome's argv. */
@@ -194,8 +204,11 @@ async function launchDetached(bin: string, argv: string[], env: NodeJS.ProcessEn
 /** Open Google Chrome on the desktop session's screen, on `url` (http(s); Google when absent). */
 export async function launchDesktopChrome(rawUrl?: unknown): Promise<DesktopChromeLaunch> {
   const display = desktopSessionDisplay();
+  if (!display) return { ok: false, available: false };
   const chrome = findChrome();
-  if (!display || !chrome) return { ok: false, available: false };
+  if (!chrome) {
+    return { ok: false, available: true, error: "Google Chrome is not installed on this ClawBox", code: CHROME_NOT_INSTALLED };
+  }
   const url = chromeUrl(rawUrl);
   if (!url) return { ok: false, available: true, error: "Only http(s) pages can be opened", code: "invalid_url" };
 

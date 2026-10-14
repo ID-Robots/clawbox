@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, waitFor } from "@/tests/helpers/test-utils";
+import { fireEvent, render, waitFor, within } from "@/tests/helpers/test-utils";
 import BrowserSettingsPanel, { type BrowserStatus } from "@/components/BrowserSettingsPanel";
 
 /**
@@ -178,6 +178,26 @@ describe("BrowserSettingsPanel", () => {
   it("still names ClawBox's own profile on a box that reports none", () => {
     const { getByText } = renderPanel();
     expect(getByText("~/.config/clawbox-browser/")).toBeInTheDocument();
+  });
+
+  /**
+   * The remote-desktop resolution lives with the screen it sizes: in the card
+   * that opens that screen in VNC, not in Settings → Appearance any more. It
+   * reads the stored value from the same route and offers the same three sizes.
+   */
+  it("puts the remote-desktop resolution beside Open in VNC, showing the stored value", async () => {
+    fetchMock.mockImplementation(async (input?: RequestInfo | URL) =>
+      String(input).includes("/setup-api/vnc/resolution")
+        ? json({ resolution: "1600x900" })
+        : json({ ok: true }));
+    const { getByTestId } = renderPanel();
+
+    const card = getByTestId("browser-settings-vnc-resolution").parentElement as HTMLElement;
+    expect(within(card).getByTestId("browser-settings-open-vnc")).toBeInTheDocument();
+    const select = within(card).getByRole("combobox", { name: "settings.vncResolution" }) as HTMLSelectElement;
+    expect(Array.from(select.options, (o) => o.value)).toEqual(["1280x720", "1600x900", "1920x1080"]);
+    await waitFor(() => expect(select.value).toBe("1600x900"));
+    expect(fetchMock.mock.calls.some(([url]) => String(url) === "/setup-api/vnc/resolution")).toBe(true);
   });
 
   it("offers no agent-link switch where the link is permanent", () => {

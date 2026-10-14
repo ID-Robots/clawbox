@@ -15,6 +15,7 @@ import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-ut
 import ChromeShelf from "@/components/ChromeShelf";
 import ScreenshotOverlay from "@/components/ScreenshotOverlay";
 import { CAPTURE_REQUEST_EVENT, SCREENSHOT_APP_ID, takeImage } from "@/lib/screenshot/session";
+import { captureShortcutKeys } from "@/lib/screenshot/shortcuts";
 import { screenshotTranslations } from "@/lib/screenshot-translations";
 import { OPEN_APP_EVENT } from "@/lib/ui-events";
 
@@ -222,12 +223,28 @@ describe("the capture keys, with the Screenshot window closed", () => {
 });
 
 describe("the Screenshot button in the tray", () => {
+  // The region selector captures the pointer for the drag; jsdom has no pointer capture.
+  beforeEach(() => {
+    Object.defineProperty(Element.prototype, "setPointerCapture", { configurable: true, value: vi.fn() });
+  });
+  afterEach(() => {
+    delete (Element.prototype as Partial<Element>).setPointerCapture;
+  });
+
+  /** Drags out a region on the selector, from (x, y) to (x + width, y + height). */
+  function dragRegion(x: number, y: number, width: number, height: number) {
+    const overlay = screen.getByTestId("screenshot-region-overlay");
+    fireEvent.pointerDown(overlay, { button: 0, pointerId: 1, pointerType: "mouse", clientX: x, clientY: y });
+    fireEvent.pointerMove(overlay, { pointerId: 1, pointerType: "mouse", clientX: x + width, clientY: y + height });
+    fireEvent.pointerUp(overlay, { button: 0, pointerId: 1, pointerType: "mouse", clientX: x + width, clientY: y + height });
+  }
+
   it("is not drawn where no capture overlay would answer it (a desktop that is not the owner's)", () => {
     renderShelf();
     expect(screen.queryByTestId("shelf-screenshot-button")).toBeNull();
   });
 
-  it("sits in the tray beside the shield and the clock, named with its keyboard shortcut", () => {
+  it("sits in the tray beside the shield and the clock, named with the region keys it stands for", () => {
     render(
       <>
         <ScreenshotOverlay />
@@ -235,8 +252,16 @@ describe("the Screenshot button in the tray", () => {
       </>,
     );
     const button = screen.getByTestId("shelf-screenshot-button");
-    expect(button).toHaveAttribute("title", "Screenshot (Print Screen or Ctrl+Shift+S)");
-    expect(button).toHaveAttribute("aria-label", "Screenshot (Print Screen or Ctrl+Shift+S)");
+    // The region keys, from the one list the overlay's own keys are read from.
+    const [key, fallback] = captureShortcutKeys("region");
+    const name = `Screenshot (${key} or ${fallback})`;
+    expect(name).toBe("Screenshot (Shift+Print Screen or Alt+Shift+S)");
+    expect(button).toHaveAttribute("title", name);
+    expect(button).toHaveAttribute("aria-label", name);
+    // Not the whole-screen keys it used to name.
+    const [fullKey, fullFallback] = captureShortcutKeys("full");
+    expect(button.getAttribute("aria-label")).not.toContain(fullFallback);
+    expect(button.getAttribute("aria-label")).not.toContain(`(${fullKey}`);
     // The tray's own button shape and icon size: a 40 px round button, an 18 px glyph.
     expect(button.className).toContain("w-10 h-10 rounded-full");
     expect(button.querySelector(".material-symbols-rounded")).toHaveStyle({ fontSize: "18px" });
@@ -247,7 +272,7 @@ describe("the Screenshot button in the tray", () => {
     expect(order.indexOf("shelf-screenshot-button")).toBeLessThan(order.indexOf("shelf-tray-button"));
   });
 
-  it("starts a capture with one click, as the app's capture button does, and the window opens on it", async () => {
+  it("starts a region selection with one click, as Shift+Print Screen does, and the window opens on the region", async () => {
     render(
       <>
         <ScreenshotOverlay />
@@ -255,12 +280,43 @@ describe("the Screenshot button in the tray", () => {
       </>,
     );
     fireEvent.click(screen.getByTestId("shelf-screenshot-button"));
-    // The app's own path: a request event to the overlay, for the whole screen.
-    expect(requests).toEqual([{ mode: "full", delay: 0, engine: "dom", hide: null }]);
+    // The app's own path: a request event to the overlay, for a region.
+    expect(requests).toEqual([{ mode: "region", delay: 0, engine: "dom", hide: null }]);
+    // The selector is up, and nothing is taken until a region is picked.
+    expect(screen.getByTestId("screenshot-region-overlay")).toBeInTheDocument();
+    await act(async () => {});
+    expect(captureScreen).not.toHaveBeenCalled();
+
+    dragRegion(100, 80, 300, 200);
     await waitFor(() => expect(captureScreen).toHaveBeenCalledTimes(1));
-    expect(captureScreen.mock.calls[0][0]).toMatchObject({ engine: "dom", region: null });
+    expect(captureScreen.mock.calls[0][0]).toMatchObject({
+      engine: "dom",
+      region: { x: 100, y: 80, width: 300, height: 200 },
+    });
+    expect(screen.queryByTestId("screenshot-region-overlay")).toBeNull();
     await finishCapture(1);
     expect(opened).toEqual([SCREENSHOT_APP_ID]);
+  });
+
+  it("is dismissed with Escape like any region selection, taking nothing", async () => {
+    render(
+      <>
+        <ScreenshotOverlay />
+        <ChromeShelf apps={[]} onAppClick={vi.fn()} onLauncherClick={vi.fn()} onTrayClick={vi.fn()} />
+      </>,
+    );
+    fireEvent.click(screen.getByTestId("shelf-screenshot-button"));
+    expect(screen.getByTestId("screenshot-region-overlay")).toBeInTheDocument();
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(screen.queryByTestId("screenshot-region-overlay")).toBeNull();
+    await act(async () => {});
+    expect(captureScreen).not.toHaveBeenCalled();
+    expect(opened).toEqual([]);
+    // Print Screen is still the whole screen: the button changed, the keys did not.
+    pressPrint();
+    await waitFor(() => expect(captureScreen).toHaveBeenCalledTimes(1));
+    expect(captureScreen.mock.calls[0][0]).toMatchObject({ region: null });
+    await finishCapture(1);
   });
 
   it("does not start a second capture when clicked again, or Print Screen is pressed, while one is under way", async () => {
@@ -272,10 +328,20 @@ describe("the Screenshot button in the tray", () => {
     );
     const button = screen.getByTestId("shelf-screenshot-button");
     fireEvent.click(button);
-    fireEvent.click(button);
-    await waitFor(() => expect(captureScreen).toHaveBeenCalledTimes(1));
+    // While the region is being picked: turned away, the selection stays as it was.
     fireEvent.click(button);
     pressPrint();
+    fireEvent.keyDown(document.body, CTRL_SHIFT_S);
+    await act(async () => {});
+    expect(captureScreen).not.toHaveBeenCalled();
+    expect(screen.getByTestId("screenshot-region-overlay")).toBeInTheDocument();
+
+    dragRegion(50, 50, 120, 90);
+    await waitFor(() => expect(captureScreen).toHaveBeenCalledTimes(1));
+    // And while the picture is being taken.
+    fireEvent.click(button);
+    pressPrint();
+    expect(screen.queryByTestId("screenshot-region-overlay")).toBeNull();
     await finishCapture(1);
     expect(captureScreen).toHaveBeenCalledTimes(1);
   });

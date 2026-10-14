@@ -138,6 +138,31 @@ describe("ToastHost — a notice that can be acted on", () => {
     }
   });
 
+  it("hands the focus on with the section for an account-limit notice", () => {
+    type PendingWindow = Window & { __clawboxPendingSettingsSection?: unknown; __clawboxPendingSettingsFocus?: unknown };
+    const sections: unknown[] = [];
+    const stopSections = listen(OPEN_SETTINGS_SECTION_EVENT, sections);
+    try {
+      render(<ToastHost />);
+      dispatch({
+        message: "Every Anthropic account on this ClawBox is at its usage limit.",
+        action: { open: "settings", section: "ai", focus: "anthropicAccounts" },
+      });
+
+      act(() => { fireEvent.click(screen.getByRole("button", { name: /— Open Settings → Providers$/ })); });
+
+      // Both ways, like the section: the event for a Settings window that is
+      // up, the handoff for one that is not open yet.
+      expect(sections).toEqual([{ section: "ai", focus: "anthropicAccounts" }]);
+      expect((window as PendingWindow).__clawboxPendingSettingsSection).toBe("ai");
+      expect((window as PendingWindow).__clawboxPendingSettingsFocus).toBe("anthropicAccounts");
+    } finally {
+      stopSections();
+      delete (window as PendingWindow).__clawboxPendingSettingsSection;
+      delete (window as PendingWindow).__clawboxPendingSettingsFocus;
+    }
+  });
+
   it("the X still only dismisses — it never opens anything", () => {
     const sections: unknown[] = [];
     const apps: unknown[] = [];
