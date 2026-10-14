@@ -57,7 +57,7 @@ Rows marked **OpenClaw/dual** or **Hermes/dual** exist only on those editions. C
 | `.env` | ✅ kept | ✅ kept (gitignored, not in wipe list) |
 | `.update-branch` (channel pin) | ✅ kept | ✅ kept |
 | `~/.openclaw` (AI config, credentials, chats) | ✅ kept | ❌ wiped |
-| `~/.hermes` (Hermes config, chats, agent install) | ✅ kept | ❌ wiped, except `hermes-agent` (the agent install) and the whole of `bin/` (which holds `tirith`, the pre-exec shell scanner) — neither can be re-downloaded in AP mode. `bin/` is kept entire rather than filtered down to `tirith`, so anything else upstream puts there survives too |
+| `~/.hermes` (Hermes config, chats, agent install) | ✅ kept | ❌ wiped, except the agent install — `hermes-agent/` (the checkout), `installs/` (its Python environment) and `tools/` (its interpreter) — and the whole of `bin/` (which holds `tirith`, the pre-exec shell scanner); none of them can be re-downloaded in AP mode. `bin/` is kept entire rather than filtered down to `tirith`, so anything else upstream puts there survives too |
 | `~/.clawkeep` (backup pairing) | ✅ kept | ❌ wiped |
 | `~/.codex` (Codex CLI auth and state) | ✅ kept | ❌ wiped |
 | `~/.local/share/codex` (the Codex CLI binary itself) | ✅ kept, replaced when the pinned version moves | ✅ kept (a 117 MB download the box cannot make in AP mode) |
