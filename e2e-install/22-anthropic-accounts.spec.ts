@@ -176,15 +176,20 @@ test.describe("Anthropic account pool (TASK-902)", () => {
 
   test.afterAll(async () => {
     if (!cookie) return;
-    for (const id of [ids.work, ids.personal].filter(Boolean)) {
-      const res = await post({ action: "remove", id });
-      // 404: the UI step already removed it.
-      expect([200, 404]).toContain(res.status);
-    }
-    await dockerExec(["rm", "-f", HANDOFF_PATH], { user: "clawbox" });
-    if (stagedSignIn) {
-      await openclaw(["config", "unset", ANTHROPIC_PROFILE_PATH]);
-      await expect.poll(anthropicRowListed, { timeout: 30_000 }).toBe(false);
+    try {
+      for (const id of [ids.work, ids.personal].filter(Boolean)) {
+        const res = await post({ action: "remove", id });
+        // 404: the UI step already removed it.
+        expect([200, 404]).toContain(res.status);
+      }
+      await dockerExec(["rm", "-f", HANDOFF_PATH], { user: "clawbox" });
+    } finally {
+      // Whatever happened above: a staged sign-in left behind would put an
+      // Anthropic row on Providers for every spec after this one.
+      if (stagedSignIn) {
+        await openclaw(["config", "unset", ANTHROPIC_PROFILE_PATH]);
+        await expect.poll(anthropicRowListed, { timeout: 30_000 }).toBe(false);
+      }
     }
   });
 
