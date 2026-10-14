@@ -24,8 +24,10 @@ vi.mock("@/lib/harness/credentials", () => creds);
 
 import { GET as listGET, POST as ingestPOST } from "@/app/setup-api/prime-radiant/ingest/route";
 import { GET as eventsGET } from "@/app/setup-api/prime-radiant/ingest/[id]/events/route";
+import { DELETE as jobDELETE, GET as jobGET } from "@/app/setup-api/prime-radiant/ingest/[id]/route";
+import { POST as retryPOST } from "@/app/setup-api/prime-radiant/ingest/[id]/retry/route";
 import { POST as uploadPOST } from "@/app/setup-api/prime-radiant/ingest/upload/route";
-import { setFlashClientOverride, type FlashClient } from "@/lib/prime-radiant/flash-client";
+import { FlashCallError, setFlashClientOverride, type FlashClient } from "@/lib/prime-radiant/flash-client";
 import { ingestFinished, listIngestJobs, stopIngest } from "@/lib/prime-radiant/ingest";
 import { readVaultSnapshot } from "@/lib/prime-radiant/vault";
 import { readWriterItems } from "@/lib/prime-radiant/writer";
@@ -51,11 +53,19 @@ const upload = (name: string, data: string, batch?: string) =>
 const events = (id: string, signal?: AbortSignal) =>
   eventsGET(new Request(`${API}/ingest/${id}/events`, { signal }), { params: Promise.resolve({ id }) });
 
+const params = (id: string) => ({ params: Promise.resolve({ id }) });
+const jobGet = (id: string) => jobGET(new Request(`${API}/ingest/${id}`), params(id));
+const jobStop = (id: string, headers: Record<string, string> = {}) =>
+  jobDELETE(new Request(`${API}/ingest/${id}`, { method: "DELETE", headers: { origin: ORIGIN, ...headers } }), params(id));
+const retry = (id: string, headers: Record<string, string> = {}) => retryPOST(post(`${API}/ingest/${id}/retry`, null, headers), params(id));
+
 let delayMs = 0;
+let failing = false;
 const client: FlashClient = {
   model: "deepseek-v4-flash",
   async complete(request) {
     if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
+    if (failing) throw new FlashCallError("refused", "plan", 403);
     const items = readWriterItems(request.user) ?? [];
     const cards = items.map((it) => ({
       i: it.i,
@@ -89,6 +99,7 @@ beforeEach(() => {
   creds.resolveClawaiToken.mockReset().mockResolvedValue(null);
   setFlashClientOverride(client);
   delayMs = 0;
+  failing = false;
   const caseDir = path.join(base, `case-${++n}`);
   filesRoot = path.join(caseDir, "home");
   fs.mkdirSync(path.join(filesRoot, "Documents", "acme"), { recursive: true });
@@ -296,5 +307,71 @@ describe("drop: upload then ingest", () => {
     const big = await uploadPOST(post(`${API}/ingest/upload?name=a.md`, "x", { "content-length": String(20 * 1024 * 1024) }));
     expect(big.status).toBe(413);
     expect((await big.json()).code).toBe("too_large");
+  });
+});
+
+describe("one job: read, stop, retry its dead letters", () => {
+  it("GET answers the job and its dead letters without a path, and 404 for an unknown id", async () => {
+    failing = true;
+    const { job } = await (await ingest({ folders: ["Documents"] })).json();
+    await ingestFinished(job.id);
+    const res = await jobGet(job.id);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.job).toMatchObject({ id: job.id, failed: 2, deadLetter: 2 });
+    expect(body.deadLetter).toHaveLength(2);
+    expect(body.deadLetter[0]).toEqual({ seq: expect.any(Number), label: expect.stringMatching(/Documents\/acme\//), error: expect.any(String), attempts: 1, bytes: expect.any(Number) });
+    expect(body.deadLetter.every((d: object) => !("source" in d))).toBe(true);
+    for (const id of ["ing-ffffffffffff", "../x"]) expect((await jobGet(id)).status).toBe(404);
+  });
+
+  it("DELETE stops a running job (202), then answers 409 not_running; the owner's page only", async () => {
+    delayMs = 300;
+    const { job } = await (await ingest({ folders: ["Documents"] })).json();
+    owner.hasOwnerSession.mockResolvedValueOnce(false);
+    expect((await jobStop(job.id)).status).toBe(403);
+    expect((await jobStop(job.id, { origin: "https://evil.example.com" })).status).toBe(403);
+    const res = await jobStop(job.id);
+    expect(res.status).toBe(202);
+    expect(await res.json()).toMatchObject({ stopping: true, job: { id: job.id } });
+    await ingestFinished(job.id);
+    const final = await (await jobGet(job.id)).json();
+    expect(final.job).toMatchObject({ error: "The ingest was stopped.", status: expect.not.stringMatching(/^running$/) });
+    const again = await jobStop(job.id);
+    expect(again.status).toBe(409);
+    expect((await again.json()).code).toBe("not_running");
+    expect((await jobStop("ing-ffffffffffff")).status).toBe(404);
+  });
+
+  it("POST retry starts a job over the dead letters, then has nothing left to retry", async () => {
+    failing = true;
+    const { job } = await (await ingest({ folders: ["Documents"] })).json();
+    await ingestFinished(job.id);
+    failing = false;
+    owner.hasOwnerSession.mockResolvedValueOnce(false);
+    expect((await retry(job.id)).status).toBe(403);
+
+    const res = await retry(job.id);
+    expect(res.status).toBe(202);
+    const { job: second } = await res.json();
+    expect(second).toMatchObject({ kind: "retry", retryOf: job.id, status: "running" });
+    const frames = await readSse(await events(second.id));
+    expect(frames.at(-1)).toMatchObject({ event: "end", data: { status: "done", done: 2, deadLetter: 0 } });
+    expect((await (await jobGet(job.id)).json()).deadLetter).toEqual([]);
+
+    const none = await retry(job.id);
+    expect(none.status).toBe(409);
+    expect((await none.json()).code).toBe("nothing_to_retry");
+    expect((await retry("ing-ffffffffffff")).status).toBe(404);
+  });
+
+  it("POST retry answers 412 without a ClawBox AI sign-in", async () => {
+    failing = true;
+    const { job } = await (await ingest({ folders: ["Documents"] })).json();
+    await ingestFinished(job.id);
+    setFlashClientOverride(null);
+    const res = await retry(job.id);
+    expect(res.status).toBe(412);
+    expect((await res.json()).code).toBe("no_credential");
   });
 });

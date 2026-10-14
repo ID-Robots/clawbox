@@ -19,7 +19,7 @@ import { openSqlite } from "@/lib/openclaw-session-store";
 import path from "@/lib/runtime-path";
 
 export const STATE_DB_FILE = "prime-radiant.sqlite";
-export const STATE_SCHEMA_VERSION = 2;
+export const STATE_SCHEMA_VERSION = 3;
 
 export function stateDbPathFor(vault: string): string {
   return path.join(path.dirname(vault), STATE_DB_FILE);
@@ -111,6 +111,25 @@ CREATE TABLE IF NOT EXISTS ingest_files (
 CREATE INDEX IF NOT EXISTS ingest_files_sha ON ingest_files (sha256, status);
 `;
 
+/**
+ * v3 — the retry queue and dead-letter list: a file row keeps where its bytes
+ * can be read again (`source`, an absolute path on this box, never answered
+ * by a route), how many rounds it was tried (`attempts`) and which later job
+ * took it over (`retried_by`). A job row keeps the job it retries
+ * (`retry_of`), how many of its files were put back on its own queue for a
+ * second round (`requeued`) and how many are still dead letters
+ * (`dead_letter`).
+ */
+const SCHEMA_V3 = `
+ALTER TABLE ingest_jobs ADD COLUMN retry_of TEXT;
+ALTER TABLE ingest_jobs ADD COLUMN requeued INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE ingest_jobs ADD COLUMN dead_letter INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE ingest_files ADD COLUMN source TEXT;
+ALTER TABLE ingest_files ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE ingest_files ADD COLUMN retried_by TEXT;
+CREATE INDEX IF NOT EXISTS ingest_files_dead ON ingest_files (job_id, status, retried_by);
+`;
+
 /** Open (creating and migrating as needed) the state database for `vault`. Caller closes it. */
 export function openStateDb(vault: string): DatabaseSync {
   const file = stateDbPathFor(vault);
@@ -123,6 +142,7 @@ export function openStateDb(vault: string): DatabaseSync {
     const steps: Array<[number, string]> = [
       [1, SCHEMA_V1],
       [2, SCHEMA_V2],
+      [3, SCHEMA_V3],
     ];
     for (const [target, sql] of steps) {
       if (version >= target) continue;

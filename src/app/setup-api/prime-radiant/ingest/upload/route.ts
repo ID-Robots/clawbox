@@ -7,7 +7,7 @@
  *
  * 200 `{ batch, name, bytes }` — `name` is the name it was staged under (a
  * rebuilt, never-clashing one). Refusals as `{ error, code }`: 400
- * `invalid_name` (not a .txt/.md/.pdf/.docx), 400 `empty`, 404
+ * `invalid_name` (not a .txt/.md/.pdf/.docx/.odt/.rtf), 400 `empty`, 404
  * `unknown_batch`, 409 `batch_full`, 413 `too_large` (9 MiB a document: the
  * middleware keeps only the first 10 MiB of a body), 507 `disk_full` (the box's disk
  * reserve).
@@ -20,7 +20,7 @@ import { fail, json, ownerWriteGuard } from "@/lib/prime-radiant/route-helpers";
 export const dynamic = "force-dynamic";
 
 const MESSAGES: Record<string, string> = {
-  invalid_name: "Prime Radiant reads .txt, .md, .pdf and .docx documents.",
+  invalid_name: "Prime Radiant reads .txt, .md, .pdf, .docx, .odt and .rtf documents.",
   empty: "The file is empty.",
   unknown_batch: "That upload batch is not there any more. Drop the files again.",
   batch_full: "One drop holds at most 200 files and 500 MB.",

@@ -238,10 +238,22 @@ export function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> 
   });
 }
 
-/** The wait before retry `attempt` (1-based): the server's Retry-After, else jittered linear backoff. */
+/** The first retry's base wait; each later one doubles it, up to {@link MAX_BACKOFF_MS}. */
+export const BASE_BACKOFF_MS = 2_000;
+export const MAX_BACKOFF_MS = 60_000;
+/** The spread added to a server's Retry-After, so a hundred calls refused together do not all come back together. */
+export const RETRY_AFTER_JITTER_MS = 2_000;
+
+/**
+ * The wait before retry `attempt` (1-based). The server's Retry-After plus a
+ * little jitter; otherwise exponential backoff (2 s, 4 s, 8 s, … capped at a
+ * minute) with "equal jitter" — half the step fixed, half random — so many
+ * calls refused by the same 429 spread out instead of retrying in lockstep.
+ */
 export function backoffMs(err: FlashCallError, attempt: number, random: () => number = Math.random): number {
-  if (err.retryAfterMs !== null) return err.retryAfterMs;
-  return Math.min(60_000, 2_000 * attempt + Math.floor(random() * 3_000));
+  if (err.retryAfterMs !== null) return err.retryAfterMs + Math.floor(random() * RETRY_AFTER_JITTER_MS);
+  const step = Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * 2 ** Math.max(0, Math.min(attempt - 1, 30)));
+  return Math.floor(step / 2 + random() * (step / 2));
 }
 
 export interface CallOutcome {
@@ -251,7 +263,7 @@ export interface CallOutcome {
 }
 
 /**
- * One request with jittered retries on 429, 5xx, a dropped connection and an
+ * One request with jittered exponential retries on 429, 5xx, a dropped connection and an
  * empty or non-JSON answer. A refused credential, a refused plan or an abort
  * is not retried. Throws the last {@link FlashCallError}.
  */
@@ -274,18 +286,5 @@ export async function completeWithRetry(client: FlashClient, request: FlashReque
 
 // ── cost estimate ─────────────────────────────────────────────────────────
 
-/**
- * Upstream list rates per million tokens, used ONLY to put an order of
- * magnitude on the Costs view. What the account is actually charged is the
- * ClawBox AI plan's business, not this table's.
- */
-export const USD_PER_MILLION: Readonly<Record<string, { input: number; cachedInput: number; output: number }>> = {
-  "deepseek-v4-flash": { input: 0.14, cachedInput: 0.0028, output: 0.28 },
-};
-
-export function estimateUsd(model: string, usage: FlashUsage): number {
-  const rate = USD_PER_MILLION[model] ?? USD_PER_MILLION["deepseek-v4-flash"];
-  const miss = Math.max(0, usage.promptTokens - usage.cacheHitTokens);
-  const usd = (miss * rate.input + usage.cacheHitTokens * rate.cachedInput + usage.completionTokens * rate.output) / 1_000_000;
-  return Math.round(usd * 1_000_000) / 1_000_000;
-}
+/** The rates and the arithmetic live in one place, `cost-rates.ts`. */
+export { estimateUsd } from "./cost-rates";

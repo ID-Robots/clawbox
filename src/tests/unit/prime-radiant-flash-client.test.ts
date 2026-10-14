@@ -144,7 +144,7 @@ describe("completeWithRetry", () => {
     const client = scripted(new FlashCallError("rate_limited", "busy", 429, 5000), new FlashCallError("server", "down", 502), ok);
     const out = await completeWithRetry(client, req, { sleep, random: () => 0 });
     expect(out).toEqual({ response: ok, attempts: 3 });
-    expect(sleep.mock.calls.map((c) => (c as unknown[])[0])).toEqual([5000, 4000]);
+    expect(sleep.mock.calls.map((c) => (c as unknown[])[0])).toEqual([5000, 2000]);
   });
 
   it("does not retry a refused credential, a refused plan or a stop", async () => {
@@ -178,11 +178,38 @@ describe("completeWithRetry", () => {
     await expect(completeWithRetry(client, req, { sleep: async () => undefined })).resolves.toMatchObject({ attempts: 2 });
   });
 
-  it("backs off linearly with jitter, capped", () => {
+  it("backs off exponentially with equal jitter, capped at a minute", () => {
     const e = new FlashCallError("server", "x");
-    expect(backoffMs(e, 1, () => 0)).toBe(2000);
-    expect(backoffMs(e, 2, () => 0.999)).toBe(6997);
-    expect(backoffMs(e, 100, () => 0)).toBe(60_000);
+    expect(backoffMs(e, 1, () => 0)).toBe(1000);
+    expect(backoffMs(e, 1, () => 0.999)).toBe(1999);
+    expect(backoffMs(e, 2, () => 0)).toBe(2000);
+    expect(backoffMs(e, 3, () => 0)).toBe(4000);
+    expect(backoffMs(e, 4, () => 0.5)).toBe(12000);
+    expect(backoffMs(e, 100, () => 0)).toBe(30_000);
+    expect(backoffMs(e, 100, () => 0.9999)).toBeLessThanOrEqual(60_000);
+  });
+
+  it("honours Retry-After and spreads the calls it refused together", () => {
+    const e = new FlashCallError("rate_limited", "busy", 429, 5_000);
+    expect(backoffMs(e, 1, () => 0)).toBe(5_000);
+    expect(backoffMs(e, 1, () => 0.5)).toBe(6_000);
+    const waits = new Set(Array.from({ length: 20 }, (_, i) => backoffMs(e, 1, () => i / 20)));
+    expect(waits.size).toBe(20);
+  });
+
+  it("waits the backoff between attempts and passes the abort signal", async () => {
+    const waits: number[] = [];
+    let n = 0;
+    const client: FlashClient = {
+      model: "m",
+      async complete() {
+        n += 1;
+        if (n < 4) throw new FlashCallError("rate_limited", "busy", 429);
+        return ok;
+      },
+    };
+    await completeWithRetry(client, req, { sleep: async (ms) => void waits.push(ms), random: () => 0 });
+    expect(waits).toEqual([1000, 2000, 4000]);
   });
 });
 
@@ -190,7 +217,7 @@ describe("cost estimate", () => {
   it("prices cache misses, cache hits and output separately", () => {
     expect(estimateUsd("deepseek-v4-flash", { promptTokens: 1_000_000, completionTokens: 1_000_000, cacheHitTokens: 0 })).toBeCloseTo(0.42, 6);
     expect(estimateUsd("deepseek-v4-flash", { promptTokens: 1_000_000, completionTokens: 0, cacheHitTokens: 1_000_000 })).toBeCloseTo(0.0028, 6);
-    expect(estimateUsd("unknown-model", { promptTokens: 0, completionTokens: 0, cacheHitTokens: 0 })).toBe(0);
+    expect(estimateUsd("unknown-model", { promptTokens: 1_000_000, completionTokens: 1_000_000, cacheHitTokens: 0 })).toBe(0);
   });
 });
 

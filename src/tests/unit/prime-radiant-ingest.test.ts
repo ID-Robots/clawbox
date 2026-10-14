@@ -12,7 +12,10 @@ import { execFileSync } from "child_process";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FlashCallError, type FlashClient, type FlashRequest } from "@/lib/prime-radiant/flash-client";
 import {
+  DEFAULT_PARALLEL,
   IngestBusyError,
+  NothingToRetryError,
+  UnknownJobError,
   getIngestJob,
   ingestFinished,
   listIngestJobs,
@@ -23,7 +26,9 @@ import {
   type IngestDeps,
   type IngestEvent,
 } from "@/lib/prime-radiant/ingest";
-import { insertJob, readCosts, readFiles, type IngestJob } from "@/lib/prime-radiant/ingest-store";
+import { insertFiles, insertJob, readCosts, readDeadLetter, readFiles, type IngestJob } from "@/lib/prime-radiant/ingest-store";
+import { deadLetterRoot } from "@/lib/prime-radiant/ingest-dead-letter";
+import { writeSettings } from "@/lib/prime-radiant/settings";
 import { readPage, readVaultSnapshot, vaultOperation } from "@/lib/prime-radiant/vault";
 import { withStateDb } from "@/lib/prime-radiant/state-db";
 import { readWriterItems, type WriterItem } from "@/lib/prime-radiant/writer";
@@ -215,19 +220,25 @@ describe("an ingest job", () => {
     write("a.md", "Doc a.");
     write("b.md", "Doc b.");
     write("c.md", "Doc c.");
-    const fake = fakeClient((items) => [cardFor(items[0]), { i: items[1].i, useful: false }, { i: items[2].i, title: "" }]);
+    const fake = fakeClient((items, call) =>
+      call === 1 ? [cardFor(items[0]), { i: items[1].i, useful: false }, { i: items[2].i, title: "" }] : items.map((it) => ({ i: it.i, title: "" })),
+    );
     const job = await run({ kind: "folders", folders: [docs] }, deps({ client: fake.client }));
-    expect(job).toMatchObject({ done: 1, skipped: 1, failed: 1, pages: 1, commits: 1, status: "done" });
-    expect(readFiles(vault, job.id).map((f) => f.status)).toEqual(["done", "skipped", "failed"]);
+    expect(job).toMatchObject({ done: 1, skipped: 1, failed: 1, pages: 1, commits: 1, status: "done", requeued: 1, deadLetter: 1 });
+    expect(fake.calls).toBe(2);
+    expect(fake.prompts[1].user).toContain("c.md");
+    expect(fake.prompts[1].user).not.toContain("a.md");
+    expect(readFiles(vault, job.id).map((f) => [f.status, f.attempts])).toEqual([["done", 1], ["skipped", 1], ["failed", 2]]);
   });
 
   it("asks once more for an unreadable answer, then fails the batch", async () => {
     write("a.md", "Doc a.");
     const garbled = fakeClient(() => "I am sorry, I cannot do that.");
     const job = await run({ kind: "folders", folders: [docs] }, deps({ client: garbled.client }));
-    expect(garbled.calls).toBe(2);
-    expect(job).toMatchObject({ failed: 1, done: 0, calls: 2, status: "done" });
-    expect(readCosts(vault, job.id)).toHaveLength(2);
+    // Two calls in the first round, two more in the retry queue's round.
+    expect(garbled.calls).toBe(4);
+    expect(job).toMatchObject({ failed: 1, done: 0, calls: 4, status: "done", requeued: 1, deadLetter: 1 });
+    expect(readCosts(vault, job.id)).toHaveLength(4);
 
     write("b.md", "Doc b.");
     const second = fakeClient((items, call) => (call === 1 ? "nope" : items.map(cardFor)));
@@ -358,6 +369,9 @@ describe("job records", () => {
       updatedAt: "2026-01-01T00:00:00.000Z",
       finishedAt: null,
       error: null,
+      retryOf: null,
+      requeued: 0,
+      deadLetter: 0,
       notes: [],
     };
     insertJob(vault, orphan);
@@ -374,5 +388,136 @@ describe("job records", () => {
   it("rebuilds job ids from their alphabet", () => {
     expect(safeJobId("ing-0123456789ab")).toBe("ing-0123456789ab");
     for (const bad of ["ing-0123456789aB", "ing-../../../x", "job-0123456789ab", "ing-0123456789abc", 5]) expect(safeJobId(bad)).toBeNull();
+  });
+});
+
+describe("the retry queue and the dead-letter list", () => {
+  it("tries a failed batch once more after a cooldown, in batches half the size", async () => {
+    for (let i = 0; i < 4; i++) write(`f${i}.md`, `Doc ${i}.`);
+    const sleeps: number[] = [];
+    // The first call keeps failing through its retries; everything after it answers.
+    const flaky = fakeClient((items, call) => (call <= 2 ? new FlashCallError("rate_limited", "busy", 429) : items.map(cardFor)));
+    const job = await run(
+      { kind: "folders", folders: [docs] },
+      deps({ client: flaky.client, batchSize: 4, retry: { attempts: 2, sleep: async (ms) => void sleeps.push(ms) }, requeueDelayMs: 1234 }),
+    );
+    expect(job).toMatchObject({ status: "done", done: 4, failed: 0, requeued: 4, deadLetter: 0, commits: 2 });
+    expect(job.notes.join(" ")).toMatch(/4 document\(s\) failed their first round/);
+    expect(sleeps).toContain(1234);
+    // Round two sent two batches of two.
+    expect(flaky.prompts.slice(2).map((p) => (readWriterItems(p.user) ?? []).length)).toEqual([2, 2]);
+    expect(readFiles(vault, job.id).every((f) => f.status === "done" && f.attempts === 2)).toBe(true);
+  });
+
+  it("does not requeue what a second round cannot fix: a stop, a refused credential, an unextractable file", async () => {
+    write("a.md", "Doc a.");
+    write("broken.pdf", "%PDF");
+    const refused = fakeClient(() => new FlashCallError("auth", "refused", 401));
+    const job = await run({ kind: "folders", folders: [docs] }, deps({ client: refused.client, extractor: async () => false }));
+    expect(job.requeued).toBe(0);
+    expect(refused.calls).toBe(1);
+  });
+
+  it("keeps what still fails as dead letters, and a retry job takes them over exactly once", async () => {
+    write("a.md", "Doc a.");
+    write("b.md", "Doc b.");
+    const down = fakeClient(() => new FlashCallError("server", "down", 503));
+    const failed = await run({ kind: "folders", folders: [docs] }, deps({ client: down.client, retry: { ...noSleep, attempts: 1 } }));
+    expect(failed).toMatchObject({ done: 0, failed: 2, requeued: 2, deadLetter: 2 });
+    expect(failed.notes.join(" ")).toMatch(/2 document\(s\) still failed; they can be retried/);
+    const dead = readDeadLetter(vault, failed.id);
+    expect(dead.map((d) => [d.error, d.attempts])).toEqual([["model call failed (server)", 2], ["model call failed (server)", 2]]);
+    expect(dead.every((d) => !("source" in d))).toBe(true);
+
+    const fake = fakeClient();
+    const retried = await run({ kind: "retry", retryOf: failed.id }, deps({ client: fake.client }));
+    expect(retried).toMatchObject({ kind: "retry", retryOf: failed.id, folders: [`retry/${failed.id}`], total: 2, done: 2, deadLetter: 0 });
+    expect(getIngestJob(failed.id, vault)?.deadLetter).toBe(0);
+    expect(readFiles(vault, failed.id).every((f) => f.retriedBy === retried.id)).toBe(true);
+    expect((await readVaultSnapshot(vault)).pages).toHaveLength(2);
+
+    await expect(startIngest({ kind: "retry", retryOf: failed.id }, deps({ client: fake.client }))).rejects.toBeInstanceOf(NothingToRetryError);
+    await expect(startIngest({ kind: "retry", retryOf: "ing-ffffffffffff" }, deps({ client: fake.client }))).rejects.toBeInstanceOf(UnknownJobError);
+  });
+
+  it("makes the files a stop never reached dead letters", async () => {
+    for (let i = 0; i < 4; i++) write(`f${i}.md`, `Doc ${i}.`);
+    const slow = fakeClient(undefined, 80);
+    const job = await startIngest({ kind: "folders", folders: [docs] }, deps({ client: slow.client, batchSize: 1, parallel: 1 }));
+    await new Promise((r) => setTimeout(r, 40));
+    stopIngest(job.id);
+    await ingestFinished(job.id);
+    const final = getIngestJob(job.id, vault)!;
+    expect(final.deadLetter).toBe(4 - final.done);
+    expect(final.deadLetter).toBeGreaterThan(0);
+  });
+
+  it("keeps a dropped file that still failed, retries it from the kept copy, then removes the copy", async () => {
+    const staged = path.join(root, "staged");
+    fs.mkdirSync(path.join(staged, "sub"), { recursive: true });
+    fs.writeFileSync(path.join(staged, "sub", "price-list.md"), "Acme price list for widgets.");
+    const down = fakeClient(() => new FlashCallError("server", "down", 503));
+    const failed = await run({ kind: "upload", dir: staged, batch: "0123456789abcdef" }, deps({ client: down.client, retry: { ...noSleep, attempts: 1 } }));
+    expect(failed.deadLetter).toBe(1);
+    expect(fs.existsSync(staged)).toBe(false);
+    const kept = path.join(deadLetterRoot(), failed.id, "sub", "price-list.md");
+    expect(fs.readFileSync(kept, "utf8")).toBe("Acme price list for widgets.");
+
+    const retried = await run({ kind: "retry", retryOf: failed.id }, deps({ client: fakeClient().client }));
+    expect(retried).toMatchObject({ done: 1, deadLetter: 0 });
+    expect(fs.existsSync(kept)).toBe(false);
+    expect(fs.existsSync(path.join(deadLetterRoot(), failed.id))).toBe(false);
+  });
+
+  it("drops a dead letter whose file is gone instead of listing it for ever", async () => {
+    const a = write("a.md", "Doc a.");
+    const down = fakeClient(() => new FlashCallError("server", "down", 503));
+    const failed = await run({ kind: "folders", folders: [docs] }, deps({ client: down.client, retry: { ...noSleep, attempts: 1 } }));
+    fs.rmSync(a);
+    const retried = await run({ kind: "retry", retryOf: failed.id }, deps({ client: fakeClient().client }));
+    expect(retried).toMatchObject({ failed: 1, deadLetter: 0 });
+    expect(readFiles(vault, retried.id)[0].error).toBe("gone");
+  });
+
+  it("turns a restart's unreached files into dead letters", async () => {
+    write("a.md", "Doc a.");
+    await run({ kind: "folders", folders: [docs] }, deps({ client: fakeClient().client }));
+    const orphan = { ...(getIngestJob(listIngestJobs(vault)[0].id, vault) as IngestJob), id: "ing-bbbbbbbbbbbb", status: "running" as const, finishedAt: null };
+    insertJob(vault, orphan);
+    insertFiles(vault, orphan.id, [{ seq: 0, label: "~/docs/x.md", source: path.join(docs, "x.md") }]);
+    expect(getIngestJob(orphan.id, vault)).toMatchObject({ status: "interrupted", deadLetter: 1 });
+    expect(readDeadLetter(vault, orphan.id)[0]).toMatchObject({ label: "~/docs/x.md", error: "interrupted" });
+  });
+});
+
+describe("settings an ingest follows", () => {
+  it("runs 128 calls at once by default, or what the settings file says", async () => {
+    expect(DEFAULT_PARALLEL).toBe(128);
+    writeSettings({ ingest: { parallel: 2 } });
+    for (let i = 0; i < 6; i++) write(`f${i}.md`, `Document number ${i}.`);
+    const slow = fakeClient(undefined, 30);
+    const { parallel: _p, ...rest } = deps({ client: slow.client, batchSize: 1 });
+    void _p;
+    const job = await run({ kind: "folders", folders: [docs] }, rest);
+    expect(job.done).toBe(6);
+    expect(slow.maxInFlight).toBe(2);
+  });
+
+  it("walks with the settings file's exclude list and says what it left out", async () => {
+    write("a.md", "Doc a.");
+    write("drafts/b.md", "Doc b.");
+    writeSettings({ ingest: { exclude: ["drafts"] } });
+    const job = await run({ kind: "folders", folders: [docs] }, deps({ client: fakeClient().client }));
+    expect(job).toMatchObject({ total: 1, done: 1 });
+    expect(job.notes).toContain("1 folder(s) were left out by the exclude list.");
+  });
+
+  it("prices calls with the settings file's rates", async () => {
+    write("a.md", "Doc a.");
+    writeSettings({ costRates: { "deepseek-v4-flash": { input: 1000, output: 1000 } } });
+    const job = await run({ kind: "folders", folders: [docs] }, deps({ client: fakeClient().client }));
+    // 1000 prompt + 100 completion tokens at 1000 USD per million each.
+    expect(job.usdEstimate).toBeCloseTo(1.1, 6);
+    expect(readCosts(vault, job.id)[0].usdEstimate).toBeCloseTo(1.1, 6);
   });
 });

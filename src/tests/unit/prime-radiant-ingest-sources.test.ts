@@ -54,12 +54,47 @@ describe("scanFolders", () => {
     write("node_modules/pkg/readme.md");
     write("deep/__pycache__/x.txt");
     write("project/dist/out.md");
+    write("g.rtf");
     const scan = await scanFolders([docs]);
-    expect(scan.files.map((f) => path.relative(docs, f.abs)).sort()).toEqual(["a.md", "d.docx", "sub/b.txt", "sub/c.PDF"]);
+    expect(scan.files.map((f) => path.relative(docs, f.abs)).sort()).toEqual(["a.md", "d.docx", "f.odt", "g.rtf", "sub/b.txt", "sub/c.PDF"]);
     expect(scan.files.find((f) => f.abs.endsWith("c.PDF"))?.ext).toBe(".pdf");
-    expect(scan.unsupported).toBe(2);
+    expect(scan.unsupported).toBe(1);
+    expect(scan.excluded).toBe(3);
     expect(scan.truncated).toBe(false);
-    expect([...INGEST_EXTENSIONS]).toEqual([".txt", ".md", ".pdf", ".docx"]);
+    expect([...INGEST_EXTENSIONS]).toEqual([".txt", ".md", ".pdf", ".docx", ".odt", ".rtf"]);
+  });
+
+  it("leaves out worktrees, scratch and spike folders, and archives of agent runs by default", async () => {
+    write("notes/a.md");
+    write("notes/worktrees/run-1/a.md");
+    write("checkout-2/README.md");
+    fs.writeFileSync(path.join(docs, "checkout-2", ".git"), "gitdir: /somewhere/else/.git/worktrees/checkout-2\n");
+    write("main-repo/doc.md");
+    fs.mkdirSync(path.join(docs, "main-repo", ".git"));
+    write("widget-spikes/round-1/cards.md");
+    write("Scratch/tmp-notes.md");
+    write("data/coding-agent-artifacts/run-x/report.md");
+    write("coding-runs/2026/report.md");
+    write("vendor/lib/README.md");
+    write("search_cache/x.md");
+    const scan = await scanFolders([docs]);
+    expect(scan.files.map((f) => path.relative(docs, f.abs)).sort()).toEqual(["main-repo/doc.md", "notes/a.md"]);
+    expect(scan.excluded).toBe(8);
+  });
+
+  it("uses the exclude list it is given instead of the defaults", async () => {
+    write("a.md");
+    write("private/b.md");
+    write("Private-2024/c.md");
+    write("node_modules/pkg/readme.md");
+    const scan = await scanFolders([docs], { exclude: ["private*"] });
+    expect(scan.files.map((f) => path.relative(docs, f.abs)).sort()).toEqual(["a.md", "node_modules/pkg/readme.md"]);
+    expect(scan.excluded).toBe(2);
+    // ClawBox's own output stays out whatever the list says.
+    const own = process.env.PRIME_RADIANT_DIR!;
+    fs.mkdirSync(path.join(own, "vault"), { recursive: true });
+    fs.writeFileSync(path.join(own, "vault", "page.md"), "page");
+    expect((await scanFolders([path.dirname(own)], { exclude: [] })).files.some((f) => f.abs.includes("vault"))).toBe(false);
   });
 
   it("never walks into Prime Radiant's own folder (the vault would ingest itself)", async () => {

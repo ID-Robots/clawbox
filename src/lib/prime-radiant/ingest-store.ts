@@ -6,6 +6,12 @@
  * of what was read so a later job skips documents already turned into pages
  * and retries the ones that failed. Every model call is one `costs` row.
  *
+ * The DEAD-LETTER list of a job is its files that still failed after the
+ * job's own second round and that no later job has taken over: `failed`, a
+ * readable `source` kept, `retried_by` empty. `POST ingest/<id>/retry` starts
+ * a job over exactly those ({@link claimDeadLetter} hands them over in one
+ * transaction, so two retries can never take the same file).
+ *
  * SERVER ONLY.
  */
 
@@ -18,7 +24,7 @@ export type IngestStatus = (typeof INGEST_STATUSES)[number];
 export const INGEST_PHASES = ["queued", "scan", "write", "done"] as const;
 export type IngestPhase = (typeof INGEST_PHASES)[number];
 
-export type IngestKind = "folders" | "upload";
+export type IngestKind = "folders" | "upload" | "retry";
 
 export type FileStatus = "pending" | "done" | "failed" | "duplicate" | "skipped";
 
@@ -46,6 +52,12 @@ export interface IngestJob {
   finishedAt: string | null;
   error: string | null;
   notes: string[];
+  /** The job whose dead letters this one retries, or null. */
+  retryOf: string | null;
+  /** Files put back on this job's own queue for a second round. */
+  requeued: number;
+  /** Files still failed after both rounds and not taken over by a later job. */
+  deadLetter: number;
 }
 
 export interface FileRow {
@@ -56,6 +68,8 @@ export interface FileRow {
   status: FileStatus;
   pages: string[];
   error: string | null;
+  attempts: number;
+  retriedBy: string | null;
 }
 
 interface JobRow {
@@ -78,6 +92,9 @@ interface JobRow {
   finished_at: string | null;
   error: string | null;
   notes: string;
+  retry_of: string | null;
+  requeued: number;
+  dead_letter: number;
 }
 
 function jsonList(text: string): string[] {
@@ -92,7 +109,7 @@ function jsonList(text: string): string[] {
 function rowToJob(r: JobRow): IngestJob {
   return {
     id: r.id,
-    kind: r.kind === "upload" ? "upload" : "folders",
+    kind: r.kind === "upload" || r.kind === "retry" ? r.kind : "folders",
     status: (INGEST_STATUSES as readonly string[]).includes(r.status) ? (r.status as IngestStatus) : "failed",
     phase: (INGEST_PHASES as readonly string[]).includes(r.phase) ? (r.phase as IngestPhase) : "done",
     folders: jsonList(r.folders),
@@ -110,6 +127,9 @@ function rowToJob(r: JobRow): IngestJob {
     finishedAt: r.finished_at,
     error: r.error,
     notes: jsonList(r.notes),
+    retryOf: r.retry_of ?? null,
+    requeued: r.requeued ?? 0,
+    deadLetter: r.dead_letter ?? 0,
   };
 }
 
@@ -117,8 +137,8 @@ export function insertJob(vault: string, job: IngestJob): void {
   withStateDb(vault, (db) => {
     db.prepare(
       `INSERT INTO ingest_jobs (id, kind, status, phase, folders, total, done, failed, skipped, duplicates, pages, commits,
-         calls, usd_estimate, created_at, updated_at, finished_at, error, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         calls, usd_estimate, created_at, updated_at, finished_at, error, notes, retry_of, requeued, dead_letter)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       job.id,
       job.kind,
@@ -139,6 +159,9 @@ export function insertJob(vault: string, job: IngestJob): void {
       job.finishedAt,
       job.error,
       JSON.stringify(job.notes),
+      job.retryOf,
+      job.requeued,
+      job.deadLetter,
     );
   });
 }
@@ -147,7 +170,8 @@ export function saveJob(vault: string, job: IngestJob): void {
   withStateDb(vault, (db) => {
     db.prepare(
       `UPDATE ingest_jobs SET status = ?, phase = ?, total = ?, done = ?, failed = ?, skipped = ?, duplicates = ?, pages = ?,
-         commits = ?, calls = ?, usd_estimate = ?, updated_at = ?, finished_at = ?, error = ?, notes = ? WHERE id = ?`,
+         commits = ?, calls = ?, usd_estimate = ?, updated_at = ?, finished_at = ?, error = ?, notes = ?, requeued = ?,
+         dead_letter = ? WHERE id = ?`,
     ).run(
       job.status,
       job.phase,
@@ -164,6 +188,8 @@ export function saveJob(vault: string, job: IngestJob): void {
       job.finishedAt,
       job.error,
       JSON.stringify(job.notes),
+      job.requeued,
+      job.deadLetter,
       job.id,
     );
   });
@@ -194,10 +220,18 @@ export function settleOrphanJobs(vault: string, live: ReadonlySet<string>, at: s
       `UPDATE ingest_jobs SET status = 'interrupted', phase = 'done', finished_at = ?, updated_at = ?,
          error = 'The box restarted while this ingest ran. Run it again to finish it.' WHERE id = ?`,
     );
+    // What it never reached is retryable like any other failure.
+    const pending = db.prepare(
+      "UPDATE ingest_files SET status = 'failed', error = 'interrupted' WHERE job_id = ? AND status = 'pending'",
+    );
     let n = 0;
     for (const { id } of rows) {
       if (live.has(id)) continue;
-      stmt.run(at, at, id);
+      inTransaction(db, () => {
+        stmt.run(at, at, id);
+        pending.run(id);
+        recountDeadLetter(db, id);
+      });
       n += 1;
     }
     return n;
@@ -215,12 +249,16 @@ function inTransaction(db: DatabaseSync, fn: () => void): void {
   }
 }
 
-export function insertFiles(vault: string, jobId: string, files: ReadonlyArray<{ seq: number; label: string }>): void {
+export function insertFiles(
+  vault: string,
+  jobId: string,
+  files: ReadonlyArray<{ seq: number; label: string; source?: string | null }>,
+): void {
   if (files.length === 0) return;
   withStateDb(vault, (db) => {
-    const stmt = db.prepare("INSERT INTO ingest_files (job_id, seq, label, status) VALUES (?, ?, ?, 'pending')");
+    const stmt = db.prepare("INSERT INTO ingest_files (job_id, seq, label, source, status) VALUES (?, ?, ?, ?, 'pending')");
     inTransaction(db, () => {
-      for (const f of files) stmt.run(jobId, f.seq, f.label);
+      for (const f of files) stmt.run(jobId, f.seq, f.label, f.source ?? null);
     });
   });
 }
@@ -232,6 +270,8 @@ export interface FileUpdate {
   bytes?: number;
   pages?: string[];
   error?: string | null;
+  /** Rounds this file was tried in (the job's own retry queue is the second). */
+  attempts?: number;
 }
 
 export function updateFiles(vault: string, jobId: string, updates: readonly FileUpdate[]): void {
@@ -239,11 +279,20 @@ export function updateFiles(vault: string, jobId: string, updates: readonly File
   withStateDb(vault, (db) => {
     const stmt = db.prepare(
       `UPDATE ingest_files SET status = ?, sha256 = COALESCE(?, sha256), bytes = COALESCE(?, bytes),
-         pages = COALESCE(?, pages), error = ? WHERE job_id = ? AND seq = ?`,
+         pages = COALESCE(?, pages), error = ?, attempts = COALESCE(?, attempts) WHERE job_id = ? AND seq = ?`,
     );
     inTransaction(db, () => {
       for (const u of updates) {
-        stmt.run(u.status, u.sha256 ?? null, u.bytes ?? null, u.pages ? JSON.stringify(u.pages) : null, u.error ?? null, jobId, u.seq);
+        stmt.run(
+          u.status,
+          u.sha256 ?? null,
+          u.bytes ?? null,
+          u.pages ? JSON.stringify(u.pages) : null,
+          u.error ?? null,
+          u.attempts ?? null,
+          jobId,
+          u.seq,
+        );
       }
     });
   });
@@ -251,9 +300,89 @@ export function updateFiles(vault: string, jobId: string, updates: readonly File
 
 export function readFiles(vault: string, jobId: string): FileRow[] {
   return withStateDb(vault, (db) =>
-    (db.prepare("SELECT seq, label, sha256, bytes, status, pages, error FROM ingest_files WHERE job_id = ? ORDER BY seq").all(jobId) as Array<
-      Omit<FileRow, "pages"> & { pages: string }
-    >).map((r) => ({ ...r, pages: jsonList(r.pages) })),
+    (db
+      .prepare(
+        `SELECT seq, label, sha256, bytes, status, pages, error, attempts, retried_by AS retriedBy
+           FROM ingest_files WHERE job_id = ? ORDER BY seq`,
+      )
+      .all(jobId) as Array<Omit<FileRow, "pages"> & { pages: string }>).map((r) => ({ ...r, pages: jsonList(r.pages) })),
+  );
+}
+
+// ── the dead-letter list ──────────────────────────────────────────────────
+
+const DEAD_LETTER_WHERE = "job_id = ? AND status = 'failed' AND retried_by IS NULL AND source IS NOT NULL";
+
+/** A dead letter as a route may answer it: no absolute path. */
+export interface DeadLetter {
+  seq: number;
+  label: string;
+  error: string | null;
+  attempts: number;
+  bytes: number;
+}
+
+/** A dead letter as a retry job reads it: where its bytes are. */
+export interface DeadLetterSource extends DeadLetter {
+  source: string;
+}
+
+function recountDeadLetter(db: DatabaseSync, jobId: string): number {
+  const row = db.prepare(`SELECT COUNT(*) AS n FROM ingest_files WHERE ${DEAD_LETTER_WHERE}`).get(jobId) as { n: number };
+  db.prepare("UPDATE ingest_jobs SET dead_letter = ? WHERE id = ?").run(row.n, jobId);
+  return row.n;
+}
+
+/** Recount a job's dead letters into its row and answer the number. */
+export function refreshDeadLetterCount(vault: string, jobId: string): number {
+  return withStateDb(vault, (db) => recountDeadLetter(db, jobId));
+}
+
+export function readDeadLetter(vault: string, jobId: string, limit = 500): DeadLetter[] {
+  return withStateDb(vault, (db) =>
+    db
+      .prepare(`SELECT seq, label, error, attempts, bytes FROM ingest_files WHERE ${DEAD_LETTER_WHERE} ORDER BY seq LIMIT ?`)
+      .all(jobId, limit) as unknown as DeadLetter[],
+  );
+}
+
+/**
+ * Hand a job's dead letters to `retryJobId`: every row is marked
+ * `retried_by` in one transaction and answered with its source, so a second
+ * retry of the same job finds nothing left to take. The original job's
+ * count drops to zero.
+ */
+export function claimDeadLetter(vault: string, jobId: string, retryJobId: string): DeadLetterSource[] {
+  return withStateDb(vault, (db) => {
+    let rows: DeadLetterSource[] = [];
+    inTransaction(db, () => {
+      rows = db
+        .prepare(`SELECT seq, label, error, attempts, bytes, source FROM ingest_files WHERE ${DEAD_LETTER_WHERE} ORDER BY seq`)
+        .all(jobId) as unknown as DeadLetterSource[];
+      db.prepare(`UPDATE ingest_files SET retried_by = ? WHERE ${DEAD_LETTER_WHERE}`).run(retryJobId, jobId);
+      recountDeadLetter(db, jobId);
+    });
+    return rows;
+  });
+}
+
+/** Where a file's bytes can be read again (null: nowhere). */
+export function setFileSources(vault: string, jobId: string, sources: ReadonlyArray<{ seq: number; source: string | null }>): void {
+  if (sources.length === 0) return;
+  withStateDb(vault, (db) => {
+    const stmt = db.prepare("UPDATE ingest_files SET source = ? WHERE job_id = ? AND seq = ?");
+    inTransaction(db, () => {
+      for (const s of sources) stmt.run(s.source, jobId, s.seq);
+    });
+  });
+}
+
+/** Every source a job's rows still point at, with their status (cleanup of kept upload copies). */
+export function readFileSources(vault: string, jobId: string): Array<{ seq: number; status: FileStatus; source: string }> {
+  return withStateDb(vault, (db) =>
+    db
+      .prepare("SELECT seq, status, source FROM ingest_files WHERE job_id = ? AND source IS NOT NULL ORDER BY seq")
+      .all(jobId) as unknown as Array<{ seq: number; status: FileStatus; source: string }>,
   );
 }
 

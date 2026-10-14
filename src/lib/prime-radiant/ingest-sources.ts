@@ -2,16 +2,19 @@
  * Finding and reading the documents an ingest turns into pages.
  *
  * - The walk is Memory Shard's (`walkFiles`: no symlinks followed, dot-entries
- *   skipped, an entry budget per folder) with an exclude list on top —
- *   dependency trees, caches, build output and Prime Radiant's own folder,
- *   because an ingest that reads its own vault (or another indexer's scratch
- *   copies) writes pages about pages.
+ *   skipped, an entry budget per folder) with an exclude list on top (see
+ *   `ingest-exclude.ts`: version control, dependencies, caches, build output,
+ *   worktrees, scratch folders, archives of agent runs — the owner's to
+ *   change), plus, always, ClawBox's own output folders and any linked git
+ *   worktree (a folder whose `.git` is a file): an ingest that reads its own
+ *   vault, another indexer's scratch copies or a second checkout of the same
+ *   project writes pages about pages.
  * - Every file is read ONCE through one no-follow handle: the size check, the
  *   SHA-256 and the bytes all come from that descriptor. The hash comes first
  *   — a document already turned into pages (or seen earlier in the same job)
  *   is never extracted again.
- * - PDF and Word documents go through the extractors the box already has
- *   (`extractOne`: pdftotext, LibreOffice), run over a PRIVATE copy of the
+ * - PDF, Word, OpenDocument and RTF documents go through the extractors the
+ *   box already has (`extractOne`: pdftotext, LibreOffice), run over a PRIVATE copy of the
  *   bytes that were hashed, so what is extracted is exactly what was hashed.
  * - Text and the path label are redacted here, before anything can reach a
  *   model.
@@ -21,33 +24,18 @@
 
 import crypto from "crypto";
 import fs from "fs/promises";
-import { constants as fsConstants } from "fs";
+import { constants as fsConstants, lstatSync } from "fs";
 import os from "os";
 import path from "@/lib/runtime-path";
 import { EXTRACT_ROOT, MAX_DOCUMENT_BYTES, extractOne, newWalkBudget, walkFiles } from "@/lib/memory-extract";
 import { redactPath, redactText } from "./redact";
+import { DEFAULT_INGEST_EXCLUDES, compileExcludes } from "./ingest-exclude";
 import { primeRadiantRoot } from "./paths";
 import { MAX_TEXT_CHARS_PER_FILE } from "./writer";
 
-/** What an ingest reads. The box's extractors handle PDF and Word documents. */
-export const INGEST_EXTENSIONS = [".txt", ".md", ".pdf", ".docx"] as const;
+/** What an ingest reads. The box's extractors handle PDF, Word, OpenDocument and RTF documents. */
+export const INGEST_EXTENSIONS = [".txt", ".md", ".pdf", ".docx", ".odt", ".rtf"] as const;
 export type IngestExtension = (typeof INGEST_EXTENSIONS)[number];
-
-/** Folders never walked into, whatever folder the owner picked. */
-export const SKIPPED_DIR_NAMES: ReadonlySet<string> = new Set([
-  "node_modules",
-  "bower_components",
-  "__pycache__",
-  "venv",
-  "site-packages",
-  "dist",
-  "build",
-  "target",
-  "coverage",
-  "Trash",
-  "$RECYCLE.BIN",
-  "System Volume Information",
-]);
 
 /** Files one job reads at most. */
 export const MAX_JOB_FILES = 5_000;
@@ -72,6 +60,18 @@ export function isOwnOutput(dir: string): boolean {
   return ownOutputDirs().some((own) => inside(own, resolved));
 }
 
+/**
+ * A linked git worktree: a folder whose `.git` is a FILE pointing back at the
+ * main repository. Its documents are the same project's, a second time.
+ */
+export function isLinkedWorktree(dir: string): boolean {
+  try {
+    return lstatSync(path.join(dir, ".git")).isFile();
+  } catch {
+    return false;
+  }
+}
+
 /** The label a document is known by everywhere outside this box: home folded, secrets redacted. */
 export function sourceLabel(abs: string): string {
   return redactPath(abs, { homeDir: os.homedir() }).text;
@@ -89,6 +89,8 @@ export interface ScanResult {
   notes: string[];
   /** Files of a kind the ingest does not read. */
   unsupported: number;
+  /** Folders left out: the exclude list, a linked worktree, ClawBox's own output. */
+  excluded: number;
   truncated: boolean;
 }
 
@@ -99,17 +101,29 @@ export interface ScanResult {
  */
 export async function scanFolders(
   folders: readonly string[],
-  options: { labelOf?: (abs: string) => string; maxFiles?: number; signal?: AbortSignal } = {},
+  options: {
+    labelOf?: (abs: string) => string;
+    maxFiles?: number;
+    signal?: AbortSignal;
+    /** Folder-name patterns never walked into (default {@link DEFAULT_INGEST_EXCLUDES}). */
+    exclude?: readonly string[];
+  } = {},
 ): Promise<ScanResult> {
   const labelOf = options.labelOf ?? sourceLabel;
   const maxFiles = options.maxFiles ?? MAX_JOB_FILES;
   const files: ScannedFile[] = [];
   const notes: string[] = [];
   let unsupported = 0;
+  let excluded = 0;
   let truncated = false;
   const seen = new Set<string>();
   const own = ownOutputDirs();
-  const skipDir = (full: string, name: string) => SKIPPED_DIR_NAMES.has(name) || own.some((o) => inside(o, path.resolve(full)));
+  const excludedName = compileExcludes(options.exclude ?? DEFAULT_INGEST_EXCLUDES);
+  const skipDir = (full: string, name: string) => {
+    const skip = excludedName(name) || own.some((o) => inside(o, path.resolve(full))) || isLinkedWorktree(full);
+    if (skip) excluded += 1;
+    return skip;
+  };
   for (const folder of folders) {
     const budget = newWalkBudget();
     for await (const abs of walkFiles(path.resolve(folder), budget, 0, { skipDir })) {
@@ -136,7 +150,7 @@ export async function scanFolders(
       break;
     }
   }
-  return { files, notes, unsupported, truncated };
+  return { files, notes, unsupported, excluded, truncated };
 }
 
 /** The bytes of one file through one no-follow handle, with their hash. */
