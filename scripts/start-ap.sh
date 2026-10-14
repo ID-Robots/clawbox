@@ -66,6 +66,8 @@ ROOT="${CLAWBOX_ROOT:-/home/clawbox/clawbox}"
 CONFIG_FILE="$ROOT/data/config.json"
 DNSMASQ_SHARED="/etc/NetworkManager/dnsmasq-shared.d"
 CAPTIVE_CONF="$DNSMASQ_SHARED/captive-portal.conf"
+CAPTIVE_PROBES_CONF="$DNSMASQ_SHARED/captive-probes.conf"
+CAPTIVE_PROBE_HOSTS="connectivitycheck.gstatic.com connectivitycheck.android.com clients1.google.com clients3.google.com captive.apple.com www.msftconnecttest.com www.msftncsi.com detectportal.firefox.com nmcheck.gnome.org connectivity-check.ubuntu.com"
 
 # Read one KEY=VALUE out of a file this script must not trust with `source`.
 #
@@ -99,7 +101,38 @@ HOTSPOT_ENV="$ROOT/data/hotspot.env"
 HOTSPOT_SSID="$(read_env_value "$HOTSPOT_ENV" HOTSPOT_SSID)"
 HOTSPOT_PASSWORD="$(read_env_value "$HOTSPOT_ENV" HOTSPOT_PASSWORD)"
 HOTSPOT_DISABLED="$(read_env_value "$HOTSPOT_ENV" HOTSPOT_DISABLED)"
-SSID="${HOTSPOT_SSID:-ClawBox-Setup}"
+# The per-device credentials printed on the box's sticker (scripts/device-secret.sh,
+# a root-owned sibling in libexec). An owner's own choice in hotspot.env wins;
+# a box with no device secret (never provisioned, or a secret cloned from
+# another board) keeps the legacy open "ClawBox-Setup" hotspot. Neither the
+# secret nor the PSK is ever echoed. The profile NAME stays "ClawBox-Setup"
+# whatever the SSID is — ap-watchdog.sh and wifi-failover.sh find the AP by it.
+DEVICE_SSID=""
+DEVICE_PSK=""
+DEVICE_SECRET_SH="$(dirname "${BASH_SOURCE[0]}")/device-secret.sh"
+if [ -x "$DEVICE_SECRET_SH" ]; then
+  device_creds_rc=0
+  device_creds="$("$DEVICE_SECRET_SH" load 2>/dev/null)" || device_creds_rc=$?
+  case "$device_creds_rc" in
+    0)
+      DEVICE_SSID="$(printf '%s\n' "$device_creds" | sed -n 's/^SSID=//p')"
+      DEVICE_PSK="$(printf '%s\n' "$device_creds" | sed -n 's/^PSK=//p')"
+      ;;
+    3) ;;
+    4) echo "[AP] Warning: device secret belongs to another board (cloned image?) — ignored" ;;
+    *) echo "[AP] Warning: device secret unreadable — ignored" ;;
+  esac
+  unset device_creds
+fi
+SSID="${HOTSPOT_SSID:-${DEVICE_SSID:-ClawBox-Setup}}"
+if [ -n "${HOTSPOT_PASSWORD:-}" ]; then
+  AP_PSK="$HOTSPOT_PASSWORD"; AP_SECURITY=owner
+elif [ -n "$DEVICE_PSK" ]; then
+  AP_PSK="$DEVICE_PSK"; AP_SECURITY=device
+else
+  AP_PSK=""; AP_SECURITY=open
+fi
+unset DEVICE_PSK
 CON_NAME="ClawBox-Setup"
 
 # Check if setup is complete (phone should get internet, not captive portal)
@@ -623,12 +656,13 @@ if [ "$AP_IDENTITY" != "$AP_UUID"$'\n'"$CON_NAME"$'\n'"$IFACE"$'\n'ap$'\n'"$SSID
   exit 1
 fi
 
-# Configure security: WPA-PSK if password set, open network otherwise
-if [ -n "${HOTSPOT_PASSWORD:-}" ]; then
+# Configure security: WPA-PSK with the owner's or the device's passphrase,
+# open network only on a box that has neither.
+if [ -n "$AP_PSK" ]; then
   nmcli connection modify uuid "$AP_UUID" \
     802-11-wireless-security.key-mgmt wpa-psk \
-    802-11-wireless-security.psk "$HOTSPOT_PASSWORD"
-  echo "[AP] WPA-PSK security enabled"
+    802-11-wireless-security.psk "$AP_PSK"
+  echo "[AP] WPA-PSK security enabled ($AP_SECURITY passphrase)"
 else
   nmcli connection modify uuid "$AP_UUID" remove 802-11-wireless-security 2>/dev/null || true
   echo "[AP] Open network (no password)"
@@ -647,6 +681,23 @@ server=1.1.1.1
 address=/clawbox.local/${AP_IP}
 DNSEOF
   echo "[AP] Upstream DNS forwarding configured"
+  # First setup only: answer the phones' and laptops' connectivity probes with
+  # the AP itself, so the OS opens its captive sheet on the setup wizard. ONLY
+  # these probe hosts — everything else still resolves upstream, so a client
+  # that shares the hotspot's internet keeps working (a wildcard hijack is what
+  # broke that before). After setup the file is removed and probes resolve
+  # normally, so a joined phone does not see a "sign in" prompt.
+  if [ "$setup_complete" != true ]; then
+    {
+      echo "# Captive-portal probe hosts -> AP during first setup (start-ap.sh)"
+      for probe_host in $CAPTIVE_PROBE_HOSTS; do
+        echo "address=/${probe_host}/${AP_IP}"
+      done
+    } > "$CAPTIVE_PROBES_CONF"
+    echo "[AP] Captive-portal probes point at the setup wizard"
+  else
+    rm -f "$CAPTIVE_PROBES_CONF" 2>/dev/null || true
+  fi
 else
   echo "[AP] Note: dnsmasq config not writable (run install.sh to fix DNS)"
 fi
@@ -735,5 +786,6 @@ mkdir -p "$(dirname "$RUNTIME_FILE")"
 cat > "$RUNTIME_FILE" <<RUNTIME_EOF
 AP_IP="$AP_IP"
 AP_SUBNET="$AP_SUBNET"
+AP_SECURITY="$AP_SECURITY"
 RUNTIME_EOF
 chmod 644 "$RUNTIME_FILE"

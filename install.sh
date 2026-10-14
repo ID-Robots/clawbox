@@ -8048,6 +8048,12 @@ step_captive_portal_dns() {
   rm -f "$DNSMASQ_DIR/captive-portal.conf"
   # Install upstream DNS forwarding for hotspot clients
   cp "$SRC_DIR/config/dnsmasq-upstream.conf" "$DNSMASQ_DIR/upstream-dns.conf"
+  # captive-probes.conf (probe hosts only, never a wildcard) is start-ap.sh's
+  # during FIRST SETUP and must survive this step then; once setup is complete
+  # nothing should send a joined phone to a "sign in" sheet, so drop it.
+  if grep -E -q '"setup_complete":[[:space:]]*true' "$PROJECT_DIR/data/config.json" 2>/dev/null; then
+    rm -f "$DNSMASQ_DIR/captive-probes.conf"
+  fi
   echo "  Removed captive portal DNS, installed upstream DNS forwarding"
 }
 
@@ -8605,6 +8611,7 @@ install_root_libexec() {
   fi
   for src in optimize-ollama.sh clawbox-desktop-mode.sh clawbox-power-mode.sh \
              clawbox-resource-limits.sh gateway-restart-when-online.sh \
+             device-secret.sh provision-device.sh \
              wifi-failover.sh start-ap.sh stop-ap.sh ap-watchdog.sh ensure-vnc-on-first-boot.sh; do
     case "$src" in
       wifi-failover.sh|start-ap.sh|stop-ap.sh) [ "$wifi_helper_ready" -eq 1 ] || continue ;;

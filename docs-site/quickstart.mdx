@@ -19,12 +19,15 @@ Get from a sealed box to a working AI assistant in a few minutes.
 <Steps>
   <Step title="Power on">
     Connect the included USB-C power supply and (optionally) an Ethernet cable.
-    ClawBox boots in about a minute; the `ClawBox-Setup` network appearing in your Wi-Fi list is the signal that it is ready.
+    ClawBox boots in about a minute; its setup network (`ClawBox-` plus four characters, printed on the sticker) appearing in your Wi-Fi list is the signal that it is ready.
   </Step>
   <Step title="Join the setup hotspot and open the wizard">
-    On first boot the box has not joined your network yet — it hosts its own. From a phone
-    or laptop, join the open **`ClawBox-Setup`** Wi-Fi network and browse to
+    On first boot the box has not joined your network yet — it hosts its own. Scan the Wi-Fi
+    QR code on the box's sticker with your phone's camera, or join the network named on the
+    sticker and type its password. Every box has its own hotspot password; there is no shared
+    default. Most phones then open the setup wizard on their own; if yours does not, browse to
     **`http://10.42.0.1`** (`http://10.43.0.1` if your network already uses `10.42.0.0/24`).
+    Boxes made before per-device stickers broadcast an open **`ClawBox-Setup`** network instead.
     See [First Boot](/setup/first-boot).
 
     <Frame caption="The wizard's first screen, with the Ethernet cable already detected">

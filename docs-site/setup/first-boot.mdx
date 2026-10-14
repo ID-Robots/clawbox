@@ -4,8 +4,8 @@ icon: "power-off"
 summary: "Unbox, join the ClawBox-Setup hotspot, and finish the on-device wizard in your browser."
 ---
 
-Everything happens in a browser, on the box's own Wi-Fi hotspot. No app to install, no code to scan,
-no account to create first.
+Everything happens in a browser, on the box's own Wi-Fi hotspot. No app to install and no account to
+create first — the only code to scan is the Wi-Fi QR on the box's sticker.
 
 <Info>
 **Hands-on time:** ~5 minutes · **Tools:** none · **Needed:** a phone or laptop with Wi-Fi, plus
@@ -27,19 +27,22 @@ and reboots the box.
     Place the unit on a flat, ventilated surface, plug in Ethernet if you have it (recommended — it
     is the most reliable path), then connect the power adapter.
   </Step>
-  <Step title="Join the ClawBox-Setup hotspot">
-    After about a minute the box broadcasts its own Wi-Fi network, **`ClawBox-Setup`** — open at
-    this point (the password you give it in the wizard's security step applies the next time the
-    hotspot starts). Join it from your phone or laptop. Its appearance in your Wi-Fi list is the
-    signal that the box is ready.
+  <Step title="Join the box's hotspot">
+    After about a minute the box broadcasts its own Wi-Fi network, **`ClawBox-XXXX`** — the name
+    and a password unique to this box are printed on its sticker, with a Wi-Fi QR code. Scan the
+    QR code with your phone's camera, or join the network and type the password. There is no
+    shared default password. (A name and password you give the hotspot in the wizard's security
+    step replace these the next time the hotspot starts.) Its appearance in your Wi-Fi list is the
+    signal that the box is ready. Boxes made before per-device stickers broadcast an open
+    **`ClawBox-Setup`** network instead.
   </Step>
   <Step title="Open the wizard">
     Browse to **`http://10.42.0.1`**. If your home network already uses `10.42.0.0/24`, the box falls
     back to `http://10.43.0.1`.
 
-    Some phones pop the page up on their own when they join the hotspot, but many will not — ClawBox
-    does not hijack DNS to force it (see [Networking](/technical/networking#two-network-modes)), so
-    typing the address is the reliable path.
+    Most phones and laptops open the wizard on their own when they join the hotspot: until setup
+    is complete the box answers the operating systems' connectivity checks, and only those (see
+    [Networking](/technical/networking#two-network-modes)). If yours does not, type the address.
   </Step>
   <Step title="Run the five-step wizard">
     1. **Wi-Fi** — pick your network and enter its password. Ethernet is detected automatically. The
