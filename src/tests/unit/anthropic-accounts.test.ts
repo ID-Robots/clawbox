@@ -358,6 +358,16 @@ describe("OAuth accounts", () => {
     expect(learned.email).toBe("old@example.com");
   });
 
+  it("answers only an API key to readUsableApiKey, never an OAuth token, and marks nothing", async () => {
+    await pool.addOAuthAccount({ label: "Max", email: "max@example.com", tokens: tokens("oauth-access", 8 * 60 * 60_000) });
+    expect(await pool.readUsableApiKey()).toBeNull();
+    const spare = await pool.addApiKeyAccount({ label: "Spare", key: SECOND_KEY });
+    expect(await pool.readUsableApiKey()).toBe(SECOND_KEY);
+    await pool.markLimited(spare.id, Date.now() + 60_000, "credit");
+    expect(await pool.readUsableApiKey()).toBeNull();
+    expect((await pool.readAccounts()).every((a) => a.lastUsedAt === null)).toBe(true);
+  });
+
   it("spends a single-use refresh token once when several runs start together", async () => {
     const account = await pool.addOAuthAccount({ label: "Max", email: "max@example.com", tokens: tokens("old-access", 5 * 60_000) });
     // Anthropic's rotation: the first renewal answers a new pair and retires

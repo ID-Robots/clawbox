@@ -3,8 +3,8 @@
  * SAMPLE of the pages the Flash writer made, under a hard dollar cap.
  *
  * It is optional in every sense. Off unless the owner switches it on; when
- * it is on but no Anthropic provider can answer (none connected, offline, a
- * refused credential), the pages it would have read are marked
+ * it is on but no Anthropic API key can answer (none configured, offline, a
+ * refused key), the pages it would have read are marked
  * `opus_pending: true` and the night goes on — the wiki is complete without
  * it. It never edits a fact: a claim Opus would change becomes a review item
  * (`kind: "opus"`) with the current text and Opus's text as the candidates,
@@ -65,31 +65,40 @@ export interface OpusClient {
   complete(request: { system: string; user: string; maxTokens: number; signal?: AbortSignal }): Promise<OpusResponse>;
 }
 
+/** Where the Opus tier's key comes from: the pool's first usable API key, or null. */
+export type OpusKeyReader = () => Promise<string | null>;
+
+async function poolApiKey(): Promise<string | null> {
+  try {
+    const { readUsableApiKey } = await import("@/lib/anthropic-accounts");
+    return await readUsableApiKey();
+  } catch {
+    return null;
+  }
+}
+
 /**
- * The owner's own Anthropic access, through the box's account pool: an API
- * key or a connected Claude account. A `claude` terminal login is not a
- * credential this process can hold, so it reads as unavailable.
+ * The owner's Anthropic API KEY from the box's provider config, and nothing
+ * else: a background pass that spends unattended must never draw on a
+ * connected Claude subscription (its OAuth token) or the `claude` terminal
+ * sign-in. No key means unavailable, and the tier leaves its pages
+ * `opus_pending`.
  */
-export function createAnthropicOpusClient(model: string = DEFAULT_OPUS_MODEL, fetchImpl: typeof fetch = fetch): OpusClient {
+export function createAnthropicOpusClient(
+  model: string = DEFAULT_OPUS_MODEL,
+  fetchImpl: typeof fetch = fetch,
+  readKey: OpusKeyReader = poolApiKey,
+): OpusClient {
   return {
     model,
     async complete(request) {
-      let credential: { kind: string; secret: string | null } | null = null;
-      try {
-        const { prepareAccount } = await import("@/lib/anthropic-accounts");
-        credential = (await prepareAccount()).prepared?.credential ?? null;
-      } catch {
-        credential = null;
-      }
-      if (!credential || !credential.secret || (credential.kind !== "api_key" && credential.kind !== "oauth")) {
-        throw new OpusUnavailableError("no Anthropic provider is connected");
-      }
-      const headers: Record<string, string> = { "content-type": "application/json", "anthropic-version": ANTHROPIC_VERSION };
-      if (credential.kind === "api_key") headers["x-api-key"] = credential.secret;
-      else {
-        headers.authorization = `Bearer ${credential.secret}`;
-        headers["anthropic-beta"] = "oauth-2025-04-20";
-      }
+      const key = await readKey().catch(() => null);
+      if (!key) throw new OpusUnavailableError("no Anthropic API key is configured");
+      const headers: Record<string, string> = {
+        "content-type": "application/json",
+        "anthropic-version": ANTHROPIC_VERSION,
+        "x-api-key": key,
+      };
       let res: Response;
       try {
         res = await fetchImpl(ANTHROPIC_MESSAGES_URL, {
@@ -139,7 +148,7 @@ export function createAnthropicOpusClient(model: string = DEFAULT_OPUS_MODEL, fe
 
 const store = processStore("prime-radiant:opus-client", () => ({ override: null as OpusClient | null }));
 
-/** Install the client the Opus tier uses instead of the account pool's (tests). `null` removes it. */
+/** Install the client the Opus tier uses instead of the API-key one (tests). `null` removes it. */
 export function setOpusClientOverride(client: OpusClient | null): void {
   store.override = client;
 }

@@ -158,7 +158,7 @@ describe("fresh box", () => {
     expect((await historyGET(req("GET", "/history/concepts/pricing.md"), pathCtx("concepts/pricing.md"))).status).toBe(404);
     expect((await diffGET(req("GET", "/diff?commit=abcdef1"))).status).toBe(404);
     const costs = await (await costsGET(req("GET", "/costs"))).json();
-    expect(costs).toMatchObject({ basis: "estimate", totals: { calls: 0, usdEstimate: 0 } });
+    expect(costs).toMatchObject({ basis: "estimate", totals: { calls: 0, usdEstimate: 0 }, notMeasured: [{ operation: "embedding", reason: "no_usage_reported" }] });
     expect(await (await nightlyGET(req("GET", "/nightly"))).json()).toMatchObject({ running: null, runs: [] });
     const settings = await (await settingsGET(req("GET", "/settings"))).json();
     expect(settings.settings.nightly).toEqual({ enabled: true, time: "03:00" });

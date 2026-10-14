@@ -21,7 +21,7 @@ import { FlashCallError, type FlashClient } from "@/lib/prime-radiant/flash-clie
 import { createStubFlashClient, stubVerdict } from "@/lib/prime-radiant/flash-stub";
 import { buildJudgePrompt, parseJudgeResponse, readJudgeItems } from "@/lib/prime-radiant/judge";
 import { computeNextNightlyMs } from "@/lib/prime-radiant/nightly-scheduler";
-import { buildOpusQueue, OpusUnavailableError, parseOpusResponse, runOpusTier, worstCaseUsd, type OpusClient } from "@/lib/prime-radiant/opus";
+import { buildOpusQueue, createAnthropicOpusClient, OpusUnavailableError, parseOpusResponse, runOpusTier, worstCaseUsd, type OpusClient } from "@/lib/prime-radiant/opus";
 import { vaultDir } from "@/lib/prime-radiant/paths";
 import { listReviewItems } from "@/lib/prime-radiant/review-store";
 import { readCostSummary } from "@/lib/prime-radiant/runs";
@@ -139,7 +139,10 @@ describe("contradiction pass", () => {
     expect(r.reviewItems[0].candidates).toHaveLength(2);
     expect(r.calls).toBe(1);
     expect(sent.join("\n")).not.toContain("help@example.com");
-    expect(readCostSummary(vaultDir(), DEFAULT_COST_RATES).byOperation.map((o) => o.operation)).toEqual(["contradiction-judge"]);
+    const summary = readCostSummary(vaultDir(), DEFAULT_COST_RATES);
+    expect(summary.byOperation.map((o) => o.operation)).toEqual(["contradiction-judge"]);
+    // The embedder reports no usage: embeddings are said to be unmeasured, never summed as free.
+    expect(summary.notMeasured).toEqual([{ operation: "embedding", reason: "no_usage_reported" }]);
 
     const again = await runContradictionPass(snap, { stateVault: vaultDir(), scope: null, client, embedder, rates: DEFAULT_COST_RATES, k: 2 });
     expect(again.embedded).toBe(0);
@@ -285,6 +288,30 @@ describe("opus tier", () => {
     );
     expect(calls).toBe(0);
     expect(capped.result.stopped).toBe("cap");
+  });
+
+  it("calls Anthropic with an API key only, and is unavailable without one", async () => {
+    const ok = {
+      content: [{ type: "text", text: "[]" }],
+      usage: { input_tokens: 10, output_tokens: 2 },
+      stop_reason: "end_turn",
+    };
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify(ok), { status: 200 }));
+    const withKey = createAnthropicOpusClient("claude-opus-5-5", fetchImpl as unknown as typeof fetch, async () => "sk-ant-api03-placeholder");
+    await expect(withKey.complete({ system: "s", user: "u", maxTokens: 10 })).resolves.toMatchObject({ text: "[]" });
+    const headers = (fetchImpl.mock.calls[0] as unknown as [string, RequestInit])[1].headers as Record<string, string>;
+    expect(headers["x-api-key"]).toBe("sk-ant-api03-placeholder");
+    expect(headers.authorization).toBeUndefined();
+    expect(headers["anthropic-beta"]).toBeUndefined();
+
+    fetchImpl.mockClear();
+    const noKey = createAnthropicOpusClient("claude-opus-5-5", fetchImpl as unknown as typeof fetch, async () => null);
+    await expect(noKey.complete({ system: "s", user: "u", maxTokens: 10 })).rejects.toBeInstanceOf(OpusUnavailableError);
+    const throwing = createAnthropicOpusClient("claude-opus-5-5", fetchImpl as unknown as typeof fetch, async () => {
+      throw new Error("store unreadable");
+    });
+    await expect(throwing.complete({ system: "s", user: "u", maxTokens: 10 })).rejects.toBeInstanceOf(OpusUnavailableError);
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it("does not start without a rate for the model, because the cap could not be kept", async () => {

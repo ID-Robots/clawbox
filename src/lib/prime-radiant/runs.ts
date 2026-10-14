@@ -167,7 +167,22 @@ export interface CostSummary {
   byOperation: Array<CostTotals & { operation: string }>;
   byModel: Array<CostTotals & { model: string }>;
   byRun: CostRunRow[];
+  /**
+   * Work that costs something and is not in the figures above: the claim
+   * embeddings of the contradiction pass, because the embedder reports no
+   * usage. Said, so a total is never read as complete.
+   */
+  notMeasured: CostNotMeasured[];
 }
+
+export interface CostNotMeasured {
+  operation: "embedding";
+  reason: "no_usage_reported";
+}
+
+export const COSTS_NOT_MEASURED: readonly CostNotMeasured[] = Object.freeze([
+  Object.freeze({ operation: "embedding", reason: "no_usage_reported" } as const),
+]);
 
 function round(usd: number): number {
   return Math.round(usd * 1e6) / 1e6;
@@ -189,6 +204,7 @@ export function readCostSummary(vault: string, rates: CostRates, options: { sinc
     byOperation: [],
     byModel: [],
     byRun: [],
+    notMeasured: COSTS_NOT_MEASURED.map((n) => ({ ...n })),
   };
   if (!stateDbExists(vault)) return empty;
   return withStateDb(vault, (db) => {
