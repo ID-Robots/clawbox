@@ -202,6 +202,26 @@ const REDIRECT_PATHS = new Set([
   "/success.txt",
 ]);
 
+/**
+ * What each connectivity probe expects from a network that is ONLINE. Once
+ * setup is complete the box answers its probes this way, so a hotspot left up
+ * after the wizard (e.g. an Ethernet-connected box) — or a captive-probes.conf
+ * that start-ap.sh has not yet removed — never keeps a joined phone or laptop
+ * on a "Sign in to network" prompt. Before setup they redirect to the wizard.
+ */
+const ONLINE_PROBE_ANSWERS: Record<string, { status: number; body: string | null }> = {
+  "/generate_204": { status: 204, body: null },
+  "/gen_204": { status: 204, body: null },
+  "/redirect": { status: 204, body: null },
+  "/connecttest.txt": { status: 200, body: "Microsoft Connect Test" },
+  "/ncsi.txt": { status: 200, body: "Microsoft NCSI" },
+  "/success.txt": { status: 200, body: "success\n" },
+  "/canonical.html": {
+    status: 200,
+    body: '<meta http-equiv="refresh" content="0;url=https://support.mozilla.org/kb/captive-portal"/>',
+  },
+};
+
 const APPLE_PATHS = new Set([
   "/hotspot-detect.html",
   "/library/test/success.html",
@@ -555,6 +575,16 @@ export async function middleware(request: NextRequest) {
 
   // 1. Captive portal detection
   if (REDIRECT_PATHS.has(pathname)) {
+    const online = readConfigCached().setupComplete ? ONLINE_PROBE_ANSWERS[pathname] : undefined;
+    if (online) {
+      return new NextResponse(online.body, {
+        status: online.status,
+        headers: {
+          "Content-Type": pathname === "/canonical.html" ? "text/html; charset=utf-8" : "text/plain; charset=utf-8",
+          "cache-control": "no-store",
+        },
+      });
+    }
     return NextResponse.redirect(PORTAL_URL, 302);
   }
   if (APPLE_PATHS.has(pathname)) {
