@@ -269,8 +269,47 @@ export interface RedactPathOptions extends RedactOptions {
 }
 
 /**
+ * Phone shapes as they appear in a FILE NAME. The prose patterns refuse a
+ * number glued to a word (`v555-123-4567` is not a phone in a sentence), but
+ * a name joins its parts with `_`, `-` and `.` — `555-123-4567-report.md`,
+ * `call_+1 555 010 0199.txt` — so here only another digit is a boundary.
+ * A bare digit run stays: in a name it is far more often a timestamp or an
+ * invoice number than a phone.
+ */
+const FILENAME_PHONE_RES: RegExp[] = [
+  /(?<![\d+])\+\d{1,3}(?:[ .-]?\(?\d{1,4}\)?){2,5}(?!\d)/g,
+  /(?<!\d)\(\d{3}\) ?\d{3}[-. ]\d{4}(?!\d)/g,
+  /(?<!\d)\d{3}[-. ]\d{3}[-. ]\d{4}(?!\d)/g,
+];
+
+/**
+ * One path segment: the phone shapes a name can hide first (the prose pattern
+ * would otherwise stop at the `_` and leave the last group behind), then the
+ * segment as text.
+ */
+function redactSegment(segment: string, options: RedactOptions): RedactionResult {
+  let phones = 0;
+  let text = segment;
+  if (options.maskPhones !== false) {
+    for (const re of FILENAME_PHONE_RES) {
+      text = text.replace(re, (m: string) => {
+        const n = digitCount(m);
+        if (n < 8 || n > 15) return m;
+        phones += 1;
+        return placeholder("PHONE");
+      });
+    }
+  }
+  const r = redactText(text, options);
+  if (phones === 0) return r;
+  const counts = { ...r.counts, PHONE: (r.counts.PHONE ?? 0) + phones };
+  return { text: r.text, counts, kinds: REDACTION_KINDS.filter((k) => counts[k]) };
+}
+
+/**
  * Redact a file path: the account's home folds to `~` (a user name is
- * personal data), then every segment is redacted as text, separators kept.
+ * personal data), then every segment is redacted as text — and as a file
+ * name, whose parts are joined by `_`, `-` and `.` — separators kept.
  */
 export function redactPath(input: string, options: RedactPathOptions = {}): RedactionResult {
   let p = input;
@@ -279,7 +318,7 @@ export function redactPath(input: string, options: RedactPathOptions = {}): Reda
   p = p.replace(/^\/(?:home|Users)\/[^/]+(?=\/|$)/, "~");
   const counts: Partial<Record<RedactionKind, number>> = {};
   const parts = p.split("/").map((segment) => {
-    const r = redactText(segment, options);
+    const r = redactSegment(segment, options);
     for (const [k, n] of Object.entries(r.counts) as Array<[RedactionKind, number]>) counts[k] = (counts[k] ?? 0) + n;
     return r.text;
   });

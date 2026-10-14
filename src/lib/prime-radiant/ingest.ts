@@ -52,6 +52,7 @@ import {
   isIngestExtension,
   prepareText,
   readFileOnce,
+  redactedLabel,
   scanFolders,
   sourceLabel,
   type Extractor,
@@ -349,9 +350,14 @@ interface PreparedFile {
   text: string;
 }
 
-/** An upload's files by batch and name: two drops of a `notes.md` are two documents, not one page. */
+/**
+ * An upload's files by batch and name: two drops of a `notes.md` are two
+ * documents, not one page. The name is the owner's and goes to ClawBox AI
+ * with the text, so it is redacted like a folder file's path — with the same
+ * keyed tag when that folded something away.
+ */
 function uploadLabel(dir: string, batch: string): (abs: string) => string {
-  return (abs) => `upload/${batch}/${path.relative(dir, abs).split(path.sep).join("/")}`;
+  return (abs) => redactedLabel(`upload/${batch}/${path.relative(dir, abs).split(path.sep).join("/")}`, abs);
 }
 
 /** Dead letters as files to read again; one whose kind is not ingestible any more is left out. */

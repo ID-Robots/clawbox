@@ -88,6 +88,32 @@ describe("ensureMemoryWikiWiring", () => {
     expect(result).toMatchObject({ state: "wired", wrote: true });
   });
 
+  it("serialises two windows opening the app together: one write, the second plans against it", async () => {
+    let config: Record<string, unknown> = {};
+    oc.readConfigStrict.mockImplementation(async () => config);
+    oc.runOpenclawConfigSetBatch.mockImplementation(async () => {
+      // The CLI takes a while; the second caller must not read the config meanwhile.
+      await new Promise((r) => setTimeout(r, 5));
+      config = wired();
+    });
+    const [first, second] = await Promise.all([
+      ensureMemoryWikiWiring({ vault: VAULT }),
+      ensureMemoryWikiWiring({ vault: VAULT }),
+    ]);
+    expect(oc.runOpenclawConfigSetBatch).toHaveBeenCalledTimes(1);
+    expect(first).toMatchObject({ state: "wired", wrote: true });
+    expect(second).toMatchObject({ state: "wired", wrote: false });
+  });
+
+  it("does not hand a failed write to the next caller", async () => {
+    oc.readConfigStrict.mockResolvedValue({});
+    oc.runOpenclawConfigSetBatch.mockRejectedValueOnce(new Error("gateway busy"));
+    await expect(ensureMemoryWikiWiring({ vault: VAULT })).rejects.toThrow("gateway busy");
+    oc.readConfigStrict.mockReset();
+    oc.readConfigStrict.mockResolvedValueOnce({}).mockResolvedValueOnce(wired());
+    expect(await ensureMemoryWikiWiring({ vault: VAULT })).toMatchObject({ state: "wired", wrote: true });
+  });
+
   it("is idempotent: a wired box makes no write", async () => {
     oc.readConfigStrict.mockResolvedValue(wired());
     expect(await ensureMemoryWikiWiring({ vault: VAULT })).toMatchObject({ state: "wired", wrote: false });

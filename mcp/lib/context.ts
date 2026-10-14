@@ -69,6 +69,7 @@ const APP_DESCRIPTIONS: Record<string, Omit<DesktopApp, "id">> = {
   files: { name: "Files", description: "File manager" },
   clawkeep: { name: "ClawKeep", description: "Backups: what is protected, run one now, restore" },
   "memory-shard": { name: "Memory Shard", description: "The memory index: embedding health, reindex, schedule" },
+  "prime-radiant": { name: "Prime Radiant", description: "The living wiki: browse pages and claims, review disputed facts, history, ingest documents" },
   system_update: { name: "System Update", description: "The installed ClawBox version and the update button" },
   store: { name: "Store", description: "App store" },
   browser: { name: "Browser Setup", description: "Browser integration panel, not the browsing window" },

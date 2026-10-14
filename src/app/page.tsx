@@ -28,6 +28,7 @@ import HermesSkillsStore from "@/components/HermesSkillsStore";
 import FilesApp from "@/components/FilesApp";
 import ClawKeepApp from "@/components/ClawKeepApp";
 import MemoryShardApp from "@/components/MemoryShardApp";
+import PrimeRadiantApp from "@/components/PrimeRadiantApp";
 import ScreenshotApp from "@/components/ScreenshotApp";
 import ScreenshotOverlay from "@/components/ScreenshotOverlay";
 import { useClawboxLogin } from "@/lib/use-clawbox-login";
@@ -390,6 +391,10 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
     // one blob instead of a gem. The plain gem keeps the identity and stays
     // legible small.
     "memory-shard": "diamond",
+    // An open book with its pages turning: the wiki, read and rewritten.
+    // `menu_book` and `hub` were the other candidates; the book that is open
+    // says "a body of knowledge you read" without borrowing the shard's gem.
+    "prime-radiant": "auto_stories",
     system_update: "system_update",
     vnc: "desktop_windows",
     // The globe: the open web, as opposed to `browser`'s window with the
@@ -521,6 +526,8 @@ const WindowContent = memo(function WindowContent({ app, meta, windowId, termina
       return <ClawKeepApp />;
     case "memory_shard":
       return <MemoryShardApp />;
+    case "prime_radiant":
+      return <PrimeRadiantApp />;
     case "system_update":
       return <SystemUpdateApp />;
     case "browser":

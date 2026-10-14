@@ -392,6 +392,25 @@ describe("an ingest job", () => {
     expect(fake.prompts[0].user).toContain('"path":"upload/0123456789abcdef/price-list.md"');
     expect(fs.existsSync(staged)).toBe(false);
   });
+  it("redacts a dropped file's name before the model sees it, and keeps redacted twins apart", async () => {
+    const staged = path.join(root, "staged-pii");
+    fs.mkdirSync(staged);
+    fs.writeFileSync(path.join(staged, "555-010-0199-acme-notes.md"), "Acme notes from the first call.");
+    fs.writeFileSync(path.join(staged, "555-010-0142-acme-notes.md"), "Acme notes from the second call.");
+    fs.writeFileSync(path.join(staged, "+44 20 7946 0958 acme.md"), "Acme notes from the third call.");
+    const fake = fakeClient((items) => items.map((it, k) => ({ ...cardFor(it), title: `Acme call ${k}` })));
+    const job = await run({ kind: "upload", dir: staged, batch: "0123456789abcdef" }, deps({ client: fake.client }));
+    expect(job).toMatchObject({ done: 3, pages: 3 });
+    const paths = fake.prompts.flatMap((p) => (readWriterItems(p.user) ?? []).map((it) => it.path));
+    expect(paths).toHaveLength(3);
+    for (const p of paths) {
+      expect(p).not.toMatch(/555|7946|0958/);
+      expect(p).toMatch(/^upload\/0123456789abcdef\/.*\[REDACTED:PHONE\].*#[0-9a-f]{12}$/);
+    }
+    // Two names that read alike once redacted stay two documents.
+    expect(new Set(paths).size).toBe(3);
+    expect((await readVaultSnapshot(vault)).pages).toHaveLength(3);
+  });
 });
 
 describe("job records", () => {

@@ -126,4 +126,18 @@ describe("redaction", () => {
     expect(r.text).toBe(`~/invoices/${placeholder("EMAIL")}/${placeholder("CARD")}.pdf`);
     expect(r.kinds).toEqual(["CARD", "EMAIL"]);
   });
+
+  it("redacts phone numbers a file name joins to its other parts", () => {
+    const P = placeholder("PHONE");
+    expect(redactPath("upload/b/555-010-0199-report.md").text).toBe(`upload/b/${P}-report.md`);
+    expect(redactPath("upload/b/call_555.010.0199.txt").text).toBe(`upload/b/call_${P}.txt`);
+    expect(redactPath("upload/b/notes 555 010 0199.md").text).toBe(`upload/b/notes ${P}.md`);
+    expect(redactPath("upload/b/+44 20 7946 0958_acme.md").text).toBe(`upload/b/${P}_acme.md`);
+    // Dates, versions and bare digit runs (timestamps, invoice numbers) stay.
+    for (const keep of ["2026-10-14-minutes.md", "v1.2.3-notes.md", "1760400000-export.md", "invoice-55501234.pdf"]) {
+      expect(redactPath(`upload/b/${keep}`).text).toBe(`upload/b/${keep}`);
+    }
+    // Phones off means off for names too.
+    expect(redactPath("upload/b/555-010-0199.md", { maskPhones: false }).text).toBe("upload/b/555-010-0199.md");
+  });
 });
