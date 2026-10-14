@@ -218,6 +218,12 @@ describe("an account at its limit mid-run", () => {
     // One notice: the account became limited and the box switched.
     expect(announceAnthropicLimit).toHaveBeenCalledTimes(1);
     expect(announceAnthropicLimit).toHaveBeenCalledWith(expect.objectContaining({ kind: "switched", fromLabel: "Work", toLabel: "Personal", runId: run.id }));
+    // The swap says the run WAS carried on (the card and the notice read this):
+    // it moved by its own path, before the fan-out's coding consumer looked,
+    // and on 2026-10-14 that read "Coding runs: nothing to move" over a run
+    // that had just moved.
+    await (await import("@/lib/anthropic-swap")).whenSwapsSettled();
+    expect((await pool.readPoolState()).lastSwap?.consumers.coding).toEqual({ status: "ok", code: "moved", count: 1 });
     // And nothing about any credential reached the record.
     const record = JSON.stringify(run);
     expect(record).not.toContain(KEY_A);
@@ -292,6 +298,9 @@ describe("the owner's test hook", () => {
     expect(run.anthropicAccount).toBe(personal.id);
     expect(run.accountSwitches).toHaveLength(1);
     expect(calls()[1].args).toContain(`--resume ${SESSION}`);
+    // What the box's swap test showed on 2026-10-14 with one live run.
+    await (await import("@/lib/anthropic-swap")).whenSwapsSettled();
+    expect((await pool.readPoolState()).lastSwap?.consumers.coding).toEqual({ status: "ok", code: "moved", count: 1 });
   });
 });
 
