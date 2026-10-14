@@ -138,6 +138,23 @@ describe("appendTimeRecord", () => {
     expect(warn).toHaveBeenCalled();
   });
 
+  // Root reads a 000 file anyway, so the case only means something as a user.
+  it.skipIf(process.getuid?.() === 0)("leaves a JSON it cannot open alone, and writes nothing over it", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await lib.appendTimeRecord(RUN_ID, budget(), timeRecord("note", "kept", NOW));
+    const jsonFile = path.join(evidence(RUN_ID), "time-record.json");
+    const before = fs.readFileSync(jsonFile, "utf8");
+    fs.chmodSync(jsonFile, 0o000);
+    try {
+      expect(await lib.appendTimeRecord(RUN_ID, budget(), timeRecord("note", "lost", NOW + MIN))).toBeNull();
+    } finally {
+      fs.chmodSync(jsonFile, 0o644);
+    }
+    expect(fs.readFileSync(jsonFile, "utf8")).toBe(before);
+    expect(fs.existsSync(path.join(evidence(RUN_ID), lib.TIME_RECORD_CORRUPT_JSON))).toBe(false);
+    expect(warn).toHaveBeenCalled();
+  });
+
   it("does not follow a log the run swapped for a link out of the folder", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     const outside = path.join(base, "outside.txt");

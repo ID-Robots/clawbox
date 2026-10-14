@@ -121,14 +121,27 @@ function parseStored(raw: string): StoredTimeRecords | null {
   return { budget, records };
 }
 
-type StoredRead = { state: "missing" } | { state: "bad" } | { state: "ok"; stored: StoredTimeRecords };
+/**
+ * What reading time-record.json found. `bad` is the file's own fault — not
+ * JSON, not a record, too large, a link, not a regular file — and a writer
+ * sets it aside. `unreadable` is the disk's (out of descriptors, an I/O
+ * error): the file may be fine, so a writer leaves it alone and writes nothing.
+ */
+type StoredRead =
+  | { state: "missing" }
+  | { state: "bad" }
+  | { state: "unreadable"; error: unknown }
+  | { state: "ok"; stored: StoredTimeRecords };
 
 function readStored(file: string): StoredRead {
   let fd: number;
   try {
     fd = fs.openSync(file, READ_FLAGS);
   } catch (err) {
-    return (err as NodeJS.ErrnoException).code === "ENOENT" ? { state: "missing" } : { state: "bad" };
+    const code = (err as NodeJS.ErrnoException).code;
+    // ELOOP is O_NOFOLLOW meeting a link.
+    if (code === "ENOENT") return { state: "missing" };
+    return code === "ELOOP" ? { state: "bad" } : { state: "unreadable", error: err };
   }
   try {
     const st = fs.fstatSync(fd);
@@ -136,8 +149,8 @@ function readStored(file: string): StoredRead {
     const raw = readBounded(fd, MAX_TIME_RECORD_JSON_BYTES);
     const stored = raw === null ? null : parseStored(raw);
     return stored ? { state: "ok", stored } : { state: "bad" };
-  } catch {
-    return { state: "bad" };
+  } catch (err) {
+    return { state: "unreadable", error: err };
   } finally {
     fs.closeSync(fd);
   }
@@ -297,6 +310,7 @@ export async function appendTimeRecord(ownerId: string, budget: TimeBudget, reco
       const dir = ensureOwnerArtifactsDir(owner);
       assertRealDir(dir);
       const read = readStored(path.join(dir, TIME_RECORD_JSON));
+      if (read.state === "unreadable") throw read.error;
       if (read.state === "bad") {
         console.warn(`[coding-agent] ${owner}: ${TIME_RECORD_JSON} was unreadable; set aside as ${TIME_RECORD_CORRUPT_JSON}`);
         setAsideBadJson(dir);
