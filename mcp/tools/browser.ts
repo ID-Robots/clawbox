@@ -130,20 +130,31 @@ const RUN_LOOPBACK_RULE: ErrorRule = {
 // browser starts, with 400 "Blocked internal address". That is an argument
 // problem the agent can fix; reporting it as "the browser is not running" sent
 // it back to browser_open with the same url, forever.
+const INTERNAL_ADDRESS_RULE: ErrorRule = {
+  status: 400,
+  match: /blocked internal address/i,
+  code: "BAD_ARGUMENT",
+  message: "That address is on the device's own private network, so the browser will not open it.",
+  next: "Do not retry that address. Ask the user for a public https:// address, or use ui_open_app to show them a ClawBox app instead.",
+};
+
 const LAUNCH_RULES: ErrorRule[] = [
   RUN_LOOPBACK_RULE,
-  {
-    status: 400,
-    match: /blocked internal address/i,
-    code: "BAD_ARGUMENT",
-    message: "That address is on the device's own private network, so the browser will not open it.",
-    next: "Do not retry that address. Ask the user for a public https:// address, or use ui_open_app to show them a ClawBox app instead.",
-  },
+  INTERNAL_ADDRESS_RULE,
   {
     status: 400,
     code: "BAD_ARGUMENT",
     message: "The device refused that address.",
     next: "Pass a full public address starting with https://, and do not retry the one that was refused.",
+  },
+  // The new tab was closed while it loaded — by the owner, or by the page's own
+  // window.close(). The browser is up, so "not running" would be a false report
+  // that sends the owner off to start an app that is already open.
+  {
+    status: 410,
+    code: "CONFLICT",
+    message: "The new tab was closed before the page could be shown.",
+    next: "Try once more. If the tab closes again, the page closes itself: report that instead of retrying.",
   },
 ];
 
@@ -154,6 +165,15 @@ const LAUNCH_RULES: ErrorRule[] = [
  */
 function launchRules(): ErrorRule[] {
   return runContext() ? LAUNCH_RULES : LAUNCH_RULES.filter((rule) => rule !== RUN_LOOPBACK_RULE);
+}
+
+/**
+ * browser_navigate meets the same two address refusals as a launch, so a run
+ * sent to a loopback port it does not serve is told to start its preview here
+ * too. Only those two: the navigate route's other 400s are not about the address.
+ */
+function navigateRules(): ErrorRule[] {
+  return runContext() ? [RUN_LOOPBACK_RULE, INTERNAL_ADDRESS_RULE] : [INTERNAL_ADDRESS_RULE];
 }
 
 // The describe route's own refusals are argument problems, not an outage:
@@ -246,9 +266,10 @@ async function browserCall(
 /**
  * The session from an earlier call, while its tab is still open; else null.
  *
- * The route answers 410 for a desktop tab that was closed (by the owner, or by
- * the page itself) and drops the session, so a dead tab is never mistaken for
- * a live one — and never replaced by whatever tab is in front now.
+ * The route answers 410 for a tab that was closed (by the owner, by the page
+ * itself, or with a headless Chromium that exited) and drops the session, so a
+ * dead tab is never mistaken for a live one — and never replaced by whatever
+ * tab is in front now.
  */
 async function liveSession(): Promise<string | null> {
   if (!sessionId) return null;
@@ -329,9 +350,9 @@ function showsFile(replyUrl: string | undefined, fileUrl: string): boolean {
   }
 }
 
-async function act(action: string, params: Record<string, unknown> = {}): Promise<BrowserReply> {
+async function act(action: string, params: Record<string, unknown> = {}, rules?: ErrorRule[]): Promise<BrowserReply> {
   const id = await ensureSession();
-  return browserCall(action, { sessionId: id, ...params });
+  return browserCall(action, { sessionId: id, ...params }, rules);
 }
 
 function headerLines(message: string, reply: BrowserReply): string[] {
@@ -534,7 +555,7 @@ export function registerBrowserTools(reg: Registrar): void {
       if (!/^https?:\/\//i.test(url)) {
         throw new ToolError("BAD_ARGUMENT", "That is not a web address.", "Pass a full address starting with https://.");
       }
-      return pageResult(`Went to ${url}.`, await act("navigate", { url, ...describeParam() }));
+      return pageResult(`Went to ${url}.`, await act("navigate", { url, ...describeParam() }, navigateRules()));
     },
   );
 

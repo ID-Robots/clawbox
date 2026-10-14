@@ -444,19 +444,21 @@ class BrowserTabClosedError extends Error {
  * opened — and a tab the owner (or the page itself) closed is not quietly
  * replaced by whatever is in front now: the session is dropped and the caller
  * is told, so it opens a new tab instead of reporting a page it never opened.
- * The headless browser has nobody else's tabs to raise its page above.
+ * A closed page is told the same way in the headless browser, whose pages
+ * close with it when it exits: a dead session that answered 200 with no
+ * picture would be kept, and every later capture would come back empty. Only
+ * the desktop has anybody else's tabs to raise the page above.
  */
 async function frontSessionTab(
   page: import("playwright").Page,
   sessionId: string,
   kind: BrowserKind,
 ): Promise<void> {
-  if (kind !== "desktop") return;
   if (page.isClosed()) {
     dropSession(sessionId);
     throw new BrowserTabClosedError();
   }
-  await page.bringToFront().catch(() => {});
+  if (kind === "desktop") await page.bringToFront().catch(() => {});
 }
 
 

@@ -4,7 +4,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { once } from "events";
-import { cgroupNamesUnit, ownsLocalPreview } from "@/lib/coding-local-preview";
+import { cgroupNamesUnit, listenerPids, ownsLocalPreview } from "@/lib/coding-local-preview";
 // Real listener/process ownership, not a mock of the access decision.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
@@ -134,6 +134,22 @@ it("refuses a port the run shares with a listener that is not its own", async (c
   theirs.kill();
   await once(theirs, "exit");
   expect(await ownsLocalPreview(new URL(`http://127.0.0.1:${port}/`), run)).toBe(true);
+});
+
+it("proves nothing about a port where any listener's owner cannot be seen", () => {
+  // Another user's daemon on 127.0.0.1 and the run's server on [::1], one port:
+  // ss names no pid for the first, and the browser at 127.0.0.1 reaches it.
+  const theirs = "LISTEN 0      4096       127.0.0.1:11434      0.0.0.0:*";
+  const mine = `LISTEN 0      511            [::1]:11434         [::]:*    users:(("node",pid=4242,fd=20))`;
+  expect(listenerPids(mine)).toEqual([4242]);
+  expect(listenerPids(`${theirs}\n${mine}\n`)).toBeNull();
+  expect(listenerPids(`${mine}\n${theirs}`)).toBeNull();
+  // Every owner of every row, once each.
+  expect(listenerPids(`${mine}\n${mine.replace("pid=4242", "pid=4343")}\n${mine}`)).toEqual([4242, 4343]);
+  expect(listenerPids(`LISTEN 0 511 127.0.0.1:3000 0.0.0.0:* users:(("node",pid=7,fd=3),("node",pid=8,fd=3))`)).toEqual([7, 8]);
+  // Nothing listening proves nothing either.
+  expect(listenerPids("")).toBeNull();
+  expect(listenerPids("\n")).toBeNull();
 });
 
 it("reads the run's scope from a cgroup path segment, never a substring", () => {

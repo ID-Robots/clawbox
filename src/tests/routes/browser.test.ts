@@ -582,6 +582,25 @@ describe("/setup-api/browser", () => {
       expect(writeBrowserLaunchEnv).not.toHaveBeenCalled();
     });
 
+    it("answers 410 and drops a headless session whose page closed with its Chromium", async () => {
+      // A headless page goes when its browser exits. Answering 200 with no
+      // picture kept the dead session alive, and every capture came back empty.
+      realBrowser.value = false;
+      const { body } = await launchSession();
+      expect(body.browser).toBe("headless");
+
+      mockPage.isClosed.mockReturnValue(true);
+      mockPage.screenshot.mockClear();
+      const gone = await sendAction("screenshot", body.sessionId);
+      expect(gone.res.status).toBe(410);
+      expect(gone.body.error).toBe("Browser tab was closed");
+      expect(mockPage.screenshot).not.toHaveBeenCalled();
+
+      const again = await sendAction("screenshot", body.sessionId);
+      expect(again.res.status).toBe(400);
+      expect(again.body.error).toBe("No active browser session");
+    });
+
     it("starts the desktop browser when it is on and nothing is up yet", async () => {
       setDesktopBrowserReady(2);
 

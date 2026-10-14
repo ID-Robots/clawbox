@@ -1,7 +1,8 @@
 /** Allow a live run's own loopback app, never arbitrary local services.
  * Every listener on the port must be the run's — in its recorded process group,
  * descended from it, or inside its systemd scope — AND have a cwd within this
- * run's real project. Re-check each navigation; no port grants survive a run.
+ * run's real project; one whose owner cannot be seen (another user's) fails.
+ * Re-check each navigation; no port grants survive a run.
  *
  * Why not the process group alone: the run CLI's shell tool starts each command
  * in a session of its own (setsid), so a server a run starts from its shell is
@@ -54,6 +55,25 @@ export function cgroupNamesUnit(cgroup: string, unit: string): boolean {
   });
 }
 
+/**
+ * The owner pids of the listeners `ss -H -ltnp` printed, or null when any row
+ * names none. ss shows no pid for another user's socket, so a pid-less row is
+ * a listener nothing here can prove is the run's — and it may be the one the
+ * browser reaches: a run's server on [::1]:P or 127.0.0.2:P does not stop
+ * another user's service owning 127.0.0.1:P.
+ */
+export function listenerPids(ss: string): number[] | null {
+  const rows = ss.split("\n").filter((row) => row.trim());
+  if (!rows.length) return null;
+  const pids = new Set<number>();
+  for (const row of rows) {
+    const owners = [...row.matchAll(/pid=(\d+)/g)].map((m) => Number(m[1]));
+    if (!owners.length) return null;
+    for (const pid of owners) pids.add(pid);
+  }
+  return [...pids];
+}
+
 async function inRunScope(pid: number, unit: string): Promise<boolean> {
   try {
     return cgroupNamesUnit(await fs.readFile(`/proc/${pid}/cgroup`, "utf8"), unit);
@@ -72,10 +92,11 @@ export async function ownsLocalPreview(url: URL, run: PreviewRun | null): Promis
   if (!Number.isInteger(port) || port < 1024 || port > 65535 || url.username || url.password) return false;
   try {
     const { stdout } = await exec("ss", ["-H", "-ltnp", "sport", "=", String(port)], { timeout: 1500, maxBuffer: 64 * 1024 });
-    const pids = [...new Set([...stdout.matchAll(/pid=(\d+)/g)].map((m) => Number(m[1])))];
-    if (!pids.length) return false;
+    const pids = listenerPids(stdout);
+    if (!pids) return false;
     const root = await fs.realpath(run.directory);
-    // All visible owners must be this run: no SO_REUSEPORT ambiguity.
+    // Every owner must be this run: no SO_REUSEPORT ambiguity, and no listener
+    // on another loopback address of the same port that the browser may reach.
     for (const pid of pids) {
       const owned = (pgid !== null && await descendsFromRun(pid, pgid)) || (unit !== null && await inRunScope(pid, unit));
       if (!owned) return false;
