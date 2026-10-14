@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import ChromeDesktop from "@/app/page";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { _resetSessionUserForTest } from "@/lib/use-session-user";
@@ -29,6 +29,8 @@ function answer(body: unknown) {
 }
 
 let saved: DesktopState | null = null;
+/** What `/setup-api/preferences` answers: the saved icons, shelf pins and grid. */
+let prefs: Record<string, unknown> = {};
 
 function installFetch() {
   vi.stubGlobal("fetch", vi.fn(async (input: unknown, init?: RequestInit) => {
@@ -37,6 +39,7 @@ function installFetch() {
       if ((init?.method ?? "GET").toUpperCase() === "PUT") return answer({ ok: true });
       return answer({ user: "clawbox", state: saved });
     }
+    if (url.includes("/setup-api/preferences")) return answer((init?.method ?? "GET").toUpperCase() === "GET" ? prefs : { ok: true });
     if (url.includes("/setup-api/users/me")) return answer({ username: "clawbox", isOwner: true, multiUser: false });
     if (url.includes("/setup-api/setup/status")) return answer({ setup_complete: true });
     if (url.includes("/setup-api/harness/active")) return answer({ active: "openclaw", edition: "openclaw", activeKnown: true });
@@ -48,6 +51,8 @@ const desktopPuts = () => vi.mocked(fetch).mock.calls.filter(([input, init]) =>
   String(input).includes("/setup-api/desktop/state") && (init?.method ?? "GET").toUpperCase() === "PUT");
 
 beforeEach(() => {
+  saved = null;
+  prefs = {};
   resetHarnessCache();
   _resetSessionUserForTest();
   window.localStorage.clear();
@@ -91,5 +96,46 @@ describe("a desktop restored from its saved state", () => {
     const files = await screen.findByTestId("chrome-window-files");
     await waitFor(() => expect(files).toHaveAttribute("data-active", "true"));
     expect(document.querySelector('[data-window-id="installed-gone-1"]')).toBeNull();
+  });
+
+  // TASK-1556: the Projects app is gone. A box updated from a build that had
+  // it may still hold its icon in the saved desktop list, its cell in the
+  // grid, a shelf pin, and an open window on top of the rest.
+  it("loads a layout that still holds the removed Projects app: its icon and window are simply not there", async () => {
+    prefs = {
+      desktop_apps: ["settings", "files", "projects"],
+      icon_grid: { "desktop-settings": { row: 0, col: 0 }, "desktop-projects": { row: 1, col: 0 }, "desktop-files": { row: 2, col: 0 } },
+      pinned_apps: { projects: true },
+    };
+    saved = snapshotDesktop([
+      { id: "files-1", appId: "files", zIndex: 100, minimized: false, x: 40, y: 60, width: 640, height: 400 },
+      { id: "projects-1", appId: "projects", zIndex: 101, minimized: false, x: 300, y: 100, width: 900, height: 620, meta: { place: "projects" } },
+    ], { savedAt: 1 });
+    const errors = vi.spyOn(console, "error");
+    try {
+      render(<ChromeDesktop />);
+      const files = await screen.findByTestId("chrome-window-files");
+      // The window that was under it takes the focus: nothing invisible holds it.
+      await waitFor(() => expect(files).toHaveAttribute("data-active", "true"));
+      await waitFor(() => expect(document.querySelector('[data-desktop-icon-id="desktop-files"]')).not.toBeNull());
+      expect(document.querySelector('[data-desktop-icon-id="desktop-settings"]')).not.toBeNull();
+      expect(document.querySelector('[data-desktop-icon-id="desktop-projects"]')).toBeNull();
+      expect(document.querySelector('[data-window-id="projects-1"]')).toBeNull();
+      expect(screen.queryByTestId("chrome-window-projects")).toBeNull();
+      // No tile for it anywhere — not a label, not an untranslated key.
+      expect(document.body.textContent ?? "").not.toMatch(/app\.projects/);
+      const aboutProjects = errors.mock.calls.filter((args) => args.some((a) => String(a).toLowerCase().includes("projects")));
+      expect(aboutProjects).toEqual([]);
+
+      // Not held on to out of sight either: the next layout the desktop saves
+      // carries no Projects window, so the saved state sheds it for good.
+      within(files).getByRole("button", { name: "Close" }).click();
+      await waitFor(() => expect(desktopPuts().length).toBeGreaterThan(0), { timeout: 3000 });
+      const last = desktopPuts().at(-1)!;
+      const body = JSON.parse(String(last[1]?.body)) as { state?: DesktopState };
+      expect(body.state?.windows.map((w) => w.appId)).toEqual([]);
+    } finally {
+      errors.mockRestore();
+    }
   });
 });

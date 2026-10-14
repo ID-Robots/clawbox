@@ -1077,6 +1077,91 @@ step_chromium_install() {
   ensure_playwright_chromium
 }
 
+# Google Chrome stable — the real thing, not Chromium — for Monitor Mode's
+# "Google Chrome" desktop icon (src/lib/desktop-chrome.ts). The device
+# installer's twin, kept line for line with install.sh::step_google_chrome_install;
+# read the reasons there. What differs: no architecture check, because this
+# installer refuses anything but x86_64 before it does anything else, and no
+# test mode, because it has none.
+#
+# From Google's own apt repo, trusted through a keyring of its own under
+# /etc/apt/keyrings that the one source line names with `signed-by`. The
+# package's cron job is told not to rewrite that line (repo_add_once="false"),
+# and a refresh that fails with the repo in place takes it out again, so a
+# conflicting source can never break apt for the rest of this PC.
+#
+# Idempotent: a Chrome already where desktop-chrome.ts looks for it is left
+# alone. Returns 1 when Chrome could not be installed: the full install treats
+# that as a warning, while a dispatched `--step google_chrome_install` (the
+# root-step dispatcher's, on an update) exits non-zero.
+GOOGLE_CHROME_KEY_URL="https://dl.google.com/linux/linux_signing_key.pub"
+GOOGLE_CHROME_KEYRING="/etc/apt/keyrings/google-chrome.asc"
+GOOGLE_CHROME_SOURCE_LIST="/etc/apt/sources.list.d/google-chrome.list"
+GOOGLE_CHROME_DEFAULTS="/etc/default/google-chrome"
+
+# Where src/lib/desktop-chrome.ts looks: google-chrome-stable or google-chrome
+# on PATH, then the package's own binary.
+google_chrome_installed() {
+  command -v google-chrome-stable &>/dev/null \
+    || command -v google-chrome &>/dev/null \
+    || [ -x /opt/google/chrome/chrome ]
+}
+
+step_google_chrome_install() {
+  if google_chrome_installed; then
+    echo "  Google Chrome already installed"
+    return 0
+  fi
+
+  # Into a temp file first and checked for what it should be, so an HTML page
+  # from a captive portal or a proxy never becomes a keyring apt trusts.
+  local key
+  key="$(mktemp)"
+  if ! curl -fsSL --proto '=https' --proto-redir '=https' \
+       --connect-timeout 15 --retry 3 --retry-connrefused \
+       "$GOOGLE_CHROME_KEY_URL" -o "$key" \
+     || [ "$(head -n 1 "$key")" != "-----BEGIN PGP PUBLIC KEY BLOCK-----" ]; then
+    echo "  WARNING: could not download Google's package signing key; Google Chrome not installed" >&2
+    rm -f "$key"
+    return 1
+  fi
+  # Checked, not left to errexit: the full install runs this step in an
+  # OR-list, where errexit is off for the whole body.
+  if ! install -d -m 0755 "${GOOGLE_CHROME_KEYRING%/*}" \
+     || ! install -m 0644 "$key" "$GOOGLE_CHROME_KEYRING"; then
+    echo "  WARNING: could not write $GOOGLE_CHROME_KEYRING; Google Chrome not installed" >&2
+    rm -f "$key"
+    return 1
+  fi
+  rm -f "$key"
+
+  if [ -f "$GOOGLE_CHROME_DEFAULTS" ]; then
+    sed -i 's/^[[:space:]]*repo_add_once=.*/repo_add_once="false"/' "$GOOGLE_CHROME_DEFAULTS"
+  else
+    echo 'repo_add_once="false"' > "$GOOGLE_CHROME_DEFAULTS"
+  fi
+  # `arch=amd64` first: that is the shape the cron job recognises as its own
+  # repo, already configured, and so leaves alone.
+  echo "deb [arch=amd64 signed-by=$GOOGLE_CHROME_KEYRING] https://dl.google.com/linux/chrome/deb/ stable main" \
+    > "$GOOGLE_CHROME_SOURCE_LIST"
+
+  # A full refresh rather than this one source: a standalone dispatch may run
+  # when step_apt_update has not, and Chrome's dependencies come from the
+  # distribution's lists, not Google's.
+  wait_for_apt
+  if ! DEBIAN_FRONTEND=noninteractive apt-get update -qq; then
+    echo "  WARNING: apt-get update failed with Google's repo added; removed it again so this PC's own updates keep working. Google Chrome not installed" >&2
+    rm -f "$GOOGLE_CHROME_SOURCE_LIST" "$GOOGLE_CHROME_KEYRING"
+    return 1
+  fi
+  wait_for_apt
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq google-chrome-stable; then
+    echo "  WARNING: apt-get install google-chrome-stable failed; Google Chrome not installed" >&2
+    return 1
+  fi
+  echo "  Google Chrome installed: $(google-chrome-stable --version 2>/dev/null || echo google-chrome-stable)"
+}
+
 # ── The OpenAI Codex CLI (TASK-439) ──────────────────────────────────────────
 #
 # The device installer's twin, kept deliberately small and parallel to it. Same
@@ -1985,7 +2070,7 @@ DISPATCH_STEPS=(
   apt_update install_bun git_pull build
   openclaw_setup openclaw_install openclaw_patch openclaw_config
   directories_permissions
-  ollama_install llamacpp_install chromium_install ai_tools_install
+  ollama_install llamacpp_install chromium_install google_chrome_install ai_tools_install
   vnc_install ffmpeg_install cloudflared_install fix_git_perms clawkeep_install
   systemd_services root_step_contract start_gateway start_ui
 )
@@ -2010,7 +2095,7 @@ fi
 
 # ── Full Install Mode ───────────────────────────────────────────────────────
 
-TOTAL_STEPS=18
+TOTAL_STEPS=19
 step=0
 log() {
   step=$((step + 1))
@@ -2053,6 +2138,12 @@ step_llamacpp_install
 
 log "Installing Chromium..."
 step_chromium_install
+
+log "Installing Google Chrome..."
+# Guarded: under errexit a bare call would abort the whole install over an
+# optional browser.
+step_google_chrome_install \
+  || echo "  Warning: Google Chrome did not install; Monitor Mode's Chrome icon will say it is missing until it does"
 
 log "Installing AI coding tools (Claude Code, Codex, Gemini)..."
 step_ai_tools_install

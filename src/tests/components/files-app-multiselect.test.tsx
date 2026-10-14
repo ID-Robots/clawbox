@@ -41,7 +41,6 @@ beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
     const method = init?.method ?? "GET";
     if (method === "GET") {
-      if (url.includes("project-folders")) return { ok: true, status: 200, json: async () => ({ folders: [], suggestions: [], max: 50 }) };
       return { ok: true, status: 200, statusText: "OK", json: async () => ({ files: HOME, availableSpace: 1e12 }) };
     }
     let parsed: unknown = null;

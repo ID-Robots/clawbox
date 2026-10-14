@@ -23,7 +23,15 @@ vi.mock("@/lib/pending-actions", () => ({
 
 import { notifyOwner } from "@/lib/email-notify";
 import { apps } from "@/lib/desktop-apps";
-import { NOTIFY_ACTION_TARGETS, OPEN_EMAIL_SETTINGS, notifyActionLabel, parseNotifyAction, toastDetailForNotice } from "@/lib/notify-action";
+import {
+  NOTIFY_ACTION_FOCUS,
+  NOTIFY_ACTION_TARGETS,
+  OPEN_ANTHROPIC_ACCOUNTS_SETTINGS,
+  OPEN_EMAIL_SETTINGS,
+  notifyActionLabel,
+  parseNotifyAction,
+  toastDetailForNotice,
+} from "@/lib/notify-action";
 import { translations } from "@/lib/translations";
 import type { Locale } from "@/lib/i18n";
 
@@ -102,6 +110,57 @@ describe("parseNotifyAction", () => {
   });
 });
 
+/**
+ * The account-limit notices land on Providers with the Anthropic accounts
+ * OPEN and in view: the accounts are folded behind a button on the Anthropic
+ * row, so the section alone would show a list with the one thing the notice is
+ * about tucked away. That ask is a `focus`, and a closed set like the pairs.
+ */
+describe("parseNotifyAction — a focus inside the section", () => {
+  it("carries the accounts focus on the pair it belongs to", () => {
+    expect(parseNotifyAction({ open: "settings", section: "ai", focus: "anthropicAccounts" }))
+      .toEqual({ open: "settings", section: "ai", focus: "anthropicAccounts" });
+    expect(parseNotifyAction(OPEN_ANTHROPIC_ACCOUNTS_SETTINGS)).toEqual(OPEN_ANTHROPIC_ACCOUNTS_SETTINGS);
+  });
+
+  it("drops a focus that is unknown, foreign to the pair, or not a string — and still opens the section", () => {
+    for (const focus of [
+      "somewhereElse",
+      "constructor",
+      "toString",
+      "",
+      42,
+      null,
+      { anthropicAccounts: true },
+      ["anthropicAccounts"],
+    ]) {
+      expect(parseNotifyAction({ open: "settings", section: "ai", focus }), String(focus)).toEqual({ open: "settings", section: "ai" });
+    }
+    // A real focus on a section that is not its home.
+    expect(parseNotifyAction({ open: "settings", section: "email", focus: "anthropicAccounts" }))
+      .toEqual({ open: "settings", section: "email" });
+  });
+
+  it("does not let a focus rescue a pair the allowlist refuses", () => {
+    expect(parseNotifyAction({ open: "settings", section: "system", focus: "anthropicAccounts" })).toBeNull();
+    expect(parseNotifyAction({ open: "browser", section: "ai", focus: "anthropicAccounts" })).toBeNull();
+  });
+
+  it("travels out of the ring with the notice", () => {
+    expect(toastDetailForNotice({ type: "notify", message: "Every Anthropic account is limited", action: OPEN_ANTHROPIC_ACCOUNTS_SETTINGS }))
+      .toEqual({ message: "Every Anthropic account is limited", action: { open: "settings", section: "ai", focus: "anthropicAccounts" } });
+  });
+
+  it("is labelled by its section, like any other destination", () => {
+    const t = (key: string, params?: Record<string, string | number>) => {
+      let str = translations.en[key] ?? key;
+      for (const [k, v] of Object.entries(params ?? {})) str = str.replaceAll(`{${k}}`, String(v));
+      return str;
+    };
+    expect(notifyActionLabel(OPEN_ANTHROPIC_ACCOUNTS_SETTINGS, t)).toBe(`Open Settings → ${translations.en["settings.providers"]}`);
+  });
+});
+
 describe("notifyOwner", () => {
   it("still pushes a plain notice with no destination — every existing caller is unchanged", async () => {
     await notifyOwner("Something happened");
@@ -175,5 +234,17 @@ describe("the allowlist points at things that exist", () => {
     const sections = new Set([...declared![1].matchAll(/"([^"]+)"/g)].map((m) => m[1]));
     expect(sections.size).toBeGreaterThan(1);
     for (const section of Object.keys(NOTIFY_ACTION_TARGETS.settings)) expect(sections).toContain(section);
+  });
+
+  it("homes every focus on an allowlisted pair, and Settings answers each one", () => {
+    // Same leniency on the receiving end: SettingsApp ignores a focus it does
+    // not compare against, so a rename here would land the owner on Providers
+    // with the accounts still folded away and every fixture still green.
+    const src = readFileSync(join(process.cwd(), "src/components/SettingsApp.tsx"), "utf8");
+    for (const [focus, home] of Object.entries(NOTIFY_ACTION_FOCUS)) {
+      expect(Object.keys(NOTIFY_ACTION_TARGETS)).toContain(home.open);
+      expect(Object.keys(NOTIFY_ACTION_TARGETS[home.open])).toContain(home.section);
+      expect(src, `SettingsApp never compares against the "${focus}" focus`).toContain(`focus === "${focus}"`);
+    }
   });
 });

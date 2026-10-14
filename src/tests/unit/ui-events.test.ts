@@ -119,6 +119,26 @@ describe("the standalone Settings handoff", () => {
     }
   });
 
+  it("hands a focus over beside the section, and a plain link clears one left behind", () => {
+    type PendingWindow = Window & { __clawboxPendingSettingsSection?: string; __clawboxPendingSettingsFocus?: string };
+    const details: unknown[] = [];
+    const onSection = (e: Event) => details.push((e as CustomEvent).detail);
+    window.addEventListener(OPEN_SETTINGS_SECTION_EVENT, onSection);
+    try {
+      handoffSettingsSection("ai", "anthropicAccounts");
+      expect((window as PendingWindow).__clawboxPendingSettingsFocus).toBe("anthropicAccounts");
+      // A focus no Settings ever took must not ride on the NEXT link's cold open.
+      handoffSettingsSection("system");
+      expect((window as PendingWindow).__clawboxPendingSettingsFocus).toBeUndefined();
+      // The plain link's event is exactly what it always was.
+      expect(details).toEqual([{ section: "ai", focus: "anthropicAccounts" }, { section: "system" }]);
+    } finally {
+      window.removeEventListener(OPEN_SETTINGS_SECTION_EVENT, onSection);
+      delete (window as PendingWindow).__clawboxPendingSettingsSection;
+      delete (window as PendingWindow).__clawboxPendingSettingsFocus;
+    }
+  });
+
   it("knows the /app/<id> page from the desktop, and spells the Settings address once", () => {
     expect(onStandaloneAppPage()).toBe(false);
     window.history.pushState({}, "", "/app/coding");

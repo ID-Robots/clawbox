@@ -4470,6 +4470,112 @@ print(python)
 PY
 }
 
+# The Hermes messaging gateway, kept on the agent that is on disk NOW.
+#
+# `hermes gateway install` writes ~/.config/systemd/user/hermes-gateway.service
+# with an ExecStart INSIDE the agent install (`<agent_dir>/venv/bin/python` up
+# to v0.21.1, a launcher under `<agent_dir>/.hermes/bin` from v0.21.7), and
+# nothing in the pinned upgrade re-renders it: the upstream installer offers
+# `gateway install --if-missing` only when it has a terminal. The gateway kept
+# running on deleted files, so the update looked healthy, and its next restart
+# crash-looped for good (`status=203/EXEC … venv/bin/python: No such file or
+# directory`, Telegram dead) — every Hermes box, 2026-10-14.
+#
+# HARNESS-FIRST, both halves Hermes' own, run as the clawbox user from the
+# shim — the NEW agent's CLI, so a unit whose interpreter is gone is no
+# obstacle:
+#   * `gateway install --no-start-now --no-start-on-login` re-renders the unit
+#     only when Hermes' own comparison calls it outdated (`systemd_unit_is_current`),
+#     and changes neither whether the gateway runs nor whether it starts at boot;
+#   * `gateway restart` drains the gateway (SIGUSR1, so a turn in flight finishes
+#     and chat hears "restarting", not "shutting down") and waits for the new
+#     one. The web server restarts this unit the same way (hermes-telegram.ts).
+# Hermes answers 0 over a restart it could not confirm (a missing linger, a
+# wait that ran out), so whether the gateway is up is asked of systemd after
+# it: active, a main pid, the same pid a settle later.
+#
+# `$1` is 1 when this run replaced the agent — the gateway is on deleted files
+# and is bounced whatever the unit says — and 0 for a runnable agent it found,
+# where only a unit Hermes had to repair is a reason to bounce: that is every box
+# an earlier update upgraded, crash-looping. Only a gateway that was running or
+# trying to be (`activating` is the crash loop) is restarted. A failure is a
+# CLAWBOX-WARN, never this step's return — the agent install worked.
+#
+# A SYSTEM unit (written by `sudo hermes gateway install --system`, the only
+# installer ClawBox had from 2026-08-11 to 2026-09-07) is only READ: rendering it
+# would mean running the clawbox-owned shim as root. An ExecStart whose program
+# is gone is reported with the repair. has_hermes_harness, because on
+# `unselected` the gateway is a foreign unit.
+HERMES_GATEWAY_SYSTEM_UNIT="/etc/systemd/system/hermes-gateway.service"
+hermes_gateway_refresh_after_install() {
+  local replaced="${1:-0}" unit=hermes-gateway.service
+  local unit_file="$CLAWBOX_HOME/.config/systemd/user/$unit"
+  local system_unit="${HERMES_GATEWAY_SYSTEM_UNIT:-}"
+  local uid before_unit out state before_pid pid settled settle program
+  has_hermes_harness || return 0
+  if [ ! -f "$unit_file" ]; then
+    [ -n "$system_unit" ] && [ -f "$system_unit" ] || return 0
+    program="$(sed -n 's/^ExecStart=[-@:+!]*//p' "$system_unit" | head -1)"
+    program="${program%% *}"
+    program="${program//\"/}"
+    if [ -n "$program" ] && [ ! -x "$program" ]; then
+      echo "CLAWBOX-WARN[hermes-gateway-not-restarted]: the system-wide $unit starts $program, which the Hermes install no longer has, so Telegram and the other channels are down; 'sudo systemctl disable --now $unit', then as the clawbox user 'hermes gateway install --start-now --start-on-login', repairs it"
+    fi
+    return 0
+  fi
+  uid="$(id -u "$CLAWBOX_USER" 2>/dev/null)" || return 0
+  gw_systemctl() {
+    runuser -u "$CLAWBOX_USER" -- env XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user "$@"
+  }
+  gw_hermes() {
+    runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" XDG_RUNTIME_DIR="/run/user/$uid" \
+      "$CLAWBOX_HOME/.local/bin/hermes" gateway "$@" </dev/null 2>&1
+  }
+  gw_warn() {
+    echo "CLAWBOX-WARN[hermes-gateway-not-restarted]: $unit $1 — Telegram and the other channels may be down; as the clawbox user, 'hermes gateway install --force && hermes gateway restart' repairs it"
+  }
+
+  before_unit="$(cat "$unit_file" 2>/dev/null || true)"
+  state="$(gw_systemctl is-active "$unit" 2>/dev/null || true)"
+  if ! out="$(gw_hermes install --no-start-now --no-start-on-login)"; then
+    # Restarting onto a unit that still names the old interpreter would turn a
+    # gateway serving from the old tree into a crash loop.
+    gw_warn "could not be re-rendered for the current agent${out:+ ($(printf '%s\n' "$out" | tail -1))}"
+    return 0
+  fi
+  if [ "$replaced" != 1 ] && [ "$before_unit" = "$(cat "$unit_file" 2>/dev/null || true)" ]; then
+    return 0
+  fi
+  case "$state" in
+    active|activating|reloading) ;;
+    *)
+      echo "  $unit re-rendered for the current agent; it was ${state:-not running} and is left that way"
+      return 0
+      ;;
+  esac
+
+  before_pid="$(gw_systemctl show "$unit" -p MainPID --value 2>/dev/null || true)"
+  if ! out="$(gw_hermes restart)"; then
+    gw_warn "could not be restarted${out:+ ($(printf '%s\n' "$out" | tail -1))}"
+    return 0
+  fi
+  # The same settle resume_paused_engines and the dashboard restart use.
+  settle="${CLAWBOX_ENGINE_SETTLE_S:-3}"
+  case "$settle" in ''|*[!0-9]*) settle=3 ;; esac
+  { [ "${#settle}" -le 3 ] && [ "$settle" -ge 1 ]; } || settle=3
+  pid="$(gw_systemctl show "$unit" -p MainPID --value 2>/dev/null || true)"
+  sleep "$settle"
+  state="$(gw_systemctl is-active "$unit" 2>/dev/null || true)"
+  settled="$(gw_systemctl show "$unit" -p MainPID --value 2>/dev/null || true)"
+  if [ "$state" = active ] && [ -n "$pid" ] && [ "$pid" != 0 ] \
+    && [ "$pid" != "$before_pid" ] && [ "$settled" = "$pid" ]; then
+    echo "  Restarted $unit on the current agent (main pid ${before_pid:-0} -> $pid, still up ${settle}s later)"
+  else
+    gw_warn "did not stay up after the restart (systemd says ${state:-unknown}, main pid ${settled:-unknown})"
+  fi
+  return 0
+}
+
 # Install the Hermes agent (git-based install into ~/.hermes). Needed by every
 # edition that runs Hermes — the hermes SKU and the premium dual SKU (which was
 # previously skipped here, so a dual box got the switcher but no second
@@ -4577,6 +4683,11 @@ step_hermes_install() {
   # checkout that is not a git repository must fall through, not abort.
   local at_commit=""
   if [ -n "$installed" ]; then
+    # The agent that runs now gets the gateway unit it needs, whatever this step
+    # does next: a box an EARLIER update upgraded is here with a unit still
+    # naming the old interpreter, and the returns below that keep this agent
+    # (on the pin, installer unreachable, nothing moved aside) would leave it.
+    hermes_gateway_refresh_after_install 0
     at_commit=$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" \
       git -C "$agent_dir" rev-parse HEAD 2>/dev/null) || at_commit=""
     if [ "$at_commit" = "$pin" ]; then
@@ -4801,6 +4912,10 @@ step_hermes_install() {
         npm install --no-fund --no-audit --progress=false \
         || echo "  Warning: WhatsApp bridge warm-up failed (non-fatal) — the first pairing will install it on demand" >&2
     fi
+    # The messaging gateway is on the tree this install just replaced. AFTER
+    # the warm-up, so a gateway that serves WhatsApp comes back to a bridge
+    # that has its dependencies.
+    hermes_gateway_refresh_after_install 1
   else
     echo "  Warning: Hermes still does not run after install — the dashboard will not start" >&2
     # The diagnosis may simply have been wrong — an empty probe on a loaded
@@ -7520,9 +7635,21 @@ step_openclaw_tts() {
       # screen below — same script, same reason ("Kokoro emits WAV natively,
       # so the happy path needs no ffmpeg at all"). The two harnesses must not
       # be configured to disagree about one script.
-      if hermes_tts_cli config set "tts.providers.$HERMES_TTS_PROVIDER.command" "$HERMES_TTS_COMMAND" \
-        && hermes_tts_cli config set "tts.providers.$HERMES_TTS_PROVIDER.output_format" wav \
-        && hermes_tts_cli config set "tts.providers.$HERMES_TTS_PROVIDER.type" command; then
+      #
+      # `--force` on these three paths, and only these. `tts.providers.<name>`
+      # is where Hermes' TTS reads a command provider — its own guide
+      # (website/docs/user-guide/features/tts.md) and the reader
+      # (tools/tts_command_provider.py, "canonical") at the v0.21.7 pin — but
+      # that `config set` validates against DEFAULT_CONFIG, which seeds no
+      # `tts.providers`, and since `providers` is a top-level key it takes the
+      # path for a wrong prefix and refuses BEFORE writing ("Did you mean:
+      # providers.clawbox-local.command" — the LLM provider table, which the TTS
+      # tool never reads). Its own `--force` is the override for exactly that
+      # refusal; earlier pins accept the flag and only drop a notice with it.
+      # This refusal left the box's voice unregistered and failed the update.
+      if hermes_tts_cli config set "tts.providers.$HERMES_TTS_PROVIDER.command" "$HERMES_TTS_COMMAND" --force \
+        && hermes_tts_cli config set "tts.providers.$HERMES_TTS_PROVIDER.output_format" wav --force \
+        && hermes_tts_cli config set "tts.providers.$HERMES_TTS_PROVIDER.type" command --force; then
         echo "  Hermes on-device TTS provider defined ($HERMES_TTS_PROVIDER)"
         # ── Seed-if-unset, with ONE extra value counted as unset: `edge` ──────
         #
@@ -10864,6 +10991,115 @@ step_chromium_install() {
   ensure_playwright_chromium
 }
 
+# Google Chrome stable — the real thing, not Chromium — for Monitor Mode's
+# "Google Chrome" desktop icon (src/lib/desktop-chrome.ts). Chromium above stays
+# the agent's browser; this one is the owner's.
+#
+# amd64 ONLY. Google ships no Linux arm64 build, so on a Jetson this is a clean
+# no-op and the icon itself says Chrome is missing. The architecture is read the
+# way the other arch-sensitive installs read it: `uname -m`.
+#
+# From Google's own apt repo, trusted through a keyring of its own under
+# /etc/apt/keyrings that the one source line names with `signed-by` — not
+# apt-key, not trusted.gpg.d — so the key vouches for that repo and nothing
+# else. Armored (.asc), which apt reads directly, so gpg is not needed to
+# dearmor it. Two traps, both from the package's own cron job
+# (/etc/cron.daily/google-chrome, which its postinst also runs):
+#  - On its first run it rewrites google-chrome.list WITHOUT signed-by, unless
+#    /etc/default/google-chrome already says repo_add_once="false". Seeded
+#    first, so the line written here is the one that stays.
+#  - A second source for the same repo with a different signed-by makes every
+#    `apt-get update` on the box fail ("Conflicting values set for option
+#    Signed-By"), and step_apt_update — every install and every in-app update —
+#    with it. So the source takes the package's own file name, and when the
+#    refresh fails with it in place it is taken out again: no Chrome is a far
+#    smaller problem than a box that can no longer update.
+#
+# Idempotent: a Chrome already where desktop-chrome.ts looks for it is left
+# alone. Returns 1 when Chrome could not be installed: the full install treats
+# that as a warning — a box without Chrome boots and works, and the icon says
+# what is missing — while a dispatched `--step google_chrome_install` exits
+# non-zero, so whoever ran it sees it fail. Kept line for line with
+# install-x64.sh's twin.
+GOOGLE_CHROME_KEY_URL="https://dl.google.com/linux/linux_signing_key.pub"
+GOOGLE_CHROME_KEYRING="/etc/apt/keyrings/google-chrome.asc"
+GOOGLE_CHROME_SOURCE_LIST="/etc/apt/sources.list.d/google-chrome.list"
+GOOGLE_CHROME_DEFAULTS="/etc/default/google-chrome"
+
+# Where src/lib/desktop-chrome.ts looks: google-chrome-stable or google-chrome
+# on PATH, then the package's own binary.
+google_chrome_installed() {
+  command -v google-chrome-stable &>/dev/null \
+    || command -v google-chrome &>/dev/null \
+    || [ -x /opt/google/chrome/chrome ]
+}
+
+step_google_chrome_install() {
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, skipping Google Chrome install"
+    return 0
+  fi
+  case "$(uname -m)" in
+    x86_64|amd64) ;;
+    *)
+      echo "  Google Chrome has no Linux build for $(uname -m) — skipping (amd64 only)"
+      return 0
+      ;;
+  esac
+  if google_chrome_installed; then
+    echo "  Google Chrome already installed"
+    return 0
+  fi
+
+  # Into a temp file first and checked for what it should be, so an HTML page
+  # from a captive portal or a proxy never becomes a keyring apt trusts.
+  local key
+  key="$(mktemp)"
+  if ! curl -fsSL --proto '=https' --proto-redir '=https' \
+       --connect-timeout 15 --retry 3 --retry-connrefused \
+       "$GOOGLE_CHROME_KEY_URL" -o "$key" \
+     || [ "$(head -n 1 "$key")" != "-----BEGIN PGP PUBLIC KEY BLOCK-----" ]; then
+    echo "  WARNING: could not download Google's package signing key; Google Chrome not installed" >&2
+    rm -f "$key"
+    return 1
+  fi
+  # Checked, not left to errexit: the full install runs this step in an
+  # OR-list, where errexit is off for the whole body.
+  if ! install -d -m 0755 "${GOOGLE_CHROME_KEYRING%/*}" \
+     || ! install -m 0644 "$key" "$GOOGLE_CHROME_KEYRING"; then
+    echo "  WARNING: could not write $GOOGLE_CHROME_KEYRING; Google Chrome not installed" >&2
+    rm -f "$key"
+    return 1
+  fi
+  rm -f "$key"
+
+  if [ -f "$GOOGLE_CHROME_DEFAULTS" ]; then
+    sed -i 's/^[[:space:]]*repo_add_once=.*/repo_add_once="false"/' "$GOOGLE_CHROME_DEFAULTS"
+  else
+    echo 'repo_add_once="false"' > "$GOOGLE_CHROME_DEFAULTS"
+  fi
+  # `arch=amd64` first: that is the shape the cron job recognises as its own
+  # repo, already configured, and so leaves alone.
+  echo "deb [arch=amd64 signed-by=$GOOGLE_CHROME_KEYRING] https://dl.google.com/linux/chrome/deb/ stable main" \
+    > "$GOOGLE_CHROME_SOURCE_LIST"
+
+  # A full refresh rather than this one source: a standalone dispatch may run
+  # on a boot where step_apt_update never did, and Chrome's dependencies come
+  # from the distribution's lists, not Google's.
+  wait_for_apt
+  if ! DEBIAN_FRONTEND=noninteractive apt-get update -qq; then
+    echo "  WARNING: apt-get update failed with Google's repo added; removed it again so the box's own updates keep working. Google Chrome not installed" >&2
+    rm -f "$GOOGLE_CHROME_SOURCE_LIST" "$GOOGLE_CHROME_KEYRING"
+    return 1
+  fi
+  wait_for_apt
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq google-chrome-stable; then
+    echo "  WARNING: apt-get install google-chrome-stable failed; Google Chrome not installed" >&2
+    return 1
+  fi
+  echo "  Google Chrome installed: $(google-chrome-stable --version 2>/dev/null || echo google-chrome-stable)"
+}
+
 
 # Claude Code, via Anthropic's NATIVE installer (Yanko, 2026-08-22 — not npm).
 #
@@ -12220,7 +12456,7 @@ step_validate_services() {
 DISPATCH_STEPS=(
   bootstrap_updater apt_update nvidia_jetpack performance_mode jtop_install ollama_install llamacpp_install llamacpp_model
   embed_model
-  chromium_install ai_tools_install coding_harness codex_cli vnc_install vnc_refresh
+  chromium_install google_chrome_install ai_tools_install coding_harness codex_cli vnc_install vnc_refresh
   openclaw_setup openclaw_install openclaw_patch openclaw_config openclaw_models openclaw_tts
   # The Local AI tab's two engine installs, since 2026-09-15: Kokoro and
   # faster-whisper are opt-in now, and these are the only two steps that
@@ -12307,7 +12543,19 @@ if [ "${1:-}" = "--step" ]; then
       # two lines, and the prefix and the verdict word are byte-identical.
       echo "[provision-status] INCOMPLETE (${PROVISION_FAILURES[*]})"
       echo "[provision-run] $PROVISION_RUN_ID"
-      if [ "$rc" -eq 0 ]; then rc=1; fi
+      if [ "$rc" -eq 0 ]; then
+        # The recorded failures are the ONLY reason this step fails, so say
+        # which they were where the updater looks: the newest `Error:` line of
+        # the unit's last 40 journal lines (updater.ts getStepFailureLine).
+        # The sub-step's own error is printed long before a step like
+        # post_update ends, and without this the owner was shown whatever
+        # fixup happened to print last. A step that failed by itself keeps its
+        # own error. The owner reads this line, so no command or path: the
+        # re-run is on the banner's own line above (harness_swap_say_failed's
+        # rule).
+        echo "Error: these setup steps did not complete: ${PROVISION_FAILURES[*]}" >&2
+        rc=1
+      fi
     fi
     exit "$rc"
   }
@@ -12328,7 +12576,7 @@ fi
 # only on the hermes and dual editions. Edition-aware rather than a constant:
 # the openclaw constant made those editions print "[27/26]" on their last step,
 # and an upper bound would leave openclaw finishing at "[26/27]".
-TOTAL_STEPS=28
+TOTAL_STEPS=29
 if has_hermes_harness; then TOTAL_STEPS=$((TOTAL_STEPS + 1)); fi
 step=0
 log() {
@@ -12448,6 +12696,13 @@ echo "  Deferred: Settings → Local AI (Memory search) fetches it on the owner'
 
 log "Installing Chromium..."
 step_chromium_install
+
+log "Installing Google Chrome (amd64 only)..."
+# Guarded: the step answers 1 when Chrome did not install, and under errexit a
+# bare call would abort the whole install over an optional browser. A Jetson
+# skips it with 0.
+step_google_chrome_install \
+  || echo "  Warning: Google Chrome did not install; Monitor Mode's Chrome icon will say it is missing until it does"
 
 log "Installing Cloudflare Tunnel (cloudflared)..."
 step_cloudflared_install

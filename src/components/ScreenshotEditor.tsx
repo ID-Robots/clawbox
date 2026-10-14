@@ -46,6 +46,7 @@ import {
   textBlockSize,
   updateAnnotation,
 } from "@/lib/screenshot/annotations";
+import { canCopyImages, copyPngToClipboard } from "@/lib/screenshot/clipboard";
 import {
   MAX_SCREENSHOT_BYTES,
   SCREENSHOTS_DIR,
@@ -151,15 +152,6 @@ type Gesture =
 interface Status {
   kind: "ok" | "error" | "saved";
   text: string;
-}
-
-function canCopyImages(): boolean {
-  return (
-    typeof window !== "undefined" &&
-    window.isSecureContext === true &&
-    typeof ClipboardItem !== "undefined" &&
-    typeof navigator.clipboard?.write === "function"
-  );
 }
 
 function ToolButton({
@@ -705,8 +697,8 @@ function ScreenshotEditor({ image, onBack, onDirtyChange, onSaved, canUseBrowser
     }
     setBusy("copy");
     try {
-      // The promise form keeps the write inside the click's gesture while the PNG is encoded.
-      await navigator.clipboard.write([new ClipboardItem({ "image/png": exportBlob("png") })]);
+      // Started inside the click's gesture, with the PNG still being encoded.
+      await copyPngToClipboard(exportBlob("png"));
       setStatus({ kind: "ok", text: t("screenshot.copied") });
     } catch {
       setStatus({ kind: "error", text: t("screenshot.copyFailed") });

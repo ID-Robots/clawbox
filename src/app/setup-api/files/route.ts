@@ -9,7 +9,6 @@ import { boundedBody } from "@/lib/bounded-body";
 import { DISK_FREE_RESERVE_BYTES } from "@/lib/disk-reserve";
 import { filesBrowseRoot, isProtectedFilePath } from "@/lib/file-guard";
 import { MAX_MOVE_ITEMS, moveEntries, type MoveConflictPolicy } from "@/lib/files-move";
-import { followMovedProjectFolders } from "@/lib/project-folders";
 import { summarizeSelectionForZip, zipSelectionStream } from "@/lib/zip-stream";
 import { issueZipTicket, redeemZipTicket, uniqueArchiveNames } from "@/lib/zip-tickets";
 import { contentDisposition } from "@/lib/content-disposition";
@@ -331,7 +330,7 @@ function selectionZipDownload(ticketId: string): NextResponse {
 /**
  * `{ action: "move", paths, conflict }` into the request's `dir` — the Files
  * app's "Move to…" and its drag-and-drop. See src/lib/files-move.ts for the
- * rules; a pinned project folder that moves keeps its pin.
+ * rules.
  */
 async function moveAction(destAbs: string, body: Record<string, unknown>): Promise<NextResponse> {
   const parsed = parseItemPaths(body.paths, MAX_MOVE_ITEMS);
@@ -345,13 +344,6 @@ async function moveAction(destAbs: string, body: Record<string, unknown>): Promi
   });
   if (!result.ok) return NextResponse.json(result.refusal.body, { status: result.refusal.status });
   const { moved, skipped, failed } = result.outcome;
-  if (moved.length > 0) {
-    try {
-      await followMovedProjectFolders(moved.map((m) => ({ from: m.from, to: m.to })));
-    } catch (err) {
-      console.warn("[files] could not carry Projects pins through a move:", err instanceof Error ? err.message : err);
-    }
-  }
   return NextResponse.json({ ok: failed.length === 0, moved, skipped, failed });
 }
 

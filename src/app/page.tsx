@@ -382,7 +382,6 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
     setup: "construction",
     terminal: "terminal",
     files: "folder",
-    projects: "folder_special",
     clawkeep: "shield_lock",
     // A faceted gem rather than a memory chip: the shard is the thing the app
     // is named for. `diamond`, not `diamond_shine` — both ship a ligature in
@@ -516,9 +515,8 @@ const WindowContent = memo(function WindowContent({ app, meta, windowId, termina
         />
       ) : null;
     case "files":
-      // The Projects icon is the Files app opened on its Projects view; a
-      // window record that names a folder (`meta.path`) still opens there.
-      return <FilesApp initialPath={meta?.path} initialPlace={app.id === "projects" || meta?.place === "projects" ? "projects" : undefined} />;
+      // A window record that names a folder (`meta.path`) opens there.
+      return <FilesApp initialPath={meta?.path} />;
     case "clawkeep":
       return <ClawKeepApp />;
     case "memory_shard":
@@ -718,8 +716,9 @@ function ChromeDesktopInner() {
   // polled only on the kiosk itself: every other box — every Jetson — sends
   // nothing.
   const kiosk = useKioskTabs(ownerApis && onKiosk);
-  // The ClawBox Desktop session's own screen, with a Chrome to start: the
-  // Google Chrome icon (src/lib/desktop-chrome-client.ts). Hidden elsewhere.
+  // The ClawBox Desktop session's own screen: the Google Chrome icon
+  // (src/lib/desktop-chrome-client.ts) — `missing` when the box has no Chrome
+  // to start, and a click then says how to install it. Hidden elsewhere.
   const desktopChrome = useDesktopChrome(ownerApis);
   // A stable callback on its own, so the shelf's click handler can depend on
   // it rather than on the whole `kiosk` object, a new one every render.
@@ -863,7 +862,7 @@ function ChromeDesktopInner() {
       ? [
           ...hiddenAppIdsForHarness(activeHarness),
           ...(onKiosk ? [] : apps.filter((a) => a.kioskOnly).map((a) => a.id)),
-          ...(desktopChrome ? [] : [DESKTOP_CHROME_APP_ID]),
+          ...(desktopChrome !== "hidden" ? [] : [DESKTOP_CHROME_APP_ID]),
         ]
       : apps.map((a) => a.id).filter((id) => !NON_OWNER_APP_IDS.includes(id)),
     [activeHarness, isOwner, onKiosk, desktopChrome],
@@ -2283,8 +2282,12 @@ function ChromeDesktopInner() {
     }
 
     if (app.type === "chrome") {
-      // A native window on the screen, not a desktop window.
-      void openDesktopChrome();
+      // A native window on the screen, not a desktop window — or, on a box
+      // with no Chrome to start, a toast that says how to install one.
+      void openDesktopChrome({
+        state: desktopChrome,
+        onMissing: () => window.dispatchEvent(new CustomEvent(TOAST_EVENT, { detail: { message: t("desktop.chromeNotInstalled") } })),
+      });
       return;
     }
 
@@ -2332,7 +2335,7 @@ function ChromeDesktopInner() {
       { id: windowId, appId, zIndex: nextZIndex, minimized: false, ...(Object.keys(windowMeta).length ? { meta: windowMeta } : {}), ...maxNonce },
     ]);
     setNextZIndex((z) => z + 1);
-  }, [openWindows, nextZIndex, getAllApps, raiseChat]);
+  }, [openWindows, nextZIndex, getAllApps, raiseChat, desktopChrome, t]);
 
   // Closing a window BY HAND is the one thing that ends its terminals'
   // sessions (TASK-1306): a refresh, a closed browser tab or a phone switching

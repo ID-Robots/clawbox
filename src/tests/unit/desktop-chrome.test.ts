@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import fs from "fs";
+import net from "net";
 import os from "os";
 import path from "path";
 import {
   buildChromeArgv,
+  CHROME_NOT_INSTALLED,
   chromeEnv,
   chromeUrl,
   DEFAULT_CHROME_URL,
@@ -13,7 +15,8 @@ import {
   launchDesktopChrome,
   parseChromeArgs,
 } from "@/lib/desktop-chrome";
-import { onBoxScreen } from "@/lib/desktop-chrome-client";
+import { desktopChromeState, onBoxScreen } from "@/lib/desktop-chrome-client";
+import { MONITOR_MODE_MARKER } from "@/lib/monitors";
 
 /**
  * The desktop's Google Chrome icon (src/lib/desktop-chrome.ts): only while the
@@ -22,16 +25,37 @@ import { onBoxScreen } from "@/lib/desktop-chrome-client";
  */
 
 let tmp: string;
+let wayland: net.Server | null = null;
 const saved = { ...process.env };
 
 beforeEach(() => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), "desktop-chrome-"));
 });
 
-afterEach(() => {
+afterEach(async () => {
   process.env = { ...saved };
+  if (wayland) await new Promise<void>((resolve) => wayland!.close(() => resolve()));
+  wayland = null;
   fs.rmSync(tmp, { recursive: true, force: true });
 });
+
+/**
+ * The ClawBox Desktop session, up on a kiosk box: a Wayland socket in a
+ * runtime dir whose monitor-mode marker names a live compositor (this test's
+ * own process, under its own name).
+ */
+async function monitorModeSessionUp(): Promise<void> {
+  process.env.CLAWBOX_KIOSK_URL = "http://localhost/";
+  process.env.CLAWBOX_MONITORS_RUNTIME_DIR = tmp;
+  process.env.CLAWBOX_MONITORS_COMPOSITOR = fs.readFileSync(`/proc/${process.pid}/comm`, "utf8").trim();
+  fs.writeFileSync(path.join(tmp, MONITOR_MODE_MARKER), `${process.pid}\n`);
+  const server = net.createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(path.join(tmp, "wayland-0"), () => resolve());
+  });
+  wayland = server;
+}
 
 function fakeChrome(): string {
   const bin = path.join(tmp, "chrome");
@@ -103,6 +127,61 @@ describe("availability", () => {
     process.env.CLAWBOX_MONITORS_RUNTIME_DIR = tmp;
     process.env.CLAWBOX_DESKTOP_CHROME = fakeChrome();
     expect(desktopChromeStatus()).toEqual({ available: false });
+  });
+});
+
+describe("in monitor mode (the ClawBox Desktop session is up)", () => {
+  it("draws the icon with a Chrome to start, and says it is installed", async () => {
+    await monitorModeSessionUp();
+    process.env.CLAWBOX_DESKTOP_CHROME = fakeChrome();
+    expect(desktopChromeStatus()).toEqual({ available: true, installed: true });
+  });
+
+  it("still draws the icon with no Chrome on the box, and says it is not installed", async () => {
+    await monitorModeSessionUp();
+    process.env.CLAWBOX_DESKTOP_CHROME = path.join(tmp, "no-such-chrome");
+    expect(desktopChromeStatus()).toEqual({ available: true, installed: false });
+  });
+
+  it("starts nothing without a Chrome: the launch answers not_installed", async () => {
+    await monitorModeSessionUp();
+    process.env.CLAWBOX_DESKTOP_CHROME = path.join(tmp, "no-such-chrome");
+    const result = await launchDesktopChrome("https://example.com/");
+    expect(result).toMatchObject({ ok: false, available: true, code: CHROME_NOT_INSTALLED });
+    expect(result.ok === false && "error" in result ? result.error : "").toMatch(/not installed/i);
+  });
+
+  it("opens Chrome as before when it is installed: the session's display, a new window, the page last", async () => {
+    await monitorModeSessionUp();
+    // No user bus in the runtime dir, so the launch is the detached child —
+    // the fake Chrome writes down what it was started with.
+    const out = path.join(tmp, "argv.txt");
+    const bin = path.join(tmp, "chrome");
+    fs.writeFileSync(bin, `#!/bin/sh\nprintf '%s\\n' "$WAYLAND_DISPLAY" "$@" > '${out}.part' && mv '${out}.part' '${out}'\n`, { mode: 0o755 });
+    process.env.CLAWBOX_DESKTOP_CHROME = bin;
+    expect(await launchDesktopChrome("https://example.com/")).toEqual({ ok: true, available: true, survivesRestart: false });
+    const deadline = Date.now() + 5_000;
+    while (!fs.existsSync(out) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+    expect(fs.readFileSync(out, "utf8").trim().split("\n")).toEqual([
+      "wayland-0",
+      "--ozone-platform=wayland",
+      "--new-window",
+      "https://example.com/",
+    ]);
+  });
+});
+
+describe("desktopChromeState", () => {
+  it("is the icon's state from the GET's answer", () => {
+    expect(desktopChromeState({ available: true, installed: true })).toBe("ready");
+    expect(desktopChromeState({ available: true, installed: false })).toBe("missing");
+    expect(desktopChromeState({ available: false })).toBe("hidden");
+    expect(desktopChromeState(null)).toBe("hidden");
+    expect(desktopChromeState("yes")).toBe("hidden");
+  });
+
+  it("reads an older server's bare `available: true` as a Chrome to start", () => {
+    expect(desktopChromeState({ available: true })).toBe("ready");
   });
 });
 

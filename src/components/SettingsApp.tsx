@@ -12,13 +12,11 @@ import AiProviderList from "./AiProviderList";
 import HarnessPicker from "./HarnessPicker";
 import PetPicker from "./PetPicker";
 import SettingsDisclosureButton from "./SettingsDisclosureButton";
-import VncResolutionSetting from "./VncResolutionSetting";
 import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel, dbmToLevel } from "@/lib/wifi-utils";
 import { useTr } from "@/lib/i18n-floor";
 import { CHAT_MODEL_STATE_EVENT, notifyProvidersChanged, onProvidersChanged } from "@/lib/ui-events";
 import AIModelsStep from "./AIModelsStep";
-import AnthropicAccountsCard from "./AnthropicAccountsCard";
 import TelegramConfiguringOverlay from "./TelegramConfiguringOverlay";
 import RemoteControlPanel from "./RemoteControlPanel";
 import LocalAiPanel from "./LocalAiPanel";
@@ -611,6 +609,11 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   const [openClawAIOfferRequest, setOpenClawAIOfferRequest] = useState(0);
   const [requestedAiProviderId, setRequestedAiProviderId] = useState<string | null>(null);
   const [providerSelectionRequest, setProviderSelectionRequest] = useState(0);
+  // A deep link asked for Providers with the Anthropic accounts open and in
+  // view (the usage-limit notices). Held until the list says it showed them,
+  // then cleared, so a later visit to Providers is not the same ask again.
+  const [showAnthropicAccounts, setShowAnthropicAccounts] = useState(false);
+  const anthropicAccountsShown = useCallback(() => setShowAnthropicAccounts(false), []);
   // Mobile: null means show nav list, a section means show content with back button
   const [mobileSection, setMobileSection] = useState<Section | null>(initialSection);
   useEffect(() => {
@@ -690,8 +693,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // (URL deep-link, tier-based redirects) where blocking would be confusing.
   const setSectionGated = useCallback((next: Section) => {
     // The owner went somewhere: a Monitors link still waiting for the box's
-    // answer is not theirs any more.
+    // answer is not theirs any more, and neither is an accounts ask the
+    // Providers list has not got to yet.
     monitorsLink.current = false;
+    setShowAnthropicAccounts(false);
     if (next === "remote" && requireLoginFor("remote")) return;
     // The old Local Models section is part of Local AI now.
     if (next === "localModels") next = "localAi";
@@ -707,7 +712,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
   // on `window` first, so a deep-link issued before this effect runs (cold
   // open of Settings) isn't lost to a listener-mount race.
   useEffect(() => {
-    const apply = (s: unknown) => {
+    const apply = (s: unknown, focus?: unknown) => {
       const next = toSection(s);
       if (!next) return;
       // Monitors only where the box has said it has a monitor session: until
@@ -721,6 +726,11 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       monitorsLink.current = false;
       setSection(next);
       setMobileSection(next);
+      // The one block inside a section a link may also ask for
+      // (`NOTIFY_ACTION_FOCUS`, src/lib/notify-action.ts). Any other focus, or
+      // this one on another section, is ignored like an unknown section — and
+      // every link replaces the last one's ask, as it does the section.
+      setShowAnthropicAccounts(next === "ai" && focus === "anthropicAccounts");
     };
     const requestClawAiOffer = () => {
       monitorsLink.current = false;
@@ -738,13 +748,15 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     };
     const w = window as Window & {
       __clawboxPendingSettingsSection?: unknown;
+      __clawboxPendingSettingsFocus?: unknown;
       __clawboxPendingClawAiOffer?: unknown;
       __clawboxPendingAiProvider?: unknown;
     };
     if (w.__clawboxPendingSettingsSection !== undefined) {
-      apply(w.__clawboxPendingSettingsSection);
+      apply(w.__clawboxPendingSettingsSection, w.__clawboxPendingSettingsFocus);
       delete w.__clawboxPendingSettingsSection;
     }
+    delete w.__clawboxPendingSettingsFocus;
     if (w.__clawboxPendingAiProvider !== undefined) {
       requestProviderSelection(w.__clawboxPendingAiProvider);
       delete w.__clawboxPendingAiProvider;
@@ -754,13 +766,15 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       delete w.__clawboxPendingClawAiOffer;
     }
     const handler = (event: Event) => {
-      apply((event as CustomEvent<{ section?: string }>).detail?.section);
+      const detail = (event as CustomEvent<{ section?: string; focus?: string }>).detail;
+      apply(detail?.section, detail?.focus);
       // The dispatcher sets the cold-open handoff AND fires this event, not
       // knowing whether Settings is up. When it is, this path is what applies
       // the section — so the handoff has to be taken here too, or it sits on
       // `window` until the NEXT cold open of Settings, which then lands on
       // whatever section some earlier deep link asked for.
-      delete (window as Window & { __clawboxPendingSettingsSection?: unknown }).__clawboxPendingSettingsSection;
+      delete w.__clawboxPendingSettingsSection;
+      delete w.__clawboxPendingSettingsFocus;
     };
     const providerHandler = (event: Event) =>
       requestProviderSelection((event as CustomEvent<{ providerId?: string }>).detail?.providerId);
@@ -3649,9 +3663,6 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 </div>
               </div>
 
-              {/* Remote desktop resolution (virtual display only) */}
-              <VncResolutionSetting />
-
               {/* Background color */}
               <div>
                 <label className="block text-[11px] font-medium text-white/35 uppercase tracking-wider mb-2">{t("settings.bgColor")}</label>
@@ -4144,7 +4155,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
               />
             )}
 
-            <AiProviderList />
+            <AiProviderList
+              showAnthropicAccounts={showAnthropicAccounts}
+              onAnthropicAccountsShown={anthropicAccountsShown}
+            />
 
             {/* No status card here. The AI Providers panel below opens with the
                 hero, which names the active provider, its model and its
@@ -4184,13 +4198,6 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 that used to live here (a credential the portal still accepts)
                 is the list's own filter now, and a switched-off ClawBox AI
                 shows neither the meter nor the button. */}
-
-            {/* The Anthropic accounts coding runs spend, in the owner's order,
-                with the one a usage limit set aside and when it is back
-                (TASK-902). On every edition and whatever the chat provider
-                above is: it is the coding agent's pool, not the chat's, and
-                the limit notices open this section to show it. */}
-            <AnthropicAccountsCard />
           </div>
         )}
 

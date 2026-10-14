@@ -417,11 +417,13 @@ describe("the Anthropic account-limit notices", () => {
     expect(buildAnthropicLimitNotice({ kind: "all_limited", resetAt: null, runId: null }, SOFIA)).toMatch(/as soon as one is back/);
   });
 
-  it("goes to the desktop as a plain notice that opens Settings → AI providers, not as a run card", async () => {
+  it("goes to the desktop as a plain notice that opens Settings → Providers on the accounts, not as a run card", async () => {
     await announceAnthropicLimit({ kind: "switched", fromLabel: "A", toLabel: "B", resetAt: AT_2250, runId: "run-k3x9q2ab" });
     const payload = ringEntry();
     expect(payload.type).toBe("notify");
-    expect(payload.action).toEqual({ open: "settings", section: "ai" });
+    // The accounts sit folded behind a button on the Anthropic row; the focus
+    // is what lands the owner with them open and in view.
+    expect(payload.action).toEqual({ open: "settings", section: "ai", focus: "anthropicAccounts" });
     expect(payload.runId).toBeUndefined();
   });
 

@@ -286,7 +286,7 @@ const SCENARIO_FNS = {
   },
   apps: () =>
     measure("apps", async () => {
-      const apps = ["settings", "files", "terminal", "coding", "store", "memory-shard", "clawkeep", "projects", "system_update"];
+      const apps = ["settings", "files", "terminal", "coding", "store", "memory-shard", "clawkeep", "system_update"];
       const opened = {};
       for (const app of apps) {
         const r = await evaluate(`new Promise((resolve) => {

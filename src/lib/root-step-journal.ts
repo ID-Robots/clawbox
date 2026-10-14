@@ -55,6 +55,13 @@
  * "still running".
  */
 
+/**
+ * install.sh's `--step` EXIT trap ends a run that recorded failures with a
+ * banner and two `[provision-…]` markers; none of them is the reason a step
+ * failed, so neither reader of that reason may hand one to the owner.
+ */
+export const DISPATCH_VERDICT_LINE = /^(\[provision-(status|run)\]|#{3,}|# )/;
+
 /** The systemd instance one `install.sh --step <name>` run happens in. */
 export function rootStepUnit(step: string): string {
   return `clawbox-root-update@${step}.service`;
