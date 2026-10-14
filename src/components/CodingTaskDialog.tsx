@@ -44,7 +44,7 @@ export default function CodingTaskDialog({ title, task, runId, onClose }: {
   return (
     <ClawKeepModalPortal>
       <div
-        className="fixed inset-0 z-[200] flex items-center justify-center p-4"
+        className="main-screen-scrim fixed inset-0 z-[200] flex items-center justify-center p-4"
         // No backdrop blur under the dim: a full-screen blur is redone over the
         // whole desktop on every frame anything beneath it moves.
         style={{ background: "rgba(0, 0, 0, 0.67)" }}
@@ -59,7 +59,7 @@ export default function CodingTaskDialog({ title, task, runId, onClose }: {
           aria-modal="true"
           aria-labelledby={titleId}
           onClick={(e) => e.stopPropagation()}
-          className="w-full max-w-3xl max-h-[85vh] flex flex-col rounded-2xl border border-white/[0.08] bg-[var(--surface-1,#16171b)] shadow-2xl overflow-hidden"
+          className="w-full max-w-3xl max-h-[85%] flex flex-col rounded-2xl border border-white/[0.08] bg-[var(--surface-1,#16171b)] shadow-2xl overflow-hidden"
         >
           <div className="flex items-start gap-3 px-5 pt-4 pb-3 border-b border-white/[0.06]">
             <div className="min-w-0 flex-1">

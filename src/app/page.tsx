@@ -3275,11 +3275,11 @@ function ChromeDesktopInner() {
           every frame anything beneath it moves, and the mascot always does.
           One step darker keeps the look, as on every other scrim. */}
       {desktopDragOver && (
-        <div className="fixed inset-0 flex items-center justify-center bg-black/65 pointer-events-none" style={{ zIndex: DESKTOP_LAYERS.notice }}>
+        <div className="main-screen-scrim fixed inset-0 flex items-center justify-center bg-black/65 pointer-events-none" style={{ zIndex: DESKTOP_LAYERS.notice }}>
           {/* Dimmed everywhere — a drop lands wherever it is let go — but
               the card centred on the MAIN monitor over a row of monitors,
-              not on the seam between two. */}
-          <div className="flex flex-col items-center gap-3 p-8 rounded-2xl border-2 border-dashed border-orange-500/60 bg-[#0d1117]/90" style={mainRect ? { position: "absolute", left: mainRect.x + mainRect.width / 2, top: mainRect.y + mainRect.height / 2, transform: "translate(-50%, -50%)" } : undefined}>
+              not on the seam between two (`main-screen-scrim`). */}
+          <div className="flex flex-col items-center gap-3 p-8 rounded-2xl border-2 border-dashed border-orange-500/60 bg-[#0d1117]/90">
             <span className="material-symbols-rounded text-orange-400" style={{ fontSize: 48 }}>upload_file</span>
             <span className="text-lg font-semibold text-white">{t("files.dropToUpload")}</span>
             <span className="text-sm text-white/50">{t("desktop.dropHint")}</span>
@@ -4183,7 +4183,7 @@ function ChromeDesktopInner() {
         const meta = installedMeta[uninstallConfirm];
         const appName = meta?.name || uninstallConfirm;
         return (
-          <div className="fixed inset-0 flex items-center justify-center bg-black/65" style={{ zIndex: DESKTOP_LAYERS.modal }} onClick={dismissUninstall}>
+          <div className="main-screen-scrim fixed inset-0 flex items-center justify-center bg-black/65" style={{ zIndex: DESKTOP_LAYERS.modal }} onClick={dismissUninstall}>
             {/* The role sits on the panel, not the scrim — see useModalDialog. */}
             <div
               ref={uninstallPanelRef}

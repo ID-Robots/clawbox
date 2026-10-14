@@ -917,7 +917,7 @@ function ConfirmModal({
       // No backdrop blur under the dim: a full-screen blur is redone over the whole
       // desktop on every frame anything beneath it moves (the mascot always does).
       // One step darker keeps the look.
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75"
+      className="main-screen-scrim fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75"
       onClick={onCancel}
     >
       <div

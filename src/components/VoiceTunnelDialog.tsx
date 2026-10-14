@@ -56,6 +56,7 @@ export default function VoiceTunnelDialog({
     <div
       onClick={onClose}
       data-testid="voice-tunnel-overlay"
+      className="main-screen-scrim"
       style={{
         position: "fixed", inset: 0, zIndex: 10020,
         // No backdrop blur under the dim: a full-screen blur is redone over the

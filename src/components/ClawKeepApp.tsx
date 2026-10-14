@@ -2078,7 +2078,7 @@ function RestoreModal({
       // No backdrop blur under the dim: a full-screen blur is redone over the whole
       // desktop on every frame anything beneath it moves (the mascot always does).
       // One step darker keeps the look.
-      className="fixed inset-0 z-[100000] flex items-center justify-center p-4 bg-black/90"
+      className="main-screen-scrim fixed inset-0 z-[100000] flex items-center justify-center p-4 bg-black/90"
       onClick={onClose}
     >
       <div
@@ -2086,7 +2086,7 @@ function RestoreModal({
         role="dialog"
         aria-modal="true"
         aria-label={t("clawkeep.restoreModal.aria")}
-        className="w-full max-w-xl rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-deep)] shadow-2xl overflow-hidden flex flex-col max-h-[80vh]"
+        className="w-full max-w-xl rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-deep)] shadow-2xl overflow-hidden flex flex-col max-h-[80%]"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -2409,14 +2409,14 @@ function SetPassphraseModal({
     {/* No backdrop blur under the dim: a full-screen blur is redone over the whole
         desktop on every frame anything beneath it moves (the mascot always does).
         One step darker keeps the look. */}
-    <div className="fixed inset-0 z-[100000] flex items-center justify-center bg-black/75 p-4">
+    <div className="main-screen-scrim fixed inset-0 z-[100000] flex items-center justify-center bg-black/75 p-4">
       <form
         ref={panelRef}
         role="dialog"
         aria-modal="true"
         aria-label={t("clawkeep.encryption.setTitle")}
         onSubmit={submit}
-        className="max-h-[calc(100dvh-2rem)] overflow-y-auto w-full max-w-md rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-deep)] p-6 shadow-2xl"
+        className="max-h-full overflow-y-auto w-full max-w-md rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-deep)] p-6 shadow-2xl"
       >
         <h2 className="text-base font-semibold text-white mb-1">
           {t("clawkeep.encryption.setTitle")}
@@ -2576,14 +2576,14 @@ function RestorePassphraseModal({
     {/* No backdrop blur under the dim: a full-screen blur is redone over the whole
         desktop on every frame anything beneath it moves (the mascot always does).
         One step darker keeps the look. */}
-    <div className="fixed inset-0 z-[100000] flex items-center justify-center bg-black/75 p-4">
+    <div className="main-screen-scrim fixed inset-0 z-[100000] flex items-center justify-center bg-black/75 p-4">
       <form
         ref={panelRef}
         role="dialog"
         aria-modal="true"
         aria-label={t("clawkeep.encryption.enterTitle")}
         onSubmit={submit}
-        className="max-h-[calc(100dvh-2rem)] overflow-y-auto w-full max-w-md rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-deep)] p-6 shadow-2xl"
+        className="max-h-full overflow-y-auto w-full max-w-md rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-deep)] p-6 shadow-2xl"
       >
         <h2 className="text-base font-semibold text-white mb-1">
           {t("clawkeep.encryption.enterTitle")}

@@ -157,7 +157,7 @@ export default function ReconnectStage({
 
   return createPortal(
     <div
-      className="reconnect-stage fixed inset-0 flex items-center justify-center px-6 overflow-y-auto py-8"
+      className="reconnect-stage main-screen-scrim fixed inset-0 flex items-center justify-center px-6 overflow-y-auto py-8"
       data-agent={hermes ? "hermes" : undefined}
       // The wizard's own ground token, not a hardcoded near-black: #0d1117
       // matched nothing in the palette. --ground is the page ground the rest

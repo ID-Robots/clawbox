@@ -674,7 +674,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
     // No backdrop blur under the dim: a full-screen blur is redone over the whole
     // desktop on every frame anything beneath it moves (the mascot always does).
     // One step darker keeps the look.
-    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/65"
+    <div className="main-screen-scrim fixed inset-0 z-[9999] flex items-center justify-center bg-black/65"
       onClick={dismissConfirmInstall}>
       <div
         ref={confirmPanelRef}

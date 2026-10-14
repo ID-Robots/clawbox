@@ -3237,7 +3237,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     ? createPortal(
         <div
           ref={factoryResetProgressPanelRef}
-          className="fixed inset-0 flex items-center justify-center"
+          className="main-screen-scrim fixed inset-0 flex items-center justify-center"
           style={{ zIndex: 2147483647, background: "rgba(13, 17, 23, 1)" }}
           role="dialog"
           aria-modal="true"
@@ -3317,7 +3317,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     // No backdrop blur under the dim: a full-screen blur is redone over the whole
     // desktop on every frame anything beneath it moves (the mascot always does).
     // One step darker keeps the look.
-    <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
+    <div className="main-screen-scrim fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
       <div
         ref={factoryResetPanelRef}
         role="dialog"
@@ -3384,7 +3384,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     // No backdrop blur under the dim: a full-screen blur is redone over the whole
     // desktop on every frame anything beneath it moves (the mascot always does).
     // One step darker keeps the look.
-    <div className="fixed inset-0 z-[300] flex items-center justify-center bg-black/65 px-4">
+    <div className="main-screen-scrim fixed inset-0 z-[300] flex items-center justify-center bg-black/65 px-4">
       <div ref={systemPasswordConfirmPanelRef} role="alertdialog" aria-modal="true" aria-labelledby="sys-pw-confirm-title" className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
         <div className="flex items-center gap-2 mb-3">
           <span className="material-symbols-rounded text-amber-400" style={{ fontSize: 22 }}>warning</span>
@@ -6924,7 +6924,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
         // No backdrop blur under the dim: a full-screen blur is redone over the whole
         // desktop on every frame anything beneath it moves (the mascot always does).
         // One step darker keeps the look.
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
+        <div className="main-screen-scrim fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
           <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
             <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{tr("settings.hotspotConfirmTitle", "Enable hotspot?")}</h3>
             <p className="text-sm text-[var(--text-muted)] mb-5 leading-relaxed">
@@ -6943,7 +6943,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
         // No backdrop blur under the dim: a full-screen blur is redone over the whole
         // desktop on every frame anything beneath it moves (the mascot always does).
         // One step darker keeps the look.
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
+        <div className="main-screen-scrim fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
           <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
             <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.hostnameConfirmTitle")}</h3>
             <p className="text-sm text-[var(--text-muted)] mb-3 leading-relaxed">
@@ -7038,7 +7038,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
         // No backdrop blur under the dim: a full-screen blur is redone over the whole
         // desktop on every frame anything beneath it moves (the mascot always does).
         // One step darker keeps the look.
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
+        <div className="main-screen-scrim fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
           <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
             <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{t("settings.hostnameConfirmTitle")}</h3>
             <p className="text-sm text-[var(--text-muted)] mb-3 leading-relaxed">
@@ -7070,7 +7070,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
         // No backdrop blur under the dim: a full-screen blur is redone over the whole
         // desktop on every frame anything beneath it moves (the mascot always does).
         // One step darker keeps the look.
-        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
+        <div className="main-screen-scrim fixed inset-0 z-[200] flex items-center justify-center bg-black/65 px-4">
           <div className="bg-[var(--bg-elevated)] rounded-2xl p-6 max-w-sm w-full shadow-2xl border border-[var(--border-subtle)]">
             <h3 className="text-lg font-bold text-[var(--text-primary)] mb-2">{tr("settings.hotspotConfirmTitle", "Enable hotspot?")}</h3>
             <p className="text-sm text-[var(--text-muted)] mb-5 leading-relaxed">
@@ -7089,7 +7089,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
 
       {/* System Update full-screen overlay (portal to escape window stacking context) */}
       {hostnameRebootTo && typeof document !== "undefined" && createPortal(
-        <div role="alertdialog" aria-modal="true" aria-live="assertive" aria-labelledby="hostname-reboot-title" className="fixed inset-0 z-[999999] flex items-center justify-center" style={{ background: "rgba(10, 15, 26, 1)" }}>
+        <div role="alertdialog" aria-modal="true" aria-live="assertive" aria-labelledby="hostname-reboot-title" className="main-screen-scrim fixed inset-0 z-[999999] flex items-center justify-center" style={{ background: "rgba(10, 15, 26, 1)" }}>
           <div className="flex flex-col items-center gap-6 max-w-md text-center px-6">
             <div className="relative w-20 h-20" aria-hidden="true">
               <div className="absolute inset-0 rounded-full border-2 border-[#fe6e00]/20 animate-pulse" />

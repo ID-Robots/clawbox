@@ -57,7 +57,7 @@ export function DangerConfirmDialog({
       // No backdrop blur under the dim: a full-screen blur is redone over the whole
       // desktop on every frame anything beneath it moves (the mascot always does).
       // One step darker keeps the look.
-      className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 p-4"
+      className="main-screen-scrim fixed inset-0 z-[9999] flex items-center justify-center bg-black/75 p-4"
       onClick={onCancel}
     >
       <div
@@ -66,7 +66,7 @@ export function DangerConfirmDialog({
         aria-modal="true"
         aria-labelledby="hs-danger-title"
         data-testid="skill-danger-dialog"
-        className="card-surface rounded-2xl p-6 w-full max-w-lg shadow-2xl border border-amber-500/40 max-h-[90vh] overflow-y-auto"
+        className="card-surface rounded-2xl p-6 w-full max-w-lg shadow-2xl border border-amber-500/40 max-h-[90%] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-3 mb-4">
