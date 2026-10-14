@@ -9,9 +9,7 @@ import {
 import { resetUpdateState } from "@/lib/updater";
 import { DATA_DIR } from "@/lib/config-store";
 import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
-import { getSystemUsername } from "@/lib/auth";
-import { CHPASSWD_INPUT_PATH, CHPASSWD_SERVICE_NAME, CHPASSWD_STEP, chpasswdRecord } from "@/lib/chpasswd";
-import { FACTORY_DEFAULT_PASSWORD } from "@/lib/system-password";
+import { requestSshPolicy } from "@/lib/ssh-policy";
 import { FACTORY_RESET_CONFIRMATION, isFactoryResetConfirmed } from "@/lib/factory-reset";
 import { readEdition } from "@/lib/edition-source";
 import { startOllamaService } from "@/lib/local-ai-runtime";
@@ -645,38 +643,32 @@ async function wipeHomeUserState(): Promise<string[]> {
 }
 
 /**
- * Reset the Linux user password back to the shipping default ("clawbox"), so
- * a factory-reset device matches its as-flashed state. Without this, the only
- * thing the reset clears is the `password_configured` flag — the SSH/sudo
- * password stays whatever the previous owner set, leaving the device's
- * sentinel "factory" state still owned by the prior user.
+ * Remove the owner's Linux password and switch SSH off, so a factory-reset
+ * device is nobody's again. Without this the only thing the reset clears is
+ * the `password_configured` flag — the SSH/sudo password stays whatever the
+ * previous owner set, leaving the "factory" state still owned by them.
  *
- * Best-effort: if the chpasswd service fails (rare — same path the wizard's
- * credentials route uses), the reset still proceeds so the device isn't
- * stuck. The wizard's CredentialsStep on first boot will re-prompt and
- * overwrite the password, so a stale value is never load-bearing.
+ * There is no default password to put back: the root step
+ * (install.sh::step_ssh_policy `factory_reset`) removes the hash entirely, so
+ * `passwd -S` reads L, hasOwnerPassword() is false and the wizard can claim
+ * the box. The hotspot falls back to the sticker credentials because
+ * data/hotspot.env is wiped with data/, and the device secret lives in /etc.
  *
- * Runs AFTER the data/ wipe so the input file lands in a freshly-recreated
+ * Best-effort: if the step fails the reset still proceeds so the device isn't
+ * stuck; the failure is logged loudly because the prior password stays active.
+ *
+ * Runs AFTER the data/ wipe so the request file lands in a freshly-recreated
  * directory the wizard then writes its own state into.
  */
-async function resetSystemPasswordToDefault(): Promise<void> {
+async function removeOwnerPasswordAndSsh(): Promise<void> {
   try {
-    await fs.mkdir(path.dirname(CHPASSWD_INPUT_PATH), { recursive: true });
-    await fs.writeFile(
-      CHPASSWD_INPUT_PATH,
-      chpasswdRecord(getSystemUsername(), FACTORY_DEFAULT_PASSWORD),
-      { mode: 0o600 },
-    );
-    await startRootStep(CHPASSWD_STEP, { timeoutMs: 30_000 });
-    console.log("[Reset] System password reset to factory default");
+    await requestSshPolicy("factory_reset");
+    console.log("[Reset] Owner password removed and SSH disabled");
   } catch (err) {
-    // The input file carries a plaintext credential — scrub it on failure.
-    await fs.unlink(CHPASSWD_INPUT_PATH).catch(() => {});
     // Error, not warn: a failed reset leaves the device in a security
-    // regression (factory-reset but still owned with the prior password)
-    // until the wizard's CredentialsStep runs on next boot and overwrites.
+    // regression (factory-reset but still owned with the prior password).
     console.error(
-      "[Reset][SECURITY] System password NOT reset — prior password still active until CredentialsStep runs:",
+      "[Reset][SECURITY] Owner password NOT removed — prior password still active:",
       err instanceof Error ? err.message : err,
     );
   }
@@ -847,8 +839,8 @@ export async function POST(request: Request) {
       console.error("[Reset] WiFi cleanup failed:", err instanceof Error ? err.message : err);
     });
 
-    // 6a. Reset the Linux user password to the shipping default.
-    await resetSystemPasswordToDefault();
+    // 6a. Remove the owner's Linux password and switch SSH off.
+    await removeOwnerPasswordAndSsh();
 
     // 6b. Reset mDNS hostname to "clawbox" (avahi + hostnamectl). Data dir is
     // already wiped, so clawbox-root-update@set_hostname.service will read the

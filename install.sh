@@ -9292,6 +9292,7 @@ step_post_update() {
   # already in the field would keep its wide-open INPUT policy — which is the
   # entire finding. Idempotent: the script converges its own rules on each run.
   optional_step firewall step_firewall
+  optional_step ssh_policy_apply step_ssh_policy_apply
   # Without this call the persistent journal would be fresh-install-only, and
   # every already-shipped box would keep losing its whole log on each reboot.
   optional_step persistent_journal step_persistent_journal
@@ -10593,6 +10594,137 @@ step_chpasswd() {
   fi
 
   printf '%s\n' "$record" | /usr/sbin/chpasswd
+}
+
+# ── SSH policy ───────────────────────────────────────────────────────────────
+#
+# SSH is OFF by default and only an owner turns it on (Settings → System →
+# Remote access). The decision is persisted root-side in /etc/clawbox/ssh-policy
+# (`enabled` | `disabled`), outside data/, so a factory reset's data/ wipe does
+# not decide it — the reset asks for `factory_reset` below instead.
+#
+# "Owner password present" is answered from /etc/shadow, never from data/:
+# `passwd -S` must say P (a usable password) AND the password must not be the
+# legacy image one, which older images were built with and which is public.
+# src/lib/system-password.ts asks the same question for the web gates; its
+# LEGACY_IMAGE_PASSWORD and the constant below are pinned together by
+# src/tests/unit/install-ssh-policy.test.ts.
+SSH_POLICY_FILE="/etc/clawbox/ssh-policy"
+SSH_LEGACY_IMAGE_PASSWORD="clawbox"
+
+# 0 = an owner's password is set; 1 = no usable password, or only the legacy
+# one; 2 = could not tell (helper missing or refused).
+ssh_owner_password_state() {
+  local status rc=0
+  status="$(passwd -S "$CLAWBOX_USER" 2>/dev/null | awk 'NR==1 {print $2}')" || true
+  case "$status" in
+    P) ;;
+    NP|L) return 1 ;;
+    *) return 2 ;;
+  esac
+  # unix_chkpwd checks the CALLER's own account, so ask as that user. 0 means
+  # the legacy password verifies; 7 (PAM_AUTH_ERR) means it does not.
+  printf '%s\0' "$SSH_LEGACY_IMAGE_PASSWORD" \
+    | runuser -u "$CLAWBOX_USER" -- /usr/sbin/unix_chkpwd "$CLAWBOX_USER" nonull \
+    >/dev/null 2>&1 || rc=$?
+  case "$rc" in
+    0) return 1 ;;
+    7) return 0 ;;
+    *) return 2 ;;
+  esac
+}
+
+write_ssh_policy() {
+  local value="$1" dir tmp
+  dir="$(dirname "$SSH_POLICY_FILE")"
+  install -d -m 0755 "$dir"
+  tmp="$(mktemp "$dir/.ssh-policy.XXXXXX")"
+  printf '%s\n' "$value" >"$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$SSH_POLICY_FILE"
+}
+
+read_ssh_policy() {
+  [ -f "$SSH_POLICY_FILE" ] && [ ! -L "$SSH_POLICY_FILE" ] || return 0
+  head -n1 "$SSH_POLICY_FILE" 2>/dev/null | tr -d '[:space:]'
+}
+
+# Stopping sshd does not end sessions already open (each has its own process),
+# which is what lets the owner — or the factory station — finish what it was
+# doing over the connection that asked for the change.
+ssh_service_off() { systemctl disable --now ssh >/dev/null 2>&1 || systemctl disable --now ssh; }
+
+# Web step, started by /setup-api/system/ssh (owner session + current
+# password) and by the factory reset. ONE word in a 0600 file under data/,
+# read once and removed, symlinks refused — step_chpasswd's shape.
+#
+# Privilege note: like chpasswd, anything running as the clawbox account can
+# write this file and start the step. `enable` is refused root-side without an
+# owner password, so it cannot open SSH on an unowned box; `disable` and
+# `factory_reset` can switch SSH off or clear the owner's password, which is
+# no more than chpasswd already lets that account do to its own password.
+step_ssh_policy() {
+  local INPUT_FILE="$PROJECT_DIR/data/.ssh-policy-request" request
+  if [ -L "$INPUT_FILE" ]; then
+    rm -f "$INPUT_FILE"
+    echo "Error: SSH policy request is a symlink; refusing" >&2
+    exit 64
+  fi
+  if [ ! -f "$INPUT_FILE" ]; then
+    echo "Error: SSH policy request not found" >&2
+    exit 1
+  fi
+  request="$(head -c 64 "$INPUT_FILE")"
+  rm -f "$INPUT_FILE"
+  case "$request" in
+    enable)
+      if ! ssh_owner_password_state; then
+        echo "Error: SSH stays off until the owner has set a password" >&2
+        exit 65
+      fi
+      write_ssh_policy enabled
+      systemctl enable --now ssh
+      echo "  SSH enabled"
+      ;;
+    disable)
+      write_ssh_policy disabled
+      ssh_service_off
+      echo "  SSH disabled"
+      ;;
+    factory_reset)
+      # No password at all — neither a default nor the previous owner's — so
+      # the box is unowned (`passwd -S` reads L) and the wizard can claim it.
+      usermod -p '!' "$CLAWBOX_USER"
+      write_ssh_policy disabled
+      ssh_service_off
+      echo "  Owner password removed and SSH disabled (factory reset)"
+      ;;
+    *)
+      echo "Error: unknown SSH policy request" >&2
+      exit 64
+      ;;
+  esac
+}
+
+# Every update (step_post_update), idempotent. A box from before the policy
+# has no file: one whose account carries an owner's password keeps SSH exactly
+# as it was (nothing is started or stopped); an unowned one — no password, or
+# only the public legacy one — gets `disabled`. Then SSH is held off whenever
+# the policy says so or nobody owns the box. "Could not tell" counts as owned
+# here, so a failed check never takes SSH away from an owner.
+step_ssh_policy_apply() {
+  local state=0 policy
+  ssh_owner_password_state || state=$?
+  policy="$(read_ssh_policy)"
+  if [ "$policy" != enabled ] && [ "$policy" != disabled ]; then
+    if [ "$state" -eq 1 ]; then policy=disabled; else policy=enabled; fi
+    write_ssh_policy "$policy"
+    echo "  SSH policy recorded: $policy"
+  fi
+  if [ "$policy" = disabled ] || [ "$state" -eq 1 ]; then
+    ssh_service_off || true
+    echo "  SSH is off (policy $policy)"
+  fi
 }
 
 # ── ClawBox users (TASK-1256) ────────────────────────────────────────────────
@@ -12488,6 +12620,9 @@ DISPATCH_STEPS=(
   # and on no web or UI list — the web server it heals cannot start it.
   heal_build
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
+  # SSH off by default: ssh_policy is the owner's switch and the factory reset,
+  # ssh_policy_apply the idempotent per-update policy, on no web or UI list.
+  ssh_policy ssh_policy_apply
   # Settings → Users, multi-user ClawBox OS: TASK-1256. On WEB_ROOT_STEPS, never on the UI list.
   user_add user_remove
   directories_permissions captive_portal_dns desktop_theme

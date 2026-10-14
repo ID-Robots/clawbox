@@ -1798,4 +1798,20 @@ export const nl: Record<string, string> = {
   "codingAgent.budgetTimelineKindNote": "Notitie",
   "codingAgent.budgetTimelineKindCheckpoint": "Controlepunt",
   "codingAgent.budgetTimelineKindMargin": "Veiligheidsmarge",
+
+  // === Remote access (SSH) card, Settings › System ===
+  "settings.ssh.title": "Externe toegang (SSH)",
+  "settings.ssh.desc": "Met SSH open je vanaf een andere computer een terminal op deze box en log je in met het wachtwoord van de box. Standaard staat het uit.",
+  "settings.ssh.loading": "Controleren…",
+  "settings.ssh.on": "SSH staat aan",
+  "settings.ssh.off": "SSH staat uit",
+  "settings.ssh.turnOn": "Inschakelen",
+  "settings.ssh.turnOff": "Uitschakelen",
+  "settings.ssh.needPassword": "Stel eerst een wachtwoord in voor de box — tot dan blijft SSH uit.",
+  "settings.ssh.confirmPrompt": "Voer je huidige wachtwoord in om te bevestigen.",
+  "settings.ssh.cancel": "Annuleren",
+  "settings.ssh.saving": "Opslaan…",
+  "settings.ssh.nowOn": "SSH staat nu aan.",
+  "settings.ssh.nowOff": "SSH staat nu uit.",
+  "settings.ssh.failed": "Externe toegang kon niet worden gewijzigd.",
 };

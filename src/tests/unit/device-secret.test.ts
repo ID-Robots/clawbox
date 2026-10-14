@@ -162,11 +162,23 @@ function stockEnv(passwdStatus = "L", chkpwdRc = "7"): Record<string, string> {
 }
 
 describe("provision-device.sh", () => {
+  it("removes the password and disables SSH without stopping the station's session", () => {
+    const text = fs.readFileSync(PROVISION, "utf-8");
+    expect(text).toContain(`usermod -p '!' "$ACCOUNT"`);
+    expect(text).toMatch(/^systemctl disable ssh$/m);
+    expect(text).not.toMatch(/disable --now ssh|systemctl stop ssh/);
+    expect(text).not.toMatch(/chpasswd/);
+  });
+
   it("--dry-run validates and prints the plan without writing or revealing the PSK", () => {
     const r = run(PROVISION, ["--dry-run"], ZEROS, stockEnv());
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("ClawBox-Q7M8");
     expect(r.stdout).toContain("dry run");
+    expect(r.stdout).toContain("remove the password of 'clawbox'");
+    expect(r.stdout).toContain("ssh-policy = disabled");
+    expect(r.stdout).toContain("not stopped now");
+    expect(fs.existsSync(path.join(etc, "ssh-policy"))).toBe(false);
     expect(r.stdout + r.stderr).not.toContain(reference(ZEROS).psk);
     expect(r.stdout + r.stderr).not.toContain(ZEROS);
     expect(fs.existsSync(path.join(etc, "device-secret"))).toBe(false);

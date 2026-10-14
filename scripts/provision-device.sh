@@ -7,6 +7,13 @@
 # per-device flow (src/lib/device-provisioning.ts). Boxes without it — every
 # box set up before this flow — keep their behaviour exactly as it was.
 #
+# Then it leaves the box with NO password (no universal default exists) and
+# SSH off:
+#   - `usermod -p '!' clawbox` removes the image's password hash entirely;
+#   - /etc/clawbox/ssh-policy = disabled (the owner turns SSH on in Settings);
+#   - `systemctl disable ssh` WITHOUT stopping it — the station is connected
+#     through it; sshd goes away at the next boot.
+#
 # Stock boxes ONLY. A box that shows ANY sign of an owner (setup completed,
 # owner password flag, own hotspot settings, an owner password in /etc/shadow)
 # is refused, and so is a box whose state cannot be read: provisioning an
@@ -50,6 +57,9 @@ ssid="$(printf '%s' "$secret" | "$DEVICE_SECRET_SH" derive | sed -n 's/^SSID=//p
 echo "provision: plan"
 echo "  - install the device secret for this board (hotspot SSID $ssid, WPA2)"
 echo "  - mark the box provisioned ($ETC_DIR/provisioned)"
+echo "  - remove the password of '$ACCOUNT' (the owner sets one in the setup wizard)"
+echo "  - write $ETC_DIR/ssh-policy = disabled"
+echo "  - disable ssh.service (not stopped now; off from the next boot)"
 
 # owned | unowned | unknown. Several independent signals; any one of them, or
 # any doubt, means "not a stock box".
@@ -86,4 +96,12 @@ marker_tmp="$(mktemp "$ETC_DIR/.provisioned.XXXXXX")"
 printf 'provisioned\n' >"$marker_tmp"
 chmod 0644 "$marker_tmp"
 mv -f "$marker_tmp" "$ETC_DIR/provisioned"
-echo "provision: done — the hotspot uses the sticker credentials from its next start"
+usermod -p '!' "$ACCOUNT"
+policy_tmp="$(mktemp "$ETC_DIR/.ssh-policy.XXXXXX")"
+printf 'disabled\n' >"$policy_tmp"
+chmod 0644 "$policy_tmp"
+mv -f "$policy_tmp" "$ETC_DIR/ssh-policy"
+# Socket-activated sshd (ssh.socket) would otherwise keep port 22 listening.
+systemctl disable ssh.socket >/dev/null 2>&1 || true
+systemctl disable ssh
+echo "provision: done — sticker hotspot from its next start, no password, SSH off from the next boot"

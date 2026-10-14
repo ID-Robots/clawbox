@@ -93,16 +93,17 @@ export async function POST(request: Request) {
     // really has one, the old check skipped `currentPassword` entirely and let
     // an unauthenticated caller take the OS account over.
     //
-    // "Owner's password" deliberately excludes the factory default: the shipped
-    // image and a factory reset both leave `clawbox` on the account, and this
-    // very route is what the wizard uses to replace it on first boot. Treating
-    // that hash as an owner 401'd the initial set on every new device.
+    // "Owner's password" deliberately excludes the legacy image password:
+    // boxes flashed from older images still carry it, and this very route is
+    // what the wizard uses to replace it on first boot. Treating that hash as
+    // an owner 401'd the initial set on every such device. A provisioned or
+    // factory-reset box has no password at all.
     // `hasOwnerPassword()` returns null when it cannot read /etc/shadow at all,
     // in which case the config flag alone decides.
     //
     // Short-circuit on the flag: once it says "owned" the shadow answer cannot
     // change the outcome, and asking anyway would spawn unix_chkpwd with the
-    // factory default on every legitimate password change — a "password check
+    // legacy image password on every legitimate password change — a "password check
     // failed" line in auth.log for an attempt nobody made.
     const flagSaysConfigured = !!(await get("password_configured"));
     const passwordAlreadyConfigured = flagSaysConfigured || (await hasOwnerPassword()) === true;

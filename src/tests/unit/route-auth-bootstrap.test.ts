@@ -2,7 +2,7 @@
  * The bootstrap carve-out in `requireSession` (wifi/connect, update/run): the
  * wizard's first steps run before any session can exist, and may only do so
  * while the device has no owner. "Owner" is decided from data/config.json AND
- * /etc/shadow — and a /etc/shadow hash that is merely the factory default must
+ * /etc/shadow — and a /etc/shadow hash that is merely the legacy image password must
  * NOT count, or every as-flashed / factory-reset box locks its own wizard out.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -81,7 +81,7 @@ describe("requireSession({ allowBootstrap: true })", () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
-  it("lets first boot through while the account still carries the factory default", async () => {
+  it("lets first boot through while the account still carries the legacy image password", async () => {
     // As-flashed / factory-reset: shadow has a hash, and it is `clawbox`.
     passwdSays("P");
     chkpwdExits(0);

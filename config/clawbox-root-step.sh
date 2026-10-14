@@ -98,7 +98,7 @@ voice_whisper_install edition_lock edition_select
 edition_foreign_teardown hermes_install hermes_edition harness_swap network_setup
 set_hostname set_timezone setup_config system_config git_pull build rebuild rebuild_reboot
 heal_build
-restart restart_ap recover chpasswd gateway_setup ffmpeg_install polkit_rules
+restart restart_ap recover chpasswd ssh_policy gateway_setup ffmpeg_install polkit_rules
 systemd_services directories_permissions captive_portal_dns desktop_theme
 fix_git_perms browser_launch cloudflared_install nm_dispatcher sysctl_linkdown
 post_update update_smoke validate_services clawkeep_install

@@ -1809,4 +1809,20 @@ export const it: Record<string, string> = {
   "codingAgent.budgetTimelineKindNote": "Nota",
   "codingAgent.budgetTimelineKindCheckpoint": "Punto di controllo",
   "codingAgent.budgetTimelineKindMargin": "Margine di sicurezza",
+
+  // === Remote access (SSH) card, Settings › System ===
+  "settings.ssh.title": "Accesso remoto (SSH)",
+  "settings.ssh.desc": "SSH ti permette di aprire un terminale su questo dispositivo da un altro computer, accedendo con la password del dispositivo. È disattivato per impostazione predefinita.",
+  "settings.ssh.loading": "Verifica in corso…",
+  "settings.ssh.on": "SSH è attivo",
+  "settings.ssh.off": "SSH è disattivato",
+  "settings.ssh.turnOn": "Attiva",
+  "settings.ssh.turnOff": "Disattiva",
+  "settings.ssh.needPassword": "Imposta prima una password per il dispositivo: fino ad allora SSH resta disattivato.",
+  "settings.ssh.confirmPrompt": "Inserisci la password attuale per confermare.",
+  "settings.ssh.cancel": "Annulla",
+  "settings.ssh.saving": "Salvataggio…",
+  "settings.ssh.nowOn": "SSH ora è attivo.",
+  "settings.ssh.nowOff": "SSH ora è disattivato.",
+  "settings.ssh.failed": "Impossibile modificare l'accesso remoto.",
 };
