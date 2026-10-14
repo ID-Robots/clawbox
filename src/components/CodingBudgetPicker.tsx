@@ -681,6 +681,9 @@ export default function CodingBudgetPicker({
               );
             })}
           </div>
+          {/* No required/min/max on these: they sit inside the card's form, and
+              a stale value would let the browser's own validation block its
+              Create button. The checks below are the routes' own. */}
           <div className="grid grid-cols-1 gap-2 px-1">
             <label htmlFor={timeId} className={LABEL}>
               {t("codingAgent.budgetPickerTimeLabel")}
@@ -688,7 +691,6 @@ export default function CodingBudgetPicker({
                 id={timeId}
                 type="time"
                 step={60}
-                required
                 value={draft.time}
                 onChange={(e) => setDraft((d) => ({ ...d, time: e.target.value }))}
                 data-testid="coding-budget-time"
@@ -713,8 +715,6 @@ export default function CodingBudgetPicker({
                   type="datetime-local"
                   step={60}
                   value={draft.start}
-                  min={localIso(firstDay, `${pad2(wallNow.hour)}:${pad2(wallNow.minute)}`)}
-                  max={draftEnd}
                   onChange={(e) => setDraft((d) => ({ ...d, start: e.target.value }))}
                   data-testid="coding-budget-start"
                   className={`${FIELD} mt-1.5`}
