@@ -229,6 +229,36 @@ describe("middleware", () => {
     });
   });
 
+  describe("connectivity probes once setup is complete", () => {
+    // A hotspot can stay up after the wizard (an Ethernet-connected box), and
+    // captive-probes.conf lingers until start-ap.sh next runs. The probes must
+    // then report "online", or a joined phone keeps a "Sign in" prompt.
+    it.each([
+      ["/generate_204", 204, ""],
+      ["/gen_204", 204, ""],
+      ["/redirect", 204, ""],
+      ["/connecttest.txt", 200, "Microsoft Connect Test"],
+      ["/ncsi.txt", 200, "Microsoft NCSI"],
+      ["/success.txt", 200, "success\n"],
+    ])("%s answers %i like an online network", async (probe, status, body) => {
+      markSetupComplete();
+      const response = await middleware(createRequest(probe));
+
+      expect(response.status).toBe(status);
+      expect(response.headers.get("Location")).toBeNull();
+      expect(await response.text()).toBe(body);
+    });
+
+    it("/canonical.html answers Firefox's expected page", async () => {
+      markSetupComplete();
+      const response = await middleware(createRequest("/canonical.html"));
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Type")).toContain("text/html");
+      expect(await response.text()).toContain("support.mozilla.org/kb/captive-portal");
+    });
+  });
+
   describe("Apple captive portal", () => {
     it("sends the iOS captive sheet to the setup wizard while setup is open", async () => {
       const request = createRequest("/hotspot-detect.html");

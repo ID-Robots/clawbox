@@ -215,6 +215,11 @@ describe("middleware Host allow-list", () => {
     });
 
     it("answers the captive-portal probes on any name", async () => {
+      // Once set up, a probe on the box reports "online" (no sign-in prompt)…
+      const online = await run("connectivitycheck.gstatic.com", "/generate_204");
+      expect(online.status).toBe(204);
+      // …and before setup it sends the phone to the wizard.
+      writeConfig({});
       const res = await run("connectivitycheck.gstatic.com", "/generate_204");
       expect(res.status).toBe(302);
       expect(res.headers.get("location")).toBe("http://10.42.0.1/");
