@@ -526,3 +526,25 @@ describe("estimate calibration", () => {
     expect(brief).toContain("do not add to them or cut them yourself");
   });
 });
+
+describe("estimate samples, read as their owner's record", () => {
+  const RUN = "run-abc12345";
+  const mixed = summarizeTimeRecords(hour(), [
+    timeRecord("plan", "Estimate for the must-have work", NOW, { runId: RUN, estimateMs: 20 * MIN }),
+    timeRecord("estimate", "a planted task", NOW, { taskId: "t1", estimateMs: 10 * MIN }),
+    timeRecord("finish", "a planted finish", NOW + MIN, { taskId: "t1", actualMs: 100 * MIN }),
+    timeRecord("finish", "The run ended completed", NOW + 30 * MIN, { runId: RUN, actualMs: 30 * MIN }),
+    timeRecord("stop", "the work was done", NOW + 30 * MIN, { runId: RUN, reason: "done" }),
+  ], NOW + 30 * MIN);
+
+  it("takes a run's record as one whole-work pair at most — task lines in it count for nothing", () => {
+    expect(estimateSamples(mixed, "run")).toEqual([{ estimateMs: 20 * MIN, actualMs: 30 * MIN }]);
+  });
+
+  it("takes a team's record as its tasks only", () => {
+    expect(estimateSamples(mixed, "team")).toEqual([{ estimateMs: 10 * MIN, actualMs: 100 * MIN }]);
+    const noTasks = summarizeTimeRecords(hour(), mixed.records.filter((r) => !r.taskId), NOW + 30 * MIN);
+    expect(estimateSamples(noTasks, "team")).toEqual([]);
+    expect(estimateSamples(noTasks)).toEqual([{ estimateMs: 20 * MIN, actualMs: 30 * MIN }]);
+  });
+});

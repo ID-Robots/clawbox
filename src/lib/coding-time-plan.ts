@@ -451,16 +451,24 @@ function recordedCalibration(records: readonly TimeRecord[]): number {
  * task with both an estimate and the time it took. A run's: its whole-work
  * estimate against the time it worked — only when the run was done and did
  * nothing else in that time (no extra work), or the pair would not be like
- * for like.
+ * for like. `owner` says whose record it is, when the caller knows: a run's
+ * is read only as a run's (one pair at most) and a team's only as a team's —
+ * a run's record sits in a folder the run can write, and must not pass for a
+ * team's dozens of tasks.
  */
-export function estimateSamples(summary: Pick<TimeRecordSummary, "tasks" | "estimateMs" | "stopReason" | "extras" | "records">): EstimateSample[] {
+export function estimateSamples(
+  summary: Pick<TimeRecordSummary, "tasks" | "estimateMs" | "stopReason" | "extras" | "records">,
+  owner: "run" | "team" | null = null,
+): EstimateSample[] {
   const scale = recordedCalibration(summary.records ?? []);
   const own = (ms: number) => ms / scale;
   const out: EstimateSample[] = [];
-  for (const t of summary.tasks ?? []) {
-    if (isPositive(t.estimateMs) && isTime(t.actualMs)) out.push({ estimateMs: own(t.estimateMs), actualMs: t.actualMs });
+  if (owner !== "run") {
+    for (const t of summary.tasks ?? []) {
+      if (isPositive(t.estimateMs) && isTime(t.actualMs)) out.push({ estimateMs: own(t.estimateMs), actualMs: t.actualMs });
+    }
+    if (owner === "team" || out.length || (summary.tasks ?? []).length) return out;
   }
-  if (out.length || (summary.tasks ?? []).length) return out;
   if (summary.stopReason !== "done" || (summary.extras ?? []).length || !isPositive(summary.estimateMs)) return out;
   const records = summary.records ?? [];
   for (let i = records.length - 1; i >= 0; i--) {

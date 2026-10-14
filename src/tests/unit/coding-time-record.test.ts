@@ -345,6 +345,14 @@ describe("calibration across this box's records", () => {
     expect(lib.currentEstimateCalibration(NOW + lib.CALIBRATION_TTL_MS)).toEqual({ factor: 2, samples: 3 });
   });
 
+  it("reads a run's folder as a run's record: task lines a run planted there count for nothing", async () => {
+    await finishedTeam("team-aaaaaaaa", [[10, 20], [10, 20], [10, 20]]);
+    // A run's own folder — one the run can write — made to look like a team of ten tasks, each done in a tenth of its estimate.
+    await finishedTeam(RUN_ID, Array.from({ length: 10 }, (): [number, number] => [10, 1]));
+    expect(lib.recentEstimateSamples()).toHaveLength(3);
+    expect(lib.currentEstimateCalibration(NOW)).toEqual({ factor: 2, samples: 3 });
+  });
+
   it("passes over what is not a record this box wrote: a link, a folder not named like a run or team, a record too large", async () => {
     await finishedTeam("team-aaaaaaaa", [[10, 20], [10, 20], [10, 20]]);
     const artifacts = path.join(root, "data", "coding-agent-artifacts");
