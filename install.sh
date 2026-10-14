@@ -10652,7 +10652,12 @@ read_ssh_policy() {
 # Stopping sshd does not end sessions already open (each has its own process),
 # which is what lets the owner — or the factory station — finish what it was
 # doing over the connection that asked for the change.
-ssh_service_off() { systemctl disable --now ssh >/dev/null 2>&1 || systemctl disable --now ssh; }
+# ssh.socket too: on a socket-activated sshd, disabling only ssh.service leaves
+# port 22 listening and starts sshd on the next connection.
+ssh_service_off() {
+  systemctl disable --now ssh.socket >/dev/null 2>&1 || true
+  systemctl disable --now ssh >/dev/null 2>&1 || systemctl disable --now ssh
+}
 
 # Web step, started by /setup-api/system/ssh (owner session + current
 # password) and by the factory reset. ONE word in a 0600 file under data/,
@@ -10717,6 +10722,13 @@ step_ssh_policy_apply() {
   ssh_owner_password_state || state=$?
   policy="$(read_ssh_policy)"
   if [ "$policy" != enabled ] && [ "$policy" != disabled ]; then
+    if [ "$state" -eq 2 ]; then
+      # Could not tell whether an owner set a password: change nothing and
+      # record nothing, so the next update decides again instead of a guess
+      # becoming permanent in either direction.
+      echo "  SSH policy undecided (password state unreadable); left as is"
+      return 0
+    fi
     if [ "$state" -eq 1 ]; then policy=disabled; else policy=enabled; fi
     write_ssh_policy "$policy"
     echo "  SSH policy recorded: $policy"

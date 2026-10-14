@@ -22,16 +22,22 @@ export default function RemoteAccessPanel() {
   const [password, setPassword] = useState("");
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [hidden, setHidden] = useState(false);
 
   useEffect(() => {
     let live = true;
     fetch("/setup-api/system/ssh", { cache: "no-store" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d: SshState | null) => { if (live && d) setState(d); })
-      // Leave the card in its loading state; nothing to act on without an answer.
-      .catch(() => {});
+      .then(async (r) => {
+        if (!live) return;
+        // Another ClawBox user: remote access is the owner's switch, so the
+        // card is not theirs to see.
+        if (r.status === 403) { setHidden(true); return; }
+        if (!r.ok) throw new Error(String(r.status));
+        setState((await r.json()) as SshState);
+      })
+      .catch(() => { if (live) setStatus({ type: "error", message: t("settings.ssh.failed") }); });
     return () => { live = false; };
-  }, []);
+  }, [t]);
 
   const cancel = () => { setConfirming(false); setPassword(""); };
 
@@ -61,6 +67,7 @@ export default function RemoteAccessPanel() {
   };
 
   const canToggle = !!state && (state.enabled || state.ownerPassword);
+  if (hidden) return null;
 
   return (
     <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="settings-ssh-card">

@@ -152,6 +152,8 @@ d("install.sh::step_ssh_policy", () => {
     expect(r.status).toBe(0);
     expect(policy()).toBe("disabled");
     expect(calls()).toContain("systemctl disable --now ssh");
+    // A socket-activated sshd would keep port 22 listening otherwise.
+    expect(calls()).toContain("systemctl disable --now ssh.socket");
   });
 
   it("factory_reset removes the password hash entirely and switches SSH off", () => {
@@ -191,9 +193,10 @@ d("install.sh::step_ssh_policy_apply (every update)", () => {
     expect(calls()).not.toContain("systemctl");
   });
 
-  it("never takes SSH away when the owner check cannot run", () => {
+  it("never takes SSH away when the owner check cannot run, and records nothing", () => {
     run("step_ssh_policy_apply", UNKNOWN);
-    expect(policy()).toBe("enabled");
+    // No guess becomes permanent: the next update decides again.
+    expect(policy()).toBeNull();
     expect(calls()).not.toContain("systemctl");
   });
 

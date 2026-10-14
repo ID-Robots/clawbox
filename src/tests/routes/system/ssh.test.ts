@@ -11,7 +11,7 @@ vi.mock("child_process", () => ({ execFile: vi.fn() }));
 vi.mock("fs/promises", () => ({
   default: { mkdir: vi.fn(), writeFile: vi.fn(), unlink: vi.fn(async () => {}) },
 }));
-vi.mock("@/lib/config-store", () => ({ DATA_DIR: "/test/data" }));
+vi.mock("@/lib/config-store", () => ({ DATA_DIR: "/test/data", get: vi.fn(async () => undefined) }));
 vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: vi.fn(async () => true) }));
 vi.mock("@/lib/same-origin", () => ({ isSameOriginRequest: vi.fn(() => true) }));
 vi.mock("@/lib/login-rate-limit", () => ({ padResponseTime: vi.fn(async () => {}) }));
@@ -61,6 +61,19 @@ beforeEach(() => {
   vi.mocked(reproveOwnerPassword).mockResolvedValue(null);
   vi.mocked(checkReproveLockout).mockResolvedValue(null);
   sshState("inactive");
+});
+
+import { get as configGet } from "@/lib/config-store";
+
+describe("GET on an owned box", () => {
+  it("answers from the password_configured flag without a shadow check", async () => {
+    vi.mocked(configGet).mockResolvedValueOnce(true as never);
+    vi.mocked(hasOwnerPassword).mockClear();
+    const { GET } = await import("@/app/setup-api/system/ssh/route");
+    const res = await GET(new Request("http://localhost/setup-api/system/ssh"));
+    expect((await res.json()).ownerPassword).toBe(true);
+    expect(vi.mocked(hasOwnerPassword)).not.toHaveBeenCalled();
+  });
 });
 
 describe("GET /setup-api/system/ssh", () => {

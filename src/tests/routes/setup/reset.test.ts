@@ -379,6 +379,31 @@ describe("POST /setup-api/setup/reset", () => {
     expect(vi.mocked(startRootStep)).not.toHaveBeenCalledWith("chpasswd", expect.anything());
   });
 
+  it("falls back to an unknowable random password when the ssh_policy step is unavailable", async () => {
+    // e.g. a platform whose root dispatcher has no ssh_policy step: the
+    // previous owner's password must still go, and never to a known default.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(startRootStep).mockImplementation(async (step: string) => {
+      if (step === "ssh_policy") throw new Error("unknown step");
+    });
+
+    const first = await resetPost();
+    expect(first.status).toBe(200);
+    const records = () => mockFs.writeFile.mock.calls
+      .filter(([p]) => typeof p === "string" && p.endsWith(".chpasswd-input"))
+      .map(([, data]) => String(data));
+    const [record] = records();
+    expect(record).toMatch(/^[a-z_][a-z0-9_-]*:[A-Za-z0-9_-]{43}\n$/);
+    expect(record).not.toMatch(/:clawbox\n$/);
+    expect(vi.mocked(startRootStep)).toHaveBeenCalledWith("chpasswd", expect.anything());
+
+    await resetPost();
+    const [, second] = records();
+    expect(second).toBeDefined();
+    expect(second).not.toBe(record);
+    errSpy.mockRestore();
+  });
+
   it("continues the reset when the password reset fails (non-fatal)", async () => {
     // A root-step failure must not strand the user on a half-reset box.
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});

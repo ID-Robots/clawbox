@@ -10,6 +10,8 @@ import { resetUpdateState } from "@/lib/updater";
 import { DATA_DIR } from "@/lib/config-store";
 import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
 import { requestSshPolicy } from "@/lib/ssh-policy";
+import { CHPASSWD_INPUT_PATH, CHPASSWD_STEP, chpasswdRecord } from "@/lib/chpasswd";
+import { getSystemUsername } from "@/lib/auth";
 import { FACTORY_RESET_CONFIRMATION, isFactoryResetConfirmed } from "@/lib/factory-reset";
 import { readEdition } from "@/lib/edition-source";
 import { startOllamaService } from "@/lib/local-ai-runtime";
@@ -664,7 +666,28 @@ async function removeOwnerPasswordAndSsh(): Promise<void> {
   try {
     await requestSshPolicy("factory_reset");
     console.log("[Reset] Owner password removed and SSH disabled");
+    return;
   } catch (err) {
+    console.error(
+      "[Reset][SECURITY] ssh_policy factory_reset failed, falling back to an unknowable password:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+  // Fallback, e.g. on a platform whose root dispatcher has no ssh_policy step
+  // (x64): still take the previous owner's password away through chpasswd,
+  // which every platform supports — replaced by 32 random bytes nobody ever
+  // sees, never a known default. The wizard sets the next owner's password.
+  try {
+    await fs.mkdir(path.dirname(CHPASSWD_INPUT_PATH), { recursive: true });
+    await fs.writeFile(
+      CHPASSWD_INPUT_PATH,
+      chpasswdRecord(getSystemUsername(), crypto.randomBytes(32).toString("base64url")),
+      { mode: 0o600 },
+    );
+    await startRootStep(CHPASSWD_STEP, { timeoutMs: 30_000 });
+    console.log("[Reset] Owner password replaced with a random one (fallback)");
+  } catch (err) {
+    await fs.unlink(CHPASSWD_INPUT_PATH).catch(() => {});
     // Error, not warn: a failed reset leaves the device in a security
     // regression (factory-reset but still owned with the prior password).
     console.error(

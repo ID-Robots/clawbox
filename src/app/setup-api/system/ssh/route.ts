@@ -8,6 +8,7 @@ import {
   reproveOwnerPassword,
 } from "@/lib/password-reprove";
 import { hasOwnerPassword } from "@/lib/system-password";
+import { get } from "@/lib/config-store";
 import { isSshActive, requestSshPolicy } from "@/lib/ssh-policy";
 
 export const dynamic = "force-dynamic";
@@ -28,7 +29,15 @@ function ownerOnly(): NextResponse {
 
 export async function GET(request: Request) {
   if (!(await hasOwnerSession(request))) return ownerOnly();
-  const [enabled, owner] = await Promise.all([isSshActive(), hasOwnerPassword()]);
+  // The config flag first, as the credentials route does: on an owned box the
+  // shadow check would run unix_chkpwd with the legacy password on every
+  // Settings visit and leave a failed-password line in auth.log each time.
+  // The flag only ever unlocks the DISPLAY here; enabling is decided root-side.
+  const ownerFromFlag = !!(await get("password_configured"));
+  const [enabled, owner] = await Promise.all([
+    isSshActive(),
+    ownerFromFlag ? Promise.resolve(true as const) : hasOwnerPassword(),
+  ]);
   return NextResponse.json(
     { enabled, ownerPassword: owner === true },
     { headers: { "cache-control": "no-store" } },
