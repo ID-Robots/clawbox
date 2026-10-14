@@ -71,7 +71,7 @@ import os from "os";
 import path, { untraced } from "@/lib/runtime-path";
 import { randomBytes } from "crypto";
 import { CONFIG_ROOT, DATA_DIR, get as configGet, getAll as configGetAll, set as configSet, setMany as configSetMany } from "@/lib/config-store";
-import { ARTIFACT_RUN_ID_RE, artifactsDir, ensureArtifactsDir, pruneArtifacts, removeArtifacts, writeRunReport, type PrunedArtifact } from "@/lib/coding-agent-artifacts";
+import { ARTIFACT_RUN_ID_RE, artifactsDir, ensureArtifactsDir, pruneArtifacts, removeArtifacts, REPORT_FILE, writeRunReport, type PrunedArtifact } from "@/lib/coding-agent-artifacts";
 import {
   type InputRefusalCode,
   type RunInputFile,
@@ -426,7 +426,33 @@ import {
   runHookScriptPath,
   runHookSettings,
 } from "@/lib/coding-run-inbox";
-import { BUDGET_PRESET_CHIPS, isBudgetChip, readTimeBudget, remainingMs, type BudgetChip, type TimeBudget } from "@/lib/coding-time-budget";
+import {
+  BUDGET_PRESET_CHIPS,
+  budgetDurationMs,
+  describeBudget,
+  elapsedMs,
+  formatDuration,
+  formatLocalDeadline,
+  HOUR_MS,
+  isBudgetChip,
+  LONG_BUDGET_MS,
+  marginCutoffMs,
+  MINUTE_MS,
+  readTimeBudget,
+  remainingMs,
+  safeTimeZone,
+  safetyMarginMs,
+  summarizeTimeRecords,
+  timeRecord,
+  type BudgetChip,
+  type TimeBudget,
+  type TimeRecord,
+  type TimeRecordSummary,
+  type TimeStopReason,
+} from "@/lib/coding-time-budget";
+import { estimateAccuracyLine, mustHaveFits, parseEstimateMinutes } from "@/lib/coding-time-plan";
+import { appendTimeRecord, loadTimeRecords, readTimeRecordSummary, type TimeRecordPayload } from "@/lib/coding-time-record";
+import { readOsTimeZone } from "@/lib/timezone";
 
 // ─── Tunables ────────────────────────────────────────────────────────────────
 
@@ -1879,6 +1905,14 @@ export interface CodingRun {
    * on a run without one — such a run works exactly as every run did before.
    */
   timeBudget?: TimeBudget | null;
+  /**
+   * How that budget is being spent — the time record kept in the run's
+   * evidence folder (src/lib/coding-time-record.ts), summarized afresh when a
+   * reader asks: the estimate, the checkpoints, why it stopped. Never stored on
+   * the record: only the copies a route answers with carry it (cloneRun), and
+   * only on a run with a budget whose record exists — ABSENT otherwise.
+   */
+  timeRecord?: TimeRecordPayload;
 }
 
 export interface RunCi extends CiFailure {
@@ -4837,6 +4871,14 @@ interface RunStore {
   queuePumpAgain?: boolean;
   /** The queue's next look when it stopped for something that clears by itself (the switch, readiness). */
   queueRetry?: NodeJS.Timeout | null;
+  /** Each budgeted run's deadline clock and its one timer — see BudgetClock. */
+  budgetClocks?: Map<string, BudgetClock>;
+  /** The box's zone as last read, for the budget brief a synchronous spawn writes — see refreshBudgetZone. */
+  budgetZone?: string;
+  /** Each budgeted run's time-record writes, one after another — see writeBudgetRecords. */
+  budgetWrites?: Map<string, Promise<TimeRecordSummary | null>>;
+  /** A test's checkpoint interval — see _setBudgetCheckpointMsForTests. */
+  budgetCheckpointMs?: number | null;
 }
 
 const store = processStore<RunStore>(RUNS_PATH, () => ({
@@ -4901,6 +4943,9 @@ export async function reconcileAfterRestart(): Promise<number> {
   const list = loadRuns();
   let repaired = 0;
   let changed = false;
+  // The zone a budgeted run's brief and record lines are worded in, before a
+  // reattach or a settle below writes one.
+  if (list.some((r) => r.timeBudget)) await refreshBudgetZone();
   // Resolved once for the whole sweep rather than per run: a reattached run that
   // fails transiently may still take its one automatic retry, and that retry
   // needs the same two tools a fresh spawn does.
@@ -4959,6 +5004,8 @@ export async function reconcileAfterRestart(): Promise<number> {
       changed = true;
     }
   }
+  // Every budgeted run that is not running again has its clock back too.
+  reviveBudgetClocks(list);
   if (changed) {
     try {
       writeAll(list);
@@ -5070,6 +5117,8 @@ function reattach(run: CodingRun, tools: SpawnTools): void {
   run.lastActivityAt = Date.now();
   const state = detachedState(run, tools, false);
   live.set(run.id, state);
+  // Its deadline is on the record: the clock is armed again from it.
+  if (run.timeBudget) armBudgetClock(run.id);
   followStream(run, state);
   // What its hook handed over while no server was watching.
   collectInboxReceipts(run, state);
@@ -5204,6 +5253,10 @@ function cloneRun(run: CodingRun): CodingRun {
   // The experience block is left out, not copied: it is for the next spawn,
   // which reads the record itself — see CodingRun.experienceBrief.
   delete clone.experienceBrief;
+  // Read afresh for the reader, never kept: a record carries none of its own.
+  delete clone.timeRecord;
+  const timeRecord = run.timeBudget ? readTimeRecordSummary(run.id, Date.now()) : null;
+  if (timeRecord) clone.timeRecord = timeRecord;
   return clone;
 }
 
@@ -6218,7 +6271,7 @@ export function buildRunMcpConfig(run: { id: string; directory: string; media?: 
 }
 
 /** The argv handed to the wrapper. Exported for the contract test. */
-export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; experience?: string | null; reviewedSeparately?: boolean; draftPullRequests?: boolean; allowRules?: readonly string[]; provider?: CodingProvider; streamInput?: boolean; hookSettings?: string | null; cpuBudget?: number | null; runNotes?: string | null; lessonChannel?: boolean; run?: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null } }): string[] {
+export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; experience?: string | null; reviewedSeparately?: boolean; draftPullRequests?: boolean; allowRules?: readonly string[]; provider?: CodingProvider; streamInput?: boolean; hookSettings?: string | null; cpuBudget?: number | null; runNotes?: string | null; lessonChannel?: boolean; timeBrief?: string | null; run?: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null } }): string[] {
   // A run whose diff a separate review will read is told not to review it
   // twice — see REVIEWER_CLAUSE_SLOT. A team's run is told it never merges.
   const headless = headlessBrief({ reviewedSeparately: opts.reviewedSeparately === true, team: Boolean(opts.run?.team) });
@@ -6252,7 +6305,9 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
   // delimited blocks after every word of the device's own. In the system
   // prompt rather than the task, so the task stays what the caller typed. A
   // run given neither gets the brief above unchanged, byte for byte.
-  const systemPrompt = [brief, opts.runNotes, opts.experience].filter((part): part is string => Boolean(part)).join("\n\n");
+  // A budgeted run's time budget (budgetBrief) comes first of them: it bounds
+  // everything the notes and the lessons go on to suggest.
+  const systemPrompt = [brief, opts.timeBrief, opts.runNotes, opts.experience].filter((part): part is string => Boolean(part)).join("\n\n");
   const args = [
     "-p",
     "--verbose",
@@ -7262,7 +7317,22 @@ export const parseTodosForTests = parseTodos;
 function noteTokens(run: CodingRun, state: LiveRun, tokens: number): boolean {
   if (!(tokens > 0)) return false;
   run.tokensUsed += tokens;
+  // The time budget's own spend ceiling, beside the owner's: whichever is the
+  // lower is the one this bill crossed first, and the stop is recorded as that
+  // one — "cost" for the budget's, "token_cap" for the owner's.
+  const budgetCap = enforcedTokenCap(run);
+  if (budgetCap !== null && run.tokensUsed >= budgetCap && state.endRequested === null && (run.tokenLimit === null || budgetCap <= run.tokenLimit)) {
+    state.endRequested = "stop";
+    run.resumable = true;
+    run.error = `Stopped at its time budget's spend ceiling (${run.tokensUsed.toLocaleString("en-US")} of ${budgetCap.toLocaleString("en-US")} tokens). Continue it with a new budget to carry on.`;
+    noteBudgetStop(run, "cost");
+    pushProgress(run, "Time budget: the spend ceiling is reached, so the run stops here.");
+    console.error(`[coding-agent] ${run.id} hit its time budget's spend ceiling at ${run.tokensUsed}`);
+    endProcess(state);
+    return true;
+  }
   if (run.tokenLimit !== null && run.tokensUsed >= run.tokenLimit && state.endRequested === null) {
+    noteBudgetStop(run, "token_cap");
     state.endRequested = "stop";
     run.resumable = true;
     run.error = `Stopped at the token limit (${run.tokensUsed.toLocaleString("en-US")} of ${run.tokenLimit.toLocaleString("en-US")}). Raise the limit or resume with a narrower task.`;
@@ -7574,6 +7644,8 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
     for (const block of content) {
       if (block.type === "text" && typeof block.text === "string") {
         pushProgress(run, block.text);
+        // A budgeted run's "ESTIMATE:" and "SKIPPED:" lines, into its time record.
+        if (run.timeBudget) noteBudgetText(run, block.text);
       } else if (block.type === "tool_use" && typeof block.name === "string") {
         const input = (block.input && typeof block.input === "object" ? block.input : {}) as Record<string, unknown>;
         // A run in a worktree pointing a file tool at the project's own path:
@@ -9442,6 +9514,9 @@ function reopenPullRequestStep(run: CodingRun): void {
  */
 function announceGatedRun(run: CodingRun): void {
   if (pipelineOwnsRun(run)) return;
+  // The time record closes with the notice (a run that gave up is only noted:
+  // Resume carries it on) — see finishRun.
+  settleBudgetRecord(run);
   void announceCodingAgent(cloneRun(run)).catch((err: unknown) => {
     console.error("[coding-agent] announce failed:", err instanceof Error ? err.message : err);
   });
@@ -10169,6 +10244,7 @@ function pipelineGaveUpReason(pipeline: PipelineState): string {
 
 /** The finish notice `finishRun` held back while the pipeline was still going. */
 function announcePipeline(run: CodingRun): void {
+  settleBudgetRecord(run);
   void announceCodingAgent(cloneRun(run)).catch((err: unknown) => {
     console.error("[coding-agent] announce failed:", err instanceof Error ? err.message : err);
   });
@@ -10763,6 +10839,9 @@ export async function resumeRunsWaitingForAnthropic(): Promise<string[]> {
 async function resumeWaitingOnce(): Promise<string[]> {
   const waiting = loadRuns()
     .filter((r) => r.status === "paused" && r.pauseReason?.kind === "allowance" && r.pauseReason.meter === "anthropic")
+    // Not past its time budget's deadline: carrying on past it is the owner's
+    // call (their own Resume), never the box's unasked.
+    .filter((r) => !r.timeBudget || remainingMs(r.timeBudget, Date.now()) > 0)
     .sort((a, b) => (a.completedAt ?? 0) - (b.completedAt ?? 0));
   const resumed: string[] = [];
   for (const run of waiting) {
@@ -11262,6 +11341,10 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // "Coding agent finished run-x" now would be exactly the claim the pipeline
   // exists to stop making. `settlePipelineRun` sends it when the pipeline is
   // actually over.
+  // A budgeted run's time record by the same rule: closed where the notice is
+  // sent (and by announceGatedRun / announcePipeline where it is held), and
+  // noted — not closed — for a pause, which Resume carries on from.
+  if (run.status === "paused" || (!deliverableGateApplies(run) && !pipelineOwnsRun(run))) settleBudgetRecord(run);
   if (run.status !== "paused" && !deliverableGateApplies(run) && !pipelineOwnsRun(run)) {
     void announceCodingAgent(cloneRun(run)).catch((err: unknown) => {
       console.error("[coding-agent] announce failed:", err instanceof Error ? err.message : err);
@@ -11483,7 +11566,10 @@ function spawnRun(
   // The project's run notes, read at EVERY spawn (src/lib/coding-run-notes.ts):
   // a completion attempt or a resume sees a lesson the owner added meanwhile.
   const runNotes = runNotesBlock(readRunNotes(run.directory));
-  const dropped = buildSpawnArgv(tools.setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, experience: run.experienceBrief, reviewedSeparately, draftPullRequests, allowRules: run.allowRules, provider: run.provider, streamInput, hookSettings: hookSettings?.json ?? null, cpuBudget, runNotes, lessonChannel: !run.readOnly, run: { id: run.id, directory: run.directory, media: run.media, team: run.team } }));
+  // The time budget as it stands at THIS spawn — deadline, time left, the
+  // margin — or nothing for a run without one (or past it, unenforced).
+  const timeBrief = budgetBriefFor(run);
+  const dropped = buildSpawnArgv(tools.setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, experience: run.experienceBrief, reviewedSeparately, draftPullRequests, allowRules: run.allowRules, provider: run.provider, streamInput, hookSettings: hookSettings?.json ?? null, cpuBudget, runNotes, lessonChannel: !run.readOnly, timeBrief, run: { id: run.id, directory: run.directory, media: run.media, team: run.team } }));
   // One evidence path everywhere — env, MCP config and --add-dir must never
   // disagree about where it is. Creation is best-effort: the MCP layer also
   // mkdirs lazily, so a failure here degrades evidence, never the run.
@@ -11624,6 +11710,10 @@ function spawnRun(
   };
   state.timeout.unref();
   live.set(run.id, state);
+  // A budgeted run's clock follows every spawn of its record — a start, a
+  // resume, another attempt, a pipeline lap, the one retry — so its checkpoints
+  // and its margin are timed against a run that is live again.
+  if (run.timeBudget) armBudgetClock(run.id);
   // Recorded now rather than derived at settle: by then the child object is the
   // only thing that still knows the group, and a leftover server has to be
   // reachable after `live` has forgotten the run. The UNIT is recorded for the
@@ -12402,7 +12492,10 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       cpuBudget,
       experience: experience?.record ?? null,
       experienceBrief: experience?.brief ?? null,
-      timeBudget: startBudget(input.timeBudget, previous),
+      // Never a team's run: the TEAM keeps the budget and ends its runs at
+      // its deadline (wrapUpRun) — a worker with a clock of its own would be a
+      // second deadline over the same work.
+      timeBudget: input.team ? null : startBudget(input.timeBudget, previous),
     });
     // THE FILES THIS RUN WAS GIVEN, staged before anything else: the task
     // context names the folder, so what is in it has to be true by the time the
@@ -12537,6 +12630,9 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // Before the record is persisted, so the names and the two progress lines are
     // in the first thing the app reads rather than appearing a poll later.
     await prepareRunSecrets(run);
+    // The zone the budget brief names the deadline in — read here, on the async
+    // path, because the spawn that writes the brief is synchronous.
+    if (run.timeBudget) await refreshBudgetZone();
     // Read before the insert, never between it and the write: the insert and
     // persist are one synchronous step (see the runs store).
     const history = await getHistoryPolicy();
@@ -12564,6 +12660,10 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     persist(true);
     console.error(`[coding-agent] ${run.id} started by ${run.source} in ${run.directory}${waited >= 0 ? " from the queue" : ""}`);
     startProjectIcon(run);
+    // The time record's first lines and the run's deadline clock, before the
+    // spawn reads the clock for its brief — a queued run's clock starts here,
+    // at its turn, against the deadline it was queued with.
+    if (run.timeBudget) beginBudget(run, waited >= 0);
     try {
       spawnOrSettle(run, resumeSessionId, tools, settings);
     } catch (err) {
@@ -13081,6 +13181,7 @@ export function stopRun(id: string): CodingRun {
     // finishRun, so nothing else would end it and it would hold the finish
     // notice for good.
     stopPipelineFor(run, "The run was stopped while it was paused, so the pipeline stopped here.");
+    settleBudgetRecord(run);
     persist(true);
     wakeWaiters(id);
     return cloneRun(run);
@@ -13095,6 +13196,7 @@ export function stopRun(id: string): CodingRun {
     run.completedAt = Date.now();
     cleanupRunResources(run, null);
     stopPipelineFor(run, "The run was stopped, so the pipeline stopped here.");
+    settleBudgetRecord(run);
     persist(true);
     wakeWaiters(id);
     // It held a slot on paper: the queue's next run may have it now.
@@ -13187,6 +13289,762 @@ export function noteTeamMessageSent(runId: string, line: string): void {
   if (!run) return;
   pushProgress(run, line);
   persist();
+}
+
+// ─── Time budget: the deadline, enforced ─────────────────────────────────────
+//
+// A budgeted run (CodingRun.timeBudget) works to an absolute deadline, and the
+// SERVER holds it to it — the brief only explains the rules:
+//
+//  - its brief names the deadline in the box's zone, the time left and the
+//    safety margin (budgetBrief), and asks for an `ESTIMATE:` line first;
+//  - one timer per run (BudgetClock), armed at every spawn of the record, on
+//    a reattach after a restart and from the deadline on the record: a
+//    checkpoint in the time record every BUDGET_CHECKPOINT_MS, a message to
+//    commit and finish at the margin, and at the deadline a clean stop
+//    (wrapUpRun) with "time" as the reason;
+//  - every step goes into the run's time record (src/lib/coding-time-record.ts,
+//    owner = the run id): the budget and the start, the estimate, what it
+//    skipped, the checkpoints, the finish with the time it took, and the stop
+//    with its reason — closed once, where the run's finish notice is sent.
+//
+// A pause does not close the record: Resume carries on against the same
+// deadline. The deadline closes it if the run is still paused then, and a
+// resume past it is noted and runs without enforcement — the owner chose to
+// go on. A run without a budget, and every team's run (the team keeps the
+// budget), has no clock at all and behaves exactly as before.
+
+/** A checkpoint goes into the time record at most this often while a budgeted run works. */
+export const BUDGET_CHECKPOINT_MS = 10 * MINUTE_MS;
+/** How long the deadline's stop lets a file write under way land before it ends the run anyway. */
+export const WRAP_UP_WRITE_WAIT_MS = 60_000;
+/** How often that wait looks. */
+const WRAP_UP_POLL_MS = 250;
+/** A run "running" on its record but between two spawns at its deadline is looked at again this soon. */
+const BUDGET_RETRY_MS = 5_000;
+/** setTimeout's longest delay; a deadline further off is reached in steps. */
+const MAX_TIMER_MS = 2_147_483_647;
+/** The most "SKIPPED:" lines one run's record takes. */
+const MAX_SKIP_RECORDS = 20;
+/** The most of one reply read for "ESTIMATE:" and "SKIPPED:" lines. */
+const MAX_BUDGET_TEXT_LINES = 200;
+/** A budget this long or shorter is a SHORT one: no e2e suites, no polish. Longer than LONG_BUDGET_MS is a long one. */
+const SHORT_BUDGET_MS = HOUR_MS;
+/** report.md is appended to only while it is smaller than this. */
+const MAX_REPORT_APPEND_BYTES = 1024 * 1024;
+
+/** How the record's own note lines start — what a restarted server reads its clock back from. */
+const CHECKPOINT_NOTE = "Checkpoint:";
+const MARGIN_NOTE = "Safety margin:";
+
+/** A budgeted run's clock: its deadline, its one timer, and what has been done against it. */
+interface BudgetClock {
+  budget: TimeBudget;
+  /** False once the run was resumed past its deadline: noted, never enforced. */
+  enforced: boolean;
+  timer: NodeJS.Timeout | null;
+  /** When the last checkpoint (or the start) went into the record, ms. */
+  lastCheckpointAt: number;
+  /** The run has been told the margin began — or started inside it and its brief said so. */
+  marginSent: boolean;
+  /** Its ESTIMATE line is on the record. */
+  estimated: boolean;
+  /** The SKIPPED lines on the record, so a line read twice is recorded once. */
+  skipped: Set<string>;
+  /** The stop the BOX made — the deadline, a spend ceiling — for the record's stop line. */
+  stopReason: TimeStopReason | null;
+  /** The record's stop line is written. */
+  closed: boolean;
+  /** The deadline's stop is under way. */
+  wrapping: boolean;
+  /** The status the last pause, give-up or after-the-deadline note was written for: one note each. */
+  noted: string | null;
+  /** The run had a time record on disk when this clock was read back. */
+  hadRecord: boolean;
+}
+
+/** Why the work stopped, in a few English words — the record's stop line and report.md. */
+const STOP_WORDS: Record<TimeStopReason, string> = {
+  done: "the work was done",
+  time: "the deadline came",
+  cost: "the budget's spend ceiling was reached",
+  token_cap: "the owner's token limit was reached",
+  quota: "the provider's usage limit stopped it",
+  nothing_left: "nothing valuable was left to do",
+  stopped: "it was stopped",
+  failed: "the run failed",
+};
+
+/** Where the budget came from, for its record line. */
+const BUDGET_SOURCE_WORDS: Record<TimeBudget["source"], string> = {
+  picker: "Budget set when the run was started",
+  text: "Budget from the task's own words",
+  default: "Budget from the owner's default",
+};
+
+function budgetClocks(): Map<string, BudgetClock> {
+  return (store.budgetClocks ??= new Map<string, BudgetClock>());
+}
+
+/** The box's zone as last read — "UTC" before the first read. */
+function budgetZone(): string {
+  return safeTimeZone(store.budgetZone);
+}
+
+/** Read the box's zone again (the OS's, never a browser's), for the next brief a spawn writes. */
+async function refreshBudgetZone(): Promise<void> {
+  store.budgetZone = await readOsTimeZone().catch(() => "UTC");
+}
+
+/**
+ * Add lines to a run's time record, in order: one chain per run on top of the
+ * store's own one-writer rule, because each write first reads the zone and
+ * two written back to back could otherwise land the other way round. Tracked
+ * like settle work, so a suite's teardown waits for it. Never rejects;
+ * answers the summary after the last line, or null.
+ */
+function writeBudgetRecords(runId: string, budget: TimeBudget, records: TimeRecord[]): Promise<TimeRecordSummary | null> {
+  const chains = (store.budgetWrites ??= new Map<string, Promise<TimeRecordSummary | null>>());
+  const next = (chains.get(runId) ?? Promise.resolve(null)).then(async () => {
+    let last: TimeRecordSummary | null = null;
+    for (const record of records) last = (await appendTimeRecord(runId, budget, record)) ?? last;
+    return last;
+  });
+  chains.set(runId, next);
+  void next.then(() => {
+    if (chains.get(runId) === next) chains.delete(runId);
+  });
+  trackSettleWork(next);
+  return next;
+}
+
+/**
+ * The clock of a budgeted run: the one in memory, else one read back off its
+ * time record — the deadline as the record has it, and what the record says
+ * was already done (the margin told, the estimate given, the stop written).
+ * Null for a run without a budget and for a team's run.
+ */
+function clockFor(run: CodingRun): BudgetClock | null {
+  if (!run.timeBudget || run.team) return null;
+  const clocks = budgetClocks();
+  const known = clocks.get(run.id);
+  if (known) return known;
+  const stored = loadTimeRecords(run.id);
+  const records = stored?.records ?? [];
+  const closed = records.some((r) => r.kind === "stop");
+  const marks = records
+    .filter((r) => r.kind === "start" || (r.kind === "note" && r.text.startsWith(CHECKPOINT_NOTE)))
+    .map((r) => Date.parse(r.at))
+    .filter((at) => Number.isFinite(at));
+  const clock: BudgetClock = {
+    budget: run.timeBudget,
+    // A stop on the record while the run still has work is a resume past the
+    // deadline: the only resume a closed record can see (see resumeBudget).
+    enforced: !closed,
+    timer: null,
+    lastCheckpointAt: marks.length ? Math.max(...marks) : Date.now(),
+    marginSent: records.some((r) => r.kind === "note" && r.text.startsWith(MARGIN_NOTE)),
+    estimated: records.some((r) => r.kind === "plan"),
+    skipped: new Set(records.filter((r) => r.kind === "skip").map((r) => r.text)),
+    stopReason: null,
+    closed,
+    wrapping: false,
+    noted: null,
+    hadRecord: stored !== null,
+  };
+  clocks.set(run.id, clock);
+  return clock;
+}
+
+function forgetClock(runId: string): void {
+  const clock = budgetClocks().get(runId);
+  if (clock?.timer) clearTimeout(clock.timer);
+  budgetClocks().delete(runId);
+}
+
+/** The budget's own spend ceiling, while it is enforced — null for a run without one. */
+function enforcedTokenCap(run: CodingRun): number | null {
+  const cap = run.timeBudget?.tokenCap;
+  if (typeof cap !== "number") return null;
+  const clock = clockFor(run);
+  return clock && clock.enforced && !clock.closed ? cap : null;
+}
+
+/** Remember which stop the BOX made, for the record's stop line. A no-op without a budget. */
+function noteBudgetStop(run: CodingRun, reason: TimeStopReason): void {
+  const clock = clockFor(run);
+  if (clock && !clock.closed) clock.stopReason = reason;
+}
+
+/**
+ * The time budget, as the system prompt says it: the deadline on the box's
+ * clock and zone, the time left, the safety margin and when it begins, that
+ * the box enforces both, the `ESTIMATE:` line it wants first (while none is
+ * on the record), and what a short or a long budget changes. One paragraph,
+ * in English, like the rest of the brief.
+ */
+export function budgetBrief(budget: TimeBudget, now: number, tz: string, opts: { askEstimate?: boolean } = {}): string {
+  const zone = safeTimeZone(tz);
+  const cutoff = marginCutoffMs(budget);
+  const margin = safetyMarginMs(budget);
+  const total = budgetDurationMs(budget);
+  const parts = [
+    `TIME BUDGET. This run has a time budget: ${describeBudget(budget, now, zone)}. It is now ${formatLocalDeadline(now, zone)} on this box's clock (${zone}), and the deadline is ${formatLocalDeadline(budget.deadline, zone)}.`,
+    now < cutoff
+      ? `The last ${formatDuration(margin)} before it are the safety margin: start nothing new after ${formatLocalDeadline(cutoff, zone)} (${formatDuration(cutoff - now)} from now), and spend the margin only on committing your work and writing your report.`
+      : `You are already inside the safety margin (the last ${formatDuration(margin)} before the deadline): start nothing new beyond the smallest version of the task, commit early and write your report.`,
+    "This box enforces the budget, not you: when the margin begins you are told to commit and finish the step you are on, and at the deadline the run is stopped and whatever is in the folder is committed for you. So commit as you go, and never leave a file half-written.",
+  ];
+  if (opts.askEstimate !== false) {
+    parts.push('Begin your first reply with one line exactly like "ESTIMATE: 20 min" — how long the must-have work will take you, in minutes. If the must-have work cannot fit before the margin, say so in that same reply, before you start, and name each thing you will leave out on a line of its own: "SKIPPED: <what> — <why>".');
+  }
+  if (total <= SHORT_BUDGET_MS) {
+    parts.push('This is a short budget: skip end-to-end suites, rebuilds that do not prove the change, and polish. Run the quickest check that proves the work, and say what you skipped — a "SKIPPED:" line each — in your report.');
+  } else if (total > LONG_BUDGET_MS) {
+    parts.push("This is a long budget: first build the tools the job needs (a script, a scraper, a harness), test them on a small sample and commit them; then spend the rest of the time on the long job itself — scraping, generating, processing — committing progress as you go, until the margin.");
+  }
+  return parts.join(" ");
+}
+
+/** This spawn's budget brief, or null — no budget, a team's run, or one going on past its deadline. */
+function budgetBriefFor(run: CodingRun): string | null {
+  const clock = clockFor(run);
+  if (!clock || !clock.enforced || clock.closed) return null;
+  const now = Date.now();
+  if (remainingMs(clock.budget, now) === 0) return null;
+  return budgetBrief(clock.budget, now, budgetZone(), { askEstimate: !clock.estimated });
+}
+
+const BUDGET_LINE_LEAD_RE = /^(?:[-*•>]\s*)*[*_`]*/u;
+const ESTIMATE_LINE_RE = /^ESTIMATE[*_`]*\s*:[*_`]*\s*(.+)$/u;
+const SKIPPED_LINE_RE = /^SKIPPED[*_`]*\s*:[*_`]*\s*(.+)$/u;
+
+/** "20 min", "~1 h 30 min", "20 min (fits)", "20 minutes — tight": the estimate at the front, or null. */
+function readEstimateValue(raw: string): number | null {
+  const text = raw.replace(/[*_`]+/gu, "").trim();
+  const whole = parseEstimateMinutes(text);
+  if (whole !== null) return whole;
+  const head = text.split(/\s+[—–-]\s+|[(;,]|\.\s/u)[0] ?? "";
+  return head && head !== text ? parseEstimateMinutes(head) : null;
+}
+
+/**
+ * What a reply's own lines say about the budget: the first `ESTIMATE:` line's
+ * estimate (ms), and each `SKIPPED:` line's text. Upper-case keywords at the
+ * start of a line (after a bullet or emphasis), as the brief asks for them —
+ * a sentence that merely mentions an estimate is not one.
+ */
+export function readBudgetLines(text: string): { estimateMs: number | null; skipped: string[] } {
+  let estimateMs: number | null = null;
+  const skipped: string[] = [];
+  if (typeof text !== "string") return { estimateMs, skipped };
+  for (const raw of text.split(/\r?\n/).slice(0, MAX_BUDGET_TEXT_LINES)) {
+    const line = raw.slice(0, 1_000).trim().replace(BUDGET_LINE_LEAD_RE, "");
+    const estimate = ESTIMATE_LINE_RE.exec(line);
+    if (estimate) {
+      if (estimateMs === null) estimateMs = readEstimateValue(estimate[1]);
+      continue;
+    }
+    const skip = SKIPPED_LINE_RE.exec(line);
+    if (skip) {
+      const what = skip[1].replace(/\p{Cc}+/gu, " ").replace(/[*_`]+$/u, "").replace(/\s+/g, " ").trim().slice(0, 300);
+      if (what) skipped.push(what);
+    }
+  }
+  return { estimateMs, skipped };
+}
+
+/** A budgeted run's reply: its estimate (the first only) and what it says it skips, into the time record. */
+function noteBudgetText(run: CodingRun, text: string): void {
+  if (!/ESTIMATE|SKIPPED/.test(text)) return;
+  const clock = clockFor(run);
+  if (!clock || clock.closed || !clock.enforced) return;
+  const { estimateMs, skipped } = readBudgetLines(text);
+  const now = Date.now();
+  const records: TimeRecord[] = [];
+  if (estimateMs !== null && !clock.estimated) {
+    clock.estimated = true;
+    const fit = mustHaveFits(clock.budget, now, [estimateMs]);
+    const verdict = fit.fits
+      ? `it fits the ${formatDuration(fit.availableMs)} before the safety margin`
+      : `it does not fit: ${formatDuration(fit.shortByMs)} more than the ${formatDuration(fit.availableMs)} before the safety margin`;
+    records.push(timeRecord("plan", `Estimate for the must-have work; ${verdict}`, now, { runId: run.id, estimateMs, tokensUsed: run.tokensUsed }));
+    pushProgress(run, `Time budget: estimated ~${formatDuration(estimateMs)} — ${fit.fits ? "fits before the safety margin" : `${formatDuration(fit.shortByMs)} more than fits before the safety margin`}.`);
+  }
+  for (const what of skipped) {
+    if (clock.skipped.size >= MAX_SKIP_RECORDS) break;
+    if (clock.skipped.has(what)) continue;
+    clock.skipped.add(what);
+    records.push(timeRecord("skip", what, now, { runId: run.id }));
+  }
+  if (records.length) void writeBudgetRecords(run.id, clock.budget, records);
+}
+
+/**
+ * A budgeted run's first lines: the budget and the start. Its clock starts
+ * here — a queued run's at its turn, against the deadline it was queued with —
+ * and one that starts inside the margin is not told the margin began: its
+ * brief already says so. One handed a deadline that has ALREADY passed (no
+ * route does that; the queue refuses one, startQueuedRun) is treated as a
+ * resume past it: the record closes as it starts, and it runs unenforced.
+ */
+function beginBudget(run: CodingRun, fromQueue: boolean): void {
+  const budget = run.timeBudget;
+  if (!budget || run.team) return;
+  forgetClock(run.id);
+  const now = Date.now();
+  const spent = remainingMs(budget, now) === 0;
+  const clock: BudgetClock = {
+    budget,
+    enforced: !spent,
+    timer: null,
+    lastCheckpointAt: now,
+    marginSent: now >= marginCutoffMs(budget),
+    estimated: false,
+    skipped: new Set<string>(),
+    stopReason: null,
+    closed: spent,
+    wrapping: false,
+    noted: null,
+    hadRecord: true,
+  };
+  budgetClocks().set(run.id, clock);
+  const records = [
+    timeRecord("budget", `${BUDGET_SOURCE_WORDS[budget.source]}: ${describeBudget(budget, now, budgetZone())}`, now, { runId: run.id }),
+    timeRecord("start", fromQueue ? "The run started, its turn in the queue come" : "The run started", now, { runId: run.id, tokensUsed: run.tokensUsed }),
+  ];
+  if (spent) {
+    records.push(
+      timeRecord("stop", `${STOP_WORDS.time} before the run started`, now, { runId: run.id, reason: "time", tokensUsed: run.tokensUsed }),
+      timeRecord("note", `Started after the deadline (${formatLocalDeadline(budget.deadline, budgetZone())}); it runs without a time limit`, now, { runId: run.id }),
+    );
+  } else if (clock.marginSent) {
+    records.push(timeRecord("note", `${MARGIN_NOTE} the run started inside it, ${formatDuration(remainingMs(budget, now))} before the deadline; its brief says so`, now, { runId: run.id }));
+  }
+  void writeBudgetRecords(run.id, budget, records);
+}
+
+/**
+ * Resume in place (resumeRunOnce), BEFORE the record is flipped to running:
+ * the same deadline, read back off the record. Still ahead, it is enforced
+ * again; spent, the record is closed as of the pause if the deadline has not
+ * closed it yet, the resume is noted, and the run goes on without enforcement
+ * — the owner chose to carry on past it.
+ */
+function resumeBudget(run: CodingRun, automatic: boolean): void {
+  const clock = clockFor(run);
+  if (!clock) return;
+  const budget = clock.budget;
+  const now = Date.now();
+  const who = automatic ? "after the usage limit reset" : "by the owner";
+  clock.noted = null;
+  clock.stopReason = null;
+  clock.wrapping = false;
+  if (remainingMs(budget, now) === 0) {
+    if (!clock.closed) closeBudgetRecord(run, clock, idleStopReason(run, clock), now);
+    clock.enforced = false;
+    // Kept, unlike a closed clock of a run that is over: its end is noted too.
+    budgetClocks().set(run.id, clock);
+    pushProgress(run, "Time budget: its deadline has passed, so the resumed run carries on without one.");
+    void writeBudgetRecords(run.id, budget, [
+      timeRecord("note", `Resumed ${who} after the deadline (${formatLocalDeadline(budget.deadline, budgetZone())}); it carries on without a time limit`, now, { runId: run.id, tokensUsed: run.tokensUsed }),
+    ]);
+    return;
+  }
+  const records = [
+    timeRecord("note", `Resumed ${who}, ${formatDuration(remainingMs(budget, now))} before the same deadline`, now, { runId: run.id, tokensUsed: run.tokensUsed }),
+  ];
+  if (!clock.marginSent && now >= marginCutoffMs(budget)) {
+    clock.marginSent = true;
+    records.push(timeRecord("note", `${MARGIN_NOTE} resumed inside it, ${formatDuration(remainingMs(budget, now))} before the deadline; its brief says so`, now, { runId: run.id }));
+  }
+  void writeBudgetRecords(run.id, budget, records);
+}
+
+/**
+ * Arm the run's one timer for the next thing its clock owes: a checkpoint and
+ * the margin while it works, the deadline always. Re-armed at every spawn, on
+ * a reattach, at boot and after each tick; a no-op for a run with no clock, a
+ * closed record or a deadline no longer enforced.
+ */
+function armBudgetClock(id: string): void {
+  const run = loadRuns().find((r) => r.id === id);
+  if (!run) return;
+  const clock = clockFor(run);
+  if (!clock) return;
+  if (clock.timer) clearTimeout(clock.timer);
+  clock.timer = null;
+  if (clock.closed || !clock.enforced || clock.wrapping) return;
+  const now = Date.now();
+  let next = Date.parse(clock.budget.deadline);
+  if (run.status === "running" && live.has(id)) {
+    next = Math.min(next, clock.lastCheckpointAt + checkpointEveryMs());
+    if (!clock.marginSent) next = Math.min(next, marginCutoffMs(clock.budget));
+  }
+  scheduleBudgetTick(id, clock, next - now);
+}
+
+function scheduleBudgetTick(id: string, clock: BudgetClock, delayMs: number): void {
+  if (clock.timer) clearTimeout(clock.timer);
+  const timer = setTimeout(() => {
+    if (clock.timer === timer) clock.timer = null;
+    budgetTick(id);
+  }, Math.min(MAX_TIMER_MS, Math.max(0, delayMs)));
+  timer.unref();
+  clock.timer = timer;
+}
+
+/** What the clock owes now: the deadline's stop, the margin's message, a checkpoint — then the next tick. */
+function budgetTick(id: string): void {
+  const run = loadRuns().find((r) => r.id === id);
+  const clock = budgetClocks().get(id);
+  if (!clock) return;
+  if (!run || !run.timeBudget) {
+    forgetClock(id);
+    return;
+  }
+  if (clock.closed || !clock.enforced || clock.wrapping) return;
+  const now = Date.now();
+  const state = live.get(id);
+  const working = run.status === "running" && state !== undefined;
+  if (remainingMs(clock.budget, now) === 0) {
+    if (working) {
+      void wrapUpRun(id, "time").catch((err: unknown) => {
+        console.error(`[coding-agent] ${id}: could not stop at its deadline:`, err instanceof Error ? err.message : err);
+      });
+      return;
+    }
+    // "running" on its record with no process: between two spawns (another
+    // account, another attempt). Looked at again in a moment.
+    if (run.status === "running") {
+      scheduleBudgetTick(id, clock, BUDGET_RETRY_MS);
+      return;
+    }
+    // Not working — paused, given up, or settled with its notice still held
+    // (a delivery pipeline going on): the deadline closes the record.
+    if (run.status === "paused" || run.status === "gave_up") {
+      pushProgress(run, "Time budget: the deadline passed while the run waited; Resume carries it on past the deadline.");
+      persist();
+    }
+    closeBudgetRecord(run, clock, idleStopReason(run, clock), now);
+    return;
+  }
+  if (working) {
+    if (!clock.marginSent && now >= marginCutoffMs(clock.budget)) sendMarginNote(run, state, clock, now);
+    if (now - clock.lastCheckpointAt >= checkpointEveryMs()) {
+      clock.lastCheckpointAt = now;
+      void writeBudgetRecords(run.id, clock.budget, [
+        timeRecord("note", `${CHECKPOINT_NOTE} ${formatDuration(elapsedMs(clock.budget, now))} used, ${formatDuration(remainingMs(clock.budget, now))} left`, now, { runId: run.id, tokensUsed: run.tokensUsed }),
+      ]);
+    }
+  }
+  armBudgetClock(id);
+}
+
+/**
+ * Put a message on the run's record and hand it over the quickest way it has
+ * (its inbox after the tool call it is in, else its stdin, else its next
+ * start) — the road the owner's own messages take. Null when the queue was
+ * full: the clock goes on regardless.
+ */
+function tellRun(run: CodingRun, state: LiveRun | undefined, text: string): RunMessageDelivery | null {
+  try {
+    run.messages = appendRunMessage(run.messages, normalizeRunMessage(text), Date.now());
+  } catch {
+    return null;
+  }
+  persist(true);
+  return state ? deliverRunMessages(run, state) : "next_start";
+}
+
+/** The margin has begun: tell the run to commit and finish the step it is on. */
+function sendMarginNote(run: CodingRun, state: LiveRun, clock: BudgetClock, now: number): void {
+  clock.marginSent = true;
+  const zone = budgetZone();
+  const left = formatDuration(remainingMs(clock.budget, now));
+  const delivery = tellRun(
+    run,
+    state,
+    `Time budget: the safety margin has begun — ${left} left before the deadline at ${formatLocalDeadline(clock.budget.deadline, zone)} (${zone}). Start nothing new. Commit your work now, finish only the step you are on, and write your report. At the deadline ClawBox stops this run and commits whatever is left in the folder.`,
+  );
+  pushProgress(run, `Time budget: the safety margin began, ${left} before the deadline — told the run to commit and finish its current step.`);
+  persist();
+  void writeBudgetRecords(run.id, clock.budget, [
+    timeRecord("note", `${MARGIN_NOTE} began with ${left} left; the run was ${delivery === null ? "not told (its message queue was full)" : "told to commit and finish its current step"}`, now, { runId: run.id, tokensUsed: run.tokensUsed }),
+  ]);
+}
+
+/** Why a run the deadline found NOT working stopped: the quota it waited on, the owner's pause, giving up, its own settle. */
+function idleStopReason(run: CodingRun, clock: BudgetClock): TimeStopReason {
+  if (run.status === "paused") return run.pauseReason?.kind === "allowance" ? "quota" : "stopped";
+  if (run.status === "gave_up") return "failed";
+  return settledStopReason(run, clock);
+}
+
+/** Why a settled run stopped: done, the box's own stop (deadline, spend ceiling, token limit), the owner, a failure. */
+function settledStopReason(run: CodingRun, clock: BudgetClock): TimeStopReason {
+  if (run.status === "completed") return "done";
+  if (run.status === "stopped") return clock.stopReason ?? "stopped";
+  if (run.status === "paused" || run.status === "gave_up") return idleStopReason(run, clock);
+  return "failed";
+}
+
+/**
+ * Close the record: the finish line (with the time the run worked) and the
+ * stop line (with why), once — and the budget's summary appended to
+ * report.md. The clock goes with it unless the run is going on past its
+ * deadline (resumeBudget keeps it, to note that end too).
+ */
+function closeBudgetRecord(run: CodingRun, clock: BudgetClock, reason: TimeStopReason, at: number): void {
+  if (clock.closed) return;
+  clock.closed = true;
+  if (clock.timer) clearTimeout(clock.timer);
+  clock.timer = null;
+  const budget = clock.budget;
+  const worked = Math.max(0, (run.completedAt ?? at) - run.startedAt);
+  const records = [
+    timeRecord("finish", `The run ended ${run.status === "gave_up" ? "giving up" : run.status}`, at, { runId: run.id, actualMs: worked, tokensUsed: run.tokensUsed }),
+    timeRecord("stop", STOP_WORDS[reason], at, { runId: run.id, reason, tokensUsed: run.tokensUsed }),
+  ];
+  const zone = budgetZone();
+  void writeBudgetRecords(run.id, budget, records).then((summary) => {
+    appendBudgetReport(run.id, budgetReportSection(summary ?? summarizeTimeRecords(budget, records, at), zone));
+  });
+  budgetClocks().delete(run.id);
+}
+
+/**
+ * The run's time record at a settle point — where its finish notice is sent
+ * (finishRun, announceGatedRun, announcePipeline), a pause, a stop that never
+ * reached finishRun, a spawn that failed. Paused or given up: noted, and the
+ * clock keeps the deadline. Settled: closed. A run going on past its deadline
+ * gets its end noted. A no-op without a budget.
+ */
+function settleBudgetRecord(run: CodingRun): void {
+  const clock = clockFor(run);
+  if (!clock) return;
+  const now = Date.now();
+  const over = run.status === "completed" || run.status === "stopped" || run.status === "failed";
+  if (!clock.enforced) {
+    if (run.status !== "running" && clock.noted !== run.status) {
+      clock.noted = run.status;
+      void writeBudgetRecords(run.id, clock.budget, [
+        timeRecord("note", `After the deadline, the run ended ${run.status === "gave_up" ? "giving up" : run.status}`, now, { runId: run.id, tokensUsed: run.tokensUsed }),
+      ]);
+    }
+    if (over) forgetClock(run.id);
+    return;
+  }
+  if (clock.closed) {
+    if (over) forgetClock(run.id);
+    return;
+  }
+  if (run.status === "paused" || run.status === "gave_up") {
+    if (clock.noted !== run.status) {
+      clock.noted = run.status;
+      clock.wrapping = false;
+      void writeBudgetRecords(run.id, clock.budget, [timeRecord("note", idleNote(run, clock.budget, now), now, { runId: run.id, tokensUsed: run.tokensUsed })]);
+    }
+    armBudgetClock(run.id);
+    return;
+  }
+  if (!over) return;
+  closeBudgetRecord(run, clock, settledStopReason(run, clock), now);
+}
+
+/** The note for a run that stopped working but may go on: why, and that the deadline stands. */
+function idleNote(run: CodingRun, budget: TimeBudget, now: number): string {
+  const left = `${formatDuration(remainingMs(budget, now))} before the deadline`;
+  if (run.status === "gave_up") return `Gave up — its deliverable is missing; Resume carries it on, ${left}`;
+  const reason = run.pauseReason;
+  if (reason?.kind === "allowance") {
+    const reset = reason.resetsAt ? Date.parse(reason.resetsAt) : NaN;
+    const when = Number.isFinite(reset) ? `it resets ${formatLocalDeadline(reset, budgetZone())}` : "it says no reset time";
+    const after = Number.isFinite(reset) && reset >= Date.parse(budget.deadline) ? ", after the deadline" : "";
+    return `Paused by the provider's usage limit (${reason.meter}); ${when}${after}; ${left}`;
+  }
+  return `Paused; the deadline still stands, ${left}`;
+}
+
+/** The budget's part of report.md: what it was, what was used, why it stopped, and how the estimates held. */
+export function budgetReportSection(summary: TimeRecordSummary, tz: string): string {
+  const zone = safeTimeZone(tz);
+  const b = summary.budget;
+  const left = summary.leftMs === null
+    ? ""
+    : summary.leftMs >= 0 ? `, ${formatDuration(summary.leftMs)} before the deadline` : `, ${formatDuration(-summary.leftMs)} past the deadline`;
+  return [
+    "## Time budget",
+    "",
+    `- Budget: ${b.label}, until ${formatLocalDeadline(b.deadline, zone)} (${zone})`,
+    `- Used: ${formatDuration(summary.usedMs)}${left}`,
+    `- Stopped: ${summary.stopReason ? `${STOP_WORDS[summary.stopReason]} (${summary.stopReason})` : "not yet"}`,
+    `- ${estimateAccuracyLine(summary)}`,
+    ...(summary.skipped.length ? [`- Skipped: ${summary.skipped.join("; ")}`] : []),
+  ].join("\n");
+}
+
+/**
+ * Add the budget's section to the run's report.md — after the run's own words
+ * (finishRun filed them first), or as the whole file when it left none. The
+ * evidence folder is one the run writes into, so nothing there is followed
+ * through a link or written as anything but a regular file. Never throws.
+ */
+function appendBudgetReport(runId: string, section: string): void {
+  try {
+    const dir = ensureArtifactsDir(runId);
+    if (!fs.lstatSync(dir).isDirectory()) return;
+    const flags = fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK;
+    const fd = fs.openSync(path.join(dir, REPORT_FILE), flags, 0o644);
+    try {
+      const st = fs.fstatSync(fd);
+      if (!st.isFile() || st.size > MAX_REPORT_APPEND_BYTES) return;
+      fs.writeSync(fd, `${st.size > 0 ? "\n" : ""}${section}\n`);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (err) {
+    console.warn(`[coding-agent] ${runId}: could not add the time budget to ${REPORT_FILE}:`, err instanceof Error ? err.message : err);
+  }
+}
+
+/** What the run is told when it is being ended for `reason`. */
+function wrapUpMessage(run: CodingRun, reason: TimeStopReason): string {
+  const tail = "Stop now and start nothing new: ClawBox ends this run after the step you are on and commits whatever is in the folder.";
+  if (reason === "time") {
+    return run.timeBudget
+      ? `Time budget: the deadline (${formatLocalDeadline(run.timeBudget.deadline, budgetZone())}) is here. ${tail}`
+      : `Time is up: the time budget for this work has ended. ${tail}`;
+  }
+  if (reason === "cost") return `Time budget: its spend ceiling is reached. ${tail}`;
+  return `ClawBox is ending this run now: ${STOP_WORDS[reason]}. ${tail}`;
+}
+
+/** What the run's record says about why the box ended it. */
+function wrapUpError(run: CodingRun, reason: TimeStopReason): string {
+  const keep = "Its work so far is kept; continue from this run to carry on.";
+  if (reason === "time") {
+    return run.timeBudget
+      ? `Stopped at its time budget's deadline (${formatLocalDeadline(run.timeBudget.deadline, budgetZone())}). ${keep}`
+      : `Stopped: the time budget for this work ended. ${keep}`;
+  }
+  if (reason === "cost") return `Stopped at its time budget's spend ceiling. ${keep}`;
+  if (reason === "token_cap") return `Stopped at the token limit. ${keep}`;
+  if (reason === "quota") return `Stopped: the provider's usage limit. ${keep}`;
+  return `Stopped: ${STOP_WORDS[reason]}. ${keep}`;
+}
+
+/** Until no file write the run asked for is still waiting for its result — or `maxMs`, or the process is gone. */
+async function untilNoWriteUnderWay(id: string, state: LiveRun, maxMs: number): Promise<void> {
+  const until = Date.now() + maxMs;
+  while (state.pendingFiles.size > 0 && live.get(id) === state && Date.now() < until) {
+    await wait(WRAP_UP_POLL_MS);
+  }
+}
+
+/**
+ * End a run cleanly because its time (or spend) is up: tell it why, let a
+ * file write that is under way land, then stop it the way the owner's Stop
+ * does — the settle commits what is in the folder (recordRunWork), so nothing
+ * is cut off mid-write and the work is kept. `reason` is recorded as the stop
+ * on a budgeted run's time record and worded into the run's error; the run is
+ * left resumable, like a run stopped at its token limit.
+ *
+ * The deadline's own stop, and what a coding TEAM calls at its deadline for
+ * the runs it started (they have no budget of their own). A paused run is
+ * closed out (stopRun); anything not running is answered as it is; null for
+ * an id that is no run.
+ */
+export async function wrapUpRun(id: string, reason: TimeStopReason): Promise<CodingRun | null> {
+  const run = loadRuns().find((r) => r.id === id);
+  if (!run) return null;
+  const clock = clockFor(run);
+  if (run.status === "paused") {
+    if (clock && !clock.closed) clock.stopReason = reason;
+    stopRun(id);
+    run.error = wrapUpError(run, reason);
+    persist(true);
+    return cloneRun(run);
+  }
+  if (run.status !== "running") return cloneRun(run);
+  const state = live.get(id);
+  if (!state) {
+    if (clock && !clock.closed) clock.stopReason = reason;
+    stopRun(id);
+    run.error = wrapUpError(run, reason);
+    persist(true);
+    return cloneRun(run);
+  }
+  // Already on its way out by the owner's Stop or a ceiling: that stop stands.
+  if (state.endRequested === "stop") return cloneRun(run);
+  if (clock) {
+    if (clock.wrapping) return cloneRun(run);
+    clock.wrapping = true;
+    if (clock.timer) clearTimeout(clock.timer);
+    clock.timer = null;
+  }
+  tellRun(run, state, wrapUpMessage(run, reason));
+  pushProgress(run, `${reason === "time" ? "Time is up" : `Ending the run: ${STOP_WORDS[reason]}`} — stopping after the step under way.`);
+  persist();
+  await untilNoWriteUnderWay(id, state, WRAP_UP_WRITE_WAIT_MS);
+  // It may have finished, or been stopped, while the write landed. A pause
+  // asked for meanwhile is overridden: the time is up either way.
+  // (Read afresh: the awaited wait is where the owner or a ceiling stops it.)
+  const endedMeanwhile = state.endRequested as LiveRun["endRequested"];
+  if (run.status !== "running" || live.get(id) !== state || endedMeanwhile === "stop") {
+    if (clock) clock.wrapping = false;
+    return cloneRun(run);
+  }
+  if (clock && !clock.closed) clock.stopReason = reason;
+  run.error = wrapUpError(run, reason);
+  run.resumable = true;
+  requestEnd(run, state, "stop");
+  return cloneRun(run);
+}
+
+/**
+ * After a restart (reconcileAfterRestart): every budgeted run's clock again,
+ * from the deadline on its record. A run reattached already has its clock
+ * (reattach); a paused or given-up one, or a settled one whose notice is still
+ * held, waits for its deadline; one that settled while no server was there to
+ * close its record is closed now, as of when it ended.
+ */
+function reviveBudgetClocks(list: CodingRun[]): void {
+  for (const run of list) {
+    if (!run.timeBudget || run.team || live.has(run.id)) continue;
+    if (run.status === "queued" || run.status === "draft" || run.status === "running") continue;
+    const clock = clockFor(run);
+    if (!clock) continue;
+    if (clock.closed || !clock.enforced) {
+      if (run.status !== "paused" && run.status !== "gave_up") forgetClock(run.id);
+      continue;
+    }
+    if (run.status === "paused" || run.status === "gave_up" || pipelineOwnsRun(run) || deliverableGateApplies(run)) {
+      armBudgetClock(run.id);
+      continue;
+    }
+    // A record from before time records existed has nothing to close.
+    if (clock.hadRecord) closeBudgetRecord(run, clock, settledStopReason(run, clock), run.completedAt ?? Date.now());
+    else forgetClock(run.id);
+  }
+}
+
+/** Every clock stopped and forgotten — the test reset's, so no timer outlives the suite that armed it. */
+function clearBudgetClocks(): void {
+  for (const clock of store.budgetClocks?.values() ?? []) {
+    if (clock.timer) clearTimeout(clock.timer);
+  }
+  store.budgetClocks?.clear();
+}
+
+/** Test hook: how often a checkpoint is due (null: BUDGET_CHECKPOINT_MS). */
+export function _setBudgetCheckpointMsForTests(ms: number | null): void {
+  store.budgetCheckpointMs = ms;
+}
+
+function checkpointEveryMs(): number {
+  const ms = store.budgetCheckpointMs;
+  return typeof ms === "number" && ms > 0 ? ms : BUDGET_CHECKPOINT_MS;
 }
 
 /**
@@ -13316,6 +14174,14 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
     // continuation text and the pull-request step both depend on which of the two
     // resumable endings this run is coming back from.
     const gaveUp = run.status === "gave_up";
+    // The SAME deadline, read back off the time record: a budget the resume
+    // finds spent is noted and not enforced (the owner chose to go on past it),
+    // one still ahead is enforced again. Before the flip below, which forgets
+    // why the run was paused.
+    if (run.timeBudget) {
+      await refreshBudgetZone();
+      resumeBudget(run, automatic);
+    }
     // The pause gap is not working time: shift the start forward by it, so the
     // elapsed clock and the ETA speak of effort, not of the night in between.
     if (run.completedAt !== null) run.startedAt += Math.max(0, Date.now() - run.completedAt);
@@ -13573,7 +14439,7 @@ async function queueRun(input: StartRunInput): Promise<CodingRun> {
   }
   const settings = await applyProviderChoice(await readRunSettings(), input, inherited);
   // Decided now, the way startRun decides it: what the queued start carries is final.
-  const timeBudget = startBudget(input.timeBudget, continued);
+  const timeBudget = input.team ? null : startBudget(input.timeBudget, continued);
   const run = newRunRecord({ task, directory, projectId, source: input.source, status: "queued", settings, deliverable: requireDeliverable(input), timeBudget });
   // Claimed now, so the failure is not offered a second Fix CI while this one waits.
   if (fixing?.ci) fixing.ci = { ...fixing.ci, fixRunId: run.id };
@@ -13632,6 +14498,20 @@ function startQueuedRun(id: string): Promise<CodingRun> {
     const run = loadRuns().find((r) => r.id === id);
     if (!run || run.status !== "queued") throw new CodingAgentError("invalid", "That queued run is no longer waiting: it was canceled or has already started.");
     const start = run.queued?.start;
+    // A deadline that passed while it waited: the work it was queued for has
+    // no time left, so it does not start at all — a harness spawned only to be
+    // stopped at once would cost the owner and do nothing. Settled failed by
+    // the queue (failQueuedRun) with this reason; its record says the same.
+    const queuedBudget = run.team ? null : readTimeBudget(start?.timeBudget ?? run.timeBudget);
+    if (queuedBudget && remainingMs(queuedBudget, Date.now()) === 0) {
+      const now = Date.now();
+      const deadline = formatLocalDeadline(queuedBudget.deadline, budgetZone());
+      void writeBudgetRecords(run.id, queuedBudget, [
+        timeRecord("budget", `${BUDGET_SOURCE_WORDS[queuedBudget.source]}: ${describeBudget(queuedBudget, now, budgetZone())}`, now, { runId: run.id }),
+        timeRecord("stop", `${STOP_WORDS.time} while the run waited in the queue`, now, { runId: run.id, reason: "time" }),
+      ]);
+      throw new CodingAgentError("invalid", `Its time budget ended while it waited in the queue (the deadline was ${deadline}). Start it again with a new budget.`);
+    }
     // Straight to the draft's own start, not through startDraftRun: this IS
     // the transition for the id, and asking for it again would wait on itself.
     if (!start || start.kind === "draft") return startDraftRunOnce(id);
@@ -14029,6 +14909,8 @@ function spawnOrSettle(
     if (isPrPending(run.pr)) {
       settlePr(run, "failed", `The run could not start, so no pull request was opened. Its branch ${run.pr?.branch ?? runBranchName(run.id)} is checked out.`);
     }
+    // Nor does its time record close anywhere else: it stopped, failed.
+    settleBudgetRecord(run);
     persist(true);
     wakeWaiters(run.id);
     console.error(`[coding-agent] ${run.id} failed to spawn:`, err instanceof Error ? err.message : err);
@@ -14074,7 +14956,11 @@ export function _resetCodingAgentStateForTests(): Promise<void> {
   store.queuePumpAgain = false;
   // `anthropicResume` is left as it is: a pass still in flight must stay the
   // one the next pass waits for.
-  return drainForTests(killed, SETTLE_DRAIN_BUDGET_MS);
+  // The budget clocks now, and again once the drain is done: a run it settles
+  // can arm one (a pause keeps its deadline), and no timer may outlive the suite.
+  clearBudgetClocks();
+  store.budgetCheckpointMs = null;
+  return drainForTests(killed, SETTLE_DRAIN_BUDGET_MS).finally(clearBudgetClocks);
 }
 
 /**
