@@ -144,6 +144,8 @@ describe("contradiction pass: pieces", () => {
     expect([...m.keys()]).toEqual([2]);
     expect(m.get(2)?.why).toContain("[REDACTED:EMAIL]");
     expect(() => parseJudgeResponse("no json", 2)).toThrow(JudgeParseError);
+    // Only out-of-range indices (a one-pair batch numbered from 1) is no usable verdict.
+    expect(() => parseJudgeResponse('[{"i":1,"verdict":"contradiction"}]', 1)).toThrow(JudgeParseError);
     const { user } = buildJudgePrompt([{ a: "x", b: "y" }]);
     expect(readJudgeItems(user)).toEqual([{ i: 0, a: "x", b: "y" }]);
   });

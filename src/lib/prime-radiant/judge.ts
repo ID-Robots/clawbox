@@ -178,8 +178,9 @@ export function parseJudgeResponse(text: string, count: number): Map<number, Jud
     const i = readIndex(r);
     const verdict = readVerdict(r.verdict);
     if (i === null || verdict === null) continue;
+    if (i < 0 || i >= count) continue;
     readable += 1;
-    if (i < 0 || i >= count || conflicted.has(i)) continue;
+    if (conflicted.has(i)) continue;
     const prior = out.get(i);
     if (prior) {
       if (prior.verdict !== verdict) {
