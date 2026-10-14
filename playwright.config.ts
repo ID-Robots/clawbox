@@ -65,10 +65,12 @@ export default defineConfig({
     // A second copy of the same build, for prime-radiant-smoke.spec.ts alone:
     // test mode with the deterministic model, every root in a temp directory.
     // Playwright starts web servers one after the other, so the build above
-    // has finished before this one runs. See e2e/helpers/prime-radiant-server.ts.
+    // has finished before this one runs; when the main server is reused and
+    // never built, this command builds itself. See
+    // e2e/helpers/prime-radiant-server.ts.
     command: primeRadiantServerCommand(),
     url: PRIME_RADIANT_BASE_URL,
     reuseExistingServer: !process.env.CI,
-    timeout: 120_000,
+    timeout: 600_000,
   }],
 });

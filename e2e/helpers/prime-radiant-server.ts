@@ -36,7 +36,7 @@ export const PRIME_RADIANT_E2E_ROOT = path.join(os.tmpdir(), `clawbox-e2e-prime-
 export const PRIME_RADIANT_E2E_DIR = path.join(PRIME_RADIANT_E2E_ROOT, "prime-radiant");
 export const PRIME_RADIANT_E2E_SECRET = path.join(PRIME_RADIANT_E2E_ROOT, "data", ".session-secret");
 
-/** The shell command `playwright.config.ts` starts it with (after the main server's build). */
+/** The shell command `playwright.config.ts` starts it with (after the main server's build, or its own when there is none). */
 export function primeRadiantServerCommand(): string {
   const root = PRIME_RADIANT_E2E_ROOT;
   const q = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
@@ -55,6 +55,10 @@ export function primeRadiantServerCommand(): string {
     "NODE_ENV=production",
   ].join(" ");
   return [
+    // The main server's command builds first, and Playwright starts web
+    // servers one after the other — but a local run that REUSES a main server
+    // already listening runs no build, so build here when there is none.
+    "{ test -f .next/standalone/server.js || bun run build; }",
     `rm -rf ${q(root)}`,
     `mkdir -p ${q(path.join(root, "data"))} ${q(path.join(root, "home"))} ${q(path.join(root, "files"))}`,
     `printf 'CLAWBOX_EDITION=hermes\\n' > ${q(path.join(root, "edition.env"))}`,

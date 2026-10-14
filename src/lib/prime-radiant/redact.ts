@@ -272,14 +272,16 @@ export interface RedactPathOptions extends RedactOptions {
  * Phone shapes as they appear in a FILE NAME. The prose patterns refuse a
  * number glued to a word (`v555-123-4567` is not a phone in a sentence), but
  * a name joins its parts with `_`, `-` and `.` — `555-123-4567-report.md`,
- * `call_+1 555 010 0199.txt` — so here only another digit is a boundary.
+ * `call_+1 555 010 0199.txt`, and `call_555_010_0199.md` once an upload's
+ * name is rebuilt — so here `_` is a separator too and only another digit
+ * is a boundary.
  * A bare digit run stays: in a name it is far more often a timestamp or an
  * invoice number than a phone.
  */
 const FILENAME_PHONE_RES: RegExp[] = [
-  /(?<![\d+])\+\d{1,3}(?:[ .-]?\(?\d{1,4}\)?){2,5}(?!\d)/g,
-  /(?<!\d)\(\d{3}\) ?\d{3}[-. ]\d{4}(?!\d)/g,
-  /(?<!\d)\d{3}[-. ]\d{3}[-. ]\d{4}(?!\d)/g,
+  /(?<![\d+])\+\d{1,3}(?:[ ._-]?\(?\d{1,4}\)?){2,5}(?!\d)/g,
+  /(?<!\d)\(\d{3}\)[ _]?\d{3}[-. _]\d{4}(?!\d)/g,
+  /(?<!\d)\d{3}[-. _]\d{3}[-. _]\d{4}(?!\d)/g,
 ];
 
 /**
