@@ -743,6 +743,34 @@ describe("spare time, used: the extra work after an early finish", () => {
     expect(spawns()).toBe(2);
   });
 
+  // Handed a deadline already gone, a run goes on without a time limit — as one the owner resumes past its deadline does.
+  const pastDeadline = () => budget(-60_000, 2 * 60 * 60_000);
+
+  it("still gives a run carried on past its deadline another go at a missing deliverable: it has no time limit", async () => {
+    ready();
+    installRounds([
+      { files: ["index.html"], result: result("Built the page.") },
+      { files: ["dist/report.html"], result: result("Wrote the report.") },
+    ]);
+    makeProject("site");
+    const started = await lib.startRun({ task: "build the page", projectId: "site", source: "owner", deliverable: { kind: "paths", paths: ["dist/report.html"] }, timeBudget: pastDeadline() });
+    await vi.waitFor(() => { expect(spawns()).toBe(2); }, { timeout: 10_000 });
+    const run = await settled(started.id);
+    expect(run.status).toBe("completed");
+    expect(run.error ?? "").not.toMatch(/deadline has passed/);
+    expect(run.attempts).toHaveLength(2);
+    expect(notes(run.id).some((t) => /^Started after the deadline \(.+\); it runs without a time limit$/.test(t))).toBe(true);
+  });
+
+  it("still gives a run carried on past its deadline its review pass", async () => {
+    ready({ coding_agent_review_pass: true });
+    installRounds([{ files: ["index.html"], result: result("Built the page.") }]);
+    makeProject("site");
+    const started = await lib.startRun({ task: "build the page", projectId: "site", source: "owner", timeBudget: pastDeadline() });
+    await vi.waitFor(() => { expect(lib.listRuns().filter((r) => r.reviewOf === started.id)).toHaveLength(1); }, { timeout: 15_000 });
+    expect(lib.getRun(started.id)?.progress.some((l) => l.startsWith("Time budget: no review pass"))).toBe(false);
+  });
+
   it("keeps the extra work's state on the run record, so a restarted server reads it back", async () => {
     ready();
     installRounds([

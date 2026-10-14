@@ -136,7 +136,7 @@ import {
   nextItemAllowed,
   type EstimateCalibration,
 } from "@/lib/coding-time-plan";
-import { appendTimeRecord, currentEstimateCalibration, loadTimeRecords } from "@/lib/coding-time-record";
+import { appendTimeRecord, estimateCalibrationNow, loadTimeRecords } from "@/lib/coding-time-record";
 import { readOsTimeZone } from "@/lib/timezone";
 import {
   allComplete,
@@ -1405,7 +1405,7 @@ async function runTeamWork(team: LiveTeam, source: CodingRunSource): Promise<voi
   const tz = budget ? await readOsTimeZone().catch(() => "UTC") : "UTC";
   // How past estimates on this box held: the planner is told, and its
   // estimates are scaled by it before the plan is fitted to the time.
-  const calibration = budget ? currentEstimateCalibration() : null;
+  const calibration = budget ? await estimateCalibrationNow() : null;
   const brief = () => plannerBrief(budget, Date.now(), tz, calibration);
   const timed = { timed: budget !== null };
   // Its clock, from the planner on: the deadline holds the planning too.

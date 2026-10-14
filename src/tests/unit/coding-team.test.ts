@@ -2588,6 +2588,8 @@ describe("a second team: queued, not refused", () => {
     expect(board.loadBoard(third.id)).not.toHaveProperty("timeBudget");
     team.cancelQueuedTeam(second.id);
     team.cancelQueuedTeam(third.id);
+    // A budgeted team reads how past estimates held (a scan of the evidence folders) before its planner starts.
+    await vi.waitFor(() => { expect(runs.get("run-00000001")).toBeDefined(); });
     Object.assign(runs.get("run-00000001")!, { status: "completed", summary: "nope" });
     outcomes = [{ summary: "nope" }];
     release();

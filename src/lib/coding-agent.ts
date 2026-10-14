@@ -470,7 +470,7 @@ import {
   parseEstimateMinutes,
   type EstimateCalibration,
 } from "@/lib/coding-time-plan";
-import { appendTimeRecord, currentEstimateCalibration, loadTimeRecords, readTimeRecordSummary, type TimeRecordPayload } from "@/lib/coding-time-record";
+import { appendTimeRecord, currentEstimateCalibration, estimateCalibrationNow, loadTimeRecords, readTimeRecordSummary, type TimeRecordPayload } from "@/lib/coding-time-record";
 import { readOsTimeZone } from "@/lib/timezone";
 
 // ─── Tunables ────────────────────────────────────────────────────────────────
@@ -4941,7 +4941,7 @@ interface RunStore {
   queueRetry?: NodeJS.Timeout | null;
   /** Each budgeted run's deadline clock and its one timer — see BudgetClock. */
   budgetClocks?: Map<string, BudgetClock>;
-  /** The box's zone as last read, for the budget brief a synchronous spawn writes — see refreshBudgetZone. */
+  /** The box's zone as last read, for the budget brief a synchronous spawn writes — see refreshBudgetContext. */
   budgetZone?: string;
   /** Each budgeted run's time-record writes, one after another — see writeBudgetRecords. */
   budgetWrites?: Map<string, Promise<TimeRecordSummary | null>>;
@@ -5013,7 +5013,7 @@ export async function reconcileAfterRestart(): Promise<number> {
   let changed = false;
   // The zone a budgeted run's brief and record lines are worded in, before a
   // reattach or a settle below writes one.
-  if (list.some((r) => r.timeBudget)) await refreshBudgetZone();
+  if (list.some((r) => r.timeBudget)) await refreshBudgetContext();
   // Resolved once for the whole sweep rather than per run: a reattached run that
   // fails transiently may still take its one automatic retry, and that retry
   // needs the same two tools a fresh spawn does.
@@ -9400,7 +9400,7 @@ async function maybeStartReviewPass(finished: CodingRun): Promise<ReviewPassOutc
   // A budgeted run inside its safety margin starts nothing new: the margin is
   // for committing and the pull request, and a pass is a run of its own. Nor
   // does one whose spend ceiling is reached: the pass would spend past it.
-  const allowed = finished.timeBudget ? nextItemAllowed(finished.timeBudget, Date.now(), finished.tokensUsed) : null;
+  const allowed = finished.timeBudget && budgetGates(finished) ? nextItemAllowed(finished.timeBudget, Date.now(), finished.tokensUsed) : null;
   if (allowed && !allowed.ok) {
     pushProgress(finished, allowed.reason === "cost"
       ? "Time budget: no review pass — the budget's spend ceiling is reached."
@@ -9783,7 +9783,8 @@ async function startCompletionAttempt(
   }
   // Nor once a time budget is spent — its deadline gone, or its spend ceiling
   // reached: the run's own clock would only stop the attempt as it began.
-  const spent = run.timeBudget ? budgetStopReason(run.timeBudget, Date.now(), run.tokensUsed) : null;
+  // (A run the owner carried on past its deadline has no time limit: not this.)
+  const spent = run.timeBudget && budgetGates(run) ? budgetStopReason(run.timeBudget, Date.now(), run.tokensUsed) : null;
   if (spent) {
     const why = spent === "time" ? "The time budget's deadline has passed" : "The time budget's spend ceiling is reached";
     giveUp(run, `${missing} ${why}, so the box did not try again.`, run.attempts.length);
@@ -12767,9 +12768,10 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // Before the record is persisted, so the names and the two progress lines are
     // in the first thing the app reads rather than appearing a poll later.
     await prepareRunSecrets(run);
-    // The zone the budget brief names the deadline in — read here, on the async
-    // path, because the spawn that writes the brief is synchronous.
-    if (run.timeBudget) await refreshBudgetZone();
+    // The zone the budget brief names the deadline in, and the calibration it
+    // states — read here, on the async path, because the spawn that writes the
+    // brief is synchronous.
+    if (run.timeBudget) await refreshBudgetContext();
     // Read before the insert, never between it and the write: the insert and
     // persist are one synchronous step (see the runs store).
     const history = await getHistoryPolicy();
@@ -13474,12 +13476,21 @@ const MAX_REPORT_APPEND_BYTES = 1024 * 1024;
 const CHECKPOINT_NOTE = "Checkpoint:";
 const MARGIN_NOTE = "Safety margin:";
 const REPLAN_NOTE = "Re-plan:";
+/** How the note ends for a run that goes on past its deadline on purpose — started or resumed after it. */
+const NO_TIME_LIMIT_TAIL = "without a time limit";
 
 /** A budgeted run's clock: its deadline, its one timer, and what has been done against it. */
 interface BudgetClock {
   budget: TimeBudget;
   /** False once the run was resumed past its deadline: noted, never enforced. */
   enforced: boolean;
+  /**
+   * The run goes on past its deadline on purpose — started or resumed after
+   * it — so the deadline gates nothing it does any more (a completion
+   * attempt, a review pass). Not the same as a record the deadline closed:
+   * that run stays held to its spent budget.
+   */
+  carriesOn: boolean;
   timer: NodeJS.Timeout | null;
   /** When the last checkpoint (or the start) went into the record, ms. */
   lastCheckpointAt: number;
@@ -13533,9 +13544,14 @@ function budgetZone(): string {
   return safeTimeZone(store.budgetZone);
 }
 
-/** Read the box's zone again (the OS's, never a browser's), for the next brief a spawn writes. */
-async function refreshBudgetZone(): Promise<void> {
+/**
+ * Read the box's zone again (the OS's, never a browser's), and how past
+ * estimates on this box held (the calibration's scan, off the event loop),
+ * for the next brief a spawn writes and the estimate its run gives.
+ */
+async function refreshBudgetContext(): Promise<void> {
   store.budgetZone = await readOsTimeZone().catch(() => "UTC");
+  await estimateCalibrationNow();
 }
 
 /**
@@ -13585,6 +13601,7 @@ function clockFor(run: CodingRun): BudgetClock | null {
     // A stop on the record while the run still has work is a resume past the
     // deadline: the only resume a closed record can see (see resumeBudget).
     enforced: !closed,
+    carriesOn: records.some((r) => r.kind === "note" && r.text.endsWith(NO_TIME_LIMIT_TAIL)),
     timer: null,
     lastCheckpointAt: marks.length ? Math.max(...marks) : Date.now(),
     marginSent: records.some((r) => r.kind === "note" && r.text.startsWith(MARGIN_NOTE)),
@@ -13614,6 +13631,16 @@ function enforcedTokenCap(run: CodingRun): number | null {
   if (typeof cap !== "number") return null;
   const clock = clockFor(run);
   return clock && clock.enforced && !clock.closed ? cap : null;
+}
+
+/**
+ * Does the run's time budget still gate what starts next — a completion
+ * attempt, a review pass? Yes, spent or not, unless the owner carried the run
+ * on past its deadline (started or resumed after it): that run goes on
+ * without a time limit, so its deadline holds nothing back.
+ */
+function budgetGates(run: CodingRun): boolean {
+  return !clockFor(run)?.carriesOn;
 }
 
 /** Remember which stop the BOX made, for the record's stop line. A no-op without a budget. */
@@ -13768,6 +13795,7 @@ function beginBudget(run: CodingRun, fromQueue: boolean): void {
   const clock: BudgetClock = {
     budget,
     enforced: !spent,
+    carriesOn: spent,
     timer: null,
     lastCheckpointAt: now,
     marginSent: now >= marginCutoffMs(budget),
@@ -13789,7 +13817,7 @@ function beginBudget(run: CodingRun, fromQueue: boolean): void {
   if (spent) {
     records.push(
       timeRecord("stop", `${STOP_WORDS.time} before the run started`, now, { runId: run.id, reason: "time", tokensUsed: run.tokensUsed }),
-      timeRecord("note", `Started after the deadline (${formatLocalDeadline(budget.deadline, budgetZone())}); it runs without a time limit`, now, { runId: run.id }),
+      timeRecord("note", `Started after the deadline (${formatLocalDeadline(budget.deadline, budgetZone())}); it runs ${NO_TIME_LIMIT_TAIL}`, now, { runId: run.id }),
     );
   } else if (clock.marginSent) {
     records.push(timeRecord("note", `${MARGIN_NOTE} the run started inside it, ${formatDuration(remainingMs(budget, now))} before the deadline; its brief says so`, now, { runId: run.id }));
@@ -13816,11 +13844,12 @@ function resumeBudget(run: CodingRun, automatic: boolean): void {
   if (remainingMs(budget, now) === 0) {
     if (!clock.closed) closeBudgetRecord(run, clock, idleStopReason(run, clock), now);
     clock.enforced = false;
+    clock.carriesOn = true;
     // Kept, unlike a closed clock of a run that is over: its end is noted too.
     budgetClocks().set(run.id, clock);
     pushProgress(run, "Time budget: its deadline has passed, so the resumed run carries on without one.");
     void writeBudgetRecords(run.id, budget, [
-      timeRecord("note", `Resumed ${who} after the deadline (${formatLocalDeadline(budget.deadline, budgetZone())}); it carries on without a time limit`, now, { runId: run.id, tokensUsed: run.tokensUsed }),
+      timeRecord("note", `Resumed ${who} after the deadline (${formatLocalDeadline(budget.deadline, budgetZone())}); it carries on ${NO_TIME_LIMIT_TAIL}`, now, { runId: run.id, tokensUsed: run.tokensUsed }),
     ]);
     return;
   }
@@ -14626,7 +14655,7 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
     // one still ahead is enforced again. Before the flip below, which forgets
     // why the run was paused.
     if (run.timeBudget) {
-      await refreshBudgetZone();
+      await refreshBudgetContext();
       resumeBudget(run, automatic);
     }
     // The pause gap is not working time: shift the start forward by it, so the

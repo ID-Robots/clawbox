@@ -323,34 +323,51 @@ describe("calibration across this box's records", () => {
   it("reads the finished estimates of every run and team, and works out the factor from them", async () => {
     await finishedTeam("team-aaaaaaaa", [[10, 20], [10, 20]]);
     await finishedTeam("team-bbbbbbbb", [[20, 30]], 1.5);
-    const samples = lib.recentEstimateSamples();
+    const samples = (await lib.recentEstimateSamples());
     expect(samples).toHaveLength(3);
     // team-bbbbbbbb's 20 minutes were the planner's 13⅓ scaled ×1.5.
     expect(samples).toContainEqual({ estimateMs: (20 * MIN) / 1.5, actualMs: 30 * MIN });
-    expect(lib.currentEstimateCalibration(NOW)).toEqual({ factor: 2, samples: 3 });
+    expect((await lib.estimateCalibrationNow(NOW))).toEqual({ factor: 2, samples: 3 });
   });
 
   it("is null without enough finished estimates, and with no evidence folder at all", async () => {
-    expect(lib.recentEstimateSamples()).toEqual([]);
-    expect(lib.currentEstimateCalibration(NOW)).toBeNull();
+    expect((await lib.recentEstimateSamples())).toEqual([]);
+    expect((await lib.estimateCalibrationNow(NOW))).toBeNull();
     await finishedTeam("team-aaaaaaaa", [[10, 20]]);
     lib._resetCalibrationCacheForTests();
-    expect(lib.currentEstimateCalibration(NOW)).toBeNull();
+    expect(await lib.estimateCalibrationNow(NOW)).toBeNull();
   });
 
   it("is worked out once a minute, not at every ask", async () => {
-    expect(lib.currentEstimateCalibration(NOW)).toBeNull();
+    expect(await lib.estimateCalibrationNow(NOW)).toBeNull();
     await finishedTeam("team-aaaaaaaa", [[10, 20], [10, 20], [10, 20]]);
+    expect(await lib.estimateCalibrationNow(NOW + 30_000)).toBeNull();
     expect(lib.currentEstimateCalibration(NOW + 30_000)).toBeNull();
+    expect(await lib.estimateCalibrationNow(NOW + lib.CALIBRATION_TTL_MS)).toEqual({ factor: 2, samples: 3 });
     expect(lib.currentEstimateCalibration(NOW + lib.CALIBRATION_TTL_MS)).toEqual({ factor: 2, samples: 3 });
+  });
+
+  it("answers the synchronous ask from memory only, and scans in the background for the next one", async () => {
+    await finishedTeam("team-aaaaaaaa", [[10, 20], [10, 20], [10, 20]]);
+    // Nothing scanned yet: no answer, and no folder read on the spot.
+    expect(lib.currentEstimateCalibration(NOW)).toBeNull();
+    await vi.waitFor(() => { expect(lib.currentEstimateCalibration(NOW + 1)).toEqual({ factor: 2, samples: 3 }); });
+  });
+
+  it("scans once for asks that land together", async () => {
+    await finishedTeam("team-aaaaaaaa", [[10, 20], [10, 20], [10, 20]]);
+    const readdir = vi.spyOn(fs.promises, "readdir");
+    const answers = await Promise.all([lib.estimateCalibrationNow(NOW), lib.estimateCalibrationNow(NOW), lib.estimateCalibrationNow(NOW)]);
+    expect(answers).toEqual(Array(3).fill({ factor: 2, samples: 3 }));
+    expect(readdir).toHaveBeenCalledTimes(1);
   });
 
   it("reads a run's folder as a run's record: task lines a run planted there count for nothing", async () => {
     await finishedTeam("team-aaaaaaaa", [[10, 20], [10, 20], [10, 20]]);
     // A run's own folder — one the run can write — made to look like a team of ten tasks, each done in a tenth of its estimate.
     await finishedTeam(RUN_ID, Array.from({ length: 10 }, (): [number, number] => [10, 1]));
-    expect(lib.recentEstimateSamples()).toHaveLength(3);
-    expect(lib.currentEstimateCalibration(NOW)).toEqual({ factor: 2, samples: 3 });
+    expect((await lib.recentEstimateSamples())).toHaveLength(3);
+    expect((await lib.estimateCalibrationNow(NOW))).toEqual({ factor: 2, samples: 3 });
   });
 
   it("passes over what is not a record this box wrote: a link, a folder not named like a run or team, a record too large", async () => {
@@ -363,7 +380,7 @@ describe("calibration across this box's records", () => {
     // A record padded past the calibration's size bound.
     await finishedTeam("team-dddddddd", [[10, 30], [10, 30], [10, 30]]);
     fs.appendFileSync(path.join(evidence("team-dddddddd"), "time-record.json"), " ".repeat(lib.CALIBRATION_MAX_RECORD_BYTES));
-    expect(lib.recentEstimateSamples()).toHaveLength(3);
-    expect(lib.currentEstimateCalibration(NOW)).toEqual({ factor: 2, samples: 3 });
+    expect((await lib.recentEstimateSamples())).toHaveLength(3);
+    expect((await lib.estimateCalibrationNow(NOW))).toEqual({ factor: 2, samples: 3 });
   });
 });
