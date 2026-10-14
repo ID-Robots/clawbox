@@ -126,6 +126,12 @@ describe("the box-wide account on the card", () => {
     expect(swap.textContent).toContain(GERMAN["settings.anthropicAccounts.consumerGateway"]);
   });
 
+  it("says the chat switched when the gateway leads with the new account and another account's write is still owed", async () => {
+    current = view({ lastSwap: { ...view().lastSwap, consumers: { gateway: { status: "ok", code: "switched_partly", count: 3 } } } });
+    render(<AnthropicAccountsCard />);
+    expect((await screen.findByTestId("anthropic-accounts-swap-gateway")).textContent).toContain(GERMAN["settings.anthropicAccounts.outcomeSwitched"]);
+  });
+
   it('turns "return to the first account" on through the route', async () => {
     render(<AnthropicAccountsCard />);
     const toggle = (await screen.findByTestId("anthropic-accounts-return-to-primary")).querySelector("input") as HTMLInputElement;

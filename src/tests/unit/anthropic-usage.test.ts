@@ -38,8 +38,13 @@ describe("reading the windows", () => {
     })).toEqual({ exhausted: true, resetsAt: at("2026-10-20T00:00:00Z"), kind: "weekly" });
   });
 
+  it("counts a window a few points short of full as spent — the request that would cross it is refused before it reads 100", () => {
+    expect(parseAnthropicUsage({ five_hour: { utilization: 96, resets_at: "2026-10-14T18:10:00Z" } }))
+      .toEqual({ exhausted: true, resetsAt: at("2026-10-14T18:10:00Z"), kind: "session" });
+  });
+
   it("is no limit when every window has room, whatever else the answer holds", () => {
-    expect(parseAnthropicUsage({ five_hour: { utilization: 99, resets_at: null }, seven_day: { utilization: 20 }, extra_usage: { utilization: 100 } }))
+    expect(parseAnthropicUsage({ five_hour: { utilization: 80, resets_at: null }, seven_day: { utilization: 20 }, extra_usage: { utilization: 100 } }))
       .toEqual({ exhausted: false, resetsAt: null, kind: "session" });
     expect(parseAnthropicUsage(null)).toEqual({ exhausted: false, resetsAt: null, kind: "session" });
   });

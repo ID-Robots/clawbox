@@ -55,6 +55,11 @@ vi.mock("@/lib/openclaw-config", async (importOriginal) => ({
   readConfigStrict: vi.fn(async () => h.config),
   restartGateway: vi.fn(async () => { h.restarts += 1; }),
   spawnOpenclawCli: vi.fn(async (args: string[], options: { stdinData?: string } = {}) => fakeCli(args, options.stdinData)),
+  // The box's own resolver (pinned in its suite), over this test's config.
+  openclawSkillsAgentArgs: vi.fn(async () => {
+    const entries = (h.config.agents as { entries?: Record<string, unknown> } | undefined)?.entries;
+    return entries && Object.keys(entries).length > 1 ? ["--agent", "main"] : [];
+  }),
 }));
 
 const H = 3_600_000;
@@ -96,8 +101,11 @@ const storedOrder = (): string[] | undefined => ((readCell("auth_profile_state")
  * profile and every order entry naming it; `order set` refuses an id the
  * store does not hold and stores the order beside the credentials.
  */
-function fakeCli(args: string[], stdin: string | undefined): string {
-  h.cli.push([...args]);
+function fakeCli(argv: string[], stdin: string | undefined): string {
+  h.cli.push([...argv]);
+  // `--agent <id>` is an option of every `models auth` verb, not an operand.
+  const at = argv.indexOf("--agent");
+  const args = at >= 0 ? [...argv.slice(0, at), ...argv.slice(at + 2)] : argv;
   const [group, sub, verb, ...rest] = args;
   if (group !== "models" || sub !== "auth") throw new Error(`unexpected CLI call: ${args.join(" ")}`);
   const flag = (name: string) => {
@@ -281,10 +289,13 @@ describe("the chat on the box's Claude accounts (TASK-1260, 2026-10-14)", () => 
     usage = (token) => token.includes("work")
       ? { five_hour: { utilization: 100, resets_at: new Date(resetsAt).toISOString() }, seven_day: { utilization: 40, resets_at: null } }
       : { five_hour: { utilization: 5, resets_at: null }, seven_day: { utilization: 10, resets_at: null } };
+    // Core cools the profile down for 30 s only (the first rate limit after
+    // a success), and the box's next look comes 45 s later: the window is
+    // over, the failure and its reason are still on record until a success.
     writeCell("auth_profile_state", {
       version: 1,
       usageStats: {
-        [`anthropic:clawbox-${work.id}`]: { errorCount: 1, failureCounts: { rate_limit: 1 }, lastFailureAt: Date.now() - 1_000, cooldownUntil: Date.now() + 30_000, cooldownReason: "rate_limit", cooldownModel: "claude-opus-5-5" },
+        [`anthropic:clawbox-${work.id}`]: { errorCount: 1, failureCounts: { rate_limit: 1 }, lastFailureAt: Date.now() - 45_000, cooldownUntil: Date.now() - 15_000, cooldownReason: "rate_limit", cooldownModel: "claude-opus-5-5" },
       },
     });
 
@@ -301,5 +312,15 @@ describe("the chat on the box's Claude accounts (TASK-1260, 2026-10-14)", () => 
     // The gateway's order follows the pool: the limited account last of the pool's.
     expect(storedOrder()).toEqual([`anthropic:clawbox-${personal.id}`, `anthropic:clawbox-${work.id}`, "anthropic:default"]);
     expect(h.restarts).toBe(0);
+  });
+
+  it("names the agent on every core verb when the box has more than one — the CLI refuses a mutation without it there", async () => {
+    h.config = { ...h.config, agents: { ...(h.config.agents as Record<string, unknown>), entries: { main: {}, research: {} } } };
+    gw.startGatewaySwap();
+    await twoClaudeAccounts();
+    await swap.whenSwapsSettled();
+    await gw.keepGatewayMirror();
+    expect(h.cli.length).toBeGreaterThan(0);
+    for (const call of h.cli) expect(call.slice(-2)).toEqual(["--agent", "main"]);
   });
 });

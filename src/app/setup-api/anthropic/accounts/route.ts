@@ -16,7 +16,8 @@ import {
   type AnthropicAccount,
   type OAuthTokens,
 } from "@/lib/anthropic-accounts";
-import { syncGatewayNow, useAccountsForChat } from "@/lib/anthropic-gateway";
+import { syncGatewayNow, putChatOnPool } from "@/lib/anthropic-gateway";
+import { getActiveHarness } from "@/lib/harness";
 import { startAnthropicSwap } from "@/lib/anthropic-swap";
 import { looksLikeAnthropicKey, MAX_ANTHROPIC_KEY_CHARS, verifyAnthropicKey } from "@/lib/coding-anthropic";
 import { simulateAnthropicLimit } from "@/lib/coding-agent";
@@ -76,7 +77,8 @@ export const dynamic = "force-dynamic";
  *    to Claude through Settings → AI Models' own path
  *    (`/setup-api/providers/default`), so the chat, Telegram and the crons
  *    rotate between them on a limit — no third sign-in. Refused with a code
- *    (`no_gateway`, `no_claude_account`, `gateway_write_failed`,
+ *    (`no_gateway` — also while the active harness is not OpenClaw, a dual
+ *    box on Hermes — `no_claude_account`, `gateway_write_failed`,
  *    `model_not_set`) when it cannot be done; the chat is never left on
  *    Claude without the accounts.
  *  - `simulate_limit` `{ id, minutes? }` — THE TEST HOOK: every live coding run
@@ -120,10 +122,21 @@ const REFUSAL_STATUS: Record<AnthropicAccountError["code"], number> = {
   store_unavailable: 503,
 };
 
-/** The pool as the card draws it: plus whether the chat can run on it on this edition. */
+/**
+ * Does the chat the owner is using run on OpenClaw right now? The pool goes
+ * into OpenClaw's gateway, and the model switch below follows whichever
+ * harness is ACTIVE — on a dual box with Hermes active it would move Hermes'
+ * chat instead.
+ */
+async function chatRunsOnOpenclaw(): Promise<boolean> {
+  if (openclawIsAbsent() || gatewayIsAbsent()) return false;
+  return (await getActiveHarness().catch(() => null)) === "openclaw";
+}
+
+/** The pool as the card draws it: plus whether the chat can run on it here and now. */
 async function poolView() {
   const view = await describePool();
-  return { ...view, gateway: { ...view.gateway, available: !openclawIsAbsent() && !gatewayIsAbsent() } };
+  return { ...view, gateway: { ...view.gateway, available: await chatRunsOnOpenclaw() } };
 }
 
 /** Changes that alter which Claude accounts the gateway holds, or their order, without necessarily moving the active one. */
@@ -298,7 +311,10 @@ export async function POST(request: Request) {
         console.error(`[anthropic-accounts] the owner turned "return to the first account" ${body.on ? "on" : "off"}`);
         break;
       case "use_for_chat": {
-        const result = await useAccountsForChat(() => setChatModelToClaude(extra));
+        if (!(await chatRunsOnOpenclaw())) {
+          return refusal("This ClawBox's chat does not run on OpenClaw right now, so it cannot use these accounts.", "no_gateway", 409);
+        }
+        const result = await putChatOnPool(() => setChatModelToClaude(extra));
         if (!result.ok) return refusal(result.error, result.code, result.status);
         break;
       }

@@ -42,8 +42,17 @@ function parseReset(value: unknown): number | null {
   return Number.isFinite(at) ? at : null;
 }
 
-/** A window that counts as spent: Anthropic's own percentage at or over 100. */
-const SPENT_PERCENT = 100;
+/**
+ * A window that counts as spent. Not 100: Anthropic refuses the request that
+ * "would exceed your account's rate limit", so the window that refused can
+ * still read a few points short when it is asked a moment later. This is only
+ * asked after core rotated off the account on a rate limit, so an account
+ * this close to its cap is not answering anyway; reading it as a throttle
+ * would leave the pool on it while every new session hits it again. 90 is
+ * where the owner's own swapper (clx) calls a window spent on the same
+ * endpoint.
+ */
+const SPENT_PERCENT = 90;
 
 /**
  * The reading of one `/api/oauth/usage` answer, the windows core's parser

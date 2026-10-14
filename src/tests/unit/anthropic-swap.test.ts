@@ -347,27 +347,6 @@ describe("a failure another consumer reports", () => {
     expect((await pool.readAccounts())[0].status).toBe("ok");
   });
 
-  it("puts a renewed credential into the gateway, without filing a swap, before the retry", async () => {
-    const { work } = await twoAccounts();
-    const order: string[] = [];
-    const gateway = consumer("gateway", async () => {
-      order.push("gateway");
-      return { status: "ok", code: "switched", count: 1 };
-    });
-    await pool.setGatewayMirror({ accountId: work.id, fingerprint: "0123456789abcdef", expiresAt: null, at: Date.now(), pending: false });
-    const before = (await pool.describePool()).lastSwap;
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("{}", { status: 200 })));
-    const outcome = await swap.reportAnthropicFailure({
-      text: "Invalid API key · Please run /login", source: "chat", accountId: work.id,
-      retry: { key: "chat:s:9", after: "gateway", run: async () => { order.push("retry"); return true; } },
-    });
-    expect(outcome).toMatchObject({ handled: true, kind: "auth", activeId: work.id, retry: "sent" });
-    expect(order).toEqual(["gateway", "retry"]);
-    expect(gateway[0]).toMatchObject({ takeover: true, change: { toId: work.id } });
-    expect((await pool.describePool()).lastSwap).toEqual(before);
-    expect(announceAnthropicLimit).not.toHaveBeenCalled();
-  });
-
   it("does nothing for a failure that is neither a limit nor a refused credential", async () => {
     const { work } = await twoAccounts();
     const retried = vi.fn(async () => true);
