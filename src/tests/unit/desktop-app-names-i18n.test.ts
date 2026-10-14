@@ -15,7 +15,7 @@ import { translations } from "@/lib/translations";
  * Product names are the deliberate exception: they are the same word in every
  * language and carry no key.
  */
-const PRODUCT_NAMES = new Set(["Hermes", "ClawKeep", "Google Chrome"]);
+const PRODUCT_NAMES = new Set(["Hermes", "ClawKeep", "Google Chrome", "Prime Radiant"]);
 
 const desktopSrc = fs.readFileSync(path.join(process.cwd(), "src/app/page.tsx"), "utf8");
 const standaloneSrc = fs.readFileSync(

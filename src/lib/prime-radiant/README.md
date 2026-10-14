@@ -92,6 +92,10 @@ Memory Shard's own search (`GET /setup-api/clawkeep/memory/search`, the edition 
 - `GET costs?since&runId` → the cost summary (estimates), with `notMeasured: [{ operation: "embedding", reason: "no_usage_reported" }]`: the contradiction pass's claim embeddings cost something the embedder does not report, so they are in no total.
 - `GET nightly` → `{ running, nextRunAt, runs }`. `POST nightly/run` → 202 `{ run }` (409 `busy`, 412 `not_initialised`); `{ merge: "dream/…" }` merges a held night (409 `open_items` / `not_merged`). Owner cookie AND same origin.
 
+## The app
+
+`src/components/PrimeRadiantApp.tsx` (and its `PrimeRadiant*.tsx` tabs) is the desktop face of these routes; it is the one caller of `POST init`, once, when `GET status` says `initialised: false`. Its strings are `primeRadiant.*` in `src/lib/prime-radiant-translations.ts`. A refusal's `code` is what the app words in the owner's language (`primeRadiant.error.<camelCode>`), so a new code a screen should explain needs a key there too; the English `error` stays the floor.
+
 ## Building on it
 
 - The ingest writer adds pages with `vaultOperation("ingest: <what>", async (tx) => { … tx.writePage(path, fm, body) … })`, allocating ids with `allocateClaimId` against `buildClaimIndex` of a snapshot read under the lock, after `redactText`/`redactPath` on everything sent to a model. Later passes calling the model go through `flashClient()` + `completeWithRetry` and record every call with `recordCost`.

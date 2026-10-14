@@ -7,6 +7,7 @@ import { onMemoryShardChanged } from "@/lib/ui-events";
 import MemoryShardArt from "./MemoryShardArt";
 import MemoryShardWizard from "./MemoryShardWizard";
 import MemoryShardSettingsPanel, { type MemoryShardSettingsState } from "./MemoryShardSettingsPanel";
+import PrimeRadiantShardSource from "./PrimeRadiantShardSource";
 import { isPlanGate } from "@/lib/paid-plan-gate";
 import { BTN_PRIMARY, BTN_SECONDARY } from "./coding-agent-ui";
 import type {
@@ -846,7 +847,11 @@ export default function MemoryShardApp() {
         {view === "wizard" && <MemoryShardWizard onDone={() => { void loadState(); }} />}
 
         {view === "home" && (
-          <div className="mt-4"><MemoryIndexCard initial={firstStatus} onError={setError} /></div>
+          <div className="mt-4">
+            <MemoryIndexCard initial={firstStatus} onError={setError} />
+            {/* The vault is a built-in source of this index; say so, and lead to it. */}
+            <PrimeRadiantShardSource />
+          </div>
         )}
       </div>
     </div>

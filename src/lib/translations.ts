@@ -4,6 +4,7 @@ import { desktopTranslations } from "./desktop-translations";
 import { editionTranslations } from "./edition-translations";
 import { monitorsTranslations } from "./monitors-translations";
 import { screenshotTranslations } from "./screenshot-translations";
+import { primeRadiantTranslations } from "./prime-radiant-translations";
 
 // Merge setup + desktop + clawkeep + edition translations per locale.
 // Order matters: later sources override earlier ones, so a clawkeep-specific
@@ -17,6 +18,7 @@ function mergeTranslations(
   edition: Record<Locale, Record<string, string>>,
   monitors: Record<Locale, Record<string, string>>,
   screenshot: Record<Locale, Record<string, string>>,
+  primeRadiant: Record<Locale, Record<string, string>>,
 ): Record<Locale, Record<string, string>> {
   const merged = {} as Record<Locale, Record<string, string>>;
   for (const locale of Object.keys(setup) as Locale[]) {
@@ -29,6 +31,8 @@ function mergeTranslations(
       ...monitors[locale],
       // The Screenshot app (TASK-1475): one module for the surface.
       ...screenshot[locale],
+      // Prime Radiant, the living wiki: one module for the surface.
+      ...primeRadiant[locale],
     };
   }
   return merged;
@@ -9089,4 +9093,5 @@ export const translations = mergeTranslations(
   editionTranslations,
   monitorsTranslations,
   screenshotTranslations,
+  primeRadiantTranslations,
 );

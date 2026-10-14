@@ -15,7 +15,7 @@ export interface AppDef {
   id: string;
   name: string;
   color: string;
-  type: "settings" | "placeholder" | "external" | "store" | "hermes_skills" | "installed" | "terminal" | "coding" | "files" | "browser" | "vnc" | "webapp" | "setup" | "clawkeep" | "memory_shard" | "system_update" | "chat" | "screenshot" | "chrome";
+  type: "settings" | "placeholder" | "external" | "store" | "hermes_skills" | "installed" | "terminal" | "coding" | "files" | "browser" | "vnc" | "webapp" | "setup" | "clawkeep" | "memory_shard" | "prime_radiant" | "system_update" | "chat" | "screenshot" | "chrome";
   url?: string;
   // Webapps only: how the desktop opens it (InstalledMeta.launch).
   launch?: "window";
@@ -55,6 +55,11 @@ export const apps: AppDef[] = [
   // and green is reserved there for a STATE (on, healthy) rather than for an
   // identity. Sized for the single card it shows.
   { id: "memory-shard", name: "app.memoryShard", color: "#2f2a52", type: "memory_shard", pinned: true, defaultWidth: 720, defaultHeight: 640 },
+  // Prime Radiant, the "living wiki": a git-backed vault of pages and claims
+  // that Memory Shard searches as one of its sources. Its own app, pinned
+  // beside Memory Shard because the two are read together, and on every
+  // edition. A product name, so it carries no translation key.
+  { id: "prime-radiant", name: "Prime Radiant", color: "#3b2a1a", type: "prime_radiant", pinned: true, defaultWidth: 980, defaultHeight: 720 },
   { id: "system_update", name: "app.systemUpdate", color: "#0ea5e9", type: "system_update", pinned: false, defaultWidth: 900, defaultHeight: 720 },
   { id: "store", name: "app.store", color: "#22c55e", type: "store", pinned: true, defaultWidth: 900, defaultHeight: 600 },
   { id: "browser", name: "app.browser", color: "#4285f4", type: "browser", pinned: false, defaultWidth: 1000, defaultHeight: 700 },

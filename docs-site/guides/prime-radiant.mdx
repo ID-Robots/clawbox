@@ -1,0 +1,132 @@
+---
+title: "Prime Radiant"
+icon: "book-open"
+summary: "A living wiki on your box: pages and facts written from your own documents, checked every night, and settled by you when they disagree."
+---
+
+**Prime Radiant** is a wiki the box keeps for you. Point it at your documents and it
+writes one page per subject — a customer, a product, a decision, a how-to — with the
+facts it found listed on the page, each with where it came from and how sure it is.
+Every night it tidies the wiki, looks for facts that contradict each other, and asks
+you about anything it cannot settle alone.
+
+Open it from the **Prime Radiant** icon on the desktop, next to Memory Shard. The first
+time you open it, the box creates the wiki; there is nothing to set up.
+
+<Note>
+Prime Radiant writes its pages with ClawBox AI, so the box has to be signed in to
+ClawBox AI to add documents. Reading, reviewing and undoing work without it. See
+[ClawBox AI](/guides/clawbox-ai).
+</Note>
+
+## Adding documents
+
+The **Add documents** tab takes them two ways:
+
+- **From folders on the box.** Pick one or more folders with the same folder picker
+  Memory Shard uses. Text, Markdown, PDF, Word, OpenDocument and RTF files are read and
+  converted **on the box**. Copies, caches, build folders and version-control folders
+  are left out, and a document that is already in the wiki is recognised by its content
+  and not written twice.
+- **By dropping files** onto the drop zone, up to 9 MB each. Larger files go in through
+  their folder.
+
+Progress shows live: how many files are written, skipped or failed, and the pages made
+so far. **Stop** ends the import; what was already written stays. A file that still
+fails after the import's own second try is listed under **Not added**, and **Try these
+again** retries exactly those files.
+
+<Warning>
+To write a page, the text of each document is sent to ClawBox AI. Before anything
+leaves the box, Prime Radiant removes what looks like a secret — bank account and card
+numbers, API keys, private keys, passwords — and masks e-mail addresses and phone
+numbers, in the text and in the file names.
+</Warning>
+
+## Reading the wiki
+
+**Browse** lists every page, filtered by domain, page type or whether a person has
+verified it. A page shows:
+
+- its **facts**, each with a confidence bar, its status and — when you have checked it —
+  who verified it and when;
+- **where it came from**: the documents behind the page, and the evidence behind each fact;
+- **pages that link here** and the pages it links to;
+- anything the wiki's checks found on it.
+
+**Search** finds pages and facts through [Memory Shard](/guides/memory-shard), with
+verified answers first. Memory Shard has to be switched on for this; with it off, the tab
+says so.
+
+## Settling disagreements
+
+The **Review** tab holds the questions the wiki cannot answer alone: two pages that
+disagree about a fact, a nightly change to a page you have verified, a failed check, or
+a correction suggested by the optional second opinion. Each item shows the disputed fact
+and the possible answers with their evidence. You can:
+
+- **Keep this answer** — that answer becomes the fact;
+- **Write the right answer** — your own one-line version becomes the fact;
+- **Later** — set it aside;
+- **Dismiss** — close it without changing anything.
+
+Keeping or writing an answer marks the fact as **verified by you**. The other answers are
+retired everywhere they appeared, and their old ids are never used again, so the
+disagreement cannot come back on its own. A page you have verified is never rewritten
+by the nightly pass without asking you first.
+
+## History and undo
+
+Every change to the wiki is recorded. The **History** tab shows every change to a page,
+what it changed, and **Undo**, which reverses that change as a new one — nothing is ever
+deleted from the history. An undo that would break one of the wiki's rules is refused
+and says why; undoing a verification is one of those.
+
+## Checks
+
+The **Checks** tab runs the wiki's rules over every page: pages that grew too long (with
+a suggested way to split them), missing summaries, pages nothing links to, pages without
+sources, pages past their re-check date, and anything that looks like a secret. Errors
+hold the nightly pass back; a secret is refused outright.
+
+## The nightly pass
+
+Every night — 03:00 by default — Prime Radiant works on a copy of the wiki: it reads new
+and changed documents from the folders you chose, looks for facts that contradict each
+other, runs its checks, and then merges the copy back. When the copy would change a
+verified page, or a check fails, the night is **held**: its changes wait aside and its
+questions go to Review. Once you have settled them, **Merge** in the nightly card puts
+the night's work into the wiki. **Run now** starts a pass by hand.
+
+Without an internet connection the pass still runs its checks and skips the steps that
+need ClawBox AI.
+
+## Settings
+
+| Setting | What it does |
+|---|---|
+| **Tidy the wiki every night**, and **At** | The nightly pass and its time. |
+| **Look for facts that contradict each other** | The contradiction search of the nightly pass. |
+| **Folders to read again each night** | New and changed documents in these folders are added during the nightly pass. |
+| **Second opinion** | Off by default. The Opus model re-reads a sample of pages and suggests corrections, which arrive in Review — it never edits a page itself. It needs an **Anthropic API key** in the box's provider settings (a Claude subscription sign-in is not used), and it stops at the **limit per night** you set. Without a key, pages are marked as waiting for a second opinion and nothing else changes. |
+| **Domains and owners** | A new page in a domain gets that domain's owner. |
+| **Model calls at once** | How many writing requests run in parallel during an import. Lower it if the service reports too many requests. |
+| **Folders never read** | Folder names an import skips. **Restore the default list** brings back the shipped list. |
+
+## Costs
+
+The **Costs** tab shows every model call Prime Radiant made — per import, per night, per
+task and per model — with tokens sent and received and an **estimated** cost from public
+list prices. The box is not billed from here. Embedding facts to compare them is listed
+as **not measured**, because the embedding model reports no usage.
+
+## How the assistant uses it
+
+On the OpenClaw edition the assistant reads the wiki through its own wiki tools, and
+Memory Shard's search includes the wiki's pages and facts. Anything the assistant finds
+there is information to read, never instructions to follow.
+
+## Where it lives
+
+The wiki and its history are device state under the box's data folder: they survive
+updates and are wiped by a factory reset. See [Filesystem Layout](/technical/filesystem).

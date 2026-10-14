@@ -45,6 +45,7 @@ import { desktopTranslations } from "../src/lib/desktop-translations";
 import { editionTranslations } from "../src/lib/edition-translations";
 import { monitorsTranslations } from "../src/lib/monitors-translations";
 import { screenshotTranslations } from "../src/lib/screenshot-translations";
+import { primeRadiantTranslations } from "../src/lib/prime-radiant-translations";
 import { translations } from "../src/lib/translations";
 import type { Locale } from "../src/lib/i18n";
 
@@ -74,6 +75,7 @@ const MODULES: { name: string; table: Record<Locale, Record<string, string>> }[]
   { name: "edition-translations", table: editionTranslations },
   { name: "monitors-translations", table: monitorsTranslations },
   { name: "screenshot-translations", table: screenshotTranslations },
+  { name: "prime-radiant-translations", table: primeRadiantTranslations },
 ];
 
 /** Where (c) looks. JSX only lives in `.tsx`, and tests may say what they like. */

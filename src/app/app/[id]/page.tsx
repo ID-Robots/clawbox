@@ -43,6 +43,7 @@ const SettingsApp = dynamic(() => import("@/components/SettingsApp"), { ssr: fal
 const AppStore = dynamic(() => import("@/components/AppStore"), { ssr: false });
 const HermesSkillsStore = dynamic(() => import("@/components/HermesSkillsStore"), { ssr: false });
 const MemoryShardApp = dynamic(() => import("@/components/MemoryShardApp"), { ssr: false });
+const PrimeRadiantApp = dynamic(() => import("@/components/PrimeRadiantApp"), { ssr: false });
 const ScreenshotApp = dynamic(() => import("@/components/ScreenshotApp"), { ssr: false });
 
 
@@ -566,6 +567,8 @@ export default function StandaloneAppPage() {
         return <FilesApp />;
       case "memory-shard":
         return <MemoryShardApp />;
+      case "prime-radiant":
+        return <PrimeRadiantApp />;
       case "browser":
         return <BrowserApp />;
       case "vnc":

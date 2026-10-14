@@ -1,0 +1,430 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { act, fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
+import PrimeRadiantApp from "@/components/PrimeRadiantApp";
+import { I18nProvider } from "@/lib/i18n";
+
+/**
+ * The Prime Radiant window over a fake set of its routes: the first open
+ * creates the vault, and every tab reads and writes the route it is meant to.
+ * Fixtures are synthetic company data only.
+ *
+ * `I18nProvider` loads its catalogue through a dynamic import, so the first
+ * mount pays for that before a translated word is on screen (the Memory Shard
+ * suite's reason for the same ceilings).
+ */
+vi.setConfig({ testTimeout: 20_000, hookTimeout: 20_000 });
+
+const STATUS = {
+  initialised: true,
+  vault: { path: "/tmp/vault", pages: 2, invalidPages: 0, verifiedPages: 1, claims: 3, domains: ["sales"], truncated: false },
+  git: { branch: "main", head: null, commits: 4 },
+  plugin: { state: "wired", vault: "/tmp/vault" },
+  lint: { errors: 0, warnings: 1, ok: true },
+};
+
+const FM = {
+  type: "entity",
+  title: "Acme Widgets Ltd",
+  domain: "sales",
+  owner: "sales-team",
+  status: "stable",
+  generated: { at: "2026-01-02T10:00:00.000Z", by: "flash" },
+  verified: null,
+  stale_after: null,
+  sources: ["upload/batch-1/acme-overview.md"],
+  privacy: "internal",
+  checked_by: "flash",
+  opus_pending: false,
+  claims: [
+    {
+      id: "sales/acme-widgets/hq-city",
+      text: "Acme Widgets Ltd is based in Springfield.",
+      confidence: 0.9,
+      status: "verified",
+      updatedAt: "2026-01-02T10:00:00.000Z",
+      evidence: [{ kind: "source", path: "upload/batch-1/acme-overview.md" }],
+      verified: { at: "2026-01-03T10:00:00.000Z", by: "owner" },
+    },
+  ],
+  retiredClaimIds: [],
+};
+
+const PAGE = {
+  path: "entities/acme-widgets.md",
+  valid: true,
+  frontmatter: FM,
+  errors: null,
+  body: "Acme Widgets Ltd sells widgets.",
+  summary: "Acme Widgets Ltd sells widgets.",
+  verified: true,
+  backlinks: ["concepts/widget-pricing.md"],
+  links: [],
+  inIndex: true,
+  lint: { scope: ["entities/acme-widgets.md"], checked: 1, findings: [], errors: 0, warnings: 0, ok: true },
+};
+
+const LIST_ENTRY = {
+  path: "entities/acme-widgets.md", valid: true, title: "Acme Widgets Ltd", type: "entity", domain: "sales", owner: "sales-team",
+  status: "stable", privacy: "internal", verified: true, claims: 1, summary: "Acme Widgets Ltd sells widgets.", bodyChars: 30, mtimeMs: 1,
+};
+
+const REVIEW_ITEM = {
+  id: "rev-0123456789ab",
+  kind: "contradiction",
+  claimId: "sales/acme-widgets/employees",
+  pages: ["entities/acme-widgets.md"],
+  candidates: [
+    { text: "Acme Widgets Ltd has 40 employees.", page: "entities/acme-widgets.md", claimId: "sales/acme-widgets/employees", evidence: [{ kind: "source", note: "2025 report" }] },
+    { text: "Acme Widgets Ltd has 55 employees.", page: "concepts/widget-pricing.md", claimId: "sales/acme-widgets/headcount", evidence: [] },
+  ],
+  evidence: [{ kind: "judge", verdict: "contradiction" }],
+  status: "open",
+  createdAt: "2026-01-04T10:00:00.000Z",
+  resolvedAt: null,
+  resolution: null,
+  runId: null,
+};
+
+const JOB_BASE = {
+  kind: "folders", folders: ["~/acme-docs"], total: 3, done: 0, failed: 0, skipped: 0, duplicates: 0, pages: 0, commits: 0, calls: 0,
+  usdEstimate: 0, createdAt: "2026-01-06T10:00:00.000Z", updatedAt: "2026-01-06T10:00:00.000Z", finishedAt: null, error: null, notes: [],
+  retryOf: null, requeued: 0, deadLetter: 0,
+};
+const RUNNING_JOB = { ...JOB_BASE, id: "job-run", status: "running", phase: "write" };
+const DEAD_JOB = { ...JOB_BASE, id: "job-dead", status: "done", phase: "done", done: 2, failed: 1, pages: 2, deadLetter: 1, finishedAt: "2026-01-05T10:00:00.000Z" };
+
+/** A stand-in for the browser's EventSource: the test plays the server's frames. */
+class FakeEventSource {
+  static last: FakeEventSource | null = null;
+  listeners = new Map<string, Array<(e: MessageEvent) => void>>();
+  onerror: (() => void) | null = null;
+  closed = false;
+  constructor(readonly url: string) { FakeEventSource.last = this; }
+  addEventListener(type: string, fn: (e: MessageEvent) => void) {
+    this.listeners.set(type, [...(this.listeners.get(type) ?? []), fn]);
+  }
+  emit(type: string, data: unknown) {
+    for (const fn of this.listeners.get(type) ?? []) fn(new MessageEvent(type, { data: JSON.stringify(data) }));
+  }
+  close() { this.closed = true; }
+}
+
+interface Call { url: string; method: string; body: unknown }
+
+let status: Record<string, unknown>;
+let calls: Call[];
+let searchStatus: number;
+let reviewItems: unknown[];
+let nightlyRuns: unknown[];
+let ingestJobs: unknown[];
+
+function installFetch() {
+  vi.stubGlobal("fetch", vi.fn(async (input: unknown, init?: RequestInit) => {
+    const url = String(input);
+    const method = (init?.method ?? "GET").toUpperCase();
+    let body: unknown = undefined;
+    if (typeof init?.body === "string") {
+      try { body = JSON.parse(init.body); } catch { body = init.body; }
+    }
+    calls.push({ url, method, body });
+    const ok = (json: unknown, code = 200) => ({ ok: code < 400, status: code, json: async () => json });
+    if (url.startsWith("/setup-api/preferences")) return ok({ ui_language: "en" });
+    const p = "/setup-api/prime-radiant";
+    if (url === `${p}/status`) return ok(status);
+    if (url === `${p}/init` && method === "POST") {
+      status = { ...status, initialised: true };
+      return ok({ created: true, plugin: { state: "wired", wrote: true } });
+    }
+    if (url.startsWith(`${p}/pages?`)) return ok({ total: 1, pages: [LIST_ENTRY] });
+    if (url === `${p}/pages/entities/acme-widgets.md`) return ok(PAGE);
+    if (url.startsWith(`${p}/search?`)) {
+      if (searchStatus === 404) return ok({ error: "Not found" }, 404);
+      return ok({
+        initialised: true, shardEnabled: true, indexing: false,
+        results: [{ source: "prime-radiant", path: "entities/acme-widgets.md", id: "sales/acme-widgets/hq-city", kind: "claim", type: "entity", title: "Acme Widgets Ltd", snippet: "Based in Springfield.", score: 0.92, verified: true }],
+      });
+    }
+    if (url.startsWith(`${p}/review?`)) return ok({ total: reviewItems.length, counts: { open: reviewItems.length, later: 0, resolved: 0 }, items: reviewItems });
+    if (url.startsWith(`${p}/review/`) && method === "POST") {
+      reviewItems = [];
+      return ok({ item: { ...REVIEW_ITEM, status: "resolved" }, commit: "abc1234", retired: [] });
+    }
+    if (url === `${p}/nightly`) return ok({ running: null, nextRunAt: null, runs: nightlyRuns });
+    if (url === `${p}/nightly/run` && method === "POST") return ok({ branch: "dream/2026-01-05", commit: "def5678abc", changed: [] });
+    if (url.startsWith(`${p}/history/`)) {
+      return ok({ path: "entities/acme-widgets.md", commits: [{ sha: "a".repeat(40), subject: "ingest: acme-overview.md", at: "2026-01-02T10:00:00.000Z", author: "Prime Radiant" }] });
+    }
+    if (url.startsWith(`${p}/diff?`)) return ok({ from: null, to: "a".repeat(40), path: "entities/acme-widgets.md", commit: null, files: [], diff: "+added line", truncated: false });
+    if (url === `${p}/revert` && method === "POST") return ok({ reverted: "a".repeat(40), commit: "b".repeat(40), changed: [] });
+    if (url.startsWith(`${p}/lint`)) return ok({ scope: "all", checked: 2, findings: [], errors: 0, warnings: 0, ok: true });
+    if (url === `${p}/costs`) {
+      return ok({
+        basis: "estimate", currency: "USD", rates: {}, since: null,
+        totals: { calls: 3, tokensIn: 1200, tokensOut: 300, usdEstimate: 0.0042 },
+        byOperation: [{ operation: "ingest", calls: 3, tokensIn: 1200, tokensOut: 300, usdEstimate: 0.0042 }],
+        byModel: [{ model: "deepseek-v4-flash", calls: 3, tokensIn: 1200, tokensOut: 300, usdEstimate: 0.0042 }],
+        byRun: [{ runId: "job-1", kind: "ingest", firstAt: "2026-01-02T10:00:00.000Z", lastAt: "2026-01-02T10:01:00.000Z", calls: 3, tokensIn: 1200, tokensOut: 300, usdEstimate: 0.0042 }],
+        notMeasured: [{ operation: "embedding", reason: "no_usage_reported" }],
+      });
+    }
+    if (url.startsWith("/setup-api/coding-agent/browse")) {
+      return ok({ root: "/srv/box", path: "/srv/box/acme-docs", parent: "/srv/box", entries: [] });
+    }
+    if (url === `${p}/ingest` && method === "POST") return ok({ job: RUNNING_JOB }, 202);
+    if (url === `${p}/ingest`) return ok({ running: null, jobs: ingestJobs });
+    if (url === `${p}/ingest/job-dead/retry` && method === "POST") return ok({ job: { ...RUNNING_JOB, id: "job-retry", kind: "retry" } }, 202);
+    if (url === `${p}/ingest/job-dead`) return ok({ job: DEAD_JOB, deadLetter: [{ seq: 1, label: "~/acme-docs/broken.pdf", error: "unreadable", attempts: 2, bytes: 10 }] });
+    if (url.startsWith(`${p}/ingest/`) && method === "DELETE") return ok({ stopping: true, job: RUNNING_JOB }, 202);
+    if (url === `${p}/settings`) {
+      const settings = {
+        ingest: { exclude: [".git", "node_modules"], parallel: 128, folders: [] },
+        costRates: {}, nightly: { enabled: true, time: "03:00" },
+        opus: { enabled: false, capUsd: 2, sampleRate: 0.02, model: "opus" },
+        contradictions: { enabled: true }, domains: [],
+      };
+      return ok({
+        settings, defaults: settings,
+        limits: { ingestParallel: { min: 1, max: 256 }, ingestFolders: 20, opusCapUsd: { min: 0.01, max: 1000 }, opusSampleRate: { min: 0, max: 1 }, domains: 100 },
+        nightly: { nextRunAt: null }, rates: {},
+      });
+    }
+    return ok({}, 404);
+  }));
+}
+
+/** Mount, and wait for the catalogue: every assertion here is about words. */
+async function mount() {
+  const view = render(<I18nProvider><PrimeRadiantApp /></I18nProvider>);
+  await waitFor(() => expect(screen.getByTestId("prime-radiant-subtitle")).toHaveTextContent("living wiki"));
+  return view;
+}
+
+async function openTab(id: string) {
+  fireEvent.click(await screen.findByTestId(`prime-radiant-tab-${id}`));
+}
+
+beforeEach(() => {
+  status = { ...STATUS };
+  calls = [];
+  searchStatus = 200;
+  reviewItems = [REVIEW_ITEM];
+  nightlyRuns = [];
+  ingestJobs = [];
+  FakeEventSource.last = null;
+  installFetch();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe("PrimeRadiantApp", () => {
+  it("creates the vault once on the first open, then shows the wiki", async () => {
+    status = { ...STATUS, initialised: false };
+    await mount();
+    expect(await screen.findByTestId("prime-radiant-tab-browse")).toBeInTheDocument();
+    expect(calls.filter((c) => c.url.endsWith("/init") && c.method === "POST")).toHaveLength(1);
+    expect(screen.getByTestId("prime-radiant-subtitle")).toHaveTextContent("living wiki");
+  });
+
+  it("does not create anything when the vault is already there", async () => {
+    await mount();
+    await screen.findByTestId("prime-radiant-tab-browse");
+    expect(calls.some((c) => c.url.endsWith("/init"))).toBe(false);
+  });
+
+  it("opens a page with its facts, confidence, sources and backlinks", async () => {
+    await mount();
+    fireEvent.click(await screen.findByTestId("prime-radiant-page-row"));
+    const claim = await screen.findByTestId("prime-radiant-claim");
+    expect(claim).toHaveTextContent("Acme Widgets Ltd is based in Springfield.");
+    expect(claim).toHaveTextContent("sales/acme-widgets/hq-city");
+    expect(claim).toHaveTextContent("90%");
+    expect(screen.getByTestId("prime-radiant-sources")).toHaveTextContent("upload/batch-1/acme-overview.md");
+    expect(screen.getByTestId("prime-radiant-backlinks")).toHaveTextContent("widget-pricing");
+  });
+
+  it("filters the page list by domain and type", async () => {
+    await mount();
+    await screen.findByTestId("prime-radiant-page-row");
+    fireEvent.change(screen.getByTestId("prime-radiant-browse-type"), { target: { value: "entity" } });
+    fireEvent.change(screen.getByTestId("prime-radiant-browse-domain"), { target: { value: "sales" } });
+    await waitFor(() => {
+      expect(calls.some((c) => c.url.includes("/pages?") && c.url.includes("type=entity") && c.url.includes("domain=sales"))).toBe(true);
+    });
+  });
+
+  it("keeps a candidate answer as the verified fact", async () => {
+    await mount();
+    await openTab("review");
+    const item = await screen.findByTestId("prime-radiant-review-item");
+    expect(within(item).getByTestId("prime-radiant-review-claim")).toHaveTextContent("sales/acme-widgets/employees");
+    expect(within(item).getAllByTestId("prime-radiant-review-candidate")).toHaveLength(2);
+    fireEvent.click(within(item).getAllByTestId("prime-radiant-review-pick")[1]);
+    await waitFor(() => {
+      const post = calls.find((c) => c.url.includes("/review/rev-0123456789ab/resolve"));
+      expect(post?.body).toEqual({ action: "pick", candidate: 1 });
+    });
+    expect(await screen.findByTestId("prime-radiant-review-empty")).toBeInTheDocument();
+  });
+
+  it("writes a new answer, and sets an item aside for later", async () => {
+    await mount();
+    await openTab("review");
+    fireEvent.click(await screen.findByTestId("prime-radiant-review-add-new"));
+    fireEvent.change(screen.getByTestId("prime-radiant-review-answer"), { target: { value: "Acme Widgets Ltd has 48 employees." } });
+    fireEvent.click(screen.getByTestId("prime-radiant-review-save-new"));
+    await waitFor(() => {
+      expect(calls.find((c) => c.url.includes("/resolve"))?.body).toEqual({ action: "new", text: "Acme Widgets Ltd has 48 employees." });
+    });
+
+    reviewItems = [REVIEW_ITEM];
+    calls = [];
+    fireEvent.click(screen.getByTestId("prime-radiant-review-status-later"));
+    fireEvent.click(screen.getByTestId("prime-radiant-review-status-open"));
+    fireEvent.click(await screen.findByTestId("prime-radiant-review-later"));
+    await waitFor(() => {
+      expect(calls.find((c) => c.url.includes("/resolve"))?.body).toEqual({ action: "later" });
+    });
+  });
+
+  it("searches through the vault route and opens a hit", async () => {
+    await mount();
+    await openTab("search");
+    fireEvent.change(screen.getByTestId("prime-radiant-search-q"), { target: { value: "headquarters" } });
+    fireEvent.click(screen.getByTestId("prime-radiant-search-go"));
+    fireEvent.click(await screen.findByTestId("prime-radiant-search-hit"));
+    expect(await screen.findByTestId("prime-radiant-page")).toBeInTheDocument();
+  });
+
+  it("says search is not on this box yet when the route is missing", async () => {
+    searchStatus = 404;
+    await mount();
+    await openTab("search");
+    fireEvent.change(screen.getByTestId("prime-radiant-search-q"), { target: { value: "widgets" } });
+    fireEvent.click(screen.getByTestId("prime-radiant-search-go"));
+    const notice = await screen.findByTestId("prime-radiant-search-notice");
+    expect(notice).toHaveAttribute("data-notice", "unavailable");
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("shows a page's history and undoes a change after confirmation", async () => {
+    await mount();
+    fireEvent.click(await screen.findByTestId("prime-radiant-page-row"));
+    fireEvent.click(await screen.findByTestId("prime-radiant-page-history"));
+    const commit = await screen.findByTestId("prime-radiant-commit");
+    expect(commit).toHaveTextContent("ingest: acme-overview.md");
+    fireEvent.click(within(commit).getByTestId("prime-radiant-revert"));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getAllByRole("button").at(-1) as HTMLElement);
+    await waitFor(() => {
+      expect(calls.find((c) => c.url.endsWith("/revert"))?.body).toEqual({ commit: "a".repeat(40), path: "entities/acme-widgets.md" });
+    });
+  });
+
+  it("lists costs as estimates and names embeddings as not measured", async () => {
+    await mount();
+    await openTab("costs");
+    expect(await screen.findByTestId("prime-radiant-cost-not-measured")).toHaveTextContent(/not measured/i);
+    expect(screen.getByTestId("prime-radiant-cost-runs")).toHaveTextContent("1,200");
+  });
+
+  it("merges a held night from the nightly card", async () => {
+    nightlyRuns = [{
+      id: "run-0123456789ab", kind: "nightly", branch: "dream/2026-01-05", status: "held", trigger: "schedule",
+      startedAt: "2026-01-05T03:00:00.000Z", finishedAt: "2026-01-05T03:10:00.000Z", usdEstimate: 0.01, summary: { held: ["verified"] },
+    }];
+    await mount();
+    await openTab("settings");
+    fireEvent.click(await screen.findByTestId("prime-radiant-nightly-merge"));
+    await waitFor(() => {
+      expect(calls.find((c) => c.url.endsWith("/nightly/run"))?.body).toEqual({ merge: "dream/2026-01-05" });
+    });
+  });
+
+  it("saves the Opus cap and refuses one outside the limits before sending it", async () => {
+    await mount();
+    await openTab("settings");
+    fireEvent.click(await screen.findByTestId("prime-radiant-opus-enabled"));
+    fireEvent.change(screen.getByTestId("prime-radiant-opus-cap"), { target: { value: "5000" } });
+    fireEvent.click(screen.getByTestId("prime-radiant-settings-save"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("1000");
+    expect(calls.some((c) => c.url.endsWith("/settings") && c.method === "PUT")).toBe(false);
+
+    fireEvent.change(screen.getByTestId("prime-radiant-opus-cap"), { target: { value: "3.5" } });
+    fireEvent.click(screen.getByTestId("prime-radiant-settings-save"));
+    await waitFor(() => {
+      const put = calls.find((c) => c.url.endsWith("/settings") && c.method === "PUT");
+      expect((put?.body as { opus: unknown }).opus).toEqual({ enabled: true, capUsd: 3.5 });
+    });
+  });
+
+  it("refuses a dropped file it cannot read before uploading anything", async () => {
+    await mount();
+    await openTab("ingest");
+    const input = await screen.findByTestId("prime-radiant-file-input");
+    fireEvent.change(input, { target: { files: [new File(["x"], "photo.png", { type: "image/png" })] } });
+    expect(await screen.findByText(/photo\.png/)).toBeInTheDocument();
+    expect(calls.some((c) => c.url.includes("/ingest/upload"))).toBe(false);
+  });
+
+  it("ingests a picked folder, follows its progress over SSE and can stop it", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    await mount();
+    await openTab("ingest");
+    fireEvent.click(await screen.findByTestId("prime-radiant-ingest-folders-add"));
+    fireEvent.click(await screen.findByTestId("prime-radiant-ingest-folders-use"));
+    fireEvent.click(screen.getByTestId("prime-radiant-ingest-start"));
+    await waitFor(() => {
+      expect(calls.find((c) => c.url.endsWith("/ingest") && c.method === "POST")?.body).toEqual({ folders: ["/srv/box/acme-docs"] });
+    });
+    const running = await screen.findByTestId("prime-radiant-ingest-running");
+    expect(FakeEventSource.last?.url).toBe("/setup-api/prime-radiant/ingest/job-run/events");
+
+    act(() => {
+      FakeEventSource.last?.emit("job", { ...RUNNING_JOB, done: 1, pages: 1 });
+      FakeEventSource.last?.emit("file", { seq: 1, label: "~/acme-docs/overview.md", status: "done", pages: ["entities/acme-widgets.md"] });
+    });
+    expect(await within(running).findByTestId("prime-radiant-ingest-files")).toHaveTextContent("overview.md");
+    expect(within(running).getByRole("progressbar")).toHaveAttribute("aria-valuenow", "33");
+
+    fireEvent.click(within(running).getByTestId("prime-radiant-ingest-stop"));
+    await waitFor(() => {
+      expect(calls.some((c) => c.url.endsWith("/ingest/job-run") && c.method === "DELETE")).toBe(true);
+    });
+
+    act(() => { FakeEventSource.last?.emit("end", { ...RUNNING_JOB, status: "interrupted", phase: "done" }); });
+    await waitFor(() => expect(screen.queryByTestId("prime-radiant-ingest-running")).toBeNull());
+    expect(FakeEventSource.last?.closed).toBe(true);
+  });
+
+  it("lists a job's dead letters and retries them", async () => {
+    ingestJobs = [DEAD_JOB];
+    await mount();
+    await openTab("ingest");
+    fireEvent.click(await screen.findByTestId("prime-radiant-dead-letter-toggle"));
+    expect(await screen.findByTestId("prime-radiant-dead-letter")).toHaveTextContent("broken.pdf");
+    fireEvent.click(screen.getByTestId("prime-radiant-dead-letter-retry"));
+    await waitFor(() => {
+      expect(calls.some((c) => c.url.endsWith("/ingest/job-dead/retry") && c.method === "POST")).toBe(true);
+    });
+  });
+});
+
+describe("PrimeRadiantShardSource", () => {
+  it("names the wiki on Memory Shard's home once the wiki exists", async () => {
+    const { default: PrimeRadiantShardSource } = await import("@/components/PrimeRadiantShardSource");
+    render(<I18nProvider><PrimeRadiantShardSource /></I18nProvider>);
+    const line = await screen.findByTestId("memory-shard-prime-radiant-source");
+    await waitFor(() => expect(line).toHaveTextContent("Prime Radiant wiki (pages: 2)"));
+  });
+
+  it("draws nothing before the wiki is created", async () => {
+    status = { ...STATUS, initialised: false };
+    const { default: PrimeRadiantShardSource } = await import("@/components/PrimeRadiantShardSource");
+    render(<I18nProvider><PrimeRadiantShardSource /></I18nProvider>);
+    await waitFor(() => expect(calls.some((c) => c.url.endsWith("/prime-radiant/status"))).toBe(true));
+    expect(screen.queryByTestId("memory-shard-prime-radiant-source")).toBeNull();
+    expect(calls.some((c) => c.url.endsWith("/init"))).toBe(false);
+  });
+});

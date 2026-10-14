@@ -23,6 +23,7 @@ test("every OpenClaw built-in exposed by Open in new tab has a standalone surfac
     "coding",
     "files",
     "memory-shard",
+    "prime-radiant",
     "store",
     "browser",
     "vnc",
