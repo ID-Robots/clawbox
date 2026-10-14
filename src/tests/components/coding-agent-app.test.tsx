@@ -514,7 +514,7 @@ describe("CodingAgentApp", () => {
     expect(gitInfo.textContent).not.toContain("git@github.com");
     expect(gitInfo.textContent).not.toContain(translations.en["codingAgent.gitNoRemote"]);
     expect(within(gitInfo).getByTestId("coding-agent-project-create-pr")).toBeInTheDocument();
-    expect(within(gitInfo).queryByTestId("coding-agent-project-backup")).toBeNull();
+    expect(within(gitInfo).queryByTestId("coding-agent-project-github-backup")).toBeNull();
     expect(gitReads).toEqual(["/setup-api/coding-agent/git?projectId=site"]);
     // The project page lists the project's runs — in its Runs tab, with the
     // count on the tab — and not the stranger.
@@ -2024,7 +2024,7 @@ describe("projects", () => {
     });
     render(<CodingAgentApp />);
     fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
-    const backup = await screen.findByTestId("coding-agent-project-backup");
+    const backup = await screen.findByTestId("coding-agent-project-github-backup");
     await waitFor(() => expect(gitReads).toHaveLength(1));
     expect(screen.getByTestId("coding-agent-git-info").textContent).toContain(translations.en["codingAgent.gitNoRemote"]);
 
@@ -2035,7 +2035,7 @@ describe("projects", () => {
     // The remote is drawn as the repository's page, and the quiet Back up
     // gives way to the GitHub link and Create PR.
     await waitFor(() => expect(within(screen.getByTestId("coding-agent-git-info")).getByTestId("coding-agent-project-github")).toHaveAttribute("href", "https://github.com/yalexx/site"));
-    expect(screen.queryByTestId("coding-agent-project-backup")).toBeNull();
+    expect(screen.queryByTestId("coding-agent-project-github-backup")).toBeNull();
     expect(screen.getByTestId("coding-agent-project-create-pr")).toBeInTheDocument();
   });
 
@@ -2052,7 +2052,7 @@ describe("projects", () => {
       render(<CodingAgentApp />);
       fireEvent.click(await screen.findByTestId("coding-agent-project-site"));
       const create = await screen.findByTestId("coding-agent-project-create-pr");
-      expect(screen.queryByTestId("coding-agent-project-backup")).toBeNull();
+      expect(screen.queryByTestId("coding-agent-project-github-backup")).toBeNull();
       fireEvent.click(create);
       await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/coding-agent/git", body: { directory: PROJECT.directory, action: "pr" } }));
       const link = await screen.findByTestId("coding-agent-project-pr");

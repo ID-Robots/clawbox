@@ -21,9 +21,8 @@ test("files app supports creating, renaming, and deleting folders", async ({ pag
   await expect(filesWindow).toBeVisible();
   await expect(page.getByTestId("files-app")).toBeVisible();
 
-  // An entry in the folder listing, by its exact name. The page also says
-  // "Projects" elsewhere — the Files sidebar's Projects heading and the
-  // desktop's Projects icon — so a bare getByText is ambiguous.
+  // An entry in the folder listing, by its exact name, so a name the page
+  // also shows elsewhere (a crumb, the status line) cannot match instead.
   const entry = (name: string) =>
     filesWindow.locator('[data-testid="files-grid"], [data-testid="files-list"]').getByText(name, { exact: true });
 

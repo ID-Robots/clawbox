@@ -2,7 +2,6 @@ import type { Locale } from "./i18n";
 import { clawkeepTranslations } from "./clawkeep-translations";
 import { desktopTranslations } from "./desktop-translations";
 import { editionTranslations } from "./edition-translations";
-import { projectBackupTranslations } from "./project-backup-translations";
 import { monitorsTranslations } from "./monitors-translations";
 import { screenshotTranslations } from "./screenshot-translations";
 
@@ -16,7 +15,6 @@ function mergeTranslations(
   desktop: Record<Locale, Record<string, string>>,
   clawkeep: Record<Locale, Record<string, string>>,
   edition: Record<Locale, Record<string, string>>,
-  projectBackup: Record<Locale, Record<string, string>>,
   monitors: Record<Locale, Record<string, string>>,
   screenshot: Record<Locale, Record<string, string>>,
 ): Record<Locale, Record<string, string>> {
@@ -27,8 +25,6 @@ function mergeTranslations(
       ...desktop[locale],
       ...clawkeep[locale],
       ...edition[locale],
-      // The Files app's GitHub backup (TASK-1358): one module for the surface.
-      ...projectBackup[locale],
       // Settings → Monitors (monitor mode): one module for the surface.
       ...monitors[locale],
       // The Screenshot app (TASK-1475): one module for the surface.
@@ -9091,7 +9087,6 @@ export const translations = mergeTranslations(
   desktopTranslations,
   clawkeepTranslations,
   editionTranslations,
-  projectBackupTranslations,
   monitorsTranslations,
   screenshotTranslations,
 );

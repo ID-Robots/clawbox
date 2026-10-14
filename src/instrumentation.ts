@@ -312,7 +312,7 @@ export async function register() {
     // that leaves a box reporting one thing and doing another. It is one
     // config read on a box that is up to date, which is every boot but one.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { runBootMigrations, dropRemovedConsentMigration, openclawWallpaperDefaultMigration, hermesWallpaperDefaultMigration, legacyWebappStorageMigration } = require('./lib/boot-migrations')
+    const { runBootMigrations, dropRemovedConsentMigration, dropRemovedProjectsMigration, openclawWallpaperDefaultMigration, hermesWallpaperDefaultMigration, legacyWebappStorageMigration } = require('./lib/boot-migrations')
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { migrateLegacyWebappStorage } = require('./lib/webapp-legacy-storage-migration')
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -357,6 +357,9 @@ export async function register() {
     const ran = await runBootMigrations(
       [
         dropRemovedConsentMigration({ set, removeFile: removeDataFile }),
+        // The removed Projects app's pinned folders and backup records: the
+        // keys only — the folders, their git history and GitHub copies stay.
+        dropRemovedProjectsMigration({ get, set }),
         // The v4 wallpaper defaults. A box updated before its edition's own
         // brand landed still holds the picture it opened on back then, and
         // nothing but an owner opening Settings would ever move it.
@@ -401,17 +404,6 @@ export async function register() {
     // The scheduler is opt-in — if its module fails to load (missing deps,
     // syntax error in dev), the rest of the app must still boot.
     console.error('[instrumentation] Could not load ClawKeep scheduler:', err instanceof Error ? err.message : err)
-  }
-  try {
-    // Projects → GitHub daily auto-backup (TASK-1358). Off for every folder
-    // until its owner turns it on; the timer only asks an hourly question.
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const projectBackupScheduler = require('./lib/project-backup-scheduler')
-    void projectBackupScheduler.start().catch((err: unknown) => {
-      console.error('[instrumentation] Project backup scheduler boot failed:', err instanceof Error ? err.message : err)
-    })
-  } catch (err) {
-    console.error('[instrumentation] Could not load the project backup scheduler:', err instanceof Error ? err.message : err)
   }
   try {
     // Old chat transcripts. Age is the only thing left to bound here -- the
