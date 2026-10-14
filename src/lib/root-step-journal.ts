@@ -71,11 +71,14 @@ export function rootStepUnit(step: string): string {
  * `journalctl` arguments for what THIS dispatch of `step` wrote.
  *
  * @param sinceMs when the caller started the step, `Date.now()`-style.
- * @param lines   how much of the window's tail to read.
+ * @param lines   how much of the window's tail to read; left out, the whole
+ *                window — for a `--grep` read, which an older journalctl
+ *                (systemd 249) would otherwise cut to the window's last N
+ *                entries BEFORE matching.
  */
 export function rootStepJournalArgs(
   step: string,
-  { sinceMs, lines }: { sinceMs: number; lines: number },
+  { sinceMs, lines }: { sinceMs: number; lines?: number },
 ): string[] {
   return [
     "-u",
@@ -89,8 +92,7 @@ export function rootStepJournalArgs(
     // 1 ms after a marker excludes it and 1 ms before includes it.
     "--since",
     `@${(sinceMs / 1000).toFixed(3)}`,
-    "-n",
-    String(lines),
+    ...(lines === undefined ? [] : ["-n", String(lines)]),
     "--no-pager",
     "-o",
     "cat",

@@ -43,7 +43,7 @@ import { applyClawaiToHermes } from "@/lib/hermes-clawai";
 import { ensureHermesGateway, retireHermesUserGateway, setHermesTelegramToken } from "@/lib/hermes-telegram";
 import { memAvailableMb } from "@/lib/mem-available";
 import { carryMemorySourcesTo } from "@/lib/memory-index-local";
-import { findOpenclawBin, readConfig, restartGateway, setTelegramToken } from "@/lib/openclaw-config";
+import { GATEWAY_COLD_START_WAIT_MS, findOpenclawBin, readConfig, restartGateway, setTelegramToken } from "@/lib/openclaw-config";
 import { freeBytes } from "@/lib/project-import";
 import { rootStepUnit } from "@/lib/root-step-journal";
 import { isUpdateLocked } from "@/lib/update-lock";
@@ -367,9 +367,15 @@ export async function latestSwapPhase(invocationId: string): Promise<SwapPhase |
   const match = `_SYSTEMD_INVOCATION_ID=${invocationId}`;
   let stdout: string;
   try {
+    // No `-n` beside `-g`: the grep is bounded already — the step prints one
+    // marker per phase — and an older journalctl (the device's is systemd
+    // 249) positions on the invocation's last N entries BEFORE the pattern
+    // filters them, which would leave out a marker its sub-step followed with
+    // a dozen lines of its own. The route no longer depends on it either:
+    // `reach` fills in what a finished step passed through.
     ({ stdout } = await execFile(
       "/usr/bin/journalctl",
-      [match, "-o", "cat", "--no-pager", "-g", PHASE_GREP, "-n", String(SWAP_PHASES.length * 2)],
+      [match, "-o", "cat", "--no-pager", "-g", PHASE_GREP],
       { timeout: 10_000 },
     ));
   } catch {
@@ -394,6 +400,12 @@ export async function latestSwapPhase(invocationId: string): Promise<SwapPhase |
 export interface SwapPhaseFollower {
   /** A journal line from the follow: the phase it named, or null for a plain line. */
   onLine(line: string): SwapPhase | null;
+  /**
+   * The route KNOWS the step got this far — it returned with the lock
+   * flipped — so every phase up to it is announced that the journal scans
+   * missed. Forward-only, like a marker.
+   */
+  reach(phase: SwapPhase): void;
   /** Resolves once every scan a line started has finished — before the route speaks after the follow. */
   settled(): Promise<void>;
 }
@@ -451,6 +463,7 @@ export function swapPhaseFollower(
         .catch(() => {});
       return null;
     },
+    reach: advanceTo,
     settled: () => chain,
   };
 }
@@ -850,7 +863,11 @@ export async function carryOverAfterSwap(target: Harness, emit: SwapEmit): Promi
       const status = await ensureHermesGateway();
       serving = status.running && status.applied;
     } else {
-      await restartGateway();
+      // A COLD start: the step has just installed and provisioned this
+      // gateway, so it gets the installer's own readiness budget, not the
+      // 30 s a warm restart does — that wait called a gateway that was up
+      // 35.5 s later "did not come back" (2026-10-14).
+      await restartGateway({ readyWaitMs: GATEWAY_COLD_START_WAIT_MS });
       serving = true;
     }
   } catch (err) {
