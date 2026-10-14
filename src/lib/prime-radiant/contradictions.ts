@@ -7,9 +7,14 @@
  * paired with its k = 5 nearest neighbours on OTHER pages. Measured on a
  * 50,000-claim vault, that blocking found every planted contradiction at
  * k = 5, where pairing claims by shared rare words found three in ten. The
- * pairs then go to the Flash judge, 40 a call, which answers
+ * pairs then go to the Flash judge in small batches ({@link JUDGE_BATCH_PAIRS}
+ * a call, several in flight), which answers
  * `contradiction | compatible | unsure` for each; the first and the last
- * become review items (a person decides, never the judge).
+ * become review items (a person decides, never the judge). A batch is small
+ * so that one answer the model botches costs only that batch: a call that
+ * comes back with no readable verdict is asked once more as two halves, what
+ * still fails waits for the next pass, and a pair the answer leaves out or
+ * garbles fails alone.
  *
  * Two caches keep a nightly pass cheap: a claim's vector is kept by the hash
  * of its text and the embedder's identity (`claim_embeddings`), and a pair's
@@ -24,16 +29,21 @@
 
 import { processStore } from "@/lib/process-store";
 import { estimateUsd, type CostRates } from "./cost-rates";
-import { completeWithRetry, FlashCallError, flashClient, stubEnabled, type FlashClient, type RetryOptions } from "./flash-client";
+import { completeWithRetry, FlashCallError, flashClient, stubEnabled, type FlashClient, type FlashResponse, type RetryOptions } from "./flash-client";
 import { recordCost } from "./ingest-store";
-import { buildJudgePrompt, JUDGE_VERDICTS, parseJudgeResponse, type JudgeVerdict } from "./judge";
+import { buildJudgePrompt, JudgeParseError, JUDGE_VERDICTS, parseJudgeResponse, type JudgeVerdict } from "./judge";
 import { redactText } from "./redact";
 import { addReviewItem, type ReviewItem } from "./review-store";
 import { runInTransaction, stateDbExists, withStateDb } from "./state-db";
 import type { VaultSnapshot } from "./vault";
 
 export const KNN_K = 5;
-export const JUDGE_BATCH_PAIRS = 40;
+/**
+ * Pairs a judge call carries. Small on purpose: on a real box one call of 67
+ * pairs came back unreadable and the whole pass found nothing.
+ */
+export const JUDGE_BATCH_PAIRS = 12;
+/** Judge calls in flight unless the caller says otherwise (the nightly pass passes the settings' parallelism). */
 export const JUDGE_PARALLEL = 8;
 export const JUDGE_MAX_TOKENS = 8_000;
 /** The most claims one pass holds vectors for (~80 MiB of float32 at 1,024 dimensions). */
@@ -253,6 +263,10 @@ export interface ContradictionPassResult {
   /** Pairs the judge was asked about this pass (the rest came from the cache). */
   judged: number;
   calls: number;
+  /** Judge batches that gave no verdict even after the half-size retry; their pairs wait for the next pass. */
+  failedBatches: number;
+  /** Pairs left unjudged this pass (failed batches, and pairs an answer left out or garbled). */
+  deferredPairs: number;
   usdEstimate: number;
   findings: ContradictionFinding[];
   /** Review items raised (new ones and ones already waiting). */
@@ -275,6 +289,8 @@ export interface ContradictionPassOptions {
   signal?: AbortSignal;
   now?: () => Date;
   k?: number;
+  /** Judge calls in flight (default {@link JUDGE_PARALLEL}). */
+  parallel?: number;
   /** Raise review items for the findings (default true). */
   raiseItems?: boolean;
 }
@@ -367,6 +383,8 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
     pairs: 0,
     judged: 0,
     calls: 0,
+    failedBatches: 0,
+    deferredPairs: 0,
     usdEstimate: 0,
     findings: [],
     reviewItems: [],
@@ -429,51 +447,94 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
   const known = readJudged(options.stateVault, hashes);
   const ask = pairs.flatMap((p, n) => (known.has(hashes[n]) ? [] : [n]));
 
-  // The judge, 40 pairs a call, a few calls in flight.
+  // The judge, a small batch a call, a few calls in flight.
   const client = options.client ?? flashClient();
   const rates = options.rates;
   const batches: number[][] = [];
   for (let at = 0; at < ask.length; at += JUDGE_BATCH_PAIRS) batches.push(ask.slice(at, at + JUDGE_BATCH_PAIRS));
   const learned: Array<{ hash: string; verdict: JudgeVerdict; why: string }> = [];
+  const failures = new Map<string, number>();
   let stop: string | null = null;
+
+  /** One call: whether it gave any verdict, or why not. Only a refused credential, plan or abort throws. */
+  async function judgeOnce(batch: readonly number[]): Promise<{ ok: true } | { ok: false; kind: string }> {
+    const { system, user } = buildJudgePrompt(batch.map((n) => ({ a: claims[pairs[n].a].text, b: claims[pairs[n].b].text })));
+    let response: FlashResponse;
+    try {
+      ({ response } = await completeWithRetry(client, { system, user, maxTokens: JUDGE_MAX_TOKENS, signal: options.signal }, options.retry));
+    } catch (err) {
+      const e = err instanceof FlashCallError ? err : null;
+      if (e && (e.kind === "no_credential" || e.kind === "auth" || e.kind === "refused" || e.kind === "aborted")) throw e;
+      return { ok: false, kind: e?.kind ?? "error" };
+    }
+    const usd = estimateUsd(response.model, response.usage, rates);
+    result.calls += 1;
+    result.usdEstimate += usd;
+    try {
+      recordCost(options.stateVault, {
+        runId: options.runId ?? null,
+        operation: "contradiction-judge",
+        model: response.model,
+        tokensIn: response.usage.promptTokens,
+        tokensOut: response.usage.completionTokens,
+        usdEstimate: usd,
+        at: now().toISOString(),
+      });
+    } catch {
+      /* the cost table is a record, not a gate */
+    }
+    let verdicts: ReturnType<typeof parseJudgeResponse>;
+    try {
+      verdicts = parseJudgeResponse(response.text, batch.length);
+    } catch (err) {
+      if (err instanceof JudgeParseError) return { ok: false, kind: "bad_response" };
+      throw err;
+    }
+    for (const [i, v] of verdicts) {
+      const n = batch[i];
+      known.set(hashes[n], v);
+      learned.push({ hash: hashes[n], verdict: v.verdict, why: v.why });
+    }
+    result.judged += verdicts.size;
+    return { ok: true };
+  }
+
+  function batchFailed(kind: string): void {
+    result.failedBatches += 1;
+    failures.set(kind, (failures.get(kind) ?? 0) + 1);
+  }
+
   await pool(
     batches.map((batch) => async () => {
       if (stop || options.signal?.aborted) return;
-      const { system, user } = buildJudgePrompt(batch.map((n) => ({ a: claims[pairs[n].a].text, b: claims[pairs[n].b].text })));
       try {
-        const { response } = await completeWithRetry(client, { system, user, maxTokens: JUDGE_MAX_TOKENS, signal: options.signal }, options.retry);
-        const usd = estimateUsd(response.model, response.usage, rates);
-        result.calls += 1;
-        result.usdEstimate += usd;
-        try {
-          recordCost(options.stateVault, {
-            runId: options.runId ?? null,
-            operation: "contradiction-judge",
-            model: response.model,
-            tokensIn: response.usage.promptTokens,
-            tokensOut: response.usage.completionTokens,
-            usdEstimate: usd,
-            at: now().toISOString(),
-          });
-        } catch {
-          /* the cost table is a record, not a gate */
+        const first = await judgeOnce(batch);
+        if (first.ok) return;
+        // An unreadable answer is asked once more, as two halves; anything else waits for the next pass.
+        if (first.kind !== "bad_response" || batch.length < 2) {
+          batchFailed(first.kind);
+          return;
         }
-        const verdicts = parseJudgeResponse(response.text, batch.length);
-        for (const [i, v] of verdicts) {
-          const n = batch[i];
-          known.set(hashes[n], v);
-          learned.push({ hash: hashes[n], verdict: v.verdict, why: v.why });
+        const mid = Math.ceil(batch.length / 2);
+        for (const half of [batch.slice(0, mid), batch.slice(mid)]) {
+          if (stop || options.signal?.aborted) return;
+          const again = await judgeOnce(half);
+          if (!again.ok) batchFailed(again.kind);
         }
-        result.judged += verdicts.size;
       } catch (err) {
-        const e = err instanceof FlashCallError ? err : null;
-        // A refused credential or plan stops the pass; a batch that kept failing is retried next pass.
-        if (e && (e.kind === "no_credential" || e.kind === "auth" || e.kind === "refused" || e.kind === "aborted")) stop = e.kind;
-        else result.notes.push(`A judge call failed (${e?.kind ?? "error"}); its pairs are judged next pass.`);
+        // A refused credential or plan, or an abort, stops the pass.
+        stop = err instanceof FlashCallError ? err.kind : "error";
       }
     }),
-    JUDGE_PARALLEL,
+    Math.max(1, options.parallel ?? JUDGE_PARALLEL),
   );
+  for (const [kind, count] of failures) {
+    result.notes.push(
+      count === 1
+        ? `A judge call failed (${kind}); its pairs are judged next pass.`
+        : `${count} judge calls failed (${kind}); their pairs are judged next pass.`,
+    );
+  }
   if (stop) {
     result.skipped = stop === "aborted" ? "aborted" : "judge_unavailable";
     result.notes.push(`The judge stopped: ${stop}.`);
@@ -483,6 +544,8 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
   } catch {
     result.notes.push("The verdicts could not be cached; the next pass asks again.");
   }
+
+  result.deferredPairs = ask.filter((n) => !known.has(hashes[n])).length;
 
   pairs.forEach((p, n) => {
     const v = known.get(hashes[n]);

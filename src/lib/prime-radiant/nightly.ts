@@ -69,7 +69,7 @@ export interface NightlySummary {
   changedCount: number;
   ingest: { jobId: string; status: string; pages: number; failed: number } | { skipped: string };
   lint: { errors: number; warnings: number; checked: number };
-  contradictions: Pick<ContradictionPassResult, "claims" | "queried" | "embedded" | "pairs" | "judged" | "calls" | "usdEstimate" | "skipped"> & {
+  contradictions: Pick<ContradictionPassResult, "claims" | "queried" | "embedded" | "pairs" | "judged" | "calls" | "failedBatches" | "deferredPairs" | "usdEstimate" | "skipped"> & {
     findings: number;
   };
   opus: Pick<OpusTierResult, "queued" | "reviewed" | "pending" | "calls" | "usdEstimate" | "capUsd" | "stopped"> | { skipped: string };
@@ -267,7 +267,19 @@ function emptySummary(): NightlySummary {
     changedCount: 0,
     ingest: { skipped: "not_run" },
     lint: { errors: 0, warnings: 0, checked: 0 },
-    contradictions: { claims: 0, queried: 0, embedded: 0, pairs: 0, judged: 0, calls: 0, usdEstimate: 0, skipped: "not_run", findings: 0 },
+    contradictions: {
+      claims: 0,
+      queried: 0,
+      embedded: 0,
+      pairs: 0,
+      judged: 0,
+      calls: 0,
+      failedBatches: 0,
+      deferredPairs: 0,
+      usdEstimate: 0,
+      skipped: "not_run",
+      findings: 0,
+    },
     opus: { skipped: "not_run" },
     gate: { touched: [] },
     reviewItems: { raised: 0 },
@@ -335,6 +347,7 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
         embedder: deps.embedder,
         rates,
         now,
+        parallel: settings.ingest.parallel,
       });
       summary.contradictions = {
         claims: pass.claims,
@@ -343,6 +356,8 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
         pairs: pass.pairs,
         judged: pass.judged,
         calls: pass.calls,
+        failedBatches: pass.failedBatches,
+        deferredPairs: pass.deferredPairs,
         usdEstimate: pass.usdEstimate,
         skipped: pass.skipped,
         findings: pass.findings.length,
