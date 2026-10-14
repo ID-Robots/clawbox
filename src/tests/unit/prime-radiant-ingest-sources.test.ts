@@ -121,6 +121,18 @@ describe("scanFolders", () => {
     expect(scan.files.map((f) => path.relative(docs, f.abs)).sort()).toEqual(["a.md", "sub/b.md"]);
   });
 
+  it("hands the files back in path order, whatever order the filesystem lists them in", async () => {
+    // Forty names: the directory's own listing order (hash order on ext4) is
+    // all but certain to differ from the sorted one somewhere.
+    const names: string[] = [];
+    for (let i = 0; i < 40; i++) names.push(`doc-${(i * 7919) % 1000}.md`, `sub-${i % 3}/item-${i}.md`);
+    for (const rel of names) write(rel);
+    const scan = await scanFolders([docs]);
+    const got = scan.files.map((f) => path.relative(docs, f.abs));
+    expect(got).toEqual([...got].sort((a, b) => (path.join(docs, a) < path.join(docs, b) ? -1 : 1)));
+    expect(got).toHaveLength(names.length);
+  });
+
   it("stops at the file cap with a note", async () => {
     for (let i = 0; i < 5; i++) write(`f${i}.md`);
     const scan = await scanFolders([docs], { maxFiles: 3 });

@@ -126,6 +126,7 @@ export async function scanFolders(
   };
   for (const folder of folders) {
     const budget = newWalkBudget();
+    const firstOfFolder = files.length;
     for await (const abs of walkFiles(path.resolve(folder), budget, 0, { skipDir })) {
       options.signal?.throwIfAborted();
       const ext = path.extname(abs).toLowerCase();
@@ -141,6 +142,11 @@ export async function scanFolders(
       }
       files.push({ abs, label: labelOf(abs), ext });
     }
+    // The walk lists a directory in the filesystem's own order (hash order on
+    // ext4), which differs from box to box; a job's files, its batches and its
+    // file list are handed out in path order instead, so the same folder is
+    // always ingested the same way.
+    sortByPath(files, firstOfFolder);
     const label = labelOf(folder);
     if (budget.rootUnreadable) notes.push(`${label} could not be read.`);
     else if (budget.unreadable > 0) notes.push(`${budget.unreadable} folder(s) inside ${label} could not be read.`);
@@ -151,6 +157,12 @@ export async function scanFolders(
     }
   }
   return { files, notes, unsupported, excluded, truncated };
+}
+
+/** Sorts `files[from..]` in place by absolute path (code-unit order, locale-free). */
+function sortByPath(files: ScannedFile[], from: number): void {
+  const tail = files.splice(from).sort((a, b) => (a.abs < b.abs ? -1 : a.abs > b.abs ? 1 : 0));
+  files.push(...tail);
 }
 
 /** The bytes of one file through one no-follow handle, with their hash. */
