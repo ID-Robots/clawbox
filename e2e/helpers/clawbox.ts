@@ -27,8 +27,6 @@ type FileEntry = {
 
 type FileTree = Record<string, FileEntry[]>;
 
-type ProjectFolderEntry = { path: string; name: string; missing?: boolean };
-
 type StoreCatalogApp = {
   name: string;
   slug: string;
@@ -48,13 +46,6 @@ type MockOptions = {
   kvEntries?: Record<string, string>;
   wifiNetworks?: WifiNetwork[];
   files?: FileTree;
-  /**
-   * The Files app's Projects (`/setup-api/project-folders`): what is pinned
-   * and what the box suggests. Paths are browse-relative, like `files` keys;
-   * a pin is accepted only for a folder `files` holds.
-   */
-  projectFolders?: ProjectFolderEntry[];
-  projectSuggestions?: ProjectFolderEntry[];
   storeApps?: StoreCatalogApp[];
   timeoutCapMs?: number;
   /**
@@ -325,8 +316,6 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
   const kvEntries: Record<string, string> = clone(options.kvEntries ?? {});
   const desktopState = options.desktopState ?? createDesktopStateMock();
   const files = clone(options.files ?? DEFAULT_FILES);
-  let projectFolders: ProjectFolderEntry[] = clone(options.projectFolders ?? []);
-  let projectSuggestions: ProjectFolderEntry[] = clone(options.projectSuggestions ?? []);
   /** Selection ZIPs the Files app asked for, by ticket. */
   const zipTickets = new Map<string, { name: string }>();
   let dismissalFingerprint: string | null = null;
@@ -1353,38 +1342,6 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
       return;
     }
 
-    if (path === "/setup-api/project-folders") {
-      if (method === "GET") {
-        await fulfillJson(route, { folders: clone(projectFolders), suggestions: clone(projectSuggestions), max: 50 });
-        return;
-      }
-      if (method === "POST") {
-        const payload = await readRequestJson<{ path?: string }>(route);
-        const rel = normalizeDir((payload.path ?? "").replace(/^~\/?/, ""));
-        if (!rel) {
-          await fulfillJson(route, { error: "The home folder is already in the sidebar", code: "is_root" }, 400);
-          return;
-        }
-        if (!files[rel]) {
-          await fulfillJson(route, { error: "There is no folder at that path", code: "not_found" }, 404);
-          return;
-        }
-        const folder = { path: rel, name: splitPath(rel).name };
-        const added = !projectFolders.some((f) => f.path === rel);
-        if (added) projectFolders = [...projectFolders, folder];
-        projectSuggestions = projectSuggestions.filter((f) => f.path !== rel);
-        await fulfillJson(route, { ok: true, added, folder, folders: clone(projectFolders) });
-        return;
-      }
-      if (method === "DELETE") {
-        const rel = normalizeDir(url.searchParams.get("path"));
-        const removed = projectFolders.some((f) => f.path === rel);
-        projectFolders = projectFolders.filter((f) => f.path !== rel);
-        await fulfillJson(route, { ok: true, removed, folders: clone(projectFolders) });
-        return;
-      }
-    }
-
     if (path === "/setup-api/files") {
       const dir = normalizeDir(url.searchParams.get("dir"));
 
@@ -1511,13 +1468,7 @@ export async function installClawboxMocks(page: Page, options: MockOptions = {})
             const to = dir ? `${dir}/${target}` : target;
             removeFileEntry(files, parent, entry.name);
             upsertFileEntry(files, dir, { ...entry, name: target });
-            if (entry.type === "directory") {
-              renameDirectory(files, rel, to);
-              projectFolders = projectFolders.map((f) =>
-                f.path === rel || f.path.startsWith(`${rel}/`)
-                  ? { ...f, path: `${to}${f.path.slice(rel.length)}`, name: f.path === rel ? target : f.name }
-                  : f);
-            }
+            if (entry.type === "directory") renameDirectory(files, rel, to);
             moved.push({ from: rel, to, name: target });
           }
           await fulfillJson(route, { ok: true, moved, skipped, failed: [] });

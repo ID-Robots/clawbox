@@ -3277,7 +3277,7 @@ export default function CodingAgentApp() {
                           type="button"
                           onClick={() => void backup({ projectId: p.kind === "codeProject" ? p.folder : null, directory: p.directory }, `project-${p.folder}`)}
                           disabled={busy === `backup-project-${p.folder}`}
-                          data-testid="coding-agent-project-backup"
+                          data-testid="coding-agent-project-github-backup"
                           className="text-[11px] text-[var(--text-secondary)] hover:text-white underline decoration-white/20 disabled:opacity-50"
                         >
                           {busy === `backup-project-${p.folder}` ? t("codingAgent.backupBusy") : t("codingAgent.backup")}

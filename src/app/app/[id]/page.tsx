@@ -564,8 +564,6 @@ export default function StandaloneAppPage() {
         return <CodingAgentApp />;
       case "files":
         return <FilesApp />;
-      case "projects":
-        return <FilesApp initialPlace="projects" />;
       case "memory-shard":
         return <MemoryShardApp />;
       case "browser":

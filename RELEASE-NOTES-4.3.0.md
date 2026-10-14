@@ -345,3 +345,6 @@ accounts get a long list of fixes.
   folder by hand; the work stays on the run's branch, as before.
 - A dismissal of the 4.2 card is kept but no longer hides anything, and a tab
   still showing the 4.2 card cannot dismiss the 4.3 one.
+- The Projects app has been removed, together with its pinned folders and the
+  GitHub backup in Files. Your folders stay where they are and still open in
+  Files; copies already on GitHub stay there, and their daily backup stops.

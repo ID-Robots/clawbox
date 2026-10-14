@@ -43,7 +43,6 @@ import ts from "typescript";
 import { clawkeepTranslations } from "../src/lib/clawkeep-translations";
 import { desktopTranslations } from "../src/lib/desktop-translations";
 import { editionTranslations } from "../src/lib/edition-translations";
-import { projectBackupTranslations } from "../src/lib/project-backup-translations";
 import { monitorsTranslations } from "../src/lib/monitors-translations";
 import { screenshotTranslations } from "../src/lib/screenshot-translations";
 import { translations } from "../src/lib/translations";
@@ -73,7 +72,6 @@ const MODULES: { name: string; table: Record<Locale, Record<string, string>> }[]
   { name: "translations.ts", table: translations },
   { name: "clawkeep-translations", table: clawkeepTranslations },
   { name: "edition-translations", table: editionTranslations },
-  { name: "project-backup-translations", table: projectBackupTranslations },
   { name: "monitors-translations", table: monitorsTranslations },
   { name: "screenshot-translations", table: screenshotTranslations },
 ];
