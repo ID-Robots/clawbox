@@ -985,3 +985,173 @@ describe("the team's pull request on the board", () => {
     expect(() => lib.reopenForCi(b, SYSTEM, "t1", "again")).toThrow(/only a complete task/);
   });
 });
+
+describe("a board's time budget", () => {
+  const BUDGET = {
+    deadline: "2026-10-15T05:00:00.000Z", label: "Until tomorrow morning", preset: "morning", source: "picker", setAt: "2026-10-14T15:00:00.000Z",
+  } as const;
+
+  it("is kept on the board it was started with, and read back off disk as it was written", () => {
+    const board = lib.createBoard({ goal: "Scrape until morning", projectId: null, directory: "/p", source: "owner", timeBudget: { ...BUDGET } }, OWNER);
+    expect(board.timeBudget).toEqual(BUDGET);
+    lib.saveBoard(board);
+    expect(lib.loadBoard(board.id)?.timeBudget).toEqual(BUDGET);
+  });
+
+  it("is ABSENT on a board without one — and on one whose file holds something this box could not have written", () => {
+    const plain = lib.createBoard({ goal: "Build it", projectId: null, directory: "/p", source: "owner" }, OWNER);
+    expect(plain).not.toHaveProperty("timeBudget");
+    lib.saveBoard(plain);
+    expect(lib.loadBoard(plain.id)).not.toHaveProperty("timeBudget");
+    const forged = lib.createBoard({ goal: "Build it", projectId: null, directory: "/p", source: "owner", timeBudget: { ...BUDGET, preset: "forever" } as never }, OWNER);
+    expect(forged).not.toHaveProperty("timeBudget");
+    // On disk too: a file whose budget was hand-edited into something no box writes is read back with none.
+    for (const bad of [{ ...BUDGET, preset: "forever" }, { ...BUDGET, deadline: "tomorrow" }, "1h"]) {
+      (plain as unknown as { timeBudget: unknown }).timeBudget = bad;
+      lib.saveBoard(plain);
+      expect(lib.loadBoard(plain.id), JSON.stringify(bad)).not.toHaveProperty("timeBudget");
+    }
+  });
+});
+
+describe("a budgeted team's plan and time on the board", () => {
+  const BUDGET = {
+    deadline: "2026-10-15T05:00:00.000Z", label: "Until tomorrow morning", preset: "morning", source: "picker", setAt: "2026-10-14T15:00:00.000Z",
+  } as const;
+  const MIN = 60_000;
+  const timed = () => lib.createBoard({ goal: "Scrape until morning", projectId: null, directory: "/p", source: "owner", timeBudget: { ...BUDGET } }, OWNER);
+  const raw = (id: string) => JSON.parse(fs.readFileSync(path.join(root, "data", "coding-team", `${id}.json`), "utf8"));
+  const rewrite = (id: string, edit: (file: Record<string, unknown>) => void) => {
+    const file = raw(id);
+    edit(file);
+    fs.writeFileSync(path.join(root, "data", "coding-team", `${id}.json`), JSON.stringify(file));
+  };
+
+  it("keeps a task's estimate, place and nice-to-have mark, and reads them back off disk", () => {
+    const b = timed();
+    const t1 = lib.postTask(b, PLANNER, { task_description: "Build the scraper", estimateMs: 40 * MIN, priority: 1 });
+    const t2 = lib.postTask(b, PLANNER, { task_description: "Polish the CSV", estimateMs: 15 * MIN, priority: 2, optional: true });
+    expect(t1).toMatchObject({ estimateMs: 40 * MIN, priority: 1 });
+    expect(t1).not.toHaveProperty("optional");
+    expect(t2).toMatchObject({ estimateMs: 15 * MIN, priority: 2, optional: true });
+    expect(b.log.find((e) => e.task_id === "t2")?.payload).toMatchObject({ estimateMs: 15 * MIN, priority: 2, optional: true });
+    lib.saveBoard(b);
+    const back = lib.loadBoard(b.id)!;
+    expect(back.tasks.map((t) => [t.estimateMs, t.priority, t.optional])).toEqual([[40 * MIN, 1, undefined], [15 * MIN, 2, true]]);
+  });
+
+  it("leaves a task without them exactly as before — and refuses them on a team without a budget", () => {
+    const plain = board();
+    const t1 = lib.postTask(plain, PLANNER, { task_description: "Scaffold the page" });
+    for (const key of ["estimateMs", "priority", "optional"]) expect(t1).not.toHaveProperty(key);
+    expect(plain.log.find((e) => e.task_id === "t1")?.payload).toEqual({ depends_on: [], files_hint: [] });
+    expect(() => lib.postTask(plain, PLANNER, { task_description: "x", estimateMs: MIN })).toThrow(/time budget/);
+    expect(() => lib.postTask(plain, PLANNER, { task_description: "x", optional: false })).toThrow(/time budget/);
+    const b = timed();
+    expect(() => lib.postTask(b, PLANNER, { task_description: "x", estimateMs: -5 })).toThrow(/estimate/);
+    expect(() => lib.postTask(b, PLANNER, { task_description: "x", estimateMs: 15 * 24 * 60 * MIN })).toThrow(/estimate/);
+    expect(() => lib.postTask(b, PLANNER, { task_description: "x", priority: 0 })).toThrow(/priority/);
+    expect(b.tasks).toHaveLength(0);
+  });
+
+  it("drops what a hand-edited file holds that this box would not write, and keeps the rest", () => {
+    const b = timed();
+    lib.postTask(b, PLANNER, { task_description: "Build the scraper", estimateMs: 40 * MIN, priority: 1 });
+    lib.saveBoard(b);
+    rewrite(b.id, (file) => {
+      Object.assign((file.tasks as Record<string, unknown>[])[0], { estimateMs: "forty", priority: 1.5, optional: "yes" });
+    });
+    const t1 = lib.loadBoard(b.id)!.tasks[0];
+    for (const key of ["estimateMs", "priority", "optional"]) expect(t1).not.toHaveProperty(key);
+    expect(t1.task_description).toBe("Build the scraper");
+  });
+
+  it("leaves a pending task out to fit the time: retired, skipped with why, never against the lead's own retirements", () => {
+    const b = timed();
+    lib.postTask(b, PLANNER, { task_description: "Build the scraper", estimateMs: 40 * MIN, priority: 1 });
+    lib.postTask(b, PLANNER, { task_description: "Write the e2e suite", depends_on: ["t1"], estimateMs: 90 * MIN, priority: 2 });
+    lib.postTask(b, PLANNER, { task_description: "Chart it", estimateMs: 10 * MIN, priority: 3 });
+    lib.postTask(b, PLANNER, { task_description: "Map it", estimateMs: 10 * MIN, priority: 4 });
+    for (const who of [PLANNER, worker("run-aaaaaaaa"), REVIEWER, OWNER]) {
+      expect(() => lib.retireForTime(b, who, "t2", "x")).toThrow(lib.BoardAccessError);
+    }
+    expect(() => lib.retireForTime(board(), SYSTEM, "t1", "x")).toThrow(/time budget/);
+    const cut = lib.retireForTime(b, SYSTEM, "t2", "does not fit before the cutoff: Write the e2e suite");
+    expect(cut?.status).toBe("retired");
+    expect(b.log.at(-2)).toMatchObject({ type: "retire", task_id: "t2", message: "Task t2 left out to fit the time: does not fit before the cutoff: Write the e2e suite" });
+    expect(b.skipped?.map((s) => [s.taskId, s.by, s.text])).toEqual([["t2", "fit", "does not fit before the cutoff: Write the e2e suite"]]);
+    // Said once: a second cut of the same task changes nothing.
+    expect(lib.retireForTime(b, SYSTEM, "t2", "again")).toBeNull();
+    expect(b.skipped).toHaveLength(1);
+    // Out of the way and no gap: t1 done, t2 cut, t3 and t4 retired by the lead → all complete.
+    b.tasks[0].status = "complete";
+    expect(lib.allComplete(b)).toBe(false);
+    // The lead may still retire its full allowance: the cut is not one of its own.
+    lib.retireTask(b, PLANNER, "t3", "the goal no longer needs it");
+    lib.retireTask(b, PLANNER, "t4", "nor this");
+    expect(lib.allComplete(b)).toBe(true);
+  });
+
+  it("records what is left out to fit the time: the system's alone, on a budgeted team, one note naming them all", () => {
+    const b = timed();
+    lib.postTask(b, PLANNER, { task_description: "Build the scraper", estimateMs: 40 * MIN, priority: 1 });
+    lib.postTask(b, PLANNER, { task_description: "Write the e2e suite", estimateMs: 90 * MIN, priority: 2 });
+    for (const who of [PLANNER, worker("run-aaaaaaaa"), REVIEWER, OWNER]) {
+      expect(() => lib.recordTimeSkips(b, who, [{ text: "x", by: "planner" }])).toThrow(lib.BoardAccessError);
+    }
+    expect(() => lib.recordTimeSkips(b, SYSTEM, [{ taskId: "t9", text: "x", by: "fit" }])).toThrow(/not on the board/);
+    expect(() => lib.recordTimeSkips(b, SYSTEM, [{ text: "   ", by: "planner" }])).toThrow(/line/);
+    expect(() => lib.recordTimeSkips(board(), SYSTEM, [{ text: "x", by: "planner" }])).toThrow(/time budget/);
+    expect(b).not.toHaveProperty("skipped");
+    const added = lib.recordTimeSkips(b, SYSTEM, [
+      { text: "Polish — not needed tonight", by: "planner" },
+      { taskId: "t2", text: "does not fit before the cutoff: Write the e2e suite", by: "fit" },
+    ]);
+    expect(added.map((s) => [s.taskId, s.by])).toEqual([[undefined, "planner"], ["t2", "fit"]]);
+    expect(b.log.at(-1)).toMatchObject({ type: "note", message: expect.stringMatching(/^Left out to fit the time: Polish — not needed tonight; t2 \(does not fit/) });
+    expect(b.alerts).toBe(0);
+    lib.saveBoard(b);
+    expect(lib.loadBoard(b.id)?.skipped).toEqual(added);
+  });
+
+  it("records extra items and why the time stopped — the first reason stands", () => {
+    const b = timed();
+    lib.postTask(b, PLANNER, { task_description: "Build the scraper", estimateMs: 40 * MIN, priority: 1 });
+    expect(() => lib.recordTeamExtra(b, PLANNER, { kind: "tests", summary: "x" })).toThrow(lib.BoardAccessError);
+    expect(() => lib.recordTeamExtra(b, SYSTEM, { kind: "refactor everything", summary: "x" })).toThrow(/allowlist/);
+    expect(() => lib.recordTeamExtra(b, SYSTEM, { kind: "tests", summary: "x", runId: "nope" })).toThrow(/not a run id/);
+    expect(() => lib.recordTeamExtra(board(), SYSTEM, { kind: "tests", summary: "x" })).toThrow(/time budget/);
+    const extra = lib.recordTeamExtra(b, SYSTEM, { kind: "Edge cases", summary: "  empty pages\nand 404s ", taskId: "t1", runId: "run-aaaaaaaa" });
+    expect(extra).toMatchObject({ kind: "edge_cases", summary: "empty pages and 404s", taskId: "t1", runId: "run-aaaaaaaa" });
+    expect(() => lib.setTimeStop(b, worker("run-aaaaaaaa"), "time")).toThrow(lib.BoardAccessError);
+    expect(() => lib.setTimeStop(b, SYSTEM, "lunch" as never)).toThrow(/reason/);
+    expect(() => lib.setTimeStop(board(), SYSTEM, "time")).toThrow(/time budget/);
+    expect(lib.setTimeStop(b, SYSTEM, "time")).toBe("time");
+    expect(lib.setTimeStop(b, OWNER, "stopped")).toBe("time");
+    expect(b.log.filter((e) => e.payload?.timeStop)).toHaveLength(1);
+    lib.saveBoard(b);
+    const back = lib.loadBoard(b.id)!;
+    expect(back.timeStop).toBe("time");
+    expect(back.extras).toEqual([extra]);
+  });
+
+  it("leaves all three ABSENT until set, and drops what a file holds that is not one", () => {
+    const b = timed();
+    lib.saveBoard(b);
+    for (const key of ["timeStop", "skipped", "extras"]) expect(lib.loadBoard(b.id)).not.toHaveProperty(key);
+    rewrite(b.id, (file) => {
+      file.timeStop = "lunch";
+      file.skipped = [{ text: "" }, "e2e", { taskId: "t01", text: "polish", at: 5 }];
+      file.extras = [{ kind: "rewrite", summary: "all of it" }, { kind: "docs", summary: "" }, { kind: "docs", summary: "README", runId: "elsewhere" }];
+    });
+    const back = lib.loadBoard(b.id)!;
+    expect(back).not.toHaveProperty("timeStop");
+    expect(back.skipped).toEqual([{ text: "polish", by: "planner", at: 5 }]);
+    expect(back.extras).toEqual([{ kind: "docs", summary: "README", at: 0 }]);
+    rewrite(b.id, (file) => {
+      file.skipped = [];
+      file.extras = "many";
+    });
+    for (const key of ["skipped", "extras"]) expect(lib.loadBoard(b.id)).not.toHaveProperty(key);
+  });
+});

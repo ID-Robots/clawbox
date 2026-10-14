@@ -46,7 +46,8 @@ import {
 import { MAX_TEAM_MESSAGE_CHARS, NOTED_REFUSALS, TEAM_MESSAGE_TARGETS, type TeamMessageRefusal, type TeamMessageTarget } from "@/lib/coding-team-messages";
 
 export type TeamMessage =
-  | { type: "task"; task_description: string; depends_on?: string[]; files_hint?: string[]; origin?: "plan" | "lead"; note?: string }
+  /** `estimateMs`, `priority` and `optional`: a budgeted plan's only (postTask refuses them on a team without a budget). */
+  | { type: "task"; task_description: string; depends_on?: string[]; files_hint?: string[]; origin?: "plan" | "lead"; note?: string; estimateMs?: number; priority?: number; optional?: boolean }
   | { type: "shape"; parallelism: number; review: ReviewMode; rationale: string }
   /** The planner's map of what the goal touches (setRepoMap): every worker and reviewer is handed it. */
   | { type: "repo_map"; files: string[]; entry_points: string[]; test_commands: string[]; gotchas: string[] }
@@ -95,6 +96,9 @@ export function validateMessage(m: unknown): string | null {
       if (msg.files_hint !== undefined && (!Array.isArray(msg.files_hint) || !msg.files_hint.every((f) => typeof f === "string"))) return "files_hint must be a list of paths.";
       if (msg.origin !== undefined && msg.origin !== "plan" && msg.origin !== "lead") return "A task's origin is plan or lead.";
       if (msg.note !== undefined && typeof msg.note !== "string") return "A task's note must be text.";
+      if (msg.estimateMs !== undefined && (typeof msg.estimateMs !== "number" || !Number.isFinite(msg.estimateMs) || msg.estimateMs <= 0)) return "A task's estimateMs is a positive number of milliseconds.";
+      if (msg.priority !== undefined && (typeof msg.priority !== "number" || !Number.isInteger(msg.priority) || msg.priority < 1)) return "A task's priority is a whole number of at least 1.";
+      if (msg.optional !== undefined && typeof msg.optional !== "boolean") return "A task's optional is true or false.";
       return null;
     case "shape":
       if (typeof msg.parallelism !== "number" || !Number.isInteger(msg.parallelism) || msg.parallelism < 1) return "A shape's parallelism is a whole number of at least 1.";

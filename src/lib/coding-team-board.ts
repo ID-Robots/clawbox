@@ -26,6 +26,8 @@
 import fs from "fs";
 import os from "os";
 import type { CiFailure } from "@/lib/coding-ci";
+import { readTimeBudget, TIME_STOP_REASONS, type TimeBudget, type TimeStopReason } from "@/lib/coding-time-budget";
+import { MAX_ESTIMATE_MS, MAX_EXTRA_SUMMARY_CHARS, readExtraKind, type ExtraWorkKind } from "@/lib/coding-time-plan";
 import path, { untraced } from "@/lib/runtime-path";
 import { randomBytes } from "crypto";
 import { DATA_DIR } from "@/lib/config-store";
@@ -68,6 +70,12 @@ export const MAX_REPO_MAP_CHARS = 2_000;
  * would do the same work once (`teamAdvice`).
  */
 export const OVERLAP_ADVICE_SHARE = 0.6;
+/** A budgeted team keeps this many things it left out to fit its time (`skipped`), the latest… */
+export const MAX_TEAM_SKIPS = 24;
+/** …and this many extra items it did with time to spare (`extras`), the latest. */
+export const MAX_TEAM_EXTRAS = 200;
+/** One skipped item's line, as the board keeps it. */
+export const MAX_SKIP_TEXT_CHARS = 300;
 /** Log lines of the kinds a teammate should hear about, quoted at the end of the digest. */
 const DIGEST_LOG_LINES = 5;
 
@@ -240,6 +248,39 @@ export interface TeamTask {
   ciReoffers: number;
   created_at: number;
   updated_at: number;
+  /**
+   * A budgeted team's plan only (coding-team-planner.ts, `parsePlan` with
+   * `timed`): the planner's estimate of the task in ms, where it listed the
+   * task (1 = the most important — the plan is cut from the bottom), and
+   * whether it marked the task a nice-to-have. Each ABSENT when unset, and on
+   * every task of a team without a budget.
+   */
+  estimateMs?: number;
+  priority?: number;
+  optional?: boolean;
+}
+
+/**
+ * Something a budgeted team left out to fit its time: a task the box cut from
+ * the bottom of the plan because the estimates did not fit before the cutoff
+ * (`by: "fit"`, with its `taskId`), or work the planner left out of the plan
+ * itself (`by: "planner"`, its own words — "the e2e suite: not needed to ship").
+ */
+export interface TeamSkip {
+  taskId?: string;
+  /** What was left out and why, on one line. */
+  text: string;
+  by: "planner" | "fit";
+  at: number;
+}
+
+/** One extra item a budgeted team did with time to spare, of a kind on the allowlist (coding-time-plan.ts EXTRA_WORK_KINDS). */
+export interface TeamExtra {
+  kind: ExtraWorkKind;
+  summary: string;
+  taskId?: string;
+  runId?: string;
+  at: number;
 }
 
 /** A task set back because a task it depends on was rejected or reopened (`holdTask`). */
@@ -421,6 +462,22 @@ export interface TeamBoard {
   updatedAt: number;
   /** When the team settled (done, failed, stopped); null while it works. */
   finishedAt: number | null;
+  /**
+   * How long the owner let the team work: an absolute deadline and the label
+   * they chose (src/lib/coding-time-budget.ts), resolved by the route that
+   * started it. ABSENT on a team without one, which works as every team did.
+   */
+  timeBudget?: TimeBudget;
+  /**
+   * A budgeted team's time, as it went (each ABSENT until set, and on a team
+   * without a budget): why its work stopped against the budget (`setTimeStop`,
+   * the first reason given stands), what it left out to fit the time
+   * (`recordTimeSkips`), and the extra items it did with time to spare
+   * (`recordTeamExtra`).
+   */
+  timeStop?: TimeStopReason;
+  skipped?: TeamSkip[];
+  extras?: TeamExtra[];
 }
 
 export class BoardAccessError extends Error {
@@ -574,9 +631,71 @@ function normalizeBoard(raw: unknown): TeamBoard | null {
     updatedAt: typeof b.updatedAt === "number" ? b.updatedAt : 0,
     finishedAt: typeof b.finishedAt === "number" ? b.finishedAt : null,
   };
+  // Re-read, never trusted; absent when the file has none this box could have written.
+  const timeBudget = readTimeBudget(b.timeBudget);
+  if (timeBudget) board.timeBudget = timeBudget;
+  // The same for the time as it went: absent when unset, never an empty list.
+  if (typeof b.timeStop === "string" && (TIME_STOP_REASONS as readonly string[]).includes(b.timeStop)) board.timeStop = b.timeStop as TimeStopReason;
+  const skipped = Array.isArray(b.skipped) ? (b.skipped as unknown[]).map(normalizeSkip).filter((s): s is TeamSkip => s !== null).slice(-MAX_TEAM_SKIPS) : [];
+  if (skipped.length) board.skipped = skipped;
+  const extras = Array.isArray(b.extras) ? (b.extras as unknown[]).map(normalizeExtra).filter((x): x is TeamExtra => x !== null).slice(-MAX_TEAM_EXTRAS) : [];
+  if (extras.length) board.extras = extras;
   // Worked out again rather than trusted from the file: they are the board's, not the file's.
   board.metrics = teamMetrics(board);
   return board;
+}
+
+/** A skipped item off disk, or null: its line, who left it out, and the task when it names one on the board's numbering. */
+function normalizeSkip(raw: unknown): TeamSkip | null {
+  if (!raw || typeof raw !== "object") return null;
+  const s = raw as Record<string, unknown>;
+  const text = typeof s.text === "string" ? clip(oneLine(s.text), MAX_SKIP_TEXT_CHARS) : "";
+  if (!text) return null;
+  const taskId = typeof s.taskId === "string" && TASK_ID_RE.test(s.taskId) ? s.taskId : null;
+  const by = s.by === "planner" || s.by === "fit" ? s.by : taskId ? "fit" : "planner";
+  return { ...(taskId ? { taskId } : {}), text, by, at: finiteOr0(s.at) };
+}
+
+/** An extra item off disk, or null: a kind off the allowlist, or no summary, is none. */
+function normalizeExtra(raw: unknown): TeamExtra | null {
+  if (!raw || typeof raw !== "object") return null;
+  const x = raw as Record<string, unknown>;
+  const kind = readExtraKind(x.kind);
+  const summary = typeof x.summary === "string" ? clip(oneLine(x.summary), MAX_EXTRA_SUMMARY_CHARS) : "";
+  if (!kind || !summary) return null;
+  return {
+    kind,
+    summary,
+    ...(typeof x.taskId === "string" && TASK_ID_RE.test(x.taskId) ? { taskId: x.taskId } : {}),
+    ...(typeof x.runId === "string" && RUN_ID_RE.test(x.runId) ? { runId: x.runId } : {}),
+    at: finiteOr0(x.at),
+  };
+}
+
+/** A planner's estimate as a task keeps it: a positive whole number of ms up to the longest budget there is, or null. */
+function readEstimateMs(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) && v > 0 && v <= MAX_ESTIMATE_MS ? Math.round(v) : null;
+}
+
+/** A task's place in the plan: 1 (the most important) to MAX_TASK_NUMBER, or null. */
+function readPriority(v: unknown): number | null {
+  return typeof v === "number" && Number.isInteger(v) && v >= 1 && v <= MAX_TASK_NUMBER ? v : null;
+}
+
+/** The highest task number the board's ids spell (t999). */
+const MAX_TASK_NUMBER = 999;
+
+const finiteOr0 = (v: unknown): number => (typeof v === "number" && Number.isFinite(v) ? v : 0);
+
+/** A budgeted plan's fields of a task, each only when set — `{}` for a task without them. */
+function taskTimeFields(t: { estimateMs?: unknown; priority?: unknown; optional?: unknown }): Pick<TeamTask, "estimateMs" | "priority" | "optional"> {
+  const estimateMs = readEstimateMs(t.estimateMs);
+  const priority = readPriority(t.priority);
+  return {
+    ...(estimateMs !== null ? { estimateMs } : {}),
+    ...(priority !== null ? { priority } : {}),
+    ...(t.optional === true ? { optional: true } : {}),
+  };
 }
 
 /**
@@ -696,6 +815,8 @@ function normalizeTask(raw: unknown): TeamTask | null {
     ciReoffers: typeof t.ciReoffers === "number" && Number.isInteger(t.ciReoffers) && t.ciReoffers >= 0 ? t.ciReoffers : 0,
     created_at: typeof t.created_at === "number" ? t.created_at : 0,
     updated_at: typeof t.updated_at === "number" ? t.updated_at : 0,
+    // A budgeted plan's: each absent when the file has none this box could have written.
+    ...taskTimeFields(t),
   };
 }
 
@@ -745,7 +866,7 @@ export const MAX_HOLD_REASON_CHARS = 600;
 
 // ─── Mutations (every one role-checked and logged) ───────────────────────────
 
-export function createBoard(input: { goal: string; projectId: string | null; directory: string; source: TeamSource; dynamic?: boolean }, actor: Actor): TeamBoard {
+export function createBoard(input: { goal: string; projectId: string | null; directory: string; source: TeamSource; dynamic?: boolean; timeBudget?: TimeBudget | null }, actor: Actor): TeamBoard {
   if (actor.kind !== "owner" && actor.kind !== "system") {
     throw new BoardAccessError(actor, "create", `Only the owner starts a team; ${describeActor(actor)} may not.`);
   }
@@ -780,6 +901,8 @@ export function createBoard(input: { goal: string; projectId: string | null; dir
     updatedAt: now,
     finishedAt: null,
   };
+  const timeBudget = readTimeBudget(input.timeBudget);
+  if (timeBudget) board.timeBudget = timeBudget;
   append(board, { ts: now, actor, type: "team_created", message: `Team created for: ${firstLine(goal)}` });
   board.metrics = teamMetrics(board, now);
   return board;
@@ -830,7 +953,7 @@ export function setRepoMap(board: TeamBoard, actor: Actor, raw: unknown): RepoMa
 export function postTask(
   board: TeamBoard,
   actor: Actor,
-  input: { task_description: string; depends_on?: string[]; files_hint?: string[]; origin?: "plan" | "lead"; note?: string },
+  input: { task_description: string; depends_on?: string[]; files_hint?: string[]; origin?: "plan" | "lead"; note?: string; estimateMs?: number; priority?: number; optional?: boolean },
 ): TeamTask {
   if (actor.kind !== "planner") throw new BoardAccessError(actor, "post_task", `Only the planner posts tasks; ${describeActor(actor)} may not.`);
   if (board.tasks.length >= MAX_TEAM_TASKS) throw new Error(`A team holds at most ${MAX_TEAM_TASKS} tasks.`);
@@ -845,6 +968,13 @@ export function postTask(
   const depends_on = [...new Set((input.depends_on ?? []).filter((d) => typeof d === "string" && TASK_ID_RE.test(d)))];
   const unknown = depends_on.filter((d) => !known.has(d));
   if (unknown.length) throw new Error(`A task depends on tasks that are not on the board: ${unknown.join(", ")}.`);
+  // A budgeted plan's estimate, place and nice-to-have mark — only on a team
+  // with a budget, so a board without one stays exactly what it was.
+  const timed = taskTimeFields(input);
+  const asked = input.estimateMs !== undefined || input.priority !== undefined || input.optional !== undefined;
+  if (asked && !board.timeBudget) throw new Error("Only a team with a time budget estimates its tasks.");
+  if (input.estimateMs !== undefined && timed.estimateMs === undefined) throw new Error("A task's estimate is a positive number of milliseconds, at most the longest budget there is.");
+  if (input.priority !== undefined && timed.priority === undefined) throw new Error(`A task's priority is a whole number from 1 to ${MAX_TASK_NUMBER}.`);
   const now = Date.now();
   const task: TeamTask = {
     task_id: `t${board.tasks.length + 1}`,
@@ -866,6 +996,7 @@ export function postTask(
     ciReoffers: 0,
     created_at: now,
     updated_at: now,
+    ...timed,
   };
   board.tasks.push(task);
   const note = (input.note ?? "").trim();
@@ -877,9 +1008,96 @@ export function postTask(
     message: origin === "lead"
       ? `Task ${task.task_id} added by the lead: ${firstLine(description)}${note ? ` — ${firstLine(note, 200)}` : ""}`
       : `Task ${task.task_id} posted: ${firstLine(description)}`,
-    payload: { depends_on, files_hint: task.files_hint, ...(origin === "lead" ? { origin, note } : {}) },
+    payload: { depends_on, files_hint: task.files_hint, ...(origin === "lead" ? { origin, note } : {}), ...timed },
   });
   return task;
+}
+
+/**
+ * A budgeted team leaves work out to fit its time — the tasks the box cut
+ * from the bottom of the plan (`by: "fit"`, each naming a task on the board)
+ * and what the planner left out of the plan itself (`by: "planner"`). The
+ * system's alone, and only on a team with a budget; one note on the log names
+ * them all. The board keeps the latest MAX_TEAM_SKIPS. Answers what it added.
+ */
+export function recordTimeSkips(board: TeamBoard, actor: Actor, skips: ReadonlyArray<{ taskId?: string; text: string; by: TeamSkip["by"] }>): TeamSkip[] {
+  if (actor.kind !== "system") throw new BoardAccessError(actor, "skip", `Only the system records what a team leaves out; ${describeActor(actor)} may not.`);
+  if (!board.timeBudget) throw new Error("Only a team with a time budget leaves work out to fit it.");
+  const now = Date.now();
+  const added: TeamSkip[] = [];
+  for (const s of skips) {
+    if (s.taskId !== undefined && !board.tasks.some((t) => t.task_id === s.taskId)) throw new Error(`Task ${s.taskId} is not on the board.`);
+    const skip = normalizeSkip({ ...s, at: now });
+    if (!skip) throw new Error("A skipped item needs its line.");
+    added.push(skip);
+  }
+  if (!added.length) return [];
+  board.skipped = [...(board.skipped ?? []), ...added].slice(-MAX_TEAM_SKIPS);
+  board.updatedAt = now;
+  const line = added.map((s) => (s.taskId ? `${s.taskId} (${s.text})` : s.text)).join("; ");
+  append(board, { ts: now, actor, type: "note", message: firstLine(`Left out to fit the time: ${line}`, 600), payload: { skipped: added.length } });
+  return added;
+}
+
+/**
+ * A budgeted team leaves a PENDING task out to fit its time — cut from the
+ * bottom of the plan before work started or at a re-plan, or too late to
+ * start before the cutoff. The task is retired (out of the way of what waits
+ * on it, neither a failure nor a gap: allComplete) and the skip recorded
+ * beside it (`recordTimeSkips`), so what was left out is said with why. The
+ * system's alone, only on a team with a budget, and never counted against the
+ * lead's own retirements. A task no longer pending is left as it is: null.
+ */
+export function retireForTime(board: TeamBoard, actor: Actor, taskId: string, why: string): TeamTask | null {
+  if (actor.kind !== "system") throw new BoardAccessError(actor, "retire", `Only the system leaves a task out to fit the time; ${describeActor(actor)} may not.`);
+  if (!board.timeBudget) throw new Error("Only a team with a time budget leaves work out to fit it.");
+  const task = requireTask(board, taskId);
+  if (task.status !== "pending") return null;
+  const now = Date.now();
+  task.status = "retired";
+  task.assigned_to = null;
+  task.updated_at = now;
+  const text = firstLine(why, MAX_SKIP_TEXT_CHARS);
+  append(board, { ts: now, actor, type: "retire", task_id: taskId, message: `Task ${taskId} left out to fit the time: ${text}`, payload: { note: text, time: true } });
+  if (!(board.skipped ?? []).some((s) => s.taskId === taskId)) recordTimeSkips(board, actor, [{ taskId, text, by: "fit" }]);
+  return task;
+}
+
+/**
+ * One extra item a budgeted team did with time to spare: a kind on the
+ * allowlist (EXTRA_WORK_KINDS) and what was done. The system's alone, and only
+ * on a team with a budget; the board keeps the latest MAX_TEAM_EXTRAS.
+ */
+export function recordTeamExtra(board: TeamBoard, actor: Actor, input: { kind: unknown; summary: string; taskId?: string; runId?: string }): TeamExtra {
+  if (actor.kind !== "system") throw new BoardAccessError(actor, "extra", `Only the system records a team's extra work; ${describeActor(actor)} may not.`);
+  if (!board.timeBudget) throw new Error("Only a team with a time budget does extra work against it.");
+  if (input.taskId !== undefined) requireTask(board, input.taskId);
+  const now = Date.now();
+  const extra = normalizeExtra({ ...input, at: now });
+  if (!extra) throw new Error("An extra item needs a kind on the allowlist and a summary of what was done.");
+  if (input.runId !== undefined && extra.runId === undefined) throw new Error(`${firstLine(String(input.runId), 40)} is not a run id.`);
+  board.extras = [...(board.extras ?? []), extra].slice(-MAX_TEAM_EXTRAS);
+  board.updatedAt = now;
+  append(board, { ts: now, actor, type: "note", ...(extra.taskId ? { task_id: extra.taskId } : {}), message: firstLine(`Extra ${extra.kind.replace("_", " ")}: ${extra.summary}`, 600), payload: { extra: extra.kind } });
+  return extra;
+}
+
+/**
+ * Why a budgeted team's work stopped against its budget — the deadline, the
+ * spend ceiling, a cap, nothing valuable left. The system's (or the owner's,
+ * who stops a team), only on a team with a budget, and once: the first reason
+ * stands, as the time record's first stop does. Answers the reason in force.
+ */
+export function setTimeStop(board: TeamBoard, actor: Actor, reason: TimeStopReason): TimeStopReason {
+  if (actor.kind !== "system" && actor.kind !== "owner") throw new BoardAccessError(actor, "time_stop", `Only the system or the owner stops a team's time; ${describeActor(actor)} may not.`);
+  if (!board.timeBudget) throw new Error("Only a team with a time budget stops against it.");
+  if (!(TIME_STOP_REASONS as readonly string[]).includes(reason)) throw new Error(`A time stop's reason is one of ${TIME_STOP_REASONS.join(", ")}.`);
+  if (board.timeStop) return board.timeStop;
+  const now = Date.now();
+  board.timeStop = reason;
+  board.updatedAt = now;
+  append(board, { ts: now, actor, type: "note", message: `Time budget: the work stopped (${reason.replace("_", " ")})`, payload: { timeStop: reason } });
+  return reason;
 }
 
 /**
@@ -891,7 +1109,9 @@ export function retireTask(board: TeamBoard, actor: Actor, taskId: string, reaso
   if (actor.kind !== "planner") throw new BoardAccessError(actor, "retire", `Only the planner retires tasks; ${describeActor(actor)} may not.`);
   const task = requireTask(board, taskId);
   if (task.status !== "pending") throw new Error(`Task ${taskId} is ${task.status}; only a pending task is retired.`);
-  if (board.tasks.filter((t) => t.status === "retired").length >= MAX_LEAD_RETIRES) {
+  // The lead's own retirements: a task left out to fit the time (retireForTime) is not one.
+  const cutForTime = new Set((board.skipped ?? []).flatMap((s) => (s.taskId ? [s.taskId] : [])));
+  if (board.tasks.filter((t) => t.status === "retired" && !cutForTime.has(t.task_id)).length >= MAX_LEAD_RETIRES) {
     throw new Error(`A team retires at most ${MAX_LEAD_RETIRES} tasks.`);
   }
   const now = Date.now();

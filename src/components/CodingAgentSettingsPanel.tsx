@@ -19,6 +19,15 @@ import HelpTip from "./HelpTip";
 import { PaidPlanNotice } from "./PaidFeatureGate";
 import { enableBlockedBy, type PlanGate } from "@/lib/paid-plan-gate";
 import { BTN_SECONDARY, CARD, FIELD, SECTION_LABEL, SEGMENT_OFF, SEGMENT_ON, SEGMENTED_TRACK } from "./coding-agent-ui";
+import { BUDGET_PRESET_CHIPS, type BudgetChip } from "@/lib/coding-time-budget";
+
+/** A default budget's words — the picker's own chips. */
+const BUDGET_CHIP_KEY: Record<BudgetChip, string> = {
+  "30m": "codingAgent.budgetPickerChip30m",
+  "1h": "codingAgent.budgetPickerChip1h",
+  morning: "codingAgent.budgetPickerChipMorning",
+  "1d": "codingAgent.budgetPickerChip1d",
+};
 
 /**
  * Settings → Coding Agent: everything the owner DECIDES about delegated
@@ -93,6 +102,14 @@ export interface AgentStatus {
   /** False until the owner finishes the setup wizard; the app shows the
    *  wizard instead of its home page while it is. */
   setupComplete: boolean;
+  /** The time budget a run or team starts with when neither the picker nor
+   *  the task's own words name one (a preset id), or null for none.
+   *  Optional: an older server does not answer with it, and the control is
+   *  not drawn there. */
+  defaultTimeBudget?: BudgetChip | null;
+  /** The box's own zone: where a budget's "until tomorrow morning" and
+   *  every time a budget shows are read. Optional, like the field above. */
+  timeZone?: string;
   /** The owner's switch for branch -> pull request -> wait for checks ->
    *  merge. Optional: an older server does not answer with it. */
   autoPr?: boolean;
@@ -894,9 +911,10 @@ export default function CodingAgentSettingsPanel(_props: {
           <div className="mt-5">
             <p className={SECTION_LABEL}>{t("codingAgent.settingsGroupCeilings")}</p>
             {/* The ceilings a run stops at — both the owner's to set. There is no
-                time limit and no price limit: a run ends when it finishes, runs
-                out of steps, hits a token ceiling if one is set, or goes quiet.
-                Saved on blur and on Enter, so a half-typed number is never sent. */}
+                price limit: a run ends when it finishes, runs out of steps, hits
+                a token ceiling if one is set, reaches the deadline of a time
+                budget it was given, or goes quiet. Saved on blur and on Enter,
+                so a half-typed number is never sent. */}
             <div className="grid grid-cols-2 gap-3 mt-4">
               <div>
                 <label htmlFor="coding-agent-turns" className="text-xs font-medium text-[var(--text-secondary)]">
@@ -939,6 +957,36 @@ export default function CodingAgentSettingsPanel(_props: {
                 {errorIn("tokens")}
               </div>
             </div>
+
+            {/* The default time budget: what a run or team works to when it is
+                started with no budget and its task names no time. Over 30
+                minutes it starts a coding team. Hidden on a server that does not
+                answer with the field. */}
+            {status && "defaultTimeBudget" in status && (
+              <div className="mt-4">
+                <div className="flex items-start justify-between gap-4">
+                  <label htmlFor="coding-agent-default-budget" className="min-w-0 text-xs font-medium text-[var(--text-secondary)]">
+                    {t("codingAgent.defaultBudgetLabel")}
+                  </label>
+                  <select
+                    id="coding-agent-default-budget"
+                    value={status.defaultTimeBudget ?? ""}
+                    disabled={saving}
+                    data-testid="coding-agent-default-budget"
+                    onChange={(e) => void saveSetting({ defaultTimeBudget: e.target.value === "" ? null : e.target.value }, "defaultBudget", t("codingAgent.defaultBudgetFailed"))}
+                    className={`text-base sm:text-xs ${FIELD} w-44 shrink-0`}
+                  >
+                    <option value="">{t("codingAgent.budgetPickerNone")}</option>
+                    {BUDGET_PRESET_CHIPS.map((chip) => (
+                      <option key={chip} value={chip}>{t(BUDGET_CHIP_KEY[chip])}</option>
+                    ))}
+                  </select>
+                </div>
+                <p className="mt-1.5 text-[11px] text-[var(--text-muted)] leading-relaxed">
+                  {t("codingAgent.defaultBudgetHint")}
+                </p>
+              </div>
+            )}
 
             {/* How many goes a run gets at the thing it was asked to DELIVER —
                 a ceiling on the run like the two above it, and hidden on a

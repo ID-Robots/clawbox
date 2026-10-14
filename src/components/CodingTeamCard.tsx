@@ -15,6 +15,7 @@ import { useT } from "@/lib/i18n";
 import { setVisibleInterval } from "@/lib/visible-interval";
 import { BTN_BASE, BTN_SECONDARY, CARD_SURFACE, INSET_SURFACE } from "./coding-agent-ui";
 import CodingTeamTree from "./CodingTeamTree";
+import CodingBudgetTimeline from "./CodingBudgetTimeline";
 import CodingAgentDiagram, { DiagramDetails, type DiagramRun } from "./CodingAgentDiagram";
 import { MAX_TEAM_CI_ROUNDS } from "@/lib/coding-ci-limits";
 import { timeAgo } from "./clawkeep-ui";
@@ -177,6 +178,9 @@ export interface TeamView {
   error: string | null;
   createdAt: number;
   updatedAt: number;
+  /** The team's time budget and how it is being spent (its time record), on a team that has one. Absent otherwise, and from an older server. */
+  timeBudget?: unknown;
+  timeRecord?: unknown;
 }
 
 interface Props {
@@ -197,6 +201,8 @@ interface Props {
    * then reads the board alone, and a panel asks the box for its run.
    */
   runs?: DiagramRun[];
+  /** The box's zone off the Coding Agent status, for a budgeted team's times; the browser's while there is none. */
+  timeZone?: string | null;
 }
 
 const POLL_MS = 5000;
@@ -263,7 +269,7 @@ function isQueuedTeam(status: TeamView["status"]): boolean {
   return status === "queued";
 }
 
-export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan, runs }: Props) {
+export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan, runs, timeZone }: Props) {
   const { t } = useT();
   const [teams, setTeams] = useState<TeamView[]>([]);
   const [busy, setBusy] = useState(false);
@@ -526,6 +532,15 @@ export default function CodingTeamCard({ directory, projectId, onOpenRun, onPlan
                 </button>
               )}
             </p>
+            {team.timeBudget !== undefined && team.timeBudget !== null && (
+              <CodingBudgetTimeline
+                budget={team.timeBudget}
+                record={team.timeRecord}
+                live={isActive(team.status)}
+                timeZone={timeZone}
+                testId="coding-team-budget"
+              />
+            )}
             {team.finalReview && (
               <p className="mt-2 text-[11px] break-words" data-testid="coding-team-final-review" data-verdict={team.finalReview.verdict}>
                 <span className="text-[var(--text-secondary)]">{t("codingAgent.team.finalReview")}: </span>

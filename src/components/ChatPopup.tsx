@@ -69,7 +69,7 @@ import { installPendingRefresh } from '@/lib/email-pending-refresh'
 import { describeChatFailure, describeFallbackReply, describeImageFailure, isUnacknowledgedTurn, UNACKNOWLEDGED_TURN_TEXT } from '@/lib/chat-error-text'
 import { describeChatSwap, reportAnthropicChatFailure, TurnLedger } from '@/lib/anthropic-chat-swap'
 import { RunFailureLedger, withFailureNote } from '@/lib/chat-run-failure'
-import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, VOICE_SETTINGS_CHANGED_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type ChatMessageDetail, type FixErrorContext, dispatchOpenCodingRun } from '@/lib/ui-events'
+import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, VOICE_SETTINGS_CHANGED_EVENT, buildFixErrorPrompt, dispatchOpenApp, onCodingAgentChanged, onProvidersChanged, type ChatMessageDetail, type FixErrorContext, dispatchOpenCodingRun } from '@/lib/ui-events'
 import { speechTextFor } from '@/lib/speech-text'
 import { SKILL_CHANGE_EVENT, buildSkillChangeMessage, type SkillChangeEvent } from '@/lib/skill-change-message'
 import { isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
@@ -1591,6 +1591,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // project page hands over its project and the team switch.
   const [newAppOptions, setNewAppOptions] = useState<{ project?: string; team?: boolean }>({})
   const [newAppMaxChars, setNewAppMaxChars] = useState<number | null>(null)
+  // The box's zone and default time budget, for the card's budget picker —
+  // off the same read, so opening the card costs no second one. Null until
+  // it answers (the picker shows UTC meanwhile).
+  const [newAppBudgetBox, setNewAppBudgetBox] = useState<{ timeZone: string | null; defaultTimeBudget: string | null }>({ timeZone: null, defaultTimeBudget: null })
   // The ONE read of the Coding Agent's status this surface makes: the card's
   // task ceiling comes off it, and so does the + button's gate below, so the
   // two cannot disagree about what the box says. Answers the payload, or null
@@ -1604,6 +1608,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       if (!data || typeof data !== 'object') return null
       const n = (data as { maxTaskChars?: unknown }).maxTaskChars
       if (typeof n === 'number' && Number.isFinite(n) && n > 0) setNewAppMaxChars(n)
+      const box = data as { timeZone?: unknown; defaultTimeBudget?: unknown }
+      if (typeof box.timeZone === 'string') {
+        setNewAppBudgetBox({ timeZone: box.timeZone, defaultTimeBudget: typeof box.defaultTimeBudget === 'string' ? box.defaultTimeBudget : null })
+      }
       return data as Record<string, unknown>
     } catch {
       return null // the card keeps the default ceiling
@@ -1619,6 +1627,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (newAppMaxChars === null) void readCodingAgentStatus()
     setShowNewApp(true)
   }, [newAppMaxChars, readCodingAgentStatus])
+  // A Coding Agent setting saved since the last read — its default time
+  // budget above all — makes the next hand-off read the status again: the
+  // card's "your default" line must not outlive the setting it names.
+  useEffect(() => onCodingAgentChanged(() => setNewAppMaxChars(null)), [])
   // Closing forgets what the last opener asked for (a project, the team
   // switch): the next "+" must open a fresh card, not the previous
   // project's team form.
@@ -8487,6 +8499,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             initialProject={newAppOptions.project}
             initialTeam={newAppOptions.team}
             maxTaskChars={newAppMaxChars ?? DEFAULT_MAX_TASK_CHARS}
+            timeZone={newAppBudgetBox.timeZone}
+            defaultTimeBudget={newAppBudgetBox.defaultTimeBudget}
             onClose={closeNewApp}
             // In the chat it floats over the composer like a popover, so it
             // behaves like one: click away (or Escape) and it goes.

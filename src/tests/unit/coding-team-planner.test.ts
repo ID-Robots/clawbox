@@ -7,7 +7,8 @@
 import { describe, expect, it } from "vitest";
 import { createBoard, MAX_LEAD_ADDS, MAX_LEAD_RETIRES, MAX_TASK_DESCRIPTION_CHARS, MAX_TEAM_TASKS, postMessage, postTask, type TaskStatus, type TeamBoard } from "@/lib/coding-team-board";
 import { MAX_TASK_CHARS, MAX_TEAM_WORKERS } from "@/lib/coding-agent";
-import { clippedNote, leadRoom, leadShouldRun, leadTask, MAX_LEAD_INBOX_CHARS, MAX_LEAD_NOTE_CHARS, parsePlan, parseReplan, PLANNER_BRIEF, REPLAN_BRIEF, replanContext, replanTask, type ReplanContext } from "@/lib/coding-team-planner";
+import { clippedNote, fitLine, fitPlan, leadRoom, leadShouldRun, leadTask, MAX_LEAD_INBOX_CHARS, MAX_LEAD_NOTE_CHARS, MAX_TIME_PLAN_SKIPS, parsePlan, parseReplan, PLANNER_BRIEF, plannerBrief, REPLAN_BRIEF, replanContext, replanTask, type ReplanContext } from "@/lib/coding-team-planner";
+import { presetBudget } from "@/lib/coding-time-budget";
 
 describe("parsePlan", () => {
   it("reads a bare array, and one fenced in prose", () => {
@@ -631,5 +632,151 @@ describe("the planner's rule for integration tasks", () => {
     const rule = /verifies, integrates or reviews the other tasks' output must list EVERY task it checks in depends_on — never fewer/;
     expect(PLANNER_BRIEF).toMatch(rule);
     expect(REPLAN_BRIEF).toMatch(rule);
+  });
+});
+
+describe("a planner with a time budget", () => {
+  const MIN = 60_000;
+  const NOW = Date.UTC(2026, 9, 14, 15, 0);
+  const TZ = "Europe/Sofia";
+  const hour = () => presetBudget("1h", NOW, TZ);
+  const day = () => presetBudget("1d", NOW, TZ);
+
+  it("is briefed exactly as before without one", () => {
+    expect(plannerBrief(null, NOW, TZ)).toBe(PLANNER_BRIEF);
+    expect(plannerBrief(undefined, NOW, TZ)).toBe(PLANNER_BRIEF);
+  });
+
+  it("is told the deadline in the box's zone, the time left and the cutoff, and what its answer must add", () => {
+    const brief = plannerBrief(hour(), NOW, TZ);
+    expect(brief.startsWith(`${PLANNER_BRIEF} `)).toBe(true);
+    const time = brief.slice(PLANNER_BRIEF.length);
+    expect(time).toContain("1 hour, until Wed 14 Oct, 19:00 (Europe/Sofia) — 1 hour left");
+    expect(time).toContain("No new task starts after the cutoff at Wed 14 Oct, 18:50 (Europe/Sofia)");
+    expect(time).toContain("the last 10 minutes before the deadline");
+    expect(time).toContain("That leaves 50 minutes of work from now");
+    for (const word of ['"estimate_minutes"', '"optional": true', "MOST IMPORTANT FIRST", "cuts from the bottom", '"time_plan"', '"skipped"', '"too_short"']) {
+      expect(time).toContain(word);
+    }
+    expect(time).toMatch(/SHORT budget: .*Leave out end-to-end suites, polish and nice-to-haves, and name each one in time_plan\.skipped/);
+    expect(time).not.toMatch(/LONG budget/);
+  });
+
+  it("on a long budget builds and tests the tools first, then gives a long job the rest, until the cutoff", () => {
+    const time = plannerBrief(day(), NOW, TZ).slice(PLANNER_BRIEF.length);
+    expect(time).toMatch(/This is a LONG budget/);
+    expect(time).toContain("build its tools first and test them in their own tasks, then ONE last task runs the job until the cutoff at Thu 15 Oct, 15:36 (Europe/Sofia)");
+    expect(time).toMatch(/do not pad the estimates/);
+    expect(time).not.toMatch(/SHORT budget/);
+  });
+
+  it("is told plainly when the cutoff has already passed", () => {
+    expect(plannerBrief(hour(), NOW + 55 * MIN, TZ)).toMatch(/The cutoff has already passed: plan ONE small task/);
+  });
+
+  it("is told how its estimates will be calibrated — last, and only when a calibration scales them", () => {
+    const calibrated = plannerBrief(hour(), NOW, TZ, { factor: 1.6, samples: 12 });
+    expect(calibrated.startsWith(plannerBrief(hour(), NOW, TZ))).toBe(true);
+    expect(calibrated).toMatch(/ ESTIMATE CALIBRATION: on this box, past estimates took 1\.6× the time estimated \(the median of 12 finished estimates\)\. ClawBox scales your estimates by 1\.6× .* do not add to them or cut them yourself\.$/);
+    expect(plannerBrief(hour(), NOW, TZ, { factor: 0.95, samples: 12 })).toBe(plannerBrief(hour(), NOW, TZ));
+    expect(plannerBrief(hour(), NOW, TZ, null)).toBe(plannerBrief(hour(), NOW, TZ));
+    // Without a budget there is no estimate to calibrate.
+    expect(plannerBrief(null, NOW, TZ, { factor: 1.6, samples: 12 })).toBe(PLANNER_BRIEF);
+  });
+
+  const ANSWER = JSON.stringify({
+    shape: { parallelism: 1, review: "final", rationale: "one scraper" },
+    tasks: [
+      { task_description: "Build the scraper", estimate_minutes: 40 },
+      { task_description: "Test it", depends_on: ["t1"], estimate_minutes: "1.5 hours" },
+      { task_description: "Scrape until the cutoff", depends_on: ["t2"], estimate_minutes: "about 30 min" },
+      { task_description: "Polish the CSV", estimate_minutes: "a while", optional: "yes" },
+      { task_description: "Tidy the README", estimate_minutes: -3, optional: true },
+      { task_description: "Note the run", estimate_minutes: {}, optional: 1 },
+    ],
+    time_plan: {
+      estimate_minutes: "3h",
+      skipped: ["the e2e suite — not needed tonight", { what: "a web UI", why: "out of time" }, 7, "the e2e suite — not needed tonight"],
+      too_short: null,
+    },
+  });
+
+  it("reads estimates, places and nice-to-haves leniently — never refusing a plan over them", () => {
+    const out = parsePlan(ANSWER, { timed: true });
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.tasks.map((t) => [t.estimateMs, t.priority, t.optional])).toEqual([
+      [40 * MIN, 1, undefined],
+      [90 * MIN, 2, undefined],
+      [30 * MIN, 3, undefined],
+      [undefined, 4, true],
+      [undefined, 5, true],
+      [undefined, 6, undefined],
+    ]);
+    expect(out.tasks[3]).not.toHaveProperty("estimateMs");
+    expect(out.tasks[5]).not.toHaveProperty("optional");
+    expect(out.timePlan).toEqual({ estimateMs: 180 * MIN, skipped: ["the e2e suite — not needed tonight", "a web UI — out of time"], tooShort: null });
+  });
+
+  it("ignores every time field without a budget: the plan is what it always was", () => {
+    const out = parsePlan(ANSWER);
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out).not.toHaveProperty("timePlan");
+    for (const t of out.tasks) expect(Object.keys(t).sort()).toEqual(["depends_on", "files_hint", "task_description"]);
+  });
+
+  it("reads too_short and a missing time_plan leniently", () => {
+    const plan = (time_plan: unknown) => {
+      const out = parsePlan(JSON.stringify({ tasks: [{ task_description: "a" }], time_plan }), { timed: true });
+      return out.ok ? out.timePlan : null;
+    };
+    expect(plan(undefined)).toEqual({ estimateMs: null, skipped: [], tooShort: null });
+    expect(plan("soon")).toEqual({ estimateMs: null, skipped: [], tooShort: null });
+    expect(plan({ too_short: "none" })?.tooShort).toBeNull();
+    expect(plan({ too_short: true })?.tooShort).toBe("(no reason given)");
+    expect(plan({ too_short: "  Two pages need\nmore than an hour. " })?.tooShort).toBe("Two pages need more than an hour.");
+    expect(plan({ skipped: "polish" })?.skipped).toEqual(["polish"]);
+    expect(plan({ skipped: Array.from({ length: 20 }, (_, i) => `item ${i}`) })?.skipped).toHaveLength(MAX_TIME_PLAN_SKIPS);
+    const bare = parsePlan(JSON.stringify([{ task_description: "a", estimate_minutes: 5 }]), { timed: true });
+    expect(bare).toMatchObject({ ok: true, tasks: [{ estimateMs: 5 * MIN, priority: 1 }], timePlan: { estimateMs: null, skipped: [], tooShort: null } });
+  });
+
+  /** Tasks t1, t2, … from [minutes or null, optional?, depends_on?]. */
+  const tasksOf = (...specs: Array<[number | null, boolean?, string[]?]>) =>
+    specs.map(([m, optional, deps], i) => ({ id: `t${i + 1}`, estimateMs: m === null ? null : m * MIN, optional: optional === true, dependsOn: deps ?? [] }));
+  const CUTOFF = "50 minutes left before the cutoff at Wed 14 Oct, 18:50 (Europe/Sofia)";
+
+  it("fits a plan whose estimates fit before the cutoff, and cuts nothing", () => {
+    const fit = fitPlan(tasksOf([20], [20, false, ["t1"]], [5, true]), hour(), NOW);
+    expect(fit).toEqual({ fits: true, allFit: true, availableMs: 50 * MIN, mustMs: 40 * MIN, totalMs: 45 * MIN, shortByMs: 0, unestimated: [], cut: [], dragged: [] });
+    expect(fitLine(fit, hour(), TZ)).toBe(`Time plan: the plan fits — estimated 45 minutes, ${CUTOFF}.`);
+  });
+
+  it("cuts the nice-to-haves first, from the bottom, when only they do not fit", () => {
+    const fit = fitPlan(tasksOf([30], [10, false, ["t1"]], [10, true], [15, true]), hour(), NOW);
+    expect(fit).toMatchObject({ fits: true, allFit: false, cut: ["t4"], dragged: [] });
+    expect(fitLine(fit, hour(), TZ)).toBe(`Time plan: the must-have tasks fit (estimated 40 minutes, ${CUTOFF}), but not every nice-to-have: t4 will be skipped.`);
+  });
+
+  it("says plainly when the must-haves do not fit, and cuts from the bottom — never a task without an estimate", () => {
+    const fit = fitPlan(tasksOf([30], [20, false, ["t1"]], [25], [10, true, ["t3"]], [null]), hour(), NOW);
+    expect(fit).toMatchObject({ fits: false, mustMs: 75 * MIN, shortByMs: 25 * MIN, cut: ["t4", "t3"], unestimated: ["t5"] });
+    expect(fitLine(fit, hour(), TZ)).toBe(`Time plan: the must-have work does NOT fit — estimated 1 h 15 min, ${CUTOFF}: 25 minutes short. To fit, t4 and t3 will be skipped. t5 gave no estimate and is not counted.`);
+  });
+
+  it("never cuts the most important must-have, nor what it waits on — and takes along what waits on a cut task", () => {
+    const alone = fitPlan(tasksOf([80]), hour(), NOW);
+    expect(alone).toMatchObject({ fits: false, cut: [] });
+    expect(fitLine(alone, hour(), TZ)).toMatch(/30 minutes short\. Nothing more can be cut: the team starts on its most important task and stops at the cutoff\.$/);
+    // t1 is optional, but the first must-have (t2) waits on it: both stay.
+    expect(fitPlan(tasksOf([30, true], [40, false, ["t1"]], [10]), hour(), NOW).cut).toEqual(["t3"]);
+    // A must-have waiting on a cut nice-to-have could never start: it goes too.
+    const dragged = fitPlan(tasksOf([20], [30, true], [10, false, ["t2"]]), hour(), NOW);
+    expect(dragged).toMatchObject({ fits: true, allFit: false, cut: ["t2", "t3"], dragged: ["t3"] });
+  });
+
+  it("says so when the planner gave no estimates at all", () => {
+    expect(fitLine(fitPlan(tasksOf([null], [null]), hour(), NOW), hour(), TZ)).toBe(`Time plan: the planner gave no estimates; ${CUTOFF}.`);
   });
 });

@@ -36,8 +36,10 @@ import {
   setSetupComplete,
   setTeamDynamic,
   setTokenLimit,
+  setDefaultTimeBudget,
 } from "@/lib/coding-agent";
 import { PR_BODY_TASK_MODES } from "@/lib/coding-pr-body";
+import { BUDGET_PRESET_CHIPS, isBudgetChip } from "@/lib/coding-time-budget";
 
 export const dynamic = "force-dynamic";
 
@@ -86,6 +88,11 @@ function forbidden() {
  * POST { teamDynamic: boolean } → may a coding team's lead add or retire tasks
  * while the team runs (one short read-only run after each worker settles).
  * OFF when absent; a team reads it when it starts.
+ * POST { defaultTimeBudget: "30m"|"1h"|"morning"|"1d" | null } → the time
+ * budget a new run or team gets when neither the start picker nor the task's
+ * words named one (src/lib/coding-time-budget.ts); null clears it, which is
+ * no budget — how every run worked before. A custom period is per start and
+ * never a default, so it is refused here with the rest of what is not a chip.
  * POST { autoPr: boolean } → branch, open a pull request into the repo's
  * default branch, wait for GitHub Actions, and merge when at least one real
  * check has passed. See @/lib/coding-pr for the guardrails.
@@ -195,6 +202,7 @@ export async function POST(request: Request) {
     historyRetention?: unknown;
     historyLimit?: unknown;
     roleModels?: unknown;
+    defaultTimeBudget?: unknown;
   };
   const hasEnabled = typeof fields.enabled === "boolean";
   const hasReviewPass = typeof fields.reviewPass === "boolean";
@@ -237,7 +245,10 @@ export async function POST(request: Request) {
   // A team's per-role model and effort (src/lib/coding-role-models.ts):
   // presence decides, and a wrong shape is refused below, whole.
   const hasRoleModels = "roleModels" in fields;
-  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasPrBodyIncludesTask && !hasReviewRounds && !hasAutoMerge && !hasCompletionAttempts && !hasMaxParallelRuns && !hasGenImages && !hasGenAudio && !hasRealBrowser && !hasTeamDynamic && !hasGitAuthorName && !hasGitAuthorEmail && !hasHistoryRetention && !hasHistoryLimit && !hasRoleModels && !clearsFault) {
+  // Presence decides: `null` CLEARS the default, and a wrong value is refused
+  // below rather than ignored.
+  const hasDefaultTimeBudget = "defaultTimeBudget" in fields;
+  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasPrBodyIncludesTask && !hasReviewRounds && !hasAutoMerge && !hasCompletionAttempts && !hasMaxParallelRuns && !hasGenImages && !hasGenAudio && !hasRealBrowser && !hasTeamDynamic && !hasGitAuthorName && !hasGitAuthorEmail && !hasHistoryRetention && !hasHistoryLimit && !hasRoleModels && !hasDefaultTimeBudget && !clearsFault) {
     return NextResponse.json(
       {
         error:
@@ -253,6 +264,7 @@ export async function POST(request: Request) {
           + "{ gitAuthorName: string | null }, { gitAuthorEmail: string | null }, "
           + "{ prBodyIncludesTask: string }, "
           + "{ roleModels: { planner?|worker?|reviewer?: { model?, effort? } } }, "
+          + "{ defaultTimeBudget: string | null }, "
           + "{ setupComplete: boolean }, { autoPr: boolean } or { clearHarnessFault: true }.",
       },
       { status: 400 },
@@ -313,6 +325,13 @@ export async function POST(request: Request) {
   const roleModelsRefusal = hasRoleModels ? checkRoleModelsPatch(fields.roleModels) : null;
   if (roleModelsRefusal) {
     return NextResponse.json({ error: roleModelsRefusal, kind: "invalid" }, { status: 400 });
+  }
+  // The default budget, checked before any setter runs, like the rest.
+  if (hasDefaultTimeBudget && fields.defaultTimeBudget !== null && !isBudgetChip(fields.defaultTimeBudget)) {
+    return NextResponse.json(
+      { error: `The default time budget must be one of: ${BUDGET_PRESET_CHIPS.join(", ")} — or null for none.`, kind: "invalid" },
+      { status: 400 },
+    );
   }
 
   try {
@@ -447,6 +466,11 @@ export async function POST(request: Request) {
     if (hasTeamDynamic) {
       const saved = await setTeamDynamic(fields.teamDynamic);
       console.error(`[coding-agent] the coding team's lead switched ${saved ? "on" : "off"} by the owner`);
+    }
+    if (hasDefaultTimeBudget) {
+      const saved = await setDefaultTimeBudget(fields.defaultTimeBudget);
+      // A chip id from the setter's own fixed list by now.
+      console.error(`[coding-agent] default time budget ${saved === null ? "cleared" : `set to ${logSafe(saved)}`} by the owner`);
     }
     if (clearsFault) {
       await clearHarnessFault();
