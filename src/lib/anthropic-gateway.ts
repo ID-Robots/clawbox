@@ -257,11 +257,15 @@ const FIRST_LOOK_BACK_MS = 15 * 60_000;
  */
 const MAX_KEEPER_BACKOFF_MS = 2 * 60 * 60_000;
 /**
- * With Anthropic's usage unreadable, the shortest core cooldown — as core set
- * it, from the failure to its end — the pool takes for a cap. Core's rate-limit
- * back-off doubles from 30 s (30 s, 1, 2, 4, 8 min …), so a capped account
- * crosses this within a few failures, while a throttle stays core's alone:
- * setting an account aside moves every consumer, and ends a live coding run on it.
+ * With Anthropic's usage unreadable, the shortest core cooldown — measured
+ * from core's newest failure to the window's end — the pool takes for a cap.
+ * Core's rate-limit back-off doubles from 30 s (30 s, 1, 2, 4, 8 min …), so a
+ * capped account crosses this within a few failures, while a throttle stays
+ * core's alone: setting an account aside moves every consumer, and ends a live
+ * coding run on it. A failure inside a running window (core probing a cooling
+ * profile, a turn on another model) keeps the window and only shortens the
+ * measure, so any error leans towards leaving the account to core, and only
+ * within a window's last five minutes.
  */
 const UNREAD_LIMIT_MIN_MS = 5 * 60_000;
 /** Which of the Anthropic orders the pool wrote, so taking the pool out undoes exactly those (config store). */
@@ -683,8 +687,8 @@ async function recordLimit(account: AnthropicAccount, seen: { limitKind: Anthrop
       // Anthropic could not be asked: a short window is a throttle core's own
       // cooldown and rotation cover; a long one is core's own window, never
       // longer than the longest session window — core's backoff grows past a
-      // day. Judged by the window core set, not by what is left of it when
-      // this look comes.
+      // day. Measured from core's newest failure, not from this look, so a
+      // window first seen late is still judged by its length.
       if (seen.until > now && seen.until - failedAt < UNREAD_LIMIT_MIN_MS) {
         console.error(`[anthropic-gateway] core cooled account ${account.id} down for under five minutes on a rate limit and its usage could not be read; left to core`);
         return 0;
