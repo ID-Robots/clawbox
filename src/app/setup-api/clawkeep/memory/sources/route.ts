@@ -1,9 +1,8 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
-import fs from "fs/promises";
 import path from "@/lib/runtime-path";
 import { hasOwnerSession } from "@/lib/owner-session";
-import { filesBrowseRoot, isProtectedFilePath } from "@/lib/file-guard";
+import { resolveFolderInsideBrowseRoot } from "@/lib/browse-folder";
 import { ExtraPathsUnreadableError, mutateExtraPaths, readExtraPaths } from "@/lib/memory-shard";
 import { invalidateMemoryStatusCache } from "@/lib/clawkeep-memory";
 
@@ -56,40 +55,6 @@ function mutationFailed(err: unknown) {
   );
 }
 
-async function resolveInsideRoot(asked: string): Promise<{ ok: true; dir: string } | { ok: false; status: 400 | 403 | 404 }> {
-  if (!asked || typeof asked !== "string") return { ok: false, status: 400 };
-  const configured = path.resolve(filesBrowseRoot());
-  let root: string;
-  try {
-    root = await fs.realpath(configured);
-  } catch {
-    root = configured;
-  }
-  // Written as relative-then-join rather than a `startsWith` helper, the same
-  // way the folder picker's own resolveDir is: it is the same rule, but a
-  // scanner can only tie a guard to the sink when the guard is inline on the
-  // very value that reaches it (js/path-injection stayed open here behind the
-  // closure, exactly as it did in the chat media route). `rel` is empty for
-  // the root itself, so the root still resolves.
-  const requested = path.isAbsolute(asked) ? path.resolve(asked) : path.resolve(root, asked);
-  const rel = path.relative(root, requested);
-  if (rel.startsWith("..") || path.isAbsolute(rel)) return { ok: false, status: 404 };
-  const candidate = path.join(root, rel);
-  try {
-    // Checked AGAIN after resolving links: the lexical check above cannot see
-    // that a folder inside the root is a symlink pointing out of it.
-    const real = await fs.realpath(candidate);
-    const realRel = path.relative(root, real);
-    if (realRel.startsWith("..") || path.isAbsolute(realRel)) return { ok: false, status: 404 };
-    if (isProtectedFilePath(real)) return { ok: false, status: 404 };
-    const stat = await fs.stat(real);
-    if (!stat.isDirectory()) return { ok: false, status: 400 };
-    return { ok: true, dir: real };
-  } catch {
-    return { ok: false, status: 404 };
-  }
-}
-
 function forbidden() {
   return NextResponse.json(
     { error: "Changing the indexed folders needs a signed-in browser session.", kind: "owner_only" },
@@ -114,7 +79,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Invalid request body" }, { status: 400 });
   }
 
-  const resolved = await resolveInsideRoot(typeof body.path === "string" ? body.path : "");
+  const resolved = await resolveFolderInsideBrowseRoot(typeof body.path === "string" ? body.path : "");
   if (!resolved.ok) {
     return NextResponse.json(
       { error: resolved.status === 400 ? "That is not a folder." : "Folder not found.", kind: "not_found" },

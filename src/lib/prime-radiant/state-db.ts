@@ -19,7 +19,7 @@ import { openSqlite } from "@/lib/openclaw-session-store";
 import path from "@/lib/runtime-path";
 
 export const STATE_DB_FILE = "prime-radiant.sqlite";
-export const STATE_SCHEMA_VERSION = 1;
+export const STATE_SCHEMA_VERSION = 2;
 
 export function stateDbPathFor(vault: string): string {
   return path.join(path.dirname(vault), STATE_DB_FILE);
@@ -79,6 +79,38 @@ CREATE TABLE IF NOT EXISTS ingest_jobs (
 );
 `;
 
+/**
+ * v2 — ingest: a job's phase and its tallies, and one row per file the job
+ * saw. A file row keeps the SHA-256 of the bytes that were read, so a later
+ * job skips a document already turned into pages (hash-first dedupe) and a
+ * re-run of the same folder retries exactly the files that failed.
+ */
+const SCHEMA_V2 = `
+ALTER TABLE ingest_jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'folders';
+ALTER TABLE ingest_jobs ADD COLUMN phase TEXT NOT NULL DEFAULT 'queued';
+ALTER TABLE ingest_jobs ADD COLUMN skipped INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE ingest_jobs ADD COLUMN duplicates INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE ingest_jobs ADD COLUMN pages INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE ingest_jobs ADD COLUMN commits INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE ingest_jobs ADD COLUMN calls INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE ingest_jobs ADD COLUMN usd_estimate REAL NOT NULL DEFAULT 0;
+ALTER TABLE ingest_jobs ADD COLUMN updated_at TEXT;
+ALTER TABLE ingest_jobs ADD COLUMN notes TEXT NOT NULL DEFAULT '[]';
+CREATE INDEX IF NOT EXISTS ingest_jobs_created ON ingest_jobs (created_at);
+CREATE TABLE IF NOT EXISTS ingest_files (
+  job_id   TEXT NOT NULL,
+  seq      INTEGER NOT NULL,
+  label    TEXT NOT NULL,
+  sha256   TEXT,
+  bytes    INTEGER NOT NULL DEFAULT 0,
+  status   TEXT NOT NULL CHECK (status IN ('pending', 'done', 'failed', 'duplicate', 'skipped')),
+  pages    TEXT NOT NULL DEFAULT '[]',
+  error    TEXT,
+  PRIMARY KEY (job_id, seq)
+);
+CREATE INDEX IF NOT EXISTS ingest_files_sha ON ingest_files (sha256, status);
+`;
+
 /** Open (creating and migrating as needed) the state database for `vault`. Caller closes it. */
 export function openStateDb(vault: string): DatabaseSync {
   const file = stateDbPathFor(vault);
@@ -88,11 +120,21 @@ export function openStateDb(vault: string): DatabaseSync {
     db.exec("PRAGMA journal_mode = WAL");
     const row = db.prepare("PRAGMA user_version").get() as { user_version?: number } | undefined;
     const version = row?.user_version ?? 0;
-    if (version < 1) {
+    const steps: Array<[number, string]> = [
+      [1, SCHEMA_V1],
+      [2, SCHEMA_V2],
+    ];
+    for (const [target, sql] of steps) {
+      if (version >= target) continue;
       db.exec("BEGIN");
-      db.exec(SCHEMA_V1);
-      db.exec(`PRAGMA user_version = ${STATE_SCHEMA_VERSION}`);
-      db.exec("COMMIT");
+      try {
+        db.exec(sql);
+        db.exec(`PRAGMA user_version = ${target}`);
+        db.exec("COMMIT");
+      } catch (err) {
+        db.exec("ROLLBACK");
+        throw err;
+      }
     }
   } catch (err) {
     try {

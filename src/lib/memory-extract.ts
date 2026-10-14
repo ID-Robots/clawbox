@@ -136,7 +136,17 @@ export function newWalkBudget(): WalkBudget {
   return { left: MAX_ENTRIES, truncated: false, unreadable: 0, rootUnreadable: false };
 }
 
-export async function* walkFiles(dir: string, budget: WalkBudget, depth = 0): AsyncGenerator<string> {
+/**
+ * What a caller may leave out of a walk besides dot-entries. `skipDir` is
+ * asked with the folder's full path and its name before the walk goes in, so
+ * a caller can keep build output, caches or its own output folder out of the
+ * documents it reads. Memory Shard passes none.
+ */
+export interface WalkOptions {
+  skipDir?: (full: string, name: string) => boolean;
+}
+
+export async function* walkFiles(dir: string, budget: WalkBudget, depth = 0, options: WalkOptions = {}): AsyncGenerator<string> {
   if (depth > MAX_DEPTH) return;
   // opendir, not readdir: readdir hands back the WHOLE listing as one array
   // before a single entry can be charged, so a directory of a million files
@@ -164,7 +174,10 @@ export async function* walkFiles(dir: string, budget: WalkBudget, depth = 0): As
       const full = path.join(dir, entry.name);
       // isDirectory() is false for a symlink, which is what keeps a link loop out
       // of the walk — the same reason the folder picker reads it this way.
-      if (entry.isDirectory()) yield* walkFiles(full, budget, depth + 1);
+      if (entry.isDirectory()) {
+        if (options.skipDir?.(full, entry.name)) continue;
+        yield* walkFiles(full, budget, depth + 1, options);
+      }
       else if (entry.isFile()) yield full;
     }
   } catch {
@@ -176,8 +189,13 @@ export async function* walkFiles(dir: string, budget: WalkBudget, depth = 0): As
   }
 }
 
-/** Extract one document to Markdown. Returns false when it could not be read. */
-async function extractOne(file: string, out: string): Promise<boolean> {
+/**
+ * Extract one document to text at `out`. Returns false when it could not be
+ * read. `.txt`/`.md` are copied, `.pdf` goes through pdftotext, everything
+ * else through LibreOffice. Exported for Prime Radiant's ingest, which uses
+ * the same extractors rather than a second set.
+ */
+export async function extractOne(file: string, out: string): Promise<boolean> {
   const ext = path.extname(file).toLowerCase();
 
   if (ext === ".txt" || ext === ".md") {

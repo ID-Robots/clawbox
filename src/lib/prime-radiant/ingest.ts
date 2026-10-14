@@ -1,0 +1,606 @@
+/**
+ * An ingest job: documents from the owner's folders (or a drop) turned into
+ * vault pages with claims.
+ *
+ *   scan  → walk the folders (exclude list, entry budget), one file row each
+ *   write → per file: read once, hash, skip what is already ingested, extract,
+ *           redact; every {@link WRITER_BATCH_SIZE} files (or a character
+ *           budget) one Flash call, up to `parallel` in flight; each answered
+ *           batch becomes ONE commit through `vaultOperation`
+ *   done  → tallies, notes, the job row settled
+ *
+ * One job runs at a time per box (the second is refused, never queued), held
+ * in `processStore` because the routes and the boot layer are separate module
+ * copies. Progress is pushed to subscribers (the SSE route) and persisted per
+ * batch; a job whose process went away is settled `interrupted` on the next
+ * read, and re-running the same folders retries exactly what did not finish —
+ * a document is skipped only once some job has written its pages.
+ *
+ * Failure scopes: a model answer that drops or garbles one item fails that
+ * file; a call that keeps failing after its retries fails its batch; a refused
+ * credential or plan stops the job (every further call would fail the same
+ * way).
+ *
+ * SERVER ONLY.
+ */
+
+import crypto from "crypto";
+import { existsSync } from "fs";
+import fs from "fs/promises";
+import path from "@/lib/runtime-path";
+import { processStore } from "@/lib/process-store";
+import { buildClaimIndex } from "./claims";
+import {
+  FlashCallError,
+  completeWithRetry,
+  estimateUsd,
+  flashClient,
+  type FlashClient,
+  type RetryOptions,
+} from "./flash-client";
+import {
+  extractText,
+  prepareText,
+  readFileOnce,
+  scanFolders,
+  sourceLabel,
+  type Extractor,
+  type ScannedFile,
+} from "./ingest-sources";
+import {
+  ingestedHashes,
+  insertFiles,
+  insertJob,
+  listJobs,
+  readJob,
+  recordCost,
+  saveJob,
+  settleOrphanJobs,
+  updateFiles,
+  type FileStatus,
+  type FileUpdate,
+  type IngestJob,
+  type IngestKind,
+} from "./ingest-store";
+import { primeRadiantRoot, vaultDir } from "./paths";
+import { readRetiredLedger, stateDbPathFor, syncActiveClaims } from "./state-db";
+import { INDEX_FILE, VaultLintBlockedError, ensureVault, readVaultSnapshot, vaultOperation } from "./vault";
+import {
+  MAX_BATCH_CHARS,
+  WRITER_BATCH_SIZE,
+  WRITER_MAX_TOKENS,
+  WriterParseError,
+  addToIndex,
+  buildPage,
+  buildWriterPrompt,
+  parseWriterResponse,
+  type BuildContext,
+  type ExistingPage,
+  type ItemVerdict,
+  type WriterItem,
+} from "./writer";
+
+/** Model calls in flight at once, by default. */
+export const DEFAULT_PARALLEL = 8;
+export const MAX_PARALLEL = 32;
+/** Events a late subscriber can catch up on. */
+const BACKLOG = 300;
+
+export type IngestEvent =
+  | { type: "job"; job: IngestJob }
+  | { type: "file"; seq: number; label: string; status: FileStatus; pages?: string[]; reason?: string };
+
+export type IngestListener = (event: IngestEvent) => void;
+
+export type IngestInput =
+  | { kind: "folders"; folders: string[] }
+  /** A drop: the staged folder and the batch it was uploaded under. */
+  | { kind: "upload"; dir: string; batch: string };
+
+export interface IngestDeps {
+  vault?: string;
+  client?: FlashClient;
+  parallel?: number;
+  batchSize?: number;
+  maxBatchChars?: number;
+  retry?: RetryOptions;
+  extractor?: Extractor;
+  now?: () => Date;
+  ownerFor?: (domain: string) => string | undefined;
+}
+
+interface LiveJob {
+  job: IngestJob;
+  listeners: Set<IngestListener>;
+  backlog: IngestEvent[];
+  abort: AbortController;
+  done: Promise<void>;
+}
+
+const store = processStore("prime-radiant:ingest", () => ({ live: new Map<string, LiveJob>() }));
+
+export class IngestBusyError extends Error {
+  constructor(readonly runningId: string) {
+    super("an ingest is already running");
+    this.name = "IngestBusyError";
+  }
+}
+
+const JOB_ID_ALPHABET = "0123456789abcdef";
+const JOB_ID_HEX = 12;
+
+export function newJobId(): string {
+  return `ing-${crypto.randomBytes(JOB_ID_HEX / 2).toString("hex")}`;
+}
+
+/** A caller's job id rebuilt from the id alphabet, or null when it cannot be one. */
+export function safeJobId(input: unknown): string | null {
+  if (typeof input !== "string" || !input.startsWith("ing-") || input.length !== 4 + JOB_ID_HEX) return null;
+  let hex = "";
+  for (const ch of input.slice(4)) {
+    const at = JOB_ID_ALPHABET.indexOf(ch);
+    if (at < 0) return null;
+    hex += JOB_ID_ALPHABET[at];
+  }
+  return `ing-${hex}`;
+}
+
+function liveIds(): Set<string> {
+  return new Set(store.live.keys());
+}
+
+/** The running job's id, or null. */
+export function runningJobId(): string | null {
+  for (const [id, live] of store.live) if (live.job.status === "running") return id;
+  return null;
+}
+
+/** One job: live when it is running here, else from the database (settling an orphan first). */
+export function getIngestJob(id: string, vault: string = vaultDir()): IngestJob | null {
+  const live = store.live.get(id);
+  if (live) return { ...live.job };
+  // A read never creates the state database.
+  if (!existsSync(stateDbPathFor(vault))) return null;
+  try {
+    settleOrphanJobs(vault, liveIds(), new Date().toISOString());
+    return readJob(vault, id);
+  } catch {
+    return null;
+  }
+}
+
+export function listIngestJobs(vault: string = vaultDir(), limit = 20): IngestJob[] {
+  if (!existsSync(stateDbPathFor(vault))) return [];
+  try {
+    settleOrphanJobs(vault, liveIds(), new Date().toISOString());
+    return listJobs(vault, limit).map((j) => (store.live.get(j.id) ? { ...store.live.get(j.id)!.job } : j));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Subscribe to a live job's events. The listener first receives the backlog
+ * (the job's current state last), then every event until the job ends.
+ * Returns the unsubscribe function, or null when the job is not live here.
+ */
+export function subscribeIngest(id: string, listener: IngestListener): (() => void) | null {
+  const live = store.live.get(id);
+  if (!live) return null;
+  for (const e of live.backlog) listener(e);
+  listener({ type: "job", job: { ...live.job } });
+  live.listeners.add(listener);
+  return () => live.listeners.delete(listener);
+}
+
+/** Resolves when the job has finished (immediately for one not running here). */
+export function ingestFinished(id: string): Promise<void> {
+  return store.live.get(id)?.done ?? Promise.resolve();
+}
+
+function emit(live: LiveJob, event: IngestEvent): void {
+  if (event.type === "file") {
+    live.backlog.push(event);
+    if (live.backlog.length > BACKLOG) live.backlog.splice(0, live.backlog.length - BACKLOG);
+  }
+  for (const l of [...live.listeners]) {
+    try {
+      l(event);
+    } catch {
+      // A subscriber that throws (a closed stream) must not stop the job.
+    }
+  }
+}
+
+/**
+ * Start a job and answer it at once; the work runs on. Throws
+ * {@link IngestBusyError} while another job runs.
+ */
+export async function startIngest(input: IngestInput, deps: IngestDeps = {}): Promise<IngestJob> {
+  const running = runningJobId();
+  if (running) throw new IngestBusyError(running);
+  const vault = deps.vault ?? vaultDir();
+  const now = deps.now ?? (() => new Date());
+  await ensureVault(vault);
+  // Checked again after the await: two starts that arrived together both passed the first look.
+  const raced = runningJobId();
+  if (raced) throw new IngestBusyError(raced);
+
+  const at = now().toISOString();
+  const job: IngestJob = {
+    id: newJobId(),
+    kind: input.kind as IngestKind,
+    status: "running",
+    phase: "queued",
+    folders: input.kind === "folders" ? input.folders.map(sourceLabel) : [`upload/${input.batch}`],
+    total: 0,
+    done: 0,
+    failed: 0,
+    skipped: 0,
+    duplicates: 0,
+    pages: 0,
+    commits: 0,
+    calls: 0,
+    usdEstimate: 0,
+    createdAt: at,
+    updatedAt: at,
+    finishedAt: null,
+    error: null,
+    notes: [],
+  };
+  settleOrphanJobs(vault, liveIds(), at);
+  insertJob(vault, job);
+  const live: LiveJob = { job, listeners: new Set(), backlog: [], abort: new AbortController(), done: Promise.resolve() };
+  store.live.set(job.id, live);
+  live.done = runJob(live, input, vault, deps).finally(() => {
+    // Kept a little after the end so a stream opened right as it finished still
+    // gets the closing state from memory; the database has it either way.
+    const t = setTimeout(() => {
+      if (store.live.get(job.id) === live) store.live.delete(job.id);
+    }, 60_000);
+    t.unref?.();
+  });
+  return { ...job };
+}
+
+/** Stop a running job. Files it did not reach are marked failed; re-running the same folders picks them up. */
+export function stopIngest(id: string): boolean {
+  const live = store.live.get(id);
+  if (!live || live.job.status !== "running") return false;
+  live.abort.abort();
+  return true;
+}
+
+interface PreparedFile {
+  seq: number;
+  file: ScannedFile;
+  sha256: string;
+  bytes: number;
+  text: string;
+}
+
+function uploadLabel(dir: string): (abs: string) => string {
+  return (abs) => `upload/${path.relative(dir, abs).split(path.sep).join("/")}`;
+}
+
+async function runJob(live: LiveJob, input: IngestInput, vault: string, deps: IngestDeps): Promise<void> {
+  const { job } = live;
+  const now = deps.now ?? (() => new Date());
+  const client = deps.client ?? flashClient();
+  const parallel = Math.min(MAX_PARALLEL, Math.max(1, Math.floor(deps.parallel ?? DEFAULT_PARALLEL)));
+  const batchSize = Math.min(WRITER_BATCH_SIZE, Math.max(1, Math.floor(deps.batchSize ?? WRITER_BATCH_SIZE)));
+  const maxBatchChars = deps.maxBatchChars ?? MAX_BATCH_CHARS;
+  const scratch = path.join(primeRadiantRoot(), "tmp", job.id);
+  const signal = live.abort.signal;
+  let fatal: string | null = null;
+
+  const touch = () => {
+    job.updatedAt = now().toISOString();
+  };
+  const publish = () => {
+    touch();
+    emit(live, { type: "job", job: { ...job } });
+  };
+  const persist = () => {
+    try {
+      saveJob(vault, job);
+    } catch (err) {
+      console.error("[prime-radiant] ingest: saving the job failed:", err instanceof Error ? err.message : err);
+    }
+  };
+  const settledSeqs = new Set<number>();
+  const settle = (updates: FileUpdate[], labels: Map<number, string>) => {
+    for (const u of updates) {
+      settledSeqs.add(u.seq);
+      if (u.status === "done") job.done += 1;
+      else if (u.status === "failed") job.failed += 1;
+      else if (u.status === "duplicate") job.duplicates += 1;
+      else if (u.status === "skipped") job.skipped += 1;
+      emit(live, {
+        type: "file",
+        seq: u.seq,
+        label: labels.get(u.seq) ?? "",
+        status: u.status,
+        ...(u.pages ? { pages: u.pages } : {}),
+        ...(u.error ? { reason: u.error } : {}),
+      });
+    }
+    try {
+      updateFiles(vault, job.id, updates);
+    } catch (err) {
+      console.error("[prime-radiant] ingest: saving file rows failed:", err instanceof Error ? err.message : err);
+    }
+  };
+
+  try {
+    // ── scan ──
+    job.phase = "scan";
+    publish();
+    const folders = input.kind === "folders" ? input.folders : [input.dir];
+    const scan = await scanFolders(folders, {
+      labelOf: input.kind === "upload" ? uploadLabel(input.dir) : undefined,
+      signal,
+    });
+    job.total = scan.files.length;
+    job.notes.push(...scan.notes);
+    if (scan.unsupported > 0) job.notes.push(`${scan.unsupported} file(s) of a kind Prime Radiant does not read were left out.`);
+    const labels = new Map<number, string>(scan.files.map((f, seq) => [seq, f.label]));
+    insertFiles(vault, job.id, scan.files.map((f, seq) => ({ seq, label: f.label })));
+    job.phase = "write";
+    publish();
+    persist();
+
+    // ── write ──
+    const known = ingestedHashes(vault);
+    const seenInJob = new Map<string, number>();
+    const inFlight = new Set<Promise<void>>();
+    let batch: PreparedFile[] = [];
+    let batchChars = 0;
+
+    const dispatch = async (files: PreparedFile[]) => {
+      if (files.length === 0) return;
+      while (inFlight.size >= parallel) await Promise.race(inFlight);
+      if (fatal || signal.aborted) {
+        settle(
+          files.map((f) => ({ seq: f.seq, status: "failed" as const, sha256: f.sha256, bytes: f.bytes, error: fatal ?? "stopped" })),
+          labels,
+        );
+        publish();
+        return;
+      }
+      const p = writeBatch(files).finally(() => inFlight.delete(p));
+      inFlight.add(p);
+    };
+
+    const writeBatch = async (files: PreparedFile[]) => {
+      let results: BatchResult;
+      try {
+        results = await processBatch(files, { client, vault, deps, job, signal, now });
+      } catch (err) {
+        // Anything processBatch did not expect fails its own batch, never the job.
+        console.error("[prime-radiant] ingest: a batch failed:", err instanceof Error ? err.message : err);
+        results = {
+          updates: files.map((f) => ({ seq: f.seq, status: "failed", sha256: f.sha256, bytes: f.bytes, error: "the batch could not be written" })),
+          pagesWritten: 0,
+          commit: null,
+          cost: null,
+          fatal: null,
+        };
+      }
+      if (results.fatal && !fatal) fatal = results.fatal;
+      settle(results.updates, labels);
+      if (results.cost) {
+        job.calls += results.cost.calls;
+        job.usdEstimate = Math.round((job.usdEstimate + results.cost.usd) * 1_000_000) / 1_000_000;
+      }
+      if (results.commit) job.commits += 1;
+      job.pages += results.pagesWritten;
+      publish();
+      persist();
+    };
+
+    for (let seq = 0; seq < scan.files.length; seq++) {
+      const file = scan.files[seq];
+      if (signal.aborted || fatal) break;
+      const read = await readFileOnce(file.abs);
+      if (!read.ok) {
+        settle([{ seq, status: read.reason === "too-large" ? "skipped" : "failed", bytes: read.bytes, error: read.reason }], labels);
+        publish();
+        continue;
+      }
+      const bytes = read.data.length;
+      if (known.has(read.sha256) || seenInJob.has(read.sha256)) {
+        settle([{ seq, status: "duplicate", sha256: read.sha256, bytes, error: null }], labels);
+        publish();
+        continue;
+      }
+      seenInJob.set(read.sha256, seq);
+      const raw = await extractText(read.data, file.ext, scratch, deps.extractor);
+      if (raw === null) {
+        settle([{ seq, status: "failed", sha256: read.sha256, bytes, error: "extract-failed" }], labels);
+        publish();
+        continue;
+      }
+      const prepared = prepareText(raw);
+      if (prepared.text.trim() === "") {
+        settle([{ seq, status: "skipped", sha256: read.sha256, bytes, error: "empty" }], labels);
+        publish();
+        continue;
+      }
+      if (batch.length > 0 && (batch.length >= batchSize || batchChars + prepared.text.length > maxBatchChars)) {
+        await dispatch(batch);
+        batch = [];
+        batchChars = 0;
+      }
+      batch.push({ seq, file, sha256: read.sha256, bytes, text: prepared.text });
+      batchChars += prepared.text.length;
+    }
+    await dispatch(batch);
+    batch = [];
+    while (inFlight.size > 0) await Promise.race(inFlight);
+
+    // Files the loop never reached (stopped, or a fatal error) are failed; a
+    // document is skipped only once some job wrote its pages, so the next run
+    // of the same folders picks them up.
+    const missing: FileUpdate[] = [];
+    for (let seq = 0; seq < scan.files.length; seq++) {
+      if (!settledSeqs.has(seq)) missing.push({ seq, status: "failed", error: fatal ?? "stopped" });
+    }
+    settle(missing, labels);
+    job.status = fatal && job.done === 0 ? "failed" : "done";
+    if (fatal) job.error = fatal;
+    else if (signal.aborted) job.error = "The ingest was stopped.";
+  } catch (err) {
+    job.status = "failed";
+    job.error = signal.aborted ? "The ingest was stopped." : "The ingest could not finish.";
+    console.error("[prime-radiant] ingest failed:", err instanceof Error ? err.message : err);
+  } finally {
+    // Cleaned up BEFORE the closing event, so whoever hears "end" finds it done.
+    await fs.rm(scratch, { recursive: true, force: true }).catch(() => undefined);
+    if (input.kind === "upload") await fs.rm(input.dir, { recursive: true, force: true }).catch(() => undefined);
+    job.phase = "done";
+    job.finishedAt = now().toISOString();
+    publish();
+    persist();
+  }
+}
+
+interface BatchResult {
+  updates: FileUpdate[];
+  pagesWritten: number;
+  commit: string | null;
+  cost: { calls: number; usd: number } | null;
+  fatal: string | null;
+}
+
+const FATAL_MESSAGES: Partial<Record<FlashCallError["kind"], string>> = {
+  no_credential: "This box is not signed in to ClawBox AI.",
+  auth: "ClawBox AI refused this box's sign-in. Sign in again in Settings.",
+  refused: "ClawBox AI refused the request. Check the plan this box is on.",
+};
+
+/** One batch: a model call (with retries, and one more call for an unreadable answer), then one commit. */
+async function processBatch(
+  files: PreparedFile[],
+  ctx: { client: FlashClient; vault: string; deps: IngestDeps; job: IngestJob; signal: AbortSignal; now: () => Date },
+): Promise<BatchResult> {
+  const { client, vault, deps, job, signal, now } = ctx;
+  const items: WriterItem[] = files.map((f, i) => ({ i, path: f.file.label, kind: f.file.ext.slice(1), text: f.text }));
+  const prompt = buildWriterPrompt(items);
+  const failAll = (reason: string, fatal: string | null = null, cost: BatchResult["cost"] = null): BatchResult => ({
+    updates: files.map((f) => ({ seq: f.seq, status: "failed", sha256: f.sha256, bytes: f.bytes, error: reason })),
+    pagesWritten: 0,
+    commit: null,
+    cost,
+    fatal,
+  });
+
+  let verdicts: Map<number, ItemVerdict> | null = null;
+  const cost = { calls: 0, usd: 0 };
+  for (let parseAttempt = 1; parseAttempt <= 2 && !verdicts; parseAttempt++) {
+    let outcome;
+    try {
+      outcome = await completeWithRetry(
+        client,
+        { system: prompt.system, user: prompt.user, maxTokens: WRITER_MAX_TOKENS, signal },
+        deps.retry,
+      );
+    } catch (err) {
+      const e = err instanceof FlashCallError ? err : null;
+      const fatal = e ? (FATAL_MESSAGES[e.kind] ?? null) : null;
+      return failAll(e?.kind === "aborted" ? "stopped" : `model call failed${e ? ` (${e.kind})` : ""}`, fatal, cost.calls ? cost : null);
+    }
+    const usd = estimateUsd(outcome.response.model, outcome.response.usage);
+    cost.calls += 1;
+    cost.usd += usd;
+    try {
+      recordCost(vault, {
+        runId: job.id,
+        operation: "ingest.write",
+        model: outcome.response.model,
+        tokensIn: outcome.response.usage.promptTokens,
+        tokensOut: outcome.response.usage.completionTokens,
+        usdEstimate: usd,
+        at: now().toISOString(),
+      });
+    } catch (err) {
+      console.error("[prime-radiant] ingest: recording a cost failed:", err instanceof Error ? err.message : err);
+    }
+    try {
+      verdicts = parseWriterResponse(outcome.response.text, items);
+    } catch (err) {
+      if (!(err instanceof WriterParseError) || parseAttempt === 2) return failAll("the model's answer could not be read", null, cost);
+    }
+  }
+  if (!verdicts) return failAll("the model's answer could not be read", null, cost);
+
+  const updates: FileUpdate[] = [];
+  let pagesWritten = 0;
+  let commit: string | null = null;
+  const written: Array<{ id: string; page: string; updatedAt: string }> = [];
+  try {
+    const op = await vaultOperation(
+      `ingest: ${files.length} document(s) (${job.id})`,
+      async (tx) => {
+        const snapshot = await readVaultSnapshot(tx.vault);
+        const valid = snapshot.pages.flatMap((p) => (p.parsed.ok ? [{ path: p.path, frontmatter: p.parsed.frontmatter }] : []));
+        let ledger: string[] = [];
+        try {
+          ledger = readRetiredLedger(tx.vault);
+        } catch {
+          ledger = [];
+        }
+        const pagesBySource = new Map<string, ExistingPage>();
+        for (const p of valid) for (const s of p.frontmatter.sources) if (!pagesBySource.has(s)) pagesBySource.set(s, p);
+        const build: BuildContext = {
+          takenPaths: new Set(snapshot.pages.map((p) => p.path)),
+          pagesBySource,
+          claimIndex: buildClaimIndex(valid, ledger),
+          now: now(),
+          ownerFor: deps.ownerFor,
+        };
+        const indexed: Array<{ path: string; title: string }> = [];
+        for (let i = 0; i < files.length; i++) {
+          const f = files[i];
+          const v = verdicts!.get(i);
+          if (!v || !v.ok) {
+            updates.push({ seq: f.seq, status: "failed", sha256: f.sha256, bytes: f.bytes, error: v && !v.ok ? v.reason : "missing" });
+            continue;
+          }
+          if (!v.draft.useful) {
+            updates.push({ seq: f.seq, status: "skipped", sha256: f.sha256, bytes: f.bytes, error: "nothing to keep" });
+            continue;
+          }
+          const built = buildPage(v.draft, f.file.label, build);
+          if (!built.ok) {
+            updates.push({ seq: f.seq, status: "skipped", sha256: f.sha256, bytes: f.bytes, error: "its page is verified" });
+            continue;
+          }
+          await tx.writePage(built.path, built.frontmatter, built.body);
+          for (const c of built.frontmatter.claims) written.push({ id: c.id, page: built.path, updatedAt: c.updatedAt });
+          indexed.push({ path: built.path, title: built.frontmatter.title });
+          updates.push({ seq: f.seq, status: "done", sha256: f.sha256, bytes: f.bytes, pages: [built.path], error: null });
+          pagesWritten += 1;
+        }
+        if (indexed.length > 0) {
+          const next = addToIndex(snapshot.indexBody, indexed);
+          if (next !== snapshot.indexBody) await tx.write(INDEX_FILE, next);
+        }
+      },
+      { vault, now: now() },
+    );
+    commit = op.commit;
+  } catch (err) {
+    const reason = err instanceof VaultLintBlockedError ? "the pages were refused by lint" : "the pages could not be saved";
+    console.error("[prime-radiant] ingest: batch commit failed:", err instanceof Error ? err.message : err);
+    return failAll(reason, null, cost);
+  }
+  if (written.length > 0) {
+    try {
+      syncActiveClaims(vault, written);
+    } catch {
+      // The ledger is a second copy; the pages hold the claims.
+    }
+  }
+  return { updates, pagesWritten, commit, cost, fatal: null };
+}
