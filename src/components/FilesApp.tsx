@@ -2412,7 +2412,7 @@ function DialogOverlay({ dialog, onChange, onCancel, onSubmit }: {
   const submit = () => { if (!pathTyped) onSubmit(); };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+    <div className="main-screen-scrim fixed inset-0 z-50 flex items-center justify-center bg-black/60"
       onClick={onCancel}>
       <div
         className="card-surface rounded-2xl p-6 w-80 shadow-2xl"
@@ -2654,7 +2654,7 @@ function FolderPickerDialog({
   const chip = "flex items-center gap-1 px-2 py-1 rounded-md text-xs transition-colors cursor-pointer shrink-0 max-w-[140px]";
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onCancel}>
+    <div className="main-screen-scrim fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onCancel}>
       <div
         ref={rootRef}
         tabIndex={-1}
@@ -2933,7 +2933,7 @@ function MoveConflictDialog({ conflict, folderName, onCancel, onResolve }: {
   const { t } = useT();
   const n = conflict.conflicts.length;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onCancel}>
+    <div className="main-screen-scrim fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onCancel}>
       <div
         role="alertdialog"
         aria-modal="true"

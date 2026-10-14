@@ -48,7 +48,37 @@ export function setDeskScreens(next: DeskScreen[] | null): void {
   const value = next && next.length > 1 ? next : null;
   if (same(screens, value)) return;
   screens = value;
+  applyMainInsetVars();
   for (const l of listeners) l();
+}
+
+/**
+ * The main monitor's insets as CSS custom properties on the document root —
+ * `--desk-main-left/top/right/bottom` — for the `main-screen-scrim` class in
+ * globals.css: a full-screen modal scrim (`fixed inset-0 … items-center
+ * justify-center`) wears it and centres its panel on the MAIN monitor rather
+ * than on the seam between two. The Force full update confirmation sat in the
+ * middle of a two-monitor row, half on each, and the owner never saw it.
+ *
+ * Written here, at the one place the layout changes, rather than by every
+ * dialog: a dialog renders inside its window and knows nothing of monitors.
+ * Removed, not zeroed, when the layout is one screen, so the class's `0px`
+ * fallback answers and a page with no layout is byte-for-byte as before.
+ */
+export const MAIN_INSET_VARS = ["--desk-main-left", "--desk-main-top", "--desk-main-right", "--desk-main-bottom"] as const;
+
+export function applyMainInsetVars(): void {
+  if (typeof document === "undefined") return;
+  const style = document.documentElement.style;
+  if (!screens) {
+    for (const name of MAIN_INSET_VARS) style.removeProperty(name);
+    return;
+  }
+  const ins = mainInsets();
+  style.setProperty("--desk-main-left", `${ins.left}px`);
+  style.setProperty("--desk-main-top", `${ins.top}px`);
+  style.setProperty("--desk-main-right", `${ins.right}px`);
+  style.setProperty("--desk-main-bottom", `${ins.bottom}px`);
 }
 
 export function subscribeDeskScreens(listener: () => void): () => void {

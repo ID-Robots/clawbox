@@ -2657,3 +2657,25 @@ input[type="range"].appearance-none::-moz-range-track {
   0% { transform: translateX(-100%); }
   100% { transform: translateX(250%); }
 }
+
+/* ── Modal scrims over a row of monitors (src/lib/desktop-screens.ts) ────────
+   A full-screen scrim (`fixed inset-0 flex items-center justify-center`)
+   centres its panel in the viewport, and in monitor mode the viewport is the
+   whole row: the Force full update confirmation landed on the seam between two
+   monitors, half on each. The desktop writes the main monitor's insets onto
+   the root (`applyMainInsetVars`), and this class spends them as a TRANSPARENT
+   border: the scrim still dims every monitor (the background paints under the
+   border), its clicks still close the dialog everywhere, and the flex box the
+   panel is centred in — the content box — is exactly the main monitor. A
+   border rather than padding, so each scrim's own `p-4`/`px-4` stays as it is
+   and a `w-full` panel is as wide as that monitor, never the row. With no
+   layout every variable is unset, the border is 0 and nothing moves. Flat
+   class only (the setup-ground parity test). */
+.main-screen-scrim {
+  border-style: solid;
+  border-color: transparent;
+  border-top-width: var(--desk-main-top, 0px);
+  border-right-width: var(--desk-main-right, 0px);
+  border-bottom-width: var(--desk-main-bottom, 0px);
+  border-left-width: var(--desk-main-left, 0px);
+}

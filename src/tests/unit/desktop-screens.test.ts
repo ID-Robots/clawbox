@@ -8,6 +8,7 @@ import {
   identifyMonitors,
   mainInsets,
   mainScreen,
+  MAIN_INSET_VARS,
   screenAt,
   screenForRect,
   screensFromStatus,
@@ -74,6 +75,32 @@ describe("setDeskScreens / getDeskScreens", () => {
     setDeskScreens(ROW);
     setDeskScreens([ROW[0]]);
     expect(getDeskScreens()).toBeNull();
+  });
+});
+
+describe("the main monitor's insets on the document root", () => {
+  afterEach(() => setDeskScreens(null));
+
+  it("writes --desk-main-* for a layout and removes them for one screen", () => {
+    setViewport(5120, 1440);
+    setDeskScreens([scr("a", 0, 0, 2560, 1440), scr("b", 2560, 0, 2560, 1440, true)]);
+    const root = document.documentElement.style;
+    expect(root.getPropertyValue("--desk-main-left")).toBe("2560px");
+    expect(root.getPropertyValue("--desk-main-top")).toBe("0px");
+    expect(root.getPropertyValue("--desk-main-right")).toBe("0px");
+    expect(root.getPropertyValue("--desk-main-bottom")).toBe("0px");
+    setDeskScreens(null);
+    for (const name of MAIN_INSET_VARS) expect(root.getPropertyValue(name)).toBe("");
+  });
+
+  it("follows a shorter main monitor in a mixed row", () => {
+    setViewport(5120, 1440);
+    setDeskScreens([scr("a", 0, 0, 2560, 1440), scr("b", 2560, 180, 1920, 1080, true)]);
+    const root = document.documentElement.style;
+    expect(root.getPropertyValue("--desk-main-left")).toBe("2560px");
+    expect(root.getPropertyValue("--desk-main-top")).toBe("180px");
+    expect(root.getPropertyValue("--desk-main-right")).toBe("640px");
+    expect(root.getPropertyValue("--desk-main-bottom")).toBe("180px");
   });
 });
 

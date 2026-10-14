@@ -180,7 +180,7 @@ function UpdatingScreen() {
         instant it mounts.
       */}
       <div
-        className="fixed inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center"
+        className="main-screen-scrim fixed inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center"
         style={{ background: "var(--ground, #0a0f1a)" }}
         data-testid="updating-ssr-floor"
       >

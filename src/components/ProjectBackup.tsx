@@ -174,7 +174,7 @@ export function GitHubHelpDialog({ onClose }: { onClose: () => void }) {
   const rootRef = useRef<HTMLDivElement>(null);
   useEffect(() => { rootRef.current?.focus(); }, []);
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60" onClick={onClose}>
+    <div className="main-screen-scrim fixed inset-0 z-[60] flex items-center justify-center bg-black/60" onClick={onClose}>
       <div
         ref={rootRef}
         tabIndex={-1}
@@ -792,7 +792,7 @@ export function ProjectBackupPanel({ folder, onClose, onChanged }: {
 
   return (
     <>
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => { if (!busy) onClose(); }}>
+    <div className="main-screen-scrim fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={() => { if (!busy) onClose(); }}>
       <div
         ref={rootRef}
         tabIndex={-1}
