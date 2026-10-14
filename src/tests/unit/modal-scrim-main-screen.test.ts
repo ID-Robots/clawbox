@@ -51,8 +51,9 @@ const STYLE_OBJECT = /style=\{\{([\s\S]*?)\}\}/g;
 /** The opening tag a style object sits in, from its `<` to its `>`. */
 function openingTag(text: string, start: number, end: number): string {
   const rest = text.slice(end);
-  const close = rest.search(/[^=]>/);
-  return text.slice(text.lastIndexOf("<", start), end + (close < 0 ? rest.length : close + 2));
+  // The first `>` that is not an arrow's — including one straight after `}}`.
+  const close = /(?:^|[^=])>/.exec(rest);
+  return text.slice(text.lastIndexOf("<", start), end + (close ? close.index + close[0].length : rest.length));
 }
 
 type Scrim = { file: string; line: number; text: string; offset: number; tag: string };
@@ -93,6 +94,10 @@ describe("modal scrims centre on the main monitor", () => {
     expect(centredScrims(classed, "x.tsx").map((s) => s.tag.includes("main-screen-scrim"))).toEqual([true]);
     expect(centredScrims(inline.replace("\n>", ' className="main-screen-scrim">'), "x.tsx").map((s) => s.tag.includes("main-screen-scrim"))).toEqual([true]);
     expect(centredScrims('<div style={{ position: "fixed", inset: 0, display: "flex" }}>', "x.tsx")).toEqual([]);
+    // A tag closed straight after its style ends there: the class of the
+    // panel inside it is not the scrim's.
+    const tight = '<div style={{ position: "fixed", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}><div className="main-screen-scrim" onClick={() => go()}>';
+    expect(centredScrims(tight, "x.tsx").map((s) => s.tag.includes("main-screen-scrim"))).toEqual([false]);
     // Both shapes are found in the tree.
     expect(SCRIMS.length).toBeGreaterThan(20);
     expect(SCRIMS.some((s) => s.file.endsWith("VoiceTunnelDialog.tsx"))).toBe(true);
