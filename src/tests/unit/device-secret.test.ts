@@ -138,9 +138,32 @@ describe("device-secret.sh install / load", () => {
   });
 });
 
+// Fake `passwd -S` / `runuser` so the owner guard can be driven without a
+// real clawbox account. PASSWD_STATUS = P | L | NP | "" (unreadable);
+// CHKPWD_RC = what unix_chkpwd answers for the legacy password (0 = it
+// verifies, 7 = an owner's own password).
+function stockEnv(passwdStatus = "L", chkpwdRc = "7"): Record<string, string> {
+  const bin = path.join(tmp, "bin");
+  const root = path.join(tmp, "root");
+  fs.mkdirSync(bin, { recursive: true });
+  fs.mkdirSync(path.join(root, "data"), { recursive: true });
+  fs.writeFileSync(
+    path.join(bin, "passwd"),
+    '#!/bin/sh\n[ -n "$PASSWD_STATUS" ] || exit 1\necho "clawbox $PASSWD_STATUS 2026-01-01 0 99999 7 -1"\n',
+    { mode: 0o755 },
+  );
+  fs.writeFileSync(path.join(bin, "runuser"), '#!/bin/sh\ncat >/dev/null\nexit "$CHKPWD_RC"\n', { mode: 0o755 });
+  return {
+    PATH: `${bin}:${process.env.PATH}`,
+    CLAWBOX_ROOT: root,
+    PASSWD_STATUS: passwdStatus,
+    CHKPWD_RC: chkpwdRc,
+  };
+}
+
 describe("provision-device.sh", () => {
   it("--dry-run validates and prints the plan without writing or revealing the PSK", () => {
-    const r = run(PROVISION, ["--dry-run"], ZEROS);
+    const r = run(PROVISION, ["--dry-run"], ZEROS, stockEnv());
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("ClawBox-Q7M8");
     expect(r.stdout).toContain("dry run");
@@ -150,7 +173,34 @@ describe("provision-device.sh", () => {
   });
 
   it("--dry-run refuses a malformed secret", () => {
-    expect(run(PROVISION, ["--dry-run"], "nope").status).toBe(2);
+    expect(run(PROVISION, ["--dry-run"], "nope", stockEnv()).status).toBe(2);
+  });
+
+  it("accepts a stock box still carrying only the legacy image password", () => {
+    const r = run(PROVISION, ["--dry-run"], ZEROS, stockEnv("P", "0"));
+    expect(r.status).toBe(0);
+  });
+
+  // TASK-1572: an already set-up customer box must never be provisioned —
+  // that would change its hotspot. Every owner signal alone refuses, and so
+  // does doubt.
+  it.each([
+    ["setup completed", { config: '{"setup_complete": true}' }],
+    ["owner password flag", { config: '{"password_configured":true}' }],
+    ["own hotspot settings", { hotspotEnv: "HOTSPOT_SSID=Home\n" }],
+    ["an owner password in shadow", { status: "P", rc: "7" }],
+    ["unreadable password state", { status: "" }],
+    ["password check failed", { status: "P", rc: "9" }],
+  ])("refuses a box with %s", (_label, c: { config?: string; hotspotEnv?: string; status?: string; rc?: string }) => {
+    const env = stockEnv(c.status ?? "L", c.rc ?? "7");
+    if (c.config) fs.writeFileSync(path.join(env.CLAWBOX_ROOT, "data", "config.json"), c.config);
+    if (c.hotspotEnv) fs.writeFileSync(path.join(env.CLAWBOX_ROOT, "data", "hotspot.env"), c.hotspotEnv);
+    for (const args of [["--dry-run"], []]) {
+      const r = run(PROVISION, args, ZEROS, env);
+      expect(r.status).not.toBe(0);
+      expect(fs.existsSync(path.join(etc, "device-secret"))).toBe(false);
+      expect(fs.existsSync(path.join(etc, "provisioned"))).toBe(false);
+    }
   });
 
   it("is installed root-owned beside start-ap.sh, which finds device-secret.sh as a sibling", () => {

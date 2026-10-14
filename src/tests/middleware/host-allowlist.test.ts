@@ -215,8 +215,15 @@ describe("middleware Host allow-list", () => {
     });
 
     it("answers the captive-portal probes on any name", async () => {
-      // Once set up, a probe on the box reports "online" (no sign-in prompt)…
+      // A box set up before per-device provisioning keeps the old redirect…
+      const legacy = await run("connectivitycheck.gstatic.com", "/generate_204");
+      expect(legacy.status).toBe(302);
+      // …a provisioned box, once set up, reports "online" (no sign-in prompt)…
+      process.env.CLAWBOX_ETC = path.join(tmpRoot, "etc-clawbox");
+      fs.mkdirSync(process.env.CLAWBOX_ETC, { recursive: true });
+      fs.writeFileSync(path.join(process.env.CLAWBOX_ETC, "provisioned"), "provisioned\n");
       const online = await run("connectivitycheck.gstatic.com", "/generate_204");
+      delete process.env.CLAWBOX_ETC;
       expect(online.status).toBe(204);
       // …and before setup it sends the phone to the wizard.
       writeConfig({});
