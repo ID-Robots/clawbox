@@ -99,6 +99,13 @@ interface StepOpts {
   ttsStatus?: string | null;
   /** Deploy clawbox-tts.sh without the execute bit. */
   ttsScriptExecutable?: boolean;
+  /**
+   * The pinned Hermes' `config set` validator: `tts.providers` is not seeded
+   * in its DEFAULT_CONFIG and `providers` IS a top-level key, so it reads
+   * `tts.providers.<name>.<field>` as a wrong prefix and refuses it unless
+   * `--force` is given (hermes_cli/config.py `_is_wrong_prefix_suggestion`).
+   */
+  hermesRefusesUnseededPaths?: boolean;
 }
 
 /**
@@ -115,6 +122,7 @@ function runStep(edition: string, opts: StepOpts = {}) {
     hermesReadFails = false,
     ttsStatus = "KOKORO=ready\n",
     ttsScriptExecutable = true,
+    hermesRefusesUnseededPaths = false,
   } = opts;
 
   const projectDir = path.join(root, "project");
@@ -174,6 +182,17 @@ function runStep(edition: string, opts: StepOpts = {}) {
         "fi",
         'if [ "$1" = "config" ] && [ "$2" = "set" ]; then',
         ...(hermesFailKey ? [`  case "$3" in ${hermesFailKey}*) exit 1 ;; esac`] : []),
+        ...(hermesRefusesUnseededPaths
+          ? [
+              '  case "$3" in tts.providers.*)',
+              '    case " $* " in *" --force "*) ;; *)',
+              `      echo "✗ '$3' is not a recognized config key — nothing was written." >&2`,
+              '      echo "  Did you mean: ${3#tts.}" >&2',
+              "      exit 1 ;;",
+              "    esac ;;",
+              "  esac",
+            ]
+          : []),
         "  exit 0",
         "fi",
         "exit 0",
@@ -907,5 +926,44 @@ describe.skipIf(!hasBash)("the health check verifies the Hermes box's voice too"
     expect(healthy("dual")).toBe(3);
     // hermes adds the three gateway probes as well: 3 + 3 = 6.
     expect(healthy("hermes")).toBe(6);
+  });
+});
+
+describe.skipIf(!hasBash)("the voice lands on a Hermes whose validator does not seed tts.providers", () => {
+  // Hermes v0.21.7 (the pin) refuses `config set tts.providers.clawbox-local.command`
+  // before writing — "not a recognized config key … Did you mean:
+  // providers.clawbox-local.command" — because its DEFAULT_CONFIG has no
+  // `tts.providers` and `providers` is a top-level key. That suggestion is the
+  // LLM provider table and nothing the TTS tool reads: tools/tts_command_provider.py
+  // and the TTS guide (website/docs/user-guide/features/tts.md) both say a
+  // command provider is `tts.providers.<name>: {type: command, command: …}`.
+  // On the box this left Kokoro unregistered and failed the update (6/7).
+  it("writes the provider definition Hermes' TTS reads, past the validator's false refusal", () => {
+    const res = runStep("hermes", { hermesRefusesUnseededPaths: true });
+
+    expect(res.provisionFailures, `the voice was not registered with Hermes:\n${res.out}`).toEqual([]);
+    expect(res.out).toMatch(/Hermes on-device TTS provider defined \(clawbox-local\)/);
+    expect(res.out).not.toMatch(/NOT registered with Hermes/);
+    const calls = res.hermesCalls.join("\n");
+    for (const field of ["command", "output_format", "type"]) {
+      const line = res.hermesCalls.find((c) => c.startsWith(`config set tts.providers.${HERMES_PROVIDER}.${field} `));
+      expect(line, `no write of tts.providers.${HERMES_PROVIDER}.${field}:\n${calls}`).toBeDefined();
+      expect(line, `the write was refused by the validator:\n${calls}`).toMatch(/ --force$/);
+    }
+    // Never the "did you mean" key: that is the LLM provider table.
+    expect(calls).not.toMatch(/^config set providers\./m);
+    expect(calls).toContain(`config set tts.provider ${HERMES_PROVIDER}`);
+  });
+
+  it("forces only those three paths — the selection and every read stay ordinary", () => {
+    // `--force` also lets `config set` replace a mapping with a scalar; the
+    // selection is a seeded scalar key and gets no such licence.
+    const res = runStep("hermes", { hermesRefusesUnseededPaths: true });
+    const forced = res.hermesCalls.filter((c) => / --force$/.test(c));
+    expect(forced.map((c) => c.split(" ")[2])).toEqual([
+      `tts.providers.${HERMES_PROVIDER}.command`,
+      `tts.providers.${HERMES_PROVIDER}.output_format`,
+      `tts.providers.${HERMES_PROVIDER}.type`,
+    ]);
   });
 });

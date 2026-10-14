@@ -22,7 +22,7 @@ Rows marked **OpenClaw/dual** or **Hermes/dual** exist only on those editions. C
 | `…/clawbox/config/openclaw-target.txt` | Pinned OpenClaw version for the fleet |
 | `…/clawbox/.next/` | Production build output (`BUILD_ID` = fingerprint of the running build) |
 | `~/.openclaw/` — **OpenClaw/dual** | **OpenClaw state**: `openclaw.json` (gateway config), `agents/` (per-agent credentials — exact paths in the table below), `credentials/` (Telegram pairing approvals), `workspace/` (agent working dir), `npm/` (plugins) |
-| `~/.hermes/` — **Hermes/dual** | **Hermes state** — the Hermes equivalent of `~/.openclaw`, and the densest secret store on the box: `config.yaml` (0600 — billing token, dashboard session signing secret, scrypt password hash, `mcp_servers.clawbox`), `config.yaml.bak-*`, `.env` (provider keys), `auth.json` (OAuth tokens), `memories/`, `sessions/`, `skills/`, `pairing/`, `cron/`, `logs/`, `state.db`, `hermes-agent/` — the agent checkout + Python venv — and `bin/tirith`, the upstream pre-exec shell scanner the agent downloads on first use |
+| `~/.hermes/` — **Hermes/dual** | **Hermes state** — the Hermes equivalent of `~/.openclaw`, and the densest secret store on the box: `config.yaml` (0600 — billing token, dashboard session signing secret, scrypt password hash, `mcp_servers.clawbox`), `config.yaml.bak-*`, `.env` (provider keys), `auth.json` (OAuth tokens), `memories/`, `sessions/`, `skills/`, `pairing/`, `cron/`, `logs/`, `state.db`, `hermes-agent/` — the agent checkout, with its Python environment in `installs/` and its interpreter in `tools/` — and `bin/tirith`, the upstream pre-exec shell scanner the agent downloads on first use |
 | `~/.local/bin/hermes` — **Hermes/dual** | Small shim into the agent's launcher under `~/.hermes/hermes-agent`; its Python environment lives under `~/.hermes/installs/` and its interpreter under `~/.hermes/tools/`, both kept by factory reset |
 | `/etc/clawbox/edition.env` | Root-owned edition lock (`openclaw` \| `hermes` \| `dual`) — the authority for the SKU; survives updates **and** factory reset |
 | `~/.codex/auth.json` | Codex CLI auth (kept in sync with the agent copies) |
@@ -57,7 +57,7 @@ Rows marked **OpenClaw/dual** or **Hermes/dual** exist only on those editions. C
 | `.env` | ✅ kept | ✅ kept (gitignored, not in wipe list) |
 | `.update-branch` (channel pin) | ✅ kept | ✅ kept |
 | `~/.openclaw` (AI config, credentials, chats) | ✅ kept | ❌ wiped |
-| `~/.hermes` (Hermes config, chats, agent install) | ✅ kept | ❌ wiped, except `hermes-agent` (the agent install) and the whole of `bin/` (which holds `tirith`, the pre-exec shell scanner) — neither can be re-downloaded in AP mode. `bin/` is kept entire rather than filtered down to `tirith`, so anything else upstream puts there survives too |
+| `~/.hermes` (Hermes config, chats, agent install) | ✅ kept | ❌ wiped, except the agent install — `hermes-agent/` (the checkout), `installs/` (its Python environment) and `tools/` (its interpreter) — and the whole of `bin/` (which holds `tirith`, the pre-exec shell scanner); none of them can be re-downloaded in AP mode. `bin/` is kept entire rather than filtered down to `tirith`, so anything else upstream puts there survives too |
 | `~/.clawkeep` (backup pairing) | ✅ kept | ❌ wiped |
 | `~/.codex` (Codex CLI auth and state) | ✅ kept | ❌ wiped |
 | `~/.local/share/codex` (the Codex CLI binary itself) | ✅ kept, replaced when the pinned version moves | ✅ kept (a 117 MB download the box cannot make in AP mode) |
@@ -82,7 +82,7 @@ simply removed and the reset finishes normally.
 
 <Warning>
 **Do not hand-roll a factory reset over SSH from this table.** `rm -rf ~/.hermes` deletes
-`hermes-agent/` and bricks the Hermes harness; `rm -rf data/*` deletes `network.env` and the
+the agent install (`hermes-agent/`, `installs/`, `tools/`) and bricks the Hermes harness; `rm -rf data/*` deletes `network.env` and the
 offline model weights. The safe procedure is [Recovery → D](/support/recovery#d--factory-reset-wipes-everything).
 </Warning>
 

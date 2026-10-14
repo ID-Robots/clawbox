@@ -13,7 +13,7 @@
 import { execFile as execFileCb } from "child_process";
 import { promisify } from "util";
 import { startRootStep } from "@/lib/root-step-runner";
-import { rootStepJournalArgs, rootStepUnit } from "@/lib/root-step-journal";
+import { DISPATCH_VERDICT_LINE, rootStepJournalArgs, rootStepUnit } from "@/lib/root-step-journal";
 
 const execFile = promisify(execFileCb);
 
@@ -64,7 +64,7 @@ async function journalLines(
   // Keep the LEADING whitespace. install.sh's two-space indent is the only
   // thing separating its own sub-phase headlines from the pip/apt output
   // underneath them, so the progress watcher below has to read them untrimmed.
-  // Everything else wants them trimmed: `failureReason`'s MARKER regex is
+  // Everything else wants them trimmed: `failureReason`'s marker regex is
   // `^`-anchored, and an indented line would slip past it.
   { keepIndent = false }: { keepIndent?: boolean } = {},
 ): Promise<string[]> {
@@ -163,9 +163,6 @@ export function watchRootStepProgress(
   };
 }
 
-/** install.sh's --step EXIT trap ends a failed run with these; none of them is the reason. */
-const MARKER = /^(\[provision-(status|run)\]|#{3,}|# )/;
-
 /**
  * The line that says WHY a failed step failed. install.sh's dispatch trap
  * prints a banner and two `[provision-…]` markers after the real error, so
@@ -174,7 +171,7 @@ const MARKER = /^(\[provision-(status|run)\]|#{3,}|# )/;
  * marker; else nothing.
  */
 export function failureReason(lines: readonly string[]): string | null {
-  const said = lines.filter((line) => !MARKER.test(line));
+  const said = lines.filter((line) => !DISPATCH_VERDICT_LINE.test(line));
   const telling = [...said].reverse().find((line) => /error|kokoro/i.test(line));
   return telling ?? (said.length > 0 ? said[said.length - 1] : null);
 }

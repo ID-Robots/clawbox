@@ -980,6 +980,123 @@ describe("updater", () => {
       expect(aptStep?.error).not.toBe("Running bun build...");
     });
 
+    it("names the fixup that failed when post_update fails on what it recorded", async () => {
+      // Hermes box, 2026-10-13: post_update's `openclaw_tts` recorded a failure
+      // and the update failed — but the owner was shown a fixup's success line,
+      // not `openclaw_tts`. The sub-step's own ERROR is printed long before the
+      // step ends, the reason is read from the unit's last 40 journal lines,
+      // and nothing at the end said which fixup it was. Fed with what the REAL
+      // `--step` dispatch block prints, so the test cannot agree with itself.
+      const { spawnSync } = await vi.importActual<typeof import("node:child_process")>("node:child_process");
+      const installSh = readFileSync(nodePath.join(process.cwd(), "install.sh"), "utf-8");
+      const fn = (name: string) => {
+        const at = installSh.indexOf(`${name}() {`);
+        return installSh.slice(at, installSh.indexOf("\n}", at) + 2);
+      };
+      const at = installSh.indexOf('if [ "${1:-}" = "--step" ]; then');
+      const program = [
+        "exec 2>&1",
+        "set -euo pipefail",
+        'PROJECT_DIR="/home/clawbox/clawbox"',
+        "PROVISION_FAILURES=()",
+        'PROVISION_RUN_ID="test-run"',
+        fn("record_provision_failure"),
+        fn("provision_repair_step"),
+        "write_provision_status() { :; }",
+        "DISPATCH_STEPS=(post_update)",
+        "step_post_update() {",
+        '  echo "  ERROR: the on-device voice was NOT registered with Hermes — could not write the clawbox-local provider definition"',
+        "  record_provision_failure openclaw_tts",
+        // The fixups after it: gateway setup, embeddings, the model, smokes.
+        '  local i; for i in $(seq 1 45); do echo "  Fixup $i: done"; done',
+        "}",
+        installSh.slice(at, installSh.indexOf("\nfi\n", at) + 4),
+      ].join("\n");
+      const dispatched = spawnSync("bash", ["-c", program, "bash", "--step", "post_update"], { encoding: "utf-8" });
+      expect(dispatched.status, dispatched.stdout).not.toBe(0);
+      // What `journalctl -u … -n 40` hands the reader: the step's tail and
+      // systemd's epilogue, newest last.
+      const journal = [
+        ...dispatched.stdout.split("\n").filter(Boolean),
+        "clawbox-root-update@post_update.service: Main process exited, code=exited, status=1/FAILURE",
+        "clawbox-root-update@post_update.service: Failed with result 'exit-code'.",
+        "clawbox-root-update@post_update.service: Consumed 9min 3.112s CPU time.",
+      ].slice(-40).join("\n");
+
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": new Error("systemctl failed"),
+        "show clawbox-root-update@post_update.service": { stdout: "failed\n", stderr: "" },
+        "/usr/bin/journalctl": { stdout: `${journal}\n`, stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().phase).toBe("failed");
+      });
+
+      const postStep = updater.getUpdateState().steps.find((step) => step.id === "post_update");
+      expect(postStep?.status).toBe("failed");
+      expect(postStep?.error, `the reason does not name the fixup that failed:\n${journal}`).toMatch(/^Error: .*openclaw_tts/);
+      // The owner reads this line: the step, not an operator's command or path.
+      expect(postStep?.error).not.toMatch(/sudo|\/home\//);
+    });
+
+    it("never hands the owner the dispatch verdict's banner or run id as the reason", async () => {
+      // A step that recorded a fixup's failure and then died on its own without
+      // an `Error:` line ends its journal with the dispatch trap's banner and
+      // `[provision-…]` markers. root-step-follow.ts never treated those as a
+      // reason; this reader took the last of them, the run id.
+      const journal = [
+        "  Polkit rules installed (NetworkManager only; root steps go through sudo)",
+        "  Copying the voice units",
+        "  ############################################################",
+        "  # PROVISIONING INCOMPLETE — step post_update reported errors.",
+        "  # Steps that failed: openclaw_tts",
+        "  # Re-run:  sudo bash /home/clawbox/clawbox/install.sh --step openclaw_tts",
+        "  ############################################################",
+        "[provision-status] INCOMPLETE (openclaw_tts)",
+        "[provision-run] 20261013T183500Z-4242",
+        "clawbox-root-update@post_update.service: Main process exited, code=exited, status=1/FAILURE",
+        "clawbox-root-update@post_update.service: Failed with result 'exit-code'.",
+        "",
+      ].join("\n");
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": new Error("systemctl failed"),
+        "show clawbox-root-update@post_update.service": { stdout: "failed\n", stderr: "" },
+        "/usr/bin/journalctl": { stdout: journal, stderr: "" },
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      vi.resetModules();
+      mockSet.mockResolvedValue();
+      mockSetMany.mockResolvedValue();
+      mockRebuiltBox();
+      updater = await import("@/lib/updater");
+
+      updater.resetUpdateState();
+      mockGet.mockResolvedValue(true);
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => {
+        expect(updater.getUpdateState().phase).toBe("failed");
+      });
+
+      const postStep = updater.getUpdateState().steps.find((step) => step.id === "post_update");
+      expect(postStep?.error).toBe("Copying the voice units");
+    });
+
     it("does NOT claim memory for a SIGKILL the journal does not attribute", async () => {
       // A stop timeout, `systemctl kill`, a watchdog and an operator all land
       // as signal 9 / exit 137. Reporting "the device ran out of memory" over
