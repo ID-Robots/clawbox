@@ -650,6 +650,30 @@ describe("spare time, used: the extra work after an early finish", () => {
     await vi.waitFor(() => { expect(record(run.id)?.stopReason).toBe("cost"); }, { timeout: 5000 });
   });
 
+  it("once the spend ceiling cut an extra item off, starts neither a review pass nor another go at a missing deliverable", async () => {
+    ready({ coding_agent_review_pass: true });
+    installRounds([
+      { files: ["index.html"], result: result("Built the page.") },
+      { events: [assistantText("working on tests", { input_tokens: 80_000, output_tokens: 10 }, "msg_x")], result: result("EXTRA: tests — more tests") },
+    ]);
+    makeProject("site");
+    const started = await lib.startRun({
+      task: "build the page",
+      projectId: "site",
+      source: "owner",
+      deliverable: { kind: "paths", paths: ["dist/report.html"] },
+      timeBudget: budget(30 * 60_000, 0, { tokenCap: 50_000 }),
+    });
+    await settled(started.id);
+    await vi.waitFor(() => { expect(lib.getRun(started.id)?.status).toBe("gave_up"); }, { timeout: 10_000 });
+    const run = lib.getRun(started.id)!;
+    expect(run.error).toMatch(/The time budget's spend ceiling is reached, so the box did not try again\./);
+    expect(run.progress).toContain("Time budget: no review pass — the budget's spend ceiling is reached.");
+    expect(lib.listRuns().filter((r) => r.reviewOf === run.id)).toHaveLength(0);
+    // The task and the one extra item: no third spawn.
+    expect(spawns()).toBe(2);
+  });
+
   it("keeps the extra work's state on the run record, so a restarted server reads it back", async () => {
     ready();
     installRounds([
