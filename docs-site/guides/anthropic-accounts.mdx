@@ -78,9 +78,11 @@ tried last, after the accounts on this list.
   passed from account to account.
 - **A brief rate limit is not a cap.** When the chat has to leave an account on a
   rate limit, the box asks Anthropic whether that account's five-hour or weekly window is
-  really used up. Only then is the account set aside, until the reset Anthropic gives. A
-  plain "rate limited" that reaches you with no reset time is sent again a minute later
-  on the same account.
+  really used up. Only then is the account set aside, until the reset Anthropic gives.
+  When Anthropic cannot be asked, a pause of under five minutes is left to the chat's
+  own retry and nothing else moves; a longer one sets the account aside. A plain "rate
+  limited" that reaches you with no reset time is sent again a minute later on the same
+  account.
 
 If a limit message gives no reset time, the account is set aside for five hours, the
 length of a session window.

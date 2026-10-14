@@ -256,6 +256,14 @@ const FIRST_LOOK_BACK_MS = 15 * 60_000;
  * still comes before a held token ends.
  */
 const MAX_KEEPER_BACKOFF_MS = 2 * 60 * 60_000;
+/**
+ * With Anthropic's usage unreadable, the shortest core cooldown the pool takes
+ * for a cap. Core's rate-limit back-off doubles from 30 s (30 s, 1, 2, 4, 8 min
+ * …), so a capped account crosses this within a few failures, while a throttle
+ * stays core's alone: setting an account aside moves every consumer, and ends
+ * a live coding run on it.
+ */
+const UNREAD_LIMIT_MIN_MS = 5 * 60_000;
 /** Which of the Anthropic orders the pool wrote, so taking the pool out undoes exactly those (config store). */
 const ORDER_MARKER_KEY = "anthropic_gateway_order";
 
@@ -672,8 +680,13 @@ async function recordLimit(account: AnthropicAccount, seen: { limitKind: Anthrop
       kind = reading.kind;
       until = reading.resetsAt !== null && reading.resetsAt > now ? reading.resetsAt : now + DEFAULT_LIMIT_MS;
     } else {
-      // Anthropic could not be asked: core's own window, never longer than
+      // Anthropic could not be asked: a short window is a throttle core's own
+      // cooldown covers; a long one is core's own window, never longer than
       // the longest session window — core's backoff grows past a day.
+      if (seen.until - now < UNREAD_LIMIT_MIN_MS) {
+        console.error(`[anthropic-gateway] core cooled account ${account.id} down on a rate limit and its usage could not be read; a window this short is left to core`);
+        return 0;
+      }
       until = Math.min(seen.until, now + DEFAULT_LIMIT_MS);
     }
   }

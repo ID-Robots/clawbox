@@ -504,12 +504,30 @@ describe("what core saw", () => {
     const { work, personal } = await twoClaudeAccounts();
     await gw.keepGatewayMirror();
     const now = Date.now();
-    core.failures[p(work.id)] = rateLimited(now, now + 60_000);
+    // Core's fifth rate limit in a row: eight minutes — a cap, not a throttle.
+    core.failures[p(work.id)] = rateLimited(now, now + 8 * 60_000);
     core.failures[p(personal.id)] = rateLimited(now, now + 30 * H);
     expect(await gw.noteGatewayCooldowns(now)).toBe(2);
     const accounts = await pool.readAccounts();
-    expect(accounts.find((a) => a.id === work.id)?.limitedUntil).toBe(now + 60_000);
+    expect(accounts.find((a) => a.id === work.id)?.limitedUntil).toBe(now + 8 * 60_000);
     expect(accounts.find((a) => a.id === personal.id)?.limitedUntil).toBe(now + 5 * H);
+  });
+
+  it("with Anthropic unreachable, leaves a short cooldown to core — no swap ends a live coding run over a throttle", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    const now = Date.now();
+    // Core's first two rate-limit cooldowns: 30 s and a minute, still running.
+    core.failures[p(work.id)] = rateLimited(now, now + 30_000);
+    expect(await gw.noteGatewayCooldowns(now)).toBe(0);
+    core.failures[p(work.id)] = rateLimited(now + 1_000, now + 61_000);
+    expect(await gw.noteGatewayCooldowns(now + 1_000)).toBe(0);
+    await swap.whenSwapsSettled();
+    expect((await pool.readAccounts()).every((a) => a.status === "ok")).toBe(true);
+    expect((await pool.readPoolState()).activeId).toBe(work.id);
+    expect(announceAnthropicLimit).not.toHaveBeenCalled();
   });
 
   it("with Anthropic unreachable and core's window over, sets nothing aside", async () => {

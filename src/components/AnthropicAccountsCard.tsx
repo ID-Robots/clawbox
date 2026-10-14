@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { formatAccountReset } from "@/lib/anthropic-chat-swap";
 import { useT } from "@/lib/i18n";
 import { openInKiosk } from "@/lib/kiosk-tabs-client";
+import { notifyProvidersChanged } from "@/lib/ui-events";
 
 /**
  * Settings → Providers → Anthropic accounts (TASK-902, TASK-1260).
@@ -80,6 +81,8 @@ interface PoolView {
   gateway?: { following: boolean; accountId: string | null; label: string | null; available?: boolean } | null;
   /** POST only. */
   verified?: boolean;
+  /** `use_for_chat` only: the model is set and the gateway is still coming back. */
+  warning?: string;
 }
 
 const CAUSE_KEY: Record<SwapCause, string> = {
@@ -310,6 +313,18 @@ export default function AnthropicAccountsCard() {
     }
   };
 
+  /**
+   * "Use these accounts for the chat too" sets the chat's default model, so
+   * the rest of Settings is told; and a model saved while the gateway is still
+   * coming back says so rather than letting the card claim it settled.
+   */
+  const putChatOnAccounts = async () => {
+    const done = await act({ action: "use_for_chat" }, "chat");
+    if (!done) return;
+    notifyProvidersChanged();
+    if (typeof done.warning === "string" && done.warning) setNote(done.warning);
+  };
+
   const move = (index: number, delta: -1 | 1) => {
     if (!view) return;
     const ids = view.accounts.map((a) => a.id);
@@ -437,7 +452,7 @@ export default function AnthropicAccountsCard() {
           <p className="text-[11px] text-[var(--text-muted)] leading-relaxed">{t("settings.anthropicAccounts.useForChatHint")}</p>
           <button
             type="button"
-            onClick={() => void act({ action: "use_for_chat" }, "chat")}
+            onClick={() => void putChatOnAccounts()}
             disabled={busy !== null}
             className="inline-flex items-center gap-1.5 text-xs px-3 py-2 rounded-lg border border-[var(--coral-bright)]/40 text-[var(--coral-bright)] hover:bg-[var(--coral-bright)]/10 disabled:opacity-50"
             data-testid="anthropic-accounts-use-for-chat-button"

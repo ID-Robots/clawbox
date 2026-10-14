@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
 import AnthropicAccountsCard from "@/components/AnthropicAccountsCard";
+import { PROVIDERS_CHANGED_EVENT } from "@/lib/ui-events";
 
 const GERMAN = translations.de as Record<string, string>;
 
@@ -159,6 +160,29 @@ describe("the chat on these accounts (TASK-1260, no third sign-in)", () => {
     await waitFor(() => expect(posts).toEqual([{ action: "use_for_chat" }]));
     await waitFor(() => expect(screen.getByTestId("anthropic-accounts-chat").textContent).toBe(GERMAN["settings.anthropicAccounts.activeChatOn"].replace("{label}", "Personal Max")));
     expect(screen.queryByTestId("anthropic-accounts-use-for-chat")).toBeNull();
+  });
+
+  it("says the model route's warning while the gateway is still coming back, and tells the rest of Settings the chat moved", async () => {
+    // `/setup-api/providers/default` answers a 200 with a `warning` when the
+    // model is written and the gateway restart is still in flight.
+    const warning = "Das Modell ist gespeichert; der Chat startet noch neu.";
+    const fetchAccounts = globalThis.fetch;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const res = await fetchAccounts(input, init);
+      if ((init?.method ?? "GET") === "GET") return res;
+      return answer({ ...(await res.json() as Record<string, unknown>), model: "anthropic/claude-sonnet-4-6", warning });
+    }));
+    const providersChanged = vi.fn();
+    window.addEventListener(PROVIDERS_CHANGED_EVENT, providersChanged);
+    try {
+      current = view({ gateway: { following: false, accountId: null, label: null, since: null, available: true } });
+      render(<AnthropicAccountsCard />);
+      fireEvent.click(await screen.findByTestId("anthropic-accounts-use-for-chat-button"));
+      await waitFor(() => expect(providersChanged).toHaveBeenCalledTimes(1), { timeout: 2_000 });
+      expect(await screen.findByText(warning)).toBeTruthy();
+    } finally {
+      window.removeEventListener(PROVIDERS_CHANGED_EVENT, providersChanged);
+    }
   });
 
   it("offers nothing while the chat already runs on them, or where no Claude account can answer", async () => {
