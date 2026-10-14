@@ -340,6 +340,8 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
   if (chat === null) return outcome("failed", "config_unreadable");
   if (chat.agent === null) {
     console.error("[anthropic-gateway] the gateway's agent roster has no `main` agent; the pool's accounts are not written to another agent's store");
+    // Whatever the pool put in `main`'s store, the chat does not read it now.
+    if (pool.gateway) await setGatewayMirror(null);
     return outcome("skipped", "agent_unsupported");
   }
   const agent = chat.agent;
@@ -407,8 +409,11 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
   }
   const order = gatewayOrder(pool, held, otherProfiles(after), now);
   let final = after;
+  // Core said it wrote the order: whatever the read-back shows, taking the
+  // pool out later clears it (an order that is not there clears without fuss).
+  let orderWritten = false;
   if (!sameList(after.order, order)) {
-    await attempt("the account order", () => d.order(order, agent));
+    if (await attempt("the account order", () => d.order(order, agent))) orderWritten = true;
     const reread = d.read();
     if (reread.kind !== "present") return outcome("failed", "write_lost", changed);
     final = reread;
@@ -416,7 +421,7 @@ async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerO
   const orderLanded = sameList(final.order ?? (order.length === 0 ? [] : null), order);
   if (!orderLanded) owed.push("order");
 
-  if (orderLanded && !marker.stored) await writeOrderMarker({ ...marker, stored: true });
+  if ((orderLanded || orderWritten) && !marker.stored) await writeOrderMarker({ ...marker, stored: true });
 
   // The account the gateway must lead with: the active one, when the gateway
   // can hold it; else the first it holds (an API key or the Terminal sign-in

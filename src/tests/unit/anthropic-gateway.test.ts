@@ -68,6 +68,8 @@ function fakeCore() {
     /** Ids whose paste core refuses, whatever `refusePaste` says. */
     refusePasteOf: new Set<string>(),
     refuseOrder: false,
+    /** `order set` answers OK and the stored order reads back otherwise (core's read raced it). */
+    orderReadsBackOtherwise: false,
     /** The `--agent` arguments openclaw.json's roster calls for; null: no `main` in it. */
     agent: [] as string[] | null,
     /** `paste-token` wrote the profile, then could not tell the running gateway and exited non-zero. */
@@ -104,6 +106,7 @@ function fakeCore() {
       if (core.refuseOrder) throw new Error("the auth state is busy");
       core.orders.push([...ids]);
       core.order = ids.length > 0 ? [...ids] : null;
+      if (core.orderReadsBackOtherwise && core.order) core.order = [...core.order].reverse();
     },
     unsetConfigOrder: async () => {
       core.configOrder = null;
@@ -374,6 +377,27 @@ describe("what the move needs, and what can wait for the keeper", () => {
     expect(await gw.syncGatewayNow()).toEqual({ status: "skipped", code: "agent_unsupported", count: null });
     expect(core.pastes).toEqual([]);
     expect(await gw.putChatOnPool(async () => ({ ok: true }))).toMatchObject({ ok: false, code: "agent_unsupported", status: 409 });
+  });
+
+  it("clears on take-out an order core said it wrote, even when its read-back disagreed", async () => {
+    const core = fakeCore();
+    await twoClaudeAccounts();
+    core.orderReadsBackOtherwise = true;
+    await gw.keepGatewayMirror();
+    core.orderReadsBackOtherwise = false;
+    core.chatOnClaude = false;
+    await gw.syncGatewayNow();
+    expect(core.order).toBeNull();
+  });
+
+  it("stops naming the pool when the roster loses its `main` agent", async () => {
+    const core = fakeCore();
+    await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    expect((await pool.describePool()).gateway.following).toBe(true);
+    core.agent = null;
+    expect(await gw.syncGatewayNow()).toMatchObject({ status: "skipped", code: "agent_unsupported" });
+    expect((await pool.describePool()).gateway.following).toBe(false);
   });
 
   it("leaves an order the owner had in openclaw.json before the pool came", async () => {
