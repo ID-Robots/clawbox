@@ -4,7 +4,10 @@
  *
  *  - a team's planner and reviewer start on the provider's CHEAPER model at no
  *    more than `xhigh` (src/lib/coding-role-models.ts), a worker on the owner's
- *    own, and the owner's per-role choice wins;
+ *    own, and the owner's per-role choice wins — provider included: a team can
+ *    run its planner on Anthropic and its workers on ClawBox AI, each run on
+ *    its own account's wiring alone, and a role whose account is not
+ *    connected is refused with that account's reason;
  *  - every run gets a CPU budget (src/lib/coding-run-cpu.ts) in its environment,
  *    and a writing run's brief asks it to keep its builds and tests to it;
  *  - the project's RUN NOTES (src/lib/coding-run-notes.ts) reach every run's
@@ -57,18 +60,25 @@ function writeConfig(cfg: Record<string, unknown>): void {
 const result = (text: string) => JSON.stringify({ type: "result", subtype: "success", is_error: false, num_turns: 1, result: text, session_id: "sess-1" });
 
 /**
- * A harness that writes down what it was handed — its model, effort and CPU
- * budget from the environment, its whole argv — into its own evidence folder,
- * runs `extra`, and finishes.
+ * A harness that writes down what it was handed — its provider, model, effort
+ * and CPU budget from the environment, the Anthropic credential handed over
+ * for this spawn (read and deleted, as the real wrapper does), its whole
+ * environment and argv — into its own evidence folder, runs `extra`, and
+ * finishes.
  */
 function installWrapper(extra: string[] = []): void {
   fs.writeFileSync(path.join(binDir, "claude"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
   fs.writeFileSync(path.join(binDir, "claude-ds"), [
     "#!/usr/bin/env bash",
     readFirstTurn(),
+    'printf "%s" "${CLAUDE_DS_PROVIDER:-}" > "$CLAWBOX_RUN_ARTIFACTS_DIR/provider.txt"',
     'printf "%s" "${CLAUDE_DS_MODEL:-}" > "$CLAWBOX_RUN_ARTIFACTS_DIR/model.txt"',
     'printf "%s" "${CLAUDE_DS_EFFORT:-}" > "$CLAWBOX_RUN_ARTIFACTS_DIR/effort.txt"',
     'printf "%s" "${CLAWBOX_RUN_CPU_BUDGET:-}" > "$CLAWBOX_RUN_ARTIFACTS_DIR/budget.txt"',
+    'cred=""',
+    'if [ -n "${CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE:-}" ]; then cred=$(cat "$CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE"); rm -f "$CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE"; fi',
+    'printf "%s" "$cred" > "$CLAWBOX_RUN_ARTIFACTS_DIR/cred.txt"',
+    'env > "$CLAWBOX_RUN_ARTIFACTS_DIR/env.txt"',
     'printf "%s\\n" "$@" > "$CLAWBOX_RUN_ARTIFACTS_DIR/argv.txt"',
     ...extra,
     `echo '${result("done")}'`,
@@ -77,7 +87,21 @@ function installWrapper(extra: string[] = []): void {
 }
 
 /** What the harness of that run wrote down. */
-const handed = (runId: string, what: "model" | "effort" | "budget" | "argv") => fs.readFileSync(path.join(artifactsDir(runId), `${what}.txt`), "utf8");
+const handed = (runId: string, what: "provider" | "model" | "effort" | "budget" | "cred" | "env" | "argv") => fs.readFileSync(path.join(artifactsDir(runId), `${what}.txt`), "utf8");
+
+/** An Anthropic key in the box's account pool — the box's own fixture, not a real credential. */
+const ANTHROPIC_KEY = "role-models-test-anthropic-key-0001";
+
+/** Connect the owner's Anthropic account: one API-key account in the pool. After `writeConfig`, which would wipe it. */
+async function connectAnthropic(): Promise<void> {
+  fs.writeFileSync(path.join(root, "data", ".session-secret"), "9d".repeat(32), { mode: 0o600 });
+  process.env.SESSION_SECRET = "the-web-servers-secret";
+  const pool = await import("@/lib/anthropic-accounts");
+  pool._resetAnthropicAccountsForTests();
+  await pool.addApiKeyAccount({ label: "Work", key: ANTHROPIC_KEY });
+}
+
+const runsFile = () => path.join(root, "data", "coding-agent-runs.json");
 
 function makeGitProject(name: string): string {
   const dir = path.join(projects, name);
@@ -126,6 +150,8 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await lib._resetCodingAgentStateForTests();
+  (await import("@/lib/anthropic-accounts"))._resetAnthropicAccountsForTests();
+  (await import("@/lib/anthropic-swap"))._resetAnthropicSwapForTests();
   restore();
   fs.rmSync(base, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
@@ -178,16 +204,195 @@ describe("a team's roles: the cheaper model where nobody writes code", () => {
   });
 
   it("answers the choices in the status, `auto` on a box that never chose, and saves an edit", async () => {
-    expect((await lib.getCodingAgentStatus()).roleModels).toEqual({
-      planner: { model: "auto", effort: "auto" },
-      worker: { model: "auto", effort: "auto" },
-      reviewer: { model: "auto", effort: "auto" },
-    });
+    const auto = { provider: "auto", model: "auto", effort: "auto" };
+    expect((await lib.getCodingAgentStatus()).roleModels).toEqual({ planner: auto, worker: auto, reviewer: auto, bulk: auto });
     await lib.setRoleModels({ planner: { model: "standard" } });
-    expect((await lib.getCodingAgentStatus()).roleModels.planner).toEqual({ model: "standard", effort: "auto" });
+    expect((await lib.getCodingAgentStatus()).roleModels.planner).toEqual({ provider: "auto", model: "standard", effort: "auto" });
     await expect(lib.setRoleModels({ planner: { model: "cheapest" } })).rejects.toMatchObject({ kind: "invalid" });
-    expect(lib.checkRoleModelsPatch({ lead: {} })).toMatch(/Unknown role/);
-    expect(lib.checkRoleModelsPatch({ worker: { effort: "auto" } })).toBeNull();
+    expect(await lib.checkRoleModelsPatch({ lead: {} })).toMatch(/Unknown role/);
+    expect(await lib.checkRoleModelsPatch({ worker: { effort: "auto" } })).toBeNull();
+    // Checked against what is stored: a model named alone takes the role's stored provider.
+    expect(await lib.checkRoleModelsPatch({ planner: { model: "claude-fable-5-1" } })).toMatch(/roleModels\.planner\.provider/);
+    await lib.setRoleModels({ planner: { provider: "anthropic" } });
+    expect(await lib.checkRoleModelsPatch({ planner: { model: "claude-fable-5-1" } })).toBeNull();
+    await lib.setRoleModels({ planner: { model: "claude-fable-5-1" }, bulk: { provider: "clawbox-ai", model: "deepseek-v4-flash" } });
+    const saved = (await lib.getCodingAgentStatus()).roleModels;
+    expect(saved.planner).toEqual({ provider: "anthropic", model: "claude-fable-5-1", effort: "auto" });
+    expect(saved.bulk).toEqual({ provider: "clawbox-ai", model: "deepseek-v4-flash", effort: "auto" });
+  });
+
+  it("moves a role the owner put on another provider there, and refuses it while that provider is not connected", async () => {
+    makePlainProject("plain");
+    // The team runs on ClawBox AI; its planner is pinned to Anthropic, which
+    // this box has no credential for. Workers stay on the team's own provider.
+    writeConfig({ coding_agent_role_models: { planner: { provider: "anthropic", model: "claude-fable-5-1" }, worker: { provider: "clawbox-ai", model: "deepseek-v4-flash" } } });
+    await expect(lib.startRun({ task: "plan it", directory: "plain", source: "owner", readOnly: true, team: { id: TEAM, role: "planner", taskId: null } }))
+      .rejects.toMatchObject({ kind: "not_ready" });
+    const worker = await lib.startRun({ task: "do t1", directory: "plain", source: "owner", team: { id: TEAM, role: "worker", taskId: "t1" } });
+    expect(worker).toMatchObject({ provider: "clawbox-ai", requestedModel: "deepseek-v4-flash", effort: "ultracode" });
+    await finished(worker.id);
+    expect(handed(worker.id, "model")).toBe("deepseek-v4-flash");
+  });
+});
+
+describe("a team's roles on their own providers", () => {
+  it("runs a mixed team: the planner on Anthropic, the workers on ClawBox AI, each on its own account's wiring alone", async () => {
+    makePlainProject("plain");
+    writeConfig({ coding_agent_role_models: { planner: { provider: "anthropic", model: "claude-fable-5-1" } } });
+    await connectAnthropic();
+
+    const planner = await lib.startRun({ task: "plan it", directory: "plain", source: "owner", readOnly: true, team: { id: TEAM, role: "planner", taskId: null } });
+    expect(planner).toMatchObject({ provider: "anthropic", requestedModel: "claude-fable-5-1", effort: "xhigh", modelRole: "planner" });
+    await finished(planner.id);
+    const worker = await lib.startRun({ task: "do t1", directory: "plain", source: "owner", team: { id: TEAM, role: "worker", taskId: "t1" } });
+    // The team's own provider: nothing moved the workers.
+    expect(worker).toMatchObject({ provider: "clawbox-ai", requestedModel: null, effort: "ultracode", modelRole: "worker" });
+    await finished(worker.id);
+
+    // What each harness was actually handed: its own provider and model, and
+    // the Anthropic credential only where the run is Anthropic's.
+    expect(handed(planner.id, "provider")).toBe("anthropic");
+    expect(handed(planner.id, "model")).toBe("claude-fable-5-1");
+    expect(handed(planner.id, "cred")).toContain(ANTHROPIC_KEY);
+    expect(handed(worker.id, "provider")).toBe("clawbox-ai");
+    expect(handed(worker.id, "model")).toBe("");
+    expect(handed(worker.id, "cred")).toBe("");
+    for (const id of [planner.id, worker.id]) {
+      const env = handed(id, "env");
+      // Neither secret is ever in a run's environment — the wrapper reads its
+      // own provider's out of the box's config — and only the Anthropic run
+      // has a credential handoff at all.
+      expect(env).not.toContain(ANTHROPIC_KEY);
+      expect(env).not.toContain("claw_test_token");
+      expect(env).not.toMatch(/^ANTHROPIC_(API_KEY|AUTH_TOKEN|BASE_URL)=/m);
+    }
+    expect(handed(planner.id, "env")).toMatch(/^CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE=/m);
+    expect(handed(worker.id, "env")).not.toMatch(/^CLAUDE_DS_ANTHROPIC_CREDENTIAL_FILE=/m);
+  });
+
+  it("starts a bulk task on the bulk role's choice, keeps the role on the record, and reads one from before the field as none", async () => {
+    makePlainProject("plain");
+    writeConfig({ coding_agent_role_models: { bulk: { provider: "clawbox-ai", model: "deepseek-v4-flash" } } });
+    const worker = await lib.startRun({ task: "do t1", directory: "plain", source: "owner", team: { id: TEAM, role: "worker", taskId: "t1" } });
+    expect(worker).toMatchObject({ requestedModel: null, modelRole: "worker" });
+    await finished(worker.id);
+    const bulk = await lib.startRun({ task: "scrape t2", directory: "plain", source: "owner", team: { id: TEAM, role: "worker", taskId: "t2", bulk: true } });
+    expect(bulk).toMatchObject({ provider: "clawbox-ai", requestedModel: "deepseek-v4-flash", effort: "ultracode", modelRole: "bulk", team: { bulk: true } });
+    await finished(bulk.id);
+    expect(handed(bulk.id, "model")).toBe("deepseek-v4-flash");
+    const lead = await lib.startRun({ task: "decide", directory: "plain", source: "owner", readOnly: true, team: { id: TEAM, role: "lead", taskId: "t1" } });
+    expect(lead.modelRole).toBe("planner");
+    await finished(lead.id);
+    const solo = await lib.startRun({ task: "build it", directory: "plain", source: "owner" });
+    expect(solo.modelRole).toBeNull();
+    await finished(solo.id);
+
+    // On disk, as written.
+    const onDisk = JSON.parse(fs.readFileSync(runsFile(), "utf8")) as Record<string, unknown>[];
+    const byId = Object.fromEntries(onDisk.map((r) => [r.id as string, r]));
+    expect(byId[bulk.id]).toMatchObject({ modelRole: "bulk", team: { role: "worker", taskId: "t2", bulk: true } });
+    expect(byId[worker.id].modelRole).toBe("worker");
+    expect(byId[solo.id].modelRole).toBeNull();
+
+    // Read back after a restart: a record from before the field, and one with
+    // a role this code never writes, read as none — never a refusal.
+    delete byId[worker.id].modelRole;
+    byId[lead.id].modelRole = "lead";
+    fs.writeFileSync(runsFile(), JSON.stringify(onDisk));
+    await lib._resetCodingAgentStateForTests();
+    expect(lib.getRun(bulk.id)).toMatchObject({ modelRole: "bulk", team: { bulk: true } });
+    expect(lib.getRun(worker.id)!.modelRole).toBeNull();
+    // A worker's team reads back without a `bulk` it never had.
+    expect(lib.getRun(worker.id)!.team).toEqual({ id: TEAM, role: "worker", taskId: "t1" });
+    expect(lib.getRun(lead.id)!.modelRole).toBeNull();
+    expect(lib.getRun(solo.id)!.modelRole).toBeNull();
+  });
+
+  it("judges the gate on the role's own provider, not the owner's default", async () => {
+    makePlainProject("plain");
+    // The owner's default is Anthropic, which this box has no credential for;
+    // the workers are pinned to ClawBox AI, which it has.
+    writeConfig({ coding_agent_provider: "anthropic", coding_agent_role_models: { worker: { provider: "clawbox-ai" } } });
+    const worker = await lib.startRun({ task: "do t1", directory: "plain", source: "owner", team: { id: TEAM, role: "worker", taskId: "t1" } });
+    expect(worker).toMatchObject({ provider: "clawbox-ai", requestedModel: null });
+    await finished(worker.id);
+    expect(handed(worker.id, "provider")).toBe("clawbox-ai");
+    // A bulk task with nothing of its own goes where the workers go.
+    const bulk = await lib.startRun({ task: "scrape t2", directory: "plain", source: "owner", team: { id: TEAM, role: "worker", taskId: "t2", bulk: true } });
+    expect(bulk).toMatchObject({ provider: "clawbox-ai", modelRole: "bulk" });
+    await finished(bulk.id);
+    // The planner is on the team's own provider — the unconnected one — and is
+    // refused with THAT account's sentence.
+    const refused = lib.startRun({ task: "plan it", directory: "plain", source: "owner", readOnly: true, team: { id: TEAM, role: "planner", taskId: null } });
+    await expect(refused).rejects.toMatchObject({ kind: "not_ready", message: expect.stringMatching(/Anthropic account is not connected/) });
+  });
+
+  it("refuses a role whose provider is not connected with that provider's reason, while the team's own runs", async () => {
+    makePlainProject("plain");
+    writeConfig({ clawai_token: "", coding_agent_provider: "anthropic", coding_agent_role_models: { reviewer: { provider: "clawbox-ai", model: "economy" } } });
+    await connectAnthropic();
+    const refused = lib.startRun({ task: "review t1", directory: "plain", source: "owner", readOnly: true, team: { id: TEAM, role: "reviewer", taskId: "t1" } });
+    await expect(refused).rejects.toMatchObject({ kind: "not_ready", message: expect.stringMatching(/ClawBox AI is not connected/) });
+    await expect(refused).rejects.toMatchObject({ message: expect.not.stringMatching(/Anthropic/) });
+    const worker = await lib.startRun({ task: "do t1", directory: "plain", source: "owner", team: { id: TEAM, role: "worker", taskId: "t1" } });
+    expect(worker).toMatchObject({ provider: "anthropic", requestedModel: "claude-opus-5-5", modelRole: "worker" });
+    await finished(worker.id);
+    expect(handed(worker.id, "provider")).toBe("anthropic");
+    expect(handed(worker.id, "model")).toBe("claude-opus-5-5");
+  });
+
+  it("keeps a resumed run on the provider and model its session was opened on, whatever the role says now", async () => {
+    makePlainProject("plain");
+    writeConfig({ coding_agent_role_models: { reviewer: { provider: "anthropic", model: "claude-sonnet-5" } } });
+    await connectAnthropic();
+    const role = { id: TEAM, role: "reviewer" as const, taskId: "t1" };
+    const first = await lib.startRun({ task: "review t1", directory: "plain", source: "owner", readOnly: true, team: role });
+    expect(first).toMatchObject({ provider: "anthropic", requestedModel: "claude-sonnet-5", modelRole: "reviewer" });
+    expect((await finished(first.id)).sessionId).toBe("sess-1");
+
+    // The owner moves the reviewers to ClawBox AI meanwhile.
+    await lib.setRoleModels({ reviewer: { provider: "clawbox-ai", model: "economy" } });
+    const again = await lib.startRun({ task: "look again", resumeRunId: first.id, source: "owner", readOnly: true, team: role });
+    expect(again).toMatchObject({ provider: "anthropic", requestedModel: "claude-sonnet-5", modelRole: "reviewer" });
+    await finished(again.id);
+    expect(handed(again.id, "provider")).toBe("anthropic");
+    expect(handed(again.id, "model")).toBe("claude-sonnet-5");
+    // A FRESH reviewer takes the role's new choice.
+    const fresh = await lib.startRun({ task: "review t2", directory: "plain", source: "owner", readOnly: true, team: { ...role, taskId: "t2" } });
+    expect(fresh).toMatchObject({ provider: "clawbox-ai", requestedModel: "deepseek-v4-flash" });
+    await finished(fresh.id);
+    expect(handed(fresh.id, "cred")).toBe("");
+  });
+
+  it("answers each role's provider, model, readiness and relative cost — what a fresh run of that role gets", async () => {
+    makePlainProject("plain");
+    // A box that never chose: the defaults on the team's own provider.
+    const defaults = (await lib.getCodingAgentStatus()).roleModelMap;
+    expect(defaults.planner).toEqual({ provider: "clawbox-ai", model: "deepseek-v4-flash", effort: "xhigh", auto: true, ready: true, problems: [], relativeCost: 1 });
+    expect(defaults.worker).toEqual({ provider: "clawbox-ai", model: null, effort: "ultracode", auto: true, ready: true, problems: [], relativeCost: null });
+    expect(defaults.reviewer).toEqual(defaults.planner);
+    expect(defaults.bulk).toEqual(defaults.worker);
+
+    // The older `{ model: tier }` shape reads exactly as it did.
+    await lib.setRoleModels({ worker: { model: "economy" } });
+    expect((await lib.teamRoleModelMap()).worker).toMatchObject({ provider: "clawbox-ai", model: "deepseek-v4-flash", auto: false, relativeCost: 1 });
+
+    // Mixed, with the planner on an account this box has not connected.
+    await lib.setRoleModels({ worker: { model: "auto" }, planner: { provider: "anthropic", model: "claude-fable-5-1" }, bulk: { provider: "clawbox-ai", model: "deepseek-v4-flash" } });
+    const map = await lib.teamRoleModelMap();
+    expect(map).toEqual((await lib.getCodingAgentStatus()).roleModelMap);
+    expect(map.planner).toMatchObject({ provider: "anthropic", model: "claude-fable-5-1", effort: "xhigh", auto: false, ready: false, relativeCost: 40 });
+    expect(map.planner.problems.join(" ")).toMatch(/Anthropic account is not connected/);
+    expect(map.bulk).toEqual({ provider: "clawbox-ai", model: "deepseek-v4-flash", effort: "ultracode", auto: false, ready: true, problems: [], relativeCost: 1 });
+    expect(map.worker).toMatchObject({ provider: "clawbox-ai", model: null, auto: true });
+
+    // And it is what the runs get.
+    const bulk = await lib.startRun({ task: "scrape t2", directory: "plain", source: "owner", team: { id: TEAM, role: "worker", taskId: "t2", bulk: true } });
+    expect(bulk).toMatchObject({ provider: map.bulk.provider, requestedModel: map.bulk.model, effort: map.bulk.effort });
+    await finished(bulk.id);
+    const worker = await lib.startRun({ task: "do t1", directory: "plain", source: "owner", team: { id: TEAM, role: "worker", taskId: "t1" } });
+    expect(worker).toMatchObject({ provider: map.worker.provider, requestedModel: map.worker.model, effort: map.worker.effort });
+    await finished(worker.id);
   });
 });
 

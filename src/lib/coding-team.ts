@@ -49,6 +49,14 @@
  * planned/added/retired/accepted/rejected, tokens, wall time) are on the
  * board.
  *
+ * Every role's runs start on the provider and model the owner chose for it
+ * (src/lib/coding-role-models.ts), and each run's line in the cast list keeps
+ * its own, so the team's tokens split by provider. A team whose planner,
+ * workers or reviewers sit on an account that cannot run is refused before
+ * anything is made (`not_ready`). A task the plan marks `bulk` — token-heavy,
+ * not critical — gets a worker on the bulk role's model; when that account
+ * cannot run, an ordinary worker takes it, and a note says so.
+ *
  * A team lives in this process; its board is on disk after every message.
  * A team the web server was restarted under is settled as failed on the
  * next read, with the reason, never left "working" forever.
@@ -72,13 +80,17 @@ import {
   startRun,
   stopRun,
   suiteSandbox,
+  teamRoleModelMap,
   teamSpawnSlot,
   waitForRun,
   wrapUpRun,
   type CodingRun,
   type CodingRunSource,
   type RunTeam,
+  type TeamRoleModelMap,
 } from "@/lib/coding-agent";
+import { isCodingProvider, type CodingProvider } from "@/lib/coding-provider";
+import { MODEL_ROLES, type ModelRole } from "@/lib/coding-role-models";
 import { RUNNER_STEP } from "@/lib/coding-agent-progress";
 import { onBatteryPower, teamWorkerCap } from "@/lib/coding-run-cpu";
 import { RunMessageError, teammatePrefix } from "@/lib/coding-run-messages";
@@ -157,6 +169,7 @@ import {
   readyTasks,
   recordTeamExtra,
   recordTimeSkips,
+  refModel,
   repoMapText,
   retireForTime,
   saveBoard,
@@ -174,6 +187,7 @@ import {
   type TeamAgents,
   type TeamBoard,
   type TeamPr,
+  type TeamRunRef,
   type TeamTask,
 } from "@/lib/coding-team-board";
 
@@ -184,7 +198,7 @@ import {
  */
 export type TeamView = TeamBoard & { agents: TeamAgents; advice: TeamAdvice | null; queuePosition?: number };
 import { TeamBus, type Delivered, type TeamMessage } from "@/lib/coding-team-bus";
-import { clippedNote, fitLine, fitPlan, leadRoom, leadShouldRun, leadTask, parsePlan, parseReplan, plannerBrief, REPLAN_BRIEF, replanContext, replanTask, type TimePlan } from "@/lib/coding-team-planner";
+import { clippedNote, fitLine, fitPlan, leadRoom, leadShouldRun, leadTask, parsePlan, parseReplan, plannerBrief, providerWords, REPLAN_BRIEF, replanContext, replanTask, withTeamModels, type TimePlan } from "@/lib/coding-team-planner";
 
 /** A team stops after this many alerts: something is going wrong repeatedly. */
 export const MAX_ALERTS = 3;
@@ -349,6 +363,10 @@ export async function startTeam(input: StartTeamInput): Promise<TeamView> {
   if (!goal) throw new CodingAgentError("invalid", "A team needs a goal.");
   if (goal.length > MAX_TASK_CHARS) throw new CodingAgentError("invalid", `The goal is too long (${goal.length} > ${MAX_TASK_CHARS} characters).`);
   const { directory, projectId } = await resolveWorkingDirectory({ projectId: input.projectId ?? null, directory: input.directory ?? null });
+  // Before anything is made or spawned: a team whose planner, workers or
+  // reviewers sit on an account that cannot run would fail at its first run
+  // of that role — the reviewer's, minutes in, after the work was paid for.
+  await assertTeamRolesReady();
   // The lead's switch, as it stands NOW: kept on the board, so an owner who
   // flips it while this team works changes the next team, not this one. A
   // queued team reads it again when its turn comes.
@@ -372,6 +390,57 @@ export async function startTeam(input: StartTeamInput): Promise<TeamView> {
   saveBoard(board);
   launchTeam(board);
   return snapshot(board);
+}
+
+/**
+ * The roles a team cannot do without. Not `bulk`: a bulk task whose account
+ * cannot run is worked by an ordinary worker instead (`bulkMayRun`).
+ */
+const REQUIRED_ROLES: readonly ModelRole[] = MODEL_ROLES.filter((r) => r !== "bulk");
+
+/** "planner", "planner and reviewer", "planner, worker and reviewer". */
+function andList(words: readonly string[]): string {
+  return words.length <= 1 ? (words[0] ?? "") : `${words.slice(0, -1).join(", ")} and ${words[words.length - 1]}`;
+}
+
+/** What each role of a team starts on right now, or null when that cannot be read — never a reason to stop a team on its own. */
+async function readTeamModels(): Promise<TeamRoleModelMap | null> {
+  try {
+    return await teamRoleModelMap();
+  } catch (err) {
+    console.error("[coding-team] could not read the team's role models:", err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+/**
+ * Refuses a team, `not_ready`, when its planner, its workers or its reviewers
+ * resolve to a provider that cannot run right now — naming the roles, the
+ * provider and why, one sentence per provider: a planner and a reviewer on
+ * the same unconnected account are one problem, not two. The readiness is the
+ * spawn gate's own (`teamRoleModelMap`). A map that cannot be read refuses
+ * nothing: every run is still judged at its own spawn.
+ */
+async function assertTeamRolesReady(): Promise<void> {
+  const map = await readTeamModels();
+  if (!map) return;
+  const blocked = new Map<CodingProvider, { roles: ModelRole[]; problems: string[] }>();
+  for (const role of REQUIRED_ROLES) {
+    const r = map[role];
+    if (!r || r.ready) continue;
+    const entry = blocked.get(r.provider) ?? { roles: [], problems: [] };
+    entry.roles.push(role);
+    for (const p of r.problems) if (p.trim() && !entry.problems.includes(p.trim())) entry.problems.push(p.trim());
+    blocked.set(r.provider, entry);
+  }
+  if (!blocked.size) return;
+  const sentences = [...blocked].map(([provider, { roles, problems }]) =>
+    `The team's ${andList(roles)} ${roles.length === 1 ? "runs" : "run"} on ${providerWords(provider)} (${provider}), which cannot run right now: ${problems.join(" ") || "it is not ready."}`);
+  const roles = [...blocked.values()].flatMap((b) => b.roles);
+  throw new CodingAgentError(
+    "not_ready",
+    `${sentences.join(" ")} Connect it, or choose another provider for the ${andList(roles)} under Team models in the Coding Agent settings.`,
+  );
 }
 
 /** The board's orchestrator, in this process, from its planner to its verdict; the next queued team once it settles. */
@@ -1231,7 +1300,7 @@ async function extraItem(team: LiveTeam, n: number, scope: readonly string[], do
     await setAside();
     return end("done", `extra item ${n} could not start: ${firstLine(err instanceof Error ? err.message : String(err), 200)}`);
   }
-  board.runs.push({ id: run.id, role: "worker", taskId: null });
+  board.runs.push(castRef(run, "worker", null));
   saveBoard(board);
   bus.send(SYSTEM, { type: "note", text: `Extra item ${n} (${run.id}): spare time on tests, fixes, edge cases, docs or a verify pass, inside the team's own files — ${formatDuration(cutoff - now)} before the cutoff.` });
   void writeTeamTime(team, [timeRecord("note", `Extra item ${n} began, ${formatDuration(cutoff - now)} before the cutoff`, now, { runId: run.id, tokensUsed: teamTokens(team) })]);
@@ -1406,7 +1475,10 @@ async function runTeamWork(team: LiveTeam, source: CodingRunSource): Promise<voi
   // How past estimates on this box held: the planner is told, and its
   // estimates are scaled by it before the plan is fitted to the time.
   const calibration = budget ? currentEstimateCalibration() : null;
-  const brief = () => plannerBrief(budget, Date.now(), tz, calibration);
+  // What every role runs on and costs, after the brief: the planner weighs
+  // which tasks to mark bulk by it. Read once, as the team begins.
+  const models = await readTeamModels();
+  const brief = () => withTeamModels(plannerBrief(budget, Date.now(), tz, calibration), models);
   const timed = { timed: budget !== null };
   // Its clock, from the planner on: the deadline holds the planning too.
   if (budget) {
@@ -1443,7 +1515,7 @@ async function runTeamWork(team: LiveTeam, source: CodingRunSource): Promise<voi
     extraBrief: brief(),
   });
   board.plannerRunId = planner.id;
-  board.runs.push({ id: planner.id, role: "planner", taskId: null });
+  board.runs.push(castRef(planner, "planner", null));
   saveBoard(board);
   const planned = await settle(team, planner.id);
   if (team.stopRequested) return;
@@ -1475,7 +1547,7 @@ async function runTeamWork(team: LiveTeam, source: CodingRunSource): Promise<voi
       readOnly: true,
       extraBrief: brief(),
     });
-    board.runs.push({ id: again.id, role: "planner", taskId: null });
+    board.runs.push(castRef(again, "planner", null));
     saveBoard(board);
     const replanned = await settle(team, again.id);
     if (team.stopRequested) return;
@@ -1800,7 +1872,7 @@ async function runAsSingleRun(team: LiveTeam, task: TeamTask, source: CodingRunS
   }
   const me = worker(run.id);
   bus.send(SYSTEM, { type: "assign", task_id: task.task_id, worker_id: run.id });
-  board.runs.push({ id: run.id, role: "worker", taskId: task.task_id });
+  board.runs.push(castRef(run, "worker", task.task_id));
   saveBoard(board);
   bus.send(me, { type: "status_update", task_id: task.task_id, status: "in_progress", worker_id: run.id });
   if (team.time) {
@@ -1870,17 +1942,30 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
     return false;
   }
 
+  // A bulk task's worker starts on the bulk role's provider and model — while
+  // that provider can run. When it cannot, the task is still worked, by an
+  // ordinary worker, and the board says why.
+  let bulk = current.role === "bulk" && await bulkMayRun(team, task.task_id);
+  const startWorker = (asBulk: boolean) => startRun({
+    task: workerTask(board, task, worktree?.path ?? null),
+    projectId: worktree ? null : board.projectId,
+    directory,
+    source,
+    team: { id: board.id, role: "worker", taskId: task.task_id, ...(asBulk ? { bulk: true } : {}) },
+    extraBrief: withRepoMap(WORKER_BRIEF, board, worktree?.path ?? null),
+    cpuShare: team.workerSlots,
+  });
   let run: CodingRun;
   try {
-    run = await startRun({
-      task: workerTask(board, task, worktree?.path ?? null),
-      projectId: worktree ? null : board.projectId,
-      directory,
-      source,
-      team: { id: board.id, role: "worker", taskId: task.task_id },
-      extraBrief: withRepoMap(WORKER_BRIEF, board, worktree?.path ?? null),
-      cpuShare: team.workerSlots,
-    });
+    try {
+      run = await startWorker(bulk);
+    } catch (err) {
+      // Its account went away between the look and the spawn: the same fallback.
+      if (!bulk || !(err instanceof CodingAgentError) || err.kind !== "not_ready") throw err;
+      bulk = false;
+      bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: bulkFallbackText(task.task_id, err.message) });
+      run = await startWorker(false);
+    }
   } catch (err) {
     if (worktree) await removeWorktree(board.directory, worktree.path);
     throw err;
@@ -1890,7 +1975,7 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
   bus.send(SYSTEM, { type: "assign", task_id: task.task_id, worker_id: run.id });
   const row = board.tasks.find((t) => t.task_id === task.task_id);
   if (row) { row.worktree = worktree?.path ?? null; row.branch = worktree?.branch ?? null; row.reviewRunId = null; }
-  board.runs.push({ id: run.id, role: "worker", taskId: task.task_id });
+  board.runs.push(castRef(run, "worker", task.task_id));
   saveBoard(board);
   bus.send(me, { type: "status_update", task_id: task.task_id, status: "in_progress", worker_id: run.id });
   noteTaskStart(team, task, run.id);
@@ -2164,7 +2249,7 @@ async function reviewTask(team: LiveTeam, task: TeamTask, source: CodingRunSourc
   if (!("id" in run)) return noReviewer(run.reason);
   const row = board.tasks.find((t) => t.task_id === task.task_id);
   if (row) row.reviewRunId = run.id;
-  board.runs.push({ id: run.id, role: "reviewer", taskId: task.task_id });
+  board.runs.push(castRef(run, "reviewer", task.task_id));
   saveBoard(board);
   const settled = await settle(team, run.id);
   // Held meanwhile (`holdDependents` stops its reviewer too): nothing to rule on, and nothing to alert about.
@@ -2222,7 +2307,7 @@ async function verdictOf(
   if (!("id" in again)) {
     return { ok: false, reason: parsed.reason, alert: `${who} gave no verdict: ${parsed.reason} Asked once more, it could not start: ${again.reason.trim().replace(/\.+$/, "")}.${said}` };
   }
-  board.runs.push({ id: again.id, role: "reviewer", taskId });
+  board.runs.push(castRef(again, "reviewer", taskId));
   saveBoard(board);
   const resettled = await settle(team, again.id);
   if (team.stopRequested) return null;
@@ -2272,7 +2357,7 @@ async function finalReview(team: LiveTeam, source: CodingRunSource, tests: strin
   } catch (err) {
     return byRule("the final reviewer could not start.", `No final reviewer: ${err instanceof Error ? err.message : String(err)}`);
   }
-  board.runs.push({ id: run.id, role: "reviewer", taskId: null });
+  board.runs.push(castRef(run, "reviewer", null));
   saveBoard(board);
   const settled = await settle(team, run.id);
   if (team.stopRequested) return null;
@@ -2366,6 +2451,9 @@ async function leadTurn(team: LiveTeam, taskIds: string[], source: CodingRunSour
   // The run is filed under the batch's latest task; the alerts name them all.
   const taskId = taskIds[taskIds.length - 1];
   const after = taskIds.join(", ");
+  // What every role runs on now — read for each turn, before the seat is
+  // taken: an account connected, or gone, since the plan is what it adds by.
+  const models = await readTeamModels();
   // A seat beside the workers still going: the memory guard is waited out
   // the way a worker's is; a stranger's run holding the box is an alert.
   for (;;) {
@@ -2393,14 +2481,14 @@ async function leadTurn(team: LiveTeam, taskIds: string[], source: CodingRunSour
       source,
       team: { id: board.id, role: "lead", taskId },
       readOnly: true,
-      extraBrief: REPLAN_BRIEF,
+      extraBrief: withTeamModels(REPLAN_BRIEF, models),
     });
   } catch (err) {
     bus.send(SYSTEM, { type: "alert", task_id: taskId, reason: `No lead after ${after}: ${err instanceof Error ? err.message : String(err)}` });
     return;
   }
   team.leadTurnsAt = [team.leadTurnsAt[1], writtenAt];
-  board.runs.push({ id: run.id, role: "lead", taskId });
+  board.runs.push(castRef(run, "lead", taskId));
   saveBoard(board);
   const settled = await settle(team, run.id);
   if (team.stopRequested) return;
@@ -2484,14 +2572,75 @@ async function settle(team: LiveTeam, runId: string): Promise<CodingRun | null> 
   }
 }
 
-/** A settled run's tokens, from its own record, onto its line in the board's cast list — what the team's metrics add up. */
+/**
+ * A settled run's tokens, account and model, from its own record, onto its
+ * line in the board's cast list — what the team's metrics add up, by role and
+ * by provider. The model is brought up to what ANSWERED (`answeredModel`).
+ */
 function noteTokens(board: TeamBoard, run: CodingRun | null): void {
   if (!run) return;
   const ref = board.runs.find((r) => r.id === run.id);
+  if (!ref) return;
+  const paid = runModelFields(run, answeredModel(run));
   const tokens = run.tokensUsed;
-  if (!ref || typeof tokens !== "number" || !Number.isFinite(tokens) || tokens < 0) return;
-  ref.tokens = tokens;
+  const counted = typeof tokens === "number" && Number.isFinite(tokens) && tokens >= 0;
+  if (!counted && !paid) return;
+  if (paid) Object.assign(ref, paid);
+  if (counted) ref.tokens = tokens;
   saveBoard(board);
+}
+
+/**
+ * A run's line in the board's cast list, with the account it was paid from,
+ * its model there and the role its choice was made for, from the record its
+ * start answered — so a team on several providers keeps each run's own.
+ */
+function castRef(run: CodingRun, role: TeamRunRef["role"], taskId: string | null): TeamRunRef {
+  const paid = runModelFields(run, refModel(run.requestedModel) ?? null);
+  return { id: run.id, role, taskId, ...(paid ?? {}) };
+}
+
+/** The provider, model and model role a ref keeps off a record — null for a record that names no provider it could have been paid from. */
+function runModelFields(run: CodingRun, model: string | null): Pick<TeamRunRef, "provider" | "model" | "modelRole"> | null {
+  if (!isCodingProvider(run.provider)) return null;
+  // Read as unknown: a record from before the field has none.
+  const role: unknown = run.modelRole;
+  return {
+    provider: run.provider,
+    model,
+    ...((MODEL_ROLES as readonly unknown[]).includes(role) ? { modelRole: role as ModelRole } : {}),
+  };
+}
+
+/**
+ * The model that did a settled run's work: what the CLI said its main loop
+ * ran on, else what the run was started with, else the one model its usage
+ * names — null where the provider's plan chose and nothing said which.
+ */
+function answeredModel(run: CodingRun): string | null {
+  const used = Array.isArray(run.modelsUsed) && run.modelsUsed.length === 1 ? refModel(run.modelsUsed[0]) : undefined;
+  return refModel(run.model) ?? refModel(run.requestedModel) ?? used ?? null;
+}
+
+/**
+ * May this bulk task's worker start on the bulk role's provider? Yes while
+ * that provider can run; when it cannot — or the map cannot be read — no, and
+ * a note on the board says the task runs as an ordinary worker, and why.
+ */
+async function bulkMayRun(team: LiveTeam, taskId: string): Promise<boolean> {
+  const map = await readTeamModels();
+  const bulk = map?.bulk;
+  if (bulk?.ready) return true;
+  const why = bulk
+    ? `${providerWords(bulk.provider)} cannot run right now: ${bulk.problems.join(" ") || "it is not ready."}`
+    : "the team's role models could not be read.";
+  team.bus.send(SYSTEM, { type: "note", task_id: taskId, text: bulkFallbackText(taskId, why) });
+  return false;
+}
+
+/** The board's line for a bulk task worked by an ordinary worker. */
+function bulkFallbackText(taskId: string, why: string): string {
+  return `Task ${taskId} is marked bulk, but the bulk role's provider is unavailable — ${why.trim()} It runs as an ordinary worker, on the workers' model.`;
 }
 
 // ─── Words ───────────────────────────────────────────────────────────────────

@@ -27,9 +27,15 @@
  * left out. Those are read leniently — an estimate that cannot be read is no
  * estimate, never a refused plan — and `fitPlan` measures the plan against
  * the time before any work starts. Without a budget, nothing here changes.
+ *
+ * A task may be marked `"role": "bulk"` — token-heavy, not critical — so its
+ * worker starts on the bulk role's model; the planner and the lead are told
+ * what every role runs on and roughly what it costs (`teamModelsBrief`).
  */
 
-import { MAX_TASK_CHARS, MAX_TEAM_WORKERS } from "@/lib/coding-agent";
+import { MAX_TASK_CHARS, MAX_TEAM_WORKERS, type TeamRoleModelMap } from "@/lib/coding-agent";
+import type { CodingProvider } from "@/lib/coding-provider";
+import { MODEL_ROLES, type ModelRole } from "@/lib/coding-role-models";
 import {
   allComplete,
   boardDigest,
@@ -47,6 +53,7 @@ import {
   type LogEntry,
   type RepoMap,
   type ReviewMode,
+  type TaskRole,
   type TaskStatus,
   type TeamBoard,
   type TeamShape,
@@ -76,6 +83,12 @@ export interface PlannedTask {
   estimateMs?: number;
   priority?: number;
   optional?: boolean;
+  /**
+   * `bulk` when the planner (or the lead) said `"role": "bulk"`: its worker
+   * starts on the bulk role's model. Absent for every other task — a worker's,
+   * whatever else `role` said — so a plan without bulk work is what it was.
+   */
+  role?: TaskRole;
 }
 
 /** A budgeted plan's `time_plan`, read leniently: what the planner said about the plan and the time. */
@@ -98,12 +111,13 @@ const TASK_RULES = [
   "A task that verifies, integrates or reviews the other tasks' output must list EVERY task it checks in depends_on — never fewer: its worker starts from the work merged so far, and a task it does not wait for may not be there yet.",
   "files_hint lists the files or folders the task should touch; the team watches for a worker straying outside it.",
   "When two tasks share a contract — an API shape, a schema, a module path — say in BOTH task_descriptions which task owns it, and that the other task's worker must ask that task's worker for it with team_message (to=\"sibling\") rather than invent it.",
+  'role is optional: "bulk" marks a task that is token-heavy and not critical — scraping, mass data, repetitive edits, long test runs — so its worker may run on a cheaper model; leave it out (or say "worker") for every other task, and always for the code the goal depends on.',
 ];
 
 export const PLANNER_BRIEF = [
   "You are the PLANNER of a small coding team working unattended in this folder. Your job is to split ONE goal into a few independent, concrete tasks that separate workers will carry out in parallel when independent, each in its own fresh session with no memory of yours.",
   "Read the folder first — map what exists, what the goal touches and what a worker would need to know — but change NOTHING: you may not edit, create, delete or run anything that writes.",
-  `Answer with ONLY a JSON object, no prose before or after: {"shape": {"parallelism": 1 to ${MAX_TEAM_WORKERS}, "review": "each" | "final" | "none", "rationale": string}, "repo_map": {"files": ["path — what it is", ...], "entry_points": [...], "test_commands": [...], "gotchas": [...]}, "tasks": [at most ${MAX_TEAM_TASKS} objects {"task_description": string, "depends_on": ["t1", ...], "files_hint": ["path", ...]}]}. Each task_description is at most ${MAX_TASK_DESCRIPTION_CHARS} characters and the rationale at most ${MAX_RATIONALE_CHARS}; longer text is cut. If a task needs more than that, split it into two tasks.`,
+  `Answer with ONLY a JSON object, no prose before or after: {"shape": {"parallelism": 1 to ${MAX_TEAM_WORKERS}, "review": "each" | "final" | "none", "rationale": string}, "repo_map": {"files": ["path — what it is", ...], "entry_points": [...], "test_commands": [...], "gotchas": [...]}, "tasks": [at most ${MAX_TEAM_TASKS} objects {"task_description": string, "depends_on": ["t1", ...], "files_hint": ["path", ...], "role": "worker" | "bulk"}]}. Each task_description is at most ${MAX_TASK_DESCRIPTION_CHARS} characters and the rationale at most ${MAX_RATIONALE_CHARS}; longer text is cut. If a task needs more than that, split it into two tasks.`,
   `repo_map is your compact map of the parts of the project the goal touches, written for the workers: the files that matter with a few words each, where the code starts (entry points), the exact commands that build and test it, and the gotchas you found — at most ${MAX_REPO_MAP_ITEMS} one-line entries per list. Every worker and reviewer is handed it instead of exploring the project again, so make it the map you would want to be given.`,
   "Tasks are numbered t1, t2, … in the order you list them; depends_on names EARLIER tasks — listed before it — that a task must wait for. Prefer 2–5 tasks only where the parts are truly independent. A plan of ONE task runs as a single ordinary run, the cheapest shape: a goal one session can do in one go is one task. Tasks that edit mostly the same files cannot run side by side and only add cost — make them one task.",
   ...TASK_RULES,
@@ -133,6 +147,66 @@ export function plannerBrief(budget: TimeBudget | null | undefined, now: number,
   if (!budget) return PLANNER_BRIEF;
   const calibrated = calibrationBrief(calibration);
   return `${PLANNER_BRIEF} ${timeBrief(budget, now, tz)}${calibrated ? ` ${calibrated}` : ""}`;
+}
+
+/** A provider as the briefs — and the team's own English lines — name it. */
+const PROVIDER_WORDS: Readonly<Record<CodingProvider, string>> = {
+  "clawbox-ai": "ClawBox AI",
+  anthropic: "Anthropic",
+};
+
+export function providerWords(provider: CodingProvider): string {
+  return PROVIDER_WORDS[provider] ?? provider;
+}
+
+/** A role as the briefs name it: the planner's line is the lead's too. */
+const ROLE_WORDS: Readonly<Record<ModelRole, string>> = {
+  planner: "planner (and the lead)",
+  worker: "worker",
+  reviewer: "reviewer",
+  bulk: "bulk",
+};
+
+/** "~1x", "~20x", "~0.5x" — or the plain fact that nobody can say. */
+function costWords(cost: number | null): string {
+  if (cost === null || !Number.isFinite(cost) || cost <= 0) return "cost not known";
+  return `~${Number(cost.toPrecision(2))}x`;
+}
+
+/**
+ * What every role of the team starts on — model, provider and roughly what a
+ * token costs there (`relativeModelCost`, the ClawBox AI flash tier = 1x) — one
+ * line per role, for the planner's brief and the lead's: it weighs which tasks
+ * to mark bulk by it. A role whose provider cannot run right now is marked
+ * UNAVAILABLE with the reason; for bulk that means a bulk task runs as an
+ * ordinary worker. Empty without a map (it could not be read): the brief is
+ * then what it was before there were role models.
+ */
+export function teamModelsBrief(map: TeamRoleModelMap | null | undefined): string {
+  if (!map) return "";
+  const lines = MODEL_ROLES.filter((role) => map[role]).map((role) => {
+    const r = map[role];
+    const head = `- ${ROLE_WORDS[role]}: ${r.model ?? "the plan's own model"} on ${providerWords(r.provider)}, ${costWords(r.relativeCost)}`;
+    if (!r.ready) {
+      const why = r.problems.map((p) => p.trim()).filter(Boolean).join(" ") || "its provider is not ready.";
+      return `${head} — UNAVAILABLE: ${why}${role === "bulk" ? " A task marked bulk runs as an ordinary worker until it is." : ""}`;
+    }
+    const worker = map.worker;
+    const same = role === "bulk" && worker && worker.provider === r.provider && worker.model === r.model;
+    return same ? `${head} — the workers' own model: marking a task bulk changes nothing on this box.` : head;
+  });
+  if (!lines.length) return "";
+  return [
+    "Team models — what each role's runs start on, and roughly what a token costs there (the ClawBox AI flash tier = 1x):",
+    ...lines,
+    'Mark a task "role": "bulk" only when it is token-heavy and not critical: its worker runs on the bulk line\'s model.',
+  ].join("\n");
+}
+
+/** A role's brief with the team's models after it, when there is a map to say. */
+export function withTeamModels(brief: string, map: TeamRoleModelMap | null | undefined): string {
+  const models = teamModelsBrief(map);
+  return models ? `${brief}\n\n${models}` : brief;
 }
 
 function timeBrief(budget: TimeBudget, now: number, tz: string): string {
@@ -316,6 +390,11 @@ function skipLine(item: unknown): string {
   const what = text(item.what) || text(item.item) || text(item.task) || text(item.name);
   const why = text(item.why) || text(item.reason);
   return what ? clip(why ? `${what} — ${why}` : what, MAX_SKIP_TEXT_CHARS) : "";
+}
+
+/** A task's `role` as a planner writes it: "bulk" in any case is bulk; anything else — none, "worker", a word it made up — is a worker's. */
+export function readTaskRole(v: unknown): TaskRole {
+  return typeof v === "string" && v.trim().toLowerCase() === "bulk" ? "bulk" : "worker";
 }
 
 /** "true" in the forms a planner writes it: true, "true", "yes". */
@@ -510,6 +589,8 @@ function readTasks(items: unknown[], offset: number, problems: string[], clipped
       task.priority = offset + i + 1;
       if (readOptional(item.optional)) task.optional = true;
     }
+    // Never a fault: a role it does not know is a worker's, like none at all.
+    if (readTaskRole(item.role) === "bulk") task.role = "bulk";
     tasks.push(task);
   }
   return tasks;
@@ -568,7 +649,7 @@ export const REPLAN_BRIEF = [
   "You are the LEAD of a small coding team working unattended in this folder: the planner that wrote the team's plan, back for a moment because one or more workers have just finished their tasks. You decide ONE thing: does the rest of the plan still fit the goal?",
   "Read what you need, but change NOTHING: you may not edit, create, delete or run anything that writes.",
   'Answer with ONLY a JSON object, no prose before or after: {"add": [task, ...], "retire": ["t4", ...], "note": string}. Every field is optional; {} means the plan stands, and that is the usual answer — change the plan only for a concrete reason.',
-  `add: new tasks, each {"task_description": string, "depends_on": ["t1", ...], "files_hint": ["path", ...]} with a task_description of at most ${MAX_TASK_DESCRIPTION_CHARS} characters (longer text is cut; if a task needs more than that, split it into two tasks), for work the goal needs that no task on the board covers — say, something a finished task revealed. They are numbered after the board's last task in the order you list them, and may depend on any task on the board or on a new one listed before them. The lead adds at most ${MAX_LEAD_ADDS} tasks over the whole team, and a team holds at most ${MAX_TEAM_TASKS}.`,
+  `add: new tasks, each {"task_description": string, "depends_on": ["t1", ...], "files_hint": ["path", ...], "role": "worker" | "bulk"} with a task_description of at most ${MAX_TASK_DESCRIPTION_CHARS} characters (longer text is cut; if a task needs more than that, split it into two tasks), for work the goal needs that no task on the board covers — say, something a finished task revealed. They are numbered after the board's last task in the order you list them, and may depend on any task on the board or on a new one listed before them. The lead adds at most ${MAX_LEAD_ADDS} tasks over the whole team, and a team holds at most ${MAX_TEAM_TASKS}.`,
   `retire: tasks still PENDING that the goal no longer needs — a finished task already did that work, or it turned out to be unnecessary. At most ${MAX_LEAD_RETIRES} over the whole team; a task a worker has started cannot be retired.`,
   `note: why, in one line of at most ${MAX_LEAD_NOTE_CHARS} characters, for the team's log.`,
   "What the team's runs told the lead with team_message — a worker blocked on a missing file, a question only a new task can answer — is listed in full under \"Messages to the lead since your last turn:\", and older messages are among the latest lines of the board you are given: weigh them, and act on them only through add or retire.",

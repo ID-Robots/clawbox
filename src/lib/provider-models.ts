@@ -135,6 +135,8 @@ export interface ProviderCatalog {
 // enumeration returns.
 export const ANTHROPIC_MODELS: readonly ProviderModelOption[] = [
   { id: "claude-opus-5-5", label: "Claude Opus 5.5", hint: "Default. Most capable." },
+  // Offered, not the default: a box with no pick still lands on Opus 5.5.
+  { id: "claude-fable-5-1", label: "Claude Fable 5.1", hint: "Newest generation." },
   { id: "claude-haiku-4-5", label: "Claude Haiku 4.5", hint: "Fastest, near-frontier." },
   { id: "claude-sonnet-5", label: "Claude Sonnet 5", hint: "Speed + intelligence." },
   // Still selectable, and still what a box that explicitly picked it keeps

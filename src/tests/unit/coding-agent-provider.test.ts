@@ -117,7 +117,7 @@ describe("the vocabulary", () => {
     // The literal is the point. An unnamed run's model reaches Claude Code as
     // a string, so a typo here ("claude-opus-5.5", an alias) is not a type
     // error — it is a run that fails several minutes in, on the owner's bill.
-    expect([...ANTHROPIC_MODELS]).toEqual(["claude-opus-5-5", "claude-opus-5", "claude-sonnet-5"]);
+    expect([...ANTHROPIC_MODELS]).toEqual(["claude-opus-5-5", "claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"]);
     expect(DEFAULT_ANTHROPIC_MODEL).toBe("claude-opus-5-5");
     expect(defaultModelForProvider("anthropic")).toBe("claude-opus-5-5");
     expect(defaultModelForProvider("clawbox-ai")).toBeNull();
@@ -318,6 +318,44 @@ describe("the run environment", () => {
     } finally {
       if (prev === undefined) delete process.env.CLAUDE_DS_MODEL;
       else process.env.CLAUDE_DS_MODEL = prev;
+    }
+  });
+
+  it("gives each run of a mixed team its own provider's wiring, and nothing of the other's", () => {
+    // A team whose planner the owner put on Anthropic and whose workers stay
+    // on ClawBox AI: two runs side by side, built one after the other from
+    // their own records, in a web server whose own environment carries both
+    // sides' variables.
+    const saved = Object.fromEntries(["CLAUDE_DS_PROVIDER", "CLAUDE_DS_MODEL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL"].map((k) => [k, process.env[k]]));
+    Object.assign(process.env, {
+      CLAUDE_DS_PROVIDER: "anthropic",
+      CLAUDE_DS_MODEL: "deepseek-v4-pro[1m]",
+      ANTHROPIC_API_KEY: "server-env-anthropic-key",
+      ANTHROPIC_AUTH_TOKEN: "server-env-proxy-token",
+      ANTHROPIC_BASE_URL: "https://proxy.example.invalid",
+    });
+    try {
+      const planner = buildRunEnv({ effort: "xhigh", provider: "anthropic", model: "claude-fable-5-1" });
+      const worker = buildRunEnv({ effort: "ultracode", provider: "clawbox-ai", model: null });
+      const economyWorker = buildRunEnv({ effort: "ultracode", provider: "clawbox-ai", model: "deepseek-v4-flash" });
+      expect(planner).toMatchObject({ CLAUDE_DS_PROVIDER: "anthropic", CLAUDE_DS_MODEL: "claude-fable-5-1", CLAUDE_DS_EFFORT: "xhigh" });
+      expect(worker).toMatchObject({ CLAUDE_DS_PROVIDER: "clawbox-ai", CLAUDE_DS_MODEL: "deepseek-v4-pro[1m]", CLAUDE_DS_EFFORT: "ultracode" });
+      expect(economyWorker).toMatchObject({ CLAUDE_DS_PROVIDER: "clawbox-ai", CLAUDE_DS_MODEL: "deepseek-v4-flash" });
+      for (const env of [planner, worker, economyWorker]) {
+        expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+        expect(env.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
+        expect(env.ANTHROPIC_BASE_URL).toBeUndefined();
+        expect(Object.values(env).some((v) => v.startsWith("server-env-"))).toBe(false);
+      }
+      // Built in the other order, each is the same: no run's environment
+      // depends on which run of the team was built before it.
+      expect(buildRunEnv({ effort: "ultracode", provider: "clawbox-ai", model: null })).toEqual(worker);
+      expect(buildRunEnv({ effort: "xhigh", provider: "anthropic", model: "claude-fable-5-1" })).toEqual(planner);
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
     }
   });
 });

@@ -529,6 +529,49 @@ describe("whether a single run was cheaper", () => {
   });
 });
 
+/**
+ * A team's roles may run on different accounts — the planner on Anthropic, a
+ * bulk task on the plan's flash tier — so the chart's figures split its tokens
+ * by account beside the split by role.
+ */
+describe("tokens by account", () => {
+  const RUNS = [
+    { id: "run-00000001", role: "planner" as const, taskId: null, tokens: 12_000, provider: "anthropic" as const, model: "claude-fable-5-1", modelRole: "planner" as const },
+    { id: "run-00000002", role: "worker" as const, taskId: "t1", tokens: 140_000, provider: "anthropic" as const, model: "claude-opus-5-5", modelRole: "worker" as const },
+    { id: "run-00000003", role: "worker" as const, taskId: "t2", tokens: 11_000, provider: "clawbox-ai" as const, model: "deepseek-v4-flash", modelRole: "bulk" as const },
+  ];
+  const split = (s: string) => t("codingAgent.team.tokensByProvider", { split: s });
+
+  it("adds up each account's runs, largest first, right beside the tokens by role", async () => {
+    stub();
+    teams = [{ ...WORKING, runs: RUNS }];
+    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    const chip = await screen.findByTestId("coding-agent-diagram-provider-tokens");
+    expect(chip).toHaveTextContent(split("Anthropic 152k · ClawBox AI 11k"));
+    // Beside, not elsewhere: the same row of figures as the split by role.
+    expect(chip.parentElement).toBe(screen.getByTestId("coding-agent-diagram-tokens").parentElement);
+  });
+
+  it("reads the server's own tally where the cast list does not say which account a run was on", async () => {
+    stub();
+    teams = [{
+      ...WORKING,
+      runs: RUNS.map(({ id, role, taskId, tokens }) => ({ id, role, taskId, tokens })),
+      metrics: { plannerRuns: 1, workerRuns: 2, reviewerRuns: 0, leadRuns: 0, tasksPlanned: 2, tasksAdded: 0, tasksRetired: 0, tasksAcceptedFirstTry: 1, tasksRejected: 0, tokensUsed: 163_000, tokensByProvider: { "clawbox-ai": 163_000 }, wallMs: 60_000 },
+    }];
+    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    expect(await screen.findByTestId("coding-agent-diagram-provider-tokens")).toHaveTextContent(split("ClawBox AI 163k"));
+  });
+
+  it("draws no split for a team from before the field", async () => {
+    stub();
+    teams = [{ ...WORKING, runs: RUNS.map(({ id, role, taskId, tokens }) => ({ id, role, taskId, tokens })) }];
+    render(<CodingTeamCard directory={DIR} projectId={null} onOpenRun={() => {}} />);
+    await screen.findByTestId("coding-agent-diagram-tokens");
+    expect(screen.queryByTestId("coding-agent-diagram-provider-tokens")).toBeNull();
+  });
+});
+
 describe("a budgeted team", () => {
   const now = Date.now();
   const iso = (ms: number) => new Date(ms).toISOString();

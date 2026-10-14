@@ -31,8 +31,11 @@ const runner = vi.hoisted(() => ({
   isCodingAgentEnabled: vi.fn(),
   queueRunMessage: vi.fn(),
   noteTeamMessageSent: vi.fn(),
+  teamRoleModelMap: vi.fn(),
 }));
 vi.mock("@/lib/coding-agent", async (importOriginal) => ({ ...(await importOriginal<typeof import("@/lib/coding-agent")>()), ...runner }));
+/** Every role ready on the box's own provider — the team's pre-flight; the host's readiness probe is not the fixture. */
+const READY_ROLES = Object.fromEntries(["planner", "worker", "reviewer", "bulk"].map((role) => [role, { provider: "clawbox-ai", model: null, effort: "high", auto: true, ready: true, problems: [], relativeCost: null }]));
 vi.mock("@/lib/mem-available", () => ({ memAvailableMb: vi.fn(async () => 8000) }));
 vi.mock("@/lib/coding-team-worktree", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/coding-team-worktree")>()),
@@ -68,6 +71,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   runner.isCodingAgentEnabled.mockResolvedValue(true);
   runner.resolveWorkingDirectory.mockResolvedValue({ directory: "/home/clawbox/Projects/shop", projectId: null });
+  runner.teamRoleModelMap.mockResolvedValue(READY_ROLES);
   runner.startRun.mockImplementation(async (input: Record<string, unknown>) => {
     seq += 1;
     const run = { id: `run-${String(seq).padStart(8, "0")}`, status: "running", team: input.team ?? null, summary: null, error: null, filesTouched: [], permissionDenials: 0, deniedActions: [] };

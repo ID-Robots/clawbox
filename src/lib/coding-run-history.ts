@@ -49,6 +49,7 @@ import {
   type ArtifactKind,
 } from "@/lib/coding-agent-artifacts";
 import { inputsRoot, SHARED_INPUTS_DIR_NAME } from "@/lib/coding-run-inputs";
+import { MODEL_ROLES, type ModelRole } from "@/lib/coding-role-models";
 import { processStore } from "@/lib/process-store";
 import { taskTitle } from "@/lib/task-title";
 import type { ZipSource } from "@/lib/zip-writer";
@@ -325,6 +326,18 @@ export interface HistoryRecord {
   completedAt?: unknown;
   directory?: unknown;
   worktree?: unknown;
+  /** The team role the run's provider and model were chosen for; absent on a record from before it. */
+  modelRole?: unknown;
+}
+
+/**
+ * A stored team role read back: one of the roles a run could have been
+ * started under, else null — a run that was not a team's, a record from
+ * before the field, or a hand edit. The one reader for the live record
+ * (normalizeRun in coding-agent.ts) and for the archive here.
+ */
+export function readModelRole(raw: unknown): ModelRole | null {
+  return typeof raw === "string" && (MODEL_ROLES as readonly string[]).includes(raw) ? raw as ModelRole : null;
 }
 
 function num(v: unknown): number | null {
@@ -517,6 +530,8 @@ export interface ArchiveEntry {
   transcript: boolean;
   stream: boolean;
   reason: ArchiveReason;
+  /** The team role its provider and model were chosen for; null for any other run and for a bundle archived before the field. */
+  modelRole: ModelRole | null;
 }
 
 /** Where the parts of a run are before it is archived — coding-agent.ts knows these paths. */
@@ -556,6 +571,7 @@ function archiveEntryOf(raw: unknown, id: string): ArchiveEntry | null {
     transcript: e.transcript === true,
     stream: e.stream === true,
     reason: e.reason === "cleared" ? "cleared" : "trimmed",
+    modelRole: readModelRole(e.modelRole),
   };
 }
 
@@ -584,6 +600,7 @@ function archiveEntryFromBundle(dir: string, id: string): ArchiveEntry | null {
     transcript: fs.existsSync(path.join(dir, ARCHIVE_TRANSCRIPT)),
     stream: fs.existsSync(path.join(dir, ARCHIVE_STREAM)),
     reason: "trimmed",
+    modelRole: readModelRole(record.modelRole),
   };
 }
 
@@ -680,6 +697,7 @@ export function archiveRun(record: HistoryRecord, sources: ArchiveSources, reaso
     transcript: transcriptCopied,
     stream: streamMoved,
     reason,
+    modelRole: readModelRole(record.modelRole),
   };
   try {
     writeJsonAtomic(path.join(staging, META_FILE), entry);

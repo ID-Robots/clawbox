@@ -55,7 +55,10 @@ export const ANTHROPIC_API_KEY_CONFIG_KEY = "anthropic_api_key";
  * an unknown model id is a failed run several minutes in, and the picker's
  * job is to make that impossible from here.
  *
- * Default first. `claude-opus-5` stays on the list behind the 5.5 default
+ * Default first. `claude-fable-5-1` is offered beside it, never instead of it:
+ * a run nobody named a model for still lands on Opus 5.5.
+ *
+ * `claude-opus-5` stays on the list behind the 5.5 default
  * rather than retiring with it, because this list is the fence for what a
  * caller ASKS FOR: the MCP tool's `model` enum, the run route, and a
  * follow-up run that re-states the model of the run it continues all go
@@ -68,7 +71,7 @@ export const ANTHROPIC_API_KEY_CONFIG_KEY = "anthropic_api_key";
  * (`normalizeRequestedModel`). So dropping an id here does not stop one
  * already on a run record — it only stops the next caller naming it.
  */
-export const ANTHROPIC_MODELS = ["claude-opus-5-5", "claude-opus-5", "claude-sonnet-5"] as const;
+export const ANTHROPIC_MODELS = ["claude-opus-5-5", "claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"] as const;
 
 export type AnthropicModel = (typeof ANTHROPIC_MODELS)[number];
 

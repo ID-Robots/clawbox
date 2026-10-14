@@ -49,7 +49,7 @@ let posts: { url: string; body: unknown }[];
 function stubFetch(
   status: {
     enabled: boolean;
-    readiness: typeof READY | typeof NOT_READY;
+    readiness: { ready: boolean; problems: string[]; [field: string]: unknown };
     defaultDirectory?: string | null;
     effort?: string;
     maxTurns?: number;
@@ -100,6 +100,12 @@ function stubFetch(
     noPrBodyTask?: boolean;
     /** A server from before the per-role models: no field, so the section is not drawn. */
     noRoleModels?: boolean;
+    /** The per-role choices as the status draws them — e.g. the older shape,
+     *  with no provider and no bulk role. Absent: every role on its default. */
+    roleModels?: Record<string, Record<string, string>>;
+    /** What each role starts on now (status.roleModelMap). Absent: a server
+     *  that predates it. */
+    roleModelMap?: Record<string, unknown>;
     /** A server from before the time budget: no default-budget field, so its select is not drawn. */
     noDefaultBudget?: boolean;
   } = {},
@@ -127,11 +133,14 @@ function stubFetch(
   let prBodyIncludesTask = status.prBodyIncludesTask ?? "summary";
   let defaultTimeBudget: string | null = status.defaultTimeBudget ?? null;
   // Every role on its default, as a box that never chose answers.
-  const roleModels: Record<string, { model: string; effort: string }> = {
-    planner: { model: "auto", effort: "auto" },
-    worker: { model: "auto", effort: "auto" },
-    reviewer: { model: "auto", effort: "auto" },
-  };
+  const roleModels: Record<string, Record<string, string>> = opts.roleModels
+    ? JSON.parse(JSON.stringify(opts.roleModels))
+    : {
+      planner: { provider: "auto", model: "auto", effort: "auto" },
+      worker: { provider: "auto", model: "auto", effort: "auto" },
+      reviewer: { provider: "auto", model: "auto", effort: "auto" },
+      bulk: { provider: "auto", model: "auto", effort: "auto" },
+    };
   const payload = () => ({
     enabled: status.enabled,
     ready: status.enabled && status.readiness.ready,
@@ -160,6 +169,7 @@ function stubFetch(
     ...(opts.noGitAuthor ? {} : { gitAuthorName, gitAuthorEmail, maxGitAuthorChars: 200 }),
     ...(opts.noPrBodyTask ? {} : { prBodyIncludesTask }),
     ...(opts.noRoleModels ? {} : { roleModels: JSON.parse(JSON.stringify(roleModels)) }),
+    ...(opts.roleModelMap ? { roleModelMap: opts.roleModelMap } : {}),
     ...(opts.noDefaultBudget ? {} : { defaultTimeBudget, timeZone: "Europe/Sofia" }),
   });
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
@@ -1094,35 +1104,230 @@ describe("the runs-at-once control", () => {
 
 
 describe("a team's model and effort per role", () => {
-  it("draws every role on its default — cheaper for the planner and reviewers, yours for workers — and names the cheaper models", async () => {
+  const model = (role: string) => screen.getByTestId(`coding-agent-role-${role}-model`) as HTMLSelectElement;
+  /** A select's choices, group by group: the group's label, then each option's value, text and whether it may be picked. */
+  const groups = (select: HTMLSelectElement) => [...select.querySelectorAll("optgroup")].map((g) => ({
+    label: g.label,
+    options: [...g.querySelectorAll("option")].map((o) => [o.value, o.textContent, o.disabled]),
+  }));
+  const priced = (name: string, n: number) => t("codingAgent.roleModel.withCost", { model: name, n });
+  const ENABLE = "/setup-api/coding-agent/enable";
+
+  it("draws all four roles on their defaults — cheaper for the planner and reviewers, yours for workers, the workers' for bulk work", async () => {
     stubFetch({ enabled: true, readiness: READY, effort: "max" });
     render(<CodingAgentSettingsPanel />);
     const planner = await screen.findByTestId("coding-agent-role-planner-model") as HTMLSelectElement;
+    const section = screen.getByTestId("coding-agent-role-models");
+    expect([...section.querySelectorAll("[data-testid^='coding-agent-role-'][data-testid$='-model']")].map((s) => s.getAttribute("data-testid")))
+      .toEqual(["coding-agent-role-planner-model", "coding-agent-role-worker-model", "coding-agent-role-reviewer-model", "coding-agent-role-bulk-model"]);
     expect(planner.value).toBe("auto");
     expect(planner.options[0].text).toBe("Default (cheaper model)");
-    expect((screen.getByTestId("coding-agent-role-worker-model") as HTMLSelectElement).options[0].text).toBe("Default (your model)");
+    expect(model("worker").options[0].text).toBe("Default (your model)");
     expect((screen.getByTestId("coding-agent-role-reviewer-effort") as HTMLSelectElement).options[0].text).toBe("Default (at most Very high)");
     expect((screen.getByTestId("coding-agent-role-worker-effort") as HTMLSelectElement).options[0].text).toBe("Default (your effort)");
-    const section = screen.getByTestId("coding-agent-role-models");
+    // Bulk work with nothing stored is a worker's run, model and effort alike.
+    expect(model("bulk").value).toBe("auto");
+    expect(model("bulk").options[0].text).toBe(t("codingAgent.roleAutoAsWorkers"));
+    expect((screen.getByTestId("coding-agent-role-bulk-effort") as HTMLSelectElement).options[0].text).toBe(t("codingAgent.roleAutoAsWorkers"));
+    expect(screen.getByLabelText(`Model for ${t("codingAgent.roleModels.bulk")}`)).toBe(model("bulk"));
+    // The planner's row says it is the lead too; bulk work's says what it is for.
+    expect(screen.getByTestId("coding-agent-role-planner-about")).toHaveTextContent(t("codingAgent.roleModelsRoleHint.planner"));
+    expect(screen.getByTestId("coding-agent-role-bulk-about")).toHaveTextContent(t("codingAgent.roleModelsRoleHint.bulk"));
     // The cheaper models are named in the help tip, one tap away — the
     // paragraph that repeated it under the rows is gone.
     fireEvent.click(screen.getByTestId("coding-agent-role-models-help"));
     expect(section.textContent).toContain("claude-sonnet-5");
     expect(section.textContent).toContain("deepseek-v4-flash");
-    expect(screen.getByLabelText("Model for Reviewers")).toBe(screen.getByTestId("coding-agent-role-reviewer-model"));
+    expect(screen.getByLabelText("Model for Reviewers")).toBe(model("reviewer"));
   });
 
-  it("posts one half of one role at a time and shows what the route saved", async () => {
+  it("offers the two older choices, then a group per account with each model's relative cost", async () => {
     stubFetch({ enabled: true, readiness: READY, effort: "max" });
     render(<CodingAgentSettingsPanel />);
     const planner = await screen.findByTestId("coding-agent-role-planner-model") as HTMLSelectElement;
-    fireEvent.change(planner, { target: { value: "standard" } });
-    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/coding-agent/enable", body: { roleModels: { planner: { model: "standard" } } } }));
-    await waitFor(() => expect((screen.getByTestId("coding-agent-role-planner-model") as HTMLSelectElement).value).toBe("standard"));
+    expect(groups(planner)).toEqual([
+      { label: t("codingAgent.roleModelTierGroup"), options: [["standard", "Your model", false], ["economy", "Cheaper model", false]] },
+      { label: "ClawBox AI", options: [["clawbox-ai/deepseek-v4-flash", priced("DeepSeek Flash", 1), false]] },
+      {
+        label: "Anthropic",
+        options: [
+          ["anthropic/claude-opus-5-5", priced("Opus 5.5", 20), false],
+          ["anthropic/claude-fable-5-1", priced("Fable 5.1", 40), false],
+          ["anthropic/claude-opus-5", priced("Opus 5", 20), false],
+          ["anthropic/claude-sonnet-5", priced("Sonnet 5", 10), false],
+        ],
+      },
+    ]);
+    // Never the Max-only tier: a role pinned to it would fail on any other plan.
+    expect([...planner.options].map((o) => o.value)).not.toContain("clawbox-ai/deepseek-v4-pro");
+    expect(screen.getByTestId("coding-agent-role-models-cost")).toHaveTextContent(t("codingAgent.roleModelsCostNote", { model: "DeepSeek Flash" }));
+  });
+
+  it("saves the provider and the model as one pair — a tier or Auto puts the role back on the team's own account", async () => {
+    stubFetch({ enabled: true, readiness: READY, effort: "max" });
+    render(<CodingAgentSettingsPanel />);
+    await screen.findByTestId("coding-agent-role-planner-model");
+
+    fireEvent.change(model("planner"), { target: { value: "anthropic/claude-fable-5-1" } });
+    await waitFor(() => expect(posts).toContainEqual({ url: ENABLE, body: { roleModels: { planner: { provider: "anthropic", model: "claude-fable-5-1" } } } }));
+    await waitFor(() => expect(model("planner").value).toBe("anthropic/claude-fable-5-1"));
+
+    // The goal's own example: bulk work on the plan's flash tier.
+    fireEvent.change(model("bulk"), { target: { value: "clawbox-ai/deepseek-v4-flash" } });
+    await waitFor(() => expect(posts).toContainEqual({ url: ENABLE, body: { roleModels: { bulk: { provider: "clawbox-ai", model: "deepseek-v4-flash" } } } }));
+    await waitFor(() => expect(model("bulk").value).toBe("clawbox-ai/deepseek-v4-flash"));
+
+    fireEvent.change(model("planner"), { target: { value: "standard" } });
+    await waitFor(() => expect(posts).toContainEqual({ url: ENABLE, body: { roleModels: { planner: { provider: "auto", model: "standard" } } } }));
+    await waitFor(() => expect(model("planner").value).toBe("standard"));
+
+    fireEvent.change(model("bulk"), { target: { value: "auto" } });
+    await waitFor(() => expect(posts).toContainEqual({ url: ENABLE, body: { roleModels: { bulk: { provider: "auto", model: "auto" } } } }));
+    await waitFor(() => expect(model("bulk").value).toBe("auto"));
+
+    // The effort stays its own half.
     const effort = screen.getByTestId("coding-agent-role-reviewer-effort") as HTMLSelectElement;
     fireEvent.change(effort, { target: { value: "low" } });
-    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/coding-agent/enable", body: { roleModels: { reviewer: { effort: "low" } } } }));
+    await waitFor(() => expect(posts).toContainEqual({ url: ENABLE, body: { roleModels: { reviewer: { effort: "low" } } } }));
     await waitFor(() => expect((screen.getByTestId("coding-agent-role-reviewer-effort") as HTMLSelectElement).value).toBe("low"));
+  });
+
+  it("disables an account that cannot run, says why once, and marks the role stored on it", async () => {
+    const MISSING = "No Anthropic account is connected: add an API key or sign in.";
+    stubFetch(
+      {
+        enabled: true,
+        effort: "max",
+        readiness: {
+          ...READY,
+          anthropicConnected: false,
+          providers: [
+            { id: "clawbox-ai", ready: true, problems: [] },
+            { id: "anthropic", ready: false, problems: [MISSING] },
+          ],
+        },
+      },
+      {
+        roleModels: {
+          planner: { provider: "auto", model: "auto", effort: "auto" },
+          worker: { provider: "auto", model: "auto", effort: "auto" },
+          reviewer: { provider: "auto", model: "auto", effort: "auto" },
+          bulk: { provider: "anthropic", model: "claude-sonnet-5", effort: "auto" },
+        },
+        roleModelMap: {
+          planner: { provider: "clawbox-ai", model: "deepseek-v4-flash", effort: "xhigh", auto: true, ready: true, problems: [], relativeCost: 1 },
+          worker: { provider: "clawbox-ai", model: null, effort: "max", auto: true, ready: true, problems: [], relativeCost: null },
+          reviewer: { provider: "clawbox-ai", model: "deepseek-v4-flash", effort: "xhigh", auto: true, ready: true, problems: [], relativeCost: 1 },
+          bulk: { provider: "anthropic", model: "claude-sonnet-5", effort: "max", auto: false, ready: false, problems: [MISSING], relativeCost: 10 },
+        },
+      },
+    );
+    render(<CodingAgentSettingsPanel />);
+    await screen.findByTestId("coding-agent-role-bulk-model");
+    for (const role of ["planner", "worker", "reviewer", "bulk"]) {
+      const [tiers, clawbox, anthropic] = groups(model(role));
+      expect(tiers.options.every(([, , off]) => off === false)).toBe(true);
+      expect(clawbox.options.every(([, , off]) => off === false)).toBe(true);
+      expect(anthropic.label).toBe(t("codingAgent.roleProviderGroupNotReady", { provider: "Anthropic" }));
+      expect(anthropic.options.length).toBe(4);
+      expect(anthropic.options.every(([, , off]) => off === true)).toBe(true);
+    }
+    // The reason, once, in the readiness check's own words.
+    const reasons = screen.getByTestId("coding-agent-role-providers-unready");
+    expect(reasons.querySelectorAll("li")).toHaveLength(1);
+    expect(screen.getByTestId("coding-agent-role-provider-anthropic-unready")).toHaveTextContent(
+      t("codingAgent.roleProviderNotReady", { provider: "Anthropic", reason: MISSING }),
+    );
+    // The stored choice still reads back as itself, and its row says it cannot start.
+    expect(model("bulk").value).toBe("anthropic/claude-sonnet-5");
+    expect(screen.getByTestId("coding-agent-role-bulk-unready")).toHaveTextContent(t("codingAgent.roleModelCannotStart", { provider: "Anthropic" }));
+    expect(screen.queryByTestId("coding-agent-role-planner-unready")).toBeNull();
+    // The account that works is still one pick away.
+    fireEvent.change(model("bulk"), { target: { value: "clawbox-ai/deepseek-v4-flash" } });
+    await waitFor(() => expect(posts).toContainEqual({ url: ENABLE, body: { roleModels: { bulk: { provider: "clawbox-ai", model: "deepseek-v4-flash" } } } }));
+  });
+
+  it("names the box's own missing piece for every account it stops", async () => {
+    stubFetch({
+      enabled: true,
+      readiness: {
+        ...NOT_READY,
+        providers: [
+          { id: "clawbox-ai", ready: false, problems: [] },
+          { id: "anthropic", ready: false, problems: ["No Anthropic account is connected."] },
+        ],
+      },
+    });
+    render(<CodingAgentSettingsPanel />);
+    await screen.findByTestId("coding-agent-role-models");
+    expect(screen.getByTestId("coding-agent-role-provider-clawbox-ai-unready")).toHaveTextContent(NOT_READY.problems[0]);
+    const anthropic = screen.getByTestId("coding-agent-role-provider-anthropic-unready");
+    expect(anthropic).toHaveTextContent(NOT_READY.problems[0]);
+    expect(anthropic).toHaveTextContent("No Anthropic account is connected.");
+  });
+
+  it("says what each role starts on right now, and what a token of it costs", async () => {
+    stubFetch({ enabled: true, readiness: READY }, {
+      roleModelMap: {
+        planner: { provider: "anthropic", model: "claude-sonnet-5", effort: "xhigh", auto: true, ready: true, problems: [], relativeCost: 10 },
+        worker: { provider: "clawbox-ai", model: null, effort: "max", auto: true, ready: true, problems: [], relativeCost: null },
+        reviewer: { provider: "anthropic", model: "claude-sonnet-5", effort: "xhigh", auto: true, ready: true, problems: [], relativeCost: 10 },
+        bulk: { provider: "clawbox-ai", model: null, effort: "max", auto: true, ready: true, problems: [], relativeCost: null },
+      },
+    });
+    render(<CodingAgentSettingsPanel />);
+    const planner = await screen.findByTestId("coding-agent-role-planner-about");
+    expect(planner.textContent).toBe([
+      t("codingAgent.roleModelsRoleHint.planner"),
+      t("codingAgent.roleModelNow", { model: "Sonnet 5", provider: "Anthropic" }),
+      t("codingAgent.roleModelCost", { n: 10 }),
+    ].join(" · "));
+    // Where the plan picks the model, the account is still said, and no cost is guessed.
+    expect(screen.getByTestId("coding-agent-role-worker-about").textContent).toBe(
+      t("codingAgent.roleModelNow", { model: t("codingAgent.roleModelPlanDecides"), provider: "ClawBox AI" }),
+    );
+  });
+
+  it("reads the older standard/economy choices back unchanged, on a server that answers without providers or bulk work", async () => {
+    stubFetch({ enabled: true, readiness: READY, effort: "max" }, {
+      roleModels: {
+        planner: { model: "economy", effort: "auto" },
+        worker: { model: "standard", effort: "xhigh" },
+        reviewer: { model: "auto", effort: "low" },
+      },
+    });
+    render(<CodingAgentSettingsPanel />);
+    await screen.findByTestId("coding-agent-role-planner-model");
+    expect(model("planner").value).toBe("economy");
+    expect(model("planner").selectedOptions[0].text).toBe("Cheaper model");
+    expect(model("worker").value).toBe("standard");
+    expect(model("worker").selectedOptions[0].text).toBe("Your model");
+    expect(model("reviewer").value).toBe("auto");
+    expect((screen.getByTestId("coding-agent-role-worker-effort") as HTMLSelectElement).value).toBe("xhigh");
+    // No row for a role the server does not know.
+    expect(screen.queryByTestId("coding-agent-role-bulk")).toBeNull();
+    // Reading is not writing.
+    expect(posts).toEqual([]);
+  });
+
+  it("reads back a pair the list has no row for — an account on its default model, or a tier there — as itself", async () => {
+    stubFetch({ enabled: true, readiness: READY, effort: "max" }, {
+      roleModels: {
+        planner: { provider: "anthropic", model: "economy", effort: "auto" },
+        worker: { provider: "clawbox-ai", model: "auto", effort: "auto" },
+        reviewer: { provider: "auto", model: "auto", effort: "auto" },
+        bulk: { provider: "auto", model: "auto", effort: "auto" },
+      },
+    });
+    render(<CodingAgentSettingsPanel />);
+    await screen.findByTestId("coding-agent-role-planner-model");
+    expect(model("planner").value).toBe("anthropic/economy");
+    expect(model("planner").selectedOptions[0].text).toBe("Cheaper model");
+    expect(model("planner").selectedOptions[0].parentElement).toHaveAttribute("data-provider", "anthropic");
+    expect(model("worker").value).toBe("clawbox-ai/auto");
+    expect(model("worker").selectedOptions[0].text).toBe(t("codingAgent.roleModel.providerDefault"));
+    // Only on the row that stores it.
+    expect([...model("reviewer").options].map((o) => o.value)).not.toContain("anthropic/economy");
   });
 
   it("is not drawn for a server that does not answer with the setting", async () => {

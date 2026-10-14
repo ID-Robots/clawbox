@@ -3,8 +3,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { notifyCodingAgentChanged } from "@/lib/ui-events";
-import { CODING_PROVIDER_NAME_KEY, ECONOMY_MODELS } from "@/lib/coding-provider";
-import { MODEL_ROLES, ROLE_AUTO, ROLE_DEFAULTS, ROLE_MODEL_TIERS, type ModelRole } from "@/lib/coding-role-models";
+import { CODING_PROVIDERS, CODING_PROVIDER_NAME_KEY, ECONOMY_MODELS } from "@/lib/coding-provider";
+import {
+  MODEL_ROLES,
+  ROLE_AUTO,
+  ROLE_AUTO_FOLLOWS,
+  ROLE_DEFAULTS,
+  ROLE_MODEL_TIERS,
+  relativeModelCost,
+  roleModelOptions,
+  type ModelRole,
+} from "@/lib/coding-role-models";
+import { codingModelName } from "@/lib/coding-model-names";
 import StatusMessage from "./StatusMessage";
 import DeviceCodeCard from "./DeviceCodeCard";
 import CodingAgentRulesCard from "./CodingAgentRulesCard";
@@ -78,6 +88,11 @@ export interface Readiness {
    *  it sends nothing, and absent must read as healthy. */
   harnessHealthy?: boolean;
   problems: string[];
+  /** Per provider: could a run start on it now, and what it is missing.
+   *  `problems` here are the provider's own; the box's are in the list above.
+   *  Optional: an older server answers without it, and no provider's choices
+   *  are then drawn as unavailable. */
+  providers?: { id: CodingProviderId; ready: boolean; problems: string[] }[];
 }
 
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max" | "ultracode";
@@ -188,11 +203,18 @@ export interface AgentStatus {
    *  the fallback below is `?? false`. */
   teamDynamic?: boolean;
   /**
-   * A team's model tier and effort per role, "auto" for the role's default
-   * (src/lib/coding-role-models.ts). Optional: a server that predates the
-   * setting answers without it, and the section is not drawn there.
+   * A team's provider, model and effort per role, "auto" for the role's
+   * default (src/lib/coding-role-models.ts roleModelsView). Optional: a server
+   * that predates the setting answers without it, and the section is not
+   * drawn there; one that predates per-role providers answers without
+   * `provider`, or without the bulk role, and draws what it has.
    */
-  roleModels?: Record<ModelRole, { model: string; effort: string }>;
+  roleModels?: Partial<Record<ModelRole, RoleModelsViewEntry>>;
+  /** What each role starts on right now, whether that provider can run, and
+   *  what a token costs there (coding-agent.ts TeamRoleModelMap). Optional:
+   *  an older server answers without it, and the rows then say nothing more
+   *  than their two selects. */
+  roleModelMap?: Partial<Record<ModelRole, RoleModelMapEntry>>;
   /** May a run draw pictures, and may the box draw the project's icon and
    *  favicon? Optional: an older server does not answer with it. ON by
    *  default, so the fallback below is `?? true`, not `?? false`. */
@@ -211,6 +233,57 @@ export interface AgentStatus {
   // does not belong in that chain — declaring the fields it never reads would
   // only suggest it did.
 }
+
+/** One role's stored choice as the status draws it: every half, "auto" where nothing is stored. */
+export interface RoleModelsViewEntry {
+  /** Absent from a server that predates per-role providers: read as "auto". */
+  provider?: CodingProviderId | typeof ROLE_AUTO;
+  /** "auto", a tier, or a model id of `provider`. */
+  model: string;
+  effort: string;
+}
+
+/** One role as its next fresh run would start (coding-agent.ts TeamRoleModel). */
+export interface RoleModelMapEntry {
+  provider: CodingProviderId;
+  /** Null where the provider's plan decides. */
+  model: string | null;
+  effort: string;
+  auto: boolean;
+  ready: boolean;
+  problems: string[];
+  /** A token's cost on that model, the plan's flash tier = 1; null where nobody can say. */
+  relativeCost: number | null;
+}
+
+/**
+ * A role's model choice as ONE select value — the provider and the model are
+ * one decision on screen, as they are one pair in the runner: "auto", a tier
+ * on the team's own account ("standard", "economy"), or "provider/model".
+ */
+const ROLE_MODEL_SEP = "/";
+
+function roleModelValue(entry: RoleModelsViewEntry): string {
+  const provider = entry.provider ?? ROLE_AUTO;
+  return provider === ROLE_AUTO ? entry.model : `${provider}${ROLE_MODEL_SEP}${entry.model}`;
+}
+
+/**
+ * What a select value saves: BOTH halves, always — so a tier picked after a
+ * pinned model puts the role back on the team's own account, and "auto" is
+ * every model half back to the default. The route checks the pair whole.
+ */
+function roleModelPatch(value: string): { provider: string; model: string } {
+  const at = value.indexOf(ROLE_MODEL_SEP);
+  if (at < 0) return { provider: ROLE_AUTO, model: value };
+  return { provider: value.slice(0, at), model: value.slice(at + 1) };
+}
+
+/** What a role's row says the role IS, where its name alone does not: the planner is the lead too, and bulk work needs its examples. */
+const ROLE_HINT_KEY: Partial<Record<ModelRole, string>> = {
+  planner: "codingAgent.roleModelsRoleHint.planner",
+  bulk: "codingAgent.roleModelsRoleHint.bulk",
+};
 
 /** How often to ask again while the GitHub answer is one we do not trust. */
 const GITHUB_REPROBE_MS = 15_000;
@@ -658,6 +731,15 @@ export default function CodingAgentSettingsPanel(_props: {
 
   const readiness = status?.readiness;
   const saving = pendingWrites > 0;
+  // The per-role section's accounts: the ones this build knows, and of those
+  // the ones that cannot run now. The box's own missing pieces are in
+  // `readiness.problems` beside the default account's, and in no account's
+  // own list — so they are what the top list has that none of those has.
+  const roleProviders: CodingProviderId[] = status?.providers?.length ? [...status.providers] : [...CODING_PROVIDERS];
+  const providerVerdicts = readiness?.providers ?? [];
+  const unreadyProviders = providerVerdicts.filter((v) => !v.ready && roleProviders.includes(v.id));
+  const sharedProblems = (readiness?.problems ?? []).filter((p) => !providerVerdicts.some((v) => v.problems.includes(p)));
+  const providerName = (id: CodingProviderId) => t(CODING_PROVIDER_NAME_KEY[id]);
   /** The refusal shown in one slot, if that is where it belongs. */
   const errorIn = (slot: ErrorSlot) => (
     error?.slot === slot ? <StatusMessage type="error" message={error.message} /> : null
@@ -1263,11 +1345,15 @@ export default function CodingAgentSettingsPanel(_props: {
               />
             </div>
 
-            {/* What each role of a team runs on. A planner reads and plans, a
-                reviewer reads and judges; only workers write the code — so the
-                first two default to the provider's cheaper model and at most
-                Extra high effort, and workers keep the owner's own. "Default"
-                stores nothing: a box that never opens this runs on the defaults. */}
+            {/* What each role of a team runs on: the account that pays, the
+                model there, and the effort. A planner reads and plans (and
+                comes back as the lead), a reviewer reads and judges; only
+                workers write the code — so the first two default to the
+                provider's cheaper model and at most Extra high effort, workers
+                keep the owner's own, and bulk work runs as the workers do until
+                the owner says otherwise. "Default" stores nothing: a box that
+                never opens this runs on the defaults, and the older
+                standard/economy choices read back as the same two options. */}
             {status?.roleModels && (
               <div className="mt-4" data-testid="coding-agent-role-models">
                 <div className="flex items-center gap-1.5">
@@ -1281,29 +1367,86 @@ export default function CodingAgentSettingsPanel(_props: {
                 {/* One row per role whose two selects share the width and wrap
                     under the name in a narrow window — a fixed width cut the
                     labels off ("Default (cheaper mo…"), and German's run longer. */}
-                <div className="mt-1.5 space-y-1.5">
-                  {MODEL_ROLES.map((role) => {
-                    const current = status.roleModels![role];
+                <div className="mt-1.5 space-y-2.5">
+                  {MODEL_ROLES.filter((role) => status.roleModels![role]).map((role) => {
+                    const current = status.roleModels![role]!;
                     const defaults = ROLE_DEFAULTS[role];
+                    // Bulk work with nothing stored is a worker's run, auto included.
+                    const followsWorkers = ROLE_AUTO_FOLLOWS[role] === "worker";
                     const roleName = t(`codingAgent.roleModels.${role}`);
                     const levels = status.effortLevels.includes(current.effort as Effort) || current.effort === ROLE_AUTO
                       ? status.effortLevels
                       : [...status.effortLevels, current.effort as Effort];
+                    const value = roleModelValue(current);
+                    const pinned = current.provider && current.provider !== ROLE_AUTO ? current.provider : null;
+                    const resolved = status.roleModelMap?.[role];
+                    const hint = ROLE_HINT_KEY[role];
+                    const about = [
+                      hint ? t(hint) : null,
+                      resolved
+                        ? t("codingAgent.roleModelNow", {
+                          model: resolved.model ? codingModelName(resolved.model) : t("codingAgent.roleModelPlanDecides"),
+                          provider: providerName(resolved.provider),
+                        })
+                        : null,
+                      resolved && resolved.relativeCost !== null ? t("codingAgent.roleModelCost", { n: resolved.relativeCost }) : null,
+                    ].filter(Boolean).join(" · ");
                     return (
                       <div key={role} className="flex flex-wrap items-center gap-x-2 gap-y-1" data-testid={`coding-agent-role-${role}`}>
                         <span className="w-24 shrink-0 text-[11px] text-[var(--text-secondary)]">{roleName}</span>
                         <select
-                          value={current.model}
+                          value={value}
                           disabled={saving}
                           aria-label={t("codingAgent.roleModelFor", { role: roleName })}
                           data-testid={`coding-agent-role-${role}-model`}
-                          onChange={(e) => void saveSetting({ roleModels: { [role]: { model: e.target.value } } }, `roleModels.${role}`, t("codingAgent.roleModelsFailed"))}
+                          onChange={(e) => void saveSetting({ roleModels: { [role]: roleModelPatch(e.target.value) } }, `roleModels.${role}`, t("codingAgent.roleModelsFailed"))}
                           className={`text-base sm:text-xs ${FIELD} flex-1 min-w-[11rem]`}
                         >
-                          <option value={ROLE_AUTO}>{t(defaults.model === "economy" ? "codingAgent.roleModel.autoEconomy" : "codingAgent.roleModel.autoStandard")}</option>
-                          {ROLE_MODEL_TIERS.map((tier) => (
-                            <option key={tier} value={tier}>{t(`codingAgent.roleModel.${tier}`)}</option>
-                          ))}
+                          <option value={ROLE_AUTO}>
+                            {followsWorkers
+                              ? t("codingAgent.roleAutoAsWorkers")
+                              : t(defaults.model === "economy" ? "codingAgent.roleModel.autoEconomy" : "codingAgent.roleModel.autoStandard")}
+                          </option>
+                          <optgroup label={t("codingAgent.roleModelTierGroup")}>
+                            {ROLE_MODEL_TIERS.map((tier) => (
+                              <option key={tier} value={tier}>{t(`codingAgent.roleModel.${tier}`)}</option>
+                            ))}
+                          </optgroup>
+                          {/* A group per account, its models priced against
+                              the plan's flash tier. An account that cannot
+                              run now keeps its group — the owner sees what it
+                              would offer — with every choice in it disabled;
+                              why is said under the rows. */}
+                          {roleProviders.map((p) => {
+                            const off = unreadyProviders.some((v) => v.id === p);
+                            const ids = roleModelOptions(p);
+                            // A pair this list has no row for — an account on
+                            // its default model, or a tier there — still reads
+                            // back as itself instead of as a blank select.
+                            const stray = pinned === p && !ids.includes(current.model) ? current.model : null;
+                            return (
+                              <optgroup
+                                key={p}
+                                label={off ? t("codingAgent.roleProviderGroupNotReady", { provider: providerName(p) }) : providerName(p)}
+                                data-provider={p}
+                              >
+                                {stray !== null && (
+                                  <option value={value} disabled={off}>
+                                    {t(stray === "economy" ? "codingAgent.roleModel.economy" : "codingAgent.roleModel.providerDefault")}
+                                  </option>
+                                )}
+                                {ids.map((id) => {
+                                  const cost = relativeModelCost(p, id);
+                                  const name = codingModelName(id);
+                                  return (
+                                    <option key={id} value={`${p}${ROLE_MODEL_SEP}${id}`} disabled={off}>
+                                      {cost === null ? name : t("codingAgent.roleModel.withCost", { model: name, n: cost })}
+                                    </option>
+                                  );
+                                })}
+                              </optgroup>
+                            );
+                          })}
                         </select>
                         <select
                           value={current.effort}
@@ -1314,18 +1457,53 @@ export default function CodingAgentSettingsPanel(_props: {
                           className={`text-base sm:text-xs ${FIELD} flex-1 min-w-[13rem]`}
                         >
                           <option value={ROLE_AUTO}>
-                            {defaults.effortCap
-                              ? t("codingAgent.roleEffort.autoCapped", { level: t(`codingAgent.effort.${defaults.effortCap}`) })
-                              : t("codingAgent.roleEffort.autoOwner")}
+                            {followsWorkers
+                              ? t("codingAgent.roleAutoAsWorkers")
+                              : defaults.effortCap
+                                ? t("codingAgent.roleEffort.autoCapped", { level: t(`codingAgent.effort.${defaults.effortCap}`) })
+                                : t("codingAgent.roleEffort.autoOwner")}
                           </option>
                           {levels.map((level) => (
                             <option key={level} value={level}>{t(`codingAgent.effort.${level}`)}</option>
                           ))}
                         </select>
+                        {/* What the role is, what it starts on right now and
+                            what that costs — the answer the runner gives,
+                            so "Default" is never a mystery. */}
+                        {about && (
+                          <p className="w-full text-[10px] text-[var(--text-muted)] leading-relaxed" data-testid={`coding-agent-role-${role}-about`}>
+                            {about}
+                          </p>
+                        )}
+                        {resolved && !resolved.ready && (
+                          <p className="w-full text-[10px] text-amber-400 leading-relaxed" data-testid={`coding-agent-role-${role}-unready`}>
+                            {t("codingAgent.roleModelCannotStart", { provider: providerName(resolved.provider) })}
+                          </p>
+                        )}
                       </div>
                     );
                   })}
                 </div>
+                {/* Why an account's choices are disabled, once per account
+                    rather than once per row: its own missing pieces, and the
+                    box's, in the readiness check's own words. */}
+                {unreadyProviders.length > 0 && (
+                  <ul className="mt-2 space-y-0.5" data-testid="coding-agent-role-providers-unready">
+                    {unreadyProviders.map((v) => {
+                      const reason = [...sharedProblems, ...v.problems].join(" ");
+                      return (
+                        <li key={v.id} className="text-[11px] text-amber-400 leading-relaxed" data-testid={`coding-agent-role-provider-${v.id}-unready`}>
+                          {reason
+                            ? t("codingAgent.roleProviderNotReady", { provider: providerName(v.id), reason })
+                            : t("codingAgent.roleProviderGroupNotReady", { provider: providerName(v.id) })}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+                <p className="mt-2 text-[10px] text-[var(--text-muted)] leading-relaxed" data-testid="coding-agent-role-models-cost">
+                  {t("codingAgent.roleModelsCostNote", { model: codingModelName(ECONOMY_MODELS["clawbox-ai"]) })}
+                </p>
               </div>
             )}
           </div>

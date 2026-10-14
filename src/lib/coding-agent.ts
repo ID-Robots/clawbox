@@ -118,6 +118,7 @@ import {
   keepsOlderRuns,
   olderRunIndex,
   olderRunsCap,
+  readModelRole,
   readOlderRunRecord,
   releaseHarnessTranscripts,
   removeOlderRun,
@@ -390,10 +391,13 @@ import { LESSON_CHANNEL_BRIEF, readRunNotes, runNotesBlock, settleRunNotes } fro
 import {
   applyRoleModelsPatch,
   CODING_AGENT_ROLE_MODELS_CONFIG_KEY,
+  MODEL_ROLES,
   modelRoleOf,
+  relativeModelCost,
   resolveRoleRun,
   roleModelsFrom,
   roleModelsView,
+  type ModelRole,
   type RoleModels,
 } from "@/lib/coding-role-models";
 import {
@@ -1454,6 +1458,14 @@ export interface CodingRun {
    */
   requestedModel: string | null;
   /**
+   * The role whose provider and model choice this run started under
+   * (src/lib/coding-role-models.ts): `planner` for a team's planner and its
+   * lead, `bulk` for a worker on a task marked token-heavy. Frozen at start
+   * like `provider`. Null for a run that is not a team's, and on a record from
+   * before the field.
+   */
+  modelRole: ModelRole | null;
+  /**
    * The Anthropic ACCOUNT — an id in the box's pool (src/lib/anthropic-accounts.ts)
    * — the run's current process is on. Null for a ClawBox AI run and for a
    * record from before the pool. Deliberately NOT frozen the way `provider` is:
@@ -2221,6 +2233,25 @@ export interface CodingHarnessReadiness {
   anyProviderReady: boolean;
 }
 
+/** One role of a coding team as its next fresh run would start: the answer `startRun` gives it. */
+export interface TeamRoleModel {
+  provider: CodingProvider;
+  /** The model on that provider, or null where the provider's plan decides. */
+  model: string | null;
+  effort: CodingEffort;
+  /** Nothing stored chose the provider or the model: the role's default on the team's own provider. */
+  auto: boolean;
+  /** Could a run be started on that provider right now? The same verdict the spawn gate reaches. */
+  ready: boolean;
+  /** Why not, in the owner's words — the box's own missing pieces, then the provider's. Empty when ready. */
+  problems: string[];
+  /** What a token costs on that model, the plan's flash tier = 1 (`relativeModelCost`); null where nobody can say. */
+  relativeCost: number | null;
+}
+
+/** Every role a choice is made for — see MODEL_ROLES. */
+export type TeamRoleModelMap = Record<ModelRole, TeamRoleModel>;
+
 export interface CodingAgentStatus {
   /** The owner's switch. */
   enabled: boolean;
@@ -2311,8 +2342,10 @@ export interface CodingAgentStatus {
   effort: CodingEffort;
   /** The levels the app should show — see OFFERED_EFFORT_LEVELS. */
   effortLevels: readonly CodingEffort[];
-  /** A team's per-role model tier and effort, "auto" for the role's default (src/lib/coding-role-models.ts). */
+  /** A team's per-role provider, model and effort, "auto" for the role's default (src/lib/coding-role-models.ts). */
   roleModels: ReturnType<typeof roleModelsView>;
+  /** What each of those roles resolves to right now, whether its provider can run, and what it costs — see TeamRoleModelMap. */
+  roleModelMap: TeamRoleModelMap;
   /** Folders in the default project folder the assistant may work in. */
   projectFolders: string[];
   /** The ceilings a run stops at, so the app can show them without guessing. */
@@ -2454,6 +2487,13 @@ export interface RunTeam {
   /** `lead`: the planner back for a moment after a worker settled, deciding whether the plan still fits (read-only, like the planner and the reviewer). */
   role: "planner" | "worker" | "reviewer" | "lead";
   taskId: string | null;
+  /**
+   * A worker on a task the plan marks token-heavy and not critical — scraping,
+   * mass data, repetitive edits, long test runs: it starts on the `bulk`
+   * role's provider and model rather than the workers'. Absent for every
+   * other run, and read back only when `true`.
+   */
+  bulk?: boolean;
 }
 
 /**
@@ -2764,7 +2804,7 @@ export async function setEffort(effort: string): Promise<CodingEffort> {
   return effort;
 }
 
-/** The owner's per-role model and effort choices for a team (src/lib/coding-role-models.ts); {} on a box that never chose. */
+/** The owner's per-role provider, model and effort choices for a team (src/lib/coding-role-models.ts); {} on a box that never chose. */
 export async function getRoleModels(): Promise<RoleModels> {
   return roleModelsFrom(await configGet(CODING_AGENT_ROLE_MODELS_CONFIG_KEY));
 }
@@ -2781,10 +2821,62 @@ export async function setRoleModels(patch: unknown): Promise<RoleModels> {
   return next.value;
 }
 
-/** Why the patch would be refused, or null — the same check `setRoleModels` makes, without a write. */
-export function checkRoleModelsPatch(patch: unknown): string | null {
-  const checked = applyRoleModelsPatch({}, patch);
+/**
+ * Why the patch would be refused, or null — the same check `setRoleModels`
+ * makes, against the same stored choices, without a write. Against what is
+ * stored rather than against nothing: a model named without its provider
+ * takes the role's stored one, so the verdict depends on it.
+ */
+export async function checkRoleModelsPatch(patch: unknown): Promise<string | null> {
+  const checked = applyRoleModelsPatch(await getRoleModels(), patch);
   return checked.ok ? null : checked.error;
+}
+
+/**
+ * What every role of a coding team starts on right now — provider, model,
+ * effort — whether that provider can run, and roughly what a token costs
+ * there: what the settings draw and what a planner weighs a task's role by.
+ *
+ * The answer `startRun` gives a team's FRESH run, from the same three inputs
+ * (the owner's provider, its default model, the owner's effort) and the same
+ * stored choices; a resume keeps what its session was opened on instead.
+ * Readiness is the existing probe, read per provider, and `ready` is the
+ * verdict the spawn gate reaches for that provider — nothing new is checked.
+ */
+export async function teamRoleModelMap(): Promise<TeamRoleModelMap> {
+  const config = await configGetAll();
+  const readiness = await readinessWith(
+    config.clawai_token,
+    config[HARNESS_FAULT_CONFIG_KEY],
+    codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]),
+  );
+  return roleModelMapFrom(config, readiness);
+}
+
+/** The map off one config snapshot and the readiness already worked out from it — so the status pays for neither twice. */
+function roleModelMapFrom(config: Record<string, unknown>, readiness: CodingHarnessReadiness): TeamRoleModelMap {
+  const ownerProvider = codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]);
+  const ownerEffort = effortFrom(config[CODING_AGENT_EFFORT_CONFIG_KEY]);
+  const stored = roleModelsFrom(config[CODING_AGENT_ROLE_MODELS_CONFIG_KEY]);
+  const shared = sharedProblems(readiness);
+  const map = {} as TeamRoleModelMap;
+  for (const role of MODEL_ROLES) {
+    const run = resolveRoleRun(role, ownerProvider, defaultModelForProvider(ownerProvider), ownerEffort, stored);
+    const verdict = readiness.providers.find((p) => p.id === run.provider);
+    const ready = verdict?.ready === true;
+    map[role] = {
+      provider: run.provider,
+      model: run.model,
+      effort: run.effort,
+      auto: run.auto,
+      ready,
+      // The box's own half too: a provider refused because Claude Code is
+      // missing must still say why, not show as disabled with no reason.
+      problems: ready ? [] : [...shared, ...(verdict?.problems ?? [])],
+      relativeCost: relativeModelCost(run.provider, run.model),
+    };
+  }
+  return map;
 }
 
 /** The owner's switch for the automatic review pass. Absent means OFF. */
@@ -3860,6 +3952,14 @@ async function readinessWith(token: unknown, faultRaw: unknown, defaultProvider:
   };
 }
 
+/**
+ * The BOX's half of a readiness answer — what is in every provider's way —
+ * out of the flat list, which also carries the default provider's credential.
+ */
+function sharedProblems(readiness: CodingHarnessReadiness): string[] {
+  return readiness.problems.filter((m) => !readiness.providers.some((p) => p.problems.includes(m)));
+}
+
 /** The owner's default provider. Anything unrecognised reads as ClawBox AI. */
 export async function getCodingProvider(): Promise<CodingProvider> {
   return codingProviderFrom(await configGet(CODING_AGENT_PROVIDER_CONFIG_KEY));
@@ -4028,6 +4128,8 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     // Every role, every half, "auto" where nothing is stored — a box that
     // never chose answers all "auto" and runs on the role defaults.
     roleModels: roleModelsView(roleModelsFrom(config[CODING_AGENT_ROLE_MODELS_CONFIG_KEY])),
+    // Off the same snapshot and the readiness above: no second probe per poll.
+    roleModelMap: roleModelMapFrom(config, readiness),
     projectFolders,
     maxTurns: maxTurnsFrom(config[CODING_AGENT_TURNS_CONFIG_KEY]),
     minMaxTurns: MIN_MAX_TURNS,
@@ -4091,7 +4193,14 @@ function normalizeTeam(raw: unknown): RunTeam | null {
   // be resumed and settled as a project run — icon, review pass, pull
   // request — in a folder that is the team's.
   if (t.role !== "planner" && t.role !== "worker" && t.role !== "reviewer" && t.role !== "lead") return null;
-  return { id: t.id, role: t.role, taskId: typeof t.taskId === "string" ? t.taskId : null };
+  return {
+    id: t.id,
+    role: t.role,
+    taskId: typeof t.taskId === "string" ? t.taskId : null,
+    // Only a worker's, and only `true`: absent stays absent, so a record from
+    // before the field reads back exactly as it was written.
+    ...(t.role === "worker" && t.bulk === true ? { bulk: true } : {}),
+  };
 }
 
 /**
@@ -4157,6 +4266,8 @@ function normalizeRun(raw: CodingRun): CodingRun {
     // is what the default answers — there was nothing else to run on.
     provider: codingProviderFrom(raw.provider),
     requestedModel: normalizeRequestedModel(raw.provider, raw.requestedModel),
+    // Null on a record from before the field, a solo run's, or a hand edit.
+    modelRole: readModelRole((raw as { modelRole?: unknown }).modelRole),
     anthropicAccount: typeof raw.anthropicAccount === "string" && /^[0-9a-f]{8}$/.test(raw.anthropicAccount) ? raw.anthropicAccount : null,
     accountSwitches: normalizeAccountSwitches((raw as { accountSwitches?: unknown }).accountSwitches),
     summary: typeof raw.summary === "string" ? raw.summary : null,
@@ -9532,7 +9643,9 @@ async function deliverableSandbox(run: CodingRun): Promise<DeliverableSandbox | 
   return {
     bin: setprivPath,
     args: CAPABILITY_DROP_ARGS,
-    env: buildRunEnv({ effort: run.effort, artifactsDir: artifactsDir(run.id), inputsDir: runInputsDir(run.id) }),
+    // The run's own provider, like its harness's: never the default's wiring
+    // under a run that is paid from the other account.
+    env: buildRunEnv({ effort: run.effort, artifactsDir: artifactsDir(run.id), inputsDir: runInputsDir(run.id), provider: run.provider, model: run.requestedModel }),
   };
 }
 
@@ -12504,11 +12617,13 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   // than after it. The gate judges a provider's credential, and judging the
   // owner's DEFAULT would refuse a run that explicitly named the account that
   // works — with a sentence about the account it never asked for. The caller's
-  // choice, else the run being resumed, else the owner's default; the same
-  // order applyProviderChoice applies below, which has the last word.
+  // choice, else the run being resumed, else — for a team's fresh run — its
+  // role's, else the owner's default; the order applyProviderChoice and the
+  // role step apply below, which have the last word.
+  const modelRole = input.team ? modelRoleOf(input.team.role, input.team.bulk === true) : null;
   const intendedProvider = isCodingProvider(input.provider)
     ? input.provider
-    : previous?.provider ?? await getCodingProvider();
+    : previous?.provider ?? await ownerOrRoleProvider(modelRole);
   // The slot is HELD from the gate to the insert below. `assertCanSpawn` counts
   // the runs it can see, and `loadRuns()` cannot see this one until
   // `insertRun` — several awaits away (the spawn tools, the folder, the
@@ -12590,13 +12705,21 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     if (previous && typeof input.reviewLoopOf === "string") settings.effort = previous.effort;
     // A TEAM's run gets its role's model and effort (src/lib/coding-role-models.ts):
     // a planner, a lead and a reviewer the provider's cheaper model and at most
-    // `xhigh` unless the owner chose otherwise; a worker the owner's own. A
-    // resume keeps the model its session was opened on (applyProviderChoice
-    // already carried it) and takes only the effort.
-    if (input.team) {
-      const role = resolveRoleRun(modelRoleOf(input.team.role), settings.provider, settings.model, settings.effort, await getRoleModels());
+    // `xhigh` unless the owner chose otherwise; a worker the owner's own, and a
+    // worker on a bulk task the `bulk` role's. A role the owner put on another
+    // provider moves there, model and all — the readiness check below is that
+    // provider's, and the spawn's environment and credential are that
+    // provider's alone (buildRunEnv, prepareRunAccount: both read the record).
+    // A resume — a review round included — keeps the provider and model its
+    // session was opened on (applyProviderChoice already carried them) and
+    // takes only the effort.
+    if (modelRole) {
+      const role = resolveRoleRun(modelRole, settings.provider, settings.model, settings.effort, await getRoleModels());
       settings.effort = role.effort;
-      if (!inherited) settings.model = role.model;
+      if (!inherited) {
+        settings.provider = role.provider;
+        settings.model = role.model;
+      }
     }
     await assertProviderReady(settings.provider);
     // A resume carries the lessons of the run it continues, the way it carries
@@ -12624,6 +12747,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       reviewLoopOf: typeof input.reviewLoopOf === "string" ? input.reviewLoopOf : null,
       reviewRound: typeof input.reviewRound === "number" && input.reviewRound > 0 ? Math.floor(input.reviewRound) : null,
       team: input.team ?? null,
+      modelRole,
       readOnly: input.readOnly === true,
       extraBrief: typeof input.extraBrief === "string" && input.extraBrief.trim() ? input.extraBrief.trim() : null,
       cpuBudget,
@@ -12973,6 +13097,19 @@ interface RunSettings {
   allowRules: string[];
 }
 
+/**
+ * The account a fresh run is going to use, worked out before its settings are
+ * read — for the spawn gate, which has to judge THAT credential: the owner's
+ * default, or the provider a team role resolves to on it. `startRun`'s role
+ * step reaches the same answer from the settings it reads, and has the last
+ * word; the effort is no part of the question.
+ */
+async function ownerOrRoleProvider(role: ModelRole | null): Promise<CodingProvider> {
+  const owner = await getCodingProvider();
+  if (!role) return owner;
+  return resolveRoleRun(role, owner, defaultModelForProvider(owner), DEFAULT_EFFORT, await getRoleModels()).provider;
+}
+
 async function readRunSettings(): Promise<RunSettings> {
   const [provider, effort, maxTurns, tokenLimit, generateImages, generateAudio, reviewPass, completionAttempts, allowRules] = await Promise.all([
     getCodingProvider(), getEffort(), getMaxTurns(), getTokenLimit(), getGenerateImages(), getGenerateAudio(), getReviewPass(),
@@ -13048,6 +13185,8 @@ function newRunRecord(fields: {
   reviewLoopOf?: string | null;
   reviewRound?: number | null;
   team?: RunTeam | null;
+  /** The role the settings were resolved for — a team's run only. */
+  modelRole?: ModelRole | null;
   readOnly?: boolean;
   extraBrief?: string | null;
   cpuBudget?: number | null;
@@ -13072,6 +13211,7 @@ function newRunRecord(fields: {
     model: null,
     provider: fields.settings.provider,
     requestedModel: fields.settings.model,
+    modelRole: fields.modelRole ?? null,
     // Chosen at each spawn from the pool (prepareRunSecrets), not here.
     anthropicAccount: null,
     accountSwitches: [],
@@ -15151,8 +15291,7 @@ async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProv
     // The shared half still applies: those problems are in every provider's
     // way. `CodingProviderReadiness.ready` already folds them in.
     if (!verdict.ready) {
-      const shared = readiness.problems.filter((m) => !readiness.providers.some((p) => p.problems.includes(m)));
-      refusal = [...shared, ...verdict.problems].join(" ");
+      refusal = [...sharedProblems(readiness), ...verdict.problems].join(" ");
     }
   } else if (!readiness.ready) {
     refusal = readiness.problems.join(" ");

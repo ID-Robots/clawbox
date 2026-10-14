@@ -146,3 +146,59 @@ describe("CodingRunTimeline", () => {
     expect(steps.at(-1)?.textContent).not.toContain("Finished: completed");
   });
 });
+
+/**
+ * The first step says what the run was started ON: the runner's line names
+ * the model alone (and is frozen — runs on disk carry it), so the account and,
+ * on a team, the role the model was chosen for come from the run's record.
+ */
+describe("the model a run started with, and its account", () => {
+  const ON: Record<string, string> = {
+    ...PACK,
+    "codingAgent.stepStarted": "Gestartet",
+    "codingAgent.stepStartedOn": "Gestartet bei {provider}",
+    "codingAgent.stepStartedOnRole": "Gestartet bei {provider} ({role})",
+    "codingAgent.stepStartedWithOn": "Gestartet mit {model} bei {provider}",
+    "codingAgent.stepStartedWithRole": "Gestartet mit {model} bei {provider} ({role})",
+    "codingAgent.providerName.anthropic": "Anthropic",
+    "codingAgent.providerName.clawboxAi": "ClawBox AI",
+    "codingAgent.modelRole.bulk": "Massenarbeit",
+    "codingAgent.modelRole.planner": "Planer",
+  };
+  const first = () => screen.getAllByTestId("coding-agent-run-activity-step")[0].textContent ?? "";
+
+  it("names the model by its short name, with the account, on a solo run", () => {
+    pack = ON;
+    render(<CodingRunTimeline lines={[RUNNER_STEP.started("claude-fable-5-1"), RUNNER_STEP.thinking]} live={false} provider="anthropic" modelRole={null} />);
+    expect(first()).toContain("Gestartet mit Fable 5.1 bei Anthropic");
+    expect(first()).not.toContain("(");
+  });
+
+  it("adds the role the model was chosen for on a team run — a bulk task on the plan's flash tier", () => {
+    pack = ON;
+    render(<CodingRunTimeline lines={[RUNNER_STEP.started("deepseek-v4-flash")]} live={false} provider="clawbox-ai" modelRole="bulk" />);
+    expect(first()).toContain("Gestartet mit DeepSeek Flash bei ClawBox AI (Massenarbeit)");
+    // The raw line is still the one behind the step.
+    fireEvent.click(screen.getAllByTestId("coding-agent-run-activity-step")[0]);
+    expect(within(screen.getByTestId("coding-agent-run-activity-detail")).getByText(RUNNER_STEP.started("deepseek-v4-flash"))).toBeTruthy();
+  });
+
+  it("says the account where the plan picked the model and the line names none", () => {
+    pack = ON;
+    render(<CodingRunTimeline lines={[RUNNER_STEP.started(null)]} live={false} provider="clawbox-ai" modelRole="planner" />);
+    expect(first()).toContain("Gestartet bei ClawBox AI (Planer)");
+  });
+
+  it("keeps a model this build has no short name for as its id", () => {
+    pack = ON;
+    render(<CodingRunTimeline lines={[RUNNER_STEP.started("claude-next-9")]} live={false} provider="anthropic" />);
+    expect(first()).toContain("Gestartet mit claude-next-9 bei Anthropic");
+  });
+
+  it("says no more than the line on a record from before the account was kept", () => {
+    pack = ON;
+    render(<CodingRunTimeline lines={[RUNNER_STEP.started("deepseek-v4-pro[1m]")]} live={false} />);
+    expect(first()).toContain("Gestartet mit deepseek-v4-pro[1m]");
+    expect(first()).not.toContain("bei");
+  });
+});

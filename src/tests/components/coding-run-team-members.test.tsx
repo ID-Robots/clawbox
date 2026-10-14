@@ -146,4 +146,35 @@ describe("CodingRunTeamMembers", () => {
     expect(calls).toHaveLength(after);
     unmount();
   });
+
+  // A team's roles may run on different accounts and models, so each
+  // teammate's row says what it runs on — and a worker on a bulk task says
+  // that too, since its row's name is "worker" either way.
+  it("says what each teammate runs on, and on which account, from the board's cast list", async () => {
+    const cast = [
+      { id: "run-plan", role: "planner" as const, taskId: null, provider: "anthropic" as const, model: "claude-fable-5-1", modelRole: "planner" as const },
+      { id: "run-w1", role: "worker" as const, taskId: "t1", provider: "anthropic" as const, model: "claude-opus-5-5", modelRole: "worker" as const },
+      { id: "run-w2", role: "worker" as const, taskId: "t2", provider: "clawbox-ai" as const, model: "deepseek-v4-flash", modelRole: "bulk" as const },
+      { id: "run-rev", role: "reviewer" as const, taskId: "t1", provider: "clawbox-ai" as const, model: null, modelRole: "reviewer" as const },
+    ];
+    render(<CodingRunTeamMembers teamId="team-1" runId="run-w1" runs={RUNS} live={false} onOpenRun={() => {}} cast={cast} />);
+    const rows = within(await screen.findByTestId("coding-agent-run-team-members")).getAllByTestId("coding-agent-team-member");
+    expect(rows).toHaveLength(3);
+    const anthropic = t("codingAgent.providerName.anthropic");
+    const clawbox = t("codingAgent.providerName.clawboxAi");
+    expect(rows[0].textContent).toContain(t("codingAgent.memberModel", { model: "Fable 5.1", provider: anthropic }));
+    expect(rows[1].textContent).toContain(t("codingAgent.memberModelRole", { model: "DeepSeek Flash", provider: clawbox, role: t("codingAgent.modelRole.bulk") }));
+    // The plan picked the reviewer's model: the account is still said.
+    expect(rows[2].textContent).toContain(t("codingAgent.memberModel", { model: t("codingAgent.roleModelPlanDecides"), provider: clawbox }));
+  });
+
+  it("says nothing about the model on a board written before it was kept", async () => {
+    stub();
+    render(<CodingRunTeamMembers teamId="team-1" runId="run-w2" runs={RUNS} live={false} onOpenRun={() => {}} />);
+    const rows = within(await screen.findByTestId("coding-agent-run-team-members")).getAllByTestId("coding-agent-team-member");
+    for (const row of rows) {
+      expect(row.textContent).not.toContain(t("codingAgent.providerName.anthropic"));
+      expect(row.textContent).not.toContain(t("codingAgent.providerName.clawboxAi"));
+    }
+  });
 });

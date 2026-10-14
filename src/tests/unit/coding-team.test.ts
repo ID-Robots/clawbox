@@ -33,6 +33,7 @@ const runner = vi.hoisted(() => ({
   teamSpawnSlot: vi.fn(),
   suiteSandbox: vi.fn(),
   wrapUpRun: vi.fn(),
+  teamRoleModelMap: vi.fn(),
 }));
 /** How many runs a team may have going at once: the box's own number unless a case says otherwise (read on every use, reset before each case). */
 const teamSlots = vi.hoisted(() => ({ value: null as number | null }));
@@ -96,6 +97,23 @@ vi.mock("@/lib/coding-review", async (importOriginal) => {
 type Team = typeof import("@/lib/coding-team");
 let team: Team;
 
+type RoleModelMap = import("@/lib/coding-agent").TeamRoleModelMap;
+/**
+ * What each role starts on, as `teamRoleModelMap` answers: every role on
+ * ClawBox AI and ready — the box every case here ran on before there were
+ * role models — unless a case says otherwise.
+ */
+function roleMap(over: { [R in keyof RoleModelMap]?: Partial<RoleModelMap[R]> } = {}): RoleModelMap {
+  const base = { provider: "clawbox-ai" as const, model: null, effort: "high" as const, auto: true, ready: true, problems: [], relativeCost: null };
+  const flash = { model: "deepseek-v4-flash", relativeCost: 1 };
+  return {
+    planner: { ...base, ...flash, ...over.planner },
+    worker: { ...base, ...over.worker },
+    reviewer: { ...base, ...flash, ...over.reviewer },
+    bulk: { ...base, ...over.bulk },
+  };
+}
+
 /** The runs the fake runner "spawns", settled by the test. */
 let runs: Map<string, Record<string, unknown>>;
 let starts: Array<Record<string, unknown>>;
@@ -138,7 +156,7 @@ function fakeRun(input: Record<string, unknown>): Record<string, unknown> {
  * way. Deliberately not called `then` — an object with a `then` field is a
  * thenable, and the fake runner returns these records from an async function.
  */
-let outcomes: Array<Partial<{ status: string; summary: string; resultText: string; error: string; filesTouched: string[]; permissionDenials: number; deniedActions: string[]; denials: Array<{ text: string; rule: string | null; refusal: null; worktreePath?: string; fullText?: string }>; worktreeHints: number; commitError: string | null; tokensUsed: number; resumesAs: Record<string, unknown> }>>;
+let outcomes: Array<Partial<{ status: string; summary: string; resultText: string; error: string; filesTouched: string[]; permissionDenials: number; deniedActions: string[]; denials: Array<{ text: string; rule: string | null; refusal: null; worktreePath?: string; fullText?: string }>; worktreeHints: number; commitError: string | null; tokensUsed: number; model: string; modelsUsed: string[]; resumesAs: Record<string, unknown> }>>;
 
 beforeEach(async () => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), "coding-team-"));
@@ -175,6 +193,8 @@ beforeEach(async () => {
   // The lead's switch: OFF, as on every box that never touched it.
   runner.getTeamDynamic.mockResolvedValue(false);
   runner.resolveWorkingDirectory.mockResolvedValue({ directory: "/home/clawbox/Projects/site", projectId: null });
+  // Every role ready on the box's own provider: the host's readiness probe is not the fixture.
+  runner.teamRoleModelMap.mockImplementation(async () => roleMap());
   // The project's own suite runs through `env` instead of `setpriv`, which a
   // test runner cannot use; only a case with a suite on disk ever asks.
   runner.suiteSandbox.mockResolvedValue({ bin: "/usr/bin/env", args: ["PYTHONDONTWRITEBYTECODE=1"], env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: root } });
@@ -2884,6 +2904,157 @@ describe("cost: run or team, the repo map, tokens per role, and the battery", ()
   });
 });
 
+describe("per-role models: bulk tasks, each run's own account, the cost by provider", () => {
+  const roleOfStart = (s: Record<string, unknown>) => (s.team as { role: string } | null)?.role ?? "run";
+  const NOT_CONNECTED = "Anthropic is not connected on this ClawBox.";
+  /** A team on two accounts: its bulk work on ClawBox AI's flash tier, everything else on Anthropic. */
+  const MIXED = roleMap({
+    planner: { provider: "anthropic", model: "claude-sonnet-5", relativeCost: 10, auto: false },
+    worker: { provider: "anthropic", model: "claude-opus-5-5", relativeCost: 20, auto: false },
+    reviewer: { provider: "anthropic", model: "claude-sonnet-5", relativeCost: 10, auto: false },
+    bulk: { provider: "clawbox-ai", model: "deepseek-v4-flash", relativeCost: 1, auto: false },
+  });
+  /** The runner as it starts a team's fresh run: on its role's provider and model, the record saying so. */
+  function startsOnRole(map: RoleModelMap) {
+    runner.startRun.mockImplementation(async (input: Record<string, unknown>) => {
+      const t = input.team as { role: string; bulk?: boolean };
+      const modelRole = t.role === "lead" ? "planner" : t.role === "worker" && t.bulk === true ? "bulk" : (t.role as "planner" | "worker" | "reviewer");
+      const r = map[modelRole];
+      return Object.assign(fakeRun(input), { provider: r.provider, requestedModel: r.model, modelRole, model: null, modelsUsed: [] });
+    });
+  }
+  const BULK_PLAN = JSON.stringify([
+    { task_description: "Scrape the catalogue into data/items.json", files_hint: ["data/items.json"], role: "bulk" },
+    { task_description: "Build the page from data/items.json", depends_on: ["t1"], files_hint: ["index.html"], role: "worker" },
+  ]);
+  const ACCEPTED = JSON.stringify({ verdict: "accepted", notes: "" });
+
+  it("starts a bulk task's worker on the bulk role, keeps every run's own provider and model, and splits the cost by provider", async () => {
+    runner.teamRoleModelMap.mockImplementation(async () => MIXED);
+    startsOnRole(MIXED);
+    // The lead too: a blocker in t1's result calls it, and it is the planner's role.
+    runner.getTeamDynamic.mockResolvedValue(true);
+    outcomes = [
+      { summary: BULK_PLAN, tokensUsed: 5_000 },
+      { summary: "Scraped 400 items.\nCould not finish: two pages timed out.", filesTouched: ["data/items.json"], tokensUsed: 80_000, model: "deepseek-v4-flash" },
+      { summary: "Built the page.", filesTouched: ["index.html"], tokensUsed: 30_000, model: "claude-opus-5-5", modelsUsed: ["claude-haiku-4-5", "claude-opus-5-5"] },
+    ];
+    reviews = [{ summary: ACCEPTED, tokensUsed: 2_000 }, { summary: ACCEPTED, tokensUsed: 3_000 }];
+    leadAnswers = [{ summary: "{}", tokensUsed: 1_000 }];
+    const board = await team.startTeam({ goal: "Scrape the catalogue and build a page from it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(starts.map(roleOfStart)).toEqual(["planner", "worker", "reviewer", "lead", "worker", "reviewer"]);
+    // The plan's mark is on the board, and only the bulk task's worker asked for the bulk role.
+    expect(done.tasks.map((t) => [t.task_id, t.role])).toEqual([["t1", "bulk"], ["t2", undefined]]);
+    expect(starts.filter((s) => roleOfStart(s) === "worker").map((w) => w.team)).toEqual([
+      { id: board.id, role: "worker", taskId: "t1", bulk: true },
+      { id: board.id, role: "worker", taskId: "t2" },
+    ]);
+    // The planner and the lead were both told what each role runs on and costs.
+    for (const brief of [String(starts[0].extraBrief), String(starts[3].extraBrief)]) {
+      expect(brief).toContain("- bulk: deepseek-v4-flash on ClawBox AI, ~1x");
+      expect(brief).toContain("- worker: claude-opus-5-5 on Anthropic, ~20x");
+      expect(brief).toContain("- planner (and the lead): claude-sonnet-5 on Anthropic, ~10x");
+    }
+    expect(String(starts[3].extraBrief)).toContain("You are the LEAD");
+    // Every run keeps its own account and model — what answered, once it settled.
+    const cast = done.runs.map((r) => [r.role, r.taskId, r.provider, r.model, r.modelRole]);
+    expect(cast).toEqual([
+      ["planner", null, "anthropic", "claude-sonnet-5", "planner"],
+      ["worker", "t1", "clawbox-ai", "deepseek-v4-flash", "bulk"],
+      ["reviewer", "t1", "anthropic", "claude-sonnet-5", "reviewer"],
+      ["lead", "t1", "anthropic", "claude-sonnet-5", "planner"],
+      ["worker", "t2", "anthropic", "claude-opus-5-5", "worker"],
+      ["reviewer", "t2", "anthropic", "claude-sonnet-5", "reviewer"],
+    ]);
+    expect(done.metrics.tokensByProvider).toEqual({ "clawbox-ai": 80_000, anthropic: 41_000 });
+    expect(done.metrics.tokensUsed).toBe(121_000);
+    // And the same off disk.
+    const { loadBoard } = await import("@/lib/coding-team-board");
+    const disk = loadBoard(board.id)!;
+    expect(disk.runs.map((r) => [r.role, r.taskId, r.provider, r.model, r.modelRole])).toEqual(cast);
+    expect(disk.metrics.tokensByProvider).toEqual(done.metrics.tokensByProvider);
+    expect(disk.tasks[0].role).toBe("bulk");
+    expect(disk.tasks[1]).not.toHaveProperty("role");
+  });
+
+  it("works a bulk task with an ordinary worker when the bulk role's account cannot run — with a note, never a refused team", async () => {
+    const map = roleMap({ bulk: { provider: "anthropic", model: "claude-sonnet-5", relativeCost: 10, auto: false, ready: false, problems: [NOT_CONNECTED] } });
+    runner.teamRoleModelMap.mockImplementation(async () => map);
+    startsOnRole(map);
+    outcomes = [{ summary: BULK_PLAN }, { summary: "Scraped.", filesTouched: ["data/items.json"] }, { summary: "Built.", filesTouched: ["index.html"] }];
+    const board = await team.startTeam({ goal: "Scrape and build", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.alerts).toBe(0);
+    // The planner was told before it planned.
+    expect(String(starts[0].extraBrief)).toContain(`- bulk: claude-sonnet-5 on Anthropic, ~10x — UNAVAILABLE: ${NOT_CONNECTED} A task marked bulk runs as an ordinary worker until it is.`);
+    expect(starts.filter((s) => roleOfStart(s) === "worker").map((w) => (w.team as { bulk?: boolean }).bulk)).toEqual([undefined, undefined]);
+    expect(done.runs.find((r) => r.role === "worker" && r.taskId === "t1")).toMatchObject({ provider: "clawbox-ai", modelRole: "worker" });
+    expect(done.log.filter((e) => e.type === "note" && /marked bulk/.test(e.message)).map((e) => [e.task_id, e.message])).toEqual([
+      ["t1", `Task t1 is marked bulk, but the bulk role's provider is unavailable — Anthropic cannot run right now: ${NOT_CONNECTED} It runs as an ordinary worker, on the workers' model.`],
+    ]);
+    // Still the plan's bulk task: the mark stays, only the worker changed.
+    expect(done.tasks[0].role).toBe("bulk");
+  });
+
+  it("falls back the same way when the bulk spawn itself is refused for its account", async () => {
+    const { CodingAgentError } = await import("@/lib/coding-agent");
+    runner.teamRoleModelMap.mockImplementation(async () => MIXED);
+    startsOnRole(MIXED);
+    const onRole = runner.startRun.getMockImplementation()!;
+    runner.startRun.mockImplementation(async (input: Record<string, unknown>) => {
+      if ((input.team as { bulk?: boolean }).bulk) throw new CodingAgentError("not_ready", "ClawBox AI is not connected.");
+      return onRole(input);
+    });
+    outcomes = [{ summary: BULK_PLAN }, { summary: "Scraped.", filesTouched: ["data/items.json"] }, { summary: "Built.", filesTouched: ["index.html"] }];
+    const board = await team.startTeam({ goal: "Scrape and build", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    const t1 = runner.startRun.mock.calls.map(([input]) => input.team as { role: string; taskId: string | null }).filter((t) => t.role === "worker" && t.taskId === "t1");
+    expect(t1).toEqual([{ id: board.id, role: "worker", taskId: "t1", bulk: true }, { id: board.id, role: "worker", taskId: "t1" }]);
+    expect(done.runs.find((r) => r.role === "worker" && r.taskId === "t1")).toMatchObject({ provider: "anthropic", model: "claude-opus-5-5", modelRole: "worker" });
+    expect(done.log.map((e) => e.message)).toContain("Task t1 is marked bulk, but the bulk role's provider is unavailable — ClawBox AI is not connected. It runs as an ordinary worker, on the workers' model.");
+    expect(done.alerts).toBe(0);
+  });
+
+  it("refuses the team before any spawn when its planner, workers or reviewers cannot run — not_ready, naming the role, the provider and why", async () => {
+    runner.teamRoleModelMap.mockImplementation(async () => roleMap({
+      planner: { provider: "anthropic", model: "claude-sonnet-5", ready: false, problems: [NOT_CONNECTED] },
+      reviewer: { provider: "anthropic", model: "claude-sonnet-5", ready: false, problems: [NOT_CONNECTED] },
+    }));
+    await expect(team.startTeam({ goal: "Build it", directory: "site", source: "owner" })).rejects.toMatchObject({
+      kind: "not_ready",
+      message: `The team's planner and reviewer run on Anthropic (anthropic), which cannot run right now: ${NOT_CONNECTED} Connect it, or choose another provider for the planner and reviewer under Team models in the Coding Agent settings.`,
+    });
+    // The workers, on the box's own account: refused the same way, in their own words.
+    runner.teamRoleModelMap.mockImplementation(async () => roleMap({ worker: { ready: false, problems: ["Claude Code is not installed.", "ClawBox AI is not connected."] } }));
+    await expect(team.startTeam({ goal: "Build it", directory: "site", source: "agent" })).rejects.toMatchObject({
+      kind: "not_ready",
+      message: expect.stringMatching(/^The team's worker runs on ClawBox AI \(clawbox-ai\), which cannot run right now: Claude Code is not installed\. ClawBox AI is not connected\. Connect it/),
+    });
+    // Nothing was made, queued or spawned.
+    expect(runner.startRun).not.toHaveBeenCalled();
+    expect(team.listTeams()).toEqual([]);
+    expect(team.activeTeamId()).toBeNull();
+  });
+
+  it("starts the team when only the role models cannot be read: every run is still judged at its own spawn", async () => {
+    runner.teamRoleModelMap.mockRejectedValue(new Error("config unreadable"));
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    outcomes = [{ summary: PLAN }, { summary: "index done", filesTouched: ["index.html"] }, { summary: "app done", filesTouched: ["app.js"] }];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    quiet.mockRestore();
+    expect(done.status).toBe("done");
+    expect(String(starts[0].extraBrief)).not.toContain("Team models");
+    // Runs whose records name no provider keep the cast list as it was.
+    expect(done.runs.every((r) => !("provider" in r) && !("model" in r))).toBe(true);
+    expect(done.metrics.tokensByProvider).toEqual({ "clawbox-ai": 0, anthropic: 0 });
+  });
+});
+
 describe("a team with a time budget", () => {
   const MIN = 60_000;
   const PLANNER_ANSWER = (extra: Record<string, unknown> = {}) => JSON.stringify({
@@ -2997,11 +3168,12 @@ describe("a team with a time budget", () => {
   });
 
   it("works as every team did without one — even when its planner volunteers estimates", async () => {
-    const { PLANNER_BRIEF } = await import("@/lib/coding-team-planner");
+    const { PLANNER_BRIEF, withTeamModels } = await import("@/lib/coding-team-planner");
     outcomes = [{ summary: PLANNER_ANSWER({ time_plan: { estimate_minutes: 65, skipped: ["the e2e suite"] } }) }];
     const started = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
     const done = await finished(started.id);
-    expect(starts[0].extraBrief).toBe(PLANNER_BRIEF);
+    // The brief as it always was, with the team's models after it — no time in it.
+    expect(starts[0].extraBrief).toBe(withTeamModels(PLANNER_BRIEF, roleMap()));
     for (const t of done.tasks) for (const key of ["estimateMs", "priority", "optional"]) expect(t).not.toHaveProperty(key);
     for (const key of ["timeBudget", "timeStop", "skipped", "extras"]) expect(done).not.toHaveProperty(key);
     expect(done.log.some((e) => /Time plan|Left out to fit/.test(e.message))).toBe(false);

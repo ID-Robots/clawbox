@@ -7,7 +7,8 @@
 import { describe, expect, it } from "vitest";
 import { createBoard, MAX_LEAD_ADDS, MAX_LEAD_RETIRES, MAX_TASK_DESCRIPTION_CHARS, MAX_TEAM_TASKS, postMessage, postTask, type TaskStatus, type TeamBoard } from "@/lib/coding-team-board";
 import { MAX_TASK_CHARS, MAX_TEAM_WORKERS } from "@/lib/coding-agent";
-import { clippedNote, fitLine, fitPlan, leadRoom, leadShouldRun, leadTask, MAX_LEAD_INBOX_CHARS, MAX_LEAD_NOTE_CHARS, MAX_TIME_PLAN_SKIPS, parsePlan, parseReplan, PLANNER_BRIEF, plannerBrief, REPLAN_BRIEF, replanContext, replanTask, type ReplanContext } from "@/lib/coding-team-planner";
+import type { TeamRoleModelMap } from "@/lib/coding-agent";
+import { clippedNote, fitLine, fitPlan, leadRoom, leadShouldRun, leadTask, MAX_LEAD_INBOX_CHARS, MAX_LEAD_NOTE_CHARS, MAX_TIME_PLAN_SKIPS, parsePlan, parseReplan, PLANNER_BRIEF, plannerBrief, readTaskRole, REPLAN_BRIEF, replanContext, replanTask, teamModelsBrief, withTeamModels, type ReplanContext } from "@/lib/coding-team-planner";
 import { presetBudget } from "@/lib/coding-time-budget";
 
 describe("parsePlan", () => {
@@ -74,6 +75,73 @@ describe("parsePlan", () => {
     expect(PLANNER_BRIEF).toMatch(/change NOTHING/);
     expect(PLANNER_BRIEF).toContain(String(MAX_TEAM_TASKS));
     expect(PLANNER_BRIEF).toMatch(/depends_on names EARLIER tasks — listed before it/);
+    // A task's optional role, in the schema and explained: bulk is token-heavy, non-critical work.
+    expect(PLANNER_BRIEF).toContain('"files_hint": ["path", ...], "role": "worker" | "bulk"}');
+    expect(PLANNER_BRIEF).toMatch(/role is optional: "bulk" marks a task that is token-heavy and not critical — scraping, mass data, repetitive edits, long test runs/);
+    expect(PLANNER_BRIEF).toMatch(/always for the code the goal depends on/);
+  });
+
+  it("reads a task's role: bulk when it says so, a worker's for anything else — never a fault", () => {
+    const out = parsePlan(JSON.stringify([
+      { task_description: "Scrape the catalogue", files_hint: ["data/"], role: "bulk" },
+      { task_description: "Re-run the long suite", role: " BULK " },
+      { task_description: "Build the page", role: "worker" },
+      { task_description: "Wire the form", role: "reviewer" },
+      { task_description: "Style it", role: 7 },
+      { task_description: "Write the README" },
+    ]));
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.tasks.map((t) => t.role)).toEqual(["bulk", "bulk", undefined, undefined, undefined, undefined]);
+    // A worker's task carries no role at all: a plan without bulk work is what it always was.
+    expect(out.tasks[2]).toEqual({ task_description: "Build the page", depends_on: [], files_hint: [] });
+    expect(out.tasks[0]).toEqual({ task_description: "Scrape the catalogue", depends_on: [], files_hint: ["data/"], role: "bulk" });
+    // The object form, and a budgeted plan, read it the same way.
+    const timed = parsePlan(JSON.stringify({ tasks: [{ task_description: "Crawl until the cutoff", role: "bulk", estimate_minutes: 30 }] }), { timed: true });
+    expect(timed).toMatchObject({ ok: true, tasks: [{ role: "bulk", estimateMs: 30 * 60_000, priority: 1 }] });
+    expect([readTaskRole("bulk"), readTaskRole("Bulk"), readTaskRole("worker"), readTaskRole(null), readTaskRole("lead")]).toEqual(["bulk", "bulk", "worker", "worker", "worker"]);
+  });
+});
+
+describe("teamModelsBrief — the role/model map the planner and the lead are given", () => {
+  const entry = (over: Partial<TeamRoleModelMap["worker"]> = {}): TeamRoleModelMap["worker"] => ({
+    provider: "clawbox-ai", model: null, effort: "high", auto: true, ready: true, problems: [], relativeCost: null, ...over,
+  });
+  const MAP: TeamRoleModelMap = {
+    planner: entry({ provider: "anthropic", model: "claude-fable-5-1", relativeCost: 40, auto: false }),
+    worker: entry({ provider: "anthropic", model: "claude-opus-5-5", relativeCost: 20 }),
+    reviewer: entry({ provider: "anthropic", model: "claude-sonnet-5", relativeCost: 10 }),
+    bulk: entry({ provider: "clawbox-ai", model: "deepseek-v4-flash", relativeCost: 1, auto: false }),
+  };
+
+  it("says one line per role — model, provider and relative cost — in the roles' order", () => {
+    expect(teamModelsBrief(MAP)).toBe([
+      "Team models — what each role's runs start on, and roughly what a token costs there (the ClawBox AI flash tier = 1x):",
+      "- planner (and the lead): claude-fable-5-1 on Anthropic, ~40x",
+      "- worker: claude-opus-5-5 on Anthropic, ~20x",
+      "- reviewer: claude-sonnet-5 on Anthropic, ~10x",
+      "- bulk: deepseek-v4-flash on ClawBox AI, ~1x",
+      'Mark a task "role": "bulk" only when it is token-heavy and not critical: its worker runs on the bulk line\'s model.',
+    ].join("\n"));
+  });
+
+  it("marks a bulk role whose provider cannot run unavailable, with its reason, and says what a bulk task does then", () => {
+    const text = teamModelsBrief({ ...MAP, bulk: entry({ provider: "anthropic", model: "claude-sonnet-5", relativeCost: 10, ready: false, problems: ["Anthropic is not connected on this ClawBox.", " "] }) });
+    expect(text).toContain("- bulk: claude-sonnet-5 on Anthropic, ~10x — UNAVAILABLE: Anthropic is not connected on this ClawBox. A task marked bulk runs as an ordinary worker until it is.");
+    // Any role that cannot run says so; a reason nobody gave is still a reason.
+    expect(teamModelsBrief({ ...MAP, reviewer: entry({ ready: false, problems: [] }) })).toContain("- reviewer: the plan's own model on ClawBox AI, cost not known — UNAVAILABLE: its provider is not ready.");
+  });
+
+  it("says when bulk is the workers' own model, the plan's own model where the provider chooses, and nothing without a map", () => {
+    const same = teamModelsBrief({ ...MAP, worker: entry(), bulk: entry() });
+    expect(same).toContain("- worker: the plan's own model on ClawBox AI, cost not known");
+    expect(same).toContain("- bulk: the plan's own model on ClawBox AI, cost not known — the workers' own model: marking a task bulk changes nothing on this box.");
+    expect(teamModelsBrief({ ...MAP, bulk: entry({ relativeCost: 0.5, model: "deepseek-v4-flash" }) })).toContain("- bulk: deepseek-v4-flash on ClawBox AI, ~0.5x");
+    expect(teamModelsBrief(null)).toBe("");
+    expect(teamModelsBrief(undefined)).toBe("");
+    // After the brief, apart from it — and the brief alone when there is no map.
+    expect(withTeamModels(PLANNER_BRIEF, MAP)).toBe(`${PLANNER_BRIEF}\n\n${teamModelsBrief(MAP)}`);
+    expect(withTeamModels(REPLAN_BRIEF, null)).toBe(REPLAN_BRIEF);
   });
 });
 
@@ -331,6 +399,18 @@ describe("parseReplan — the lead's answer", () => {
       retire: ["t3"],
       note: "t1 already wrote the README",
     });
+  });
+
+  it("reads an added task's role as a plan's is: bulk when said, a worker's otherwise — and tells the lead it may", () => {
+    const out = parseReplan(JSON.stringify({ add: [task("Re-scrape the missing pages", { role: "bulk" }), task("Fix the parser", { role: "lead" })], note: "t1 missed pages" }), ctxOf(["complete"]));
+    expect(out).toMatchObject({ ok: true });
+    if (!out.ok) return;
+    expect(out.add).toEqual([
+      { task_description: "Re-scrape the missing pages", depends_on: [], files_hint: ["x.ts"], role: "bulk" },
+      { task_description: "Fix the parser", depends_on: [], files_hint: ["x.ts"] },
+    ]);
+    expect(REPLAN_BRIEF).toContain('"files_hint": ["path", ...], "role": "worker" | "bulk"}');
+    expect(REPLAN_BRIEF).toMatch(/role is optional: "bulk" marks a task that is token-heavy and not critical/);
   });
 
   it("refuses more adds than the team has left, and a board over MAX_TEAM_TASKS", () => {
