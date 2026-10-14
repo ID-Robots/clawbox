@@ -7,6 +7,12 @@ import os from "os";
 import path from "path";
 import { execFileSync } from "child_process";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// The Memory Shard reindex a commit hands its pages to. Stubbed here: what it
+// does is pinned in prime-radiant-shard-index.test.ts; this suite pins that a
+// commit asks for it.
+const shard = vi.hoisted(() => ({ scheduleReindexAfterCommit: vi.fn() }));
+vi.mock("@/lib/prime-radiant/shard-index", () => shard);
 import {
   ensureVault,
   readPage,
@@ -38,6 +44,7 @@ function gitOut(vault: string, ...args: string[]): string {
 }
 
 beforeEach(() => {
+  shard.scheduleReindexAfterCommit.mockClear();
   root = path.join(base, `case-${++n}`);
   process.env.PRIME_RADIANT_DIR = root;
 });
@@ -294,5 +301,25 @@ describe("prime radiant vault", () => {
     await git(vault, ["checkout", "--quiet", "-b", "dream/2026-06-01"]);
     await vaultOperation("ingest: dream", (tx) => tx.write("concepts/dream.md", pageText({ title: "Dream" })));
     expect(await changedPaths(vault, "main", "dream/2026-06-01")).toEqual(["concepts/dream.md"]);
+  });
+
+  it("hands a commit's pages to the Memory Shard reindex, without waiting — and only when it committed", async () => {
+    await vaultOperation("ingest: a", async (tx) => {
+      await tx.write("concepts/pricing.md", pageText());
+      await tx.write("index.md", INDEXED("concepts/pricing.md"));
+    });
+    await vi.waitFor(() => expect(shard.scheduleReindexAfterCommit).toHaveBeenCalledTimes(1));
+    expect(shard.scheduleReindexAfterCommit).toHaveBeenCalledWith(vaultDir(), ["concepts/pricing.md", "index.md"]);
+
+    // Nothing changed: no commit, nothing to reindex.
+    await vaultOperation("ingest: same", async (tx) => {
+      await tx.write("concepts/pricing.md", pageText());
+    });
+    // A caller that reindexes itself switches it off.
+    await vaultOperation("ingest: b", async (tx) => {
+      await tx.write("concepts/other.md", pageText({ title: "Other" }));
+    }, { reindex: false, lint: false });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(shard.scheduleReindexAfterCommit).toHaveBeenCalledTimes(1);
   });
 });

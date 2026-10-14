@@ -107,6 +107,8 @@ const CHUNK_OVERLAP = 150;
 
 /** Inputs per embeddings request. ~20 KB of body — far inside the proxy's cap. */
 const EMBED_BATCH_INPUTS = 16;
+/** The same batch size, for the Prime Radiant vault index that shares this engine. */
+export const MEMORY_EMBED_BATCH_INPUTS = EMBED_BATCH_INPUTS;
 
 /**
  * THE CEILING IS A MEMORY BUDGET, so it is derived from the budget and not
@@ -677,6 +679,21 @@ async function embedBatch(
       wait = Math.min(wait * 2, EMBED_RETRY_MAX_WAIT_MS);
     }
   }
+}
+
+/**
+ * {@link embedBatch} for the other store built on this engine: the Prime
+ * Radiant vault index (`src/lib/prime-radiant/shard-index.ts`). Same fence,
+ * same retry rules, same normalised vectors — one embedding client on the box,
+ * not two that drift apart.
+ */
+export function embedMemoryTexts(
+  texts: readonly string[],
+  inputType: "query" | "document",
+  signal: AbortSignal | undefined,
+  embedder: ResolvedEmbedder,
+): Promise<Float32Array[]> {
+  return embedBatch(texts, inputType, signal, embedder);
 }
 
 /** One request, one answer. The retry above is what decides to ask again. */

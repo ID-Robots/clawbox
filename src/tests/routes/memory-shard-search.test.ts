@@ -37,6 +37,9 @@ vi.mock("@/lib/memory-index-local", () => ({
   searchLocalMemory: search,
   MEMORY_SEARCH_DEADLINE_MS,
 }));
+// The Prime Radiant vault, a built-in source. Empty unless a test says otherwise.
+const vaultSearch = vi.hoisted(() => vi.fn<(...args: unknown[]) => Promise<unknown[]>>(async () => []));
+vi.mock("@/lib/prime-radiant/shard-index", () => ({ searchPrimeRadiant: vaultSearch }));
 
 import { NextRequest } from "next/server";
 import { GET } from "@/app/setup-api/clawkeep/memory/search/route";
@@ -52,6 +55,7 @@ beforeEach(() => {
   absent.value = true;
   enabled.value = true;
   search.mockClear();
+  vaultSearch.mockReset().mockResolvedValue([]);
 });
 
 describe("who may search", () => {
@@ -144,5 +148,35 @@ describe("what it accepts and answers", () => {
     const body = await res.json();
     expect(body.code).toBe("search_failed");
     expect(JSON.stringify(body)).not.toContain("127.0.0.1");
+  });
+});
+
+describe("the Prime Radiant vault as a built-in source", () => {
+  const vaultHit = {
+    source: "prime-radiant", path: "entities/acme-widgets.md", id: "acme-sales/acme-widgets/colour", kind: "claim",
+    type: "entity", title: "Acme Widgets Ltd", snippet: "Acme Widgets Ltd: blue widgets.", score: 0.95, similarity: 0.85, verified: true,
+  };
+
+  it("merges vault hits with the owner's documents, by score, and keeps their path, id and type", async () => {
+    vaultSearch.mockResolvedValue([vaultHit]);
+    const body = await (await call("?q=widgets&limit=2")).json();
+    expect(body.results).toEqual([
+      vaultHit,
+      { path: "Documents/lease.md", snippet: "The deposit is two months' rent.", score: 0.82 },
+    ]);
+    expect(vaultSearch).toHaveBeenCalledWith("widgets", 2, expect.any(AbortSignal));
+  });
+
+  it("still answers the owner's documents when the vault index cannot", async () => {
+    vaultSearch.mockRejectedValue(new Error("The embedding model did not answer: HTTP 502"));
+    const res = await call("?q=deposit");
+    expect(res.status).toBe(200);
+    expect((await res.json()).results).toHaveLength(1);
+  });
+
+  it("is not asked while Memory Shard is switched off", async () => {
+    enabled.value = false;
+    expect((await call("?q=deposit")).status).toBe(409);
+    expect(vaultSearch).not.toHaveBeenCalled();
   });
 });

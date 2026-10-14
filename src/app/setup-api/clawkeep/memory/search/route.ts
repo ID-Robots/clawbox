@@ -3,6 +3,7 @@ import type { NextRequest } from "next/server";
 import { openclawIsAbsent } from "@/lib/openclaw-config";
 import { getMemoryShardEnabled } from "@/lib/memory-shard";
 import { MEMORY_SEARCH_DEADLINE_MS, searchLocalMemory } from "@/lib/memory-index-local";
+import { searchPrimeRadiant } from "@/lib/prime-radiant/shard-index";
 
 export const dynamic = "force-dynamic";
 
@@ -73,7 +74,19 @@ export async function GET(request: NextRequest) {
     // cancellation of the work it started: a cold llama.cpp wake carries on and
     // makes the next search warm.
     const deadline = AbortSignal.any([request.signal, AbortSignal.timeout(MEMORY_SEARCH_DEADLINE_MS)]);
-    const results = await searchLocalMemory(query, limit, deadline);
+    // The Prime Radiant vault is a built-in source: its hits come back beside
+    // the owner's documents, carrying the page path, the page or claim id and
+    // the page type. On this edition nothing else reads the vault (OpenClaw's
+    // memory-wiki plugin is what reaches it on the other one). A vault index
+    // that cannot answer costs its own hits, never the owner's.
+    const [owned, vault] = await Promise.all([
+      searchLocalMemory(query, limit, deadline),
+      searchPrimeRadiant(query, limit, deadline).catch((err) => {
+        console.warn(`[memory-shard] vault search failed: ${err instanceof Error ? err.message : String(err)}`);
+        return [];
+      }),
+    ]);
+    const results = [...owned, ...vault].sort((a, b) => b.score - a.score).slice(0, limit);
     return NextResponse.json({ results }, { headers: { "Cache-Control": "no-store" } });
   } catch (err) {
     // The embedder not answering is the one failure worth naming: it is the
