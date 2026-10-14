@@ -12613,8 +12613,8 @@ DISPATCH_STEPS=(
   heal_build
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
   # SSH off by default on provisioned boxes: ssh_policy is the owner's switch
-  # and the factory reset. No update ever changes SSH (TASK-1572: a box set up
-  # before this flow keeps its SSH exactly as it is).
+  # and the factory reset. No update ever changes SSH: TASK-1572, a box set up
+  # before this flow keeps its SSH exactly as it is.
   ssh_policy
   # Settings → Users, multi-user ClawBox OS: TASK-1256. On WEB_ROOT_STEPS, never on the UI list.
   user_add user_remove
