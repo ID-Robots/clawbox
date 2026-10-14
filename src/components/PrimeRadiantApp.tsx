@@ -38,6 +38,14 @@ import PrimeRadiantCosts from "./PrimeRadiantCosts";
  * shown with a retry button rather than retried on its own — it writes the
  * agent's configuration, and doing that in a loop is the wrong failure mode.
  */
+
+/** A status the window can draw: a vault that exists carries its counts and its wiring. */
+function isDrawableStatus(s: unknown): s is PrimeRadiantStatus {
+  if (!s || typeof s !== "object") return false;
+  const st = s as Partial<PrimeRadiantStatus>;
+  if (typeof st.initialised !== "boolean") return false;
+  return !st.initialised || (!!st.vault && typeof st.vault === "object" && !!st.plugin && typeof st.plugin === "object");
+}
 export default function PrimeRadiantApp() {
   const { t } = useT();
   const [status, setStatus] = useState<PrimeRadiantStatus | null>(null);
@@ -60,7 +68,7 @@ export default function PrimeRadiantApp() {
 
   /** What to do with a status: show it, or create the vault and read again. */
   const settle = useCallback(async (s: PrimeRadiantStatus, signal?: AbortSignal) => {
-    if (!s || typeof s !== "object" || typeof s.initialised !== "boolean") throw new Error("shape");
+    if (!isDrawableStatus(s)) throw new Error("shape");
     setStatus(s);
     if (s.initialised) {
       setPhase("ready");
@@ -72,6 +80,7 @@ export default function PrimeRadiantApp() {
     if (signal?.aborted) return;
     const after = await prJson<PrimeRadiantStatus>(`${API}/status`, { signal });
     if (signal?.aborted) return;
+    if (!isDrawableStatus(after)) throw new Error("shape");
     setStatus(after);
     setPhase(after.initialised ? "ready" : "failed");
     if (after.initialised) announceVaultChanged();
@@ -95,7 +104,12 @@ export default function PrimeRadiantApp() {
 
   const changed = useCallback(() => {
     setRevision((r) => r + 1);
-    void prJson<PrimeRadiantStatus>(`${API}/status`).then(setStatus).catch(() => undefined);
+    // Only a status the window can draw replaces the one on screen.
+    void prJson<PrimeRadiantStatus>(`${API}/status`)
+      .then((s) => {
+        if (isDrawableStatus(s) && s.initialised) setStatus(s);
+      })
+      .catch(() => undefined);
     announceVaultChanged();
   }, []);
 

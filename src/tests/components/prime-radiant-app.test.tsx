@@ -123,6 +123,8 @@ let reviewGate: Promise<void> | null;
 let reviewItems: unknown[];
 let nightlyRuns: unknown[];
 let ingestJobs: unknown[];
+/** Refusals the fake answers the next `DELETE ingest/<id>` calls with, first first. */
+let stopRefusals: number[];
 
 function installFetch() {
   vi.stubGlobal("fetch", vi.fn(async (input: unknown, init?: RequestInit) => {
@@ -181,7 +183,11 @@ function installFetch() {
     if (url === `${p}/ingest`) return ok({ running: null, jobs: ingestJobs });
     if (url === `${p}/ingest/job-dead/retry` && method === "POST") return ok({ job: { ...RUNNING_JOB, id: "job-retry", kind: "retry" } }, 202);
     if (url === `${p}/ingest/job-dead`) return ok({ job: DEAD_JOB, deadLetter: [{ seq: 1, label: "~/acme-docs/broken.pdf", error: "unreadable", attempts: 2, bytes: 10 }] });
-    if (url.startsWith(`${p}/ingest/`) && method === "DELETE") return ok({ stopping: true, job: RUNNING_JOB }, 202);
+    if (url.startsWith(`${p}/ingest/`) && method === "DELETE") {
+      const refusal = stopRefusals.shift();
+      if (refusal) return ok({ error: "The job could not be stopped", code: "stop_failed" }, refusal);
+      return ok({ stopping: true, job: RUNNING_JOB }, 202);
+    }
     if (url === `${p}/settings`) {
       const settings = {
         ingest: { exclude: [".git", "node_modules"], parallel: 128, folders: [] },
@@ -227,6 +233,7 @@ beforeEach(() => {
   reviewItems = [REVIEW_ITEM];
   nightlyRuns = [];
   ingestJobs = [];
+  stopRefusals = [];
   FakeEventSource.last = null;
   installFetch();
 });
@@ -269,6 +276,19 @@ describe("PrimeRadiantApp", () => {
     await waitFor(() => {
       expect(calls.some((c) => c.url.includes("/pages?") && c.url.includes("type=entity") && c.url.includes("domain=sales"))).toBe(true);
     });
+  });
+
+  it("keeps the window drawn when a refresh answers a status it cannot draw", async () => {
+    await mount();
+    expect(await screen.findByTestId("prime-radiant-counts")).toBeInTheDocument();
+    const reads = () => calls.filter((c) => c.url === "/setup-api/prime-radiant/status").length;
+    const before = reads();
+    status = { initialised: true } as typeof status;
+    fireEvent.click(screen.getByTestId("prime-radiant-refresh"));
+    await waitFor(() => expect(reads()).toBeGreaterThan(before));
+    await act(async () => { await Promise.resolve(); });
+    expect(screen.getByTestId("prime-radiant-counts")).toBeInTheDocument();
+    expect(screen.getByTestId("prime-radiant-app")).toBeInTheDocument();
   });
 
   it("keeps a candidate answer as the verified fact", async () => {
@@ -475,6 +495,25 @@ describe("PrimeRadiantApp", () => {
     act(() => { FakeEventSource.last?.emit("end", { ...RUNNING_JOB, status: "interrupted", phase: "done" }); });
     await waitFor(() => expect(screen.queryByTestId("prime-radiant-ingest-running")).toBeNull());
     expect(FakeEventSource.last?.closed).toBe(true);
+  });
+
+  it("clears a failed stop's error when the next stop goes through", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    stopRefusals = [500];
+    await mount();
+    await openTab("ingest");
+    fireEvent.click(await screen.findByTestId("prime-radiant-ingest-folders-add"));
+    fireEvent.click(await screen.findByTestId("prime-radiant-ingest-folders-use"));
+    fireEvent.click(screen.getByTestId("prime-radiant-ingest-start"));
+    const running = await screen.findByTestId("prime-radiant-ingest-running");
+    fireEvent.click(within(running).getByTestId("prime-radiant-ingest-stop"));
+    expect(await screen.findByText(/could not be stopped/)).toBeInTheDocument();
+    await waitFor(() => expect(within(running).getByTestId("prime-radiant-ingest-stop")).not.toBeDisabled());
+    fireEvent.click(within(running).getByTestId("prime-radiant-ingest-stop"));
+    await waitFor(() => {
+      expect(calls.filter((c) => c.url.endsWith("/ingest/job-run") && c.method === "DELETE")).toHaveLength(2);
+    });
+    await waitFor(() => expect(screen.queryByText(/could not be stopped/)).toBeNull());
   });
 
   it("stops polling a job the box no longer has after the stream drops", async () => {

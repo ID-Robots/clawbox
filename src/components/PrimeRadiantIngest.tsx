@@ -175,6 +175,7 @@ export default function PrimeRadiantIngest({ onChanged }: { onChanged: () => voi
   const stop = async () => {
     if (!running) return;
     setBusy("stop");
+    setError(null);
     try {
       await prJson(`${API}/ingest/${encodeURIComponent(running.id)}`, { method: "DELETE" });
     } catch (err) {

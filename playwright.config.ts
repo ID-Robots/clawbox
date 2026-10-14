@@ -1,4 +1,5 @@
 import { defineConfig, devices } from "@playwright/test";
+import { PRIME_RADIANT_BASE_URL, primeRadiantServerCommand } from "./e2e/helpers/prime-radiant-server";
 
 const port = Number(process.env.PLAYWRIGHT_PORT || process.env.PORT || 3100);
 const baseURL = `http://localhost:${port}`;
@@ -43,7 +44,7 @@ export default defineConfig({
       use: { ...devices["Desktop Chrome"] },
     },
   ],
-  webServer: {
+  webServer: [{
     // Run e2e against a real production build, not `bun run dev`. The Turbopack
     // dev server compiled routes on demand (the first hit to `/` could outlast
     // the 15s expect timeout under CI load) and, on next 16.2, its HMR
@@ -60,5 +61,16 @@ export default defineConfig({
     url: baseURL,
     reuseExistingServer: !process.env.CI,
     timeout: 600_000,
-  },
+  }, {
+    // A second copy of the same build, for prime-radiant-smoke.spec.ts alone:
+    // test mode with the deterministic model, every root in a temp directory.
+    // Playwright starts web servers one after the other, so the build above
+    // has finished before this one runs; when the main server is reused and
+    // never built, this command builds itself. See
+    // e2e/helpers/prime-radiant-server.ts.
+    command: primeRadiantServerCommand(),
+    url: PRIME_RADIANT_BASE_URL,
+    reuseExistingServer: !process.env.CI,
+    timeout: 600_000,
+  }],
 });

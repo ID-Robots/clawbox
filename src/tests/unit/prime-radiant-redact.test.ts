@@ -14,6 +14,7 @@ import {
   redactText,
   scanSecrets,
 } from "@/lib/prime-radiant/redact";
+import { safeUploadName } from "@/lib/prime-radiant/ingest-upload";
 
 const fakeKey = (prefix: string, body: string) => prefix + body;
 const MIXED = "Ab3dE5gH7jK9mN1pQ3rS5tU7vW9xY1zA3bC5";
@@ -133,8 +134,14 @@ describe("redaction", () => {
     expect(redactPath("upload/b/call_555.010.0199.txt").text).toBe(`upload/b/call_${P}.txt`);
     expect(redactPath("upload/b/notes 555 010 0199.md").text).toBe(`upload/b/notes ${P}.md`);
     expect(redactPath("upload/b/+44 20 7946 0958_acme.md").text).toBe(`upload/b/${P}_acme.md`);
+    // An upload's rebuilt name joins every part with `_`.
+    expect(redactPath("upload/b/call_555_010_0199.md").text).toBe(`upload/b/call_${P}.md`);
+    expect(redactPath("upload/b/+44_20_7946_0958_acme.md").text).toBe(`upload/b/${P}_acme.md`);
+    const staged = safeUploadName("call#555#010#0199.md")?.name;
+    expect(staged).toBe("call_555_010_0199.md");
+    expect(redactPath(`upload/b/${staged}`).text).toBe(`upload/b/call_${P}.md`);
     // Dates, versions and bare digit runs (timestamps, invoice numbers) stay.
-    for (const keep of ["2026-10-14-minutes.md", "v1.2.3-notes.md", "1760400000-export.md", "invoice-55501234.pdf"]) {
+    for (const keep of ["2026-10-14-minutes.md", "2026_10_14_minutes.md", "v1.2.3-notes.md", "1760400000-export.md", "invoice-55501234.pdf"]) {
       expect(redactPath(`upload/b/${keep}`).text).toBe(`upload/b/${keep}`);
     }
     // Phones off means off for names too.
