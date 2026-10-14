@@ -1,8 +1,12 @@
 /**
- * The read side the `/setup-api/prime-radiant/*` routes answer from: status,
- * the page list, one page with its links, and the lint report. Routes stay
- * thin (auth, parameters, status codes); everything here is testable without
- * a request.
+ * What the `/setup-api/prime-radiant/*` routes answer from: status, the page
+ * list, one page with its links, the lint report, and `initialise`. Routes
+ * stay thin (auth, parameters, status codes); everything here is testable
+ * without a request.
+ *
+ * The reads NEVER create anything: on a vault that does not exist yet, status
+ * says `initialised: false`, the list and the lint are empty and a page is
+ * absent. Only {@link initialise} (and a mutating `vaultOperation`) makes it.
  *
  * SERVER ONLY.
  */
@@ -12,15 +16,23 @@ import { lintVault, type LintReport } from "./lint";
 import { pageSummary } from "./frontmatter";
 import { hasVerification, type PageFrontmatter, type SchemaError } from "./schema";
 import { currentBranch, commitCount, headCommit, type CommitInfo } from "./git";
-import { memoryWikiWiringStatus, type WiringPlan } from "./plugin-wiring";
+import { ensureMemoryWikiWiring, memoryWikiWiringStatus, type WiringPlan, type WiringResult } from "./plugin-wiring";
 import { vaultDir, safePagePath, isKnowledgePage } from "./paths";
 import { readRetiredLedger } from "./state-db";
-import { ensureVault, listEntry, readVaultSnapshot, type PageListEntry, type VaultSnapshot } from "./vault";
+import {
+  ensureVault,
+  listEntry,
+  readVaultSnapshot,
+  vaultInitialised,
+  type PageListEntry,
+  type VaultSnapshot,
+} from "./vault";
 
 export interface PrimeRadiantStatus {
+  /** False until `POST init` (or a first change) has made the vault. */
+  initialised: boolean;
   vault: {
     path: string;
-    created: boolean;
     pages: number;
     invalidPages: number;
     verifiedPages: number;
@@ -42,7 +54,15 @@ function ledger(vault: string): string[] {
 }
 
 export async function getStatus(vault: string = vaultDir()): Promise<PrimeRadiantStatus> {
-  const { created } = await ensureVault(vault);
+  if (!(await vaultInitialised(vault))) {
+    return {
+      initialised: false,
+      vault: { path: vault, pages: 0, invalidPages: 0, verifiedPages: 0, claims: 0, domains: [], truncated: false },
+      git: { branch: null, head: null, commits: 0 },
+      plugin: await memoryWikiWiringStatus(vault),
+      lint: { errors: 0, warnings: 0, ok: true },
+    };
+  }
   const snapshot = await readVaultSnapshot(vault);
   const valid = snapshot.pages.flatMap((p) => (p.parsed.ok ? [p.parsed.frontmatter] : []));
   const report = lintVault(snapshot, { ledgerRetired: ledger(vault) });
@@ -53,9 +73,9 @@ export async function getStatus(vault: string = vaultDir()): Promise<PrimeRadian
     memoryWikiWiringStatus(vault),
   ]);
   return {
+    initialised: true,
     vault: {
       path: vault,
-      created,
       pages: snapshot.pages.length,
       invalidPages: snapshot.pages.length - valid.length,
       verifiedPages: valid.filter(hasVerification).length,
@@ -83,7 +103,7 @@ export interface PageFilter {
 export const MAX_PAGE_LIST = 500;
 
 export async function listPages(filter: PageFilter = {}, vault: string = vaultDir()): Promise<{ total: number; pages: PageListEntry[] }> {
-  await ensureVault(vault);
+  if (!(await vaultInitialised(vault))) return { total: 0, pages: [] };
   const snapshot = await readVaultSnapshot(vault);
   const q = filter.q?.trim().toLowerCase();
   const all = snapshot.pages.map(listEntry).filter((e) => {
@@ -118,7 +138,7 @@ export interface PageDetail {
 export async function getPage(rel: string, vault: string = vaultDir()): Promise<PageDetail | null> {
   const safe = safePagePath(rel);
   if (!safe || !isKnowledgePage(safe)) return null;
-  await ensureVault(vault);
+  if (!(await vaultInitialised(vault))) return null;
   const snapshot = await readVaultSnapshot(vault);
   const page = snapshot.pages.find((p) => p.path === safe);
   if (!page) return null;
@@ -152,11 +172,43 @@ function pageDetail(snapshot: VaultSnapshot, rel: string, vault: string): PageDe
  * for the whole vault when none are given.
  */
 export async function getLint(paths: readonly string[] | null, vault: string = vaultDir(), now?: Date): Promise<LintReport> {
-  await ensureVault(vault);
-  const snapshot = await readVaultSnapshot(vault);
+  const snapshot: VaultSnapshot = (await vaultInitialised(vault))
+    ? await readVaultSnapshot(vault)
+    : { vault, pages: [], indexBody: null, truncated: false };
   const scope =
     paths && paths.length > 0
       ? paths.map((p) => safePagePath(p)).filter((p): p is string => p !== null && isKnowledgePage(p))
       : undefined;
   return lintVault(snapshot, { scope, ledgerRetired: ledger(vault), now });
+}
+
+export interface InitialiseResult {
+  /** True when this call made the vault; false when it was already there. */
+  created: boolean;
+  /** The memory-wiki wiring after this call, and whether it wrote the config. */
+  plugin: WiringResult;
+}
+
+/**
+ * Make the vault and point memory-wiki at it. Idempotent: a second call makes
+ * nothing and writes no config. The wiring never overwrites an owner's own
+ * memory-wiki setting (that is reported as a `conflict`).
+ */
+export async function initialise(vault: string = vaultDir()): Promise<InitialiseResult> {
+  const { created } = await ensureVault(vault);
+  let plugin: WiringResult;
+  try {
+    plugin = await ensureMemoryWikiWiring({ vault });
+  } catch (err) {
+    throw new WiringWriteError(err);
+  }
+  return { created, plugin };
+}
+
+/** The vault is there; the memory-wiki config write is what failed. */
+export class WiringWriteError extends Error {
+  constructor(readonly cause: unknown) {
+    super(`memory-wiki wiring could not be written: ${cause instanceof Error ? cause.message : String(cause)}`);
+    this.name = "WiringWriteError";
+  }
 }

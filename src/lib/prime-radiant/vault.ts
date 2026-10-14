@@ -1,5 +1,6 @@
 /**
- * The vault on disk: created on first use, read as a snapshot, and changed
+ * The vault on disk: created by `POST init` or a first change (never by a
+ * read), read as a snapshot, and changed
  * only through {@link vaultOperation} — which holds the vault's lock, lints the
  * pages it touched, and records exactly one commit (or puts every touched file
  * back when the lint refuses or the operation throws).
@@ -96,8 +97,23 @@ async function assertInsideVault(vault: string, abs: string): Promise<void> {
 }
 
 /**
+ * Whether the vault exists as a repository with at least one commit. Reads
+ * only: never creates the folder, the repository or the state database, so a
+ * GET can ask it.
+ */
+export async function vaultInitialised(vault: string = vaultDir()): Promise<boolean> {
+  try {
+    if (!(await fs.stat(vault)).isDirectory()) return false;
+  } catch {
+    return false;
+  }
+  return (await isGitRepo(vault)) && (await hasCommits(vault));
+}
+
+/**
  * Create the vault (folder + git repository + seed files + first commit) when
- * it is not there yet. Idempotent; safe to call from every route.
+ * it is not there yet. Idempotent. Called by `POST init` and by every
+ * {@link vaultOperation}; the read routes never call it.
  */
 export async function ensureVault(vault: string = vaultDir()): Promise<{ created: boolean }> {
   return withVaultLock(vault, async () => {

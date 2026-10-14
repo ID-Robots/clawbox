@@ -27,20 +27,21 @@ module here is SERVER ONLY unless it says "pure".
 | `links.ts` (pure) | `extractLinks(body)` (wikilinks and relative Markdown links, code ignored), `createLinkResolver(pages)`, `buildLinkGraph(pages, indexBody)` → inbound/outbound/indexed. |
 | `lint.ts` (pure over a snapshot) | `lintVault(snapshot, { scope, ledgerRetired, now })` → `LintReport`. Rules: `page-too-long` (6,000 soft / 12,000 hard), `summary-missing`, `summary-too-long` (300), `too-many-claims` (20), `claim-too-long` (240), `atomic-too-long` (entity/decision 3,000), `orphan`, `no-sources`, `stale-after-passed`, `secret-pattern`, `frontmatter-invalid`, `claim-id-collision`, `claim-id-retired-reuse`. Over-cap findings carry a `split` (`suggestSplit`: by headings, else by paragraphs; the page stays the hub). Four rules have `blocksCommit`. |
 | `git.ts` | `git(vault, args)` through `runChild` (no shell, own environment, user's global git config ignored), `withVaultLock(vault, fn)` (per-vault mutex in `processStore`), `commitPaths`, `restorePaths`, `headCommit`, `currentBranch`, `commitCount`, `logForPath`, `showFileAt`, `changedPaths(base, head)`, `trackedAtHead`. Author/committer `Prime Radiant <prime-radiant@localhost>`. |
-| `vault.ts` | `ensureVault()` (idempotent first-run init), `readVaultSnapshot()`, `readPage(rel)`, `listEntry(page)`, and **`vaultOperation(message, fn)`** — the one way to change the vault: lock held, writes through `tx.write/writePage/remove`, scoped lint, exactly one commit (or none if nothing changed); a blocking finding (`VaultLintBlockedError`) or a throw puts every touched file back. |
+| `vault.ts` | `vaultInitialised()` (read-only: a repository with a commit?), `ensureVault()` (idempotent first-run init — `POST init` and `vaultOperation` only), `readVaultSnapshot()`, `readPage(rel)`, `listEntry(page)`, and **`vaultOperation(message, fn)`** — the one way to change the vault: lock held, writes through `tx.write/writePage/remove`, scoped lint, exactly one commit (or none if nothing changed); a blocking finding (`VaultLintBlockedError`) or a throw puts every touched file back. |
 | `state-db.ts` | `openStateDb(vault)` / `withStateDb(vault, fn)` (node:sqlite, migrated by `user_version`); the claim ledger: `readRetiredLedger`, `recordRetired`, `syncActiveClaims`. The other tables are created for later work. |
 | `plugin-wiring.ts` | `planMemoryWikiWiring(config, vault)` (pure), `memoryWikiWiringStatus()`, `ensureMemoryWikiWiring({ force })`: writes only `plugins.entries.memory-wiki.{enabled, config.vaultMode, config.vault.path}`, only when they differ, in one batch. Owner choices (plugin off, another mode or vault, agent scope, deny/allow lists) are `conflict`s, never overwritten unless forced (and deny/allow/agent scope never). |
-| `service.ts` | What the routes answer: `getStatus()`, `listPages(filter)`, `getPage(rel)`, `getLint(paths)`. |
+| `service.ts` | What the routes answer: `getStatus()`, `listPages(filter)`, `getPage(rel)`, `getLint(paths)` — none of them creates anything; on a missing vault they answer `initialised: false` / empty / null — and `initialise()` (`ensureVault` + `ensureMemoryWikiWiring`, idempotent; a failed config write is a `WiringWriteError`). |
 | `route-helpers.ts` | `json`, `fail(code, error, status)`, `vaultFailure(where, err)`. |
 
 ## Routes (`src/app/setup-api/prime-radiant/`)
 
-All owner-only through `requireSession`, `force-dynamic`, `Cache-Control: no-store`, failures as `{ error, code }`.
+All owner-only through `requireSession`, `force-dynamic`, `Cache-Control: no-store`, failures as `{ error, code }`. The GETs NEVER create the vault (no folder, no repository, no state database, no config write); the app calls `POST init` when status says `initialised: false`. There is no boot hook.
 
-- `GET status` — vault (created on first use), git head, memory-wiki wiring state, lint summary.
-- `GET pages?type&domain&status&verified&q&offset&limit` — page list, no bodies.
-- `GET pages/<path>` — one page: frontmatter or its errors, body, summary, backlinks, links, scoped lint. Not a page → 404.
-- `GET lint?path=…&paths=a,b` — lint report for those pages, or the whole vault.
+- `POST init` — `ensureVault()` + `ensureMemoryWikiWiring()`, idempotent: `{ created, plugin: { state, …, wrote } }`. Owner cookie AND same origin (the MCP bearer gets 403 `owner_only`, a cross-site page 403 `cross_origin`), because it writes openclaw.json. 500 `vault_unavailable` when the vault cannot be made, `wiring_failed` when the vault is made and the config write failed.
+- `GET status` — `initialised`, the vault's counts, git head, memory-wiki wiring state (reported, never written), lint summary. Not initialised → zero counts, `git: { branch: null, head: null, commits: 0 }`, a clean lint.
+- `GET pages?type&domain&status&verified&q&offset&limit` — page list, no bodies (`{ total: 0, pages: [] }` with no vault).
+- `GET pages/<path>` — one page: frontmatter or its errors, body, summary, backlinks, links, scoped lint. Not a page, or no vault → 404.
+- `GET lint?path=…&paths=a,b` — lint report for those pages, or the whole vault (an empty report with no vault).
 
 ## Building on it
 

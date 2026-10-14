@@ -1,6 +1,7 @@
 /**
- * GET /setup-api/prime-radiant/{status,pages,pages/<path>,lint} over a real
- * vault in a tmp dir. Owner-only like every other setup-api route.
+ * GET /setup-api/prime-radiant/{status,pages,pages/<path>,lint} and
+ * POST /setup-api/prime-radiant/init over a real vault in a tmp dir.
+ * Owner-only like every other setup-api route; the GETs never create the vault.
  */
 import fs from "fs";
 import os from "os";
@@ -10,6 +11,8 @@ import { NextResponse } from "next/server";
 
 const auth = vi.hoisted(() => ({ requireSession: vi.fn() }));
 vi.mock("@/lib/route-auth", () => auth);
+const owner = vi.hoisted(() => ({ hasOwnerSession: vi.fn(async () => true) }));
+vi.mock("@/lib/owner-session", () => owner);
 const oc = vi.hoisted(() => ({
   openclawIsAbsent: vi.fn(() => false),
   readConfigStrict: vi.fn(async () => ({})),
@@ -21,6 +24,8 @@ import { GET as statusGET } from "@/app/setup-api/prime-radiant/status/route";
 import { GET as pagesGET } from "@/app/setup-api/prime-radiant/pages/route";
 import { GET as pageGET } from "@/app/setup-api/prime-radiant/pages/[...path]/route";
 import { GET as lintGET } from "@/app/setup-api/prime-radiant/lint/route";
+import { POST as initPOST } from "@/app/setup-api/prime-radiant/init/route";
+import { MEMORY_WIKI_PLUGIN_ID } from "@/lib/prime-radiant/plugin-wiring";
 import { vaultOperation } from "@/lib/prime-radiant/vault";
 import { claim, pageText } from "../helpers/prime-radiant-fixtures";
 
@@ -33,6 +38,8 @@ let n = 0;
 
 const ORIGIN = "http://clawbox.local/setup-api/prime-radiant";
 const req = (p: string) => new Request(`${ORIGIN}${p}`);
+const initReq = (headers: Record<string, string> = {}) =>
+  initPOST(new Request(`${ORIGIN}/init`, { method: "POST", headers: { origin: "http://clawbox.local", ...headers } }));
 const pageReq = (segments: string[]) => pageGET(req(`/pages/${segments.join("/")}`), { params: Promise.resolve({ path: segments }) });
 
 async function seed() {
@@ -52,6 +59,8 @@ async function seed() {
 
 beforeEach(() => {
   auth.requireSession.mockResolvedValue(null);
+  owner.hasOwnerSession.mockResolvedValue(true);
+  oc.runOpenclawConfigSetBatch.mockReset().mockResolvedValue(undefined);
   oc.openclawIsAbsent.mockReturnValue(false);
   oc.readConfigStrict.mockResolvedValue({});
   process.env.PRIME_RADIANT_DIR = path.join(base, `case-${++n}`);
@@ -66,7 +75,13 @@ afterAll(() => {
 describe("prime radiant routes: auth", () => {
   it("answers whatever requireSession answers, before touching the vault", async () => {
     auth.requireSession.mockResolvedValue(NextResponse.json({ error: "owner_only", code: "owner_only" }, { status: 403 }));
-    for (const res of [await statusGET(req("/status")), await pagesGET(req("/pages")), await lintGET(req("/lint")), await pageReq(["concepts", "x.md"])]) {
+    for (const res of [
+      await statusGET(req("/status")),
+      await pagesGET(req("/pages")),
+      await lintGET(req("/lint")),
+      await pageReq(["concepts", "x.md"]),
+      await initReq(),
+    ]) {
       expect(res.status).toBe(403);
     }
     expect(fs.existsSync(process.env.PRIME_RADIANT_DIR!)).toBe(false);
@@ -74,20 +89,113 @@ describe("prime radiant routes: auth", () => {
   });
 });
 
-describe("GET /status", () => {
-  it("creates the vault on first use and reports it", async () => {
-    const res = await statusGET(req("/status"));
+describe("GET routes on a vault that does not exist yet", () => {
+  it("create nothing: no folder, no repository, no state database", async () => {
+    const root = process.env.PRIME_RADIANT_DIR!;
+    const status = await statusGET(req("/status"));
+    expect(status.status).toBe(200);
+    expect(status.headers.get("cache-control")).toBe("no-store");
+    const body = await status.json();
+    expect(body).toMatchObject({
+      initialised: false,
+      vault: { pages: 0, claims: 0, domains: [] },
+      git: { branch: null, head: null, commits: 0 },
+      plugin: { state: "needs-write" },
+      lint: { errors: 0, warnings: 0, ok: true },
+    });
+
+    expect(await (await pagesGET(req("/pages"))).json()).toEqual({ total: 0, pages: [] });
+    const lint = await (await lintGET(req("/lint"))).json();
+    expect(lint).toMatchObject({ checked: 0, findings: [], ok: true });
+    const page = await pageReq(["concepts", "pricing.md"]);
+    expect(page.status).toBe(404);
+    expect((await page.json()).code).toBe("not_found");
+
+    expect(fs.existsSync(root)).toBe(false);
+    expect(oc.runOpenclawConfigSetBatch).not.toHaveBeenCalled();
+  });
+
+  it("leave an existing empty folder alone (no git init inside it)", async () => {
+    const vault = path.join(process.env.PRIME_RADIANT_DIR!, "vault");
+    fs.mkdirSync(vault, { recursive: true });
+    expect((await (await statusGET(req("/status"))).json()).initialised).toBe(false);
+    expect(fs.readdirSync(vault)).toEqual([]);
+    expect(fs.readdirSync(process.env.PRIME_RADIANT_DIR!)).toEqual(["vault"]);
+  });
+});
+
+describe("POST /init", () => {
+  it("makes the vault and wires memory-wiki, once", async () => {
+    const res = await initReq();
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toBe("no-store");
     const body = await res.json();
-    expect(body.vault).toMatchObject({ created: true, pages: 0, claims: 0 });
-    expect(body.git).toMatchObject({ branch: "main", commits: 1, head: { subject: "init: vault" } });
-    expect(body.plugin).toMatchObject({ state: "needs-write" });
-    expect(oc.runOpenclawConfigSetBatch).not.toHaveBeenCalled();
-    const again = await (await statusGET(req("/status"))).json();
-    expect(again.vault.created).toBe(false);
+    expect(body.created).toBe(true);
+    expect(body.plugin.wrote).toBe(true);
+    expect(oc.runOpenclawConfigSetBatch).toHaveBeenCalledTimes(1);
+    const keys = (oc.runOpenclawConfigSetBatch.mock.calls[0] as unknown as [Array<[string, string, string]>])[0].map((a) => a[0]);
+    expect(keys.every((k) => k.startsWith(`plugins.entries.${MEMORY_WIKI_PLUGIN_ID}.`))).toBe(true);
+
+    const status = await (await statusGET(req("/status"))).json();
+    expect(status).toMatchObject({ initialised: true, vault: { pages: 0 } });
+    expect(status.git).toMatchObject({ branch: "main", commits: 1, head: { subject: "init: vault" } });
+
+    // The config now says what we wrote: a second init makes and writes nothing.
+    const vault = path.join(process.env.PRIME_RADIANT_DIR!, "vault");
+    oc.readConfigStrict.mockResolvedValue({
+      plugins: { entries: { [MEMORY_WIKI_PLUGIN_ID]: { enabled: true, config: { vaultMode: "isolated", vault: { path: vault } } } } },
+    });
+    const again = await (await initReq()).json();
+    expect(again).toMatchObject({ created: false, plugin: { state: "wired", wrote: false } });
+    expect(oc.runOpenclawConfigSetBatch).toHaveBeenCalledTimes(1);
+    expect((await (await statusGET(req("/status"))).json()).git.commits).toBe(1);
   });
 
+  it("makes the vault even where there is no OpenClaw to wire", async () => {
+    oc.openclawIsAbsent.mockReturnValue(true);
+    const body = await (await initReq()).json();
+    expect(body).toMatchObject({ created: true, plugin: { state: "unavailable", reason: "no-openclaw", wrote: false } });
+    expect(oc.runOpenclawConfigSetBatch).not.toHaveBeenCalled();
+  });
+
+  it("refuses the MCP bearer and a cross-site page before touching anything", async () => {
+    owner.hasOwnerSession.mockResolvedValue(false);
+    const bearer = await initReq();
+    expect(bearer.status).toBe(403);
+    expect((await bearer.json()).code).toBe("owner_only");
+
+    owner.hasOwnerSession.mockResolvedValue(true);
+    const cross = await initReq({ origin: "http://evil.example.com" });
+    expect(cross.status).toBe(403);
+    expect((await cross.json()).code).toBe("cross_origin");
+
+    expect(fs.existsSync(process.env.PRIME_RADIANT_DIR!)).toBe(false);
+    expect(oc.runOpenclawConfigSetBatch).not.toHaveBeenCalled();
+  });
+
+  it("answers wiring_failed when the vault is made but the config write fails", async () => {
+    oc.runOpenclawConfigSetBatch.mockRejectedValue(new Error("config locked"));
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await initReq();
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: expect.any(String), code: "wiring_failed" });
+    expect((await (await statusGET(req("/status"))).json()).initialised).toBe(true);
+    spy.mockRestore();
+  });
+
+  it("answers vault_unavailable when the vault cannot be made", async () => {
+    const blocker = path.join(base, `blocker-init-${n}`);
+    fs.writeFileSync(blocker, "a file where the folder should be");
+    process.env.PRIME_RADIANT_DIR = blocker;
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const res = await initReq();
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: expect.any(String), code: "vault_unavailable" });
+    spy.mockRestore();
+  });
+});
+
+describe("GET /status", () => {
   it("counts pages, claims, verification and domains", async () => {
     await seed();
     const body = await (await statusGET(req("/status"))).json();
@@ -177,14 +285,13 @@ describe("GET /lint", () => {
     expect((await lintGET(req(`/lint?${many}`))).status).toBe(400);
   });
 
-  it("answers 500 with a code when the vault cannot be made", async () => {
+  it("treats a file where the vault folder should be as no vault", async () => {
     const blocker = path.join(base, `blocker-${n}`);
     fs.writeFileSync(blocker, "a file where the folder should be");
     process.env.PRIME_RADIANT_DIR = blocker;
-    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     const res = await lintGET(req("/lint"));
-    expect(res.status).toBe(500);
-    expect(await res.json()).toEqual({ error: expect.any(String), code: "vault_unavailable" });
-    spy.mockRestore();
+    expect(res.status).toBe(200);
+    expect((await res.json()).checked).toBe(0);
+    expect(fs.readFileSync(blocker, "utf8")).toBe("a file where the folder should be");
   });
 });
