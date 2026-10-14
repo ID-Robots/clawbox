@@ -1066,6 +1066,32 @@ describe("a budgeted team's plan and time on the board", () => {
     expect(t1.task_description).toBe("Build the scraper");
   });
 
+  it("leaves a pending task out to fit the time: retired, skipped with why, never against the lead's own retirements", () => {
+    const b = timed();
+    lib.postTask(b, PLANNER, { task_description: "Build the scraper", estimateMs: 40 * MIN, priority: 1 });
+    lib.postTask(b, PLANNER, { task_description: "Write the e2e suite", depends_on: ["t1"], estimateMs: 90 * MIN, priority: 2 });
+    lib.postTask(b, PLANNER, { task_description: "Chart it", estimateMs: 10 * MIN, priority: 3 });
+    lib.postTask(b, PLANNER, { task_description: "Map it", estimateMs: 10 * MIN, priority: 4 });
+    for (const who of [PLANNER, worker("run-aaaaaaaa"), REVIEWER, OWNER]) {
+      expect(() => lib.retireForTime(b, who, "t2", "x")).toThrow(lib.BoardAccessError);
+    }
+    expect(() => lib.retireForTime(board(), SYSTEM, "t1", "x")).toThrow(/time budget/);
+    const cut = lib.retireForTime(b, SYSTEM, "t2", "does not fit before the cutoff: Write the e2e suite");
+    expect(cut?.status).toBe("retired");
+    expect(b.log.at(-2)).toMatchObject({ type: "retire", task_id: "t2", message: "Task t2 left out to fit the time: does not fit before the cutoff: Write the e2e suite" });
+    expect(b.skipped?.map((s) => [s.taskId, s.by, s.text])).toEqual([["t2", "fit", "does not fit before the cutoff: Write the e2e suite"]]);
+    // Said once: a second cut of the same task changes nothing.
+    expect(lib.retireForTime(b, SYSTEM, "t2", "again")).toBeNull();
+    expect(b.skipped).toHaveLength(1);
+    // Out of the way and no gap: t1 done, t2 cut, t3 and t4 retired by the lead → all complete.
+    b.tasks[0].status = "complete";
+    expect(lib.allComplete(b)).toBe(false);
+    // The lead may still retire its full allowance: the cut is not one of its own.
+    lib.retireTask(b, PLANNER, "t3", "the goal no longer needs it");
+    lib.retireTask(b, PLANNER, "t4", "nor this");
+    expect(lib.allComplete(b)).toBe(true);
+  });
+
   it("records what is left out to fit the time: the system's alone, on a budgeted team, one note naming them all", () => {
     const b = timed();
     lib.postTask(b, PLANNER, { task_description: "Build the scraper", estimateMs: 40 * MIN, priority: 1 });

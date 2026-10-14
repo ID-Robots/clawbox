@@ -1040,6 +1040,30 @@ export function recordTimeSkips(board: TeamBoard, actor: Actor, skips: ReadonlyA
 }
 
 /**
+ * A budgeted team leaves a PENDING task out to fit its time — cut from the
+ * bottom of the plan before work started or at a re-plan, or too late to
+ * start before the cutoff. The task is retired (out of the way of what waits
+ * on it, neither a failure nor a gap: allComplete) and the skip recorded
+ * beside it (`recordTimeSkips`), so what was left out is said with why. The
+ * system's alone, only on a team with a budget, and never counted against the
+ * lead's own retirements. A task no longer pending is left as it is: null.
+ */
+export function retireForTime(board: TeamBoard, actor: Actor, taskId: string, why: string): TeamTask | null {
+  if (actor.kind !== "system") throw new BoardAccessError(actor, "retire", `Only the system leaves a task out to fit the time; ${describeActor(actor)} may not.`);
+  if (!board.timeBudget) throw new Error("Only a team with a time budget leaves work out to fit it.");
+  const task = requireTask(board, taskId);
+  if (task.status !== "pending") return null;
+  const now = Date.now();
+  task.status = "retired";
+  task.assigned_to = null;
+  task.updated_at = now;
+  const text = firstLine(why, MAX_SKIP_TEXT_CHARS);
+  append(board, { ts: now, actor, type: "retire", task_id: taskId, message: `Task ${taskId} left out to fit the time: ${text}`, payload: { note: text, time: true } });
+  if (!(board.skipped ?? []).some((s) => s.taskId === taskId)) recordTimeSkips(board, actor, [{ taskId, text, by: "fit" }]);
+  return task;
+}
+
+/**
  * One extra item a budgeted team did with time to spare: a kind on the
  * allowlist (EXTRA_WORK_KINDS) and what was done. The system's alone, and only
  * on a team with a budget; the board keeps the latest MAX_TEAM_EXTRAS.
@@ -1085,7 +1109,9 @@ export function retireTask(board: TeamBoard, actor: Actor, taskId: string, reaso
   if (actor.kind !== "planner") throw new BoardAccessError(actor, "retire", `Only the planner retires tasks; ${describeActor(actor)} may not.`);
   const task = requireTask(board, taskId);
   if (task.status !== "pending") throw new Error(`Task ${taskId} is ${task.status}; only a pending task is retired.`);
-  if (board.tasks.filter((t) => t.status === "retired").length >= MAX_LEAD_RETIRES) {
+  // The lead's own retirements: a task left out to fit the time (retireForTime) is not one.
+  const cutForTime = new Set((board.skipped ?? []).flatMap((s) => (s.taskId ? [s.taskId] : [])));
+  if (board.tasks.filter((t) => t.status === "retired" && !cutForTime.has(t.task_id)).length >= MAX_LEAD_RETIRES) {
     throw new Error(`A team retires at most ${MAX_LEAD_RETIRES} tasks.`);
   }
   const now = Date.now();

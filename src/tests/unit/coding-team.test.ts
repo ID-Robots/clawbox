@@ -32,6 +32,7 @@ const runner = vi.hoisted(() => ({
   getTeamDynamic: vi.fn(),
   teamSpawnSlot: vi.fn(),
   suiteSandbox: vi.fn(),
+  wrapUpRun: vi.fn(),
 }));
 /** How many runs a team may have going at once: the box's own number unless a case says otherwise (read on every use, reset before each case). */
 const teamSlots = vi.hoisted(() => ({ value: null as number | null }));
@@ -108,6 +109,8 @@ let merges: Array<{ ok: boolean; conflict?: boolean }>;
 let waitsBeforeSettle: number;
 /** How many of the team's worker runs were still going when each run started — the parallelism, observed. */
 let liveWorkersAtStart: Record<string, number>;
+/** Tasks whose worker a case HOLDS at work until the box ends it (see waitForRun). */
+let holdTasks: Set<string>;
 
 function fakeRun(input: Record<string, unknown>): Record<string, unknown> {
   seq += 1;
@@ -122,6 +125,7 @@ function fakeRun(input: Record<string, unknown>): Record<string, unknown> {
     filesTouched: [] as string[], permissionDenials: 0, deniedActions: [] as string[],
     team: input.team ?? null, readOnly: input.readOnly === true, extraBrief: input.extraBrief ?? null,
     outcomeAt: reviewer ? -1 : lead ? -2 : workerSeq++, waits: 0,
+    held: team?.role === "worker" && holdTasks.has(String((input.team as { taskId?: unknown }).taskId)),
   };
   runs.set(id, run);
   starts.push(input);
@@ -148,6 +152,7 @@ beforeEach(async () => {
   merges = [];
   waitsBeforeSettle = 1;
   liveWorkersAtStart = {};
+  holdTasks = new Set();
   teamSlots.value = null;
   power.onBattery = false;
   vi.resetModules();
@@ -178,6 +183,12 @@ beforeEach(async () => {
   runner.waitForRun.mockImplementation(async (id: string) => {
     const run = runs.get(id);
     if (!run) return null;
+    // A run a case HOLDS at work: each look waits a moment, as the real wait
+    // does, so the team's clock gets its turn — until the box ends it.
+    if (run.held === true && run.status === "running") {
+      await new Promise((r) => setTimeout(r, 20));
+      return run;
+    }
     if (run.status === "running") {
       run.waits = Number(run.waits) + 1;
       if (Number(run.waits) < waitsBeforeSettle) return run;
@@ -202,6 +213,13 @@ beforeEach(async () => {
   runner.stopRun.mockImplementation((id: string) => {
     const run = runs.get(id);
     if (run) Object.assign(run, { status: "stopped", completedAt: Date.now() });
+    return run;
+  });
+  // The deadline's clean stop: a run at work ends "stopped", its reason worded.
+  runner.wrapUpRun.mockImplementation(async (id: string, reason: string) => {
+    const run = runs.get(id);
+    if (!run) return null;
+    if (run.status === "running" || run.status === "paused") Object.assign(run, { status: "stopped", completedAt: Date.now(), error: `Stopped: ${reason}`, held: false });
     return run;
   });
   // The real spawn slot, watched: what a lead asks it is under test below.
@@ -243,6 +261,13 @@ async function finished(id: string) {
     await new Promise((r) => setTimeout(r, 10));
   }
   return team.getTeam(id) ?? live!;
+}
+
+/** A budgeted team's time record, once its stop is written — the last thing the orchestrator does. */
+async function closed(id: string) {
+  const { loadTimeRecords } = await import("@/lib/coding-time-record");
+  await vi.waitFor(() => { expect(loadTimeRecords(id)?.records.some((r) => r.kind === "stop")).toBe(true); }, { timeout: 10_000 });
+  return loadTimeRecords(id)!;
 }
 
 const PARALLEL_PLAN = JSON.stringify([
@@ -2874,7 +2899,13 @@ describe("a team with a time budget", () => {
     const { presetBudget } = await import("@/lib/coding-time-budget");
     outcomes = [{ summary: PLANNER_ANSWER({ time_plan: { estimate_minutes: 65, skipped: ["the e2e suite — not needed for one page"], too_short: "Three files in an hour is tight." } }) }];
     const started = await team.startTeam({ goal: "Build it", directory: "site", source: "owner", timeBudget: presetBudget("1h", Date.now(), "Europe/Sofia") });
-    const done = await finished(started.id);
+    await finished(started.id);
+    await closed(started.id);
+    const done = team.getTeam(started.id)!;
+    // What was cut to fit is left out — retired, never started — and the rest is done.
+    expect(done.status).toBe("done");
+    expect(done.tasks.map((t) => [t.task_id, t.status])).toEqual([["t1", "complete"], ["t2", "complete"], ["t3", "retired"]]);
+    expect(starts.filter((s) => (s.team as { role?: string; taskId?: string | null } | null)?.taskId === "t3")).toHaveLength(0);
     const brief = String(starts[0].extraBrief);
     expect(brief).toContain("ONLY a JSON object");
     expect(brief).toMatch(/TIME BUDGET: this team works to a deadline — 1 hour, until .* \(Europe\/Sofia\)/);
@@ -2896,10 +2927,11 @@ describe("a team with a time budget", () => {
       ["t3", "fit", "does not fit before the cutoff: Polish styles.css"],
     ]);
     expect(done.alerts).toBe(0);
-    // The team's own time record: the budget, the plan, every estimate and every skip, in that order.
+    // The team's own time record: the budget, the plan, every estimate and every skip, in that order —
+    // then each task's start and finish, and the stop.
     const { loadTimeRecords } = await import("@/lib/coding-time-record");
     const record = loadTimeRecords(done.id);
-    expect(record?.records.map((r) => [r.kind, r.taskId, r.estimateMs])).toEqual([
+    expect(record?.records.slice(0, 8).map((r) => [r.kind, r.taskId, r.estimateMs])).toEqual([
       ["budget", undefined, undefined],
       ["plan", undefined, 65 * MIN],
       ["estimate", "t1", 30 * MIN],
@@ -2909,6 +2941,11 @@ describe("a team with a time budget", () => {
       ["skip", "t3", undefined],
       ["note", undefined, undefined],
     ]);
+    const timed = record!.records.filter((r) => r.kind === "start" || r.kind === "finish").map((r) => [r.kind, r.taskId]);
+    expect(timed).toEqual([["start", "t1"], ["finish", "t1"], ["start", "t2"], ["finish", "t2"]]);
+    expect(record!.records.find((r) => r.kind === "finish")?.actualMs).toEqual(expect.any(Number));
+    expect(record!.records.filter((r) => r.kind === "stop").map((r) => r.reason)).toEqual(["done"]);
+    expect(done.log.some((e) => /^Time budget: the work was done \(done\)\. Estimates: 2 tasks, estimated 45 minutes, took/.test(e.message))).toBe(true);
     expect(record?.records[1].text).toMatch(/^3 tasks planned, 1 optional; the must-have tasks fit/);
     expect(record?.records[4].text).toBe("optional — Polish styles.css");
     const log = fs.readFileSync(path.join(root, "data", "coding-agent-artifacts", done.id, "time-record.log"), "utf8");
@@ -2929,3 +2966,213 @@ describe("a team with a time budget", () => {
     expect(loadTimeRecords(done.id)).toBeNull();
   });
 });
+
+describe("a budgeted team works to its deadline", () => {
+  const MIN = 60_000;
+  const HOUR = 60 * MIN;
+  /** The box's clock as the orchestrator reads it: the real one, moved on by a case. */
+  let offset = 0;
+  let dateSpy: { mockRestore: () => void } | null = null;
+  const at = (ms: number) => new Date(Date.now() + ms).toISOString();
+  /** A budget `aheadMs` from now that began `sinceMs` ago. */
+  const budget = (aheadMs: number, sinceMs = 0, extra: Record<string, unknown> = {}) => ({
+    deadline: at(aheadMs), label: "Until the test is over", preset: "custom" as const, source: "picker" as const, setAt: at(-sinceMs), ...extra,
+  });
+  const plan = (tasks: Array<Record<string, unknown>>) => JSON.stringify({ tasks });
+  const workerStarts = () => starts.filter((s) => (s.team as { role?: string } | null)?.role === "worker");
+  const workerRun = (taskId: string) => [...runs.values()].find((r) => (r.team as { role?: string; taskId?: string | null } | null)?.role === "worker" && (r.team as { taskId?: string | null }).taskId === taskId);
+
+  beforeEach(() => {
+    offset = 0;
+    const realNow = Date.now.bind(Date);
+    dateSpy = vi.spyOn(Date, "now").mockImplementation(() => realNow() + offset);
+    team._setTeamClockForTests({ tickMs: 25 });
+  });
+
+  afterEach(() => {
+    dateSpy?.mockRestore();
+    dateSpy = null;
+  });
+
+  it("says before any work starts that the must-have work does not fit, and never starts what it cut", async () => {
+    outcomes = [{
+      summary: plan([
+        { task_description: "Build the scraper", files_hint: ["scrape.py"], estimate_minutes: 40 },
+        { task_description: "Run it on every page", depends_on: ["t1"], files_hint: ["out/"], estimate_minutes: 40 },
+        { task_description: "Pretty report", files_hint: ["report.md"], estimate_minutes: 10, optional: true },
+      ]),
+    }];
+    const started = await team.startTeam({ goal: "Scrape it", directory: "site", source: "owner", timeBudget: budget(HOUR) });
+    await finished(started.id);
+    await closed(started.id);
+    const done = team.getTeam(started.id)!;
+    const warning = done.log.findIndex((e) => /^Time plan: the must-have work does NOT fit — estimated 1 h 20 min, .*: \d+ minutes short\. To fit, t3 and t2 will be skipped\.$/.test(e.message));
+    const firstAssign = done.log.findIndex((e) => e.type === "status_update");
+    expect(warning).toBeGreaterThanOrEqual(0);
+    expect(warning).toBeLessThan(firstAssign);
+    expect(done.tasks.map((t) => [t.task_id, t.status])).toEqual([["t1", "complete"], ["t2", "retired"], ["t3", "retired"]]);
+    expect(workerStarts().filter((s) => (s.team as { taskId?: string | null }).taskId)).toHaveLength(1);
+    expect(done.status).toBe("done");
+    expect(done.skipped?.filter((s) => s.by === "fit").map((s) => s.taskId)).toEqual(["t3", "t2"]);
+  });
+
+  it("re-plans at a task boundary when a task ran more than 25% over its estimate, cutting from the bottom of the plan", async () => {
+    outcomes = [{
+      summary: plan([
+        { task_description: "Parse the feed", files_hint: ["feed.py"], estimate_minutes: 10 },
+        { task_description: "Store it", depends_on: ["t1"], files_hint: ["store.py"], estimate_minutes: 30 },
+        { task_description: "Index it", depends_on: ["t2"], files_hint: ["index.py"], estimate_minutes: 30 },
+        { task_description: "Chart it", depends_on: ["t3"], files_hint: ["chart.py"], estimate_minutes: 30, optional: true },
+      ]),
+    }];
+    // t1 takes an hour on the box's clock: +500% over its ten minutes.
+    const base = runner.waitForRun.getMockImplementation()!;
+    runner.waitForRun.mockImplementation(async (id: string, ms: number) => {
+      const before = runs.get(id)?.status;
+      const run = await base(id, ms) as Record<string, unknown> | null;
+      const role = run?.team as { role?: string; taskId?: string | null } | null;
+      if (before === "running" && run?.status === "completed" && role?.role === "worker" && role.taskId === "t1") offset += HOUR;
+      return run;
+    });
+    const started = await team.startTeam({ goal: "Feed pipeline", directory: "site", source: "owner", timeBudget: budget(2 * HOUR) });
+    await finished(started.id);
+    const record = await closed(started.id);
+    const done = team.getTeam(started.id)!;
+    // 2 hours less a 12-minute margin, an hour gone: 48 minutes left for 90 minutes of plan.
+    expect(done.log.map((e) => e.message)).toEqual(expect.arrayContaining([
+      expect.stringMatching(/^Re-plan: t1 took 1 hour against ~10 minutes \(\+500%\); what is left is \d+ minutes more than fits before the cutoff, so t4 and t3 are cut from the bottom of the plan\.$/),
+    ]));
+    expect(done.tasks.map((t) => [t.task_id, t.status])).toEqual([["t1", "complete"], ["t2", "complete"], ["t3", "retired"], ["t4", "retired"]]);
+    expect(done.skipped?.map((s) => [s.taskId, s.text.split(":")[0]])).toEqual([
+      ["t4", "cut at a re-plan, t1 having run +500% over its estimate"],
+      ["t3", "cut at a re-plan, t1 having run +500% over its estimate"],
+    ]);
+    expect(record.records.find((r) => r.kind === "finish" && r.taskId === "t1")?.actualMs).toBeGreaterThanOrEqual(HOUR);
+    expect(record.records.some((r) => r.kind === "note" && r.text.startsWith("Re-plan: t1 took 1 hour"))).toBe(true);
+    expect(record.records.filter((r) => r.kind === "skip").map((r) => r.taskId)).toEqual(["t4", "t3"]);
+  });
+
+  it("ends the runs at work cleanly at the deadline, leaves the rest out, and says it stopped for time", async () => {
+    outcomes = [{
+      summary: plan([
+        { task_description: "Scaffold index.html", files_hint: ["index.html"], estimate_minutes: 10 },
+        { task_description: "Wire app.js", depends_on: ["t1"], files_hint: ["app.js"], estimate_minutes: 10 },
+      ]),
+    }];
+    holdTasks.add("t1");
+    const started = await team.startTeam({ goal: "Build it", directory: "site", source: "owner", timeBudget: budget(2 * HOUR) });
+    await vi.waitFor(() => { expect(workerRun("t1")).toBeDefined(); }, { timeout: 5000 });
+    // The deadline passes while t1's worker is at work.
+    offset += 2 * HOUR + MIN;
+    const done = await finished(started.id);
+    expect(runner.wrapUpRun).toHaveBeenCalledWith(workerRun("t1")!.id, "time");
+    expect(done.status).toBe("stopped");
+    expect(done.timeStop).toBe("time");
+    expect(done.tasks.map((t) => [t.task_id, t.status])).toEqual([["t1", "failed"], ["t2", "retired"]]);
+    expect(done.log.map((e) => e.message)).toEqual(expect.arrayContaining([
+      expect.stringMatching(/^Time budget: the deadline \(.+\) is here\. Ending run-\d+ after the step under way; no new task starts\.$/),
+      expect.stringMatching(/^Team → stopped: Stopped: the deadline came with t1 not finished\. What was accepted is on clawbox\/team-/),
+    ]));
+    expect(done.skipped?.find((s) => s.taskId === "t2")?.text).toBe("the deadline came before it could start: Wire app.js");
+    const record = await closed(started.id);
+    expect(record.records.filter((r) => r.kind === "stop").map((r) => r.reason)).toEqual(["time"]);
+  });
+
+  it("stops at the budget's spend ceiling, summed over the team's runs, and records cost", async () => {
+    outcomes = [{ summary: plan([{ task_description: "Scaffold index.html", files_hint: ["index.html"], estimate_minutes: 10 }, { task_description: "Wire app.js", depends_on: ["t1"], files_hint: ["app.js"], estimate_minutes: 10 }]) }];
+    holdTasks.add("t1");
+    const started = await team.startTeam({ goal: "Build it", directory: "site", source: "owner", timeBudget: budget(2 * HOUR, 0, { tokenCap: 50_000 }) });
+    await vi.waitFor(() => { expect(workerRun("t1")).toBeDefined(); }, { timeout: 5000 });
+    workerRun("t1")!.tokensUsed = 60_000;
+    const done = await finished(started.id);
+    expect(runner.wrapUpRun).toHaveBeenCalledWith(workerRun("t1")!.id, "cost");
+    expect(done.status).toBe("stopped");
+    expect(done.timeStop).toBe("cost");
+    const record = await closed(started.id);
+    expect(record.records.filter((r) => r.kind === "stop").map((r) => r.reason)).toEqual(["cost"]);
+  });
+
+  it("uses spare time for extra items — merged one by one — and ends early on NOTHING_LEFT", async () => {
+    outcomes = [
+      { summary: plan([{ task_description: "Scaffold index.html", files_hint: ["index.html"], estimate_minutes: 10 }, { task_description: "Wire app.js", depends_on: ["t1"], files_hint: ["app.js"], estimate_minutes: 10 }]) },
+      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: "app done", filesTouched: ["app.js"] },
+      { summary: "Added tests.\nEXTRA: tests — covered app.js" },
+      { summary: "Looked again.\nNOTHING_LEFT — all covered" },
+    ];
+    const started = await team.startTeam({ goal: "Build it", directory: "site", source: "owner", timeBudget: budget(2 * HOUR) });
+    await finished(started.id);
+    const record = await closed(started.id);
+    const done = team.getTeam(started.id)!;
+    expect(done.status).toBe("done");
+    expect(done.extras?.map((e) => [e.kind, e.summary])).toEqual([["tests", "covered app.js"]]);
+    expect(done.timeStop).toBe("nothing_left");
+    const extraTasks = workerStarts().filter((s) => (s.team as { taskId?: string | null }).taskId === null).map((s) => String(s.task));
+    expect(extraTasks).toHaveLength(2);
+    expect(extraTasks[0]).toContain("EXTRA WORK, item 1 of at most 8.");
+    expect(extraTasks[0]).toMatch(/scope: index\.html, app\.js, test\//);
+    expect(extraTasks[1]).toContain('Already done, so not again: "tests: covered app.js".');
+    expect(plumbing.mergeWorkerBranch).toHaveBeenCalledWith(expect.any(String), expect.stringMatching(/-x1-1$/), expect.stringContaining("extra 1 — tests: covered app.js"));
+    expect(plumbing.mergeWorkerBranch).not.toHaveBeenCalledWith(expect.any(String), expect.stringMatching(/-x2-1$/), expect.any(String));
+    expect(done.log.map((e) => e.message)).toEqual(expect.arrayContaining(["Time budget: Extra work ended after 1 item: nothing valuable is left to do — all covered."]));
+    expect(summaryOf(record).extras).toEqual(["tests: covered app.js"]);
+    expect(record.records.filter((r) => r.kind === "stop").map((r) => r.reason)).toEqual(["nothing_left"]);
+  });
+
+  it("sets aside an extra item that touched a file outside the team's files, unmerged, and ends the extra work", async () => {
+    outcomes = [
+      { summary: plan([{ task_description: "Scaffold index.html", files_hint: ["index.html"], estimate_minutes: 10 }, { task_description: "Wire app.js", depends_on: ["t1"], files_hint: ["app.js"], estimate_minutes: 10 }]) },
+      { summary: "index done", filesTouched: ["index.html"] },
+      { summary: "app done", filesTouched: ["app.js"] },
+      { summary: "EXTRA: fixes — tidied the billing server" },
+    ];
+    plumbing.changedFiles.mockImplementation(async (_dir: string, branch: string) => (/-x1-1$/.test(branch) ? ["server/billing.js"] : committedOn(branch)));
+    const started = await team.startTeam({ goal: "Build it", directory: "site", source: "owner", timeBudget: budget(2 * HOUR) });
+    await finished(started.id);
+    await closed(started.id);
+    const done = team.getTeam(started.id)!;
+    expect(done.status).toBe("done");
+    expect(done.extras ?? []).toEqual([]);
+    expect(done.timeStop).toBe("done");
+    expect(plumbing.mergeWorkerBranch).not.toHaveBeenCalledWith(expect.any(String), expect.stringMatching(/-x1-1$/), expect.any(String));
+    expect(plumbing.removeWorktree).toHaveBeenCalledWith(expect.any(String), expect.stringContaining("x1-1"), { dropBranch: expect.stringMatching(/-x1-1$/) });
+    expect(done.log.map((e) => e.message)).toEqual(expect.arrayContaining([
+      expect.stringMatching(/^Time budget: Extra work ended after 0 items: extra item 1 \(fixes: tidied the billing server\) was refused — "server\/billing\.js" is outside this task's files/),
+    ]));
+  });
+
+  it("hands its budget to the one run a one-task plan becomes", async () => {
+    const b = budget(2 * HOUR);
+    outcomes = [{ summary: plan([{ task_description: "Fix the typo", files_hint: ["README.md"], estimate_minutes: 5 }]) }];
+    const started = await team.startTeam({ goal: "Fix the typo", directory: "site", source: "owner", timeBudget: b });
+    const done = await finished(started.id);
+    expect(done.singleRun).toBe(true);
+    expect(starts[1].timeBudget).toEqual(b);
+    expect(starts[1].team).toBeUndefined();
+    await closed(started.id);
+    expect(team.getTeam(started.id)?.timeStop).toBe("done");
+  });
+
+  it("does not start a queued team whose deadline passed while it waited, and says why", async () => {
+    outcomes = [{ summary: PLAN }];
+    const first = await team.startTeam({ goal: "First", directory: "site", source: "owner" });
+    const second = await team.startTeam({ goal: "Second", directory: "site", source: "owner", timeBudget: budget(-MIN, HOUR) });
+    expect(second.status).toBe("queued");
+    await finished(first.id);
+    const late = await finished(second.id);
+    expect(late.status).toBe("failed");
+    expect(late.error).toMatch(/^Its time budget ended while it waited in the queue \(the deadline was .+\)\. Start it again with a new budget\.$/);
+    expect(late.timeStop).toBe("time");
+    const record = await closed(second.id);
+    expect(record.records.map((r) => r.kind)).toEqual(["budget", "stop"]);
+    // Its planner never ran.
+    expect(starts.some((s) => String(s.task) === "Second")).toBe(false);
+  });
+});
+
+/** The summary a route answers with, worked out from what is stored. */
+function summaryOf(stored: { budget: import("@/lib/coding-time-budget").TimeBudget; records: import("@/lib/coding-time-budget").TimeRecord[] }) {
+  return {
+    extras: stored.records.filter((r) => r.kind === "extra").map((r) => r.text),
+  };
+}
