@@ -256,6 +256,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "tray.batteryMinutes": "{minutes} min",
     "desktop.toast.dismiss": "Dismiss",
     "desktop.toast.openSettings": "Open Settings → {section}",
+    "desktop.chromeNotInstalled": "Google Chrome is not installed on this ClawBox. To install it, open the Terminal in the ClawBox folder and run: sudo bash install.sh --step google_chrome_install",
 
     // === ChatApp ===
     "chat.title": "Chat",
