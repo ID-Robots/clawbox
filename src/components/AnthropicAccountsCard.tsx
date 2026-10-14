@@ -81,7 +81,7 @@ interface PoolView {
   gateway?: { following: boolean; accountId: string | null; label: string | null; available?: boolean } | null;
   /** POST only. */
   verified?: boolean;
-  /** `use_for_chat` only: the model is set and the gateway is still coming back. */
+  /** `use_for_chat` only: the model is set, and the box qualified the save. */
   warning?: string;
 }
 
@@ -315,8 +315,9 @@ export default function AnthropicAccountsCard() {
 
   /**
    * "Use these accounts for the chat too" sets the chat's default model, so
-   * the rest of Settings is told; and a model saved while the gateway is still
-   * coming back says so rather than letting the card claim it settled.
+   * the rest of Settings is told; and a save the box qualified (the gateway
+   * still coming back, say) says so rather than letting the card claim it
+   * settled.
    */
   const putChatOnAccounts = async () => {
     const done = await act({ action: "use_for_chat" }, "chat");

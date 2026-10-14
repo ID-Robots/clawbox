@@ -513,21 +513,40 @@ describe("what core saw", () => {
     expect(accounts.find((a) => a.id === personal.id)?.limitedUntil).toBe(now + 5 * H);
   });
 
-  it("with Anthropic unreachable, leaves a short cooldown to core — no swap ends a live coding run over a throttle", async () => {
+  it("with Anthropic unreachable, leaves core's short cooldowns to core and takes the cap once its back-off reaches five minutes", async () => {
     const core = fakeCore();
     gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    // Core's rate-limit back-off on one account, each failure after the last
+    // window ended: 30 s, 1, 2, 4 min — throttles, so no swap ends a live
+    // coding run — then 8 min, a cap the pool takes over.
+    let at = Date.now();
+    const verdicts: number[] = [];
+    for (const window of [30_000, 60_000, 120_000, 240_000, 480_000]) {
+      core.failures[p(work.id)] = { ...rateLimited(at, at + window), lastFailureAt: at };
+      verdicts.push(await gw.noteGatewayCooldowns(at + 1_000));
+      await swap.whenSwapsSettled();
+      if (verdicts.length < 5) {
+        expect((await pool.readAccounts()).every((a) => a.status === "ok")).toBe(true);
+        expect((await pool.readPoolState()).activeId).toBe(work.id);
+      }
+      at += window + 5_000;
+    }
+    expect(verdicts).toEqual([0, 0, 0, 0, 1]);
+    expect((await pool.readPoolState()).activeId).toBe(personal.id);
+    expect(announceAnthropicLimit).toHaveBeenCalledTimes(1);
+  });
+
+  it("with Anthropic unreachable, judges core's window by its length — a cap first seen late is still a cap", async () => {
+    const core = fakeCore();
     const { work } = await twoClaudeAccounts();
     await gw.keepGatewayMirror();
     const now = Date.now();
-    // Core's first two rate-limit cooldowns: 30 s and a minute, still running.
-    core.failures[p(work.id)] = rateLimited(now, now + 30_000);
-    expect(await gw.noteGatewayCooldowns(now)).toBe(0);
-    core.failures[p(work.id)] = rateLimited(now + 1_000, now + 61_000);
-    expect(await gw.noteGatewayCooldowns(now + 1_000)).toBe(0);
-    await swap.whenSwapsSettled();
-    expect((await pool.readAccounts()).every((a) => a.status === "ok")).toBe(true);
-    expect((await pool.readPoolState()).activeId).toBe(work.id);
-    expect(announceAnthropicLimit).not.toHaveBeenCalled();
+    // An eight-minute window first looked at four minutes in (a web-server restart).
+    core.failures[p(work.id)] = { ...rateLimited(now - 4 * 60_000, now + 4 * 60_000), lastFailureAt: now - 4 * 60_000 };
+    expect(await gw.noteGatewayCooldowns(now)).toBe(1);
+    expect((await pool.readAccounts()).find((a) => a.id === work.id)?.limitedUntil).toBe(now + 4 * 60_000);
   });
 
   it("with Anthropic unreachable and core's window over, sets nothing aside", async () => {

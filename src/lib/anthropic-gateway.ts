@@ -257,11 +257,11 @@ const FIRST_LOOK_BACK_MS = 15 * 60_000;
  */
 const MAX_KEEPER_BACKOFF_MS = 2 * 60 * 60_000;
 /**
- * With Anthropic's usage unreadable, the shortest core cooldown the pool takes
- * for a cap. Core's rate-limit back-off doubles from 30 s (30 s, 1, 2, 4, 8 min
- * …), so a capped account crosses this within a few failures, while a throttle
- * stays core's alone: setting an account aside moves every consumer, and ends
- * a live coding run on it.
+ * With Anthropic's usage unreadable, the shortest core cooldown — as core set
+ * it, from the failure to its end — the pool takes for a cap. Core's rate-limit
+ * back-off doubles from 30 s (30 s, 1, 2, 4, 8 min …), so a capped account
+ * crosses this within a few failures, while a throttle stays core's alone:
+ * setting an account aside moves every consumer, and ends a live coding run on it.
  */
 const UNREAD_LIMIT_MIN_MS = 5 * 60_000;
 /** Which of the Anthropic orders the pool wrote, so taking the pool out undoes exactly those (config store). */
@@ -650,7 +650,7 @@ async function noteCooldownsLocked(now: number): Promise<number> {
         console.error(`[anthropic-gateway] core saw account ${account.id}'s credential refused in a gateway turn; asked again, it is ${verdict}`);
         acted += 1;
       } else {
-        acted += await recordLimit(account, seen, now);
+        acted += await recordLimit(account, seen, at, now);
       }
       seenBy.set(profileId, at);
     } catch (err) {
@@ -663,7 +663,7 @@ async function noteCooldownsLocked(now: number): Promise<number> {
 }
 
 /** One limit core saw, in the pool until Anthropic's reset — or nothing, for a window that is not spent. */
-async function recordLimit(account: AnthropicAccount, seen: { limitKind: AnthropicLimitKind; until: number }, now: number): Promise<number> {
+async function recordLimit(account: AnthropicAccount, seen: { limitKind: AnthropicLimitKind; until: number }, failedAt: number, now: number): Promise<number> {
   if (effectiveStatus(account, now) === "limited" && (account.limitedUntil ?? 0) >= seen.until) return 0;
   let until = seen.until;
   let kind = seen.limitKind;
@@ -681,10 +681,12 @@ async function recordLimit(account: AnthropicAccount, seen: { limitKind: Anthrop
       until = reading.resetsAt !== null && reading.resetsAt > now ? reading.resetsAt : now + DEFAULT_LIMIT_MS;
     } else {
       // Anthropic could not be asked: a short window is a throttle core's own
-      // cooldown covers; a long one is core's own window, never longer than
-      // the longest session window — core's backoff grows past a day.
-      if (seen.until - now < UNREAD_LIMIT_MIN_MS) {
-        console.error(`[anthropic-gateway] core cooled account ${account.id} down on a rate limit and its usage could not be read; a window this short is left to core`);
+      // cooldown and rotation cover; a long one is core's own window, never
+      // longer than the longest session window — core's backoff grows past a
+      // day. Judged by the window core set, not by what is left of it when
+      // this look comes.
+      if (seen.until > now && seen.until - failedAt < UNREAD_LIMIT_MIN_MS) {
+        console.error(`[anthropic-gateway] core cooled account ${account.id} down for under five minutes on a rate limit and its usage could not be read; left to core`);
         return 0;
       }
       until = Math.min(seen.until, now + DEFAULT_LIMIT_MS);
