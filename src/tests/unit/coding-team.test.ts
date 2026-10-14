@@ -2540,6 +2540,30 @@ describe("a second team: queued, not refused", () => {
     expect(team.getTeam(second.id)?.status).toBe("stopped");
   });
 
+  it("keeps the time budget it was started with on its board — a queued one's on disk too — and none without one", async () => {
+    const BUDGET = {
+      deadline: "2026-10-15T05:00:00.000Z", label: "Until tomorrow morning", preset: "morning", source: "picker", setAt: "2026-10-14T15:00:00.000Z",
+    } as const;
+    const board = await import("@/lib/coding-team-board");
+    let release: () => void = () => {};
+    runner.waitForRun.mockImplementationOnce(() => new Promise((r) => { release = () => r(runs.get("run-00000001")); }));
+    const first = await team.startTeam({ goal: "g", source: "owner", timeBudget: { ...BUDGET } });
+    expect(first.timeBudget).toEqual(BUDGET);
+    const second = await team.startTeam({ goal: "h", source: "agent", timeBudget: { ...BUDGET, preset: "1d", label: "1 day" } });
+    expect(second).toMatchObject({ status: "queued", timeBudget: { preset: "1d", label: "1 day" } });
+    expect(board.loadBoard(second.id)?.timeBudget).toMatchObject({ preset: "1d" });
+    const third = await team.startTeam({ goal: "i", source: "agent" });
+    expect(third).not.toHaveProperty("timeBudget");
+    expect(board.loadBoard(third.id)).not.toHaveProperty("timeBudget");
+    team.cancelQueuedTeam(second.id);
+    team.cancelQueuedTeam(third.id);
+    Object.assign(runs.get("run-00000001")!, { status: "completed", summary: "nope" });
+    outcomes = [{ summary: "nope" }];
+    release();
+    await finished(first.id);
+    expect(team.getTeam(first.id)?.timeBudget).toEqual(BUDGET);
+  });
+
   it("is started at boot when it was waiting at a restart", async () => {
     // What a restart leaves: a queued board on disk and no team in this process.
     const board = await import("@/lib/coding-team-board");

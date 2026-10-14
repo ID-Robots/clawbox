@@ -632,6 +632,15 @@ describe("the default time budget", () => {
     expect(configSet).toHaveBeenLastCalledWith("coding_agent_default_budget", undefined);
   });
 
+  it("answers with the status re-read after the write, carrying the default — or null once cleared", async () => {
+    getStatus.mockResolvedValueOnce({ ...STATUS, defaultTimeBudget: "morning", timeZone: "Europe/Sofia" });
+    const saved = await (await POST(request({ cookie: ownerCookie(), body: { defaultTimeBudget: "morning" } }))).json();
+    expect(saved).toMatchObject({ defaultTimeBudget: "morning", timeZone: "Europe/Sofia" });
+    getStatus.mockResolvedValueOnce({ ...STATUS, defaultTimeBudget: null, timeZone: "Europe/Sofia" });
+    const cleared = await (await POST(request({ cookie: ownerCookie(), body: { defaultTimeBudget: null } }))).json();
+    expect(cleared.defaultTimeBudget).toBeNull();
+  });
+
   it("refuses what is not a chip BEFORE any setting in the same body is written", async () => {
     for (const bad of ["custom", "2h", 30, true, ""]) {
       vi.mocked(configSet).mockClear();

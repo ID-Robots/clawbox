@@ -426,7 +426,7 @@ import {
   runHookScriptPath,
   runHookSettings,
 } from "@/lib/coding-run-inbox";
-import { BUDGET_PRESET_CHIPS, isBudgetChip, readTimeBudget, type BudgetChip, type TimeBudget } from "@/lib/coding-time-budget";
+import { BUDGET_PRESET_CHIPS, isBudgetChip, readTimeBudget, remainingMs, type BudgetChip, type TimeBudget } from "@/lib/coding-time-budget";
 
 // ─── Tunables ────────────────────────────────────────────────────────────────
 
@@ -2363,7 +2363,10 @@ export interface StartRunInput {
    * The time budget the ROUTE resolved (src/lib/coding-time-budget.ts) — the
    * picker, the task's words or the owner's default, already an absolute
    * deadline. Re-read through `readTimeBudget` here, so a malformed one is no
-   * budget rather than a run that cannot start. Absent: no budget, as before.
+   * budget rather than a run that cannot start. Absent: no budget, as before —
+   * except on a continuation (`resumeRunId`), which then carries the budget of
+   * the run it continues while that deadline is ahead (`startBudget`); `null`
+   * is the caller's explicit "none" and carries nothing.
    */
   timeBudget?: TimeBudget | null;
 }
@@ -4281,6 +4284,21 @@ function normalizeRun(raw: CodingRun): CodingRun {
 /** `{ timeBudget }` when there is one, `{}` when not — the field is absent on a run without a budget, never null. */
 function withTimeBudget(budget: TimeBudget | null | undefined): { timeBudget?: TimeBudget } {
   return budget ? { timeBudget: budget } : {};
+}
+
+/**
+ * The budget a run starts with: the one it was given; else, for a run that
+ * CONTINUES another — a resume, a Fix CI, the automatic review pass, a
+ * review-loop round — that run's own, while its deadline is still ahead: the
+ * same work keeps the same deadline, and a spent one is not carried into a
+ * fresh start. `null` given is an explicit "no budget" and carries nothing.
+ */
+function startBudget(given: unknown, previous: CodingRun | null): TimeBudget | null {
+  if (given === null) return null;
+  const own = readTimeBudget(given);
+  if (own) return own;
+  const carried = previous?.timeBudget ?? null;
+  return carried && remainingMs(carried, Date.now()) > 0 ? carried : null;
 }
 
 /** A run's CI failure off disk, or null — rendered on its page and quoted to the next run, so re-read, never trusted. */
@@ -12384,7 +12402,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       cpuBudget,
       experience: experience?.record ?? null,
       experienceBrief: experience?.brief ?? null,
-      timeBudget: readTimeBudget(input.timeBudget),
+      timeBudget: startBudget(input.timeBudget, previous),
     });
     // THE FILES THIS RUN WAS GIVEN, staged before anything else: the task
     // context names the folder, so what is in it has to be true by the time the
@@ -13534,9 +13552,11 @@ async function queueRun(input: StartRunInput): Promise<CodingRun> {
   let projectId: string | null;
   let inherited: { provider: CodingProvider; model: string | null } | null = null;
   let fixing: CodingRun | null = null;
+  let continued: CodingRun | null = null;
   if (resumeRunId) {
     const previous = loadRuns().find((r) => r.id === resumeRunId) ?? null;
     if (!previous) throw new CodingAgentError("not_found", "There is no coding run with that id to resume.");
+    continued = previous;
     if (!previous.sessionId && input.freshSession !== true) {
       throw new CodingAgentError("invalid", "That run never started a Claude Code session, so it cannot be resumed. Start a new run instead.");
     }
@@ -13552,7 +13572,8 @@ async function queueRun(input: StartRunInput): Promise<CodingRun> {
     ({ directory, projectId } = await resolveWorkingDirectory(input));
   }
   const settings = await applyProviderChoice(await readRunSettings(), input, inherited);
-  const timeBudget = readTimeBudget(input.timeBudget);
+  // Decided now, the way startRun decides it: what the queued start carries is final.
+  const timeBudget = startBudget(input.timeBudget, continued);
   const run = newRunRecord({ task, directory, projectId, source: input.source, status: "queued", settings, deliverable: requireDeliverable(input), timeBudget });
   // Claimed now, so the failure is not offered a second Fix CI while this one waits.
   if (fixing?.ci) fixing.ci = { ...fixing.ci, fixRunId: run.id };
@@ -13628,8 +13649,9 @@ function startQueuedRun(id: string): Promise<CodingRun> {
       fixCi: start.fixCi === true,
       source: run.source,
       queuedRunId: id,
-      // The deadline it was queued with: absolute, so the wait counts against it.
-      ...withTimeBudget(readTimeBudget(start.timeBudget)),
+      // The deadline it was queued with: absolute, so the wait counts against
+      // it. None is passed as null — decided at queue time, never re-carried.
+      timeBudget: readTimeBudget(start.timeBudget),
     });
   });
 }

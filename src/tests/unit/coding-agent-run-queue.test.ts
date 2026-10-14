@@ -278,4 +278,41 @@ describe("a run's time budget", () => {
     const a = await lib.startOrQueueRun({ task: "one", directory: "alpha", source: "owner", timeBudget: { ...BUDGET, deadline: "tomorrow" } as never });
     expect(a.run).not.toHaveProperty("timeBudget");
   });
+
+  it("carries over to a continuation that names none while its deadline is ahead — not a spent one, and not past an explicit null", async () => {
+    const isoAt = (offsetMs: number) => new Date(Date.now() + offsetMs).toISOString();
+    const ahead = { ...BUDGET, setAt: isoAt(-60_000), deadline: isoAt(3_600_000) };
+    const spent = { ...BUDGET, setAt: isoAt(-7_200_000), deadline: isoAt(-60_000) };
+    fs.writeFileSync(flag, "go");
+    const p = await lib.startOrQueueRun({ task: "build it", directory: "alpha", source: "owner", timeBudget: ahead });
+    await finished(p.run.id);
+    const old = await lib.startOrQueueRun({ task: "old work", directory: "beta", source: "owner", timeBudget: spent });
+    await finished(old.run.id);
+
+    // A resume naming none: the same work, the same deadline.
+    const resumed = await lib.startOrQueueRun({ task: "carry on", resumeRunId: p.run.id, source: "owner" });
+    expect(resumed.queued).toBe(false);
+    expect(resumed.run.timeBudget).toEqual(ahead);
+    await finished(resumed.run.id);
+    // The caller's "none" (null): nothing carried.
+    const bare = await lib.startOrQueueRun({ task: "carry on", resumeRunId: p.run.id, source: "owner", timeBudget: null });
+    expect(bare.run).not.toHaveProperty("timeBudget");
+    await finished(bare.run.id);
+    // A deadline already gone is not carried into a fresh start.
+    const late = await lib.startOrQueueRun({ task: "carry on", resumeRunId: old.run.id, source: "owner" });
+    expect(late.run).not.toHaveProperty("timeBudget");
+    await finished(late.run.id);
+
+    // The same rule when the continuation has to wait: decided as it is queued.
+    fs.rmSync(flag, { force: true });
+    await lib.startOrQueueRun({ task: "busy", directory: "gamma", source: "owner" });
+    const waiting = await lib.startOrQueueRun({ task: "carry on", resumeRunId: p.run.id, source: "owner" });
+    expect(waiting.queued).toBe(true);
+    expect(waiting.run.timeBudget).toEqual(ahead);
+    const stored = onDisk().find((r) => r.id === waiting.run.id) as unknown as { queued: { start: { timeBudget?: unknown } } };
+    expect(stored.queued.start.timeBudget).toEqual(ahead);
+    await lib.cancelQueuedRun(waiting.run.id);
+    const waitingBare = await lib.startOrQueueRun({ task: "carry on", resumeRunId: p.run.id, source: "owner", timeBudget: null });
+    expect(waitingBare.run).not.toHaveProperty("timeBudget");
+  });
 });

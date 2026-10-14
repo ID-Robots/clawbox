@@ -21,9 +21,11 @@ const startOrQueueRun = vi.hoisted(() => vi.fn());
 const getDefaultTimeBudget = vi.hoisted(() => vi.fn());
 // The owner's token cap: a long budget's default spend ceiling. None unless a case sets one.
 const getTokenLimit = vi.hoisted(() => vi.fn());
+// What a budget routed to a team is gated on first: ready unless a case says not.
+const checkReadiness = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/coding-agent", async () => {
   const actual = await vi.importActual<typeof import("@/lib/coding-agent")>("@/lib/coding-agent");
-  return { ...actual, startRun, startOrQueueRun, getDefaultTimeBudget, getTokenLimit };
+  return { ...actual, startRun, startOrQueueRun, getDefaultTimeBudget, getTokenLimit, checkReadiness };
 });
 // A budget over 30 minutes starts a TEAM instead of the run.
 const startTeam = vi.hoisted(() => vi.fn());
@@ -68,6 +70,7 @@ beforeEach(async () => {
   startOrQueueRun.mockImplementation(async (input: unknown) => ({ run: await startRun(input), queued: false }));
   getDefaultTimeBudget.mockResolvedValue(null);
   getTokenLimit.mockResolvedValue(null);
+  checkReadiness.mockResolvedValue({ ready: true, problems: [] });
   startTeam.mockResolvedValue(TEAM);
   const lib = await import("@/lib/coding-agent");
   CodingAgentError = lib.CodingAgentError;
@@ -443,6 +446,98 @@ describe("the time budget", () => {
     const res = await POST(req({ body: { task: "Build it", projectId: "site", budget: "1d" } }));
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual({ error: "There are already 3 coding teams waiting.", kind: "busy" });
+  });
+
+  it("lets the task's words beat the owner's default", async () => {
+    getDefaultTimeBudget.mockResolvedValue("1d");
+    const body = await (await POST(req({ body: { task: "You have 2 hours to build it", projectId: "site" } }))).json();
+    expect(body).toMatchObject({ routedToTeam: true, timeBudget: { source: "text", label: "2 hours", preset: "custom" } });
+    const short = await (await POST(req({ body: { task: "Fix the typo. You have 30 minutes.", projectId: "site" } }))).json();
+    expect(short).toMatchObject({ run: RUN, timeBudget: { source: "text", preset: "30m" } });
+  });
+
+  it("keeps a long budget on one run for EVERY field only a run carries, naming it", async () => {
+    const fields: Record<string, unknown> = {
+      provider: "anthropic", model: "claude-sonnet-5", deliverable: { kind: "paths", paths: ["app.js"] }, pipeline: true, experience: { brief: "x" },
+    };
+    for (const [field, value] of Object.entries(fields)) {
+      startTeam.mockClear();
+      const body = await (await POST(req({ body: { task: "Build it", projectId: "site", budget: "2h", [field]: value } }))).json();
+      expect(body, field).toMatchObject({ run: RUN, routedToTeam: false, timeBudget: { label: "2 hours" } });
+      expect(body.routeNote, field).toContain(field);
+      expect(lastRunInput()[field], field).toEqual(value);
+      expect(startTeam, field).not.toHaveBeenCalled();
+    }
+  });
+
+  it("routes 31 minutes to a team, and measures a picked period from its start, not from now", async () => {
+    const body = await (await POST(req({ body: { task: "Build it", projectId: "site", budget: "31m" } }))).json();
+    expect(body).toMatchObject({ routedToTeam: true, timeBudget: { label: "31 minutes" } });
+    expect(startTeam).toHaveBeenCalledTimes(1);
+    // Two hours away, but only 30 minutes long: one run.
+    const start = new Date(Date.now() + 120 * MIN).toISOString();
+    const end = new Date(Date.now() + 150 * MIN).toISOString();
+    const period = await (await POST(req({ body: { task: "Build it", projectId: "site", budget: { preset: "custom", start, end } } }))).json();
+    expect(period).toMatchObject({ run: RUN, timeBudget: { preset: "custom", start, deadline: end } });
+    expect(startTeam).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats a blank resume id as the fresh run startRun makes of it — default and routing included", async () => {
+    getDefaultTimeBudget.mockResolvedValue("1h");
+    const body = await (await POST(req({ body: { task: "Build it", projectId: "site", resumeRunId: "   " } }))).json();
+    expect(body).toMatchObject({ routedToTeam: true, timeBudget: { preset: "1h", source: "default" } });
+  });
+
+  it("passes a continuation's explicit \"none\" as null, so it carries no budget over; naming none passes nothing", async () => {
+    await POST(req({ body: { task: "Carry on", resumeRunId: "run-aaaaaaaa", budget: "none" } }));
+    expect(lastRunInput()).toMatchObject({ resumeRunId: "run-aaaaaaaa", timeBudget: null });
+    await POST(req({ body: { task: "Carry on", resumeRunId: "run-aaaaaaaa" } }));
+    expect(lastRunInput()).not.toHaveProperty("timeBudget");
+    // A NEW run's "none" is no budget either way: the field stays absent.
+    await POST(req({ body: { task: "Build it", projectId: "site", budget: "none" } }));
+    expect(lastRunInput()).not.toHaveProperty("timeBudget");
+  });
+
+  it("answers 409 not_ready — as a run would — before saving a team on a box that cannot run one", async () => {
+    checkReadiness.mockResolvedValueOnce({ ready: false, problems: ["ClawBox AI is not connected."] });
+    const res = await POST(req({ body: { task: "Build it", projectId: "site", budget: "1d" } }));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: "ClawBox AI is not connected.", kind: "not_ready" });
+    expect(startTeam).not.toHaveBeenCalled();
+    expect(startOrQueueRun).not.toHaveBeenCalled();
+    // A short budget is not gated here: the run's own start answers for it.
+    checkReadiness.mockResolvedValueOnce({ ready: false, problems: ["x"] });
+    expect((await POST(req({ body: { task: "Build it", projectId: "site", budget: "30m" } }))).status).toBe(202);
+  });
+
+  it("turns an unexpected failure starting the team into a 500 with a plain message", async () => {
+    startTeam.mockRejectedValueOnce(new Error("disk full"));
+    const res = await POST(req({ body: { task: "Build it", projectId: "site", budget: "1d" } }));
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({ error: "disk full" });
+  });
+
+  it("starts without a default, without a cap and on UTC when it cannot read them — never refusing the run", async () => {
+    // The bearer: a cookie session reads the clock this case pins.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-10-14T15:00:00Z"));
+      getDefaultTimeBudget.mockRejectedValue(new Error("config unreadable"));
+      getTokenLimit.mockRejectedValue(new Error("config unreadable"));
+      const plain = await POST(req({ auth: "bearer", body: { task: "Build it", projectId: "site" } }));
+      expect(await plain.json()).toEqual({ started: true, queued: false, run: RUN });
+      const day = await (await POST(req({ auth: "bearer", body: { task: "Build it", projectId: "site", budget: "1d" } }))).json();
+      expect(day.timeBudget).not.toHaveProperty("tokenCap");
+      // On the box's zone (Sofia here) the morning is 08:00 EEST; with no zone, 08:00 UTC.
+      const sofia = await (await POST(req({ auth: "bearer", body: { task: "Build it", projectId: "site", budget: "morning" } }))).json();
+      expect(sofia.timeBudget.deadline).toBe("2026-10-15T05:00:00.000Z");
+      const tz = await import("@/lib/timezone");
+      vi.mocked(tz.readOsTimeZone).mockRejectedValueOnce(new Error("no zone"));
+      const utc = await (await POST(req({ auth: "bearer", body: { task: "Build it", projectId: "site", budget: "morning" } }))).json();
+      expect(utc.timeBudget.deadline).toBe("2026-10-15T08:00:00.000Z");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("gives a budget over two hours the owner's token cap as its spend ceiling, and takes one named with it", async () => {

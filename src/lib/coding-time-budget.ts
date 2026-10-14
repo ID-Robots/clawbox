@@ -98,8 +98,10 @@ export const MAX_BUDGET_MS = 14 * DAY_MS;
 export const MORNING_HOUR = 8;
 /** …at least this far away: at 07:30 "until tomorrow morning" means tomorrow, not half an hour. */
 export const MORNING_MIN_LEAD_MS = HOUR_MS;
-/** A day named without a time ("until Friday") ends at this hour; "tomorrow" alone ends at MORNING_HOUR. */
+/** A day named without a time ("until Friday") ends at this hour; "tomorrow" alone ends at MORNING_HOUR. Also "evening" and "end of day". */
 export const END_OF_DAY_HOUR = 18;
+/** "Tonight", "tomorrow night": this hour of that day. */
+export const NIGHT_HOUR = 22;
 /** The longest label this box writes or reads back. */
 export const MAX_BUDGET_LABEL_CHARS = 120;
 /** A budget LONGER than this, naming no spend ceiling, takes the owner's token cap as one. */
@@ -446,7 +448,9 @@ export function parseBudgetToken(token: string, now: Now, tz: string): BudgetRes
   if (!raw || raw.length > MAX_TOKEN_CHARS) return unknown();
   const lower = raw.toLowerCase();
   if (lower === "none") return { ok: true, budget: null };
-  const chip = isBudgetChip(lower) ? lower : TOKEN_ALIASES[lower];
+  // An OWN key only: "constructor" or "__proto__" is not an alias, and reading
+  // one off the prototype made a deadline of NaN — a 500 rather than this 400.
+  const chip = isBudgetChip(lower) ? lower : Object.prototype.hasOwnProperty.call(TOKEN_ALIASES, lower) ? TOKEN_ALIASES[lower] : undefined;
   if (chip) return { ok: true, budget: presetBudget(chip, now, tz, "picker") };
   const duration = parseDuration(raw);
   if (duration !== null) return durationBudget(duration, now, "picker");
@@ -583,7 +587,7 @@ const NUMBER_WORD_RE = Object.keys(NUMBER_WORDS).sort((a, b) => b.length - a.len
 
 /** Unit words, longest first so a shorter one never wins on a prefix. */
 const UNIT_WORDS: [string, number][] = [
-  ["денонощия", DAY_MS], ["денонощие", DAY_MS], ["minutes", MINUTE_MS], ["minuten", MINUTE_MS], ["минути", MINUTE_MS],
+  ["денонощия", DAY_MS], ["денонощие", DAY_MS], ["minutes", MINUTE_MS], ["minuten", MINUTE_MS], ["часове", HOUR_MS], ["минути", MINUTE_MS],
   ["минута", MINUTE_MS], ["stunden", HOUR_MS], ["minute", MINUTE_MS], ["stunde", HOUR_MS], ["hours", HOUR_MS],
   ["часът", HOUR_MS], ["tagen", DAY_MS], ["hour", HOUR_MS], ["mins", MINUTE_MS], ["часа", HOUR_MS], ["days", DAY_MS],
   ["tage", DAY_MS], ["дена", DAY_MS], ["hrs", HOUR_MS], ["min", MINUTE_MS], ["мин", MINUTE_MS], ["час", HOUR_MS],
@@ -593,8 +597,10 @@ const UNIT_WORDS: [string, number][] = [
 const SHORT_UNITS: Record<string, number> = { m: MINUTE_MS, h: HOUR_MS, d: DAY_MS, ч: HOUR_MS };
 const UNIT_RE = UNIT_WORDS.map(([w]) => w).join("|");
 const HALF_RE = "(?:and\\s+a\\s+half|и\\s+половина|und\\s+ein\\s+halb)";
-/** Words that may stand between the cue and the amount: "you have ABOUT 2 hours". */
-const APPROX_RE = "(?:(?:up\\s+to|about|around|roughly|approximately|approx\\.?|около|приблизително|ungefähr|ungefaehr|etwa|circa|ca\\.)\\s+)?";
+/** Words that may stand between the cue and the amount, at most two: "you have ABOUT 2 hours", "du hast NOCH ETWA 2 Stunden", "имаш ОЩЕ 30 минути". */
+const APPROX_RE = "(?:(?:up\\s+to|about|around|roughly|approximately|approx\\.?|still|only|just|at\\s+most|at\\s+least|"
+  + "около|приблизително|още|само|най-много|поне|"
+  + "ungefähr|ungefaehr|etwa|circa|ca\\.|noch|nur|höchstens|hoechstens|mindestens)\\s+){0,2}";
 
 const unitMs = (word: string): number => {
   const w = word.toLowerCase();
@@ -623,14 +629,18 @@ interface DurationHit {
 }
 
 /** The units Bulgarian says without a number: "имаш час" is "you have an hour". Nothing else stands bare — "you have days of data" is no budget. */
-const BARE_UNITS = new Set(["час", "ден"]);
+const BARE_UNITS: ReadonlySet<string> = new Set(["час", "ден"]);
+/** …and the ones any language says bare after "next": "for the next hour", "für die nächste Stunde", "през следващия час". */
+const NEXT_BARE_UNITS: ReadonlySet<string> = new Set([...BARE_UNITS, "hour", "day", "stunde", "tag"]);
+/** A cue that ends in "next", which lets the unit after it stand without a number. */
+const ENDS_IN_NEXT_RE = /(?:next|nächsten?|naechsten?|следващия|следващите)$/iu;
 
 /**
- * A length of time at the very start of `rest`. `bare` allows a unit with no
- * number ("имаш час") — only behind a real cue word, never as a clause of its
- * own.
+ * A length of time at the very start of `rest`. `bare` lists the units that
+ * may stand with no number ("имаш час") — only behind a real cue word, never
+ * as a clause of its own.
  */
-function durationAt(rest: string, bare: boolean): DurationHit | null {
+function durationAt(rest: string, bare: ReadonlySet<string> | null): DurationHit | null {
   for (const [re, ms] of SPECIAL_DURATIONS) {
     const m = re.exec(rest);
     if (m) return { len: m[0].length, ms };
@@ -647,7 +657,7 @@ function durationAt(rest: string, bare: boolean): DurationHit | null {
     if (m[4]) amount += 0.5;
     unit = m[5];
   } else {
-    if (!bare || !BARE_UNITS.has(m[6].toLowerCase())) return null;
+    if (!bare || !bare.has(m[6].toLowerCase())) return null;
     amount = 1;
     unit = m[6];
   }
@@ -672,13 +682,37 @@ const MORNING_RE = new RegExp(
   `^(?:(?:tomorrow\\s+)?(?:the\\s+)?morning|(?:утре\\s+)?сутрин(?:та)?|morgen\\s+(?:früh|frueh|in\\s+der\\s+früh|vormittag))${RIGHT}`,
   "iu",
 );
-/** A day: today, tomorrow, the day after, a weekday, or an ISO date. */
+/** The hour a deadline naming a part of a day ends at: "tomorrow evening" is 18:00, "Friday morning" 08:00, "at noon" 12:00. */
+const DAY_PART_HOURS: Record<string, number> = {
+  morning: MORNING_HOUR, noon: 12, midday: 12, afternoon: 15, evening: END_OF_DAY_HOUR, night: NIGHT_HOUR,
+  сутрин: MORNING_HOUR, сутринта: MORNING_HOUR, обяд: 12, обед: 12, следобед: 15, следобяд: 15,
+  вечер: END_OF_DAY_HOUR, вечерта: END_OF_DAY_HOUR, нощта: NIGHT_HOUR,
+  früh: MORNING_HOUR, frueh: MORNING_HOUR, morgen: MORNING_HOUR, vormittag: MORNING_HOUR, mittag: 12,
+  nachmittag: 15, abend: END_OF_DAY_HOUR, nacht: NIGHT_HOUR,
+};
+const DAY_PART_WORDS_RE = Object.keys(DAY_PART_HOURS).sort((a, b) => b.length - a.length).join("|");
+/** A part of the day after the day it is part of: " evening", " in the afternoon", " at noon", " сутринта", " am Abend". */
+const DAY_PART_RE = new RegExp(`^\\s+(?:(?:in\\s+the|at|на|през|am|in\\s+der)\\s+)?(${DAY_PART_WORDS_RE})${RIGHT}`, "iu");
+/** The parts German glues onto a weekday: "Freitagabend", "Montagmorgen". */
+const GLUED_PARTS_RE = "nachmittag|vormittag|morgen|mittag|abend|nacht|früh|frueh";
+/** "End of day", said of today: "until end of day", "до края на деня", "bis Feierabend". */
+const END_OF_DAY_RE = "(?:the\\s+)?end\\s+of\\s+(?:the\\s+)?(?:(?:work(?:ing)?|business)\\s+)?day|eod|close\\s+of\\s+business|"
+  + "края\\s+на\\s+(?:работния\\s+)?деня|tagesende|(?:dem\\s+)?ende\\s+des\\s+(?:arbeits)?tages|feierabend|dienstschluss";
+/**
+ * A day: today ("this" only before a part of it — "this evening"), tonight,
+ * end of day, tomorrow, the day after, a weekday (German may glue a part of
+ * the day on: "Freitagabend"), or an ISO date.
+ */
 const DAY_RE = new RegExp(
-  `^(?:(today|днес|heute)|(tomorrow|утре|morgen)|((?:the\\s+)?day\\s+after\\s+tomorrow|вдругиден|übermorgen|uebermorgen)|${DAY_PREFIX_RE}(${WEEKDAY_RE})|(\\d{4})-(\\d{2})-(\\d{2}))${RIGHT}`,
+  `^(?:(?<today>today|днес|heute|this(?=\\s+(?:morning|noon|afternoon|evening)${RIGHT}))|(?<tonight>tonight|довечера)|(?<eod>${END_OF_DAY_RE})`
+    + `|(?<tomorrow>tomorrow|утре|morgen)|(?<after>(?:the\\s+)?day\\s+after\\s+tomorrow|вдругиден|übermorgen|uebermorgen)`
+    + `|${DAY_PREFIX_RE}(?<weekday>${WEEKDAY_RE})(?<glued>${GLUED_PARTS_RE})?|(?<y>\\d{4})-(?<mo>\\d{2})-(?<d>\\d{2}))${RIGHT}`,
   "iu",
 );
 const CONNECTOR_RE = /^(?:\s*,)?\s+(?:(?:at\s+around|at|@|um|в|около|gegen)\s+)?/iu;
 const AT_WORD_RE = /^(?:\s*,)?\s+(?:at\s+around|at|@|um|в|около|gegen)\s+/iu;
+/** Before a time that follows a part of the day: spaces and an optional "at" — no comma, since "… morning, at 10 we deploy" is a clause of its own. */
+const TRAILING_AT_RE = /^\s+(?:(?:at\s+around|at|@|um|в|около|gegen)\s+)?/iu;
 /** Clock times: "6pm", "6:30 p.m.", "18:00", "18h30", "18.00 Uhr", "18 ч.", "18 Uhr". */
 const TIME_RE = new RegExp(
   "^(?:(\\d{1,2})(?::(\\d{2}))?\\s*(a\\.?m\\.?|p\\.?m\\.?)"
@@ -694,6 +728,8 @@ interface ClockHit {
   len: number;
   hour: number;
   minute: number;
+  /** Said with a.m. or p.m. — so a part of the day does not move it ("evening at 7am" is what it says). */
+  marked: boolean;
 }
 
 /** A clock time at the start of `rest`; a bare hour only when `bareHour` (behind "at"/"um"/"в"). */
@@ -719,13 +755,75 @@ function clockAt(rest: string, bareHour: boolean): ClockHit | null {
       minute = 0;
     }
     if (hour > 23 || minute > 59) return null;
-    return { len: m[0].length, hour, minute };
+    return { len: m[0].length, hour, minute, marked: m[1] !== undefined };
   }
   if (bareHour) {
     const b = BARE_HOUR_RE.exec(rest);
-    if (b && Number(b[1]) <= 23) return { len: b[0].length, hour: Number(b[1]), minute: 0 };
+    if (b && Number(b[1]) <= 23) return { len: b[0].length, hour: Number(b[1]), minute: 0, marked: false };
   }
   return null;
+}
+
+/** A clock time following a part of the day — "… at 7", "… 18:00", "… um 20 Uhr" — with the spaces before it. */
+function clockAfter(rest: string): ClockHit | null {
+  const conn = TRAILING_AT_RE.exec(rest);
+  if (!conn) return null;
+  const clock = clockAt(rest.slice(conn[0].length), conn[0].trim() !== "");
+  return clock ? { ...clock, len: conn[0].length + clock.len } : null;
+}
+
+/** A time said within a part of the day: "evening at 7" is 19:00, "afternoon at 3" 15:00; "7pm", "19:00" and a morning's hours stay as said. */
+function hourWithinPart(clock: ClockHit, partHour: number): number {
+  const h = clock.hour;
+  if (clock.marked || partHour < 12 || h < 1 || h >= 12) return h;
+  // "Tonight at 1" is the small hours, not 13:00.
+  if (partHour === NIGHT_HOUR && h < 6) return h;
+  return h + 12;
+}
+
+interface DayHit {
+  len: number;
+  year: number;
+  month: number;
+  day: number;
+  /** The hour it ends at when no time is named. */
+  hour: number;
+  /** A part of the day came with it (tonight, end of day, "Freitagabend"): a bare "at 7" then reads within that part. */
+  part: boolean;
+  /** A weekday: one already gone this week is next week's. */
+  rollWeek: boolean;
+}
+
+/** A day at the start of `rest` (see DAY_RE), as a calendar date on the box's wall clock. */
+function dayAt(rest: string, today: LocalParts): DayHit | null {
+  const m = DAY_RE.exec(rest);
+  const g = m?.groups;
+  if (!m || !g) return null;
+  const on = (n: number) => addDays(today.year, today.month, today.day, n);
+  const hit = (date: { year: number; month: number; day: number }, hour: number, part = false, rollWeek = false): DayHit =>
+    ({ len: m[0].length, ...date, hour, part, rollWeek });
+  if (g.today !== undefined) return hit(on(0), END_OF_DAY_HOUR);
+  if (g.tonight !== undefined) return hit(on(0), NIGHT_HOUR, true);
+  if (g.eod !== undefined) return hit(on(0), END_OF_DAY_HOUR, true);
+  if (g.tomorrow !== undefined) return hit(on(1), MORNING_HOUR);
+  if (g.after !== undefined) return hit(on(2), END_OF_DAY_HOUR);
+  if (g.weekday !== undefined) {
+    const wd = WEEKDAYS[g.weekday.toLowerCase()] ?? 0;
+    const glued = g.glued !== undefined ? DAY_PART_HOURS[g.glued.toLowerCase()] : undefined;
+    return hit(on((wd - today.weekday + 7) % 7), glued ?? END_OF_DAY_HOUR, glued !== undefined, true);
+  }
+  const [y, mo, d] = [Number(g.y), Number(g.mo), Number(g.d)];
+  const check = new Date(Date.UTC(y, mo - 1, d));
+  if (mo < 1 || mo > 12 || check.getUTCMonth() !== mo - 1 || check.getUTCDate() !== d) return null;
+  return hit({ year: y, month: mo, day: d }, END_OF_DAY_HOUR);
+}
+
+/** `hour:minute` on that day, box-local. "Until Friday" said on a Friday evening is next Friday, not a deadline already gone. */
+function dayInstant(day: DayHit, hour: number, minute: number, now: number, tz: string): number {
+  const at = zonedToUtc(day.year, day.month, day.day, hour, minute, tz);
+  if (!day.rollWeek || at > now) return at;
+  const next = addDays(day.year, day.month, day.day, 7);
+  return zonedToUtc(next.year, next.month, next.day, hour, minute, tz);
 }
 
 interface DeadlineHit {
@@ -734,53 +832,64 @@ interface DeadlineHit {
   morning: boolean;
 }
 
-/** A point in time at the start of `rest`: the morning, a day with or without a time, an ISO date, or a time alone. */
+/**
+ * A point in time at the start of `rest`: the morning (with a time in it, or
+ * not), a day with a time, a part of it or neither, an ISO date, or a time
+ * alone — which a day may follow ("until 6pm tomorrow").
+ */
 function deadlineAt(rest: string, now: number, tz: string): DeadlineHit | null {
   const morning = MORNING_RE.exec(rest);
-  if (morning) return { len: morning[0].length, deadline: nextMorning(now, tz), morning: true };
+  if (morning) {
+    const at = nextMorning(now, tz);
+    // "Tomorrow morning at 10": that morning's day, at the time named.
+    const timed = clockAfter(rest.slice(morning[0].length));
+    if (!timed) return { len: morning[0].length, deadline: at, morning: true };
+    const d = localParts(at, tz);
+    return { len: morning[0].length + timed.len, deadline: zonedToUtc(d.year, d.month, d.day, timed.hour, timed.minute, tz), morning: false };
+  }
   const today = localParts(now, tz);
-  const day = DAY_RE.exec(rest);
+  const day = dayAt(rest, today);
   if (day) {
-    let len = day[0].length;
-    let clock: ClockHit | null = null;
+    let len = day.len;
+    let hour = day.hour;
+    let minute = 0;
     const after = rest.slice(len);
-    const conn = CONNECTOR_RE.exec(after);
-    if (conn) {
-      clock = clockAt(after.slice(conn[0].length), AT_WORD_RE.test(after));
-      if (clock) len += conn[0].length + clock.len;
-    }
-    let date: { year: number; month: number; day: number };
-    let defaultHour = END_OF_DAY_HOUR;
-    let rollWeek = false;
-    if (day[1]) {
-      date = { year: today.year, month: today.month, day: today.day };
-    } else if (day[2]) {
-      date = addDays(today.year, today.month, today.day, 1);
-      defaultHour = MORNING_HOUR;
-    } else if (day[3]) {
-      date = addDays(today.year, today.month, today.day, 2);
-    } else if (day[4]) {
-      const wd = WEEKDAYS[day[4].toLowerCase()] ?? 0;
-      date = addDays(today.year, today.month, today.day, (wd - today.weekday + 7) % 7);
-      rollWeek = true;
+    // A time with it: "Friday 18:00", "Friday, 6pm", "Friday at 6".
+    const conn = day.part ? null : CONNECTOR_RE.exec(after);
+    const clock = conn ? clockAt(after.slice(conn[0].length), AT_WORD_RE.test(after)) : null;
+    if (conn && clock) {
+      len += conn[0].length + clock.len;
+      hour = clock.hour;
+      minute = clock.minute;
     } else {
-      const [y, mo, d] = [Number(day[5]), Number(day[6]), Number(day[7])];
-      const check = new Date(Date.UTC(y, mo - 1, d));
-      if (mo < 1 || mo > 12 || check.getUTCMonth() !== mo - 1 || check.getUTCDate() !== d) return null;
-      date = { year: y, month: mo, day: d };
+      // Or a part of it — "tomorrow evening", "петък сутринта", "Freitag Abend"
+      // — never left unread, where the day's own default hour would answer for
+      // it; and then a time within that part ("tomorrow evening at 7").
+      const part = day.part ? null : DAY_PART_RE.exec(after);
+      if (part) {
+        len += part[0].length;
+        hour = DAY_PART_HOURS[part[1].toLowerCase()] ?? hour;
+      }
+      if (part || day.part) {
+        const timed = clockAfter(rest.slice(len));
+        if (timed) {
+          len += timed.len;
+          hour = hourWithinPart(timed, hour);
+          minute = timed.minute;
+        }
+      }
     }
-    const hour = clock?.hour ?? defaultHour;
-    const minute = clock?.minute ?? 0;
-    let at = zonedToUtc(date.year, date.month, date.day, hour, minute, tz);
-    // "Until Friday" said on a Friday evening is next Friday, not a deadline already gone.
-    if (rollWeek && at <= now) {
-      const next = addDays(date.year, date.month, date.day, 7);
-      at = zonedToUtc(next.year, next.month, next.day, hour, minute, tz);
-    }
-    return { len, deadline: at, morning: false };
+    return { len, deadline: dayInstant(day, hour, minute, now, tz), morning: false };
   }
   const clock = clockAt(rest, false);
   if (clock) {
+    // The day may follow the time: "until 6pm tomorrow", "bis 18 Uhr am Freitag", "до 18:00 в петък".
+    const gap = /^\s+/u.exec(rest.slice(clock.len));
+    const later = gap ? dayAt(rest.slice(clock.len + gap[0].length), today) : null;
+    if (gap && later) {
+      return { len: clock.len + gap[0].length + later.len, deadline: dayInstant(later, clock.hour, clock.minute, now, tz), morning: false };
+    }
+    // A time alone: today's, or tomorrow's once it has gone.
     let at = zonedToUtc(today.year, today.month, today.day, clock.hour, clock.minute, tz);
     if (at <= now) {
       const next = addDays(today.year, today.month, today.day, 1);
@@ -799,30 +908,40 @@ interface Cue {
   re: RegExp;
   /** The cue may be the empty string: a length standing as its own clause ("… 2 hours."). */
   clause: boolean;
+  /** A verb-led cue: refused behind a subject that is not the agent (`foreignLead`). */
+  guarded: boolean;
 }
 
 /**
  * Cue words by language. `anywhere` cues are specific enough to stand
- * mid-sentence; `clause` cues count only where a clause opens. What a FEATURE
- * would say mid-sentence lives in `clause`: "a time limit of 30 minutes per
- * quiz", "tasks whose deadline is tomorrow", "the shop works until 18:00"
- * ("магазинът работи до 18:00") all describe the thing being built.
+ * mid-sentence — they say who is meant ("you have"). `verb` cues are the
+ * imperative ("work until", "finish by", "time budget:"), which a feature can
+ * say too with a subject of its own ("the poller should WORK FOR 2 hours",
+ * "make it work until 18:00", "add a time budget of 30 minutes"): they count
+ * anywhere except behind such a subject (`foreignLead`). `clause` cues count
+ * only where a clause opens. What a FEATURE would say mid-sentence lives in
+ * `clause`: "a time limit of 30 minutes per quiz", "tasks whose deadline is
+ * tomorrow", "the shop works until 18:00" ("магазинът работи до 18:00", "der
+ * Server arbeitet bis 18 Uhr") all describe the thing being built.
  */
-const CUE_SOURCES: { lang: TextBudgetMatch["lang"]; kind: CueKind; anywhere: string; clause: string }[] = [
+const CUE_SOURCES: { lang: TextBudgetMatch["lang"]; kind: CueKind; anywhere: string; verb?: string; clause: string }[] = [
   {
     lang: "en",
     kind: "duration",
-    anywhere: "you\\s+have(?:\\s+got)?|you've\\s+got|you\\s+get|you\\s+(?:can|may|should)\\s+(?:spend|take|use)|"
-      + "work(?:\\s+on\\s+(?:it|this|that))?(?:\\s+for(?:\\s+the\\s+next)?)?|keep\\s+(?:working|going)(?:\\s+for(?:\\s+the\\s+next)?)?|"
+    anywhere: "you\\s+(?:still\\s+|only\\s+|just\\s+)?have(?:\\s+got)?|you've\\s+(?:still\\s+|only\\s+|just\\s+)?got|you\\s+get|"
+      + "you\\s+(?:can|may|should)\\s+(?:spend|take|use)",
+    verb: "(?:work|keep\\s+(?:working|going))(?:\\s+on\\s+(?:it|this|that))?(?:\\s+for(?:\\s+the\\s+next)?)?|"
+      + "continue(?:\\s+on\\s+(?:it|this|that))?\\s+for(?:\\s+the\\s+next)?|"
       + "time\\s+budget(?:\\s+is|\\s+of)?\\s*:?|(?:finish|be\\s+done|complete\\s+it)\\s+within(?:\\s+the\\s+next)?",
-    clause: "for(?:\\s+the\\s+next)?|within(?:\\s+the\\s+next)?|in\\s+the\\s+next|spend|take|continue\\s+for|"
+    clause: "for(?:\\s+the\\s+next)?|within(?:\\s+the\\s+next)?|in\\s+the\\s+next|spend|take|"
       + "budget(?:\\s+is|\\s+of)?\\s*:?|time\\s*limit(?:\\s+is|\\s+of)?\\s*:?",
   },
   {
     lang: "en",
     kind: "deadline",
-    anywhere: "(?:work|keep\\s+(?:working|going)|carry\\s+on|you\\s+have(?:\\s+got)?(?:\\s+time)?|you've\\s+got(?:\\s+time)?|you\\s+can\\s+work)"
-      + "(?:\\s+on\\s+(?:it|this|that))?\\s+(?:until|till|til|up\\s+until|up\\s+to)|"
+    anywhere: "(?:you\\s+(?:still\\s+|only\\s+)?have(?:\\s+got)?(?:\\s+time)?|you've\\s+(?:still\\s+)?got(?:\\s+time)?|you\\s+can\\s+work)"
+      + "(?:\\s+on\\s+(?:it|this|that))?\\s+(?:until|till|til|up\\s+until|up\\s+to)",
+    verb: "(?:work|keep\\s+(?:working|going)|carry\\s+on)(?:\\s+on\\s+(?:it|this|that))?\\s+(?:until|till|til|up\\s+until|up\\s+to)|"
       + "(?:finish|be\\s+done|deliver|complete)(?:\\s+(?:it|this|that|everything))?\\s+by|time\\s+budget(?:\\s+is)?\\s*:?\\s*(?:until|till)",
     clause: "until|till|up\\s+until|deadline(?:\\s+is)?\\s*:?",
   },
@@ -831,8 +950,8 @@ const CUE_SOURCES: { lang: TextBudgetMatch["lang"]; kind: CueKind; anywhere: str
     kind: "duration",
     anywhere: "имаш|имате|разполагаш\\s+с|разполагате\\s+с|"
       + "времеви\\s+бюджет(?:ът)?(?:\\s+е)?\\s*:?|бюджет\\s+(?:от\\s+)?време(?:\\s+е)?\\s*:?",
-    clause: "за|в\\s+рамките\\s+на(?:\\s+следващите)?|през\\s+следващите|в\\s+следващите|бюджет(?:ът)?(?:\\s+е)?\\s*:?|"
-      + "работи(?:те)?(?:\\s+по\\s+(?:това|задачата|нея))?(?:\\s+(?:за|в\\s+продължение\\s+на|през\\s+следващите))?",
+    clause: "за|в\\s+рамките\\s+на(?:\\s+следващ(?:ите|ия))?|през\\s+следващ(?:ите|ия)|в\\s+следващ(?:ите|ия)|бюджет(?:ът)?(?:\\s+е)?\\s*:?|"
+      + "работи(?:те)?(?:\\s+по\\s+(?:това|задачата|нея))?(?:\\s+(?:за|в\\s+продължение\\s+на|през\\s+следващ(?:ите|ия)))?",
   },
   {
     lang: "bg",
@@ -844,26 +963,63 @@ const CUE_SOURCES: { lang: TextBudgetMatch["lang"]; kind: CueKind; anywhere: str
   {
     lang: "de",
     kind: "duration",
+    // "arbeite" is the imperative; "arbeitet" is also what a server does, so it opens a clause or is no cue.
     anywhere: "du\\s+hast|ihr\\s+habt|sie\\s+haben|du\\s+bekommst|nimm\\s+dir|"
-      + "arbeite(?:t)?(?:\\s+(?:daran|dran))?(?:\\s+(?:für|fuer))?(?:\\s+die\\s+(?:nächsten|naechsten))?|"
-      + "zeitbudget(?:\\s+ist|\\s+von)?\\s*:?",
-    clause: "(?:für|fuer)(?:\\s+die\\s+(?:nächsten|naechsten))?|innerhalb(?:\\s+von)?(?:\\s+der\\s+(?:nächsten|naechsten))?|"
-      + "in\\s+den\\s+(?:nächsten|naechsten)|budget(?:\\s+ist)?\\s*:?|zeitlimit(?:\\s+ist|\\s+von)?\\s*:?",
+      + "arbeite(?:\\s+(?:daran|dran))?(?:\\s+(?:für|fuer))?(?:\\s+die\\s+(?:nächsten?|naechsten?))?",
+    verb: "zeitbudget(?:\\s+ist|\\s+von)?\\s*:?",
+    clause: "(?:für|fuer)(?:\\s+die\\s+(?:nächsten?|naechsten?))?|innerhalb(?:\\s+von)?(?:\\s+der\\s+(?:nächsten|naechsten))?|"
+      + "in\\s+den\\s+(?:nächsten|naechsten)|budget(?:\\s+ist)?\\s*:?|zeitlimit(?:\\s+ist|\\s+von)?\\s*:?|"
+      + "arbeitet(?:\\s+(?:daran|dran))?(?:\\s+(?:für|fuer))?(?:\\s+die\\s+(?:nächsten?|naechsten?))?",
   },
   {
     lang: "de",
     kind: "deadline",
-    anywhere: "(?:arbeite(?:t)?|mach(?:e|t)?\\s+weiter|du\\s+hast(?:\\s+zeit)?|ihr\\s+habt(?:\\s+zeit)?|sie\\s+haben(?:\\s+zeit)?)(?:\\s+(?:daran|dran))?\\s+bis|"
-      + "(?:fertig|erledigt)\\s+bis",
-    clause: "bis|frist(?:\\s+ist)?\\s*:?|deadline(?:\\s+ist)?\\s*:?",
+    anywhere: "(?:arbeite|mach(?:e)?\\s+weiter|du\\s+hast(?:\\s+zeit)?|ihr\\s+habt(?:\\s+zeit)?|sie\\s+haben(?:\\s+zeit)?)(?:\\s+(?:daran|dran))?\\s+bis",
+    verb: "(?:fertig|erledigt)\\s+bis",
+    clause: "bis|frist(?:\\s+ist)?\\s*:?|deadline(?:\\s+ist)?\\s*:?|(?:arbeitet|macht\\s+weiter)(?:\\s+(?:daran|dran))?\\s+bis",
   },
 ];
 
+const cueRe = (words: string) => new RegExp(`${LEFT}(${words})[\\s:]+`, "giu");
 const CUES: Cue[] = CUE_SOURCES.flatMap((c) => [
-  { lang: c.lang, kind: c.kind, clause: false, re: new RegExp(`${LEFT}(${c.anywhere})[\\s:]+`, "giu") },
+  { lang: c.lang, kind: c.kind, clause: false, guarded: false, re: cueRe(c.anywhere) },
+  ...(c.verb ? [{ lang: c.lang, kind: c.kind, clause: false, guarded: true, re: cueRe(c.verb) }] : []),
   // Found like any cue word; `opensClause` then decides whether it opens a clause.
-  { lang: c.lang, kind: c.kind, clause: true, re: new RegExp(`${LEFT}(${c.clause})[\\s:]+`, "giu") },
+  { lang: c.lang, kind: c.kind, clause: true, guarded: false, re: cueRe(c.clause) },
 ]);
+
+/**
+ * The words that put a subject other than the agent in front of a verb cue —
+ * a modal, "to", a pronoun or an article: "the poller SHOULD work for 2
+ * hours", "make IT work until 18:00", "add A time budget of 30 minutes", "der
+ * Bericht SOLL fertig bis 17 Uhr sein".
+ */
+const FOREIGN_LEAD = new Set([
+  "should", "will", "would", "must", "can", "could", "may", "might", "shall", "to", "does", "do", "did",
+  "won't", "can't", "shouldn't", "doesn't", "don't", "wouldn't", "mustn't",
+  "it", "they", "that", "this", "which", "who", "them", "a", "an", "also", "not", "never", "always",
+  "soll", "sollte", "sollen", "wird", "werden", "kann", "können", "muss", "müssen", "darf", "es", "ein", "eine", "einen", "einem",
+]);
+/** …unless the one before it is the owner talking to the agent: "YOU should work for 2 hours", "I want you to work until 6". */
+const OWN_LEAD = new Set(["you", "i", "we", "du", "ihr"]);
+
+/** The word ending just before `at` (over spaces only — a comma or a full stop ends the look), and where it starts. */
+function wordBefore(text: string, at: number): { word: string; start: number } | null {
+  const stop = Math.max(-1, at - MAX_LOOKBACK);
+  let i = at - 1;
+  while (i > stop && isSpace(text[i])) i--;
+  const end = i + 1;
+  while (i > stop && /[\p{L}']/u.test(text[i])) i--;
+  return end > i + 1 ? { word: text.slice(i + 1, end).toLowerCase(), start: i + 1 } : null;
+}
+
+/** Is the verb cue at `at` said of something other than the agent? See FOREIGN_LEAD. */
+function foreignLead(text: string, at: number): boolean {
+  const prev = wordBefore(text, at);
+  if (!prev || !FOREIGN_LEAD.has(prev.word)) return false;
+  const before = wordBefore(text, prev.start);
+  return !(before && OWN_LEAD.has(before.word));
+}
 /** Where a number starts — a candidate for a length standing as a sentence of its own: "Build the scraper. 1 day." */
 const NUMBER_START_RE = new RegExp(`${LEFT}(?=\\d)`, "gu");
 const SENTENCE_END_RE = /^[^\S\n\r]*(?:$|[.!?](?:\s|$)|[\n\r])/u;
@@ -890,10 +1046,15 @@ function langOfPhrase(phrase: string): TextBudgetMatch["lang"] {
  * петък 18:00") and German ("du hast 30 Minuten", "für 2 Stunden", "arbeite bis
  * morgen früh", "bis Freitag 18 Uhr").
  *
+ * A deadline may name a part of the day ("tomorrow evening", "Freitagabend",
+ * "tonight", "end of day") and put its day after its time ("until 6pm
+ * tomorrow", "до 18:00 в петък").
+ *
  * Deliberately narrow: a length or a time counts only behind a cue that says
- * it is the work's budget ("you have", "work until"), or opening a clause of
- * its own ("For 2 hours, …"). "Cache results for 2 hours" is a feature, and is
- * not read as a budget. The first statement in the text wins.
+ * it is the work's budget ("you have", "work until" — not "the poller should
+ * work for 2 hours"), or opening a clause of its own ("For 2 hours, …").
+ * "Cache results for 2 hours" is a feature, and is not read as a budget. The
+ * first statement in the text wins.
  *
  * Null when the words state none. A statement this box will not take (in the
  * past, more than 14 days away, under 5 minutes) is answered with the reason,
@@ -918,11 +1079,12 @@ export function parseBudgetFromText(text: string, now: Now, tz: string): TextBud
       // moves forward, since a cue word is never empty.
       cue.re.lastIndex = start + Math.max(1, m[2].length);
       if (cue.clause && !opensClause(source, start, false)) continue;
+      if (cue.guarded && foreignLead(source, start)) continue;
       // A length or a time is a few dozen characters at most: read a window,
       // never the rest of a long text per cue.
       const rest = source.slice(restAt, restAt + EXPRESSION_WINDOW);
       if (cue.kind === "duration") {
-        const d = durationAt(rest, true);
+        const d = durationAt(rest, ENDS_IN_NEXT_RE.test(m[2]) ? NEXT_BARE_UNITS : BARE_UNITS);
         if (d) consider({ index: start, end: restAt + d.len, lang: cue.lang, duration: d.ms });
       } else {
         const d = deadlineAt(rest, at, zone);
@@ -935,7 +1097,7 @@ export function parseBudgetFromText(text: string, now: Now, tz: string): TextBud
     const start = m.index + m[1].length;
     if (opensClause(source, start, true)) {
       const rest = source.slice(start, start + EXPRESSION_WINDOW);
-      const d = durationAt(rest, false);
+      const d = durationAt(rest, null);
       if (d && SENTENCE_END_RE.test(source.slice(start + d.len))) {
         consider({ index: start, end: start + d.len, lang: langOfPhrase(rest.slice(0, d.len)), duration: d.ms });
       }
