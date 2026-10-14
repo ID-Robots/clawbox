@@ -184,6 +184,48 @@ describe("provision-device.sh", () => {
     expect(fs.existsSync(path.join(etc, "device-secret"))).toBe(false);
   });
 
+  describe("refuses a box that already has an owner", () => {
+    // passwd / runuser stubs on PATH and a fake install tree, so the guard runs
+    // exactly as on a box: P + not-the-legacy-password = owned.
+    function guarded(opts: { status: string; chkpwd: number; setupComplete?: boolean }) {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "prov-guard-"));
+      const bin = path.join(root, "bin");
+      fs.mkdirSync(bin);
+      fs.mkdirSync(path.join(root, "box", "data"), { recursive: true });
+      if (opts.setupComplete) {
+        fs.writeFileSync(path.join(root, "box", "data", "config.json"), '{"setup_complete": true}');
+      }
+      fs.writeFileSync(path.join(bin, "passwd"), `#!/usr/bin/env bash\necho "clawbox ${opts.status} 01/01/2026"\n`, { mode: 0o755 });
+      fs.writeFileSync(path.join(bin, "runuser"), `#!/usr/bin/env bash\ncat >/dev/null\nexit ${opts.chkpwd}\n`, { mode: 0o755 });
+      const r = spawnSync("bash", [PROVISION, "--dry-run"], {
+        input: ZEROS,
+        encoding: "utf-8",
+        env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CLAWBOX_ETC: etc, CLAWBOX_ROOT: path.join(root, "box") },
+      });
+      fs.rmSync(root, { recursive: true, force: true });
+      return r;
+    }
+
+    it("an owner's own password", () => {
+      const r = guarded({ status: "P", chkpwd: 7 });
+      expect(r.status).toBe(3);
+      expect(r.stderr).toContain("refusing");
+    });
+
+    it("a completed setup, whatever the password", () => {
+      expect(guarded({ status: "L", chkpwd: 7, setupComplete: true }).status).toBe(3);
+    });
+
+    it("an undecidable password check", () => {
+      expect(guarded({ status: "P", chkpwd: 4 }).status).toBe(3);
+    });
+
+    it("but provisions a stock box on the legacy image password or none", () => {
+      expect(guarded({ status: "P", chkpwd: 0 }).status).toBe(0);
+      expect(guarded({ status: "L", chkpwd: 7 }).status).toBe(0);
+    });
+  });
+
   it("--dry-run refuses a malformed secret", () => {
     expect(run(PROVISION, ["--dry-run"], "nope", stockEnv()).status).toBe(2);
   });
