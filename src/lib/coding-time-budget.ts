@@ -519,15 +519,52 @@ export function withDefaultTokenCap(budget: TimeBudget, ownerTokenLimit: number 
 const WORD = "\\p{L}\\p{N}";
 const LEFT = `(^|[^${WORD}])`;
 const RIGHT = `(?=$|[^${WORD}])`;
+/** Only this much of a task is read for a budget: tasks are capped well under it, and the scan stays cheap whatever is sent. */
+export const MAX_TEXT_SCAN_CHARS = 20_000;
+/** How far back a clause test looks over spaces and a bullet. */
+const MAX_LOOKBACK = 200;
+/** How much text after a cue can hold its length or time ("the day after tomorrow at around 6:30 p.m." is 44). */
+const EXPRESSION_WINDOW = 120;
+const isSpace = (c: string) => /\s/u.test(c);
+
 /**
- * The start of a clause: the text's start, a sentence mark or a comma followed
- * by a space ("1.5 hours" is not a clause break), a line break, an opening
- * bracket — and a list bullet after any of them. Not a colon: "Timeout: 2
- * hours" is a feature, not a budget.
+ * Does a clause open at `at`? True at the text's start, after a line break,
+ * after a sentence mark or a comma followed by a space ("1.5 hours" is not a
+ * clause break), after an opening bracket — and after a list bullet behind
+ * any of those. Not after a colon: "Timeout: 2 hours" is a feature, not a
+ * budget. `sentence` asks for a sentence of its own: only the start, a line
+ * break or a sentence end — never a bracket or a bullet, where "(2 hours)" is
+ * an estimate.
+ *
+ * A look-back in code rather than a pattern: two whitespace runs side by side
+ * in a regex made a long run of blank lines quadratic.
  */
-const CLAUSE = `((?:^|[.!?;,]\\s+|[\\n\\r(\\[])\\s*(?:[-–—•*]\\s+)?)`;
-/** A sentence of its own: only a sentence end or a line break before it — never a bracket or a bullet, where "(2 hours)" is an estimate. */
-const SENTENCE = `((?:^|[.!?]\\s+|[\\n\\r])\\s*)`;
+function opensClause(text: string, at: number, sentence: boolean): boolean {
+  let i = at - 1;
+  let spaced = false;
+  let newline = false;
+  const skipSpaces = () => {
+    const stop = Math.max(-1, i - MAX_LOOKBACK);
+    while (i > stop && isSpace(text[i])) {
+      if (text[i] === "\n" || text[i] === "\r") newline = true;
+      spaced = true;
+      i--;
+    }
+  };
+  skipSpaces();
+  if (i < 0 || newline) return true;
+  if (!sentence && spaced && "-–—•*".includes(text[i])) {
+    i--;
+    spaced = false;
+    skipSpaces();
+    if (i < 0 || newline) return true;
+    if (!spaced) return false;
+  }
+  const c = text[i];
+  if (sentence) return spaced && ".!?".includes(c);
+  if ("([".includes(c)) return true;
+  return spaced && ".!?;,".includes(c);
+}
 
 const NUMBER_WORDS: Record<string, number> = {
   // en
@@ -824,11 +861,12 @@ const CUE_SOURCES: { lang: TextBudgetMatch["lang"]; kind: CueKind; anywhere: str
 
 const CUES: Cue[] = CUE_SOURCES.flatMap((c) => [
   { lang: c.lang, kind: c.kind, clause: false, re: new RegExp(`${LEFT}(${c.anywhere})[\\s:]+`, "giu") },
-  { lang: c.lang, kind: c.kind, clause: true, re: new RegExp(`${CLAUSE}(${c.clause})[\\s:]+`, "giu") },
+  // Found like any cue word; `opensClause` then decides whether it opens a clause.
+  { lang: c.lang, kind: c.kind, clause: true, re: new RegExp(`${LEFT}(${c.clause})[\\s:]+`, "giu") },
 ]);
-/** A length standing as a sentence of its own: "Build the scraper. 1 day." */
-const BARE_SENTENCE_RE = new RegExp(`${SENTENCE}(?=\\d)`, "gu");
-const SENTENCE_END_RE = /^\s*(?:$|[.!?](?:\s|$)|[\n\r])/u;
+/** Where a number starts — a candidate for a length standing as a sentence of its own: "Build the scraper. 1 day." */
+const NUMBER_START_RE = new RegExp(`${LEFT}(?=\\d)`, "gu");
+const SENTENCE_END_RE = /^[^\S\n\r]*(?:$|[.!?](?:\s|$)|[\n\r])/u;
 
 interface Found {
   index: number;
@@ -863,7 +901,7 @@ function langOfPhrase(phrase: string): TextBudgetMatch["lang"] {
  */
 export function parseBudgetFromText(text: string, now: Now, tz: string): TextBudgetResult | null {
   if (typeof text !== "string" || !text.trim()) return null;
-  const source = text.normalize("NFC").replace(/[’ʼ]/gu, "'");
+  const source = text.slice(0, MAX_TEXT_SCAN_CHARS).normalize("NFC").replace(/[’ʼ]/gu, "'");
   const at = nowMs(now);
   const zone = safeTimeZone(tz);
   let best: Found | null = null;
@@ -875,7 +913,14 @@ export function parseBudgetFromText(text: string, now: Now, tz: string): TextBud
     for (let m = cue.re.exec(source); m; m = cue.re.exec(source)) {
       const start = m.index + m[1].length;
       const restAt = m.index + m[0].length;
-      const rest = source.slice(restAt);
+      // The next search starts just after this cue WORD, not after the spaces
+      // it consumed, so a cue standing in them is still seen; and it always
+      // moves forward, since a cue word is never empty.
+      cue.re.lastIndex = start + Math.max(1, m[2].length);
+      if (cue.clause && !opensClause(source, start, false)) continue;
+      // A length or a time is a few dozen characters at most: read a window,
+      // never the rest of a long text per cue.
+      const rest = source.slice(restAt, restAt + EXPRESSION_WINDOW);
       if (cue.kind === "duration") {
         const d = durationAt(rest, true);
         if (d) consider({ index: start, end: restAt + d.len, lang: cue.lang, duration: d.ms });
@@ -883,20 +928,19 @@ export function parseBudgetFromText(text: string, now: Now, tz: string): TextBud
         const d = deadlineAt(rest, at, zone);
         if (d) consider({ index: start, end: restAt + d.len, lang: cue.lang, deadline: d });
       }
-      // A zero-width step cannot happen (every cue consumes a space), but a
-      // global regex that did not move would spin; be certain it moves.
-      if (cue.re.lastIndex === m.index) cue.re.lastIndex++;
     }
   }
-  BARE_SENTENCE_RE.lastIndex = 0;
-  for (let m = BARE_SENTENCE_RE.exec(source); m; m = BARE_SENTENCE_RE.exec(source)) {
+  NUMBER_START_RE.lastIndex = 0;
+  for (let m = NUMBER_START_RE.exec(source); m; m = NUMBER_START_RE.exec(source)) {
     const start = m.index + m[1].length;
-    const rest = source.slice(start);
-    const d = durationAt(rest, false);
-    if (d && SENTENCE_END_RE.test(rest.slice(d.len))) {
-      consider({ index: start, end: start + d.len, lang: langOfPhrase(rest.slice(0, d.len)), duration: d.ms });
+    if (opensClause(source, start, true)) {
+      const rest = source.slice(start, start + EXPRESSION_WINDOW);
+      const d = durationAt(rest, false);
+      if (d && SENTENCE_END_RE.test(source.slice(start + d.len))) {
+        consider({ index: start, end: start + d.len, lang: langOfPhrase(rest.slice(0, d.len)), duration: d.ms });
+      }
     }
-    if (BARE_SENTENCE_RE.lastIndex === m.index) BARE_SENTENCE_RE.lastIndex++;
+    if (NUMBER_START_RE.lastIndex <= m.index) NUMBER_START_RE.lastIndex = m.index + 1;
   }
   const found = best as Found | null;
   if (!found) return null;

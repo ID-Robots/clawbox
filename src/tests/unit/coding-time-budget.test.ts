@@ -525,3 +525,26 @@ describe("the safety margin (item 13)", () => {
     expect(fitsBeforeCutoff(tiny, NOW)).toBe(false);
   });
 });
+
+describe("a long or hostile text", () => {
+  it("is read in linear time — runs of blank lines or spaced commas once took seconds", () => {
+    for (const text of ["\n".repeat(20_000) + "x", ("," + " ".repeat(2_000)).repeat(10) + "x", "for ".repeat(5_000), "1 ".repeat(10_000)]) {
+      const t = performance.now();
+      parseBudgetFromText(text, NOW, SOFIA);
+      expect(performance.now() - t, JSON.stringify(text.slice(0, 12))).toBeLessThan(1_000);
+    }
+  });
+
+  it("reads only the first 20 000 characters", () => {
+    expect(parseBudgetFromText(`${"x ".repeat(5_000)}You have 2 hours.`, NOW, SOFIA)?.ok).toBe(true);
+    expect(parseBudgetFromText(`${"x ".repeat(10_000)}You have 2 hours.`, NOW, SOFIA)).toBeNull();
+  });
+
+  it("still sees a clause cue after a bullet, a bracket or a line break — and not mid-sentence", () => {
+    expect(ok("Plan:\n- for 2 hours build the scraper").budget.label).toBe("2 hours");
+    expect(ok("Scope (for 2 hours) is the scraper").budget.label).toBe("2 hours");
+    expect(ok("Build it.\n\n   for 2 hours").budget.label).toBe("2 hours");
+    expect(parseBudgetFromText("store it - for 2 hours", NOW, SOFIA)).toBeNull();
+    expect(parseBudgetFromText("Build the cache:for 2 hours", NOW, SOFIA)).toBeNull();
+  });
+});
