@@ -1591,6 +1591,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // project page hands over its project and the team switch.
   const [newAppOptions, setNewAppOptions] = useState<{ project?: string; team?: boolean }>({})
   const [newAppMaxChars, setNewAppMaxChars] = useState<number | null>(null)
+  // The box's zone and default time budget, for the card's budget picker —
+  // off the same read, so opening the card costs no second one. Null until
+  // it answers (the picker shows UTC meanwhile).
+  const [newAppBudgetBox, setNewAppBudgetBox] = useState<{ timeZone: string | null; defaultTimeBudget: string | null }>({ timeZone: null, defaultTimeBudget: null })
   // The ONE read of the Coding Agent's status this surface makes: the card's
   // task ceiling comes off it, and so does the + button's gate below, so the
   // two cannot disagree about what the box says. Answers the payload, or null
@@ -1604,6 +1608,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       if (!data || typeof data !== 'object') return null
       const n = (data as { maxTaskChars?: unknown }).maxTaskChars
       if (typeof n === 'number' && Number.isFinite(n) && n > 0) setNewAppMaxChars(n)
+      const box = data as { timeZone?: unknown; defaultTimeBudget?: unknown }
+      if (typeof box.timeZone === 'string') {
+        setNewAppBudgetBox({ timeZone: box.timeZone, defaultTimeBudget: typeof box.defaultTimeBudget === 'string' ? box.defaultTimeBudget : null })
+      }
       return data as Record<string, unknown>
     } catch {
       return null // the card keeps the default ceiling
@@ -8487,6 +8495,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             initialProject={newAppOptions.project}
             initialTeam={newAppOptions.team}
             maxTaskChars={newAppMaxChars ?? DEFAULT_MAX_TASK_CHARS}
+            timeZone={newAppBudgetBox.timeZone}
+            defaultTimeBudget={newAppBudgetBox.defaultTimeBudget}
             onClose={closeNewApp}
             // In the chat it floats over the composer like a popover, so it
             // behaves like one: click away (or Escape) and it goes.

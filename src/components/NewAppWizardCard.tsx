@@ -3,6 +3,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useT } from "@/lib/i18n";
 import { taskTitle } from "@/lib/task-title";
+import CodingBudgetPicker, { NO_BUDGET_OUTCOME, type BudgetPickerOutcome } from "@/components/CodingBudgetPicker";
 import {
   buildNewAppPrompt,
   buildResumeProjectPrompt,
@@ -135,6 +136,12 @@ function projectRowsOf(data: unknown): ProjectRow[] {
 
 type WizardMode = "new" | "existing";
 
+/** The picker's outcome as the ui-events builders take it — nothing at all when no budget was picked. */
+function budgetFields(budget: BudgetPickerOutcome): { budget?: string; budgetTokenCap?: number } {
+  if (!budget.token) return {};
+  return { budget: budget.token, ...(budget.tokenCap !== null ? { budgetTokenCap: budget.tokenCap } : {}) };
+}
+
 export interface NewAppWizardCardProps {
   /**
    * Close when a click lands outside the card.
@@ -147,6 +154,14 @@ export interface NewAppWizardCardProps {
   closeOnOutsideClick?: boolean;
   /** The run route's `maxTaskChars`, when the caller has read it. */
   maxTaskChars?: number;
+  /**
+   * The box's IANA zone, for the time-budget picker, when the caller reads the
+   * coding status itself — null while that read is out. Absent: the picker
+   * reads the status on its own.
+   */
+  timeZone?: string | null;
+  /** The owner's default time budget (a chip id) off the same read, or null for none. */
+  defaultTimeBudget?: string | null;
   /** Cancel, and Create once the message is in the chat. */
   onClose: () => void;
   /** After Create only: the message has been handed to the chat. */
@@ -161,6 +176,8 @@ export interface NewAppWizardCardProps {
 
 export default function NewAppWizardCard({
   maxTaskChars = DEFAULT_MAX_TASK_CHARS,
+  timeZone,
+  defaultTimeBudget,
   onClose,
   onHanded,
   initialProject,
@@ -183,6 +200,10 @@ export default function NewAppWizardCard({
   const [projects, setProjects] = useState<ProjectRow[] | null>(null);
   const [projectDir, setProjectDir] = useState(initialProject ?? "");
   const [next, setNext] = useState("");
+  // How long the work may take: the picker's token and ceiling, which the
+  // message asks the assistant to pass on. Nothing picked leaves the message
+  // as it always was.
+  const [budget, setBudget] = useState<BudgetPickerOutcome>(NO_BUDGET_OUTCOME);
   useEffect(() => {
     if (mode !== "existing" || projects !== null) return;
     let active = true;
@@ -267,6 +288,7 @@ export default function NewAppWizardCard({
       if (!project) return setError(t("codingAgent.newProjectRequired"));
       if (!trimmedNext) return setError(t("codingAgent.newWhatRequired"));
       if (trimmedNext.length > maxTaskChars) return setError(t("codingAgent.newWhatTooLong", { max: maxTaskChars }));
+      if (budget.error) return setError(t("codingAgent.budgetPickerInvalid"));
       const req = {
         name: project.name,
         directory: project.directory,
@@ -274,6 +296,7 @@ export default function NewAppWizardCard({
         folder: project.folder,
         instructions: trimmedNext,
         latestRun: project.latestRun,
+        ...budgetFields(budget),
       };
       dispatchChatMessage(team ? buildTeamProjectPrompt(req) : buildResumeProjectPrompt(req));
       setError(null);
@@ -287,7 +310,8 @@ export default function NewAppWizardCard({
     if (trimmedName.length > NEW_APP_NAME_MAX) return setError(t("codingAgent.newNameTooLong", { max: NEW_APP_NAME_MAX }));
     if (!trimmedWhat) return setError(t("codingAgent.newWhatRequired"));
     if (trimmedWhat.length > maxTaskChars) return setError(t("codingAgent.newWhatTooLong", { max: maxTaskChars }));
-    dispatchChatMessage(buildNewAppPrompt({ name: trimmedName, description: trimmedWhat, template }));
+    if (budget.error) return setError(t("codingAgent.budgetPickerInvalid"));
+    dispatchChatMessage(buildNewAppPrompt({ name: trimmedName, description: trimmedWhat, template, ...budgetFields(budget) }));
     setError(null);
     onClose();
     onHanded?.();
@@ -410,6 +434,13 @@ export default function NewAppWizardCard({
         </select>
       </label>
       </>)}
+      {/* Below both modes, so a pick survives switching between them. */}
+      <CodingBudgetPicker
+        onChange={setBudget}
+        team={mode === "existing" && team}
+        timeZone={timeZone}
+        defaultBudget={defaultTimeBudget}
+      />
       {error && (
         <p className="text-[11px] text-amber-400" role="alert" data-testid="coding-agent-new-error">{error}</p>
       )}

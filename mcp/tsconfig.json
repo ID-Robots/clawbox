@@ -20,7 +20,8 @@
     "../src/lib/hermes-reasoning.ts",
     "../src/lib/local-model-profile.ts",
     "../src/lib/hermes-providers.ts",
-    "../src/lib/task-title.ts"
+    "../src/lib/task-title.ts",
+    "../src/lib/coding-time-budget.ts"
   ],
   "exclude": []
 }
