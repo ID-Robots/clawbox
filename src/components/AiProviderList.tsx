@@ -63,8 +63,12 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
    * thing that opens it without a click is a deep link asking for it.
    */
   const [accountsOpen, setAccountsOpen] = useState(false);
-  /** Set with `accountsOpen` by a deep link; taken by the effect that scrolls once the panel is in the DOM. */
-  const [revealAccounts, setRevealAccounts] = useState(false);
+  /**
+   * Bumped with `accountsOpen` by a deep link. The effect that scrolls only
+   * READS it, so it runs once per ask, after the commit that put the panel in
+   * the DOM — and never sets state of its own.
+   */
+  const [revealRequest, setRevealRequest] = useState(0);
   const anthropicRowRef = useRef<HTMLLIElement | null>(null);
 
   const setEnabled = useCallback(async (row: ProviderStatusRow, enabled: boolean) => {
@@ -134,8 +138,11 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
   useEffect(() => {
     if (!showAnthropicAccounts) return;
     if (hasAnthropicRow) {
+      // A request from outside is external state the list synchronises to,
+      // like ChromeWindow's maximize signal.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setAccountsOpen(true);
-      setRevealAccounts(true);
+      setRevealRequest((n) => n + 1);
     } else if (anthropicPending) {
       return;
     }
@@ -145,12 +152,11 @@ export default function AiProviderList({ showAnthropicAccounts = false, onAnthro
   // A pass of its own so the scroll runs AFTER the commit that mounted the
   // panel: aligned to the row's top, the card under it comes into view with it.
   useEffect(() => {
-    if (!revealAccounts) return;
-    setRevealAccounts(false);
+    if (!revealRequest) return;
     const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches === true;
     // Guarded: jsdom ships an Element without it.
     anthropicRowRef.current?.scrollIntoView?.({ block: "start", behavior: reduceMotion ? "auto" : "smooth" });
-  }, [revealAccounts]);
+  }, [revealRequest]);
 
   return (
     <div className="rounded-2xl border border-[var(--border-subtle)] bg-[var(--surface-card)] p-5" data-testid="ai-provider-list">
