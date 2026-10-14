@@ -633,7 +633,7 @@ describe("spare time, used: the extra work after an early finish", () => {
     expect(notes(run.id).some((t) => /^Done; no extra work: \d+ minutes? is left before the safety margin, less than the 5 minutes an item takes$/.test(t))).toBe(true);
   });
 
-  it("stops at the budget's spend ceiling during an extra item, recorded as cost", async () => {
+  it("ends the extra work at the budget's spend ceiling, recorded as cost — and the run, whose task was done, stays completed", async () => {
     ready();
     installRounds([
       { files: ["index.html"], result: result("Built the page.") },
@@ -642,9 +642,47 @@ describe("spare time, used: the extra work after an early finish", () => {
     makeProject("site");
     const started = await lib.startRun({ task: "build the page", projectId: "site", source: "owner", timeBudget: budget(30 * 60_000, 0, { tokenCap: 50_000 }) });
     const run = await settled(started.id);
-    expect(run.status).toBe("stopped");
+    expect(run.status).toBe("completed");
+    expect(run.error).toBeNull();
+    expect(run.summary).toBe("Built the page.");
     expect(run.extraWork?.stop).toBe("cost");
+    expect(run.progress.some((l) => /^Time budget: extra item 1 ended stopped \(cost\); the task itself was done and committed\.$/.test(l))).toBe(true);
     await vi.waitFor(() => { expect(record(run.id)?.stopReason).toBe("cost"); }, { timeout: 5000 });
+  });
+
+  it("keeps the extra work's state on the run record, so a restarted server reads it back", async () => {
+    ready();
+    installRounds([
+      { files: ["index.html"], result: result("Built the page.") },
+      { files: ["tests/page.test.js"], result: result("EXTRA: tests — covered the title") },
+      { result: result("NOTHING_LEFT") },
+    ]);
+    makeProject("site");
+    const started = await lib.startRun({ task: "build the page", projectId: "site", source: "owner", timeBudget: budget(30 * 60_000, 0) });
+    const run = await settled(started.id);
+    await vi.waitFor(() => { expect(record(run.id)?.stopReason).toBe("nothing_left"); }, { timeout: 5000 });
+    const before = run.extraWork;
+    // The web server goes; the runs file and the time record stay.
+    await lib._resetCodingAgentStateForTests();
+    const after = lib.getRun(run.id)!;
+    expect(after.extraWork).toEqual(before);
+    expect(after.extraWork).toMatchObject({ items: ["tests: covered the title"], round: null, stop: "nothing_left" });
+    expect(after.timeRecord?.extras).toEqual(["tests: covered the title"]);
+  });
+
+  it("starts no review pass once the safety margin has begun: nothing new starts there", async () => {
+    ready({ coding_agent_review_pass: true });
+    installRounds([{ files: ["index.html"], result: result("Built the page.") }]);
+    makeProject("site");
+    // 32 minutes long, 25 gone: inside the 10-minute margin already.
+    const started = await lib.startRun({ task: "build the page", projectId: "site", source: "owner", timeBudget: budget(7 * 60_000, 25 * 60_000) });
+    const run = await settled(started.id);
+    expect(run.status).toBe("completed");
+    await vi.waitFor(() => {
+      expect(lib.getRun(run.id)?.progress.some((l) => l === "Time budget: no review pass — the safety margin has begun, so nothing new starts.")).toBe(true);
+    }, { timeout: 5000 });
+    expect(spawns()).toBe(1);
+    expect(lib.listRuns().filter((r) => r.reviewOf === run.id)).toHaveLength(0);
   });
 
   it("does no extra work for a run without a budget", async () => {
