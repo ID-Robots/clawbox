@@ -15,13 +15,15 @@ import { parsePage, serializePage, pageSummary, type ParsedPage } from "./frontm
 import { hasVerification, type PageFrontmatter } from "./schema";
 import { isKnowledgePage, pageAbsPath, RESERVED_DIRS, safePagePath, vaultDir } from "./paths";
 import { commitPaths, git, hasCommits, initRepo, isGitRepo, restorePaths, withVaultLock } from "./git";
-import { lintVault, type LintFinding } from "./lint";
+import { lintSecretsInText, lintVault, type LintFinding } from "./lint";
 import { readRetiredLedger, recordRetired } from "./state-db";
 
 /** A page bigger than this is not read whole; it is reported, never parsed. */
 export const MAX_PAGE_FILE_BYTES = 1024 * 1024;
 export const MAX_VAULT_PAGES = 50_000;
 const MAX_DEPTH = 8;
+/** The deepest page the snapshot walk reaches: a folder at MAX_DEPTH holds pages one segment deeper. */
+const MAX_PAGE_SEGMENTS = MAX_DEPTH + 1;
 
 export const INDEX_FILE = "index.md";
 
@@ -309,7 +311,8 @@ export interface VaultOperationOptions {
 function txPath(rel: string): string {
   if (rel === INDEX_FILE) return rel;
   const safe = safePagePath(rel);
-  if (!safe || !isKnowledgePage(safe)) throw new VaultPathError(rel);
+  // A page the walk cannot reach would be committed and then never listed or linted.
+  if (!safe || !isKnowledgePage(safe) || safe.split("/").length > MAX_PAGE_SEGMENTS) throw new VaultPathError(rel);
   return safe;
 }
 
@@ -366,11 +369,22 @@ export async function vaultOperation<T>(
     let findings: LintFinding[] = [];
     if (options.lint !== false && touched.size > 0) {
       const snapshot = await readVaultSnapshot(vault);
+      // Every touched page is judged, also one the walk did not return (a
+      // truncated snapshot): the blocking rules hold for every commit.
+      const known = new Set(snapshot.pages.map((p) => p.path));
+      for (const p of changed()) {
+        if (p === INDEX_FILE || known.has(p)) continue;
+        const page = await readPageAt(vault, p);
+        if (page) snapshot.pages.push(page);
+      }
       const report = lintVault(snapshot, {
         scope: changed().filter((p) => p !== INDEX_FILE),
         ledgerRetired: readRetiredLedgerSafe(vault),
         now: options.now,
       });
+      if (touched.has(INDEX_FILE) && snapshot.indexBody !== null) {
+        report.findings.push(...lintSecretsInText(INDEX_FILE, snapshot.indexBody));
+      }
       const blocking = report.findings.filter((f) => f.blocksCommit);
       if (blocking.length > 0) {
         await restorePaths(vault, changed());

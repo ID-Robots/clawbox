@@ -11,6 +11,7 @@ import {
   ensureVault,
   readPage,
   readVaultSnapshot,
+  vaultInitialised,
   vaultOperation,
   VaultLintBlockedError,
   VaultPathError,
@@ -229,6 +230,58 @@ describe("prime radiant vault", () => {
     expect((await readPage("concepts/pricing"))?.parsed.ok).toBe(true);
     expect(await readPage("concepts/alias.md")).toBeNull();
     expect(await readPage("../x")).toBeNull();
+  });
+
+  it("recognises its own repository when the vault is reached through a symlink", async () => {
+    const real = path.join(base, `real-${n}`);
+    fs.mkdirSync(real, { recursive: true });
+    fs.symlinkSync(real, root);
+    expect(await ensureVault()).toEqual({ created: true });
+    expect(await vaultInitialised()).toBe(true);
+    expect(await ensureVault()).toEqual({ created: false });
+    expect(await commitCount(vaultDir())).toBe(1);
+  });
+
+  it("commits nothing, and does not throw, for a path that never existed", async () => {
+    await ensureVault();
+    const vault = vaultDir();
+    const commits = await commitCount(vault);
+    const gone = await vaultOperation("remove: missing", (tx) => tx.remove("concepts/missing.md"));
+    expect(gone.commit).toBeNull();
+    const transient = await vaultOperation("ingest: transient", async (tx) => {
+      await tx.write("concepts/transient.md", pageText({ title: "Transient" }));
+      await tx.remove("concepts/transient.md");
+    });
+    expect(transient.commit).toBeNull();
+    expect(await commitCount(vault)).toBe(commits);
+    // Beside a real change, the missing path is dropped and the change still commits.
+    const mixed = await vaultOperation("ingest: mixed", async (tx) => {
+      await tx.remove("concepts/missing.md");
+      await tx.write("concepts/pricing.md", pageText());
+    });
+    expect(mixed.commit).toMatch(/^[0-9a-f]{40}$/);
+    expect(gitOut(vault, "show", "--name-only", "--format=", "HEAD")).toBe("concepts/pricing.md");
+    expect(gitOut(vault, "status", "--porcelain")).toBe("");
+  });
+
+  it("lints every touched path: a secret in index.md is refused, a page past the walk's depth is refused", async () => {
+    await ensureVault();
+    const vault = vaultDir();
+    const index = fs.readFileSync(path.join(vault, "index.md"), "utf8");
+    const commits = await commitCount(vault);
+    await expect(vaultOperation("index: leak", (tx) => tx.write("index.md", `${index}\npassword=Hunter22!\n`))).rejects.toBeInstanceOf(
+      VaultLintBlockedError,
+    );
+    expect(fs.readFileSync(path.join(vault, "index.md"), "utf8")).toBe(index);
+    expect(await commitCount(vault)).toBe(commits);
+
+    const deepest = "a/b/c/d/e/f/g/h/page.md"; // nine segments: the walk still reaches it
+    await vaultOperation("ingest: deep", async (tx) => {
+      await tx.write(deepest, pageText({ title: "Deep" }));
+      await tx.write("index.md", INDEXED(deepest));
+    });
+    expect((await readVaultSnapshot(vault)).pages.map((p) => p.path)).toContain(deepest);
+    await expect(vaultOperation("x", (tx) => tx.write("a/b/c/d/e/f/g/h/i/page.md", pageText()))).rejects.toBeInstanceOf(VaultPathError);
   });
 
   it("answers history, file-at-ref and branch diffs", async () => {

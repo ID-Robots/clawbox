@@ -1,6 +1,6 @@
 /**
- * GET /setup-api/prime-radiant/status — the vault (created on first use), its
- * git head, the memory-wiki wiring and a lint summary. Owner-only.
+ * GET /setup-api/prime-radiant/status — the vault (never created here; see
+ * POST init), its git head, the memory-wiki wiring and a lint summary. Owner-only.
  */
 import { requireSession } from "@/lib/route-auth";
 import { getStatus } from "@/lib/prime-radiant/service";

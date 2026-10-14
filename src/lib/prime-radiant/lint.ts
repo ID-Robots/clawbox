@@ -291,6 +291,16 @@ function lintPageShape(page: VaultPage, fm: PageFrontmatter, body: string, now: 
   }
 }
 
+/**
+ * The secret check alone, for a touched file that is not a knowledge page
+ * (index.md): it is committed like a page, so a secret there would land in
+ * history just the same.
+ */
+export function lintSecretsInText(rel: string, text: string): LintFinding[] {
+  const kinds = scanSecrets(text);
+  return kinds.length > 0 ? [finding("secret-pattern", "error", rel, `the page contains what looks like ${kinds.join(", ")}`, { kinds })] : [];
+}
+
 /** Lint a vault snapshot. */
 export function lintVault(snapshot: VaultSnapshot, options: LintOptions = {}): LintReport {
   const now = options.now ?? new Date();

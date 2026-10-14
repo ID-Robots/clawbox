@@ -98,7 +98,10 @@ describe("ensureMemoryWikiWiring", () => {
     oc.readConfigStrict.mockResolvedValue(wired({}, { path: "/somewhere/else" }));
     expect(await ensureMemoryWikiWiring({ vault: VAULT })).toMatchObject({ state: "conflict", wrote: false });
     expect(oc.runOpenclawConfigSetBatch).not.toHaveBeenCalled();
-    await ensureMemoryWikiWiring({ vault: VAULT, force: true });
+    // Forced: the write lands and the read-back finds the vault where it was put.
+    oc.readConfigStrict.mockReset();
+    oc.readConfigStrict.mockResolvedValueOnce(wired({}, { path: "/somewhere/else" })).mockResolvedValueOnce(wired());
+    expect(await ensureMemoryWikiWiring({ vault: VAULT, force: true })).toMatchObject({ state: "wired", wrote: true });
     expect(oc.runOpenclawConfigSetBatch).toHaveBeenCalledWith([[WIRING_KEYS.vaultPath, JSON.stringify(VAULT), "--json"]]);
 
     oc.runOpenclawConfigSetBatch.mockClear();

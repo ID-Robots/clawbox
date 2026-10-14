@@ -105,8 +105,15 @@ export async function isGitRepo(vault: string): Promise<boolean> {
   const r = await git(vault, ["rev-parse", "--is-inside-work-tree"], { allowFail: true });
   if (r.code !== 0 || r.stdout.trim() !== "true") return false;
   // The vault must be the repository's ROOT, not a folder inside someone else's.
+  // git answers the canonical path, so both sides are compared after realpath
+  // (a vault reached through a symlinked folder is still its own root).
   const top = await git(vault, ["rev-parse", "--show-toplevel"], { allowFail: true });
-  return top.code === 0 && path.resolve(top.stdout.trim()) === path.resolve(vault);
+  if (top.code !== 0) return false;
+  try {
+    return (await fs.realpath(top.stdout.trim())) === (await fs.realpath(vault));
+  } catch {
+    return false;
+  }
 }
 
 export async function hasCommits(vault: string): Promise<boolean> {
@@ -192,11 +199,22 @@ export async function trackedAtHead(vault: string, rel: string): Promise<boolean
 export async function commitPaths(vault: string, message: string, paths: readonly string[]): Promise<string | null> {
   const subject = message.replace(/[\r\n]+/g, " ").trim();
   if (subject === "") throw new Error("a vault commit needs a message");
-  if (paths.length === 0) return null;
-  await git(vault, ["add", "-A", "--", ...paths]);
-  const staged = await git(vault, ["diff", "--cached", "--quiet", "--", ...paths], { allowFail: true });
+  // A path neither on disk nor in HEAD (a remove of a page that never
+  // existed, or a page written and removed again) is no change, and git
+  // would refuse it as a pathspec that matches nothing.
+  const live: string[] = [];
+  for (const p of paths) {
+    const onDisk = await fs.lstat(path.join(vault, ...p.split("/"))).then(
+      () => true,
+      () => false,
+    );
+    if (onDisk || (await trackedAtHead(vault, p))) live.push(p);
+  }
+  if (live.length === 0) return null;
+  await git(vault, ["add", "-A", "--", ...live]);
+  const staged = await git(vault, ["diff", "--cached", "--quiet", "--", ...live], { allowFail: true });
   if (staged.code === 0) return null;
-  await git(vault, ["commit", "--quiet", "--no-verify", "-m", subject, "--", ...paths]);
+  await git(vault, ["commit", "--quiet", "--no-verify", "-m", subject, "--", ...live]);
   const head = await headCommit(vault);
   return head?.sha ?? null;
 }
