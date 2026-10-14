@@ -25,7 +25,8 @@
 import fs from "fs";
 import { randomBytes } from "crypto";
 import path from "@/lib/runtime-path";
-import { ensureOwnerArtifactsDir, ownerArtifactsDir, safeOwnerId } from "@/lib/coding-agent-artifacts";
+import { artifactsRoot, ensureOwnerArtifactsDir, ownerArtifactsDir, safeOwnerId } from "@/lib/coding-agent-artifacts";
+import { estimateCalibration, estimateSamples, CALIBRATION_MAX_SAMPLES, type EstimateCalibration, type EstimateSample } from "@/lib/coding-time-plan";
 import {
   formatTimeRecordLine,
   readTimeBudget,
@@ -189,6 +190,126 @@ export function readTimeRecordSummary(ownerId: string, now: Date | number, maxRe
   const keep = Number.isInteger(maxRecords) && maxRecords >= 0 ? Math.min(maxRecords, MAX_STORED_TIME_RECORDS) : DEFAULT_PAYLOAD_RECORDS;
   const records = keep > 0 ? summary.records.slice(-keep) : [];
   return { ...summary, records, omittedRecords: summary.records.length - records.length };
+}
+
+// ─── Calibration: how past estimates held ────────────────────────────────────
+
+/** The most evidence folders one calibration reads — those whose time record was written last. */
+export const CALIBRATION_MAX_OWNERS = 30;
+/** A time record larger than this is passed over by a calibration: the finished ones it wants are small. */
+export const CALIBRATION_MAX_RECORD_BYTES = 256 * 1024;
+/** The most run and team folders a calibration looks at to find the newest records — every one a box keeps, in practice. */
+const CALIBRATION_MAX_SCAN = 20_000;
+/** How many folders a calibration's scan looks into at once: one batch of lstat calls, then the event loop's turn. */
+const CALIBRATION_STAT_BATCH = 64;
+/** A calibration is worked out again at most this often. */
+export const CALIBRATION_TTL_MS = 60_000;
+
+let calibrationCache: { at: number; value: EstimateCalibration | null } | null = null;
+/** The scan under way, if one is: a second ask waits for it rather than starting its own. */
+let calibrationScan: Promise<EstimateCalibration | null> | null = null;
+
+/** A folder's time-record.json, when it is one a calibration reads: a regular file no larger than CALIBRATION_MAX_RECORD_BYTES. */
+async function calibrationCandidate(owner: string): Promise<{ owner: string; mtime: number } | null> {
+  try {
+    const st = await fs.promises.lstat(path.join(ownerArtifactsDir(owner), TIME_RECORD_JSON));
+    return st.isFile() && st.size <= CALIBRATION_MAX_RECORD_BYTES ? { owner, mtime: st.mtimeMs } : null;
+  } catch {
+    // No time record: the work had no budget.
+    return null;
+  }
+}
+
+/**
+ * The finished estimates in the latest time records of this box, runs' and
+ * teams' alike, newest record first — at most CALIBRATION_MAX_OWNERS records
+ * and CALIBRATION_MAX_SAMPLES estimates. Read as warily as loadTimeRecords
+ * reads one: only a real folder named like a run or team id, only a regular
+ * time-record.json no larger than CALIBRATION_MAX_RECORD_BYTES. The folders
+ * are listed and looked into asynchronously, a batch at a time, so a box with
+ * thousands of them does not hold the event loop; only the few records read
+ * are read whole. Work still going has no finished estimate yet, so the work
+ * asking never measures itself. Never rejects: no records is no samples.
+ */
+export async function recentEstimateSamples(): Promise<EstimateSample[]> {
+  let names: string[];
+  try {
+    // Only the folders named like a run or team, before any cap: the listing's
+    // order is the disk's, not the time's, so a cap first could miss the newest.
+    names = (await fs.promises.readdir(artifactsRoot(), { withFileTypes: true }))
+      .filter((d) => d.isDirectory() && safeOwnerId(d.name) === d.name)
+      .map((d) => d.name)
+      .slice(0, CALIBRATION_MAX_SCAN);
+  } catch {
+    return [];
+  }
+  const found: { owner: string; mtime: number }[] = [];
+  for (let i = 0; i < names.length; i += CALIBRATION_STAT_BATCH) {
+    const batch = await Promise.all(names.slice(i, i + CALIBRATION_STAT_BATCH).map(calibrationCandidate));
+    for (const c of batch) if (c) found.push(c);
+  }
+  found.sort((a, b) => b.mtime - a.mtime);
+  const samples: EstimateSample[] = [];
+  for (const { owner } of found.slice(0, CALIBRATION_MAX_OWNERS)) {
+    const stored = loadTimeRecords(owner);
+    if (!stored) continue;
+    // A run's folder is the run's to write: read as a run's record, one pair at most.
+    const kind = owner.startsWith("team-") ? "team" : "run";
+    samples.push(...estimateSamples(summarizeTimeRecords(stored.budget, stored.records, Date.now()), kind));
+    if (samples.length >= CALIBRATION_MAX_SAMPLES) break;
+  }
+  return samples.slice(0, CALIBRATION_MAX_SAMPLES);
+}
+
+/** Scan again — one scan at a time — and keep what it found as of `now`. Never rejects. */
+function rescanCalibration(now: number): Promise<EstimateCalibration | null> {
+  if (calibrationScan) return calibrationScan;
+  const scan = recentEstimateSamples()
+    .then((samples) => estimateCalibration(samples), () => null)
+    .then((value) => {
+      calibrationCache = { at: now, value };
+      return value;
+    })
+    .finally(() => {
+      if (calibrationScan === scan) calibrationScan = null;
+    });
+  calibrationScan = scan;
+  return scan;
+}
+
+const isFresh = (cached: typeof calibrationCache, now: number): cached is NonNullable<typeof calibrationCache> =>
+  cached !== null && now >= cached.at && now - cached.at < CALIBRATION_TTL_MS;
+
+/**
+ * How past estimates on this box held (estimateCalibration over
+ * recentEstimateSamples), or null with too few finished ones — as of a scan
+ * no older than CALIBRATION_TTL_MS, scanning again first when the last one is
+ * older. What a team awaits before it plans, and a run before it spawns (so
+ * its brief and its estimate read it from currentEstimateCalibration). Never
+ * rejects.
+ */
+export function estimateCalibrationNow(now: number = Date.now()): Promise<EstimateCalibration | null> {
+  const cached = calibrationCache;
+  return isFresh(cached, now) ? Promise.resolve(cached.value) : rescanCalibration(now);
+}
+
+/**
+ * The calibration as the last scan found it, without touching the disk — for
+ * the synchronous places that state or apply it (a spawn's brief, a run's
+ * estimate line). Null before any scan. One older than CALIBRATION_TTL_MS
+ * starts a fresh scan in the background for the next ask, and is still
+ * answered: the run that awaited it before spawning is held to the same one.
+ */
+export function currentEstimateCalibration(now: number = Date.now()): EstimateCalibration | null {
+  const cached = calibrationCache;
+  if (!isFresh(cached, now)) void rescanCalibration(now);
+  return cached?.value ?? null;
+}
+
+/** Tests only: forget the last calibration worked out. */
+export function _resetCalibrationCacheForTests(): void {
+  calibrationCache = null;
+  calibrationScan = null;
 }
 
 // ─── Writing ─────────────────────────────────────────────────────────────────

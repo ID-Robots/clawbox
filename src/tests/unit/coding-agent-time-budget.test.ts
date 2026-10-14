@@ -463,6 +463,75 @@ describe("a pause, a resume and a restart against the same deadline", () => {
   });
 });
 
+describe("estimate calibration and the re-plan trigger", () => {
+  it("says the re-plan trigger and a calibration in the brief that asks for the estimate — and neither once it is given", () => {
+    const now = Date.parse("2026-10-14T15:00:00.000Z");
+    const hour: TimeBudget = { deadline: "2026-10-14T16:00:00.000Z", label: "1 hour", preset: "1h", source: "picker", setAt: "2026-10-14T15:00:00.000Z" };
+    const brief = lib.budgetBrief(hour, now, "UTC", { calibration: { factor: 1.5, samples: 6 } });
+    expect(brief).toContain("If the work runs more than 25% over that estimate, you will be told to re-plan");
+    expect(brief).toContain("ESTIMATE CALIBRATION: on this box, past estimates took 1.5× the time estimated (the median of 6 finished estimates)");
+    // Within 10%: nothing to say.
+    expect(lib.budgetBrief(hour, now, "UTC", { calibration: { factor: 1.05, samples: 6 } })).not.toContain("CALIBRATION");
+    const given = lib.budgetBrief(hour, now, "UTC", { askEstimate: false, calibration: { factor: 1.5, samples: 6 } });
+    expect(given).not.toContain("CALIBRATION");
+    expect(given).not.toContain("re-plan");
+  });
+
+  it("scales a run's estimate by how past estimates on this box held, and fits and records it so", async () => {
+    ready();
+    // Three finished tasks of earlier teams, each taking twice its estimate.
+    const store = await import("@/lib/coding-time-record");
+    const { timeRecord } = await import("@/lib/coding-time-budget");
+    const past = budget(-60 * 60_000, 3 * 60 * 60_000);
+    for (const team of ["team-aaaaaaaa", "team-bbbbbbbb", "team-cccccccc"]) {
+      await store.appendTimeRecord(team, past, timeRecord("estimate", "the task", Date.now() - 2 * 60 * 60_000, { taskId: "t1", estimateMs: 10 * 60_000 }));
+      await store.appendTimeRecord(team, past, timeRecord("finish", "The worker ended completed", Date.now() - 100 * 60_000, { taskId: "t1", actualMs: 20 * 60_000 }));
+    }
+    installWrapper([assistantText("ESTIMATE: 10 min\nStarting now.")], { wait: true });
+    const id = await startLive("site", budget(60 * 60_000, 0));
+    expect(fs.readFileSync(argvFile(), "utf-8")).toContain("ESTIMATE CALIBRATION: on this box, past estimates took 2× the time estimated (the median of 3 finished estimates)");
+
+    await vi.waitFor(() => { expect(kinds(id)).toContain("plan"); }, { timeout: 5000 });
+    const plan = record(id)!.records.find((r) => r.kind === "plan")!;
+    expect(plan.estimateMs).toBe(20 * 60_000);
+    expect(plan.calibration).toBe(2);
+    expect(plan.text).toMatch(/^Estimate for the must-have work \(the run said ~10 minutes; past estimates on this box took 2× theirs\); it fits the/);
+    expect(lib.getRun(id)?.progress).toContain("Time budget: estimated ~20 minutes (its ~10 minutes, calibrated ×2) — fits before the safety margin.");
+    lib.stopRun(id);
+    await settled(id);
+  });
+
+  it("tells a run more than 25% over its own estimate to re-plan, once — read back off the record after a restart", async () => {
+    ready();
+    installWrapper([assistantText("ESTIMATE: 1 min\nStarting now.")], { wait: true });
+    const id = await startLive("site", budget(60 * 60_000, 60_000));
+    await vi.waitFor(() => { expect(kinds(id)).toContain("plan"); }, { timeout: 5000 });
+    // Not yet: a minute has not gone by.
+    expect(lib.getRun(id)?.messages.some((m) => m.text.includes("re-plan now"))).toBe(false);
+    lib.pauseRun(id);
+    await settled(id);
+
+    // The web server goes, and the estimate on the record was given three minutes ago.
+    await lib._resetCodingAgentStateForTests();
+    const file = path.join(root, "data", "coding-agent-artifacts", id, "time-record.json");
+    const json = JSON.parse(fs.readFileSync(file, "utf-8"));
+    for (const r of json.records) if (r.kind === "plan") r.at = iso(-3 * 60_000);
+    fs.writeFileSync(file, JSON.stringify(json));
+
+    await lib.resumeRun(id);
+    await vi.waitFor(() => {
+      expect(lib.getRun(id)?.messages.some((m) => /^Time budget: re-plan now\. You estimated ~1 minute for the must-have work and it has taken 3 minutes \(\+\d+%\)\. .+ are left before the safety margin/.test(m.text))).toBe(true);
+    }, { timeout: 8000 });
+    expect(lib.getRun(id)?.progress.some((l) => /^Time budget: \+\d+% over its estimate — told the run to re-plan what is left/.test(l))).toBe(true);
+    await vi.waitFor(() => { expect(notes(id).filter((t) => /^Re-plan: \+\d+% over the estimate \(~1 minute, took 3 minutes\)/.test(t))).toHaveLength(1); }, { timeout: 5000 });
+    // Once: the next ticks say nothing more.
+    await new Promise((r) => setTimeout(r, 300));
+    expect(lib.getRun(id)?.messages.filter((m) => m.text.includes("re-plan now"))).toHaveLength(1);
+    lib.stopRun(id);
+    await settled(id);
+  });
+});
+
 describe("wrapUpRun", () => {
   it("tells a run without a budget why, then stops it cleanly — what a team calls at its deadline", async () => {
     ready();
@@ -672,6 +741,34 @@ describe("spare time, used: the extra work after an early finish", () => {
     expect(lib.listRuns().filter((r) => r.reviewOf === run.id)).toHaveLength(0);
     // The task and the one extra item: no third spawn.
     expect(spawns()).toBe(2);
+  });
+
+  // Handed a deadline already gone, a run goes on without a time limit — as one the owner resumes past its deadline does.
+  const pastDeadline = () => budget(-60_000, 2 * 60 * 60_000);
+
+  it("still gives a run carried on past its deadline another go at a missing deliverable: it has no time limit", async () => {
+    ready();
+    installRounds([
+      { files: ["index.html"], result: result("Built the page.") },
+      { files: ["dist/report.html"], result: result("Wrote the report.") },
+    ]);
+    makeProject("site");
+    const started = await lib.startRun({ task: "build the page", projectId: "site", source: "owner", deliverable: { kind: "paths", paths: ["dist/report.html"] }, timeBudget: pastDeadline() });
+    await vi.waitFor(() => { expect(spawns()).toBe(2); }, { timeout: 10_000 });
+    const run = await settled(started.id);
+    expect(run.status).toBe("completed");
+    expect(run.error ?? "").not.toMatch(/deadline has passed/);
+    expect(run.attempts).toHaveLength(2);
+    expect(notes(run.id).some((t) => /^Started after the deadline \(.+\); it runs without a time limit$/.test(t))).toBe(true);
+  });
+
+  it("still gives a run carried on past its deadline its review pass", async () => {
+    ready({ coding_agent_review_pass: true });
+    installRounds([{ files: ["index.html"], result: result("Built the page.") }]);
+    makeProject("site");
+    const started = await lib.startRun({ task: "build the page", projectId: "site", source: "owner", timeBudget: pastDeadline() });
+    await vi.waitFor(() => { expect(lib.listRuns().filter((r) => r.reviewOf === started.id)).toHaveLength(1); }, { timeout: 15_000 });
+    expect(lib.getRun(started.id)?.progress.some((l) => l.startsWith("Time budget: no review pass"))).toBe(false);
   });
 
   it("keeps the extra work's state on the run record, so a restarted server reads it back", async () => {

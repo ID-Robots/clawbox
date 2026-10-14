@@ -99,6 +99,13 @@ describe("CodingBudgetTimeline", () => {
     expect([...screen.getByTestId("tl-legend").querySelectorAll("li")].map((li) => li.textContent)).toEqual(["Estimate", "Safety margin", "Checkpoint", "Finish"]);
   });
 
+  it("names the estimate marks in the legend when only the tasks' estimates are drawn", () => {
+    render(<CodingBudgetTimeline budget={HOUR_BUDGET} record={{ ...RECORD, estimateMs: null }} live timeZone={SOFIA} testId="tl" />);
+    expect(screen.queryByTestId("tl-estimate")).toBeNull();
+    expect(screen.getAllByTestId("tl-task-estimate")).toHaveLength(2);
+    expect([...screen.getByTestId("tl-legend").querySelectorAll("li")].map((li) => li.textContent)).toContain("Estimate");
+  });
+
   it("lists the checkpoints with the time used and left at each, and says how many older ones are in the file", () => {
     render(<CodingBudgetTimeline budget={HOUR_BUDGET} record={RECORD} live timeZone={SOFIA} testId="tl" />);
     const list = screen.getByTestId("tl-checkpoints");

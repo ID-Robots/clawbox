@@ -453,18 +453,24 @@ import {
   type TimeStopReason,
 } from "@/lib/coding-time-budget";
 import {
+  calibrateEstimate,
+  calibrationApplies,
+  calibrationBrief,
   checkExtraItem,
+  ESTIMATE_OVERRUN_FRACTION,
   estimateAccuracyLine,
   EXTRA_ITEM_ESTIMATE_MS,
   extraWorkPrompt,
   extraWorkScope,
+  isBehindEstimate,
   lastExtraClaim,
   MAX_EXTRA_ITEMS,
   mustHaveFits,
   nextItemAllowed,
   parseEstimateMinutes,
+  type EstimateCalibration,
 } from "@/lib/coding-time-plan";
-import { appendTimeRecord, loadTimeRecords, readTimeRecordSummary, type TimeRecordPayload } from "@/lib/coding-time-record";
+import { appendTimeRecord, currentEstimateCalibration, estimateCalibrationNow, loadTimeRecords, readTimeRecordSummary, type TimeRecordPayload } from "@/lib/coding-time-record";
 import { readOsTimeZone } from "@/lib/timezone";
 
 // ─── Tunables ────────────────────────────────────────────────────────────────
@@ -4935,7 +4941,7 @@ interface RunStore {
   queueRetry?: NodeJS.Timeout | null;
   /** Each budgeted run's deadline clock and its one timer — see BudgetClock. */
   budgetClocks?: Map<string, BudgetClock>;
-  /** The box's zone as last read, for the budget brief a synchronous spawn writes — see refreshBudgetZone. */
+  /** The box's zone as last read, for the budget brief a synchronous spawn writes — see refreshBudgetContext. */
   budgetZone?: string;
   /** Each budgeted run's time-record writes, one after another — see writeBudgetRecords. */
   budgetWrites?: Map<string, Promise<TimeRecordSummary | null>>;
@@ -5007,7 +5013,7 @@ export async function reconcileAfterRestart(): Promise<number> {
   let changed = false;
   // The zone a budgeted run's brief and record lines are worded in, before a
   // reattach or a settle below writes one.
-  if (list.some((r) => r.timeBudget)) await refreshBudgetZone();
+  if (list.some((r) => r.timeBudget)) await refreshBudgetContext();
   // Resolved once for the whole sweep rather than per run: a reattached run that
   // fails transiently may still take its one automatic retry, and that retry
   // needs the same two tools a fresh spawn does.
@@ -9394,7 +9400,7 @@ async function maybeStartReviewPass(finished: CodingRun): Promise<ReviewPassOutc
   // A budgeted run inside its safety margin starts nothing new: the margin is
   // for committing and the pull request, and a pass is a run of its own. Nor
   // does one whose spend ceiling is reached: the pass would spend past it.
-  const allowed = finished.timeBudget ? nextItemAllowed(finished.timeBudget, Date.now(), finished.tokensUsed) : null;
+  const allowed = finished.timeBudget && budgetGates(finished) ? nextItemAllowed(finished.timeBudget, Date.now(), finished.tokensUsed) : null;
   if (allowed && !allowed.ok) {
     pushProgress(finished, allowed.reason === "cost"
       ? "Time budget: no review pass — the budget's spend ceiling is reached."
@@ -9777,7 +9783,8 @@ async function startCompletionAttempt(
   }
   // Nor once a time budget is spent — its deadline gone, or its spend ceiling
   // reached: the run's own clock would only stop the attempt as it began.
-  const spent = run.timeBudget ? budgetStopReason(run.timeBudget, Date.now(), run.tokensUsed) : null;
+  // (A run the owner carried on past its deadline has no time limit: not this.)
+  const spent = run.timeBudget && budgetGates(run) ? budgetStopReason(run.timeBudget, Date.now(), run.tokensUsed) : null;
   if (spent) {
     const why = spent === "time" ? "The time budget's deadline has passed" : "The time budget's spend ceiling is reached";
     giveUp(run, `${missing} ${why}, so the box did not try again.`, run.attempts.length);
@@ -12761,9 +12768,10 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // Before the record is persisted, so the names and the two progress lines are
     // in the first thing the app reads rather than appearing a poll later.
     await prepareRunSecrets(run);
-    // The zone the budget brief names the deadline in — read here, on the async
-    // path, because the spawn that writes the brief is synchronous.
-    if (run.timeBudget) await refreshBudgetZone();
+    // The zone the budget brief names the deadline in, and the calibration it
+    // states — read here, on the async path, because the spawn that writes the
+    // brief is synchronous.
+    if (run.timeBudget) await refreshBudgetContext();
     // Read before the insert, never between it and the write: the insert and
     // persist are one synchronous step (see the runs store).
     const history = await getHistoryPolicy();
@@ -13467,12 +13475,22 @@ const MAX_REPORT_APPEND_BYTES = 1024 * 1024;
 /** How the record's own note lines start — what a restarted server reads its clock back from. */
 const CHECKPOINT_NOTE = "Checkpoint:";
 const MARGIN_NOTE = "Safety margin:";
+const REPLAN_NOTE = "Re-plan:";
+/** How the note ends for a run that goes on past its deadline on purpose — started or resumed after it. */
+const NO_TIME_LIMIT_TAIL = "without a time limit";
 
 /** A budgeted run's clock: its deadline, its one timer, and what has been done against it. */
 interface BudgetClock {
   budget: TimeBudget;
   /** False once the run was resumed past its deadline: noted, never enforced. */
   enforced: boolean;
+  /**
+   * The run goes on past its deadline on purpose — started or resumed after
+   * it — so the deadline gates nothing it does any more (a completion
+   * attempt, a review pass). Not the same as a record the deadline closed:
+   * that run stays held to its spent budget.
+   */
+  carriesOn: boolean;
   timer: NodeJS.Timeout | null;
   /** When the last checkpoint (or the start) went into the record, ms. */
   lastCheckpointAt: number;
@@ -13480,6 +13498,10 @@ interface BudgetClock {
   marginSent: boolean;
   /** Its ESTIMATE line is on the record. */
   estimated: boolean;
+  /** That estimate as the run is held to it (calibrated), and when it was given, ms — null before one. */
+  estimate: { ms: number; at: number } | null;
+  /** The run has been told it is more than 25% over its estimate and to re-plan: once per run. */
+  replanSent: boolean;
   /** The SKIPPED lines on the record, so a line read twice is recorded once. */
   skipped: Set<string>;
   /** The stop the BOX made — the deadline, a spend ceiling — for the record's stop line. */
@@ -13522,9 +13544,14 @@ function budgetZone(): string {
   return safeTimeZone(store.budgetZone);
 }
 
-/** Read the box's zone again (the OS's, never a browser's), for the next brief a spawn writes. */
-async function refreshBudgetZone(): Promise<void> {
+/**
+ * Read the box's zone again (the OS's, never a browser's), and how past
+ * estimates on this box held (the calibration's scan, off the event loop),
+ * for the next brief a spawn writes and the estimate its run gives.
+ */
+async function refreshBudgetContext(): Promise<void> {
   store.budgetZone = await readOsTimeZone().catch(() => "UTC");
+  await estimateCalibrationNow();
 }
 
 /**
@@ -13567,15 +13594,20 @@ function clockFor(run: CodingRun): BudgetClock | null {
     .filter((r) => r.kind === "start" || (r.kind === "note" && r.text.startsWith(CHECKPOINT_NOTE)))
     .map((r) => Date.parse(r.at))
     .filter((at) => Number.isFinite(at));
+  const plan = records.find((r) => r.kind === "plan");
+  const planAt = plan ? Date.parse(plan.at) : NaN;
   const clock: BudgetClock = {
     budget: run.timeBudget,
     // A stop on the record while the run still has work is a resume past the
     // deadline: the only resume a closed record can see (see resumeBudget).
     enforced: !closed,
+    carriesOn: records.some((r) => r.kind === "note" && r.text.endsWith(NO_TIME_LIMIT_TAIL)),
     timer: null,
     lastCheckpointAt: marks.length ? Math.max(...marks) : Date.now(),
     marginSent: records.some((r) => r.kind === "note" && r.text.startsWith(MARGIN_NOTE)),
-    estimated: records.some((r) => r.kind === "plan"),
+    estimated: plan !== undefined,
+    estimate: plan && typeof plan.estimateMs === "number" && plan.estimateMs > 0 && Number.isFinite(planAt) ? { ms: plan.estimateMs, at: planAt } : null,
+    replanSent: records.some((r) => r.kind === "note" && r.text.startsWith(REPLAN_NOTE)),
     skipped: new Set(records.filter((r) => r.kind === "skip").map((r) => r.text)),
     stopReason: null,
     closed,
@@ -13601,6 +13633,16 @@ function enforcedTokenCap(run: CodingRun): number | null {
   return clock && clock.enforced && !clock.closed ? cap : null;
 }
 
+/**
+ * Does the run's time budget still gate what starts next — a completion
+ * attempt, a review pass? Yes, spent or not, unless the owner carried the run
+ * on past its deadline (started or resumed after it): that run goes on
+ * without a time limit, so its deadline holds nothing back.
+ */
+function budgetGates(run: CodingRun): boolean {
+  return !clockFor(run)?.carriesOn;
+}
+
 /** Remember which stop the BOX made, for the record's stop line. A no-op without a budget. */
 function noteBudgetStop(run: CodingRun, reason: TimeStopReason): void {
   const clock = clockFor(run);
@@ -13612,9 +13654,11 @@ function noteBudgetStop(run: CodingRun, reason: TimeStopReason): void {
  * clock and zone, the time left, the safety margin and when it begins, that
  * the box enforces both, the `ESTIMATE:` line it wants first (while none is
  * on the record), and what a short or a long budget changes. One paragraph,
- * in English, like the rest of the brief.
+ * in English, like the rest of the brief. With the estimate asked for, it
+ * says the re-plan trigger, and a `calibration` that applies says how the box
+ * will scale the estimate.
  */
-export function budgetBrief(budget: TimeBudget, now: number, tz: string, opts: { askEstimate?: boolean } = {}): string {
+export function budgetBrief(budget: TimeBudget, now: number, tz: string, opts: { askEstimate?: boolean; calibration?: EstimateCalibration | null } = {}): string {
   const zone = safeTimeZone(tz);
   const cutoff = marginCutoffMs(budget);
   const margin = safetyMarginMs(budget);
@@ -13628,6 +13672,9 @@ export function budgetBrief(budget: TimeBudget, now: number, tz: string, opts: {
   ];
   if (opts.askEstimate !== false) {
     parts.push('Begin your first reply with one line exactly like "ESTIMATE: 20 min" — how long the must-have work will take you, in minutes. If the must-have work cannot fit before the margin, say so in that same reply, before you start, and name each thing you will leave out on a line of its own: "SKIPPED: <what> — <why>".');
+    parts.push(`If the work runs more than ${Math.round(ESTIMATE_OVERRUN_FRACTION * 100)}% over that estimate, you will be told to re-plan: narrow it to what the task needs, and say what you leave out.`);
+    const calibrated = calibrationBrief(opts.calibration);
+    if (calibrated) parts.push(calibrated);
   }
   if (total <= SHORT_BUDGET_MS) {
     parts.push('This is a short budget: skip end-to-end suites, rebuilds that do not prove the change, and polish. Run the quickest check that proves the work, and say what you skipped — a "SKIPPED:" line each — in your report.');
@@ -13643,7 +13690,10 @@ function budgetBriefFor(run: CodingRun): string | null {
   if (!clock || !clock.enforced || clock.closed) return null;
   const now = Date.now();
   if (remainingMs(clock.budget, now) === 0) return null;
-  return budgetBrief(clock.budget, now, budgetZone(), { askEstimate: !clock.estimated });
+  return budgetBrief(clock.budget, now, budgetZone(), {
+    askEstimate: !clock.estimated,
+    calibration: clock.estimated ? null : currentEstimateCalibration(now),
+  });
 }
 
 const BUDGET_LINE_LEAD_RE = /^(?:[-*•>]\s*)*[*_`]*/u;
@@ -13685,22 +13735,39 @@ export function readBudgetLines(text: string): { estimateMs: number | null; skip
   return { estimateMs, skipped };
 }
 
-/** A budgeted run's reply: its estimate (the first only) and what it says it skips, into the time record. */
+/**
+ * A budgeted run's reply: its estimate (the first only) and what it says it
+ * skips, into the time record. The estimate is calibrated first — scaled by
+ * how past estimates on this box held, when they ran over or under — and the
+ * run is fitted to the time, and later held to its re-plan trigger, with that.
+ */
 function noteBudgetText(run: CodingRun, text: string): void {
   if (!/ESTIMATE|SKIPPED/.test(text)) return;
   const clock = clockFor(run);
   if (!clock || clock.closed || !clock.enforced) return;
-  const { estimateMs, skipped } = readBudgetLines(text);
+  const { estimateMs: said, skipped } = readBudgetLines(text);
   const now = Date.now();
   const records: TimeRecord[] = [];
-  if (estimateMs !== null && !clock.estimated) {
+  if (said !== null && !clock.estimated) {
     clock.estimated = true;
+    const calibration = currentEstimateCalibration(now);
+    const scaled = calibrationApplies(calibration);
+    const estimateMs = calibrateEstimate(said, calibration);
+    clock.estimate = { ms: estimateMs, at: now };
     const fit = mustHaveFits(clock.budget, now, [estimateMs]);
     const verdict = fit.fits
       ? `it fits the ${formatDuration(fit.availableMs)} before the safety margin`
       : `it does not fit: ${formatDuration(fit.shortByMs)} more than the ${formatDuration(fit.availableMs)} before the safety margin`;
-    records.push(timeRecord("plan", `Estimate for the must-have work; ${verdict}`, now, { runId: run.id, estimateMs, tokensUsed: run.tokensUsed }));
-    pushProgress(run, `Time budget: estimated ~${formatDuration(estimateMs)} — ${fit.fits ? "fits before the safety margin" : `${formatDuration(fit.shortByMs)} more than fits before the safety margin`}.`);
+    const how = scaled ? ` (the run said ~${formatDuration(said)}; past estimates on this box took ${calibration.factor}× theirs)` : "";
+    records.push(timeRecord("plan", `Estimate for the must-have work${how}; ${verdict}`, now, {
+      runId: run.id,
+      estimateMs,
+      ...(scaled ? { calibration: calibration.factor } : {}),
+      tokensUsed: run.tokensUsed,
+    }));
+    const estimated = scaled ? `~${formatDuration(estimateMs)} (its ~${formatDuration(said)}, calibrated ×${calibration.factor})` : `~${formatDuration(estimateMs)}`;
+    pushProgress(run, `Time budget: estimated ${estimated} — ${fit.fits ? "fits before the safety margin" : `${formatDuration(fit.shortByMs)} more than fits before the safety margin`}.`);
+    armBudgetClock(run.id);
   }
   for (const what of skipped) {
     if (clock.skipped.size >= MAX_SKIP_RECORDS) break;
@@ -13728,10 +13795,13 @@ function beginBudget(run: CodingRun, fromQueue: boolean): void {
   const clock: BudgetClock = {
     budget,
     enforced: !spent,
+    carriesOn: spent,
     timer: null,
     lastCheckpointAt: now,
     marginSent: now >= marginCutoffMs(budget),
     estimated: false,
+    estimate: null,
+    replanSent: false,
     skipped: new Set<string>(),
     stopReason: null,
     closed: spent,
@@ -13747,7 +13817,7 @@ function beginBudget(run: CodingRun, fromQueue: boolean): void {
   if (spent) {
     records.push(
       timeRecord("stop", `${STOP_WORDS.time} before the run started`, now, { runId: run.id, reason: "time", tokensUsed: run.tokensUsed }),
-      timeRecord("note", `Started after the deadline (${formatLocalDeadline(budget.deadline, budgetZone())}); it runs without a time limit`, now, { runId: run.id }),
+      timeRecord("note", `Started after the deadline (${formatLocalDeadline(budget.deadline, budgetZone())}); it runs ${NO_TIME_LIMIT_TAIL}`, now, { runId: run.id }),
     );
   } else if (clock.marginSent) {
     records.push(timeRecord("note", `${MARGIN_NOTE} the run started inside it, ${formatDuration(remainingMs(budget, now))} before the deadline; its brief says so`, now, { runId: run.id }));
@@ -13774,11 +13844,12 @@ function resumeBudget(run: CodingRun, automatic: boolean): void {
   if (remainingMs(budget, now) === 0) {
     if (!clock.closed) closeBudgetRecord(run, clock, idleStopReason(run, clock), now);
     clock.enforced = false;
+    clock.carriesOn = true;
     // Kept, unlike a closed clock of a run that is over: its end is noted too.
     budgetClocks().set(run.id, clock);
     pushProgress(run, "Time budget: its deadline has passed, so the resumed run carries on without one.");
     void writeBudgetRecords(run.id, budget, [
-      timeRecord("note", `Resumed ${who} after the deadline (${formatLocalDeadline(budget.deadline, budgetZone())}); it carries on without a time limit`, now, { runId: run.id, tokensUsed: run.tokensUsed }),
+      timeRecord("note", `Resumed ${who} after the deadline (${formatLocalDeadline(budget.deadline, budgetZone())}); it carries on ${NO_TIME_LIMIT_TAIL}`, now, { runId: run.id, tokensUsed: run.tokensUsed }),
     ]);
     return;
   }
@@ -13811,8 +13882,22 @@ function armBudgetClock(id: string): void {
   if (run.status === "running" && live.has(id)) {
     next = Math.min(next, clock.lastCheckpointAt + checkpointEveryMs());
     if (!clock.marginSent) next = Math.min(next, marginCutoffMs(clock.budget));
+    const replanAt = replanDueAt(run, clock);
+    if (replanAt !== null) next = Math.min(next, replanAt);
   }
   scheduleBudgetTick(id, clock, next - now);
+}
+
+/**
+ * When the run's re-plan trigger fires: the first moment it has taken more
+ * than 25% over its own estimate (isBehindEstimate), counted from when it
+ * gave it. Null once it has fired, inside the margin (the margin's own
+ * message says more), without an estimate, and once the task is done and its
+ * spare time goes to extra items (the estimate was for the task).
+ */
+function replanDueAt(run: CodingRun, clock: BudgetClock): number | null {
+  if (clock.replanSent || clock.marginSent || !clock.estimate || run.extraWork) return null;
+  return clock.estimate.at + Math.floor(clock.estimate.ms * (1 + ESTIMATE_OVERRUN_FRACTION)) + 1;
 }
 
 function scheduleBudgetTick(id: string, clock: BudgetClock, delayMs: number): void {
@@ -13861,7 +13946,11 @@ function budgetTick(id: string): void {
     return;
   }
   if (working) {
-    if (!clock.marginSent && now >= marginCutoffMs(clock.budget)) sendMarginNote(run, state, clock, now);
+    if (!clock.marginSent && now >= marginCutoffMs(clock.budget)) {
+      sendMarginNote(run, state, clock, now);
+    } else if (replanDueAt(run, clock) !== null && clock.estimate && isBehindEstimate(clock.estimate.ms, now - clock.estimate.at)) {
+      sendReplanNote(run, state, clock, clock.estimate, now);
+    }
     if (now - clock.lastCheckpointAt >= checkpointEveryMs()) {
       clock.lastCheckpointAt = now;
       void writeBudgetRecords(run.id, clock.budget, [
@@ -13902,6 +13991,32 @@ function sendMarginNote(run: CodingRun, state: LiveRun, clock: BudgetClock, now:
   persist();
   void writeBudgetRecords(run.id, clock.budget, [
     timeRecord("note", `${MARGIN_NOTE} began with ${left} left; the run was ${delivery === null ? "not told (its message queue was full)" : "told to commit and finish its current step"}`, now, { runId: run.id, tokensUsed: run.tokensUsed }),
+  ]);
+}
+
+/**
+ * The re-plan trigger of a single run: it has taken more than 25% over its
+ * own estimate. Told once — like the margin, the road the owner's messages
+ * take — to narrow what is left to the must-have work against the time before
+ * the margin, commit, and name what it leaves out ("SKIPPED:" lines, which go
+ * into the record as they come). On the progress log and in the record.
+ */
+function sendReplanNote(run: CodingRun, state: LiveRun, clock: BudgetClock, estimate: { ms: number; at: number }, now: number): void {
+  clock.replanSent = true;
+  const zone = budgetZone();
+  const took = Math.max(0, now - estimate.at);
+  const over = Math.round((took / estimate.ms - 1) * 100);
+  const cutoff = marginCutoffMs(clock.budget);
+  const left = formatDuration(Math.max(0, cutoff - now));
+  const delivery = tellRun(
+    run,
+    state,
+    `Time budget: re-plan now. You estimated ~${formatDuration(estimate.ms)} for the must-have work and it has taken ${formatDuration(took)} (+${over}%). ${left} are left before the safety margin at ${formatLocalDeadline(cutoff, zone)} (${zone}). Narrow what is left to what the task needs to work, commit what you have now, and name each thing you will leave out on a line of its own: "SKIPPED: <what> — <why>".`,
+  );
+  pushProgress(run, `Time budget: +${over}% over its estimate — told the run to re-plan what is left against the ${left} before the safety margin.`);
+  persist();
+  void writeBudgetRecords(run.id, clock.budget, [
+    timeRecord("note", `${REPLAN_NOTE} +${over}% over the estimate (~${formatDuration(estimate.ms)}, took ${formatDuration(took)}), ${left} before the safety margin; the run was ${delivery === null ? "not told (its message queue was full)" : "told to narrow to the must-have work"}`, now, { runId: run.id, tokensUsed: run.tokensUsed }),
   ]);
 }
 
@@ -14540,7 +14655,7 @@ async function resumeRunOnce(id: string, automatic = false): Promise<CodingRun> 
     // one still ahead is enforced again. Before the flip below, which forgets
     // why the run was paused.
     if (run.timeBudget) {
-      await refreshBudgetZone();
+      await refreshBudgetContext();
       resumeBudget(run, automatic);
     }
     // The pause gap is not working time: shift the start forward by it, so the

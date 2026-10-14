@@ -323,7 +323,7 @@ export default function CodingBudgetTimeline({ budget, record, live, timeZone, t
         })}
       </div>
       <ul className="-mt-1 mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-[var(--text-muted)]" data-testid={`${testId}-legend`}>
-        {estimateAt !== null && (
+        {(estimateAt !== null || taskMarks.length > 0) && (
           <li className="inline-flex items-center gap-1"><span className="h-2.5 w-0.5 rounded bg-white/80" aria-hidden="true" />{t("codingAgent.budgetTimelineEstimate")}</li>
         )}
         <li className="inline-flex items-center gap-1">

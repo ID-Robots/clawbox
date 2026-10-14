@@ -18,6 +18,7 @@ import {
   MINUTE_MS,
   parseDuration,
   type TimeBudget,
+  type TimeRecord,
   type TimeRecordSummary,
 } from "@/lib/coding-time-budget";
 
@@ -27,6 +28,8 @@ const nowMs = (now: Now): number => (typeof now === "number" ? now : now.getTime
 
 /** A positive, finite number of ms — what every estimate and need here must be to count. */
 const isPositive = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
+
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 // ─── Extra work ──────────────────────────────────────────────────────────────
 
@@ -391,9 +394,149 @@ export function nextItemAllowed(
   return { ok: true };
 }
 
-// ─── Reporting ───────────────────────────────────────────────────────────────
+// ─── Calibration ─────────────────────────────────────────────────────────────
+//
+// How the estimates on this box have held, fed back into the next ones. Each
+// budgeted run and team records what it estimated and what it took; the next
+// plan reads the latest of those (coding-time-record.ts
+// `currentEstimateCalibration`) and, when they ran consistently over or under,
+// scales its new estimates by the median of took ÷ estimated before they are
+// fitted to the time. The scaled estimate is what the work is planned, gated
+// and re-planned with; the factor goes on the plan's record line, so the
+// planner's own word can be read back (estimateMs ÷ calibration) and the next
+// calibration measures the planner, not the previous calibration.
 
-const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+/** Fewer finished estimates than this say nothing about how estimates hold: no calibration. */
+export const CALIBRATION_MIN_SAMPLES = 3;
+/** The most finished estimates one calibration reads — the latest ones. */
+export const CALIBRATION_MAX_SAMPLES = 40;
+/**
+ * The factor's bounds. A record lives in a folder its run can write, so one
+ * wild overrun — or a forged record — can at most triple an estimate or halve
+ * it, and the median of many keeps a few from moving it at all.
+ */
+export const CALIBRATION_MIN_FACTOR = 0.5;
+export const CALIBRATION_MAX_FACTOR = 3;
+/** Within this share of 1 the estimates held: nothing is scaled. */
+export const CALIBRATION_TOLERANCE = 0.1;
+
+/** One finished estimate: what the planner or the run said (uncalibrated), and the time it took. */
+export interface EstimateSample {
+  estimateMs: number;
+  actualMs: number;
+}
+
+/** How past estimates held: the median of took ÷ estimated, and how many finished estimates it is the median of. */
+export interface EstimateCalibration {
+  factor: number;
+  samples: number;
+}
+
+const clampFactor = (f: number): number => Math.min(CALIBRATION_MAX_FACTOR, Math.max(CALIBRATION_MIN_FACTOR, f));
+
+const isTime = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0;
+
+/** The factor a record's estimates were scaled by when it was planned — its latest plan line's — or 1. */
+function recordedCalibration(records: readonly TimeRecord[]): number {
+  for (let i = records.length - 1; i >= 0; i--) {
+    const r = records[i];
+    if (r?.kind === "plan") return isPositive(r.calibration) ? r.calibration : 1;
+  }
+  return 1;
+}
+
+/**
+ * The finished estimates in one time record, each as the planner or the run
+ * gave it (a calibrated estimate divided back by its factor). A team's: every
+ * task with both an estimate and the time it took. A run's: its whole-work
+ * estimate against the time it worked — only when the run was done and did
+ * nothing else in that time (no extra work), or the pair would not be like
+ * for like. `owner` says whose record it is, when the caller knows: a run's
+ * is read only as a run's (one pair at most) and a team's only as a team's —
+ * a run's record sits in a folder the run can write, and must not pass for a
+ * team's dozens of tasks.
+ */
+export function estimateSamples(
+  summary: Pick<TimeRecordSummary, "tasks" | "estimateMs" | "stopReason" | "extras" | "records">,
+  owner: "run" | "team" | null = null,
+): EstimateSample[] {
+  const scale = recordedCalibration(summary.records ?? []);
+  const own = (ms: number) => ms / scale;
+  const out: EstimateSample[] = [];
+  if (owner !== "run") {
+    for (const t of summary.tasks ?? []) {
+      if (isPositive(t.estimateMs) && isTime(t.actualMs)) out.push({ estimateMs: own(t.estimateMs), actualMs: t.actualMs });
+    }
+    if (owner === "team" || out.length || (summary.tasks ?? []).length) return out;
+  }
+  if (summary.stopReason !== "done" || (summary.extras ?? []).length || !isPositive(summary.estimateMs)) return out;
+  const records = summary.records ?? [];
+  for (let i = records.length - 1; i >= 0; i--) {
+    const r = records[i];
+    if (r?.kind === "finish" && !r.taskId && isTime(r.actualMs)) return [{ estimateMs: own(summary.estimateMs), actualMs: r.actualMs }];
+  }
+  return out;
+}
+
+/**
+ * How past estimates held, from finished ones (latest first; past
+ * CALIBRATION_MAX_SAMPLES the older ones are not read): the median of took ÷
+ * estimated, each bounded, rounded to two places — or null with fewer than
+ * CALIBRATION_MIN_SAMPLES.
+ */
+export function estimateCalibration(samples: readonly EstimateSample[]): EstimateCalibration | null {
+  const ratios = samples
+    .filter((s) => s && isPositive(s.estimateMs) && isTime(s.actualMs))
+    .slice(0, CALIBRATION_MAX_SAMPLES)
+    .map((s) => clampFactor(s.actualMs / s.estimateMs))
+    .sort((a, b) => a - b);
+  if (ratios.length < CALIBRATION_MIN_SAMPLES) return null;
+  const mid = ratios.length >> 1;
+  const median = ratios.length % 2 ? ratios[mid] : (ratios[mid - 1] + ratios[mid]) / 2;
+  return { factor: clampFactor(Math.round(median * 100) / 100), samples: ratios.length };
+}
+
+/** Does this calibration scale anything — are past estimates off by more than CALIBRATION_TOLERANCE? */
+export function calibrationApplies(cal: EstimateCalibration | null | undefined): cal is EstimateCalibration {
+  // In hundredths, as the factor is kept: 0.9 is 10% off, though 1 - 0.9 is not quite 0.1 in floating point.
+  return !!cal && isPositive(cal.factor) && Math.round(Math.abs(cal.factor - 1) * 100) >= Math.round(CALIBRATION_TOLERANCE * 100);
+}
+
+/**
+ * An estimate as the work plans with it: scaled by the calibration when one
+ * applies, rounded to whole minutes and kept inside the estimate bounds (at
+ * least MIN_ESTIMATE_MS, at most MAX_ESTIMATE_MS) — else unchanged.
+ */
+export function calibrateEstimate(estimateMs: number, cal: EstimateCalibration | null | undefined): number {
+  if (!isPositive(estimateMs) || !calibrationApplies(cal)) return estimateMs;
+  const scaled = Math.round((estimateMs * cal.factor) / MINUTE_MS) * MINUTE_MS;
+  return Math.min(MAX_ESTIMATE_MS, Math.max(MIN_ESTIMATE_MS, scaled));
+}
+
+/** "1.4×", "0.75×": a factor as the notes say it. */
+const timesText = (factor: number): string => `${factor}×`;
+
+/**
+ * One English line for the log and the time record when a calibration
+ * applies — how the estimates held and what that does to the new ones — or
+ * null when none does.
+ */
+export function calibrationNote(cal: EstimateCalibration | null | undefined): string | null {
+  if (!calibrationApplies(cal)) return null;
+  return `Calibration: on this box, past estimates took ${timesText(cal.factor)} the time estimated (the median of ${plural(cal.samples, "finished estimate")}), so the estimates here are scaled by ${timesText(cal.factor)} before they are fitted to the time.`;
+}
+
+/**
+ * The calibration as a brief says it to the planner or the run, or null when
+ * none applies: what the box will do with its estimates, and that it should
+ * not pad them itself — the box measures its own word, not a corrected one.
+ */
+export function calibrationBrief(cal: EstimateCalibration | null | undefined): string | null {
+  if (!calibrationApplies(cal)) return null;
+  return `ESTIMATE CALIBRATION: on this box, past estimates took ${timesText(cal.factor)} the time estimated (the median of ${plural(cal.samples, "finished estimate")}). ClawBox scales your estimates by ${timesText(cal.factor)} before it fits them to the time, so estimate as you normally would — do not add to them or cut them yourself.`;
+}
+
+// ─── Reporting ───────────────────────────────────────────────────────────────
 
 /** "+24%", "-10%", "±0%": how far the time taken was from the estimate. */
 function overrunPercent(estimateMs: number, actualMs: number): string {

@@ -5,6 +5,7 @@ import { CodingAgentError, ExperienceChoiceError, MAX_TASK_CHARS, PipelineChoice
 import { startTeam } from "@/lib/coding-team";
 import { needsTeam } from "@/lib/coding-time-budget";
 import { budgetAnswer, resolveStartBudget } from "@/lib/coding-time-budget-server";
+import { logSafe } from "@/lib/log-safe";
 
 export const dynamic = "force-dynamic";
 
@@ -164,7 +165,8 @@ export async function POST(request: Request) {
         if (err instanceof CodingAgentError) {
           return NextResponse.json({ error: err.message, kind: err.kind }, { status: httpStatusForCodingError(err.kind) });
         }
-        console.error("[coding-agent/run] failed to start the team:", err instanceof Error ? err.message : err);
+        // The error can quote the caller's goal or folder: one line, capped.
+        console.error(`[coding-agent/run] failed to start the team: ${logSafe(err instanceof Error ? err.message : String(err))}`);
         return NextResponse.json(
           { error: err instanceof Error ? err.message : "Could not start the coding team" },
           { status: 500 },
