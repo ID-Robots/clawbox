@@ -10,11 +10,11 @@
 // the Coding Agent's OWN hand-off (its home's Create, a project's Plan) is
 // not gated here, because that app already sits behind its wizard.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import ChatPopup from "@/components/ChatPopup";
 import { installHermesBox } from "@/tests/helpers/hermes-chat-box";
 import { resetHarnessCache } from "@/lib/client-harness";
-import { OPEN_APP_EVENT, openNewAppCard, type OpenAppDetail } from "@/lib/ui-events";
+import { notifyCodingAgentChanged, OPEN_APP_EVENT, openNewAppCard, type OpenAppDetail } from "@/lib/ui-events";
 
 // A jsdom mount of `ChatPopup` costs seconds under a full parallel run; every
 // suite that mounts it declares both ceilings (`test-timeout-hygiene.test.ts`).
@@ -222,5 +222,29 @@ describe("the chat's Create App button and the Coding Agent's setup", () => {
 
     await screen.findByTestId("chat-new-app");
     expect(opened).toEqual([]);
+  });
+
+  it("reads the status again on the next hand-off once a Coding Agent setting changed, so the default budget it names is the current one", async () => {
+    let defaultTimeBudget: string | null = null;
+    const status = answerCodingStatus(() => ok({ enabled: true, setupComplete: true, maxTaskChars: 4000, timeZone: "UTC", defaultTimeBudget }));
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await screen.findByTestId("chat-new-app-toggle");
+
+    openNewAppCard({});
+    await screen.findByTestId("chat-new-app");
+    await waitFor(() => expect(status.reads()).toBe(1));
+    // The picker's line, as the copy says it (or by its key where no catalogue is mounted).
+    const line = () => screen.getByTestId("coding-budget-preview").textContent ?? "";
+    await waitFor(() => expect(line()).toMatch(/budgetPickerNotSet$|otherwise there is no limit/));
+    // Asked again with nothing changed: the read it has stands.
+    openNewAppCard({});
+    expect(status.reads()).toBe(1);
+
+    // The owner sets a default in the Coding Agent settings.
+    defaultTimeBudget = "1h";
+    await act(async () => { notifyCodingAgentChanged(); });
+    openNewAppCard({});
+    await waitFor(() => expect(status.reads()).toBe(2));
+    await waitFor(() => expect(line()).toMatch(/budgetPickerNotSetDefault|your default/));
   });
 });

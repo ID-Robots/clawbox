@@ -439,3 +439,34 @@ describe("the Create App card with a budget", () => {
     }
   });
 });
+
+describe("what the task's own words say, shown before the start", () => {
+  it("shows the budget the task names when nothing is picked, on the box's clock", () => {
+    renderPicker({ timeZone: SOFIA, defaultBudget: null, taskText: "Scrape the catalogue and work until tomorrow morning." });
+    // 15:00 in Sofia now: the next 08:00 is tomorrow's.
+    expect(screen.getByTestId("coding-budget-from-text")).toHaveTextContent(/^From the task: “work until tomorrow morning” — ends Thu 15 Oct, 08:00, in 17 hours\.$/);
+    // Over 30 minutes: the box will start a team for it.
+    expect(screen.getByTestId("coding-budget-team-hint")).toBeInTheDocument();
+    expect(screen.queryByText(/^Not set:/)).toBeNull();
+  });
+
+  it("says the pick wins over the task's words once something is picked", () => {
+    renderPicker({ timeZone: SOFIA, defaultBudget: null, taskText: "Fix the header. You have 30 minutes." });
+    expect(screen.getByTestId("coding-budget-from-text")).toHaveTextContent("You have 30 minutes");
+    fireEvent.click(radio("1h"));
+    expect(screen.queryByTestId("coding-budget-from-text")).toBeNull();
+    expect(screen.getByTestId("coding-budget-overrides-text")).toHaveTextContent(/^Your pick wins over “You have 30 minutes” in the task\.$/);
+  });
+
+  it("says when the task names a time the box would not take, and falls back to the usual line", () => {
+    renderPicker({ timeZone: SOFIA, defaultBudget: "1h", taskText: "Build it. You have 20 days." });
+    expect(screen.getByTestId("coding-budget-from-text-refused")).toHaveTextContent("“You have 20 days”");
+    expect(screen.getByText(/^Not set: a time the task itself names applies, otherwise your default — 1 hour\.$/)).toBeInTheDocument();
+  });
+
+  it("is quiet for a task that names no time", () => {
+    renderPicker({ timeZone: SOFIA, defaultBudget: null, taskText: "Build a todo app." });
+    expect(screen.queryByTestId("coding-budget-from-text")).toBeNull();
+    expect(screen.queryByTestId("coding-budget-from-text-refused")).toBeNull();
+  });
+});

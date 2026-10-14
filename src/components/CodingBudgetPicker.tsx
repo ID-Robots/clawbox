@@ -15,6 +15,7 @@ import {
   formatLocalDeadline,
   isBudgetChip,
   needsTeam,
+  parseBudgetFromText,
   parseIsoInstant,
   presetBudget,
   safeTimeZone,
@@ -205,7 +206,7 @@ function defaultStart(now: number, tz: string): string {
 // ─── Words, in the UI's language and the box's zone ─────────────────────────
 
 /** "Thu 15 Oct, 18:00" on the box's clock — the stored label's own words in English, the locale's elsewhere. */
-function formatDeadline(ms: number, tz: string, locale: string): string {
+export function formatDeadline(ms: number, tz: string, locale: string): string {
   if (locale === "en") return formatLocalDeadline(ms, tz);
   try {
     return new Intl.DateTimeFormat(locale, {
@@ -308,8 +309,18 @@ export interface CodingBudgetPickerProps {
   /** The owner's default budget off the host's read (a chip id), or null for none. Only read with `timeZone`. */
   defaultBudget?: string | null;
   initialValue?: BudgetPickerValue;
+  /**
+   * The task as typed so far. A time it names ("until tomorrow morning",
+   * "you have 30 minutes") is read the way the routes read it
+   * (parseBudgetFromText) and shown before the start: what the box understood
+   * when nothing is picked, and that the pick wins over it when something is.
+   */
+  taskText?: string;
   className?: string;
 }
+
+/** Only this much of the task is read for the preview — the routes' own bound. */
+const MAX_PREVIEW_TEXT_CHARS = 20_000;
 
 export default function CodingBudgetPicker({
   onChange,
@@ -317,6 +328,7 @@ export default function CodingBudgetPicker({
   timeZone,
   defaultBudget,
   initialValue = EMPTY_BUDGET_PICK,
+  taskText = "",
   className = "",
 }: CodingBudgetPickerProps) {
   const { t, locale } = useT();
@@ -529,6 +541,13 @@ export default function CodingBudgetPicker({
     setValue(EMPTY_BUDGET_PICK);
     chipRefs.current[0]?.focus();
   };
+
+  // ── What the task's own words say ──
+  const fromText = useMemo(
+    () => (taskText.trim() ? parseBudgetFromText(taskText.slice(0, MAX_PREVIEW_TEXT_CHARS), now, zone) : null),
+    [taskText, now, zone],
+  );
+  const textEnd = fromText?.ok ? Date.parse(fromText.budget.deadline) : null;
 
   // ── What it comes to ──
   const preview = previewPickBudget(value.pick, now, zone);
@@ -754,12 +773,30 @@ export default function CodingBudgetPicker({
       )}
 
       <div className="space-y-1 text-[11px]" aria-live="polite" data-testid="coding-budget-preview">
-        {!value.pick && (
+        {!value.pick && fromText?.ok && textEnd !== null && (
+          <p className="text-[var(--text-secondary)]" data-testid="coding-budget-from-text">
+            {t("codingAgent.budgetPickerFromText", { phrase: fromText.match.phrase, time: formatDeadline(textEnd, zone, locale), relative: formatRelative(textEnd - now, locale) })}
+          </p>
+        )}
+        {!value.pick && fromText && !fromText.ok && (
+          <p className="text-amber-400" data-testid="coding-budget-from-text-refused">
+            {t("codingAgent.budgetPickerFromTextRefused", { phrase: fromText.match.phrase })}
+          </p>
+        )}
+        {value.pick && fromText && (
+          <p className="text-[var(--text-muted)]" data-testid="coding-budget-overrides-text">
+            {t("codingAgent.budgetPickerOverridesText", { phrase: fromText.match.phrase })}
+          </p>
+        )}
+        {!value.pick && !fromText?.ok && (
           <p className="text-[var(--text-muted)]">
             {defaultChip
               ? t("codingAgent.budgetPickerNotSetDefault", { budget: t(CHIP_LABEL[defaultChip]) })
               : t("codingAgent.budgetPickerNotSet")}
           </p>
+        )}
+        {!value.pick && fromText?.ok && !team && needsTeam(fromText.budget) && (
+          <p className="text-[var(--text-muted)]" data-testid="coding-budget-team-hint">{t("codingAgent.budgetPickerTeamHint")}</p>
         )}
         {value.pick?.kind === "none" && <p className="text-[var(--text-muted)]">{t("codingAgent.budgetPickerNoLimitHint")}</p>}
         {pickProblem && <p className="text-amber-400" role="alert">{problemText(pickProblem)}</p>}

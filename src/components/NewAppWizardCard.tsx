@@ -440,6 +440,7 @@ export default function NewAppWizardCard({
         team={mode === "existing" && team}
         timeZone={timeZone}
         defaultBudget={defaultTimeBudget}
+        taskText={mode === "existing" ? next : what}
       />
       {error && (
         <p className="text-[11px] text-amber-400" role="alert" data-testid="coding-agent-new-error">{error}</p>

@@ -66,6 +66,7 @@ function stubFetch(
     gitAuthorName?: string | null;
     gitAuthorEmail?: string | null;
     prBodyIncludesTask?: string;
+    defaultTimeBudget?: string | null;
   },
   opts: {
     resolveTo?: string;
@@ -99,6 +100,8 @@ function stubFetch(
     noPrBodyTask?: boolean;
     /** A server from before the per-role models: no field, so the section is not drawn. */
     noRoleModels?: boolean;
+    /** A server from before the time budget: no default-budget field, so its select is not drawn. */
+    noDefaultBudget?: boolean;
   } = {},
 ) {
   posts = [];
@@ -122,6 +125,7 @@ function stubFetch(
   let gitAuthorName: string | null = status.gitAuthorName ?? null;
   let gitAuthorEmail: string | null = status.gitAuthorEmail ?? null;
   let prBodyIncludesTask = status.prBodyIncludesTask ?? "summary";
+  let defaultTimeBudget: string | null = status.defaultTimeBudget ?? null;
   // Every role on its default, as a box that never chose answers.
   const roleModels: Record<string, { model: string; effort: string }> = {
     planner: { model: "auto", effort: "auto" },
@@ -156,6 +160,7 @@ function stubFetch(
     ...(opts.noGitAuthor ? {} : { gitAuthorName, gitAuthorEmail, maxGitAuthorChars: 200 }),
     ...(opts.noPrBodyTask ? {} : { prBodyIncludesTask }),
     ...(opts.noRoleModels ? {} : { roleModels: JSON.parse(JSON.stringify(roleModels)) }),
+    ...(opts.noDefaultBudget ? {} : { defaultTimeBudget, timeZone: "Europe/Sofia" }),
   });
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
@@ -226,6 +231,7 @@ function stubFetch(
         if ("gitAuthorEmail" in body) gitAuthorEmail = body.gitAuthorEmail;
       }
       if (typeof body.autoMerge === "boolean") autoMerge = body.autoMerge;
+      if ("defaultTimeBudget" in body) defaultTimeBudget = body.defaultTimeBudget;
       if (typeof body.prBodyIncludesTask === "string") prBodyIncludesTask = body.prBodyIncludesTask;
       if (body.roleModels && typeof body.roleModels === "object") {
         for (const [role, half] of Object.entries(body.roleModels as Record<string, Record<string, string>>)) {
@@ -1124,5 +1130,39 @@ describe("a team's model and effort per role", () => {
     render(<CodingAgentSettingsPanel />);
     await screen.findByTestId("coding-agent-effort");
     expect(screen.queryByTestId("coding-agent-role-models")).toBeNull();
+  });
+});
+
+/** The time budget a run or team gets when it is started with none and its task names no time. */
+describe("the default time budget", () => {
+  const LABEL = translations.en["codingAgent.defaultBudgetLabel"];
+
+  it("shows the stored default, offers no limit and the four presets, and saves a new one", async () => {
+    stubFetch({ enabled: true, readiness: READY, defaultTimeBudget: "1h" });
+    render(<CodingAgentSettingsPanel />);
+    const select = await screen.findByLabelText(LABEL) as HTMLSelectElement;
+    expect(select.value).toBe("1h");
+    expect([...select.querySelectorAll("option")].map((o) => [o.value, o.textContent])).toEqual([
+      ["", translations.en["codingAgent.budgetPickerNone"]],
+      ["30m", translations.en["codingAgent.budgetPickerChip30m"]],
+      ["1h", translations.en["codingAgent.budgetPickerChip1h"]],
+      ["morning", translations.en["codingAgent.budgetPickerChipMorning"]],
+      ["1d", translations.en["codingAgent.budgetPickerChip1d"]],
+    ]);
+    expect(screen.getByText(translations.en["codingAgent.defaultBudgetHint"])).toBeTruthy();
+
+    fireEvent.change(select, { target: { value: "morning" } });
+    await waitFor(() => { expect(posts).toContainEqual({ url: "/setup-api/coding-agent/enable", body: { defaultTimeBudget: "morning" } }); });
+    await waitFor(() => { expect((screen.getByLabelText(LABEL) as HTMLSelectElement).value).toBe("morning"); });
+
+    fireEvent.change(screen.getByLabelText(LABEL), { target: { value: "" } });
+    await waitFor(() => { expect(posts).toContainEqual({ url: "/setup-api/coding-agent/enable", body: { defaultTimeBudget: null } }); });
+  });
+
+  it("is not drawn by a server that predates the time budget", async () => {
+    stubFetch({ enabled: true, readiness: READY }, { noDefaultBudget: true });
+    render(<CodingAgentSettingsPanel />);
+    await screen.findByRole("switch", { name: SWITCH });
+    expect(screen.queryByTestId("coding-agent-default-budget")).toBeNull();
   });
 });

@@ -69,7 +69,7 @@ import { installPendingRefresh } from '@/lib/email-pending-refresh'
 import { describeChatFailure, describeFallbackReply, describeImageFailure, isUnacknowledgedTurn, UNACKNOWLEDGED_TURN_TEXT } from '@/lib/chat-error-text'
 import { describeChatSwap, reportAnthropicChatFailure, TurnLedger } from '@/lib/anthropic-chat-swap'
 import { RunFailureLedger, withFailureNote } from '@/lib/chat-run-failure'
-import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, VOICE_SETTINGS_CHANGED_EVENT, buildFixErrorPrompt, dispatchOpenApp, onProvidersChanged, type ChatMessageDetail, type FixErrorContext, dispatchOpenCodingRun } from '@/lib/ui-events'
+import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, VOICE_SETTINGS_CHANGED_EVENT, buildFixErrorPrompt, dispatchOpenApp, onCodingAgentChanged, onProvidersChanged, type ChatMessageDetail, type FixErrorContext, dispatchOpenCodingRun } from '@/lib/ui-events'
 import { speechTextFor } from '@/lib/speech-text'
 import { SKILL_CHANGE_EVENT, buildSkillChangeMessage, type SkillChangeEvent } from '@/lib/skill-change-message'
 import { isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
@@ -1627,6 +1627,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (newAppMaxChars === null) void readCodingAgentStatus()
     setShowNewApp(true)
   }, [newAppMaxChars, readCodingAgentStatus])
+  // A Coding Agent setting saved since the last read — its default time
+  // budget above all — makes the next hand-off read the status again: the
+  // card's "your default" line must not outlive the setting it names.
+  useEffect(() => onCodingAgentChanged(() => setNewAppMaxChars(null)), [])
   // Closing forgets what the last opener asked for (a project, the team
   // switch): the next "+" must open a fresh card, not the previous
   // project's team form.
