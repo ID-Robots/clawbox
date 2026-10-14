@@ -1005,5 +1005,11 @@ describe("a board's time budget", () => {
     expect(lib.loadBoard(plain.id)).not.toHaveProperty("timeBudget");
     const forged = lib.createBoard({ goal: "Build it", projectId: null, directory: "/p", source: "owner", timeBudget: { ...BUDGET, preset: "forever" } as never }, OWNER);
     expect(forged).not.toHaveProperty("timeBudget");
+    // On disk too: a file whose budget was hand-edited into something no box writes is read back with none.
+    for (const bad of [{ ...BUDGET, preset: "forever" }, { ...BUDGET, deadline: "tomorrow" }, "1h"]) {
+      (plain as unknown as { timeBudget: unknown }).timeBudget = bad;
+      lib.saveBoard(plain);
+      expect(lib.loadBoard(plain.id), JSON.stringify(bad)).not.toHaveProperty("timeBudget");
+    }
   });
 });

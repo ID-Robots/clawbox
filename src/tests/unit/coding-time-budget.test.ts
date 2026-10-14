@@ -26,6 +26,7 @@ import {
   parseBudgetFromText,
   parseBudgetToken,
   parseDuration,
+  parseIsoInstant,
   presetBudget,
   readBudgetInput,
   readTimeBudget,
@@ -90,6 +91,20 @@ describe("the chips", () => {
     expect(at(presetBudget("morning", nyEve, "America/New_York"))).toBe("2026-03-08T12:00:00.000Z");
     // Sofia falls back on 25 Oct too: 08:00 EET is 06:00 UTC.
     expect(at(presetBudget("morning", Date.parse("2026-10-24T19:00:00Z"), SOFIA))).toBe("2026-10-25T06:00:00.000Z");
+  });
+
+  it("keeps the morning right in half-hour zones and across a southern-hemisphere DST change", () => {
+    expect(at(presetBudget("morning", NOW, "Asia/Kolkata"))).toBe("2026-10-15T02:30:00.000Z"); // 08:00 IST, +05:30
+    expect(at(presetBudget("morning", NOW, "Australia/Sydney"))).toBe("2026-10-14T21:00:00.000Z"); // 08:00 AEDT
+    expect(at(presetBudget("morning", NOW, "Australia/Lord_Howe"))).toBe("2026-10-14T21:00:00.000Z"); // 08:00 at +11, a half-hour DST
+    // Sydney springs forward on 4 Oct 2026: 22:00 AEST the evening before, 08:00 AEDT after.
+    expect(at(presetBudget("morning", Date.parse("2026-10-03T12:00:00Z"), "Australia/Sydney"))).toBe("2026-10-03T21:00:00.000Z");
+  });
+
+  it("reads a wall-clock time in the hour a clock repeats as the earlier one, and one in the skipped hour on the offset before the jump", () => {
+    expect(parseIsoInstant("2026-11-01T01:30", "America/New_York")).toBe(Date.parse("2026-11-01T05:30:00Z")); // EDT, not EST
+    expect(parseIsoInstant("2026-10-25T03:30", SOFIA)).toBe(Date.parse("2026-10-25T00:30:00Z")); // EEST, not EET
+    expect(parseIsoInstant("2026-03-08T02:30", "America/New_York")).toBe(Date.parse("2026-03-08T07:30:00Z")); // 02:30 never happens: EST
   });
 
   it("reads a zone this engine does not know as UTC rather than failing", () => {
@@ -169,6 +184,18 @@ describe("the budget token a caller sends", () => {
     expect((parseBudgetToken("15d", NOW, SOFIA) as { error: string }).error).toMatch(/at most 14 days/);
     expect((parseBudgetToken("3m", NOW, SOFIA) as { error: string }).error).toMatch(/at least 5 minutes/);
     expect((parseBudgetToken("a/b/c", NOW, SOFIA) as { ok: boolean }).ok).toBe(false);
+  });
+
+  it("refuses the names an object inherits — a 400 sentence, never a deadline of NaN", () => {
+    for (const token of ["constructor", "__proto__", "toString", "hasOwnProperty", "valueOf"]) {
+      const r = parseBudgetToken(token, NOW, SOFIA);
+      expect(r, token).toMatchObject({ ok: false, error: expect.stringMatching(/is not one this box knows/) });
+    }
+  });
+
+  it("takes exactly the 5-minute floor and the 14-day ceiling", () => {
+    expect(parseBudgetToken("5m", NOW, SOFIA)).toEqual({ ok: true, budget: expect.objectContaining({ deadline: "2026-10-14T15:05:00.000Z" }) });
+    expect(parseBudgetToken("14d", NOW, SOFIA)).toEqual({ ok: true, budget: expect.objectContaining({ deadline: "2026-10-28T15:00:00.000Z" }) });
   });
 
   it("takes the object shapes the start UI sends, and refuses anything else", () => {
@@ -295,6 +322,93 @@ describe("the task's words — German", () => {
   it("does not read a feature's own times as a budget", () => {
     expect(parseBudgetFromText("Öffnungszeiten: 9 bis 18 Uhr", NOW, SOFIA)).toBeNull();
     expect(parseBudgetFromText("Sitzungen laufen nach 2 Stunden ab", NOW, SOFIA)).toBeNull();
+  });
+});
+
+describe("the task's words — a part of the day, and a day after its time", () => {
+  // NOW is Wednesday 18:00 in Sofia (UTC+3): Thursday 18:00 is 15:00 UTC.
+  it("reads the part of the day a deadline names, rather than the day's default hour", () => {
+    expect(ok("work until tomorrow evening").budget).toMatchObject({ preset: "custom", deadline: "2026-10-15T15:00:00.000Z", label: "Until Thu 15 Oct, 18:00" });
+    expect(ok("work until tomorrow afternoon").budget.deadline).toBe("2026-10-15T12:00:00.000Z");
+    expect(ok("work until tomorrow night").budget.deadline).toBe("2026-10-15T19:00:00.000Z");
+    expect(ok("until tomorrow at noon").budget.deadline).toBe("2026-10-15T09:00:00.000Z");
+    expect(ok("until Friday morning").budget.deadline).toBe("2026-10-16T05:00:00.000Z");
+    expect(ok("до утре вечер").budget.deadline).toBe("2026-10-15T15:00:00.000Z");
+    expect(ok("работи до петък сутринта").budget.deadline).toBe("2026-10-16T05:00:00.000Z");
+    expect(ok("bis morgen Abend").budget.deadline).toBe("2026-10-15T15:00:00.000Z");
+    expect(ok("bis Freitagabend").budget.deadline).toBe("2026-10-16T15:00:00.000Z");
+  });
+
+  it("reads a time within that part of the day, and a time within the morning", () => {
+    expect(ok("until tomorrow evening at 7").budget.deadline).toBe("2026-10-15T16:00:00.000Z"); // 19:00, not 07:00
+    expect(ok("bis Freitag Abend um 20 Uhr").budget.deadline).toBe("2026-10-16T17:00:00.000Z");
+    expect(ok("work until tomorrow morning at 10").budget).toMatchObject({ preset: "custom", deadline: "2026-10-15T07:00:00.000Z" });
+  });
+
+  it("reads the day that FOLLOWS a time, rather than today's", () => {
+    expect(ok("work until 6pm tomorrow").budget.deadline).toBe("2026-10-15T15:00:00.000Z");
+    expect(ok("until 18:00 Friday").budget.deadline).toBe("2026-10-16T15:00:00.000Z");
+    expect(ok("bis 18 Uhr am Freitag").budget.deadline).toBe("2026-10-16T15:00:00.000Z");
+    expect(ok("до 18:00 в петък").budget.deadline).toBe("2026-10-16T15:00:00.000Z");
+    expect(ok("до 18 ч. утре").budget.deadline).toBe("2026-10-15T15:00:00.000Z");
+  });
+
+  it("reads tonight and the end of the day as today's", () => {
+    expect(ok("work until tonight").budget.deadline).toBe("2026-10-14T19:00:00.000Z"); // 22:00
+    expect(ok("до довечера").budget.deadline).toBe("2026-10-14T19:00:00.000Z");
+    const tenAm = Date.parse("2026-10-14T07:00:00Z"); // 10:00 in Sofia
+    for (const text of ["work until end of day", "работи до края на деня", "bis Feierabend", "until this evening"]) {
+      expect(ok(text, tenAm).budget.deadline, text).toBe("2026-10-14T15:00:00.000Z");
+    }
+    // Said at 18:00, the end of today has come: understood, and refused with the reason.
+    expect(parseBudgetFromText("work until end of day", NOW, SOFIA)).toMatchObject({ ok: false, error: expect.stringMatching(/in the past/) });
+  });
+});
+
+describe("the task's words — who they are said to", () => {
+  it("does not read a verb said of the thing being built as the agent's budget", () => {
+    for (const text of [
+      "Add a time budget of 30 minutes to the export job",
+      "The poller should work for 2 hours before retrying",
+      "Make it work until 18:00",
+      "The job must finish within 30 minutes",
+      "The report should be done by 17:00",
+      "Der Server arbeitet bis 18 Uhr",
+      "Der Bericht soll fertig bis 17 Uhr sein",
+    ]) {
+      expect(parseBudgetFromText(text, NOW, SOFIA), text).toBeNull();
+    }
+  });
+
+  it("still reads the owner telling the agent, mid-sentence or not", () => {
+    expect(ok("I want you to work for 2 hours on this").budget.deadline).toBe("2026-10-14T17:00:00.000Z");
+    expect(ok("Please work for 2 hours").budget.deadline).toBe("2026-10-14T17:00:00.000Z");
+    expect(ok("You should work until tomorrow morning").budget.preset).toBe("morning");
+    expect(ok("Build the scraper and keep working until morning").budget.preset).toBe("morning");
+    expect(ok("Your time budget is 2 hours").budget.deadline).toBe("2026-10-14T17:00:00.000Z");
+    expect(ok("Time budget: 2 hours").budget.deadline).toBe("2026-10-14T17:00:00.000Z");
+    expect(ok("Arbeitet bis morgen früh!").budget.preset).toBe("morning");
+  });
+
+  it("reads a bare unit after \"next\", the Bulgarian plural of hours, and the words before an amount", () => {
+    expect(ok("Work for the next hour on the parser").budget.preset).toBe("1h");
+    expect(ok("für die nächste Stunde").budget.preset).toBe("1h");
+    expect(ok("през следващия час").budget.preset).toBe("1h");
+    expect(ok("за 24 часове").budget.preset).toBe("1d");
+    expect(ok("имаш 3 часове").budget.deadline).toBe("2026-10-14T18:00:00.000Z");
+    for (const text of ["You still have 30 minutes", "du hast noch 30 Minuten", "имаш още 30 минути"]) {
+      expect(ok(text).budget.preset, text).toBe("30m");
+    }
+    expect(ok("you have at most 2 hours").budget.deadline).toBe("2026-10-14T17:00:00.000Z");
+    expect(ok("du hast noch etwa 2 Stunden").budget.deadline).toBe("2026-10-14T17:00:00.000Z");
+  });
+
+  it("reads a typographic apostrophe and a decomposed umlaut like the plain ones", () => {
+    expect(ok("You’ve got 2 hours").budget.deadline).toBe("2026-10-14T17:00:00.000Z");
+    // "u" and a combining diaeresis, as some keyboards and pastes send it.
+    const decomposed = ok("Fu\u0308r 2 Stunden: baue die Seite");
+    expect(decomposed.budget.deadline).toBe("2026-10-14T17:00:00.000Z");
+    expect(decomposed.match.lang).toBe("de");
   });
 });
 

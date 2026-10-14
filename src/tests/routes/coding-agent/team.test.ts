@@ -111,6 +111,8 @@ describe("POST", () => {
     expect(res.status).toBe(202);
     expect(await res.json()).toEqual({ started: true, queued: false, team: BOARD });
     expect(team.startTeam).toHaveBeenCalledWith({ goal: "Build it", projectId: null, directory: "site", source: "agent" });
+    // Absent, not `undefined`: toHaveBeenCalledWith cannot tell the two apart.
+    expect(team.startTeam.mock.calls[0][0]).not.toHaveProperty("timeBudget");
   });
 
   it("records the owner's cookie as the source", async () => {
@@ -222,6 +224,21 @@ describe("POST with a time budget", () => {
     const none = await (await POST(req("team", { goal: "Build it", budget: "none" }))).json();
     expect(none).toEqual({ started: true, queued: false, team: BOARD });
     expect(team.startTeam).toHaveBeenLastCalledWith({ goal: "Build it", projectId: null, directory: null, source: "agent" });
+    expect(team.startTeam.mock.calls[team.startTeam.mock.calls.length - 1][0]).not.toHaveProperty("timeBudget");
+  });
+
+  it("lets the goal's words beat the owner's default", async () => {
+    getDefaultTimeBudget.mockResolvedValue("morning");
+    const body = await (await POST(req("team", { goal: "You have 2 hours: build the invoice app" }))).json();
+    expect(body.timeBudget).toMatchObject({ preset: "custom", source: "text", label: "2 hours" });
+    expect(team.startTeam).toHaveBeenLastCalledWith(expect.objectContaining({ timeBudget: body.timeBudget }));
+  });
+
+  it("turns an unexpected failure into a 500 with a plain message", async () => {
+    team.startTeam.mockRejectedValueOnce(new Error("disk full"));
+    const res = await POST(req("team", { goal: "Build it", budget: "1h" }));
+    expect(res.status).toBe(500);
+    expect((await res.json()).error).toBe("disk full");
   });
 
   it("refuses a budget it cannot read, or one in the past, with 400 and a sentence — no team started", async () => {

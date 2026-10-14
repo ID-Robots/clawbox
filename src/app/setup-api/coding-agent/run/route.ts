@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
 import { hasOwnerSession } from "@/lib/owner-session";
-import { CodingAgentError, ExperienceChoiceError, MAX_TASK_CHARS, PipelineChoiceError, ProviderChoiceError, httpStatusForCodingError, startOrQueueRun } from "@/lib/coding-agent";
+import { CodingAgentError, ExperienceChoiceError, MAX_TASK_CHARS, PipelineChoiceError, ProviderChoiceError, checkReadiness, httpStatusForCodingError, startOrQueueRun } from "@/lib/coding-agent";
 import { startTeam } from "@/lib/coding-team";
 import { needsTeam } from "@/lib/coding-time-budget";
 import { budgetAnswer, resolveStartBudget } from "@/lib/coding-time-budget-server";
@@ -34,13 +34,17 @@ function sent(v: unknown): boolean {
  * token cap. It beats a budget the task's words state ("you
  * have 2 hours", "work until tomorrow morning"), which beats the owner's
  * default (`coding_agent_default_budget`, never applied to a resume or a Fix
- * CI). One that is not a budget, ends in the past or is more than 14 days away
+ * CI — which, naming none, keep the budget of the run they continue while its
+ * deadline is ahead; "none" keeps nothing). One that is not a budget, ends in
+ * the past or is more than 14 days away
  * is 400 `invalid` with `code: "budget"` and a sentence saying what is taken.
  * The answer carries the resolved `timeBudget` (an absolute deadline) when
  * there is one; without one, the run and the answer are exactly as before.
  *
  * A budget LONGER than 30 minutes starts a coding team on the task instead
- * (`startTeam`): 202 `{ started, queued, team, routedToTeam: true, timeBudget }`.
+ * (`startTeam`): 202 `{ started, queued, team, routedToTeam: true, timeBudget }`
+ * — or, on a box that could not start a run, the 409 `not_ready` a run gets,
+ * before any board is saved.
  * Not for a resume or a Fix CI — they continue one run's session — and not for
  * a request carrying something only a run can (RUN_ONLY_FIELDS): that stays
  * one run with its budget, and the answer says so (`routedToTeam: false`,
@@ -127,8 +131,10 @@ export async function POST(request: Request) {
   const source = (await hasOwnerSession(request)) ? "owner" : "agent";
 
   // A continuation picks up one run's session: never a team, and never the
-  // owner's default — only a budget it is given, or one its words state.
-  const continuing = (typeof body.resumeRunId === "string" && body.resumeRunId !== "") || body.fixCi === true;
+  // owner's default — a budget it is given, one its words state, or else the
+  // one the run it continues still has (startRun carries that one). Trimmed
+  // as startRun trims it: a blank id is a fresh run, not a continuation.
+  const continuing = (typeof body.resumeRunId === "string" && body.resumeRunId.trim() !== "") || body.fixCi === true;
   const resolved = await resolveStartBudget({ explicit: body.budget, text: task, applyDefault: !continuing });
   if (!resolved.ok) {
     return NextResponse.json({ error: resolved.error, kind: "invalid", code: "budget" }, { status: 400 });
@@ -143,6 +149,13 @@ export async function POST(request: Request) {
       routeNote = `A budget over 30 minutes normally starts a coding team, but this request names ${runOnly.join(", ")}, which only a single run carries — so it runs as one run with the budget.`;
     } else {
       try {
+        // The refusal a run gets on a box that cannot start one (409
+        // not_ready), given BEFORE a board is saved: a team would answer
+        // 202 and only fail later, where the caller is no longer looking.
+        const readiness = await checkReadiness();
+        if (!readiness.ready) {
+          throw new CodingAgentError("not_ready", readiness.problems.join(" ") || "The coding agent is not ready to start work on this ClawBox.");
+        }
         const team = await startTeam({ goal: task, projectId, directory, source, timeBudget });
         const queued = team.status === "queued";
         console.error(`[coding-agent/run] a time budget over 30 minutes: started team ${team.id} instead of a run`);
@@ -200,8 +213,9 @@ export async function POST(request: Request) {
       // its own record of the named run — never the caller's.
       ...(body.fixCi === true ? { fixCi: true } : {}),
       // Resolved above, on the box's clock: an absolute deadline, frozen on the
-      // record. Absent without one, so such a run starts exactly as before.
-      ...(timeBudget ? { timeBudget } : {}),
+      // record. Absent without one, so such a run starts exactly as before; a
+      // continuation's explicit "none" is null, so it carries nothing over.
+      ...(timeBudget ? { timeBudget } : continuing && body.budget != null ? { timeBudget: null } : {}),
     });
     return NextResponse.json(
       { started: !queued, queued, run, ...budgetAnswer(resolved), ...(routeNote ? { routedToTeam: false, routeNote } : {}) },
