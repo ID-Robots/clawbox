@@ -1332,6 +1332,23 @@ export async function prepareAccount(opts: { exclude?: ReadonlySet<string>; fall
 }
 
 /**
+ * The first usable Anthropic API KEY in the pool, in priority order — never a
+ * connected Claude account's token, never the `claude` sign-in. For background
+ * features that may spend on an API key the owner added but must not draw on a
+ * subscription. Read-only: it marks nothing, moves nothing and records no use;
+ * null when the pool holds no usable key or the store cannot be read.
+ */
+export async function readUsableApiKey(): Promise<string | null> {
+  const now = Date.now();
+  for (const account of await readAccounts()) {
+    if (account.kind !== "api_key" || !isUsable(account, now)) continue;
+    const stored = await readDeviceSecret({ scope: ANTHROPIC_ACCOUNTS_SCOPE, name: secretName(account.id) }).catch(() => null);
+    if (stored?.found && stored.value) return stored.value;
+  }
+  return null;
+}
+
+/**
  * Could an account OTHER than `excludeId` take a run over, as far as this
  * process knows right now? Synchronous, off the snapshot — for the runner's
  * settle path. `null` means "not known yet" (nothing read since boot): the

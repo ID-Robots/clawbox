@@ -43,7 +43,7 @@ afterAll(() => {
 describe("readSettings", () => {
   it("answers the defaults and creates nothing on a fresh box", () => {
     const s = readSettings();
-    expect(s.ingest).toEqual({ exclude: [...DEFAULT_INGEST_EXCLUDES], parallel: DEFAULT_INGEST_PARALLEL });
+    expect(s.ingest).toEqual({ exclude: [...DEFAULT_INGEST_EXCLUDES], parallel: DEFAULT_INGEST_PARALLEL, folders: [] });
     expect(DEFAULT_INGEST_PARALLEL).toBe(128);
     expect(s.costRates).toEqual({});
     expect(fs.existsSync(root)).toBe(false);
@@ -53,7 +53,7 @@ describe("readSettings", () => {
     fs.mkdirSync(root, { recursive: true });
     fs.writeFileSync(settingsPath(), JSON.stringify({ ingest: { exclude: ["drafts"], parallel: 9999 }, costRates: "nope" }));
     const s = readSettings();
-    expect(s.ingest).toEqual({ exclude: ["drafts"], parallel: DEFAULT_INGEST_PARALLEL });
+    expect(s.ingest).toEqual({ exclude: ["drafts"], parallel: DEFAULT_INGEST_PARALLEL, folders: [] });
     expect(s.costRates).toEqual({});
   });
 
@@ -72,14 +72,14 @@ describe("writeSettings", () => {
     fs.mkdirSync(root, { recursive: true });
     fs.writeFileSync(settingsPath(), JSON.stringify({ schedule: "03:00", ingest: { other: true } }));
     const s = writeSettings({ ingest: { exclude: ["drafts", "Drafts", " archive-* "], parallel: 64 } });
-    expect(s.ingest).toEqual({ exclude: ["drafts", "archive-*"], parallel: 64 });
+    expect(s.ingest).toEqual({ exclude: ["drafts", "archive-*"], parallel: 64, folders: [] });
     const raw = JSON.parse(fs.readFileSync(settingsPath(), "utf8"));
     expect(raw).toMatchObject({ schedule: "03:00", ingest: { other: true, parallel: 64 } });
     expect(fs.statSync(settingsPath()).mode & 0o777).toBe(0o600);
     expect(fs.readdirSync(root).filter((f) => f.endsWith(".tmp"))).toEqual([]);
 
     const back = writeSettings({ ingest: { exclude: null, parallel: null } });
-    expect(back.ingest).toEqual({ exclude: [...DEFAULT_INGEST_EXCLUDES], parallel: DEFAULT_INGEST_PARALLEL });
+    expect(back.ingest).toEqual({ exclude: [...DEFAULT_INGEST_EXCLUDES], parallel: DEFAULT_INGEST_PARALLEL, folders: [] });
   });
 
   it("refuses a bad field whole and writes nothing", () => {

@@ -37,3 +37,25 @@ export async function ownerWriteGuard(req: Request, what: string): Promise<NextR
   if (!isSameOriginRequest(req)) return fail("cross_origin", "This request did not come from the ClawBox desktop.", 403);
   return null;
 }
+
+/** A JSON request body of at most `maxBytes`, or the failure to answer with. */
+export async function readJsonBody(req: Request, maxBytes = 64 * 1024): Promise<{ ok: true; body: unknown } | { ok: false; response: NextResponse }> {
+  let text: string;
+  try {
+    text = await req.text();
+  } catch {
+    return { ok: false, response: fail("invalid", "The request body could not be read.", 400) };
+  }
+  if (text.length > maxBytes) return { ok: false, response: fail("invalid", "The request is too large.", 413) };
+  if (text.trim() === "") return { ok: true, body: {} };
+  try {
+    return { ok: true, body: JSON.parse(text) };
+  } catch {
+    return { ok: false, response: fail("invalid", "The request body is not JSON.", 400) };
+  }
+}
+
+/** The non-blocking `same origin` half of the write guard, for a write the MCP bearer may make. */
+export function crossOriginRefusal(req: Request): NextResponse | null {
+  return isSameOriginRequest(req) ? null : fail("cross_origin", "This request did not come from the ClawBox desktop.", 403);
+}
