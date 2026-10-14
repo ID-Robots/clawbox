@@ -985,3 +985,25 @@ describe("the team's pull request on the board", () => {
     expect(() => lib.reopenForCi(b, SYSTEM, "t1", "again")).toThrow(/only a complete task/);
   });
 });
+
+describe("a board's time budget", () => {
+  const BUDGET = {
+    deadline: "2026-10-15T05:00:00.000Z", label: "Until tomorrow morning", preset: "morning", source: "picker", setAt: "2026-10-14T15:00:00.000Z",
+  } as const;
+
+  it("is kept on the board it was started with, and read back off disk as it was written", () => {
+    const board = lib.createBoard({ goal: "Scrape until morning", projectId: null, directory: "/p", source: "owner", timeBudget: { ...BUDGET } }, OWNER);
+    expect(board.timeBudget).toEqual(BUDGET);
+    lib.saveBoard(board);
+    expect(lib.loadBoard(board.id)?.timeBudget).toEqual(BUDGET);
+  });
+
+  it("is ABSENT on a board without one — and on one whose file holds something this box could not have written", () => {
+    const plain = lib.createBoard({ goal: "Build it", projectId: null, directory: "/p", source: "owner" }, OWNER);
+    expect(plain).not.toHaveProperty("timeBudget");
+    lib.saveBoard(plain);
+    expect(lib.loadBoard(plain.id)).not.toHaveProperty("timeBudget");
+    const forged = lib.createBoard({ goal: "Build it", projectId: null, directory: "/p", source: "owner", timeBudget: { ...BUDGET, preset: "forever" } as never }, OWNER);
+    expect(forged).not.toHaveProperty("timeBudget");
+  });
+});

@@ -21,6 +21,18 @@ vi.mock("@/lib/route-auth", async () => {
   return { ...actual, requireSession };
 });
 vi.mock("@/lib/owner-session", () => ({ hasOwnerSession }));
+// The owner's default time budget (none unless a case sets one) and the box's zone.
+const getDefaultTimeBudget = vi.hoisted(() => vi.fn());
+const getTokenLimit = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/coding-agent", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/coding-agent")>()),
+  getDefaultTimeBudget,
+  getTokenLimit,
+}));
+vi.mock("@/lib/timezone", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/timezone")>()),
+  readOsTimeZone: vi.fn(async () => "Europe/Sofia"),
+}));
 
 let GET: (req: Request) => Promise<Response>;
 let POST: (req: Request) => Promise<Response>;
@@ -40,6 +52,8 @@ beforeEach(async () => {
   vi.clearAllMocks();
   requireSession.mockResolvedValue(null);
   hasOwnerSession.mockResolvedValue(false);
+  getDefaultTimeBudget.mockResolvedValue(null);
+  getTokenLimit.mockResolvedValue(null);
   team.startTeam.mockResolvedValue(BOARD);
   team.stopTeam.mockReturnValue({ ...BOARD, status: "stopped" });
   team.getTeam.mockReturnValue(BOARD);
@@ -172,5 +186,64 @@ describe("POST stop", () => {
     hasOwnerSession.mockResolvedValueOnce(true);
     expect((await STOP(req("team/stop", { id: OWNERS.id }))).status).toBe(200);
     expect(team.stopTeam).toHaveBeenCalledWith(OWNERS.id);
+  });
+});
+
+/**
+ * THE TIME BUDGET a team works to (src/lib/coding-time-budget.ts): the
+ * picker's `budget`, else the goal's own words, else the owner's default —
+ * resolved here on the box's clock and handed to the orchestrator, which keeps
+ * it on the board. Without one, the call and the answer are what they were.
+ */
+describe("POST with a time budget", () => {
+  const MIN = 60_000;
+  const span = (b: { deadline: string; setAt: string }) => Date.parse(b.deadline) - Date.parse(b.setAt);
+
+  it("hands the picker's budget to the orchestrator and names it in the answer", async () => {
+    const res = await POST(req("team", { goal: "Build it", projectId: "site", budget: "1d" }));
+    expect(res.status).toBe(202);
+    const body = await res.json();
+    expect(body).toMatchObject({ started: true, queued: false, team: BOARD, timeBudget: { preset: "1d", source: "picker", label: "1 day" } });
+    expect(span(body.timeBudget)).toBe(24 * 60 * MIN);
+    expect(team.startTeam).toHaveBeenCalledWith({ goal: "Build it", projectId: "site", directory: null, source: "agent", timeBudget: body.timeBudget });
+  });
+
+  it("reads the goal's words when the picker named none, and lets the picker beat them", async () => {
+    const said = await (await POST(req("team", { goal: "Arbeite bis morgen früh an dem Scraper" }))).json();
+    expect(said.timeBudget).toMatchObject({ preset: "morning", source: "text" });
+    const picked = await (await POST(req("team", { goal: "You have 2 hours", budget: "1h" }))).json();
+    expect(picked.timeBudget).toMatchObject({ preset: "1h", source: "picker" });
+  });
+
+  it("falls back to the owner's default, which \"none\" overrides", async () => {
+    getDefaultTimeBudget.mockResolvedValue("morning");
+    const fallback = await (await POST(req("team", { goal: "Build it" }))).json();
+    expect(fallback.timeBudget).toMatchObject({ preset: "morning", source: "default" });
+    const none = await (await POST(req("team", { goal: "Build it", budget: "none" }))).json();
+    expect(none).toEqual({ started: true, queued: false, team: BOARD });
+    expect(team.startTeam).toHaveBeenLastCalledWith({ goal: "Build it", projectId: null, directory: null, source: "agent" });
+  });
+
+  it("refuses a budget it cannot read, or one in the past, with 400 and a sentence — no team started", async () => {
+    for (const budget of ["later", "2020-01-01T00:00:00Z", { preset: "custom" }]) {
+      const res = await POST(req("team", { goal: "Build it", budget }));
+      expect(res.status, JSON.stringify(budget)).toBe(400);
+      expect(await res.json()).toMatchObject({ kind: "invalid", code: "budget", error: expect.stringMatching(/time budget/) });
+    }
+    expect(team.startTeam).not.toHaveBeenCalled();
+  });
+
+  it("answers a queued team with its budget too", async () => {
+    team.startTeam.mockResolvedValueOnce({ ...BOARD, status: "queued", queuePosition: 2 });
+    const body = await (await POST(req("team", { goal: "Build it", budget: "1h" }))).json();
+    expect(body).toMatchObject({ started: false, queued: true, timeBudget: { preset: "1h" } });
+  });
+
+  it("carries the owner's token cap on a budget over two hours as its spend ceiling", async () => {
+    getTokenLimit.mockResolvedValue(750_000);
+    // "1d", not "morning": the morning's length depends on the hour the suite runs at.
+    const body = await (await POST(req("team", { goal: "Scrape the catalogue", budget: "1d" }))).json();
+    expect(body.timeBudget).toMatchObject({ preset: "1d", tokenCap: 750_000 });
+    expect(team.startTeam).toHaveBeenLastCalledWith(expect.objectContaining({ timeBudget: body.timeBudget }));
   });
 });

@@ -621,3 +621,36 @@ describe("a team's model and effort per role", () => {
     expect(configSet).not.toHaveBeenCalled();
   });
 });
+
+describe("the default time budget", () => {
+  it("saves a chip through the real setter, and clears it with null", async () => {
+    const res = await POST(request({ cookie: ownerCookie(), body: { defaultTimeBudget: "morning" } }));
+    expect(res.status).toBe(200);
+    expect(configSet).toHaveBeenCalledWith("coding_agent_default_budget", "morning");
+    const cleared = await POST(request({ cookie: ownerCookie(), body: { defaultTimeBudget: null } }));
+    expect(cleared.status).toBe(200);
+    expect(configSet).toHaveBeenLastCalledWith("coding_agent_default_budget", undefined);
+  });
+
+  it("refuses what is not a chip BEFORE any setting in the same body is written", async () => {
+    for (const bad of ["custom", "2h", 30, true, ""]) {
+      vi.mocked(configSet).mockClear();
+      setEffort.mockClear();
+      const res = await POST(request({ cookie: ownerCookie(), body: { effort: "low", defaultTimeBudget: bad } }));
+      expect(res.status, JSON.stringify(bad)).toBe(400);
+      const body = await res.json();
+      expect(body.kind).toBe("invalid");
+      expect(body.error).toMatch(/30m, 1h, morning, 1d/);
+      expect(setEffort).not.toHaveBeenCalled();
+      expect(configSet).not.toHaveBeenCalled();
+    }
+  });
+
+  it("is the owner's alone, and is named in the refusal of an empty body", async () => {
+    const res = await POST(request({ bearer: "any-valid-looking-token-value", body: { defaultTimeBudget: "1d" } }));
+    expect(res.status).toBe(403);
+    expect(configSet).not.toHaveBeenCalled();
+    const empty = await POST(request({ cookie: ownerCookie(), body: { nonsense: 1 } }));
+    expect((await empty.json()).error).toContain("{ defaultTimeBudget: string | null }");
+  });
+});

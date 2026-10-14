@@ -26,6 +26,7 @@
 import fs from "fs";
 import os from "os";
 import type { CiFailure } from "@/lib/coding-ci";
+import { readTimeBudget, type TimeBudget } from "@/lib/coding-time-budget";
 import path, { untraced } from "@/lib/runtime-path";
 import { randomBytes } from "crypto";
 import { DATA_DIR } from "@/lib/config-store";
@@ -421,6 +422,12 @@ export interface TeamBoard {
   updatedAt: number;
   /** When the team settled (done, failed, stopped); null while it works. */
   finishedAt: number | null;
+  /**
+   * How long the owner let the team work: an absolute deadline and the label
+   * they chose (src/lib/coding-time-budget.ts), resolved by the route that
+   * started it. ABSENT on a team without one, which works as every team did.
+   */
+  timeBudget?: TimeBudget;
 }
 
 export class BoardAccessError extends Error {
@@ -574,6 +581,9 @@ function normalizeBoard(raw: unknown): TeamBoard | null {
     updatedAt: typeof b.updatedAt === "number" ? b.updatedAt : 0,
     finishedAt: typeof b.finishedAt === "number" ? b.finishedAt : null,
   };
+  // Re-read, never trusted; absent when the file has none this box could have written.
+  const timeBudget = readTimeBudget(b.timeBudget);
+  if (timeBudget) board.timeBudget = timeBudget;
   // Worked out again rather than trusted from the file: they are the board's, not the file's.
   board.metrics = teamMetrics(board);
   return board;
@@ -745,7 +755,7 @@ export const MAX_HOLD_REASON_CHARS = 600;
 
 // ─── Mutations (every one role-checked and logged) ───────────────────────────
 
-export function createBoard(input: { goal: string; projectId: string | null; directory: string; source: TeamSource; dynamic?: boolean }, actor: Actor): TeamBoard {
+export function createBoard(input: { goal: string; projectId: string | null; directory: string; source: TeamSource; dynamic?: boolean; timeBudget?: TimeBudget | null }, actor: Actor): TeamBoard {
   if (actor.kind !== "owner" && actor.kind !== "system") {
     throw new BoardAccessError(actor, "create", `Only the owner starts a team; ${describeActor(actor)} may not.`);
   }
@@ -780,6 +790,8 @@ export function createBoard(input: { goal: string; projectId: string | null; dir
     updatedAt: now,
     finishedAt: null,
   };
+  const timeBudget = readTimeBudget(input.timeBudget);
+  if (timeBudget) board.timeBudget = timeBudget;
   append(board, { ts: now, actor, type: "team_created", message: `Team created for: ${firstLine(goal)}` });
   board.metrics = teamMetrics(board, now);
   return board;
