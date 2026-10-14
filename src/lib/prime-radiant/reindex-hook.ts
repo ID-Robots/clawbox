@@ -3,10 +3,8 @@
  *
  * After the vault's main branch moves (a nightly merge, a verification, a
  * revert) the pages that changed are handed to whatever hook is installed —
- * Memory Shard's incremental `reindexPrimeRadiantPaths` once the Shard side
- * registers it at boot (`setVaultReindexHook`). With no hook installed this is
- * a no-op: the vault is the source of truth and a full Shard pass reads it
- * anyway. A hook that fails or throws is logged and never fails the change
+ * Memory Shard's incremental `reindexPrimeRadiantPaths` by default, or an
+ * override installed with `setVaultReindexHook` (tests). A hook that fails or throws is logged and never fails the change
  * that called it.
  *
  * The hook lives in `processStore`: the boot layer that installs it and the
@@ -29,8 +27,8 @@ export function setVaultReindexHook(hook: VaultReindexHook | null): void {
 /** Hand the changed knowledge pages to the hook. Answers whether a hook ran. */
 export async function notifyVaultChanged(paths: readonly string[]): Promise<boolean> {
   const pages = [...new Set(paths.filter(isKnowledgePage))].sort();
-  const hook = store.hook;
-  if (!hook || pages.length === 0) return false;
+  if (pages.length === 0) return false;
+  const hook = store.hook ?? defaultHook;
   try {
     await hook(pages);
     return true;
@@ -38,4 +36,9 @@ export async function notifyVaultChanged(paths: readonly string[]): Promise<bool
     console.warn("[prime-radiant] reindex hook failed:", err instanceof Error ? err.message : err);
     return false;
   }
+}
+
+async function defaultHook(paths: string[]): Promise<unknown> {
+  const { reindexPrimeRadiantPaths } = await import("./shard-index");
+  return reindexPrimeRadiantPaths(paths);
 }

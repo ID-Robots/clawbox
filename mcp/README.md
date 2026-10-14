@@ -1095,6 +1095,11 @@ index now (OpenClaw's own, or the one ClawBox keeps where there is no OpenClaw),
 so the tool is registered on both, with one description per edition: only the
 Hermes one points at `memory_shard_search`, which is Hermes-only because on
 OpenClaw the index is OpenClaw's and it searches it as part of a turn.
+`memory_shard_search` also answers from the Prime Radiant wiki, a built-in
+source once the vault exists: those passages carry `source: "prime-radiant"`,
+the vault-relative page `path`, the page or claim `id`, `kind`, the page `type`
+and `verified`, and a verified page or claim ranks first (on OpenClaw the
+memory-wiki plugin is what reaches the vault).
 
 **There is no reindex tool.** `POST /setup-api/clawkeep/memory/index` answers
 this bearer 403 `owner_only` on purpose — before that check the assistant could

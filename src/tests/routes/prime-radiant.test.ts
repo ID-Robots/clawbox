@@ -19,12 +19,23 @@ const oc = vi.hoisted(() => ({
   runOpenclawConfigSetBatch: vi.fn(async () => undefined),
 }));
 vi.mock("@/lib/openclaw-config", () => oc);
+// The vault's Memory Shard index: stubbed (it embeds), pinned in its own suite.
+const shard = vi.hoisted(() => ({
+  scheduleReindexAfterCommit: vi.fn(),
+  reindexPrimeRadiantVault: vi.fn(async () => null),
+  searchPrimeRadiant: vi.fn(async (): Promise<unknown[]> => []),
+  vaultIndexStatus: vi.fn(async () => ({ exists: true, pages: 3, chunks: 6, identity: "valid", needsFullScan: false, builtAt: 1 })),
+}));
+vi.mock("@/lib/prime-radiant/shard-index", () => shard);
+const memoryShard = vi.hoisted(() => ({ getMemoryShardEnabled: vi.fn(async () => true) }));
+vi.mock("@/lib/memory-shard", () => memoryShard);
 
 import { GET as statusGET } from "@/app/setup-api/prime-radiant/status/route";
 import { GET as pagesGET } from "@/app/setup-api/prime-radiant/pages/route";
 import { GET as pageGET } from "@/app/setup-api/prime-radiant/pages/[...path]/route";
 import { GET as lintGET } from "@/app/setup-api/prime-radiant/lint/route";
 import { POST as initPOST } from "@/app/setup-api/prime-radiant/init/route";
+import { GET as searchGET } from "@/app/setup-api/prime-radiant/search/route";
 import { MEMORY_WIKI_PLUGIN_ID } from "@/lib/prime-radiant/plugin-wiring";
 import { vaultOperation } from "@/lib/prime-radiant/vault";
 import { claim, pageText } from "../helpers/prime-radiant-fixtures";
@@ -81,6 +92,7 @@ describe("prime radiant routes: auth", () => {
       await lintGET(req("/lint")),
       await pageReq(["concepts", "x.md"]),
       await initReq(),
+      await searchGET(req("/search?q=widgets")),
     ]) {
       expect(res.status).toBe(403);
     }
@@ -293,5 +305,66 @@ describe("GET /lint", () => {
     expect(res.status).toBe(200);
     expect((await res.json()).checked).toBe(0);
     expect(fs.readFileSync(blocker, "utf8")).toBe("a file where the folder should be");
+  });
+});
+
+describe("GET /search", () => {
+  const VALID = { exists: true, pages: 3, chunks: 6, identity: "valid", needsFullScan: false, builtAt: 1 };
+  beforeEach(() => {
+    shard.searchPrimeRadiant.mockReset().mockResolvedValue([]);
+    shard.reindexPrimeRadiantVault.mockReset().mockResolvedValue(null);
+    shard.vaultIndexStatus.mockReset().mockResolvedValue(VALID);
+    memoryShard.getMemoryShardEnabled.mockReset().mockResolvedValue(true);
+  });
+
+  it("asks for a query and creates nothing without a vault", async () => {
+    expect((await searchGET(req("/search"))).status).toBe(400);
+    const res = await searchGET(req("/search?q=widgets"));
+    expect(await res.json()).toEqual({ initialised: false, shardEnabled: true, indexing: false, results: [] });
+    expect(fs.existsSync(process.env.PRIME_RADIANT_DIR!)).toBe(false);
+    expect(shard.reindexPrimeRadiantVault).not.toHaveBeenCalled();
+  });
+
+  it("answers the vault's hits with path, id and type", async () => {
+    await seed();
+    const hit = {
+      source: "prime-radiant", path: "entities/acme-widgets.md", id: "entities/acme-widgets", kind: "page",
+      type: "entity", title: "Acme Widgets Ltd", snippet: "Acme Widgets Ltd is a synthetic company.", score: 0.9, similarity: 0.8, verified: true,
+    };
+    shard.searchPrimeRadiant.mockResolvedValue([hit]);
+    const res = await searchGET(req("/search?q=acme&limit=99"));
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(await res.json()).toEqual({ initialised: true, shardEnabled: true, indexing: false, index: VALID, results: [hit] });
+    expect(shard.searchPrimeRadiant).toHaveBeenCalledWith("acme", 20, expect.any(AbortSignal));
+    expect(shard.reindexPrimeRadiantVault).not.toHaveBeenCalled();
+  });
+
+  it("answers nothing and starts no index while Memory Shard is switched off", async () => {
+    await seed();
+    memoryShard.getMemoryShardEnabled.mockResolvedValue(false);
+    shard.vaultIndexStatus.mockResolvedValue({ ...VALID, exists: false, identity: "missing" });
+    const res = await searchGET(req("/search?q=acme"));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ initialised: true, shardEnabled: false, indexing: false, results: [] });
+    expect(shard.reindexPrimeRadiantVault).not.toHaveBeenCalled();
+    expect(shard.searchPrimeRadiant).not.toHaveBeenCalled();
+  });
+
+  it("starts a whole-vault index when there is none yet, and says so", async () => {
+    await seed();
+    shard.vaultIndexStatus.mockResolvedValue({ ...VALID, exists: false, identity: "missing" });
+    const body = await (await searchGET(req("/search?q=acme"))).json();
+    expect(body).toMatchObject({ initialised: true, indexing: true, results: [] });
+    expect(shard.reindexPrimeRadiantVault).toHaveBeenCalledTimes(1);
+    expect(shard.searchPrimeRadiant).not.toHaveBeenCalled();
+  });
+
+  it("answers 503 when the embedder cannot take the query", async () => {
+    await seed();
+    shard.searchPrimeRadiant.mockRejectedValue(new Error("The embedding model did not answer: HTTP 502"));
+    const res = await searchGET(req("/search?q=acme"));
+    expect(res.status).toBe(503);
+    expect((await res.json()).code).toBe("search_failed");
   });
 });

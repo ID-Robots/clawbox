@@ -71,6 +71,16 @@ export async function POST(request: Request) {
     // switched it off — and on re-arms the schedule they already saved,
     // which is what the wizard relies on when it enables after its PUT.
     await refreshMemoryScheduler();
+    // The Prime Radiant vault is one of its sources and is not indexed while
+    // it is off: catch up on whatever was committed meanwhile. Unchanged pages
+    // cost a blob comparison; no vault, nothing to do. Never awaited.
+    if (body.enabled === true) {
+      void import("@/lib/prime-radiant/shard-index")
+        .then((m) => m.reindexPrimeRadiantVault())
+        .catch((err) => {
+          console.warn(`[memory-shard] vault index catch-up did not finish: ${err instanceof Error ? err.message : String(err)}`);
+        });
+    }
   }
   if (hasSetup) {
     await setMemoryShardSetupComplete(body.setupComplete as boolean);

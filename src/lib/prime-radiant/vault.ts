@@ -306,6 +306,12 @@ export interface VaultOperationOptions {
   lint?: boolean;
   /** Clock for the lint's stale check (tests). */
   now?: Date;
+  /**
+   * Re-embed the changed pages in Memory Shard's vault index after a commit on
+   * `main`, in the background. Default true; a caller that reindexes itself
+   * (a merge that names its own paths) can switch it off.
+   */
+  reindex?: boolean;
 }
 
 function txPath(rel: string): string {
@@ -400,6 +406,7 @@ export async function vaultOperation<T>(
       throw err;
     }
     if (commit) recordRetiredFromPages(vault, await Promise.all(changed().map((p) => (p === INDEX_FILE ? null : readPageAt(vault, p)))));
+    if (commit && options.reindex !== false) reindexAfterCommit(vault, changed());
     return { result, commit, changed: changed(), findings };
   });
 }
@@ -423,4 +430,18 @@ function recordRetiredFromPages(vault: string, pages: Array<VaultPage | null>): 
   } catch {
     // The ledger is a second copy; the page itself already records the retirement.
   }
+}
+
+/**
+ * Hand the commit's pages to Memory Shard's vault index without waiting for it.
+ * Imported lazily: the index pulls in the embedder and sqlite, which a vault
+ * operation must not need to load, and nothing here may slow or fail the
+ * operation that already committed.
+ */
+function reindexAfterCommit(vault: string, changed: readonly string[]): void {
+  void import("./shard-index")
+    .then((m) => m.scheduleReindexAfterCommit(vault, changed))
+    .catch((err) => {
+      console.warn(`[prime-radiant] vault reindex could not be scheduled: ${err instanceof Error ? err.message : String(err)}`);
+    });
 }
