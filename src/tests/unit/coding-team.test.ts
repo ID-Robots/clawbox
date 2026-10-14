@@ -2953,6 +2953,49 @@ describe("a team with a time budget", () => {
     expect(log).toMatch(/\[skip\] t3 — does not fit before the cutoff: Polish styles\.css/);
   });
 
+  it("calibrates its planner's estimates by how past estimates on this box held, and fits the plan with them", async () => {
+    const { presetBudget, timeRecord } = await import("@/lib/coding-time-budget");
+    const store = await import("@/lib/coding-time-record");
+    // Three earlier teams, each task taking 1.5× its estimate.
+    const past = presetBudget("1h", Date.now() - 3 * 60 * MIN, "Europe/Sofia");
+    for (const id of ["team-aaaaaaaa", "team-bbbbbbbb", "team-cccccccc"]) {
+      await store.appendTimeRecord(id, past, timeRecord("estimate", "the task", Date.now() - 3 * 60 * MIN, { taskId: "t1", estimateMs: 10 * MIN }));
+      await store.appendTimeRecord(id, past, timeRecord("finish", "The worker ended completed", Date.now() - 2 * 60 * MIN, { taskId: "t1", actualMs: 15 * MIN }));
+    }
+    outcomes = [{ summary: JSON.stringify({
+      tasks: [
+        { task_description: "Scaffold index.html", files_hint: ["index.html"], estimate_minutes: 10 },
+        { task_description: "Wire app.js", depends_on: ["t1"], files_hint: ["app.js"], estimate_minutes: 5 },
+        { task_description: "Polish styles.css", files_hint: ["styles.css"], estimate_minutes: 20, optional: true },
+      ],
+      time_plan: { estimate_minutes: 35 },
+    }) }];
+    const started = await team.startTeam({ goal: "Build it", directory: "site", source: "owner", timeBudget: presetBudget("1h", Date.now(), "Europe/Sofia") });
+    await finished(started.id);
+    await closed(started.id);
+    const done = team.getTeam(started.id)!;
+    expect(String(starts[0].extraBrief)).toContain("ESTIMATE CALIBRATION: on this box, past estimates took 1.5× the time estimated (the median of 3 finished estimates)");
+    // Scaled ×1.5 on the board: 15 + 8 must-have minutes fit in the 50 before the cutoff; the 30-minute nice-to-have does not.
+    expect(done.tasks.map((t) => [t.task_id, t.estimateMs, t.status])).toEqual([
+      ["t1", 15 * MIN, "complete"],
+      ["t2", 8 * MIN, "complete"],
+      ["t3", 30 * MIN, "retired"],
+    ]);
+    const notes = done.log.filter((e) => e.type === "note").map((e) => e.message);
+    expect(notes).toEqual(expect.arrayContaining([
+      "Calibration: on this box, past estimates took 1.5× the time estimated (the median of 3 finished estimates), so the estimates here are scaled by 1.5× before they are fitted to the time.",
+      expect.stringMatching(/^Time plan: the must-have tasks fit \(estimated 23 minutes, /),
+    ]));
+    // The plan's record line keeps the factor, so the planner's own word reads back: 15 minutes ÷ 1.5 is its 10.
+    const record = store.loadTimeRecords(done.id)!;
+    const plan = record.records.find((r) => r.kind === "plan")!;
+    expect([plan.estimateMs, plan.calibration]).toEqual([53 * MIN, 1.5]);
+    const { estimateSamples } = await import("@/lib/coding-time-plan");
+    const samples = estimateSamples((await import("@/lib/coding-time-budget")).summarizeTimeRecords(record.budget, record.records, Date.now()));
+    // (t2's 7.5 minutes were rounded to 8 on the board: whole minutes are what a plan keeps.)
+    expect(samples.map((s) => s.estimateMs)).toEqual([10 * MIN, (8 * MIN) / 1.5]);
+  });
+
   it("works as every team did without one — even when its planner volunteers estimates", async () => {
     const { PLANNER_BRIEF } = await import("@/lib/coding-team-planner");
     outcomes = [{ summary: PLANNER_ANSWER({ time_plan: { estimate_minutes: 65, skipped: ["the e2e suite"] } }) }];
@@ -3050,6 +3093,34 @@ describe("a budgeted team works to its deadline", () => {
     expect(record.records.find((r) => r.kind === "finish" && r.taskId === "t1")?.actualMs).toBeGreaterThanOrEqual(HOUR);
     expect(record.records.some((r) => r.kind === "note" && r.text.startsWith("Re-plan: t1 took 1 hour"))).toBe(true);
     expect(record.records.filter((r) => r.kind === "skip").map((r) => r.taskId)).toEqual(["t4", "t3"]);
+  });
+
+  it("re-plans while a task is still at work once it is more than 25% over its estimate — once, not again when it ends", async () => {
+    outcomes = [{
+      summary: plan([
+        { task_description: "Parse the feed", files_hint: ["feed.py"], estimate_minutes: 10 },
+        { task_description: "Store it", depends_on: ["t1"], files_hint: ["store.py"], estimate_minutes: 30 },
+        { task_description: "Index it", depends_on: ["t2"], files_hint: ["index.py"], estimate_minutes: 30 },
+        { task_description: "Chart it", depends_on: ["t3"], files_hint: ["chart.py"], estimate_minutes: 30, optional: true },
+      ]),
+    }];
+    holdTasks.add("t1");
+    const started = await team.startTeam({ goal: "Feed pipeline", directory: "site", source: "owner", timeBudget: budget(2 * HOUR) });
+    await vi.waitFor(() => { expect(workerRun("t1")).toBeDefined(); }, { timeout: 5000 });
+    // Half an hour into t1's ten minutes, its worker still at work: 78 minutes
+    // left before the cutoff hold the 60 must-have minutes, not the nice-to-have.
+    offset += 30 * MIN;
+    const replan = /^Re-plan: t1 has taken \d+ minutes against ~10 minutes \(\+\d+%\) and is still at work; what is left is \d+ minutes more than fits before the cutoff, so t4 is cut from the bottom of the plan\.$/;
+    await vi.waitFor(() => { expect(team.getTeam(started.id)!.log.some((e) => replan.test(e.message))).toBe(true); }, { timeout: 5000 });
+    expect(team.getTeam(started.id)!.tasks.find((t) => t.task_id === "t4")?.status).toBe("retired");
+    workerRun("t1")!.held = false;
+    const done = await finished(started.id);
+    const record = await closed(started.id);
+    expect(done.tasks.map((t) => [t.task_id, t.status])).toEqual([["t1", "complete"], ["t2", "complete"], ["t3", "complete"], ["t4", "retired"]]);
+    // Once per attempt: t1's finish, over its estimate too, re-plans nothing more.
+    expect(done.log.filter((e) => e.message.startsWith("Re-plan: t1"))).toHaveLength(1);
+    expect(record.records.filter((r) => r.kind === "note" && r.text.startsWith("Re-plan: t1 has taken"))).toHaveLength(1);
+    expect(done.skipped?.map((s) => [s.taskId, s.text.split(":")[0]])).toEqual([["t4", expect.stringMatching(/^cut at a re-plan, t1 having run \+\d+% over its estimate$/)]]);
   });
 
   it("ends the runs at work cleanly at the deadline, leaves the rest out, and says it stopped for time", async () => {

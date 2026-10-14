@@ -1319,8 +1319,14 @@ export interface TimeRecord {
   text: string;
   taskId?: string;
   runId?: string;
-  /** `plan` / `estimate`: the estimate, ms. */
+  /** `plan` / `estimate`: the estimate, ms — as the work was planned with it, calibrated when `calibration` is on the plan line. */
   estimateMs?: number;
+  /**
+   * `plan`: the factor the estimates were scaled by, from how past estimates
+   * on this box held (coding-time-plan.ts `calibrateEstimate`) — absent when
+   * none were. The planner's or the run's own word is estimateMs ÷ it.
+   */
+  calibration?: number;
   /** `finish`: the time it actually took, ms. */
   actualMs?: number;
   /** `stop`: why. */
@@ -1367,6 +1373,9 @@ function cleanRecordText(text: string): string {
   return String(text ?? "").replace(/\p{Cc}+/gu, " ").replace(/\s+/g, " ").trim().slice(0, MAX_RECORD_TEXT_CHARS);
 }
 
+/** The largest calibration factor a record line keeps; the planning rules never scale past a few times. */
+const MAX_RECORD_CALIBRATION = 10;
+
 const nonNegative = (v: unknown): number | undefined =>
   typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.round(v) : undefined;
 
@@ -1382,6 +1391,9 @@ export function readTimeRecord(raw: unknown): TimeRecord | null {
   if (typeof r.runId === "string" && r.runId) out.runId = r.runId.slice(0, 40);
   const estimate = nonNegative(r.estimateMs);
   if (estimate !== undefined) out.estimateMs = estimate;
+  if (typeof r.calibration === "number" && Number.isFinite(r.calibration) && r.calibration >= 0.01 && r.calibration <= MAX_RECORD_CALIBRATION) {
+    out.calibration = Math.round(r.calibration * 100) / 100;
+  }
   const actual = nonNegative(r.actualMs);
   if (actual !== undefined) out.actualMs = actual;
   if (typeof r.reason === "string" && (TIME_STOP_REASONS as readonly string[]).includes(r.reason)) out.reason = r.reason as TimeStopReason;
@@ -1457,6 +1469,7 @@ export function formatTimeRecordLine(record: TimeRecord, tz: string): string {
   if (record.taskId) bits.push(record.taskId);
   if (record.runId) bits.push(record.runId);
   if (typeof record.estimateMs === "number") bits.push(`~${formatDuration(record.estimateMs)}`);
+  if (typeof record.calibration === "number") bits.push(`calibrated ×${record.calibration}`);
   if (typeof record.actualMs === "number") bits.push(`took ${formatDuration(record.actualMs)}`);
   if (record.reason) bits.push(`reason: ${record.reason}`);
   if (typeof record.tokensUsed === "number") bits.push(`${record.tokensUsed} tokens so far`);

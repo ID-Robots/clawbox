@@ -308,3 +308,54 @@ describe("readTimeRecordSummary", () => {
     expect(lib.readTimeRecordSummary(RUN_ID, NOW)).toBeNull();
   });
 });
+
+describe("calibration across this box's records", () => {
+  /** A finished budgeted team with one task per [estimate, took] pair, minutes; `factor` is what its plan was scaled by. */
+  const finishedTeam = async (id: string, pairs: [number, number][], factor?: number) => {
+    const b = budget();
+    await lib.appendTimeRecord(id, b, timeRecord("plan", "planned", NOW, { estimateMs: 60 * MIN, ...(factor ? { calibration: factor } : {}) }));
+    for (const [i, [est, took]] of pairs.entries()) {
+      await lib.appendTimeRecord(id, b, timeRecord("estimate", `task ${i + 1}`, NOW, { taskId: `t${i + 1}`, estimateMs: est * MIN }));
+      await lib.appendTimeRecord(id, b, timeRecord("finish", "The worker ended completed", NOW + took * MIN, { taskId: `t${i + 1}`, actualMs: took * MIN }));
+    }
+  };
+
+  it("reads the finished estimates of every run and team, and works out the factor from them", async () => {
+    await finishedTeam("team-aaaaaaaa", [[10, 20], [10, 20]]);
+    await finishedTeam("team-bbbbbbbb", [[20, 30]], 1.5);
+    const samples = lib.recentEstimateSamples();
+    expect(samples).toHaveLength(3);
+    // team-bbbbbbbb's 20 minutes were the planner's 13⅓ scaled ×1.5.
+    expect(samples).toContainEqual({ estimateMs: (20 * MIN) / 1.5, actualMs: 30 * MIN });
+    expect(lib.currentEstimateCalibration(NOW)).toEqual({ factor: 2, samples: 3 });
+  });
+
+  it("is null without enough finished estimates, and with no evidence folder at all", async () => {
+    expect(lib.recentEstimateSamples()).toEqual([]);
+    expect(lib.currentEstimateCalibration(NOW)).toBeNull();
+    await finishedTeam("team-aaaaaaaa", [[10, 20]]);
+    lib._resetCalibrationCacheForTests();
+    expect(lib.currentEstimateCalibration(NOW)).toBeNull();
+  });
+
+  it("is worked out once a minute, not at every ask", async () => {
+    expect(lib.currentEstimateCalibration(NOW)).toBeNull();
+    await finishedTeam("team-aaaaaaaa", [[10, 20], [10, 20], [10, 20]]);
+    expect(lib.currentEstimateCalibration(NOW + 30_000)).toBeNull();
+    expect(lib.currentEstimateCalibration(NOW + lib.CALIBRATION_TTL_MS)).toEqual({ factor: 2, samples: 3 });
+  });
+
+  it("passes over what is not a record this box wrote: a link, a folder not named like a run or team, a record too large", async () => {
+    await finishedTeam("team-aaaaaaaa", [[10, 20], [10, 20], [10, 20]]);
+    const artifacts = path.join(root, "data", "coding-agent-artifacts");
+    // A folder named like no run or team, holding a record that would say 3× otherwise.
+    fs.cpSync(evidence("team-aaaaaaaa"), path.join(artifacts, "not-a-team"), { recursive: true });
+    // A team folder that is a link to another one.
+    fs.symlinkSync(evidence("team-aaaaaaaa"), path.join(artifacts, "team-cccccccc"));
+    // A record padded past the calibration's size bound.
+    await finishedTeam("team-dddddddd", [[10, 30], [10, 30], [10, 30]]);
+    fs.appendFileSync(path.join(evidence("team-dddddddd"), "time-record.json"), " ".repeat(lib.CALIBRATION_MAX_RECORD_BYTES));
+    expect(lib.recentEstimateSamples()).toHaveLength(3);
+    expect(lib.currentEstimateCalibration(NOW)).toEqual({ factor: 2, samples: 3 });
+  });
+});

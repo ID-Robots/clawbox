@@ -453,18 +453,24 @@ import {
   type TimeStopReason,
 } from "@/lib/coding-time-budget";
 import {
+  calibrateEstimate,
+  calibrationApplies,
+  calibrationBrief,
   checkExtraItem,
+  ESTIMATE_OVERRUN_FRACTION,
   estimateAccuracyLine,
   EXTRA_ITEM_ESTIMATE_MS,
   extraWorkPrompt,
   extraWorkScope,
+  isBehindEstimate,
   lastExtraClaim,
   MAX_EXTRA_ITEMS,
   mustHaveFits,
   nextItemAllowed,
   parseEstimateMinutes,
+  type EstimateCalibration,
 } from "@/lib/coding-time-plan";
-import { appendTimeRecord, loadTimeRecords, readTimeRecordSummary, type TimeRecordPayload } from "@/lib/coding-time-record";
+import { appendTimeRecord, currentEstimateCalibration, loadTimeRecords, readTimeRecordSummary, type TimeRecordPayload } from "@/lib/coding-time-record";
 import { readOsTimeZone } from "@/lib/timezone";
 
 // ─── Tunables ────────────────────────────────────────────────────────────────
@@ -13467,6 +13473,7 @@ const MAX_REPORT_APPEND_BYTES = 1024 * 1024;
 /** How the record's own note lines start — what a restarted server reads its clock back from. */
 const CHECKPOINT_NOTE = "Checkpoint:";
 const MARGIN_NOTE = "Safety margin:";
+const REPLAN_NOTE = "Re-plan:";
 
 /** A budgeted run's clock: its deadline, its one timer, and what has been done against it. */
 interface BudgetClock {
@@ -13480,6 +13487,10 @@ interface BudgetClock {
   marginSent: boolean;
   /** Its ESTIMATE line is on the record. */
   estimated: boolean;
+  /** That estimate as the run is held to it (calibrated), and when it was given, ms — null before one. */
+  estimate: { ms: number; at: number } | null;
+  /** The run has been told it is more than 25% over its estimate and to re-plan: once per run. */
+  replanSent: boolean;
   /** The SKIPPED lines on the record, so a line read twice is recorded once. */
   skipped: Set<string>;
   /** The stop the BOX made — the deadline, a spend ceiling — for the record's stop line. */
@@ -13567,6 +13578,8 @@ function clockFor(run: CodingRun): BudgetClock | null {
     .filter((r) => r.kind === "start" || (r.kind === "note" && r.text.startsWith(CHECKPOINT_NOTE)))
     .map((r) => Date.parse(r.at))
     .filter((at) => Number.isFinite(at));
+  const plan = records.find((r) => r.kind === "plan");
+  const planAt = plan ? Date.parse(plan.at) : NaN;
   const clock: BudgetClock = {
     budget: run.timeBudget,
     // A stop on the record while the run still has work is a resume past the
@@ -13575,7 +13588,9 @@ function clockFor(run: CodingRun): BudgetClock | null {
     timer: null,
     lastCheckpointAt: marks.length ? Math.max(...marks) : Date.now(),
     marginSent: records.some((r) => r.kind === "note" && r.text.startsWith(MARGIN_NOTE)),
-    estimated: records.some((r) => r.kind === "plan"),
+    estimated: plan !== undefined,
+    estimate: plan && typeof plan.estimateMs === "number" && plan.estimateMs > 0 && Number.isFinite(planAt) ? { ms: plan.estimateMs, at: planAt } : null,
+    replanSent: records.some((r) => r.kind === "note" && r.text.startsWith(REPLAN_NOTE)),
     skipped: new Set(records.filter((r) => r.kind === "skip").map((r) => r.text)),
     stopReason: null,
     closed,
@@ -13612,9 +13627,11 @@ function noteBudgetStop(run: CodingRun, reason: TimeStopReason): void {
  * clock and zone, the time left, the safety margin and when it begins, that
  * the box enforces both, the `ESTIMATE:` line it wants first (while none is
  * on the record), and what a short or a long budget changes. One paragraph,
- * in English, like the rest of the brief.
+ * in English, like the rest of the brief. With the estimate asked for, it
+ * says the re-plan trigger, and a `calibration` that applies says how the box
+ * will scale the estimate.
  */
-export function budgetBrief(budget: TimeBudget, now: number, tz: string, opts: { askEstimate?: boolean } = {}): string {
+export function budgetBrief(budget: TimeBudget, now: number, tz: string, opts: { askEstimate?: boolean; calibration?: EstimateCalibration | null } = {}): string {
   const zone = safeTimeZone(tz);
   const cutoff = marginCutoffMs(budget);
   const margin = safetyMarginMs(budget);
@@ -13628,6 +13645,9 @@ export function budgetBrief(budget: TimeBudget, now: number, tz: string, opts: {
   ];
   if (opts.askEstimate !== false) {
     parts.push('Begin your first reply with one line exactly like "ESTIMATE: 20 min" — how long the must-have work will take you, in minutes. If the must-have work cannot fit before the margin, say so in that same reply, before you start, and name each thing you will leave out on a line of its own: "SKIPPED: <what> — <why>".');
+    parts.push(`If the work runs more than ${Math.round(ESTIMATE_OVERRUN_FRACTION * 100)}% over that estimate, you will be told to re-plan: narrow it to what the task needs, and say what you leave out.`);
+    const calibrated = calibrationBrief(opts.calibration);
+    if (calibrated) parts.push(calibrated);
   }
   if (total <= SHORT_BUDGET_MS) {
     parts.push('This is a short budget: skip end-to-end suites, rebuilds that do not prove the change, and polish. Run the quickest check that proves the work, and say what you skipped — a "SKIPPED:" line each — in your report.');
@@ -13643,7 +13663,10 @@ function budgetBriefFor(run: CodingRun): string | null {
   if (!clock || !clock.enforced || clock.closed) return null;
   const now = Date.now();
   if (remainingMs(clock.budget, now) === 0) return null;
-  return budgetBrief(clock.budget, now, budgetZone(), { askEstimate: !clock.estimated });
+  return budgetBrief(clock.budget, now, budgetZone(), {
+    askEstimate: !clock.estimated,
+    calibration: clock.estimated ? null : currentEstimateCalibration(now),
+  });
 }
 
 const BUDGET_LINE_LEAD_RE = /^(?:[-*•>]\s*)*[*_`]*/u;
@@ -13685,22 +13708,39 @@ export function readBudgetLines(text: string): { estimateMs: number | null; skip
   return { estimateMs, skipped };
 }
 
-/** A budgeted run's reply: its estimate (the first only) and what it says it skips, into the time record. */
+/**
+ * A budgeted run's reply: its estimate (the first only) and what it says it
+ * skips, into the time record. The estimate is calibrated first — scaled by
+ * how past estimates on this box held, when they ran over or under — and the
+ * run is fitted to the time, and later held to its re-plan trigger, with that.
+ */
 function noteBudgetText(run: CodingRun, text: string): void {
   if (!/ESTIMATE|SKIPPED/.test(text)) return;
   const clock = clockFor(run);
   if (!clock || clock.closed || !clock.enforced) return;
-  const { estimateMs, skipped } = readBudgetLines(text);
+  const { estimateMs: said, skipped } = readBudgetLines(text);
   const now = Date.now();
   const records: TimeRecord[] = [];
-  if (estimateMs !== null && !clock.estimated) {
+  if (said !== null && !clock.estimated) {
     clock.estimated = true;
+    const calibration = currentEstimateCalibration(now);
+    const scaled = calibrationApplies(calibration);
+    const estimateMs = calibrateEstimate(said, calibration);
+    clock.estimate = { ms: estimateMs, at: now };
     const fit = mustHaveFits(clock.budget, now, [estimateMs]);
     const verdict = fit.fits
       ? `it fits the ${formatDuration(fit.availableMs)} before the safety margin`
       : `it does not fit: ${formatDuration(fit.shortByMs)} more than the ${formatDuration(fit.availableMs)} before the safety margin`;
-    records.push(timeRecord("plan", `Estimate for the must-have work; ${verdict}`, now, { runId: run.id, estimateMs, tokensUsed: run.tokensUsed }));
-    pushProgress(run, `Time budget: estimated ~${formatDuration(estimateMs)} — ${fit.fits ? "fits before the safety margin" : `${formatDuration(fit.shortByMs)} more than fits before the safety margin`}.`);
+    const how = scaled ? ` (the run said ~${formatDuration(said)}; past estimates on this box took ${calibration.factor}× theirs)` : "";
+    records.push(timeRecord("plan", `Estimate for the must-have work${how}; ${verdict}`, now, {
+      runId: run.id,
+      estimateMs,
+      ...(scaled ? { calibration: calibration.factor } : {}),
+      tokensUsed: run.tokensUsed,
+    }));
+    const estimated = scaled ? `~${formatDuration(estimateMs)} (its ~${formatDuration(said)}, calibrated ×${calibration.factor})` : `~${formatDuration(estimateMs)}`;
+    pushProgress(run, `Time budget: estimated ${estimated} — ${fit.fits ? "fits before the safety margin" : `${formatDuration(fit.shortByMs)} more than fits before the safety margin`}.`);
+    armBudgetClock(run.id);
   }
   for (const what of skipped) {
     if (clock.skipped.size >= MAX_SKIP_RECORDS) break;
@@ -13732,6 +13772,8 @@ function beginBudget(run: CodingRun, fromQueue: boolean): void {
     lastCheckpointAt: now,
     marginSent: now >= marginCutoffMs(budget),
     estimated: false,
+    estimate: null,
+    replanSent: false,
     skipped: new Set<string>(),
     stopReason: null,
     closed: spent,
@@ -13811,8 +13853,22 @@ function armBudgetClock(id: string): void {
   if (run.status === "running" && live.has(id)) {
     next = Math.min(next, clock.lastCheckpointAt + checkpointEveryMs());
     if (!clock.marginSent) next = Math.min(next, marginCutoffMs(clock.budget));
+    const replanAt = replanDueAt(run, clock);
+    if (replanAt !== null) next = Math.min(next, replanAt);
   }
   scheduleBudgetTick(id, clock, next - now);
+}
+
+/**
+ * When the run's re-plan trigger fires: the first moment it has taken more
+ * than 25% over its own estimate (isBehindEstimate), counted from when it
+ * gave it. Null once it has fired, inside the margin (the margin's own
+ * message says more), without an estimate, and once the task is done and its
+ * spare time goes to extra items (the estimate was for the task).
+ */
+function replanDueAt(run: CodingRun, clock: BudgetClock): number | null {
+  if (clock.replanSent || clock.marginSent || !clock.estimate || run.extraWork) return null;
+  return clock.estimate.at + Math.floor(clock.estimate.ms * (1 + ESTIMATE_OVERRUN_FRACTION)) + 1;
 }
 
 function scheduleBudgetTick(id: string, clock: BudgetClock, delayMs: number): void {
@@ -13861,7 +13917,11 @@ function budgetTick(id: string): void {
     return;
   }
   if (working) {
-    if (!clock.marginSent && now >= marginCutoffMs(clock.budget)) sendMarginNote(run, state, clock, now);
+    if (!clock.marginSent && now >= marginCutoffMs(clock.budget)) {
+      sendMarginNote(run, state, clock, now);
+    } else if (replanDueAt(run, clock) !== null && clock.estimate && isBehindEstimate(clock.estimate.ms, now - clock.estimate.at)) {
+      sendReplanNote(run, state, clock, clock.estimate, now);
+    }
     if (now - clock.lastCheckpointAt >= checkpointEveryMs()) {
       clock.lastCheckpointAt = now;
       void writeBudgetRecords(run.id, clock.budget, [
@@ -13902,6 +13962,32 @@ function sendMarginNote(run: CodingRun, state: LiveRun, clock: BudgetClock, now:
   persist();
   void writeBudgetRecords(run.id, clock.budget, [
     timeRecord("note", `${MARGIN_NOTE} began with ${left} left; the run was ${delivery === null ? "not told (its message queue was full)" : "told to commit and finish its current step"}`, now, { runId: run.id, tokensUsed: run.tokensUsed }),
+  ]);
+}
+
+/**
+ * The re-plan trigger of a single run: it has taken more than 25% over its
+ * own estimate. Told once — like the margin, the road the owner's messages
+ * take — to narrow what is left to the must-have work against the time before
+ * the margin, commit, and name what it leaves out ("SKIPPED:" lines, which go
+ * into the record as they come). On the progress log and in the record.
+ */
+function sendReplanNote(run: CodingRun, state: LiveRun, clock: BudgetClock, estimate: { ms: number; at: number }, now: number): void {
+  clock.replanSent = true;
+  const zone = budgetZone();
+  const took = Math.max(0, now - estimate.at);
+  const over = Math.round((took / estimate.ms - 1) * 100);
+  const cutoff = marginCutoffMs(clock.budget);
+  const left = formatDuration(Math.max(0, cutoff - now));
+  const delivery = tellRun(
+    run,
+    state,
+    `Time budget: re-plan now. You estimated ~${formatDuration(estimate.ms)} for the must-have work and it has taken ${formatDuration(took)} (+${over}%). ${left} are left before the safety margin at ${formatLocalDeadline(cutoff, zone)} (${zone}). Narrow what is left to what the task needs to work, commit what you have now, and name each thing you will leave out on a line of its own: "SKIPPED: <what> — <why>".`,
+  );
+  pushProgress(run, `Time budget: +${over}% over its estimate — told the run to re-plan what is left against the ${left} before the safety margin.`);
+  persist();
+  void writeBudgetRecords(run.id, clock.budget, [
+    timeRecord("note", `${REPLAN_NOTE} +${over}% over the estimate (~${formatDuration(estimate.ms)}, took ${formatDuration(took)}), ${left} before the safety margin; the run was ${delivery === null ? "not told (its message queue was full)" : "told to narrow to the must-have work"}`, now, { runId: run.id, tokensUsed: run.tokensUsed }),
   ]);
 }
 
