@@ -94,8 +94,9 @@ describe("CodingBudgetTimeline", () => {
     expect(screen.getByTestId("tl-accuracy")).toHaveTextContent("Estimated 30 min, took 36 min");
     expect(screen.getByTestId("tl-extras")).toHaveTextContent("tests: covered the parser");
     expect(screen.getByTestId("tl-skipped")).toHaveTextContent("t3 (does not fit before the cutoff: Polish styles.css)");
-    // Markers on the bar for the checkpoint and the finish the record noted.
+    // Markers on the bar for the checkpoint and the finish the record noted — and a legend that says what each is.
     expect(screen.getAllByTestId("tl-mark")).toHaveLength(2);
+    expect([...screen.getByTestId("tl-legend").querySelectorAll("li")].map((li) => li.textContent)).toEqual(["Estimate", "Safety margin", "Checkpoint", "Finish"]);
   });
 
   it("lists the checkpoints with the time used and left at each, and says how many older ones are in the file", () => {
@@ -121,6 +122,9 @@ describe("CodingBudgetTimeline", () => {
     expect(screen.getByTestId("tl-remaining")).toHaveTextContent("5 min");
     expect(screen.getByText("Past the deadline")).toBeInTheDocument();
     expect(screen.getByTestId("tl-fill").style.width).toBe("100%");
+    // The bar in the chip's colour: amber for the box's own stop, not the green of work done.
+    expect(screen.getByTestId("tl-fill").style.background).toBe("rgb(252, 211, 77)");
+    expect(screen.getByTestId("tl-legend")).toHaveTextContent("Stop");
   });
 
   it("shows a budget whose record is not written yet, with the run's own token count", () => {

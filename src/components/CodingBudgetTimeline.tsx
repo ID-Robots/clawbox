@@ -58,6 +58,28 @@ const STOP_TONE: Record<TimeStopReason, string> = {
   failed: "text-red-300 border-red-400/40",
 };
 
+/** The bar's fill once the work stopped, in the status chip's own colours: green done, amber the box's stop, and so on. */
+const STOP_FILL: Record<TimeStopReason, string> = {
+  done: "#86efac",
+  nothing_left: "#86efac",
+  time: "#fcd34d",
+  cost: "#fcd34d",
+  token_cap: "#fcd34d",
+  quota: "#93c5fd",
+  stopped: "#cbd5e1",
+  failed: "#fca5a5",
+};
+
+/** The dot a record line leaves on the bar, by what it is. */
+const MARK_TONE: Partial<Record<keyof typeof KIND_KEY, string>> = {
+  checkpoint: "bg-sky-300",
+  finish: "bg-sky-300",
+  margin: "bg-amber-300",
+  skip: "bg-amber-400",
+  extra: "bg-emerald-400",
+  stop: "bg-white",
+};
+
 const KIND_KEY: Record<TimeRecord["kind"] | "checkpoint" | "margin", string> = {
   budget: "codingAgent.budgetTimelineKindBudget",
   plan: "codingAgent.budgetTimelineKindPlan",
@@ -226,7 +248,10 @@ export default function CodingBudgetTimeline({ budget, record, live, timeZone, t
 
   const rows = data.records.slice(-MAX_ROWS);
   const omitted = data.omittedRecords + (data.records.length - rows.length);
-  const fill = data.stopReason === "failed" ? "#fca5a5" : data.stopReason ? "#86efac" : "#fcd34d";
+  const fill = data.stopReason ? STOP_FILL[data.stopReason] : "#fcd34d";
+  // What the marks on the bar are, for the kinds this bar shows: a tooltip
+  // alone leaves a phone, and anyone not hovering, guessing.
+  const markKinds = [...new Set(marks.map(rowKind))].filter((k) => k !== "margin" && MARK_TONE[k]);
 
   return (
     <section className={`mt-3 ${CARD_SURFACE} px-4 py-3 ${className}`} data-testid={testId} aria-label={t("codingAgent.budgetTimelineTitle")}>
@@ -285,7 +310,7 @@ export default function CodingBudgetTimeline({ budget, record, live, timeZone, t
         ))}
         {marks.map((r, i) => {
           const k = rowKind(r);
-          const tone = k === "stop" ? "bg-white" : k === "skip" ? "bg-amber-400" : k === "extra" ? "bg-emerald-400" : k === "margin" ? "bg-amber-300" : "bg-sky-300";
+          const tone = MARK_TONE[k] ?? "bg-sky-300";
           return (
             <span
               key={`${r.at}-${i}`}
@@ -297,6 +322,18 @@ export default function CodingBudgetTimeline({ budget, record, live, timeZone, t
           );
         })}
       </div>
+      <ul className="-mt-1 mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-[var(--text-muted)]" data-testid={`${testId}-legend`}>
+        {estimateAt !== null && (
+          <li className="inline-flex items-center gap-1"><span className="h-2.5 w-0.5 rounded bg-white/80" aria-hidden="true" />{t("codingAgent.budgetTimelineEstimate")}</li>
+        )}
+        <li className="inline-flex items-center gap-1">
+          <span className="h-2 w-3 rounded-sm bg-[repeating-linear-gradient(135deg,rgba(251,191,36,0.45)_0_2px,transparent_2px_4px)]" aria-hidden="true" />
+          {t("codingAgent.budgetTimelineKindMargin")}
+        </li>
+        {markKinds.map((k) => (
+          <li key={k} className="inline-flex items-center gap-1"><span className={`h-1.5 w-1.5 rounded-full ${MARK_TONE[k]}`} aria-hidden="true" />{t(KIND_KEY[k])}</li>
+        ))}
+      </ul>
 
       <dl className="grid grid-cols-2 gap-x-4 gap-y-2 sm:grid-cols-4 text-[11px]" data-testid={`${testId}-figures`}>
         <div className="min-w-0">

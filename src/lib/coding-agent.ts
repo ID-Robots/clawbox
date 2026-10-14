@@ -429,9 +429,9 @@ import {
 import {
   BUDGET_PRESET_CHIPS,
   budgetDurationMs,
+  budgetStopReason,
   describeBudget,
   elapsedMs,
-  fitsBeforeCutoff,
   formatDuration,
   formatLocalDeadline,
   HOUR_MS,
@@ -9392,9 +9392,13 @@ async function maybeStartReviewPass(finished: CodingRun): Promise<ReviewPassOutc
   // brief was written from — never the switch as it stands now.
   if (!finished.reviewPass) return "skipped";
   // A budgeted run inside its safety margin starts nothing new: the margin is
-  // for committing and the pull request, and a pass is a run of its own.
-  if (finished.timeBudget && !fitsBeforeCutoff(finished.timeBudget, Date.now())) {
-    pushProgress(finished, "Time budget: no review pass — the safety margin has begun, so nothing new starts.");
+  // for committing and the pull request, and a pass is a run of its own. Nor
+  // does one whose spend ceiling is reached: the pass would spend past it.
+  const allowed = finished.timeBudget ? nextItemAllowed(finished.timeBudget, Date.now(), finished.tokensUsed) : null;
+  if (allowed && !allowed.ok) {
+    pushProgress(finished, allowed.reason === "cost"
+      ? "Time budget: no review pass — the budget's spend ceiling is reached."
+      : "Time budget: no review pass — the safety margin has begun, so nothing new starts.");
     persist();
     return "skipped";
   }
@@ -9769,6 +9773,14 @@ async function startCompletionAttempt(
   // name of "one more attempt". So the honest ending is recorded instead.
   if (!run.sessionId) {
     giveUp(run, `${missing} There is no session to carry on in, so the box did not try again.`, run.attempts.length);
+    return;
+  }
+  // Nor once a time budget is spent — its deadline gone, or its spend ceiling
+  // reached: the run's own clock would only stop the attempt as it began.
+  const spent = run.timeBudget ? budgetStopReason(run.timeBudget, Date.now(), run.tokensUsed) : null;
+  if (spent) {
+    const why = spent === "time" ? "The time budget's deadline has passed" : "The time budget's spend ceiling is reached";
+    giveUp(run, `${missing} ${why}, so the box did not try again.`, run.attempts.length);
     return;
   }
 
@@ -11231,6 +11243,9 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     // does: the harness never started, so nothing happened that a second
     // attempt could trip over — and this one goes without the flag.
     && (isTransientFailure(run.error) || state.scopeRefused || state.streamInputRefused)
+    // Not an extra item's: a fresh-session retry starts the TASK over, and the
+    // task is done — the item ends here and the run stays completed.
+    && !run.extraWork?.round
     && run.filesTouched.length === 0
     && !state.sawWriteAttempt
     && !state.commandMayHaveSideEffects
