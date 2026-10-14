@@ -103,7 +103,9 @@ import { ciFailureLine, ciFixNotes, goalWantsMerge, goalWantsPullRequest, MAX_TE
 import { decideMerge, markPullRequestReady, mergePullRequest, openPullRequest, readPullRequest } from "@/lib/coding-pr";
 import { pushBranch, readFailedCheckLogs, readReviewSnapshot } from "@/lib/coding-review";
 import { isLive, isSettled } from "@/lib/coding-agent-status";
-import type { TimeBudget } from "@/lib/coding-time-budget";
+import { describeBudget, timeRecord, type TimeBudget, type TimeRecord } from "@/lib/coding-time-budget";
+import { appendTimeRecord, loadTimeRecords } from "@/lib/coding-time-record";
+import { readOsTimeZone } from "@/lib/timezone";
 import {
   allComplete,
   blockedBy,
@@ -121,6 +123,7 @@ import {
   ownHarnessStateDenial,
   readOnlyDenial,
   readyTasks,
+  recordTimeSkips,
   repoMapText,
   saveBoard,
   setTeamStatus,
@@ -146,7 +149,7 @@ import {
  */
 export type TeamView = TeamBoard & { agents: TeamAgents; advice: TeamAdvice | null; queuePosition?: number };
 import { TeamBus, type Delivered, type TeamMessage } from "@/lib/coding-team-bus";
-import { clippedNote, leadRoom, leadShouldRun, leadTask, parsePlan, parseReplan, PLANNER_BRIEF, REPLAN_BRIEF, replanContext, replanTask } from "@/lib/coding-team-planner";
+import { clippedNote, fitLine, fitPlan, leadRoom, leadShouldRun, leadTask, parsePlan, parseReplan, plannerBrief, REPLAN_BRIEF, replanContext, replanTask, type TimePlan } from "@/lib/coding-team-planner";
 
 /** A team stops after this many alerts: something is going wrong repeatedly. */
 export const MAX_ALERTS = 3;
@@ -670,8 +673,68 @@ export function _resetCodingTeamStateForTests(): void {
 
 // ─── The loop ────────────────────────────────────────────────────────────────
 
+/**
+ * A budgeted team's plan against its time, before any work starts
+ * (coding-team-planner.ts `fitPlan`): do the must-have estimates fit before
+ * the safety-margin cutoff? The answer goes on the log in one line — plainly
+ * when they do not — beside anything the planner said about the time being
+ * too short. What will be skipped — the planner's own list, and the tasks cut
+ * from the bottom of the plan to fit — is marked on the board (`skipped`).
+ * The plan, each task's estimate and every skip go into the team's time
+ * record (owner: the team's id), opened with the budget's line unless the
+ * record already has one. A record the disk refuses is left out
+ * (appendTimeRecord never throws): the work goes on.
+ */
+async function planAgainstBudget(team: LiveTeam, budget: TimeBudget, timePlan: TimePlan | null, tz: string): Promise<void> {
+  const { board, bus } = team;
+  const now = Date.now();
+  const fit = fitPlan(board.tasks.map((t) => ({ id: t.task_id, estimateMs: t.estimateMs, optional: t.optional === true, dependsOn: t.depends_on })), budget, now);
+  const line = fitLine(fit, budget, tz);
+  bus.send(SYSTEM, { type: "note", text: line });
+  const tooShort = timePlan?.tooShort ? `The planner says the time is too short for the goal: ${timePlan.tooShort}` : null;
+  if (tooShort) bus.send(SYSTEM, { type: "note", text: tooShort });
+  const described = (id: string) => firstLine(board.tasks.find((t) => t.task_id === id)?.task_description ?? "", 160);
+  const skips = [
+    ...(timePlan?.skipped ?? []).map((text) => ({ text, by: "planner" as const })),
+    ...fit.cut.map((id) => ({
+      taskId: id,
+      text: `${fit.dragged.includes(id) ? "waits on a task cut to fit the time" : "does not fit before the cutoff"}: ${described(id)}`,
+      by: "fit" as const,
+    })),
+  ];
+  if (skips.length) {
+    recordTimeSkips(board, SYSTEM, skips);
+    saveBoard(board);
+  }
+
+  const records: TimeRecord[] = [];
+  if (!loadTimeRecords(board.id)) records.push(timeRecord("budget", `Budget: ${describeBudget(budget, now, tz)}`, now));
+  const optional = board.tasks.filter((t) => t.optional).length;
+  const estimated = board.tasks.reduce((sum, t) => sum + (t.estimateMs ?? 0), 0);
+  // The planner's own estimate of the whole plan, else its tasks' summed.
+  const planMs = timePlan?.estimateMs ?? (estimated > 0 ? estimated : null);
+  const planned = `${board.tasks.length} ${board.tasks.length === 1 ? "task" : "tasks"} planned${optional ? `, ${optional} optional` : ""}`;
+  records.push(timeRecord("plan", `${planned}; ${line.replace(/^Time plan: /, "")}`, now, planMs ? { estimateMs: planMs } : {}));
+  for (const t of board.tasks) {
+    const what = `${t.optional ? "optional — " : ""}${t.estimateMs ? "" : "no estimate — "}${firstLine(t.task_description, 200)}`;
+    records.push(timeRecord("estimate", what, now, { taskId: t.task_id, ...(t.estimateMs ? { estimateMs: t.estimateMs } : {}) }));
+  }
+  for (const s of skips) records.push(timeRecord("skip", s.text, now, "taskId" in s ? { taskId: s.taskId } : {}));
+  if (tooShort) records.push(timeRecord("note", tooShort, now));
+  // One after the other, in this order: the log reads as the plan was made.
+  for (const r of records) await appendTimeRecord(board.id, budget, r);
+}
+
 async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   const { board, bus } = team;
+  // A budgeted team's planner is told the deadline in the box's zone, the
+  // time left and the cutoff, and asked for estimates — worked out afresh for
+  // every ask, on the box's clock. Without a budget: the brief and the plan
+  // as they always were.
+  const budget = board.timeBudget ?? null;
+  const tz = budget ? await readOsTimeZone().catch(() => "UTC") : "UTC";
+  const brief = () => plannerBrief(budget, Date.now(), tz);
+  const timed = { timed: budget !== null };
 
   // 1. The planner: a read-only run whose final message is the plan.
   const planner = await startRun({
@@ -681,7 +744,7 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
     source,
     team: { id: board.id, role: "planner", taskId: null },
     readOnly: true,
-    extraBrief: PLANNER_BRIEF,
+    extraBrief: brief(),
   });
   board.plannerRunId = planner.id;
   board.runs.push({ id: planner.id, role: "planner", taskId: null });
@@ -694,7 +757,7 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
     return;
   }
   let answer = planned.resultText ?? planned.summary;
-  let plan = parsePlan(answer);
+  let plan = parsePlan(answer, timed);
   // More than one correction, because one was not enough. On the box, a planner
   // told only to "shorten" a 2835-character description answered 3013 the second
   // time and the board died with no task ever posted — twice, on two devices.
@@ -714,7 +777,7 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
       source,
       team: { id: board.id, role: "planner", taskId: null },
       readOnly: true,
-      extraBrief: PLANNER_BRIEF,
+      extraBrief: brief(),
     });
     board.runs.push({ id: again.id, role: "planner", taskId: null });
     saveBoard(board);
@@ -727,7 +790,7 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
       break;
     }
     answer = replanned.resultText ?? replanned.summary;
-    plan = parsePlan(answer);
+    plan = parsePlan(answer, timed);
   }
   if (!plan.ok) {
     setTeamStatus(board, SYSTEM, "failed", plan.reason);
@@ -747,6 +810,11 @@ async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
   for (const task of plan.tasks) bus.send(PLANNER, { type: "task", ...task });
   // Text over its bound was cut, not refused: one note says so — never an alert.
   if (plan.clipped) bus.send(SYSTEM, { type: "note", text: clippedNote(plan.clipped) });
+  // A budgeted plan against its time, before any work starts.
+  if (budget) {
+    await planAgainstBudget(team, budget, plan.timePlan ?? null, tz);
+    if (team.stopRequested) return;
+  }
 
   // ONE task is one run's worth of work: it runs as one ordinary run, not
   // inside the team's branch, worktree and reviewer machinery around it.

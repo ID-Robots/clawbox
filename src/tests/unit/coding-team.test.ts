@@ -81,6 +81,12 @@ vi.mock("@/lib/coding-pr", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/coding-pr")>();
   return { ...actual, openPullRequest: github.openPullRequest, readPullRequest: github.readPullRequest, mergePullRequest: github.mergePullRequest, markPullRequestReady: github.markPullRequestReady };
 });
+// The box's zone, for a team with a time budget: its planner's brief and its
+// time record name the deadline in it, and the host's own zone is not the fixture.
+vi.mock("@/lib/timezone", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/timezone")>()),
+  readOsTimeZone: async () => "Europe/Sofia",
+}));
 vi.mock("@/lib/coding-review", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/coding-review")>();
   return { ...actual, pushBranch: github.pushBranch, readReviewSnapshot: github.readReviewSnapshot, readFailedCheckLogs: github.readFailedCheckLogs };
@@ -2850,5 +2856,76 @@ describe("cost: run or team, the repo map, tokens per role, and the battery", ()
     expect(done.singleRun).toBe(false);
     expect(done.advice).toEqual({ reason: "overlap", overlap: 100 });
     expect(done.log.map((e) => e.message)).toEqual(expect.arrayContaining([expect.stringMatching(/^100% of the files this plan's tasks name are named by another task too/)]));
+  });
+});
+
+describe("a team with a time budget", () => {
+  const MIN = 60_000;
+  const PLANNER_ANSWER = (extra: Record<string, unknown> = {}) => JSON.stringify({
+    tasks: [
+      { task_description: "Scaffold index.html", files_hint: ["index.html"], estimate_minutes: 30 },
+      { task_description: "Wire app.js", depends_on: ["t1"], files_hint: ["app.js"], estimate_minutes: "15 min" },
+      { task_description: "Polish styles.css", files_hint: ["styles.css"], estimate_minutes: 20, optional: true },
+    ],
+    ...extra,
+  });
+
+  it("briefs its planner with the deadline, keeps the estimates, fits the plan to the time before work starts and records it", async () => {
+    const { presetBudget } = await import("@/lib/coding-time-budget");
+    outcomes = [{ summary: PLANNER_ANSWER({ time_plan: { estimate_minutes: 65, skipped: ["the e2e suite — not needed for one page"], too_short: "Three files in an hour is tight." } }) }];
+    const started = await team.startTeam({ goal: "Build it", directory: "site", source: "owner", timeBudget: presetBudget("1h", Date.now(), "Europe/Sofia") });
+    const done = await finished(started.id);
+    const brief = String(starts[0].extraBrief);
+    expect(brief).toContain("ONLY a JSON object");
+    expect(brief).toMatch(/TIME BUDGET: this team works to a deadline — 1 hour, until .* \(Europe\/Sofia\)/);
+    expect(brief).toContain("SHORT budget");
+    expect(done.tasks.map((t) => [t.task_id, t.estimateMs, t.priority, t.optional])).toEqual([
+      ["t1", 30 * MIN, 1, undefined],
+      ["t2", 15 * MIN, 2, undefined],
+      ["t3", 20 * MIN, 3, true],
+    ]);
+    // 45 must-have minutes fit in the 50 before the cutoff; the 20-minute nice-to-have does not.
+    const notes = done.log.filter((e) => e.type === "note").map((e) => e.message);
+    expect(notes).toEqual(expect.arrayContaining([
+      expect.stringMatching(/^Time plan: the must-have tasks fit \(estimated 45 minutes, .* left before the cutoff at .* \(Europe\/Sofia\)\), but not every nice-to-have: t3 will be skipped\.$/),
+      "The planner says the time is too short for the goal: Three files in an hour is tight.",
+      expect.stringMatching(/^Left out to fit the time: the e2e suite — not needed for one page; t3 \(does not fit before the cutoff: Polish styles\.css\)$/),
+    ]));
+    expect(done.skipped?.map((s) => [s.taskId, s.by, s.text])).toEqual([
+      [undefined, "planner", "the e2e suite — not needed for one page"],
+      ["t3", "fit", "does not fit before the cutoff: Polish styles.css"],
+    ]);
+    expect(done.alerts).toBe(0);
+    // The team's own time record: the budget, the plan, every estimate and every skip, in that order.
+    const { loadTimeRecords } = await import("@/lib/coding-time-record");
+    const record = loadTimeRecords(done.id);
+    expect(record?.records.map((r) => [r.kind, r.taskId, r.estimateMs])).toEqual([
+      ["budget", undefined, undefined],
+      ["plan", undefined, 65 * MIN],
+      ["estimate", "t1", 30 * MIN],
+      ["estimate", "t2", 15 * MIN],
+      ["estimate", "t3", 20 * MIN],
+      ["skip", undefined, undefined],
+      ["skip", "t3", undefined],
+      ["note", undefined, undefined],
+    ]);
+    expect(record?.records[1].text).toMatch(/^3 tasks planned, 1 optional; the must-have tasks fit/);
+    expect(record?.records[4].text).toBe("optional — Polish styles.css");
+    const log = fs.readFileSync(path.join(root, "data", "coding-agent-artifacts", done.id, "time-record.log"), "utf8");
+    expect(log).toMatch(/\[plan\] ~1 h 5 min — 3 tasks planned/);
+    expect(log).toMatch(/\[skip\] t3 — does not fit before the cutoff: Polish styles\.css/);
+  });
+
+  it("works as every team did without one — even when its planner volunteers estimates", async () => {
+    const { PLANNER_BRIEF } = await import("@/lib/coding-team-planner");
+    outcomes = [{ summary: PLANNER_ANSWER({ time_plan: { estimate_minutes: 65, skipped: ["the e2e suite"] } }) }];
+    const started = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(started.id);
+    expect(starts[0].extraBrief).toBe(PLANNER_BRIEF);
+    for (const t of done.tasks) for (const key of ["estimateMs", "priority", "optional"]) expect(t).not.toHaveProperty(key);
+    for (const key of ["timeBudget", "timeStop", "skipped", "extras"]) expect(done).not.toHaveProperty(key);
+    expect(done.log.some((e) => /Time plan|Left out to fit/.test(e.message))).toBe(false);
+    const { loadTimeRecords } = await import("@/lib/coding-time-record");
+    expect(loadTimeRecords(done.id)).toBeNull();
   });
 });

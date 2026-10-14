@@ -19,6 +19,14 @@
  * something to decide (`leadShouldRun`) — one short read-only run may add a
  * task or retire one still pending. Its answer is read here too, as
  * strictly, and against the board as it stands.
+ *
+ * A team with a TIME BUDGET gets more of both (`plannerBrief`, `parsePlan`
+ * with `timed`): the planner is told the deadline in the box's zone, the time
+ * left and the cutoff, and answers an estimate per task, the tasks most
+ * important first, its nice-to-haves marked, and a `time_plan` saying what it
+ * left out. Those are read leniently — an estimate that cannot be read is no
+ * estimate, never a refused plan — and `fitPlan` measures the plan against
+ * the time before any work starts. Without a budget, nothing here changes.
  */
 
 import { MAX_TASK_CHARS, MAX_TEAM_WORKERS } from "@/lib/coding-agent";
@@ -31,6 +39,7 @@ import {
   MAX_LEAD_RETIRES,
   MAX_RATIONALE_CHARS,
   MAX_REPO_MAP_ITEMS,
+  MAX_SKIP_TEXT_CHARS,
   MAX_TASK_DESCRIPTION_CHARS,
   MAX_TEAM_TASKS,
   normalizeRepoMap,
@@ -42,12 +51,45 @@ import {
   type TeamBoard,
   type TeamShape,
 } from "@/lib/coding-team-board";
+import {
+  describeBudget,
+  formatDuration,
+  formatLocalDeadline,
+  LONG_BUDGET_MS,
+  marginCutoffMs,
+  safeTimeZone,
+  safetyMarginMs,
+  type TimeBudget,
+} from "@/lib/coding-time-budget";
+import { cutFromBottom, mustHaveFits, parseEstimateMinutes } from "@/lib/coding-time-plan";
 
 export interface PlannedTask {
   task_description: string;
   depends_on: string[];
   files_hint: string[];
+  /**
+   * A budgeted plan's only (`parsePlan` with `timed`), each absent otherwise:
+   * the planner's `estimate_minutes` as ms (absent when it gave none that
+   * could be read), the task's place in the list (1 = the most important),
+   * and `optional: true` on a nice-to-have.
+   */
+  estimateMs?: number;
+  priority?: number;
+  optional?: boolean;
 }
+
+/** A budgeted plan's `time_plan`, read leniently: what the planner said about the plan and the time. */
+export interface TimePlan {
+  /** The whole plan's estimate, ms, or null when it gave none that could be read. */
+  estimateMs: number | null;
+  /** What the planner left out to fit the time, and why — one line each. */
+  skipped: string[];
+  /** The planner's word that the time cannot hold the goal, or null. */
+  tooShort: string | null;
+}
+
+/** A time_plan names at most this many skipped items; the rest are dropped. */
+export const MAX_TIME_PLAN_SKIPS = 12;
 
 /** How a task is written: the planner's rules, and the lead's when it adds one. */
 const TASK_RULES = [
@@ -69,6 +111,46 @@ export const PLANNER_BRIEF = [
   'A one-file fix is ONE task with parallelism 1 and review "final". Tasks on independent files may run in parallel — parallelism up to the number of tasks that can run at once. A migration, or any chain where each step builds on the last, runs serially: parallelism 1, each task depending on the one before.',
   "If the goal cannot be planned as written — it names files or folders that are not there, or turns on a decision only the owner can take — say so in one short team_message to the lead or to the owner's assistant, never for progress or acknowledgements, and still answer with the JSON plan.",
 ].join(" ");
+
+/**
+ * Up to this much time before its cutoff, a budget is SHORT: the plan holds
+ * only what the goal needs. Longer, the plan builds and tests its tools first
+ * and gives a long-running job the rest of the time.
+ */
+export const SHORT_PLAN_MS = LONG_BUDGET_MS;
+
+/**
+ * The brief a team's planner works to: PLANNER_BRIEF exactly, for a team
+ * without a budget. With one, the time follows it — the deadline in the box's
+ * zone (`tz`, read on the server), the time left, and the safety-margin cutoff
+ * after which no new task starts — and what the plan must then also say: an
+ * estimate per task, the tasks most important first, the nice-to-haves
+ * marked, and a time_plan. `now` is the box's clock.
+ */
+export function plannerBrief(budget: TimeBudget | null | undefined, now: number, tz: string): string {
+  if (!budget) return PLANNER_BRIEF;
+  return `${PLANNER_BRIEF} ${timeBrief(budget, now, tz)}`;
+}
+
+function timeBrief(budget: TimeBudget, now: number, tz: string): string {
+  const zone = safeTimeZone(tz);
+  const cutoff = marginCutoffMs(budget);
+  const toCutoff = Math.max(0, cutoff - now);
+  const at = `${formatLocalDeadline(cutoff, zone)} (${zone})`;
+  return [
+    `TIME BUDGET: this team works to a deadline — ${describeBudget(budget, now, zone)}.`,
+    `No new task starts after the cutoff at ${at}: the last ${formatDuration(safetyMarginMs(budget))} before the deadline are kept for committing and the pull request.`,
+    toCutoff > 0
+      ? `That leaves ${formatDuration(toCutoff)} of work from now, this planning included; plan the work to end by the cutoff.`
+      : "The cutoff has already passed: plan ONE small task, the most important step.",
+    'With a budget your JSON says more. Every task also has "estimate_minutes" — a whole number, one worker\'s minutes for it, its checks included — and "optional": true when it is a nice-to-have rather than what the goal needs.',
+    "List the tasks MOST IMPORTANT FIRST, still after the tasks they depend on: when the estimates do not fit the time, the team cuts from the bottom of the list, nice-to-haves first.",
+    'At the top level add "time_plan": {"estimate_minutes": the whole plan\'s minutes, "skipped": ["what you left out — and why", ...], "too_short": null, or one sentence saying why the time cannot hold the goal}.',
+    toCutoff <= SHORT_PLAN_MS
+      ? "This is a SHORT budget: plan only what the goal needs to work. Leave out end-to-end suites, polish and nice-to-haves, and name each one in time_plan.skipped with why."
+      : `This is a LONG budget. When the goal has a long-running job — scraping, crawling, a benchmark, a soak test, anything that runs "until" a time — build its tools first and test them in their own tasks, then ONE last task runs the job until the cutoff at ${at}: its description says to stop at the cutoff, and its estimate_minutes is the least time the job needs to be worth running — it runs on until the cutoff regardless. Time left over goes to extra checks, tests and fixes, so do not pad the estimates.`,
+  ].join(" ");
+}
 
 /** How much of a planner's wrong answer is quoted back to it. */
 const REPLAN_QUOTE_CHARS = 1_500;
@@ -115,6 +197,8 @@ export interface PlanParse {
   repoMap: RepoMap | null;
   /** Every field cut to its bound; absent when nothing was. */
   clipped?: ClippedField[];
+  /** A budgeted plan's `time_plan` (`timed`), its fields empty when the planner gave none; absent without a budget. */
+  timePlan?: TimePlan;
 }
 
 /** The clips of one answer as ONE line for the team's log — a note, never an alert. */
@@ -134,8 +218,15 @@ export interface PlanFailure {
  * around it ignored: a JSON array of tasks, or `{"shape": {...}, "tasks":
  * [...]}`. A shape that is there but wrong refuses the plan like a bad task
  * does, with every fault named.
+ *
+ * `timed` (a team with a time budget) also reads each task's
+ * `estimate_minutes` and `optional`, numbers the tasks' priority in the order
+ * listed, and reads the `time_plan` — all leniently: what cannot be read is
+ * left out, never a fault. Without it those fields are ignored, and the plan
+ * is what it always was.
  */
-export function parsePlan(text: string | null | undefined): PlanParse | PlanFailure {
+export function parsePlan(text: string | null | undefined, opts: { timed?: boolean } = {}): PlanParse | PlanFailure {
+  const timed = opts.timed === true;
   if (!text || !text.trim()) return { ok: false, reason: "The planner answered nothing." };
   const candidate = extractJson(text, (v) => Array.isArray(v) || (isObject(v) && ("tasks" in v || "shape" in v)));
   if (candidate === null) return { ok: false, reason: "The planner's answer holds no JSON array." };
@@ -149,6 +240,7 @@ export function parsePlan(text: string | null | undefined): PlanParse | PlanFail
   const clipped: ClippedField[] = [];
   let shape: TeamShape | null = null;
   let repoMap: RepoMap | null = null;
+  let timePlanRaw: unknown;
   let list: unknown = raw;
   if (!Array.isArray(raw)) {
     if (!isObject(raw)) return { ok: false, reason: "The planner's answer is not a JSON array." };
@@ -161,6 +253,7 @@ export function parsePlan(text: string | null | undefined): PlanParse | PlanFail
       else problems.push(...read.problems);
     }
     repoMap = normalizeRepoMap(raw.repo_map);
+    timePlanRaw = raw.time_plan ?? raw.timePlan;
   }
   const items = list as unknown[];
   if (items.length === 0) return { ok: false, reason: "The planner produced no tasks." };
@@ -176,7 +269,7 @@ export function parsePlan(text: string | null | undefined): PlanParse | PlanFail
     // then never find its dependency.
     if (n === null || n > items.length || n === i + 1) return `Task t${i + 1} depends on ${d}, which is not another task in the plan.`;
     return null;
-  });
+  }, timed);
   if (problems.length) return { ok: false, reason: joinProblems(problems) };
   // A cycle is named as one first: it is the fault the planner must rethink,
   // not merely reorder.
@@ -189,7 +282,150 @@ export function parsePlan(text: string | null | undefined): PlanParse | PlanFail
   // planner is asked again.
   const forward = forwardDependencies(tasks, 0);
   if (forward.length) return { ok: false, reason: joinProblems(forward) };
-  return { ok: true, tasks, shape, repoMap, ...(clipped.length ? { clipped } : {}) };
+  return { ok: true, tasks, shape, repoMap, ...(clipped.length ? { clipped } : {}), ...(timed ? { timePlan: readTimePlan(timePlanRaw) } : {}) };
+}
+
+/** Words a planner may put in `too_short` that mean it is not. */
+const NOT_TOO_SHORT = /^(?:null|none|no|false|n\/a|-)$/i;
+
+/** A budgeted plan's `time_plan`, leniently: whatever of it can be read, the rest empty. */
+function readTimePlan(raw: unknown): TimePlan {
+  const o = isObject(raw) ? raw : {};
+  const list = Array.isArray(o.skipped) ? o.skipped : o.skipped === undefined || o.skipped === null ? [] : [o.skipped];
+  const skipped: string[] = [];
+  for (const item of list) {
+    const line = skipLine(item);
+    if (!line || skipped.includes(line)) continue;
+    skipped.push(line);
+    if (skipped.length >= MAX_TIME_PLAN_SKIPS) break;
+  }
+  const short = o.too_short ?? o.tooShort;
+  const said = typeof short === "string" ? clip(oneLine(short), MAX_SKIP_TEXT_CHARS) : "";
+  const tooShort = said && !NOT_TOO_SHORT.test(said) ? said : short === true ? "(no reason given)" : null;
+  return { estimateMs: parseEstimateMinutes(o.estimate_minutes ?? o.estimateMinutes ?? o.estimate), skipped, tooShort };
+}
+
+/** One skipped item as a line: a string, or `{what, why}` (or `item`/`task`/`name` and `reason`) — "" for anything else. */
+function skipLine(item: unknown): string {
+  if (typeof item === "string") return clip(oneLine(item), MAX_SKIP_TEXT_CHARS);
+  if (!isObject(item)) return "";
+  const text = (v: unknown) => (typeof v === "string" && v.trim() ? oneLine(v) : "");
+  const what = text(item.what) || text(item.item) || text(item.task) || text(item.name);
+  const why = text(item.why) || text(item.reason);
+  return what ? clip(why ? `${what} — ${why}` : what, MAX_SKIP_TEXT_CHARS) : "";
+}
+
+/** "true" in the forms a planner writes it: true, "true", "yes". */
+function readOptional(v: unknown): boolean {
+  return v === true || (typeof v === "string" && /^(?:true|yes)$/i.test(v.trim()));
+}
+
+// ─── Fitting the plan to the time ────────────────────────────────────────────
+
+/** A posted task as `fitPlan` reads it, in the plan's order (most important first). */
+export interface FitTask {
+  id: string;
+  estimateMs?: number | null;
+  optional?: boolean;
+  dependsOn: readonly string[];
+}
+
+export interface PlanFit {
+  /** Do the must-have tasks' estimates fit before the safety-margin cutoff (mustHaveFits)? */
+  fits: boolean;
+  /** …and the whole plan's, its nice-to-haves too? */
+  allFit: boolean;
+  /** Time left before the cutoff, ms. */
+  availableMs: number;
+  /** The must-have estimates summed, and the whole plan's, ms. */
+  mustMs: number;
+  totalMs: number;
+  /** How far the must-haves are over the time, ms; 0 when they fit. */
+  shortByMs: number;
+  /** Tasks with no estimate: they count as nothing, and are never cut for time. */
+  unestimated: string[];
+  /** What will be skipped to fit, in the order cut: nice-to-haves before must-haves, each from the bottom of the plan; then every task that waits on one cut. */
+  cut: string[];
+  /** Of `cut`, the tasks cut only because they wait on a task that was. */
+  dragged: string[];
+}
+
+const hasEstimate = (v: number | null | undefined): v is number => typeof v === "number" && Number.isFinite(v) && v > 0;
+
+/**
+ * A budgeted plan against its time, before any work starts. The must-haves'
+ * estimates are summed against the time left before the cutoff
+ * (mustHaveFits); when the whole plan does not fit, what goes is cut from the
+ * bottom (cutFromBottom) — nice-to-haves first, then the must-haves, each
+ * least important first — until the rest fits. The most important must-have,
+ * and whatever it waits on, is never cut: the team always starts on
+ * something, and the deadline stops it. A task that waits on a cut task could
+ * never start, so it is cut too (`dragged`).
+ */
+export function fitPlan(tasks: readonly FitTask[], budget: TimeBudget, now: number): PlanFit {
+  const must = tasks.filter((t) => !t.optional);
+  const nice = tasks.filter((t) => t.optional);
+  const mustFit = mustHaveFits(budget, now, must.map((t) => t.estimateMs));
+  const all = mustHaveFits(budget, now, tasks.map((t) => t.estimateMs));
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const kept = new Set<string>();
+  const keep = (id: string): void => {
+    const t = byId.get(id);
+    if (!t || kept.has(id)) return;
+    kept.add(id);
+    t.dependsOn.forEach(keep);
+  };
+  const first = must[0] ?? tasks[0];
+  if (first) keep(first.id);
+  const cut = all.fits
+    ? []
+    : cutFromBottom([...must, ...nice].filter((t) => !kept.has(t.id)).map((t) => ({ id: t.id, estimateMs: t.estimateMs })), all.shortByMs);
+  const gone = new Set(cut);
+  const dragged: string[] = [];
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const t of tasks) {
+      if (gone.has(t.id) || !t.dependsOn.some((d) => gone.has(d))) continue;
+      gone.add(t.id);
+      dragged.push(t.id);
+      grew = true;
+    }
+  }
+  return {
+    fits: mustFit.fits,
+    allFit: all.fits,
+    availableMs: all.availableMs,
+    mustMs: mustFit.neededMs,
+    totalMs: all.neededMs,
+    shortByMs: mustFit.shortByMs,
+    unestimated: tasks.filter((t) => !hasEstimate(t.estimateMs)).map((t) => t.id),
+    cut: [...cut, ...dragged],
+    dragged,
+  };
+}
+
+/** "t3", "t3 and t4", "t3, t4 and t5". */
+function idList(ids: readonly string[]): string {
+  return ids.length <= 1 ? (ids[0] ?? "") : `${ids.slice(0, -1).join(", ")} and ${ids[ids.length - 1]}`;
+}
+
+/**
+ * The fit in one English line for the team's log and its time record: the
+ * estimates against the time left before the cutoff (in the box's zone), and
+ * what will be skipped. It says plainly when the must-have work does not fit.
+ */
+export function fitLine(fit: PlanFit, budget: TimeBudget, tz: string): string {
+  const zone = safeTimeZone(tz);
+  const left = `${formatDuration(fit.availableMs)} left before the cutoff at ${formatLocalDeadline(marginCutoffMs(budget), zone)} (${zone})`;
+  const n = fit.unestimated.length;
+  const unestimated = n ? ` ${idList(fit.unestimated)} gave no estimate and ${n === 1 ? "is" : "are"} not counted.` : "";
+  const skipped = fit.cut.length ? `${idList(fit.cut)} will be skipped` : "";
+  if (fit.totalMs === 0) return `Time plan: the planner gave no estimates; ${left}.`;
+  if (fit.allFit) return `Time plan: the plan fits — estimated ${formatDuration(fit.totalMs)}, ${left}.${unestimated}`;
+  if (fit.fits) {
+    return `Time plan: the must-have tasks fit (estimated ${formatDuration(fit.mustMs)}, ${left}), but not every nice-to-have${skipped ? `: ${skipped}` : ""}.${unestimated}`;
+  }
+  return `Time plan: the must-have work does NOT fit — estimated ${formatDuration(fit.mustMs)}, ${left}: ${formatDuration(fit.shortByMs)} short. ${skipped ? `To fit, ${skipped}.` : "Nothing more can be cut: the team starts on its most important task and stops at the cutoff."}${unestimated}`;
 }
 
 /** Every dependency of a task (numbered from `t{offset + 1}`) on one listed after it, as the fault the planner or lead must fix. */
@@ -232,7 +468,7 @@ function parseShape(raw: unknown, clipped: ClippedField[]): { ok: true; shape: T
  * is cut, onto `clipped`. `checkDependency` says what is wrong with one
  * dependency (`n` is its number, null when the id is not canonical).
  */
-function readTasks(items: unknown[], offset: number, problems: string[], clipped: ClippedField[], checkDependency: (d: string, n: number | null, i: number) => string | null): PlannedTask[] {
+function readTasks(items: unknown[], offset: number, problems: string[], clipped: ClippedField[], checkDependency: (d: string, n: number | null, i: number) => string | null, timed = false): PlannedTask[] {
   const tasks: PlannedTask[] = [];
   for (let i = 0; i < items.length; i++) {
     const item = items[i] as Record<string, unknown>;
@@ -262,7 +498,16 @@ function readTasks(items: unknown[], offset: number, problems: string[], clipped
     const hint = item.files_hint === undefined ? [] : item.files_hint;
     const validHint = Array.isArray(hint) && hint.every((f) => typeof f === "string");
     if (!validHint) problems.push(`Task ${id}'s files_hint is not a list of paths.`);
-    if (description && validDepends && validHint) tasks.push({ task_description: description, depends_on, files_hint: (hint as string[]).map((f) => f.trim()).filter(Boolean).slice(0, 40) });
+    if (!description || !validDepends || !validHint) continue;
+    const task: PlannedTask = { task_description: description, depends_on, files_hint: (hint as string[]).map((f) => f.trim()).filter(Boolean).slice(0, 40) };
+    if (timed) {
+      // Lenient: an estimate that cannot be read is none, never a fault.
+      const estimateMs = parseEstimateMinutes(item.estimate_minutes ?? item.estimateMinutes ?? item.estimate);
+      if (estimateMs !== null) task.estimateMs = estimateMs;
+      task.priority = offset + i + 1;
+      if (readOptional(item.optional)) task.optional = true;
+    }
+    tasks.push(task);
   }
   return tasks;
 }
@@ -584,6 +829,10 @@ function isObject(v: unknown): v is Record<string, unknown> {
 
 function clip(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
 }
 
 /** A sentence's end (its stop, and any closing quote or bracket, before a space) or a line break. */
