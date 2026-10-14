@@ -314,9 +314,11 @@ export async function startIngest(input: IngestInput, deps: IngestDeps = {}): Pr
     const original = store.live.get(input.retryOf);
     if (original) original.job.deadLetter = 0;
   }
-  await pruneKeptCopies(now().getTime()).catch(() => 0);
+  // Registered before the next await: until it is, a second start passes the
+  // busy check and an orphan sweep would settle this job as interrupted.
   const live: LiveJob = { job, listeners: new Set(), backlog: [], abort: new AbortController(), done: Promise.resolve() };
   store.live.set(job.id, live);
+  await pruneKeptCopies(now().getTime()).catch(() => 0);
   live.done = runJob(live, input, claimed, vault, deps).finally(() => {
     // Kept a little after the end so a stream opened right as it finished still
     // gets the closing state from memory; the database has it either way.
@@ -347,8 +349,9 @@ interface PreparedFile {
   text: string;
 }
 
-function uploadLabel(dir: string): (abs: string) => string {
-  return (abs) => `upload/${path.relative(dir, abs).split(path.sep).join("/")}`;
+/** An upload's files by batch and name: two drops of a `notes.md` are two documents, not one page. */
+function uploadLabel(dir: string, batch: string): (abs: string) => string {
+  return (abs) => `upload/${batch}/${path.relative(dir, abs).split(path.sep).join("/")}`;
 }
 
 /** Dead letters as files to read again; one whose kind is not ingestible any more is left out. */
@@ -426,7 +429,7 @@ async function runJob(
       input.kind === "retry"
         ? { files: retryFiles(claimed), notes: [] as string[], unsupported: 0, excluded: 0, truncated: false }
         : await scanFolders(input.kind === "folders" ? input.folders : [input.dir], {
-            labelOf: input.kind === "upload" ? uploadLabel(input.dir) : undefined,
+            labelOf: input.kind === "upload" ? uploadLabel(input.dir, input.batch) : undefined,
             signal,
             exclude: deps.exclude ?? settings.ingest.exclude,
           });

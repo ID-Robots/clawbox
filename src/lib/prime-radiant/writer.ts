@@ -214,6 +214,53 @@ function notUseful(i: number): PageDraft {
   };
 }
 
+/** Candidate brackets tried at most, each way: a prose `[REDACTED:EMAIL]` costs one try, not the call. */
+const MAX_ARRAY_STARTS = 32;
+const MAX_ARRAY_ENDS = 8;
+
+function bracketsFrom(text: string, ch: string, forward: boolean, max: number): number[] {
+  const out: number[] = [];
+  let at = forward ? text.indexOf(ch) : text.lastIndexOf(ch);
+  while (at >= 0 && out.length < max) {
+    out.push(at);
+    at = forward ? text.indexOf(ch, at + 1) : at === 0 ? -1 : text.lastIndexOf(ch, at - 1);
+  }
+  return out;
+}
+
+/**
+ * The JSON array in a model's answer. Not simply the first `[` to the last
+ * `]`: prose around the array may hold brackets of its own (a repeated
+ * `[REDACTED:…]` placeholder, "[3 items]"), so every `[` is tried in turn
+ * against the last few `]`, and the first slice that parses as an array of
+ * objects wins (a bare list of numbers only when nothing better parses).
+ */
+function findJsonArray(text: string): unknown[] {
+  const starts = bracketsFrom(text, "[", true, MAX_ARRAY_STARTS);
+  const ends = bracketsFrom(text, "]", false, MAX_ARRAY_ENDS);
+  if (starts.length === 0 || ends.length === 0 || ends[0] <= starts[0]) throw new WriterParseError("the answer holds no JSON array");
+  let sawJson = false;
+  let fallback: unknown[] | null = null;
+  for (const start of starts) {
+    for (const end of ends) {
+      if (end <= start) break;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text.slice(start, end + 1));
+      } catch {
+        continue;
+      }
+      sawJson = true;
+      if (!Array.isArray(parsed)) continue;
+      // A bare list in the prose ("[1, 2]") is not the answer; an array of cards is.
+      if (parsed.length === 0 || parsed.some((x) => x !== null && typeof x === "object")) return parsed;
+      fallback ??= parsed;
+    }
+  }
+  if (fallback) return fallback;
+  throw new WriterParseError(sawJson ? "the answer is not a JSON array" : "the answer's JSON array does not parse");
+}
+
 /**
  * Read the model's answer for a batch: one verdict per item asked about.
  * An item the answer does not mention, or mentions twice, is a failure for
@@ -221,16 +268,7 @@ function notUseful(i: number): PageDraft {
  * the caller can retry the whole call.
  */
 export function parseWriterResponse(text: string, items: readonly WriterItem[]): Map<number, ItemVerdict> {
-  const start = text.indexOf("[");
-  const end = text.lastIndexOf("]");
-  if (start < 0 || end <= start) throw new WriterParseError("the answer holds no JSON array");
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text.slice(start, end + 1));
-  } catch {
-    throw new WriterParseError("the answer's JSON array does not parse");
-  }
-  if (!Array.isArray(parsed)) throw new WriterParseError("the answer is not a JSON array");
+  const parsed = findJsonArray(text);
   const expected = new Set(items.map((it) => it.i));
   const out = new Map<number, ItemVerdict>();
   const seen = new Set<number>();

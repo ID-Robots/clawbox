@@ -293,7 +293,7 @@ describe("drop: upload then ingest", () => {
     const frames = await readSse(await events(job.id));
     expect(frames.at(-1)).toMatchObject({ event: "end", data: { status: "done", done: 2 } });
     const labels = frames.filter((f) => f.event === "file").map((f) => (f.data as { label: string }).label).sort();
-    expect(labels).toEqual(["upload/Price list.md", "upload/notes.txt"]);
+    expect(labels).toEqual([`upload/${batch}/Price list.md`, `upload/${batch}/notes.txt`]);
     expect(fs.existsSync(path.join(process.env.PRIME_RADIANT_DIR!, "uploads", batch))).toBe(false);
   });
 

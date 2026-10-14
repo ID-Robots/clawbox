@@ -96,6 +96,19 @@ describe("parseWriterResponse", () => {
     expect(v.get(1)).toMatchObject({ ok: true, draft: { title: "Support hours", type: "howto" } });
   });
 
+  it("finds the array behind brackets in the prose", () => {
+    const array = JSON.stringify([card(0), card(1)]);
+    for (const text of [
+      `I kept [REDACTED:EMAIL] out of the cards:\n${array}`,
+      `Here are [2 items] as asked: ${array}\nNote: [REDACTED:IBAN] was left out.`,
+      `Indexes [0, 1] follow:\n${array}`,
+    ]) {
+      const v = parseWriterResponse(text, items);
+      expect(v.get(0)).toMatchObject({ ok: true });
+      expect(v.get(1)).toMatchObject({ ok: true });
+    }
+  });
+
   it("throws a WriterParseError when there is no usable array", () => {
     expect(() => parseWriterResponse("I cannot help with that.", items)).toThrow(WriterParseError);
     expect(() => parseWriterResponse("[not json]", items)).toThrow(WriterParseError);

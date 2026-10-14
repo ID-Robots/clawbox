@@ -320,6 +320,54 @@ describe("an ingest job", () => {
     await ingestFinished(first.id);
   });
 
+  it("refuses a second start that arrives while the first is still starting", async () => {
+    write("a.md", "Doc a.");
+    await run({ kind: "folders", folders: [docs] }, deps({ client: fakeClient().client }));
+    write("b.md", "Doc b.");
+    // Kept copies to look through make the start's own housekeeping take a while.
+    for (let i = 0; i < 300; i++) fs.mkdirSync(path.join(deadLetterRoot(), `ing-${String(i).padStart(12, "0")}`), { recursive: true });
+    const slow = fakeClient(undefined, 50);
+    const starts = await Promise.allSettled([
+      startIngest({ kind: "folders", folders: [docs] }, deps({ client: slow.client })),
+      startIngest({ kind: "folders", folders: [docs] }, deps({ client: slow.client })),
+    ]);
+    const started = starts.flatMap((s) => (s.status === "fulfilled" ? [s.value] : []));
+    const refused = starts.flatMap((s) => (s.status === "rejected" ? [s.reason] : []));
+    expect(started).toHaveLength(1);
+    expect(refused[0]).toBeInstanceOf(IngestBusyError);
+    // An orphan sweep while it starts must not settle the job that is running.
+    expect(getIngestJob(started[0].id, vault)?.status).toBe("running");
+    await ingestFinished(started[0].id);
+    expect(getIngestJob(started[0].id, vault)?.status).toBe("done");
+  });
+
+  it("keeps two dropped files of the same name apart", async () => {
+    const fake = fakeClient((items) => items.map((it) => ({ ...cardFor(it), title: `Acme notes ${fake.calls}` })));
+    for (const [batch, text] of [["0123456789abcdef", "Acme notes, spring."], ["fedcba9876543210", "Acme notes, autumn."]] as const) {
+      const staged = path.join(root, `staged-${batch}`);
+      fs.mkdirSync(staged);
+      fs.writeFileSync(path.join(staged, "notes.md"), text);
+      await run({ kind: "upload", dir: staged, batch }, deps({ client: fake.client }));
+    }
+    expect((await readVaultSnapshot(vault)).pages).toHaveLength(2);
+  });
+
+  it("keeps two documents apart whose paths read alike once redacted", async () => {
+    write("orders@example.com/notes.md", "Acme notes for the first mailbox.");
+    write("billing@example.com/notes.md", "Acme notes for the second mailbox.");
+    const fake = fakeClient((items) => items.map((it, k) => ({ ...cardFor(it), title: `Acme mailbox ${k}` })));
+    const job = await run({ kind: "folders", folders: [docs] }, deps({ client: fake.client }));
+    expect(job).toMatchObject({ done: 2, pages: 2 });
+    expect((await readVaultSnapshot(vault)).pages).toHaveLength(2);
+    const sent = fake.prompts.map((p) => p.user).join("\n");
+    expect(sent).not.toContain("example.com");
+    // A changed document still updates its own page, not the other one.
+    write("orders@example.com/notes.md", "Acme notes for the first mailbox, revised.");
+    const again = await run({ kind: "folders", folders: [docs] }, deps({ client: fakeClient().client }));
+    expect(again).toMatchObject({ done: 1, duplicates: 1 });
+    expect((await readVaultSnapshot(vault)).pages).toHaveLength(2);
+  });
+
   it("can be stopped; what it did not reach stays retryable", async () => {
     for (let i = 0; i < 4; i++) write(`f${i}.md`, `Doc ${i}.`);
     const slow = fakeClient(undefined, 80);
@@ -341,7 +389,7 @@ describe("an ingest job", () => {
     const fake = fakeClient();
     const job = await run({ kind: "upload", dir: staged, batch: "0123456789abcdef" }, deps({ client: fake.client }));
     expect(job).toMatchObject({ kind: "upload", folders: ["upload/0123456789abcdef"], done: 1 });
-    expect(fake.prompts[0].user).toContain('"path":"upload/price-list.md"');
+    expect(fake.prompts[0].user).toContain('"path":"upload/0123456789abcdef/price-list.md"');
     expect(fs.existsSync(staged)).toBe(false);
   });
 });

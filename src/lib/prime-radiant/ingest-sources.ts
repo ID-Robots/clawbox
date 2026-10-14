@@ -24,7 +24,7 @@
 
 import crypto from "crypto";
 import fs from "fs/promises";
-import { constants as fsConstants, lstatSync } from "fs";
+import { constants as fsConstants, lstatSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import os from "os";
 import path from "@/lib/runtime-path";
 import { EXTRACT_ROOT, MAX_DOCUMENT_BYTES, extractOne, newWalkBudget, walkFiles } from "@/lib/memory-extract";
@@ -72,9 +72,47 @@ export function isLinkedWorktree(dir: string): boolean {
   }
 }
 
-/** The label a document is known by everywhere outside this box: home folded, secrets redacted. */
+/**
+ * The box's own key for {@link sourceLabel}'s discriminator: random, kept
+ * beside the vault (never inside it), created on first use.
+ */
+function labelKey(): Buffer {
+  const file = path.join(primeRadiantRoot(), ".label-key");
+  try {
+    const key = readFileSync(file);
+    if (key.length >= 32) return key;
+  } catch {
+    // Not there yet.
+  }
+  const key = crypto.randomBytes(32);
+  try {
+    mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    writeFileSync(file, key, { mode: 0o600, flag: "wx" });
+  } catch {
+    // Another caller wrote it first: use theirs.
+    try {
+      const theirs = readFileSync(file);
+      if (theirs.length >= 32) return theirs;
+    } catch {
+      // Unreadable: this call's key still keeps the label distinct within the job.
+    }
+  }
+  return key;
+}
+
+/**
+ * The label a document is known by everywhere outside this box: home folded,
+ * secrets redacted. The label is also a page's identity (a changed document
+ * updates its page in place), so when redaction folded something away — two
+ * paths that differ only in an e-mail address read alike once redacted — a
+ * short keyed hash of the real path is appended (`…/notes.md#1a2b3c4d5e6f`).
+ * Keyed, so the hash cannot be used to guess what was redacted.
+ */
 export function sourceLabel(abs: string): string {
-  return redactPath(abs, { homeDir: os.homedir() }).text;
+  const r = redactPath(abs, { homeDir: os.homedir() });
+  if (r.kinds.length === 0) return r.text;
+  const tag = crypto.createHmac("sha256", labelKey()).update(abs).digest("hex").slice(0, 12);
+  return `${r.text}#${tag}`;
 }
 
 export interface ScannedFile {

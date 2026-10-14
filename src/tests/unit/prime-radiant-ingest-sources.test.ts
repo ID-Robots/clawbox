@@ -158,7 +158,17 @@ describe("sourceLabel", () => {
   it("folds the home folder and redacts secrets in a name", () => {
     const home = os.homedir();
     expect(sourceLabel(path.join(home, "Documents", "acme.pdf"))).toBe("~/Documents/acme.pdf");
-    expect(sourceLabel("/srv/share/orders@example.com/list.md")).toBe("/srv/share/[REDACTED:EMAIL]/list.md");
+    expect(sourceLabel("/srv/share/orders@example.com/list.md")).toMatch(/^\/srv\/share\/\[REDACTED:EMAIL\]\/list\.md#[0-9a-f]{12}$/);
+  });
+
+  it("keeps two paths apart that read alike once redacted, the same way every time", () => {
+    const a = sourceLabel("/srv/share/orders@example.com/list.md");
+    const b = sourceLabel("/srv/share/billing@example.com/list.md");
+    expect(a).not.toBe(b);
+    expect(sourceLabel("/srv/share/orders@example.com/list.md")).toBe(a);
+    expect(a).not.toContain("example.com");
+    // A path redaction did not touch carries no suffix.
+    expect(sourceLabel("/srv/share/list.md")).toBe("/srv/share/list.md");
   });
 });
 
