@@ -651,6 +651,11 @@ const FATAL_MESSAGES: Partial<Record<FlashCallError["kind"], string>> = {
 };
 
 /** One batch: a model call (with retries, and one more call for an unreadable answer), then one commit. */
+function ownerLookup(domains: ReadonlyArray<{ name: string; owner: string }>): (domain: string) => string | undefined {
+  const byName = new Map(domains.map((d) => [d.name, d.owner]));
+  return (domain) => byName.get(domain);
+}
+
 async function processBatch(
   files: PreparedFile[],
   ctx: { client: FlashClient; vault: string; deps: IngestDeps; job: IngestJob; signal: AbortSignal; now: () => Date; rates: CostRates },
@@ -740,7 +745,8 @@ async function processBatch(
           pagesBySource,
           claimIndex: buildClaimIndex(valid, ledger),
           now: now(),
-          ownerFor: deps.ownerFor,
+          // The owner a domain's new pages get: the settings' domain list, unless the caller names one.
+          ownerFor: deps.ownerFor ?? ownerLookup(readSettings().domains),
         };
         const indexed: Array<{ path: string; title: string }> = [];
         for (let i = 0; i < files.length; i++) {

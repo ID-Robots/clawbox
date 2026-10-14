@@ -819,6 +819,28 @@ async function embedBatchOnce(
 }
 
 /**
+ * Embed short texts as DOCUMENTS with the embedder Memory Shard uses — the
+ * same fence, the same proxy, the same retries — for another part of ClawBox
+ * that compares texts with each other (Prime Radiant's contradiction pass
+ * embeds claims to find the pairs worth judging). Unit-length vectors, in
+ * order, and the embedder's identity, so a caller that caches vectors can tell
+ * when they belong to another model (the same value {@link localEmbeddingIdentity}
+ * answers before any call). Throws {@link EmbeddingUnavailableError}
+ * when the embedder cannot answer.
+ */
+export async function embedDocumentsWithShardEmbedder(
+  texts: readonly string[],
+  signal?: AbortSignal,
+): Promise<{ identity: string; vectors: Float32Array[] }> {
+  const embedder = await resolveMemoryEmbedder();
+  const vectors: Float32Array[] = [];
+  for (let at = 0; at < texts.length; at += EMBED_BATCH_INPUTS) {
+    vectors.push(...(await embedBatch(texts.slice(at, at + EMBED_BATCH_INPUTS), "document", signal, embedder)));
+  }
+  return { identity: embedderIdentity(embedder), vectors };
+}
+
+/**
  * Unit length, once, at write time — so every later comparison is a dot
  * product rather than a cosine with two square roots per candidate.
  */

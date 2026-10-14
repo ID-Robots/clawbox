@@ -39,6 +39,8 @@ export const DEFAULT_COST_RATES: CostRates = Object.freeze({
   unit: "per-million-tokens",
   models: Object.freeze({
     "deepseek-v4-flash": Object.freeze({ input: 0.14, cachedInput: 0.0028, output: 0.28 }),
+    // The optional nightly Opus tier: the provider's public list rates.
+    "claude-opus-5-5": Object.freeze({ input: 4, cachedInput: 0.2, output: 20 }),
   }),
 });
 

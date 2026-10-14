@@ -19,7 +19,7 @@ import { openSqlite } from "@/lib/openclaw-session-store";
 import path from "@/lib/runtime-path";
 
 export const STATE_DB_FILE = "prime-radiant.sqlite";
-export const STATE_SCHEMA_VERSION = 3;
+export const STATE_SCHEMA_VERSION = 4;
 
 export function stateDbPathFor(vault: string): string {
   return path.join(path.dirname(vault), STATE_DB_FILE);
@@ -130,6 +130,39 @@ ALTER TABLE ingest_files ADD COLUMN retried_by TEXT;
 CREATE INDEX IF NOT EXISTS ingest_files_dead ON ingest_files (job_id, status, retried_by);
 `;
 
+/**
+ * v4 — review and the nightly pass: a review item keeps a `dedupe_key` (the
+ * same disputed pair or the same lint finding is ONE open item, however many
+ * nights find it) and the run that raised it; a run keeps its trigger and its
+ * spend. `claim_embeddings` caches a claim's vector by the hash of its
+ * (redacted) text and the embedder's identity, so a nightly pass embeds only
+ * what changed; `judged_pairs` remembers the judge's verdict on a pair of
+ * claim texts, so the same pair is never paid for twice.
+ */
+const SCHEMA_V4 = `
+ALTER TABLE review_items ADD COLUMN dedupe_key TEXT;
+ALTER TABLE review_items ADD COLUMN run_id TEXT;
+CREATE INDEX IF NOT EXISTS review_items_dedupe ON review_items (dedupe_key, status);
+ALTER TABLE runs ADD COLUMN trigger_kind TEXT;
+ALTER TABLE runs ADD COLUMN usd_estimate REAL NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS runs_started ON runs (started_at);
+CREATE TABLE IF NOT EXISTS claim_embeddings (
+  claim_id   TEXT NOT NULL,
+  text_hash  TEXT NOT NULL,
+  identity   TEXT NOT NULL,
+  dims       INTEGER NOT NULL,
+  vec        BLOB NOT NULL,
+  at         TEXT NOT NULL,
+  PRIMARY KEY (claim_id, identity)
+);
+CREATE TABLE IF NOT EXISTS judged_pairs (
+  pair_hash  TEXT PRIMARY KEY,
+  verdict    TEXT NOT NULL,
+  why        TEXT,
+  at         TEXT NOT NULL
+);
+`;
+
 /** Open (creating and migrating as needed) the state database for `vault`. Caller closes it. */
 export function openStateDb(vault: string): DatabaseSync {
   const file = stateDbPathFor(vault);
@@ -143,6 +176,7 @@ export function openStateDb(vault: string): DatabaseSync {
       [1, SCHEMA_V1],
       [2, SCHEMA_V2],
       [3, SCHEMA_V3],
+      [4, SCHEMA_V4],
     ];
     for (const [target, sql] of steps) {
       if (version >= target) continue;
@@ -165,6 +199,11 @@ export function openStateDb(vault: string): DatabaseSync {
     throw err;
   }
   return db;
+}
+
+/** Whether the state database exists. A read route asks this first, so it never creates one. */
+export function stateDbExists(vault: string): boolean {
+  return fs.existsSync(stateDbPathFor(vault));
 }
 
 export function withStateDb<T>(vault: string, fn: (db: DatabaseSync) => T): T {

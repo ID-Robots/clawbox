@@ -667,4 +667,16 @@ export async function register() {
   } catch (err) {
     console.error('[instrumentation] Could not load memory index scheduler:', err instanceof Error ? err.message : err)
   }
+  try {
+    // Prime Radiant's nightly pass, armed from its own settings file the same
+    // way. Arming is a timer only: a box whose vault was never created skips
+    // the slot when it fires, and nothing is created at boot.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const primeRadiantScheduler = require('./lib/prime-radiant/nightly-scheduler')
+    void primeRadiantScheduler.start().catch((err: unknown) => {
+      console.error('[instrumentation] Prime Radiant nightly scheduler boot failed:', err instanceof Error ? err.message : err)
+    })
+  } catch (err) {
+    console.error('[instrumentation] Could not load the Prime Radiant nightly scheduler:', err instanceof Error ? err.message : err)
+  }
 }
