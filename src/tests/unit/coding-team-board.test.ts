@@ -552,6 +552,8 @@ describe("teamMetrics", () => {
       tasksRejected: 2,
       tokensUsed: 12_000,
       tokensByRole: { planner: 1_200, worker: 9_000, reviewer: 1_500, lead: 300 },
+      // Its runs name no account (a board from before the field): on none.
+      tokensByProvider: { "clawbox-ai": 0, anthropic: 0 },
       wallMs: 60_000,
       messagesSent: 5,
       messagesToLead: 1,

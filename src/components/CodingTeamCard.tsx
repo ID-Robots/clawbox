@@ -18,6 +18,8 @@ import CodingTeamTree from "./CodingTeamTree";
 import CodingBudgetTimeline from "./CodingBudgetTimeline";
 import CodingAgentDiagram, { DiagramDetails, type DiagramRun } from "./CodingAgentDiagram";
 import { MAX_TEAM_CI_ROUNDS } from "@/lib/coding-ci-limits";
+import type { CodingProvider } from "@/lib/coding-provider";
+import type { ModelRole } from "@/lib/coding-role-models";
 import { timeAgo } from "./clawkeep-ui";
 
 export interface TeamTaskView {
@@ -47,6 +49,11 @@ export interface TeamRunView {
   taskId: string | null;
   /** Tokens the run spent, once it settled. */
   tokens?: number;
+  /** The account it started on, the model there (null where the plan decides)
+   *  and the role that choice was made for. Absent from an older server. */
+  provider?: CodingProvider | null;
+  model?: string | null;
+  modelRole?: ModelRole | null;
 }
 
 /**
@@ -76,6 +83,10 @@ export interface TeamMetricsView {
   tokensUsed: number;
   /** The same tokens by the role that spent them. Absent from an older server. */
   tokensByRole?: { planner: number; worker: number; reviewer: number; lead: number };
+  /** The same tokens by the account that paid for them — a team's roles may
+   *  run on different ones. Absent from an older server; an account no run
+   *  used may be absent too. */
+  tokensByProvider?: Partial<Record<CodingProvider, number>>;
   wallMs: number;
 }
 

@@ -54,6 +54,16 @@ describe("provider-models", () => {
       expect(opus5?.hint?.startsWith("Default")).toBe(false);
     });
 
+    // Fable 5.1 joined the list beside the default, not in its place: the
+    // "Default." hint and `defaultModelId` above still name Opus 5.5.
+    it("offers Claude Fable 5.1 as a non-default row", () => {
+      const catalog = getProviderCatalog("anthropic");
+      const fable = catalog?.models.find((m) => m.id === "claude-fable-5-1");
+      expect(fable).toMatchObject({ id: "claude-fable-5-1", label: "Claude Fable 5.1" });
+      expect(fable?.hint?.startsWith("Default")).toBe(false);
+      expect(catalog?.defaultModelId).toBe("claude-opus-5-5");
+    });
+
     // xAI (Grok): the cold-start list is the two ids the core's bundled xai
     // plugin leads its manifest with, and the default is the first of them.
     it("carries an xai catalogue whose default is a row it lists", () => {

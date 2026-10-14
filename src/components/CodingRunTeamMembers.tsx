@@ -3,6 +3,9 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useT } from "@/lib/i18n";
 import { isLive, isSettled, type CodingRunStatus } from "@/lib/coding-agent-status";
+import { CODING_PROVIDER_NAME_KEY, isCodingProvider, type CodingProvider } from "@/lib/coding-provider";
+import type { ModelRole } from "@/lib/coding-role-models";
+import { codingModelName } from "@/lib/coding-model-names";
 import { setVisibleInterval } from "@/lib/visible-interval";
 import CodingTeamTree from "./CodingTeamTree";
 import CodingAgentRosterRow from "./CodingAgentRosterRow";
@@ -17,6 +20,31 @@ export interface BoardRun {
   id: string;
   role: "planner" | "worker" | "reviewer" | "lead";
   taskId: string | null;
+  /** The account the run started on, the model there (null where the plan
+   *  decides) and the role that choice was made for (coding-team-board.ts
+   *  TeamRunRef). Absent on a board written before they were kept, and the
+   *  row then says nothing about its model. */
+  provider?: CodingProvider | null;
+  model?: string | null;
+  modelRole?: ModelRole | null;
+}
+
+type Translate = (key: string, params?: Record<string, string | number>) => string;
+
+/**
+ * "Opus 5.5 on Anthropic" — what a teammate runs on, on its row. Its role is
+ * already the row's name, so it is only added where the model was chosen for
+ * a different one: a worker on a task the plan marked bulk.
+ */
+export function memberModelLine(t: Translate, m: Pick<BoardRun, "provider" | "model" | "modelRole">): string | undefined {
+  if (!m.provider || !isCodingProvider(m.provider)) return undefined;
+  const params = {
+    model: m.model ? codingModelName(m.model) : t("codingAgent.roleModelPlanDecides"),
+    provider: t(CODING_PROVIDER_NAME_KEY[m.provider]),
+  };
+  return m.modelRole === "bulk"
+    ? t("codingAgent.memberModelRole", { ...params, role: t("codingAgent.modelRole.bulk") })
+    : t("codingAgent.memberModel", params);
 }
 
 /**
@@ -133,11 +161,12 @@ export default function CodingRunTeamMembers({ teamId, runId, runs, live, onOpen
                 iconClassName={at ? "text-amber-400 animate-pulse" : ok ? "text-emerald-400/80" : done ? "text-red-400/80" : "text-[var(--text-muted)]"}
                 name={roleLabel(m)}
                 nameClassName={at ? "text-amber-200" : "text-[var(--text-primary)]"}
+                what={memberModelLine(t, m)}
                 meta={status ? t(`codingAgent.status${status.charAt(0).toUpperCase()}${status.slice(1)}`) : undefined}
-                // The board records a teammate's role, its run and whether it
-                // is at work, and that is the whole row — so no panel opens on
-                // it. The run id stays a link: opening a teammate's page is
-                // the one thing anyone does from here.
+                // The board records a teammate's role, its run, what it runs
+                // on and whether it is at work, and that is the whole row — so
+                // no panel opens on it. The run id stays a link: opening a
+                // teammate's page is the one thing anyone does from here.
                 fields={[]}
                 aside={<button type="button" onClick={() => onOpenRun(m.id)} className="font-mono text-[var(--text-muted)] underline decoration-white/20 hover:text-white shrink-0">{m.id}</button>}
               />

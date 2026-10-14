@@ -615,6 +615,47 @@ describe("a team's model and effort per role", () => {
     expect(configSet).not.toHaveBeenCalled();
   });
 
+  it("saves a provider and a model per role, bulk work included", async () => {
+    const res = await POST(request({ cookie: ownerCookie(), body: { roleModels: {
+      planner: { provider: "anthropic", model: "claude-fable-5-1" },
+      bulk: { provider: "clawbox-ai", model: "deepseek-v4-flash" },
+    } } }));
+    expect(res.status).toBe(200);
+    expect(configSet).toHaveBeenCalledWith("coding_agent_role_models", {
+      planner: { provider: "anthropic", model: "claude-fable-5-1" },
+      bulk: { provider: "clawbox-ai", model: "deepseek-v4-flash" },
+    });
+  });
+
+  it("takes a model named alone against the provider already stored for the role", async () => {
+    vi.mocked(configGet).mockImplementation(async (key: string) =>
+      key === "clawai_plan_tier" ? "flash" : key === "coding_agent_role_models" ? { planner: { provider: "anthropic", effort: "high" } } : undefined);
+    const res = await POST(request({ cookie: ownerCookie(), body: { roleModels: { planner: { model: "claude-sonnet-5" } } } }));
+    expect(res.status).toBe(200);
+    expect(configSet).toHaveBeenCalledWith("coding_agent_role_models", { planner: { provider: "anthropic", model: "claude-sonnet-5", effort: "high" } });
+  });
+
+  it("refuses a provider and model that do not go together, WHOLE and before anything is written", async () => {
+    for (const roleModels of [
+      { planner: { provider: "clawbox-ai", model: "claude-fable-5-1" } },
+      { bulk: { provider: "clawbox-ai", model: "deepseek-v4-pro" } },
+      { worker: { model: "claude-fable-5-1" } },
+      { planner: { provider: "anthropic", model: "claude-fable-5-1" }, reviewer: { provider: "openai" } },
+    ]) {
+      const res = await POST(request({ cookie: ownerCookie(), body: { effort: "low", roleModels } }));
+      expect(res.status, JSON.stringify(roleModels)).toBe(400);
+      expect((await res.json()).kind).toBe("invalid");
+    }
+    expect(setEffort).not.toHaveBeenCalled();
+    expect(configSet).not.toHaveBeenCalled();
+  });
+
+  it("names the new shape in its usage answer", async () => {
+    const res = await POST(request({ cookie: ownerCookie(), body: { nothing: true } }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("{ roleModels: { planner?|worker?|reviewer?|bulk?: { provider?, model?, effort? } } }");
+  });
+
   it("is the owner's alone: the MCP bearer cannot change what a team's runs cost", async () => {
     const res = await POST(request({ bearer: "any-valid-looking-token-value", body: { roleModels: { worker: { model: "economy" } } } }));
     expect(res.status).toBe(403);

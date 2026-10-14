@@ -68,6 +68,7 @@ import { taskTitle } from "@/lib/task-title";
 import { monotonicNow } from "@/lib/visible-interval";
 import type { AgentStatus, CodingProviderId, Effort, GitHubState } from "./CodingAgentSettingsPanel";
 import { CODING_PROVIDER_NAME_KEY } from "@/lib/coding-provider";
+import type { ModelRole } from "@/lib/coding-role-models";
 
 /**
  * The Coding Agent app — opened from the desktop icon of the same name.
@@ -138,6 +139,10 @@ interface Run {
    *  AI, because there was nothing else to be on, but nothing is CLAIMED here:
    *  an absent field simply draws no line. */
   provider?: CodingProviderId;
+  /** On a team run, the role its provider and model were chosen for
+   *  (coding-role-models.ts: planner, worker, reviewer, bulk). Null on a solo
+   *  run; absent on a record written before the field. */
+  modelRole?: ModelRole | null;
   /** The model it was STARTED with — not `model`, which is what answered. */
   requestedModel?: string | null;
   /** Sub-agents working right now; 0 once the run has settled. */
@@ -507,13 +512,15 @@ function StatTile({ label, value, hint, testId }: { label: string; value: ReactN
  * nowhere to go. Here it has the rail's width and wraps at its own hyphens,
  * which is where a name like `deepseek-v4-pro[1m]` wants to break.
  */
-function StatLine({ label, value, hint, mono = false, testId }: { label: string; value: string; hint?: string; mono?: boolean; testId?: string }) {
+function StatLine({ label, value, hint, note, mono = false, testId }: { label: string; value: string; hint?: string; note?: string; mono?: boolean; testId?: string }) {
   return (
     <div className="flex items-baseline justify-between gap-3 py-1.5 min-w-0" data-testid={testId}>
       <dt className="shrink-0 text-[10px] uppercase tracking-wider text-[var(--text-muted)]">{label}</dt>
       <dd className={`min-w-0 text-right text-[11px] text-[var(--text-secondary)] break-words ${mono ? "font-mono" : ""}`}>
         {value}
         {hint && <span className="block text-[10px] text-[var(--text-muted)] break-words">{hint}</span>}
+        {/* Words, not an identifier: never in the value's monospace. */}
+        {note && <span className="block font-sans text-[10px] text-[var(--text-muted)] break-words" data-testid={testId ? `${testId}-note` : undefined}>{note}</span>}
       </dd>
     </div>
   );
@@ -2893,6 +2900,8 @@ export default function CodingAgentApp() {
                         startedAt={run.startedAt}
                         live
                         embedded
+                        provider={run.provider}
+                        modelRole={run.modelRole}
                         working={{
                           label: t("codingAgent.chatWorking"),
                           busy: t("codingAgent.chatBusy"),
@@ -2921,7 +2930,7 @@ export default function CodingAgentApp() {
                   sixty rows the owner scrolled past to reach one paragraph —
                   is under it, folded. */}
               {!isLive(run.status) && summaryCard}
-              {!isLive(run.status) && <CodingRunTimeline lines={activity} times={activityAt} startedAt={run.startedAt} live={false} folded />}
+              {!isLive(run.status) && <CodingRunTimeline lines={activity} times={activityAt} startedAt={run.startedAt} live={false} folded provider={run.provider} modelRole={run.modelRole} />}
 
               {deliverableCard(run)}
               {reviewCard(run)}
@@ -3118,11 +3127,21 @@ export default function CodingAgentApp() {
                       choice is visible after the fact. Only when they DO
                       differ — a run that got what it asked for drew the same
                       identifier twice, one under the other. */}
+                  {/* And whose account they ran on — on a team run, beside the
+                      role the model was chosen for: a team's roles may sit on
+                      different accounts, and this is the one place a run's
+                      own record says which. */}
                   <StatLine
                     label={t("codingAgent.statModels")}
                     value={runModels(run) ?? nothingYet}
                     hint={run.requestedModel && run.modelsUsed?.length && !run.modelsUsed.includes(run.requestedModel) ? run.requestedModel : undefined}
+                    note={run.provider
+                      ? run.modelRole
+                        ? t("codingAgent.runModelViaRole", { provider: t(CODING_PROVIDER_NAME_KEY[run.provider]), role: t(`codingAgent.modelRole.${run.modelRole}`) })
+                        : t("codingAgent.runModelVia", { provider: t(CODING_PROVIDER_NAME_KEY[run.provider]) })
+                      : undefined}
                     mono
+                    testId="coding-agent-stat-models"
                   />
                   <StatLine label={t("codingAgent.statCommit")} value={run.commit ?? nothingYet} mono testId="coding-agent-stat-commit" />
                   {/* Only when something WAS refused: "Not allowed — 0" is a

@@ -52,6 +52,7 @@ import {
   type GraphRun,
 } from "@/lib/coding-agent-graph";
 import type { RunMessage } from "@/lib/coding-run-messages";
+import { CODING_PROVIDERS, CODING_PROVIDER_NAME_KEY, isCodingProvider, type CodingProvider } from "@/lib/coding-provider";
 import type { TeamTaskView, TeamView } from "./CodingTeamCard";
 import { useSteppedFlow } from "./CodingTeamTree";
 import CodingRunTimeline, { describeStep } from "./CodingRunTimeline";
@@ -159,6 +160,34 @@ export function compactCount(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
   return String(Math.max(0, Math.round(n)));
+}
+
+/**
+ * A team's tokens by the account that paid for them, largest first — the
+ * split beside the split by role, since a team's roles may run on different
+ * accounts.
+ *
+ * Summed from the cast list the way the role split is (a settled run's own
+ * count, else the live figure the host has), so the two splits add up to the
+ * same total; the server's own tally where no run on the list says which
+ * account it was on. Empty where nothing says — a board from before the field.
+ */
+export function tokensByProvider(team: Pick<TeamView, "runs" | "metrics">, runOf: (id: string) => { tokensUsed?: number } | undefined = () => undefined): [CodingProvider, number][] {
+  const out = new Map<CodingProvider, number>();
+  const known = (team.runs ?? []).filter((r) => r.provider && isCodingProvider(r.provider));
+  if (known.length > 0) {
+    for (const r of known) {
+      const n = Math.max(0, r.tokens ?? runOf(r.id)?.tokensUsed ?? 0);
+      if (n > 0) out.set(r.provider!, (out.get(r.provider!) ?? 0) + n);
+    }
+  } else {
+    const tally = team.metrics?.tokensByProvider ?? {};
+    for (const p of CODING_PROVIDERS) {
+      const n = tally[p];
+      if (typeof n === "number" && n > 0) out.set(p, n);
+    }
+  }
+  return [...out.entries()].sort((a, b) => b[1] - a[1]);
 }
 
 /** A task id short enough for its chip; the whole id is in the chip's title. */
@@ -560,6 +589,8 @@ function DiagramFigures({ source, lookup }: { source: DiagramSource; lookup: (id
   const tokenSum = tokens.planner + tokens.workers + tokens.reviewers;
   const wall = team.metrics?.wallMs ?? Math.max(0, team.updatedAt - team.createdAt);
   const split = t("codingAgent.diagram.tokensSplit", { planner: compactCount(tokens.planner), workers: compactCount(tokens.workers), reviewers: compactCount(tokens.reviewers) });
+  const byProvider = tokensByProvider(team, lookup);
+  const providerSplit = byProvider.map(([p, n]) => `${t(CODING_PROVIDER_NAME_KEY[p])} ${compactCount(n)}`).join(" · ");
   return (
     <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1.5" data-testid="coding-agent-diagram-figures">
       {p.total > 0 && (
@@ -589,6 +620,12 @@ function DiagramFigures({ source, lookup }: { source: DiagramSource; lookup: (id
             <span style={{ width: `${(tokens.workers / tokenSum) * 100}%`, background: "#fbbf24" }} />
             <span style={{ width: `${(tokens.reviewers / tokenSum) * 100}%`, background: STATE_COLOR.reviewing }} />
           </span>
+        </span>
+      )}
+      {byProvider.length > 0 && (
+        <span className="inline-flex items-center gap-1 text-[11px] text-[var(--text-secondary)]" data-testid="coding-agent-diagram-provider-tokens">
+          {icon("account_balance_wallet")}
+          {t("codingAgent.team.tokensByProvider", { split: providerSplit })}
         </span>
       )}
       {wall > 0 && (

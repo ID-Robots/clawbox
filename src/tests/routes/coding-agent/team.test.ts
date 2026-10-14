@@ -90,6 +90,19 @@ describe("GET", () => {
     expect(body.team).toMatchObject({ shape: { parallelism: 1, review: "final" }, dynamic: true, metrics });
   });
 
+  it("answers each run's provider and model, a task's bulk role, and the cost by provider as the board keeps them", async () => {
+    const runs = [
+      { id: "run-00000001", role: "planner", taskId: null, tokens: 5_000, provider: "anthropic", model: "claude-fable-5-1", modelRole: "planner" },
+      { id: "run-00000002", role: "worker", taskId: "t1", tokens: 80_000, provider: "clawbox-ai", model: "deepseek-v4-flash", modelRole: "bulk" },
+    ];
+    const tasks = [{ task_id: "t1", task_description: "Scrape", status: "complete", role: "bulk" }];
+    team.getTeam.mockReturnValueOnce({ ...BOARD, runs, tasks, metrics: { tokensUsed: 85_000, tokensByProvider: { "clawbox-ai": 80_000, anthropic: 5_000 } } });
+    const body = await (await GET(req("team?id=team-abcd1234"))).json();
+    expect(body.team.runs).toEqual(runs);
+    expect(body.team.tasks).toEqual(tasks);
+    expect(body.team.metrics.tokensByProvider).toEqual({ "clawbox-ai": 80_000, anthropic: 5_000 });
+  });
+
   it("needs a session", async () => {
     requireSession.mockResolvedValueOnce(new Response("{}", { status: 401 }));
     expect((await GET(req("team"))).status).toBe(401);
@@ -130,12 +143,21 @@ describe("POST", () => {
 
   it("passes the orchestrator's refusals through with their status", async () => {
     const { CodingAgentError, httpStatusForCodingError } = await import("@/lib/coding-agent");
-    for (const kind of ["disabled", "busy", "invalid", "not_found"] as const) {
+    for (const kind of ["disabled", "not_ready", "busy", "invalid", "not_found"] as const) {
       team.startTeam.mockRejectedValueOnce(new CodingAgentError(kind, `refused: ${kind}`));
       const res = await POST(req("team", { goal: "g" }));
       expect(res.status, kind).toBe(httpStatusForCodingError(kind));
       expect(await res.json()).toEqual({ error: `refused: ${kind}`, kind });
     }
+  });
+
+  it("answers 409 not_ready with the role, the provider and why, when a team role's account cannot run", async () => {
+    const { CodingAgentError } = await import("@/lib/coding-agent");
+    const words = "The team's reviewer runs on Anthropic (anthropic), which cannot run right now: Anthropic is not connected on this ClawBox. Connect it, or choose another provider for the reviewer under Team models in the Coding Agent settings.";
+    team.startTeam.mockRejectedValueOnce(new CodingAgentError("not_ready", words));
+    const res = await POST(req("team", { goal: "Build it", directory: "site" }));
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ error: words, kind: "not_ready" });
   });
 
   it("refuses a body that is not JSON, and needs a session", async () => {

@@ -175,6 +175,31 @@ describe("the archive", () => {
     expect(lib.archivedEvidencePath(id, "shot.png")).toBe(fs.realpathSync(path.join(bundle, "evidence", "shot.png")));
   });
 
+  it("keeps the team role a run was started under, and reads a bundle from before the field as none", () => {
+    const bulk = lib.archiveRun(record("run-bbbbbbc1", { modelRole: "bulk" }), { evidenceDir: null, inputsDir: null, streamLog: null, stderrLog: null, transcript: null }, "trimmed")!;
+    expect(bulk.modelRole).toBe("bulk");
+    const solo = lib.archiveRun(record("run-bbbbbbc2", { modelRole: null }), { evidenceDir: null, inputsDir: null, streamLog: null, stderrLog: null, transcript: null }, "trimmed")!;
+    expect(solo.modelRole).toBeNull();
+    // A role this code never writes is none, not a new kind of role.
+    expect(lib.archiveRun(record("run-bbbbbbc3", { modelRole: "lead" }), { evidenceDir: null, inputsDir: null, streamLog: null, stderrLog: null, transcript: null }, "trimmed")!.modelRole).toBeNull();
+    expect(lib.listArchive(0, 10).entries.find((e) => e.id === "run-bbbbbbc1")!.modelRole).toBe("bulk");
+
+    // A bundle archived before the field: its archive.json and the index carry
+    // no role at all, and the entry reads back with null rather than undefined.
+    const meta = path.join(data, "coding-agent-archive", "run-bbbbbbc1", "archive.json");
+    const older = readJson(meta) as Record<string, unknown>;
+    delete older.modelRole;
+    fs.writeFileSync(meta, JSON.stringify(older));
+    fs.rmSync(path.join(data, "coding-agent-archive", "index.json"), { force: true });
+    expect(lib.archiveIndex().find((e) => e.id === "run-bbbbbbc1")!.modelRole).toBeNull();
+    expect(lib.readArchivedRun("run-bbbbbbc1")!.record.modelRole).toBe("bulk");
+  });
+
+  it("reads a stored role as one of the roles a choice is made for, or none", () => {
+    for (const role of ["planner", "worker", "reviewer", "bulk"]) expect(lib.readModelRole(role)).toBe(role);
+    for (const junk of ["lead", "Planner", "", 1, null, undefined, {}]) expect(lib.readModelRole(junk)).toBeNull();
+  });
+
   it("archives what is there, and says so, when parts are missing", () => {
     const id = "run-bbbbbbb2";
     const entry = lib.archiveRun(record(id), { evidenceDir: path.join(data, "none"), inputsDir: null, streamLog: null, stderrLog: null, transcript: path.join(home, "gone.jsonl") }, "cleared")!;

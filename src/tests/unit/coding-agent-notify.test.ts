@@ -50,6 +50,7 @@ function run(over: Partial<CodingRun> = {}): CodingRun {
     sessionId: "sess-1",
     provider: "clawbox-ai",
     requestedModel: null,
+    modelRole: null,
     anthropicAccount: null,
     accountSwitches: [],
     model: "deepseek-v4-flash",

@@ -17,6 +17,9 @@ import { useEffect, useRef } from "react";
 import { useState, useSyncExternalStore } from "react";
 import { describeProgressLine, type ProgressDescription, type ProgressLabelKey } from "@/lib/coding-agent-progress";
 import { useT } from "@/lib/i18n";
+import { CODING_PROVIDER_NAME_KEY, isCodingProvider, type CodingProvider } from "@/lib/coding-provider";
+import { MODEL_ROLES, type ModelRole } from "@/lib/coding-role-models";
+import { codingModelName } from "@/lib/coding-model-names";
 import { CARD_SURFACE, SECTION_LABEL } from "./coding-agent-ui";
 
 /**
@@ -162,9 +165,43 @@ function word(t: Translate, key: string, english: string, params?: Record<string
   return said === key ? english : said;
 }
 
+/**
+ * What the run was started ON, from its record rather than its feed: the
+ * account that paid and, on a team, the role its model was chosen for. The
+ * runner's "Started with <model>" line names the model alone, and it is frozen
+ * (runs on disk carry it), so the rest comes from the record beside it.
+ */
+export interface StartedOn {
+  provider?: CodingProvider | null;
+  modelRole?: ModelRole | null;
+}
+
+/**
+ * The first step as "Started with Opus 5.5 on Anthropic (Bulk work)" — or
+ * null where the record cannot say more than the line does (no provider on a
+ * record from before the field), and the plain step label stands.
+ */
+function startedOnLabel(t: Translate, step: ProgressDescription, on: StartedOn | undefined): string | null {
+  if (step.labelKey !== "startedWith" && step.labelKey !== "started") return null;
+  if (!on?.provider || !isCodingProvider(on.provider)) return null;
+  const provider = t(CODING_PROVIDER_NAME_KEY[on.provider]);
+  const role = on.modelRole && (MODEL_ROLES as readonly string[]).includes(on.modelRole) ? t(`codingAgent.modelRole.${on.modelRole}`) : null;
+  if (step.labelKey === "started") {
+    return role
+      ? word(t, "codingAgent.stepStartedOnRole", step.label, { provider, role })
+      : word(t, "codingAgent.stepStartedOn", step.label, { provider });
+  }
+  const model = codingModelName(String(step.params?.model ?? ""));
+  return role
+    ? word(t, "codingAgent.stepStartedWithRole", step.label, { model, provider, role })
+    : word(t, "codingAgent.stepStartedWithOn", step.label, { model, provider });
+}
+
 /** A step's chip text in the owner's language. */
-function stepLabel(t: Translate, step: ProgressDescription): string {
+function stepLabel(t: Translate, step: ProgressDescription, on?: StartedOn): string {
   if (!step.labelKey) return step.label;
+  const started = startedOnLabel(t, step, on);
+  if (started !== null) return started;
   const params = step.params && step.params.status !== undefined
     // The status word is a run status, and the app already has all six.
     ? { ...step.params, status: word(t, STATUS_KEY[String(step.params.status)] ?? "", String(step.params.status)) }
@@ -209,6 +246,10 @@ interface Props {
   embedded?: boolean;
   /** A settled run's log: a card folded to its heading, opened on a click. */
   folded?: boolean;
+  /** The account the run is on — its first step says so beside the model. Absent on a record from before the field. */
+  provider?: CodingProvider | null;
+  /** On a team run: the role its model was chosen for (coding-role-models.ts). Null for a solo run. */
+  modelRole?: ModelRole | null;
   testId?: string;
 }
 
@@ -240,7 +281,7 @@ function sinceStart(at: number, startedAt: number): string {
   return `+${m}m ${sec - m * 60}s`;
 }
 
-export default function CodingRunTimeline({ lines, times = [], startedAt, live, working, embedded = false, folded = false, testId = "coding-agent-run-activity" }: Props) {
+export default function CodingRunTimeline({ lines, times = [], startedAt, live, working, embedded = false, folded = false, provider, modelRole, testId = "coding-agent-run-activity" }: Props) {
   const { t } = useT();
   const list = useRef<HTMLOListElement>(null);
   // Hydrated or not — every hook before the early return below.
@@ -272,7 +313,7 @@ export default function CodingRunTimeline({ lines, times = [], startedAt, live, 
     const since = startedAt !== undefined ? sinceStart(times[i], startedAt) : null;
     return [clock, since].filter(Boolean).join(" · ") || null;
   };
-  const label = (step: ProgressDescription) => stepLabel(t, step);
+  const label = (step: ProgressDescription) => stepLabel(t, step, { provider, modelRole });
   const detail = (step: ProgressDescription) => stepDetail(t, step);
   // Folded, the card is a <details> and its heading the <summary>: one
   // heading either way, and the steps stay in the DOM for a reader that

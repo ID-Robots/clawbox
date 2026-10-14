@@ -26,6 +26,8 @@
 import fs from "fs";
 import os from "os";
 import type { CiFailure } from "@/lib/coding-ci";
+import { CODING_PROVIDERS, isCodingProvider, type CodingProvider } from "@/lib/coding-provider";
+import { MODEL_ROLES, type ModelRole } from "@/lib/coding-role-models";
 import { readTimeBudget, TIME_STOP_REASONS, type TimeBudget, type TimeStopReason } from "@/lib/coding-time-budget";
 import { MAX_ESTIMATE_MS, MAX_EXTRA_SUMMARY_CHARS, readExtraKind, type ExtraWorkKind } from "@/lib/coding-time-plan";
 import path, { untraced } from "@/lib/runtime-path";
@@ -142,6 +144,18 @@ export interface RoleTokens {
   lead: number;
 }
 
+/**
+ * Which kind of worker a task wants. `bulk`: token-heavy and not critical —
+ * scraping, mass data, repetitive edits, long test runs — so its worker may
+ * start on the `bulk` role's provider and model (src/lib/coding-role-models.ts)
+ * rather than the workers'. `worker` is every other task.
+ */
+export type TaskRole = "worker" | "bulk";
+export const TASK_ROLES: readonly TaskRole[] = ["worker", "bulk"];
+
+/** Tokens the team's runs spent, by the account that paid for them (each run's own provider). */
+export type ProviderTokens = Record<CodingProvider, number>;
+
 /** The one reviewer run over the merged result, in the `final` review mode. */
 export interface FinalReview {
   verdict: "accepted" | "rejected";
@@ -172,6 +186,13 @@ export interface TeamMetrics {
   tokensUsed: number;
   /** The same tokens by role: what the planner, the workers, the reviewers and the lead each cost. */
   tokensByRole: RoleTokens;
+  /**
+   * The same tokens by the provider each run was paid from (`TeamRunRef.provider`)
+   * — a team whose roles sit on different accounts costs each its own share.
+   * A run on a board from before the field names no provider: its tokens are
+   * in `tokensUsed` and in neither of these.
+   */
+  tokensByProvider: ProviderTokens;
   /** From the team's creation to its end — or to now, while it works. */
   wallMs: number;
   /**
@@ -258,6 +279,12 @@ export interface TeamTask {
   estimateMs?: number;
   priority?: number;
   optional?: boolean;
+  /**
+   * `bulk` on a task the planner (or the lead) marked token-heavy and not
+   * critical: its worker starts on the bulk role's model. ABSENT on every
+   * other task — a worker's — and on every task of a board from before.
+   */
+  role?: TaskRole;
 }
 
 /**
@@ -359,6 +386,27 @@ export interface TeamRunRef {
   sentAt?: number[];
   /** Tokens the run spent, from its record once it settled; absent before. */
   tokens?: number;
+  /**
+   * The account the run was paid from, and its model there — from its record
+   * when it started, the model brought up to what answered once it settled;
+   * null where the provider's plan chose and nothing said which. `modelRole`
+   * is the role its model choice was made for: `planner` for the lead too,
+   * `bulk` for a worker on a bulk task. Each ABSENT on a board from before.
+   */
+  provider?: CodingProvider;
+  model?: string | null;
+  modelRole?: ModelRole;
+}
+
+/** A model id as a run ref keeps it: what a record could carry, never a page of text. */
+const MAX_REF_MODEL_CHARS = 120;
+
+/** A run ref's model off disk or a record: the id, null for "the plan's", undefined for nothing readable. */
+export function refModel(raw: unknown): string | null | undefined {
+  if (raw === null) return null;
+  if (typeof raw !== "string") return undefined;
+  const id = raw.trim();
+  return id && id.length <= MAX_REF_MODEL_CHARS && !/\s/.test(id) ? id : undefined;
 }
 
 /** Who worked on a team, counted from the board: the figure the card shows. */
@@ -609,6 +657,12 @@ function normalizeBoard(raw: unknown): TeamBoard | null {
             : [];
           const run: TeamRunRef = { id: ref.id, role: ref.role as TeamRunRef["role"], taskId: typeof ref.taskId === "string" ? ref.taskId : null, ...(sentAt.length ? { sentAt } : {}) };
           if (typeof ref.tokens === "number" && Number.isFinite(ref.tokens) && ref.tokens >= 0) run.tokens = ref.tokens;
+          // Who paid and on what: each re-read on its own, absent when the
+          // file has none this box could have written — a board from before.
+          if (isCodingProvider(ref.provider)) run.provider = ref.provider;
+          const model = refModel(ref.model);
+          if (model !== undefined) run.model = model;
+          if ((MODEL_ROLES as readonly unknown[]).includes(ref.modelRole)) run.modelRole = ref.modelRole as ModelRole;
           return [run];
         })
       : [],
@@ -817,6 +871,8 @@ function normalizeTask(raw: unknown): TeamTask | null {
     updated_at: typeof t.updated_at === "number" ? t.updated_at : 0,
     // A budgeted plan's: each absent when the file has none this box could have written.
     ...taskTimeFields(t),
+    // Only a bulk task carries it; absent is a worker's, as on a board from before.
+    ...(t.role === "bulk" ? { role: "bulk" as const } : {}),
   };
 }
 
@@ -953,7 +1009,7 @@ export function setRepoMap(board: TeamBoard, actor: Actor, raw: unknown): RepoMa
 export function postTask(
   board: TeamBoard,
   actor: Actor,
-  input: { task_description: string; depends_on?: string[]; files_hint?: string[]; origin?: "plan" | "lead"; note?: string; estimateMs?: number; priority?: number; optional?: boolean },
+  input: { task_description: string; depends_on?: string[]; files_hint?: string[]; origin?: "plan" | "lead"; note?: string; estimateMs?: number; priority?: number; optional?: boolean; role?: TaskRole },
 ): TeamTask {
   if (actor.kind !== "planner") throw new BoardAccessError(actor, "post_task", `Only the planner posts tasks; ${describeActor(actor)} may not.`);
   if (board.tasks.length >= MAX_TEAM_TASKS) throw new Error(`A team holds at most ${MAX_TEAM_TASKS} tasks.`);
@@ -975,6 +1031,9 @@ export function postTask(
   if (asked && !board.timeBudget) throw new Error("Only a team with a time budget estimates its tasks.");
   if (input.estimateMs !== undefined && timed.estimateMs === undefined) throw new Error("A task's estimate is a positive number of milliseconds, at most the longest budget there is.");
   if (input.priority !== undefined && timed.priority === undefined) throw new Error(`A task's priority is a whole number from 1 to ${MAX_TASK_NUMBER}.`);
+  if (input.role !== undefined && !TASK_ROLES.includes(input.role)) throw new Error(`A task's role is ${TASK_ROLES.join(" or ")}.`);
+  // Kept only for bulk: a worker's task stays exactly what every task was.
+  const role = input.role === "bulk" ? { role: "bulk" as const } : {};
   const now = Date.now();
   const task: TeamTask = {
     task_id: `t${board.tasks.length + 1}`,
@@ -997,18 +1056,20 @@ export function postTask(
     created_at: now,
     updated_at: now,
     ...timed,
+    ...role,
   };
   board.tasks.push(task);
   const note = (input.note ?? "").trim();
+  const bulk = task.role === "bulk" ? " (bulk)" : "";
   append(board, {
     ts: now,
     actor,
     type: "task",
     task_id: task.task_id,
     message: origin === "lead"
-      ? `Task ${task.task_id} added by the lead: ${firstLine(description)}${note ? ` — ${firstLine(note, 200)}` : ""}`
-      : `Task ${task.task_id} posted: ${firstLine(description)}`,
-    payload: { depends_on, files_hint: task.files_hint, ...(origin === "lead" ? { origin, note } : {}), ...timed },
+      ? `Task ${task.task_id}${bulk} added by the lead: ${firstLine(description)}${note ? ` — ${firstLine(note, 200)}` : ""}`
+      : `Task ${task.task_id}${bulk} posted: ${firstLine(description)}`,
+    payload: { depends_on, files_hint: task.files_hint, ...(origin === "lead" ? { origin, note } : {}), ...timed, ...role },
   });
   return task;
 }
@@ -1725,11 +1786,16 @@ export function boardDigest(board: TeamBoard, forTaskId: string | readonly strin
   return text.length > max ? clip(text, max) : text;
 }
 
+/** Every provider at nothing spent. */
+function noProviderTokens(): ProviderTokens {
+  return Object.fromEntries(CODING_PROVIDERS.map((p) => [p, 0])) as ProviderTokens;
+}
+
 /** Nothing counted yet: the figures of a board that has only just been made. */
 const EMPTY_METRICS: TeamMetrics = {
   plannerRuns: 0, workerRuns: 0, reviewerRuns: 0, leadRuns: 0,
   tasksPlanned: 0, tasksAdded: 0, tasksRetired: 0, tasksAcceptedFirstTry: 0, tasksRejected: 0,
-  tokensUsed: 0, tokensByRole: { planner: 0, worker: 0, reviewer: 0, lead: 0 }, wallMs: 0,
+  tokensUsed: 0, tokensByRole: { planner: 0, worker: 0, reviewer: 0, lead: 0 }, tokensByProvider: noProviderTokens(), wallMs: 0,
   messagesSent: 0, messagesToLead: 0, messagesToSibling: 0, messagesUndelivered: 0,
   readOnlyRefusals: 0,
 };
@@ -1757,6 +1823,8 @@ export function teamMetrics(board: TeamBoard, now: number = Date.now()): TeamMet
     tasksRejected: board.tasks.filter((t) => t.rejections > 0).length,
     tokensUsed: board.runs.reduce((sum, r) => sum + runTokens(r), 0),
     tokensByRole: board.runs.reduce<RoleTokens>((by, r) => ({ ...by, [r.role]: by[r.role] + runTokens(r) }), { planner: 0, worker: 0, reviewer: 0, lead: 0 }),
+    // Each run on the account it was paid from; one from before the field is on none.
+    tokensByProvider: board.runs.reduce<ProviderTokens>((by, r) => (r.provider ? { ...by, [r.provider]: by[r.provider] + runTokens(r) } : by), noProviderTokens()),
     wallMs: board.createdAt > 0 ? Math.max(0, ended - board.createdAt) : 0,
     messagesSent: messages.length + unreached.length,
     messagesToLead: payloads.filter((p) => p?.to === "lead").length + unreached.filter((u) => u.to === "lead").length,

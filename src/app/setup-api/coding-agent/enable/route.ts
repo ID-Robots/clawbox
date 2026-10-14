@@ -88,6 +88,16 @@ function forbidden() {
  * POST { teamDynamic: boolean } → may a coding team's lead add or retire tasks
  * while the team runs (one short read-only run after each worker settles).
  * OFF when absent; a team reads it when it starts.
+ * POST { roleModels: { planner?|worker?|reviewer?|bulk?: { provider?, model?,
+ * effort? } } } → what a coding team's roles run on (src/lib/coding-role-models.ts).
+ * `provider` is "clawbox-ai" or "anthropic"; `model` is "standard", "economy"
+ * or one model that provider offers (`roleModelOptions` — a model needs a
+ * provider, named in the same edit or already stored for the role); `effort`
+ * is one of the levels above; "auto" or null puts a half back to the role's
+ * default. Only the halves named change. The whole edit is refused, before
+ * anything in the body is saved, on an unknown role or field or a provider and
+ * model that do not go together. Storing a provider does not require it to be
+ * connected; a team run of that role does.
  * POST { defaultTimeBudget: "30m"|"1h"|"morning"|"1d" | null } → the time
  * budget a new run or team gets when neither the start picker nor the task's
  * words named one (src/lib/coding-time-budget.ts); null clears it, which is
@@ -263,7 +273,7 @@ export async function POST(request: Request) {
           + "{ historyRetention: string, historyLimit?: number }, "
           + "{ gitAuthorName: string | null }, { gitAuthorEmail: string | null }, "
           + "{ prBodyIncludesTask: string }, "
-          + "{ roleModels: { planner?|worker?|reviewer?: { model?, effort? } } }, "
+          + "{ roleModels: { planner?|worker?|reviewer?|bulk?: { provider?, model?, effort? } } }, "
           + "{ defaultTimeBudget: string | null }, "
           + "{ setupComplete: boolean }, { autoPr: boolean } or { clearHarnessFault: true }.",
       },
@@ -321,11 +331,6 @@ export async function POST(request: Request) {
       { status: 400 },
     );
   }
-  // The per-role choices, checked whole before any setter runs, like the rest.
-  const roleModelsRefusal = hasRoleModels ? checkRoleModelsPatch(fields.roleModels) : null;
-  if (roleModelsRefusal) {
-    return NextResponse.json({ error: roleModelsRefusal, kind: "invalid" }, { status: 400 });
-  }
   // The default budget, checked before any setter runs, like the rest.
   if (hasDefaultTimeBudget && fields.defaultTimeBudget !== null && !isBudgetChip(fields.defaultTimeBudget)) {
     return NextResponse.json(
@@ -335,6 +340,13 @@ export async function POST(request: Request) {
   }
 
   try {
+    // The per-role choices, checked whole before any setter runs, like the
+    // rest — and inside the try because the check reads what is stored: a
+    // model named alone runs on the role's stored provider.
+    const roleModelsRefusal = hasRoleModels ? await checkRoleModelsPatch(fields.roleModels) : null;
+    if (roleModelsRefusal) {
+      return NextResponse.json({ error: roleModelsRefusal, kind: "invalid" }, { status: 400 });
+    }
     // The family's availability BEFORE the write, read only on requests that
     // can actually move it. `ready` — not the raw switch — because `ready` is
     // the fact `probeCodingAgent` reads to decide whether the coding_agent_*
