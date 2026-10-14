@@ -12,7 +12,6 @@ import AiProviderList from "./AiProviderList";
 import HarnessPicker from "./HarnessPicker";
 import PetPicker from "./PetPicker";
 import SettingsDisclosureButton from "./SettingsDisclosureButton";
-import VncResolutionSetting from "./VncResolutionSetting";
 import type { WifiNetwork } from "@/lib/wifi-utils";
 import { signalToLevel, dbmToLevel } from "@/lib/wifi-utils";
 import { useTr } from "@/lib/i18n-floor";
@@ -3648,9 +3647,6 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                   />
                 </div>
               </div>
-
-              {/* Remote desktop resolution (virtual display only) */}
-              <VncResolutionSetting />
 
               {/* Background color */}
               <div>
