@@ -5,6 +5,7 @@ import path from "@/lib/runtime-path";
 import { verifyMcpBearer } from "@/lib/mcp-token";
 import { isPublicGatewayAsset } from "@/lib/gateway-static";
 import { readEdition } from "@/lib/edition-source";
+import { isProvisionedDevice } from "@/lib/device-provisioning";
 import { isBootstrapAllowedPath } from "@/lib/setup-api-gate";
 import { isSetupApiPath } from "@/lib/clawbox-namespaces";
 import { UPDATE_LOCK_HEADER, UPDATE_LOCK_KEY, UPDATING_PAGE } from "@/lib/update-lock";
@@ -240,6 +241,14 @@ const SETUP_WIZARD_URL = new URL("/setup", PORTAL_URL).toString();
  */
 function appleProbeResponse(setupOpen: boolean): NextResponse {
   const headers = { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" };
+  if (!setupOpen && !isProvisionedDevice()) {
+    // A box set up before per-device provisioning keeps exactly the answer it
+    // always gave — an update must not change anything for existing owners.
+    return new NextResponse(
+      "<!DOCTYPE html><HTML><HEAD><TITLE>ClawBox Setup</TITLE></HEAD><BODY>Please complete setup.</BODY></HTML>",
+      { status: 200, headers: { "Content-Type": "text/html" } },
+    );
+  }
   if (!setupOpen) {
     return new NextResponse(
       "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>",
@@ -575,7 +584,11 @@ export async function middleware(request: NextRequest) {
 
   // 1. Captive portal detection
   if (REDIRECT_PATHS.has(pathname)) {
-    const online = readConfigCached().setupComplete ? ONLINE_PROBE_ANSWERS[pathname] : undefined;
+    // Only provisioned boxes answer "online" after setup; a box set up before
+    // per-device provisioning keeps its old redirect, unchanged by an update.
+    const online = readConfigCached().setupComplete && isProvisionedDevice()
+      ? ONLINE_PROBE_ANSWERS[pathname]
+      : undefined;
     if (online) {
       return new NextResponse(online.body, {
         status: online.status,
