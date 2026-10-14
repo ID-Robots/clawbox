@@ -256,7 +256,7 @@ run_post_update() {
 # update on this PC never reboots it.
 INSTALLER_STEPS="
 apt_update chromium_install clawkeep_install cloudflared_install ffmpeg_install fix_git_perms
-llamacpp_install ollama_install openclaw_config openclaw_install openclaw_patch
+google_chrome_install llamacpp_install ollama_install openclaw_config openclaw_install openclaw_patch
 openclaw_setup vnc_install
 "
 

@@ -10864,6 +10864,115 @@ step_chromium_install() {
   ensure_playwright_chromium
 }
 
+# Google Chrome stable — the real thing, not Chromium — for Monitor Mode's
+# "Google Chrome" desktop icon (src/lib/desktop-chrome.ts). Chromium above stays
+# the agent's browser; this one is the owner's.
+#
+# amd64 ONLY. Google ships no Linux arm64 build, so on a Jetson this is a clean
+# no-op and the icon itself says Chrome is missing. The architecture is read the
+# way the other arch-sensitive installs read it: `uname -m`.
+#
+# From Google's own apt repo, trusted through a keyring of its own under
+# /etc/apt/keyrings that the one source line names with `signed-by` — not
+# apt-key, not trusted.gpg.d — so the key vouches for that repo and nothing
+# else. Armored (.asc), which apt reads directly, so gpg is not needed to
+# dearmor it. Two traps, both from the package's own cron job
+# (/etc/cron.daily/google-chrome, which its postinst also runs):
+#  - On its first run it rewrites google-chrome.list WITHOUT signed-by, unless
+#    /etc/default/google-chrome already says repo_add_once="false". Seeded
+#    first, so the line written here is the one that stays.
+#  - A second source for the same repo with a different signed-by makes every
+#    `apt-get update` on the box fail ("Conflicting values set for option
+#    Signed-By"), and step_apt_update — every install and every in-app update —
+#    with it. So the source takes the package's own file name, and when the
+#    refresh fails with it in place it is taken out again: no Chrome is a far
+#    smaller problem than a box that can no longer update.
+#
+# Idempotent: a Chrome already where desktop-chrome.ts looks for it is left
+# alone. Returns 1 when Chrome could not be installed: the full install treats
+# that as a warning — a box without Chrome boots and works, and the icon says
+# what is missing — while a dispatched `--step google_chrome_install` exits
+# non-zero, so whoever ran it sees it fail. Kept line for line with
+# install-x64.sh's twin.
+GOOGLE_CHROME_KEY_URL="https://dl.google.com/linux/linux_signing_key.pub"
+GOOGLE_CHROME_KEYRING="/etc/apt/keyrings/google-chrome.asc"
+GOOGLE_CHROME_SOURCE_LIST="/etc/apt/sources.list.d/google-chrome.list"
+GOOGLE_CHROME_DEFAULTS="/etc/default/google-chrome"
+
+# Where src/lib/desktop-chrome.ts looks: google-chrome-stable or google-chrome
+# on PATH, then the package's own binary.
+google_chrome_installed() {
+  command -v google-chrome-stable &>/dev/null \
+    || command -v google-chrome &>/dev/null \
+    || [ -x /opt/google/chrome/chrome ]
+}
+
+step_google_chrome_install() {
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, skipping Google Chrome install"
+    return 0
+  fi
+  case "$(uname -m)" in
+    x86_64|amd64) ;;
+    *)
+      echo "  Google Chrome has no Linux build for $(uname -m) — skipping (amd64 only)"
+      return 0
+      ;;
+  esac
+  if google_chrome_installed; then
+    echo "  Google Chrome already installed"
+    return 0
+  fi
+
+  # Into a temp file first and checked for what it should be, so an HTML page
+  # from a captive portal or a proxy never becomes a keyring apt trusts.
+  local key
+  key="$(mktemp)"
+  if ! curl -fsSL --proto '=https' --proto-redir '=https' \
+       --connect-timeout 15 --retry 3 --retry-connrefused \
+       "$GOOGLE_CHROME_KEY_URL" -o "$key" \
+     || [ "$(head -n 1 "$key")" != "-----BEGIN PGP PUBLIC KEY BLOCK-----" ]; then
+    echo "  WARNING: could not download Google's package signing key; Google Chrome not installed" >&2
+    rm -f "$key"
+    return 1
+  fi
+  # Checked, not left to errexit: the full install runs this step in an
+  # OR-list, where errexit is off for the whole body.
+  if ! install -d -m 0755 "${GOOGLE_CHROME_KEYRING%/*}" \
+     || ! install -m 0644 "$key" "$GOOGLE_CHROME_KEYRING"; then
+    echo "  WARNING: could not write $GOOGLE_CHROME_KEYRING; Google Chrome not installed" >&2
+    rm -f "$key"
+    return 1
+  fi
+  rm -f "$key"
+
+  if [ -f "$GOOGLE_CHROME_DEFAULTS" ]; then
+    sed -i 's/^[[:space:]]*repo_add_once=.*/repo_add_once="false"/' "$GOOGLE_CHROME_DEFAULTS"
+  else
+    echo 'repo_add_once="false"' > "$GOOGLE_CHROME_DEFAULTS"
+  fi
+  # `arch=amd64` first: that is the shape the cron job recognises as its own
+  # repo, already configured, and so leaves alone.
+  echo "deb [arch=amd64 signed-by=$GOOGLE_CHROME_KEYRING] https://dl.google.com/linux/chrome/deb/ stable main" \
+    > "$GOOGLE_CHROME_SOURCE_LIST"
+
+  # A full refresh rather than this one source: a standalone dispatch may run
+  # on a boot where step_apt_update never did, and Chrome's dependencies come
+  # from the distribution's lists, not Google's.
+  wait_for_apt
+  if ! DEBIAN_FRONTEND=noninteractive apt-get update -qq; then
+    echo "  WARNING: apt-get update failed with Google's repo added; removed it again so the box's own updates keep working. Google Chrome not installed" >&2
+    rm -f "$GOOGLE_CHROME_SOURCE_LIST" "$GOOGLE_CHROME_KEYRING"
+    return 1
+  fi
+  wait_for_apt
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq google-chrome-stable; then
+    echo "  WARNING: apt-get install google-chrome-stable failed; Google Chrome not installed" >&2
+    return 1
+  fi
+  echo "  Google Chrome installed: $(google-chrome-stable --version 2>/dev/null || echo google-chrome-stable)"
+}
+
 
 # Claude Code, via Anthropic's NATIVE installer (Yanko, 2026-08-22 — not npm).
 #
@@ -12220,7 +12329,7 @@ step_validate_services() {
 DISPATCH_STEPS=(
   bootstrap_updater apt_update nvidia_jetpack performance_mode jtop_install ollama_install llamacpp_install llamacpp_model
   embed_model
-  chromium_install ai_tools_install coding_harness codex_cli vnc_install vnc_refresh
+  chromium_install google_chrome_install ai_tools_install coding_harness codex_cli vnc_install vnc_refresh
   openclaw_setup openclaw_install openclaw_patch openclaw_config openclaw_models openclaw_tts
   # The Local AI tab's two engine installs, since 2026-09-15: Kokoro and
   # faster-whisper are opt-in now, and these are the only two steps that
@@ -12328,7 +12437,7 @@ fi
 # only on the hermes and dual editions. Edition-aware rather than a constant:
 # the openclaw constant made those editions print "[27/26]" on their last step,
 # and an upper bound would leave openclaw finishing at "[26/27]".
-TOTAL_STEPS=28
+TOTAL_STEPS=29
 if has_hermes_harness; then TOTAL_STEPS=$((TOTAL_STEPS + 1)); fi
 step=0
 log() {
@@ -12448,6 +12557,13 @@ echo "  Deferred: Settings → Local AI (Memory search) fetches it on the owner'
 
 log "Installing Chromium..."
 step_chromium_install
+
+log "Installing Google Chrome (amd64 only)..."
+# Guarded: the step answers 1 when Chrome did not install, and under errexit a
+# bare call would abort the whole install over an optional browser. A Jetson
+# skips it with 0.
+step_google_chrome_install \
+  || echo "  Warning: Google Chrome did not install; Monitor Mode's Chrome icon will say it is missing until it does"
 
 log "Installing Cloudflare Tunnel (cloudflared)..."
 step_cloudflared_install
