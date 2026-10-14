@@ -4470,6 +4470,92 @@ print(python)
 PY
 }
 
+# The Hermes messaging gateway, re-rendered for the agent that is on disk NOW.
+#
+# `hermes gateway install` writes ~/.config/systemd/user/hermes-gateway.service
+# with an ExecStart INSIDE the agent install (`<agent_dir>/venv/bin/python` up
+# to v0.21.1, a launcher under `<agent_dir>/.hermes/bin` from v0.21.7), and
+# nothing in the pinned upgrade rewrites it: the upstream installer offers
+# `gateway install --if-missing` only when it has a terminal. The gateway kept
+# running on deleted files, so the update looked healthy, and its next restart
+# crash-looped for good (`status=203/EXEC … venv/bin/python: No such file or
+# directory`, Telegram dead) — every Hermes box, 2026-10-14.
+#
+# HARNESS-FIRST: `gateway install --force` is Hermes' own re-render from its
+# own generator, and what healed the box by hand. `--no-start-now
+# --no-start-on-login` keep it to the definition: whether the gateway runs and
+# whether it starts at boot stay as they were. (Hermes' `gateway run` and
+# `gateway restart` re-render a stale unit too, but a unit whose interpreter is
+# gone reaches neither.)
+#
+# `$1` is 1 when this run replaced the agent — the gateway is on deleted files
+# and is bounced whatever the unit says — and 0 on the early return of a box
+# already on the pin, where every box an earlier update upgraded now sits; there
+# a unit Hermes leaves byte-identical means nothing to pick up, and no restart.
+#
+# `restart`, never `start` (a no-op for a gateway still on the old tree), and
+# only for one that was running or trying to (`activating` is the crash loop).
+# Proven, not assumed: active, a main pid, the same pid a settle later. A
+# failure is a CLAWBOX-WARN, never this step's return — the agent install
+# worked. The USER unit only, what every shipped box has (the system install
+# needs a sudo refused on purpose, src/lib/hermes-telegram.ts); and
+# has_hermes_harness, because on `unselected` the gateway is a foreign unit.
+hermes_gateway_refresh_after_install() {
+  local replaced="${1:-0}" unit=hermes-gateway.service
+  local unit_file="$CLAWBOX_HOME/.config/systemd/user/$unit"
+  local uid before_unit out state before_pid pid settled settle
+  has_hermes_harness || return 0
+  [ -f "$unit_file" ] || return 0
+  uid="$(id -u "$CLAWBOX_USER" 2>/dev/null)" || return 0
+  gw_systemctl() {
+    runuser -u "$CLAWBOX_USER" -- env XDG_RUNTIME_DIR="/run/user/$uid" systemctl --user "$@"
+  }
+  gw_warn() {
+    echo "CLAWBOX-WARN[hermes-gateway-not-restarted]: $unit $1 — Telegram and the other channels may be down; as the clawbox user, 'hermes gateway install --force && hermes gateway restart' repairs it"
+  }
+
+  before_unit="$(cat "$unit_file" 2>/dev/null || true)"
+  state="$(gw_systemctl is-active "$unit" 2>/dev/null || true)"
+  if ! out="$(runuser -u "$CLAWBOX_USER" -- env HOME="$CLAWBOX_HOME" XDG_RUNTIME_DIR="/run/user/$uid" \
+    "$CLAWBOX_HOME/.local/bin/hermes" gateway install --force --no-start-now --no-start-on-login 2>&1)"; then
+    # Restarting onto a unit that still names the old interpreter would turn a
+    # gateway serving from the old tree into a crash loop.
+    gw_warn "could not be re-rendered for the current agent${out:+ ($(printf '%s\n' "$out" | tail -1))}"
+    return 0
+  fi
+  if [ "$replaced" != 1 ] && [ "$before_unit" = "$(cat "$unit_file" 2>/dev/null || true)" ]; then
+    return 0
+  fi
+  case "$state" in
+    active|activating|reloading) ;;
+    *)
+      echo "  $unit re-rendered for the current agent; it was ${state:-not running} and is left that way"
+      return 0
+      ;;
+  esac
+
+  before_pid="$(gw_systemctl show "$unit" -p MainPID --value 2>/dev/null || true)"
+  if ! gw_systemctl restart "$unit" >/dev/null 2>&1; then
+    gw_warn "could not be restarted"
+    return 0
+  fi
+  # The same settle resume_paused_engines and the dashboard restart use.
+  settle="${CLAWBOX_ENGINE_SETTLE_S:-3}"
+  case "$settle" in ''|*[!0-9]*) settle=3 ;; esac
+  { [ "${#settle}" -le 3 ] && [ "$settle" -ge 1 ]; } || settle=3
+  pid="$(gw_systemctl show "$unit" -p MainPID --value 2>/dev/null || true)"
+  sleep "$settle"
+  state="$(gw_systemctl is-active "$unit" 2>/dev/null || true)"
+  settled="$(gw_systemctl show "$unit" -p MainPID --value 2>/dev/null || true)"
+  if [ "$state" = active ] && [ -n "$pid" ] && [ "$pid" != 0 ] \
+    && [ "$pid" != "$before_pid" ] && [ "$settled" = "$pid" ]; then
+    echo "  Restarted $unit on the current agent (main pid ${before_pid:-0} -> $pid, still up ${settle}s later)"
+  else
+    gw_warn "did not stay up after the restart (systemd says ${state:-unknown}, main pid ${settled:-unknown})"
+  fi
+  return 0
+}
+
 # Install the Hermes agent (git-based install into ~/.hermes). Needed by every
 # edition that runs Hermes — the hermes SKU and the premium dual SKU (which was
 # previously skipped here, so a dual box got the switcher but no second
@@ -4581,6 +4667,9 @@ step_hermes_install() {
       git -C "$agent_dir" rev-parse HEAD 2>/dev/null) || at_commit=""
     if [ "$at_commit" = "$pin" ]; then
       echo "  Hermes already installed at the pinned commit ($installed)"
+      # A box an EARLIER update upgraded is here, with a gateway unit still
+      # naming the old interpreter. See the function.
+      hermes_gateway_refresh_after_install 0
       return 0
     fi
     # A working agent on the wrong commit takes the SAME path the unrunnable
@@ -4801,6 +4890,10 @@ step_hermes_install() {
         npm install --no-fund --no-audit --progress=false \
         || echo "  Warning: WhatsApp bridge warm-up failed (non-fatal) — the first pairing will install it on demand" >&2
     fi
+    # The messaging gateway is on the tree this install just replaced. AFTER
+    # the warm-up, so a gateway that serves WhatsApp comes back to a bridge
+    # that has its dependencies.
+    hermes_gateway_refresh_after_install 1
   else
     echo "  Warning: Hermes still does not run after install — the dashboard will not start" >&2
     # The diagnosis may simply have been wrong — an empty probe on a loaded
@@ -7520,9 +7613,21 @@ step_openclaw_tts() {
       # screen below — same script, same reason ("Kokoro emits WAV natively,
       # so the happy path needs no ffmpeg at all"). The two harnesses must not
       # be configured to disagree about one script.
-      if hermes_tts_cli config set "tts.providers.$HERMES_TTS_PROVIDER.command" "$HERMES_TTS_COMMAND" \
-        && hermes_tts_cli config set "tts.providers.$HERMES_TTS_PROVIDER.output_format" wav \
-        && hermes_tts_cli config set "tts.providers.$HERMES_TTS_PROVIDER.type" command; then
+      #
+      # `--force` on these three paths, and only these. `tts.providers.<name>`
+      # is where Hermes' TTS reads a command provider — its own guide
+      # (website/docs/user-guide/features/tts.md) and the reader
+      # (tools/tts_command_provider.py, "canonical") at the v0.21.7 pin — but
+      # that `config set` validates against DEFAULT_CONFIG, which seeds no
+      # `tts.providers`, and since `providers` is a top-level key it takes the
+      # path for a wrong prefix and refuses BEFORE writing ("Did you mean:
+      # providers.clawbox-local.command" — the LLM provider table, which the TTS
+      # tool never reads). Its own `--force` is the override for exactly that
+      # refusal; earlier pins accept the flag and only drop a notice with it.
+      # This refusal left the box's voice unregistered and failed the update.
+      if hermes_tts_cli config set "tts.providers.$HERMES_TTS_PROVIDER.command" "$HERMES_TTS_COMMAND" --force \
+        && hermes_tts_cli config set "tts.providers.$HERMES_TTS_PROVIDER.output_format" wav --force \
+        && hermes_tts_cli config set "tts.providers.$HERMES_TTS_PROVIDER.type" command --force; then
         echo "  Hermes on-device TTS provider defined ($HERMES_TTS_PROVIDER)"
         # ── Seed-if-unset, with ONE extra value counted as unset: `edge` ──────
         #
@@ -12307,7 +12412,17 @@ if [ "${1:-}" = "--step" ]; then
       # two lines, and the prefix and the verdict word are byte-identical.
       echo "[provision-status] INCOMPLETE (${PROVISION_FAILURES[*]})"
       echo "[provision-run] $PROVISION_RUN_ID"
-      if [ "$rc" -eq 0 ]; then rc=1; fi
+      if [ "$rc" -eq 0 ]; then
+        # The recorded failures are the ONLY reason this step fails, so say
+        # which they were where the updater looks: the newest `Error:` line of
+        # the unit's last 40 journal lines (updater.ts getStepFailureLine).
+        # The sub-step's own error is printed long before a step like
+        # post_update ends, and without this the owner was shown whatever
+        # fixup happened to print last. A step that failed by itself keeps its
+        # own error.
+        echo "Error: ${PROVISION_FAILURES[*]} did not complete — re-run: sudo bash $PROJECT_DIR/install.sh --step $(provision_repair_step "${PROVISION_FAILURES[0]}")" >&2
+        rc=1
+      fi
     fi
     exit "$rc"
   }

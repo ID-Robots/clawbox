@@ -723,6 +723,9 @@ describe("step_hermes_install — behaviour, driven against a fake HOME", () => 
       "sed -n '/^hermes_dashboard_restart_warn() {/,/^}/p' \"$4\" >> \"$1/fn.sh\"",
       "sed -n '/^hermes_dashboard_restart_after_install() {/,/^}/p' \"$4\" >> \"$1/fn.sh\"",
       "sed -n '/^hermes_venv_python() {/,/^}/p' \"$4\" >> \"$1/fn.sh\"",
+      // The gateway re-render: a no-op here, where no gateway unit exists —
+      // install-hermes-gateway-refresh.test.ts drives it.
+      "sed -n '/^hermes_gateway_refresh_after_install() {/,/^}/p' \"$4\" >> \"$1/fn.sh\"",
       "sed -n '/^step_hermes_install() {/,/^}/p' \"$4\" >> \"$1/fn.sh\"",
       '. "$1/fn.sh"',
       // Merged, because the warnings that matter here are all on stderr.
