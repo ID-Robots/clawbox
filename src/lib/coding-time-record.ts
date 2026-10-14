@@ -198,8 +198,8 @@ export function readTimeRecordSummary(ownerId: string, now: Date | number, maxRe
 export const CALIBRATION_MAX_OWNERS = 30;
 /** A time record larger than this is passed over by a calibration: the finished ones it wants are small. */
 export const CALIBRATION_MAX_RECORD_BYTES = 256 * 1024;
-/** The most folders a calibration looks at to find those, newest or not. */
-const CALIBRATION_MAX_SCAN = 2_000;
+/** The most run and team folders a calibration looks at to find the newest records — every one a box keeps, in practice. */
+const CALIBRATION_MAX_SCAN = 20_000;
 /** A calibration is worked out again at most this often. */
 export const CALIBRATION_TTL_MS = 60_000;
 
@@ -217,17 +217,17 @@ let calibrationCache: { at: number; value: EstimateCalibration | null } | null =
 export function recentEstimateSamples(): EstimateSample[] {
   let names: string[];
   try {
+    // Only the folders named like a run or team, before any cap: the listing's
+    // order is the disk's, not the time's, so a cap first could miss the newest.
     names = fs.readdirSync(artifactsRoot(), { withFileTypes: true })
-      .filter((d) => d.isDirectory())
+      .filter((d) => d.isDirectory() && safeOwnerId(d.name) === d.name)
       .map((d) => d.name)
       .slice(0, CALIBRATION_MAX_SCAN);
   } catch {
     return [];
   }
   const found: { owner: string; mtime: number }[] = [];
-  for (const name of names) {
-    const owner = safeOwnerId(name);
-    if (!owner || owner !== name) continue;
+  for (const owner of names) {
     try {
       const st = fs.lstatSync(path.join(ownerArtifactsDir(owner), TIME_RECORD_JSON));
       if (st.isFile() && st.size <= CALIBRATION_MAX_RECORD_BYTES) found.push({ owner, mtime: st.mtimeMs });
@@ -240,7 +240,9 @@ export function recentEstimateSamples(): EstimateSample[] {
   for (const { owner } of found.slice(0, CALIBRATION_MAX_OWNERS)) {
     const stored = loadTimeRecords(owner);
     if (!stored) continue;
-    samples.push(...estimateSamples(summarizeTimeRecords(stored.budget, stored.records, Date.now())));
+    // A run's folder is the run's to write: read as a run's record, one pair at most.
+    const kind = owner.startsWith("team-") ? "team" : "run";
+    samples.push(...estimateSamples(summarizeTimeRecords(stored.budget, stored.records, Date.now()), kind));
     if (samples.length >= CALIBRATION_MAX_SAMPLES) break;
   }
   return samples.slice(0, CALIBRATION_MAX_SAMPLES);
