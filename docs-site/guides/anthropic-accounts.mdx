@@ -11,25 +11,25 @@ limit resets. That includes a coding queue left running overnight, and the chat'
 scheduled tasks.
 
 Connect more than one Anthropic account and the box carries on. One account is
-**active** at a time. New coding runs, review passes and team workers start on it. The
-chat, its scheduled tasks and its check-ins follow it too once the box has had to switch
-accounts, if the chat runs on a Claude subscription. When the active account hits its
-limit, everything on it moves to the next account together, and interrupted work
-continues where it was. Two things stay where they are until they need to move: a coding
-run already working on an account that can still answer, and a chat still on its own
-sign-in before the first switch.
+**active** at a time. New coding runs, review passes and team workers start on it. Press
+**Use these accounts for the chat too** on the card and the chat, Telegram and your other
+channels, its scheduled tasks and its check-ins run on the same accounts, with no sign-in
+of their own. When the active account hits its limit, everything on it moves to the next
+account together, and interrupted work continues where it was. A coding run already
+working on an account that can still answer stays there until it needs to move.
 
 <Frame caption="Settings → Providers → Anthropic accounts, in the order the box tries them">
   <img src="/images/4.0/settings-anthropic-accounts.png" alt="The Anthropic accounts card badged 2 of 3 ready: a Claude Max account marked In use, a Claude Pro account marked Limited until a time later today, and an API key marked Ready, with a button to connect another account." />
 </Frame>
 
 <Note>
-The accounts do not choose **which** AI answers in the chat. That is still the provider
-at the top of **Settings → Providers** (see
-[Choose Your AI Provider](/setup/choose-ai-provider)). When the chat runs on a Claude
-subscription, it runs on the active account from this list once the box has had to
-switch accounts for the first time. Connecting an account never replaces the sign-in the
-chat already uses by itself.
+The accounts do not choose **which** AI answers in the chat by themselves. That is still
+the provider at the top of **Settings → Providers** (see
+[Choose Your AI Provider](/setup/choose-ai-provider)). **Use these accounts for the chat
+too** is the one switch that moves the chat to Claude, and it does that through the same
+setting. While the chat runs on a Claude model, it holds every Claude account on this
+list. A sign-in you made for the chat yourself in **Settings → Providers** is kept: it is
+tried last, after the accounts on this list.
 </Note>
 
 ## How the fallback works
@@ -43,12 +43,14 @@ chat already uses by itself.
   - coding runs, review passes and team workers still on the old account are stopped
     and resumed **in the same session** on the new one. The branch, the commits and the
     pull request stay the same.
-  - the chat's Claude subscription is switched and the gateway restarts on it, for
-    every agent and every conversation.
+  - the chat moves by itself, inside the same reply: it holds every Claude account on
+    the list, and when one is at its limit it answers from the next one instead of
+    falling back to another AI. That covers the desktop chat, Telegram and the other
+    channels, scheduled tasks and check-ins. The box reads which account the chat had to
+    leave, asks Anthropic when that account's window resets, and moves everything else
+    with it. Nothing restarts.
   - a message you sent in the **desktop chat**, a scheduled task or a check-in that
-    failed on the limit is **sent again once** on the new account. A message that came
-    in on a channel (Telegram and the like) is not sent again: send it once more
-    yourself, and it goes through on the new account.
+    still failed on the limit is **sent again once** on the new account.
 - **A refused sign-in moves everything too.** If Anthropic refuses an account (a 401,
   a revoked sign-in or key), the box first checks with Anthropic. If the sign-in really
   is dead, the account is marked **Needs re-authentication** and everything moves on. If
@@ -60,8 +62,7 @@ chat already uses by itself.
   network filter in Anthropic's place), the account keeps its state and the box tries
   again on the next request. Only Anthropic itself refusing the sign-in takes it out.
 - **The box stays where it moved to.** When the first account's limit resets, the box
-  keeps using the account it switched to until that one runs out too. That saves a
-  restart of the chat for nothing. To go back to the first account as soon as it resets,
+  keeps using the account it switched to until that one runs out too. To go back to the first account as soon as it resets,
   turn on **Return to the first account once its limit resets**. To switch by hand at
   any time, move an account to the top of the list: the first account that can answer
   becomes the active one.
@@ -75,11 +76,11 @@ chat already uses by itself.
   window, the weekly cap, an API key's rate limit, a prepaid key with no credit left and
   Anthropic refusing the credential. Any other failure is a real failure and is not
   passed from account to account.
-- **A brief rate limit is not a cap.** When the chat or a scheduled task gets a plain
-  "rate limited" from Anthropic, with no reset time and no "usage limit" in it, the box
-  keeps the account and sends the message again a minute later. Only when the same
-  account is rate limited again within ten minutes does the box treat it as capped and
-  switch.
+- **A brief rate limit is not a cap.** When the chat has to leave an account on a
+  rate limit, the box asks Anthropic whether that account's five-hour or weekly window is
+  really used up. Only then is the account set aside, until the reset Anthropic gives. A
+  plain "rate limited" that reaches you with no reset time is sent again a minute later
+  on the same account.
 
 If a limit message gives no reset time, the account is set aside for five hours, the
 length of a session window.
@@ -153,7 +154,8 @@ or **All limited · back at 22:50**.
 ## What you see when a limit hits
 
 - **On the card:** a line naming the account new coding runs start on and the one the
-  chat is on (or that the chat keeps its own sign-in until the first switch), and a **Last swap**
+  chat is on (or that the chat does not use these accounts yet, with the button to put it
+  on them), and a **Last swap**
   panel: when it happened, from which account to which, why (*Usage limit, back at
   22:50*, *Anthropic refused the sign-in*, *Your change*…), and what each part of the box
   did: *Coding runs: 2 carried on*, *Chat and scheduled tasks: switched*, *Failed turns:
@@ -175,16 +177,16 @@ or **All limited · back at 22:50**.
 ## Try it with two accounts
 
 1. Connect two Claude accounts (or a Claude account and an API key) on the card.
-2. In **Settings → Providers**, pick a Claude model for the chat with **Sign in with
-   Claude**, so the chat runs on a Claude subscription.
+2. Press **Use these accounts for the chat too** on the card. The chat switches to
+   Claude on these accounts, with no sign-in of its own.
 3. Start a coding run and send a chat message.
 4. Move account #2 to the top of the list. The **Last swap** panel shows *Your change*,
-   and the chat restarts on account #2. A run already working on account #1 finishes
-   there, because that account can still answer.
+   and new chat conversations start on account #2, with no restart. A conversation or a
+   run already working on account #1 stays there while that account can still answer.
 5. To see a real limit's path without waiting for one, the owner-only test hook
    `POST /setup-api/anthropic/accounts` with `{"action":"simulate_limit","id":"<account id>"}`
    sets the account aside for 30 minutes. Runs on it are stopped and resumed on the next
-   account, the chat is switched, and you get the notice.
+   account, the chat moves to the next account, and you get the notice.
 
 ## The assistant knows too
 

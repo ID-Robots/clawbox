@@ -11,7 +11,7 @@
 export const anthropicAccountsEn: Record<string, string> = {
   "settings.anthropicAccounts.title": "Anthropic accounts",
   "settings.anthropicAccounts.intro":
-    "Coding runs start on one account from this list, and so do the chat and its scheduled tasks once the box has had to switch accounts. When that account hits its usage limit or Anthropic refuses it, everything on it moves to the next account together and carries on where it was.",
+    "Coding runs use these accounts in this order, and so do the chat and its scheduled tasks once they run on them. When the account in use hits its usage limit or Anthropic refuses it, everything on it moves to the next account and carries on where it was.",
   "settings.anthropicAccounts.summaryReady": "{ready} of {total} ready",
   "settings.anthropicAccounts.summaryAllLimited": "All limited · back at {time}",
   "settings.anthropicAccounts.summaryNone": "Not connected",
@@ -64,8 +64,11 @@ export const anthropicAccountsEn: Record<string, string> = {
   "settings.anthropicAccounts.refusedDuplicate": "That sign-in is {signedIn}, which is already on the list as {label}.",
   // TASK-1260: one active account for the whole box, and what a swap did.
   "settings.anthropicAccounts.activeNow": "New coding runs start on {label}.",
-  "settings.anthropicAccounts.activeChatOn": "The chat and its scheduled tasks run on {label}.",
-  "settings.anthropicAccounts.activeChatOwn": "The chat follows once the box first has to switch accounts, when it runs on a Claude subscription.",
+  "settings.anthropicAccounts.activeChatOn": "The chat and its scheduled tasks run on {label}, and move to the next account by themselves when it runs out.",
+  "settings.anthropicAccounts.activeChatOwn": "The chat does not use these accounts.",
+  "settings.anthropicAccounts.useForChat": "Use these accounts for the chat too",
+  "settings.anthropicAccounts.useForChatHint": "Switches the chat, Telegram and scheduled tasks to Claude on these accounts. When one runs out they move to the next by themselves, like coding runs. No extra sign-in.",
+  "settings.anthropicAccounts.useForChatWorking": "Setting up the chat…",
   "settings.anthropicAccounts.allLimitedBanner": "All accounts limited, earliest reset {time}. Waiting work carries on by itself then.",
   "settings.anthropicAccounts.noneCanAnswer": "No account can answer, and none comes back by itself. Re-authenticate one to carry on.",
   "settings.anthropicAccounts.returnToPrimary": "Return to the first account once its limit resets",
@@ -88,7 +91,7 @@ export const anthropicAccountsEn: Record<string, string> = {
   "settings.anthropicAccounts.outcomeNothing": "nothing to move",
   "settings.anthropicAccounts.outcomeSwitched": "switched",
   "settings.anthropicAccounts.outcomeNotAffected": "not affected",
-  "settings.anthropicAccounts.outcomeNotTransferable": "kept their own sign-in: the chat can only use a Claude account signed in here",
+  "settings.anthropicAccounts.outcomeNotTransferable": "stayed on the Claude accounts: the chat cannot use an API key or the Terminal sign-in",
   "settings.anthropicAccounts.outcomeFailed": "could not be switched, see the box's log",
   "settings.anthropicAccounts.outcomePending": "switching…",
   "settings.anthropicAccounts.outcomeRetried": "{count} sent again",

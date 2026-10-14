@@ -52,7 +52,7 @@ function view(over: Record<string, unknown> = {}) {
         retries: { status: "ok", code: "retried", count: 1 },
       },
     },
-    gateway: { following: true, accountId: PERSONAL, label: "Personal Max", since: NOW - 60_000 },
+    gateway: { following: true, accountId: PERSONAL, label: "Personal Max", since: NOW - 60_000, available: true },
     ...over,
   };
 }
@@ -73,6 +73,7 @@ beforeEach(() => {
     const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
     posts.push(body);
     if (body.action === "set_return_to_primary") current = { ...current, returnToPrimary: body.on === true };
+    if (body.action === "use_for_chat") current = { ...current, gateway: { following: true, accountId: PERSONAL, label: "Personal Max", since: NOW, available: true } };
     return answer(current);
   }));
 });
@@ -139,5 +140,40 @@ describe("the box-wide account on the card", () => {
     render(<AnthropicAccountsCard />);
     await screen.findByTestId("anthropic-accounts-active");
     expect(screen.queryByTestId("anthropic-accounts-last-swap")).toBeNull();
+  });
+});
+
+describe("the chat on these accounts (TASK-1260, no third sign-in)", () => {
+  it("offers the chat the pool, and puts it on it in one press", async () => {
+    current = view({ gateway: { following: false, accountId: null, label: null, since: null, available: true } });
+    render(<AnthropicAccountsCard />);
+    expect((await screen.findByTestId("anthropic-accounts-chat")).textContent).toBe(GERMAN["settings.anthropicAccounts.activeChatOwn"]);
+    expect(screen.getByTestId("anthropic-accounts-use-for-chat").textContent).toContain(GERMAN["settings.anthropicAccounts.useForChatHint"]);
+    fireEvent.click(screen.getByTestId("anthropic-accounts-use-for-chat-button"));
+    await waitFor(() => expect(posts).toEqual([{ action: "use_for_chat" }]));
+    await waitFor(() => expect(screen.getByTestId("anthropic-accounts-chat").textContent).toBe(GERMAN["settings.anthropicAccounts.activeChatOn"].replace("{label}", "Personal Max")));
+    expect(screen.queryByTestId("anthropic-accounts-use-for-chat")).toBeNull();
+  });
+
+  it("offers nothing while the chat already runs on them, or where no Claude account can answer", async () => {
+    const { unmount } = render(<AnthropicAccountsCard />);
+    await screen.findByTestId("anthropic-accounts-chat");
+    expect(screen.queryByTestId("anthropic-accounts-use-for-chat")).toBeNull();
+    unmount();
+    current = view({
+      accounts: view().accounts.map((a) => ({ ...a, status: "revoked", limitedUntil: null })),
+      gateway: { following: false, accountId: null, label: null, since: null, available: true },
+    });
+    render(<AnthropicAccountsCard />);
+    await screen.findByTestId("anthropic-accounts-summary");
+    expect(screen.queryByTestId("anthropic-accounts-use-for-chat")).toBeNull();
+  });
+
+  it("says nothing of the chat on a box whose chat does not run on OpenClaw", async () => {
+    current = view({ gateway: { following: false, accountId: null, label: null, since: null, available: false } });
+    render(<AnthropicAccountsCard />);
+    await screen.findByTestId("anthropic-accounts-active");
+    expect(screen.queryByTestId("anthropic-accounts-chat")).toBeNull();
+    expect(screen.queryByTestId("anthropic-accounts-use-for-chat")).toBeNull();
   });
 });

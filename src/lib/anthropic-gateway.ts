@@ -1,92 +1,157 @@
 /**
- * The OpenClaw gateway as a consumer of the box's active Anthropic account
- * (TASK-1260).
+ * The OpenClaw gateway as a consumer of the box's Anthropic account pool
+ * (TASK-1260; the gateway leg proven on the box 2026-10-14).
  *
- * THREE JOBS.
+ * WHAT IT DOES. While the chat runs on a Claude model, EVERY Claude account of
+ * the pool is in the gateway as an auth profile of its own, and core does the
+ * rest — the same in every turn it runs: the desktop chat, Telegram and the
+ * other channels, cron runs and heartbeats, the CLI. A limit in a turn makes
+ * core cool that account's profile down and try the next one INSIDE the same
+ * turn, instead of falling back to another provider; the box reads what core
+ * recorded and moves the pool with it, so coding runs, the accounts card and
+ * the owner's notice agree with the chat.
  *
- *  1. THE SWAP. When the active account moves (src/lib/anthropic-swap.ts), the
- *     gateway's Claude subscription profile — every agent's, so every session,
- *     cron run and heartbeat — gets the new account's access token
- *     (src/lib/anthropic-gateway-auth.ts) and the gateway is restarted on it,
- *     so a turn in flight on the old account is not the only thing that
- *     changes. The write is read back after the restart and repeated once if
- *     it did not survive it.
+ * WHY. Until now the gateway held ONE Claude profile and the box overwrote it
+ * with whichever account was active, then restarted the gateway. On the box a
+ * real 429 in the chat logged `rotations=0` — core had nothing to rotate to —
+ * and core answered from ClawBox AI while the pool still called the account
+ * fine: the box only heard of chat failures through the desktop chat's own
+ * report and a cron scan, never of a Telegram turn or of a turn core rescued
+ * with a model fallback.
  *
- *  2. THE KEEPER. The gateway holds an access token and no refresh token (the
- *     pool is the grant's only holder), so every ten minutes the keeper renews
- *     the token through the pool once it is within three hours of its end and
- *     puts the renewal in — no restart, the old token is still good. It also
- *     notices a profile something ELSE wrote since (the owner signing in again
- *     in Settings → Providers) and stands down: the gateway is then on the
- *     owner's own sign-in until the next swap.
+ * HARNESS FIRST — every mechanism here is core's own (OpenClaw 2026.10.2):
+ *  - THE PROFILES: `anthropic:clawbox-<pool id>`, written by core's own writer,
+ *    `openclaw models auth paste-token --provider anthropic --profile-id <id>
+ *    --expires-in <n>s`, the token on stdin. A `token` profile is a bearer core
+ *    uses and never refreshes — the pool stays the ONLY holder of each refresh
+ *    token, and the keeper below puts a renewed access token in before the old
+ *    one ends. `models auth logout <id> --yes` takes one out, with its order
+ *    and config entries. The CLI tells the running gateway; nothing restarts.
+ *  - THE ORDER: core's stored per-agent order, `openclaw models auth order set
+ *    --provider anthropic <ids…>`: the active account first, then the pool's
+ *    other accounts that can answer, in the owner's order, then the limited
+ *    ones by their reset, then every other Anthropic profile the store holds.
+ *    An explicit order is the WHOLE candidate list, so nothing the owner put
+ *    there is dropped. The CLI's `order set`, not the `models.authOrderSet`
+ *    RPC: `paste-token` registers each profile in openclaw.json's
+ *    `auth.profiles`, and beside an `anthropic:default` sign-in of another
+ *    mode that also writes a CONFIG `auth.order.anthropic`, over which the
+ *    RPC refuses ("controlled by auth configuration") while the stored order
+ *    still outranks it for selection.
+ *  - ROTATION AND COOLDOWNS: core's. On a rate limit it allows ONE same-provider
+ *    profile rotation per turn before model fallback
+ *    (`MAX_RATE_LIMIT_PROFILE_ROTATIONS`), so the order matters: the next
+ *    profile must be an account that can answer.
+ *  - WHAT CORE SAW: its per-profile failure state (`usageStats`, in the store's
+ *    state row), read here and never written. Core's window is its own backoff,
+ *    not the account's reset, so a rate-limit cooldown is checked against
+ *    Anthropic's usage windows for that account (src/lib/anthropic-usage.ts):
+ *    a spent window is the pool's limit until Anthropic's reset; a window that
+ *    is not spent was a throttle, core's cooldown handles it, and the pool is
+ *    left alone.
  *
- *  3. THE FAILURES. A gateway turn that dies on the limit is invisible to the
- *     server — the gateway reports it to whoever sent it. So: cron runs and
- *     heartbeats (OpenClaw 2 runs heartbeats as cron jobs) are read with
- *     `cron.list` every two minutes, and a run whose last error is an
- *     Anthropic limit or a refused credential is reported and run once more
- *     (`cron.run`, `mode: "force"`) after the swap; the desktop chat reports
- *     its own failed turns through /setup-api/anthropic/failure, and the turn
- *     is sent again into its session.
+ * THE OWNER'S OWN SIGN-IN. A Claude sign-in made for the chat in Settings → AI
+ * Models (`anthropic:default`, which core owns and refreshes) is never
+ * rewritten or deleted. It goes LAST in the order: the box cannot tell which
+ * account it is — on the box it was a second grant of a pool account — and
+ * ahead of the pool's accounts the one rotation a turn gets could land on the
+ * same spent subscription and fall back to another provider. At the end it is
+ * still what answers when every pool account is out.
  *
- * WHEN THE GATEWAY FOLLOWS. Once it has been moved it follows every move. The
- * first time, only for a move a FAILURE or the OWNER caused (a limit, a refused
- * credential, a removal, the owner's new order): connecting a first account
- * must not silently replace the sign-in the chat already runs on.
+ * WHEN. While the pool has a Claude account and openclaw.json's primary model
+ * is a Claude one. The owner turns the chat onto the pool from the accounts
+ * card (`useAccountsForChat`, which sets the model through Settings → AI
+ * Models' own path); a chat on another provider is never switched by itself,
+ * and when the owner moves it off Claude the pool's profiles are taken out.
  *
- * WHAT IT CANNOT CARRY. The profile holds a Claude account's OAuth token; an
- * API-key account or the Terminal's `claude` sign-in (never read by this box)
- * cannot be put there. When the active account is one of those the gateway is
- * left where it is and the swap says so (`not_transferable`).
+ * WHAT IT CANNOT CARRY. An API key or the Terminal's `claude` sign-in is not a
+ * Claude account this box holds the grant of; with one of those active the
+ * chat stays on the pool's Claude accounts (`not_transferable`).
  */
 
 import { DATA_DIR } from "@/lib/config-store";
-import { GATEWAY_PORT, gatewayIsAbsent, openclawIsAbsent, restartGateway } from "@/lib/openclaw-config";
-import { waitForPortOpen } from "@/lib/port-probe";
+import { gatewayIsAbsent, openclawIsAbsent, readConfigStrict, spawnOpenclawCli } from "@/lib/openclaw-config";
 import { gatewayWsCall } from "@/lib/openclaw-gateway-ws";
 import { processStore } from "@/lib/process-store";
 import { createSerialLock, type SerialLock } from "@/lib/serial-lock";
 import {
   gatewayCredentialFor,
+  markLimited,
+  probeAccountCredential,
   readPoolState,
   setGatewayMirror,
-  type GatewayMirror,
+  type AnthropicAccount,
+  type PoolState,
   type SwapConsumerOutcome,
 } from "@/lib/anthropic-accounts";
-import {
-  listGatewayAnthropicProfiles,
-  tokenFingerprint,
-  writeGatewayAnthropicToken,
-  type GatewayAnthropicProfile,
-  type GatewayWriteResult,
-} from "@/lib/anthropic-gateway-auth";
+import { tokenFingerprint } from "@/lib/anthropic-gateway-auth";
+import { DEFAULT_LIMIT_MS, effectiveStatus, type AnthropicLimitKind } from "@/lib/anthropic-limit";
+import { fetchAnthropicUsage, type AnthropicUsageReading } from "@/lib/anthropic-usage";
+import { readGatewayProviderAuth, type GatewayProviderAuthRead, type ProfileFailureState } from "@/lib/openclaw-auth-store";
 import { registerSwapConsumer, reportAnthropicFailure, type FailureOutcome, type SwapContext } from "@/lib/anthropic-swap";
+import { verifyAnthropicKey } from "@/lib/coding-anthropic";
+
+const PROVIDER = "anthropic";
+const POOL_PROFILE_PREFIX = "anthropic:clawbox-";
+
+/** The gateway profile one pool account is held under. */
+function poolProfileId(accountId: string): string {
+  return `${POOL_PROFILE_PREFIX}${accountId}`;
+}
+
+const isPoolProfile = (profileId: string) => profileId.startsWith(POOL_PROFILE_PREFIX);
 
 /** Everything this module touches outside itself — one seam, so the tests can stand in for a gateway. */
 export interface GatewayDeps {
   absent: () => boolean;
-  list: () => GatewayAnthropicProfile[];
-  write: (token: { access: string; expires: number | null }) => GatewayWriteResult;
-  restart: () => Promise<void>;
-  /** Is the gateway listening right now? One cheap probe, no restart. */
-  reachable: () => Promise<boolean>;
+  /** Is the chat's primary model a Claude one? Null when openclaw.json could not be read. */
+  chatOnClaude: () => Promise<boolean | null>;
+  /** What core's store holds for Anthropic: the profiles, the stored order, the failures. */
+  read: () => GatewayProviderAuthRead;
+  /** Core's writer: one `token` profile, the access token on stdin. */
+  paste: (profileId: string, token: { access: string; expires: number | null }) => Promise<void>;
+  /** Core's removal of one profile, its order and config entries. */
+  logout: (profileId: string) => Promise<void>;
+  /** Core's stored order for Anthropic; an empty list clears it. */
+  order: (profileIds: readonly string[]) => Promise<void>;
+  /** Anthropic's usage windows for one account. Null: could not be asked. */
+  usage: (access: string) => Promise<AnthropicUsageReading | null>;
   call: (method: string, params: Record<string, unknown>) => Promise<Record<string, unknown>>;
 }
 
-const SWAP_READY_WAIT_MS = 120_000;
+/** A Jetson CLI cold start is 5-14 s; a busy one is given room. */
+const CLI_TIMEOUT_MS = 60_000;
 
 const defaultDeps: GatewayDeps = {
   absent: () => openclawIsAbsent() || gatewayIsAbsent(),
-  list: () => listGatewayAnthropicProfiles(),
-  write: (token) => writeGatewayAnthropicToken(token),
-  // Nobody waits on a swap's restart, and a gateway with many sessions can
-  // take well over the default 30 s to bind its port: a slow restart reported
-  // as a failure is what made the keeper restart it again and again.
-  restart: () => restartGateway({ awaitReady: true, readyWaitMs: SWAP_READY_WAIT_MS }),
-  reachable: () => waitForPortOpen(GATEWAY_PORT, "127.0.0.1", { timeoutMs: 1_000, intervalMs: 250 }),
+  chatOnClaude: async () => {
+    try {
+      const primary = (await readConfigStrict()).agents?.defaults?.model?.primary;
+      return typeof primary === "string" && primary.trim().toLowerCase().startsWith(`${PROVIDER}/`);
+    } catch {
+      return null;
+    }
+  },
+  read: () => readGatewayProviderAuth(PROVIDER),
+  paste: async (profileId, token) => {
+    const args = ["models", "auth", "paste-token", "--provider", PROVIDER, "--profile-id", profileId];
+    // Core stores the end itself, so it stops offering the profile at the
+    // moment the token stops working — whatever the keeper is doing.
+    if (token.expires !== null) args.push("--expires-in", `${Math.max(60, Math.floor((token.expires - Date.now()) / 1000))}s`);
+    await spawnOpenclawCli(args, { stdinData: `${token.access}\n`, timeoutMs: CLI_TIMEOUT_MS });
+  },
+  logout: async (profileId) => {
+    await spawnOpenclawCli(["models", "auth", "logout", profileId, "--yes"], { timeoutMs: CLI_TIMEOUT_MS });
+  },
+  order: async (profileIds) => {
+    const args = profileIds.length > 0
+      ? ["models", "auth", "order", "set", "--provider", PROVIDER, ...profileIds]
+      : ["models", "auth", "order", "clear", "--provider", PROVIDER];
+    await spawnOpenclawCli(args, { timeoutMs: CLI_TIMEOUT_MS });
+  },
+  usage: (access) => fetchAnthropicUsage(access),
   // The in-process socket only: a gateway that is not there is skipped this
-  // time rather than paid for with a CLI start-up (seconds on a Jetson) every
-  // two minutes.
+  // time rather than paid for with a CLI start-up every minute.
   call: (method, params) => gatewayWsCall(method, params, { timeoutMs: 10_000 }),
 };
 
@@ -100,15 +165,13 @@ interface GatewayRuntime {
   /** One keeper / watcher pass at a time. */
   busy: boolean;
   /**
-   * Every write of the gateway's profile, and every decision made from reading
-   * it, one after the other: the swap queue and the keeper's timer are two
-   * writers, and a keeper that read the mirror before a swap wrote the new
-   * account would take the swap's token for the owner's own sign-in.
+   * Every write to the gateway's profiles and order, and every decision made
+   * from reading them, one after the other: the swap queue, the keeper, the
+   * watcher and the owner's "use these accounts for the chat" are four writers.
    */
   lock: SerialLock;
-  /** Restarts the keeper tried for a pending move that failed in a row, and when the last one failed. */
-  restartFailures: number;
-  lastRestartFailureAt: number;
+  /** Failures of core's already acted on, by account and failure time: one failure is one limit. */
+  noted: Set<string>;
 }
 
 function runtime(): GatewayRuntime {
@@ -120,216 +183,334 @@ function runtime(): GatewayRuntime {
     cronWatermark: null,
     busy: false,
     lock: createSerialLock(),
-    restartFailures: 0,
-    lastRestartFailureAt: 0,
+    noted: new Set(),
   }));
 }
 
 const deps = () => runtime().deps;
 
 const KEEPER_MS = 10 * 60_000;
-/** The longest the keeper waits between restarts it retries for a move whose restart keeps failing. */
-const MAX_RETRY_BACKOFF_MS = 6 * 60 * 60_000;
-
-/**
- * May the keeper restart the gateway again for a pending move? The first retry
- * goes on the next pass; after that the wait doubles (20 min, 40 min, ... up
- * to six hours), so a gateway that genuinely cannot start is not bounced, and
- * every chat on it killed, every ten minutes forever.
- */
-function retryAllowed(now: number): boolean {
-  const state = runtime();
-  if (state.restartFailures < 2) return true;
-  const wait = Math.min(KEEPER_MS * 2 ** (state.restartFailures - 1), MAX_RETRY_BACKOFF_MS);
-  return now - state.lastRestartFailureAt >= wait;
-}
-
-function noteRestart(ok: boolean): void {
-  const state = runtime();
-  if (ok) {
-    state.restartFailures = 0;
-    state.lastRestartFailureAt = 0;
-  } else {
-    state.restartFailures += 1;
-    state.lastRestartFailureAt = Date.now();
-  }
-}
-const WATCH_MS = 2 * 60_000;
+const WATCH_MS = 60_000;
 /** How far back the first look at the crons reaches: a failure just before a restart still counts. */
 const FIRST_LOOK_BACK_MS = 15 * 60_000;
-
-/** The causes that move a gateway which has never followed the pool. */
-const TAKEOVER_CAUSES = new Set(["limit", "auth", "removed", "owner"]);
+/** A bound on the failures remembered as acted on. */
+const MAX_NOTED = 200;
 
 function outcome(status: SwapConsumerOutcome["status"], code: string, count: number | null = null): SwapConsumerOutcome {
   return { status, code, count };
 }
 
-// ── 1. the swap ─────────────────────────────────────────────────────────────
+// ── putting the pool in ─────────────────────────────────────────────────────
 
-/** The consumer src/lib/anthropic-swap.ts fans a move out to. */
+/**
+ * The order core should try the Anthropic profiles in: the active account,
+ * the pool's other accounts that can answer in the owner's order, the limited
+ * ones by their reset — then every profile that is not the pool's, in the
+ * order core has them, the owner's own sign-in among them.
+ */
+function gatewayOrder(pool: PoolState, held: ReadonlySet<string>, others: readonly string[], now: number): string[] {
+  const inGateway = pool.accounts.filter((a) => a.kind === "oauth" && held.has(poolProfileId(a.id)));
+  const usable = inGateway.filter((a) => effectiveStatus(a, now) === "ok");
+  const active = usable.find((a) => a.id === pool.activeId);
+  const limited = inGateway
+    .filter((a) => effectiveStatus(a, now) === "limited")
+    .sort((a, b) => (a.limitedUntil ?? 0) - (b.limitedUntil ?? 0));
+  return [...(active ? [active] : []), ...usable.filter((a) => a !== active), ...limited].map((a) => poolProfileId(a.id)).concat(others);
+}
+
+/** The profiles that are not the pool's: in core's stored order first, then as the store lists them. */
+function otherProfiles(store: Extract<GatewayProviderAuthRead, { kind: "present" }> | null): string[] {
+  if (!store) return [];
+  const ids = store.profiles.map((p) => p.profileId).filter((id) => !isPoolProfile(id));
+  const ordered = (store.order ?? []).filter((id) => ids.includes(id));
+  return [...ordered, ...ids.filter((id) => !ordered.includes(id))];
+}
+
+const sameList = (a: readonly string[] | null, b: readonly string[]) => a !== null && a.length === b.length && a.every((id, i) => id === b[i]);
+
+/**
+ * Put the pool in the gateway — or take it out — as it stands now. Under the
+ * gateway lock. `force`: the owner is putting the chat on the pool, so the
+ * chat's model is about to be a Claude one.
+ */
+async function syncLocked(opts: { force?: boolean } = {}): Promise<SwapConsumerOutcome> {
+  const d = deps();
+  if (d.absent()) return outcome("skipped", "no_gateway");
+  const before = d.read();
+  if (before.kind === "unreadable") return outcome("failed", "store_unreadable");
+  const ours = before.kind === "present" ? before.profiles.filter((p) => isPoolProfile(p.profileId)) : [];
+  const pool = await readPoolState();
+  const now = Date.now();
+  const wanted = pool.accounts.filter((a) => a.kind === "oauth" && (effectiveStatus(a, now) === "ok" || effectiveStatus(a, now) === "limited"));
+  const onClaude = opts.force ? true : await d.chatOnClaude();
+  // Unknown is not "off": a config that could not be read must not take the
+  // chat's accounts away.
+  if (onClaude === null) return outcome("failed", "config_unreadable");
+  let changed = 0;
+  // What a CLI call answered is not the proof — `paste-token` ends by telling
+  // the running gateway, and that can fail over a profile it did write. The
+  // store read back afterwards is what decides what landed.
+  const attempt = async (what: string, work: () => Promise<void>): Promise<void> => {
+    try {
+      await work();
+      changed += 1;
+    } catch (err) {
+      console.error(`[anthropic-gateway] core did not confirm ${what}:`, err instanceof Error ? err.message : err);
+    }
+  };
+
+  if (!onClaude || wanted.length === 0) {
+    const why = !onClaude ? "not_subscription" : pool.accounts.some((a) => a.kind === "oauth") ? "no_account" : "not_transferable";
+    for (const profile of ours) await attempt(`taking ${profile.profileId} out`, () => d.logout(profile.profileId));
+    const left = ours.length > 0 ? d.read() : before;
+    if (left.kind === "present" && left.profiles.some((p) => isPoolProfile(p.profileId))) return outcome("failed", "write_failed", changed);
+    if (left.kind === "unreadable") return outcome("failed", "write_lost", changed);
+    if (pool.gateway) await setGatewayMirror(null);
+    return outcome("skipped", why, changed > 0 ? changed : null);
+  }
+
+  // Every account's current access token, in where it is not already.
+  const tokens = new Map<string, { fingerprint: string; expires: number | null }>();
+  for (const account of wanted) {
+    const id = poolProfileId(account.id);
+    // Null: the pool could not hand one out (a store outage, a renewal that
+    // could not be made) — what the gateway holds stays, and is owed.
+    const token = await gatewayCredentialFor(account.id);
+    if (!token) continue;
+    const fingerprint = tokenFingerprint(token.access);
+    tokens.set(id, { fingerprint, expires: token.expires });
+    if (ours.some((p) => p.profileId === id && p.fingerprint === fingerprint)) continue;
+    await attempt(`account ${account.id}'s token`, () => d.paste(id, token));
+  }
+  // Out: accounts that left the pool or can no longer answer (needs the owner).
+  const unwanted = ours.filter((p) => !wanted.some((a) => poolProfileId(a.id) === p.profileId));
+  for (const profile of unwanted) await attempt(`taking ${profile.profileId} out`, () => d.logout(profile.profileId));
+
+  // Read back. A profile still holding an older token stays in the order —
+  // that token answers until it ends, and an explicit order is core's whole
+  // candidate list — and the write is owed.
+  const after = d.read();
+  if (after.kind !== "present") return outcome("failed", "write_lost", changed);
+  const owed: string[] = [];
+  const held = new Set<string>();
+  for (const account of wanted) {
+    const id = poolProfileId(account.id);
+    const stored = after.profiles.find((p) => p.profileId === id);
+    if (stored) held.add(id);
+    if (stored?.fingerprint !== tokens.get(id)?.fingerprint || !tokens.has(id)) owed.push(id);
+  }
+  for (const profile of unwanted) {
+    if (after.profiles.some((p) => p.profileId === profile.profileId)) owed.push(profile.profileId);
+  }
+  const order = gatewayOrder(pool, held, otherProfiles(after), now);
+  if (!sameList(after.order, order)) {
+    await attempt("the account order", () => d.order(order));
+    const final = d.read();
+    if (final.kind !== "present" || !sameList(final.order ?? (order.length === 0 ? [] : null), order)) owed.push("order");
+  }
+
+  const lead = pool.accounts.find((a) => order[0] === poolProfileId(a.id)) ?? null;
+  const leadToken = lead ? tokens.get(poolProfileId(lead.id)) ?? null : null;
+  const leadHeld = lead ? after.profiles.find((p) => p.profileId === poolProfileId(lead.id)) : undefined;
+  const fingerprint = leadToken?.fingerprint ?? leadHeld?.fingerprint ?? null;
+  if (lead && fingerprint) {
+    const mirror = pool.gateway;
+    const expiresAt = leadToken?.expires ?? leadHeld?.expires ?? null;
+    const pending = owed.length > 0;
+    // When the gateway's order started leading with THIS account: kept while
+    // it does, so the card's "since" means what it says. Written only when it
+    // changed — the keeper passes every ten minutes.
+    if (!mirror || mirror.accountId !== lead.id || mirror.fingerprint !== fingerprint || mirror.expiresAt !== expiresAt || mirror.pending !== pending) {
+      const at = mirror && mirror.accountId === lead.id ? mirror.at : now;
+      await setGatewayMirror({ accountId: lead.id, fingerprint, expiresAt, at, pending });
+    }
+  } else if (pool.gateway) {
+    await setGatewayMirror(null);
+  }
+  if (changed > 0) console.error(`[anthropic-gateway] the gateway holds ${held.size} Claude account(s) of the pool, ${lead ? `${lead.id} first` : "none first"}${owed.length > 0 ? `; ${owed.length} owed` : ""}`);
+  if (owed.length > 0) return outcome("failed", "write_failed", held.size);
+  const active = pool.accounts.find((a) => a.id === pool.activeId);
+  if (active && active.kind !== "oauth") return outcome("skipped", "not_transferable", held.size);
+  return outcome("ok", changed > 0 ? "switched" : "already", held.size);
+}
+
+/** The consumer src/lib/anthropic-swap.ts fans a move out to: the order follows the pool. */
 export async function applyGatewaySwap(ctx: SwapContext): Promise<SwapConsumerOutcome> {
   if (deps().absent()) return outcome("skipped", "no_gateway");
-  const { change } = ctx;
-  if (!change.toId) return outcome("skipped", "no_account");
-  const target = change.toId;
   return runtime().lock(async () => {
-    const pool = await readPoolState();
-    if (pool.gateway === null && !ctx.takeover && !TAKEOVER_CAUSES.has(change.cause)) return outcome("skipped", "not_following");
-    // Waited behind another writer (a keeper pass, a move that timed out in
-    // the queue but is still restarting the gateway): a target that is no
-    // longer the active account is history.
-    if (pool.activeId !== target) return outcome("skipped", "superseded");
-    return syncLocked(target, { restart: true });
+    // Waited behind another writer: a target that is no longer the active
+    // account is history; the newer move is queued behind this one.
+    if (ctx.change.toId !== null && (await readPoolState()).activeId !== ctx.change.toId) return outcome("skipped", "superseded");
+    return syncLocked();
   });
 }
 
-/**
- * Put the gateway on `accountId`: write, restart, read back. Answers what it
- * did in the swap's fixed words. `restart: false` puts the token in for the
- * gateway's next read and owes no restart.
- */
-export function syncGatewayTo(accountId: string, opts: { restart: boolean }): Promise<SwapConsumerOutcome> {
-  return runtime().lock(() => syncLocked(accountId, opts));
-}
-
-/** `syncGatewayTo`'s body, under the gateway lock. */
-async function syncLocked(accountId: string, opts: { restart: boolean; keeper?: boolean }): Promise<SwapConsumerOutcome> {
-  const d = deps();
-  if (d.absent()) return outcome("skipped", "no_gateway");
-  const pool = await readPoolState();
-  const account = pool.accounts.find((a) => a.id === accountId);
-  if (!account) return outcome("skipped", "no_account");
-  const profiles = d.list();
-  if (profiles.length === 0) return outcome("skipped", "not_subscription");
-  if (account.kind !== "oauth") return outcome("skipped", "not_transferable");
-  const token = await gatewayCredentialFor(accountId);
-  if (!token) return outcome("failed", "credential_unavailable");
-  const fingerprint = tokenFingerprint(token.access);
-  const alreadyThere = profiles.every((p) => p.fingerprint === fingerprint);
-  const mirror = pool.gateway;
-  // Done only when the files hold it AND the gateway was restarted onto it: a
-  // write whose restart failed is not a gateway on the new account.
-  const settled = alreadyThere && mirror?.accountId === accountId && mirror.fingerprint === fingerprint && !mirror.pending;
-  if (settled) return outcome("ok", "already", profiles.length);
-  let written = alreadyThere ? profiles.length : 0;
-  if (!alreadyThere) {
-    const result = d.write(token);
-    if (result.written === 0) return outcome("failed", "write_failed");
-    written = result.written;
-  }
-  // When the gateway was put on THIS account, for attributing failures
-  // (gatewayAccountAt): kept across a renewal or a re-sync of a SETTLED move to
-  // the same account, so a turn that ran on it just before is still its turn;
-  // stamped afresh at each record otherwise, so a move that was still owed —
-  // the old account's token possibly back in the store — counts from when it
-  // actually landed.
-  const keptAt = mirror && mirror.accountId === accountId && !mirror.pending ? mirror.at : null;
-  const record = (pending: boolean) => setGatewayMirror({ accountId, fingerprint, expiresAt: token.expires, at: keptAt ?? Date.now(), pending });
-  if (!opts.restart) {
-    await record(false);
-    return outcome("ok", "renewed", written);
-  }
-  // The keeper finishing a pending move whose token is already in place: a
-  // restart that was only slower than its readiness wait left a gateway that
-  // is up and on this token. Clear the debt; do not restart it again.
-  if (opts.keeper && alreadyThere && mirror?.pending && mirror.accountId === accountId && mirror.fingerprint === fingerprint && await d.reachable()) {
-    await record(false);
-    noteRestart(true);
-    console.error(`[anthropic-gateway] the gateway came up on Anthropic account ${accountId} after all; no further restart`);
-    return outcome("ok", "switched", written);
-  }
-  if (opts.keeper && !retryAllowed(Date.now())) return outcome("failed", "restart_backoff", written);
-  // Recorded as OWED before the restart and as done only after it: a restart
-  // that fails leaves the keeper something to finish.
-  await record(true);
+/** Bring the gateway in line with the pool now — after the owner changed it. Never throws. */
+export async function syncGatewayNow(): Promise<SwapConsumerOutcome> {
   try {
-    await d.restart();
+    return await runtime().lock(() => syncLocked());
   } catch (err) {
-    console.error("[anthropic-gateway] the gateway did not come back after the account swap:", err instanceof Error ? err.message : err);
-    noteRestart(false);
-    return outcome("failed", "restart_failed", written);
+    console.error("[anthropic-gateway] could not bring the gateway in line with the pool:", err instanceof Error ? err.message : err);
+    return outcome("failed", "error");
   }
-  // The gateway may have flushed its own copy of the store on the way down.
-  if (d.list().some((p) => p.fingerprint !== fingerprint)) {
-    d.write(token);
-    try {
-      await d.restart();
-    } catch {
-      noteRestart(false);
-      return outcome("failed", "restart_failed", written);
-    }
-    if (d.list().some((p) => p.fingerprint !== fingerprint)) {
-      // Two restarts and a store still holds another token — one it can read
-      // and not write (root-owned, locked). Counted as a restart that failed,
-      // or the keeper bounces the gateway, and every chat on it, twice every
-      // pass for ever instead of backing off.
-      noteRestart(false);
-      return outcome("failed", "write_lost", written);
-    }
-  }
-  await record(false);
-  noteRestart(true);
-  console.error(`[anthropic-gateway] the gateway now runs on Anthropic account ${accountId} (${written} profile(s))`);
-  return outcome("ok", "switched", written);
 }
 
-// ── 2. the keeper ───────────────────────────────────────────────────────────
-
-export type KeeperResult = "idle" | "fresh" | "renewed" | "resynced" | "stood_down" | "failed";
+export type UseForChatResult =
+  | { ok: true; outcome: SwapConsumerOutcome }
+  | { ok: false; code: "no_gateway" | "no_claude_account" | "gateway_write_failed" | "model_not_set"; error: string; status: number };
 
 /**
- * One keeper pass, under the gateway lock: the mirror it reads is the mirror
- * as the last writer left it. Exported for the tests; the timer calls it every
- * ten minutes.
+ * The accounts card's "Use these accounts for the chat too": the pool's Claude
+ * accounts into the gateway, then the chat's model onto Claude through
+ * `setModel` — Settings → AI Models' own path, the caller's to pass. One
+ * gesture of the owner's, under the gateway lock so no keeper pass in between
+ * takes the accounts out again for a chat that is not on Claude yet.
+ */
+export async function useAccountsForChat(setModel: () => Promise<{ ok: true } | { ok: false; error: string; status: number }>): Promise<UseForChatResult> {
+  if (deps().absent()) return { ok: false, code: "no_gateway", error: "This ClawBox's chat does not run on OpenClaw.", status: 409 };
+  return runtime().lock(async () => {
+    const pool = await readPoolState();
+    const now = Date.now();
+    if (!pool.accounts.some((a) => a.kind === "oauth" && effectiveStatus(a, now) !== "expired" && effectiveStatus(a, now) !== "revoked")) {
+      return { ok: false, code: "no_claude_account", error: "No Claude account on this box can answer: the chat can only use a Claude account signed in here.", status: 409 } as const;
+    }
+    const synced = await syncLocked({ force: true });
+    if (synced.status !== "ok" && synced.code !== "not_transferable") {
+      return { ok: false, code: "gateway_write_failed", error: "The Claude accounts could not be given to the chat. See the box's log.", status: 502 } as const;
+    }
+    const set = await setModel();
+    if (!set.ok) return { ok: false, code: "model_not_set", error: set.error, status: set.status } as const;
+    console.error("[anthropic-gateway] the owner put the chat on the box's Claude accounts");
+    return { ok: true, outcome: synced } as const;
+  });
+}
+
+// ── what core saw ───────────────────────────────────────────────────────────
+
+/** Core's failure state for a pool profile, as the pool reads it: a limit, a refused credential, or nothing worth acting on. */
+function coreFailureOf(failure: ProfileFailureState, now: number): { kind: "limit"; limitKind: AnthropicLimitKind; until: number; at: number } | { kind: "auth"; at: number } | null {
+  const active = (until: number | null): until is number => until !== null && until > now;
+  if (active(failure.blockedUntil)) return { kind: "limit", limitKind: "session", until: failure.blockedUntil, at: failure.lastFailureAt ?? failure.blockedUntil };
+  if (active(failure.disabledUntil)) {
+    if (failure.disabledReason === "billing") return { kind: "limit", limitKind: "credit", until: failure.disabledUntil, at: failure.lastFailureAt ?? failure.disabledUntil };
+    if (failure.disabledReason === "auth_permanent") return { kind: "auth", at: failure.lastFailureAt ?? failure.disabledUntil };
+  }
+  if (active(failure.cooldownUntil)) {
+    if (failure.cooldownReason === "rate_limit") return { kind: "limit", limitKind: "rate", until: failure.cooldownUntil, at: failure.lastFailureAt ?? failure.cooldownUntil };
+    if (failure.cooldownReason === "auth") return { kind: "auth", at: failure.lastFailureAt ?? failure.cooldownUntil };
+  }
+  return null;
+}
+
+/**
+ * Record in the pool what core recorded against the pool's profiles since the
+ * last look: a limit until Anthropic's own reset (which moves the active
+ * account, and with it every consumer), a refused credential confirmed with
+ * the pool's own check. Answers how many it acted on. Under the gateway lock.
+ */
+async function noteCooldownsLocked(now: number): Promise<number> {
+  const d = deps();
+  if (d.absent()) return 0;
+  const store = d.read();
+  if (store.kind !== "present") return 0;
+  const state = runtime();
+  const pool = await readPoolState();
+  let acted = 0;
+  for (const account of pool.accounts) {
+    if (account.kind !== "oauth") continue;
+    const failure = store.failures[poolProfileId(account.id)];
+    const seen = failure ? coreFailureOf(failure, now) : null;
+    if (!seen) continue;
+    const key = `${account.id}:${seen.at}`;
+    if (state.noted.has(key)) continue;
+    state.noted.add(key);
+    if (state.noted.size > MAX_NOTED) state.noted.delete(state.noted.values().next().value as string);
+    try {
+      if (seen.kind === "auth") {
+        // Renewed when the grant is alive — the next sync puts the fresh
+        // token in — and out of the pool when Anthropic refuses the grant.
+        const verdict = await probeAccountCredential(account.id, verifyAnthropicKey, { source: "chat" });
+        console.error(`[anthropic-gateway] core saw account ${account.id}'s credential refused in a gateway turn; asked again, it is ${verdict}`);
+        acted += 1;
+      } else {
+        acted += await recordLimit(account, seen, now);
+      }
+    } catch (err) {
+      // Not acted on — the pool could not be written: the next look tries
+      // again rather than calling this failure handled.
+      state.noted.delete(key);
+      console.error(`[anthropic-gateway] could not record what the gateway saw on account ${account.id}:`, err instanceof Error ? err.message : err);
+    }
+  }
+  return acted;
+}
+
+/** One limit core saw, in the pool until Anthropic's reset — or nothing, for a window that is not spent. */
+async function recordLimit(account: AnthropicAccount, seen: { limitKind: AnthropicLimitKind; until: number }, now: number): Promise<number> {
+  if (effectiveStatus(account, now) === "limited" && (account.limitedUntil ?? 0) >= seen.until) return 0;
+  let until = seen.until;
+  let kind = seen.limitKind;
+  if (kind === "rate") {
+    const token = await gatewayCredentialFor(account.id);
+    const reading = token ? await deps().usage(token.access) : null;
+    if (reading && !reading.exhausted) {
+      // Anthropic says no window is spent: a throttle core's own cooldown
+      // already covers. Set aside for hours, the account would be lost for nothing.
+      console.error(`[anthropic-gateway] core cooled account ${account.id} down on a rate limit, but none of its usage windows is spent; left in`);
+      return 0;
+    }
+    if (reading?.exhausted) {
+      kind = reading.kind;
+      until = reading.resetsAt !== null && reading.resetsAt > now ? reading.resetsAt : now + DEFAULT_LIMIT_MS;
+    } else {
+      // Anthropic could not be asked: core's own window, never longer than
+      // the longest session window — core's backoff grows past a day.
+      until = Math.min(seen.until, now + DEFAULT_LIMIT_MS);
+    }
+  }
+  await markLimited(account.id, until, kind, { source: "chat" });
+  console.error(`[anthropic-gateway] core rotated off account ${account.id} on a ${kind} limit; set aside until ${new Date(until).toISOString()}`);
+  return 1;
+}
+
+/** Look at what core recorded, act on it, and bring the gateway's order in line if anything changed. */
+export function noteGatewayCooldowns(now: number = Date.now()): Promise<number> {
+  return runtime().lock(async () => {
+    const acted = await noteCooldownsLocked(now);
+    if (acted > 0) await syncLocked();
+    return acted;
+  });
+}
+
+// ── the keeper ──────────────────────────────────────────────────────────────
+
+export type KeeperResult = "idle" | "fresh" | "synced" | "failed";
+
+/**
+ * One keeper pass, under the gateway lock: what core saw, then the pool put
+ * in as it stands — a renewed token where the pool renewed one (well before
+ * the old one ends; no restart), an account in or out, the order. Exported
+ * for the tests; the timer calls it every ten minutes.
  */
 export function keepGatewayMirror(): Promise<KeeperResult> {
-  return runtime().lock(keepLocked);
+  return runtime().lock(async (): Promise<KeeperResult> => {
+    if (deps().absent()) return "idle";
+    await noteCooldownsLocked(Date.now());
+    const result = await syncLocked();
+    if (result.status === "failed") return "failed";
+    if (result.code === "switched") return "synced";
+    if (result.status === "ok") return "fresh";
+    return result.count ? "synced" : "idle";
+  });
 }
 
-async function keepLocked(): Promise<KeeperResult> {
-  const d = deps();
-  if (d.absent()) return "idle";
-  const pool = await readPoolState();
-  const mirror = pool.gateway;
-  if (!mirror) return "idle";
-  // The swap did not finish taking the gateway along — the active account
-  // moved past it, or its restart failed (`pending`): finish it now.
-  const behind = pool.activeId !== null && mirror.accountId !== pool.activeId
-    && pool.accounts.find((a) => a.id === pool.activeId)?.kind === "oauth";
-  if (behind || mirror.pending) {
-    const target = behind && pool.activeId ? pool.activeId : mirror.accountId;
-    return (await syncLocked(target, { restart: true, keeper: true })).status === "ok" ? "resynced" : "failed";
-  }
-  const profiles = d.list();
-  if (profiles.length === 0) {
-    await setGatewayMirror(null);
-    return "stood_down";
-  }
-  const token = await gatewayCredentialFor(mirror.accountId);
-  if (!token) return "failed";
-  const fingerprint = tokenFingerprint(token.access);
-  if (profiles.some((p) => p.fingerprint !== mirror.fingerprint && p.fingerprint !== fingerprint)) {
-    // Not ours: the owner signed the chat in again. It is theirs until the next swap.
-    await setGatewayMirror(null);
-    console.error("[anthropic-gateway] the gateway's Claude sign-in was replaced outside the account pool; it no longer follows the pool until the next swap");
-    return "stood_down";
-  }
-  if (fingerprint === mirror.fingerprint && profiles.every((p) => p.fingerprint === fingerprint)) return "fresh";
-  if (d.write(token).written === 0) return "failed";
-  await setGatewayMirror({ ...mirror, fingerprint, expiresAt: token.expires, pending: false });
-  return "renewed";
-}
-
-// ── 3. the failures ─────────────────────────────────────────────────────────
+// ── the failures ────────────────────────────────────────────────────────────
 
 interface CronJobView {
   id: string;
   lastStatus: string | null;
   lastError: string | null;
   lastRunAtMs: number | null;
-  /** The agent the job runs as: core's resolved owner, else the one declared. */
-  agentId: string | null;
 }
 
 /** `cron.list`'s jobs, read defensively: the fields core has used for a job's last run, flat or under `state`. */
@@ -346,13 +527,11 @@ export function parseCronJobs(payload: unknown): CronJobView[] {
     const status = state.lastStatus ?? state.lastRunStatus;
     const error = state.lastError;
     const at = state.lastRunAtMs ?? state.lastRunAt;
-    const agent = typeof job.effectiveAgentId === "string" ? job.effectiveAgentId : job.agentId;
     jobs.push({
       id,
       lastStatus: typeof status === "string" ? status : null,
       lastError: typeof error === "string" && error ? error : null,
       lastRunAtMs: typeof at === "number" && Number.isFinite(at) ? at : null,
-      agentId: typeof agent === "string" && agent ? agent : null,
     });
   }
   return jobs;
@@ -371,37 +550,14 @@ export function mentionsAnthropic(text: string | null | undefined): boolean {
 }
 
 /**
- * The pool account a gateway turn of `agentId` that ran at `ranAt` failed on:
- * where the box put the gateway, for a turn that ran once it was there. One
- * that ran before the move ran on the account the gateway has just left
- * (usually the very account whose limit caused the move).
- *
- * While the restart onto it is owed (`pending`), the mirror says what the box
- * WROTE, not what the agent runs on: the turn is blamed on it only when every
- * store that agent reads holds that token, which core re-reads by itself. Not
- * when the gateway put its own copy back on the way down, and not for an agent
- * whose store the box could not write — while the agents whose stores did take
- * it are still blamed, since `write_lost` leaves `pending` set for good. An
- * unknown agent is judged on every store core reads.
- *
- * Null blames no pool account; the failure still goes through the swap, and a
- * held retry runs again on the account the gateway is on now.
+ * A gateway turn that reached its sender as a failure has already been through
+ * core's rotation: every account it could try is in core's failure state,
+ * which is the evidence of WHICH accounts failed (noteGatewayCooldowns). The
+ * report itself blames no pool account — on the box a session could be pinned
+ * to an account other than the one the order leads with, and a turn rescued by
+ * another provider never reaches anyone at all — it holds the turn for one
+ * retry and makes sure the gateway is on the active account.
  */
-function gatewayAccountAt(mirror: GatewayMirror | null, ranAt: number, agentId: string | null, profiles: () => GatewayAnthropicProfile[]): string | null {
-  if (!mirror || ranAt < mirror.at) return null;
-  if (!mirror.pending) return mirror.accountId;
-  // What core reads for that agent: its own store and the base it reads
-  // through (main's store, the shared row) — never a retired auth-profiles.json,
-  // which runtime does not use.
-  const stores = profiles().filter((p) => p.store !== "json");
-  const read = agentId === null ? stores : stores.filter((p) => p.agentId === agentId || p.agentId === "main" || p.store === "shared");
-  return read.length > 0 && read.every((p) => p.fingerprint === mirror.fingerprint) ? mirror.accountId : null;
-}
-
-/** The agent a chat session belongs to, from its key (`agent:<id>:…`). */
-function agentOfSession(sessionKey: string | null): string | null {
-  return sessionKey ? /^agent:([^:]+):/.exec(sessionKey)?.[1] ?? null : null;
-}
 
 /** One look at the gateway's crons. Answers how many failures it reported. */
 export async function scanGatewayCrons(now: number = Date.now()): Promise<number> {
@@ -409,8 +565,8 @@ export async function scanGatewayCrons(now: number = Date.now()): Promise<number
   const state = runtime();
   if (d.absent()) return 0;
   const pool = await readPoolState();
-  const profiles = d.list();
-  if (pool.accounts.length === 0 || profiles.length === 0) return 0;
+  const store = d.read();
+  if (pool.accounts.length === 0 || store.kind !== "present" || store.profiles.length === 0) return 0;
   let payload: Record<string, unknown>;
   try {
     payload = await d.call("cron.list", { includeDisabled: false });
@@ -424,17 +580,15 @@ export async function scanGatewayCrons(now: number = Date.now()): Promise<number
     if (job.lastRunAtMs === null || job.lastRunAtMs <= since) continue;
     newest = Math.max(newest, job.lastRunAtMs);
     if (job.lastStatus !== "error" || !mentionsAnthropic(job.lastError)) continue;
-    // Also what keeps the first look after a boot, which reaches back
-    // FIRST_LOOK_BACK_MS, from blaming runs older than the move.
-    const accountId = gatewayAccountAt(pool.gateway, job.lastRunAtMs, job.agentId, () => profiles);
     const result = await reportAnthropicFailure({
       text: job.lastError,
       source: "cron",
-      accountId,
+      accountId: null,
       retry: {
-        // Per account: a run that fails again on the account it was moved to
-        // is a new failure, and earns one retry of its own on the next.
-        key: `cron:${job.id}:${accountId ?? "own"}`,
+        // Per account the pool is on once core's record is in (the watcher
+        // reads it first): a run that fails again on the account it was moved
+        // to is a new failure, and earns one retry of its own on the next.
+        key: `cron:${job.id}:${pool.activeId ?? "none"}`,
         after: "gateway",
         run: async () => {
           try {
@@ -473,31 +627,34 @@ export async function reportChatFailure(input: ChatFailure): Promise<FailureOutc
   const model = text(input.model, 200)?.toLowerCase() ?? null;
   const detail = text(input.detail, 2_000);
   const errorMessage = text(input.errorMessage, 2_000);
-  const anthropic = provider === "anthropic" || (model !== null && /^(?:anthropic\/)?claude/.test(model))
+  const anthropic = provider === PROVIDER || (model !== null && /^(?:anthropic\/)?claude/.test(model))
     || (provider === null && mentionsAnthropic(`${detail ?? ""} ${errorMessage ?? ""}`));
   if (!anthropic) return null;
-  const pool = await readPoolState();
+  // What core recorded for this very turn, into the pool first: the move it
+  // causes is the swap the retry below waits for.
+  await noteGatewayCooldowns().catch((err: unknown) => {
+    console.error("[anthropic-gateway] could not read what the gateway recorded:", err instanceof Error ? err.message : err);
+  });
   const sessionKey = text(input.sessionKey, 300);
   const message = text(input.message, 32_000);
   const d = deps();
-  // Reported as the turn fails, and a swap's restart ends every turn in
-  // flight: a report after the move is the new account's — once it is there.
-  const accountId = gatewayAccountAt(pool.gateway, Date.now(), agentOfSession(sessionKey), () => d.list());
+  // Per account the pool is on now, as for a cron run: one retry per account.
+  const on = (await readPoolState()).activeId ?? "none";
   return reportAnthropicFailure({
     // The provider's own words first: the gateway's copy says "rate limit"
     // without the time the account comes back.
     text: [detail, errorMessage].filter(Boolean).join("\n") || null,
     reason: text(input.reason, 40),
     source: "chat",
-    accountId,
+    accountId: null,
     retry: sessionKey && message ? {
-      key: `chat:${sessionKey}:${tokenFingerprint(message)}:${accountId ?? "own"}`,
+      key: `chat:${sessionKey}:${tokenFingerprint(message)}:${on}`,
       after: "gateway",
       run: async () => {
         try {
           // Stable for the turn it repeats: the gateway can tell a second
           // delivery of the same retry from a new one.
-          await d.call("chat.send", { sessionKey, message, deliver: false, idempotencyKey: `clawbox-swap-${tokenFingerprint(`${sessionKey}:${message}:${accountId ?? "own"}`)}` });
+          await d.call("chat.send", { sessionKey, message, deliver: false, idempotencyKey: `clawbox-swap-${tokenFingerprint(`${sessionKey}:${message}:${on}`)}` });
           return true;
         } catch {
           return false;
@@ -511,7 +668,7 @@ export async function reportChatFailure(input: ChatFailure): Promise<FailureOutc
 
 /**
  * At boot (armAnthropicAccounts) and from the chat's report route: register the
- * consumer and start the keeper and the cron watcher, once per process.
+ * consumer and start the keeper and the watcher, once per process.
  */
 export function startGatewaySwap(): void {
   const state = runtime();
@@ -524,7 +681,10 @@ export function startGatewaySwap(): void {
     state.keeper.unref?.();
   }
   if (!state.watcher) {
-    state.watcher = setInterval(() => void guarded(() => scanGatewayCrons()), WATCH_MS);
+    state.watcher = setInterval(() => void guarded(async () => {
+      await noteGatewayCooldowns();
+      await scanGatewayCrons();
+    }), WATCH_MS);
     state.watcher.unref?.();
   }
 }
@@ -542,7 +702,7 @@ async function guarded(work: () => Promise<unknown>): Promise<void> {
   }
 }
 
-/** Test seam: stand in for the gateway, and forget the timers and the watermark. */
+/** Test seam: stand in for the gateway, and forget the timers, the watermark and what was noted. */
 export function _setGatewayDepsForTests(overrides: Partial<GatewayDeps> | null): void {
   const state = runtime();
   state.deps = overrides ? { ...defaultDeps, ...overrides } : defaultDeps;
@@ -554,6 +714,5 @@ export function _setGatewayDepsForTests(overrides: Partial<GatewayDeps> | null):
   state.cronWatermark = null;
   state.busy = false;
   state.lock = createSerialLock();
-  state.restartFailures = 0;
-  state.lastRestartFailureAt = 0;
+  state.noted.clear();
 }

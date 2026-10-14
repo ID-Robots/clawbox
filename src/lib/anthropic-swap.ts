@@ -19,10 +19,10 @@
  *     worker on an account that can no longer answer is ended and resumed in
  *     its own session on the active account; runs waiting for a reset resume.
  *     Queued runs need nothing: each spawn asks the pool for the active account.
- *   - `gateway` (src/lib/anthropic-gateway.ts): the OpenClaw gateway's Claude
- *     subscription profile — every agent's, so every session, cron and
- *     heartbeat — is rewritten with the active account and the gateway is
- *     restarted on it.
+ *   - `gateway` (src/lib/anthropic-gateway.ts): the OpenClaw gateway holds
+ *     every Claude account of the pool as a profile of its own and rotates
+ *     between them inside a turn; its order is moved to lead with the active
+ *     account — no restart.
  *
  * and then the turns that FAILED on the limit are retried once (`retries`): a
  * chat turn or a cron run a consumer reported with `reportAnthropicFailure`.
@@ -372,7 +372,7 @@ export interface FailureOutcome {
  * nothing written, nothing restarted, the gateway on no pool account at all.
  *
  * The gateway's mirror is the box's own record of where it put the gateway,
- * and a `pending` one is a restart still owed, not a gateway on that account.
+ * and a `pending` one is a write still owed, not a gateway on that account.
  * A consumer that leaves no such record is answered as before.
  */
 function answeredActive(consumer: Exclude<SwapConsumerName, "retries">, pool: PoolState): AnthropicAccount | null {

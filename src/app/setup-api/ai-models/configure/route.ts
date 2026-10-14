@@ -3404,8 +3404,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
       // healed by the retry both sentences ask for, and recorded here rather
       // than fixed).
       //
-      // Claude's sign-in only: it is the profile this was measured on, and the
-      // one ClawBox already rewrites in that row (anthropic-gateway-auth.ts).
+      // Claude's sign-in only: it is the profile this was measured on.
       // The ClawBox AI device login runs this branch too (`clawai/poll` posts
       // `authMode: "subscription"`) and is kept out by name, not only by the
       // provider id it rides today: its credential is the CLI paste further

@@ -42,6 +42,13 @@ vi.mock("@/lib/coding-agent", () => ({ simulateAnthropicLimit }));
 const announceAnthropicLimit = vi.hoisted(() => vi.fn(async () => undefined));
 vi.mock("@/lib/coding-agent-notify", () => ({ announceAnthropicLimit }));
 
+// The chat's half (src/lib/anthropic-gateway.ts, pinned in its own suite) and
+// Settings → AI Models' "make this the default", at their module boundaries.
+const gateway = vi.hoisted(() => ({ syncGatewayNow: vi.fn(), useAccountsForChat: vi.fn() }));
+vi.mock("@/lib/anthropic-gateway", () => gateway);
+const setDefaultProvider = vi.hoisted(() => vi.fn());
+vi.mock("@/app/setup-api/providers/default/route", () => ({ POST: setDefaultProvider }));
+
 const handoff = vi.hoisted(() => ({ readHandoffTokens: vi.fn(), clearHandoffTokens: vi.fn() }));
 vi.mock("@/lib/oauth-handoff", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/oauth-handoff")>()),
@@ -61,6 +68,7 @@ const VIEW = {
   health: { total: 2, healthy: 1, limited: 1, needsAttention: 0, allLimited: false, nextResetAt: 2_000 },
   activeAccountId: "bbbbbbbb",
   loginAvailable: false,
+  gateway: { following: false, accountId: null, label: null, since: null },
   now: 1_000,
 };
 
@@ -108,6 +116,12 @@ beforeEach(async () => {
     tokens: { provider: "anthropic", accessToken: ACCESS, refreshToken: REFRESH, expiresIn: 28_800, accountEmail: "max2@example.com", createdAt: Date.now() },
   });
   handoff.clearHandoffTokens.mockResolvedValue(undefined);
+  gateway.syncGatewayNow.mockResolvedValue({ status: "ok", code: "already", count: 2 });
+  gateway.useAccountsForChat.mockImplementation(async (setModel: () => Promise<{ ok: true } | { ok: false; error: string; status: number }>) => {
+    const set = await setModel();
+    return set.ok ? { ok: true, outcome: { status: "ok", code: "switched", count: 2 } } : { ok: false, code: "model_not_set", error: set.error, status: set.status };
+  });
+  setDefaultProvider.mockResolvedValue(new Response(JSON.stringify({ ok: true, provider: "anthropic", model: "anthropic/claude-opus-5-5" }), { status: 200 }));
   fetchMock = vi.fn().mockResolvedValue(new Response("{}", { status: 200 }));
   vi.stubGlobal("fetch", fetchMock);
   const route = await import("@/app/setup-api/anthropic/accounts/route");
@@ -317,5 +331,46 @@ describe("the owner's preference (TASK-1260)", () => {
     const res = await post({ action: "simulate_limit", id: "zzzzzzzz" });
     expect(res.status).toBe(404);
     expect(simulateAnthropicLimit).not.toHaveBeenCalled();
+  });
+});
+
+describe("the chat on the pool's Claude accounts (TASK-1260)", () => {
+  it("says whether this box's chat can run on the pool at all", async () => {
+    const body = await (await GET(req("GET"))).json();
+    expect(body.gateway).toEqual({ following: false, accountId: null, label: null, since: null, available: true });
+  });
+
+  it("puts the accounts in, then sets the chat's model through Settings → AI Models' own path", async () => {
+    const res = await post({ action: "use_for_chat" });
+    expect(res.status).toBe(200);
+    expect(gateway.useAccountsForChat).toHaveBeenCalledTimes(1);
+    expect(setDefaultProvider).toHaveBeenCalledTimes(1);
+    const asked = setDefaultProvider.mock.calls[0][0] as Request;
+    expect(await asked.json()).toEqual({ provider: "anthropic" });
+    expect((await res.json()).model).toBe("anthropic/claude-opus-5-5");
+  });
+
+  it("is the owner's alone, from the box's own pages", async () => {
+    expect((await post({ action: "use_for_chat" }, { auth: "bearer" })).status).toBe(403);
+    expect((await post({ action: "use_for_chat" }, { site: "cross-site" })).status).toBe(403);
+    expect(gateway.useAccountsForChat).not.toHaveBeenCalled();
+  });
+
+  it("answers a refusal with its own code — the model route's in words the owner can act on", async () => {
+    setDefaultProvider.mockResolvedValue(new Response(JSON.stringify({ error: "That provider is switched off. Switch it on first.", kind: "provider_disabled", provider: "anthropic" }), { status: 409 }));
+    const res = await post({ action: "use_for_chat" });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.code).toBe("model_not_set");
+    expect(body.error).toBe("Anthropic is switched off in Settings → Providers. Switch it on first.");
+    gateway.useAccountsForChat.mockResolvedValue({ ok: false, code: "no_claude_account", error: "No Claude account on this box can answer.", status: 409 });
+    expect((await (await post({ action: "use_for_chat" })).json()).code).toBe("no_claude_account");
+  });
+
+  it("brings the gateway in line at once after a change of the owner's that does not move the active account", async () => {
+    await post({ action: "connect_oauth" });
+    await post({ action: "rename", id: "aaaaaaaa", label: "Work 2" });
+    await post({ action: "remove", id: "aaaaaaaa" });
+    expect(gateway.syncGatewayNow).toHaveBeenCalledTimes(2);
   });
 });
