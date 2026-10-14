@@ -4,8 +4,24 @@ import { getTeam, listTeams, startTeam } from "@/lib/coding-team";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { requireSession } from "@/lib/route-auth";
 import { budgetAnswer, resolveStartBudget } from "@/lib/coding-time-budget-server";
+import { readTimeRecordSummary, type TimeRecordPayload } from "@/lib/coding-time-record";
 
 export const dynamic = "force-dynamic";
+
+/** How many record lines each team of the LIST carries — the latest; one team's read (`?id=`) carries the default. */
+const LIST_TIME_RECORDS = 50;
+
+/**
+ * A team as the GET answers it: with its time record (`timeRecord`,
+ * readTimeRecordSummary — the plan, the estimates, the skips and the
+ * checkpoints, summarized as of now) when it has a budget and a record.
+ * Without either, the board exactly as before: no key at all.
+ */
+function withTimeRecord<T extends { id: string; timeBudget?: unknown }>(team: T, now: number, maxRecords?: number): T & { timeRecord?: TimeRecordPayload } {
+  if (!team.timeBudget) return team;
+  const timeRecord = readTimeRecordSummary(team.id, now, maxRecords);
+  return timeRecord ? { ...team, timeRecord } : team;
+}
 
 /**
  * A coding TEAM — the multi-agent shape of the coding agent
@@ -15,8 +31,13 @@ export const dynamic = "force-dynamic";
  *                                 the planner's `shape`, and `metrics` (runs per
  *                                 role, tasks planned/added/retired/accepted first
  *                                 try/rejected, tokens, wall time, team messages
- *                                 sent/to the lead/to a sibling/undelivered) as of now
- * GET                           → { teams } — the recent boards, newest first
+ *                                 sent/to the lead/to a sibling/undelivered) as of now;
+ *                                 a team with a time budget also carries its
+ *                                 `timeRecord` (the plan, estimates, skips and
+ *                                 checkpoints, as of now) once it has one
+ * GET                           → { teams } — the recent boards, newest first,
+ *                                 each budgeted one with its `timeRecord` cut to
+ *                                 the latest LIST_TIME_RECORDS record lines
  * POST { goal, projectId | directory, budget? } → 202 { started: true, team }, or —
  *                                 while another team works — 202 { started:
  *                                 false, queued: true, team } with the board in
@@ -52,9 +73,10 @@ export async function GET(request: Request) {
     if (!owner && team.source === "owner") {
       return NextResponse.json({ error: "That team was started by the owner; only the owner can read it.", kind: "owner_only" }, { status: 403 });
     }
-    return NextResponse.json({ team });
+    return NextResponse.json({ team: withTimeRecord(team, Date.now()) });
   }
-  return NextResponse.json({ teams: listTeams().filter((t) => owner || t.source === "agent") });
+  const now = Date.now();
+  return NextResponse.json({ teams: listTeams().filter((t) => owner || t.source === "agent").map((t) => withTimeRecord(t, now, LIST_TIME_RECORDS)) });
 }
 
 export async function POST(request: Request) {
