@@ -149,6 +149,19 @@ describe("the Google Chrome icon in Monitor Mode", () => {
     expect(screen.queryByText(/Google Chrome is not installed/)).toBeNull();
   });
 
+  it("does not call a Chrome installed since the page loaded 'not installed' when it fails to start", async () => {
+    status = { available: true, installed: false };
+    launch = {
+      status: 500,
+      body: { available: true, ok: false, error: "Google Chrome could not be started: EACCES", code: "launch_failed" },
+    };
+    render(<ChromeDesktop />);
+    fireEvent.click(await chromeIcon());
+    // The ordinary fallback for a launch that failed, as for an icon drawn as installed.
+    await waitFor(() => expect(windowOpen).toHaveBeenCalledWith("https://www.google.com/", "_blank", "noopener"));
+    expect(screen.queryByText(/Google Chrome is not installed/)).toBeNull();
+  });
+
   it("is not drawn off the ClawBox Desktop session", async () => {
     status = { available: false };
     render(<ChromeDesktop />);

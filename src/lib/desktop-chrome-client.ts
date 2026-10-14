@@ -84,9 +84,12 @@ export interface OpenDesktopChromeOptions {
  * removed since is reported. When the box has none, `onMissing` is called and
  * nothing is opened. When the server cannot open it for any other reason (the
  * session went away under the page), the page opens one the ordinary way, so
- * a click is never a dead icon.
+ * a click is never a dead icon. The icon's own `missing` stands in only when
+ * no answer came back at all: a server that answered anything else (a Chrome
+ * installed since, that then failed to start) has said Chrome is there.
  */
 export async function openDesktopChrome({ url, state = "ready", onMissing }: OpenDesktopChromeOptions = {}): Promise<void> {
+  let answered = false;
   try {
     const r = await fetch(DESKTOP_CHROME_URL, {
       method: "POST",
@@ -99,10 +102,11 @@ export async function openDesktopChrome({ url, state = "ready", onMissing }: Ope
       onMissing?.();
       return;
     }
+    answered = !!body && typeof body === "object" && typeof (body as { available?: unknown }).available === "boolean";
   } catch {
     // fall through
   }
-  if (state === "missing") {
+  if (state === "missing" && !answered) {
     onMissing?.();
     return;
   }
