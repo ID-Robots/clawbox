@@ -141,7 +141,7 @@ describe("extraWorkScope", () => {
   });
 
   it("adds nothing for a path outside the repo, and never the whole repo", () => {
-    const scope = extraWorkScope(["/home/someone/.bashrc", "../up.txt", "", 42]);
+    const scope = extraWorkScope(["/home/clawbox/.bashrc", "../up.txt", "", 42]);
     expect(scope).toEqual([...EXTRA_SCOPE_DIRS, "README.md", "CHANGELOG.md"]);
     expect(scope).not.toContain("/");
     expect(checkExtraItem({ kind: "fixes", files: ["src/app.ts"] }, scope).ok).toBe(false);
