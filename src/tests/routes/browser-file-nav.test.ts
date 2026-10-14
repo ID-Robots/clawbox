@@ -26,6 +26,7 @@ const mocks = vi.hoisted(() => ({
     title: vi.fn(async () => "Page"),
     screenshot: vi.fn(async () => Buffer.from("PNG")),
     bringToFront: vi.fn(async () => undefined),
+    isClosed: vi.fn(() => false),
     evaluate: vi.fn(async () => false),
     close: vi.fn(async () => undefined),
   },
@@ -170,6 +171,77 @@ it("scopes concurrent run pages to the requested run and rejects another run's s
   const inactive = await request({ action: "launch", codingRunId: "run-bbbbbbbb" });
   expect(inactive.status).toBe(400);
   expect((await inactive.json()).error).toContain("Coding run is not active");
+});
+
+/**
+ * The loopback exception: a run may open a port on 127.0.0.1 / localhost /
+ * [::1] that it is serving itself (the ownership proof is
+ * src/lib/coding-local-preview.ts, tested against real processes in
+ * coding-local-preview.test.ts). Every other private address stays refused,
+ * and is never even put to the ownership check.
+ */
+describe("loopback preview inside a run", () => {
+  const RUN = "run-aaaaaaaa";
+  const launchAt = async (url: string, codingRunId?: string) => {
+    const res = await POST(new Request("http://localhost/setup-api/browser", {
+      method: "POST",
+      body: JSON.stringify({ action: "launch", url, ...(codingRunId ? { codingRunId } : {}) }),
+    }));
+    return { status: res.status, body: await res.json() };
+  };
+
+  beforeEach(() => {
+    mocks.getRun.mockImplementation((id: string) => (id === RUN ? { id, status: "running", directory: runDir, pgid: 4242, unit: null } : undefined));
+  });
+
+  it("navigates the run's own tab to a 127.0.0.1 port the run serves", async () => {
+    mocks.ownsLocalPreview.mockResolvedValue(true);
+    mocks.page.url.mockReturnValue("http://127.0.0.1:3000/");
+    const { status, body } = await launchAt("http://127.0.0.1:3000/", RUN);
+    expect(status).toBe(200);
+    expect(body.sessionId).toEqual(expect.any(String));
+    expect(mocks.page.goto).toHaveBeenCalledTimes(1);
+    expect(mocks.page.goto.mock.calls[0][0]).toBe("http://127.0.0.1:3000/");
+    // Asked about THIS run's record, not whichever run is active.
+    const [asked, run] = mocks.ownsLocalPreview.mock.calls[0] as unknown as [URL, { directory: string; pgid: number }];
+    expect(asked.href).toBe("http://127.0.0.1:3000/");
+    expect(run).toMatchObject({ directory: runDir, pgid: 4242 });
+  });
+
+  it("refuses a loopback port the run does not serve with its own reason, and closes the tab it opened", async () => {
+    mocks.ownsLocalPreview.mockResolvedValue(false);
+    for (const url of ["http://127.0.0.1:3000/", "http://localhost:5173/", "http://[::1]:8080/"]) {
+      const { status, body } = await launchAt(url, RUN);
+      expect(status).toBe(400);
+      expect(body.error).toBe("Blocked loopback address (not served by this run)");
+    }
+    expect(mocks.ownsLocalPreview).toHaveBeenCalledTimes(3);
+    expect(mocks.page.goto).not.toHaveBeenCalled();
+    expect(mocks.page.close).toHaveBeenCalledTimes(3);
+  });
+
+  it("refuses LAN, link-local, other private and *.localhost addresses inside a run without asking about ownership", async () => {
+    // Even a check that would say yes is never consulted for these.
+    mocks.ownsLocalPreview.mockResolvedValue(true);
+    for (const url of ["http://10.0.0.1:3000/", "http://192.168.1.20:3000/", "http://172.16.0.5:3000/", "http://169.254.169.254/", "http://127.0.0.2:3000/"]) { // public-hygiene: allow synthetic private addresses the route must refuse, not real hosts
+      const { status, body } = await launchAt(url, RUN);
+      expect(status).toBe(400);
+      expect(body.error).toBe("Blocked internal address");
+    }
+    const named = await launchAt("http://app.localhost:3000/", RUN);
+    expect(named.status).toBe(400);
+    expect(named.body.error).toBe("Blocked internal host");
+    expect(mocks.ownsLocalPreview).not.toHaveBeenCalled();
+    expect(mocks.page.goto).not.toHaveBeenCalled();
+  });
+
+  it("keeps loopback an internal address when no run is asking", async () => {
+    mocks.ownsLocalPreview.mockResolvedValue(true);
+    const { status, body } = await launchAt("http://127.0.0.1:3000/");
+    expect(status).toBe(400);
+    expect(body.error).toBe("Blocked internal address");
+    expect(mocks.ownsLocalPreview).not.toHaveBeenCalled();
+  });
 });
 
 it("coalesces owned asset validation but rechecks navigation, expiry and run liveness", async () => {
