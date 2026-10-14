@@ -25,7 +25,8 @@
 import fs from "fs";
 import { randomBytes } from "crypto";
 import path from "@/lib/runtime-path";
-import { ensureOwnerArtifactsDir, ownerArtifactsDir, safeOwnerId } from "@/lib/coding-agent-artifacts";
+import { artifactsRoot, ensureOwnerArtifactsDir, ownerArtifactsDir, safeOwnerId } from "@/lib/coding-agent-artifacts";
+import { estimateCalibration, estimateSamples, CALIBRATION_MAX_SAMPLES, type EstimateCalibration, type EstimateSample } from "@/lib/coding-time-plan";
 import {
   formatTimeRecordLine,
   readTimeBudget,
@@ -189,6 +190,79 @@ export function readTimeRecordSummary(ownerId: string, now: Date | number, maxRe
   const keep = Number.isInteger(maxRecords) && maxRecords >= 0 ? Math.min(maxRecords, MAX_STORED_TIME_RECORDS) : DEFAULT_PAYLOAD_RECORDS;
   const records = keep > 0 ? summary.records.slice(-keep) : [];
   return { ...summary, records, omittedRecords: summary.records.length - records.length };
+}
+
+// ─── Calibration: how past estimates held ────────────────────────────────────
+
+/** The most evidence folders one calibration reads — those whose time record was written last. */
+export const CALIBRATION_MAX_OWNERS = 30;
+/** A time record larger than this is passed over by a calibration: the finished ones it wants are small. */
+export const CALIBRATION_MAX_RECORD_BYTES = 256 * 1024;
+/** The most folders a calibration looks at to find those, newest or not. */
+const CALIBRATION_MAX_SCAN = 2_000;
+/** A calibration is worked out again at most this often. */
+export const CALIBRATION_TTL_MS = 60_000;
+
+let calibrationCache: { at: number; value: EstimateCalibration | null } | null = null;
+
+/**
+ * The finished estimates in the latest time records of this box, runs' and
+ * teams' alike, newest record first — at most CALIBRATION_MAX_OWNERS records
+ * and CALIBRATION_MAX_SAMPLES estimates. Read as warily as loadTimeRecords
+ * reads one: only a real folder named like a run or team id, only a regular
+ * time-record.json no larger than CALIBRATION_MAX_RECORD_BYTES. Work still
+ * going has no finished estimate yet, so the work asking never measures
+ * itself. Never throws: no records is no samples.
+ */
+export function recentEstimateSamples(): EstimateSample[] {
+  let names: string[];
+  try {
+    names = fs.readdirSync(artifactsRoot(), { withFileTypes: true })
+      .filter((d) => d.isDirectory())
+      .map((d) => d.name)
+      .slice(0, CALIBRATION_MAX_SCAN);
+  } catch {
+    return [];
+  }
+  const found: { owner: string; mtime: number }[] = [];
+  for (const name of names) {
+    const owner = safeOwnerId(name);
+    if (!owner || owner !== name) continue;
+    try {
+      const st = fs.lstatSync(path.join(ownerArtifactsDir(owner), TIME_RECORD_JSON));
+      if (st.isFile() && st.size <= CALIBRATION_MAX_RECORD_BYTES) found.push({ owner, mtime: st.mtimeMs });
+    } catch {
+      // No time record: the work had no budget.
+    }
+  }
+  found.sort((a, b) => b.mtime - a.mtime);
+  const samples: EstimateSample[] = [];
+  for (const { owner } of found.slice(0, CALIBRATION_MAX_OWNERS)) {
+    const stored = loadTimeRecords(owner);
+    if (!stored) continue;
+    samples.push(...estimateSamples(summarizeTimeRecords(stored.budget, stored.records, Date.now())));
+    if (samples.length >= CALIBRATION_MAX_SAMPLES) break;
+  }
+  return samples.slice(0, CALIBRATION_MAX_SAMPLES);
+}
+
+/**
+ * How past estimates on this box held (estimateCalibration over
+ * recentEstimateSamples), or null with too few finished ones. Worked out at
+ * most once per CALIBRATION_TTL_MS: a team asks at its plan, a run when its
+ * estimate comes in. Never throws.
+ */
+export function currentEstimateCalibration(now: number = Date.now()): EstimateCalibration | null {
+  const cached = calibrationCache;
+  if (cached && now >= cached.at && now - cached.at < CALIBRATION_TTL_MS) return cached.value;
+  const value = estimateCalibration(recentEstimateSamples());
+  calibrationCache = { at: now, value };
+  return value;
+}
+
+/** Tests only: forget the last calibration worked out. */
+export function _resetCalibrationCacheForTests(): void {
+  calibrationCache = null;
 }
 
 // ─── Writing ─────────────────────────────────────────────────────────────────

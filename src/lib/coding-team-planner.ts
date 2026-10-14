@@ -61,7 +61,7 @@ import {
   safetyMarginMs,
   type TimeBudget,
 } from "@/lib/coding-time-budget";
-import { cutFromBottom, mustHaveFits, parseEstimateMinutes } from "@/lib/coding-time-plan";
+import { calibrationBrief, cutFromBottom, mustHaveFits, parseEstimateMinutes, type EstimateCalibration } from "@/lib/coding-time-plan";
 
 export interface PlannedTask {
   task_description: string;
@@ -125,11 +125,14 @@ export const SHORT_PLAN_MS = LONG_BUDGET_MS;
  * zone (`tz`, read on the server), the time left, and the safety-margin cutoff
  * after which no new task starts — and what the plan must then also say: an
  * estimate per task, the tasks most important first, the nice-to-haves
- * marked, and a time_plan. `now` is the box's clock.
+ * marked, and a time_plan. `now` is the box's clock. A `calibration` that
+ * applies (past estimates on this box ran over or under) is said last: the
+ * box scales the estimates by it, so the planner is asked not to.
  */
-export function plannerBrief(budget: TimeBudget | null | undefined, now: number, tz: string): string {
+export function plannerBrief(budget: TimeBudget | null | undefined, now: number, tz: string, calibration: EstimateCalibration | null = null): string {
   if (!budget) return PLANNER_BRIEF;
-  return `${PLANNER_BRIEF} ${timeBrief(budget, now, tz)}`;
+  const calibrated = calibrationBrief(calibration);
+  return `${PLANNER_BRIEF} ${timeBrief(budget, now, tz)}${calibrated ? ` ${calibrated}` : ""}`;
 }
 
 function timeBrief(budget: TimeBudget, now: number, tz: string): string {

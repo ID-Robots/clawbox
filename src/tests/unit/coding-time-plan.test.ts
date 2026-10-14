@@ -10,9 +10,18 @@
 import { describe, expect, it } from "vitest";
 import { presetBudget, summarizeTimeRecords, timeRecord, type TimeBudget } from "@/lib/coding-time-budget";
 import {
+  calibrateEstimate,
+  calibrationApplies,
+  calibrationBrief,
+  calibrationNote,
+  CALIBRATION_MAX_FACTOR,
+  CALIBRATION_MAX_SAMPLES,
+  CALIBRATION_MIN_FACTOR,
   checkExtraItem,
   cutFromBottom,
   estimateAccuracyLine,
+  estimateCalibration,
+  estimateSamples,
   EXTRA_ITEM_ESTIMATE_MS,
   EXTRA_SCOPE_DIRS,
   EXTRA_WORK_KINDS,
@@ -433,5 +442,87 @@ describe("estimateAccuracyLine", () => {
   it("says so when no estimate was given", () => {
     expect(estimateAccuracyLine({ tasks: [{ taskId: "t1", estimateMs: null, actualMs: HOUR }], estimateMs: null, usedMs: HOUR, finishedAt: null }))
       .toBe("Estimates: none given");
+  });
+});
+
+describe("estimate calibration", () => {
+  const sample = (estimateMin: number, tookMin: number) => ({ estimateMs: estimateMin * MIN, actualMs: tookMin * MIN });
+
+  it("reads a team's finished tasks, each estimate divided back by the factor the plan was scaled by", () => {
+    const records = [
+      timeRecord("plan", "2 tasks planned", NOW, { estimateMs: 60 * MIN, calibration: 1.5 }),
+      timeRecord("estimate", "build", NOW, { taskId: "t1", estimateMs: 30 * MIN }),
+      timeRecord("estimate", "test", NOW, { taskId: "t2", estimateMs: 30 * MIN }),
+      timeRecord("finish", "The worker ended completed", NOW + 40 * MIN, { taskId: "t1", actualMs: 40 * MIN }),
+    ];
+    const summary = summarizeTimeRecords(hour(), records, NOW + HOUR);
+    // t2 has no time taken: it is no sample. t1 was planned at 30 minutes scaled ×1.5 — the planner said 20.
+    expect(estimateSamples(summary)).toEqual([{ estimateMs: 20 * MIN, actualMs: 40 * MIN }]);
+  });
+
+  it("reads a run's whole-work estimate against the time it worked — only when it was done and did nothing else", () => {
+    const run = (stop: "done" | "nothing_left", extra: boolean) => summarizeTimeRecords(hour(), [
+      timeRecord("plan", "Estimate for the must-have work", NOW, { runId: "run-abc12345", estimateMs: 20 * MIN }),
+      ...(extra ? [timeRecord("extra", "tests — covered the parser", NOW + 25 * MIN, { actualMs: 5 * MIN })] : []),
+      timeRecord("finish", "The run ended completed", NOW + 30 * MIN, { runId: "run-abc12345", actualMs: 30 * MIN }),
+      timeRecord("stop", "the work was done", NOW + 30 * MIN, { runId: "run-abc12345", reason: stop }),
+    ], NOW + 30 * MIN);
+    expect(estimateSamples(run("done", false))).toEqual([{ estimateMs: 20 * MIN, actualMs: 30 * MIN }]);
+    // Extra work is in the time it worked: not like for like.
+    expect(estimateSamples(run("nothing_left", true))).toEqual([]);
+    expect(estimateSamples(run("done", true))).toEqual([]);
+  });
+
+  it("finds nothing in a record with no estimate or no finish", () => {
+    expect(estimateSamples(summarizeTimeRecords(hour(), [timeRecord("budget", "1 hour", NOW)], NOW))).toEqual([]);
+    const unfinished = summarizeTimeRecords(hour(), [timeRecord("plan", "Estimate", NOW, { estimateMs: 20 * MIN })], NOW + MIN);
+    expect(estimateSamples(unfinished)).toEqual([]);
+  });
+
+  it("is the median of took ÷ estimated — none under three finished estimates", () => {
+    expect(estimateCalibration([])).toBeNull();
+    expect(estimateCalibration([sample(10, 20), sample(10, 20)])).toBeNull();
+    expect(estimateCalibration([sample(10, 20), sample(10, 12), sample(20, 30)])).toEqual({ factor: 1.5, samples: 3 });
+    // An even count: the mean of the middle two.
+    expect(estimateCalibration([sample(10, 10), sample(10, 12), sample(10, 14), sample(10, 40)])).toEqual({ factor: 1.3, samples: 4 });
+  });
+
+  it("is bounded: one wild overrun, a zero or a forged record moves it no further than the bounds", () => {
+    expect(estimateCalibration([sample(1, 600), sample(1, 600), sample(1, 600)])?.factor).toBe(CALIBRATION_MAX_FACTOR);
+    expect(estimateCalibration([sample(60, 0), sample(60, 0), sample(60, 1)])?.factor).toBe(CALIBRATION_MIN_FACTOR);
+    // A median: two honest estimates outvote one wild one.
+    expect(estimateCalibration([sample(10, 11), sample(10, 11), sample(1, 600)])?.factor).toBe(1.1);
+    // What is not a sample is not counted.
+    const bad = [{ estimateMs: 0, actualMs: MIN }, { estimateMs: NaN, actualMs: MIN }, { estimateMs: MIN, actualMs: -1 }];
+    expect(estimateCalibration([...bad, sample(10, 20), sample(10, 20)])).toBeNull();
+  });
+
+  it("reads only the latest CALIBRATION_MAX_SAMPLES", () => {
+    const latest = Array.from({ length: CALIBRATION_MAX_SAMPLES }, () => sample(10, 20));
+    const older = Array.from({ length: 50 }, () => sample(10, 5));
+    expect(estimateCalibration([...latest, ...older])).toEqual({ factor: 2, samples: CALIBRATION_MAX_SAMPLES });
+  });
+
+  it("scales an estimate only when past ones were off by 10% or more, to whole minutes, inside the estimate bounds", () => {
+    expect(calibrationApplies(null)).toBe(false);
+    expect(calibrationApplies({ factor: 1.05, samples: 9 })).toBe(false);
+    expect(calibrationApplies({ factor: 0.9, samples: 9 })).toBe(true);
+    expect(calibrateEstimate(20 * MIN, null)).toBe(20 * MIN);
+    expect(calibrateEstimate(20 * MIN, { factor: 1.05, samples: 9 })).toBe(20 * MIN);
+    expect(calibrateEstimate(20 * MIN, { factor: 1.4, samples: 9 })).toBe(28 * MIN);
+    expect(calibrateEstimate(7 * MIN, { factor: 1.5, samples: 9 })).toBe(11 * MIN);
+    expect(calibrateEstimate(MIN, { factor: 0.5, samples: 9 })).toBe(MIN);
+    expect(calibrateEstimate(MAX_ESTIMATE_MS, { factor: 3, samples: 9 })).toBe(MAX_ESTIMATE_MS);
+  });
+
+  it("says what it does on the log and in a brief — nothing when it scales nothing", () => {
+    expect(calibrationNote({ factor: 1.02, samples: 5 })).toBeNull();
+    expect(calibrationBrief(null)).toBeNull();
+    expect(calibrationNote({ factor: 1.4, samples: 7 })).toBe(
+      "Calibration: on this box, past estimates took 1.4× the time estimated (the median of 7 finished estimates), so the estimates here are scaled by 1.4× before they are fitted to the time.",
+    );
+    const brief = calibrationBrief({ factor: 0.75, samples: 3 });
+    expect(brief).toContain("took 0.75× the time estimated (the median of 3 finished estimates)");
+    expect(brief).toContain("do not add to them or cut them yourself");
   });
 });

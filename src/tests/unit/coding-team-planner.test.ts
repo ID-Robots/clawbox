@@ -674,6 +674,16 @@ describe("a planner with a time budget", () => {
     expect(plannerBrief(hour(), NOW + 55 * MIN, TZ)).toMatch(/The cutoff has already passed: plan ONE small task/);
   });
 
+  it("is told how its estimates will be calibrated — last, and only when a calibration scales them", () => {
+    const calibrated = plannerBrief(hour(), NOW, TZ, { factor: 1.6, samples: 12 });
+    expect(calibrated.startsWith(plannerBrief(hour(), NOW, TZ))).toBe(true);
+    expect(calibrated).toMatch(/ ESTIMATE CALIBRATION: on this box, past estimates took 1\.6× the time estimated \(the median of 12 finished estimates\)\. ClawBox scales your estimates by 1\.6× .* do not add to them or cut them yourself\.$/);
+    expect(plannerBrief(hour(), NOW, TZ, { factor: 0.95, samples: 12 })).toBe(plannerBrief(hour(), NOW, TZ));
+    expect(plannerBrief(hour(), NOW, TZ, null)).toBe(plannerBrief(hour(), NOW, TZ));
+    // Without a budget there is no estimate to calibrate.
+    expect(plannerBrief(null, NOW, TZ, { factor: 1.6, samples: 12 })).toBe(PLANNER_BRIEF);
+  });
+
   const ANSWER = JSON.stringify({
     shape: { parallelism: 1, review: "final", rationale: "one scraper" },
     tasks: [

@@ -122,6 +122,9 @@ import {
   type TimeStopReason,
 } from "@/lib/coding-time-budget";
 import {
+  calibrateEstimate,
+  calibrationApplies,
+  calibrationNote,
   checkExtraItem,
   estimateAccuracyLine,
   EXTRA_ITEM_ESTIMATE_MS,
@@ -131,8 +134,9 @@ import {
   lastExtraClaim,
   MAX_EXTRA_ITEMS,
   nextItemAllowed,
+  type EstimateCalibration,
 } from "@/lib/coding-time-plan";
-import { appendTimeRecord, loadTimeRecords } from "@/lib/coding-time-record";
+import { appendTimeRecord, currentEstimateCalibration, loadTimeRecords } from "@/lib/coding-time-record";
 import { readOsTimeZone } from "@/lib/timezone";
 import {
   allComplete,
@@ -284,6 +288,8 @@ interface TeamTime {
   lastCheckpointAt: number;
   /** When each task's current worker started, ms: what its time taken is measured from. */
   started: Map<string, number>;
+  /** Tasks whose current worker already set off the re-plan trigger: once per attempt, while it runs or when it finishes. */
+  replanned: Set<string>;
   /** A worker task was dispatched: the team's first is never refused for its estimate alone. */
   dispatched: boolean;
   /** Tasks were left out because the safety margin began before they could start. */
@@ -762,10 +768,14 @@ export function _resetCodingTeamStateForTests(): void {
  * task's estimate and every skip go into the team's time record (owner: the
  * team's id), after the budget's line its clock wrote. A record the disk
  * refuses is left out (appendTimeRecord never throws): the work goes on.
+ * When the estimates were calibrated (already scaled on the board), the log
+ * says so first, and the plan's record line carries the factor.
  */
-async function planAgainstBudget(team: LiveTeam, budget: TimeBudget, timePlan: TimePlan | null, tz: string): Promise<void> {
+async function planAgainstBudget(team: LiveTeam, budget: TimeBudget, timePlan: TimePlan | null, tz: string, calibration: EstimateCalibration | null = null): Promise<void> {
   const { board, bus } = team;
   const now = Date.now();
+  const calibrated = calibrationNote(calibration);
+  if (calibrated) bus.send(SYSTEM, { type: "note", text: calibrated });
   const fit = fitPlan(board.tasks.map((t) => ({ id: t.task_id, estimateMs: t.estimateMs, optional: t.optional === true, dependsOn: t.depends_on })), budget, now);
   const line = fitLine(fit, budget, tz);
   bus.send(SYSTEM, { type: "note", text: line });
@@ -794,7 +804,11 @@ async function planAgainstBudget(team: LiveTeam, budget: TimeBudget, timePlan: T
   // The planner's own estimate of the whole plan, else its tasks' summed.
   const planMs = timePlan?.estimateMs ?? (estimated > 0 ? estimated : null);
   const planned = `${board.tasks.length} ${board.tasks.length === 1 ? "task" : "tasks"} planned${optional ? `, ${optional} optional` : ""}`;
-  records.push(timeRecord("plan", `${planned}; ${line.replace(/^Time plan: /, "")}`, now, planMs ? { estimateMs: planMs } : {}));
+  records.push(timeRecord("plan", `${planned}; ${line.replace(/^Time plan: /, "")}`, now, {
+    ...(planMs ? { estimateMs: planMs } : {}),
+    ...(calibrated && calibration ? { calibration: calibration.factor } : {}),
+  }));
+  if (calibrated) records.push(timeRecord("note", calibrated, now));
   for (const t of board.tasks) {
     const what = `${t.optional ? "optional — " : ""}${t.estimateMs ? "" : "no estimate — "}${firstLine(t.task_description, 200)}`;
     records.push(timeRecord("estimate", what, now, { taskId: t.task_id, ...(t.estimateMs ? { estimateMs: t.estimateMs } : {}) }));
@@ -934,6 +948,18 @@ function teamClockTick(team: LiveTeam): void {
       bus.send(SYSTEM, { type: "note", text: `Safety margin: ${left} left before the deadline — no new task starts; ${told} run${told === 1 ? "" : "s"} at work told to commit and finish the step under way.` });
       saveBoard(board);
       void writeTeamTime(team, [timeRecord("note", `Safety margin: began with ${left} left; ${told} run${told === 1 ? "" : "s"} at work told to commit and finish`, now, { tokensUsed: teamTokens(team) })]);
+    }
+  }
+  // The re-plan trigger while a task runs, not only when it ends: a worker
+  // already more than 25% over its estimate re-plans what is left now —
+  // before the cutoff only: past it nothing new starts, so there is nothing
+  // left to re-plan.
+  if (!time.up && now < marginCutoffMs(time.budget)) {
+    for (const task of board.tasks) {
+      if (task.status !== "in_progress" || !task.estimateMs || time.replanned.has(task.task_id)) continue;
+      const began = time.started.get(task.task_id);
+      if (began === undefined || !isBehindEstimate(task.estimateMs, now - began)) continue;
+      replanIfBehind(team, task, now - began, true);
     }
   }
   if (now - time.lastCheckpointAt >= clockTuning.checkpointMs) {
@@ -1078,6 +1104,8 @@ function noteTaskStart(team: LiveTeam, task: TeamTask, runId: string): void {
   if (!time) return;
   const now = Date.now();
   time.started.set(task.task_id, now);
+  // A new attempt has a clock of its own, and its own re-plan trigger.
+  time.replanned.delete(task.task_id);
   void writeTeamTime(team, [
     timeRecord("start", `${task.attempts > 0 ? `Attempt ${task.attempts + 1}: ` : ""}${firstLine(task.task_description, 200)}`, now, { taskId: task.task_id, runId, ...(task.estimateMs ? { estimateMs: task.estimateMs } : {}), tokensUsed: teamTokens(team) }),
   ]);
@@ -1094,26 +1122,30 @@ function noteTaskFinish(team: LiveTeam, task: TeamTask, runId: string, run: Codi
   void writeTeamTime(team, [
     timeRecord("finish", `The worker ended ${run?.status ?? "without a record"}`, now, { taskId: task.task_id, runId, actualMs, tokensUsed: teamTokens(team) }),
   ]);
-  if (run?.status === "completed") replanIfBehind(team, task, actualMs);
+  // Once per attempt: a worker the clock already found behind has re-planned.
+  if (run?.status === "completed" && !time.replanned.has(task.task_id)) replanIfBehind(team, task, actualMs);
+  time.replanned.delete(task.task_id);
 }
 
 /**
- * The re-plan trigger, at a task boundary: a task that took more than 25%
- * over its estimate (isBehindEstimate) puts the rest of the plan against the
- * time again — the tasks not started, most important first, after what the
- * ones at work still need by their estimates — and what does not fit is cut
+ * The re-plan trigger: a task more than 25% over its estimate
+ * (isBehindEstimate) — found by the team's clock while its worker runs
+ * (`running`), else when it finishes — puts the rest of the plan against the
+ * time again: the tasks not started, most important first, after what the
+ * other ones at work still need by their estimates. What does not fit is cut
  * from the bottom (fitPlan: nice-to-haves first), each cut recorded with why.
- * Said either way, on the log and in the record.
+ * Said either way, on the log and in the record; once per attempt.
  */
-function replanIfBehind(team: LiveTeam, task: TeamTask, actualMs: number): void {
+function replanIfBehind(team: LiveTeam, task: TeamTask, actualMs: number, running = false): void {
   const time = team.time;
   if (!time || time.up || team.stopRequested) return;
   const est = task.estimateMs;
   if (!est || !isBehindEstimate(est, actualMs)) return;
+  time.replanned.add(task.task_id);
   const { board, bus } = team;
   const now = Date.now();
   const over = Math.round((actualMs / est - 1) * 100);
-  const head = `Re-plan: ${task.task_id} took ${formatDuration(actualMs)} against ~${formatDuration(est)} (+${over}%)`;
+  const head = `Re-plan: ${task.task_id} ${running ? "has taken" : "took"} ${formatDuration(actualMs)} against ~${formatDuration(est)} (+${over}%)${running ? " and is still at work" : ""}`;
   const rank = (t: TeamTask) => t.priority ?? Number.MAX_SAFE_INTEGER;
   const pending = board.tasks.filter((t) => t.status === "pending").sort((a, b) => rank(a) - rank(b));
   const atWork = board.tasks
@@ -1371,7 +1403,10 @@ async function runTeamWork(team: LiveTeam, source: CodingRunSource): Promise<voi
   // as they always were.
   const budget = board.timeBudget ?? null;
   const tz = budget ? await readOsTimeZone().catch(() => "UTC") : "UTC";
-  const brief = () => plannerBrief(budget, Date.now(), tz);
+  // How past estimates on this box held: the planner is told, and its
+  // estimates are scaled by it before the plan is fitted to the time.
+  const calibration = budget ? currentEstimateCalibration() : null;
+  const brief = () => plannerBrief(budget, Date.now(), tz, calibration);
   const timed = { timed: budget !== null };
   // Its clock, from the planner on: the deadline holds the planning too.
   if (budget) {
@@ -1383,6 +1418,7 @@ async function runTeamWork(team: LiveTeam, source: CodingRunSource): Promise<voi
       marginSent: Date.now() >= marginCutoffMs(budget),
       lastCheckpointAt: Date.now(),
       started: new Map(),
+      replanned: new Set(),
       dispatched: false,
       cutoffHit: false,
       extrasRan: false,
@@ -1467,12 +1503,18 @@ async function runTeamWork(team: LiveTeam, source: CodingRunSource): Promise<voi
     const { files, entryPoints, testCommands, gotchas } = plan.repoMap;
     bus.send(PLANNER, { type: "repo_map", files, entry_points: entryPoints, test_commands: testCommands, gotchas });
   }
+  // A calibrated plan's estimates go on the board scaled: the work is fitted,
+  // gated and re-planned with them, and the plan's record line keeps the factor.
+  if (budget && calibrationApplies(calibration)) {
+    for (const task of plan.tasks) if (task.estimateMs) task.estimateMs = calibrateEstimate(task.estimateMs, calibration);
+    if (plan.timePlan?.estimateMs) plan.timePlan.estimateMs = calibrateEstimate(plan.timePlan.estimateMs, calibration);
+  }
   for (const task of plan.tasks) bus.send(PLANNER, { type: "task", ...task });
   // Text over its bound was cut, not refused: one note says so — never an alert.
   if (plan.clipped) bus.send(SYSTEM, { type: "note", text: clippedNote(plan.clipped) });
   // A budgeted plan against its time, before any work starts.
   if (budget) {
-    await planAgainstBudget(team, budget, plan.timePlan ?? null, tz);
+    await planAgainstBudget(team, budget, plan.timePlan ?? null, tz, calibration);
     if (team.stopRequested) return;
   }
 
