@@ -5,7 +5,8 @@
  * carries the marker below; it lives in /etc next to the device secret, so a
  * factory reset (which wipes data/) keeps it. Every box that was set up before
  * this flow existed has no marker and keeps its behaviour exactly as it was:
- * same hotspot, same captive-probe answers, same password and SSH handling.
+ * same hotspot and same captive-probe answers. This flow never changes SSH or
+ * the system password, on any box.
  * provision-device.sh refuses a box that already has an owner, so the marker
  * can never appear on a customer's box through an update.
  *

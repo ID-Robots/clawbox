@@ -7,6 +7,9 @@
 # per-device flow (src/lib/device-provisioning.ts). Boxes without it — every
 # box set up before this flow — keep their behaviour exactly as it was.
 #
+# It changes nothing else: the system password and SSH stay exactly as the
+# image ships them (SSH defaults are unchanged by decision).
+#
 # Stock boxes ONLY. A box that shows ANY sign of an owner (setup completed,
 # owner password flag, own hotspot settings, an owner password in /etc/shadow)
 # is refused, and so is a box whose state cannot be read: provisioning an
