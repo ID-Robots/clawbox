@@ -230,24 +230,37 @@ describe("middleware", () => {
   });
 
   describe("Apple captive portal", () => {
-    it("returns HTML response for /hotspot-detect.html", async () => {
+    it("sends the iOS captive sheet to the setup wizard while setup is open", async () => {
       const request = createRequest("/hotspot-detect.html");
       const response = await middleware(request);
 
       expect(response.status).toBe(200);
-      expect(response.headers.get("Content-Type")).toBe("text/html");
+      expect(response.headers.get("Content-Type")).toContain("text/html");
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
 
       const body = await response.text();
-      expect(body).toContain("ClawBox Setup");
-      expect(body).toContain("<!DOCTYPE html>");
+      // Not "Success" — that would tell iOS the network is open and no sheet opens.
+      expect(body).not.toContain("<BODY>Success</BODY>");
+      expect(body).toContain('http-equiv="refresh" content="0;url=http://10.42.0.1/setup"');
+      expect(body).toContain('href="http://10.42.0.1/setup"');
     });
 
-    it("returns HTML response for /library/test/success.html", async () => {
+    it("answers /library/test/success.html the same way during setup", async () => {
       const request = createRequest("/library/test/success.html");
       const response = await middleware(request);
 
       expect(response.status).toBe(200);
-      expect(response.headers.get("Content-Type")).toBe("text/html");
+      expect(await response.text()).toContain("http://10.42.0.1/setup");
+    });
+
+    it("answers Success once setup is complete, so no device sees a captive network", async () => {
+      markSetupComplete();
+      const response = await middleware(createRequest("/hotspot-detect.html"));
+
+      expect(response.status).toBe(200);
+      const body = await response.text();
+      expect(body).toContain("<BODY>Success</BODY>");
+      expect(body).not.toContain("/setup");
     });
   });
 
@@ -283,7 +296,7 @@ describe("middleware", () => {
       const response = await middleware(request);
 
       expect(response.status).toBe(200);
-      expect(response.headers.get("Content-Type")).toBe("text/html");
+      expect(response.headers.get("Content-Type")).toContain("text/html");
     });
   });
 

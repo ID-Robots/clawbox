@@ -207,6 +207,34 @@ const APPLE_PATHS = new Set([
   "/library/test/success.html",
 ]);
 
+const SETUP_WIZARD_URL = new URL("/setup", PORTAL_URL).toString();
+
+/**
+ * Apple's probe expects a page whose body is "Success"; anything else makes
+ * iOS/macOS open its captive sheet ON the page it got. During first setup
+ * start-ap.sh points captive.apple.com at the box, so the answer is a small
+ * page that moves the sheet straight to the setup wizard (meta refresh, plus a
+ * link for a sheet that ignores it). Once setup is complete the probe host is
+ * no longer resolved to the box, and a request that still lands here gets the
+ * "Success" page, so a device is never told the network is captive.
+ */
+function appleProbeResponse(setupOpen: boolean): NextResponse {
+  const headers = { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" };
+  if (!setupOpen) {
+    return new NextResponse(
+      "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>",
+      { status: 200, headers },
+    );
+  }
+  return new NextResponse(
+    "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>ClawBox Setup</title>"
+      + `<meta name="viewport" content="width=device-width,initial-scale=1">`
+      + `<meta http-equiv="refresh" content="0;url=${SETUP_WIZARD_URL}"></head>`
+      + `<body><p><a href="${SETUP_WIZARD_URL}">Open ClawBox setup</a></p></body></html>`,
+    { status: 200, headers },
+  );
+}
+
 // ─── Auth ────────────────────────────────────────────────────────────────────
 
 // `/fonts/` and `/images/` are deliberately NOT here any more. `/fonts/` is
@@ -530,10 +558,7 @@ export async function middleware(request: NextRequest) {
     return NextResponse.redirect(PORTAL_URL, 302);
   }
   if (APPLE_PATHS.has(pathname)) {
-    return new NextResponse(
-      "<!DOCTYPE html><HTML><HEAD><TITLE>ClawBox Setup</TITLE></HEAD><BODY>Please complete setup.</BODY></HTML>",
-      { status: 200, headers: { "Content-Type": "text/html" } }
-    );
+    return appleProbeResponse(!readConfigCached().setupComplete);
   }
 
   // 1a. The Host allow-list (src/lib/host-allowlist.ts). A name that is not
