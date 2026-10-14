@@ -141,10 +141,15 @@ export function dispatchOpenApp(appId: string, opts: OpenAppOptions = {}): void 
  * is the sequence `page.tsx` open-a-section helpers also perform — named here
  * so the event string and the `__clawboxPendingSettingsSection` handoff live
  * in one place instead of drifting across each dispatch site.
+ *
+ * `focus` names a block inside the section to open and bring into view (the
+ * closed set is `NOTIFY_ACTION_FOCUS` in src/lib/notify-action.ts); it rides
+ * both handoffs beside the section, and SettingsApp ignores one it does not
+ * know, exactly as it ignores an unknown section.
  */
-export function dispatchOpenSettingsSection(section: string): void {
+export function dispatchOpenSettingsSection(section: string, focus?: string): void {
   if (typeof window === "undefined") return;
-  handoffSettingsSection(section);
+  handoffSettingsSection(section, focus);
   dispatchOpenApp("settings");
 }
 
@@ -154,10 +159,15 @@ export function dispatchOpenSettingsSection(section: string): void {
  * `/app/settings?section=…` route, where there is no desktop to open a window
  * into and nothing listens for OPEN_APP_EVENT.
  */
-export function handoffSettingsSection(section: string): void {
+export function handoffSettingsSection(section: string, focus?: string): void {
   if (typeof window === "undefined") return;
-  (window as Window & { __clawboxPendingSettingsSection?: string }).__clawboxPendingSettingsSection = section;
-  window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_SECTION_EVENT, { detail: { section } }));
+  const w = window as Window & { __clawboxPendingSettingsSection?: string; __clawboxPendingSettingsFocus?: string };
+  w.__clawboxPendingSettingsSection = section;
+  // Replaced by EVERY link, a plain one included: a focus left over from a
+  // link Settings never took would otherwise ride along on the next cold open.
+  if (focus) w.__clawboxPendingSettingsFocus = focus;
+  else delete w.__clawboxPendingSettingsFocus;
+  window.dispatchEvent(new CustomEvent(OPEN_SETTINGS_SECTION_EVENT, { detail: focus ? { section, focus } : { section } }));
 }
 
 /** The query parameter `/app/settings` reads its opening section from. */

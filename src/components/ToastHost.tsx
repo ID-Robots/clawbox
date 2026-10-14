@@ -64,8 +64,9 @@ function openNotifyAction(action: NotifyAction): void {
     case "settings":
       // The deep link that already exists: it leaves a handoff on `window` so
       // a COLD open of Settings still lands on the section, and fires the
-      // event for a Settings window that is already up.
-      dispatchOpenSettingsSection(action.section);
+      // event for a Settings window that is already up. The focus, when the
+      // notice names one, travels the same two ways.
+      dispatchOpenSettingsSection(action.section, action.focus);
       return;
     default: {
       // `open` is typed from the allowlist table, so adding an app there stops
