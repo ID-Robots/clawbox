@@ -333,9 +333,16 @@ describe("the file-drop overlay over a row of monitors", () => {
     const overlay = src.match(/\{desktopDragOver && \([\s\S]{0,1200}?files\.dropToUpload/)?.[0] ?? "";
     // No backdrop blur under the dim (a full-screen blur is redone over the
     // whole 5120x1440 desktop on every frame the mascot moves beneath it); one
-    // step darker keeps the look.
-    expect(overlay).toMatch(/className="fixed inset-0 flex items-center justify-center bg-black\/65 pointer-events-none"/);
-    expect(overlay).toMatch(/style=\{mainRect \? \{ position: "absolute", left: mainRect\.x \+ mainRect\.width \/ 2, top: mainRect\.y \+ mainRect\.height \/ 2, transform: "translate\(-50%, -50%\)" \} : undefined\}/);
+    // step darker keeps the look. `main-screen-scrim` (globals.css) narrows the
+    // box the card is centred in to the main monitor with a transparent border
+    // the dim still paints under: every monitor is dimmed, a drop still lands
+    // wherever it is let go, and with no layout the border is 0.
+    expect(overlay).toMatch(/className="main-screen-scrim fixed inset-0 flex items-center justify-center bg-black\/65 pointer-events-none"/);
+    // …and the card takes no offset of its own on top: an absolute position
+    // from `mainRect` inside that already-narrowed box lands it the main
+    // monitor's offset too far.
+    expect(overlay).toMatch(/<div className="flex flex-col items-center gap-3 p-8 rounded-2xl border-2 border-dashed border-orange-500\/60 bg-\[#0d1117\]\/90">/);
+    expect(overlay).not.toMatch(/mainRect/);
   });
 });
 
@@ -343,9 +350,10 @@ describe("the desktop's full-screen scrims", () => {
   it("dim without a backdrop blur, one step darker", () => {
     // The file-drop overlay and the uninstall confirmation: a blur under a
     // 60% black scrim is 40% of what is seen, and costs a whole-viewport pass
-    // per frame while anything underneath animates.
+    // per frame while anything underneath animates. `main-screen-scrim` centres
+    // the confirmation on the main monitor and leaves the dim to the scrim.
     expect(src).not.toMatch(/backdrop-blur/);
-    expect(src).toMatch(/<div className="fixed inset-0 flex items-center justify-center bg-black\/65" style=\{\{ zIndex: DESKTOP_LAYERS\.modal \}\} onClick=\{dismissUninstall\}>/);
+    expect(src).toMatch(/<div className="main-screen-scrim fixed inset-0 flex items-center justify-center bg-black\/65" style=\{\{ zIndex: DESKTOP_LAYERS\.modal \}\} onClick=\{dismissUninstall\}>/);
   });
 });
 

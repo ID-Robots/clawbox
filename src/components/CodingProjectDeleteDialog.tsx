@@ -228,7 +228,7 @@ export default function CodingProjectDeleteDialog({
         aria-modal="true"
         aria-labelledby={titleId}
         aria-describedby={describedId}
-        className="w-full max-w-[520px] max-h-[85vh] overflow-y-auto rounded-2xl border border-white/[0.08] bg-[var(--surface-1,#16171b)] p-5 shadow-2xl"
+        className="w-full max-w-[520px] max-h-[85%] overflow-y-auto rounded-2xl border border-white/[0.08] bg-[var(--surface-1,#16171b)] p-5 shadow-2xl"
       >
         <h2 id={titleId} className="text-sm font-semibold text-[var(--text-primary)]">
           {t("codingAgent.delete.title", { name })}

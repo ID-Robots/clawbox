@@ -2039,7 +2039,7 @@ function FolderPickerDialog({
         aria-modal="true"
         aria-label={title}
         data-testid={testId}
-        className="card-surface rounded-2xl p-5 shadow-2xl flex flex-col gap-3 outline-none w-[min(440px,calc(100vw-2rem))] max-h-[min(580px,calc(100vh-2rem))]"
+        className="card-surface rounded-2xl p-5 shadow-2xl flex flex-col gap-3 outline-none w-[min(440px,calc(100%-2rem))] max-h-[min(580px,calc(100%-2rem))]"
         onClick={(e) => e.stopPropagation()}
         onKeyDown={(e) => {
           if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); onCancel(); }
@@ -2314,7 +2314,7 @@ function MoveConflictDialog({ conflict, folderName, onCancel, onResolve }: {
         aria-modal="true"
         aria-label={t("files.conflictTitle", { folder: folderName })}
         data-testid="files-conflict-dialog"
-        className="card-surface rounded-2xl p-6 w-[min(360px,calc(100vw-2rem))] shadow-2xl"
+        className="card-surface rounded-2xl p-6 w-[min(360px,calc(100%-2rem))] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
         onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); onCancel(); } }}
       >

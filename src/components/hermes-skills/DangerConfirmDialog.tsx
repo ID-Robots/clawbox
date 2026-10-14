@@ -66,7 +66,7 @@ export function DangerConfirmDialog({
         aria-modal="true"
         aria-labelledby="hs-danger-title"
         data-testid="skill-danger-dialog"
-        className="card-surface rounded-2xl p-6 w-full max-w-lg shadow-2xl border border-amber-500/40 max-h-[90vh] overflow-y-auto"
+        className="card-surface rounded-2xl p-6 w-full max-w-lg shadow-2xl border border-amber-500/40 max-h-[90%] overflow-y-auto"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-3 mb-4">

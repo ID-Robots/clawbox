@@ -423,7 +423,7 @@ export function PublicLinkDialog({
   const primary = PRIMARY;
 
   return createPortal(
-    <div onClick={onClose} data-testid="public-link-overlay" style={{ position: "fixed", inset: 0, zIndex: 10020, background: "rgba(0,0,0,0.62)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+    <div onClick={onClose} data-testid="public-link-overlay" className="main-screen-scrim" style={{ position: "fixed", inset: 0, zIndex: 10020, background: "rgba(0,0,0,0.62)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
       <div
         ref={panelRef}
         role="dialog"
@@ -431,7 +431,7 @@ export function PublicLinkDialog({
         aria-label={t("publicLink.title", { name: appName })}
         data-testid="public-link-dialog"
         onClick={(e) => e.stopPropagation()}
-        style={{ width: "min(440px, 100%)", maxHeight: "calc(100vh - 48px)", overflowY: "auto", borderRadius: 14, background: "#1c1c22", border: "1px solid rgba(255,255,255,0.1)", boxShadow: "0 8px 40px rgba(0,0,0,0.6)", padding: "18px 20px", color: "rgba(255,255,255,0.9)" }}
+        style={{ width: "min(440px, 100%)", maxHeight: "100%", overflowY: "auto", borderRadius: 14, background: "#1c1c22", border: "1px solid rgba(255,255,255,0.1)", boxShadow: "0 8px 40px rgba(0,0,0,0.6)", padding: "18px 20px", color: "rgba(255,255,255,0.9)" }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
           <span className="material-symbols-rounded" aria-hidden style={{ fontSize: 22, color: "#f97316" }}>public</span>

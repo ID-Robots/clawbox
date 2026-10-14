@@ -9028,6 +9028,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // darker (0.9, from 0.85 + blur(2px)) keeps it just as far back.
         <div
           data-testid="chat-image-preview-scrim"
+          className="main-screen-scrim"
           onClick={closePreview}
           style={{
             position: 'fixed', inset: 0, zIndex: 10020,
