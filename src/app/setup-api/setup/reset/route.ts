@@ -10,7 +10,8 @@ import { resetUpdateState } from "@/lib/updater";
 import { DATA_DIR } from "@/lib/config-store";
 import { CLAWKEEP_DATA_DIR } from "@/lib/clawkeep";
 import { getSystemUsername } from "@/lib/auth";
-import { CHPASSWD_INPUT_PATH, CHPASSWD_SERVICE_NAME, CHPASSWD_STEP, chpasswdRecord } from "@/lib/chpasswd";
+import { CHPASSWD_DEVICE_REQUEST_PATH, CHPASSWD_INPUT_PATH, CHPASSWD_SERVICE_NAME, CHPASSWD_STEP, chpasswdRecord } from "@/lib/chpasswd";
+import { isProvisionedDevice } from "@/lib/device-provisioning";
 import { FACTORY_DEFAULT_PASSWORD } from "@/lib/system-password";
 import { FACTORY_RESET_CONFIRMATION, isFactoryResetConfirmed } from "@/lib/factory-reset";
 import { readEdition } from "@/lib/edition-source";
@@ -660,6 +661,23 @@ async function wipeHomeUserState(): Promise<string[]> {
  * directory the wizard then writes its own state into.
  */
 async function resetSystemPasswordToDefault(): Promise<void> {
+  // A provisioned box goes back to the password on its sticker, never to the
+  // universal one; every other box keeps the reset it always had.
+  if (isProvisionedDevice()) {
+    try {
+      await fs.mkdir(path.dirname(CHPASSWD_DEVICE_REQUEST_PATH), { recursive: true });
+      await fs.writeFile(CHPASSWD_DEVICE_REQUEST_PATH, "device\n", { mode: 0o600 });
+      await startRootStep(CHPASSWD_STEP, { timeoutMs: 30_000 });
+      console.log("[Reset] System password reset to the sticker password");
+    } catch (err) {
+      await fs.unlink(CHPASSWD_DEVICE_REQUEST_PATH).catch(() => {});
+      console.error(
+        "[Reset][SECURITY] System password NOT reset to the sticker password — prior password still active:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+    return;
+  }
   try {
     await fs.mkdir(path.dirname(CHPASSWD_INPUT_PATH), { recursive: true });
     await fs.writeFile(

@@ -68,6 +68,8 @@ function runStep() {
   const script = [
     "set -uo pipefail",
     `PROJECT_DIR="${project}"`,
+    `CLAWBOX_ETC="${tmp}/etc"`,
+    `ROOT_LIBEXEC_DIR="${tmp}/libexec"`,
     'CLAWBOX_USER="clawbox"',
     body,
     "step_chpasswd",
@@ -354,5 +356,47 @@ d("root never evaluates a clawbox-writable data file", () => {
     // A WiFi PSK may contain almost anything, so the value is passed through
     // whole — it is only ever an argv element for nmcli, never evaluated.
     expect(r.stdout).toBe("p a$s w'ord");
+  });
+});
+
+d("step_chpasswd — provisioned boxes get their sticker password back (TASK-1572)", () => {
+  const etc = () => path.join(tmp, "etc");
+  const request = () => path.join(project, "data", ".chpasswd-device");
+  function fakeDeviceSecret() {
+    fs.mkdirSync(path.join(tmp, "libexec"), { recursive: true });
+    fs.writeFileSync(path.join(tmp, "libexec", "device-secret.sh"),
+      `#!/usr/bin/env bash\necho "device-secret $*" >> "${tmp}/device-calls"\n`, { mode: 0o755 });
+  }
+  const deviceCalls = () => (fs.existsSync(path.join(tmp, "device-calls")) ? fs.readFileSync(path.join(tmp, "device-calls"), "utf-8") : "");
+
+  it("refuses the device request on a box that was not provisioned, and feeds chpasswd nothing", () => {
+    fakeDeviceSecret();
+    fs.writeFileSync(request(), "device\n", { mode: 0o600 });
+    const r = runStep();
+    expect(r.status).toBe(66);
+    expect(fs.existsSync(request())).toBe(false);
+    expect(fedToChpasswd()).toBe("");
+    expect(deviceCalls()).toBe("");
+  });
+
+  it("sets the sticker password on a provisioned box", () => {
+    fakeDeviceSecret();
+    fs.mkdirSync(etc(), { recursive: true });
+    fs.writeFileSync(path.join(etc(), "provisioned"), "provisioned\n");
+    fs.writeFileSync(request(), "device\n", { mode: 0o600 });
+    const r = runStep();
+    expect(r.status).toBe(0);
+    expect(deviceCalls()).toContain("device-secret set-password");
+    expect(fedToChpasswd()).toBe("");
+    expect(fs.existsSync(request())).toBe(false);
+  });
+
+  it("an owner's own password clears the sticker-password marker", () => {
+    fs.mkdirSync(etc(), { recursive: true });
+    fs.writeFileSync(path.join(etc(), "password-is-device"), "P 2026-10-15\n");
+    fs.writeFileSync(inputFile, "clawbox:owner-chosen\n", { mode: 0o600 });
+    const r = runStep();
+    expect(r.status).toBe(0);
+    expect(fs.existsSync(path.join(etc(), "password-is-device"))).toBe(false);
   });
 });

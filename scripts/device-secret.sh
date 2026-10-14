@@ -30,6 +30,13 @@
 #   device-secret.sh qr        < secret-hex   -> WIFI:T:WPA;S:<ssid>;P:<psk>;;
 #   device-secret.sh install   < secret-hex   -> writes the file (root)
 #   device-secret.sh load                     -> SSID=... / PSK=... from the file
+#   device-secret.sh set-password             -> (root) the account password = the
+#                                                sticker Wi-Fi password (PSK), and
+#                                                $CLAWBOX_ETC/password-is-device records it
+#
+# Provisioned boxes ship with the sticker's Wi-Fi password as their initial
+# system/SSH password (no universal default); the wizard replaces it with the
+# owner's own, and a factory reset puts the sticker one back.
 # Exit codes: 0 ok, 2 bad input, 3 no secret file, 4 secret of another board,
 # 64 usage.
 set -euo pipefail
@@ -139,6 +146,26 @@ cmd_install() {
   echo "device-secret: installed for this board"
 }
 
+# The password goes to chpasswd on stdin only. The marker holds `passwd -S`
+# status + last-change date so the web gates (src/lib/system-password.ts) can
+# tell "still the sticker password" from an owner's own; any later change
+# through the chpasswd step removes it.
+cmd_set_password() {
+  local account="${CLAWBOX_USER:-clawbox}" creds psk tmp
+  [ "$(id -u)" -eq 0 ] || die 64 "set-password must run as root"
+  creds="$(cmd_load)"
+  psk="$(printf '%s\n' "$creds" | sed -n 's/^PSK=//p')"
+  unset creds
+  [ -n "$psk" ] || die 2 "no device password"
+  printf '%s:%s\n' "$account" "$psk" | /usr/sbin/chpasswd
+  unset psk
+  tmp="$(mktemp "$ETC_DIR/.password-is-device.XXXXXX")"
+  passwd -S "$account" | awk 'NR==1 {print $2, $3}' >"$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$ETC_DIR/password-is-device"
+  echo "device-secret: account password set to the sticker password"
+}
+
 case "${1:-}" in
   # Assign first: a failed read inside an argument's $(...) would not stop us.
   derive) secret="$(read_secret_stdin)"; derive_pair "$secret" ;;
@@ -151,5 +178,6 @@ case "${1:-}" in
     ;;
   install) cmd_install ;;
   load) cmd_load ;;
-  *) echo "usage: device-secret.sh derive|qr|install|load" >&2; exit 64 ;;
+  set-password) cmd_set_password ;;
+  *) echo "usage: device-secret.sh derive|qr|install|load|set-password" >&2; exit 64 ;;
 esac

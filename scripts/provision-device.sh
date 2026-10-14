@@ -7,8 +7,10 @@
 # per-device flow (src/lib/device-provisioning.ts). Boxes without it — every
 # box set up before this flow — keep their behaviour exactly as it was.
 #
-# It changes nothing else: the system password and SSH stay exactly as the
-# image ships them (SSH defaults are unchanged by decision).
+# It also sets the account's initial system/SSH password to the sticker's Wi-Fi
+# password (device-secret.sh set-password), replacing the image's universal
+# one. SSH stays on as the image ships it; the setup wizard replaces the
+# password with the owner's own, and a factory reset puts the sticker one back.
 #
 # Stock boxes ONLY. A box that shows ANY sign of an owner (setup completed,
 # owner password flag, own hotspot settings, an owner password in /etc/shadow)
@@ -53,6 +55,7 @@ ssid="$(printf '%s' "$secret" | "$DEVICE_SECRET_SH" derive | sed -n 's/^SSID=//p
 echo "provision: plan"
 echo "  - install the device secret for this board (hotspot SSID $ssid, WPA2)"
 echo "  - mark the box provisioned ($ETC_DIR/provisioned)"
+echo "  - set the initial system/SSH password to the sticker Wi-Fi password (SSH stays on)"
 
 # owned | unowned | unknown. Several independent signals; any one of them, or
 # any doubt, means "not a stock box".
@@ -89,4 +92,5 @@ marker_tmp="$(mktemp "$ETC_DIR/.provisioned.XXXXXX")"
 printf 'provisioned\n' >"$marker_tmp"
 chmod 0644 "$marker_tmp"
 mv -f "$marker_tmp" "$ETC_DIR/provisioned"
-echo "provision: done — the hotspot uses the sticker credentials from its next start"
+CLAWBOX_USER="$ACCOUNT" "$DEVICE_SECRET_SH" set-password
+echo "provision: done — sticker hotspot from its next start; system/SSH password = sticker password"

@@ -10550,6 +10550,19 @@ step_llamacpp_install() {
 # password, root's included.
 step_chpasswd() {
   local INPUT_FILE="$PROJECT_DIR/data/.chpasswd-input"
+  local DEVICE_REQUEST="$PROJECT_DIR/data/.chpasswd-device"
+  # Factory reset of a provisioned box (setup/reset): the request file asks for
+  # the sticker password back. Only on a box the factory station provisioned;
+  # every other box keeps the record form below unchanged.
+  if [ -e "$DEVICE_REQUEST" ] || [ -L "$DEVICE_REQUEST" ]; then
+    rm -f "$DEVICE_REQUEST"
+    if [ ! -f "${CLAWBOX_ETC:-/etc/clawbox}/provisioned" ]; then
+      echo "Error: device password requested on a box that was not provisioned" >&2
+      exit 66
+    fi
+    CLAWBOX_USER="$CLAWBOX_USER" "$ROOT_LIBEXEC_DIR/device-secret.sh" set-password
+    return
+  fi
   # -f follows symlinks; -L rejects the link itself. A symlink here would be a
   # way to make root read a file the clawbox user could not otherwise feed in.
   if [ -L "$INPUT_FILE" ]; then
@@ -10593,6 +10606,8 @@ step_chpasswd() {
   fi
 
   printf '%s\n' "$record" | /usr/sbin/chpasswd
+  # The owner's (or wizard's) own password now: no longer the sticker one.
+  rm -f "${CLAWBOX_ETC:-/etc/clawbox}/password-is-device"
 }
 
 # ── ClawBox users (TASK-1256) ────────────────────────────────────────────────
