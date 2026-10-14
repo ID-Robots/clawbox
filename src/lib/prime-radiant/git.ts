@@ -1,0 +1,215 @@
+/**
+ * The vault's git: one repository, one author, one operation at a time.
+ *
+ * Every mutating operation on the vault is exactly ONE commit by
+ * `Prime Radiant <prime-radiant@localhost>`, so `git log -- <page>` is that
+ * page's history and `git revert` is its undo. Operations are serialised by a
+ * per-vault async mutex kept in {@link processStore} — this module is compiled
+ * more than once into the one web server (see process-store.ts), and a lock
+ * per module copy would be no lock at all.
+ *
+ * git runs through {@link runChild}: no shell, argv only, a hard timeout, and
+ * an environment built here from nothing. The user's global and system git
+ * config are switched off (`GIT_CONFIG_GLOBAL=/dev/null`,
+ * `GIT_CONFIG_NOSYSTEM=1`), hooks are pointed at /dev/null and signing is off,
+ * so a box whose owner signs commits or runs hooks still gets plain, local
+ * vault commits that never prompt.
+ *
+ * SERVER ONLY.
+ */
+
+import fs from "fs/promises";
+import { runChild, type ChildResult } from "@/lib/child-run";
+import { processStore } from "@/lib/process-store";
+import { createSerialLock, type SerialLock } from "@/lib/serial-lock";
+import path from "@/lib/runtime-path";
+
+export const VAULT_AUTHOR = Object.freeze({ name: "Prime Radiant", email: "prime-radiant@localhost" });
+export const VAULT_MAIN_BRANCH = "main";
+
+const GIT_TIMEOUT_MS = 30_000;
+
+export class VaultGitError extends Error {
+  constructor(
+    message: string,
+    readonly args: readonly string[],
+    readonly result: ChildResult,
+  ) {
+    super(message);
+    this.name = "VaultGitError";
+  }
+}
+
+export function gitEnv(): Record<string, string> {
+  return {
+    PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+    HOME: process.env.HOME ?? "/tmp",
+    LANG: "C",
+    LC_ALL: "C",
+    NO_COLOR: "1",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_AUTHOR_NAME: VAULT_AUTHOR.name,
+    GIT_AUTHOR_EMAIL: VAULT_AUTHOR.email,
+    GIT_COMMITTER_NAME: VAULT_AUTHOR.name,
+    GIT_COMMITTER_EMAIL: VAULT_AUTHOR.email,
+  };
+}
+
+const FIXED_CONFIG = [
+  "-c", "core.hooksPath=/dev/null",
+  "-c", "commit.gpgsign=false",
+  "-c", "tag.gpgsign=false",
+  "-c", "core.quotepath=false",
+  "-c", "core.autocrlf=false",
+  "-c", `user.name=${VAULT_AUTHOR.name}`,
+  "-c", `user.email=${VAULT_AUTHOR.email}`,
+];
+
+export interface GitOptions {
+  input?: string;
+  timeoutMs?: number;
+  /** Return a failed result instead of throwing. */
+  allowFail?: boolean;
+}
+
+/** Run git in the vault. Throws {@link VaultGitError} on a non-zero exit unless `allowFail`. */
+export async function git(vault: string, args: readonly string[], opts: GitOptions = {}): Promise<ChildResult> {
+  const result = await runChild("git", [...FIXED_CONFIG, "-C", vault, ...args], {
+    timeoutMs: opts.timeoutMs ?? GIT_TIMEOUT_MS,
+    env: gitEnv(),
+    input: opts.input,
+    notStarted: "git is not installed",
+  });
+  if (result.code !== 0 && !opts.allowFail) {
+    const detail = (result.stderr || result.stdout).trim().split("\n").slice(-3).join(" ");
+    throw new VaultGitError(`git ${args[0]} failed: ${detail || `exit ${result.code}`}`, args, result);
+  }
+  return result;
+}
+
+/** Run `fn` with the vault's lock held. One operation per vault at a time, in arrival order. */
+export function withVaultLock<T>(vault: string, fn: () => Promise<T>): Promise<T> {
+  const locks = processStore("prime-radiant:vault-locks", () => new Map<string, SerialLock>());
+  const key = path.resolve(vault);
+  let lock = locks.get(key);
+  if (!lock) {
+    lock = createSerialLock();
+    locks.set(key, lock);
+  }
+  return lock(fn);
+}
+
+export async function isGitRepo(vault: string): Promise<boolean> {
+  const r = await git(vault, ["rev-parse", "--is-inside-work-tree"], { allowFail: true });
+  if (r.code !== 0 || r.stdout.trim() !== "true") return false;
+  // The vault must be the repository's ROOT, not a folder inside someone else's.
+  const top = await git(vault, ["rev-parse", "--show-toplevel"], { allowFail: true });
+  return top.code === 0 && path.resolve(top.stdout.trim()) === path.resolve(vault);
+}
+
+export async function hasCommits(vault: string): Promise<boolean> {
+  const r = await git(vault, ["rev-parse", "--verify", "--quiet", "HEAD"], { allowFail: true });
+  return r.code === 0;
+}
+
+/** `git init` with `main` as the first branch (works on git older than 2.28 too). */
+export async function initRepo(vault: string): Promise<void> {
+  await git(vault, ["init", "--quiet"]);
+  await git(vault, ["symbolic-ref", "HEAD", `refs/heads/${VAULT_MAIN_BRANCH}`]);
+}
+
+export interface CommitInfo {
+  sha: string;
+  subject: string;
+  /** ISO 8601 committer date. */
+  at: string;
+  author: string;
+}
+
+const LOG_FORMAT = "%H%x1f%s%x1f%cI%x1f%an%x1e";
+
+function parseLog(stdout: string): CommitInfo[] {
+  return stdout
+    .split("\x1e")
+    .map((rec) => rec.trim())
+    .filter((rec) => rec !== "")
+    .map((rec) => {
+      const [sha, subject, at, author] = rec.split("\x1f");
+      return { sha, subject, at, author };
+    });
+}
+
+export async function headCommit(vault: string): Promise<CommitInfo | null> {
+  const r = await git(vault, ["log", "-1", `--format=${LOG_FORMAT}`], { allowFail: true });
+  if (r.code !== 0) return null;
+  return parseLog(r.stdout)[0] ?? null;
+}
+
+export async function currentBranch(vault: string): Promise<string | null> {
+  const r = await git(vault, ["symbolic-ref", "--quiet", "--short", "HEAD"], { allowFail: true });
+  return r.code === 0 ? r.stdout.trim() : null;
+}
+
+export async function commitCount(vault: string, ref = "HEAD"): Promise<number> {
+  const r = await git(vault, ["rev-list", "--count", ref], { allowFail: true });
+  const n = Number.parseInt(r.stdout.trim(), 10);
+  return r.code === 0 && Number.isFinite(n) ? n : 0;
+}
+
+/** The history of one vault-relative path, newest first (follows renames). */
+export async function logForPath(vault: string, rel: string, limit = 50): Promise<CommitInfo[]> {
+  const r = await git(vault, ["log", `-${Math.max(1, Math.min(limit, 1000))}`, "--follow", `--format=${LOG_FORMAT}`, "--", rel], {
+    allowFail: true,
+  });
+  return r.code === 0 ? parseLog(r.stdout) : [];
+}
+
+/** A file's contents at `ref`, or null when it does not exist there. */
+export async function showFileAt(vault: string, ref: string, rel: string): Promise<string | null> {
+  const r = await git(vault, ["show", `${ref}:${rel}`], { allowFail: true });
+  return r.code === 0 ? r.stdout : null;
+}
+
+/** Paths that differ between `base` and `head` (three-dot: since they diverged). */
+export async function changedPaths(vault: string, base: string, head: string): Promise<string[]> {
+  const r = await git(vault, ["diff", "--name-only", "-z", `${base}...${head}`]);
+  return r.stdout.split("\0").filter((p) => p !== "");
+}
+
+/** Does `rel` exist in HEAD? */
+export async function trackedAtHead(vault: string, rel: string): Promise<boolean> {
+  const r = await git(vault, ["cat-file", "-e", `HEAD:${rel}`], { allowFail: true });
+  return r.code === 0;
+}
+
+/**
+ * Stage exactly `paths` (additions, edits and deletions) and commit them as
+ * one commit. Returns the new sha, or null when nothing in `paths` changed —
+ * an operation that changed nothing records nothing. Callers hold the lock.
+ */
+export async function commitPaths(vault: string, message: string, paths: readonly string[]): Promise<string | null> {
+  const subject = message.replace(/[\r\n]+/g, " ").trim();
+  if (subject === "") throw new Error("a vault commit needs a message");
+  if (paths.length === 0) return null;
+  await git(vault, ["add", "-A", "--", ...paths]);
+  const staged = await git(vault, ["diff", "--cached", "--quiet", "--", ...paths], { allowFail: true });
+  if (staged.code === 0) return null;
+  await git(vault, ["commit", "--quiet", "--no-verify", "-m", subject, "--", ...paths]);
+  const head = await headCommit(vault);
+  return head?.sha ?? null;
+}
+
+/** Put `paths` back the way HEAD has them (a new file is removed). Callers hold the lock. */
+export async function restorePaths(vault: string, paths: readonly string[]): Promise<void> {
+  if (paths.length === 0) return;
+  const tracked: string[] = [];
+  const untracked: string[] = [];
+  for (const p of paths) ((await trackedAtHead(vault, p)) ? tracked : untracked).push(p);
+  await git(vault, ["reset", "--quiet", "--", ...paths], { allowFail: true });
+  if (tracked.length > 0) await git(vault, ["checkout", "HEAD", "--", ...tracked]);
+  // A path HEAD does not have was created by the operation: it goes. Paths are
+  // vault-relative and were accepted by safePagePath before anything wrote them.
+  for (const p of untracked) await fs.rm(path.join(vault, ...p.split("/")), { force: true });
+}

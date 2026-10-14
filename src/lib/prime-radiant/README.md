@@ -1,0 +1,49 @@
+# Prime Radiant — `src/lib/prime-radiant/`
+
+The server-side layer of Prime Radiant, the "living wiki": a git-backed vault
+of Markdown pages with structured claims, read by OpenClaw's bundled
+`memory-wiki` plugin in isolated mode and kept healthy by its own lint. Every
+module here is SERVER ONLY unless it says "pure".
+
+## Layout on disk
+
+```
+<box data dir>/prime-radiant/        (or $PRIME_RADIANT_DIR)
+  vault/                              git repo, branch main, memory-wiki layout
+    index.md  AGENTS.md  .gitignore
+    entities/  concepts/  syntheses/  sources/
+  prime-radiant.sqlite                state: claim_registry, review_items, runs, costs, ingest_jobs
+```
+
+## Modules
+
+| Module | What it is for |
+| --- | --- |
+| `paths.ts` | `primeRadiantRoot()`, `vaultDir()`, `stateDbPath()` (read at call time); `safePagePath(input)` rebuilds a caller's page path or answers null; `isKnowledgePage(rel)` tells pages from bookkeeping (`index.md`, `reports/`, `.openclaw-wiki/`, …). |
+| `schema.ts` (pure) | The page contract: `PageFrontmatter`, `Claim`, the enums, `validateFrontmatter(raw)`, `hasVerification(fm)`, `folderForType(type)`. Unknown keys are kept. |
+| `frontmatter.ts` (pure) | `parsePage(text)` → `{ ok, frontmatter, body }` or `{ ok: false, errors }`; `serializePage(fm, body)` is deterministic (an unchanged page re-serialises to the same bytes); `pageSummary(body)`. YAML via js-yaml's CORE schema (no implicit dates). |
+| `claims.ts` (pure) | The global claim-id namespace `<domain>/<entity>/<fact>`: `isClaimId`, `makeClaimId`, `slugify`, `buildClaimIndex(pages, ledgerRetired)`, `claimCollisions`, `retiredReuse`, `assertClaimIdAvailable` (throws `ClaimIdError` `invalid`/`taken`/`retired`), `allocateClaimId`, `retireClaimsOnPage`. A retired id is never reused. |
+| `redact.ts` (pure) | `redactText(text, { maskEmails, maskPhones })`, `redactPath(path, { homeDir })`, `scanSecrets(text)`. Deterministic `[REDACTED:<KIND>]` placeholders; IBAN mod-97 and card Luhn validation; Unix timestamps are never cards. Apply to text AND paths before any network call. |
+| `links.ts` (pure) | `extractLinks(body)` (wikilinks and relative Markdown links, code ignored), `createLinkResolver(pages)`, `buildLinkGraph(pages, indexBody)` → inbound/outbound/indexed. |
+| `lint.ts` (pure over a snapshot) | `lintVault(snapshot, { scope, ledgerRetired, now })` → `LintReport`. Rules: `page-too-long` (6,000 soft / 12,000 hard), `summary-missing`, `summary-too-long` (300), `too-many-claims` (20), `claim-too-long` (240), `atomic-too-long` (entity/decision 3,000), `orphan`, `no-sources`, `stale-after-passed`, `secret-pattern`, `frontmatter-invalid`, `claim-id-collision`, `claim-id-retired-reuse`. Over-cap findings carry a `split` (`suggestSplit`: by headings, else by paragraphs; the page stays the hub). Four rules have `blocksCommit`. |
+| `git.ts` | `git(vault, args)` through `runChild` (no shell, own environment, user's global git config ignored), `withVaultLock(vault, fn)` (per-vault mutex in `processStore`), `commitPaths`, `restorePaths`, `headCommit`, `currentBranch`, `commitCount`, `logForPath`, `showFileAt`, `changedPaths(base, head)`, `trackedAtHead`. Author/committer `Prime Radiant <prime-radiant@localhost>`. |
+| `vault.ts` | `ensureVault()` (idempotent first-run init), `readVaultSnapshot()`, `readPage(rel)`, `listEntry(page)`, and **`vaultOperation(message, fn)`** — the one way to change the vault: lock held, writes through `tx.write/writePage/remove`, scoped lint, exactly one commit (or none if nothing changed); a blocking finding (`VaultLintBlockedError`) or a throw puts every touched file back. |
+| `state-db.ts` | `openStateDb(vault)` / `withStateDb(vault, fn)` (node:sqlite, migrated by `user_version`); the claim ledger: `readRetiredLedger`, `recordRetired`, `syncActiveClaims`. The other tables are created for later work. |
+| `plugin-wiring.ts` | `planMemoryWikiWiring(config, vault)` (pure), `memoryWikiWiringStatus()`, `ensureMemoryWikiWiring({ force })`: writes only `plugins.entries.memory-wiki.{enabled, config.vaultMode, config.vault.path}`, only when they differ, in one batch. Owner choices (plugin off, another mode or vault, agent scope, deny/allow lists) are `conflict`s, never overwritten unless forced (and deny/allow/agent scope never). |
+| `service.ts` | What the routes answer: `getStatus()`, `listPages(filter)`, `getPage(rel)`, `getLint(paths)`. |
+| `route-helpers.ts` | `json`, `fail(code, error, status)`, `vaultFailure(where, err)`. |
+
+## Routes (`src/app/setup-api/prime-radiant/`)
+
+All owner-only through `requireSession`, `force-dynamic`, `Cache-Control: no-store`, failures as `{ error, code }`.
+
+- `GET status` — vault (created on first use), git head, memory-wiki wiring state, lint summary.
+- `GET pages?type&domain&status&verified&q&offset&limit` — page list, no bodies.
+- `GET pages/<path>` — one page: frontmatter or its errors, body, summary, backlinks, links, scoped lint. Not a page → 404.
+- `GET lint?path=…&paths=a,b` — lint report for those pages, or the whole vault.
+
+## Building on it
+
+- A writer adds pages with `vaultOperation("ingest: <what>", async (tx) => { … tx.writePage(path, fm, body) … })`, allocating ids with `allocateClaimId` against `buildClaimIndex` of a fresh snapshot, after `redactText`/`redactPath` on everything sent to a model.
+- A verification replaces a claim with `retireClaimsOnPage` (+ `verified` on the claim, `checked_by: "human"`) inside one `vaultOperation("verify: <claimId>", …)`; the ledger records the retired ids after the commit.
+- A gate compares branches with `changedPaths` and `showFileAt` + `parsePage` + `hasVerification` on the base side.
