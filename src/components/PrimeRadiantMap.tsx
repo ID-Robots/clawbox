@@ -532,11 +532,18 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
               setResultsOpen(true);
             }}
             onFocus={() => setResultsOpen(true)}
+            onBlur={() => setResultsOpen(false)}
             onKeyDown={onSearchKey}
             data-testid="prime-radiant-map-search"
           />
           {matches && resultsOpen && (
-            <div className={`${CARD_SURFACE} absolute z-20 left-0 right-0 mt-1 p-1 bg-[var(--win-ground)] shadow-xl`} data-testid="prime-radiant-map-results">
+            <div
+              // Opaque (the window's own ground): the legend and the map must not show through.
+              // A press here keeps the field focused, so its blur does not close the list under the click.
+              className="absolute z-20 left-0 right-0 mt-1 p-1 rounded-xl border border-white/[0.1] bg-[var(--win-ground,#0d1117)] shadow-xl"
+              onMouseDown={(e) => e.preventDefault()}
+              data-testid="prime-radiant-map-results"
+            >
               <p className="px-2 py-1 text-[11px] text-[var(--text-muted)]" role="status" aria-live="polite" data-testid="prime-radiant-map-match-count">
                 {matches.length > 0 ? t("primeRadiant.map.matches", { n: matches.length }) : t("primeRadiant.map.noMatches")}
               </p>
@@ -556,6 +563,11 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
                   </li>
                 ))}
               </ul>
+              {matches.length > 8 && (
+                <p className="px-2 pt-1 pb-0.5 text-[11px] text-[var(--text-muted)]" data-testid="prime-radiant-map-results-more">
+                  {t("primeRadiant.map.more", { n: matches.length - 8 })}
+                </p>
+              )}
             </div>
           )}
         </div>

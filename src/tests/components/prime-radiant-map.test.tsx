@@ -141,6 +141,10 @@ describe("PrimeRadiantMap", () => {
     const { onOpenPage } = await mount();
     fireEvent.change(screen.getByTestId("prime-radiant-map-search"), { target: { value: "acme" } });
     expect(await screen.findByTestId("prime-radiant-map-match-count")).toHaveTextContent("Matching pages: 2");
+    // Leaving the field folds the list away (it would cover the map); coming back opens it again.
+    fireEvent.blur(screen.getByTestId("prime-radiant-map-search"));
+    expect(screen.queryByTestId("prime-radiant-map-results")).toBeNull();
+    fireEvent.focus(screen.getByTestId("prime-radiant-map-search"));
     const results = screen.getAllByTestId("prime-radiant-map-result");
     expect(results.map((r) => r.textContent)).toEqual([expect.stringContaining("Acme Widgets Ltd"), expect.stringContaining("Acme returns")]);
     await waitFor(() => expect(lastStates(setStates)[0]).toBe(STATE_MATCH));
