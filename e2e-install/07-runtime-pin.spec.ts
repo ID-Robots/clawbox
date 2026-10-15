@@ -96,11 +96,12 @@ test.describe("the runtime and the core the install actually left behind", () =>
   });
 
   test("leaves a config the pinned core accepts", async () => {
-    // The core's own validator over the openclaw.json install.sh actually
-    // wrote: a key the core does not know (install.sh's
-    // `agents.defaults.model.fallback`, refused on every core since it was
-    // added) is caught here by the harness itself, not by matching strings.
-    // The exit status is not trusted alone — the JSON verdict is read too.
+    // The core's own validator over the openclaw.json this install actually
+    // left — including what ClawBox writes without the CLI (gateway-pre-start's
+    // Python passes, the web server's whole-file writes), which the static
+    // harness-contract check cannot read. A key the core does not know fails
+    // here in the harness's own words, not by matching strings. The exit
+    // status is not trusted alone — the JSON verdict is read too.
     const out = await dockerExec(
       ["bash", "-lc", "/home/clawbox/.npm-global/bin/openclaw config validate --json; echo \"__exit=$?\""],
       { user: "clawbox", timeoutMs: 120_000 },

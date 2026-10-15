@@ -6918,9 +6918,18 @@ step_openclaw_config() {
     # `fallbacks`, a LIST: the core has no singular `fallback` key and refused
     # this write with "Unrecognized key" on every core since the line was added,
     # which ended the step here under errexit (the harness-contract CI job now
-    # checks every key against the pinned schema).
-    oc_config_set agents.defaults.model.fallbacks '["deepseek/deepseek-chat"]' --json
-    echo "  ClawBox AI fallback model configured"
+    # checks every key against the pinned schema). Seeded only while the list
+    # is unset or empty, as the primary above is: this step re-runs on every
+    # rebuild, and a list the owner or the configure route wrote stays theirs.
+    # (`config get` prints an unset path's notice on stderr, nothing on stdout.)
+    local CURRENT_FALLBACKS
+    CURRENT_FALLBACKS=$(as_clawbox "$OPENCLAW_BIN" config get agents.defaults.model.fallbacks 2>/dev/null | tr -d '[:space:]' || echo "")
+    if [ -z "$CURRENT_FALLBACKS" ] || [ "$CURRENT_FALLBACKS" = "null" ] || [ "$CURRENT_FALLBACKS" = "[]" ]; then
+      oc_config_set agents.defaults.model.fallbacks '["deepseek/deepseek-chat"]' --strict-json
+      echo "  ClawBox AI fallback model configured"
+    else
+      echo "  Fallback models already set — preserving"
+    fi
     # Deliberately no image provider here, unlike configureClawboxAi() in
     # src/app/setup-api/ai-models/configure/route.ts and the migration in
     # scripts/gateway-pre-start.sh. CLAWBOX_AI_API_KEY is a raw DeepSeek key

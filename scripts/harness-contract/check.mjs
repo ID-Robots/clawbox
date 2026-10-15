@@ -24,10 +24,11 @@ const meta = read(metaPath);
 const ALLOWLIST = "config/harness-contract-allowlist.json";
 const allow = read(path.join(repo, ALLOWLIST));
 const today = new Date().toISOString().slice(0, 10);
+const soon = new Date(Date.now() + 14 * 86_400_000).toISOString().slice(0, 10);
 
 const OC = `openclaw@${meta.openclawPin}`;
 const HE = `hermes@${meta.hermesTag ?? meta.hermesCommit.slice(0, 12)}`;
-const label = (h) => (h === "openclaw" ? OC : HE);
+const label = (h) => (h === "openclaw" ? OC : h === "hermes" ? HE : "clawbox");
 
 /** Findings, grouped by what is wrong so each is one line with all its sites. */
 const findings = new Map();
@@ -35,6 +36,7 @@ const add = (level, harness, kind, name, why, site) => {
   const id = `${level}|${harness}|${kind}|${name}|${why}`;
   if (!findings.has(id)) findings.set(id, { level, harness, kind, name, why, sites: [] });
   if (site && !findings.get(id).sites.includes(site)) findings.get(id).sites.push(site);
+  return findings.get(id);
 };
 const fail = (...a) => add("FAIL", ...a);
 const warn = (...a) => add("WARN", ...a);
@@ -108,7 +110,15 @@ if (need(oc.hooks, "the plugin hook names (pluginHookNameSet)")) {
 }
 
 // ── Hermes ──────────────────────────────────────────────────────────────────
-const tree = new Map(he.cli.map((r) => [r.path, r]));
+const needHermes = (value, what) => {
+  if (value) return true;
+  fail("hermes", "surface", what, "could not be read from the pinned source — the check cannot vouch for it", null);
+  return false;
+};
+needHermes(he.cli?.length, "the argparse tree");
+needHermes(he.validatorRefusalRule, "the config validator's refusal rule (_is_wrong_prefix_suggestion)");
+if (he.chatRules?.present) needHermes(he.chatRules.refused && he.chatRules.frozenOnResume, "`hermes chat`'s runtime rules (_UNSUPPORTED, _POLICY)");
+const tree = new Map((he.cli ?? []).map((r) => [r.path, r]));
 const children = new Map();
 for (const r of he.cli) {
   const parts = r.path.split(" ");
@@ -117,7 +127,7 @@ for (const r of he.cli) {
   if (!children.has(parent)) children.set(parent, new Map());
   for (const n of [parts[parts.length - 1], ...r.aliases]) children.get(parent).set(n, r.path);
 }
-for (const u of uses("hermes", "cli")) {
+for (const u of tree.size ? uses("hermes", "cli") : []) {
   let node = "hermes";
   let ok = true;
   for (const w of u.words) {
@@ -140,15 +150,20 @@ for (const u of uses("hermes", "cli")) {
     }
   }
 }
+// Keys ClawBox itself writes with --force (outside the validator by design): reading them back is fine.
+const forced = uses("hermes", "config").filter((u) => u.op === "set" && u.force).map((u) => u.name.split("."));
+const isForced = (key) => forced.some((f) => f.length === key.split(".").length && f.every((seg, i) => seg === "*" || seg === key.split(".")[i]));
 for (const u of uses("hermes", "config")) {
   const v = he.config[u.name];
   if (!v || v.env) continue; // UPPER_SNAKE keys go to .env, which the validator does not judge
   if (v.known) continue;
-  const via = u.op === "set" ? "`hermes config set`" : null;
-  if (via && v.refused && !u.force) fail("hermes", "config", u.name, `refused by the pinned \`hermes config set\` without --force${v.suggestion ? ` (did you mean ${v.suggestion})` : ""}`, u.site);
-  else if (via && v.refused) info("hermes", "config", u.name, "outside the validator's schema; written with --force, which the call passes", u.site);
-  else if (via) warn("hermes", "config", u.name, "not in the pinned config schema; Hermes writes it with a 'not a recognized config key' warning", u.site);
-  else info("hermes", "config", u.name, `${u.op === "get" ? "read" : u.op} outside the pinned validator's schema — the runtime must read it for this to matter`, u.site);
+  const hint = v.suggestion ? ` (did you mean ${v.suggestion})` : "";
+  if (u.op === "set" && v.refused && !u.force) fail("hermes", "config", u.name, `refused by the pinned \`hermes config set\` without --force${hint}`, u.site);
+  else if (u.op === "set" && v.refused) info("hermes", "config", u.name, "outside the validator's schema; written with --force, which the call passes", u.site);
+  else if (u.op === "set") warn("hermes", "config", u.name, `not in the pinned config schema; Hermes writes it with a 'not a recognized config key' warning${hint}`, u.site);
+  else if (u.op === "write" || u.op === "unset") fail("hermes", "config", u.name, `${u.op === "write" ? "written into config.yaml" : "unset"}, but not a key the pinned validator knows${hint}`, u.site);
+  else if (isForced(u.name)) info("hermes", "config", u.name, "read back; ClawBox writes it with --force", u.site);
+  else warn("hermes", "config", u.name, `read, but not a key the pinned validator knows${hint}`, u.site);
 }
 if (!he.openrpc) fail("hermes", "surface", "apps/shared/src/gateway-contract.openrpc.json", "not found at the pin — the RPC and event checks cannot run", null);
 else {
@@ -162,8 +177,12 @@ else {
     fail("hermes", "event", u.name, kinds.includes("x-server-requests") ? "a server→client REQUEST at the pin, not an event" : "the pinned dashboard never sends this event", u.site);
   }
 }
-const routes = he.routes.map(([methods, p]) => ({ methods: methods.split(","), segs: p.split("/") }));
-for (const u of uses("hermes", "route")) {
+// A route with no literal segment before its first parameter (the SPA's
+// `GET /{full_path:path}` fallback) answers every path, so it proves nothing.
+const routes = (he.routes ?? []).map(([methods, p]) => ({ methods: methods.split(","), segs: p.split("/") }))
+  .filter((r) => !/^\{/.test(r.segs[1] ?? "{"));
+needHermes(routes.length, "the dashboard routes");
+for (const u of routes.length ? uses("hermes", "route") : []) {
   const segs = u.name.split("/");
   const match = routes.some((r) => {
     if (u.method && !r.methods.includes(u.method) && !r.methods.includes("*")) return false;
@@ -177,13 +196,12 @@ for (const u of uses("hermes", "route")) {
   });
   if (!match) fail("hermes", "route", `${u.method ?? "ANY"} ${u.name}`, "no such route on the pinned dashboard", u.site);
 }
-if (meta.hermesTagCommit === null) info("hermes", "pin", meta.hermesTag, "the tag was verified when this pin's checkout was cached", null);
+if (meta.hermesTagCommit === null) info("hermes", "pin", meta.hermesTag, "this tag -> commit was verified upstream when the cached tree recorded it", null);
 else if (meta.hermesTagCommit !== meta.hermesCommit) {
   fail("hermes", "pin", meta.hermesTag, `upstream's tag points at ${meta.hermesTagCommit || "nothing"}, not the pinned ${meta.hermesCommit}`, meta.hermesPinSite);
 }
 
 // ── the allow-list ──────────────────────────────────────────────────────────
-const allowed = [];
 for (const [i, e] of (allow.entries ?? []).entries()) {
   const where = `${ALLOWLIST} entry ${i + 1} (${e.harness} ${e.kind} ${e.name})`;
   if (!["known-gap", "version-guarded"].includes(e.category) || !e.reason?.trim() || !/^\d{4}-\d{2}-\d{2}$/.test(e.expires ?? "") || !e.sites?.length) {
@@ -196,11 +214,48 @@ for (const [i, e] of (allow.entries ?? []).entries()) {
     continue;
   }
   if (e.expires < today) {
-    for (const h of hits) h.why += ` (allow-list entry expired ${e.expires}: ${e.reason})`;
+    // Red on beta and locally; a warning on a pull request, which did not cause it and cannot fix it.
+    for (const h of hits) {
+      h.why += ` (allow-list entry expired ${e.expires}: ${e.reason})`;
+      if (process.env.GITHUB_EVENT_NAME === "pull_request") h.level = "WARN";
+    }
     continue;
   }
-  for (const h of hits) { h.level = "ALLOWED"; h.allow = e; }
-  allowed.push(e);
+  if (e.expires <= soon) warn(e.harness, "allow-list", where, `expires ${e.expires}: fix it or renew the entry with a reason`, null);
+  // Only the files the entry names are covered: a new file using the same name is a new case.
+  const fileOf = (site) => site.split(/:(?=\d+$)/)[0];
+  const files = new Set(e.sites.map(fileOf));
+  for (const h of hits) {
+    const extra = h.sites.filter((site) => !files.has(fileOf(site)));
+    const covered = h.sites.filter((site) => files.has(fileOf(site)));
+    if (!extra.length) { h.level = "ALLOWED"; h.allow = e; continue; }
+    h.sites = extra;
+    h.why += ` — not covered by ${where}, which names ${[...files].join(", ")}`;
+    if (covered.length) findings.set(`ALLOWED|${h.harness}|${h.kind}|${h.name}|${i}`, { ...h, level: "ALLOWED", why: h.why.split(" — not covered")[0], sites: covered, allow: e });
+  }
+}
+
+// ── call sites the scan could not read: the list may shrink, never grow unseen ──
+const RECORDED = "config/harness-contract-unchecked.json";
+const recorded = read(path.join(repo, RECORDED));
+const current = new Map();
+for (const u of usage.unchecked) {
+  const key = `${u.site.split(/:(?=\d+$)/)[0]}\u0000${u.why}`;
+  if (!current.has(key)) current.set(key, { harness: u.harness, sites: [] });
+  current.get(key).sites.push(u.site);
+}
+for (const [key, { harness, sites }] of current) {
+  const [file, why] = key.split("\u0000");
+  const was = recorded[file]?.[why] ?? 0;
+  if (sites.length > was) {
+    fail(harness, "unchecked", `${file}: ${why}`, `${sites.length} call site(s), ${was} recorded in ${RECORDED} — pass the value as a literal or a named constant, or record it (node scripts/harness-contract/scan.mjs --unchecked > ${RECORDED})`, null).sites.push(...sites);
+  }
+}
+for (const [file, whys] of Object.entries(recorded)) {
+  for (const [why, n] of Object.entries(whys)) {
+    const now = current.get(`${file}\u0000${why}`)?.sites.length ?? 0;
+    if (now < n) info("clawbox", "unchecked", `${file}: ${why}`, `${now} call site(s), ${n} recorded — lower the record (node scripts/harness-contract/scan.mjs --unchecked > ${RECORDED})`, null);
+  }
 }
 
 // ── report ──────────────────────────────────────────────────────────────────

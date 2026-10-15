@@ -32,7 +32,7 @@ class _Stub(type):
     def __getattr__(cls, name):
         if name.startswith("__") and name.endswith("__"):
             raise AttributeError(name)
-        return _make(f"{cls.__name__}.{name}")
+        return _make(name)
 
     def __call__(cls, *a, **k):
         if len(a) == 1 and callable(a[0]) and not k:
@@ -58,8 +58,17 @@ class _Stub(type):
         return (object,)
 
 
+_STUBS = {}
+
+
 def _make(name):
-    return _Stub(name.replace(".", "_"), (), {})
+    """One stand-in per name, so code that walks a chain (`while p is not None and p.pid
+    not in seen: p = p.parent()`) comes round to an object it has seen and stops."""
+    if name not in _STUBS:
+        if len(_STUBS) > 50_000:
+            raise RuntimeError("stand-in modules grew without bound: a stubbed dependency is being driven in a loop")
+        _STUBS[name] = _Stub(name.replace(".", "_"), (), {})
+    return _STUBS[name]
 
 
 class _Route:
@@ -123,7 +132,8 @@ class _Router:
 
 
 class _Finder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
-    """Stand in for any module that is neither the checkout's own nor the standard library's."""
+    """Stand in for EVERY module that is neither the checkout's own nor the standard
+    library's — whatever the host has installed — so the answer is the same on every host."""
 
     def __init__(self, roots):
         self.roots = roots
@@ -132,14 +142,10 @@ class _Finder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
         top = fullname.split(".")[0]
         if top in self.roots or top in sys.stdlib_module_names:
             return None
-        for finder in sys.meta_path:
-            if finder is self:
-                continue
-            try:
-                if finder.find_spec(fullname, path, target) is not None:
-                    return None
-            except Exception:
-                pass
+        # The interpreter's own directories hold modules stdlib_module_names omits
+        # (_sysconfigdata_*); anything found there is the standard library.
+        if "." not in fullname and importlib.machinery.PathFinder.find_spec(fullname, _STDLIB_PATHS) is not None:
+            return None
         return importlib.machinery.ModuleSpec(fullname, self, is_package=True)
 
     def create_module(self, spec):
@@ -147,16 +153,17 @@ class _Finder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
         module.__path__ = []
         if spec.name == "fastapi":
             module.FastAPI = module.APIRouter = _Router
-        module.__getattr__ = lambda n, _s=spec.name: _make(f"{_s}.{n}")
+        module.__getattr__ = lambda n: _make(n)
         return module
 
     def exec_module(self, module):
         pass
 
 
+_STDLIB_PATHS = [p for p in sys.path if p and "site-packages" not in p and "dist-packages" not in p]
 sys.path.insert(0, checkout)
 roots = {n[:-3] if n.endswith(".py") else n for n in os.listdir(checkout)}
-sys.meta_path.append(_Finder(roots))
+sys.meta_path.insert(0, _Finder(roots))
 usage = json.load(open(usage_path))
 out = {}
 
@@ -211,14 +218,18 @@ except ImportError:
     out["chatRules"] = {"present": False}
 else:
     flag = lambda n: ("-" if len(n) == 1 else "--") + n.replace("_", "-")  # noqa: E731
+    # A rename upstream must not read as "nothing is refused": absent is null, which the check fails on.
+    unsupported, policy = getattr(gateway_chat, "_UNSUPPORTED", None), getattr(gateway_chat, "_POLICY", None)
     out["chatRules"] = {"present": True,
-                        "refused": sorted(flag(n) for n in getattr(gateway_chat, "_UNSUPPORTED", ())),
-                        "frozenOnResume": sorted(flag(n) for n in getattr(gateway_chat, "_POLICY", ()))}
+                        "refused": None if unsupported is None else sorted(flag(n) for n in unsupported),
+                        "frozenOnResume": None if policy is None else sorted(flag(n) for n in policy)}
 
 # ── config: Hermes's own validator, asked about every key ClawBox names ──────
 from hermes_cli import config as hermes_config  # noqa: E402
 
 verdicts = {}
+wrong_prefix = getattr(hermes_config, "_is_wrong_prefix_suggestion", None)
+out["validatorRefusalRule"] = wrong_prefix is not None
 for u in usage["usages"]:
     if u["harness"] != "hermes" or u["kind"] != "config" or u["name"] in verdicts:
         continue
@@ -227,9 +238,8 @@ for u in usage["usages"]:
         verdicts[key] = {"env": True}
         continue
     known, suggestion = hermes_config._validate_config_key(key)
-    wrong_prefix = getattr(hermes_config, "_is_wrong_prefix_suggestion", lambda *_: False)
     verdicts[key] = {"known": bool(known), "suggestion": suggestion,
-                     "refused": (not known) and bool(wrong_prefix(key, suggestion))}
+                     "refused": (not known) and bool(wrong_prefix and wrong_prefix(key, suggestion))}
 out["config"] = verdicts
 try:
     from hermes_cli import config_defaults as hermes_defaults

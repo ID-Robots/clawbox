@@ -41,9 +41,12 @@ jobs:
 
       - name: Read the pins
         id: pins
+        # Assigned first, so a pin that cannot be read fails the step here.
         run: |
-          echo "openclaw=$(node scripts/harness-pins.mjs openclaw)" >> "$GITHUB_OUTPUT"
-          echo "hermes=$(node scripts/harness-pins.mjs hermes.commit)" >> "$GITHUB_OUTPUT"
+          openclaw="$(node scripts/harness-pins.mjs openclaw)"
+          hermes="$(node scripts/harness-pins.mjs hermes.commit)"
+          echo "openclaw=$openclaw" >> "$GITHUB_OUTPUT"
+          echo "hermes=$hermes" >> "$GITHUB_OUTPUT"
 
       - name: Restore the pinned OpenClaw
         id: openclaw-cache
@@ -65,8 +68,9 @@ jobs:
         run: scripts/harness-contract/run.sh
 
       # Saved whatever the verdict, so a failing PR does not refetch the pins
-      # on every push. run.sh only ever leaves a complete package or a
-      # verified tree at these paths.
+      # on every push. run.sh builds both in a `.part` directory and moves it
+      # to these paths only when complete (Hermes: once its tag is verified),
+      # so a failed or cancelled run leaves nothing here to save.
       - name: Save the pinned OpenClaw
         if: always() && steps.openclaw-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6

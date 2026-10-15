@@ -85,10 +85,8 @@ function parseHelp(text) {
   const options = new Set();
   for (const l of section("Options").filter((x) => /^ {2}-/.test(x))) {
     const spec = l.trim().split(/ {2,}/)[0];
-    for (const m of spec.matchAll(/(?:^|[\s,])(--?[A-Za-z0-9][A-Za-z0-9-]*)/g)) {
-      options.add(m[1]);
-      if (m[1].startsWith("--no-")) options.add(`--${m[1].slice(5)}`);
-    }
+    // As listed: commander accepts `--x` beside `--no-x` only when it lists both.
+    for (const m of spec.matchAll(/(?:^|[\s,])(--?[A-Za-z0-9][A-Za-z0-9-]*)/g)) options.add(m[1]);
   }
   return {
     usage: usageLine,

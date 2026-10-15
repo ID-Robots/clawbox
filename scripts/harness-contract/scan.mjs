@@ -521,39 +521,49 @@ function scanJs(file, info, consts, registry, record, skip) {
   };
   const dashed = (text) => [...text.matchAll(/["'`](--?[a-z][a-z0-9-]*)(?:=[^"'`]*)?["'`]/g)].map((m) => m[1]);
 
+  /** Every alternative of an argv once spreads of local arrays (and their ternaries) are spelled out. */
+  const expand = (elems, pos, depth = 0) => {
+    let out = [[]];
+    for (const e of elems) {
+      const v = literal(e.text);
+      const inner = depth < 2 && /^[A-Za-z_$][\w$]*$/.test(v.spread ?? "") ? localArray(v.spread, pos) : null;
+      if (inner) {
+        const subs = inner.flatMap((alt) => expand(alt, pos, depth + 1));
+        out = out.flatMap((o) => subs.map((sub) => [...o, ...sub])).slice(0, 16);
+      } else out = out.map((o) => [...o, e]);
+    }
+    return out;
+  };
   /**
-   * One argv alternative → {words, flags, restRaw, dynamicHead, paramSpread}.
+   * One argv alternative → {words, flags, restRaw, dynamicHead, paramSpread, optionsFirst}.
    * `paramSpread` is a spread of a parameter of the enclosing function in
    * command position: the words come from that function's callers.
    */
-  const readArgv = (elems, pos, depth = 0) => {
+  const readArgv = (elems, pos) => {
     const words = [];
     const flags = [];
     const restRaw = [];
     let head = true;
     let dynamicHead = false;
     let paramSpread = null;
+    let optionsFirst = false;
+    let computedFlag = false;
     for (const e of elems) {
       const v = literal(e.text);
       if (v.spread !== undefined) {
         const name = /^[A-Za-z_$][\w$]*$/.test(v.spread) ? v.spread : null;
-        const inner = name ? localArray(name, pos) : null;
-        if (inner && depth < 2) {
-          const sub = readArgv(inner[0], pos, depth + 1);
-          if (head && sub.words.length && !sub.dynamicHead) words.push(...sub.words);
-          else if (head && (sub.dynamicHead || sub.words.length === 0)) { head = false; dynamicHead = true; }
-          flags.push(...sub.flags, ...inner.slice(1).flatMap((alt) => readArgv(alt, pos, depth + 1).flags));
-          restRaw.push(...sub.restRaw);
-          continue;
-        }
         if (head && name && enclosing(pos)?.params.includes(name)) paramSpread = { name, words: [...words], flags: [...flags] };
         flags.push(...dashed(v.spread));
         if (head) { head = false; dynamicHead = true; }
         continue;
       }
       const s = textValue(v);
-      if (s !== null && s.startsWith("-") && resolve(v).str !== undefined) {
-        if (s !== "-" && s !== "--") flags.push(s.split("=")[0]);
+      if (s !== null && s.startsWith("-")) {
+        // `--name=${value}` is still the literal option `--name`; a computed name is not read.
+        const flag = s.split("=")[0];
+        if (flag.includes("*")) computedFlag = true;
+        else if (s !== "-" && s !== "--") flags.push(flag);
+        if (head && !words.length) optionsFirst = true;
         head = false;
         continue;
       }
@@ -565,7 +575,7 @@ function scanJs(file, info, consts, registry, record, skip) {
       head = false;
       restRaw.push(e);
     }
-    return { words, flags: [...new Set(flags)], restRaw, dynamicHead, paramSpread };
+    return { words, flags: [...new Set(flags)], restRaw, dynamicHead, paramSpread, optionsFirst, computedFlag };
   };
 
   const cliUse = (entry, expr, pos, how) => {
@@ -575,7 +585,7 @@ function scanJs(file, info, consts, registry, record, skip) {
       if (expr && learn(pos, expr, { kind: "argv", harness, prefix: entry.prefix })) return;
       return unchecked(harness, "cli", pos, `${how}: argv is computed at runtime`);
     }
-    for (const elems of alts) {
+    for (const elems of alts.flatMap((alt) => expand(alt, pos))) {
       const a = readArgv(elems, pos);
       if (entry.prefix) {
         a.words = [...entry.prefix.words, ...a.words];
@@ -587,6 +597,8 @@ function scanJs(file, info, consts, registry, record, skip) {
       }
       if (a.dynamicHead && !a.words.length) { unchecked(harness, "cli", pos, `${how}: the command is computed at runtime`); continue; }
       const rest = a.restRaw.map((e) => textValue(literal(e.text)));
+      if (a.optionsFirst && rest.some((r) => typeof r === "string" && COMMAND_WORD.test(r))) unchecked(harness, "cli", pos, `${how}: options before the command — the command after them is not read`);
+      if (a.computedFlag) unchecked(harness, "cli", pos, `${how}: an option name is computed at runtime`);
       emit({ harness, kind: "cli", name: a.words.join(" "), words: a.words, flags: a.flags, rest: rest.slice(0, 3), partial: a.dynamicHead || undefined, site: site(pos) });
       const [w0, w1] = a.words;
       if (w0 === "config" && ["set", "get", "unset"].includes(w1)) {
@@ -960,11 +972,14 @@ function scanShell(file, src, record, skip) {
       if (!harness) continue;
       // Only in command position: after an operator, or after a wrapper such as
       // `timeout -k 5 60`, `env HOME=…`, `as_clawbox -H` — never `dirname "$BIN"`.
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word.text)) continue; // `X=…/bin/openclaw` names it, runs nothing
       let k = w - 1;
       while (k >= 0 && !words[k].op && !SHELL_WRAPPERS.test(words[k].text)
-        && (/^-[-A-Za-z]*$/.test(words[k].text) || /^\d+$/.test(words[k].text) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[k].text) || words[k].dynamic)) k--;
+        && (/^-[-A-Za-z]*$/.test(words[k].text) || /^\d+$/.test(words[k].text) || /^[A-Za-z_][A-Za-z0-9_]*=/.test(words[k].text) || words[k].dynamic
+          || /^-(u|g|-user|-group)$/.test(words[k - 1]?.text ?? ""))) k--;
       if (k >= 0 && !(words[k].op && SHELL_STOP.has(words[k].text)) && !SHELL_WRAPPERS.test(words[k].text)) continue;
       if (k >= 0 && words[k].op && !SHELL_STOP.has(words[k].text)) continue;
+      if (k >= 0 && words[k].text === "!" && /^(\[|\[\[|test)$/.test(words[k - 1]?.text ?? "")) continue; // `[ ! -x "$BIN" ]`
       const args = [];
       for (let a = w + 1; a < words.length && !(words[a].op && SHELL_STOP.has(words[a].text)); a++) if (!words[a].op) args.push(words[a]);
       found.push({ harness, args: fwd ? [...fwd.prefix.map((t) => ({ text: t })), ...args.slice(fwd.shifts)] : args });
@@ -1008,8 +1023,13 @@ function scanShell(file, src, record, skip) {
       let k = 0;
       for (; k < args.length && !args[k].dynamic && COMMAND_WORD.test(args[k].text); k++) cmdWords.push(args[k].text);
       if (k === 0 && args[0]?.dynamic) { skip(harness, "cli", at, "the command is computed at runtime"); continue; }
-      const flags = [...new Set(args.filter((a) => !a.dynamic && /^--?[a-z]/i.test(a.text)).map((a) => a.text.split("=")[0]))];
-      const after = args.slice(k).filter((a) => !/^--?[a-z]/i.test(a.text) || a.dynamic);
+      // `--name="$X"` is still the literal option `--name`; a computed name is not read.
+      const optionWords = args.filter((a) => /^--?[a-z]/i.test(a.text));
+      const flags = [...new Set(optionWords.map((a) => a.text.split("=")[0]).filter((f) => !f.includes("$")))];
+      if (optionWords.some((a) => a.text.split("=")[0].includes("$"))) skip(harness, "cli", at, "an option name is computed at runtime");
+      const after = args.slice(k).filter((a) => !/^--?[a-z]/i.test(a.text));
+      if (k === 0 && /^--?[a-z]/i.test(args[0]?.text ?? "") && after.some((a) => !a.dynamic && COMMAND_WORD.test(a.text))) skip(harness, "cli", at, "options before the command — the command after them is not read");
+      if (!cmdWords.length && !flags.length && !after.length) continue; // names the binary, runs nothing checkable
       record({ harness, kind: "cli", name: cmdWords.join(" "), words: cmdWords, flags, rest: after.slice(0, 3).map((a) => (a.dynamic ? null : a.text)), site: at });
       if (cmdWords[0] === "config" && ["set", "get", "unset"].includes(cmdWords[1])) {
         const key = after[0];
@@ -1043,6 +1063,21 @@ function stripShellComment(text) {
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const root = path.resolve(process.argv[2] ?? path.join(path.dirname(fileURLToPath(import.meta.url)), "../.."));
-  process.stdout.write(`${JSON.stringify(scanTree(root), null, 1)}\n`);
+  // `scan.mjs [repo]` → usage JSON; `scan.mjs --unchecked [repo]` → the record
+  // config/harness-contract-unchecked.json keeps (call sites per file and reason).
+  const args = process.argv.slice(2);
+  const snapshot = args[0] === "--unchecked" ? args.shift() : null;
+  const root = path.resolve(args[0] ?? path.join(path.dirname(fileURLToPath(import.meta.url)), "../.."));
+  const scan = scanTree(root);
+  if (!snapshot) process.stdout.write(`${JSON.stringify(scan, null, 1)}\n`);
+  else {
+    const counts = {};
+    for (const u of scan.unchecked) {
+      const file = u.site.split(/:(?=\d+$)/)[0];
+      counts[file] ??= {};
+      counts[file][u.why] = (counts[file][u.why] ?? 0) + 1;
+    }
+    const sorted = Object.fromEntries(Object.keys(counts).sort().map((f) => [f, Object.fromEntries(Object.entries(counts[f]).sort())]));
+    process.stdout.write(`${JSON.stringify(sorted, null, 1)}\n`);
+  }
 }

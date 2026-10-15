@@ -165,6 +165,31 @@ describe("the scanner", () => {
     expect(found(scan, "openclaw", "cli", "backup create")[0].flags).toEqual(["--json", "--verify"]);
   });
 
+  it("never drops a call shape silently: it reads it, or lists it as unchecked", () => {
+    const scan = scanTree(tree({
+      "src/lib/b.ts": [
+        "export async function f(cond: boolean, p: string) {",
+        '  const base = cond ? ["models", "list"] : ["modles", "lst"];',
+        '  await spawnOpenclawCli([...base, "--json"]);',
+        '  await spawnOpenclawCli(["models", "list", `--provder=${p}`]);',
+        '  await spawnOpenclawCli(["--log-level", "error", "config", "set", "agents.defaults.model.fallback", "x"]);',
+        "}",
+      ].join("\n"),
+      "install.sh": [
+        'OPENCLAW_BIN="$NPM_PREFIX/bin/openclaw"',
+        'sudo -u clawbox "$OPENCLAW_BIN" doctor --fiks',
+        '"$OPENCLAW_BIN" models list --provder="$P"',
+        '"$OPENCLAW_BIN" --log-level error config set agents.defaults.model.fallback x',
+      ].join("\n"),
+    })) as Scan;
+    expect(found(scan, "openclaw", "cli", "modles lst")).toHaveLength(1);
+    expect(found(scan, "openclaw", "cli", "models list").flatMap((u) => u.flags)).toEqual(expect.arrayContaining(["--json", "--provder"]));
+    expect(found(scan, "openclaw", "cli", "doctor")[0]).toMatchObject({ site: "install.sh:2", flags: ["--fiks"] });
+    for (const site of ["src/lib/b.ts:5", "install.sh:4"]) {
+      expect(scan.unchecked, site).toContainEqual(expect.objectContaining({ site, why: expect.stringContaining("options before the command") }));
+    }
+  });
+
   it("finds, in this tree, what the hand-made maps of ClawBox's harness use list", () => {
     // A floor, not a census: one representative of each kind the research
     // mapped by hand (2026-10-15). A scanner change that loses a pattern fails
@@ -192,12 +217,18 @@ describe("the scanner", () => {
 
 describe("the checker", () => {
   const PIN = "2026.10.3";
-  const run = (opts: { usages: Usage[]; allow?: unknown[]; stateRow?: number }) => {
+  type Unchecked = { harness: string; kind: string; site: string; why: string };
+  const run = (opts: {
+    usages: Usage[]; allow?: unknown[]; stateRow?: number; unchecked?: Unchecked[];
+    recorded?: Record<string, Record<string, number>>; event?: string;
+    hermesConfig?: Record<string, unknown>; routes?: [string, string][];
+  }) => {
     const dir = tree({
       "config/harness-contract-allowlist.json": JSON.stringify({ entries: opts.allow ?? [] }),
+      "config/harness-contract-unchecked.json": JSON.stringify(opts.recorded ?? {}),
       "src/lib/updater.ts": `const OPENCLAW_STATE_SCHEMA_BY_VERSION: Readonly<Record<string, number>> = {\n  "${PIN}": ${opts.stateRow ?? 20},\n};\n`,
       "install.sh": 'OPENCLAW_NODE_ENGINE=">=24.16.0 <25, or >=26.1.0"\nHERMES_PIN_COMMIT="${HERMES_PIN_COMMIT:-' + "a".repeat(40) + '}"\n',
-      "usage.json": JSON.stringify({ usages: opts.usages, unchecked: [] }),
+      "usage.json": JSON.stringify({ usages: opts.usages, unchecked: opts.unchecked ?? [] }),
       "openclaw.json": JSON.stringify({
         version: PIN, build: "abc", schemaVersions: { state: 20, agent: 24 }, engines: { node: ">=24.16.0 <25 || >=26.1.0" },
         cli: {
@@ -207,10 +238,16 @@ describe("the checker", () => {
         },
         configPaths: ["agents.defaults.model.fallbacks", "plugins.entries.*.enabled"], rpcMethods: ["chat.send"], events: ["chat"], hooks: ["before_tool_call"],
       }),
-      "hermes.json": JSON.stringify({ cli: [{ path: "hermes", aliases: [], options: [] }], chatRules: { present: false }, config: {}, openrpc: {}, routes: [] }),
+      "hermes.json": JSON.stringify({
+        cli: [{ path: "hermes", aliases: [], options: [] }], chatRules: { present: false }, validatorRefusalRule: true,
+        config: opts.hermesConfig ?? {}, openrpc: {},
+        // The pinned dashboard's real shape: specific routes plus the SPA's catch-all.
+        routes: opts.routes ?? [["GET", "/api/model/options"], ["POST", "/api/auth/ws-ticket"], ["GET", "/{full_path:path}"]],
+      }),
       "meta.json": JSON.stringify({ openclawPin: PIN, hermesCommit: "a".repeat(40), hermesTag: "v0.0.1", hermesTagCommit: null, hermesPinSite: "install.sh:2" }),
     });
-    const r = spawnSync("node", [CHECK, dir, ...["usage", "openclaw", "hermes", "meta"].map((f) => path.join(dir, `${f}.json`))], { encoding: "utf-8", env: { ...process.env, GITHUB_ACTIONS: "" } });
+    const r = spawnSync("node", [CHECK, dir, ...["usage", "openclaw", "hermes", "meta"].map((f) => path.join(dir, `${f}.json`))],
+      { encoding: "utf-8", env: { ...process.env, GITHUB_ACTIONS: "", GITHUB_EVENT_NAME: opts.event ?? "" } });
     return { code: r.status, out: r.stdout + r.stderr };
   };
   const bad: Usage = { harness: "openclaw", kind: "config", name: "agents.defaults.model.fallback", op: "set", site: "install.sh:6918" };
@@ -237,6 +274,47 @@ describe("the checker", () => {
     const noReason = run({ usages: [bad], allow: [{ ...gap, reason: "" }] });
     expect(noReason.code).toBe(1);
     expect(noReason.out).toMatch(/needs category .* reason/);
+  });
+
+  it("covers only the files an allow-list entry names", () => {
+    const again: Usage = { ...bad, site: "src/lib/new-writer.ts:7" };
+    const r = run({ usages: [bad, again], allow: [gap] });
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(/ALLOWED openclaw@2026\.10\.3 config agents\.defaults\.model\.fallback .* ← install\.sh:6918/);
+    expect(r.out).toMatch(/FAIL    openclaw@2026\.10\.3 config agents\.defaults\.model\.fallback .*not covered by .* ← src\/lib\/new-writer\.ts:7/);
+  });
+
+  it("warns on a pull request, and fails elsewhere, once an entry has expired", () => {
+    const expired = [{ ...gap, expires: "2000-01-01" }];
+    const onPr = run({ usages: [bad], allow: expired, event: "pull_request" });
+    expect(onPr.code).toBe(0);
+    expect(onPr.out).toMatch(/WARN .*expired 2000-01-01/);
+    expect(run({ usages: [bad], allow: expired, event: "push" }).code).toBe(1);
+  });
+
+  it("does not let the dashboard's catch-all route vouch for a route that is not there", () => {
+    const route = (name: string, method?: string): Usage => ({ harness: "hermes", kind: "route", name, method, site: "src/lib/hermes-x.ts:1" });
+    const r = run({ usages: [route("/api/model/options"), route("/api/auth/ws-ticket", "POST"), route("/api/definitely-not-a-route"), route("/api/model/gone", "GET")] });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("FAIL    hermes@v0.0.1 route ANY /api/definitely-not-a-route — no such route on the pinned dashboard");
+    expect(r.out).toContain("FAIL    hermes@v0.0.1 route GET /api/model/gone");
+    expect(r.out).not.toMatch(/route .*\/api\/model\/options|ws-ticket/);
+  });
+
+  it("fails a Hermes key ClawBox writes outside `hermes config set` that the pinned validator does not know", () => {
+    const write: Usage = { harness: "hermes", kind: "config", name: "agent.clarify_timout", op: "write", site: "src/lib/hermes-x.ts:9" };
+    const r = run({ usages: [write], hermesConfig: { "agent.clarify_timout": { known: false, refused: false, suggestion: "agent.clarify_timeout" } } });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("FAIL    hermes@v0.0.1 config agent.clarify_timout — written into config.yaml, but not a key the pinned validator knows (did you mean agent.clarify_timeout)");
+  });
+
+  it("fails when more call sites are computed at runtime than are recorded", () => {
+    const why = "runOpenclawConfigSet: the key is computed at runtime";
+    const unchecked = [1, 2].map((n) => ({ harness: "openclaw", kind: "config", site: `src/lib/x.ts:${n}`, why }));
+    expect(run({ usages: [], unchecked, recorded: { "src/lib/x.ts": { [why]: 2 } } }).code).toBe(0);
+    const grew = run({ usages: [], unchecked, recorded: { "src/lib/x.ts": { [why]: 1 } } });
+    expect(grew.code).toBe(1);
+    expect(grew.out).toMatch(/FAIL    openclaw@2026\.10\.3 unchecked src\/lib\/x\.ts: runOpenclawConfigSet.* 2 call site\(s\), 1 recorded .* ← src\/lib\/x\.ts:1, src\/lib\/x\.ts:2/);
   });
 
   it("fails when the updater's state-schema row disagrees with the pinned package", () => {
