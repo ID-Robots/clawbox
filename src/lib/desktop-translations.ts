@@ -424,6 +424,8 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "settings.voice.autoPlayAll": "Auto-play every spoken reply",
     "settings.voice.autoPlayAllHint": "In the mascot chat, the reply to a question you typed starts playing by itself too, just like the reply to one you spoke. Off, it waits on its player for you to press play.",
     "settings.voice.autoPlayAllNeedsSpokenReplies": "Turn on Spoken replies above to use this.",
+    "settings.voice.shortSpoken": "Short spoken answers",
+    "settings.voice.shortSpokenHint": "A reply spoken aloud says only the main answer, in a sentence or two, so it starts sooner. The full reply, with every detail, still appears in the chat.",
     "chat.audioPlay": "Play",
     "chat.audioPause": "Pause",
     "chat.audioStop": "Stop",
