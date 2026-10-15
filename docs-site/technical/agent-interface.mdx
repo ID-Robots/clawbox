@@ -222,11 +222,12 @@ changes your plan or buys credits.
 
 ### Anthropic accounts — both editions
 `anthropic_accounts` reads the Anthropic account pool from **Settings → Providers →
-Anthropic accounts**: coding runs use it, and so does the chat on a Claude subscription once
-the box has had to switch accounts. For each account it gives the name, the kind and the
+Anthropic accounts**: coding runs use it, and so do the chat, its channels and its scheduled
+tasks once the owner has pressed **Use these accounts for the chat too**. For each account it gives the name, the kind and the
 state: it can answer, or it is at its usage limit and back at a given time. It also gives the
-order, the active account (`in_use`: the one new coding runs start on and the chat follows
-once it has switched — a run already under way may still be finishing on another), how many
+order, the active account (`in_use`: the one new coding runs start on and the chat's account
+order leads with — a run or a conversation already under way may still be finishing on
+another), how many
 can answer, and the last swap (`last_swap`: when, from which account to which, and why). When
 every account is limited, it tells the agent to wait for the first reset: runs that were cut
 off resume by themselves then, and `coding_agent_run` refuses a new Anthropic run until that

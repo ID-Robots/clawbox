@@ -230,7 +230,7 @@ import {
   type AnthropicLimit,
   type AnthropicLimitKind,
 } from "@/lib/anthropic-limit";
-import { registerSwapConsumer } from "@/lib/anthropic-swap";
+import { registerSwapConsumer, type SwapContext } from "@/lib/anthropic-swap";
 import { startGatewaySwap } from "@/lib/anthropic-gateway";
 import { announceCodingAgent } from "@/lib/coding-agent-notify";
 import {
@@ -10978,12 +10978,20 @@ function moveRunsOffDeadAccounts(): string[] {
   return moved;
 }
 
-async function applyCodingSwap(): Promise<SwapConsumerOutcome> {
+async function applyCodingSwap(ctx: SwapContext): Promise<SwapConsumerOutcome> {
   if (!activeAccountSnapshot()) return { status: "skipped", code: "no_account", count: null };
   const moved = moveRunsOffDeadAccounts();
   const resumed = await resumeRunsWaitingForAnthropic();
-  const count = moved.length + resumed.length;
-  if (count > 0) console.error(`[coding-agent] the Anthropic account swap moved ${moved.length} run(s) and resumed ${resumed.length}`);
+  // The run whose own limit or refusal moved the account is being carried on
+  // by its own path (continueOnAnotherAccount), which recorded the limit
+  // first: its process is already gone, so the sweep above cannot see it. It
+  // moved all the same — counted, or the card and the notice say "nothing to
+  // move" over a run that just moved (2026-10-14).
+  const own = ctx.change.runId;
+  const ownRun = own && !moved.includes(own) && !resumed.includes(own) ? loadRuns().find((r) => r.id === own) : undefined;
+  const carried = ownRun && ownRun.status === "running" && ownRun.provider === "anthropic" ? 1 : 0;
+  const count = moved.length + resumed.length + carried;
+  if (count > 0) console.error(`[coding-agent] the Anthropic account swap moved ${moved.length + carried} run(s) and resumed ${resumed.length}`);
   return { status: "ok", code: count > 0 ? "moved" : "nothing_running", count };
 }
 

@@ -218,6 +218,7 @@ export async function POST(req: Request) {
             // missing. The desktop has to land on it whatever the modal
             // says, and the credentials are carried so they are not the
             // second thing missing — a note, never a claim of success.
+            phases.reach("lock");
             const notes = await carry();
             await removeSwapRequest();
             emit(controller, { error, code: "swap_failed", active: target, reload: true, lockFlipped: true, notes });
@@ -241,6 +242,10 @@ export async function POST(req: Request) {
           });
           return;
         }
+        // A step that returned 0 with the lock flipped passed every phase
+        // of its own: the ones no journal scan caught are said now, so the
+        // list never jumps from `install` to `carry` (2026-10-14).
+        phases.reach("provision");
         const notes = await carry();
         // The refresh reloads HERMES' MCP children — the only harness with a
         // dashboard to ask. On the way to Hermes that is the dashboard the

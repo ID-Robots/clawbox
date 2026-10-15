@@ -42,13 +42,13 @@
  * ONE ACTIVE ACCOUNT FOR THE WHOLE BOX (TASK-1260). The pool also records
  * WHICH account is in use — `activeId` — and that is the one source of truth
  * every Claude consumer re-reads: coding runs, review passes and team workers
- * (src/lib/coding-agent.ts), the OpenClaw gateway's Claude subscription and its
- * crons (src/lib/anthropic-gateway.ts). It is settled on every read and every
- * write (`settleActive`), so a limit, a refused credential, a reset, a removal
- * or the owner's new order all move it through the same few lines; each move
- * is handed to the listeners (`onActiveChange`) once the write has landed, and
- * src/lib/anthropic-swap.ts fans it out to the consumers and records what each
- * did as `lastSwap`.
+ * (src/lib/coding-agent.ts), the OpenClaw gateway's order over the pool's
+ * Claude accounts and its crons (src/lib/anthropic-gateway.ts). It is settled
+ * on every read and every write (`settleActive`), so a limit, a refused
+ * credential, a reset, a removal or the owner's new order all move it through
+ * the same few lines; each move is handed to the listeners (`onActiveChange`)
+ * once the write has landed, and src/lib/anthropic-swap.ts fans it out to the
+ * consumers and records what each did as `lastSwap`.
  */
 
 import crypto from "crypto";
@@ -156,22 +156,23 @@ export interface SwapEvent {
 }
 
 /**
- * Where the gateway's Claude subscription credential stands, as this box last
- * wrote it (src/lib/anthropic-gateway.ts). `fingerprint` is a truncated SHA-256
- * of the access token — enough to notice that something else has since written
- * the profile (the owner signing in again in Settings), useless for anything
- * else. Never the token.
+ * Where the chat stands on the pool, as this box last left the gateway
+ * (src/lib/anthropic-gateway.ts): every Claude account is a gateway profile of
+ * its own, and `accountId` is the one the gateway's order LEADS with — the
+ * active account, unless it is one the gateway cannot hold. `fingerprint` is a
+ * truncated SHA-256 of that account's access token as put in, useless for
+ * anything else. Never the token. Null: the chat does not run on the pool.
  */
 export interface GatewayMirror {
   accountId: string;
   fingerprint: string;
   expiresAt: number | null;
+  /** Since when the order has led with `accountId`. */
   at: number;
   /**
-   * The token is written but the gateway has not been restarted onto it yet
-   * (the restart failed, or is under way). The keeper finishes it: a gateway
-   * whose restart failed would otherwise go on running on the old account's
-   * token in memory while every file says it moved.
+   * Something the last pass asked of core did not land — a token, a removal,
+   * the order. The keeper tries again; until then the gateway is not counted
+   * as being on the active account.
    */
   pending: boolean;
 }
@@ -1008,7 +1009,7 @@ export async function updateSwapConsumer(eventId: string, name: SwapConsumerName
   });
 }
 
-/** Where the gateway's Claude subscription credential now stands (src/lib/anthropic-gateway.ts); null when it no longer follows the pool. */
+/** Where the chat stands on the pool (src/lib/anthropic-gateway.ts); null when it does not run on it. */
 export async function setGatewayMirror(mirror: GatewayMirror | null): Promise<void> {
   await mutate((file) => {
     file.gateway = mirror && file.accounts.some((a) => a.id === mirror.accountId) ? { ...mirror } : null;
@@ -1508,7 +1509,7 @@ export interface AnthropicPoolView {
   returnToPrimary: boolean;
   /** The most recent move of the active account and what each consumer did about it — labels and times only. */
   lastSwap: SwapEvent | null;
-  /** Whether the gateway's Claude subscription follows the active account, and which one it holds. */
+  /** Whether the chat runs on the pool's Claude accounts, and which one the gateway's order leads with. */
   gateway: { following: boolean; accountId: string | null; label: string | null; since: number | null };
   now: number;
 }

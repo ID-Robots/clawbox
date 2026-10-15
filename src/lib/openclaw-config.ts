@@ -4041,6 +4041,17 @@ export function gatewayReadyWaitMs(): number {
   return Number.isFinite(override) && override > 0 ? override : 30000;
 }
 
+/**
+ * How long a gateway starting COLD — just installed or provisioned, its
+ * plugins loading for the first time — is given to bind its port: install.sh's
+ * own `wait_for_gateway_port` budget (`CLAWBOX_GATEWAY_READY_BUDGET_S`, 180 s),
+ * so the web server never calls a gateway dead that the installer would still
+ * be waiting for. On 2026-10-14 the gateway an edition swap had just put on the
+ * box was `ready` after 35.5 s, and the 30 s a warm restart is given reported
+ * its Telegram bot as unconfirmed. A caller passes it as `readyWaitMs`.
+ */
+export const GATEWAY_COLD_START_WAIT_MS = 180_000;
+
 // Validated: this is the port awaitGatewayReady hands to waitForPortOpen, and
 // `net.Socket.connect` throws ERR_SOCKET_BAD_PORT synchronously on a malformed
 // or out-of-range one — which would surface as "the gateway failed to restart"

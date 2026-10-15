@@ -14,10 +14,11 @@
  * uses: every turn died with "No API key found for provider anthropic".
  *
  * So ClawBox reads the row to learn what the gateway really holds, and writes
- * the profile itself when the migration did not. That is what the account
- * pool's writer (anthropic-gateway-auth.ts) already does to this row, and what
- * core was proven to honour: a profile written straight in is read at once, a
- * later doctor leaves it alone, and the row carries no integrity signature.
+ * the profile itself when the migration did not — what core was proven to
+ * honour: a profile written straight in is read at once, a later doctor
+ * leaves it alone, and the row carries no integrity signature. (The account
+ * pool's profiles are not written here: core's own `models auth paste-token`
+ * writes them, src/lib/anthropic-gateway.ts.)
  *
  * WHICH STORE: the one core's `resolveSharedAuthStorePath` answers — the
  * `config_machine_state` row `authProfiles.store` in
@@ -47,9 +48,8 @@
  *
  * TWO RULES for whoever calls or edits this:
  *  1. THE GATEWAY MUST BE STOPPED when the write runs. A running gateway may
- *     flush its own copy of the store on the way down (syncLocked in
- *     anthropic-gateway.ts writes a second time for exactly that), and its
- *     copy is the one with the fence in it.
+ *     flush its own copy of the store on the way down, and its copy is the
+ *     one with the fence in it.
  *  2. READ BACK AFTER WRITING. `ok: true` says the transaction committed, not
  *     that the gateway's store holds the sign-in; readGatewayAuthProfile's
  *     fingerprint is what says that.
@@ -361,6 +361,135 @@ export function gatewayAuthStoreHoldsApiKey(
     return local === null || holdsKey(local.entry);
   } catch {
     return false;
+  }
+}
+
+/** One stored profile of a provider, as much of it as may leave this module. */
+export interface ProviderAuthProfile extends GatewayAuthProfileCopy {
+  profileId: string;
+}
+
+/**
+ * Core's own failure bookkeeping for one profile (`usageStats[<id>]` in the
+ * state row, `computeNextProfileUsageStats` on 2026.10.2): a rate limit or a
+ * refused credential sets a COOLDOWN, billing and a permanent refusal a
+ * DISABLE, a provider-reported subscription window a BLOCK. Times are core's
+ * own `Date.now()` values; a field core did not write is null.
+ */
+export interface ProfileFailureState {
+  cooldownUntil: number | null;
+  cooldownReason: string | null;
+  disabledUntil: number | null;
+  disabledReason: string | null;
+  blockedUntil: number | null;
+  lastFailureAt: number | null;
+}
+
+export type GatewayProviderAuthRead =
+  | { kind: "no-store" }
+  | { kind: "unreadable"; cause?: string }
+  | {
+      kind: "present";
+      /** Every profile of the provider a turn could resolve, the main agent's own copy over the shared row's. */
+      profiles: ProviderAuthProfile[];
+      /** Core's STORED order for the provider (`models auth order set`), or null when none is stored. */
+      order: string[] | null;
+      /** Core's failure state per profile of the provider that has any. */
+      failures: Record<string, ProfileFailureState>;
+    };
+
+const numberOr = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
+const stringOr = (v: unknown): string | null => (typeof v === "string" && v ? v : null);
+
+/** The provider a stored profile belongs to: its own field, else its id's prefix — the rule core lists profiles by. */
+function providerOf(profileId: string, entry: Json): string {
+  return String(entry.provider ?? profileId.split(":")[0] ?? "").trim().toLowerCase();
+}
+
+/** A state row's blob, or null when the database has no such row (or none at all). Throws when one that is there cannot be asked. */
+function readStateBlob(dbPath: string, kind: GatewayAuthStoreKind): Json | null {
+  if (!isFile(dbPath)) return null;
+  const db = openSqlite(dbPath, true);
+  try {
+    return parseBlob(readRow(db, AUTH_STATE_CELLS[kind])?.json) as Json | null;
+  } finally {
+    db.close();
+  }
+}
+
+/** A blob's map under `key`, or an empty one. */
+function mapOf(blob: Json | null, key: string): Json {
+  const value = blob?.[key];
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Json) : {};
+}
+
+/**
+ * Everything the store core resolves holds for ONE provider (TASK-1260, the
+ * account pool in the chat): its profiles, the order core will try them in,
+ * and the failures core recorded against each — read-only, the way
+ * `readGatewayAuthProfile` reads one profile. Writes stay core's own (the
+ * `openclaw models auth` verbs); this is how ClawBox learns what they and the
+ * gateway's turns left behind.
+ *
+ * Under `state-db` ownership the main agent's own rows are merged over the
+ * shared ones, id by id, as core merges them (see the header). Never throws;
+ * no token leaves it.
+ */
+export function readGatewayProviderAuth(provider: string, paths?: GatewayAuthPaths): GatewayProviderAuthRead {
+  const wanted = provider.trim().toLowerCase();
+  try {
+    const where = paths ?? gatewayAuthPaths();
+    const found = findStore(where);
+    if (!found) return { kind: "no-store" };
+    const blob = parseBlob(found.json) as Json | null;
+    const stored = blob && profilesOf(blob);
+    if (!stored) return { kind: "unreadable" };
+    const merged: Json = { ...stored };
+    let localState: Json | null = null;
+    let baseState: Json | null;
+    if (found.store === "shared") {
+      const mainDb = mainAgentDb(where);
+      if (isFile(mainDb)) {
+        const db = openSqlite(mainDb, true);
+        try {
+          const local = profilesOf((parseBlob(readRow(db, STORE_CELLS.agent)?.json) as Json | null) ?? {});
+          if (local) Object.assign(merged, local);
+        } finally {
+          db.close();
+        }
+        localState = readStateBlob(mainDb, "agent");
+      }
+      baseState = readStateBlob(found.dbPath, "shared");
+    } else {
+      baseState = readStateBlob(found.dbPath, "agent");
+    }
+    const profiles: ProviderAuthProfile[] = [];
+    for (const profileId of Object.keys(merged)) {
+      const entry = profileAt(merged, profileId);
+      if (entry && providerOf(profileId, entry) === wanted) profiles.push({ profileId, ...describeCopy(entry) });
+    }
+    const orderOf = (state: Json | null): string[] | null => {
+      const list = mapOf(state, "order")[wanted];
+      return Array.isArray(list) && list.every((id) => typeof id === "string") ? (list as string[]) : null;
+    };
+    const stats = { ...mapOf(baseState, "usageStats"), ...mapOf(localState, "usageStats") };
+    const failures: Record<string, ProfileFailureState> = {};
+    for (const { profileId } of profiles) {
+      const s = stats[profileId];
+      if (!s || typeof s !== "object" || Array.isArray(s)) continue;
+      const e = s as Json;
+      failures[profileId] = {
+        cooldownUntil: numberOr(e.cooldownUntil),
+        cooldownReason: stringOr(e.cooldownReason),
+        disabledUntil: numberOr(e.disabledUntil),
+        disabledReason: stringOr(e.disabledReason),
+        blockedUntil: numberOr(e.blockedUntil),
+        lastFailureAt: numberOr(e.lastFailureAt),
+      };
+    }
+    return { kind: "present", profiles, order: orderOf(localState) ?? orderOf(baseState), failures };
+  } catch (err) {
+    return { kind: "unreadable", cause: err instanceof Error ? err.message : String(err) };
   }
 }
 

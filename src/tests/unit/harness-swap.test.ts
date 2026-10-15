@@ -370,6 +370,18 @@ describe("the journal's phase markers", () => {
   });
 });
 
+describe("the carry-over's wait for a cold gateway", () => {
+  it("is install.sh's own `wait_for_gateway_port` budget, so the web server never gives up before the installer would", async () => {
+    // 2026-10-14: the swapped-in gateway was ready 35.5 s after its start; a
+    // shorter private wait called it "did not come back".
+    const { GATEWAY_COLD_START_WAIT_MS } = await import("@/lib/openclaw-config");
+    const installer = await fs.readFile(path.join(process.cwd(), "install.sh"), "utf8");
+    const budget = /local budget="\$\{CLAWBOX_GATEWAY_READY_BUDGET_S:-(\d+)\}"/.exec(installer)?.[1];
+    expect(budget).toBeDefined();
+    expect(GATEWAY_COLD_START_WAIT_MS).toBe(Number(budget) * 1000);
+  });
+});
+
 describe("the phase markers read out of the unit's own journal", () => {
   // The follow forwards only the LAST journal line per poll, and install.sh
   // prints every marker immediately followed by the sub-step's own line, so

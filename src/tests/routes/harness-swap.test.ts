@@ -498,6 +498,52 @@ describe("POST /setup-api/harness/swap — the stream", () => {
     expect(collectingAt).toBeGreaterThan(installAt);
   });
 
+  it("lists every phase the step passed even when no scan of the journal caught its marker", async () => {
+    // 2026-10-14, Hermes → OpenClaw on the box: the journal has `phase=lock`
+    // and `phase=provision`, the stream went request → install → carry →
+    // done. The scans saw `install` and nothing after it; a step that ended
+    // well with the lock flipped is the proof it passed both.
+    h.invocationId = "8f0c2e1d4b6a4c0e9a7d3e5f1b2c3d4e";
+    h.journal = ["[harness-swap] phase=request", "[harness-swap] phase=install"];
+    h.follow.mockImplementation(async (_step, opts) => {
+      opts.onStatus("  -> install.sh --step openclaw_install (as the OpenClaw edition)");
+      opts.onStatus("added 812 packages in 3m");
+      opts.onStatus("  -> install.sh --step gateway_setup (as the OpenClaw edition)");
+      opts.onStatus("  This box is now the OpenClaw edition");
+      h.edition = { edition: "openclaw", defaulted: false };
+      return { ok: true };
+    });
+    h.edition = { edition: "hermes", defaulted: false };
+    h.active.mockResolvedValue("hermes");
+
+    const out = await expectLanded(await POST(post({ harness: "openclaw" })), "openclaw");
+
+    expect(out.filter((l) => l.phase).map((l) => l.phase)).toEqual(["request", "install", "lock", "provision", "carry", "done"]);
+  });
+
+  it("waits for a cold gateway as long as the box's own installer does before it calls the bot unconfirmed", async () => {
+    // 2026-10-14: the swapped-in gateway was `ready` 35.5 s after its start
+    // and Telegram was serving a second later, yet the carry-over said "The
+    // OpenClaw gateway has not confirmed the bot yet: gateway did not come
+    // back" — its wait was the 30 s a warm restart is given.
+    const { GatewayNotReadyError } = await import("@/lib/openclaw-config");
+    h.restartGateway.mockImplementation(async (opts?: { readyWaitMs?: number }) => {
+      if ((opts?.readyWaitMs ?? 30_000) < 35_500) throw new GatewayNotReadyError();
+    });
+    h.edition = { edition: "hermes", defaulted: false };
+    h.active.mockResolvedValue("hermes");
+    h.get.mockImplementation(async (key: string) => ({ telegram_bot_token: "123:bot" } as Record<string, string>)[key]);
+    followLandsOn("openclaw");
+
+    const out = await lines(await POST(post({ harness: "openclaw" })));
+
+    const last = out[out.length - 1];
+    expect(last).toMatchObject({ success: true, active: "openclaw" });
+    expect(last.notes).not.toContain(SWAP_NOTES.telegramPending);
+    expect(out.find((l) => l.status === "Telegram bot carried over.")).toBeDefined();
+    expect(out.find((l) => typeof l.status === "string" && l.status.includes("did not come back"))).toBeUndefined();
+  });
+
   it("carries the credentials and the persona into OpenClaw on the way back, and asks no Hermes dashboard for a tool reload", async () => {
     h.edition = { edition: "hermes", defaulted: false };
     h.active.mockResolvedValue("hermes");

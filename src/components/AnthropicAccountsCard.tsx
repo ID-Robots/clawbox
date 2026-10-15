@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { formatAccountReset } from "@/lib/anthropic-chat-swap";
 import { useT } from "@/lib/i18n";
 import { openInKiosk } from "@/lib/kiosk-tabs-client";
+import { notifyProvidersChanged } from "@/lib/ui-events";
 
 /**
  * Settings → Providers → Anthropic accounts (TASK-902, TASK-1260).
@@ -13,6 +14,9 @@ import { openInKiosk } from "@/lib/kiosk-tabs-client";
  * gateway and its scheduled tasks — uses it. When it hits its usage limit, or
  * Anthropic refuses its credential, all of them move to the next account
  * together and the interrupted work carries on (src/lib/anthropic-swap.ts);
+ * the chat holds every Claude account and moves inside the turn itself
+ * (src/lib/anthropic-gateway.ts) once the owner has put it on them here —
+ * "Use these accounts for the chat too", no sign-in of its own;
  * the box stays there unless the owner turned on "return to the first
  * account". This card is where the owner sees that happen — which account is
  * active, which is limited and until when, the last swap and what each
@@ -69,10 +73,16 @@ interface PoolView {
   /** TASK-1260 — absent from an older server's answer. */
   returnToPrimary?: boolean;
   lastSwap?: SwapView | null;
-  /** Whether the chat's gateway follows the pool, and which account it holds. */
-  gateway?: { following: boolean; accountId: string | null; label: string | null } | null;
+  /**
+   * Whether the chat runs on the pool's Claude accounts, and which one its
+   * order leads with. `available`: this box's chat runs on OpenClaw at all
+   * (absent from an older server's answer).
+   */
+  gateway?: { following: boolean; accountId: string | null; label: string | null; available?: boolean } | null;
   /** POST only. */
   verified?: boolean;
+  /** `use_for_chat` only: the chat runs on the accounts, and the box qualified the model write (or reported it failed over a model already on Claude). */
+  warning?: string;
 }
 
 const CAUSE_KEY: Record<SwapCause, string> = {
@@ -99,6 +109,7 @@ function outcomeKey(outcome: ConsumerOutcome): string {
     case "moved": return "settings.anthropicAccounts.outcomeMoved";
     case "nothing_running": return "settings.anthropicAccounts.outcomeNothing";
     case "switched":
+    case "switched_partly":
     case "renewed":
     case "already": return "settings.anthropicAccounts.outcomeSwitched";
     case "retried": return "settings.anthropicAccounts.outcomeRetried";
@@ -302,6 +313,19 @@ export default function AnthropicAccountsCard() {
     }
   };
 
+  /**
+   * "Use these accounts for the chat too" sets the chat's default model, so
+   * the rest of Settings is told; and a save the box qualified (the gateway
+   * still coming back, say) says so rather than letting the card claim it
+   * settled.
+   */
+  const putChatOnAccounts = async () => {
+    const done = await act({ action: "use_for_chat" }, "chat");
+    if (!done) return;
+    notifyProvidersChanged();
+    if (typeof done.warning === "string" && done.warning) setNote(done.warning);
+  };
+
   const move = (index: number, delta: -1 | 1) => {
     if (!view) return;
     const ids = view.accounts.map((a) => a.id);
@@ -322,6 +346,11 @@ export default function AnthropicAccountsCard() {
   const health = view?.health;
   const activeAccount = accounts.find((a) => a.id === view?.activeAccountId) ?? null;
   const lastSwap = view?.lastSwap ?? null;
+  // Only a server that says the chat CAN run on the pool is offered the
+  // switch; one that predates it keeps the sentence and nothing to press.
+  const chatAvailable = view?.gateway?.available !== false;
+  const offerChat = view?.gateway?.available === true && !view.gateway.following
+    && accounts.some((a) => a.kind === "oauth" && a.status !== "expired" && a.status !== "revoked");
 
   const summary = !view
     ? null
@@ -399,20 +428,40 @@ export default function AnthropicAccountsCard() {
           <p className="mb-3 flex items-start gap-2 text-[11px] text-[var(--text-secondary)]" data-testid="anthropic-accounts-active">
             <span className="material-symbols-rounded shrink-0 text-emerald-300" style={{ fontSize: 16 }} aria-hidden="true">bolt</span>
             {/* Where NEW work starts, and — said apart, because it can differ —
-                what the chat is on: it keeps its own sign-in until the box
-                first has to switch, and a run already under way finishes on
+                what the chat is on: the account its order leads with once it
+                runs on these accounts, and a run already under way finishes on
                 the account it started on while that one can answer. */}
             <span>
               {t("settings.anthropicAccounts.activeNow", { label: activeAccount.label })}
-              {" "}
-              <span data-testid="anthropic-accounts-chat">
-                {view.gateway?.following && view.gateway.label
-                  ? t("settings.anthropicAccounts.activeChatOn", { label: view.gateway.label })
-                  : t("settings.anthropicAccounts.activeChatOwn")}
-              </span>
+              {chatAvailable && (
+                <>
+                  {" "}
+                  <span data-testid="anthropic-accounts-chat">
+                    {view.gateway?.following && view.gateway.label
+                      ? t("settings.anthropicAccounts.activeChatOn", { label: view.gateway.label })
+                      : t("settings.anthropicAccounts.activeChatOwn")}
+                  </span>
+                </>
+              )}
             </span>
           </p>
         ) : null
+      )}
+
+      {offerChat && (
+        <div className="mb-3 rounded-xl border border-white/[0.08] px-3 py-2.5 space-y-2" data-testid="anthropic-accounts-use-for-chat">
+          <p className="text-[11px] text-[var(--text-muted)] leading-relaxed">{t("settings.anthropicAccounts.useForChatHint")}</p>
+          <button
+            type="button"
+            onClick={() => void putChatOnAccounts()}
+            disabled={busy !== null}
+            className="inline-flex items-center gap-1.5 text-xs px-3 py-2 rounded-lg border border-[var(--coral-bright)]/40 text-[var(--coral-bright)] hover:bg-[var(--coral-bright)]/10 disabled:opacity-50"
+            data-testid="anthropic-accounts-use-for-chat-button"
+          >
+            <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">forum</span>
+            {busy === "chat" ? t("settings.anthropicAccounts.useForChatWorking") : t("settings.anthropicAccounts.useForChat")}
+          </button>
+        </div>
       )}
 
       {!panel && errorAlert && <div className="mb-3">{errorAlert}</div>}

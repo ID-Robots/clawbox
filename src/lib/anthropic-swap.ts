@@ -19,10 +19,10 @@
  *     worker on an account that can no longer answer is ended and resumed in
  *     its own session on the active account; runs waiting for a reset resume.
  *     Queued runs need nothing: each spawn asks the pool for the active account.
- *   - `gateway` (src/lib/anthropic-gateway.ts): the OpenClaw gateway's Claude
- *     subscription profile — every agent's, so every session, cron and
- *     heartbeat — is rewritten with the active account and the gateway is
- *     restarted on it.
+ *   - `gateway` (src/lib/anthropic-gateway.ts): the OpenClaw gateway holds
+ *     every Claude account of the pool as a profile of its own and rotates
+ *     between them inside a turn; its order is moved to lead with the active
+ *     account — no restart.
  *
  * and then the turns that FAILED on the limit are retried once (`retries`): a
  * chat turn or a cron run a consumer reported with `reportAnthropicFailure`.
@@ -55,7 +55,6 @@ import {
   updateSwapConsumer,
   type ActiveChange,
   type AnthropicAccount,
-  type CredentialProbe,
   type PoolState,
   type SwapConsumerName,
   type SwapConsumerOutcome,
@@ -169,15 +168,11 @@ export async function whenSwapsSettled(): Promise<void> {
   }
 }
 
-/**
- * Queue a fan-out. `record: false` is not a swap at all — the active account
- * did not move, a consumer only needs the credential it already follows put in
- * again (a renewed token) — so it files no event and sends no notice.
- */
-function enqueue(change: ActiveChange, takeover: boolean, only?: ReadonlySet<string>, record = true): Promise<void> {
+/** Queue a fan-out. */
+function enqueue(change: ActiveChange, takeover: boolean, only?: ReadonlySet<string>): Promise<void> {
   const state = runtime();
   state.inFlight += 1;
-  const next = state.queue.then(() => fanOut(change, takeover, only, record)).catch((err: unknown) => {
+  const next = state.queue.then(() => fanOut(change, takeover, only)).catch((err: unknown) => {
     console.error("[anthropic-swap] a swap could not be carried out:", err instanceof Error ? err.message : err);
   }).finally(() => {
     state.inFlight -= 1;
@@ -245,22 +240,19 @@ function announce(change: ActiveChange): void {
   void announceAnthropicLimit({ kind: "all_limited", resetAt: change.health.nextResetAt, runId: change.runId }).catch(() => {});
 }
 
-async function fanOut(change: ActiveChange, takeover: boolean, only?: ReadonlySet<string>, record = true): Promise<void> {
+async function fanOut(change: ActiveChange, takeover: boolean, only?: ReadonlySet<string>): Promise<void> {
   const state = runtime();
   // A fixed order, whatever order they registered in: the runs first (they are
-  // mid-turn and cost the owner most while they wait), then the gateway, whose
-  // restart is the slow part.
+  // mid-turn and cost the owner most while they wait), then the gateway.
   const consumers = [...state.consumers.values()]
     .filter((c) => !only || only.has(c.name))
     .sort((a, b) => SWAP_CONSUMERS.indexOf(a.name) - SWAP_CONSUMERS.indexOf(b.name));
   const event = eventOf(change, consumers.map((c) => c.name));
-  if (record) {
-    if (!takeover) announce(change);
-    await recordSwapEvent(event).catch((err: unknown) => {
-      console.error("[anthropic-swap] could not record the swap:", err instanceof Error ? err.message : err);
-    });
-    console.error(`[anthropic-swap] ${change.cause}: ${change.fromId ?? "none"} -> ${change.toId ?? "none (no account can answer)"} (${change.source})`);
-  }
+  if (!takeover) announce(change);
+  await recordSwapEvent(event).catch((err: unknown) => {
+    console.error("[anthropic-swap] could not record the swap:", err instanceof Error ? err.message : err);
+  });
+  console.error(`[anthropic-swap] ${change.cause}: ${change.fromId ?? "none"} -> ${change.toId ?? "none (no account can answer)"} (${change.source})`);
 
   const done = new Map<string, SwapConsumerOutcome>();
   for (const consumer of consumers) {
@@ -280,9 +272,9 @@ async function fanOut(change: ActiveChange, takeover: boolean, only?: ReadonlySe
       }
     }
     done.set(consumer.name, result);
-    if (record) await updateSwapConsumer(event.id, consumer.name, result).catch(() => {});
+    await updateSwapConsumer(event.id, consumer.name, result).catch(() => {});
   }
-  await drainRetries(record ? event.id : null, change.toId, done);
+  await drainRetries(event.id, change.toId, done);
 }
 
 /**
@@ -339,7 +331,12 @@ export interface FailureReport {
   /** The gateway's failover reason for it, when it gave one. */
   reason?: string | null;
   source: Extract<SwapSource, "chat" | "cron">;
-  /** The pool account the failing consumer was on, or null when it was on a credential the pool does not hold. */
+  /**
+   * The pool account the failing consumer was on, or null when it cannot say.
+   * The gateway always answers null: its turns run on whichever of the pool's
+   * profiles core picked, and core's own record of which one failed is read
+   * into the pool before it reports (src/lib/anthropic-gateway.ts).
+   */
   accountId: string | null;
   retry?: RetryRequest;
 }
@@ -372,7 +369,7 @@ export interface FailureOutcome {
  * nothing written, nothing restarted, the gateway on no pool account at all.
  *
  * The gateway's mirror is the box's own record of where it put the gateway,
- * and a `pending` one is a restart still owed, not a gateway on that account.
+ * and a `pending` one is a write still owed, not a gateway on that account.
  * A consumer that leaves no such record is answered as before.
  */
 function answeredActive(consumer: Exclude<SwapConsumerName, "retries">, pool: PoolState): AnthropicAccount | null {
@@ -458,7 +455,6 @@ export async function reportAnthropicFailure(report: FailureReport): Promise<Fai
   try {
     const before = await readPoolState();
     const known = report.accountId !== null && before.accounts.some((a) => a.id === report.accountId);
-    let probe: CredentialProbe | null = null;
     if (known && report.accountId) {
       if (failure.type === "limit") {
         await markLimited(report.accountId, limitUntil(failure.limit, now), failure.limit.kind, { source: report.source });
@@ -469,7 +465,7 @@ export async function reportAnthropicFailure(report: FailureReport): Promise<Fai
       } else {
         // Confirmed first: a token the pool can still renew was only stale
         // where it was used, and the account stays in.
-        probe = await probeAccountCredential(report.accountId, verifyAnthropicKey, { source: report.source });
+        await probeAccountCredential(report.accountId, verifyAnthropicKey, { source: report.source });
       }
     }
     await whenSwapsSettled();
@@ -500,16 +496,6 @@ export async function reportAnthropicFailure(report: FailureReport): Promise<Fai
         health: after.health,
         at: Date.now(),
       }, true, new Set([consumer]));
-    } else if (probe === "ok" && consumer === "gateway" && after.activeId && state.consumers.has("gateway")) {
-      // Renewed, not refused: the pool now holds a fresh token, the gateway
-      // still holds the one Anthropic just turned away. Put the renewal in
-      // (and restart onto it) BEFORE the retry, or it fails the same way — and
-      // it is not a swap, so nothing is filed or announced.
-      const active = after.accounts.find((a) => a.id === after.activeId) ?? null;
-      await enqueue({
-        fromId: after.activeId, fromLabel: active?.label ?? null, toId: after.activeId, toLabel: active?.label ?? null,
-        cause: "auth", source: report.source, runId: null, limitKind: null, limitedUntil: null, health: after.health, at: Date.now(),
-      }, true, new Set(["gateway"]), false);
     } else if (after.activeId && onActive && state.pending.size > 0) {
       // Nothing to move and the consumer is already on the active account (a
       // swap another report caused has landed): the held retries can go, and
