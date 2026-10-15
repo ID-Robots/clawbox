@@ -135,12 +135,21 @@ export function assertClaimIdAvailable(index: ClaimIndex, id: string, page: stri
 
 /**
  * An id for a new fact that does not collide with anything active or retired:
- * the plain id when free, else `-2`, `-3`, … on the fact slug.
+ * the plain id when free, else `-2`, `-3`, … on the fact slug. `usedOnPage`
+ * holds the ids the page being built already gave out, so two facts that
+ * slug alike on one page get distinct ids instead of a lint collision.
  */
-export function allocateClaimId(index: ClaimIndex, domain: string, entity: string, fact: string, page: string): string {
+export function allocateClaimId(
+  index: ClaimIndex,
+  domain: string,
+  entity: string,
+  fact: string,
+  page: string,
+  usedOnPage: ReadonlySet<string> = new Set(),
+): string {
   const base = makeClaimId(domain, entity, fact);
   const free = (id: string) =>
-    !index.retired.has(id) && (index.active.get(id) ?? []).every((loc) => loc.page === page);
+    !usedOnPage.has(id) && !index.retired.has(id) && (index.active.get(id) ?? []).every((loc) => loc.page === page);
   if (free(base)) return base;
   for (let n = 2; n < 10_000; n++) {
     const parts = base.split("/");

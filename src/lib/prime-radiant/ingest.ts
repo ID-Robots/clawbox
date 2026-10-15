@@ -62,6 +62,7 @@ import {
   type ScannedFile,
 } from "./ingest-sources";
 import { estimateUsd, type CostRates } from "./cost-rates";
+import { lintSecretsInText, type LintFinding } from "./lint";
 import { emptySkipCounts } from "./ingest-exclude";
 import { dropKeptCopies, keepFailedUploads, pruneKeptCopies } from "./ingest-dead-letter";
 import {
@@ -95,6 +96,7 @@ import {
   WRITER_MAX_TOKENS,
   WriterParseError,
   addToIndex,
+  indexLine,
   buildPage,
   buildWriterPrompt,
   parseWriterResponse,
@@ -689,6 +691,36 @@ const FATAL_MESSAGES: Partial<Record<FlashCallError["kind"], string>> = {
   refused: "ClawBox AI refused the request. Check the plan this box is on.",
 };
 
+/**
+ * The files of a batch a lint refusal blames: a finding on a page this batch
+ * wrote names that page's file; a secret in index.md names every file whose
+ * index line (its title) carries one. Empty when the refusal is about none of
+ * this batch's pages, so the caller knows dropping files would not help.
+ */
+export function lintCulprits(
+  findings: readonly LintFinding[],
+  pageOf: ReadonlyMap<string, number>,
+  titleOf: ReadonlyMap<number, string>,
+): Map<number, string> {
+  const rules = new Map<number, Set<string>>();
+  const blame = (i: number, rule: string) => {
+    const set = rules.get(i) ?? new Set<string>();
+    set.add(rule);
+    rules.set(i, set);
+  };
+  for (const f of findings) {
+    const i = pageOf.get(f.path);
+    if (i !== undefined) {
+      blame(i, f.rule);
+    } else if (f.path === INDEX_FILE) {
+      for (const [path, idx] of pageOf) {
+        if (lintSecretsInText(INDEX_FILE, indexLine(path, titleOf.get(idx) ?? "")).length > 0) blame(idx, f.rule);
+      }
+    }
+  }
+  return new Map([...rules].map(([i, set]) => [i, `its page was refused by lint: ${[...set].sort().join(", ")}`]));
+}
+
 /** One batch: a model call (with retries, and one more call for an unreadable answer), then one commit. */
 function ownerLookup(domains: ReadonlyArray<{ name: string; owner: string }>): (domain: string) => string | undefined {
   const byName = new Map(domains.map((d) => [d.name, d.owner]));
@@ -760,71 +792,96 @@ async function processBatch(
   }
   if (!verdicts) return failAll("the model's answer could not be read", null, cost, true);
 
-  const updates: FileUpdate[] = [];
-  const transient = new Set<number>();
+  let updates: FileUpdate[] = [];
+  let transient = new Set<number>();
   let pagesWritten = 0;
   let commit: string | null = null;
-  const written: Array<{ id: string; page: string; updatedAt: string }> = [];
-  try {
-    const op = await vaultOperation(
-      `ingest: ${files.length} document(s) (${job.id})`,
-      async (tx) => {
-        const snapshot = await readVaultSnapshot(tx.vault);
-        const valid = snapshot.pages.flatMap((p) => (p.parsed.ok ? [{ path: p.path, frontmatter: p.parsed.frontmatter }] : []));
-        let ledger: string[] = [];
-        try {
-          ledger = readRetiredLedger(tx.vault);
-        } catch {
-          ledger = [];
-        }
-        const pagesBySource = new Map<string, ExistingPage>();
-        for (const p of valid) for (const s of p.frontmatter.sources) if (!pagesBySource.has(s)) pagesBySource.set(s, p);
-        const build: BuildContext = {
-          takenPaths: new Set(snapshot.pages.map((p) => p.path)),
-          pagesBySource,
-          claimIndex: buildClaimIndex(valid, ledger),
-          now: now(),
-          // The owner a domain's new pages get: the settings' domain list, unless the caller names one.
-          ownerFor: deps.ownerFor ?? ownerLookup(readSettings().domains),
-        };
-        const indexed: Array<{ path: string; title: string }> = [];
-        for (let i = 0; i < files.length; i++) {
-          const f = files[i];
-          const v = verdicts!.get(i);
-          if (!v || !v.ok) {
-            updates.push({ seq: f.seq, status: "failed", sha256: f.sha256, bytes: f.bytes, error: v && !v.ok ? v.reason : "missing" });
-            transient.add(f.seq);
-            continue;
+  let written: Array<{ id: string; page: string; updatedAt: string }> = [];
+  // Files whose page lint refused, with why. They fail alone; the rest of the
+  // batch is written again without them (the vault is put back after a refusal,
+  // and index.md is rebuilt from it, so a dropped page leaves no trace there).
+  const refused = new Map<number, string>();
+  for (;;) {
+    updates = [];
+    transient = new Set<number>();
+    pagesWritten = 0;
+    written = [];
+    const pageOf = new Map<string, number>();
+    const titleOf = new Map<number, string>();
+    try {
+      const op = await vaultOperation(
+        `ingest: ${files.length - refused.size} document(s) (${job.id})`,
+        async (tx) => {
+          const snapshot = await readVaultSnapshot(tx.vault);
+          const valid = snapshot.pages.flatMap((p) => (p.parsed.ok ? [{ path: p.path, frontmatter: p.parsed.frontmatter }] : []));
+          let ledger: string[] = [];
+          try {
+            ledger = readRetiredLedger(tx.vault);
+          } catch {
+            ledger = [];
           }
-          if (!v.draft.useful) {
-            updates.push({ seq: f.seq, status: "skipped", sha256: f.sha256, bytes: f.bytes, error: "nothing to keep" });
-            continue;
+          const pagesBySource = new Map<string, ExistingPage>();
+          for (const p of valid) for (const s of p.frontmatter.sources) if (!pagesBySource.has(s)) pagesBySource.set(s, p);
+          const build: BuildContext = {
+            takenPaths: new Set(snapshot.pages.map((p) => p.path)),
+            pagesBySource,
+            claimIndex: buildClaimIndex(valid, ledger),
+            now: now(),
+            // The owner a domain's new pages get: the settings' domain list, unless the caller names one.
+            ownerFor: deps.ownerFor ?? ownerLookup(readSettings().domains),
+          };
+          const indexed: Array<{ path: string; title: string }> = [];
+          for (let i = 0; i < files.length; i++) {
+            const f = files[i];
+            const why = refused.get(i);
+            if (why !== undefined) {
+              updates.push({ seq: f.seq, status: "failed", sha256: f.sha256, bytes: f.bytes, error: why });
+              continue;
+            }
+            const v = verdicts!.get(i);
+            if (!v || !v.ok) {
+              updates.push({ seq: f.seq, status: "failed", sha256: f.sha256, bytes: f.bytes, error: v && !v.ok ? v.reason : "missing" });
+              transient.add(f.seq);
+              continue;
+            }
+            if (!v.draft.useful) {
+              updates.push({ seq: f.seq, status: "skipped", sha256: f.sha256, bytes: f.bytes, error: "nothing to keep" });
+              continue;
+            }
+            const built = buildPage(v.draft, f.file.label, build);
+            if (!built.ok) {
+              updates.push({ seq: f.seq, status: "skipped", sha256: f.sha256, bytes: f.bytes, error: "its page is verified" });
+              continue;
+            }
+            await tx.writePage(built.path, built.frontmatter, built.body);
+            pageOf.set(built.path, i);
+            titleOf.set(i, built.frontmatter.title);
+            for (const c of built.frontmatter.claims) written.push({ id: c.id, page: built.path, updatedAt: c.updatedAt });
+            indexed.push({ path: built.path, title: built.frontmatter.title });
+            updates.push({ seq: f.seq, status: "done", sha256: f.sha256, bytes: f.bytes, pages: [built.path], error: null });
+            pagesWritten += 1;
           }
-          const built = buildPage(v.draft, f.file.label, build);
-          if (!built.ok) {
-            updates.push({ seq: f.seq, status: "skipped", sha256: f.sha256, bytes: f.bytes, error: "its page is verified" });
-            continue;
+          if (indexed.length > 0) {
+            const next = addToIndex(snapshot.indexBody, indexed);
+            if (next !== snapshot.indexBody) await tx.write(INDEX_FILE, next);
           }
-          await tx.writePage(built.path, built.frontmatter, built.body);
-          for (const c of built.frontmatter.claims) written.push({ id: c.id, page: built.path, updatedAt: c.updatedAt });
-          indexed.push({ path: built.path, title: built.frontmatter.title });
-          updates.push({ seq: f.seq, status: "done", sha256: f.sha256, bytes: f.bytes, pages: [built.path], error: null });
-          pagesWritten += 1;
-        }
-        if (indexed.length > 0) {
-          const next = addToIndex(snapshot.indexBody, indexed);
-          if (next !== snapshot.indexBody) await tx.write(INDEX_FILE, next);
-        }
-      },
-      { vault, now: now() },
-    );
-    commit = op.commit;
-  } catch (err) {
-    const blocked = err instanceof VaultLintBlockedError;
-    const reason = blocked ? "the pages were refused by lint" : "the pages could not be saved";
-    console.error("[prime-radiant] ingest: batch commit failed:", err instanceof Error ? err.message : err);
-    // Lint will refuse the same pages again; a failed save may not happen twice.
-    return failAll(reason, null, cost, !blocked);
+        },
+        { vault, now: now() },
+      );
+      commit = op.commit;
+      break;
+    } catch (err) {
+      const blocked = err instanceof VaultLintBlockedError;
+      console.error("[prime-radiant] ingest: batch commit failed:", err instanceof Error ? err.message : err);
+      const culprits = blocked ? lintCulprits(err.findings, pageOf, titleOf) : new Map<number, string>();
+      if (culprits.size === 0) {
+        // Not a page of this batch to blame (or not lint at all): the batch fails
+        // as a whole. Lint will refuse the same pages again; a failed save may not.
+        return failAll(blocked ? "the pages were refused by lint" : "the pages could not be saved", null, cost, !blocked);
+      }
+      for (const [i, why] of culprits) refused.set(i, why);
+      console.error(`[prime-radiant] ingest: dropping ${culprits.size} refused page(s), committing the rest of the batch`);
+    }
   }
   if (written.length > 0) {
     try {

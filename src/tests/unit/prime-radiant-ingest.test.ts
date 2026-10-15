@@ -217,6 +217,21 @@ describe("an ingest job", () => {
     expect(readFiles(vault, job.id)[0]).toMatchObject({ status: "skipped", error: "its page is verified" });
   });
 
+  it("gives two facts that slug alike on one page distinct claim ids instead of a lint refusal", async () => {
+    write("twin.md", "Doc twin.");
+    const fake = fakeClient((items) =>
+      items.map((it) => ({ ...cardFor(it), facts: [{ fact: "Same fact.", quote: "x", confidence: 0.7 }, { fact: "Same fact!", quote: "x", confidence: 0.6 }] })),
+    );
+    const job = await run({ kind: "folders", folders: [docs] }, deps({ client: fake.client }));
+    expect(job).toMatchObject({ done: 1, failed: 0, pages: 1, commits: 1 });
+    const page = (await readVaultSnapshot(vault)).pages[0];
+    expect(page.parsed.ok).toBe(true);
+    if (page.parsed.ok) {
+      const ids = page.parsed.frontmatter.claims.map((c) => c.id);
+      expect(new Set(ids).size).toBe(2);
+    }
+  });
+
   it("fails only the item the model dropped or garbled, and skips what it called useless", async () => {
     write("a.md", "Doc a.");
     write("b.md", "Doc b.");
