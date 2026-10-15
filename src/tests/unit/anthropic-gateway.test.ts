@@ -779,8 +779,20 @@ describe("the owner's switch: use these accounts for the chat too", () => {
       return { ok: false as const, error: "Failed to switch chat model", status: 500 };
     });
     const result = await gw.putChatOnPool(setModel);
-    expect(result).toMatchObject({ ok: false, code: "model_not_set", status: 500 });
+    expect(result).toMatchObject({ ok: false, code: "model_unknown", status: 500 });
     expect(result.ok ? "" : result.error).toMatch(/could not be read.*Failed to switch chat model$/);
     expect(core.logouts).toEqual([]);
+  });
+
+  it("decides a model route that threw the same way as one that refused — the accounts go out when the chat did not move", async () => {
+    const core = fakeCore();
+    core.chatOnClaude = false;
+    await twoClaudeAccounts();
+    const setModel = vi.fn(async (): Promise<{ ok: true }> => {
+      throw new Error("the config store could not be written");
+    });
+    expect(await gw.putChatOnPool(setModel)).toEqual({ ok: false, code: "model_not_set", error: "the config store could not be written", status: 500 });
+    expect([...core.profiles.keys()]).toEqual(["anthropic:default"]);
+    expect((await pool.describePool()).gateway.following).toBe(false);
   });
 });

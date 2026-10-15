@@ -545,9 +545,15 @@ export async function syncGatewayNow(): Promise<SwapConsumerOutcome> {
 }
 
 export type UseForChatResult =
-  /** `warning`: the model route failed after the chat's model had landed on Claude — what it reported. */
+  /** `warning`: the model route failed, yet the chat's model is on Claude (landed, or was already) — what it reported. */
   | { ok: true; outcome: SwapConsumerOutcome; warning?: string }
-  | { ok: false; code: "no_gateway" | "no_claude_account" | "agent_unsupported" | "gateway_write_failed" | "model_not_set"; error: string; status: number };
+  /**
+   * `model_not_set`: the chat did not move and the accounts are out again.
+   * `model_unknown`: the model route failed and openclaw.json could not be
+   * read to tell whether the chat moved — the accounts are left in, for the
+   * keeper to settle.
+   */
+  | { ok: false; code: "no_gateway" | "no_claude_account" | "agent_unsupported" | "gateway_write_failed" | "model_not_set" | "model_unknown"; error: string; status: number };
 
 /**
  * The accounts card's "Use these accounts for the chat too": the pool's Claude
@@ -571,7 +577,9 @@ export async function putChatOnPool(setModel: () => Promise<{ ok: true } | { ok:
     if (synced.status !== "ok" && synced.code !== "not_transferable") {
       return { ok: false, code: "gateway_write_failed", error: "The Anthropic accounts could not be given to the chat. See the box's log.", status: 502 } as const;
     }
-    const set = await setModel();
+    // A throw is a refusal too: the accounts are already in, and the same
+    // re-read below must decide whether they stay.
+    const set = await setModel().catch((err: unknown) => ({ ok: false as const, error: err instanceof Error ? err.message : String(err), status: 500 }));
     if (!set.ok) {
       // A refusal is not proof the chat stayed where it was: the model route
       // can fail after `agents.defaults.model.primary` landed. openclaw.json
@@ -584,7 +592,7 @@ export async function putChatOnPool(setModel: () => Promise<{ ok: true } | { ok:
       }
       // Unknown is not "off": nothing is taken out, and the keeper settles it.
       if (chat === null) {
-        return { ok: false, code: "model_not_set", error: `Whether the chat moved could not be read, so the accounts stay in until it can be. Setting its model reported: ${set.error}`, status: set.status } as const;
+        return { ok: false, code: "model_unknown", error: `Whether the chat moved could not be read, so the accounts stay in until it can be. Setting its model reported: ${set.error}`, status: set.status } as const;
       }
       // The chat did not move: take the accounts out again rather than leave
       // the card saying the chat runs on them, with nothing to press.

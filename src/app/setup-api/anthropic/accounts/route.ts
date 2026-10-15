@@ -79,8 +79,11 @@ export const dynamic = "force-dynamic";
  *    rotate between them on a limit — no third sign-in. Refused with a code
  *    (`no_gateway` — also while the active harness is not OpenClaw, a dual
  *    box on Hermes — `no_claude_account`, `gateway_write_failed`,
- *    `model_not_set`) when it cannot be done; the chat is never left on
- *    Claude without the accounts.
+ *    `model_not_set` with the accounts out again, `model_unknown` with them
+ *    left in because openclaw.json could not be read) when it cannot be done;
+ *    the chat is never left on Claude without the accounts. A model route
+ *    that failed over a chat whose model is on Claude anyway is done: 200,
+ *    with what it reported as `warning` and no `model`.
  *  - `simulate_limit` `{ id, minutes? }` — THE TEST HOOK: every live coding run
  *    on that account ends as if Anthropic had answered "You've hit your session
  *    limit · resets <then>", and the real switch path takes it from there; with
@@ -89,7 +92,8 @@ export const dynamic = "force-dynamic";
  *    and sends the owner's notice. Owner-only like the rest.
  *
  * Every answer is the re-read GET shape (plus `verified` for a key,
- * `interrupted` for the test hook and the chat's `model` for `use_for_chat`),
+ * `interrupted` for the test hook, the chat's `model` and any `warning` for
+ * `use_for_chat`),
  * so the panel never has to guess. `gateway.available` says whether this
  * box's chat runs on OpenClaw at all, which is where `use_for_chat` applies.
  */

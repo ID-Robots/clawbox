@@ -81,7 +81,7 @@ interface PoolView {
   gateway?: { following: boolean; accountId: string | null; label: string | null; available?: boolean } | null;
   /** POST only. */
   verified?: boolean;
-  /** `use_for_chat` only: the model is set, and the box qualified the save. */
+  /** `use_for_chat` only: the chat runs on the accounts, and the box qualified the model write (or reported it failed over a model already on Claude). */
   warning?: string;
 }
 
