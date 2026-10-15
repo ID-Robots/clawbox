@@ -30,10 +30,61 @@ class IntegrationTest(unittest.TestCase):
         cls.deb=cls.base/'package.deb'
         owner=pwd.getpwuid(os.getuid())
         cls.project=os.path.join(owner.pw_dir,'clawbox')
-        args=SimpleNamespace(user=owner.pw_name,project=cls.project,node_dir='/usr/bin',
+        # The builder refuses a Node the pinned core refuses, so the package
+        # under test names a Node that answers as one the core accepts — never
+        # the runner's own /usr/bin/node, whose version is the runner's.
+        cls.node_dir=cls.node_stub(cls.base,'v24.18.0')
+        args=SimpleNamespace(user=owner.pw_name,project=cls.project,node_dir=cls.node_dir,
                              npm_prefix=os.path.join(owner.pw_dir,'.nvm/versions/node/v24.0.0'),version='1.0.0',
                              staging=str(cls.stage),output=str(cls.deb))
         builder.build(args)
+
+    @staticmethod
+    def node_stub(base,version):
+        """A bin directory whose `node --version` answers `version` (or nothing, for None)."""
+        d=tempfile.mkdtemp(prefix='node-',dir=base)
+        if version is not None:
+            node=Path(d)/'node'
+            node.write_text(f'#!/bin/sh\n[ "$1" = --version ] || exit 64\nprintf "%s\\n" "{version}"\n'); node.chmod(0o755)
+        return d
+
+    # Exactly the published `engines.node` of the pinned core, as a table — the
+    # same matrix install-node-engine-table.test.ts runs the installers' bash
+    # copies over, so the builder's Python copy cannot drift from them.
+    NODE_REJECTED=['22.22.2','22.22.3','22.23.2','23.11.0','24.15.0','25.9.0','26.0.0']
+    NODE_ACCEPTED=['24.16.0','24.21.0','26.1.0','26.8.2','27.0.0','100.0.0']
+
+    def test_builder_node_engine_table_matches_the_installers(self):
+        for v in self.NODE_REJECTED:
+            self.assertFalse(builder.node_version_satisfies_openclaw_engine(v),v)
+            self.assertFalse(builder.node_version_satisfies_openclaw_engine('v'+v),v)
+        for v in self.NODE_ACCEPTED:
+            self.assertTrue(builder.node_version_satisfies_openclaw_engine(v),v)
+            self.assertTrue(builder.node_version_satisfies_openclaw_engine('v'+v),v)
+        self.assertFalse(builder.node_version_satisfies_openclaw_engine(''))
+        self.assertFalse(builder.node_version_satisfies_openclaw_engine(None))
+
+    def test_builder_refuses_a_node_dir_the_pinned_core_refuses(self):
+        """Refused where the builder's output is read, not inside the next core update's root unit."""
+        owner=pwd.getpwuid(os.getuid())
+        for version,accepted in [('v22.23.2',False),('v24.15.0',False),(None,False),('v24.16.0',True)]:
+            with self.subTest(node=version):
+                node_dir=self.node_stub(self.base,version)
+                out=tempfile.mkdtemp(prefix='build-',dir=self.base)
+                args=SimpleNamespace(user=owner.pw_name,project=self.project,node_dir=node_dir,
+                                     npm_prefix=os.path.join(owner.pw_dir,'.nvm/versions/node/v24.0.0'),version='1.0.0',
+                                     staging=os.path.join(out,'stage'),output=os.path.join(out,'package.deb'))
+                if accepted:
+                    builder.build(args)
+                    env=Path(args.staging,'etc/clawbox/x64-integration.env').read_text()
+                    self.assertIn(f'NODE_DIR={node_dir}\n',env)
+                    continue
+                with self.assertRaises(ValueError) as refused:
+                    builder.build(args)
+                self.assertIn('--node-dir',str(refused.exception))
+                self.assertIn('>=24.16.0 <25, or >=26.1.0',str(refused.exception))
+                if version: self.assertIn(version,str(refused.exception))
+                self.assertFalse(Path(out,'package.deb').exists())
 
     @classmethod
     def tearDownClass(cls): cls.tmp.cleanup()
@@ -436,6 +487,28 @@ exit {code}
                 self.assertEqual(self.recovery_points(root),[])
                 self.assertFalse((root/'guard').exists())
                 self.assertIn('system-start',events)
+
+    def test_node_the_package_names_is_checked_against_the_core_engines_before_npm_runs(self):
+        """A package rebuilt without --node-dir once pointed the step at the distro's Node 22: the owner read npm's wall of text, not the repair."""
+        root,worker,_=self.core_fixture()
+        (root/'mirror/config/openclaw-target.txt').write_text('2026.9.1\n')
+        node=root/'runtime/node'
+        node.write_text(self.NODE.replace("printf 'v24.18.0\\n'","printf 'v22.23.2\\n'"))
+        result=self.run_worker(worker,'openclaw_install')
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn('v22.23.2',result.stderr)
+        self.assertIn('>=24.16.0 <25, or >=26.1.0',result.stderr)
+        self.assertIn('--node-dir',result.stderr)
+        self.assertIn('untouched',result.stderr)
+        events=(root/'events').read_text()
+        self.assertNotIn('npm-install',events)
+        self.assertNotIn('backup-',events)
+        self.assertNotIn('doctor-start',events)
+        self.assertEqual(self.core_version(root/'lib/node_modules/openclaw'),'2026.8.1')
+        self.assertFalse((root/'.openclaw-stage').exists())
+        self.assertEqual(self.recovery_points(root),[])
+        self.assertFalse((root/'guard').exists())
+        self.assertIn('system-start',events)
 
     # The links the archiver refuses: an absolute target outside the state
     # tree, a relative one that lands outside (and does not exist), a stale
