@@ -4,10 +4,11 @@ import { useCallback, useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { BTN_PRIMARY, BTN_QUIET, BTN_SECONDARY, CARD_SURFACE, FIELD, INSET_SURFACE, SECTION_LABEL } from "./coding-agent-ui";
 import PrimeRadiantFolderPicker from "./PrimeRadiantFolderPicker";
+import { useTokensByRun } from "./PrimeRadiantUsage";
 import {
   API,
   errorText,
-  formatUsd,
+  formatTokens,
   formatWhen,
   jsonInit,
   prJson,
@@ -22,7 +23,6 @@ interface SettingsAnswer {
   limits: {
     ingestParallel: { min: number; max: number };
     ingestFolders: number;
-    opusCapUsd: { min: number; max: number };
     domains: number;
   };
   nightly: { nextRunAt: number | null };
@@ -40,7 +40,6 @@ interface Draft {
   time: string;
   contradictions: boolean;
   opusEnabled: boolean;
-  capUsd: string;
   parallel: string;
   exclude: string;
   skipCodeProjects: boolean;
@@ -54,7 +53,6 @@ function draftOf(s: Settings): Draft {
     time: s.nightly.time,
     contradictions: s.contradictions.enabled,
     opusEnabled: s.opus.enabled,
-    capUsd: String(s.opus.capUsd),
     parallel: String(s.ingest.parallel),
     exclude: s.ingest.exclude.join("\n"),
     skipCodeProjects: s.ingest.skipCodeProjects,
@@ -67,10 +65,15 @@ const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 /**
  * Settings: the nightly pass (on/off, its time, the folders it re-reads), the
- * contradiction pass, the optional Opus tier with its hard dollar cap, the
- * domains and their owners, the ingest exclude list and how many model calls
- * run at once — and the nightly pass itself: Run now, the last nights, and a
- * Merge button for a night that was held for review once its items are settled.
+ * contradiction pass, the optional Opus tier, the domains and their owners,
+ * the ingest exclude list and how many model calls run at once — and the
+ * nightly pass itself: Run now, the last nights with the tokens each used, and
+ * a Merge button for a night that was held for review once its items are
+ * settled.
+ *
+ * No money is shown. The Opus tier's nightly cap is a dollar figure on the
+ * wire, so it is not offered here: a save sends back the cap the box already
+ * has, and the server keeps holding the tier to it.
  */
 export default function PrimeRadiantSettings({ onChanged }: { onChanged: () => void }) {
   const { t, locale } = useT();
@@ -98,12 +101,8 @@ export default function PrimeRadiantSettings({ onChanged }: { onChanged: () => v
 
   const save = async () => {
     if (!draft || !answer) return;
-    const cap = Number(draft.capUsd);
     const parallel = Number(draft.parallel);
     if (!TIME_RE.test(draft.time)) return setError(t("primeRadiant.settings.badTime"));
-    if (!Number.isFinite(cap) || cap < answer.limits.opusCapUsd.min || cap > answer.limits.opusCapUsd.max) {
-      return setError(t("primeRadiant.settings.badCap", { min: answer.limits.opusCapUsd.min, max: answer.limits.opusCapUsd.max }));
-    }
     if (!Number.isInteger(parallel) || parallel < answer.limits.ingestParallel.min || parallel > answer.limits.ingestParallel.max) {
       return setError(t("primeRadiant.settings.badParallel", { min: answer.limits.ingestParallel.min, max: answer.limits.ingestParallel.max }));
     }
@@ -114,7 +113,7 @@ export default function PrimeRadiantSettings({ onChanged }: { onChanged: () => v
       const next = await prJson<SettingsAnswer>(`${API}/settings`, jsonInit("PUT", {
         nightly: { enabled: draft.nightlyEnabled, time: draft.time },
         contradictions: { enabled: draft.contradictions },
-        opus: { enabled: draft.opusEnabled, capUsd: cap },
+        opus: { enabled: draft.opusEnabled, capUsd: answer.settings.opus.capUsd },
         ingest: {
           parallel,
           exclude: draft.exclude.split("\n").map((l) => l.trim()).filter(Boolean),
@@ -150,7 +149,7 @@ export default function PrimeRadiantSettings({ onChanged }: { onChanged: () => v
               {t("primeRadiant.settings.time")}
               <input type="time" className={`${FIELD} text-xs`} value={draft.time} onChange={(e) => set({ time: e.target.value })} disabled={!draft.nightlyEnabled} data-testid="prime-radiant-nightly-time" />
             </label>
-            {answer.nightly.nextRunAt && draft.nightlyEnabled && (
+            {!!answer.nightly.nextRunAt && draft.nightlyEnabled && (
               <p className="text-[11px] text-[var(--text-muted)]">{t("primeRadiant.settings.nextRun", { at: formatWhen(answer.nightly.nextRunAt, locale) })}</p>
             )}
             <Toggle label={t("primeRadiant.settings.contradictions")} checked={draft.contradictions} onChange={(v) => set({ contradictions: v })} testId="prime-radiant-contradictions" />
@@ -167,21 +166,6 @@ export default function PrimeRadiantSettings({ onChanged }: { onChanged: () => v
             <h3 className={SECTION_LABEL}>{t("primeRadiant.settings.opusTitle")}</h3>
             <p className="text-[11px] text-[var(--text-muted)]">{t("primeRadiant.settings.opusBody")}</p>
             <Toggle label={t("primeRadiant.settings.opusOn")} checked={draft.opusEnabled} onChange={(v) => set({ opusEnabled: v })} testId="prime-radiant-opus-enabled" />
-            <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
-              {t("primeRadiant.settings.opusCap")}
-              <input
-                type="number"
-                inputMode="decimal"
-                step="0.01"
-                min={answer.limits.opusCapUsd.min}
-                max={answer.limits.opusCapUsd.max}
-                className={`${FIELD} text-xs w-28`}
-                value={draft.capUsd}
-                onChange={(e) => set({ capUsd: e.target.value })}
-                disabled={!draft.opusEnabled}
-                data-testid="prime-radiant-opus-cap"
-              />
-            </label>
           </section>
 
           <section className={`${CARD_SURFACE} p-4 space-y-3`}>
@@ -328,6 +312,12 @@ function PrimeRadiantNightly({ onChanged }: { onChanged: () => void }) {
   };
 
   const runs = state?.runs ?? [];
+  // A night's own calls, and those of the import it ran for the nightly folders.
+  const tokensByRun = useTokensByRun(state);
+  const tokensOf = (run: RunRecord) => {
+    const job = (run.summary as { ingest?: { jobId?: unknown } } | null)?.ingest?.jobId;
+    return (tokensByRun?.get(run.id) ?? 0) + (typeof job === "string" ? (tokensByRun?.get(job) ?? 0) : 0);
+  };
   return (
     <section className={`${CARD_SURFACE} p-4 space-y-3`} data-testid="prime-radiant-nightly">
       <div className="flex items-center justify-between gap-2">
@@ -353,7 +343,11 @@ function PrimeRadiantNightly({ onChanged }: { onChanged: () => void }) {
                   {t(`primeRadiant.nightly.status.${run.status}`)}
                 </span>
                 <span className="text-[var(--text-muted)]">{formatWhen(run.startedAt, locale)}</span>
-                <span className="text-[var(--text-muted)]">{formatUsd(run.usdEstimate, locale)}</span>
+                {tokensOf(run) > 0 && (
+                  <span className="text-[var(--text-muted)] tabular-nums" data-testid="prime-radiant-nightly-tokens">
+                    {t("primeRadiant.tokens", { n: formatTokens(tokensOf(run), locale) })}
+                  </span>
+                )}
                 {run.branch && <span className="font-mono text-[11px] text-[var(--text-muted)]">{run.branch}</span>}
                 {held && (
                   <button

@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
-import { APP_GROUND, BTN_PRIMARY, BTN_SECONDARY } from "./coding-agent-ui";
+import { useTr } from "@/lib/i18n-floor";
+import { APP_GROUND, BTN_PRIMARY, BTN_SECONDARY, SECTION_LABEL } from "./coding-agent-ui";
 import {
   API,
   PRODUCT_NAME,
@@ -16,14 +17,16 @@ import {
   type Tab,
 } from "./prime-radiant-ui";
 import PrimeRadiantBrowse from "./PrimeRadiantBrowse";
-import PrimeRadiantSearch from "./PrimeRadiantSearch";
 import PrimeRadiantReview from "./PrimeRadiantReview";
 import PrimeRadiantHistory from "./PrimeRadiantHistory";
 import PrimeRadiantLint from "./PrimeRadiantLint";
 import PrimeRadiantIngest from "./PrimeRadiantIngest";
 import PrimeRadiantSettings from "./PrimeRadiantSettings";
-import PrimeRadiantCosts from "./PrimeRadiantCosts";
+import PrimeRadiantUsage from "./PrimeRadiantUsage";
 import PrimeRadiantIcon from "./PrimeRadiantIcon";
+
+/** The Map (WebGL, a layout worker) is fetched only when its tab is first drawn. */
+const PrimeRadiantMap = lazy(() => import("./PrimeRadiantMap"));
 
 /**
  * Prime Radiant — the "living wiki" — as its own desktop app.
@@ -38,6 +41,11 @@ import PrimeRadiantIcon from "./PrimeRadiantIcon";
  * repository and points the memory-wiki plugin at it. A refused init is
  * shown with a retry button rather than retried on its own — it writes the
  * agent's configuration, and doing that in a loop is the wrong failure mode.
+ *
+ * Five tabs: Map (the start page of a vault with pages; an empty vault opens
+ * on Pages, whose empty state leads to Add), Pages (the list and its search,
+ * each page with its history), Review (open questions, then failed checks),
+ * Add, and Settings (with the token usage). The app shows no money anywhere.
  */
 
 /** A status the window can draw: a vault that exists carries its counts and its wiring. */
@@ -49,11 +57,17 @@ function isDrawableStatus(s: unknown): s is PrimeRadiantStatus {
 }
 export default function PrimeRadiantApp() {
   const { t } = useT();
+  /** For what shows before the dictionaries load (the window can be the first thing on screen): English, never a key. */
+  const tr = useTr();
   const [status, setStatus] = useState<PrimeRadiantStatus | null>(null);
   const [phase, setPhase] = useState<"loading" | "initialising" | "ready" | "failed">("loading");
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("browse");
-  /** The page the History tab opens on, handed over from Browse. */
+  /** The start tab is picked once, from the first status that has the vault. */
+  const startPicked = useRef(false);
+  /** A page opened from the Map goes back to the Map. */
+  const backToMap = useRef(false);
+  /** The page whose history Pages shows, opened from that page's own view (null: no history open). */
   const [historyPage, setHistoryPage] = useState<string | null>(null);
   /** The page Browse shows; Search, Review, Lint and History open one here too. */
   const [browsePage, setBrowsePage] = useState<string | null>(null);
@@ -96,11 +110,18 @@ export default function PrimeRadiantApp() {
       });
   }, []);
 
+  const pickStartTab = useCallback((s: PrimeRadiantStatus) => {
+    if (startPicked.current || !s.initialised) return;
+    startPicked.current = true;
+    setTab(s.vault.pages > 0 ? "map" : "browse");
+  }, []);
+
   /** What to do with a status: show it, or create the vault and read again. */
   const settle = useCallback(async (s: PrimeRadiantStatus, signal?: AbortSignal) => {
     if (!isDrawableStatus(s)) throw new Error("shape");
     setStatus(s);
     if (s.initialised) {
+      pickStartTab(s);
       setPhase("ready");
       if (s.plugin.state === "needs-write") rewire(signal);
       return;
@@ -113,9 +134,10 @@ export default function PrimeRadiantApp() {
     if (signal?.aborted) return;
     if (!isDrawableStatus(after)) throw new Error("shape");
     setStatus(after);
+    pickStartTab(after);
     setPhase(after.initialised ? "ready" : "failed");
     if (after.initialised) announceVaultChanged();
-  }, [rewire]);
+  }, [rewire, pickStartTab]);
 
   const fail = useCallback((err: unknown, signal?: AbortSignal) => {
     if ((err as Error)?.name === "AbortError" || signal?.aborted) return;
@@ -153,14 +175,37 @@ export default function PrimeRadiantApp() {
       .catch((err) => fail(err));
   };
 
+  const showTab = useCallback((id: Tab) => {
+    backToMap.current = false;
+    setHistoryPage(null);
+    setTab(id);
+  }, []);
   const openPage = useCallback((path: string) => {
+    backToMap.current = false;
+    setHistoryPage(null);
     setBrowsePage(path);
     setTab("browse");
   }, []);
+  const openFromMap = useCallback((path: string) => {
+    backToMap.current = true;
+    setHistoryPage(null);
+    setBrowsePage(path);
+    setTab("browse");
+  }, []);
+  /** Browse's own navigation; its Back from a page the Map opened returns to the Map. */
+  const selectInBrowse = useCallback((path: string | null) => {
+    setBrowsePage(path);
+    if (path === null && backToMap.current) {
+      backToMap.current = false;
+      setTab("map");
+    }
+  }, []);
+  /** A page's history opens in Pages, over the page; Back returns to the page. */
   const openHistory = useCallback((path: string) => {
     setHistoryPage(path);
-    setTab("history");
+    setTab("browse");
   }, []);
+  const toIngest = useCallback(() => showTab("ingest"), [showTab]);
 
   const ready = phase === "ready" && status?.initialised;
 
@@ -175,7 +220,7 @@ export default function PrimeRadiantApp() {
           <PrimeRadiantIcon className="w-5 h-5 shrink-0" />
           <h1 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--text-primary)]">{PRODUCT_NAME}</h1>
           <span className="text-xs text-[var(--text-muted)] truncate" data-testid="prime-radiant-subtitle">
-            {t("primeRadiant.subtitle")}
+            {tr("primeRadiant.subtitle", "living wiki")}
           </span>
         </div>
         {ready && status && (
@@ -196,7 +241,7 @@ export default function PrimeRadiantApp() {
               role="tab"
               aria-selected={tab === id}
               data-testid={`prime-radiant-tab-${id}`}
-              onClick={() => setTab(id)}
+              onClick={() => showTab(id)}
               className={`inline-flex items-center gap-1.5 shrink-0 rounded-lg px-3 py-1.5 text-xs font-medium cursor-pointer transition-colors ${
                 tab === id
                   ? "bg-white/[0.12] text-[var(--text-primary)]"
@@ -210,7 +255,10 @@ export default function PrimeRadiantApp() {
         </nav>
       )}
 
-      <main className="flex-1 min-h-0 overflow-y-auto px-5 py-4" role={ready ? "tabpanel" : undefined}>
+      <main
+        className={`flex-1 min-h-0 px-5 py-4 ${ready && tab === "map" ? "overflow-hidden flex flex-col" : "overflow-y-auto"}`}
+        role={ready ? "tabpanel" : undefined}
+      >
         {error && phase === "ready" && (
           <p role="alert" className="mb-3 text-xs text-red-300">{error}</p>
         )}
@@ -220,7 +268,7 @@ export default function PrimeRadiantApp() {
             <PrimeRadiantIcon className="w-10 h-10" />
             <p className="flex items-center gap-2">
               <span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 16 }} aria-hidden="true">progress_activity</span>
-              {phase === "initialising" ? t("primeRadiant.initialising") : t("primeRadiant.loading")}
+              {phase === "initialising" ? tr("primeRadiant.initialising", "Creating the wiki for the first time…") : tr("primeRadiant.loading", "Loading…")}
             </p>
           </div>
         )}
@@ -237,7 +285,7 @@ export default function PrimeRadiantApp() {
 
         {ready && status && (
           <>
-            {status.plugin.state === "conflict" && tab === "browse" && (
+            {status.plugin.state === "conflict" && (tab === "browse" || tab === "map") && (
               <p className="mb-3 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs text-amber-200" data-testid="prime-radiant-wiring-conflict">
                 {t(
                   status.plugin.conflicts.every((c) => c === "plugin-writes")
@@ -246,28 +294,60 @@ export default function PrimeRadiantApp() {
                 )}
               </p>
             )}
-            {repaired && tab === "browse" && (
+            {repaired && (tab === "browse" || tab === "map") && (
               <p className="mb-3 rounded-lg border border-sky-400/30 bg-sky-400/10 px-3 py-2 text-xs text-sky-200" data-testid="prime-radiant-repaired" role="status">
                 {t("primeRadiant.repaired", { pages: repaired.pages, files: repaired.files })}
               </p>
             )}
-            {tab === "browse" && (
+            {tab === "map" && (
+              <div className="flex-1 min-h-0">
+                <Suspense
+                  fallback={
+                    <p className="flex items-center gap-2 py-10 justify-center text-sm text-[var(--text-muted)]" role="status">
+                      <span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 16 }} aria-hidden="true">progress_activity</span>
+                      {tr("primeRadiant.map.loading", "Drawing the map…")}
+                    </p>
+                  }
+                >
+                  <PrimeRadiantMap revision={revision} onOpenPage={openFromMap} onIngest={toIngest} />
+                </Suspense>
+              </div>
+            )}
+            {tab === "browse" && historyPage !== null && (
+              <div className="space-y-3">
+                <button type="button" className={BTN_SECONDARY} onClick={() => setHistoryPage(null)} data-testid="prime-radiant-history-back">
+                  <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">arrow_back</span>
+                  {t("primeRadiant.back")}
+                </button>
+                <PrimeRadiantHistory key={historyPage} initialPage={historyPage} revision={revision} onChanged={changed} onOpenPage={openPage} />
+              </div>
+            )}
+            {tab === "browse" && historyPage === null && (
               <PrimeRadiantBrowse
                 domains={status.vault.domains}
                 revision={revision}
                 selected={browsePage}
-                onSelect={setBrowsePage}
+                onSelect={selectInBrowse}
                 onHistory={openHistory}
-                onIngest={() => setTab("ingest")}
+                onIngest={toIngest}
               />
             )}
-            {tab === "search" && <PrimeRadiantSearch onOpenPage={openPage} />}
-            {tab === "review" && <PrimeRadiantReview revision={revision} onChanged={changed} onOpenPage={openPage} onOpenSettings={() => setTab("settings")} />}
-            {tab === "history" && <PrimeRadiantHistory initialPage={historyPage} revision={revision} onChanged={changed} onOpenPage={openPage} />}
-            {tab === "lint" && <PrimeRadiantLint revision={revision} onOpenPage={openPage} />}
+            {tab === "review" && (
+              <div className="space-y-6">
+                <PrimeRadiantReview revision={revision} onChanged={changed} onOpenPage={openPage} onOpenSettings={() => showTab("settings")} />
+                <section className="space-y-2" data-testid="prime-radiant-review-checks">
+                  <h3 className={SECTION_LABEL}>{t("primeRadiant.tab.lint")}</h3>
+                  <PrimeRadiantLint revision={revision} onOpenPage={openPage} />
+                </section>
+              </div>
+            )}
             {tab === "ingest" && <PrimeRadiantIngest onChanged={changed} />}
-            {tab === "settings" && <PrimeRadiantSettings onChanged={changed} />}
-            {tab === "costs" && <PrimeRadiantCosts revision={revision} />}
+            {tab === "settings" && (
+              <div className="space-y-4">
+                <PrimeRadiantSettings onChanged={changed} />
+                <PrimeRadiantUsage revision={revision} />
+              </div>
+            )}
           </>
         )}
       </main>
