@@ -65,7 +65,9 @@ guessed at: the job prints it under "unchecked" with its file:line, and
 reason. More than recorded fails the check — pass the value as a literal or a
 named constant, or record it with
 `node scripts/harness-contract/scan.mjs --unchecked > config/harness-contract-unchecked.json`
-so the reviewer sees the blind spot grow.
+so the reviewer sees the blind spot grow. A source file the scan cannot read
+is listed there too (`clawbox file <file>:1 — the file could not be read`):
+fix its permissions rather than record it.
 
 Not read at all: whole-file writers of the harnesses' own stores — the web
 server's `writeConfig()` of openclaw.json, the Python passes over it in

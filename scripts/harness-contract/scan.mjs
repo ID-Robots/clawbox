@@ -14,7 +14,8 @@
  * at: it is reported under `unchecked` with its file:line, and the
  * harness-contract job prints that list. Constants are followed when they are
  * plain string literals (same file first, then a name defined exactly once in
- * the tree), and a local argv array is followed back to its definition.
+ * the tree), and a local argv array is followed back to its definition. A
+ * source file the scan cannot read is listed there too.
  *
  *   node scripts/harness-contract/scan.mjs [repoDir] > usage.json
  */
@@ -29,6 +30,9 @@ const SKIP = [
   /^(e2e|e2e-install|docs|docs-site|bench|reports|public|node_modules)\//, /^scripts\/nano-tests\//, /\.d\.ts$/,
 ];
 const JS_EXT = /\.(ts|tsx|js|mjs|cjs)$/;
+// A path git lists that holds no code: gone from the tree (ENOENT, or ENOTDIR
+// when a folder on its way became a file), a folder, a dangling or looping link.
+const NO_CODE_HERE = new Set(["ENOENT", "ENOTDIR", "EISDIR", "ELOOP"]);
 
 function listFiles(root) {
   let files;
@@ -52,7 +56,7 @@ function listFiles(root) {
       try {
         return /^#!.*\b(ba)?sh\b/.test(fs.readFileSync(path.join(root, f), "utf-8").split("\n", 1)[0]);
       } catch (e) {
-        return !["ENOENT", "EISDIR", "ELOOP"].includes(e?.code); // unreadable: kept, so the scan lists it
+        return !NO_CODE_HERE.has(e?.code); // unreadable: kept, so the scan lists it
       }
     }
     return false;
@@ -340,10 +344,9 @@ export function scanTree(root) {
     try {
       sources.set(f, fs.readFileSync(path.join(root, f), "utf-8"));
     } catch (e) {
-      // A path git lists that is gone from the tree, a folder or a dangling
-      // link holds no code; any other failure is code the scan could not
+      // Anything but a path with no code there is code the scan could not
       // read, which is listed rather than dropped.
-      if (!["ENOENT", "EISDIR", "ELOOP"].includes(e?.code)) unreadable.push([f, e?.code ?? "error"]);
+      if (!NO_CODE_HERE.has(e?.code)) unreadable.push([f, e?.code ?? "error"]);
     }
   }
   const out = { generatedFrom: root, usages: [], unchecked: [] };

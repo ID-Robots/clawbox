@@ -353,11 +353,14 @@ describe("the scanner", () => {
     const dir = tree({
       "src/lib/ok.ts": 'export const f = () => spawnOpenclawCli(["skills", "list"]);',
       "src/lib/locked.ts": 'export const g = () => spawnOpenclawCli(["plugins", "list"]);',
+      "scripts/locked-tool": "#!/bin/bash\nopenclaw plugins list\n",
     });
-    fs.chmodSync(path.join(dir, "src/lib/locked.ts"), 0o000);
+    for (const f of ["src/lib/locked.ts", "scripts/locked-tool"]) fs.chmodSync(path.join(dir, f), 0o000);
     const scan = scanTree(dir) as Scan;
     expect(found(scan, "openclaw", "cli", "skills list")).toHaveLength(1);
-    expect(scan.unchecked).toContainEqual(expect.objectContaining({ site: "src/lib/locked.ts:1", why: expect.stringContaining("could not be read") }));
+    for (const f of ["src/lib/locked.ts", "scripts/locked-tool"]) {
+      expect(scan.unchecked).toContainEqual({ harness: "clawbox", kind: "file", site: `${f}:1`, why: "the file could not be read (EACCES)" });
+    }
   });
 
   it("finds, in this tree, what the hand-made maps of ClawBox's harness use list", () => {
