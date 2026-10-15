@@ -251,7 +251,7 @@ describe("the integration test's machine text", () => {
     "a wrapped base64 blob": { kind: "encoded", text: base64(3_000).match(/.{1,76}/g)!.join("\n") },
     "an env key=value dump": {
       kind: "keyvalue",
-      text: lines("SHELL=/bin/bash", "HOME=/home/user", "LANG=en_US.UTF-8", "PATH=/usr/local/bin:/usr/bin:/bin", "XDG_SESSION_TYPE=wayland", "DISPLAY=:0", "TERM=xterm-256color"),
+      text: lines("SHELL=/bin/bash", "HOME=/home/user", "LANG=en_US.UTF-8", "PATH=/usr/local/bin:/usr/bin:/bin", "XDG_SESSION_TYPE=wayland", "DISPLAY=:0", "TERM=xterm-256color"), // public-hygiene: allow a synthetic env dump sample, not a real host/account
     },
     "a hexdump -C": {
       kind: "encoded",
