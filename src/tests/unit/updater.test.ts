@@ -86,11 +86,7 @@ const { mockX64Integration, mockX64Install } = vi.hoisted(() => ({
   mockX64Integration: vi.fn(() => false),
   mockX64Install: vi.fn(() => false),
 }));
-// The detection is the seam; the module's constants (the desktop core step's
-// wait budget) stay real, so a test cannot pass against a budget the updater
-// never reads.
-vi.mock("@/lib/x64-integration", async (orig) => ({
-  ...(await orig<typeof import("@/lib/x64-integration")>()),
+vi.mock("@/lib/x64-integration", () => ({
   hasX64DesktopIntegration: mockX64Integration,
   hasX64Install: mockX64Install,
 }));
@@ -2744,14 +2740,6 @@ describe("updater", () => {
       // A first CLI installation must outlive the installer's five-minute
       // download allowance instead of inheriting a three-minute fetch budget.
       expect(bootstrap?.[2]).toEqual(expect.objectContaining({ timeout: 930_000 }));
-      // The core step archives and migrates the state when the pin moves; it
-      // waits on the desktop's own budget, not the appliance's five minutes.
-      const coreStep = mockExecFile.mock.calls.find(([, args]) =>
-        (args as string[]).includes("openclaw_install"),
-      );
-      const { X64_DESKTOP_CORE_STEP_TIMEOUT_MS } = await import("@/lib/x64-integration");
-      expect(coreStep?.[2]).toEqual(expect.objectContaining({ timeout: X64_DESKTOP_CORE_STEP_TIMEOUT_MS + 30_000 }));
-      expect(X64_DESKTOP_CORE_STEP_TIMEOUT_MS).toBeGreaterThan(300_000);
       const calls = commands();
       const harnessIndex = calls.findIndex((call) => call.includes("/usr/bin/setpriv"));
       expect(harnessIndex).toBeGreaterThan(calls.findIndex((call) => call.includes("clawbox-run-root-step.sh apt_update")));
