@@ -193,7 +193,7 @@ export interface GraphInsights {
   orphans: number[];
   /** The most connected pages, busiest first. */
   hubs: number[];
-  /** Pages whose links reach the most other communities, strongest first. */
+  /** Pages whose links reach the most other communities, strongest first (hubs are listed as hubs). */
   bridges: number[];
 }
 
@@ -243,6 +243,7 @@ export function graphInsights(
     .slice(0, limit);
 
   // A bridge: how many other communities a page's neighbours sit in, then how much weight crosses.
+  // The hubs reach far by sheer size and are already listed, so the bridges are the other pages.
   const reach = new Int32Array(n);
   const cross = new Float64Array(n);
   const seen = new Int32Array(n).fill(-1);
@@ -257,8 +258,9 @@ export function graphInsights(
       }
     }
   }
+  const isHub = new Set(hubs);
   const bridges = all
-    .filter((i) => reach[i] > 0)
+    .filter((i) => reach[i] > 0 && !isHub.has(i))
     .sort((x, y) => reach[y] - reach[x] || cross[y] - cross[x] || degree[y] - degree[x] || x - y)
     .slice(0, limit);
 

@@ -63,9 +63,9 @@ void main() {
   o = vec4(c * a, a);
 }`;
 
+// Edges are a quiet neutral grey whatever the nodes' colours.
 const EDGE_VS = `#version 300 es
 layout(location=1) in vec3 a_pos;
-layout(location=2) in vec4 a_color;
 layout(location=4) in uint a_state;
 uniform mat4 u_vp;
 uniform float u_alpha;
@@ -73,7 +73,7 @@ out vec4 v_color;
 void main() {
   gl_Position = u_vp * vec4(a_pos, 1.0);
   float a = (a_state & 2u) != 0u ? u_alpha * 0.2 : u_alpha;
-  v_color = vec4(mix(a_color.rgb, vec3(1.0), 0.4) * a, a);
+  v_color = vec4(vec3(0.66, 0.68, 0.72) * a, a);
 }`;
 
 const EDGE_FS = `#version 300 es
@@ -212,7 +212,9 @@ export class GLRenderer implements Renderer {
     gl.useProgram(this.edgeProgram);
     gl.uniformMatrix4fv(u.eu_vp, false, vp);
     if (this.edgeCount > 0) {
-      gl.uniform1f(u.eu_alpha, this.hiCount > 0 ? 0.08 : 0.16);
+      // Fainter as edges multiply, so a dense core stays a structure, not a white blot.
+      const alpha = Math.max(0.05, 0.18 * Math.sqrt(3000 / Math.max(3000, this.edgeCount / 2)));
+      gl.uniform1f(u.eu_alpha, this.hiCount > 0 ? alpha / 2 : alpha);
       gl.bindVertexArray(this.edgeVao);
       gl.drawElements(gl.LINES, this.edgeCount, gl.UNSIGNED_INT, 0);
     }

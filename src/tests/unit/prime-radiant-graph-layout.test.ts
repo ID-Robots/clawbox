@@ -211,22 +211,40 @@ describe("louvain", () => {
 });
 
 describe("graphInsights", () => {
-  it("names orphans (a shared source is not a link), hubs by degree, and the bridge between communities", () => {
-    // Two cliques joined by 3-4; node 8 only shares a source with 0; node 9 has nothing.
-    const ends = [...TWO_CLIQUES.ends, 0, 8];
-    const weights = [...TWO_CLIQUES.weights, 0.5];
-    const n = 10;
+  const degreeOf = (n: number, ends: ArrayLike<number>) => {
     const degree = new Float32Array(n);
     for (let e = 0; e < ends.length / 2; e++) {
       degree[ends[e * 2]]++;
       degree[ends[e * 2 + 1]]++;
     }
-    const comm = louvain(n, ends, weights);
-    const insights = graphInsights(n, ends, weights, degree, comm, 3);
+    return degree;
+  };
+
+  it("names orphans (a shared source is not a link) and hubs by degree", () => {
+    // Two cliques joined by 3-4; node 8 only shares a source with 0; node 9 has nothing.
+    const ends = [...TWO_CLIQUES.ends, 0, 8];
+    const weights = [...TWO_CLIQUES.weights, 0.5];
+    const n = 10;
+    const degree = degreeOf(n, ends);
+    const insights = graphInsights(n, ends, weights, degree, louvain(n, ends, weights), 3);
     expect(insights.orphans).toEqual([8, 9]);
-    expect(insights.hubs[0]).toBe(0); // 3 links and a source
-    expect(insights.hubs).toHaveLength(3);
-    expect(insights.bridges.slice(0, 2).sort()).toEqual([3, 4]);
+    expect(insights.hubs).toEqual([0, 3, 4]); // 0: three links and a source; 3 and 4: three links and the join
+  });
+
+  it("names the page that joins two communities as a bridge, apart from the hubs", () => {
+    // Cliques 0-3 and 4-7, joined only through page 8 (3-8-4).
+    const ends: number[] = [];
+    for (const base of [0, 4]) for (let a = 0; a < 4; a++) for (let b = a + 1; b < 4; b++) ends.push(base + a, base + b);
+    ends.push(3, 8, 8, 4);
+    const n = 9;
+    const weights = new Float32Array(ends.length / 2).fill(1);
+    const degree = degreeOf(n, ends);
+    const comm = louvain(n, ends, weights);
+    expect(comm[0]).not.toBe(comm[7]);
+    const insights = graphInsights(n, ends, weights, degree, comm, 3);
+    expect(insights.hubs).toEqual([3, 4, 0]);
+    expect(insights.bridges[0]).toBe(8);
+    expect(insights.bridges.some((i) => insights.hubs.includes(i))).toBe(false);
   });
 
   it("has nothing to say about an empty graph", () => {

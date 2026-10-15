@@ -61,8 +61,8 @@ export class FlatRenderer implements Renderer {
       ctx.lineWidth = dpr;
       ctx.stroke();
     };
-    stroke(this.edges, this.hi.length > 0 ? "rgba(255,255,255,0.05)" : "rgba(255,255,255,0.1)");
-    stroke(this.hi, "rgba(255,255,255,0.6)");
+    stroke(this.edges, this.hi.length > 0 ? "rgba(168,173,184,0.06)" : "rgba(168,173,184,0.14)");
+    stroke(this.hi, "rgba(190,195,205,0.7)");
 
     // Dimmed first, then the rest, then whatever is picked out — one path per colour each time.
     const picked = STATE_MATCH | STATE_SELECTED | STATE_HOVER;

@@ -63,9 +63,30 @@ interface Analysis {
   insights: GraphInsights;
 }
 
-const PALETTE = ["#7aa2f7", "#f7768e", "#9ece6a", "#e0af68", "#bb9af7", "#7dcfff", "#ff9e64", "#73daca", "#f4b8e4", "#c0caf5", "#2ac3de", "#d4a373"];
-const GREY: [number, number, number] = [128, 134, 146];
+/**
+ * Domain and community colours, biggest first: ClawBox orange and a soft grey
+ * lead, with warm and clear accents between them — all readable on the dark
+ * ground. Past twelve, golden-angle hues.
+ */
+const PALETTE = [
+  "#f97316", // ClawBox orange
+  "#38bdf8", // sky
+  "#fbbf24", // amber
+  "#a8a29e", // warm grey
+  "#2dd4bf", // teal
+  "#fb7185", // rose
+  "#a3e635", // lime
+  "#a78bfa", // violet
+  "#fdba74", // light orange
+  "#d4d4d8", // light grey
+  "#f0abfc", // fuchsia
+  "#94a3b8", // slate grey
+];
+/** Pages with no domain, and communities of one: a quieter grey than the palette's. */
+const GREY: [number, number, number] = [100, 106, 118];
 const HUB_LABELS = 20;
+/** Search matches that get a label of their own (more would be a wall of text). */
+const MATCH_LABELS = 12;
 const LIST_LIMIT = 300;
 const CHIPS = 6;
 
@@ -75,7 +96,7 @@ function rgb(k: number): [number, number, number] {
     const h = PALETTE[k];
     return [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
   }
-  const hue = (k * 137.508) % 360;
+  const hue = (20 + k * 137.508) % 360;
   const f = (x: number) => {
     const a = 0.55 * Math.min(0.65, 1 - 0.65);
     const t = (x + hue / 30) % 12;
@@ -166,6 +187,8 @@ let kept: {
   settled: boolean;
   camera: CameraState;
   analysis: Analysis | null;
+  /** The page picked out when the Map was left (opening it in Browse and coming back keeps it). */
+  selectedId: string | null;
 } | null = null;
 
 function warmStart(model: Model, kind: MapKind) {
@@ -198,14 +221,18 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
   const [hidden, setHidden] = useState<ReadonlySet<number>>(() => new Set());
   const [query, setQuery] = useState("");
   const [resultsOpen, setResultsOpen] = useState(false);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(() => kept?.selectedId ?? null);
   const [hovered, setHovered] = useState<number | null>(null);
   const [settled, setSettled] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const viewRef = useRef<MapView | null>(null);
   const tipRef = useRef<HTMLDivElement>(null);
   const labelEls = useRef(new Map<number, HTMLSpanElement>());
+  /** Labels in the order they claim space: the selected page, then hubs by degree. */
+  const labelOrder = useRef<number[]>([]);
+  const labelWidths = useRef(new Map<number, number>());
   const analysisRef = useRef<Analysis | null>(null);
+  const selectedRef = useRef<string | null>(null);
   const matchCursor = useRef(-1);
   /** The latest opener, so a new callback from the app never rebuilds the view. */
   const openRef = useRef(onOpenPage);
@@ -219,7 +246,8 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
 
   useEffect(() => {
     analysisRef.current = analysis;
-  }, [analysis]);
+    selectedRef.current = selectedId;
+  }, [analysis, selectedId]);
 
   // The graph: fetched again when the vault changed; the same revision keeps what is on screen.
   useEffect(() => {
@@ -257,12 +285,25 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
         openRef.current(model.ids[i]);
       },
       onFrame() {
+        // A label shows only where it does not cover one placed before it.
         const out = [0, 0];
-        for (const [i, el] of labelEls.current) {
+        const placed: number[] = [];
+        for (const i of labelOrder.current) {
+          const el = labelEls.current.get(i);
+          if (!el) continue;
           const w = view?.project(i, out) ?? -1;
-          const off = w < 0 || out[0] < 0 || out[1] < 0 || out[0] > canvas.clientWidth || out[1] > canvas.clientHeight;
-          el.style.opacity = off ? "0" : "1";
-          if (!off) el.style.transform = `translate(${Math.round(out[0])}px, ${Math.round(out[1]) - 8}px) translate(-50%, -100%)`;
+          let show = !(w < 0 || out[0] < 0 || out[1] < 0 || out[0] > canvas.clientWidth || out[1] > canvas.clientHeight);
+          if (show) {
+            let width = labelWidths.current.get(i);
+            if (width === undefined) labelWidths.current.set(i, (width = el.offsetWidth));
+            const x0 = out[0] - width / 2 - 2, x1 = out[0] + width / 2 + 2, y1 = out[1] - 6, y0 = y1 - 16;
+            for (let k = 0; k < placed.length && show; k += 4) {
+              show = x1 < placed[k] || x0 > placed[k + 2] || y1 < placed[k + 1] || y0 > placed[k + 3];
+            }
+            if (show) placed.push(x0, y0, x1, y1);
+          }
+          el.style.opacity = show ? "1" : "0";
+          if (show) el.style.transform = `translate(${Math.round(out[0])}px, ${Math.round(out[1]) - 8}px) translate(-50%, -100%)`;
         }
       },
       onCommunities(communities, insights) {
@@ -292,6 +333,7 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
         settled: view.settled,
         camera: view.camera(),
         analysis: analysisRef.current,
+        selectedId: selectedRef.current,
       };
       view.dispose();
       viewRef.current = null;
@@ -370,10 +412,14 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
 
   const labels = useMemo(() => {
     if (!model) return [];
-    const list = model.hubs.filter((i) => !hidden.has(model.domainOf[i]));
-    if (selected !== null && !list.includes(selected)) list.push(selected);
-    return list;
-  }, [model, hidden, selected]);
+    const first = [...(selected !== null ? [selected] : []), ...(matches ?? []).slice(0, MATCH_LABELS).filter((i) => i !== selected)];
+    return [...first, ...model.hubs.filter((i) => !hidden.has(model.domainOf[i]) && !first.includes(i))];
+  }, [model, hidden, selected, matches]);
+  useEffect(() => {
+    labelOrder.current = labels;
+    labelWidths.current.clear();
+    viewRef.current?.invalidate();
+  }, [labels]);
 
   const listed = useMemo(() => {
     if (!model) return [];
@@ -627,7 +673,7 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
           </div>
         )}
 
-        <p className="absolute right-2 bottom-2 hidden @md:block text-[10px] text-[var(--text-muted)]">
+        <p className="absolute right-2 bottom-2 hidden @md:block rounded-full bg-black/50 px-2 py-0.5 text-[10px] text-[var(--text-muted)]">
           {t(mode === "webgl" ? "primeRadiant.map.hint" : "primeRadiant.map.hintFlat")}
         </p>
       </div>

@@ -254,7 +254,7 @@ export class MapView {
       if (d > max) max = d;
     }
     // A few far-flung orphans should not shrink the rest to a dot.
-    const r = Math.min(Math.sqrt(max), Math.sqrt(sq / n) * 2.4) + 20;
+    const r = Math.min(Math.sqrt(max), Math.sqrt(sq / n) * 2) + 20;
     this.fit = { x, y, z, r };
   }
 
@@ -387,7 +387,7 @@ export class MapView {
   private fitDistance(r: number): number {
     const aspect = this.cssH > 0 ? this.cssW / this.cssH : 1;
     const tan = Math.min(TAN, TAN * aspect);
-    return (r / Math.sin(Math.atan(tan))) * 1.05;
+    return r / Math.sin(Math.atan(tan));
   }
 
   private fitZoom(r: number): number {
