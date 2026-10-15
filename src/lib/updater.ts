@@ -136,7 +136,7 @@ const OPENCLAW_TARGET_FILE = path.join(PROJECT_DIR, "config", "openclaw-target.t
 // `{target: null, updateAvailable: false}` — "no OpenClaw update available" over a
 // box that has one, the false-success shape — and `reinstallManagedPluginPayload`
 // pinned the channel plugins to `@2026.8.1` on a 2026.9.3 core.
-const OPENCLAW_VERSION_FALLBACK = "2026.10.2";
+const OPENCLAW_VERSION_FALLBACK = "2026.10.3";
 
 /**
  * The state-DB schema each pinned core supports, read from the published
@@ -164,6 +164,7 @@ const OPENCLAW_STATE_SCHEMA_BY_VERSION: Readonly<Record<string, number>> = {
   "2026.9.3": 16,
   "2026.9.4": 17,
   "2026.10.2": 20,
+  "2026.10.3": 20,
 };
 
 /** The state schema `version` supports, or null when this pin is not in the table. */

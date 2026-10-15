@@ -95,6 +95,24 @@ test.describe("the runtime and the core the install actually left behind", () =>
     expect(out).not.toContain("is required (current:");
   });
 
+  test("leaves a config the pinned core accepts", async () => {
+    // The core's own validator over the openclaw.json install.sh actually
+    // wrote: a key the core does not know (install.sh's
+    // `agents.defaults.model.fallback`, refused on every core since it was
+    // added) is caught here by the harness itself, not by matching strings.
+    // The exit status is not trusted alone — the JSON verdict is read too.
+    const out = await dockerExec(
+      ["bash", "-lc", "/home/clawbox/.npm-global/bin/openclaw config validate --json; echo \"__exit=$?\""],
+      { user: "clawbox", timeoutMs: 120_000 },
+    );
+    const exit = /__exit=(\d+)/.exec(out)?.[1];
+    const json = out.slice(out.indexOf("{"), out.lastIndexOf("}") + 1);
+    const verdict = JSON.parse(json || "{}") as { valid?: boolean; issues?: { path: string; message: string }[] };
+    expect(verdict.issues ?? [], `openclaw config validate: ${json}`).toEqual([]);
+    expect(verdict.valid, `openclaw config validate: ${json}`).toBe(true);
+    expect(exit).toBe("0");
+  });
+
   test("records that same core as the build's pin", async () => {
     // The pin file as it sits on the box — the value `install.sh --step
     // openclaw_install` reads on the next run and the UI's "Latest" column
