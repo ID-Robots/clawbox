@@ -89,6 +89,7 @@ const { mockX64Integration, mockX64Install } = vi.hoisted(() => ({
 vi.mock("@/lib/x64-integration", () => ({
   hasX64DesktopIntegration: mockX64Integration,
   hasX64Install: mockX64Install,
+  X64_DESKTOP_CORE_STEP_TIMEOUT_MS: 3_600_000,
 }));
 // The owner's rebuild and the UI restart on an install-x64.sh PC: both act on
 // THIS process and the real checkout, so they are seams here and are tested on
@@ -2740,6 +2741,13 @@ describe("updater", () => {
       // A first CLI installation must outlive the installer's five-minute
       // download allowance instead of inheriting a three-minute fetch budget.
       expect(bootstrap?.[2]).toEqual(expect.objectContaining({ timeout: 930_000 }));
+      // The desktop's core step replaces the core behind a verified archive
+      // and a migration of multi-GB agent databases: its wait is the desktop's
+      // own hour, not the appliance's five minutes (plus the runner's 30 s).
+      const install = mockExecFile.mock.calls.find(([, args]) =>
+        (args as string[]).includes("openclaw_install"),
+      );
+      expect(install?.[2]).toEqual(expect.objectContaining({ timeout: 3_630_000 }));
       const calls = commands();
       const harnessIndex = calls.findIndex((call) => call.includes("/usr/bin/setpriv"));
       expect(harnessIndex).toBeGreaterThan(calls.findIndex((call) => call.includes("clawbox-run-root-step.sh apt_update")));
