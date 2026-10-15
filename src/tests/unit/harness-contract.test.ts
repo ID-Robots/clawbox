@@ -281,6 +281,41 @@ describe("the scanner", () => {
     expect(found(scan, "openclaw", "cli", "skills list")[0]?.flags).toEqual(["--jsonn"]);
   });
 
+  it("reads a call in JSX text after a slash, and a regex that opens a statement or starts with >", () => {
+    // A slash run counts as a regex only if what follows its closing slash
+    // can follow a regex: `</button>` and `/>` cannot.
+    const scan = scanTree(tree({
+      "src/components/J.tsx": [
+        "export function J({ client, pct }: { client: { request: (m: string, p: object) => void }; pct: number }) {",
+        '  const a = <p>Usage: /new <button onClick={() => client.request("jsx.one", {})}>x</button></p>;',
+        '  const b = <p>Saved in /tmp <button onClick={() => client.request("jsx.two", {})}>x</button></p>;',
+        '  const c = <p>{pct}% / <button onClick={() => client.request("jsx.three", {})}>x</button></p>;',
+        '  const d = <p>Ctrl+/ or <button onClick={() => client.request("jsx.four", {})}>x</button></p>;',
+        "  return [a, b, c, d];",
+        "}",
+      ].join("\n"),
+      "src/lib/r.ts": [
+        "export async function r(s: string) {",
+        "  if (s) { s = s.trim(); }",
+        '  /^https?:\\/\\//.test(s) && (await spawnOpenclawCli(["skills", "first"]));',
+        "  if (s) { s = s.trim(); }",
+        "  /^\\/*x/.test(s);",
+        '  await spawnOpenclawCli(["skills", "second"]);',
+        '  await spawnOpenclawCli(["skills", "third", s.replace(/>"/g, "")]);',
+        '  await spawnOpenclawCli(["skills", "fourth", s.split(/>\\(/)[0]]);',
+        '  const t = s.replace(/>\\/*/g, "");',
+        '  await spawnOpenclawCli(["skills", "fifth", t]);',
+        "}",
+      ].join("\n"),
+    })) as Scan;
+    for (const [m, line] of [["jsx.one", 2], ["jsx.two", 3], ["jsx.three", 4], ["jsx.four", 5]] as const) {
+      expect(found(scan, "openclaw", "rpc", m)[0]?.site, m).toBe(`src/components/J.tsx:${line}`);
+    }
+    for (const [w, line] of [["first", 3], ["second", 6], ["third", 7], ["fourth", 8], ["fifth", 10]] as const) {
+      expect(found(scan, "openclaw", "cli", `skills ${w}`)[0]?.site, w).toBe(`src/lib/r.ts:${line}`);
+    }
+  });
+
   it("lists a harness launcher call, or a push onto its argv, whose arguments it cannot read", () => {
     // Brackets that never close (a file cut off mid-call stands in for any
     // parse the scanner gets wrong): the call is still the harness's.
@@ -295,6 +330,23 @@ describe("the scanner", () => {
     })) as Scan;
     expect(scan.unchecked).toContainEqual(expect.objectContaining({ site: "src/lib/k.ts:4", why: expect.stringContaining(".push()") }));
     expect(scan.unchecked).toContainEqual(expect.objectContaining({ site: "src/lib/k.ts:5", why: expect.stringContaining("could not be read") }));
+    const pushed = scanTree(tree({
+      "src/lib/m.ts": [
+        "export async function f() {",
+        '  const extra = ["--json"];',
+        '  extra.push("--deep", (1;',
+        '  await spawnOpenclawCli(["memory", "status", ...extra]);',
+      ].join("\n"),
+      "src/lib/n.ts": [
+        "export async function g(v: string) {",
+        '  const ops = [["a.b", "1"]];',
+        '  ops.push(["c.d", v], (1;',
+        "  await runOpenclawConfigSetBatch(ops);",
+      ].join("\n"),
+    })) as Scan;
+    for (const at of ["src/lib/m.ts:4", "src/lib/n.ts:4"]) {
+      expect(pushed.unchecked).toContainEqual(expect.objectContaining({ site: at, why: expect.stringContaining(".push()") }));
+    }
   });
 
   it("finds, in this tree, what the hand-made maps of ClawBox's harness use list", () => {

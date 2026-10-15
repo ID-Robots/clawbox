@@ -81,11 +81,14 @@ const REGEX_AFTER_WORDS = new Set(["return", "typeof", "case", "in", "of", "dele
  * JS/TS with every comment blanked (same length, newlines kept), strings left
  * alone, and the body of what it takes for a regex literal blanked too, so a
  * quote or bracket inside one cannot derail the parse of the call around it.
- * Only a slash run that closes on its own line counts as a regex, never `</x`
- * or `/>` (JSX), nor after `}` or a bare `>`; a slash after an operand —
- * `x!`, `i++` included — divides.
- * A regex right after `)` (`if (s) /re/`) is read as a division: that gap
- * makes the call around it unreadable, which the scan lists, never drops.
+ * A slash run counts as a regex only where one may start, never as `</x` or
+ * `</>`, and only when it closes on its own line with nothing after its flags
+ * that cannot follow a regex (so not `</span>`, `/>` or `/path` in JSX text).
+ * After `}` a regex may only open its line (`{a} / {b}` is JSX text), never
+ * after a bare `>`; after an operand — `x!`, `i++` included — a slash divides.
+ * Known gap: a regex right after `)` (`if (s) /re/`) is read as a division;
+ * that usually leaves the call around it unreadable (an invoker call is then
+ * listed), but a `//` or `/*` inside such a regex is read as a comment.
  */
 function maskJs(src) {
   const out = src.split("");
@@ -96,8 +99,8 @@ function maskJs(src) {
   const tpl = []; // brace depth for each open template `${`
   const blank = (a, b) => { for (let k = a; k < b; k++) if (out[k] !== "\n") out[k] = " "; };
   let arrow = false; // prev is the `>` of `=>`
-  // Not after `}` (in JSX that is text: `{a} / {b}`) or a bare `>` (a tag's end, a comparison).
-  const regexAllowed = () => prev === "" || "(,=:[!&|?{;+-*%<~^".includes(prev) || (prev === ">" && arrow) || (prev === "a" && keywordBefore);
+  const opensLine = () => /^[ \t]*$/.test(src.slice(src.lastIndexOf("\n", i - 1) + 1, i));
+  const regexAllowed = () => prev === "" || "(,=:[!&|?{;+-*%<~^".includes(prev) || (prev === ">" && arrow) || (prev === "}" && opensLine()) || (prev === "a" && keywordBefore);
   while (i < n) {
     const c = src[i];
     const d = src[i + 1];
@@ -132,7 +135,7 @@ function maskJs(src) {
       if (src[i] === "`") { i++; prev = "a"; keywordBefore = false; }
       continue;
     }
-    if (c === "/" && regexAllowed() && d !== ">" && !(prev === "<" && /[A-Za-z]/.test(d ?? ""))) {
+    if (c === "/" && regexAllowed() && !(prev === "<" && /[A-Za-z>]/.test(d ?? ""))) {
       let j = i + 1;
       let cls = false;
       for (; j < n && src[j] !== "\n"; j++) {
@@ -141,15 +144,16 @@ function maskJs(src) {
         else if (src[j] === "]") cls = false;
         else if (src[j] === "/" && !cls) break;
       }
-      if (src[j] === "/") { // closed on its own line: a regex
+      let k = j + 1;
+      while (/[dgimsuyv]/.test(src[k] ?? "")) k++;
+      if (src[j] === "/" && !/[\w$>]/.test(src[k] ?? "")) { // a regex
         blank(i + 1, j);
-        i = j + 1;
-        while (/[a-z]/i.test(src[i] ?? "")) i++;
+        i = k;
         prev = "a";
         keywordBefore = false;
         continue;
       }
-      // no closing slash on the line: it was an operator after all
+      // not a regex after all: the slash is an operator (or JSX text)
     }
     // `x!` (TypeScript's non-null) and `i++` / `i--` leave an operand behind.
     if (c === "!" && /[\w$)\]]/.test(src[i - 1] ?? "")) { i++; continue; }
@@ -559,13 +563,14 @@ function scanJs(file, info, consts, registry, record, skip) {
   const dashed = (text) => [...text.matchAll(/["'`](--?[a-z][a-z0-9-]*)(?:=[^"'`]*)?["'`]/g)].map((m) => m[1]);
 
   /** Every alternative of an argv once spreads of local arrays (and their ternaries) are spelled out. */
-  const expand = (elems, pos, depth = 0) => {
+  const expand = (elems, pos, note, depth = 0) => {
     let out = [[]];
     for (const e of elems) {
       const v = literal(e.text);
       const inner = depth < 2 && /^[A-Za-z_$][\w$]*$/.test(v.spread ?? "") ? localArray(v.spread, pos) : null;
       if (inner) {
-        const subs = inner.flatMap((alt) => expand(alt, pos, depth + 1));
+        if (inner.unreadablePush) note.unreadablePush = true;
+        const subs = inner.flatMap((alt) => expand(alt, pos, note, depth + 1));
         out = out.flatMap((o) => subs.map((sub) => [...o, ...sub])).slice(0, 16);
       } else out = out.map((o) => [...o, e]);
     }
@@ -622,8 +627,10 @@ function scanJs(file, info, consts, registry, record, skip) {
       if (expr && learn(pos, expr, { kind: "argv", harness, prefix: entry.prefix })) return;
       return unchecked(harness, "cli", pos, `${how}: argv is computed at runtime`);
     }
-    if (alts.unreadablePush) unchecked(harness, "cli", pos, `${how}: a .push() onto the argv could not be read`);
-    for (const elems of alts.flatMap((alt) => expand(alt, pos))) {
+    const note = { unreadablePush: alts.unreadablePush };
+    const expanded = alts.flatMap((alt) => expand(alt, pos, note));
+    if (note.unreadablePush) unchecked(harness, "cli", pos, `${how}: a .push() onto the argv could not be read`);
+    for (const elems of expanded) {
       const a = readArgv(elems, pos);
       if (entry.prefix) {
         a.words = [...entry.prefix.words, ...a.words];
@@ -711,6 +718,7 @@ function scanJs(file, info, consts, registry, record, skip) {
           if (!(expr && learn(pos, expr, { kind: "batch", harness: entry.harness }))) unchecked(entry.harness, "config", pos, `${how}: the operations are built at runtime`);
           continue;
         }
+        if (alts.unreadablePush) unchecked(entry.harness, "config", pos, `${how}: a .push() onto the operations could not be read`);
         for (const op of alts.flat()) {
           const o = op.text.trim();
           if (o.startsWith("[")) keyUse({ harness: entry.harness, op: "set" }, splitTop(o.slice(1, -1), op.offset + op.text.indexOf("[") + 1)[0], pos, how);
