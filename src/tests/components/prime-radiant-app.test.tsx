@@ -139,6 +139,8 @@ let ingestJobs: unknown[];
 let stopRefusals: number[];
 let previewAnswer: Record<string, unknown> | null;
 let skipCodeProjects: boolean;
+/** What `POST init` says its one-time memory-wiki repair did. */
+let initRepair: Record<string, unknown> | null;
 
 function installFetch() {
   vi.stubGlobal("fetch", vi.fn(async (input: unknown, init?: RequestInit) => {
@@ -154,8 +156,9 @@ function installFetch() {
     const p = "/setup-api/prime-radiant";
     if (url === `${p}/status`) return ok(status);
     if (url === `${p}/init` && method === "POST") {
-      status = { ...status, initialised: true };
-      return ok({ created: true, plugin: { state: "wired", wrote: true } });
+      const created = !status.initialised;
+      status = { ...status, initialised: true, plugin: { state: "wired", vault: "/tmp/vault" } };
+      return ok({ created, plugin: { state: "wired", wrote: true }, repair: initRepair });
     }
     if (url.startsWith(`${p}/pages?`)) return ok({ total: 1, pages: [LIST_ENTRY] });
     if (url === `${p}/pages/entities/acme-widgets.md`) return ok(PAGE);
@@ -261,6 +264,7 @@ beforeEach(() => {
   stopRefusals = [];
   previewAnswer = PREVIEW;
   skipCodeProjects = true;
+  initRepair = { ran: true, cleaned: [], removed: [], commit: null };
   FakeEventSource.last = null;
   installFetch();
 });
@@ -282,6 +286,31 @@ describe("PrimeRadiantApp", () => {
     await mount();
     await screen.findByTestId("prime-radiant-tab-browse");
     expect(calls.some((c) => c.url.endsWith("/init"))).toBe(false);
+  });
+
+  // The live test: a box wired before memory-wiki's vault writers were known
+  // let the plugin compile into the vault. Its wiring now `needs-write`.
+  it("re-wires a vault whose memory-wiki wiring still needs a write, once, in the background, and says what was cleaned", async () => {
+    status = { ...STATUS, plugin: { state: "needs-write", vault: "/tmp/vault", writes: [{ key: "plugins.entries.memory-wiki.config.render.createBacklinks", value: false }] } };
+    initRepair = { ran: true, cleaned: ["concepts/a.md", "concepts/b.md", "index.md"], removed: ["WIKI.md", "entities/index.md"], commit: "abc1234" };
+    await mount();
+    expect(await screen.findByTestId("prime-radiant-tab-browse")).toBeInTheDocument();
+    const notice = await screen.findByTestId("prime-radiant-repaired");
+    expect(notice).toHaveTextContent("3 page(s) cleaned, 2 file(s) removed");
+    expect(calls.filter((c) => c.url.endsWith("/init") && c.method === "POST")).toHaveLength(1);
+  });
+
+  it("says the plugin was set by hand to write into the wiki when that is the only conflict", async () => {
+    status = { ...STATUS, plugin: { state: "conflict", vault: "/tmp/vault", conflicts: ["plugin-writes"], writes: [] } };
+    await mount();
+    expect(await screen.findByTestId("prime-radiant-wiring-conflict")).toHaveTextContent("write its own links, indexes and reports");
+    expect(calls.some((c) => c.url.endsWith("/init"))).toBe(false);
+  });
+
+  it("keeps the general conflict text for any other conflict", async () => {
+    status = { ...STATUS, plugin: { state: "conflict", vault: "/tmp/vault", conflicts: ["other-vault-path", "plugin-writes"], writes: [] } };
+    await mount();
+    expect(await screen.findByTestId("prime-radiant-wiring-conflict")).toHaveTextContent("may not read this wiki");
   });
 
   it("opens a page with its facts, confidence, sources and backlinks", async () => {

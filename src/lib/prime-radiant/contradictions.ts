@@ -725,7 +725,8 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
     if (!v || v.verdict === "compatible") return;
     const a = claims[p.a];
     const b = claims[p.b];
-    result.findings.push({ a: { ...a }, b: { ...b }, verdict: v.verdict, why: v.why, score: Math.round(p.score * 1000) / 1000 });
+    const side = (c: PassClaim) => ({ id: c.id, page: c.page, text: c.text, verified: c.verified });
+    result.findings.push({ a: side(a), b: side(b), verdict: v.verdict, why: v.why, score: Math.round(p.score * 1000) / 1000 });
   });
 
   if (options.raiseItems !== false) {
