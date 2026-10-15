@@ -270,7 +270,7 @@ for (const f of list) {
   const allowNote = f.allow ? `  [${f.allow.category} until ${f.allow.expires}: ${f.allow.reason}]` : "";
   console.log(`${f.level.padEnd(7)} ${label(f.harness)} ${f.kind} ${f.name} — ${f.why}${allowNote}${sitesText(f.sites)}`);
 }
-console.log(`unchecked (computed at runtime, or a file the scan could not read): ${usage.unchecked.length} sites`);
+console.log(`unchecked (not read statically — computed at runtime, unparseable or unreadable; each with its reason): ${usage.unchecked.length} sites`);
 for (const u of usage.unchecked) console.log(`  ${u.harness} ${u.kind} ${u.site} — ${u.why}`);
 const failures = list.filter((f) => f.level === "FAIL");
 console.log(`harness-contract: ${failures.length} failure(s), ${list.filter((f) => f.level === "ALLOWED").length} allowed, ${list.filter((f) => f.level === "WARN").length} warning(s)`);
@@ -288,7 +288,7 @@ if (process.env.GITHUB_ACTIONS) {
     const rows = list.filter((f) => f.level !== "INFO").map((f) => `| ${f.level} | ${label(f.harness)} | ${f.kind} | \`${f.name}\` | ${f.why} | ${f.sites.slice(0, 3).join("<br>")} |`);
     fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, [
       `### harness-contract — ${OC}, ${HE}`, "",
-      `${failures.length} failure(s); ${usage.usages.length} usages read from source, ${usage.unchecked.length} sites computed at runtime or unreadable (listed in the log).`, "",
+      `${failures.length} failure(s); ${usage.usages.length} usages read from source, ${usage.unchecked.length} unchecked sites not read statically (each listed in the log with its reason).`, "",
       ...(rows.length ? ["| | harness | kind | item | why | ClawBox |", "|---|---|---|---|---|---|", ...rows] : []), "",
     ].join("\n"));
   }
