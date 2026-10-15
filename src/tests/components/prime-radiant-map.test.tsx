@@ -348,6 +348,8 @@ describe("PrimeRadiantMap", () => {
   it("shows the arrow over the map, a hand over a page and a move cross while dragging — never a grab hand", async () => {
     const pick = vi.spyOn(MapView.prototype, "pick").mockReturnValue(-1);
     await mount();
+    // The view listens once it has drawn (its effect may run just after the status shows).
+    await waitFor(() => expect(glCalls.some(([k]) => k === "drawArraysInstanced")).toBe(true));
     const canvas = screen.getByTestId("prime-radiant-map-canvas");
     expect(canvas.className).not.toMatch(/grab/);
     expect(canvas).toHaveClass("cursor-default");
@@ -362,6 +364,24 @@ describe("PrimeRadiantMap", () => {
     fireEvent.pointerUp(canvas, { pointerId: 1, pointerType: "mouse", clientX: 90, clientY: 80 });
     expect(canvas.style.cursor).toBe("default");
     for (const shape of [canvas.style.cursor, getComputedStyle(canvas).cursor]) expect(shape).not.toMatch(/grab/);
+  });
+
+  it("forgets the hovered page when the camera flies elsewhere, so no tooltip or hand is left over empty space", async () => {
+    vi.spyOn(MapView.prototype, "pick").mockReturnValue(1);
+    await mount();
+    await waitFor(() => expect(glCalls.some(([k]) => k === "drawArraysInstanced")).toBe(true));
+    const canvas = screen.getByTestId("prime-radiant-map-canvas");
+    fireEvent.pointerMove(canvas, { pointerId: 1, pointerType: "mouse", clientX: 40, clientY: 50 });
+    const tip = screen.getByTestId("prime-radiant-map-tooltip");
+    await waitFor(() => expect(tip).toHaveTextContent("Widget pricing"));
+    expect(canvas.style.cursor).toBe("pointer");
+    // The search flies to another page: the one that was under the pointer has moved away.
+    const search = screen.getByTestId("prime-radiant-map-search");
+    fireEvent.change(search, { target: { value: "holidays" } });
+    fireEvent.keyDown(search, { key: "Enter" });
+    expect(await screen.findByTestId("prime-radiant-map-selected")).toHaveTextContent("Office holidays");
+    await waitFor(() => expect(tip).toHaveClass("hidden"));
+    expect(canvas.style.cursor).toBe("default");
   });
 
   it("draws 48 pages with no links at all: every one in view, never a speck, on a canvas a screenshot can read", async () => {
@@ -469,6 +489,7 @@ describe("PrimeRadiantMap", () => {
     summaryGate = new Promise<void>((r) => (release = r));
     const pick = vi.spyOn(MapView.prototype, "pick").mockReturnValue(3);
     await mount();
+    await waitFor(() => expect(glCalls.some(([k]) => k === "drawArraysInstanced")).toBe(true));
     const asked = () => vi.mocked(fetch).mock.calls.map(([u]) => String(u)).filter((u) => u.includes("?view=summary"));
     expect(asked().some((u) => u.includes("support-hours"))).toBe(false);
 
