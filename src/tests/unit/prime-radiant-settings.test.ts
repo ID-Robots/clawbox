@@ -18,6 +18,7 @@ import {
 } from "@/lib/prime-radiant/cost-rates";
 import {
   DEFAULT_INGEST_EXCLUDES,
+  EXCLUDE_DEFAULTS_GENERATION,
   PREVIOUS_DEFAULT_INGEST_EXCLUDES,
   compileExcludes,
   isDefaultExcludeList,
@@ -160,14 +161,28 @@ describe("exclude-list migration", () => {
     writeSettings({ ingest: { exclude: ["drafts"] } });
     const s = writeSettings({ ingest: { exclude: [...DEFAULT_INGEST_EXCLUDES] } });
     expect(s.ingest.exclude).toEqual([...DEFAULT_INGEST_EXCLUDES]);
-    expect(JSON.parse(fs.readFileSync(settingsPath(), "utf8")).ingest).not.toHaveProperty("exclude");
-    writeSettings({ ingest: { exclude: [...previous] } });
-    expect(JSON.parse(fs.readFileSync(settingsPath(), "utf8")).ingest).not.toHaveProperty("exclude");
+    const stored = JSON.parse(fs.readFileSync(settingsPath(), "utf8")).ingest;
+    expect(stored).not.toHaveProperty("exclude");
+    expect(stored).not.toHaveProperty("excludeSavedWith");
+  });
+
+  it("keeps the earlier default list when the owner saves it now (removing exactly the patterns added since)", () => {
+    const s = writeSettings({ ingest: { exclude: [...previous] } });
+    expect(s.ingest.exclude).toEqual([...previous]);
+    expect(JSON.parse(fs.readFileSync(settingsPath(), "utf8")).ingest).toMatchObject({ exclude: [...previous], excludeSavedWith: EXCLUDE_DEFAULTS_GENERATION });
+    expect(readSettings().ingest.exclude).toEqual([...previous]);
+    // Put back to the defaults, the marker goes with the list.
+    writeSettings({ ingest: { exclude: null } });
+    expect(JSON.parse(fs.readFileSync(settingsPath(), "utf8")).ingest).toEqual({});
   });
 
   it("recognises today's and every earlier default list, and nothing else", () => {
     expect(isDefaultExcludeList(DEFAULT_INGEST_EXCLUDES)).toBe(true);
     expect(isDefaultExcludeList(previous)).toBe(true);
+    // Saved under today's generation, the earlier list is the owner's choice.
+    expect(isDefaultExcludeList(previous, EXCLUDE_DEFAULTS_GENERATION)).toBe(false);
+    expect(isDefaultExcludeList(DEFAULT_INGEST_EXCLUDES, EXCLUDE_DEFAULTS_GENERATION)).toBe(true);
+    expect(isDefaultExcludeList(previous, "2")).toBe(true);
     expect(isDefaultExcludeList([])).toBe(false);
     expect(isDefaultExcludeList(["node_modules"])).toBe(false);
     // The earlier list is a frozen record: today's grew from it.

@@ -124,13 +124,26 @@ function sameList(a: readonly string[], b: readonly string[]): boolean {
 }
 
 /**
+ * Which default list {@link DEFAULT_INGEST_EXCLUDES} is: one more than the
+ * lists before it. A saved exclude list records it (`excludeSavedWith`), so a
+ * copy of an earlier default the owner chose AFTER it stopped being the
+ * default is told apart from one that was merely never changed.
+ */
+export const EXCLUDE_DEFAULTS_GENERATION = PREVIOUS_DEFAULT_INGEST_EXCLUDES.length + 1;
+
+/**
  * Whether `patterns` is a default list — today's, or one ClawBox shipped
  * earlier — in any order and letter case. Such a list was never the owner's
  * choice, so it follows the defaults; any other list is the owner's and is
- * kept exactly as it is.
+ * kept exactly as it is. `savedWith` is the generation the list was saved
+ * under: an earlier default saved once it was no longer the default (an
+ * owner who removed exactly the patterns added since) is the owner's choice.
  */
-export function isDefaultExcludeList(patterns: readonly string[]): boolean {
-  return sameList(patterns, DEFAULT_INGEST_EXCLUDES) || PREVIOUS_DEFAULT_INGEST_EXCLUDES.some((old) => sameList(patterns, old));
+export function isDefaultExcludeList(patterns: readonly string[], savedWith?: unknown): boolean {
+  if (sameList(patterns, DEFAULT_INGEST_EXCLUDES)) return true;
+  const generation = typeof savedWith === "number" && Number.isInteger(savedWith) ? savedWith : 0;
+  // The k-th earlier list was the default of generation k + 1.
+  return PREVIOUS_DEFAULT_INGEST_EXCLUDES.some((old, k) => generation <= k + 1 && sameList(patterns, old));
 }
 
 export const MAX_EXCLUDE_PATTERNS = 200;

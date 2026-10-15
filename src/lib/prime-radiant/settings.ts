@@ -17,7 +17,7 @@
 import crypto from "crypto";
 import fs from "fs";
 import path, { untraced } from "@/lib/runtime-path";
-import { DEFAULT_INGEST_EXCLUDES, isDefaultExcludeList, readExcludeList } from "./ingest-exclude";
+import { DEFAULT_INGEST_EXCLUDES, EXCLUDE_DEFAULTS_GENERATION, isDefaultExcludeList, readExcludeList } from "./ingest-exclude";
 import { mergeCostRates, readRateOverrides, type CostRates, type ModelRate } from "./cost-rates";
 import { primeRadiantRoot } from "./paths";
 
@@ -221,7 +221,7 @@ export function readSettings(root: string = primeRadiantRoot()): PrimeRadiantSet
   const ingest = (raw.ingest && typeof raw.ingest === "object" ? raw.ingest : {}) as Record<string, unknown>;
   if (ingest.exclude !== undefined) {
     const list = readExcludeList(ingest.exclude);
-    if (list.ok && !isDefaultExcludeList(list.patterns)) out.ingest.exclude = list.patterns;
+    if (list.ok && !isDefaultExcludeList(list.patterns, ingest.excludeSavedWith)) out.ingest.exclude = list.patterns;
   }
   if (typeof ingest.skipCodeProjects === "boolean") out.ingest.skipCodeProjects = ingest.skipCodeProjects;
   const parallel = readParallel(ingest.parallel);
@@ -305,13 +305,22 @@ export function writeSettings(patch: SettingsPatch, root: string = primeRadiantR
   const next: Record<string, unknown> = { ...raw };
   const ingest = { ...((raw.ingest && typeof raw.ingest === "object" ? raw.ingest : {}) as Record<string, unknown>) };
   if (patch.ingest) {
-    if (patch.ingest.exclude === null) delete ingest.exclude;
-    else if (patch.ingest.exclude !== undefined) {
+    if (patch.ingest.exclude === null) {
+      delete ingest.exclude;
+      delete ingest.excludeSavedWith;
+    } else if (patch.ingest.exclude !== undefined) {
       const list = readExcludeList(patch.ingest.exclude);
       if (!list.ok) throw new SettingsError(list.error);
-      // The defaults are not stored: they keep following ClawBox's list.
-      if (isDefaultExcludeList(list.patterns)) delete ingest.exclude;
-      else ingest.exclude = list.patterns;
+      // Today's defaults are not stored: they keep following ClawBox's list.
+      // Any other list — an earlier default included — is the owner's choice
+      // now, and says so, so it is never read as an untouched copy.
+      if (isDefaultExcludeList(list.patterns, EXCLUDE_DEFAULTS_GENERATION)) {
+        delete ingest.exclude;
+        delete ingest.excludeSavedWith;
+      } else {
+        ingest.exclude = list.patterns;
+        ingest.excludeSavedWith = EXCLUDE_DEFAULTS_GENERATION;
+      }
     }
     if (patch.ingest.skipCodeProjects === null) delete ingest.skipCodeProjects;
     else if (patch.ingest.skipCodeProjects !== undefined) {
