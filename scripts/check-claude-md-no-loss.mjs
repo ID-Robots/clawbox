@@ -73,7 +73,10 @@ export function splitUnits(text) {
       units.push({ line, text: raw, heading: heading[2] });
       return;
     }
-    if (/^<!--.*-->\s*$/.test(raw)) {
+    // A one-line HTML comment (the Next.js block's markers) is a unit of its
+    // own. Plain string tests, not a tag regex: this splits lines, it filters
+    // nothing, and a comment spread over lines is simply paragraph text here.
+    if (raw.startsWith("<!--") && raw.trimEnd().endsWith("-->")) {
       close();
       units.push({ line, text: raw, heading: null });
       return;
