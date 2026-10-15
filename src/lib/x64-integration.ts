@@ -71,3 +71,20 @@ export function hasX64Install(projectDir: string): boolean {
   const configured = readRootOwnedProjectDir(X64_INSTALL_FILE, `the x64 install record (${X64_INSTALL_FILE})`);
   return configured !== null && path.resolve(configured) === path.resolve(projectDir);
 }
+
+/**
+ * The wait budget the updater gives the desktop integration's `openclaw_install`
+ * step, in place of the appliance's five minutes.
+ *
+ * On the desktop that step REPLACES the core when the pin moves (see
+ * `scripts/x64-migration/clawbox-x64-step.sh`): it writes a verified archive
+ * of the state with the installed core, copies the databases it would have to
+ * put back, and runs the new core's migration — over agent databases that
+ * measure in gigabytes on the desktop this package was built for. The root
+ * unit's own ceiling (`TimeoutStartSec=7200` in
+ * `config/clawbox-root-update@.service`) is what bounds the step; this budget
+ * only has to outlast an honest run, because an overrun of the client's wait
+ * is reported as the step's failure while the unit carries on migrating in
+ * the background — and a Retry then meets a core already replaced.
+ */
+export const X64_DESKTOP_CORE_STEP_TIMEOUT_MS = 3_600_000;

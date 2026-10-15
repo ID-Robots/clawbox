@@ -39,7 +39,7 @@ import {
   holderFromAnotherBoot,
   type UpdateLockHolder,
 } from "./update-lock";
-import { hasX64DesktopIntegration, hasX64Install } from "./x64-integration";
+import { hasX64DesktopIntegration, hasX64Install, X64_DESKTOP_CORE_STEP_TIMEOUT_MS } from "./x64-integration";
 import {
   X64_ROOT_STEPS_SKIPPED,
   classifyX64RootStepExit,
@@ -5493,7 +5493,14 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
       } else if (step.requiresRoot) {
         // Desktop bootstrap also installs a missing Claude CLI. Its HTTPS
         // download alone allows five minutes; use the system-fixup budget.
-        const timeoutMs = desktopIntegration && step.id === "bootstrap_updater" ? 900_000 : step.timeoutMs;
+        // The desktop's core step archives and migrates the state when the
+        // pin moves, which is minutes per gigabyte of agent database
+        // (X64_DESKTOP_CORE_STEP_TIMEOUT_MS says why the budget is its own).
+        const timeoutMs = desktopIntegration && step.id === "bootstrap_updater"
+          ? 900_000
+          : desktopIntegration && step.id === "openclaw_install"
+            ? X64_DESKTOP_CORE_STEP_TIMEOUT_MS
+            : step.timeoutMs;
         if (!desktopIntegration && GATEWAY_QUIESCED_ROOT_STEPS.has(step.id) && !gatewayIsAbsent()) {
           await execAsRootWithGatewayQuiesced(step.id, timeoutMs);
         } else {
