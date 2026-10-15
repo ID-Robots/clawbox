@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# timeout: 960
+# timeout: 900
 #
 # The coding agent's TIME BUDGET on the real box, through the same routes
 # 40-coding-agent-run uses (src/app/setup-api/coding-agent/):
