@@ -66,6 +66,35 @@ export default function PrimeRadiantApp() {
    * second config write. Never aborted — the server finishes it either way.
    */
   const initRequest = useRef<Promise<unknown> | null>(null);
+  /** What the one-time repair took out of the vault, when this window's `POST init` ran it. */
+  const [repaired, setRepaired] = useState<{ pages: number; files: number } | null>(null);
+
+  /**
+   * A vault that is there but whose memory-wiki wiring still needs a write
+   * (keys a newer ClawBox added): the same one `POST init`, in the
+   * background — the window is usable meanwhile, and a failure is only
+   * logged (the status keeps saying `needs-write`; the next window asks again).
+   */
+  const rewire = useCallback((signal?: AbortSignal) => {
+    initRequest.current ??= prJson(`${API}/init`, jsonInit("POST", {}));
+    void initRequest.current
+      .then(async (res) => {
+        const repair = (res as { repair?: { cleaned?: unknown[]; removed?: unknown[] } | null } | null)?.repair;
+        const pages = Array.isArray(repair?.cleaned) ? repair.cleaned.length : 0;
+        const files = Array.isArray(repair?.removed) ? repair.removed.length : 0;
+        if (pages + files > 0 && !signal?.aborted) setRepaired({ pages, files });
+        const after = await prJson<PrimeRadiantStatus>(`${API}/status`, { signal });
+        if (signal?.aborted || !isDrawableStatus(after) || !after.initialised) return;
+        setStatus(after);
+        if (pages + files > 0) {
+          setRevision((r) => r + 1);
+          announceVaultChanged();
+        }
+      })
+      .catch((err) => {
+        if ((err as Error)?.name !== "AbortError") console.warn("[prime-radiant] memory-wiki wiring:", err);
+      });
+  }, []);
 
   /** What to do with a status: show it, or create the vault and read again. */
   const settle = useCallback(async (s: PrimeRadiantStatus, signal?: AbortSignal) => {
@@ -73,6 +102,7 @@ export default function PrimeRadiantApp() {
     setStatus(s);
     if (s.initialised) {
       setPhase("ready");
+      if (s.plugin.state === "needs-write") rewire(signal);
       return;
     }
     setPhase("initialising");
@@ -85,7 +115,7 @@ export default function PrimeRadiantApp() {
     setStatus(after);
     setPhase(after.initialised ? "ready" : "failed");
     if (after.initialised) announceVaultChanged();
-  }, []);
+  }, [rewire]);
 
   const fail = useCallback((err: unknown, signal?: AbortSignal) => {
     if ((err as Error)?.name === "AbortError" || signal?.aborted) return;
@@ -209,7 +239,16 @@ export default function PrimeRadiantApp() {
           <>
             {status.plugin.state === "conflict" && tab === "browse" && (
               <p className="mb-3 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs text-amber-200" data-testid="prime-radiant-wiring-conflict">
-                {t("primeRadiant.wiringConflict")}
+                {t(
+                  status.plugin.conflicts.every((c) => c === "plugin-writes")
+                    ? "primeRadiant.wiringConflictWrites"
+                    : "primeRadiant.wiringConflict",
+                )}
+              </p>
+            )}
+            {repaired && tab === "browse" && (
+              <p className="mb-3 rounded-lg border border-sky-400/30 bg-sky-400/10 px-3 py-2 text-xs text-sky-200" data-testid="prime-radiant-repaired" role="status">
+                {t("primeRadiant.repaired", { pages: repaired.pages, files: repaired.files })}
               </p>
             )}
             {tab === "browse" && (

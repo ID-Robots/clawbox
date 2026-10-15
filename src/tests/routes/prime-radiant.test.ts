@@ -144,6 +144,8 @@ describe("POST /init", () => {
     const body = await res.json();
     expect(body.created).toBe(true);
     expect(body.plugin.wrote).toBe(true);
+    // A new vault has nothing of memory-wiki's to take out; the repair is marked done all the same.
+    expect(body.repair).toEqual({ ran: true, cleaned: [], removed: [], commit: null });
     expect(oc.runOpenclawConfigSetBatch).toHaveBeenCalledTimes(1);
     const keys = (oc.runOpenclawConfigSetBatch.mock.calls[0] as unknown as [Array<[string, string, string]>])[0].map((a) => a[0]);
     expect(keys.every((k) => k.startsWith(`plugins.entries.${MEMORY_WIKI_PLUGIN_ID}.`))).toBe(true);
@@ -155,10 +157,22 @@ describe("POST /init", () => {
     // The config now says what we wrote: a second init makes and writes nothing.
     const vault = path.join(process.env.PRIME_RADIANT_DIR!, "vault");
     oc.readConfigStrict.mockResolvedValue({
-      plugins: { entries: { [MEMORY_WIKI_PLUGIN_ID]: { enabled: true, config: { vaultMode: "isolated", vault: { path: vault } } } } },
+      plugins: {
+        entries: {
+          [MEMORY_WIKI_PLUGIN_ID]: {
+            enabled: true,
+            config: {
+              vaultMode: "isolated",
+              vault: { path: vault },
+              ingest: { autoCompile: false },
+              render: { createBacklinks: false, createDashboards: false },
+            },
+          },
+        },
+      },
     });
     const again = await (await initReq()).json();
-    expect(again).toMatchObject({ created: false, plugin: { state: "wired", wrote: false } });
+    expect(again).toMatchObject({ created: false, plugin: { state: "wired", wrote: false }, repair: { ran: false } });
     expect(oc.runOpenclawConfigSetBatch).toHaveBeenCalledTimes(1);
     expect((await (await statusGET(req("/status"))).json()).git.commits).toBe(1);
   });

@@ -47,6 +47,8 @@ export interface FlashResponse {
   text: string;
   usage: FlashUsage;
   model: string;
+  /** Why the model stopped, as the provider says it (`stop`, `length` …); absent when it did not say. */
+  finishReason?: string | null;
 }
 
 export interface FlashClient {
@@ -174,12 +176,17 @@ export function createClawboxAiFlashClient(options: ClawboxAiFlashOptions = {}):
       } catch {
         throw new FlashCallError("bad_response", "ClawBox AI answered something that is not JSON.");
       }
-      const b = (body ?? {}) as { choices?: Array<{ message?: { content?: unknown } }>; usage?: unknown; model?: unknown };
+      const b = (body ?? {}) as { choices?: Array<{ message?: { content?: unknown }; finish_reason?: unknown }>; usage?: unknown; model?: unknown };
       const text = b.choices?.[0]?.message?.content;
+      const finish = b.choices?.[0]?.finish_reason;
+      const finishReason = typeof finish === "string" ? finish : null;
       if (typeof text !== "string" || text.trim() === "") {
-        throw new FlashCallError("bad_response", "ClawBox AI answered with no text.");
+        throw new FlashCallError(
+          "bad_response",
+          finishReason === "length" ? "ClawBox AI reached the output cap before it answered." : "ClawBox AI answered with no text.",
+        );
       }
-      return { text, usage: readUsage(b.usage), model };
+      return { text, usage: readUsage(b.usage), model, finishReason };
     },
   };
 }
@@ -218,6 +225,12 @@ export interface RetryOptions {
   random?: () => number;
   /** Called before each retry with the error that caused it. */
   onRetry?: (err: FlashCallError, attempt: number) => void;
+  /**
+   * Whether a retryable error is worth the SAME request again (default: all
+   * are). The contradiction judge says no to `bad_response`: an empty or
+   * capped answer is asked again in smaller calls, not resent as it was.
+   */
+  retryOn?: (err: FlashCallError) => boolean;
 }
 
 export function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
@@ -276,7 +289,7 @@ export async function completeWithRetry(client: FlashClient, request: FlashReque
       return { response: await client.complete(request), attempts: attempt };
     } catch (err) {
       last = err instanceof FlashCallError ? err : new FlashCallError("network", err instanceof Error ? err.message : String(err));
-      if (!last.retryable || attempt === attempts) throw last;
+      if (!last.retryable || attempt === attempts || (options.retryOn && !options.retryOn(last))) throw last;
       options.onRetry?.(last, attempt);
       await sleep(backoffMs(last, attempt, options.random), request.signal);
     }

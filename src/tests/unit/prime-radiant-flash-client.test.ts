@@ -57,7 +57,12 @@ describe("the ClawBox AI client", () => {
     const fetchImpl = vi.fn(async () => respond(200, okBody));
     const client = createClawboxAiFlashClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
     const out = await client.complete(req);
-    expect(out).toEqual({ text: "[]", model: "deepseek-v4-flash", usage: { promptTokens: 1000, completionTokens: 200, cacheHitTokens: 400 } });
+    expect(out).toEqual({
+      text: "[]",
+      model: "deepseek-v4-flash",
+      usage: { promptTokens: 1000, completionTokens: 200, cacheHitTokens: 400 },
+      finishReason: null,
+    });
     const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe("https://proxy.example.com/api/ai/chat/completions");
     expect((init.headers as Record<string, string>).authorization).toBe("Bearer claw_test_token");
@@ -70,6 +75,15 @@ describe("the ClawBox AI client", () => {
         { role: "user", content: "user" },
       ],
     });
+  });
+
+  it("says when the answer was cut at its output cap, and an empty one capped before it began", async () => {
+    const capped = { ...okBody, choices: [{ message: { content: '[{"i":0,"verdict":"compatible"}' }, finish_reason: "length" }] };
+    const client = createClawboxAiFlashClient({ fetchImpl: (async () => respond(200, capped)) as unknown as typeof fetch });
+    expect(await client.complete(req)).toMatchObject({ finishReason: "length" });
+    const empty = { ...okBody, choices: [{ message: { content: "" }, finish_reason: "length" }] };
+    const none = createClawboxAiFlashClient({ fetchImpl: (async () => respond(200, empty)) as unknown as typeof fetch });
+    await expect(none.complete(req)).rejects.toMatchObject({ kind: "bad_response", message: expect.stringMatching(/output cap/) });
   });
 
   it("refuses to call without a credential", async () => {
@@ -153,6 +167,16 @@ describe("completeWithRetry", () => {
       await expect(completeWithRetry(client, req, { sleep: async () => undefined })).rejects.toMatchObject({ kind });
       expect(client.calls).toBe(1);
     }
+  });
+
+  it("does not resend what the caller says is not worth the same request again", async () => {
+    const client = scripted(new FlashCallError("bad_response", "capped"), ok);
+    await expect(
+      completeWithRetry(client, req, { sleep: async () => undefined, retryOn: (e) => e.kind !== "bad_response" }),
+    ).rejects.toMatchObject({ kind: "bad_response" });
+    expect(client.calls).toBe(1);
+    const busy = scripted(new FlashCallError("rate_limited", "busy", 429), ok);
+    expect(await completeWithRetry(busy, req, { sleep: async () => undefined, retryOn: (e) => e.kind !== "bad_response" })).toMatchObject({ attempts: 2 });
   });
 
   it("gives up after the attempts, with the last error", async () => {

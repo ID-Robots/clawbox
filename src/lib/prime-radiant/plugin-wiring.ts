@@ -6,9 +6,20 @@
  *
  * The keys written, and nothing else:
  *
- *   plugins.entries.memory-wiki.enabled            true
- *   plugins.entries.memory-wiki.config.vaultMode   "isolated"
- *   plugins.entries.memory-wiki.config.vault.path  <the vault>
+ *   plugins.entries.memory-wiki.enabled                          true
+ *   plugins.entries.memory-wiki.config.vaultMode                 "isolated"
+ *   plugins.entries.memory-wiki.config.vault.path                <the vault>
+ *   plugins.entries.memory-wiki.config.ingest.autoCompile        false
+ *   plugins.entries.memory-wiki.config.render.createBacklinks    false
+ *   plugins.entries.memory-wiki.config.render.createDashboards   false
+ *
+ * The last three keep the plugin a READER: left at their defaults it
+ * compiles the vault on its first `wiki_status`/`wiki_search` — a
+ * "## Related" block appended to every page, `<folder>/index.md` and
+ * `reports/*.md` written beside them — and the vault's own lint then
+ * refuses those files. Prime Radiant ignores what the plugin writes anyway
+ * (see `plugin-files.ts`), but a vault the plugin leaves alone stays one the
+ * owner can read.
  *
  * IDEMPOTENT: each key is written only when it differs, so a wired box makes
  * no write (and no gateway restart). NEVER CLOBBERS: a value the owner set on
@@ -39,7 +50,17 @@ export const WIRING_KEYS = Object.freeze({
   enabled: `${ENTRY}.enabled`,
   vaultMode: `${ENTRY}.config.vaultMode`,
   vaultPath: `${ENTRY}.config.vault.path`,
+  autoCompile: `${ENTRY}.config.ingest.autoCompile`,
+  createBacklinks: `${ENTRY}.config.render.createBacklinks`,
+  createDashboards: `${ENTRY}.config.render.createDashboards`,
 });
+
+/** The plugin's switches that make it write into the vault, each wanted `false`: `[section, key, config path]`. */
+const VAULT_WRITE_SWITCHES = [
+  ["ingest", "autoCompile", WIRING_KEYS.autoCompile],
+  ["render", "createBacklinks", WIRING_KEYS.createBacklinks],
+  ["render", "createDashboards", WIRING_KEYS.createDashboards],
+] as const;
 
 export type WiringConflict =
   | "plugin-disabled"
@@ -47,7 +68,9 @@ export type WiringConflict =
   | "plugin-not-allowed"
   | "other-vault-mode"
   | "other-vault-path"
-  | "agent-scope";
+  | "agent-scope"
+  /** The owner switched one of the plugin's vault writers on by hand. */
+  | "plugin-writes";
 
 export type WiringPlan =
   | { state: "wired"; vault: string }
@@ -95,6 +118,16 @@ export function planMemoryWikiWiring(config: OpenClawConfig, vault: string): Wir
   }
   // Agent scope turns vault.path into a PARENT; Prime Radiant is one vault.
   if (vaultCfg?.scope === "agent") conflicts.push("agent-scope");
+  // Unset means the plugin's default, `true`: written `false`. Set by hand to
+  // anything else is the owner's, reported once however many there are.
+  let writerOn = false;
+  for (const [section, key, configKey] of VAULT_WRITE_SWITCHES) {
+    const value = obj(cfg?.[section])?.[key];
+    if (value === false) continue;
+    if (value !== undefined) writerOn = true;
+    writes.push({ key: configKey, value: false });
+  }
+  if (writerOn) conflicts.push("plugin-writes");
 
   if (conflicts.length > 0) return { state: "conflict", vault, conflicts, writes };
   if (writes.length > 0) return { state: "needs-write", vault, writes };
@@ -115,17 +148,17 @@ export async function memoryWikiWiringStatus(vault: string = vaultDir()): Promis
 export interface EnsureWiringOptions {
   vault?: string;
   /**
-   * Resolve the conflicts that ONLY need our three keys: a disabled plugin, a
-   * different mode or a different vault path. A deny/allow list and agent
-   * scope are never edited from here — they say something about the whole
-   * box, not about this vault.
+   * Resolve the conflicts that ONLY need our own keys: a disabled plugin, a
+   * different mode or vault path, a vault writer switched on. A deny/allow
+   * list and agent scope are never edited from here — they say something
+   * about the whole box, not about this vault.
    */
   force?: boolean;
 }
 
 export type WiringResult = WiringPlan & { wrote: boolean };
 
-const FORCEABLE: ReadonlySet<WiringConflict> = new Set(["plugin-disabled", "other-vault-mode", "other-vault-path"]);
+const FORCEABLE: ReadonlySet<WiringConflict> = new Set(["plugin-disabled", "other-vault-mode", "other-vault-path", "plugin-writes"]);
 
 /**
  * One wiring at a time, process-wide: two windows opening the app together

@@ -11,15 +11,24 @@ import { ensureMemoryWikiWiring, planMemoryWikiWiring, WIRING_KEYS } from "@/lib
 
 const VAULT = "/srv/box/data/prime-radiant/vault";
 
+/** The plugin a reader of the vault: its compile writers off. */
+const READER = { ingest: { autoCompile: false }, render: { createBacklinks: false, createDashboards: false } };
+
 function wired(extra: Record<string, unknown> = {}, vaultExtra: Record<string, unknown> = {}) {
   return {
     plugins: {
       entries: {
-        "memory-wiki": { enabled: true, config: { vaultMode: "isolated", vault: { path: VAULT, ...vaultExtra }, ...extra } },
+        "memory-wiki": { enabled: true, config: { vaultMode: "isolated", vault: { path: VAULT, ...vaultExtra }, ...READER, ...extra } },
       },
     },
   };
 }
+
+const READER_WRITES = [
+  { key: WIRING_KEYS.autoCompile, value: false },
+  { key: WIRING_KEYS.createBacklinks, value: false },
+  { key: WIRING_KEYS.createDashboards, value: false },
+];
 
 beforeEach(() => {
   oc.openclawIsAbsent.mockReturnValue(false);
@@ -28,7 +37,7 @@ beforeEach(() => {
 });
 
 describe("memory-wiki wiring plan", () => {
-  it("writes the three keys on a box that never configured the plugin", () => {
+  it("writes the six keys on a box that never configured the plugin", () => {
     expect(planMemoryWikiWiring({ gateway: { port: 1 } }, VAULT)).toEqual({
       state: "needs-write",
       vault: VAULT,
@@ -36,8 +45,44 @@ describe("memory-wiki wiring plan", () => {
         { key: WIRING_KEYS.enabled, value: true },
         { key: WIRING_KEYS.vaultMode, value: "isolated" },
         { key: WIRING_KEYS.vaultPath, value: VAULT },
+        ...READER_WRITES,
       ],
     });
+    expect(WIRING_KEYS).toMatchObject({
+      autoCompile: "plugins.entries.memory-wiki.config.ingest.autoCompile",
+      createBacklinks: "plugins.entries.memory-wiki.config.render.createBacklinks",
+      createDashboards: "plugins.entries.memory-wiki.config.render.createDashboards",
+    });
+  });
+
+  // The live test: wired with only the first three keys, the plugin's first
+  // wiki_status compiled the vault — a Related block on every page,
+  // <folder>/index.md, reports/ — and the vault's lint held the nightly.
+  it("switches the plugin's vault writers off on a box wired before they were known", () => {
+    const old = wired();
+    const cfg = old.plugins.entries["memory-wiki"].config as Record<string, unknown>;
+    delete cfg.ingest;
+    delete cfg.render;
+    expect(planMemoryWikiWiring(old, VAULT)).toEqual({ state: "needs-write", vault: VAULT, writes: READER_WRITES });
+    // Only the one still unset is written; the owner's other render choices are not ours.
+    expect(planMemoryWikiWiring(wired({ render: { createBacklinks: false, createDashboards: false, preserveHumanBlocks: true } , ingest: { maxConcurrentJobs: 2 } }), VAULT)).toEqual({
+      state: "needs-write",
+      vault: VAULT,
+      writes: [{ key: WIRING_KEYS.autoCompile, value: false }],
+    });
+  });
+
+  it("reports a vault writer the owner switched on by hand as a conflict, once", () => {
+    const plan = planMemoryWikiWiring(wired({ render: { createBacklinks: true, createDashboards: true } }), VAULT);
+    expect(plan).toMatchObject({
+      state: "conflict",
+      conflicts: ["plugin-writes"],
+      writes: [
+        { key: WIRING_KEYS.createBacklinks, value: false },
+        { key: WIRING_KEYS.createDashboards, value: false },
+      ],
+    });
+    expect(planMemoryWikiWiring(wired({ ingest: { autoCompile: true } }), VAULT)).toMatchObject({ state: "conflict", conflicts: ["plugin-writes"] });
   });
 
   it("writes nothing when already wired, and keeps the owner's other plugin settings out of it", () => {
@@ -84,8 +129,22 @@ describe("ensureMemoryWikiWiring", () => {
       [WIRING_KEYS.enabled, "true", "--json"],
       [WIRING_KEYS.vaultMode, '"isolated"', "--json"],
       [WIRING_KEYS.vaultPath, JSON.stringify(VAULT), "--json"],
+      [WIRING_KEYS.autoCompile, "false", "--json"],
+      [WIRING_KEYS.createBacklinks, "false", "--json"],
+      [WIRING_KEYS.createDashboards, "false", "--json"],
     ]);
     expect(result).toMatchObject({ state: "wired", wrote: true });
+  });
+
+  it("leaves a vault writer the owner switched on alone unless forced", async () => {
+    const owners = wired({ render: { createBacklinks: true, createDashboards: false } });
+    oc.readConfigStrict.mockResolvedValue(owners);
+    expect(await ensureMemoryWikiWiring({ vault: VAULT })).toMatchObject({ state: "conflict", conflicts: ["plugin-writes"], wrote: false });
+    expect(oc.runOpenclawConfigSetBatch).not.toHaveBeenCalled();
+    oc.readConfigStrict.mockReset();
+    oc.readConfigStrict.mockResolvedValueOnce(owners).mockResolvedValueOnce(wired());
+    expect(await ensureMemoryWikiWiring({ vault: VAULT, force: true })).toMatchObject({ state: "wired", wrote: true });
+    expect(oc.runOpenclawConfigSetBatch).toHaveBeenCalledWith([[WIRING_KEYS.createBacklinks, "false", "--json"]]);
   });
 
   it("serialises two windows opening the app together: one write, the second plans against it", async () => {

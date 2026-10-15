@@ -157,6 +157,45 @@ describe("nightly pass", () => {
     expect(await branches()).toEqual(["main"]);
   });
 
+  // The live test: memory-wiki compiled into main's checkout — a Related
+  // block on every page, its own <folder>/index.md with no frontmatter — and
+  // the night was held. Now the first night repairs it, and a block the
+  // plugin writes later never makes main "dirty".
+  it("is not held by what memory-wiki wrote into main, and repairs it once", async () => {
+    await ensureVault();
+    const page = pageText({ title: "Terms", claims: [claim("acme-sales/terms/net", "Acme Widgets Ltd pays suppliers within 30 days.")] }, "Acme terms.\n");
+    await vaultOperation("seed: terms", async (tx) => {
+      await tx.write("concepts/terms.md", page);
+      await tx.write("index.md", "# Index\n\n- [[concepts/terms]]\n");
+    });
+    const v = vaultDir();
+    const related = (text: string) =>
+      `${text.trimEnd()}\n\n## Related\n<!-- openclaw:wiki:related:start -->\n- [Index](../index.md)\n<!-- openclaw:wiki:related:end -->\n`;
+    const compile = () => {
+      fs.writeFileSync(path.join(v, "concepts", "terms.md"), related(page));
+      fs.mkdirSync(path.join(v, "entities"), { recursive: true });
+      fs.writeFileSync(path.join(v, "entities", "index.md"), "# Entities\n\n## Generated\n<!-- openclaw:wiki:entities:index:start -->\n- No entities yet.\n<!-- openclaw:wiki:entities:index:end -->\n");
+    };
+    compile();
+
+    const run = await runNightly("manual", deps());
+    expect(run).toMatchObject({ status: "merged" });
+    const summary = run!.summary as unknown as NightlySummary;
+    expect(summary.held).toEqual([]);
+    expect(summary.notes.join(" ")).toMatch(/memory-wiki's generated blocks and files were taken out of the vault \(1 page\(s\), 1 file\(s\)\)/);
+    expect(fs.readFileSync(path.join(v, "concepts", "terms.md"), "utf8")).toBe(page);
+    expect(fs.existsSync(path.join(v, "entities", "index.md"))).toBe(false);
+
+    // The plugin compiles again during the day; the next night still merges.
+    compile();
+    fs.writeFileSync(path.join(filesRoot, "Documents", "shipping.md"), "Orders ship within three working days.");
+    const second = await runNightly("schedule", deps({ now: () => new Date(2026, 4, 21, 3, 0) }));
+    expect(second).toMatchObject({ status: "merged" });
+    expect((second!.summary as unknown as NightlySummary).notes.join(" ")).not.toMatch(/memory-wiki/);
+    expect(fs.readFileSync(path.join(v, "concepts", "terms.md"), "utf8")).toBe(page);
+    expect((await git(v, ["status", "--porcelain"])).stdout.trim()).toBe("");
+  });
+
   it("offline: skips the ingest and the judge, still lints and gates, and finds nothing to merge", async () => {
     await ensureVault();
     const run = await runNightly("schedule", deps({ online: async () => false }));

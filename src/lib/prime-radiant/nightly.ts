@@ -47,6 +47,7 @@ import { getIngestJob, ingestFinished, IngestBusyError, startIngest } from "./in
 import { isOwnOutput } from "./ingest-sources";
 import { lintVault, type LintFinding } from "./lint";
 import { isKnowledgePage, vaultDir } from "./paths";
+import { repairPluginWritesOnce, restorePluginOnlyEdits } from "./plugin-repair";
 import { notifyVaultChanged } from "./reindex-hook";
 import { addReviewItem, countWaitingForRuns, listReviewItems } from "./review-store";
 import { buildOpusQueue, opusClient, runOpusTier, type OpusClient, type OpusTierResult } from "./opus";
@@ -69,7 +70,7 @@ export interface NightlySummary {
   changedCount: number;
   ingest: { jobId: string; status: string; pages: number; failed: number } | { skipped: string };
   lint: { errors: number; warnings: number; checked: number };
-  contradictions: Pick<ContradictionPassResult, "claims" | "queried" | "embedded" | "pairs" | "judged" | "calls" | "failedBatches" | "deferredPairs" | "carried" | "deferredClaims" | "complete" | "usdEstimate" | "skipped"> & {
+  contradictions: Pick<ContradictionPassResult, "claims" | "queried" | "embedded" | "pairs" | "judged" | "calls" | "failedBatches" | "capped" | "deferredPairs" | "carried" | "deferredClaims" | "complete" | "usdEstimate" | "skipped"> & {
     findings: number;
   };
   opus: Pick<OpusTierResult, "queued" | "reviewed" | "pending" | "calls" | "usdEstimate" | "capUsd" | "stopped"> | { skipped: string };
@@ -233,6 +234,8 @@ async function mergeIntoMain(
   branch: string,
 ): Promise<{ ok: true; commit: string; changed: string[] } | { ok: false; reason: string }> {
   return withVaultLock(vault, async () => {
+    // A "## Related" block memory-wiki wrote into a page is not a change of the owner's to protect.
+    await restorePluginOnlyEdits(vault);
     const status = await git(vault, ["status", "--porcelain", "--untracked-files=no"]);
     if (status.stdout.trim() !== "") return { ok: false, reason: "the vault had uncommitted changes" };
     const before = (await git(vault, ["rev-parse", "HEAD"])).stdout.trim();
@@ -275,6 +278,7 @@ function emptySummary(): NightlySummary {
       judged: 0,
       calls: 0,
       failedBatches: 0,
+      capped: 0,
       deferredPairs: 0,
       carried: 0,
       deferredClaims: 0,
@@ -298,6 +302,16 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
   const notes = summary.notes;
   const online = await (deps.online ?? flashAvailable)().catch(() => false);
   if (!online) notes.push("ClawBox AI is not reachable from this box; the ingest and the contradiction judge were skipped.");
+
+  // Once per vault, before the branch is cut: what memory-wiki wrote into main goes first.
+  try {
+    const repair = await repairPluginWritesOnce(vault, now);
+    if (repair.cleaned.length + repair.removed.length > 0) {
+      notes.push(`memory-wiki's generated blocks and files were taken out of the vault (${repair.cleaned.length} page(s), ${repair.removed.length} file(s)).`);
+    }
+  } catch (err) {
+    notes.push(`memory-wiki's generated files could not be taken out of the vault: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
+  }
 
   const branch = await dreamBranchName(vault, now());
   const wt = worktreePath(vault);
@@ -363,6 +377,7 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
         judged: pass.judged,
         calls: pass.calls,
         failedBatches: pass.failedBatches,
+        capped: pass.capped,
         deferredPairs: pass.deferredPairs,
         carried: pass.carried,
         deferredClaims: pass.deferredClaims,

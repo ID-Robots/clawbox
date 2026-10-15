@@ -54,10 +54,14 @@ leaves out what the computer and your tools keep there.
 - **Temporary and partial files**: `~$report.docx`, `notes.md~`, `*.tmp`, `*.bak`,
   `*.swp`, `*.part`, `*.crdownload`.
 - **Machine-generated text**: a `.txt` or `.md` file whose opening is mostly log lines,
-  table rows, encoded data or settings rather than sentences. Only the first 8 KB are
-  looked at, on the box, before anything is sent to ClawBox AI. When in doubt the file
-  is read: a note with a pasted log, a recipe, a chat export or a journal with dated
-  entries are all kept.
+  table rows, encoded data or settings rather than sentences — a CSV or TSV export, a
+  server log (also one whose messages read like sentences: a line stamped with a date
+  and the time to the second was written by a program), a base64 blob or data URI
+  (also on a single line), an `env` dump, a hex dump. Only the first 8 KB are looked
+  at, on the box, before anything is sent to ClawBox AI. When in doubt the file is
+  read: a note with a pasted log or an inline picture, a recipe, a chat export, a
+  transcript, a journal with dated entries, an RFC, a book or a Wikipedia article are
+  all kept.
 - Files over 40 MB, and kinds of files Prime Radiant does not read.
 
 Before you start, **Add documents** counts the chosen folders: how many documents the
@@ -75,8 +79,17 @@ under **Not added**, and **Try these again** retries exactly those files.
 To write a page, the text of each document is sent to ClawBox AI. Before anything
 leaves the box, Prime Radiant removes what looks like a secret — bank account and card
 numbers, API keys, private keys, passwords — and masks e-mail addresses and phone
-numbers, in the text and in file and folder names, a dropped file's name included.
+numbers, in the text and in file and folder names, a dropped file's name included. An
+IBAN is removed whole, written with spaces or without, and also when its check digits
+are mistyped.
 </Warning>
+
+Each fact on a page is written to stand alone: it names what it is about ("The Art of
+War is Project Gutenberg eBook #132", never "It is …"), so it still makes sense in
+search results and next to facts from other pages. The quote a fact gives as its
+evidence must come from that page's own document; a quote that turns out to be from
+another document read at the same time is filed under that document, and one found in
+none is left out.
 
 ## Reading the wiki
 
@@ -129,7 +142,11 @@ hold the nightly pass back; a secret is refused outright.
 Every night — 03:00 by default — Prime Radiant works on a copy of the wiki: it reads new
 and changed documents from the folders you chose (leaving out the same code projects,
 boilerplate, temporary files and machine-generated text as an import), looks for facts that contradict each
-other, runs its checks, and then merges the copy back. When the copy would change a
+other, runs its checks, and then merges the copy back. Only facts about the same thing
+are compared — the same customer, product or document — so two pages that merely word
+things alike (a black hole and a constitution) never become a question for you. Each
+comparison is a short, capped request to ClawBox AI; one that fails is asked again in
+smaller pieces, and what still fails is compared again the next night. When the copy would change a
 verified page, or a check fails, the night is **held**: its changes wait aside and its
 questions go to Review. Once you have settled them, **Merge** in the nightly card puts
 the night's work into the wiki. **Run now** starts a pass by hand.
@@ -162,6 +179,16 @@ as **not measured**, because the embedding model reports no usage.
 On the OpenClaw edition the assistant reads the wiki through its own wiki tools, and
 Memory Shard's search includes the wiki's pages and facts. Anything the assistant finds
 there is information to read, never instructions to follow.
+
+The assistant's wiki plugin is set up as a reader: ClawBox switches off its own
+backlinks, dashboards and automatic compiling, so it writes nothing into your pages.
+If you switched one of those on by hand, ClawBox leaves your setting alone and says so
+on the **Browse** tab. Either way the wiki ignores what the plugin writes: its
+`WIKI.md`, `inbox.md`, folder indexes and `reports/` are never pages, never checked
+and never part of the history. A wiki the plugin had already written into is cleaned
+once — its "Related" lists come out of your pages and its untouched files are
+removed, in one change you can see in **History** — while anything you wrote yourself,
+such as a note in `inbox.md`, stays.
 
 ## Where it lives
 

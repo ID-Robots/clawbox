@@ -1,17 +1,28 @@
 /**
  * The contradiction judge against the answers a real model gives: fenced
  * JSON, prose around it, a truncated array, extra fields, a wrapper object —
- * and the pass that sends it small batches, asks an unreadable batch again in
- * halves, and loses only what still fails. Fixtures are synthetic.
+ * and the pass that sends it small batches with a capped answer, asks an
+ * unreadable batch (and what a readable answer left out) again in small
+ * calls, never resends an empty answer as it was, and loses only what still
+ * fails. Fixtures are synthetic.
  */
 import fs from "fs";
 import os from "os";
 import path from "path";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createHashEmbedder, fullComparisonDone, JUDGE_BATCH_PAIRS, readDeferredClaims, runContradictionPass } from "@/lib/prime-radiant/contradictions";
+import {
+  createHashEmbedder,
+  fullComparisonDone,
+  JUDGE_BATCH_PAIRS,
+  JUDGE_MAX_TOKENS,
+  JUDGE_RETRY_PAIRS,
+  judgeMaxTokens,
+  readDeferredClaims,
+  runContradictionPass,
+} from "@/lib/prime-radiant/contradictions";
 import { DEFAULT_COST_RATES } from "@/lib/prime-radiant/cost-rates";
 import { FlashCallError, type FlashClient, type FlashRequest } from "@/lib/prime-radiant/flash-client";
-import { jsonObjectsIn, JudgeParseError, parseJudgeResponse, readJudgeItems } from "@/lib/prime-radiant/judge";
+import { buildJudgePrompt, jsonObjectsIn, JudgeParseError, parseJudgeResponse, readJudgeItems } from "@/lib/prime-radiant/judge";
 import { vaultDir } from "@/lib/prime-radiant/paths";
 import { claim, pageText, snapshot } from "../helpers/prime-radiant-fixtures";
 
@@ -114,16 +125,18 @@ function manyClaims() {
 
 type Answer = (items: Array<{ i: number; a: string; b: string }>, call: number) => string;
 
-function scripted(answer: Answer): FlashClient & { sizes: number[]; maxInFlight: number } {
+function scripted(answer: Answer): FlashClient & { sizes: number[]; caps: number[]; maxInFlight: number } {
   let inFlight = 0;
   const c = {
     model: "deepseek-v4-flash",
     sizes: [] as number[],
+    caps: [] as number[],
     maxInFlight: 0,
     async complete(request: FlashRequest) {
       const items = readJudgeItems(request.user) ?? [];
       const call = c.sizes.length;
       c.sizes.push(items.length);
+      c.caps.push(request.maxTokens);
       inFlight += 1;
       c.maxInFlight = Math.max(c.maxInFlight, inFlight);
       await new Promise((r) => setTimeout(r, 2));
@@ -159,7 +172,17 @@ describe("contradiction pass: small batches", () => {
     expect(r.skipped).toBeNull();
   });
 
-  it("asks an unreadable batch again as two halves, and loses nothing when they answer", async () => {
+  it("caps every answer by the pairs it carries", async () => {
+    const client = scripted((items) => fenced(items));
+    await runContradictionPass(manyClaims(), { stateVault: vaultDir(), scope: null, client, embedder: createHashEmbedder(), retry: noSleep, parallel: 1 });
+    expect(client.caps).toEqual(client.sizes.map((size) => judgeMaxTokens(size)));
+    expect(Math.max(...client.caps)).toBeLessThanOrEqual(JUDGE_MAX_TOKENS);
+    expect(judgeMaxTokens(1)).toBeLessThan(judgeMaxTokens(JUDGE_BATCH_PAIRS));
+    // Half what every call was allowed before, and asked for one terse object a pair.
+    expect(judgeMaxTokens(JUDGE_BATCH_PAIRS)).toBeLessThanOrEqual(4_000);
+  });
+
+  it("asks an unreadable batch again in small calls, and loses nothing when they answer", async () => {
     // The first call rambles with no JSON; every later call answers properly.
     const client = scripted((items, call) => (call === 0 ? "Thinking about these pairs carefully, the prices seem" : fenced(items, "contradiction")));
     const r = await runContradictionPass(manyClaims(), {
@@ -172,11 +195,54 @@ describe("contradiction pass: small batches", () => {
       raiseItems: false,
     });
     expect(client.sizes[0]).toBe(JUDGE_BATCH_PAIRS);
-    expect(client.sizes.slice(1, 3)).toEqual([JUDGE_BATCH_PAIRS / 2, JUDGE_BATCH_PAIRS / 2]);
+    const retries = JUDGE_BATCH_PAIRS / JUDGE_RETRY_PAIRS;
+    expect(client.sizes.slice(1, 1 + retries)).toEqual(Array(retries).fill(JUDGE_RETRY_PAIRS));
+    expect(client.caps[1]).toBe(judgeMaxTokens(JUDGE_RETRY_PAIRS));
     expect(r.failedBatches).toBe(0);
     expect(r.judged).toBe(r.pairs);
     expect(r.findings).toHaveLength(r.pairs);
     expect(r.notes.join(" ")).not.toContain("judge call failed");
+  });
+
+  it("never resends an answer that came back empty at its cap: it asks again smaller", async () => {
+    let first = true;
+    const sizes: number[] = [];
+    const client: FlashClient = {
+      model: "deepseek-v4-flash",
+      async complete(request) {
+        const items = readJudgeItems(request.user) ?? [];
+        sizes.push(items.length);
+        if (first) {
+          first = false;
+          throw new FlashCallError("bad_response", "ClawBox AI reached the output cap before it answered.");
+        }
+        return { text: fenced(items), model: "deepseek-v4-flash", usage: { promptTokens: 100, completionTokens: 20, cacheHitTokens: 0 } };
+      },
+    };
+    // Four attempts allowed: the empty answer is still asked only once at full size.
+    const r = await runContradictionPass(manyClaims(), { stateVault: vaultDir(), scope: null, client, embedder: createHashEmbedder(), retry: { sleep: async () => undefined }, parallel: 1 });
+    expect(sizes.filter((s) => s === JUDGE_BATCH_PAIRS).length).toBe(Math.floor(r.pairs / JUDGE_BATCH_PAIRS));
+    expect(sizes[1]).toBe(JUDGE_RETRY_PAIRS);
+    expect(r.deferredPairs).toBe(0);
+    expect(r.judged).toBe(r.pairs);
+  });
+
+  it("counts the answers cut at their cap and asks what they left out again", async () => {
+    const client: FlashClient = {
+      model: "deepseek-v4-flash",
+      async complete(request) {
+        const items = readJudgeItems(request.user) ?? [];
+        // A long batch is cut after its first two verdicts.
+        const cut = items.length > JUDGE_RETRY_PAIRS;
+        const text = JSON.stringify((cut ? items.slice(0, 2) : items).map((it) => ({ i: it.i, verdict: "compatible" })));
+        return { text, model: "deepseek-v4-flash", usage: { promptTokens: 100, completionTokens: 20, cacheHitTokens: 0 }, finishReason: cut ? "length" : "stop" };
+      },
+    };
+    const r = await runContradictionPass(manyClaims(), { stateVault: vaultDir(), scope: null, client, embedder: createHashEmbedder(), retry: noSleep, parallel: 1 });
+    expect(r.capped).toBeGreaterThan(0);
+    expect(r.judged).toBe(r.pairs);
+    expect(r.deferredPairs).toBe(0);
+    expect(r.notes.join(" ")).toMatch(/reached the output cap/);
   });
 
   it("loses only the batch that keeps failing, counts it, and still raises the rest", async () => {
@@ -194,11 +260,12 @@ describe("contradiction pass: small batches", () => {
       retry: noSleep,
       parallel: 1,
     });
-    expect(r.failedBatches).toBe(2); // both halves of the first batch
+    const retries = JUDGE_BATCH_PAIRS / JUDGE_RETRY_PAIRS;
+    expect(r.failedBatches).toBe(retries); // every small retry of the first batch
     expect(r.deferredPairs).toBe(JUDGE_BATCH_PAIRS);
     expect(r.judged).toBe(r.pairs - JUDGE_BATCH_PAIRS);
     expect(r.reviewItems.length).toBe(r.pairs - JUDGE_BATCH_PAIRS);
-    expect(r.notes).toContain("2 judge calls failed (bad_response); their pairs are judged next pass.");
+    expect(r.notes).toContain(`${retries} judge calls failed (bad_response); their pairs are judged next pass.`);
     expect(r.skipped).toBeNull();
 
     // The next pass asks only the deferred pairs.
@@ -208,14 +275,25 @@ describe("contradiction pass: small batches", () => {
     expect(again.deferredPairs).toBe(0);
   });
 
-  it("fails a single pair the answer leaves out, not its batch", async () => {
+  it("asks a pair a readable answer left out again on its own, not its whole batch", async () => {
+    // Every answer leaves out item 3; a retry of one or two pairs has no item 3.
     const client = scripted((items) => "Verdicts:\n" + JSON.stringify(items.filter((it) => it.i !== 3).map((it) => ({ i: it.i, verdict: "compatible" }))));
     const r = await runContradictionPass(manyClaims(), { stateVault: vaultDir(), scope: null, client, embedder: createHashEmbedder(), retry: noSleep });
     const batches = Math.ceil(r.pairs / JUDGE_BATCH_PAIRS);
-    expect(client.sizes).toHaveLength(batches); // no half-size retry: the answer was readable
+    const left = client.sizes.slice(0, batches).filter((s) => s > 3).length;
+    expect(client.sizes.slice(batches)).toEqual(Array(left).fill(1));
     expect(r.failedBatches).toBe(0);
-    expect(r.deferredPairs).toBe(client.sizes.filter((s) => s > 3).length);
-    expect(r.judged).toBe(r.pairs - r.deferredPairs);
+    expect(r.deferredPairs).toBe(0);
+    expect(r.judged).toBe(r.pairs);
+  });
+
+  it("asks for a terse verdict: a reason only where a person reads one", () => {
+    const { system } = buildJudgePrompt([{ a: "x", b: "y" }]);
+    expect(system).toMatch(/"why" in at most 8 words/);
+    expect(system).toMatch(/Do not explain your reasoning/);
+    expect(system).toMatch(/different things/);
+    // A why for a compatible pair is not kept.
+    expect(parseJudgeResponse('[{"i":0,"verdict":"compatible","why":"they talk about two different books entirely"}]', 1).get(0)).toEqual({ verdict: "compatible", why: "" });
   });
 
   it("does not halve a batch whose call failed for another reason", async () => {

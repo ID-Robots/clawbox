@@ -6,6 +6,7 @@
 import { describe, expect, it } from "vitest";
 import {
   entropy,
+  IBAN_LENGTHS,
   ibanValid,
   looksLikeUnixTimestamp,
   luhnValid,
@@ -18,6 +19,29 @@ import { safeUploadName } from "@/lib/prime-radiant/ingest-upload";
 
 const fakeKey = (prefix: string, body: string) => prefix + body;
 const MIXED = "Ab3dE5gH7jK9mN1pQ3rS5tU7vW9xY1zA3bC5";
+
+const IBAN_DIGITS = "0123456789";
+/** No vowels: random letters never spell "IBAN", or a word another pattern reads. */
+const IBAN_LETTERS = "BCDFGHJKLMNPRSTVWXZ";
+
+/** A deterministic pick in [0, n), so a generated page is the same on every run. */
+function picker(seed: number): (n: number) => number {
+  let s = seed >>> 0;
+  return (n) => {
+    s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+    return Math.floor((s / 2 ** 32) * n);
+  };
+}
+
+/** `cc`, check digits and `bban`: a valid IBAN, or with `ok` false check digits one off (mod-97 leaves 2, never 1). */
+function withCheckDigits(cc: string, bban: string, ok = true): string {
+  let rem = 0;
+  for (const ch of `${bban}${cc}00`) {
+    const code = ch.charCodeAt(0);
+    for (const d of code >= 65 ? String(code - 55) : ch) rem = (rem * 10 + Number(d)) % 97;
+  }
+  return `${cc}${String(98 - rem + (ok ? 0 : 1)).padStart(2, "0")}${bban}`;
+}
 
 describe("redaction", () => {
   it("replaces private keys whole", () => {
@@ -64,12 +88,105 @@ describe("redaction", () => {
     expect(entropy("aaaa")).toBe(0);
   });
 
-  it("replaces IBANs that pass mod-97 and nothing else shaped like one", () => {
+  it("replaces IBANs that pass mod-97, and nothing else shaped like one", () => {
     expect(ibanValid("GB82 WEST 1234 5698 7654 32")).toBe(true);
     expect(ibanValid("GB82 WEST 1234 5698 7654 33")).toBe(false);
     expect(redactText("Pay to GB82 WEST 1234 5698 7654 32 today").text).toBe(`Pay to ${placeholder("IBAN")} today`);
     expect(redactText("Pay to GB82WEST12345698765432.").text).toBe(`Pay to ${placeholder("IBAN")}.`);
-    expect(redactText("ref GB82 WEST 1234 5698 7654 33").kinds).not.toContain("IBAN");
+    // Too short for a British IBAN, or an unregistered country with bad check digits: not one.
+    expect(redactText("ref GB82 WEST 1234 5698 7654").kinds).not.toContain("IBAN");
+    expect(redactText("code XX12345678901234567890 here").kinds).not.toContain("IBAN");
+    expect(redactText("AT12 ORDER NUMBER FOR THE CLIENT").kinds).not.toContain("IBAN");
+  });
+
+  // The live import: an unspaced Bulgarian IBAN came out as "BG80BNBG[REDACTED:CARD]".
+  it("replaces a whole IBAN, spaced or not, and never masks its account part as a card", () => {
+    const bg = ["BG80", "BNBG", "9661", "1020", "3456", "78"];
+    const unspaced = bg.join("");
+    const spaced = bg.join(" ");
+    const whole = `IBAN: ${placeholder("IBAN")}.`;
+    expect(redactText(`IBAN: ${unspaced}.`).text).toBe(whole);
+    expect(redactText(`IBAN: ${spaced}.`).text).toBe(whole);
+    expect(redactText(`IBAN: BG80BNBG 9661 1020 3456 78.`).text).toBe(whole);
+    // Run into the word before it, or the one after it, as extracted PDF text does.
+    expect(redactText(`IBAN${unspaced}`).text).toBe(`IBAN${placeholder("IBAN")}`);
+    expect(redactText(`${unspaced}EUR`).text).toBe(`${placeholder("IBAN")}EUR`);
+    expect(redactText(`${spaced} BIC BNBGBGSD`).text).toBe(`${placeholder("IBAN")} BIC BNBGBGSD`);
+    // Two side by side are two.
+    const two = redactText(`${unspaced} GB82WEST12345698765432 done`);
+    expect(two.text).toBe(`${placeholder("IBAN")} ${placeholder("IBAN")} done`);
+    expect(two.counts.IBAN).toBe(2);
+    // Mistyped check digits: still an account number of exactly the Bulgarian shape.
+    const typo = redactText(`${unspaced.slice(0, -1)}9 and ${spaced.slice(0, -1)}9`);
+    expect(typo.text).toBe(`${placeholder("IBAN")} and ${placeholder("IBAN")}`);
+    expect(typo.kinds).toEqual(["IBAN"]);
+    // An IBAN-shaped word that is no IBAN keeps its digits: half of it masked as a card would read as safe.
+    expect(redactText("BG80BNBG4111111111111111").text).toBe("BG80BNBG4111111111111111");
+    expect(redactText("card4111111111111111").text).toBe(`card${placeholder("CARD")}`);
+    expect(redactText(`IBAN ${unspaced}, card 4111 1111 1111 1111`).kinds).toEqual(["IBAN", "CARD"]);
+  });
+
+  // Where an IBAN ends is tried at every length from the longest down; a page
+  // of IBAN-shaped runs must stay quick and come out run by run as it always did.
+  it("redacts a page of IBAN-shaped runs quickly, each where its IBAN ends", () => {
+    const pick = picker(1195);
+    const from = (chars: string) => chars[pick(chars.length)];
+    const many = (chars: string, n: number) => Array.from({ length: n }, () => from(chars)).join("");
+    // Digits with a letter every fourth character: never 13 digits in a row, which a card would be.
+    const kindAt = (i: number) => ((i - 4) % 4 === 3 ? IBAN_LETTERS : IBAN_DIGITS);
+    const body = (n: number) => Array.from({ length: n }, (_, i) => from(kindAt(i + 4))).join("");
+    // `compact` grown by `n` characters, each chosen so that no prefix of 15 or more passes mod-97.
+    const growInvalid = (compact: string, n: number) => {
+      let s = compact;
+      for (let i = 0; i < n; i++) {
+        const chars = kindAt(s.length);
+        let ch = from(chars);
+        while (ibanValid(s + ch)) ch = chars[(chars.indexOf(ch) + 1) % chars.length];
+        s += ch;
+      }
+      return s;
+    };
+    const fours = (compact: string) => compact.replace(/(.{4})(?=.)/g, "$1 ");
+    const singles = (compact: string) => `${compact.slice(0, 4)} ${compact.slice(4).split("").join(" ")}`;
+    const IBAN = placeholder("IBAN");
+    const runs: Array<[run: string, redacted: string]> = [];
+
+    // Registered countries at their registered length, 15 to 33.
+    for (const cc of ["NO", "BE", "DK", "MK", "AT", "CH", "GB", "GI", "AD", "PT", "IS", "FR", "AL", "BR", "JO", "MT", "LC", "RU"]) {
+      const length = IBAN_LENGTHS[cc];
+      const valid = withCheckDigits(cc, body(length - 4));
+      runs.push([valid, IBAN], [fours(valid), IBAN], [`${valid}EUR`, `${IBAN}EUR`]);
+      // Check digits off: still an account number of exactly the country's shape …
+      runs.push([withCheckDigits(cc, many(IBAN_DIGITS, length - 4), false), IBAN]);
+      // … unless it holds too few digits to be one.
+      const wordy = withCheckDigits(cc, many(IBAN_LETTERS, length - 7) + many(IBAN_DIGITS, 3), false);
+      runs.push([wordy, wordy]);
+    }
+
+    // Unregistered countries at every length from 15 to 34: mod-97 alone decides.
+    const unregistered = ["ZZ", "QQ", "WW", "YY"];
+    expect(unregistered.filter((cc) => cc in IBAN_LENGTHS)).toEqual([]);
+    for (let length = 15; length <= 34; length++) {
+      const cc = unregistered[length % unregistered.length];
+      const valid = withCheckDigits(cc, body(length - 4));
+      const off = withCheckDigits(cc, body(length - 4), false);
+      runs.push([valid, IBAN], [off, off], [singles(valid), IBAN]);
+      // Spaced a character at a time every length is a possible end: the longest that passes is the IBAN …
+      const tail = growInvalid(valid, Math.min(1 + pick(4), 36 - length)).slice(length);
+      runs.push([singles(valid + tail), `${IBAN} ${tail.split("").join(" ")}`]);
+      // … and with none that passes there is none, up to the 36 characters a run can hold.
+      const none = singles(growInvalid(cc + many(IBAN_DIGITS, 2), length - 4 + pick(3)));
+      runs.push([none, none]);
+    }
+    expect(runs.length).toBeGreaterThanOrEqual(100);
+
+    const started = performance.now();
+    const r = redactText(runs.map(([run]) => run).join("\n"));
+    const elapsed = performance.now() - started;
+    expect(r.text.split("\n")).toEqual(runs.map(([, redacted]) => redacted));
+    expect(r.counts.IBAN).toBe(runs.filter(([, redacted]) => redacted.startsWith(IBAN)).length);
+    expect(r.kinds).toEqual(["IBAN"]);
+    expect(elapsed).toBeLessThan(1000);
   });
 
   it("replaces Luhn-valid card numbers with or without separators", () => {
