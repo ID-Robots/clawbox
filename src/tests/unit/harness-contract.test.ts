@@ -246,6 +246,57 @@ describe("the scanner", () => {
     expect(found(scan, "openclaw", "cli", "plugins lst")[0]?.site).toBe("src/lib/f.ts:2");
   });
 
+  it("does not take JSX, a non-null `!` or a postfix `++` for the start of a regex", () => {
+    // Taken for a regex, the slash after `</`, `x!` or `i++` used to blank the
+    // line up to the next slash — and a call or a pushed flag with it.
+    const scan = scanTree(tree({
+      "src/components/G.tsx": [
+        "export function G({ label, client }: { label: string; client: { request: (m: string, p: object) => void } }) {",
+        '  return <div><span>{label}</span><button onClick={() => client.request("chat.abort", {})}>x</button></div>;',
+        "}",
+        "export function H({ client }: { client: { request: (m: string, p: object) => void } }) {",
+        '  return <p><Icon size={16} /> <button onClick={() => client.request("sessions.reset", {})}>y</button></p>;',
+        "}",
+        "export function P({ done, client }: { done: number; client: { request: (m: string, p: object) => number } }) {",
+        '  return <b>{done} / {client.request("progressCard.get", {})}</b>;',
+        "}",
+      ].join("\n"),
+      "src/lib/h.ts": [
+        "export async function f(i: number, y: number, s: number | undefined, n: number | undefined) {",
+        '  const r = i++ / y; await spawnOpenclawCli(["seen", "postinc"]);',
+        "  const kb = s! / 1024 + (await spawnOpenclawCli([",
+        '    "seen", "nonnull"]));',
+        '  const args = ["skills", "list"];',
+        '  args.push("--jsonn", String(n! / 2));',
+        "  await spawnOpenclawCli(args);",
+        "  return [r, kb];",
+        "}",
+      ].join("\n"),
+    })) as Scan;
+    expect(found(scan, "openclaw", "rpc", "chat.abort")[0]?.site).toBe("src/components/G.tsx:2");
+    expect(found(scan, "openclaw", "rpc", "sessions.reset")[0]?.site).toBe("src/components/G.tsx:5");
+    expect(found(scan, "openclaw", "rpc", "progressCard.get")[0]?.site).toBe("src/components/G.tsx:8");
+    expect(found(scan, "openclaw", "cli", "seen postinc")[0]?.site).toBe("src/lib/h.ts:2");
+    expect(found(scan, "openclaw", "cli", "seen nonnull")[0]?.site).toBe("src/lib/h.ts:3");
+    expect(found(scan, "openclaw", "cli", "skills list")[0]?.flags).toEqual(["--jsonn"]);
+  });
+
+  it("lists a harness launcher call, or a push onto its argv, whose arguments it cannot read", () => {
+    // Brackets that never close (a file cut off mid-call stands in for any
+    // parse the scanner gets wrong): the call is still the harness's.
+    const scan = scanTree(tree({
+      "src/lib/k.ts": [
+        "export async function f() {",
+        '  const args = ["skills", "list"];',
+        '  args.push("--json", (1;',
+        "  await spawnOpenclawCli(args);",
+        '  await execFileAsync(openclawBin(), ["plugins", "list", (',
+      ].join("\n"),
+    })) as Scan;
+    expect(scan.unchecked).toContainEqual(expect.objectContaining({ site: "src/lib/k.ts:4", why: expect.stringContaining(".push()") }));
+    expect(scan.unchecked).toContainEqual(expect.objectContaining({ site: "src/lib/k.ts:5", why: expect.stringContaining("could not be read") }));
+  });
+
   it("finds, in this tree, what the hand-made maps of ClawBox's harness use list", () => {
     // A floor, not a census: one representative of each kind the research
     // mapped by hand (2026-10-15). A scanner change that loses a pattern fails

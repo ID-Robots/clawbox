@@ -78,9 +78,14 @@ function lineIndex(text) {
 const REGEX_AFTER_WORDS = new Set(["return", "typeof", "case", "in", "of", "delete", "void", "throw", "new", "else", "do", "instanceof", "yield", "await"]);
 
 /**
- * JS/TS with every comment and every regex literal's body blanked (same
- * length, newlines kept), strings left alone: what follows never has to tell
- * a quote or a bracket inside a regex from a real one.
+ * JS/TS with every comment blanked (same length, newlines kept), strings left
+ * alone, and the body of what it takes for a regex literal blanked too, so a
+ * quote or bracket inside one cannot derail the parse of the call around it.
+ * Only a slash run that closes on its own line counts as a regex, never `</x`
+ * or `/>` (JSX), nor after `}` or a bare `>`; a slash after an operand —
+ * `x!`, `i++` included — divides.
+ * A regex right after `)` (`if (s) /re/`) is read as a division: that gap
+ * makes the call around it unreadable, which the scan lists, never drops.
  */
 function maskJs(src) {
   const out = src.split("");
@@ -90,7 +95,9 @@ function maskJs(src) {
   let keywordBefore = false; // the last token was one of REGEX_AFTER_WORDS, and not a member name after `.`
   const tpl = []; // brace depth for each open template `${`
   const blank = (a, b) => { for (let k = a; k < b; k++) if (out[k] !== "\n") out[k] = " "; };
-  const regexAllowed = () => prev === "" || "(,=:[!&|?{};+-*%<>~^".includes(prev) || (prev === "a" && keywordBefore);
+  let arrow = false; // prev is the `>` of `=>`
+  // Not after `}` (in JSX that is text: `{a} / {b}`) or a bare `>` (a tag's end, a comparison).
+  const regexAllowed = () => prev === "" || "(,=:[!&|?{;+-*%<~^".includes(prev) || (prev === ">" && arrow) || (prev === "a" && keywordBefore);
   while (i < n) {
     const c = src[i];
     const d = src[i + 1];
@@ -125,23 +132,28 @@ function maskJs(src) {
       if (src[i] === "`") { i++; prev = "a"; keywordBefore = false; }
       continue;
     }
-    if (c === "/" && regexAllowed()) {
-      const body = ++i;
+    if (c === "/" && regexAllowed() && d !== ">" && !(prev === "<" && /[A-Za-z]/.test(d ?? ""))) {
+      let j = i + 1;
       let cls = false;
-      while (i < n && src[i] !== "\n") {
-        if (src[i] === "\\") { i += 2; continue; }
-        if (src[i] === "[") cls = true;
-        else if (src[i] === "]") cls = false;
-        else if (src[i] === "/" && !cls) break;
-        i++;
+      for (; j < n && src[j] !== "\n"; j++) {
+        if (src[j] === "\\") { j++; continue; }
+        if (src[j] === "[") cls = true;
+        else if (src[j] === "]") cls = false;
+        else if (src[j] === "/" && !cls) break;
       }
-      blank(body, Math.min(i, n));
-      i++;
-      while (/[a-z]/i.test(src[i] ?? "")) i++;
-      prev = "a";
-      keywordBefore = false;
-      continue;
+      if (src[j] === "/") { // closed on its own line: a regex
+        blank(i + 1, j);
+        i = j + 1;
+        while (/[a-z]/i.test(src[i] ?? "")) i++;
+        prev = "a";
+        keywordBefore = false;
+        continue;
+      }
+      // no closing slash on the line: it was an operator after all
     }
+    // `x!` (TypeScript's non-null) and `i++` / `i--` leave an operand behind.
+    if (c === "!" && /[\w$)\]]/.test(src[i - 1] ?? "")) { i++; continue; }
+    if ((c === "+" || c === "-") && d === c && /[\w$)\]]/.test(src[i - 1] ?? "")) { i += 2; continue; }
     if (/[\w$]/.test(c)) {
       // A whole word: a regex may follow `return` or `typeof`, never `x.of` or `obj.in`.
       let j = i;
@@ -155,7 +167,7 @@ function maskJs(src) {
       if (c === "{") tpl[tpl.length - 1]++;
       else if (c === "}") tpl[tpl.length - 1]--;
     }
-    if (!/\s/.test(c)) prev = c;
+    if (!/\s/.test(c)) { prev = c; arrow = c === ">" && src[i - 1] === "="; }
     i++;
   }
   return out.join("");
@@ -522,13 +534,17 @@ function scanJs(file, info, consts, registry, record, skip) {
     if (!best || lineOf(before) - lineOf(best.pos) > 120) return null;
     const lastClose = best.alts[best.alts.length - 1][1];
     const pushed = [];
+    let unreadablePush = false;
     const between = masked.slice(lastClose, before);
     for (const p of between.matchAll(new RegExp(`(?<![\\w$])${reEscape(name)}\\.push\\(`, "g"))) {
       const o = lastClose + p.index + p[0].length - 1;
       const c = closing(masked, o);
       if (c > 0) pushed.push(...splitTop(masked.slice(o + 1, c), o + 1));
+      else unreadablePush = true;
     }
-    return best.alts.map(([o, c]) => [...splitTop(masked.slice(o + 1, c), o + 1), ...pushed]);
+    const alts = best.alts.map(([o, c]) => [...splitTop(masked.slice(o + 1, c), o + 1), ...pushed]);
+    alts.unreadablePush = unreadablePush;
+    return alts;
   };
   const elementsOf = (expr, pos) => {
     const t = expr.text.trim();
@@ -606,6 +622,7 @@ function scanJs(file, info, consts, registry, record, skip) {
       if (expr && learn(pos, expr, { kind: "argv", harness, prefix: entry.prefix })) return;
       return unchecked(harness, "cli", pos, `${how}: argv is computed at runtime`);
     }
+    if (alts.unreadablePush) unchecked(harness, "cli", pos, `${how}: a .push() onto the argv could not be read`);
     for (const elems of alts.flatMap((alt) => expand(alt, pos))) {
       const a = readArgv(elems, pos);
       if (entry.prefix) {
@@ -739,9 +756,10 @@ function scanJs(file, info, consts, registry, record, skip) {
     if (!LAUNCHERS.test(m[2])) continue;
     const open = m.index + m[0].length - 1;
     const close = closing(masked, open);
-    if (close < 0) continue;
+    const bin = /^\(\s*([^\s,]+)/.exec(masked.slice(open, open + 80))?.[1] ?? "";
+    const harness = bins.hermes.has(bin) ? "hermes" : "openclaw";
+    if (close < 0) { unchecked(harness, "cli", m.index, `${m[1]}${m[2]}: the call's arguments could not be read`); continue; }
     const args = splitTop(masked.slice(open + 1, close), open + 1);
-    const harness = bins.hermes.has(args[0].text.trim()) ? "hermes" : "openclaw";
     if (args[1]) cliUse({ harness }, args[1], m.index, `${m[1]}${m[2]}`);
   }
   // `[…, openclawBin(), ...args]` — a wrapper such as flock in front of the CLI.
