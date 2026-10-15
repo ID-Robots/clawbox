@@ -9,9 +9,11 @@
  * only the value goes.
  *
  * Every numeric pattern is validated, not just matched: an IBAN must pass its
- * mod-97 check, a card number the Luhn check — and a bare 10- or 13-digit run
- * that reads as a Unix timestamp (seconds or milliseconds) is never a card,
- * since millisecond timestamps pass Luhn about one time in ten.
+ * mod-97 check or have exactly its country's registered shape, and is
+ * replaced WHOLE, spaced or not (never its account part as a "card"); a card
+ * number must pass the Luhn check and stand alone — and a bare 10- or
+ * 13-digit run that reads as a Unix timestamp (seconds or milliseconds) is
+ * never a card, since millisecond timestamps pass Luhn about one time in ten.
  *
  * Pure: no fs, no network.
  */
@@ -93,6 +95,23 @@ export function looksLikeUnixTimestamp(digits: string): boolean {
   return false;
 }
 
+/**
+ * IBAN length by country (the SWIFT IBAN registry). The length tells where an
+ * IBAN ends, so one glued to the word after it ("…3456 78EUR") is still found
+ * whole, and an IBAN whose check digits are off (a typo, a made-up example) is
+ * still an account number when it has exactly its country's shape.
+ */
+export const IBAN_LENGTHS: Readonly<Record<string, number>> = Object.freeze({
+  AD: 24, AE: 23, AL: 28, AT: 20, AZ: 28, BA: 20, BE: 16, BG: 22, BH: 22, BI: 27, BR: 29, BY: 28,
+  CH: 21, CR: 22, CY: 28, CZ: 24, DE: 22, DJ: 27, DK: 18, DO: 28, EE: 20, EG: 29, ES: 24, FI: 18,
+  FK: 18, FO: 18, FR: 27, GB: 22, GE: 22, GI: 23, GL: 18, GR: 27, GT: 28, HN: 28, HR: 21, HU: 28,
+  IE: 22, IL: 23, IQ: 23, IS: 26, IT: 27, JO: 30, KW: 30, KZ: 20, LB: 28, LC: 32, LI: 21, LT: 20,
+  LU: 20, LV: 21, LY: 25, MC: 27, MD: 24, ME: 22, MK: 19, MN: 20, MR: 27, MT: 31, MU: 30, NI: 28,
+  NL: 18, NO: 15, OM: 23, PK: 24, PL: 28, PS: 29, PT: 25, QA: 29, RO: 24, RS: 22, RU: 33, SA: 24,
+  SC: 31, SD: 18, SE: 24, SI: 19, SK: 24, SM: 27, SO: 23, ST: 25, SV: 28, TL: 23, TN: 24, TR: 26,
+  UA: 29, VA: 22, VG: 24, XK: 20, YE: 30,
+});
+
 export function ibanValid(candidate: string): boolean {
   const iban = candidate.replace(/\s+/g, "").toUpperCase();
   if (!/^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/.test(iban)) return false;
@@ -169,9 +188,77 @@ function looksLikePassword(value: string, quoted: boolean): boolean {
 const SECRET_KV_RE =
   /(\b[A-Za-z0-9_.-]*(?:secret|token|api[_-]?key|apikey|access[_-]?key|auth[_-]?key|credential|private[_-]?key)[A-Za-z0-9_.-]*\b["']?\s*[:=]\s*)("([^"\n]{16,})"|'([^'\n]{16,})'|([A-Za-z0-9+/=_~.-]{16,}))/gi;
 
-const IBAN_RE = /(?<![A-Za-z0-9])[A-Z]{2}\d{2}(?: ?[A-Z0-9]{4}){2,7}(?: ?[A-Z0-9]{1,3})?(?![A-Za-z0-9])/g;
+/**
+ * Where an IBAN may start: two capitals and two check digits not glued to the
+ * word before them (except "IBAN" itself, which extracted text often runs
+ * into the number), then letters and digits with single spaces between —
+ * spaced in fours, unspaced, or anything between. Greedy on purpose: where
+ * the IBAN really ends is decided by {@link ibanEnd}, not by the pattern.
+ */
+const IBAN_START_RE = /(?:(?<=IBAN)|(?<![A-Za-z0-9]))[A-Z]{2}\d{2}(?:[ \u00a0]?[A-Z0-9]){11,32}/g;
+const IBAN_MAX = 34;
+const IBAN_MIN = 15;
+/** Digits an IBAN-shaped run with bad check digits must hold to still count as one: an account number has them. */
+const IBAN_SHAPE_MIN_DIGITS = 8;
+
+/**
+ * Where the IBAN that starts a candidate ends (an offset into `text`), or null
+ * when there is none. With a registered country the registry length decides:
+ * a run of that length that passes mod-97 is an IBAN whatever follows it, and
+ * one with the right length, enough digits and an end at a word boundary is
+ * one too (a mistyped IBAN is still an account number). Otherwise the
+ * longest run ending at a boundary that passes mod-97.
+ */
+function ibanEnd(text: string, start: number, candidate: string): number | null {
+  const at: number[] = [];
+  for (let i = 0; i < candidate.length; i++) if (/[A-Z0-9]/.test(candidate[i])) at.push(i);
+  const endOf = (n: number) => start + at[n - 1] + 1;
+  const glued = (n: number) => /[A-Za-z0-9]/.test(text[endOf(n)] ?? "");
+  const compact = (n: number) => at.slice(0, n).map((i) => candidate[i]).join("");
+  const registered = IBAN_LENGTHS[candidate.slice(0, 2)];
+  if (registered && at.length >= registered) {
+    const iban = compact(registered);
+    if (ibanValid(iban)) return endOf(registered);
+    if (!glued(registered) && digitCount(iban.slice(4)) >= IBAN_SHAPE_MIN_DIGITS) return endOf(registered);
+  }
+  for (let n = Math.min(at.length, IBAN_MAX); n >= IBAN_MIN; n--) {
+    if (!glued(n) && ibanValid(compact(n))) return endOf(n);
+  }
+  return null;
+}
+
+/** Every IBAN in `text` replaced whole, spaced or not; `onHit` counts them. */
+function redactIbans(text: string, onHit: () => void): string {
+  const re = new RegExp(IBAN_START_RE.source, "g");
+  let out = "";
+  let last = 0;
+  for (let m = re.exec(text); m !== null; m = re.exec(text)) {
+    const end = ibanEnd(text, m.index, m[0]);
+    if (end === null) {
+      re.lastIndex = m.index + 1;
+      continue;
+    }
+    out += text.slice(last, m.index) + placeholder("IBAN");
+    onHit();
+    last = end;
+    re.lastIndex = end;
+  }
+  return last === 0 ? text : out + text.slice(last);
+}
 
 const CARD_RE = /(?<![\d.,-])\d(?:[ -]?\d){12,18}(?![\d])/g;
+
+/**
+ * Whether the digits at `offset` are the account part of an IBAN-shaped word
+ * (`BG80BNBG9661…`) — one that is not a valid IBAN, or it would be gone
+ * already. Such digits are never a card: half an IBAN masked as a card
+ * reads as if the rest were safe to show.
+ */
+function ibanTail(text: string, offset: number): boolean {
+  let from = offset;
+  while (from > 0 && /[A-Za-z0-9]/.test(text[from - 1])) from -= 1;
+  return from < offset && /^[A-Z]{2}\d{2}/.test(text.slice(from, offset + 4));
+}
 
 const EMAIL_RE = /(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,24}(?![A-Za-z0-9-])/g;
 
@@ -223,14 +310,10 @@ export function redactText(input: string, options: RedactOptions = {}): Redactio
       return key + placeholder("SECRET");
     },
   );
-  text = text.replace(IBAN_RE, (m: string) => {
-    if (!ibanValid(m)) return m;
-    bump("IBAN");
-    return placeholder("IBAN");
-  });
-  text = text.replace(CARD_RE, (m: string) => {
+  text = redactIbans(text, () => bump("IBAN"));
+  text = text.replace(CARD_RE, (m: string, offset: number, whole: string) => {
     const digits = m.replace(/\D/g, "");
-    if (digits.length < 13 || digits.length > 19) return m;
+    if (digits.length < 13 || digits.length > 19 || ibanTail(whole, offset)) return m;
     if (digits === m && looksLikeUnixTimestamp(digits)) return m;
     if (/^(\d)\1+$/.test(digits) || !luhnValid(digits)) return m;
     bump("CARD");

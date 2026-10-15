@@ -64,12 +64,42 @@ describe("redaction", () => {
     expect(entropy("aaaa")).toBe(0);
   });
 
-  it("replaces IBANs that pass mod-97 and nothing else shaped like one", () => {
+  it("replaces IBANs that pass mod-97, and nothing else shaped like one", () => {
     expect(ibanValid("GB82 WEST 1234 5698 7654 32")).toBe(true);
     expect(ibanValid("GB82 WEST 1234 5698 7654 33")).toBe(false);
     expect(redactText("Pay to GB82 WEST 1234 5698 7654 32 today").text).toBe(`Pay to ${placeholder("IBAN")} today`);
     expect(redactText("Pay to GB82WEST12345698765432.").text).toBe(`Pay to ${placeholder("IBAN")}.`);
-    expect(redactText("ref GB82 WEST 1234 5698 7654 33").kinds).not.toContain("IBAN");
+    // Too short for a British IBAN, or an unregistered country with bad check digits: not one.
+    expect(redactText("ref GB82 WEST 1234 5698 7654").kinds).not.toContain("IBAN");
+    expect(redactText("code XX12345678901234567890 here").kinds).not.toContain("IBAN");
+    expect(redactText("AT12 ORDER NUMBER FOR THE CLIENT").kinds).not.toContain("IBAN");
+  });
+
+  // The live import: an unspaced Bulgarian IBAN came out as "BG80BNBG[REDACTED:CARD]".
+  it("replaces a whole IBAN, spaced or not, and never masks its account part as a card", () => {
+    const bg = ["BG80", "BNBG", "9661", "1020", "3456", "78"];
+    const unspaced = bg.join("");
+    const spaced = bg.join(" ");
+    const whole = `IBAN: ${placeholder("IBAN")}.`;
+    expect(redactText(`IBAN: ${unspaced}.`).text).toBe(whole);
+    expect(redactText(`IBAN: ${spaced}.`).text).toBe(whole);
+    expect(redactText(`IBAN: BG80BNBG 9661 1020 3456 78.`).text).toBe(whole);
+    // Run into the word before it, or the one after it, as extracted PDF text does.
+    expect(redactText(`IBAN${unspaced}`).text).toBe(`IBAN${placeholder("IBAN")}`);
+    expect(redactText(`${unspaced}EUR`).text).toBe(`${placeholder("IBAN")}EUR`);
+    expect(redactText(`${spaced} BIC BNBGBGSD`).text).toBe(`${placeholder("IBAN")} BIC BNBGBGSD`);
+    // Two side by side are two.
+    const two = redactText(`${unspaced} GB82WEST12345698765432 done`);
+    expect(two.text).toBe(`${placeholder("IBAN")} ${placeholder("IBAN")} done`);
+    expect(two.counts.IBAN).toBe(2);
+    // Mistyped check digits: still an account number of exactly the Bulgarian shape.
+    const typo = redactText(`${unspaced.slice(0, -1)}9 and ${spaced.slice(0, -1)}9`);
+    expect(typo.text).toBe(`${placeholder("IBAN")} and ${placeholder("IBAN")}`);
+    expect(typo.kinds).toEqual(["IBAN"]);
+    // An IBAN-shaped word that is no IBAN keeps its digits: half of it masked as a card would read as safe.
+    expect(redactText("BG80BNBG4111111111111111").text).toBe("BG80BNBG4111111111111111");
+    expect(redactText("card4111111111111111").text).toBe(`card${placeholder("CARD")}`);
+    expect(redactText(`IBAN ${unspaced}, card 4111 1111 1111 1111`).kinds).toEqual(["IBAN", "CARD"]);
   });
 
   it("replaces Luhn-valid card numbers with or without separators", () => {
