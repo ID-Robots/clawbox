@@ -36,8 +36,10 @@ import { wireLocalVoice } from "@/lib/voice-local-wiring";
 import {
   getVoiceAutoPlayAll,
   getVoiceAutoReply,
+  getVoiceShortSpoken,
   setVoiceAutoPlayAll,
   setVoiceAutoReply,
+  setVoiceShortSpoken,
   ttsAutoModeFor,
 } from "@/lib/voice-reply";
 import { clearOwnerChoice, noteOwnerChoice, readChoiceSource, restoreChoiceSource } from "@/lib/clawai-cloud-choice";
@@ -53,6 +55,8 @@ import { logSafe } from "@/lib/log-safe";
  * POST /setup-api/tts {autoReply}   → spoken replies on or off (owner only)
  * POST /setup-api/tts {autoPlayAll} → whether every spoken reply in the chat
  *                                     plays by itself (owner only)
+ * POST /setup-api/tts {shortSpoken} → whether the chat speaks only a reply's
+ *                                     short answer (owner only)
  *
  * GET touches only the filesystem. The openclaw CLI costs 8-12 s of cold start
  * on an Orin Nano (see runOpenclawConfigSet's note), which is fine for an
@@ -82,13 +86,14 @@ const NO_STORE = { "Cache-Control": "no-store" };
  * `logSafe` alone is not a barrier that query recognises (the note in
  * ai-models/configure/route.ts says so, and it is right); `JSON.stringify` is.
  */
-const ACTIONS = ["select", "voice", "language", "autoReply", "autoPlayAll"] as const;
+const ACTIONS = ["select", "voice", "language", "autoReply", "autoPlayAll", "shortSpoken"] as const;
 
 /**
- * The owner's own switches: whether the box answers with a voice at all, and
- * whether the chat plays every such answer by itself. See the gate in POST.
+ * The owner's own switches: whether the box answers with a voice at all,
+ * whether the chat plays every such answer by itself, and whether it speaks
+ * only the short answer. See the gate in POST.
  */
-const OWNER_ONLY_ACTIONS: ReadonlySet<(typeof ACTIONS)[number]> = new Set(["autoReply", "autoPlayAll"]);
+const OWNER_ONLY_ACTIONS: ReadonlySet<(typeof ACTIONS)[number]> = new Set(["autoReply", "autoPlayAll", "shortSpoken"]);
 
 function refuse(error: string, code: string, status: number) {
   return NextResponse.json({ error, code }, { status, headers: NO_STORE });
@@ -156,22 +161,30 @@ type VoiceStatusBody = VoiceOutputStatus & {
    * replies are off — when it does nothing.
    */
   autoPlayAll: boolean;
+  /**
+   * The owner's third switch: the chat speaks only a reply's short answer,
+   * while the written reply stays whole. Stored on its own for the same
+   * reason as the one above.
+   */
+  shortSpoken: boolean;
 };
 
 async function status(): Promise<VoiceStatusBody> {
   const harness = await getActiveHarness();
-  const [{ config, probe }, state, localVoice, autoReply, autoPlayAll] = await Promise.all([
+  const [{ config, probe }, state, localVoice, autoReply, autoPlayAll, shortSpoken] = await Promise.all([
     probeBox(harness),
     readVoiceState().then(withUiLanguage),
     readLocalVoice(),
     getVoiceAutoReply(),
     getVoiceAutoPlayAll(),
+    getVoiceShortSpoken(),
   ]);
   return {
     ...buildVoiceOutputStatus(config, probe, state, localVoice),
     channels: await channelsSpeak(harness),
     autoReply,
     autoPlayAll,
+    shortSpoken,
   };
 }
 
@@ -207,6 +220,20 @@ async function handleAutoPlayAll(enabled: unknown) {
     return refuse("Say whether every spoken reply plays by itself.", "bad_request", 400);
   }
   await setVoiceAutoPlayAll(enabled);
+  return NextResponse.json(await status(), { headers: NO_STORE });
+}
+
+/**
+ * Whether the desktop chat speaks only a reply's short answer. The chat's
+ * business alone, exactly like the auto-play switch above: a channel's spoken
+ * reply is the gateway's, so nothing is written outside the config store and
+ * every harness takes the same path.
+ */
+async function handleShortSpoken(enabled: unknown) {
+  if (typeof enabled !== "boolean") {
+    return refuse("Say whether spoken replies are short or whole.", "bad_request", 400);
+  }
+  await setVoiceShortSpoken(enabled);
   return NextResponse.json(await status(), { headers: NO_STORE });
 }
 
@@ -558,7 +585,8 @@ export async function POST(req: Request) {
   // MCP bearer the middleware also admits here (same rule as the stt route);
   // the cookie rides on a POST any other site fires at the box (same-origin.ts).
   // The auto-play switch under it takes the same gate: whether the box starts
-  // talking at whoever is at the desk is the owner's call just the same.
+  // talking at whoever is at the desk is the owner's call just the same, and
+  // so is how much of a reply it says out loud (the short-answer switch).
   const ownerOnly = OWNER_ONLY_ACTIONS.has(action);
   if (ownerOnly && !(await hasOwnerSession(req))) {
     return NextResponse.json(
@@ -585,6 +613,7 @@ export async function POST(req: Request) {
     if (action === "language") return await handleLanguage(language);
     if (action === "autoReply") return await handleAutoReply(enabled);
     if (action === "autoPlayAll") return await handleAutoPlayAll(enabled);
+    if (action === "shortSpoken") return await handleShortSpoken(enabled);
     return await handleSelect(choice as VoiceChoice);
   } catch (err) {
     // THE ERROR, NOT THE ACTION, is what CodeQL reported here (#464), and the

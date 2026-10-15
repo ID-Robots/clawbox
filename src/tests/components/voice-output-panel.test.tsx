@@ -3,6 +3,8 @@ import { act, cleanup, fireEvent, render as renderBare, screen, waitFor } from "
 import { I18nProvider } from "@/lib/i18n";
 import VoiceOutputPanel, { isVoiceStatus } from "@/components/VoiceOutputPanel";
 import { sampleSentence } from "@/lib/voice-catalog";
+import { desktopTranslations } from "@/lib/desktop-translations";
+import { translations } from "@/lib/translations";
 
 /**
  * Settings → Voice, the compact version: where speech comes from, the
@@ -526,6 +528,156 @@ describe("status validation", () => {
     expect(isVoiceStatus(status({ autoPlayAll: "yes" }))).toBe(false);
   });
 
+});
+
+/**
+ * "Short spoken answers", the third switch on spoken replies: off by default
+ * (off is exactly what the voice did before it existed — the whole reply is
+ * spoken), owner-written through the same route, and greyed out under the
+ * same rule as auto-play, because with spoken replies off there is nothing
+ * spoken to shorten.
+ */
+describe("short spoken answers", () => {
+  it("offers it off by default, greyed out and saying why while spoken replies are off", async () => {
+    // A status from a server that predates the field carries no `shortSpoken`
+    // at all, and reads as off — never as on.
+    mockFetch(status());
+    render(<VoiceOutputPanel active />);
+    const toggle = await screen.findByTestId("voice-short-spoken");
+    expect(toggle).toHaveAttribute("role", "switch");
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+    expect(toggle).toBeDisabled();
+    expect(screen.getByTestId("voice-short-spoken-hint")).toHaveTextContent(/Spoken replies above/);
+    expect(toggle).toHaveAccessibleDescription(/Spoken replies above/);
+    expect(await screen.findByText("Short spoken answers")).toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(posts).toEqual([]);
+  });
+
+  it("sits in the spoken-replies card, under auto-play", async () => {
+    mockFetch(status({ autoReply: true }));
+    render(<VoiceOutputPanel active />);
+    const row = await screen.findByTestId("voice-short-spoken-row");
+    const autoPlayRow = screen.getByTestId("voice-auto-play-all-row");
+    expect(row.parentElement).toBe(autoPlayRow.parentElement);
+    expect(row.parentElement).toContainElement(screen.getByTestId("voice-auto-reply"));
+    expect(autoPlayRow.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("keeps its position while spoken replies are off, so turning them back on brings it back", async () => {
+    mockFetch(status({ autoReply: false, shortSpoken: true }));
+    render(<VoiceOutputPanel active />);
+    const toggle = await screen.findByTestId("voice-short-spoken");
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    expect(toggle).toBeDisabled();
+  });
+
+  it("posts the flip once spoken replies are on, adopts the box's answer and tells the chat", async () => {
+    mockFetch(status({ autoReply: true }), { answer: { ...status(), autoReply: true, shortSpoken: true } });
+    const heard: unknown[] = [];
+    const listener = (e: Event) => heard.push((e as CustomEvent).detail);
+    window.addEventListener("clawbox:voice-settings-changed", listener);
+    try {
+      render(<VoiceOutputPanel active />);
+      const toggle = await screen.findByTestId("voice-short-spoken");
+      expect(toggle).not.toBeDisabled();
+      expect(toggle).toHaveAttribute("aria-checked", "false");
+      expect(screen.getByTestId("voice-short-spoken-hint")).toHaveTextContent(/main answer/);
+      fireEvent.click(toggle);
+      await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/tts", body: { action: "shortSpoken", enabled: true } }));
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
+      // The open chat learns it with no reload, on the event the other two
+      // switches ride on — all three named, so none is left to a stale read.
+      expect(heard).toHaveLength(1);
+      expect(heard[0]).toMatchObject({ autoReply: true, autoPlayAll: false, shortSpoken: true });
+      expect((heard[0] as { engines?: unknown }).engines).toEqual(status().engines);
+    } finally {
+      window.removeEventListener("clawbox:voice-settings-changed", listener);
+    }
+  });
+
+  it("posts the flip back off, and leaves auto-play where it was", async () => {
+    mockFetch(status({ autoReply: true, autoPlayAll: true, shortSpoken: true }), {
+      answer: { ...status(), autoReply: true, autoPlayAll: true, shortSpoken: false },
+    });
+    render(<VoiceOutputPanel active />);
+    const toggle = await screen.findByTestId("voice-short-spoken");
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    fireEvent.click(toggle);
+    await waitFor(() => expect(posts).toContainEqual({ url: "/setup-api/tts", body: { action: "shortSpoken", enabled: false } }));
+    await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "false"));
+    expect(screen.getByTestId("voice-auto-play-all")).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("shows the box's refusal and keeps the switch where the box left it", async () => {
+    // Owner-only on the route: without an owner session the box answers 403,
+    // and the switch must not pretend the write landed.
+    mockFetch(status({ autoReply: true }), { refuse: { status: 403, body: { error: "Only the owner can change this." } } });
+    render(<VoiceOutputPanel active />);
+    const toggle = await screen.findByTestId("voice-short-spoken");
+    fireEvent.click(toggle);
+    expect(await screen.findByRole("alert")).toHaveTextContent("Only the owner can change this.");
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+  });
+
+  it("follows the switch when it is moved somewhere else, and only when an event names it", async () => {
+    mockFetch(status({ autoReply: true }));
+    render(<VoiceOutputPanel active />);
+    const toggle = await screen.findByTestId("voice-short-spoken");
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+    act(() => { window.dispatchEvent(new CustomEvent("clawbox:voice-settings-changed", { detail: { shortSpoken: true } })); });
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    // A writer from before the switch existed names only the other two, and
+    // must not move it.
+    act(() => {
+      window.dispatchEvent(new CustomEvent("clawbox:voice-settings-changed", { detail: { autoReply: true, autoPlayAll: true } }));
+    });
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+    // Nor does a value that is not a boolean.
+    act(() => { window.dispatchEvent(new CustomEvent("clawbox:voice-settings-changed", { detail: { shortSpoken: "no" } })); });
+    expect(toggle).toHaveAttribute("aria-checked", "true");
+  });
+
+  it("names it on the event the ffmpeg repair sends, too", async () => {
+    mockFetch(status({ channels: { supportedOnEdition: true, voiceNoteReady: false }, autoReply: true, shortSpoken: true }), {
+      install: '{"success":true}\n',
+      after: status({ channels: { supportedOnEdition: true, voiceNoteReady: true }, autoReply: true, shortSpoken: true }),
+    });
+    const heard: unknown[] = [];
+    const listener = (e: Event) => heard.push((e as CustomEvent).detail);
+    window.addEventListener("clawbox:voice-settings-changed", listener);
+    try {
+      render(<VoiceOutputPanel active />);
+      fireEvent.click(await screen.findByTestId("voice-channel-voice-notes-fix"));
+      await waitFor(() => expect(heard).toHaveLength(1));
+      expect(heard[0]).toMatchObject({ autoReply: true, shortSpoken: true });
+      expect(screen.getByTestId("voice-short-spoken")).toHaveAttribute("aria-checked", "true");
+    } finally {
+      window.removeEventListener("clawbox:voice-settings-changed", listener);
+    }
+  });
+
+  it("refuses a status whose short-answers switch is not a boolean", () => {
+    expect(isVoiceStatus(status({ shortSpoken: true }))).toBe(true);
+    expect(isVoiceStatus(status({ shortSpoken: false }))).toBe(true);
+    expect(isVoiceStatus(status({ shortSpoken: null }))).toBe(true);
+    expect(isVoiceStatus(status({ shortSpoken: "yes" }))).toBe(false);
+    expect(isVoiceStatus(status({ shortSpoken: 1 }))).toBe(false);
+  });
+
+  it("is said in every locale the other voice switches are, never in English by default", () => {
+    for (const locale of Object.keys(desktopTranslations) as (keyof typeof desktopTranslations)[]) {
+      for (const key of ["settings.voice.shortSpoken", "settings.voice.shortSpokenHint"]) {
+        const value = desktopTranslations[locale][key];
+        expect(value, `${locale}["${key}"]`).toEqual(expect.any(String));
+        expect(value.trim().length, `${locale}["${key}"]`).toBeGreaterThan(0);
+        expect(translations[locale][key], `merged ${locale}["${key}"]`).toBe(value);
+        if (locale !== "en") expect(value, `${locale}["${key}"] is still English`).not.toBe(desktopTranslations.en[key]);
+      }
+      // Beside the auto-play strings it mirrors, in the same table.
+      expect(desktopTranslations[locale]["settings.voice.autoPlayAllNeedsSpokenReplies"], locale).toEqual(expect.any(String));
+    }
+  });
 });
 
 /**

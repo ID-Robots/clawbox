@@ -55,9 +55,9 @@ function isDisclosure(value: unknown): boolean {
  */
 /**
  * The tts route's answer: the status, plus the owner's switch for spoken
- * replies and the auto-play switch under it.
+ * replies and the two switches under it — auto-play, and short spoken answers.
  */
-export type VoiceStatusAnswer = VoiceOutputStatus & { autoReply?: boolean; autoPlayAll?: boolean };
+export type VoiceStatusAnswer = VoiceOutputStatus & { autoReply?: boolean; autoPlayAll?: boolean; shortSpoken?: boolean };
 
 export function isVoiceStatus(value: unknown): value is VoiceStatusAnswer {
   if (!value || typeof value !== "object") return false;
@@ -67,6 +67,7 @@ export function isVoiceStatus(value: unknown): value is VoiceStatusAnswer {
   // switch shown in its default position (off).
   if (s.autoReply != null && typeof s.autoReply !== "boolean") return false;
   if (s.autoPlayAll != null && typeof s.autoPlayAll !== "boolean") return false;
+  if (s.shortSpoken != null && typeof s.shortSpoken !== "boolean") return false;
   if (!Array.isArray(s.engines) || !s.engines.every(isEngine)) return false;
   if (typeof s.drifted !== "boolean") return false;
   if (s.warning !== null && typeof s.warning !== "string") return false;
@@ -248,12 +249,13 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
    */
   useEffect(() => {
     const onChanged = (event: Event) => {
-      const detail = (event as CustomEvent<{ autoReply?: unknown; autoPlayAll?: unknown }>).detail;
+      const detail = (event as CustomEvent<{ autoReply?: unknown; autoPlayAll?: unknown; shortSpoken?: unknown }>).detail;
       // Each switch on its own: a writer that names only one (or an older
-      // one that predates the second) must not move the other.
+      // one that predates the others) must not move the rest.
       const moved: Partial<VoiceStatusAnswer> = {};
       if (typeof detail?.autoReply === "boolean") moved.autoReply = detail.autoReply;
       if (typeof detail?.autoPlayAll === "boolean") moved.autoPlayAll = detail.autoPlayAll;
+      if (typeof detail?.shortSpoken === "boolean") moved.shortSpoken = detail.shortSpoken;
       if (Object.keys(moved).length === 0) return;
       switchEventsRef.current += 1;
       setStatus((prev) => (prev ? { ...prev, ...moved } : prev));
@@ -354,6 +356,7 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
           detail: {
             autoReply: refreshed.autoReply === true,
             autoPlayAll: refreshed.autoPlayAll === true,
+            shortSpoken: refreshed.shortSpoken === true,
             engines: refreshed.engines,
           },
         }));
@@ -422,10 +425,16 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
         // `autoReply`. `select` and the ffmpeg repair are what install or
         // retire this box's voice, and a chat docked beside this page kept
         // showing the old answer until it was closed and reopened. The
-        // auto-play switch rides along for the same reason: the chat reads it
-        // the moment the next reply lands, with no reopen in between.
+        // auto-play and short-answer switches ride along for the same reason:
+        // the chat reads them the moment the next reply lands, with no reopen
+        // in between.
         window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, {
-          detail: { autoReply: data.autoReply === true, autoPlayAll: data.autoPlayAll === true, engines: data.engines },
+          detail: {
+            autoReply: data.autoReply === true,
+            autoPlayAll: data.autoPlayAll === true,
+            shortSpoken: data.shortSpoken === true,
+            engines: data.engines,
+          },
         }));
       }
       if (data && typeof data === "object" && (data as { fallback?: unknown }).fallback) {
@@ -518,7 +527,8 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
   // whose option is greyed out — and a Play that then asked the box to speak
   // with it only produced a refusal to read.
   const canSpeak = engineById(source)?.configured === true;
-  // Auto-play has nothing to play while spoken replies are off.
+  // Auto-play has nothing to play, and short answers nothing to shorten,
+  // while spoken replies are off.
   const spokenRepliesOn = status.autoReply === true;
 
   const optionLabel = (engine: VoiceEngine | null, nameKey: string, missingKey: string) =>
@@ -736,6 +746,42 @@ export default function VoiceOutputPanel({ active }: { active: boolean }) {
             }`}
           >
             <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${status.autoPlayAll === true ? "translate-x-6" : "translate-x-1"}`} />
+          </button>
+        </div>
+
+        {/* Short spoken answers, the third switch on spoken replies. Off by
+            default, and off means exactly what the voice did before it
+            existed: the whole reply is spoken. On, the voice says only the
+            main answer, so it starts sooner; the written reply in the chat
+            keeps every word either way. Greyed out under the same rule as
+            auto-play, and for the same reason — with spoken replies off there
+            is nothing spoken to shorten — keeping its position meanwhile. */}
+        <div className={`${ROW} border-t border-[var(--border-subtle)] pt-4`} data-testid="voice-short-spoken-row">
+          <div className="min-w-0">
+            <label
+              htmlFor="voice-short-spoken"
+              className={`${LABEL} ${spokenRepliesOn ? "" : "opacity-60"}`}
+            >
+              {t("settings.voice.shortSpoken")}
+            </label>
+            <p id="voice-short-spoken-hint" className={`${MUTED} mt-0.5`} data-testid="voice-short-spoken-hint">
+              {spokenRepliesOn ? t("settings.voice.shortSpokenHint") : t("settings.voice.autoPlayAllNeedsSpokenReplies")}
+            </p>
+          </div>
+          <button
+            id="voice-short-spoken"
+            type="button"
+            role="switch"
+            aria-checked={status.shortSpoken === true}
+            aria-describedby="voice-short-spoken-hint"
+            disabled={disabled || !spokenRepliesOn}
+            onClick={() => void post({ action: "shortSpoken", enabled: status.shortSpoken !== true })}
+            data-testid="voice-short-spoken"
+            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shrink-0 ${
+              status.shortSpoken === true ? "bg-[var(--coral-bright)]" : "bg-gray-600"
+            }`}
+          >
+            <span className={`inline-block h-4 w-4 rounded-full bg-white transition-transform ${status.shortSpoken === true ? "translate-x-6" : "translate-x-1"}`} />
           </button>
         </div>
       </div>

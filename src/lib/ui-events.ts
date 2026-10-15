@@ -617,8 +617,10 @@ export function onCodingRunStarted(listener: () => void): () => void {
 
 /**
  * Settings → Voice saved the spoken-replies switches:
- * `{ autoReply: boolean, autoPlayAll: boolean, engines }`. The open chat
- * listens so its next reply honours the new positions without a reopen; a
- * field that is absent leaves the chat's reading of it alone.
+ * `{ autoReply: boolean, autoPlayAll: boolean, shortSpoken?: boolean, engines }`.
+ * The open chat listens so its next reply honours the new positions without a
+ * reopen; a field that is absent leaves the chat's reading of it alone.
+ * `shortSpoken` (Short spoken answers) is optional for that reason: a writer
+ * from before it existed never names it, and must not switch it off.
  */
 export const VOICE_SETTINGS_CHANGED_EVENT = "clawbox:voice-settings-changed";

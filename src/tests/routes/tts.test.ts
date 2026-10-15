@@ -63,6 +63,8 @@ const autoReplyMock = vi.fn();
 const setAutoReplyMock = vi.fn();
 const autoPlayAllMock = vi.fn();
 const setAutoPlayAllMock = vi.fn();
+const shortSpokenMock = vi.fn();
+const setShortSpokenMock = vi.fn();
 vi.mock("@/lib/voice-reply", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/voice-reply")>();
   return {
@@ -71,6 +73,8 @@ vi.mock("@/lib/voice-reply", async (importOriginal) => {
     setVoiceAutoReply: (...a: unknown[]) => setAutoReplyMock(...a),
     getVoiceAutoPlayAll: (...a: unknown[]) => autoPlayAllMock(...a),
     setVoiceAutoPlayAll: (...a: unknown[]) => setAutoPlayAllMock(...a),
+    getVoiceShortSpoken: (...a: unknown[]) => shortSpokenMock(...a),
+    setVoiceShortSpoken: (...a: unknown[]) => setShortSpokenMock(...a),
   };
 });
 
@@ -136,6 +140,8 @@ beforeEach(() => {
   setAutoReplyMock.mockReset().mockResolvedValue(undefined);
   autoPlayAllMock.mockReset().mockResolvedValue(false);
   setAutoPlayAllMock.mockReset().mockResolvedValue(undefined);
+  shortSpokenMock.mockReset().mockResolvedValue(false);
+  setShortSpokenMock.mockReset().mockResolvedValue(undefined);
   ownerMock.mockReset().mockResolvedValue(true);
 });
 
@@ -253,13 +259,14 @@ describe("auto-play every spoken reply", () => {
     expect(setAutoPlayAllMock).not.toHaveBeenCalled();
   });
 
-  it.each(["autoReply", "autoPlayAll"] as const)("refuses %s from another site's page, even with the owner's cookie", async (action) => {
+  it.each(["autoReply", "autoPlayAll", "shortSpoken"] as const)("refuses %s from another site's page, even with the owner's cookie", async (action) => {
     const { POST } = await route();
     const res = await POST(post({ action, enabled: true }, { host: "box", origin: "http://evil.example" }));
     expect(res.status).toBe(403);
     expect((await res.json()).code).toBe("cross_origin");
     expect(setAutoPlayAllMock).not.toHaveBeenCalled();
     expect(setAutoReplyMock).not.toHaveBeenCalled();
+    expect(setShortSpokenMock).not.toHaveBeenCalled();
     expect(configSetMock).not.toHaveBeenCalled();
   });
 
@@ -274,6 +281,108 @@ describe("auto-play every spoken reply", () => {
     setAutoPlayAllMock.mockRejectedValue(new Error("EROFS"));
     const { POST } = await route();
     const res = await POST(post({ action: "autoPlayAll", enabled: true }));
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("cannot_change");
+  });
+});
+
+/**
+ * "Short spoken answers": the third switch, which has the desktop chat speak
+ * only a reply's short answer while the written reply stays whole. The chat's
+ * alone like auto-play — nothing reaches the gateway — and the owner's alone,
+ * behind the same gate.
+ */
+describe("short spoken answers", () => {
+  it("reports shortSpoken:false for a box that never stored it, through the real reader", async () => {
+    const real = await vi.importActual<typeof import("@/lib/voice-reply")>("@/lib/voice-reply");
+    shortSpokenMock.mockImplementation(real.getVoiceShortSpoken);
+    preferenceMock.mockResolvedValue(undefined);
+    const { GET } = await route();
+    const body = await (await GET()).json();
+    expect(body.shortSpoken).toBe(false);
+    expect(preferenceMock).toHaveBeenCalledWith(real.VOICE_SHORT_SPOKEN_KEY);
+    expect(real.VOICE_SHORT_SPOKEN_KEY).toBe("voice_short_spoken");
+  });
+
+  it("reads only a stored true as on", async () => {
+    const real = await vi.importActual<typeof import("@/lib/voice-reply")>("@/lib/voice-reply");
+    shortSpokenMock.mockImplementation(real.getVoiceShortSpoken);
+    const { GET } = await route();
+    for (const stored of [false, "true", 1, null]) {
+      preferenceMock.mockResolvedValue(stored);
+      expect((await (await GET()).json()).shortSpoken).toBe(false);
+    }
+    preferenceMock.mockResolvedValue(true);
+    expect((await (await GET()).json()).shortSpoken).toBe(true);
+  });
+
+  it("reports the stored position beside the other two switches", async () => {
+    autoReplyMock.mockResolvedValue(true);
+    autoPlayAllMock.mockResolvedValue(false);
+    shortSpokenMock.mockResolvedValue(true);
+    const { GET } = await route();
+    const body = await (await GET()).json();
+    expect(body).toMatchObject({ autoReply: true, autoPlayAll: false, shortSpoken: true });
+  });
+
+  it("stores the owner's answer and a later GET reflects it, writing nothing to the gateway", async () => {
+    // A store of its own behind the mocked pair, so the GET after the POST
+    // reads what the POST wrote rather than what the test says it wrote.
+    let stored = false;
+    setShortSpokenMock.mockImplementation(async (enabled: boolean) => {
+      stored = enabled;
+    });
+    shortSpokenMock.mockImplementation(async () => stored);
+    const { GET, POST } = await route();
+
+    let res = await POST(post({ action: "shortSpoken", enabled: true }));
+    expect(res.status).toBe(200);
+    expect(setShortSpokenMock).toHaveBeenCalledWith(true);
+    expect((await res.json()).shortSpoken).toBe(true);
+    expect((await (await GET()).json()).shortSpoken).toBe(true);
+
+    res = await POST(post({ action: "shortSpoken", enabled: false }));
+    expect(res.status).toBe(200);
+    expect(setShortSpokenMock).toHaveBeenLastCalledWith(false);
+    expect((await res.json()).shortSpoken).toBe(false);
+    expect((await (await GET()).json()).shortSpoken).toBe(false);
+    // A channel's spoken reply is the gateway's: `tts.auto` and the other two
+    // switches are not this action's to touch.
+    expect(configSetMock).not.toHaveBeenCalled();
+    expect(setAutoReplyMock).not.toHaveBeenCalled();
+    expect(setAutoPlayAllMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses a body that does not say on or off", async () => {
+    const { POST } = await route();
+    for (const enabled of ["true", 1, null, undefined]) {
+      const res = await POST(post({ action: "shortSpoken", enabled }));
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe("bad_request");
+    }
+    expect(setShortSpokenMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses the switch to the MCP bearer", async () => {
+    ownerMock.mockResolvedValue(false);
+    const { POST } = await route();
+    const res = await POST(post({ action: "shortSpoken", enabled: true }));
+    expect(res.status).toBe(403);
+    expect((await res.json()).code).toBe("owner_only");
+    expect(setShortSpokenMock).not.toHaveBeenCalled();
+  });
+
+  it("takes the switch from the box's own page", async () => {
+    const { POST } = await route();
+    const res = await POST(post({ action: "shortSpoken", enabled: true }, { host: "box", origin: "http://box" }));
+    expect(res.status).toBe(200);
+    expect(setShortSpokenMock).toHaveBeenCalledWith(true);
+  });
+
+  it("answers a store that will not take the write with the route's own refusal", async () => {
+    setShortSpokenMock.mockRejectedValue(new Error("EROFS"));
+    const { POST } = await route();
+    const res = await POST(post({ action: "shortSpoken", enabled: true }));
     expect(res.status).toBe(500);
     expect((await res.json()).code).toBe("cannot_change");
   });
