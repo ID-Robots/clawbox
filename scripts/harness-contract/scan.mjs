@@ -75,15 +75,18 @@ function lineIndex(text) {
   };
 }
 
+const REGEX_AFTER_WORDS = new Set(["return", "typeof", "case", "in", "of", "delete", "void", "throw", "new", "else", "do", "instanceof", "yield", "await"]);
+
 /** JS/TS with every comment blanked (same length, newlines kept), strings left alone. */
 function maskJs(src) {
   const out = src.split("");
   const n = src.length;
   let i = 0;
   let prev = ""; // last significant character outside strings/comments
+  let keywordBefore = false; // the last token was one of REGEX_AFTER_WORDS, and not a member name after `.`
   const tpl = []; // brace depth for each open template `${`
   const blank = (a, b) => { for (let k = a; k < b; k++) if (out[k] !== "\n") out[k] = " "; };
-  const regexAllowed = () => prev === "" || "(,=:[!&|?{};+-*%<>~^".includes(prev) || /\b(return|typeof|case|in|of|delete|void|throw|new|else|do)$/.test(src.slice(Math.max(0, i - 7), i));
+  const regexAllowed = () => prev === "" || "(,=:[!&|?{};+-*%<>~^".includes(prev) || (prev === "a" && keywordBefore);
   while (i < n) {
     const c = src[i];
     const d = src[i + 1];
@@ -132,11 +135,20 @@ function maskJs(src) {
       prev = "a";
       continue;
     }
+    if (/[\w$]/.test(c)) {
+      // A whole word: a regex may follow `return` or `typeof`, never `x.of` or `obj.in`.
+      let j = i;
+      while (j < n && /[\w$]/.test(src[j])) j++;
+      keywordBefore = prev !== "." && REGEX_AFTER_WORDS.has(src.slice(i, j));
+      prev = "a";
+      i = j;
+      continue;
+    }
     if (tpl.length) {
       if (c === "{") tpl[tpl.length - 1]++;
       else if (c === "}") tpl[tpl.length - 1]--;
     }
-    if (!/\s/.test(c)) prev = /[\w$]/.test(c) ? "a" : c;
+    if (!/\s/.test(c)) prev = c;
     i++;
   }
   return out.join("");
@@ -203,6 +215,8 @@ function closingTemplate(text, i) {
 }
 
 const unescape = (s) => s.replace(/\\(["'`\\])/g, "$1");
+/** `s` as a literal inside a RegExp. */
+const reEscape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
  * One expression, as far as a literal reading goes:
@@ -502,7 +516,7 @@ function scanJs(file, info, consts, registry, record, skip) {
     const lastClose = best.alts[best.alts.length - 1][1];
     const pushed = [];
     const between = masked.slice(lastClose, before);
-    for (const p of between.matchAll(new RegExp(`\\b${name.replace(/\$/g, "\\$")}\\.push\\(`, "g"))) {
+    for (const p of between.matchAll(new RegExp(`\\b${reEscape(name)}\\.push\\(`, "g"))) {
       const o = lastClose + p.index + p[0].length - 1;
       const c = closing(masked, o);
       if (c > 0) pushed.push(...splitTop(masked.slice(o + 1, c), o + 1));
@@ -634,7 +648,7 @@ function scanJs(file, info, consts, registry, record, skip) {
   };
 
   // ── the registry's calls
-  const names = [...registry.keys()].map((n) => n.replace(/\$/g, "\\$")).join("|");
+  const names = [...registry.keys()].map(reEscape).join("|");
   const callRe = new RegExp(`(?<![\\w$])((?:[\\w$]+\\.)*)(${names})\\s*\\(`, "g");
   for (const m of masked.matchAll(callRe)) {
     const namePos = m.index + m[1].length;
@@ -670,7 +684,7 @@ function scanJs(file, info, consts, registry, record, skip) {
         for (const op of alts.flat()) {
           const o = op.text.trim();
           if (o.startsWith("[")) keyUse({ harness: entry.harness, op: "set" }, splitTop(o.slice(1, -1), op.offset + op.text.indexOf("[") + 1)[0], pos, how);
-          else unchecked(entry.harness, "config", pos, `${how}: operations from ${o.slice(0, 60)}`);
+          else unchecked(entry.harness, "config", pos, `${how}: operations from ${o.replace(/\s+/g, " ").slice(0, 60)}`);
         }
       } else if (entry.kind === "keylist") {
         const t = expr?.text.trim() ?? "";
@@ -707,7 +721,7 @@ function scanJs(file, info, consts, registry, record, skip) {
     for (const m of masked.matchAll(/\b(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:[\w.]+\s*(?:\|\||\?\?)\s*)?(findOpenclawBin|openclawBin|hermesBin)\(\)/g)) (m[2] === "hermesBin" ? he : oc).add(m[1]);
     return { openclaw: oc, hermes: he };
   })());
-  const binAlt = [...bins.openclaw, ...bins.hermes].map((b) => b.replace(/[()$]/g, "\\$&")).join("|");
+  const binAlt = [...bins.openclaw, ...bins.hermes].map(reEscape).join("|");
   for (const m of masked.matchAll(new RegExp(`(?<![\\w$])((?:[\\w$]+\\.)*)([A-Za-z_$][\\w$]*)\\s*\\((?=\\s*(?:${binAlt})\\s*,)`, "g"))) {
     if (!LAUNCHERS.test(m[2])) continue;
     const open = m.index + m[0].length - 1;

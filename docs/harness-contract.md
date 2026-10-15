@@ -90,7 +90,8 @@ ClawBox file:line that uses it (also as an annotation on the PR diff).
 
 ## Running it
 
-`scripts/harness-contract/run.sh` runs the whole check (Node 24.16 or newer and
-Python 3.11 or newer). It keeps the pinned harnesses in
+`scripts/harness-contract/run.sh` runs the whole check. It needs a Node the
+pinned core accepts (its `engines.node`, `>=24.16.0 <25 || >=26.1.0` at
+2026.10.3 — not Node 25) and Python 3.11 or newer. It keeps the pinned harnesses in
 `~/.cache/clawbox-harness-contract` (`HARNESS_CONTRACT_CACHE`), so only the
 first run after a pin moves uses the network; CI caches the same paths by pin.

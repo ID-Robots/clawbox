@@ -21,8 +21,8 @@
   "runOpenclawConfigUnset: the key is computed at runtime": 1
  },
  "src/app/setup-api/local-ai/exclusive/route.ts": {
-  "setConfigBatch: operations from ...(restorablePrimary\n          ? [[\"agents.defaults.model.p": 1,
-  "setConfigBatch: operations from ...(restoreFallbacks\n          ? [[\"agents.defaults.model.fa": 1,
+  "setConfigBatch: operations from ...(restorablePrimary ? [[\"agents.defaults.model.primary\", J": 1,
+  "setConfigBatch: operations from ...(restoreFallbacks ? [[\"agents.defaults.model.fallbacks\", ": 1,
   "setConfigBatch: operations from ...enableProviderPluginOps([restorablePrimary, ...(restoreFa": 1
  },
  "src/app/setup-api/tts/route.ts": {

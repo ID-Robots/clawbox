@@ -157,9 +157,10 @@ describe("the scanner", () => {
     expect(found(scan, "openclaw", "config", "agents.defaults.model.primary")[0].site).toBe("install.sh:12");
     expect(found(scan, "openclaw", "cli", "plugins enable codex")[0]).toMatchObject({ site: "install.sh:13", flags: ["--accept-capabilities"] });
     expect(found(scan, "openclaw", "cli", "")[0]).toMatchObject({ site: "install.sh:16", flags: ["--version"] });
-    expect(scan.usages.filter((u) => u.harness === "openclaw" && u.kind === "cli" && u.site !== "install.sh:16" && u.site.startsWith("install.sh:1"))).toEqual(
-      expect.not.arrayContaining([expect.objectContaining({ site: "install.sh:15" }), expect.objectContaining({ site: "install.sh:18" })]),
-    );
+    const cliSites = scan.usages.filter((u) => u.harness === "openclaw" && u.kind === "cli").map((u) => u.site);
+    expect(cliSites, "the echo that names the CLI").not.toContain("install.sh:15");
+    expect(cliSites, "dirname of the binary").not.toContain("install.sh:18");
+    expect(cliSites, "the -x test of the binary").not.toContain("install.sh:14");
     expect(found(scan, "openclaw", "cli", "doctor")).toEqual([]);
     expect(found(scan, "hermes", "config", "tts.providers.*.command")[0]).toMatchObject({ site: "install.sh:20", force: true });
     expect(found(scan, "openclaw", "cli", "backup create")[0].flags).toEqual(["--json", "--verify"]);
@@ -188,6 +189,23 @@ describe("the scanner", () => {
     for (const site of ["src/lib/b.ts:5", "install.sh:4"]) {
       expect(scan.unchecked, site).toContainEqual(expect.objectContaining({ site, why: expect.stringContaining("options before the command") }));
     }
+  });
+
+  it("tells a regex from a division by the token before it, not by its spelling", () => {
+    // `step.do/2` divides. Read as the start of a regex, the `/` ran to the
+    // next slash — the first one of `//` — so the comment was never blanked
+    // and the call written in it was taken for a real one.
+    const scan = scanTree(tree({
+      "src/lib/c.ts": [
+        "export async function f(step: { do: number }, s: string) {",
+        '  const half = step.do/2; // spawnOpenclawCli(["never", "read"])',
+        '  if (half > 1) return /["\']/.test(s);',
+        '  await spawnOpenclawCli(["skills", "list", "--json"]);',
+        "}",
+      ].join("\n"),
+    })) as Scan;
+    expect(found(scan, "openclaw", "cli", "never read")).toEqual([]);
+    expect(found(scan, "openclaw", "cli", "skills list")[0]?.site).toBe("src/lib/c.ts:4");
   });
 
   it("finds, in this tree, what the hand-made maps of ClawBox's harness use list", () => {
