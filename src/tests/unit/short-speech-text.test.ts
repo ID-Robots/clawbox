@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
+import { sameSpokenWords,
   SHORT_SPEECH_MAX_CHARS,
   SHORT_SPEECH_MAX_SENTENCES,
   shortSpeechTextFor,
@@ -253,5 +253,15 @@ describe("shortSpeechTextFromStream", () => {
         }
       }
     }
+  });
+});
+
+describe("sameSpokenWords", () => {
+  it("treats spacing and line breaks as the same words", () => {
+    expect(sameSpokenWords("First message.\nSecond message.", "First message. Second message.")).toBe(true);
+  });
+  it("tells different words apart", () => {
+    expect(sameSpokenWords("Yes, it ran.", "No, it failed.")).toBe(false);
+    expect(sameSpokenWords("Short. Two. Three.", "Short. Two. Three. Four.")).toBe(false);
   });
 });

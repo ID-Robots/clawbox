@@ -1430,6 +1430,58 @@ describe("spoken replies in the desktop chat", () => {
     expect(speakBodies).toEqual([]);
   });
 
+  it("says the short answer instead of a reply's own clip when the reply runs past three sentences under 300 characters", async () => {
+    // Under the character cap is not short enough: the attached clip reads all
+    // five sentences, and the voice says the first three.
+    shortSpokenAnswer = true;
+    replyText = "Short. Two. Three. Four. Five.";
+    replyAudio = "/home/clawbox/.openclaw/media/outbound/voice-1787260000000---aa.wav";
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await speakIntoTheChat();
+    await waitFor(() => expect(speakBodies).toEqual([speakBody("Short. Two. Three.")]));
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+    expect((play.mock.contexts[0] as HTMLMediaElement).src).toBe("blob:spoken-reply");
+    await settleAfterTheTurn();
+    expect(play).toHaveBeenCalledTimes(1);
+  });
+
+  it("says the final's short answer again when the final replaced what the stream said", async () => {
+    // OpenClaw may replace a delta: the bubble shows the final, and its voice
+    // must not keep the obsolete answer.
+    const FINAL = "No — the backup failed at 03:00. The disk was full. Free some space and run it again.\n\nThe log is in the backup folder.";
+    shortSpokenAnswer = true;
+    replyText = FINAL;
+    streamDeltas = LONG_DELTAS;
+    const releaseFinal = holdTheFinal();
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await speakIntoTheChat();
+    await waitFor(() => expect(speakBodies).toEqual([speakBody(SHORT_ANSWER)]));
+    await act(async () => { releaseFinal(); });
+    await waitFor(() => expect(speakBodies).toEqual([
+      speakBody(SHORT_ANSWER),
+      speakBody("No — the backup failed at 03:00. The disk was full. Free some space and run it again."),
+    ]));
+    await settleAfterTheTurn();
+    expect(speakBodies).toHaveLength(2);
+  });
+
+  it("does not say the answer twice when the final only spaces the streamed words differently", async () => {
+    // Hermes stores a turn's messages a blank line apart that streamed run
+    // together: the same words, said once.
+    shortSpokenAnswer = true;
+    replyText = LONG_REPLY.replace(" Nothing needs doing.", "\n\nNothing needs doing.");
+    streamDeltas = LONG_DELTAS;
+    const releaseFinal = holdTheFinal();
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await speakIntoTheChat();
+    await waitFor(() => expect(speakBodies).toEqual([speakBody(SHORT_ANSWER)]));
+    await act(async () => { releaseFinal(); });
+    await waitFor(() => expect(screen.queryByTestId("chat-turn-status")).toBeNull());
+    await settleAfterTheTurn();
+    expect(speakBodies).toHaveLength(1);
+    expect(play).toHaveBeenCalledTimes(1);
+  });
+
   it("speaks the short answer of a reply that only arrived through the history refetch", async () => {
     // The replay sounds as the live reply would have.
     shortSpokenAnswer = true;

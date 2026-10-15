@@ -86,6 +86,14 @@ export function shortSpeechTextFor(reply: string): string {
  * to fit. A string returned here is the string shortSpeechTextFor answers for
  * any finished reply that begins with `textSoFar`; never "".
  */
+/**
+ * Whether two spoken texts say the same words, line breaks and spacing aside
+ * (a final can store with blank lines what streamed run together).
+ */
+export function sameSpokenWords(a: string, b: string): boolean {
+  return a.replace(/\s+/g, "") === b.replace(/\s+/g, "");
+}
+
 export function shortSpeechTextFromStream(textSoFar: string): string | null {
   const { text, settled } = shortAnswer(textSoFar, false);
   return settled && text ? text : null;

@@ -71,7 +71,7 @@ import { describeChatSwap, reportAnthropicChatFailure, TurnLedger } from '@/lib/
 import { RunFailureLedger, withFailureNote } from '@/lib/chat-run-failure'
 import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, VOICE_SETTINGS_CHANGED_EVENT, buildFixErrorPrompt, dispatchOpenApp, onCodingAgentChanged, onProvidersChanged, type ChatMessageDetail, type FixErrorContext, dispatchOpenCodingRun } from '@/lib/ui-events'
 import { speechTextFor } from '@/lib/speech-text'
-import { SHORT_SPEECH_MAX_CHARS, shortSpeechTextFor, shortSpeechTextFromStream } from '@/lib/short-speech-text'
+import { sameSpokenWords, shortSpeechTextFor, shortSpeechTextFromStream } from '@/lib/short-speech-text'
 import { SKILL_CHANGE_EVENT, buildSkillChangeMessage, type SkillChangeEvent } from '@/lib/skill-change-message'
 import { isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
 import { useModalDialog } from '@/hooks/useModalDialog'
@@ -5128,10 +5128,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     audio: string[],
     { live = true }: { live?: boolean } = {},
   ) => {
+    // A clip a harness attached reads out the WHOLE reply: with short answers
+    // on it stands in only when the short answer is that whole reply — not
+    // merely under the character cap, since a short reply can still run past
+    // the sentence limit.
     const played = voiceShortSpokenRef.current
       && audio.length > 0
       && voiceCanSpeakRef.current !== false
-      && speechTextFor(text).length > SHORT_SPEECH_MAX_CHARS
+      && !sameSpokenWords(shortSpeechTextFor(text), speechTextFor(text))
       ? []
       : audio
     if (aloud) { await speakReply(text, played); return }
@@ -5154,7 +5158,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
    * speakFromStream), and `landed`, which hands that clip the reply's bubble
    * text once the run is over (null: no bubble holds the reply).
    */
-  const streamedSpeechRef = useRef<{ runKey: string; landed: (bubbleText: string | null) => void } | null>(null)
+  const streamedSpeechRef = useRef<{
+    runKey: string
+    /** The words the stream said, to compare with the final's own short answer. */
+    words: string
+    /** The stream spoke a typed reply: a respoken final plays only with the owner at the chat, as it did. */
+    onlyWithOwner: boolean
+    landed: (bubbleText: string | null) => void
+  } | null>(null)
   /** The run `runKey` is over without a final reply: its streamed voice keeps `kept`'s bubble, or none. */
   const endStreamedSpeech = useCallback((runKey: string | null, kept: string | null) => {
     const streamed = streamedSpeechRef.current
@@ -5172,10 +5183,21 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // byte for byte what streamed: Hermes streams a turn's messages run
     // together and stores them a blank line apart, so the same answer would
     // be said twice.
+    //
+    // A final whose own short answer is DIFFERENT words (OpenClaw may replace
+    // what a delta said) must not keep a clip of the obsolete answer: that
+    // clip is stopped and let go, and the final's answer is said instead.
+    // Compared without whitespace, so Hermes' blank lines are the same words.
     const streamed = streamedSpeechRef.current
     if (runKey && streamed?.runKey === runKey) {
       streamedSpeechRef.current = null
-      streamed.landed(text)
+      if (sameSpokenWords(shortSpeechTextFor(text), streamed.words)) {
+        streamed.landed(text)
+        return
+      }
+      streamed.landed(null)
+      stopSpokenReply()
+      await speakReply(text, [], { onlyWithOwner: streamed.onlyWithOwner })
       return
     }
     // Both marks are read and SPENT here, so a final the gateway re-delivers
@@ -5185,7 +5207,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     const asked = Boolean(runKey) && askedTurnKeyRef.current === runKey
     if (asked) askedTurnKeyRef.current = null
     await voiceReply(aloud, asked, text, audio)
-  }, [voiceReply])
+  }, [voiceReply, speakReply])
   /**
    * Short spoken answers, as fast as the reply allows: called with the whole
    * reply so far on every streamed delta of the live run `runKey`, and the
@@ -5232,7 +5254,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     streamedSpeechRef.current?.landed(null)
     let landed: (bubbleText: string | null) => void = () => {}
     const bubble = new Promise<string | null>((resolve) => { landed = resolve })
-    streamedSpeechRef.current = { runKey, landed }
+    streamedSpeechRef.current = { runKey, words, onlyWithOwner: !aloud, landed }
     void speakReply(bubble, [], { words, onlyWithOwner: !aloud })
   }, [speakReply, chatOwesAClip, ownerAtTheChat])
   const speakFromStreamRef = useRef(speakFromStream)
