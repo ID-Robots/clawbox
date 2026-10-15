@@ -1,0 +1,66 @@
+{
+ "_doc": [
+  "Failures the harness-contract CI job accepts for now. See docs/harness-contract.md.",
+  "Every entry names the failure exactly (harness, kind, name), says why it is accepted, where ClawBox uses it (file:line when written; the job prints the current lines) and when it must be looked at again.",
+  "category 'version-guarded': written only for an older core generation, behind a guard in the code, so the pinned harness rightly lacks it.",
+  "category 'known-gap': a real gap at the pin, accepted until the date; fix it or bump the pin before then.",
+  "Tests (src/tests/, *.test.*, *.spec.*, e2e*/) are never scanned, so a string that only appears in a test needs no entry.",
+  "An entry that has expired, or that no longer matches a failure, fails the job: the list cannot outlive the reason for it."
+ ],
+ "entries": [
+  {
+   "harness": "openclaw",
+   "kind": "config",
+   "name": "agents.defaults.compaction.reserveTokensFloor",
+   "category": "version-guarded",
+   "reason": "OpenClaw 1 only: written in the `else` arm of `if openclaw_is_v2` in step_openclaw_config; OpenClaw 2 replaced it with compaction.mode and refuses it.",
+   "sites": ["install.sh:6894"],
+   "expires": "2027-01-15"
+  },
+  {
+   "harness": "openclaw",
+   "kind": "config",
+   "name": "gateway.controlUi.allowInsecureAuth",
+   "category": "version-guarded",
+   "reason": "OpenClaw 1 only: both writes sit after `if openclaw_is_v2; then … return 0` in install-x64.sh's step_openclaw_patch and step_openclaw_config.",
+   "sites": ["install-x64.sh:646", "install-x64.sh:826"],
+   "expires": "2027-01-15"
+  },
+  {
+   "harness": "hermes",
+   "kind": "event",
+   "name": "approval.request",
+   "category": "known-gap",
+   "reason": "At v0.21.7 the dashboard asks for an approval with the server->client REQUEST `approval` (OpenRPC x-server-requests), sent only to a client that declares it can answer; ClawBox's dashboard client does not, so Hermes withdraws the approval and this event handler never fires.",
+   "sites": ["src/lib/hermes-dashboard-turn.ts:122"],
+   "expires": "2026-11-15"
+  },
+  {
+   "harness": "hermes",
+   "kind": "event",
+   "name": "clarify.request",
+   "category": "known-gap",
+   "reason": "At v0.21.7 a clarify question is the server->client REQUEST `clarify` (OpenRPC x-server-requests), not an event; ClawBox waits for an event that is never sent, and the question goes back to the agent undelivered.",
+   "sites": ["src/lib/hermes-dashboard-turn.ts:142"],
+   "expires": "2026-11-15"
+  },
+  {
+   "harness": "hermes",
+   "kind": "event",
+   "name": "clarify.expire",
+   "category": "known-gap",
+   "reason": "Not in v0.21.7's dashboard contract at all; part of the same unimplemented clarify flow as clarify.request.",
+   "sites": ["src/lib/hermes-dashboard-turn.ts:152"],
+   "expires": "2026-11-15"
+  },
+  {
+   "harness": "hermes",
+   "kind": "rpc",
+   "name": "clarify.respond",
+   "category": "known-gap",
+   "reason": "Not a method at v0.21.7 (the answer to the server->client `clarify` request is its JSON-RPC result); a call answers -32601. v0.22.1 adds it under x-canonical-methods with different params.",
+   "sites": ["src/app/setup-api/hermes/chat/clarify/route.ts:194", "src/lib/hermes-dashboard-turn.ts:1311", "src/lib/hermes-dashboard-turn.ts:1647"],
+   "expires": "2026-11-15"
+  }
+ ]
+}

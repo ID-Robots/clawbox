@@ -95,6 +95,40 @@ test.describe("the runtime and the core the install actually left behind", () =>
     expect(out).not.toContain("is required (current:");
   });
 
+  test("leaves a config the pinned core accepts", async () => {
+    // The core's own validator over the openclaw.json this install actually
+    // left — including what ClawBox writes without the CLI (gateway-pre-start's
+    // Python passes, the web server's whole-file writes), which the static
+    // harness-contract check cannot read. A key the core does not know fails
+    // here in the harness's own words, not by matching strings. The exit
+    // status is not trusted alone — the JSON verdict is read too.
+    //
+    // While an offline maintenance run owns the state database (the gateway's
+    // start can begin one), the core refuses to read and says to retry when it
+    // finishes — so a validate that lands in that window is asked again,
+    // as the core instructs, rather than read as a verdict. Bounded: a
+    // maintenance that never ends still fails below, in the core's words.
+    let out = "";
+    for (let attempt = 0; attempt < 24; attempt += 1) {
+      out = await dockerExec(
+        ["bash", "-lc", "/home/clawbox/.npm-global/bin/openclaw config validate --json; echo \"__exit=$?\""],
+        { user: "clawbox", timeoutMs: 120_000 },
+      );
+      // Both of the core's admission refusals end in this instruction: "…is
+      // undergoing offline maintenance; retry when it finishes." and, for an
+      // owner record caught half-written, "…could not be verified; retry
+      // after maintenance finishes."
+      if (!/retry (?:when it|after maintenance) finishes/.test(out)) break;
+      await new Promise((resolve) => setTimeout(resolve, 5_000));
+    }
+    const exit = /__exit=(\d+)/.exec(out)?.[1];
+    const json = out.slice(out.indexOf("{"), out.lastIndexOf("}") + 1);
+    const verdict = JSON.parse(json || "{}") as { valid?: boolean; issues?: { path: string; message: string }[] };
+    expect(verdict.issues ?? [], `openclaw config validate: ${json}`).toEqual([]);
+    expect(verdict.valid, `openclaw config validate: ${json}`).toBe(true);
+    expect(exit).toBe("0");
+  });
+
   test("records that same core as the build's pin", async () => {
     // The pin file as it sits on the box — the value `install.sh --step
     // openclaw_install` reads on the next run and the UI's "Latest" column
