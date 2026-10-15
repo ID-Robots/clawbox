@@ -11,10 +11,10 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/x64-migration 
 python3 scripts/x64-migration/build-package.py \
   --node-dir "$(dirname "$(readlink -f "$(command -v node)")")" \
   --staging /tmp/clawbox-x64-integration-stage \
-  --output /tmp/clawbox-x64-integration_1.0.5_amd64.deb
-dpkg-deb --info /tmp/clawbox-x64-integration_1.0.5_amd64.deb
-dpkg-deb --contents /tmp/clawbox-x64-integration_1.0.5_amd64.deb
-sudo -n dpkg -i /tmp/clawbox-x64-integration_1.0.5_amd64.deb
+  --output /tmp/clawbox-x64-integration_1.0.6_amd64.deb
+dpkg-deb --info /tmp/clawbox-x64-integration_1.0.6_amd64.deb
+dpkg-deb --contents /tmp/clawbox-x64-integration_1.0.6_amd64.deb
+sudo -n dpkg -i /tmp/clawbox-x64-integration_1.0.6_amd64.deb
 ```
 
 By default the package is for the account that runs the builder (under `sudo`,
@@ -63,6 +63,14 @@ and inheritable capabilities cleared and privilege escalation disabled. This
 happens before core maintenance; a failed dependency or coding install stops
 the update before the gateway is cycled. No root package replacement is needed,
 so additional repairs in an installed desktop adapter remain intact.
+
+**1.0.6** gives the bridge a 360 s stop timeout: its ExecStop waits for
+OpenClaw's own drain, whose user unit stops within 330 s, and at 120 s the
+bridge recorded a timeout failure over every restart that met a draining
+gateway. The dashboard waits for such a restart on the unit whatever the
+installed package. The installed adapter is not replaced by a dashboard update:
+a desktop receives this only by building and installing the package again (the
+commands at the top of this file).
 
 For new package installations, **1.0.4** additionally delivers the same harness
 from bootstrap and post-update root steps, dropping to the desktop owner.

@@ -43,6 +43,12 @@ case "${1:-}" in
 esac
 
 OPENCLAW_BIN="${OPENCLAW_BIN:-/home/clawbox/.npm-global/bin/openclaw}"
+# The core refuses a config read while a gateway start or a doctor run holds its
+# state for offline maintenance, and says to retry when it finishes. This
+# script is launched from the gateway's own pre-start, i.e. exactly as a gateway
+# starts; openclaw-maintenance-retry.sh beside it asks again.
+OPENCLAW_RETRY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/openclaw-maintenance-retry.sh"
+[ -x "$OPENCLAW_RETRY" ] || OPENCLAW_RETRY=/usr/bin/env
 OPENCLAW_CONFIG="${OPENCLAW_CONFIG:-/home/clawbox/.openclaw/openclaw.json}"
 # --- the CLI must write the file this script reads --------------------------
 # `openclaw config set` and `openclaw memory index` do not read OPENCLAW_CONFIG
@@ -366,11 +372,58 @@ print(json.dumps({
 }))
 PY
 }
+# The core's own readiness contract (docs/gateway/health.md, OpenClaw 2026.10.3):
+# /startupz answers 200 once startup has settled, 503 until then.
+GATEWAY_START_WAIT_S="${CLAWBOX_GATEWAY_START_WAIT_S:-180}"
+startupz_code() {
+  curl -s -o /dev/null -m 2 -w '%{http_code}' "http://127.0.0.1:${GATEWAY_PORT:-18789}/startupz" 2>/dev/null || true
+}
+wait_for_gateway_started() {
+  local waited=0
+  while [ "$waited" -lt "$GATEWAY_START_WAIT_S" ]; do
+    [ "$(startupz_code)" = "200" ] && return 0
+    sleep 2
+    waited=$((waited + 2))
+  done
+  return 1
+}
+# Whether one process is the gateway server. Same rule as
+# isGatewayServerProcess in src/lib/gateway-start-guard.ts: argv naming the
+# `gateway` command, or the title the core sets over it (`openclaw-gateway`, or
+# `openclaw` on the unit's own main process, whose parent is the service
+# manager). The ExecStartPre's own CLI calls are children of its shell.
+gateway_pid_is_server() {
+  local pid=$1 title ppid
+  [ -r "/proc/$pid/cmdline" ] || return 1
+  tr '\0' '\n' < "/proc/$pid/cmdline" | awk '
+    g == 1 { if ($0 == "run" || substr($0, 1, 1) == "-") ok = 1; g = 2 }
+    g == 0 && $0 == "gateway" { g = 1 }
+    END { exit (g == 1 || ok) ? 0 : 1 }' && return 0
+  title="$(tr '\0' ' ' < "/proc/$pid/cmdline" | sed 's/[[:space:]]*$//')"
+  [ "$title" = "openclaw-gateway" ] && return 0
+  [ "$title" = "openclaw" ] || return 1
+  ppid="$(sed 's/.*) //' "/proc/$pid/stat" 2>/dev/null | cut -d' ' -f2)"
+  [ -n "$ppid" ] && [ "$(cat "/proc/$ppid/comm" 2>/dev/null)" = "systemd" ]
+}
+# Whether the gateway PROCESS is up in its unit (the appliance's system unit, or
+# the owner's user unit on an x64 bridge); the unit's ExecStartPre does not
+# count. GATEWAY_CGROUP_DIRS replaces the two places looked in.
+gateway_process_up() {
+  local dir pid uid
+  uid="$(id -u)"
+  for dir in ${GATEWAY_CGROUP_DIRS:-/sys/fs/cgroup/system.slice/clawbox-gateway.service /sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/app.slice/openclaw-gateway.service}; do
+    [ -r "$dir/cgroup.procs" ] || continue
+    while read -r pid; do
+      gateway_pid_is_server "$pid" && return 0
+    done < "$dir/cgroup.procs"
+  done
+  return 1
+}
 write_cfg() {
   local payload
   payload="$(embed_settings_json)" || return 1
   [ -n "$payload" ] || return 1
-  "$OPENCLAW_BIN" config set "$MEMORY_SEARCH_KEY" "$payload" --strict-json --merge >/dev/null 2>&1
+  "$OPENCLAW_RETRY" "$OPENCLAW_BIN" config set "$MEMORY_SEARCH_KEY" "$payload" --strict-json --merge >/dev/null 2>&1
 }
 # What the CLI wrote is not taken on its exit code: the file is read back. A
 # CLI that answered 0 after writing another tree (see the pin at the top) or
@@ -407,6 +460,19 @@ else
   # request; the proxy restores the model's query instruction from that label
   # (src/lib/embed-query-instruction.ts). Without them every query would be
   # embedded bare and recall would quietly degrade.
+  # A config write inside a gateway's startup admission makes OpenClaw refuse
+  # readiness ("migration inputs changed during startup", exit 78) and stay
+  # down. Launched by the gateway's own pre-start, this runs WHILE that gateway
+  # starts; launched by install.sh, it runs just after one was restarted.
+  # Either way the write waits for the core's own /startupz to say started; a
+  # start that does not finish in time is left alone and tried again later.
+  # No gateway running at all (an update holding it stopped) writes at once.
+  if { [ "${CLAWBOX_AFTER_GATEWAY_START:-0}" = "1" ] \
+       || { gateway_process_up && [ "$(startupz_code)" != "200" ]; }; } \
+     && ! wait_for_gateway_started; then
+    log "WARN: the gateway did not finish starting within ${GATEWAY_START_WAIT_S}s — the embedding settings are not written under a starting gateway; trying again on the next gateway start"
+    exit 0
+  fi
   if ! write_cfg; then
     log "WARN: could not write the local embedding settings (non-fatal; provider unchanged, memory search stays as it is)"
     exit 0
@@ -428,7 +494,7 @@ if [ "$(state_get reindex_pending)" != "1" ]; then
   log "the index is already built for this embedder — no reindex needed"
   exit 0
 fi
-if "$OPENCLAW_BIN" memory index --force >/dev/null 2>&1; then
+if "$OPENCLAW_RETRY" "$OPENCLAW_BIN" memory index --force >/dev/null 2>&1; then
   state_set_reindex_pending 0
   log "forced a full memory reindex for the new embedding provider"
 else

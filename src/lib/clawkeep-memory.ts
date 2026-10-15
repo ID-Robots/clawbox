@@ -43,6 +43,7 @@ import {
 import { isLoopbackBaseUrl } from "@/lib/embed-runtime-ids";
 import { memoryStatusTimeoutMs } from "@/lib/memory-status-timeout";
 import { processStore } from "@/lib/process-store";
+import { isOpenclawMaintenanceRefusal, withOpenclawMaintenanceRetry } from "@/lib/openclaw-maintenance";
 import {
   countIndexChunks,
   createIndexProgressReader,
@@ -584,11 +585,31 @@ function terminate(child: ChildProcess): void {
   escalate.unref();
 }
 
+/**
+ * `openclaw memory status`, asked again while the core's state is under
+ * offline maintenance (a gateway start, a doctor run): that refusal read as
+ * "status unavailable", and a read probe is exactly what may simply ask again.
+ * See `@/lib/openclaw-maintenance`.
+ */
 function collectMemoryStatusJson(): Promise<unknown> {
+  return withOpenclawMaintenanceRetry(
+    (timeoutMs) => collectMemoryStatusJsonOnce(timeoutMs),
+    { timeoutMs: STATUS_TIMEOUT_MS, label: "openclaw memory status" },
+  );
+}
+
+function collectMemoryStatusJsonOnce(timeoutMs: number): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const child = spawn(openclawBin(), ["memory", "status", "--agent", "main", "--deep", "--json"], {
       env: openclawEnv(),
-      stdio: ["ignore", "pipe", "ignore"],
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    // Only the start of stderr is kept: it is read for the core's maintenance
+    // sentence and nothing else, and draining it keeps a chatty run from
+    // blocking on a full pipe.
+    let errText = "";
+    child.stderr?.on("data", (chunk: Buffer) => {
+      if (errText.length < 4096) errText += chunk.toString("utf8");
     });
     const chunks: Buffer[] = [];
     let bytes = 0;
@@ -603,7 +624,7 @@ function collectMemoryStatusJson(): Promise<unknown> {
     const timer = setTimeout(() => {
       timedOut = true;
       terminate(child);
-    }, STATUS_TIMEOUT_MS);
+    }, timeoutMs);
     // terminate() arms its own SIGKILL escalation, so it must fire once:
     // every chunk after the overflow would otherwise add a signal and a timer.
     let overflowed = false;
@@ -620,6 +641,13 @@ function collectMemoryStatusJson(): Promise<unknown> {
     });
     child.once("error", () => finish(() => reject(new Error("memory status unavailable"))));
     child.once("close", (code) => finish(() => {
+      if (!timedOut && code !== 0) {
+        const said = `${errText}\n${Buffer.concat(chunks).toString("utf8")}`;
+        if (isOpenclawMaintenanceRefusal(said)) {
+          reject(new Error(`memory status unavailable: ${said.trim().slice(0, 600)}`));
+          return;
+        }
+      }
       if (timedOut || bytes > MAX_STATUS_OUTPUT_BYTES || code !== 0) {
         reject(new Error("memory status unavailable"));
         return;

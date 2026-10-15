@@ -12,6 +12,7 @@ import { setPreferences } from "@/lib/preference-store";
 import { isClawhubHandle, lookupClawhubOwner, pickClawhubMatch } from "@/lib/clawhub-url";
 import { refreshSkillsCache } from "@/lib/openclaw-skill-info";
 import { ICONS_DIR, safeAppId, webappIconPath } from "@/lib/webapp-icon";
+import { withOpenclawMaintenanceRetry } from "@/lib/openclaw-maintenance";
 
 const STORE_API = "https://clawbox.com/api/store/apps";
 const STORE_ICONS_BASE = "https://clawbox.com/store/icons";
@@ -217,14 +218,16 @@ async function runOpenclawInstall(openclawBin: string, ref: string): Promise<Cla
   const agent = await openclawSkillsAgentArgs();
   for (let attempt = 0; ; attempt++) {
     try {
-      const { stdout, stderr } = await execFileAsync(openclawBin, [
+      // Asked again while the core's state is under offline maintenance (a
+      // gateway start, a doctor run): see `@/lib/openclaw-maintenance`.
+      const { stdout, stderr } = await withOpenclawMaintenanceRetry((timeout) => execFileAsync(openclawBin, [
         "skills", "install", ref,
         ...agent,
         "--force",
       ], {
-        timeout: 60_000,
+        timeout,
         env: { ...process.env, PATH: `${path.dirname(openclawBin)}:${process.env.PATH}` },
-      });
+      }), { timeoutMs: 60_000, label: "openclaw skills install" });
       return { success: true, output: stdout || stderr };
     } catch (err: unknown) {
       const rawMsg = err instanceof Error ? err.message : String(err);

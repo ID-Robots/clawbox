@@ -5,6 +5,8 @@ import { awaitGatewayRestartAfter, readGatewayUnitMoment, type GatewayUnitMoment
 import { installDeepseekProviderPlugin, installedOpenclawRelease } from "@/lib/openclaw-deepseek-plugin";
 import { findOpenclawBin, runOpenclawConfigSet } from "@/lib/openclaw-config";
 import { canonicalPluginId, type PluginRepairEntry, type PluginRepairStage } from "@/lib/plugin-repair";
+import { withOpenclawMaintenanceRetry } from "@/lib/openclaw-maintenance";
+import { holdWhileGatewayStarts } from "@/lib/gateway-start-guard";
 
 const execFile = promisify(execFileCb);
 
@@ -200,10 +202,13 @@ export async function inspectPluginRuntime(pluginId: string): Promise<RuntimeVer
   const unreadable: RuntimeVerdict = { loaded: null, cause: ` ${verb} answered nothing this device could read.` };
   let stdout: string;
   try {
-    ({ stdout } = await execFile(openclawBin(), ["plugins", "inspect", pluginId, "--runtime", "--json"], {
-      timeout: INSPECT_TIMEOUT_MS,
-      maxBuffer: 8 * 1024 * 1024,
-    }));
+    // Asked again while a gateway start or a doctor run holds the state for
+    // maintenance: the core refuses before it reads (`@/lib/openclaw-maintenance`).
+    ({ stdout } = await withOpenclawMaintenanceRetry((timeout) => execFile(
+      openclawBin(),
+      ["plugins", "inspect", pluginId, "--runtime", "--json"],
+      { timeout, maxBuffer: 8 * 1024 * 1024 },
+    ), { timeoutMs: INSPECT_TIMEOUT_MS, label: "openclaw plugins inspect" }));
   } catch (err) {
     return { loaded: null, cause: cliFailureCause(verb, err) };
   }
@@ -345,10 +350,13 @@ export async function runPluginRepair(
   // for at all, and `plugins enable` answers that with "Plugin not found".
   if (stage === "consent") {
     try {
-      await execFile(openclawBin(), ["plugins", "enable", registryId, "--accept-capabilities"], {
-        timeout: CONSENT_TIMEOUT_MS,
-        maxBuffer: 8 * 1024 * 1024,
-      });
+      // Both verbs write openclaw.json: never under a starting gateway.
+      await holdWhileGatewayStarts("openclaw plugins enable");
+      await withOpenclawMaintenanceRetry((timeout) => execFile(
+        openclawBin(),
+        ["plugins", "enable", registryId, "--accept-capabilities"],
+        { timeout, maxBuffer: 8 * 1024 * 1024 },
+      ), { timeoutMs: CONSENT_TIMEOUT_MS, label: "openclaw plugins enable" });
     } catch (err) {
       // A CONSENT ROW WHOSE PAYLOAD IS GONE is an install, and after a core
       // bump it is the common case: payloads live in npm projects keyed to the
@@ -407,13 +415,14 @@ export async function runPluginRepair(
       if (!spec) return fail("no_spec", "spec", "");
       const before = await gatewayBeforeInstall();
       try {
+        await holdWhileGatewayStarts("openclaw plugins install");
         // `--force` because the boot path uses it and because the CLI exits 1
         // with "plugin already exists (delete it first)" otherwise.
-        await execFile(
+        await withOpenclawMaintenanceRetry((timeout) => execFile(
           openclawBin(),
           ["plugins", "install", spec, "--force", "--accept-capabilities"],
-          { timeout: INSTALL_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024 },
-        );
+          { timeout, maxBuffer: 8 * 1024 * 1024 },
+        ), { timeoutMs: INSTALL_TIMEOUT_MS, label: "openclaw plugins install" });
       } catch (err) {
         return fail("repair_failed", "install", cliFailureCause("openclaw plugins install", err));
       }

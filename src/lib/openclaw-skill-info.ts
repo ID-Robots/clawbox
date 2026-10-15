@@ -3,6 +3,7 @@ import { promisify } from "util";
 import fs from "fs/promises";
 import path from "@/lib/runtime-path";
 import { findOpenclawBin, getSkillsDir, openclawIsAbsent, openclawSkillsAgentArgs } from "@/lib/openclaw-config";
+import { withOpenclawMaintenanceRetry } from "@/lib/openclaw-maintenance";
 
 /**
  * The skill list behind GET /setup-api/apps/skill-info.
@@ -115,10 +116,12 @@ async function scanSkills(): Promise<SkillInfo[]> {
   // `--agent` only when the box has more than one, which is the only case the
   // CLI refuses to guess in — see openclawSkillsAgentArgs.
   const agent = await openclawSkillsAgentArgs();
-  const { stdout } = await execFileAsync(bin, ["skills", "list", ...agent, "--json"], {
-    timeout: 30_000,
+  // Asked again while the core's state is under offline maintenance (a
+  // gateway start, a doctor run): see `@/lib/openclaw-maintenance`.
+  const { stdout } = await withOpenclawMaintenanceRetry((timeout) => execFileAsync(bin, ["skills", "list", ...agent, "--json"], {
+    timeout,
     env: { ...process.env, PATH: `${path.dirname(bin)}:${process.env.PATH}` },
-  });
+  }), { timeoutMs: 30_000, label: "openclaw skills list" });
   const data = JSON.parse(stdout);
   const skills = (data.skills || []) as Record<string, unknown>[];
   return skills.map((s) => ({

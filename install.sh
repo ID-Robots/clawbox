@@ -1174,6 +1174,14 @@ SWAPFILE_PRIORITY=1
 BUN="$CLAWBOX_HOME/.bun/bin/bun"
 NPM_PREFIX="$CLAWBOX_HOME/.npm-global"
 OPENCLAW_BIN="$NPM_PREFIX/bin/openclaw"
+# The core refuses a command that reads its config while another process holds
+# its state for offline maintenance (a gateway start, a doctor run) and says to
+# retry when it finishes; scripts/openclaw-maintenance-retry.sh asks again. A
+# call site spells it "${OPENCLAW_RETRY:-/usr/bin/env}", so a step run on its own still runs.
+OPENCLAW_RETRY=/usr/bin/env
+if [ -n "${SRC_DIR:-}" ] && [ -x "$SRC_DIR/scripts/openclaw-maintenance-retry.sh" ]; then
+  OPENCLAW_RETRY="$SRC_DIR/scripts/openclaw-maintenance-retry.sh"
+fi
 OPENCLAW_VERSION="2026.10.3"
 
 # Pinned Hermes agent release, in the same spirit as $OPENCLAW_VERSION above:
@@ -6528,7 +6536,7 @@ step_openclaw_install() {
   # @latest, which is exactly how @openclaw/codex drifted ahead of the
   # pinned core and crashed every Codex chat.
   local INSTALLED_PLUGINS
-  INSTALLED_PLUGINS=$(as_clawbox -H "$OPENCLAW_BIN" plugins list --json 2>/dev/null \
+  INSTALLED_PLUGINS=$(as_clawbox -H "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins list --json 2>/dev/null \
     | python3 -c '
 import json, sys
 try:
@@ -6614,7 +6622,7 @@ for p in d.get("plugins", []):
           echo "      (not a ClawBox-managed plugin: refreshed without accepting new capabilities)"
           ;;
       esac
-      if ! as_clawbox -H "$OPENCLAW_BIN" plugins install "$spec" --force "${CAP_ARGS[@]}" >/dev/null 2>&1; then
+      if ! as_clawbox -H "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins install "$spec" --force "${CAP_ARGS[@]}" >/dev/null 2>&1; then
         echo "      WARN: refresh failed (non-fatal; gateway-pre-start will retry on next boot)"
       fi
     done <<< "$INSTALLED_PLUGINS"
@@ -6846,7 +6854,7 @@ step_openclaw_patch() {
 oc_config_set() {
   local attempt
   for attempt in 1 2 3; do
-    if as_clawbox "$OPENCLAW_BIN" config set "$@"; then
+    if as_clawbox "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" config set "$@"; then
       return 0
     fi
     if [ "$attempt" -lt 3 ]; then
@@ -6868,7 +6876,7 @@ step_openclaw_config() {
   # Only seed the primary model if unset — preserves the user's provider choice
   # across updates (rebuild_reboot re-invokes this step).
   local CURRENT_PRIMARY
-  CURRENT_PRIMARY=$(as_clawbox "$OPENCLAW_BIN" config get agents.defaults.model.primary 2>/dev/null || echo "")
+  CURRENT_PRIMARY=$(as_clawbox "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" config get agents.defaults.model.primary 2>/dev/null || echo "")
   if [ -z "$CURRENT_PRIMARY" ] || [ "$CURRENT_PRIMARY" = "null" ]; then
     if openclaw_is_v2; then
       # OpenClaw 2 VALIDATES model refs at config set, and this v1-era seed
@@ -6923,7 +6931,7 @@ step_openclaw_config() {
     # rebuild, and a list the owner or the configure route wrote stays theirs.
     # (`config get` prints an unset path's notice on stderr, nothing on stdout.)
     local CURRENT_FALLBACKS
-    CURRENT_FALLBACKS=$(as_clawbox "$OPENCLAW_BIN" config get agents.defaults.model.fallbacks 2>/dev/null | tr -d '[:space:]' || echo "")
+    CURRENT_FALLBACKS=$(as_clawbox "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" config get agents.defaults.model.fallbacks 2>/dev/null | tr -d '[:space:]' || echo "")
     if [ -z "$CURRENT_FALLBACKS" ] || [ "$CURRENT_FALLBACKS" = "null" ] || [ "$CURRENT_FALLBACKS" = "[]" ]; then
       oc_config_set agents.defaults.model.fallbacks '["deepseek/deepseek-chat"]' --strict-json
       echo "  ClawBox AI fallback model configured"
@@ -7089,10 +7097,10 @@ NODE
 # provider resolves, not how it got there, so an OpenClaw without the
 # subcommand must not cost a box its voice.
 tts_ensure_provider_registered() {
-  if ! as_clawbox "$OPENCLAW_BIN" plugins registry --refresh >/dev/null 2>&1; then
+  if ! as_clawbox "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins registry --refresh >/dev/null 2>&1; then
     echo "  Warning: could not refresh the plugin registry — the provider may not be visible to the gateway" >&2
   fi
-  as_clawbox "$OPENCLAW_BIN" plugins info tts-local-cli >/dev/null 2>&1
+  as_clawbox "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins info tts-local-cli >/dev/null 2>&1
 }
 
 # The name of the ClawBox AI cloud voice entry, when this box has one.
@@ -7180,7 +7188,7 @@ PY
 
 tts_managed_cloud_provider() {
   local home="$1"
-  as_clawbox "$OPENCLAW_BIN" config get "$home.providers" 2>/dev/null | python3 -c '
+  as_clawbox "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" config get "$home.providers" 2>/dev/null | python3 -c '
 import json, sys
 try:
     providers = json.load(sys.stdin)
@@ -7820,7 +7828,7 @@ step_openclaw_tts() {
   # v2 box would never get its local voice.
   local TTS_HOME="messages.tts"
   openclaw_is_v2 && TTS_HOME="tts"
-  CURRENT_TTS=$(as_clawbox "$OPENCLAW_BIN" config get "$TTS_HOME.provider" 2>/dev/null || echo "")
+  CURRENT_TTS=$(as_clawbox "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" config get "$TTS_HOME.provider" 2>/dev/null || echo "")
   if [ -n "$CURRENT_TTS" ] && [ "$CURRENT_TTS" != "null" ]; then
     # An owner who chose ElevenLabs keeps it. But when the box is already on
     # OUR provider, preserving the selection is not enough: the update that
@@ -10151,7 +10159,7 @@ ensure_local_embeddings() {
   # invent. What IS closed off is the one way a non-interactive CLI hangs
   # without doing anything: a prompt on stdin, which it would otherwise inherit
   # from the root step and wait on for ever.
-  if ! EMBED_JSON="$(as_clawbox "$OPENCLAW_BIN" memory status --agent main --deep --json 2>/dev/null </dev/null)"; then
+  if ! EMBED_JSON="$(as_clawbox "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" memory status --agent main --deep --json 2>/dev/null </dev/null)"; then
     EMBED_JSON=""
   fi
   # `command -v` first, and a state of its own: without the interpreter the

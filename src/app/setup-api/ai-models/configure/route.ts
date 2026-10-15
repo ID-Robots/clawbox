@@ -650,7 +650,10 @@ class SignInWouldBeLostError extends Error {
  *
  * Fails OPEN: a store that cannot be read does not refuse a save the owner
  * asked for. The failure is logged, and the paste that follows is the same one
- * beta performed unconditionally.
+ * beta performed unconditionally. A read refused only because the core's state
+ * is under offline maintenance (a gateway start, a doctor run) is asked again
+ * first, inside `spawnOpenclawCli`, so this guard is not skipped over a window
+ * of seconds.
  */
 async function assertNoSignInAt(profileId: string): Promise<void> {
   // Nothing to lose where there is no OpenClaw auth store: the Hermes SKU

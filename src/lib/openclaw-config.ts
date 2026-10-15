@@ -24,6 +24,12 @@ import { ANTHROPIC_PLUGIN_ENABLED_KEY } from "@/lib/provider-plugin-ops";
 import { isDiscordSnowflake, isSafeDiscordToken } from "@/lib/discord-api";
 import { envPort, waitForPortOpen } from "@/lib/port-probe";
 import { markGatewayRestartBegun } from "@/lib/gateway-restart-tracker";
+import {
+  GatewayRestartFailedError,
+  describeUnitState,
+  runUnitJob,
+  type UnitJobOutcome,
+} from "@/lib/gateway-unit-job";
 import { getLocalAiToken } from "@/lib/local-ai-token";
 import { LEGACY_EXEC_APPROVALS_RE } from "@/lib/openclaw-doctor-blocker";
 import {
@@ -33,6 +39,8 @@ import {
 import { CLAWBOX_AI_MODEL_BY_TIER } from "@/lib/clawbox-ai-models";
 import { needsClawboxAiFlashPolicyRepair } from "@/lib/clawbox-ai-chat-policy";
 import { isConfigMutationConflict } from "@/lib/config-conflict";
+import { withOpenclawMaintenanceRetry } from "@/lib/openclaw-maintenance";
+import { ConfigChangedWhileHeldError, cliWritesConfig, holdWhileGatewayStarts } from "@/lib/gateway-start-guard";
 
 const exec = promisify(execFile);
 
@@ -182,7 +190,14 @@ async function executeConfigWrite(
   options: OpenclawConfigSetOptions,
   skipGateway = false,
 ): Promise<void> {
-  if (!skipGateway && "done" in (await configWritesViaGateway([write], options))) return;
+  if (!skipGateway) {
+    const outcome = await configWritesViaGateway([write], options);
+    if ("done" in outcome) return;
+    // A gateway that is starting does not answer yet. Wait it out (never write
+    // the file under it, see `@/lib/gateway-start-guard`), then ask it again.
+    if (outcome.declined === "unavailable" && (await holdWhileGatewayStarts("config write"))
+      && "done" in (await configWritesViaGateway([write], options))) return;
+  }
   await executeConfigWriteWithCli(write, options);
 }
 
@@ -985,9 +1000,14 @@ async function settleStagedWrites(
   const started = Date.now();
   const areas = loggedConfigAreas(staged.flatMap((entry) => configWritePaths(entry.write)));
   const options = combinedWriteOptions(staged);
-  const outcome: GatewayWriteOutcome = options
+  let outcome: GatewayWriteOutcome = options
     ? await configWritesViaGateway(staged.map((entry) => entry.write), options)
     : { declined: "unsupported" };
+  // A starting gateway does not answer yet: wait it out, then ask it again.
+  if (options && "declined" in outcome && outcome.declined === "unavailable"
+    && (await holdWhileGatewayStarts(`${label} config writes`))) {
+    outcome = await configWritesViaGateway(staged.map((entry) => entry.write), options);
+  }
   if ("done" in outcome) {
     const how = outcome.done === "written" ? "landed as one gateway config.patch" : "were already in the file";
     console.log(
@@ -1262,6 +1282,25 @@ function spawnOpenclaw(args: string[], options: SpawnOpenclawOptions = {}): Prom
   if (openclawIsAbsent()) {
     return Promise.reject(new OpenclawUnavailableError());
   }
+  // The core refuses every command that reads its config while a gateway start
+  // or a doctor run holds the state for maintenance, and says to retry when it
+  // finishes; it refuses before acting, so the command is asked again here,
+  // inside the caller's own timeout. See `@/lib/openclaw-maintenance`. The
+  // first two words name it in the log: they are the verb, never a value.
+  const timeoutMs = options.timeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS;
+  const label = `openclaw ${(options.labelArgs ?? args).slice(0, 2).join(" ")}`;
+  // A verb that writes openclaw.json waits out a gateway that is starting: a
+  // write inside its startup admission makes it exit 78 and stay down (see
+  // `@/lib/gateway-start-guard`). This is where the gateway-first write path
+  // falls back to the CLI, so it is where the wait belongs.
+  const held = cliWritesConfig(args) ? holdWhileGatewayStarts(label) : Promise.resolve();
+  return held.then(() => withOpenclawMaintenanceRetry(
+    (remainingMs) => spawnOpenclawOnce(args, { ...options, timeoutMs: remainingMs }),
+    { timeoutMs, label },
+  ));
+}
+
+function spawnOpenclawOnce(args: string[], options: SpawnOpenclawOptions = {}): Promise<string> {
   const bin = findOpenclawBin();
   const { uid, gid, captureStdout = false, stdinData } = options;
   const timeoutMs = options.timeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS;
@@ -2564,11 +2603,28 @@ async function writeSecretJsonAtomically(file: string, data: unknown): Promise<v
   await fs.rename(tmpPath, file);
 }
 
+/** The config file's identity, size and mtime, or "absent". Synchronous: one stat. */
+function configFileFingerprint(): string {
+  try {
+    const stat = fsSync.statSync(CONFIG_PATH);
+    return `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+  } catch {
+    return "absent";
+  }
+}
+
 export async function writeConfig(config: OpenClawConfig): Promise<void> {
   // A whole-file write inside an open config write transaction: what the
   // transaction staged lands first (validated), so this write — read through
   // the overlay or not — neither carries it unvalidated nor drops it.
   await flushConfigWrites();
+  // Never under a gateway that is starting (`@/lib/gateway-start-guard`). The
+  // caller read the file before this wait; a file that moved during it (the
+  // gateway's own start writes it) is not written over with that snapshot.
+  const readAs = configFileFingerprint();
+  if (await holdWhileGatewayStarts("writeConfig") && configFileFingerprint() !== readAs) {
+    throw new ConfigChangedWhileHeldError();
+  }
   await fs.mkdir(OPENCLAW_HOME, { recursive: true });
   await writeSecretJsonAtomically(CONFIG_PATH, config);
 }
@@ -2823,6 +2879,9 @@ async function withOpenclawConfigSidecarLock<T>(mutate: () => Promise<T>): Promi
   // BEFORE the lock: the flush is a gateway or CLI write, and those take this
   // same lock — flushed from inside it, each would wait on the other.
   await flushConfigWrites();
+  // Also before it: a starting gateway is waited out with the lock free, so
+  // the read inside `mutate` is taken after the wait, not before it.
+  await holdWhileGatewayStarts("locked config write");
   const lockPath = untraced(`${CONFIG_PATH}.lock`);
   const reclaimGuardPath = `${lockPath}.reclaim`;
   const deadline = Date.now() + 30_000;
@@ -3955,12 +4014,24 @@ export type OpenclawDoctorFixOutcome =
 
 export async function runOpenclawDoctorFix(): Promise<OpenclawDoctorFixOutcome> {
   if (gatewayIsAbsent()) return "completed";
+  // A stop that outlives its client is waited for rather than raced: on an
+  // x64 bridge the stop waits for OpenClaw's own drain, and doctor started
+  // beside a gateway still draining finds a second owner of its state.
+  let stop: UnitJobOutcome | null = null;
   try {
-    await exec("/usr/bin/sudo", ["-n", "/usr/bin/systemctl", "stop", "clawbox-gateway.service"], {
-      timeout: 30000,
+    stop = await runUnitJob("/usr/bin/sudo", ["-n", "/usr/bin/systemctl", "stop", "clawbox-gateway.service"], {
+      unit: "clawbox-gateway.service",
+      timeoutMs: 30000,
+      settleBudgetMs: 90_000,
     });
   } catch {
     /* older sudoers or already stopped — doctor itself reports real trouble */
+  }
+  if (stop?.kind === "in-flight") {
+    throw new Error(`The assistant's gateway was still stopping after ${Math.round(stop.waitedMs / 1000)}s more, so its repair was not run beside it. Try again in a few minutes.`);
+  }
+  if (stop?.kind === "settled" && stop.state.activeState === "active") {
+    throw new Error(`The assistant's gateway did not stop (${describeUnitState(stop.state)}), so its repair was not run beside it.`);
   }
   try {
     // The stop above is necessary and was never sufficient: the core refused
@@ -4022,9 +4093,10 @@ export class GatewayNotReadyError extends Error {
  * Erring long is the point: a slow but healthy restart reported as a failure
  * would be the exact inverse of the bug this wait exists to fix.
  *
- * The wait begins AFTER `systemctl restart` returns, so it covers only the new
- * process's startup — not the drain (`TimeoutStopSec=30`) and not the pre-start
- * (`TimeoutStartSec=600`, already bounded by this call's own 60 s exec budget).
+ * The wait begins AFTER the restart job has finished, so it covers only the new
+ * process's startup — not the drain and not the pre-start. A job that outlives
+ * the call's 60 s client (OpenClaw's own drain on an x64 bridge, a slow
+ * pre-start) is waited for on the unit first; see `assertRestartLanded`.
  *
  * Read per call rather than frozen at import, so a box that needs longer can be
  * given it without a rebuild. Nothing in the repo sets `GATEWAY_READY_WAIT_MS`
@@ -4074,7 +4146,18 @@ export interface RestartGatewayOptions {
    * waiting on). Never shorter than that default.
    */
   readyWaitMs?: number;
+  /**
+   * How long a restart that outlived its 60 s client is waited for on the
+   * unit. Default {@link GATEWAY_RESTART_SETTLE_MS}, sized for a request a
+   * person is waiting on: past it the answer is GatewayNotReadyError ("still
+   * restarting") and the restart lands on its own. The updater, which nobody
+   * waits on, passes the unit's whole stop-and-start budget.
+   */
+  restartSettleMs?: number;
 }
+
+/** See {@link RestartGatewayOptions.restartSettleMs}: with the 60 s client, under a tunnel's ~100 s. */
+export const GATEWAY_RESTART_SETTLE_MS = 30_000;
 
 /**
  * Block until the gateway is listening again, or say it never came back.
@@ -4178,16 +4261,19 @@ async function restartGatewayOnce(options: RestartGatewayOptions): Promise<void>
     /* older sudoers, or nothing to reset — the restart below tells the truth */
   }
   try {
-    await exec("/usr/bin/sudo", ["/usr/bin/systemctl", "restart", "clawbox-gateway.service"], {
-      timeout: 60000,
+    const restart = await runUnitJob("/usr/bin/sudo", ["/usr/bin/systemctl", "restart", "clawbox-gateway.service"], {
+      unit: "clawbox-gateway.service",
+      timeoutMs: 60000,
+      settleBudgetMs: options.restartSettleMs ?? GATEWAY_RESTART_SETTLE_MS,
     });
+    assertRestartLanded(restart, "clawbox-gateway.service");
     await awaitGatewayReady(options);
     // The SECOND bump: everything read while this restart was in flight belongs
     // to the generation that is now behind us.
     gatewayRestartCount += 1;
     return;
   } catch (err) {
-    if (err instanceof GatewayNotReadyError) throw err;
+    if (err instanceof GatewayNotReadyError || err instanceof GatewayRestartFailedError) throw err;
     const message = err instanceof Error ? err.message : String(err);
     // Fall back only when this installation genuinely has no ClawBox system
     // unit. A runtime mask is an update/factory-reset lock: starting the legacy
@@ -4198,14 +4284,18 @@ async function restartGatewayOnce(options: RestartGatewayOptions): Promise<void>
       /clawbox-gateway\.service[^\n]*(?:not found|could not be found)/i.test(message);
     if (!systemGatewayMasked && systemGatewayMissing) {
       try {
-        await exec("systemctl", ["--user", "restart", "openclaw-gateway.service"], {
-          timeout: 60000,
+        const restart = await runUnitJob("systemctl", ["--user", "restart", "openclaw-gateway.service"], {
+          unit: "openclaw-gateway.service",
+          user: true,
+          timeoutMs: 60000,
+          settleBudgetMs: options.restartSettleMs ?? GATEWAY_RESTART_SETTLE_MS,
           env: {
             ...process.env,
             HOME: process.env.HOME || "/home/clawbox",
             XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR || `/run/user/${process.getuid?.() ?? 1000}`,
           },
         });
+        assertRestartLanded(restart, "openclaw-gateway.service");
         // The legacy user unit serves the same port, so it owes the same proof.
         await awaitGatewayReady(options);
         gatewayRestartCount += 1;
@@ -4213,7 +4303,9 @@ async function restartGatewayOnce(options: RestartGatewayOptions): Promise<void>
       } catch (fallbackErr) {
         // A gateway that was restarted but never came back must not be reported
         // as the missing-unit error that sent us down this branch.
-        if (fallbackErr instanceof GatewayNotReadyError) throw fallbackErr;
+        if (fallbackErr instanceof GatewayNotReadyError || fallbackErr instanceof GatewayRestartFailedError) {
+          throw fallbackErr;
+        }
         console.error(
           "[openclaw-config] Failed to restart fallback OpenClaw user gateway:",
           fallbackErr instanceof Error ? fallbackErr.message : fallbackErr
@@ -4226,6 +4318,32 @@ async function restartGatewayOnce(options: RestartGatewayOptions): Promise<void>
     );
     throw err;
   }
+}
+
+/**
+ * What a restart that outlived its 60 s client came to. The client returning
+ * is systemd's own answer and needs nothing more. A client killed by that
+ * deadline left the job running (see `@/lib/gateway-unit-job`): the restart
+ * landed when the job finished with the unit active, failed when it finished
+ * any other way, and is still going when the job outlasted the wait, which is
+ * the not-back-yet answer GatewayNotReadyError already carries.
+ */
+function assertRestartLanded(outcome: UnitJobOutcome, unit: string): void {
+  if (outcome.kind === "returned") return;
+  const seconds = Math.round(outcome.waitedMs / 1000);
+  if (outcome.kind === "in-flight") {
+    console.error(`[openclaw-config] ${unit} was still restarting ${seconds}s after its client gave up`);
+    throw new GatewayNotReadyError(
+      `the gateway is still restarting (${unit} has not finished after ${seconds}s more); it comes back on its own when the old one has drained`,
+    );
+  }
+  if (outcome.state.activeState === "active") {
+    console.log(`[openclaw-config] ${unit} restart landed ${seconds}s after its client gave up`);
+    return;
+  }
+  throw new GatewayRestartFailedError(
+    `The gateway did not start again after the restart: ${unit} is ${describeUnitState(outcome.state)}. Its service log names the cause.`,
+  );
 }
 
 /*

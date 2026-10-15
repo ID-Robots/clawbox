@@ -31,6 +31,9 @@ const h = vi.hoisted(() => ({
   bounceCalls: 0,
   execCalls: [] as { file: string; args: string[] }[],
   execFailure: null as string | null,
+  // The restart killed at its client deadline, and what `systemctl show` says after.
+  restartTimesOut: false,
+  unitShow: "",
   gatewayUp: true,
   ownerSession: true,
   sameOrigin: true,
@@ -57,7 +60,10 @@ vi.mock("node:child_process", () => ({
     cb: (err: Error | null, res?: { stdout: string; stderr: string }) => void,
   ) => {
     h.execCalls.push({ file, args });
-    if (h.execFailure) cb(new Error(h.execFailure));
+    if (h.restartTimesOut && args.includes("restart")) {
+      cb(Object.assign(new Error(`Command failed: ${file} ${args.join(" ")}`), { killed: true, signal: "SIGTERM", code: null }));
+    } else if (args.includes("show")) cb(null, { stdout: h.unitShow, stderr: "" });
+    else if (h.execFailure) cb(new Error(h.execFailure));
     else cb(null, { stdout: "", stderr: "" });
   },
 }));
@@ -119,6 +125,8 @@ beforeEach(() => {
   h.bounceCalls = 0;
   h.execCalls.length = 0;
   h.execFailure = null;
+  h.restartTimesOut = false;
+  h.unitShow = "";
   h.gatewayUp = true;
   h.ownerSession = true;
   h.sameOrigin = true;
@@ -190,6 +198,29 @@ describe("POST /setup-api/clawkeep/restore — bringing the state holder back", 
     expect(body.restartErrors[0]).toMatch(/^clawbox-gateway\.service: /);
     expect(body.restartErrors[0]).toContain("a password is required");
     expect(body.restartPending).toEqual([]);
+  });
+
+  // On an x64 bridge the restart waits for OpenClaw's own drain (up to 330 s),
+  // so the 30 s client is killed while systemd carries on (F2, 2026-10-15).
+  it("waits for a restart that outlived its client and serves the restore once it landed", async () => {
+    h.restartTimesOut = true;
+    h.unitShow = "Job=\nActiveState=active\nSubState=exited\nResult=success\n";
+    const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const body = await (await post()).json();
+    quiet.mockRestore();
+    expect(body.restartErrors).toEqual([]);
+    expect(body.restartPending).toEqual([]);
+    expect(h.execCalls.some((c) => c.args.includes("show"))).toBe(true);
+  });
+
+  it("names the unit's state when a restart that outlived its client did not come back", async () => {
+    h.restartTimesOut = true;
+    h.unitShow = "Job=\nActiveState=failed\nSubState=failed\nResult=exit-code\n";
+    const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const body = await (await post()).json();
+    quiet.mockRestore();
+    expect(body.restartErrors).toEqual(["clawbox-gateway.service: did not start again after the restore: it is failed (failed, exit-code)"]);
+    expect(body.restartErrors[0]).not.toMatch(/Command failed/);
   });
 
   it("does not call the OpenClaw restore done until the gateway is serving again", async () => {

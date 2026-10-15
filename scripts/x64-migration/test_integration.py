@@ -104,6 +104,18 @@ class IntegrationTest(unittest.TestCase):
         launcher=(self.stage/'usr/local/libexec/clawbox/clawbox-run-root-step.sh').read_text()
         self.assertNotIn('harness_swap ',launcher)
 
+    def test_bridge_stop_outlasts_openclaws_own_drain(self):
+        """The bridge's ExecStop waits for the user unit, whose stop is 330 s.
+
+        At 120 s the bridge timed out with 'Failed with result timeout' while
+        the user gateway was still draining, and the restart that followed
+        landed minutes later anyway.
+        """
+        unit=(self.stage/'etc/systemd/system/clawbox-gateway.service').read_text()
+        stop=[line for line in unit.splitlines() if line.startswith('TimeoutStopSec=')]
+        self.assertEqual(len(stop),1,unit)
+        self.assertGreaterEqual(int(stop[0].split('=',1)[1]),330+30)
+
     def test_every_installed_shell_script_parses(self):
         for p in self.stage.rglob('*'):
             if p.is_file() and p.read_bytes()[:2]==b'#!' and (p.suffix=='.sh' or p.name in ['postinst','cloudflared-quick','openclaw-cli']):
@@ -298,6 +310,8 @@ ln -s ../lib/node_modules/openclaw/openclaw.mjs "$prefix/bin/openclaw"
         runtime=root/'runtime'; runtime.mkdir()
         (root/'mirror/config').mkdir(parents=True)
         (root/'mirror/config/openclaw-target.txt').write_text('2026.8.1\n')
+        (root/'mirror/scripts').mkdir(parents=True,exist_ok=True)
+        (root/'mirror/scripts/openclaw-maintenance-retry.sh').write_text((HERE.parent/'openclaw-maintenance-retry.sh').read_text())
         (root/'core-exit').write_text(str(doctor_exit))
         for name,text in [('node',self.NODE),('npm',self.NPM.replace('{root}',str(root)))]:
             tool=runtime/name; tool.write_text(text); tool.chmod(0o755)
@@ -345,6 +359,47 @@ ln -s ../lib/node_modules/openclaw/openclaw.mjs "$prefix/bin/openclaw"
         self.assertIn('gateway-stop',events)
         self.assertIn('system-start',events)
         self.assertNotIn('configuration accepted',result.stdout)
+
+    def maintenance_validator(self,root,refusals):
+        """An openclaw whose validate is refused for maintenance `refusals` times, then accepts."""
+        counter=root/'refusals'
+        counter.write_text(str(refusals))
+        cli=root/'bin/openclaw'
+        # Replaced, never written through: the fixture's core may be a link.
+        cli.unlink(missing_ok=True)
+        cli.write_text(f'''#!/bin/sh
+printf 'validate\\n' >> '{root}/events'
+left=$(cat '{counter}')
+if [ "$left" -gt 0 ]; then
+  echo $((left-1)) > '{counter}'
+  echo 'OpenClaw config could not be read: <root>: read failed: Error: OpenClaw state at /state/openclaw.sqlite is undergoing offline maintenance; retry when it finishes.' >&2
+  exit 1
+fi
+echo '{{"valid":true}}'
+''')
+        cli.chmod(0o755)
+
+    def test_core_validation_asks_again_while_the_core_is_under_maintenance(self):
+        """F4: a validate that lands in a gateway start's bootstrap is asked again, not failed."""
+        root,worker,_=self.core_fixture()
+        self.maintenance_validator(root,1)
+        result=subprocess.run(['/bin/bash',str(worker),'openclaw_install'],capture_output=True,text=True,timeout=30,
+                              env={**os.environ,'CLAWBOX_OPENCLAW_MAINTENANCE_PAUSE_S':'1'})
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('configuration accepted',result.stdout)
+        self.assertEqual((root/'events').read_text().splitlines().count('validate'),2)
+        self.assertFalse((root/'guard').exists())
+
+    def test_core_validation_still_under_maintenance_is_busy_not_refused(self):
+        root,worker,_=self.core_fixture()
+        self.maintenance_validator(root,99)
+        result=subprocess.run(['/bin/bash',str(worker),'openclaw_install'],capture_output=True,text=True,timeout=30,
+                              env={**os.environ,'CLAWBOX_OPENCLAW_MAINTENANCE_WINDOW_S':'2','CLAWBOX_OPENCLAW_MAINTENANCE_PAUSE_S':'1'})
+        self.assertEqual(result.returncode,75,result.stderr)
+        self.assertIn('still finishing maintenance',result.stderr)
+        self.assertNotIn('configuration accepted',result.stdout)
+        self.assertFalse((root/'guard').exists())
+        self.assertIn('system-start',(root/'events').read_text())
 
     def test_concurrent_core_steps_never_overlap(self):
         root,worker,_=self.core_fixture()

@@ -494,7 +494,9 @@ d("gateway pre-start: the config-repair block's own edges", () => {
     // SIGTERM-only on purpose — a SIGKILL mid-import is what leaves the
     // `.doctor-importing` claim file this same block has to clear.
     const src = block();
-    expect(src).toContain('timeout -k 5 60 "$OPENCLAW_BIN" config validate --json');
+    // The validator goes through the maintenance retry wrapper, which the bound
+    // ends together with the command; doctor does not (its output streams).
+    expect(src).toContain('timeout -k 5 60 "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" config validate --json');
     expect(src).toContain('timeout 180 "$OPENCLAW_BIN" doctor --fix --non-interactive');
     expect(src).not.toContain('timeout -k 5 180 "$OPENCLAW_BIN" doctor');
   });

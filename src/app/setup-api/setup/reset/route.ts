@@ -22,6 +22,7 @@ import path from "@/lib/runtime-path";
 import crypto from "crypto";
 import { startRootStep } from "@/lib/root-step-runner";
 import { readDesktopBrowserConfig } from "@/lib/desktop-browser-config";
+import { runUnitJob } from "@/lib/gateway-unit-job";
 
 const execFile = promisify(execFileCb);
 
@@ -326,7 +327,16 @@ async function maskAndStopGateway(): Promise<void> {
     console.warn("[Reset] Failed to mask gateway:", err instanceof Error ? err.message : err);
   }
   try {
-    await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "stop", "clawbox-gateway.service"], { timeout: 15_000 });
+    // Waited for on the unit when the stop outlives its client: on an x64
+    // bridge it waits for OpenClaw's own drain, and the wipe must not start
+    // beside a gateway that is still writing its state.
+    const stop = await runUnitJob("/usr/bin/sudo", ["/usr/bin/systemctl", "stop", "clawbox-gateway.service"], {
+      unit: "clawbox-gateway.service",
+      timeoutMs: 15_000,
+    });
+    if (stop.kind === "in-flight") {
+      console.warn(`[Reset] clawbox-gateway was still stopping after ${Math.round(stop.waitedMs / 1000)}s; wiping anyway`);
+    }
   } catch (err) {
     console.warn("[Reset] Failed to stop gateway before wipe:", err instanceof Error ? err.message : err);
   }

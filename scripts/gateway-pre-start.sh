@@ -24,6 +24,12 @@ CLAWBOX_HOME_DIR="${CLAWBOX_HOME_DIR:-${HOME:-/home/clawbox}}"
 CLAWBOX_ROOT="${CLAWBOX_ROOT:-$CLAWBOX_HOME_DIR/clawbox}"
 CLAWBOX_PORT="${CLAWBOX_PORT:-80}"
 OPENCLAW_BIN="${OPENCLAW_BIN:-$CLAWBOX_HOME_DIR/.npm-global/bin/openclaw}"
+# Every `openclaw` below that reads the config goes through this: the core
+# refuses such a command while another process holds its state for offline
+# maintenance and says to retry when it finishes (see the script). A call site
+# spells it "${OPENCLAW_RETRY:-/usr/bin/env}", so a block run on its own still runs.
+OPENCLAW_RETRY="$SCRIPT_DIR/openclaw-maintenance-retry.sh"
+[ -x "$OPENCLAW_RETRY" ] || OPENCLAW_RETRY=/usr/bin/env
 OPENCLAW_CONFIG="${OPENCLAW_CONFIG:-${CLAWBOX_OPENCLAW_HOME:-${OPENCLAW_HOME:-$CLAWBOX_HOME_DIR/.openclaw}}/openclaw.json}"
 # Every `openclaw` below, and the scripts this one launches, must read and
 # write THAT file. The CLI does not look at OPENCLAW_CONFIG: it takes
@@ -335,7 +341,7 @@ clawbox_exec_approvals_blocker() {
 # config is the subject, which is every other caller.
 clawbox_core_config_verdict() {
   local out rc=0
-  out="$(OPENCLAW_CONFIG_PATH="${1:-$OPENCLAW_CONFIG}" timeout -k 5 60 "$OPENCLAW_BIN" config validate --json 2>/dev/null)" || rc=$?
+  out="$(OPENCLAW_CONFIG_PATH="${1:-$OPENCLAW_CONFIG}" timeout -k 5 60 "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" config validate --json 2>/dev/null)" || rc=$?
   # EXIT 0 IS ACCEPTANCE unless the core's own payload contradicts it
   # (TASK-741). Requiring stdout to parse as JSON on TOP of a zero exit made a
   # core that exits 0 with empty, banner-prefixed or non-JSON output answer
@@ -355,10 +361,13 @@ clawbox_core_config_verdict() {
   # would spend 180 s of doctor on every start of a box whose config is fine.
   case "$rc" in
     0|1) ;;
+    # The retry wrapper's own answer: the core was still finishing maintenance
+    # on its state at the end of its window. Busy, not a verdict.
+    75) printf 'unknown\tOpenClaw was still finishing maintenance on its state\n'; return 0 ;;
     *) printf 'unknown\tthe validator did not answer (exit %s)\n' "$rc"; return 0 ;;
   esac
   CLAWBOX_VERDICT_JSON="$out" CLAWBOX_VERDICT_RC="$rc" python3 <<'PY'
-import json, os, sys
+import json, os, re, sys
 
 # Exit 0 with no readable verdict is still acceptance: the exit code IS the
 # answer, and a banner is not a contradiction. Exit 1 with no readable verdict
@@ -384,6 +393,17 @@ if doc.get("valid") is not False:
     # contradicting itself, and neither half is worth a stamp or a doctor run:
     # say so and ask again next boot.
     _no_verdict("the validator's exit code and its verdict disagree")
+# The core's maintenance refusal arrives as `valid: false` on `<root>` ("read
+# failed … undergoing offline maintenance; retry when it finishes"). It says who
+# holds the state, not what is wrong with the config: no verdict, never a
+# refusal worth 180 s of doctor.
+if any(
+    isinstance(issue, dict)
+    and re.search(r"retry (?:when it|after maintenance) finishes", str(issue.get("message", "")), re.I)
+    for issue in doc.get("issues") or []
+):
+    print("unknown\tOpenClaw's state was under offline maintenance")
+    sys.exit(0)
 parts = []
 for issue in doc.get("issues") or []:
     if not isinstance(issue, dict):
@@ -4289,7 +4309,7 @@ PY
 )" || LEGACY_CODEX_PRIMARY=""
 if [ -n "$LEGACY_CODEX_PRIMARY" ]; then
   NEW_CODEX_PRIMARY="codex/${LEGACY_CODEX_PRIMARY#*/}"
-  if "$OPENCLAW_BIN" config set agents.defaults.model.primary "$NEW_CODEX_PRIMARY" >/dev/null 2>&1; then
+  if "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" config set agents.defaults.model.primary "$NEW_CODEX_PRIMARY" >/dev/null 2>&1; then
     echo "  Migrated primary model $LEGACY_CODEX_PRIMARY -> $NEW_CODEX_PRIMARY (openai-codex provider renamed to codex in OpenClaw 2026.6.x)"
   else
     echo "  WARN: failed to migrate $LEGACY_CODEX_PRIMARY -> $NEW_CODEX_PRIMARY; Codex chats may fail with 'Unknown model'"
@@ -4430,7 +4450,7 @@ PY
 # `enabled: false`.
 clawbox_plugin_disable() {
   local id="$1"
-  timeout -k 5 60 "$OPENCLAW_BIN" config set "$(clawbox_plugin_enabled_path "$id")" false --strict-json \
+  timeout -k 5 60 "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" config set "$(clawbox_plugin_enabled_path "$id")" false --strict-json \
     >/dev/null 2>&1 || true
   CLAWBOX_PLUGIN_ID="$id" python3 - "$OPENCLAW_CONFIG" <<'PY' 2>/dev/null
 import json, os, sys
@@ -4453,7 +4473,7 @@ PY
 # when the file itself now says `enabled: true`.
 clawbox_plugin_reenable() {
   local id="$1"
-  timeout -k 5 60 "$OPENCLAW_BIN" config set "$(clawbox_plugin_enabled_path "$id")" true --strict-json \
+  timeout -k 5 60 "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" config set "$(clawbox_plugin_enabled_path "$id")" true --strict-json \
     >/dev/null 2>&1 || true
   CLAWBOX_PLUGIN_ID="$id" python3 - "$OPENCLAW_CONFIG" <<'PY' 2>/dev/null
 import json, os, sys
@@ -4826,10 +4846,10 @@ clawbox_run_openclaw_capture() {
   CLAWBOX_CLI_OUT=""
   file="$(mktemp 2>/dev/null)" || file=""
   if [ -z "$file" ]; then
-    timeout -k 5 "$secs" "$OPENCLAW_BIN" "$@" </dev/null >/dev/null 2>&1 || rc=$?
+    timeout -k 5 "$secs" "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" "$@" </dev/null >/dev/null 2>&1 || rc=$?
     return "$rc"
   fi
-  timeout -k 5 "$secs" "$OPENCLAW_BIN" "$@" </dev/null >"$file" 2>&1 || rc=$?
+  timeout -k 5 "$secs" "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" "$@" </dev/null >"$file" 2>&1 || rc=$?
   # `cat` has no grandchildren, so this substitution cannot stall the way the
   # one above would.
   CLAWBOX_CLI_OUT="$(cat "$file" 2>/dev/null || true)"
@@ -5116,7 +5136,7 @@ clawbox_consent_states_load() {
   # plugin that makes that call cost tens of seconds on an Orin. One CLI start
   # answers for every id, which is what keeps this affordable in a blocking
   # ExecStartPre.
-  timeout -k 5 60 "$OPENCLAW_BIN" plugins inspect --all --json </dev/null >"$file" 2>/dev/null || rc=$?
+  timeout -k 5 60 "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins inspect --all --json </dev/null >"$file" 2>/dev/null || rc=$?
   if [ "$rc" != "0" ]; then
     rm -f "$file" 2>/dev/null || true
     CLAWBOX_CONSENT_STATES_READY=2
@@ -5439,7 +5459,7 @@ fi
 # on the box — over the codex plugin-repair probe.
 if [ ! -f "$CODEX_PLUGIN_DIR/package.json" ]; then
   CODEX_PLUGIN_DIR_FOUND="$(
-    timeout -k 5 20 "$OPENCLAW_BIN" plugins list --json 2>/dev/null |
+    timeout -k 5 20 "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins list --json 2>/dev/null |
       python3 -c 'import json, os, sys
 try:
     data = json.load(sys.stdin)
@@ -5473,7 +5493,7 @@ if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ -f "$CODEX_PLUGIN_DIR/package.json" ]; 
   # `-k 5` for the reason spelled out above the sibling call: without it the
   # ceiling is not one, because a survivor holds this substitution's pipe.
   CODEX_REGISTRY_DEPS_OK="$(
-    timeout -k 5 20 "$OPENCLAW_BIN" plugins list --json 2>/dev/null |
+    timeout -k 5 20 "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins list --json 2>/dev/null |
       python3 -c 'import json, sys
 try:
     data = json.load(sys.stdin)
@@ -5789,11 +5809,11 @@ SEEDPY
       # finds the landed key no longer at its literal and retries only the rest.
       CLAWBOX_JOBS_OK=1
       if [ "$CLAWBOX_JOBS_WRITES" != "[]" ] \
-        && ! timeout -k 5 90 "$OPENCLAW_BIN" config set --batch-json "$CLAWBOX_JOBS_WRITES" >/dev/null 2>&1; then
+        && ! timeout -k 5 90 "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" config set --batch-json "$CLAWBOX_JOBS_WRITES" >/dev/null 2>&1; then
         CLAWBOX_JOBS_OK=0
       fi
       if [ "$CLAWBOX_JOBS_OK" = "1" ] && [ "$CLAWBOX_JOBS_UNSET" = "1" ] \
-        && ! timeout -k 5 90 "$OPENCLAW_BIN" config unset agents.defaults.heartbeat.every >/dev/null 2>&1; then
+        && ! timeout -k 5 90 "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" config unset agents.defaults.heartbeat.every >/dev/null 2>&1; then
         CLAWBOX_JOBS_OK=0
       fi
       if [ "$CLAWBOX_JOBS_OK" != "1" ]; then
@@ -6606,7 +6626,9 @@ if update_owns_box; then
   echo "  Local embeddings check skipped: an update owns this box (the next gateway start after it runs the check)"
 elif [ -x "$LOCAL_EMBEDDINGS" ]; then
   mkdir -p "$(dirname "$LOCAL_EMBEDDINGS_LOG")" 2>/dev/null || true
-  setsid nohup "$LOCAL_EMBEDDINGS" --no-download >>"$LOCAL_EMBEDDINGS_LOG" 2>&1 &
+  # It runs while this gateway starts: told so, it writes the config only once
+  # the gateway has started (a write inside startup admission is exit 78).
+  CLAWBOX_AFTER_GATEWAY_START=1 setsid nohup "$LOCAL_EMBEDDINGS" --no-download >>"$LOCAL_EMBEDDINGS_LOG" 2>&1 &
   echo "  Local embeddings check running in the background (see $LOCAL_EMBEDDINGS_LOG)"
 else
   echo "  WARN: $LOCAL_EMBEDDINGS missing; semantic memory keeps whatever embeddings provider is configured"
@@ -7457,7 +7479,7 @@ PY
       printf '%s' "$up"
     }
     CLAWBOX_HOOK_BEGAN="$(clawbox_hook_uptime || true)"
-    CLAWBOX_HOOK_JSON="$(timeout -k 5 "$CLAWBOX_HOOK_CEILING" "$OPENCLAW_BIN" plugins inspect "$CLAWBOX_HOOK_PLUGIN_ID" --runtime --json 2>"$CLAWBOX_HOOK_ERR_FILE")" \
+    CLAWBOX_HOOK_JSON="$(timeout -k 5 "$CLAWBOX_HOOK_CEILING" "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" plugins inspect "$CLAWBOX_HOOK_PLUGIN_ID" --runtime --json 2>"$CLAWBOX_HOOK_ERR_FILE")" \
       || CLAWBOX_HOOK_RC=$?
     CLAWBOX_HOOK_ENDED="$(clawbox_hook_uptime || true)"
     if [ -n "$CLAWBOX_HOOK_BEGAN" ] && [ -n "$CLAWBOX_HOOK_ENDED" ]; then

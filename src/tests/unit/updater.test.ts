@@ -32,6 +32,20 @@ vi.mock("child_process", () => ({
   spawn: vi.fn(),
 }));
 
+// The real maintenance retry, with no window: a case here that feeds the core's
+// "retry when it finishes" is about what the updater makes of the answer that
+// is left, and must not wait out 25 s of asks to get there.
+vi.mock("@/lib/openclaw-maintenance", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/openclaw-maintenance")>();
+  return {
+    ...actual,
+    withOpenclawMaintenanceRetry: <T,>(
+      attempt: (timeoutMs: number) => Promise<T>,
+      options: Parameters<typeof actual.withOpenclawMaintenanceRetry>[1],
+    ) => actual.withOpenclawMaintenanceRetry(attempt, { ...options, windowMs: 0 }),
+  };
+});
+
 // `realpath` beside `readFile`: readBuildId follows `.next/standalone/server.js`
 // through the link `postbuild` writes for the NESTED standalone layout, so a
 // mock without it would make every case that reaches the entry throw inside
@@ -3122,6 +3136,9 @@ describe("updater", () => {
       expect(mockSetMany).toHaveBeenCalledWith(
         expect.objectContaining({ update_needs_continuation: undefined }),
       );
+      // Let the continuation it started finish here: left running, it reached
+      // the next case's mocks and was counted there.
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
     });
 
     it("retries the plugin repairs an older core left, once the gateway is known healthy (TASK-1088)", async () => {
@@ -3976,6 +3993,42 @@ describe("updater", () => {
       const state = await runContinuation();
 
       expect(state.error).not.toContain("refuses this device's configuration");
+      expect(state.error).toContain("gateway crashed for an unrelated reason");
+    });
+
+    it("says nothing when the validator was refused for the core's own maintenance", async () => {
+      // F4, 2026-10-15: while a gateway start or a doctor run holds the state,
+      // the pinned core answers `config validate --json` with exit 1 and
+      // `valid:false` on `<root>` — "read failed … undergoing offline
+      // maintenance; retry when it finishes". That is about who holds the state,
+      // not about the config, and is no verdict at all.
+      setupExecFileMock({
+        "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+        "/usr/bin/journalctl -u clawbox-gateway.service": {
+          stdout: "gateway crashed for an unrelated reason\n",
+          stderr: "",
+        },
+        [DOCTOR]: new Error("Command failed: openclaw doctor --fix"),
+        [VALIDATE]: Object.assign(new Error("Command failed"), {
+          stdout: JSON.stringify({
+            ok: false,
+            valid: false,
+            issues: [{
+              path: "<root>",
+              message: "read failed at /home/clawbox/.openclaw/openclaw.json: Error: OpenClaw state at /home/clawbox/.openclaw/state/openclaw.sqlite is undergoing offline maintenance; retry when it finishes.",
+            }],
+          }),
+          stderr: "",
+        }),
+        ping: { stdout: "", stderr: "" },
+        systemctl: { stdout: "", stderr: "" },
+        openclaw: { stdout: "1.0.0", stderr: "" },
+      });
+
+      const state = await runContinuation();
+
+      expect(state.error).not.toContain("refuses this device's configuration");
+      expect(state.error).not.toContain("offline maintenance");
       expect(state.error).toContain("gateway crashed for an unrelated reason");
     });
 

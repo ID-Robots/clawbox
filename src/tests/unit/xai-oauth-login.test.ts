@@ -259,6 +259,49 @@ describe("the login in flight", () => {
 
   const PROMPT = "Open https://example.test/device\nCode: ABCD-1234\n";
 
+  // F4, 2026-10-15: the pinned core refuses every command that reads its config
+  // while a gateway start or a doctor run holds the state, and says to retry.
+  // The sign-in had not begun, so the start is asked again; one that already
+  // showed its code never is.
+  const MAINTENANCE = "OpenClaw state at /state/openclaw.sqlite is undergoing offline maintenance; retry when it finishes.\n";
+
+  it("asks again when the core refused the start for maintenance, then shows the code", async () => {
+    const first = child;
+    const second = fakeChild();
+    let spawned = 0;
+    xaiLoginSpawn.spawn = (_bin, args) => {
+      spawnArgs = args;
+      spawned += 1;
+      return (spawned === 1 ? first : second) as unknown as ChildProcess;
+    };
+    const started = startXaiLogin({ replaceExisting: false });
+    first.stderr.emit("data", Buffer.from(MAINTENANCE));
+    first.emit("close", 1);
+    await vi.advanceTimersByTimeAsync(2_000);
+    second.stdout.emit("data", Buffer.from(PROMPT));
+    await vi.advanceTimersByTimeAsync(250);
+    expect(spawned).toBe(2);
+    expect(await started).toMatchObject({ status: "pending", userCode: "ABCD-1234" });
+  });
+
+  it("gives up in plain words on a core that stays under maintenance", async () => {
+    let spawned = 0;
+    xaiLoginSpawn.spawn = () => {
+      spawned += 1;
+      const refused = fakeChild();
+      setTimeout(() => {
+        refused.stderr.emit("data", Buffer.from(MAINTENANCE));
+        refused.emit("close", 1);
+      }, 0);
+      return refused as unknown as ChildProcess;
+    };
+    const started = startXaiLogin({ replaceExisting: false });
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(await started).toMatchObject({ status: "failed", detail: expect.stringMatching(/finishing maintenance/) });
+    expect(spawned).toBeGreaterThan(1);
+    expect(spawned).toBeLessThanOrEqual(18);
+  });
+
   it("answers start with the URL and code as soon as the CLI prints them", async () => {
     const answer = await startWith(() => {
       child.stdout.emit("data", Buffer.from("Open https://example.test/device\nCode: ABCD-1234\n"));

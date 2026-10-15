@@ -357,16 +357,39 @@ describe("/setup-api/system/timezone", () => {
     expect(mockConfigSet).not.toHaveBeenCalled();
   });
 
-  it("re-offers over an ADOPTED zone, so a box that changed hands is not stuck", async () => {
-    // "First browser to open the desktop wins for ever" strands a box QA'd in
-    // one country and used in another: there is no other way to change it.
+  it("never lets a second browser in another zone move an ADOPTED zone", async () => {
+    // Owner's ruling, 2026-10-15: adopted once, then only Settings changes it.
+    // Two of the owner's browsers in different zones rewrote it all day, and
+    // two of those harness writes landed inside a gateway's startup.
     storeHas("Europe/Sofia", "adopted");
     const mod = await import("@/app/setup-api/system/timezone/route");
 
-    const body = await (await mod.POST(post({ timezone: "America/New_York", adopt: true }))).json();
+    const body = await (await mod.POST(post({ timezone: "Europe/Berlin", adopt: true }))).json();
+
+    expect(body.changed).toBe(false);
+    expect(body.timezone).toBe("Europe/Sofia");
+    expect(mockStartRootStep).not.toHaveBeenCalled();
+    expect(mockConfigSet).not.toHaveBeenCalled();
+  });
+
+  it("does not let another zone ride the retry of an adopted zone that never landed", async () => {
+    storeHas("Europe/Sofia", "adopted", false);
+    const mod = await import("@/app/setup-api/system/timezone/route");
+
+    const body = await (await mod.POST(post({ timezone: "Europe/Berlin", adopt: true }))).json();
+
+    expect(body.changed).toBe(false);
+    expect(mockConfigSet).not.toHaveBeenCalled();
+  });
+
+  it("still changes an adopted zone when the owner sets one in Settings", async () => {
+    storeHas("Europe/Sofia", "adopted");
+    const mod = await import("@/app/setup-api/system/timezone/route");
+
+    const body = await (await mod.POST(post({ timezone: "Europe/Berlin" }))).json();
 
     expect(body.changed).toBe(true);
-    expect(body.timezone).toBe("America/New_York");
+    expect(body.timezone).toBe("Europe/Berlin");
   });
 
   it("costs nothing when the same zone is offered again to a box that took it", async () => {
@@ -517,7 +540,15 @@ describe("/setup-api/system/timezone", () => {
     expect(body.timezone).toBe("Europe/Sofia");
     expect(typeof body.os).toBe("string");
     expect(body.applied).toBe(true);
-    expect(body.acceptsAdoption).toBe(true);
+    // Adopted and landed: no browser's offer is taken any more.
+    expect(body.acceptsAdoption).toBe(false);
+  });
+
+  it("takes an offer only while the box has no zone, or still owes the harness its adopted one", async () => {
+    const mod = await import("@/app/setup-api/system/timezone/route");
+    expect((await (await mod.GET()).json()).acceptsAdoption).toBe(true);
+    storeHas("Europe/Sofia", "adopted", false);
+    expect((await (await mod.GET()).json()).acceptsAdoption).toBe(true);
   });
 
   it("tells a browser not to offer over a zone a person chose", async () => {

@@ -40,6 +40,12 @@ import {
   type UpdateLockHolder,
 } from "./update-lock";
 import { hasX64DesktopIntegration, hasX64Install, X64_DESKTOP_CORE_STEP_TIMEOUT_MS } from "./x64-integration";
+import { UNIT_JOB_SETTLE_BUDGET_MS, describeUnitState, runUnitJob } from "./gateway-unit-job";
+import {
+  OpenclawStateMaintenanceError,
+  isOpenclawMaintenanceRefusal,
+  withOpenclawMaintenanceRetry,
+} from "./openclaw-maintenance";
 import {
   X64_ROOT_STEPS_SKIPPED,
   classifyX64RootStepExit,
@@ -2089,11 +2095,13 @@ async function runOpenclawDoctorFix(): Promise<void> {
   // No openclaw binary on the Hermes edition — nothing to doctor.
   if (openclawIsAbsent()) return;
   try {
-    await execFile(openclawBin(), ["doctor", "--fix", "--yes", "--non-interactive"], {
-      timeout: DOCTOR_FIX_TIMEOUT_MS,
+    // Asked again while another holder has the state under maintenance: the
+    // core refuses before it acts (`@/lib/openclaw-maintenance`).
+    await withOpenclawMaintenanceRetry((timeout) => execFile(openclawBin(), ["doctor", "--fix", "--yes", "--non-interactive"], {
+      timeout,
       maxBuffer: 2 * 1024 * 1024,
       env: doctorChildEnv(),
-    });
+    }), { timeoutMs: DOCTOR_FIX_TIMEOUT_MS, label: "openclaw doctor --fix" });
   } catch (err) {
     // WHICH failure this was, and what the owner can do about it (TASK-754).
     // A doctor blocked by a legacy exec-approvals file migrated NOTHING, and
@@ -2184,8 +2192,12 @@ async function askCoreToValidateConfig(): Promise<CoreConfigVerdict | null> {
   let accepted = true;
   let text: string;
   try {
-    const { stdout } = await execFile(openclawBin(), ["config", "validate", "--json"], {
-      timeout: 60_000,
+    // A validate that lands while a gateway start or a doctor run holds the
+    // state is refused with "retry when it finishes", worded as `valid:false`
+    // on `<root>`. Asked again; still refused, it is NO verdict (below), never
+    // the core refusing this device's configuration.
+    const { stdout } = await withOpenclawMaintenanceRetry((timeout) => execFile(openclawBin(), ["config", "validate", "--json"], {
+      timeout,
       maxBuffer: 2 * 1024 * 1024,
       // SIGKILL at the deadline, the counterpart of the `-k 5` the boot
       // script's validate bounds carry (TASK-741): node's `execFile` sends
@@ -2198,9 +2210,10 @@ async function askCoreToValidateConfig(): Promise<CoreConfigVerdict | null> {
       // every later doctor exactly as the original file does.
       killSignal: "SIGKILL",
       env: openclawChildEnv(),
-    });
+    }), { timeoutMs: 60_000, label: "openclaw config validate" });
     text = stdout ?? "";
   } catch (err) {
+    if (err instanceof OpenclawStateMaintenanceError) return null;
     // The core prints the verdict as JSON on stdout and exits 1 when it
     // refuses. Any other non-zero exit carries no verdict at all.
     accepted = false;
@@ -2229,6 +2242,9 @@ async function askCoreToValidateConfig(): Promise<CoreConfigVerdict | null> {
       return { accepted, payload: null };
     }
     text = commandOutput(err);
+    // The core's maintenance refusal is about who holds the state, not about
+    // the config: no verdict, whatever its payload says.
+    if (isOpenclawMaintenanceRefusal(text)) return null;
   }
   let parsed: unknown;
   try {
@@ -2302,11 +2318,21 @@ async function setGatewayMaintenanceMask(masked: boolean): Promise<void> {
 }
 
 async function stopGatewayForMaintenance(): Promise<void> {
-  await execFile(
-    "/usr/bin/sudo",
-    ["-n", "/usr/bin/systemctl", "stop", "clawbox-gateway.service"],
-    { timeout: 30_000, maxBuffer: 1024 * 1024 },
-  );
+  // The unit's own stop deadline is the client's 30 s too, so a drain that
+  // uses all of it outlives the client by the moment systemd takes to kill.
+  // That stop is waited for on the unit, never reported as a failure, and
+  // never raced: a gateway still draining is a second writer of the state the
+  // maintenance step is about to touch.
+  const stop = await runUnitJob("/usr/bin/sudo", ["-n", "/usr/bin/systemctl", "stop", "clawbox-gateway.service"], {
+    unit: "clawbox-gateway.service",
+    timeoutMs: 30_000,
+  });
+  if (stop.kind === "in-flight") {
+    throw new Error(`clawbox-gateway was still stopping ${Math.round(stop.waitedMs / 1000)}s after it was asked to — not starting maintenance beside it`);
+  }
+  if (stop.kind === "settled" && stop.state.activeState === "active") {
+    throw new Error(`clawbox-gateway did not stop: it is ${describeUnitState(stop.state)}`);
+  }
 }
 
 async function removeGatewayMaintenanceMask(): Promise<void> {
@@ -3110,11 +3136,11 @@ async function clearRepairMarkerAfterPayloadRepair(pluginId: string): Promise<vo
   const switchedOff = await clawboxDisabledEntryId(pluginId).catch(() => null);
   if (switchedOff) {
     try {
-      await execFile(
+      await withOpenclawMaintenanceRetry((timeout) => execFile(
         openclawBin(),
         ["plugins", "enable", switchedOff, "--accept-capabilities"],
-        { timeout: 60_000, maxBuffer: 4 * 1024 * 1024 },
-      );
+        { timeout, maxBuffer: 4 * 1024 * 1024 },
+      ), { timeoutMs: 60_000, label: "openclaw plugins enable" });
     } catch (err) {
       console.warn(
         `[Updater] "${switchedOff}" was reinstalled but could not be switched back on; `
@@ -3230,11 +3256,11 @@ async function reinstallManagedPluginPayload(
   let lastError: unknown;
   for (const spec of specs) {
     try {
-      await execFile(
+      await withOpenclawMaintenanceRetry((timeout) => execFile(
         openclawBin(),
         ["plugins", "install", spec, "--force", "--accept-capabilities"],
-        { timeout: 360_000, maxBuffer: 4 * 1024 * 1024 },
-      );
+        { timeout, maxBuffer: 4 * 1024 * 1024 },
+      ), { timeoutMs: 360_000, label: "openclaw plugins install" });
       return true;
     } catch (err) {
       lastError = err;
@@ -3269,11 +3295,11 @@ async function reinstallManagedPluginPayload(
  */
 async function recordPluginCapabilityConsent(pluginId: string): Promise<void> {
   try {
-    await execFile(
+    await withOpenclawMaintenanceRetry((timeout) => execFile(
       openclawBin(),
       ["plugins", "enable", pluginId, "--accept-capabilities"],
-      { timeout: 60_000, maxBuffer: 4 * 1024 * 1024 },
-    );
+      { timeout, maxBuffer: 4 * 1024 * 1024 },
+    ), { timeoutMs: 60_000, label: "openclaw plugins enable" });
     // The OTHER repair path for the same state (TASK-606). A marker the boot
     // script wrote and only the boot script cleared would leave a permanent
     // "Needs repair" badge on a plugin this update just consented — the false
@@ -3464,7 +3490,7 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
     // doctor/pre-start migrations or rewrite the owner's providers/sessions.
     gatewayNeedsRecovery = false;
     if (await waitForGateway(GATEWAY_HEALTH_WAIT_MS)) return;
-    await restartGateway({ awaitReady: false });
+    await restartGateway({ awaitReady: false, restartSettleMs: UNIT_JOB_SETTLE_BUDGET_MS });
     if (await waitForGateway(GATEWAY_RECOVERY_WAIT_MS)) return;
     throw new Error("The existing OpenClaw user gateway did not become ready. Check its service logs before retrying the update.");
   }
@@ -3477,7 +3503,7 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
     // the appliance's repairs. Its sudoers grant carries this restart.
     gatewayNeedsRecovery = false;
     if (!options.restartFirst && await waitForGateway(GATEWAY_HEALTH_WAIT_MS)) return;
-    await restartGateway({ awaitReady: false });
+    await restartGateway({ awaitReady: false, restartSettleMs: UNIT_JOB_SETTLE_BUDGET_MS });
     if (await waitForGateway(GATEWAY_RECOVERY_WAIT_MS)) return;
     throw new Error(await describeDeadGateway(await readGatewayJournalTail()));
   }
@@ -3512,7 +3538,7 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
   // read that turns "not listening" into a diagnosis. A throw from inside
   // restartGateway would abort the function before the legacy-state quarantine
   // it exists to perform ever ran.
-  await restartGateway({ awaitReady: false });
+  await restartGateway({ awaitReady: false, restartSettleMs: UNIT_JOB_SETTLE_BUDGET_MS });
   if (await waitForGateway(GATEWAY_RECOVERY_WAIT_MS)) return;
 
   const beforeRecoveryLog = await readGatewayJournalTail();
@@ -3524,7 +3550,7 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
     await quarantineLegacyOpenclawState();
     await runOpenclawDoctorFix();
   });
-  await restartGateway({ awaitReady: false });
+  await restartGateway({ awaitReady: false, restartSettleMs: UNIT_JOB_SETTLE_BUDGET_MS });
   if (await waitForGateway(GATEWAY_RECOVERY_WAIT_MS)) return;
 
   const afterRecoveryLog = await readGatewayJournalTail();
