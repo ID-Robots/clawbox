@@ -219,3 +219,148 @@ describe("judgeMachineText", () => {
     expect(isMachineText(text)).toBe(false);
   });
 });
+
+// The live import over a home folder: one sample of each kind it met. Three
+// got through — a server log whose messages read like prose, a one-line
+// base64 blob, a TSV dump whose empty last columns were trimmed away.
+describe("the integration test's machine text", () => {
+  /** Deterministic base64 of `n` pseudo-random bytes. */
+  const base64 = (n: number) => {
+    let seed = 42;
+    return Buffer.from(Array.from({ length: n }, () => (seed = (seed * 1103515245 + 12345) % 2147483648) & 0xff)).toString("base64");
+  };
+
+  const SAMPLES: Record<string, { text: string; kind: string }> = {
+    "a CSV export": {
+      kind: "table",
+      text: lines(
+        "id,name,email,created_at,plan,mrr",
+        '1,"Smith, John",john@example.com,2026-01-02 10:00:00,pro,49.00',
+        '2,"Doe, Jane",jane@example.com,2026-01-03 11:00:00,free,0.00',
+        '3,"Brown, Bob",bob@example.com,2026-01-04 12:00:00,team,199.00',
+        '4,"White, Ann",ann@example.com,2026-01-05 13:00:00,pro,49.00',
+        '5,"Green, Tom",tom@example.com,2026-01-06 14:00:00,free,0.00',
+      ),
+    },
+    "a TSV dump in .md whose last columns are often empty": {
+      kind: "table",
+      text: `# Export\n\n${Array.from({ length: 10 }, (_, i) => `row${i}\tvalue ${i}\t${i % 2 ? "" : "x"}\t${i % 3 ? "" : "y"}`).join("\n")}\n`,
+    },
+    "a base64 blob on one line": { kind: "encoded", text: base64(6_000) },
+    "a data URI under a line naming it": { kind: "encoded", text: `Attachment: photo.png\n\ndata:image/png;base64,${base64(3_000)}` },
+    "a wrapped base64 blob": { kind: "encoded", text: base64(3_000).match(/.{1,76}/g)!.join("\n") },
+    "an env key=value dump": {
+      kind: "keyvalue",
+      text: lines("SHELL=/bin/bash", "HOME=/home/user", "LANG=en_US.UTF-8", "PATH=/usr/local/bin:/usr/bin:/bin", "XDG_SESSION_TYPE=wayland", "DISPLAY=:0", "TERM=xterm-256color"),
+    },
+    "a hexdump -C": {
+      kind: "encoded",
+      text: Array.from({ length: 10 }, (_, i) => `${(i * 16).toString(16).padStart(8, "0")}  48 65 6c 6c 6f 2c 20 77  6f 72 6c 64 21 0a 00 00  |Hello, world!...|`).join("\n"),
+    },
+    "a server log whose messages read like prose": {
+      kind: "log",
+      text: lines(
+        "2026-10-14T08:12:01.233Z Server listening on port 3000",
+        "2026-10-14T08:12:01.410Z Connected to the database at localhost",
+        "2026-10-14T08:12:02.007Z Loaded 14 routes from the routes folder",
+        "2026-10-14T08:12:04.131Z Cache warmed up with 230 entries in memory",
+        "2026-10-14T08:15:44.902Z Request from the dashboard took a long time",
+        "2026-10-14T08:16:02.118Z Scheduled the nightly backup for three in the morning",
+      ),
+    },
+    "a bracketed date-time log": {
+      kind: "log",
+      text: Array.from({ length: 8 }, (_, i) => `[2026-10-14 08:1${i}:01] Handling the request for the user profile page number ${i}`).join("\n"),
+    },
+    "an Apache error log": {
+      kind: "log",
+      text: Array.from({ length: 6 }, (_, i) =>
+        `[Wed Oct 14 08:1${i}:01.233456 2026] [core:error] [pid 41${i}] [client 192.0.2.10:51522] AH00124: Request exceeded the limit of internal redirects due to a configuration error.`,
+      ).join("\n"),
+    },
+    "docker compose logs": {
+      kind: "log",
+      text: Array.from({ length: 8 }, (_, i) => `web-1  | 2026-10-14T08:1${i}:01.000Z GET /health answered in good time for the probe`).join("\n"),
+    },
+  };
+
+  const KEPT: Record<string, string> = {
+    "an RFC": lines(
+      "Network Working Group                                          J. Postel",
+      "Request for Comments: 791                                            ISI",
+      "                                                           September 1981",
+      "",
+      "                           INTERNET PROTOCOL",
+      "",
+      "1.  INTRODUCTION",
+      "",
+      "  The Internet Protocol is designed for use in interconnected systems of",
+      "  packet-switched computer communication networks.  Such a system has",
+      '  been called a "catenet".  The internet protocol provides for',
+      "  transmitting blocks of data called datagrams from sources to",
+      "  destinations, where sources and destinations are hosts identified by",
+      "  fixed length addresses.",
+    ),
+    "a Project Gutenberg book": lines(
+      "The Project Gutenberg eBook of The Art of War",
+      "",
+      "This ebook is for the use of anyone anywhere in the United States and",
+      "most other parts of the world at no cost and with almost no restrictions",
+      "whatsoever. You may copy it, give it away or re-use it under the terms",
+      "of the Project Gutenberg License included with this ebook or online",
+      "at www.gutenberg.org.",
+      "",
+      "Title: The Art of War",
+      "Author: Sun Tzu",
+      "Release date: May 1, 1994 [eBook #132]",
+    ),
+    "a Wikipedia article in markdown": lines(
+      "# Black hole",
+      "",
+      "A **black hole** is a region of [spacetime](spacetime) wherein gravity is so strong that nothing can escape it.",
+      "",
+      "| Property | Value |",
+      "|---|---|",
+      "| Type | Astronomical object |",
+      "",
+      "The boundary of no escape is called the event horizon. It has a great effect on an object crossing it.",
+      "General relativity predicts that a sufficiently compact mass can deform spacetime to form a black hole.",
+    ),
+    "a transcript with elapsed times": lines(
+      "00:00:01 Welcome back to the show, today we talk about gardening in the city.",
+      "00:00:09 My guest has grown tomatoes on a balcony for more than ten years.",
+      "00:00:17 We start with the soil, because that is where most people go wrong.",
+      "00:00:25 Then the watering, which matters more than any fertiliser you can buy.",
+      "00:00:34 And at the end a few words about the pests that like balconies too.",
+      "00:00:41 So let us begin with the question everybody asks me first.",
+    ),
+    "a journal stamped to the minute": lines(
+      "2026-10-01T08:30 Started the new job today and met most of the team over coffee.",
+      "2026-10-02T09:15 Long day of onboarding; the laptop finally arrived in the afternoon.",
+      "2026-10-03T08:45 First real task: cleaning up the old customer list with Priya.",
+      "2026-10-06T07:50 Weekend hike to the lake was cold but the views were worth it.",
+      "2026-10-07T18:20 Presented the cleanup plan and it went better than I expected.",
+      "2026-10-08T21:05 Booked flights for the conference in Lisbon next month.",
+    ),
+    "a short note with an inline picture": `Photo of the whiteboard after the planning meeting with the whole team.\n\n![board](data:image/png;base64,${base64(3_000)})\n`,
+  };
+
+  for (const [name, sample] of Object.entries(SAMPLES)) {
+    it(`leaves out ${name}`, () => {
+      const v = judgeMachineText(sample.text);
+      expect(v.machine, JSON.stringify(v)).toBe(true);
+      expect(v.kind).toBe(sample.kind);
+    });
+  }
+
+  for (const [name, text] of Object.entries(KEPT)) {
+    it(`keeps ${name}`, () => {
+      const v = judgeMachineText(text);
+      expect(v.machine, JSON.stringify(v)).toBe(false);
+    });
+  }
+
+  it("still keeps a short line of base64 too small to be a blob", () => {
+    expect(isMachineText(base64(300))).toBe(false);
+  });
+});
