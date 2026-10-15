@@ -254,13 +254,13 @@ state/              the exact pre-update bytes the automatic rollback puts back:
 doctor.log          the new core's migration output, once it ran.
 
 The previous core is retained at $NPM_PREFIX/lib/node_modules/.openclaw-previous until the next
-core replacement. To go back by hand, with the gateway stopped
-(sudo systemctl stop clawbox-gateway.service):
-  1. copy state/ back over $INSTALL_HOME/.openclaw (state/config/openclaw.json is
+core replacement. To go back by hand:
+  1. stop the gateway through its bridge, as root: systemctl stop clawbox-gateway.service
+  2. copy state/ back over $INSTALL_HOME/.openclaw (state/config/openclaw.json is
      $INSTALL_HOME/.openclaw/openclaw.json; the other paths mirror the state directory);
-  2. put the previous core back: move .openclaw-previous to
+  3. put the previous core back: move .openclaw-previous to
      $NPM_PREFIX/lib/node_modules/openclaw (or: npm install -g openclaw@$current --prefix $NPM_PREFIX);
-  3. sudo systemctl start clawbox-gateway.service
+  4. start it again, as root: systemctl restart clawbox-gateway.service
 Package rollback alone never reverses a migration: the state must go back with it.
 EOF
 }
