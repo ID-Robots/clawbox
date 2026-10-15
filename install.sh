@@ -6915,7 +6915,11 @@ step_openclaw_config() {
     fi
     oc_config_set auth.profiles.deepseek:default '{"provider":"deepseek","mode":"api_key"}' --json
     oc_config_set models.providers.deepseek "$CLAWBOX_AI_PROVIDER_JSON" --json
-    oc_config_set agents.defaults.model.fallback "deepseek/deepseek-chat"
+    # `fallbacks`, a LIST: the core has no singular `fallback` key and refused
+    # this write with "Unrecognized key" on every core since the line was added,
+    # which ended the step here under errexit (the harness-contract CI job now
+    # checks every key against the pinned schema).
+    oc_config_set agents.defaults.model.fallbacks '["deepseek/deepseek-chat"]' --json
     echo "  ClawBox AI fallback model configured"
     # Deliberately no image provider here, unlike configureClawboxAi() in
     # src/app/setup-api/ai-models/configure/route.ts and the migration in
