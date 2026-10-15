@@ -71,6 +71,7 @@ import { describeChatSwap, reportAnthropicChatFailure, TurnLedger } from '@/lib/
 import { RunFailureLedger, withFailureNote } from '@/lib/chat-run-failure'
 import { NEW_APP_EVENT, CHAT_MESSAGE_EVENT, FIX_ERROR_EVENT, VOICE_SETTINGS_CHANGED_EVENT, buildFixErrorPrompt, dispatchOpenApp, onCodingAgentChanged, onProvidersChanged, type ChatMessageDetail, type FixErrorContext, dispatchOpenCodingRun } from '@/lib/ui-events'
 import { speechTextFor } from '@/lib/speech-text'
+import { SHORT_SPEECH_MAX_CHARS, shortSpeechTextFor, shortSpeechTextFromStream } from '@/lib/short-speech-text'
 import { SKILL_CHANGE_EVENT, buildSkillChangeMessage, type SkillChangeEvent } from '@/lib/skill-change-message'
 import { isSentinel, isInterSessionEnvelope } from '@/lib/chat-sentinels'
 import { useModalDialog } from '@/hooks/useModalDialog'
@@ -200,6 +201,13 @@ const SPOKEN_REPLIES_KEPT = 12
 const SPEAK_REPLY_TIMEOUT_MS = 150_000
 /** The longest one spoken reply holds the queue while playing (a capped reply is ~100 s of speech). */
 const PLAYBACK_MAX_MS = 150_000
+/**
+ * How far into a streaming reply the chat keeps looking for its short spoken
+ * answer (Settings → Voice → "Short spoken answers"). Three sentences of prose
+ * settle in a few hundred characters; a reply still unsettled this far in is
+ * code or tables, and is spoken from its final instead.
+ */
+const STREAM_SPEECH_SCAN_CHARS = 20_000
 /**
  * The refusals of `tts/speak` that mean "not now" rather than "not this": the
  * voice did not answer (a hung cloud, a Kokoro past its deadline) or the box
@@ -3396,6 +3404,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             // keeps the directives and their cards.
             if (text && !isSentinel(streamingEmailRefsText(text)) && !isInterSessionEnvelope(text, msg)) {
               applyStreaming(text); setReloadingSkill(false)
+              // Short spoken answers start from here, not from the final.
+              speakFromStreamRef.current(runIdRef.current, text)
             }
           } else if (state === 'final') {
             // A generated picture arrives as a MEDIA: line inside the reply
@@ -3456,6 +3466,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             // The run this final closes, for the ack-only branch below (the
             // ref is cleared two lines down).
             const finishedRun = runIdRef.current
+            // A final that was not spoken above (already on screen, an ack, an
+            // envelope) still closes a run the stream may have spoken: its clip
+            // joins the bubble already showing the reply, if one is.
+            endStreamedSpeechRef.current(finishedRun, alreadyShownWithMedia ? text : null)
             applyStreaming('')
             // A reply another model wrote — the picked one failed and the
             // gateway's configured fallback answered. The `final` frame does
@@ -3545,9 +3559,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
             // saw.
             const kept = dropUnfinishedDirective(streamingRef.current)
             applyStreaming('')
-            if (kept.trim() && !isSentinel(streamingEmailRefsText(kept))) {
+            const keptShown = Boolean(kept.trim()) && !isSentinel(streamingEmailRefsText(kept))
+            if (keptShown) {
               setMessages(msgs => [...msgs, { role: 'assistant', text: kept, timestamp: Date.now() }])
             }
+            // An answer the stream already spoke stays with what was kept of it.
+            endStreamedSpeechRef.current(runIdRef.current, keptShown ? kept : null)
             // A Stop used to leave the question with nothing under it — no
             // partial answer when none had arrived yet, and no sign the reply
             // was stopped rather than lost (2026-10-13 smoke test).
@@ -4660,6 +4677,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // states it moves it, so a box that predates the switch leaves it off. A
   // ref and not state: nothing renders it, and a landing reply reads it.
   const voiceAutoPlayAllRef = useRef(false)
+  // Settings → Voice → "Short spoken answers": the voice says the reply's
+  // answer — a sentence or three, src/lib/short-speech-text.ts — and starts as
+  // soon as the stream has settled it, while the bubble keeps every word (see
+  // speakFromStream). Off until the box says otherwise, by the same rule as the
+  // two switches above, so a box that predates it reads the whole reply out.
+  const voiceShortSpokenRef = useRef(false)
   // Whether the owner is at the chat right now: the popup open and its tab
   // the one on screen. Auto-play asks twice — when a typed question's reply
   // lands, and again the moment its sound would start — because a turn
@@ -4748,7 +4771,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // through its own harness. `autoReply` alone decides.
     fetch('/setup-api/tts', { cache: 'no-store' })
       .then(res => (res.ok ? res.json() : null))
-      .then((data: { autoReply?: unknown; autoPlayAll?: unknown; engines?: unknown } | null) => {
+      .then((data: { autoReply?: unknown; autoPlayAll?: unknown; shortSpoken?: unknown; engines?: unknown } | null) => {
         if (!active || settingsMovedSinceRead) return
         // Only a body that actually STATES the switch moves it. A refusal or a
         // server error answers an error object, and `data?.autoReply !== false`
@@ -4759,6 +4782,8 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // The auto-play switch by the same rule: a server that predates it
         // says nothing, and nothing said is off.
         if (typeof data?.autoPlayAll === 'boolean') voiceAutoPlayAllRef.current = data.autoPlayAll
+        // Short spoken answers, likewise.
+        if (typeof data?.shortSpoken === 'boolean') voiceShortSpokenRef.current = data.shortSpoken
         // Only a body that LISTS engines moves this, exactly as the event path
         // below does. A refusal or an error object has no `engines` key, and
         // reading that as "nothing known" would put a box that had already
@@ -4772,10 +4797,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // silent until the page was reloaded — and, worse, left one that had lost
     // it asked for a clip on every single reply.
     const onChanged = (e: Event) => {
-      const detail = (e as CustomEvent<{ autoReply?: unknown; autoPlayAll?: unknown; engines?: unknown }>).detail
+      const detail = (e as CustomEvent<{ autoReply?: unknown; autoPlayAll?: unknown; shortSpoken?: unknown; engines?: unknown }>).detail
       settingsMovedSinceRead = true
       if (typeof detail?.autoReply === 'boolean') setVoiceAutoReply(detail.autoReply)
       if (typeof detail?.autoPlayAll === 'boolean') voiceAutoPlayAllRef.current = detail.autoPlayAll
+      // Optional on the event (src/lib/ui-events.ts): a writer that does not
+      // name it leaves the chat's reading alone.
+      if (typeof detail?.shortSpoken === 'boolean') voiceShortSpokenRef.current = detail.shortSpoken
       if (detail && 'engines' in detail) voiceCanSpeakRef.current = speechEngineAvailable(detail.engines)
     }
     window.addEventListener(VOICE_SETTINGS_CHANGED_EVENT, onChanged)
@@ -4839,14 +4867,27 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
    * `onlyWithOwner`, so the sound still starts only if the owner is at the
    * chat when it does (see ownerAtTheChat); otherwise the clip stays on its
    * bubble, as it would have by default.
+   *
+   * What it says is the reply's words — all of them, or with Settings → Voice
+   * → "Short spoken answers" on, its answer alone (shortSpeechTextFor). The
+   * bubble is never touched: it keeps every word either way.
+   *
+   * `text` is the reply as its bubble shows it, which is how the clip finds
+   * that bubble — or, for a reply still STREAMING (speakFromStream), a promise
+   * of it that settles when the reply lands (null: it never did). Then
+   * `words` says what to speak, nothing waits for the bubble, and the clip
+   * and any failure line go onto it once it is there.
    */
   const speakReply = useCallback(async (
-    text: string,
+    text: string | Promise<string | null>,
     audio: string[],
-    { play = true, onlyWithOwner = false }: { play?: boolean; onlyWithOwner?: boolean } = {},
+    { play = true, onlyWithOwner = false, words: given }: { play?: boolean; onlyWithOwner?: boolean; words?: string } = {},
   ) => {
     if (!voiceAutoReplyRef.current) return
-    const words = audio.length > 0 ? '' : speechTextFor(text)
+    const known = typeof text === 'string' ? text : null
+    const words = audio.length > 0
+      ? ''
+      : given ?? (known === null ? '' : voiceShortSpokenRef.current ? shortSpeechTextFor(known) : speechTextFor(known))
     if (audio.length === 0 && !words) return
     // One at a time, in order, PLAYBACK INCLUDED — chained on the previous
     // reply, whatever became of it, so a second answer never talks over the
@@ -4881,7 +4922,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // Asked of the bubbles that EXIST: a transcript this reply has not been
       // painted into yet says nothing either way, and reading that as "already
       // spoken" would skip every clip on a fast box.
-      const waiting = messagesRef.current.filter(m => m.role === 'assistant' && m.text === text)
+      const waiting = messagesRef.current.filter(m => m.role === 'assistant' && m.text === known)
       if (!play && waiting.length > 0 && waiting.every(m => (m.audio?.length ?? 0) > 0)) return
       let res: Response | null = null
       let blob: Blob | null = null
@@ -4932,18 +4973,27 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         if (speechGenerationRef.current === generation && voiceAutoReplyRef.current && aloud()) {
           const code = res ? await replyRefusalCode(res) : null
           if (code !== 'switched_off' && voiceAutoReplyRef.current) {
+            const noAnswer = !res || res.status === 429 || SPEAK_NO_ANSWER_CODES.has(code ?? '')
             // The reply's bubble, by its timestamp. One not painted yet as
             // this lands is named by where the transcript ends now instead:
             // its bubble is the first with these words from there on, so a
             // later reply that says the same thing never inherits the line.
-            const transcript = messagesRef.current
-            const bubble = [...transcript].reverse().find(m => m.role === 'assistant' && m.text === text)
-            setSpeakFailure({
-              text,
-              timestamp: bubble?.timestamp ?? null,
-              after: transcript.length,
-              noAnswer: !res || res.status === 429 || SPEAK_NO_ANSWER_CODES.has(code ?? ''),
-            })
+            const report = (bubbleText: string | null) => {
+              if (bubbleText === null || speechGenerationRef.current !== generation) return
+              const transcript = messagesRef.current
+              const bubble = [...transcript].reverse().find(m => m.role === 'assistant' && m.text === bubbleText)
+              setSpeakFailure({
+                text: bubbleText,
+                timestamp: bubble?.timestamp ?? null,
+                after: transcript.length,
+                noAnswer,
+              })
+            }
+            // A reply still streaming has no bubble to put the line under
+            // yet: it goes there when the reply lands, without holding the
+            // queue of spoken replies until then.
+            if (known !== null) report(known)
+            else void Promise.resolve(text).then(report)
           }
         }
         return
@@ -4986,22 +5036,31 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       }
       // Onto the bubble it answers — the newest assistant bubble with this
       // text and no audio yet — so it can be played again from the transcript.
-      setMessages(prev => {
-        for (let i = prev.length - 1; i >= 0; i--) {
-          const m = prev[i]
-          if (m.role === 'assistant' && m.text === text && !(m.audio?.length)) {
-            const next = [...prev]
-            next[i] = { ...m, audio: [url] }
-            return next
+      const attach = (bubbleText: string | null) => {
+        // A streaming reply's clip is attached when the reply lands, which
+        // can be after the conversation went or the ring let the clip go.
+        if (bubbleText === null || speechGenerationRef.current !== generation || !spokenUrlsRef.current.includes(url)) return
+        setMessages(prev => {
+          for (let i = prev.length - 1; i >= 0; i--) {
+            const m = prev[i]
+            if (m.role === 'assistant' && m.text === bubbleText && !(m.audio?.length)) {
+              const next = [...prev]
+              next[i] = { ...m, audio: [url] }
+              return next
+            }
           }
-        }
-        // Nobody took it: another clip won the race for that bubble (the
-        // gateway's late supplement), or the bubble has gone. It stays in the
-        // ring, which now releases by age rather than by reference and so
-        // reclaims it — deciding here instead would mean trusting an updater's
-        // result synchronously, which React does not promise.
-        return prev
-      })
+          // Nobody took it: another clip won the race for that bubble (the
+          // gateway's late supplement), or the bubble has gone. It stays in
+          // the ring, which now releases by age rather than by reference and
+          // so reclaims it — deciding here instead would mean trusting an
+          // updater's result synchronously, which React does not promise.
+          return prev
+        })
+      }
+      // A reply still streaming plays NOW — the point of starting early —
+      // and its clip joins the bubble once the reply has landed.
+      if (known !== null) attach(known)
+      else void Promise.resolve(text).then(attach)
       if (aloud()) await playReply(url)
     } catch { /* the reply is on screen; the voice was a bonus */ }
     finally { release() }
@@ -5053,6 +5112,14 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
    *    screen — when the reply lands and again when its sound would start
    *    (`onlyWithOwner`). A turn the owner walked away from finishes into a
    *    clip to press, never a voice in an empty room.
+   *
+   * With "Short spoken answers" on, a clip that came WITH the reply — Hermes'
+   * chat route, a gateway that spoke for itself, one stored in the history —
+   * is the whole reply read out. It is played only when the whole reply is
+   * already short; otherwise the chat says the answer itself and that clip
+   * stays on its bubble, to press. One short synthesis, and only for a reply
+   * that is being played: a clip nobody plays is left exactly as it came, and
+   * so is one on a box that has said it has no voice to make another with.
    */
   const voiceReply = useCallback(async (
     aloud: boolean,
@@ -5061,7 +5128,13 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     audio: string[],
     { live = true }: { live?: boolean } = {},
   ) => {
-    if (aloud) { await speakReply(text, audio); return }
+    const played = voiceShortSpokenRef.current
+      && audio.length > 0
+      && voiceCanSpeakRef.current !== false
+      && speechTextFor(text).length > SHORT_SPEECH_MAX_CHARS
+      ? []
+      : audio
+    if (aloud) { await speakReply(text, played); return }
     if (typedReplyAutoPlays({
       asked,
       live,
@@ -5070,13 +5143,41 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       hasClip: audio.length > 0,
       owedAClip: chatOwesAClip(asked, audio),
     })) {
-      await speakReply(text, audio, { onlyWithOwner: true })
+      await speakReply(text, played, { onlyWithOwner: true })
       return
     }
     if (!chatOwesAClip(asked, audio)) return
     await speakReply(text, [], { play: false })
   }, [speakReply, chatOwesAClip, ownerAtTheChat])
+  /**
+   * The run whose reply the STREAM has already given its voice (see
+   * speakFromStream), and `landed`, which hands that clip the reply's bubble
+   * text once the run is over (null: no bubble holds the reply).
+   */
+  const streamedSpeechRef = useRef<{ runKey: string; landed: (bubbleText: string | null) => void } | null>(null)
+  /** The run `runKey` is over without a final reply: its streamed voice keeps `kept`'s bubble, or none. */
+  const endStreamedSpeech = useCallback((runKey: string | null, kept: string | null) => {
+    const streamed = streamedSpeechRef.current
+    if (!runKey || streamed?.runKey !== runKey) return
+    streamedSpeechRef.current = null
+    streamed.landed(kept)
+  }, [])
+  const endStreamedSpeechRef = useRef(endStreamedSpeech)
+  useEffect(() => { endStreamedSpeechRef.current = endStreamedSpeech }, [endStreamedSpeech])
   const maybeSpeakReply = useCallback(async (runKey: string | null, text: string, audio: string[]) => {
+    // Short spoken answers: the stream already said this reply's answer, and
+    // spent the marks when it did. The final only hands that clip its bubble;
+    // the clip a harness attached (Hermes) keeps the bubble and waits to be
+    // pressed. Never spoken again, even where the finished text is not
+    // byte for byte what streamed: Hermes streams a turn's messages run
+    // together and stores them a blank line apart, so the same answer would
+    // be said twice.
+    const streamed = streamedSpeechRef.current
+    if (runKey && streamed?.runKey === runKey) {
+      streamedSpeechRef.current = null
+      streamed.landed(text)
+      return
+    }
     // Both marks are read and SPENT here, so a final the gateway re-delivers
     // cannot buy a second synthesis of the same words.
     const aloud = Boolean(runKey) && voiceTurnKeyRef.current === runKey
@@ -5085,6 +5186,57 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     if (asked) askedTurnKeyRef.current = null
     await voiceReply(aloud, asked, text, audio)
   }, [voiceReply])
+  /**
+   * Short spoken answers, as fast as the reply allows: called with the whole
+   * reply so far on every streamed delta of the live run `runKey`, and the
+   * first time short-speech-text says the answer is settled, it is spoken —
+   * before the reply has finished streaming, often long before.
+   *
+   * Only a reply that is going to be PLAYED starts early, decided exactly as
+   * voiceReply decides it when the reply lands: a spoken question's answer,
+   * or a typed one with auto-play on, the owner at the chat and a clip it
+   * would have had anyway (the chat's own, or — Hermes — the one its chat
+   * route attaches, which the short answer stands in for). A clip to press
+   * is nobody's wait, and is made from the final as before. The run's marks
+   * are SPENT here, as the final would have spent them, so the final, a
+   * re-delivery, an ack-only refetch or a return to the tab says nothing
+   * again. A settled answer is the one shortSpeechTextFor picks from any
+   * reply that goes on from this text (src/lib/short-speech-text.ts), so a
+   * reply spoken here sounds as one that only settled at its final does.
+   */
+  const speakFromStream = useCallback((runKey: string | null, textSoFar: string) => {
+    if (!runKey || !voiceShortSpokenRef.current || !voiceAutoReplyRef.current) return
+    if (streamedSpeechRef.current?.runKey === runKey) return
+    // A box that has said it has no voice is not raced: its final does
+    // exactly what it always did.
+    if (voiceCanSpeakRef.current === false) return
+    const aloud = voiceTurnKeyRef.current === runKey
+    const asked = askedTurnKeyRef.current === runKey
+    if (!aloud && !typedReplyAutoPlays({
+      asked,
+      live: true,
+      present: ownerAtTheChat(),
+      autoPlayAll: voiceAutoPlayAllRef.current,
+      hasClip: spokenReplyTriggerRef.current === 'box',
+      owedAClip: chatOwesAClip(asked, []),
+    })) return
+    // A reply whose answer has not settled this far in is a wall of code or
+    // a table; its final says what there is to say, and the stream stops
+    // re-reading an ever longer text on every delta.
+    if (textSoFar.length > STREAM_SPEECH_SCAN_CHARS) return
+    const words = shortSpeechTextFromStream(textSoFar)
+    if (words === null) return
+    if (aloud) voiceTurnKeyRef.current = null
+    if (asked) askedTurnKeyRef.current = null
+    // An earlier run's that never ended here (its tab was left) lets go.
+    streamedSpeechRef.current?.landed(null)
+    let landed: (bubbleText: string | null) => void = () => {}
+    const bubble = new Promise<string | null>((resolve) => { landed = resolve })
+    streamedSpeechRef.current = { runKey, landed }
+    void speakReply(bubble, [], { words, onlyWithOwner: !aloud })
+  }, [speakReply, chatOwesAClip, ownerAtTheChat])
+  const speakFromStreamRef = useRef(speakFromStream)
+  useEffect(() => { speakFromStreamRef.current = speakFromStream }, [speakFromStream])
   useEffect(() => { voiceReplyRef.current = voiceReply }, [voiceReply])
   const maybeSpeakReplyRef = useRef(maybeSpeakReply)
   useEffect(() => { maybeSpeakReplyRef.current = maybeSpeakReply }, [maybeSpeakReply])
@@ -5977,7 +6129,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // A run that has already ended (Stop, or a late frame after the final)
         // must not reopen the caret, so a delta is only painted while this run
         // is still the live one.
-        if (event.kind === 'delta' && runIdRef.current === idempotencyKey) applyStreaming(event.text)
+        if (event.kind === 'delta' && runIdRef.current === idempotencyKey) {
+          applyStreaming(event.text)
+          // Short spoken answers start from here, not from the final.
+          speakFromStreamRef.current(idempotencyKey, event.text)
+        }
         // Live tool steps, through the SAME pills the gateway harness already
         // feeds. A hermes turn used to reach this callback with nothing but
         // text, so a turn that spent its time in `web_search` — measured at up
@@ -6067,9 +6223,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
       // split here would improve.
       const kept = dropUnfinishedDirective(streamingRef.current)
       applyStreaming('')
-      if (kept.trim() && !isSentinel(streamingEmailRefsText(kept))) {
+      const keptShown = Boolean(kept.trim()) && !isSentinel(streamingEmailRefsText(kept))
+      if (keptShown) {
         setMessages(prev => [...prev, { role: 'assistant', text: kept, timestamp: Date.now() }])
       }
+      // An answer the stream already spoke stays with what was kept of it.
+      endStreamedSpeechRef.current(idempotencyKey, keptShown ? kept : null)
       clearToolCalls()
       // The agent is no longer parked on anything, so neither is the customer.
       // A card outliving its turn is a control with nowhere to post to.
@@ -6445,6 +6604,12 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // act on. Stop is best-effort by design: a turn that could not be called
     // back finishes on its own, and a red banner about the Stop button would
     // tell the customer nothing they can do.
+    //
+    // With short spoken answers the turn can already be TALKING — its answer
+    // is spoken before the reply has finished streaming — and the voice is
+    // part of what the owner is stopping, whether it is sounding yet or still
+    // being made (an unnamed stop also keeps a queued one from starting).
+    if (runIdRef.current && streamedSpeechRef.current?.runKey === runIdRef.current) stopSpokenReply()
     try {
       await adapter.abortTurn()
     } catch (err) {

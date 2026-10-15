@@ -4,6 +4,7 @@ import ChatPopup, { speakFailureIsNewest } from "@/components/ChatPopup";
 import { resetHarnessCache } from "@/lib/client-harness";
 import { VOICE_SETTINGS_CHANGED_EVENT } from "@/lib/ui-events";
 import { _resetSpokenReplyPlaybackForTests } from "@/lib/spoken-reply-playback";
+import { speechTextFor } from "@/lib/speech-text";
 
 // The same ceiling the sibling chat suites take: under a full-suite run every
 // worker gets a slice of the box's cores and the 5 s default expires on
@@ -71,6 +72,22 @@ let finalDelayMs = 1;
 let ttsGate: Promise<void> | null = null;
 /** The page's visibility, as the chat reads it. */
 let pageVisibility: DocumentVisibilityState = "visible";
+/**
+ * Settings → Voice → "Short spoken answers", as `/setup-api/tts` states it;
+ * `undefined` sends no field at all — a server from before it.
+ */
+let shortSpokenAnswer: boolean | undefined = undefined;
+/**
+ * The reply as the gateway STREAMS it before its final: each entry the whole
+ * reply so far, one `delta` frame apiece, `deltaGapMs` apart.
+ */
+let streamDeltas: string[] = [];
+const deltaGapMs = 2;
+/**
+ * When set, the final of every turn after the chat's own opener waits for
+ * this — so a test can look at the chat while the reply is still streaming.
+ */
+let finalGate: Promise<void> | null = null;
 /** Every socket the chat opened, newest last — so a test can drop one. */
 const sockets: FakeGatewayWs[] = [];
 
@@ -148,8 +165,27 @@ class FakeGatewayWs {
         },
       },
     };
-    setTimeout(() => this.emit(final), finalDelayMs);
-    if (duplicateFinal) setTimeout(() => this.emit(final), finalDelayMs + 5);
+    streamDeltas.forEach((soFar, i) => {
+      setTimeout(() => this.emit({
+        type: "event",
+        event: "chat",
+        payload: {
+          runId,
+          sessionKey: "agent:main:main",
+          state: "delta",
+          message: { role: "assistant", content: [{ type: "text", text: soFar }] },
+        },
+      }), 1 + i * deltaGapMs);
+    });
+    const streamed = streamDeltas.length * deltaGapMs;
+    // The chat's own opener is the first send; only the owner's turns wait.
+    const gate = sentFrames.filter((f) => f.method === "chat.send").length > 1 ? finalGate : null;
+    const emitFinal = () => {
+      setTimeout(() => this.emit(final), finalDelayMs + streamed);
+      if (duplicateFinal) setTimeout(() => this.emit(final), finalDelayMs + streamed + 5);
+    };
+    if (gate) void gate.then(emitFinal);
+    else emitFinal();
     if (supplementAudio) {
       setTimeout(() => this.emit({
         type: "event",
@@ -252,6 +288,7 @@ function installFetch() {
           choice: "auto",
           autoReply: autoReplyAnswer,
           ...(autoPlayAllAnswer !== undefined ? { autoPlayAll: autoPlayAllAnswer } : {}),
+          ...(shortSpokenAnswer !== undefined ? { shortSpoken: shortSpokenAnswer } : {}),
           ...(ttsEngines ? { engines: ttsEngines } : {}),
         };
         if (ttsGate) await ttsGate;
@@ -311,6 +348,9 @@ describe("spoken replies in the desktop chat", () => {
     finalDelayMs = 1;
     ttsGate = null;
     pageVisibility = "visible";
+    shortSpokenAnswer = undefined;
+    streamDeltas = [];
+    finalGate = null;
     Object.defineProperty(document, "visibilityState", { configurable: true, get: () => pageVisibility });
     sockets.length = 0;
     resetHarnessCache();
@@ -1184,6 +1224,289 @@ describe("spoken replies in the desktop chat", () => {
     await waitFor(() => expect(screen.getByTestId("chat-audio")).toHaveAttribute("src", "blob:spoken-reply"));
     await settleAfterTheTurn();
     expect(play).not.toHaveBeenCalled();
+  });
+
+  // ── Short spoken answers ──────────────────────────────────────────────
+  //
+  // Settings → Voice's third switch: on, the voice says the reply's ANSWER —
+  // its first sentences, src/lib/short-speech-text.ts — and starts as soon as
+  // the stream has settled them, before the reply has finished; the bubble
+  // keeps every word. Off — the default, and what a box that predates the
+  // switch reads — the whole reply is read out at its final, as above.
+
+  const ANSWER = "**Yes** — last night's backup ran at 03:00 and finished cleanly. Nothing needs doing. It took four minutes.";
+  /** What the voice says of LONG_REPLY with short answers on. */
+  const SHORT_ANSWER = "Yes — last night's backup ran at 03:00 and finished cleanly. Nothing needs doing. It took four minutes.";
+  /** A reply whose whole spoken text runs well past 300 characters. */
+  const LONG_REPLY = [
+    ANSWER,
+    "",
+    "Here is what it ran:",
+    "",
+    "```bash",
+    "rsync -a /home /mnt/backup",
+    "```",
+    "",
+    "The full log is in the backup folder, and the next run is tomorrow night. If you like, I can send you a summary every morning, or only warn you when a run fails. Backups older than thirty days are pruned on their own, so the disk will not fill up.",
+  ].join("\n");
+  /** LONG_REPLY as the gateway streams it: the answer has settled by the fourth frame. */
+  const LONG_DELTAS = [
+    "**Yes** — last night's backup ran at 03:00",
+    "**Yes** — last night's backup ran at 03:00 and finished cleanly. Nothing needs doing.",
+    ANSWER,
+    `${ANSWER}\n\nHere is what it ran:`,
+    LONG_REPLY.slice(0, LONG_REPLY.indexOf("rsync")),
+    LONG_REPLY,
+  ];
+  const speakBody = (text: string) => JSON.stringify({ text, formats: ["mp3"] });
+  /** Hold every owner's turn's final until the returned function is called. */
+  function holdTheFinal(): () => void {
+    let open: () => void = () => {};
+    finalGate = new Promise<void>((resolve) => { open = resolve; });
+    return () => open();
+  }
+  /** Type a question whose reply is held mid-stream: waits for ITS send, not its end. */
+  async function askWhileItStreams(question = "did the backup run?") {
+    const textarea = await screen.findByRole("textbox");
+    await waitFor(() => expect(textarea).not.toBeDisabled());
+    fireEvent.change(textarea, { target: { value: question } });
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    await waitFor(() => expect(sends()).toBeGreaterThanOrEqual(2));
+  }
+  /** The reply's last words are on screen in the chat's opener AND the reply streaming now. */
+  async function waitForTheWholeStream() {
+    await waitFor(() => expect(screen.getAllByText(/pruned on their own/)).toHaveLength(2));
+  }
+
+  it("speaks only the short answer of a spoken question, before the reply has finished streaming", async () => {
+    shortSpokenAnswer = true;
+    replyText = LONG_REPLY;
+    streamDeltas = LONG_DELTAS;
+    const releaseFinal = holdTheFinal();
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await speakIntoTheChat();
+    // Asked for and PLAYING while the turn is still running — its final has
+    // not even been sent.
+    await waitFor(() => expect(speakBodies).toEqual([speakBody(SHORT_ANSWER)]));
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId("chat-stop")).toBeInTheDocument();
+
+    await act(async () => { releaseFinal(); });
+    await waitFor(() => expect(screen.queryByTestId("chat-turn-status")).toBeNull());
+    // The bubble keeps every word of the reply, the code and the detail the
+    // voice left out included...
+    expect(screen.getAllByText(/pruned on their own/)).toHaveLength(2);
+    expect(screen.getAllByText(/rsync -a \/home \/mnt\/backup/)).toHaveLength(2);
+    // ...and the clip that was said joins it, to play again.
+    await waitFor(() => expect(screen.getByTestId("chat-audio")).toHaveAttribute("src", "blob:spoken-reply"));
+    // The final did not say it a second time.
+    await settleAfterTheTurn();
+    expect(speakBodies).toHaveLength(1);
+    expect(play).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads the whole reply out at its final, exactly as before, while short answers are off", async () => {
+    shortSpokenAnswer = false;
+    replyText = LONG_REPLY;
+    streamDeltas = LONG_DELTAS;
+    const releaseFinal = holdTheFinal();
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await speakIntoTheChat();
+    await waitForTheWholeStream();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(speakBodies).toEqual([]);
+
+    await act(async () => { releaseFinal(); });
+    await waitFor(() => expect(speakBodies).toEqual([speakBody(speechTextFor(LONG_REPLY))]));
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+  });
+
+  it("reads the whole reply out on a box that predates the switch", async () => {
+    // No `shortSpoken` field at all: off, as on the box.
+    replyText = LONG_REPLY;
+    streamDeltas = LONG_DELTAS;
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await speakIntoTheChat();
+    await waitFor(() => expect(speakBodies).toEqual([speakBody(speechTextFor(LONG_REPLY))]));
+  });
+
+  it("plays a typed reply's short answer while it streams, once auto-play is on", async () => {
+    shortSpokenAnswer = true;
+    autoPlayAllAnswer = true;
+    replyText = LONG_REPLY;
+    streamDeltas = LONG_DELTAS;
+    const releaseFinal = holdTheFinal();
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await askWhileItStreams();
+    await waitFor(() => expect(speakBodies).toEqual([speakBody(SHORT_ANSWER)]));
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId("chat-stop")).toBeInTheDocument();
+
+    await act(async () => { releaseFinal(); });
+    await waitFor(() => expect(screen.queryByTestId("chat-turn-status")).toBeNull());
+    await settleAfterTheTurn();
+    expect(speakBodies).toHaveLength(1);
+    expect(play).toHaveBeenCalledTimes(1);
+  });
+
+  it("makes a typed reply's clip to press from its short answer, at the final, while auto-play is off", async () => {
+    // Nobody is waiting to hear it, so nothing is raced from the stream.
+    shortSpokenAnswer = true;
+    replyText = LONG_REPLY;
+    streamDeltas = LONG_DELTAS;
+    const releaseFinal = holdTheFinal();
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await askWhileItStreams();
+    await waitForTheWholeStream();
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(speakBodies).toEqual([]);
+
+    await act(async () => { releaseFinal(); });
+    await waitFor(() => expect(speakBodies).toEqual([speakBody(SHORT_ANSWER)]));
+    expect(await screen.findByTestId("chat-audio")).toHaveAttribute("src", "blob:spoken-reply");
+    await settleAfterTheTurn();
+    expect(play).not.toHaveBeenCalled();
+  });
+
+  it("speaks a short reply that never settled from its final, once", async () => {
+    // Two words could still become three sentences until the reply ends.
+    shortSpokenAnswer = true;
+    streamDeltas = ["**Fine**", "**Fine**, thanks."];
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await speakIntoTheChat();
+    await waitFor(() => expect(speakBodies).toEqual([SPEAK_BODY]));
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+    await settleAfterTheTurn();
+    expect(speakBodies).toHaveLength(1);
+    expect(play).toHaveBeenCalledTimes(1);
+  });
+
+  it("says the short answer instead of a long reply's own clip, and leaves that clip on the bubble", async () => {
+    // Hermes' chat route attaches the WHOLE reply read out; with short
+    // answers on, the chat says the answer itself.
+    shortSpokenAnswer = true;
+    replyText = LONG_REPLY;
+    replyAudio = "/home/clawbox/.openclaw/media/outbound/voice-1787260000000---aa.wav";
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await speakIntoTheChat();
+    await waitFor(() => expect(speakBodies).toEqual([speakBody(SHORT_ANSWER)]));
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+    expect((play.mock.contexts[0] as HTMLMediaElement).src).toBe("blob:spoken-reply");
+    // Both replies keep the clip they came with (the chat's opener carried
+    // one too, and was never played).
+    const players = screen.getAllByTestId("chat-audio").map((el) => el.getAttribute("src") ?? "");
+    expect(players).toHaveLength(2);
+    expect(players.every((src) => src.includes("/setup-api/chat/media"))).toBe(true);
+    await settleAfterTheTurn();
+    expect(play).toHaveBeenCalledTimes(1);
+  });
+
+  it("plays a long reply's own clip as it is on a box that has said it has no voice", async () => {
+    // Nothing could make the short answer, and the clip the reply came with
+    // still plays.
+    shortSpokenAnswer = true;
+    ttsEngines = [{ id: "local", configured: false }, { id: "cloud", configured: false }];
+    replyText = LONG_REPLY;
+    streamDeltas = LONG_DELTAS;
+    replyAudio = "/home/clawbox/.openclaw/media/outbound/voice-1787260000000---aa.wav";
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => expect(ttsReads).toBeGreaterThan(0));
+    await speakIntoTheChat();
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+    expect((play.mock.contexts[0] as HTMLMediaElement).src).toContain("/setup-api/chat/media");
+    await settleAfterTheTurn();
+    expect(speakBodies).toEqual([]);
+  });
+
+  it("plays a short reply's own clip as it is, and asks for nothing", async () => {
+    shortSpokenAnswer = true;
+    replyText = "Fine, thanks.";
+    replyAudio = "/home/clawbox/.openclaw/media/outbound/voice-1787260000000---aa.wav";
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await speakIntoTheChat();
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+    expect((play.mock.contexts[0] as HTMLMediaElement).src).toContain("/setup-api/chat/media");
+    await settleAfterTheTurn();
+    expect(speakBodies).toEqual([]);
+  });
+
+  it("speaks the short answer of a reply that only arrived through the history refetch", async () => {
+    // The replay sounds as the live reply would have.
+    shortSpokenAnswer = true;
+    ackOnly = true;
+    replyText = LONG_REPLY;
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await speakIntoTheChat();
+    await waitFor(() => expect(speakBodies).toEqual([speakBody(SHORT_ANSWER)]), { timeout: 8000 });
+  }, 12_000);
+
+  it("follows the short-answers switch live, and an event that does not name it leaves it alone", async () => {
+    replyText = LONG_REPLY;
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await waitFor(() => expect(ttsReads).toBeGreaterThan(0));
+    act(() => {
+      window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, { detail: { autoReply: true, autoPlayAll: false, shortSpoken: true } }));
+    });
+    await speakIntoTheChat();
+    await waitFor(() => expect(speakBodies).toEqual([speakBody(SHORT_ANSWER)]));
+
+    // A writer from before the switch names only the other two.
+    act(() => {
+      window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, { detail: { autoReply: true, autoPlayAll: false } }));
+    });
+    await speakIntoTheChat();
+    await waitFor(() => expect(speakBodies).toEqual([speakBody(SHORT_ANSWER), speakBody(SHORT_ANSWER)]));
+
+    // ...and off again: the whole reply.
+    act(() => {
+      window.dispatchEvent(new CustomEvent(VOICE_SETTINGS_CHANGED_EVENT, { detail: { shortSpoken: false } }));
+    });
+    await speakIntoTheChat();
+    await waitFor(() => expect(speakBodies[2]).toBe(speakBody(speechTextFor(LONG_REPLY))));
+  });
+
+  it("silences an answer spoken from the stream when the owner stops the turn", async () => {
+    shortSpokenAnswer = true;
+    replyText = LONG_REPLY;
+    streamDeltas = LONG_DELTAS;
+    holdTheFinal();
+    const media = holdPlayback();
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await speakIntoTheChat();
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+    const detached = play.mock.contexts[0] as HTMLMediaElement;
+    expect(media.isPlaying(detached)).toBe(true);
+    fireEvent.click(screen.getByTestId("chat-stop"));
+    expect(media.isPlaying(detached)).toBe(false);
+  });
+
+  it("keeps an answer spoken from the stream with what was kept of a run that ended without its final", async () => {
+    shortSpokenAnswer = true;
+    replyText = LONG_REPLY;
+    // The answer settles on the last frame that arrives; the final never does.
+    streamDeltas = LONG_DELTAS.slice(0, 4);
+    holdTheFinal();
+    render(<ChatPopup isOpen onClose={() => {}} />);
+    await speakIntoTheChat();
+    await waitFor(() => expect(speakBodies).toEqual([speakBody(SHORT_ANSWER)]));
+    await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      sockets[sockets.length - 1].emit({
+        type: "event",
+        event: "chat",
+        payload: { runId: "run-cut", sessionKey: "agent:main:main", state: "aborted" },
+      });
+    });
+    await waitFor(() => expect(screen.queryByTestId("chat-stop")).toBeNull());
+    // What had streamed stays on screen beside the chat's opener, and the
+    // clip that said its answer joins it, to play again...
+    expect(screen.getAllByText(/Here is what it ran/)).toHaveLength(2);
+    expect(await screen.findByTestId("chat-audio")).toHaveAttribute("src", "blob:spoken-reply");
+    // ...and nothing about the cut-off run is said a second time.
+    await settleAfterTheTurn();
+    expect(speakBodies).toHaveLength(1);
+    expect(play).toHaveBeenCalledTimes(1);
   });
 
 });
