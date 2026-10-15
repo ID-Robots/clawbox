@@ -2,9 +2,11 @@
  * An ingest job: documents from the owner's folders (or a drop) turned into
  * vault pages with claims.
  *
- *   scan  → walk the folders (exclude list, entry budget), one file row each
+ *   scan  → walk the folders (exclude list, code projects, boilerplate and
+ *           temporary files by name, entry budget), one file row each
  *   write → per file: read once, hash, skip what is already ingested, extract,
- *           redact; every {@link WRITER_BATCH_SIZE} files (or a character
+ *           leave out machine-generated text (a log, a table export …, never
+ *           sent to a model), redact; every {@link WRITER_BATCH_SIZE} files (or a character
  *           budget) one Flash call, up to `parallel` in flight (128 by
  *           default, the settings file's to change); each answered batch
  *           becomes ONE commit through `vaultOperation`
@@ -50,6 +52,7 @@ import {
 import {
   extractText,
   isIngestExtension,
+  machineTextFile,
   prepareText,
   readFileOnce,
   redactedLabel,
@@ -59,6 +62,7 @@ import {
   type ScannedFile,
 } from "./ingest-sources";
 import { estimateUsd, type CostRates } from "./cost-rates";
+import { emptySkipCounts } from "./ingest-exclude";
 import { dropKeptCopies, keepFailedUploads, pruneKeptCopies } from "./ingest-dead-letter";
 import {
   claimDeadLetter,
@@ -132,6 +136,8 @@ export interface IngestDeps {
   ownerFor?: (domain: string) => string | undefined;
   /** Folder-name patterns never walked into (default: the settings file's list). */
   exclude?: readonly string[];
+  /** Leave out code projects found during the walk (default: the settings file's choice). */
+  skipCodeProjects?: boolean;
   /** The wait before the retry queue's second round (default {@link REQUEUE_DELAY_MS}). */
   requeueDelayMs?: number;
   /** The rates calls are priced with (default: the settings file's). */
@@ -305,6 +311,7 @@ export async function startIngest(input: IngestInput, deps: IngestDeps = {}): Pr
     retryOf: input.kind === "retry" ? input.retryOf : null,
     requeued: 0,
     deadLetter: 0,
+    skips: emptySkipCounts(),
   };
   settleOrphanJobs(vault, liveIds(), at);
   insertJob(vault, job);
@@ -431,18 +438,27 @@ async function runJob(
     // ── scan ──
     job.phase = "scan";
     publish();
+    // A drop's files were each chosen by the owner: nothing is left out by name or content.
+    const chosen = input.kind === "upload";
     const scan =
       input.kind === "retry"
-        ? { files: retryFiles(claimed), notes: [] as string[], unsupported: 0, excluded: 0, truncated: false }
+        ? { files: retryFiles(claimed), notes: [] as string[], skips: emptySkipCounts(), truncated: false }
         : await scanFolders(input.kind === "folders" ? input.folders : [input.dir], {
-            labelOf: input.kind === "upload" ? uploadLabel(input.dir, input.batch) : undefined,
+            labelOf: chosen ? uploadLabel(input.dir, input.batch) : undefined,
             signal,
             exclude: deps.exclude ?? settings.ingest.exclude,
+            skipCodeProjects: deps.skipCodeProjects ?? settings.ingest.skipCodeProjects,
+            skipByName: !chosen,
           });
     job.total = scan.files.length;
+    job.skips = { ...scan.skips };
     job.notes.push(...scan.notes);
-    if (scan.unsupported > 0) job.notes.push(`${scan.unsupported} file(s) of a kind Prime Radiant does not read were left out.`);
-    if (scan.excluded > 0) job.notes.push(`${scan.excluded} folder(s) were left out by the exclude list.`);
+    const s = scan.skips;
+    if (s.unsupported > 0) job.notes.push(`${s.unsupported} file(s) of a kind Prime Radiant does not read were left out.`);
+    if (s.excludedFolder > 0) job.notes.push(`${s.excludedFolder} folder(s) were left out by the exclude list.`);
+    if (s.codeProject > 0) job.notes.push(`${s.codeProject} code project(s) were left out.`);
+    if (s.boilerplate > 0) job.notes.push(`${s.boilerplate} licence, changelog or other boilerplate file(s) were left out.`);
+    if (s.temp > 0) job.notes.push(`${s.temp} temporary or partial file(s) were left out.`);
     const labels = new Map<number, string>(scan.files.map((f, seq) => [seq, f.label]));
     insertFiles(vault, job.id, scan.files.map((f, seq) => ({ seq, label: f.label, source: f.abs })));
     job.phase = "write";
@@ -519,6 +535,7 @@ async function runJob(
         // A file that is no longer there cannot be retried: it leaves the dead-letter list.
         const missing = read.reason === "unreadable" && !existsSync(file.abs);
         if (missing) gone.push({ seq, source: null });
+        if (read.reason === "too-large") job.skips.tooLarge += 1;
         settle(
           [{ seq, status: read.reason === "too-large" ? "skipped" : "failed", bytes: read.bytes, error: missing ? "gone" : read.reason, attempts: 1 }],
           labels,
@@ -536,6 +553,13 @@ async function runJob(
       const raw = await extractText(read.data, file.ext, scratch, deps.extractor);
       if (raw === null) {
         settle([{ seq, status: "failed", sha256: read.sha256, bytes, error: "extract-failed" }], labels);
+        publish();
+        continue;
+      }
+      // Before anything is sent to a model: a log or a data dump is no document.
+      if (input.kind === "folders" && machineTextFile(file.ext, raw)) {
+        job.skips.machineText += 1;
+        settle([{ seq, status: "skipped", sha256: read.sha256, bytes, error: "machine-text" }], labels);
         publish();
         continue;
       }
@@ -557,6 +581,8 @@ async function runJob(
     batch = [];
     while (inFlight.size > 0) await Promise.race(inFlight);
     if (gone.length > 0) setFileSources(vault, job.id, gone);
+    if (job.skips.machineText > 0) job.notes.push(`${job.skips.machineText} machine-generated text file(s) (logs, data exports) were left out.`);
+    if (job.skips.tooLarge > 0) job.notes.push(`${job.skips.tooLarge} file(s) too large to read were left out.`);
 
     // ── the retry queue: one more round, after a cooldown, in smaller batches ──
     if (requeue.length > 0) {

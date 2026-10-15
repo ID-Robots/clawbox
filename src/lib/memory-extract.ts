@@ -140,10 +140,12 @@ export function newWalkBudget(): WalkBudget {
  * What a caller may leave out of a walk besides dot-entries. `skipDir` is
  * asked with the folder's full path and its name before the walk goes in, so
  * a caller can keep build output, caches or its own output folder out of the
- * documents it reads. Memory Shard passes none.
+ * documents it reads; it may answer later (a promise), to look inside the
+ * folder first. The folder the walk starts at is never asked. Memory Shard
+ * passes none.
  */
 export interface WalkOptions {
-  skipDir?: (full: string, name: string) => boolean;
+  skipDir?: (full: string, name: string) => boolean | Promise<boolean>;
 }
 
 export async function* walkFiles(dir: string, budget: WalkBudget, depth = 0, options: WalkOptions = {}): AsyncGenerator<string> {
@@ -175,7 +177,7 @@ export async function* walkFiles(dir: string, budget: WalkBudget, depth = 0, opt
       // isDirectory() is false for a symlink, which is what keeps a link loop out
       // of the walk — the same reason the folder picker reads it this way.
       if (entry.isDirectory()) {
-        if (options.skipDir?.(full, entry.name)) continue;
+        if (options.skipDir && (await options.skipDir(full, entry.name))) continue;
         yield* walkFiles(full, budget, depth + 1, options);
       }
       else if (entry.isFile()) yield full;

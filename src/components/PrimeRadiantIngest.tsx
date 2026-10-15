@@ -8,13 +8,17 @@ import {
   API,
   PrimeRadiantError,
   errorText,
+  formatCount,
   formatUsd,
   formatWhen,
   jsonInit,
   prJson,
+  skipEntries,
   type DeadLetter,
   type FileStatus,
   type IngestJob,
+  type IngestPreview,
+  type SkipCounts,
 } from "./prime-radiant-ui";
 
 /** What a drop may carry: the extensions the extractor reads, 9 MiB each (the route's cap). */
@@ -22,6 +26,17 @@ const DROP_EXTENSIONS = [".txt", ".md", ".pdf", ".docx", ".odt", ".rtf"];
 const DROP_MAX_BYTES = 9 * 1024 * 1024;
 const MAX_FOLDERS = 20;
 const MAX_FILE_LINES = 50;
+/** Above this many documents, Start asks before it spends the owner's allowance. */
+export const CONFIRM_ABOVE = 500;
+/** The pause after the folder list changes before it is counted again. */
+const PREVIEW_DELAY_MS = 300;
+
+/** The preview of the folders in the list, for that exact list. */
+interface PreviewState {
+  key: string;
+  data: IngestPreview | null;
+  error: string | null;
+}
 
 /** Why the client refuses a dropped file before sending it, or null. */
 function dropRefusal(file: { name: string; size: number }): "Type" | "Size" | "Empty" | null {
@@ -59,6 +74,9 @@ export default function PrimeRadiantIngest({ onChanged }: { onChanged: () => voi
   const [uploadNote, setUploadNote] = useState<string | null>(null);
   const [openJob, setOpenJob] = useState<string | null>(null);
   const [deadLetter, setDeadLetter] = useState<DeadLetter[] | null>(null);
+  const [preview, setPreview] = useState<PreviewState | null>(null);
+  /** The folder list Start is asking about (the question lapses when the list changes). */
+  const [confirmFor, setConfirmFor] = useState<string | null>(null);
   const streamRef = useRef<EventSource | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -159,6 +177,30 @@ export default function PrimeRadiantIngest({ onChanged }: { onChanged: () => voi
     };
   }, [follow, detach, t]);
 
+  // Count what the chosen folders would read, again whenever the list changes.
+  const folderKey = JSON.stringify(folders);
+  useEffect(() => {
+    const list = JSON.parse(folderKey) as string[];
+    if (list.length === 0) return;
+    const ctl = new AbortController();
+    const timer = setTimeout(() => {
+      prJson<{ preview: IngestPreview }>(`${API}/ingest/preview`, { ...jsonInit("POST", { folders: list }), signal: ctl.signal })
+        .then(({ preview: data }) => setPreview({ key: folderKey, data, error: null }))
+        .catch((err) => {
+          if ((err as Error)?.name === "AbortError") return;
+          setPreview({ key: folderKey, data: null, error: errorText(err, t) });
+        });
+    }, PREVIEW_DELAY_MS);
+    return () => {
+      clearTimeout(timer);
+      ctl.abort();
+    };
+  }, [folderKey, t]);
+  // A preview counts only for the list it was made for.
+  const current = folders.length > 0 && preview && preview.key === folderKey ? preview : null;
+  const counting = folders.length > 0 && !current;
+  const confirming = confirmFor === folderKey;
+
   const start = async (body: unknown, label: string) => {
     setBusy(label);
     setError(null);
@@ -252,6 +294,17 @@ export default function PrimeRadiantIngest({ onChanged }: { onChanged: () => voi
     }
   };
 
+  /** Start, after asking when the folders hold many documents (or could not be counted). */
+  const startFolders = () => {
+    const documents = current?.data?.documents;
+    if (!confirming && (documents === undefined || documents > CONFIRM_ABOVE)) {
+      setConfirmFor(folderKey);
+      return;
+    }
+    setConfirmFor(null);
+    void start({ folders }, "folders");
+  };
+
   const percent = running && running.total > 0
     ? Math.min(100, Math.round(((running.done + running.failed + running.skipped + running.duplicates) / running.total) * 100))
     : null;
@@ -286,6 +339,7 @@ export default function PrimeRadiantIngest({ onChanged }: { onChanged: () => voi
               done: running.done, total: running.total, failed: running.failed, skipped: running.skipped + running.duplicates, pages: running.pages,
             })}
           </p>
+          <SkipLine skips={running.skips} testId="prime-radiant-ingest-skips" />
           {lines.length > 0 && (
             <ul className={`${INSET_SURFACE} max-h-40 overflow-y-auto p-2 space-y-0.5 font-mono text-[11px]`} data-testid="prime-radiant-ingest-files">
               {lines.map((l) => (
@@ -302,16 +356,47 @@ export default function PrimeRadiantIngest({ onChanged }: { onChanged: () => voi
         <h3 className={SECTION_LABEL}>{t("primeRadiant.ingest.foldersTitle")}</h3>
         <p className="text-xs text-[var(--text-muted)]">{t("primeRadiant.ingest.foldersBody")}</p>
         <PrimeRadiantFolderPicker folders={folders} onChange={setFolders} max={MAX_FOLDERS} disabled={busy !== null} testId="prime-radiant-ingest-folders" />
-        <button
-          type="button"
-          className={BTN_PRIMARY}
-          disabled={folders.length === 0 || busy !== null || !!running}
-          onClick={() => void start({ folders }, "folders")}
-          data-testid="prime-radiant-ingest-start"
-        >
-          <span className="material-symbols-rounded" style={{ fontSize: 15 }} aria-hidden="true">drive_folder_upload</span>
-          {busy === "folders" ? t("primeRadiant.ingest.starting") : t("primeRadiant.ingest.start")}
-        </button>
+        {counting && (
+          <div className={`${INSET_SURFACE} p-3 space-y-2`} role="status" data-testid="prime-radiant-ingest-preview" data-state="counting">
+            <p className="text-xs text-[var(--text-muted)]">{t("primeRadiant.ingest.previewCounting")}</p>
+            <div className="h-1 rounded-full bg-white/10 overflow-hidden"><div className="memory-index-bar-sweep bg-emerald-400/70" /></div>
+          </div>
+        )}
+        {current?.error && (
+          <p role="alert" className="text-xs text-red-300" data-testid="prime-radiant-ingest-preview" data-state="failed">
+            {current.error}
+          </p>
+        )}
+        {current?.data && <PreviewCard preview={current.data} />}
+        {confirming ? (
+          <div className={`${INSET_SURFACE} p-3 space-y-2 border border-amber-300/30`} role="alertdialog" aria-labelledby="pr-ingest-confirm" data-testid="prime-radiant-ingest-confirm">
+            <p id="pr-ingest-confirm" className="text-xs text-amber-100">
+              {current?.data
+                ? t("primeRadiant.ingest.confirmTitle", { n: formatCount(current.data.documents, locale) })
+                : t("primeRadiant.ingest.confirmUnknown")}
+            </p>
+            <p className="text-[11px] text-[var(--text-muted)]">{t("primeRadiant.ingest.confirmBody")}</p>
+            <div className="flex flex-wrap gap-2">
+              <button type="button" className={BTN_PRIMARY} disabled={busy !== null || !!running} onClick={startFolders} data-testid="prime-radiant-ingest-confirm-start">
+                {busy === "folders" ? t("primeRadiant.ingest.starting") : t("primeRadiant.ingest.confirmStart")}
+              </button>
+              <button type="button" className={BTN_SECONDARY} onClick={() => setConfirmFor(null)} data-testid="prime-radiant-ingest-confirm-cancel">
+                {t("primeRadiant.ingest.confirmCancel")}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <button
+            type="button"
+            className={BTN_PRIMARY}
+            disabled={folders.length === 0 || counting || current?.data?.documents === 0 || busy !== null || !!running}
+            onClick={startFolders}
+            data-testid="prime-radiant-ingest-start"
+          >
+            <span className="material-symbols-rounded" style={{ fontSize: 15 }} aria-hidden="true">drive_folder_upload</span>
+            {busy === "folders" ? t("primeRadiant.ingest.starting") : t("primeRadiant.ingest.start")}
+          </button>
+        )}
       </section>
 
       <section
@@ -368,6 +453,7 @@ export default function PrimeRadiantIngest({ onChanged }: { onChanged: () => voi
                 )}
               </div>
               {job.folders.length > 0 && <p className="mt-0.5 font-mono text-[11px] text-[var(--text-muted)] truncate">{job.folders.join(", ")}</p>}
+              <SkipLine skips={job.skips} testId="prime-radiant-ingest-job-skips" />
               {job.error && <p className="mt-0.5 text-[11px] text-red-300">{job.error}</p>}
               {openJob === job.id && (
                 <div className="mt-2 space-y-2" data-testid="prime-radiant-dead-letter">
@@ -396,6 +482,76 @@ export default function PrimeRadiantIngest({ onChanged }: { onChanged: () => voi
           ))}
         </ul>
       </section>
+    </div>
+  );
+}
+
+/** What a job or a preview left out, by reason: one muted line, nothing when nothing was left out. */
+function SkipLine({ skips, testId }: { skips: Partial<SkipCounts> | null | undefined; testId: string }) {
+  const { t, locale } = useT();
+  const entries = skipEntries(skips);
+  if (entries.length === 0) return null;
+  return (
+    <p className="mt-0.5 text-[11px] text-[var(--text-muted)]" data-testid={testId}>
+      {t("primeRadiant.ingest.leftOut")}{" "}
+      {entries.map(([reason, n]) => t(`primeRadiant.ingest.skip.${reason}`, { n: formatCount(n, locale) })).join(" · ")}
+    </p>
+  );
+}
+
+/** The chosen folders, counted: what Start would read, where it is, and what is left out and why. */
+function PreviewCard({ preview }: { preview: IngestPreview }) {
+  const { t, locale } = useT();
+  const entries = skipEntries(preview.skips);
+  return (
+    <div className={`${INSET_SURFACE} p-3 space-y-2`} data-testid="prime-radiant-ingest-preview" data-state="ready" data-documents={preview.documents}>
+      <p className="text-xs text-[var(--text-primary)]">
+        {preview.documents === 0
+          ? t("primeRadiant.ingest.previewNone")
+          : t("primeRadiant.ingest.previewDocuments", { n: formatCount(preview.documents, locale) })}
+      </p>
+      {preview.truncated && (
+        <p className="text-[11px] text-amber-200">{t("primeRadiant.ingest.previewTruncated", { max: formatCount(preview.limit, locale) })}</p>
+      )}
+      {preview.topFolders.length > 0 && (
+        <div>
+          <p className="text-[11px] text-[var(--text-muted)]">{t("primeRadiant.ingest.previewTopFolders")}</p>
+          <ul className="mt-1 space-y-0.5" data-testid="prime-radiant-ingest-preview-folders">
+            {preview.topFolders.map((f) => (
+              <li key={f.label} className="flex items-center gap-2 font-mono text-[11px] text-[var(--text-secondary)]">
+                <span className="flex-1 truncate">{f.label}</span>
+                <span className="tabular-nums text-[var(--text-muted)]">{formatCount(f.documents, locale)}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {entries.length > 0 && (
+        <div>
+          <p className="text-[11px] text-[var(--text-muted)]">{t("primeRadiant.ingest.leftOut")}</p>
+          <ul className="mt-1 space-y-0.5" data-testid="prime-radiant-ingest-preview-skips">
+            {entries.map(([reason, n]) => (
+              <li key={reason} className="text-[11px] text-[var(--text-secondary)]" data-reason={reason}>
+                {t(`primeRadiant.ingest.skip.${reason}`, { n: formatCount(n, locale) })}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {preview.codeProjects.length > 0 && (
+        <details className="text-[11px] text-[var(--text-muted)]">
+          <summary className="cursor-pointer">{t("primeRadiant.ingest.previewProjects", { n: formatCount(preview.skips.codeProject, locale) })}</summary>
+          <ul className="mt-1 max-h-32 overflow-y-auto space-y-0.5 font-mono">
+            {preview.codeProjects.map((p) => <li key={p} className="truncate">{p}</li>)}
+          </ul>
+          <p className="mt-1">{t("primeRadiant.ingest.previewProjectsHelp")}</p>
+        </details>
+      )}
+      {preview.notes.length > 0 && (
+        <ul className="space-y-0.5 text-[11px] text-amber-200/80">
+          {preview.notes.map((n) => <li key={n}>{n}</li>)}
+        </ul>
+      )}
     </div>
   );
 }

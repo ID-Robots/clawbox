@@ -7,6 +7,7 @@ import { installClawboxMocks } from "./helpers/clawbox";
 import {
   PRIME_RADIANT_BASE_URL,
   PRIME_RADIANT_E2E_DIR,
+  PRIME_RADIANT_E2E_ROOT,
   PRIME_RADIANT_E2E_SECRET,
 } from "./helpers/prime-radiant-server";
 
@@ -17,7 +18,9 @@ import {
 // see helpers/prime-radiant-server.ts). Open the app (which makes the vault),
 // drop three synthetic documents, read the pages in Browse, run the nightly
 // pass so the contradiction between two of them becomes a review item, settle
-// it in Review and find the verified claim on its page.
+// it in Review and find the verified claim on its page. Then: point an import
+// at the whole (fake) home folder and see the preview leave out a code
+// project, boilerplate, a temporary file and a log before anything is read.
 
 const FIXTURES = path.join(__dirname, "fixtures", "prime-radiant");
 const DOCUMENTS = ["warehouse-handbook.md", "inventory-audit.md", "office-guide.md"];
@@ -154,5 +157,55 @@ test.describe("Prime Radiant", () => {
       await app.getByTestId("prime-radiant-page-back").click();
     }
     await expect(app.getByTestId("prime-radiant-counts")).toContainText("Verified pages: 1");
+  });
+
+  test("previews the home folder before importing it, leaving out code, boilerplate, temporary files and logs", async ({ page }) => {
+    test.setTimeout(120_000);
+    // The server's Files root is the folder picker's root: "Your home folder".
+    const home = path.join(PRIME_RADIANT_E2E_ROOT, "files");
+    const tops = new Set<string>();
+    const put = (rel: string, text: string) => {
+      const abs = path.join(home, rel);
+      fs.mkdirSync(path.dirname(abs), { recursive: true, mode: 0o700 });
+      // Owner-only, like the server's session secret beside them.
+      fs.writeFileSync(abs, text, { mode: 0o600 });
+      tops.add(rel.split("/")[0]);
+    };
+    put("Documents/supplier-terms.md", "Acme Widgets Ltd pays its suppliers within 30 days of the invoice date.");
+    put("Documents/LICENSE.md", "MIT License. Permission is hereby granted, free of charge, to any person.");
+    put(
+      "Documents/server.txt",
+      Array.from({ length: 20 }, (_, i) => `2026-10-14 08:00:${String(i).padStart(2, "0")} INFO request ${i} served in 12ms`).join("\n"),
+    );
+    put("Projects/storefront/package.json", "{}");
+    put("Projects/storefront/README.md", "How the storefront is deployed.");
+    put("Downloads/~$draft.docx", "lock");
+    try {
+      const app = await openPrimeRadiant(page);
+      await page.route("**/setup-api/coding-agent/browse**", (route) => route.continue());
+      await app.getByTestId("prime-radiant-tab-ingest").click();
+      await app.getByTestId("prime-radiant-ingest-folders-home").click();
+
+      const preview = app.getByTestId("prime-radiant-ingest-preview");
+      await expect(preview).toHaveAttribute("data-state", "ready", { timeout: 30_000 });
+      await expect(preview).toHaveAttribute("data-documents", "1");
+      await expect(preview).toContainText("Documents to read: 1");
+      const skips = app.getByTestId("prime-radiant-ingest-preview-skips");
+      await expect(skips).toContainText("Code projects: 1");
+      await expect(skips).toContainText("Licence, changelog and similar files: 1");
+      await expect(skips).toContainText("Logs and data exports: 1");
+      await expect(skips).toContainText("Temporary or partial files: 1");
+      await expect(app.getByTestId("prime-radiant-ingest-preview-folders")).toContainText("Documents");
+
+      // Under 500 documents: Start starts without asking.
+      await app.getByTestId("prime-radiant-ingest-start").click();
+      const job = app.getByTestId("prime-radiant-ingest-job").first();
+      await expect(job).toContainText("Finished", { timeout: 60_000 });
+      await expect(job).toContainText("1 pages");
+      await expect(job.getByTestId("prime-radiant-ingest-job-skips")).toContainText("Code projects: 1");
+      await expect(job.getByTestId("prime-radiant-ingest-job-skips")).toContainText("Logs and data exports: 1");
+    } finally {
+      for (const top of tops) fs.rmSync(path.join(home, top), { recursive: true, force: true });
+    }
   });
 });

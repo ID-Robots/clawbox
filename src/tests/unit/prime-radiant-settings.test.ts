@@ -1,8 +1,10 @@
 /**
  * Prime Radiant's settings file (the ingest half and the cost rates): read
  * over the defaults without creating anything, written strictly and
- * atomically, keys it does not own kept; the exclude-list grammar; the cost
- * rates as one object with the owner's overrides laid over it.
+ * atomically, keys it does not own kept; "Skip code projects"; the
+ * exclude-list grammar and its migration (an earlier default list follows
+ * today's, an owner's own list is never touched); the cost rates as one
+ * object with the owner's overrides laid over it.
  */
 import fs from "fs";
 import os from "os";
@@ -14,12 +16,20 @@ import {
   mergeCostRates,
   readRateOverrides,
 } from "@/lib/prime-radiant/cost-rates";
-import { DEFAULT_INGEST_EXCLUDES, compileExcludes, readExcludeList } from "@/lib/prime-radiant/ingest-exclude";
+import {
+  DEFAULT_INGEST_EXCLUDES,
+  EXCLUDE_DEFAULTS_GENERATION,
+  PREVIOUS_DEFAULT_INGEST_EXCLUDES,
+  compileExcludes,
+  isDefaultExcludeList,
+  readExcludeList,
+} from "@/lib/prime-radiant/ingest-exclude";
 import {
   DEFAULT_INGEST_PARALLEL,
   SettingsError,
   effectiveCostRates,
   readSettings,
+  readSettingsPatch,
   settingsPath,
   writeSettings,
 } from "@/lib/prime-radiant/settings";
@@ -43,7 +53,7 @@ afterAll(() => {
 describe("readSettings", () => {
   it("answers the defaults and creates nothing on a fresh box", () => {
     const s = readSettings();
-    expect(s.ingest).toEqual({ exclude: [...DEFAULT_INGEST_EXCLUDES], parallel: DEFAULT_INGEST_PARALLEL, folders: [] });
+    expect(s.ingest).toEqual({ exclude: [...DEFAULT_INGEST_EXCLUDES], skipCodeProjects: true, parallel: DEFAULT_INGEST_PARALLEL, folders: [] });
     expect(DEFAULT_INGEST_PARALLEL).toBe(128);
     expect(s.costRates).toEqual({});
     expect(fs.existsSync(root)).toBe(false);
@@ -53,7 +63,7 @@ describe("readSettings", () => {
     fs.mkdirSync(root, { recursive: true });
     fs.writeFileSync(settingsPath(), JSON.stringify({ ingest: { exclude: ["drafts"], parallel: 9999 }, costRates: "nope" }));
     const s = readSettings();
-    expect(s.ingest).toEqual({ exclude: ["drafts"], parallel: DEFAULT_INGEST_PARALLEL, folders: [] });
+    expect(s.ingest).toEqual({ exclude: ["drafts"], skipCodeProjects: true, parallel: DEFAULT_INGEST_PARALLEL, folders: [] });
     expect(s.costRates).toEqual({});
   });
 
@@ -72,14 +82,14 @@ describe("writeSettings", () => {
     fs.mkdirSync(root, { recursive: true });
     fs.writeFileSync(settingsPath(), JSON.stringify({ schedule: "03:00", ingest: { other: true } }));
     const s = writeSettings({ ingest: { exclude: ["drafts", "Drafts", " archive-* "], parallel: 64 } });
-    expect(s.ingest).toEqual({ exclude: ["drafts", "archive-*"], parallel: 64, folders: [] });
+    expect(s.ingest).toEqual({ exclude: ["drafts", "archive-*"], skipCodeProjects: true, parallel: 64, folders: [] });
     const raw = JSON.parse(fs.readFileSync(settingsPath(), "utf8"));
     expect(raw).toMatchObject({ schedule: "03:00", ingest: { other: true, parallel: 64 } });
     expect(fs.statSync(settingsPath()).mode & 0o777).toBe(0o600);
     expect(fs.readdirSync(root).filter((f) => f.endsWith(".tmp"))).toEqual([]);
 
     const back = writeSettings({ ingest: { exclude: null, parallel: null } });
-    expect(back.ingest).toEqual({ exclude: [...DEFAULT_INGEST_EXCLUDES], parallel: DEFAULT_INGEST_PARALLEL, folders: [] });
+    expect(back.ingest).toEqual({ exclude: [...DEFAULT_INGEST_EXCLUDES], skipCodeProjects: true, parallel: DEFAULT_INGEST_PARALLEL, folders: [] });
   });
 
   it("refuses a bad field whole and writes nothing", () => {
@@ -93,6 +103,8 @@ describe("writeSettings", () => {
       { ingest: { exclude: [""] } },
       { ingest: { exclude: ["x".repeat(81)] } },
       { ingest: { exclude: Array.from({ length: 201 }, (_, i) => `d${i}`) } },
+      { ingest: { skipCodeProjects: "yes" } },
+      { ingest: { skipCodeProjects: 0 } },
       { costRates: { "deepseek-v4-flash": { input: -1, output: 1 } } },
       { costRates: { "bad model id!": { input: 1, output: 1 } } },
       { costRates: [] },
@@ -100,6 +112,82 @@ describe("writeSettings", () => {
       expect(() => writeSettings(patch), JSON.stringify(patch).slice(0, 60)).toThrow(SettingsError);
     }
     expect(fs.existsSync(settingsPath())).toBe(false);
+  });
+});
+
+describe("skipping code projects", () => {
+  it("is on by default, and the owner's choice is stored, read back and reset", () => {
+    expect(readSettings().ingest.skipCodeProjects).toBe(true);
+    expect(writeSettings({ ingest: { skipCodeProjects: false } }).ingest.skipCodeProjects).toBe(false);
+    expect(JSON.parse(fs.readFileSync(settingsPath(), "utf8")).ingest.skipCodeProjects).toBe(false);
+    expect(readSettings().ingest.skipCodeProjects).toBe(false);
+    expect(writeSettings({ ingest: { skipCodeProjects: null } }).ingest.skipCodeProjects).toBe(true);
+    expect(readSettingsPatch({ ingest: { skipCodeProjects: true } })).toEqual({ ingest: { skipCodeProjects: true } });
+  });
+
+  it("reads a stored value that is not true or false as the default", () => {
+    fs.mkdirSync(root, { recursive: true });
+    fs.writeFileSync(settingsPath(), JSON.stringify({ ingest: { skipCodeProjects: "no" } }));
+    expect(readSettings().ingest.skipCodeProjects).toBe(true);
+  });
+});
+
+describe("exclude-list migration", () => {
+  const [previous] = PREVIOUS_DEFAULT_INGEST_EXCLUDES;
+
+  it("reads a stored copy of the earlier default list (what saving the form stored) as today's defaults", () => {
+    fs.mkdirSync(root, { recursive: true });
+    // In another order and letter case, as an owner's file may hold it.
+    fs.writeFileSync(settingsPath(), JSON.stringify({ ingest: { exclude: [...previous].reverse().map((p) => p.toUpperCase()), parallel: 32 } }));
+    const s = readSettings();
+    expect(s.ingest.exclude).toEqual([...DEFAULT_INGEST_EXCLUDES]);
+    expect(s.ingest.exclude).toEqual(expect.arrayContaining(["snap", "logs", "tests", "examples"]));
+    expect(s.ingest.parallel).toBe(32);
+    // Reading never rewrites the file.
+    expect(JSON.parse(fs.readFileSync(settingsPath(), "utf8")).ingest.exclude).toHaveLength(previous.length);
+  });
+
+  it("never touches an owner's own list, even one that differs from a default by one pattern", () => {
+    fs.mkdirSync(root, { recursive: true });
+    const custom = [...previous, "Private"];
+    fs.writeFileSync(settingsPath(), JSON.stringify({ ingest: { exclude: custom } }));
+    expect(readSettings().ingest.exclude).toEqual(custom);
+    const trimmed = previous.filter((p) => p !== "build");
+    expect(writeSettings({ ingest: { exclude: trimmed } }).ingest.exclude).toEqual(trimmed);
+    expect(JSON.parse(fs.readFileSync(settingsPath(), "utf8")).ingest.exclude).toEqual(trimmed);
+  });
+
+  it("stores nothing when the default list is saved (Restore the default list), so it keeps following ClawBox", () => {
+    writeSettings({ ingest: { exclude: ["drafts"] } });
+    const s = writeSettings({ ingest: { exclude: [...DEFAULT_INGEST_EXCLUDES] } });
+    expect(s.ingest.exclude).toEqual([...DEFAULT_INGEST_EXCLUDES]);
+    const stored = JSON.parse(fs.readFileSync(settingsPath(), "utf8")).ingest;
+    expect(stored).not.toHaveProperty("exclude");
+    expect(stored).not.toHaveProperty("excludeSavedWith");
+  });
+
+  it("keeps the earlier default list when the owner saves it now (removing exactly the patterns added since)", () => {
+    const s = writeSettings({ ingest: { exclude: [...previous] } });
+    expect(s.ingest.exclude).toEqual([...previous]);
+    expect(JSON.parse(fs.readFileSync(settingsPath(), "utf8")).ingest).toMatchObject({ exclude: [...previous], excludeSavedWith: EXCLUDE_DEFAULTS_GENERATION });
+    expect(readSettings().ingest.exclude).toEqual([...previous]);
+    // Put back to the defaults, the marker goes with the list.
+    writeSettings({ ingest: { exclude: null } });
+    expect(JSON.parse(fs.readFileSync(settingsPath(), "utf8")).ingest).toEqual({});
+  });
+
+  it("recognises today's and every earlier default list, and nothing else", () => {
+    expect(isDefaultExcludeList(DEFAULT_INGEST_EXCLUDES)).toBe(true);
+    expect(isDefaultExcludeList(previous)).toBe(true);
+    // Saved under today's generation, the earlier list is the owner's choice.
+    expect(isDefaultExcludeList(previous, EXCLUDE_DEFAULTS_GENERATION)).toBe(false);
+    expect(isDefaultExcludeList(DEFAULT_INGEST_EXCLUDES, EXCLUDE_DEFAULTS_GENERATION)).toBe(true);
+    expect(isDefaultExcludeList(previous, "2")).toBe(true);
+    expect(isDefaultExcludeList([])).toBe(false);
+    expect(isDefaultExcludeList(["node_modules"])).toBe(false);
+    // The earlier list is a frozen record: today's grew from it.
+    for (const p of previous) expect(DEFAULT_INGEST_EXCLUDES).toContain(p);
+    expect(Object.isFrozen(previous)).toBe(true);
   });
 });
 

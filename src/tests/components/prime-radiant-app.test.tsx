@@ -92,6 +92,18 @@ const JOB_BASE = {
   kind: "folders", folders: ["~/acme-docs"], total: 3, done: 0, failed: 0, skipped: 0, duplicates: 0, pages: 0, commits: 0, calls: 0,
   usdEstimate: 0, createdAt: "2026-01-06T10:00:00.000Z", updatedAt: "2026-01-06T10:00:00.000Z", finishedAt: null, error: null, notes: [],
   retryOf: null, requeued: 0, deadLetter: 0,
+  skips: { codeProject: 0, excludedFolder: 0, boilerplate: 0, temp: 0, machineText: 0, tooLarge: 0, unsupported: 0 },
+};
+const NO_SKIPS = JOB_BASE.skips;
+/** What the fake preview route answers for the picked folders. */
+const PREVIEW = {
+  documents: 3,
+  skips: { ...NO_SKIPS, codeProject: 2, boilerplate: 4, machineText: 1, unsupported: 12 },
+  topFolders: [{ label: "~/acme-docs/contracts", documents: 2 }, { label: "~/acme-docs", documents: 1 }],
+  codeProjects: ["~/acme-docs/site", "~/acme-docs/tools"],
+  truncated: false,
+  limit: 5000,
+  notes: [],
 };
 const RUNNING_JOB = { ...JOB_BASE, id: "job-run", status: "running", phase: "write" };
 const DEAD_JOB = { ...JOB_BASE, id: "job-dead", status: "done", phase: "done", done: 2, failed: 1, pages: 2, deadLetter: 1, finishedAt: "2026-01-05T10:00:00.000Z" };
@@ -125,6 +137,8 @@ let nightlyRuns: unknown[];
 let ingestJobs: unknown[];
 /** Refusals the fake answers the next `DELETE ingest/<id>` calls with, first first. */
 let stopRefusals: number[];
+let previewAnswer: Record<string, unknown> | null;
+let skipCodeProjects: boolean;
 
 function installFetch() {
   vi.stubGlobal("fetch", vi.fn(async (input: unknown, init?: RequestInit) => {
@@ -179,6 +193,10 @@ function installFetch() {
     if (url.startsWith("/setup-api/coding-agent/browse")) {
       return ok({ root: "/srv/box", path: "/srv/box/acme-docs", parent: "/srv/box", entries: [] });
     }
+    if (url === `${p}/ingest/preview` && method === "POST") {
+      if (!previewAnswer) return ok({ error: "The folders could not be counted.", code: "preview_failed" }, 500);
+      return ok({ preview: previewAnswer });
+    }
     if (url === `${p}/ingest` && method === "POST") return ok({ job: RUNNING_JOB }, 202);
     if (url === `${p}/ingest`) return ok({ running: null, jobs: ingestJobs });
     if (url === `${p}/ingest/job-dead/retry` && method === "POST") return ok({ job: { ...RUNNING_JOB, id: "job-retry", kind: "retry" } }, 202);
@@ -190,7 +208,7 @@ function installFetch() {
     }
     if (url === `${p}/settings`) {
       const settings = {
-        ingest: { exclude: [".git", "node_modules"], parallel: 128, folders: [] },
+        ingest: { exclude: [".git", "node_modules"], skipCodeProjects, parallel: 128, folders: [] },
         costRates: {}, nightly: { enabled: true, time: "03:00" },
         opus: { enabled: false, capUsd: 2, sampleRate: 0.02, model: "opus" },
         contradictions: { enabled: true }, domains: [],
@@ -216,6 +234,13 @@ async function openTab(id: string) {
   fireEvent.click(await screen.findByTestId(`prime-radiant-tab-${id}`));
 }
 
+/** Pick the browse listing's folder in Add documents and wait until it is counted. */
+async function pickFolder() {
+  fireEvent.click(await screen.findByTestId("prime-radiant-ingest-folders-add"));
+  fireEvent.click(await screen.findByTestId("prime-radiant-ingest-folders-use"));
+  await waitFor(() => expect(screen.getByTestId("prime-radiant-ingest-start")).not.toBeDisabled());
+}
+
 beforeEach(() => {
   status = { ...STATUS };
   calls = [];
@@ -234,6 +259,8 @@ beforeEach(() => {
   nightlyRuns = [];
   ingestJobs = [];
   stopRefusals = [];
+  previewAnswer = PREVIEW;
+  skipCodeProjects = true;
   FakeEventSource.last = null;
   installFetch();
 });
@@ -471,8 +498,7 @@ describe("PrimeRadiantApp", () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     await mount();
     await openTab("ingest");
-    fireEvent.click(await screen.findByTestId("prime-radiant-ingest-folders-add"));
-    fireEvent.click(await screen.findByTestId("prime-radiant-ingest-folders-use"));
+    await pickFolder();
     fireEvent.click(screen.getByTestId("prime-radiant-ingest-start"));
     await waitFor(() => {
       expect(calls.find((c) => c.url.endsWith("/ingest") && c.method === "POST")?.body).toEqual({ folders: ["/srv/box/acme-docs"] });
@@ -502,8 +528,7 @@ describe("PrimeRadiantApp", () => {
     stopRefusals = [500];
     await mount();
     await openTab("ingest");
-    fireEvent.click(await screen.findByTestId("prime-radiant-ingest-folders-add"));
-    fireEvent.click(await screen.findByTestId("prime-radiant-ingest-folders-use"));
+    await pickFolder();
     fireEvent.click(screen.getByTestId("prime-radiant-ingest-start"));
     const running = await screen.findByTestId("prime-radiant-ingest-running");
     fireEvent.click(within(running).getByTestId("prime-radiant-ingest-stop"));
@@ -520,8 +545,7 @@ describe("PrimeRadiantApp", () => {
     vi.stubGlobal("EventSource", FakeEventSource);
     await mount();
     await openTab("ingest");
-    fireEvent.click(await screen.findByTestId("prime-radiant-ingest-folders-add"));
-    fireEvent.click(await screen.findByTestId("prime-radiant-ingest-folders-use"));
+    await pickFolder();
     fireEvent.click(screen.getByTestId("prime-radiant-ingest-start"));
     await screen.findByTestId("prime-radiant-ingest-running");
     // The stream drops; the job read that follows answers 404 (the fake has no job-run GET).
@@ -532,6 +556,128 @@ describe("PrimeRadiantApp", () => {
     expect(seen).toBe(1);
     await act(async () => { await new Promise((r) => setTimeout(r, 2300)); });
     expect(reads()).toBe(seen);
+  });
+
+  it("counts the picked folders before Start: documents, where they are, and what is left out and why", async () => {
+    await mount();
+    await openTab("ingest");
+    expect(screen.getByTestId("prime-radiant-ingest-start")).toBeDisabled();
+    fireEvent.click(await screen.findByTestId("prime-radiant-ingest-folders-add"));
+    fireEvent.click(await screen.findByTestId("prime-radiant-ingest-folders-use"));
+    // Start waits for the count.
+    expect(screen.getByTestId("prime-radiant-ingest-start")).toBeDisabled();
+    await screen.findByTestId("prime-radiant-ingest-preview", {}, { timeout: 3000 });
+    await waitFor(() => expect(screen.getByTestId("prime-radiant-ingest-preview")).toHaveAttribute("data-state", "ready"));
+    expect(calls.find((c) => c.url.endsWith("/ingest/preview"))?.body).toEqual({ folders: ["/srv/box/acme-docs"] });
+    expect(screen.getByTestId("prime-radiant-ingest-preview")).toHaveTextContent("Documents to read: 3");
+    expect(screen.getByTestId("prime-radiant-ingest-preview-folders")).toHaveTextContent("~/acme-docs/contracts");
+    const skips = screen.getByTestId("prime-radiant-ingest-preview-skips");
+    expect(skips).toHaveTextContent("Code projects: 2");
+    expect(skips).toHaveTextContent("Licence, changelog and similar files: 4");
+    expect(skips).toHaveTextContent("Logs and data exports: 1");
+    expect(skips).toHaveTextContent("Other kinds of files: 12");
+    expect(skips).not.toHaveTextContent("Temporary");
+    expect(screen.getByTestId("prime-radiant-ingest-preview")).toHaveTextContent("~/acme-docs/site");
+    // Under the threshold: Start starts at once.
+    fireEvent.click(screen.getByTestId("prime-radiant-ingest-start"));
+    await waitFor(() => expect(calls.some((c) => c.url.endsWith("/ingest") && c.method === "POST")).toBe(true));
+    expect(screen.queryByTestId("prime-radiant-ingest-confirm")).toBeNull();
+  });
+
+  it("asks before starting an import of more than 500 documents, and Cancel starts nothing", async () => {
+    previewAnswer = { ...PREVIEW, documents: 1234, truncated: false };
+    vi.stubGlobal("EventSource", FakeEventSource);
+    await mount();
+    await openTab("ingest");
+    await pickFolder();
+    fireEvent.click(screen.getByTestId("prime-radiant-ingest-start"));
+    const confirm = await screen.findByTestId("prime-radiant-ingest-confirm");
+    expect(confirm).toHaveTextContent("Read 1,234 documents?");
+    expect(calls.some((c) => c.url.endsWith("/ingest") && c.method === "POST")).toBe(false);
+    fireEvent.click(screen.getByTestId("prime-radiant-ingest-confirm-cancel"));
+    expect(screen.queryByTestId("prime-radiant-ingest-confirm")).toBeNull();
+    expect(calls.some((c) => c.url.endsWith("/ingest") && c.method === "POST")).toBe(false);
+
+    fireEvent.click(screen.getByTestId("prime-radiant-ingest-start"));
+    fireEvent.click(await screen.findByTestId("prime-radiant-ingest-confirm-start"));
+    await waitFor(() => {
+      expect(calls.find((c) => c.url.endsWith("/ingest") && c.method === "POST")?.body).toEqual({ folders: ["/srv/box/acme-docs"] });
+    });
+  });
+
+  it("asks before starting when the folders could not be counted", async () => {
+    previewAnswer = null;
+    await mount();
+    await openTab("ingest");
+    await pickFolder();
+    expect(await screen.findByTestId("prime-radiant-ingest-preview")).toHaveTextContent("could not be counted");
+    fireEvent.click(screen.getByTestId("prime-radiant-ingest-start"));
+    expect(await screen.findByTestId("prime-radiant-ingest-confirm")).toHaveTextContent("Start the import anyway?");
+    expect(calls.some((c) => c.url.endsWith("/ingest") && c.method === "POST")).toBe(false);
+  });
+
+  it("starts 500 documents without asking (only more than 500 asks)", async () => {
+    previewAnswer = { ...PREVIEW, documents: 500 };
+    await mount();
+    await openTab("ingest");
+    await pickFolder();
+    fireEvent.click(screen.getByTestId("prime-radiant-ingest-start"));
+    await waitFor(() => expect(calls.some((c) => c.url.endsWith("/ingest") && c.method === "POST")).toBe(true));
+  });
+
+  it("keeps Start off when the folders hold nothing to read", async () => {
+    previewAnswer = { ...PREVIEW, documents: 0, topFolders: [] };
+    await mount();
+    await openTab("ingest");
+    fireEvent.click(await screen.findByTestId("prime-radiant-ingest-folders-add"));
+    fireEvent.click(await screen.findByTestId("prime-radiant-ingest-folders-use"));
+    await waitFor(() => expect(screen.getByTestId("prime-radiant-ingest-preview")).toHaveAttribute("data-state", "ready"));
+    expect(screen.getByTestId("prime-radiant-ingest-preview")).toHaveTextContent("nothing to read");
+    expect(screen.getByTestId("prime-radiant-ingest-start")).toBeDisabled();
+  });
+
+  it("says when one import cannot read every document", async () => {
+    previewAnswer = { ...PREVIEW, documents: 5000, truncated: true };
+    await mount();
+    await openTab("ingest");
+    await pickFolder();
+    expect(screen.getByTestId("prime-radiant-ingest-preview")).toHaveTextContent("One import reads at most 5,000 documents");
+  });
+
+  it("adds the home folder in one click", async () => {
+    await mount();
+    await openTab("ingest");
+    fireEvent.click(await screen.findByTestId("prime-radiant-ingest-folders-home"));
+    await waitFor(() => expect(calls.find((c) => c.url.endsWith("/ingest/preview"))?.body).toEqual({ folders: ["/srv/box"] }));
+    expect(screen.getByTestId("prime-radiant-ingest-folders")).toHaveTextContent("/srv/box");
+    await waitFor(() => expect(screen.getByTestId("prime-radiant-ingest-folders-home")).toBeDisabled());
+  });
+
+  it("shows what a running and a finished job left out, by reason", async () => {
+    vi.stubGlobal("EventSource", FakeEventSource);
+    ingestJobs = [{ ...DEAD_JOB, skips: { ...NO_SKIPS, temp: 3 } }];
+    await mount();
+    await openTab("ingest");
+    expect(await screen.findByTestId("prime-radiant-ingest-job-skips")).toHaveTextContent("Temporary or partial files: 3");
+    await pickFolder();
+    fireEvent.click(screen.getByTestId("prime-radiant-ingest-start"));
+    const running = await screen.findByTestId("prime-radiant-ingest-running");
+    act(() => { FakeEventSource.last?.emit("job", { ...RUNNING_JOB, skips: { ...NO_SKIPS, codeProject: 4, tooLarge: 1 } }); });
+    const line = await within(running).findByTestId("prime-radiant-ingest-skips");
+    expect(line).toHaveTextContent("Left out: Code projects: 4 · Too large to read: 1");
+  });
+
+  it("saves Skip code projects with the other ingest settings", async () => {
+    await mount();
+    await openTab("settings");
+    const toggle = await screen.findByTestId("prime-radiant-skip-code-projects");
+    expect(toggle).toBeChecked();
+    fireEvent.click(toggle);
+    fireEvent.click(screen.getByTestId("prime-radiant-settings-save"));
+    await waitFor(() => {
+      const put = calls.find((c) => c.url.endsWith("/settings") && c.method === "PUT");
+      expect((put?.body as { ingest: { skipCodeProjects: boolean } }).ingest.skipCodeProjects).toBe(false);
+    });
   });
 
   it("lists a job's dead letters and retries them", async () => {

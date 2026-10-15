@@ -28,6 +28,7 @@ import {
 } from "@/lib/prime-radiant/ingest";
 import { insertFiles, insertJob, readCosts, readDeadLetter, readFiles, type IngestJob } from "@/lib/prime-radiant/ingest-store";
 import { deadLetterRoot } from "@/lib/prime-radiant/ingest-dead-letter";
+import { emptySkipCounts } from "@/lib/prime-radiant/ingest-exclude";
 import { writeSettings } from "@/lib/prime-radiant/settings";
 import { readPage, readVaultSnapshot, vaultOperation } from "@/lib/prime-radiant/vault";
 import { withStateDb } from "@/lib/prime-radiant/state-db";
@@ -440,9 +441,12 @@ describe("job records", () => {
       requeued: 0,
       deadLetter: 0,
       notes: [],
+      skips: { ...emptySkipCounts(), codeProject: 2, unsupported: 7 },
     };
     insertJob(vault, orphan);
     expect(getIngestJob(orphan.id, vault)).toMatchObject({ status: "interrupted", phase: "done", error: expect.stringMatching(/restarted/) });
+    // What the job left out survives the round trip through the database.
+    expect(getIngestJob(orphan.id, vault)?.skips).toEqual({ ...emptySkipCounts(), codeProject: 2, unsupported: 7 });
     expect(listIngestJobs(vault).map((j) => j.id)).toContain(orphan.id);
   });
 
@@ -577,6 +581,46 @@ describe("settings an ingest follows", () => {
     const job = await run({ kind: "folders", folders: [docs] }, deps({ client: fakeClient().client }));
     expect(job).toMatchObject({ total: 1, done: 1 });
     expect(job.notes).toContain("1 folder(s) were left out by the exclude list.");
+  });
+
+  it("leaves out code projects, boilerplate, temporary files and machine text, counting each reason", async () => {
+    write("notes/plan.md", "Our plan for the Acme launch is to start in spring with the northern stores first.");
+    write("notes/LICENSE.md", "MIT License\n\nPermission is hereby granted, free of charge, to any person obtaining a copy.");
+    write("notes/~$budget.docx", "lock");
+    write("notes/plan.md~", "backup");
+    write("app/package.json", "{}");
+    write("app/README.md", "The app's readme.");
+    const log = Array.from({ length: 20 }, (_, i) => `2026-10-15 10:00:${String(i).padStart(2, "0")} INFO worker-${i} started job ${i}`).join("\n");
+    write("notes/worker.log.txt", log);
+    const model = fakeClient();
+    const job = await run({ kind: "folders", folders: [docs] }, deps({ client: model.client }));
+    expect(job).toMatchObject({ total: 2, done: 1, skipped: 1 });
+    expect(job.skips).toMatchObject({ codeProject: 1, boilerplate: 1, temp: 2, machineText: 1 });
+    expect(job.notes).toContain("1 code project(s) were left out.");
+    expect(job.notes).toContain("1 machine-generated text file(s) (logs, data exports) were left out.");
+    // The log never reached the model.
+    expect(model.prompts.map((p) => p.user).join("\n")).not.toContain("worker-3");
+    expect(readFiles(vault, job.id).find((f) => f.label.endsWith("worker.log.txt"))).toMatchObject({ status: "skipped", error: "machine-text" });
+    expect(getIngestJob(job.id, vault)?.skips).toEqual(job.skips);
+  });
+
+  it("reads code projects too when the settings say not to skip them", async () => {
+    write("app/package.json", "{}");
+    write("app/docs/guide.md", "How the Acme app is deployed to the stores.");
+    writeSettings({ ingest: { skipCodeProjects: false } });
+    const job = await run({ kind: "folders", folders: [docs] }, deps({ client: fakeClient().client }));
+    expect(job).toMatchObject({ total: 1, done: 1 });
+    expect(job.skips.codeProject).toBe(0);
+  });
+
+  it("reads a dropped file whatever its name or content: the owner chose it", async () => {
+    const drop = path.join(root, "drop");
+    fs.mkdirSync(drop, { recursive: true });
+    fs.writeFileSync(path.join(drop, "CHANGELOG.md"), "Changes to the Acme price list this quarter, written by the owner.");
+    fs.writeFileSync(path.join(drop, "export.txt"), Array.from({ length: 12 }, (_, i) => `${i},acme,${i * 3},eur`).join("\n"));
+    const job = await run({ kind: "upload", dir: drop, batch: "0123456789abcdef" }, deps({ client: fakeClient().client }));
+    expect(job).toMatchObject({ total: 2, done: 2 });
+    expect(job.skips).toEqual(emptySkipCounts());
   });
 
   it("prices calls with the settings file's rates", async () => {

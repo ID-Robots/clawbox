@@ -16,7 +16,8 @@ interface BrowseAnswer {
  * (`/setup-api/coding-agent/browse`, the browse root's rule): a list of folders
  * with Remove per row and "Add a folder" opening a walkable listing. The list
  * itself belongs to the host — the ingest form holds it in memory, the
- * settings page saves it — so this only reports the change.
+ * settings page saves it — so this only reports the change. "Your home
+ * folder" adds the browse root (the owner's home) in one click.
  */
 export default function PrimeRadiantFolderPicker({ folders, onChange, max, disabled, testId }: {
   folders: string[];
@@ -28,6 +29,7 @@ export default function PrimeRadiantFolderPicker({ folders, onChange, max, disab
   const { t } = useT();
   const [browse, setBrowse] = useState<BrowseAnswer | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [home, setHome] = useState<string | null>(null);
   const abort = useRef<AbortController | null>(null);
   useEffect(() => () => abort.current?.abort(), []);
 
@@ -41,7 +43,9 @@ export default function PrimeRadiantFolderPicker({ folders, onChange, max, disab
       let res = await fetch(`/setup-api/coding-agent/browse${qs}`, { signal: ctl.signal });
       if (res.status === 404 && dir) res = await fetch("/setup-api/coding-agent/browse", { signal: ctl.signal });
       if (!res.ok) throw new Error("browse");
-      setBrowse((await res.json()) as BrowseAnswer);
+      const answer = (await res.json()) as BrowseAnswer;
+      setHome(answer.root);
+      setBrowse(answer);
     } catch (err) {
       if ((err as Error)?.name === "AbortError") return;
       setError(t("primeRadiant.folders.browseFailed"));
@@ -51,6 +55,25 @@ export default function PrimeRadiantFolderPicker({ folders, onChange, max, disab
   const add = (dir: string) => {
     if (!folders.includes(dir)) onChange([...folders, dir]);
     setBrowse(null);
+  };
+
+  /** The browse root is the owner's home folder: ask for it (once) and add it. */
+  const addHome = async () => {
+    if (home) return add(home);
+    abort.current?.abort();
+    const ctl = new AbortController();
+    abort.current = ctl;
+    setError(null);
+    try {
+      const res = await fetch("/setup-api/coding-agent/browse", { signal: ctl.signal });
+      if (!res.ok) throw new Error("browse");
+      const { root } = (await res.json()) as BrowseAnswer;
+      setHome(root);
+      add(root);
+    } catch (err) {
+      if ((err as Error)?.name === "AbortError") return;
+      setError(t("primeRadiant.folders.browseFailed"));
+    }
   };
 
   return (
@@ -67,16 +90,28 @@ export default function PrimeRadiantFolderPicker({ folders, onChange, max, disab
         ))}
         {folders.length === 0 && <li className="text-[11px] text-[var(--text-muted)]">{t("primeRadiant.folders.none")}</li>}
       </ul>
-      <button
-        type="button"
-        className={`${BTN_SECONDARY} mt-2`}
-        disabled={disabled || folders.length >= max}
-        onClick={() => void open()}
-        data-testid={`${testId}-add`}
-      >
-        <span className="material-symbols-rounded" style={{ fontSize: 15 }} aria-hidden="true">create_new_folder</span>
-        {t("primeRadiant.folders.add")}
-      </button>
+      <div className="mt-2 flex flex-wrap gap-2">
+        <button
+          type="button"
+          className={BTN_SECONDARY}
+          disabled={disabled || folders.length >= max}
+          onClick={() => void open()}
+          data-testid={`${testId}-add`}
+        >
+          <span className="material-symbols-rounded" style={{ fontSize: 15 }} aria-hidden="true">create_new_folder</span>
+          {t("primeRadiant.folders.add")}
+        </button>
+        <button
+          type="button"
+          className={BTN_SECONDARY}
+          disabled={disabled || folders.length >= max || (home !== null && folders.includes(home))}
+          onClick={() => void addHome()}
+          data-testid={`${testId}-home`}
+        >
+          <span className="material-symbols-rounded" style={{ fontSize: 15 }} aria-hidden="true">home</span>
+          {t("primeRadiant.folders.home")}
+        </button>
+      </div>
       {browse && (
         <div className="mt-2 rounded-xl bg-black/25 border border-white/[0.06] p-2" data-testid={`${testId}-browser`}>
           <div className="flex items-center justify-between gap-2 px-1 pb-1">

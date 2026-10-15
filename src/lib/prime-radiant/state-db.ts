@@ -19,7 +19,7 @@ import { openSqlite } from "@/lib/openclaw-session-store";
 import path from "@/lib/runtime-path";
 
 export const STATE_DB_FILE = "prime-radiant.sqlite";
-export const STATE_SCHEMA_VERSION = 5;
+export const STATE_SCHEMA_VERSION = 6;
 
 export function stateDbPathFor(vault: string): string {
   return path.join(path.dirname(vault), STATE_DB_FILE);
@@ -187,6 +187,16 @@ CREATE TABLE IF NOT EXISTS pass_state (
 `;
 
 /**
+ * v6 — what a job left out and why: `skips` is a JSON object of counts by
+ * reason (code projects and excluded folders not gone into; boilerplate,
+ * temporary, machine-generated, too-large and other-kind files), so nothing a
+ * job drops is dropped silently.
+ */
+const SCHEMA_V6 = `
+ALTER TABLE ingest_jobs ADD COLUMN skips TEXT NOT NULL DEFAULT '{}';
+`;
+
+/**
  * Run `fn` in one transaction. A failed ROLLBACK (SQLite may already have
  * ended the transaction after an I/O or disk-full error) is logged and never
  * replaces the error that caused it.
@@ -222,6 +232,7 @@ export function openStateDb(vault: string): DatabaseSync {
       [3, SCHEMA_V3],
       [4, SCHEMA_V4],
       [5, SCHEMA_V5],
+      [6, SCHEMA_V6],
     ];
     for (const [target, sql] of steps) {
       if (version >= target) continue;

@@ -16,6 +16,7 @@
  */
 
 import type { DatabaseSync } from "node:sqlite";
+import { readSkipCounts, type SkipCounts } from "./ingest-exclude";
 import { withStateDb } from "./state-db";
 
 export const INGEST_STATUSES = ["running", "done", "failed", "interrupted"] as const;
@@ -58,6 +59,8 @@ export interface IngestJob {
   requeued: number;
   /** Files still failed after both rounds and not taken over by a later job. */
   deadLetter: number;
+  /** Files and folders left out, by reason (see `SkipCounts`). */
+  skips: SkipCounts;
 }
 
 export interface FileRow {
@@ -95,6 +98,7 @@ interface JobRow {
   retry_of: string | null;
   requeued: number;
   dead_letter: number;
+  skips?: string | null;
 }
 
 function jsonList(text: string): string[] {
@@ -103,6 +107,14 @@ function jsonList(text: string): string[] {
     return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
   } catch {
     return [];
+  }
+}
+
+function jsonObject(text: string | null | undefined): unknown {
+  try {
+    return text ? JSON.parse(text) : null;
+  } catch {
+    return null;
   }
 }
 
@@ -130,6 +142,7 @@ function rowToJob(r: JobRow): IngestJob {
     retryOf: r.retry_of ?? null,
     requeued: r.requeued ?? 0,
     deadLetter: r.dead_letter ?? 0,
+    skips: readSkipCounts(jsonObject(r.skips)),
   };
 }
 
@@ -137,8 +150,8 @@ export function insertJob(vault: string, job: IngestJob): void {
   withStateDb(vault, (db) => {
     db.prepare(
       `INSERT INTO ingest_jobs (id, kind, status, phase, folders, total, done, failed, skipped, duplicates, pages, commits,
-         calls, usd_estimate, created_at, updated_at, finished_at, error, notes, retry_of, requeued, dead_letter)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         calls, usd_estimate, created_at, updated_at, finished_at, error, notes, retry_of, requeued, dead_letter, skips)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       job.id,
       job.kind,
@@ -162,6 +175,7 @@ export function insertJob(vault: string, job: IngestJob): void {
       job.retryOf,
       job.requeued,
       job.deadLetter,
+      JSON.stringify(job.skips),
     );
   });
 }
@@ -171,7 +185,7 @@ export function saveJob(vault: string, job: IngestJob): void {
     db.prepare(
       `UPDATE ingest_jobs SET status = ?, phase = ?, total = ?, done = ?, failed = ?, skipped = ?, duplicates = ?, pages = ?,
          commits = ?, calls = ?, usd_estimate = ?, updated_at = ?, finished_at = ?, error = ?, notes = ?, requeued = ?,
-         dead_letter = ? WHERE id = ?`,
+         dead_letter = ?, skips = ? WHERE id = ?`,
     ).run(
       job.status,
       job.phase,
@@ -190,6 +204,7 @@ export function saveJob(vault: string, job: IngestJob): void {
       JSON.stringify(job.notes),
       job.requeued,
       job.deadLetter,
+      JSON.stringify(job.skips),
       job.id,
     );
   });

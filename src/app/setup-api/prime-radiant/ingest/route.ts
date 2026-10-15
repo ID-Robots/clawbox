@@ -16,16 +16,13 @@
  * admits.
  */
 import { requireSession } from "@/lib/route-auth";
-import { resolveFolderInsideBrowseRoot } from "@/lib/browse-folder";
 import { flashAvailable } from "@/lib/prime-radiant/flash-client";
 import { IngestBusyError, listIngestJobs, runningJobId, startIngest } from "@/lib/prime-radiant/ingest";
-import { isOwnOutput } from "@/lib/prime-radiant/ingest-sources";
 import { safeBatchId, stagedBatch } from "@/lib/prime-radiant/ingest-upload";
-import { fail, json, ownerWriteGuard, vaultFailure } from "@/lib/prime-radiant/route-helpers";
+import { fail, json, ownerWriteGuard, resolveIngestFolders, vaultFailure } from "@/lib/prime-radiant/route-helpers";
 
 export const dynamic = "force-dynamic";
 
-const MAX_INGEST_FOLDERS = 20;
 const MAX_BODY_BYTES = 64 * 1024;
 
 export async function GET(req: Request) {
@@ -59,24 +56,9 @@ export async function POST(req: Request) {
 
   let input: Parameters<typeof startIngest>[0];
   if (hasFolders) {
-    if (!Array.isArray(b.folders) || b.folders.length === 0 || b.folders.length > MAX_INGEST_FOLDERS) {
-      return fail("invalid", `Choose between 1 and ${MAX_INGEST_FOLDERS} folders.`, 400);
-    }
-    const folders: string[] = [];
-    for (const [index, asked] of b.folders.entries()) {
-      const resolved = await resolveFolderInsideBrowseRoot(asked);
-      if (!resolved.ok) {
-        return json(
-          { error: resolved.status === 400 ? "That is not a folder." : "Folder not found.", code: "folder_not_found", index },
-          resolved.status,
-        );
-      }
-      if (isOwnOutput(resolved.dir)) {
-        return json({ error: "That folder holds ClawBox's own files.", code: "folder_refused", index }, 400);
-      }
-      if (!folders.includes(resolved.dir)) folders.push(resolved.dir);
-    }
-    input = { kind: "folders", folders };
+    const resolved = await resolveIngestFolders(b.folders);
+    if (!resolved.ok) return resolved.response;
+    input = { kind: "folders", folders: resolved.folders };
   } else {
     const batch = safeBatchId(b.upload);
     const dir = batch ? await stagedBatch(batch) : null;
