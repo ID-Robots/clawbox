@@ -208,23 +208,46 @@ const IBAN_SHAPE_MIN_DIGITS = 8;
  * one with the right length, enough digits and an end at a word boundary is
  * one too (a mistyped IBAN is still an account number). Otherwise the
  * longest run ending at a boundary that passes mod-97.
+ *
+ * Every length shares its prefix with the next, so the fallback does not
+ * check each one from scratch: one running mod-97 over the characters after
+ * the check digits gives each length's remainder, and the country code and
+ * check digits — which {@link ibanValid}'s rearrangement moves to the end —
+ * are folded in per length.
  */
 function ibanEnd(text: string, start: number, candidate: string): number | null {
   const at: number[] = [];
-  for (let i = 0; i < candidate.length; i++) if (/[A-Z0-9]/.test(candidate[i])) at.push(i);
+  let compact = "";
+  for (let i = 0; i < candidate.length; i++) {
+    if (!/[A-Z0-9]/.test(candidate[i])) continue;
+    at.push(i);
+    compact += candidate[i];
+  }
   const endOf = (n: number) => start + at[n - 1] + 1;
   const glued = (n: number) => /[A-Za-z0-9]/.test(text[endOf(n)] ?? "");
-  const compact = (n: number) => at.slice(0, n).map((i) => candidate[i]).join("");
   const registered = IBAN_LENGTHS[candidate.slice(0, 2)];
   if (registered && at.length >= registered) {
-    const iban = compact(registered);
+    const iban = compact.slice(0, registered);
     if (ibanValid(iban)) return endOf(registered);
     if (!glued(registered) && digitCount(iban.slice(4)) >= IBAN_SHAPE_MIN_DIGITS) return endOf(registered);
   }
-  for (let n = Math.min(at.length, IBAN_MAX); n >= IBAN_MIN; n--) {
-    if (!glued(n) && ibanValid(compact(n))) return endOf(n);
+  const longest = Math.min(at.length, IBAN_MAX);
+  // rest[n] (n ≥ 4): the remainder of compact[4, n), what the rearranged IBAN of length n reads before its first four.
+  const rest = [0, 0, 0, 0, 0];
+  for (let n = 4; n < longest; n++) rest.push(mod97Push(rest[n], compact[n]));
+  for (let n = longest; n >= IBAN_MIN; n--) {
+    if (glued(n)) continue;
+    let rem = rest[n];
+    for (let i = 0; i < 4; i++) rem = mod97Push(rem, compact[i]);
+    if (rem === 1) return endOf(n);
   }
   return null;
+}
+
+/** `rem` with `ch` appended in mod-97 as {@link ibanValid} reads it: a letter as its two digits (A = 10 … Z = 35), a digit as itself. */
+function mod97Push(rem: number, ch: string): number {
+  const code = ch.charCodeAt(0);
+  return code >= 65 ? (rem * 100 + code - 55) % 97 : (rem * 10 + code - 48) % 97;
 }
 
 /** Every IBAN in `text` replaced whole, spaced or not; `onHit` counts them. */
