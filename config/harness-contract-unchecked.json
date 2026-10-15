@@ -1,0 +1,79 @@
+{
+ "install.sh": {
+  "config get: the key is computed at runtime": 2,
+  "config set: the key is computed at runtime": 4
+ },
+ "scripts/ensure-local-embeddings.sh": {
+  "config set: the key is computed at runtime": 1
+ },
+ "scripts/gateway-pre-start.sh": {
+  "config set --batch-json: the paths are in a JSON payload built at runtime": 1,
+  "config set: the key is computed at runtime": 2
+ },
+ "src/app/setup-api/ai-models/configure/route.ts": {
+  "runConfigSetBatch: the operations are built at runtime": 5,
+  "runOpenclawConfigSet: the key is computed at runtime": 2
+ },
+ "src/app/setup-api/chat/model/route.ts": {
+  "runOpenclawConfigSet: the key is computed at runtime": 1,
+  "runOpenclawConfigSetBatch: operations from ...armOps": 1,
+  "runOpenclawConfigSetBatch: operations from ...enableProviderPluginOps([targetModel])": 1,
+  "runOpenclawConfigUnset: the key is computed at runtime": 1
+ },
+ "src/app/setup-api/local-ai/exclusive/route.ts": {
+  "setConfigBatch: operations from ...(restorablePrimary ? [[\"agents.defaults.model.primary\", J": 1,
+  "setConfigBatch: operations from ...(restoreFallbacks ? [[\"agents.defaults.model.fallbacks\", ": 1,
+  "setConfigBatch: operations from ...enableProviderPluginOps([restorablePrimary, ...(restoreFa": 1
+ },
+ "src/app/setup-api/tts/route.ts": {
+  "config set: the key's first segment is computed at runtime": 2
+ },
+ "src/lib/anthropic-gateway.ts": {
+  "modelsAuth: argv is computed at runtime": 1
+ },
+ "src/lib/background-jobs.ts": {
+  "patchHermesConfig: a key is computed at runtime": 1,
+  "readHermesConfigValue: the key is computed at runtime": 2,
+  "runOpenclawConfigSet: the key is computed at runtime": 3,
+  "runOpenclawConfigUnset: the key is computed at runtime": 1
+ },
+ "src/lib/hermes-clawai.ts": {
+  "runHermesCli: argv is computed at runtime": 1,
+  "runOrThrow: argv is computed at runtime": 1
+ },
+ "src/lib/hermes-config-cache.ts": {
+  "hermesConfigGet: the key is computed at runtime": 1
+ },
+ "src/lib/hermes-config-yaml.ts": {
+  "config set: the key is computed at runtime": 1,
+  "config unset: the key is computed at runtime": 1
+ },
+ "src/lib/hermes-local-ai.ts": {
+  "patchHermesConfig: set is built at runtime": 1,
+  "patchHermesConfig: unset is built at runtime": 1
+ },
+ "src/lib/memory-shard.ts": {
+  "config set: the key's first segment is computed at runtime": 2,
+  "config unset: the key's first segment is computed at runtime": 1
+ },
+ "src/lib/openclaw-config.ts": {
+  "config set --batch-json: the paths are in a JSON payload built at runtime": 1,
+  "spawnOpenclawConfigSet: argv is computed at runtime": 1
+ },
+ "src/lib/prime-radiant/plugin-wiring.ts": {
+  "runOpenclawConfigSetBatch: the operations are built at runtime": 1
+ },
+ "src/lib/updater.ts": {
+  "runOpenclawConfigSet: the key is computed at runtime": 1,
+  "runOpenclawConfigSetBatch: the operations are built at runtime": 1
+ },
+ "src/lib/voice-box.ts": {
+  "config set: the key's first segment is computed at runtime": 1
+ },
+ "src/lib/voice-local-wiring.ts": {
+  "config set: the key's first segment is computed at runtime": 1
+ },
+ "src/lib/xai-oauth-login.ts": {
+  "xaiLoginSpawn.spawn: argv is computed at runtime": 1
+ }
+}

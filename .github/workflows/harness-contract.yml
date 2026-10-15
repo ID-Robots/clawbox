@@ -1,0 +1,86 @@
+name: harness-contract
+
+# Every OpenClaw and Hermes command, flag, config key, gateway RPC method and
+# event, plugin hook and dashboard route that ClawBox's source uses, checked
+# against the PINNED harnesses themselves — the published OpenClaw package and
+# the Hermes source at HERMES_PIN_COMMIT — so a key the core refuses, a flag a
+# release removed, or an event the pinned dashboard never sends fails here,
+# not on a box. What it reads, how, and what to do with a failure:
+# docs/harness-contract.md. The usage is read from the source on every run,
+# so it cannot fall behind the code.
+#
+# The pinned harnesses are cached by pin: the network (npm for OpenClaw,
+# GitHub for Hermes) is used only on the first run after a pin moves.
+on:
+  pull_request:
+    branches: [beta, main]
+  push:
+    branches: [beta]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: harness-contract-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  harness-contract:
+    name: harness-contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # The pinned core runs under it: engines.node is `>=24.16.0 <25 || >=26.1.0`.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+
+      - name: Read the pins
+        id: pins
+        # Assigned first, so a pin that cannot be read fails the step here.
+        run: |
+          openclaw="$(node scripts/harness-pins.mjs openclaw)"
+          hermes="$(node scripts/harness-pins.mjs hermes.commit)"
+          echo "openclaw=$openclaw" >> "$GITHUB_OUTPUT"
+          echo "hermes=$hermes" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the pinned OpenClaw
+        id: openclaw-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/clawbox-harness-contract/openclaw-${{ steps.pins.outputs.openclaw }}
+          key: harness-contract-openclaw-${{ steps.pins.outputs.openclaw }}
+
+      - name: Restore the pinned Hermes
+        id: hermes-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/clawbox-harness-contract/hermes-${{ steps.pins.outputs.hermes }}
+          key: harness-contract-hermes-${{ steps.pins.outputs.hermes }}
+
+      # Python is the runner's own (3.11+ is all the Hermes source needs to be
+      # read); nothing is installed into it.
+      - name: Check ClawBox against the pinned harnesses
+        run: scripts/harness-contract/run.sh
+
+      # Saved whatever the verdict, so a failing PR does not refetch the pins
+      # on every push. run.sh builds both in a `.part` directory and moves it
+      # to these paths only when complete (Hermes: once its tag is verified),
+      # so a failed or cancelled run leaves nothing here to save.
+      - name: Save the pinned OpenClaw
+        if: always() && steps.openclaw-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/clawbox-harness-contract/openclaw-${{ steps.pins.outputs.openclaw }}
+          key: harness-contract-openclaw-${{ steps.pins.outputs.openclaw }}
+
+      - name: Save the pinned Hermes
+        if: always() && steps.hermes-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/clawbox-harness-contract/hermes-${{ steps.pins.outputs.hermes }}
+          key: harness-contract-hermes-${{ steps.pins.outputs.hermes }}

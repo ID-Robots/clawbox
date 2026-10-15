@@ -12,7 +12,7 @@ import nodePath from "node:path";
  * DERIVED, not typed: `fs/promises` is mocked in this suite, so the updater never
  * reads a pin file and falls back to its compiled `OPENCLAW_VERSION_FALLBACK`,
  * which must equal `config/openclaw-target.txt` (guarded by
- * install-node-engine-table.test.ts). Sixteen literal `@2026.8.1` expectations
+ * harness-pins.test.ts). Sixteen literal `@2026.8.1` expectations
  * here had to be hand-edited at the last pin bump and would again at the next —
  * and a suite that needs hand-editing to follow a pin is a suite that can be
  * left behind by one.
