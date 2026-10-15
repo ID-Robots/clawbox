@@ -482,7 +482,7 @@ describe("the Memory Shard app", () => {
   });
 
   it("shows on screen the name its reset help mark is announced with", async () => {
-    // The mark's accessible name is "Start over" (what CLAUDE.md and the tip
+    // The mark's accessible name is "Start over" (what docs/agents/memory-shard.md and the tip
     // itself call this), while the only visible words in the card were the
     // button's "Reset" — a reader was told the name of something nothing on
     // screen said.
