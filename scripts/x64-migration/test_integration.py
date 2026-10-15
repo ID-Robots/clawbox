@@ -170,8 +170,16 @@ version=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$here/package.json")
 case "$1" in
   --version) printf 'version-%s\n' "$version" >> '{root}/events'; printf 'OpenClaw %s (fixture)\n' "$version" ;;
   backup)
+    case " $* " in *" --dry-run "*)
+      printf '{"assets":[{"kind":"state","sourcePath":"{root}/.openclaw"}],"agentRoots":[{"agentId":"main","sourcePath":"{root}/.openclaw/agents/main/agent"}]}\n'; exit 0 ;;
+    esac
     printf 'backup-%s\n' "$version" >> '{root}/events'
     [ ! -f '{root}/backup-exit' ] || exit "$(cat '{root}/backup-exit')"
+    for bad in plugin-skills/outside agents/main/agent/tmp/dangling browser/SingletonSocket; do
+      if [ -L "{root}/.openclaw/$bad" ]; then
+        echo "Backup archive write failed: Archive symbolic link is outside the declared backup assets: $bad" >&2; exit 1
+      fi
+    done
     out=; while [ $# -gt 0 ]; do [ "$1" = --output ] && out=$2; shift; done
     printf 'archive' > "$out/fixture-openclaw-backup.tar.gz"; printf '{"ok":true}\n' ;;
   doctor)
@@ -428,6 +436,73 @@ exit {code}
                 self.assertEqual(self.recovery_points(root),[])
                 self.assertFalse((root/'guard').exists())
                 self.assertIn('system-start',events)
+
+    # The links the archiver refuses: an absolute target outside the state
+    # tree, a relative one that lands outside (and does not exist), a stale
+    # Chromium socket link; and one inside that must be left alone.
+    @staticmethod
+    def plant_links(root):
+        state=root/'.openclaw'
+        (state/'plugin-skills').mkdir(); (state/'agents/main/agent/tmp').mkdir(parents=True); (state/'browser').mkdir()
+        links={'plugin-skills/outside':'/etc/hostname',
+               'agents/main/agent/tmp/dangling':'../../../../../../nowhere-'+root.name,
+               'browser/SingletonSocket':'../../../tmp/com.google.Chrome.fixture/SingletonSocket',
+               'state/inside':'openclaw.sqlite'}
+        for rel,target in links.items(): os.symlink(target,state/rel)
+        return links
+
+    def assert_links_back(self,root,links):
+        for rel,target in links.items():
+            path=root/'.openclaw'/rel
+            self.assertTrue(path.is_symlink(),rel)
+            self.assertEqual(os.readlink(path),target,rel)
+
+    def test_links_the_archiver_refuses_are_set_aside_for_the_archive_and_put_back(self):
+        root,worker,_=self.core_fixture()
+        (root/'mirror/config/openclaw-target.txt').write_text('2026.9.1\n')
+        links=self.plant_links(root)
+        result=self.run_worker(worker,'openclaw_install')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('Set aside 3 symbolic links',result.stdout)
+        self.assertIn('Put back 3 set-aside links',result.stdout)
+        self.assert_links_back(root,links)
+        point=self.recovery_points(root)[0]
+        self.assertFalse((point/'set-aside-links.txt').exists())
+        journal=(point/'set-aside-links.restored.txt').read_text().splitlines()
+        self.assertEqual(sorted(l.split('\t')[0] for l in journal),
+                         sorted(str(root/'.openclaw'/rel) for rel in ['plugin-skills/outside','agents/main/agent/tmp/dangling','browser/SingletonSocket']))
+        self.assertEqual((point/'archive/fixture-openclaw-backup.tar.gz').read_text(),'archive')
+        self.assertIn('"agentRoots"',(point/'backup-plan.json').read_text())
+        self.assertEqual(self.core_version(root/'lib/node_modules/openclaw'),'2026.9.1')
+
+    def test_set_aside_links_come_back_when_the_archive_fails(self):
+        root,worker,_=self.core_fixture()
+        (root/'mirror/config/openclaw-target.txt').write_text('2026.9.1\n')
+        links=self.plant_links(root)
+        (root/'backup-exit').write_text('3')
+        result=self.run_worker(worker,'openclaw_install')
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn('backup create --verify failed',result.stderr)
+        self.assert_links_back(root,links)
+        self.assertFalse((self.recovery_points(root)[0]/'set-aside-links.txt').exists())
+        self.assertEqual(self.core_version(root/'lib/node_modules/openclaw'),'2026.8.1')
+
+    def test_links_a_cut_short_run_left_set_aside_are_put_back_by_the_next_step(self):
+        root,worker,_=self.core_fixture()
+        (root/'.openclaw/plugin-skills').mkdir()
+        point=root/'backups/openclaw-core-update/20260101T000000Z-2026.8.0-to-2026.8.1'
+        point.mkdir(parents=True)
+        missing=root/'.openclaw/plugin-skills/outside'
+        (point/'set-aside-links.txt').write_text(f'{missing}\t/etc/hostname\n')
+        result=self.run_worker(worker,'openclaw_install')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('putting them back',result.stdout)
+        self.assertTrue(missing.is_symlink()); self.assertEqual(os.readlink(missing),'/etc/hostname')
+        self.assertFalse((point/'set-aside-links.txt').exists())
+        self.assertTrue((point/'set-aside-links.restored.txt').exists())
+        # A point still holding set-aside links is never pruned, and this one,
+        # restored, is an ordinary point again: three newer ones push it out.
+        self.assertIn('configuration accepted',result.stdout)
 
     def test_failed_archive_stops_before_the_swap(self):
         root,worker,_=self.core_fixture()

@@ -273,12 +273,147 @@ else:
 PY
 }
 
+# The links the archiver refuses, set aside for the archive and put back.
+# OpenClaw's `backup create` (2026.9.4 and 2026.10.x alike) refuses, WHILE
+# WRITING, every symbolic link whose target is outside its declared assets —
+# an absolute target whose real path is outside every asset or does not exist,
+# a relative one that lands outside — and has no exclusion (ClawKeep's
+# backup_guard meets the same rule and is the model here). On the desktop this
+# package was built for that was some seventy links — a plugin-skills index
+# pointing at a core prefix, a Codex sandbox's tool links, Chromium's
+# SingletonSocket — and the first refusal came 23 minutes into the archive.
+# So the links are found first, by the archiver's own rule over the roots its
+# dry run declares (the state directory alone when the plan cannot be read),
+# their text journalled in <point>/set-aside-links.txt, unlinked for the
+# archive and recreated from the journal afterwards, pass or fail; the journal
+# is renamed set-aside-links.restored.txt once every link is back, and one a
+# cut-short run left is put back at the start of the next core step. Only
+# links are touched, only while the gateway is stopped, and never one that
+# something else has replaced meanwhile.
+core_links_set_aside() {
+  as_owner /usr/bin/python3 -I - "$1" "$2" "$INSTALL_HOME/.openclaw" <<'PY'
+import json, os, pathlib, sys
+mode, point, state_dir = sys.argv[1], pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])
+journal, restored = point / 'set-aside-links.txt', point / 'set-aside-links.restored.txt'
+def inside(path, root):
+    return path == root or path.startswith(root.rstrip('/') + '/')
+def refused(path, target, roots):
+    """The archiver's rule: an absolute target is kept only when its REAL path
+    is inside a declared asset, a relative one must land inside one."""
+    if '\\' in target:
+        return True
+    if os.path.isabs(target):
+        try:
+            real = os.path.realpath(target, strict=True)
+        except OSError:
+            return True
+        return not any(inside(real, root) for root in roots)
+    landed = os.path.normpath(os.path.join(os.path.dirname(path), target))
+    return not any(inside(landed, root) for root in roots)
+def put_back():
+    if not journal.exists():
+        return 0, 0
+    back = kept = 0
+    for line in journal.read_text().splitlines():
+        if '\t' not in line:
+            continue
+        path, target = line.split('\t', 1)
+        if os.path.lexists(path):
+            if os.path.islink(path) and os.readlink(path) == target:
+                back += 1
+            else:
+                kept += 1
+                print(f'  Warning: not restoring the link {path}: something else is there now')
+            continue
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        os.symlink(target, path)
+        back += 1
+    if kept == 0:
+        with open(restored, 'a') as out:
+            out.write(journal.read_text())
+        journal.unlink()
+    os.sync()
+    return back, kept
+if mode == 'set-aside':
+    if journal.exists():
+        raise SystemExit(f'{journal} is still there: links from an earlier run were not put back')
+    roots = []
+    try:
+        plan = json.loads((point / 'backup-plan.json').read_text())
+        for asset in plan.get('assets') or []:
+            if asset.get('sourcePath'):
+                roots.append(os.path.realpath(asset['sourcePath']))
+        for agent in plan.get('agentRoots') or []:
+            if agent.get('sourcePath'):
+                roots.append(os.path.realpath(agent['sourcePath']))
+    except (OSError, ValueError):
+        roots = []
+    if not roots:
+        roots = [os.path.realpath(state_dir)]
+    # The plan lists an agent root inside the state root as a root of its own:
+    # walk only the outermost roots, and keep one entry per link.
+    outer = [r for r in dict.fromkeys(roots) if not any(o != r and inside(r, o) for o in roots)]
+    found = {}
+    for root in outer:
+        for dirpath, dirnames, filenames in os.walk(root):
+            for name in dirnames + filenames:
+                path = os.path.join(dirpath, name)
+                if not os.path.islink(path):
+                    continue
+                target = os.readlink(path)
+                if '\n' in path or '\n' in target or '\t' in path:
+                    raise SystemExit(f'refusing to journal a link whose name or target holds a newline or tab: {path}')
+                if refused(path, target, roots):
+                    found[path] = target
+    with open(journal, 'w') as out:
+        out.write(''.join(f'{path}\t{target}\n' for path, target in found.items()))
+        out.flush(); os.fsync(out.fileno())
+    for path in found:
+        os.unlink(path)
+    os.sync()
+    print(f'  Set aside {len(found)} symbolic links the archiver would refuse (listed in {journal})')
+elif mode == 'restore':
+    back, kept = put_back()
+    print(f'  Put back {back} set-aside links' + (f'; {kept} not restored' if kept else ''))
+    if kept:
+        raise SystemExit(1)
+else:
+    raise SystemExit('unknown mode')
+PY
+}
+
+# Links a cut-short run left set aside, under any recovery point: put back
+# before the core is probed, the way a parked core is.
+restore_set_aside_links_everywhere() {
+  local root journal
+  root=$(core_recovery_root)
+  [ -d "$root" ] || return 0
+  for journal in "$root"/*/set-aside-links.txt; do
+    [ -f "$journal" ] || continue
+    echo "An earlier core step left links set aside; putting them back from $journal"
+    core_links_set_aside restore "$(dirname "$journal")" || return 1
+  done
+}
+
 make_core_recovery_point() {
   local point=$1 current=$2 target=$3
+  local archive_rc=0
   as_owner /bin/mkdir -p -m 0700 "$point" "$point/archive" "$point/state" || return 1
+  # The archiver's own plan names the roots its link rule is judged against.
+  as_owner /bin/bash -c 'exec "$1" backup create --dry-run --no-include-workspace --json </dev/null >"$2" 2>/dev/null' _ \
+      "$NPM_PREFIX/bin/openclaw" "$point/backup-plan.json" || true
+  core_links_set_aside set-aside "$point" || {
+    echo "Error: the links the archiver refuses could not be set aside; nothing on this desktop was changed" >&2
+    return 1
+  }
   echo "Writing the verified pre-update archive with OpenClaw $current (backup create --verify --no-include-workspace)..."
-  if ! as_owner /bin/bash -c 'exec "$1" backup create --verify --no-include-workspace --output "$2" --json </dev/null >"$3" 2>"$4"' _ \
-      "$NPM_PREFIX/bin/openclaw" "$point/archive" "$point/backup-create.json" "$point/backup-create.log"; then
+  as_owner /bin/bash -c 'exec "$1" backup create --verify --no-include-workspace --output "$2" --json </dev/null >"$3" 2>"$4"' _ \
+      "$NPM_PREFIX/bin/openclaw" "$point/archive" "$point/backup-create.json" "$point/backup-create.log" || archive_rc=$?
+  core_links_set_aside restore "$point" || {
+    echo "Error: not every set-aside link is back (see $point/set-aside-links.txt); the next core step puts them back, nothing else on this desktop was changed" >&2
+    return 1
+  }
+  if [ "$archive_rc" -ne 0 ]; then
     as_owner /bin/cat "$point/backup-create.log" >&2 || true
     echo "Error: openclaw backup create --verify failed; nothing on this desktop was changed (its output is in $point)" >&2
     return 1
@@ -297,6 +432,8 @@ state/              the exact pre-update bytes the automatic rollback puts back:
                     state/openclaw.sqlite and agents/<id>/agent/openclaw-agent.sqlite with their
                     -wal/-shm, one generation, taken with the gateway stopped; snapshot.txt lists them.
 doctor.log          the new core's migration output, once it ran.
+set-aside-links.*   the symbolic links the archiver refuses, unlinked for the archive and recreated
+                    after it (.restored.txt once they are back; .txt means the next core step puts them back).
 
 The previous core is retained at $NPM_PREFIX/lib/node_modules/.openclaw-previous until the next
 core replacement. To go back by hand:
@@ -459,7 +596,7 @@ import pathlib, shutil, sys
 root, keep, marker = pathlib.Path(sys.argv[1]), int(sys.argv[2]), pathlib.Path(sys.argv[3])
 # Never the point a pending replacement still needs.
 pending = marker.read_text().splitlines()[:1] if marker.is_file() else []
-points = sorted(p for p in root.iterdir() if p.is_dir() and not p.is_symlink() and str(p) not in pending) if root.is_dir() else []
+points = sorted(p for p in root.iterdir() if p.is_dir() and not p.is_symlink() and str(p) not in pending and not (p / 'set-aside-links.txt').exists()) if root.is_dir() else []
 for old in points[:-keep] if keep else points:
     shutil.rmtree(old)
     print(f'  Removed the older recovery point {old.name}')
@@ -530,6 +667,7 @@ update_openclaw() {
     echo 'Error: invalid pinned OpenClaw version' >&2; return 1;
   }
   recover_parked_openclaw_core || return 1
+  restore_set_aside_links_everywhere || return 1
   settle_interrupted_core_replacement || return 1
   current=$(installed_openclaw_version)
   if [ "$current" != "$target" ]; then
