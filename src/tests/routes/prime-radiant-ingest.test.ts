@@ -1,6 +1,6 @@
 /**
- * POST/GET /setup-api/prime-radiant/ingest, GET ingest/<id>/events (SSE) and
- * POST ingest/upload, over a real vault in a tmp dir with the model replaced
+ * POST/GET /setup-api/prime-radiant/ingest, GET ingest/<id>/events (SSE),
+ * POST ingest/upload and POST ingest/preview, over a real vault in a tmp dir with the model replaced
  * through the client override. The writes are owner-cookie AND same-origin;
  * folders come from the Files tree only; the GETs never create anything.
  */
@@ -27,6 +27,8 @@ import { GET as eventsGET } from "@/app/setup-api/prime-radiant/ingest/[id]/even
 import { DELETE as jobDELETE, GET as jobGET } from "@/app/setup-api/prime-radiant/ingest/[id]/route";
 import { POST as retryPOST } from "@/app/setup-api/prime-radiant/ingest/[id]/retry/route";
 import { POST as uploadPOST } from "@/app/setup-api/prime-radiant/ingest/upload/route";
+import { POST as previewPOST } from "@/app/setup-api/prime-radiant/ingest/preview/route";
+import { writeSettings } from "@/lib/prime-radiant/settings";
 import { FlashCallError, setFlashClientOverride, type FlashClient } from "@/lib/prime-radiant/flash-client";
 import { ingestFinished, listIngestJobs, stopIngest } from "@/lib/prime-radiant/ingest";
 import { readVaultSnapshot } from "@/lib/prime-radiant/vault";
@@ -50,6 +52,8 @@ const ingest = (body: unknown, headers: Record<string, string> = {}) =>
   ingestPOST(post(`${API}/ingest`, JSON.stringify(body), { "content-type": "application/json", ...headers }));
 const upload = (name: string, data: string, batch?: string) =>
   uploadPOST(post(`${API}/ingest/upload?name=${encodeURIComponent(name)}${batch ? `&batch=${batch}` : ""}`, data, { "content-length": String(Buffer.byteLength(data)) }));
+const preview = (body: unknown, headers: Record<string, string> = {}) =>
+  previewPOST(post(`${API}/ingest/preview`, JSON.stringify(body), { "content-type": "application/json", ...headers }));
 const events = (id: string, signal?: AbortSignal) =>
   eventsGET(new Request(`${API}/ingest/${id}/events`, { signal }), { params: Promise.resolve({ id }) });
 
@@ -373,5 +377,53 @@ describe("one job: read, stop, retry its dead letters", () => {
     const res = await retry(job.id);
     expect(res.status).toBe(412);
     expect((await res.json()).code).toBe("no_credential");
+  });
+});
+
+describe("POST ingest/preview", () => {
+  it("counts what an ingest of the folders would read, with the reasons for what it leaves out, and writes nothing", async () => {
+    fs.mkdirSync(path.join(filesRoot, "Projects", "site", ".git"), { recursive: true });
+    fs.writeFileSync(path.join(filesRoot, "Projects", "site", "README.md"), "Site readme.");
+    fs.writeFileSync(path.join(filesRoot, "Documents", "acme", "LICENSE.md"), "MIT");
+    fs.mkdirSync(path.join(filesRoot, "snap", "chromium"), { recursive: true });
+    fs.writeFileSync(path.join(filesRoot, "snap", "chromium", "cache.txt"), "x");
+    const res = await preview({ folders: ["."] });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    const { preview: p } = await res.json();
+    expect(p).toMatchObject({ documents: 2, truncated: false, limit: 5000 });
+    expect(p.skips).toMatchObject({ codeProject: 1, boilerplate: 1, excludedFolder: 1 });
+    expect(p.topFolders).toEqual([{ label: expect.stringMatching(/Documents$/), documents: 2 }]);
+    expect(p.codeProjects).toEqual([expect.stringMatching(/Projects\/site$/)]);
+    expect(fs.existsSync(process.env.PRIME_RADIANT_DIR!)).toBe(false);
+  });
+
+  it("reads a project the owner picks, and follows the settings' Skip code projects", async () => {
+    fs.mkdirSync(path.join(filesRoot, "Projects", "site", ".git"), { recursive: true });
+    fs.writeFileSync(path.join(filesRoot, "Projects", "site", "README.md"), "Site readme.");
+    expect((await (await preview({ folders: ["Projects/site"] })).json()).preview.documents).toBe(1);
+    expect((await (await preview({ folders: ["Projects"] })).json()).preview.documents).toBe(0);
+    writeSettings({ ingest: { skipCodeProjects: false } });
+    expect((await (await preview({ folders: ["Projects"] })).json()).preview.documents).toBe(1);
+  });
+
+  it("refuses what an ingest refuses: no folders, a bad folder, ClawBox's own output, another site, the MCP bearer", async () => {
+    for (const body of [{}, { folders: [] }, { folders: "Documents" }, { folders: Array(21).fill("Documents") }]) {
+      const res = await preview(body);
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe("invalid");
+    }
+    const missing = await preview({ folders: ["Documents", "Documents/missing"] });
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toMatchObject({ code: "folder_not_found", index: 1 });
+    process.env.PRIME_RADIANT_DIR = path.join(filesRoot, "pr");
+    fs.mkdirSync(path.join(filesRoot, "pr", "vault"), { recursive: true });
+    expect((await (await preview({ folders: ["pr/vault"] })).json()).code).toBe("folder_refused");
+    const cross = await preview({ folders: ["Documents"] }, { origin: "https://evil.example" });
+    expect(cross.status).toBe(403);
+    owner.hasOwnerSession.mockResolvedValue(false);
+    const bearer = await preview({ folders: ["Documents"] });
+    expect(bearer.status).toBe(403);
+    expect((await bearer.json()).code).toBe("owner_only");
   });
 });

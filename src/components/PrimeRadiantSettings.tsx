@@ -43,6 +43,7 @@ interface Draft {
   capUsd: string;
   parallel: string;
   exclude: string;
+  skipCodeProjects: boolean;
   folders: string[];
   domains: Array<{ name: string; owner: string }>;
 }
@@ -56,6 +57,7 @@ function draftOf(s: Settings): Draft {
     capUsd: String(s.opus.capUsd),
     parallel: String(s.ingest.parallel),
     exclude: s.ingest.exclude.join("\n"),
+    skipCodeProjects: s.ingest.skipCodeProjects,
     folders: [...s.ingest.folders],
     domains: s.domains.map((d) => ({ ...d })),
   };
@@ -116,6 +118,7 @@ export default function PrimeRadiantSettings({ onChanged }: { onChanged: () => v
         ingest: {
           parallel,
           exclude: draft.exclude.split("\n").map((l) => l.trim()).filter(Boolean),
+          skipCodeProjects: draft.skipCodeProjects,
           folders: draft.folders,
         },
         domains,
@@ -234,6 +237,8 @@ export default function PrimeRadiantSettings({ onChanged }: { onChanged: () => v
               />
             </label>
             <p className="text-[11px] text-[var(--text-muted)]">{t("primeRadiant.settings.parallelBody", { n: answer.defaults.ingest.parallel })}</p>
+            <Toggle label={t("primeRadiant.settings.skipCodeProjects")} checked={draft.skipCodeProjects} onChange={(v) => set({ skipCodeProjects: v })} testId="prime-radiant-skip-code-projects" />
+            <p className="text-[11px] text-[var(--text-muted)]">{t("primeRadiant.settings.skipCodeProjectsBody")}</p>
             <label className="block text-xs text-[var(--text-secondary)]" htmlFor="pr-exclude">{t("primeRadiant.settings.exclude")}</label>
             <p className="text-[11px] text-[var(--text-muted)]">{t("primeRadiant.settings.excludeBody")}</p>
             <textarea

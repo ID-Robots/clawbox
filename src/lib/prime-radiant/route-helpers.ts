@@ -6,9 +6,41 @@
  */
 
 import { NextResponse } from "next/server";
+import { resolveFolderInsideBrowseRoot } from "@/lib/browse-folder";
 import { requireSession } from "@/lib/route-auth";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
+import { isOwnOutput } from "./ingest-sources";
+
+/** Folders one ingest (or its preview) may name. */
+export const MAX_INGEST_FOLDERS = 20;
+
+/**
+ * The folders an ingest was asked to read, each resolved the folder picker's
+ * way (inside the tree the Files app browses, never a credential store) and
+ * never ClawBox's own output; duplicates folded. The failure names the
+ * offending folder's `index`.
+ */
+export async function resolveIngestFolders(asked: unknown): Promise<{ ok: true; folders: string[] } | { ok: false; response: NextResponse }> {
+  if (!Array.isArray(asked) || asked.length === 0 || asked.length > MAX_INGEST_FOLDERS) {
+    return { ok: false, response: fail("invalid", `Choose between 1 and ${MAX_INGEST_FOLDERS} folders.`, 400) };
+  }
+  const folders: string[] = [];
+  for (const [index, folder] of asked.entries()) {
+    const resolved = await resolveFolderInsideBrowseRoot(folder);
+    if (!resolved.ok) {
+      return {
+        ok: false,
+        response: json({ error: resolved.status === 400 ? "That is not a folder." : "Folder not found.", code: "folder_not_found", index }, resolved.status),
+      };
+    }
+    if (isOwnOutput(resolved.dir)) {
+      return { ok: false, response: json({ error: "That folder holds ClawBox's own files.", code: "folder_refused", index }, 400) };
+    }
+    if (!folders.includes(resolved.dir)) folders.push(resolved.dir);
+  }
+  return { ok: true, folders };
+}
 
 export function json(body: unknown, status = 200): NextResponse {
   return NextResponse.json(body, { status, headers: { "Cache-Control": "no-store" } });

@@ -24,18 +24,52 @@ ClawBox AI to add documents. Reading, reviewing and undoing work without it. See
 The **Add documents** tab takes them two ways:
 
 - **From folders on the box.** Pick one or more folders with the same folder picker
-  Memory Shard uses. Text, Markdown, PDF, Word, OpenDocument and RTF files are read and
-  converted **on the box**. Copies, caches, build folders and version-control folders
-  are left out, and a document that is already in the wiki is recognised by its content
-  and not written twice.
+  Memory Shard uses, or **Your home folder** to add your whole home folder in one click.
+  Text, Markdown, PDF, Word, OpenDocument and RTF files are read and converted **on the
+  box**, and a document that is already in the wiki is recognised by its content and
+  not written twice.
 - **By dropping files** onto the drop zone, up to 9 MB each. A larger file goes in
   through its folder, which reads documents up to 40 MB; a bigger one is skipped as too
-  large.
+  large. A dropped file is always read: you chose it.
 
-Progress shows live: how many files are written, skipped or failed, and the pages made
-so far. **Stop** ends the import; what was already written stays. A file that still
-fails after the import's own second try is listed under **Not added**, and **Try these
-again** retries exactly those files.
+### What a folder import leaves out
+
+An import is safe to point at your whole home folder: it reads your own documents and
+leaves out what the computer and your tools keep there.
+
+- **Code projects.** A folder that holds a `.git` folder or a project file —
+  `package.json`, `Cargo.toml`, `pyproject.toml`, `setup.py`, `go.mod`,
+  `CMakeLists.txt`, `pom.xml`, `build.gradle`, `Gemfile`, `composer.json`, a `.csproj`
+  or `.sln`, or a `Makefile` next to source files — is not gone into. A folder you pick
+  yourself is always read, even when it is a project: pick `~/Projects/acme` to read
+  that project's documents. A notes vault kept in git (it has an `.obsidian` folder) is
+  not a code project. **Skip code projects** in Settings turns this off.
+- **Excluded folders** — the **Folders never read** list in Settings: version control,
+  dependencies, caches, build output, logs, test data and examples (`test`, `tests`,
+  `fixtures`, `e2e`, `examples` …), `snap` and `flatpak`, the Trash, and a few more.
+- **Boilerplate** kept as `.txt` or `.md`: `LICENSE`, `COPYING`, `NOTICE`, `AUTHORS`,
+  `CHANGELOG`, `CODE_OF_CONDUCT`, `CONTRIBUTING`, `SECURITY`, `requirements*.txt`,
+  `CMakeLists.txt`, `robots.txt`, `llms*.txt`, `*.lock.txt`. A `License agreement.pdf`
+  is yours and is read.
+- **Temporary and partial files**: `~$report.docx`, `notes.md~`, `*.tmp`, `*.bak`,
+  `*.swp`, `*.part`, `*.crdownload`.
+- **Machine-generated text**: a `.txt` or `.md` file whose opening is mostly log lines,
+  table rows, encoded data or settings rather than sentences. Only the first 8 KB are
+  looked at, on the box, before anything is sent to ClawBox AI. When in doubt the file
+  is read: a note with a pasted log, a recipe, a chat export or a journal with dated
+  entries are all kept.
+- Files over 40 MB, and kinds of files Prime Radiant does not read.
+
+Before you start, **Add documents** counts the chosen folders: how many documents the
+import would read, the folders that hold the most of them, and how many files and
+folders were left out for each reason (the code projects by name). An import of more
+than 500 documents asks before it starts. One import reads at most 5,000 documents;
+start it again for the rest.
+
+Progress shows live: how many files are written, skipped or failed, the pages made so
+far, and what was left out for each reason. **Stop** ends the import; what was already
+written stays. A file that still fails after the import's own second try is listed
+under **Not added**, and **Try these again** retries exactly those files.
 
 <Warning>
 To write a page, the text of each document is sent to ClawBox AI. Before anything
@@ -93,7 +127,8 @@ hold the nightly pass back; a secret is refused outright.
 ## The nightly pass
 
 Every night — 03:00 by default — Prime Radiant works on a copy of the wiki: it reads new
-and changed documents from the folders you chose, looks for facts that contradict each
+and changed documents from the folders you chose (leaving out the same code projects,
+boilerplate, temporary files and machine-generated text as an import), looks for facts that contradict each
 other, runs its checks, and then merges the copy back. When the copy would change a
 verified page, or a check fails, the night is **held**: its changes wait aside and its
 questions go to Review. Once you have settled them, **Merge** in the nightly card puts
@@ -112,7 +147,8 @@ need ClawBox AI.
 | **Second opinion** | Off by default. The Opus model re-reads a sample of pages and suggests corrections, which arrive in Review — it never edits a page itself. It needs an **Anthropic API key** in the box's provider settings (a Claude subscription sign-in is not used), and it stops at the **limit per night** you set. Without a key, pages are marked as waiting for a second opinion and nothing else changes. |
 | **Domains and owners** | A new page in a domain gets that domain's owner. |
 | **Model calls at once** | How many writing requests run in parallel during an import. Lower it if the service reports too many requests. |
-| **Folders never read** | Folder names an import skips. **Restore the default list** brings back the shipped list. |
+| **Skip code projects** | On by default. A code project found inside a folder you add is not read; a project folder you add yourself always is. |
+| **Folders never read** | Folder names an import skips. **Restore the default list** brings back the shipped list. A list you never changed follows the shipped list as it grows; a list you changed is kept as it is. |
 
 ## Costs
 

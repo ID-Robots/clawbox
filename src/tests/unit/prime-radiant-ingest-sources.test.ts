@@ -1,7 +1,9 @@
 /**
  * Finding and reading ingest documents: the walk's exclude list (never
- * ClawBox's own output), the one-handle read with its hash, redaction and
- * capping of the text, and extraction from a private copy.
+ * ClawBox's own output), code projects found during the walk (never the
+ * folder the owner picked), boilerplate and temporary files by name, the
+ * preview of what a job would read, the one-handle read with its hash,
+ * redaction and capping of the text, and extraction from a private copy.
  */
 import fs from "fs";
 import os from "os";
@@ -9,13 +11,17 @@ import path from "path";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   INGEST_EXTENSIONS,
+  MAX_JOB_FILES,
+  codeProjectIn,
   extractText,
   isOwnOutput,
   prepareText,
+  previewFolders,
   readFileOnce,
   scanFolders,
   sourceLabel,
 } from "@/lib/prime-radiant/ingest-sources";
+import { MAX_DOCUMENT_BYTES } from "@/lib/memory-extract";
 
 const base = fs.mkdtempSync(path.join(os.tmpdir(), "prime-radiant-sources-"));
 const prevDir = process.env.PRIME_RADIANT_DIR;
@@ -64,7 +70,7 @@ describe("scanFolders", () => {
     expect([...INGEST_EXTENSIONS]).toEqual([".txt", ".md", ".pdf", ".docx", ".odt", ".rtf"]);
   });
 
-  it("leaves out worktrees, scratch and spike folders, and archives of agent runs by default", async () => {
+  it("leaves out worktrees, repositories, scratch and spike folders, and archives of agent runs by default", async () => {
     write("notes/a.md");
     write("notes/worktrees/run-1/a.md");
     write("checkout-2/README.md");
@@ -78,8 +84,21 @@ describe("scanFolders", () => {
     write("vendor/lib/README.md");
     write("search_cache/x.md");
     const scan = await scanFolders([docs]);
-    expect(scan.files.map((f) => path.relative(docs, f.abs)).sort()).toEqual(["main-repo/doc.md", "notes/a.md"]);
+    expect(scan.files.map((f) => path.relative(docs, f.abs)).sort()).toEqual(["notes/a.md"]);
     expect(scan.excluded).toBe(8);
+    // A repository found during the walk is a code project (its own reason).
+    expect(scan.skips.codeProject).toBe(1);
+    expect(scan.codeProjects).toEqual([path.join(docs, "main-repo")]);
+  });
+
+  it("leaves out logs, test data, examples, snap and flatpak folders by default", async () => {
+    write("keep/a.md");
+    for (const dir of ["snap", "flatpak", "logs", "log", "fixtures", "__fixtures__", "test", "tests", "__tests__", "e2e", "examples", "Trash"]) {
+      write(`keep/${dir}/x.md`);
+    }
+    const scan = await scanFolders([docs]);
+    expect(scan.files.map((f) => path.relative(docs, f.abs))).toEqual(["keep/a.md"]);
+    expect(scan.skips.excludedFolder).toBe(12);
   });
 
   it("uses the exclude list it is given instead of the defaults", async () => {
@@ -151,6 +170,156 @@ describe("scanFolders", () => {
     write("a.md");
     const scan = await scanFolders([docs], { labelOf: (abs) => `upload/${path.basename(abs)}` });
     expect(scan.files[0].label).toBe("upload/a.md");
+  });
+});
+
+describe("code projects", () => {
+  const manifests = ["package.json", "Cargo.toml", "pyproject.toml", "setup.py", "go.mod", "CMakeLists.txt", "pom.xml", "build.gradle", "Gemfile", "composer.json", "Widgets.csproj", "Widgets.sln"];
+
+  it("skips a folder found during the walk that holds a manifest, a .git folder, or a Makefile next to source", async () => {
+    write("notes/plan.md");
+    for (const [i, m] of manifests.entries()) {
+      write(`p${i}/${m}`, "x");
+      write(`p${i}/README.md`);
+      write(`p${i}/docs/guide.md`);
+    }
+    write("repo/README.md");
+    fs.mkdirSync(path.join(docs, "repo", ".git"));
+    write("cproj/Makefile", "all:\n\tcc main.c\n");
+    write("cproj/main.c", "int main(void) { return 0; }");
+    write("cproj/NOTES.md");
+    const scan = await scanFolders([docs]);
+    expect(scan.files.map((f) => path.relative(docs, f.abs))).toEqual(["notes/plan.md"]);
+    expect(scan.skips.codeProject).toBe(manifests.length + 2);
+    expect(scan.excluded).toBe(0);
+  });
+
+  it("keeps a folder whose Makefile builds no code, and a notes vault kept in git", async () => {
+    write("thesis/Makefile", "all:\n\tlatexmk thesis.tex\n");
+    write("thesis/thesis.tex", "\\documentclass{article}");
+    write("thesis/outline.md");
+    write("vault/journal.md");
+    fs.mkdirSync(path.join(docs, "vault", ".git"));
+    fs.mkdirSync(path.join(docs, "vault", ".obsidian"));
+    const scan = await scanFolders([docs]);
+    expect(scan.files.map((f) => path.relative(docs, f.abs)).sort()).toEqual(["thesis/outline.md", "vault/journal.md"]);
+    expect(scan.skips.codeProject).toBe(0);
+  });
+
+  it("reads a project the owner picked explicitly, but not the projects inside it", async () => {
+    const project = path.join(docs, "Projects", "foo");
+    write("Projects/foo/package.json", "{}");
+    fs.mkdirSync(path.join(project, ".git"), { recursive: true });
+    write("Projects/foo/docs/design.md");
+    write("Projects/foo/notes.txt");
+    write("Projects/foo/packages/bar/package.json", "{}");
+    write("Projects/foo/packages/bar/README.md");
+    // Walking the parent leaves foo out; picking foo itself reads its documents.
+    expect((await scanFolders([path.join(docs, "Projects")])).files).toEqual([]);
+    const picked = await scanFolders([project]);
+    expect(picked.files.map((f) => path.relative(project, f.abs))).toEqual(["docs/design.md", "notes.txt"]);
+    expect(picked.skips.codeProject).toBe(1);
+    // A home folder and a project inside it, both picked: the project is read once, from its own pick.
+    const both = await scanFolders([docs, project]);
+    expect(both.files.map((f) => path.relative(docs, f.abs))).toEqual(["Projects/foo/docs/design.md", "Projects/foo/notes.txt"]);
+  });
+
+  it("reads code projects when told not to skip them", async () => {
+    write("app/package.json", "{}");
+    write("app/docs/guide.md");
+    const scan = await scanFolders([docs], { skipCodeProjects: false });
+    expect(scan.files.map((f) => path.relative(docs, f.abs))).toEqual(["app/docs/guide.md"]);
+    expect(scan.skips.codeProject).toBe(0);
+  });
+
+  it("finds a marker past the first entries of a big folder, and never follows a symlinked .git", async () => {
+    const big = path.join(docs, "big");
+    fs.mkdirSync(big);
+    for (let i = 0; i < 2100; i++) fs.writeFileSync(path.join(big, `f${String(i).padStart(4, "0")}.dat`), "");
+    expect(await codeProjectIn(big)).toBeNull();
+    fs.writeFileSync(path.join(big, "go.mod"), "module x");
+    expect(await codeProjectIn(big)).toBe("go.mod");
+    const linked = path.join(docs, "linked");
+    fs.mkdirSync(path.join(docs, "real-git"), { recursive: true });
+    fs.mkdirSync(linked);
+    fs.symlinkSync(path.join(docs, "real-git"), path.join(linked, ".git"));
+    expect(await codeProjectIn(linked)).toBeNull();
+    expect(await codeProjectIn(path.join(docs, "missing"))).toBeNull();
+  });
+});
+
+describe("files left out by name", () => {
+  it("counts boilerplate and temporary files apart from documents and other kinds", async () => {
+    // At the top of the picked folder, which is never judged a project (a CMakeLists.txt deeper down makes its folder one).
+    for (const name of ["LICENSE.md", "license.txt", "COPYING.txt", "NOTICE.md", "AUTHORS.txt", "CHANGELOG.md", "CODE_OF_CONDUCT.md", "CONTRIBUTING.md", "SECURITY.md",
+      "requirements-dev.txt", "CMakeLists.txt", "robots.txt", "llms-full.txt", "yarn.lock.txt"]) {
+      write(name, "boilerplate");
+    }
+    for (const name of ["~$budget.docx", "notes.md~", "draft.tmp", "old.bak", "file.swp", "movie.part", "report.pdf.crdownload"]) write(`t/${name}`, "temp");
+    write("keep/Notice.md");
+    write("keep/security-checklist.md");
+    write("keep/License agreement.pdf");
+    write("keep/README.md");
+    write("other/photo.png");
+    const scan = await scanFolders([docs]);
+    expect(scan.files.map((f) => path.relative(docs, f.abs)).sort()).toEqual([
+      "keep/License agreement.pdf", "keep/Notice.md", "keep/README.md", "keep/security-checklist.md",
+    ]);
+    expect(scan.skips).toMatchObject({ boilerplate: 14, temp: 7, unsupported: 1 });
+  });
+
+  it("keeps every file of a drop, whatever its name", async () => {
+    write("LICENSE.md");
+    write("~$x.docx");
+    const scan = await scanFolders([docs], { skipByName: false });
+    expect(scan.files.map((f) => path.basename(f.abs)).sort()).toEqual(["LICENSE.md", "~$x.docx"]);
+  });
+});
+
+describe("previewFolders", () => {
+  it("counts what a job would read, what it leaves out and why, and where the documents are", async () => {
+    for (let i = 0; i < 3; i++) write(`Documents/Work/memo-${i}.md`, "A memo about the Acme budget for next year and who signs it off.");
+    write("Documents/letter.docx", "docx bytes");
+    write("Downloads/manual.pdf", "pdf bytes");
+    write("notes.txt", "A note at the top of the home folder about the dentist appointment next week.");
+    write("Projects/site/package.json", "{}");
+    write("Projects/site/README.md");
+    write("LICENSE.txt", "MIT");
+    write("Downloads/~$draft.docx", "lock");
+    write("logs/app.md", "x");
+    write("Documents/server.txt", Array.from({ length: 30 }, (_, i) => `2026-10-14 08:00:${String(i).padStart(2, "0")} INFO request ${i} served in 12ms`).join("\n"));
+    const big = write("Downloads/huge.pdf", "");
+    fs.truncateSync(big, MAX_DOCUMENT_BYTES + 1);
+    write("Pictures/cat.jpg", "jpg");
+    const preview = await previewFolders([docs]);
+    expect(preview.documents).toBe(6);
+    expect(preview.skips).toEqual({
+      codeProject: 1, excludedFolder: 1, boilerplate: 1, temp: 1, machineText: 1, tooLarge: 1, unsupported: 1,
+    });
+    expect(preview.topFolders).toEqual([
+      { label: sourceLabel(path.join(docs, "Documents")), documents: 4 },
+      { label: sourceLabel(docs), documents: 1 },
+      { label: sourceLabel(path.join(docs, "Downloads")), documents: 1 },
+    ]);
+    expect(preview.codeProjects).toEqual([sourceLabel(path.join(docs, "Projects", "site"))]);
+    expect(preview).toMatchObject({ truncated: false, limit: MAX_JOB_FILES, notes: [] });
+  });
+
+  it("follows the same settings as the job, and says when there is more than one job reads", async () => {
+    write("app/package.json", "{}");
+    write("app/a.md");
+    write("drafts/b.md");
+    for (let i = 0; i < 4; i++) write(`c${i}.md`);
+    const preview = await previewFolders([docs], { exclude: ["drafts"], skipCodeProjects: false });
+    expect(preview).toMatchObject({ documents: 5, truncated: false });
+    expect(preview.skips).toMatchObject({ codeProject: 0, excludedFolder: 1 });
+    expect(await previewFolders([docs], { maxFiles: 3 })).toMatchObject({ documents: 3, truncated: true, limit: 3, notes: [] });
+  });
+
+  it("names a folder it could not read like a source", async () => {
+    const preview = await previewFolders([path.join(docs, "missing")]);
+    expect(preview.documents).toBe(0);
+    expect(preview.notes.join(" ")).toContain(`${sourceLabel(path.join(docs, "missing"))} could not be read.`);
   });
 });
 

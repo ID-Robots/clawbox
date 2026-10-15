@@ -2,8 +2,9 @@
  * Prime Radiant's settings: `<prime-radiant root>/settings.json`, beside the
  * state database and outside the vault (they are not knowledge).
  *
- * This module owns every section: ingest (the exclude list, the model-call
- * parallelism, the folders the nightly pass re-reads), the cost rates, the
+ * This module owns every section: ingest (the exclude list, whether code
+ * projects are skipped, the model-call parallelism, the folders the nightly
+ * pass re-reads), the cost rates, the
  * nightly schedule, the optional Opus tier, the contradiction pass and the
  * domains with their owners. Keys it does not know are kept on every
  * write, so a section another module adds survives an ingest setting being
@@ -16,7 +17,7 @@
 import crypto from "crypto";
 import fs from "fs";
 import path, { untraced } from "@/lib/runtime-path";
-import { DEFAULT_INGEST_EXCLUDES, readExcludeList } from "./ingest-exclude";
+import { DEFAULT_INGEST_EXCLUDES, isDefaultExcludeList, readExcludeList } from "./ingest-exclude";
 import { mergeCostRates, readRateOverrides, type CostRates, type ModelRate } from "./cost-rates";
 import { primeRadiantRoot } from "./paths";
 
@@ -46,8 +47,15 @@ export const MAX_DOMAINS = 100;
 const MAX_OWNER_CHARS = 80;
 
 export interface IngestSettings {
-  /** Folder-name patterns never walked into. */
+  /**
+   * Folder-name patterns never walked into. A stored list that is a default
+   * list (today's or an earlier one) reads as today's defaults, and saving the
+   * defaults stores nothing, so the list keeps following ClawBox until the
+   * owner changes it; a list the owner changed is kept as it is.
+   */
   exclude: string[];
+  /** Leave out code projects a walk comes across (a picked folder is always read). */
+  skipCodeProjects: boolean;
   /** Model calls in flight at once. */
   parallel: number;
   /** Absolute folders the nightly pass re-reads (empty = no nightly ingest). */
@@ -91,7 +99,7 @@ export interface PrimeRadiantSettings {
 
 export function defaultSettings(): PrimeRadiantSettings {
   return {
-    ingest: { exclude: [...DEFAULT_INGEST_EXCLUDES], parallel: DEFAULT_INGEST_PARALLEL, folders: [] },
+    ingest: { exclude: [...DEFAULT_INGEST_EXCLUDES], skipCodeProjects: true, parallel: DEFAULT_INGEST_PARALLEL, folders: [] },
     costRates: {},
     nightly: { enabled: true, time: DEFAULT_NIGHTLY_TIME },
     opus: { enabled: false, capUsd: DEFAULT_OPUS_CAP_USD, sampleRate: DEFAULT_OPUS_SAMPLE_RATE, model: DEFAULT_OPUS_MODEL },
@@ -213,8 +221,9 @@ export function readSettings(root: string = primeRadiantRoot()): PrimeRadiantSet
   const ingest = (raw.ingest && typeof raw.ingest === "object" ? raw.ingest : {}) as Record<string, unknown>;
   if (ingest.exclude !== undefined) {
     const list = readExcludeList(ingest.exclude);
-    if (list.ok) out.ingest.exclude = list.patterns;
+    if (list.ok && !isDefaultExcludeList(list.patterns)) out.ingest.exclude = list.patterns;
   }
+  if (typeof ingest.skipCodeProjects === "boolean") out.ingest.skipCodeProjects = ingest.skipCodeProjects;
   const parallel = readParallel(ingest.parallel);
   if (parallel !== null) out.ingest.parallel = parallel;
   if (ingest.folders !== undefined) {
@@ -245,7 +254,7 @@ export function effectiveCostRates(root: string = primeRadiantRoot()): CostRates
 }
 
 export interface SettingsPatch {
-  ingest?: { exclude?: unknown; parallel?: unknown; folders?: unknown };
+  ingest?: { exclude?: unknown; skipCodeProjects?: unknown; parallel?: unknown; folders?: unknown };
   costRates?: unknown;
   nightly?: { enabled?: unknown; time?: unknown } | null;
   opus?: { enabled?: unknown; capUsd?: unknown; sampleRate?: unknown; model?: unknown } | null;
@@ -255,7 +264,7 @@ export interface SettingsPatch {
 
 /** The keys a patch may carry, per section — anything else is refused, never stored. */
 const PATCH_KEYS: Readonly<Record<string, readonly string[]>> = {
-  ingest: ["exclude", "parallel", "folders"],
+  ingest: ["exclude", "skipCodeProjects", "parallel", "folders"],
   nightly: Object.keys(FIELDS.nightly),
   opus: Object.keys(FIELDS.opus),
   contradictions: Object.keys(FIELDS.contradictions),
@@ -286,7 +295,8 @@ export class SettingsError extends Error {
 
 /**
  * Apply a patch: each field given is validated strictly and replaces the
- * stored one (`exclude: null` / `costRates: null` put the defaults back).
+ * stored one (`exclude: null` / `costRates: null` put the defaults back; an
+ * exclude list equal to a default list does too).
  * A bad field refuses the whole patch ({@link SettingsError}) and writes
  * nothing. Written atomically, 0600.
  */
@@ -299,7 +309,15 @@ export function writeSettings(patch: SettingsPatch, root: string = primeRadiantR
     else if (patch.ingest.exclude !== undefined) {
       const list = readExcludeList(patch.ingest.exclude);
       if (!list.ok) throw new SettingsError(list.error);
-      ingest.exclude = list.patterns;
+      // The defaults are not stored: they keep following ClawBox's list.
+      if (isDefaultExcludeList(list.patterns)) delete ingest.exclude;
+      else ingest.exclude = list.patterns;
+    }
+    if (patch.ingest.skipCodeProjects === null) delete ingest.skipCodeProjects;
+    else if (patch.ingest.skipCodeProjects !== undefined) {
+      const r = readBool(patch.ingest.skipCodeProjects, "ingest.skipCodeProjects");
+      if (!r.ok) throw new SettingsError(r.error);
+      ingest.skipCodeProjects = r.value;
     }
     if (patch.ingest.parallel === null) delete ingest.parallel;
     else if (patch.ingest.parallel !== undefined) {

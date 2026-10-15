@@ -10,6 +10,8 @@ import type { CommitInfo } from "@/lib/prime-radiant/git";
 import type { LintFinding, LintReport } from "@/lib/prime-radiant/lint";
 import type { ReviewItem, ReviewStatus } from "@/lib/prime-radiant/review-store";
 import type { IngestJob, DeadLetter, FileStatus } from "@/lib/prime-radiant/ingest-store";
+import type { SkipCounts, SkipReason } from "@/lib/prime-radiant/ingest-exclude";
+import type { IngestPreview } from "@/lib/prime-radiant/ingest-sources";
 import type { PageListEntry } from "@/lib/prime-radiant/vault";
 import type { PageDetail, PrimeRadiantStatus } from "@/lib/prime-radiant/service";
 import type { PrimeRadiantSettings } from "@/lib/prime-radiant/settings";
@@ -23,6 +25,7 @@ export type {
   DiffResult,
   FileStatus,
   IngestJob,
+  IngestPreview,
   LintFinding,
   LintReport,
   PageDetail,
@@ -32,7 +35,29 @@ export type {
   ReviewItem,
   ReviewStatus,
   RunRecord,
+  SkipCounts,
+  SkipReason,
 };
+
+/** The order skip reasons are listed in (every reason `SkipCounts` holds). */
+export const SKIP_ORDER: readonly SkipReason[] = [
+  "codeProject",
+  "excludedFolder",
+  "boilerplate",
+  "temp",
+  "machineText",
+  "tooLarge",
+  "unsupported",
+];
+
+/** A job's or a preview's skips worth showing, in {@link SKIP_ORDER}: the reasons with a count. */
+export function skipEntries(skips: Partial<SkipCounts> | null | undefined): Array<[SkipReason, number]> {
+  if (!skips) return [];
+  return SKIP_ORDER.flatMap((r) => {
+    const n = skips[r];
+    return typeof n === "number" && n > 0 ? [[r, n] as [SkipReason, number]] : [];
+  });
+}
 
 export const API = "/setup-api/prime-radiant";
 
