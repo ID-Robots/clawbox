@@ -86,5 +86,12 @@ export function hasX64Install(projectDir: string): boolean {
  * only has to outlast an honest run, because an overrun of the client's wait
  * is reported as the step's failure while the unit carries on migrating in
  * the background — and a Retry then meets a core already replaced.
+ *
+ * 110 minutes, just under that ceiling: the step's archive is the whole
+ * state directory less the workspaces (`backup create` takes no narrower
+ * exclusion), which measured 48 GB on the desktop this package was built
+ * for — tens of minutes to write and verify before the migration has even
+ * started — so an hour was the budget most likely to be the thing that
+ * failed an honest run.
  */
-export const X64_DESKTOP_CORE_STEP_TIMEOUT_MS = 3_600_000;
+export const X64_DESKTOP_CORE_STEP_TIMEOUT_MS = 6_600_000;

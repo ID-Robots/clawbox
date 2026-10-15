@@ -58,7 +58,7 @@ vi.mock("@/lib/root-step-runner", async (orig) => ({
 vi.mock("@/lib/x64-integration", () => ({
   hasX64DesktopIntegration: vi.fn(() => false),
   hasX64Install: vi.fn(() => false),
-  X64_DESKTOP_CORE_STEP_TIMEOUT_MS: 3_600_000,
+  X64_DESKTOP_CORE_STEP_TIMEOUT_MS: 6_600_000,
 }));
 
 vi.mock("@/lib/port-probe", async (orig) => ({

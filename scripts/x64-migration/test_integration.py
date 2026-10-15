@@ -86,7 +86,9 @@ esac
         return root,path
 
     def run_worker(self,path,step='set_timezone'):
-        return subprocess.run(['/bin/bash',str(path),step],capture_output=True,text=True,timeout=5)
+        # 30 s, not 5: a core replacement runs several `sync -f` and python
+        # spawns, and on a CI runner's disk that took the test past 5 s once.
+        return subprocess.run(['/bin/bash',str(path),step],capture_output=True,text=True,timeout=30)
 
     def test_timezone_applies_valid_zone(self):
         root,worker=self.fixture()
