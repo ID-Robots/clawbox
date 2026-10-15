@@ -110,7 +110,15 @@ generation, listed in `snapshot.txt` (each of those database files that did not
 exist is listed as `absent:<path>`), with `recovery.txt` saying how to use it.
 Only then are the trees swapped (two renames, the previous core retained at
 `<prefix>/lib/node_modules/.openclaw-previous` until the next replacement) and
-`openclaw doctor --fix --non-interactive` run on the new core. A migration that
+`openclaw doctor --fix --non-interactive` run on the new core. The archiver
+refuses, while writing, every symbolic link whose target is outside its
+declared assets (an absolute target whose real path is outside or does not
+exist, a relative one that lands outside) and has no exclusion, so before the
+archive the step finds those links by that rule over the roots the archiver's
+own dry run declares, journals them in `set-aside-links.txt`, unlinks them for
+the archive and recreates them afterwards, pass or fail (`.restored.txt` once
+they are back); links a cut-short run left set aside are put back at the start
+of the next core step, and a point still holding some is never pruned. A migration that
 fails, or reports a blocker (a lost maintenance lease, changed inputs, a legacy
 store still to migrate), puts the previous core and the `state/` copy back
 before the step returns — and removes what the new core created: a database
