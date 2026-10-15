@@ -10,10 +10,10 @@ package manager.
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/x64-migration -p 'test_*.py'
 python3 scripts/x64-migration/build-package.py \
   --staging /tmp/clawbox-x64-integration-stage \
-  --output /tmp/clawbox-x64-integration_1.0.4_amd64.deb
-dpkg-deb --info /tmp/clawbox-x64-integration_1.0.4_amd64.deb
-dpkg-deb --contents /tmp/clawbox-x64-integration_1.0.4_amd64.deb
-sudo -n dpkg -i /tmp/clawbox-x64-integration_1.0.4_amd64.deb
+  --output /tmp/clawbox-x64-integration_1.0.5_amd64.deb
+dpkg-deb --info /tmp/clawbox-x64-integration_1.0.5_amd64.deb
+dpkg-deb --contents /tmp/clawbox-x64-integration_1.0.5_amd64.deb
+sudo -n dpkg -i /tmp/clawbox-x64-integration_1.0.5_amd64.deb
 ```
 
 By default the package is for the account that runs the builder (under `sudo`,
@@ -22,6 +22,10 @@ package prefix `~/.nvm/versions/node/v24.0.0`. Override the builder arguments
 for another desktop. These non-secret paths live in root-owned
 `/etc/clawbox/x64-integration.env`. The CLI wrapper checks that it runs as the
 configured desktop owner before loading the owner-writable OpenClaw package.
+`--node-dir` is the Node every core command and the staged core's own
+`--version` gate run on, so it has to satisfy the pinned core's `engines.node`
+(2026.10.2: `>=24.16.0 <25 || >=26.1.0`); a core that refuses it is never
+promoted, and the step says to rebuild the package with a Node it accepts.
 
 The package installs a system `clawbox-gateway.service` bridge to the existing
 user `openclaw-gateway.service`. Initial activation uses **start**, preserving
@@ -87,11 +91,34 @@ bash scripts/x64-migration/install-coding-harness.sh scripts/claude-ds "$PWD"
 The Coding app checks readiness on its next status request. A running agent's
 MCP server discovers newly installed tools on its next restart.
 
-The already-installed OpenClaw version is validated without running migrations.
-The owner's idempotent backup compatibility patch is reapplied as that owner.
-A changed core pin is deliberately refused before package/database modification:
-a new core version requires a reviewed state snapshot and rollback workflow.
-This package does not promise safe downgrades of a migrated SQLite schema.
+An OpenClaw core already at the pin is validated without running migrations.
+The owner's compatibility patches under `~/bin` are reapplied as that owner; one
+pinned to another core version answers "Review required" and is reported on a
+`CLAWBOX-WARN[core-patch-skipped]` line rather than failing the step.
+
+**A changed core pin replaces the core with a recovery point** (package 1.0.5;
+earlier packages refused it). Inside the maintenance guard, with the gateway
+stopped, the step stages the pinned core in a prefix of its own and gates it on
+its own `--version`; then writes the recovery point under
+`~/backups/openclaw-core-update/<UTC stamp>-<from>-to-<to>/`: `archive/`, a
+verified archive the INSTALLED core writes with
+`openclaw backup create --verify --no-include-workspace` (config, credentials,
+the state database, every agent database), and `state/`, a plain copy of the
+exact pre-update `openclaw.json`, `state/openclaw.sqlite` and every
+`agents/<id>/agent/openclaw-agent.sqlite` with their `-wal`/`-shm` — one
+generation, listed in `snapshot.txt`, with `recovery.txt` saying how to use it.
+Only then are the trees swapped (two renames, the previous core retained at
+`<prefix>/lib/node_modules/.openclaw-previous` until the next replacement) and
+`openclaw doctor --fix --non-interactive` run on the new core. A migration that
+fails, or reports a blocker (a lost maintenance lease, changed inputs, a legacy
+store still to migrate), puts the previous core and the `state/` copy back
+before the step returns, so the gateway the guard restarts is the one the
+desktop had. The newest three recovery points are kept. The archive excludes
+workspaces (tens of gigabytes on a long-lived desktop) and the `state/`
+copy covers the default layout; an agent database at a configured path outside
+it is in the archive only. Package rollback alone never reverses a migration:
+to go back by hand, restore `state/` and the previous core together, as
+`recovery.txt` says.
 
 The package also installs timezone support, the existing owner-password update
 capability with root-side account validation, a tunnel wrapper that ignores

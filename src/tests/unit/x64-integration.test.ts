@@ -150,3 +150,11 @@ describe("a PC installed with install-x64.sh", () => {
     expect(fs.closeSync).toHaveBeenCalledWith(43);
   });
 });
+
+describe("X64_DESKTOP_CORE_STEP_TIMEOUT_MS", () => {
+  it("outlasts an archive and a multi-GB migration and stays inside the root unit's 7200 s ceiling", async () => {
+    const { X64_DESKTOP_CORE_STEP_TIMEOUT_MS } = await import("@/lib/x64-integration");
+    expect(X64_DESKTOP_CORE_STEP_TIMEOUT_MS).toBeGreaterThanOrEqual(30 * 60_000);
+    expect(X64_DESKTOP_CORE_STEP_TIMEOUT_MS).toBeLessThan(7_200_000);
+  });
+});

@@ -2,6 +2,7 @@
 """Read-only fixture tests; no host service, credential, or timezone changes."""
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import pwd
@@ -150,20 +151,91 @@ esac
         self.assertEqual(result.returncode,64)
         self.assertFalse((root/'pwned').exists())
 
+    # The fixture's OpenClaw launcher: the real layout (<prefix>/bin/openclaw a
+    # relative symlink into <prefix>/lib/node_modules/openclaw/, the version its
+    # own package.json's), so the staged core the fake npm writes answers for
+    # itself exactly as the live one does. Every core command records an event;
+    # doctor and config validate exit with core-exit, doctor also prints
+    # doctor-says and, under doctor-mutates, rewrites the state the rollback
+    # must put back.
+    LAUNCHER = r"""#!/bin/sh
+here=$(dirname "$(readlink -f "$0")")
+version=$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$here/package.json")
+case "$1" in
+  --version) printf 'version-%s\n' "$version" >> '{root}/events'; printf 'OpenClaw %s (fixture)\n' "$version" ;;
+  backup)
+    printf 'backup-%s\n' "$version" >> '{root}/events'
+    [ ! -f '{root}/backup-exit' ] || exit "$(cat '{root}/backup-exit')"
+    out=; while [ $# -gt 0 ]; do [ "$1" = --output ] && out=$2; shift; done
+    printf 'archive' > "$out/fixture-openclaw-backup.tar.gz"; printf '{"ok":true}\n' ;;
+  doctor)
+    printf 'doctor-start\n' >> '{root}/events'
+    sleep 0.15
+    [ ! -f '{root}/doctor-says' ] || cat '{root}/doctor-says'
+    if [ -f '{root}/doctor-mutates' ]; then
+      printf 'migrated-by-%s' "$version" > '{root}/.openclaw/agents/main/agent/openclaw-agent.sqlite'
+      printf 'shm' > '{root}/.openclaw/agents/main/agent/openclaw-agent.sqlite-shm'
+      rm -f '{root}/.openclaw/agents/main/agent/openclaw-agent.sqlite-wal'
+      printf '{"meta":{"lastTouchedVersion":"%s"}}' "$version" > '{root}/.openclaw/openclaw.json'
+    fi
+    printf 'doctor-end\n' >> '{root}/events'
+    exit "$(cat '{root}/core-exit')" ;;
+  config)
+    printf 'doctor-start\n' >> '{root}/events'
+    sleep 0.15
+    printf 'doctor-end\nvalidate-%s\n' "$version" >> '{root}/events'
+    exit "$(cat '{root}/core-exit')" ;;
+  *) exit 64 ;;
+esac
+"""
+
+    # `node` answers `-p "require('<package.json>').version"` from that file.
+    NODE = r"""#!/bin/sh
+case "$1" in
+  --version) printf 'v24.18.0\n' ;;
+  -p) f=$(printf '%s' "$2" | sed -n "s/^require('\([^']*\)').version$/\1/p")
+      [ -n "$f" ] && [ -f "$f" ] || exit 1
+      sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$f" ;;
+  *) exit 64 ;;
+esac
+"""
+
+    # `npm install -g openclaw@<v> --prefix <stage>` lays the global shape out
+    # in the stage -- at npm-version's version when that file says otherwise,
+    # failing with npm-exit's code when it exists.
+    NPM = r"""#!/bin/sh
+[ "$1" = install ] || exit 0
+printf 'npm-%s\n' "$1" >> '{root}/events'
+[ ! -f '{root}/npm-exit' ] || exit "$(cat '{root}/npm-exit')"
+prefix=; spec=
+while [ $# -gt 0 ]; do
+  case "$1" in --prefix) prefix=$2; shift ;; openclaw@*) spec=${1#openclaw@} ;; esac
+  shift
+done
+[ ! -f '{root}/npm-version' ] || spec=$(cat '{root}/npm-version')
+pkg="$prefix/lib/node_modules/openclaw"
+mkdir -p "$pkg" "$prefix/bin"
+printf '{"name":"openclaw","version":"%s"}\n' "$spec" > "$pkg/package.json"
+cp '{root}/launcher.sh' "$pkg/openclaw.mjs"; chmod 0755 "$pkg/openclaw.mjs"
+ln -s ../lib/node_modules/openclaw/openclaw.mjs "$prefix/bin/openclaw"
+"""
+
     def core_fixture(self,doctor_exit=0):
         root,worker=self.fixture()
         runtime=root/'runtime'; runtime.mkdir()
-        binary=root/'bin'; binary.mkdir()
         (root/'mirror/config').mkdir(parents=True)
         (root/'mirror/config/openclaw-target.txt').write_text('2026.8.1\n')
-        node=runtime/'node'; node.write_text('#!/bin/sh\nprintf "2026.8.1\\n"\n'); node.chmod(0o755)
-        doctor=binary/'openclaw'
-        doctor.write_text(f'''#!/bin/sh
-printf 'doctor-start\\n' >> '{root}/events'
-sleep 0.15
-printf 'doctor-end\\n' >> '{root}/events'
-exit {doctor_exit}
-'''); doctor.chmod(0o755)
+        (root/'core-exit').write_text(str(doctor_exit))
+        for name,text in [('node',self.NODE),('npm',self.NPM.replace('{root}',str(root)))]:
+            tool=runtime/name; tool.write_text(text); tool.chmod(0o755)
+        (root/'launcher.sh').write_text(self.LAUNCHER.replace('{root}',str(root)))
+        self.write_core(root,root,'2026.8.1')
+        state=root/'.openclaw'
+        (state/'state').mkdir(parents=True); (state/'agents/main/agent').mkdir(parents=True)
+        (state/'openclaw.json').write_text('{"meta":{"lastTouchedVersion":"2026.8.1"}}')
+        (state/'state/openclaw.sqlite').write_text('state-2026.8.1')
+        (state/'agents/main/agent/openclaw-agent.sqlite').write_text('agent-2026.8.1')
+        (state/'agents/main/agent/openclaw-agent.sqlite-wal').write_text('wal-2026.8.1')
         host=root/'host.env'; host.write_text(host.read_text().replace('NODE_DIR=/usr/bin',f'NODE_DIR={runtime}'))
         gateway=root/'gateway'
         gateway.write_text(f'#!/bin/sh\nprintf "gateway-%s\\n" "$1" >> "{root}/events"\n'); gateway.chmod(0o755)
@@ -247,16 +319,129 @@ exit {code}
         self.assertIn('doctor-end',(root/'events').read_text())
         self.assertFalse((root/'guard').exists())
 
-    def test_changed_core_pin_is_refused_before_any_core_command(self):
-        """A refused migration must release maintenance and restore the gateway."""
+    @staticmethod
+    def write_core(root,prefix,version):
+        pkg=prefix/'lib/node_modules/openclaw'; pkg.mkdir(parents=True)
+        (pkg/'package.json').write_text('{"name":"openclaw","version":"%s"}\n'%version)
+        (pkg/'openclaw.mjs').write_text((root/'launcher.sh').read_text()); (pkg/'openclaw.mjs').chmod(0o755)
+        (prefix/'bin').mkdir(exist_ok=True)
+        os.symlink('../lib/node_modules/openclaw/openclaw.mjs',prefix/'bin/openclaw')
+
+    @staticmethod
+    def core_version(tree):
+        return json.loads((tree/'package.json').read_text())['version']
+
+    @staticmethod
+    def recovery_points(root):
+        base=root/'backups/openclaw-core-update'
+        return sorted(base.iterdir()) if base.is_dir() else []
+
+    def test_changed_core_pin_replaces_the_core_behind_a_recovery_point(self):
+        """Stage and gate first, then the archive and the state copy, then the swap and doctor."""
         root,worker,_=self.core_fixture()
         (root/'mirror/config/openclaw-target.txt').write_text('2026.9.1\n')
         result=self.run_worker(worker,'openclaw_install')
-        self.assertEqual(result.returncode,78,result.stderr)
-        self.assertNotIn('doctor-start',(root/'events').read_text())
-        self.assertIn('reviewed state snapshot',result.stderr)
+        self.assertEqual(result.returncode,0,result.stderr)
+        events=(root/'events').read_text().splitlines()
+        # Two doctor pairs: the migration, then config validate (the fixture logs every core command so).
+        order=['gateway-stop','npm-install','version-2026.9.1','backup-2026.8.1','doctor-start','doctor-end','doctor-start','doctor-end','validate-2026.9.1','system-start']
+        self.assertEqual([e for e in events if e in order],order,events)
+        self.assertEqual(self.core_version(root/'lib/node_modules/openclaw'),'2026.9.1')
+        self.assertEqual(self.core_version(root/'lib/node_modules/.openclaw-previous'),'2026.8.1')
+        self.assertEqual(os.readlink(root/'bin/openclaw'),'../lib/node_modules/openclaw/openclaw.mjs')
+        self.assertFalse((root/'.openclaw-stage').exists())
+        points=self.recovery_points(root)
+        self.assertEqual(len(points),1,points)
+        point=points[0]
+        self.assertTrue(point.name.endswith('-2026.8.1-to-2026.9.1'),point.name)
+        self.assertEqual((point/'archive/fixture-openclaw-backup.tar.gz').read_text(),'archive')
+        self.assertEqual((point/'state/config/openclaw.json').read_text(),'{"meta":{"lastTouchedVersion":"2026.8.1"}}')
+        self.assertEqual((point/'state/state/openclaw.sqlite').read_text(),'state-2026.8.1')
+        self.assertEqual((point/'state/agents/main/agent/openclaw-agent.sqlite-wal').read_text(),'wal-2026.8.1')
+        self.assertEqual((point/'state/snapshot.txt').read_text().splitlines(),
+                         ['config/openclaw.json','state/openclaw.sqlite','agents/main/agent/openclaw-agent.sqlite','agents/main/agent/openclaw-agent.sqlite-wal'])
+        self.assertIn('backup create --verify',(point/'recovery.txt').read_text())
+        self.assertTrue((point/'doctor.log').exists())
+        self.assertIn('OpenClaw 2026.9.1 installed; configuration accepted',result.stdout)
         self.assertFalse((root/'guard').exists())
-        self.assertIn('system-start',(root/'events').read_text())
+
+    def test_refused_migration_restores_the_previous_core_and_the_state(self):
+        """A failed or blocked doctor puts the core AND the one-generation state copy back."""
+        for case in ['exit','blocker']:
+            with self.subTest(case=case):
+                root,worker,_=self.core_fixture(9 if case=='exit' else 0)
+                (root/'mirror/config/openclaw-target.txt').write_text('2026.9.1\n')
+                (root/'doctor-mutates').write_text('')
+                if case=='blocker': (root/'doctor-says').write_text('agent database maintenance lease was lost\n')
+                result=self.run_worker(worker,'openclaw_install')
+                self.assertNotEqual(result.returncode,0)
+                self.assertIn('restoring OpenClaw 2026.8.1',result.stderr)
+                self.assertIn('back as they were',result.stderr)
+                self.assertEqual(self.core_version(root/'lib/node_modules/openclaw'),'2026.8.1')
+                self.assertEqual([p.name for p in (root/'lib/node_modules').iterdir()],['openclaw'])
+                state=root/'.openclaw'
+                self.assertEqual((state/'agents/main/agent/openclaw-agent.sqlite').read_text(),'agent-2026.8.1')
+                self.assertEqual((state/'agents/main/agent/openclaw-agent.sqlite-wal').read_text(),'wal-2026.8.1')
+                self.assertFalse((state/'agents/main/agent/openclaw-agent.sqlite-shm').exists())
+                self.assertEqual((state/'openclaw.json').read_text(),'{"meta":{"lastTouchedVersion":"2026.8.1"}}')
+                events=(root/'events').read_text().splitlines()
+                self.assertIn('doctor-start',events)
+                self.assertNotIn('validate-2026.9.1',events)
+                self.assertIn('system-start',events)
+                self.assertNotIn('configuration accepted',result.stdout)
+                self.assertFalse((root/'guard').exists())
+                self.assertEqual(len(self.recovery_points(root)),1)
+
+    def test_staged_core_that_is_not_the_pin_never_reaches_the_live_prefix(self):
+        """The gate is the staged launcher's own answer; nothing of the owner's is touched before it."""
+        for case in ['other-version','npm-failed']:
+            with self.subTest(case=case):
+                root,worker,_=self.core_fixture()
+                (root/'mirror/config/openclaw-target.txt').write_text('2026.9.1\n')
+                if case=='other-version': (root/'npm-version').write_text('2026.9.0')
+                else: (root/'npm-exit').write_text('7')
+                result=self.run_worker(worker,'openclaw_install')
+                self.assertNotEqual(result.returncode,0)
+                self.assertIn('untouched',result.stderr)
+                self.assertEqual(self.core_version(root/'lib/node_modules/openclaw'),'2026.8.1')
+                events=(root/'events').read_text()
+                self.assertNotIn('backup-',events)
+                self.assertNotIn('doctor-start',events)
+                self.assertFalse((root/'.openclaw-stage').exists())
+                self.assertEqual(self.recovery_points(root),[])
+                self.assertFalse((root/'guard').exists())
+                self.assertIn('system-start',events)
+
+    def test_failed_archive_stops_before_the_swap(self):
+        root,worker,_=self.core_fixture()
+        (root/'mirror/config/openclaw-target.txt').write_text('2026.9.1\n')
+        (root/'backup-exit').write_text('3')
+        result=self.run_worker(worker,'openclaw_install')
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn('backup create --verify failed',result.stderr)
+        self.assertEqual(self.core_version(root/'lib/node_modules/openclaw'),'2026.8.1')
+        self.assertFalse((root/'lib/node_modules/.openclaw-previous').exists())
+        self.assertFalse((root/'.openclaw-stage').exists())
+        self.assertNotIn('doctor-start',(root/'events').read_text())
+        self.assertFalse((root/'guard').exists())
+
+    def test_owner_patch_for_another_core_is_skipped_with_a_warning(self):
+        root,worker,_=self.core_fixture()
+        hook=root/'bin/openclaw-patch-backup-sqlite'
+        hook.write_text('#!/bin/sh\necho "Review required: this patch supports OpenClaw 2026.8.1, found 2026.9.1" >&2\nexit 1\n')
+        hook.chmod(0o755)
+        result=self.run_worker(worker,'openclaw_install')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('CLAWBOX-WARN[core-patch-skipped]: openclaw-patch-backup-sqlite',result.stdout)
+        self.assertIn('configuration accepted',result.stdout)
+
+    def test_parked_previous_core_is_put_back_when_the_live_one_is_gone(self):
+        root,worker,_=self.core_fixture()
+        (root/'lib/node_modules/openclaw').rename(root/'lib/node_modules/.openclaw-previous')
+        result=self.run_worker(worker,'openclaw_install')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(self.core_version(root/'lib/node_modules/openclaw'),'2026.8.1')
+        self.assertNotIn('npm-install',(root/'events').read_text())
 
     def rebuild_fixture(self,fail_at=None):
         """Model dependency/build failures with an old UI and owner-state sentinels."""

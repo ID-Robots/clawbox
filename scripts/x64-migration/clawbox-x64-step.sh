@@ -84,33 +84,334 @@ install_coding_harness() {
     "$MIRROR/scripts/claude-ds" "$PROJECT_DIR"
 }
 
+# ---------------------------------------------------------------------------
+# Replacing the OpenClaw core on this desktop.
+#
+# The pin in the mirror moves past the installed core on every core bump, and
+# this step used to refuse that outright for want of a recovery plan. The plan
+# is the one the core's own "Rollback and recovery" doc names: a recovery point
+# is the matching package, openclaw.json, state/openclaw.sqlite and every
+# agents/<id>/agent/openclaw-agent.sqlite, from ONE generation, taken with the
+# gateway stopped — and once state has migrated past an older release's schema,
+# the supported way back is that recovery point with its matching release.
+#
+# So, inside the maintenance guard the caller holds (gateway stopped, nothing
+# may restart it):
+#   1. stage the pinned core in a prefix of its own and gate it on its own
+#      `--version` (the core is the authority on its engines) — nothing of the
+#      owner's is touched while npm can still fail;
+#   2. the recovery point: `backup create --verify --no-include-workspace` by
+#      the INSTALLED core (the one that can read this state), which is the
+#      verified archive the docs name, beside a plain copy of the exact
+#      pre-activation bytes (config, databases, their -wal/-shm) that the
+#      automatic rollback puts back;
+#   3. the swap, two renames, with the previous core RETAINED beside the live
+#      one until the next replacement;
+#   4. `doctor --fix --non-interactive` on the new core; a refused or
+#      incomplete migration restores the previous core and the snapshot, and
+#      the caller then restarts the gateway it stopped — on the core it had.
+#
+# `openclaw update` is deliberately not used: it restarts and verifies the
+# managed service itself, and this package holds the user gateway behind the
+# maintenance condition for the whole step, so its activation check could never
+# pass and it would roll every update back. Every write into the owner-writable
+# core prefix and into the recovery point runs as the owner, never as root.
+# ---------------------------------------------------------------------------
+CORE_RECOVERY_KEEP=3
+
+core_recovery_root() { printf '%s/backups/openclaw-core-update' "$INSTALL_HOME"; }
+
+installed_openclaw_version() {
+  as_owner "$NODE_DIR/node" -p "require('$NPM_PREFIX/lib/node_modules/openclaw/package.json').version" 2>/dev/null || true
+}
+
+# A replacement cut short between its two renames leaves the live tree gone and
+# the old one set aside: put it back before the core is probed, so a parked
+# core is never mistaken for an absent one. A retained previous core beside a
+# live one is this package's rollback material and stays; only a stage left
+# behind is dropped.
+recover_parked_openclaw_core() {
+  as_owner /bin/bash -s -- "$NPM_PREFIX" <<'SH'
+set -euo pipefail
+live=$1/lib/node_modules/openclaw
+previous=$1/lib/node_modules/.openclaw-previous
+stage=$1/.openclaw-stage
+if [ ! -e "$live" ] && [ ! -L "$live" ]; then
+  if [ -e "$previous" ] || [ -L "$previous" ]; then
+    echo '  An earlier core swap was cut short with the previous OpenClaw core set aside; putting it back'
+    mv "$previous" "$live"
+  fi
+  exit 0
+fi
+if [ -e "$stage" ]; then
+  echo '  Removing the stage an earlier core swap left behind'
+  rm -rf "$stage"
+fi
+SH
+}
+
+stage_openclaw_core() {
+  local stage=$1 target=$2 out
+  as_owner /bin/rm -rf "$stage" || return 1
+  as_owner /bin/mkdir -p "$stage" || return 1
+  if ! as_owner npm install -g "openclaw@$target" --prefix "$stage" --no-fund --no-audit </dev/null; then
+    echo "Error: npm could not install openclaw@$target into the stage; the core on this desktop is untouched" >&2
+    as_owner /bin/rm -rf "$stage"; return 1
+  fi
+  if [ ! -x "$stage/bin/openclaw" ]; then
+    echo "Error: npm left no openclaw launcher in the stage; the core on this desktop is untouched" >&2
+    as_owner /bin/rm -rf "$stage"; return 1
+  fi
+  # The staged launcher's own answer is the gate: a core that refuses the Node
+  # it is given, or answers nothing, never reaches the live prefix.
+  if ! out=$(as_owner "$stage/bin/openclaw" --version 2>&1 </dev/null); then
+    printf '%s\n' "$out" >&2
+    echo "Error: openclaw@$target is staged but refuses to run with the Node at $NODE_DIR ($(as_owner "$NODE_DIR/node" --version 2>/dev/null || echo unknown)); rebuild this integration package with --node-dir naming a Node the core's engines accept. The core on this desktop is untouched." >&2
+    as_owner /bin/rm -rf "$stage"; return 1
+  fi
+  if [ "$(printf '%s\n' "$out" | awk '$1 == "OpenClaw" { print $2; exit }')" != "$target" ]; then
+    echo "Error: the staged openclaw answers '${out:-<nothing>}' to --version, not $target; the core on this desktop is untouched" >&2
+    as_owner /bin/rm -rf "$stage"; return 1
+  fi
+  echo "Staged: $(printf '%s\n' "$out" | awk '$1 == "OpenClaw" { print; exit }')"
+}
+
+# The plain half of the recovery point: `snapshot` copies the set the rollback
+# needs under <point>/state (paths mirroring the state directory, the config
+# under config/openclaw.json) and lists it in snapshot.txt; `restore` puts
+# exactly that list back and removes a -wal/-shm the new core added beside a
+# database the list holds. Never through a symlink in either direction.
+core_state_set() {
+  as_owner /usr/bin/python3 -I - "$1" "$INSTALL_HOME/.openclaw" "$2" "$INSTALL_HOME/.openclaw/openclaw.json" <<'PY'
+import os, pathlib, shutil, sys
+mode, state_dir, snap, config = sys.argv[1], pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3]), pathlib.Path(sys.argv[4])
+manifest = snap / 'snapshot.txt'
+def copy(src, dst):
+    if src.is_symlink():
+        raise SystemExit(f'refusing a symbolic link in the state set: {src}')
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
+    with open(dst, 'rb') as f:
+        os.fsync(f.fileno())
+if mode == 'snapshot':
+    bases = [state_dir / 'state' / 'openclaw.sqlite', *sorted(state_dir.glob('agents/*/agent/openclaw-agent.sqlite'))]
+    entries = []
+    if config.exists():
+        copy(config, snap / 'config' / 'openclaw.json'); entries.append('config/openclaw.json')
+    for base in bases:
+        for suffix in ['', '-wal', '-shm']:
+            src = pathlib.Path(str(base) + suffix)
+            if src.exists():
+                rel = src.relative_to(state_dir)
+                copy(src, snap / rel); entries.append(str(rel))
+    manifest.write_text(''.join(e + '\n' for e in entries))
+    print(f'  Snapshot: {len(entries)} files under {snap}')
+elif mode == 'restore':
+    entries = [e for e in manifest.read_text().splitlines() if e]
+    kept = set(entries)
+    for rel in entries:
+        dst = config if rel == 'config/openclaw.json' else state_dir / rel
+        if dst.is_symlink():
+            raise SystemExit(f'refusing to restore over a symbolic link: {dst}')
+        copy(snap / rel, dst)
+    for rel in entries:
+        if rel.endswith('.sqlite'):
+            for suffix in ['-wal', '-shm']:
+                if rel + suffix not in kept:
+                    stray = state_dir / (rel + suffix)
+                    if stray.exists() and not stray.is_symlink():
+                        stray.unlink()
+    os.sync()
+    print(f'  Restored: {len(entries)} files from {snap}')
+else:
+    raise SystemExit('unknown mode')
+PY
+}
+
+make_core_recovery_point() {
+  local point=$1 current=$2 target=$3
+  as_owner /bin/mkdir -p -m 0700 "$point" "$point/archive" "$point/state" || return 1
+  echo "Writing the verified pre-update archive with OpenClaw $current (backup create --verify --no-include-workspace)..."
+  if ! as_owner /bin/bash -c 'exec "$1" backup create --verify --no-include-workspace --output "$2" --json </dev/null >"$3" 2>"$4"' _ \
+      "$NPM_PREFIX/bin/openclaw" "$point/archive" "$point/backup-create.json" "$point/backup-create.log"; then
+    as_owner /bin/cat "$point/backup-create.log" >&2 || true
+    echo "Error: openclaw backup create --verify failed; nothing on this desktop was changed (its output is in $point)" >&2
+    return 1
+  fi
+  core_state_set snapshot "$point/state" || {
+    echo "Error: the pre-update state could not be copied; nothing on this desktop was changed" >&2
+    return 1
+  }
+  as_owner /bin/bash -c 'cat >"$1"' _ "$point/recovery.txt" <<EOF
+OpenClaw core replacement on this desktop: $current -> $target
+
+archive/            verified archive written by OpenClaw $current ("backup create --verify
+                    --no-include-workspace"): config, credentials, the state database and every
+                    agent database; workspaces left out. backup-create.json is its report.
+state/              the exact pre-update bytes the automatic rollback puts back: config/openclaw.json,
+                    state/openclaw.sqlite and agents/<id>/agent/openclaw-agent.sqlite with their
+                    -wal/-shm, one generation, taken with the gateway stopped; snapshot.txt lists them.
+doctor.log          the new core's migration output, once it ran.
+
+The previous core is retained at $NPM_PREFIX/lib/node_modules/.openclaw-previous until the next
+core replacement. To go back by hand, with the gateway stopped
+(sudo systemctl stop clawbox-gateway.service):
+  1. copy state/ back over $INSTALL_HOME/.openclaw (state/config/openclaw.json is
+     $INSTALL_HOME/.openclaw/openclaw.json; the other paths mirror the state directory);
+  2. put the previous core back: move .openclaw-previous to
+     $NPM_PREFIX/lib/node_modules/openclaw (or: npm install -g openclaw@$current --prefix $NPM_PREFIX);
+  3. sudo systemctl start clawbox-gateway.service
+Package rollback alone never reverses a migration: the state must go back with it.
+EOF
+}
+
+promote_openclaw_core() {
+  as_owner /bin/bash -s -- "$1" "$NPM_PREFIX" <<'SH'
+set -euo pipefail
+stage=$1 prefix=$2
+live=$prefix/lib/node_modules/openclaw
+previous=$prefix/lib/node_modules/.openclaw-previous
+# Flush first: npm's writes sit in the page cache, and a stop in the seconds
+# after the rename must find the new tree whole as well as in place.
+sync -f "$stage"
+rm -rf "$previous"
+if [ -e "$live" ] || [ -L "$live" ]; then mv "$live" "$previous"; fi
+if ! mv "$stage/lib/node_modules/openclaw" "$live"; then
+  { [ -e "$previous" ] || [ -L "$previous" ]; } && mv "$previous" "$live"
+  echo 'Error: could not move the staged OpenClaw core into place; the previous one is back' >&2
+  exit 1
+fi
+mkdir -p "$prefix/bin"
+for entry in "$stage"/bin/*; do
+  { [ -e "$entry" ] || [ -L "$entry" ]; } || continue
+  name=$(basename "$entry")
+  rm -f "$prefix/bin/$name"
+  mv "$entry" "$prefix/bin/$name"
+done
+if ! { [ -e "$prefix/bin/openclaw" ] || [ -L "$prefix/bin/openclaw" ]; }; then
+  mv "$live" "$prefix/lib/node_modules/.openclaw-rejected"
+  { [ -e "$previous" ] || [ -L "$previous" ]; } && mv "$previous" "$live"
+  rm -rf "$prefix/lib/node_modules/.openclaw-rejected"
+  echo 'Error: the staged core came with no openclaw launcher; the previous one is back' >&2
+  exit 1
+fi
+sync -f "$prefix"
+rm -rf "$stage"
+SH
+}
+
+migrate_openclaw_state() {
+  local point=$1 rc=0 out
+  echo 'Running openclaw doctor --fix --non-interactive (state migrations for the new core)...'
+  out=$(as_owner /usr/bin/env OPENCLAW_SERVICE_REPAIR_POLICY=external \
+    "$NPM_PREFIX/bin/openclaw" doctor --fix --non-interactive </dev/null 2>&1) || rc=$?
+  printf '%s\n' "$out"
+  printf '%s\n' "$out" | as_owner /bin/bash -c 'cat >"$1"' _ "$point/doctor.log" || true
+  [ "$rc" -eq 0 ] || return 1
+  # install.sh's blockers, plus the two this desktop has met: a maintenance
+  # lease lost under a multi-GB agent database, and inputs that changed.
+  if printf '%s\n' "$out" | grep -qiE 'requires stopped-writer maintenance|Legacy session store requires migration|startup migrations did not complete|Skipped historical transcript directive migration|lease was lost|migration inputs changed'; then
+    return 1
+  fi
+}
+
+rollback_openclaw_core() {
+  local point=$1 target=$2
+  as_owner /bin/bash -s -- "$NPM_PREFIX" "$target" <<'SH'
+set -euo pipefail
+prefix=$1 target=$2
+live=$prefix/lib/node_modules/openclaw
+previous=$prefix/lib/node_modules/.openclaw-previous
+rejected=$prefix/lib/node_modules/.openclaw-rejected-$target
+if [ -e "$previous" ] || [ -L "$previous" ]; then
+  rm -rf "$rejected"
+  if [ -e "$live" ] || [ -L "$live" ]; then mv "$live" "$rejected"; fi
+  mv "$previous" "$live"
+  rm -rf "$rejected"
+  sync -f "$prefix"
+fi
+SH
+  core_state_set restore "$point/state"
+}
+
+prune_core_recovery_points() {
+  as_owner /usr/bin/python3 -I - "$(core_recovery_root)" "$CORE_RECOVERY_KEEP" <<'PY'
+import pathlib, shutil, sys
+root, keep = pathlib.Path(sys.argv[1]), int(sys.argv[2])
+points = sorted(p for p in root.iterdir() if p.is_dir() and not p.is_symlink()) if root.is_dir() else []
+for old in points[:-keep] if keep else points:
+    shutil.rmtree(old)
+    print(f'  Removed the older recovery point {old.name}')
+PY
+}
+
+replace_openclaw_core() {
+  local current=$1 target=$2
+  local stage="$NPM_PREFIX/.openclaw-stage"
+  local point
+  point="$(core_recovery_root)/$(date -u +%Y%m%dT%H%M%SZ)-$current-to-$target"
+  echo "OpenClaw $current -> $target: staging the pinned core (the running core is untouched until it is gated and the recovery point is on disk)"
+  stage_openclaw_core "$stage" "$target" || return 1
+  echo "Recovery point: $point"
+  make_core_recovery_point "$point" "$current" "$target" || { as_owner /bin/rm -rf "$stage"; return 1; }
+  promote_openclaw_core "$stage" || return 1
+  echo "OpenClaw $target is in place; the previous core is retained at $NPM_PREFIX/lib/node_modules/.openclaw-previous"
+  if ! migrate_openclaw_state "$point"; then
+    echo "Error: OpenClaw $target did not complete the state migration; restoring OpenClaw $current and the pre-update state from $point" >&2
+    if ! rollback_openclaw_core "$point" "$target"; then
+      echo "Error: the rollback did not complete; restore by hand from $point (recovery.txt there says how)" >&2
+      return 1
+    fi
+    echo "Error: OpenClaw $current and its state are back as they were; the migration's output is in $point/doctor.log" >&2
+    return 1
+  fi
+  prune_core_recovery_points || true
+}
+
+# The owner's own compatibility patches over the installed core, each pinned to
+# the core version it was reviewed for and refusing any other with "Review
+# required". That refusal is reported, never fatal: a patch written for an older
+# core has nothing to do on a newer one, and failing the update over it would
+# hold the pin back for a repair only the owner can make. Any other failure is
+# the step's, as before.
+reapply_owner_core_patches() {
+  local live="$NPM_PREFIX/lib/node_modules/openclaw" helper out rc
+  for helper in openclaw-patch-backup-sqlite openclaw-patch-memory-maintenance; do
+    [ -x "$INSTALL_HOME/bin/$helper" ] || continue
+    rc=0
+    out=$(as_owner "$INSTALL_HOME/bin/$helper" "$live" 2>&1) || rc=$?
+    [ -z "$out" ] || printf '%s\n' "$out"
+    [ "$rc" -eq 0 ] && continue
+    if printf '%s\n' "$out" | grep -q '^Review required:'; then
+      echo "CLAWBOX-WARN[core-patch-skipped]: $helper does not apply to the installed OpenClaw core and was skipped ($(printf '%s\n' "$out" | grep -m1 '^Review required:'))"
+      continue
+    fi
+    case "$helper" in
+      *memory-maintenance) echo 'Error: the memory maintenance compatibility repair refused; stopping the core step.' >&2 ;;
+    esac
+    return "$rc"
+  done
+}
+
 update_openclaw() {
   local target current
   target=$(head -n 1 "$MIRROR/config/openclaw-target.txt")
   [[ "$target" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]] || {
     echo 'Error: invalid pinned OpenClaw version' >&2; return 1;
   }
-  current=$(as_owner "$NODE_DIR/node" -p "require('$NPM_PREFIX/lib/node_modules/openclaw/package.json').version" 2>/dev/null || true)
+  recover_parked_openclaw_core || return 1
+  current=$(installed_openclaw_version)
   if [ "$current" != "$target" ]; then
-    echo "Error: OpenClaw $current -> $target needs a reviewed state snapshot and rollback migration. This desktop integration refuses to replace the core or migrate its database without that recovery plan." >&2
-    return 78
+    replace_openclaw_core "${current:-none}" "$target" || return 1
   fi
-  if [ -x "$INSTALL_HOME/bin/openclaw-patch-backup-sqlite" ]; then
-    as_owner "$INSTALL_HOME/bin/openclaw-patch-backup-sqlite" \
-      "$NPM_PREFIX/lib/node_modules/openclaw" || return $?
-  fi
-  if [ -x "$INSTALL_HOME/bin/openclaw-patch-memory-maintenance" ]; then
-    as_owner "$INSTALL_HOME/bin/openclaw-patch-memory-maintenance" \
-      "$NPM_PREFIX/lib/node_modules/openclaw" || {
-        local repair_rc=$?
-        echo 'Error: the memory maintenance compatibility repair refused; stopping the core step.' >&2
-        return "$repair_rc"
-      }
-  fi
-  # Already on the requested core: validate without rewriting configuration or
-  # running a second migration. The existing SQLite state stays untouched.
+  reapply_owner_core_patches || return $?
+  # Validate without rewriting configuration or running a second migration.
   as_owner "$NPM_PREFIX/bin/openclaw" config validate --json </dev/null || return $?
-  echo "OpenClaw $target already installed; configuration accepted"
+  if [ "$current" != "$target" ]; then
+    echo "OpenClaw $target installed; configuration accepted"
+  else
+    echo "OpenClaw $target already installed; configuration accepted"
+  fi
 }
 
 with_gateway_stopped() {
