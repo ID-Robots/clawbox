@@ -1,5 +1,6 @@
 import { useCallback, useState } from "react";
 import type { ChatToolSummary } from "@/lib/chat-history-cache";
+import PrimeRadiantIcon from "@/components/PrimeRadiantIcon";
 
 // The OpenClaw gateway broadcasts tool-call lifecycle as `event: 'agent'`
 // with `stream: 'tool'`; payload `data.phase` is `start | update | result`.
@@ -18,8 +19,40 @@ export interface ChatToolCall {
 // tools look like image generation.
 const TOOL_SERVER_PREFIX_RE = /^[a-z0-9-]+__/i;
 
-function prettifyToolName(raw: string): string {
+/**
+ * The box's own knowledge tools, named for the apps the owner knows them by.
+ * OpenClaw's `wiki_*` tools read and write the Prime Radiant vault (the
+ * `memory-wiki` plugin is pointed at it, `prime-radiant/plugin-wiring.ts`) and
+ * `memory_*` is Memory Shard's index — so the chat says "Prime Radiant Search",
+ * not "wiki search", and draws the app's mark beside it.
+ */
+export type ToolBrand = "prime-radiant" | "memory-shard";
+
+const BRANDED_TOOLS: Readonly<Record<string, { label: string; brand: ToolBrand }>> = Object.freeze({
+  wiki_status: { label: "Prime Radiant Status", brand: "prime-radiant" },
+  wiki_search: { label: "Prime Radiant Search", brand: "prime-radiant" },
+  wiki_get: { label: "Prime Radiant Page", brand: "prime-radiant" },
+  wiki_apply: { label: "Prime Radiant Update", brand: "prime-radiant" },
+  wiki_lint: { label: "Prime Radiant Checks", brand: "prime-radiant" },
+  memory_search: { label: "Memory Shard Search", brand: "memory-shard" },
+  memory_get: { label: "Memory Shard Read", brand: "memory-shard" },
+});
+
+function brandedTool(raw: string): { label: string; brand: ToolBrand } | null {
+  if (!raw) return null;
+  const key = raw.replace(TOOL_SERVER_PREFIX_RE, "").toLowerCase();
+  return Object.prototype.hasOwnProperty.call(BRANDED_TOOLS, key) ? BRANDED_TOOLS[key] : null;
+}
+
+/** Which app's mark a tool's step row carries, if any. */
+export function toolBrand(raw: string): ToolBrand | null {
+  return brandedTool(raw)?.brand ?? null;
+}
+
+export function prettifyToolName(raw: string): string {
   if (!raw) return "tool";
+  const branded = brandedTool(raw);
+  if (branded) return branded.label;
   const stripped = raw.replace(TOOL_SERVER_PREFIX_RE, "");
   const cleaned = stripped.replace(/[_]+/g, " ").trim();
   return cleaned.length > 0 ? cleaned : raw;
@@ -118,8 +151,25 @@ const CHIP_GLYPH: Record<ChipTone, string> = { running: "🔧", done: "✓", fai
  * moment the page is refreshed, and the only way to guarantee that is to render
  * both from here.
  */
+function BrandMark({ brand }: { brand: ToolBrand }) {
+  if (brand === "prime-radiant") {
+    return <PrimeRadiantIcon className="w-3.5 h-3.5 shrink-0" />;
+  }
+  // Memory Shard's desktop glyph (page.tsx iconMap: `diamond`).
+  return (
+    <span
+      aria-hidden="true"
+      className="material-symbols-rounded"
+      data-testid="memory-shard-mark"
+      style={{ fontSize: 14, lineHeight: 1, color: "#9fd3ff", flexShrink: 0 }}
+    >
+      diamond
+    </span>
+  );
+}
+
 function ToolChip(
-  { tone, label, suffix, title }: { tone: ChipTone; label: string; suffix?: string; title?: string },
+  { tone, label, suffix, title, brand }: { tone: ChipTone; label: string; suffix?: string; title?: string; brand?: ToolBrand | null },
 ) {
   return (
     <div
@@ -136,6 +186,7 @@ function ToolChip(
       }}
     >
       <span aria-hidden="true" style={{ width: 14, textAlign: "center", flexShrink: 0 }}>{CHIP_GLYPH[tone]}</span>
+      {brand ? <BrandMark brand={brand} /> : null}
       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{label}</span>
       {suffix ? <span style={{ opacity: 0.7, flexShrink: 0 }}>· {suffix}</span> : null}
     </div>
@@ -181,6 +232,7 @@ export function ToolCallPills({ toolCalls, runningLabel }: { toolCalls: ChatTool
             key={group[0].id}
             tone={running ? "running" : "done"}
             label={countedLabel(group[0].prettyName, group.length)}
+            brand={toolBrand(group[0].name)}
             {...(running ? { suffix: runningLabel } : {})}
           />
         );
@@ -264,6 +316,7 @@ export function ToolCallSummaryChips(
               key={`${group[0].name}-${index}`}
               tone={group[0].status === "error" ? "failed" : "done"}
               label={countedLabel(prettifyToolName(group[0].name), group.length)}
+              brand={toolBrand(group[0].name)}
               // Every collapsed call keeps its argument summary — one per line.
               title={group.map((call) => (call.detail ? `${call.name}: ${call.detail}` : call.name)).join("\n")}
             />
