@@ -57,6 +57,20 @@ wait_time_record() {
   return 1
 }
 
+# wait_record_closed SECONDS — after the run settled, poll runs?id= until its
+# time record carries the stop line (closed asynchronously, right after the
+# status changes). Leaves the last answer in API_BODY; returns non-zero when
+# the record never closed.
+wait_record_closed() {
+  local deadline=$(( $(date +%s) + $1 ))
+  while :; do
+    board_api GET "/setup-api/coding-agent/runs?id=$RUN_ID"
+    [ "$API_STATUS" = 200 ] && [ "$(api_json '.run.timeRecord.stopReason != null')" = true ] && return 0
+    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    sleep 3
+  done
+}
+
 # check_time_artifacts STOP_REASON — both time-record artifacts of RUN_ID are served and name the stop.
 check_time_artifacts() {
   board_api GET "/setup-api/coding-agent/artifacts?runId=$RUN_ID&file=time-record.json"
@@ -178,6 +192,7 @@ fi
 wait_coding_run 300
 expect_completed
 if [ "$RUN_STATUS" = completed ]; then
+  wait_record_closed 30 || note "the time record had no stop line 30 s after the run completed"
   STOP=$(api_json '.run.timeRecord.stopReason // empty')
   FIN=$(api_json '.run.timeRecord.finishedAt // empty'); F=$(iso_s "$FIN")
   LEFT=$(api_json '.run.timeRecord.leftMs // empty')
@@ -203,7 +218,33 @@ fi
 
 # ---- 3. a budget from the task's words, and the deadline enforced ------------
 PROJECT_DIR=$DIR_B
-TASK="You have 5 minutes for this task. Run the command: node -e \"setTimeout(() => {}, 100000)\" — six times in a row, one after the other, waiting for each to finish before starting the next (each takes about 100 seconds; that wait is expected and is the whole point, do not shorten it, do not run them in parallel or in the background). After the sixth one has finished, create a file named done.txt in the current working folder with the single word done in it. Do not create any other file and do not run anything else."
+# A script the run is told to repeat: each call waits 110 s (under the agent's
+# own 2-minute command limit) and says whether to run it again — six calls
+# are 11 minutes, well past the 5-minute budget. Its count is on disk, so the
+# run cannot shorten it; the model's only part is to keep calling it.
+# shellcheck disable=SC2016  # the JavaScript is written as it is
+if ! board '
+  cat > "$1/wait.js" <<"EOF"
+const fs = require("fs");
+const file = ".wait-count";
+const total = 6;
+let n = 0;
+try { n = parseInt(fs.readFileSync(file, "utf8"), 10) || 0; } catch {}
+n += 1;
+fs.writeFileSync(file, String(n));
+console.log(`step ${n} of ${total}: waiting 110 seconds, please keep waiting...`);
+setTimeout(() => {
+  if (n < total) console.log(`step ${n} of ${total} finished. NOT DONE YET: run \`node wait.js\` again now and wait for it.`);
+  else console.log("ALL DONE: every step has finished. Now create done.txt.");
+}, 110000);
+EOF
+  [ -s "$1/wait.js" ]
+' "$DIR_B"; then
+  not_ok "could not place wait.js in $DIR_B"
+  cleanup
+  finish
+fi
+TASK="You have 5 minutes for this task. The current working folder holds wait.js. Run: node wait.js — and wait for it to finish (it takes about 110 seconds; that wait is expected and is the whole point: do not shorten it, do not run it in the background, do not read or change wait.js). It prints whether the work is done. When it says NOT DONE YET, run node wait.js again and wait for it, and keep doing exactly that until it prints ALL DONE. Only then create a file named done.txt in the current working folder with the single word done in it. Do not create or change any other file and do not run anything else."
 
 if ! start_budget_run "$TASK" null; then
   not_ok "the text-budget run did not start: $(api_error)"
@@ -240,7 +281,10 @@ if ! wait_coding_run $((BUDGET_S + WRAP_UP_GRACE_S + 60)); then
   cleanup
   finish
 fi
+wait_record_closed 30 || note "the time record had no stop line 30 s after the run ended"
 note "run ended: $(api_json -c '{status: .run.status, resumable: .run.resumable, error: (.run.error // "" | .[0:160]), timeRecord: (.run.timeRecord | {stopReason, finishedAt, usedMs, leftMs})}')"
+# shellcheck disable=SC2016  # expanded on the board
+note "wait.js was run $(board 'cat "$1/.wait-count" 2>/dev/null || echo 0' "$DIR_B" | tail -n1) time(s) on the board"
 STOP=$(api_json '.run.timeRecord.stopReason // empty')
 FIN=$(api_json '.run.timeRecord.finishedAt // empty'); F=$(iso_s "$FIN")
 LEFT=$(api_json '.run.timeRecord.leftMs // empty')
