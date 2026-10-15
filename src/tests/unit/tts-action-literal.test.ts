@@ -61,7 +61,7 @@ describe("POST /setup-api/tts — the action that reaches the journal", () => {
       .map((entry) => entry.trim())
       .filter(Boolean);
 
-    expect(names).toEqual(['"select"', '"voice"', '"language"', '"autoReply"', '"autoPlayAll"']);
+    expect(names).toEqual(['"select"', '"voice"', '"language"', '"autoReply"', '"autoPlayAll"', '"shortSpoken"']);
     // `as const` is what gives the `.find` below its literal union — without it
     // `action` widens to `string` and the four handlers lose their narrowing.
     expect(source.slice(end, end + 12)).toContain("as const");

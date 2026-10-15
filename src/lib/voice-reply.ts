@@ -24,7 +24,11 @@
  * spoken one's. It belongs to the desktop chat alone and reaches no gateway:
  * a channel's typed question still gets a typed answer. It means nothing
  * while spoken replies are off — there is no clip to play then — and the
- * Voice tab greys it out in that state rather than forgetting it.
+ * Voice tab greys it out in that state rather than forgetting it. A third,
+ * "Short spoken answers" (`voice_short_spoken`, OFF unless the owner turns it
+ * on), has the chat speak only a reply's short answer rather than all of it —
+ * the desktop chat's alone in the same way, and meaningless while spoken
+ * replies are off.
  *
  * The switch lives in ClawBox's own config store, like the transcription
  * preference: the Hermes edition has no openclaw.json and its desktop chat
@@ -78,6 +82,26 @@ export async function getVoiceAutoPlayAll(): Promise<boolean> {
 
 export async function setVoiceAutoPlayAll(enabled: boolean): Promise<void> {
   await set(VOICE_AUTO_PLAY_ALL_KEY, enabled);
+}
+
+/** The config-store key of the third switch: short spoken answers. */
+export const VOICE_SHORT_SPOKEN_KEY = "voice_short_spoken";
+
+/**
+ * Whether the desktop chat speaks only the short answer of a reply (a sentence
+ * or three) instead of the whole of it; the written reply in the chat stays
+ * whole either way. Off unless the owner switched it on, by the same rule as
+ * the switches above: only a stored `true` shortens. A box that predates the
+ * switch has nothing stored and goes on speaking every reply in full, as it
+ * always has. The desktop chat's alone, like auto-play: no gateway reads it.
+ */
+export async function getVoiceShortSpoken(): Promise<boolean> {
+  const stored = await get(VOICE_SHORT_SPOKEN_KEY);
+  return stored === true;
+}
+
+export async function setVoiceShortSpoken(enabled: boolean): Promise<void> {
+  await set(VOICE_SHORT_SPOKEN_KEY, enabled);
 }
 
 /** The gateway's auto-TTS mode for the switch's position. */
