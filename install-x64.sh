@@ -426,9 +426,16 @@ wait_for_apt() {
 step_apt_update() {
   wait_for_apt
   apt-get update -qq
+  # poppler-utils (pdftotext) and libreoffice-writer are the document
+  # extractors Memory Shard and Prime Radiant spawn (src/lib/memory-extract.ts):
+  # without libreoffice-writer every .docx/.odt/.rtf an import reads fails as
+  # "extract-failed" (seen on the owner's laptop, 2026-10-15). Same packages as
+  # install.sh's Jetson list; this step also runs on every update, so an
+  # installed PC picks them up too.
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     git curl python3 python3-pip pipx build-essential cmake ninja-build \
-    pkg-config openssl ffmpeg ca-certificates sudo
+    pkg-config openssl ffmpeg ca-certificates sudo \
+    poppler-utils libreoffice-writer
   ensure_openclaw_node_engine
 }
 
