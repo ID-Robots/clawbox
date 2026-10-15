@@ -102,10 +102,21 @@ test.describe("the runtime and the core the install actually left behind", () =>
     // harness-contract check cannot read. A key the core does not know fails
     // here in the harness's own words, not by matching strings. The exit
     // status is not trusted alone — the JSON verdict is read too.
-    const out = await dockerExec(
-      ["bash", "-lc", "/home/clawbox/.npm-global/bin/openclaw config validate --json; echo \"__exit=$?\""],
-      { user: "clawbox", timeoutMs: 120_000 },
-    );
+    //
+    // While an offline maintenance run owns the state database (the gateway's
+    // start can begin one), the core refuses to read and says to "retry when
+    // it finishes" — so a validate that lands in that window is asked again,
+    // as the core instructs, rather than read as a verdict. Bounded: a
+    // maintenance that never ends still fails below, in the core's words.
+    let out = "";
+    for (let attempt = 0; attempt < 24; attempt += 1) {
+      out = await dockerExec(
+        ["bash", "-lc", "/home/clawbox/.npm-global/bin/openclaw config validate --json; echo \"__exit=$?\""],
+        { user: "clawbox", timeoutMs: 120_000 },
+      );
+      if (!out.includes("is undergoing offline maintenance")) break;
+      await new Promise((resolve) => setTimeout(resolve, 5_000));
+    }
     const exit = /__exit=(\d+)/.exec(out)?.[1];
     const json = out.slice(out.indexOf("{"), out.lastIndexOf("}") + 1);
     const verdict = JSON.parse(json || "{}") as { valid?: boolean; issues?: { path: string; message: string }[] };
