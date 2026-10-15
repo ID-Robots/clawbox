@@ -70,3 +70,14 @@ describe("pageBlurb", () => {
     expect(plainText("**Bold**, _italic_, ~~gone~~ <b>tag</b> ![img](x.png) [^1] snake_case_name")).toBe("Bold, italic, gone tag snake_case_name");
   });
 });
+
+describe("plainText and markup", () => {
+  it("leaves no tag behind when tags are nested or broken", () => {
+    for (const s of ["<<b>script>alert(1)</script>", "<scr<b>ipt>x", "a <b>bold</b> word", "1 < 2 and 3 > 2"]) {
+      const out = plainText(s);
+      expect(out).not.toMatch(/[<>]/);
+      expect(out.toLowerCase()).not.toContain("<script");
+    }
+    expect(plainText("a <b>bold</b> word")).toBe("a bold word");
+  });
+});

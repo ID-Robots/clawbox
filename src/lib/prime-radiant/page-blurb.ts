@@ -28,7 +28,10 @@ export function plainText(markdown: string): string {
     .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
     .replace(/\[([^\]]*)\]\[[^\]]*\]/g, "$1")
     .replace(/`([^`]*)`/g, "$1")
-    .replace(/<[^>]+>/g, "")
+    // Tags out, then any angle bracket left over: a nested or broken tag
+    // ("<<b>script>") can leave a new one after a single pass.
+    .replace(/<[^>]*>/g, "")
+    .replace(/[<>]/g, "")
     .replace(/\*\*|__|~~/g, "")
     .replace(/(^|[\s(])[*_](?=\S)/g, "$1")
     .replace(/(\S)[*_](?=$|[\s.,;:!?)])/g, "$1")

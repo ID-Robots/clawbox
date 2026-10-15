@@ -112,18 +112,28 @@ export default function PrimeRadiantApp() {
    * background — the window is usable meanwhile, and a failure is only
    * logged (the status keeps saying `needs-write`; the next window asks again).
    */
+  /**
+   * What a `POST init` answer says the one-time repair took out of the vault,
+   * noted for the banner (once per window, never after it was dismissed).
+   * Returns how many pages and files it touched.
+   */
+  const noteRepair = useCallback((res: unknown, signal?: AbortSignal): number => {
+    const repair = (res as { repair?: { cleaned?: unknown[]; removed?: unknown[] } | null } | null)?.repair;
+    const pages = Array.isArray(repair?.cleaned) ? repair.cleaned.length : 0;
+    const files = Array.isArray(repair?.removed) ? repair.removed.length : 0;
+    if (pages + files > 0 && !signal?.aborted && !repairNoticeSeen()) setRepaired({ pages, files });
+    return pages + files;
+  }, []);
+
   const rewire = useCallback((signal?: AbortSignal) => {
     initRequest.current ??= prJson(`${API}/init`, jsonInit("POST", {}));
     void initRequest.current
       .then(async (res) => {
-        const repair = (res as { repair?: { cleaned?: unknown[]; removed?: unknown[] } | null } | null)?.repair;
-        const pages = Array.isArray(repair?.cleaned) ? repair.cleaned.length : 0;
-        const files = Array.isArray(repair?.removed) ? repair.removed.length : 0;
-        if (pages + files > 0 && !signal?.aborted && !repairNoticeSeen()) setRepaired({ pages, files });
+        const touched = noteRepair(res, signal);
         const after = await prJson<PrimeRadiantStatus>(`${API}/status`, { signal });
         if (signal?.aborted || !isDrawableStatus(after) || !after.initialised) return;
         setStatus(after);
-        if (pages + files > 0) {
+        if (touched > 0) {
           setRevision((r) => r + 1);
           announceVaultChanged();
         }
@@ -131,7 +141,7 @@ export default function PrimeRadiantApp() {
       .catch((err) => {
         if ((err as Error)?.name !== "AbortError") console.warn("[prime-radiant] memory-wiki wiring:", err);
       });
-  }, []);
+  }, [noteRepair]);
 
   const pickStartTab = useCallback((s: PrimeRadiantStatus) => {
     if (startPicked.current || !s.initialised) return;
@@ -151,7 +161,9 @@ export default function PrimeRadiantApp() {
     }
     setPhase("initialising");
     initRequest.current ??= prJson(`${API}/init`, jsonInit("POST", {}));
-    await initRequest.current;
+    // A first init over an existing vault can run the one-time repair too:
+    // say what it took out, as a rewire does.
+    noteRepair(await initRequest.current, signal);
     if (signal?.aborted) return;
     const after = await prJson<PrimeRadiantStatus>(`${API}/status`, { signal });
     if (signal?.aborted) return;
@@ -160,7 +172,7 @@ export default function PrimeRadiantApp() {
     pickStartTab(after);
     setPhase(after.initialised ? "ready" : "failed");
     if (after.initialised) announceVaultChanged();
-  }, [rewire, pickStartTab]);
+  }, [rewire, pickStartTab, noteRepair]);
 
   const fail = useCallback((err: unknown, signal?: AbortSignal) => {
     if ((err as Error)?.name === "AbortError" || signal?.aborted) return;

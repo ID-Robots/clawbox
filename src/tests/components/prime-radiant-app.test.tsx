@@ -345,6 +345,18 @@ describe("PrimeRadiantApp", () => {
     expect(screen.queryByTestId("prime-radiant-repaired")).toBeNull();
   });
 
+  it("says what the repair cleaned when the first open of an existing vault runs it", async () => {
+    // Not initialised yet, but the folder already held plugin writes: the
+    // first POST init runs the one-time repair, and its answer is not lost.
+    status = { ...STATUS, initialised: false };
+    initRepair = { ran: true, cleaned: ["concepts/a.md"], removed: ["WIKI.md"], commit: "abc1234" };
+    await mount();
+    fireEvent.click(await screen.findByTestId("prime-radiant-tab-browse"));
+    const notice = await screen.findByTestId("prime-radiant-repaired");
+    expect(notice).toHaveTextContent("1 page(s) cleaned, 1 file(s) removed");
+    expect(calls.filter((c) => c.url.endsWith("/init") && c.method === "POST")).toHaveLength(1);
+  });
+
   it("does not say what the repair cleaned again once it has been seen", async () => {
     window.localStorage.setItem("clawbox.primeRadiant.repairNoticeSeen", "1");
     status = { ...STATUS, plugin: { state: "needs-write", vault: "/tmp/vault", writes: [{ key: "plugins.entries.memory-wiki.config.render.createBacklinks", value: false }] } };

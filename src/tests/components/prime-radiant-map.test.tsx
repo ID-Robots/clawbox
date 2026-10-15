@@ -394,7 +394,8 @@ describe("PrimeRadiantMap", () => {
     await waitFor(() => expect(screen.getByTestId("prime-radiant-map-status")).toHaveTextContent("Pages: 48 · Links: 0"), { timeout: 15_000 });
     expect(screen.queryByTestId("prime-radiant-map-related")).toBeNull();
     // The Screenshot app reads a canvas with drawImage between frames: without this a WebGL canvas reads back empty.
-    expect(HTMLCanvasElement.prototype.getContext).toHaveBeenCalledWith("webgl2", expect.objectContaining({ preserveDrawingBuffer: true }));
+    // The view is lazy-loaded: under a loaded machine its context comes a moment after the status line.
+    await waitFor(() => expect(HTMLCanvasElement.prototype.getContext).toHaveBeenCalledWith("webgl2", expect.objectContaining({ preserveDrawingBuffer: true })), { timeout: 15_000 });
     await waitFor(() => expect(screen.getByTestId("prime-radiant-map-status")).not.toHaveTextContent("Arranging"));
 
     // One nodes draw for all 48, and no edge draw (there are none).
