@@ -16,6 +16,21 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const shard = vi.hoisted(() => ({ scheduleReindexAfterCommit: vi.fn() }));
 vi.mock("@/lib/prime-radiant/shard-index", () => shard);
+/** How many of the next vault commits fail (a git lock, a full disk). */
+const commitFault = vi.hoisted(() => ({ failures: 0 }));
+vi.mock("@/lib/prime-radiant/git", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/prime-radiant/git")>();
+  return {
+    ...actual,
+    commitPaths: async (...args: Parameters<typeof actual.commitPaths>) => {
+      if (commitFault.failures > 0) {
+        commitFault.failures -= 1;
+        throw new Error("git commit failed: index.lock exists");
+      }
+      return actual.commitPaths(...args);
+    },
+  };
+});
 
 import { parsePage, serializePage } from "@/lib/prime-radiant/frontmatter";
 import { git, headCommit } from "@/lib/prime-radiant/git";
@@ -111,6 +126,32 @@ describe("memory-wiki's files and blocks (pure)", () => {
     expect(stripManagedBlocks(human)).toEqual({ text: human, blocks: 0 });
   });
 
+  it("takes a block and the blank lines before it out of a CRLF page", () => {
+    const page = "# Pricing\r\n\r\nAcme prices.\r\n";
+    const touched = `${page.trimEnd()}\r\n\r\n## Related\r\n<!-- openclaw:wiki:related:start -->\r\n- [Shipping](../concepts/shipping.md)\r\n<!-- openclaw:wiki:related:end -->\r\n`;
+    expect(stripManagedBlocks(touched)).toEqual({ text: page, blocks: 1 });
+    // Two blocks in a row go with the blank lines between them.
+    const twice = `${touched.trimEnd()}\r\n\r\n<!-- openclaw:wiki:extra:start -->\r\nx\r\n<!-- openclaw:wiki:extra:end -->\r\n`;
+    expect(stripManagedBlocks(twice)).toEqual({ text: page, blocks: 2 });
+  });
+
+  it("reads a long run of line breaks in one pass (no ReDoS)", () => {
+    const run = "\r\n".repeat(50_000);
+    const started = performance.now();
+    // No marker at all: returned as is.
+    expect(stripManagedBlocks(run)).toEqual({ text: run, blocks: 0 });
+    // A marker somewhere, so the pattern does run over every line break — and finds no block.
+    const raw = `${run}<!-- openclaw:wiki:raw-source -->\r\n`;
+    expect(stripManagedBlocks(raw)).toEqual({ text: raw, blocks: 0 });
+    const heading = `## Related${run}x <!-- openclaw:wiki:related:start -->\r\n`;
+    expect(stripManagedBlocks(heading)).toEqual({ text: heading, blocks: 0 });
+    // A block after the run still takes the run with it.
+    const page = "# Page\r\n\r\nBody.\r\n";
+    const touched = `${page}${run}## Related\r\n<!-- openclaw:wiki:related:start -->\r\n- [A](a.md)\r\n<!-- openclaw:wiki:related:end -->\r\n`;
+    expect(stripManagedBlocks(touched)).toEqual({ text: page, blocks: 1 });
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
   it("deletes only a plugin file still exactly as the plugin made it", () => {
     expect(isPristinePluginIndex(generatedIndex("Entities", "entities"))).toBe(true);
     expect(isPristinePluginIndex(`${generatedIndex("Entities", "entities")}\nMy own note about entities.\n`)).toBe(false);
@@ -158,6 +199,7 @@ let n = 0;
 
 beforeEach(() => {
   process.env.PRIME_RADIANT_DIR = path.join(base, `case-${++n}`);
+  commitFault.failures = 0;
 });
 
 afterAll(() => {
@@ -261,6 +303,30 @@ describe("a vault memory-wiki wrote into", () => {
     expect(pluginRepairDone()).toBe(true);
     expect(await repairPluginWritesOnce()).toEqual({ ran: false, cleaned: [], removed: [], commit: null });
     expect(exists("WIKI.md")).toBe(true);
+  });
+
+  it("commits on a retry what a repair whose commit failed had already deleted and written", async () => {
+    await pollutedVault();
+    // An older ClawBox committed a dashboard and a group index just as the plugin wrote them.
+    await git(vaultDir(), ["add", "reports/claim-health.md", "entities/index.md"]);
+    await git(vaultDir(), ["commit", "--quiet", "-m", "older ClawBox: everything"]);
+    commitFault.failures = 1;
+    await expect(repairPluginWritesOnce()).rejects.toThrow("git commit failed");
+    // The working tree is repaired, HEAD is not, and the repair is not marked done.
+    expect(exists("reports/claim-health.md")).toBe(false);
+    expect(exists("entities/index.md")).toBe(false);
+    expect(pluginRepairDone()).toBe(false);
+
+    const result = await repairPluginWritesOnce();
+    expect(result.ran).toBe(true);
+    expect(result.removed).toEqual(expect.arrayContaining(["reports/claim-health.md", "entities/index.md"]));
+    const head = (await headCommit(vaultDir()))!;
+    expect(head.subject).toBe(REPAIR_COMMIT_MESSAGE);
+    const files = (await git(vaultDir(), ["show", "--name-only", "--format=", "HEAD"])).stdout.trim().split("\n").sort();
+    expect(files).toEqual([".gitignore", "concepts/catalogue.md", "entities/index.md", "reports/claim-health.md"]);
+    expect((await git(vaultDir(), ["cat-file", "-e", "HEAD:reports/claim-health.md"], { allowFail: true })).code).not.toBe(0);
+    expect(await status()).toBe("");
+    expect(pluginRepairDone()).toBe(true);
   });
 
   it("never commits an owner's own edit with the repair, and keeps it", async () => {

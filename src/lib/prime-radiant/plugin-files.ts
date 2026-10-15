@@ -62,11 +62,24 @@ export const MANAGED_MARKER_PREFIX = "<!-- openclaw:wiki:";
 /**
  * One managed block as `replaceManagedMarkdownBlock` writes it: an optional
  * heading line, then `<!-- openclaw:wiki:<name>:start -->` … `:end -->` with
- * the same name — and the blank lines the plugin put before it. A human block
- * (`openclaw:human:…`) and the raw-source marker (no start/end) never match.
+ * the same name, from the start of a line. A human block (`openclaw:human:…`)
+ * and the raw-source marker (no start/end) never match. The blank lines the
+ * plugin put before it are not in the pattern — a `(?:\r?\n)*` in front made
+ * every run of line breaks a quadratic backtrack (ReDoS); stripManagedBlocks
+ * takes them off in code. Each run here can be matched one way only.
  */
 const MANAGED_BLOCK_RE =
-  /(?:\r?\n)*(?:^|(?<=\n))(?:#{1,6}[ \t]+(?:Related|Generated)[ \t]*(?:\r?\n|\r)+[ \t]*)?<!-- openclaw:wiki:([A-Za-z0-9][\w:.-]{0,80}):start -->[\s\S]*?<!-- openclaw:wiki:\1:end -->[ \t]*/g;
+  /(?:^|(?<=\n))(?:#{1,6}[ \t]+(?:Related|Generated)[ \t]*[\r\n]+[ \t]*)?<!-- openclaw:wiki:([A-Za-z0-9][\w:.-]{0,80}):start -->[\s\S]*?<!-- openclaw:wiki:\1:end -->[ \t]*/g;
+
+/** `text` without the line breaks (LF or CRLF) it ends with — one pass from the end, no regex. */
+function withoutTrailingLineBreaks(text: string): string {
+  let end = text.length;
+  while (end > 0 && text[end - 1] === "\n") {
+    end -= 1;
+    if (end > 0 && text[end - 1] === "\r") end -= 1;
+  }
+  return text.slice(0, end);
+}
 
 export interface StrippedText {
   text: string;
@@ -83,11 +96,16 @@ export interface StrippedText {
 export function stripManagedBlocks(text: string): StrippedText {
   if (!text.includes(MANAGED_MARKER_PREFIX)) return { text, blocks: 0 };
   let blocks = 0;
-  const out = text.replace(MANAGED_BLOCK_RE, () => {
+  let out = "";
+  let last = 0;
+  for (const m of text.matchAll(MANAGED_BLOCK_RE)) {
+    // The blank lines the plugin put before the block go with it.
+    out += withoutTrailingLineBreaks(text.slice(last, m.index));
+    last = m.index + m[0].length;
     blocks += 1;
-    return "";
-  });
+  }
   if (blocks === 0) return { text, blocks };
+  out += text.slice(last);
   return { text: text.endsWith("\n") && !out.endsWith("\n") ? `${out}\n` : out, blocks };
 }
 

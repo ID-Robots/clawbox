@@ -13,7 +13,8 @@
  * a page the owner edited by hand keeps the edit (only the block goes, and
  * the page is not committed), an `inbox.md` with a note in it stays. Done
  * once per vault (`pass_state`), from the first of `POST init`, an ingest of
- * the vault or the nightly pass.
+ * the vault or the nightly pass. A run whose commit fails is not marked done,
+ * and the next one commits what it had already deleted and written too.
  *
  * {@link restorePluginOnlyEdits} is what the nightly merge and a revert ask
  * first: a tracked page whose only change is a managed block the plugin
@@ -120,6 +121,27 @@ async function headFilesWithBlocks(vault: string): Promise<Set<string>> {
   return out;
 }
 
+/** The files HEAD holds directly in the folder `dir`, as vault-relative paths. */
+async function headFilesIn(vault: string, dir: string): Promise<string[]> {
+  const r = await git(vault, ["ls-tree", "-z", "HEAD", "--", `${dir}/`], { allowFail: true });
+  if (r.code !== 0) return [];
+  const out: string[] = [];
+  for (const entry of r.stdout.split("\0")) {
+    // `<mode> <type> <object>\t<path>`
+    const tab = entry.indexOf("\t");
+    if (tab > 0 && entry.slice(0, tab).split(" ")[1] === "blob") out.push(entry.slice(tab + 1));
+  }
+  return out;
+}
+
+/** Whether nothing at all — no file, folder or symlink — is at `file`. */
+async function absent(file: string): Promise<boolean> {
+  return fs.lstat(file).then(
+    () => false,
+    (err: NodeJS.ErrnoException) => err.code === "ENOENT" || err.code === "ENOTDIR",
+  );
+}
+
 /** Delete `rel` when it is a folder holding nothing but empty folders. Answers whether it went. */
 async function removeIfEmpty(vault: string, rel: string): Promise<boolean> {
   const dir = abs(vault, rel);
@@ -178,16 +200,34 @@ export async function repairPluginWritesOnce(vault: string = vaultDir(), now: ()
       { rel: "WIKI.md", pristine: isPristineWikiOverview },
       { rel: "inbox.md", pristine: isPristineInbox },
     ];
+    const reports = new Set<string>();
     try {
       for (const e of await fs.readdir(abs(vault, "reports"), { withFileTypes: true })) {
-        if (e.isFile() && e.name.endsWith(".md")) generated.push({ rel: `reports/${e.name}`, pristine: isPristinePluginReport });
+        if (e.isFile() && e.name.endsWith(".md")) reports.add(`reports/${e.name}`);
       }
     } catch {
       // no reports folder
     }
+    // A run whose commit failed deleted its reports (and the folder) already: HEAD still names them.
+    for (const rel of await headFilesIn(vault, "reports")) {
+      if (rel.endsWith(".md")) reports.add(rel);
+    }
+    for (const rel of reports) generated.push({ rel, pristine: isPristinePluginReport });
     for (const { rel, pristine } of generated) {
       const text = await readPlain(abs(vault, rel));
-      if (text === null || !pristine(text)) continue;
+      if (text === null) {
+        // Gone, and HEAD holds it as the plugin made it: a run before this one
+        // deleted it and then failed to commit. The deletion is committed now,
+        // or it would be left over in the working tree for good.
+        if (!(await absent(abs(vault, rel)))) continue;
+        const head = await showFileAt(vault, "HEAD", rel);
+        if (head !== null && pristine(head)) {
+          commit.push(rel);
+          result.removed.push(rel);
+        }
+        continue;
+      }
+      if (!pristine(text)) continue;
       await fs.rm(abs(vault, rel), { force: true });
       result.removed.push(rel);
       if (await trackedAtHead(vault, rel)) commit.push(rel);
@@ -197,10 +237,15 @@ export async function repairPluginWritesOnce(vault: string = vaultDir(), now: ()
     }
 
     // 3. Their names in .gitignore, so a plugin that re-creates them changes nothing git sees.
-    const ignore = withPluginGitignore(await readPlain(abs(vault, ".gitignore")));
+    const currentIgnore = await readPlain(abs(vault, ".gitignore"));
+    const ignore = withPluginGitignore(currentIgnore);
     if (ignore !== null) {
       await writeText(abs(vault, ".gitignore"), ignore);
       commit.push(".gitignore");
+    } else if (currentIgnore !== null) {
+      // Written by a run whose commit failed: HEAD's copy still lacks the names.
+      const head = await showFileAt(vault, "HEAD", ".gitignore");
+      if (head === null || withPluginGitignore(head) !== null) commit.push(".gitignore");
     }
 
     if (commit.length > 0) result.commit = await commitPaths(vault, REPAIR_COMMIT_MESSAGE, commit);
