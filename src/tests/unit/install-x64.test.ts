@@ -659,3 +659,22 @@ describe.skipIf(!hasPython3)("install-x64.sh OpenClaw 2 token seeding", () => {
     expect(seed("clawbox")).toMatch(/^[a-f0-9]{64}$/);
   });
 });
+
+
+describe("step_apt_update installs the document extractors", () => {
+  // Memory Shard and Prime Radiant hand .docx/.odt/.rtf to libreoffice and PDFs
+  // to pdftotext (src/lib/memory-extract.ts). On a PC without them every such
+  // file an import reads fails as "extract-failed" (owner's laptop, 2026-10-15).
+  // apt_update is also a step every update runs, so installed PCs get them too.
+  const start = SOURCE.indexOf("step_apt_update() {");
+  const body = SOURCE.slice(start, SOURCE.indexOf("\n}", start));
+
+  it.each(["poppler-utils", "libreoffice-writer"])("installs %s", (pkg) => {
+    expect(start).toBeGreaterThan(-1);
+    expect(body).toMatch(new RegExp(`apt-get install[^\\n]*(\\\\\\n[^\\n]*)*\\b${pkg}\\b`));
+  });
+
+  it("does not pull in the full LibreOffice suite", () => {
+    expect(body).not.toMatch(/\blibreoffice(?![-\w])/);
+  });
+});
