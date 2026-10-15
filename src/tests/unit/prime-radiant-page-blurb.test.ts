@@ -37,6 +37,12 @@ describe("pageBlurb", () => {
     expect(pageBlurb(null, body)).toBe("Prices follow the Acme catalogue and the Acme list, see prices.csv and widget sizes.");
   });
 
+  it("finds the prose right under a heading, with no blank line between them", () => {
+    expect(firstProse("# Books to read\nA running list of books to read this year.")).toBe("A running list of books to read this year.");
+    expect(firstProse("Intro line\n## Details\nMore text.")).toBe("Intro line");
+    expect(firstProse("## Facts\n- one\n## About\nWhat this page is for.")).toBe("What this page is for.");
+  });
+
   it("is null for a page with no prose at all", () => {
     expect(pageBlurb(null, "## Facts\n\n- one\n- two\n")).toBeNull();
     expect(pageBlurb(null, "")).toBeNull();

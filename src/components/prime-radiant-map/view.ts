@@ -335,6 +335,7 @@ export class MapView {
 
   /** Frame the whole graph again. */
   resetView(): void {
+    this.dropHover();
     this.flight = null;
     this.fitting = true;
     if (this.kind === "2d") this.stepFit(true);
@@ -344,6 +345,7 @@ export class MapView {
   /** Fly to the given nodes (all of them in view), or frame one up close. */
   flyTo(nodes: readonly number[]): void {
     if (nodes.length === 0 || this.n === 0) return;
+    this.dropHover();
     let x = 0, y = 0, z = 0;
     for (const i of nodes) {
       x += this.pos[i * 3];
@@ -631,6 +633,16 @@ export class MapView {
   private local(e: PointerEvent | WheelEvent): { x: number; y: number } {
     const rect = this.canvas.getBoundingClientRect();
     return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  }
+
+  /**
+   * The camera is about to jump: whatever page was under the pointer will not
+   * be. Forget it (tooltip, highlight, hand cursor) until the pointer moves again.
+   */
+  private dropHover(): void {
+    if (this.hover < 0) return;
+    this.setHover(-1);
+    this.events.onHover(null, 0, 0);
   }
 
   private setHover(i: number): void {

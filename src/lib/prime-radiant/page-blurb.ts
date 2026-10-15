@@ -63,10 +63,11 @@ export function firstProse(body: string): string | null {
       if (found) return found;
       continue;
     }
-    // A heading on the line after a paragraph still ends it.
-    if (para.length > 0 && /^\s{0,3}#{1,6}(?:\s|$)/.test(line)) {
+    // A heading is a block of its own: it ends the paragraph before it, and the line after it starts one.
+    if (/^\s{0,3}#{1,6}(?:\s|$)/.test(line)) {
       const found = flush();
       if (found) return found;
+      continue;
     }
     para.push(line);
   }
