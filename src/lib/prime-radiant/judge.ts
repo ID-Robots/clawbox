@@ -11,12 +11,21 @@ export type JudgeVerdict = (typeof JUDGE_VERDICTS)[number];
 
 export const JUDGE_PAIRS_MARKER = "PAIRS (JSON):";
 
+/** The words a `why` may run to; it is asked for only when the pair is not compatible. */
+export const JUDGE_WHY_WORDS = 8;
+
+/**
+ * Terse on purpose: on the live test the judge wrote 461k output tokens for
+ * 100 calls. One compact object per pair, a reason only where a person will
+ * read it (a contradiction or an unsure pair becomes a review item), no
+ * reasoning written out.
+ */
 export const JUDGE_SYSTEM_PROMPT = [
   "You check facts in a company wiki for contradictions.",
   "Each item is a pair of statements. Say whether they CONTRADICT: they cannot both be true about the same thing at the same time.",
-  "Different invoices, different months, different products or different entities are NOT contradictions. A statement that is merely more specific is not one either.",
-  'Answer with a JSON array only, one object per item: [{"i": <n>, "verdict": "contradiction" | "compatible" | "unsure", "why": "<at most 15 words>"}].',
-  "No prose before or after the array, no code fence, and exactly one object for every item.",
+  "Statements about different things — different works, people, products, invoices, months or entities — are NOT contradictions, however alike their wording. A statement that is merely more specific is not one either.",
+  `Answer with one compact JSON array, one object per item, in item order: {"i":<n>,"verdict":"compatible"} — or, for "contradiction" or "unsure" only, add "why" in at most ${JUDGE_WHY_WORDS} words: {"i":<n>,"verdict":"contradiction","why":"10 EUR against 12 EUR"}.`,
+  "Do not explain your reasoning. No prose before or after the array, no code fence, and exactly one object for every item.",
   "Placeholders like [REDACTED:EMAIL] stand for removed values; never guess them.",
 ].join("\n");
 
@@ -189,7 +198,8 @@ export function parseJudgeResponse(text: string, count: number): Map<number, Jud
       }
       continue;
     }
-    const why = typeof r.why === "string" ? redactText(r.why.replace(/\s+/g, " ").trim().slice(0, 200)).text : "";
+    // A why for a compatible pair is never shown: not kept.
+    const why = typeof r.why === "string" && verdict !== "compatible" ? redactText(r.why.replace(/\s+/g, " ").trim().slice(0, 200)).text : "";
     out.set(i, { verdict, why });
   }
   if (readable === 0) throw new JudgeParseError("the answer holds no verdict");

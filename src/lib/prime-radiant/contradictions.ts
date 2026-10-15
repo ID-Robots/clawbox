@@ -2,19 +2,26 @@
  * The semantic contradiction pass: two claims with DIFFERENT ids that cannot
  * both be true.
  *
- * Blocking is by embedding: every active claim is embedded with Memory
- * Shard's own embedder (its text redacted first), and each claim in scope is
- * paired with its k = 5 nearest neighbours on OTHER pages. Measured on a
- * 50,000-claim vault, that blocking found every planted contradiction at
- * k = 5, where pairing claims by shared rare words found three in ten. The
- * pairs then go to the Flash judge in small batches ({@link JUDGE_BATCH_PAIRS}
- * a call, several in flight), which answers
+ * Blocking is by embedding AND subject: every active claim is embedded with
+ * Memory Shard's own embedder (its text redacted first), and each claim in
+ * scope is paired with its k = 5 nearest neighbours on OTHER pages that are
+ * about the SAME thing ({@link sameSubject}: the same entity in their ids, or
+ * subjects that share most of their words, or one naming the other's) — on
+ * the live test, pairing by wording alone sent a black hole against the US
+ * Constitution, and 84 of 85 items were false. Measured on a 50,000-claim
+ * vault, embedding blocking found every planted contradiction at k = 5,
+ * where pairing claims by shared rare words found three in ten. Two claims
+ * with the same text are never a pair. The pairs then go to the Flash judge
+ * in small batches ({@link JUDGE_BATCH_PAIRS} a call, several in flight, the
+ * answer capped at {@link judgeMaxTokens} — a terse verdict, a reason only
+ * for what a person will read), which answers
  * `contradiction | compatible | unsure` for each; the first and the last
  * become review items (a person decides, never the judge). A batch is small
  * so that one answer the model botches costs only that batch: a call that
- * comes back with no readable verdict is asked once more as two halves, what
- * still fails waits for the next pass, and a pair the answer leaves out or
- * garbles fails alone.
+ * comes back with no readable verdict (or empty, capped before it answered —
+ * never resent as it was) is asked once more in calls of
+ * {@link JUDGE_RETRY_PAIRS}, so are the pairs a readable answer left out, and
+ * what still fails waits for the next pass.
  *
  * Two caches keep a nightly pass cheap: a claim's vector is kept by the hash
  * of its text and the embedder's identity (`claim_embeddings`), and a pair's
@@ -42,17 +49,31 @@ import { buildJudgePrompt, JudgeParseError, JUDGE_VERDICTS, parseJudgeResponse, 
 import { redactText } from "./redact";
 import { addReviewItem, type ReviewItem } from "./review-store";
 import { runInTransaction, stateDbExists, withStateDb } from "./state-db";
+import { claimSubject, sameSubject, type ClaimSubject } from "./subject";
 import type { VaultSnapshot } from "./vault";
 
 export const KNN_K = 5;
 /**
  * Pairs a judge call carries. Small on purpose: on a real box one call of 67
- * pairs came back unreadable and the whole pass found nothing.
+ * pairs came back unreadable and the whole pass found nothing, and a call of
+ * 12 that ran long lost all twelve.
  */
-export const JUDGE_BATCH_PAIRS = 12;
+export const JUDGE_BATCH_PAIRS = 8;
+/** The size of the calls a failed batch (or the pairs an answer left out) is asked again in. */
+export const JUDGE_RETRY_PAIRS = 2;
 /** Judge calls in flight unless the caller says otherwise (the nightly pass passes the settings' parallelism). */
 export const JUDGE_PARALLEL = 8;
-export const JUDGE_MAX_TOKENS = 8_000;
+/** The output ceiling of any judge call (it was 8,000 for every call). */
+export const JUDGE_MAX_TOKENS = 4_096;
+/** A judge call's output budget: this much, plus {@link JUDGE_TOKENS_PER_PAIR} a pair. */
+export const JUDGE_BASE_TOKENS = 512;
+/** Room per pair for a model that thinks before it answers; the verdict itself is ~15 tokens. */
+export const JUDGE_TOKENS_PER_PAIR = 384;
+
+/** The output cap of a judge call carrying `pairs` pairs. */
+export function judgeMaxTokens(pairs: number): number {
+  return Math.min(JUDGE_MAX_TOKENS, JUDGE_BASE_TOKENS + JUDGE_TOKENS_PER_PAIR * Math.max(1, pairs));
+}
 /** The most claims one pass holds vectors for (~80 MiB of float32 at 1,024 dimensions). */
 export const MAX_PASS_CLAIMS = 20_000;
 /** The most pairs one pass sends to the judge; the rest wait for the next pass. */
@@ -127,6 +148,8 @@ export interface PassClaim {
   /** The claim text, redacted — the only form that leaves the box. */
   text: string;
   verified: boolean;
+  /** What the claim is about (its own subject, else its page's), for {@link sameSubject}. */
+  subject: ClaimSubject;
 }
 
 /** Every active claim on a valid page, redacted, in page order. */
@@ -134,11 +157,22 @@ export function collectClaims(snapshot: Pick<VaultSnapshot, "pages">): PassClaim
   const out: PassClaim[] = [];
   for (const page of snapshot.pages) {
     if (!page.parsed.ok) continue;
+    const title = page.parsed.frontmatter.title;
     for (const c of page.parsed.frontmatter.claims) {
-      out.push({ id: c.id, page: page.path, text: redactText(c.text.slice(0, MAX_CLAIM_CHARS)).text, verified: !!c.verified });
+      const text = redactText(c.text.slice(0, MAX_CLAIM_CHARS)).text;
+      out.push({ id: c.id, page: page.path, text, verified: !!c.verified, subject: claimSubject(c.id, text, title) });
     }
   }
   return out;
+}
+
+/**
+ * Whether two claims of the pass may be judged as a pair: about the same
+ * thing ({@link sameSubject}), and not the same statement twice (that can
+ * never contradict itself).
+ */
+export function comparable(a: Pick<PassClaim, "text" | "subject">, b: Pick<PassClaim, "text" | "subject">): boolean {
+  return a.text !== b.text && sameSubject(a.subject, b.subject);
 }
 
 export interface CandidatePair {
@@ -147,15 +181,21 @@ export interface CandidatePair {
   score: number;
 }
 
+/** Which two claims (indexes) may be a pair at all; absent, any two on different pages with different ids. */
+export type PairFilter = (a: number, b: number) => boolean;
+
 /**
  * For each claim in `queries` (indexes into `vectors`), its `k` nearest
- * neighbours on another page with another id — each unordered pair once.
+ * neighbours on another page with another id — and, given `allow`, only
+ * among the claims it allows (the pass: about the same thing) — each
+ * unordered pair once.
  */
 export function nearestPairs(
   claims: readonly Pick<PassClaim, "id" | "page">[],
   vectors: readonly Float32Array[],
   queries: readonly number[],
   k = KNN_K,
+  allow?: PairFilter,
 ): CandidatePair[] {
   const seen = new Map<string, CandidatePair>();
   for (const q of queries) {
@@ -163,6 +203,7 @@ export function nearestPairs(
     const best: Array<{ at: number; score: number }> = [];
     for (let i = 0; i < vectors.length; i++) {
       if (i === q || claims[i].page === claims[q].page || claims[i].id === claims[q].id) continue;
+      if (allow && !allow(q, i)) continue;
       const v = vectors[i];
       let score = 0;
       for (let d = 0; d < qv.length && d < v.length; d++) score += qv[d] * v[d];
@@ -239,11 +280,12 @@ export async function nearestPairsYielding(
   k = KNN_K,
   signal?: AbortSignal,
   chunk = KNN_QUERY_CHUNK,
+  allow?: PairFilter,
 ): Promise<CandidatePair[]> {
   const merged = new Map<string, CandidatePair>();
   for (let at = 0; at < queries.length; at += chunk) {
     if (signal?.aborted) break;
-    for (const p of nearestPairs(claims, vectors, queries.slice(at, at + chunk), k)) {
+    for (const p of nearestPairs(claims, vectors, queries.slice(at, at + chunk), k, allow)) {
       const key = `${p.a}:${p.b}`;
       if (!merged.has(key)) merged.set(key, p);
     }
@@ -270,8 +312,10 @@ export interface ContradictionPassResult {
   /** Pairs the judge was asked about this pass (the rest came from the cache). */
   judged: number;
   calls: number;
-  /** Judge batches that gave no verdict even after the half-size retry; their pairs wait for the next pass. */
+  /** Judge calls that failed (a batch, or a smaller retry of one); their pairs wait for the next pass. */
   failedBatches: number;
+  /** Judge answers cut at their output cap ({@link judgeMaxTokens}); what they left out was asked again smaller. */
+  capped: number;
   /** Pairs left unjudged this pass (failed batches, pairs an answer left out or garbled, pairs over the cap, a stopped judge). */
   deferredPairs: number;
   /** Claims an earlier pass deferred that this pass compared again (outside its own scope). */
@@ -444,6 +488,7 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
     judged: 0,
     calls: 0,
     failedBatches: 0,
+    capped: 0,
     deferredPairs: 0,
     carried: 0,
     deferredClaims: 0,
@@ -533,7 +578,9 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
     return finish(new Set(queries), "embedder_unavailable");
   }
 
-  const pairs = await nearestPairsYielding(claims, vectors, queries, options.k ?? KNN_K, options.signal);
+  const pairs = await nearestPairsYielding(claims, vectors, queries, options.k ?? KNN_K, options.signal, KNN_QUERY_CHUNK, (a, b) =>
+    comparable(claims[a], claims[b]),
+  );
   result.pairs = pairs.length;
   if (options.signal?.aborted) {
     result.skipped = "aborted";
@@ -559,12 +606,21 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
   const failures = new Map<string, number>();
   let stop: string | null = null;
 
-  /** One call: whether it gave any verdict, or why not. Only a refused credential, plan or abort throws. */
-  async function judgeOnce(batch: readonly number[]): Promise<{ ok: true } | { ok: false; kind: string }> {
+  // An empty or capped answer is asked again in smaller calls, never resent as it was.
+  const retry: RetryOptions = {
+    ...options.retry,
+    retryOn: (err) => err.kind !== "bad_response" && (options.retry?.retryOn?.(err) ?? true),
+  };
+
+  /**
+   * One call: the pairs a readable answer left out, or why there was none.
+   * Only a refused credential, plan or abort throws.
+   */
+  async function judgeOnce(batch: readonly number[]): Promise<{ ok: true; missing: number[] } | { ok: false; kind: string }> {
     const { system, user } = buildJudgePrompt(batch.map((n) => ({ a: claims[pairs[n].a].text, b: claims[pairs[n].b].text })));
     let response: FlashResponse;
     try {
-      ({ response } = await completeWithRetry(client, { system, user, maxTokens: JUDGE_MAX_TOKENS, signal: options.signal }, options.retry));
+      ({ response } = await completeWithRetry(client, { system, user, maxTokens: judgeMaxTokens(batch.length), signal: options.signal }, retry));
     } catch (err) {
       const e = err instanceof FlashCallError ? err : null;
       if (e && (e.kind === "no_credential" || e.kind === "auth" || e.kind === "refused" || e.kind === "aborted")) throw e;
@@ -573,6 +629,7 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
     const usd = estimateUsd(response.model, response.usage, rates);
     result.calls += 1;
     result.usdEstimate += usd;
+    if (response.finishReason === "length") result.capped += 1;
     try {
       recordCost(options.stateVault, {
         runId: options.runId ?? null,
@@ -599,7 +656,7 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
       learned.push({ hash: hashes[n], verdict: v.verdict, why: v.why });
     }
     result.judged += verdicts.size;
-    return { ok: true };
+    return { ok: true, missing: batch.filter((_, i) => !verdicts.has(i)) };
   }
 
   function batchFailed(kind: string): void {
@@ -612,17 +669,18 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
       if (stop || options.signal?.aborted) return;
       try {
         const first = await judgeOnce(batch);
-        if (first.ok) return;
-        // An unreadable answer is asked once more, as two halves; anything else waits for the next pass.
-        if (first.kind !== "bad_response" || batch.length < 2) {
+        // An unreadable (or empty, or capped) answer, and the pairs a readable
+        // one left out, are asked once more in small calls; a call that failed
+        // for another reason waits for the next pass.
+        if (!first.ok && first.kind !== "bad_response") {
           batchFailed(first.kind);
           return;
         }
-        const mid = Math.ceil(batch.length / 2);
-        for (const half of [batch.slice(0, mid), batch.slice(mid)]) {
+        const again = first.ok ? first.missing : batch;
+        for (let at = 0; at < again.length; at += JUDGE_RETRY_PAIRS) {
           if (stop || options.signal?.aborted) return;
-          const again = await judgeOnce(half);
-          if (!again.ok) batchFailed(again.kind);
+          const small = await judgeOnce(again.slice(at, at + JUDGE_RETRY_PAIRS));
+          if (!small.ok) batchFailed(small.kind);
         }
       } catch (err) {
         // A refused credential or plan, or an abort, stops the pass.
@@ -637,6 +695,9 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
         ? `A judge call failed (${kind}); its pairs are judged next pass.`
         : `${count} judge calls failed (${kind}); their pairs are judged next pass.`,
     );
+  }
+  if (result.capped > 0) {
+    result.notes.push(`${result.capped} judge answer(s) reached the output cap; the pairs they left out were asked again in smaller calls.`);
   }
   if (stop) {
     result.skipped = stop === "aborted" ? "aborted" : "judge_unavailable";

@@ -139,10 +139,10 @@ describe("memory-wiki's files and blocks (pure)", () => {
       "concepts/pricing.md": pageText({ claims: [claim("acme-sales/pricing/blue-widget")] }, "Acme prices.\n"),
       "concepts/shipping.md": pageText({ title: "Shipping", claims: [claim("acme-ops/shipping/days")] }, "Acme ships.\n"),
     };
-    const clean = lintVault(snapshot(pages), { scope: null });
+    const clean = lintVault(snapshot(pages), {});
     const touched = lintVault(
       snapshot(Object.fromEntries(Object.entries(pages).map(([p, t]) => [p, related(t)]))),
-      { scope: null },
+      {},
     );
     // The Related links rescue no orphan, and nothing new is found.
     expect(touched.findings).toEqual(clean.findings);
@@ -222,7 +222,7 @@ describe("a vault memory-wiki wrote into", () => {
     const snap = await readVaultSnapshot();
     expect(snap.pages.map((p) => p.path)).toEqual(["concepts/catalogue.md", "concepts/pricing.md", "concepts/shipping.md"]);
     expect(snap.indexBody).not.toContain("openclaw:wiki");
-    const report = lintVault(snap, { scope: null });
+    const report = lintVault(snap, {});
     expect(report.findings.filter((f) => f.severity === "error")).toEqual([]);
     expect(report.findings.some((f) => f.rule === "frontmatter-invalid")).toBe(false);
   });

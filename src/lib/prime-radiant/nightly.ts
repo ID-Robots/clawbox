@@ -70,7 +70,7 @@ export interface NightlySummary {
   changedCount: number;
   ingest: { jobId: string; status: string; pages: number; failed: number } | { skipped: string };
   lint: { errors: number; warnings: number; checked: number };
-  contradictions: Pick<ContradictionPassResult, "claims" | "queried" | "embedded" | "pairs" | "judged" | "calls" | "failedBatches" | "deferredPairs" | "carried" | "deferredClaims" | "complete" | "usdEstimate" | "skipped"> & {
+  contradictions: Pick<ContradictionPassResult, "claims" | "queried" | "embedded" | "pairs" | "judged" | "calls" | "failedBatches" | "capped" | "deferredPairs" | "carried" | "deferredClaims" | "complete" | "usdEstimate" | "skipped"> & {
     findings: number;
   };
   opus: Pick<OpusTierResult, "queued" | "reviewed" | "pending" | "calls" | "usdEstimate" | "capUsd" | "stopped"> | { skipped: string };
@@ -278,6 +278,7 @@ function emptySummary(): NightlySummary {
       judged: 0,
       calls: 0,
       failedBatches: 0,
+      capped: 0,
       deferredPairs: 0,
       carried: 0,
       deferredClaims: 0,
@@ -376,6 +377,7 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
         judged: pass.judged,
         calls: pass.calls,
         failedBatches: pass.failedBatches,
+        capped: pass.capped,
         deferredPairs: pass.deferredPairs,
         carried: pass.carried,
         deferredClaims: pass.deferredClaims,
