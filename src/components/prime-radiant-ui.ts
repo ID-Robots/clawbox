@@ -188,11 +188,12 @@ export function pageUrl(base: string, path: string): string {
   return `${base}/${path.split("/").map(encodeURIComponent).join("/")}`;
 }
 
-/** Tabs the app has, in order. */
-export const TABS = ["browse", "search", "review", "history", "lint", "ingest", "settings", "costs"] as const;
+/** Tabs the app has, in order. The Map is the start page of a vault with pages. */
+export const TABS = ["map", "browse", "search", "review", "history", "lint", "ingest", "settings", "costs"] as const;
 export type Tab = (typeof TABS)[number];
 
 export const TAB_ICONS: Record<Tab, string> = {
+  map: "hub",
   browse: "menu_book",
   search: "search",
   review: "rate_review",

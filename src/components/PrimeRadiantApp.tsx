@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { APP_GROUND, BTN_PRIMARY, BTN_SECONDARY } from "./coding-agent-ui";
 import {
@@ -25,6 +25,9 @@ import PrimeRadiantSettings from "./PrimeRadiantSettings";
 import PrimeRadiantCosts from "./PrimeRadiantCosts";
 import PrimeRadiantIcon from "./PrimeRadiantIcon";
 
+/** The Map (WebGL, a layout worker) is fetched only when its tab is first drawn. */
+const PrimeRadiantMap = lazy(() => import("./PrimeRadiantMap"));
+
 /**
  * Prime Radiant — the "living wiki" — as its own desktop app.
  *
@@ -38,6 +41,9 @@ import PrimeRadiantIcon from "./PrimeRadiantIcon";
  * repository and points the memory-wiki plugin at it. A refused init is
  * shown with a retry button rather than retried on its own — it writes the
  * agent's configuration, and doing that in a loop is the wrong failure mode.
+ *
+ * A vault with pages opens on the Map; an empty one on Browse, whose empty
+ * state leads to Add documents.
  */
 
 /** A status the window can draw: a vault that exists carries its counts and its wiring. */
@@ -53,6 +59,10 @@ export default function PrimeRadiantApp() {
   const [phase, setPhase] = useState<"loading" | "initialising" | "ready" | "failed">("loading");
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("browse");
+  /** The start tab is picked once, from the first status that has the vault. */
+  const startPicked = useRef(false);
+  /** A page opened from the Map goes back to the Map. */
+  const backToMap = useRef(false);
   /** The page the History tab opens on, handed over from Browse. */
   const [historyPage, setHistoryPage] = useState<string | null>(null);
   /** The page Browse shows; Search, Review, Lint and History open one here too. */
@@ -96,11 +106,18 @@ export default function PrimeRadiantApp() {
       });
   }, []);
 
+  const pickStartTab = useCallback((s: PrimeRadiantStatus) => {
+    if (startPicked.current || !s.initialised) return;
+    startPicked.current = true;
+    setTab(s.vault.pages > 0 ? "map" : "browse");
+  }, []);
+
   /** What to do with a status: show it, or create the vault and read again. */
   const settle = useCallback(async (s: PrimeRadiantStatus, signal?: AbortSignal) => {
     if (!isDrawableStatus(s)) throw new Error("shape");
     setStatus(s);
     if (s.initialised) {
+      pickStartTab(s);
       setPhase("ready");
       if (s.plugin.state === "needs-write") rewire(signal);
       return;
@@ -113,9 +130,10 @@ export default function PrimeRadiantApp() {
     if (signal?.aborted) return;
     if (!isDrawableStatus(after)) throw new Error("shape");
     setStatus(after);
+    pickStartTab(after);
     setPhase(after.initialised ? "ready" : "failed");
     if (after.initialised) announceVaultChanged();
-  }, [rewire]);
+  }, [rewire, pickStartTab]);
 
   const fail = useCallback((err: unknown, signal?: AbortSignal) => {
     if ((err as Error)?.name === "AbortError" || signal?.aborted) return;
@@ -153,14 +171,34 @@ export default function PrimeRadiantApp() {
       .catch((err) => fail(err));
   };
 
+  const showTab = useCallback((id: Tab) => {
+    backToMap.current = false;
+    setTab(id);
+  }, []);
   const openPage = useCallback((path: string) => {
+    backToMap.current = false;
     setBrowsePage(path);
     setTab("browse");
   }, []);
+  const openFromMap = useCallback((path: string) => {
+    backToMap.current = true;
+    setBrowsePage(path);
+    setTab("browse");
+  }, []);
+  /** Browse's own navigation; its Back from a page the Map opened returns to the Map. */
+  const selectInBrowse = useCallback((path: string | null) => {
+    setBrowsePage(path);
+    if (path === null && backToMap.current) {
+      backToMap.current = false;
+      setTab("map");
+    }
+  }, []);
   const openHistory = useCallback((path: string) => {
+    backToMap.current = false;
     setHistoryPage(path);
     setTab("history");
   }, []);
+  const toIngest = useCallback(() => showTab("ingest"), [showTab]);
 
   const ready = phase === "ready" && status?.initialised;
 
@@ -196,7 +234,7 @@ export default function PrimeRadiantApp() {
               role="tab"
               aria-selected={tab === id}
               data-testid={`prime-radiant-tab-${id}`}
-              onClick={() => setTab(id)}
+              onClick={() => showTab(id)}
               className={`inline-flex items-center gap-1.5 shrink-0 rounded-lg px-3 py-1.5 text-xs font-medium cursor-pointer transition-colors ${
                 tab === id
                   ? "bg-white/[0.12] text-[var(--text-primary)]"
@@ -210,7 +248,10 @@ export default function PrimeRadiantApp() {
         </nav>
       )}
 
-      <main className="flex-1 min-h-0 overflow-y-auto px-5 py-4" role={ready ? "tabpanel" : undefined}>
+      <main
+        className={`flex-1 min-h-0 px-5 py-4 ${ready && tab === "map" ? "overflow-hidden flex flex-col" : "overflow-y-auto"}`}
+        role={ready ? "tabpanel" : undefined}
+      >
         {error && phase === "ready" && (
           <p role="alert" className="mb-3 text-xs text-red-300">{error}</p>
         )}
@@ -237,7 +278,7 @@ export default function PrimeRadiantApp() {
 
         {ready && status && (
           <>
-            {status.plugin.state === "conflict" && tab === "browse" && (
+            {status.plugin.state === "conflict" && (tab === "browse" || tab === "map") && (
               <p className="mb-3 rounded-lg border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-xs text-amber-200" data-testid="prime-radiant-wiring-conflict">
                 {t(
                   status.plugin.conflicts.every((c) => c === "plugin-writes")
@@ -246,23 +287,37 @@ export default function PrimeRadiantApp() {
                 )}
               </p>
             )}
-            {repaired && tab === "browse" && (
+            {repaired && (tab === "browse" || tab === "map") && (
               <p className="mb-3 rounded-lg border border-sky-400/30 bg-sky-400/10 px-3 py-2 text-xs text-sky-200" data-testid="prime-radiant-repaired" role="status">
                 {t("primeRadiant.repaired", { pages: repaired.pages, files: repaired.files })}
               </p>
+            )}
+            {tab === "map" && (
+              <div className="flex-1 min-h-0">
+                <Suspense
+                  fallback={
+                    <p className="flex items-center gap-2 py-10 justify-center text-sm text-[var(--text-muted)]" role="status">
+                      <span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 16 }} aria-hidden="true">progress_activity</span>
+                      {t("primeRadiant.map.loading")}
+                    </p>
+                  }
+                >
+                  <PrimeRadiantMap revision={revision} onOpenPage={openFromMap} onIngest={toIngest} />
+                </Suspense>
+              </div>
             )}
             {tab === "browse" && (
               <PrimeRadiantBrowse
                 domains={status.vault.domains}
                 revision={revision}
                 selected={browsePage}
-                onSelect={setBrowsePage}
+                onSelect={selectInBrowse}
                 onHistory={openHistory}
-                onIngest={() => setTab("ingest")}
+                onIngest={toIngest}
               />
             )}
             {tab === "search" && <PrimeRadiantSearch onOpenPage={openPage} />}
-            {tab === "review" && <PrimeRadiantReview revision={revision} onChanged={changed} onOpenPage={openPage} onOpenSettings={() => setTab("settings")} />}
+            {tab === "review" && <PrimeRadiantReview revision={revision} onChanged={changed} onOpenPage={openPage} onOpenSettings={() => showTab("settings")} />}
             {tab === "history" && <PrimeRadiantHistory initialPage={historyPage} revision={revision} onChanged={changed} onOpenPage={openPage} />}
             {tab === "lint" && <PrimeRadiantLint revision={revision} onOpenPage={openPage} />}
             {tab === "ingest" && <PrimeRadiantIngest onChanged={changed} />}

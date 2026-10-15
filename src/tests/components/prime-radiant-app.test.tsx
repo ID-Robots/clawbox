@@ -66,6 +66,17 @@ const PAGE = {
   lint: { scope: ["entities/acme-widgets.md"], checked: 1, findings: [], errors: 0, warnings: 0, ok: true },
 };
 
+/** What the Map's graph route answers: the two pages, linked. */
+const GRAPH = {
+  revision: "f".repeat(40),
+  truncated: false,
+  nodes: [
+    { id: "entities/acme-widgets.md", title: "Acme Widgets Ltd", domain: "sales", degree: 1, sources: 1 },
+    { id: "concepts/widget-pricing.md", title: "Widget pricing", domain: "sales", degree: 1, sources: 0 },
+  ],
+  edges: [[0, 1, 1]],
+};
+
 const LIST_ENTRY = {
   path: "entities/acme-widgets.md", valid: true, title: "Acme Widgets Ltd", type: "entity", domain: "sales", owner: "sales-team",
   status: "stable", privacy: "internal", verified: true, claims: 1, summary: "Acme Widgets Ltd sells widgets.", bodyChars: 30, mtimeMs: 1,
@@ -141,6 +152,8 @@ let previewAnswer: Record<string, unknown> | null;
 let skipCodeProjects: boolean;
 /** What `POST init` says its one-time memory-wiki repair did. */
 let initRepair: Record<string, unknown> | null;
+/** What `GET pages?…` lists. */
+let listed: unknown[];
 
 function installFetch() {
   vi.stubGlobal("fetch", vi.fn(async (input: unknown, init?: RequestInit) => {
@@ -160,7 +173,8 @@ function installFetch() {
       status = { ...status, initialised: true, plugin: { state: "wired", vault: "/tmp/vault" } };
       return ok({ created, plugin: { state: "wired", wrote: true }, repair: initRepair });
     }
-    if (url.startsWith(`${p}/pages?`)) return ok({ total: 1, pages: [LIST_ENTRY] });
+    if (url.startsWith(`${p}/pages?`)) return ok({ total: listed.length, pages: listed });
+    if (url === `${p}/graph`) return ok(listed.length > 0 ? GRAPH : { revision: null, truncated: false, nodes: [], edges: [] });
     if (url === `${p}/pages/entities/acme-widgets.md`) return ok(PAGE);
     if (url.startsWith(`${p}/search?`)) {
       if (searchStatus === 404) return ok({ error: "Not found" }, 404);
@@ -265,8 +279,11 @@ beforeEach(() => {
   previewAnswer = PREVIEW;
   skipCodeProjects = true;
   initRepair = { ran: true, cleaned: [], removed: [], commit: null };
+  listed = [LIST_ENTRY];
   FakeEventSource.last = null;
   installFetch();
+  // The Map's canvas: no WebGL or 2D context in jsdom (its own suite mocks one), so it lists the pages.
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
 });
 
 afterEach(() => {
@@ -313,8 +330,42 @@ describe("PrimeRadiantApp", () => {
     expect(await screen.findByTestId("prime-radiant-wiring-conflict")).toHaveTextContent("may not read this wiki");
   });
 
+  it("opens on the Map when the vault has pages", async () => {
+    await mount();
+    expect(await screen.findByTestId("prime-radiant-tab-map")).toHaveAttribute("aria-selected", "true");
+    expect(screen.getAllByRole("tab")[0]).toBe(screen.getByTestId("prime-radiant-tab-map"));
+    expect(await screen.findByTestId("prime-radiant-map")).toBeInTheDocument();
+    expect(calls.some((c) => c.url === "/setup-api/prime-radiant/graph")).toBe(true);
+  });
+
+  it("opens on Browse, with its call to add documents, when the vault is empty", async () => {
+    status = { ...STATUS, vault: { ...STATUS.vault, pages: 0, claims: 0, verifiedPages: 0, domains: [] } };
+    listed = [];
+    await mount();
+    expect(await screen.findByTestId("prime-radiant-tab-browse")).toHaveAttribute("aria-selected", "true");
+    expect(await screen.findByTestId("prime-radiant-empty")).toBeInTheDocument();
+    expect(calls.some((c) => c.url === "/setup-api/prime-radiant/graph")).toBe(false);
+    // The Map, asked for anyway, says the same.
+    await openTab("map");
+    const empty = await screen.findByTestId("prime-radiant-map-empty");
+    fireEvent.click(within(empty).getByRole("button"));
+    expect(await screen.findByTestId("prime-radiant-tab-ingest")).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("opens a page from the Map in Browse, and Back returns to the Map", async () => {
+    await mount();
+    const list = await screen.findByTestId("prime-radiant-map-list");
+    fireEvent.click(within(list).getAllByRole("button")[0]);
+    expect(await screen.findByTestId("prime-radiant-claim")).toHaveTextContent("Acme Widgets Ltd is based in Springfield.");
+    expect(screen.getByTestId("prime-radiant-tab-browse")).toHaveAttribute("aria-selected", "true");
+    fireEvent.click(screen.getByTestId("prime-radiant-page-back"));
+    expect(await screen.findByTestId("prime-radiant-map")).toBeInTheDocument();
+    expect(screen.getByTestId("prime-radiant-tab-map")).toHaveAttribute("aria-selected", "true");
+  });
+
   it("opens a page with its facts, confidence, sources and backlinks", async () => {
     await mount();
+    await openTab("browse");
     fireEvent.click(await screen.findByTestId("prime-radiant-page-row"));
     const claim = await screen.findByTestId("prime-radiant-claim");
     expect(claim).toHaveTextContent("Acme Widgets Ltd is based in Springfield.");
@@ -326,6 +377,7 @@ describe("PrimeRadiantApp", () => {
 
   it("filters the page list by domain and type", async () => {
     await mount();
+    await openTab("browse");
     await screen.findByTestId("prime-radiant-page-row");
     fireEvent.change(screen.getByTestId("prime-radiant-browse-type"), { target: { value: "entity" } });
     fireEvent.change(screen.getByTestId("prime-radiant-browse-domain"), { target: { value: "sales" } });
@@ -447,6 +499,7 @@ describe("PrimeRadiantApp", () => {
 
   it("shows a page's history and undoes a change after confirmation", async () => {
     await mount();
+    await openTab("browse");
     fireEvent.click(await screen.findByTestId("prime-radiant-page-row"));
     fireEvent.click(await screen.findByTestId("prime-radiant-page-history"));
     const commit = await screen.findByTestId("prime-radiant-commit");
@@ -461,6 +514,7 @@ describe("PrimeRadiantApp", () => {
 
   it("sends one undo however fast Confirm is pressed twice", async () => {
     await mount();
+    await openTab("browse");
     fireEvent.click(await screen.findByTestId("prime-radiant-page-row"));
     fireEvent.click(await screen.findByTestId("prime-radiant-page-history"));
     const commit = await screen.findByTestId("prime-radiant-commit");
