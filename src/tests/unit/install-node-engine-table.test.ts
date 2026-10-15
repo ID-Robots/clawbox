@@ -226,48 +226,8 @@ describe("install.sh / install-x64.sh Node engine table", () => {
     expect(accepts("install-x64.sh", DIST_VERSION), DIST_VERSION).toBe(true);
   });
 
-  it("pins the same core version everywhere it is written down", () => {
-    // FOUR places, and every one of them is a fallback for the same moment: the
-    // pin file cannot be read. `OPENCLAW_VERSION` in each installer is the
-    // version a corrupted or partial install lands on; `OPENCLAW_VERSION_FALLBACK`
-    // in the updater is what the UI's "Latest" column and the managed-plugin
-    // reinstall use. They drifted once, and the cost was not a cosmetic one:
-    // install.sh fell back to the new pin while updater.ts fell back to the old,
-    // so the UI answered "no OpenClaw update available" over a box that had one
-    // (false success) and the channel plugins were pinned to the previous core's
-    // version on the new core. Nothing can derive these — they exist for the
-    // moment the shared file is unavailable — so this case is the guard.
-    const pinned = readFileSync(path.join(REPO, "config/openclaw-target.txt"), "utf-8").trim();
-    expect(pinned).toBe("2026.10.2");
-    for (const [name, source] of Object.entries(INSTALLERS)) {
-      expect(source, name).toContain(`OPENCLAW_VERSION="${pinned}"`);
-    }
-    const updater = readFileSync(path.join(REPO, "src/lib/updater.ts"), "utf-8");
-    expect(updater, "src/lib/updater.ts").toContain(
-      `const OPENCLAW_VERSION_FALLBACK = "${pinned}";`,
-    );
-  });
-
-  it("records which state schema the pinned core supports", () => {
-    // A FIFTH thing the pin has to carry, and the one a bump forgets most
-    // easily: OpenClaw migrates `state/openclaw.sqlite` forward and never back,
-    // so a core that meets a newer file refuses to open it and the box loses its
-    // assistant mid-update. `OPENCLAW_STATE_SCHEMA_BY_VERSION` is what the
-    // updater's pre-flight compares against, and `openclawStateSchemaFor`
-    // answers null for a version it has never been told about — which makes the
-    // pre-flight stand down silently. Bumping the pin without adding its row
-    // would therefore not fail anything at runtime; it would just quietly switch
-    // the guard off. This is the guard for the guard.
-    //
-    // Read from the source rather than imported, like every other case here:
-    // importing the updater pulls its whole Node surface into a test that only
-    // ever wanted to read four files.
-    const pinned = readFileSync(path.join(REPO, "config/openclaw-target.txt"), "utf-8").trim();
-    const updater = readFileSync(path.join(REPO, "src/lib/updater.ts"), "utf-8");
-    const table = /OPENCLAW_STATE_SCHEMA_BY_VERSION[^{]*\{([^}]*)\}/.exec(updater)?.[1];
-    expect(table, "OPENCLAW_STATE_SCHEMA_BY_VERSION in src/lib/updater.ts").toBeTypeOf("string");
-    expect(table, `no state schema recorded for the pinned ${pinned}`).toMatch(
-      new RegExp(`"${pinned.replaceAll(".", "\\.")}"\\s*:\\s*\\d+`),
-    );
-  });
+  // The pin itself — one source, every fallback equal to it, its state-schema
+  // row — is guarded in harness-pins.test.ts; the pinned package's own
+  // `engines.node` is checked against OPENCLAW_NODE_ENGINE by the
+  // harness-contract CI job.
 });

@@ -129,20 +129,20 @@ const OPENCLAW_TARGET_FILE = path.join(PROJECT_DIR, "config", "openclaw-target.t
 // It is the THIRD copy of the pin (install.sh, install-x64.sh, here), and
 // nothing in the code can derive it: it exists precisely for the moment the file
 // the other two read cannot be read. So the guard is a test —
-// `install-node-engine-table.test.ts`, "pins the same core version everywhere it
-// is written down" — which fails if any of the four drifts. What drift costs,
+// `harness-pins.test.ts`, "pins the same core version everywhere it is written
+// down" — which fails if any of the four drifts. What drift costs,
 // measured on this value: with the pin file unreadable, install.sh falls back to
 // 2026.9.3 while this fell back to 2026.8.1, so `readUpdateStatus` answered
 // `{target: null, updateAvailable: false}` — "no OpenClaw update available" over a
 // box that has one, the false-success shape — and `reinstallManagedPluginPayload`
 // pinned the channel plugins to `@2026.8.1` on a 2026.9.3 core.
-const OPENCLAW_VERSION_FALLBACK = "2026.10.2";
+const OPENCLAW_VERSION_FALLBACK = "2026.10.3";
 
 /**
- * The state-DB schema each pinned core supports, read from
- * `OPENCLAW_STATE_SCHEMA_VERSION` in the published tarball's
- * `dist/openclaw-state-db-contract-*.js` — not from release notes, which do
- * not carry the number.
+ * The state-DB schema each pinned core supports, read from the published
+ * package's own `package.json` (`openclaw.schemaVersions.state`) — not from
+ * release notes, which do not carry the number. The `harness-contract` CI job
+ * fails when the row for the pin disagrees with the package.
  *
  * It exists because OpenClaw NEVER downgrades a state schema. Once a core has
  * opened `~/.openclaw/state/openclaw.sqlite` it migrates the file forward and
@@ -164,6 +164,7 @@ const OPENCLAW_STATE_SCHEMA_BY_VERSION: Readonly<Record<string, number>> = {
   "2026.9.3": 16,
   "2026.9.4": 17,
   "2026.10.2": 20,
+  "2026.10.3": 20,
 };
 
 /** The state schema `version` supports, or null when this pin is not in the table. */
