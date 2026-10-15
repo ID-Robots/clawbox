@@ -103,7 +103,7 @@ const { mockX64Integration, mockX64Install } = vi.hoisted(() => ({
 vi.mock("@/lib/x64-integration", () => ({
   hasX64DesktopIntegration: mockX64Integration,
   hasX64Install: mockX64Install,
-  X64_DESKTOP_CORE_STEP_TIMEOUT_MS: 6_600_000,
+  X64_DESKTOP_CORE_STEP_TIMEOUT_MS: 6_600_000, X64_DESKTOP_GATEWAY_READY_WAIT_MS: 240_000,
 }));
 // The owner's rebuild and the UI restart on an install-x64.sh PC: both act on
 // THIS process and the real checkout, so they are seams here and are tested on
@@ -2810,6 +2810,18 @@ describe("updater", () => {
       await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
       expect(updater.getUpdateState().error).toContain("existing OpenClaw user gateway");
       expectNoApplianceMaintenance();
+    });
+
+    it("gives a slow-booting desktop gateway the desktop's window before and after restarting it", async () => {
+      mockGet.mockResolvedValue(true);
+      mockGatewayUp.mockResolvedValue(false);
+      expect(await updater.checkContinuation()).toBe(true);
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("failed"));
+      // A 75 s boot outlived the appliance's 30 s + 45 s: the restart in
+      // between threw the first boot away and the second wait ran out first.
+      const waits = mockGatewayUp.mock.calls.map(([, , options]) => options?.timeoutMs);
+      expect(waits.length).toBeGreaterThanOrEqual(2);
+      expect(waits.every((timeoutMs) => timeoutMs === 240_000)).toBe(true);
     });
 
     it("reports a rolled-back rebuild without stopping the restored gateway", async () => {

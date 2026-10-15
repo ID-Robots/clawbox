@@ -95,3 +95,18 @@ export function hasX64Install(projectDir: string): boolean {
  * failed an honest run.
  */
 export const X64_DESKTOP_CORE_STEP_TIMEOUT_MS = 6_600_000;
+
+/**
+ * How long the updater waits for the desktop's user gateway to answer, both
+ * after the core step restarts it and again after the updater's own restart.
+ *
+ * The appliance's 30 s + 45 s used to be the whole budget here too, and an
+ * owner gateway with many agents and a large state database does not boot in
+ * that: the desktop this package was built for took 52 s to open its port and
+ * 75 s to report ready after a core upgrade. The 30 s wait expired mid-boot,
+ * the restart threw that boot away, and the 45 s after it expired seconds
+ * before the port opened, so a finished, healthy upgrade was reported as
+ * failed. Four minutes covers that with room for a cold page cache, and only
+ * runs out on a gateway that is genuinely not coming back.
+ */
+export const X64_DESKTOP_GATEWAY_READY_WAIT_MS = 240_000;
