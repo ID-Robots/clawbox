@@ -9,6 +9,7 @@ package manager.
 ```sh
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/x64-migration -p 'test_*.py'
 python3 scripts/x64-migration/build-package.py \
+  --node-dir "$(dirname "$(readlink -f "$(command -v node)")")" \
   --staging /tmp/clawbox-x64-integration-stage \
   --output /tmp/clawbox-x64-integration_1.0.5_amd64.deb
 dpkg-deb --info /tmp/clawbox-x64-integration_1.0.5_amd64.deb
@@ -17,15 +18,19 @@ sudo -n dpkg -i /tmp/clawbox-x64-integration_1.0.5_amd64.deb
 ```
 
 By default the package is for the account that runs the builder (under `sudo`,
-the one that ran `sudo`): project `~/clawbox`, interpreter `/usr/bin/node`, and
-package prefix `~/.nvm/versions/node/v24.0.0`. Override the builder arguments
-for another desktop. These non-secret paths live in root-owned
+the one that ran `sudo`): project `~/clawbox`, interpreter the `node` on the
+builder's PATH (else `/usr/bin`), and package prefix
+`~/.nvm/versions/node/v24.0.0`. Override the builder arguments for another
+desktop. These non-secret paths live in root-owned
 `/etc/clawbox/x64-integration.env`. The CLI wrapper checks that it runs as the
 configured desktop owner before loading the owner-writable OpenClaw package.
-`--node-dir` is the Node every core command and the staged core's own
-`--version` gate run on, so it has to satisfy the pinned core's `engines.node`
-(2026.10.2: `>=24.16.0 <25 || >=26.1.0`); a core that refuses it is never
-promoted, and the step says to rebuild the package with a Node it accepts.
+`--node-dir` is the Node every core command and the staged core's own install
+and `--version` gate run on, so it has to satisfy the pinned core's
+`engines.node` (`>=24.16.0 <25 || >=26.1.0` since 2026.9.3). The builder
+refuses a `--node-dir` whose `node --version` the pinned core would refuse, and
+the core step checks the same table before npm stages anything — a package
+once rebuilt without the flag named the distro's Node 22, and the only word of
+it the owner got was npm's own refusal, inside the root unit, naming no repair.
 
 The package installs a system `clawbox-gateway.service` bridge to the existing
 user `openclaw-gateway.service`. Initial activation uses **start**, preserving
@@ -110,7 +115,15 @@ generation, listed in `snapshot.txt` (each of those database files that did not
 exist is listed as `absent:<path>`), with `recovery.txt` saying how to use it.
 Only then are the trees swapped (two renames, the previous core retained at
 `<prefix>/lib/node_modules/.openclaw-previous` until the next replacement) and
-`openclaw doctor --fix --non-interactive` run on the new core. A migration that
+`openclaw doctor --fix --non-interactive` run on the new core. The archiver
+refuses, while writing, every symbolic link whose target is outside its
+declared assets (an absolute target whose real path is outside or does not
+exist, a relative one that lands outside) and has no exclusion, so before the
+archive the step finds those links by that rule over the roots the archiver's
+own dry run declares, journals them in `set-aside-links.txt`, unlinks them for
+the archive and recreates them afterwards, pass or fail (`.restored.txt` once
+they are back); links a cut-short run left set aside are put back at the start
+of the next core step, and a point still holding some is never pruned. A migration that
 fails, or reports a blocker (a lost maintenance lease, changed inputs, a legacy
 store still to migrate), puts the previous core and the `state/` copy back
 before the step returns — and removes what the new core created: a database
