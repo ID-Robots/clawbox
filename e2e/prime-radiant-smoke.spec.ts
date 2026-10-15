@@ -166,8 +166,9 @@ test.describe("Prime Radiant", () => {
     const tops = new Set<string>();
     const put = (rel: string, text: string) => {
       const abs = path.join(home, rel);
-      fs.mkdirSync(path.dirname(abs), { recursive: true });
-      fs.writeFileSync(abs, text);
+      fs.mkdirSync(path.dirname(abs), { recursive: true, mode: 0o700 });
+      // Owner-only, like the server's session secret beside them.
+      fs.writeFileSync(abs, text, { mode: 0o600 });
       tops.add(rel.split("/")[0]);
     };
     put("Documents/supplier-terms.md", "Acme Widgets Ltd pays its suppliers within 30 days of the invoice date.");

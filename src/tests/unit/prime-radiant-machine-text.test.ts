@@ -30,7 +30,7 @@ const MACHINE: Record<string, { text: string; kind: string }> = {
       "Oct 14 07:58:13 clawbox kernel: [12345.678901] usb 1-1: new high-speed USB device number 4 using xhci_hcd",
       "Oct 14 07:58:14 clawbox NetworkManager[812]: <info>  [1728892694.1234] device (wlan0): state change: activated",
       "Oct 14 07:59:01 clawbox CRON[20211]: (root) CMD (command -v debian-sa1 > /dev/null && debian-sa1 1 1)",
-      "Oct 14 08:00:02 clawbox sshd[20233]: Accepted publickey for clawbox from 192.168.1.20 port 51522 ssh2",
+      "Oct 14 08:00:02 clawbox sshd[20233]: Accepted publickey for clawbox from 192.0.2.20 port 51522 ssh2",
       "Oct 14 08:00:02 clawbox sshd[20233]: pam_unix(sshd:session): session opened for user clawbox(uid=1000)",
       "Oct 14 08:01:17 clawbox systemd[1]: apt-daily.service: Deactivated successfully.",
     ),
@@ -38,7 +38,7 @@ const MACHINE: Record<string, { text: string; kind: string }> = {
   "an access log": {
     kind: "log",
     text: Array.from({ length: 10 }, (_, i) =>
-      `192.168.1.${10 + i} - - [14/Oct/2026:08:1${i}:02 +0000] "GET /api/items?page=${i} HTTP/1.1" 200 ${512 + i} "-" "Mozilla/5.0"`,
+      `192.0.2.${10 + i} - - [14/Oct/2026:08:1${i}:02 +0000] "GET /api/items?page=${i} HTTP/1.1" 200 ${512 + i} "-" "Mozilla/5.0"`,
     ).join("\n"),
   },
   "a CSV export saved as .txt": {
