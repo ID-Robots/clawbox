@@ -298,7 +298,7 @@ export interface LayoutGraph {
   n: number;
   /** Two node indexes per edge. */
   ends: ArrayLike<number>;
-  /** One weight per edge (1 a link, 0.5 a shared source). */
+  /** One weight per edge (graph-weights.ts: 1 a link, 0.5 a shared source, 0.25 a related hint). */
   weights: ArrayLike<number>;
 }
 

@@ -290,6 +290,7 @@ beforeEach(() => {
   previewAnswer = PREVIEW;
   skipCodeProjects = true;
   initRepair = { ran: true, cleaned: [], removed: [], commit: null };
+  window.localStorage.removeItem("clawbox.primeRadiant.repairNoticeSeen");
   listed = [LIST_ENTRY];
   FakeEventSource.last = null;
   installFetch();
@@ -326,14 +327,44 @@ describe("PrimeRadiantApp", () => {
 
   // The live test: a box wired before memory-wiki's vault writers were known
   // let the plugin compile into the vault. Its wiring now `needs-write`.
-  it("re-wires a vault whose memory-wiki wiring still needs a write, once, in the background, and says what was cleaned", async () => {
+  it("re-wires a vault whose memory-wiki wiring still needs a write, once, in the background, and says what was cleaned once, over Pages", async () => {
     status = { ...STATUS, plugin: { state: "needs-write", vault: "/tmp/vault", writes: [{ key: "plugins.entries.memory-wiki.config.render.createBacklinks", value: false }] } };
     initRepair = { ran: true, cleaned: ["concepts/a.md", "concepts/b.md", "index.md"], removed: ["WIKI.md", "entities/index.md"], commit: "abc1234" };
     await mount();
-    expect(await screen.findByTestId("prime-radiant-tab-browse")).toBeInTheDocument();
+    expect(await screen.findByTestId("prime-radiant-tab-map")).toHaveAttribute("aria-selected", "true");
+    await waitFor(() => expect(calls.filter((c) => c.url.endsWith("/status")).length).toBeGreaterThanOrEqual(2));
+    // Never over the Map.
+    expect(screen.queryByTestId("prime-radiant-repaired")).toBeNull();
+    fireEvent.click(screen.getByTestId("prime-radiant-tab-browse"));
     const notice = await screen.findByTestId("prime-radiant-repaired");
     expect(notice).toHaveTextContent("3 page(s) cleaned, 2 file(s) removed");
     expect(calls.filter((c) => c.url.endsWith("/init") && c.method === "POST")).toHaveLength(1);
+    // Said once: remembered as soon as it is on screen, and it can be put away.
+    expect(window.localStorage.getItem("clawbox.primeRadiant.repairNoticeSeen")).toBe("1");
+    fireEvent.click(within(notice).getByTestId("prime-radiant-repaired-dismiss"));
+    expect(screen.queryByTestId("prime-radiant-repaired")).toBeNull();
+  });
+
+  it("says what the repair cleaned when the first open of an existing vault runs it", async () => {
+    // Not initialised yet, but the folder already held plugin writes: the
+    // first POST init runs the one-time repair, and its answer is not lost.
+    status = { ...STATUS, initialised: false };
+    initRepair = { ran: true, cleaned: ["concepts/a.md"], removed: ["WIKI.md"], commit: "abc1234" };
+    await mount();
+    fireEvent.click(await screen.findByTestId("prime-radiant-tab-browse"));
+    const notice = await screen.findByTestId("prime-radiant-repaired");
+    expect(notice).toHaveTextContent("1 page(s) cleaned, 1 file(s) removed");
+    expect(calls.filter((c) => c.url.endsWith("/init") && c.method === "POST")).toHaveLength(1);
+  });
+
+  it("does not say what the repair cleaned again once it has been seen", async () => {
+    window.localStorage.setItem("clawbox.primeRadiant.repairNoticeSeen", "1");
+    status = { ...STATUS, plugin: { state: "needs-write", vault: "/tmp/vault", writes: [{ key: "plugins.entries.memory-wiki.config.render.createBacklinks", value: false }] } };
+    initRepair = { ran: true, cleaned: ["concepts/a.md"], removed: [], commit: "abc1234" };
+    await mount();
+    fireEvent.click(await screen.findByTestId("prime-radiant-tab-browse"));
+    await waitFor(() => expect(calls.filter((c) => c.url.endsWith("/status")).length).toBeGreaterThanOrEqual(2));
+    expect(screen.queryByTestId("prime-radiant-repaired")).toBeNull();
   });
 
   it("says the plugin was set by hand to write into the wiki when that is the only conflict", async () => {

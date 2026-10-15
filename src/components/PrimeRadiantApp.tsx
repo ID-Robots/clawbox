@@ -29,6 +29,29 @@ import PrimeRadiantIcon from "./PrimeRadiantIcon";
 const PrimeRadiantMap = lazy(() => import("./PrimeRadiantMap"));
 
 /**
+ * The one-time repair's notice is said once: remembered on this browser as
+ * soon as it has been on screen, so neither a reopened window nor a second
+ * repair report shows it again. It sits over Pages, never over the Map.
+ */
+const REPAIR_NOTICE_KEY = "clawbox.primeRadiant.repairNoticeSeen";
+
+function repairNoticeSeen(): boolean {
+  try {
+    return window.localStorage.getItem(REPAIR_NOTICE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function rememberRepairNotice(): void {
+  try {
+    window.localStorage.setItem(REPAIR_NOTICE_KEY, "1");
+  } catch {
+    // Storage refused (a private window): the notice may come back once more.
+  }
+}
+
+/**
  * Prime Radiant — the "living wiki" — as its own desktop app.
  *
  * A separate app from Memory Shard on purpose: Memory Shard is the search
@@ -89,18 +112,28 @@ export default function PrimeRadiantApp() {
    * background — the window is usable meanwhile, and a failure is only
    * logged (the status keeps saying `needs-write`; the next window asks again).
    */
+  /**
+   * What a `POST init` answer says the one-time repair took out of the vault,
+   * noted for the banner (once per window, never after it was dismissed).
+   * Returns how many pages and files it touched.
+   */
+  const noteRepair = useCallback((res: unknown, signal?: AbortSignal): number => {
+    const repair = (res as { repair?: { cleaned?: unknown[]; removed?: unknown[] } | null } | null)?.repair;
+    const pages = Array.isArray(repair?.cleaned) ? repair.cleaned.length : 0;
+    const files = Array.isArray(repair?.removed) ? repair.removed.length : 0;
+    if (pages + files > 0 && !signal?.aborted && !repairNoticeSeen()) setRepaired({ pages, files });
+    return pages + files;
+  }, []);
+
   const rewire = useCallback((signal?: AbortSignal) => {
     initRequest.current ??= prJson(`${API}/init`, jsonInit("POST", {}));
     void initRequest.current
       .then(async (res) => {
-        const repair = (res as { repair?: { cleaned?: unknown[]; removed?: unknown[] } | null } | null)?.repair;
-        const pages = Array.isArray(repair?.cleaned) ? repair.cleaned.length : 0;
-        const files = Array.isArray(repair?.removed) ? repair.removed.length : 0;
-        if (pages + files > 0 && !signal?.aborted) setRepaired({ pages, files });
+        const touched = noteRepair(res, signal);
         const after = await prJson<PrimeRadiantStatus>(`${API}/status`, { signal });
         if (signal?.aborted || !isDrawableStatus(after) || !after.initialised) return;
         setStatus(after);
-        if (pages + files > 0) {
+        if (touched > 0) {
           setRevision((r) => r + 1);
           announceVaultChanged();
         }
@@ -108,7 +141,7 @@ export default function PrimeRadiantApp() {
       .catch((err) => {
         if ((err as Error)?.name !== "AbortError") console.warn("[prime-radiant] memory-wiki wiring:", err);
       });
-  }, []);
+  }, [noteRepair]);
 
   const pickStartTab = useCallback((s: PrimeRadiantStatus) => {
     if (startPicked.current || !s.initialised) return;
@@ -128,7 +161,9 @@ export default function PrimeRadiantApp() {
     }
     setPhase("initialising");
     initRequest.current ??= prJson(`${API}/init`, jsonInit("POST", {}));
-    await initRequest.current;
+    // A first init over an existing vault can run the one-time repair too:
+    // say what it took out, as a rewire does.
+    noteRepair(await initRequest.current, signal);
     if (signal?.aborted) return;
     const after = await prJson<PrimeRadiantStatus>(`${API}/status`, { signal });
     if (signal?.aborted) return;
@@ -137,7 +172,7 @@ export default function PrimeRadiantApp() {
     pickStartTab(after);
     setPhase(after.initialised ? "ready" : "failed");
     if (after.initialised) announceVaultChanged();
-  }, [rewire, pickStartTab]);
+  }, [rewire, pickStartTab, noteRepair]);
 
   const fail = useCallback((err: unknown, signal?: AbortSignal) => {
     if ((err as Error)?.name === "AbortError" || signal?.aborted) return;
@@ -154,6 +189,11 @@ export default function PrimeRadiantApp() {
       .catch((err) => fail(err, ctl.signal));
     return () => ctl.abort();
   }, [settle, fail]);
+
+  // On screen once is enough: never again on this browser.
+  useEffect(() => {
+    if (repaired && tab === "browse") rememberRepairNotice();
+  }, [repaired, tab]);
 
   const changed = useCallback(() => {
     setRevision((r) => r + 1);
@@ -294,10 +334,20 @@ export default function PrimeRadiantApp() {
                 )}
               </p>
             )}
-            {repaired && (tab === "browse" || tab === "map") && (
-              <p className="mb-3 rounded-lg border border-sky-400/30 bg-sky-400/10 px-3 py-2 text-xs text-sky-200" data-testid="prime-radiant-repaired" role="status">
-                {t("primeRadiant.repaired", { pages: repaired.pages, files: repaired.files })}
-              </p>
+            {repaired && tab === "browse" && (
+              <div className="mb-3 flex items-start gap-2 rounded-lg border border-sky-400/30 bg-sky-400/10 pl-3 pr-1 py-1.5 text-xs text-sky-200" data-testid="prime-radiant-repaired" role="status">
+                <p className="flex-1 py-0.5">{t("primeRadiant.repaired", { pages: repaired.pages, files: repaired.files })}</p>
+                <button
+                  type="button"
+                  className="shrink-0 rounded-md p-0.5 text-sky-200/80 hover:bg-sky-400/15 hover:text-sky-100 cursor-pointer"
+                  onClick={() => setRepaired(null)}
+                  aria-label={t("primeRadiant.repairedDismiss")}
+                  title={t("primeRadiant.repairedDismiss")}
+                  data-testid="prime-radiant-repaired-dismiss"
+                >
+                  <span className="material-symbols-rounded" style={{ fontSize: 15 }} aria-hidden="true">close</span>
+                </button>
+              </div>
             )}
             {tab === "map" && (
               <div className="flex-1 min-h-0">

@@ -288,6 +288,26 @@ describe("GET /pages/<path>", () => {
       expect((await res.json()).code).toBe("not_found");
     }
   });
+
+  it("answers only a short summary with ?view=summary, for the Map's card", async () => {
+    await seed();
+    await vaultOperation("ingest: summaries", async (tx) => {
+      await tx.write("concepts/returns.md", pageText({ title: "Returns", summary: "Returns are taken within **30 days**." } as never, "Body that the summary outranks.\n"));
+      await tx.write("concepts/facts.md", pageText({ title: "Facts" }, "## Facts\n\n- one\n- two\n"));
+    });
+    const summary = async (segments: string[]) => {
+      const res = await pageGET(req(`/pages/${segments.join("/")}?view=summary`), { params: Promise.resolve({ path: segments }) });
+      return { status: res.status, body: await res.json() };
+    };
+    // The first prose paragraph, Markdown out; nothing else of the page.
+    expect(await summary(["concepts", "support.md"])).toEqual({ status: 200, body: { path: "concepts/support.md", summary: "Support answers on weekdays." } });
+    expect((await summary(["entities", "acme-widgets.md"])).body.summary).toBe("Acme Widgets Ltd is a synthetic company.");
+    // The frontmatter's own summary first; a page without prose says null.
+    expect((await summary(["concepts", "returns.md"])).body.summary).toBe("Returns are taken within 30 days.");
+    expect((await summary(["concepts", "facts.md"])).body).toEqual({ path: "concepts/facts.md", summary: null });
+    // Missing and unsafe pages answer 404, as without it.
+    for (const segments of [["concepts", "nope.md"], ["..", "prime-radiant.sqlite"], ["index.md"]]) expect((await summary(segments)).status).toBe(404);
+  });
 });
 
 describe("GET /lint", () => {

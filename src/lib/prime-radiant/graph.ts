@@ -4,7 +4,7 @@
  * `{ nodes: [{ id, title, domain, degree, sources }], edges: [[a, b, w]] }`,
  * where `a` and `b` index `nodes`.
  *
- * Two kinds of edge, one per pair of pages:
+ * Three kinds of edge, one per pair of pages (graph-weights.ts):
  *   - a link (w = 1): a `[[wikilink]]` or Markdown link either way between
  *     the two (resolved as links.ts resolves them);
  *   - a shared source (w = 0.5): both pages name the same source document.
@@ -13,7 +13,14 @@
  *     (five or fewer pages are still all tied), and no page takes more than
  *     {@link MAX_SOURCE_EDGES} such edges in all. A pair already linked keeps
  *     its link.
- * Built in O(pages + links + source mentions).
+ *   - a related hint (w = 0.25), only for a page with no link: pages written
+ *     from separate documents link nowhere, and a map of loose dots says
+ *     nothing. Such a page is tied to pages that share a topic with it — an
+ *     entity, subject or tag in its frontmatter, or the entity its claims are
+ *     about — in the same ring as sources; a page still without any edge
+ *     then gets up to two neighbours in its own domain. At most
+ *     {@link MAX_RELATED_EDGES} a page. Not counted in a page's degree.
+ * Built in O(pages + links + source and topic mentions).
  *
  * The graph is kept for the vault's revision — HEAD, plus the size and time
  * of any page changed since — so a second open reads no page at all.
@@ -24,17 +31,22 @@
 import fs from "fs/promises";
 import { createHash } from "crypto";
 import path from "@/lib/runtime-path";
+import { parseClaimId } from "./claims";
+import { LINK_WEIGHT, RELATED_WEIGHT, SOURCE_WEIGHT } from "./graph-weights";
 import { buildLinkGraph } from "./links";
 import { git } from "./git";
 import { vaultDir } from "./paths";
+import type { PageFrontmatter } from "./schema";
 import { readVaultSnapshot, vaultInitialised, type VaultSnapshot } from "./vault";
+
+export { LINK_WEIGHT, RELATED_WEIGHT, SOURCE_WEIGHT };
 
 export interface GraphNode {
   /** Vault-relative page path. */
   id: string;
   title: string;
   domain: string | null;
-  /** Edges this page has (links and shared sources). */
+  /** Links and shared sources this page has (a related hint is not one). */
   degree: number;
   /** Source documents the page names. */
   sources: number;
@@ -52,23 +64,68 @@ export interface VaultGraph {
   edges: GraphEdge[];
 }
 
-export const LINK_WEIGHT = 1;
-export const SOURCE_WEIGHT = 0.5;
 /** A page is tied to this many following pages of each source it shares. */
 export const SOURCE_RING = 2;
 /** At most this many shared-source edges per page. */
 export const MAX_SOURCE_EDGES = 6;
+/** At most this many related hints per page. */
+export const MAX_RELATED_EDGES = 4;
 
 export interface GraphPage {
   path: string;
   title: string | null;
   domain: string | null;
   sources: readonly string[];
+  /** What the page is about, for related hints: frontmatter entities, subjects and tags, its claims' entity. */
+  topics?: readonly string[];
   body: string;
 }
 
 function leafTitle(rel: string): string {
   return (rel.split("/").pop() ?? rel).replace(/\.md$/i, "");
+}
+
+/** A topic as a key: "Acme Widgets", "acme-widgets" and "ACME widgets" are one; any script, accents folded. */
+export function topicKey(raw: string): string {
+  return raw
+    .normalize("NFKD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+/** Strings from a frontmatter field that may be one string or a list of them. */
+function strings(value: unknown): string[] {
+  if (typeof value === "string") return [value];
+  return Array.isArray(value) ? value.filter((x): x is string => typeof x === "string") : [];
+}
+
+/**
+ * Offer `tie` each list's members in a ring with their next
+ * {@link SOURCE_RING} neighbours (every pair of a list of five or fewer); it
+ * decides whether there is room. Linear in the members, whatever a list's size.
+ */
+function ringTie(lists: Iterable<readonly number[]>, tie: (a: number, b: number) => void): void {
+  for (const members of lists) {
+    const k = members.length;
+    if (k < 2) continue;
+    for (let i = 0; i < k; i++) {
+      for (let d = 1; d <= SOURCE_RING && d < k; d++) tie(members[i], members[(i + d) % k]);
+    }
+  }
+}
+
+function groupBy(n: number, keysOf: (i: number) => Iterable<string>): Map<string, number[]> {
+  const out = new Map<string, number[]>();
+  for (let i = 0; i < n; i++) {
+    for (const key of new Set(keysOf(i))) {
+      const list = out.get(key);
+      if (list) list.push(i);
+      else out.set(key, [i]);
+    }
+  }
+  return out;
 }
 
 /** The graph of `pages` (in the order given, which becomes the node order). */
@@ -86,8 +143,10 @@ export function buildVaultGraph(pages: readonly GraphPage[], revision: string | 
     if (pairs.has(key)) return false;
     pairs.add(key);
     edges.push([a, b, w]);
-    degree[a]++;
-    degree[b]++;
+    if (w !== RELATED_WEIGHT) {
+      degree[a]++;
+      degree[b]++;
+    }
     return true;
   };
 
@@ -101,29 +160,37 @@ export function buildVaultGraph(pages: readonly GraphPage[], revision: string | 
       if (j !== undefined) add(i, j, LINK_WEIGHT);
     }
   });
+  const linked = new Uint8Array(n);
+  for (const [a, b] of edges) linked[a] = linked[b] = 1;
 
-  const bySource = new Map<string, number[]>();
-  pages.forEach((p, i) => {
-    for (const s of new Set(p.sources.map((x) => x.trim()).filter(Boolean))) {
-      const list = bySource.get(s);
-      if (list) list.push(i);
-      else bySource.set(s, [i]);
+  const sourceEdges = new Uint8Array(n);
+  ringTie(groupBy(n, (i) => pages[i].sources.map((x) => x.trim()).filter(Boolean)).values(), (a, b) => {
+    if (sourceEdges[a] >= MAX_SOURCE_EDGES || sourceEdges[b] >= MAX_SOURCE_EDGES) return;
+    if (add(a, b, SOURCE_WEIGHT)) {
+      sourceEdges[a]++;
+      sourceEdges[b]++;
     }
   });
-  const sourceEdges = new Uint8Array(n);
-  for (const members of bySource.values()) {
-    const k = members.length;
-    if (k < 2) continue;
-    for (let i = 0; i < k; i++) {
-      for (let d = 1; d <= SOURCE_RING && d < k; d++) {
-        const a = members[i], b = members[(i + d) % k];
-        if (sourceEdges[a] >= MAX_SOURCE_EDGES || sourceEdges[b] >= MAX_SOURCE_EDGES) continue;
-        if (add(a, b, SOURCE_WEIGHT)) {
-          sourceEdges[a]++;
-          sourceEdges[b]++;
-        }
-      }
+
+  // Related hints, for the pages no link reaches: a shared topic first…
+  const related = new Uint8Array(n);
+  const relate = (a: number, b: number) => {
+    if ((linked[a] && linked[b]) || related[a] >= MAX_RELATED_EDGES || related[b] >= MAX_RELATED_EDGES) return;
+    if (add(a, b, RELATED_WEIGHT)) {
+      related[a]++;
+      related[b]++;
     }
+  };
+  ringTie(groupBy(n, (i) => (pages[i].topics ?? []).map(topicKey).filter(Boolean)).values(), relate);
+  // …then, for a page with no edge at all yet, its neighbours in its domain.
+  const loose = Array.from({ length: n }, (_, i) => degree[i] === 0 && related[i] === 0);
+  for (const members of groupBy(n, (i) => (pages[i].domain ? [pages[i].domain!] : [])).values()) {
+    const k = members.length;
+    members.forEach((i, at) => {
+      if (!loose[i] || k < 2) return;
+      relate(i, members[(at + 1) % k]);
+      relate(i, members[(at + k - 1) % k]);
+    });
   }
 
   return {
@@ -140,10 +207,29 @@ export function buildVaultGraph(pages: readonly GraphPage[], revision: string | 
   };
 }
 
+/** What a page is about: the entities, subjects and tags in its frontmatter, and what its claims are about. */
+export function pageTopics(fm: PageFrontmatter): string[] {
+  const out = [...strings(fm.entities), ...strings(fm.entity), ...strings(fm.subjects), ...strings(fm.subject), ...strings(fm.tags)];
+  for (const c of Array.isArray(fm.claims) ? fm.claims : []) {
+    // A claim id is `<domain>/<entity>/<fact>`: the entity is what it is about.
+    const entity = typeof c?.id === "string" ? parseClaimId(c.id)?.entity : undefined;
+    if (entity) out.push(entity);
+    out.push(...strings(c?.subject));
+  }
+  return out;
+}
+
 export function graphPages(snapshot: VaultSnapshot): GraphPage[] {
   return snapshot.pages.map((p) => {
     const fm = p.parsed.ok ? p.parsed.frontmatter : null;
-    return { path: p.path, title: fm?.title ?? null, domain: fm?.domain ?? null, sources: fm?.sources ?? [], body: p.parsed.body };
+    return {
+      path: p.path,
+      title: fm?.title ?? null,
+      domain: fm?.domain ?? null,
+      sources: fm?.sources ?? [],
+      topics: fm ? pageTopics(fm) : [],
+      body: p.parsed.body,
+    };
   });
 }
 

@@ -1,8 +1,8 @@
 /**
  * The flat Map, for a browser without WebGL2 or an owner who asked for less
  * motion: the same nodes, colours and states on a 2D canvas, drawn once per
- * change (never animated). Edges are one stroked path; nodes are batched by
- * colour, one fill per colour.
+ * change (never animated). Edges are one stroked path (the related hints a
+ * fainter one); nodes are batched by colour, one fill per colour.
  */
 import { STATE_DIM, STATE_HIDDEN, STATE_HOVER, STATE_MATCH, STATE_SELECTED } from "./renderer-gl";
 import type { Renderer } from "./view";
@@ -16,6 +16,7 @@ export class FlatRenderer implements Renderer {
   private states: Uint8Array = new Uint8Array(0);
   private edges: Uint32Array = new Uint32Array(0);
   private hi: Uint32Array = new Uint32Array(0);
+  private weak: Uint32Array = new Uint32Array(0);
 
   constructor(private readonly ctx: CanvasRenderingContext2D) {}
 
@@ -37,12 +38,13 @@ export class FlatRenderer implements Renderer {
     this.states = states;
   }
 
-  setEdges(visible: Uint32Array, highlighted: Uint32Array): void {
+  setEdges(visible: Uint32Array, highlighted: Uint32Array, weak: Uint32Array): void {
     this.edges = visible;
     this.hi = highlighted;
+    this.weak = weak;
   }
 
-  draw(vp: Float32Array, width: number, height: number, scale: number, _fog: [number, number], dpr: number): void {
+  draw(vp: Float32Array, width: number, height: number, scale: number, _fog: [number, number], dpr: number, minPx: number): void {
     const { ctx, n, pos, states, colors, sizes } = this;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, width, height);
@@ -61,6 +63,7 @@ export class FlatRenderer implements Renderer {
       ctx.lineWidth = dpr;
       ctx.stroke();
     };
+    stroke(this.weak, this.hi.length > 0 ? "rgba(168,173,184,0.03)" : "rgba(168,173,184,0.065)");
     stroke(this.edges, this.hi.length > 0 ? "rgba(168,173,184,0.06)" : "rgba(168,173,184,0.14)");
     stroke(this.hi, "rgba(190,195,205,0.7)");
 
@@ -76,7 +79,7 @@ export class FlatRenderer implements Renderer {
         const key = (colors[i * 4] << 16) | (colors[i * 4 + 1] << 8) | colors[i * 4 + 2];
         let path = paths.get(key);
         if (!path) paths.set(key, (path = new Path2D()));
-        const r = Math.max(1.5 * dpr, sizes[i] * scale * (s & STATE_SELECTED ? 1.7 : s & STATE_HOVER ? 1.45 : s & STATE_MATCH ? 1.25 : 1));
+        const r = Math.max(minPx, sizes[i] * scale) * (s & STATE_SELECTED ? 1.7 : s & STATE_HOVER ? 1.45 : s & STATE_MATCH ? 1.25 : 1);
         const x = sx(i), y = sy(i);
         path.moveTo(x + r, y);
         path.arc(x, y, r, 0, Math.PI * 2);

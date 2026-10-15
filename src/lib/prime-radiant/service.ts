@@ -14,6 +14,7 @@
 import { buildLinkGraph } from "./links";
 import { lintVault, type LintReport } from "./lint";
 import { pageSummary } from "./frontmatter";
+import { pageBlurb } from "./page-blurb";
 import { hasVerification, type PageFrontmatter, type SchemaError } from "./schema";
 import { currentBranch, commitCount, headCommit, type CommitInfo } from "./git";
 import { repairPluginWritesOnce, type PluginRepairResult } from "./plugin-repair";
@@ -23,6 +24,7 @@ import { readRetiredLedger } from "./state-db";
 import {
   ensureVault,
   listEntry,
+  readPage,
   readVaultSnapshot,
   vaultInitialised,
   type PageListEntry,
@@ -144,6 +146,23 @@ export async function getPage(rel: string, vault: string = vaultDir()): Promise<
   const page = snapshot.pages.find((p) => p.path === safe);
   if (!page) return null;
   return pageDetail(snapshot, page.path, vault);
+}
+
+/** A page in a few sentences, for the Map's card (page-blurb.ts). */
+export interface PageBlurb {
+  path: string;
+  /** Null when the page has no summary and no prose. */
+  summary: string | null;
+}
+
+/** The Map card's summary of one page: reads that page alone, whatever the vault's size. */
+export async function getPageBlurb(rel: string, vault: string = vaultDir()): Promise<PageBlurb | null> {
+  const safe = safePagePath(rel);
+  if (!safe || !isKnowledgePage(safe)) return null;
+  if (!(await vaultInitialised(vault))) return null;
+  const page = await readPage(safe, vault);
+  if (!page) return null;
+  return { path: page.path, summary: pageBlurb(page.parsed.ok ? page.parsed.frontmatter : null, page.parsed.body) };
 }
 
 function pageDetail(snapshot: VaultSnapshot, rel: string, vault: string): PageDetail {
