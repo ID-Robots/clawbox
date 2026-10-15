@@ -383,6 +383,17 @@ describe("the chat on the pool's Claude accounts (TASK-1260)", () => {
     expect((await (await post({ action: "use_for_chat" })).json()).code).toBe("no_claude_account");
   });
 
+  it("answers a chat that did move as done, carrying what the box reported about the model write as the card's note", async () => {
+    gateway.putChatOnPool.mockResolvedValue({
+      ok: true,
+      outcome: { status: "ok", code: "switched", count: 2 },
+      warning: "The chat now runs on these accounts, but setting its model reported: Failed to switch chat model",
+    });
+    const res = await post({ action: "use_for_chat" });
+    expect(res.status).toBe(200);
+    expect((await res.json()).warning).toBe("The chat now runs on these accounts, but setting its model reported: Failed to switch chat model");
+  });
+
   it("brings the gateway in line at once after a change of the owner's that does not move the active account", async () => {
     await post({ action: "connect_oauth" });
     await post({ action: "rename", id: "aaaaaaaa", label: "Work 2" });

@@ -316,6 +316,7 @@ export async function POST(request: Request) {
         }
         const result = await putChatOnPool(() => setChatModelToClaude(extra));
         if (!result.ok) return refusal(result.error, result.code, result.status);
+        if (result.warning) extra.warning = result.warning;
         break;
       }
       case "simulate_limit": {

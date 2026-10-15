@@ -752,4 +752,35 @@ describe("the owner's switch: use these accounts for the chat too", () => {
     expect([...core.profiles.keys()]).toEqual(["anthropic:default"]);
     expect((await pool.describePool()).gateway.following).toBe(false);
   });
+
+  it("answers a model route that failed AFTER the chat's model landed on Claude as done, with what the box reported — the accounts stay", async () => {
+    const core = fakeCore();
+    core.chatOnClaude = false;
+    const { work } = await twoClaudeAccounts();
+    const setModel = vi.fn(async () => {
+      // `agents.defaults.model.primary` is written, then a later step of the model route throws.
+      core.chatOnClaude = true;
+      return { ok: false as const, error: "The plugin state could not be written.", status: 500 };
+    });
+    const result = await gw.putChatOnPool(setModel);
+    expect(result).toMatchObject({ ok: true, warning: expect.stringContaining("The plugin state could not be written.") });
+    // Taking them out would leave a chat on Claude with no credential of the pool's.
+    expect(core.logouts).toEqual([]);
+    expect(core.order?.[0]).toBe(p(work.id));
+    expect((await pool.describePool()).gateway.following).toBe(true);
+  });
+
+  it("takes nothing out when the model route failed and openclaw.json cannot be read to tell whether the chat moved, and says so", async () => {
+    const core = fakeCore();
+    core.chatOnClaude = false;
+    await twoClaudeAccounts();
+    const setModel = vi.fn(async () => {
+      core.chatOnClaude = null;
+      return { ok: false as const, error: "Failed to switch chat model", status: 500 };
+    });
+    const result = await gw.putChatOnPool(setModel);
+    expect(result).toMatchObject({ ok: false, code: "model_not_set", status: 500 });
+    expect(result.ok ? "" : result.error).toMatch(/could not be read.*Failed to switch chat model$/);
+    expect(core.logouts).toEqual([]);
+  });
 });

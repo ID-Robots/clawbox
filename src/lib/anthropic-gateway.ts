@@ -545,7 +545,8 @@ export async function syncGatewayNow(): Promise<SwapConsumerOutcome> {
 }
 
 export type UseForChatResult =
-  | { ok: true; outcome: SwapConsumerOutcome }
+  /** `warning`: the model route failed after the chat's model had landed on Claude — what it reported. */
+  | { ok: true; outcome: SwapConsumerOutcome; warning?: string }
   | { ok: false; code: "no_gateway" | "no_claude_account" | "agent_unsupported" | "gateway_write_failed" | "model_not_set"; error: string; status: number };
 
 /**
@@ -572,6 +573,19 @@ export async function putChatOnPool(setModel: () => Promise<{ ok: true } | { ok:
     }
     const set = await setModel();
     if (!set.ok) {
+      // A refusal is not proof the chat stayed where it was: the model route
+      // can fail after `agents.defaults.model.primary` landed. openclaw.json
+      // decides. On Claude, the accounts are what the chat now runs on, so the
+      // move is done — taken out, they could leave it with no credential at all.
+      const chat = await deps().chat();
+      if (chat?.onAnthropic) {
+        console.error(`[anthropic-gateway] the chat's model landed on Claude though the model route answered ${set.status}; the accounts stay`);
+        return { ok: true, outcome: synced, warning: `The chat now runs on these accounts, but setting its model reported: ${set.error}` } as const;
+      }
+      // Unknown is not "off": nothing is taken out, and the keeper settles it.
+      if (chat === null) {
+        return { ok: false, code: "model_not_set", error: `Whether the chat moved could not be read, so the accounts stay in until it can be. Setting its model reported: ${set.error}`, status: set.status } as const;
+      }
       // The chat did not move: take the accounts out again rather than leave
       // the card saying the chat runs on them, with nothing to press.
       await syncLocked();
