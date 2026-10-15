@@ -59,7 +59,7 @@ export const apps: AppDef[] = [
   // that Memory Shard searches as one of its sources. Its own app, pinned
   // beside Memory Shard because the two are read together, and on every
   // edition. A product name, so it carries no translation key.
-  { id: "prime-radiant", name: "Prime Radiant", color: "#3b2a1a", type: "prime_radiant", pinned: true, defaultWidth: 980, defaultHeight: 720 },
+  { id: "prime-radiant", name: "Prime Radiant", color: "#0f2a52", type: "prime_radiant", pinned: true, defaultWidth: 980, defaultHeight: 720 },
   { id: "system_update", name: "app.systemUpdate", color: "#0ea5e9", type: "system_update", pinned: false, defaultWidth: 900, defaultHeight: 720 },
   { id: "store", name: "app.store", color: "#22c55e", type: "store", pinned: true, defaultWidth: 900, defaultHeight: 600 },
   { id: "browser", name: "app.browser", color: "#4285f4", type: "browser", pinned: false, defaultWidth: 1000, defaultHeight: 700 },

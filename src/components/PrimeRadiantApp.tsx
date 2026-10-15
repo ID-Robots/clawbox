@@ -23,6 +23,7 @@ import PrimeRadiantLint from "./PrimeRadiantLint";
 import PrimeRadiantIngest from "./PrimeRadiantIngest";
 import PrimeRadiantSettings from "./PrimeRadiantSettings";
 import PrimeRadiantCosts from "./PrimeRadiantCosts";
+import PrimeRadiantIcon from "./PrimeRadiantIcon";
 
 /**
  * Prime Radiant — the "living wiki" — as its own desktop app.
@@ -141,9 +142,7 @@ export default function PrimeRadiantApp() {
     >
       <header className="flex items-center justify-between gap-4 px-5 pt-4 pb-3 border-b border-white/[0.06]">
         <div className="flex items-center gap-2 min-w-0">
-          <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 20 }} aria-hidden="true">
-            auto_stories
-          </span>
+          <PrimeRadiantIcon className="w-5 h-5 shrink-0" />
           <h1 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--text-primary)]">{PRODUCT_NAME}</h1>
           <span className="text-xs text-[var(--text-muted)] truncate" data-testid="prime-radiant-subtitle">
             {t("primeRadiant.subtitle")}
@@ -188,7 +187,7 @@ export default function PrimeRadiantApp() {
 
         {(phase === "loading" || phase === "initialising") && (
           <div className="h-full flex flex-col items-center justify-center gap-3 py-10 text-sm text-[var(--text-muted)]" role="status" aria-live="polite" data-testid="prime-radiant-loading">
-            <span className="material-symbols-rounded text-[var(--coral-bright)]" style={{ fontSize: 40 }} aria-hidden="true">auto_stories</span>
+            <PrimeRadiantIcon className="w-10 h-10" />
             <p className="flex items-center gap-2">
               <span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 16 }} aria-hidden="true">progress_activity</span>
               {phase === "initialising" ? t("primeRadiant.initialising") : t("primeRadiant.loading")}

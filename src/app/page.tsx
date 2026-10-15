@@ -49,6 +49,7 @@ import PowerApprovalPrompt, { POWER_APPROVAL_EVENT } from "@/components/PowerApp
 import InstalledAppIcon from "@/components/InstalledAppIcon";
 import AgentBrowserIcon from "@/components/AgentBrowserIcon";
 import GoogleChromeIcon from "@/components/GoogleChromeIcon";
+import PrimeRadiantIcon from "@/components/PrimeRadiantIcon";
 import SetupWizard from "@/components/SetupWizard";
 import { I18nProvider, useT } from "@/lib/i18n";
 import { cleanVersion } from "@/lib/version-utils";
@@ -331,6 +332,12 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
     return <GoogleChromeIcon className={size} />;
   }
 
+  if (id === "prime-radiant") {
+    // The tesseract wireframe (PrimeRadiantIcon), drawn as vector art on the
+    // app's dark blue tile — a glyph from the icon font could not carry it.
+    return <PrimeRadiantIcon className={size} />;
+  }
+
   if (id === "clawbox") {
     // The crab fills its square except for a little headroom above the
     // claws, so a 1.3× render is exactly tile-high and overhangs the sides a
@@ -391,10 +398,6 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
     // one blob instead of a gem. The plain gem keeps the identity and stays
     // legible small.
     "memory-shard": "diamond",
-    // An open book with its pages turning: the wiki, read and rewritten.
-    // `menu_book` and `hub` were the other candidates; the book that is open
-    // says "a body of knowledge you read" without borrowing the shard's gem.
-    "prime-radiant": "auto_stories",
     system_update: "system_update",
     vnc: "desktop_windows",
     // The globe: the open web, as opposed to `browser`'s window with the
