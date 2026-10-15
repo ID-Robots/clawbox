@@ -1,8 +1,8 @@
 /**
  * GET /setup-api/prime-radiant/graph — the Map's graph over a real vault in a
  * tmp dir: owner-only, never creates the vault, compact numeric shape, the
- * two edge rules (links; shared sources without cliques) and the cache kept
- * per vault revision.
+ * edge rules (links; shared sources without cliques; related hints for the
+ * pages no link reaches) and the cache kept per vault revision.
  */
 import fs from "fs";
 import os from "os";
@@ -21,14 +21,18 @@ import {
   buildVaultGraph,
   clearGraphCache,
   getVaultGraph,
+  MAX_RELATED_EDGES,
   MAX_SOURCE_EDGES,
+  pageTopics,
+  RELATED_WEIGHT,
   SOURCE_WEIGHT,
+  topicKey,
   type GraphPage,
   type VaultGraph,
 } from "@/lib/prime-radiant/graph";
 import { vaultDir } from "@/lib/prime-radiant/paths";
 import { vaultOperation } from "@/lib/prime-radiant/vault";
-import { pageText } from "../helpers/prime-radiant-fixtures";
+import { claim, frontmatter, pageText } from "../helpers/prime-radiant-fixtures";
 
 // Real git processes, in series: give them room on a loaded CI runner.
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
@@ -104,15 +108,54 @@ describe("GET /setup-api/prime-radiant/graph", () => {
     // Every edge is [a, b, w] with a < b, indexes into nodes, one per pair.
     for (const [a, b, w] of graph.edges) {
       expect(Number.isInteger(a) && Number.isInteger(b) && a < b && b < graph.nodes.length).toBe(true);
-      expect([1, SOURCE_WEIGHT]).toContain(w);
+      expect([1, SOURCE_WEIGHT, RELATED_WEIGHT]).toContain(w);
     }
     const edge = (x: string, y: string) => graph.edges.find(([a, b]) => (a === at(x) && b === at(y)) || (a === at(y) && b === at(x)));
     // A wikilink one way and one back: one link edge.
     expect(edge("entities/acme-widgets.md", "concepts/pricing.md")?.[2]).toBe(1);
     // A Markdown link and a shared source: the link wins.
     expect(edge("entities/acme-widgets.md", "concepts/support.md")?.[2]).toBe(1);
-    expect(graph.edges).toHaveLength(2);
+    // Holidays links nowhere: a related hint to its domain's other page, not counted as a connection.
+    expect(edge("concepts/holidays.md", "concepts/support.md")?.[2]).toBe(RELATED_WEIGHT);
+    expect(graph.nodes[at("concepts/holidays.md")].degree).toBe(0);
+    expect(graph.edges).toHaveLength(3);
     expect(edge("concepts/holidays.md", "concepts/pricing.md")).toBeUndefined();
+  });
+
+  it("gives a vault of pages from separate documents, none linked, related hints by domain", async () => {
+    // The owner's vault: 48 pages, no wikilinks, a source each, 24 domains.
+    await vaultOperation("ingest: separate documents", async (tx) => {
+      for (let i = 0; i < 48; i++) {
+        await tx.write(
+          `concepts/note-${String(i).padStart(2, "0")}.md`,
+          pageText({ title: `Note ${i}`, domain: `domain-${Math.floor(i / 2)}`, sources: [`upload/doc-${i}.pdf`] }, `Note ${i} stands alone.\n`),
+        );
+      }
+    });
+    const graph = await getGraph();
+    expect(graph.nodes).toHaveLength(48);
+    expect(graph.edges.length).toBe(24);
+    const touched = new Set<number>();
+    for (const [a, b, w] of graph.edges) {
+      expect(w).toBe(RELATED_WEIGHT);
+      expect(graph.nodes[a].domain).toBe(graph.nodes[b].domain);
+      touched.add(a).add(b);
+    }
+    expect(touched.size).toBe(48);
+    // Still no links: every page stays an orphan and a node of degree 0.
+    expect(graph.nodes.every((x) => x.degree === 0)).toBe(true);
+  });
+
+  it("ties unlinked pages that share a tag or a claim's subject, across domains", async () => {
+    await vaultOperation("ingest: topics", async (tx) => {
+      await tx.write("concepts/a.md", pageText({ title: "Alpha", domain: "acme-sales", sources: [], tags: ["Acme Widgets"] } as never, "Alpha.\n"));
+      await tx.write(
+        "concepts/b.md",
+        pageText({ title: "Beta", domain: "acme-support", sources: [], claims: [claim("acme-support/acme-widgets/answers-weekdays", "Acme Widgets Ltd answers on weekdays.")] }, "Beta.\n"),
+      );
+    });
+    const graph = await getGraph();
+    expect(graph.edges).toEqual([[0, 1, RELATED_WEIGHT]]);
   });
 
   it("ties pages that share only a source with a half-weight edge", async () => {
@@ -193,6 +236,57 @@ describe("buildVaultGraph", () => {
   it("titles a page without a valid title by its file name, and keeps a missing domain as null", () => {
     const graph = buildVaultGraph([page("concepts/widget-sizes.md", { domain: null })], null);
     expect(graph.nodes[0]).toEqual({ id: "concepts/widget-sizes.md", title: "widget-sizes", domain: null, degree: 0, sources: 0 });
+  });
+
+  it("ties the pages no link reaches: a shared topic first, else neighbours in their own domain", () => {
+    const pages = [
+      page("p0.md", { domain: "sales", topics: ["Acme Widgets"] }),
+      page("p1.md", { domain: "support", topics: ["acme-widgets"] }),
+      page("p2.md", { domain: "sales" }),
+      page("p3.md", { domain: "legal", topics: ["ACME widgets"], body: "[[p4]]" }),
+      page("p4.md", { domain: "legal" }),
+      page("p5.md", { domain: null }),
+      page("p6.md", { domain: null }),
+    ];
+    const graph = buildVaultGraph(pages, "rev");
+    const w = (x: number, y: number) => graph.edges.find(([a, b]) => a === Math.min(x, y) && b === Math.max(x, y))?.[2];
+    expect(w(3, 4)).toBe(1);
+    // One topic, three spellings: the two unlinked pages, and each to the linked page that shares it.
+    expect(w(0, 1)).toBe(RELATED_WEIGHT);
+    expect(w(0, 3)).toBe(RELATED_WEIGHT);
+    expect(w(1, 3)).toBe(RELATED_WEIGHT);
+    // p2 shares nothing: its domain's other page.
+    expect(w(2, 0)).toBe(RELATED_WEIGHT);
+    // Pages with no domain and no topic have nothing to go by.
+    expect(graph.edges.some(([a, b]) => a >= 5 || b >= 5)).toBe(false);
+    expect(graph.edges).toHaveLength(5);
+    // Hints are not connections.
+    expect(graph.nodes.map((x) => x.degree)).toEqual([0, 0, 0, 1, 1, 0, 0]);
+  });
+
+  it("keeps related hints to a ring, a few per page, however many pages share a topic", () => {
+    const pages = Array.from({ length: 300 }, (_, i) => page(`concepts/p${i}.md`, { domain: `d${i % 7}`, topics: ["widgets"] }));
+    const graph = buildVaultGraph(pages, "rev");
+    const per = new Uint32Array(300);
+    for (const [a, b, w] of graph.edges) {
+      expect(w).toBe(RELATED_WEIGHT);
+      per[a]++;
+      per[b]++;
+    }
+    expect(Math.max(...per)).toBeLessThanOrEqual(MAX_RELATED_EDGES);
+    expect(Math.min(...per)).toBeGreaterThanOrEqual(1);
+    expect(graph.edges.length).toBeLessThanOrEqual(600);
+  });
+
+  it("adds no hint to a page a link already reaches", () => {
+    const graph = buildVaultGraph([page("a.md", { body: "[[b]]", topics: ["x"] }), page("b.md", { topics: ["x"] }), page("c.md", { body: "[[d]]" }), page("d.md")], "rev");
+    expect(graph.edges).toEqual([[0, 1, 1], [2, 3, 1]]);
+  });
+
+  it("reads topics from a page's entities, subjects, tags and claims, in any script", () => {
+    const fm = frontmatter({ claims: [claim("acme-sales/acme-widgets/ships-blue")], tags: ["Финанси", "#Pricing"], entities: "Acme Widgets Ltd", subject: 4 } as never);
+    expect(pageTopics(fm).map(topicKey)).toEqual(["acme-widgets-ltd", "финанси", "pricing", "acme-widgets"]);
+    expect(topicKey("Café Crème")).toBe(topicKey("cafe-creme"));
   });
 
   it("drops links to pages that do not exist and self-links", () => {

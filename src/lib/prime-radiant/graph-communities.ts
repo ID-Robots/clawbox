@@ -11,6 +11,7 @@
  *
  * Pure: runs in the Map's worker, tested directly.
  */
+import { isRelatedWeight, LINK_WEIGHT } from "./graph-weights";
 
 interface LevelGraph {
   n: number;
@@ -193,7 +194,10 @@ export interface GraphInsights {
   orphans: number[];
   /** The most connected pages, busiest first. */
   hubs: number[];
-  /** Pages whose links reach the most other communities, strongest first (hubs are listed as hubs). */
+  /**
+   * Pages whose links reach the most other communities, strongest first (hubs
+   * are listed as hubs; a related hint, a guess, ties nothing together).
+   */
   bridges: number[];
 }
 
@@ -214,7 +218,7 @@ export function graphInsights(
   const offsets = new Int32Array(n + 1);
   for (let e = 0; e < m; e++) {
     const x = ends[e * 2], y = ends[e * 2 + 1];
-    if ((weights[e] ?? 1) >= 1) {
+    if ((weights[e] ?? 1) >= LINK_WEIGHT) {
       links[x]++;
       links[y]++;
     }
@@ -250,7 +254,7 @@ export function graphInsights(
   for (let i = 0; i < n; i++) {
     for (let j = offsets[i]; j < offsets[i + 1]; j++) {
       const c = communities[adj[j]];
-      if (c === communities[i]) continue;
+      if (c === communities[i] || isRelatedWeight(adjW[j])) continue;
       cross[i] += adjW[j];
       if (seen[c] !== i) {
         seen[c] = i;

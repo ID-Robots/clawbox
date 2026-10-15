@@ -247,8 +247,38 @@ describe("graphInsights", () => {
     expect(insights.bridges.some((i) => insights.hubs.includes(i))).toBe(false);
   });
 
+  it("never makes a bridge of a related hint, a guess at structure", () => {
+    // The same two cliques, joined through page 8 by related hints only (weight 0.25).
+    const ends: number[] = [];
+    for (const base of [0, 4]) for (let a = 0; a < 4; a++) for (let b = a + 1; b < 4; b++) ends.push(base + a, base + b);
+    ends.push(3, 8, 8, 4);
+    const n = 9;
+    const weights = new Float32Array(ends.length / 2).fill(1);
+    weights[weights.length - 2] = weights[weights.length - 1] = 0.25;
+    const degree = degreeOf(n, ends.slice(0, -4));
+    const insights = graphInsights(n, ends, weights, degree, louvain(n, ends, weights), 3);
+    expect(insights.bridges).not.toContain(8);
+    // And a page reached by hints only is still an orphan: no link in or out.
+    expect(insights.orphans).toEqual([8]);
+  });
+
   it("has nothing to say about an empty graph", () => {
     expect(graphInsights(0, [], [], [], [])).toEqual({ orphans: [], hubs: [], bridges: [] });
+  });
+
+  it("lays out and analyses 48 pages with no edges at all: finite, spread out, every page an orphan", () => {
+    const n = 48;
+    const groups = Uint16Array.from({ length: n }, (_, i) => Math.floor(i / 2));
+    const layout = createLayout({ n, ends: [], weights: [] }, seedPositions(n, groups, 3), 3);
+    while (!isSettled(layout)) tick(layout);
+    const out = writePositions(layout, new Float32Array(n * 3));
+    expect([...out].every(Number.isFinite)).toBe(true);
+    // Repulsion keeps them apart: no two share a spot.
+    const spots = new Set(Array.from({ length: n }, (_, i) => `${Math.round(out[i * 3])},${Math.round(out[i * 3 + 1])},${Math.round(out[i * 3 + 2])}`));
+    expect(spots.size).toBe(n);
+    const comm = louvain(n, [], []);
+    expect(new Set(comm).size).toBe(n);
+    expect(graphInsights(n, [], [], new Float32Array(n), comm).orphans).toHaveLength(n);
   });
 });
 
