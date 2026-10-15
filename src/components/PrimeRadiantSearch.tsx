@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
-import { BTN_PRIMARY, FIELD, INSET_SURFACE } from "./coding-agent-ui";
+import { BTN_QUIET, CARD_SURFACE, INSET_SURFACE, SECTION_LABEL } from "./coding-agent-ui";
 import { API, PrimeRadiantError, errorText, pageLabel, prJson } from "./prime-radiant-ui";
 
 /** One hit as the search route answers it (Memory Shard's engine over the vault). */
@@ -44,64 +44,72 @@ function snippetBody(hit: Pick<SearchHit, "title" | "snippet">): string {
   return text.trim();
 }
 
+/** A content search Pages asked for: the words, and a count so the same words can be asked again. */
+export interface SearchRequest {
+  q: string;
+  n: number;
+}
+
 /**
- * Search: the vault through Memory Shard's engine (`GET search`). Memory Shard
- * is the search engine; Prime Radiant is one of its sources, so with Memory
- * Shard switched off there is nothing to search and the tab says so. A server
- * that predates the route answers 404, which reads as "not on this box yet"
- * rather than as an error.
+ * Searching inside pages, under the Pages tab's one search field: the vault
+ * through Memory Shard's engine (`GET search`), run when the owner presses
+ * Enter or the search button (typing alone only filters the list by title).
+ * Memory Shard is the search engine; Prime Radiant is one of its sources, so
+ * with Memory Shard switched off there is nothing to search and this says so.
+ * A server that predates the route answers 404, which reads as "not on this
+ * box yet" rather than as an error.
  */
-export default function PrimeRadiantSearch({ onOpenPage }: { onOpenPage: (path: string) => void }) {
+export default function PrimeRadiantSearch({ request, onOpenPage, onClose, onBusy }: {
+  request: SearchRequest;
+  onOpenPage: (path: string) => void;
+  onClose: () => void;
+  onBusy?: (busy: boolean) => void;
+}) {
   const { t, locale } = useT();
-  const [query, setQuery] = useState("");
-  const [busy, setBusy] = useState(false);
   const [results, setResults] = useState<SearchHit[] | null>(null);
   const [notice, setNotice] = useState<Notice>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const run = async (e?: React.FormEvent) => {
-    e?.preventDefault();
-    const q = query.trim();
-    if (!q || busy) return;
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const answer = await prJson<SearchAnswer>(`${API}/search?${new URLSearchParams({ q, limit: "20" })}`);
-      const hits = Array.isArray(answer?.results) ? answer.results : [];
-      setResults(hits);
-      if (answer?.shardEnabled === false) setNotice("shardOff");
-      else if (answer?.indexing) setNotice("indexing");
-      else if (hits.length === 0) setNotice("noResults");
-    } catch (err) {
-      setResults(null);
-      if (err instanceof PrimeRadiantError && err.status === 404) setNotice("unavailable");
-      else setError(errorText(err, t));
-    } finally {
-      setBusy(false);
-    }
-  };
+  useEffect(() => {
+    const ctl = new AbortController();
+    onBusy?.(true);
+    prJson<SearchAnswer>(`${API}/search?${new URLSearchParams({ q: request.q, limit: "20" })}`, { signal: ctl.signal })
+      .then((answer) => {
+        if (ctl.signal.aborted) return;
+        const hits = Array.isArray(answer?.results) ? answer.results : [];
+        setResults(hits);
+        setError(null);
+        setNotice(answer?.shardEnabled === false ? "shardOff" : answer?.indexing ? "indexing" : hits.length === 0 ? "noResults" : null);
+      })
+      .catch((err) => {
+        if ((err as Error)?.name === "AbortError" || ctl.signal.aborted) return;
+        setResults(null);
+        if (err instanceof PrimeRadiantError && err.status === 404) {
+          setNotice("unavailable");
+          setError(null);
+        } else {
+          setNotice(null);
+          setError(errorText(err, t));
+        }
+      })
+      .finally(() => {
+        if (!ctl.signal.aborted) onBusy?.(false);
+      });
+    return () => ctl.abort();
+    // `onBusy` is the parent's setter; a new request is what runs a search.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [request, t]);
 
   const percent = (n: number) => new Intl.NumberFormat(locale, { style: "percent" }).format(Math.max(0, Math.min(1, n)));
 
   return (
-    <div className="space-y-3" data-testid="prime-radiant-search">
-      <form className="flex gap-2" onSubmit={run}>
-        <label className="sr-only" htmlFor="pr-search-q">{t("primeRadiant.search.placeholder")}</label>
-        <input
-          id="pr-search-q"
-          className={`${FIELD} text-sm flex-1`}
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder={t("primeRadiant.search.placeholder")}
-          maxLength={1000}
-          data-testid="prime-radiant-search-q"
-        />
-        <button type="submit" className={BTN_PRIMARY} disabled={busy || !query.trim()} data-testid="prime-radiant-search-go">
-          <span className="material-symbols-rounded" style={{ fontSize: 15 }} aria-hidden="true">search</span>
-          {busy ? t("primeRadiant.search.searching") : t("primeRadiant.search.go")}
+    <section className={`${CARD_SURFACE} p-3 space-y-2`} data-testid="prime-radiant-search">
+      <div className="flex items-center justify-between gap-2">
+        <h3 className={SECTION_LABEL}>{t("primeRadiant.search.insideTitle")}</h3>
+        <button type="button" className={`${BTN_QUIET} !px-1.5 !py-0.5`} onClick={onClose} aria-label={t("primeRadiant.search.close")} title={t("primeRadiant.search.close")} data-testid="prime-radiant-search-close">
+          <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">close</span>
         </button>
-      </form>
+      </div>
       <p className="text-[11px] text-[var(--text-muted)]">{t("primeRadiant.search.hint")}</p>
 
       {error && <p role="alert" className="text-xs text-red-300">{error}</p>}
@@ -140,6 +148,6 @@ export default function PrimeRadiantSearch({ onOpenPage }: { onOpenPage: (path: 
           ))}
         </ul>
       )}
-    </div>
+    </section>
   );
 }

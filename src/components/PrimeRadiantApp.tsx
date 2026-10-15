@@ -2,7 +2,7 @@
 
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
-import { APP_GROUND, BTN_PRIMARY, BTN_SECONDARY } from "./coding-agent-ui";
+import { APP_GROUND, BTN_PRIMARY, BTN_SECONDARY, SECTION_LABEL } from "./coding-agent-ui";
 import {
   API,
   PRODUCT_NAME,
@@ -16,13 +16,12 @@ import {
   type Tab,
 } from "./prime-radiant-ui";
 import PrimeRadiantBrowse from "./PrimeRadiantBrowse";
-import PrimeRadiantSearch from "./PrimeRadiantSearch";
 import PrimeRadiantReview from "./PrimeRadiantReview";
 import PrimeRadiantHistory from "./PrimeRadiantHistory";
 import PrimeRadiantLint from "./PrimeRadiantLint";
 import PrimeRadiantIngest from "./PrimeRadiantIngest";
 import PrimeRadiantSettings from "./PrimeRadiantSettings";
-import PrimeRadiantCosts from "./PrimeRadiantCosts";
+import PrimeRadiantUsage from "./PrimeRadiantUsage";
 import PrimeRadiantIcon from "./PrimeRadiantIcon";
 
 /** The Map (WebGL, a layout worker) is fetched only when its tab is first drawn. */
@@ -42,8 +41,10 @@ const PrimeRadiantMap = lazy(() => import("./PrimeRadiantMap"));
  * shown with a retry button rather than retried on its own — it writes the
  * agent's configuration, and doing that in a loop is the wrong failure mode.
  *
- * A vault with pages opens on the Map; an empty one on Browse, whose empty
- * state leads to Add documents.
+ * Five tabs: Map (the start page of a vault with pages; an empty vault opens
+ * on Pages, whose empty state leads to Add), Pages (the list and its search,
+ * each page with its history), Review (open questions, then failed checks),
+ * Add, and Settings (with the token usage). The app shows no money anywhere.
  */
 
 /** A status the window can draw: a vault that exists carries its counts and its wiring. */
@@ -63,7 +64,7 @@ export default function PrimeRadiantApp() {
   const startPicked = useRef(false);
   /** A page opened from the Map goes back to the Map. */
   const backToMap = useRef(false);
-  /** The page the History tab opens on, handed over from Browse. */
+  /** The page whose history Pages shows, opened from that page's own view (null: no history open). */
   const [historyPage, setHistoryPage] = useState<string | null>(null);
   /** The page Browse shows; Search, Review, Lint and History open one here too. */
   const [browsePage, setBrowsePage] = useState<string | null>(null);
@@ -173,15 +174,18 @@ export default function PrimeRadiantApp() {
 
   const showTab = useCallback((id: Tab) => {
     backToMap.current = false;
+    setHistoryPage(null);
     setTab(id);
   }, []);
   const openPage = useCallback((path: string) => {
     backToMap.current = false;
+    setHistoryPage(null);
     setBrowsePage(path);
     setTab("browse");
   }, []);
   const openFromMap = useCallback((path: string) => {
     backToMap.current = true;
+    setHistoryPage(null);
     setBrowsePage(path);
     setTab("browse");
   }, []);
@@ -193,10 +197,10 @@ export default function PrimeRadiantApp() {
       setTab("map");
     }
   }, []);
+  /** A page's history opens in Pages, over the page; Back returns to the page. */
   const openHistory = useCallback((path: string) => {
-    backToMap.current = false;
     setHistoryPage(path);
-    setTab("history");
+    setTab("browse");
   }, []);
   const toIngest = useCallback(() => showTab("ingest"), [showTab]);
 
@@ -306,7 +310,16 @@ export default function PrimeRadiantApp() {
                 </Suspense>
               </div>
             )}
-            {tab === "browse" && (
+            {tab === "browse" && historyPage !== null && (
+              <div className="space-y-3">
+                <button type="button" className={BTN_SECONDARY} onClick={() => setHistoryPage(null)} data-testid="prime-radiant-history-back">
+                  <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">arrow_back</span>
+                  {t("primeRadiant.back")}
+                </button>
+                <PrimeRadiantHistory key={historyPage} initialPage={historyPage} revision={revision} onChanged={changed} onOpenPage={openPage} />
+              </div>
+            )}
+            {tab === "browse" && historyPage === null && (
               <PrimeRadiantBrowse
                 domains={status.vault.domains}
                 revision={revision}
@@ -316,13 +329,22 @@ export default function PrimeRadiantApp() {
                 onIngest={toIngest}
               />
             )}
-            {tab === "search" && <PrimeRadiantSearch onOpenPage={openPage} />}
-            {tab === "review" && <PrimeRadiantReview revision={revision} onChanged={changed} onOpenPage={openPage} onOpenSettings={() => showTab("settings")} />}
-            {tab === "history" && <PrimeRadiantHistory initialPage={historyPage} revision={revision} onChanged={changed} onOpenPage={openPage} />}
-            {tab === "lint" && <PrimeRadiantLint revision={revision} onOpenPage={openPage} />}
+            {tab === "review" && (
+              <div className="space-y-6">
+                <PrimeRadiantReview revision={revision} onChanged={changed} onOpenPage={openPage} onOpenSettings={() => showTab("settings")} />
+                <section className="space-y-2" data-testid="prime-radiant-review-checks">
+                  <h3 className={SECTION_LABEL}>{t("primeRadiant.tab.lint")}</h3>
+                  <PrimeRadiantLint revision={revision} onOpenPage={openPage} />
+                </section>
+              </div>
+            )}
             {tab === "ingest" && <PrimeRadiantIngest onChanged={changed} />}
-            {tab === "settings" && <PrimeRadiantSettings onChanged={changed} />}
-            {tab === "costs" && <PrimeRadiantCosts revision={revision} />}
+            {tab === "settings" && (
+              <div className="space-y-4">
+                <PrimeRadiantSettings onChanged={changed} />
+                <PrimeRadiantUsage revision={revision} />
+              </div>
+            )}
           </>
         )}
       </main>

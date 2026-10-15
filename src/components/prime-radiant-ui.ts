@@ -167,10 +167,12 @@ export function formatWhen(iso: string | number | null | undefined, locale: stri
   return d.toLocaleString(locale, { dateStyle: "medium", timeStyle: "short" });
 }
 
-/** "$0.0123" — estimates are small, so four decimals below a cent. */
-export function formatUsd(usd: number, locale: string): string {
-  const digits = usd !== 0 && Math.abs(usd) < 0.01 ? 4 : 2;
-  return new Intl.NumberFormat(locale, { style: "currency", currency: "USD", minimumFractionDigits: digits, maximumFractionDigits: digits }).format(usd);
+/**
+ * "12.4K" — a token count, compact, in the owner's locale. Usage is shown in
+ * tokens only: the app never puts a price on screen.
+ */
+export function formatTokens(n: number, locale: string): string {
+  return new Intl.NumberFormat(locale, { notation: "compact", maximumFractionDigits: 1 }).format(Math.max(0, n));
 }
 
 export function formatCount(n: number, locale: string): string {
@@ -188,18 +190,19 @@ export function pageUrl(base: string, path: string): string {
   return `${base}/${path.split("/").map(encodeURIComponent).join("/")}`;
 }
 
-/** Tabs the app has, in order. The Map is the start page of a vault with pages. */
-export const TABS = ["map", "browse", "search", "review", "history", "lint", "ingest", "settings", "costs"] as const;
+/**
+ * Tabs the app has, in order: Map (the start page of a vault with pages),
+ * Pages (`browse`: the list, its search and each page with its history),
+ * Review (open questions and failed checks), Add (`ingest`) and Settings
+ * (with the token usage). The ids are stable; only the words changed.
+ */
+export const TABS = ["map", "browse", "review", "ingest", "settings"] as const;
 export type Tab = (typeof TABS)[number];
 
 export const TAB_ICONS: Record<Tab, string> = {
   map: "hub",
-  browse: "menu_book",
-  search: "search",
-  review: "rate_review",
-  history: "history",
-  lint: "rule",
-  ingest: "upload_file",
+  browse: "description",
+  review: "inbox",
+  ingest: "add_circle",
   settings: "tune",
-  costs: "paid",
 };

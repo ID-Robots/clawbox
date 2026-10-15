@@ -203,7 +203,12 @@ function installFetch() {
         totals: { calls: 3, tokensIn: 1200, tokensOut: 300, usdEstimate: 0.0042 },
         byOperation: [{ operation: "ingest", calls: 3, tokensIn: 1200, tokensOut: 300, usdEstimate: 0.0042 }],
         byModel: [{ model: "deepseek-v4-flash", calls: 3, tokensIn: 1200, tokensOut: 300, usdEstimate: 0.0042 }],
-        byRun: [{ runId: "job-1", kind: "ingest", firstAt: "2026-01-02T10:00:00.000Z", lastAt: "2026-01-02T10:01:00.000Z", calls: 3, tokensIn: 1200, tokensOut: 300, usdEstimate: 0.0042 }],
+        byRun: [
+          { runId: "job-1", kind: "ingest", firstAt: "2026-01-02T10:00:00.000Z", lastAt: "2026-01-02T10:01:00.000Z", calls: 3, tokensIn: 1200, tokensOut: 300, usdEstimate: 0.0042 },
+          { runId: "job-dead", kind: "ingest", firstAt: "2026-01-05T10:00:00.000Z", lastAt: "2026-01-05T10:01:00.000Z", calls: 2, tokensIn: 4000, tokensOut: 600, usdEstimate: 0.01 },
+          { runId: "run-0123456789ab", kind: "nightly", firstAt: "2026-01-05T03:00:00.000Z", lastAt: "2026-01-05T03:05:00.000Z", calls: 1, tokensIn: 1000, tokensOut: 0, usdEstimate: 0.3 },
+          { runId: "job-night", kind: "ingest", firstAt: "2026-01-05T03:01:00.000Z", lastAt: "2026-01-05T03:02:00.000Z", calls: 1, tokensIn: 400, tokensOut: 100, usdEstimate: 0.12 },
+        ],
         notMeasured: [{ operation: "embedding", reason: "no_usage_reported" }],
       });
     }
@@ -338,6 +343,23 @@ describe("PrimeRadiantApp", () => {
     expect(calls.some((c) => c.url === "/setup-api/prime-radiant/graph")).toBe(true);
   });
 
+  it("has five tabs: Map, Pages, Review, Add and Settings", async () => {
+    await mount();
+    await screen.findByTestId("prime-radiant-tab-map");
+    const labels = screen.getAllByRole("tab").map((tab) => tab.textContent ?? "");
+    expect(labels).toHaveLength(5);
+    ["Map", "Pages", "Review", "Add", "Settings"].forEach((label, i) => expect(labels[i].endsWith(label)).toBe(true));
+  });
+
+  it("lists the failed checks under Review, after the questions", async () => {
+    await mount();
+    await openTab("review");
+    const checks = await screen.findByTestId("prime-radiant-review-checks");
+    expect(within(checks).getByText("Checks")).toBeInTheDocument();
+    expect(await within(checks).findByTestId("prime-radiant-lint")).toBeInTheDocument();
+    expect(screen.getByTestId("prime-radiant-review")).toBeInTheDocument();
+  });
+
   it("opens on Browse, with its call to add documents, when the vault is empty", async () => {
     status = { ...STATUS, vault: { ...STATUS.vault, pages: 0, claims: 0, verifiedPages: 0, domains: [] } };
     listed = [];
@@ -453,11 +475,11 @@ describe("PrimeRadiantApp", () => {
     });
   });
 
-  it("searches through the vault route and opens a hit", async () => {
+  it("searches inside pages from the Pages field and opens a hit", async () => {
     await mount();
-    await openTab("search");
-    fireEvent.change(screen.getByTestId("prime-radiant-search-q"), { target: { value: "headquarters" } });
-    fireEvent.click(screen.getByTestId("prime-radiant-search-go"));
+    await openTab("browse");
+    fireEvent.change(await screen.findByTestId("prime-radiant-browse-q"), { target: { value: "headquarters" } });
+    fireEvent.keyDown(screen.getByTestId("prime-radiant-browse-q"), { key: "Enter" });
     const hit = await screen.findByTestId("prime-radiant-search-hit");
     expect(calls.find((c) => c.url.includes("/search?"))?.url).toContain("limit=20");
     // The title is the row's; the snippet drops the lead the index gave it.
@@ -469,11 +491,24 @@ describe("PrimeRadiantApp", () => {
     expect(await screen.findByTestId("prime-radiant-page")).toBeInTheDocument();
   });
 
+  it("filters the list as the owner types, and searches inside pages only when asked", async () => {
+    await mount();
+    await openTab("browse");
+    fireEvent.change(await screen.findByTestId("prime-radiant-browse-q"), { target: { value: "acme" } });
+    await waitFor(() => expect(calls.some((c) => c.url.includes("/pages?") && c.url.includes("q=acme"))).toBe(true));
+    expect(calls.some((c) => c.url.includes("/search?"))).toBe(false);
+    fireEvent.click(screen.getByTestId("prime-radiant-search-go"));
+    expect(await screen.findByTestId("prime-radiant-search-hit")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("prime-radiant-search-close"));
+    expect(screen.queryByTestId("prime-radiant-search")).toBeNull();
+    expect(screen.getByTestId("prime-radiant-search-go")).not.toBeDisabled();
+  });
+
   it("says when Memory Shard is off and when the index is still being built", async () => {
     await mount();
-    await openTab("search");
+    await openTab("browse");
     searchAnswer = { initialised: true, shardEnabled: false, indexing: false, results: [] };
-    fireEvent.change(screen.getByTestId("prime-radiant-search-q"), { target: { value: "widgets" } });
+    fireEvent.change(await screen.findByTestId("prime-radiant-browse-q"), { target: { value: "widgets" } });
     fireEvent.click(screen.getByTestId("prime-radiant-search-go"));
     await waitFor(() => expect(screen.getByTestId("prime-radiant-search-notice")).toHaveAttribute("data-notice", "shardOff"));
 
@@ -481,6 +516,7 @@ describe("PrimeRadiantApp", () => {
       initialised: true, shardEnabled: true, indexing: true,
       index: { exists: false, pages: 0, chunks: 0, identity: "missing", needsFullScan: true, builtAt: null }, results: [],
     };
+    await waitFor(() => expect(screen.getByTestId("prime-radiant-search-go")).not.toBeDisabled());
     fireEvent.click(screen.getByTestId("prime-radiant-search-go"));
     await waitFor(() => expect(screen.getByTestId("prime-radiant-search-notice")).toHaveAttribute("data-notice", "indexing"));
     expect(screen.queryByTestId("prime-radiant-search-hit")).toBeNull();
@@ -489,8 +525,8 @@ describe("PrimeRadiantApp", () => {
   it("says search is not on this box yet when the route is missing", async () => {
     searchStatus = 404;
     await mount();
-    await openTab("search");
-    fireEvent.change(screen.getByTestId("prime-radiant-search-q"), { target: { value: "widgets" } });
+    await openTab("browse");
+    fireEvent.change(await screen.findByTestId("prime-radiant-browse-q"), { target: { value: "widgets" } });
     fireEvent.click(screen.getByTestId("prime-radiant-search-go"));
     const notice = await screen.findByTestId("prime-radiant-search-notice");
     expect(notice).toHaveAttribute("data-notice", "unavailable");
@@ -510,6 +546,10 @@ describe("PrimeRadiantApp", () => {
     await waitFor(() => {
       expect(calls.find((c) => c.url.endsWith("/revert"))?.body).toEqual({ commit: "a".repeat(40), path: "entities/acme-widgets.md" });
     });
+    // History is part of Pages now, not a tab of its own; Back returns to the page.
+    expect(screen.getByTestId("prime-radiant-tab-browse")).toHaveAttribute("aria-selected", "true");
+    fireEvent.click(screen.getByTestId("prime-radiant-history-back"));
+    expect(await screen.findByTestId("prime-radiant-page")).toBeInTheDocument();
   });
 
   it("sends one undo however fast Confirm is pressed twice", async () => {
@@ -530,12 +570,15 @@ describe("PrimeRadiantApp", () => {
     expect(calls.filter((c) => c.url.endsWith("/revert"))).toHaveLength(1);
   });
 
-  it("lists costs as estimates and names embeddings as not measured", async () => {
+  it("shows model usage in Settings as tokens, never money, and names embeddings as not measured", async () => {
     await mount();
-    await openTab("costs");
-    expect(await screen.findByTestId("prime-radiant-cost-not-measured")).toHaveTextContent(/not measured/i);
-    expect(screen.getByTestId("prime-radiant-cost-runs")).toHaveTextContent("1,200");
-    expect(screen.getByRole("table", { name: "By run" })).toBe(screen.getByTestId("prime-radiant-cost-runs"));
+    await openTab("settings");
+    const total = await screen.findByTestId("prime-radiant-usage-total");
+    expect(total).toHaveTextContent("Tokens: 1.5K (sent 1.2K, received 300) · Model calls: 3");
+    expect(screen.getByTestId("prime-radiant-usage-not-measured")).toHaveTextContent(/not measured/i);
+    expect(screen.getByTestId("prime-radiant-usage-by-task")).toHaveTextContent("ingest 1.5K");
+    expect(screen.getByRole("table", { name: "Per import and night" })).toHaveTextContent("1.2K");
+    expect(screen.getByTestId("prime-radiant-app").textContent).not.toMatch(/\$|USD|US dollars|cost/i);
   });
 
   it("merges a held night from the nightly card", async () => {
@@ -551,21 +594,35 @@ describe("PrimeRadiantApp", () => {
     });
   });
 
-  it("saves the Opus cap and refuses one outside the limits before sending it", async () => {
+  it("switches the second opinion on without a price on screen, keeping the cap the box has", async () => {
     await mount();
     await openTab("settings");
     fireEvent.click(await screen.findByTestId("prime-radiant-opus-enabled"));
-    fireEvent.change(screen.getByTestId("prime-radiant-opus-cap"), { target: { value: "5000" } });
-    fireEvent.click(screen.getByTestId("prime-radiant-settings-save"));
-    expect(await screen.findByRole("alert")).toHaveTextContent("1000");
-    expect(calls.some((c) => c.url.endsWith("/settings") && c.method === "PUT")).toBe(false);
-
-    fireEvent.change(screen.getByTestId("prime-radiant-opus-cap"), { target: { value: "3.5" } });
+    expect(screen.queryByTestId("prime-radiant-opus-cap")).toBeNull();
+    expect(screen.getByTestId("prime-radiant-settings").textContent).not.toMatch(/\$|USD|spending/i);
     fireEvent.click(screen.getByTestId("prime-radiant-settings-save"));
     await waitFor(() => {
       const put = calls.find((c) => c.url.endsWith("/settings") && c.method === "PUT");
-      expect((put?.body as { opus: unknown }).opus).toEqual({ enabled: true, capUsd: 3.5 });
+      expect((put?.body as { opus: unknown }).opus).toEqual({ enabled: true, capUsd: 2 });
     });
+  });
+
+  it("shows the tokens an import and a night used, and no money", async () => {
+    ingestJobs = [DEAD_JOB];
+    nightlyRuns = [{
+      id: "run-0123456789ab", kind: "nightly", branch: null, status: "done", trigger: "schedule",
+      startedAt: "2026-01-05T03:00:00.000Z", finishedAt: "2026-01-05T03:10:00.000Z", usdEstimate: 0.42,
+      summary: { ingest: { jobId: "job-night" } },
+    }];
+    await mount();
+    await openTab("ingest");
+    const job = await screen.findByTestId("prime-radiant-ingest-job");
+    await waitFor(() => expect(job).toHaveTextContent("2 pages from 2 of 3 files · 4.6K tokens"));
+    expect(screen.getByTestId("prime-radiant-app").textContent).not.toMatch(/\$|USD/);
+    await openTab("settings");
+    // The night's own calls and those of the import it ran.
+    expect(await screen.findByTestId("prime-radiant-nightly-tokens")).toHaveTextContent("1.5K tokens");
+    expect(screen.getByTestId("prime-radiant-nightly").textContent).not.toMatch(/\$|0\.42/);
   });
 
   it("refuses a dropped file it cannot read before uploading anything", async () => {

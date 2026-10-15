@@ -71,6 +71,8 @@
     { "key": "primeRadiant.lint.error", "locales": ["es"], "reason": "\"Error\" is the Spanish word." },
     { "key": "primeRadiant.search.page", "locales": ["fr"], "reason": "\"Page\" is the French word." },
     { "key": "primeRadiant.history.page", "locales": ["fr"], "reason": "\"Page\" is the French word." },
+    { "key": "primeRadiant.tab.browse", "locales": ["fr"], "reason": "\"Pages\" is the French word." },
+    { "key": "primeRadiant.tokens", "locales": ["es", "nl"], "reason": "\"tokens\" is the everyday Spanish and Dutch term for model tokens." },
     { "key": "settings.anthropicAccounts.apiKeyPlaceholder", "locales": "*", "reason": "The shape of an Anthropic API key." },
     { "key": "settings.botTokenPlaceholder", "locales": "*", "reason": "The shape of a Telegram bot token." },
     { "key": "settings.discord", "locales": "*", "reason": "Discord is a brand name." },

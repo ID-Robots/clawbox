@@ -4,12 +4,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { BTN_DANGER, BTN_PRIMARY, BTN_SECONDARY, CARD_SURFACE, INSET_SURFACE, SECTION_LABEL } from "./coding-agent-ui";
 import PrimeRadiantFolderPicker from "./PrimeRadiantFolderPicker";
+import { useTokensByRun } from "./PrimeRadiantUsage";
 import {
   API,
   PrimeRadiantError,
   errorText,
   formatCount,
-  formatUsd,
+  formatTokens,
   formatWhen,
   jsonInit,
   prJson,
@@ -305,6 +306,13 @@ export default function PrimeRadiantIngest({ onChanged }: { onChanged: () => voi
     void start({ folders }, "folders");
   };
 
+  // Tokens per job: read again as the list changes, and every 5 s while a job runs.
+  const tokensByRun = useTokensByRun(jobs, running ? 5000 : 0);
+  const tokens = (id: string) => {
+    const n = tokensByRun?.get(id) ?? 0;
+    return n > 0 ? t("primeRadiant.tokens", { n: formatTokens(n, locale) }) : null;
+  };
+
   const percent = running && running.total > 0
     ? Math.min(100, Math.round(((running.done + running.failed + running.skipped + running.duplicates) / running.total) * 100))
     : null;
@@ -338,6 +346,7 @@ export default function PrimeRadiantIngest({ onChanged }: { onChanged: () => voi
             {t(`primeRadiant.ingest.phase.${running.phase}`)} · {t("primeRadiant.ingest.tally", {
               done: running.done, total: running.total, failed: running.failed, skipped: running.skipped + running.duplicates, pages: running.pages,
             })}
+            {tokens(running.id) && <span data-testid="prime-radiant-ingest-tokens"> · {tokens(running.id)}</span>}
           </p>
           <SkipLine skips={running.skips} testId="prime-radiant-ingest-skips" />
           {lines.length > 0 && (
@@ -444,7 +453,8 @@ export default function PrimeRadiantIngest({ onChanged }: { onChanged: () => voi
                 <span className="text-[var(--text-primary)]">{t(`primeRadiant.ingest.status.${job.status}`)}</span>
                 <span className="text-[var(--text-muted)]">{formatWhen(job.createdAt, locale)}</span>
                 <span className="text-[var(--text-muted)]">
-                  {t("primeRadiant.ingest.jobSummary", { pages: job.pages, done: job.done, total: job.total, usd: formatUsd(job.usdEstimate, locale) })}
+                  {t("primeRadiant.ingest.jobSummary", { pages: job.pages, done: job.done, total: job.total })}
+                  {tokens(job.id) && ` · ${tokens(job.id)}`}
                 </span>
                 {job.deadLetter > 0 && (
                   <button type="button" className={`${BTN_SECONDARY} ml-auto`} onClick={() => void showDeadLetter(job.id)} aria-expanded={openJob === job.id} data-testid="prime-radiant-dead-letter-toggle">

@@ -109,7 +109,9 @@ async function mount(onOpenPage = vi.fn(), onIngest = vi.fn()) {
       <PrimeRadiantMap revision={0} onOpenPage={onOpenPage} onIngest={onIngest} />
     </I18nProvider>,
   );
-  await waitFor(() => expect(screen.getByTestId("prime-radiant-map-status")).toHaveTextContent("Pages: 6"));
+  // The first mount in a file pays for I18nProvider's catalogue import, which a
+  // loaded runner can take longer than the default 5 s to finish.
+  await waitFor(() => expect(screen.getByTestId("prime-radiant-map-status")).toHaveTextContent("Pages: 6"), { timeout: 15_000 });
   return { ...view, onOpenPage, onIngest };
 }
 

@@ -16,6 +16,7 @@ import {
   type PageDetail,
   type PageListEntry,
 } from "./prime-radiant-ui";
+import PrimeRadiantSearch, { type SearchRequest } from "./PrimeRadiantSearch";
 
 interface Props {
   domains: string[];
@@ -37,9 +38,12 @@ interface Filters {
 const EMPTY: Filters = { type: "", domain: "", verified: "", q: "" };
 
 /**
- * Browse: the vault's pages by domain and type, and one page in full — its
- * claims with their confidence and verification, where it came from (the
- * page's sources and each claim's evidence), and what links to it.
+ * Pages (the `browse` tab): the vault's pages by domain and type, and one page
+ * in full — its claims with their confidence and verification, where it came
+ * from (the page's sources and each claim's evidence), and what links to it.
+ * Its one search field filters the list by title or path as the owner types,
+ * and Enter (or the button beside it) searches inside the pages through
+ * Memory Shard, the hits shown above the list.
  */
 export default function PrimeRadiantBrowse({ domains, revision, selected, onSelect, onHistory, onIngest }: Props) {
   const { t, locale } = useT();
@@ -49,6 +53,9 @@ export default function PrimeRadiantBrowse({ domains, revision, selected, onSele
   const [error, setError] = useState<string | null>(null);
   /** A refused page read, filed under the path it was for. */
   const [pageError, setPageError] = useState<{ path: string; message: string } | null>(null);
+  /** The search inside pages last asked for, and whether it is still out. */
+  const [searched, setSearched] = useState<SearchRequest | null>(null);
+  const [searching, setSearching] = useState(false);
 
   const loadList = useCallback(async (signal: AbortSignal) => {
     const q = new URLSearchParams();
@@ -95,6 +102,11 @@ export default function PrimeRadiantBrowse({ domains, revision, selected, onSele
   }, [selected, revision, t]);
 
   const set = (patch: Partial<Filters>) => setFilters((f) => ({ ...f, ...patch }));
+  const searchInside = () => {
+    const q = filters.q.trim();
+    if (!q) return;
+    setSearched((s) => ({ q, n: (s?.n ?? 0) + 1 }));
+  };
 
   if (selected) {
     return (
@@ -113,15 +125,26 @@ export default function PrimeRadiantBrowse({ domains, revision, selected, onSele
   return (
     <div className="space-y-3" data-testid="prime-radiant-browse">
       <div className="flex flex-wrap gap-2 items-center">
-        <label className="sr-only" htmlFor="pr-browse-q">{t("primeRadiant.browse.filterText")}</label>
+        <label className="sr-only" htmlFor="pr-browse-q">{t("primeRadiant.browse.searchPlaceholder")}</label>
         <input
           id="pr-browse-q"
-          className={`${FIELD} text-xs flex-1 min-w-[10rem]`}
-          placeholder={t("primeRadiant.browse.filterText")}
+          type="search"
+          className={`${FIELD} text-xs flex-1 min-w-[12rem]`}
+          placeholder={t("primeRadiant.browse.searchPlaceholder")}
           value={filters.q}
+          maxLength={1000}
           onChange={(e) => set({ q: e.target.value })}
+          onKeyDown={(e) => {
+            if (e.key !== "Enter") return;
+            e.preventDefault();
+            searchInside();
+          }}
           data-testid="prime-radiant-browse-q"
         />
+        <button type="button" className={BTN_SECONDARY} onClick={searchInside} disabled={!filters.q.trim() || searching} data-testid="prime-radiant-search-go">
+          <span className="material-symbols-rounded" style={{ fontSize: 15 }} aria-hidden="true">manage_search</span>
+          {searching ? t("primeRadiant.search.searching") : t("primeRadiant.search.inside")}
+        </button>
         <select
           className={`${FIELD} text-xs`}
           value={filters.domain}
@@ -156,6 +179,18 @@ export default function PrimeRadiantBrowse({ domains, revision, selected, onSele
       </div>
 
       {error && <p role="alert" className="text-xs text-red-300">{error}</p>}
+
+      {searched && (
+        <PrimeRadiantSearch
+          request={searched}
+          onOpenPage={onSelect}
+          onBusy={setSearching}
+          onClose={() => {
+            setSearched(null);
+            setSearching(false);
+          }}
+        />
+      )}
 
       {list && list.total === 0 && !filters.q && !filters.domain && !filters.type && !filters.verified ? (
         <div className={`${CARD_SURFACE} p-6 text-center space-y-3`} data-testid="prime-radiant-empty">

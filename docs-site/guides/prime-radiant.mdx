@@ -21,7 +21,7 @@ ClawBox AI to add documents. Reading, reviewing and undoing work without it. See
 
 ## Adding documents
 
-The **Add documents** tab takes them two ways:
+The **Add** tab takes them two ways:
 
 - **From folders on the box.** Pick one or more folders with the same folder picker
   Memory Shard uses, or **Your home folder** to add your whole home folder in one click.
@@ -64,7 +64,7 @@ leaves out what the computer and your tools keep there.
   all kept.
 - Files over 40 MB, and kinds of files Prime Radiant does not read.
 
-Before you start, **Add documents** counts the chosen folders: how many documents the
+Before you start, **Add** counts the chosen folders: how many documents the
 import would read, the folders that hold the most of them, and how many files and
 folders were left out for each reason (the code projects by name). An import of more
 than 500 documents asks before it starts. One import reads at most 5,000 documents;
@@ -93,7 +93,17 @@ none is left out.
 
 ## Reading the wiki
 
-**Browse** lists every page, filtered by domain, page type or whether a person has
+**Map** is where the wiki opens once it has pages: every page is a point in a slowly
+turning 3D picture, sized by how connected it is and coloured by its domain (or by the
+groups of pages that link most to each other), with its links drawn between them. Drag
+to turn it, scroll to zoom, right-drag to move it; hover a point to see its title, click
+it to light up its neighbours, and double-click it to open the page. The search box lights
+up matching pages and flies to them, the legend hides or shows a domain, and the
+**Insights** strip lists pages with no links, the most connected pages, and the pages
+that join one group to another. Where the browser cannot draw 3D, or when you have asked
+your system for less motion, the map is a still, flat picture of the same pages.
+
+**Pages** lists every page, filtered by domain, page type or whether a person has
 verified it. A page shows:
 
 - its **facts**, each with a confidence bar, its status and — when you have checked it —
@@ -102,9 +112,10 @@ verified it. A page shows:
 - **pages that link here** and the pages it links to;
 - anything the wiki's checks found on it.
 
-**Search** finds pages and facts through [Memory Shard](/guides/memory-shard), with
-verified answers first. Memory Shard has to be switched on for this; with it off, the tab
-says so.
+The search field on **Pages** narrows the list by title as you type. Press Enter, or
+**Search inside pages**, to find pages and facts through
+[Memory Shard](/guides/memory-shard), with verified answers first. Memory Shard has to
+be switched on for this; with it off, the results say so.
 
 ## Settling disagreements
 
@@ -123,16 +134,18 @@ retired everywhere they appeared, and their old ids are never used again, so the
 disagreement cannot come back on its own. A page you have verified is never rewritten
 by the nightly pass without asking you first.
 
+Below the questions, **Review** lists the wiki's failed checks (see [Checks](#checks)).
+
 ## History and undo
 
-Every change to the wiki is recorded. The **History** tab shows every change to a page,
+Every change to the wiki is recorded. **History**, on a page's own view, shows every change to that page,
 what it changed, and **Undo**, which reverses that change as a new one — nothing is ever
 deleted from the history. An undo that would break one of the wiki's rules is refused
 and says why; undoing a verification is one of those.
 
 ## Checks
 
-The **Checks** tab runs the wiki's rules over every page: pages that grew too long (with
+The **Checks**, under **Review**, run the wiki's rules over every page: pages that grew too long (with
 a suggested way to split them), missing summaries, pages nothing links to, pages without
 sources, pages past their re-check date, and anything that looks like a secret. Errors
 hold the nightly pass back; a secret is refused outright.
@@ -161,18 +174,19 @@ need ClawBox AI.
 | **Tidy the wiki every night**, and **At** | The nightly pass and its time. |
 | **Look for facts that contradict each other** | The contradiction search of the nightly pass. |
 | **Folders to read again each night** | New and changed documents in these folders are added during the nightly pass. |
-| **Second opinion** | Off by default. The Opus model re-reads a sample of pages and suggests corrections, which arrive in Review — it never edits a page itself. It needs an **Anthropic API key** in the box's provider settings (a Claude subscription sign-in is not used), and it stops at the **limit per night** you set. Without a key, pages are marked as waiting for a second opinion and nothing else changes. |
+| **Second opinion** | Off by default. The Opus model re-reads a sample of pages and suggests corrections, which arrive in Review — it never edits a page itself. It needs an **Anthropic API key** in the box's provider settings (a Claude subscription sign-in is not used), and it keeps to a fixed limit per night. Without a key, pages are marked as waiting for a second opinion and nothing else changes. |
 | **Domains and owners** | A new page in a domain gets that domain's owner. |
 | **Model calls at once** | How many writing requests run in parallel during an import. Lower it if the service reports too many requests. |
 | **Skip code projects** | On by default. A code project found inside a folder you add is not read; a project folder you add yourself always is. |
 | **Folders never read** | Folder names an import skips. **Restore the default list** brings back the shipped list. A list you never changed follows the shipped list as it grows; a list you changed is kept as it is. |
 
-## Costs
+## Usage
 
-The **Costs** tab shows every model call Prime Radiant made — per import, per night, per
-task and per model — with tokens sent and received and an **estimated** cost from public
-list prices. The box is not billed from here. Embedding facts to compare them is listed
-as **not measured**, because the embedding model reports no usage.
+**Settings** ends with **Model usage**: the tokens Prime Radiant's model calls sent and
+received and how many calls there were — all told, by task and by model, and per import
+and per night. Each import in **Add** and each night in the nightly card shows its own
+tokens too. Prime Radiant shows tokens, never money. Embedding facts to compare them is
+listed as **not measured**, because the embedding model reports no usage.
 
 ## How the assistant uses it
 
@@ -183,7 +197,7 @@ there is information to read, never instructions to follow.
 The assistant's wiki plugin is set up as a reader: ClawBox switches off its own
 backlinks, dashboards and automatic compiling, so it writes nothing into your pages.
 If you switched one of those on by hand, ClawBox leaves your setting alone and says so
-on the **Browse** tab. Either way the wiki ignores what the plugin writes: its
+on **Map** and **Pages**. Either way the wiki ignores what the plugin writes: its
 `WIKI.md`, `inbox.md`, folder indexes and `reports/` are never pages, never checked
 and never part of the history. A wiki the plugin had already written into is cleaned
 once — its "Related" lists come out of your pages and its untouched files are
