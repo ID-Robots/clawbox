@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# timeout: 720
+# timeout: 960
 #
 # The coding agent's TIME BUDGET on the real box, through the same routes
 # 40-coding-agent-run uses (src/app/setup-api/coding-agent/):
@@ -13,7 +13,7 @@
 #      completes early with the stop reason "done", and both time-record
 #      artifacts (time-record.json, time-record.log) are served.
 #   3. A run whose TASK TEXT says "you have 5 minutes" and that is told to
-#      keep working for longer than that: the words become the budget
+#      wait for a 330-second script before it finishes: the words become the budget
 #      (source "text"), and the box ends the run by itself — at the deadline
 #      (status stopped, stop reason "time", resumable) or, if the model
 #      finished its steps sooner, as done — in either case within the deadline
@@ -218,25 +218,20 @@ fi
 
 # ---- 3. a budget from the task's words, and the deadline enforced ------------
 PROJECT_DIR=$DIR_B
-# A script the run is told to repeat: each call waits 110 s (under the agent's
-# own 2-minute command limit) and says whether to run it again — six calls
-# are 11 minutes, well past the 5-minute budget. Its count is on disk, so the
-# run cannot shorten it; the model's only part is to keep calling it.
+# A script the run is told to wait for: one call waits 330 s — past the
+# 5-minute budget — and only then prints ALL DONE. A call the agent's own
+# command limit cuts off prints nothing, and the task says to run it again.
+# Its calls are counted on disk, for the log.
 # shellcheck disable=SC2016  # the JavaScript is written as it is
 if ! board '
   cat > "$1/wait.js" <<"EOF"
 const fs = require("fs");
 const file = ".wait-count";
-const total = 6;
 let n = 0;
 try { n = parseInt(fs.readFileSync(file, "utf8"), 10) || 0; } catch {}
-n += 1;
-fs.writeFileSync(file, String(n));
-console.log(`step ${n} of ${total}: waiting 110 seconds, please keep waiting...`);
-setTimeout(() => {
-  if (n < total) console.log(`step ${n} of ${total} finished. NOT DONE YET: run \`node wait.js\` again now and wait for it.`);
-  else console.log("ALL DONE: every step has finished. Now create done.txt.");
-}, 110000);
+fs.writeFileSync(file, String(n + 1));
+console.log("waiting 330 seconds; this is expected, please keep waiting for ALL DONE...");
+setTimeout(() => { console.log("ALL DONE: the wait has finished. Now create done.txt."); }, 330000);
 EOF
   [ -s "$1/wait.js" ]
 ' "$DIR_B"; then
@@ -244,7 +239,7 @@ EOF
   cleanup
   finish
 fi
-TASK="You have 5 minutes for this task. The current working folder holds wait.js. Run: node wait.js — and wait for it to finish (it takes about 110 seconds; that wait is expected and is the whole point: do not shorten it, do not run it in the background, do not read or change wait.js). It prints whether the work is done. When it says NOT DONE YET, run node wait.js again and wait for it, and keep doing exactly that until it prints ALL DONE. Only then create a file named done.txt in the current working folder with the single word done in it. Do not create or change any other file and do not run anything else."
+TASK="You have 5 minutes for this task. The current working folder holds wait.js. Run: node wait.js — with a command timeout of at least 400 seconds (400000 ms) — and wait for it to finish: it takes about five and a half minutes, and that wait is expected and is the whole point. Do not shorten it, do not run it in the background, do not read or change wait.js. It prints ALL DONE when it has finished. If it is cut off before it prints ALL DONE, run it again the same way and wait again. Only after it has printed ALL DONE, create a file named done.txt in the current working folder with the single word done in it. Do not create or change any other file and do not run anything else."
 
 if ! start_budget_run "$TASK" null; then
   not_ok "the text-budget run did not start: $(api_error)"
@@ -264,6 +259,11 @@ else
 fi
 
 if wait_time_record 60; then
+  if [ "$(api_json '.run.status == "running" and .run.timeRecord.finishedAt == null and .run.timeRecord.leftMs == null and .run.timeRecord.usedMs >= 0')" = true ]; then
+    ok "while the run works, its time record shows the time used ($(api_json '.run.timeRecord.usedMs') ms) and no finish yet"
+  else
+    not_ok "the in-progress time record is not as expected: $(api_json -c '{status: .run.status, timeRecord: (.run.timeRecord | {usedMs, leftMs, finishedAt, stopReason})}')"
+  fi
   if [ "$(api_json '[.run.timeRecord.records[] | select(.kind == "note" and (.text | startswith("Safety margin:")))] | length > 0')" = true ]; then
     ok "the record notes the run started inside its safety margin (10 min > the 5-minute budget)"
   else
