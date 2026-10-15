@@ -1,6 +1,3 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-
 import { NextRequest, NextResponse } from "next/server";
 
 import {
@@ -15,11 +12,10 @@ import { bounceHermesDashboardShared } from "@/lib/hermes-bounce-claim";
 import { GATEWAY_PORT, gatewayReadyWaitMs } from "@/lib/openclaw-config";
 import { hasOwnerSession } from "@/lib/owner-session";
 import { waitForPortOpen } from "@/lib/port-probe";
+import { describeUnitState, runUnitJob } from "@/lib/gateway-unit-job";
 import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
-
-const exec = promisify(execFile);
 
 // The OpenClaw unit that holds the restored state open. After we swap a
 // directory (or file) atomically, a running process's existing handles still
@@ -114,9 +110,26 @@ async function restartStateHolder(edition: string): Promise<RestartOutcome> {
     // The unit name comes from the const above rather than being spelled again
     // here, and scripts/check-sudoers-coverage.sh resolves it: one name, checked
     // against the allow-list, with no second copy to drift.
-    await exec("/usr/bin/sudo", ["/usr/bin/systemctl", "restart", OPENCLAW_RESTART_UNIT], {
-      timeout: 30_000,
+    // A restart that outlives its 30 s client is waited for on the unit: on an
+    // x64 bridge the stop waits for OpenClaw's own drain (up to 330 s), and the
+    // client's deadline was being reported as a failed restart that then landed.
+    const restart = await runUnitJob("/usr/bin/sudo", ["/usr/bin/systemctl", "restart", OPENCLAW_RESTART_UNIT], {
+      unit: OPENCLAW_RESTART_UNIT,
+      timeoutMs: 30_000,
+      // A person is waiting on this answer: past it the restore says the
+      // gateway is still restarting, and it comes back on its own.
+      settleBudgetMs: 30_000,
     });
+    if (restart.kind === "in-flight") {
+      const detail = "is still restarting with the restored state (the old gateway is finishing its work)";
+      console.warn(`[clawkeep/restore] ${OPENCLAW_RESTART_UNIT} ${detail}`);
+      return { errors: [], pending: [`${OPENCLAW_RESTART_UNIT}: ${detail}`] };
+    }
+    if (restart.kind === "settled" && restart.state.activeState !== "active") {
+      const detail = `did not start again after the restore: it is ${describeUnitState(restart.state)}`;
+      console.warn(`[clawkeep/restore] ${OPENCLAW_RESTART_UNIT} ${detail}`);
+      return { errors: [`${OPENCLAW_RESTART_UNIT}: ${detail}`], pending: [] };
+    }
     // The unit is Type=simple: `restart` returns when the process is forked,
     // seconds before it re-opens :18789 with the restored state. Answering
     // "done" there reported the restore as served by a gateway that was still

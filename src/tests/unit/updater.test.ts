@@ -3122,6 +3122,9 @@ describe("updater", () => {
       expect(mockSetMany).toHaveBeenCalledWith(
         expect.objectContaining({ update_needs_continuation: undefined }),
       );
+      // Let the continuation it started finish here: left running, it reached
+      // the next case's mocks and was counted there.
+      await vi.waitFor(() => expect(updater.getUpdateState().phase).not.toBe("running"));
     });
 
     it("retries the plugin repairs an older core left, once the gateway is known healthy (TASK-1088)", async () => {

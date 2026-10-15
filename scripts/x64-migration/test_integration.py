@@ -53,6 +53,18 @@ class IntegrationTest(unittest.TestCase):
         launcher=(self.stage/'usr/local/libexec/clawbox/clawbox-run-root-step.sh').read_text()
         self.assertNotIn('harness_swap ',launcher)
 
+    def test_bridge_stop_outlasts_openclaws_own_drain(self):
+        """The bridge's ExecStop waits for the user unit, whose stop is 330 s.
+
+        At 120 s the bridge timed out with 'Failed with result timeout' while
+        the user gateway was still draining, and the restart that followed
+        landed minutes later anyway.
+        """
+        unit=(self.stage/'etc/systemd/system/clawbox-gateway.service').read_text()
+        stop=[line for line in unit.splitlines() if line.startswith('TimeoutStopSec=')]
+        self.assertEqual(len(stop),1,unit)
+        self.assertGreaterEqual(int(stop[0].split('=',1)[1]),330+30)
+
     def test_every_installed_shell_script_parses(self):
         for p in self.stage.rglob('*'):
             if p.is_file() and p.read_bytes()[:2]==b'#!' and (p.suffix=='.sh' or p.name in ['postinst','cloudflared-quick','openclaw-cli']):

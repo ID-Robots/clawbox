@@ -112,7 +112,9 @@ RemainAfterExit=yes
 ExecStart={lib}clawbox-x64-gateway.sh start
 ExecStop={lib}clawbox-x64-gateway.sh stop
 TimeoutStartSec=600
-TimeoutStopSec=120
+# ExecStop waits for OpenClaw's own drain: its user unit stops within
+# TimeoutStopSec=330, so the bridge allows that and a margin.
+TimeoutStopSec=360
 
 [Install]
 WantedBy=multi-user.target
@@ -204,7 +206,7 @@ if __name__=='__main__':
     parser.add_argument('--project',default=os.path.join(owner.pw_dir,'clawbox'))
     parser.add_argument('--node-dir',default='/usr/bin')
     parser.add_argument('--npm-prefix',default=os.path.join(owner.pw_dir,'.nvm/versions/node/v24.0.0'))
-    parser.add_argument('--version',default='1.0.5')
+    parser.add_argument('--version',default='1.0.6')
     parser.add_argument('--staging',required=True)
     parser.add_argument('--output',required=True)
     build(parser.parse_args())

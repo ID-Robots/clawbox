@@ -40,6 +40,7 @@ import {
   type UpdateLockHolder,
 } from "./update-lock";
 import { hasX64DesktopIntegration, hasX64Install, X64_DESKTOP_CORE_STEP_TIMEOUT_MS } from "./x64-integration";
+import { UNIT_JOB_SETTLE_BUDGET_MS, describeUnitState, runUnitJob } from "./gateway-unit-job";
 import {
   X64_ROOT_STEPS_SKIPPED,
   classifyX64RootStepExit,
@@ -2302,11 +2303,21 @@ async function setGatewayMaintenanceMask(masked: boolean): Promise<void> {
 }
 
 async function stopGatewayForMaintenance(): Promise<void> {
-  await execFile(
-    "/usr/bin/sudo",
-    ["-n", "/usr/bin/systemctl", "stop", "clawbox-gateway.service"],
-    { timeout: 30_000, maxBuffer: 1024 * 1024 },
-  );
+  // The unit's own stop deadline is the client's 30 s too, so a drain that
+  // uses all of it outlives the client by the moment systemd takes to kill.
+  // That stop is waited for on the unit, never reported as a failure, and
+  // never raced: a gateway still draining is a second writer of the state the
+  // maintenance step is about to touch.
+  const stop = await runUnitJob("/usr/bin/sudo", ["-n", "/usr/bin/systemctl", "stop", "clawbox-gateway.service"], {
+    unit: "clawbox-gateway.service",
+    timeoutMs: 30_000,
+  });
+  if (stop.kind === "in-flight") {
+    throw new Error(`clawbox-gateway was still stopping ${Math.round(stop.waitedMs / 1000)}s after it was asked to — not starting maintenance beside it`);
+  }
+  if (stop.kind === "settled" && stop.state.activeState === "active") {
+    throw new Error(`clawbox-gateway did not stop: it is ${describeUnitState(stop.state)}`);
+  }
 }
 
 async function removeGatewayMaintenanceMask(): Promise<void> {
@@ -3464,7 +3475,7 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
     // doctor/pre-start migrations or rewrite the owner's providers/sessions.
     gatewayNeedsRecovery = false;
     if (await waitForGateway(GATEWAY_HEALTH_WAIT_MS)) return;
-    await restartGateway({ awaitReady: false });
+    await restartGateway({ awaitReady: false, restartSettleMs: UNIT_JOB_SETTLE_BUDGET_MS });
     if (await waitForGateway(GATEWAY_RECOVERY_WAIT_MS)) return;
     throw new Error("The existing OpenClaw user gateway did not become ready. Check its service logs before retrying the update.");
   }
@@ -3477,7 +3488,7 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
     // the appliance's repairs. Its sudoers grant carries this restart.
     gatewayNeedsRecovery = false;
     if (!options.restartFirst && await waitForGateway(GATEWAY_HEALTH_WAIT_MS)) return;
-    await restartGateway({ awaitReady: false });
+    await restartGateway({ awaitReady: false, restartSettleMs: UNIT_JOB_SETTLE_BUDGET_MS });
     if (await waitForGateway(GATEWAY_RECOVERY_WAIT_MS)) return;
     throw new Error(await describeDeadGateway(await readGatewayJournalTail()));
   }
@@ -3512,7 +3523,7 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
   // read that turns "not listening" into a diagnosis. A throw from inside
   // restartGateway would abort the function before the legacy-state quarantine
   // it exists to perform ever ran.
-  await restartGateway({ awaitReady: false });
+  await restartGateway({ awaitReady: false, restartSettleMs: UNIT_JOB_SETTLE_BUDGET_MS });
   if (await waitForGateway(GATEWAY_RECOVERY_WAIT_MS)) return;
 
   const beforeRecoveryLog = await readGatewayJournalTail();
@@ -3524,7 +3535,7 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
     await quarantineLegacyOpenclawState();
     await runOpenclawDoctorFix();
   });
-  await restartGateway({ awaitReady: false });
+  await restartGateway({ awaitReady: false, restartSettleMs: UNIT_JOB_SETTLE_BUDGET_MS });
   if (await waitForGateway(GATEWAY_RECOVERY_WAIT_MS)) return;
 
   const afterRecoveryLog = await readGatewayJournalTail();
