@@ -23,6 +23,32 @@ as_owner() {
     "$@"
 }
 
+# The pinned core's `engines.node` — the same table install.sh and install-x64.sh
+# carry (install-node-engine-table.test.ts runs all three): with 2026.9.3 it
+# became `>=24.16.0 <25 || >=26.1.0`, so Node 22 is refused outright.
+OPENCLAW_NODE_ENGINE=">=24.16.0 <25, or >=26.1.0"
+
+node_version_satisfies_openclaw_engine() {
+  local version="$1" major
+  [ -n "$version" ] || return 1
+  major="${version%%.*}"
+  case "$major" in
+    24) dpkg --compare-versions "$version" ge "24.16.0" ;;
+    26) dpkg --compare-versions "$version" ge "26.1.0" ;;
+    2[7-9]|[3-9][0-9]|[1-9][0-9][0-9]*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# The Node THIS PACKAGE names (NODE_DIR, baked in by build-package.py), asked
+# as the owner — never the one on root's PATH, which is not what the core runs
+# on. Asked with --version (every Node answers it, so does the fixture's).
+node_satisfies_openclaw_engine() {
+  local v
+  v=$(as_owner "$NODE_DIR/node" --version 2>/dev/null </dev/null || echo "")
+  node_version_satisfies_openclaw_engine "${v#v}"
+}
+
 refresh_trusted_source() {
   # The branch is DATA. Never trust the user checkout's remote, hooks, objects,
   # or executable files for a root update. Fetch the fixed vendor URL into a
@@ -172,6 +198,13 @@ SH
 
 stage_openclaw_core() {
   local stage=$1 target=$2 out
+  # Checked BEFORE npm runs: this package was once rebuilt without --node-dir
+  # and so pointed at the distro's Node 22, and the core's preinstall refused
+  # it with a wall of npm text that named neither the Node nor the repair.
+  if ! node_satisfies_openclaw_engine; then
+    echo "Error: the Node this integration package names, $NODE_DIR/node, is $(as_owner "$NODE_DIR/node" --version 2>/dev/null </dev/null || echo 'not runnable') and openclaw@$target needs Node $OPENCLAW_NODE_ENGINE; rebuild the package with --node-dir naming a Node the core accepts (python3 scripts/x64-migration/build-package.py --node-dir <dir> ...) and install it, then run the update again. The core on this desktop is untouched." >&2
+    return 1
+  fi
   as_owner /bin/rm -rf "$stage" || return 1
   as_owner /bin/mkdir -p "$stage" || return 1
   if ! as_owner npm install -g "openclaw@$target" --prefix "$stage" --no-fund --no-audit </dev/null; then

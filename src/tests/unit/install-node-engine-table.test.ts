@@ -37,7 +37,18 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../.
 const INSTALLERS = {
   "install.sh": readFileSync(path.join(REPO, "install.sh"), "utf-8"),
   "install-x64.sh": readFileSync(path.join(REPO, "install-x64.sh"), "utf-8"),
+  // The x64 integration package's root step carries the third copy: it asks
+  // the Node the PACKAGE names (`$NODE_DIR/node`, as the owner) before npm
+  // stages a core on it — a package rebuilt without --node-dir once pointed it
+  // at the distro's Node 22, and the refusal was npm's, naming no repair.
+  "scripts/x64-migration/clawbox-x64-step.sh": readFileSync(
+    path.join(REPO, "scripts/x64-migration/clawbox-x64-step.sh"),
+    "utf-8",
+  ),
 } as const;
+
+/** build-package.py's Python copy of the same table; test_integration.py runs it, this suite holds its text. */
+const BUILDER = readFileSync(path.join(REPO, "scripts/x64-migration/build-package.py"), "utf-8");
 
 const HAS_BASH = spawnSync("bash", ["-c", "true"], { stdio: "ignore" }).status === 0;
 const HAS_DPKG = spawnSync("dpkg", ["--version"], { stdio: "ignore" }).status === 0;
@@ -106,6 +117,9 @@ function verdicts(installer: keyof typeof INSTALLERS): Map<string, boolean> {
 
   const source = INSTALLERS[installer];
   const program = [
+    // The step asks through `as_owner` (runuser as the desktop owner): here it
+    // is the stub itself, asked directly.
+    'as_owner() { "$@"; }',
     optionalShellFunction(source, "node_version_satisfies_openclaw_engine"),
     shellFunction(source, "node_satisfies_openclaw_engine"),
     `for v in ${[...REJECTED, ...ACCEPTED, DIST_VERSION].join(" ")}; do`,
@@ -114,7 +128,8 @@ function verdicts(installer: keyof typeof INSTALLERS): Map<string, boolean> {
     "done",
   ].join("\n");
   const r = spawnSync("bash", ["-c", program], {
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}` },
+    // NODE_DIR is what the x64 step asks; the installers ask the node on PATH.
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH ?? ""}`, NODE_DIR: bin },
     encoding: "utf-8",
   });
   if (r.status !== 0) throw new Error(`the guard could not be run (status ${r.status}): ${r.stderr}`);
@@ -161,7 +176,7 @@ const ACCEPTED = [
   "100.0.0", // three digits: the case a two-digit-only pattern rejected
 ] as const;
 
-describe("install.sh / install-x64.sh Node engine table", () => {
+describe("install.sh / install-x64.sh / clawbox-x64-step.sh Node engine table", () => {
   // ASSERTED, NOT SKIPPED ON, the way email-directive-parity.test.ts puts it:
   // `describe.skip` on a missing tool turns the only proof of the engine floor
   // into a green no-op, and the next edit to either `case` table would ship
@@ -196,13 +211,17 @@ describe("install.sh / install-x64.sh Node engine table", () => {
       expect(source).toContain('OPENCLAW_NODE_ENGINE=">=24.16.0 <25, or >=26.1.0"');
       expect(source).not.toMatch(/requires Node >=22/);
     }
+    expect(BUILDER).toContain('OPENCLAW_NODE_ENGINE = ">=24.16.0 <25, or >=26.1.0"');
   });
 
   it("fetches the NodeSource channel of the major it accepts, and never the retired one", () => {
     // A guard that rejects 22 while the install line still pipes `setup_22.x`
     // is the worst of both: the box takes the apt transaction, lands on a Node
     // the guard refuses, and the step exits 1 having replaced the runtime.
-    for (const [name, source] of Object.entries(INSTALLERS)) {
+    // The two INSTALLERS only: the x64 step installs no Node at all (the
+    // package names one, and the step refuses a core on the wrong one).
+    for (const name of ["install.sh", "install-x64.sh"] as const) {
+      const source = INSTALLERS[name];
       expect(source, name).toContain("deb.nodesource.com/setup_24.x");
       expect(source, name).not.toContain("setup_22.x");
     }
