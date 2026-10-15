@@ -39,7 +39,12 @@ import {
   holderFromAnotherBoot,
   type UpdateLockHolder,
 } from "./update-lock";
-import { hasX64DesktopIntegration, hasX64Install, X64_DESKTOP_CORE_STEP_TIMEOUT_MS } from "./x64-integration";
+import {
+  hasX64DesktopIntegration,
+  hasX64Install,
+  X64_DESKTOP_CORE_STEP_TIMEOUT_MS,
+  X64_DESKTOP_GATEWAY_READY_WAIT_MS,
+} from "./x64-integration";
 import { UNIT_JOB_SETTLE_BUDGET_MS, describeUnitState, runUnitJob } from "./gateway-unit-job";
 import {
   OpenclawStateMaintenanceError,
@@ -3488,10 +3493,13 @@ async function ensureGatewayHealthy(options: { restartFirst?: boolean } = {}): P
     // The desktop package restores its existing user gateway before its core
     // step returns, including failures. It must not inherit the appliance's
     // doctor/pre-start migrations or rewrite the owner's providers/sessions.
+    // Its boot is far slower than the appliance's, so it gets its own window
+    // (X64_DESKTOP_GATEWAY_READY_WAIT_MS says why): restarting a gateway that
+    // is still booting only starts the slow boot over.
     gatewayNeedsRecovery = false;
-    if (await waitForGateway(GATEWAY_HEALTH_WAIT_MS)) return;
+    if (await waitForGateway(X64_DESKTOP_GATEWAY_READY_WAIT_MS)) return;
     await restartGateway({ awaitReady: false, restartSettleMs: UNIT_JOB_SETTLE_BUDGET_MS });
-    if (await waitForGateway(GATEWAY_RECOVERY_WAIT_MS)) return;
+    if (await waitForGateway(X64_DESKTOP_GATEWAY_READY_WAIT_MS)) return;
     throw new Error("The existing OpenClaw user gateway did not become ready. Check its service logs before retrying the update.");
   }
   if (hasX64Install(PROJECT_DIR)) {

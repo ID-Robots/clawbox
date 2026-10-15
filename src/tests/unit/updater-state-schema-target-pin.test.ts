@@ -65,7 +65,7 @@ vi.mock("@/lib/openclaw-config", async (importOriginal) => ({
   openclawIsAbsent: () => false,
 }));
 
-vi.mock("@/lib/x64-integration", () => ({ hasX64DesktopIntegration: () => false, hasX64Install: () => false, X64_DESKTOP_CORE_STEP_TIMEOUT_MS: 6_600_000 }));
+vi.mock("@/lib/x64-integration", () => ({ hasX64DesktopIntegration: () => false, hasX64Install: () => false, X64_DESKTOP_CORE_STEP_TIMEOUT_MS: 6_600_000, X64_DESKTOP_GATEWAY_READY_WAIT_MS: 240_000 }));
 
 import { get, set, setMany } from "@/lib/config-store";
 import * as childProcess from "child_process";
