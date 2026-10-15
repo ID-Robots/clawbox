@@ -10,7 +10,7 @@ import {
   chmodSync,
   symlinkSync,
 } from "node:fs";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -76,6 +76,8 @@ beforeEach(() => {
     "curl",
     [
       'echo "curl $*" >> "$CALLS_LOG"',
+      '# The gateway\'s own /startupz: answers the code a case scripts.',
+      'case "$*" in *startupz*) printf "%s" "${STARTUPZ_CODE:-000}"; exit 0 ;; esac',
       'if [ "${PROXY_UP:-1}" != "1" ]; then exit 7; fi',
       "exit 0",
     ].join("\n"),
@@ -733,6 +735,59 @@ describe.skipIf(!canRun)("ensure-local-embeddings.sh on OpenClaw 2", () => {
   });
 });
 
+/**
+ * F3, 2026-10-15: launched by the gateway's own pre-start, this runs while
+ * that gateway starts, and a config write inside its startup admission makes
+ * OpenClaw refuse readiness (exit 78) and stay down. Told so, it writes only
+ * once the core's own /startupz says started.
+ */
+describe.skipIf(!canRun)("ensure-local-embeddings.sh beside a starting gateway", () => {
+  it("writes the settings once the gateway it was launched beside has started", () => {
+    const r = run({ args: ["--no-download"], extraEnv: { CLAWBOX_AFTER_GATEWAY_START: "1", STARTUPZ_CODE: "200" } });
+    expect(r.status).toBe(0);
+    expect(r.calls.some((c) => c.startsWith("curl") && c.includes("/startupz"))).toBe(true);
+    expect(configSets(r.calls)).toHaveLength(1);
+  });
+
+  it("writes nothing under a gateway that does not finish starting, and says so", () => {
+    const r = run({
+      args: ["--no-download"],
+      extraEnv: { CLAWBOX_AFTER_GATEWAY_START: "1", STARTUPZ_CODE: "503", CLAWBOX_GATEWAY_START_WAIT_S: "4" },
+    });
+    expect(r.status).toBe(0);
+    expect(configSets(r.calls)).toEqual([]);
+    expect(`${r.stdout}${r.stderr}`).toContain("not written under a starting gateway");
+  });
+
+  it("writes at once when no gateway is running (an update holding it stopped)", () => {
+    const r = run({
+      args: ["--no-download"],
+      extraEnv: { STARTUPZ_CODE: "503", GATEWAY_CGROUP_DIRS: path.join(dir, "no-such-unit") },
+    });
+    expect(r.calls.some((c) => c.includes("/startupz"))).toBe(false);
+    expect(configSets(r.calls)).toHaveLength(1);
+  });
+
+  it("waits for a gateway install.sh has just restarted, launched with no flag at all", () => {
+    // install.sh's main flow restarts the gateway and calls this straight
+    // after: a gateway process is up and /startupz is not 200 yet.
+    const unit = path.join(dir, "gateway-unit");
+    mkdirSync(unit);
+    const gw = spawn("bash", ["-c", "sleep 60; true", "openclaw", "gateway", "--allow-unconfigured"], { stdio: "ignore" });
+    try {
+      writeFileSync(path.join(unit, "cgroup.procs"), `${gw.pid}\n`);
+      const env = { GATEWAY_CGROUP_DIRS: unit, CLAWBOX_GATEWAY_START_WAIT_S: "4" };
+      const starting = run({ args: ["--no-download"], extraEnv: { ...env, STARTUPZ_CODE: "503" } });
+      expect(configSets(starting.calls)).toEqual([]);
+      expect(`${starting.stdout}${starting.stderr}`).toContain("not written under a starting gateway");
+      const started = run({ args: ["--no-download"], extraEnv: { ...env, STARTUPZ_CODE: "200" } });
+      expect(configSets(started.calls)).toHaveLength(1);
+    } finally {
+      gw.kill("SIGKILL");
+    }
+  });
+});
+
 describe("gateway-pre-start.sh local embeddings hand-off", () => {
   const src = readFileSync(PRE_START, "utf-8");
 
@@ -742,7 +797,11 @@ describe("gateway-pre-start.sh local embeddings hand-off", () => {
   });
 
   it("launches it with --no-download: a gateway start wires a model that is there and fetches none", () => {
-    expect(src).toMatch(/^\s*setsid nohup "\$LOCAL_EMBEDDINGS" --no-download /m);
+    expect(src).toMatch(/^\s*(?:CLAWBOX_AFTER_GATEWAY_START=1 )?setsid nohup "\$LOCAL_EMBEDDINGS" --no-download /m);
+  });
+
+  it("tells it that it runs beside a starting gateway", () => {
+    expect(src).toMatch(/^\s*CLAWBOX_AFTER_GATEWAY_START=1 setsid nohup "\$LOCAL_EMBEDDINGS"/m);
   });
 
   it("launches nothing at all while an in-app update owns the box", () => {

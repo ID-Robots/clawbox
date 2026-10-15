@@ -6626,7 +6626,9 @@ if update_owns_box; then
   echo "  Local embeddings check skipped: an update owns this box (the next gateway start after it runs the check)"
 elif [ -x "$LOCAL_EMBEDDINGS" ]; then
   mkdir -p "$(dirname "$LOCAL_EMBEDDINGS_LOG")" 2>/dev/null || true
-  setsid nohup "$LOCAL_EMBEDDINGS" --no-download >>"$LOCAL_EMBEDDINGS_LOG" 2>&1 &
+  # It runs while this gateway starts: told so, it writes the config only once
+  # the gateway has started (a write inside startup admission is exit 78).
+  CLAWBOX_AFTER_GATEWAY_START=1 setsid nohup "$LOCAL_EMBEDDINGS" --no-download >>"$LOCAL_EMBEDDINGS_LOG" 2>&1 &
   echo "  Local embeddings check running in the background (see $LOCAL_EMBEDDINGS_LOG)"
 else
   echo "  WARN: $LOCAL_EMBEDDINGS missing; semantic memory keeps whatever embeddings provider is configured"

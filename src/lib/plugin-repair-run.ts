@@ -6,6 +6,7 @@ import { installDeepseekProviderPlugin, installedOpenclawRelease } from "@/lib/o
 import { findOpenclawBin, runOpenclawConfigSet } from "@/lib/openclaw-config";
 import { canonicalPluginId, type PluginRepairEntry, type PluginRepairStage } from "@/lib/plugin-repair";
 import { withOpenclawMaintenanceRetry } from "@/lib/openclaw-maintenance";
+import { holdWhileGatewayStarts } from "@/lib/gateway-start-guard";
 
 const execFile = promisify(execFileCb);
 
@@ -349,6 +350,8 @@ export async function runPluginRepair(
   // for at all, and `plugins enable` answers that with "Plugin not found".
   if (stage === "consent") {
     try {
+      // Both verbs write openclaw.json: never under a starting gateway.
+      await holdWhileGatewayStarts("openclaw plugins enable");
       await withOpenclawMaintenanceRetry((timeout) => execFile(
         openclawBin(),
         ["plugins", "enable", registryId, "--accept-capabilities"],
@@ -412,6 +415,7 @@ export async function runPluginRepair(
       if (!spec) return fail("no_spec", "spec", "");
       const before = await gatewayBeforeInstall();
       try {
+        await holdWhileGatewayStarts("openclaw plugins install");
         // `--force` because the boot path uses it and because the CLI exits 1
         // with "plugin already exists (delete it first)" otherwise.
         await withOpenclawMaintenanceRetry((timeout) => execFile(

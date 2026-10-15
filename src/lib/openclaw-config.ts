@@ -40,6 +40,7 @@ import { CLAWBOX_AI_MODEL_BY_TIER } from "@/lib/clawbox-ai-models";
 import { needsClawboxAiFlashPolicyRepair } from "@/lib/clawbox-ai-chat-policy";
 import { isConfigMutationConflict } from "@/lib/config-conflict";
 import { withOpenclawMaintenanceRetry } from "@/lib/openclaw-maintenance";
+import { ConfigChangedWhileHeldError, cliWritesConfig, holdWhileGatewayStarts } from "@/lib/gateway-start-guard";
 
 const exec = promisify(execFile);
 
@@ -189,7 +190,14 @@ async function executeConfigWrite(
   options: OpenclawConfigSetOptions,
   skipGateway = false,
 ): Promise<void> {
-  if (!skipGateway && "done" in (await configWritesViaGateway([write], options))) return;
+  if (!skipGateway) {
+    const outcome = await configWritesViaGateway([write], options);
+    if ("done" in outcome) return;
+    // A gateway that is starting does not answer yet. Wait it out (never write
+    // the file under it, see `@/lib/gateway-start-guard`), then ask it again.
+    if (outcome.declined === "unavailable" && (await holdWhileGatewayStarts("config write"))
+      && "done" in (await configWritesViaGateway([write], options))) return;
+  }
   await executeConfigWriteWithCli(write, options);
 }
 
@@ -992,9 +1000,14 @@ async function settleStagedWrites(
   const started = Date.now();
   const areas = loggedConfigAreas(staged.flatMap((entry) => configWritePaths(entry.write)));
   const options = combinedWriteOptions(staged);
-  const outcome: GatewayWriteOutcome = options
+  let outcome: GatewayWriteOutcome = options
     ? await configWritesViaGateway(staged.map((entry) => entry.write), options)
     : { declined: "unsupported" };
+  // A starting gateway does not answer yet: wait it out, then ask it again.
+  if (options && "declined" in outcome && outcome.declined === "unavailable"
+    && (await holdWhileGatewayStarts(`${label} config writes`))) {
+    outcome = await configWritesViaGateway(staged.map((entry) => entry.write), options);
+  }
   if ("done" in outcome) {
     const how = outcome.done === "written" ? "landed as one gateway config.patch" : "were already in the file";
     console.log(
@@ -1275,10 +1288,16 @@ function spawnOpenclaw(args: string[], options: SpawnOpenclawOptions = {}): Prom
   // inside the caller's own timeout. See `@/lib/openclaw-maintenance`. The
   // first two words name it in the log: they are the verb, never a value.
   const timeoutMs = options.timeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS;
-  return withOpenclawMaintenanceRetry(
+  const label = `openclaw ${(options.labelArgs ?? args).slice(0, 2).join(" ")}`;
+  // A verb that writes openclaw.json waits out a gateway that is starting: a
+  // write inside its startup admission makes it exit 78 and stay down (see
+  // `@/lib/gateway-start-guard`). This is where the gateway-first write path
+  // falls back to the CLI, so it is where the wait belongs.
+  const held = cliWritesConfig(args) ? holdWhileGatewayStarts(label) : Promise.resolve();
+  return held.then(() => withOpenclawMaintenanceRetry(
     (remainingMs) => spawnOpenclawOnce(args, { ...options, timeoutMs: remainingMs }),
-    { timeoutMs, label: `openclaw ${(options.labelArgs ?? args).slice(0, 2).join(" ")}` },
-  );
+    { timeoutMs, label },
+  ));
 }
 
 function spawnOpenclawOnce(args: string[], options: SpawnOpenclawOptions = {}): Promise<string> {
@@ -2584,11 +2603,28 @@ async function writeSecretJsonAtomically(file: string, data: unknown): Promise<v
   await fs.rename(tmpPath, file);
 }
 
+/** The config file's identity, size and mtime, or "absent". Synchronous: one stat. */
+function configFileFingerprint(): string {
+  try {
+    const stat = fsSync.statSync(CONFIG_PATH);
+    return `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+  } catch {
+    return "absent";
+  }
+}
+
 export async function writeConfig(config: OpenClawConfig): Promise<void> {
   // A whole-file write inside an open config write transaction: what the
   // transaction staged lands first (validated), so this write — read through
   // the overlay or not — neither carries it unvalidated nor drops it.
   await flushConfigWrites();
+  // Never under a gateway that is starting (`@/lib/gateway-start-guard`). The
+  // caller read the file before this wait; a file that moved during it (the
+  // gateway's own start writes it) is not written over with that snapshot.
+  const readAs = configFileFingerprint();
+  if (await holdWhileGatewayStarts("writeConfig") && configFileFingerprint() !== readAs) {
+    throw new ConfigChangedWhileHeldError();
+  }
   await fs.mkdir(OPENCLAW_HOME, { recursive: true });
   await writeSecretJsonAtomically(CONFIG_PATH, config);
 }
@@ -2843,6 +2879,9 @@ async function withOpenclawConfigSidecarLock<T>(mutate: () => Promise<T>): Promi
   // BEFORE the lock: the flush is a gateway or CLI write, and those take this
   // same lock — flushed from inside it, each would wait on the other.
   await flushConfigWrites();
+  // Also before it: a starting gateway is waited out with the lock free, so
+  // the read inside `mutate` is taken after the wait, not before it.
+  await holdWhileGatewayStarts("locked config write");
   const lockPath = untraced(`${CONFIG_PATH}.lock`);
   const reclaimGuardPath = `${lockPath}.reclaim`;
   const deadline = Date.now() + 30_000;
