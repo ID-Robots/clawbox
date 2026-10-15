@@ -11,6 +11,10 @@ import { STATE_DIM, STATE_HIDDEN, STATE_MATCH, STATE_SELECTED } from "@/componen
  * Worker either, so the layout engine runs on the page (the fallback path) —
  * the real layout and Louvain, on a graph small enough to settle at once.
  * Fixtures are synthetic company data only.
+ *
+ * ISOLATED is the shape of the owner's vault that drew an empty map: pages
+ * written from separate documents, so no links and no shared sources, two to
+ * each of 24 domains.
  */
 vi.setConfig({ testTimeout: 20_000, hookTimeout: 20_000 });
 
@@ -30,8 +34,20 @@ const GRAPH = {
   edges: [[0, 1, 1], [0, 2, 1], [0, 3, 1], [1, 3, 0.5]],
 };
 
+/** 48 pages, no edges at all, 24 domains. */
+const ISOLATED = {
+  revision: "d".repeat(40),
+  truncated: false,
+  nodes: Array.from({ length: 48 }, (_, i) => ({ id: `notes/note-${i}.md`, title: `Note ${i}`, domain: `domain-${Math.floor(i / 2)}`, degree: 0, sources: 1 })),
+  edges: [],
+};
+
 let graph: Record<string, unknown>;
 let glCalls: Array<[string, unknown[]]>;
+/** What `GET pages/<path>?view=summary` answers, by page; a page not listed answers 404. */
+let summaryOf: Record<string, string | null>;
+/** Holds the summary answers back until it resolves. */
+let summaryGate: Promise<void> | null;
 let contexts: string[];
 let webgl: boolean;
 let flat: boolean;
@@ -51,7 +67,9 @@ function fakeGL(canvas: HTMLCanvasElement): WebGL2RenderingContext {
       if (/^[A-Z0-9_]+$/.test(key)) return GL[key as keyof typeof GL] ?? 0x9000 + key.length;
       return (...args: unknown[]) => {
         glCalls.push([key, args]);
-        return /^create/.test(key) || key === "getUniformLocation" ? { name: key } : undefined;
+        // A uniform's location names the uniform, so a test can tell u_min from u_alpha.
+        if (key === "getUniformLocation") return { name: args[1] };
+        return /^create/.test(key) ? { name: key } : undefined;
       };
     },
   });
@@ -76,12 +94,20 @@ function installFetch() {
     const ok = (json: unknown, code = 200) => ({ ok: code < 400, status: code, json: async () => json });
     if (url.startsWith("/setup-api/preferences")) return ok({ ui_language: "en" });
     if (url === "/setup-api/prime-radiant/graph") return ok(graph);
+    const page = /^\/setup-api\/prime-radiant\/pages\/(.+)\?view=summary$/.exec(url);
+    if (page) {
+      const id = decodeURIComponent(page[1]);
+      if (summaryGate) await summaryGate;
+      return id in summaryOf ? ok({ path: id, summary: summaryOf[id] }) : ok({ error: "No such page.", code: "not_found" }, 404);
+    }
     return ok({}, 404);
   }));
 }
 
 beforeEach(() => {
   graph = GRAPH;
+  summaryOf = {};
+  summaryGate = null;
   glCalls = [];
   contexts = [];
   webgl = true;
@@ -113,6 +139,11 @@ async function mount(onOpenPage = vi.fn(), onIngest = vi.fn()) {
   // loaded runner can take longer than the default 5 s to finish.
   await waitFor(() => expect(screen.getByTestId("prime-radiant-map-status")).toHaveTextContent("Pages: 6"), { timeout: 15_000 });
   return { ...view, onOpenPage, onIngest };
+}
+
+/** The arguments of every call to `fn` on a uniform called `name`, in order. */
+function uniformCalls(fn: string, name: string): unknown[][] {
+  return glCalls.filter(([k, a]) => k === fn && (a[0] as { name?: string } | null)?.name === name).map(([, a]) => a);
 }
 
 /** The node states the view was last handed. */
@@ -205,6 +236,7 @@ describe("PrimeRadiantMap", () => {
     const setStates = vi.spyOn(MapView.prototype, "setStates");
     const setColors = vi.spyOn(MapView.prototype, "setColors");
     await mount();
+    fireEvent.click(screen.getByTestId("prime-radiant-map-legend-toggle"));
     const legend = screen.getByTestId("prime-radiant-map-legend");
     const support = within(legend).getAllByTestId("prime-radiant-map-domain").find((b) => b.textContent?.includes("acme-support"))!;
     expect(within(legend).getAllByTestId("prime-radiant-map-domain").map((b) => b.textContent)).toEqual(["acme-sales3", "acme-support2", "No domain1"]);
@@ -225,6 +257,7 @@ describe("PrimeRadiantMap", () => {
   it("keeps a hidden domain hidden when a new revision orders the legend differently", async () => {
     const setStates = vi.spyOn(MapView.prototype, "setStates");
     const { rerender } = await mount();
+    fireEvent.click(screen.getByTestId("prime-radiant-map-legend-toggle"));
     const legend = screen.getByTestId("prime-radiant-map-legend");
     fireEvent.click(within(legend).getAllByTestId("prime-radiant-map-domain").find((b) => b.textContent?.includes("acme-support"))!);
     await waitFor(() => expect(lastStates(setStates)[3]).toBe(STATE_HIDDEN));
@@ -262,14 +295,210 @@ describe("PrimeRadiantMap", () => {
     expect(screen.getByTestId("prime-radiant-map-status")).not.toHaveTextContent("Arranging");
   });
 
-  it("lists orphans, hubs and bridges, and a click picks one out", async () => {
+  it("keeps orphans, hubs and bridges behind one Insights button on the map, and a click picks one out", async () => {
     await mount();
+    // No strip under the map: the canvas has that room.
+    expect(screen.queryByTestId("prime-radiant-map-insights")).toBeNull();
+    const button = screen.getByTestId("prime-radiant-map-insights-toggle");
+    await waitFor(() => expect(button).not.toBeDisabled());
+    expect(button).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(button);
+    expect(button).toHaveAttribute("aria-expanded", "true");
     const orphans = await screen.findByTestId("prime-radiant-map-insight-orphans");
     expect(orphans).toHaveTextContent("Office holidays");
     expect(orphans).toHaveTextContent("Loose note");
     expect(screen.getByTestId("prime-radiant-map-insight-hubs")).toHaveTextContent("Acme Widgets Ltd");
+    expect(screen.getByTestId("prime-radiant-map-insight-bridges")).toBeInTheDocument();
     fireEvent.click(within(orphans).getByText("Office holidays"));
     expect(await screen.findByTestId("prime-radiant-map-selected")).toHaveTextContent("Office holidays");
+    // Escape folds it away and gives the focus back to the button.
+    fireEvent.keyDown(screen.getByTestId("prime-radiant-map-insights"), { key: "Escape" });
+    expect(screen.queryByTestId("prime-radiant-map-insights")).toBeNull();
+    expect(button).toHaveFocus();
+  });
+
+  it("keeps one compact row above the map: the search, the colouring and the fit button", async () => {
+    await mount();
+    const row = screen.getByTestId("prime-radiant-map-toolbar");
+    expect(row.children).toHaveLength(3);
+    expect(within(row).getByTestId("prime-radiant-map-search")).toBeInTheDocument();
+    expect(within(row).getByTestId("prime-radiant-map-colour-community")).toBeInTheDocument();
+    expect(within(row).getByTestId("prime-radiant-map-fit")).toBeInTheDocument();
+    expect(within(row).queryAllByTestId("prime-radiant-map-domain")).toHaveLength(0);
+  });
+
+  it("folds the domain legend into a corner of the map, closed until asked for", async () => {
+    const setStates = vi.spyOn(MapView.prototype, "setStates");
+    await mount();
+    const toggle = screen.getByTestId("prime-radiant-map-legend-toggle");
+    expect(screen.queryByTestId("prime-radiant-map-legend")).toBeNull();
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle).toHaveTextContent("Domains3");
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(within(screen.getByTestId("prime-radiant-map-legend")).getAllByTestId("prime-radiant-map-domain")[2]);
+    await waitFor(() => expect(lastStates(setStates)[5]).toBe(STATE_HIDDEN));
+    // Folded again, it still says something is hidden; the domain stays hidden.
+    fireEvent.keyDown(screen.getByTestId("prime-radiant-map-legend"), { key: "Escape" });
+    expect(screen.queryByTestId("prime-radiant-map-legend")).toBeNull();
+    expect(toggle).toHaveTextContent("1 hidden");
+    expect(lastStates(setStates)[5]).toBe(STATE_HIDDEN);
+  });
+
+  it("shows the arrow over the map, a hand over a page and a move cross while dragging — never a grab hand", async () => {
+    const pick = vi.spyOn(MapView.prototype, "pick").mockReturnValue(-1);
+    await mount();
+    const canvas = screen.getByTestId("prime-radiant-map-canvas");
+    expect(canvas.className).not.toMatch(/grab/);
+    expect(canvas).toHaveClass("cursor-default");
+    fireEvent.pointerMove(canvas, { pointerId: 1, pointerType: "mouse", clientX: 40, clientY: 50 });
+    expect(["", "default"]).toContain(canvas.style.cursor);
+    pick.mockReturnValue(1);
+    fireEvent.pointerMove(canvas, { pointerId: 1, pointerType: "mouse", clientX: 41, clientY: 50 });
+    expect(canvas.style.cursor).toBe("pointer");
+    fireEvent.pointerDown(canvas, { pointerId: 1, pointerType: "mouse", clientX: 41, clientY: 50 });
+    fireEvent.pointerMove(canvas, { pointerId: 1, pointerType: "mouse", clientX: 90, clientY: 80 });
+    expect(canvas.style.cursor).toBe("move");
+    fireEvent.pointerUp(canvas, { pointerId: 1, pointerType: "mouse", clientX: 90, clientY: 80 });
+    expect(canvas.style.cursor).toBe("default");
+    for (const shape of [canvas.style.cursor, getComputedStyle(canvas).cursor]) expect(shape).not.toMatch(/grab/);
+  });
+
+  it("draws 48 pages with no links at all: every one in view, never a speck, on a canvas a screenshot can read", async () => {
+    graph = ISOLATED;
+    render(
+      <I18nProvider>
+        <PrimeRadiantMap revision={0} onOpenPage={vi.fn()} onIngest={vi.fn()} />
+      </I18nProvider>,
+    );
+    await waitFor(() => expect(screen.getByTestId("prime-radiant-map-status")).toHaveTextContent("Pages: 48 · Links: 0"), { timeout: 15_000 });
+    expect(screen.queryByTestId("prime-radiant-map-related")).toBeNull();
+    // The Screenshot app reads a canvas with drawImage between frames: without this a WebGL canvas reads back empty.
+    expect(HTMLCanvasElement.prototype.getContext).toHaveBeenCalledWith("webgl2", expect.objectContaining({ preserveDrawingBuffer: true }));
+    await waitFor(() => expect(screen.getByTestId("prime-radiant-map-status")).not.toHaveTextContent("Arranging"));
+
+    // One nodes draw for all 48, and no edge draw (there are none).
+    await waitFor(() => expect(glCalls.some(([k, a]) => k === "drawArraysInstanced" && a[3] === 48)).toBe(true));
+    expect(glCalls.filter(([k]) => k === "drawArraysInstanced").pop()![1]).toEqual([GL.TRIANGLE_STRIP, 0, 4, 48]);
+    expect(glCalls.some(([k]) => k === "drawElements")).toBe(false);
+
+    // The camera is finite and, once it has eased in, frames every page.
+    const inView = () => {
+      const vp = uniformCalls("uniformMatrix4fv", "u_vp").pop()![2] as Float32Array;
+      const pos = glCalls.filter(([k]) => k === "bufferSubData").pop()![1][2] as Float32Array;
+      expect([...vp].every(Number.isFinite)).toBe(true);
+      expect(pos).toHaveLength(48 * 3);
+      for (let i = 0; i < 48; i++) {
+        const [x, y, z] = [pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]];
+        expect([x, y, z].every(Number.isFinite)).toBe(true);
+        const w = vp[3] * x + vp[7] * y + vp[11] * z + vp[15];
+        expect(w).toBeGreaterThan(0);
+        expect(Math.abs((vp[0] * x + vp[4] * y + vp[8] * z + vp[12]) / w)).toBeLessThanOrEqual(1);
+        expect(Math.abs((vp[1] * x + vp[5] * y + vp[9] * z + vp[13]) / w)).toBeLessThanOrEqual(1);
+      }
+    };
+    await waitFor(inView, { timeout: 5_000 });
+    // A page with no links is the smallest node there is: it still gets a dot you can see (CSS px × DPR 1).
+    const min = uniformCalls("uniform1f", "u_min").pop()![1] as number;
+    expect(min).toBeGreaterThanOrEqual(3);
+    expect(Number.isFinite(uniformCalls("uniform1f", "u_scale").pop()![1] as number)).toBe(true);
+  });
+
+  it("never starts a map again from the origin it was left at before the layout answered", async () => {
+    graph = ISOLATED;
+    // Left at once: the layout never answered, so every page is still at the origin.
+    const silent = vi.spyOn(MapView.prototype, "load").mockImplementation(() => {});
+    const first = render(
+      <I18nProvider>
+        <PrimeRadiantMap revision={0} onOpenPage={vi.fn()} onIngest={vi.fn()} />
+      </I18nProvider>,
+    );
+    await waitFor(() => expect(silent).toHaveBeenCalled(), { timeout: 15_000 });
+    first.unmount();
+    silent.mockRestore();
+
+    const load = vi.spyOn(MapView.prototype, "load");
+    graph = { ...ISOLATED, revision: "9".repeat(40) };
+    render(
+      <I18nProvider>
+        <PrimeRadiantMap revision={1} onOpenPage={vi.fn()} onIngest={vi.fn()} />
+      </I18nProvider>,
+    );
+    await waitFor(() => expect(load).toHaveBeenCalled());
+    const warm = load.mock.calls[0][1];
+    const known = warm ? [...warm.known.keys()].filter((i) => warm.known[i]) : [];
+    // Whatever is kept for these pages is a real layout — 48 pages with no edge, started at one spot, never part.
+    const spots = new Set(known.map((i) => `${warm!.positions[i * 3]},${warm!.positions[i * 3 + 1]},${warm!.positions[i * 3 + 2]}`));
+    expect(known.length === 0 || spots.size > 1).toBe(true);
+  });
+
+  it("draws the related hints fainter, in a pass of their own, and never counts them as links", async () => {
+    graph = { ...GRAPH, revision: "e".repeat(40), edges: [[0, 1, 1], [0, 3, 0.5], [2, 4, 0.25], [4, 5, 0.25]] };
+    await mount();
+    expect(screen.getByTestId("prime-radiant-map-status")).toHaveTextContent("Links: 1");
+    // Counted apart, and said what they are.
+    const related = screen.getByTestId("prime-radiant-map-related");
+    expect(related).toHaveTextContent("Related: 2");
+    expect(related).toHaveAttribute("title", expect.stringContaining("not links"));
+    // Nothing picked out (a page kept from another visit would add its own lit edges).
+    fireEvent.keyDown(screen.getByTestId("prime-radiant-map-canvas"), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByTestId("prime-radiant-map-selected")).toBeNull());
+    glCalls = [];
+    await waitFor(() => expect(glCalls.filter(([k]) => k === "drawElements").length).toBeGreaterThanOrEqual(2));
+    // Per frame: the hints (2 edges), then the links and shared sources (2 edges); the alpha set before each.
+    let alpha = 0;
+    const seen: Array<[number, number]> = [];
+    for (const [k, a] of glCalls) {
+      if (k === "uniform1f" && (a[0] as { name?: string }).name === "u_alpha") alpha = a[1] as number;
+      if (k === "drawElements") seen.push([a[1] as number, alpha]);
+    }
+    const [weak, strong] = seen.slice(-2);
+    expect(weak[0]).toBe(4);
+    expect(strong[0]).toBe(4);
+    expect(weak[1]).toBeLessThan(strong[1]);
+    expect(weak[1]).toBeGreaterThan(0);
+  });
+
+  it("says what a picked page is about, asked for only then, and leaves no empty box for a page without prose", async () => {
+    graph = { ...GRAPH, revision: "f".repeat(40) };
+    summaryOf = {
+      "concepts/support-hours.md": "Support answers on weekdays from nine to five. Urgent tickets go to the on-call engineer.",
+      "concepts/widget-pricing.md": null,
+    };
+    let release!: () => void;
+    summaryGate = new Promise<void>((r) => (release = r));
+    const pick = vi.spyOn(MapView.prototype, "pick").mockReturnValue(3);
+    await mount();
+    const asked = () => vi.mocked(fetch).mock.calls.map(([u]) => String(u)).filter((u) => u.includes("?view=summary"));
+    expect(asked().some((u) => u.includes("support-hours"))).toBe(false);
+
+    const canvas = screen.getByTestId("prime-radiant-map-canvas");
+    fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 100, clientY: 100 });
+    fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 100, clientY: 100 });
+    const card = await screen.findByTestId("prime-radiant-map-selected");
+    expect(card).toHaveTextContent("Support hours");
+    // A small line while it comes, then the text; "Open page" stays for the rest.
+    expect(within(card).getByTestId("prime-radiant-map-summary-loading")).toHaveTextContent("Reading the page…");
+    release();
+    expect(await within(card).findByTestId("prime-radiant-map-summary")).toHaveTextContent("Support answers on weekdays from nine to five.");
+    expect(within(card).queryByTestId("prime-radiant-map-summary-loading")).toBeNull();
+    expect(within(card).getByTestId("prime-radiant-map-open")).toBeInTheDocument();
+    expect(asked().filter((u) => u.endsWith("/pages/concepts/support-hours.md?view=summary"))).toHaveLength(1);
+
+    // A page with no prose: once read, no box at all.
+    pick.mockReturnValue(1);
+    fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 200, clientY: 100 });
+    fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 200, clientY: 100 });
+    await waitFor(() => expect(screen.getByTestId("prime-radiant-map-selected")).toHaveTextContent("Widget pricing"));
+    await waitFor(() => expect(screen.queryByTestId("prime-radiant-map-summary-loading")).toBeNull());
+    expect(screen.queryByTestId("prime-radiant-map-summary")).toBeNull();
+
+    // Picked again, the first page answers from the cache, at once.
+    pick.mockReturnValue(3);
+    fireEvent.pointerDown(canvas, { pointerId: 1, clientX: 300, clientY: 100 });
+    fireEvent.pointerUp(canvas, { pointerId: 1, clientX: 300, clientY: 100 });
+    expect(await screen.findByTestId("prime-radiant-map-summary")).toHaveTextContent("Urgent tickets");
+    expect(asked().filter((u) => u.includes("support-hours"))).toHaveLength(1);
   });
 
   it("gives a screen reader the pages as a list that opens them", async () => {

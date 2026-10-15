@@ -1,11 +1,12 @@
 "use client";
 
-import { useDeferredValue, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useDeferredValue, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { useT } from "@/lib/i18n";
 import type { VaultGraph } from "@/lib/prime-radiant/graph";
 import type { GraphInsights } from "@/lib/prime-radiant/graph-communities";
+import { isRelatedWeight, LINK_WEIGHT } from "@/lib/prime-radiant/graph-weights";
 import { BTN_PRIMARY, BTN_QUIET, BTN_SECONDARY, CARD_SURFACE, FIELD } from "./coding-agent-ui";
-import { API, errorText, prJson } from "./prime-radiant-ui";
+import { API, errorText, pageUrl, prJson } from "./prime-radiant-ui";
 import { STATE_DIM, STATE_HIDDEN, STATE_MATCH, STATE_SELECTED } from "./prime-radiant-map/renderer-gl";
 import { MapView, type CameraState, type MapKind } from "./prime-radiant-map/view";
 
@@ -18,9 +19,12 @@ import { MapView, type CameraState, type MapKind } from "./prime-radiant-map/vie
  * WebGL2, or for an owner who asked for less motion, it is a still 2D
  * canvas, and a screen reader gets the pages as a list.
  *
- * Hover names a page, a click picks it out with its neighbours, a double
- * click (or Enter) opens it in Browse. The search box lights up matching
- * pages and flies there; the Insights strip lists orphans, hubs and bridges.
+ * Hover names a page, a click picks it out with its neighbours and says what
+ * it is about (its summary, asked for only then), a double click (or Enter)
+ * opens it in Browse. One row above the map: the search box (it lights up
+ * matching pages and flies there), the colouring and the fit button. On the
+ * map itself, folded away until asked for: the domain legend (a click hides
+ * or shows a domain) and the Insights — orphans, hubs and bridges.
  *
  * Loaded lazily by PrimeRadiantApp, so none of this weighs on the other tabs.
  */
@@ -52,6 +56,8 @@ interface Model {
   ends: Uint32Array;
   weights: Float32Array;
   links: number;
+  /** Related hints (a shared topic or domain): drawn, never counted as links. */
+  related: number;
   offsets: Int32Array;
   adj: Int32Array;
   /** The most connected pages, which keep a label. */
@@ -132,11 +138,13 @@ export function toModel(g: VaultGraph): Model {
   const weights = new Float32Array(m);
   const offsets = new Int32Array(n + 1);
   let links = 0;
+  let related = 0;
   valid.forEach(([a, b, w], e) => {
     ends[e * 2] = a;
     ends[e * 2 + 1] = b;
     weights[e] = w;
-    if (w >= 1) links++;
+    if (w >= LINK_WEIGHT) links++;
+    else if (isRelatedWeight(w)) related++;
     offsets[a + 1]++;
     offsets[b + 1]++;
   });
@@ -168,6 +176,7 @@ export function toModel(g: VaultGraph): Model {
     ends,
     weights,
     links,
+    related,
     offsets,
     adj,
     hubs,
@@ -207,6 +216,20 @@ function warmStart(model: Model, kind: MapKind) {
   return { positions, known, settled: false };
 }
 
+/**
+ * The card's page summaries (`GET pages/<path>?view=summary`), per revision
+ * and page: a page picked again says it at once. Oldest out past the cap.
+ */
+const summaries = new Map<string, string | null>();
+const SUMMARY_CACHE = 500;
+const summaryKey = (revision: string | null, id: string) => `${revision ?? ""}\n${id}`;
+
+function keepSummary(key: string, text: string | null): void {
+  summaries.delete(key);
+  summaries.set(key, text);
+  if (summaries.size > SUMMARY_CACHE) summaries.delete(summaries.keys().next().value!);
+}
+
 function prefersFlat(): boolean {
   return typeof window !== "undefined" && !!window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
 }
@@ -225,6 +248,16 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
   const [selectedId, setSelectedId] = useState<string | null>(() => kept?.selectedId ?? null);
   const [hovered, setHovered] = useState<number | null>(null);
   const [settled, setSettled] = useState(false);
+  const [legendOpen, setLegendOpen] = useState(false);
+  const [insightsOpen, setInsightsOpen] = useState(false);
+  /** Bumped when a summary arrives (they are kept outside React, in `summaries`). */
+  const [, setSummaryArrived] = useState(0);
+  /** The summary that could not be read, so the card stops saying it is reading. */
+  const [summaryFailed, setSummaryFailed] = useState<string | null>(null);
+  const legendId = useId();
+  const insightsId = useId();
+  const legendToggleRef = useRef<HTMLButtonElement>(null);
+  const insightsToggleRef = useRef<HTMLButtonElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const viewRef = useRef<MapView | null>(null);
   const tipRef = useRef<HTMLDivElement>(null);
@@ -277,6 +310,25 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
     return () => ctl.abort();
   }, [revision, reload, t]);
 
+  // The picked page's summary: asked for once it is picked, never with the graph (thousands of pages).
+  useEffect(() => {
+    if (!model || selectedId === null || !model.index.has(selectedId)) return;
+    const key = summaryKey(model.revision, selectedId);
+    if (summaries.has(key)) return;
+    const ctl = new AbortController();
+    prJson<{ summary?: unknown }>(`${pageUrl(`${API}/pages`, selectedId)}?view=summary`, { signal: ctl.signal })
+      .then((answer) => {
+        const text = typeof answer?.summary === "string" && answer.summary.trim() !== "" ? answer.summary.trim() : null;
+        keepSummary(key, text);
+        if (!ctl.signal.aborted) setSummaryArrived((k) => k + 1);
+      })
+      .catch((err) => {
+        if ((err as Error)?.name === "AbortError" || ctl.signal.aborted) return;
+        setSummaryFailed(key);
+      });
+    return () => ctl.abort();
+  }, [model, selectedId]);
+
   // The view: one per graph and mode.
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -302,17 +354,19 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
           if (!el) continue;
           const w = view?.project(i, out) ?? -1;
           let show = !(w < 0 || out[0] < 0 || out[1] < 0 || out[0] > canvas.clientWidth || out[1] > canvas.clientHeight);
+          // Clear of its own dot, however near the camera flew.
+          const lift = show && view ? Math.min(60, view.radius(i, w)) + 3 : 8;
           if (show) {
             let width = labelWidths.current.get(i);
             if (width === undefined) labelWidths.current.set(i, (width = el.offsetWidth));
-            const x0 = out[0] - width / 2 - 2, x1 = out[0] + width / 2 + 2, y1 = out[1] - 6, y0 = y1 - 16;
+            const x0 = out[0] - width / 2 - 2, x1 = out[0] + width / 2 + 2, y1 = out[1] - lift + 2, y0 = y1 - 16;
             for (let k = 0; k < placed.length && show; k += 4) {
               show = x1 < placed[k] || x0 > placed[k + 2] || y1 < placed[k + 1] || y0 > placed[k + 3];
             }
             if (show) placed.push(x0, y0, x1, y1);
           }
           el.style.opacity = show ? "1" : "0";
-          if (show) el.style.transform = `translate(${Math.round(out[0])}px, ${Math.round(out[1]) - 8}px) translate(-50%, -100%)`;
+          if (show) el.style.transform = `translate(${Math.round(out[0])}px, ${Math.round(out[1] - lift)}px) translate(-50%, -100%)`;
         }
       },
       onCommunities(communities, insights) {
@@ -338,16 +392,20 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
     view.load({ n: model.n, ends: model.ends, weights: model.weights, groups: model.domainOf, degree: model.degree, sizes: model.sizes }, warm);
     if (kept && kept.revision === model.revision && kept.kind === mode) view.restoreCamera(kept.camera);
     return () => {
-      kept = {
-        revision: model.revision,
-        kind: mode,
-        ids: model.ids,
-        positions: view.positions().slice(),
-        settled: view.settled,
-        camera: view.camera(),
-        analysis: analysisRef.current,
-        selectedId: selectedRef.current,
-      };
+      // Left before the layout said anything: every page is still at the origin, and pages with no
+      // edge between them, started there together, could never part. Keep the last good picture.
+      if (view.hasPositions) {
+        kept = {
+          revision: model.revision,
+          kind: mode,
+          ids: model.ids,
+          positions: view.positions().slice(),
+          settled: view.settled,
+          camera: view.camera(),
+          analysis: analysisRef.current,
+          selectedId: selectedRef.current,
+        };
+      }
       view.dispose();
       viewRef.current = null;
     };
@@ -398,14 +456,16 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
     if (!model) return null;
     const keep = (e: number) => !hidden.has(model.domainOf[model.ends[e * 2]]) && !hidden.has(model.domainOf[model.ends[e * 2 + 1]]);
     const visible: number[] = [];
+    const weak: number[] = [];
     const lit: number[] = [];
     for (let e = 0; e < model.ends.length / 2; e++) {
       if (!keep(e)) continue;
       const a = model.ends[e * 2], b = model.ends[e * 2 + 1];
-      visible.push(a, b);
+      // A related hint (a shared topic or domain, not a link) is drawn fainter.
+      (isRelatedWeight(model.weights[e]) ? weak : visible).push(a, b);
       if (selected !== null && (a === selected || b === selected)) lit.push(a, b);
     }
-    return { visible: Uint32Array.from(visible), lit: Uint32Array.from(lit) };
+    return { visible: Uint32Array.from(visible), lit: Uint32Array.from(lit), weak: Uint32Array.from(weak) };
   }, [model, hidden, selected]);
 
   // Hand the view what React decided. Declared after the view's own effect, so a new view gets all three.
@@ -416,7 +476,7 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
     if (states) viewRef.current?.setStates(states);
   }, [states, mode, model]);
   useEffect(() => {
-    if (edges) viewRef.current?.setEdges(edges.visible, edges.lit);
+    if (edges) viewRef.current?.setEdges(edges.visible, edges.lit, edges.weak);
   }, [edges, mode, model]);
   useEffect(() => {
     matchCursor.current = -1;
@@ -514,12 +574,31 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
         { key: "bridges", label: t("primeRadiant.map.bridges"), hint: t("primeRadiant.map.bridgesHint"), nodes: insights.bridges },
       ]
     : [];
-  const card = selected !== null ? selected : null;
+  const card = selected;
+  const cardKey = card !== null ? summaryKey(model.revision, model.ids[card]) : null;
+  /** Undefined while it is being read; null when the page has none (or it could not be read). */
+  const cardSummary = cardKey === null ? null : summaries.has(cardKey) ? summaries.get(cardKey)! : summaryFailed === cardKey ? null : undefined;
+  const dot = (k: number) => css(model.domains[k] === "" ? GREY : rgb(k));
+  const pill = "inline-flex items-center gap-1.5 rounded-full border border-white/[0.1] bg-black/60 px-2.5 py-1 text-[11px] text-[var(--text-secondary)] backdrop-blur hover:bg-black/80 hover:text-[var(--text-primary)] cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed";
+  const overlay = "rounded-xl border border-white/[0.1] bg-[var(--win-ground,#0d1117)] shadow-xl";
+  // Escape folds an overlay away and hands the focus back to the button that opened it.
+  const onLegendKey = (e: KeyboardEvent<HTMLElement>) => {
+    if (e.key !== "Escape") return;
+    e.stopPropagation();
+    setLegendOpen(false);
+    legendToggleRef.current?.focus();
+  };
+  const onInsightsKey = (e: KeyboardEvent<HTMLElement>) => {
+    if (e.key !== "Escape") return;
+    e.stopPropagation();
+    setInsightsOpen(false);
+    insightsToggleRef.current?.focus();
+  };
 
   return (
     <div className="h-full min-h-[420px] flex flex-col gap-2" data-testid="prime-radiant-map" data-mode={mode}>
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="relative flex-1 min-w-[12rem]">
+      <div className="flex items-center gap-2" data-testid="prime-radiant-map-toolbar">
+        <div className="relative flex-1 min-w-0">
           <span className="material-symbols-rounded absolute left-2 top-1/2 -translate-y-1/2 text-[var(--text-muted)]" style={{ fontSize: 16 }} aria-hidden="true">search</span>
           <input
             type="search"
@@ -538,9 +617,9 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
           />
           {matches && resultsOpen && (
             <div
-              // Opaque (the window's own ground): the legend and the map must not show through.
+              // Opaque (the window's own ground): the map must not show through.
               // A press here keeps the field focused, so its blur does not close the list under the click.
-              className="absolute z-20 left-0 right-0 mt-1 p-1 rounded-xl border border-white/[0.1] bg-[var(--win-ground,#0d1117)] shadow-xl"
+              className={`absolute z-30 left-0 right-0 mt-1 p-1 ${overlay}`}
               onMouseDown={(e) => e.preventDefault()}
               data-testid="prime-radiant-map-results"
             >
@@ -556,7 +635,7 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
                       onClick={() => focusNode(i)}
                       data-testid="prime-radiant-map-result"
                     >
-                      <span className="w-2 h-2 rounded-full shrink-0" style={{ background: css(model.domains[model.domainOf[i]] === "" ? GREY : rgb(model.domainOf[i])) }} aria-hidden="true" />
+                      <span className="w-2 h-2 rounded-full shrink-0" style={{ background: dot(model.domainOf[i]) }} aria-hidden="true" />
                       <span className="truncate">{model.titles[i]}</span>
                       <span className="ml-auto shrink-0 text-[10px] text-[var(--text-muted)]">{domainLabel(model.domains[model.domainOf[i]])}</span>
                     </button>
@@ -571,7 +650,7 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
             </div>
           )}
         </div>
-        <div className="inline-flex rounded-lg border border-white/[0.08] p-0.5" role="group" aria-label={t("primeRadiant.map.colourBy")}>
+        <div className="inline-flex shrink-0 rounded-lg border border-white/[0.08] p-0.5" role="group" aria-label={t("primeRadiant.map.colourBy")}>
           {(["domain", "community"] as const).map((m) => (
             <button
               key={m}
@@ -588,47 +667,26 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
             </button>
           ))}
         </div>
-        <button type="button" className={BTN_SECONDARY} onClick={() => viewRef.current?.resetView()} title={t("primeRadiant.map.resetView")} aria-label={t("primeRadiant.map.resetView")}>
+        <button
+          type="button"
+          className={`${BTN_SECONDARY} shrink-0`}
+          onClick={() => viewRef.current?.resetView()}
+          title={t("primeRadiant.map.resetView")}
+          aria-label={t("primeRadiant.map.resetView")}
+          data-testid="prime-radiant-map-fit"
+        >
           <span className="material-symbols-rounded" style={{ fontSize: 15 }} aria-hidden="true">fit_screen</span>
         </button>
       </div>
 
-      <div className="flex flex-wrap gap-1 max-h-[3.25rem] overflow-y-auto" role="group" aria-label={t("primeRadiant.map.domains")} data-testid="prime-radiant-map-legend">
-        {model.domains.map((d, k) => {
-          const off = hidden.has(k);
-          return (
-            <button
-              key={d || "-"}
-              type="button"
-              aria-pressed={!off}
-              title={t("primeRadiant.map.toggleDomain", { domain: domainLabel(d) })}
-              onClick={() =>
-                setHiddenNames((h) => {
-                  const next = new Set(h);
-                  if (off) next.delete(d);
-                  else next.add(d);
-                  return next;
-                })
-              }
-              className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] cursor-pointer transition-opacity ${
-                off ? "border-white/[0.06] text-[var(--text-muted)] opacity-50" : "border-white/[0.1] text-[var(--text-secondary)] hover:bg-white/[0.06]"
-              }`}
-              data-testid="prime-radiant-map-domain"
-            >
-              <span className="w-2 h-2 rounded-full" style={{ background: css(d === "" ? GREY : rgb(k)), opacity: colourMode === "domain" ? 1 : 0.35 }} aria-hidden="true" />
-              {domainLabel(d)}
-              <span className="text-[var(--text-muted)]">{model.domainSize[k]}</span>
-            </button>
-          );
-        })}
-      </div>
-
-      <div className="relative flex-1 min-h-[240px] rounded-xl overflow-hidden border border-white/[0.06] bg-[radial-gradient(ellipse_at_center,rgba(122,162,247,0.07),transparent_70%)]">
+      <div className="relative flex-1 min-h-[300px] rounded-xl overflow-hidden border border-white/[0.06] bg-[radial-gradient(ellipse_at_center,rgba(122,162,247,0.07),transparent_70%)]">
         {mode !== "none" && (
           <canvas
             key={mode}
             ref={canvasRef}
-            className="absolute inset-0 w-full h-full touch-none outline-none focus-visible:ring-2 focus-visible:ring-[var(--coral-ring)] cursor-grab active:cursor-grabbing"
+            // The view sets the pointer itself (a hand over a page, a move cross while dragging):
+            // never the grab hand, which cursor themes such as DMZ-White do not draw at all.
+            className="absolute inset-0 w-full h-full touch-none outline-none focus-visible:ring-2 focus-visible:ring-[var(--coral-ring)] cursor-default"
             tabIndex={0}
             role="application"
             aria-label={t("primeRadiant.map.canvas", { n: model.n })}
@@ -661,8 +719,16 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
           </div>
         </div>
 
-        <div className="absolute left-2 top-2 flex items-center gap-1.5 text-[11px] text-[var(--text-muted)]" data-testid="prime-radiant-map-status">
-          <span className="rounded-full bg-black/40 px-2 py-0.5">{t("primeRadiant.map.summary", { pages: model.n, links: model.links })}</span>
+        <div className="pointer-events-none absolute left-2 top-2 flex items-center gap-1.5 text-[11px] text-[var(--text-muted)]" data-testid="prime-radiant-map-status">
+          <span className="rounded-full bg-black/40 px-2 py-0.5">
+            {t("primeRadiant.map.summary", { pages: model.n, links: model.links })}
+            {model.related > 0 && (
+              <span className="pointer-events-auto" title={t("primeRadiant.map.relatedHint")} data-testid="prime-radiant-map-related">
+                {" · "}
+                {t("primeRadiant.map.related", { n: model.related })}
+              </span>
+            )}
+          </span>
           {!settled && mode !== "none" && (
             <span className="inline-flex items-center gap-1 rounded-full bg-black/40 px-2 py-0.5">
               <span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 12 }} aria-hidden="true">progress_activity</span>
@@ -672,61 +738,158 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
           {mode === "2d" && <span className="rounded-full bg-black/40 px-2 py-0.5">{t("primeRadiant.map.flat")}</span>}
         </div>
         {model.truncated && (
-          <p className="absolute left-2 top-8 text-[11px] text-amber-200">{t("primeRadiant.map.truncated", { n: model.n })}</p>
+          <p className="pointer-events-none absolute left-2 top-8 text-[11px] text-amber-200">{t("primeRadiant.map.truncated", { n: model.n })}</p>
         )}
         {mode === "none" && (
           <p className="absolute inset-x-0 top-1/3 text-center text-xs text-[var(--text-muted)]">{t("primeRadiant.map.noCanvas")}</p>
         )}
 
         {card !== null && (
-          <div className={`${CARD_SURFACE} absolute right-2 top-2 w-[15rem] p-3 bg-black/70 backdrop-blur space-y-2`} data-testid="prime-radiant-map-selected">
-            <div className="flex items-start gap-2">
-              <span className="mt-1 w-2.5 h-2.5 rounded-full shrink-0" style={{ background: css(model.domains[model.domainOf[card]] === "" ? GREY : rgb(model.domainOf[card])) }} aria-hidden="true" />
+          <div
+            className={`${CARD_SURFACE} absolute right-2 top-2 z-20 flex w-[17rem] max-w-[calc(100%-1rem)] max-h-[calc(100%-1rem)] flex-col gap-2 p-3 !bg-black/75 backdrop-blur`}
+            data-testid="prime-radiant-map-selected"
+          >
+            <div className="flex shrink-0 items-start gap-2">
+              <span className="mt-1 w-2.5 h-2.5 rounded-full shrink-0" style={{ background: dot(model.domainOf[card]) }} aria-hidden="true" />
               <p className="text-sm font-medium text-[var(--text-primary)] break-words flex-1">{model.titles[card]}</p>
               <button type="button" className={`${BTN_QUIET} !px-1 !py-0.5`} onClick={() => setSelectedId(null)} aria-label={t("primeRadiant.map.close")} title={t("primeRadiant.map.close")}>
                 <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">close</span>
               </button>
             </div>
-            <p className="font-mono text-[10px] text-[var(--text-muted)] break-all">{model.ids[card]}</p>
-            <p className="text-[11px] text-[var(--text-secondary)]">
+            <p className="shrink-0 font-mono text-[10px] text-[var(--text-muted)] break-all">{model.ids[card]}</p>
+            <p className="shrink-0 text-[11px] text-[var(--text-secondary)]">
               {domainLabel(model.domains[model.domainOf[card]])} · {t("primeRadiant.map.connections", { n: model.degree[card] })} · {t("primeRadiant.map.sources", { n: model.sources[card] })}
             </p>
-            <button type="button" className={`${BTN_PRIMARY} w-full`} onClick={() => onOpenPage(model.ids[card])} data-testid="prime-radiant-map-open">
+            {cardSummary === undefined && (
+              <p className="shrink-0 flex items-center gap-1.5 text-[11px] text-[var(--text-muted)]" role="status" data-testid="prime-radiant-map-summary-loading">
+                <span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 12 }} aria-hidden="true">progress_activity</span>
+                {t("primeRadiant.map.summaryLoading")}
+              </p>
+            )}
+            {typeof cardSummary === "string" && (
+              <p className="min-h-0 max-h-40 overflow-y-auto pr-1 text-xs leading-relaxed text-[var(--text-secondary)]" data-testid="prime-radiant-map-summary">
+                {cardSummary}
+              </p>
+            )}
+            <button type="button" className={`${BTN_PRIMARY} w-full shrink-0`} onClick={() => onOpenPage(model.ids[card])} data-testid="prime-radiant-map-open">
               <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">open_in_new</span>
               {t("primeRadiant.map.open")}
             </button>
           </div>
         )}
 
-        <p className="absolute right-2 bottom-2 hidden @md:block rounded-full bg-black/50 px-2 py-0.5 text-[10px] text-[var(--text-muted)]">
+        <div className="absolute left-2 bottom-2 z-10 flex max-w-[calc(100%-1rem)] flex-col items-start gap-1.5">
+          {legendOpen && (
+            <div
+              id={legendId}
+              className={`w-[18rem] max-w-full max-h-56 overflow-y-auto p-2 ${overlay}`}
+              role="group"
+              aria-label={t("primeRadiant.map.domains")}
+              onKeyDown={onLegendKey}
+              data-testid="prime-radiant-map-legend"
+            >
+              <div className="flex flex-wrap gap-1">
+                {model.domains.map((d, k) => {
+                  const off = hidden.has(k);
+                  return (
+                    <button
+                      key={d || "-"}
+                      type="button"
+                      aria-pressed={!off}
+                      title={t("primeRadiant.map.toggleDomain", { domain: domainLabel(d) })}
+                      onClick={() =>
+                        setHiddenNames((h) => {
+                          const next = new Set(h);
+                          if (off) next.delete(d);
+                          else next.add(d);
+                          return next;
+                        })
+                      }
+                      className={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] cursor-pointer transition-opacity ${
+                        off ? "border-white/[0.06] text-[var(--text-muted)] opacity-50" : "border-white/[0.1] text-[var(--text-secondary)] hover:bg-white/[0.06]"
+                      }`}
+                      data-testid="prime-radiant-map-domain"
+                    >
+                      <span className="w-2 h-2 rounded-full" style={{ background: dot(k), opacity: colourMode === "domain" ? 1 : 0.35 }} aria-hidden="true" />
+                      {domainLabel(d)}
+                      <span className="text-[var(--text-muted)]">{model.domainSize[k]}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+          <button
+            ref={legendToggleRef}
+            type="button"
+            className={pill}
+            aria-expanded={legendOpen}
+            aria-controls={legendId}
+            onClick={() => setLegendOpen((o) => !o)}
+            data-testid="prime-radiant-map-legend-toggle"
+          >
+            <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">palette</span>
+            {t("primeRadiant.map.domains")}
+            <span className="text-[var(--text-muted)]">{model.domains.length}</span>
+            {hidden.size > 0 && <span className="text-amber-200/90">· {t("primeRadiant.map.hiddenDomains", { n: hidden.size })}</span>}
+            <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">{legendOpen ? "expand_more" : "expand_less"}</span>
+          </button>
+        </div>
+
+        <p className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 hidden @3xl:block whitespace-nowrap rounded-full bg-black/50 px-2 py-0.5 text-[10px] text-[var(--text-muted)]">
           {t(mode === "webgl" ? "primeRadiant.map.hint" : "primeRadiant.map.hintFlat")}
         </p>
-      </div>
 
-      <section className="flex gap-4 overflow-x-auto pb-1" aria-label={t("primeRadiant.map.insights")} data-testid="prime-radiant-map-insights">
-        {groups.map((g) => (
-          <div key={g.key} className="min-w-[12rem] flex-1" data-testid={`prime-radiant-map-insight-${g.key}`}>
-            <h3 className="text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)]" title={g.hint}>
-              {g.label} <span className="font-normal">{g.nodes.length}</span>
-            </h3>
-            <div className="mt-1 flex flex-wrap gap-1">
-              {g.nodes.length === 0 && <span className="text-[11px] text-[var(--text-muted)]">{t("primeRadiant.map.none")}</span>}
-              {g.nodes.slice(0, CHIPS).map((i) => (
-                <button
-                  key={i}
-                  type="button"
-                  className="max-w-[11rem] truncate rounded-full border border-white/[0.08] bg-white/[0.04] px-2 py-0.5 text-[11px] text-[var(--text-secondary)] hover:bg-white/[0.1] cursor-pointer"
-                  onClick={() => focusNode(i)}
-                  title={model.titles[i]}
-                >
-                  {model.titles[i]}
-                </button>
+        <div className="absolute right-2 bottom-2 z-10 flex max-w-[calc(100%-1rem)] flex-col items-end gap-1.5">
+          {insightsOpen && insights && (
+            <section
+              id={insightsId}
+              className={`w-[20rem] max-w-full max-h-72 overflow-y-auto p-3 space-y-3 ${overlay}`}
+              aria-label={t("primeRadiant.map.insights")}
+              onKeyDown={onInsightsKey}
+              data-testid="prime-radiant-map-insights"
+            >
+              {groups.map((g) => (
+                <div key={g.key} data-testid={`prime-radiant-map-insight-${g.key}`}>
+                  <h3 className="text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
+                    {g.label} <span className="font-normal">{g.nodes.length}</span>
+                  </h3>
+                  <p className="text-[10px] text-[var(--text-muted)]">{g.hint}</p>
+                  <div className="mt-1 flex flex-wrap gap-1">
+                    {g.nodes.length === 0 && <span className="text-[11px] text-[var(--text-muted)]">{t("primeRadiant.map.none")}</span>}
+                    {g.nodes.slice(0, CHIPS).map((i) => (
+                      <button
+                        key={i}
+                        type="button"
+                        className="max-w-[11rem] truncate rounded-full border border-white/[0.08] bg-white/[0.04] px-2 py-0.5 text-[11px] text-[var(--text-secondary)] hover:bg-white/[0.1] cursor-pointer"
+                        onClick={() => focusNode(i)}
+                        title={model.titles[i]}
+                      >
+                        {model.titles[i]}
+                      </button>
+                    ))}
+                    {g.nodes.length > CHIPS && <span className="px-1 text-[11px] text-[var(--text-muted)]">{t("primeRadiant.map.more", { n: g.nodes.length - CHIPS })}</span>}
+                  </div>
+                </div>
               ))}
-              {g.nodes.length > CHIPS && <span className="px-1 text-[11px] text-[var(--text-muted)]">{t("primeRadiant.map.more", { n: g.nodes.length - CHIPS })}</span>}
-            </div>
-          </div>
-        ))}
-      </section>
+            </section>
+          )}
+          <button
+            ref={insightsToggleRef}
+            type="button"
+            className={pill}
+            aria-expanded={insightsOpen && !!insights}
+            aria-controls={insightsId}
+            disabled={!insights}
+            title={insights ? t("primeRadiant.map.insightsHint") : t("primeRadiant.map.arranging")}
+            onClick={() => setInsightsOpen((o) => !o)}
+            data-testid="prime-radiant-map-insights-toggle"
+          >
+            <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">insights</span>
+            {t("primeRadiant.map.insights")}
+          </button>
+        </div>
+      </div>
 
       <div className={mode === "none" ? "max-h-64 overflow-y-auto" : "sr-only"} data-testid="prime-radiant-map-list">
         <h3 className="text-xs text-[var(--text-muted)]">{t("primeRadiant.map.list")}</h3>

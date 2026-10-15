@@ -15,7 +15,7 @@
 import type { GraphInsights } from "@/lib/prime-radiant/graph-communities";
 import type { FromEngine, StartMessage } from "./layout-engine";
 import { openLayoutPort, type LayoutPort } from "./layout-port";
-import { GLRenderer, STATE_HIDDEN, STATE_HOVER } from "./renderer-gl";
+import { GLRenderer, STATE_HIDDEN, STATE_HOVER, STATE_MATCH, STATE_SELECTED } from "./renderer-gl";
 import { FlatRenderer } from "./renderer-2d";
 
 export type MapKind = "webgl" | "2d";
@@ -26,8 +26,9 @@ export interface Renderer {
   setPositions(pos: Float32Array): void;
   setColors(rgba: Uint8Array): void;
   setStates(states: Uint8Array): void;
-  setEdges(visible: Uint32Array, highlighted: Uint32Array): void;
-  draw(vp: Float32Array, width: number, height: number, scale: number, fog: [number, number], dpr: number): void;
+  setEdges(visible: Uint32Array, highlighted: Uint32Array, weak: Uint32Array): void;
+  /** `scale` is device px per world unit at depth 1; `minPx` the smallest node radius, in device px. */
+  draw(vp: Float32Array, width: number, height: number, scale: number, fog: [number, number], dpr: number, minPx: number): void;
   dispose(): void;
 }
 
@@ -69,6 +70,14 @@ const MAX_DPR = 2;
 const SPIN = 0.00008;
 const CELL = 24;
 const FLIGHT_MS = 650;
+/**
+ * The smallest node on screen, in CSS px: a page with no links is laid out
+ * far from the rest and would otherwise be a speck of a device pixel or two.
+ * A little smaller on a map of thousands, so it stays a picture, not a carpet.
+ */
+const MIN_RADIUS = 3.5;
+const MIN_RADIUS_LARGE = 2;
+const LARGE_MAP = 4000;
 
 const ease = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
 const nextFrame = (cb: FrameRequestCallback): number =>
@@ -87,6 +96,8 @@ export class MapView {
   private port: LayoutPort | null = null;
   /** The flat view has drawn this layout's seed (it next draws the settled result). */
   private drawnOnce = false;
+  /** Positions have arrived for this graph: until then every node sits at the origin. */
+  private placed = false;
 
   private yaw = 0.6;
   private pitch = 0.3;
@@ -128,7 +139,9 @@ export class MapView {
   static create(canvas: HTMLCanvasElement, kind: MapKind, events: MapViewEvents): MapView | null {
     try {
       if (kind === "webgl") {
-        const gl = canvas.getContext("webgl2", { antialias: true, alpha: true, premultipliedAlpha: true });
+        // preserveDrawingBuffer: the Screenshot app reads canvases with drawImage, between frames,
+        // and without it a WebGL canvas reads back empty — the map came out as a blank square.
+        const gl = canvas.getContext("webgl2", { antialias: true, alpha: true, premultipliedAlpha: true, preserveDrawingBuffer: true });
         return gl ? new MapView(canvas, new GLRenderer(gl), events) : null;
       }
       const ctx = canvas.getContext("2d");
@@ -188,6 +201,7 @@ export class MapView {
     this.items = new Int32Array(n);
     this.hover = -1;
     this.drawnOnce = false;
+    this.placed = false;
     this.settled = false;
     this.renderer.setNodes(n, graph.sizes);
     const complete = warm && warm.positions.length === n * 3 && warm.known.every(Boolean);
@@ -224,6 +238,7 @@ export class MapView {
 
   private positionsArrived(positions: Float32Array, settled: boolean): void {
     this.pos.set(positions.subarray(0, this.n * 3));
+    this.placed = true;
     this.renderer.setPositions(this.pos);
     this.bounds();
     this.version++;
@@ -264,6 +279,11 @@ export class MapView {
     return this.pos;
   }
 
+  /** Whether the layout has placed the nodes yet (before that, {@link positions} are all zero). */
+  get hasPositions(): boolean {
+    return this.placed;
+  }
+
   setColors(rgba: Uint8Array): void {
     this.renderer.setColors(rgba);
     this.invalidate();
@@ -284,8 +304,9 @@ export class MapView {
     this.renderer.setStates(this.states);
   }
 
-  setEdges(visible: Uint32Array, highlighted: Uint32Array): void {
-    this.renderer.setEdges(visible, highlighted);
+  /** Edges as pairs of node indexes: links and shared sources, a selected page's own, and the related hints. */
+  setEdges(visible: Uint32Array, highlighted: Uint32Array, weak: Uint32Array = new Uint32Array(0)): void {
+    this.renderer.setEdges(visible, highlighted, weak);
     this.invalidate();
   }
 
@@ -462,6 +483,18 @@ export class MapView {
     return this.kind === "2d" ? this.zoom : this.cssH / 2 / TAN;
   }
 
+  /** The smallest radius a node is drawn at, in CSS px. */
+  minRadius(): number {
+    return this.n > LARGE_MAP ? MIN_RADIUS_LARGE : MIN_RADIUS;
+  }
+
+  /** Node `i`'s radius on screen in CSS px, at the depth {@link project} gave, grown as its state grows it. */
+  radius(i: number, depth: number): number {
+    const s = this.states[i] ?? 0;
+    const boost = s & STATE_SELECTED ? 1.7 : s & STATE_HOVER ? 1.45 : s & STATE_MATCH ? 1.25 : 1;
+    return Math.max(this.minRadius(), (this.sizes[i] * this.scale()) / Math.max(depth, 0.001)) * boost;
+  }
+
   // ── loop ────────────────────────────────────────────────────────────────
 
   private changed(): void {
@@ -501,7 +534,15 @@ export class MapView {
     if (moving) this.version++;
     this.matrix();
     const r = this.fit.r;
-    this.renderer.draw(this.vp, this.canvas.width, this.canvas.height, this.scale() * this.dpr, [this.distance - r * 0.2, this.distance + r * 1.6], this.dpr);
+    this.renderer.draw(
+      this.vp,
+      this.canvas.width,
+      this.canvas.height,
+      this.scale() * this.dpr,
+      [this.distance - r * 0.2, this.distance + r * 1.6],
+      this.dpr,
+      this.minRadius() * this.dpr,
+    );
     this.events.onFrame();
     if (moving) this.raf = nextFrame(this.frame);
     else this.last = 0;
@@ -530,6 +571,7 @@ export class MapView {
       this.cellFill = new Int32Array(cols * rows);
     } else this.cellStart.fill(0);
     const scale = this.scale();
+    const min = this.minRadius();
     const out = [0, 0];
     let maxR = 0;
     for (let i = 0; i < this.n; i++) {
@@ -541,7 +583,7 @@ export class MapView {
       this.sx[i] = out[0];
       this.sy[i] = out[1];
       this.sw[i] = w;
-      const r = Math.max(1, (this.sizes[i] * scale) / w);
+      const r = Math.max(min, (this.sizes[i] * scale) / w);
       this.sr[i] = r;
       if (r > maxR) maxR = r;
       this.cellStart[Math.floor(out[1] / CELL) * cols + Math.floor(out[0] / CELL) + 1]++;
@@ -596,6 +638,17 @@ export class MapView {
     this.hover = i;
     this.compose();
     this.invalidate();
+    this.setCursor();
+  }
+
+  /**
+   * The pointer's shape: a hand over a page, a move cross while dragging, the
+   * arrow anywhere else. Only shapes every cursor theme draws: DMZ-White,
+   * Debian's default, has no grab hand, and Chromium then shows no pointer.
+   */
+  private setCursor(): void {
+    const shape = this.down?.moved || this.pointers.size > 1 ? "move" : this.hover >= 0 ? "pointer" : "default";
+    if (this.canvas.style.cursor !== shape) this.canvas.style.cursor = shape;
   }
 
   private onDown = (e: PointerEvent) => {
@@ -610,6 +663,7 @@ export class MapView {
       if (this.down) this.down.moved = true;
       this.pinch = this.spread();
     }
+    this.setCursor();
   };
 
   private spread(): number {
@@ -641,6 +695,7 @@ export class MapView {
     if (!down.moved && Math.hypot(p.x - down.x, p.y - down.y) > 4) {
       down.moved = true;
       this.setHover(-1);
+      this.setCursor();
       this.events.onHover(null, p.x, p.y);
     }
     if (!down.moved) return;
@@ -655,6 +710,7 @@ export class MapView {
     if (this.pointers.size > 0 || !this.down) return;
     const tapped = !this.down.moved && e.type === "pointerup";
     this.down = null;
+    this.setCursor();
     if (!tapped) return;
     const i = this.pick(p.x, p.y);
     const now = performance.now();
