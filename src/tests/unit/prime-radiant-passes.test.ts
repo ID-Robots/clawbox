@@ -20,7 +20,7 @@ import {
 import { DEFAULT_COST_RATES, mergeCostRates } from "@/lib/prime-radiant/cost-rates";
 import { FlashCallError, type FlashClient } from "@/lib/prime-radiant/flash-client";
 import { createStubFlashClient, stubVerdict } from "@/lib/prime-radiant/flash-stub";
-import { buildJudgePrompt, parseJudgeResponse, readJudgeItems } from "@/lib/prime-radiant/judge";
+import { buildJudgePrompt, JudgeParseError, parseJudgeResponse, readJudgeItems } from "@/lib/prime-radiant/judge";
 import { computeNextNightlyMs } from "@/lib/prime-radiant/nightly-scheduler";
 import { buildOpusQueue, createAnthropicOpusClient, OpusUnavailableError, parseOpusResponse, runOpusTier, worstCaseUsd, type OpusClient } from "@/lib/prime-radiant/opus";
 import { vaultDir } from "@/lib/prime-radiant/paths";
@@ -135,14 +135,17 @@ describe("contradiction pass: pieces", () => {
     expect(pairHash("x", "y")).toMatch(/^[0-9a-f]{32}$/);
   });
 
-  it("reads the judge's answer strictly", () => {
+  it("reads the judge's answer, one verdict per pair", () => {
     const m = parseJudgeResponse(
       'Sure: [{"i":0,"verdict":"contradiction","why":"price differs"},{"i":0,"verdict":"compatible"},{"i":5,"verdict":"contradiction"},{"i":1,"verdict":"maybe"},{"i":2,"verdict":"unsure","why":"mail me at a@example.com"}]',
       3,
     );
-    expect([...m.keys()]).toEqual([0, 2]);
+    // Pair 0 was answered two ways, so it fails alone; 5 is out of range, "maybe" is no verdict.
+    expect([...m.keys()]).toEqual([2]);
     expect(m.get(2)?.why).toContain("[REDACTED:EMAIL]");
-    expect(parseJudgeResponse("no json", 2).size).toBe(0);
+    expect(() => parseJudgeResponse("no json", 2)).toThrow(JudgeParseError);
+    // Only out-of-range indices (a one-pair batch numbered from 1) is no usable verdict.
+    expect(() => parseJudgeResponse('[{"i":1,"verdict":"contradiction"}]', 1)).toThrow(JudgeParseError);
     const { user } = buildJudgePrompt([{ a: "x", b: "y" }]);
     expect(readJudgeItems(user)).toEqual([{ i: 0, a: "x", b: "y" }]);
   });
