@@ -106,14 +106,29 @@ verified archive the INSTALLED core writes with
 the state database, every agent database), and `state/`, a plain copy of the
 exact pre-update `openclaw.json`, `state/openclaw.sqlite` and every
 `agents/<id>/agent/openclaw-agent.sqlite` with their `-wal`/`-shm` — one
-generation, listed in `snapshot.txt`, with `recovery.txt` saying how to use it.
+generation, listed in `snapshot.txt` (each of those database files that did not
+exist is listed as `absent:<path>`), with `recovery.txt` saying how to use it.
 Only then are the trees swapped (two renames, the previous core retained at
 `<prefix>/lib/node_modules/.openclaw-previous` until the next replacement) and
 `openclaw doctor --fix --non-interactive` run on the new core. A migration that
 fails, or reports a blocker (a lost maintenance lease, changed inputs, a legacy
 store still to migrate), puts the previous core and the `state/` copy back
-before the step returns, so the gateway the guard restarts is the one the
-desktop had. The newest three recovery points are kept. The archive excludes
+before the step returns — and removes what the new core created: a database
+the snapshot recorded absent, a `-wal`/`-shm` beside a restored one, the
+database of an agent that had none — so the gateway the guard restarts is the
+one the desktop had. The newest three recovery points are kept, after a
+rollback as after a success.
+
+From just before the swap until the migration is confirmed or rolled back,
+`<prefix>/.openclaw-migration-pending` names the recovery point, both
+versions and the phase. A step cut short in between (a reboot, a power loss,
+the unit's `TimeoutStartSec`) leaves it, and the next core step settles it
+before comparing versions: with the new core in place it runs the migration
+again and rolls back to the recorded point if the core refuses; with the
+previous core still in place nothing was migrated, so the mark goes and the
+update proceeds; a rollback already begun is finished, and the following
+Retry replaces the core afresh. A mark that names no recovery point under
+`~/backups/openclaw-core-update/` stops the step untouched. The archive excludes
 workspaces (tens of gigabytes on a long-lived desktop) and the `state/`
 copy covers the default layout; an agent database at a configured path outside
 it is in the archive only. Package rollback alone never reverses a migration:
