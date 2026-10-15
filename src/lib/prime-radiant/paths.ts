@@ -14,6 +14,7 @@
 
 import path from "@/lib/runtime-path";
 import { resolveConfigRoot } from "@/lib/config-store";
+import { isPluginOwnedPath } from "./plugin-files";
 
 export function primeRadiantRoot(): string {
   const override = process.env.PRIME_RADIANT_DIR;
@@ -85,12 +86,16 @@ export function pageAbsPath(vault: string, rel: string): string {
   return abs;
 }
 
-/** True when a vault-relative path is a knowledge page (not bookkeeping). */
+/**
+ * True when a vault-relative path is a knowledge page (not bookkeeping, and
+ * not a file memory-wiki writes — `entities/index.md` and the like, see
+ * `plugin-files.ts`).
+ */
 export function isKnowledgePage(rel: string): boolean {
   if (!rel.endsWith(".md")) return false;
   const segments = rel.split("/");
   if (segments.some((s) => s.startsWith("."))) return false;
   if (segments.length > 1 && RESERVED_DIRS.has(segments[0])) return false;
   if (segments.length === 1 && RESERVED_FILES.has(segments[0])) return false;
-  return true;
+  return !isPluginOwnedPath(rel);
 }

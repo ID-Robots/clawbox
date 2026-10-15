@@ -18,6 +18,7 @@
  */
 
 import { commitPaths, git, logForPath, withVaultLock, type CommitInfo } from "./git";
+import { restorePluginOnlyEdits } from "./plugin-repair";
 import { lintSecretsInText, lintVault, type LintFinding } from "./lint";
 import { isKnowledgePage, safePagePath, vaultDir } from "./paths";
 import { notifyVaultChanged } from "./reindex-hook";
@@ -153,6 +154,8 @@ export async function revertCommit(input: { sha: string; path?: string | null },
     if (!sha) throw new HistoryError("not_found", "No such commit in the vault.", 404);
     const parent = await resolveCommit(vault, `${sha}^1`);
     if (!parent) throw new HistoryError("invalid", "The first commit of the vault cannot be reverted.", 400);
+    // A block memory-wiki wrote into a page since is no change of the owner's to protect.
+    await restorePluginOnlyEdits(vault);
     const status = await git(vault, ["status", "--porcelain", "--untracked-files=no"]);
     if (status.stdout.trim() !== "") throw new HistoryError("dirty", "The vault has uncommitted changes; try again in a moment.", 409);
     const pathArgs = page ? ["--", page] : [];

@@ -16,6 +16,7 @@ import { lintVault, type LintReport } from "./lint";
 import { pageSummary } from "./frontmatter";
 import { hasVerification, type PageFrontmatter, type SchemaError } from "./schema";
 import { currentBranch, commitCount, headCommit, type CommitInfo } from "./git";
+import { repairPluginWritesOnce, type PluginRepairResult } from "./plugin-repair";
 import { ensureMemoryWikiWiring, memoryWikiWiringStatus, type WiringPlan, type WiringResult } from "./plugin-wiring";
 import { vaultDir, safePagePath, isKnowledgePage } from "./paths";
 import { readRetiredLedger } from "./state-db";
@@ -187,12 +188,20 @@ export interface InitialiseResult {
   created: boolean;
   /** The memory-wiki wiring after this call, and whether it wrote the config. */
   plugin: WiringResult;
+  /**
+   * The one-time repair of what memory-wiki had written into the vault, when
+   * this call ran it (`ran: false` once it has run; null when it failed —
+   * the nightly pass tries again).
+   */
+  repair: PluginRepairResult | null;
 }
 
 /**
  * Make the vault and point memory-wiki at it. Idempotent: a second call makes
  * nothing and writes no config. The wiring never overwrites an owner's own
- * memory-wiki setting (that is reported as a `conflict`).
+ * memory-wiki setting (that is reported as a `conflict`). Also called on an
+ * initialised vault whose wiring still needs a write (the keys a newer
+ * ClawBox added) — the wiring and the repair are each done once.
  */
 export async function initialise(vault: string = vaultDir()): Promise<InitialiseResult> {
   const { created } = await ensureVault(vault);
@@ -202,7 +211,14 @@ export async function initialise(vault: string = vaultDir()): Promise<Initialise
   } catch (err) {
     throw new WiringWriteError(err);
   }
-  return { created, plugin };
+  let repair: PluginRepairResult | null;
+  try {
+    repair = await repairPluginWritesOnce(vault);
+  } catch (err) {
+    console.warn(`[prime-radiant] memory-wiki repair failed: ${err instanceof Error ? err.message : String(err)}`);
+    repair = null;
+  }
+  return { created, plugin, repair };
 }
 
 /** The vault is there; the memory-wiki config write is what failed. */

@@ -14,6 +14,7 @@ import path, { untraced } from "@/lib/runtime-path";
 import { parsePage, serializePage, pageSummary, type ParsedPage } from "./frontmatter";
 import { hasVerification, type PageFrontmatter } from "./schema";
 import { isKnowledgePage, pageAbsPath, RESERVED_DIRS, safePagePath, vaultDir } from "./paths";
+import { PLUGIN_GITIGNORE_LINES, stripManagedBlocks } from "./plugin-files";
 import { commitPaths, git, hasCommits, initRepo, isGitRepo, restorePaths, withVaultLock } from "./git";
 import { lintSecretsInText, lintVault, type LintFinding } from "./lint";
 import { readRetiredLedger, recordRetired } from "./state-db";
@@ -29,8 +30,9 @@ export const INDEX_FILE = "index.md";
 
 const SEED_FILES: Readonly<Record<string, string>> = {
   ".gitignore": [
-    "# memory-wiki keeps its compiled state here; it is rebuildable and not history.",
-    ".openclaw-wiki/",
+    "# OpenClaw's memory-wiki plugin keeps its state and its own generated files here;",
+    "# they are rebuildable, not knowledge, and never part of the vault's history.",
+    ...PLUGIN_GITIGNORE_LINES,
     "",
   ].join("\n"),
   [INDEX_FILE]: ["# Index", "", "Every page of this wiki is listed here, one line each.", ""].join("\n"),
@@ -218,7 +220,8 @@ export async function readVaultSnapshot(vault: string = vaultDir()): Promise<Vau
   }
   let indexBody: string | null = null;
   try {
-    indexBody = await fs.readFile(path.join(vault, INDEX_FILE), "utf8");
+    // Without memory-wiki's "## Generated" block: its links index nothing of ours.
+    indexBody = stripManagedBlocks(await fs.readFile(path.join(vault, INDEX_FILE), "utf8")).text;
   } catch {
     indexBody = null;
   }

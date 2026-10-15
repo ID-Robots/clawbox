@@ -12,6 +12,7 @@
  */
 
 import yaml from "js-yaml";
+import { stripManagedBlocks } from "./plugin-files";
 import {
   FRONTMATTER_KEY_ORDER,
   validateFrontmatter,
@@ -41,9 +42,16 @@ export type ParsedPage =
   | { ok: true; frontmatter: PageFrontmatter; body: string }
   | { ok: false; errors: SchemaError[]; body: string; raw: unknown };
 
-/** Parse and validate a page file's text. Never throws. */
+/**
+ * Parse and validate a page file's text. Never throws. The body comes back
+ * without memory-wiki's managed blocks (a "## Related" list the plugin
+ * appended): they are the plugin's, not the page's — no length, link or
+ * summary rule counts them, and a page written back from its parse drops
+ * them.
+ */
 export function parsePage(text: string): ParsedPage {
-  const { yamlText, body } = splitFrontmatter(text);
+  const { yamlText, body: rawBody } = splitFrontmatter(text);
+  const body = stripManagedBlocks(rawBody).text;
   if (yamlText === null) {
     return { ok: false, errors: [{ field: "", message: "no frontmatter block" }], body, raw: null };
   }

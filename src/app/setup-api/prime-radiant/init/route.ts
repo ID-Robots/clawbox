@@ -1,8 +1,11 @@
 /**
- * POST /setup-api/prime-radiant/init — make the vault and point memory-wiki
- * at it. Idempotent: a second call makes nothing and writes no config. The
- * read routes never create the vault; the app calls this when status says
- * `initialised: false`.
+ * POST /setup-api/prime-radiant/init — make the vault, point memory-wiki
+ * at it (as a reader: its vault writers switched off) and, once, take out
+ * what the plugin had already written into the vault. Idempotent: a second
+ * call makes nothing and writes no config. The read routes never create the
+ * vault; the app calls this when status says `initialised: false`, or when
+ * an initialised vault's wiring still `needs-write` (keys a newer ClawBox
+ * added).
  *
  * OWNER ONLY, cookie AND same origin: it writes openclaw.json, so the MCP
  * bearer (which `requireSession` admits) and a cross-site page riding the

@@ -308,11 +308,15 @@ export type BuiltPage =
   | { ok: true; path: string; frontmatter: PageFrontmatter; body: string; updated: boolean }
   | { ok: false; reason: "verified-page"; path: string };
 
+/** File names a page never takes: `<folder>/index.md` is memory-wiki's (see plugin-files.ts). */
+const RESERVED_PAGE_SLUGS: ReadonlySet<string> = new Set(["index"]);
+
 function pathFor(type: PageType, title: string, taken: ReadonlySet<string>): string {
   const folder = folderForType(type);
   const base = slugify(title, 80);
-  let candidate = `${folder}/${base}.md`;
-  for (let n = 2; taken.has(candidate) && n < 10_000; n++) candidate = `${folder}/${base}-${n}.md`;
+  const first = RESERVED_PAGE_SLUGS.has(base) ? 2 : 1;
+  let candidate = first === 1 ? `${folder}/${base}.md` : `${folder}/${base}-${first}.md`;
+  for (let n = first + 1; taken.has(candidate) && n < 10_000; n++) candidate = `${folder}/${base}-${n}.md`;
   return candidate;
 }
 

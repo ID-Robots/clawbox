@@ -85,6 +85,7 @@ import {
   type IngestJob,
 } from "./ingest-store";
 import { primeRadiantRoot, vaultDir } from "./paths";
+import { repairPluginWritesOnce } from "./plugin-repair";
 import { DEFAULT_INGEST_PARALLEL, MAX_INGEST_PARALLEL, effectiveCostRates, readSettings } from "./settings";
 import { readRetiredLedger, stateDbPathFor, syncActiveClaims } from "./state-db";
 import { INDEX_FILE, VaultLintBlockedError, ensureVault, readVaultSnapshot, vaultOperation } from "./vault";
@@ -273,6 +274,12 @@ export async function startIngest(input: IngestInput, deps: IngestDeps = {}): Pr
   const vault = deps.vault ?? vaultDir();
   const now = deps.now ?? (() => new Date());
   await ensureVault(vault);
+  // The box's own vault (not a nightly worktree): what memory-wiki wrote into it goes first, once.
+  if (!deps.vault) {
+    await repairPluginWritesOnce(vault, now).catch((err) => {
+      console.warn(`[prime-radiant] memory-wiki repair failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  }
   // Checked again after the await: two starts that arrived together both passed the first look.
   const raced = runningJobId();
   if (raced) throw new IngestBusyError(raced);
