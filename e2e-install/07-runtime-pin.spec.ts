@@ -104,8 +104,8 @@ test.describe("the runtime and the core the install actually left behind", () =>
     // status is not trusted alone — the JSON verdict is read too.
     //
     // While an offline maintenance run owns the state database (the gateway's
-    // start can begin one), the core refuses to read and says to "retry when
-    // it finishes" — so a validate that lands in that window is asked again,
+    // start can begin one), the core refuses to read and says to retry when it
+    // finishes — so a validate that lands in that window is asked again,
     // as the core instructs, rather than read as a verdict. Bounded: a
     // maintenance that never ends still fails below, in the core's words.
     let out = "";
@@ -114,7 +114,11 @@ test.describe("the runtime and the core the install actually left behind", () =>
         ["bash", "-lc", "/home/clawbox/.npm-global/bin/openclaw config validate --json; echo \"__exit=$?\""],
         { user: "clawbox", timeoutMs: 120_000 },
       );
-      if (!out.includes("is undergoing offline maintenance")) break;
+      // Both of the core's admission refusals end in this instruction: "…is
+      // undergoing offline maintenance; retry when it finishes." and, for an
+      // owner record caught half-written, "…could not be verified; retry
+      // after maintenance finishes."
+      if (!/retry (?:when it|after maintenance) finishes/.test(out)) break;
       await new Promise((resolve) => setTimeout(resolve, 5_000));
     }
     const exit = /__exit=(\d+)/.exec(out)?.[1];
