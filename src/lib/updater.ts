@@ -42,6 +42,11 @@ import {
 import { hasX64DesktopIntegration, hasX64Install, X64_DESKTOP_CORE_STEP_TIMEOUT_MS } from "./x64-integration";
 import { UNIT_JOB_SETTLE_BUDGET_MS, describeUnitState, runUnitJob } from "./gateway-unit-job";
 import {
+  OpenclawStateMaintenanceError,
+  isOpenclawMaintenanceRefusal,
+  withOpenclawMaintenanceRetry,
+} from "./openclaw-maintenance";
+import {
   X64_ROOT_STEPS_SKIPPED,
   classifyX64RootStepExit,
   classifyX64RootStepGap,
@@ -2090,11 +2095,13 @@ async function runOpenclawDoctorFix(): Promise<void> {
   // No openclaw binary on the Hermes edition — nothing to doctor.
   if (openclawIsAbsent()) return;
   try {
-    await execFile(openclawBin(), ["doctor", "--fix", "--yes", "--non-interactive"], {
-      timeout: DOCTOR_FIX_TIMEOUT_MS,
+    // Asked again while another holder has the state under maintenance: the
+    // core refuses before it acts (`@/lib/openclaw-maintenance`).
+    await withOpenclawMaintenanceRetry((timeout) => execFile(openclawBin(), ["doctor", "--fix", "--yes", "--non-interactive"], {
+      timeout,
       maxBuffer: 2 * 1024 * 1024,
       env: doctorChildEnv(),
-    });
+    }), { timeoutMs: DOCTOR_FIX_TIMEOUT_MS, label: "openclaw doctor --fix" });
   } catch (err) {
     // WHICH failure this was, and what the owner can do about it (TASK-754).
     // A doctor blocked by a legacy exec-approvals file migrated NOTHING, and
@@ -2185,8 +2192,12 @@ async function askCoreToValidateConfig(): Promise<CoreConfigVerdict | null> {
   let accepted = true;
   let text: string;
   try {
-    const { stdout } = await execFile(openclawBin(), ["config", "validate", "--json"], {
-      timeout: 60_000,
+    // A validate that lands while a gateway start or a doctor run holds the
+    // state is refused with "retry when it finishes", worded as `valid:false`
+    // on `<root>`. Asked again; still refused, it is NO verdict (below), never
+    // the core refusing this device's configuration.
+    const { stdout } = await withOpenclawMaintenanceRetry((timeout) => execFile(openclawBin(), ["config", "validate", "--json"], {
+      timeout,
       maxBuffer: 2 * 1024 * 1024,
       // SIGKILL at the deadline, the counterpart of the `-k 5` the boot
       // script's validate bounds carry (TASK-741): node's `execFile` sends
@@ -2199,9 +2210,10 @@ async function askCoreToValidateConfig(): Promise<CoreConfigVerdict | null> {
       // every later doctor exactly as the original file does.
       killSignal: "SIGKILL",
       env: openclawChildEnv(),
-    });
+    }), { timeoutMs: 60_000, label: "openclaw config validate" });
     text = stdout ?? "";
   } catch (err) {
+    if (err instanceof OpenclawStateMaintenanceError) return null;
     // The core prints the verdict as JSON on stdout and exits 1 when it
     // refuses. Any other non-zero exit carries no verdict at all.
     accepted = false;
@@ -2230,6 +2242,9 @@ async function askCoreToValidateConfig(): Promise<CoreConfigVerdict | null> {
       return { accepted, payload: null };
     }
     text = commandOutput(err);
+    // The core's maintenance refusal is about who holds the state, not about
+    // the config: no verdict, whatever its payload says.
+    if (isOpenclawMaintenanceRefusal(text)) return null;
   }
   let parsed: unknown;
   try {
@@ -3121,11 +3136,11 @@ async function clearRepairMarkerAfterPayloadRepair(pluginId: string): Promise<vo
   const switchedOff = await clawboxDisabledEntryId(pluginId).catch(() => null);
   if (switchedOff) {
     try {
-      await execFile(
+      await withOpenclawMaintenanceRetry((timeout) => execFile(
         openclawBin(),
         ["plugins", "enable", switchedOff, "--accept-capabilities"],
-        { timeout: 60_000, maxBuffer: 4 * 1024 * 1024 },
-      );
+        { timeout, maxBuffer: 4 * 1024 * 1024 },
+      ), { timeoutMs: 60_000, label: "openclaw plugins enable" });
     } catch (err) {
       console.warn(
         `[Updater] "${switchedOff}" was reinstalled but could not be switched back on; `
@@ -3241,11 +3256,11 @@ async function reinstallManagedPluginPayload(
   let lastError: unknown;
   for (const spec of specs) {
     try {
-      await execFile(
+      await withOpenclawMaintenanceRetry((timeout) => execFile(
         openclawBin(),
         ["plugins", "install", spec, "--force", "--accept-capabilities"],
-        { timeout: 360_000, maxBuffer: 4 * 1024 * 1024 },
-      );
+        { timeout, maxBuffer: 4 * 1024 * 1024 },
+      ), { timeoutMs: 360_000, label: "openclaw plugins install" });
       return true;
     } catch (err) {
       lastError = err;
@@ -3280,11 +3295,11 @@ async function reinstallManagedPluginPayload(
  */
 async function recordPluginCapabilityConsent(pluginId: string): Promise<void> {
   try {
-    await execFile(
+    await withOpenclawMaintenanceRetry((timeout) => execFile(
       openclawBin(),
       ["plugins", "enable", pluginId, "--accept-capabilities"],
-      { timeout: 60_000, maxBuffer: 4 * 1024 * 1024 },
-    );
+      { timeout, maxBuffer: 4 * 1024 * 1024 },
+    ), { timeoutMs: 60_000, label: "openclaw plugins enable" });
     // The OTHER repair path for the same state (TASK-606). A marker the boot
     // script wrote and only the boot script cleared would leave a permanent
     // "Needs repair" badge on a plugin this update just consented — the false

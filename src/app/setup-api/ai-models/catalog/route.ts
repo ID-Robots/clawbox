@@ -18,6 +18,7 @@ import {
   subscriptionSurfaceProvider,
 } from "@/lib/provider-models";
 import { forgetProviderEnumeration, recordProviderEnumeration } from "@/lib/provider-runnable";
+import { isOpenclawMaintenanceRefusal, withOpenclawMaintenanceRetry } from "@/lib/openclaw-maintenance";
 
 export const dynamic = "force-dynamic";
 
@@ -1203,7 +1204,20 @@ function toFetchResult(
   return { models, diagnostic, emptyIsAnswer };
 }
 
+/**
+ * `openclaw models list` for one provider, asked again while the core's state
+ * is under offline maintenance (a gateway start, a doctor run). The refusal
+ * is a parseable `{ok:false}` answer, which used to keep the previous
+ * catalogue with the core's sentence as the reason; see `@/lib/openclaw-maintenance`.
+ */
 function fetchOpenclawCatalog(provider: string): Promise<CatalogFetchResult> {
+  return withOpenclawMaintenanceRetry(
+    (timeoutMs) => fetchOpenclawCatalogOnce(provider, timeoutMs),
+    { timeoutMs: REFRESH_TIMEOUT_MS, label: "openclaw models list" },
+  );
+}
+
+function fetchOpenclawCatalogOnce(provider: string, timeoutMs: number): Promise<CatalogFetchResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(openclawBin(), ["models", "list", "--provider", provider, "--all", "--json"], {
       stdio: ["ignore", "pipe", "pipe"],
@@ -1222,8 +1236,8 @@ function fetchOpenclawCatalog(provider: string): Promise<CatalogFetchResult> {
       fn();
     };
     const timer = setTimeout(() => {
-      finish(() => reject(new Error(`openclaw timed out after ${REFRESH_TIMEOUT_MS}ms`)));
-    }, REFRESH_TIMEOUT_MS);
+      finish(() => reject(new Error(`openclaw timed out after ${timeoutMs}ms`)));
+    }, timeoutMs);
     child.stdout.on("data", (b: Buffer) => {
       stdout += b.toString("utf8");
       // openclaw's compile-cache wrapper keeps a grandchild holding our
@@ -1243,6 +1257,12 @@ function fetchOpenclawCatalog(provider: string): Promise<CatalogFetchResult> {
         return;
       }
       clearTimeout(timer);
+      // The core's maintenance refusal parses too (`{ok:false,error}`): it is
+      // a question to ask again, not an empty catalogue.
+      if (parsed.ok === false && isOpenclawMaintenanceRefusal(`${JSON.stringify(parsed.error ?? "")}\n${stderr}`)) {
+        finish(() => reject(new Error(`openclaw models list: ${JSON.stringify(parsed.error ?? "")}`)));
+        return;
+      }
       finish(() => {
         // A payload that parses but cannot be transformed is a refresh that
         // FAILED, not one that never ended: rejecting records the backoff and

@@ -39,6 +39,7 @@ import {
 import { CLAWBOX_AI_MODEL_BY_TIER } from "@/lib/clawbox-ai-models";
 import { needsClawboxAiFlashPolicyRepair } from "@/lib/clawbox-ai-chat-policy";
 import { isConfigMutationConflict } from "@/lib/config-conflict";
+import { withOpenclawMaintenanceRetry } from "@/lib/openclaw-maintenance";
 
 const exec = promisify(execFile);
 
@@ -1268,6 +1269,19 @@ function spawnOpenclaw(args: string[], options: SpawnOpenclawOptions = {}): Prom
   if (openclawIsAbsent()) {
     return Promise.reject(new OpenclawUnavailableError());
   }
+  // The core refuses every command that reads its config while a gateway start
+  // or a doctor run holds the state for maintenance, and says to retry when it
+  // finishes; it refuses before acting, so the command is asked again here,
+  // inside the caller's own timeout. See `@/lib/openclaw-maintenance`. The
+  // first two words name it in the log: they are the verb, never a value.
+  const timeoutMs = options.timeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS;
+  return withOpenclawMaintenanceRetry(
+    (remainingMs) => spawnOpenclawOnce(args, { ...options, timeoutMs: remainingMs }),
+    { timeoutMs, label: `openclaw ${(options.labelArgs ?? args).slice(0, 2).join(" ")}` },
+  );
+}
+
+function spawnOpenclawOnce(args: string[], options: SpawnOpenclawOptions = {}): Promise<string> {
   const bin = findOpenclawBin();
   const { uid, gid, captureStdout = false, stdinData } = options;
   const timeoutMs = options.timeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS;

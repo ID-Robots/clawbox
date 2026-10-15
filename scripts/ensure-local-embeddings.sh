@@ -43,6 +43,12 @@ case "${1:-}" in
 esac
 
 OPENCLAW_BIN="${OPENCLAW_BIN:-/home/clawbox/.npm-global/bin/openclaw}"
+# The core refuses a config read while a gateway start or a doctor run holds its
+# state for offline maintenance, and says to retry when it finishes. This
+# script is launched from the gateway's own pre-start, i.e. exactly as a gateway
+# starts; openclaw-maintenance-retry.sh beside it asks again.
+OPENCLAW_RETRY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/openclaw-maintenance-retry.sh"
+[ -x "$OPENCLAW_RETRY" ] || OPENCLAW_RETRY=/usr/bin/env
 OPENCLAW_CONFIG="${OPENCLAW_CONFIG:-/home/clawbox/.openclaw/openclaw.json}"
 # --- the CLI must write the file this script reads --------------------------
 # `openclaw config set` and `openclaw memory index` do not read OPENCLAW_CONFIG
@@ -370,7 +376,7 @@ write_cfg() {
   local payload
   payload="$(embed_settings_json)" || return 1
   [ -n "$payload" ] || return 1
-  "$OPENCLAW_BIN" config set "$MEMORY_SEARCH_KEY" "$payload" --strict-json --merge >/dev/null 2>&1
+  "$OPENCLAW_RETRY" "$OPENCLAW_BIN" config set "$MEMORY_SEARCH_KEY" "$payload" --strict-json --merge >/dev/null 2>&1
 }
 # What the CLI wrote is not taken on its exit code: the file is read back. A
 # CLI that answered 0 after writing another tree (see the pin at the top) or
@@ -428,7 +434,7 @@ if [ "$(state_get reindex_pending)" != "1" ]; then
   log "the index is already built for this embedder — no reindex needed"
   exit 0
 fi
-if "$OPENCLAW_BIN" memory index --force >/dev/null 2>&1; then
+if "$OPENCLAW_RETRY" "$OPENCLAW_BIN" memory index --force >/dev/null 2>&1; then
   state_set_reindex_pending 0
   log "forced a full memory reindex for the new embedding provider"
 else

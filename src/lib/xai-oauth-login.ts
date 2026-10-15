@@ -57,6 +57,11 @@
 import { spawn, type ChildProcess } from "child_process";
 import { readdirSync, readFileSync } from "fs";
 import { findOpenclawBin, spawnOpenclawCli } from "@/lib/openclaw-config";
+import {
+  MAINTENANCE_RETRY_PAUSE_MS,
+  MAINTENANCE_RETRY_WINDOW_MS,
+  isOpenclawMaintenanceRefusal,
+} from "@/lib/openclaw-maintenance";
 
 /** The one profile id the xAI credential lives under, either mode. */
 export const XAI_PROFILE_ID = "xai:default";
@@ -471,9 +476,11 @@ export async function startXaiLogin(opts: {
     return { status: "failed", detail: "The sign-in was cancelled, or replaced by another one, before it started." };
   }
   cancelXaiLogin();
+  // One launch, used again when the core refused the start for maintenance.
+  const launch = (): ChildProcess => xaiLoginSpawn.spawn(findOpenclawBin(), xaiLoginArgs(opts.replaceExisting));
   let child: ChildProcess;
   try {
-    child = xaiLoginSpawn.spawn(findOpenclawBin(), xaiLoginArgs(opts.replaceExisting));
+    child = launch();
   } catch (err) {
     return { status: "failed", detail: `Could not start the OpenClaw sign-in: ${err instanceof Error ? err.message : String(err)}` };
   }
@@ -507,14 +514,46 @@ export async function startXaiLogin(opts: {
       }
     }
   };
-  child.stdout?.on("data", append);
-  child.stderr?.on("data", append);
-  child.on("error", (err) => {
-    settle(login, { status: "failed", detail: `Could not run the OpenClaw sign-in: ${err.message}` });
-  });
-  child.on("close", (code) => {
+  // A refusal BEFORE the device code is the core's "retry when it finishes":
+  // its state was under offline maintenance (a gateway start, a doctor run),
+  // and the sign-in had not begun. Asked again, as the core says, inside the
+  // window; a sign-in that already showed its code is never restarted.
+  const maintenanceRefusedStart = (): boolean =>
+    isOpenclawMaintenanceRefusal(login.output) && !parseXaiDeviceLogin(login.output).verificationUrl;
+  const wire = (proc: ChildProcess) => {
+    proc.stdout?.on("data", append);
+    proc.stderr?.on("data", append);
+    proc.on("error", (err) => {
+      settle(login, { status: "failed", detail: `Could not run the OpenClaw sign-in: ${err.message}` });
+    });
+    proc.on("close", (code) => onClose(code));
+  };
+  const onClose = (code: number | null) => {
     if (code === 0) {
       settle(login, { status: "complete" });
+      return;
+    }
+    if (code !== null && !login.result && pending === login && maintenanceRefusedStart()) {
+      if (Date.now() - login.startedAt + MAINTENANCE_RETRY_PAUSE_MS <= MAINTENANCE_RETRY_WINDOW_MS) {
+        const again = setTimeout(() => {
+          if (login.result || pending !== login) return;
+          login.output = "";
+          try {
+            login.child = launch();
+          } catch (err) {
+            settle(login, { status: "failed", detail: `Could not start the OpenClaw sign-in: ${err instanceof Error ? err.message : String(err)}` });
+            return;
+          }
+          wire(login.child);
+        }, MAINTENANCE_RETRY_PAUSE_MS);
+        again.unref?.();
+        login.timers.push(again);
+        return;
+      }
+      settle(login, {
+        status: "failed",
+        detail: "OpenClaw is finishing maintenance on its data and did not start the sign-in in time. Try again in a minute.",
+      });
       return;
     }
     settle(login, {
@@ -524,7 +563,8 @@ export async function startXaiLogin(opts: {
         : `The sign-in did not complete (exit ${code}).`,
       output: outputTail(login.output) || undefined,
     });
-  });
+  };
+  wire(child);
 
   const deadline = setTimeout(() => {
     if (login.result || parseXaiDeviceLogin(login.output).verificationUrl) return;
@@ -533,7 +573,7 @@ export async function startXaiLogin(opts: {
       detail: "The sign-in did not show a verification link. This is what OpenClaw printed:",
       output: outputTail(login.output) || "(nothing)",
     });
-    kill(child);
+    kill(login.child);
   }, PARSE_DEADLINE_MS);
   deadline.unref?.();
   login.timers.push(deadline);

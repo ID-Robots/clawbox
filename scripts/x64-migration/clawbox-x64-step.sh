@@ -536,8 +536,17 @@ update_openclaw() {
     replace_openclaw_core "${current:-none}" "$target" || return 1
   fi
   reapply_owner_core_patches || return $?
-  # Validate without rewriting configuration or running a second migration.
-  as_owner "$NPM_PREFIX/bin/openclaw" config validate --json </dev/null || return $?
+  # Validate without rewriting configuration or running a second migration,
+  # through the mirror's retry wrapper: the core refuses a config read while a
+  # gateway start or a doctor run holds its state for maintenance and says to
+  # retry when it finishes; still refused after its window, it exits 75. A
+  # mirror cut from a branch that predates the wrapper validates as before.
+  if [ -f "$MIRROR/scripts/openclaw-maintenance-retry.sh" ]; then
+    as_owner /bin/bash "$MIRROR/scripts/openclaw-maintenance-retry.sh" \
+      "$NPM_PREFIX/bin/openclaw" config validate --json </dev/null || return $?
+  else
+    as_owner "$NPM_PREFIX/bin/openclaw" config validate --json </dev/null || return $?
+  fi
   if [ "$current" != "$target" ]; then
     echo "OpenClaw $target installed; configuration accepted"
   else
