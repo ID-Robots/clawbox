@@ -8,7 +8,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { createHashEmbedder, JUDGE_BATCH_PAIRS, runContradictionPass } from "@/lib/prime-radiant/contradictions";
+import { createHashEmbedder, fullComparisonDone, JUDGE_BATCH_PAIRS, readDeferredClaims, runContradictionPass } from "@/lib/prime-radiant/contradictions";
 import { DEFAULT_COST_RATES } from "@/lib/prime-radiant/cost-rates";
 import { FlashCallError, type FlashClient, type FlashRequest } from "@/lib/prime-radiant/flash-client";
 import { jsonObjectsIn, JudgeParseError, parseJudgeResponse, readJudgeItems } from "@/lib/prime-radiant/judge";
@@ -233,5 +233,86 @@ describe("contradiction pass: small batches", () => {
     expect(r.failedBatches).toBe(batches);
     expect(r.deferredPairs).toBe(r.pairs);
     expect(r.judged).toBe(0);
+  });
+});
+
+describe("contradiction pass: what a failed pass owes the next one", () => {
+  const failing = (): FlashClient => ({
+    model: "deepseek-v4-flash",
+    async complete() {
+      throw new FlashCallError("server", "upstream 502");
+    },
+  });
+
+  it("carries the claims of unjudged pairs into a later SCOPED pass, which raises them and clears the debt", async () => {
+    const vault = vaultDir();
+    const first = await runContradictionPass(manyClaims(), { stateVault: vault, scope: null, client: failing(), embedder: createHashEmbedder(), retry: noSleep });
+    expect(first.deferredPairs).toBe(first.pairs);
+    expect(first.complete).toBe(false);
+    expect(first.deferredClaims).toBe(21);
+    expect(readDeferredClaims(vault).size).toBe(21);
+    expect(fullComparisonDone(vault)).toBe(false);
+
+    // A night that changed no page: before the carry-over this compared nothing.
+    const client = scripted((items) => fenced(items, "contradiction"));
+    const second = await runContradictionPass(manyClaims(), { stateVault: vault, scope: [], client, embedder: createHashEmbedder(), retry: noSleep });
+    expect(second.skipped).toBeNull();
+    expect(second.queried).toBe(21);
+    expect(second.carried).toBe(21);
+    expect(second.judged).toBe(first.pairs);
+    expect(second.reviewItems.length).toBe(first.pairs);
+    expect(second.complete).toBe(true);
+    expect(readDeferredClaims(vault).size).toBe(0);
+    // A scoped pass is never the full comparison, however complete.
+    expect(fullComparisonDone(vault)).toBe(false);
+
+    // Nothing is owed any more: the next quiet night compares nothing and asks nobody.
+    const quiet = scripted((items) => fenced(items));
+    const third = await runContradictionPass(manyClaims(), { stateVault: vault, scope: [], client: quiet, embedder: createHashEmbedder(), retry: noSleep });
+    expect(third.skipped).toBe("nothing_to_compare");
+    expect(third.carried).toBe(0);
+    expect(quiet.sizes).toEqual([]);
+  });
+
+  it("keeps only the claims of the pairs still unjudged, and records a full comparison once nothing is owed", async () => {
+    const vault = vaultDir();
+    let poisoned: Set<string> | null = null;
+    const client = scripted((items, call) => {
+      if (call === 0) poisoned = new Set(items.map((it) => `${it.a}|${it.b}`));
+      if (items.every((it) => poisoned!.has(`${it.a}|${it.b}`))) return "no verdicts today";
+      return fenced(items);
+    });
+    const first = await runContradictionPass(manyClaims(), { stateVault: vault, scope: null, client, embedder: createHashEmbedder(), retry: noSleep, parallel: 1 });
+    expect(first.deferredPairs).toBe(JUDGE_BATCH_PAIRS);
+    const owed = readDeferredClaims(vault);
+    expect(owed.size).toBe(first.deferredClaims);
+    expect(owed.size).toBeGreaterThan(0);
+    expect(owed.size).toBeLessThan(21);
+    expect(fullComparisonDone(vault)).toBe(false);
+
+    const full = await runContradictionPass(manyClaims(), { stateVault: vault, scope: null, client: scripted((items) => fenced(items)), embedder: createHashEmbedder(), retry: noSleep });
+    expect(full.complete).toBe(true);
+    expect(readDeferredClaims(vault).size).toBe(0);
+    expect(fullComparisonDone(vault)).toBe(true);
+  });
+
+  it("owes every claim in scope when the embedder cannot answer", async () => {
+    const vault = vaultDir();
+    const broken = { identity: async () => "broken", embed: async () => Promise.reject(new Error("embedder down")) };
+    const r = await runContradictionPass(manyClaims(), { stateVault: vault, scope: null, client: failing(), embedder: broken, retry: noSleep });
+    expect(r.skipped).toBe("embedder_unavailable");
+    expect(r.complete).toBe(false);
+    expect(readDeferredClaims(vault).size).toBe(21);
+  });
+
+  it("drops a deferred claim the vault no longer holds", async () => {
+    const vault = vaultDir();
+    await runContradictionPass(manyClaims(), { stateVault: vault, scope: null, client: failing(), embedder: createHashEmbedder(), retry: noSleep });
+    const smaller = snapshot({
+      "concepts/catalogue-0.md": pageText({ title: "Catalogue 0", claims: [claim("acme-sales/catalogue-0/widget-0", "The widget model 0 costs 10 EUR per unit in region 0.")] }),
+    });
+    const r = await runContradictionPass(smaller, { stateVault: vault, scope: [], client: scripted((items) => fenced(items)), embedder: createHashEmbedder(), retry: noSleep });
+    expect(r.skipped).toBe("nothing_to_compare");
+    expect(readDeferredClaims(vault).size).toBe(0);
   });
 });
