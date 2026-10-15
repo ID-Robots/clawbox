@@ -136,9 +136,10 @@ export async function GET() {
   return NextResponse.json({
     ...state,
     os: await readOsTimeZone(),
-    // Whether a browser's offer would be taken. A zone a PERSON chose is never
-    // overridden by whoever happens to open the dashboard next.
-    acceptsAdoption: state.source !== "explicit",
+    // Whether a browser's offer would be taken: only while the box has no zone,
+    // or still owes the harness the one it adopted. After that it changes only
+    // in Settings (see `transition`).
+    acceptsAdoption: !state.timezone || (state.source !== "explicit" && !state.applied),
   });
 }
 
@@ -199,17 +200,16 @@ export async function POST(request: Request) {
 async function transition(tz: string, adopting: boolean): Promise<NextResponse> {
   const state = await readState();
 
-  // ADOPTION is a repair, not a sync. The desktop offers the browser's zone on
-  // every load so a box that shipped before this existed heals on the owner's
-  // next visit; a zone a PERSON chose is never overwritten by it.
-  //
-  // It is deliberately NOT once-per-box. "First browser to open the desktop
-  // wins, for ever" is the failure the one-time rule creates: a box QA'd in one
-  // country and used in another would keep the wrong zone with no way back. An
-  // adopted zone therefore follows the owner's browser, which means a support
-  // engineer looking from elsewhere moves it — and the owner's next load moves
-  // it back. Self-correcting beats permanently wrong.
-  if (adopting && state.source === "explicit") {
+  // ADOPTION IS ONCE PER BOX (owner's ruling, 2026-10-15): a browser's zone is
+  // taken only while the box has none, and after that the zone changes only
+  // in Settings. It used to follow every browser that opened the desktop, and
+  // two owner browsers in different zones ping-ponged it all day (seven
+  // rewrites on one box), each one a write of the harness config — two of
+  // them inside a gateway's startup, which stopped the gateway. The kiosk and
+  // any other browser are bound by the same rule. The one repeat is the same
+  // zone again while the harness has not taken it yet, which is a retry and
+  // not a change.
+  if (adopting && state.timezone && (state.source === "explicit" || state.timezone !== tz)) {
     return NextResponse.json({ success: true, changed: false, timezone: state.timezone });
   }
   if (adopting && state.timezone === tz && state.applied) {

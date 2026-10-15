@@ -19,11 +19,12 @@ import { useEffect } from "react";
  * would make it pass in e2e. The wizard hands off to `/` when it finishes, and
  * the desktop is where the box learns its zone.
  *
- * ADOPTION, not synchronisation, and the SERVER owns the rule: a zone a person
- * chose explicitly is never overwritten by whoever opens the dashboard next.
- * An adopted one does follow the owner's browser, deliberately — "the first
- * browser to open the desktop wins for ever" would strand a box QA'd in one
- * country and used in another, and self-correcting beats permanently wrong.
+ * ADOPTION ONCE, and the SERVER owns the rule (owner's ruling, 2026-10-15):
+ * the browser's zone is offered only while the box has none, and after that
+ * the zone changes only in Settings. It used to follow every browser that
+ * opened the desktop, and two of the owner's browsers in different zones
+ * rewrote it back and forth all day. Other browsers, the kiosk included, never
+ * write it once the box has one.
  *
  * Renders nothing and never reports a failure to the owner: an offline load,
  * or one where the harness write did not land, simply asks again next time —
@@ -54,13 +55,14 @@ export default function TimezoneAdopter() {
           acceptsAdoption?: boolean;
         };
         if (cancelled) return;
-        // The owner chose one — leave it alone.
+        // The owner chose one, or the box already took one: leave it alone.
         if (current.acceptsAdoption === false) return;
-        // Already this zone AND actually applied. `applied` is the load-bearing
-        // half: a box whose harness write failed has the zone recorded and the
-        // agent still in UTC, and that is precisely the box that must be asked
-        // again.
-        if (current.timezone === tz && current.applied) return;
+        // The box has a zone already. Only that same zone, recorded but not
+        // yet applied, is offered again: a box whose harness write failed has
+        // the zone recorded and the agent still in UTC, and that box must be
+        // asked again. A browser in another zone never moves it (an older
+        // server still answers acceptsAdoption for an adopted zone).
+        if (current.timezone && (current.timezone !== tz || current.applied)) return;
 
         await fetch("/setup-api/system/timezone", {
           method: "POST",

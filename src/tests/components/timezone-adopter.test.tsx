@@ -87,6 +87,29 @@ describe("TimezoneAdopter", () => {
     expect(h.posts()).toHaveLength(0);
   });
 
+  it("never offers another zone over one the box already adopted, the kiosk included", async () => {
+    // Owner's ruling, 2026-10-15: adopted once, then only Settings changes it.
+    // An older server still answers acceptsAdoption: true for an adopted zone,
+    // so the desktop holds the rule too.
+    stubBrowserZone("Europe/Berlin");
+    const h = stubFetch({ timezone: "Europe/Sofia", applied: true, acceptsAdoption: true });
+
+    render(<TimezoneAdopter />);
+
+    await waitFor(() => expect(h.all().length).toBeGreaterThan(0));
+    expect(h.posts()).toHaveLength(0);
+  });
+
+  it("does not ride another zone on the retry of one that never landed", async () => {
+    stubBrowserZone("Europe/Berlin");
+    const h = stubFetch({ timezone: "Europe/Sofia", applied: false, acceptsAdoption: true });
+
+    render(<TimezoneAdopter />);
+
+    await waitFor(() => expect(h.all().length).toBeGreaterThan(0));
+    expect(h.posts()).toHaveLength(0);
+  });
+
   it("offers again when the zone is recorded but never landed on the harness", async () => {
     // The false success the applied marker exists for: `openclaw config set`
     // wants 10-12 s on a Jetson and can fail while the gateway is still coming
