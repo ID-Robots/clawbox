@@ -40,6 +40,8 @@ export interface MapViewEvents {
   onCommunities(communities: Int32Array, insights: GraphInsights): void;
   onSettled(settled: boolean): void;
   onContextLost(): void;
+  /** The layout cannot run at all (its code failed to load): no positions will come. */
+  onLayoutFailed(): void;
 }
 
 export interface MapGraphInput {
@@ -194,7 +196,7 @@ export class MapView {
       return;
     }
     this.events.onSettled(false);
-    this.port = openLayoutPort(this.onLayout);
+    this.port = openLayoutPort(this.onLayout, () => this.events.onLayoutFailed());
     const start: StartMessage = {
       type: "start",
       n,

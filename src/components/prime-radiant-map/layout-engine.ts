@@ -36,6 +36,44 @@ export interface LayoutEngine {
   stop(): void;
 }
 
+/** More pages than any vault the Map is drawn for; a bigger `n` is refused. */
+export const MAX_NODES = 1 << 21;
+
+/**
+ * A message as it arrives in the worker, checked against the protocol. The
+ * index arrays (edge ends, groups) are copied as plain integers and every one
+ * must name a node, so the layout never indexes outside its own arrays. Null
+ * for anything else.
+ */
+export function readToEngine(data: unknown): ToEngine | null {
+  if (typeof data !== "object" || data === null) return null;
+  const msg = data as Record<string, unknown>;
+  if (msg.type === "buffer") return msg.positions instanceof Float32Array ? { type: "buffer", positions: msg.positions } : null;
+  if (msg.type !== "start") return null;
+  const { n, dims, warm } = msg;
+  if (typeof n !== "number" || !Number.isInteger(n) || n < 0 || n > MAX_NODES) return null;
+  if (dims !== 2 && dims !== 3) return null;
+  if (!(msg.ends instanceof Uint32Array) || msg.ends.length % 2 !== 0) return null;
+  if (!(msg.weights instanceof Float32Array) || msg.weights.length !== msg.ends.length / 2) return null;
+  if (!(msg.groups instanceof Uint16Array) || msg.groups.length !== n) return null;
+  if (!(msg.degree instanceof Float32Array) || msg.degree.length !== n) return null;
+  const ends = new Uint32Array(msg.ends.length);
+  for (let i = 0; i < ends.length; i++) {
+    const v = msg.ends[i] >>> 0;
+    if (v >= n) return null;
+    ends[i] = v;
+  }
+  const groups = new Uint16Array(n);
+  for (let i = 0; i < n; i++) groups[i] = msg.groups[i] & 0xffff;
+  let checkedWarm: StartMessage["warm"];
+  if (warm !== undefined) {
+    const w = warm as { positions?: unknown; known?: unknown } | null;
+    if (!w || !(w.positions instanceof Float32Array) || !(w.known instanceof Uint8Array) || w.known.length !== n) return null;
+    checkedWarm = { positions: w.positions, known: w.known };
+  }
+  return { type: "start", n, ends, weights: msg.weights, groups, degree: msg.degree, dims, warm: checkedWarm };
+}
+
 /** How long one slice of ticks may run before the engine posts and yields. */
 const SLICE_MS = 14;
 

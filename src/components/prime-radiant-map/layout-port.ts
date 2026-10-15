@@ -2,7 +2,8 @@
  * Where the Map's layout runs: a Web Worker when the browser can start one,
  * else the same engine on the page in slices (loaded only then). A worker
  * that fails to load (a blocked script, an old browser) falls back the same
- * way and is handed its last `start` again.
+ * way and is handed its last `start` again. When the engine cannot load on
+ * the page either (a missing chunk after an update), `onFail` says so once.
  */
 import type { FromEngine, LayoutEngine, ToEngine } from "./layout-engine";
 
@@ -11,7 +12,7 @@ export interface LayoutPort {
   close(): void;
 }
 
-export function openLayoutPort(onMessage: (msg: FromEngine) => void): LayoutPort {
+export function openLayoutPort(onMessage: (msg: FromEngine) => void, onFail: (err: unknown) => void): LayoutPort {
   let closed = false;
   let lastStart: ToEngine | null = null;
   let worker: Worker | null = null;
@@ -20,12 +21,18 @@ export function openLayoutPort(onMessage: (msg: FromEngine) => void): LayoutPort
 
   const inThread = () => {
     queue = lastStart ? [lastStart] : [];
-    void import("./layout-engine").then(({ createLayoutEngine }) => {
-      if (closed) return;
-      engine = createLayoutEngine((msg) => onMessage(msg));
-      for (const msg of queue ?? []) engine.handle(msg);
-      queue = null;
-    });
+    import("./layout-engine")
+      .then(({ createLayoutEngine }) => {
+        if (closed) return;
+        engine = createLayoutEngine((msg) => onMessage(msg));
+        for (const msg of queue ?? []) engine.handle(msg);
+        queue = null;
+      })
+      .catch((err: unknown) => {
+        queue = null;
+        engine = null;
+        if (!closed) onFail(err);
+      });
   };
 
   if (typeof Worker !== "undefined") {

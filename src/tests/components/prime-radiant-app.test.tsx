@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import PrimeRadiantApp from "@/components/PrimeRadiantApp";
-import { I18nProvider } from "@/lib/i18n";
+import { I18nProvider, useT } from "@/lib/i18n";
 import { OPEN_APP_EVENT } from "@/lib/ui-events";
 import { PRIME_RADIANT_CHANGED_EVENT, prJson } from "@/components/prime-radiant-ui";
 import { stubLocation } from "@/tests/helpers/session-switch";
@@ -245,10 +245,16 @@ function installFetch() {
   }));
 }
 
+/** Reads one word through the provider's own `t`: it is English only once the catalogue is in. */
+function CatalogueProbe() {
+  const { t } = useT();
+  return <span hidden data-testid="catalogue-probe">{t("primeRadiant.subtitle")}</span>;
+}
+
 /** Mount, and wait for the catalogue: every assertion here is about words. */
 async function mount() {
-  const view = render(<I18nProvider><PrimeRadiantApp /></I18nProvider>);
-  await waitFor(() => expect(screen.getByTestId("prime-radiant-subtitle")).toHaveTextContent("living wiki"));
+  const view = render(<I18nProvider><CatalogueProbe /><PrimeRadiantApp /></I18nProvider>);
+  await waitFor(() => expect(screen.getByTestId("catalogue-probe")).toHaveTextContent("living wiki"));
   return view;
 }
 
@@ -296,6 +302,14 @@ afterEach(() => {
 });
 
 describe("PrimeRadiantApp", () => {
+  it("shows English, never a key, before the catalogue is in", () => {
+    // No provider: `t` answers every key with itself, as before the catalogue loads.
+    render(<PrimeRadiantApp />);
+    expect(screen.getByTestId("prime-radiant-subtitle")).toHaveTextContent("living wiki");
+    expect(screen.getByTestId("prime-radiant-loading")).toHaveTextContent("Loading…");
+    expect(screen.getByTestId("prime-radiant-app").textContent).not.toMatch(/primeRadiant\./);
+  });
+
   it("creates the vault once on the first open, then shows the wiki", async () => {
     status = { ...STATUS, initialised: false };
     await mount();

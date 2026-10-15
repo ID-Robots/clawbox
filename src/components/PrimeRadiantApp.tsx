@@ -2,6 +2,7 @@
 
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useT } from "@/lib/i18n";
+import { useTr } from "@/lib/i18n-floor";
 import { APP_GROUND, BTN_PRIMARY, BTN_SECONDARY, SECTION_LABEL } from "./coding-agent-ui";
 import {
   API,
@@ -56,6 +57,8 @@ function isDrawableStatus(s: unknown): s is PrimeRadiantStatus {
 }
 export default function PrimeRadiantApp() {
   const { t } = useT();
+  /** For what shows before the dictionaries load (the window can be the first thing on screen): English, never a key. */
+  const tr = useTr();
   const [status, setStatus] = useState<PrimeRadiantStatus | null>(null);
   const [phase, setPhase] = useState<"loading" | "initialising" | "ready" | "failed">("loading");
   const [error, setError] = useState<string | null>(null);
@@ -217,7 +220,7 @@ export default function PrimeRadiantApp() {
           <PrimeRadiantIcon className="w-5 h-5 shrink-0" />
           <h1 className="text-[15px] font-semibold tracking-[-0.01em] text-[var(--text-primary)]">{PRODUCT_NAME}</h1>
           <span className="text-xs text-[var(--text-muted)] truncate" data-testid="prime-radiant-subtitle">
-            {t("primeRadiant.subtitle")}
+            {tr("primeRadiant.subtitle", "living wiki")}
           </span>
         </div>
         {ready && status && (
@@ -265,7 +268,7 @@ export default function PrimeRadiantApp() {
             <PrimeRadiantIcon className="w-10 h-10" />
             <p className="flex items-center gap-2">
               <span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 16 }} aria-hidden="true">progress_activity</span>
-              {phase === "initialising" ? t("primeRadiant.initialising") : t("primeRadiant.loading")}
+              {phase === "initialising" ? tr("primeRadiant.initialising", "Creating the wiki for the first time…") : tr("primeRadiant.loading", "Loading…")}
             </p>
           </div>
         )}
@@ -302,7 +305,7 @@ export default function PrimeRadiantApp() {
                   fallback={
                     <p className="flex items-center gap-2 py-10 justify-center text-sm text-[var(--text-muted)]" role="status">
                       <span className="material-symbols-rounded motion-safe:animate-spin" style={{ fontSize: 16 }} aria-hidden="true">progress_activity</span>
-                      {t("primeRadiant.map.loading")}
+                      {tr("primeRadiant.map.loading", "Drawing the map…")}
                     </p>
                   }
                 >

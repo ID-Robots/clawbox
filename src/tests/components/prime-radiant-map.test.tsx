@@ -218,6 +218,46 @@ describe("PrimeRadiantMap", () => {
     await waitFor(() => expect(setColors.mock.calls.length).toBeGreaterThan(before));
   });
 
+  it("keeps a hidden domain hidden when a new revision orders the legend differently", async () => {
+    const setStates = vi.spyOn(MapView.prototype, "setStates");
+    const { rerender } = await mount();
+    const legend = screen.getByTestId("prime-radiant-map-legend");
+    fireEvent.click(within(legend).getAllByTestId("prime-radiant-map-domain").find((b) => b.textContent?.includes("acme-support"))!);
+    await waitFor(() => expect(lastStates(setStates)[3]).toBe(STATE_HIDDEN));
+
+    // An ingest moved pages: acme-support now leads the legend.
+    graph = {
+      ...GRAPH,
+      revision: "b".repeat(40),
+      nodes: GRAPH.nodes.map((node, i) => ({ ...node, domain: i < 3 ? "acme-support" : i < 5 ? "acme-sales" : null })),
+    };
+    rerender(
+      <I18nProvider>
+        <PrimeRadiantMap revision={1} onOpenPage={vi.fn()} onIngest={vi.fn()} />
+      </I18nProvider>,
+    );
+    await waitFor(() =>
+      expect(within(screen.getByTestId("prime-radiant-map-legend")).getAllByTestId("prime-radiant-map-domain").map((b) => b.textContent)).toEqual([
+        "acme-support3",
+        "acme-sales2",
+        "No domain1",
+      ]),
+    );
+    const support = within(screen.getByTestId("prime-radiant-map-legend")).getAllByTestId("prime-radiant-map-domain")[0];
+    expect(support).toHaveAttribute("aria-pressed", "false");
+    await waitFor(() => expect([...lastStates(setStates)].map((s) => s === STATE_HIDDEN)).toEqual([true, true, true, false, false, false]));
+  });
+
+  it("stands the page list in when the layout cannot load at all", async () => {
+    // What the port reports when neither the worker nor the engine's chunk loads: no positions, ever.
+    vi.spyOn(MapView.prototype, "load").mockImplementation(function (this: MapView) {
+      (this as unknown as { events: { onLayoutFailed(): void } }).events.onLayoutFailed();
+    });
+    await mount();
+    await waitFor(() => expect(screen.getByTestId("prime-radiant-map")).toHaveAttribute("data-mode", "none"));
+    expect(screen.getByTestId("prime-radiant-map-status")).not.toHaveTextContent("Arranging");
+  });
+
   it("lists orphans, hubs and bridges, and a click picks one out", async () => {
     await mount();
     const orphans = await screen.findByTestId("prime-radiant-map-insight-orphans");

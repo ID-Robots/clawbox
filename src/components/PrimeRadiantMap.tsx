@@ -218,7 +218,8 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
   const [reload, setReload] = useState(0);
   const [mode, setMode] = useState<Mode>(() => (prefersFlat() ? "2d" : "webgl"));
   const [colourMode, setColourMode] = useState<"domain" | "community">("domain");
-  const [hidden, setHidden] = useState<ReadonlySet<number>>(() => new Set());
+  /** Hidden domains by name: a new revision may order the legend differently. */
+  const [hiddenNames, setHiddenNames] = useState<ReadonlySet<string>>(() => new Set());
   const [query, setQuery] = useState("");
   const [resultsOpen, setResultsOpen] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(() => kept?.selectedId ?? null);
@@ -243,6 +244,14 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
   const model = data?.model ?? null;
   const analysis = data?.analysis ?? null;
   const selected = model && selectedId !== null ? (model.index.get(selectedId) ?? null) : null;
+  /** The hidden domains as indexes into this model's legend. */
+  const hidden = useMemo(() => {
+    const out = new Set<number>();
+    model?.domains.forEach((d, k) => {
+      if (hiddenNames.has(d)) out.add(k);
+    });
+    return out;
+  }, [model, hiddenNames]);
 
   useEffect(() => {
     analysisRef.current = analysis;
@@ -312,6 +321,10 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
       onSettled: setSettled,
       onContextLost() {
         setMode("2d");
+      },
+      onLayoutFailed() {
+        // Nothing can place the pages: the page list stands in, as when no canvas draws.
+        setMode("none");
       },
     });
     if (!view) {
@@ -578,10 +591,10 @@ export default function PrimeRadiantMap({ revision, onOpenPage, onIngest }: Prop
               aria-pressed={!off}
               title={t("primeRadiant.map.toggleDomain", { domain: domainLabel(d) })}
               onClick={() =>
-                setHidden((h) => {
+                setHiddenNames((h) => {
                   const next = new Set(h);
-                  if (off) next.delete(k);
-                  else next.add(k);
+                  if (off) next.delete(d);
+                  else next.add(d);
                   return next;
                 })
               }

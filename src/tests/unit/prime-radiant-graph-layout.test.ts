@@ -6,7 +6,7 @@
 import { describe, expect, it } from "vitest";
 import { createLayout, isSettled, LINK_DISTANCE, Octree, prng, seedPositions, tick, writePositions } from "@/lib/prime-radiant/graph-layout";
 import { graphInsights, louvain, modularity } from "@/lib/prime-radiant/graph-communities";
-import { createLayoutEngine, type FromEngine } from "@/components/prime-radiant-map/layout-engine";
+import { createLayoutEngine, readToEngine, type FromEngine } from "@/components/prime-radiant-map/layout-engine";
 
 /** Positions for `n` random points in a cube of side `size`. */
 function cloud(n: number, size = 1000, seed = 7): Float64Array {
@@ -307,5 +307,59 @@ describe("layout engine (the worker's protocol)", () => {
     const first = messages[0];
     expect(first.type).toBe("positions");
     if (first.type === "positions") expect([...first.positions]).toEqual([100, 200, 300, -100, -200, -300]);
+  });
+});
+
+describe("readToEngine", () => {
+  const start = () => ({
+    type: "start",
+    n: 3,
+    ends: new Uint32Array([0, 1, 1, 2]),
+    weights: new Float32Array([1, 0.5]),
+    groups: new Uint16Array([0, 0, 1]),
+    degree: new Float32Array([1, 2, 1]),
+    dims: 3,
+  });
+
+  it("passes a well-formed start through, with its own copies of the indexes", () => {
+    const sent = start();
+    const msg = readToEngine(sent);
+    expect(msg).toMatchObject({ type: "start", n: 3, dims: 3 });
+    if (msg?.type !== "start") throw new Error("not a start");
+    expect([...msg.ends]).toEqual([0, 1, 1, 2]);
+    expect(msg.ends).not.toBe(sent.ends);
+    expect([...msg.groups]).toEqual([0, 0, 1]);
+    expect(msg.warm).toBeUndefined();
+  });
+
+  it("passes a buffer through", () => {
+    const positions = new Float32Array(9);
+    expect(readToEngine({ type: "buffer", positions })).toEqual({ type: "buffer", positions });
+  });
+
+  it("refuses an edge that names no node, so nothing outside the arrays is written", () => {
+    expect(readToEngine({ ...start(), ends: new Uint32Array([0, 3, 1, 2]) })).toBeNull();
+  });
+
+  it("refuses what is not the protocol", () => {
+    for (const bad of [
+      null,
+      "start",
+      { type: "other" },
+      { type: "buffer", positions: [0, 0, 0] },
+      { ...start(), n: -1 },
+      { ...start(), n: 1.5 },
+      { ...start(), n: "3" },
+      { ...start(), dims: 4 },
+      { ...start(), ends: [0, 1, 1, 2] },
+      { ...start(), ends: new Uint32Array([0, 1, 2]) },
+      { ...start(), weights: new Float32Array([1]) },
+      { ...start(), groups: new Uint16Array(2) },
+      { ...start(), degree: new Float32Array(2) },
+      { ...start(), warm: { positions: new Float32Array(9), known: new Uint8Array(2) } },
+      { ...start(), warm: null },
+    ]) {
+      expect(readToEngine(bad)).toBeNull();
+    }
   });
 });
