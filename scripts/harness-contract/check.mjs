@@ -94,7 +94,8 @@ if (need(oc.hooks, "the plugin hook names (pluginHookNameSet)")) {
 {
   const updater = fs.readFileSync(path.join(repo, "src/lib/updater.ts"), "utf-8");
   const table = /OPENCLAW_STATE_SCHEMA_BY_VERSION[^{]*\{([^}]*)\}/.exec(updater)?.[1] ?? "";
-  const row = new RegExp(`"${meta.openclawPin.replaceAll(".", "\\.")}"\\s*:\\s*(\\d+)`).exec(table);
+  const pinPattern = meta.openclawPin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const row = new RegExp(`"${pinPattern}"\\s*:\\s*(\\d+)`).exec(table);
   const native = oc.schemaVersions?.state;
   if (!row || Number(row[1]) !== native) {
     const line = updater.split("\n").findIndex((l) => l.includes("OPENCLAW_STATE_SCHEMA_BY_VERSION:")) + 1;

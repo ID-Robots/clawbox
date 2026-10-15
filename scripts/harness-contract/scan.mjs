@@ -77,7 +77,11 @@ function lineIndex(text) {
 
 const REGEX_AFTER_WORDS = new Set(["return", "typeof", "case", "in", "of", "delete", "void", "throw", "new", "else", "do", "instanceof", "yield", "await"]);
 
-/** JS/TS with every comment blanked (same length, newlines kept), strings left alone. */
+/**
+ * JS/TS with every comment and every regex literal's body blanked (same
+ * length, newlines kept), strings left alone: what follows never has to tell
+ * a quote or a bracket inside a regex from a real one.
+ */
 function maskJs(src) {
   const out = src.split("");
   const n = src.length;
@@ -107,6 +111,7 @@ function maskJs(src) {
       while (i < n && src[i] !== c && src[i] !== "\n") i += src[i] === "\\" ? 2 : 1;
       i++;
       prev = "a";
+      keywordBefore = false; // a literal, not the keyword, now stands before what follows
       continue;
     }
     if (c === "`" || (c === "}" && tpl.length && tpl[tpl.length - 1] === 0)) {
@@ -114,14 +119,14 @@ function maskJs(src) {
       i++;
       while (i < n && src[i] !== "`") {
         if (src[i] === "\\") { i += 2; continue; }
-        if (src[i] === "$" && src[i + 1] === "{") { tpl.push(0); i += 2; break; }
+        if (src[i] === "$" && src[i + 1] === "{") { tpl.push(0); i += 2; prev = "{"; keywordBefore = false; break; }
         i++;
       }
-      if (src[i] === "`") { i++; prev = "a"; }
+      if (src[i] === "`") { i++; prev = "a"; keywordBefore = false; }
       continue;
     }
     if (c === "/" && regexAllowed()) {
-      i++;
+      const body = ++i;
       let cls = false;
       while (i < n && src[i] !== "\n") {
         if (src[i] === "\\") { i += 2; continue; }
@@ -130,9 +135,11 @@ function maskJs(src) {
         else if (src[i] === "/" && !cls) break;
         i++;
       }
+      blank(body, Math.min(i, n));
       i++;
       while (/[a-z]/i.test(src[i] ?? "")) i++;
       prev = "a";
+      keywordBefore = false;
       continue;
     }
     if (/[\w$]/.test(c)) {
@@ -516,7 +523,7 @@ function scanJs(file, info, consts, registry, record, skip) {
     const lastClose = best.alts[best.alts.length - 1][1];
     const pushed = [];
     const between = masked.slice(lastClose, before);
-    for (const p of between.matchAll(new RegExp(`\\b${reEscape(name)}\\.push\\(`, "g"))) {
+    for (const p of between.matchAll(new RegExp(`(?<![\\w$])${reEscape(name)}\\.push\\(`, "g"))) {
       const o = lastClose + p.index + p[0].length - 1;
       const c = closing(masked, o);
       if (c > 0) pushed.push(...splitTop(masked.slice(o + 1, c), o + 1));
@@ -655,9 +662,15 @@ function scanJs(file, info, consts, registry, record, skip) {
     if (defPositions.has(namePos) || /\bfunction\s*\*?\s*$/.test(masked.slice(Math.max(0, namePos - 12), namePos))) continue;
     const open = m.index + m[0].length - 1;
     const close = closing(masked, open);
-    if (close < 0) continue;
-    const args = splitTop(masked.slice(open + 1, close), open + 1);
     const pos = m.index;
+    if (close < 0) {
+      // Never dropped silently: the call is the harness's, its arguments just could not be read.
+      for (const entry of registry.get(m[2]) ?? []) {
+        unchecked(entry.harness, { argv: "cli", rpc: "rpc" }[entry.kind] ?? "config", pos, `${m[2]}: the call's arguments could not be read`);
+      }
+      continue;
+    }
+    const args = splitTop(masked.slice(open + 1, close), open + 1);
     for (const entry of registry.get(m[2]) ?? []) {
       const expr = args[entry.index];
       const how = m[2];

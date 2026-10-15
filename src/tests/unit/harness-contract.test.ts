@@ -208,6 +208,44 @@ describe("the scanner", () => {
     expect(found(scan, "openclaw", "cli", "skills list")[0]?.site).toBe("src/lib/c.ts:4");
   });
 
+  it("forgets a keyword once a literal follows it", () => {
+    // `return "4" / 2` divides: the keyword is before the string, not before
+    // the slash. Misread, the slash ran into the `//` and the call written in
+    // the comment was taken for a real one.
+    const scan = scanTree(tree({
+      "src/lib/d.ts": [
+        'export const a = () => { return "4" / 2; }; // spawnOpenclawCli(["never", "string"])',
+        "export const b = () => { return `4` / 2; }; // spawnOpenclawCli([\"never\", \"template\"])",
+        'export const c = () => { return /4/ / 2; }; // spawnOpenclawCli(["never", "regex"])',
+      ].join("\n"),
+    })) as Scan;
+    for (const w of ["string", "template", "regex"]) expect(found(scan, "openclaw", "cli", `never ${w}`), w).toEqual([]);
+  });
+
+  it("follows an argv array whose name starts with $", () => {
+    const scan = scanTree(tree({
+      "src/lib/e.ts": [
+        "export async function f() {",
+        '  const $args = ["skills", "list"];',
+        '  $args.push("--jsonn");',
+        "  await spawnOpenclawCli($args);",
+        "}",
+      ].join("\n"),
+    })) as Scan;
+    expect(found(scan, "openclaw", "cli", "skills list")[0]?.flags).toEqual(["--jsonn"]);
+  });
+
+  it("reads a call whose arguments hold a regex literal with a quote in it", () => {
+    const scan = scanTree(tree({
+      "src/lib/f.ts": [
+        "export async function f(x: string) {",
+        '  await spawnOpenclawCli(["plugins", "lst", x.replace(/"/g, "")]);',
+        "}",
+      ].join("\n"),
+    })) as Scan;
+    expect(found(scan, "openclaw", "cli", "plugins lst")[0]?.site).toBe("src/lib/f.ts:2");
+  });
+
   it("finds, in this tree, what the hand-made maps of ClawBox's harness use list", () => {
     // A floor, not a census: one representative of each kind the research
     // mapped by hand (2026-10-15). A scanner change that loses a pattern fails
