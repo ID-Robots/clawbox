@@ -8,7 +8,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createHashEmbedder } from "@/lib/prime-radiant/contradictions";
+import { createHashEmbedder, fullComparisonDone, readDeferredClaims } from "@/lib/prime-radiant/contradictions";
 import type { FlashClient } from "@/lib/prime-radiant/flash-client";
 import { git, headCommit } from "@/lib/prime-radiant/git";
 import { readJudgeItems } from "@/lib/prime-radiant/judge";
@@ -220,6 +220,51 @@ describe("nightly pass", () => {
     expect(lint.some((i) => i.runId === second!.id)).toBe(true);
     // The first night's items are still open; the second night's are its own.
     await expect(mergeHeldNight("dream/2026-05-21")).rejects.toMatchObject({ code: "open_items" });
+  });
+
+  it("a night whose judge failed is not the full comparison: the next night judges its pairs and raises the item", async () => {
+    await ensureVault();
+    // The judge answers prose with no verdict; the writer still works, so the pages land on main.
+    const brokenJudge: FlashClient = {
+      model: "deepseek-v4-flash",
+      async complete(request) {
+        if (readJudgeItems(request.user)) return { text: "I could not decide.", model: "deepseek-v4-flash", usage: { promptTokens: 100, completionTokens: 5, cacheHitTokens: 0 } };
+        return client.complete(request);
+      },
+    };
+    const first = await runNightly("schedule", deps({ client: brokenJudge }));
+    expect(first?.status).toBe("merged");
+    const s1 = first!.summary as unknown as NightlySummary;
+    expect(s1.contradictions.queried).toBeGreaterThan(0);
+    expect(s1.contradictions.deferredPairs).toBeGreaterThan(0);
+    expect(s1.contradictions.complete).toBe(false);
+    expect(s1.notes.join(" ")).toMatch(/judged next pass/);
+    expect(readDeferredClaims(vaultDir()).size).toBeGreaterThan(0);
+    expect(fullComparisonDone(vaultDir())).toBe(false);
+    expect(listReviewItems(vaultDir(), { kind: "contradiction" }).items).toEqual([]);
+
+    // The next night changes no page (the same documents are skipped), and still judges what was owed.
+    const second = await runNightly("schedule", deps({ now: () => new Date(2026, 4, 21, 3, 0) }));
+    const s2 = second!.summary as unknown as NightlySummary;
+    expect(s2.contradictions.skipped).toBeNull();
+    expect(s2.contradictions.queried).toBeGreaterThan(0);
+    expect(s2.contradictions.findings).toBe(1);
+    expect(s2.contradictions.deferredPairs).toBe(0);
+    expect(s2.contradictions.complete).toBe(true);
+    expect(listReviewItems(vaultDir(), { kind: "contradiction" }).items).toHaveLength(1);
+    expect(readDeferredClaims(vaultDir()).size).toBe(0);
+    expect(fullComparisonDone(vaultDir())).toBe(true);
+
+    // Now the nights are scoped: a quiet one compares nothing.
+    const third = await runNightly("schedule", deps({ now: () => new Date(2026, 4, 22, 3, 0) }));
+    const s3 = third!.summary as unknown as NightlySummary;
+    expect(s3.contradictions).toMatchObject({ queried: 0, carried: 0, skipped: "nothing_to_compare" });
+  });
+
+  it("an offline night does not count as the full comparison", async () => {
+    await ensureVault();
+    await runNightly("schedule", deps({ online: async () => false }));
+    expect(fullComparisonDone(vaultDir())).toBe(false);
   });
 
   it("runs one pass at a time", async () => {

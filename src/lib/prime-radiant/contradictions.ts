@@ -21,6 +21,13 @@
  * verdict by the hash of the two texts (`judged_pairs`) — an unchanged vault
  * embeds nothing and judges nothing the next night.
  *
+ * Nothing found is lost to a failure: a claim with a pair this pass could not
+ * judge is written to `deferred_claims`, and the next pass compares it again
+ * whatever that night's scope is, until its pairs are judged. A pass that
+ * compared every claim and left nothing deferred records `full_comparison`
+ * ({@link fullComparisonDone}) — the nightly pass compares the whole vault
+ * until one has.
+ *
  * Every model dependency is injectable; nothing here throws for a model that
  * cannot answer — the pass reports what it skipped.
  *
@@ -265,8 +272,14 @@ export interface ContradictionPassResult {
   calls: number;
   /** Judge batches that gave no verdict even after the half-size retry; their pairs wait for the next pass. */
   failedBatches: number;
-  /** Pairs left unjudged this pass (failed batches, and pairs an answer left out or garbled). */
+  /** Pairs left unjudged this pass (failed batches, pairs an answer left out or garbled, pairs over the cap, a stopped judge). */
   deferredPairs: number;
+  /** Claims an earlier pass deferred that this pass compared again (outside its own scope). */
+  carried: number;
+  /** Claims left in the deferred set for the next pass. */
+  deferredClaims: number;
+  /** Every claim in scope was compared and every pair found was judged and kept. */
+  complete: boolean;
   usdEstimate: number;
   findings: ContradictionFinding[];
   /** Review items raised (new ones and ones already waiting). */
@@ -360,6 +373,53 @@ function storeJudged(vault: string, rows: ReadonlyArray<{ hash: string; verdict:
   });
 }
 
+// ── the carry-over ────────────────────────────────────────────────────────
+
+const FULL_COMPARISON_KEY = "full_comparison";
+
+/** Ids of the claims an earlier pass could not finish judging. Never creates the database. */
+export function readDeferredClaims(vault: string): Set<string> {
+  if (!stateDbExists(vault)) return new Set();
+  return withStateDb(vault, (db) => new Set((db.prepare("SELECT claim_id FROM deferred_claims").all() as Array<{ claim_id: string }>).map((r) => r.claim_id)));
+}
+
+/** Whether any pass has compared every claim and judged every pair it found. Never creates the database. */
+export function fullComparisonDone(vault: string): boolean {
+  if (!stateDbExists(vault)) return false;
+  return withStateDb(vault, (db) => !!db.prepare("SELECT 1 AS one FROM pass_state WHERE key = ?").get(FULL_COMPARISON_KEY));
+}
+
+/**
+ * Settle the deferred set after a pass: the claims it compared leave it (their
+ * pairs were judged, or are written back below), claims the vault no longer
+ * holds leave it, and every claim with an unjudged pair goes (back) in. One
+ * transaction, so a failure leaves the set as it was.
+ */
+function settleDeferred(
+  vault: string,
+  input: { compared: readonly string[]; present: ReadonlySet<string>; deferred: ReadonlyArray<{ id: string; page: string }>; reason: string; full: boolean },
+  at: string,
+): void {
+  withStateDb(vault, (db) => {
+    const existing = (db.prepare("SELECT claim_id FROM deferred_claims").all() as Array<{ claim_id: string }>).map((r) => r.claim_id);
+    const drop = db.prepare("DELETE FROM deferred_claims WHERE claim_id = ?");
+    const add = db.prepare(
+      `INSERT INTO deferred_claims (claim_id, page, reason, at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(claim_id) DO UPDATE SET page = excluded.page, reason = excluded.reason, at = excluded.at`,
+    );
+    runInTransaction(db, () => {
+      for (const id of input.compared) drop.run(id);
+      for (const id of existing) if (!input.present.has(id)) drop.run(id);
+      for (const c of input.deferred) add.run(c.id, c.page, input.reason, at);
+      if (input.full) {
+        db.prepare(
+          `INSERT INTO pass_state (key, value, at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, at = excluded.at`,
+        ).run(FULL_COMPARISON_KEY, at, at);
+      }
+    });
+  });
+}
+
 /** Run `tasks` with at most `limit` in flight, in order of start. */
 async function pool<T>(tasks: ReadonlyArray<() => Promise<T>>, limit: number): Promise<T[]> {
   const out: T[] = new Array(tasks.length);
@@ -385,26 +445,62 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
     calls: 0,
     failedBatches: 0,
     deferredPairs: 0,
+    carried: 0,
+    deferredClaims: 0,
+    complete: false,
     usdEstimate: 0,
     findings: [],
     reviewItems: [],
     skipped: null,
     notes: [],
   };
-  let claims = collectClaims(snapshot);
+  const all = collectClaims(snapshot);
+  const present = new Set(all.map((c) => c.id));
+  let deferredBefore: Set<string>;
+  try {
+    deferredBefore = readDeferredClaims(options.stateVault);
+  } catch {
+    deferredBefore = new Set();
+    result.notes.push("The claims an earlier pass left unjudged could not be read; they are compared on a later pass.");
+  }
+  const scope = options.scope ? new Set(options.scope) : null;
+  const wanted = (c: PassClaim) => !scope || scope.has(c.page) || deferredBefore.has(c.id);
+  let claims = all;
+  let overCap = false;
   if (claims.length > MAX_PASS_CLAIMS) {
-    // Scope first, so the claims a night changed are always among those compared.
-    const inScope = new Set(options.scope ?? []);
-    claims = [...claims.filter((c) => inScope.has(c.page)), ...claims.filter((c) => !inScope.has(c.page))].slice(0, MAX_PASS_CLAIMS);
+    // Scope (and what an earlier pass left unjudged) first, so those claims are always among those compared.
+    claims = [...claims.filter(wanted), ...claims.filter((c) => !wanted(c))].slice(0, MAX_PASS_CLAIMS);
+    overCap = true;
     result.notes.push(`Only ${MAX_PASS_CLAIMS} claims were compared; the rest wait for a later pass.`);
   }
   result.claims = claims.length;
-  const scope = options.scope ? new Set(options.scope) : null;
-  const queries = claims.flatMap((c, i) => (!scope || scope.has(c.page) ? [i] : []));
+  const queries = claims.flatMap((c, i) => (wanted(c) ? [i] : []));
   result.queried = queries.length;
+  result.carried = scope ? queries.filter((i) => !scope.has(claims[i].page)).length : 0;
+  if (result.carried > 0) result.notes.push(`${result.carried} claim(s) an earlier pass could not finish judging were compared again.`);
+
+  /** Write the carry-over and decide whether this pass was a full comparison. Never throws. */
+  const finish = (unjudged: ReadonlySet<number>, reason: string): ContradictionPassResult => {
+    const deferred = [...unjudged].map((i) => ({ id: claims[i].id, page: claims[i].page }));
+    result.deferredClaims = deferred.length;
+    // Nothing to compare is not a failure: a vault of one claim has compared everything.
+    result.complete = (!result.skipped || result.skipped === "nothing_to_compare") && unjudged.size === 0 && result.deferredPairs === 0 && !overCap;
+    try {
+      settleDeferred(
+        options.stateVault,
+        { compared: queries.map((i) => claims[i].id), present, deferred, reason, full: result.complete && !scope },
+        now().toISOString(),
+      );
+    } catch {
+      result.complete = false;
+      result.notes.push("The claims left unjudged could not be recorded; the next pass compares the whole vault.");
+    }
+    return result;
+  };
+
   if (queries.length === 0 || claims.length < 2) {
     result.skipped = "nothing_to_compare";
-    return result;
+    return finish(new Set(), "nothing_to_compare");
   }
 
   // Embed what the cache does not hold for this embedder.
@@ -428,24 +524,31 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
   } catch (err) {
     result.skipped = "embedder_unavailable";
     result.notes.push(`The embedder could not answer: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
-    return result;
+    return finish(new Set(queries), "embedder_unavailable");
   }
   const dims = vectors[0]?.length ?? 0;
   if (!vectors.every((v) => v.length === dims)) {
     result.skipped = "embedder_unavailable";
     result.notes.push("The claim vectors have different widths; run the pass again after the embedder settles.");
-    return result;
+    return finish(new Set(queries), "embedder_unavailable");
   }
 
-  let pairs = await nearestPairsYielding(claims, vectors, queries, options.k ?? KNN_K, options.signal);
+  const pairs = await nearestPairsYielding(claims, vectors, queries, options.k ?? KNN_K, options.signal);
   result.pairs = pairs.length;
-  if (pairs.length > MAX_JUDGED_PAIRS) {
-    pairs = pairs.slice(0, MAX_JUDGED_PAIRS);
-    result.notes.push(`Only the ${MAX_JUDGED_PAIRS} closest pairs were judged this pass.`);
+  if (options.signal?.aborted) {
+    result.skipped = "aborted";
+    return finish(new Set(queries), "aborted");
   }
   const hashes = pairs.map((p) => pairHash(claims[p.a].text, claims[p.b].text));
   const known = readJudged(options.stateVault, hashes);
-  const ask = pairs.flatMap((p, n) => (known.has(hashes[n]) ? [] : [n]));
+  let ask = pairs.flatMap((p, n) => (known.has(hashes[n]) ? [] : [n]));
+  // The cap is on what the judge is ASKED (a cached verdict costs nothing), so
+  // every pass makes progress; the pairs over it are carried to the next one.
+  const overflow = ask.slice(MAX_JUDGED_PAIRS);
+  if (overflow.length > 0) {
+    ask = ask.slice(0, MAX_JUDGED_PAIRS);
+    result.notes.push(`Only ${MAX_JUDGED_PAIRS} pairs were judged this pass; the other ${overflow.length} are judged next pass.`);
+  }
 
   // The judge, a small batch a call, a few calls in flight.
   const client = options.client ?? flashClient();
@@ -539,13 +642,22 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
     result.skipped = stop === "aborted" ? "aborted" : "judge_unavailable";
     result.notes.push(`The judge stopped: ${stop}.`);
   }
+  let unkept: readonly number[] = [];
   try {
     storeJudged(options.stateVault, learned, now().toISOString());
   } catch {
+    // Judged, but not remembered: the pairs stay owed so a later pass asks again.
+    unkept = ask.filter((n) => known.has(hashes[n]));
     result.notes.push("The verdicts could not be cached; the next pass asks again.");
   }
 
-  result.deferredPairs = ask.filter((n) => !known.has(hashes[n])).length;
+  const unjudgedPairs = [...ask.filter((n) => !known.has(hashes[n])), ...overflow];
+  result.deferredPairs = unjudgedPairs.length;
+  const unjudged = new Set<number>();
+  for (const n of [...unjudgedPairs, ...unkept]) {
+    unjudged.add(pairs[n].a);
+    unjudged.add(pairs[n].b);
+  }
 
   pairs.forEach((p, n) => {
     const v = known.get(hashes[n]);
@@ -589,5 +701,5 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
     }
   }
   result.usdEstimate = Math.round(result.usdEstimate * 1e6) / 1e6;
-  return result;
+  return finish(unjudged, stop ? "judge_stopped" : overflow.length > 0 ? "over_cap" : "judge_failed");
 }

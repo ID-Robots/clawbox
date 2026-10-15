@@ -19,7 +19,7 @@ import { openSqlite } from "@/lib/openclaw-session-store";
 import path from "@/lib/runtime-path";
 
 export const STATE_DB_FILE = "prime-radiant.sqlite";
-export const STATE_SCHEMA_VERSION = 4;
+export const STATE_SCHEMA_VERSION = 5;
 
 export function stateDbPathFor(vault: string): string {
   return path.join(path.dirname(vault), STATE_DB_FILE);
@@ -164,6 +164,29 @@ CREATE TABLE IF NOT EXISTS judged_pairs (
 `;
 
 /**
+ * v5 — the contradiction pass's carry-over: `deferred_claims` holds every
+ * claim one of whose pairs a pass could not judge (a judge call that failed,
+ * an embedder that could not answer, a pass stopped or over its cap), so the
+ * next pass compares it again whatever that night changed; a row goes once
+ * the claim's pairs are judged or the claim is gone. `pass_state` keeps small
+ * named facts about the passes — `full_comparison` is the last time a pass
+ * compared EVERY claim and judged every pair it found.
+ */
+const SCHEMA_V5 = `
+CREATE TABLE IF NOT EXISTS deferred_claims (
+  claim_id  TEXT PRIMARY KEY,
+  page      TEXT NOT NULL,
+  reason    TEXT NOT NULL,
+  at        TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pass_state (
+  key    TEXT PRIMARY KEY,
+  value  TEXT NOT NULL,
+  at     TEXT NOT NULL
+);
+`;
+
+/**
  * Run `fn` in one transaction. A failed ROLLBACK (SQLite may already have
  * ended the transaction after an I/O or disk-full error) is logged and never
  * replaces the error that caused it.
@@ -198,6 +221,7 @@ export function openStateDb(vault: string): DatabaseSync {
       [2, SCHEMA_V2],
       [3, SCHEMA_V3],
       [4, SCHEMA_V4],
+      [5, SCHEMA_V5],
     ];
     for (const [target, sql] of steps) {
       if (version >= target) continue;

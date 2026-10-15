@@ -38,7 +38,7 @@ import fs from "fs/promises";
 import { processStore } from "@/lib/process-store";
 import { resolveFolderInsideBrowseRoot } from "@/lib/browse-folder";
 import path from "@/lib/runtime-path";
-import { runContradictionPass, type ClaimEmbedder, type ContradictionPassResult } from "./contradictions";
+import { fullComparisonDone, runContradictionPass, type ClaimEmbedder, type ContradictionPassResult } from "./contradictions";
 import type { CostRates } from "./cost-rates";
 import { flashAvailable, type FlashClient } from "./flash-client";
 import { verifiedTouches, type VerifiedTouch } from "./gate";
@@ -50,7 +50,7 @@ import { isKnowledgePage, vaultDir } from "./paths";
 import { notifyVaultChanged } from "./reindex-hook";
 import { addReviewItem, countWaitingForRuns, listReviewItems } from "./review-store";
 import { buildOpusQueue, opusClient, runOpusTier, type OpusClient, type OpusTierResult } from "./opus";
-import { anyFinishedRun, insertRun, listRuns, newRunId, saveRun, settleOrphanRuns, type RunRecord, type RunStatus, type RunTrigger } from "./runs";
+import { insertRun, listRuns, newRunId, saveRun, settleOrphanRuns, type RunRecord, type RunStatus, type RunTrigger } from "./runs";
 import { effectiveCostRates, readSettings, type PrimeRadiantSettings } from "./settings";
 import { readRetiredLedger, stateDbExists } from "./state-db";
 import { readVaultSnapshot, vaultInitialised, vaultOperation } from "./vault";
@@ -69,7 +69,7 @@ export interface NightlySummary {
   changedCount: number;
   ingest: { jobId: string; status: string; pages: number; failed: number } | { skipped: string };
   lint: { errors: number; warnings: number; checked: number };
-  contradictions: Pick<ContradictionPassResult, "claims" | "queried" | "embedded" | "pairs" | "judged" | "calls" | "failedBatches" | "deferredPairs" | "usdEstimate" | "skipped"> & {
+  contradictions: Pick<ContradictionPassResult, "claims" | "queried" | "embedded" | "pairs" | "judged" | "calls" | "failedBatches" | "deferredPairs" | "carried" | "deferredClaims" | "complete" | "usdEstimate" | "skipped"> & {
     findings: number;
   };
   opus: Pick<OpusTierResult, "queued" | "reviewed" | "pending" | "calls" | "usdEstimate" | "capUsd" | "stopped"> | { skipped: string };
@@ -276,6 +276,9 @@ function emptySummary(): NightlySummary {
       calls: 0,
       failedBatches: 0,
       deferredPairs: 0,
+      carried: 0,
+      deferredClaims: 0,
+      complete: false,
       usdEstimate: 0,
       skipped: "not_run",
       findings: 0,
@@ -338,7 +341,10 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
     if (!settings.contradictions.enabled) summary.contradictions.skipped = "disabled";
     else if (!online) summary.contradictions.skipped = "offline";
     else {
-      const firstNight = !anyFinishedRun(vault);
+      // Every claim until one pass has compared them all and judged every pair:
+      // a night that merely finished (offline, a judge that failed) does not count.
+      // Claims an earlier pass left unjudged are added to a scoped pass by the pass itself.
+      const firstNight = !fullComparisonDone(vault);
       const pass = await runContradictionPass(snapshot, {
         stateVault: vault,
         scope: firstNight ? null : changed,
@@ -358,6 +364,9 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
         calls: pass.calls,
         failedBatches: pass.failedBatches,
         deferredPairs: pass.deferredPairs,
+        carried: pass.carried,
+        deferredClaims: pass.deferredClaims,
+        complete: pass.complete,
         usdEstimate: pass.usdEstimate,
         skipped: pass.skipped,
         findings: pass.findings.length,

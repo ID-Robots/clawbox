@@ -135,12 +135,6 @@ export function settleOrphanRuns(vault: string, live: ReadonlySet<string>, at: s
   });
 }
 
-/** Whether any nightly pass has ever finished (merged, held or found nothing): the first one compares every claim. */
-export function anyFinishedRun(vault: string): boolean {
-  if (!stateDbExists(vault)) return false;
-  return withStateDb(vault, (db) => !!db.prepare("SELECT 1 AS one FROM runs WHERE status IN ('merged', 'held', 'nothing') LIMIT 1").get());
-}
-
 // ── costs ─────────────────────────────────────────────────────────────────
 
 export interface CostTotals {
