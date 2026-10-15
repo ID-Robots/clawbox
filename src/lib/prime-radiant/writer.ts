@@ -14,6 +14,7 @@
 
 import { allocateClaimId, slugify, type ClaimIndex } from "./claims";
 import { redactText } from "./redact";
+import { selfContainedClaim } from "./subject";
 import {
   PAGE_TYPES,
   SLUG_RE,
@@ -71,9 +72,13 @@ export const WRITER_SYSTEM_PROMPT = [
   ' "domain": a lowercase-kebab business area, e.g. "sales", "support", "finance", "engineering",',
   ' "summary": at most 2 sentences and 300 characters: what it is and why it matters,',
   ' "details": optional Markdown with the important specifics (no top-level heading), may be "",',
-  ' "facts": up to 8 atomic facts [{"fact": "one sentence", "quote": "<= 12 words copied from the text", "confidence": 0.0-1.0}],',
+  ' "facts": up to 8 atomic facts [{"fact": "one sentence", "quote": "<= 12 words copied word for word from THIS item\'s text", "confidence": 0.0-1.0}],',
   ' "sensitivity": "public"|"internal"|"confidential",',
   ' "confidence": 0.0-1.0}',
+  "Every fact must be true read ALONE, away from the page and the other facts: it names its subject.",
+  'Write "The Art of War is Project Gutenberg eBook #132", never "It is Project Gutenberg eBook #132"; "The Art of War is called the oldest military treatise", never "The work is called …".',
+  "Never open a fact with a pronoun (it, its, this, they, he, she) or a stand-in (the document, the work, the book, the company, the author).",
+  "An item's facts and quotes come from that item's own text only — never from another item in the same call.",
 ].join("\n");
 
 export function buildWriterPrompt(items: readonly WriterItem[]): { system: string; user: string } {
@@ -96,6 +101,12 @@ export interface DraftFact {
   fact: string;
   quote: string;
   confidence: number;
+  /**
+   * The label of the document the quote was found in when it is not the
+   * page's own (another item of the same call): the evidence is filed there.
+   * Absent: the page's own document.
+   */
+  source?: string;
 }
 
 export interface PageDraft {
@@ -166,14 +177,19 @@ export function readDraft(raw: unknown, expected: ReadonlySet<number>): ItemVerd
   if (typeof o.summary !== "string" || o.summary.trim() === "") return useful ? fail("no summary") : { ok: true, i, draft: notUseful(i) };
   const domainRaw = typeof o.domain === "string" ? o.domain.trim().toLowerCase() : "";
   const domain = SLUG_RE.test(domainRaw) && domainRaw.length <= 48 ? domainRaw : domainRaw ? slugify(domainRaw, 48) : DEFAULT_DOMAIN;
+  const title = cleanLine(o.title, MAX_TITLE_CHARS);
   const facts: DraftFact[] = [];
   if (Array.isArray(o.facts)) {
     for (const f of o.facts) {
       if (!f || typeof f !== "object") continue;
       const fo = f as Record<string, unknown>;
       if (typeof fo.fact !== "string" || fo.fact.trim() === "") continue;
+      // A claim must say what it is about: "It is …" is repaired with the
+      // title, "He was …" (who?) is not kept.
+      const fact = selfContainedClaim(cleanLine(fo.fact, MAX_CLAIM_CHARS), title);
+      if (fact === null) continue;
       facts.push({
-        fact: cleanLine(fo.fact, MAX_CLAIM_CHARS),
+        fact: fact.length > MAX_CLAIM_CHARS ? cleanLine(fact, MAX_CLAIM_CHARS) : fact,
         quote: typeof fo.quote === "string" ? cleanLine(fo.quote, 160) : "",
         confidence: clamp01(fo.confidence, clamp01(o.confidence, 0.6)),
       });
@@ -188,7 +204,7 @@ export function readDraft(raw: unknown, expected: ReadonlySet<number>): ItemVerd
       i,
       useful,
       type: writerType,
-      title: cleanLine(o.title, MAX_TITLE_CHARS),
+      title,
       domain: domain === "x" ? DEFAULT_DOMAIN : domain,
       summary: cleanLine(o.summary, MAX_SUMMARY_CHARS),
       details: typeof o.details === "string" ? cleanDetails(o.details, maxDetails) : "",
@@ -261,15 +277,59 @@ function findJsonArray(text: string): unknown[] {
   throw new WriterParseError(sawJson ? "the answer is not a JSON array" : "the answer's JSON array does not parse");
 }
 
+// ── evidence ──────────────────────────────────────────────────────────────
+
+/**
+ * Text reduced to its words for a containment test: case, quote marks,
+ * punctuation, Markdown marks and spacing do not count; a quote cut short
+ * (`…`) loses its last, partial word.
+ */
+export function evidenceWords(text: string): string {
+  let t = text.normalize("NFKC").toLowerCase();
+  const cut = /…\s*$/.test(t);
+  t = t.replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  if (cut) t = t.replace(/\s*\S+$/, "");
+  return t;
+}
+
+/** Whether `quote` is in a document's text (both as {@link evidenceWords} reads them). */
+export function quoteIn(documentWords: string, quote: string): boolean {
+  const q = evidenceWords(quote);
+  return q !== "" && ` ${documentWords} `.includes(` ${q} `);
+}
+
+/**
+ * Each fact's quote checked against the page's OWN document: on the live
+ * test the page for `Office move.txt` cited "The ID Robots office is at 25
+ * Tsar Boris III Blvd", a line of another file in the same call. A quote in
+ * the page's own text stays; one found in exactly one other document of the
+ * call is filed under that document ({@link DraftFact.source}); one found in
+ * none, or in several others, is dropped (the fact keeps its page's source
+ * and loses the note).
+ */
+export function checkEvidence(draft: PageDraft, own: WriterItem, items: readonly WriterItem[], words: ReadonlyMap<number, string>): PageDraft {
+  if (draft.facts.every((f) => f.quote === "")) return draft;
+  const facts = draft.facts.map((f): DraftFact => {
+    if (f.quote === "" || quoteIn(words.get(own.i) ?? "", f.quote)) return f;
+    const elsewhere = items.filter((it) => it.i !== own.i && quoteIn(words.get(it.i) ?? "", f.quote));
+    if (elsewhere.length === 1 && elsewhere[0].path !== own.path) return { ...f, source: elsewhere[0].path };
+    return { fact: f.fact, quote: "", confidence: f.confidence };
+  });
+  return { ...draft, facts };
+}
+
 /**
  * Read the model's answer for a batch: one verdict per item asked about.
  * An item the answer does not mention, or mentions twice, is a failure for
  * that item alone. No JSON array at all throws {@link WriterParseError}, so
- * the caller can retry the whole call.
+ * the caller can retry the whole call. Every quote is checked against the
+ * documents of the call ({@link checkEvidence}).
  */
 export function parseWriterResponse(text: string, items: readonly WriterItem[]): Map<number, ItemVerdict> {
   const parsed = findJsonArray(text);
   const expected = new Set(items.map((it) => it.i));
+  const byIndex = new Map(items.map((it) => [it.i, it]));
+  let words: Map<number, string> | null = null;
   const out = new Map<number, ItemVerdict>();
   const seen = new Set<number>();
   for (const raw of parsed) {
@@ -280,7 +340,12 @@ export function parseWriterResponse(text: string, items: readonly WriterItem[]):
       continue;
     }
     seen.add(verdict.i);
-    out.set(verdict.i, verdict.ok ? { ok: true, draft: verdict.draft } : { ok: false, reason: verdict.reason });
+    if (!verdict.ok) {
+      out.set(verdict.i, { ok: false, reason: verdict.reason });
+      continue;
+    }
+    words ??= new Map(items.map((it) => [it.i, evidenceWords(it.text)]));
+    out.set(verdict.i, { ok: true, draft: checkEvidence(verdict.draft, byIndex.get(verdict.i)!, items, words) });
   }
   for (const it of items) if (!out.has(it.i)) out.set(it.i, { ok: false, reason: "missing from the answer" });
   return out;
@@ -368,7 +433,7 @@ export function buildPage(draft: PageDraft, source: string, ctx: BuildContext): 
       confidence: Math.round(fact.confidence * 100) / 100,
       status: "proposed",
       updatedAt,
-      evidence: [{ kind: "source", path: source, ...(fact.quote ? { note: fact.quote } : {}) }],
+      evidence: [{ kind: "source", path: fact.source ?? source, ...(fact.quote ? { note: fact.quote } : {}) }],
     };
     claims.push(claim);
     const list = ctx.claimIndex.active.get(id) ?? [];

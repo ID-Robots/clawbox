@@ -165,6 +165,91 @@ describe("parseWriterResponse", () => {
   });
 });
 
+// The live test: claims without a subject ("It is Project Gutenberg eBook
+// #5") made 84 of 85 contradiction items false.
+describe("self-contained claims", () => {
+  it("tells the model every fact names its subject, and comes from its own item", () => {
+    const { system } = buildWriterPrompt(items);
+    expect(system).toMatch(/names its subject/);
+    expect(system).toMatch(/never "It is Project Gutenberg eBook #132"/);
+    expect(system).toMatch(/that item's own text only/);
+  });
+
+  it("repairs a fact that opens with a stand-in for the page, and drops one that could mean anyone", () => {
+    const book: WriterItem = { i: 0, path: "~/Books/art-of-war.txt", kind: "txt", text: "The Project Gutenberg eBook of The Art of War. EBook #132. The oldest military treatise in the world." };
+    const answer = JSON.stringify([
+      card(0, {
+        type: "concept",
+        title: "The Art of War",
+        facts: [
+          { fact: "It is Project Gutenberg eBook #132.", quote: "EBook #132", confidence: 0.9 },
+          { fact: "The work is called the oldest military treatise.", quote: "The oldest military treatise", confidence: 0.8 },
+          { fact: "He was a Chinese general.", quote: "", confidence: 0.6 },
+          { fact: "The Art of War has 13 chapters.", quote: "", confidence: 0.7 },
+        ],
+      }),
+    ]);
+    const v = parseWriterResponse(answer, [book]).get(0)!;
+    expect(v.ok).toBe(true);
+    if (!v.ok) return;
+    expect(v.draft.facts.map((f) => f.fact)).toEqual([
+      "The Art of War is Project Gutenberg eBook #132.",
+      "The Art of War is called the oldest military treatise.",
+      "The Art of War has 13 chapters.",
+    ]);
+    // The claim id is made from the repaired text.
+    const built = buildPage(v.draft, book.path, ctx());
+    expect(built.ok && built.frontmatter.claims[0].id).toMatch(/\/the-art-of-war-is-project-gutenberg-ebook-132$/);
+  });
+});
+
+// The live test: the page for "Office move.txt" cited a line of another
+// document of the same call as evidence from its own source.
+describe("evidence from the page's own document", () => {
+  const batch: WriterItem[] = [
+    { i: 0, path: "~/Documents/Office move.txt", kind: "txt", text: "We move on 1 March. The movers come at 8 in the morning.\nPack your desk the day before." },
+    { i: 1, path: "~/Documents/Company info.txt", kind: "txt", text: "ID Robots Ltd.\nThe ID Robots office is at 25 Tsar Boris III Blvd, Sofia.\nPhone the front desk first." },
+  ];
+  const answer = (facts: Array<{ fact: string; quote: string }>) =>
+    JSON.stringify([card(0, { title: "Office move", facts: facts.map((f) => ({ ...f, confidence: 0.8 })) }), card(1, { title: "Company info", facts: [] })]);
+
+  it("keeps a quote found in the page's own text, whatever its case, quotes and punctuation", () => {
+    const v = parseWriterResponse(answer([{ fact: "The office move is on 1 March.", quote: "we move on 1 March" }, { fact: "The movers come at 8 in the morning.", quote: "“The movers come at 8 in the morning…”" }]), batch).get(0)!;
+    expect(v.ok && v.draft.facts.map((f) => [f.quote, f.source])).toEqual([
+      ["we move on 1 March", undefined],
+      ["“The movers come at 8 in the morning…”", undefined],
+    ]);
+  });
+
+  it("files a quote from another document of the call under that document", () => {
+    const v = parseWriterResponse(answer([{ fact: "The ID Robots office is at 25 Tsar Boris III Blvd.", quote: "The ID Robots office is at 25 Tsar Boris III Blvd" }]), batch).get(0)!;
+    expect(v.ok).toBe(true);
+    if (!v.ok) return;
+    expect(v.draft.facts[0]).toMatchObject({ quote: "The ID Robots office is at 25 Tsar Boris III Blvd", source: "~/Documents/Company info.txt" });
+    const built = buildPage(v.draft, batch[0].path, ctx());
+    expect(built.ok && built.frontmatter.claims[0].evidence).toEqual([
+      { kind: "source", path: "~/Documents/Company info.txt", note: "The ID Robots office is at 25 Tsar Boris III Blvd" },
+    ]);
+    expect(built.ok && built.frontmatter.sources).toEqual([batch[0].path]);
+  });
+
+  it("drops a quote no document of the call holds, and keeps the fact on its own source", () => {
+    const v = parseWriterResponse(answer([{ fact: "The office move is on 1 March.", quote: "relocation scheduled for spring" }]), batch).get(0)!;
+    expect(v.ok && v.draft.facts[0]).toEqual({ fact: "The office move is on 1 March.", quote: "", confidence: 0.8 });
+    const built = v.ok ? buildPage(v.draft, batch[0].path, ctx()) : null;
+    expect(built?.ok && built.frontmatter.claims[0].evidence).toEqual([{ kind: "source", path: batch[0].path }]);
+  });
+
+  it("drops a quote two other documents hold: which one is not known", () => {
+    const three = [...batch, { i: 2, path: "~/Documents/Visitors.txt", kind: "txt", text: "Phone the front desk first, then wait." }];
+    const out = parseWriterResponse(
+      JSON.stringify([card(0, { title: "Office move", facts: [{ fact: "Visitors phone the front desk first.", quote: "Phone the front desk first", confidence: 0.8 }] }), card(1, { facts: [] }), card(2, { facts: [] })]),
+      three,
+    ).get(0)!;
+    expect(out.ok && out.draft.facts[0].quote).toBe("");
+  });
+});
+
 describe("cleaning", () => {
   it("cleanLine collapses whitespace and cuts at a word", () => {
     expect(cleanLine("a\n  b\tc", 50)).toBe("a b c");
