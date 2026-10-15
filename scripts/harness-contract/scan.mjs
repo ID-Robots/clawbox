@@ -51,8 +51,8 @@ function listFiles(root) {
     if (f.startsWith("scripts/") && !path.basename(f).includes(".")) {
       try {
         return /^#!.*\b(ba)?sh\b/.test(fs.readFileSync(path.join(root, f), "utf-8").split("\n", 1)[0]);
-      } catch {
-        return false;
+      } catch (e) {
+        return !["ENOENT", "EISDIR", "ELOOP"].includes(e?.code); // unreadable: kept, so the scan lists it
       }
     }
     return false;
@@ -335,11 +335,15 @@ function baseRegistry() {
 export function scanTree(root) {
   const files = listFiles(root);
   const sources = new Map();
+  const unreadable = [];
   for (const f of files) {
     try {
       sources.set(f, fs.readFileSync(path.join(root, f), "utf-8"));
-    } catch {
-      /* unreadable files are not usages */
+    } catch (e) {
+      // A path git lists that is gone from the tree, a folder or a dangling
+      // link holds no code; any other failure is code the scan could not
+      // read, which is listed rather than dropped.
+      if (!["ENOENT", "EISDIR", "ELOOP"].includes(e?.code)) unreadable.push([f, e?.code ?? "error"]);
     }
   }
   const out = { generatedFrom: root, usages: [], unchecked: [] };
@@ -353,6 +357,7 @@ export function scanTree(root) {
     const key = `${harness}|${kind}|${site}|${why}`;
     if (!skips.has(key)) { skips.add(key); out.unchecked.push({ harness, kind, site, why }); }
   };
+  for (const [f, code] of unreadable) skip("clawbox", "file", `${f}:1`, `the file could not be read (${code})`);
 
   // Constants across the JS tree: the file's own first, then a name the tree
   // defines exactly once (what an import of it resolves to).

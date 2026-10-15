@@ -349,6 +349,17 @@ describe("the scanner", () => {
     }
   });
 
+  it.skipIf(process.getuid?.() === 0)("lists a source file it cannot read instead of dropping it", () => {
+    const dir = tree({
+      "src/lib/ok.ts": 'export const f = () => spawnOpenclawCli(["skills", "list"]);',
+      "src/lib/locked.ts": 'export const g = () => spawnOpenclawCli(["plugins", "list"]);',
+    });
+    fs.chmodSync(path.join(dir, "src/lib/locked.ts"), 0o000);
+    const scan = scanTree(dir) as Scan;
+    expect(found(scan, "openclaw", "cli", "skills list")).toHaveLength(1);
+    expect(scan.unchecked).toContainEqual(expect.objectContaining({ site: "src/lib/locked.ts:1", why: expect.stringContaining("could not be read") }));
+  });
+
   it("finds, in this tree, what the hand-made maps of ClawBox's harness use list", () => {
     // A floor, not a census: one representative of each kind the research
     // mapped by hand (2026-10-15). A scanner change that loses a pattern fails
