@@ -425,8 +425,10 @@ export function buildPage(draft: PageDraft, source: string, ctx: BuildContext): 
 
   const entity = slugify(draft.title, 48);
   const claims: Claim[] = [];
+  const usedOnPage = new Set<string>();
   for (const fact of draft.facts) {
-    const id = allocateClaimId(ctx.claimIndex, draft.domain, entity, slugify(fact.fact, 48), path);
+    const id = allocateClaimId(ctx.claimIndex, draft.domain, entity, slugify(fact.fact, 48), path, usedOnPage);
+    usedOnPage.add(id);
     const claim: Claim = {
       id,
       text: fact.fact,
