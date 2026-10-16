@@ -4376,16 +4376,24 @@ async function restartGatewayOnce(options: RestartGatewayOptions): Promise<void>
 }
 
 /**
- * What a restart that outlived its 60 s client came to. The client returning
- * is systemd's own answer and needs nothing more. A client killed by that
+ * What a restart that outlived its client came to. The client returning is
+ * systemd's own answer and needs nothing more. A client killed by that
  * deadline left the job running (see `@/lib/gateway-unit-job`): the restart
  * landed when the job finished with the unit active, failed when it finished
  * any other way, and is still going when the job outlasted the wait, which is
- * the not-back-yet answer GatewayNotReadyError already carries.
+ * the not-back-yet answer GatewayNotReadyError already carries. A unit systemd
+ * never answered about is none of those, and is reported as unconfirmed.
  */
 function assertRestartLanded(outcome: UnitJobOutcome, unit: string): void {
   if (outcome.kind === "returned") return;
   const seconds = Math.round(outcome.waitedMs / 1000);
+  // Never read once: "could not look" is not "still restarting", and callers
+  // take GatewayNotReadyError as a restart systemd holds.
+  if (outcome.kind === "in-flight" && outcome.state === null) {
+    throw new GatewayRestartFailedError(
+      `The gateway's restart could not be confirmed: systemd did not answer about ${unit} after the restart's client gave up.`,
+    );
+  }
   if (outcome.kind === "in-flight") {
     console.error(`[openclaw-config] ${unit} was still restarting ${seconds}s after its client gave up`);
     throw new GatewayNotReadyError(

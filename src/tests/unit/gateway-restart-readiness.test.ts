@@ -385,6 +385,32 @@ describe("restartGateway when the restart outlives its client", () => {
     quiet.forEach((s) => s.mockRestore());
   });
 
+  it("does not call a restart queued when systemd could not be asked about the unit at all", async () => {
+    // "Could not look" is not "in flight": the configure restore reads in
+    // flight as queued and drops its offline hint.
+    const { restartGateway, GatewayNotReadyError } = await load();
+    execFileMock.mockImplementation((_cmd: string, args: string[], _opts: unknown, cb: ExecCallback) => {
+      if (args.includes("restart")) {
+        cb(Object.assign(new Error("Command failed: sudo systemctl restart"), { killed: true, signal: "SIGTERM", code: null }));
+        return;
+      }
+      if (args.includes("show")) {
+        cb(Object.assign(new Error("Failed to connect to bus: Connection refused"), { code: 1 }));
+        return;
+      }
+      cb(null, { stdout: "", stderr: "" });
+    });
+    const quiet = [vi.spyOn(console, "warn"), vi.spyOn(console, "error")].map((s) => s.mockImplementation(() => {}));
+    let err: unknown = "pending";
+    restartGateway({ awaitReady: false, restartClientMs: 5_000, restartSettleMs: 0 })
+      .then(() => { err = null; }, (e: unknown) => { err = e; });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(GatewayNotReadyError);
+    expect((err as Error).message).toMatch(/could not be confirmed/);
+    quiet.forEach((s) => s.mockRestore());
+  });
+
   it("asks for a restart with the client a caller gives it, and reads one it outlived as queued", async () => {
     const { restartGateway, GatewayNotReadyError } = await load();
     unitAnswers(["Job=4711\nActiveState=deactivating\nSubState=stop-sigterm\nResult=success\n"]);
