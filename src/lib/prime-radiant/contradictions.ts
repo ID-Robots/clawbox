@@ -49,6 +49,7 @@ import { buildJudgePrompt, JudgeParseError, JUDGE_VERDICTS, parseJudgeResponse, 
 import { redactText } from "./redact";
 import { addReviewItem, type ReviewItem } from "./review-store";
 import { runInTransaction, stateDbExists, withStateDb } from "./state-db";
+import { differentSubjects, sideIdentifiers, type Identifiers } from "./identifiers";
 import { claimSubject, sameSubject, type ClaimSubject } from "./subject";
 import type { VaultSnapshot } from "./vault";
 
@@ -150,6 +151,8 @@ export interface PassClaim {
   verified: boolean;
   /** What the claim is about (its own subject, else its page's), for {@link sameSubject}. */
   subject: ClaimSubject;
+  /** The identifiers its page title and its text carry (waybill, invoice, transfer numbers, dates). */
+  ids?: Identifiers;
 }
 
 /** Every active claim on a valid page, redacted, in page order. */
@@ -160,7 +163,7 @@ export function collectClaims(snapshot: Pick<VaultSnapshot, "pages">): PassClaim
     const title = page.parsed.frontmatter.title;
     for (const c of page.parsed.frontmatter.claims) {
       const text = redactText(c.text.slice(0, MAX_CLAIM_CHARS)).text;
-      out.push({ id: c.id, page: page.path, text, verified: !!c.verified, subject: claimSubject(c.id, text, title) });
+      out.push({ id: c.id, page: page.path, text, verified: !!c.verified, subject: claimSubject(c.id, text, title), ids: sideIdentifiers(title, text) });
     }
   }
   return out;
@@ -171,8 +174,10 @@ export function collectClaims(snapshot: Pick<VaultSnapshot, "pages">): PassClaim
  * thing ({@link sameSubject}), and not the same statement twice (that can
  * never contradict itself).
  */
-export function comparable(a: Pick<PassClaim, "text" | "subject">, b: Pick<PassClaim, "text" | "subject">): boolean {
-  return a.text !== b.text && sameSubject(a.subject, b.subject);
+export function comparable(a: Pick<PassClaim, "text" | "subject" | "ids">, b: Pick<PassClaim, "text" | "subject" | "ids">): boolean {
+  if (a.text === b.text || !sameSubject(a.subject, b.subject)) return false;
+  // Two waybills, two transfers, two days' reports: different identifiers are different things.
+  return !(a.ids && b.ids && differentSubjects(a.ids, b.ids));
 }
 
 export interface CandidatePair {
