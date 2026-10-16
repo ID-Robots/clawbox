@@ -8010,6 +8010,169 @@ if [ -d "$CLAWBOX_WORKSPACE" ]; then
   mkdir -p "$CLAWBOX_WORKSPACE/skills" 2>/dev/null || true
 fi
 
+# ── Default skills (TASK-1639): ClawBox's own first-party skills, seeded ────
+#
+# config/default-skills/<id>/ holds a small reviewed set (the ClawBox handbook
+# plus everyday-work skills: leads, email outreach, inbox triage, documents,
+# reminders, research). No third-party ClawHub skills are shipped by default.
+#
+# Each skill is copied into <workspace>/skills/<id>/ ONCE, and the record
+# data/default-skills.json remembers what was seeded and the sha256 of the
+# SKILL.md that was written:
+#   not in the record, not on disk  copy it, record it
+#   not in the record, on disk      the owner's own skill of that name: left
+#                                   alone, recorded so it is never overwritten
+#   in the record, missing on disk  the owner removed it: NOT re-added
+#   in the record, unchanged on disk and the shipped copy changed
+#                                   refreshed to the shipped copy (an update)
+#   in the record, edited on disk   the owner's edit: left alone
+# An unreadable record means nothing is written. This is a blocking
+# ExecStartPre, so the step is total: any failure is a WARN, never a stop, and
+# a boot with nothing to do is one small file read per skill.
+CLAWBOX_DEFAULT_SKILLS_SRC="$CLAWBOX_ROOT/config/default-skills"
+CLAWBOX_DEFAULT_SKILLS_STATE="$CLAWBOX_ROOT/data/default-skills.json"
+if [ -d "$CLAWBOX_DEFAULT_SKILLS_SRC" ] && [ -d "$CLAWBOX_WORKSPACE/skills" ]; then
+  python3 - "$CLAWBOX_DEFAULT_SKILLS_SRC" "$CLAWBOX_WORKSPACE/skills" "$CLAWBOX_DEFAULT_SKILLS_STATE" <<'SKILLSPY' || echo "  WARN: default skills not seeded this boot" >&2
+import hashlib, json, os, shutil, sys, tempfile
+
+src_root, dst_root, state_path = sys.argv[1:4]
+
+
+def sha(path):
+    try:
+        with open(path, "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
+    except OSError:
+        return None
+
+
+try:
+    with open(state_path, encoding="utf-8") as fh:
+        state = json.load(fh)
+    if not isinstance(state, dict) or not isinstance(state.get("skills"), dict):
+        raise ValueError("shape")
+except FileNotFoundError:
+    state = {"skills": {}}
+except (OSError, ValueError, RecursionError):
+    print("  WARN: data/default-skills.json cannot be read; default skills left as they are", file=sys.stderr)
+    raise SystemExit(0)
+
+skills = state["skills"]
+changed, seeded, refreshed = False, [], []
+for sid in sorted(os.listdir(src_root)):
+    src = os.path.join(src_root, sid)
+    src_md = os.path.join(src, "SKILL.md")
+    if sid.startswith(".") or not os.path.isfile(src_md):
+        continue
+    dst = os.path.join(dst_root, sid)
+    dst_md = os.path.join(dst, "SKILL.md")
+    want = sha(src_md)
+    row = skills.get(sid)
+    written = row.get("sha256") if isinstance(row, dict) else None
+    try:
+        if row is None:
+            if os.path.exists(dst):
+                skills[sid] = {"sha256": None, "owner": True}
+            else:
+                tmp = tempfile.mkdtemp(prefix="." + sid + ".", dir=dst_root)
+                shutil.copytree(src, os.path.join(tmp, sid))
+                os.rename(os.path.join(tmp, sid), dst)
+                os.rmdir(tmp)
+                skills[sid] = {"sha256": want}
+                seeded.append(sid)
+            changed = True
+        elif written and os.path.isfile(dst_md) and sha(dst_md) == written and want != written:
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+            skills[sid] = {"sha256": want}
+            refreshed.append(sid)
+            changed = True
+    except OSError as exc:
+        print(f"  WARN: could not seed default skill {sid}: {exc}", file=sys.stderr)
+
+if changed:
+    try:
+        os.makedirs(os.path.dirname(state_path), exist_ok=True)
+        tmp = state_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, indent=2, sort_keys=True)
+        os.replace(tmp, state_path)
+    except OSError as exc:
+        print(f"  WARN: could not record default skills: {exc}", file=sys.stderr)
+if seeded:
+    print("  Seeded default skills: " + ", ".join(seeded))
+if refreshed:
+    print("  Refreshed default skills: " + ", ".join(refreshed))
+SKILLSPY
+fi
+
+# ── Cron failure alerts to the owner's chat, ONCE (TASK-1639) ───────────────
+#
+# A reminder or digest the owner set up from chat that starts failing should
+# say so in that chat, not only in the Control UI. The core's own key
+# `cron.failureAlert` (schema-validated, written through `config set
+# --batch-json`) is set to enabled, announce, channel "last" (the channel the
+# owner last talked on), with the core's own threshold and cooldown — only when
+# the key is ABSENT, and only once: the attempt is recorded under "config" in
+# data/default-skills.json, so an owner who later removes or changes it is
+# never overridden. One CLI start on the one boot that seeds it.
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ -f "$OPENCLAW_CONFIG" ]; then
+  CLAWBOX_ALERT_NEEDED="$(python3 - "$OPENCLAW_CONFIG" "$CLAWBOX_DEFAULT_SKILLS_STATE" <<'ALERTPY' || echo 0
+import json, sys
+try:
+    with open(sys.argv[2], encoding="utf-8") as fh:
+        state = json.load(fh)
+except FileNotFoundError:
+    state = {}
+except (OSError, ValueError, RecursionError):
+    print("0"); raise SystemExit(0)
+done = state.get("config", []) if isinstance(state, dict) else []
+if not isinstance(done, list) or "cron.failureAlert" in done:
+    print("0"); raise SystemExit(0)
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        cfg = json.load(fh)
+except (OSError, ValueError, RecursionError):
+    print("0"); raise SystemExit(0)
+cron = cfg.get("cron") if isinstance(cfg, dict) else None
+print("2" if isinstance(cron, dict) and "failureAlert" in cron else "1")
+ALERTPY
+)"
+  CLAWBOX_ALERT_OK=0
+  if [ "$CLAWBOX_ALERT_NEEDED" = "1" ]; then
+    if timeout -k 5 90 "${OPENCLAW_RETRY:-/usr/bin/env}" "$OPENCLAW_BIN" config set --batch-json \
+      '[{"path":"cron.failureAlert","value":{"enabled":true,"mode":"announce","channel":"last"}}]' >/dev/null 2>&1; then
+      echo "  Enabled cron failure alerts to the owner's last chat (cron.failureAlert)"
+      CLAWBOX_ALERT_OK=1
+    else
+      echo "  WARN: could not enable cron failure alerts; will retry next boot" >&2
+    fi
+  fi
+  # Recorded when it landed, or when the owner already had his own value.
+  if [ "$CLAWBOX_ALERT_OK" = "1" ] || [ "$CLAWBOX_ALERT_NEEDED" = "2" ]; then
+    python3 - "$CLAWBOX_DEFAULT_SKILLS_STATE" <<'ALERTREC' || echo "  WARN: could not record the cron failure-alert seed" >&2
+import json, os, sys
+path = sys.argv[1]
+try:
+    with open(path, encoding="utf-8") as fh:
+        state = json.load(fh)
+except FileNotFoundError:
+    state = {}
+if not isinstance(state, dict):
+    raise SystemExit(1)
+done = state.setdefault("config", [])
+if not isinstance(done, list):
+    raise SystemExit(1)
+if "cron.failureAlert" not in done:
+    done.append("cron.failureAlert")
+state.setdefault("skills", {})
+os.makedirs(os.path.dirname(path), exist_ok=True)
+with open(path + ".tmp", "w", encoding="utf-8") as fh:
+    json.dump(state, fh, indent=2, sort_keys=True)
+os.replace(path + ".tmp", path)
+ALERTREC
+  fi
+fi
+
 CLAWBOX_GUIDE_SRC="$CLAWBOX_ROOT/config/clawbox-workspace-guide.md"
 CLAWBOX_GUIDE_DST="$CLAWBOX_WORKSPACE/CLAWBOX.md"
 # Topping an existing CLAWBOX.md up, section by section.

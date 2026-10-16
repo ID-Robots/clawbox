@@ -479,7 +479,14 @@ import { readOsTimeZone } from "@/lib/timezone";
 
 // ─── Tunables ────────────────────────────────────────────────────────────────
 
-/** config.json key of the owner's switch. Absent means OFF. */
+/**
+ * config.json key of the owner's switch. Absent means ON (TASK-1639: the box
+ * works from chat out of the box, so the main agent can delegate a coding task
+ * without the owner opening the app first). Only an explicit `false` — what
+ * switching it off writes — is OFF. Runs still work in their own copy on a
+ * branch, auto pull requests stay off by default, and the tools are only
+ * offered once the harness reports ready.
+ */
 export const CODING_AGENT_CONFIG_KEY = "coding_agent_enabled";
 /**
  * config.json key of the folder a run works in when the caller names neither a
@@ -2549,13 +2556,18 @@ export function httpStatusForCodingError(kind: CodingAgentErrorKind): number {
 // ─── The owner's switch ──────────────────────────────────────────────────────
 
 export async function isCodingAgentEnabled(): Promise<boolean> {
-  return (await configGet(CODING_AGENT_CONFIG_KEY)) === true;
+  return codingAgentEnabledFrom(await configGet(CODING_AGENT_CONFIG_KEY));
 }
 
 // Each setting is derived from its raw config value by a pure function, so a
 // single read of config.json can answer the whole status (getCodingAgentStatus
 // used to open the file eight times per poll) while the one-key getters below
 // keep their names.
+
+/** Absent (or anything but an explicit `false`) is ON — see CODING_AGENT_CONFIG_KEY. */
+export function codingAgentEnabledFrom(raw: unknown): boolean {
+  return raw !== false;
+}
 
 function defaultDirectoryFrom(raw: unknown): string | null {
   return typeof raw === "string" && raw.trim() ? raw.trim() : null;
@@ -4036,7 +4048,7 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
   // One read of config.json for every setting the status carries — the app
   // polls this, and each getter above opens and parses the file on its own.
   const config = await configGetAll();
-  const enabled = config[CODING_AGENT_CONFIG_KEY] === true;
+  const enabled = codingAgentEnabledFrom(config[CODING_AGENT_CONFIG_KEY]);
   const defaultDirectory = defaultDirectoryFrom(config[CODING_AGENT_DIR_CONFIG_KEY]);
   const effort = effortFrom(config[CODING_AGENT_EFFORT_CONFIG_KEY]);
   const provider = codingProviderFrom(config[CODING_AGENT_PROVIDER_CONFIG_KEY]);
@@ -4148,7 +4160,9 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     // home page about a second after it appeared.
     setupComplete: typeof config[CODING_AGENT_SETUP_CONFIG_KEY] === "boolean"
       ? config[CODING_AGENT_SETUP_CONFIG_KEY] === true
-      : enabled,
+      // An explicit `true` only: the switch is ON by default now, and an absent
+      // key is a box nobody has set up, not one set up before the wizard.
+      : config[CODING_AGENT_CONFIG_KEY] === true,
   };
 }
 
