@@ -7,7 +7,7 @@
   "config set: the key is computed at runtime": 1
  },
  "scripts/gateway-pre-start.sh": {
-  "config set --batch-json: the paths are in a JSON payload built at runtime": 1,
+  "config set --batch-json: the paths are in a JSON payload built at runtime": 2,
   "config set: the key is computed at runtime": 2
  },
  "src/app/setup-api/ai-models/configure/route.ts": {
