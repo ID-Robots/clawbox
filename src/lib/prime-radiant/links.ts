@@ -40,6 +40,68 @@ export function extractLinks(body: string): RawLink[] {
   return out;
 }
 
+// The two link shapes above with their parts captured (the same text matches).
+const WIKILINK_PARTS_RE = /\[\[([^\]|#\n]+)(#[^\]|\n]*)?(\|[^\]\n]*)?\]\]/g;
+const MD_LINK_PARTS_RE = /\[([^\]\n]*)\]\(([^)\s]+)(\s+"[^"]*")?\)/g;
+const CODE_RE = /```[\s\S]*?```|`[^`\n]*`/g;
+
+/** One link in a body, with the parts a rewrite keeps. `target` is what {@link extractLinks} reads. */
+export type FoundLink =
+  | { kind: "wiki"; target: string; heading: string | null; alias: string | null }
+  | { kind: "md"; target: string; text: string; fragment: string | null; title: string | null };
+
+/**
+ * `body` with each link `retarget` answers a replacement for (the whole link's
+ * new text) rewritten, every other character as it was. Code is left alone,
+ * as {@link extractLinks} leaves it: a `[[x]]` there is an example.
+ */
+export function rewriteLinks(body: string, retarget: (link: FoundLink) => string | null): { body: string; rewritten: number } {
+  let rewritten = 0;
+  const prose = (text: string) =>
+    text
+      .replace(WIKILINK_PARTS_RE, (whole, target: string, heading: string | undefined, alias: string | undefined) => {
+        const next = retarget({ kind: "wiki", target: target.trim(), heading: heading === undefined ? null : heading.slice(1), alias: alias === undefined ? null : alias.slice(1) });
+        if (next === null || next === whole) return whole;
+        rewritten++;
+        return next;
+      })
+      .replace(MD_LINK_PARTS_RE, (whole, text: string, href: string, title: string | undefined) => {
+        const target = href.trim();
+        if (/^[a-z][a-z0-9+.-]*:/i.test(target) || target.startsWith("#") || target.startsWith("/")) return whole;
+        const hash = target.indexOf("#");
+        const bare = hash < 0 ? target : target.slice(0, hash);
+        if (!bare.toLowerCase().endsWith(".md")) return whole;
+        const next = retarget({
+          kind: "md",
+          target: decodeURIComponentSafe(bare),
+          text,
+          fragment: hash < 0 ? null : target.slice(hash + 1),
+          title: title === undefined ? null : title.trim(),
+        });
+        if (next === null || next === whole) return whole;
+        rewritten++;
+        return next;
+      });
+  let out = "";
+  let at = 0;
+  for (const m of body.matchAll(CODE_RE)) {
+    out += prose(body.slice(at, m.index)) + m[0];
+    at = m.index + m[0].length;
+  }
+  out += prose(body.slice(at));
+  return { body: out, rewritten };
+}
+
+/** The relative Markdown href from the page `fromPage` to the page `toPage` (both vault paths). */
+export function relativeHref(fromPage: string, toPage: string): string {
+  const from = fromPage.split("/").slice(0, -1);
+  const to = toPage.split("/");
+  let common = 0;
+  while (common < from.length && common < to.length - 1 && from[common] === to[common]) common++;
+  const rel = [...from.slice(common).map(() => ".."), ...to.slice(common)].join("/");
+  return rel.replace(/ /g, "%20");
+}
+
 function decodeURIComponentSafe(s: string): string {
   try {
     return decodeURIComponent(s);

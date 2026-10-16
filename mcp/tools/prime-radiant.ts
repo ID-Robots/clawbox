@@ -1,7 +1,7 @@
 // Prime Radiant — the owner's living wiki — as the agent's tools.
 //
 // Everything the desktop app does, and the edits it has no buttons for
-// (create, edit and delete a page; add, edit, delete and verify a claim),
+// (create, edit, delete and merge pages; add, edit, delete and verify a claim),
 // through the SAME /setup-api/prime-radiant/* routes the app calls. The vault's
 // lock, its lint, its one git commit per change and the owner checks are the
 // routes'; nothing here reads or writes the vault itself, so there is no
@@ -21,7 +21,7 @@
 // carry.
 //
 // Both editions: the vault is ClawBox's, not a harness's. `profile: "full"`
-// only — thirty tools are context a 4-8B model on the core profile should not
+// only — thirty-one tools are context a 4-8B model on the core profile should not
 // pay for; `memory_shard_search` already reads the wiki there.
 
 import { z } from "zod";
@@ -58,6 +58,7 @@ export const PRIME_RADIANT_TOOLS = [
   "prime_radiant_page_create",
   "prime_radiant_page_edit",
   "prime_radiant_page_delete",
+  "prime_radiant_page_merge",
   "prime_radiant_claim_add",
   "prime_radiant_claim_edit",
   "prime_radiant_claim_delete",
@@ -161,6 +162,9 @@ const NEXT: Record<string, { code: ToolErrorCode; next: string }> = {
   taken: { code: "CONFLICT", next: "Leave the id out so one is allocated, or choose another." },
   retired: { code: "CONFLICT", next: "A retired id is never reused: leave the id out so a new one is allocated." },
   too_many_claims: { code: "CONFLICT", next: "Put the fact on another page, or delete a claim first." },
+  deprecated: { code: "CONFLICT", next: "Merge into the page that replaced it (prime_radiant_pages), or ask the user which page should stay." },
+  too_long: { code: "CONFLICT", next: "Shorten the page that stays (prime_radiant_page_edit) or merge fewer pages at once, then try again." },
+  into_links: { code: "CONFLICT", next: "Ask the user: take those links out of the page that stays (prime_radiant_page_edit), or merge with keep_into_body: false." },
   invalid_page: { code: "CONFLICT", next: "Tell the user the page needs fixing by hand; prime_radiant_lint says what is wrong." },
   conflict: { code: "CONFLICT", next: "A later change touched the same lines: undo the later commit first, or edit the page instead." },
   nothing_to_revert: { code: "CONFLICT", next: "Check what that commit did with prime_radiant_diff." },
@@ -287,6 +291,22 @@ interface PageBody {
   links?: string[];
   inIndex?: boolean;
   lint?: { findings?: unknown[] };
+}
+
+interface MergeBody {
+  into?: string;
+  from?: string[];
+  dryRun?: boolean;
+  commit?: string | null;
+  claims?: string[];
+  verified?: string[];
+  aliases?: string[];
+  privacy?: string | null;
+  relinked?: Array<{ path: string; links: number }>;
+  links?: number;
+  unparsed?: string[];
+  reviewItems?: number;
+  findings?: unknown[];
 }
 
 interface GraphBody {
@@ -770,6 +790,40 @@ function registerEditTools(reg: Registrar): void {
       const r = await pr<{ path: string; commit?: string | null; claims?: string[]; verified?: string[] }>("DELETE", `/pages/${segments(path)}`);
       const facts = r.claims?.length ? ` Its ${r.claims.length} claim(s) went with it${r.verified?.length ? `, ${r.verified.length} of them verified` : ""}.` : "";
       return text(committed(r.commit, `Deleted ${r.path}.${facts}`));
+    },
+  );
+
+  reg.tool(
+    "prime_radiant_page_merge",
+    "Merge duplicate wiki pages into one, only when the user asked for it: their claims move to the page that stays with ids and verifications unchanged, their titles become its aliases, links across the wiki lead to it, and they go with their index lines, in one commit the owner can undo. dry_run: true says what would change and writes nothing.",
+    {
+      into: zPagePath("The page that stays and receives the others."),
+      from: z.array(zPagePath("A duplicate page.")).min(1).max(20).describe("The duplicate pages to fold into it and remove, 1 to 20."),
+      dry_run: zOptBool("true: only say what the merge would change; nothing is written."),
+      keep_into_body: zOptBool("Leave out to keep the staying page's text as it is; false lets merged summaries be added to it."),
+      confirm: zConfirm("Must be true. Set it only when the user asked for these pages to be merged."),
+    },
+    DESTRUCTIVE,
+    async (a: { into: string; from: string[]; dry_run?: boolean; keep_into_body?: boolean; confirm: true }) => {
+      if (a.from.includes(a.into)) throw new ToolError("BAD_ARGUMENT", "A page cannot be merged into itself.", "Leave the page that stays out of from.");
+      const r = await pr<MergeBody>("POST", "/pages/merge", {
+        body: { into: a.into, from: a.from, ...(a.dry_run ? { dry_run: true } : {}), ...(a.keep_into_body === false ? { keep_into_body: false } : {}) },
+      });
+      const dry = r.dryRun === true;
+      const claims = r.claims ?? [];
+      const verified = r.verified?.length ? ` (${r.verified.length} verified, kept as they are)` : "";
+      const facts = `${claims.length} claim(s)${verified} ${dry ? "would move" : "moved"}, ${r.links ?? 0} link(s) on ${r.relinked?.length ?? 0} page(s) ${dry ? "would lead" : "now lead"} there.`;
+      const merged = `${(r.from ?? a.from).join(", ")} into ${r.into ?? a.into}`;
+      return json({
+        result: dry ? `Dry run, nothing was changed. Merging ${merged}: ${facts}` : committed(r.commit, `Merged ${merged}: ${facts}`),
+        claims,
+        aliases: r.aliases ?? [],
+        relinked: r.relinked ?? [],
+        ...(r.privacy ? { privacy_raised_to: r.privacy } : {}),
+        ...(r.unparsed?.length ? { not_relinked: r.unparsed } : {}),
+        ...(r.reviewItems ? { review_items_followed: r.reviewItems } : {}),
+        checks: findingsOut(r.findings),
+      });
     },
   );
 

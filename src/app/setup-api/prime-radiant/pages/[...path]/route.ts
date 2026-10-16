@@ -15,9 +15,23 @@
  * or the assistant through the MCP bearer (its commit names it), from our own
  * page; 404 `not_found`, 400 `invalid`, 409 `invalid_page` / `verified` /
  * `lint_blocked`, 412 `not_initialised`.
+ *
+ * POST /setup-api/prime-radiant/pages/merge `{ into, from: [1..20], dry_run?,
+ * keep_into_body? }` — fold duplicate pages into `into` (edit.ts
+ * `mergePages`): one commit `merge: <from, …> -> <into>`, or with `dry_run:
+ * true` the same answer and no commit. `into`'s body stays byte for byte
+ * unless `keep_into_body: false`. `{ into, from, dryRun, commit, claims, verified, aliases, sources,
+ * privacy, notes, relinked, links, indexLines, unparsed, reviewItems,
+ * findings }`. The same writers as PATCH; 404 `not_found`, 400 `invalid`
+ * (into itself), 409 `deprecated` / `verified` / `taken` / `retired` /
+ * `too_many_claims` / `too_long` / `into_links` / `invalid_page` /
+ * `lint_blocked`, 412
+ * `not_initialised`. It is answered here rather than from a `merge/` folder,
+ * which would take GET, PATCH and DELETE of a page at `merge.md` from this
+ * route; a POST to any other page path is 405.
  */
 import { requireSession } from "@/lib/route-auth";
-import { deletePage, editPage, readPagePatch } from "@/lib/prime-radiant/edit";
+import { deletePage, editPage, mergePages, readPageMerge, readPagePatch } from "@/lib/prime-radiant/edit";
 import { getPage, getPageBlurb } from "@/lib/prime-radiant/service";
 import { editFailure, fail, json, readJsonBody, vaultFailure, writerGuard } from "@/lib/prime-radiant/route-helpers";
 
@@ -60,5 +74,21 @@ export async function DELETE(req: Request, { params }: Params) {
     return json(await deletePage(rel, gate.writer));
   } catch (err) {
     return editFailure("page delete", err);
+  }
+}
+
+export async function POST(req: Request, { params }: Params) {
+  const segments = (await params).path ?? [];
+  if (segments.length !== 1 || segments[0] !== "merge") {
+    return fail("method_not_allowed", "Pages are created with POST pages and merged with POST pages/merge.", 405);
+  }
+  const gate = await writerGuard(req, "Merging pages");
+  if (!gate.ok) return gate.response;
+  const read = await readJsonBody(req);
+  if (!read.ok) return read.response;
+  try {
+    return json(await mergePages(readPageMerge(read.body), gate.writer));
+  } catch (err) {
+    return editFailure("page merge", err);
   }
 }

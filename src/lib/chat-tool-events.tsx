@@ -131,6 +131,7 @@ export const TOOL_STEP_APPS: Readonly<Record<ToolBrand, ToolStepApp>> = Object.f
       prime_radiant_costs: "usage", prime_radiant_settings: "settings", prime_radiant_review_list: "review",
       prime_radiant_history: "history", prime_radiant_diff: "history", prime_radiant_ingest_status: "import",
       prime_radiant_page_create: "create", prime_radiant_page_edit: "update", prime_radiant_page_delete: "remove",
+      prime_radiant_page_merge: "update",
       prime_radiant_claim_add: "create", prime_radiant_claim_edit: "update", prime_radiant_claim_delete: "remove",
       prime_radiant_claim_verify: "verify", prime_radiant_review_resolve: "review", prime_radiant_review_raise: "review",
       prime_radiant_undo: "undo", prime_radiant_ingest_preview: "import", prime_radiant_ingest_start: "import",

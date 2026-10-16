@@ -67,6 +67,7 @@ const TOOL_ROWS: [wire: string, label: string, brand: ToolBrand][] = [
   ["clawbox__prime_radiant_page_create", "Prime Radiant Create", "prime-radiant"],
   ["mcp__clawbox__prime_radiant_page_edit", "Prime Radiant Update", "prime-radiant"],
   ["clawbox__prime_radiant_page_delete", "Prime Radiant Remove", "prime-radiant"],
+  ["clawbox__prime_radiant_page_merge", "Prime Radiant Update", "prime-radiant"],
   ["clawbox__prime_radiant_claim_add", "Prime Radiant Create", "prime-radiant"],
   ["clawbox__prime_radiant_claim_edit", "Prime Radiant Update", "prime-radiant"],
   ["clawbox__prime_radiant_claim_delete", "Prime Radiant Remove", "prime-radiant"],
