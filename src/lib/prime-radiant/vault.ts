@@ -11,6 +11,7 @@
 import fs from "fs/promises";
 import { constants as fsConstants } from "fs";
 import path, { untraced } from "@/lib/runtime-path";
+import { withPluginFields } from "./plugin-compat";
 import { parsePage, serializePage, pageSummary, type ParsedPage } from "./frontmatter";
 import { hasVerification, type PageFrontmatter } from "./schema";
 import { isKnowledgePage, pageAbsPath, RESERVED_DIRS, safePagePath, vaultDir } from "./paths";
@@ -356,7 +357,8 @@ export async function vaultOperation<T>(
         return p;
       },
       async writePage(rel, frontmatter, body) {
-        return tx.write(rel, serializePage(frontmatter, body));
+        // memory-wiki's own fields (id, pageType, sourceIds, updatedAt) ride along on every write.
+        return tx.write(rel, serializePage(withPluginFields(txPath(rel), frontmatter), body));
       },
       async remove(rel) {
         const p = txPath(rel);
