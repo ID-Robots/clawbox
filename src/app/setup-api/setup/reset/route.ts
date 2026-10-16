@@ -22,7 +22,7 @@ import path from "@/lib/runtime-path";
 import crypto from "crypto";
 import { startRootStep } from "@/lib/root-step-runner";
 import { readDesktopBrowserConfig } from "@/lib/desktop-browser-config";
-import { runUnitJob } from "@/lib/gateway-unit-job";
+import { clientTimedOut, readUnitState, runUnitJob, unitIsStopped, type UnitState } from "@/lib/gateway-unit-job";
 
 const execFile = promisify(execFileCb);
 
@@ -326,28 +326,91 @@ async function maskAndStopGateway(): Promise<void> {
   } catch (err) {
     console.warn("[Reset] Failed to mask gateway:", err instanceof Error ? err.message : err);
   }
+  // Waited for on the unit when the stop outlives its client: on an x64 bridge
+  // it waits for OpenClaw's own drain, and the wipe must not start beside a
+  // gateway that is still writing its state. A gateway still stopping, or not
+  // stopped at all, ends the reset here, before anything is wiped; the caller's
+  // catch unmasks it, asks systemd to start it again when the stop is still
+  // under way, and answers in these words. The waits are bounded so that answer
+  // reaches the page: the tunnel cuts a request at about 100 s (worst case
+  // here: mask 10 + client 15 + settle 45 + show 10 + unmask 10 + restart 5),
+  // and a reset that wiped minutes after the page showed a network error would
+  // be a failure reported over a reset that happened.
+  const stopAskedAt = Date.now();
+  let state: UnitState | null = null;
+  let stillStopping = false;
   try {
-    // Waited for on the unit when the stop outlives its client: on an x64
-    // bridge it waits for OpenClaw's own drain, and the wipe must not start
-    // beside a gateway that is still writing its state.
     const stop = await runUnitJob("/usr/bin/sudo", ["/usr/bin/systemctl", "stop", "clawbox-gateway.service"], {
       unit: "clawbox-gateway.service",
       timeoutMs: 15_000,
+      settleBudgetMs: 45_000,
     });
-    if (stop.kind === "in-flight") {
-      console.warn(`[Reset] clawbox-gateway was still stopping after ${Math.round(stop.waitedMs / 1000)}s; wiping anyway`);
-    }
+    if (stop.kind === "in-flight") stillStopping = true;
+    else if (stop.kind === "settled") state = stop.state;
   } catch (err) {
+    // A stop that failed outright (a refused sudo, a stop cancelled by a
+    // restart someone else queued) proves nothing either way, so the unit is
+    // asked. A unit that cannot be asked either may still be running, and the
+    // wipe is not started on a guess: a restart of the device is the way back.
     console.warn("[Reset] Failed to stop gateway before wipe:", err instanceof Error ? err.message : err);
+    state = await readUnitState("clawbox-gateway.service");
+    if (!state) {
+      throw new GatewayNotStoppedError(
+        "The factory reset was not started because the assistant could not be confirmed stopped. Nothing was erased; restart the device and try again.",
+        false,
+      );
+    }
+  }
+  if (state && !unitIsStopped(state)) {
+    if (state.activeState === "deactivating") stillStopping = true;
+    else throw new GatewayNotStoppedError("The assistant did not stop, so the factory reset was not started. Nothing was erased.", false);
+  }
+  if (stillStopping) {
+    const waitedS = Math.round((Date.now() - stopAskedAt) / 1000);
+    throw new GatewayNotStoppedError(
+      `The assistant was still stopping after ${waitedS}s, so the factory reset was not started. Nothing was erased.`,
+      true,
+    );
   }
 }
 
-async function unmaskGateway(): Promise<void> {
-  if (!gatewayIsPartOfThisEdition()) return;
+/** The reset ended before anything was erased because the gateway had not stopped. */
+class GatewayNotStoppedError extends Error {
+  constructor(message: string, readonly stillStopping: boolean) {
+    super(message);
+    this.name = "GatewayNotStoppedError";
+  }
+}
+
+/**
+ * Put back a gateway this reset stopped and then did not wipe beside. The stop
+ * it asked for runs on after its client was killed, and an explicit stop is
+ * one `Restart=always` does not undo, so without this the assistant stays down
+ * until the box restarts. systemd queues the restart behind the running stop
+ * and starts the unit once its deactivation ends. A refusal (a masked unit, a
+ * refused sudo) comes back at once; a client still waiting at its deadline
+ * means systemd took the job, which is what answers true.
+ */
+async function startGatewayAgain(): Promise<boolean> {
+  try {
+    await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "restart", "clawbox-gateway.service"], { timeout: 5_000 });
+    return true;
+  } catch (err) {
+    if (clientTimedOut(err)) return true;
+    console.warn("[Reset] Failed to start the gateway again:", err instanceof Error ? err.message : err);
+    return false;
+  }
+}
+
+/** Whether the gateway is unmasked afterwards (true where this edition has none). */
+async function unmaskGateway(): Promise<boolean> {
+  if (!gatewayIsPartOfThisEdition()) return true;
   try {
     await execFile("/usr/bin/sudo", ["/usr/bin/systemctl", "--runtime", "unmask", "clawbox-gateway.service"], { timeout: 10_000 });
+    return true;
   } catch (err) {
     console.warn("[Reset] Failed to unmask gateway:", err instanceof Error ? err.message : err);
+    return false;
   }
 }
 
@@ -751,9 +814,11 @@ export async function POST(request: Request) {
   if (refused) return refused;
 
   try {
-    resetUpdateState();
-
     await maskAndStopGateway();
+
+    // Only once the wipe is really starting: a reset that ended above must
+    // leave a running update's state as it was.
+    resetUpdateState();
 
     const dataFailures: string[] = [];
     // The top of data/ is wiped by a readdir + rm pass of its own rather than
@@ -881,9 +946,16 @@ export async function POST(request: Request) {
     });
     return response;
   } catch (err) {
-    await unmaskGateway();
+    const unmasked = await unmaskGateway();
+    let error = err instanceof Error ? err.message : "Factory reset failed";
+    if (err instanceof GatewayNotStoppedError && err.stillStopping) {
+      // Said only once systemd took the restart: a masked unit refuses it.
+      error += unmasked && await startGatewayAgain()
+        ? " The assistant was asked to start again; try the reset again in a few minutes."
+        : " The assistant stays stopped until the device is restarted.";
+    }
     return NextResponse.json(
-      { error: err instanceof Error ? err.message : "Factory reset failed" },
+      { error },
       { status: 500 },
     );
   }
