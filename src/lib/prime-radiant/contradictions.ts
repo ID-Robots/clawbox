@@ -151,7 +151,7 @@ export interface PassClaim {
   verified: boolean;
   /** What the claim is about (its own subject, else its page's), for {@link sameSubject}. */
   subject: ClaimSubject;
-  /** The identifiers its page title and its text carry (waybill, invoice, transfer numbers, dates). */
+  /** The identifiers its page title and its text carry (waybill, invoice, transfer numbers, dates), and whether its page is a record. */
   ids?: Identifiers;
 }
 
@@ -160,10 +160,10 @@ export function collectClaims(snapshot: Pick<VaultSnapshot, "pages">): PassClaim
   const out: PassClaim[] = [];
   for (const page of snapshot.pages) {
     if (!page.parsed.ok) continue;
-    const title = page.parsed.frontmatter.title;
+    const { title, type } = page.parsed.frontmatter;
     for (const c of page.parsed.frontmatter.claims) {
       const text = redactText(c.text.slice(0, MAX_CLAIM_CHARS)).text;
-      out.push({ id: c.id, page: page.path, text, verified: !!c.verified, subject: claimSubject(c.id, text, title), ids: sideIdentifiers(title, text) });
+      out.push({ id: c.id, page: page.path, text, verified: !!c.verified, subject: claimSubject(c.id, text, title), ids: sideIdentifiers(title, text, type) });
     }
   }
   return out;
@@ -176,7 +176,8 @@ export function collectClaims(snapshot: Pick<VaultSnapshot, "pages">): PassClaim
  */
 export function comparable(a: Pick<PassClaim, "text" | "subject" | "ids">, b: Pick<PassClaim, "text" | "subject" | "ids">): boolean {
   if (a.text === b.text || !sameSubject(a.subject, b.subject)) return false;
-  // Two waybills, two transfers, two days' reports: different identifiers are different things.
+  // Two waybills, two transfers, two days' reports: different identifiers are different things;
+  // two record pages (invoices, receipts, declarations) are one document only when they share a reference.
   return !(a.ids && b.ids && differentSubjects(a.ids, b.ids));
 }
 
