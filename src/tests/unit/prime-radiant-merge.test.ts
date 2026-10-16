@@ -19,7 +19,7 @@ import { mergePages, PageEditError, readPageMerge, type EditWho, type PageMerge 
 import { ASSISTANT_AUTHOR, git, headCommit } from "@/lib/prime-radiant/git";
 import { revertCommit } from "@/lib/prime-radiant/history";
 import { createLinkResolver, extractLinks, relativeHref, rewriteLinks } from "@/lib/prime-radiant/links";
-import { lintVault } from "@/lib/prime-radiant/lint";
+import { LIMITS, lintVault } from "@/lib/prime-radiant/lint";
 import { vaultDir } from "@/lib/prime-radiant/paths";
 import { addReviewItem, getReviewItem } from "@/lib/prime-radiant/review-store";
 import { withStateDb } from "@/lib/prime-radiant/state-db";
@@ -342,6 +342,22 @@ describe("mergePages", () => {
     expect(r.unparsed).toEqual(["concepts/broken.md"]);
     expect(read("concepts/broken.md")).toBe(broken);
     expect(r.relinked.map((p) => p.path)).not.toContain("concepts/broken.md");
+  });
+
+  it("refuses a summary that would take the staying page past the hard cap, and changes nothing", async () => {
+    // Just under the cap: the old page's "Merged from" line would cross it.
+    const long = `${INTO_BODY}\n${"Detail. ".repeat(1480).trim()}\n`;
+    expect(long.trim().length).toBeLessThanOrEqual(LIMITS.bodyHardChars);
+    await seed(pages({ intoBody: long }));
+    const head = (await headCommit(vault))?.sha;
+    await expect(mergePages(LET_BODY_CHANGE, OWNER, { now: NOW })).rejects.toMatchObject({
+      code: "too_long",
+      status: 409,
+      message: expect.stringContaining(INTO),
+    });
+    expect((await headCommit(vault))?.sha).toBe(head);
+    // Kept as it is, the same page merges: no summary is added.
+    await expect(mergePages(MERGE, OWNER, { now: NOW })).resolves.toMatchObject({ notes: [] });
   });
 
   it("refuses a claim whose id was retired, naming it, and changes nothing", async () => {
