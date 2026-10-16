@@ -4021,7 +4021,11 @@ export function gatewayIsAbsent(): boolean {
 export type OpenclawDoctorFixOutcome =
   | "completed"
   | "blocked-by-legacy-exec-approvals"
-  | "blocked-by-service-ownership";
+  | "blocked-by-service-ownership"
+  /** Doctor was not run: the gateway's stop has not finished (an x64 bridge's drain). */
+  | "gateway-still-stopping"
+  /** Doctor was not run: the gateway is up or coming up (another surface restarted it). */
+  | "gateway-not-stopped";
 
 export async function runOpenclawDoctorFix(): Promise<OpenclawDoctorFixOutcome> {
   if (gatewayIsAbsent()) return "completed";
@@ -4029,15 +4033,19 @@ export async function runOpenclawDoctorFix(): Promise<OpenclawDoctorFixOutcome> 
   // x64 bridge the stop waits for OpenClaw's own drain, and doctor started
   // beside a gateway still draining finds a second owner of its state. Doctor
   // runs only beside a unit that is down; a gateway still stopping, or there
-  // at all, refuses here in plain words. The caller restores the unit.
+  // at all, is answered as an outcome the caller words for the owner, and the
+  // caller restores the unit. The waits are the factory reset's, sized so the
+  // whole answer reaches the page inside the tunnel's ~100 s: client 15 +
+  // settle 45 + the last show 10, then the caller's rollback and its restore
+  // (reset-failed, a 5 s restart client, one show).
   const stopAskedAt = Date.now();
   let state: UnitState | null = null;
   let stillStopping = false;
   try {
     const stop = await runUnitJob("/usr/bin/sudo", ["-n", "/usr/bin/systemctl", "stop", "clawbox-gateway.service"], {
       unit: "clawbox-gateway.service",
-      timeoutMs: 30000,
-      settleBudgetMs: 90_000,
+      timeoutMs: 15_000,
+      settleBudgetMs: 45_000,
     });
     if (stop.kind === "in-flight") stillStopping = true;
     else if (stop.kind === "settled") state = stop.state;
@@ -4050,10 +4058,14 @@ export async function runOpenclawDoctorFix(): Promise<OpenclawDoctorFixOutcome> 
   }
   if (state && !unitIsStopped(state)) {
     if (state.activeState === "deactivating") stillStopping = true;
-    else throw new Error(`The assistant's gateway did not stop (${describeUnitState(state)}), so its repair was not run beside it.`);
+    else {
+      console.warn(`[openclaw-config] doctor --fix not run: the gateway did not stop (${describeUnitState(state)})`);
+      return "gateway-not-stopped";
+    }
   }
   if (stillStopping) {
-    throw new Error(`The assistant's gateway was still stopping after ${Math.round((Date.now() - stopAskedAt) / 1000)}s, so its repair was not run beside it. Try again in a few minutes.`);
+    console.warn(`[openclaw-config] doctor --fix not run: the gateway was still stopping after ${Math.round((Date.now() - stopAskedAt) / 1000)}s`);
+    return "gateway-still-stopping";
   }
   try {
     // The stop above is necessary and was never sufficient: the core refused
@@ -4176,10 +4188,20 @@ export interface RestartGatewayOptions {
    * waits on, passes the unit's whole stop-and-start budget.
    */
   restartSettleMs?: number;
+  /**
+   * The `systemctl restart` client's own bound. Default
+   * {@link GATEWAY_RESTART_CLIENT_MS}. A caller that only needs systemd to
+   * TAKE the restart, behind a stop that is still draining, passes a few
+   * seconds with `restartSettleMs: 0`: a client still waiting then means the
+   * job is queued, and the answer is GatewayNotReadyError.
+   */
+  restartClientMs?: number;
 }
 
 /** See {@link RestartGatewayOptions.restartSettleMs}: with the 60 s client, under a tunnel's ~100 s. */
 export const GATEWAY_RESTART_SETTLE_MS = 30_000;
+/** See {@link RestartGatewayOptions.restartClientMs}. */
+export const GATEWAY_RESTART_CLIENT_MS = 60_000;
 
 /**
  * Block until the gateway is listening again, or say it never came back.
@@ -4285,7 +4307,7 @@ async function restartGatewayOnce(options: RestartGatewayOptions): Promise<void>
   try {
     const restart = await runUnitJob("/usr/bin/sudo", ["/usr/bin/systemctl", "restart", "clawbox-gateway.service"], {
       unit: "clawbox-gateway.service",
-      timeoutMs: 60000,
+      timeoutMs: options.restartClientMs ?? GATEWAY_RESTART_CLIENT_MS,
       settleBudgetMs: options.restartSettleMs ?? GATEWAY_RESTART_SETTLE_MS,
     });
     assertRestartLanded(restart, "clawbox-gateway.service");
@@ -4309,7 +4331,7 @@ async function restartGatewayOnce(options: RestartGatewayOptions): Promise<void>
         const restart = await runUnitJob("systemctl", ["--user", "restart", "openclaw-gateway.service"], {
           unit: "openclaw-gateway.service",
           user: true,
-          timeoutMs: 60000,
+          timeoutMs: options.restartClientMs ?? GATEWAY_RESTART_CLIENT_MS,
           settleBudgetMs: options.restartSettleMs ?? GATEWAY_RESTART_SETTLE_MS,
           env: {
             ...process.env,

@@ -287,25 +287,87 @@ describe("restartGateway when the restart outlives its client", () => {
     quiet.forEach((s) => s.mockRestore());
   });
 
-  it("does not run doctor beside a gateway that is still stopping", async () => {
-    const { runOpenclawDoctorFix } = await load();
+  const doctorSpawned = () => spawnMock.mock.calls.some(([, argv]) => (argv as string[]).includes("doctor"));
+
+  /** A stop whose client its deadline killed, and `show` answering `answers` in turn (the last repeats). */
+  function stopOutlivedThen(answers: string[]) {
+    let shown = 0;
     execFileMock.mockImplementation((_cmd: string, args: string[], _opts: unknown, cb: ExecCallback) => {
       if (args.includes("stop")) {
         cb(Object.assign(new Error("Command failed: sudo systemctl stop"), { killed: true, signal: "SIGTERM", code: null }));
         return;
       }
       if (args.includes("show")) {
-        cb(null, { stdout: "Job=88\nActiveState=deactivating\nSubState=stop-sigterm\nResult=success\n", stderr: "" });
+        cb(null, { stdout: answers[Math.min(shown, answers.length - 1)], stderr: "" });
+        shown += 1;
         return;
       }
       cb(null, { stdout: "", stderr: "" });
     });
-    const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+  }
+
+  it("does not run doctor beside a gateway that is still stopping, and says so as an outcome", async () => {
+    // Returned rather than thrown, so the configure route can tell the owner
+    // the assistant was busy instead of its generic "run doctor --fix" advice.
+    const { runOpenclawDoctorFix } = await load();
+    stopOutlivedThen(["Job=88\nActiveState=deactivating\nSubState=stop-sigterm\nResult=success\n"]);
+    const quiet = [vi.spyOn(console, "warn"), vi.spyOn(console, "error")].map((s) => s.mockImplementation(() => {}));
     const fixed = runOpenclawDoctorFix();
     fixed.catch(() => {});
     await vi.advanceTimersByTimeAsync(100_000);
-    await expect(fixed).rejects.toThrow(/still stopping .*not run beside it/);
-    quiet.mockRestore();
+    await expect(fixed).resolves.toBe("gateway-still-stopping");
+    expect(doctorSpawned()).toBe(false);
+    quiet.forEach((s) => s.mockRestore());
+  });
+
+  it("answers a stop still draining inside the tunnel's ~100 s, its restore included", async () => {
+    // On an x64 bridge the stop waits for OpenClaw's own drain. The doctor's
+    // answer, the rollback and the configure route's short restore all have
+    // to reach the page before the tunnel cuts the request.
+    const { runOpenclawDoctorFix } = await load();
+    stopOutlivedThen(["Job=88\nActiveState=deactivating\nSubState=stop-sigterm\nResult=success\n"]);
+    const quiet = [vi.spyOn(console, "warn"), vi.spyOn(console, "error")].map((s) => s.mockImplementation(() => {}));
+    let outcome: unknown = "pending";
+    runOpenclawDoctorFix().then((o) => { outcome = o; }, (e: unknown) => { outcome = e; });
+    await vi.advanceTimersByTimeAsync(50_000);
+    expect(outcome).toBe("gateway-still-stopping");
+    const stopCall = execFileMock.mock.calls.find(([, args]) => (args as string[]).includes("stop"));
+    expect((stopCall?.[2] as { timeout?: number }).timeout).toBeLessThanOrEqual(15_000);
+    quiet.forEach((s) => s.mockRestore());
+  });
+
+  it.each(["active", "activating"])(
+    "does not run doctor when the stop job settled with the unit %s again",
+    async (activeState) => {
+      // Another surface's restart replaced the stop job the doctor's client
+      // gave up on, and the unit came back up while doctor would migrate it.
+      const { runOpenclawDoctorFix } = await load();
+      stopOutlivedThen([
+        "Job=88\nActiveState=deactivating\nSubState=stop-sigterm\nResult=success\n",
+        `Job=\nActiveState=${activeState}\nSubState=running\nResult=success\n`,
+      ]);
+      const quiet = [vi.spyOn(console, "warn"), vi.spyOn(console, "error")].map((s) => s.mockImplementation(() => {}));
+      const fixed = runOpenclawDoctorFix();
+      fixed.catch(() => {});
+      await vi.advanceTimersByTimeAsync(5_000);
+      await expect(fixed).resolves.toBe("gateway-not-stopped");
+      expect(doctorSpawned()).toBe(false);
+      quiet.forEach((s) => s.mockRestore());
+    },
+  );
+
+  it("asks for a restart with the client a caller gives it, and reads one it outlived as queued", async () => {
+    const { restartGateway, GatewayNotReadyError } = await load();
+    unitAnswers(["Job=4711\nActiveState=deactivating\nSubState=stop-sigterm\nResult=success\n"]);
+    const quiet = [vi.spyOn(console, "warn"), vi.spyOn(console, "error")].map((s) => s.mockImplementation(() => {}));
+    let err: unknown = "pending";
+    restartGateway({ awaitReady: false, restartClientMs: 5_000, restartSettleMs: 0 })
+      .then(() => { err = null; }, (e: unknown) => { err = e; });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(err).toBeInstanceOf(GatewayNotReadyError);
+    const restartCall = execFileMock.mock.calls.find(([, args]) => (args as string[]).includes("restart"));
+    expect((restartCall?.[2] as { timeout?: number }).timeout).toBe(5_000);
+    quiet.forEach((s) => s.mockRestore());
   });
 
   /** A stop that failed outright, and `show` answering `state`. */
@@ -322,7 +384,6 @@ describe("restartGateway when the restart outlives its client", () => {
       cb(null, { stdout: "", stderr: "" });
     });
   }
-  const doctorSpawned = () => spawnMock.mock.calls.some(([, argv]) => (argv as string[]).includes("doctor"));
 
   it("does not run doctor beside a gateway a cancelled stop left restarting", async () => {
     // Another surface's restart replaced the stop job: `systemctl stop` exits
@@ -332,7 +393,7 @@ describe("restartGateway when the restart outlives its client", () => {
     const fixed = runOpenclawDoctorFix();
     fixed.catch(() => {});
     await vi.advanceTimersByTimeAsync(1_000);
-    await expect(fixed).rejects.toThrow(/did not stop .*not run beside it/);
+    await expect(fixed).resolves.toBe("gateway-not-stopped");
     expect(doctorSpawned()).toBe(false);
   });
 
@@ -342,7 +403,7 @@ describe("restartGateway when the restart outlives its client", () => {
     const fixed = runOpenclawDoctorFix();
     fixed.catch(() => {});
     await vi.advanceTimersByTimeAsync(1_000);
-    await expect(fixed).rejects.toThrow(/still stopping .*not run beside it/);
+    await expect(fixed).resolves.toBe("gateway-still-stopping");
     expect(doctorSpawned()).toBe(false);
   });
 

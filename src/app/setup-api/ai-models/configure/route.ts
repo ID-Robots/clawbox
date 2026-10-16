@@ -8,6 +8,7 @@ import { getAll, setMany } from "@/lib/config-store";
 import { HANDOFF_TOKENS_PATH, HANDOFF_TTL_MS } from "@/lib/oauth-handoff";
 import {
   restartGateway,
+  type RestartGatewayOptions,
   runOpenclawDoctorFix,
   type OpenclawDoctorFixOutcome,
   findOpenclawBin,
@@ -2237,8 +2238,23 @@ type GatewayState =
    */
   | "restart-issued";
 
-/** Shared by reference: `configureModel` has too many exits to return it. */
-type GatewayTracker = { state: GatewayState };
+/**
+ * Shared by reference: `configureModel` has too many exits to return it.
+ * `stopStillRunning`: doctor found the stop it asked for still draining (an x64
+ * bridge), so systemd queues the restore behind it and asking is enough.
+ */
+type GatewayTracker = { state: GatewayState; stopStillRunning?: boolean };
+
+/**
+ * How POST restores a gateway this request stopped: never a readiness wait.
+ * Behind a stop still draining, a 60 s client would only wait out the drain,
+ * past the tunnel's cut, so it only asks.
+ */
+function restoreOptions(gateway: GatewayTracker): RestartGatewayOptions {
+  return gateway.stopStillRunning
+    ? { awaitReady: false, restartClientMs: 5_000, restartSettleMs: 0 }
+    : { awaitReady: false };
+}
 
 /** Folded into the error the owner sees when the restore itself fails. */
 const GATEWAY_OFFLINE_HINT =
@@ -2267,7 +2283,7 @@ export async function POST(request: Request) {
       // No readiness wait: this answer is logged and dropped — the original
       // throw becomes Next's 500 either way — so waiting out the budget would
       // only add blocking time to a request that has already failed.
-      await restartGateway({ awaitReady: false }).catch((restartErr) => {
+      await restartGateway(restoreOptions(gateway)).catch((restartErr) => {
         console.error(
           "[configure] Gateway restart after an unhandled save failure also failed:",
           restartErr instanceof Error ? logSafe(restartErr.message) : restartErr,
@@ -2288,9 +2304,17 @@ export async function POST(request: Request) {
     // the ordinary case on a cold box — and tell the owner to go press Restart
     // on a gateway that is already coming back, while adding the whole budget
     // to a request that has already failed.
-    await restartGateway({ awaitReady: false });
+    await restartGateway(restoreOptions(gateway));
     return response;
   } catch (err) {
+    // A restart still in flight is one systemd holds: the gateway comes back
+    // on its own, and "use Restart" would be advice for a restart already
+    // queued. By name, not `instanceof`: dozens of suites replace this module
+    // with a factory that does not carry the class.
+    if (err instanceof Error && err.name === "GatewayNotReadyError") {
+      console.warn("[configure] Gateway restore queued behind its stop:", JSON.stringify(logSafe(err.message)));
+      return response;
+    }
     // A runtime mask (an update in flight) refuses the restart; never unmask
     // from here. The save already failed — tell the owner what is left to do.
     console.error(
@@ -3309,6 +3333,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         // into this 502. That inertness is the whole reason these outcomes are
         // returned rather than thrown, and it is load-bearing for the suite.
         outcome = await runOpenclawDoctorFix();
+        if (outcome === "gateway-still-stopping") gateway.stopStillRunning = true;
         if (outcome !== undefined && outcome !== "completed") {
           doctorBlockedBy = outcome;
           // Into the SAME failure path, deliberately: the v1/v2 decision below
@@ -3365,6 +3390,12 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
                   + " manages the gateway service, so the subscription sign-in was rolled back. Restart the device"
                   + " and sign in again. If it is refused again, install the latest device update — older OpenClaw"
                   + " versions cannot be told that ClawBox owns the gateway."
+                // Doctor was deliberately not run beside a gateway that was not
+                // down, so the Terminal advice below would be for a command
+                // that never ran. The restore below brings the gateway back.
+                : doctorBlockedBy === "gateway-still-stopping" || doctorBlockedBy === "gateway-not-stopped"
+                ? "The assistant was busy restarting, so its credential migration was not run and the"
+                  + " subscription sign-in was rolled back. Sign in again in a few minutes."
                 : "Credential migration failed. The subscription sign-in was rolled back — try again, or run 'openclaw doctor --fix' from the Terminal.",
             },
             { status: 502 },
