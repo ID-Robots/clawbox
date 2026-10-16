@@ -140,6 +140,9 @@ describe("month-name dates in titles", () => {
     expect(amount.date.size).toBe(0);
     expect([...amount.month]).toEqual(["2026-06"]);
     expect(titleIdentifiers("Receipt 4 June").date.size).toBe(0);
+    // A day that is not on the calendar is no day, written by name or by number.
+    for (const t of ["Receipt 31 June 2026", "Receipt 31.06.2026", "Receipt 2026-02-30", "Receipt Feb 29 2026"]) expect(titleIdentifiers(t).date.size, t).toBe(0);
+    expect([...titleIdentifiers("Receipt 29 Feb 2028").date]).toEqual(["2028-02-29"]);
     expect(titleIdentifiers("Marching orders 12 2026").date.size + titleIdentifiers("Marching orders 12 2026").month.size).toBe(0);
     // The year of a month-name date is not left behind as a reference.
     expect(titleIdentifiers(RECEIPT_4.title).ref.size).toBe(0);

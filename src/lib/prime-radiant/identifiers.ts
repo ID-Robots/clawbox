@@ -95,8 +95,13 @@ function year(y: string): boolean {
   return /^(19|20)\d{2}$/.test(y);
 }
 
+/** A day that is on the calendar: never "31 June" or "29 Feb" of a common year. */
 function addDay(out: Identifiers, y: string, m: string | number, d: string): void {
-  if (year(y) && +m >= 1 && +m <= 12 && +d >= 1 && +d <= 31) out.date.add(`${y}-${pad(String(m))}-${pad(d)}`);
+  const month = +m;
+  const day = +d;
+  if (!year(y) || month < 1 || month > 12) return;
+  const lastDay = new Date(Date.UTC(+y, month, 0)).getUTCDate();
+  if (day >= 1 && day <= lastDay) out.date.add(`${y}-${pad(String(month))}-${pad(String(day))}`);
 }
 
 /** Dates and months in a text, normalised to YYYY-MM-DD / YYYY-MM; their spans are blanked so they are not read as refs. */
