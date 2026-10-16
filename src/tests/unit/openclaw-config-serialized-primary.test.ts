@@ -252,7 +252,7 @@ describe("serialized unvalidated primary-model fallback", () => {
     process.env.CLAWBOX_OPENCLAW_HOME = root;
     delete process.env.OPENCLAW_HOME;
     vi.resetModules();
-    const held = vi.fn(async () => false);
+    const held = vi.fn<typeof import("@/lib/gateway-start-guard").holdWhileGatewayStarts>(async () => false);
     vi.doMock("@/lib/gateway-start-guard", async (importOriginal) => ({
       ...(await importOriginal<typeof import("@/lib/gateway-start-guard")>()),
       holdWhileGatewayStarts: held,
