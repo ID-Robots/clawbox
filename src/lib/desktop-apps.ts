@@ -84,3 +84,37 @@ export const apps: AppDef[] = [
   // already has its icons arranged gains one at the end.
   { id: "screenshot", name: "app.screenshot", color: "#be123c", type: "screenshot", pinned: false, defaultWidth: 1100, defaultHeight: 680 },
 ];
+
+/**
+ * The Material Symbols glyph each app is drawn with — on the desktop, and as
+ * the mark beside a chat step that used the app (`chat-tool-events.tsx`), so
+ * the two cannot disagree. Apps drawn as artwork instead (Hermes, the Agent
+ * Browser, Chrome, Prime Radiant, the chat's crab, OpenClaw) are not here.
+ */
+export const APP_GLYPHS: Readonly<Record<string, string>> = Object.freeze({
+  settings: "settings",
+  setup: "construction",
+  terminal: "terminal",
+  files: "folder",
+  clawkeep: "shield_lock",
+  // A faceted gem rather than a memory chip: the shard is the thing the app
+  // is named for. `diamond`, not `diamond_shine` — both ship a ligature in
+  // the bundled subset, but the shine variant's sparkle marks sit right on
+  // top of the facet lines, and at desktop-icon size (48px) the two read as
+  // one blob instead of a gem. The plain gem keeps the identity and stays
+  // legible small.
+  "memory-shard": "diamond",
+  system_update: "system_update",
+  vnc: "desktop_windows",
+  // The globe: the open web, as opposed to `browser`'s window with the
+  // assistant in it (AgentBrowserIcon).
+  web: "language",
+  camera: "photo_camera",
+  screenshot: "screenshot_monitor",
+  store: "storefront",
+  chat: "chat_bubble",
+  "hermes-skills": "extension",
+  // The same glyph the finish card's Open button and the run page use for
+  // the agent, so the icon on the desktop is the icon in the app.
+  coding: "smart_toy",
+});

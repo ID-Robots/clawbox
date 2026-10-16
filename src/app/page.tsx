@@ -57,7 +57,7 @@ import { resolveHarnessProbe } from "@/lib/harness-probe";
 import { samePairingToken } from "@/lib/telegram-pairing-token";
 import type { InstalledMeta } from "@/lib/store-categories";
 import { SKILL_CHANGE_EVENT, announceSkillChange, installedAppRemovedDetail } from "@/lib/skill-change-message";
-import { apps, type AppDef } from "@/lib/desktop-apps";
+import { APP_GLYPHS, apps, type AppDef } from "@/lib/desktop-apps";
 import { hiddenAppIdsForHarness, isInstalledAppVisible } from "@/lib/desktop-app-editions";
 import { fetchSessionUser, mayUseOwnerApis, useMayUseOwnerApis, useSessionUser } from "@/lib/use-session-user";
 import { useFollowSessionSwitch } from "@/lib/session-switch";
@@ -376,41 +376,8 @@ function AppIcon({ id, size = "w-6 h-6" }: { id: string; size?: string }) {
     );
   }
 
-  if (id === "hermes-skills") {
-    return <MIcon name="extension" className="text-white" size={px} />;
-  }
-
-  if (id === "coding") {
-    // The same glyph the finish card's Open button and the run page use for
-    // the agent, so the icon on the desktop is the icon in the app.
-    return <MIcon name="smart_toy" className="text-white" size={px} />;
-  }
-
-  const iconMap: Record<string, string> = {
-    settings: "settings",
-    setup: "construction",
-    terminal: "terminal",
-    files: "folder",
-    clawkeep: "shield_lock",
-    // A faceted gem rather than a memory chip: the shard is the thing the app
-    // is named for. `diamond`, not `diamond_shine` — both ship a ligature in
-    // the bundled subset, but the shine variant's sparkle marks sit right on
-    // top of the facet lines, and at desktop-icon size (48px) the two read as
-    // one blob instead of a gem. The plain gem keeps the identity and stays
-    // legible small.
-    "memory-shard": "diamond",
-    system_update: "system_update",
-    vnc: "desktop_windows",
-    // The globe: the open web, as opposed to `browser`'s window with the
-    // assistant in it (AgentBrowserIcon).
-    web: "language",
-    camera: "photo_camera",
-    screenshot: "screenshot_monitor",
-    store: "storefront",
-    chat: "chat_bubble",
-  };
-
-  const iconName = iconMap[id];
+  // Every other app is a glyph, from the table the chat's step marks read too.
+  const iconName = Object.prototype.hasOwnProperty.call(APP_GLYPHS, id) ? APP_GLYPHS[id] : undefined;
   if (!iconName) return null;
   return <MIcon name={iconName} className="text-white" size={px} />;
 }
