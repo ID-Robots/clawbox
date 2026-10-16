@@ -1,12 +1,14 @@
 /**
  * /setup-api/prime-radiant/settings — every Prime Radiant setting in one place.
  *
- * GET → `{ settings, defaults, limits, nightly: { nextRunAt }, rates }`: the
+ * GET → `{ settings, defaults, limits, nightly: { nextRunAt }, rates, opusSource }`: the
  * settings in force (the file's valid sections over the defaults — ingest
  * exclude list, parallelism and nightly folders; cost-rate overrides; the
  * nightly schedule; the Opus tier; the contradiction pass; domains and their
- * owners), the defaults, and the cost rates they price with. Never creates
- * anything.
+ * owners), the defaults, the cost rates they price with, and which account
+ * the second opinion would use tonight (`opusSource`: `api_key`,
+ * `subscription` or `none` — a read of the account pool and the `claude`
+ * sign-in, never a model call). Never creates anything.
  *
  * PUT — a patch: only the sections and fields named change, each validated
  * strictly; a bad field refuses the whole patch (400 `invalid`) and writes
@@ -19,6 +21,7 @@ import { requireSession } from "@/lib/route-auth";
 import { resolveFolderInsideBrowseRoot } from "@/lib/browse-folder";
 import { isOwnOutput } from "@/lib/prime-radiant/ingest-sources";
 import { nextRunAtMs, refresh } from "@/lib/prime-radiant/nightly-scheduler";
+import { detectOpusSource } from "@/lib/prime-radiant/opus-source";
 import { fail, json, ownerWriteGuard, readJsonBody } from "@/lib/prime-radiant/route-helpers";
 import {
   defaultSettings,
@@ -27,8 +30,10 @@ import {
   MAX_INGEST_FOLDERS,
   MAX_INGEST_PARALLEL,
   MAX_OPUS_CAP_USD,
+  MAX_OPUS_MAX_PAGES,
   MIN_INGEST_PARALLEL,
   MIN_OPUS_CAP_USD,
+  MIN_OPUS_MAX_PAGES,
   readSettings,
   readSettingsPatch,
   SettingsError,
@@ -42,17 +47,21 @@ const LIMITS = {
   ingestFolders: MAX_INGEST_FOLDERS,
   opusCapUsd: { min: MIN_OPUS_CAP_USD, max: MAX_OPUS_CAP_USD },
   opusSampleRate: { min: 0, max: 1 },
+  opusMaxPages: { min: MIN_OPUS_MAX_PAGES, max: MAX_OPUS_MAX_PAGES },
   domains: MAX_DOMAINS,
 };
 
-function answer() {
-  return { settings: readSettings(), defaults: defaultSettings(), limits: LIMITS, nightly: { nextRunAt: nextRunAtMs() }, rates: effectiveCostRates() };
+async function answer() {
+  const opusSource = await detectOpusSource()
+    .then((d) => d.source)
+    .catch(() => "none" as const);
+  return { settings: readSettings(), defaults: defaultSettings(), limits: LIMITS, nightly: { nextRunAt: nextRunAtMs() }, rates: effectiveCostRates(), opusSource };
 }
 
 export async function GET(req: Request) {
   const denied = await requireSession(req);
   if (denied) return denied;
-  return json(answer());
+  return json(await answer());
 }
 
 export async function PUT(req: Request) {
@@ -86,5 +95,5 @@ export async function PUT(req: Request) {
     return fail("write_failed", "The settings could not be saved.", 500);
   }
   await refresh().catch(() => undefined);
-  return json(answer());
+  return json(await answer());
 }

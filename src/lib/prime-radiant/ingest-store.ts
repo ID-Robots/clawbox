@@ -419,11 +419,19 @@ export interface CostRecord {
   tokensOut: number;
   usdEstimate: number;
   at: string;
+  /**
+   * What `usdEstimate` is: priced from the rates (`estimate`, the default) or
+   * a call a Claude subscription answered (`subscription`, $0 marginal).
+   */
+  basis?: CostBasis;
 }
+
+export const COST_BASES = ["estimate", "subscription"] as const;
+export type CostBasis = (typeof COST_BASES)[number];
 
 export function recordCost(vault: string, cost: CostRecord): void {
   withStateDb(vault, (db) => {
-    db.prepare("INSERT INTO costs (run_id, operation, model, tokens_in, tokens_out, usd_estimate, at) VALUES (?, ?, ?, ?, ?, ?, ?)").run(
+    db.prepare("INSERT INTO costs (run_id, operation, model, tokens_in, tokens_out, usd_estimate, at, basis) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
       cost.runId,
       cost.operation,
       cost.model,
@@ -431,13 +439,14 @@ export function recordCost(vault: string, cost: CostRecord): void {
       cost.tokensOut,
       cost.usdEstimate,
       cost.at,
+      cost.basis ?? "estimate",
     );
   });
 }
 
 export function readCosts(vault: string, runId: string): CostRecord[] {
   return withStateDb(vault, (db) =>
-    (db.prepare("SELECT run_id, operation, model, tokens_in, tokens_out, usd_estimate, at FROM costs WHERE run_id = ? ORDER BY id").all(runId) as Array<{
+    (db.prepare("SELECT run_id, operation, model, tokens_in, tokens_out, usd_estimate, at, basis FROM costs WHERE run_id = ? ORDER BY id").all(runId) as Array<{
       run_id: string | null;
       operation: string;
       model: string;
@@ -445,6 +454,7 @@ export function readCosts(vault: string, runId: string): CostRecord[] {
       tokens_out: number;
       usd_estimate: number;
       at: string;
+      basis: string;
     }>).map((r) => ({
       runId: r.run_id,
       operation: r.operation,
@@ -453,6 +463,7 @@ export function readCosts(vault: string, runId: string): CostRecord[] {
       tokensOut: r.tokens_out,
       usdEstimate: r.usd_estimate,
       at: r.at,
+      basis: r.basis === "subscription" ? "subscription" : "estimate",
     })),
   );
 }

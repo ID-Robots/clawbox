@@ -150,6 +150,8 @@ let ingestJobs: unknown[];
 let stopRefusals: number[];
 let previewAnswer: Record<string, unknown> | null;
 let skipCodeProjects: boolean;
+/** The settings GET's Opus source and page cap; null answers as an older server (neither field). */
+let opusExtras: { source: "api_key" | "subscription" | "none"; maxPages: number } | null;
 /** What `POST init` says its one-time memory-wiki repair did. */
 let initRepair: Record<string, unknown> | null;
 /** What `GET pages?…` lists. */
@@ -232,13 +234,17 @@ function installFetch() {
       const settings = {
         ingest: { exclude: [".git", "node_modules"], skipCodeProjects, parallel: 128, folders: [] },
         costRates: {}, nightly: { enabled: true, time: "03:00" },
-        opus: { enabled: false, capUsd: 2, sampleRate: 0.02, model: "opus" },
+        opus: { enabled: false, capUsd: 2, sampleRate: 0.02, model: "opus", ...(opusExtras ? { maxPages: opusExtras.maxPages } : {}) },
         contradictions: { enabled: true }, domains: [],
       };
       return ok({
         settings, defaults: settings,
-        limits: { ingestParallel: { min: 1, max: 256 }, ingestFolders: 20, opusCapUsd: { min: 0.01, max: 1000 }, opusSampleRate: { min: 0, max: 1 }, domains: 100 },
+        limits: {
+          ingestParallel: { min: 1, max: 256 }, ingestFolders: 20, opusCapUsd: { min: 0.01, max: 1000 }, opusSampleRate: { min: 0, max: 1 }, domains: 100,
+          ...(opusExtras ? { opusMaxPages: { min: 4, max: 2000 } } : {}),
+        },
         nightly: { nextRunAt: null }, rates: {},
+        ...(opusExtras ? { opusSource: opusExtras.source } : {}),
       });
     }
     return ok({}, 404);
@@ -289,6 +295,7 @@ beforeEach(() => {
   stopRefusals = [];
   previewAnswer = PREVIEW;
   skipCodeProjects = true;
+  opusExtras = null;
   initRepair = { ran: true, cleaned: [], removed: [], commit: null };
   window.localStorage.removeItem("clawbox.primeRadiant.repairNoticeSeen");
   listed = [LIST_ENTRY];
@@ -650,6 +657,35 @@ describe("PrimeRadiantApp", () => {
       const put = calls.find((c) => c.url.endsWith("/settings") && c.method === "PUT");
       expect((put?.body as { opus: unknown }).opus).toEqual({ enabled: true, capUsd: 2 });
     });
+  });
+
+  it("says the second opinion runs on the Claude subscription and saves the pages-per-night cap", async () => {
+    opusExtras = { source: "subscription", maxPages: 100 };
+    await mount();
+    await openTab("settings");
+    const source = await screen.findByTestId("prime-radiant-opus-source");
+    expect(source).toHaveAttribute("data-source", "subscription");
+    expect(source).toHaveTextContent(/Claude subscription/);
+    expect(screen.getByTestId("prime-radiant-settings").textContent).not.toMatch(/needs an Anthropic API key/i);
+    fireEvent.click(screen.getByTestId("prime-radiant-opus-enabled"));
+    const pages = screen.getByTestId("prime-radiant-opus-max-pages");
+    expect(pages).toHaveValue(100);
+    fireEvent.change(pages, { target: { value: "3" } });
+    fireEvent.click(screen.getByTestId("prime-radiant-settings-save"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Pages per night must be a whole number from 4 to 2000.");
+    fireEvent.change(pages, { target: { value: "40" } });
+    fireEvent.click(screen.getByTestId("prime-radiant-settings-save"));
+    await waitFor(() => {
+      const put = calls.find((c) => c.url.endsWith("/settings") && c.method === "PUT");
+      expect((put?.body as { opus: unknown }).opus).toEqual({ enabled: true, capUsd: 2, maxPages: 40 });
+    });
+  });
+
+  it("says when no account can give a second opinion", async () => {
+    opusExtras = { source: "none", maxPages: 100 };
+    await mount();
+    await openTab("settings");
+    expect(await screen.findByTestId("prime-radiant-opus-source")).toHaveTextContent(/no Anthropic API key and no Claude sign-in/);
   });
 
   it("shows the tokens an import and a night used, and no money", async () => {

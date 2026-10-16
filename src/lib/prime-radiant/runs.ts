@@ -11,6 +11,7 @@
 
 import crypto from "crypto";
 import type { CostRates } from "./cost-rates";
+import type { CostBasis } from "./ingest-store";
 import { stateDbExists, withStateDb } from "./state-db";
 
 export const RUN_STATUSES = ["running", "merged", "held", "nothing", "skipped", "failed", "interrupted"] as const;
@@ -160,6 +161,12 @@ export interface CostSummary {
   totals: CostTotals;
   byOperation: Array<CostTotals & { operation: string }>;
   byModel: Array<CostTotals & { model: string }>;
+  /**
+   * The calls by what their dollar figure is: `estimate` (priced from the
+   * rates) and `subscription` (answered by the owner's Claude subscription —
+   * real tokens, $0 marginal, so they never move the totals' dollars).
+   */
+  byBasis: Array<CostTotals & { basis: CostBasis }>;
   byRun: CostRunRow[];
   /**
    * Work that costs something and is not in the figures above: the claim
@@ -197,6 +204,7 @@ export function readCostSummary(vault: string, rates: CostRates, options: { sinc
     totals: { calls: 0, tokensIn: 0, tokensOut: 0, usdEstimate: 0 },
     byOperation: [],
     byModel: [],
+    byBasis: [],
     byRun: [],
     notMeasured: COSTS_NOT_MEASURED.map((n) => ({ ...n })),
   };
@@ -217,6 +225,7 @@ export function readCostSummary(vault: string, rates: CostRates, options: { sinc
     const all = db.prepare(`SELECT ${AGG} FROM costs ${clause}`).get(...params) as Agg;
     const ops = db.prepare(`SELECT operation, ${AGG} FROM costs ${clause} GROUP BY operation ORDER BY usd DESC`).all(...params) as Array<Agg & { operation: string }>;
     const models = db.prepare(`SELECT model, ${AGG} FROM costs ${clause} GROUP BY model ORDER BY usd DESC`).all(...params) as Array<Agg & { model: string }>;
+    const bases = db.prepare(`SELECT basis, ${AGG} FROM costs ${clause} GROUP BY basis ORDER BY basis`).all(...params) as Array<Agg & { basis: string }>;
     const runs = db
       .prepare(`SELECT run_id, MIN(at) AS first_at, MAX(at) AS last_at, ${AGG} FROM costs ${clause} GROUP BY run_id ORDER BY last_at DESC LIMIT ?`)
       .all(...params, Math.max(1, Math.min(options.limit ?? 50, 500))) as Array<Agg & { run_id: string | null; first_at: string; last_at: string }>;
@@ -225,6 +234,7 @@ export function readCostSummary(vault: string, rates: CostRates, options: { sinc
       totals: totals(all),
       byOperation: ops.map((r) => ({ operation: r.operation, ...totals(r) })),
       byModel: models.map((r) => ({ model: r.model, ...totals(r) })),
+      byBasis: bases.map((r) => ({ basis: r.basis === "subscription" ? ("subscription" as const) : ("estimate" as const), ...totals(r) })),
       byRun: runs.map((r) => ({
         runId: r.run_id,
         kind: r.run_id?.startsWith("run-") ? "nightly" : r.run_id?.startsWith("ing-") ? "ingest" : "other",

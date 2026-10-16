@@ -50,7 +50,8 @@ import { isKnowledgePage, vaultDir } from "./paths";
 import { repairPluginWritesOnce, restorePluginOnlyEdits } from "./plugin-repair";
 import { notifyVaultChanged } from "./reindex-hook";
 import { addReviewItem, countWaitingForRuns, listReviewItems } from "./review-store";
-import { buildOpusQueue, opusClient, runOpusTier, type OpusClient, type OpusTierResult } from "./opus";
+import { buildOpusQueue, runOpusTier, type OpusClient, type OpusTierResult } from "./opus";
+import { resolveOpusClient } from "./opus-source";
 import { insertRun, listRuns, newRunId, saveRun, settleOrphanRuns, type RunRecord, type RunStatus, type RunTrigger } from "./runs";
 import { effectiveCostRates, readSettings, type PrimeRadiantSettings } from "./settings";
 import { readRetiredLedger, stateDbExists } from "./state-db";
@@ -74,7 +75,7 @@ export interface NightlySummary {
   contradictions: Pick<ContradictionPassResult, "claims" | "queried" | "embedded" | "pairs" | "judged" | "calls" | "failedBatches" | "capped" | "deferredPairs" | "carried" | "deferredClaims" | "complete" | "usdEstimate" | "skipped"> & {
     findings: number;
   };
-  opus: Pick<OpusTierResult, "queued" | "reviewed" | "pending" | "calls" | "usdEstimate" | "capUsd" | "stopped"> | { skipped: string };
+  opus: Pick<OpusTierResult, "queued" | "reviewed" | "pending" | "calls" | "usdEstimate" | "capUsd" | "maxPages" | "source" | "stopped"> | { skipped: string };
   gate: { touched: string[] };
   reviewItems: { raised: number };
   held: string[];
@@ -408,21 +409,34 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
       if (queue.length === 0) summary.opus = { skipped: "nothing_queued" };
       else {
         try {
+          // Resolved once for the night: an API key, else the Claude subscription, else none.
+          const client = deps.opus ?? (await resolveOpusClient(settings.opus.model));
           const op = await vaultOperation(
             "nightly: opus check",
             (tx) =>
               runOpusTier(tx, queue, {
                 stateVault: vault,
                 capUsd: settings.opus.capUsd,
+                maxPages: settings.opus.maxPages,
                 rates,
-                client: deps.opus ?? opusClient(settings.opus.model),
+                client,
                 runId: run.id,
                 now,
               }),
             { vault: wt, now: now() },
           );
           const o = op.result;
-          summary.opus = { queued: o.queued, reviewed: o.reviewed, pending: o.pending, calls: o.calls, usdEstimate: o.usdEstimate, capUsd: o.capUsd, stopped: o.stopped };
+          summary.opus = {
+            queued: o.queued,
+            reviewed: o.reviewed,
+            pending: o.pending,
+            calls: o.calls,
+            usdEstimate: o.usdEstimate,
+            capUsd: o.capUsd,
+            maxPages: o.maxPages,
+            source: o.source,
+            stopped: o.stopped,
+          };
           summary.reviewItems.raised += o.reviewItems.length;
           notes.push(...o.notes);
           run.usdEstimate += o.usdEstimate;

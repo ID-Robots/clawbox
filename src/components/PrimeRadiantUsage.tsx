@@ -83,6 +83,11 @@ export default function PrimeRadiantUsage({ revision }: { revision: number }) {
               {summary.byModel.map((m) => `${m.model} ${tok(m.tokensIn + m.tokensOut)}`).join(" · ")}
             </p>
           )}
+          {(summary.byBasis ?? []).filter((b) => b.basis === "subscription" && b.calls > 0).map((b) => (
+            <p key={b.basis} className="text-[11px] text-[var(--text-muted)] tabular-nums" data-testid="prime-radiant-usage-subscription">
+              {t("primeRadiant.costs.subscriptionCalls", { calls: n(b.calls) })}
+            </p>
+          ))}
           {summary.notMeasured.length > 0 && (
             <ul className="text-[11px] text-amber-200" data-testid="prime-radiant-usage-not-measured">
               {summary.notMeasured.map((m) => (

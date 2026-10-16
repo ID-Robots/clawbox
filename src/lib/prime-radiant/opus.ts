@@ -1,31 +1,40 @@
 /**
  * The optional Opus tier of the nightly pass: a stronger model re-reads a
- * SAMPLE of the pages the Flash writer made, under a hard dollar cap.
+ * SAMPLE of the pages the Flash writer made, under hard caps.
  *
  * It is optional in every sense. Off unless the owner switches it on; when
- * it is on but no Anthropic API key can answer (none configured, offline, a
- * refused key), the pages it would have read are marked
- * `opus_pending: true` and the night goes on — the wiki is complete without
- * it. It never edits a fact: a claim Opus would change becomes a review item
- * (`kind: "opus"`) with the current text and Opus's text as the candidates,
- * and the page records `checked_by: opus`.
+ * it is on but no account can answer (none configured, offline, a refused
+ * credential, a subscription at its usage limit), the pages it would have read
+ * are marked `opus_pending: true` and the night goes on — the wiki is complete
+ * without it. It never edits a fact: a claim Opus would change becomes a
+ * review item (`kind: "opus"`) with the current text and Opus's text as the
+ * candidates, and the page records `checked_by: opus`.
+ *
+ * WHO ANSWERS (opus-source.ts): an Anthropic API KEY from the box's account
+ * pool first (the Messages API, below); otherwise the owner's Claude
+ * SUBSCRIPTION through the `claude` CLI run headless — the way the coding
+ * agent uses it, never by lifting its OAuth token into API calls.
  *
  * The queue, in order: pages already owed a check (`opus_pending`), pages the
  * night changed, pages named by an open review item, then a random share of
  * the other flash-checked pages (`sampleRate`). Verified and human-checked
  * pages are never queued.
  *
- * The cap is HARD: before each call the worst case of that call (its prompt
- * at the input rate plus every token it may answer at the output rate) must
- * fit under what is left; the first call that does not fit ends the tier and
- * every page still queued is marked pending.
+ * The caps are HARD. Pages: a night sends at most `maxPages` pages, whichever
+ * account answers. Dollars (an API key only — a subscription call costs $0 at
+ * the margin): before each call the worst case of that call (its prompt at the
+ * input rate plus every token it may answer at the output rate) must fit under
+ * what is left. The first call that does not fit ends the tier, and so does a
+ * subscription at its usage limit or a coding-agent run that started (the
+ * tier yields the owner's plan to it); every page still queued is marked
+ * pending.
  *
  * SERVER ONLY.
  */
 
 import { processStore } from "@/lib/process-store";
 import { estimateUsd, type CostRates } from "./cost-rates";
-import { recordCost } from "./ingest-store";
+import { recordCost, type CostBasis } from "./ingest-store";
 import { redactText } from "./redact";
 import { addReviewItem, type ReviewItem } from "./review-store";
 import { hasVerification, type PageFrontmatter } from "./schema";
@@ -59,8 +68,32 @@ export class OpusUnavailableError extends Error {
   }
 }
 
+/** The subscription (or a key) answered "usage limit": nothing more tonight. */
+export class OpusLimitError extends OpusUnavailableError {
+  constructor(
+    message: string,
+    readonly resetsAt: number | null = null,
+  ) {
+    super(message);
+    this.name = "OpusLimitError";
+  }
+}
+
+/** The tier steps aside (a coding-agent run is working, the box is short of memory). */
+export class OpusYieldError extends OpusUnavailableError {
+  constructor(message: string) {
+    super(message);
+    this.name = "OpusYieldError";
+  }
+}
+
+/** Which account answers: an API key, the Claude subscription, or nothing. */
+export type OpusSource = "api_key" | "subscription" | "none";
+
 export interface OpusClient {
   readonly model: string;
+  /** Absent reads as `api_key` (priced, held to the dollar cap). */
+  readonly source?: OpusSource;
   /** Throws {@link OpusUnavailableError} when no provider can answer. */
   complete(request: { system: string; user: string; maxTokens: number; signal?: AbortSignal }): Promise<OpusResponse>;
 }
@@ -91,6 +124,7 @@ export function createAnthropicOpusClient(
 ): OpusClient {
   return {
     model,
+    source: "api_key",
     async complete(request) {
       const key = await readKey().catch(() => null);
       if (!key) throw new OpusUnavailableError("no Anthropic API key is configured");
@@ -119,6 +153,7 @@ export function createAnthropicOpusClient(
       }
       if (!res.ok) {
         await res.body?.cancel().catch(() => undefined);
+        if (res.status === 429) throw new OpusLimitError("Anthropic answered 429");
         throw new OpusUnavailableError(`Anthropic answered ${res.status}`);
       }
       let body: unknown;
@@ -151,6 +186,11 @@ const store = processStore("prime-radiant:opus-client", () => ({ override: null 
 /** Install the client the Opus tier uses instead of the API-key one (tests). `null` removes it. */
 export function setOpusClientOverride(client: OpusClient | null): void {
   store.override = client;
+}
+
+/** The client a test installed, or null. */
+export function opusClientOverride(): OpusClient | null {
+  return store.override;
 }
 
 export function opusClient(model: string = DEFAULT_OPUS_MODEL): OpusClient {
@@ -251,23 +291,35 @@ export function parseOpusResponse(text: string, count: number): Map<number, Opus
 
 // ── the tier ──────────────────────────────────────────────────────────────
 
+export type OpusStop = "unavailable" | "cap" | "pages" | "limit" | "busy";
+
 export interface OpusTierResult {
   queued: number;
   reviewed: number;
-  /** Pages left `opus_pending` (provider absent, cap reached, a failed call). */
+  /** Pages left `opus_pending` (provider absent, a cap reached, a failed call). */
   pending: number;
   calls: number;
   usdEstimate: number;
   capUsd: number;
+  /** The most pages this night could send. */
+  maxPages: number;
+  /** Who answered (or would have). */
+  source: OpusSource;
   reviewItems: ReviewItem[];
-  /** Why the tier stopped short, when it did: `unavailable` or `cap`. */
-  stopped: "unavailable" | "cap" | null;
+  /**
+   * Why the tier stopped short, when it did: `unavailable` (no account, a
+   * failed call), `cap` (dollars), `pages` (the nightly page cap), `limit`
+   * (the account's usage limit), `busy` (it yielded to a coding-agent run).
+   */
+  stopped: OpusStop | null;
   notes: string[];
 }
 
 export interface OpusTierOptions {
   stateVault: string;
   capUsd: number;
+  /** The nightly page cap (default: no page cap beyond the queue). */
+  maxPages?: number;
   rates: CostRates;
   client: OpusClient;
   runId?: string | null;
@@ -300,6 +352,9 @@ function pageInput(page: VaultPage, k: number): OpusPageInput | null {
  */
 export async function runOpusTier(tx: VaultTx, queue: readonly OpusQueueEntry[], options: OpusTierOptions): Promise<OpusTierResult> {
   const now = options.now ?? (() => new Date());
+  const source: OpusSource = options.client.source ?? "api_key";
+  const priced = source !== "subscription";
+  const maxPages = options.maxPages ?? Number.POSITIVE_INFINITY;
   const result: OpusTierResult = {
     queued: queue.length,
     reviewed: 0,
@@ -307,12 +362,15 @@ export async function runOpusTier(tx: VaultTx, queue: readonly OpusQueueEntry[],
     calls: 0,
     usdEstimate: 0,
     capUsd: options.capUsd,
+    maxPages: Number.isFinite(maxPages) ? maxPages : queue.length,
+    source,
     reviewItems: [],
     stopped: null,
     notes: [],
   };
   const model = options.client.model;
-  if (queue.length > 0 && !options.rates.models[model]) {
+  let sent = 0;
+  if (queue.length > 0 && priced && !options.rates.models[model]) {
     // No rate means no way to keep the cap: the tier does not start.
     result.stopped = "cap";
     result.notes.push(`There is no cost rate for ${model}, so the cap cannot be kept; add one in the settings.`);
@@ -334,9 +392,15 @@ export async function runOpusTier(tx: VaultTx, queue: readonly OpusQueueEntry[],
       await markPending(pages);
       continue;
     }
+    if (sent + pages.length > maxPages) {
+      result.stopped = "pages";
+      result.notes.push(`The nightly limit of ${result.maxPages} pages for the second opinion was reached; the rest wait for the next night.`);
+      await markPending(pages);
+      continue;
+    }
     const inputs = pages.map((p, k) => pageInput(p, k)).filter((x): x is OpusPageInput => !!x);
     const { system, user } = buildOpusPrompt(inputs);
-    if (result.usdEstimate + worstCaseUsd(model, system.length + user.length, options.rates) > options.capUsd) {
+    if (priced && result.usdEstimate + worstCaseUsd(model, system.length + user.length, options.rates) > options.capUsd) {
       result.stopped = "cap";
       result.notes.push(`The Opus cap of $${options.capUsd} was reached.`);
       await markPending(pages);
@@ -344,8 +408,11 @@ export async function runOpusTier(tx: VaultTx, queue: readonly OpusQueueEntry[],
     }
     let verdicts: Map<number, OpusPageVerdict>;
     try {
+      sent += pages.length;
       const response = await options.client.complete({ system, user, maxTokens: OPUS_MAX_TOKENS, signal: options.signal });
-      const usd = estimateUsd(response.model, response.usage, options.rates);
+      // A subscription call's tokens are real; its marginal cost is $0.
+      const basis: CostBasis = priced ? "estimate" : "subscription";
+      const usd = priced ? estimateUsd(response.model, response.usage, options.rates) : 0;
       result.calls += 1;
       result.usdEstimate += usd;
       try {
@@ -357,14 +424,24 @@ export async function runOpusTier(tx: VaultTx, queue: readonly OpusQueueEntry[],
           tokensOut: response.usage.completionTokens,
           usdEstimate: usd,
           at: now().toISOString(),
+          basis,
         });
       } catch {
         /* a record, not a gate */
       }
       verdicts = parseOpusResponse(response.text, inputs.length);
     } catch (err) {
-      result.stopped = "unavailable";
-      result.notes.push(`Opus was not available (${err instanceof Error ? err.message.slice(0, 120) : "error"}); its pages wait.`);
+      const why = err instanceof Error ? err.message.slice(0, 120) : "error";
+      if (err instanceof OpusLimitError) {
+        result.stopped = "limit";
+        result.notes.push(`The ${source === "subscription" ? "Claude subscription" : "Anthropic account"} reached its usage limit (${why}); the second opinion stops for tonight and its pages wait.`);
+      } else if (err instanceof OpusYieldError) {
+        result.stopped = "busy";
+        result.notes.push(`The second opinion stepped aside (${why}); its pages wait for the next night.`);
+      } else {
+        result.stopped = "unavailable";
+        result.notes.push(`Opus was not available (${why}); its pages wait.`);
+      }
       await markPending(pages);
       continue;
     }
