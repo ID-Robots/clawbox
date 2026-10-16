@@ -121,6 +121,10 @@ function getConnectButtonLabel(providerName?: string | null) {
  * what a mount-only read gave a Settings window the desktop never unmounts.
  */
 const TIER_REFRESH_MS = 30_000;
+/** Upper bound on one configure save: the slowest path restarts the gateway. */
+export const CONFIGURE_SAVE_TIMEOUT_MS = 90_000;
+export const CONFIGURE_SAVE_TIMEOUT_MESSAGE =
+  "Saving took longer than 90 seconds and was stopped. Check that the device is online, then try again. If it keeps happening, restart the device and sign in again.";
 
 type ConfiguringKind = "generic" | "ollama" | "llamacpp";
 
@@ -1124,6 +1128,13 @@ export default function AIModelsStep({
 
     setSaving(true);
     showConfiguring();
+    // The overlay is timer-driven, so a save the box never answers would sit
+    // on "warming up" forever. Bound the request and say what to do instead.
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, CONFIGURE_SAVE_TIMEOUT_MS);
     try {
       const res = await fetch("/setup-api/ai-models/configure", {
         method: "POST",
@@ -1131,6 +1142,7 @@ export default function AIModelsStep({
         body: JSON.stringify({ scope: configureScope, ...payload }),
         signal: controller.signal,
       });
+      clearTimeout(timeout);
       if (controller.signal.aborted) return;
       if (!res.ok) return showError(await extractError(res, "Failed to configure"));
       const data = await res.json();
@@ -1141,9 +1153,14 @@ export default function AIModelsStep({
         showError(humanizeApiError(data.error, "Failed to configure"));
       }
     } catch (err) {
+      if (timedOut) {
+        setSaving(false);
+        return showError(CONFIGURE_SAVE_TIMEOUT_MESSAGE);
+      }
       if (err instanceof DOMException && err.name === "AbortError") return;
       showError(`Failed: ${err instanceof Error ? err.message : err}`);
     } finally {
+      clearTimeout(timeout);
       if (!controller.signal.aborted) setSaving(false);
     }
   }, [configureScope, extractError, finishConfigure, showConfiguring, showError]);
