@@ -153,15 +153,15 @@ describe("gatewayStartPhase", () => {
     expect(await gatewayStartPhase()).toBe("idle");
   });
 
-  it("does not count the unit's ExecStartPre: only the gateway process starts", async () => {
-    // A write before ExecStart is what the startup admission then reads, so
-    // the pre-start's own processes never hold one.
+  it("reads the unit's ExecStartPre as its own phase: a unit with processes, none of them the gateway", async () => {
+    // A CLI write takes about 8 s from spawn to exit, so one let through late
+    // in the pre-start lands inside the gateway's bootstrap (box run, 2026-10-16:
+    // writes issued 2.3 s and 0.8 s before ExecStart exited 0.4 s and 1.8 s in).
     const { gatewayStartPhase, isGatewayServerArgv } = await import("@/lib/gateway-start-guard");
     host.cmdline = "/bin/bash\0/opt/clawbox/scripts/gateway-pre-start.sh\0";
-    expect(await gatewayStartPhase()).toBe("idle");
+    expect(await gatewayStartPhase()).toBe("pre-start");
     host.cmdline = "node\0/opt/openclaw/openclaw.mjs\0config\0validate\0--json\0";
-    expect(await gatewayStartPhase()).toBe("idle");
-    expect(host.probes).toBe(0);
+    expect(await gatewayStartPhase()).toBe("pre-start");
     expect(isGatewayServerArgv(["openclaw", "gateway", "--allow-unconfigured"])).toBe(true);
     expect(isGatewayServerArgv(["node", "dist/index.js", "gateway", "run"])).toBe(true);
     expect(isGatewayServerArgv(["openclaw", "gateway"])).toBe(true);
@@ -180,7 +180,7 @@ describe("gatewayStartPhase", () => {
     expect(await gatewayStartPhase()).toBe("starting");
     // The same title on a CLI call the ExecStartPre's shell made is not it.
     host.parentComm = "bash";
-    expect(await gatewayStartPhase()).toBe("idle");
+    expect(await gatewayStartPhase()).toBe("pre-start");
     expect(isGatewayServerProcess(["openclaw-gateway"], "systemd")).toBe(true);
     expect(isGatewayServerProcess(["openclaw"], "systemd")).toBe(true);
     expect(isGatewayServerProcess(["openclaw"], "bash")).toBe(false);
@@ -196,6 +196,22 @@ describe("gatewayStartPhase", () => {
     host.procs = "4242\n";
     host.ageS = 900;
     expect(await gatewayStartPhase()).toBe("idle");
+  });
+
+  it("does not read a pre-start older than the unit's own start timeout as one, nor a gateway that answers", async () => {
+    // systemd ends a pre-start at TimeoutStartSec (600 s on both units), so
+    // processes older than that are not a start this could wait out.
+    const { gatewayStartPhase } = await import("@/lib/gateway-start-guard");
+    host.cmdline = "/bin/bash\0/opt/clawbox/scripts/gateway-pre-start.sh\0";
+    host.ageS = 700;
+    expect(await gatewayStartPhase()).toBe("idle");
+    // A gateway whose process this does not recognise is still the core's word.
+    host.ageS = 5;
+    host.startup = ["started"];
+    expect(await gatewayStartPhase()).toBe("started");
+    host.probes = 0;
+    host.startup = ["starting"];
+    expect(await gatewayStartPhase()).toBe("starting");
   });
 });
 
@@ -231,6 +247,67 @@ describe("a config write while the gateway is starting", () => {
     expect(host.spawned.filter((argv) => argv[0] === "config")).toEqual([]);
     expect(JSON.parse(fs.readFileSync(host.file, "utf-8")).agents.defaults.userTimezone).toBeUndefined();
     quiet.forEach((s) => s.mockRestore());
+  });
+
+  it("holds a write issued during the unit's ExecStartPre until the gateway it starts is ready", async () => {
+    // Let through here, the CLI write would still be running when ExecStart
+    // begins, and land inside the gateway's startup admission.
+    vi.useFakeTimers();
+    host.cmdline = "/bin/bash\0/opt/clawbox/scripts/gateway-pre-start.sh\0";
+    host.parentComm = "systemd";
+    const lib = await import("@/lib/openclaw-config");
+    const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const written = lib.runOpenclawConfigSet(["agents.defaults.userTimezone", "Europe/Sofia"]);
+    written.catch(() => {});
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(host.spawned.filter((argv) => argv[0] === "config")).toEqual([]);
+    // ExecStart: the gateway process is up, the core says starting, then started.
+    host.cmdline = "node\0/opt/openclaw/openclaw.mjs\0gateway\0--allow-unconfigured\0--bind\0lan\0";
+    host.ageS = 1;
+    host.probes = 0;
+    host.startup = ["silent", "starting", "starting", "started"];
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(host.spawned.filter((argv) => argv[0] === "config")).toEqual([]);
+    await vi.advanceTimersByTimeAsync(3_000);
+    await expect(written).resolves.toBeUndefined();
+    expect(host.spawned.filter((argv) => argv[0] === "config")).toHaveLength(1);
+    expect(JSON.parse(fs.readFileSync(host.file, "utf-8")).agents.defaults.userTimezone).toBe("Europe/Sofia");
+    quiet.mockRestore();
+  });
+
+  it("does not count the pre-start against the two minutes the gateway itself is given", async () => {
+    vi.useFakeTimers();
+    host.cmdline = "/bin/bash\0/opt/clawbox/scripts/gateway-pre-start.sh\0";
+    const { holdWhileGatewayStarts, GatewayStillStartingError } = await import("@/lib/gateway-start-guard");
+    const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const held = holdWhileGatewayStarts("config set");
+    held.catch(() => {});
+    // A cold pre-start of 200 s, then a gateway that takes 110 s to start.
+    await vi.advanceTimersByTimeAsync(200_000);
+    host.cmdline = "node\0/opt/openclaw/openclaw.mjs\0gateway\0";
+    host.ageS = 1;
+    host.probes = 0;
+    host.startup = ["starting"];
+    await vi.advanceTimersByTimeAsync(110_000);
+    host.probes = 0;
+    host.startup = ["started"];
+    await vi.advanceTimersByTimeAsync(2_000);
+    await expect(held).resolves.toBe(true);
+    // The same pre-start followed by a gateway still starting after 120 s is refused.
+    host.cmdline = "/bin/bash\0/opt/clawbox/scripts/gateway-pre-start.sh\0";
+    host.ageS = 5;
+    host.probes = 0;
+    host.startup = ["silent"];
+    const again = holdWhileGatewayStarts("config set");
+    again.catch(() => {});
+    await vi.advanceTimersByTimeAsync(200_000);
+    host.cmdline = "node\0/opt/openclaw/openclaw.mjs\0gateway\0";
+    host.ageS = 1;
+    host.probes = 0;
+    host.startup = ["starting"];
+    await vi.advanceTimersByTimeAsync(125_000);
+    await expect(again).rejects.toBeInstanceOf(GatewayStillStartingError);
+    quiet.mockRestore();
   });
 
   it("holds a whole-file write the same way", async () => {

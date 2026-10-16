@@ -786,6 +786,25 @@ describe.skipIf(!canRun)("ensure-local-embeddings.sh beside a starting gateway",
       gw.kill("SIGKILL");
     }
   });
+
+  it("waits through the gateway unit's ExecStartPre too, launched with no flag at all", () => {
+    // A write let through late in the pre-start is still running when
+    // ExecStart begins, and lands inside the gateway's startup admission.
+    const unit = path.join(dir, "gateway-unit");
+    mkdirSync(unit);
+    const preStart = spawn("bash", ["-c", "sleep 60; true", "gateway-pre-start.sh"], { stdio: "ignore" });
+    try {
+      writeFileSync(path.join(unit, "cgroup.procs"), `${preStart.pid}\n`);
+      const r = run({
+        args: ["--no-download"],
+        extraEnv: { GATEWAY_CGROUP_DIRS: unit, CLAWBOX_GATEWAY_START_WAIT_S: "4", STARTUPZ_CODE: "000" },
+      });
+      expect(configSets(r.calls)).toEqual([]);
+      expect(`${r.stdout}${r.stderr}`).toContain("not written under a starting gateway");
+    } finally {
+      preStart.kill("SIGKILL");
+    }
+  });
 });
 
 describe("gateway-pre-start.sh local embeddings hand-off", () => {
