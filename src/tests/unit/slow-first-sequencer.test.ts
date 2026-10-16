@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { TestSpecification, Vitest } from "vitest/node";
 import fs from "fs";
 import path from "path";
-import SlowFirstSequencer, { SLOW_FIRST } from "@/tests/helpers/slow-first-sequencer";
+import SlowFirstSequencer, { SLOW_FIRST, UNMEASURED_S, planShards } from "@/tests/helpers/slow-first-sequencer";
 
 /**
  * The sequencer vitest.config.ts installs: the files known to take longest
@@ -13,9 +13,9 @@ import SlowFirstSequencer, { SLOW_FIRST } from "@/tests/helpers/slow-first-seque
 const REPO = path.resolve(__dirname, "../../..");
 
 /** The base sequencer with nothing cached — what every CI run looks like. */
-function sequencer(): SlowFirstSequencer {
+function sequencer(shard?: { index: number; count: number }): SlowFirstSequencer {
   const ctx = {
-    config: { root: REPO },
+    config: { root: REPO, shard },
     cache: { getFileTestResults: () => undefined, getFileStats: () => undefined },
   };
   return new SlowFirstSequencer(ctx as unknown as Vitest);
@@ -67,5 +67,53 @@ describe("SlowFirstSequencer", () => {
       `unit:${SLOW_FIRST[0]}`,
       "unit:src/tests/unit/z.test.ts",
     ]);
+  });
+});
+
+describe("planShards: the shards, balanced by measured duration", () => {
+  const files = Array.from({ length: 40 }, (_, i) => `src/tests/unit/f${String(i).padStart(2, "0")}.test.ts`);
+  const table: Record<string, number> = Object.fromEntries(files.slice(0, 12).map((f, i) => [f, 60 - i * 4]));
+  const load = (shard: string[]) => shard.reduce((sum, f) => sum + (table[f] ?? UNMEASURED_S), 0);
+
+  it("puts every file in exactly one shard", () => {
+    const plan = planShards(files, 4, table);
+    expect(plan).toHaveLength(4);
+    expect(plan.flat().sort()).toEqual([...files].sort());
+    expect(new Set(plan.flat()).size).toBe(files.length);
+    expect(planShards([...files, files[0]], 4, table).flat()).toHaveLength(files.length);
+  });
+
+  it("evens the load: no shard is ahead of another by more than one file's time", () => {
+    const loads = planShards(files, 4, table).map(load);
+    expect(Math.max(...loads) - Math.min(...loads)).toBeLessThanOrEqual(Math.max(...Object.values(table)));
+    expect(Math.max(...loads) - Math.min(...loads)).toBeLessThan(10);
+  });
+
+  it("is the same plan whatever order the files come in, so every runner agrees", () => {
+    const shuffled = [...files].reverse();
+    expect(planShards(shuffled, 4, table)).toEqual(planShards(files, 4, table));
+  });
+
+  it("counts a file the table does not list as UNMEASURED_S", () => {
+    const plan = planShards(["a.test.ts", "b.test.ts", "c.test.ts"], 2, { "a.test.ts": 1 });
+    expect(plan).toEqual([["a.test.ts"], ["b.test.ts", "c.test.ts"]]);
+  });
+
+  it("measures the repository's own table: every entry a test file, every value seconds", () => {
+    const real = JSON.parse(fs.readFileSync(path.join(REPO, "src/tests/helpers/test-durations.json"), "utf8")) as Record<string, number>;
+    expect(Object.keys(real).length).toBeGreaterThan(50);
+    for (const [file, seconds] of Object.entries(real)) {
+      expect(file).toMatch(/^src\/tests\/.+\.test\.tsx?$/);
+      expect(seconds).toBeGreaterThan(0);
+    }
+  });
+
+  it("hands each runner its own part of the same plan", async () => {
+    const specs = files.map((f) => spec("unit", f));
+    const parts = await Promise.all([1, 2, 3].map((index) => sequencer({ index, count: 3 }).shard(specs)));
+    const names = parts.map((part) => part.map(rel));
+    expect(names.flat().sort()).toEqual([...files].sort());
+    expect(new Set(names.flat()).size).toBe(files.length);
+    expect(names).toEqual(planShards(files, 3).map((shard) => files.filter((f) => shard.includes(f))));
   });
 });

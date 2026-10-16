@@ -24,20 +24,24 @@ concurrency:
 # here reports into:
 #
 #   checks  — the blocking checks that are not the suite, plus advisory lint.
-#   shard   — the vitest suite, split eight ways across runners (TASK-1127).
-#   test    — merges the eight shards' reports, applies the coverage
+#   shard   — the vitest suite, split ten ways across runners (TASK-1127).
+#   test    — merges the ten shards' reports, applies the coverage
 #             thresholds ONCE over the merged coverage, and fails unless
 #             `checks` and every shard passed.
 #
 # The suite alone took 11-13 min of a ~15 min job on one runner and was half
 # of every PR's wait; split four ways it was ~4-5 min a shard plus ~1 min of
-# merge (6.5 min a run), and eight ways about half that a shard: a shard's
-# fixed cost (checkout, install, vitest's start and its coverage report) is
-# ~30 s, measured, so the files are what the time is.
+# merge (6.5 min a run). A shard's fixed cost (checkout, install, vitest's
+# start and its coverage report) is ~30 s, measured, so the files are what
+# the time is — and vitest's own split, by a hash of each path, left one of
+# eight shards with three times another's file time (157 to 458 s, measured).
+# The shards are planned by measured duration instead (planShards in
+# src/tests/helpers/slow-first-sequencer.ts, the table beside it): ten shards
+# of ~225 file-seconds each, on that same run's numbers.
 #
 # bun's download cache (~/.bun/install/cache) is restored in every job, keyed
-# on bun.lock, and saved by `checks` alone so eight shards do not race to
-# write the same entry; `bun install --frozen-lockfile` still runs everywhere.
+# on bun.lock, and saved by `checks` alone so ten shards do not race to write
+# the same entry; `bun install --frozen-lockfile` still runs everywhere.
 jobs:
   checks:
     runs-on: ubuntu-latest
@@ -200,7 +204,7 @@ jobs:
       # others, and the merged report is the one place all of it is read.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     steps:
       - uses: actions/checkout@v7
 
@@ -232,9 +236,11 @@ jobs:
       # code, so a shard would fail every threshold. They are applied once,
       # to the merged coverage, in `test` below.
       #
-      # vitest splits by file (a hash of each path, so the same file always
-      # lands in the same shard), not by duration; measured on 1239 files, the
-      # heaviest (the ~90 s sudoers scan) is well under a shard's share.
+      # The split is by file, planned on measured durations (the sequencer's
+      # planShards; vitest's default is a hash of each path): every runner
+      # computes the same plan and runs its own part, each file in exactly one
+      # shard. The heaviest file (the ~2 min sudoers scan) fits in a shard's
+      # share.
       #
       # Through scripts/vitest-shard.sh, which runs exactly that command and,
       # when it fails, runs it ONCE more (TASK-1401). A shard that passes only
@@ -363,7 +369,7 @@ jobs:
             rc=1
           fi
           if [ "$SHARD_RESULT" != "success" ]; then
-            echo "::error::the vitest shards finished '$SHARD_RESULT' — see the vitest (n/8) jobs"
+            echo "::error::the vitest shards finished '$SHARD_RESULT' — see the vitest (n/10) jobs"
             rc=1
           fi
           exit "$rc"

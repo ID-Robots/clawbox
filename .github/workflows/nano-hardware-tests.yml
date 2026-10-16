@@ -642,8 +642,16 @@ jobs:
           # restores the board from the golden image afterwards.
           nano-ci ssh "$SERIAL" "f=/home/clawbox/clawbox/.env; touch \$f && sed -i '/^CLAWBOX_CODING_MIN_BUDGET_MINUTES=/d' \$f && echo CLAWBOX_CODING_MIN_BUDGET_MINUTES=1 >> \$f" 2>&1 | "$RUNNER_TEMP/nano-redact" ||
             echo "::warning title=Budget floor not set::the board keeps the 5-minute floor, so 45-coding-agent-time-budget waits 5 minutes"
+          # What the rebuild can reuse (scripts/force-update.sh): the stamp of
+          # the last dependency install and the framework's build cache. Said
+          # before and after, for the log; never a verdict.
+          kept() {
+            nano-ci ssh "$SERIAL" 'cd /home/clawbox/clawbox && printf "build cache %s, dependency stamp %s\n" "$([ -d .next/cache ] && du -sh .next/cache | cut -f1 || echo none)" "$([ -f node_modules/.clawbox-deps-stamp ] && echo present || echo absent)"' 2>/dev/null | tail -n 1 | "$RUNNER_TEMP/nano-redact" || true
+          }
+          echo "Before the rebuild: $(kept)"
           rc=0
           nano-ci rebuild "$SERIAL" "$BRANCH" 2>&1 | "$RUNNER_TEMP/nano-redact" || rc=${PIPESTATUS[0]}
+          echo "After the rebuild: $(kept)"
           # 4: the branch moved on and the board is on its new head — the
           # verify step tells "superseded" from a wrong commit.
           if [ "$rc" -ne 0 ] && [ "$rc" -ne 4 ]; then
