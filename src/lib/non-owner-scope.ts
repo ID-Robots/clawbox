@@ -150,22 +150,41 @@ function ownerPage(req: NonOwnerRequest): NonOwnerVerdict {
   return req.intent === "unknown" ? "redirect-home" : "deny";
 }
 
+/**
+ * The path as a router may still resolve it: escapes decoded, case folded,
+ * repeated and trailing slashes dropped. The exceptions are matched on THIS,
+ * so none of them is dodged by spelling — middleware judges API paths as
+ * typed and never strips their trailing slash (`/setup-api/gateway/` reaches
+ * the same handler as `/setup-api/gateway`). Null for a path that does not
+ * decode, which is refused.
+ */
+function canonicalPath(pathname: string): string | null {
+  let path: string;
+  try {
+    path = decodeURIComponent(pathname);
+  } catch {
+    return null;
+  }
+  path = path.toLowerCase().replace(/\/{2,}/g, "/");
+  return path.length > 1 ? path.replace(/\/+$/, "") || "/" : path;
+}
+
 export function nonOwnerVerdict(req: NonOwnerRequest): NonOwnerVerdict {
   const { pathname } = req;
   const method = req.method.toUpperCase();
   const isRead = method === "GET" || method === "HEAD";
+  const canon = canonicalPath(pathname);
+  if (canon === null) return "deny";
 
-  if (underPrefix(pathname, "/setup-api")) {
-    if (OWNER_ACCOUNT_API.has(pathname) || OWNER_SECRET_API.has(pathname)) return "deny";
-    return "allow";
-  }
-
+  // The exceptions first, on the canonical path.
+  if (OWNER_ACCOUNT_API.has(canon) || OWNER_SECRET_API.has(canon)) return "deny";
   // API trees answer code, so they answer 403 JSON however they are asked.
-  if (GATEWAY_PREFIXES.some((p) => underPrefix(pathname, p))) {
+  if (GATEWAY_PREFIXES.some((p) => underPrefix(canon, p))) {
     return isRead && isOwnChatMedia(pathname, req.username) ? "allow" : "deny";
   }
+  if (OWNER_ONLY_PAGES.has(canon)) return ownerPage(req);
 
-  if (OWNER_ONLY_PAGES.has(pathname)) return ownerPage(req);
+  if (underPrefix(pathname, "/setup-api")) return "allow";
 
   if (pathname === "/" || CLAWBOX_PAGE_PREFIXES.some((p) => underPrefix(pathname, p))) return "allow";
 

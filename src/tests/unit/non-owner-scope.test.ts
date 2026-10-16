@@ -81,6 +81,30 @@ describe("nonOwnerVerdict — what stays the owner's", () => {
     expect(verdict("/setup-api/gateway", "GET", "navigation")).toBe("deny");
   });
 
+  it("is not dodged by spelling: a trailing slash, doubled slashes, escapes or case", () => {
+    // Middleware never strips an API path's trailing slash, and the router
+    // serves `/setup-api/gateway/` from the same handler.
+    for (const url of [
+      "/setup-api/gateway/",
+      "/setup-api/gateway//",
+      "/setup-api//gateway",
+      "/setup-api/gatew%61y",
+      "/setup-api/Gateway",
+      "/setup-api/system/credentials/",
+      "/setup-api/system%2Fcredentials",
+      "/setup-api/setup/reset/",
+      "/API/chat",
+      "/api%2Fchat",
+      "/app/OpenClaw",
+    ]) {
+      expect(verdict(url, "GET", "fetch"), url).toBe("deny");
+    }
+    expect(verdict("/setup-api/%zz")).toBe("deny");
+    // …while an ordinary path with a slash at the end still opens.
+    expect(verdict("/setup-api/gateway/ws-config")).toBe("allow");
+    expect(verdict("/setup-api/users/")).toBe("allow");
+  });
+
   it("the harnesses' consoles (every conversation on the box): sends their pages to the desktop", () => {
     for (const url of ["/app/openclaw", "/app/hermes", "/chat", "/sessions", "/settings", "/overview"]) {
       expect(verdict(url, "GET", "navigation"), url).toBe("redirect-home");

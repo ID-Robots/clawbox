@@ -12,6 +12,9 @@ vi.mock("@/lib/gateway-proxy", () => ({
   getGatewayToken: vi.fn().mockResolvedValue("test-token"),
 }));
 
+const who = vi.hoisted(() => ({ identity: null as { username: string; isOwner: boolean } | null }));
+vi.mock("@/lib/route-auth", () => ({ sessionIdentity: vi.fn(async () => who.identity) }));
+
 vi.mock("@/lib/gateway-health", () => ({
   getGatewayServiceHealth: vi.fn().mockResolvedValue({
     active: false,
@@ -107,6 +110,24 @@ describe("/setup-api/gateway", () => {
     const html = await res.text();
     expect(html).toContain("__OPENCLAW_WS_URL__");
     expect(html).toContain("clawbox.local");
+  });
+
+  it("injects the gateway token for the owner and never for another ClawBox user", async () => {
+    const page = () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        text: () => Promise.resolve("<html><head></head><body>Gateway</body></html>"),
+      });
+      return GET(new NextRequest(new URL("http://clawbox.local/setup-api/gateway"))).then((r) => r.text());
+    };
+    try {
+      who.identity = { username: "clawbox", isOwner: true };
+      expect(await page()).toContain("test-token");
+      who.identity = { username: "alice", isOwner: false };
+      expect(await page()).not.toContain("test-token");
+    } finally {
+      who.identity = null;
+    }
   });
 
   it("carries the EMAIL: directive handling the other door already has", async () => {
