@@ -34,6 +34,7 @@ import { formatBytes, formatBytesApart } from "@/lib/format-bytes";
 import { getEdition } from "@/lib/harness";
 import { backupSourceFor } from "@/lib/harness/backup-source";
 import type { HarnessId } from "@/lib/harness/transport";
+import { migrateLegacyPortalUrl } from "@/lib/portal-legacy-domain";
 
 export const CLAWKEEP_DATA_DIR =
   process.env.CLAWKEEP_DATA_DIR?.trim() || path.join(os.homedir(), ".clawkeep");
@@ -50,8 +51,9 @@ const STATE_PATH = path.join(CLAWKEEP_DATA_DIR, "state.json");
 const RESTORING_FLAG_PATH = path.join(CLAWKEEP_DATA_DIR, "restoring.flag");
 const SCHEDULE_PATH = path.join(CLAWKEEP_DATA_DIR, "schedule.json");
 
-export const DEFAULT_PORTAL_SERVER =
-  process.env.CLAWKEEP_PORTAL_SERVER?.trim() || "https://clawbox.com";
+export const DEFAULT_PORTAL_SERVER = migrateLegacyPortalUrl(
+  process.env.CLAWKEEP_PORTAL_SERVER?.trim() || "https://clawbox.com",
+);
 
 const DEFAULT_BIN_NAME = "clawkeepd";
 
@@ -886,9 +888,35 @@ async function writeStateFile(state: StateFile): Promise<void> {
   await fs.rename(tmp, STATE_PATH);
 }
 
+/** Rewrite a top-level `server = "<legacy portal>"` line to the current
+ * portal; every other line (and any custom server) is left byte-for-byte. */
+export function migrateLegacyServerToml(toml: string): string {
+  const lines = toml.split(/(\r?\n)/);
+  for (let i = 0; i < lines.length; i += 2) {
+    const line = lines[i].trim();
+    if (line.startsWith("[")) break;
+    const m = lines[i].match(/^(\s*server\s*=\s*")([^"]*)(".*)$/);
+    if (!m) continue;
+    const next = migrateLegacyPortalUrl(m[2]);
+    if (next !== m[2]) lines[i] = `${m[1]}${next}${m[3]}`;
+    break;
+  }
+  return lines.join("");
+}
+
+/** Persist the legacy-domain rewrite (TASK-1600) when config.toml has one. */
+async function migrateConfigTomlFile(toml: string): Promise<string> {
+  const migrated = migrateLegacyServerToml(toml);
+  if (migrated === toml) return toml;
+  const tmp = untraced(`${CLAWKEEP_CONFIG_PATH}.tmp.${process.pid}`);
+  await fs.writeFile(tmp, migrated, { mode: 0o644 });
+  await fs.rename(tmp, CLAWKEEP_CONFIG_PATH);
+  return migrated;
+}
+
 export async function readConfigToml(): Promise<string> {
   try {
-    return await fs.readFile(CLAWKEEP_CONFIG_PATH, "utf8");
+    return await migrateConfigTomlFile(await fs.readFile(CLAWKEEP_CONFIG_PATH, "utf8"));
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
   }
@@ -996,7 +1024,7 @@ function readServer(toml: string): string {
     if (eq < 0) continue;
     if (line.slice(0, eq).trim() !== "server") continue;
     const m = line.slice(eq + 1).trim().match(/^"([^"]*)"/);
-    if (m) return m[1];
+    if (m) return migrateLegacyPortalUrl(m[1]);
   }
   return DEFAULT_PORTAL_SERVER;
 }
@@ -1118,6 +1146,8 @@ async function getDaemonBin(): Promise<string | null> {
  */
 async function pairedDaemonBin(): Promise<string> {
   if (!(await readToken())) throw new ClawKeepNotPairedError();
+  // The daemon reads config.toml itself: migrate a legacy server first.
+  await readConfigToml().catch(() => { /* daemon reports its own config errors */ });
   return (await getDaemonBin()) ?? DEFAULT_BIN_NAME;
 }
 
@@ -1135,7 +1165,9 @@ function buildSpawnEnv(): NodeJS.ProcessEnv {
   const parentPath = process.env.PATH ?? "";
   const prefix = Array.from(extraDirs).join(path.delimiter);
   const augmentedPath = parentPath ? `${prefix}${path.delimiter}${parentPath}` : prefix;
-  return { ...process.env, CLAWKEEP_DATA_DIR, PATH: augmentedPath };
+  const env: NodeJS.ProcessEnv = { ...process.env, CLAWKEEP_DATA_DIR, PATH: augmentedPath };
+  if (env.CLAWKEEP_PORTAL_SERVER) env.CLAWKEEP_PORTAL_SERVER = migrateLegacyPortalUrl(env.CLAWKEEP_PORTAL_SERVER.trim());
+  return env;
 }
 
 // ────────────────────────────────────────────────────────────────────
