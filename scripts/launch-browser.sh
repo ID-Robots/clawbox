@@ -284,14 +284,19 @@ fi
 
 # Any profile, ClawBox's own included: a browser on it that does not answer
 # on the port yet is one still starting — given a few seconds, then reused
-# like any running one. One that never answers is not joined either.
+# like any running one. One that never answers is not joined either; one that
+# goes away meanwhile (the last of a killed browser's processes) leaves the
+# profile free, and the start goes on.
 if browser_profile_in_use "$PROFILE"; then
   for _ in $(seq 1 20); do
     sleep 0.5
     reuse_running_browser
+    browser_profile_in_use "$PROFILE" || break
   done
-  echo "A browser is running on $PROFILE without remote debugging on port $CDP_PORT; not starting a second browser on it" >&2
-  exit 1
+  if browser_profile_in_use "$PROFILE"; then
+    echo "A browser is running on $PROFILE without remote debugging on port $CDP_PORT; not starting a second browser on it" >&2
+    exit 1
+  fi
 fi
 
 if ! wait_for_display "$DISPLAY" "${XAUTHORITY:-}"; then

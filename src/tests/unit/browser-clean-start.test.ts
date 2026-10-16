@@ -496,4 +496,19 @@ describe.skipIf(!usable)("scripts/launch-browser.sh starts clean", () => {
     expect(argv()).toBeNull();
     expect(readPrefs()).toEqual(CRASHED);
   });
+
+  it("starts the browser once the one holding its profile goes away while it waits", async () => {
+    // Real waits here: the holder has to outlive the first look and not the last.
+    const realSleep = spawnSync("bash", ["-c", "type -P sleep"], { encoding: "utf-8" }).stdout.trim();
+    fs.writeFileSync(path.join(tmp, "bin", "sleep"), `#!/bin/sh\nexec ${realSleep} 0.1\n`, { mode: 0o755 });
+    writePrefs();
+    const holder = spawn("bash", ["-c", "sleep 0.5; exit 0", "fake-chromium", `--user-data-dir=${profile}`], { stdio: "ignore", detached: true });
+    children.push(holder);
+    await new Promise((r) => setTimeout(r, 100));
+    const r = await launch(await closedPort());
+    expect(r.code, r.stderr).toBe(0);
+    expect(r.stderr).not.toContain("not starting a second browser on it");
+    expect(argv()).toContain("--hide-crash-restore-bubble");
+    expect(readPrefs().session.restore_on_startup).toBe(5);
+  });
 });
