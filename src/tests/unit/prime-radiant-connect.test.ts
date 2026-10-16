@@ -68,8 +68,8 @@ function fakeRun(snap: VaultSnapshot) {
     const tx = {
       vault: "/nonexistent",
       touched: new Set<string>(),
-      async read() {
-        return null;
+      async read(rel: string) {
+        return snap.pages.find((p) => p.path === rel) ?? null;
       },
       async write(rel: string, text: string) {
         if (rel === "index.md") snap.indexBody = text;
@@ -142,7 +142,7 @@ describe("planConnections", () => {
     expect(hub.parsed.ok && (hub.parsed.frontmatter.sourceIds as string[]).length).toBeGreaterThan(0);
 
     // A second run changes nothing.
-    const again = planConnections(snap, { now: NOW, vectors: await vectorsFor(snap), minSimilarity: 0.1 });
+    const again = await planConnections(snap, { now: NOW, vectors: await vectorsFor(snap), minSimilarity: 0.1 });
     expect(again.writes).toEqual([]);
   });
 
