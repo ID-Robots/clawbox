@@ -29,7 +29,8 @@ pause="${CLAWBOX_OPENCLAW_MAINTENANCE_PAUSE_S:-2}"
 
 [ "$#" -ge 1 ] || { echo "usage: $0 <openclaw> <args...>" >&2; exit 64; }
 
-out="$(mktemp 2>/dev/null)" && err="$(mktemp 2>/dev/null)" || exec "$@"
+out="$(mktemp 2>/dev/null)" || exec "$@"
+err="$(mktemp 2>/dev/null)" || { rm -f "$out"; exec "$@"; }
 trap 'rm -f "$out" "$err"' EXIT
 # A caller's `timeout` signals this script and the ask together: what the ask
 # had printed is still handed on, as it would have been without the wrapper.

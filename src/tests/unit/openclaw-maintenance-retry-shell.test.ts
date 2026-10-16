@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -107,6 +107,29 @@ describe("scripts/openclaw-maintenance-retry.sh", () => {
     const r = run(["timeout", "2", WRAPPER, "sh", "-c", "echo partial; sleep 10"]);
     expect(r.status).toBe(124);
     expect(r.stdout).toContain("partial");
+  });
+
+  it("leaves no capture file behind when only the second one could be made", () => {
+    // A `mktemp` that makes one file and then fails: the wrapper falls back to
+    // running the command bare, and the first file must not stay in TMPDIR.
+    const made = path.join(dir, "made");
+    const count = path.join(dir, "mktemp-calls");
+    const fake = path.join(dir, "mktemp");
+    writeFileSync(fake, `#!/usr/bin/env bash
+n=$(cat ${JSON.stringify(count)} 2>/dev/null || echo 0)
+echo $((n+1)) > ${JSON.stringify(count)}
+[ "$n" -ge 1 ] && exit 1
+f="$(PATH=/usr/bin:/bin mktemp "$@")" || exit 1
+printf '%s\\n' "$f" >> ${JSON.stringify(made)}
+printf '%s\\n' "$f"
+`);
+    chmodSync(fake, 0o755);
+    const r = run([WRAPPER, "sh", "-c", "echo ran"], { PATH: `${dir}:/usr/bin:/bin` });
+    expect(r.status).toBe(0);
+    expect(r.stdout.trim()).toBe("ran");
+    const first = readFileSync(made, "utf-8").trim();
+    expect(first).not.toBe("");
+    expect(existsSync(first)).toBe(false);
   });
 
   it("passes any other failure straight through, asked once", () => {
