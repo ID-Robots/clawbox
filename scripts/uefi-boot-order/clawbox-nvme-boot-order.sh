@@ -47,7 +47,7 @@ ndh_bottom() {
     # Keep the attributes it was created with; UEFI refuses a write that
     # changes them. Absent, it gets NVIDIA's own: BS|NV|RT (07 00 00 00).
     attr="$(od -An -tx1 -N4 "$NDH" 2>/dev/null | tr -d ' \n')"
-    [[ "$attr" =~ ^[0-9a-f]{8}$ ]] || attr=07000000
+    [[ ${#attr} -eq 8 && "$attr" =~ ^[0-9a-f]+$ ]] || attr=07000000
     # efivarfs marks variables immutable; one write() carries attributes + data.
     chattr -i "$NDH" 2>/dev/null
     printf '%b' "$(printf '%s' "$attr" | sed 's/../\\x&/g')\\x00" > "$NDH" 2>/dev/null
@@ -88,7 +88,7 @@ classify() { # one Boot#### line -> nvme | net | other
 
 declare -A KIND=() ACTIVE=()
 while IFS= read -r line; do
-    [[ "$line" =~ ^Boot([0-9A-Fa-f]{4})(\*?)[[:space:]] ]] || continue
+    [[ "$line" =~ ^Boot([0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f][0-9A-Fa-f])(\*?)[[:space:]] ]] || continue
     n="${BASH_REMATCH[1]^^}"
     KIND[$n]="$(classify "$line")"
     [ -n "${BASH_REMATCH[2]}" ] && ACTIVE[$n]=1

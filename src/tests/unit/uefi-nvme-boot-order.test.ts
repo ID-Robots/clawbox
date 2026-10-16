@@ -1,8 +1,11 @@
-import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { execFileSync, spawnSync } from "child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, chmodSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
+
+// Runs the real guard script under bash: both ceilings, see test-timeout-hygiene.
+vi.setConfig({ testTimeout: 15_000, hookTimeout: 15_000 });
 
 /**
  * TASK-1636: after an update a box did not boot because its NVMe entry had
