@@ -25,6 +25,7 @@ import {
   parseClawaiAllowanceRefusal,
   type ClawaiAllowanceKind,
 } from "@/lib/clawai-allowance";
+import { PORTAL_CREDITS_URL, type ClawaiUsage } from "@/lib/clawai-usage";
 
 /**
  * The failure OpenClaw reports when the session file changes under a running
@@ -476,6 +477,8 @@ const ALLOWANCE_EN: Record<string, string> = {
   "chat.allowanceFreesUpAt": "It frees up at {time}.",
   "chat.allowanceFreesUpLater": "It frees up as older usage leaves the rolling window.",
   "chat.allowanceSeeUsage": "Your usage is in Settings, under Providers.",
+  "chat.allowanceGeneric": "That message did not go through — a ClawBox AI usage limit is reached.",
+  "chat.allowanceExtraUsage": "To keep going before then, add an extra-usage pack: {url}",
 };
 
 /** What a chat surface hands in so the sentence comes out in the owner's language and clock. */
@@ -484,25 +487,85 @@ export interface ChatFailureWords {
   locale: string;
   /** The zone "frees up at" is read in; the browser's own when absent. */
   timeZone?: string | null;
+  /**
+   * The last ClawBox AI usage answer this surface read (`/setup-api/ai-models/usage`),
+   * when it has one. Used only when a turn died on a bare rate limit: the
+   * gateway can word the proxy's allowance refusal as its generic "rate-limited"
+   * line and drop the envelope, and then the usage data is the only place left
+   * that says which allowance is spent and when it frees up (TASK-1602).
+   */
+  clawaiUsage?: ClawaiUsage | null;
 }
 
-function allowanceSentence(raw: string, words: ChatFailureWords | undefined): string | null {
-  const refusal = parseClawaiAllowanceRefusal(raw);
-  if (!refusal) return null;
+type Say = (key: string, params?: Record<string, string | number>) => string;
+
+function sayWith(words: ChatFailureWords | undefined): Say {
   // A translator that does not know a key answers the key itself (and, with no
   // provider above it, ignores the params) — the English floor covers both.
-  const say = (key: string, params?: Record<string, string | number>): string => {
+  return (key, params) => {
     const hit = words?.t(key, params);
     let out = hit && hit !== key ? hit : ALLOWANCE_EN[key];
     for (const [name, value] of Object.entries(params ?? {})) out = out.replaceAll(`{${name}}`, String(value));
     return out;
   };
-  const time = formatFreesUpAt(refusal.resetAt, { locale: words?.locale ?? "en", timeZone: words?.timeZone ?? null });
-  return [
-    say(ALLOWANCE_KEY[refusal.kind]),
+}
+
+/**
+ * The full sentence for a spent allowance: which one, when it frees up, and
+ * the one thing to do now. Extra-usage packs are offered only for the weekly
+ * pool (or a limit the proxy did not name): the burst and memory-indexing
+ * windows have their own remedies, and promising a pack would unlock them is
+ * a promise this box cannot check.
+ */
+function allowanceWords(kind: ClawaiAllowanceKind | "generic", resetAt: string | null, words: ChatFailureWords | undefined): string {
+  const say = sayWith(words);
+  const time = formatFreesUpAt(resetAt, { locale: words?.locale ?? "en", timeZone: words?.timeZone ?? null });
+  const parts = [
+    say(kind === "generic" ? "chat.allowanceGeneric" : ALLOWANCE_KEY[kind]),
     time ? say("chat.allowanceFreesUpAt", { time }) : say("chat.allowanceFreesUpLater"),
-    say("chat.allowanceSeeUsage"),
-  ].join(" ");
+  ];
+  if (kind === "weekly" || kind === "generic") parts.push(say("chat.allowanceExtraUsage", { url: PORTAL_CREDITS_URL }));
+  parts.push(say("chat.allowanceSeeUsage"));
+  return parts.join(" ");
+}
+
+/**
+ * The proxy's own refusal type. Its 429 for a spent allowance carries
+ * `"type":"usage_limit"` with a `resetAt`; a refusal that names no window
+ * still gets the honest "a usage limit" rather than "wait a minute".
+ */
+const USAGE_LIMIT_TYPE_RE = /\busage_limit\b/;
+const RESET_AT_ANY_RE = /resetAt\\?"?\s*[:=]\s*\\?"?(\d{4}-\d{2}-\d{2}T[0-9:.]+(?:Z|[+-]\d{2}:?\d{2})?)/;
+
+/** Is the turn's provider ClawBox AI, as far as the context can tell? Unknown answers null. */
+function isClawaiTurn(context: ChatRunFailureContext | undefined): boolean | null {
+  const id = (context?.provider ?? providerFromRef(context?.model))?.trim().toLowerCase();
+  if (!id) return null;
+  return id === "clawai" || id === "clawbox" || id === "clawbox-ai";
+}
+
+/**
+ * A bare rate limit, read against the usage data: a spent weekly pool (or
+ * burst ceiling) explains it. Only when the turn is ClawBox AI's or the
+ * context cannot say, and only off a window the portal read as over its
+ * limit — a 429 from another provider, or from a ClawBox AI window that still
+ * has room, keeps the ordinary rate-limit sentence.
+ */
+function allowanceFromUsage(context: ChatRunFailureContext | undefined, words: ChatFailureWords | undefined): string | null {
+  const usage = words?.clawaiUsage;
+  if (!usage || usage.shape !== "weekly") return null;
+  if (isClawaiTurn(context) === false) return null;
+  if (!usage.weekly.unavailable && usage.weekly.isOverLimit) return allowanceWords("weekly", usage.weekly.resetAt, words);
+  if (usage.burst && !usage.burst.unavailable && usage.burst.isOverLimit) return allowanceWords("burst", usage.burst.resetAt, words);
+  return null;
+}
+
+function allowanceSentence(raw: string, words: ChatFailureWords | undefined): string | null {
+  const refusal = parseClawaiAllowanceRefusal(raw);
+  if (refusal) return allowanceWords(refusal.kind, refusal.resetAt, words);
+  if (!USAGE_LIMIT_TYPE_RE.test(raw)) return null;
+  const at = RESET_AT_ANY_RE.exec(raw)?.[1] ?? null;
+  return allowanceWords("generic", at && !Number.isNaN(Date.parse(at)) ? at : null, words);
 }
 
 /**
@@ -542,7 +605,7 @@ export function describeChatFailure(raw: unknown, context?: ChatRunFailureContex
   // this the customer would get that bare operator line instead of the calm,
   // actionable one — and a 429 buried in an otherwise unsafe string would be
   // dropped to the generic fallback, losing the one fact that explains it.
-  if (isRateLimit(evidence)) return RATE_LIMIT;
+  if (isRateLimit(evidence)) return allowanceFromUsage(context, words) ?? RATE_LIMIT;
   // Before the sanitizer for the same reason as the rate limit: "HTTP 403:
   // Invalid token" carries no path or handle, so it would otherwise pass the
   // leak rules and be relayed verbatim — which is exactly the bubble TASK-419

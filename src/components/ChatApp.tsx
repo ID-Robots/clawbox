@@ -1,5 +1,7 @@
 'use client'
 
+import { useClawaiUsageSnapshot } from "@/hooks/useClawaiUsageSnapshot"
+import type { ChatFailureWords } from "@/lib/chat-error-text"
 import React, { useState, useEffect, useRef, useCallback, useMemo, memo } from 'react'
 import Link from 'next/link'
 import { buildDeviceConnectParams } from '@/lib/gateway-device-identity'
@@ -351,8 +353,11 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
   const headerHidden = fullscreenChat && !headerPeek
   // The words a failed turn is said in — a ref, for the handlers that
   // outlive the render that created them.
-  const failureWordsRef = useRef({ t, locale })
-  useEffect(() => { failureWordsRef.current = { t, locale } }, [t, locale])
+  const clawaiUsageSnapshot = useClawaiUsageSnapshot()
+  const failureWordsRef = useRef<ChatFailureWords>({ t, locale })
+  useEffect(() => {
+    failureWordsRef.current = { t, locale, clawaiUsage: clawaiUsageSnapshot.usage, timeZone: clawaiUsageSnapshot.timeZone }
+  }, [t, locale, clawaiUsageSnapshot])
   const [status, setStatus] = useState<'connecting' | 'connected' | 'error'>('connecting')
   // Welcome-to-portal banner: show in the chat empty state when the user
   // hasn't signed in to a ClawBox account yet. Dismissible, persisted in

@@ -1,5 +1,7 @@
 'use client'
 
+import { useClawaiUsageSnapshot } from "@/hooks/useClawaiUsageSnapshot"
+import type { ChatFailureWords } from "@/lib/chat-error-text"
 import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback, memo, useSyncExternalStore } from 'react'
 import { createPortal } from 'react-dom'
 
@@ -1019,8 +1021,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // The words a failed turn is said in. A ref, because the gateway's event
   // handlers outlive the render that created them and must still speak the
   // owner's current language.
-  const failureWordsRef = useRef({ t, locale })
-  useEffect(() => { failureWordsRef.current = { t, locale } }, [t, locale])
+  const clawaiUsageSnapshot = useClawaiUsageSnapshot()
+  const failureWordsRef = useRef<ChatFailureWords>({ t, locale })
+  useEffect(() => {
+    failureWordsRef.current = { t, locale, clawaiUsage: clawaiUsageSnapshot.usage, timeZone: clawaiUsageSnapshot.timeZone }
+  }, [t, locale, clawaiUsageSnapshot])
   const [panelWidth, setPanelWidth] = useState<number | null>(initialPanelWidth && initialPanelWidth > 0 ? initialPanelWidth : null)
   // A PHONE never draws the docked panel. Its geometry is a desktop one — a
   // column anchored to the right edge at a width chosen on a big screen — which

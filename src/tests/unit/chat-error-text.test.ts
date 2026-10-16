@@ -552,3 +552,57 @@ describe("a provider echoing the key it refused, masked", () => {
     expect(shown).not.toContain("req_");
   });
 });
+
+// TASK-1602: the proxy's weekly refusal is a 429 `usage_limit` with a resetAt,
+// and the gateway can word it as a bare rate limit.
+describe("ClawBox AI usage_limit refusals (TASK-1602)", () => {
+  const RESET = "2026-10-20T09:30:00Z";
+  const window = (over: boolean, resetAt: string | null = RESET) => ({
+    used: over ? 100 : 10, limit: 100, percentUsed: over ? 100 : 10, isOverLimit: over, resetAt, unavailable: false,
+  });
+  const usage = (weeklyOver: boolean, burstOver = false) => ({
+    shape: "weekly" as const, plan: "pro" as const, tierDisplayName: "Pro",
+    weekly: window(weeklyOver), burst: window(burstOver), meters: {}, credits: null, billingInterval: null,
+    legacy: { percentUsed: 0, resetIn: null, isOverLimit: false, tier: null, tierDisplayName: null, buckets: null },
+  });
+  const words = (u: ReturnType<typeof usage> | null) => ({ t: (k: string) => k, locale: "en", timeZone: "UTC", clawaiUsage: u });
+
+  it("names a usage_limit envelope with no window code, with its reset time and the packs link", () => {
+    const raw = `HTTP 429: {"error":{"type":"usage_limit","message":"Usage limit reached","resetAt":"${RESET}"}}`;
+    const text = describeChatFailure(raw, undefined, words(null));
+    expect(text).toMatch(/a ClawBox AI usage limit is reached/);
+    expect(text).toMatch(/09:30/);
+    expect(text).toMatch(/extra-usage pack: https:\/\/clawbox\.com\/portal\/credits/);
+    expect(text).not.toMatch(/Wait a minute/);
+  });
+
+  it("offers the packs link for a weekly refusal", () => {
+    const raw = `{"error":{"type":"usage_limit","code":"weekly_limit_exceeded","resetAt":"${RESET}"}}`;
+    expect(describeChatFailure(raw)).toMatch(/chat allowance is used up.*extra-usage pack/);
+  });
+
+  it("does not promise packs for a burst refusal", () => {
+    const raw = `{"error":{"type":"usage_limit","code":"burst_limit_exceeded","resetAt":"${RESET}"}}`;
+    expect(describeChatFailure(raw)).not.toMatch(/extra-usage pack/);
+  });
+
+  it("explains a bare rate limit from the usage data when the weekly pool is spent", () => {
+    const text = describeChatFailure("API rate limit reached. Please try again later.", undefined, words(usage(true)));
+    expect(text).toMatch(/this week's ClawBox AI chat allowance is used up/);
+    expect(text).toMatch(/09:30/);
+  });
+
+  it("names the burst limit, not the week, when only the short-term limit is spent", () => {
+    const text = describeChatFailure("rate limited", undefined, words(usage(false, true)));
+    expect(text).toMatch(/5-hour burst limit is reached/);
+  });
+
+  it("keeps the ordinary rate-limit sentence when no ClawBox AI window is spent", () => {
+    expect(describeChatFailure("rate limited", undefined, words(usage(false)))).toMatch(/rate-limiting this box/);
+  });
+
+  it("keeps the ordinary rate-limit sentence when the turn was another provider's", () => {
+    const text = describeChatFailure("rate limited", { provider: "anthropic", reason: "rate_limit" }, words(usage(true)));
+    expect(text).toMatch(/rate-limiting this box/);
+  });
+});
