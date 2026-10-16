@@ -218,6 +218,27 @@ const CASES: Case[] = [
     bad: { path: "concepts/pricing.md", confirm: false },
   },
   {
+    tool: "prime_radiant_page_merge",
+    args: { into: "entities/acme.md", from: ["entities/acme-widgets-gmbh.md"], confirm: true },
+    reply: {
+      into: "entities/acme.md",
+      from: ["entities/acme-widgets-gmbh.md"],
+      dryRun: false,
+      commit: SHA,
+      claims: [CLAIM],
+      verified: [CLAIM],
+      aliases: ["Acme Widgets GmbH"],
+      relinked: [{ path: "concepts/pricing.md", links: 2 }],
+      links: 3,
+      findings: [],
+    },
+    method: "POST",
+    path: `${BASE}/pages/merge`,
+    sent: { body: { into: "entities/acme.md", from: ["entities/acme-widgets-gmbh.md"] } },
+    says: /Merged entities\/acme-widgets-gmbh\.md into entities\/acme\.md: 1 claim\(s\) \(1 verified, kept as they are\) moved, 3 link\(s\) on 1 page\(s\) now lead there\. Commit 0123456789ab/,
+    bad: { into: "entities/acme.md", from: [], confirm: true },
+  },
+  {
     tool: "prime_radiant_claim_add",
     args: { page: "concepts/pricing.md", text: "The green widget costs 9 EUR.", confidence: 60, source: "price-list.pdf" },
     reply: { id: "acme-sales/pricing/green", page: "concepts/pricing.md", commit: SHA, findings: [] },
@@ -386,7 +407,7 @@ describe("the family", () => {
 
   it("gates every destructive tool on a literal confirm, and marks the reads read-only", () => {
     const h = harness();
-    for (const name of ["prime_radiant_page_delete", "prime_radiant_claim_delete", "prime_radiant_undo", "prime_radiant_settings_update", "prime_radiant_nightly_merge"]) {
+    for (const name of ["prime_radiant_page_delete", "prime_radiant_page_merge", "prime_radiant_claim_delete", "prime_radiant_undo", "prime_radiant_settings_update", "prime_radiant_nightly_merge"]) {
       expect(h.get(name).opts.destructive, name).toBe(true);
       expect(z.object(h.get(name).shape).safeParse({ ...CASES.find((c) => c.tool === name)!.args, confirm: undefined }).success, name).toBe(false);
     }
@@ -559,6 +580,55 @@ describe("arguments the handler checks itself", () => {
     const out = await harness().call("prime_radiant_search", { query: "   ", limit: 5 });
     expect(out.isError && out.error.code).toBe("BAD_ARGUMENT");
     expect(api).not.toHaveBeenCalled();
+  });
+});
+
+describe("prime_radiant_page_merge", () => {
+  const MERGE = { into: "entities/acme.md", from: ["entities/acme-widgets-gmbh.md", "concepts/acme-legacy.md"], confirm: true as const };
+
+  it("previews with dry_run, lets the body change only when asked, and says nothing was changed", async () => {
+    api.mockResolvedValue({ into: MERGE.into, from: MERGE.from, dryRun: true, commit: null, claims: [CLAIM], links: 0, relinked: [], unparsed: ["concepts/broken.md"], privacy: "confidential", reviewItems: 1 });
+    const out = await harness().call("prime_radiant_page_merge", { ...MERGE, dry_run: true, keep_into_body: false });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(call()[1]).toMatchObject({ method: "POST", body: { into: MERGE.into, from: MERGE.from, dry_run: true, keep_into_body: false } });
+    expect(JSON.parse(out.text)).toMatchObject({
+      result: expect.stringMatching(/^Dry run, nothing was changed\. Merging entities\/acme-widgets-gmbh\.md, concepts\/acme-legacy\.md into entities\/acme\.md: 1 claim\(s\) would move/),
+      claims: [CLAIM],
+      privacy_raised_to: "confidential",
+      not_relinked: ["concepts/broken.md"],
+      review_items_followed: 1,
+    });
+    // The default keeps the staying page's body: nothing extra is sent.
+    api.mockReset().mockResolvedValue({ into: MERGE.into, from: MERGE.from, dryRun: false, commit: SHA, claims: [] });
+    await harness().call("prime_radiant_page_merge", MERGE);
+    expect(call()[1].body).toEqual({ into: MERGE.into, from: MERGE.from });
+  });
+
+  it("refuses a page merged into itself, more than 20 pages or a path that is not one, sending nothing", async () => {
+    const out = await harness().call("prime_radiant_page_merge", { ...MERGE, from: [MERGE.into] });
+    expect(out.isError && out.error.code).toBe("BAD_ARGUMENT");
+    const shape = z.object(harness().get("prime_radiant_page_merge").shape);
+    expect(shape.safeParse({ ...MERGE, from: Array.from({ length: 21 }, (_, i) => `entities/p${i}.md`) }).success).toBe(false);
+    for (const p of ["../../system/power", "./x.md", "/concepts/x.md"]) {
+      expect(shape.safeParse({ ...MERGE, into: p }).success, p).toBe(false);
+      expect(shape.safeParse({ ...MERGE, from: [p] }).success, p).toBe(false);
+    }
+    expect(api).not.toHaveBeenCalled();
+  });
+
+  it("turns the merge's own refusals into what to do", async () => {
+    for (const [code, next] of [
+      ["deprecated", /page that replaced it/],
+      ["into_links", /keep_into_body: false/],
+      ["too_long", /merge fewer pages/],
+      ["too_many_claims", /delete a claim first/],
+      ["verified", /prime_radiant_review_raise/],
+    ] as const) {
+      refuse(409, code);
+      const out = await harness().call("prime_radiant_page_merge", MERGE);
+      expect(out.isError && out.error, code).toMatchObject({ code: "CONFLICT", message: `refused: ${code}`, next: expect.stringMatching(next) });
+    }
   });
 });
 

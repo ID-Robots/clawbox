@@ -1,5 +1,5 @@
 /**
- * The direct-edit routes (pages POST/PATCH/DELETE, claims POST/PATCH/DELETE,
+ * The direct-edit routes (pages POST/PATCH/DELETE, pages/merge, claims POST/PATCH/DELETE,
  * claims/verify) and the writes the assistant may now make (revert of its own
  * commits, review resolve, maintenance connect), over a real vault in a tmp
  * dir. Three callers: the owner's cookie, the MCP bearer (the assistant) and
@@ -29,7 +29,7 @@ const shard = vi.hoisted(() => ({
 vi.mock("@/lib/prime-radiant/shard-index", () => shard);
 
 import { POST as pagesPOST, GET as pagesGET } from "@/app/setup-api/prime-radiant/pages/route";
-import { DELETE as pageDELETE, GET as pageGET, PATCH as pagePATCH } from "@/app/setup-api/prime-radiant/pages/[...path]/route";
+import { DELETE as pageDELETE, GET as pageGET, PATCH as pagePATCH, POST as pagePOST } from "@/app/setup-api/prime-radiant/pages/[...path]/route";
 import { POST as claimsPOST } from "@/app/setup-api/prime-radiant/claims/route";
 import { DELETE as claimDELETE, PATCH as claimPATCH } from "@/app/setup-api/prime-radiant/claims/[...id]/route";
 import { POST as verifyPOST } from "@/app/setup-api/prime-radiant/claims/verify/route";
@@ -120,6 +120,7 @@ describe("who may write", () => {
       await pagesPOST(req("POST", "/pages", "assistant", NEW_PAGE)),
       await pagePATCH(req("PATCH", "/pages/concepts/pricing.md", "assistant", { title: "x" }), pathCtx("concepts/pricing.md")),
       await pageDELETE(req("DELETE", "/pages/concepts/pricing.md", "assistant"), pathCtx("concepts/pricing.md")),
+      await pagePOST(req("POST", "/pages/merge", "assistant", { into: "concepts/pricing.md", from: ["concepts/x.md"] }), pathCtx("merge")),
       await claimsPOST(req("POST", "/claims", "assistant", { page: "concepts/pricing.md", text: "x" })),
       await claimPATCH(req("PATCH", `/claims/${PRICE.id}`, "assistant", { text: "x" }), idCtx(PRICE.id)),
       await claimDELETE(req("DELETE", `/claims/${PRICE.id}`, "assistant"), idCtx(PRICE.id)),
@@ -138,6 +139,7 @@ describe("who may write", () => {
       await pagesPOST(req("POST", "/pages", "nobody", NEW_PAGE)),
       await pagePATCH(req("PATCH", "/pages/concepts/pricing.md", "nobody", { title: "x" }), pathCtx("concepts/pricing.md")),
       await pageDELETE(req("DELETE", "/pages/concepts/pricing.md", "nobody"), pathCtx("concepts/pricing.md")),
+      await pagePOST(req("POST", "/pages/merge", "nobody", { into: "concepts/pricing.md", from: ["concepts/x.md"] }), pathCtx("merge")),
       await claimsPOST(req("POST", "/claims", "nobody", { page: "concepts/pricing.md", text: "A fact." })),
       await claimDELETE(req("DELETE", `/claims/${PRICE.id}`, "nobody"), idCtx(PRICE.id)),
       await verifyPOST(req("POST", "/claims/verify", "nobody", { id: PRICE.id })),
@@ -266,6 +268,71 @@ describe("pages", () => {
     expect(log()[0]).toBe("ClawBox assistant|Prime Radiant|delete: concepts/pricing.md");
     const again = await pageDELETE(req("DELETE", "/pages/concepts/pricing.md", "assistant"), pathCtx("concepts/pricing.md"));
     expect(again.status).toBe(404);
+  });
+
+  it("merges a duplicate as the assistant through the bearer: a dry run first, then one commit it authors and may undo", async () => {
+    await ensureVault();
+    await seed();
+    const GREEN = claim("acme-sales/prices/green-widget", "The green widget costs 9 EUR.", { status: "proposed" });
+    await vaultOperation("seed: duplicate", async (tx) => {
+      await tx.write("concepts/prices.md", pageText({ title: "Widget prices", claims: [GREEN] }, "Widget prices in brief.\n"));
+      await tx.write("concepts/shipping.md", pageText({ title: "Shipping" }, "Shipping is priced as in [[concepts/prices|the list]].\n"));
+      await tx.write("index.md", "# Index\n\n- [[concepts/pricing]] — Widget pricing\n- [[concepts/prices]] — Widget prices\n- [[concepts/shipping]] — Shipping\n");
+    });
+    const before = { pricing: read("concepts/pricing.md"), prices: read("concepts/prices.md"), shipping: read("concepts/shipping.md"), index: read("index.md") };
+    const head = log()[0];
+    const merge = { into: "concepts/pricing.md", from: ["concepts/prices.md"] };
+
+    const dry = await pagePOST(req("POST", "/pages/merge", "assistant", { ...merge, dry_run: true }), pathCtx("merge"));
+    expect(dry.status).toBe(200);
+    expect(await dry.json()).toMatchObject({ dryRun: true, commit: null, claims: [GREEN.id], relinked: [{ path: "concepts/shipping.md", links: 1 }], links: 1, indexLines: 1 });
+    expect(log()[0]).toBe(head);
+
+    const res = await pagePOST(req("POST", "/pages/merge", "assistant", merge), pathCtx("merge"));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toMatchObject({ dryRun: false, claims: [GREEN.id], aliases: ["Widget prices"], findings: [] });
+    expect(log()[0]).toBe("ClawBox assistant|Prime Radiant|merge: concepts/prices.md -> concepts/pricing.md");
+    expect(fs.existsSync(path.join(vault, "concepts/prices.md"))).toBe(false);
+    expect(read("concepts/shipping.md")).toContain("[[concepts/pricing|the list]]");
+    expect(read("index.md")).toBe("# Index\n\n- [[concepts/pricing]] — Widget pricing\n- [[concepts/shipping]] — Shipping\n");
+    const merged = read("concepts/pricing.md");
+    expect(merged).toContain(GREEN.id);
+    expect(merged).toContain(VERIFIED.id);
+    // The page that stays keeps its body as it was.
+    expect(merged.slice(merged.indexOf("\n---\n"))).toBe(before.pricing.slice(before.pricing.indexOf("\n---\n")));
+
+    const undone = await revertPOST(req("POST", "/revert", "assistant", { commit: body.commit }));
+    expect(undone.status).toBe(200);
+    expect({ pricing: read("concepts/pricing.md"), prices: read("concepts/prices.md"), shipping: read("concepts/shipping.md"), index: read("index.md") }).toEqual(before);
+  });
+
+  it("refuses a merge strictly, answers 405 to a POST on a page, and leaves a page at merge.md to GET", async () => {
+    await ensureVault();
+    await seed();
+    await vaultOperation("seed: merge.md", async (tx) => tx.write("merge.md", pageText({ title: "Merge notes" }, "How the team merges.\n")));
+    const head = log()[0];
+    for (const [body, status, code] of [
+      [{ into: "concepts/pricing.md", from: ["concepts/pricing.md"] }, 400, "invalid"],
+      [{ into: "concepts/pricing.md", from: [] }, 400, "invalid"],
+      [{ into: "concepts/pricing.md", from: ["merge.md"], force: true }, 400, "invalid"],
+      [{ into: "concepts/pricing.md", from: ["concepts/nope.md"] }, 404, "not_found"],
+    ] as const) {
+      const res = await pagePOST(req("POST", "/pages/merge", "owner", body), pathCtx("merge"));
+      expect(res.status, JSON.stringify(body)).toBe(status);
+      expect((await res.json()).code).toBe(code);
+    }
+    await pagePATCH(req("PATCH", "/pages/concepts/pricing.md", "owner", { status: "deprecated" }), pathCtx("concepts/pricing.md"));
+    const deprecated = await pagePOST(req("POST", "/pages/merge", "owner", { into: "concepts/pricing.md", from: ["merge.md"] }), pathCtx("merge"));
+    expect(deprecated.status).toBe(409);
+    expect((await deprecated.json()).code).toBe("deprecated");
+    expect(log(2)[1]).toBe(head);
+
+    const onPage = await pagePOST(req("POST", "/pages/concepts/pricing.md", "owner", {}), pathCtx("concepts/pricing.md"));
+    expect(onPage.status).toBe(405);
+    const page = await pageGET(req("GET", "/pages/merge", "owner"), pathCtx("merge"));
+    expect(page.status).toBe(200);
+    expect((await page.json()).path).toBe("merge.md");
   });
 
   it("lists pages by owner", async () => {
