@@ -6,11 +6,15 @@
  *    carry different identifiers (waybills, invoices, transfers, dates), with
  *    the note "auto: different subjects (identifier filter)". Nothing else is
  *    closed. `dryRun: true` only counts.
+ *  - `reindex`: start a whole-vault search reindex (every page on `main`,
+ *    vectors at 1,024-d); 202 `{ started: true }`, `GET status` follows it
+ *    (`index.needsFullScan` clears when it finishes uncapped).
  *
  * OWNER ONLY, cookie AND same origin. 412 `not_initialised` before the vault
  * exists; 400 `invalid` for an unknown action.
  */
 import { vaultDir } from "@/lib/prime-radiant/paths";
+import { reindexPrimeRadiantVault, vaultIndexingAllowed } from "@/lib/prime-radiant/shard-index";
 import { rejudgeOpenContradictions } from "@/lib/prime-radiant/rejudge";
 import { fail, json, ownerWriteGuard, readJsonBody, vaultFailure } from "@/lib/prime-radiant/route-helpers";
 import { readVaultSnapshot, vaultInitialised } from "@/lib/prime-radiant/vault";
@@ -30,6 +34,11 @@ export async function POST(req: Request) {
       case "rejudge-reviews": {
         const vault = vaultDir();
         return json(rejudgeOpenContradictions(vault, await readVaultSnapshot(vault), { dryRun }));
+      }
+      case "reindex": {
+        if (!(await vaultIndexingAllowed())) return fail("shard_off", "Switch Memory Shard on to index the vault.", 409);
+        void reindexPrimeRadiantVault().catch((err) => console.warn(`[prime-radiant] full reindex did not finish: ${err instanceof Error ? err.message : err}`));
+        return json({ started: true }, 202);
       }
       default:
         return fail("invalid", "Unknown action.", 400);

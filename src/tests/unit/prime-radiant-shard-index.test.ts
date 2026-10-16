@@ -403,3 +403,16 @@ describe("the incremental reindex hook", () => {
     expect(runs.reduce((s, r) => s + r!.indexed, 0)).toBe(2);
   });
 });
+
+describe("vault vector width", () => {
+  it("cuts a wide vector to 1,024-d and normalises it again; keeps a narrow one", async () => {
+    const { truncateVector, VAULT_INDEX_DIMS, vaultMaxChunks } = await import("@/lib/prime-radiant/shard-index");
+    const wide = new Float32Array(3072).fill(1 / Math.sqrt(3072));
+    const cut = truncateVector(wide);
+    expect(cut.length).toBe(VAULT_INDEX_DIMS);
+    expect(cut.reduce((s, x) => s + x * x, 0)).toBeCloseTo(1, 5);
+    const narrow = new Float32Array(384).fill(0.1);
+    expect(truncateVector(narrow)).toBe(narrow);
+    expect(vaultMaxChunks(3072)).toBeGreaterThanOrEqual(25_000);
+  });
+});

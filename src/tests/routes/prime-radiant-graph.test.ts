@@ -102,8 +102,8 @@ describe("GET /setup-api/prime-radiant/graph", () => {
     expect(ids.sort()).toEqual(["concepts/holidays.md", "concepts/pricing.md", "concepts/support.md", "entities/acme-widgets.md"]);
     const at = (id: string) => graph.nodes.findIndex((x) => x.id === id);
     const widgets = graph.nodes[at("entities/acme-widgets.md")];
-    expect(widgets).toEqual({ id: "entities/acme-widgets.md", title: "Acme Widgets Ltd", domain: "acme-sales", degree: 2, sources: 2 });
-    expect(graph.nodes[at("concepts/holidays.md")]).toMatchObject({ degree: 0, sources: 0, domain: "acme-support" });
+    expect(widgets).toEqual({ id: "entities/acme-widgets.md", title: "Acme Widgets Ltd", domain: "acme-sales", degree: 2, links: 2, sources: 2 });
+    expect(graph.nodes[at("concepts/holidays.md")]).toMatchObject({ links: 0, sources: 0, domain: "acme-support" });
 
     // Every edge is [a, b, w] with a < b, indexes into nodes, one per pair.
     for (const [a, b, w] of graph.edges) {
@@ -117,7 +117,7 @@ describe("GET /setup-api/prime-radiant/graph", () => {
     expect(edge("entities/acme-widgets.md", "concepts/support.md")?.[2]).toBe(1);
     // Holidays links nowhere: a related hint to its domain's other page, not counted as a connection.
     expect(edge("concepts/holidays.md", "concepts/support.md")?.[2]).toBe(RELATED_WEIGHT);
-    expect(graph.nodes[at("concepts/holidays.md")].degree).toBe(0);
+    expect(graph.nodes[at("concepts/holidays.md")].links).toBe(0);
     expect(graph.edges).toHaveLength(3);
     expect(edge("concepts/holidays.md", "concepts/pricing.md")).toBeUndefined();
   });
@@ -142,8 +142,9 @@ describe("GET /setup-api/prime-radiant/graph", () => {
       touched.add(a).add(b);
     }
     expect(touched.size).toBe(48);
-    // Still no links: every page stays an orphan and a node of degree 0.
-    expect(graph.nodes.every((x) => x.degree === 0)).toBe(true);
+    // Still no links: every page has no link, but its hints count in its degree.
+    expect(graph.nodes.every((x) => x.links === 0)).toBe(true);
+    expect(graph.nodes.every((x) => x.degree > 0)).toBe(true);
   });
 
   it("ties unlinked pages that share a tag or a claim's subject, across domains", async () => {
@@ -235,7 +236,7 @@ describe("buildVaultGraph", () => {
 
   it("titles a page without a valid title by its file name, and keeps a missing domain as null", () => {
     const graph = buildVaultGraph([page("concepts/widget-sizes.md", { domain: null })], null);
-    expect(graph.nodes[0]).toEqual({ id: "concepts/widget-sizes.md", title: "widget-sizes", domain: null, degree: 0, sources: 0 });
+    expect(graph.nodes[0]).toEqual({ id: "concepts/widget-sizes.md", title: "widget-sizes", domain: null, degree: 0, links: 0, sources: 0 });
   });
 
   it("ties the pages no link reaches: a shared topic first, else neighbours in their own domain", () => {
@@ -260,8 +261,9 @@ describe("buildVaultGraph", () => {
     // Pages with no domain and no topic have nothing to go by.
     expect(graph.edges.some(([a, b]) => a >= 5 || b >= 5)).toBe(false);
     expect(graph.edges).toHaveLength(5);
-    // Hints are not connections.
-    expect(graph.nodes.map((x) => x.degree)).toEqual([0, 0, 0, 1, 1, 0, 0]);
+    // Hints are not links, but they are edges of the node.
+    expect(graph.nodes.map((x) => x.links)).toEqual([0, 0, 0, 1, 1, 0, 0]);
+    expect(graph.nodes.map((x) => x.degree)).toEqual([3, 2, 1, 3, 1, 0, 0]);
   });
 
   it("keeps related hints to a ring, a few per page, however many pages share a topic", () => {
