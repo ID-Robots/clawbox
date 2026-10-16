@@ -137,7 +137,7 @@ chat=$(cd "$REPO" && USER_COOKIE="$USER_COOKIE" USER_NAME="$USER_NAME" timeout 3
   const mine = "agent:main:clawbox-user-" + process.env.USER_NAME;
   let main = "", foreign = 0, done = false;
   const finish = (line) => { if (done) return; done = true; out(line); if (main) out(foreign === 0 ? "ok - no frame of another session reached the user" : "not ok - " + foreign + " frame(s) of another session reached the user"); ws.close(); setTimeout(() => process.exit(0), 200); };
-  setTimeout(() => finish("not ok - no answer to the user’s turn within 240 s"), 240000);
+  setTimeout(() => finish("not ok - no answer to the user\u2019s turn within 240 s"), 240000);
   ws.on("error", (e) => finish("not ok - the chat socket failed: " + e.message));
   ws.on("message", (raw) => {
     const f = JSON.parse(String(raw));
@@ -148,22 +148,22 @@ chat=$(cd "$REPO" && USER_COOKIE="$USER_COOKIE" USER_NAME="$USER_NAME" timeout 3
     if (f.type === "event") {
       const key = f.payload && f.payload.sessionKey;
       if (key && key.toLowerCase() !== mine) foreign++;
-      if (f.event === "chat" && key && key.toLowerCase() === mine && f.payload.state === "final") finish("ok - a real turn on the user’s own key was answered");
+      if (f.event === "chat" && key && key.toLowerCase() === mine && f.payload.state === "final") finish("ok - a real turn on the user\u2019s own key was answered");
       return;
     }
     if (f.id === "c") {
       main = f.ok && f.payload && f.payload.snapshot && f.payload.snapshot.sessionDefaults && f.payload.snapshot.sessionDefaults.mainSessionKey;
-      out(main === mine ? "ok - the hello names the user’s own main key" : "not ok - the hello named " + main);
-      out(f.payload && f.payload.auth ? "not ok - the hello carried the relay’s device token" : "ok - the hello carries no device token");
+      out(main === mine ? "ok - the hello names the user\u2019s own main key" : "not ok - the hello named " + main);
+      out(f.payload && f.payload.auth ? "not ok - the hello carried the relay\u2019s device token" : "ok - the hello carries no device token");
       ws.send(JSON.stringify({ type: "req", id: "peek", method: "chat.history", params: { sessionKey: "agent:main:main", limit: 5 } }));
       return;
     }
     if (f.id === "peek") {
-      out(!f.ok && f.error && f.error.code === "FORBIDDEN" ? "ok - the owner’s history is refused to the user" : "not ok - the owner’s history answered the user");
+      out(!f.ok && f.error && f.error.code === "FORBIDDEN" ? "ok - the owner\u2019s history is refused to the user" : "not ok - the owner\u2019s history answered the user");
       ws.send(JSON.stringify({ type: "req", id: "send", method: "chat.send", params: { sessionKey: mine, message: "Reply with exactly this text and nothing else: NANO-USER-OK", deliver: false, idempotencyKey: "nano-user-" + Date.now() } }));
       return;
     }
-    if (f.id === "send" && !f.ok) finish("not ok - the user’s turn was refused: " + JSON.stringify(f.error));
+    if (f.id === "send" && !f.ok) finish("not ok - the user\u2019s turn was refused: " + JSON.stringify(f.error));
   });
 '"'"' 2>&1)
 printf "%s\n" "$chat" | grep "^RESULT " || say "not ok - the chat check printed nothing: $(printf "%s" "$chat" | tail -n 3 | tr "\n" " ")"

@@ -190,21 +190,21 @@ function filterGatewayFrame(state, frame) {
     }
     return { toClient: frame };
   }
-  if (frame.type === "event" && typeof frame.event === "string") {
-    if (frame.event === "connect.challenge") return { toClient: frame };
-    const payload = isRecord(frame.payload) ? frame.payload : {};
-    if (frame.event === "question.resolved") {
-      // `{id, status, answers}` and no key: the id is the filter.
-      return typeof payload.id === "string" && state.questions.has(payload.id) ? { toClient: frame } : {};
-    }
-    const fields = KEYED_EVENTS[frame.event];
-    if (!fields) return {};
-    const mine = fields.some((field) => userMayUseKey(state.username, payload[field]));
-    if (!mine) return {};
-    if (frame.event === "question.requested" && typeof payload.id === "string") state.questions.add(payload.id);
-    return { toClient: frame };
+  // A type test, written as a refusal: harness-contract reads `.event === "<literal>"`
+  // as an event name, so the positive form would claim an event called "string".
+  if (frame.type !== "event" || typeof frame.event !== "string") return {};
+  if (frame.event === "connect.challenge") return { toClient: frame };
+  const payload = isRecord(frame.payload) ? frame.payload : {};
+  if (frame.event === "question.resolved") {
+    // `{id, status, answers}` and no key: the id is the filter.
+    return typeof payload.id === "string" && state.questions.has(payload.id) ? { toClient: frame } : {};
   }
-  return {};
+  const fields = KEYED_EVENTS[frame.event];
+  if (!fields) return {};
+  const mine = fields.some((field) => userMayUseKey(state.username, payload[field]));
+  if (!mine) return {};
+  if (frame.event === "question.requested" && typeof payload.id === "string") state.questions.add(payload.id);
+  return { toClient: frame };
 }
 
 // ── The relay's device identity ─────────────────────────────────────────────
