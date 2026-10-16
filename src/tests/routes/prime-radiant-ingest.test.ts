@@ -14,7 +14,7 @@ import { NextResponse } from "next/server";
 
 const auth = vi.hoisted(() => ({ requireSession: vi.fn() }));
 vi.mock("@/lib/route-auth", () => auth);
-const owner = vi.hoisted(() => ({ hasOwnerSession: vi.fn(async () => true) }));
+const owner = vi.hoisted(() => ({ hasPersonSession: vi.fn(async () => true) }));
 vi.mock("@/lib/owner-session", () => owner);
 const creds = vi.hoisted(() => ({
   resolveClawaiToken: vi.fn(async (): Promise<string | null> => null),
@@ -111,7 +111,7 @@ async function readSse(res: Response): Promise<Array<{ event: string; data: unkn
 
 beforeEach(() => {
   auth.requireSession.mockReset().mockResolvedValue(null);
-  owner.hasOwnerSession.mockReset().mockResolvedValue(true);
+  owner.hasPersonSession.mockReset().mockResolvedValue(true);
   creds.resolveClawaiToken.mockReset().mockResolvedValue(null);
   setFlashClientOverride(client);
   delayMs = 0;
@@ -151,8 +151,8 @@ describe("auth", () => {
     expect(fs.existsSync(process.env.PRIME_RADIANT_DIR!)).toBe(false);
   });
 
-  it("refuses a caller with neither the owner's cookie nor the assistant's bearer on the writes", async () => {
-    owner.hasOwnerSession.mockResolvedValue(false);
+  it("refuses a caller with neither a person's cookie nor the assistant's bearer on the writes", async () => {
+    owner.hasPersonSession.mockResolvedValue(false);
     for (const res of [await ingest({ folders: ["Documents"] }), await upload("a.md", "x")]) {
       expect(res.status).toBe(403);
       expect((await res.json()).code).toBe("owner_only");
@@ -160,7 +160,7 @@ describe("auth", () => {
   });
 
   it("admits the assistant's bearer to start an ingest, but keeps the drop the owner's", async () => {
-    owner.hasOwnerSession.mockResolvedValue(false);
+    owner.hasPersonSession.mockResolvedValue(false);
     const drop = await uploadPOST(post(`${API}/ingest/upload?name=a.md`, "x", { ...ASSISTANT, "content-length": "1" }));
     expect(drop.status).toBe(403);
     expect((await drop.json()).code).toBe("owner_only");
@@ -347,7 +347,7 @@ describe("drop: upload then ingest", () => {
 
 describe("named files: ingested as one staged batch", () => {
   it("stages the files the assistant names, ingests them like a drop, and removes the staging", async () => {
-    owner.hasOwnerSession.mockResolvedValue(false);
+    owner.hasPersonSession.mockResolvedValue(false);
     const res = await ingest({ files: ["Documents/acme/catalogue.md", path.join(filesRoot, "Documents", "acme", "support.txt"), "Documents/acme/catalogue.md"] }, ASSISTANT);
     expect(res.status).toBe(202);
     const { job } = await res.json();
@@ -406,7 +406,7 @@ describe("one job: read, stop, retry its dead letters", () => {
   it("DELETE stops a running job (202), then answers 409 not_running; the owner's page only", async () => {
     delayMs = 300;
     const { job } = await (await ingest({ folders: ["Documents"] })).json();
-    owner.hasOwnerSession.mockResolvedValueOnce(false);
+    owner.hasPersonSession.mockResolvedValueOnce(false);
     expect((await jobStop(job.id)).status).toBe(403);
     expect((await jobStop(job.id, { origin: "https://evil.example.com" })).status).toBe(403);
     const res = await jobStop(job.id);
@@ -426,7 +426,7 @@ describe("one job: read, stop, retry its dead letters", () => {
     const { job } = await (await ingest({ folders: ["Documents"] })).json();
     await ingestFinished(job.id);
     failing = false;
-    owner.hasOwnerSession.mockResolvedValueOnce(false);
+    owner.hasPersonSession.mockResolvedValueOnce(false);
     expect((await retry(job.id)).status).toBe(403);
 
     const res = await retry(job.id);
@@ -495,7 +495,7 @@ describe("POST ingest/preview", () => {
     expect((await (await preview({ folders: ["pr/vault"] })).json()).code).toBe("folder_refused");
     const cross = await preview({ folders: ["Documents"] }, { origin: "https://evil.example" });
     expect(cross.status).toBe(403);
-    owner.hasOwnerSession.mockResolvedValue(false);
+    owner.hasPersonSession.mockResolvedValue(false);
     const bearer = await preview({ folders: ["Documents"] });
     expect(bearer.status).toBe(403);
     expect((await bearer.json()).code).toBe("owner_only");

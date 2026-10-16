@@ -26,7 +26,7 @@ const { getMock, setMock, x64InstallMock, readlinkMock } = vi.hoisted(() => ({
   readlinkMock: vi.fn(async () => "/usr/share/zoneinfo/Europe/Sofia"),
 }));
 
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: vi.fn(async () => true) }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: vi.fn(async () => true) }));
 vi.mock("@/lib/same-origin", () => ({ isSameOriginRequest: vi.fn(() => true) }));
 vi.mock("@/lib/root-step-runner", () => ({ startRootStep: vi.fn(async () => {}) }));
 vi.mock("@/lib/config-store", () => ({ get: getMock, set: setMock }));

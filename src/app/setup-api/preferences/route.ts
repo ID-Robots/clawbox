@@ -15,7 +15,6 @@ import {
 } from "@/lib/language-persona";
 import { logSafe } from "@/lib/log-safe";
 import { requireSession } from "@/lib/route-auth";
-import { NON_OWNER_READABLE_PREF_KEYS } from "@/lib/non-owner-scope";
 import { UI_LANGUAGE_READ } from "@/lib/ui-language-read";
 
 export const dynamic = "force-dynamic";
@@ -136,15 +135,10 @@ export async function GET(req: Request) {
   // Asked only for a read wider than the language, so the one request /login
   // makes never pays for a cookie verification; `requireSession` mirrors the
   // middleware's own order (bearer, cookie, test mode), so the MCP tool's
-  // `preferences_get` and the e2e harness keep the door they have.
-  //
-  // A ClawBox user other than the owner (TASK-1256) may read the few keys the
-  // desktop and their Terminal need, NON_OWNER_READABLE_PREF_KEYS — the same
-  // list middleware's allow-list admits them for — and nothing wider.
+  // `preferences_get` and the e2e harness keep the door they have. Every
+  // signed-in ClawBox user reads them: they get the owner's desktop.
   if (!isAnonymousReadable(allParam, keysParam)) {
-    const nonOwnerReadable = !allParam && typeof keysParam === "string" && keysParam.length > 0
-      && keysParam.split(",").every((k) => NON_OWNER_READABLE_PREF_KEYS.has(k.trim()));
-    const denied = await requireSession(req, { allowNonOwner: nonOwnerReadable });
+    const denied = await requireSession(req);
     if (denied) return denied;
   }
 
@@ -216,9 +210,9 @@ export async function POST(req: Request) {
     // that suite expects; it is not a per-request saving — a module import is
     // paid once per process either way.
     const writesInstalled = Object.keys(body).some((key) => key.startsWith(OWNER_ONLY_WRITE_PREFIX));
-    if (writesInstalled && !(await (await import("@/lib/owner-session")).hasOwnerSession(req))) {
+    if (writesInstalled && !(await (await import("@/lib/owner-session")).hasPersonSession(req))) {
       return NextResponse.json(
-        { error: "Installed apps can only be changed from the owner's own session", code: "owner_only" },
+        { error: "Installed apps can only be changed from a signed-in person's own session", code: "owner_only" },
         { status: 403 },
       );
     }

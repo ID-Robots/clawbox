@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { DEFAULT_MEMORY_SCHEDULE, writeMemorySchedule } from "@/lib/clawkeep-memory";
 import { refresh as refreshMemoryScheduler } from "@/lib/clawkeep-memory-scheduler";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { setMemoryShardEnabled, setMemoryShardSetupComplete } from "@/lib/memory-shard";
 
 export const dynamic = "force-dynamic";
@@ -21,7 +21,7 @@ export const dynamic = "force-dynamic";
  * owner's onboarding.
  */
 export async function POST(request: Request) {
-  if (!(await hasOwnerSession(request))) {
+  if (!(await hasPersonSession(request))) {
     return NextResponse.json(
       { error: "Resetting Memory Shard needs a signed-in browser session.", kind: "owner_only" },
       { status: 403 },

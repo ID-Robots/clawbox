@@ -9,6 +9,7 @@ import { NextRequest } from "next/server";
 const ownerSession = vi.fn<() => Promise<boolean>>();
 vi.mock("@/lib/owner-session", () => ({
   hasOwnerSession: () => ownerSession(),
+  personSession: async () => null,
 }));
 
 vi.mock("fs/promises", () => ({

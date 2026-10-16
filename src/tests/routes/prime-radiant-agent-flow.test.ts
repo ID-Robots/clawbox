@@ -11,7 +11,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const auth = vi.hoisted(() => ({ requireSession: vi.fn(async () => null) }));
 vi.mock("@/lib/route-auth", () => auth);
-const owner = vi.hoisted(() => ({ hasOwnerSession: vi.fn(async () => false) }));
+const owner = vi.hoisted(() => ({ hasPersonSession: vi.fn(async () => false) }));
 vi.mock("@/lib/owner-session", () => owner);
 const bearer = vi.hoisted(() => ({ verifyMcpBearer: vi.fn((h: string | null) => h === "Bearer test-assistant-bearer") }));
 vi.mock("@/lib/mcp-token", () => bearer);

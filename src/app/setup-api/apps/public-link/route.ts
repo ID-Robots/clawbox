@@ -15,19 +15,38 @@ export const dynamic = "force-dynamic";
  *                             or remove it (null); the link stays the same
  *   DELETE {appId}            disable — immediate
  *
- * The OWNER'S SESSION COOKIE, and only that. Middleware would let the MCP
+ * A PERSON'S SESSION COOKIE, and only that: the owner's or any other ClawBox
+ * user's, who all get the owner's desktop. Middleware would let the MCP
  * bearer reach any /setup-api route, but that bearer is the agent, and
  * putting something on the public internet is a decision the agent must not
- * be able to take for the owner (the same line email/pending and
- * coding-agent/enable draw). A ClawBox user who is not the owner is refused
- * too. The e2e-install harness's test mode is the one documented exception.
+ * be able to take for a person (the same line email/pending and
+ * coding-agent/enable draw). The e2e-install harness's test mode is the one
+ * documented exception.
+ *
+ * A link's URL carries its access token (`?k=…`), and a token is a secret the
+ * owner alone sees in clear: everyone else is answered the URL with the token
+ * masked (`tokenMasked: true`).
  */
-async function ownerOnly(request: Request): Promise<NextResponse | null> {
-  if (process.env.CLAWBOX_TEST_MODE === "1") return null;
+async function personOnly(request: Request): Promise<{ denied: NextResponse } | { owner: boolean }> {
+  if (process.env.CLAWBOX_TEST_MODE === "1") return { owner: true };
   const identity = await sessionIdentity(request);
-  if (identity?.isOwner) return null;
-  if (identity) return NextResponse.json({ error: "Only the box owner can do this.", code: "owner_only" }, { status: 403 });
-  return NextResponse.json({ error: "Sign in as the owner to manage public links.", code: "owner_session_required" }, { status: 401 });
+  if (identity) return { owner: identity.isOwner };
+  return { denied: NextResponse.json({ error: "Sign in to manage public links.", code: "owner_session_required" }, { status: 401 }) };
+}
+
+const MASK = "••••••••";
+
+/** A link URL with its access token masked, for anyone but the owner. */
+function maskLinkUrl(url: unknown): unknown {
+  if (typeof url !== "string" || !url) return url;
+  return url.replace(/([?&]k=)[^&#]*/g, `$1${MASK}`);
+}
+
+function forViewer<T>(owner: boolean, link: T): T {
+  if (owner || !link || typeof link !== "object") return link;
+  const record = link as Record<string, unknown>;
+  if (typeof record.url !== "string" || !record.url) return link;
+  return { ...record, url: maskLinkUrl(record.url), tokenMasked: true } as T;
 }
 
 function failure(err: unknown): NextResponse {
@@ -39,18 +58,19 @@ function failure(err: unknown): NextResponse {
 const NO_STORE = { "cache-control": "no-store" };
 
 export async function GET(request: Request) {
-  const denied = await ownerOnly(request);
-  if (denied) return denied;
+  const who = await personOnly(request);
+  if ("denied" in who) return who.denied;
   try {
-    return NextResponse.json({ links: await listPublicLinks() }, { headers: NO_STORE });
+    const links = await listPublicLinks();
+    return NextResponse.json({ links: links.map((link) => forViewer(who.owner, link)) }, { headers: NO_STORE });
   } catch (err) {
     return failure(err);
   }
 }
 
 export async function POST(request: Request) {
-  const denied = await ownerOnly(request);
-  if (denied) return denied;
+  const who = await personOnly(request);
+  if ("denied" in who) return who.denied;
   let body: Record<string, unknown>;
   try {
     const parsed: unknown = await request.json();
@@ -61,15 +81,15 @@ export async function POST(request: Request) {
   }
   try {
     const link = await createPublicLink({ appId: body.appId, mode: body.mode, ttlMinutes: body.ttlMinutes, apiAllow: body.apiAllow, password: body.password });
-    return NextResponse.json({ link }, { status: 201, headers: NO_STORE });
+    return NextResponse.json({ link: forViewer(who.owner, link) }, { status: 201, headers: NO_STORE });
   } catch (err) {
     return failure(err);
   }
 }
 
 export async function PATCH(request: Request) {
-  const denied = await ownerOnly(request);
-  if (denied) return denied;
+  const who = await personOnly(request);
+  if ("denied" in who) return who.denied;
   let body: Record<string, unknown>;
   try {
     const parsed: unknown = await request.json();
@@ -91,8 +111,8 @@ export async function PATCH(request: Request) {
 }
 
 export async function DELETE(request: Request) {
-  const denied = await ownerOnly(request);
-  if (denied) return denied;
+  const who = await personOnly(request);
+  if ("denied" in who) return who.denied;
   let appId: unknown;
   try {
     appId = ((await request.json()) as { appId?: unknown })?.appId;

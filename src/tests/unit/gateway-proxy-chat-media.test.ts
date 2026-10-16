@@ -7,8 +7,10 @@ import { NextRequest } from "next/server";
 // with its bearer, which the browser never holds, so every download through the
 // /api proxy came back 401 — and the proxy dropped Content-Length besides.
 const ownerSession = vi.fn<() => Promise<boolean>>();
+const person = vi.fn<() => Promise<{ username: string; isOwner: boolean } | null>>();
 vi.mock("@/lib/owner-session", () => ({
   hasOwnerSession: () => ownerSession(),
+  personSession: () => person(),
 }));
 
 vi.mock("fs/promises", () => ({
@@ -54,6 +56,7 @@ describe("proxyGatewayRequest — chat media the agent sends", () => {
     vi.resetModules();
     vi.clearAllMocks();
     ownerSession.mockResolvedValue(true);
+    person.mockResolvedValue(null);
     mockFs.readFile.mockResolvedValue(JSON.stringify({
       gateway: { auth: { token: "gateway-secret-token" } },
     }));
@@ -116,6 +119,24 @@ describe("proxyGatewayRequest — chat media the agent sends", () => {
     expect(init.headers.get("authorization")).toBeNull();
     expect(mockFs.readFile).not.toHaveBeenCalled();
     expect(res.status).toBe(401);
+  });
+
+  it("sends the bearer to another ClawBox user only for the media of THEIR OWN chat", async () => {
+    ownerSession.mockResolvedValue(false);
+    person.mockResolvedValue({ username: "alice", isOwner: false });
+    const own = `/api/chat/media/outgoing/${encodeURIComponent("agent:main:clawbox-user-alice")}/7c9e6679-7425-40de-944b-e07fc1f90ae7/full`;
+    await gatewayProxy.proxyGatewayRequest(request(own));
+    expect(upstreamCall().init.headers.get("authorization")).toBe("Bearer gateway-secret-token");
+
+    mockFetch.mockClear();
+    // The owner's conversation's file is not hers to fetch.
+    await gatewayProxy.proxyGatewayRequest(request(MEDIA_PATH));
+    expect(upstreamCall().init.headers.get("authorization")).toBeNull();
+
+    mockFetch.mockClear();
+    const bobs = `/api/chat/media/outgoing/${encodeURIComponent("agent:main:clawbox-user-bob")}/7c9e6679-7425-40de-944b-e07fc1f90ae7/full`;
+    await gatewayProxy.proxyGatewayRequest(request(bobs));
+    expect(upstreamCall().init.headers.get("authorization")).toBeNull();
   });
 
   it("does not pass on a bearer the browser chose for the media path", async () => {

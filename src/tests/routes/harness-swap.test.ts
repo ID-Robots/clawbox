@@ -63,7 +63,7 @@ const h = vi.hoisted(() => ({
   execCalls: [] as string[][],
 }));
 
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: h.owner }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: h.owner }));
 vi.mock("@/lib/same-origin", () => ({ isSameOriginRequest: h.sameOrigin }));
 vi.mock("@/lib/root-step-follow", async (orig) => ({
   ...(await orig<typeof import("@/lib/root-step-follow")>()),

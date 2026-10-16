@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { getActiveHarness } from "@/lib/harness";
 import { UNKNOWN_FACTS, capabilitiesFor } from "@/lib/harness/capabilities";
 import { clearTranscript, readTranscript, type TranscriptRecord } from "@/lib/harness/transcript-store";
-import { DESKTOP_TRANSCRIPT_KEY, transcriptKeyIsSafe } from "@/lib/harness/transcript-key";
+import { transcriptKeyFor } from "@/lib/chat-scope-server";
 
 export const dynamic = "force-dynamic";
 
@@ -58,14 +58,19 @@ const WRONG_STORE = {
 const BAD_KEY = { error: "Invalid session key" } as const;
 
 /**
- * Which conversation: the desktop thread unless the caller names one of the
- * tabs opened beside it. A key that is not a bare filename is refused before
- * it can become one — see `transcriptKeyIsSafe`. Null means refused.
+ * Which conversation: the caller's own main thread unless they name one of the
+ * tabs opened beside it — and only ever one of THEIRS (src/lib/chat-scope.ts):
+ * every ClawBox user has their own chat. A key that is not a bare filename is
+ * refused before it can become one — see `transcriptKeyIsSafe`.
  */
-function sessionKeyOf(req: NextRequest): string | null {
-  const raw = req.nextUrl.searchParams.get("sessionKey");
-  if (!raw) return DESKTOP_TRANSCRIPT_KEY;
-  return transcriptKeyIsSafe(raw) ? raw : null;
+async function sessionKeyOf(req: NextRequest): Promise<{ key: string } | { refusal: NextResponse }> {
+  const verdict = await transcriptKeyFor(req, req.nextUrl.searchParams.get("sessionKey"));
+  if (verdict.ok) return { key: verdict.key };
+  return {
+    refusal: verdict.status === 400
+      ? NextResponse.json(BAD_KEY, { status: 400 })
+      : NextResponse.json({ error: verdict.error, code: verdict.code }, { status: 403 }),
+  };
 }
 
 /** One stored record as the chat surface's own message shape. */
@@ -96,8 +101,9 @@ export async function GET(req: NextRequest) {
   if (!(await transcriptLivesHere())) {
     return NextResponse.json(WRONG_STORE, { status: 409 });
   }
-  const key = sessionKeyOf(req);
-  if (!key) return NextResponse.json(BAD_KEY, { status: 400 });
+  const which = await sessionKeyOf(req);
+  if ("refusal" in which) return which.refusal;
+  const { key } = which;
   const raw = Number(req.nextUrl.searchParams.get("limit"));
   // A missing or nonsensical limit is the default, not a 400: the caller asked
   // for the conversation, and there is a right answer to give them.
@@ -116,8 +122,9 @@ export async function DELETE(req: NextRequest) {
   if (!(await transcriptLivesHere())) {
     return NextResponse.json(WRONG_STORE, { status: 409 });
   }
-  const key = sessionKeyOf(req);
-  if (!key) return NextResponse.json(BAD_KEY, { status: 400 });
+  const which = await sessionKeyOf(req);
+  if ("refusal" in which) return which.refusal;
+  const { key } = which;
   try {
     await clearTranscript(key);
   } catch (err) {

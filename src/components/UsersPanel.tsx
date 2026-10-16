@@ -1,10 +1,14 @@
 "use client";
 
-// Settings → Users (TASK-1256, multi-user ClawBox OS). The owner lists,
-// creates and removes the box's other users; every one of them is a real
-// Linux account with its own password (src/lib/clawbox-users.ts). The route
-// behind this panel answers the owner's cookie alone, so the panel only ever
-// renders for the owner — it still says so plainly if the route refuses.
+// Settings → Users (multi-user ClawBox OS). Every signed-in person lists,
+// creates and removes the box's users here; every one of them is a real Linux
+// account with its own password (src/lib/clawbox-users.ts). The owner's own
+// account and the one you are signed in as cannot be removed.
+//
+// A failure says WHY: each route code has its own translated sentence, the
+// box's own reason (the root step's "Error:" line) is shown under it, and a
+// box whose system side is older than this build is given the one command
+// that repairs it — never a bare "try again".
 
 import { useCallback, useEffect, useState } from "react";
 import StatusMessage from "./StatusMessage";
@@ -15,12 +19,21 @@ interface UsersListing {
   owner: { username: string };
   users: Array<{ username: string; createdAt: string }>;
   currentUser: string;
+  /** Whether a second user could sign in right now; the repair when not. */
+  signIn: { available: boolean; repairCommand?: string };
 }
 
 // Messages are kept as catalogue KEYS and translated when drawn, so nothing
 // here depends on `t`: the list is fetched once, and a language switch
 // re-words what is on screen instead of re-fetching it.
-type Message = { key: string; params?: Record<string, string | number> };
+type Message = {
+  key: string;
+  params?: Record<string, string | number>;
+  /** The box's own reason, shown as it said it (system output is not translated). */
+  detail?: string;
+  /** A Terminal command that repairs the failure, shown to copy. */
+  command?: string;
+};
 type Notice = ({ type: "success" | "error" } & Message) | null;
 
 const ERROR_KEYS: Record<string, string> = {
@@ -28,18 +41,34 @@ const ERROR_KEYS: Record<string, string> = {
   reserved_username: "users.errReserved",
   user_exists: "users.errExists",
   invalid_password: "users.errPassword",
-  account_check_failed: "users.errCreateFailed",
+  password_rejected: "users.errPasswordRejected",
+  account_check_failed: "users.errAccountCheck",
+  root_step_unavailable: "users.errNeedsRepair",
+  create_timeout: "users.errCreateTimeout",
   create_failed: "users.errCreateFailed",
+  remove_timeout: "users.errRemoveTimeout",
   remove_failed: "users.errRemoveFailed",
-  not_found: "users.errRemoveFailed",
+  not_found: "users.errNotFound",
   cannot_remove_owner: "users.errCannotRemove",
   cannot_remove_self: "users.errCannotRemove",
   owner_only: "users.errOwnerOnly",
+  internal: "users.errInternal",
 };
 
 /** The catalogue key for a route's refusal code, or the fallback key. */
 function errorKey(code: unknown, fallback: string): string {
   return (typeof code === "string" && ERROR_KEYS[code]) || fallback;
+}
+
+const DETAIL_MAX = 300;
+
+/** A route's refusal as a message: its sentence, and what the box said and how to repair it when it said so. */
+function refusalMessage(data: unknown, fallback: string): Message {
+  const d = (typeof data === "object" && data !== null ? data : {}) as Record<string, unknown>;
+  const message: Message = { key: errorKey(d.code, fallback) };
+  if (typeof d.detail === "string" && d.detail.trim()) message.detail = d.detail.trim().slice(0, DETAIL_MAX);
+  if (typeof d.repairCommand === "string" && d.repairCommand.trim()) message.command = d.repairCommand.trim();
+  return message;
 }
 
 function parseListing(data: unknown): UsersListing | null {
@@ -53,7 +82,44 @@ function parseListing(data: unknown): UsersListing | null {
       createdAt: typeof u.createdAt === "string" ? u.createdAt : "",
     })),
     currentUser: typeof d.currentUser === "string" ? d.currentUser : d.owner.username,
+    signIn: d.signIn && typeof d.signIn === "object" && d.signIn.available === false
+      ? { available: false, ...(typeof d.signIn.repairCommand === "string" ? { repairCommand: d.signIn.repairCommand } : {}) }
+      : { available: true },
   };
+}
+
+/** A command to run once in the Terminal, selectable and copyable. */
+function RepairCommand({ command }: { command: string }) {
+  const { t } = useT();
+  const [copied, setCopied] = useState(false);
+  return (
+    <span className="mt-2 flex items-start gap-2">
+      <code className="flex-1 min-w-0 break-all select-all rounded-md bg-black/40 px-2 py-1.5 font-mono text-[11px] text-white/85" data-testid="users-repair-command">
+        {command}
+      </code>
+      <button
+        type="button"
+        onClick={() => {
+          void navigator.clipboard?.writeText(command).then(() => setCopied(true), () => setCopied(false));
+        }}
+        className="shrink-0 px-2 h-7 rounded-md text-[11px] text-white/80 bg-white/10 hover:bg-white/15 transition-colors cursor-pointer"
+      >
+        {copied ? t("users.copied") : t("users.copy")}
+      </button>
+    </span>
+  );
+}
+
+/** A message in the current language, with the box's own words and the repair under it. */
+function MessageBody({ text, message }: { text: string; message: Message }) {
+  const { t } = useT();
+  return (
+    <span className="block">
+      <span className="block">{text}</span>
+      {message.detail && <span className="block mt-1 text-[11px] opacity-80" data-testid="users-error-detail">{t("users.boxSaid", { reason: message.detail })}</span>}
+      {message.command && <RepairCommand command={message.command} />}
+    </span>
+  );
 }
 
 function Avatar({ name, owner }: { name: string; owner: boolean }) {
@@ -80,7 +146,7 @@ export default function UsersPanel() {
   const [confirm, setConfirm] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [formError, setFormError] = useState<string | null>(null);
+  const [formError, setFormError] = useState<Message | null>(null);
 
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [removing, setRemoving] = useState<string | null>(null);
@@ -143,7 +209,7 @@ export default function UsersPanel() {
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) {
-        setFormError(errorKey(data?.code, "users.errCreateFailed"));
+        setFormError(refusalMessage(data, "users.errCreateFailed"));
         return;
       }
       const parsed = parseListing(data);
@@ -155,7 +221,7 @@ export default function UsersPanel() {
       setConfirm("");
       setShowPassword(false);
     } catch {
-      setFormError("users.errCreateFailed");
+      setFormError({ key: "users.errCreateFailed" });
     } finally {
       setCreating(false);
     }
@@ -172,7 +238,7 @@ export default function UsersPanel() {
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) {
-        setNotice({ type: "error", key: errorKey(data?.code, "users.errRemoveFailed") });
+        setNotice({ type: "error", ...refusalMessage(data, "users.errRemoveFailed") });
         await load();
         return;
       }
@@ -291,7 +357,19 @@ export default function UsersPanel() {
           </ul>
         )}
       </div>
-      {notice && <StatusMessage type={notice.type} message={say(notice.key, notice.params)} />}
+      {notice && (
+        notice.detail || notice.command
+          ? <StatusMessage type={notice.type} message={<MessageBody text={say(notice.key, notice.params)} message={notice} />} />
+          : <StatusMessage type={notice.type} message={say(notice.key, notice.params)} />
+      )}
+
+      {/* ── A box where other users cannot sign in yet ── */}
+      {listing && !listing.signIn.available && (
+        <div className="rounded-xl border border-amber-400/30 bg-amber-500/10 p-4 text-xs text-amber-100 leading-relaxed" role="status" data-testid="users-signin-unavailable">
+          <span className="block">{t("users.signInUnavailable")}</span>
+          {listing.signIn.repairCommand && <RepairCommand command={listing.signIn.repairCommand} />}
+        </div>
+      )}
 
       {/* ── Add a user ── */}
       {listing && (
@@ -360,7 +438,11 @@ export default function UsersPanel() {
             />
             {mismatch && <p id="users-new-confirm-error" className="text-[11px] mt-1 text-red-400">{t("users.errMismatch")}</p>}
           </div>
-          {formError && <StatusMessage type="error" message={say(formError)} />}
+          {formError && (
+            formError.detail || formError.command
+              ? <StatusMessage type="error" message={<MessageBody text={say(formError.key, formError.params)} message={formError} />} />
+              : <StatusMessage type="error" message={say(formError.key, formError.params)} />
+          )}
           <button
             type="submit"
             disabled={!canCreate}
@@ -376,6 +458,7 @@ export default function UsersPanel() {
       <div className="rounded-xl border border-white/10 p-4">
         <h4 className="text-xs font-semibold uppercase tracking-wider text-white/50">{t("users.scopeTitle")}</h4>
         <p className="text-xs text-white/60 mt-2 leading-relaxed">{t("users.scopeNote")}</p>
+        <p className="text-xs text-white/45 mt-2 leading-relaxed">{t("users.trustNote")}</p>
       </div>
     </div>
   );

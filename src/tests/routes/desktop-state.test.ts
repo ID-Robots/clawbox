@@ -100,7 +100,7 @@ describe("/setup-api/desktop/state", () => {
     auth.requireSession.mockResolvedValue(NextResponse.json({ error: "Authentication required" }, { status: 401 }));
     expect((await GET(new Request(URL_))).status).toBe(401);
     expect((await put({ state: ownerDesk })).status).toBe(401);
-    expect(auth.requireSession).toHaveBeenCalledWith(expect.any(Request), { allowNonOwner: true });
+    expect(auth.requireSession).toHaveBeenCalledWith(expect.any(Request));
   });
 
   it("refuses a write from another site", async () => {

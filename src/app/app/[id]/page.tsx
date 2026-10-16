@@ -6,7 +6,7 @@ import dynamic from "next/dynamic";
 import Image from "next/image";
 import Link from "next/link";
 import { resolveHarnessProbe } from "@/lib/harness-probe";
-import { mayUseOwnerApis } from "@/lib/use-session-user";
+import { mayUseOwnerApis, useSettledSessionUser } from "@/lib/use-session-user";
 import { useFollowSessionSwitch } from "@/lib/session-switch";
 import { customWallpaperId, customWallpaperIndex, wallpaperIdAfterDelete } from "@/lib/custom-wallpapers";
 import { isShowableCustomWallpaper, readWallpaperFile, useUndecodableImage } from "@/lib/wallpaper-image";
@@ -402,6 +402,9 @@ export default function StandaloneAppPage() {
   // The chat's fullscreen mode on a phone folds this page's title bar away
   // too; the chat then carries the link back to the desktop (TASK-1157).
   const [chatChromeHidden, setChatChromeHidden] = useState(false);
+  // The chat is the signed-in person's own (src/lib/chat-scope.ts): drawn
+  // once /users/me has said whose.
+  const chatUserState = useSettledSessionUser();
 
   useEffect(() => {
     const probe = new AbortController();
@@ -415,10 +418,8 @@ export default function StandaloneAppPage() {
     // window used to wear the wrong product for the life of the tab. The
     // desktop has always retried; this is the same helper, not a second copy.
     //
-    // Only for the owner (TASK-1256). The harness route is the owner's, and a
-    // non-owner's session — which reaches this page for /app/terminal alone —
-    // would be refused every retry of the probe. Their answer is "unknown",
-    // the fail-closed one, and the Terminal never waits on it.
+    // Once /users/me has answered: every signed-in ClawBox user gets the
+    // owner's apps on this page as on the desktop.
     void mayUseOwnerApis().then((may) => {
       if (probe.signal.aborted) return;
       if (!may) {
@@ -550,7 +551,9 @@ export default function StandaloneAppPage() {
     }
     switch (id) {
       case "clawbox":
-        return <ChatApp onPhoneChromeHiddenChange={setChatChromeHidden} />;
+        return chatUserState === undefined
+          ? loading
+          : <ChatApp chatUser={chatUserState && !chatUserState.isOwner ? chatUserState.username : null} onPhoneChromeHiddenChange={setChatChromeHidden} />;
       case "clawkeep":
         return <ClawKeepApp />;
       case "system_update":

@@ -23,12 +23,15 @@ import { createRequire } from "module";
 const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite");
 
 let denied: Response | null = null;
-let owner = true;
+const OWNER = { username: "clawbox", isOwner: true };
+const ALICE = { username: "alice", isOwner: false };
+/** Who the request's cookie speaks for; null is the agent's bearer (no person). */
+let person: { username: string; isOwner: boolean } | null = OWNER;
 vi.mock("@/lib/route-auth", () => ({
   requireSession: vi.fn(async () => denied),
 }));
 vi.mock("@/lib/owner-session", () => ({
-  hasOwnerSession: vi.fn(async () => owner),
+  personSession: vi.fn(async () => person),
 }));
 
 const PHONE_TAB = "agent:main:clawbox-0a1b2c3d4e5f";
@@ -84,7 +87,7 @@ describe("/setup-api/chat/tabs", () => {
     process.env.CLAWBOX_ROOT = root;
     process.env.CLAWBOX_OPENCLAW_HOME = openclawHome;
     denied = null;
-    owner = true;
+    person = OWNER;
   });
 
   afterEach(() => {
@@ -141,8 +144,8 @@ describe("/setup-api/chat/tabs", () => {
   });
 
   describe("who may write", () => {
-    it("refuses the agent's bearer: only the owner's own browser changes the strip", async () => {
-      owner = false;
+    it("refuses the agent's bearer: only a person's own browser changes the strip", async () => {
+      person = null;
       const route = await load();
       const res = await route.POST(post({ upsert: [tab(PHONE_TAB)] }));
       expect(res.status).toBe(403);
@@ -306,11 +309,69 @@ describe("/setup-api/chat/tabs", () => {
       expect(fs.existsSync(inventoryFile())).toBe(false);
     });
 
-    it("lets only the owner's own browser move it", async () => {
-      owner = false;
+    it("lets only a person's own browser move it", async () => {
+      person = null;
       const route = await load();
       expect((await route.POST(post({ activity: { key: null } }))).status).toBe(403);
       expect(fs.existsSync(inventoryFile())).toBe(false);
+    });
+  });
+
+  describe("one strip per person", () => {
+    const ALICE_TAB = "agent:main:clawbox-utab-0a1b2c3d4e5f-alice";
+    const ALICE_HERMES_TAB = "desktop-utab-0a1b2c3d4e5f-alice";
+    const aliceFile = () => path.join(root, "data", "chat-tabs", "alice.json");
+
+    it("keeps a user's tabs in their own list, never the owner's, and the owner's out of theirs", async () => {
+      person = OWNER;
+      await (await load()).POST(post({ upsert: [tab(PHONE_TAB, { label: "Owner's plans", autoLabel: false })] }));
+
+      person = ALICE;
+      const route = await load();
+      const theirs = await tabsOf(await route.POST(post({ upsert: [tab(ALICE_TAB, { label: "Alice's trip", autoLabel: false })] })));
+      expect(theirs.map((t) => t.key)).toEqual([ALICE_TAB]);
+      expect(fs.existsSync(aliceFile())).toBe(true);
+      expect(JSON.stringify(theirs)).not.toContain("Owner's plans");
+
+      person = OWNER;
+      const owners = await tabsOf(await (await load()).GET(get()));
+      expect(owners.map((t) => t.key)).toEqual([PHONE_TAB]);
+      expect(JSON.stringify(owners)).not.toContain("Alice's trip");
+    });
+
+    it("drops a key in someone else's space before it reaches the user's file", async () => {
+      person = ALICE;
+      const route = await load();
+      const listed = await tabsOf(await route.POST(post({
+        upsert: [tab(PHONE_TAB), tab("agent:main:clawbox-utab-0a1b2c3d4e5f-bob"), tab(ALICE_TAB)],
+        activity: { key: PHONE_TAB },
+      })));
+      expect(listed.map((t) => t.key)).toEqual([ALICE_TAB]);
+      const file = JSON.parse(fs.readFileSync(aliceFile(), "utf8"));
+      expect(file.tabs.map((t: { key: string }) => t.key)).toEqual([ALICE_TAB]);
+      expect(file.active).toBeUndefined();
+      // …and the owner's list was never touched.
+      expect(fs.existsSync(inventoryFile())).toBe(false);
+    });
+
+    it("finds a user's own conversations on the box, and only theirs", async () => {
+      writeTranscript(ALICE_HERMES_TAB, [{ role: "user", text: "Alice asks about Rome", timestamp: 5_000 }]);
+      writeTranscript(HERMES_TAB, [{ role: "user", text: "The owner asks about taxes", timestamp: 6_000 }]);
+      writeAgentStore("main", {
+        [ALICE_TAB]: { createdAt: 7_000, label: "Alice in OpenClaw" },
+        [DESKTOP_TAB]: { createdAt: 8_000, label: "Owner in OpenClaw" },
+        "agent:main:clawbox-user-alice": { createdAt: 9_000 },
+      });
+
+      person = ALICE;
+      const aliceTabs = await tabsOf(await (await load()).GET(get()));
+      expect(aliceTabs.map((t) => t.key).sort()).toEqual([ALICE_HERMES_TAB, ALICE_TAB].sort());
+      expect(JSON.stringify(aliceTabs)).not.toMatch(/taxes|Owner in OpenClaw/);
+
+      person = OWNER;
+      const ownerTabs = await tabsOf(await (await load()).GET(get()));
+      expect(ownerTabs.map((t) => t.key).sort()).toEqual([HERMES_TAB, DESKTOP_TAB].sort());
+      expect(JSON.stringify(ownerTabs)).not.toMatch(/Rome|Alice in OpenClaw/);
     });
   });
 });

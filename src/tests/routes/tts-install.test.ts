@@ -23,7 +23,7 @@ const writeStateMock = vi.fn();
 const clearChoiceMock = vi.fn();
 const voiceState = { choice: "auto" as string };
 
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: (...a: unknown[]) => ownerMock(...a) }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: (...a: unknown[]) => ownerMock(...a) }));
 vi.mock("@/lib/root-step-follow", () => ({ followRootStep: (...a: unknown[]) => followMock(...a) }));
 vi.mock("@/lib/kokoro-uninstall", () => ({ uninstallKokoro: () => uninstallMock() }));
 vi.mock("@/app/setup-api/tts/route", () => ({ POST: (...a: unknown[]) => selectMock(...a) }));

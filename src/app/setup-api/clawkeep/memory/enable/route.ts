@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { refresh as refreshMemoryScheduler } from "@/lib/clawkeep-memory-scheduler";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { bodyWouldEnable } from "@/lib/paid-plan-gate";
 import { readPlanGate, refusePaidPlan } from "@/lib/paid-plan-gate-server";
 import {
@@ -27,7 +27,7 @@ export const dynamic = "force-dynamic";
  * @/lib/paid-plan-gate for why the other writes stay open.
  */
 export async function POST(request: Request) {
-  if (!(await hasOwnerSession(request))) {
+  if (!(await hasPersonSession(request))) {
     return NextResponse.json(
       { error: "Changing the memory index switch needs a signed-in browser session.", kind: "owner_only" },
       { status: 403 },

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { getDefaultDirectory, listProjects } from "@/lib/coding-agent";
 import { importFolder, importGitHubRepo, type ImportOutcome, type ImportReason } from "@/lib/project-import";
@@ -36,7 +36,7 @@ const STATUS: Record<ImportReason, number> = {
  * and a cross-site page must not be able to fill their project folder.
  */
 export async function POST(request: Request) {
-  if (!(await hasOwnerSession(request))) {
+  if (!(await hasPersonSession(request))) {
     return NextResponse.json({ error: "Importing a project needs a signed-in browser session.", kind: "owner_only" }, { status: 403 });
   }
   if (!isSameOriginRequest(request)) {

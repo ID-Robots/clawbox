@@ -774,7 +774,9 @@ export async function POST(request: Request) {
   // `export async function POST()` — zero parameters, so it could not read a
   // cookie even in principle — and an unauthenticated POST really did wipe the
   // QA box on 2026-08-22T00:04Z. TASK-443.
-  const unauthorized = await requireSession(request);
+  // The owner's account itself: never another ClawBox user's to change or
+  // wipe, whatever else of the desktop they share (src/lib/non-owner-scope.ts).
+  const unauthorized = await requireSession(request, { ownerOnly: true });
   if (unauthorized) {
     await padResponseTime(startedAt);
     return unauthorized;

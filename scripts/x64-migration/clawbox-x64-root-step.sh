@@ -247,6 +247,157 @@ run_post_update() {
   echo "clawbox-root-step: x64 post-update done"
 }
 
+# ── Settings → Users ─────────────────────────────────────────────────────────
+#
+# install.sh's step_user_add / step_user_remove, for this PC. The appliance
+# runs them out of install.sh; here root never runs the checkout, so they live
+# in this root-owned dispatcher beside run_chpasswd, under the same rules:
+# ONE record from a 0600 file under data/, read once and deleted; a name held
+# to src/lib/username-rules.ts's USERNAME_RE and never root or the install
+# user; a new account in exactly one supplementary group, clawbox-users (never
+# sudo, never adm); and a removal only of a member of that group with
+# uid >= 1000 that administers nothing. config/clawbox-user-helper.sh (sign-in
+# and the Terminal) holds itself to the same membership rule.
+#
+# Exit codes the web side reads from the unit (src/lib/clawbox-users.ts):
+# 64 = the record was refused, 65 = the name is taken, 1 = the system tools
+# failed; the "Error:" line says which.
+readonly CLAWBOX_USERS_GROUP="clawbox-users"
+
+# 1-32 characters, carried by a length test rather than a `{0,31}` bound in
+# the regex (shell-regex-hygiene.test.ts).
+clawbox_user_name_ok() {
+  [ "${#1}" -ge 1 ] && [ "${#1}" -le 32 ] && [[ "$1" =~ ^[a-z_][a-z0-9_-]*$ ]]
+}
+
+# The one record a user step was handed, refusing a symlink, a missing file and
+# a second record. Prints the record; exits on refusal.
+read_user_step_input() {
+  local input_file="$1" record
+  if [ -L "$input_file" ]; then
+    rm -f "$input_file"
+    echo "Error: user input file is a symlink; refusing" >&2
+    exit 64
+  fi
+  if [ ! -f "$input_file" ]; then
+    echo "Error: user input file not found" >&2
+    exit 1
+  fi
+  record="$(cat "$input_file")"
+  rm -f "$input_file"
+  case "$record" in
+    *$'\n'*) echo "Error: user input must be exactly one record" >&2; exit 64 ;;
+    *$'\r'*) echo "Error: user input contains a carriage return" >&2; exit 64 ;;
+  esac
+  printf '%s' "$record"
+}
+
+run_user_add() {
+  local record user password home owner_home
+  require_install_user
+  record="$(read_user_step_input "$PROJECT_DIR/data/.user-add-input")" || exit $?
+  user="${record%%:*}"
+  password="${record#*:}"
+  if ! clawbox_user_name_ok "$user"; then
+    echo "Error: '$user' is not a valid username" >&2
+    exit 64
+  fi
+  if [ "$user" = "root" ] || [ "$user" = "$CLAWBOX_USER" ]; then
+    echo "Error: '$user' cannot be created here" >&2
+    exit 64
+  fi
+  if [ "$record" = "$user" ] || [ -z "$password" ]; then
+    echo "Error: user input has no password" >&2
+    exit 64
+  fi
+  if /usr/bin/getent passwd "$user" >/dev/null 2>&1 || /usr/bin/getent group "$user" >/dev/null 2>&1; then
+    echo "Error: an account or group named '$user' already exists" >&2
+    exit 65
+  fi
+
+  if ! /usr/bin/getent group "$CLAWBOX_USERS_GROUP" >/dev/null 2>&1; then
+    /usr/sbin/groupadd --system "$CLAWBOX_USERS_GROUP" || {
+      echo "Error: could not create the $CLAWBOX_USERS_GROUP group" >&2
+      exit 1
+    }
+  fi
+  /usr/sbin/useradd --create-home --shell /bin/bash --user-group \
+    --groups "$CLAWBOX_USERS_GROUP" "$user" || {
+    echo "Error: useradd could not create '$user'" >&2
+    exit 1
+  }
+  if ! printf '%s:%s\n' "$user" "$password" | /usr/sbin/chpasswd; then
+    /usr/sbin/userdel --remove "$user" >/dev/null 2>&1 || true
+    echo "Error: could not set the password for '$user'; the account was removed again" >&2
+    exit 1
+  fi
+
+  # The new home is theirs alone, and the install user's stops being readable
+  # by the accounts this step creates: it holds the checkout, data/ and every
+  # credential store, and nothing that runs as another user reads from it.
+  # Only the "other" bits go, so the install user's own group access stays.
+  home="$(/usr/bin/getent passwd "$user" | /usr/bin/cut -d: -f6)"
+  if [ -n "$home" ] && [ -d "$home" ]; then
+    /usr/bin/chmod 0750 "$home" || true
+  fi
+  owner_home="$(/usr/bin/getent passwd "$CLAWBOX_USER" | /usr/bin/cut -d: -f6)"
+  if [ -n "$owner_home" ] && [ -d "$owner_home" ] && [ "$owner_home" != "/" ]; then
+    /usr/bin/chmod o-rwx "$owner_home" || echo "  Warning: could not restrict $owner_home" >&2
+  fi
+  echo "clawbox-root-step: created ClawBox user '$user'"
+}
+
+run_user_remove() {
+  local user uid groups rc=0
+  require_install_user
+  user="$(read_user_step_input "$PROJECT_DIR/data/.user-remove-input")" || exit $?
+  if ! clawbox_user_name_ok "$user"; then
+    echo "Error: '$user' is not a valid username" >&2
+    exit 64
+  fi
+  if [ "$user" = "root" ] || [ "$user" = "$CLAWBOX_USER" ]; then
+    echo "Error: '$user' cannot be removed here" >&2
+    exit 64
+  fi
+  if ! /usr/bin/getent passwd "$user" >/dev/null 2>&1; then
+    # Already gone (removed by hand, or a retry after a partial run): the
+    # registry entry is what the owner is asking to clear, and it has been.
+    echo "clawbox-root-step: ClawBox user '$user' has no account; nothing to remove"
+    return 0
+  fi
+  uid="$(/usr/bin/getent passwd "$user" | /usr/bin/cut -d: -f3)"
+  groups=" $(/usr/bin/id -nG "$user" 2>/dev/null || true) "
+  case "$groups" in
+    *" $CLAWBOX_USERS_GROUP "*) ;;
+    *)
+      echo "Error: '$user' is not a ClawBox user (not in $CLAWBOX_USERS_GROUP); refusing" >&2
+      exit 64
+      ;;
+  esac
+  case "$groups" in
+    *" sudo "*|*" admin "*|*" wheel "*|*" root "*|*" adm "*)
+      echo "Error: '$user' is an administrator account; refusing" >&2
+      exit 64
+      ;;
+  esac
+  if ! [[ "$uid" =~ ^[0-9]+$ ]] || [ "$uid" -lt 1000 ] || [ "$uid" -eq 65534 ]; then
+    echo "Error: '$user' is a system account; refusing" >&2
+    exit 64
+  fi
+
+  # End everything the user is running first — a Terminal session is a login
+  # shell under their uid — or userdel refuses with "user is currently used".
+  /usr/bin/pkill -KILL -u "$uid" >/dev/null 2>&1 || true
+  sleep 1
+  /usr/sbin/userdel --remove "$user" || rc=$?
+  # 12: the account is gone but its home or mail spool could not be removed.
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 12 ]; then
+    echo "Error: userdel could not remove '$user' (exit $rc)" >&2
+    exit 1
+  fi
+  echo "clawbox-root-step: removed ClawBox user '$user'"
+}
+
 # The steps the x64 installer implements. Everything else is refused loudly: a
 # step that silently does nothing is worse than one that fails.
 #
@@ -275,6 +426,12 @@ case "$step" in
     ;;
   post_update)
     run_post_update
+    ;;
+  user_add)
+    run_user_add
+    ;;
+  user_remove)
+    run_user_remove
     ;;
   restart_ap|performance_mode)
     run_noop "$step"

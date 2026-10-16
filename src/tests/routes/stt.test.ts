@@ -34,7 +34,7 @@ vi.mock("@/lib/openclaw-config", () => ({
   },
 }));
 vi.mock("@/lib/owner-session", () => ({
-  hasOwnerSession: (...a: unknown[]) => ownerSessionMock(...a),
+  hasPersonSession: (...a: unknown[]) => ownerSessionMock(...a),
 }));
 vi.mock("@/lib/stt-local", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/stt-local")>();

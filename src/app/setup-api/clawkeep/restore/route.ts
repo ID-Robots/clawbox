@@ -10,7 +10,7 @@ import { getEdition } from "@/lib/harness";
 import { HERMES_DASHBOARD_UNIT } from "@/lib/hermes-dashboard-auth";
 import { bounceHermesDashboardShared } from "@/lib/hermes-bounce-claim";
 import { GATEWAY_PORT, gatewayReadyWaitMs } from "@/lib/openclaw-config";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { waitForPortOpen } from "@/lib/port-probe";
 import { describeUnitState, runUnitJob } from "@/lib/gateway-unit-job";
 import { isSameOriginRequest } from "@/lib/same-origin";
@@ -169,7 +169,7 @@ export async function POST(request: NextRequest) {
   // box. Restoring a snapshot is neither the agent's to do nor another
   // page's — so the gate asks both questions and refuses on either, before
   // the body is read.
-  if (!(await hasOwnerSession(request)) || !isSameOriginRequest(request)) {
+  if (!(await hasPersonSession(request)) || !isSameOriginRequest(request)) {
     return NextResponse.json(
       {
         error: "Restoring a snapshot needs a signed-in browser session on this ClawBox's own pages.",

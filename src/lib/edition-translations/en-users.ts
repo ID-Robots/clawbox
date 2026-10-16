@@ -1,12 +1,12 @@
 /**
- * Multi-user ClawBox OS (TASK-1256): Settings → Users, the login screen's user
- * picker and error lines, and the tray's "signed in as". Every locale carries
- * its own copy of each key (edition-translations.test.ts holds it to that).
+ * Multi-user ClawBox OS: Settings → Users, the login screen's user picker and
+ * error lines, and the tray's "signed in as". Every locale carries its own
+ * copy of each key (edition-translations.test.ts holds it to that).
  */
 export const usersEn: Record<string, string> = {
   "settings.users": "Users",
   "users.title": "Users",
-  "users.intro": "Everyone who signs in to this ClawBox has a Linux account and password of their own. The owner is the box's administrator and the only one who can change its settings.",
+  "users.intro": "Everyone who signs in to this ClawBox has a Linux account and password of their own, and the same apps and settings. Only the owner's own account — its password and the factory reset — stays with the owner.",
   "users.ownerBadge": "Owner",
   "users.youBadge": "You",
   "users.ownerHint": "Administrator · cannot be removed",
@@ -33,10 +33,22 @@ export const usersEn: Record<string, string> = {
   "users.errCreateFailed": "The account could not be created. Try again.",
   "users.errRemoveFailed": "The account could not be removed. Try again.",
   "users.errLoad": "Could not load the list of users.",
-  "users.errOwnerOnly": "Only the box owner can manage users.",
+  "users.errOwnerOnly": "Sign in to ClawBox to manage users.",
+  "users.errPasswordRejected": "The box refused that password, so the account was not kept. Choose a different password.",
+  "users.errAccountCheck": "The box could not check its existing accounts. Try again.",
+  "users.errNeedsRepair": "This box's system side is older than this version of ClawBox, so it cannot add or remove accounts yet. Open the Terminal, run this command once, then try again:",
+  "users.errCreateTimeout": "Creating the account took too long and was stopped. Try again.",
+  "users.errRemoveTimeout": "Removing the account took too long and was stopped. Try again.",
+  "users.errNotFound": "That user is no longer on this box.",
+  "users.errInternal": "Something went wrong managing users. Try again.",
+  "users.boxSaid": "The box said: {reason}",
+  "users.signInUnavailable": "Other users cannot sign in on this box yet: its sign-in helper is missing. Open the Terminal, run this command once, then reload this page:",
+  "users.copy": "Copy",
+  "users.copied": "Copied",
   "users.errCannotRemove": "The owner and the user you are signed in as cannot be removed.",
   "users.scopeTitle": "What other users can do",
-  "users.scopeNote": "Other users sign in with their own password and get a Terminal that runs as their own Linux account, in their own home folder. Settings, the assistant, Files, the coding agent, the app store and the remote desktop stay with the owner.",
+  "users.scopeNote": "Other users sign in with their own password and get the same ClawBox: every app, Files, the browser, the coding agent, the app store, the remote desktop and Settings. Each has their own chat with the assistant and never sees anyone else's. Their Terminal runs as their own Linux account. Keys and passwords stay masked for them, and only the owner can change the owner's own account.",
+  "users.trustNote": "The assistant, Files and the coding agent work as this box's own account for everyone who signs in, so add only people you trust with the box.",
   "users.empty": "No other users yet.",
   "login.chooseUser": "Who is signing in?",
   "login.username": "Username",
@@ -44,9 +56,10 @@ export const usersEn: Record<string, string> = {
   "login.incorrectPassword": "Incorrect password",
   "login.incorrectCredentials": "Incorrect username or password",
   "login.tooManyAttempts": "Too many failed attempts. Try again in a few minutes.",
+  "login.signinUnavailable": "This box cannot check other users' passwords yet. Ask the owner to open Settings → Users, which shows the one-time repair.",
   "tray.signedInAs": "Signed in as",
   "tray.signedInAsName": "Signed in as {name}",
   "tray.switchUser": "Switch user",
-  "tray.nonOwnerHint": "Only the Terminal is yours here — everything else belongs to the box owner.",
+  "tray.nonOwnerHint": "Your chat is your own — the rest of this box is shared with its owner.",
   "users.ownerOnlyPage": "Only the box owner can open that page — you are back on the desktop.",
 };

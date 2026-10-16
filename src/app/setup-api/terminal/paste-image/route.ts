@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { boundedBody } from "@/lib/bounded-body";
-import { requireSession } from "@/lib/route-auth";
+import { ownerOnlyResponse, requireSession, sessionIdentity } from "@/lib/route-auth";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { TERMINAL_PASTE_MAX_BYTES } from "@/lib/terminal-paste";
 import { TerminalPasteError, savePastedImage } from "@/lib/terminal-paste-store";
@@ -15,10 +15,12 @@ export const dynamic = "force-dynamic";
 // and no extension comes from the caller: the store picks all three, the
 // extension from the bytes.
 //
-// Owner-only, and deliberately so. A non-owner's Terminal is a shell under a
-// different Linux account, which cannot read a file in the owner's home — the
-// middleware already answers such a session 403 `owner_only` for any write
-// here, and the Terminal words that. Same-origin, because it writes a file.
+// The owner's Terminal only — not a rule about who may paste, a fact about
+// where the picture lands: another ClawBox user's Terminal is a shell under
+// their own Linux account, which cannot read a file in the owner's home, so a
+// path to one would be no use to it. Such a session is answered 403
+// `owner_only` and the Terminal pastes the text instead, as it words it.
+// Same-origin, because it writes a file.
 
 const NO_STORE = { "cache-control": "no-store" };
 
@@ -62,6 +64,8 @@ async function readImage(request: Request): Promise<Uint8Array | NextResponse> {
 export async function POST(request: Request) {
   const denied = await requireSession(request);
   if (denied) return denied;
+  const me = await sessionIdentity(request);
+  if (me && !me.isOwner) return ownerOnlyResponse();
   if (!isSameOriginRequest(request)) return refuse("Cross-origin request refused.", "cross_origin", 403);
 
   const bytes = await readImage(request);

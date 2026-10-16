@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { CHROME_NOT_INSTALLED, desktopChromeStatus, launchDesktopChrome } from "@/lib/desktop-chrome";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 
 /**
@@ -33,7 +33,7 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
-  if (!(await hasOwnerSession(req))) {
+  if (!(await hasPersonSession(req))) {
     return refuse("Only the owner's own session may open Chrome on the screen", "owner_only", 403);
   }
   if (!isSameOriginRequest(req)) {

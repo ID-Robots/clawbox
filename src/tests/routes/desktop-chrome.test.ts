@@ -9,7 +9,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const h = vi.hoisted(() => ({ ownerSession: true, sameOrigin: true, available: true, installed: true, calls: [] as unknown[] }));
 
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: vi.fn(async () => h.ownerSession) }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: vi.fn(async () => h.ownerSession) }));
 vi.mock("@/lib/same-origin", () => ({ isSameOriginRequest: vi.fn(() => h.sameOrigin) }));
 vi.mock("@/lib/desktop-chrome", () => ({
   CHROME_NOT_INSTALLED: "not_installed",

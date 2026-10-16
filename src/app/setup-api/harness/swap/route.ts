@@ -29,7 +29,7 @@ import {
   swapTargetFor,
   writeSwapRequest,
 } from "@/lib/harness-swap";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { followRootStep } from "@/lib/root-step-follow";
 import { isSameOriginRequest } from "@/lib/same-origin";
 
@@ -96,7 +96,7 @@ export async function POST(req: Request) {
   // everywhere under /setup-api, and re-installing the box's agent as root is
   // the person's decision — not the agent's, and not another site's page
   // riding the owner's cookie.
-  if (!(await hasOwnerSession(req))) {
+  if (!(await hasPersonSession(req))) {
     return refuse(403, "owner_only", "Changing the harness needs a signed-in browser session.");
   }
   if (!isSameOriginRequest(req)) {

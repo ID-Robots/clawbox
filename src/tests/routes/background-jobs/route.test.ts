@@ -11,7 +11,7 @@ vi.mock("@/lib/hermes-config-yaml", () => ({
   patchHermesConfig: vi.fn(),
   readHermesConfigValue: vi.fn(),
 }));
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: vi.fn() }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: vi.fn() }));
 
 // OpenClaw 2 arrives with heartbeat DMs, memory dreaming and self-learning all
 // on, spending the owner's subscription and messaging him without being asked
@@ -36,7 +36,7 @@ let runOpenclawConfigSet: Mock;
 let runOpenclawConfigUnset: Mock;
 let patchHermesConfig: Mock;
 let readHermesConfigValue: Mock;
-let hasOwnerSession: Mock;
+let hasPersonSession: Mock;
 
 function post(body: unknown) {
   return POST(new Request("http://x/setup-api/background-jobs", {
@@ -61,7 +61,7 @@ beforeEach(async () => {
     });
   ({ patchHermesConfig, readHermesConfigValue } =
     (await import("@/lib/hermes-config-yaml")) as unknown as { patchHermesConfig: Mock; readHermesConfigValue: Mock });
-  ({ hasOwnerSession } = (await import("@/lib/owner-session")) as unknown as { hasOwnerSession: Mock });
+  ({ hasPersonSession } = (await import("@/lib/owner-session")) as unknown as { hasPersonSession: Mock });
   getActiveHarness.mockResolvedValue("openclaw");
   readConfigStrict.mockResolvedValue({});
   restartGateway.mockResolvedValue(undefined);
@@ -69,7 +69,7 @@ beforeEach(async () => {
   runOpenclawConfigUnset.mockResolvedValue(undefined);
   readHermesConfigValue.mockResolvedValue(null);
   patchHermesConfig.mockResolvedValue({ mode: "merge", backupPath: null });
-  hasOwnerSession.mockResolvedValue(true);
+  hasPersonSession.mockResolvedValue(true);
   ({ GET, POST } = await import("@/app/setup-api/background-jobs/route"));
 });
 
@@ -105,7 +105,7 @@ describe("background-jobs — reading the box", () => {
 
 describe("background-jobs — the switches", () => {
   it("refuses the agent", async () => {
-    hasOwnerSession.mockResolvedValue(false);
+    hasPersonSession.mockResolvedValue(false);
     const r = await post({ id: "checkIns", enabled: true });
     expect(r.status).toBe(403);
     expect(runOpenclawConfigSet).not.toHaveBeenCalled();

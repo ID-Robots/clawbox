@@ -11,7 +11,7 @@ import { NextResponse } from "next/server";
 
 const auth = vi.hoisted(() => ({ requireSession: vi.fn() }));
 vi.mock("@/lib/route-auth", () => auth);
-const owner = vi.hoisted(() => ({ hasOwnerSession: vi.fn(async () => true) }));
+const owner = vi.hoisted(() => ({ hasPersonSession: vi.fn(async () => true) }));
 vi.mock("@/lib/owner-session", () => owner);
 const oc = vi.hoisted(() => ({
   openclawIsAbsent: vi.fn(() => false),
@@ -70,7 +70,7 @@ async function seed() {
 
 beforeEach(() => {
   auth.requireSession.mockResolvedValue(null);
-  owner.hasOwnerSession.mockResolvedValue(true);
+  owner.hasPersonSession.mockResolvedValue(true);
   oc.runOpenclawConfigSetBatch.mockReset().mockResolvedValue(undefined);
   oc.openclawIsAbsent.mockReturnValue(false);
   oc.readConfigStrict.mockResolvedValue({});
@@ -185,12 +185,12 @@ describe("POST /init", () => {
   });
 
   it("refuses the MCP bearer and a cross-site page before touching anything", async () => {
-    owner.hasOwnerSession.mockResolvedValue(false);
+    owner.hasPersonSession.mockResolvedValue(false);
     const bearer = await initReq();
     expect(bearer.status).toBe(403);
     expect((await bearer.json()).code).toBe("owner_only");
 
-    owner.hasOwnerSession.mockResolvedValue(true);
+    owner.hasPersonSession.mockResolvedValue(true);
     const cross = await initReq({ origin: "http://evil.example.com" });
     expect(cross.status).toBe(403);
     expect((await cross.json()).code).toBe("cross_origin");

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { runHistorySummary } from "@/lib/coding-agent";
 import { clearArchive, listArchive, readArchivedRun } from "@/lib/coding-run-history";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 
 export const dynamic = "force-dynamic";
 
@@ -57,7 +57,7 @@ export async function GET(request: Request) {
 }
 
 export async function DELETE(request: Request) {
-  if (!(await hasOwnerSession(request))) {
+  if (!(await hasPersonSession(request))) {
     return NextResponse.json(
       { error: "Clearing the run archive needs a signed-in browser session.", kind: "owner_only" },
       { status: 403 },

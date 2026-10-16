@@ -32,7 +32,7 @@ vi.mock("@/lib/clawkeep-memory-scheduler", () => ({
 // refusal itself is asserted in its own block below.
 const { ownerSession } = vi.hoisted(() => ({ ownerSession: { value: true } }));
 vi.mock("@/lib/owner-session", () => ({
-  hasOwnerSession: vi.fn(async () => ownerSession.value),
+  hasPersonSession: vi.fn(async () => ownerSession.value),
 }));
 
 // Starting a run also needs Memory Shard to be switched ON: the switch is the

@@ -18,7 +18,7 @@ const ownerMock = vi.fn();
 const unitStateMock = vi.fn();
 const startMock = vi.fn();
 
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: (...a: unknown[]) => ownerMock(...a) }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: (...a: unknown[]) => ownerMock(...a) }));
 
 vi.mock("@/lib/local-models", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/local-models")>();

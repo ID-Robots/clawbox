@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { hasValidSession } from "@/lib/route-auth";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { declaredTooLong, readJsonObject } from "@/lib/bounded-json";
@@ -109,7 +109,7 @@ export async function GET(request: Request): Promise<NextResponse> {
 }
 
 export async function POST(request: Request): Promise<NextResponse> {
-  if (!(await hasOwnerSession(request))) {
+  if (!(await hasPersonSession(request))) {
     return refuse(403, "owner_only", "A delivery pipeline is steered from a signed-in browser session on this ClawBox.");
   }
   if (!isSameOriginRequest(request)) {
@@ -146,7 +146,7 @@ export async function POST(request: Request): Promise<NextResponse> {
 }
 
 export async function PUT(request: Request): Promise<NextResponse> {
-  if (!(await hasOwnerSession(request))) {
+  if (!(await hasPersonSession(request))) {
     return refuse(403, "owner_only", "Letting this ClawBox run the whole delivery flow by itself needs a signed-in browser session.");
   }
   if (!isSameOriginRequest(request)) {

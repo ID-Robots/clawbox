@@ -45,8 +45,8 @@ function SystemTray({
   onClose,
 }: SystemTrayProps) {
   const { t } = useT();
-  // Multi-user ClawBox OS (TASK-1256): who is signed in, and whether they may
-  // restart or shut down the box (the owner only — the power route says so too).
+  // Multi-user ClawBox OS: who is signed in. Every signed-in person gets the
+  // owner's desktop, the power buttons included.
   const sessionUser = useSessionUser();
   const isOwner = sessionUser?.isOwner !== false;
   const showUser = !!sessionUser && (sessionUser.multiUser || !sessionUser.isOwner);
@@ -349,7 +349,6 @@ function SystemTray({
           {/* Bottom actions */}
           <div className="p-4 flex flex-col gap-2">
             {powerError && <p role="alert" className="text-xs text-red-400">{powerError}</p>}
-            {isOwner && (
             <div className="grid grid-cols-2 gap-2">
               <button
                 onClick={() => handlePower("restart")}
@@ -370,7 +369,6 @@ function SystemTray({
                 <span className="text-sm text-white/80 whitespace-nowrap">{confirmAction === "shutdown" ? t("tray.confirm") : t("tray.shutDown")}</span>
               </button>
             </div>
-            )}
             <button
               onClick={async () => {
                 await fetch("/login-api/logout", { method: "POST" }).catch(() => {});

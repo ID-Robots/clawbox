@@ -237,26 +237,6 @@ function firstLine(text: string, max = 80): string {
   return line.length > max ? `${line.slice(0, max - 1)}…` : line.trim();
 }
 
-/** Is the signed-in browser the owner's? Asked once per page; unknown counts as yes, as the desktop reads it (page.tsx). */
-let ownerAnswer: Promise<boolean | null> | null = null;
-function useOwnerSession(ask: boolean): boolean {
-  const [owner, setOwner] = useState<boolean | null>(null);
-  useEffect(() => {
-    if (!ask) return;
-    let cancelled = false;
-    ownerAnswer ??= fetch("/setup-api/users/me", { cache: "no-store" })
-      .then(async (res) => (res.ok ? ((await res.json()) as { isOwner?: boolean }).isOwner ?? null : null))
-      .catch(() => null);
-    void ownerAnswer.then((v) => { if (!cancelled) setOwner(v); });
-    return () => { cancelled = true; };
-  }, [ask]);
-  return owner !== false;
-}
-
-/** Forget the cached owner answer — for the tests, which sign in as different people. */
-export function resetDiagramOwnerCache(): void {
-  ownerAnswer = null;
-}
 
 /**
  * The run behind a node: the host's copy when it has one, else asked of the
@@ -671,7 +651,6 @@ function AgentPanel({ id, node, team, supplied, parentRun, refreshKey, isCurrent
   }, [stopError]);
   const live = run ? isLive(run.status) : false;
   const stoppable = run !== null && isHeld(run.status) && run.status !== "draft";
-  const owner = useOwnerSession(stoppable);
   const now = useSecondTicker(live || (node.role === "helper" && node.state === "working"));
   const task: TeamTaskView | null = node.taskId && team ? team.tasks.find((x) => x.task_id === node.taskId) ?? null : null;
   const color = STATE_COLOR[node.state];
@@ -871,7 +850,7 @@ function AgentPanel({ id, node, team, supplied, parentRun, refreshKey, isCurrent
             {t("codingAgent.diagram.message")}
           </button>
         )}
-        {stoppable && owner && (
+        {stoppable && (
           <button type="button" className={BTN_DANGER} onClick={() => void stop()} disabled={stopping} data-testid="coding-agent-node-panel-stop">
             <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">stop_circle</span>
             {t("codingAgent.stop")}

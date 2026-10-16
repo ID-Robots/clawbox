@@ -1,4 +1,5 @@
 import { uuid } from "@/lib/chat-history-cache";
+import { userTabKeyFor } from "@/lib/chat-scope";
 import { isSentinel, isInterSessionEnvelope } from "@/lib/chat-sentinels";
 import { commandsFromOpenClawList, type SlashCommand } from "@/lib/chat-slash-commands";
 import {
@@ -406,13 +407,19 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
    * structure (`cron:`, `dashboard:` and friends are reserved shapes).
    */
   newSessionKey(mainSessionKey: string): string {
+    const tabId = uuid().replace(/-/g, "").slice(0, 12).toLowerCase();
+    // A ClawBox user other than the owner chats under their own keys
+    // (src/lib/chat-scope.ts): a tab beside THEIR main is theirs too, or the
+    // gateway relay would refuse it as someone else's conversation.
+    const userTab = userTabKeyFor(mainSessionKey, tabId);
+    if (userTab) return userTab;
     const parts = mainSessionKey.split(":");
     // Lowercased like the suffix, and for the same reason: the gateway
     // lowercases the key it files the session under, so a main key that ever
     // arrived with an uppercase agent id would leave the popup persisting a
     // tab key that no longer names the session behind it.
     const agentId = (parts[0] === "agent" && parts[1] ? parts[1] : "main").toLowerCase();
-    return `agent:${agentId}:clawbox-${uuid().replace(/-/g, "").slice(0, 12).toLowerCase()}`;
+    return `agent:${agentId}:clawbox-${tabId}`;
   }
 
   ownsSessionKey(key: string): boolean {

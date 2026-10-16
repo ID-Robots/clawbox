@@ -143,7 +143,10 @@ into helpers without reordering anything, and a test pins it: `bootstrap_updater
    ```
 
    This copies the new `clawbox-x64-root-step.sh` to `/usr/local/libexec/clawbox/clawbox-root-step.sh`
-   and refreshes the root-owned installer copy and `/etc/clawbox/x64.env`. Until it is run:
+   and refreshes the root-owned installer copy and `/etc/clawbox/x64.env`. It also installs the
+   Settings → Users helper (`clawbox-user-helper.sh`) with its own sudoers drop-in
+   (`/etc/sudoers.d/clawbox-x64-users`); until then Settings → Users names this command instead of
+   creating an account, and other users cannot sign in. Until it is run:
    - **System Update still works.** The steps the old helper cannot run are skipped, with one card that
      names this command.
    - `set_timezone` still fails, but only when the clock is **not** already on the requested zone.

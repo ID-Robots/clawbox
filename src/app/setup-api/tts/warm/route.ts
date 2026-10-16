@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { KOKORO_UNIT, readUnitState, startUserEngine } from "@/lib/local-models";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 
 /**
@@ -36,7 +36,7 @@ import { isSameOriginRequest } from "@/lib/same-origin";
 const NO_STORE = { "Cache-Control": "no-store" };
 
 export async function POST(req: Request) {
-  if (!(await hasOwnerSession(req))) {
+  if (!(await hasPersonSession(req))) {
     return NextResponse.json(
       { error: "Warming the voice needs a signed-in browser session.", code: "owner_only" },
       { status: 403, headers: NO_STORE },

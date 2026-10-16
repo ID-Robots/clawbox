@@ -1,10 +1,13 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
-// TASK-1256: Settings → Users. Owner cookie only (never another ClawBox user,
-// never the MCP bearer), same-origin for the writes, and the owner and the
-// caller can never be removed.
+// Settings → Users. A person's cookie only — the owner's or any other ClawBox
+// user's, who all get the owner's Settings — never the MCP bearer;
+// same-origin for the writes; and the owner and the caller can never be
+// removed. A failure carries its reason and, where there is one, the repair.
 
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: vi.fn() }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: vi.fn() }));
+vi.mock("@/lib/user-chats", () => ({ isolateUserChats: vi.fn(async () => {}) }));
+vi.mock("@/lib/root-step-runner", () => ({ rootStepRepairCommand: vi.fn(() => "sudo bash /opt/clawbox/install-x64.sh --step root_step_contract") }));
 vi.mock("@/lib/same-origin", () => ({ isSameOriginRequest: vi.fn() }));
 vi.mock("@/lib/route-auth", () => ({ sessionIdentity: vi.fn() }));
 vi.mock("@/lib/auth", () => ({ getSystemUsername: vi.fn().mockReturnValue("clawbox") }));
@@ -15,13 +18,15 @@ vi.mock("@/lib/clawbox-users", async () => {
     listUsers: vi.fn(),
     createUser: vi.fn(),
     removeUser: vi.fn(),
+    userHelperAvailable: vi.fn(),
   };
 });
 
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
+import { isolateUserChats } from "@/lib/user-chats";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { sessionIdentity } from "@/lib/route-auth";
-import { createUser, listUsers, removeUser, UserAdminError } from "@/lib/clawbox-users";
+import { createUser, listUsers, removeUser, UserAdminError, userHelperAvailable } from "@/lib/clawbox-users";
 import { getSystemUsername } from "@/lib/auth";
 
 const ALICE = { username: "alice", createdAt: "2026-09-27T10:00:00.000Z", sv: "a1b2c3d4e5f60718" };
@@ -40,21 +45,22 @@ describe("/setup-api/users", () => {
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
-    vi.mocked(hasOwnerSession).mockResolvedValue(true);
+    vi.mocked(hasPersonSession).mockResolvedValue(true);
     vi.mocked(isSameOriginRequest).mockReturnValue(true);
     vi.mocked(sessionIdentity).mockResolvedValue({ username: "clawbox", isOwner: true });
     vi.mocked(listUsers).mockResolvedValue([ALICE]);
+    vi.mocked(userHelperAvailable).mockResolvedValue(true);
     vi.mocked(getSystemUsername).mockReturnValue("clawbox");
     route = await import("@/app/setup-api/users/route");
   });
 
-  describe("owner-only guard", () => {
+  describe("who may manage users", () => {
     it.each([
       ["GET", undefined],
       ["POST", { username: "bob", password: "correct horse" }],
       ["DELETE", { username: "alice" }],
-    ] as const)("%s refuses anyone but the owner (a second user, the MCP bearer) with 403 owner_only", async (method, body) => {
-      vi.mocked(hasOwnerSession).mockResolvedValue(false);
+    ] as const)("%s refuses the MCP bearer (no person's session) with 403 owner_only", async (method, body) => {
+      vi.mocked(hasPersonSession).mockResolvedValue(false);
       const handler = route[method];
       const res = await handler(req(method, body));
       expect(res.status).toBe(403);
@@ -62,6 +68,25 @@ describe("/setup-api/users", () => {
       expect(createUser).not.toHaveBeenCalled();
       expect(removeUser).not.toHaveBeenCalled();
       expect(listUsers).not.toHaveBeenCalled();
+    });
+
+    it("lets another signed-in ClawBox user list and add users — they get the owner's Settings", async () => {
+      vi.mocked(sessionIdentity).mockResolvedValue({ username: "alice", isOwner: false });
+      vi.mocked(createUser).mockResolvedValue({ username: "bob", createdAt: "2026-09-27T12:00:00.000Z", sv: "b0b0b0b0b0b0b0b0" });
+      const list = await route.GET(req("GET"));
+      expect(list.status).toBe(200);
+      expect((await list.json()).currentUser).toBe("alice");
+      const add = await route.POST(req("POST", { username: "bob", password: "correct horse" }));
+      expect(add.status).toBe(201);
+    });
+
+    it("tells the library who is asking, so nobody removes themselves or the owner", async () => {
+      vi.mocked(sessionIdentity).mockResolvedValue({ username: "alice", isOwner: false });
+      vi.mocked(removeUser).mockRejectedValue(new UserAdminError("cannot_remove_owner", "The box owner cannot be removed."));
+      const res = await route.DELETE(req("DELETE", { username: "clawbox" }));
+      expect(removeUser).toHaveBeenCalledWith("clawbox", { currentUser: "alice" });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ code: "cannot_remove_owner" });
     });
 
     it.each(["POST", "DELETE"] as const)("%s refuses a cross-origin write even from the owner", async (method) => {
@@ -82,8 +107,18 @@ describe("/setup-api/users", () => {
       owner: { username: "clawbox" },
       users: [{ username: "alice", createdAt: ALICE.createdAt }],
       currentUser: "clawbox",
+      signIn: { available: true },
     });
     expect(JSON.stringify(body)).not.toContain(ALICE.sv);
+  });
+
+  it("GET says when other users cannot sign in yet, with the command that repairs it", async () => {
+    vi.mocked(userHelperAvailable).mockResolvedValue(false);
+    const body = await (await route.GET(req("GET"))).json();
+    expect(body.signIn).toEqual({
+      available: false,
+      repairCommand: "sudo bash /opt/clawbox/install-x64.sh --step root_step_contract",
+    });
   });
 
   it("POST creates a user and answers 201 with the new listing", async () => {
@@ -94,6 +129,34 @@ describe("/setup-api/users", () => {
     const body = await res.json();
     expect(body.user).toEqual({ username: "bob", createdAt: "2026-09-27T12:00:00.000Z" });
     expect(JSON.stringify(body)).not.toContain("correct horse");
+    // The box now has two people: the assistant's session tools are narrowed.
+    expect(isolateUserChats).toHaveBeenCalledTimes(1);
+  });
+
+  it("POST passes the box's own reason and the repair command on to the panel", async () => {
+    vi.mocked(createUser).mockRejectedValue(new UserAdminError(
+      "root_step_unavailable",
+      "This box's system permissions are older than this build…",
+      { repairCommand: "sudo bash /opt/clawbox/install-x64.sh --step root_step_contract" },
+    ));
+    const res = await route.POST(req("POST", { username: "carol", password: "correct horse" }));
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({
+      code: "root_step_unavailable",
+      repairCommand: "sudo bash /opt/clawbox/install-x64.sh --step root_step_contract",
+    });
+    expect(isolateUserChats).not.toHaveBeenCalled();
+  });
+
+  it("POST relays what the system tools said", async () => {
+    vi.mocked(createUser).mockRejectedValue(new UserAdminError("create_failed", "The account could not be created: useradd could not create 'carol'", { detail: "useradd could not create 'carol'" }));
+    const res = await route.POST(req("POST", { username: "carol", password: "correct horse" }));
+    expect(res.status).toBe(500);
+    expect(await res.json()).toEqual({
+      error: "The account could not be created: useradd could not create 'carol'",
+      code: "create_failed",
+      detail: "useradd could not create 'carol'",
+    });
   });
 
   it("POST relays a refusal with its stable code and status", async () => {

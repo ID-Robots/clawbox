@@ -43,7 +43,7 @@ import {
   ttsAutoModeFor,
 } from "@/lib/voice-reply";
 import { clearOwnerChoice, noteOwnerChoice, readChoiceSource, restoreChoiceSource } from "@/lib/clawai-cloud-choice";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { logSafe } from "@/lib/log-safe";
 
@@ -588,7 +588,7 @@ export async function POST(req: Request) {
   // talking at whoever is at the desk is the owner's call just the same, and
   // so is how much of a reply it says out loud (the short-answer switch).
   const ownerOnly = OWNER_ONLY_ACTIONS.has(action);
-  if (ownerOnly && !(await hasOwnerSession(req))) {
+  if (ownerOnly && !(await hasPersonSession(req))) {
     return NextResponse.json(
       { error: "Changing spoken replies needs a signed-in browser session.", kind: "owner_only", code: "owner_only" },
       { status: 403, headers: NO_STORE },

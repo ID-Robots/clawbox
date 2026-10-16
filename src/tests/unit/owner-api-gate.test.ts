@@ -42,9 +42,9 @@ describe("mayUseOwnerApis", () => {
     await expect(mayUseOwnerApis()).resolves.toBe(true);
   });
 
-  it("is false for another ClawBox user", async () => {
+  it("is true for another ClawBox user too — every signed-in person gets the owner's desktop", async () => {
     stubUsersMe({ ok: true, body: { username: "alice", isOwner: false, multiUser: true } });
-    await expect(mayUseOwnerApis()).resolves.toBe(false);
+    await expect(mayUseOwnerApis()).resolves.toBe(true);
   });
 
   it("stays the owner's answer when /users/me fails or cannot be reached", async () => {
@@ -67,11 +67,11 @@ describe("mayUseOwnerApis", () => {
 });
 
 describe("useMayUseOwnerApis", () => {
-  it("is null until the box answers, then settles", async () => {
+  it("is null until the box answers, then settles — true for another ClawBox user as well", async () => {
     stubUsersMe({ ok: true, body: { username: "alice", isOwner: false, multiUser: true } });
     const { result } = renderHook(() => useMayUseOwnerApis());
     expect(result.current).toBeNull();
-    await waitFor(() => expect(result.current).toBe(false));
+    await waitFor(() => expect(result.current).toBe(true));
   });
 
   it("settles true for the owner", async () => {

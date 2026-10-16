@@ -113,20 +113,19 @@ describe("GET /setup-api/system/battery — who may ask", () => {
     expect(readBattery).not.toHaveBeenCalled();
   });
 
-  it("is 403 owner_only for a signed-in user who is not the owner, and reads nothing", async () => {
+  it("answers a signed-in user who is not the owner — they get the owner's tray", async () => {
     laptopOnBattery();
     const res = await GET(req(nonOwnerCookie()));
-    expect(res.status).toBe(403);
-    expect(await res.json()).toMatchObject({ code: "owner_only" });
-    expect(readBattery).not.toHaveBeenCalled();
+    expect(res.status).toBe(200);
+    expect(readBattery).toHaveBeenCalled();
   });
 
-  it("is outside middleware's non-owner scope", () => {
+  it("is inside middleware's scope for another ClawBox user", () => {
     for (const intent of ["fetch", "unknown"] as const) {
       expect(
-        nonOwnerVerdict({ pathname: ROUTE, method: "GET", searchParams: new URLSearchParams(), intent }),
+        nonOwnerVerdict({ pathname: ROUTE, method: "GET", searchParams: new URLSearchParams(), intent, username: "alice" }),
         intent,
-      ).toBe("deny");
+      ).toBe("allow");
     }
   });
 });

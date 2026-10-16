@@ -19,7 +19,7 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/owner-session", () => ({
-  hasOwnerSession: vi.fn(async () => h.ownerSession),
+  hasPersonSession: vi.fn(async () => h.ownerSession),
 }));
 vi.mock("@/lib/same-origin", () => ({
   isSameOriginRequest: vi.fn(() => h.sameOrigin),

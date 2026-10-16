@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { hasOwnerSession } from "./owner-session";
+import { hasOwnerSession, personSession } from "./owner-session";
+import { mayUseChatKey } from "./chat-scope";
 import fs from "fs/promises";
 import os from "os";
 import net from "net";
@@ -415,10 +416,12 @@ export function gatewayProxyHeaders(source: Headers): Headers {
 //     segment so no dot-segment, encoded separator or empty segment can point
 //     the credential at any other gateway endpoint;
 //   - the caller holds the OWNER's session (hasOwnerSession — the same check
-//     that guards the token in serveGatewayHTML). Middleware already refuses a
-//     caller with no session, and refuses a non-owner user (TASK-1256) the
-//     whole /api tree; this check stands on its own anyway, because this
-//     function owns the secret and must not depend on a gate upstream.
+//     that guards the token in serveGatewayHTML), or another ClawBox user's
+//     and the file is filed under one of their own chat sessions
+//     (`mayFetchChatMedia`). Middleware already refuses a caller with no
+//     session, and lets a non-owner user into no other part of the /api tree;
+//     this check stands on its own anyway, because this function owns the
+//     secret and must not depend on a gate upstream.
 // Every other /api path is proxied exactly as before, without a bearer.
 const CHAT_MEDIA_OUTGOING_PREFIX = "/api/chat/media/outgoing/";
 const CHAT_MEDIA_SEGMENT_RE = /^[A-Za-z0-9._~%:@-]+$/;
@@ -448,6 +451,32 @@ export function isChatMediaOutgoingPath(pathname: string): boolean {
 }
 
 /**
+ * The session a chat-media path is filed under — its first segment after the
+ * prefix, decoded (`agent%3Amain%3Amain` → `agent:main:main`) — or null.
+ */
+export function chatMediaSessionKey(pathname: string): string | null {
+  if (!isChatMediaOutgoingPath(pathname)) return null;
+  try {
+    return decodeURIComponent(pathname.slice(CHAT_MEDIA_OUTGOING_PREFIX.length).split("/")[0]);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * May this request have the gateway's bearer attached to a chat-media read?
+ * The owner's browser, for any of the owner's conversations; another ClawBox
+ * user's, only for a file filed under one of THEIR sessions
+ * (src/lib/chat-scope.ts) — the pictures the agent sent in their own chat.
+ */
+async function mayFetchChatMedia(request: NextRequest): Promise<boolean> {
+  if (await hasOwnerSession(request)) return true;
+  const person = await personSession(request);
+  if (!person || person.isOwner) return false;
+  return mayUseChatKey(person, chatMediaSessionKey(request.nextUrl.pathname));
+}
+
+/**
  * Reverse-proxy one request to the OpenClaw gateway with client attribution
  * stripped. Path and query come from the request itself, so the caller does not
  * have to reassemble a catch-all segment.
@@ -466,7 +495,7 @@ export async function proxyGatewayRequest(request: NextRequest): Promise<NextRes
     // Never pass on a credential the browser chose: the owner's request gets
     // the gateway's own token, anyone else's gets none at all.
     upstreamHeaders.delete("authorization");
-    const token = (await hasOwnerSession(request)) ? await getGatewayToken() : "";
+    const token = (await mayFetchChatMedia(request)) ? await getGatewayToken() : "";
     if (token) upstreamHeaders.set("authorization", `Bearer ${token}`);
   }
 

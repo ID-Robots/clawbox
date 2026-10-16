@@ -17,7 +17,7 @@ import { vaultDir } from "@/lib/prime-radiant/paths";
 import { createReviewItem, ReviewError } from "@/lib/prime-radiant/review";
 import { listReviewItems, REVIEW_KINDS, REVIEW_STATUSES, type ReviewKind, type ReviewStatus } from "@/lib/prime-radiant/review-store";
 import { isClaimId } from "@/lib/prime-radiant/claims";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { crossOriginRefusal, fail, json, readJsonBody, vaultFailure } from "@/lib/prime-radiant/route-helpers";
 import { vaultInitialised } from "@/lib/prime-radiant/vault";
 
@@ -62,7 +62,7 @@ export async function POST(req: Request) {
   if (!read.ok) return read.response;
   if (!(await vaultInitialised())) return fail("not_initialised", "Open Prime Radiant once to create its vault first.", 412);
   try {
-    const by = (await hasOwnerSession(req)) ? "owner" : "assistant";
+    const by = (await hasPersonSession(req)) ? "owner" : "assistant";
     const { item, created } = createReviewItem(read.body, { by });
     return json(created ? { item } : { item, created: false }, created ? 201 : 200);
   } catch (err) {

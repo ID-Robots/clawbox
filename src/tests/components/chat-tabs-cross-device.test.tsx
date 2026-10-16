@@ -17,7 +17,7 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 // session gate and the owner check are the route's own tests' business, and
 // here stand for a signed-in owner's browser.
 vi.mock("@/lib/route-auth", () => ({ requireSession: vi.fn(async () => null) }));
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: vi.fn(async () => true) }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: vi.fn(async () => true), personSession: vi.fn(async () => ({ username: "clawbox", isOwner: true })) }));
 
 vi.mock("@/lib/i18n", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/i18n")>();

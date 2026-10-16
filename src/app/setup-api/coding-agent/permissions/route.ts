@@ -10,7 +10,7 @@ import {
 } from "@/lib/coding-agent";
 import { MAX_ALLOW_RULES, MAX_RULE_CHARS } from "@/lib/coding-permission-rules";
 import { sharedInputsDir } from "@/lib/coding-run-inputs";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
@@ -50,7 +50,7 @@ function refuse(status: number, kind: string, error: string, code?: string) {
 
 /** Owner session, and — for the two writes — this box's own page. */
 async function guard(request: Request, write: boolean): Promise<NextResponse | null> {
-  if (!(await hasOwnerSession(request))) {
+  if (!(await hasPersonSession(request))) {
     return refuse(403, "owner_only", "Reading or changing what a coding run may do needs a signed-in browser session.");
   }
   if (write && !isSameOriginRequest(request)) {

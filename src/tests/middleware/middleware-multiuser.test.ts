@@ -4,10 +4,11 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 
-// TASK-1256: middleware with more than one ClawBox user. The owner's session
-// is unchanged; a second user's session reaches only the per-user allow-list
-// (src/lib/non-owner-scope.ts) and is refused everything else with 403 — or,
-// for a page, sent to the desktop; a removed user's cookie is no session at all.
+// Middleware with more than one ClawBox user. The owner's session is
+// unchanged; a second user's session reaches the owner's desktop — every app
+// and Settings — except the owner's account, the gateway's token and its
+// console trees (src/lib/non-owner-scope.ts), which answer 403 (or, for a
+// page, the desktop); a removed user's cookie is no session at all.
 
 const SECRET = "test-secret";
 const ALICE_SV = "a1b2c3d4e5f60718";
@@ -89,17 +90,10 @@ describe("middleware — multi-user", () => {
     expect(res.headers.get("x-middleware-next")).toBe("1");
   });
 
-  it("a second user reaches who-am-I, the box language and the Terminal's settings", async () => {
-    const alice = await sign({ u: "alice", sv: ALICE_SV });
-    for (const p of ["/setup-api/users/me", "/setup-api/preferences?keys=ui_language", "/setup-api/terminal/shells", "/"]) {
-      const res = await middleware(request(p, alice));
-      expect(res.headers.get("x-middleware-next"), p).toBe("1");
-    }
-  });
-
-  it("a second user is refused every owner route with 403 owner_only — never a 401", async () => {
+  it("a second user reaches the owner's desktop: every route the owner's apps and Settings use", async () => {
     const alice = await sign({ u: "alice", sv: ALICE_SV });
     for (const [method, p] of [
+      ["GET", "/setup-api/users/me"],
       ["GET", "/setup-api/users"],
       ["POST", "/setup-api/users"],
       ["POST", "/setup-api/coding-agent/enable"],
@@ -107,26 +101,48 @@ describe("middleware — multi-user", () => {
       ["GET", "/setup-api/preferences?all=1"],
       ["POST", "/setup-api/preferences"],
       ["POST", "/setup-api/system/power"],
-      ["GET", "/api/chat"],
+      ["GET", "/setup-api/wifi/status"],
+      ["GET", "/setup-api/network/internet"],
+      ["GET", "/setup-api/gateway/ws-config"],
+      ["GET", "/setup-api/chat/tabs"],
+      ["GET", "/"],
+      ["GET", "/app/settings"],
+      ["GET", "/app/files"],
+      ["GET", "/app/clawbox"],
+      ["GET", "/setup"],
     ] as const) {
-      const res = await middleware(request(p, alice, { method }));
-      expect(res.status, `${method} ${p}`).toBe(403);
-      expect(await res.json(), `${method} ${p}`).toMatchObject({ code: "owner_only" });
+      const res = await middleware(request(p, alice, { method, document: p.startsWith("/app") || p === "/" || p === "/setup" }));
+      expect(res.headers.get("x-middleware-next"), `${method} ${p}`).toBe("1");
     }
   });
 
-  it("a second user reads the box's connectivity for the tray", async () => {
+  it("a second user is refused the owner's account and the gateway's trees with 403 owner_only — never a 401", async () => {
     const alice = await sign({ u: "alice", sv: ALICE_SV });
-    const res = await middleware(request("/setup-api/network/internet", alice));
-    expect(res.headers.get("x-middleware-next")).toBe("1");
-    // …and nothing else of the network.
-    await expectOwnerOnlyJson(await middleware(request("/setup-api/wifi/status", alice)), "wifi/status");
-    await expectOwnerOnlyJson(await middleware(request("/setup-api/network/internet", alice, { method: "POST" })), "POST internet");
+    for (const [method, p] of [
+      ["POST", "/setup-api/system/credentials"],
+      ["POST", "/setup-api/system/credentials/verify"],
+      ["POST", "/setup-api/setup/reset"],
+      ["GET", "/setup-api/gateway"],
+      ["GET", "/api/chat"],
+      ["GET", "/api/chat/media/outgoing/agent%3Amain%3Amain/1/full"],
+    ] as const) {
+      await expectOwnerOnlyJson(await middleware(request(p, alice, { method })), `${method} ${p}`);
+    }
   });
 
-  it("a second user opening an owner page lands on the desktop, told why", async () => {
+  it("a second user reaches the media of their own chat, and nobody else's", async () => {
     const alice = await sign({ u: "alice", sv: ALICE_SV });
-    for (const p of ["/setup", "/app/settings", "/chat", "/settings", "/files", "/hermes", "/novnc", "/apps", "/app/browser"]) {
+    const own = await middleware(request("/api/chat/media/outgoing/agent%3Amain%3Aclawbox-user-alice/1/full", alice));
+    expect(own.headers.get("x-middleware-next")).toBe("1");
+    await expectOwnerOnlyJson(
+      await middleware(request("/api/chat/media/outgoing/agent%3Amain%3Aclawbox-user-bob/1/full", alice)),
+      "bob's media",
+    );
+  });
+
+  it("a second user opening a harness console page lands on the desktop, told why", async () => {
+    const alice = await sign({ u: "alice", sv: ALICE_SV });
+    for (const p of ["/app/openclaw", "/app/hermes", "/chat", "/settings", "/sessions"]) {
       expectDesktopWithNotice(await middleware(request(p, alice, { document: true })), p);
     }
   });
@@ -134,14 +150,14 @@ describe("middleware — multi-user", () => {
   it("a plain-HTTP browser navigation (Accept: text/html, no Sec-Fetch-*) lands on the desktop too", async () => {
     const alice = await sign({ u: "alice", sv: ALICE_SV });
     const accept = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
-    for (const p of ["/settings", "/files", "/app/files"]) {
+    for (const p of ["/settings", "/chat", "/app/openclaw"]) {
       expectDesktopWithNotice(await middleware(request(p, alice, { headers: { accept } })), p);
     }
   });
 
   it("a page asked for by curl (Accept: */*) is a navigation, not an API call", async () => {
     const alice = await sign({ u: "alice", sv: ALICE_SV });
-    for (const p of ["/settings", "/files", "/apps", "/hermes", "/novnc"]) {
+    for (const p of ["/settings", "/chat", "/app/hermes"]) {
       const res = await middleware(request(p, alice, { headers: { accept: "*/*" } }));
       expectDesktopWithNotice(res, p);
       expect(res.headers.get("cache-control"), p).toBe("no-store");
@@ -150,22 +166,14 @@ describe("middleware — multi-user", () => {
 
   it("API requests keep their 403 JSON, navigation or not", async () => {
     const alice = await sign({ u: "alice", sv: ALICE_SV });
-    await expectOwnerOnlyJson(await middleware(request("/setup-api/users", alice, { document: true })), "document setup-api");
-    await expectOwnerOnlyJson(
-      await middleware(request("/setup-api/files/list", alice, { headers: { accept: "text/html" } })),
-      "html setup-api",
-    );
+    await expectOwnerOnlyJson(await middleware(request("/setup-api/system/credentials", alice, { document: true })), "document setup-api");
     await expectOwnerOnlyJson(await middleware(request("/api/chat", alice, { document: true })), "document gateway api");
-    // A page path fetched by code (fetch/XHR, the Next router) is code asking.
+    // A console page fetched by code (fetch/XHR, the Next router) is code asking.
     await expectOwnerOnlyJson(
       await middleware(request("/settings", alice, { headers: { "sec-fetch-dest": "empty" } })),
       "fetch /settings",
     );
     await expectOwnerOnlyJson(await middleware(request("/settings", alice, { headers: { rsc: "1" } })), "rsc /settings");
-    await expectOwnerOnlyJson(
-      await middleware(request("/settings", alice, { headers: { accept: "application/json" } })),
-      "json /settings",
-    );
   });
 
   it("the redirect lands on a desktop the second user may open", async () => {

@@ -9,7 +9,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor, within } from "@/tests/helpers/test-utils";
 import { translations } from "@/lib/translations";
-import CodingAgentDiagram, { DiagramDetails, SHEET_BELOW, resetDiagramOwnerCache, type DiagramRun } from "@/components/CodingAgentDiagram";
+import CodingAgentDiagram, { DiagramDetails, SHEET_BELOW, type DiagramRun } from "@/components/CodingAgentDiagram";
 import CodingAgentLiveAgents, { RunAgentsDiagram } from "@/components/CodingAgentLiveAgents";
 import type { TeamView } from "@/components/CodingTeamCard";
 
@@ -89,7 +89,6 @@ let isOwner: boolean | null;
 beforeEach(() => {
   fetches = [];
   isOwner = true;
-  resetDiagramOwnerCache();
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
     fetches.push({ url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
@@ -334,12 +333,13 @@ describe("the panel: what an agent is doing now", () => {
     }
   });
 
-  it("offers no Stop to a session that is not the owner's", async () => {
+  it("offers Stop to every signed-in ClawBox user, not the owner alone — they all get the owner's desktop", async () => {
     isOwner = false;
     renderTeam();
     fireEvent.click(node("run-work0002"));
-    await waitFor(() => expect(fetches.some((f) => f.url === "/setup-api/users/me")).toBe(true));
-    await waitFor(() => expect(screen.queryByTestId("coding-agent-node-panel-stop")).toBeNull());
+    expect(await screen.findByTestId("coding-agent-node-panel-stop")).toBeTruthy();
+    // Nothing to ask the box first: the panel no longer waits on who is signed in.
+    expect(fetches.some((f) => f.url === "/setup-api/users/me")).toBe(false);
   });
 
   it("asks the box for a run the host does not hold", async () => {

@@ -14,7 +14,7 @@ export async function POST(request: Request) {
   // loosened or a path reaches it around the matcher. `allowBootstrap` stays
   // false on purpose: a box with no owner must never be marked complete, and
   // the wizard always holds the cookie CredentialsStep minted by the time it
-  // posts here. `requireSession` (not `hasOwnerSession`) because it honours
+  // posts here. `requireSession` (not `hasPersonSession`) because it honours
   // CLAWBOX_TEST_MODE, which the e2e-install harness — driving the wizard with
   // no cookie jar, and later posting here to harvest a fresh session — relies on.
   const unauthorized = await requireSession(request);

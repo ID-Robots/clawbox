@@ -14,7 +14,7 @@ import { NextResponse } from "next/server";
 
 const auth = vi.hoisted(() => ({ requireSession: vi.fn() }));
 vi.mock("@/lib/route-auth", () => auth);
-const owner = vi.hoisted(() => ({ hasOwnerSession: vi.fn(async () => true) }));
+const owner = vi.hoisted(() => ({ hasPersonSession: vi.fn(async () => true) }));
 vi.mock("@/lib/owner-session", () => owner);
 const bearer = vi.hoisted(() => ({ verifyMcpBearer: vi.fn((h: string | null) => h === "Bearer test-assistant-bearer") }));
 vi.mock("@/lib/mcp-token", () => bearer);
@@ -55,7 +55,7 @@ type As = "owner" | "assistant" | "nobody";
 /** A request as one of the three callers. The assistant is the MCP server: a bearer, no Origin. */
 function req(method: string, url: string, as: As, body?: unknown, headers: Record<string, string> = {}) {
   const who: Record<string, string> = as === "assistant" ? { authorization: "Bearer test-assistant-bearer" } : as === "owner" ? { origin: ORIGIN } : {};
-  owner.hasOwnerSession.mockResolvedValue(as === "owner");
+  owner.hasPersonSession.mockResolvedValue(as === "owner");
   return new Request(`${API}${url}`, {
     method,
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -102,7 +102,7 @@ const NEW_PAGE = {
 
 beforeEach(async () => {
   auth.requireSession.mockReset().mockResolvedValue(null);
-  owner.hasOwnerSession.mockReset().mockResolvedValue(true);
+  owner.hasPersonSession.mockReset().mockResolvedValue(true);
   process.env.PRIME_RADIANT_DIR = path.join(base, `case-${++n}`);
   vault = path.join(process.env.PRIME_RADIANT_DIR, "vault");
 });

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import path from "@/lib/runtime-path";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { resolveFolderInsideBrowseRoot } from "@/lib/browse-folder";
 import { ExtraPathsUnreadableError, mutateExtraPaths, readExtraPaths } from "@/lib/memory-shard";
 import { invalidateMemoryStatusCache } from "@/lib/clawkeep-memory";
@@ -64,13 +64,13 @@ function forbidden() {
 
 /** GET → { paths } */
 export async function GET(request: NextRequest) {
-  if (!(await hasOwnerSession(request))) return forbidden();
+  if (!(await hasPersonSession(request))) return forbidden();
   return NextResponse.json({ paths: await readExtraPaths() });
 }
 
 /** POST { path } → add one folder. Idempotent: adding it twice is not an error. */
 export async function POST(request: NextRequest) {
-  if (!(await hasOwnerSession(request))) return forbidden();
+  if (!(await hasPersonSession(request))) return forbidden();
 
   let body: { path?: unknown };
   try {
@@ -111,7 +111,7 @@ export async function POST(request: NextRequest) {
 
 /** DELETE { path } → stop indexing one folder. The files are left alone. */
 export async function DELETE(request: NextRequest) {
-  if (!(await hasOwnerSession(request))) return forbidden();
+  if (!(await hasPersonSession(request))) return forbidden();
 
   let body: { path?: unknown };
   try {

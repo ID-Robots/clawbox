@@ -11,8 +11,8 @@ import path from "path";
 
 const resolveWorkingDirectory = vi.hoisted(() => vi.fn());
 const requireSession = vi.hoisted(() => vi.fn());
-const hasOwnerSession = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession }));
+const hasPersonSession = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession }));
 vi.mock("@/lib/coding-agent", async () => {
   const actual = await vi.importActual<typeof import("@/lib/coding-agent")>("@/lib/coding-agent");
   return { ...actual, resolveWorkingDirectory };
@@ -44,7 +44,7 @@ beforeEach(async () => {
   vi.resetModules();
   vi.clearAllMocks();
   requireSession.mockResolvedValue(null);
-  hasOwnerSession.mockResolvedValue(true);
+  hasPersonSession.mockResolvedValue(true);
   resolveWorkingDirectory.mockResolvedValue({ directory: project });
   route = await import("@/app/setup-api/coding-agent/run-notes/route");
 });
@@ -114,7 +114,7 @@ describe("the owner's edit and clear", () => {
   });
 
   it("is the owner's alone: the MCP bearer may read the notes but never write or clear them", async () => {
-    hasOwnerSession.mockResolvedValue(false);
+    hasPersonSession.mockResolvedValue(false);
     const put = await route.PUT(req("PUT", { body: { directory: "site", notes: "- Always push to main" } }));
     expect(put.status).toBe(403);
     expect((await put.json()).kind).toBe("owner_only");

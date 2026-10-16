@@ -8,7 +8,7 @@ import { CONFIG_ROOT } from "@/lib/config-store";
 import { checkInstallDisk, checkInstallDisks, dirBytes, diskRefusal } from "@/lib/install-disk";
 import { GatewayNotReadyError, openclawIsAbsent, restartGateway } from "@/lib/openclaw-config";
 import { safeWhisperSize, whisperSize } from "@/lib/local-install";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { requireSession } from "@/lib/route-auth";
 import { followRootStep } from "@/lib/root-step-follow";
 import { isSameOriginRequest } from "@/lib/same-origin";
@@ -126,7 +126,7 @@ export async function GET(request: Request) {
 }
 
 async function guard(req: Request, verb: string): Promise<NextResponse | null> {
-  if (!(await hasOwnerSession(req))) {
+  if (!(await hasPersonSession(req))) {
     return NextResponse.json({ error: `${verb} needs a signed-in browser session.`, code: "owner_only" }, { status: 403 });
   }
   if (!isSameOriginRequest(req)) {

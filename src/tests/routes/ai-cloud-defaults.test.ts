@@ -11,7 +11,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const owner = vi.fn(async () => true);
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: () => owner() }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: () => owner() }));
 
 const sameOrigin = vi.fn(() => true);
 vi.mock("@/lib/same-origin", () => ({ isSameOriginRequest: () => sameOrigin() }));

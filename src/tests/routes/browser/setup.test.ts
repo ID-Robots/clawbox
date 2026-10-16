@@ -10,7 +10,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: vi.fn(async () => true) }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: vi.fn(async () => true) }));
 vi.mock("@/lib/same-origin", () => ({ isSameOriginRequest: vi.fn(() => true) }));
 
 const store = new Map<string, unknown>();
@@ -32,7 +32,7 @@ vi.mock("fs/promises", () => ({
   },
 }));
 
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 
 const post = async (body: unknown) => {
@@ -48,12 +48,12 @@ describe("/setup-api/browser/setup", () => {
   beforeEach(() => {
     store.clear();
     writeFile.mockClear();
-    vi.mocked(hasOwnerSession).mockResolvedValue(true);
+    vi.mocked(hasPersonSession).mockResolvedValue(true);
     vi.mocked(isSameOriginRequest).mockReturnValue(true);
   });
 
   it("refuses the agent's credential", async () => {
-    vi.mocked(hasOwnerSession).mockResolvedValue(false);
+    vi.mocked(hasPersonSession).mockResolvedValue(false);
     const res = await post({ autoOpen: false });
     expect(res.status).toBe(403);
     expect((await res.json()).code).toBe("owner_only");

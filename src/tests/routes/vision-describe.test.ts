@@ -21,7 +21,7 @@ import { saveEnv } from "../helpers/env";
 
 const mocks = vi.hoisted(() => ({
   describeImage: vi.fn(async (): Promise<{ text: string | null; error: string | null }> => ({ text: "a red square", error: null })),
-  hasOwnerSession: vi.fn(async () => true),
+  hasPersonSession: vi.fn(async () => true),
   activeRunId: vi.fn<() => string | null>(() => null),
   activeRunDirectory: vi.fn<() => string | null>(() => null),
   artifactsDir: vi.fn<(id: string) => string>(),
@@ -32,7 +32,7 @@ vi.mock("@/lib/vision-describe", async (importOriginal) => ({
   describeImage: mocks.describeImage,
 }));
 vi.mock("@/lib/route-auth", () => ({ requireSession: async () => null }));
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: mocks.hasOwnerSession }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: mocks.hasPersonSession }));
 vi.mock("@/lib/coding-agent", () => ({
   activeRunId: mocks.activeRunId,
   activeRunDirectory: mocks.activeRunDirectory,
@@ -69,7 +69,7 @@ beforeEach(async () => {
   process.env.FILES_ROOT = base;
   mocks.describeImage.mockClear();
   mocks.describeImage.mockResolvedValue({ text: "a red square", error: null });
-  mocks.hasOwnerSession.mockResolvedValue(true);
+  mocks.hasPersonSession.mockResolvedValue(true);
   mocks.activeRunId.mockReturnValue(null);
   mocks.activeRunDirectory.mockReturnValue(null);
   mocks.artifactsDir.mockImplementation((id) => path.join(base, "artifacts", id));
@@ -190,7 +190,7 @@ describe("the fence", () => {
   });
 
   it("keeps the bearer inside the active run's working and evidence folders", async () => {
-    mocks.hasOwnerSession.mockResolvedValue(false);
+    mocks.hasPersonSession.mockResolvedValue(false);
     mocks.activeRunId.mockReturnValue("run-abc12345");
     mocks.activeRunDirectory.mockReturnValue(path.join(base, "work"));
 
@@ -206,7 +206,7 @@ describe("the fence", () => {
   });
 
   it("judges the fence on the real file, not on a symlink planted inside the run's folder", async () => {
-    mocks.hasOwnerSession.mockResolvedValue(false);
+    mocks.hasPersonSession.mockResolvedValue(false);
     mocks.activeRunId.mockReturnValue("run-abc12345");
     mocks.activeRunDirectory.mockReturnValue(path.join(base, "work"));
     const outside = png("elsewhere", "photo.png");
@@ -217,7 +217,7 @@ describe("the fence", () => {
   });
 
   it("keeps the bearer inside the home folder when no run is live", async () => {
-    mocks.hasOwnerSession.mockResolvedValue(false);
+    mocks.hasPersonSession.mockResolvedValue(false);
     process.env.FILES_ROOT = path.join(base, "home");
     expect((await POST(req({ path: png("home", "Pictures", "cat.png") }))).status).toBe(200);
     const res = await POST(req({ path: png("other", "cat.png") }));
@@ -252,7 +252,7 @@ describe("the coding run id that chooses the roots", () => {
   beforeEach(() => {
     // The bearer's fence, not the owner's wide contract: only then is the id
     // what decides the roots.
-    mocks.hasOwnerSession.mockResolvedValue(false);
+    mocks.hasPersonSession.mockResolvedValue(false);
     runDir = path.join(base, "runs", RUN_ID);
     fs.mkdirSync(runDir, { recursive: true });
     mocks.getRun.mockImplementation((id) =>
@@ -326,7 +326,7 @@ describe("the coding run id that chooses the roots", () => {
   it("leaves the owner's wide contract alone", async () => {
     // A signed-in person at the desktop reads under the Files tree whatever
     // the body says about runs, so the id must not narrow them by accident.
-    mocks.hasOwnerSession.mockResolvedValue(true);
+    mocks.hasPersonSession.mockResolvedValue(true);
     const res = await POST(req({ path: png("anywhere.png"), codingRunId: RUN_ID }));
     expect(res.status).toBe(200);
   });

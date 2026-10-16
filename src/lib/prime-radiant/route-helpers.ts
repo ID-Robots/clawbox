@@ -9,7 +9,7 @@ import { NextResponse } from "next/server";
 import { resolveFileInsideBrowseRoot, resolveFolderInsideBrowseRoot } from "@/lib/browse-folder";
 import { verifyMcpBearer } from "@/lib/mcp-token";
 import { requireSession } from "@/lib/route-auth";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { PageEditError } from "./edit";
 import { ASSISTANT_AUTHOR, VAULT_AUTHOR, type VaultAuthor } from "./git";
@@ -114,7 +114,7 @@ export function editFailure(where: string, err: unknown): NextResponse {
 export async function ownerWriteGuard(req: Request, what: string): Promise<NextResponse | null> {
   const denied = await requireSession(req);
   if (denied) return denied;
-  if (!(await hasOwnerSession(req))) return fail("owner_only", `${what} needs a signed-in browser session.`, 403);
+  if (!(await hasPersonSession(req))) return fail("owner_only", `${what} needs a signed-in browser session.`, 403);
   if (!isSameOriginRequest(req)) return fail("cross_origin", "This request did not come from the ClawBox desktop.", 403);
   return null;
 }
@@ -138,17 +138,18 @@ export const ASSISTANT_WRITER: VaultWriter = Object.freeze({ by: "assistant", au
  * The gate a Prime Radiant change the ASSISTANT may also make keeps: a
  * session (`requireSession`), then our own page (a cross-site form riding the
  * owner's cookie is refused 403 `cross_origin`; the MCP server sends no
- * Origin), then WHO — the owner's own browser cookie, or the MCP bearer itself
- * (checked here again, not taken from the session check: middleware and
- * `requireSession` admit either, and only the bearer makes the caller the
- * assistant). Anything else — test mode with neither, a bootstrap window — is
- * refused 403 `owner_only`, as before.
+ * Origin), then WHO — a signed-in person's browser cookie (the owner's or any
+ * ClawBox user's: both write as the vault's own author, as `ownerWriteGuard`
+ * admits them), or the MCP bearer itself (checked here again, not taken from
+ * the session check: middleware and `requireSession` admit either, and only
+ * the bearer makes the caller the assistant). Anything else — test mode with
+ * neither, a bootstrap window — is refused 403 `owner_only`, as before.
  */
 export async function writerGuard(req: Request, what: string): Promise<{ ok: true; writer: VaultWriter } | { ok: false; response: NextResponse }> {
   const denied = await requireSession(req);
   if (denied) return { ok: false, response: denied };
   if (!isSameOriginRequest(req)) return { ok: false, response: fail("cross_origin", "This request did not come from the ClawBox desktop.", 403) };
-  if (await hasOwnerSession(req)) return { ok: true, writer: OWNER_WRITER };
+  if (await hasPersonSession(req)) return { ok: true, writer: OWNER_WRITER };
   if (verifyMcpBearer(req.headers.get("authorization"))) return { ok: true, writer: ASSISTANT_WRITER };
   return { ok: false, response: fail("owner_only", `${what} needs a signed-in browser session or the box's assistant.`, 403) };
 }

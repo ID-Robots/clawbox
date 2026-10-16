@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { startMemoryIndex } from "@/lib/clawkeep-memory";
 import { getMemoryShardEnabled } from "@/lib/memory-shard";
 
@@ -35,7 +35,7 @@ function switchedOff() {
 }
 
 export async function POST(request: NextRequest) {
-  if (!(await hasOwnerSession(request))) {
+  if (!(await hasPersonSession(request))) {
     return NextResponse.json(
       { error: "Starting an index run needs a signed-in browser session.", kind: "owner_only" },
       { status: 403, headers: { "Cache-Control": "no-store" } },

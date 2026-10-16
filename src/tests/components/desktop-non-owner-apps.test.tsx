@@ -6,12 +6,11 @@ import { _resetSessionUserForTest } from "@/lib/use-session-user";
 import { nonOwnerVerdict } from "@/lib/non-owner-scope";
 import { UPDATE_LOCK_HEADER, UPDATING_PAGE } from "@/lib/update-constants";
 
-// Multi-user ClawBox OS (TASK-1256). The owner's store-installed apps — skills
-// and web apps — are the owner's: a second ClawBox user's desktop must not
-// offer them in the icon grid, the launcher or the shelf, whatever the box
-// answers. And it must not ASK for them, or for anything else the server only
-// refuses a non-owner: the lab1 hardware test counted ~15 owner-only requests
-// (each a 403, several on a poll) from a non-owner's desktop on load.
+// Multi-user ClawBox OS. A second ClawBox user gets the owner's desktop: the
+// store-installed apps — skills and web apps — in the icon grid, the launcher
+// and the shelf, the assistant (their own chat), the mascot, the notices. And
+// it still asks the server nothing the server would refuse them: every
+// request is judged by the very table the middleware answers with.
 
 // The widgets that fetch on mount are counted rather than rendered, so a case
 // can tell "mounted and quiet" from "never mounted".
@@ -52,7 +51,10 @@ function installFetch() {
     if (signedOut && url.includes("/setup-api/")) {
       return { ok: false, status: 401, headers: new Headers(), json: async () => ({ error: "Unauthorized" }), text: async () => "" };
     }
-    if (url.includes("/setup-api/users/me")) return answer(me, updateLocked ? { [UPDATE_LOCK_HEADER]: "1" } : {});
+    // The middleware stamps the update lock on every /setup-api answer alike.
+    const lock: Record<string, string> = updateLocked && url.includes("/setup-api/") ? { [UPDATE_LOCK_HEADER]: "1" } : {};
+    if (url.includes("/setup-api/users/me")) return answer(me, lock);
+    if (url.includes("/setup-api/kv")) return answer({}, lock);
     if (url.includes("/setup-api/setup/status")) return answer({ setup_complete: true });
     if (url.includes("/setup-api/harness/active")) return answer({ active: "openclaw", edition: "openclaw", activeKnown: true });
     if (url.includes("/setup-api/preferences?all=1")) {
@@ -120,7 +122,7 @@ afterEach(() => {
   window.history.replaceState(null, "", "/");
 });
 
-describe("the desktop's installed apps — owner only", () => {
+describe("the desktop's installed apps — every signed-in person's", () => {
   it("offers the owner their installed app (so the case below means something)", async () => {
     me = OWNER;
     render(<ChromeDesktop />);
@@ -131,20 +133,24 @@ describe("the desktop's installed apps — owner only", () => {
     await drainOwnerWrites();
   });
 
-  it("offers a second ClawBox user none of them — not on the desktop, not in the launcher", async () => {
+  it("offers a second ClawBox user the same installed apps, and every built-in app but the harness console", async () => {
     me = ALICE;
     render(<ChromeDesktop />);
     expect(await screen.findByTestId("shelf-user-badge")).toBeInTheDocument();
-    await wait(50);
-    expect(screen.queryAllByText(APP_NAME)).toHaveLength(0);
+    expect((await screen.findAllByText(APP_NAME)).length).toBeGreaterThan(0);
 
     await openLauncher();
     const launcher = await screen.findByTestId("app-launcher");
-    // Past the launcher's 50 ms opening timer, so it settles inside this case.
-    await wait(150);
-    expect(screen.queryAllByText(APP_NAME)).toHaveLength(0);
-    // What the launcher does offer is the Terminal.
-    expect(launcher.textContent ?? "").toMatch(/terminal/i);
+    // The launcher's list once the harness and the copy have landed.
+    await waitFor(() => {
+      const offered = launcher.textContent ?? "";
+      for (const name of ["Settings", "Terminal", "Files", "Coding Agent", "ClawKeep", "Memory Shard", "Prime Radiant"]) {
+        expect(offered, name).toContain(name);
+      }
+    });
+    // The harness's own console lists every conversation on the box.
+    expect(launcher.textContent ?? "").not.toContain("OpenClaw");
+    await drainOwnerWrites();
   });
 });
 
@@ -160,31 +166,27 @@ describe("the desktop's requests — only what the signed-in user may ask", () =
     // Judged by the very table the middleware answers with, so this cannot
     // pass while the desktop asks for something the server would 403.
     const refused = requests().filter(({ method, url }) =>
-      nonOwnerVerdict({ pathname: url.pathname, method, searchParams: url.searchParams, intent: "fetch" }) !== "allow");
+      nonOwnerVerdict({ pathname: url.pathname, method, searchParams: url.searchParams, intent: "fetch", username: "alice" }) !== "allow");
     expect(refused.map((r) => r.label)).toEqual([]);
 
-    // The ones the lab saw, by name.
-    for (const fragment of [
-      "/setup-api/preferences?all=1",
-      "POST /setup-api/preferences",
-      "/setup-api/kv",
-      "/setup-api/harness/active",
-      "/setup-api/update/versions",
-      "/setup-api/telegram/pairing",
-      "/setup-api/whats-new",
-      "/setup-api/ai-models/status",
-      "/setup-api/clawkeep",
-      "/setup-api/system/power/approval",
-      "/setup-api/system/timezone",
-      "/setup-api/chat/capabilities",
-      "/setup-api/gateway/ws-config",
-    ]) {
-      expect(asked(fragment), fragment).toBe(false);
-    }
-    // The assistant, the mascot and the timezone adopter are not mounted at all.
-    expect(mounted.chat).toBe(0);
-    expect(mounted.mascot).toBe(0);
-    expect(mounted.timezone).toBe(0);
+    // …while asking what the owner's desktop asks: it IS the owner's desktop.
+    await waitFor(() => {
+      for (const fragment of [
+        "GET /setup-api/preferences?all=1",
+        "GET /setup-api/kv",
+        "/setup-api/harness/active",
+        "/setup-api/update/versions",
+        "/setup-api/ai-models/status",
+        "/setup-api/clawkeep",
+      ]) {
+        expect(asked(fragment), fragment).toBe(true);
+      }
+    });
+    // The assistant (their own chat), the mascot and the timezone adopter are mounted.
+    expect(mounted.chat).toBeGreaterThan(0);
+    expect(mounted.mascot).toBeGreaterThan(0);
+    expect(mounted.timezone).toBeGreaterThan(0);
+    await drainOwnerWrites();
   });
 
   it("the owner's desktop still asks for all of it", async () => {
@@ -247,10 +249,9 @@ describe("the desktop's requests — only what the signed-in user may ask", () =
       render(<ChromeDesktop />);
       expect(await screen.findByTestId("shelf-user-badge")).toBeInTheDocument();
       updateLocked = true;
-      // The desktop's 2 s poll: /users/me for a non-owner, which the
-      // middleware stamps with the update lock like any /setup-api answer.
+      // The desktop's 2 s poll of the notice ring, which the middleware
+      // stamps with the update lock like any /setup-api answer.
       await waitFor(() => expect(replace).toHaveBeenCalledWith(UPDATING_PAGE), { timeout: 6_000 });
-      expect(asked("/setup-api/kv")).toBe(false);
     } finally {
       if (saved) Object.defineProperty(window, "location", saved);
     }
@@ -315,16 +316,16 @@ describe("a desktop whose session is gone", () => {
   });
 
   it("a second ClawBox user's ordinary desktop is not sent to login", async () => {
-    // Their session is fine; the owner-only routes answer them 403, never
-    // 401, and the desktop must stay where it is (TASK-1256).
+    // Their session is fine; the few owner-only routes answer them 403, never
+    // 401, and the desktop must stay where it is.
     me = ALICE;
     const { replace, restore } = stubLocation();
     try {
       render(<ChromeDesktop />);
       expect(await screen.findByTestId("shelf-user-badge")).toBeInTheDocument();
-      // Wait for the desktop's own /users/me poll (the one that would carry a
-      // 401) to be made and answered, rather than for a fixed time.
-      const polls = () => requests().filter((r) => r.url.pathname === "/setup-api/users/me").length;
+      // Wait for the desktop's own notice-ring poll (the one that would carry
+      // a 401) to be made and answered, rather than for a fixed time.
+      const polls = () => requests().filter((r) => r.url.pathname === "/setup-api/kv").length;
       const before = polls();
       await waitFor(() => expect(polls()).toBeGreaterThan(before), { timeout: 6_000 });
       const results = vi.mocked(fetch).mock.results;

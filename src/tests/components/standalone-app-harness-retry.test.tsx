@@ -73,8 +73,9 @@ describe("/app/<id> — a probe that could not name the harness", () => {
   });
 });
 
-describe("/app/<id> — signed in as a user who is not the owner (TASK-1256)", () => {
-  it("never asks the owner's harness route, and fails closed without it", async () => {
+describe("/app/<id> — signed in as a user who is not the owner", () => {
+  it("asks the harness like the owner's page does — they get the owner's apps", async () => {
+    harnessMock.mockResolvedValue({ active: "openclaw", edition: "openclaw", activeKnown: true });
     const fetchMock = vi.fn(async (input: unknown) => ({
       ok: true,
       json: async () => (String(input).includes("/setup-api/users/me")
@@ -85,9 +86,7 @@ describe("/app/<id> — signed in as a user who is not the owner (TASK-1256)", (
 
     render(<StandaloneAppPage />);
 
-    // "unknown" hides both harnesses' apps — the answer a failed probe gives.
-    expect(await screen.findByText(/App not found: store/)).toBeInTheDocument();
-    await waitFor(() => expect(fetchMock.mock.calls.some(([u]) => String(u).includes("/setup-api/users/me"))).toBe(true));
-    expect(harnessMock).not.toHaveBeenCalled();
+    await waitFor(() => expect(harnessMock).toHaveBeenCalled());
+    expect(screen.queryByText(/App not found: store/)).toBeNull();
   });
 });

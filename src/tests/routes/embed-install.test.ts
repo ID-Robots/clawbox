@@ -15,7 +15,7 @@ import path from "path";
 
 let modelPath: string;
 const owner = { value: true };
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: async () => owner.value }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: async () => owner.value }));
 
 const followed = vi.fn(async () => ({ ok: true as boolean, error: undefined as string | undefined }));
 vi.mock("@/lib/root-step-follow", () => ({ followRootStep: (...a: unknown[]) => followed(...(a as [])) }));

@@ -100,6 +100,9 @@ def build(args):
     lib = '/usr/local/libexec/clawbox/'
     for name in ['clawbox-x64-step.sh', 'clawbox-x64-gateway.sh']:
         write(root, lib+name, (HERE/name).read_text(), 0o755)
+    # Settings → Users: the sign-in check and a ClawBox user's own Terminal,
+    # granted below exactly as config/clawbox-sudoers grants it on the appliance.
+    write(root, lib+'clawbox-user-helper.sh', (REPO/'config/clawbox-user-helper.sh').read_text(), 0o755)
     write(root,lib+'openclaw-cli','''#!/usr/bin/env bash
 set -euo pipefail
 . /etc/clawbox/x64-integration.env
@@ -119,7 +122,7 @@ exec "$NODE_DIR/node" "$NPM_PREFIX/lib/node_modules/openclaw/openclaw.mjs" "$@"
     write(root, lib+'clawbox-root-step.sh', dispatcher, 0o755)
     launcher=(REPO/'config/clawbox-run-root-step.sh').read_text()
     # Grant only the capabilities the x64 worker actually implements.
-    allowed='bootstrap_updater set_timezone chpasswd fix_git_perms apt_update nvidia_jetpack performance_mode chromium_install vnc_install vnc_refresh ffmpeg_install openclaw_install openclaw_setup openclaw_config openclaw_patch gateway_setup rebuild_reboot post_update llamacpp_install clawkeep_install cloudflared_install'
+    allowed='bootstrap_updater set_timezone chpasswd fix_git_perms apt_update nvidia_jetpack performance_mode chromium_install vnc_install vnc_refresh ffmpeg_install openclaw_install openclaw_setup openclaw_config openclaw_patch gateway_setup rebuild_reboot post_update llamacpp_install clawkeep_install cloudflared_install user_add user_remove'
     launcher,count=re.subn(r'WEB_ROOT_STEPS="\n.*?\n"', f'WEB_ROOT_STEPS="\n{allowed}\n"', launcher, count=1, flags=re.S)
     if count!=1: raise ValueError('vendor launcher allow-list changed')
     write(root, lib+'clawbox-run-root-step.sh', launcher, 0o755)
@@ -197,7 +200,8 @@ exec /usr/local/bin/cloudflared "$@"
             '/usr/bin/systemctl restart clawbox-gateway.service','/usr/bin/systemctl start clawbox-browser.service',
             '/usr/bin/systemctl stop clawbox-browser.service','/usr/bin/systemctl enable --now ollama.service',
             '/usr/bin/systemctl start ollama.service','/usr/bin/systemctl stop ollama.service',
-            '/usr/bin/systemctl start clawbox-embed.service','/usr/bin/systemctl stop clawbox-embed.service']
+            '/usr/bin/systemctl start clawbox-embed.service','/usr/bin/systemctl stop clawbox-embed.service',
+            lib+'clawbox-user-helper.sh']
     write(root,'/etc/sudoers.d/clawbox-x64-integration',f'{args.user} ALL=(root) NOPASSWD: '+', '.join(grants)+'\n',0o440)
     write(root,'/DEBIAN/control',f'''Package: clawbox-x64-integration
 Version: {args.version}

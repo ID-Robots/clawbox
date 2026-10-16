@@ -8,7 +8,7 @@ import type { NextRequest } from "next/server";
  * src/middleware.ts admits the MCP bearer to every /setup-api route so the
  * agent can reach the device's own API — and no MCP tool exists for any of
  * these, yet the bearer reached them all the same. Each route now re-checks
- * with `hasOwnerSession` (the cookie, never the bearer) and
+ * with `hasPersonSession` (the cookie, never the bearer) and
  * `isSameOriginRequest` (our page, not another site's POST riding the cookie),
  * the same pair clawkeep/setup uses. `backup` is deliberately NOT in this file:
  * the `backup_now` MCP tool posts it with the bearer, so gating it would break
@@ -26,7 +26,7 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/owner-session", () => ({
-  hasOwnerSession: vi.fn(async () => h.ownerSession),
+  hasPersonSession: vi.fn(async () => h.ownerSession),
 }));
 vi.mock("@/lib/same-origin", () => ({
   isSameOriginRequest: vi.fn(() => h.sameOrigin),

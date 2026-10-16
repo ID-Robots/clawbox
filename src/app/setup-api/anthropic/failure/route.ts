@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { startAnthropicSwap, type FailureOutcome } from "@/lib/anthropic-swap";
 import { reportChatFailure, startGatewaySwap } from "@/lib/anthropic-gateway";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
@@ -38,7 +38,7 @@ function refusal(error: string, code: string, status: number) {
 const ANSWER_WITHIN_MS = 4_000;
 
 export async function POST(request: Request) {
-  if (!(await hasOwnerSession(request))) return refusal("Reporting a failed turn needs a signed-in browser session.", "owner_only", 403);
+  if (!(await hasPersonSession(request))) return refusal("Reporting a failed turn needs a signed-in browser session.", "owner_only", 403);
   if (!isSameOriginRequest(request)) return refusal("A failed turn can only be reported from this ClawBox's own pages.", "cross_origin", 403);
 
   let body: Record<string, unknown>;

@@ -356,8 +356,9 @@ const NAV_ITEMS: { id: Section; icon: string; labelKey: string }[] = [
   { id: "voice", icon: "record_voice_over", labelKey: "settings.voice" },
   { id: "wifi", icon: "wifi", labelKey: "settings.network" },
   { id: "remote", icon: "cloud_sync", labelKey: "settings.remote" },
-  // Who can sign in to the box — each a real Linux account (TASK-1256). Only
-  // the owner ever sees Settings; the route behind the panel checks too.
+  // Who can sign in to the box — each a real Linux account. Every signed-in
+  // person gets Settings, this page with it; the owner's own account cannot
+  // be removed by anyone, and the route behind the panel checks too.
   { id: "users", icon: "group", labelKey: "settings.users" },
   { id: "system", icon: "monitor_heart", labelKey: "settings.system" },
   // The whole system update — versions, the run, beta channel, branch pin,

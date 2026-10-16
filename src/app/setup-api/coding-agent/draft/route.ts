@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { CodingAgentError, MAX_TASK_CHARS, ProviderChoiceError, createDraftRun, deleteDraftRun, httpStatusForCodingError } from "@/lib/coding-agent";
 import { runLifecycleRoute } from "@/lib/coding-agent-route";
 
@@ -39,7 +39,7 @@ export async function POST(request: Request) {
       { status: 413 },
     );
   }
-  const source = (await hasOwnerSession(request)) ? "owner" : "agent";
+  const source = (await hasPersonSession(request)) ? "owner" : "agent";
   try {
     const run = await createDraftRun({
       task,

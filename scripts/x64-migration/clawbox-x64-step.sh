@@ -880,5 +880,12 @@ PY
   # Out of the verified MIRROR, like the coding harness: root-established bytes,
   # never the desktop checkout.
   cloudflared_install) /bin/bash "$MIRROR/scripts/setup-tunnel.sh" ;;
+  # Settings → Users, out of the same MIRROR: the install-x64.sh PC's root
+  # dispatcher implements both, handed this desktop's owner and checkout (it
+  # would otherwise look for the x64.env this package never writes).
+  user_add|user_remove)
+    /usr/bin/env CLAWBOX_USER="$INSTALL_USER" PROJECT_DIR="$PROJECT_DIR" \
+      /bin/bash "$MIRROR/scripts/x64-migration/clawbox-x64-root-step.sh" "$step"
+    ;;
   *) echo "Error: $step is not supported by this desktop integration" >&2; exit 64 ;;
 esac

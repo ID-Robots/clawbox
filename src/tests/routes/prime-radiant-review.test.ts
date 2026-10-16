@@ -13,7 +13,7 @@ import { NextResponse } from "next/server";
 
 const auth = vi.hoisted(() => ({ requireSession: vi.fn() }));
 vi.mock("@/lib/route-auth", () => auth);
-const owner = vi.hoisted(() => ({ hasOwnerSession: vi.fn(async () => true) }));
+const owner = vi.hoisted(() => ({ hasPersonSession: vi.fn(async () => true) }));
 vi.mock("@/lib/owner-session", () => owner);
 const creds = vi.hoisted(() => ({
   resolveClawaiToken: vi.fn(async (): Promise<string | null> => null),
@@ -82,7 +82,7 @@ async function seed() {
 
 beforeEach(() => {
   auth.requireSession.mockReset().mockResolvedValue(null);
-  owner.hasOwnerSession.mockReset().mockResolvedValue(true);
+  owner.hasPersonSession.mockReset().mockResolvedValue(true);
   creds.resolveClawaiToken.mockReset().mockResolvedValue(null);
   setFlashClientOverride(null);
   const caseDir = path.join(base, `case-${++n}`);
@@ -123,8 +123,8 @@ describe("auth", () => {
     expect(fs.existsSync(root)).toBe(false);
   });
 
-  it("refuses a caller with neither the owner's cookie nor the assistant's bearer on the writes, but lets the session raise a review item", async () => {
-    owner.hasOwnerSession.mockResolvedValue(false);
+  it("refuses a caller with neither a person's cookie nor the assistant's bearer on the writes, but lets the session raise a review item", async () => {
+    owner.hasPersonSession.mockResolvedValue(false);
     for (const res of [
       await resolvePOST(req("POST", "/review/rev-000000000000/resolve", { action: "later" }), idCtx("rev-000000000000")),
       await revertPOST(req("POST", "/revert", { commit: "abcdef1" })),
@@ -141,7 +141,7 @@ describe("auth", () => {
   });
 
   it("lets the assistant change the schedule and the Opus cap, never what the cap is measured in", async () => {
-    owner.hasOwnerSession.mockResolvedValue(false);
+    owner.hasPersonSession.mockResolvedValue(false);
     const asAssistant = { authorization: "Bearer test-assistant-bearer" };
     for (const body of [
       { costRates: { "claude-opus-5-5": { input: 0, output: 0 } } },
@@ -154,7 +154,7 @@ describe("auth", () => {
     const ok = await settingsPUT(req("PUT", "/settings", { nightly: { time: "04:30" }, opus: { enabled: true, capUsd: 5 } }, asAssistant));
     expect(ok.status).toBe(200);
     expect((await ok.json()).settings).toMatchObject({ nightly: { time: "04:30" }, opus: { enabled: true, capUsd: 5 } });
-    owner.hasOwnerSession.mockResolvedValue(true);
+    owner.hasPersonSession.mockResolvedValue(true);
     const owners = await settingsPUT(req("PUT", "/settings", { opus: { model: "claude-opus-5-5" } }));
     expect(owners.status).toBe(200);
   });

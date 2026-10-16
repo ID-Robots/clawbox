@@ -4,7 +4,7 @@
  * The property that matters: the ASSISTANT must not be able to switch the index
  * on, widen what it reads, or move where the owner's memories are embedded.
  * Middleware admits the MCP bearer on every /setup-api path and the agent holds
- * it, so each of these routes refuses in-handler with hasOwnerSession — the same
+ * it, so each of these routes refuses in-handler with hasPersonSession — the same
  * rule as coding-agent/enable. (The three memory routes that existed before this
  * have no such check at all, which is how the agent can start a full reindex
  * today; that is noted for a separate change.)
@@ -18,9 +18,9 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: vi.fn(async () => false) }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: vi.fn(async () => false) }));
 
 /**
  * The OpenClaw config as the CLI would hold it, in memory: `readConfig` and
@@ -86,7 +86,7 @@ vi.mock("@/lib/memory-shard", async () => {
 });
 
 afterEach(() => {
-  vi.mocked(hasOwnerSession).mockReset().mockResolvedValue(false);
+  vi.mocked(hasPersonSession).mockReset().mockResolvedValue(false);
   switchToLocalEmbeddings.mockClear();
   invalidateMemoryStatusCache.mockClear();
   cli.reset();
@@ -133,7 +133,7 @@ describe("the provider switch's origin guard", () => {
     new Request(url("provider"), { method: "POST", headers: { host: "localhost", ...headers } });
 
   it("refuses a cross-site POST that carries the owner's session, before anything is written", async () => {
-    vi.mocked(hasOwnerSession).mockResolvedValue(true);
+    vi.mocked(hasPersonSession).mockResolvedValue(true);
     const { POST } = await import("@/app/setup-api/clawkeep/memory/provider/route");
     const res = await POST(post({ origin: "https://evil.example" }));
     expect(res.status).toBe(403);
@@ -142,7 +142,7 @@ describe("the provider switch's origin guard", () => {
   });
 
   it("refuses a browser that says cross-site even without an Origin", async () => {
-    vi.mocked(hasOwnerSession).mockResolvedValue(true);
+    vi.mocked(hasPersonSession).mockResolvedValue(true);
     const { POST } = await import("@/app/setup-api/clawkeep/memory/provider/route");
     const res = await POST(post({ "sec-fetch-site": "cross-site" }));
     expect(res.status).toBe(403);
@@ -151,7 +151,7 @@ describe("the provider switch's origin guard", () => {
   });
 
   it("lets the box's own page through — the guard must not refuse the wizard", async () => {
-    vi.mocked(hasOwnerSession).mockResolvedValue(true);
+    vi.mocked(hasPersonSession).mockResolvedValue(true);
     const { POST } = await import("@/app/setup-api/clawkeep/memory/provider/route");
     const res = await POST(post({ origin: "http://localhost" }));
     expect(res.status).toBe(200);
@@ -288,7 +288,7 @@ describe("folder writes are serialised (ms-findings F-A)", () => {
     });
 
     it("ends with the state the last call asked for when POST and DELETE overlap", async () => {
-      vi.mocked(hasOwnerSession).mockResolvedValue(true);
+      vi.mocked(hasPersonSession).mockResolvedValue(true);
       const { NextRequest } = await import("next/server");
       const { POST, DELETE } = await import("@/app/setup-api/clawkeep/memory/sources/route");
       cli.extraPaths = ["/home/owner/old"];
@@ -312,7 +312,7 @@ describe("folder writes are serialised (ms-findings F-A)", () => {
     });
 
     it("answers a stable kind when the write itself fails, rather than a bare 500", async () => {
-      vi.mocked(hasOwnerSession).mockResolvedValue(true);
+      vi.mocked(hasPersonSession).mockResolvedValue(true);
       const { NextRequest } = await import("next/server");
       const { POST, DELETE } = await import("@/app/setup-api/clawkeep/memory/sources/route");
       cli.extraPaths = ["/home/owner/old"];
@@ -334,7 +334,7 @@ describe("folder writes are serialised (ms-findings F-A)", () => {
     });
 
     it("answers success, with the folder in the list, when the write landed and only the read-back failed", async () => {
-      vi.mocked(hasOwnerSession).mockResolvedValue(true);
+      vi.mocked(hasPersonSession).mockResolvedValue(true);
       const { NextRequest } = await import("next/server");
       const { POST } = await import("@/app/setup-api/clawkeep/memory/sources/route");
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -352,7 +352,7 @@ describe("folder writes are serialised (ms-findings F-A)", () => {
     });
 
     it("answers read_failed and writes nothing while openclaw.json cannot be read", async () => {
-      vi.mocked(hasOwnerSession).mockResolvedValue(true);
+      vi.mocked(hasPersonSession).mockResolvedValue(true);
       const { NextRequest } = await import("next/server");
       const { GET, POST, DELETE } = await import("@/app/setup-api/clawkeep/memory/sources/route");
       cli.extraPaths = ["/home/owner/old"];

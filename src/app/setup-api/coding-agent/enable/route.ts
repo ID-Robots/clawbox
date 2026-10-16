@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { refreshCodingAgentToolsIfChanged } from "@/lib/coding-agent-mcp-refresh";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { logSafe } from "@/lib/log-safe";
 import { bodyWouldEnable } from "@/lib/paid-plan-gate";
 import { readPlanGate, refusePaidPlan } from "@/lib/paid-plan-gate-server";
@@ -172,7 +172,7 @@ function forbidden() {
  *          or 403 without an owner session
  */
 export async function POST(request: Request) {
-  if (!(await hasOwnerSession(request))) return forbidden();
+  if (!(await hasPersonSession(request))) return forbidden();
 
   let body: unknown;
   try {

@@ -1447,6 +1447,18 @@ x64_sudoers_rule() {
   printf '%s\n' ", /usr/bin/systemctl enable --now ollama.service, /usr/bin/systemctl start ollama.service, /usr/bin/systemctl stop ollama.service"
 }
 
+# Settings → Users: a ClawBox user's sign-in check and their own Terminal
+# (`sudo -n clawbox-user-helper.sh verify|shell <user>`, src/lib/clawbox-users.ts
+# and scripts/terminal-server.mjs), the appliance's config/clawbox-sudoers grant
+# for the same root-owned helper. Its own drop-in, written by
+# step_root_step_contract beside the helper it names, so the one repair command
+# the app prints brings both — and never rewrites the service grants above,
+# whose desktop half depends on how this PC was first installed.
+X64_USERS_SUDOERS="/etc/sudoers.d/clawbox-x64-users"
+x64_user_helper_sudoers_rule() {
+  printf '%s\n' "$CLAWBOX_USER ALL=(root) NOPASSWD: /usr/local/libexec/clawbox/clawbox-user-helper.sh"
+}
+
 reserved_port_env_keys() {
   local env_file="$PROJECT_DIR/.env"
   [ -f "$env_file" ] || return 0
@@ -1544,9 +1556,29 @@ step_root_step_contract() {
     return 1
   fi
 
+  # The multi-user helper ships in config/, beside the appliance's copy of it.
+  local helper="$src/../../config/clawbox-user-helper.sh"
+  if [ ! -f "$helper" ]; then
+    echo "Error: config/clawbox-user-helper.sh not found beside $src" >&2
+    return 1
+  fi
+
   install -d -o root -g root -m 0755 "$ROOT_STEP_DIR" "$ROOT_STEP_CONF_DIR"
   install -o root -g root -m 0755 "$src/clawbox-x64-run-root-step.sh" "$ROOT_STEP_DIR/clawbox-run-root-step.sh"
   install -o root -g root -m 0755 "$src/clawbox-x64-root-step.sh" "$ROOT_STEP_DIR/clawbox-root-step.sh"
+  install -o root -g root -m 0755 "$helper" "$ROOT_STEP_DIR/clawbox-user-helper.sh"
+
+  local users_sudoers_tmp
+  users_sudoers_tmp=$(mktemp)
+  x64_user_helper_sudoers_rule > "$users_sudoers_tmp"
+  chmod 440 "$users_sudoers_tmp"
+  if ! visudo -cf "$users_sudoers_tmp" >/dev/null; then
+    rm -f "$users_sudoers_tmp"
+    echo "Error: generated x64 users sudoers rule is invalid" >&2
+    return 1
+  fi
+  install -o root -g root -m 440 "$users_sudoers_tmp" "$X64_USERS_SUDOERS"
+  rm -f "$users_sudoers_tmp"
 
   # Root runs a root-owned copy of this installer, never $PROJECT_DIR/install-x64.sh:
   # that tree belongs to the install user, so exec'ing it as root would make the
@@ -1574,7 +1606,7 @@ UNIT
   systemctl daemon-reload
 
   reconcile_owner_password_flag
-  echo "  Root-step contract installed (launcher, dispatcher, template unit)"
+  echo "  Root-step contract installed (launcher, dispatcher, users helper and its grant, template unit)"
 }
 
 step_systemd_services() {

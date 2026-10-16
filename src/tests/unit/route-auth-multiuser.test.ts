@@ -1,13 +1,14 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import crypto from "crypto";
 import fs from "fs";
 import os from "os";
 import path from "path";
 
-// TASK-1256: the in-handler guard and identity question with more than one
-// ClawBox user. A second user's session is a real session — but not the
-// owner's, so every owner route answers it 403 owner_only (never 401, which
-// the desktop reads as "signed out").
+// The in-handler guard and identity questions with more than one ClawBox
+// user. A second user's session is a real session that gets the owner's
+// desktop: `requireSession` and the person check let it through, and only a
+// route marked `ownerOnly` — the owner's account itself — answers it 403
+// owner_only (never 401, which the desktop reads as "signed out").
 
 const SECRET = "test-session-secret-0123456789abcdef";
 const ALICE_SV = "a1b2c3d4e5f60718";
@@ -36,6 +37,8 @@ describe("route-auth with ClawBox users", () => {
   }
 
   beforeEach(() => {
+    // Every module reads its data folder from CLAWBOX_ROOT when it loads.
+    vi.resetModules();
     root = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-multiuser-"));
     fs.mkdirSync(path.join(root, "data"), { recursive: true });
     fs.writeFileSync(path.join(root, "data", ".session-secret"), SECRET, { mode: 0o600 });
@@ -62,23 +65,26 @@ describe("route-auth with ClawBox users", () => {
     expect(await sessionIdentity(request())).toBeNull();
   });
 
-  it("hasValidSession — the owner question — is false for a second user", async () => {
+  it("hasValidSession is true for every signed-in person, the second user included", async () => {
     const { hasValidSession } = await import("@/lib/route-auth");
     expect(await hasValidSession(request(sign({})))).toBe(true);
-    expect(await hasValidSession(request(sign({ u: "alice", sv: ALICE_SV })))).toBe(false);
+    expect(await hasValidSession(request(sign({ u: "alice", sv: ALICE_SV })))).toBe(true);
+    expect(await hasValidSession(request())).toBe(false);
   });
 
-  it("requireSession answers a second user 403 owner_only, not 401", async () => {
+  it("requireSession lets a second user through: they get the owner's desktop", async () => {
     const { requireSession } = await import("@/lib/route-auth");
-    const res = await requireSession(request(sign({ u: "alice", sv: ALICE_SV })));
+    expect(await requireSession(request(sign({ u: "alice", sv: ALICE_SV })))).toBeNull();
+    expect(await requireSession(request(sign({})))).toBeNull();
+  });
+
+  it("requireSession with ownerOnly answers a second user 403 owner_only, not 401 — and lets the owner through", async () => {
+    const { requireSession } = await import("@/lib/route-auth");
+    const res = await requireSession(request(sign({ u: "alice", sv: ALICE_SV })), { ownerOnly: true });
     expect(res?.status).toBe(403);
     expect(await res?.json()).toMatchObject({ code: "owner_only" });
-  });
-
-  it("requireSession lets a second user through only where the route opts in", async () => {
-    const { requireSession } = await import("@/lib/route-auth");
-    expect(await requireSession(request(sign({ u: "alice", sv: ALICE_SV })), { allowNonOwner: true })).toBeNull();
-    expect(await requireSession(request(sign({})), { allowNonOwner: true })).toBeNull();
+    expect(await requireSession(request(sign({})), { ownerOnly: true })).toBeNull();
+    expect((await requireSession(request(), { ownerOnly: true }))?.status).toBe(401);
   });
 
   it("a removed user is signed out everywhere: 401, as if they had no cookie", async () => {
@@ -96,18 +102,33 @@ describe("route-auth with ClawBox users", () => {
     expect(await sessionIdentity(request(cookie))).toBeNull();
   });
 
-  it("the Terminal's shell list — scoped per user — answers a second user; the users admin does not", async () => {
-    process.env.SESSION_SECRET = SECRET; // hasOwnerSession signs with the live secret
+  it("the Terminal's shell list and the users admin both answer a second user; the owner's password route does not", async () => {
+    process.env.SESSION_SECRET = SECRET; // the person check signs with the live secret
     const alice = sign({ u: "alice", sv: ALICE_SV });
     const { GET: shells } = await import("@/app/setup-api/terminal/shells/route");
     expect((await shells(request(alice))).status).toBe(200);
-    const { GET: users } = await import("@/app/setup-api/users/route");
-    const res = await users(request(alice));
+    const { POST: credentials } = await import("@/app/setup-api/system/credentials/route");
+    const res = await credentials(new Request("http://localhost/setup-api/system/credentials", {
+      method: "POST",
+      headers: { cookie: `clawbox_session=${alice}`, "content-type": "application/json" },
+      body: JSON.stringify({ currentPassword: "x", password: "a new password for the owner" }),
+    }));
     expect(res.status).toBe(403);
     expect(await res.json()).toMatchObject({ code: "owner_only" });
   });
 
-  it("hasOwnerSession — the owner-only gate on 38 routes — refuses a second user and keeps a legacy cookie", async () => {
+  it("hasPersonSession — the person gate on the desktop's routes — answers every signed-in person, never a stale cookie", async () => {
+    process.env.SESSION_SECRET = SECRET;
+    const { hasPersonSession, personSession } = await import("@/lib/owner-session");
+    expect(await hasPersonSession(request(sign({})))).toBe(true);
+    expect(await hasPersonSession(request(sign({ u: "alice", sv: ALICE_SV })))).toBe(true);
+    expect(await personSession(request(sign({ u: "alice", sv: ALICE_SV })))).toEqual({ username: "alice", isOwner: false });
+    expect(await hasPersonSession(request(sign({ u: "alice", sv: "0f0f0f0f0f0f0f0f" })))).toBe(false);
+    expect(await hasPersonSession(request(sign({ u: "root" })))).toBe(false);
+    expect(await hasPersonSession(request())).toBe(false);
+  });
+
+  it("hasOwnerSession — the owner's own token and account — refuses a second user and keeps a legacy cookie", async () => {
     process.env.SESSION_SECRET = SECRET;
     const { hasOwnerSession } = await import("@/lib/owner-session");
     expect(await hasOwnerSession(request(sign({})))).toBe(true);
