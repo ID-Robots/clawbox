@@ -12,7 +12,7 @@ import { clearPairingState, readPairingAllowEntries, readPairingRequests } from 
 import fsSync from "fs";
 import path, { untraced } from "@/lib/runtime-path";
 import { execFile, spawn } from "child_process";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import { isDeepStrictEqual, promisify } from "util";
 import { getLlamaCppProxyBaseUrl } from "@/lib/llamacpp";
 import { getLocalAiProxyRootUrl } from "@/lib/local-ai-proxy-url";
@@ -2603,13 +2603,19 @@ async function writeSecretJsonAtomically(file: string, data: unknown): Promise<v
   await fs.rename(tmpPath, file);
 }
 
-/** The config file's identity, size and mtime, or "absent". Synchronous: one stat. */
+/**
+ * The config file's content, as a digest; "absent" when there is no file, and
+ * "unreadable" when there is one this process could not read. The content
+ * alone: an in-place rewrite of the same size inside one mtime tick is a
+ * change, while a rename that left the same bytes, or a touch, is not one. The
+ * file is small and usually in the page cache; one synchronous read per
+ * whole-file write.
+ */
 function configFileFingerprint(): string {
   try {
-    const stat = fsSync.statSync(CONFIG_PATH);
-    return `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
-  } catch {
-    return "absent";
+    return createHash("sha256").update(fsSync.readFileSync(CONFIG_PATH)).digest("hex");
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === "ENOENT" ? "absent" : "unreadable";
   }
 }
 
@@ -2620,10 +2626,12 @@ export async function writeConfig(config: OpenClawConfig): Promise<void> {
   await flushConfigWrites();
   // Never under a gateway that is starting (`@/lib/gateway-start-guard`). The
   // caller read the file before this wait; a file that moved during it (the
-  // gateway's own start writes it) is not written over with that snapshot.
+  // gateway's own start writes it) is not written over with that snapshot, and
+  // neither is one that could not be read: unread is not unchanged.
   const readAs = configFileFingerprint();
-  if (await holdWhileGatewayStarts("writeConfig") && configFileFingerprint() !== readAs) {
-    throw new ConfigChangedWhileHeldError();
+  if (await holdWhileGatewayStarts("writeConfig")) {
+    const nowAs = configFileFingerprint();
+    if (nowAs !== readAs || nowAs === "unreadable") throw new ConfigChangedWhileHeldError();
   }
   await fs.mkdir(OPENCLAW_HOME, { recursive: true });
   await writeSecretJsonAtomically(CONFIG_PATH, config);
