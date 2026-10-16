@@ -149,8 +149,10 @@ const defaultRunner: CliRunner = (bin, args, input, options) =>
       options.signal?.removeEventListener("abort", onAbort);
       resolve({ code, stdout, stderr, timedOut });
     };
+    // The tail, not the head: the JSON result line comes last.
     child.stdout.on("data", (b: Buffer) => {
-      if (stdout.length < MAX_STDOUT_BYTES) stdout += b.toString("utf8");
+      stdout += b.toString("utf8");
+      if (stdout.length > MAX_STDOUT_BYTES) stdout = stdout.slice(stdout.length - MAX_STDOUT_BYTES);
     });
     child.stderr.on("data", (b: Buffer) => {
       if (stderr.length < MAX_STDERR_BYTES) stderr += b.toString("utf8");

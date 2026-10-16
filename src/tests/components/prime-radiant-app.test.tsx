@@ -681,6 +681,18 @@ describe("PrimeRadiantApp", () => {
     });
   });
 
+  it("never lets the page cap block a save while the second opinion is off", async () => {
+    opusExtras = { source: "api_key", maxPages: 100 };
+    await mount();
+    await openTab("settings");
+    fireEvent.change(await screen.findByTestId("prime-radiant-opus-max-pages"), { target: { value: "" } });
+    fireEvent.click(screen.getByTestId("prime-radiant-settings-save"));
+    await waitFor(() => {
+      const put = calls.find((c) => c.url.endsWith("/settings") && c.method === "PUT");
+      expect((put?.body as { opus: unknown }).opus).toEqual({ enabled: false, capUsd: 2 });
+    });
+  });
+
   it("says when no account can give a second opinion", async () => {
     opusExtras = { source: "none", maxPages: 100 };
     await mount();

@@ -118,7 +118,8 @@ export default function PrimeRadiantSettings({ onChanged }: { onChanged: () => v
     if (!Number.isInteger(parallel) || parallel < answer.limits.ingestParallel.min || parallel > answer.limits.ingestParallel.max) {
       return setError(t("primeRadiant.settings.badParallel", { min: answer.limits.ingestParallel.min, max: answer.limits.ingestParallel.max }));
     }
-    const pagesLimit = answer.limits.opusMaxPages;
+    // Only while the tier is on: the field is disabled otherwise, so a bad value there could not be fixed.
+    const pagesLimit = draft.opusEnabled ? answer.limits.opusMaxPages : undefined;
     const maxPages = Number(draft.opusMaxPages);
     if (pagesLimit && (!Number.isInteger(maxPages) || maxPages < pagesLimit.min || maxPages > pagesLimit.max)) {
       return setError(t("primeRadiant.settings.badOpusMaxPages", { min: pagesLimit.min, max: pagesLimit.max }));

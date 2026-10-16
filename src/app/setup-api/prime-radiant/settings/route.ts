@@ -51,10 +51,14 @@ const LIMITS = {
   domains: MAX_DOMAINS,
 };
 
+const OPUS_SOURCE_BUDGET_MS = 3_000;
+
 async function answer() {
-  const opusSource = await detectOpusSource()
-    .then((d) => d.source)
-    .catch(() => "none" as const);
+  // Bounded: a pool or PATH read that stalls must not hold the page (or a save that already landed).
+  const opusSource = await Promise.race([
+    detectOpusSource().then((d) => d.source),
+    new Promise<"none">((resolve) => setTimeout(() => resolve("none"), OPUS_SOURCE_BUDGET_MS).unref?.()),
+  ]).catch(() => "none" as const);
   return { settings: readSettings(), defaults: defaultSettings(), limits: LIMITS, nightly: { nextRunAt: nextRunAtMs() }, rates: effectiveCostRates(), opusSource };
 }
 
