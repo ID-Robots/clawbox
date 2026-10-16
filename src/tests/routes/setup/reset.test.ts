@@ -232,6 +232,45 @@ describe("POST /setup-api/setup/reset", () => {
       .toBeGreaterThan(calls.indexOf("/usr/bin/sudo /usr/bin/systemctl --runtime unmask clawbox-gateway.service"));
   });
 
+  // What a stop still under way leaves the restart: on hardware it is queued
+  // behind the running stop, so its 5 s client is killed while systemd holds
+  // it; refused outright (a start limit, a refused sudo), it comes back at once.
+  it.each<[string, Error, RegExp, RegExp | null]>([
+    [
+      "says it was asked to start again when the restart's client waits out its deadline",
+      Object.assign(new Error("Command failed: /usr/bin/sudo /usr/bin/systemctl restart clawbox-gateway.service"), {
+        killed: true, signal: "SIGTERM", code: null,
+      }),
+      /Nothing was erased.*asked to start again/,
+      null,
+    ],
+    [
+      "says it stays stopped when systemd refused the restart outright",
+      Object.assign(new Error("Job for clawbox-gateway.service failed: start request repeated too quickly"), { code: 1 }),
+      /Nothing was erased.*stays stopped until the device is restarted/,
+      /start again/,
+    ],
+  ])("%s", async (_what, restartAnswer, said, notSaid) => {
+    setupExecFileMock({
+      nmcli: { stdout: "", stderr: "" },
+      systemctl: { stdout: "", stderr: "" },
+      "systemctl stop clawbox-gateway.service": STOP_TIMED_OUT,
+      "systemctl show clawbox-gateway.service": { stdout: "Job=\nActiveState=deactivating\nSubState=stop-sigterm\nResult=success\n", stderr: "" },
+      "systemctl restart clawbox-gateway.service": restartAnswer,
+    });
+    const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const pending = resetPost();
+    await vi.advanceTimersByTimeAsync(5_000);
+    const res = await pending;
+    quiet.mockRestore();
+    expect(res.status).toBe(500);
+    const { error } = await res.json();
+    expect(error).toMatch(said);
+    if (notSaid) expect(error).not.toMatch(notSaid);
+    expect(systemctlCalls()).toContain("/usr/bin/sudo /usr/bin/systemctl restart clawbox-gateway.service");
+    expect(mockFs.rm).not.toHaveBeenCalled();
+  });
+
   it("does not promise a restart it could not ask for", async () => {
     // The unmask failed, so a restart would be refused as masked: the answer
     // says the assistant stays stopped instead of that it is coming back.

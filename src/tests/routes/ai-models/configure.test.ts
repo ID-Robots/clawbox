@@ -3813,6 +3813,78 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(body.error).not.toMatch(/exec-approvals/i);
     });
 
+    const subscriptionSignIn = () => jsonRequest({
+      provider: "anthropic",
+      apiKey: ANTHROPIC_OAUTH_ACCESS,
+      authMode: "subscription",
+      refreshToken: "refresh-token",
+      expiresIn: 3600,
+    });
+
+    it.each(["gateway-not-stopped", "gateway-still-stopping"] as const)(
+      "says the assistant was busy, and gives no Terminal advice, when doctor answers %s",
+      async (outcome) => {
+        // Doctor refused to run beside a gateway that was not down (another
+        // surface restarted it, or its stop was still draining). The migration
+        // did not happen, so the sign-in still rolls back; "run doctor from the
+        // Terminal" is advice for a command that was deliberately not run.
+        vi.mocked(runOpenclawDoctorFix).mockResolvedValueOnce(outcome);
+        vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.9.3 (test)\n");
+        mockFs.readdir.mockResolvedValueOnce([]);
+
+        const res = await configurePost(subscriptionSignIn());
+        const body = await res.json();
+
+        expect(res.status).toBe(502);
+        expect(body.error).toMatch(/busy restarting/i);
+        expect(body.error).toMatch(/sign in again in a few minutes/i);
+        expect(body.error).not.toMatch(/Terminal/i);
+        expect(mockFs.rename).toHaveBeenCalledWith(
+          expect.stringMatching(/auth-profiles\.json$/),
+          expect.stringMatching(/auth-profiles\.json\.failed-/),
+        );
+      },
+    );
+
+    it.each(["gateway-still-stopping", "gateway-not-stopped"] as const)(
+      "only asks for the restore when doctor answered %s",
+      async (outcome) => {
+        // systemd queues the restart behind the job still running (a drain,
+        // another surface's restart); waiting that job out with the usual
+        // 60 s client would answer past the tunnel's cut.
+        vi.mocked(runOpenclawDoctorFix).mockResolvedValueOnce(outcome);
+        vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.9.3 (test)\n");
+        mockFs.readdir.mockResolvedValueOnce([]);
+
+        await configurePost(subscriptionSignIn());
+
+        expect(mockRestartGateway).toHaveBeenCalledWith(
+          expect.objectContaining({ awaitReady: false, restartClientMs: 5_000, restartSettleMs: 0 }),
+        );
+      },
+    );
+
+    it("does not send the owner to press Restart over a restart systemd already holds", async () => {
+      vi.mocked(runOpenclawDoctorFix).mockResolvedValueOnce("gateway-still-stopping");
+      vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.9.3 (test)\n");
+      mockFs.readdir.mockResolvedValueOnce([]);
+      // What restartGateway throws for a restart still in flight (the real
+      // class's name; this suite's factory does not carry the class).
+      mockRestartGateway.mockRejectedValueOnce(Object.assign(
+        new Error("the gateway is still restarting (clawbox-gateway.service has not finished after 0s more)"),
+        { name: "GatewayNotReadyError" },
+      ));
+      const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+      const res = await configurePost(subscriptionSignIn());
+      const body = await res.json();
+      quiet.mockRestore();
+
+      expect(res.status).toBe(502);
+      expect(body.error).toMatch(/busy restarting/i);
+      expect(body.error).not.toMatch(/offline until the gateway restarts/);
+    });
+
     it("keeps the legacy best-effort doctor behavior on an explicit OpenClaw 1 binary", async () => {
       vi.mocked(runOpenclawDoctorFix).mockRejectedValueOnce(new Error("v1 doctor unavailable"));
       vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.7.9 (test)\n");

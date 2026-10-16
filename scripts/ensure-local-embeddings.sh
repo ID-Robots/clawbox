@@ -387,34 +387,20 @@ wait_for_gateway_started() {
   done
   return 1
 }
-# Whether one process is the gateway server. Same rule as
-# isGatewayServerProcess in src/lib/gateway-start-guard.ts: argv naming the
-# `gateway` command, or the title the core sets over it (`openclaw-gateway`, or
-# `openclaw` on the unit's own main process, whose parent is the service
-# manager). The ExecStartPre's own CLI calls are children of its shell.
-gateway_pid_is_server() {
-  local pid=$1 title ppid
-  [ -r "/proc/$pid/cmdline" ] || return 1
-  tr '\0' '\n' < "/proc/$pid/cmdline" | awk '
-    g == 1 { if ($0 == "run" || substr($0, 1, 1) == "-") ok = 1; g = 2 }
-    g == 0 && $0 == "gateway" { g = 1 }
-    END { exit (g == 1 || ok) ? 0 : 1 }' && return 0
-  title="$(tr '\0' ' ' < "/proc/$pid/cmdline" | sed 's/[[:space:]]*$//')"
-  [ "$title" = "openclaw-gateway" ] && return 0
-  [ "$title" = "openclaw" ] || return 1
-  ppid="$(sed 's/.*) //' "/proc/$pid/stat" 2>/dev/null | cut -d' ' -f2)"
-  [ -n "$ppid" ] && [ "$(cat "/proc/$ppid/comm" 2>/dev/null)" = "systemd" ]
-}
-# Whether the gateway PROCESS is up in its unit (the appliance's system unit, or
-# the owner's user unit on an x64 bridge); the unit's ExecStartPre does not
-# count. GATEWAY_CGROUP_DIRS replaces the two places looked in.
-gateway_process_up() {
-  local dir pid uid
+# Whether the gateway unit is running anything: the gateway itself, or its
+# ExecStartPre (the appliance's system unit, or the owner's user unit on an x64
+# bridge). The pre-start counts: a CLI write takes seconds, so one started late
+# in it is still writing when ExecStart begins. The places looked in are the
+# ones gatewayCgroupDirs() in src/lib/gateway-start-guard.ts reads;
+# GATEWAY_CGROUP_DIRS replaces them.
+gateway_unit_running() {
+  local dir pid uid manager
   uid="$(id -u)"
-  for dir in ${GATEWAY_CGROUP_DIRS:-/sys/fs/cgroup/system.slice/clawbox-gateway.service /sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/app.slice/openclaw-gateway.service}; do
+  manager="/sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service"
+  for dir in ${GATEWAY_CGROUP_DIRS:-/sys/fs/cgroup/system.slice/clawbox-gateway.service $manager/app.slice/openclaw-gateway.service $manager/openclaw-gateway.service}; do
     [ -r "$dir/cgroup.procs" ] || continue
     while read -r pid; do
-      gateway_pid_is_server "$pid" && return 0
+      [ -n "$pid" ] && [ -d "/proc/$pid" ] && return 0
     done < "$dir/cgroup.procs"
   done
   return 1
@@ -463,12 +449,13 @@ else
   # A config write inside a gateway's startup admission makes OpenClaw refuse
   # readiness ("migration inputs changed during startup", exit 78) and stay
   # down. Launched by the gateway's own pre-start, this runs WHILE that gateway
-  # starts; launched by install.sh, it runs just after one was restarted.
-  # Either way the write waits for the core's own /startupz to say started; a
-  # start that does not finish in time is left alone and tried again later.
-  # No gateway running at all (an update holding it stopped) writes at once.
+  # starts; launched by install.sh, it runs just after one was restarted, or
+  # while its unit's pre-start still runs. Either way the write waits for the
+  # core's own /startupz to say started; a start that does not finish in time
+  # is left alone and tried again later. A gateway unit running nothing at all
+  # (an update holding it stopped) writes at once.
   if { [ "${CLAWBOX_AFTER_GATEWAY_START:-0}" = "1" ] \
-       || { gateway_process_up && [ "$(startupz_code)" != "200" ]; }; } \
+       || { gateway_unit_running && [ "$(startupz_code)" != "200" ]; }; } \
      && ! wait_for_gateway_started; then
     log "WARN: the gateway did not finish starting within ${GATEWAY_START_WAIT_S}s — the embedding settings are not written under a starting gateway; trying again on the next gateway start"
     exit 0

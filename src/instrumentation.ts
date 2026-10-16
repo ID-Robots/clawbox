@@ -39,7 +39,7 @@ export async function repairOpenclawConfig(repairs: {
   let changed = false
   for (const [label, run] of steps) {
     try {
-      if (await run()) changed = true
+      if (await runOnceMoreIfMovedWhileHeld(run)) changed = true
     } catch (err) {
       console.error(`[instrumentation] Failed to ${label}:`, err instanceof Error ? err.message : err)
     }
@@ -53,6 +53,23 @@ export async function repairOpenclawConfig(repairs: {
     await repairs.restartGateway({ awaitReady: false })
   } catch (err) {
     console.error('[instrumentation] Gateway restart after config repair failed:', err instanceof Error ? err.message : err)
+  }
+}
+
+/**
+ * A repair reads openclaw.json at boot while the gateway's pre-start runs, and
+ * its write is held until the gateway is up (`@/lib/gateway-start-guard`). The
+ * pre-start's own passes rewrite the file meanwhile, so the held snapshot is
+ * refused (`config_changed_while_held`, by code: the class is not loaded here).
+ * Run once more, the repair reads the file as it is now, beside a gateway that
+ * no longer holds it.
+ */
+async function runOnceMoreIfMovedWhileHeld(run: () => Promise<boolean>): Promise<boolean> {
+  try {
+    return await run()
+  } catch (err) {
+    if ((err as { code?: unknown } | null)?.code !== 'config_changed_while_held') throw err
+    return run()
   }
 }
 

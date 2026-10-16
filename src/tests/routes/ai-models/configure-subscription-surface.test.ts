@@ -786,6 +786,20 @@ describe("POST /setup-api/ai-models/configure and the gateway doctor --fix stopp
     expect(restartGateway).toHaveBeenCalledWith({ awaitReady: false });
   });
 
+  it("only asks, restoring after its own error handling throws, behind a gateway doctor found busy", async () => {
+    // A pre-SQLite core carries on past a doctor that was not run; a later
+    // throw then restores through the outer catch, behind the same running job.
+    vi.mocked(runOpenclawDoctorFix).mockResolvedValueOnce("gateway-still-stopping");
+    mockFs.readdir.mockResolvedValueOnce([] as never);
+    vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.7.9 (test)\n");
+    const poisoned = new Error("boom") as unknown as { message: unknown };
+    poisoned.message = null;
+    vi.mocked(runOpenclawConfigSetBatch).mockRejectedValueOnce(poisoned);
+
+    await expect(configurePost(subscribe())).rejects.toThrow();
+    expect(restartGateway).toHaveBeenCalledWith({ awaitReady: false, restartClientMs: 5_000, restartSettleMs: 0 });
+  });
+
   it("leaves the gateway alone when an API-key save fails — nothing stopped it", async () => {
     // The API-key path pastes through the CLI and never runs doctor, so a
     // failure there has no stopped unit to restore.
