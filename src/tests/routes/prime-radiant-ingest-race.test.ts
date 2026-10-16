@@ -11,7 +11,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const auth = vi.hoisted(() => ({ requireSession: vi.fn(async () => null) }));
 vi.mock("@/lib/route-auth", () => auth);
-const owner = vi.hoisted(() => ({ hasOwnerSession: vi.fn(async () => true) }));
+const owner = vi.hoisted(() => ({ hasPersonSession: vi.fn(async () => true) }));
 vi.mock("@/lib/owner-session", () => owner);
 vi.mock("@/lib/prime-radiant/flash-client", () => ({ flashAvailable: async () => true }));
 const start = vi.hoisted(() => ({ startIngest: vi.fn() }));

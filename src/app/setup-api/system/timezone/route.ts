@@ -3,7 +3,7 @@ import fs from "fs/promises";
 import path from "@/lib/runtime-path";
 import { randomUUID } from "crypto";
 import { get, set } from "@/lib/config-store";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { startRootStep } from "@/lib/root-step-runner";
 import { hasX64Install } from "@/lib/x64-integration";
@@ -150,7 +150,7 @@ export async function POST(request: Request) {
   // its cron — and a same-site proxied webapp under /apps/<id>/ carrying the
   // owner's cookie could do it too. Neither is the person whose day this
   // setting is about.
-  if (!(await hasOwnerSession(request))) {
+  if (!(await hasPersonSession(request))) {
     return NextResponse.json(
       { error: "Changing the timezone needs a signed-in browser session.", kind: "owner_only" },
       { status: 403 },

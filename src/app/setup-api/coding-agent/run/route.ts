@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { CodingAgentError, ExperienceChoiceError, MAX_TASK_CHARS, PipelineChoiceError, ProviderChoiceError, checkReadiness, httpStatusForCodingError, startOrQueueRun } from "@/lib/coding-agent";
 import { startTeam } from "@/lib/coding-team";
 import { needsTeam } from "@/lib/coding-time-budget";
@@ -129,7 +129,7 @@ export async function POST(request: Request) {
 
   // Who is asking decides how the run is labelled, nothing more: an owner
   // clicking in Settings holds a cookie, the agent holds the bearer.
-  const source = (await hasOwnerSession(request)) ? "owner" : "agent";
+  const source = (await hasPersonSession(request)) ? "owner" : "agent";
 
   // A continuation picks up one run's session: never a team, and never the
   // owner's default — a budget it is given, one its words state, or else the

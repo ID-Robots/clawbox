@@ -12,7 +12,7 @@
  * owner's cookie are both refused.
  */
 import { requireSession } from "@/lib/route-auth";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { initialise, WiringWriteError } from "@/lib/prime-radiant/service";
 import { fail, json, vaultFailure } from "@/lib/prime-radiant/route-helpers";
@@ -22,7 +22,7 @@ export const dynamic = "force-dynamic";
 export async function POST(req: Request) {
   const denied = await requireSession(req);
   if (denied) return denied;
-  if (!(await hasOwnerSession(req))) {
+  if (!(await hasPersonSession(req))) {
     return fail("owner_only", "Setting up Prime Radiant needs a signed-in browser session.", 403);
   }
   if (!isSameOriginRequest(req)) return fail("cross_origin", "This request did not come from the ClawBox desktop.", 403);

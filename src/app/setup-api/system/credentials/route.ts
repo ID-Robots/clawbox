@@ -113,7 +113,9 @@ export async function POST(request: Request) {
       // even if the middleware gate is somehow bypassed. Re-proving
       // `currentPassword` below is necessary but not sufficient — without this
       // the route is also an unauthenticated password oracle.
-      const unauthorized = await requireSession(request);
+      // The owner's account itself: never another ClawBox user's to change or
+      // wipe, whatever else of the desktop they share (src/lib/non-owner-scope.ts).
+      const unauthorized = await requireSession(request, { ownerOnly: true });
       if (unauthorized) return unauthorized;
 
       if (!currentPassword) {

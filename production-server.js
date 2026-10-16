@@ -20,6 +20,7 @@ const {
   parseUserRegistry,
   sessionIdentityFromCookieHeader,
 } = require("./scripts/session-cookie.js");
+const { loadOrCreateRelayIdentity, readGatewayToken, relayUserChat } = require("./scripts/gateway-user-relay.js");
 
 // Same rule as envPort() in src/lib/port-probe.ts, written out because this
 // entry point is standalone CommonJS and cannot import the TypeScript helper:
@@ -50,16 +51,16 @@ const IS_DEV = process.env.NODE_ENV === "development";
 // `sanitizeClose` marks the one upstream that answers a code-less goodbye with
 // a status code no browser will accept — see createCloseFrameRewriter below.
 //
-// Multi-user ClawBox OS (TASK-1256): `ownerOnly` refuses a session of any
-// ClawBox user but the owner — the remote desktop IS the owner's screen. The
-// terminal is open to every signed-in user because it is scoped: `terminal`
-// marks the route that gets the per-boot TERMINAL_TOKEN (without it the PTY
-// server refuses the connection, so a local account cannot dial 127.0.0.1:3006
-// for the owner's shell) and, for a non-owner, the username the PTY server
-// starts the shell AS (scripts/terminal-server.mjs).
+// Multi-user ClawBox OS: every signed-in ClawBox user gets the owner's
+// desktop, the remote desktop included, so both sockets admit any of them.
+// `ownerOnly` stays supported for a route that ever needs it. The terminal is
+// scoped: `terminal` marks the route that gets the per-boot TERMINAL_TOKEN
+// (without it the PTY server refuses the connection, so a local account cannot
+// dial 127.0.0.1:3006 for the owner's shell) and, for a non-owner, the
+// username the PTY server starts the shell AS (scripts/terminal-server.mjs).
 const UPGRADE_ROUTES = [
   { prefix: "/terminal-ws", targetPort: TERMINAL_WS_PORT, stripPrefix: true, requireAuth: true, terminal: true },
-  { prefix: "/novnc-ws", targetPort: NOVNC_WS_PORT, stripPrefix: true, requireAuth: true, ownerOnly: true, sanitizeClose: true },
+  { prefix: "/novnc-ws", targetPort: NOVNC_WS_PORT, stripPrefix: true, requireAuth: true, sanitizeClose: true },
 ];
 
 // Headers this proxy alone may set on the way to the PTY server. Whatever a
@@ -119,7 +120,7 @@ function resolveUpgradeTarget(reqUrl) {
       };
     }
   }
-  return { targetPort: GATEWAY_PORT, url: reqUrl, requireAuth: false };
+  return { targetPort: GATEWAY_PORT, url: reqUrl, requireAuth: false, gateway: true };
 }
 
 // Current session generation and ClawBox users, read from data/config.json
@@ -187,6 +188,46 @@ function authorizeUpgrade(gate, req) {
   if (!identity) return { ok: false, status: 401 };
   if (gate.ownerOnly && !identity.isOwner) return { ok: false, status: 403 };
   return { ok: true, identity };
+}
+
+// ─── A ClawBox user's chat (not the owner's) ───
+// The gateway route stays ungated for the owner's browser and every local
+// caller: the gateway enforces its own token. A cookie that names ANOTHER
+// ClawBox user is different — their chat must reach only their own sessions,
+// and their browser is never given the token — so that socket ends here and
+// scripts/gateway-user-relay.js speaks to the gateway for them.
+const OPENCLAW_CONFIG_PATH = `${
+  process.env.CLAWBOX_OPENCLAW_HOME
+  || process.env.OPENCLAW_HOME
+  || `${process.env.HOME || "/home/clawbox"}/.openclaw`
+}/openclaw.json`;
+const RELAY_IDENTITY_PATH = path.join(process.env.CLAWBOX_ROOT || __dirname, "data", ".gateway-user-relay-device.json");
+let relayIdentity = null;
+const userChatWss = new WebSocket.Server({ noServer: true });
+
+/** The ClawBox user (never the owner) a gateway upgrade's cookie names, or null. */
+function relayedChatUser(gate, req) {
+  if (!gate.gateway) return null;
+  const identity = upgradeSessionIdentity(req);
+  return identity && !identity.isOwner ? identity.username : null;
+}
+
+function relayUserChatUpgrade(req, socket, head, url, username) {
+  userChatWss.handleUpgrade(req, socket, head, (clientWs) => {
+    if (!relayIdentity) relayIdentity = loadOrCreateRelayIdentity(RELAY_IDENTITY_PATH);
+    relayUserChat({
+      clientWs,
+      username,
+      token: readGatewayToken(OPENCLAW_CONFIG_PATH),
+      identity: relayIdentity,
+      connectUpstream: () => new WebSocket(`ws://127.0.0.1:${GATEWAY_PORT}${url}`, {
+        // Port-less to satisfy the gateway's strict origin allowlist, as the
+        // owner's pipe and the WSS proxy below send it.
+        headers: { origin: "http://127.0.0.1", host: `127.0.0.1:${GATEWAY_PORT}` },
+      }),
+      log: (message) => console.warn(`[user-chat-relay] ${message}`),
+    });
+  });
 }
 
 // An upgrade addressed to a name that is not this box's own (see
@@ -624,6 +665,10 @@ function attachUpgradeProxy(server) {
     if (!auth.ok) {
       return rejectUpgrade(socket, auth.status);
     }
+    const chatUser = relayedChatUser(gate, req);
+    if (chatUser) {
+      return relayUserChatUpgrade(req, socket, head, url, chatUser);
+    }
     const extraHeaders = terminalHeadersFor(gate, auth.identity);
     const upstream = net.connect(targetPort, "127.0.0.1", () => {
       const hostHeader = `127.0.0.1:${targetPort}`;
@@ -694,6 +739,10 @@ function startHttpsServer(httpServer) {
       const auth = authorizeUpgrade(gate, req);
       if (!auth.ok) {
         return rejectUpgrade(socket, auth.status);
+      }
+      const chatUser = relayedChatUser(gate, req);
+      if (chatUser) {
+        return relayUserChatUpgrade(req, socket, head, gate.url, chatUser);
       }
       wss.handleUpgrade(req, socket, head, (clientWs) => {
         const { targetPort, url } = gate;

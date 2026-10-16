@@ -23,7 +23,7 @@ import { looksLikeAnthropicKey, MAX_ANTHROPIC_KEY_CHARS, verifyAnthropicKey } fr
 import { simulateAnthropicLimit } from "@/lib/coding-agent";
 import { clearHandoffTokens, readHandoffTokens } from "@/lib/oauth-handoff";
 import { gatewayIsAbsent, openclawIsAbsent } from "@/lib/openclaw-config";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { hasValidSession } from "@/lib/route-auth";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { POST as setDefaultProvider } from "@/app/setup-api/providers/default/route";
@@ -219,7 +219,7 @@ async function takeHandoff(): Promise<{ tokens: OAuthTokens; email: string | nul
 }
 
 export async function POST(request: Request) {
-  if (!(await hasOwnerSession(request))) return forbidden();
+  if (!(await hasPersonSession(request))) return forbidden();
   if (!isSameOriginRequest(request)) return crossOrigin();
   // Every change below may move the active account; the swap has to be
   // listening in this process when it does (the boot hook normally is first).

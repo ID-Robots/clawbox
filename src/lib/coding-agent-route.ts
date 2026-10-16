@@ -19,7 +19,7 @@
 
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { CodingAgentError, getRun, httpStatusForCodingError } from "@/lib/coding-agent";
 
 /**
@@ -82,7 +82,7 @@ export function runLifecycleRoute({ verb, noun = "run", idFrom = "body", act }: 
       if (!run) {
         return NextResponse.json({ error: "There is no coding run with that id.", kind: "not_found" }, { status: 404 });
       }
-      if (run.source === "owner" && !(await hasOwnerSession(request))) {
+      if (run.source === "owner" && !(await hasPersonSession(request))) {
         const whose = noun === "draft" ? "That draft is the owner's" : "That run was started by the owner";
         return NextResponse.json({ error: `${whose}; only they can ${verb} it.`, kind: "owner_only" }, { status: 403 });
       }

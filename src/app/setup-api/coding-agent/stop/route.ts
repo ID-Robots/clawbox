@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { cancelQueuedRun, getRun, stopRun } from "@/lib/coding-agent";
 import { runLifecycleRoute } from "@/lib/coding-agent-route";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 
 export const dynamic = "force-dynamic";
 
@@ -20,7 +20,7 @@ export const POST = runLifecycleRoute({
   verb: "stop",
   act: async (id, _body, request) => {
     if (getRun(id)?.status === "queued") {
-      if (!(await hasOwnerSession(request))) {
+      if (!(await hasPersonSession(request))) {
         return NextResponse.json({ error: "That run is waiting in the queue; only the owner can cancel a queued run.", kind: "owner_only" }, { status: 403 });
       }
       return NextResponse.json({ run: await cancelQueuedRun(id) });

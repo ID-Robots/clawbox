@@ -95,7 +95,7 @@ import {
   type TurnEvent,
   type TurnResult,
 } from '@/lib/harness/transport'
-import { DESKTOP_TRANSCRIPT_KEY } from '@/lib/harness/transcript-key'
+import { defaultTranscriptKeyFor } from '@/lib/chat-scope'
 // Staging, its refusals and its thumbnails, from the module both chats share.
 // The adapter names an attachment by its absolute path on the box, so this
 // surface stages through the same edition-neutral route the mascot chat uses
@@ -138,6 +138,12 @@ import { useTr } from '@/lib/i18n-floor'
 
 
 interface ChatAppProps {
+  /**
+   * The ClawBox user this chat belongs to when it is not the owner's: their
+   * main transcript on a harness with no handshake (src/lib/chat-scope.ts).
+   * The gateway's hello names theirs itself, through the user-chat relay.
+   */
+  chatUser?: string | null
   onThinkingChange?: (thinking: boolean) => void
   hideHeader?: boolean
   /**
@@ -320,7 +326,7 @@ const ChatAppStreamingBubble = memo(function ChatAppStreamingBubble({ text, t }:
   )
 })
 
-function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChange }: ChatAppProps) {
+function ChatApp({ chatUser = null, onThinkingChange, hideHeader = false, onPhoneChromeHiddenChange }: ChatAppProps) {
   const { t, locale } = useT()
   const tr = useTr()
   // The phone layout (TASK-1157), the same view settings the mascot chat uses
@@ -1541,9 +1547,9 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
     // below reads it, and to the SAME key the mascot chat binds, so the two
     // surfaces show one conversation the way they already do on the gateway's
     // `mainSessionKey`.
-    if (!caps.hasLiveConnection) sessionKeyRef.current = DESKTOP_TRANSCRIPT_KEY
+    if (!caps.hasLiveConnection) sessionKeyRef.current = defaultTranscriptKeyFor(chatUser ? { username: chatUser, isOwner: false } : null)
     void adapter.connect()
-  }, [adapter, harnessLoaded, caps.hasLiveConnection])
+  }, [adapter, harnessLoaded, caps.hasLiveConnection, chatUser])
 
   // Replay the stored conversation on a harness that has no handshake to hang it
   // on. The gateway path bootstraps its history the moment auth resolves — there

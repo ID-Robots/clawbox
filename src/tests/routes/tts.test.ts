@@ -79,7 +79,7 @@ vi.mock("@/lib/voice-reply", async (importOriginal) => {
 });
 
 const ownerMock = vi.fn();
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: (...a: unknown[]) => ownerMock(...a) }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: (...a: unknown[]) => ownerMock(...a) }));
 
 vi.mock("fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("fs")>();

@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 import { POST as selectVoice } from "@/app/setup-api/tts/route";
 import { clearOwnerChoice } from "@/lib/clawai-cloud-choice";
 import { uninstallKokoro } from "@/lib/kokoro-uninstall";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { followRootStep } from "@/lib/root-step-follow";
 import { readVoiceState, writeVoiceState } from "@/lib/voice-output-store";
@@ -56,7 +56,7 @@ export async function POST(req: Request) {
   // Kokoro everywhere, and since 2026-09-15 this click is the one way in.
   // OWNER ONLY. Installing software as root is the person's decision; the
   // agent holds the MCP bearer the middleware also admits here.
-  if (!(await hasOwnerSession(req))) {
+  if (!(await hasPersonSession(req))) {
     return NextResponse.json({ error: "Installing the voice needs a signed-in browser session.", kind: "owner_only" }, { status: 403 });
   }
   if (!isSameOriginRequest(req)) {
@@ -116,7 +116,7 @@ export async function POST(req: Request) {
  * also admits here, and taking the owner's voice away is not its call.
  */
 export async function DELETE(req: Request) {
-  if (!(await hasOwnerSession(req))) {
+  if (!(await hasPersonSession(req))) {
     return NextResponse.json({ error: "Removing the voice needs a signed-in browser session.", code: "owner_only" }, { status: 403 });
   }
   if (!isSameOriginRequest(req)) {

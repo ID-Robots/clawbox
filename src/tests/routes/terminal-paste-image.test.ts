@@ -1,7 +1,8 @@
 /**
  * POST /setup-api/terminal/paste-image: a picture pasted into the Terminal is
- * saved on the box and answered as a path. Owner-only, same-origin, one
- * folder, one size cap — and nothing about the file is the caller's to choose.
+ * saved on the box and answered as a path. The owner's Terminal only (another
+ * user's shell could not read the owner's file), same-origin, one folder, one
+ * size cap — and nothing about the file is the caller's to choose.
  */
 import fs from "fs";
 import os from "os";
@@ -9,7 +10,11 @@ import path from "path";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextResponse } from "next/server";
 
-const auth = vi.hoisted(() => ({ requireSession: vi.fn() }));
+const auth = vi.hoisted(() => ({
+  requireSession: vi.fn(),
+  sessionIdentity: vi.fn(),
+  ownerOnlyResponse: vi.fn(),
+}));
 vi.mock("@/lib/route-auth", () => auth);
 
 import { POST } from "@/app/setup-api/terminal/paste-image/route";
@@ -39,6 +44,8 @@ function post(body: Uint8Array | null, headers: Record<string, string> = {}, url
 beforeEach(() => {
   vi.clearAllMocks();
   auth.requireSession.mockResolvedValue(null);
+  auth.sessionIdentity.mockResolvedValue({ username: "clawbox", isOwner: true });
+  auth.ownerOnlyResponse.mockImplementation(() => NextResponse.json({ error: "Only the box owner can do this.", code: "owner_only" }, { status: 403 }));
   process.env.CLAWBOX_HOME = home;
   fs.rmSync(home, { recursive: true, force: true });
   fs.mkdirSync(home, { recursive: true });
@@ -57,10 +64,12 @@ describe("who may paste", () => {
     expect(fs.existsSync(dir)).toBe(false);
   });
 
-  it("is owner-only: it never opts in to other users, whose shell could not read the file", async () => {
-    await post(PNG);
-    expect(auth.requireSession).toHaveBeenCalledTimes(1);
-    expect(auth.requireSession.mock.calls[0][1]).toBeUndefined();
+  it("answers another ClawBox user owner_only and writes nothing: their shell could not read the file", async () => {
+    auth.sessionIdentity.mockResolvedValue({ username: "alice", isOwner: false });
+    const res = await post(PNG);
+    expect(res.status).toBe(403);
+    expect(await res.json()).toMatchObject({ code: "owner_only" });
+    expect(fs.existsSync(dir)).toBe(false);
   });
 
   it("refuses another site's page", async () => {

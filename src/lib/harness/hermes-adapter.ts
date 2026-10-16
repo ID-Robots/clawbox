@@ -1,4 +1,5 @@
 import { splitAssistantMedia } from "@/lib/chat-media";
+import { userTabKeyFor } from "@/lib/chat-scope";
 import { uuid, type ChatToolSummary } from "@/lib/chat-history-cache";
 import { isSlashCommand, type SlashCommand } from "@/lib/chat-slash-commands";
 import { HERMES_AUTO_PROVIDER, hermesProviderLabel } from "@/lib/hermes-providers";
@@ -584,7 +585,10 @@ export class HermesAdapter implements HarnessAdapter {
    * starts a fresh one and reports it back.
    */
   newSessionKey(mainSessionKey: string): string {
-    return `${mainSessionKey}-${uuid().replace(/-/g, "").slice(0, 12).toLowerCase()}`;
+    const tabId = uuid().replace(/-/g, "").slice(0, 12).toLowerCase();
+    // A ClawBox user's tab carries their name after the id (src/lib/chat-scope.ts),
+    // so it names them alone however their username is spelled.
+    return userTabKeyFor(mainSessionKey, tabId) ?? `${mainSessionKey}-${tabId}`;
   }
 
   ownsSessionKey(key: string): boolean {

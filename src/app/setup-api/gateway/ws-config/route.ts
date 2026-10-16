@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getGatewayToken } from "@/lib/gateway-proxy";
+import { sessionIdentity } from "@/lib/route-auth";
 import fs from "fs/promises";
 
 export const dynamic = "force-dynamic";
@@ -28,7 +29,14 @@ function inferWsScheme(request: NextRequest): "ws" | "wss" {
 export async function GET(request: NextRequest) {
   const host = request.headers.get("host") || "clawbox.local";
   const scheme = inferWsScheme(request);
-  const token = await getGatewayToken();
+  // The gateway's shared token is full operator access to every session on
+  // the box. Only the owner's browser holds it; another ClawBox user's chat
+  // socket is answered by production-server.js's relay
+  // (scripts/gateway-user-relay.js), which holds it for them and passes only
+  // their own conversations — so they get none here.
+  const me = await sessionIdentity(request);
+  const relayed = !!me && !me.isOwner;
+  const token = relayed ? "" : await getGatewayToken();
 
   let model = "";
   try {
@@ -48,6 +56,7 @@ export async function GET(request: NextRequest) {
       wsUrl: `${scheme}://${host}`,
       token: token || "",
       model,
+      ...(relayed ? { relayed: true } : {}),
     },
     // Never cache: this response carries the live gateway auth token, which can
     // be regenerated (per-device reseed, post-update). A cached copy would make

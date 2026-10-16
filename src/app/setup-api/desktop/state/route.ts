@@ -24,7 +24,7 @@ const MAX_BODY_BYTES = 256 * 1024;
 const NO_STORE = { "cache-control": "no-store" };
 
 async function caller(request: Request): Promise<{ username: string; isOwner: boolean } | NextResponse> {
-  const denied = await requireSession(request, { allowNonOwner: true });
+  const denied = await requireSession(request);
   if (denied) return denied;
   const identity = await sessionIdentity(request);
   return identity ?? { username: ownerUsername(), isOwner: true };

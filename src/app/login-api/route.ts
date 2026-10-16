@@ -8,7 +8,8 @@ import {
   getSystemUsername,
 } from "@/lib/auth";
 import { hasOwnerPassword } from "@/lib/system-password";
-import { findUser, verifyUserPassword } from "@/lib/clawbox-users";
+import { checkUserPassword, findUser } from "@/lib/clawbox-users";
+import { isTunnelRequest } from "@/lib/host-allowlist";
 import {
   checkLockout,
   recordFailure,
@@ -179,11 +180,23 @@ export async function POST(request: Request) {
     }
   }
 
+  const verdict = target.kind === "user" ? await checkUserPassword(target.username, password) : null;
+  // The box could not check a second user's password at all — its root-owned
+  // helper is missing or not granted (an x64 PC before its one-time repair).
+  // No password was tried, so nothing is charged, and on the LAN, where the
+  // picker already lists every name, the person is told why instead of
+  // "incorrect". Over the tunnel it stays "incorrect", like an unknown name, so
+  // the internet still cannot tell which names exist.
+  if (verdict === "unavailable" && !isTunnelRequest(request.headers)) {
+    await padResponseTime(startedAt);
+    return NextResponse.json(
+      { error: "This box cannot check other users' passwords yet. Ask the owner to open Settings → Users, which shows the one-time repair.", code: "signin_unavailable" },
+      { status: 503 },
+    );
+  }
   const valid = target.kind === "owner"
     ? await verifyPassword(password)
-    : target.kind === "user"
-      ? await verifyUserPassword(target.username, password)
-      : false;
+    : verdict === "ok";
   if (!valid || target.kind === "unknown") {
     // Record against every bucket, then report the longest lock in force so the
     // client's Retry-After is honest about when it can actually try again.

@@ -46,7 +46,7 @@ const h = vi.hoisted(() => ({
 // so the route re-checks. These cases are about what the OWNER gets, so both
 // answer yes; the refusal itself is asserted in its own block below.
 vi.mock("@/lib/owner-session", () => ({
-  hasOwnerSession: vi.fn(async () => h.ownerSession),
+  hasPersonSession: vi.fn(async () => h.ownerSession),
 }));
 vi.mock("@/lib/same-origin", () => ({
   isSameOriginRequest: vi.fn(() => h.sameOrigin),

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { ClawKeepError, resetRunningState } from "@/lib/clawkeep";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
@@ -18,7 +18,7 @@ export async function POST(request: NextRequest) {
   // Owner-only, on the person's own page: the middleware admits the MCP bearer
   // to every /setup-api route, and no MCP tool exists for this — the same gate
   // restore, unpair and the snapshot mutations carry (security scan #20).
-  if (!(await hasOwnerSession(request)) || !isSameOriginRequest(request)) {
+  if (!(await hasPersonSession(request)) || !isSameOriginRequest(request)) {
     return NextResponse.json(
       {
         error: "Resetting the backup state needs a signed-in browser session on this ClawBox's own pages.",

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { historyExportAll } from "@/lib/coding-agent";
 import { safeRunId } from "@/lib/coding-agent-artifacts";
 import { archivedRunZipSources } from "@/lib/coding-run-history";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { zipResponseStream } from "@/lib/zip-writer";
 
 export const dynamic = "force-dynamic";
@@ -35,7 +35,7 @@ function zipResponse(stream: ReadableStream<Uint8Array>, filename: string): Resp
 }
 
 export async function GET(request: Request) {
-  if (!(await hasOwnerSession(request))) {
+  if (!(await hasPersonSession(request))) {
     return NextResponse.json(
       { error: "Exporting the run history needs a signed-in browser session.", kind: "owner_only" },
       { status: 403 },

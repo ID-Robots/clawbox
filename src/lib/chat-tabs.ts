@@ -23,6 +23,8 @@
  * its whole cached list without resurrecting a tab closed elsewhere meanwhile.
  */
 
+import { isUserTabKey } from "@/lib/chat-scope";
+
 /** One side conversation, as the strip shows it and the box keeps it. */
 export interface ChatTabRecord {
   /** The session key as the transport minted it — see `HarnessAdapter.newSessionKey`. */
@@ -117,9 +119,19 @@ const MAX_LABEL_CHARS = 80;
 const OPENCLAW_TAB_KEY_RE = /^agent:[a-z0-9][a-z0-9_-]{0,63}:clawbox-[a-z0-9]{1,24}$/;
 const HERMES_TAB_KEY_RE = /^desktop-[a-z0-9]{1,24}$/;
 
-export function isChatTabKey(key: unknown): key is string {
+/** An owner's tab (the two shapes above): never one of another ClawBox user's. */
+export function isOwnerChatTabKey(key: unknown): key is string {
   return typeof key === "string"
     && (OPENCLAW_TAB_KEY_RE.test(key) || HERMES_TAB_KEY_RE.test(key));
+}
+
+/**
+ * Any tab the popup can mint: the owner's two shapes, or a ClawBox user's
+ * (`clawbox-utab-…` / `desktop-utab-…`, src/lib/chat-scope.ts). WHOSE it is
+ * is the route's question — each person's inventory holds their own alone.
+ */
+export function isChatTabKey(key: unknown): key is string {
+  return isOwnerChatTabKey(key) || isUserTabKey(key);
 }
 
 /**

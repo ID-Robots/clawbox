@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 vi.mock("child_process", () => ({ execFile: vi.fn() }));
 vi.mock("@/lib/harness", () => ({ getActiveHarness: vi.fn() }));
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: vi.fn() }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: vi.fn() }));
 vi.mock("@/lib/openclaw-config", () => ({
   // The route resolves the binary through the repo's own resolver rather than
   // guessing a path; the tests pin the argv, not where the binary lives.
@@ -52,7 +52,7 @@ let GET: (req: Request) => Promise<Response>;
 let POST: (req: Request) => Promise<Response>;
 let execFile: Mock;
 let getActiveHarness: Mock;
-let hasOwnerSession: Mock;
+let hasPersonSession: Mock;
 let restartGateway: Mock;
 let runOpenclawConfigSet: Mock;
 let installDeepseek: Mock;
@@ -103,7 +103,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   ({ execFile } = (await import("child_process")) as unknown as { execFile: Mock });
   ({ getActiveHarness } = (await import("@/lib/harness")) as unknown as { getActiveHarness: Mock });
-  ({ hasOwnerSession } = (await import("@/lib/owner-session")) as unknown as { hasOwnerSession: Mock });
+  ({ hasPersonSession } = (await import("@/lib/owner-session")) as unknown as { hasPersonSession: Mock });
   ({ restartGateway, runOpenclawConfigSet } =
     (await import("@/lib/openclaw-config")) as unknown as { restartGateway: Mock; runOpenclawConfigSet: Mock });
   ({ installDeepseekProviderPlugin: installDeepseek, installedOpenclawRelease: installedRelease } =
@@ -136,7 +136,7 @@ beforeEach(async () => {
       return execImpl(cmd, args);
     };
   getActiveHarness.mockResolvedValue("openclaw");
-  hasOwnerSession.mockResolvedValue(true);
+  hasPersonSession.mockResolvedValue(true);
   restartGateway.mockResolvedValue(undefined);
   runOpenclawConfigSet.mockResolvedValue(undefined);
   clearPluginRepair.mockResolvedValue(true);
@@ -153,7 +153,7 @@ beforeEach(async () => {
 
 describe("plugins/repair — the Retry", () => {
   it("refuses the agent", async () => {
-    hasOwnerSession.mockResolvedValue(false);
+    hasPersonSession.mockResolvedValue(false);
     expect((await post({ pluginId: "codex" })).status).toBe(403);
   });
 
@@ -265,7 +265,7 @@ describe("plugins/repair — the Retry", () => {
     expect((await post({ pluginId: "codex" })).status).toBe(404);
   });
   it("refuses a POST that another site's page fired at the box", async () => {
-    // The owner's cookie rides on a cross-site POST, and `hasOwnerSession`
+    // The owner's cookie rides on a cross-site POST, and `hasPersonSession`
     // alone cannot tell the two apart. The blast radius is small — the marker
     // is the allow-list and the spec comes from it, so nothing attacker-chosen
     // reaches an argv — but a state-changing owner route that installs a
@@ -353,7 +353,7 @@ describe("plugins/repair — the Retry", () => {
     // Same gate as the write. Middleware admits the MCP bearer to `/setup-api`,
     // and which of the box's plugins ClawBox had to switch off is the owner's
     // business, not the agent's.
-    hasOwnerSession.mockResolvedValue(false);
+    hasPersonSession.mockResolvedValue(false);
     const r = await GET(new Request("http://x/setup-api/plugins/repair"));
     expect(r.status).toBe(403);
     expect(await r.json()).toMatchObject({ ok: false, code: "owner_only" });

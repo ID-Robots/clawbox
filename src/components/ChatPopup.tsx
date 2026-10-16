@@ -89,7 +89,7 @@ import { shouldPatchSessionDefaults } from '@/lib/harness/capabilities'
 // wrapper tags, which is genuinely OpenClaw-specific. `boundedAudio` is not,
 // and now lives with the rest of the media helpers.
 import { extractText, type GatewayLink } from '@/lib/harness/openclaw-gateway-adapter'
-import { DESKTOP_TRANSCRIPT_KEY } from '@/lib/harness/transcript-key'
+import { chatKeyUser, defaultTranscriptKeyFor } from '@/lib/chat-scope'
 import { CHAT_TABS_ROUTE, conversationToFollow, isChatTabKey, nextTabSeq, parseActiveRecord, parseTabList, sortTabs, tabLabelFromText, type ChatActiveRecord, type ChatTabRecord } from '@/lib/chat-tabs'
 import { HarnessError, type HarnessStatus, type TurnResult, type HarnessAdapter } from '@/lib/harness/transport'
 import { splitMediaDirectives, mediaFileName, mediaUrl, isImageMedia, boundedAudio } from '@/lib/chat-media'
@@ -320,6 +320,14 @@ export interface ChatFloatingRect {
 interface ChatPopupProps {
   isOpen: boolean
   onClose: () => void
+  /**
+   * The ClawBox user this chat belongs to when it is not the owner's. Every
+   * user has their own conversations (src/lib/chat-scope.ts): their main
+   * transcript on a harness with no handshake, their own cached tab list, and
+   * never a tab of anyone else's. `null`/absent is the owner's chat, exactly
+   * as it was before multi-user.
+   */
+  chatUser?: string | null
   onOpenFull?: () => void
   onOpenSettingsSection?: (section: 'ai' | 'localAi') => void
   onThinkingChange?: (thinking: boolean) => void
@@ -696,6 +704,14 @@ const SIZE_STORAGE_KEY = 'clawbox-chat-size'
 // own: which tab it has open, and the closes the box has not confirmed yet.
 type ChatTab = ChatTabRecord
 const TABS_STORAGE_KEY = 'clawbox-chat-tabs'
+/**
+ * Each person's cached strip under their own name: two people who sign in on
+ * one browser must never paint each other's tab labels, which are the first
+ * words of a conversation. The owner keeps the key every browser already has.
+ */
+function tabsStorageKeyFor(chatUser: string | null | undefined): string {
+  return chatUser ? `${TABS_STORAGE_KEY}:user:${chatUser}` : TABS_STORAGE_KEY
+}
 /** How long one sync of the tab list may take before it is given up on. */
 const TAB_SYNC_TIMEOUT_MS = 10_000
 /**
@@ -771,10 +787,10 @@ interface StoredTabs {
 
 const NO_STORED_TABS: StoredTabs = { tabs: [], active: null, closed: [], seenActiveAt: 0 }
 
-function readStoredTabs(): StoredTabs {
+function readStoredTabs(storageKey: string): StoredTabs {
   if (typeof window === 'undefined') return NO_STORED_TABS
   try {
-    const raw = window.localStorage?.getItem(TABS_STORAGE_KEY)
+    const raw = window.localStorage?.getItem(storageKey)
     if (!raw) return NO_STORED_TABS
     const parsed = JSON.parse(raw) as { tabs?: unknown; active?: unknown; closed?: unknown; seenActiveAt?: unknown }
     const tabs = (Array.isArray(parsed.tabs) ? parsed.tabs : [])
@@ -797,8 +813,8 @@ function readStoredTabs(): StoredTabs {
   }
 }
 
-function writeStoredTabs(stored: StoredTabs): void {
-  try { window.localStorage?.setItem(TABS_STORAGE_KEY, JSON.stringify(stored)) } catch { /* localStorage unavailable */ }
+function writeStoredTabs(storageKey: string, stored: StoredTabs): void {
+  try { window.localStorage?.setItem(storageKey, JSON.stringify(stored)) } catch { /* localStorage unavailable */ }
 }
 
 /** Two lists that would paint the same strip — so a sync that changed nothing re-renders nothing. */
@@ -1007,7 +1023,7 @@ function shownCodingCardIds(transcript: HTMLElement | null): string[] {
   return Array.from(transcript.querySelectorAll(CODING_CARD_SELECTOR), el => el.getAttribute('data-run-id') ?? '')
 }
 
-function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, floatingZIndex, onFocus, onFloatingRectChange, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
+function ChatPopup({ isOpen, onClose, chatUser = null, onOpenFull, onOpenSettingsSection, onThinkingChange, onPanelModeChange, initialPanelWidth, floatingZIndex, onFocus, onFloatingRectChange, mascotX, mobile = false, trayMode = false }: ChatPopupProps) {
   const { t, locale } = useT()
   const tr = useTr()
   // The kiosk bar's height on the laptop (0 everywhere else): the docked panel
@@ -2304,7 +2320,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   // `activeTabKeyRef` is what the hello handler binds the socket to on every
   // (re)connect — a gateway bounce or a provider switch must bring the owner
   // back to the tab they were on, not to main. null = the main session.
-  const storedTabs = useRef(readStoredTabs()).current
+  // Fixed for the popup's life: signing in as someone else reloads the desktop.
+  const tabsStorageKeyRef = useRef(tabsStorageKeyFor(chatUser))
+  const storedTabs = useRef(readStoredTabs(tabsStorageKeyRef.current)).current
   const [tabs, setTabs] = useState<ChatTab[]>(storedTabs.tabs)
   const [activeTabKey, setActiveTabKey] = useState<string | null>(storedTabs.active)
   const activeTabKeyRef = useRef<string | null>(storedTabs.active)
@@ -2370,7 +2388,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const markActiveSeen = useCallback((at: number) => {
     if (!(at > seenActiveAtRef.current)) return
     seenActiveAtRef.current = at
-    writeStoredTabs({ tabs: tabsRef.current, active: activeTabKeyRef.current, closed: closedTabsRef.current, seenActiveAt: at })
+    writeStoredTabs(tabsStorageKeyRef.current, { tabs: tabsRef.current, active: activeTabKeyRef.current, closed: closedTabsRef.current, seenActiveAt: at })
   }, [])
   /**
    * Weigh the box's record for a pending arrival and answer the session to
@@ -2450,7 +2468,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     const listed = answer && typeof answer === 'object' ? (answer as { tabs?: unknown }).tabs : undefined
     if (!Array.isArray(listed) || seq !== tabSyncSeqRef.current) return
     closedTabsRef.current = closedTabsRef.current.filter(k => !close.includes(k))
-    const owns = (key: string) => adapterRef.current?.ownsSessionKey(key) ?? true
+    // Only tabs in the same person's space as the main key (src/lib/chat-scope.ts).
+    const space = chatKeyUser(mainSessionKeyRef.current)
+    const owns = (key: string) => (adapterRef.current?.ownsSessionKey(key) ?? true) && chatKeyUser(key) === space
     const before = tabsRef.current
     const next = [
       ...parseTabList(listed).filter(tb => owns(tb.key)),
@@ -2460,7 +2480,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     ]
     tabsRef.current = next
     setTabs(prev => sameTabList(prev, next) ? prev : next)
-    writeStoredTabs({ tabs: next, active: activeTabKeyRef.current, closed: closedTabsRef.current, seenActiveAt: seenActiveAtRef.current })
+    writeStoredTabs(tabsStorageKeyRef.current, { tabs: next, active: activeTabKeyRef.current, closed: closedTabsRef.current, seenActiveAt: seenActiveAtRef.current })
     // Tabs closed on another device: what this popup held for them goes too.
     const gone = before.filter(tb => !next.some(n => n.key === tb.key)).map(tb => tb.key)
     if (gone.length > 0) {
@@ -2498,7 +2518,7 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   useEffect(() => () => { tabSyncSeqRef.current += 1 }, [])
   useEffect(() => {
     tabsRef.current = tabs
-    writeStoredTabs({ tabs, active: activeTabKey, closed: closedTabsRef.current, seenActiveAt: seenActiveAtRef.current })
+    writeStoredTabs(tabsStorageKeyRef.current, { tabs, active: activeTabKey, closed: closedTabsRef.current, seenActiveAt: seenActiveAtRef.current })
     if (!tabsDirtyRef.current) return
     tabsDirtyRef.current = false
     void syncTabs()
@@ -2524,7 +2544,11 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
   const bindMainSession = useCallback((main: string): string => {
     mainSessionKeyRef.current = main
     setMainSessionKey(main)
-    const owns = (key: string) => adapterRef.current?.ownsSessionKey(key) ?? true
+    // A tab is this chat's only when it is in the same person's space as the
+    // main key: a cached list from someone else on this browser, or a tab of
+    // the owner's under a user's main, is dropped like another transport's.
+    const space = chatKeyUser(main)
+    const owns = (key: string) => (adapterRef.current?.ownsSessionKey(key) ?? true) && chatKeyUser(key) === space
     setTabs(prev => prev.every(tb => owns(tb.key)) ? prev : prev.filter(tb => owns(tb.key)))
     if (activeTabKeyRef.current !== null && !owns(activeTabKeyRef.current)) {
       activeTabKeyRef.current = null
@@ -6988,9 +7012,9 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
     // No hello will name a main session on a harness with no live connection:
     // the box's own transcript store is the thread, and its tabs are files
     // beside it. Bound BEFORE the replay below reads it.
-    if (!caps.hasLiveConnection) bindMainSession(DESKTOP_TRANSCRIPT_KEY)
+    if (!caps.hasLiveConnection) bindMainSession(defaultTranscriptKeyFor(chatUser ? { username: chatUser, isOwner: false } : null))
     void adapter.connect()
-  }, [adapter, harnessLoaded, caps.hasLiveConnection, bindMainSession])
+  }, [adapter, harnessLoaded, caps.hasLiveConnection, bindMainSession, chatUser])
 
   // Replay the stored conversation on a harness that has no handshake to hang
   // it on.

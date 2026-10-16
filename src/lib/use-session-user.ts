@@ -3,12 +3,13 @@
 import { useEffect, useState } from "react";
 
 /**
- * Who is signed in on this browser (TASK-1256, multi-user ClawBox OS), from
- * GET /setup-api/users/me — the one users route every signed-in user reaches.
+ * Who is signed in on this browser (multi-user ClawBox OS), from
+ * GET /setup-api/users/me.
  *
- * `isOwner: false` is a ClawBox user other than the owner: the desktop shows
- * them only the apps scoped per user (src/lib/non-owner-scope.ts), and the
- * server refuses everything else whatever the UI draws.
+ * `isOwner: false` is a ClawBox user other than the owner. They get the
+ * owner's desktop — every app but the harnesses' own consoles, and Settings —
+ * with a chat of their own (src/lib/chat-scope.ts); src/lib/non-owner-scope.ts
+ * is what the server holds them to whatever the UI draws.
  */
 export interface SessionUser {
   username: string;
@@ -41,6 +42,27 @@ export function fetchSessionUser(): Promise<SessionUser | null> {
   return pending;
 }
 
+/**
+ * `undefined` until /users/me has answered or failed, then the user — or
+ * `null` when it could not be had, which the desktop treats as the owner's,
+ * exactly as before multi-user. For what must not be drawn twice for two
+ * different people: the chat, whose cached tabs and main conversation are
+ * the signed-in person's own.
+ */
+export function useSettledSessionUser(): SessionUser | null | undefined {
+  const [user, setUser] = useState<SessionUser | null | undefined>(undefined);
+  useEffect(() => {
+    let live = true;
+    void fetchSessionUser().then((u) => {
+      if (live) setUser(u);
+    });
+    return () => {
+      live = false;
+    };
+  }, []);
+  return user;
+}
+
 /** `null` until the answer arrives (and when it cannot be had). */
 export function useSessionUser(): SessionUser | null {
   const [user, setUser] = useState<SessionUser | null>(null);
@@ -57,18 +79,17 @@ export function useSessionUser(): SessionUser | null {
 }
 
 /**
- * Whether the browser may call the owner's routes — the gate every desktop
- * fetch of an owner-only /setup-api route waits on, so a non-owner's desktop
- * never sends the ~15 requests the server would only refuse with 403
- * (src/lib/non-owner-scope.ts).
+ * Whether the browser may call the desktop's routes — every signed-in ClawBox
+ * user may, since each gets the owner's desktop (src/lib/non-owner-scope.ts
+ * names the few exceptions, which the server answers itself). Still a
+ * promise, and still the gate the desktop's first reads wait on, so they go
+ * out once /users/me has said who is signed in rather than before.
  *
- * `false` only once the box has SAID the session is another ClawBox user's.
- * When `users/me` cannot be had the answer is `true`: the owner's desktop
- * behaves exactly as it did before multi-user, and the server still refuses
- * whatever it must — this gate is about noise, never about access.
+ * Never `false` for a signed-in person; kept as a gate rather than removed so
+ * a desktop component that must wait for the answer has one place to ask.
  */
 export function mayUseOwnerApis(): Promise<boolean> {
-  return fetchSessionUser().then((u) => u?.isOwner !== false);
+  return fetchSessionUser().then(() => true);
 }
 
 /** `mayUseOwnerApis()` as a hook: `null` until settled, so an effect can wait on it. */

@@ -59,7 +59,7 @@ import type { InstalledMeta } from "@/lib/store-categories";
 import { SKILL_CHANGE_EVENT, announceSkillChange, installedAppRemovedDetail } from "@/lib/skill-change-message";
 import { APP_GLYPHS, apps, type AppDef } from "@/lib/desktop-apps";
 import { hiddenAppIdsForHarness, isInstalledAppVisible } from "@/lib/desktop-app-editions";
-import { fetchSessionUser, mayUseOwnerApis, useMayUseOwnerApis, useSessionUser } from "@/lib/use-session-user";
+import { fetchSessionUser, mayUseOwnerApis, useMayUseOwnerApis, useSettledSessionUser } from "@/lib/use-session-user";
 import { useFollowSessionSwitch } from "@/lib/session-switch";
 import { KIOSK_PAGES_APP_ID, kioskPageTabs, openInKiosk, useKioskTabs } from "@/lib/kiosk-tabs-client";
 import { useKioskBarInset } from "@/lib/kiosk-bar-inset";
@@ -68,7 +68,7 @@ import { useDeskScreens } from "@/lib/use-desk-screens";
 import { DESKTOP_CHROME_APP_ID, openDesktopChrome, useDesktopChrome } from "@/lib/desktop-chrome-client";
 import { useMonitorLayoutSync } from "@/lib/use-monitor-layout";
 import MonitorIdentifyOverlay from "@/components/MonitorIdentifyOverlay";
-import { NON_OWNER_APP_IDS, OWNER_ONLY_NOTICE, installedAppIdsFor } from "@/lib/non-owner-scope";
+import { OWNER_ONLY_APP_IDS, OWNER_ONLY_NOTICE } from "@/lib/non-owner-scope";
 import { customWallpaperId, customWallpaperIndex, wallpaperIdAfterDelete } from "@/lib/custom-wallpapers";
 import { isShowableCustomWallpaper, readWallpaperFile, useUndecodableImage } from "@/lib/wallpaper-image";
 import {
@@ -654,14 +654,12 @@ function ChromeDesktopInner() {
   const [setupChecked, setSetupChecked] = useState(false);
   const [setupRequired, setSetupRequired] = useState(false);
   const [showClawAiOfferNotification, setShowClawAiOfferNotification] = useState(false);
-  // Multi-user ClawBox OS (TASK-1256): may this browser call the owner's
-  // routes? `null` until /users/me answers, then settled for the page's life.
-  // Every owner-only read, poll and widget below waits for `true`, so another
-  // ClawBox user's desktop sends none of the requests the server would only
-  // refuse with 403 — it used to send about fifteen on every load, several of
-  // them on a poll. (`isOwner` further down is the OPTIMISTIC reading used for
-  // what is drawn, so a single-user box never flickers; this is the strict one
-  // used for what is asked.)
+  // Multi-user ClawBox OS: `null` until /users/me answers, then `true` for the
+  // page's life — every signed-in ClawBox user gets the owner's desktop. The
+  // desktop's first reads, polls and widgets below still wait for it, so they
+  // go out once the box has said who is signed in. (`isOwner` further down is
+  // the OPTIMISTIC reading used for what is drawn, so a single-user box never
+  // flickers.)
   const ownerApiAccess = useMayUseOwnerApis();
   const ownerApis = ownerApiAccess === true;
   // Account-level "is ClawBox AI configured on this device?" — drives
@@ -825,24 +823,27 @@ function ChromeDesktopInner() {
   // can never be visible in one surface and hidden in another. Until the
   // harness is known BOTH sets are hidden — fail closed.
   //
-  // Multi-user ClawBox OS (TASK-1256): a signed-in user who is not the owner is
-  // shown only the apps scoped per user (NON_OWNER_APP_IDS — the Terminal, which
-  // runs as their own Linux account). Folded into this same list so every
-  // surface that already honours it — icons, launcher, shelf, openApp — hides
-  // the owner's apps too. Until /users/me answers the desktop draws as the
-  // owner's, so a single-user box never flickers; the server refuses a
-  // non-owner everything else whatever is drawn.
-  const sessionUser = useSessionUser();
+  // Multi-user ClawBox OS: every signed-in ClawBox user gets the owner's
+  // desktop — every built-in and installed app, and Settings — with a chat of
+  // their own. The one thing folded in here for them is the harnesses' own
+  // consoles (OWNER_ONLY_APP_IDS), which list every conversation on the box,
+  // the owner's included; every surface that honours this list — icons,
+  // launcher, shelf, openApp — hides those two. Until /users/me answers the
+  // desktop draws as the owner's, so a single-user box never flickers.
+  const settledSessionUser = useSettledSessionUser();
+  const sessionUser = settledSessionUser ?? null;
   const isOwner = sessionUser?.isOwner !== false;
+  // The chat is the signed-in person's own (src/lib/chat-scope.ts): null for
+  // the owner, the username for anyone else.
+  const chatUser = sessionUser && !sessionUser.isOwner ? sessionUser.username : null;
   const harnessHiddenAppIds = useMemo<string[]>(
-    () => isOwner
+    () => [
+      ...hiddenAppIdsForHarness(activeHarness),
       // A kiosk-only app (Web) exists on the laptop's kiosk desktop alone.
-      ? [
-          ...hiddenAppIdsForHarness(activeHarness),
-          ...(onKiosk ? [] : apps.filter((a) => a.kioskOnly).map((a) => a.id)),
-          ...(desktopChrome !== "hidden" ? [] : [DESKTOP_CHROME_APP_ID]),
-        ]
-      : apps.map((a) => a.id).filter((id) => !NON_OWNER_APP_IDS.includes(id)),
+      ...(onKiosk ? [] : apps.filter((a) => a.kioskOnly).map((a) => a.id)),
+      ...(desktopChrome !== "hidden" ? [] : [DESKTOP_CHROME_APP_ID]),
+      ...(isOwner ? [] : OWNER_ONLY_APP_IDS),
+    ],
     [activeHarness, isOwner, onKiosk, desktopChrome],
   );
 
@@ -861,10 +862,10 @@ function ChromeDesktopInner() {
   // diverge, a hidden app keeps its grid slot and leaves a gap.
   const visibleInstalledAppIds = useMemo(
     () =>
-      installedAppIdsFor(isOwner, installedApps).filter(
+      installedApps.filter(
         (id) => !hiddenInstalledApps.includes(id) && isInstalledAppVisible(installedMeta[id], activeHarness),
       ),
-    [installedApps, hiddenInstalledApps, installedMeta, activeHarness, isOwner],
+    [installedApps, hiddenInstalledApps, installedMeta, activeHarness],
   );
   const handleAddToDesktop = useCallback((appId: string) => {
     // The launcher hands over its own ids, which for an installed app carry
@@ -1379,14 +1380,6 @@ function ChromeDesktopInner() {
   useEffect(() => {
     if (shouldOpenChatFirst(readChatFirstEnvironment(window))) setChatOpen(true);
   }, []);
-
-  // The assistant is the owner's: it runs as their Linux account with the
-  // box's device tools, so it cannot be scoped to another user (TASK-1256).
-  // Whatever opened the chat — the fresh-install greeting, chat-first on a
-  // phone — a non-owner's desktop closes it again.
-  useEffect(() => {
-    if (!isOwner && chatOpen) setChatOpen(false);
-  }, [isOwner, chatOpen]);
 
   // A non-owner who opened one of the owner's pages was sent here by the
   // middleware with `?notice=owner-only` (src/lib/non-owner-scope.ts): say why,
@@ -2169,9 +2162,9 @@ function ChromeDesktopInner() {
   // Get all apps including installed ones
   const getAllApps = useCallback((): AppDef[] => {
     const installedAppDefs: AppDef[] = [];
-    // The owner's installed apps reach the launcher, the shelf and openApp —
-    // never a non-owner's (TASK-1256), by the same rule as the icon grid.
-    for (const appId of installedAppIdsFor(isOwner, installedApps)) {
+    // Installed apps reach the launcher, the shelf and openApp for every
+    // signed-in person, by the same rule as the icon grid.
+    for (const appId of installedApps) {
       const meta = installedMeta[appId];
       // Store-installed OpenClaw skills are unusable on Hermes (see
       // isInstalledAppVisible) — they must not reach the launcher, the shelf,
@@ -2210,7 +2203,7 @@ function ChromeDesktopInner() {
         defaultHeight: 760,
       },
     ];
-  }, [installedApps, installedMeta, activeHarness, harnessHiddenAppIds, isOwner]);
+  }, [installedApps, installedMeta, activeHarness, harnessHiddenAppIds]);
   // The same list as one value per change of what it is built from: an
   // installed app's AppDef is built fresh by every call, and a window handed a
   // new one re-renders with its app (see DesktopWindow).
@@ -2499,10 +2492,10 @@ function ChromeDesktopInner() {
   // sight rather than the browser's clock — comparing across the two dropped
   // every notice while the box ran behind.
   useEffect(() => {
-    // Wait for the role: the owner polls the notice ring; another ClawBox user
-    // (TASK-1256) is refused the ring, so their desktop polls /users/me — a
-    // route open to every signed-in user — for the one thing it needs from
-    // this poll, the update lock below.
+    // Wait for /users/me: every signed-in person polls the notice ring (they
+    // all get the owner's desktop). The /users/me branch is what a desktop
+    // that could not be told it may use the box's routes falls back to, for
+    // the one thing it needs from this poll, the update lock below.
     if (ownerApiAccess === null) return;
     const pollUrl = ownerApiAccess ? "/setup-api/kv?key=ui:pending-actions" : "/setup-api/users/me";
     let active = true;
@@ -3212,10 +3205,10 @@ function ChromeDesktopInner() {
   // report where it is standing (a rect per pointer move of a drag is not a
   // price to pay while nothing is dodging it).
   //
-  // Every card in that column is the owner's business — an update to run, the
-  // release notes, a ClawBox AI offer, a Telegram pairing to approve, a coding
-  // run — so a non-owner's desktop (TASK-1256) draws none of them.
-  const noticesUp = isOwner && Boolean(
+  // Every card in that column — an update to run, the release notes, a ClawBox
+  // AI offer, a Telegram pairing to approve, a coding run — is every signed-in
+  // person's business: they all get the owner's desktop.
+  const noticesUp = Boolean(
     (updateAvailable && !updateNoticeHidden)
     || whatsNew.visible
     || showClawAiOfferNotification
@@ -3719,13 +3712,16 @@ function ChromeDesktopInner() {
       {!isMobile && ownerApis && (
         <Mascot frozen={chatOpen} rightInset={chatPanelInset} onTap={handleMascotTap} />
       )}
-      {/* Mounted for the owner only, not merely kept closed: a closed popup
-          still resolves its harness and capabilities and the gateway's
-          ws-config on mount, all of which the server refuses another user. */}
-      {ownerApis && (
+      {/* Mounted once /users/me has said who is signed in: the chat is that
+          person's own — their main conversation, their tabs, their cached
+          strip (src/lib/chat-scope.ts) — so it must never be drawn first as
+          someone else's. Another ClawBox user's gateway socket is answered by
+          the relay in production-server.js, which passes only their keys. */}
+      {ownerApis && settledSessionUser !== undefined && (
         <ChatPopup
-          isOpen={chatOpen && isOwner}
+          isOpen={chatOpen}
           onClose={closeChat}
+          chatUser={chatUser}
           onOpenSettingsSection={openSettingsSection}
           onPanelModeChange={handleChatPanelModeChange}
           initialPanelWidth={chatPanelWidth}
@@ -3924,15 +3920,10 @@ function ChromeDesktopInner() {
         }}
         onTrayClick={() => {
           setLauncherOpen(false);
-          if (!isOwner) {
-            // Settings is the owner's; the clock opens the tray instead.
-            setTrayOpen((prev) => !prev);
-            return;
-          }
           setTrayOpen(false);
           openSettingsSection("system");
         }}
-        onClawKeepShieldClick={isOwner ? openClawKeepOrAiProvider : undefined}
+        onClawKeepShieldClick={openClawKeepOrAiProvider}
         clawkeepStatus={{ protection: clawkeepProtection, unconfigured: clawkeepUnconfigured, busy: clawkeepBusy, restoring: clawkeepRestoring, refusal: clawkeepRefusal }}
         onPowerClick={() => {
           setLauncherOpen(false);
@@ -3950,7 +3941,7 @@ function ChromeDesktopInner() {
         }}
         onShelfSettings={() => openApp("settings")}
         onChatClick={() => setChatOpen(prev => !prev)}
-        showChatButton={isOwner && (mascotHidden || isMobile)}
+        showChatButton={mascotHidden || isMobile}
         clawAiAuthenticated={clawAiAuthenticated}
         sessionUser={sessionUser && (sessionUser.multiUser || !sessionUser.isOwner) ? sessionUser : null}
       />

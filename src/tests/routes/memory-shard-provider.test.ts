@@ -31,7 +31,7 @@ const h = vi.hoisted(() => ({
   facts: vi.fn(),
 }));
 
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: async () => h.owner }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: async () => h.owner }));
 vi.mock("@/lib/openclaw-config", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/openclaw-config")>()),
   openclawIsAbsent: () => h.absent,

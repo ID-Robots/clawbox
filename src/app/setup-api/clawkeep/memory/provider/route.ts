@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { readEmbeddingPlacement, switchToLocalEmbeddings } from "@/lib/memory-shard";
 import { noteOwnerChoice } from "@/lib/clawai-cloud-choice";
@@ -116,7 +116,7 @@ async function readEmbedderChoice(): Promise<EmbedderChoiceStatus> {
  * move the index onto a model that is not there — or off the box.
  */
 export async function POST(request: Request) {
-  if (!(await hasOwnerSession(request))) {
+  if (!(await hasPersonSession(request))) {
     return NextResponse.json(
       { error: "Changing the embedding provider needs a signed-in browser session.", kind: "owner_only" },
       { status: 403 },

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { clearFinishedRuns, getHistoryPolicy, getRun, listOlderRuns, listRuns, MAX_WAIT_MS, transcriptPath, waitForRun } from "@/lib/coding-agent";
 import { listArtifacts } from "@/lib/coding-agent-artifacts";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 
 export const dynamic = "force-dynamic";
 
@@ -41,7 +41,7 @@ const MAX_HISTORY_LIMIT = 50;
 const MAX_PROJECT_CHARS = 4096;
 
 export async function DELETE(request: Request) {
-  if (!(await hasOwnerSession(request))) {
+  if (!(await hasPersonSession(request))) {
     return NextResponse.json(
       { error: "Clearing the coding run history needs a signed-in browser session.", kind: "owner_only" },
       { status: 403 },

@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 
 import fs from "fs/promises";
 import { NextResponse } from "next/server";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { followRootStep } from "@/lib/root-step-follow";
 import { getEmbedLaunchSpec, getEmbedProvisioningStatus } from "@/lib/embed-server";
@@ -51,7 +51,7 @@ export async function POST(req: Request) {
   //
   // OWNER ONLY. Fetching software as root is the person's decision; the agent
   // holds the MCP bearer the middleware also admits here.
-  if (!(await hasOwnerSession(req))) {
+  if (!(await hasPersonSession(req))) {
     return NextResponse.json({ error: "Setting up the memory model needs a signed-in browser session.", kind: "owner_only" }, { status: 403 });
   }
   if (!isSameOriginRequest(req)) {
@@ -117,7 +117,7 @@ export async function POST(req: Request) {
  * which is the one thing this button promises.
  */
 export async function DELETE(req: Request) {
-  if (!(await hasOwnerSession(req))) {
+  if (!(await hasPersonSession(req))) {
     return NextResponse.json({ error: "Removing the memory model needs a signed-in browser session.", kind: "owner_only" }, { status: 403 });
   }
   if (!isSameOriginRequest(req)) {

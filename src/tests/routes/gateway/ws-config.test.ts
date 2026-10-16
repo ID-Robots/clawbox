@@ -5,6 +5,9 @@ vi.mock("@/lib/gateway-proxy", () => ({
   getGatewayToken: vi.fn().mockResolvedValue("test-token"),
 }));
 
+const who = vi.hoisted(() => ({ identity: null as { username: string; isOwner: boolean } | null }));
+vi.mock("@/lib/route-auth", () => ({ sessionIdentity: vi.fn(async () => who.identity) }));
+
 vi.mock("fs/promises", () => ({
   default: {
     readFile: vi.fn().mockResolvedValue(JSON.stringify({
@@ -27,6 +30,31 @@ describe("/setup-api/gateway/ws-config", () => {
     }));
     const mod = await import("@/app/setup-api/gateway/ws-config/route");
     GET = mod.GET;
+  });
+
+  it("never hands another ClawBox user the gateway's token: their socket goes through the relay", async () => {
+    who.identity = { username: "alice", isOwner: false };
+    try {
+      const body = await (await GET(new NextRequest(new URL("http://clawbox.local/setup-api/gateway/ws-config")))).json();
+      expect(body.token).toBe("");
+      expect(body.relayed).toBe(true);
+      expect(body.wsUrl).toBe("ws://clawbox.local");
+      const { getGatewayToken } = await import("@/lib/gateway-proxy");
+      expect(getGatewayToken).not.toHaveBeenCalled();
+    } finally {
+      who.identity = null;
+    }
+  });
+
+  it("gives the owner the token as before", async () => {
+    who.identity = { username: "clawbox", isOwner: true };
+    try {
+      const body = await (await GET(new NextRequest(new URL("http://clawbox.local/setup-api/gateway/ws-config")))).json();
+      expect(body.token).toBe("test-token");
+      expect(body.relayed).toBeUndefined();
+    } finally {
+      who.identity = null;
+    }
   });
 
   it("returns same-origin ws URL so the upgrade proxy can forward it", async () => {

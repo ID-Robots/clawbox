@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { CodingAgentError, httpStatusForCodingError, resolveWorkingDirectory } from "@/lib/coding-agent";
 import { clearRunNotes, MAX_RUN_NOTES_CHARS, readRunNotes, RUN_NOTES_DIR, RUN_NOTES_FILE, RunNotesError, writeRunNotes } from "@/lib/coding-run-notes";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { requireSession } from "@/lib/route-auth";
 
 export const dynamic = "force-dynamic";
@@ -91,7 +91,7 @@ export async function GET(request: Request) {
 }
 
 export async function PUT(request: Request) {
-  if (!(await hasOwnerSession(request))) return ownerOnly();
+  if (!(await hasPersonSession(request))) return ownerOnly();
   const read = await readCappedJson(request);
   if (!read.ok) {
     return read.status === 413
@@ -116,7 +116,7 @@ export async function PUT(request: Request) {
 }
 
 export async function DELETE(request: Request) {
-  if (!(await hasOwnerSession(request))) return ownerOnly();
+  if (!(await hasPersonSession(request))) return ownerOnly();
   const url = new URL(request.url);
   const project = await resolveProject(url.searchParams.get("projectId"), url.searchParams.get("directory"));
   if ("response" in project) return project.response;

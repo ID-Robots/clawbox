@@ -15,12 +15,12 @@ const team = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/coding-team", () => team);
 const requireSession = vi.hoisted(() => vi.fn());
-const hasOwnerSession = vi.hoisted(() => vi.fn());
+const hasPersonSession = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/route-auth", async () => {
   const actual = await vi.importActual<typeof import("@/lib/route-auth")>("@/lib/route-auth");
   return { ...actual, requireSession };
 });
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession }));
 // The owner's default time budget (none unless a case sets one) and the box's zone.
 const getDefaultTimeBudget = vi.hoisted(() => vi.fn());
 const getTokenLimit = vi.hoisted(() => vi.fn());
@@ -57,7 +57,7 @@ beforeEach(async () => {
   vi.resetModules();
   vi.clearAllMocks();
   requireSession.mockResolvedValue(null);
-  hasOwnerSession.mockResolvedValue(false);
+  hasPersonSession.mockResolvedValue(false);
   getDefaultTimeBudget.mockResolvedValue(null);
   getTokenLimit.mockResolvedValue(null);
   team.startTeam.mockResolvedValue(BOARD);
@@ -119,7 +119,7 @@ describe("GET", () => {
     expect((await refused.json()).kind).toBe("owner_only");
     expect((await GET(req(`team?id=${BOARD.id}`))).status).toBe(200);
     // The owner: everything.
-    hasOwnerSession.mockResolvedValue(true);
+    hasPersonSession.mockResolvedValue(true);
     expect((await (await GET(req("team"))).json()).teams).toHaveLength(2);
     expect((await GET(req(`team?id=${OWNERS.id}`))).status).toBe(200);
   });
@@ -136,7 +136,7 @@ describe("POST", () => {
   });
 
   it("records the owner's cookie as the source", async () => {
-    hasOwnerSession.mockResolvedValueOnce(true);
+    hasPersonSession.mockResolvedValueOnce(true);
     await POST(req("team", { goal: "Build it", projectId: "site" }));
     expect(team.startTeam).toHaveBeenCalledWith({ goal: "Build it", projectId: "site", directory: null, source: "owner" });
   });
@@ -184,7 +184,7 @@ describe("a second team", () => {
     const refused = await STOP(req("team/stop", { id: BOARD.id }));
     expect(refused.status).toBe(403);
     expect(await refused.json()).toMatchObject({ kind: "owner_only", error: expect.stringMatching(/only the owner can cancel a queued team/) });
-    hasOwnerSession.mockResolvedValue(true);
+    hasPersonSession.mockResolvedValue(true);
     const ok = await STOP(req("team/stop", { id: BOARD.id }));
     expect(ok.status).toBe(200);
     expect((await ok.json()).team.status).toBe("stopped");
@@ -214,7 +214,7 @@ describe("POST stop", () => {
     expect(refused.status).toBe(403);
     expect((await refused.json()).kind).toBe("owner_only");
     expect(team.stopTeam).not.toHaveBeenCalled();
-    hasOwnerSession.mockResolvedValueOnce(true);
+    hasPersonSession.mockResolvedValueOnce(true);
     expect((await STOP(req("team/stop", { id: OWNERS.id }))).status).toBe(200);
     expect(team.stopTeam).toHaveBeenCalledWith(OWNERS.id);
   });

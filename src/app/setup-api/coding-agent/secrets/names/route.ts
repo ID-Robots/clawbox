@@ -20,7 +20,7 @@ export const dynamic = "force-dynamic";
  * no verb anywhere that does — see the store's header.
  *
  * The MCP bearer is ADMITTED here, which is the whole point, so `hasValidSession`
- * (cookie OR bearer) is the right gate and `hasOwnerSession` would be the wrong
+ * (cookie OR bearer) is the right gate and `hasPersonSession` would be the wrong
  * one. It is read-only, so it carries no origin check: nothing here changes.
  */
 export async function GET(request: Request) {

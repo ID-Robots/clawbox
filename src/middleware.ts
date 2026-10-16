@@ -707,8 +707,9 @@ export async function middleware(request: NextRequest) {
     // API answering a navigation redirect with HTML is defect #304), but a
     // HEADER costs nothing and carries the same fact on requests the desktop is
     // already making. src/app/page.tsx turns it into the navigation.
-    // 4a'. A ClawBox user who is not the owner (TASK-1256) reaches only what is
-    // scoped per user — src/lib/non-owner-scope.ts, an allow-list. A 403 rather
+    // 4a'. A ClawBox user who is not the owner gets the owner's desktop except
+    // the owner's chat, secrets in clear and the owner's account —
+    // src/lib/non-owner-scope.ts, which names those exceptions. A 403 rather
     // than the 401 below: the session is fine, and the desktop reads a 401 as
     // "signed out" and sends the person back to /login. The RAW path, for the
     // same reason as step 2. A page is answered with the desktop instead of the
@@ -721,6 +722,7 @@ export async function middleware(request: NextRequest) {
         method: request.method,
         searchParams: request.nextUrl.searchParams,
         intent: requestIntent(request.headers),
+        username: identity.username,
       });
       if (verdict === "redirect-home") {
         return NextResponse.redirect(new URL(NON_OWNER_HOME, request.url), {

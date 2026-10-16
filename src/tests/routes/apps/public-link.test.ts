@@ -69,11 +69,23 @@ describe("who may publish", () => {
     expect(fs.existsSync(path.join(LINKS_DIR, "links.json"))).toBe(false);
   });
 
-  it("refuses a signed-in ClawBox user who is not the owner", async () => {
+  it("lets another signed-in ClawBox user publish, and shows them a live link with its token masked", async () => {
     vi.mocked(sessionIdentity).mockResolvedValue(member);
     const res = await POST(req("POST", { appId: "notes", mode: "permanent" }));
-    expect(res.status).toBe(403);
-    expect((await res.json()).code).toBe("owner_only");
+    expect(res.status).toBe(201);
+
+    const { id, token } = serving.readLinks(ROOT)[0];
+    fs.writeFileSync(path.join(LINKS_DIR, "runtime.json"), JSON.stringify({ [id]: { url: "https://calm-river.trycloudflare.com", state: "live" } }));
+    const theirs = (await (await GET(req("GET"))).json()).links;
+    expect(theirs[0]).toMatchObject({ state: "live", tokenMasked: true });
+    expect(theirs[0].url).not.toContain(token);
+    expect(theirs[0].url).toMatch(/^https:\/\/calm-river\.trycloudflare\.com\/\?k=•+$/);
+
+    // The owner sees the same link in clear.
+    vi.mocked(sessionIdentity).mockResolvedValue({ username: "clawbox", isOwner: true });
+    const owners = (await (await GET(req("GET"))).json()).links;
+    expect(owners[0].url).toBe(`https://calm-river.trycloudflare.com/?k=${token}`);
+    expect(owners[0].tokenMasked).toBeUndefined();
   });
 });
 
@@ -325,13 +337,11 @@ describe("a link password", () => {
     expect(everythingOnDisk()).not.toContain("a-second-password");
   });
 
-  it("is the owner's to change: no session and the agent's bearer 401, another user 403", async () => {
+  it("is a person's to change: no session and the agent's bearer 401", async () => {
     await createPublicLink({ appId: "notes", mode: "permanent", password: PASSWORD });
     const before = stored()[0].password;
     vi.mocked(sessionIdentity).mockResolvedValue(null);
     expect((await PATCH(req("PATCH", { appId: "notes", password: null }))).status).toBe(401);
-    vi.mocked(sessionIdentity).mockResolvedValue(member);
-    expect((await PATCH(req("PATCH", { appId: "notes", password: null }))).status).toBe(403);
     expect(stored()[0].password).toEqual(before);
   });
 

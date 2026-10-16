@@ -100,10 +100,71 @@ describe("UsersPanel", () => {
     await waitFor(() => expect(screen.queryByText("alice")).toBeNull());
   });
 
-  it("says plainly when the route refuses anyone but the owner", async () => {
+  it("says plainly when the route refuses a caller that is not a signed-in person", async () => {
     fetchMock.mockImplementation(() => json(403, { code: "owner_only" }));
     render(<UsersPanel />);
     expect(await screen.findByText("users.errOwnerOnly")).toBeInTheDocument();
+  });
+
+  async function tryToCreate(answer: { status: number; body: unknown }) {
+    fetchMock.mockImplementation((url: string, init?: RequestInit) => {
+      if ((init?.method ?? "GET") === "GET") return json(200, listing([]));
+      return json(answer.status, answer.body);
+    });
+    render(<UsersPanel />);
+    await screen.findByText("users.empty");
+    fireEvent.change(screen.getByLabelText("users.username"), { target: { value: "carol" } });
+    fireEvent.change(screen.getByLabelText("users.password"), { target: { value: "correct horse" } });
+    fireEvent.change(screen.getByLabelText("users.confirmPassword"), { target: { value: "correct horse" } });
+    fireEvent.click(screen.getByRole("button", { name: "users.create" }));
+  }
+
+  it("never hides why an account could not be created: an x64 box gets its one repair command", async () => {
+    await tryToCreate({
+      status: 503,
+      body: { code: "root_step_unavailable", error: "…", repairCommand: "sudo bash /opt/clawbox/install-x64.sh --step root_step_contract" },
+    });
+    expect(await screen.findByText("users.errNeedsRepair")).toBeInTheDocument();
+    expect(screen.getByTestId("users-repair-command")).toHaveTextContent("sudo bash /opt/clawbox/install-x64.sh --step root_step_contract");
+    expect(screen.queryByText("users.errCreateFailed")).toBeNull();
+  });
+
+  it("shows what the box itself said under the translated sentence", async () => {
+    await tryToCreate({ status: 500, body: { code: "create_failed", error: "…", detail: "useradd could not create 'carol'" } });
+    expect(await screen.findByText("users.errCreateFailed")).toBeInTheDocument();
+    expect(screen.getByTestId("users-error-detail")).toHaveTextContent(`users.boxSaid{"reason":"useradd could not create 'carol'"}`);
+  });
+
+  it.each([
+    ["password_rejected", "users.errPasswordRejected"],
+    ["account_check_failed", "users.errAccountCheck"],
+    ["create_timeout", "users.errCreateTimeout"],
+    ["user_exists", "users.errExists"],
+    ["internal", "users.errInternal"],
+  ])("words the %s refusal as %s", async (code, key) => {
+    await tryToCreate({ status: 400, body: { code, error: "…" } });
+    expect(await screen.findByText(key)).toBeInTheDocument();
+  });
+
+  it("warns when other users cannot sign in on this box yet, with the command that repairs it", async () => {
+    fetchMock.mockImplementation(() => json(200, {
+      ...listing([ALICE]),
+      signIn: { available: false, repairCommand: "sudo bash /opt/clawbox/install-x64.sh --step root_step_contract" },
+    }));
+    render(<UsersPanel />);
+    const banner = await screen.findByTestId("users-signin-unavailable");
+    expect(banner).toHaveTextContent("users.signInUnavailable");
+    expect(banner).toHaveTextContent("install-x64.sh --step root_step_contract");
+  });
+
+  it("gives a second user the same panel, without a Remove for the owner or for themselves", async () => {
+    fetchMock.mockImplementation(() => json(200, { ...listing([ALICE, { username: "bob", createdAt: ALICE.createdAt }]), currentUser: "alice" }));
+    render(<UsersPanel />);
+    expect(await screen.findByText("bob")).toBeInTheDocument();
+    // bob's alone: never the owner's, never alice's own.
+    expect(screen.getAllByText("users.remove")).toHaveLength(1);
+    expect(screen.getByTestId("users-add-form")).toBeInTheDocument();
+    expect(screen.getByText("users.trustNote")).toBeInTheDocument();
   });
 });
 
@@ -116,14 +177,14 @@ describe("SystemTray — signed-in user", () => {
       url === "/setup-api/users/me" ? json(200, me) : json(200, { online: true, latencyMs: 5 })));
   }
 
-  it("names a second user, offers Switch user, and hides restart and shut down", async () => {
+  it("names a second user, offers Switch user, and gives them the owner's restart and shut down", async () => {
     stubMe({ username: "alice", isOwner: false, multiUser: true });
     render(<SystemTray isOpen onClose={() => {}} />);
     expect(await screen.findByText("alice")).toBeInTheDocument();
     expect(screen.getByText("tray.switchUser")).toBeInTheDocument();
     expect(screen.getByText("tray.nonOwnerHint")).toBeInTheDocument();
-    expect(screen.queryByText("tray.restart")).toBeNull();
-    expect(screen.queryByText("tray.shutDown")).toBeNull();
+    expect(screen.getByText("tray.restart")).toBeInTheDocument();
+    expect(screen.getByText("tray.shutDown")).toBeInTheDocument();
   });
 
   it("leaves a single-user owner's tray exactly as it was", async () => {

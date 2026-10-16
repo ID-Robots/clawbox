@@ -6,7 +6,7 @@ import { resolveClawaiToken } from "@/lib/harness/credentials";
 import { GatewayNotReadyError, openclawIsAbsent, restartGateway } from "@/lib/openclaw-config";
 import { clearOwnerChoice, noteOwnerChoice } from "@/lib/clawai-cloud-choice";
 import { syncChannelAudio } from "@/lib/stt-channel";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { localSttInstalled } from "@/lib/stt-local";
 import {
@@ -97,12 +97,12 @@ export async function POST(req: Request) {
   // make it, whatever it has been told. Same helper and rule as
   // coding-agent/enable.
   //
-  // AND SAME-ORIGIN. `hasOwnerSession` answers "the owner is signed in", not
+  // AND SAME-ORIGIN. `hasPersonSession` answers "the owner is signed in", not
   // "the owner asked for this": the session cookie is `SameSite=Lax`, which
   // stops the ordinary cross-SITE POST but not a page on a different ORIGIN of
   // the same site. This route moves where the owner's recordings are sent, so
   // it takes the same second guard the ClawKeep mutation routes take.
-  if (!(await hasOwnerSession(req)) || !isSameOriginRequest(req)) {
+  if (!(await hasPersonSession(req)) || !isSameOriginRequest(req)) {
     return NextResponse.json(
       { error: "Changing the transcription engine needs a signed-in browser session.", kind: "owner_only" },
       { status: 403 },

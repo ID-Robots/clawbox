@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { CodingAgentError, httpStatusForCodingError } from "@/lib/coding-agent";
 import { cancelQueuedTeam, getTeam, stopTeam } from "@/lib/coding-team";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { requireSession } from "@/lib/route-auth";
 
 export const dynamic = "force-dynamic";
@@ -28,7 +28,7 @@ export async function POST(request: Request) {
   try {
     const team = getTeam(id);
     if (!team) return NextResponse.json({ error: "There is no coding team with that id.", kind: "not_found" }, { status: 404 });
-    const owner = await hasOwnerSession(request);
+    const owner = await hasPersonSession(request);
     if (team.status === "queued") {
       if (!owner) return NextResponse.json({ error: "That team is waiting in the queue; only the owner can cancel a queued team.", kind: "owner_only" }, { status: 403 });
       return NextResponse.json({ team: cancelQueuedTeam(id) });

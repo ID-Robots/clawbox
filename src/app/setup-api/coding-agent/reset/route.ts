@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { refreshCodingAgentToolsIfReadinessChanged } from "@/lib/coding-agent-mcp-refresh";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { getCodingAgentStatus, resetCodingAgentSetup } from "@/lib/coding-agent";
 
 export const dynamic = "force-dynamic";
@@ -26,7 +26,7 @@ export const dynamic = "force-dynamic";
  * @returns 200 with the re-read status, or 403 without an owner session.
  */
 export async function POST(request: Request) {
-  if (!(await hasOwnerSession(request))) {
+  if (!(await hasPersonSession(request))) {
     return NextResponse.json(
       { error: "Resetting the coding agent needs a signed-in browser session.", kind: "owner_only" },
       { status: 403 },

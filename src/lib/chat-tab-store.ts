@@ -24,6 +24,12 @@
  * are the agent's business, were never tabs, and stay out of the strip.
  * A closed key is never adopted again, which is what keeps a session whose
  * delete lagged (a run still holding it) from walking back in.
+ *
+ * ONE INVENTORY PER PERSON. Every ClawBox user has their own chat
+ * (src/lib/chat-scope.ts): the owner's list stays data/chat-tabs.json, each
+ * other user's is data/chat-tabs/<username>.json, and discovery adopts only
+ * the caller's own tab shapes — the owner's never names a user's
+ * conversation, and a user's never names anyone else's.
  */
 
 import fs from "fs";
@@ -31,8 +37,10 @@ import path, { untraced } from "@/lib/runtime-path";
 import { DATA_DIR } from "@/lib/config-store";
 import { readTranscript, TRANSCRIPT_DIR, TRANSCRIPT_LIMITS } from "@/lib/harness/transcript-store";
 import { AGENTS_DIR_DEFAULT, listAgentIds, readSessionEntries } from "@/lib/openclaw-session-store";
+import { chatKeyUser, type ChatPrincipal } from "@/lib/chat-scope";
 import {
   isChatTabKey,
+  isOwnerChatTabKey,
   mergeTabInventory,
   parseTabInventory,
   tabLabelFromText,
@@ -43,12 +51,34 @@ import {
 } from "@/lib/chat-tabs";
 
 const INVENTORY_PATH = path.join(DATA_DIR, "chat-tabs.json");
+/** Where the other users' inventories live, one file each. */
+export const USER_INVENTORY_DIR = path.join(DATA_DIR, "chat-tabs");
 const FILE_MODE = 0o600;
 
-function readInventory(): ChatTabInventory {
+const USERNAME_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789_-";
+
+/**
+ * The file a person's inventory is kept in. A user's name is REBUILT from the
+ * username alphabet before it is joined (the `safeAppId` idiom), so nothing
+ * of the caller's string reaches the path; `null` for a name that is not one.
+ */
+export function inventoryPathFor(principal: ChatPrincipal | null): string | null {
+  if (!principal || principal.isOwner) return INVENTORY_PATH;
+  const name = principal.username;
+  if (typeof name !== "string" || name.length < 1 || name.length > 32 || !/^[a-z_]/.test(name)) return null;
+  let safe = "";
+  for (const ch of name) {
+    const at = USERNAME_ALPHABET.indexOf(ch);
+    if (at < 0) return null;
+    safe += USERNAME_ALPHABET[at];
+  }
+  return path.join(USER_INVENTORY_DIR, `${safe}.json`);
+}
+
+function readInventory(file: string): ChatTabInventory {
   let raw: string;
   try {
-    raw = fs.readFileSync(INVENTORY_PATH, "utf8");
+    raw = fs.readFileSync(file, "utf8");
   } catch {
     return { tabs: [], closed: [] };
   }
@@ -57,14 +87,14 @@ function readInventory(): ChatTabInventory {
   } catch {
     // A torn or hand-edited file is an empty strip, not a 500 on every chat
     // open. The next change writes a whole one over it.
-    console.warn("[chat-tabs] data/chat-tabs.json is not valid JSON; starting from an empty list");
+    console.warn(`[chat-tabs] ${path.basename(file)} is not valid JSON; starting from an empty list`);
     return { tabs: [], closed: [] };
   }
 }
 
-function writeInventory(inventory: ChatTabInventory): void {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  const tmp = untraced(`${INVENTORY_PATH}.tmp`);
+function writeInventory(file: string, inventory: ChatTabInventory): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = untraced(`${file}.tmp`);
   fs.writeFileSync(tmp, JSON.stringify(inventory), { mode: FILE_MODE });
   // `mode` only applies to a file writeFileSync CREATES; a stale temp left at
   // 0644 by a crash would carry that onto the live file through the rename.
@@ -73,7 +103,13 @@ function writeInventory(inventory: ChatTabInventory): void {
   } catch {
     // best effort
   }
-  fs.renameSync(tmp, INVENTORY_PATH);
+  fs.renameSync(tmp, file);
+}
+
+/** Is `key` a tab of THIS person's strip: their shape, in their space? */
+function isTabOf(principal: ChatPrincipal | null, key: string): boolean {
+  if (!principal || principal.isOwner) return isOwnerChatTabKey(key);
+  return isChatTabKey(key) && chatKeyUser(key) === principal.username;
 }
 
 /** Every key the inventory already has an opinion on: listed or closed. */
@@ -86,7 +122,7 @@ function knownKeys(inventory: ChatTabInventory): Set<string> {
  * again on its own way to the disk; the pattern here only decides which files
  * are tabs at all.
  */
-export async function discoverHermesTabs(known: ReadonlySet<string>): Promise<ChatTabRecord[]> {
+export async function discoverHermesTabs(known: ReadonlySet<string>, principal: ChatPrincipal | null = null): Promise<ChatTabRecord[]> {
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(TRANSCRIPT_DIR, { withFileTypes: true });
@@ -97,7 +133,7 @@ export async function discoverHermesTabs(known: ReadonlySet<string>): Promise<Ch
   for (const entry of entries) {
     if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
     const key = entry.name.slice(0, -".jsonl".length);
-    if (!key.startsWith("desktop-") || !isChatTabKey(key) || known.has(key)) continue;
+    if (!key.startsWith("desktop-") || !isTabOf(principal, key) || known.has(key)) continue;
     const records = await readTranscript(TRANSCRIPT_LIMITS.MAX_RECORDS, key);
     if (records.length === 0) continue;
     const firstSaid = records.find((record) => record.role === "user" && tabLabelFromText(record.text));
@@ -140,13 +176,14 @@ function legacySessionEntries(agentsDir: string, agentId: string): Array<{ key: 
 export function discoverOpenClawTabs(
   known: ReadonlySet<string>,
   agentsDir: string = AGENTS_DIR_DEFAULT,
+  principal: ChatPrincipal | null = null,
 ): ChatTabRecord[] {
   const found: ChatTabRecord[] = [];
   for (const agentId of listAgentIds(agentsDir)) {
     const rows = readSessionEntries(agentId, agentsDir) ?? legacySessionEntries(agentsDir, agentId);
     for (const { key, entry } of rows) {
       const lower = key.toLowerCase();
-      if (!lower.startsWith(`agent:${agentId.toLowerCase()}:clawbox-`) || !isChatTabKey(lower) || known.has(lower)) continue;
+      if (!lower.startsWith(`agent:${agentId.toLowerCase()}:clawbox-`) || !isTabOf(principal, lower) || known.has(lower)) continue;
       const stamp = [entry.createdAt, entry.updatedAt].find(
         (value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0,
       );
@@ -179,21 +216,40 @@ export interface ChatTabSync {
  * result instead of writing over it. Discovery never throws: a store that
  * cannot be read is simply not evidence.
  */
-export async function syncChatTabs(change: TabInventoryChange = {}): Promise<ChatTabSync> {
-  const known = knownKeys(readInventory());
+export async function syncChatTabs(
+  change: TabInventoryChange = {},
+  principal: ChatPrincipal | null = null,
+): Promise<ChatTabSync> {
+  const file = inventoryPathFor(principal);
+  if (!file) return { tabs: [], active: null };
+  const known = knownKeys(readInventory(file));
   let discovered: ChatTabRecord[] = [];
   try {
-    discovered = [...(await discoverHermesTabs(known)), ...discoverOpenClawTabs(known)];
+    discovered = [...(await discoverHermesTabs(known, principal)), ...discoverOpenClawTabs(known, AGENTS_DIR_DEFAULT, principal)];
   } catch (err) {
     console.warn("[chat-tabs] could not look for conversations on the box:", err);
   }
+  // Only this person's conversations reach their list, whatever a device sent.
+  const mine = (key: string) => isTabOf(principal, key);
+  const scoped: TabInventoryChange = {
+    ...(change.upsert ? { upsert: change.upsert.filter((tab) => mine(tab.key)) } : {}),
+    ...(change.close ? { close: change.close.filter(mine) } : {}),
+    ...(change.activity && (change.activity.key === null || mine(change.activity.key)) ? { activity: change.activity } : {}),
+  };
   // The device's own change first, so the name it gave a tab wins over one
   // guessed from the transcript, and a key it closes is closed before
   // discovery could offer it again.
-  const own = mergeTabInventory(readInventory(), change);
+  const own = mergeTabInventory(readInventory(file), scoped);
   const adopted = mergeTabInventory(own.inventory, { upsert: discovered });
-  if (own.changed || adopted.changed) writeInventory(adopted.inventory);
+  if (own.changed || adopted.changed) writeInventory(file, adopted.inventory);
   return { tabs: adopted.inventory.tabs, active: adopted.inventory.active ?? null };
+}
+
+/** Forget a removed user's strip, so a user created later under the name starts on an empty one. */
+export function removeUserInventory(username: string): void {
+  const file = inventoryPathFor({ username, isOwner: false });
+  if (!file) return;
+  fs.rmSync(file, { force: true });
 }
 
 /** Test seam: where the inventory lives. */

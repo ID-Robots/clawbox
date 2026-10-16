@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  */
 
 const owner = { value: true };
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: async () => owner.value }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: async () => owner.value }));
 vi.mock("@/lib/route-auth", () => ({ requireSession: async () => null }));
 
 /** The root-step follower behind `{action:"install-engine"}`; its real module reaches systemd. */

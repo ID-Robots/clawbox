@@ -50,7 +50,7 @@ const { getMock, setMock, hasHermesHarnessMock, openclawIsAbsentMock, ownerSessi
     sameOriginMock: vi.fn(() => true),
   }));
 
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: ownerSessionMock }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: ownerSessionMock }));
 vi.mock("@/lib/same-origin", () => ({ isSameOriginRequest: sameOriginMock }));
 
 vi.mock("@/lib/root-step-runner", () => ({

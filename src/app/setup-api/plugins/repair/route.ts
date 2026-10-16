@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 
 import { getActiveHarness } from "@/lib/harness";
 import { restartGateway } from "@/lib/openclaw-config";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import {
   canonicalPluginId,
@@ -67,7 +67,7 @@ import {
  */
 
 export async function GET(req: Request) {
-  if (!(await hasOwnerSession(req))) {
+  if (!(await hasPersonSession(req))) {
     return NextResponse.json({ ok: false, code: "owner_only" }, { status: 403 });
   }
   const repairs = await readPluginRepairs();
@@ -89,7 +89,7 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
-  if (!(await hasOwnerSession(req))) {
+  if (!(await hasPersonSession(req))) {
     return NextResponse.json({ ok: false, code: "owner_only" }, { status: 403 });
   }
   // And from OUR page. The owner's cookie rides on a POST any other site fires

@@ -111,13 +111,12 @@ function sessionSecret(): string | null {
 
 export interface RequireSessionOptions {
   /**
-   * Let a signed-in user OTHER than the owner through (TASK-1256). Off by
-   * default: every route behind `requireSession` was written for the owner, so
-   * a non-owner is refused with 403 `owner_only` unless the route says it is
-   * scoped per user. Middleware's own allow-list (src/lib/non-owner-scope.ts)
-   * has to admit the path too.
+   * Refuse every signed-in ClawBox user but the owner, with 403 `owner_only`.
+   * Off by default: every ClawBox user gets the owner's desktop, so a route
+   * is theirs too unless it is one of the few that are the owner's alone —
+   * the owner's account itself (src/lib/non-owner-scope.ts names them).
    */
-  allowNonOwner?: boolean;
+  ownerOnly?: boolean;
   /**
    * Let the request through while the device is in the genuine first-boot
    * bootstrap window — no password has ever been set, so there is no owner to
@@ -203,10 +202,10 @@ export async function sessionIdentity(request: Request | undefined): Promise<Ses
 }
 
 /**
- * True when the request carries the MCP bearer or a valid session cookie
- * issued to the OWNER. A session of another ClawBox user (TASK-1256) is not
- * one: every caller of this asks "is this the owner" — setup/status trims its
- * answer for anyone who isn't, and `requireSession` gates owner routes on it.
+ * True when the request carries the MCP bearer or a valid session cookie of a
+ * person signed in to this box — the owner or any other ClawBox user, who all
+ * get the owner's desktop. `setup/status` trims its answer for anyone who is
+ * neither, and `requireSession` gates on it.
  *
  * Deliberately does NOT honour `CLAWBOX_TEST_MODE`, unlike `requireSession`
  * below. The two answer different questions: `requireSession` is a GATE ("may
@@ -226,7 +225,7 @@ export async function hasValidSession(request: Request | undefined): Promise<boo
   const authHeader = request.headers.get("authorization");
   if (authHeader && verifyMcpBearer(authHeader)) return true;
 
-  return (await sessionIdentity(request))?.isOwner === true;
+  return (await sessionIdentity(request)) !== null;
 }
 
 /** The 403 a signed-in non-owner gets from an owner route — never a 401, which the desktop reads as "session expired". */
@@ -240,25 +239,30 @@ export function ownerOnlyResponse(): NextResponse {
 /**
  * Returns a 401 response when the caller may not run this route, or `null`
  * when it may. Mirrors middleware's decision order so the two can't disagree:
- * MCP bearer → session cookie → test mode → bootstrap window. A session of a
- * ClawBox user other than the owner is answered 403 `owner_only` unless the
- * route opts in with `allowNonOwner`.
+ * MCP bearer → session cookie → test mode → bootstrap window. Every signed-in
+ * ClawBox user passes; with `ownerOnly`, anyone but the owner (and the agent's
+ * bearer) is answered 403 `owner_only`.
  */
 export async function requireSession(
   request: Request | undefined,
   opts: RequireSessionOptions = {},
 ): Promise<NextResponse | null> {
-  if (await hasValidSession(request)) return null;
+  if (opts.ownerOnly) {
+    const who = await sessionIdentity(request);
+    if (who?.isOwner) return null;
+    if (who) return ownerOnlyResponse();
+    // The agent's bearer is not the owner either; the test harness and the
+    // bootstrap window below still answer for a route that allows them.
+    const authHeader = request?.headers?.get?.("authorization");
+    if (authHeader && verifyMcpBearer(authHeader)) return ownerOnlyResponse();
+  } else if (await hasValidSession(request)) {
+    return null;
+  }
 
   // Same escape hatch middleware §3b uses for the e2e-install harness, which
   // drives the whole wizard over HTTP with no cookie jar. install.sh only
   // writes this flag when it boots under CLAWBOX_TEST_MODE.
   if (process.env.CLAWBOX_TEST_MODE === "1") return null;
-
-  if (await sessionIdentity(request)) {
-    // A valid session that is not the owner's (the owner returned above).
-    return opts.allowNonOwner ? null : ownerOnlyResponse();
-  }
 
   if (opts.allowBootstrap && !(await deviceHasOwner())) return null;
 

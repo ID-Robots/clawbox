@@ -22,7 +22,7 @@
 // draft and approve it on the next tool call — the gate would authenticate the
 // exact party it exists to stop.
 //
-// So every method here re-checks with hasOwnerSession() and takes a session
+// So every method here re-checks with hasPersonSession() and takes a session
 // cookie only. See src/lib/owner-session.ts. The /setup-api/email prefix is
 // already on PRE_AUTH_SENSITIVE_PREFIXES, so this is a second, narrower check
 // inside a door middleware has already guarded — never a replacement for it.
@@ -60,7 +60,7 @@ import {
 // but a control whose only possible answer is "that is no longer waiting" is a
 // control that should not still be there.
 import { retireChatPrompt } from "@/lib/email-approval";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { sendMail, SmtpError } from "@/lib/smtp-client";
 
 export const dynamic = "force-dynamic";
@@ -78,7 +78,7 @@ function forbidden() {
 }
 
 export async function GET(request: Request) {
-  if (!(await hasOwnerSession(request))) return forbidden();
+  if (!(await hasPersonSession(request))) return forbidden();
   try {
     // Both halves in one answer, deliberately: a surface that read the queue
     // and the receipts in two requests could see a draft in neither, and would
@@ -93,7 +93,7 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  if (!(await hasOwnerSession(request))) return forbidden();
+  if (!(await hasPersonSession(request))) return forbidden();
 
   let body: { action?: unknown; id?: unknown; drafts?: unknown };
   try {

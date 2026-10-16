@@ -1,6 +1,9 @@
+import type { ReactNode } from "react";
+
 interface StatusMessageProps {
   type: "success" | "error" | "info";
-  message: string;
+  /** A sentence, or phrasing content around one (a detail line, a command). */
+  message: ReactNode;
 }
 
 const STYLES: Record<StatusMessageProps["type"], string> = {

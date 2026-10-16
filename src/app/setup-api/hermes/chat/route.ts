@@ -40,7 +40,7 @@ import {
 import { appendTranscript } from "@/lib/harness/transcript-store";
 import { isSlashCommandMessage } from "@/lib/chat-slash-commands";
 import { runHermesSlashCommand, withSessionModelNote } from "@/lib/hermes-slash-exec";
-import { DESKTOP_TRANSCRIPT_KEY, transcriptKeyIsSafe } from "@/lib/harness/transcript-key";
+import { hermesSessionFor, noteHermesSession, transcriptKeyFor } from "@/lib/chat-scope-server";
 import { resolveInMediaRoot } from "@/lib/harness/media-root";
 import { hermesDocumentPrompt } from "@/lib/harness/hermes-document-prompt";
 import { mediaUrl, splitAssistantMedia } from "@/lib/chat-media";
@@ -358,6 +358,9 @@ async function settleTurn(
   streamedReasoning: string,
   served: { model?: string; provider?: string } = {},
 ): Promise<TurnPayload> {
+  // Which person's conversation this Hermes session now carries, so only
+  // they may resume it (src/lib/chat-scope-server.ts).
+  noteHermesSession(threaded, sessionKey);
   const consoleReply = extractReasoningPanels(consoleText);
   const record = await readHermesTurn(threaded);
   const spoken = record?.text ?? consoleReply.text;
@@ -1030,18 +1033,22 @@ export async function POST(request: Request) {
   const rawModel = typeof body.model === "string" ? body.model.trim() : "";
   const rawProvider = typeof body.provider === "string" ? body.provider.trim() : "";
   let rawReasoning = typeof body.reasoning === "string" ? body.reasoning.trim() : "";
-  const rawSessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
-  if (rawSessionId && !SESSION_ID_RE.test(rawSessionId)) {
+  const requestedSessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
+  if (requestedSessionId && !SESSION_ID_RE.test(requestedSessionId)) {
     return NextResponse.json({ error: "Invalid session id" }, { status: 400 });
   }
   // Becomes a filename in the transcript store, so it is held to the store's
-  // own rule before anything is written under it.
-  const sessionKey = typeof body.sessionKey === "string" && body.sessionKey
-    ? body.sessionKey
-    : DESKTOP_TRANSCRIPT_KEY;
-  if (!transcriptKeyIsSafe(sessionKey)) {
-    return NextResponse.json({ error: "Invalid session key" }, { status: 400 });
+  // own rule before anything is written under it — and to the caller's own
+  // chat: every ClawBox user has theirs (src/lib/chat-scope.ts), and a turn
+  // with no key lands in the caller's main thread, never the owner's for a user.
+  const which = await transcriptKeyFor(request, body.sessionKey);
+  if (!which.ok) {
+    return NextResponse.json({ error: which.error, code: which.code }, { status: which.status });
   }
+  const sessionKey = which.key;
+  // A Hermes session another person's chat opened is not resumed: the turn
+  // starts a fresh one instead.
+  const rawSessionId = hermesSessionFor(which.principal, requestedSessionId);
 
   // Every value below reaches argv. No shell is involved (spawn takes an array)
   // but a value starting with "-" would still be parsed by hermes as a flag, so
@@ -1346,6 +1353,7 @@ export async function POST(request: Request) {
       // what the owner re-reads and a bubble that loses the caveat on a refresh
       // would be the same false success one reload later.
       const text = withSessionModelNote(ran, rawModel);
+      noteHermesSession(ran.sessionId, sessionKey);
       await appendTranscript(
         { role: "assistant", text, timestamp: Date.now() },
         sessionKey,

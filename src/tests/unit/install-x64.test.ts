@@ -393,6 +393,31 @@ describe("install-x64.sh shared-host preflight", () => {
     expect(SOURCE).toContain("  systemd_services root_step_contract start_gateway start_ui");
   });
 
+  it("installs the Settings → Users helper and its own sudoers grant with the root-step contract", () => {
+    // Without these an x64 PC could create no second user (the launcher
+    // refused user_add) and sign none in (`sudo -n clawbox-user-helper.sh`
+    // had nothing to run and no grant). ONE repair command brings all of it:
+    // the one `rootStepRepairCommand` prints, `--step root_step_contract`.
+    const start = SOURCE.indexOf("step_root_step_contract() {");
+    const end = SOURCE.indexOf("\nstep_systemd_services() {", start);
+    const body = SOURCE.slice(start, end);
+    expect(body).toContain('install -o root -g root -m 0755 "$helper" "$ROOT_STEP_DIR/clawbox-user-helper.sh"');
+    expect(body).toContain("x64_user_helper_sudoers_rule");
+    expect(body).toContain('visudo -cf "$users_sudoers_tmp"');
+    expect(body).toContain('install -o root -g root -m 440 "$users_sudoers_tmp" "$X64_USERS_SUDOERS"');
+    expect(SOURCE).toContain('X64_USERS_SUDOERS="/etc/sudoers.d/clawbox-x64-users"');
+
+    const rule = spawnSync("bash", ["-c", [
+      "set -euo pipefail",
+      "CLAWBOX_USER=desk",
+      SOURCE.slice(SOURCE.indexOf("x64_user_helper_sudoers_rule() {"), SOURCE.indexOf("}", SOURCE.indexOf("x64_user_helper_sudoers_rule() {")) + 1),
+      "x64_user_helper_sudoers_rule",
+    ].join("\n")], { encoding: "utf-8", timeout: 30_000 });
+    expect(rule.status).toBe(0);
+    // Exactly the root-owned helper, no argument spec, no wildcard.
+    expect(rule.stdout).toBe("desk ALL=(root) NOPASSWD: /usr/local/libexec/clawbox/clawbox-user-helper.sh\n");
+  });
+
   it("ships a launcher and dispatcher that keep root off the install user's tree", () => {
     const dir = path.resolve(process.cwd(), "scripts/x64-migration");
     const launcher = readFileSync(path.join(dir, "clawbox-x64-run-root-step.sh"), "utf8");

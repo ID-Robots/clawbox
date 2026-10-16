@@ -28,7 +28,7 @@ vi.mock("@/lib/clawkeep-memory-scheduler", () => ({
 
 const { ownerSession } = vi.hoisted(() => ({ ownerSession: { value: true } }));
 vi.mock("@/lib/owner-session", () => ({
-  hasOwnerSession: vi.fn(async () => ownerSession.value),
+  hasPersonSession: vi.fn(async () => ownerSession.value),
 }));
 
 // The one write in a reset that a full or read-only disk can refuse. Faked

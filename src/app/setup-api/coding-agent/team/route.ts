@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { CodingAgentError, httpStatusForCodingError } from "@/lib/coding-agent";
 import { getTeam, listTeams, startTeam } from "@/lib/coding-team";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { requireSession } from "@/lib/route-auth";
 import { budgetAnswer, resolveStartBudget } from "@/lib/coding-time-budget-server";
 import { readTimeRecordSummary, type TimeRecordPayload } from "@/lib/coding-time-record";
@@ -65,7 +65,7 @@ export async function GET(request: Request) {
   if (unauthorized) return unauthorized;
   // The owner gate the run routes apply: the MCP bearer sees only the teams
   // it started. An owner's team, its goal and its log are the owner's.
-  const owner = await hasOwnerSession(request);
+  const owner = await hasPersonSession(request);
   const id = new URL(request.url).searchParams.get("id");
   if (id) {
     const team = getTeam(id);
@@ -101,7 +101,7 @@ export async function POST(request: Request) {
       goal,
       projectId: typeof body.projectId === "string" ? body.projectId : null,
       directory: typeof body.directory === "string" ? body.directory : null,
-      source: (await hasOwnerSession(request)) ? "owner" : "agent",
+      source: (await hasPersonSession(request)) ? "owner" : "agent",
       // Absent without one: a team without a budget starts exactly as before.
       ...(resolved.budget ? { timeBudget: resolved.budget } : {}),
     });

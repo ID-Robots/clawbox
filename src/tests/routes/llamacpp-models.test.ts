@@ -14,7 +14,7 @@ import path from "path";
 
 let modelDir: string;
 const owner = { value: true };
-vi.mock("@/lib/owner-session", () => ({ hasOwnerSession: async () => owner.value }));
+vi.mock("@/lib/owner-session", () => ({ hasPersonSession: async () => owner.value }));
 vi.mock("@/lib/route-auth", () => ({ requireSession: async () => null }));
 
 /** openclaw.json as the Gemma uninstall reads it: who the box answers with. */

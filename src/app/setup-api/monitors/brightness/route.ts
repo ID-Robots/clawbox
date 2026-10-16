@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 
 import { NextResponse } from "next/server";
 import { requireSession } from "@/lib/route-auth";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { readMonitorOutputs } from "@/lib/monitors";
 import { BrightnessError, readBrightness, setBrightness } from "@/lib/monitor-brightness";
@@ -33,7 +33,7 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
-  if (!(await hasOwnerSession(req))) {
+  if (!(await hasPersonSession(req))) {
     return refuse("Only the owner's own session may change the monitors", "owner_only", 403);
   }
   if (!isSameOriginRequest(req)) {

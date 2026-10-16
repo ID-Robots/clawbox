@@ -6,7 +6,7 @@ import {
   deleteSnapshot,
   SnapshotLockedError,
 } from "@/lib/clawkeep";
-import { hasOwnerSession } from "@/lib/owner-session";
+import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 
 export const dynamic = "force-dynamic";
@@ -22,7 +22,7 @@ export async function POST(request: NextRequest) {
   // box. Deleting a snapshot is neither the agent's to do nor another
   // page's — so the gate asks both questions and refuses on either, before
   // the body is read.
-  if (!(await hasOwnerSession(request)) || !isSameOriginRequest(request)) {
+  if (!(await hasPersonSession(request)) || !isSameOriginRequest(request)) {
     return NextResponse.json(
       {
         error: "Deleting a snapshot needs a signed-in browser session on this ClawBox's own pages.",
