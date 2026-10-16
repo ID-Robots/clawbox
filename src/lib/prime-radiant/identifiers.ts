@@ -251,11 +251,12 @@ const MIN_REF_DIGITS = 6;
  * One reference written two ways: the same, or digits that agree — six or
  * more, one the tail of the other ("AC-INV-2026-000123" in a title and
  * "invoice 2026-000123" in a claim). Errs towards one thing: a pair is kept.
+ * Leading zeros are padding, not digits: "INV-000001" is no tail of "INV-1000001".
  */
 function sameRef(x: string, y: string): boolean {
   if (x === y) return true;
-  const dx = x.replace(/\D/g, "");
-  const dy = y.replace(/\D/g, "");
+  const dx = x.replace(/\D/g, "").replace(/^0+/, "");
+  const dy = y.replace(/\D/g, "").replace(/^0+/, "");
   const [short, long] = dx.length <= dy.length ? [dx, dy] : [dy, dx];
   return short.length >= MIN_REF_DIGITS && long.endsWith(short);
 }

@@ -190,6 +190,12 @@ describe("record pages", () => {
     expect(both(DATED_A, DATED_B)).toEqual([null, null]);
     // The reference in one page's title and the other's claim, written differently.
     expect(both({ ...VAT_A, text: "VAT is charged at 23%." }, { title: "Bank transfer 2026-03-25", text: "It pays invoice 2026-7000000202, reverse-charged at 0% VAT." })).toEqual([null, null]);
+    // Zero padding is no digit: two invoices numbered 1 and 1000001 stay two.
+    const total = (title: string, text: string): PairSide => ({ title, text });
+    expect(both(total("Invoice INV-000001", "The total is 10 EUR."), total("Invoice INV-1000001", "The total is 12 EUR."))).toEqual([
+      "different identifiers",
+      "different identifiers",
+    ]);
     // The redacted declaration that does name the same invoice.
     expect(both(CUSTOMS, { ...EXPORT, text: "The referenced invoice AC-INV-2026-5100000392 is dated 15.07.2026." })).toEqual([null, null]);
     expect(both(RECEIPT_4, { title: "Adnet receipt 04 Jun 2026", text: "Receipt RC-48213 total is €0.07." }).every((r) => r === DIFFERENT_RECORDS)).toBe(true);
