@@ -383,6 +383,19 @@ describe("the folder the device proposes", () => {
   });
 });
 
+describe("the switch is ON by default (TASK-1639)", () => {
+  it("is on when the key was never written, off only on an explicit false", async () => {
+    const lib = await import("@/lib/coding-agent");
+    expect(lib.codingAgentEnabledFrom(undefined)).toBe(true);
+    expect(lib.codingAgentEnabledFrom(true)).toBe(true);
+    expect(lib.codingAgentEnabledFrom(false)).toBe(false);
+    configGetAll.mockResolvedValue({});
+    expect((await lib.getCodingAgentStatus()).enabled).toBe(true);
+    configGetAll.mockResolvedValue({ coding_agent_enabled: false });
+    expect((await lib.getCodingAgentStatus()).enabled).toBe(false);
+  });
+});
+
 describe("the setup wizard flag", () => {
   it("is false on a box that has never been set up", async () => {
     configGetAll.mockResolvedValue({});

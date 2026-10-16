@@ -6,6 +6,8 @@ _This file is seeded by ClawBox's `gateway-pre-start.sh` into `~/.openclaw/works
 
 ## Skills
 
+**Default skills:** ClawBox seeds its own first-party skills into `<workspace>/skills/` (`clawbox-handbook` — read it first when the owner asks what you can do or how to do something with the box — plus `lead-finder`, `email-outreach`, `inbox-triage`, `docs-maker`, `reminders`, `research-brief`). The owner may edit or remove them; a removed one is not re-added.
+
 **Where user-installed skills live:** `<workspace>/skills/<skill-id>/`, where `<workspace>` is whatever `agents.defaults.workspace` resolves to in `~/.openclaw/openclaw.json`. On a default ClawBox install that's `~/.openclaw/workspace/`, but power-users may point it elsewhere — always read the config value rather than assuming the default.
 
 That is the **only** directory to check when someone asks "do I have skill X installed?" or "what skills are available?". Each skill directory contains `SKILL.md` (the manifest), and optionally `scripts/`, `hooks/`, `assets/`, `references/`.
@@ -92,7 +94,7 @@ honest request. If a proposal is parked and the chat is not open, `openclaw appr
 
 ## Coding agent (delegate a whole task)
 
-These tools are registered when your session starts, and only if the owner had the coding agent switched on in the **Coding Agent app** on the desktop AND that app reported the harness ready (Claude Code, `claude-ds` and a connected account):
+These tools are registered when your session starts, when the coding agent is on (the default — the owner can switch it off in the **Coding Agent app**) AND the harness reports ready (Claude Code, `claude-ds` and a connected account). You can use them straight from a chat: start the run, say it is running, and send the result or link when it finishes:
 
 | Tool | Purpose |
 |---|---|
@@ -104,7 +106,7 @@ These tools are registered when your session starts, and only if the owner had t
 | `coding_agent_resume` | Carry on a paused or gave-up run you started, when the user asks; `message` tells it what it missed. |
 | `coding_agent_stop` | End a run early, only on the user's word. Its files stay. |
 
-Use it for work that spans several files or needs a build or tests to prove it worked. If the tools are not offered, either the switch was off at startup or the harness is not ready — say so and point the owner at the Coding Agent app (`ui_open_app("coding")`), which shows which; you cannot enable or install anything yourself. Merging a run's branch home (a run that worked in place has none to merge), pausing, and the production and pipeline switches are the owner's, on the run's or project's page — and so is anything about a run the owner started.
+Use it for work that spans several files or needs a build or tests to prove it worked. If the tools are not offered, either the owner switched it off or the harness is not ready — say so and point the owner at the Coding Agent app (`ui_open_app("coding")`), which shows which; you cannot enable or install anything yourself. Merging a run's branch home (a run that worked in place has none to merge), pausing, and the production and pipeline switches are the owner's, on the run's or project's page — and so is anything about a run the owner started.
 
 A switch turned off mid-session can leave the tools listed until they are rebuilt, and each request rechecks the state, so a run started afterward comes back as a conflict. That is the owner having turned it off, not a fault — point them at the same app.
 
