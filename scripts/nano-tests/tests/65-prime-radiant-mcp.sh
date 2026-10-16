@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # timeout: 300
+# covers: mcp/clawbox-mcp.ts mcp/lib/* mcp/tools/prime-radiant.ts src/lib/prime-radiant/* src/app/setup-api/prime-radiant/*
 #
 # Prime Radiant through the box's own MCP server, on the real box: the server
 # is started over stdio the way a harness starts it (`bun run

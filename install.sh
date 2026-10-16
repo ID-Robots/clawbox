@@ -2772,6 +2772,28 @@ set_previous_build_aside() {
   mv -T "$build_dir" "$kept_dir"
 }
 
+# The parked build's framework cache (.next/cache: Turbopack's and the type
+# check's) into the new .next, so a rebuild starts warm instead of from
+# nothing — most of an update's sources are the ones the last build saw, and
+# Next checks every cached entry against the sources it sees, so a stale one
+# is recomputed, never trusted. As clawbox, the build's own user (a .next made
+# by root would refuse the build its output directory); a cache that cannot
+# move is only a slower build, so this never fails the rebuild. A failed build
+# takes the cache with it — the restore puts back the build, which serves
+# without one.
+carry_build_cache() {
+  local build_dir="$1" kept_dir="$2"
+  if [ ! -d "$kept_dir/cache" ] || [ -L "$kept_dir/cache" ] || [ -e "$build_dir/cache" ]; then
+    return 0
+  fi
+  if as_clawbox mkdir -p "$build_dir" && as_clawbox mv -T "$kept_dir/cache" "$build_dir/cache"; then
+    echo "  Keeping the build cache (.next/cache) for this build"
+  else
+    echo "  Warning: could not keep the build cache - building without it" >&2
+  fi
+  return 0
+}
+
 # Bring the dashboard back up, and say exactly which build it came up on.
 #
 # Three outcomes, and they are three different sentences because they send an
@@ -3111,6 +3133,7 @@ do_rebuild() {
     rc=1
     failed_at="setting the previous build aside"
   else
+    carry_build_cache "$build_dir" "$kept_dir" || true
     # The assistant's room, judged at the last moment it can be: everything
     # that only precedes the build has run with the gateway up (TASK-1197).
     # The reboot path paused it in free_memory_for_build already.

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # timeout: 900
+# covers: src/lib/coding-*.ts src/lib/code-projects.ts src/app/setup-api/coding-agent/* src/app/setup-api/code/*
+# covers: scripts/coding-run-hook.mjs scripts/coding-run-preview mcp/tools/coding-agent.ts mcp/tools/coding.ts
 #
 # The coding agent's TIME BUDGET on the real box, through the same routes
 # 40-coding-agent-run uses (src/app/setup-api/coding-agent/):
@@ -12,14 +14,23 @@
 #      record while it runs (budget, time used, nothing finished yet), the run
 #      completes early with the stop reason "done", and both time-record
 #      artifacts (time-record.json, time-record.log) are served.
-#   3. A run whose TASK TEXT says "you have 5 minutes" and that is told to
-#      wait for a 330-second script before it finishes: the words become the budget
-#      (source "text"), and the box ends the run by itself — at the deadline
-#      (status stopped, stop reason "time", resumable) or, if the model
-#      finished its steps sooner, as done — in either case within the deadline
-#      plus the wrap-up grace, never past the safety margin, with the stop
-#      line on the record. The "Safety margin:" note is asserted too: a
-#      5-minute budget starts inside its 10-minute margin.
+#   3. A run whose TASK TEXT says "you have N minutes" — N the shortest budget
+#      the box takes — and that is told to wait for a script that runs 30 s
+#      past it before it finishes: the words become the budget (source
+#      "text"), and the box ends the run by itself — at the deadline (status
+#      stopped, stop reason "time", resumable) or, if the model finished its
+#      steps sooner, as done — in either case within the deadline plus the
+#      wrap-up grace, never past the safety margin, with the stop line on the
+#      record. The "Safety margin:" note is asserted too: a budget that short
+#      starts inside its 10-minute margin.
+#
+# N is 5 on a box as shipped. The test boards set
+# CLAWBOX_CODING_MIN_BUDGET_MINUTES=1 (.github/workflows/nano-hardware-tests.yml
+# writes it into the board's .env before the rebuild), so there the deadline
+# is one minute away instead of five; the status route answers the floor
+# (minTimeBudgetMinutes) and this test reads it there, so it runs as it should
+# on any board. The too-short budget in 1. is "2m" under a floor of 3 minutes
+# or more and "0.5m" under a lower one.
 #
 # Model wording is never asserted, only the structure and the timing the box
 # itself enforces. Every instant is read from the box's own records (setAt,
@@ -28,7 +39,7 @@
 # shellcheck source=scripts/nano-tests/lib.sh
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
-BUDGET_S=300        # the shortest budget the box takes: 5 minutes
+BUDGET_S=300        # part 2's explicit budget: 5 minutes
 WRAP_UP_GRACE_S=120 # the deadline's stop lets a write land (60 s) and then ends the run
 
 # iso_s ISO — an ISO 8601 instant (with or without fractional seconds) as epoch seconds; "" when unreadable.
@@ -93,7 +104,16 @@ if [ "$API_STATUS" != 200 ]; then
   not_ok "coding-agent status did not answer: $(api_error)"
   finish
 fi
-note "status: $(api_json -c '{enabled, ready, defaultDirectory, running, timeZone, defaultTimeBudget}')"
+note "status: $(api_json -c '{enabled, ready, defaultDirectory, running, timeZone, defaultTimeBudget, minTimeBudgetMinutes}')"
+# The shortest budget the box takes (5 min, absent on a build without the
+# field), and what part 1 sends as one that is too short for it.
+FLOOR_MIN=$(api_json '.minTimeBudgetMinutes // 5')
+[[ $FLOOR_MIN =~ ^[1-5]$ ]] || FLOOR_MIN=5
+FLOOR_S=$((FLOOR_MIN * 60))
+if [ "$FLOOR_MIN" -gt 2 ]; then TOO_SHORT='"2m"'; else TOO_SHORT='"0.5m"'; fi
+if [ "$FLOOR_MIN" -ne 5 ]; then
+  note "this board takes budgets from $FLOOR_MIN min (CLAWBOX_CODING_MIN_BUDGET_MINUTES): part 3 waits a $FLOOR_MIN-minute deadline"
+fi
 if [ "$(api_json '.enabled')" != true ]; then
   not_ok "the coding agent is switched off on this board (status.enabled=false): the lab image must enable it"
   finish
@@ -127,7 +147,7 @@ cleanup() {
 
 # ---- 1. budgets the box refuses, before any run ------------------------------
 PROJECT_DIR=$DIR_A
-for bad in '"2m"' '"2020-01-01T00:00:00Z"' '"not a budget"'; do
+for bad in "$TOO_SHORT" '"2020-01-01T00:00:00Z"' '"not a budget"'; do
   if start_budget_run "Create a file named never.txt in the current working folder." "$bad"; then
     not_ok "budget $bad started run $RUN_ID instead of being refused"
     board_api POST /setup-api/coding-agent/stop "$(jq -cn --arg id "$RUN_ID" '{runId: $id}')"
@@ -218,10 +238,12 @@ fi
 
 # ---- 3. a budget from the task's words, and the deadline enforced ------------
 PROJECT_DIR=$DIR_B
-# A script the run is told to wait for: one call waits 330 s — past the
-# 5-minute budget — and only then prints ALL DONE. A call the agent's own
-# command limit cuts off prints nothing, and the task says to run it again.
-# Its calls are counted on disk, for the log.
+# A script the run is told to wait for: one call waits 30 s past the budget,
+# and only then prints ALL DONE. A call the agent's own command limit cuts off
+# prints nothing, and the task says to run it again. Its calls are counted on
+# disk, for the log.
+WAIT_S=$((FLOOR_S + 30))
+if [ "$FLOOR_MIN" -eq 1 ]; then WORDS="1 minute"; else WORDS="$FLOOR_MIN minutes"; fi
 # shellcheck disable=SC2016  # the JavaScript is written as it is
 if ! board '
   cat > "$1/wait.js" <<"EOF"
@@ -230,8 +252,9 @@ const file = ".wait-count";
 let n = 0;
 try { n = parseInt(fs.readFileSync(file, "utf8"), 10) || 0; } catch {}
 fs.writeFileSync(file, String(n + 1));
-console.log("waiting 330 seconds; this is expected, please keep waiting for ALL DONE...");
-setTimeout(() => { console.log("ALL DONE: the wait has finished. Now create done.txt."); }, 330000);
+const seconds = Number(process.argv[2] || "330");
+console.log(`waiting ${seconds} seconds; this is expected, please keep waiting for ALL DONE...`);
+setTimeout(() => { console.log("ALL DONE: the wait has finished. Now create done.txt."); }, seconds * 1000);
 EOF
   [ -s "$1/wait.js" ]
 ' "$DIR_B"; then
@@ -239,23 +262,23 @@ EOF
   cleanup
   finish
 fi
-TASK="You have 5 minutes for this task. The current working folder holds wait.js. Run: node wait.js — with a command timeout of at least 400 seconds (400000 ms) — and wait for it to finish: it takes about five and a half minutes, and that wait is expected and is the whole point. Do not shorten it, do not run it in the background, do not read or change wait.js. It prints ALL DONE when it has finished. If it is cut off before it prints ALL DONE, run it again the same way and wait again. Only after it has printed ALL DONE, create a file named done.txt in the current working folder with the single word done in it. Do not create or change any other file and do not run anything else."
+TASK="You have $WORDS for this task. The current working folder holds wait.js. Run: node wait.js $WAIT_S — with a command timeout of at least $((WAIT_S + 70)) seconds ($(( (WAIT_S + 70) * 1000 )) ms) — and wait for it to finish: it takes about $WAIT_S seconds, and that wait is expected and is the whole point. Do not shorten it, do not run it in the background, do not read or change wait.js. It prints ALL DONE when it has finished. If it is cut off before it prints ALL DONE, run it again the same way and wait again. Only after it has printed ALL DONE, create a file named done.txt in the current working folder with the single word done in it. Do not create or change any other file and do not run anything else."
 
 if ! start_budget_run "$TASK" null; then
   not_ok "the text-budget run did not start: $(api_error)"
   cleanup
   finish
 fi
-ok "run $RUN_ID started from a task that says \"You have 5 minutes\" (HTTP 202)"
+ok "run $RUN_ID started from a task that says \"You have $WORDS\" (HTTP 202)"
 note "answer: $(api_json -c '{started, queued, routedToTeam, timeBudget, timeBudgetIgnored}')"
 
 DEADLINE=$(api_json '.timeBudget.deadline // empty')
 SET_AT=$(api_json '.timeBudget.setAt // empty')
 D=$(iso_s "$DEADLINE"); S=$(iso_s "$SET_AT")
-if [ -n "$D" ] && [ -n "$S" ] && [ $((D - S)) -eq "$BUDGET_S" ] && [ "$(api_json '.timeBudget.source')" = text ]; then
-  ok "the task's words became the budget: source text, deadline $DEADLINE, $BUDGET_S s after it was set"
+if [ -n "$D" ] && [ -n "$S" ] && [ $((D - S)) -eq "$FLOOR_S" ] && [ "$(api_json '.timeBudget.source')" = text ]; then
+  ok "the task's words became the budget: source text, deadline $DEADLINE, $FLOOR_S s after it was set"
 else
-  not_ok "the words \"You have 5 minutes\" did not become a 5-minute budget: $(api_json -c '{timeBudget, timeBudgetIgnored}')"
+  not_ok "the words \"You have $WORDS\" did not become a $FLOOR_S s budget: $(api_json -c '{timeBudget, timeBudgetIgnored}')"
 fi
 
 if wait_time_record 60; then
@@ -265,7 +288,7 @@ if wait_time_record 60; then
     not_ok "the in-progress time record is not as expected: $(api_json -c '{status: .run.status, timeRecord: (.run.timeRecord | {usedMs, leftMs, finishedAt, stopReason})}')"
   fi
   if [ "$(api_json '[.run.timeRecord.records[] | select(.kind == "note" and (.text | startswith("Safety margin:")))] | length > 0')" = true ]; then
-    ok "the record notes the run started inside its safety margin (10 min > the 5-minute budget)"
+    ok "the record notes the run started inside its safety margin (10 min > the $WORDS budget)"
   else
     not_ok "no 'Safety margin:' note on the record: $(api_json -c '[.run.timeRecord.records[] | {kind, text: .text[0:80]}]')"
   fi
@@ -273,11 +296,11 @@ else
   not_ok "run $RUN_ID exposed no time record within 60 s: $(api_error)"
 fi
 
-# The run must end BY ITSELF: at the deadline (5 min after the start) plus the
-# wrap-up grace at the latest. wait_coding_run's own stop on the way out is the
-# failure case here.
-if ! wait_coding_run $((BUDGET_S + WRAP_UP_GRACE_S + 60)); then
-  not_ok "run $RUN_ID was still running $((BUDGET_S + WRAP_UP_GRACE_S + 60)) s after its start: the deadline did not end it ($(run_account))"
+# The run must end BY ITSELF: at the deadline ($WORDS after the start) plus
+# the wrap-up grace at the latest. wait_coding_run's own stop on the way out is
+# the failure case here.
+if ! wait_coding_run $((FLOOR_S + WRAP_UP_GRACE_S + 60)); then
+  not_ok "run $RUN_ID was still running $((FLOOR_S + WRAP_UP_GRACE_S + 60)) s after its start: the deadline did not end it ($(run_account))"
   cleanup
   finish
 fi

@@ -2,8 +2,11 @@ name: E2E Tests
 
 on:
   pull_request:
+  # beta too: GitHub hands a pull request the caches of its own branch and of
+  # its base, so the caches below are warm for a PR's first run only once a
+  # push to beta has saved them.
   push:
-    branches: [main]
+    branches: [main, beta]
 
 permissions:
   contents: read
@@ -30,16 +33,30 @@ jobs:
         with:
           bun-version: "1.2.10"
 
-      - name: Install dependencies
-        run: bun install --frozen-lockfile
+      - name: Cache bun's downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
 
-      # Cache Playwright browser binaries between runs (~250MB Chromium download).
+      - name: Install dependencies
+        id: deps
+        run: |
+          bun install --frozen-lockfile
+          echo "playwright=$(node -p "require('playwright-core/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      # Cache Playwright browser binaries between runs (~250MB Chromium download),
+      # keyed on the exact Playwright version that runs them — not on
+      # package.json, which changed the key (and missed) on every dependency
+      # edit, about half of all runs.
       - name: Cache Playwright browsers
         id: playwright-cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('package.json') }}
+          key: playwright-${{ runner.os }}-${{ steps.deps.outputs.playwright }}
 
       - name: Install Playwright Chromium
         if: steps.playwright-cache.outputs.cache-hit != 'true'
@@ -58,9 +75,11 @@ jobs:
       # cache for the same lockfile, which is still valid — the compiler
       # verifies each cached file against the source it sees, so a stale entry
       # is recomputed, never trusted. Saved after the job by actions/cache.
-      # (Next 16 builds with Turbopack, whose own compiler cache is not written
-      # to disk unless experimental.turbopackFileSystemCacheForBuild is on; this
-      # step is where that cache would land too, once it is enabled.)
+      # Next 16.4 writes Turbopack's compiler cache there too
+      # (experimental.turbopackFileSystemCacheForBuild is on by default):
+      # measured on 2 CPUs, a warm cache took the compile from 21 s to 5 s and
+      # the type check from 26 s to 5 s. The last fallback is any cache at all —
+      # a lockfile change still leaves most entries good.
       - name: Cache Next.js build cache
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
@@ -68,6 +87,7 @@ jobs:
           key: nextjs-${{ runner.os }}-${{ hashFiles('bun.lock') }}-${{ hashFiles('src/**', 'public/**', 'next.config.ts', 'tsconfig.json') }}
           restore-keys: |
             nextjs-${{ runner.os }}-${{ hashFiles('bun.lock') }}-
+            nextjs-${{ runner.os }}-
 
       - name: Run E2E tests with coverage
         id: e2e

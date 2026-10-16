@@ -57,8 +57,13 @@ on:
 permissions:
   contents: read
 
+# A run a newer push to the same PR has superseded is cancelled. Grouped by PR
+# number, and every other run — a push to beta or main, the schedule, a
+# dispatch — in a group of its own (its run id), as in pr-tests-coverage.yml:
+# a group keyed on the branch cancelled a landed commit's run when the next
+# merge arrived, and the upgrade shard a PR into beta may skip runs only here.
 concurrency:
-  group: e2e-install-${{ github.ref }}
+  group: e2e-install-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:
@@ -275,6 +280,31 @@ jobs:
           cache-from: type=gha,scope=e2e-install-${{ runner.arch }}
           cache-to: type=gha,mode=min,scope=e2e-install-${{ runner.arch }}
 
+      # The framework's build cache for the install's `next build`: the
+      # container's .next/cache from the last push to beta or main (or this
+      # shard's newest on the same lockfile), mounted read-only and copied in
+      # by the entrypoint before install.sh runs (e2e-install/cache-seed/
+      # README.md). Next checks every entry against the sources it sees, so the
+      # build is still this checkout's; it only skips repeated work. A miss is
+      # a cold build, as before.
+      - name: Restore the build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ runner.temp }}/e2e-cache/next-cache
+          key: e2e-install-next-${{ runner.arch }}-${{ matrix.shard }}-${{ hashFiles('bun.lock') }}-${{ github.sha }}
+          restore-keys: |
+            e2e-install-next-${{ runner.arch }}-${{ matrix.shard }}-${{ hashFiles('bun.lock') }}-
+            e2e-install-next-${{ runner.arch }}-${{ matrix.shard }}-
+            e2e-install-next-${{ runner.arch }}-
+
+      # Every `compose` after this one — global-setup's included — reads the
+      # same mount, so the container it finds running has the same config.
+      - name: Point the harness at the build cache
+        run: |
+          mkdir -p "$RUNNER_TEMP/e2e-cache"
+          echo "CLAWBOX_E2E_CACHE_DIR=$RUNNER_TEMP/e2e-cache" >> "$GITHUB_ENV"
+          du -sh "$RUNNER_TEMP/e2e-cache/next-cache" 2>/dev/null || echo "no build cache restored: the install builds cold"
+
       # The install inside the container (~4 min) needs nothing from the host
       # but the image, so it starts here and runs while the host installs
       # Playwright below — 40 s to 1 min 45 s of apt, measured, that every
@@ -287,10 +317,28 @@ jobs:
       # Only install the host-side bits we need to *drive* the tests: the
       # Playwright runner + its system libs for the chat UI spec. The
       # container inside Docker has its own separate Playwright install.
-      - name: Install Playwright (host side)
+      - name: Install host dependencies
+        id: host-deps
         run: |
           bun install --frozen-lockfile
-          bunx playwright install --with-deps chromium
+          echo "playwright=$(node -p "require('playwright-core/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      # The browser binary, by the exact Playwright version that runs it; its
+      # system libraries come from apt either way.
+      - name: Cache Playwright browsers
+        id: playwright-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ runner.arch }}-${{ steps.host-deps.outputs.playwright }}
+
+      - name: Install Playwright (host side)
+        run: |
+          if [ "${{ steps.playwright-cache.outputs.cache-hit }}" = true ]; then
+            bunx playwright install-deps chromium
+          else
+            bunx playwright install --with-deps chromium
+          fi
 
       - name: Run e2e-install suite
         id: e2e
@@ -315,6 +363,33 @@ jobs:
             args=(--grep "$GREP_FILTER" --pass-with-no-tests)
           fi
           bunx playwright test --config e2e-install/playwright.config.ts "${args[@]}"
+
+      # The container's build cache after its last build, for the next run:
+      # saved from pushes to beta and main, the schedule and a dispatch only,
+      # so every pull request into those branches restores the same few
+      # entries rather than each PR filling the repository's cache with its
+      # own. Only after a suite that passed: an install or build that failed
+      # can leave a partial cache, and every later run would start from it.
+      # Before the teardown, which deletes the volume it is in.
+      - name: Keep the build cache
+        id: keep-cache
+        if: ${{ !cancelled() && github.event_name != 'pull_request' && steps.e2e.outcome == 'success' }}
+        run: |
+          out="$RUNNER_TEMP/e2e-cache/next-cache"
+          rm -rf "$out"
+          if docker compose -f e2e-install/docker-compose.test.yml cp clawbox:/home/clawbox/clawbox/.next/cache "$out"; then
+            du -sh "$out"
+            echo "kept=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning title=No build cache kept::the container has no .next/cache to save"
+          fi
+
+      - name: Save the build cache
+        if: ${{ !cancelled() && steps.keep-cache.outputs.kept == 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ${{ runner.temp }}/e2e-cache/next-cache
+          key: e2e-install-next-${{ runner.arch }}-${{ matrix.shard }}-${{ hashFiles('bun.lock') }}-${{ github.sha }}
 
       - name: Dump install log on failure
         if: failure()

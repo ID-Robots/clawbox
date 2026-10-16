@@ -154,6 +154,8 @@ interface Scenario {
    * let expire; the shipped default is 180.
    */
   probeWindow?: string;
+  /** The serving build carries a framework cache (`.next/cache/entry`). */
+  previousCache?: boolean;
 }
 
 interface Run {
@@ -212,6 +214,7 @@ function run(scenario: Scenario = {}): Run {
     entry = "do_rebuild",
     rebootFollows = false,
     probeWindow = "2",
+    previousCache = false,
   } = scenario;
   // `step_build` calls run_next_build directly and ignores its arguments, so
   // pairing it with the flag would silently omit the behaviour and read as
@@ -225,6 +228,10 @@ function run(scenario: Scenario = {}): Run {
   rmSync(buildAttempts, { force: true });
   mkdirSync(projectDir, { recursive: true });
   if (previousBuild === "servable") writeBuild(path.join(projectDir, ".next"), "old-build-id");
+  if (previousCache) {
+    mkdirSync(path.join(projectDir, ".next", "cache"), { recursive: true });
+    writeFileSync(path.join(projectDir, ".next", "cache", "entry"), "warm\n", "utf-8");
+  }
   if (parkedBuild === "servable") {
     writeBuild(path.join(projectDir, ".next-old"), "parked-build-id");
     // With the stamp the earlier, killed run left on it. Without this the
@@ -352,6 +359,9 @@ function run(scenario: Scenario = {}): Run {
     "# subject, not the wall clock, so the wait is a no-op here and all twenty",
     "# attempts run instantly.",
     "sleep() { :; }",
+    "# The cache carry moves the parked build's .next/cache as clawbox; here that",
+    "# is whoever runs the test.",
+    'as_clawbox() { "$@"; }',
     "ensure_node_pty() {",
     nodePty === "succeeds"
       ? "  echo '  node-pty is already loadable'"
@@ -454,6 +464,9 @@ function run(scenario: Scenario = {}): Run {
       "drain_build_transients",
       "promote_parked_build",
       "set_previous_build_aside",
+      // The parked build's .next/cache into the new one, between the park
+      // and the build.
+      "carry_build_cache",
       "restore_previous_build",
       "run_next_build",
     ),
@@ -541,6 +554,15 @@ describe("do_rebuild verifies the build it produced", () => {
     expect(r.status).toBe(0);
     expect(r.buildId).toBe("new-build-id");
     expect(r.hasEntry).toBe(true);
+  });
+
+  it("carries the serving build's .next/cache into the new build instead of deleting it with the park", () => {
+    const r = run({ build: "succeeds", previousCache: true });
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.buildId).toBe("new-build-id");
+    expect(r.stdout).toContain("Keeping the build cache (.next/cache) for this build");
+    expect(readFileSync(path.join(projectDir, ".next", "cache", "entry"), "utf-8")).toBe("warm\n");
+    expect(existsSync(path.join(projectDir, ".next-old")), "the parked build was left behind").toBe(false);
   });
 
   it("fails when the build exits 0 without producing anything", () => {
