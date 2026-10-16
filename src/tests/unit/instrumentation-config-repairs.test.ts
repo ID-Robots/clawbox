@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { repairOpenclawConfig } from "@/instrumentation";
+import { ConfigChangedWhileHeldError, GatewayStillStartingError } from "@/lib/gateway-start-guard";
 import { deferred } from "@/tests/helpers/deferred";
 
 /**
@@ -75,9 +76,9 @@ describe("repairOpenclawConfig", () => {
     // runs; their write is held until the gateway is up, and the pre-start's
     // own passes rewrite the file meanwhile, so the held snapshot is refused.
     // Run again, the repair reads the file as it is now.
-    const moved = Object.assign(new Error("OpenClaw's settings changed while the assistant was starting"), {
-      code: "config_changed_while_held",
-    });
+    // The guard's own error: the retry keys on its code, which instrumentation
+    // does not import the class for.
+    const moved = new ConfigChangedWhileHeldError();
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const ensureMicrosoftTtsExcluded = vi.fn()
       .mockRejectedValueOnce(moved)
@@ -91,7 +92,7 @@ describe("repairOpenclawConfig", () => {
   });
 
   it("runs it once more only: a second refusal is logged like any other failure", async () => {
-    const moved = Object.assign(new Error("settings changed"), { code: "config_changed_while_held" });
+    const moved = new ConfigChangedWhileHeldError();
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const ensureMicrosoftTtsExcluded = vi.fn().mockRejectedValue(moved);
     await repairOpenclawConfig({
@@ -100,7 +101,23 @@ describe("repairOpenclawConfig", () => {
       restartGateway: async () => {},
     });
     expect(ensureMicrosoftTtsExcluded).toHaveBeenCalledTimes(2);
-    expect(error).toHaveBeenCalledWith(expect.stringContaining("Microsoft TTS"), "settings changed");
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("Microsoft TTS"), moved.message);
+    error.mockRestore();
+  });
+
+  it("does not run a repair again for any other refusal, a gateway still starting included", async () => {
+    // Run again after "still starting", the repair could hold for the whole
+    // start once more, and the update continuation waits on this promise.
+    const stillStarting = new GatewayStillStartingError();
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const ensureMicrosoftTtsExcluded = vi.fn().mockRejectedValue(stillStarting);
+    await repairOpenclawConfig({
+      ensureLocalAiProxyUrls: async () => false,
+      ensureMicrosoftTtsExcluded,
+      restartGateway: async () => {},
+    });
+    expect(ensureMicrosoftTtsExcluded).toHaveBeenCalledTimes(1);
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("Microsoft TTS"), stillStarting.message);
     error.mockRestore();
   });
 

@@ -19,11 +19,11 @@ import { logSafe } from "@/lib/log-safe";
  * the CLI, which writes the file regardless. The owner's ruling: wait for the
  * gateway instead, about two minutes of its own start at most, then write;
  * still not ready, fail in plain words. The unit's ExecStartPre is waited out
- * as well and not counted against those two minutes (owner's ruling,
- * 2026-10-16), so the worst case is the pre-start's own bound (600 s) plus the
- * two minutes: a write a page is waiting on can outlast the tunnel's ~100 s on
- * a cold pre-start, and then lands after the page has given up. The units keep
- * `RestartPreventExitStatus=78`.
+ * as well and, by design, not counted against those two minutes: a cold
+ * pre-start can legitimately take minutes. So the worst case is the
+ * pre-start's own bound (600 s) plus the two minutes, and a write a page is
+ * waiting on can outlast the tunnel's ~100 s on a cold pre-start, then land
+ * after the page has given up. The units keep `RestartPreventExitStatus=78`.
  *
  * WHAT "STARTING" MEANS HERE, read without spawning anything:
  *   - the gateway PROCESS is up: a process in the gateway unit's cgroup (the

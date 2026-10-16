@@ -243,4 +243,26 @@ describe("serialized unvalidated primary-model fallback", () => {
     const lockPath = path.join(root, "openclaw.json.lock");
     expect(existsSync(lockPath)).toBe(false);
   });
+
+  it("waits for a starting gateway before taking OpenClaw's config lock, and not again inside it", async () => {
+    // Held with the lock taken, a write would keep the gateway's own
+    // pre-start CLI writes out of the lock for the whole pre-start.
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "clawbox-primary-hold-"));
+    roots.push(root);
+    process.env.CLAWBOX_OPENCLAW_HOME = root;
+    delete process.env.OPENCLAW_HOME;
+    vi.resetModules();
+    const held = vi.fn(async () => false);
+    vi.doMock("@/lib/gateway-start-guard", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("@/lib/gateway-start-guard")>()),
+      holdWhileGatewayStarts: held,
+    }));
+    try {
+      const { setPrimaryModelWithoutCatalogValidation } = await import("@/lib/openclaw-config");
+      await setPrimaryModelWithoutCatalogValidation("deepseek/deepseek-v4-pro");
+      expect(held.mock.calls.map(([label]) => label)).toEqual(["locked config write"]);
+    } finally {
+      vi.doUnmock("@/lib/gateway-start-guard");
+    }
+  });
 });
