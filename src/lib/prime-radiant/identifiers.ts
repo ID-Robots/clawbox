@@ -14,14 +14,16 @@
  * Identifiers read:
  *  - in a page TITLE: dates (2026-09-14, 14.09.2026, 2026-09), and any token
  *    of 5+ digits or of letters and 3+ digits (INV-2026-0012, 1Z999AA1, #48213);
- *  - in a claim TEXT: dates, and numbers or codes that follow a reference
- *    word (waybill, invoice, order, transfer, parcel, tracking, shipment,
- *    reference, no., #, №) — never a bare amount, so "10 EUR against 12 EUR"
- *    stays a question for the judge.
+ *  - in a claim TEXT: code-shaped references after a reference word
+ *    (waybill, invoice, order, transfer, parcel, tracking, shipment,
+ *    reference, #, №) — six digits or more, or letters and digits; never a
+ *    bare amount ("order 12 units", "10 EUR against 12 EUR") and never a
+ *    date (two dates in claims about one thing may be the contradiction).
  *
- * Two sides are different subjects when both carry identifiers of the same
- * kind and those share none. Errs towards keeping a pair: anything unclear
- * goes to the judge as before.
+ * Two sides are different subjects when both carry references and those
+ * share none, or — sharing none — their TITLES carry different days or
+ * months. A shared reference means one thing: never filtered. Errs towards
+ * keeping a pair: anything unclear goes to the judge as before.
  *
  * Pure.
  */
@@ -35,7 +37,7 @@ export interface Identifiers {
 }
 
 const REF_WORDS =
-  "waybill|awb|invoice|inv|order|transfer|payment|parcel|package|tracking|shipment|consignment|receipt|reference|ref|transaction|txn|iban|proforma|credit\\s+note|bill|no\\.?|nr\\.?|number|id|#|№";
+  "waybill|awb|invoice|inv|order|transfer|parcel|package|tracking|shipment|consignment|receipt|reference|ref|transaction|txn|proforma|credit\\s+note|#|№";
 
 const REF_AFTER_WORD = new RegExp(`(?:^|[^\\p{L}])(?:${REF_WORDS})\\s*[:#№]?\\s*([A-Za-z]{0,6}[-/]?\\d[\\dA-Za-z/-]{2,})`, "giu");
 const HASH_REF = /[#№]\s*([A-Za-z]{0,6}\d[\dA-Za-z-]{2,})/gu;
@@ -91,15 +93,21 @@ export function titleIdentifiers(title: string | null | undefined): Identifiers 
   return out;
 }
 
-/** The identifiers a claim text carries (dates, and refs after a reference word). */
+/** A reference that looks like a code, not an amount: six digits or more, or letters with three digits or more. */
+function codeShaped(tok: string): boolean {
+  const digits = (tok.match(/\d/g) ?? []).length;
+  return digits >= 6 || (/[A-Za-z]/.test(tok) && digits >= 3);
+}
+
+/** The references a claim text carries after a reference word. Dates in a claim are left out on purpose. */
 export function claimIdentifiers(text: string): Identifiers {
   const out = empty();
-  const rest = readDates(text, out);
+  const rest = readDates(text, empty());
   for (const re of [REF_AFTER_WORD, HASH_REF]) {
     re.lastIndex = 0;
     for (const m of rest.matchAll(re)) {
       const tok = m[1].replace(/[-/]+$/, "");
-      if ((tok.match(/\d/g) ?? []).length < 3) continue;
+      if (!codeShaped(tok)) continue;
       out.ref.add(normRef(tok));
     }
   }
@@ -127,6 +135,8 @@ function disjoint(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
  * or different months (a day's month counts as its month).
  */
 export function differentSubjects(a: Identifiers, b: Identifiers): string | null {
+  // One reference on both sides: the same thing, whatever its dates say.
+  for (const r of a.ref) if (b.ref.has(r)) return null;
   if (disjoint(a.ref, b.ref)) return "different identifiers";
   if (disjoint(a.date, b.date)) return "different dates";
   const months = (x: Identifiers) => new Set([...x.month, ...[...x.date].map((d) => d.slice(0, 7))]);

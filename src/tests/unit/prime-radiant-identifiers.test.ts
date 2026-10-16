@@ -41,8 +41,9 @@ describe("identifiers", () => {
 
   it("reads refs in claims only after a reference word", () => {
     expect([...claimIdentifiers("Waybill 1054432198 was delivered on 14.09.2026.").ref]).toEqual(["1054432198"]);
-    expect([...claimIdentifiers("Waybill 1054432198 was delivered on 14.09.2026.").date]).toEqual(["2026-09-14"]);
+    expect(claimIdentifiers("Waybill 1054432198 was delivered on 14.09.2026.").date.size).toBe(0);
     expect(claimIdentifiers("The widget costs 12000 EUR.").ref.size).toBe(0);
+    expect(claimIdentifiers("Order 12 units of widgets.").ref.size).toBe(0);
   });
 
   it("says two waybills, two days and two invoices are different subjects", () => {
@@ -54,6 +55,11 @@ describe("identifiers", () => {
     ).toBe("different dates");
     expect(differentSubjectSides({ title: "Widget pricing", text: "The widget costs 10 EUR." }, { title: "Widget price list", text: "The widget costs 12 EUR." })).toBeNull();
     expect(differentSubjectSides({ title: "Invoice 20260118", text: "Paid." }, { title: "Invoice 20260118", text: "Unpaid." })).toBeNull();
+    // One waybill, two delivery dates: that may be the contradiction itself.
+    expect(
+      differentSubjectSides({ title: "Parcel status", text: "Waybill 1054432198 was delivered on 2026-09-14." }, { title: "Parcel status", text: "Waybill 1054432198 was delivered on 2026-09-15." }),
+    ).toBeNull();
+    expect(differentSubjectSides({ title: "Widget orders", text: "Order 12 units." }, { title: "Widget orders", text: "Order 15 units." })).toBeNull();
   });
 
   it("keeps two different waybills out of the judge's pairs", () => {

@@ -25,7 +25,8 @@ export interface RejudgeResult {
 
 /** The reason the filter would close this item, or null to leave it. Pure. */
 export function rejudgeReason(item: Pick<ReviewItem, "kind" | "candidates">, titles: ReadonlyMap<string, string>): string | null {
-  if (item.kind !== "contradiction" || item.candidates.length < 2) return null;
+  // Only the two-sided items the pass raises; a hand-raised item with more candidates is a person's question.
+  if (item.kind !== "contradiction" || item.candidates.length !== 2) return null;
   const [a, b] = item.candidates;
   const side = (c: (typeof item.candidates)[number]) => ({ title: c.page ? (titles.get(c.page) ?? null) : null, text: c.text });
   return differentSubjectSides(side(a), side(b));
