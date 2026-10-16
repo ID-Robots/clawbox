@@ -6161,9 +6161,10 @@ function ChatPopup({ isOpen, onClose, onOpenFull, onOpenSettingsSection, onThink
         // text, so a turn that spent its time in `web_search` — measured at up
         // to four minutes on the box — showed an empty bubble and no reason to
         // believe anything was happening. `applyToolEvent` reads `toolCallId`,
-        // so the transport's stable `id` is handed over under that name.
+        // so the transport's stable `id` is handed over under that name, and
+        // `detail` (a shell step's command) is what names the app it reached.
         else if (event.kind === 'tool' && runIdRef.current === idempotencyKey) {
-          applyToolEvent({ toolCallId: event.id, name: event.name, phase: event.phase })
+          applyToolEvent({ toolCallId: event.id, name: event.name, phase: event.phase, detail: event.detail })
           if (isCodingAgentTool(event.name)) nudgeCodingAgent()
           // Remember that this turn asked to send mail. Noted on `start` as
           // well as on `result` because a tool that never reported a result —

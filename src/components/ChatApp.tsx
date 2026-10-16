@@ -1376,8 +1376,9 @@ function ChatApp({ onThinkingChange, hideHeader = false, onPhoneChromeHiddenChan
         } else if (event.kind === 'tool' && runIdRef.current === idempotencyKey) {
           // The same pills the gateway's own `agent` events already feed.
           // `applyToolEvent` reads `toolCallId`, so the transport's stable `id`
-          // is handed over under that name.
-          applyToolEvent({ toolCallId: event.id, name: event.name, phase: event.phase })
+          // is handed over under that name, and `detail` (a shell step's
+          // command) is what names the app the step reached.
+          applyToolEvent({ toolCallId: event.id, name: event.name, phase: event.phase, detail: event.detail })
         }
       })
     } catch (err) {
