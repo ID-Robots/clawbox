@@ -18,7 +18,8 @@ import {
   terminateClawboxBrowser,
   terminateForeignCdpBrowser,
 } from "@/lib/process-match";
-import { findPlaywrightChromium, focusCdpBrowser } from "@/lib/cdp-probe";
+import { findPlaywrightChromium } from "@/lib/cdp-probe";
+import { focusRunningBrowser } from "@/lib/browser-clean-start";
 import { cdpEndpoint, readDesktopBrowserConfig, type DesktopBrowserConfig } from "@/lib/desktop-browser-config";
 import { cleanBrowserLocks } from "@/lib/shared-browser-runtime";
 import { PROFILE_MIGRATION_KEY, type ProfileMigrationRecord } from "@/lib/shared-browser";
@@ -485,16 +486,17 @@ export async function POST(req: Request) {
         // no-op that then reported success).
         const existing = await getBrowserStatus(desktop);
         if (existing.running && existing.cdpReady) {
-          // Ours or the owner's own: bring it to them — the start page as a
-          // tab, or its window forward — instead of answering "already
-          // running" over a window they may not be looking at.
-          const focus = await focusCdpBrowser(endpoint, await getBrowserStartUrl());
+          // Ours or the owner's own: bring its window forward instead of
+          // answering "already running" over a window they may not be looking
+          // at. The shared clean-start rule (src/lib/browser-clean-start.ts):
+          // no blank tab and no second start page for a browser with a page.
+          const focus = await focusRunningBrowser(cdpPort, await getBrowserStartUrl());
           return NextResponse.json({
             ok: true,
             alreadyRunning: true,
             pid: existing.pid,
             cdpPort,
-            focused: focus !== "unreachable",
+            focused: focus === "focused",
           });
         }
         // The owner's browser is open on the configured profile but not on the

@@ -48,9 +48,13 @@ vi.mock("@/lib/sqlite-store", () => ({
 // leaks into "not installed".
 vi.mock("@/lib/cdp-probe", () => ({
   findPlaywrightChromium: vi.fn().mockReturnValue(null),
-  // Bringing an already-running browser forward (unit-tested in
-  // src/tests/unit/cdp-probe.test.ts against a fake Chromium).
-  focusCdpBrowser: vi.fn().mockResolvedValue("activated"),
+}));
+
+// Bringing an already-running browser forward: the shared clean-start rule
+// (unit-tested in src/tests/unit/browser-clean-start.test.ts against a fake
+// Chromium).
+vi.mock("@/lib/browser-clean-start", () => ({
+  focusRunningBrowser: vi.fn().mockResolvedValue("focused"),
 }));
 
 const mockFetch = vi.fn();
@@ -58,7 +62,8 @@ vi.stubGlobal("fetch", mockFetch);
 
 import { openclawIsAbsent, readConfig, restartGateway, runOpenclawConfigSet } from "@/lib/openclaw-config";
 import { sqliteGet, sqliteSet } from "@/lib/sqlite-store";
-import { findPlaywrightChromium, focusCdpBrowser } from "@/lib/cdp-probe";
+import { findPlaywrightChromium } from "@/lib/cdp-probe";
+import { focusRunningBrowser } from "@/lib/browser-clean-start";
 import fs from "fs/promises";
 import path from "path";
 import { promisify } from "util";
@@ -87,7 +92,7 @@ describe("/setup-api/browser/manage", () => {
     vi.mocked(fs.readFile).mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
     vi.mocked(fs.writeFile).mockResolvedValue(undefined);
     vi.mocked(findPlaywrightChromium).mockReturnValue(null);
-    vi.mocked(focusCdpBrowser).mockResolvedValue("activated");
+    vi.mocked(focusRunningBrowser).mockResolvedValue("focused");
     mockFetch.mockRejectedValue(new Error("connection refused"));
     mockExec = vi.fn();
     vi.mocked(promisify).mockReturnValue(mockExec as never);
@@ -699,7 +704,7 @@ describe("/setup-api/browser/manage", () => {
 
       expect(res.status).toBe(200);
       expect(body).toMatchObject({ ok: true, alreadyRunning: true, pid: 4242, cdpPort: 9222, focused: true });
-      expect(focusCdpBrowser).toHaveBeenCalledWith("http://127.0.0.1:9222", "about:blank");
+      expect(focusRunningBrowser).toHaveBeenCalledWith(9222, "about:blank");
       expect(started()).toBe(false);
       expect(fs.unlink).not.toHaveBeenCalled();
       expect(killSpy).not.toHaveBeenCalled();
@@ -771,7 +776,7 @@ describe("/setup-api/browser/manage", () => {
       expect(res.status).toBe(409);
       expect((await res.json()).code).toBe("profile_in_use");
       // Nothing of the other browser's was brought forward as if it were the owner's.
-      expect(focusCdpBrowser).not.toHaveBeenCalled();
+      expect(focusRunningBrowser).not.toHaveBeenCalled();
       expect(started()).toBe(false);
     });
 

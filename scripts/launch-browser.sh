@@ -7,6 +7,16 @@ set -euo pipefail
 # `launch-browser.sh --print-config` prints the profile, port and executable
 # this would use and exits — the test that keeps these rules and
 # src/lib/desktop-browser-config.ts in step runs it.
+#
+# `launch-browser.sh URL` asks for that page: opened in the browser already
+# running (in place of a blank tab when it has one), or as the first page of a
+# fresh start instead of the owner's start page. Without a URL a running
+# browser is only brought to the front — never given another blank tab.
+# Every start begins clean (scripts/lib/browser-clean-start.sh): no restored
+# session and no "Restore pages?" bubble, also after a crash.
+
+# shellcheck source=scripts/lib/browser-clean-start.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib/browser-clean-start.sh"
 
 CURRENT_USER="$(id -un)"
 HOME="${HOME:-$(getent passwd "$CURRENT_USER" | cut -d: -f6)}"
@@ -235,11 +245,28 @@ fi
   exit 1
 }
 
-# Check if already running
-if curl -s "http://127.0.0.1:$CDP_PORT/json/version" >/dev/null 2>&1; then
-  echo "Browser already running on CDP port $CDP_PORT"
-  exit 0
+# The page asked for, if any. Only an http(s) address or about:blank: this
+# lands on Chromium's command line, where anything else could be read as a
+# switch.
+ASKED_URL=""
+if [ -n "${1:-}" ]; then
+  case "$1" in
+    http://*|https://*|about:blank) [[ "$1" =~ [[:space:]] ]] || ASKED_URL="$1" ;;
+  esac
+  [ -n "$ASKED_URL" ] || echo "Not an http(s) address, so not opened: $1" >&2
 fi
+
+# Already running: that browser is reused — its page brought to the front, the
+# URL asked for opened in it — and this exits 0. A second start would only hand
+# it another tab. Returns only when nothing answers on the port.
+reuse_running_browser() {
+  local reused status=0
+  reused="$(browser_reuse_running "$CDP_PORT" "$ASKED_URL" "$START_URL")" || status=$?
+  [ "$status" -eq 1 ] && return 0
+  echo "Browser already running on CDP port $CDP_PORT: $reused"
+  exit 0
+}
+reuse_running_browser
 
 # The owner's own profile (not ClawBox's), open in a browser that does not
 # answer on the port: a second Chromium on it would only hand the start page
@@ -251,6 +278,23 @@ if [ "$PROFILE" != "$DEFAULT_PROFILE" ] && [ -L "$PROFILE/SingletonLock" ]; then
   lock_pid="${lock_holder##*-}"
   if [[ "$lock_pid" =~ ^[0-9]+$ ]] && [ -d "/proc/$lock_pid" ]; then
     echo "The browser profile $PROFILE is already open (pid $lock_pid) without remote debugging on port $CDP_PORT; not starting a second browser on it" >&2
+    exit 1
+  fi
+fi
+
+# Any profile, ClawBox's own included: a browser on it that does not answer
+# on the port yet is one still starting — given a few seconds, then reused
+# like any running one. One that never answers is not joined either; one that
+# goes away meanwhile (the last of a killed browser's processes) leaves the
+# profile free, and the start goes on.
+if browser_profile_in_use "$PROFILE"; then
+  for _ in $(seq 1 20); do
+    sleep 0.5
+    reuse_running_browser
+    browser_profile_in_use "$PROFILE" || break
+  done
+  if browser_profile_in_use "$PROFILE"; then
+    echo "A browser is running on $PROFILE without remote debugging on port $CDP_PORT; not starting a second browser on it" >&2
     exit 1
   fi
 fi
@@ -305,11 +349,17 @@ if is_chrome_for_testing "$CHROMIUM"; then
   BUILD_FLAGS=(--test-type=gpu)
 fi
 
+# A clean start: the new tab page instead of the last session, and a clean
+# last exit, so a crash or a hard stop brings back no tabs and no "Restore
+# pages?" bubble. Only those keys of the profile's preferences change.
+echo "Session: $(browser_reset_session_prefs "$PROFILE" || true)"
+
 echo "Starting Chromium from $CHROMIUM on DISPLAY=$DISPLAY with CDP port $CDP_PORT"
 exec env DISPLAY="$DISPLAY" HOME="$HOME" DBUS_SESSION_BUS_ADDRESS="disabled:" \
   "$CHROMIUM" \
   "${SANDBOX_FLAGS[@]}" \
   "${BUILD_FLAGS[@]}" \
+  "${BROWSER_CLEAN_START_FLAGS[@]}" \
   --remote-debugging-port="$CDP_PORT" \
   --remote-allow-origins="http://127.0.0.1:${CDP_PORT}" \
   --user-data-dir="$PROFILE" \
@@ -324,4 +374,4 @@ exec env DISPLAY="$DISPLAY" HOME="$HOME" DBUS_SESSION_BUS_ADDRESS="disabled:" \
   --disable-background-networking \
   --password-store=basic \
   --metrics-recording-only \
-  "$START_URL"
+  "${ASKED_URL:-$START_URL}"

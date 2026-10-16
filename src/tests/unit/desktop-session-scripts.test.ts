@@ -714,6 +714,10 @@ describe("where the pieces meet", () => {
     expect(session).toContain('BROWSER="${CLAWBOX_DESKTOP_BROWSER:-/usr/local/bin/clawbox-desktop-browser}"');
     expect(installer).toContain('"$HERE/clawbox-desktop-span.mjs" /usr/local/lib/clawbox/clawbox-desktop-span.mjs');
     expect(browser).toContain('SPAN="${CLAWBOX_DESKTOP_SPAN:-/usr/local/lib/clawbox/clawbox-desktop-span.mjs}"');
+    // The clean-start rule scripts/launch-browser.sh sources from the tree.
+    expect(installer).toContain('"$REPO/scripts/lib/browser-clean-start.sh" /usr/local/lib/clawbox/browser-clean-start.sh');
+    expect(browser).toContain('CLEAN_START="${CLAWBOX_BROWSER_CLEAN_START:-/usr/local/lib/clawbox/browser-clean-start.sh}"');
+    expect(read(path.join(ROOT, "scripts/launch-browser.sh"))).toContain('source "$(dirname "${BASH_SOURCE[0]}")/lib/browser-clean-start.sh"');
     expect(installer).toContain('"$REPO/kiosk/labwc/rc.xml.in" /etc/clawbox/labwc/rc.xml.in');
     expect(browser).toContain('TEMPLATE="${CLAWBOX_LABWC_TEMPLATE:-/etc/clawbox/labwc/rc.xml.in}"');
     // The file the web server writes (src/lib/monitors.ts: DATA_DIR/monitors.json).
