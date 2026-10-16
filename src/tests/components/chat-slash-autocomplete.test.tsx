@@ -74,6 +74,8 @@ const sockets: FakeGatewayWs[] = [];
 const socket = () => sockets[sockets.length - 1] ?? null;
 /** Set by a case that wants the gateway to refuse `commands.list`. */
 let commandsListFails = false;
+/** Set by a case that wants the gateway to refuse as a multi-agent box does. */
+let commandsListNeedsAgent = false;
 /** Rows a case adds to the catalogue mid-test — a skill installed, say. */
 let extraCommands: Record<string, unknown>[] = [];
 
@@ -104,6 +106,13 @@ class FakeGatewayWs {
       return;
     }
     if (frame.method === "commands.list") {
+      if (commandsListNeedsAgent) {
+        setTimeout(() => this.emit({
+          type: "res", id, ok: false,
+          error: { code: "AGENT_SELECTION_REQUIRED", message: "agent selection required" },
+        }), 0);
+        return;
+      }
       if (commandsListFails) {
         setTimeout(() => this.emit({
           type: "res", id, ok: false, error: { message: "commands.list unavailable" },
@@ -183,6 +192,7 @@ describe("slash-command autocomplete (OpenClaw, mascot chat)", () => {
     sent.length = 0;
     sockets.length = 0;
     commandsListFails = false;
+    commandsListNeedsAgent = false;
     extraCommands = [];
     resetHarnessCache();
     window.localStorage.clear();
@@ -197,12 +207,21 @@ describe("slash-command autocomplete (OpenClaw, mascot chat)", () => {
     resetHarnessCache();
   });
 
-  it("asks the GATEWAY for the list, as commands.list{scope:'text',includeArgs:true}", async () => {
+  it("asks the GATEWAY for the list, as commands.list{scope:'text',includeArgs:true,agentId}", async () => {
     await mountReady();
     // The wire contract, pinned: `scope:'text'` because a ClawBox turn goes out
     // as text, and `includeArgs` is what makes a row able to say `/model
-    // <model>`. Never bound to a session key — the catalogue is the agent's.
-    expect(framesFor("commands.list")[0].params).toEqual({ scope: "text", includeArgs: true });
+    // <model>`. Never bound to a session key, but bound to the agent THIS
+    // chat's key names, which a multi-agent gateway requires.
+    expect(framesFor("commands.list")[0].params).toEqual({ scope: "text", includeArgs: true, agentId: "main" });
+  });
+
+  it("does not retry a refusal for a missing agent selection", async () => {
+    commandsListNeedsAgent = true;
+    await mountReady();
+    // The retry ladder starts at 1s; wait past it and see no second ask.
+    await new Promise((r) => setTimeout(r, 1_500));
+    expect(framesFor("commands.list")).toHaveLength(1);
   });
 
   it("shows the harness's own commands and descriptions when `/` is typed", async () => {
