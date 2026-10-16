@@ -17,8 +17,13 @@ import { logSafe } from "@/lib/log-safe";
  * The write path asked the running gateway first (`config.patch`), and a
  * gateway that is starting does not answer yet, so the write fell straight to
  * the CLI, which writes the file regardless. The owner's ruling: wait for the
- * gateway instead, about two minutes at most, then write; still not ready,
- * fail in plain words. The units keep `RestartPreventExitStatus=78`.
+ * gateway instead, about two minutes of its own start at most, then write;
+ * still not ready, fail in plain words. The unit's ExecStartPre is waited out
+ * as well and not counted against those two minutes (owner's ruling,
+ * 2026-10-16), so the worst case is the pre-start's own bound (600 s) plus the
+ * two minutes: a write a page is waiting on can outlast the tunnel's ~100 s on
+ * a cold pre-start, and then lands after the page has given up. The units keep
+ * `RestartPreventExitStatus=78`.
  *
  * WHAT "STARTING" MEANS HERE, read without spawning anything:
  *   - the gateway PROCESS is up: a process in the gateway unit's cgroup (the
@@ -55,7 +60,7 @@ import { logSafe } from "@/lib/log-safe";
  */
 
 const GATEWAY_PORT = envPort(process.env.GATEWAY_PORT, 18789);
-/** How long a write waits for a starting gateway: the owner's "about 120 s". */
+/** How long a write waits for a starting gateway process (pre-start not counted): the owner's "about 120 s". */
 export const GATEWAY_START_WAIT_MS = 120_000;
 /** A gateway silent for longer than this since its unit started is not "starting". */
 const RECENT_START_MS = 300_000;

@@ -70,6 +70,40 @@ describe("repairOpenclawConfig", () => {
     error.mockRestore();
   });
 
+  it("runs a repair once more when the file moved while its write was held for the gateway's start", async () => {
+    // At boot the repairs read openclaw.json while the gateway's pre-start
+    // runs; their write is held until the gateway is up, and the pre-start's
+    // own passes rewrite the file meanwhile, so the held snapshot is refused.
+    // Run again, the repair reads the file as it is now.
+    const moved = Object.assign(new Error("OpenClaw's settings changed while the assistant was starting"), {
+      code: "config_changed_while_held",
+    });
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const ensureMicrosoftTtsExcluded = vi.fn()
+      .mockRejectedValueOnce(moved)
+      .mockResolvedValueOnce(true);
+    const restartGateway = vi.fn(async () => {});
+    await repairOpenclawConfig({ ensureLocalAiProxyUrls: async () => false, ensureMicrosoftTtsExcluded, restartGateway });
+    expect(ensureMicrosoftTtsExcluded).toHaveBeenCalledTimes(2);
+    expect(restartGateway).toHaveBeenCalledTimes(1);
+    expect(error).not.toHaveBeenCalled();
+    error.mockRestore();
+  });
+
+  it("runs it once more only: a second refusal is logged like any other failure", async () => {
+    const moved = Object.assign(new Error("settings changed"), { code: "config_changed_while_held" });
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const ensureMicrosoftTtsExcluded = vi.fn().mockRejectedValue(moved);
+    await repairOpenclawConfig({
+      ensureLocalAiProxyUrls: async () => false,
+      ensureMicrosoftTtsExcluded,
+      restartGateway: async () => {},
+    });
+    expect(ensureMicrosoftTtsExcluded).toHaveBeenCalledTimes(2);
+    expect(error).toHaveBeenCalledWith(expect.stringContaining("Microsoft TTS"), "settings changed");
+    error.mockRestore();
+  });
+
   it("never throws — a restart that fails is logged, not raised into boot", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     await expect(repairOpenclawConfig({

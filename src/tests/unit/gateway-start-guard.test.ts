@@ -203,7 +203,9 @@ describe("gatewayStartPhase", () => {
     // processes older than that are not a start this could wait out.
     const { gatewayStartPhase } = await import("@/lib/gateway-start-guard");
     host.cmdline = "/bin/bash\0/opt/clawbox/scripts/gateway-pre-start.sh\0";
-    host.ageS = 700;
+    host.ageS = 590;
+    expect(await gatewayStartPhase()).toBe("pre-start");
+    host.ageS = 610;
     expect(await gatewayStartPhase()).toBe("idle");
     // A gateway whose process this does not recognise is still the core's word.
     host.ageS = 5;

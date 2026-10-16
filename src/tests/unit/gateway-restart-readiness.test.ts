@@ -320,10 +320,11 @@ describe("restartGateway when the restart outlives its client", () => {
     quiet.forEach((s) => s.mockRestore());
   });
 
-  it("answers a stop still draining inside the tunnel's ~100 s, its restore included", async () => {
+  it("answers a stop still draining within its tunnel-sized budget", async () => {
     // On an x64 bridge the stop waits for OpenClaw's own drain. The doctor's
     // answer, the rollback and the configure route's short restore all have
-    // to reach the page before the tunnel cuts the request.
+    // to reach the page before the tunnel cuts the request; this is the
+    // doctor's share (the restore's is pinned in the configure suites).
     const { runOpenclawDoctorFix } = await load();
     stopOutlivedThen(["Job=88\nActiveState=deactivating\nSubState=stop-sigterm\nResult=success\n"]);
     const quiet = [vi.spyOn(console, "warn"), vi.spyOn(console, "error")].map((s) => s.mockImplementation(() => {}));
@@ -355,6 +356,34 @@ describe("restartGateway when the restart outlives its client", () => {
       quiet.forEach((s) => s.mockRestore());
     },
   );
+
+  it("gives the legacy user unit the same restart client a caller asked for", async () => {
+    const { restartGateway, GatewayNotReadyError } = await load();
+    execFileMock.mockImplementation((cmd: string, args: string[], _opts: unknown, cb: ExecCallback) => {
+      if (cmd === "/usr/bin/sudo" && args.includes("restart")) {
+        cb(Object.assign(new Error("Failed to restart clawbox-gateway.service: Unit clawbox-gateway.service not found."), { code: 5 }));
+        return;
+      }
+      if (args.includes("--user") && args.includes("restart")) {
+        cb(Object.assign(new Error("Command failed: systemctl --user restart"), { killed: true, signal: "SIGTERM", code: null }));
+        return;
+      }
+      if (args.includes("show")) {
+        cb(null, { stdout: "Job=4711\nActiveState=deactivating\nSubState=stop-sigterm\nResult=success\n", stderr: "" });
+        return;
+      }
+      cb(null, { stdout: "", stderr: "" });
+    });
+    const quiet = [vi.spyOn(console, "warn"), vi.spyOn(console, "error")].map((s) => s.mockImplementation(() => {}));
+    let err: unknown = "pending";
+    restartGateway({ awaitReady: false, restartClientMs: 5_000, restartSettleMs: 0 })
+      .then(() => { err = null; }, (e: unknown) => { err = e; });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(err).toBeInstanceOf(GatewayNotReadyError);
+    const userRestart = execFileMock.mock.calls.find(([, args]) => (args as string[]).includes("--user") && (args as string[]).includes("restart"));
+    expect((userRestart?.[2] as { timeout?: number }).timeout).toBe(5_000);
+    quiet.forEach((s) => s.mockRestore());
+  });
 
   it("asks for a restart with the client a caller gives it, and reads one it outlived as queued", async () => {
     const { restartGateway, GatewayNotReadyError } = await load();

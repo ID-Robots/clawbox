@@ -2240,18 +2240,19 @@ type GatewayState =
 
 /**
  * Shared by reference: `configureModel` has too many exits to return it.
- * `stopStillRunning`: doctor found the stop it asked for still draining (an x64
- * bridge), so systemd queues the restore behind it and asking is enough.
+ * `gatewayBusy`: doctor found the gateway not down (its stop still draining on
+ * an x64 bridge, or another surface's restart bringing it back), so systemd
+ * queues the restore behind that job and asking is enough.
  */
-type GatewayTracker = { state: GatewayState; stopStillRunning?: boolean };
+type GatewayTracker = { state: GatewayState; gatewayBusy?: boolean };
 
 /**
  * How POST restores a gateway this request stopped: never a readiness wait.
- * Behind a stop still draining, a 60 s client would only wait out the drain,
- * past the tunnel's cut, so it only asks.
+ * Behind a job still running (a drain, another restart), a 60 s client would
+ * only wait that job out, past the tunnel's cut, so it only asks.
  */
 function restoreOptions(gateway: GatewayTracker): RestartGatewayOptions {
-  return gateway.stopStillRunning
+  return gateway.gatewayBusy
     ? { awaitReady: false, restartClientMs: 5_000, restartSettleMs: 0 }
     : { awaitReady: false };
 }
@@ -3333,7 +3334,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
         // into this 502. That inertness is the whole reason these outcomes are
         // returned rather than thrown, and it is load-bearing for the suite.
         outcome = await runOpenclawDoctorFix();
-        if (outcome === "gateway-still-stopping") gateway.stopStillRunning = true;
+        if (outcome === "gateway-still-stopping" || outcome === "gateway-not-stopped") gateway.gatewayBusy = true;
         if (outcome !== undefined && outcome !== "completed") {
           doctorBlockedBy = outcome;
           // Into the SAME failure path, deliberately: the v1/v2 decision below

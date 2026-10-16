@@ -390,12 +390,14 @@ wait_for_gateway_started() {
 # Whether the gateway unit is running anything: the gateway itself, or its
 # ExecStartPre (the appliance's system unit, or the owner's user unit on an x64
 # bridge). The pre-start counts: a CLI write takes seconds, so one started late
-# in it is still writing when ExecStart begins. GATEWAY_CGROUP_DIRS replaces
-# the two places looked in.
+# in it is still writing when ExecStart begins. The places looked in are the
+# ones gatewayCgroupDirs() in src/lib/gateway-start-guard.ts reads;
+# GATEWAY_CGROUP_DIRS replaces them.
 gateway_unit_running() {
-  local dir pid uid
+  local dir pid uid manager
   uid="$(id -u)"
-  for dir in ${GATEWAY_CGROUP_DIRS:-/sys/fs/cgroup/system.slice/clawbox-gateway.service /sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service/app.slice/openclaw-gateway.service}; do
+  manager="/sys/fs/cgroup/user.slice/user-$uid.slice/user@$uid.service"
+  for dir in ${GATEWAY_CGROUP_DIRS:-/sys/fs/cgroup/system.slice/clawbox-gateway.service $manager/app.slice/openclaw-gateway.service $manager/openclaw-gateway.service}; do
     [ -r "$dir/cgroup.procs" ] || continue
     while read -r pid; do
       [ -n "$pid" ] && [ -d "/proc/$pid" ] && return 0

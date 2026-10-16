@@ -2636,6 +2636,16 @@ export async function writeConfig(config: OpenClawConfig): Promise<void> {
     const nowAs = configFileFingerprint();
     if (nowAs !== readAs || nowAs === "unreadable") throw new ConfigChangedWhileHeldError();
   }
+  await writeConfigFile(config);
+}
+
+/**
+ * The whole-file write alone, for a caller inside the core's config lock that
+ * already flushed and waited out a starting gateway before taking it: holding
+ * again with the lock taken would keep the gateway's own pre-start CLI writes
+ * out of the lock for the whole pre-start.
+ */
+async function writeConfigFile(config: OpenClawConfig): Promise<void> {
   await fs.mkdir(OPENCLAW_HOME, { recursive: true });
   await writeSecretJsonAtomically(CONFIG_PATH, config);
 }
@@ -2978,7 +2988,7 @@ export async function setPrimaryModelWithoutCatalogValidation(modelRef: string):
     const defaults = (agents.defaults ??= {}) as Record<string, unknown>;
     const model = (defaults.model ??= {}) as Record<string, unknown>;
     model.primary = modelRef;
-    await writeConfig(config);
+    await writeConfigFile(config);
   });
 }
 
@@ -2998,7 +3008,7 @@ export async function repairClawboxAiFlashModelPolicy(): Promise<boolean> {
     const allow = config.agents?.defaults?.modelPolicy?.allow;
     if (!allow || !needsClawboxAiFlashPolicyRepair(config)) return false;
     allow.push(CLAWBOX_AI_MODEL_BY_TIER.flash);
-    await writeConfig(config);
+    await writeConfigFile(config);
     return true;
   });
 }
@@ -4036,8 +4046,9 @@ export async function runOpenclawDoctorFix(): Promise<OpenclawDoctorFixOutcome> 
   // at all, is answered as an outcome the caller words for the owner, and the
   // caller restores the unit. The waits are the factory reset's, sized so the
   // whole answer reaches the page inside the tunnel's ~100 s: client 15 +
-  // settle 45 + the last show 10, then the caller's rollback and its restore
-  // (reset-failed, a 5 s restart client, one show).
+  // settle 45 + the last show 10, then the caller's rollback and, for either
+  // refusal, a restore that only asks (reset-failed, a 5 s restart client, one
+  // show).
   const stopAskedAt = Date.now();
   let state: UnitState | null = null;
   let stillStopping = false;
@@ -4181,7 +4192,7 @@ export interface RestartGatewayOptions {
    */
   readyWaitMs?: number;
   /**
-   * How long a restart that outlived its 60 s client is waited for on the
+   * How long a restart that outlived its client is waited for on the
    * unit. Default {@link GATEWAY_RESTART_SETTLE_MS}, sized for a request a
    * person is waiting on: past it the answer is GatewayNotReadyError ("still
    * restarting") and the restart lands on its own. The updater, which nobody

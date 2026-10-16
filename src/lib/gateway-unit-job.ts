@@ -8,9 +8,9 @@ const exec = promisify(execFile);
  *
  * `systemctl restart|stop` blocks until systemd has finished the JOB, and the
  * job does not end when the client is killed: systemd finishes it regardless.
- * Every ClawBox caller bounds that client (60 s for a restart, 30 s or less for
- * a stop), and on an x64 bridge install that bound is shorter than the stop
- * itself. The bridge's ExecStop is `systemctl --user stop openclaw-gateway`,
+ * Every ClawBox caller bounds that client (60 s for a restart, 5 s for a
+ * restore that only asks, 30 s or less for a stop), and on an x64 bridge
+ * install that bound is shorter than the stop itself. The bridge's ExecStop is `systemctl --user stop openclaw-gateway`,
  * which waits for OpenClaw's own drain: the user unit OpenClaw renders carries
  * TimeoutStopSec=330 and the gateway caps its drain at 315 s for it
  * (docs/cli/gateway/restart-and-supervision.md, OpenClaw 2026.10.3). Node then

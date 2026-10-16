@@ -3814,19 +3814,23 @@ describe("POST /setup-api/ai-models/configure", () => {
       },
     );
 
-    it("only asks for the restore when doctor found the gateway's stop still draining", async () => {
-      // systemd queues the restart behind the running stop; waiting out the
-      // drain with the usual 60 s client would answer past the tunnel's cut.
-      vi.mocked(runOpenclawDoctorFix).mockResolvedValueOnce("gateway-still-stopping");
-      vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.9.3 (test)\n");
-      mockFs.readdir.mockResolvedValueOnce([]);
+    it.each(["gateway-still-stopping", "gateway-not-stopped"] as const)(
+      "only asks for the restore when doctor answered %s",
+      async (outcome) => {
+        // systemd queues the restart behind the job still running (a drain,
+        // another surface's restart); waiting that job out with the usual
+        // 60 s client would answer past the tunnel's cut.
+        vi.mocked(runOpenclawDoctorFix).mockResolvedValueOnce(outcome);
+        vi.mocked(spawnOpenclawCli).mockResolvedValueOnce("OpenClaw 2026.9.3 (test)\n");
+        mockFs.readdir.mockResolvedValueOnce([]);
 
-      await configurePost(subscriptionSignIn());
+        await configurePost(subscriptionSignIn());
 
-      expect(mockRestartGateway).toHaveBeenCalledWith(
-        expect.objectContaining({ awaitReady: false, restartClientMs: 5_000, restartSettleMs: 0 }),
-      );
-    });
+        expect(mockRestartGateway).toHaveBeenCalledWith(
+          expect.objectContaining({ awaitReady: false, restartClientMs: 5_000, restartSettleMs: 0 }),
+        );
+      },
+    );
 
     it("does not send the owner to press Restart over a restart systemd already holds", async () => {
       vi.mocked(runOpenclawDoctorFix).mockResolvedValueOnce("gateway-still-stopping");
