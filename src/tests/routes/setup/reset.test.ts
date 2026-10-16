@@ -168,6 +168,156 @@ describe("POST /setup-api/setup/reset", () => {
     expect(mockResetUpdateState).toHaveBeenCalled();
   });
 
+  /** Every systemctl argv the route ran, in order. */
+  const systemctlCalls = () => mockExecFile.mock.calls
+    .map((call) => `${call[0]} ${(call[1] as string[]).join(" ")}`)
+    .filter((line) => line.includes("systemctl"));
+  const STOP_TIMED_OUT = Object.assign(
+    new Error("Command failed: /usr/bin/sudo /usr/bin/systemctl stop clawbox-gateway.service"),
+    { killed: true, signal: "SIGTERM", code: null },
+  );
+
+  it("erases nothing beside a gateway that is still stopping, says so, and starts it again", async () => {
+    // On an x64 bridge the stop waits for OpenClaw's own drain (up to 330 s):
+    // its 15 s client is killed and the job runs on. A wipe started beside it
+    // would race a gateway still writing its state. (On beta this test times
+    // out: the route waited the full 360 s and then wiped.)
+    setupExecFileMock({
+      nmcli: { stdout: "", stderr: "" },
+      systemctl: { stdout: "", stderr: "" },
+      "systemctl stop clawbox-gateway.service": STOP_TIMED_OUT,
+      "systemctl show clawbox-gateway.service": {
+        stdout: "Job=91\nActiveState=deactivating\nSubState=stop-sigterm\nResult=success\n",
+        stderr: "",
+      },
+    });
+    const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const pending = resetPost();
+    // The mocked client fails at once, so this is the 45 s wait and one poll;
+    // a longer wait does not answer in time, and the seconds it names say so.
+    await vi.advanceTimersByTimeAsync(47_000);
+    const res = await pending;
+    quiet.mockRestore();
+    expect(res.status).toBe(500);
+    const { error } = await res.json();
+    expect(error).toMatch(/still stopping after \d+s.*Nothing was erased.*asked to start again/);
+    expect(Number(/after (\d+)s/.exec(error)?.[1])).toBeLessThanOrEqual(47);
+    expect(mockFs.rm).not.toHaveBeenCalled();
+    expect(mockResetUpdateState).not.toHaveBeenCalled();
+    // Unmasked, then started again: an explicit stop is not one Restart=always undoes.
+    const calls = systemctlCalls();
+    const unmask = calls.indexOf("/usr/bin/sudo /usr/bin/systemctl --runtime unmask clawbox-gateway.service");
+    const restart = calls.indexOf("/usr/bin/sudo /usr/bin/systemctl restart clawbox-gateway.service");
+    expect(unmask).toBeGreaterThan(-1);
+    expect(restart).toBeGreaterThan(unmask);
+  });
+
+  it("treats a stop that settled with the unit still deactivating as still stopping", async () => {
+    setupExecFileMock({
+      nmcli: { stdout: "", stderr: "" },
+      systemctl: { stdout: "", stderr: "" },
+      "systemctl stop clawbox-gateway.service": STOP_TIMED_OUT,
+      "systemctl show clawbox-gateway.service": { stdout: "Job=\nActiveState=deactivating\nSubState=stop-sigterm\nResult=success\n", stderr: "" },
+    });
+    const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const pending = resetPost();
+    await vi.advanceTimersByTimeAsync(5_000);
+    const res = await pending;
+    quiet.mockRestore();
+    expect(res.status).toBe(500);
+    expect((await res.json()).error).toMatch(/still stopping.*Nothing was erased.*asked to start again/);
+    expect(mockFs.rm).not.toHaveBeenCalled();
+    const calls = systemctlCalls();
+    expect(calls.indexOf("/usr/bin/sudo /usr/bin/systemctl restart clawbox-gateway.service"))
+      .toBeGreaterThan(calls.indexOf("/usr/bin/sudo /usr/bin/systemctl --runtime unmask clawbox-gateway.service"));
+  });
+
+  it("does not promise a restart it could not ask for", async () => {
+    // The unmask failed, so a restart would be refused as masked: the answer
+    // says the assistant stays stopped instead of that it is coming back.
+    setupExecFileMock({
+      nmcli: { stdout: "", stderr: "" },
+      systemctl: { stdout: "", stderr: "" },
+      "systemctl stop clawbox-gateway.service": STOP_TIMED_OUT,
+      "systemctl show clawbox-gateway.service": { stdout: "Job=\nActiveState=deactivating\nSubState=stop-sigterm\nResult=success\n", stderr: "" },
+      "systemctl --runtime unmask clawbox-gateway.service": Object.assign(new Error("Command failed: unmask"), { code: 1 }),
+    });
+    const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const pending = resetPost();
+    await vi.advanceTimersByTimeAsync(5_000);
+    const res = await pending;
+    quiet.mockRestore();
+    expect(res.status).toBe(500);
+    const { error } = await res.json();
+    expect(error).toMatch(/Nothing was erased.*stays stopped until the device is restarted/);
+    expect(error).not.toMatch(/start again/);
+    expect(systemctlCalls()).not.toContain("/usr/bin/sudo /usr/bin/systemctl restart clawbox-gateway.service");
+  });
+
+  it("erases nothing when the stop ended with the gateway still running, and leaves it running", async () => {
+    setupExecFileMock({
+      nmcli: { stdout: "", stderr: "" },
+      systemctl: { stdout: "", stderr: "" },
+      "systemctl stop clawbox-gateway.service": STOP_TIMED_OUT,
+      "systemctl show clawbox-gateway.service": { stdout: "Job=\nActiveState=active\nSubState=running\nResult=success\n", stderr: "" },
+    });
+    const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const pending = resetPost();
+    await vi.advanceTimersByTimeAsync(20_000);
+    const res = await pending;
+    quiet.mockRestore();
+    expect(res.status).toBe(500);
+    expect((await res.json()).error).toMatch(/did not stop.*Nothing was erased/);
+    expect(mockFs.rm).not.toHaveBeenCalled();
+    const calls = systemctlCalls();
+    expect(calls).toContain("/usr/bin/sudo /usr/bin/systemctl --runtime unmask clawbox-gateway.service");
+    expect(calls).not.toContain("/usr/bin/sudo /usr/bin/systemctl restart clawbox-gateway.service");
+  });
+
+  it("asks the unit when the stop fails outright, and wipes only beside a stopped one", async () => {
+    // A stop cancelled by a restart someone else queued exits 1; the unit says
+    // whether the gateway is still there.
+    const cancelled = Object.assign(new Error("Job for clawbox-gateway.service canceled."), { code: 1 });
+    const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+    setupExecFileMock({
+      nmcli: { stdout: "", stderr: "" },
+      systemctl: { stdout: "", stderr: "" },
+      "systemctl stop clawbox-gateway.service": cancelled,
+      "systemctl show clawbox-gateway.service": { stdout: "Job=\nActiveState=activating\nSubState=start-pre\nResult=success\n", stderr: "" },
+    });
+    const refused = await resetPost();
+    expect(refused.status).toBe(500);
+    expect(mockFs.rm).not.toHaveBeenCalled();
+
+    setupExecFileMock({
+      nmcli: { stdout: "", stderr: "" },
+      systemctl: { stdout: "", stderr: "" },
+      "systemctl stop clawbox-gateway.service": cancelled,
+      "systemctl show clawbox-gateway.service": { stdout: "Job=\nActiveState=inactive\nSubState=dead\nResult=success\n", stderr: "" },
+    });
+    const wiped = await resetPost();
+    quiet.mockRestore();
+    expect(wiped.status).toBe(200);
+  });
+
+  it("erases nothing when neither the stop nor the unit can be read", async () => {
+    // systemd answered neither: the gateway may still be running, so the
+    // destructive half does not start on a guess. A reboot is the way back.
+    const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+    setupExecFileMock({
+      nmcli: { stdout: "", stderr: "" },
+      systemctl: { stdout: "", stderr: "" },
+      "systemctl stop clawbox-gateway.service": Object.assign(new Error("Failed to connect to bus"), { code: 1 }),
+      "systemctl show clawbox-gateway.service": Object.assign(new Error("Failed to connect to bus"), { code: 1 }),
+    });
+    const res = await resetPost();
+    quiet.mockRestore();
+    expect(res.status).toBe(500);
+    expect((await res.json()).error).toMatch(/could not be confirmed stopped.*Nothing was erased/);
+    expect(mockFs.rm).not.toHaveBeenCalled();
+    expect(systemctlCalls()).not.toContain("/usr/bin/sudo /usr/bin/systemctl restart clawbox-gateway.service");
+  });
+
   it("clears the session cookie in the reset response", async () => {
     const res = await resetPost();
     const setCookie = res.headers.get("set-cookie");

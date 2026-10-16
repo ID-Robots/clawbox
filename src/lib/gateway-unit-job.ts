@@ -59,9 +59,9 @@ export interface UnitJobOptions {
 
 /**
  * How long a job the client gave up on is waited for by a caller nobody is
- * waiting on (the updater, a stop that must finish before a wipe): OpenClaw's
- * stop budget (330 s) plus half a minute for the start that follows it. A
- * caller answering a request passes a short `settleBudgetMs` instead: a tunnel
+ * waiting on (the updater): OpenClaw's stop budget (330 s) plus half a minute
+ * for the start that follows it. A caller answering a request passes a short
+ * `settleBudgetMs` instead (the factory reset, a settings save): a tunnel
  * gives up near 100 s, and "still restarting" is then the honest answer.
  */
 export const UNIT_JOB_SETTLE_BUDGET_MS = 360_000;
@@ -154,6 +154,16 @@ export async function runUnitJob(command: string, args: string[], options: UnitJ
     );
     return waitForUnitJob(options);
   }
+}
+
+/**
+ * Whether the unit is down: the only states in which something that must not
+ * run beside the gateway (a factory-reset wipe, doctor) may start. An
+ * allow-list, so `deactivating` (still stopping) and `activating`, `active` or
+ * `reloading` (a gateway that is there) all count as not stopped.
+ */
+export function unitIsStopped(state: UnitState): boolean {
+  return state.activeState === "inactive" || state.activeState === "failed";
 }
 
 /** "inactive (dead)", "failed (exit-code)": the unit's state as one phrase. */

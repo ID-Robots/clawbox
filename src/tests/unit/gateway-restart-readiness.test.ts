@@ -1,3 +1,4 @@
+import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 /**
@@ -16,13 +17,27 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  */
 const execFileMock = vi.hoisted(() => vi.fn());
 const waitForPortOpenMock = vi.hoisted(() => vi.fn());
+/** Every `openclaw` the code spawns: never a real one, whatever a test reaches. */
+const spawnMock = vi.hoisted(() => vi.fn());
 
 type ExecCallback = (error: Error | null, result?: { stdout: string; stderr: string }) => void;
 
 vi.mock("child_process", async (orig) => ({
   ...(await orig<typeof import("child_process")>()),
   execFile: execFileMock,
+  spawn: spawnMock,
 }));
+
+/** An `openclaw` that exits 0 at once. */
+function fakeChild() {
+  const child = new EventEmitter() as EventEmitter & Record<string, unknown>;
+  child.stdout = new EventEmitter();
+  child.stderr = new EventEmitter();
+  child.stdin = { end: () => {}, write: () => {}, on: () => {} };
+  child.kill = () => {};
+  setTimeout(() => child.emit("close", 0), 1);
+  return child;
+}
 
 vi.mock("@/lib/port-probe", async (orig) => ({
   ...(await orig<typeof import("@/lib/port-probe")>()),
@@ -182,6 +197,8 @@ describe("restartGateway when the restart outlives its client", () => {
     execFileMock.mockReset();
     waitForPortOpenMock.mockReset();
     waitForPortOpenMock.mockResolvedValue(true);
+    spawnMock.mockReset();
+    spawnMock.mockImplementation(fakeChild);
     vi.useFakeTimers();
   });
 
@@ -289,6 +306,55 @@ describe("restartGateway when the restart outlives its client", () => {
     await vi.advanceTimersByTimeAsync(100_000);
     await expect(fixed).rejects.toThrow(/still stopping .*not run beside it/);
     quiet.mockRestore();
+  });
+
+  /** A stop that failed outright, and `show` answering `state`. */
+  function failedStopThen(activeState: string) {
+    execFileMock.mockImplementation((_cmd: string, args: string[], _opts: unknown, cb: ExecCallback) => {
+      if (args.includes("stop")) {
+        cb(Object.assign(new Error("Job for clawbox-gateway.service canceled."), { code: 1 }));
+        return;
+      }
+      if (args.includes("show")) {
+        cb(null, { stdout: `Job=\nActiveState=${activeState}\nSubState=x\nResult=success\n`, stderr: "" });
+        return;
+      }
+      cb(null, { stdout: "", stderr: "" });
+    });
+  }
+  const doctorSpawned = () => spawnMock.mock.calls.some(([, argv]) => (argv as string[]).includes("doctor"));
+
+  it("does not run doctor beside a gateway a cancelled stop left restarting", async () => {
+    // Another surface's restart replaced the stop job: `systemctl stop` exits
+    // 1, and the gateway is coming back up while doctor would migrate its state.
+    const { runOpenclawDoctorFix } = await load();
+    failedStopThen("activating");
+    const fixed = runOpenclawDoctorFix();
+    fixed.catch(() => {});
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(fixed).rejects.toThrow(/did not stop .*not run beside it/);
+    expect(doctorSpawned()).toBe(false);
+  });
+
+  it("treats a failed stop over a unit still deactivating as still stopping", async () => {
+    const { runOpenclawDoctorFix } = await load();
+    failedStopThen("deactivating");
+    const fixed = runOpenclawDoctorFix();
+    fixed.catch(() => {});
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(fixed).rejects.toThrow(/still stopping .*not run beside it/);
+    expect(doctorSpawned()).toBe(false);
+  });
+
+  it("runs doctor after a failed stop when the unit says it is down", async () => {
+    // An older sudoers refusing the stop of a gateway that is already stopped
+    // keeps the old leniency: the unit is asked, and inactive is down.
+    const { runOpenclawDoctorFix } = await load();
+    failedStopThen("inactive");
+    const fixed = runOpenclawDoctorFix();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await expect(fixed).resolves.toBe("completed");
+    expect(doctorSpawned()).toBe(true);
   });
 
   it("still fails at once on a restart systemd refused", async () => {

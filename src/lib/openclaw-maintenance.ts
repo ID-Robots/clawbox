@@ -27,6 +27,8 @@
  * omits is `undefined` to every `instanceof` against it.
  */
 
+import { logSafe } from "@/lib/log-safe";
+
 /** Both of the core's admission refusals end in this instruction. */
 export const OPENCLAW_MAINTENANCE_RE = /retry (?:when it|after maintenance) finishes/i;
 
@@ -107,12 +109,12 @@ export async function withOpenclawMaintenanceRetry<T>(
       const fitsBudget = deadline - (now + pauseMs) > lastAskMs;
       if (!fitsWindow || !fitsBudget) {
         console.warn(
-          `[openclaw] ${options.label}: the state was still under offline maintenance after ${tries} ask(s); giving up`,
+          `[openclaw] ${JSON.stringify(logSafe(options.label))}: the state was still under offline maintenance after ${tries} ask(s); giving up`,
         );
         throw new OpenclawStateMaintenanceError(refusalLine(err));
       }
       if (tries === 1) {
-        console.warn(`[openclaw] ${options.label}: ${refusalLine(err) || "offline maintenance"} — asking again`);
+        console.warn(`[openclaw] ${JSON.stringify(logSafe(options.label))}: ${JSON.stringify(logSafe(refusalLine(err) || "offline maintenance", 300))} — asking again`);
       }
       await new Promise((resolve) => setTimeout(resolve, pauseMs));
     }

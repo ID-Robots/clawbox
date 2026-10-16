@@ -35,6 +35,8 @@ const host = vi.hoisted(() => ({
   probes: 0,
   spawned: [] as string[][],
   file: "",
+  /** The config file exists but cannot be read (EACCES). */
+  unreadable: false,
 }));
 
 vi.mock("fs", async (importOriginal) => {
@@ -42,6 +44,7 @@ vi.mock("fs", async (importOriginal) => {
   const enoent = () => Object.assign(new Error("ENOENT"), { code: "ENOENT" });
   const fake = (file: unknown): string | null => {
     const p = String(file);
+    if (host.unreadable && p === host.file) throw Object.assign(new Error("EACCES"), { code: "EACCES" });
     if (p.endsWith("/clawbox-gateway.service/cgroup.procs")) {
       if (host.procs === null) throw enoent();
       return host.procs;
@@ -117,6 +120,7 @@ beforeEach(() => {
   host.startup = ["silent"];
   host.probes = 0;
   host.spawned = [];
+  host.unreadable = false;
   vi.stubEnv("CLAWBOX_OPENCLAW_HOME", home);
   vi.stubEnv("CLAWBOX_EDITION_FILE", "/nonexistent/edition.env");
   vi.stubEnv("CLAWBOX_EDITION", "openclaw");
@@ -258,6 +262,82 @@ describe("a config write while the gateway is starting", () => {
     await expect(written).rejects.toBeInstanceOf(ConfigChangedWhileHeldError);
     expect(JSON.parse(fs.readFileSync(host.file, "utf-8")).plugins.entries.started).toBe(true);
     quiet.mockRestore();
+  });
+
+  it("does not write over a same-size rewrite in place that left the mtime where it was", async () => {
+    // Same inode, same size, a clock that did not move (a coarse or stepped
+    // timestamp): only the content says the file is not the one it was.
+    vi.useFakeTimers();
+    host.startup = ["silent", "started"];
+    const before = JSON.stringify({ agents: { defaults: {} }, plugins: { entries: { a: 1 } } }, null, 2);
+    const after = before.replace("\"a\": 1", "\"b\": 2");
+    expect(after.length).toBe(before.length);
+    fs.writeFileSync(host.file, before);
+    fs.utimesSync(host.file, 1_700_000_000, 1_700_000_000);
+    const lib = await import("@/lib/openclaw-config");
+    const { ConfigChangedWhileHeldError } = await import("@/lib/gateway-start-guard");
+    const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const written = lib.writeConfig({ agents: { defaults: { userTimezone: "Europe/Berlin" } } } as never);
+    written.catch(() => {});
+    await vi.advanceTimersByTimeAsync(10);
+    fs.writeFileSync(host.file, after);
+    fs.utimesSync(host.file, 1_700_000_000, 1_700_000_000);
+    await vi.advanceTimersByTimeAsync(3_000);
+    await expect(written).rejects.toBeInstanceOf(ConfigChangedWhileHeldError);
+    expect(JSON.parse(fs.readFileSync(host.file, "utf-8")).plugins.entries.b).toBe(2);
+    quiet.mockRestore();
+  });
+
+  it("still writes when the file was only rewritten with the same bytes during the hold", async () => {
+    // A temp-and-rename that left the content as it was gives the file a new
+    // inode and mtime; the caller's snapshot is still based on what is there.
+    vi.useFakeTimers();
+    host.startup = ["silent", "started"];
+    const lib = await import("@/lib/openclaw-config");
+    const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const written = lib.writeConfig({ agents: { defaults: { userTimezone: "Europe/Berlin" } } } as never);
+    written.catch(() => {});
+    await vi.advanceTimersByTimeAsync(10);
+    const same = fs.readFileSync(host.file);
+    fs.writeFileSync(`${host.file}.tmp`, same);
+    fs.renameSync(`${host.file}.tmp`, host.file);
+    await vi.advanceTimersByTimeAsync(3_000);
+    await expect(written).resolves.toBeUndefined();
+    expect(JSON.parse(fs.readFileSync(host.file, "utf-8")).agents.defaults.userTimezone).toBe("Europe/Berlin");
+    quiet.mockRestore();
+  });
+
+  it("does not write a held snapshot over a file it could not read", async () => {
+    // Unread is not unchanged: a file that cannot be inspected before and after
+    // the hold is not replaced on the strength of two failed reads.
+    vi.useFakeTimers();
+    host.startup = ["silent", "started"];
+    const before = fs.readFileSync(host.file, "utf-8");
+    host.unreadable = true;
+    const lib = await import("@/lib/openclaw-config");
+    const { ConfigChangedWhileHeldError } = await import("@/lib/gateway-start-guard");
+    const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const written = lib.writeConfig({ agents: { defaults: { userTimezone: "Europe/Berlin" } } } as never);
+    written.catch(() => {});
+    await vi.advanceTimersByTimeAsync(3_000);
+    await expect(written).rejects.toBeInstanceOf(ConfigChangedWhileHeldError);
+    host.unreadable = false;
+    expect(fs.readFileSync(host.file, "utf-8")).toBe(before);
+    quiet.mockRestore();
+  });
+
+  it("logs a caller's label as one line, whatever it carries", async () => {
+    vi.useFakeTimers();
+    host.startup = ["silent", "started"];
+    const { holdWhileGatewayStarts } = await import("@/lib/gateway-start-guard");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const held = holdWhileGatewayStarts("config set\n[openclaw-config] forged: written");
+    await vi.advanceTimersByTimeAsync(2_000);
+    await expect(held).resolves.toBe(true);
+    const lines = warn.mock.calls.map((call) => String(call[0]));
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) expect(line).not.toMatch(/[\r\n]/);
+    warn.mockRestore();
   });
 
   it("writes at once when the gateway is not starting", async () => {
