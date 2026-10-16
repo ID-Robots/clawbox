@@ -54,6 +54,7 @@ import { buildOpusQueue, opusClient, runOpusTier, type OpusClient, type OpusTier
 import { insertRun, listRuns, newRunId, saveRun, settleOrphanRuns, type RunRecord, type RunStatus, type RunTrigger } from "./runs";
 import { effectiveCostRates, readSettings, type PrimeRadiantSettings } from "./settings";
 import { readRetiredLedger, stateDbExists } from "./state-db";
+import { rejudgeOpenContradictions } from "./rejudge";
 import { readVaultSnapshot, vaultInitialised, vaultOperation } from "./vault";
 
 export const DREAM_BRANCH_PREFIX = "dream/";
@@ -389,6 +390,14 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
       summary.reviewItems.raised += pass.reviewItems.length;
       notes.push(...pass.notes);
       run.usdEstimate += pass.usdEstimate;
+    }
+
+    // 3b. open contradiction items about two different things (identifier filter) are closed with a reason
+    try {
+      const re = rejudgeOpenContradictions(vault, snapshot, { now });
+      if (re.closed > 0) notes.push(`${re.closed} open contradiction item(s) were closed: different subjects (identifier filter).`);
+    } catch (err) {
+      notes.push(`The open contradiction items could not be re-checked: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
     }
 
     // 4. Opus, optional

@@ -60,6 +60,8 @@ export interface ReviewResolution {
   commit?: string | null;
   retired?: string[];
   by: string;
+  /** Why it was settled, when a pass (not a person) settled it. */
+  note?: string;
 }
 
 export interface ReviewItem {
