@@ -368,10 +368,12 @@ jobs:
       # saved from pushes to beta and main, the schedule and a dispatch only,
       # so every pull request into those branches restores the same few
       # entries rather than each PR filling the repository's cache with its
-      # own. Before the teardown, which deletes the volume it is in.
+      # own. Only after a suite that passed: an install or build that failed
+      # can leave a partial cache, and every later run would start from it.
+      # Before the teardown, which deletes the volume it is in.
       - name: Keep the build cache
         id: keep-cache
-        if: ${{ !cancelled() && github.event_name != 'pull_request' && steps.e2e.outcome != 'skipped' }}
+        if: ${{ !cancelled() && github.event_name != 'pull_request' && steps.e2e.outcome == 'success' }}
         run: |
           out="$RUNNER_TEMP/e2e-cache/next-cache"
           rm -rf "$out"

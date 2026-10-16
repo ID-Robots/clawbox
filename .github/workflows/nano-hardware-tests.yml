@@ -138,6 +138,11 @@ jobs:
       # `all`, or the test names the board runs (scripts/nano-tests/select-tests.sh).
       tests: ${{ steps.classify.outputs.tests }}
       tests_reason: ${{ steps.classify.outputs.tests_reason }}
+      # `1` when the long-tier tests run: a dispatch with `long` ticked, or a
+      # PR whose LIVE labels carry `nano-long` (the same read as the
+      # selection's), so a label added before a re-run sets the board job's
+      # long tier and its time limit as well as the selection.
+      long: ${{ steps.classify.outputs.long }}
     steps:
       # The classifiers and the tests' own maps, at the commit under test.
       - name: Check out the classifier
@@ -175,13 +180,16 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           HEAD_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}
           INPUT_REF: ${{ inputs.ref }}
+          INPUT_LONG: ${{ inputs.long }}
         run: |
           tests=all
           tests_reason=""
+          long=0
           if [ "$EVENT" = workflow_dispatch ]; then
             hardware=true
             reason="dispatched by hand for $INPUT_REF"
             tests_reason="every test: a dispatch runs the full suite"
+            [ "$INPUT_LONG" = true ] && long=1
           else
             compare="$RUNNER_TEMP/compare.json"
             files="$RUNNER_TEMP/changed-files.txt"
@@ -210,6 +218,7 @@ jobs:
               full_label=""
               for label in $labels; do
                 case "$label" in nano-full | nano-long) full_label=$label ;; esac
+                [ "$label" = nano-long ] && long=1
               done
               if [ -n "$full_label" ]; then
                 tests_reason="every test: the PR carries $full_label"
@@ -237,6 +246,7 @@ jobs:
             echo "reason=$reason"
             echo "tests=$tests"
             echo "tests_reason=$tests_reason"
+            echo "long=$long"
           } >> "$GITHUB_OUTPUT"
           echo "Needs a board: $hardware ($reason)"
           echo "Tests: $tests ($tests_reason)"
@@ -292,9 +302,10 @@ jobs:
     # the lab host after the job, not inside it, so no room is kept for a
     # cleanup any more and the rest is headroom for the upload, the summary,
     # the recycle and the release fallback. A normal run spends ~25.
-    # 280 with the long tier (label `nano-long`, or a dispatch with `long`):
-    # its tests rebuild the board twice and run the box's own updater.
-    timeout-minutes: ${{ (inputs.long || contains(github.event.pull_request.labels.*.name, 'nano-long')) && 280 || 90 }}
+    # 280 with the long tier (label `nano-long`, or a dispatch with `long`,
+    # as `plan` read them): its tests rebuild the board twice and run the
+    # box's own updater.
+    timeout-minutes: ${{ needs.plan.outputs.long == '1' && 280 || 90 }}
     defaults:
       run:
         shell: bash
@@ -305,8 +316,9 @@ jobs:
       # host's home folder.
       NANO_RESULTS_DIR: results
       # The long-tier tests (`# tier: long` in scripts/nano-tests/tests/) run
-      # only on a PR labelled `nano-long` or a dispatch with `long` ticked.
-      NANO_TESTS_LONG: ${{ (inputs.long || contains(github.event.pull_request.labels.*.name, 'nano-long')) && '1' || '0' }}
+      # only on a PR labelled `nano-long` or a dispatch with `long` ticked —
+      # `plan`'s answer, from the PR's labels as they are when it runs.
+      NANO_TESTS_LONG: ${{ needs.plan.outputs.long == '1' && '1' || '0' }}
     # For the PR comment, which runs on GitHub's runners so that this job, on
     # the lab host, never holds a token that can write.
     outputs:
