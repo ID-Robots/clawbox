@@ -19,7 +19,7 @@ import { openSqlite } from "@/lib/openclaw-session-store";
 import path from "@/lib/runtime-path";
 
 export const STATE_DB_FILE = "prime-radiant.sqlite";
-export const STATE_SCHEMA_VERSION = 6;
+export const STATE_SCHEMA_VERSION = 7;
 
 export function stateDbPathFor(vault: string): string {
   return path.join(path.dirname(vault), STATE_DB_FILE);
@@ -197,6 +197,15 @@ ALTER TABLE ingest_jobs ADD COLUMN skips TEXT NOT NULL DEFAULT '{}';
 `;
 
 /**
+ * v7 — what a cost row's dollar figure IS: `estimate` (priced from the rates in
+ * force, every row before v7) or `subscription` (a call the owner's Claude
+ * subscription answered: its tokens are real, its marginal cost is $0).
+ */
+const SCHEMA_V7 = `
+ALTER TABLE costs ADD COLUMN basis TEXT NOT NULL DEFAULT 'estimate';
+`;
+
+/**
  * Run `fn` in one transaction. A failed ROLLBACK (SQLite may already have
  * ended the transaction after an I/O or disk-full error) is logged and never
  * replaces the error that caused it.
@@ -233,6 +242,7 @@ export function openStateDb(vault: string): DatabaseSync {
       [4, SCHEMA_V4],
       [5, SCHEMA_V5],
       [6, SCHEMA_V6],
+      [7, SCHEMA_V7],
     ];
     for (const [target, sql] of steps) {
       if (version >= target) continue;

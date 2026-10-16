@@ -174,7 +174,7 @@ need ClawBox AI.
 | **Tidy the wiki every night**, and **At** | The nightly pass and its time. |
 | **Look for facts that contradict each other** | The contradiction search of the nightly pass. |
 | **Folders to read again each night** | New and changed documents in these folders are added during the nightly pass. |
-| **Second opinion** | Off by default. The Opus model re-reads a sample of pages and suggests corrections, which arrive in Review — it never edits a page itself. It needs an **Anthropic API key** in the box's provider settings (a Claude subscription sign-in is not used), and it keeps to a fixed limit per night. Without a key, pages are marked as waiting for a second opinion and nothing else changes. |
+| **Second opinion** | Off by default. The Opus model re-reads a sample of pages and suggests corrections, which arrive in Review — it never edits a page itself. It uses an **Anthropic API key** from the box's provider settings when there is one, and otherwise your **Claude subscription** — the `claude` sign-in on the box, run the way the Coding Agent runs it. It runs only during the nightly pass, one request at a time, steps aside while the Coding Agent is working, stops for the night when the subscription reaches its usage limit, and reads at most the **pages per night** you set. Without either, pages are marked as waiting for a second opinion and nothing else changes. |
 | **Domains and owners** | A new page in a domain gets that domain's owner. |
 | **Model calls at once** | How many writing requests run in parallel during an import. Lower it if the service reports too many requests. |
 | **Skip code projects** | On by default. A code project found inside a folder you add is not read; a project folder you add yourself always is. |

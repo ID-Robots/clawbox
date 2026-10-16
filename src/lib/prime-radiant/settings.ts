@@ -42,6 +42,15 @@ export const MIN_OPUS_CAP_USD = 0.01;
 export const MAX_OPUS_CAP_USD = 1000;
 /** The share of flash-checked pages a night samples beyond the ones that are owed a check. */
 export const DEFAULT_OPUS_SAMPLE_RATE = 0.02;
+/**
+ * The most pages one night sends to Opus, whichever account answers — the
+ * cap that holds on a Claude SUBSCRIPTION, where a dollar figure means nothing
+ * and the owner's own allowance is what a night spends. Pages past it stay
+ * `opus_pending` for the next night.
+ */
+export const DEFAULT_OPUS_MAX_PAGES = 100;
+export const MIN_OPUS_MAX_PAGES = 4;
+export const MAX_OPUS_MAX_PAGES = 2000;
 
 export const MAX_DOMAINS = 100;
 const MAX_OWNER_CHARS = 80;
@@ -75,6 +84,8 @@ export interface OpusSettings {
   /** 0..1 — the random share of flash-checked pages sampled each night. */
   sampleRate: number;
   model: string;
+  /** Hard ceiling on the pages one night sends to Opus (any account). */
+  maxPages: number;
 }
 
 export interface ContradictionSettings {
@@ -102,7 +113,7 @@ export function defaultSettings(): PrimeRadiantSettings {
     ingest: { exclude: [...DEFAULT_INGEST_EXCLUDES], skipCodeProjects: true, parallel: DEFAULT_INGEST_PARALLEL, folders: [] },
     costRates: {},
     nightly: { enabled: true, time: DEFAULT_NIGHTLY_TIME },
-    opus: { enabled: false, capUsd: DEFAULT_OPUS_CAP_USD, sampleRate: DEFAULT_OPUS_SAMPLE_RATE, model: DEFAULT_OPUS_MODEL },
+    opus: { enabled: false, capUsd: DEFAULT_OPUS_CAP_USD, sampleRate: DEFAULT_OPUS_SAMPLE_RATE, model: DEFAULT_OPUS_MODEL, maxPages: DEFAULT_OPUS_MAX_PAGES },
     contradictions: { enabled: true },
     domains: [],
   };
@@ -189,6 +200,10 @@ const FIELDS = {
     sampleRate: (v: unknown) => readNumber(v, 0, 1, "opus.sampleRate"),
     model: (v: unknown): Read<string> =>
       typeof v === "string" && MODEL_RE.test(v) ? { ok: true, value: v } : { ok: false, error: "opus.model is not a model id." },
+    maxPages: (v: unknown): Read<number> =>
+      typeof v === "number" && Number.isInteger(v) && v >= MIN_OPUS_MAX_PAGES && v <= MAX_OPUS_MAX_PAGES
+        ? { ok: true, value: v }
+        : { ok: false, error: `opus.maxPages must be a whole number from ${MIN_OPUS_MAX_PAGES} to ${MAX_OPUS_MAX_PAGES}.` },
   },
   contradictions: {
     enabled: (v: unknown) => readBool(v, "contradictions.enabled"),
@@ -257,7 +272,7 @@ export interface SettingsPatch {
   ingest?: { exclude?: unknown; skipCodeProjects?: unknown; parallel?: unknown; folders?: unknown };
   costRates?: unknown;
   nightly?: { enabled?: unknown; time?: unknown } | null;
-  opus?: { enabled?: unknown; capUsd?: unknown; sampleRate?: unknown; model?: unknown } | null;
+  opus?: { enabled?: unknown; capUsd?: unknown; sampleRate?: unknown; model?: unknown; maxPages?: unknown } | null;
   contradictions?: { enabled?: unknown } | null;
   domains?: unknown;
 }

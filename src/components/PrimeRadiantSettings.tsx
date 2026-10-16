@@ -24,9 +24,18 @@ interface SettingsAnswer {
     ingestParallel: { min: number; max: number };
     ingestFolders: number;
     domains: number;
+    opusMaxPages?: { min: number; max: number };
   };
   nightly: { nextRunAt: number | null };
+  /** Which account the second opinion would use tonight (absent on an older server). */
+  opusSource?: "api_key" | "subscription" | "none";
 }
+
+const OPUS_SOURCE_KEY = {
+  api_key: "primeRadiant.settings.opusSourceApiKey",
+  subscription: "primeRadiant.settings.opusSourceSubscription",
+  none: "primeRadiant.settings.opusSourceNone",
+} as const;
 
 interface NightlyAnswer {
   running: string | null;
@@ -40,6 +49,7 @@ interface Draft {
   time: string;
   contradictions: boolean;
   opusEnabled: boolean;
+  opusMaxPages: string;
   parallel: string;
   exclude: string;
   skipCodeProjects: boolean;
@@ -53,6 +63,7 @@ function draftOf(s: Settings): Draft {
     time: s.nightly.time,
     contradictions: s.contradictions.enabled,
     opusEnabled: s.opus.enabled,
+    opusMaxPages: String(s.opus.maxPages ?? ""),
     parallel: String(s.ingest.parallel),
     exclude: s.ingest.exclude.join("\n"),
     skipCodeProjects: s.ingest.skipCodeProjects,
@@ -71,9 +82,10 @@ const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
  * a Merge button for a night that was held for review once its items are
  * settled.
  *
- * No money is shown. The Opus tier's nightly cap is a dollar figure on the
- * wire, so it is not offered here: a save sends back the cap the box already
- * has, and the server keeps holding the tier to it.
+ * No money is shown. The Opus tier's dollar cap is a figure on the wire, so
+ * it is not offered here: a save sends back the cap the box already has, and
+ * the server keeps holding an API key to it. Its PAGE cap is offered — the
+ * one that holds on a Claude subscription — beside which account it will use.
  */
 export default function PrimeRadiantSettings({ onChanged }: { onChanged: () => void }) {
   const { t, locale } = useT();
@@ -106,6 +118,12 @@ export default function PrimeRadiantSettings({ onChanged }: { onChanged: () => v
     if (!Number.isInteger(parallel) || parallel < answer.limits.ingestParallel.min || parallel > answer.limits.ingestParallel.max) {
       return setError(t("primeRadiant.settings.badParallel", { min: answer.limits.ingestParallel.min, max: answer.limits.ingestParallel.max }));
     }
+    // Only while the tier is on: the field is disabled otherwise, so a bad value there could not be fixed.
+    const pagesLimit = draft.opusEnabled ? answer.limits.opusMaxPages : undefined;
+    const maxPages = Number(draft.opusMaxPages);
+    if (pagesLimit && (!Number.isInteger(maxPages) || maxPages < pagesLimit.min || maxPages > pagesLimit.max)) {
+      return setError(t("primeRadiant.settings.badOpusMaxPages", { min: pagesLimit.min, max: pagesLimit.max }));
+    }
     const domains = draft.domains.map((d) => ({ name: d.name.trim(), owner: d.owner.trim() })).filter((d) => d.name);
     setSaving(true);
     setError(null);
@@ -113,7 +131,7 @@ export default function PrimeRadiantSettings({ onChanged }: { onChanged: () => v
       const next = await prJson<SettingsAnswer>(`${API}/settings`, jsonInit("PUT", {
         nightly: { enabled: draft.nightlyEnabled, time: draft.time },
         contradictions: { enabled: draft.contradictions },
-        opus: { enabled: draft.opusEnabled, capUsd: answer.settings.opus.capUsd },
+        opus: { enabled: draft.opusEnabled, capUsd: answer.settings.opus.capUsd, ...(pagesLimit ? { maxPages } : {}) },
         ingest: {
           parallel,
           exclude: draft.exclude.split("\n").map((l) => l.trim()).filter(Boolean),
@@ -165,7 +183,32 @@ export default function PrimeRadiantSettings({ onChanged }: { onChanged: () => v
           <section className={`${CARD_SURFACE} p-4 space-y-3`}>
             <h3 className={SECTION_LABEL}>{t("primeRadiant.settings.opusTitle")}</h3>
             <p className="text-[11px] text-[var(--text-muted)]">{t("primeRadiant.settings.opusBody")}</p>
+            {answer.opusSource && (
+              <p
+                className={`text-[11px] ${answer.opusSource === "none" ? "text-amber-200" : "text-[var(--text-secondary)]"}`}
+                data-testid="prime-radiant-opus-source"
+                data-source={answer.opusSource}
+              >
+                {t(OPUS_SOURCE_KEY[answer.opusSource])}
+              </p>
+            )}
             <Toggle label={t("primeRadiant.settings.opusOn")} checked={draft.opusEnabled} onChange={(v) => set({ opusEnabled: v })} testId="prime-radiant-opus-enabled" />
+            {answer.limits.opusMaxPages && (
+              <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+                {t("primeRadiant.settings.opusMaxPages")}
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  className={`${FIELD} text-xs w-24`}
+                  min={answer.limits.opusMaxPages.min}
+                  max={answer.limits.opusMaxPages.max}
+                  value={draft.opusMaxPages}
+                  onChange={(e) => set({ opusMaxPages: e.target.value })}
+                  disabled={!draft.opusEnabled}
+                  data-testid="prime-radiant-opus-max-pages"
+                />
+              </label>
+            )}
           </section>
 
           <section className={`${CARD_SURFACE} p-4 space-y-3`}>
