@@ -620,38 +620,41 @@ jobs:
           # What ssh says besides (a known-hosts line names the address) is
           # shown, redacted, only when the commit could not be read.
           err="$RUNNER_TEMP/ssh.err"
-          before=$(nano-ci ssh "$SERIAL" 'git -C /home/clawbox/clawbox rev-parse HEAD' 2>"$err" | tail -n 1 | tr -d '[:space:]') || true
-          if ! [[ $before =~ ^[0-9a-f]{40}$ ]]; then
-            before=""
-            "$RUNNER_TEMP/nano-redact" < "$err"
-          fi
-          echo "before=$before" >> "$GITHUB_OUTPUT"
-          echo "$SERIAL is at ${before:-an unreadable commit}; rebuilding it from branch $BRANCH, whose head is $SHA"
-          # The commit under test, for `nano-ci rebuild` to check the board
-          # against (and to retry a failed build once before it reports).
+          # One hop for everything the board is told and asked before the
+          # rebuild — each `nano-ci ssh` is seconds of connection:
+          #   - the commit under test, for `nano-ci rebuild` to check the
+          #     board against (and to retry a failed build once before it
+          #     reports);
+          #   - the shortest coding budget the box takes, lowered from 5
+          #     minutes to 1 on this test board only
+          #     (src/lib/coding-time-budget.ts), so the deadline test
+          #     (45-coding-agent-time-budget) waits a 1-minute deadline. Into
+          #     the .env clawbox-setup.service loads, before the rebuild, whose
+          #     restart of the web server reads it; the recycle restores the
+          #     board from the golden image afterwards;
+          #   - what the rebuild can reuse (scripts/force-update.sh): the
+          #     stamp of the last dependency install and the framework's build
+          #     cache, for the log, never a verdict;
+          #   - last, the commit the board is on now.
           if ! [[ $SHA =~ ^[0-9a-f]{40}$ ]]; then
             echo "::error title=No commit under test::'$SHA' is not a commit SHA"
             exit 1
           fi
-          nano-ci ssh "$SERIAL" "echo $SHA > /tmp/nano-ci-want-sha" 2>&1 | "$RUNNER_TEMP/nano-redact"
-          # The shortest coding budget the box takes, lowered from 5 minutes to
-          # 1 on this test board only (src/lib/coding-time-budget.ts), so the
-          # deadline test (45-coding-agent-time-budget) waits a 1-minute
-          # deadline. Into the .env clawbox-setup.service loads, before the
-          # rebuild, whose restart of the web server reads it; the recycle
-          # restores the board from the golden image afterwards.
-          nano-ci ssh "$SERIAL" "f=/home/clawbox/clawbox/.env; touch \$f && sed -i '/^CLAWBOX_CODING_MIN_BUDGET_MINUTES=/d' \$f && echo CLAWBOX_CODING_MIN_BUDGET_MINUTES=1 >> \$f" 2>&1 | "$RUNNER_TEMP/nano-redact" ||
+          # shellcheck disable=SC2016  # expanded on the board
+          probe='printf "%s\n" "build cache $([ -d .next/cache ] && du -sh .next/cache | cut -f1 || echo none), dependency stamp $([ -f node_modules/.clawbox-deps-stamp ] && echo present || echo absent)"'
+          answer=$(nano-ci ssh "$SERIAL" "echo $SHA > /tmp/nano-ci-want-sha; cd /home/clawbox/clawbox && touch .env && sed -i '/^CLAWBOX_CODING_MIN_BUDGET_MINUTES=/d' .env && echo CLAWBOX_CODING_MIN_BUDGET_MINUTES=1 >> .env && echo floor-set; $probe; git rev-parse HEAD" 2>"$err") || true
+          before=$(printf '%s\n' "$answer" | tail -n 1 | tr -d '[:space:]')
+          if ! [[ $before =~ ^[0-9a-f]{40}$ ]]; then
+            before=""
+            "$RUNNER_TEMP/nano-redact" < "$err"
+          fi
+          grep -q '^floor-set$' <<<"$answer" ||
             echo "::warning title=Budget floor not set::the board keeps the 5-minute floor, so 45-coding-agent-time-budget waits 5 minutes"
-          # What the rebuild can reuse (scripts/force-update.sh): the stamp of
-          # the last dependency install and the framework's build cache. Said
-          # before and after, for the log; never a verdict.
-          kept() {
-            nano-ci ssh "$SERIAL" 'cd /home/clawbox/clawbox && printf "build cache %s, dependency stamp %s\n" "$([ -d .next/cache ] && du -sh .next/cache | cut -f1 || echo none)" "$([ -f node_modules/.clawbox-deps-stamp ] && echo present || echo absent)"' 2>/dev/null | tail -n 1 | "$RUNNER_TEMP/nano-redact" || true
-          }
-          echo "Before the rebuild: $(kept)"
+          echo "Before the rebuild: $(grep -m 1 '^build cache ' <<<"$answer" | "$RUNNER_TEMP/nano-redact")"
+          echo "before=$before" >> "$GITHUB_OUTPUT"
+          echo "$SERIAL is at ${before:-an unreadable commit}; rebuilding it from branch $BRANCH, whose head is $SHA"
           rc=0
           nano-ci rebuild "$SERIAL" "$BRANCH" 2>&1 | "$RUNNER_TEMP/nano-redact" || rc=${PIPESTATUS[0]}
-          echo "After the rebuild: $(kept)"
           # 4: the branch moved on and the board is on its new head — the
           # verify step tells "superseded" from a wrong commit.
           if [ "$rc" -ne 0 ] && [ "$rc" -ne 4 ]; then
@@ -701,11 +704,16 @@ jobs:
           GIT_TERMINAL_PROMPT: "0"
         run: |
           err="$RUNNER_TEMP/ssh.err"
-          board_sha=$(nano-ci ssh "$SERIAL" 'git -C /home/clawbox/clawbox rev-parse HEAD' 2>"$err" | tail -n 1 | tr -d '[:space:]') || true
+          # The same hop says what the rebuild left to reuse next time (see
+          # the rebuild step), for the log.
+          # shellcheck disable=SC2016  # expanded on the board
+          answer=$(nano-ci ssh "$SERIAL" 'cd /home/clawbox/clawbox && printf "%s\n" "build cache $([ -d .next/cache ] && du -sh .next/cache | cut -f1 || echo none), dependency stamp $([ -f node_modules/.clawbox-deps-stamp ] && echo present || echo absent)"; git rev-parse HEAD' 2>"$err") || true
+          board_sha=$(printf '%s\n' "$answer" | tail -n 1 | tr -d '[:space:]')
           if ! [[ $board_sha =~ ^[0-9a-f]{40}$ ]]; then
             board_sha=""
             "$RUNNER_TEMP/nano-redact" < "$err"
           fi
+          echo "After the rebuild: $(grep -m 1 '^build cache ' <<<"$answer" | "$RUNNER_TEMP/nano-redact")"
           echo "board_sha=$board_sha" >> "$GITHUB_OUTPUT"
           if [ "$board_sha" = "$SHA" ]; then
             echo "$SERIAL is at $SHA"
