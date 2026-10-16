@@ -1615,7 +1615,8 @@ RestartSec=5
 RestartPreventExitStatus=78
 SuccessExitStatus=0 143
 TimeoutStartSec=600
-TimeoutStopSec=30
+# OpenClaw sizes its drain from this and its own template writes 330 (TASK-1604).
+TimeoutStopSec=330
 
 [Install]
 WantedBy=multi-user.target
