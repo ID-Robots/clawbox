@@ -92,6 +92,26 @@ export const DAY_MS = 24 * HOUR_MS;
 export const TEAM_BUDGET_THRESHOLD_MS = 30 * MINUTE_MS;
 /** Shorter than this is not a budget a run can plan in. */
 export const MIN_BUDGET_MS = 5 * MINUTE_MS;
+/** The lowest floor the environment may set instead (see minBudgetMsFrom). */
+export const MIN_BUDGET_FLOOR_MS = MINUTE_MS;
+/** The environment variable that lowers MIN_BUDGET_MS on one box. */
+export const MIN_BUDGET_ENV = "CLAWBOX_CODING_MIN_BUDGET_MINUTES";
+
+/**
+ * The shortest budget this box takes: MIN_BUDGET_MS, unless the server's
+ * environment names a SHORTER whole number of minutes in MIN_BUDGET_ENV
+ * (1 to 4). Only the on-device test boards set it
+ * (.github/workflows/nano-hardware-tests.yml), so that the deadline test
+ * waits one minute instead of five; anything else in it, a longer floor
+ * included, is MIN_BUDGET_MS. The server passes the result to resolveBudget;
+ * the start UI keeps MIN_BUDGET_MS.
+ */
+export function minBudgetMsFrom(raw: string | null | undefined): number {
+  const text = typeof raw === "string" ? raw.trim() : "";
+  if (!/^[1-9][0-9]?$/.test(text)) return MIN_BUDGET_MS;
+  const ms = Number(text) * MINUTE_MS;
+  return ms >= MIN_BUDGET_FLOOR_MS && ms < MIN_BUDGET_MS ? ms : MIN_BUDGET_MS;
+}
 /** Further away than this is refused: a run is not left working for weeks on one sentence. */
 export const MAX_BUDGET_MS = 14 * DAY_MS;
 /** "Until tomorrow morning" is the next 08:00, box-local. */
@@ -290,12 +310,16 @@ export function presetBudget(preset: BudgetChip, now: Now, tz: string, source: B
   return { deadline: iso(deadline), label: PRESET_LABELS[preset], preset, source, setAt: iso(at) };
 }
 
-/** The checks every deadline passes, whatever named it. Null when it is fine. */
-function deadlineProblem(deadline: number, workStart: number, now: number): string | null {
+/**
+ * The checks every deadline passes, whatever named it. Null when it is fine.
+ * `minMs` is the shortest budget taken: MIN_BUDGET_MS unless the server's
+ * environment lowered it (minBudgetMsFrom).
+ */
+function deadlineProblem(deadline: number, workStart: number, now: number, minMs: number = MIN_BUDGET_MS): string | null {
   if (!Number.isFinite(deadline)) return "The time budget's end is not a time this box can read.";
   if (deadline <= now) return `The time budget ends in the past (${iso(deadline)}). Pick an end later than now.`;
   if (deadline - now > MAX_BUDGET_MS) return `A time budget can run at most ${MAX_BUDGET_MS / DAY_MS} days; that one ends ${iso(deadline)}.`;
-  if (deadline - Math.max(now, workStart) < MIN_BUDGET_MS) return `A time budget must be at least ${MIN_BUDGET_MS / MINUTE_MS} minutes long.`;
+  if (deadline - Math.max(now, workStart) < minMs) return `A time budget must be at least ${formatDuration(minMs)} long.`;
   return null;
 }
 
@@ -306,10 +330,10 @@ function presetForDuration(ms: number): BudgetChip | null {
 }
 
 /** A budget of `ms` from now, or why not. */
-export function durationBudget(ms: number, now: Now, source: BudgetSource = "picker"): BudgetResult {
+export function durationBudget(ms: number, now: Now, source: BudgetSource = "picker", minMs: number = MIN_BUDGET_MS): BudgetResult {
   const at = nowMs(now);
   if (!Number.isFinite(ms) || ms <= 0) return { ok: false, error: "A time budget must be a length of time greater than zero." };
-  const problem = deadlineProblem(at + ms, at, at);
+  const problem = deadlineProblem(at + ms, at, at, minMs);
   if (problem) return { ok: false, error: problem };
   const preset = presetForDuration(ms);
   return {
@@ -365,7 +389,7 @@ export function customBudget(
   endIso: string,
   now: Now,
   startIso?: string | null,
-  opts: { tz?: string; source?: BudgetSource; label?: string } = {},
+  opts: { tz?: string; source?: BudgetSource; label?: string; minMs?: number } = {},
 ): BudgetResult {
   const at = nowMs(now);
   const tz = safeTimeZone(opts.tz);
@@ -377,7 +401,7 @@ export function customBudget(
     if (start === null) return { ok: false, error: "The time budget's start is not a time this box can read: use ISO 8601, e.g. 2026-10-15T09:00:00Z." };
     if (start >= end) return { ok: false, error: "The time budget's start must be before its end." };
   }
-  const problem = deadlineProblem(end, start ?? at, at);
+  const problem = deadlineProblem(end, start ?? at, at, opts.minMs);
   if (problem) return { ok: false, error: problem };
   const label = typeof opts.label === "string" && opts.label.trim() ? cleanLabel(opts.label) : `Until ${formatLocalDeadline(end, tz)}`;
   return {
@@ -438,7 +462,7 @@ const TOKEN_ALIASES: Record<string, BudgetChip> = {
  * no-budget. Anything else, a past end, or one more than 14 days away is
  * refused with a sentence that says what this box takes.
  */
-export function parseBudgetToken(token: string, now: Now, tz: string): BudgetResult {
+export function parseBudgetToken(token: string, now: Now, tz: string, minMs: number = MIN_BUDGET_MS): BudgetResult {
   const raw = typeof token === "string" ? token.trim() : "";
   const unknown = (): BudgetResult => ({
     ok: false,
@@ -453,14 +477,14 @@ export function parseBudgetToken(token: string, now: Now, tz: string): BudgetRes
   const chip = isBudgetChip(lower) ? lower : Object.prototype.hasOwnProperty.call(TOKEN_ALIASES, lower) ? TOKEN_ALIASES[lower] : undefined;
   if (chip) return { ok: true, budget: presetBudget(chip, now, tz, "picker") };
   const duration = parseDuration(raw);
-  if (duration !== null) return durationBudget(duration, now, "picker");
+  if (duration !== null) return durationBudget(duration, now, "picker", minMs);
   if (raw.includes("/")) {
     const [start, end, ...extra] = raw.split("/");
     if (extra.length || !start || !end) return unknown();
     if (parseIsoInstant(start, tz) === null || parseIsoInstant(end, tz) === null) return unknown();
-    return customBudget(end, now, start, { tz });
+    return customBudget(end, now, start, { tz, minMs });
   }
-  if (parseIsoInstant(raw, tz) !== null) return customBudget(raw, now, null, { tz });
+  if (parseIsoInstant(raw, tz) !== null) return customBudget(raw, now, null, { tz, minMs });
   return unknown();
 }
 
@@ -477,8 +501,8 @@ function readTokenCap(v: unknown): number | null {
  * least MIN_BUDGET_TOKEN_CAP; null or absent for none).
  * The caller decides what absent means — this reads a value that is there.
  */
-export function readBudgetInput(raw: unknown, now: Now, tz: string): BudgetResult {
-  if (typeof raw === "string") return parseBudgetToken(raw, now, tz);
+export function readBudgetInput(raw: unknown, now: Now, tz: string, minMs: number = MIN_BUDGET_MS): BudgetResult {
+  if (typeof raw === "string") return parseBudgetToken(raw, now, tz, minMs);
   if (raw && typeof raw === "object" && !Array.isArray(raw)) {
     const o = raw as Record<string, unknown>;
     const preset = typeof o.preset === "string" ? o.preset.trim().toLowerCase() : undefined;
@@ -494,7 +518,7 @@ export function readBudgetInput(raw: unknown, now: Now, tz: string): BudgetResul
       r.ok && r.budget && tokenCap !== null ? { ok: true, budget: { ...r.budget, tokenCap } } : r;
     if (preset && isBudgetChip(preset)) return capped({ ok: true, budget: presetBudget(preset, now, tz, "picker") });
     if ((preset === undefined || preset === "custom") && end !== undefined) {
-      return capped(customBudget(end, now, start, { tz, ...(typeof o.label === "string" && preset === "custom" ? { label: o.label } : {}) }));
+      return capped(customBudget(end, now, start, { tz, minMs, ...(typeof o.label === "string" && preset === "custom" ? { label: o.label } : {}) }));
     }
   }
   return {
@@ -1060,7 +1084,7 @@ function langOfPhrase(phrase: string): TextBudgetMatch["lang"] {
  * past, more than 14 days away, under 5 minutes) is answered with the reason,
  * so the start UI can say what it understood and why it is not used.
  */
-export function parseBudgetFromText(text: string, now: Now, tz: string): TextBudgetResult | null {
+export function parseBudgetFromText(text: string, now: Now, tz: string, minMs: number = MIN_BUDGET_MS): TextBudgetResult | null {
   if (typeof text !== "string" || !text.trim()) return null;
   const source = text.slice(0, MAX_TEXT_SCAN_CHARS).normalize("NFC").replace(/[’ʼ]/gu, "'");
   const at = nowMs(now);
@@ -1108,11 +1132,11 @@ export function parseBudgetFromText(text: string, now: Now, tz: string): TextBud
   if (!found) return null;
   const match: TextBudgetMatch = { phrase: source.slice(found.index, found.end).trim(), index: found.index, lang: found.lang };
   if (found.duration !== undefined) {
-    const r = durationBudget(found.duration, at, "text");
+    const r = durationBudget(found.duration, at, "text", minMs);
     return r.ok && r.budget ? { ok: true, budget: r.budget, match } : { ok: false, error: r.ok ? "No budget." : r.error, match };
   }
   const hit = found.deadline as DeadlineHit;
-  const problem = deadlineProblem(hit.deadline, at, at);
+  const problem = deadlineProblem(hit.deadline, at, at, minMs);
   if (problem) return { ok: false, error: problem, match };
   const budget: TimeBudget = hit.morning
     ? { ...presetBudget("morning", at, zone, "text") }
@@ -1133,20 +1157,22 @@ export function parseBudgetFromText(text: string, now: Now, tz: string): TextBud
  *
  * `defaultTokenCap` is the owner's existing token cap: whichever rule decided,
  * a budget over LONG_BUDGET_MS that names no spend ceiling takes it as one.
+ * `minBudgetMs` is the shortest budget taken, explicit or from the words:
+ * MIN_BUDGET_MS when absent (see minBudgetMsFrom).
  */
 export function resolveBudget(
-  input: { explicit?: unknown; text?: string | null; defaultPreset?: unknown; defaultTokenCap?: number | null },
+  input: { explicit?: unknown; text?: string | null; defaultPreset?: unknown; defaultTokenCap?: number | null; minBudgetMs?: number },
   now: Now,
   tz: string,
 ): BudgetResolution {
   const zone = safeTimeZone(tz);
   const cap = (b: TimeBudget): TimeBudget => withDefaultTokenCap(b, input.defaultTokenCap);
   if (input.explicit !== undefined && input.explicit !== null) {
-    const r = readBudgetInput(input.explicit, now, zone);
+    const r = readBudgetInput(input.explicit, now, zone, input.minBudgetMs);
     if (!r.ok) return r;
     return { ok: true, budget: r.budget ? cap(r.budget) : null, from: r.budget ? "picker" : "none", text: null };
   }
-  const text = typeof input.text === "string" ? parseBudgetFromText(input.text, now, zone) : null;
+  const text = typeof input.text === "string" ? parseBudgetFromText(input.text, now, zone, input.minBudgetMs) : null;
   if (text?.ok) return { ok: true, budget: cap(text.budget), from: "text", text };
   if (isBudgetChip(input.defaultPreset)) {
     return { ok: true, budget: cap(presetBudget(input.defaultPreset, now, zone, "default")), from: "default", text };

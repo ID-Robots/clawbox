@@ -268,8 +268,9 @@ check "...and says the suite did not run" contains "$WORK/summary-none.md" "did 
 check "lib.sh parses" bash -n "$LIB"
 check "run.sh parses" bash -n "$RUN"
 check "summary.sh parses" bash -n "$HERE/summary.sh"
-for name in 10-build-identity 20-services 25-gateway-channels 30-chat-turn 40-coding-agent-run 50-memory-pressure \
-  60-media-tools 65-prime-radiant-mcp 70-reboot-survival 75-full-reboot 76-gnome-initial-setup 77-vnc-clean-boot 78-one-browser 79-browser-clean-start 85-update-rollback 90-upgrade-from-release; do
+for name in 10-build-identity 20-services 25-gateway-channels 30-chat-turn 40-coding-agent-run 45-coding-agent-time-budget \
+  50-memory-pressure 60-media-tools 65-prime-radiant-mcp 75-full-reboot 76-gnome-initial-setup 77-vnc-clean-boot 78-one-browser \
+  79-browser-clean-start 85-update-rollback 90-upgrade-from-release; do
   check "tests/$name.sh is there" test -f "$HERE/tests/$name.sh"
 done
 for t in "$HERE"/tests/*; do
@@ -283,6 +284,26 @@ for t in "$HERE"/tests/*; do
     bash -c 't=$(head -n 20 "$1" | sed -n -E "s/^#[[:space:]]*timeout:[[:space:]]*([0-9]+)[[:space:]]*$/\1/p" | head -n 1)
       max=900; head -n 20 "$1" | grep -qE "^#[[:space:]]*tier:[[:space:]]*long[[:space:]]*$" && max=4500
       [ -n "$t" ] && [ "$t" -le "$max" ]' _ "$t"
+  # A test that runs beside others only reads the box: whatever restarts,
+  # reboots or stops something goes through sudo, and none of that may share
+  # the board with another test.
+  if head -n 20 "$t" | grep -qE '^#[[:space:]]*parallel:'; then
+    check "tests/$name names its parallel group in lower case" \
+      bash -c 'head -n 20 "$1" | grep -qE "^#[[:space:]]*parallel:[[:space:]]*[a-z0-9-]+[[:space:]]*$"' _ "$t"
+    check "tests/$name runs side by side, so it uses no sudo and never reboots" \
+      bash -c '! grep -vE "^[[:space:]]*#" "$1" | grep -qE "sudo|reboot|poweroff|systemctl (restart|stop|kill)|kill -"' _ "$t"
+  fi
+  # Every pattern of its map names a file that exists: a typo, or a file
+  # moved since, would quietly stop selecting this test.
+  check "tests/$name maps only onto files that exist (# covers:)" bash -c '
+    patterns=$(head -n 20 "$1" | sed -n -E "s/^#[[:space:]]*covers:[[:space:]]*(.*[^[:space:]])[[:space:]]*$/\1/p" | tr " " "\n" | grep .)
+    [ -n "$patterns" ] || exit 0
+    files=$(git -C "$2" ls-files)
+    while IFS= read -r p; do
+      case "$p" in *[!A-Za-z0-9._/*-]*) echo "bad pattern $p"; exit 1 ;; esac
+      re="^$(printf "%s" "$p" | sed -e "s/[.]/[.]/g" -e "s/[*]/.*/g")\$"
+      grep -qE "$re" <<<"$files" || { echo "no file matches $p"; exit 1; }
+    done <<<"$patterns"' _ "$t" "$HERE/../.."
 done
 
 # ---- long-tier tests are opt-in ----------------------------------------------
@@ -295,6 +316,93 @@ check "a long-tier test is skipped by default" line_matches "$WORK/out-long.txt"
 jq_check "a skipped long-tier test is a skip in summary.json" "$WORK/res-long/summary.json" '.skipped == 1 and .ok'
 NANO_TESTS_LONG=1 NANO_TESTS_DIR=$L bash "$RUN" --results "$WORK/res-long2" SERIAL-7 > "$WORK/out-long2.txt" 2>&1
 check "NANO_TESTS_LONG=1 runs a long-tier test" line_matches "$WORK/out-long2.txt" '^ok 2 - 20-long \([0-9]+s\)$'
+
+# ---- read-only neighbours run side by side -----------------------------------
+P=$WORK/tests-parallel
+fixture "$P" 10-a.sh '# parallel: g
+sleep 3; echo "ok - a"'
+fixture "$P" 20-b.sh '# parallel: g
+sleep 3; echo "ok - b"'
+fixture "$P" 25-long.sh '# parallel: g
+# tier: long
+echo "not ok - a long-tier test must not run here"'
+fixture "$P" 30-c.sh '# parallel: g
+sleep 1; echo "not ok - c is broken"; exit 1'
+fixture "$P" 40-d.sh 'echo "ok - d"'
+fixture "$P" 50-e.sh '# parallel: h
+sleep 1; echo "ok - e"'
+fixture "$P" 60-f.sh '# parallel: h
+sleep 1; echo "ok - f"'
+T0=$(date +%s)
+NANO_TESTS_DIR=$P bash "$RUN" --results "$WORK/res-par" SERIAL-P > "$WORK/out-par.txt" 2>&1
+RC=$?
+T1=$(date +%s)
+check "a parallel suite with a failure exits 1" test "$RC" -eq 1
+check "neighbours sharing a group run at the same time (3 s + 1 s, not 9 s)" test $((T1 - T0)) -lt 8
+check "...and say so" line_matches "$WORK/out-par.txt" '^# side by side \(parallel: g\): 10-a 20-b 30-c$'
+check "their TAP lines keep NN order" bash -c '[ "$(grep -E "^(not )?ok [0-9]+ " "$1" | sed -E "s/^(not )?ok ([0-9]+) .*/\2/" | tr "\n" " ")" = "1 2 3 4 5 6 7 " ]' _ "$WORK/out-par.txt"
+check "a long-tier test inside a group is skipped in its place" line_matches "$WORK/out-par.txt" '^ok 3 - 25-long \(0s\) # SKIP long-tier'
+check "a failure inside a group is that test's alone" line_matches "$WORK/out-par.txt" '^not ok 4 - 30-c '
+jq_check "each one keeps its own duration" "$WORK/res-par/summary.json" '
+  ([.tests[] | select(.name == "10-a" or .name == "20-b") | .duration_s >= 3] | all)
+  and ([.tests[] | select(.name == "30-c") | .duration_s <= 3] | all)'
+jq_check "the summary lists them in NN order with the right counts" "$WORK/res-par/summary.json" '
+  [.tests[].name] == ["10-a","20-b","25-long","30-c","40-d","50-e","60-f"]
+  and .passed == 5 and .failed == 1 and .skipped == 1 and .selection == "all"'
+T0=$(date +%s)
+NANO_PARALLEL=0 NANO_TESTS_DIR=$P bash "$RUN" --results "$WORK/res-seq" SERIAL-P > "$WORK/out-seq.txt" 2>&1
+T1=$(date +%s)
+check "NANO_PARALLEL=0 runs every test on its own" test $((T1 - T0)) -ge 9
+check "...with the same verdicts" bash -c 'diff <(jq -c "[.tests[] | [.name, .status]]" "$1") <(jq -c "[.tests[] | [.name, .status]]" "$2")' _ "$WORK/res-par/summary.json" "$WORK/res-seq/summary.json"
+
+# ---- a cancel in the middle of a group ----------------------------------------
+Q=$WORK/tests-par-cancel
+fixture "$Q" 10-quick.sh '# parallel: g
+echo "ok - quick"'
+fixture "$Q" 20-slow.sh '# parallel: g
+echo "ok - started"; echo $$ > "$NANO_RESULTS_DIR/../slow1.pid"; sleep 60'
+fixture "$Q" 30-slow.sh '# parallel: g
+echo "ok - started"; echo $$ > "$NANO_RESULTS_DIR/../slow2.pid"; sleep 60'
+fixture "$Q" 40-after.sh 'echo "ok - must not run after a cancel"'
+NANO_TESTS_DIR=$Q bash "$RUN" --results "$WORK/res-par-cancel" SERIAL-Q > "$WORK/out-par-cancel.txt" 2>&1 &
+RUNNER=$!
+for _ in $(seq 1 100); do
+  [ -s "$WORK/slow1.pid" ] && [ -s "$WORK/slow2.pid" ] && break
+  sleep 0.1
+done
+sleep 1.5
+kill -TERM "$RUNNER"
+wait "$RUNNER"
+RC=$?
+check "a run cancelled inside a group exits 130" test "$RC" -eq 130
+jq_check "what ended is reported, what ran is interrupted, in NN order" "$WORK/res-par-cancel/summary.json" '
+  .interrupted == true and .ok == false and .total == 3
+  and [.tests[] | [.name, .status, .reason]] == [["10-quick","pass",""],["20-slow","fail","interrupted"],["30-slow","fail","interrupted"]]'
+check "no test runs after the cancel" lacks "$WORK/out-par-cancel.txt" "must not run after a cancel"
+sleep 0.5
+for pidfile in "$WORK/slow1.pid" "$WORK/slow2.pid"; do
+  if [ -s "$pidfile" ]; then
+    check "the running tests are stopped with the runner ($(basename "$pidfile"))" bash -c '! kill -0 "$(cat "$1")" 2>/dev/null' _ "$pidfile"
+  fi
+done
+
+# ---- change-based selection ----------------------------------------------------
+NANO_TESTS_SELECT="10-a,40-d 60-f" NANO_TESTS_SELECT_REASON="from 2 files" NANO_TESTS_DIR=$P \
+  bash "$RUN" --results "$WORK/res-sel" SERIAL-S > "$WORK/out-sel.txt" 2>&1
+RC=$?
+check "a selection of passing tests exits 0" test "$RC" -eq 0
+check "the selection is announced" line_matches "$WORK/out-sel.txt" '^# change-based selection: 10-a 40-d 60-f \(from 2 files\)$'
+check "a test left out is a skip that says why" line_matches "$WORK/out-sel.txt" '^ok 2 - 20-b \(0s\) # SKIP not affected by this change'
+check "...even a failing one, which never runs" line_matches "$WORK/out-sel.txt" '^ok 4 - 30-c \(0s\) # SKIP not affected by this change'
+jq_check "summary.json names the selection and counts the rest as skipped" "$WORK/res-sel/summary.json" '
+  .selection == ["10-a","40-d","60-f"] and .passed == 3 and .skipped == 4 and .failed == 0 and .ok and .planned == 7'
+NANO_TESTS_SELECT=all NANO_TESTS_DIR=$B bash "$RUN" --results "$WORK/res-sel-all" SERIAL-S > /dev/null 2>&1
+jq_check "NANO_TESTS_SELECT=all runs every test" "$WORK/res-sel-all/summary.json" '.selection == "all" and .passed == 1 and .skipped == 1'
+NANO_TESTS_SELECT="99-no-such-test" NANO_TESTS_DIR=$P bash "$RUN" --results "$WORK/res-sel-bad" SERIAL-S > "$WORK/out-sel-bad.txt" 2>&1
+check "a selection naming no test is a usage error (2)" test $? -eq 2
+check "...that names it" contains "$WORK/out-sel-bad.txt" "99-no-such-test"
+NANO_TESTS_SELECT='10-a;reboot' NANO_TESTS_DIR=$P bash "$RUN" --results "$WORK/res-sel-bad2" SERIAL-S > /dev/null 2>&1
+check "a selection that is not test names is refused (2)" test $? -eq 2
 
 echo "1..$N"
 if [ "$FAILS" -gt 0 ]; then

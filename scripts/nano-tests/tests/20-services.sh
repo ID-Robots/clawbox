@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # timeout: 300
+# select: always
+# parallel: probes
+# covers: src/lib/gateway-health.ts src/app/setup-api/gateway/*
 #
 # The box's services are up after the rebuild.
 #

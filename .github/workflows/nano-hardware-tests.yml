@@ -22,9 +22,22 @@ name: Nano hardware tests
 #     reads the changed files (scripts/nano-tests/needs-board.sh), and the board
 #     job is then skipped with the reason in plan's job summary and in the PR
 #     comment.
+#   - on every push to beta or main (a merge), the same docs-only rule applied
+#     to the push's own changes: the FULL suite, which is what keeps change-based
+#     selection (below) from costing coverage.
 # `workflow_dispatch` runs it on a BRANCH of this repository. A tag or a commit
 # SHA is taken only when a branch here has exactly that commit as its head (that
 # branch is then used); anything else is refused.
+#
+# Change-based selection: on a pull request the board runs the tests whose map
+# (`# covers:` in scripts/nano-tests/tests/) reaches the PR's changed files,
+# plus the core smoke set (build identity, services, a chat turn) — `plan`
+# decides with scripts/nano-tests/select-tests.sh, and every test left out is
+# reported as a skip that says why. The FULL suite runs on a push to beta or
+# main, on a dispatch, on a PR labelled `nano-full` (or `nano-long`; the labels
+# are read when `plan` runs, so add one and re-run the job), and whenever the
+# map is unsure about a changed file, the runner itself changed, or the list
+# of changed files is incomplete.
 #
 # The commit under test is handed to the board first (/tmp/nano-ci-want-sha),
 # so `nano-ci rebuild` checks the board reached exactly it, retries once with
@@ -74,6 +87,8 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
     branches: [beta, main]
+  push:
+    branches: [beta, main]
   workflow_dispatch:
     inputs:
       ref:
@@ -101,93 +116,146 @@ jobs:
     #   - its head is in this repository (the workflow's own fork fence; the
     #     runner hook on the lab host is the other layer);
     #   - it does not carry `skip-nano`, the only opt-out.
+    # A push is to beta or main of this repository (the trigger), never a fork's.
     if: >-
       github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && github.repository == 'ID-Robots/clawbox') ||
       (github.event_name == 'pull_request' &&
        github.event.pull_request.head.repo.full_name == github.repository &&
        !contains(github.event.pull_request.labels.*.name, 'skip-nano'))
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # The PR's live labels (`nano-full`, `nano-long`) are read through the API.
+    permissions:
+      contents: read
+      pull-requests: read
     defaults:
       run:
         shell: bash
     outputs:
       hardware: ${{ steps.classify.outputs.hardware }}
       reason: ${{ steps.classify.outputs.reason }}
+      # `all`, or the test names the board runs (scripts/nano-tests/select-tests.sh).
+      tests: ${{ steps.classify.outputs.tests }}
+      tests_reason: ${{ steps.classify.outputs.tests_reason }}
     steps:
+      # The classifiers and the tests' own maps, at the commit under test.
       - name: Check out the classifier
-        if: github.event_name == 'pull_request'
+        if: github.event_name != 'workflow_dispatch'
         uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-          sparse-checkout: scripts/nano-tests/needs-board.sh
+          sparse-checkout: scripts/nano-tests/
           sparse-checkout-cone-mode: false
 
       # The changed files AT THE COMMIT UNDER TEST: GitHub's compare of this
       # event's base and head is the PR's "Files changed" (a three-dot diff from
       # the merge base), pinned to these SHAs rather than to wherever the PR has
-      # moved since. Both sides of a rename are judged, so code moved into docs/
-      # still needs a board. A compare lists at most 300 files; at 300, or when
-      # the call fails, the list is partial and the PR gets a board — every
-      # doubt does (scripts/nano-tests/needs-board.sh).
+      # moved since; for a push, the commits it pushed. Both sides of a rename
+      # are judged, so code moved into docs/ still needs a board. A compare
+      # lists at most 300 files; at 300, or when the call fails, the list is
+      # partial and the run gets a board and the full suite — every doubt does
+      # (scripts/nano-tests/needs-board.sh, select-tests.sh).
+      #
+      # Which tests: on a pull request, select-tests.sh's answer, unless the
+      # PR carries `nano-full` or `nano-long` — read from the API, so a label
+      # added after the push counts on a re-run (the event's own labels are
+      # the fallback). A push or a dispatch runs every test.
       - name: Classify the changed files
         id: classify
         env:
           EVENT: ${{ github.event_name }}
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}
           INPUT_REF: ${{ inputs.ref }}
         run: |
-          if [ "$EVENT" != pull_request ]; then
+          tests=all
+          tests_reason=""
+          if [ "$EVENT" = workflow_dispatch ]; then
             hardware=true
             reason="dispatched by hand for $INPUT_REF"
+            tests_reason="every test: a dispatch runs the full suite"
           else
             compare="$RUNNER_TEMP/compare.json"
             files="$RUNNER_TEMP/changed-files.txt"
             partial=()
-            if gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" > "$compare" &&
+            if ! [[ $BASE_SHA =~ ^[0-9a-f]+$ && ${#BASE_SHA} -eq 40 && $BASE_SHA != 0000000000000000000000000000000000000000 ]]; then
+              echo "No base commit to compare with (a new branch?), so this run gets a board"
+              : > "$files"
+              partial=(--partial)
+            elif gh api "repos/$REPO/compare/$BASE_SHA...$HEAD_SHA" > "$compare" &&
                count=$(jq '(.files // []) | length' "$compare") &&
                jq -r '(.files // [])[] | .filename, (.previous_filename // empty) | gsub("[\r\n]"; "?")' "$compare" > "$files"; then
               echo "$count changed files between ${BASE_SHA:0:12} and ${HEAD_SHA:0:12}"
               [ "$count" -lt 300 ] || partial=(--partial)
             else
-              echo "::warning title=Changed files unknown::could not list the PR's changed files, so it gets a board"
+              echo "::warning title=Changed files unknown::could not list the changed files, so this run gets a board"
               : > "$files"
               partial=(--partial)
             fi
             verdict=$(bash scripts/nano-tests/needs-board.sh "${partial[@]}" < "$files") || verdict=""
             hardware=$(sed -n 's/^hardware=//p' <<<"$verdict")
             reason=$(sed -n 's/^reason=//p' <<<"$verdict")
+            if [ "$EVENT" = push ]; then
+              tests_reason="every test: a push to $HEAD_REF runs the full suite"
+            else
+              labels=$(gh api "repos/$REPO/issues/$PR_NUMBER/labels" --jq '.[].name' 2>/dev/null) || labels=$EVENT_LABELS
+              full_label=""
+              for label in $labels; do
+                case "$label" in nano-full | nano-long) full_label=$label ;; esac
+              done
+              if [ -n "$full_label" ]; then
+                tests_reason="every test: the PR carries $full_label"
+              else
+                selection=$(bash scripts/nano-tests/select-tests.sh "${partial[@]}" < "$files") || selection=""
+                tests=$(sed -n 's/^tests=//p' <<<"$selection")
+                tests_reason=$(sed -n 's/^reason=//p' <<<"$selection")
+                # A name the board's run.sh would not take is no selection.
+                if ! [[ $tests == all || $tests =~ ^[0-9][0-9]-[a-z0-9-]+( [0-9][0-9]-[a-z0-9-]+)*$ ]]; then
+                  tests=all
+                  tests_reason="every test: the selection gave no usable answer"
+                fi
+              fi
+            fi
           fi
           case "$hardware" in
             true | false) ;;
             *)
               hardware=true
-              reason="the classifier gave no verdict, so the PR gets a board"
+              reason="the classifier gave no verdict, so this run gets a board"
               ;;
           esac
           {
             echo "hardware=$hardware"
             echo "reason=$reason"
+            echo "tests=$tests"
+            echo "tests_reason=$tests_reason"
           } >> "$GITHUB_OUTPUT"
           echo "Needs a board: $hardware ($reason)"
+          echo "Tests: $tests ($tests_reason)"
           if [ "$hardware" = true ]; then
-            echo "**Needs a board:** $reason." >> "$GITHUB_STEP_SUMMARY"
+            {
+              echo "**Needs a board:** $reason."
+              echo
+              echo "**Tests:** $tests_reason."
+            } >> "$GITHUB_STEP_SUMMARY"
           else
             {
               echo "## Nano hardware tests — skipped"
               echo
-              echo "**No board was taken: $reason.** A pull request that changes nothing but \`docs/**\`, \`docs-site/**\` or \`**/*.md\` (\`config/**\` excepted) skips the on-device suite."
+              echo "**No board was taken: $reason.** A pull request or push that changes nothing but \`docs/**\`, \`docs-site/**\` or \`**/*.md\` (\`config/**\` excepted) skips the on-device suite."
               echo
-              # The board is rebuilt from a branch, so the hint names the PR's
+              # The board is rebuilt from a branch, so the hint names the
               # branch; --ref is where the workflow file lives (main may have
               # none).
-              echo "To test this PR on a board anyway (its branch, while its head is still \`${HEAD_SHA:0:12}\`): \`gh workflow run nano-hardware-tests.yml --ref $BASE_REF -f ref=$HEAD_REF\`"
+              echo "To test it on a board anyway (its branch, while its head is still \`${HEAD_SHA:0:12}\`): \`gh workflow run nano-hardware-tests.yml --ref ${BASE_REF:-$HEAD_REF} -f ref=$HEAD_REF\`"
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
@@ -200,11 +268,13 @@ jobs:
     if: >-
       needs.plan.outputs.hardware == 'true' &&
       (github.event_name == 'workflow_dispatch' ||
+       (github.event_name == 'push' && github.repository == 'ID-Robots/clawbox') ||
        (github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository))
     runs-on: [self-hosted, nano-lab]
-    # One board job at a time PER PULL REQUEST (a dispatch: per ref it was
-    # dispatched from), and a running job is never cancelled by the next one:
+    # One board job at a time PER PULL REQUEST (a dispatch or a push: per ref
+    # it was dispatched from or pushed to), and a running job is never
+    # cancelled by the next one:
     # its recycle (or the release fallback) must run. A push to the PR queues
     # behind the PR's own running job; GitHub keeps ONE pending job per group,
     # so a third push replaces the second, which then shows as cancelled before
@@ -263,14 +333,17 @@ jobs:
       # the board stays on its old commit. A pull_request uses its head branch
       # (in this repository: the fence) and its head commit. A dispatch takes a
       # branch; a tag or a commit SHA only when a branch of this repository has
-      # exactly that commit as its head, and then that branch. Everything else
-      # is refused — which also keeps a fork's commit, which GitHub serves by
-      # SHA from this repository too, off the lab host. The branch must pass
+      # exactly that commit as its head, and then that branch. A push is the
+      # branch it pushed to (beta or main) at the commit it pushed. Everything
+      # else is refused — which also keeps a fork's commit, which GitHub serves
+      # by SHA from this repository too, off the lab host. The branch must pass
       # force-update.sh's own character check before it reaches nano-ci.
       - name: Resolve the branch under test
         id: ref
         env:
           EVENT: ${{ github.event_name }}
+          PUSH_REF: ${{ github.ref_name }}
+          PUSH_SHA: ${{ github.sha }}
           INPUT_REF: ${{ inputs.ref }}
           PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -294,6 +367,12 @@ jobs:
             branch=$PR_HEAD_REF
             sha=$PR_HEAD_SHA
             how="the PR's head branch"
+          elif [ "$EVENT" = push ]; then
+            case "$PUSH_REF" in beta | main) ;; *) refuse "a push to $PUSH_REF: only pushes to beta and main are tested here" ;; esac
+            [[ $PUSH_SHA =~ ^[0-9a-f]{40}$ ]] || refuse "the pushed commit is not a commit SHA"
+            branch=$PUSH_REF
+            sha=$PUSH_SHA
+            how="the push to $PUSH_REF"
           else
             # Not echoed when it fails: it is the one value here nobody checked.
             [[ $INPUT_REF =~ ^[A-Za-z0-9._/-]+$ ]] || refuse "the dispatched ref is not a branch, tag or commit name"
@@ -427,6 +506,8 @@ jobs:
           "$RUNNER_TEMP/nano-redact" < /dev/null
           if [ "$EVENT" = pull_request ]; then
             purpose="clawbox PR #$PR_NUMBER $sha"
+          elif [ "$EVENT" = push ]; then
+            purpose="clawbox push $BRANCH $sha"
           else
             purpose="clawbox dispatch $BRANCH $sha"
           fi
@@ -553,6 +634,14 @@ jobs:
             exit 1
           fi
           nano-ci ssh "$SERIAL" "echo $SHA > /tmp/nano-ci-want-sha" 2>&1 | "$RUNNER_TEMP/nano-redact"
+          # The shortest coding budget the box takes, lowered from 5 minutes to
+          # 1 on this test board only (src/lib/coding-time-budget.ts), so the
+          # deadline test (45-coding-agent-time-budget) waits a 1-minute
+          # deadline. Into the .env clawbox-setup.service loads, before the
+          # rebuild, whose restart of the web server reads it; the recycle
+          # restores the board from the golden image afterwards.
+          nano-ci ssh "$SERIAL" "f=/home/clawbox/clawbox/.env; touch \$f && sed -i '/^CLAWBOX_CODING_MIN_BUDGET_MINUTES=/d' \$f && echo CLAWBOX_CODING_MIN_BUDGET_MINUTES=1 >> \$f" 2>&1 | "$RUNNER_TEMP/nano-redact" ||
+            echo "::warning title=Budget floor not set::the board keeps the 5-minute floor, so 45-coding-agent-time-budget waits 5 minutes"
           rc=0
           nano-ci rebuild "$SERIAL" "$BRANCH" 2>&1 | "$RUNNER_TEMP/nano-redact" || rc=${PIPESTATUS[0]}
           # 4: the branch moved on and the board is on its new head — the
@@ -667,6 +756,10 @@ jobs:
           NANO_RUN_ID: gh${{ github.run_id }}-${{ github.run_attempt }}
           # The update tests hand it to the box's own updater.
           NANO_BRANCH: ${{ steps.ref.outputs.branch }}
+          # Change-based selection (`plan`): `all`, or the tests to run; the
+          # rest are reported as skips.
+          NANO_TESTS_SELECT: ${{ needs.plan.outputs.tests || 'all' }}
+          NANO_TESTS_SELECT_REASON: ${{ needs.plan.outputs.tests_reason }}
         run: bash scripts/nano-tests/run.sh "$SERIAL"
 
       # From here on every step is `always()`, which also runs on a cancel —
@@ -706,6 +799,7 @@ jobs:
           NANO_SHA: ${{ steps.target.outputs.sha || steps.ref.outputs.sha || github.event.pull_request.head.sha || inputs.ref }}
           NANO_OUTCOME: "${{ job.status == 'cancelled' && 'The job was cancelled. ' || '' }}Steps: branch ${{ steps.ref.outcome || 'not run' }} · reserve ${{ steps.reserve.outcome || 'not run' }} · rebuild ${{ steps.rebuild.outcome || 'not run' }} · back up ${{ steps.healthy.outcome || 'not run' }} · commit check ${{ steps.verify.outputs.superseded == 'true' && 'superseded by a newer push' || steps.verify.outcome || 'not run' }} · suite ${{ steps.suite.outcome || 'not run' }}"
           REF_NOTE: ${{ steps.ref.outputs.note }}
+          TESTS_NOTE: ${{ needs.plan.outputs.tests_reason && format('**Tests:** {0}.', needs.plan.outputs.tests_reason) || '' }}
           RESERVE_NOTE: ${{ steps.reserve.outputs.note }}
           VERIFY_NOTE: ${{ steps.verify.outputs.note }}
           CHECKED_OUT: ${{ steps.target.outcome }}
@@ -725,7 +819,7 @@ jobs:
           else
             printf '## Nano hardware tests\n\n**The on-device suite did not run.** %s\n' "$NANO_OUTCOME" > "$raw"
           fi
-          for note in "$REF_NOTE" "$RESERVE_NOTE" "$VERIFY_NOTE"; do
+          for note in "$REF_NOTE" "$TESTS_NOTE" "$RESERVE_NOTE" "$VERIFY_NOTE"; do
             if [ -n "$note" ]; then
               printf '\n%s\n' "$note" >> "$raw"
             fi

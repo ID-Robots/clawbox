@@ -442,6 +442,8 @@ import {
   isBudgetChip,
   LONG_BUDGET_MS,
   marginCutoffMs,
+  MIN_BUDGET_ENV,
+  minBudgetMsFrom,
   MINUTE_MS,
   readTimeBudget,
   remainingMs,
@@ -2315,6 +2317,8 @@ export interface CodingAgentStatus {
   defaultTimeBudget: BudgetChip | null;
   /** The box's own IANA zone — what "box-local" means for a budget, so the start UI previews the deadline the box will store. */
   timeZone: string;
+  /** The shortest time budget a start may name, in minutes: 5, or the shorter floor CLAWBOX_CODING_MIN_BUDGET_MINUTES sets on an on-device test board. */
+  minTimeBudgetMinutes: number;
   /** The owner's standing permission rules, in the order they saved them. */
   allowRules: string[];
   /** How many they may keep, so the editor can say so without guessing. */
@@ -4100,6 +4104,7 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     teamDynamic: config[CODING_TEAM_DYNAMIC_CONFIG_KEY] === true,
     defaultTimeBudget: defaultTimeBudgetFrom(config[CODING_AGENT_DEFAULT_BUDGET_CONFIG_KEY]),
     timeZone,
+    minTimeBudgetMinutes: minBudgetMsFrom(process.env[MIN_BUDGET_ENV]) / MINUTE_MS,
     // The home, so a harness-project rule is still on the list the panels
     // read; the full context's directory walk is not worth it here.
     allowRules: normalizeAllowRules(config[CODING_AGENT_ALLOW_RULES_CONFIG_KEY], allowRuleHomeContext()),

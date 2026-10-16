@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # timeout: 300
+# parallel: probes
+# covers: src/lib/openclaw-channels.ts src/lib/gateway-health.ts src/app/setup-api/gateway/* src/app/setup-api/telegram/* src/app/setup-api/discord/*
+# covers: src/app/setup-api/whatsapp/* src/lib/openclaw-whatsapp.ts src/lib/whatsapp-pairing.ts src/lib/discord-api.ts src/lib/telegram-*.ts
 #
 # The gateway is ready, settled, and every chat channel it runs is healthy.
 #

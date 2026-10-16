@@ -6,7 +6,7 @@
  * budget the same way.
  */
 import { getDefaultTimeBudget, getTokenLimit } from "@/lib/coding-agent";
-import { resolveBudget, type BudgetResolution, type TimeBudget } from "@/lib/coding-time-budget";
+import { MIN_BUDGET_ENV, minBudgetMsFrom, resolveBudget, type BudgetResolution, type TimeBudget } from "@/lib/coding-time-budget";
 import { readOsTimeZone } from "@/lib/timezone";
 
 /**
@@ -20,6 +20,7 @@ import { readOsTimeZone } from "@/lib/timezone";
  * @returns the resolution; `ok: false` carries the sentence a route answers 400 with.
  *   A budget over two hours that names no spend ceiling carries the owner's
  *   existing token cap as its `tokenCap` (none when the owner set none).
+ *   The shortest budget taken is serverMinBudgetMs().
  */
 export async function resolveStartBudget(
   input: { explicit: unknown; text: string; applyDefault: boolean },
@@ -30,7 +31,20 @@ export async function resolveStartBudget(
     input.applyDefault ? getDefaultTimeBudget().catch(() => null) : Promise.resolve(null),
     getTokenLimit().catch(() => null),
   ]);
-  return resolveBudget({ explicit: input.explicit, text: input.text, defaultPreset, defaultTokenCap }, now, tz);
+  return resolveBudget(
+    { explicit: input.explicit, text: input.text, defaultPreset, defaultTokenCap, minBudgetMs: serverMinBudgetMs() },
+    now,
+    tz,
+  );
+}
+
+/**
+ * The shortest budget this server takes: 5 minutes, or the shorter floor its
+ * environment names (CLAWBOX_CODING_MIN_BUDGET_MINUTES, 1-4 — set only on the
+ * on-device test boards; see minBudgetMsFrom).
+ */
+export function serverMinBudgetMs(env: NodeJS.ProcessEnv = process.env): number {
+  return minBudgetMsFrom(env[MIN_BUDGET_ENV]);
 }
 
 /**

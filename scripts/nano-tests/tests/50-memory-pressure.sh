@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # timeout: 420
+# covers: scripts/setup-optimizations.sh scripts/clawbox-resource-limits.sh config/clawbox-resource-limits.env src/lib/mem-available.ts
 #
 # The box rides out memory pressure: an 8 GB Jetson runs the gateway, the
 # dashboard, a browser and a local model side by side, and a coding run or a

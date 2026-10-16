@@ -130,6 +130,12 @@ locally, and unset runs every spec on one box as before):
 | `core` | every spec except the upgrade | every run, every PR (~7 min) |
 | `upgrade` | `10-setup-wizard`, then `90-upgrade-main-to-beta` | the schedule, a dispatch, and every PR that touches a path in `UPGRADE_PATHS`, or whose file list cannot be read (~13 min) |
 
+Each shard's install builds with the framework's build cache (`.next/cache`)
+of the last push to `beta` or `main` when the Actions cache has one — see
+[cache-seed/README.md](cache-seed/README.md) — and in-app updates carry the
+cache of the build they replace into the new one (`carry_build_cache` in
+`install.sh`), so the upgrade's rebuild of the PR head starts warm too.
+
 `UPGRADE_PATHS` is the installer, `scripts/`, `config/`, the lockfiles and
 build config, the updater and its root steps, the setup state it carries
 across, and this harness. The install itself is in `core`, so a change to

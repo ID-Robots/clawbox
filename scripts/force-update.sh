@@ -29,6 +29,19 @@ set -euo pipefail
 #   A value that is not a whole number is replaced with the default and a line
 #   is printed saying so. Same two knobs, same rule, as install.sh.
 #
+# Two things are kept from the last run, because a rebuild is minutes on a
+# Jetson and most of them repeat it:
+#   - the dependency install is SKIPPED when nothing it reads changed since the
+#     last one that worked here — package.json, bun.lock and the bun doing it,
+#     hashed into node_modules/.clawbox-deps-stamp (inside node_modules, so a
+#     removed node_modules takes its stamp with it). A build that then fails
+#     gets the install and one more build before anything is rolled back, so a
+#     damaged node_modules under an unchanged lockfile still gets repaired;
+#   - the framework's build cache, .next/cache (Turbopack's and the type
+#     check's), moves from the parked build into the new one instead of being
+#     deleted with it. Next checks every cached entry against the sources it
+#     sees, so a stale one is recomputed, never trusted.
+#
 # A build that fails is never served, and never leaves the checkout ahead of
 # what is served: the serving build is parked before `next build` runs and put
 # back if the new one fails, the checkout goes back to the commit it was on,
@@ -164,6 +177,8 @@ PREV_HEAD=""     # the commit checked out before this run
 PREV_BRANCH=""   # the branch it was on; empty for a detached HEAD
 MOVED=0          # the checkout may have left PREV_HEAD
 INSTALLED=0      # `bun install` ran against the new commit's lockfile
+INSTALL_SKIPPED=0 # the install was skipped: its inputs had not changed
+CACHE_CARRIED=0  # .next/cache moved from the parked build into the new one
 PARKED=0         # the serving build is parked at $KEPT_DIR
 NO_FALLBACK=0    # too little space to park: the build runs over the serving one
 BUILT=0          # `bun run build` has started writing .next
@@ -195,6 +210,46 @@ verify_build_present() {
   if ! bash "$PROJECT_DIR/scripts/verify-build-identity.sh" --project-dir "$PROJECT_DIR" --quiet; then
     echo "[force-update] The build on disk does not name the checked-out commit" >&2
     return 1
+  fi
+}
+
+# What node_modules is installed from: package.json, bun.lock and the bun
+# that installs them, as one hash. Fails when either file is missing (nothing
+# to compare: install). bun is asked as clawbox, like every other bun call
+# here — root never runs the clawbox-owned binary.
+DEPS_STAMP="$PROJECT_DIR/node_modules/.clawbox-deps-stamp"
+deps_hash() {
+  [ -f "$PROJECT_DIR/package.json" ] && [ -f "$PROJECT_DIR/bun.lock" ] || return 1
+  {
+    cat "$PROJECT_DIR/package.json" "$PROJECT_DIR/bun.lock"
+    run_as_clawbox "$BUN_BIN --version" 2>/dev/null || true
+  } | sha256sum | cut -d' ' -f1
+}
+
+# `bun install`, and the stamp that lets the next run skip it. The stamp goes
+# first, so an install that fails or is cut short leaves none behind.
+install_deps() {
+  local want
+  INSTALLED=1
+  run_as_clawbox "rm -f $DEPS_STAMP" || true
+  run_as_clawbox "cd $PROJECT_DIR && $BUN_BIN install" || return 1
+  want="$(deps_hash)" || want=""
+  if [[ "$want" =~ ^[0-9a-f]+$ ]]; then
+    run_as_clawbox "printf '%s\n' $want > $DEPS_STAMP" || true
+  fi
+}
+
+# The parked build's .next/cache into the new .next, so this build starts warm.
+# As clawbox: a .next made by root would refuse the build its own output dir.
+carry_build_cache() {
+  [ "$PARKED" -eq 1 ] || return 0
+  [ -d "$KEPT_DIR/cache" ] && [ ! -L "$KEPT_DIR/cache" ] || return 0
+  [ ! -e "$BUILD_DIR/cache" ] || return 0
+  if run_as_clawbox "mkdir -p $BUILD_DIR && mv -T $KEPT_DIR/cache $BUILD_DIR/cache"; then
+    CACHE_CARRIED=1
+    echo "[force-update] Keeping the build cache (.next/cache) for this build"
+  else
+    echo "[force-update] Warning: could not keep the build cache — building without it" >&2
   fi
 }
 
@@ -275,6 +330,10 @@ restore_serving_build() {
     echo "[force-update] The parked build is gone from $KEPT_DIR — there is no previous build to put back" >&2
     return 1
   fi
+  # Its cache goes back with it (a rename): best effort, a build serves without one.
+  if [ "$CACHE_CARRIED" -eq 1 ] && [ -d "$BUILD_DIR/cache" ] && [ ! -L "$BUILD_DIR/cache" ] && [ ! -e "$KEPT_DIR/cache" ]; then
+    mv -T "$BUILD_DIR/cache" "$KEPT_DIR/cache" 2>/dev/null || true
+  fi
   if ! rm -rf "$BUILD_DIR" || ! mv -T "$KEPT_DIR" "$BUILD_DIR"; then
     echo "[force-update] Could not put the previous build back — it is still at $KEPT_DIR" >&2
     return 1
@@ -310,7 +369,7 @@ roll_back_checkout() {
   # node_modules was installed for the lockfile of the commit that failed; put
   # it back in step with the one that is checked out again. Best-effort: the
   # restored build carries its own traced node_modules in .next/standalone.
-  if [ "$INSTALLED" -eq 1 ] && ! run_as_clawbox "cd $PROJECT_DIR && $BUN_BIN install"; then
+  if [ "$INSTALLED" -eq 1 ] && ! install_deps; then
     echo "[force-update] Warning: bun install for the restored commit failed — run it again before the next build" >&2
   fi
 }
@@ -408,14 +467,19 @@ HEAD_SHA=$(run_as_clawbox "$GIT rev-parse --short HEAD") || HEAD_SHA="?"
 echo "[force-update] Now at $TARGET_BRANCH @ $HEAD_SHA"
 
 echo "[force-update] Rebuilding (this takes 1-3 minutes on Jetson)..."
-INSTALLED=1
-if ! run_as_clawbox "cd $PROJECT_DIR && $BUN_BIN install"; then
+WANT_DEPS="$(deps_hash)" || WANT_DEPS=""
+HAVE_DEPS="$(cat "$DEPS_STAMP" 2>/dev/null)" || HAVE_DEPS=""
+if [ -n "$WANT_DEPS" ] && [ "$WANT_DEPS" = "$HAVE_DEPS" ] && [ -d "$PROJECT_DIR/node_modules" ]; then
+  INSTALL_SKIPPED=1
+  echo "[force-update] Dependencies unchanged since the last install (package.json, bun.lock, bun) — skipping bun install"
+elif ! install_deps; then
   give_up "bun install failed" 1
 fi
 
 if ! park_serving_build; then
   give_up "Could not set the serving build aside" 1
 fi
+carry_build_cache
 
 # ONE retry, and only for the mid-build file-trace race — the same guard
 # `run_next_build` carries in install.sh, copied rather than shared because
@@ -432,42 +496,63 @@ BUILD_LOG_DIR="$(mktemp -d "${TMPDIR:-/tmp}/clawbox-force-update-XXXXXX" 2>/dev/
 if [ -n "$BUILD_LOG_DIR" ]; then BUILD_LOG="$BUILD_LOG_DIR/build.log"; fi
 BUILD_RC=0
 BUILT=1
-for BUILD_ATTEMPT in 1 2; do
-  if [ -n "$BUILD_LOG" ]; then
-    if run_as_clawbox "cd $PROJECT_DIR && $BUN_BIN run build" 2>&1 | tee "$BUILD_LOG"; then
-      BUILD_RC=0
+run_build() {
+  local attempt
+  for attempt in 1 2; do
+    if [ -n "$BUILD_LOG" ]; then
+      if run_as_clawbox "cd $PROJECT_DIR && $BUN_BIN run build" 2>&1 | tee "$BUILD_LOG"; then
+        BUILD_RC=0
+      else
+        # The BUILD's status, never the pipeline's: a log this script could not
+        # write must not turn a build that worked into a failed recovery.
+        BUILD_RC=${PIPESTATUS[0]}
+      fi
+      # Done, unless Next reported a traced file it could not copy (below).
+      if [ "$BUILD_RC" -eq 0 ] && ! copy_failure_in_log "$BUILD_LOG"; then break; fi
     else
-      # The BUILD's status, never the pipeline's: a log this script could not
-      # write must not turn a build that worked into a failed recovery.
-      BUILD_RC=${PIPESTATUS[0]}
+      if run_as_clawbox "cd $PROJECT_DIR && $BUN_BIN run build"; then BUILD_RC=0; else BUILD_RC=$?; fi
+      break
     fi
-    # Done, unless Next reported a traced file it could not copy (below).
-    if [ "$BUILD_RC" -eq 0 ] && ! copy_failure_in_log "$BUILD_LOG"; then break; fi
-  else
-    if run_as_clawbox "cd $PROJECT_DIR && $BUN_BIN run build"; then BUILD_RC=0; else BUILD_RC=$?; fi
-    break
-  fi
-  if [ "$BUILD_ATTEMPT" -eq 2 ]; then break; fi
-  # Both shapes of the race, the fatal copy and the one Next only warns about.
-  # One awk, not two greps in a pipe — see run_next_build in install.sh.
-  awk '/ENOENT.*copyfile/ { hit = 1 } END { exit hit ? 0 : 1 }' "$BUILD_LOG" || break
-  echo "[force-update] A file the build was tracing changed while it ran — building once more"
-done
+    if [ "$attempt" -eq 2 ]; then break; fi
+    # Both shapes of the race, the fatal copy and the one Next only warns about.
+    # One awk, not two greps in a pipe — see run_next_build in install.sh.
+    awk '/ENOENT.*copyfile/ { hit = 1 } END { exit hit ? 0 : 1 }' "$BUILD_LOG" || break
+    echo "[force-update] A file the build was tracing changed while it ran — building once more"
+  done
+}
 
 # Four verdicts, and the build has to pass all of them before anything is
 # restarted onto it: its exit status, its own output (twice), and what it left
-# on disk.
-if [ "$BUILD_RC" -ne 0 ]; then
-  give_up "Build failed (exit $BUILD_RC)" "$BUILD_RC"
+# on disk. Sets FAIL_WHY and FAIL_CODE when it did not.
+FAIL_WHY=""
+FAIL_CODE=1
+build_failed() {
+  FAIL_WHY="" FAIL_CODE=1
+  if [ "$BUILD_RC" -ne 0 ]; then
+    FAIL_WHY="Build failed (exit $BUILD_RC)" FAIL_CODE=$BUILD_RC
+  elif [ -n "$BUILD_LOG" ] && build_error_in_log "$BUILD_LOG"; then
+    FAIL_WHY="Build failed (it exited 0, but printed \"Build error occurred\")"
+  elif [ -n "$BUILD_LOG" ] && copy_failure_in_log "$BUILD_LOG"; then
+    FAIL_WHY="Build failed (it exited 0, but could not copy every traced file into .next/standalone)"
+  elif ! verify_build_present; then
+    FAIL_WHY="Build failed (it exited 0, but left no build the dashboard can serve)"
+  fi
+  [ -n "$FAIL_WHY" ]
+}
+
+run_build
+# With the install skipped, a failed build may be node_modules' fault rather
+# than the commit's: install, and build once more, before giving up.
+if build_failed && [ "$INSTALL_SKIPPED" -eq 1 ]; then
+  echo "[force-update] $FAIL_WHY with the dependency install skipped — installing, then building once more"
+  INSTALL_SKIPPED=0
+  if ! install_deps; then
+    give_up "bun install failed" 1
+  fi
+  run_build
 fi
-if [ -n "$BUILD_LOG" ] && build_error_in_log "$BUILD_LOG"; then
-  give_up "Build failed (it exited 0, but printed \"Build error occurred\")" 1
-fi
-if [ -n "$BUILD_LOG" ] && copy_failure_in_log "$BUILD_LOG"; then
-  give_up "Build failed (it exited 0, but could not copy every traced file into .next/standalone)" 1
-fi
-if ! verify_build_present; then
-  give_up "Build failed (it exited 0, but left no build the dashboard can serve)" 1
+if build_failed; then
+  give_up "$FAIL_WHY" "$FAIL_CODE"
 fi
 
 # The new build is accepted: nothing after this point may undo it. So the

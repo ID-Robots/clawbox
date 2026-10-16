@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # timeout: 180
+# parallel: after-boot
+# covers: scripts/start-vnc.sh scripts/ensure-vnc-on-first-boot.sh src/app/setup-api/vnc/* src/lib/vnc-*.ts
 #
 # The VNC desktop comes up on its first start of the boot and stays up. On the
 # boot after an update, clawbox-vnc.service used to log

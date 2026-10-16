@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 # timeout: 600
+# parallel: agent
+# covers: src/lib/coding-*.ts src/lib/code-projects.ts src/app/setup-api/coding-agent/* src/app/setup-api/code/*
+# covers: scripts/coding-run-hook.mjs scripts/coding-run-preview mcp/tools/coding-agent.ts mcp/tools/coding.ts
 #
 # A delegated coding run, end to end, through the routes the assistant uses
 # (src/app/setup-api/coding-agent/): POST run with a tiny task in a fresh

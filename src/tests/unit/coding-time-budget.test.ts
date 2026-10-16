@@ -22,6 +22,8 @@ import {
   formatLocalDeadline,
   formatTimeRecordLine,
   MAX_BUDGET_MS,
+  MIN_BUDGET_MS,
+  minBudgetMsFrom,
   needsTeam,
   parseBudgetFromText,
   parseBudgetToken,
@@ -442,6 +444,35 @@ describe("which budget wins", () => {
 
   it("ignores a default that is not a chip", () => {
     expect(resolveBudget({ text: "Build it", defaultPreset: "custom" }, NOW, SOFIA)).toMatchObject({ budget: null, from: "none" });
+  });
+});
+
+describe("a lowered floor (CLAWBOX_CODING_MIN_BUDGET_MINUTES, the on-device test boards)", () => {
+  it("reads 1 to 4 whole minutes, and anything else as the 5-minute floor", () => {
+    expect(MIN_BUDGET_MS).toBe(5 * MIN);
+    expect(minBudgetMsFrom("1")).toBe(MIN);
+    expect(minBudgetMsFrom(" 4 ")).toBe(4 * MIN);
+    for (const raw of [undefined, null, "", "0", "5", "6", "30", "-1", "1.5", "1m", "01", "abc", "999"]) {
+      expect(minBudgetMsFrom(raw), String(raw)).toBe(MIN_BUDGET_MS);
+    }
+  });
+
+  it("takes a budget from the words down to the floor, and refuses one under it", () => {
+    const floor = minBudgetMsFrom("1");
+    const r = resolveBudget({ text: "You have 1 minute for this task.", minBudgetMs: floor }, NOW, SOFIA);
+    expect(r).toMatchObject({ ok: true, from: "text", budget: { source: "text", deadline: "2026-10-14T15:01:00.000Z" } });
+    // The same words on a box without the floor are ignored, and say why.
+    const plain = resolveBudget({ text: "You have 1 minute for this task." }, NOW, SOFIA);
+    expect(plain).toMatchObject({ ok: true, from: "none", budget: null, text: { ok: false, error: expect.stringMatching(/at least 5 minutes/) } });
+  });
+
+  it("refuses an explicit budget under the floor, by the floor's own length", () => {
+    const floor = minBudgetMsFrom("1");
+    expect(resolveBudget({ explicit: "2m", minBudgetMs: floor }, NOW, SOFIA)).toMatchObject({ ok: true, from: "picker" });
+    const short = resolveBudget({ explicit: "0.5m", minBudgetMs: floor }, NOW, SOFIA);
+    expect(short).toMatchObject({ ok: false, error: expect.stringMatching(/at least 1 minute long/) });
+    expect(readBudgetInput({ preset: "custom", end: "2026-10-14T15:00:30Z" }, NOW, "UTC", floor)).toMatchObject({ ok: false, error: expect.stringMatching(/at least 1 minute long/) });
+    expect(parseBudgetToken("2m", NOW, SOFIA)).toMatchObject({ ok: false, error: expect.stringMatching(/at least 5 minutes long/) });
   });
 });
 

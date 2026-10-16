@@ -13,7 +13,11 @@
 #
 # Every scripts/nano-tests/tests/NN-*.sh runs, in order, as `bash <test> <serial>`
 # under a deadline — 600 s, or the test's own `# timeout: NNN` header line — and
-# the next one runs whatever the last one did. One TAP line per test:
+# the next one runs whatever the last one did. Neighbours that share a
+# `# parallel: GROUP` header (tests that only READ the box: no restart, no
+# reboot, no memory pressure, no sudo) run at the same time, each under its own
+# deadline; their lines still come out in NN order. NANO_PARALLEL=0 runs every
+# test on its own. One TAP line per test:
 #
 #   ok 1 - 10-build-identity (14s)
 #   not ok 2 - 20-services (3s)
@@ -50,6 +54,13 @@
 # rebuilds the box, more than once): it runs only with NANO_TESTS_LONG=1 and is
 # reported as a skip otherwise. The workflow sets it for a pull request labelled
 # `nano-long` and for a dispatch with `long` ticked.
+#
+# NANO_TESTS_SELECT names the tests to run (space- or comma-separated names,
+# e.g. "10-build-identity 30-chat-turn"); every other test is reported as a
+# skip, "not affected by this change". Empty or `all` runs every test. The
+# workflow takes it from scripts/nano-tests/select-tests.sh, which maps a pull
+# request's changed files onto the tests that cover them; a name that is no
+# test here is a usage error. NANO_TESTS_SELECT_REASON, when set, is noted.
 # NANO_TESTS_DIR and NANO_DEFAULT_TIMEOUT override the test folder and the 600 s
 # default (the self-test uses both).
 #
@@ -106,6 +117,20 @@ if [ ${#TESTS[@]} -eq 0 ]; then
   die "no test to run in $TESTS_DIR"
 fi
 
+# Change-based selection: NANO_TESTS_SELECT, checked against the tests here
+# before anything runs. SELECTED holds " name name … " — or is empty for all.
+NANO_PARALLEL=${NANO_PARALLEL:-1}
+read -r -a SELECT_LIST <<<"$(printf '%s' "${NANO_TESTS_SELECT:-}" | tr ',\t\r\n' '    ')"
+SELECTED=""
+if [ ${#SELECT_LIST[@]} -gt 0 ] && [ "${SELECT_LIST[*]}" != all ]; then
+  for want in "${SELECT_LIST[@]}"; do
+    [[ $want =~ ^[0-9][0-9]-[a-z0-9-]+$ ]] || die "NANO_TESTS_SELECT: '$want' is not a test name"
+    [ -f "$TESTS_DIR/$want.sh" ] || die "NANO_TESTS_SELECT: no test named $want in $TESTS_DIR"
+    SELECTED="$SELECTED $want"
+  done
+  SELECTED="$SELECTED "
+fi
+
 mkdir -p "$RESULTS_DIR" || die "cannot create $RESULTS_DIR"
 # Printed as given: the absolute path may name the host's home folder.
 RESULTS_SHOWN=$RESULTS_DIR
@@ -147,6 +172,11 @@ timeout_for() {
 # The `# tier: NAME` header, looked for in the first 20 lines; "" when none.
 tier_for() {
   head -n 20 "$1" | sed -n -E 's/^#[[:space:]]*tier:[[:space:]]*([a-z]+)[[:space:]]*$/\1/p' | head -n 1
+}
+
+# The `# parallel: GROUP` header, looked for in the first 20 lines; "" when none.
+parallel_for() {
+  head -n 20 "$1" | sed -n -E 's/^#[[:space:]]*parallel:[[:space:]]*([a-z0-9-]+)[[:space:]]*$/\1/p' | head -n 1
 }
 NANO_TESTS_LONG=${NANO_TESTS_LONG:-0}
 export NANO_TESTS_LONG NANO_BRANCH=${NANO_BRANCH:-}
@@ -210,6 +240,7 @@ write_summary() {
     --arg serial "$SERIAL" --arg lab "$NANO_LAB" --arg sha "$NANO_SHA" \
     --arg run_id "$NANO_RUN_ID" --arg started "$STARTED_AT" \
     --arg finished "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg selection "${SELECTED:+${SELECTED# }}" \
     --argjson planned "${#TESTS[@]}" --argjson interrupted "$INTERRUPTED" '
     {
       serial: $serial, lab: $lab, sha: $sha, run_id: $run_id,
@@ -221,6 +252,7 @@ write_summary() {
       skipped: (map(select(.status == "skip")) | length),
       interrupted: $interrupted,
       ok: ((map(select(.status == "fail")) | length) == 0 and ($interrupted | not) and length == $planned),
+      selection: (if $selection == "" then "all" else ($selection | rtrimstr(" ") | split(" ")) end),
       tests: .
     }' "$RECORDS" > "$RESULTS_DIR/summary.json"
 }
@@ -239,21 +271,106 @@ show_log() {
 # Workflow-command data escaping (%, CR, LF), for the failure annotations.
 gh_escape() { local s=${1//%/%25}; s=${s//$'\r'/%0D}; printf '%s' "${s//$'\n'/%0A}"; }
 
-CHILD=""
-CURRENT=""
-CURRENT_START=0
-CURRENT_LIMIT=0
+# Per test, by its place in TESTS: name, deadline, `# parallel:` group, the
+# reason it is skipped without running ("" when it runs), and, once started,
+# its pid, start, exit status and duration. STATE is pending, running, ended
+# (exited, not yet reported) or recorded.
+NAMES=() LIMITS=() GROUPS_OF=() PRESKIP=() PIDS=() STARTS=() RCS=() ELAPSED=() STATE=()
+for i in "${!TESTS[@]}"; do
+  file=${TESTS[$i]}
+  NAMES[i]=$(basename "$file" .sh)
+  LIMITS[i]=$(timeout_for "$file")
+  GROUPS_OF[i]=$(parallel_for "$file")
+  PRESKIP[i]=""
+  if [ "$(tier_for "$file")" = long ] && [ "$NANO_TESTS_LONG" != 1 ]; then
+    PRESKIP[i]="long-tier test, runs only with NANO_TESTS_LONG=1 (label nano-long)"
+  elif [ -n "$SELECTED" ] && [[ $SELECTED != *" ${NAMES[i]} "* ]]; then
+    PRESKIP[i]="not affected by this change (change-based selection; the full suite runs on beta and main, and with the label nano-full)"
+  fi
+  STATE[i]=pending
+done
+
+# start_test I — test I in the background under its deadline: `timeout` puts
+# it in a process group of its own and signals that whole group at the
+# deadline, `nano-ci ssh` children included; a cancelled job stops it through
+# on_signal.
+start_test() {
+  local i=$1
+  echo "# ${NAMES[i]}: running (deadline ${LIMITS[i]}s)"
+  STARTS[i]=$(date +%s)
+  NANO_TEST_NAME=${NAMES[i]} NANO_TEST_TIMEOUT=${LIMITS[i]} \
+    timeout --kill-after="$KILL_GRACE" "${LIMITS[i]}" bash "${TESTS[i]}" "$SERIAL" </dev/null >"$WORK/${NAMES[i]}.raw" 2>&1 &
+  PIDS[i]=$!
+  STATE[i]=running
+}
+
+# reap I — the exit status and duration of test I, which has ended (or is
+# waited for here until it does).
+reap() {
+  local i=$1 rc
+  wait "${PIDS[i]}"
+  rc=$?
+  RCS[i]=$rc
+  ELAPSED[i]=$(( $(date +%s) - STARTS[i] ))
+  STATE[i]=ended
+}
+
+# report I — test I's log redacted, its verdict recorded and printed.
+report() {
+  # $1, not i: the words of one `local` are expanded before any is assigned.
+  local i=$1 name=${NAMES[$1]} log=$RESULTS_DIR/${NAMES[$1]}.log
+  redact < "$WORK/$name.raw" > "$log"
+  rm -f "$WORK/$name.raw"
+  verdict "$log" "${RCS[i]}" "${ELAPSED[i]}" "${LIMITS[i]}"
+  record "$name" "$STATUS" "$REASON" "${ELAPSED[i]}" "${LIMITS[i]}" "${RCS[i]}"
+  STATE[i]=recorded
+  case "$STATUS" in
+    pass) echo "ok $((i + 1)) - $name (${ELAPSED[i]}s)" ;;
+    skip) echo "ok $((i + 1)) - $name (${ELAPSED[i]}s) # SKIP $REASON" ;;
+    *)
+      FAILED=$((FAILED + 1))
+      echo "not ok $((i + 1)) - $name (${ELAPSED[i]}s)"
+      echo "#   $REASON"
+      if [ "${GITHUB_ACTIONS:-}" = true ]; then
+        echo "::error title=nano test $name failed::$(gh_escape "$REASON")"
+      fi
+      ;;
+  esac
+  show_log "$name" "$log"
+}
+
+# report_skip I — a test that does not run here (long tier, not selected).
+report_skip() {
+  local i=$1 name=${NAMES[$1]}
+  echo "ok # SKIP ${PRESKIP[i]}" > "$RESULTS_DIR/$name.log"
+  record "$name" skip "${PRESKIP[i]}" 0 "${LIMITS[i]}" 0
+  STATE[i]=recorded
+  echo "ok $((i + 1)) - $name (0s) # SKIP ${PRESKIP[i]}"
+}
+
+# A cancel (the job's own, or its timeout): every running test is stopped, and
+# the run is reported in NN order up to there — what ended with its verdict,
+# what was still running as interrupted.
 on_signal() {
+  local i
   INTERRUPTED=true
-  if [ -n "$CHILD" ]; then
-    kill -TERM "$CHILD" 2>/dev/null
-    wait "$CHILD" 2>/dev/null
-  fi
-  if [ -n "$CURRENT" ]; then
-    [ -f "$WORK/raw.log" ] && redact < "$WORK/raw.log" > "$RESULTS_DIR/$CURRENT.log"
-    record "$CURRENT" fail "interrupted" "$(( $(date +%s) - CURRENT_START ))" "$CURRENT_LIMIT" 130
-    echo "not ok - $CURRENT (interrupted)"
-  fi
+  for i in "${!STATE[@]}"; do
+    [ "${STATE[i]}" = running ] && kill -TERM "${PIDS[i]}" 2>/dev/null
+  done
+  for i in "${!STATE[@]}"; do
+    [ "${STATE[i]}" = running ] && wait "${PIDS[i]}" 2>/dev/null
+  done
+  for i in "${!STATE[@]}"; do
+    case "${STATE[i]}" in
+      running)
+        [ -f "$WORK/${NAMES[i]}.raw" ] && redact < "$WORK/${NAMES[i]}.raw" > "$RESULTS_DIR/${NAMES[i]}.log"
+        record "${NAMES[i]}" fail "interrupted" "$(( $(date +%s) - STARTS[i] ))" "${LIMITS[i]}" 130
+        STATE[i]=recorded
+        echo "not ok - ${NAMES[i]} (interrupted)"
+        ;;
+      ended) report "$i" ;;
+    esac
+  done
   write_summary
   rm -rf "$WORK"
   exit 130
@@ -263,55 +380,58 @@ trap on_signal INT TERM
 echo "TAP version 13"
 echo "1..${#TESTS[@]}"
 echo "# board $SERIAL${NANO_LAB:+ in $NANO_LAB}, commit ${NANO_SHA:-unknown}, run $NANO_RUN_ID"
+if [ -n "$SELECTED" ]; then
+  echo "# change-based selection:${SELECTED% }${NANO_TESTS_SELECT_REASON:+ ($NANO_TESTS_SELECT_REASON)}"
+fi
 
-index=0
 FAILED=0
-for file in "${TESTS[@]}"; do
-  index=$((index + 1))
-  name=$(basename "$file" .sh)
-  limit=$(timeout_for "$file")
-  log=$RESULTS_DIR/$name.log
-  if [ "$(tier_for "$file")" = long ] && [ "$NANO_TESTS_LONG" != 1 ]; then
-    REASON="long-tier test, runs only with NANO_TESTS_LONG=1 (label nano-long)"
-    echo "ok # SKIP $REASON" > "$log"
-    record "$name" skip "$REASON" 0 "$limit" 0
-    echo "ok $index - $name (0s) # SKIP $REASON"
+COUNT=${#TESTS[@]}
+i=0
+while [ "$i" -lt "$COUNT" ]; do
+  if [ -n "${PRESKIP[i]}" ]; then
+    report_skip "$i"
+    i=$((i + 1))
     continue
   fi
-  echo "# $name: running (deadline ${limit}s)"
-  CURRENT=$name CURRENT_START=$(date +%s) CURRENT_LIMIT=$limit
-  # In the background and waited for, so a cancelled job can stop the test
-  # (see on_signal). `timeout` puts the test in a process group of its own and
-  # signals that whole group at the deadline, `nano-ci ssh` children included.
-  NANO_TEST_NAME=$name NANO_TEST_TIMEOUT=$limit \
-    timeout --kill-after="$KILL_GRACE" "$limit" bash "$file" "$SERIAL" </dev/null >"$WORK/raw.log" 2>&1 &
-  CHILD=$!
-  wait "$CHILD"
-  rc=$?
-  CHILD=""
-  elapsed=$(( $(date +%s) - CURRENT_START ))
-  redact < "$WORK/raw.log" > "$log"
-  rm -f "$WORK/raw.log"
-  CURRENT=""
-
-  verdict "$log" "$rc" "$elapsed" "$limit"
-  record "$name" "$STATUS" "$REASON" "$elapsed" "$limit" "$rc"
-  case "$STATUS" in
-    pass) echo "ok $index - $name (${elapsed}s)" ;;
-    skip) echo "ok $index - $name (${elapsed}s) # SKIP $REASON" ;;
-    *)
-      FAILED=$((FAILED + 1))
-      echo "not ok $index - $name (${elapsed}s)"
-      echo "#   $REASON"
-      if [ "${GITHUB_ACTIONS:-}" = true ]; then
-        echo "::error title=nano test $name failed::$(gh_escape "$REASON")"
-      fi
-      ;;
-  esac
-  show_log "$name" "$log"
+  # The batch: this test, and — when it names a group — every neighbour after
+  # it that names the same one (tests skipped in between do not break it).
+  group=${GROUPS_OF[i]}
+  end=$((i + 1))
+  if [ -n "$group" ] && [ "$NANO_PARALLEL" != 0 ]; then
+    while [ "$end" -lt "$COUNT" ] && { [ -n "${PRESKIP[end]}" ] || [ "${GROUPS_OF[end]}" = "$group" ]; }; do
+      end=$((end + 1))
+    done
+  fi
+  members=()
+  for ((k = i; k < end; k++)); do
+    [ -n "${PRESKIP[k]}" ] || members+=("$k")
+  done
+  if [ ${#members[@]} -gt 1 ]; then
+    echo "# side by side (parallel: $group):$(for k in "${members[@]}"; do printf ' %s' "${NAMES[k]}"; done)"
+  fi
+  for k in "${members[@]}"; do start_test "$k"; done
+  if [ ${#members[@]} -eq 1 ]; then
+    reap "${members[0]}"
+  else
+    # Each one's own duration: looked at every second, reaped as it ends.
+    left=${#members[@]}
+    while [ "$left" -gt 0 ]; do
+      for k in "${members[@]}"; do
+        if [ "${STATE[k]}" = running ] && ! kill -0 "${PIDS[k]}" 2>/dev/null; then
+          reap "$k"
+          left=$((left - 1))
+        fi
+      done
+      [ "$left" -eq 0 ] || sleep 1
+    done
+  fi
+  for ((k = i; k < end; k++)); do
+    if [ -n "${PRESKIP[k]}" ]; then report_skip "$k"; else report "$k"; fi
+  done
+  i=$end
 done
 
 write_summary
 rm -rf "$WORK"
-echo "# $((index - FAILED)) of $index passed or skipped; summary: $RESULTS_SHOWN/summary.json"
+echo "# $((COUNT - FAILED)) of $COUNT passed or skipped; summary: $RESULTS_SHOWN/summary.json"
 [ "$FAILED" -eq 0 ]
