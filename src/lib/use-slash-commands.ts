@@ -9,6 +9,7 @@ import {
   type SlashCommand,
 } from '@/lib/chat-slash-commands'
 import type { HarnessAdapter, HarnessStatus } from '@/lib/harness/transport'
+import { isAgentSelectionRequired } from '@/lib/harness/openclaw-gateway-adapter'
 
 /**
  * The composer's slash-command autocomplete, as one hook, so the mascot chat
@@ -226,9 +227,16 @@ export function useSlashCommands(options: UseSlashCommandsOptions): UseSlashComm
         failuresRef.current = 0
         setCatalogue({ adapter, list: next })
       })
-      .catch(() => {
+      .catch((err: unknown) => {
         if (!live) return
         setCatalogue({ adapter, list: NO_COMMANDS })
+        // A gateway that cannot tell which agent is meant gives the same answer
+        // to every retry; stop instead of looping, and let the stale-focus
+        // throttle (not an immediate re-ask) govern the next attempt.
+        if (isAgentSelectionRequired(err)) {
+          readAtRef.current = Date.now()
+          return
+        }
         const delay = CATALOGUE_RETRY_DELAYS_MS[failuresRef.current]
         failuresRef.current += 1
         if (delay === undefined) return

@@ -274,6 +274,41 @@ function gatewayError(err: unknown): HarnessError {
   return asHarnessError(err, "upstream");
 }
 
+/** The refusal a multi-agent gateway gives a call that names no agent. */
+const AGENT_SELECTION_REQUIRED = "AGENT_SELECTION_REQUIRED";
+
+/**
+ * Did the gateway refuse because it cannot tell WHICH agent was meant?
+ *
+ * That answer does not change on a retry: the same request names the same
+ * (missing) agent every time, so a caller must stop asking rather than loop.
+ * Walks `cause` because `gatewayError` wraps the frame rejection, and reads
+ * `details.code` as well as `code` since the core may nest it.
+ */
+export function isAgentSelectionRequired(err: unknown): boolean {
+  let current: unknown = err;
+  for (let depth = 0; depth < 4 && current && typeof current === "object"; depth += 1) {
+    const e = current as { code?: unknown; message?: unknown; details?: unknown; cause?: unknown };
+    if (e.code === AGENT_SELECTION_REQUIRED) return true;
+    const details = e.details as { code?: unknown } | null | undefined;
+    if (details && typeof details === "object" && details.code === AGENT_SELECTION_REQUIRED) return true;
+    if (typeof e.message === "string" && e.message.includes(AGENT_SELECTION_REQUIRED)) return true;
+    current = e.cause;
+  }
+  return false;
+}
+
+/**
+ * The agent a fully qualified session key names (`agent:<agentId>:<rest>`),
+ * or `undefined` for any other shape. Never guessed: a key that does not say
+ * which agent it belongs to yields nothing, so no caller picks one for it.
+ */
+export function agentIdFromSessionKey(key: string): string | undefined {
+  const parts = key.split(":");
+  if (parts.length < 3 || parts[0] !== "agent" || !parts[1]) return undefined;
+  return parts[1].toLowerCase();
+}
+
 export class OpenClawGatewayAdapter implements HarnessAdapter {
   readonly id = "openclaw" as const;
 
@@ -441,16 +476,22 @@ export class OpenClawGatewayAdapter implements HarnessAdapter {
    * composer, would do nothing. `includeArgs` is what makes a row able to say
    * `/model <model>` instead of `/model`.
    *
-   * Deliberately NOT bound to a session key: the catalogue asked for without
-   * one is the agent's, which is what a composer wants, and passing this
-   * surface's key would make the answer depend on a session that may not exist
-   * yet on a box whose first turn has not been sent.
+   * Deliberately NOT bound to a session key: passing this surface's key would
+   * make the answer depend on a session that may not exist yet on a box whose
+   * first turn has not been sent. It IS bound to the agent that key names
+   * (`agentId`, optional on `commands.list`): a gateway with several agents
+   * and explicit ownership refuses an unnamed call with
+   * AGENT_SELECTION_REQUIRED. The id comes only from this chat's own session
+   * key, so the catalogue is the agent the turns go to; a key that names no
+   * agent sends none and leaves the choice to the gateway.
    */
   async listCommands(): Promise<readonly SlashCommand[]> {
+    const agentId = agentIdFromSessionKey(this.link.sessionKey());
     try {
       const result = await this.link.request("commands.list", {
         scope: "text",
         includeArgs: true,
+        ...(agentId ? { agentId } : {}),
       });
       return commandsFromOpenClawList(result);
     } catch (err) {
