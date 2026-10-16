@@ -118,7 +118,7 @@ describe("ClawBox AI usage card — weekly payload, paid monthly plan", () => {
     expect(within(weekly).getByRole("progressbar")).toHaveAttribute("aria-valuenow", "24");
 
     const burst = within(card).getByTestId("clawai-usage-burst");
-    expect(burst).toHaveTextContent("5-hour burst");
+    expect(burst).toHaveTextContent("Short-term limit (5 hours)");
     // Later today: the clock alone.
     expect(burst).toHaveTextContent("Frees up at 11:00");
   });
