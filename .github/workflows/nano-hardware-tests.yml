@@ -751,10 +751,13 @@ jobs:
 
       # `nano-ci recycle` hands the board from the CI lease to the lab host's
       # reflash service within seconds and returns 0; it never waits for the
-      # reflash. The service restores the board from the golden image,
-      # provisions it to beta's head, verifies it and releases it FREE with
-      # the "clean" marker that `nano-ci reserve` asks for — or quarantines
-      # it. Once this step succeeds the board is no longer ours.
+      # reflash. The service cleans the board (a fast wipe + beta provision
+      # when it was restored from the golden image less than 24 h ago and is
+      # healthy, else a full golden restore + provision), verifies it and
+      # releases it FREE with the "clean" marker that `nano-ci reserve` asks
+      # for — or quarantines it. The long tier (update rollback, upgrade from
+      # the current release) changes more than the fast wipe puts back, so it
+      # asks for `--full`. Once this step succeeds the board is no longer ours.
       - name: Recycle the board for a clean reflash
         id: recycle
         if: always() && steps.reserve.outputs.serial != ''
@@ -764,11 +767,12 @@ jobs:
         # The verdict is nano-ci's exit status, not the redactor's.
         run: |
           set +e
-          nano-ci recycle "$SERIAL" 2>&1 | "$RUNNER_TEMP/nano-redact"
+          full=(); [ "${NANO_TESTS_LONG:-0}" = 1 ] && full=(--full)
+          nano-ci recycle "$SERIAL" "${full[@]}" 2>&1 | "$RUNNER_TEMP/nano-redact"
           rc=${PIPESTATUS[0]}
           set -e
           if [ "$rc" -eq 0 ]; then
-            echo "- Recycled \`$SERIAL\`: handed to the reflash queue for a clean golden restore + beta provision." >> "$GITHUB_STEP_SUMMARY"
+            echo "- Recycled \`$SERIAL\`: handed to the reflash queue for a clean reflash${full:+ (full golden restore: long tier)} + beta provision." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "::error title=Board recycle failed::nano-ci recycle $SERIAL exited $rc; the board stays leased and is released below"
             echo "- **Recycle FAILED** for \`$SERIAL\` (exit $rc): the board stays leased and is released below." >> "$GITHUB_STEP_SUMMARY"
