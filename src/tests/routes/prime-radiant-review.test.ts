@@ -22,6 +22,8 @@ const creds = vi.hoisted(() => ({
   proxyRefusedClawaiCredential: vi.fn(async () => false),
 }));
 vi.mock("@/lib/harness/credentials", () => creds);
+const bearer = vi.hoisted(() => ({ verifyMcpBearer: vi.fn((h: string | null) => h === "Bearer test-assistant-bearer") }));
+vi.mock("@/lib/mcp-token", () => bearer);
 
 import { GET as reviewGET, POST as reviewPOST } from "@/app/setup-api/prime-radiant/review/route";
 import { POST as resolvePOST } from "@/app/setup-api/prime-radiant/review/[id]/resolve/route";
@@ -136,6 +138,25 @@ describe("auth", () => {
     const raised = await reviewPOST(req("POST", "/review", { claimId: A.id, note: "Price changed" }));
     expect(raised.status).toBe(201);
     expect((await raised.json()).item.evidence[0]).toMatchObject({ kind: "raised-by", source: "assistant" });
+  });
+
+  it("lets the assistant change the schedule and the Opus cap, never what the cap is measured in", async () => {
+    owner.hasOwnerSession.mockResolvedValue(false);
+    const asAssistant = { authorization: "Bearer test-assistant-bearer" };
+    for (const body of [
+      { costRates: { "claude-opus-5-5": { input: 0, output: 0 } } },
+      { opus: { enabled: true, model: "some-unpriced-model" } },
+    ]) {
+      const res = await settingsPUT(req("PUT", "/settings", body, asAssistant));
+      expect(res.status, JSON.stringify(body)).toBe(403);
+      expect((await res.json()).code).toBe("owner_only");
+    }
+    const ok = await settingsPUT(req("PUT", "/settings", { nightly: { time: "04:30" }, opus: { enabled: true, capUsd: 5 } }, asAssistant));
+    expect(ok.status).toBe(200);
+    expect((await ok.json()).settings).toMatchObject({ nightly: { time: "04:30" }, opus: { enabled: true, capUsd: 5 } });
+    owner.hasOwnerSession.mockResolvedValue(true);
+    const owners = await settingsPUT(req("PUT", "/settings", { opus: { model: "claude-opus-5-5" } }));
+    expect(owners.status).toBe(200);
   });
 
   it("refuses a cross-site page on every write", async () => {

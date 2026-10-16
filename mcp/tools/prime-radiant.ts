@@ -95,8 +95,16 @@ const TIME_RE = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 const BRANCH_RE = /^dream\/\d{4}-\d{2}-\d{2}(?:-\d{1,3})?$/;
 const DOMAIN_OWNER_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*=.{1,80}$/;
 
-const zPagePath = (description: string) => zText(512, description);
-const zOptPagePath = (description: string) => zOptText(512, description);
+/**
+ * A vault page path in the vault's own alphabet (`safePagePath`): every segment
+ * starts with a letter or digit, so no `.` or `..` segment can reach the URL —
+ * the URL parser resolves those, and `pages/../../<route>` would send this
+ * tool's method and body to another /setup-api route entirely.
+ */
+const PAGE_PATH_RE = /^[A-Za-z0-9][A-Za-z0-9._ -]*(?:\/[A-Za-z0-9][A-Za-z0-9._ -]*)*$/;
+const PAGE_PATH_RULE = "a vault path like concepts/acme-widgets.md: letters, digits, . _ - and spaces, segments joined by /";
+const zPagePath = (description: string) => z.string().min(1).max(512).regex(PAGE_PATH_RE, PAGE_PATH_RULE).describe(description);
+const zOptPagePath = (description: string) => zPagePath(description).optional();
 const zClaimId = (description: string) =>
   z.string().max(194).regex(CLAIM_ID_RE, "<domain>/<entity>/<fact>, each part lowercase kebab-case").describe(description);
 const zDomain = (description: string) => z.string().max(64).regex(SLUG_RE, "lowercase kebab-case").describe(description);
@@ -122,6 +130,16 @@ interface RouteRefusal {
 }
 
 const LIST_FIRST = "Check the path or id against what exists: prime_radiant_pages, prime_radiant_search or prime_radiant_review_list.";
+
+/**
+ * A write that outlived its timeout may still have landed — a page or claim
+ * created, an import started — and "retry once" would make it twice (a
+ * second page at `<slug>-2`). So a write's timeout says to look first.
+ */
+const WRITE_TIMEOUT = {
+  message: "Prime Radiant did not answer in time; the change may still have been made.",
+  next: "Do not repeat it yet: check with prime_radiant_status, prime_radiant_history or prime_radiant_ingest_status first, and call again only if it did not happen.",
+};
 
 /** What to do about each refusal code the routes answer. Codes not here fall back to the status. */
 const NEXT: Record<string, { code: ToolErrorCode; next: string }> = {
@@ -188,20 +206,21 @@ function refusalOf(err: ApiError): ToolError | null {
 /** One call to a Prime Radiant route; a refusal becomes what to do about it. */
 async function pr<T>(method: NonNullable<ApiOptions["method"]>, path: string, options: Omit<ApiOptions, "method"> = {}): Promise<T> {
   try {
-    return await api<T>(`${BASE}${path}`, { timeoutMs: method === "GET" ? READ_MS : WRITE_MS, ...options, method });
+    const write = method !== "GET" && path !== "/ingest/preview";
+    return await api<T>(`${BASE}${path}`, { timeoutMs: write ? WRITE_MS : READ_MS, ...(write ? { onTimeout: WRITE_TIMEOUT } : {}), ...options, method });
   } catch (err) {
     if (err instanceof ApiError) throw refusalOf(err) ?? err;
     throw err;
   }
 }
 
-/** A vault path as URL segments. */
+/** A vault path as URL segments; a dot segment (which the URL parser would resolve) is refused here too. */
 function segments(p: string): string {
-  return p
-    .replace(/^\/+/, "")
-    .split("/")
-    .map((s) => encodeURIComponent(s))
-    .join("/");
+  const parts = p.replace(/^\/+/, "").split("/");
+  if (parts.some((s) => s === "" || s === "." || s === "..")) {
+    throw new ToolError("BAD_ARGUMENT", "That is not a page path.", "Pass the page's vault path as prime_radiant_pages lists it, e.g. concepts/acme-widgets.md.");
+  }
+  return parts.map((s) => encodeURIComponent(s)).join("/");
 }
 
 const short = (sha: unknown) => (typeof sha === "string" ? sha.slice(0, 12) : null);

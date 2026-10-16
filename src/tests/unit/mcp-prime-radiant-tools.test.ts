@@ -43,7 +43,8 @@ function refuse(status: number, code: string, extra: Record<string, unknown> = {
   });
 }
 
-const call = (n = 0) => api.mock.calls[n] as [string, { method: string; query?: Record<string, unknown>; body?: Record<string, unknown>; timeoutMs: number }];
+const call = (n = 0) =>
+  api.mock.calls[n] as [string, { method: string; query?: Record<string, unknown>; body?: Record<string, unknown>; timeoutMs: number; onTimeout?: { message: string; next: string } }];
 
 beforeEach(() => {
   api.mockReset();
@@ -558,6 +559,51 @@ describe("arguments the handler checks itself", () => {
     const out = await harness().call("prime_radiant_search", { query: "   ", limit: 5 });
     expect(out.isError && out.error.code).toBe("BAD_ARGUMENT");
     expect(api).not.toHaveBeenCalled();
+  });
+});
+
+describe("a page path can only ever name a page", () => {
+  // The URL parser resolves dot segments: `pages/../../system/power` IS
+  // /setup-api/system/power, so an unchecked path would send this tool's
+  // method and body to another route with the same bearer.
+  const ESCAPES = ["../../system/power", "concepts/../../settings", "./x.md", "concepts//x.md", "/concepts/x.md", "concepts\\x.md", "%2e%2e/x"];
+
+  it.each([
+    ["prime_radiant_page", (p: string) => ({ path: p })],
+    ["prime_radiant_page_edit", (p: string) => ({ path: p, title: "x" })],
+    ["prime_radiant_page_delete", (p: string) => ({ path: p, confirm: true })],
+    ["prime_radiant_history", (p: string) => ({ path: p })],
+    ["prime_radiant_undo", (p: string) => ({ commit: SHA, path: p, confirm: true })],
+    ["prime_radiant_claim_add", (p: string) => ({ page: p, text: "A fact." })],
+  ] as const)("%s refuses a path that is not one", (tool, args) => {
+    const shape = z.object(harness().get(tool).shape);
+    for (const p of ESCAPES) expect(shape.safeParse(args(p)).success, p).toBe(false);
+    expect(shape.safeParse(args("concepts/Acme widgets 2.md")).success).toBe(true);
+  });
+
+  it("refuses a dot segment in the handler too, sending nothing", async () => {
+    for (const [tool, args] of [
+      ["prime_radiant_page_delete", { path: "../../system/power", confirm: true }],
+      ["prime_radiant_page", { path: "concepts/../../settings", include_body: true }],
+    ] as const) {
+      const out = await harness().call(tool, args);
+      expect(out.isError && out.error.code, tool).toBe("BAD_ARGUMENT");
+    }
+    expect(api).not.toHaveBeenCalled();
+  });
+});
+
+describe("a write that times out", () => {
+  it("is told to look before repeating it; a read and the preview keep the plain retry", async () => {
+    api.mockResolvedValue({ path: "entities/x.md", commit: SHA, claims: [] });
+    await harness().call("prime_radiant_page_create", { type: "entity", title: "X", domain: "acme", summary: "X.", confidence: 80 });
+    expect(call()[1]).toMatchObject({ method: "POST", onTimeout: { next: expect.stringMatching(/Do not repeat it yet/) } });
+    api.mockReset().mockResolvedValue({ path: "entities/x.md" });
+    await harness().call("prime_radiant_page", { path: "entities/x.md", include_body: false });
+    expect(call()[1].onTimeout).toBeUndefined();
+    api.mockReset().mockResolvedValue({ preview: {} });
+    await harness().call("prime_radiant_ingest_preview", { folders: ["Documents"] });
+    expect(call()[1].onTimeout).toBeUndefined();
   });
 });
 

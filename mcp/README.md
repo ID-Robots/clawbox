@@ -1146,7 +1146,9 @@ whose author is the assistant (403 `owner_only` otherwise).
 document drop (`ingest/upload` — the assistant names files by path,
 `POST ingest { files }`, staged through the same `stageUpload`), and the
 `reindex`, `rejudge-reviews` and `migrate-frontmatter` maintenance passes (the
-bearer may run `connect` only).
+bearer may run `connect` only), and the settings' cost rates and Opus model —
+what the Opus dollar cap is measured in (a rate of 0, or an unpriced model, and
+the cap never trips); the bearer may change the cap itself.
 
 **Destructive tools** carry `confirm: true` (`zConfirm`): `prime_radiant_page_delete`,
 `prime_radiant_claim_delete`, `prime_radiant_undo`, `prime_radiant_settings_update`
