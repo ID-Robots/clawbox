@@ -106,6 +106,30 @@ describe("an app whose server the run has already stopped", () => {
     expect(fs.existsSync(path.join(root, "data", "webapps", "hello-app", "meta.json"))).toBe(false);
   });
 
+  it("notices a start command that exits while the box is still closing its log", async () => {
+    // The exit used to be listened for only after the start log was closed: a
+    // command that failed during that await (a loaded runner, `exit 3`)
+    // emitted `exit` with nobody listening, and the box waited the whole wait
+    // for a server that had already gone. The close is held here until the
+    // command has certainly exited.
+    const port = await freePort();
+    const realOpen = fs.promises.open.bind(fs.promises);
+    vi.spyOn(fs.promises, "open").mockImplementation(async (...args: Parameters<typeof fs.promises.open>) => {
+      const handle = await realOpen(...args);
+      const close = handle.close.bind(handle);
+      handle.close = async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1_500));
+        return close();
+      };
+      return handle;
+    });
+    const began = Date.now();
+    const outcome = await start.startServerApp({ id: "hello-app", directory: project, manifest: manifestFor(port, "exit 3"), searchPath, noScope: true, waitMs: 20_000 });
+    expect(outcome.ok).toBe(false);
+    expect((outcome as { detail: string }).detail).toContain("exit code 3");
+    expect(Date.now() - began).toBeLessThan(10_000);
+  });
+
   it("ends a start that is still running and still silent when the wait is over", async () => {
     const port = await freePort();
     const marker = path.join(project, "silent.pid");

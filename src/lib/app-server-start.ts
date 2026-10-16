@@ -283,11 +283,15 @@ async function startOnce(input: StartServerAppInput): Promise<StartOutcome> {
         shell: false,
         stdio: ["ignore", log.fd, log.fd],
       });
+      // Listening BEFORE the await below: a command that fails at once can
+      // exit while the log is being closed, and an `exit` emitted with nobody
+      // listening is gone — the wait would then run its whole length for a
+      // server that had already stopped.
+      child.once("error", () => { gone = true; });
+      child.once("exit", (code) => { gone = true; exited = code; });
     } finally {
       await log.close().catch(() => undefined);
     }
-    child.once("error", () => { gone = true; });
-    child.once("exit", (code) => { gone = true; exited = code; });
     child.unref();
 
     const deadline = Date.now() + waitMs;
