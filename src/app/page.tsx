@@ -85,6 +85,7 @@ import { readChatFirstEnvironment, shouldOpenChatFirst } from "@/lib/mobile-chat
 import { runMobileBack, useMobileBackDepth } from "@/lib/mobile-back";
 import { isBoxOwnScreen, setVisibleInterval } from "@/lib/visible-interval";
 import { samePairingRequests, sameSelection, type PairingRequestCard } from "@/lib/desktop-shell-equality";
+import { mergeDesktopApps, knownSetChanged } from "@/lib/desktop-app-merge";
 import { PublicLinkBadge, PublicLinkDialog, PublicLinkMenuItems, usePublicAppLinks } from "@/components/PublicAppLink";
 import {
   layoutIcons,
@@ -955,9 +956,14 @@ function ChromeDesktopInner() {
   // drop their cells, and by the `desktop_apps` write, which records the version
   // so it happens exactly once.
   const shedNeeded = useRef<Set<string> | null>(null);
-  // Bumped once by the load when a shed is owed, purely to run the write effect
-  // below on a box whose `desktopApps` the load did not change.
-  const [shedTick, setShedTick] = useState(0);
+  // Bumped by the load when a shed is owed or the known set changed, purely to
+  // run the write effect below on a box whose `desktopApps` the load did not
+  // change.
+  const [listWriteTick, setListWriteTick] = useState(0);
+  // The default built-ins this box has been offered, settled by the load and
+  // carried on every `desktop_apps` write for the life of the page — null until
+  // the load has answered. See `mergeDesktopApps`.
+  const knownApps = useRef<string[] | null>(null);
   // Set once this page has shed, and never cleared: every `desktop_apps` write
   // from then on carries the version, so no debounce replacement can drop it.
   const shedRecorded = useRef(false);
@@ -1009,34 +1015,31 @@ function ChromeDesktopInner() {
           // The write effect keys on `desktopApps`, which does not change on a
           // box that had no saved list — so nothing would carry the marker to
           // disk. This is the one-shot that makes it run.
-          setShedTick((n) => n + 1);
+          setListWriteTick((n) => n + 1);
         }
-        // Merge new built-ins into the saved list so they appear without a factory reset.
-        if (Array.isArray(data.desktop_apps)) {
-          // Built-in ids only. An older launcher pushed `installed-*` ids here
-          // (see handleAddToDesktop); an id that names no built-in reserves an
-          // empty grid slot, so a box that already saved one sheds it on load.
-          // Validated against every built-in, not just the default set: an
-          // owner who added Remote Desktop from the launcher keeps it.
-          let saved = (data.desktop_apps as string[]).filter(id => BUILT_IN_APP_IDS.includes(id));
-          // An app that MOVED off the desktop is dropped from a list that was
-          // saved before it moved — once per shed version. Without this the move
-          // reaches new boxes only; run unconditionally, an owner who put the
-          // icon back would lose it again on every reload.
-          //
-          // The state set here is what reaches the disk: the effects that mirror
-          // `desktopApps` and `iconPositions` into preferences do the writing.
-          // The decision travels out on a ref because this load effect has empty
-          // deps and cannot see `savePreferences`.
-          if (shedNeeded.current) {
-            const shed = shedNeeded.current;
-            saved = saved.filter(id => !shed.has(id));
-          }
-          // ...but only default-set built-ins are auto-added, so an app that
-          // ships off the desktop never appears on a box that never had it.
-          const missingNewBuiltins = DEFAULT_DESKTOP_APPS.filter(id => !saved.includes(id));
-          setDesktopApps(missingNewBuiltins.length > 0 ? [...saved, ...missingNewBuiltins] : saved);
-        }
+        // Merge new built-ins into the saved list so they appear without a
+        // factory reset — but only built-ins this box has never been offered
+        // (`desktop_apps_known`), so one the owner removed stays removed. The
+        // validation, the shed and the migration of a box with no known set
+        // are all in `mergeDesktopApps`.
+        //
+        // The state set here is what reaches the disk: the effect that mirrors
+        // `desktopApps` into preferences does the writing, and carries the
+        // known set and the shed version on the same write. The decisions
+        // travel out on refs because this load effect has empty deps and
+        // cannot see `savePreferences`.
+        const merged = mergeDesktopApps({
+          saved: data.desktop_apps,
+          known: data.desktop_apps_known,
+          builtIns: BUILT_IN_APP_IDS,
+          defaults: DEFAULT_DESKTOP_APPS,
+          shed: shedNeeded.current,
+        });
+        knownApps.current = merged.known;
+        if (merged.apps) setDesktopApps(merged.apps);
+        // Same one-shot as the shed's: a box whose list the load did not
+        // change must still get its known set on disk.
+        if (knownSetChanged(data.desktop_apps_known, merged.known)) setListWriteTick((n) => n + 1);
         if (Array.isArray(data.hidden_installed)) setHiddenInstalledApps(data.hidden_installed as string[]);
         if (data.pinned_apps && typeof data.pinned_apps === "object") setPinnedOverrides(data.pinned_apps as Record<string, boolean>);
         if (data.icon_grid && typeof data.icon_grid === "object") {
@@ -1541,17 +1544,21 @@ function ChromeDesktopInner() {
       shedRecorded.current = true;
       shedNeeded.current = null;
     }
+    // The known set rides along for the same reason: written apart, a list
+    // that dropped a removed icon could land without the set that says the
+    // icon was already offered.
+    const known = knownApps.current ? { desktop_apps_known: knownApps.current } : {};
     savePreferences(
       shedRecorded.current
-        ? { desktop_apps: desktopApps, desktop_apps_shed: DESKTOP_APPS_SHED_VERSION }
-        : { desktop_apps: desktopApps },
+        ? { desktop_apps: desktopApps, desktop_apps_shed: DESKTOP_APPS_SHED_VERSION, ...known }
+        : { desktop_apps: desktopApps, ...known },
       // An EXPLICIT slot, because this body has two shapes: without one the slot
       // key is the field names, so the shed write and every later plain write
       // would debounce in separate slots and could both be in flight. The
       // appearance write above carries an explicit slot for the same reason.
       "desktop_apps",
     );
-  }, [desktopApps, shedTick, savePreferences]);
+  }, [desktopApps, listWriteTick, savePreferences]);
   useEffect(() => { savePreferences({ hidden_installed: hiddenInstalledApps }); }, [hiddenInstalledApps, savePreferences]);
   useEffect(() => { savePreferences({ pinned_apps: pinnedOverrides }); }, [pinnedOverrides, savePreferences]);
   useEffect(() => { savePreferences({ icon_grid: iconPositions }); }, [iconPositions, savePreferences]);
