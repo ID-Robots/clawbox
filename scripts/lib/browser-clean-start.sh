@@ -260,7 +260,9 @@ def open_tab(address):
 same = next((p for p in pages if url and p["url"] == url), None)
 try:
     if not pages:
-        open_tab(url or start)
+        if not open_tab(url or start):
+            print(f"it had no page and did not confirm one for {url or start}")
+            sys.exit(2)
         print(f"opened {url or start} in it: it had no page")
     elif not url:
         activate(pages[0])
@@ -271,12 +273,16 @@ try:
     else:
         blank = next((p for p in pages if p["url"] in BLANK), None)
         page = open_tab(url)
+        if not page:
+            # No tab it can name: the blank one may be the window's only tab,
+            # and closing it could take the window (or the browser) with it.
+            print(f"it did not confirm a tab for {url}; left as it is")
+            sys.exit(2)
         if blank:
             # Opened first, closed after: a window whose only tab closed first
             # would take the browser with it.
             call(f"/json/close/{blank['id']}")
-        if page:
-            activate(page)
+        activate(page)
         print(f"opened {url} " + ("in place of a blank tab" if blank else "in a new tab"))
 except (OSError, ValueError) as e:
     print(f"it did not take the request ({e}); left as it is")

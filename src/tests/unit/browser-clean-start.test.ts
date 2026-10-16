@@ -255,7 +255,7 @@ interface FakeDevtools {
 }
 
 /** A DevTools HTTP endpoint with these targets, recording every request. */
-function fakeDevtools(targets: unknown[], opts: { failActivate?: boolean } = {}): Promise<FakeDevtools> {
+function fakeDevtools(targets: unknown[], opts: { failActivate?: boolean; newTabWithoutId?: boolean } = {}): Promise<FakeDevtools> {
   const calls: string[] = [];
   const server = http.createServer((req, res) => {
     calls.push(`${req.method} ${req.url}`);
@@ -263,7 +263,8 @@ function fakeDevtools(targets: unknown[], opts: { failActivate?: boolean } = {})
     if (req.url === "/json/list" || req.url === "/json/version") {
       res.end(JSON.stringify(req.url === "/json/list" ? targets : { Browser: "Chrome/140.0.0.0" }));
     } else if (req.url?.startsWith("/json/new?") && req.method === "PUT") {
-      res.end(JSON.stringify({ id: "NEW1", type: "page", url: decodeURIComponent(req.url.slice("/json/new?".length)) }));
+      const url = decodeURIComponent(req.url.slice("/json/new?".length));
+      res.end(JSON.stringify(opts.newTabWithoutId ? { type: "page", url } : { id: "NEW1", type: "page", url }));
     } else if (req.url?.startsWith("/json/activate/") && !opts.failActivate) {
       res.end('"Target activated"');
     } else if (req.url?.startsWith("/json/close/")) {
@@ -377,6 +378,21 @@ describe.skipIf(!usable)("reuse: a running browser gets no second start and no b
   it("says 2 when the browser answers but does not take the request", async () => {
     devtools = await fakeDevtools(OWNER_TABS, { failActivate: true });
     expect((await reuse("")).code).toBe(2);
+  });
+
+  it("keeps the blank tab when the new one cannot be confirmed — it may be the window's only tab", async () => {
+    devtools = await fakeDevtools(OWNER_TABS, { newTabWithoutId: true });
+    const r = await reuse("https://news.example.org/");
+    expect(r.code).toBe(2);
+    expect(r.stdout).not.toContain("in place of a blank tab");
+    expect(devtools.calls).toEqual(["GET /json/list", `PUT /json/new?${encodeURIComponent("https://news.example.org/")}`]);
+  });
+
+  it("does not claim a page for a browser with none when the new one cannot be confirmed", async () => {
+    devtools = await fakeDevtools([], { newTabWithoutId: true });
+    const r = await reuse("", "https://start.example.org/");
+    expect(r.code).toBe(2);
+    expect(r.stdout).toContain("did not confirm");
   });
 
   it("is what the Open route asks, through src/lib/browser-clean-start.ts", async () => {
