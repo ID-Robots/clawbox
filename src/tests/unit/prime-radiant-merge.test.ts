@@ -330,6 +330,17 @@ describe("mergePages", () => {
     expect(r.indexLines).toBe(2);
   });
 
+  it("lists the page that stays when only the merged pages were listed", async () => {
+    await seed();
+    // No line for it, and no other link to it in index.md: only the merged pages' lines.
+    fs.writeFileSync(path.join(vault, "index.md"), INDEX.replace("- [[entities/acme]] — Acme Widgets Ltd\n", "").replace("The German arm is [[entities/acme-widgets-gmbh|here]].\n", ""));
+    await git(vault, ["commit", "-qam", "index by hand"]);
+    const r = await mergePages(MERGE, OWNER, { now: NOW });
+    expect(r.indexLines).toBe(2);
+    expect(read("index.md")).toContain("- [[entities/acme]] — Acme Widgets Ltd\n");
+    expect(lintVault(await readVaultSnapshot(vault), { now: NOW }).findings).toEqual([]);
+  });
+
   it("removes the merged pages, and lint stays clean: no error, no orphan, no link left broken", async () => {
     await seed();
     const before = await readVaultSnapshot(vault);
@@ -359,7 +370,7 @@ describe("mergePages", () => {
     expect((await git(vault, ["status", "--porcelain"])).stdout.trim()).toBe("");
 
     const done = await mergePages(MERGE, OWNER, { now: NOW });
-    const strip = ({ dryRun: _d, commit: _c, findings: _f, ...rest }: typeof dry) => rest;
+    const strip = (r: typeof dry) => ({ ...r, dryRun: undefined, commit: undefined, findings: undefined });
     expect(strip(done)).toEqual(strip(dry));
   });
 

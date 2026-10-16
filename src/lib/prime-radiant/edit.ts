@@ -698,7 +698,7 @@ export interface PageMergeResult {
   relinked: Array<{ path: string; links: number }>;
   /** Every link rewritten, index.md's included. */
   links: number;
-  /** index.md lines that went with the merged pages. */
+  /** index.md lines that went with the merged pages (`into` gets one of its own when it had none). */
   indexLines: number;
   /** Pages linking a merged page that do not parse, left as they are: fix them by hand. */
   unparsed: string[];
@@ -920,7 +920,12 @@ function planMerge(snapshot: VaultSnapshot, vault: string, input: PageMerge, who
     }
     const r = rewriteLinks(next, retarget(INDEX_FILE));
     links += r.rewritten;
-    if (r.body !== snapshot.indexBody) indexText = r.body;
+    next = r.body;
+    // The merged pages' lines listed the subject: it stays listed, under the page that stays.
+    if (indexLines > 0 && !extractLinks(next).some((l) => resolver.resolve(INDEX_FILE, l) === into.path)) {
+      next = addToIndex(next, [{ path: into.path, title: fm.title }]);
+    }
+    if (next !== snapshot.indexBody) indexText = next;
   }
 
   const frontmatter: PageFrontmatter = { ...fm, privacy, generated: { at, by: who.by }, sources, claims, retiredClaimIds };
