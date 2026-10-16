@@ -58,6 +58,7 @@ import {
   embedMemoryTexts,
   embedderIdentity,
 } from "@/lib/memory-index-local";
+import { stripRelatedBlock } from "./connect";
 import { parsePage } from "./frontmatter";
 import { currentBranch, git, VAULT_MAIN_BRANCH } from "./git";
 import { isKnowledgePage, safePagePath, vaultDir } from "./paths";
@@ -236,7 +237,8 @@ export function pageIndexUnits(rel: string, text: string): VaultPageUnits | null
   const pageVerified = fm.verified != null;
   const title = fm.title.trim();
   const units: VaultIndexUnit[] = [];
-  for (const chunk of chunkText(parsed.body)) {
+  // The connect pass's link block is navigation, not content: never embedded.
+  for (const chunk of chunkText(stripRelatedBlock(parsed.body))) {
     units.push({ refId: pageId, kind: "page", verified: pageVerified, text: redacted(`${title}\n\n${chunk}`) });
   }
   for (const claim of fm.claims) {
@@ -881,6 +883,40 @@ export async function searchPrimeRadiant(
       candidates.push(candidate);
     }
     return rankVaultHits(candidates, want);
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * One vector per indexed page — the mean of its page chunks, unit length —
+ * for the connect pass's related-page links. Empty when there is no index
+ * (or it answers to another embedder). Read-only.
+ */
+export async function readPageVectors(vault: string = vaultDir()): Promise<Map<string, Float32Array>> {
+  const out = new Map<string, Float32Array>();
+  const db = await openForRead(vaultIndexPathFor(vault));
+  if (!db) return out;
+  try {
+    if (metaGet(db, "identity") !== storeIdentity(await resolveMemoryEmbedder(), vault)) return out;
+    const sums = new Map<string, Float32Array>();
+    for (const raw of db.prepare("SELECT path, vec FROM chunks WHERE kind = 'page'").iterate()) {
+      const row = raw as { path?: unknown; vec?: unknown };
+      if (typeof row.path !== "string" || !(row.vec instanceof Uint8Array) || row.vec.byteLength % 4 !== 0) continue;
+      const copy = new Float32Array(row.vec.byteLength / 4);
+      new Uint8Array(copy.buffer).set(row.vec);
+      const sum = sums.get(row.path);
+      if (!sum) sums.set(row.path, copy);
+      else if (sum.length === copy.length) for (let i = 0; i < sum.length; i++) sum[i] += copy[i];
+    }
+    for (const [p, v] of sums) {
+      let n = 0;
+      for (let i = 0; i < v.length; i++) n += v[i] * v[i];
+      const norm = Math.sqrt(n) || 1;
+      for (let i = 0; i < v.length; i++) v[i] /= norm;
+      out.set(p, v);
+    }
+    return out;
   } finally {
     db.close();
   }
