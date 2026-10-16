@@ -67,6 +67,26 @@ export const TOOL_NOTES: readonly ToolNote[] = [
     note: "It holds the owner's PDFs, Word files and Markdown. Ask a question or a phrase (\"what does the lease say about the deposit\") rather than one keyword.",
   },
   {
+    tool: "prime_radiant_status",
+    note: "Prime Radiant is the owner's wiki: pages with YAML frontmatter, each fact a claim with a global id `<domain>/<entity>/<fact>`. Every change you make through the `prime_radiant_*` tools is one commit authored \"ClawBox assistant\", which the owner sees in Prime Radiant → History and can undo.",
+  },
+  {
+    tool: "prime_radiant_page_edit",
+    note: "`summary` replaces only the first paragraph; `body` replaces everything (its first paragraph becomes the summary). Read the page with `prime_radiant_page` first so you do not drop what is there.",
+  },
+  {
+    tool: "prime_radiant_claim_verify",
+    note: "A verification is final for the wiki: a later import never overwrites the page, and only verifying again changes the text. Verify only what the user confirmed; when you are unsure, `prime_radiant_review_raise` asks the owner instead.",
+  },
+  {
+    tool: "prime_radiant_undo",
+    note: "Only the commits you made can be undone here — the answer refuses any other as the owner's. A later commit that touched the same lines blocks the undo: undo that one first. Undoing a verification that retired other ids is refused by the wiki's rules.",
+  },
+  {
+    tool: "prime_radiant_ingest_start",
+    note: "Run `prime_radiant_ingest_preview` on folders first and tell the user how many documents it would read: a large import spends a lot of the owner's ClawBox AI allowance.",
+  },
+  {
     tool: "skill_list",
     note: "Only skills marked \"from the store\" can be removed. A final line in brackets saying how many skills were left out is not a skill.",
   },

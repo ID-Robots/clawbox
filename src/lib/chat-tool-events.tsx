@@ -59,7 +59,7 @@ export type ToolAction =
   | "search" | "read" | "page" | "status" | "index" | "update" | "checks" | "check" | "import"
   | "list" | "create" | "remove" | "run" | "install" | "uninstall" | "backup" | "restore"
   | "start" | "stop" | "resume" | "message" | "open" | "close" | "click" | "type" | "scroll"
-  | "screenshot";
+  | "screenshot" | "map" | "usage" | "settings" | "review" | "history" | "verify" | "undo";
 
 /** A desktop app's id, or a feature that has no desktop app of its own. */
 export type ToolBrand =
@@ -118,11 +118,25 @@ export const TOOL_STEP_APPS: Readonly<Record<ToolBrand, ToolStepApp>> = Object.f
     cli: { "openclaw memory": { search: "search", status: "status", index: "index", get: "read" } },
   },
   // OpenClaw's `wiki_*` tools read and write the Prime Radiant vault (the
-  // `memory-wiki` plugin is pointed at it, `prime-radiant/plugin-wiring.ts`).
+  // `memory-wiki` plugin is pointed at it, `prime-radiant/plugin-wiring.ts`);
+  // `prime_radiant_*` are ClawBox's own (`mcp/tools/prime-radiant.ts`), the
+  // app's every action through its routes.
   "prime-radiant": {
     app: "prime-radiant",
     english: "Prime Radiant",
     tools: { wiki_status: "status", wiki_search: "search", wiki_get: "page", wiki_apply: "update", wiki_lint: "checks" },
+    boxTools: {
+      prime_radiant_status: "status", prime_radiant_pages: "list", prime_radiant_page: "page",
+      prime_radiant_search: "search", prime_radiant_map: "map", prime_radiant_lint: "checks",
+      prime_radiant_costs: "usage", prime_radiant_settings: "settings", prime_radiant_review_list: "review",
+      prime_radiant_history: "history", prime_radiant_diff: "history", prime_radiant_ingest_status: "import",
+      prime_radiant_page_create: "create", prime_radiant_page_edit: "update", prime_radiant_page_delete: "remove",
+      prime_radiant_claim_add: "create", prime_radiant_claim_edit: "update", prime_radiant_claim_delete: "remove",
+      prime_radiant_claim_verify: "verify", prime_radiant_review_resolve: "review", prime_radiant_review_raise: "review",
+      prime_radiant_undo: "undo", prime_radiant_ingest_preview: "import", prime_radiant_ingest_start: "import",
+      prime_radiant_ingest_stop: "stop", prime_radiant_ingest_retry: "import", prime_radiant_nightly_run: "run",
+      prime_radiant_nightly_merge: "update", prime_radiant_connect_run: "run", prime_radiant_settings_update: "settings",
+    },
     cli: {
       "openclaw wiki": {
         status: "status", doctor: "checks", lint: "checks", search: "search", get: "page", apply: "update",

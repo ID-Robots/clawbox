@@ -9,7 +9,8 @@
  * same lines the patch no longer applies and the revert is refused
  * (`conflict`) rather than guessed at. The result is linted like every other
  * change: a revert that would bring a retired claim id back (undoing a
- * verification) is refused by `claim-id-retired-reuse`.
+ * verification) is refused by `claim-id-retired-reuse`. Undo is the owner's;
+ * the assistant may undo only a commit it authored itself (`onlyAuthoredBy`).
  *
  * Commit ids reach git only rebuilt from the hex alphabet; page paths only
  * through `safePagePath`.
@@ -17,7 +18,7 @@
  * SERVER ONLY.
  */
 
-import { commitPaths, git, logForPath, withVaultLock, type CommitInfo } from "./git";
+import { commitAuthorEmail, commitPaths, git, logForPath, withVaultLock, type CommitInfo, type VaultAuthor } from "./git";
 import { restorePluginOnlyEdits } from "./plugin-repair";
 import { lintSecretsInText, lintVault, type LintFinding } from "./lint";
 import { isKnowledgePage, safePagePath, vaultDir } from "./paths";
@@ -45,7 +46,7 @@ export function safeCommitId(input: unknown): string | null {
 
 export class HistoryError extends Error {
   constructor(
-    readonly code: "not_initialised" | "not_found" | "invalid" | "conflict" | "lint_blocked" | "nothing_to_revert" | "dirty",
+    readonly code: "not_initialised" | "not_found" | "invalid" | "conflict" | "lint_blocked" | "nothing_to_revert" | "dirty" | "owner_only",
     message: string,
     readonly status: number,
     readonly findings: LintFinding[] = [],
@@ -136,11 +137,25 @@ export interface RevertResult {
   findings: LintFinding[];
 }
 
+export interface RevertOptions {
+  /** Who the revert commit names as its author. Default Prime Radiant. */
+  author?: VaultAuthor;
+  /**
+   * Undo only a commit this author made, else refuse `owner_only`: the
+   * assistant may take back its own change, never the owner's or a pass's.
+   */
+  onlyAuthoredBy?: VaultAuthor;
+}
+
 /**
  * Undo commit `sha` (or only its change to `path`) as one new commit. Holds
  * the vault's lock for the whole of it.
  */
-export async function revertCommit(input: { sha: string; path?: string | null }, vault: string = vaultDir()): Promise<RevertResult> {
+export async function revertCommit(
+  input: { sha: string; path?: string | null },
+  vault: string = vaultDir(),
+  options: RevertOptions = {},
+): Promise<RevertResult> {
   if (!(await vaultInitialised(vault))) throw new HistoryError("not_initialised", "The vault has not been created yet.", 404);
   const id = safeCommitId(input.sha);
   if (!id) throw new HistoryError("invalid", "A commit id is 7 to 40 hex characters.", 400);
@@ -154,6 +169,9 @@ export async function revertCommit(input: { sha: string; path?: string | null },
     if (!sha) throw new HistoryError("not_found", "No such commit in the vault.", 404);
     const parent = await resolveCommit(vault, `${sha}^1`);
     if (!parent) throw new HistoryError("invalid", "The first commit of the vault cannot be reverted.", 400);
+    if (options.onlyAuthoredBy && (await commitAuthorEmail(vault, sha)) !== options.onlyAuthoredBy.email) {
+      throw new HistoryError("owner_only", "Only the owner can undo a change the assistant did not make.", 403);
+    }
     // A block memory-wiki wrote into a page since is no change of the owner's to protect.
     await restorePluginOnlyEdits(vault);
     const status = await git(vault, ["status", "--porcelain", "--untracked-files=no"]);
@@ -186,7 +204,7 @@ export async function revertCommit(input: { sha: string; path?: string | null },
     const subject = (await git(vault, ["log", "-1", "--format=%s", sha])).stdout.trim().slice(0, 120);
     let commit: string | null;
     try {
-      commit = await commitPaths(vault, `revert: ${sha.slice(0, 12)} ${subject}`, staged);
+      commit = await commitPaths(vault, `revert: ${sha.slice(0, 12)} ${subject}`, staged, options.author);
     } catch (err) {
       await git(vault, ["reset", "--quiet", "--hard", "HEAD"], { allowFail: true });
       throw err;

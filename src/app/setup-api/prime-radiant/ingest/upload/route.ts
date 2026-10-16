@@ -12,7 +12,9 @@
  * middleware keeps only the first 10 MiB of a body), 507 `disk_full` (the box's disk
  * reserve).
  *
- * OWNER ONLY, cookie AND same origin, like the ingest it feeds.
+ * OWNER ONLY, cookie AND same origin: a drop is the owner's browser. The
+ * assistant names files by path instead (`POST ingest { files }`), which
+ * stages them through the same `stageUpload`.
  */
 import { stageUpload } from "@/lib/prime-radiant/ingest-upload";
 import { fail, json, ownerWriteGuard } from "@/lib/prime-radiant/route-helpers";

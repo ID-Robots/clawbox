@@ -99,6 +99,8 @@ export interface PageFilter {
   /** Case-insensitive match on title or path. */
   q?: string;
   verified?: boolean;
+  /** The page's owner, matched whole and case-insensitively. */
+  owner?: string;
   offset?: number;
   limit?: number;
 }
@@ -109,11 +111,13 @@ export async function listPages(filter: PageFilter = {}, vault: string = vaultDi
   if (!(await vaultInitialised(vault))) return { total: 0, pages: [] };
   const snapshot = await readVaultSnapshot(vault);
   const q = filter.q?.trim().toLowerCase();
+  const owner = filter.owner?.trim().toLowerCase();
   const all = snapshot.pages.map(listEntry).filter((e) => {
     if (filter.type && e.type !== filter.type) return false;
     if (filter.domain && e.domain !== filter.domain) return false;
     if (filter.status && e.status !== filter.status) return false;
     if (filter.verified !== undefined && e.verified !== filter.verified) return false;
+    if (owner && (e.owner ?? "").toLowerCase() !== owner) return false;
     if (q && !e.path.toLowerCase().includes(q) && !(e.title ?? "").toLowerCase().includes(q)) return false;
     return true;
   });

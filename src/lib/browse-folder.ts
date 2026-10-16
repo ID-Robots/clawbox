@@ -5,7 +5,8 @@
  *
  * Shared by every route that takes a folder from the folder picker — Memory
  * Shard's sources and Prime Radiant's ingest — so the two cannot disagree
- * about which folders an owner may hand the box to read.
+ * about which folders an owner may hand the box to read. Prime Radiant's
+ * ingest of named files keeps the same rule for a file.
  *
  * SERVER ONLY.
  */
@@ -15,8 +16,27 @@ import path from "@/lib/runtime-path";
 import { filesBrowseRoot, isProtectedFilePath } from "@/lib/file-guard";
 
 export type BrowseFolderResult = { ok: true; dir: string } | { ok: false; status: 400 | 403 | 404 };
+export type BrowseFileResult = { ok: true; file: string; bytes: number } | { ok: false; status: 400 | 403 | 404 };
 
 export async function resolveFolderInsideBrowseRoot(asked: unknown): Promise<BrowseFolderResult> {
+  const r = await resolveInsideBrowseRoot(asked, "dir");
+  return r.ok ? { ok: true, dir: r.path } : r;
+}
+
+/**
+ * The same rule for one FILE the owner (or the assistant, for them) names:
+ * inside the Files app's tree after links are resolved, never a protected
+ * credential store, and a regular file. Prime Radiant's ingest of named files.
+ */
+export async function resolveFileInsideBrowseRoot(asked: unknown): Promise<BrowseFileResult> {
+  const r = await resolveInsideBrowseRoot(asked, "file");
+  return r.ok ? { ok: true, file: r.path, bytes: r.bytes } : r;
+}
+
+async function resolveInsideBrowseRoot(
+  asked: unknown,
+  want: "dir" | "file",
+): Promise<{ ok: true; path: string; bytes: number } | { ok: false; status: 400 | 403 | 404 }> {
   if (!asked || typeof asked !== "string") return { ok: false, status: 400 };
   const configured = path.resolve(filesBrowseRoot());
   let root: string;
@@ -42,8 +62,8 @@ export async function resolveFolderInsideBrowseRoot(asked: unknown): Promise<Bro
     if (realRel.startsWith("..") || path.isAbsolute(realRel)) return { ok: false, status: 404 };
     if (isProtectedFilePath(real)) return { ok: false, status: 404 };
     const stat = await fs.stat(real);
-    if (!stat.isDirectory()) return { ok: false, status: 400 };
-    return { ok: true, dir: real };
+    if (want === "dir" ? !stat.isDirectory() : !stat.isFile()) return { ok: false, status: 400 };
+    return { ok: true, path: real, bytes: stat.size };
   } catch {
     return { ok: false, status: 404 };
   }

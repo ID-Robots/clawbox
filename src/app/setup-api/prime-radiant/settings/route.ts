@@ -15,14 +15,15 @@
  * nothing; `null` puts a field (or a whole section) back to its default. Ingest
  * folders follow the folder picker's rule (404 `folder_not_found`, 400
  * `folder_refused`, with `index`). The nightly timer is re-armed after a save.
- * OWNER ONLY, cookie AND same origin.
+ * The owner (cookie AND same origin), or the assistant through the MCP bearer
+ * — whose tool asks for the owner's word first. Never another site.
  */
 import { requireSession } from "@/lib/route-auth";
 import { resolveFolderInsideBrowseRoot } from "@/lib/browse-folder";
 import { isOwnOutput } from "@/lib/prime-radiant/ingest-sources";
 import { nextRunAtMs, refresh } from "@/lib/prime-radiant/nightly-scheduler";
 import { detectOpusSource } from "@/lib/prime-radiant/opus-source";
-import { fail, json, ownerWriteGuard, readJsonBody } from "@/lib/prime-radiant/route-helpers";
+import { fail, json, readJsonBody, writerGuard } from "@/lib/prime-radiant/route-helpers";
 import {
   defaultSettings,
   effectiveCostRates,
@@ -69,8 +70,8 @@ export async function GET(req: Request) {
 }
 
 export async function PUT(req: Request) {
-  const denied = await ownerWriteGuard(req, "Changing Prime Radiant's settings");
-  if (denied) return denied;
+  const gate = await writerGuard(req, "Changing Prime Radiant's settings");
+  if (!gate.ok) return gate.response;
   const read = await readJsonBody(req);
   if (!read.ok) return read.response;
   let patch;

@@ -61,6 +61,7 @@ import type { Capabilities, McpContext } from "./lib/context";
 // wrong place.
 import { API_BASE } from "./lib/api";
 import type { Ed } from "./lib/register";
+import { PRIME_RADIANT_TOOLS } from "./tools/prime-radiant";
 
 /**
  * Everything a posture must decide: the context minus the server's identity.
@@ -264,6 +265,9 @@ const UNGATED_COMMON = [
   // The Anthropic account pool's state (TASK-902): "no account connected" is
   // an answer, and a queue needs it most on the box where every one is limited.
   "anthropic_accounts",
+  // Prime Radiant's family: a box with no vault yet answers "open the app
+  // once", never a refusal to register — the vault is ClawBox's on both editions.
+  ...PRIME_RADIANT_TOOLS,
 ];
 
 /** The gate that points the OTHER way: it exists where the box cannot draw. */

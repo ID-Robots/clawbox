@@ -125,6 +125,7 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 | Coding team (`coding_team_run/status/stop`) | when the owner switched it on | when the owner switched it on |
 | Steering and following runs (`coding_run_message`, `coding_run_list`, `coding_agent_resume`, `coding_project_status`) | when the owner switched the coding agent on | same |
 | Device state reads (`memory_shard_status`, `local_ai_status`, `clawbox_ai_usage`, `anthropic_accounts`) | yes | yes |
+| Prime Radiant (`prime_radiant_*`, 30 tools) | yes | yes |
 | Coordinate browser control (`browser_click/type/keypress/scroll`) | yes | **no** — Hermes ships a richer browser toolset |
 | Media inside a run (`generate_image`, `generate_audio`) | when the owner's switch is on | when the owner's switch is on |
 | Everything else | yes | yes |
@@ -1121,6 +1122,71 @@ open the app (`ui_open_app("memory-shard")`) for the owner to press Reindex, and
 then to report progress from this tool — not to poll it in a loop. The switch,
 the folders, the provider and the schedule are owner-only for the same reason.
 
+### Prime Radiant (both editions)
+
+`mcp/tools/prime-radiant.ts` — the owner's wiki, everything the desktop app does
+plus the edits it has no buttons for, through the **same**
+`/setup-api/prime-radiant/*` routes the app calls. The vault's lock, its lint,
+its one git commit per change and the owner checks are the routes' (and the
+library they call, `src/lib/prime-radiant/`); this module reads and writes
+nothing itself. Registered on both editions (the vault is ClawBox's, not a
+harness's) and on the full profile only: `memory_shard_search` already reads the
+wiki for a small model on the core profile.
+
+**Who.** `writerGuard` (`src/lib/prime-radiant/route-helpers.ts`) tells the
+owner's cookie (from our own page) from this server's bearer, which it checks
+again itself. A change made through the bearer is the assistant's: its commit is
+authored `ClawBox assistant <assistant@localhost>` (committed by Prime Radiant),
+so the owner sees it in **History** and can **Undo** it, and a verification it
+gives is stamped `verified.by: assistant` without marking the page
+`checked_by: human`. Undo is the owner's: the bearer may revert only a commit
+whose author is the assistant (403 `owner_only` otherwise).
+
+**Stays the owner's, no tool:** `POST init` (it writes openclaw.json), the
+document drop (`ingest/upload` — the assistant names files by path,
+`POST ingest { files }`, staged through the same `stageUpload`), and the
+`reindex`, `rejudge-reviews` and `migrate-frontmatter` maintenance passes (the
+bearer may run `connect` only).
+
+**Destructive tools** carry `confirm: true` (`zConfirm`): `prime_radiant_page_delete`,
+`prime_radiant_claim_delete`, `prime_radiant_undo`, `prime_radiant_settings_update`
+— and so do the ones that give someone's word (`prime_radiant_claim_verify`,
+`prime_radiant_review_resolve`) or merge a held night.
+
+| UI action | Route | Tool |
+|---|---|---|
+| Open the app (status, counts, wiring) | `GET status` | `prime_radiant_status` (+ `GET ingest`, `nightly`, `maintenance`, `review`) |
+| Pages: list, filter by domain / type / verification, title box | `GET pages?domain&type&owner&status&verified&q` | `prime_radiant_pages` |
+| Open a page (claims, confidence, sources, backlinks, links, checks, body) | `GET pages/<path>` | `prime_radiant_page` |
+| Search inside pages | `GET search` | `prime_radiant_search` |
+| Map (nodes, edges; card summary) | `GET graph`, `GET pages/<path>?view=summary` | `prime_radiant_map` |
+| Checks | `GET lint` | `prime_radiant_lint` |
+| Usage / token costs | `GET costs` | `prime_radiant_costs` |
+| Settings (read) | `GET settings` | `prime_radiant_settings` |
+| Review queue | `GET review` | `prime_radiant_review_list` |
+| History of a page / a commit's diff | `GET history/<path>`, `GET diff` | `prime_radiant_history`, `prime_radiant_diff` |
+| Import progress, recent jobs, failed files | `GET ingest`, `GET ingest/<id>` (the app also streams `ingest/<id>/events`) | `prime_radiant_ingest_status` |
+| — (no button) create a page | `POST pages` | `prime_radiant_page_create` |
+| — edit a page's summary, body or fields | `PATCH pages/<path>` | `prime_radiant_page_edit` |
+| — delete a page | `DELETE pages/<path>` | `prime_radiant_page_delete` |
+| — add / edit / delete a claim | `POST claims`, `PATCH` / `DELETE claims/<id>` | `prime_radiant_claim_add` / `_edit` / `_delete` |
+| Review: pick / new answer (verifies); — verify a claim directly | `POST review/<id>/resolve`; `POST claims/verify` | `prime_radiant_review_resolve`, `prime_radiant_claim_verify` |
+| Review: later / dismiss | `POST review/<id>/resolve` | `prime_radiant_review_resolve` |
+| — raise a review item | `POST review` | `prime_radiant_review_raise` |
+| History: Undo | `POST revert` | `prime_radiant_undo` (own commits only) |
+| Add: count a folder (preview) | `POST ingest/preview` | `prime_radiant_ingest_preview` |
+| Add: Start (folders) / drop files | `POST ingest { folders }` / `ingest/upload` + `POST ingest { upload }` | `prime_radiant_ingest_start` (folders, or files by path: `POST ingest { files }`) |
+| Add: Stop | `DELETE ingest/<id>` | `prime_radiant_ingest_stop` |
+| Add: Retry failed files | `POST ingest/<id>/retry` | `prime_radiant_ingest_retry` |
+| Settings: Run now / Merge a held night | `POST nightly/run` / `POST nightly/run { merge }` | `prime_radiant_nightly_run` / `prime_radiant_nightly_merge` |
+| — run the connect pass | `POST maintenance { action: "connect" }` | `prime_radiant_connect_run` |
+| Settings: Save (schedule, contradictions, Opus on/off + caps, domains and owners, exclude list, parallel, skip code projects, nightly folders) | `PUT settings` | `prime_radiant_settings_update` |
+
+The route refusals become instructions (`NEXT` in the module): `owner_only` says
+it is the owner's and not to retry, `not_initialised` sends the agent to
+`ui_open_app("prime-radiant")`, `lint_blocked` names the rules, `verified` points
+at `prime_radiant_claim_verify`, `busy` names the running job.
+
 ### Local AI (both editions)
 
 `local_ai_status`
@@ -1199,6 +1265,7 @@ is also what Hermes' circuit breaker counts against every ClawBox tool:
 | Reindex, Memory Shard switch/folders/provider/schedule/reset | `clawkeep/memory/*` writes | an hours-long re-embed of the owner's documents |
 | Installing or removing Kokoro, Whisper, embeddings, models | `tts/install`, `whisper`, `embed/install`, `ollama/*`, `llamacpp/models` | root install steps, gigabytes of downloads |
 | MCP switch, background jobs | `harness/mcp`, `background-jobs` | consent |
+| Prime Radiant setup, the document drop, reindex / rejudge / migration, undoing a change the assistant did not make | `prime-radiant/init`, `…/ingest/upload`, `…/maintenance` (all but `connect`), `…/revert` of another author's commit | they write openclaw.json, re-embed the whole vault or reverse the owner's own work |
 
 ### Examples and refusal shapes
 

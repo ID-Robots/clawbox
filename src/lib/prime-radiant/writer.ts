@@ -376,7 +376,8 @@ export type BuiltPage =
 /** File names a page never takes: `<folder>/index.md` is memory-wiki's (see plugin-files.ts). */
 const RESERVED_PAGE_SLUGS: ReadonlySet<string> = new Set(["index"]);
 
-function pathFor(type: PageType, title: string, taken: ReadonlySet<string>): string {
+/** A new page's path: its type's folder and its title's slug, never one `taken`. */
+export function pathFor(type: PageType, title: string, taken: ReadonlySet<string>): string {
   const folder = folderForType(type);
   const base = slugify(title, 80);
   const first = RESERVED_PAGE_SLUGS.has(base) ? 2 : 1;
@@ -480,4 +481,13 @@ export function addToIndex(indexText: string | null, pages: ReadonlyArray<{ path
   }
   if (lines.length === 0) return text;
   return `${text}${text.endsWith("\n\n") ? "" : "\n"}${lines.join("\n")}\n`;
+}
+
+/** index.md without the list lines that link `path` (a deleted page). */
+export function removeFromIndex(indexText: string, path: string): string {
+  const link = `[[${path.replace(/\.md$/, "")}]]`;
+  return indexText
+    .split("\n")
+    .filter((line) => !(/^\s*[-*]\s/.test(line) && line.includes(link)))
+    .join("\n");
 }

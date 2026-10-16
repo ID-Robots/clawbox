@@ -2,7 +2,8 @@
  * The slice 3 routes over a real vault in a tmp dir: review (list, raise,
  * resolve), history, diff, revert, settings, costs and the nightly pass. The
  * reads never create anything; the writes that change the vault or spend the
- * owner's allowance are owner-cookie AND same-origin.
+ * owner's allowance are the owner's cookie or the assistant's MCP bearer, and
+ * never another site (the assistant's own writes: prime-radiant-edit.test.ts).
  */
 import fs from "fs";
 import os from "os";
@@ -120,7 +121,7 @@ describe("auth", () => {
     expect(fs.existsSync(root)).toBe(false);
   });
 
-  it("refuses the MCP bearer on the owner's writes, but lets it raise a review item", async () => {
+  it("refuses a caller with neither the owner's cookie nor the assistant's bearer on the writes, but lets the session raise a review item", async () => {
     owner.hasOwnerSession.mockResolvedValue(false);
     for (const res of [
       await resolvePOST(req("POST", "/review/rev-000000000000/resolve", { action: "later" }), idCtx("rev-000000000000")),

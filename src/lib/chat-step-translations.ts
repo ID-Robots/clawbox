@@ -42,6 +42,13 @@ const en = {
   "chat.step.action.type": "Type",
   "chat.step.action.scroll": "Scroll",
   "chat.step.action.screenshot": "Screenshot",
+  "chat.step.action.map": "Map",
+  "chat.step.action.usage": "Usage",
+  "chat.step.action.settings": "Settings",
+  "chat.step.action.review": "Review",
+  "chat.step.action.history": "History",
+  "chat.step.action.verify": "Verify",
+  "chat.step.action.undo": "Undo",
 };
 
 type Table = Record<keyof typeof en, string>;
@@ -77,6 +84,13 @@ const bg: Table = {
   "chat.step.action.type": "въвеждане",
   "chat.step.action.scroll": "превъртане",
   "chat.step.action.screenshot": "екранна снимка",
+  "chat.step.action.map": "карта",
+  "chat.step.action.usage": "разход",
+  "chat.step.action.settings": "настройки",
+  "chat.step.action.review": "преглед",
+  "chat.step.action.history": "история",
+  "chat.step.action.verify": "потвърждаване",
+  "chat.step.action.undo": "отмяна",
 };
 
 const de: Table = {
@@ -110,6 +124,13 @@ const de: Table = {
   "chat.step.action.type": "Eingabe",
   "chat.step.action.scroll": "Scrollen",
   "chat.step.action.screenshot": "Bildschirmfoto",
+  "chat.step.action.map": "Karte",
+  "chat.step.action.usage": "Verbrauch",
+  "chat.step.action.settings": "Einstellungen",
+  "chat.step.action.review": "Überprüfung",
+  "chat.step.action.history": "Verlauf",
+  "chat.step.action.verify": "Verifizierung",
+  "chat.step.action.undo": "Rückgängig",
 };
 
 const es: Table = {
@@ -143,6 +164,13 @@ const es: Table = {
   "chat.step.action.type": "escritura",
   "chat.step.action.scroll": "desplazamiento",
   "chat.step.action.screenshot": "captura de pantalla",
+  "chat.step.action.map": "mapa",
+  "chat.step.action.usage": "uso",
+  "chat.step.action.settings": "ajustes",
+  "chat.step.action.review": "revisión",
+  "chat.step.action.history": "historial",
+  "chat.step.action.verify": "verificación",
+  "chat.step.action.undo": "deshacer",
 };
 
 const fr: Table = {
@@ -176,6 +204,13 @@ const fr: Table = {
   "chat.step.action.type": "saisie",
   "chat.step.action.scroll": "défilement",
   "chat.step.action.screenshot": "capture d'écran",
+  "chat.step.action.map": "carte",
+  "chat.step.action.usage": "consommation",
+  "chat.step.action.settings": "réglages",
+  "chat.step.action.review": "revue",
+  "chat.step.action.history": "historique",
+  "chat.step.action.verify": "vérification",
+  "chat.step.action.undo": "annulation",
 };
 
 const it: Table = {
@@ -209,6 +244,13 @@ const it: Table = {
   "chat.step.action.type": "digitazione",
   "chat.step.action.scroll": "scorrimento",
   "chat.step.action.screenshot": "istantanea",
+  "chat.step.action.map": "mappa",
+  "chat.step.action.usage": "consumi",
+  "chat.step.action.settings": "impostazioni",
+  "chat.step.action.review": "revisione",
+  "chat.step.action.history": "cronologia",
+  "chat.step.action.verify": "verifica",
+  "chat.step.action.undo": "annullamento",
 };
 
 const ja: Table = {
@@ -242,6 +284,13 @@ const ja: Table = {
   "chat.step.action.type": "入力",
   "chat.step.action.scroll": "スクロール",
   "chat.step.action.screenshot": "スクリーンショット",
+  "chat.step.action.map": "マップ",
+  "chat.step.action.usage": "使用量",
+  "chat.step.action.settings": "設定",
+  "chat.step.action.review": "レビュー",
+  "chat.step.action.history": "履歴",
+  "chat.step.action.verify": "検証",
+  "chat.step.action.undo": "元に戻す",
 };
 
 const nl: Table = {
@@ -275,6 +324,13 @@ const nl: Table = {
   "chat.step.action.type": "typen",
   "chat.step.action.scroll": "scrollen",
   "chat.step.action.screenshot": "schermafbeelding",
+  "chat.step.action.map": "kaart",
+  "chat.step.action.usage": "verbruik",
+  "chat.step.action.settings": "instellingen",
+  "chat.step.action.review": "beoordeling",
+  "chat.step.action.history": "geschiedenis",
+  "chat.step.action.verify": "verificatie",
+  "chat.step.action.undo": "ongedaan maken",
 };
 
 const sv: Table = {
@@ -308,6 +364,13 @@ const sv: Table = {
   "chat.step.action.type": "skriv",
   "chat.step.action.scroll": "rulla",
   "chat.step.action.screenshot": "skärmbild",
+  "chat.step.action.map": "karta",
+  "chat.step.action.usage": "förbrukning",
+  "chat.step.action.settings": "inställningar",
+  "chat.step.action.review": "granskning",
+  "chat.step.action.history": "historik",
+  "chat.step.action.verify": "verifiering",
+  "chat.step.action.undo": "ångra",
 };
 
 const zh: Table = {
@@ -341,6 +404,13 @@ const zh: Table = {
   "chat.step.action.type": "输入",
   "chat.step.action.scroll": "滚动",
   "chat.step.action.screenshot": "截图",
+  "chat.step.action.map": "地图",
+  "chat.step.action.usage": "用量",
+  "chat.step.action.settings": "设置",
+  "chat.step.action.review": "审阅",
+  "chat.step.action.history": "历史",
+  "chat.step.action.verify": "验证",
+  "chat.step.action.undo": "撤销",
 };
 
 /** The English table — the floor `chat-tool-events.tsx` renders before a dictionary loads. */

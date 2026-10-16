@@ -15,7 +15,8 @@
 
 import crypto from "crypto";
 import fs from "fs/promises";
-import { statfsSync } from "fs";
+import { createReadStream, statfsSync } from "fs";
+import { Readable } from "stream";
 import path from "@/lib/runtime-path";
 import { boundedBody } from "@/lib/bounded-body";
 import { DISK_FREE_RESERVE_BYTES } from "@/lib/disk-reserve";
@@ -228,4 +229,34 @@ export async function stagedBatch(rawBatch: unknown): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+/**
+ * Stage files the caller named by path (already resolved inside the Files
+ * app's tree, `resolveFileInsideBrowseRoot`) as one batch, through the same
+ * {@link stageUpload} a drop goes through: the same names, caps and disk
+ * reserve. A refusal names the offending file's `index`; the batch made so
+ * far is removed.
+ */
+export async function stageFiles(
+  files: ReadonlyArray<{ path: string; bytes: number }>,
+): Promise<{ ok: true; batch: string; dir: string } | { ok: false; code: Exclude<StageResult, { ok: true }>["code"]; status: number; index: number }> {
+  let batch: string | null = null;
+  for (const [index, file] of files.entries()) {
+    let result: StageResult;
+    try {
+      // Node's web stream type and the DOM's differ only in their typings; the chunks are bytes.
+      const stream = Readable.toWeb(createReadStream(file.path)) as unknown as ReadableStream<Uint8Array>;
+      result = await stageUpload(stream, path.basename(file.path), batch, file.bytes);
+    } catch {
+      result = { ok: false, code: "write_failed", status: 500 };
+    }
+    if (!result.ok) {
+      if (batch) await fs.rm(batchDir(batch), { recursive: true, force: true }).catch(() => undefined);
+      return { ok: false, code: result.code, status: result.status, index };
+    }
+    batch = result.batch;
+  }
+  if (!batch) return { ok: false, code: "empty", status: 400, index: 0 };
+  return { ok: true, batch, dir: batchDir(batch) };
 }
