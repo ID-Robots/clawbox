@@ -12,6 +12,9 @@ import path from "path";
 const src = fs.readFileSync(path.join(process.cwd(), "src/app/page.tsx"), "utf8");
 // The app registry moved to a module both the desktop and `/app/<id>` import.
 const registrySrc = fs.readFileSync(path.join(process.cwd(), "src/lib/desktop-apps.ts"), "utf8");
+// The merge of a saved list moved into a pure module (desktop-app-merge.test.ts
+// tests its behaviour); these pin that the page hands it the right sets.
+const mergeSrc = fs.readFileSync(path.join(process.cwd(), "src/lib/desktop-app-merge.ts"), "utf8");
 
 describe("default desktop icons", () => {
   it("keeps Remote Desktop and System Update out of the default grid but in the built-in set", () => {
@@ -28,17 +31,12 @@ describe("default desktop icons", () => {
   });
 
   it("validates a saved layout against every built-in, not just the defaults", () => {
-    // The binding keyword is not the point — the shed below reassigns `saved`,
-    // so this matches either form and pins only the rule it exists for.
-    expect(src).toMatch(
-      /(?:const|let) saved = \(data\.desktop_apps as string\[\]\)\.filter\(id => BUILT_IN_APP_IDS\.includes\(id\)\)/
-    );
+    expect(src).toMatch(/saved: data\.desktop_apps,\s*known: data\.desktop_apps_known,\s*builtIns: BUILT_IN_APP_IDS,/);
+    expect(mergeSrc).toMatch(/builtIns\.includes\(id\)/);
   });
 
   it("auto-adds only built-ins that belong on the desktop by default", () => {
-    expect(src).toMatch(
-      /const missingNewBuiltins = DEFAULT_DESKTOP_APPS\.filter\(id => !saved\.includes\(id\)\)/
-    );
+    expect(src).toMatch(/defaults: DEFAULT_DESKTOP_APPS,/);
   });
 
   it("gives every built-in a declared icon slot, including the off-by-default ones", () => {
@@ -53,7 +51,8 @@ describe("default desktop icons", () => {
 describe("one-time shed of apps that moved off the desktop", () => {
   it("sheds exactly the ids that moved, and only from a saved list", () => {
     expect(src).toMatch(/1: \["system_update", "vnc"\]/);
-    expect(src).toMatch(/saved = saved\.filter\(id => !shed\.has\(id\)\)/);
+    expect(src).toMatch(/shed: shedNeeded\.current,/);
+    expect(mergeSrc).toMatch(/saved = saved\.filter\(id => !shed\.has\(id\)\)/);
   });
 
   it("applies only the versions a box has not already had", () => {
@@ -70,7 +69,7 @@ describe("one-time shed of apps that moved off the desktop", () => {
     // Two writes could land apart, and a box that shed its icons without
     // recording the version would shed them again on the next load.
     expect(src).toMatch(
-      /\{ desktop_apps: desktopApps, desktop_apps_shed: DESKTOP_APPS_SHED_VERSION \}/,
+      /\{ desktop_apps: desktopApps, desktop_apps_shed: DESKTOP_APPS_SHED_VERSION, \.\.\.known \}/,
     );
   });
 
