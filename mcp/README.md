@@ -1150,10 +1150,16 @@ bearer may run `connect` only), and the settings' cost rates and Opus model —
 what the Opus dollar cap is measured in (a rate of 0, or an unpriced model, and
 the cap never trips); the bearer may change the cap itself.
 
-**Destructive tools** carry `confirm: true` (`zConfirm`): `prime_radiant_page_delete`,
-`prime_radiant_claim_delete`, `prime_radiant_undo`, `prime_radiant_settings_update`
-— and so do the ones that give someone's word (`prime_radiant_claim_verify`,
-`prime_radiant_review_resolve`) or merge a held night.
+**Destructive tools** (`destructiveHint`) carry `confirm: true` (`zConfirm`):
+`prime_radiant_page_delete`, `prime_radiant_claim_delete`, `prime_radiant_undo`,
+`prime_radiant_settings_update` and `prime_radiant_nightly_merge` (it moves the
+wiki's main branch) — and so do the ones that give someone's word
+(`prime_radiant_claim_verify`, `prime_radiant_review_resolve`).
+
+**Imports and connect passes the assistant starts** commit as it, like its
+direct edits, so it can undo them too. The nightly pass stays Prime Radiant's
+whoever presses Run now: it is the box's own scheduled pass, held for the
+owner when it touches a verified page.
 
 | UI action | Route | Tool |
 |---|---|---|

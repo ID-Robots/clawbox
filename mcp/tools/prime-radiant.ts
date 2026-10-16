@@ -996,7 +996,7 @@ function registerPassTools(reg: Registrar): void {
       branch: z.string().regex(BRANCH_RE, "dream/YYYY-MM-DD").describe("The held night's branch, e.g. dream/2026-10-15."),
       confirm: zConfirm("Must be true. Set it only when the user asked for this night to be merged."),
     },
-    WRITE,
+    DESTRUCTIVE,
     async ({ branch }: { branch: string; confirm: true }) => {
       const r = await pr<{ branch?: string; commit?: string | null; changed?: unknown[] }>("POST", "/nightly/run", { body: { merge: branch } });
       return text(`Merged ${r.branch ?? branch} as ${short(r.commit) ?? "no new commit"}${Array.isArray(r.changed) ? ` (${r.changed.length} page(s))` : ""}.`);

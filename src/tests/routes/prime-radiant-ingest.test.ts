@@ -39,6 +39,11 @@ import { FlashCallError, setFlashClientOverride, type FlashClient } from "@/lib/
 import { ingestFinished, listIngestJobs, stopIngest } from "@/lib/prime-radiant/ingest";
 import { readVaultSnapshot } from "@/lib/prime-radiant/vault";
 import { readWriterItems } from "@/lib/prime-radiant/writer";
+import { execFileSync } from "child_process";
+
+/** `<author>|<subject>` of the vault's last commit. */
+const gitLog = (vault: string) =>
+  execFileSync("git", ["-C", vault, "log", "-1", "--format=%an|%s"], { env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" }, encoding: "utf8" }).trim();
 
 vi.setConfig({ testTimeout: 60_000, hookTimeout: 30_000 });
 
@@ -163,6 +168,14 @@ describe("auth", () => {
     expect(res.status).toBe(202);
     const { job } = await res.json();
     await ingestFinished(job.id);
+    // Its commits name it, so History shows who imported and the assistant can undo it.
+    expect(gitLog(vault)).toMatch(/^ClawBox assistant\|ingest: /);
+  });
+
+  it("names Prime Radiant on an import the owner started", async () => {
+    const { job } = await (await ingest({ folders: ["Documents"] })).json();
+    await ingestFinished(job.id);
+    expect(gitLog(vault)).toMatch(/^Prime Radiant\|ingest: /);
   });
 
   it("refuses a cross-site page riding the owner's cookie", async () => {

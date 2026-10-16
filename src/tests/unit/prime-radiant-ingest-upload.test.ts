@@ -15,8 +15,10 @@ import {
   pruneStaleBatches,
   safeBatchId,
   safeUploadName,
+  stageFiles,
   stageUpload,
   stagedBatch,
+  uploadsRoot,
 } from "@/lib/prime-radiant/ingest-upload";
 
 const base = fs.mkdtempSync(path.join(os.tmpdir(), "prime-radiant-upload-"));
@@ -124,6 +126,38 @@ describe("stageUpload", () => {
     const res = await stageUpload(body("new"), "b.md", first.batch, null);
     expect(res).toMatchObject({ ok: true, name: "b (2).md" });
     expect(fs.readFileSync(target, "utf8")).toBe("original");
+  });
+});
+
+describe("a refused file", () => {
+  const batches = () => (fs.existsSync(uploadsRoot()) ? fs.readdirSync(uploadsRoot()) : []);
+
+  it("takes away the batch it was the first file of, and leaves a batch it joined", async () => {
+    expect(await stageUpload(body(), "x.md", null, null)).toMatchObject({ ok: false, code: "empty" });
+    expect(await stageUpload(body("only part"), "x.md", null, 5000)).toMatchObject({ ok: false, code: "too_large" });
+    expect(await stageUpload(body(...Array.from({ length: 10 }, () => new Uint8Array(1024 * 1024))), "big.md", null, null)).toMatchObject({ ok: false, code: "too_large" });
+    expect(batches()).toEqual([]);
+    const first = await stageUpload(body("seed"), "seed.md", null, null);
+    if (!first.ok) throw new Error("expected ok");
+    expect(await stageUpload(body(), "y.md", first.batch, null)).toMatchObject({ ok: false, code: "empty" });
+    expect(batches()).toEqual([first.batch]);
+    expect(fs.readdirSync(batchDir(first.batch))).toEqual(["seed.md"]);
+  });
+
+  it.skipIf(!fs.existsSync("/proc/self/fd"))("closes the file stageFiles opened, also when it is refused before being read", async () => {
+    const dir = path.join(base, `named-${n}`);
+    fs.mkdirSync(dir, { recursive: true });
+    // Bigger than one stream buffer: a small file is read to its end, and closed, whether or not anyone asks.
+    const png = path.join(dir, "photo.png");
+    fs.writeFileSync(png, Buffer.alloc(256 * 1024));
+    const open = () => fs.readdirSync("/proc/self/fd").length;
+    const before = open();
+    for (let i = 0; i < 40; i++) {
+      expect(await stageFiles([{ path: png, bytes: 256 * 1024 }])).toMatchObject({ ok: false, code: "invalid_name", index: 0 });
+    }
+    await new Promise((r) => setTimeout(r, 100));
+    expect(open() - before).toBeLessThan(5);
+    expect(batches()).toEqual([]);
   });
 });
 

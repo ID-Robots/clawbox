@@ -386,7 +386,7 @@ describe("the family", () => {
 
   it("gates every destructive tool on a literal confirm, and marks the reads read-only", () => {
     const h = harness();
-    for (const name of ["prime_radiant_page_delete", "prime_radiant_claim_delete", "prime_radiant_undo", "prime_radiant_settings_update"]) {
+    for (const name of ["prime_radiant_page_delete", "prime_radiant_claim_delete", "prime_radiant_undo", "prime_radiant_settings_update", "prime_radiant_nightly_merge"]) {
       expect(h.get(name).opts.destructive, name).toBe(true);
       expect(z.object(h.get(name).shape).safeParse({ ...CASES.find((c) => c.tool === name)!.args, confirm: undefined }).success, name).toBe(false);
     }

@@ -35,7 +35,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     return fail("no_credential", "Sign this box in to ClawBox AI first; Prime Radiant writes its pages with it.", 412);
   }
   try {
-    return json({ job: await startIngest({ kind: "retry", retryOf: id }) }, 202);
+    return json({ job: await startIngest({ kind: "retry", retryOf: id }, { author: gate.writer.author }) }, 202);
   } catch (err) {
     if (err instanceof IngestBusyError) {
       return json({ error: "An ingest is already running.", code: "busy", runningId: err.runningId }, 409);

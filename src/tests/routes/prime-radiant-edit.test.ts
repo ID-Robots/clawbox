@@ -35,8 +35,9 @@ import { DELETE as claimDELETE, PATCH as claimPATCH } from "@/app/setup-api/prim
 import { POST as verifyPOST } from "@/app/setup-api/prime-radiant/claims/verify/route";
 import { POST as revertPOST } from "@/app/setup-api/prime-radiant/revert/route";
 import { POST as resolvePOST } from "@/app/setup-api/prime-radiant/review/[id]/resolve/route";
-import { POST as maintenancePOST } from "@/app/setup-api/prime-radiant/maintenance/route";
+import { GET as maintenanceGET, POST as maintenancePOST } from "@/app/setup-api/prime-radiant/maintenance/route";
 import { addReviewItem } from "@/lib/prime-radiant/review-store";
+import { commitAuthorEmail } from "@/lib/prime-radiant/git";
 import { ensureVault, vaultOperation } from "@/lib/prime-radiant/vault";
 import { claim, pageText } from "../helpers/prime-radiant-fixtures";
 
@@ -331,6 +332,17 @@ describe("claims", () => {
   });
 });
 
+describe("commitAuthorEmail", () => {
+  it("reads a commit's author, and never takes the argument for an option", async () => {
+    await ensureVault();
+    await seed();
+    const head = execFileSync("git", ["-C", vault, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    expect(await commitAuthorEmail(vault, head)).toBe("prime-radiant@localhost");
+    // `--all` as a revision is no revision; as an option it would read the newest commit's author.
+    expect(await commitAuthorEmail(vault, "--all")).toBeNull();
+  });
+});
+
 describe("undo, review and passes for the assistant", () => {
   it("lets the assistant undo its own commit but not the owner's, which the owner may undo", async () => {
     await ensureVault();
@@ -385,5 +397,30 @@ describe("undo, review and passes for the assistant", () => {
     const dry = await maintenancePOST(req("POST", "/maintenance", "assistant", { action: "connect", dryRun: true }));
     expect(dry.status).toBe(200);
     expect(await dry.json()).toMatchObject({ dryRun: true });
+  });
+
+  it("names the assistant on the commits of a connect pass it started", async () => {
+    await ensureVault();
+    await seed();
+    // A second page that names the first, so the pass has a link to write.
+    await vaultOperation("seed: catalogue", async (tx) => {
+      await tx.write("concepts/catalogue.md", pageText({ title: "Catalogue", domain: "acme-sales" }, "The catalogue lists Widget pricing for every size.\n"));
+    });
+    const seeded = log()[0];
+    const res = await maintenancePOST(req("POST", "/maintenance", "assistant", { action: "connect" }));
+    expect(res.status).toBe(202);
+    for (let i = 0; i < 100; i++) {
+      const state = await (await maintenanceGET(req("GET", "/maintenance", "assistant"))).json();
+      if (!state.running) {
+        expect(state.last.connect.error).toBeUndefined();
+        expect(state.last.connect.commits.length).toBeGreaterThan(0);
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    const commits = log(20);
+    const since = commits.slice(0, commits.indexOf(seeded));
+    expect(since.length).toBeGreaterThan(0);
+    for (const c of since) expect(c).toMatch(/^ClawBox assistant\|Prime Radiant\|connect/);
   });
 });

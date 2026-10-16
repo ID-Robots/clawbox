@@ -19,6 +19,7 @@
  * through the MCP bearer when the owner asks it to — never a cross-site page.
  * The GET admits whoever `requireSession` admits.
  */
+import fs from "fs/promises";
 import { requireSession } from "@/lib/route-auth";
 import { flashAvailable } from "@/lib/prime-radiant/flash-client";
 import { IngestBusyError, listIngestJobs, runningJobId, startIngest } from "@/lib/prime-radiant/ingest";
@@ -70,6 +71,10 @@ export async function POST(req: Request) {
   }
 
   let input: Parameters<typeof startIngest>[0];
+  // The batch staged here from named files: no job owns it until startIngest
+  // registers one, so a start that throws (a job that raced in, a vault that
+  // could not be opened) must take it away again. A dropped batch is the drop's.
+  let namedBatchDir: string | null = null;
   if (hasFolders) {
     const resolved = await resolveIngestFolders(b.folders);
     if (!resolved.ok) return resolved.response;
@@ -79,6 +84,7 @@ export async function POST(req: Request) {
     if (!resolved.ok) return resolved.response;
     const staged = await stageFiles(resolved.files);
     if (!staged.ok) return json({ error: STAGE_MESSAGES[staged.code] ?? STAGE_MESSAGES.write_failed, code: staged.code, index: staged.index }, staged.status);
+    namedBatchDir = staged.dir;
     input = { kind: "upload", dir: staged.dir, batch: staged.batch };
   } else {
     const batch = safeBatchId(b.upload);
@@ -88,8 +94,10 @@ export async function POST(req: Request) {
   }
 
   try {
-    return json({ job: await startIngest(input) }, 202);
+    // The commits of an import the assistant started name it, so it can undo them.
+    return json({ job: await startIngest(input, { author: gate.writer.author }) }, 202);
   } catch (err) {
+    if (namedBatchDir) await fs.rm(namedBatchDir, { recursive: true, force: true }).catch(() => undefined);
     if (err instanceof IngestBusyError) {
       return json({ error: "An ingest is already running.", code: "busy", runningId: err.runningId }, 409);
     }

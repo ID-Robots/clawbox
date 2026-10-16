@@ -235,7 +235,7 @@ export async function commitPaths(vault: string, message: string, paths: readonl
 
 /** The author email a commit records, or null when `sha` names no commit. */
 export async function commitAuthorEmail(vault: string, sha: string): Promise<string | null> {
-  const r = await git(vault, ["log", "-1", "--format=%ae", sha], { allowFail: true });
+  const r = await git(vault, ["log", "-1", "--format=%ae", "--end-of-options", sha], { allowFail: true });
   return r.code === 0 ? r.stdout.trim() : null;
 }
 

@@ -89,6 +89,7 @@ import { primeRadiantRoot, vaultDir } from "./paths";
 import { repairPluginWritesOnce } from "./plugin-repair";
 import { DEFAULT_INGEST_PARALLEL, MAX_INGEST_PARALLEL, effectiveCostRates, readSettings } from "./settings";
 import { readRetiredLedger, stateDbPathFor, syncActiveClaims } from "./state-db";
+import type { VaultAuthor } from "./git";
 import { INDEX_FILE, VaultLintBlockedError, ensureVault, readVaultSnapshot, vaultOperation } from "./vault";
 import {
   MAX_BATCH_CHARS,
@@ -129,6 +130,8 @@ export type IngestInput =
 
 export interface IngestDeps {
   vault?: string;
+  /** Who the job's commits name as their author: the assistant, for an import it started. Default Prime Radiant. */
+  author?: VaultAuthor;
   client?: FlashClient;
   parallel?: number;
   batchSize?: number;
@@ -866,7 +869,7 @@ async function processBatch(
             if (next !== snapshot.indexBody) await tx.write(INDEX_FILE, next);
           }
         },
-        { vault, now: now() },
+        { vault, now: now(), author: deps.author },
       );
       commit = op.commit;
       break;

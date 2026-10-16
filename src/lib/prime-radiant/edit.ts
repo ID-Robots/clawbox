@@ -410,7 +410,7 @@ export async function createPage(input: NewPage, who: EditWho, options: EditOpti
     },
     { vault, now: options.now, author: who.author },
   );
-  syncClaims(vault, written.map((c) => ({ id: c.id, page: path, updatedAt: c.updatedAt })));
+  if (op.commit) syncClaims(vault, written.map((c) => ({ id: c.id, page: path, updatedAt: c.updatedAt })));
   return { path, commit: op.commit, claims: written.map((c) => c.id), findings: findingsOf(op.findings) };
 }
 
@@ -533,7 +533,7 @@ export async function addClaim(input: NewClaim, who: EditWho, options: EditOptio
     },
     { vault, now: options.now, author: who.author },
   );
-  syncClaims(vault, [{ id, page: input.page, updatedAt: at }]);
+  if (op.commit) syncClaims(vault, [{ id, page: input.page, updatedAt: at }]);
   return { id, page: input.page, commit: op.commit, findings: findingsOf(op.findings) };
 }
 
