@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 import { spawn } from "child_process";
 import fs from "fs/promises";
 import path, { untraced } from "@/lib/runtime-path";
-import { getAll, setMany } from "@/lib/config-store";
+import { getAll, set as setConfigKey, setMany } from "@/lib/config-store";
 import { HANDOFF_TOKENS_PATH, HANDOFF_TTL_MS } from "@/lib/oauth-handoff";
 import {
   restartGateway,
@@ -2734,6 +2734,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // that IS the state this card is about. This route holds a portal answer
     // for the credential it is writing, at the moment it writes it.
     let portalPlan: ClawaiPortalPlan | undefined;
+    let clawaiTokenRejected = false;
     if (isClawAI && clawboxAiToken) {
       try {
         const lookup = await fetchPortalTier(clawboxAiToken);
@@ -2755,10 +2756,34 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
             );
           }
         }
+        if (lookup.source === "unreachable" && lookup.rejected) {
+          clawaiTokenRejected = true;
+        }
       } catch (err) {
         // Never let a tier probe break pairing; fall through to the picker.
         console.warn("[configure] ClawBox AI portal tier probe failed:", err);
       }
+    }
+    // The portal itself refused this credential (revoked / invalid). Writing it
+    // again and restarting the gateway only parks the wizard on "warming up"
+    // over a token that can never work (TASK-1601). Drop ONLY the stored
+    // ClawBox AI credential — every other provider is left as it is — and tell
+    // the client to pair again, before anything is written.
+    if (clawaiTokenRejected) {
+      if (previousClawaiToken && previousClawaiToken === clawboxAiToken) {
+        try {
+          await setConfigKey(CLAWBOX_AI_TOKEN_CONFIG_KEY, undefined);
+        } catch (err) {
+          console.warn("[configure] Could not clear the rejected ClawBox AI token:", err);
+        }
+      }
+      return NextResponse.json(
+        {
+          error: "This ClawBox AI sign-in is no longer valid. Sign in to ClawBox AI again to link this device.",
+          code: "clawai_token_rejected",
+        },
+        { status: 401 },
+      );
     }
   const resolvedClawboxTier: ClawboxAiTier | null = isClawAI
       ? (portalConfirmedTier

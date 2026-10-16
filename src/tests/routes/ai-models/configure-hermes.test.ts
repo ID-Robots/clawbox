@@ -287,6 +287,9 @@ describe("POST /setup-api/ai-models/configure — hermes edition", () => {
   it("configures ClawBox AI through Hermes, not openclaw", async () => {
     const cs = await import("@/lib/config-store");
     vi.mocked(cs.getAll).mockResolvedValue({ clawai_token: "claw_abc123def456" });
+    // No real portal in tests: a live lookup would see the fake token refused
+    // and (correctly, TASK-1601) answer 401 before anything is written.
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network disabled in tests")));
 
     const res = await POST(jsonRequest({ provider: "clawai", clawaiTier: "flash" }));
     const body = await res.json();

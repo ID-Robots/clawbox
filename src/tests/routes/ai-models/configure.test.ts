@@ -260,7 +260,7 @@ vi.mock("@/lib/local-ai-token", () => ({
   markLocalAiTokenMigrated: vi.fn(),
 }));
 
-import { getAll, getKnown, setMany } from "@/lib/config-store";
+import { getAll, getKnown, set as setConfigKey, setMany } from "@/lib/config-store";
 import { unpairLocal } from "@/lib/clawkeep";
 import { inferConfiguredLocalModel, readConfig, readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConfigSetBatch, runOpenclawConfigUnset, applyModelOverrideToAllAgentSessions, parseFullyQualifiedModel,
   setPrimaryModelWithoutCatalogValidation,
@@ -3343,6 +3343,38 @@ describe("POST /setup-api/ai-models/configure", () => {
 
       expect(res.status).toBe(200);
       expect(primaryModelWritten()).toBe("deepseek/deepseek-v4-pro");
+    });
+
+    describe("a token the portal itself refuses (TASK-1601)", () => {
+      const refused = () => deviceInfo({ error: { code: "invalid_token" } }, 401);
+
+      it("clears only the stored ClawBox AI token and asks for a new sign-in", async () => {
+        vi.stubGlobal("fetch", refused());
+        mockGetAll.mockResolvedValue({ clawai_token: "claw_revoked_stored", ai_model_provider: "clawai" });
+        const mockSet = vi.mocked(setConfigKey);
+        mockSet.mockClear();
+
+        const res = await configurePost(jsonRequest({ provider: "clawai", clawaiTier: "pro" }));
+
+        expect(res.status).toBe(401);
+        expect(await res.json()).toMatchObject({ code: "clawai_token_rejected" });
+        expect(mockSet).toHaveBeenCalledWith("clawai_token", undefined);
+        expect(mockSet.mock.calls.filter(([key]) => key !== "clawai_token" && key !== "clawai_credential_refusal")).toEqual([]);
+        expect(mockSetMany).not.toHaveBeenCalled();
+        expect(primaryModelWritten()).toBeUndefined();
+      });
+
+      it("refuses a rejected NEW token without touching the stored one", async () => {
+        vi.stubGlobal("fetch", refused());
+        mockGetAll.mockResolvedValue({ clawai_token: "claw_other_stored" });
+        const mockSet = vi.mocked(setConfigKey);
+        mockSet.mockClear();
+
+        const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "claw_revoked_new" }));
+
+        expect(res.status).toBe(401);
+        expect(mockSet).not.toHaveBeenCalledWith("clawai_token", undefined);
+      });
     });
 
     it("keeps the picker's choice when the portal reports an unpaid account", async () => {
