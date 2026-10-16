@@ -276,8 +276,8 @@ of them kept failing.
     and the `claude-ds` harness is ready — probed at startup, and unlike
     `email_list` never re-probed after it),
   - **Prime Radiant** (both editions, full profile only): the `prime_radiant_*`
-    family (`mcp/tools/prime-radiant.ts`, 30 tools) — every action of the app plus
-    page create/edit/delete and claim add/edit/delete/verify — calls the app's own
+    family (`mcp/tools/prime-radiant.ts`, 31 tools) — every action of the app plus
+    page create/edit/delete/merge and claim add/edit/delete/verify — calls the app's own
     `/setup-api/prime-radiant/*` routes; `writerGuard` admits the MCP bearer as
     the assistant, whose commits are authored `ClawBox assistant` so History shows
     them and Undo reverses them; the bearer may undo only its own commits, and

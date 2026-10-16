@@ -75,6 +75,10 @@ export const TOOL_NOTES: readonly ToolNote[] = [
     note: "`summary` replaces only the first paragraph; `body` replaces everything (its first paragraph becomes the summary). Read the page with `prime_radiant_page` first so you do not drop what is there.",
   },
   {
+    tool: "prime_radiant_page_merge",
+    note: "Run it with `dry_run: true` first and tell the user what would move and which pages' links would change; merge once they agree. The page that stays keeps its text exactly as it is (pick the fuller page as `into`); a link in it to a page being merged refuses the merge until it is taken out, or until the user lets its text change (`keep_into_body: false`).",
+  },
+  {
     tool: "prime_radiant_claim_verify",
     note: "A verification is final for the wiki: a later import never overwrites the page, and only verifying again changes the text. Verify only what the user confirmed; when you are unsure, `prime_radiant_review_raise` asks the owner instead.",
   },

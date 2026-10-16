@@ -1,8 +1,8 @@
 /**
- * Direct edits to the vault: a page created, edited or deleted, a claim
- * added, edited or deleted, a claim verified as it stands. The routes under
- * `pages` and `claims` answer from here, for the owner and for the assistant
- * through the box's MCP server alike.
+ * Direct edits to the vault: a page created, edited, deleted or merged into
+ * another, a claim added, edited or deleted, a claim verified as it stands.
+ * The routes under `pages` and `claims` answer from here, for the owner and
+ * for the assistant through the box's MCP server alike.
  *
  * Every change is ONE {@link vaultOperation}: the vault's lock, the scoped lint
  * that refuses the four blocking rules, and one commit naming its author — so
@@ -19,6 +19,11 @@
  *     does to a losing answer, and a retired id is refused for good — so the
  *     delete could not be undone (lint's `claim-id-retired-reuse`). The id is
  *     free to come back.
+ *   - a merge MOVES claims: the same id, the same text, the same verification
+ *     on the page that stays. One it cannot move so — its id on a different
+ *     claim there already — refuses the merge, and says which. The page that
+ *     stays keeps its body byte for byte unless the caller lets it change
+ *     (`keep_into_body: false`): only its frontmatter takes the merge.
  *
  * Request bodies are read strictly here (`readNewPage`, `readPagePatch`, …):
  * an unknown field or a wrong type is a 400, never silently dropped.
@@ -27,9 +32,13 @@
  */
 
 import { allocateClaimId, assertClaimIdAvailable, buildClaimIndex, ClaimIdError, isClaimId, nowIso, slugify, type ClaimIndex } from "./claims";
+import { pageSummary, serializeFrontmatter, splitFrontmatter } from "./frontmatter";
 import type { VaultAuthor } from "./git";
+import { createLinkResolver, extractLinks, relativeHref, rewriteLinks, type FoundLink } from "./links";
 import { LIMITS, type LintFinding } from "./lint";
 import { isKnowledgePage, safePagePath, vaultDir } from "./paths";
+import { withPluginFields } from "./plugin-compat";
+import { followMovedClaims } from "./review-store";
 import {
   isIsoDate,
   PAGE_STATUSES,
@@ -58,7 +67,19 @@ export const DEFAULT_CLAIM_CONFIDENCE = 0.8;
 
 export class PageEditError extends Error {
   constructor(
-    readonly code: "invalid" | "not_initialised" | "not_found" | "exists" | "invalid_page" | "verified" | "taken" | "retired" | "too_many_claims",
+    readonly code:
+      | "invalid"
+      | "not_initialised"
+      | "not_found"
+      | "exists"
+      | "invalid_page"
+      | "verified"
+      | "taken"
+      | "retired"
+      | "too_many_claims"
+      | "deprecated"
+      | "too_long"
+      | "into_links",
     message: string,
     readonly status: number,
   ) {
@@ -293,6 +314,36 @@ export function readVerifyRequest(body: unknown): VerifyRequest {
     text: b.text === undefined || b.text === null ? null : claimText(b.text),
     page: b.page === undefined || b.page === null ? null : pagePathOf(b.page),
   };
+}
+
+/** Pages one merge folds into its target, at most. */
+export const MAX_MERGE_PAGES = 20;
+
+export interface PageMerge {
+  into: string;
+  from: string[];
+  dryRun: boolean;
+  /** Leave `into`'s body exactly as it is (the default): only its frontmatter changes. */
+  keepIntoBody: boolean;
+}
+
+function mergePath(value: unknown, field: string): string {
+  if (typeof value !== "string") throw bad(`${field} names pages by their vault path, e.g. entities/acme-widgets.md.`);
+  const safe = safePagePath(value);
+  if (!safe || !isKnowledgePage(safe)) throw new PageEditError("not_found", `No such page: ${value.slice(0, 120)}.`, 404);
+  return safe;
+}
+
+/** `POST pages/merge`: `{ into, from: [1..20 page paths], dry_run?, keep_into_body? }` (keep_into_body defaults to true). */
+export function readPageMerge(body: unknown): PageMerge {
+  const b = objectBody(body, ["into", "from", "dry_run", "keep_into_body"]);
+  const into = mergePath(b.into, "into");
+  if (!Array.isArray(b.from) || b.from.length === 0 || b.from.length > MAX_MERGE_PAGES) throw bad(`from is a list of 1 to ${MAX_MERGE_PAGES} page paths.`);
+  const from = [...new Set(b.from.map((p) => mergePath(p, "from")))];
+  if (from.includes(into)) throw bad("A page cannot be merged into itself: leave the target out of from.");
+  if (b.dry_run !== undefined && typeof b.dry_run !== "boolean") throw bad("dry_run is true or false.");
+  if (b.keep_into_body !== undefined && typeof b.keep_into_body !== "boolean") throw bad("keep_into_body is true or false.");
+  return { into, from, dryRun: b.dry_run === true, keepIntoBody: b.keep_into_body !== false };
 }
 
 // ── shared ─────────────────────────────────────────────────────────────────
@@ -622,4 +673,333 @@ export async function verifyClaimAs(input: VerifyRequest, who: EditWho, options:
     vault,
     now: options.now,
   });
+}
+
+// ── merging pages ──────────────────────────────────────────────────────────
+
+export interface PageMergeResult {
+  into: string;
+  from: string[];
+  dryRun: boolean;
+  /** The merge's commit; null for a dry run. */
+  commit: string | null;
+  /** Ids of the claims the merged pages carried, now on `into` unchanged; `verified` the ones whose verification moved with them. */
+  claims: string[];
+  verified: string[];
+  /** Names `into` gained as aliases: the merged pages' titles and their own aliases. */
+  aliases: string[];
+  /** Sources `into` gained. */
+  sources: string[];
+  /** `into`'s privacy when a merged page's stricter tier raised it, else null. */
+  privacy: PrivacyTier | null;
+  /** The merged pages whose summary was new to `into` and now closes its body ("Merged from …"); always empty when its body is kept. */
+  notes: string[];
+  /** Pages whose links to a merged page now lead to `into` (on `into` itself, when its body may change, they became plain text), with how many each. */
+  relinked: Array<{ path: string; links: number }>;
+  /** Every link rewritten, index.md's included. */
+  links: number;
+  /** index.md lines that went with the merged pages (`into` gets one of its own when it had none). */
+  indexLines: number;
+  /** Pages linking a merged page that do not parse, left as they are: fix them by hand. */
+  unparsed: string[];
+  /** Waiting review items about a moved claim, now naming `into` where they named a merged page. */
+  reviewItems: number;
+  findings: EditFinding[];
+}
+
+interface MergePlan {
+  result: Omit<PageMergeResult, "dryRun" | "commit" | "reviewItems" | "findings">;
+  /** `text`: the whole new file when the body is kept as it was (its raw bytes, memory-wiki's blocks included). */
+  page: { frontmatter: PageFrontmatter; body: string; text: string | null };
+  rewrites: Array<{ path: string; frontmatter: PageFrontmatter; body: string }>;
+  /** index.md's new text, or null when it stays as it is. */
+  index: string | null;
+}
+
+/** A page a merge names, valid, or the refusal that says which and why not. */
+function mergePage(snapshot: VaultSnapshot, rel: string): { path: string; frontmatter: PageFrontmatter; body: string; text: string } {
+  const page = snapshot.pages.find((p) => p.path === rel);
+  if (!page) throw new PageEditError("not_found", `No such page: ${rel}.`, 404);
+  if (!page.parsed.ok) throw new PageEditError("invalid_page", `The frontmatter of ${rel} does not parse; fix it by hand before merging.`, 409);
+  return { path: page.path, frontmatter: page.parsed.frontmatter, body: page.parsed.body, text: page.text };
+}
+
+function nameList(value: unknown): string[] {
+  const list = typeof value === "string" ? [value] : Array.isArray(value) ? value : [];
+  return list.filter((x): x is string => typeof x === "string" && x.trim() !== "").map((x) => x.trim());
+}
+
+/** Text as a containment test reads it: spacing and case do not count. */
+function squash(text: string): string {
+  return text.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+/** What a link shows, for where it stops being a link. */
+function shownText(link: FoundLink): string {
+  if (link.kind === "md") return link.text.trim() !== "" ? link.text : link.target;
+  return link.alias !== null && link.alias.trim() !== "" ? link.alias : link.target;
+}
+
+function mdLink(link: FoundLink & { kind: "md" }, href: string): string {
+  return `[${link.text}](${href}${link.fragment !== null ? `#${link.fragment}` : ""}${link.title ? ` ${link.title}` : ""})`;
+}
+
+/**
+ * The whole merge, worked out from a snapshot and written nowhere: the target
+ * page as it will be, every other page whose links change, and index.md.
+ * Throws the refusal when the merge may not happen. Pure apart from the
+ * retired-id ledger it reads.
+ */
+function planMerge(snapshot: VaultSnapshot, vault: string, input: PageMerge, who: EditWho, at: string): MergePlan {
+  const into = mergePage(snapshot, input.into);
+  if (input.from.includes(into.path)) throw bad("A page cannot be merged into itself: leave the target out of from.");
+  const fm = into.frontmatter;
+  if (fm.status === "deprecated") throw new PageEditError("deprecated", `${into.path} is deprecated; merge into the page that replaces it.`, 409);
+  if (fm.verified && !who.person) {
+    throw new PageEditError("verified", `A person verified ${into.path} as a whole; raise a review item for the owner instead of merging into it.`, 409);
+  }
+  const froms = input.from.map((p) => mergePage(snapshot, p));
+  for (const f of froms) {
+    if (f.frontmatter.verified && !who.person) {
+      throw new PageEditError("verified", `A person verified ${f.path} as a whole; only the owner can merge it away.`, 409);
+    }
+  }
+
+  // Claims move as they are: id, text, status, evidence and verification.
+  const index = indexOf(snapshot, vault);
+  const claims = [...fm.claims];
+  const slot = new Map(claims.map((c, i) => [c.id, i]));
+  const holder = new Map(claims.map((c) => [c.id, into.path]));
+  const movedIds: string[] = [];
+  for (const f of froms) {
+    for (const c of f.frontmatter.claims) {
+      const i = slot.get(c.id);
+      if (i === undefined) {
+        if (index.retired.has(c.id)) {
+          throw new PageEditError("retired", `The claim ${c.id} on ${f.path} uses a retired id, which may not move to another page; delete that claim first.`, 409);
+        }
+        slot.set(c.id, claims.length);
+        holder.set(c.id, f.path);
+        claims.push(c);
+        movedIds.push(c.id);
+        continue;
+      }
+      const there = claims[i];
+      const other = holder.get(c.id) ?? into.path;
+      if (there.text !== c.text) {
+        if (c.verified || there.verified) {
+          const [v, w] = c.verified ? [f.path, other] : [other, f.path];
+          throw new PageEditError("verified", `The verified claim ${c.id} on ${v} shares its id with a different claim on ${w}, so it cannot move intact; settle the two first.`, 409);
+        }
+        throw new PageEditError("taken", `The claim id ${c.id} is on ${other} and on ${f.path} with different text; settle the two before merging.`, 409);
+      }
+      // The same fact twice keeps one copy: the verified one when only one is.
+      if (c.verified && !there.verified) {
+        claims[i] = c;
+        holder.set(c.id, f.path);
+        if (!movedIds.includes(c.id)) movedIds.push(c.id);
+      }
+    }
+  }
+  if (claims.length > fm.claims.length && claims.length > LIMITS.maxClaims) {
+    throw new PageEditError(
+      "too_many_claims",
+      `Merging would leave ${claims.length} claims on ${into.path}; a page carries at most ${LIMITS.maxClaims}. Delete or move ${claims.length - LIMITS.maxClaims} of them first, or merge fewer pages.`,
+      409,
+    );
+  }
+  // A retirement the merged pages recorded stays on a page, not only in the ledger.
+  const retired = new Set(fm.retiredClaimIds);
+  for (const f of froms) for (const id of f.frontmatter.retiredClaimIds) retired.add(id);
+  const retiredClaimIds = retired.size === fm.retiredClaimIds.length ? fm.retiredClaimIds : [...retired].sort();
+
+  const sources = [...fm.sources];
+  const gainedSources: string[] = [];
+  for (const s of froms.flatMap((f) => f.frontmatter.sources)) {
+    if (sources.includes(s)) continue;
+    sources.push(s);
+    gainedSources.push(s);
+  }
+
+  const aliases = nameList(fm.aliases);
+  const named = new Set([fm.title, ...aliases].map((n) => n.toLowerCase()));
+  const gainedAliases: string[] = [];
+  for (const f of froms) {
+    for (const name of [f.frontmatter.title, ...nameList(f.frontmatter.aliases)]) {
+      if (named.has(name.toLowerCase())) continue;
+      named.add(name.toLowerCase());
+      aliases.push(name);
+      gainedAliases.push(name);
+    }
+  }
+  // The merged pages' facts keep at least the protection they had.
+  const tier = (p: PrivacyTier) => PRIVACY_TIERS.indexOf(p);
+  const privacy = froms.reduce<PrivacyTier>((strictest, f) => (tier(f.frontmatter.privacy) > tier(strictest) ? f.frontmatter.privacy : strictest), fm.privacy);
+
+  // Links: every one that resolves to a merged page today, as lint resolves it.
+  const gone = new Set(froms.map((f) => f.path));
+  const resolver = createLinkResolver(snapshot.pages.map((p) => ({ path: p.path, title: p.parsed.ok ? p.parsed.frontmatter.title : undefined })));
+  const intoLink = into.path.replace(/\.md$/, "");
+  const retarget = (page: string) => (link: FoundLink): string | null => {
+    const target = resolver.resolve(page, link);
+    if (target === null || !gone.has(target)) return null;
+    if (page === into.path) return shownText(link);
+    if (link.kind === "md") return mdLink(link, relativeHref(page, into.path));
+    // A link by name or title keeps showing those words; one by path shows the new path.
+    const label = link.alias ?? (link.target.includes("/") ? null : link.target);
+    return `[[${intoLink}${link.heading !== null ? `#${link.heading}` : ""}${label !== null ? `|${label}` : ""}]]`;
+  };
+
+  const relinked: Array<{ path: string; links: number }> = [];
+  let links = 0;
+  let body = into.body;
+  if (input.keepIntoBody) {
+    // A kept body cannot drop its links to the pages that go, and they would lead nowhere.
+    const linked = [...new Set(extractLinks(into.body).flatMap((l) => {
+      const target = resolver.resolve(into.path, l);
+      return target !== null && gone.has(target) ? [target] : [];
+    }))];
+    if (linked.length > 0) {
+      throw new PageEditError(
+        "into_links",
+        `${into.path} links to ${linked.join(", ")}, which the merge removes, and its body is kept as it is: take those links out of it first, or merge with keep_into_body: false to make them plain text.`,
+        409,
+      );
+    }
+  } else {
+    const own = rewriteLinks(into.body, retarget(into.path));
+    body = own.body;
+    if (own.rewritten > 0) relinked.push({ path: into.path, links: own.rewritten });
+    links += own.rewritten;
+  }
+
+  // A merged page's summary that `into` does not say yet closes its body, its
+  // links read from where it now sits — unless the body is kept, or the page
+  // was deprecated (its text is a pointer like "Duplicate of [[…]]", no fact).
+  const notes: string[] = [];
+  for (const f of input.keepIntoBody ? [] : froms) {
+    const summary = f.frontmatter.status === "deprecated" ? null : pageSummary(f.body);
+    if (summary === null) continue;
+    const moved = rewriteLinks(summary, (link) => {
+      const target = resolver.resolve(f.path, link);
+      if (target === null) return null;
+      if (target === into.path || gone.has(target)) return shownText(link);
+      return link.kind === "md" ? mdLink(link, relativeHref(into.path, target)) : null;
+    }).body;
+    if (squash(body).includes(squash(summary)) || squash(body).includes(squash(moved))) continue;
+    body = pageSummary(body) === null ? withSummary(body, moved) : `${body.trimEnd()}\n\nMerged from ${f.frontmatter.title}: ${moved}`;
+    notes.push(f.path);
+  }
+  if (notes.length > 0 && body.trim().length > LIMITS.bodyHardChars) {
+    throw new PageEditError("too_long", `The merged summaries would take ${into.path} past ${LIMITS.bodyHardChars} characters; shorten it or merge fewer pages.`, 409);
+  }
+
+  const rewrites: MergePlan["rewrites"] = [];
+  const unparsed: string[] = [];
+  for (const p of snapshot.pages) {
+    if (gone.has(p.path) || p.path === into.path) continue;
+    if (!p.parsed.ok) {
+      if (extractLinks(p.parsed.body).some((l) => gone.has(resolver.resolve(p.path, l) ?? ""))) unparsed.push(p.path);
+      continue;
+    }
+    const r = rewriteLinks(p.parsed.body, retarget(p.path));
+    if (r.rewritten === 0) continue;
+    rewrites.push({ path: p.path, frontmatter: p.parsed.frontmatter, body: r.body });
+    relinked.push({ path: p.path, links: r.rewritten });
+    links += r.rewritten;
+  }
+
+  let indexText: string | null = null;
+  let indexLines = 0;
+  if (snapshot.indexBody !== null) {
+    let next = snapshot.indexBody;
+    for (const f of froms) {
+      const without = removeFromIndex(next, f.path);
+      indexLines += next.split("\n").length - without.split("\n").length;
+      next = without;
+    }
+    const r = rewriteLinks(next, retarget(INDEX_FILE));
+    links += r.rewritten;
+    next = r.body;
+    // The merged pages' lines listed the subject: it stays listed, under the page that stays.
+    if (indexLines > 0 && !extractLinks(next).some((l) => resolver.resolve(INDEX_FILE, l) === into.path)) {
+      next = addToIndex(next, [{ path: into.path, title: fm.title }]);
+    }
+    if (next !== snapshot.indexBody) indexText = next;
+  }
+
+  const frontmatter: PageFrontmatter = { ...fm, privacy, generated: { at, by: who.by }, sources, claims, retiredClaimIds };
+  if (gainedAliases.length > 0) frontmatter.aliases = aliases;
+  return {
+    result: {
+      into: into.path,
+      from: froms.map((f) => f.path),
+      claims: movedIds,
+      verified: movedIds.filter((id) => claims[slot.get(id) ?? -1]?.verified),
+      aliases: gainedAliases,
+      sources: gainedSources,
+      privacy: privacy === fm.privacy ? null : privacy,
+      notes,
+      relinked,
+      links,
+      indexLines,
+      unparsed,
+    },
+    // The kept body goes back as the bytes it was, behind the new frontmatter.
+    page: { frontmatter, body, text: input.keepIntoBody ? `---\n${serializeFrontmatter(withPluginFields(into.path, frontmatter))}---\n${splitFrontmatter(into.text).body}` : null },
+    rewrites,
+    index: indexText,
+  };
+}
+
+function followReviewItems(vault: string, plan: MergePlan["result"], dryRun: boolean): number {
+  try {
+    return followMovedClaims(vault, plan.claims, new Map(plan.from.map((p) => [p, plan.into])), { dryRun });
+  } catch {
+    // The items still name the claims, which is how they are settled.
+    return 0;
+  }
+}
+
+/**
+ * Fold duplicate pages into one: one commit, `merge: <from, …> -> <into>`,
+ * that Undo reverses whole. Every claim of the merged pages moves onto `into`
+ * as it is (see the header), their sources and names join its own, every
+ * link to them in the vault (index.md too) leads to `into`, and they go with
+ * their index lines. `into`'s body stays byte for byte (`keepIntoBody`, the
+ * default — a link there to a merged page refuses the merge, `into_links`);
+ * let it change and their summaries close it when it lacks them, its links
+ * to them become plain text.
+ * Waiting review items about a moved claim follow it; none is resolved.
+ * `dryRun` answers the same without writing anything.
+ */
+export async function mergePages(input: PageMerge, who: EditWho, options: EditOptions = {}): Promise<PageMergeResult> {
+  const vault = options.vault ?? vaultDir();
+  await requireVault(vault);
+  const at = nowIso(options.now);
+  if (input.dryRun) {
+    const plan = planMerge(await readVaultSnapshot(vault), vault, input, who, at);
+    return { ...plan.result, dryRun: true, commit: null, reviewItems: followReviewItems(vault, plan.result, true), findings: [] };
+  }
+  const op = await vaultOperation(
+    `merge: ${input.from.join(", ")} -> ${input.into}`,
+    async (tx) => {
+      const plan = planMerge(await readVaultSnapshot(tx.vault), tx.vault, input, who, at);
+      if (plan.page.text !== null) await tx.write(plan.result.into, plan.page.text);
+      else await tx.writePage(plan.result.into, plan.page.frontmatter, plan.page.body);
+      for (const w of plan.rewrites) await tx.writePage(w.path, w.frontmatter, w.body);
+      for (const p of plan.result.from) await tx.remove(p);
+      if (plan.index !== null) await tx.write(INDEX_FILE, plan.index);
+      return plan;
+    },
+    { vault, now: options.now, author: who.author },
+  );
+  const plan = op.result;
+  let reviewItems = 0;
+  if (op.commit) {
+    const moved = new Set(plan.result.claims);
+    syncClaims(vault, plan.page.frontmatter.claims.filter((c) => moved.has(c.id)).map((c) => ({ id: c.id, page: plan.result.into, updatedAt: c.updatedAt })));
+    reviewItems = followReviewItems(vault, plan.result, false);
+  }
+  return { ...plan.result, dryRun: false, commit: op.commit, reviewItems, findings: findingsOf(op.findings) };
 }

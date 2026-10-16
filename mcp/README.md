@@ -125,7 +125,7 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 | Coding team (`coding_team_run/status/stop`) | when the owner switched it on | when the owner switched it on |
 | Steering and following runs (`coding_run_message`, `coding_run_list`, `coding_agent_resume`, `coding_project_status`) | when the owner switched the coding agent on | same |
 | Device state reads (`memory_shard_status`, `local_ai_status`, `clawbox_ai_usage`, `anthropic_accounts`) | yes | yes |
-| Prime Radiant (`prime_radiant_*`, 30 tools) | yes | yes |
+| Prime Radiant (`prime_radiant_*`, 31 tools) | yes | yes |
 | Coordinate browser control (`browser_click/type/keypress/scroll`) | yes | **no** — Hermes ships a richer browser toolset |
 | Media inside a run (`generate_image`, `generate_audio`) | when the owner's switch is on | when the owner's switch is on |
 | Everything else | yes | yes |
@@ -1151,7 +1151,7 @@ what the Opus dollar cap is measured in (a rate of 0, or an unpriced model, and
 the cap never trips); the bearer may change the cap itself.
 
 **Destructive tools** (`destructiveHint`) carry `confirm: true` (`zConfirm`):
-`prime_radiant_page_delete`, `prime_radiant_claim_delete`, `prime_radiant_undo`,
+`prime_radiant_page_delete`, `prime_radiant_page_merge`, `prime_radiant_claim_delete`, `prime_radiant_undo`,
 `prime_radiant_settings_update` and `prime_radiant_nightly_merge` (it moves the
 wiki's main branch) — and so do the ones that give someone's word
 (`prime_radiant_claim_verify`, `prime_radiant_review_resolve`).
@@ -1177,6 +1177,7 @@ owner when it touches a verified page.
 | — (no button) create a page | `POST pages` | `prime_radiant_page_create` |
 | — edit a page's summary, body or fields | `PATCH pages/<path>` | `prime_radiant_page_edit` |
 | — delete a page | `DELETE pages/<path>` | `prime_radiant_page_delete` |
+| — merge duplicate pages into one (claims, aliases, links; `dry_run` previews) | `POST pages/merge` | `prime_radiant_page_merge` |
 | — add / edit / delete a claim | `POST claims`, `PATCH` / `DELETE claims/<id>` | `prime_radiant_claim_add` / `_edit` / `_delete` |
 | Review: pick / new answer (verifies); — verify a claim directly | `POST review/<id>/resolve`; `POST claims/verify` | `prime_radiant_review_resolve`, `prime_radiant_claim_verify` |
 | Review: later / dismiss | `POST review/<id>/resolve` | `prime_radiant_review_resolve` |

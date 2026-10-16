@@ -350,6 +350,37 @@ export function closeItemsForRetired(vault: string, retired: readonly string[], 
   });
 }
 
+/**
+ * Let the still-waiting items about `claimIds` follow those claims to the page
+ * they moved to (a page merge: `moved` maps each old page to its new one).
+ * The page names change, in `pages` and in the candidates; the claim ids,
+ * the status and everything else stay — nothing is resolved. Answers how
+ * many items changed (with `dryRun`, would change).
+ */
+export function followMovedClaims(
+  vault: string,
+  claimIds: readonly string[],
+  moved: ReadonlyMap<string, string>,
+  options: { dryRun?: boolean } = {},
+): number {
+  if (claimIds.length === 0 || moved.size === 0 || !stateDbExists(vault)) return 0;
+  const ids = new Set(claimIds);
+  return withStateDb(vault, (db) => {
+    const rows = db.prepare(`SELECT ${COLUMNS} FROM review_items WHERE status IN ('open', 'later')`).all() as unknown as Row[];
+    const update = db.prepare("UPDATE review_items SET pages = ?, candidates = ? WHERE id = ? AND status IN ('open', 'later')");
+    let n = 0;
+    for (const item of rows.map(fromRow)) {
+      if (!(item.claimId && ids.has(item.claimId)) && !item.candidates.some((c) => c.claimId && ids.has(c.claimId))) continue;
+      const pages = [...new Set(item.pages.map((p) => moved.get(p) ?? p))];
+      const candidates = item.candidates.map((c) => (c.page && moved.has(c.page) ? { ...c, page: moved.get(c.page) ?? c.page } : c));
+      if (JSON.stringify(pages) === JSON.stringify(item.pages) && JSON.stringify(candidates) === JSON.stringify(item.candidates)) continue;
+      n++;
+      if (!options.dryRun) update.run(JSON.stringify(pages), JSON.stringify(candidates), item.id);
+    }
+    return n;
+  });
+}
+
 /** How many items raised by these runs still wait (open or later). */
 export function countWaitingForRuns(vault: string, runIds: readonly string[]): number {
   if (runIds.length === 0 || !stateDbExists(vault)) return 0;
