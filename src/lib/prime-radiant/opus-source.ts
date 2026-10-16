@@ -52,8 +52,9 @@ import { DEFAULT_OPUS_MODEL } from "./settings";
 export const OPUS_CLI_TIMEOUT_MS = 6 * 60_000;
 /** Below this much available memory a second Claude Code process is not started. */
 export const OPUS_CLI_MIN_AVAILABLE_MB = 1_000;
-const MAX_STDOUT_BYTES = 2 * 1024 * 1024;
-const MAX_STDERR_BYTES = 64 * 1024;
+/** What is kept of the CLI's output, in characters (the streams are decoded as UTF-8). */
+const MAX_STDOUT_CHARS = 2 * 1024 * 1024;
+const MAX_STDERR_CHARS = 64 * 1024;
 const KILL_GRACE_MS = 5_000;
 
 export interface CliRun {
@@ -149,13 +150,16 @@ const defaultRunner: CliRunner = (bin, args, input, options) =>
       options.signal?.removeEventListener("abort", onAbort);
       resolve({ code, stdout, stderr, timedOut });
     };
+    // Decoded by the stream, so a character split across two chunks stays whole.
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
     // The tail, not the head: the JSON result line comes last.
-    child.stdout.on("data", (b: Buffer) => {
-      stdout += b.toString("utf8");
-      if (stdout.length > MAX_STDOUT_BYTES) stdout = stdout.slice(stdout.length - MAX_STDOUT_BYTES);
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+      if (stdout.length > MAX_STDOUT_CHARS) stdout = stdout.slice(stdout.length - MAX_STDOUT_CHARS);
     });
-    child.stderr.on("data", (b: Buffer) => {
-      if (stderr.length < MAX_STDERR_BYTES) stderr += b.toString("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      if (stderr.length < MAX_STDERR_CHARS) stderr += chunk;
     });
     child.on("error", (err) => {
       stderr += `\n${err.message}`;

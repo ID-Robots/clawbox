@@ -197,6 +197,15 @@ describe("the subscription client", () => {
       if (prevKey === undefined) delete process.env.ANTHROPIC_API_KEY;
       else process.env.ANTHROPIC_API_KEY = prevKey;
     }
+    // A multibyte answer written in two pieces that split a character stays whole.
+    const split = path.join(dir, "split-claude");
+    fs.writeFileSync(
+      split,
+      `#!/bin/sh\ncat > /dev/null\nprintf '{"type":"result","subtype":"success","is_error":false,"result":"\\320'\nsleep 0.2\nprintf '\\237\\321\\200\\320\\270\\320\\274\\320\\265\\321\\200","usage":{}}\\n'\n`,
+      { mode: 0o755 },
+    );
+    const splitClient = createSubscriptionOpusClient("claude-opus-5-5", { claudePath: split, yieldReason: notBusy, pathValue: "/usr/bin:/bin" });
+    await expect(splitClient.complete({ system: "s", user: "u", maxTokens: 10 })).resolves.toMatchObject({ text: "Пример" });
     const slow = path.join(dir, "slow-claude");
     fs.writeFileSync(slow, "#!/bin/sh\nsleep 30\n", { mode: 0o755 });
     const client = createSubscriptionOpusClient("claude-opus-5-5", { claudePath: slow, yieldReason: notBusy, pathValue: "/usr/bin:/bin", timeoutMs: 300 });
