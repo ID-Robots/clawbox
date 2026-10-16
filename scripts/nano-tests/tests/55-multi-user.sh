@@ -58,6 +58,17 @@ call() {
 status_of() { printf "%s\n" "$1" | head -n1; }
 body_of() { printf "%s\n" "$1" | tail -n +2; }
 
+# python3, not jq: a stock board has no jq.
+# json_ok EXPR [ARG]: true when the Python expression EXPR is True for the JSON
+# on stdin, as `j` (ARG as `arg`); false for anything else, invalid JSON included.
+json_ok() {
+  python3 -c "import json,sys; j=json.load(sys.stdin); arg=(sys.argv[2:] or [None])[0]; sys.exit(0 if eval(sys.argv[1]) is True else 1)" "$@" 2>/dev/null
+}
+# json_field NAME: the top-level field NAME of the JSON on stdin, compact; nothing for invalid JSON.
+json_field() {
+  python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin).get(sys.argv[1]), separators=(\",\", \":\")))" "$1" 2>/dev/null
+}
+
 remove_user() {
   call DELETE /setup-api/users "$OWNER" "{\"username\":\"$USER_NAME\"}" >/dev/null 2>&1 || true
 }
@@ -83,10 +94,10 @@ if id -nG "$USER_NAME" | tr " " "\n" | grep -Eqx "sudo|adm|admin|wheel"; then
   say "not ok - the new account is in an administrator group"
 fi
 listing=$(body_of "$(call GET /setup-api/users "$OWNER")")
-if printf "%s" "$listing" | jq -e ".signIn.available == true" >/dev/null 2>&1; then
+if printf "%s" "$listing" | json_ok "j[\"signIn\"][\"available\"] is True"; then
   say "ok - the listing says other users can sign in"
 else
-  say "not ok - the listing says sign-in is unavailable: $(printf "%s" "$listing" | jq -c .signIn 2>/dev/null)"
+  say "not ok - the listing says sign-in is unavailable: $(printf "%s" "$listing" | json_field signIn || printf "(not JSON)")"
 fi
 
 # 2. Sign in with their own password; a wrong one is refused.
@@ -104,7 +115,7 @@ else
   exit 0
 fi
 me=$(body_of "$(call GET /setup-api/users/me "$USER_COOKIE")")
-printf "%s" "$me" | jq -e --arg u "$USER_NAME" ".username == \$u and .isOwner == false" >/dev/null 2>&1 \
+printf "%s" "$me" | json_ok "j[\"username\"] == arg and j[\"isOwner\"] is False" "$USER_NAME" \
   && say "ok - users/me names the user, not the owner" || say "not ok - users/me answered $(printf "%s" "$me" | head -c 200)"
 
 # 3. The owner desktop is theirs, except the three exceptions.
@@ -123,7 +134,7 @@ cred=$(status_of "$(call POST /setup-api/system/credentials "$USER_COOKIE" "{\"p
 console=$(status_of "$(call GET /setup-api/gateway "$USER_COOKIE")")
 [ "$console" = 403 ] && say "ok - the gateway console page with its token stays the owner'"'"'s (403)" || say "not ok - the gateway console answered the user $console"
 ws=$(body_of "$(call GET /setup-api/gateway/ws-config "$USER_COOKIE")")
-if printf "%s" "$ws" | jq -e ".token == \"\" and .relayed == true" >/dev/null 2>&1; then
+if printf "%s" "$ws" | json_ok "j[\"token\"] == \"\" and j[\"relayed\"] is True"; then
   say "ok - ws-config hands the user no gateway token"
 else
   say "not ok - ws-config answered the user a token or no relay mark"
