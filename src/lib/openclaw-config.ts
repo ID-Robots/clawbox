@@ -27,8 +27,11 @@ import { markGatewayRestartBegun } from "@/lib/gateway-restart-tracker";
 import {
   GatewayRestartFailedError,
   describeUnitState,
+  readUnitState,
   runUnitJob,
+  unitIsStopped,
   type UnitJobOutcome,
+  type UnitState,
 } from "@/lib/gateway-unit-job";
 import { getLocalAiToken } from "@/lib/local-ai-token";
 import { LEGACY_EXEC_APPROVALS_RE } from "@/lib/openclaw-doctor-blocker";
@@ -4024,22 +4027,33 @@ export async function runOpenclawDoctorFix(): Promise<OpenclawDoctorFixOutcome> 
   if (gatewayIsAbsent()) return "completed";
   // A stop that outlives its client is waited for rather than raced: on an
   // x64 bridge the stop waits for OpenClaw's own drain, and doctor started
-  // beside a gateway still draining finds a second owner of its state.
-  let stop: UnitJobOutcome | null = null;
+  // beside a gateway still draining finds a second owner of its state. Doctor
+  // runs only beside a unit that is down; a gateway still stopping, or there
+  // at all, refuses here in plain words. The caller restores the unit.
+  const stopAskedAt = Date.now();
+  let state: UnitState | null = null;
+  let stillStopping = false;
   try {
-    stop = await runUnitJob("/usr/bin/sudo", ["-n", "/usr/bin/systemctl", "stop", "clawbox-gateway.service"], {
+    const stop = await runUnitJob("/usr/bin/sudo", ["-n", "/usr/bin/systemctl", "stop", "clawbox-gateway.service"], {
       unit: "clawbox-gateway.service",
       timeoutMs: 30000,
       settleBudgetMs: 90_000,
     });
+    if (stop.kind === "in-flight") stillStopping = true;
+    else if (stop.kind === "settled") state = stop.state;
   } catch {
-    /* older sudoers or already stopped — doctor itself reports real trouble */
+    // A stop that failed outright (an older sudoers, or a stop cancelled by a
+    // restart another surface queued) proves nothing either way, so the unit
+    // is asked. Only a unit that cannot be asked at all keeps the old leniency
+    // of going on: doctor itself reports real trouble.
+    state = await readUnitState("clawbox-gateway.service");
   }
-  if (stop?.kind === "in-flight") {
-    throw new Error(`The assistant's gateway was still stopping after ${Math.round(stop.waitedMs / 1000)}s more, so its repair was not run beside it. Try again in a few minutes.`);
+  if (state && !unitIsStopped(state)) {
+    if (state.activeState === "deactivating") stillStopping = true;
+    else throw new Error(`The assistant's gateway did not stop (${describeUnitState(state)}), so its repair was not run beside it.`);
   }
-  if (stop?.kind === "settled" && stop.state.activeState === "active") {
-    throw new Error(`The assistant's gateway did not stop (${describeUnitState(stop.state)}), so its repair was not run beside it.`);
+  if (stillStopping) {
+    throw new Error(`The assistant's gateway was still stopping after ${Math.round((Date.now() - stopAskedAt) / 1000)}s, so its repair was not run beside it. Try again in a few minutes.`);
   }
   try {
     // The stop above is necessary and was never sufficient: the core refused
