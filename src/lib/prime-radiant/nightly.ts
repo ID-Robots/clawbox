@@ -396,7 +396,7 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
     // 3b. open contradiction items about two different things (identifier filter) are closed with a reason
     try {
       const re = rejudgeOpenContradictions(vault, snapshot, { now });
-      if (re.closed > 0) notes.push(`${re.closed} open contradiction item(s) were closed: different subjects (identifier filter).`);
+      if (re.closed > 0) notes.push(`${re.closed} open contradiction item(s) were closed: different subjects or records (identifier filter).`);
     } catch (err) {
       notes.push(`The open contradiction items could not be re-checked: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
     }

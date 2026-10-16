@@ -106,6 +106,8 @@ describe("names and leaves", () => {
   it("tells a leaf by a kind word and an identifier or date", () => {
     expect(leafInfo("Speedex waybill 1054432101", ["Delivered on 2026-09-03."])).toMatchObject({ kind: "shipments", qualifier: "Speedex", month: "2026-09" });
     expect(leafInfo("Daily sales report 2026-09-14")).toMatchObject({ kind: "daily-reports", month: "2026-09", sortKey: "2026-09-14" });
+    // A month-name date in the title is a date too.
+    expect(leafInfo("Adnet receipt email 0.05 4 jun 2026 21:59")).toMatchObject({ kind: "invoices", month: "2026-06", sortKey: "2026-06-04" });
     expect(leafInfo("Invoice process")).toBeNull();
     expect(leafInfo("Daily standup notes")).toBeNull();
   });

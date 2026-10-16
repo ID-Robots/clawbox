@@ -4,8 +4,11 @@
  * POST `{ action, dryRun? }`:
  *  - `rejudge-reviews`: close the OPEN contradiction items whose two sides
  *    carry different identifiers (waybills, invoices, transfers, dates), with
- *    the note "auto: different subjects (identifier filter)". Nothing else is
- *    closed. Answers the result. `dryRun: true` only counts.
+ *    the note "auto: different subjects (identifier filter)", or are two
+ *    record pages with no reference in common, with the note "auto: different
+ *    records, no shared reference (identifier filter)". An item touching a
+ *    verified claim stays open. Nothing else is closed. Answers the result.
+ *    `dryRun: true` only counts.
  *  - `reindex`: start a whole-vault search reindex (every page on `main`,
  *    vectors at 1,024-d); `GET status` follows it (`index.needsFullScan`
  *    clears when it finishes uncapped).
