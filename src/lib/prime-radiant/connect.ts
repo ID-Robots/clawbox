@@ -50,6 +50,10 @@ export const RELATED_MIN_SIMILARITY = 0.6;
 export const RELATED_DIMS = 256;
 /** Pages sharing a rare entity a page links to, at most. */
 export const SHARED_ENTITY_K = 3;
+/** Links a page should reach: shared-entity pages fill up to this many when the other sections fall short. */
+export const TARGET_LINKS = 6;
+/** Shared-entity candidates kept per page (for that filling). */
+const SHARED_ENTITY_POOL = 8;
 /** An entity named on more pages than this is too common to tie two pages by. */
 export const SHARED_ENTITY_MAX_DF = 150;
 /** Distinct pages a name must appear on before the pass creates an entity page for it. */
@@ -82,6 +86,11 @@ const NAME_STOP: ReadonlySet<string> = new Set(
   ).split(" "),
 );
 
+/** Last words that make a phrase a kind of document or role, not a name. */
+const DOC_TAILS: ReadonlySet<string> = new Set(
+  "Invoice Invoices Receipt Receipts Email Emails Declaration Declarations Shipment Shipments Recipient Recipients Sender Report Reports Label Labels Order Orders Payment Payments Transfer Transfers Statement Statements Document Documents Form Forms Request Requests Confirmation Notification Notice Letter Message Ticket Tickets Template Draft Copy".split(" "),
+);
+
 function cleanName(raw: string): string | null {
   const words = raw.trim().split(/\s+/);
   while (words.length > 0 && NAME_STOP.has(words[0])) words.shift();
@@ -91,6 +100,11 @@ function cleanName(raw: string): string | null {
   if (name.length < 3 || name.length > 60 || /^\d/.test(name)) return null;
   // One plain capitalised word ("Delivered") is no name; a CamelCase word or an acronym-led one is.
   if (words.length === 1 && !/[a-z][A-Z]|^[A-Z]{2,}[a-z]/.test(name)) return null;
+  // "PRs", "PDFs": a plural acronym is a kind of thing, not a name.
+  if (words.length === 1 && /^[A-Z]{2,}s$/.test(name)) return null;
+  // "Customs Export Declaration", "Meta Ads Receipt": a document kind, not a name.
+  if (DOC_TAILS.has(words[words.length - 1])) return null;
+  if (new RegExp(`^${ORG_SUFFIX}$`).test(name)) return null;
   return name;
 }
 
@@ -368,6 +382,7 @@ export function planConnections(snapshot: Pick<VaultSnapshot, "pages" | "indexBo
   const fresh = [...df.entries()]
     .filter(([name, s]) => s.size >= MIN_ENTITY_PAGES && !lowerTaken.has(name.toLowerCase()))
     .sort((a, b) => b[1].size - a[1].size || a[0].localeCompare(b[0]))
+    .filter(([name], i, all) => all.findIndex(([other]) => other.toLowerCase() === name.toLowerCase()) === i)
     .slice(0, MAX_NEW_ENTITIES);
   const created: PlannedWrite[] = [];
   const newPages: ConnectPage[] = [];
@@ -535,9 +550,26 @@ export function planConnections(snapshot: Pick<VaultSnapshot, "pages" | "indexBo
     }
     shared.set(
       p.path,
-      [...score.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, SHARED_ENTITY_K).map(([o]) => o),
+      [...score.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, SHARED_ENTITY_POOL).map(([o]) => o),
     );
   }
+
+  // Pages written from the same source document (a source shared by many is no tie).
+  const bySource = new Map<string, string[]>();
+  for (const p of content) for (const src of p.fm.sources) {
+    const l = bySource.get(src) ?? [];
+    l.push(p.path);
+    bySource.set(src, l);
+  }
+  const sameSource = (p: ConnectPage) => {
+    const out: string[] = [];
+    for (const src of p.fm.sources) {
+      const l = bySource.get(src) ?? [];
+      if (l.length > SHARED_ENTITY_MAX_DF) continue;
+      for (const o of l) if (o !== p.path && !out.includes(o)) out.push(o);
+    }
+    return out;
+  };
 
   // 4. render the blocks.
   const titleOf = (p: string) => byPath.get(p)?.fm.title ?? p.replace(/\.md$/, "");
@@ -564,11 +596,19 @@ export function planConnections(snapshot: Pick<VaultSnapshot, "pages" | "indexBo
       const at = m.indexOf(p.path);
       siblings.push(...[m[at - 1], m[at + 1]].filter((x): x is string => !!x));
     }
+    const others = new Set([...(hub ? [hub] : []), ...(pageEntities.get(p.path) ?? []), ...(related.get(p.path) ?? []), ...siblings]);
+    const sharedPool = (shared.get(p.path) ?? []).filter((t) => !others.has(t));
     const sections: Section[] = [
       { heading: "Hub", targets: hub ? [hub] : [] },
       { heading: "Entities", targets: pageEntities.get(p.path) ?? [] },
       { heading: "Similar pages", targets: related.get(p.path) ?? [] },
-      { heading: "Shares entities with", targets: shared.get(p.path) ?? [] },
+      { heading: "Shares entities with", targets: sharedPool.slice(0, Math.max(SHARED_ENTITY_K, TARGET_LINKS - others.size)) },
+      {
+        heading: "Same source",
+        targets: sameSource(p)
+          .filter((t) => !others.has(t) && !sharedPool.includes(t))
+          .slice(0, Math.max(0, TARGET_LINKS - others.size - Math.min(sharedPool.length, Math.max(SHARED_ENTITY_K, TARGET_LINKS - others.size)))),
+      },
       { heading: "Neighbours", targets: siblings },
     ];
     // An entity page lists the pages that name it (its backlinks).
