@@ -48,6 +48,8 @@ export const RELATED_K = 5;
 export const RELATED_MIN_SIMILARITY = 0.6;
 /** The leading dimensions the neighbour search compares (Matryoshka; plenty to rank neighbours). */
 export const RELATED_DIMS = 256;
+/** Pages that take part in the neighbour search, at most (it is quadratic). */
+export const MAX_RELATED_PAGES = 20_000;
 /** Pages sharing a rare entity a page links to, at most. */
 export const SHARED_ENTITY_K = 3;
 /** Links a page should reach: shared-entity pages fill up to this many when the other sections fall short. */
@@ -206,6 +208,8 @@ export interface PlannedWrite {
   frontmatter: PageFrontmatter;
   body: string;
   created: boolean;
+  /** The page's text when the plan was made (null: a new page); the write is skipped when the file moved since. */
+  expected: string | null;
 }
 
 export interface ConnectStats {
@@ -343,7 +347,7 @@ function stringList(v: unknown): string[] {
 }
 
 /** Plan the pass over `snapshot`. Pure. */
-export function planConnections(snapshot: Pick<VaultSnapshot, "pages" | "indexBody">, options: ConnectOptions = {}): ConnectPlan {
+export async function planConnections(snapshot: Pick<VaultSnapshot, "pages" | "indexBody">, options: ConnectOptions = {}): Promise<ConnectPlan> {
   const now = (options.now ?? new Date()).toISOString();
   const minSim = options.minSimilarity ?? RELATED_MIN_SIMILARITY;
   const pages: ConnectPage[] = snapshot.pages.flatMap((p) => (p.parsed.ok ? [{ path: p.path, fm: p.parsed.frontmatter, body: stripRelatedBlock(p.parsed.body) }] : []));
@@ -392,13 +396,15 @@ export function planConnections(snapshot: Pick<VaultSnapshot, "pages" | "indexBo
     const domain = mostCommon(members.map((m) => m.fm.domain)) ?? "general";
     const existingOurs = pages.find((p) => isOurs(p) && p.fm.title === name && p.path.startsWith("entities/"));
     const path = existingOurs?.path ?? uniquePath("entities", name, taken);
-    const fm: PageFrontmatter = {
+    const computed = { domain, sources: topSources(members, 10), privacy: strictestPrivacy(members) };
+    // An earlier run's page keeps whatever a person set on it (owner, status, aliases, verification).
+    const fm: PageFrontmatter = existingOurs ? { ...existingOurs.fm, sources: computed.sources } : {
       type: "entity",
       title: name,
       domain,
       owner: "unassigned",
       status: "draft",
-      generated: { at: existingOurs?.fm.generated.at ?? now, by: "connect" },
+      generated: { at: now, by: "connect" },
       verified: null,
       stale_after: null,
       sources: topSources(members, 10),
@@ -413,7 +419,7 @@ export function planConnections(snapshot: Pick<VaultSnapshot, "pages" | "indexBo
     entityByName.set(name, path);
     if (!existingOurs) taken.add(path);
     byPath.set(path, page);
-    created.push({ path, frontmatter: fm, body: page.body, created: !existingOurs });
+    created.push({ path, frontmatter: fm, body: page.body, created: !existingOurs, expected: originals.get(path)?.text ?? null });
   }
 
   // Which entities each content page names.
@@ -476,13 +482,14 @@ export function planConnections(snapshot: Pick<VaultSnapshot, "pages" | "indexBo
       l.push({ month: `${info.month}#${String(part).padStart(3, "0")}`, path });
       hubsBySeries.set(series, l);
       const leafPages = slice.map((s) => byPath.get(s)!);
-      const fm: PageFrontmatter = {
+      const hubMeta = { kind: info.kind, month: info.month, ...(info.qualifier ? { qualifier: info.qualifier } : {}), leaves: slice.length };
+      const fm: PageFrontmatter = prior ? { ...prior.fm, sources: topSources(leafPages, 20), hub: hubMeta } : {
         type: "synthesis",
         title,
         domain: mostCommon(leafPages.map((m) => m.fm.domain)) ?? "general",
         owner: "unassigned",
         status: "draft",
-        generated: { at: prior?.fm.generated.at ?? now, by: "connect" },
+        generated: { at: now, by: "connect" },
         verified: null,
         stale_after: null,
         sources: topSources(leafPages, 20),
@@ -498,7 +505,7 @@ export function planConnections(snapshot: Pick<VaultSnapshot, "pages" | "indexBo
       const page: ConnectPage = { path, fm, body };
       byPath.set(path, page);
       newPages.push(page);
-      created.push({ path, frontmatter: fm, body, created: !prior });
+      created.push({ path, frontmatter: fm, body, created: !prior, expected: originals.get(path)?.text ?? null });
     }
   }
   const prevNextHub = new Map<string, string[]>();
@@ -509,12 +516,14 @@ export function planConnections(snapshot: Pick<VaultSnapshot, "pages" | "indexBo
 
   // 2. related by embedding (cut to RELATED_DIMS), leaves of the same hub left out (they are tied as siblings).
   const related = new Map<string, string[]>();
-  const vecPages = content.filter((p) => options.vectors?.has(p.path));
+  const vecPages = content.filter((p) => options.vectors?.has(p.path)).slice(0, MAX_RELATED_PAGES);
   if (vecPages.length > 1) {
     const dims = Math.min(RELATED_DIMS, options.vectors!.get(vecPages[0].path)!.length);
     const vs = vecPages.map((p) => cut(options.vectors!.get(p.path)!, dims));
     const ok = vs.map((v) => v.length === dims);
     for (let i = 0; i < vecPages.length; i++) {
+      // A few thousand pages is billions of multiply-adds: the event loop is let through between rows.
+      if (i % 32 === 0) await new Promise<void>((resolve) => setImmediate(resolve));
       if (!ok[i]) continue;
       const best: Array<{ j: number; s: number }> = [];
       const hubI = hubOf.get(vecPages[i].path);
@@ -620,10 +629,15 @@ export function planConnections(snapshot: Pick<VaultSnapshot, "pages" | "indexBo
       finalBodies.set(p.path, original?.parsed.body ?? p.body);
       continue;
     }
-    if (original && original.parsed.body.trim() !== body.trim()) writes.push({ path: p.path, frontmatter: p.fm, body, created: false });
+    if (original && original.parsed.body.trim() !== body.trim()) writes.push({ path: p.path, frontmatter: p.fm, body, created: false, expected: original.text });
   }
   for (const c of created) {
     const page = byPath.get(c.path)!;
+    // A page of ours a person verified is theirs now.
+    if (c.frontmatter.verified) {
+      finalBodies.set(c.path, originals.get(c.path)?.parsed.body ?? page.body);
+      continue;
+    }
     const sections: Section[] = c.frontmatter.type === "synthesis"
       ? [
           { heading: "Pages", targets: hubMembers.get(c.path) ?? [], bare: true },
@@ -681,7 +695,7 @@ export async function runConnectPass(
   run: (message: string, fn: (tx: VaultTx) => Promise<void>) => Promise<{ commit: string | null }>,
   options: ConnectOptions & { dryRun?: boolean } = {},
 ): Promise<ConnectRunResult> {
-  const plan = planConnections(snapshot, options);
+  const plan = await planConnections(snapshot, options);
   const created = plan.writes.filter((w) => w.created);
   const result: ConnectRunResult = { ...plan.stats, written: plan.writes.length, created: created.length, commits: [], dryRun: !!options.dryRun };
   if (options.dryRun) return result;
@@ -691,7 +705,12 @@ export async function runConnectPass(
     const batch = ordered.slice(at, at + CONNECT_BATCH);
     const { commit } = await run(`connect: links, entities and hubs (${at + 1}-${at + batch.length} of ${ordered.length})`, async (tx) => {
       if (at === 0 && indexBody !== null) await tx.write("index.md", indexBody);
-      for (const w of batch) await tx.writePage(w.path, w.frontmatter, w.body);
+      for (const w of batch) {
+        // Edited (or verified) since the plan was made: left as the person left it.
+        const current = await tx.read(w.path);
+        if ((current?.text ?? null) !== w.expected) continue;
+        await tx.writePage(w.path, w.frontmatter, w.body);
+      }
     });
     if (commit) result.commits.push(commit);
   }

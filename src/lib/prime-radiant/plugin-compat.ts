@@ -111,6 +111,9 @@ export async function migratePluginFrontmatter(
     const { commit } = await run(`migrate: memory-wiki frontmatter (${at + 1}-${at + batch.length} of ${todo.length})`, async (tx) => {
       for (const p of batch) {
         if (!p.parsed.ok) continue;
+        // Edited since the snapshot: left as it is (the next migration picks it up).
+        const current = await tx.read(p.path);
+        if (current?.text !== p.text) continue;
         await tx.writePage(p.path, p.parsed.frontmatter, p.parsed.body);
       }
     });
