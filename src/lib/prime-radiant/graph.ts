@@ -19,7 +19,7 @@
  *     entity, subject or tag in its frontmatter, or the entity its claims are
  *     about — in the same ring as sources; a page still without any edge
  *     then gets up to two neighbours in its own domain. At most
- *     {@link MAX_RELATED_EDGES} a page. Not counted in a page's degree.
+ *     {@link MAX_RELATED_EDGES} a page. Counted in `degree`, not in `links`.
  * Built in O(pages + links + source and topic mentions).
  *
  * The graph is kept for the vault's revision — HEAD, plus the size and time
@@ -46,8 +46,10 @@ export interface GraphNode {
   id: string;
   title: string;
   domain: string | null;
-  /** Links and shared sources this page has (a related hint is not one). */
+  /** Every edge this page has: links, shared sources and related hints. */
   degree: number;
+  /** Its `[[wikilink]]` / Markdown links, either way (a shared source or a hint is not one). */
+  links: number;
   /** Source documents the page names. */
   sources: number;
 }
@@ -134,6 +136,7 @@ export function buildVaultGraph(pages: readonly GraphPage[], revision: string | 
   const index = new Map<string, number>();
   pages.forEach((p, i) => index.set(p.path, i));
   const degree = new Uint32Array(n);
+  const linkCount = new Uint32Array(n);
   const edges: GraphEdge[] = [];
   const pairs = new Set<number>();
   const add = (x: number, y: number, w: number): boolean => {
@@ -143,9 +146,11 @@ export function buildVaultGraph(pages: readonly GraphPage[], revision: string | 
     if (pairs.has(key)) return false;
     pairs.add(key);
     edges.push([a, b, w]);
-    if (w !== RELATED_WEIGHT) {
-      degree[a]++;
-      degree[b]++;
+    degree[a]++;
+    degree[b]++;
+    if (w === LINK_WEIGHT) {
+      linkCount[a]++;
+      linkCount[b]++;
     }
     return true;
   };
@@ -183,7 +188,7 @@ export function buildVaultGraph(pages: readonly GraphPage[], revision: string | 
   };
   ringTie(groupBy(n, (i) => (pages[i].topics ?? []).map(topicKey).filter(Boolean)).values(), relate);
   // …then, for a page with no edge at all yet, its neighbours in its domain.
-  const loose = Array.from({ length: n }, (_, i) => degree[i] === 0 && related[i] === 0);
+  const loose = Array.from({ length: n }, (_, i) => degree[i] === 0);
   for (const members of groupBy(n, (i) => (pages[i].domain ? [pages[i].domain!] : [])).values()) {
     const k = members.length;
     members.forEach((i, at) => {
@@ -201,6 +206,7 @@ export function buildVaultGraph(pages: readonly GraphPage[], revision: string | 
       title: p.title?.trim() || leafTitle(p.path),
       domain: p.domain,
       degree: degree[i],
+      links: linkCount[i],
       sources: p.sources.length,
     })),
     edges,

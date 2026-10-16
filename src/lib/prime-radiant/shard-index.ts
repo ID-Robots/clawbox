@@ -4,7 +4,7 @@
  * Memory Shard stays the search engine: this module reuses its chunker
  * (`chunkText`), its embedding client (`embedMemoryTexts` — the same fence,
  * retries and normalised vectors), its embedder choice (`resolveMemoryEmbedder`)
- * and its memory budget (`maxIndexChunks`). What it adds is what the owner's
+ * and keeps a vector budget of its own (`vaultMaxChunks`, vectors cut to 1,024-d). What it adds is what the owner's
  * folders never had: every hit knows WHICH page or claim it came from (`path`,
  * `id`, `kind`, page `type`), and a page or claim a person verified ranks above
  * one nobody checked.
@@ -57,7 +57,6 @@ import {
   chunkText,
   embedMemoryTexts,
   embedderIdentity,
-  maxIndexChunks,
 } from "@/lib/memory-index-local";
 import { parsePage } from "./frontmatter";
 import { currentBranch, git, VAULT_MAIN_BRANCH } from "./git";
@@ -67,7 +66,40 @@ import { vaultInitialised } from "./vault";
 import type { PageFrontmatter } from "./schema";
 
 /** Bumped when the tables or what goes into them change: the store is rebuilt. */
-const VAULT_INDEX_SCHEMA = "1";
+const VAULT_INDEX_SCHEMA = "2";
+
+/**
+ * The width a vault vector is kept at. The cloud embedder answers 3,072-d
+ * Matryoshka vectors whose leading dimensions carry most of the meaning: cut
+ * to {@link VAULT_INDEX_DIMS} and normalised again, a vector costs a third of
+ * the memory, so the whole vault fits where only a quarter of it did. A
+ * narrower embedder is kept as it is. Queries are cut the same way.
+ */
+export const VAULT_INDEX_DIMS = 1024;
+
+/**
+ * The vault's own vector budget (Shard's is for the owner's folders): enough
+ * for ~40k chunks at {@link VAULT_INDEX_DIMS}, a vault of several thousand
+ * pages with room to grow.
+ */
+export const VAULT_INDEX_BUDGET_BYTES = 160 * 1024 * 1024;
+
+/** The most chunks the vault index holds for vectors `dims` wide. */
+export function vaultMaxChunks(dims: number): number {
+  const width = Math.max(1, Math.min(VAULT_INDEX_DIMS, Number.isFinite(dims) && dims > 0 ? dims : VAULT_INDEX_DIMS));
+  return Math.max(1, Math.floor(VAULT_INDEX_BUDGET_BYTES / (width * Float32Array.BYTES_PER_ELEMENT)));
+}
+
+/** A vector cut to {@link VAULT_INDEX_DIMS} and normalised to unit length again (Matryoshka truncation). */
+export function truncateVector(vec: Float32Array, dims = VAULT_INDEX_DIMS): Float32Array {
+  if (vec.length <= dims) return vec;
+  const out = vec.slice(0, dims);
+  let sum = 0;
+  for (let i = 0; i < out.length; i++) sum += out[i] * out[i];
+  const norm = Math.sqrt(sum) || 1;
+  for (let i = 0; i < out.length; i++) out[i] /= norm;
+  return out;
+}
 
 export const VAULT_INDEX_FILE = "shard-index.sqlite";
 
@@ -88,6 +120,16 @@ const MAX_INDEXED_PAGE_BYTES = 1024 * 1024;
  * order the boost gave them.
  */
 export const VERIFIED_BOOST = 0.1;
+
+/**
+ * How far a hub page (a `synthesis` page rolling up many leaves: a month of
+ * shipments, of transfers, of daily reports) is lifted, so a query about the
+ * kind of thing finds the hub before the hundred single parcels under it.
+ */
+export const HUB_BOOST = 0.08;
+
+/** The page types ranked as hubs. */
+export const HUB_TYPES: ReadonlySet<string> = new Set(["synthesis"]);
 
 /** The ceiling of a hit's score, the same as a plain similarity's. */
 export const MAX_SCORE = 1;
@@ -245,7 +287,7 @@ export function rankVaultHits(candidates: readonly RankCandidate[], limit: numbe
   const best = new Map<string, { hit: VaultSearchHit; rank: number }>();
   for (const c of candidates) {
     const similarity = Math.max(0, Math.min(1, c.similarity));
-    const rank = similarity + (c.verified ? VERIFIED_BOOST : 0);
+    const rank = similarity + (c.verified ? VERIFIED_BOOST : 0) + (c.kind === "page" && HUB_TYPES.has(c.type) ? HUB_BOOST : 0);
     const key = hitKey(c);
     const held = best.get(key);
     if (held && held.rank >= rank) continue;
@@ -360,7 +402,7 @@ function countOf(db: DatabaseSync, sql: string): number {
 function storeIdentity(embedder: ResolvedEmbedder, vault: string): string {
   return crypto
     .createHash("sha256")
-    .update(`${embedderIdentity(embedder)}|${path.resolve(vault)}|v${VAULT_INDEX_SCHEMA}`)
+    .update(`${embedderIdentity(embedder)}|${path.resolve(vault)}|v${VAULT_INDEX_SCHEMA}|d${VAULT_INDEX_DIMS}`)
     .digest("hex")
     .slice(0, 16);
 }
@@ -441,7 +483,7 @@ async function syncOnce(vault: string, paths: ReadonlySet<string> | null, signal
 
   const embedder = await resolveMemoryEmbedder();
   const identity = storeIdentity(embedder, vault);
-  const ceiling = maxIndexChunks(embedder.dimensions);
+  const ceiling = vaultMaxChunks(embedder.dimensions);
   const db = await openForWrite(vaultIndexPathFor(vault));
   try {
     const disowned = metaGet(db, "identity") !== identity;
@@ -531,7 +573,7 @@ async function syncOnce(vault: string, paths: ReadonlySet<string> | null, signal
       const vectors: Float32Array[] = [];
       for (let at = 0; at < units.length; at += MEMORY_EMBED_BATCH_INPUTS) {
         const batch = units.slice(at, at + MEMORY_EMBED_BATCH_INPUTS).map((u) => u.text);
-        vectors.push(...(await embedMemoryTexts(batch, "document", signal, embedder)));
+        vectors.push(...(await embedMemoryTexts(batch, "document", signal, embedder)).map((v) => truncateVector(v)));
       }
       tx(() => {
         sql.dropChunks.run(rel);
@@ -693,6 +735,8 @@ interface VectorCache {
   vectors: Float32Array;
   ids: number[];
   verified: Uint8Array;
+  /** What each row is lifted by: verified, hub page. */
+  lift: Float32Array;
 }
 
 interface CacheSlot {
@@ -742,8 +786,11 @@ function loadVectors(db: DatabaseSync, file: string): VectorCache | null {
   let dim = 0;
   const ids: number[] = [];
   const verified = new Uint8Array(total);
-  for (const raw of db.prepare("SELECT id, verified, vec FROM chunks ORDER BY id").iterate()) {
-    const row = raw as { id?: unknown; verified?: unknown; vec?: unknown };
+  const lift = new Float32Array(total);
+  for (const raw of db
+    .prepare("SELECT c.id AS id, c.verified AS verified, c.vec AS vec, c.kind AS kind, p.type AS type FROM chunks c LEFT JOIN pages p ON p.path = c.path ORDER BY c.id")
+    .iterate()) {
+    const row = raw as { id?: unknown; verified?: unknown; vec?: unknown; kind?: unknown; type?: unknown };
     const vec = row.vec as Uint8Array;
     if (!vectors) {
       dim = vec.byteLength / Float32Array.BYTES_PER_ELEMENT;
@@ -754,10 +801,11 @@ function loadVectors(db: DatabaseSync, file: string): VectorCache | null {
     if (vec.byteLength !== dim * Float32Array.BYTES_PER_ELEMENT || ids.length >= total) continue;
     bytes!.set(vec, ids.length * dim * Float32Array.BYTES_PER_ELEMENT);
     verified[ids.length] = Number(row.verified) ? 1 : 0;
+    lift[ids.length] = (Number(row.verified) ? VERIFIED_BOOST : 0) + (row.kind === "page" && typeof row.type === "string" && HUB_TYPES.has(row.type) ? HUB_BOOST : 0);
     ids.push(Number(row.id));
   }
   if (!vectors || ids.length === 0) return null;
-  slot.cache = { stamp, dim, vectors: vectors.subarray(0, ids.length * dim), ids, verified: verified.subarray(0, ids.length) };
+  slot.cache = { stamp, dim, vectors: vectors.subarray(0, ids.length * dim), ids, verified: verified.subarray(0, ids.length), lift: lift.subarray(0, ids.length) };
   arm();
   return slot.cache;
 }
@@ -787,7 +835,8 @@ export async function searchPrimeRadiant(
     embedding.catch(() => {});
     const cache = loadVectors(db, file);
     if (!cache) return [];
-    const [q] = await embedding;
+    const [raw] = await embedding;
+    const q = raw ? truncateVector(raw) : raw;
     if (!q || q.length !== cache.dim) return [];
 
     // Every row scored, then read best first until `want` distinct pages and
@@ -800,7 +849,7 @@ export async function searchPrimeRadiant(
       let s = 0;
       const base = row * cache.dim;
       for (let i = 0; i < cache.dim; i += 1) s += cache.vectors[base + i] * q[i];
-      boostedAt[row] = s + (cache.verified[row] ? VERIFIED_BOOST : 0);
+      boostedAt[row] = s + cache.lift[row];
     }
     const order = Array.from(cache.ids.keys()).sort((a, b) => boostedAt[b] - boostedAt[a] || a - b);
 
@@ -824,7 +873,7 @@ export async function searchPrimeRadiant(
         title: typeof row.title === "string" ? row.title : "",
         text: row.text,
         verified,
-        similarity: boostedAt[at] - (verified ? VERIFIED_BOOST : 0),
+        similarity: boostedAt[at] - cache.lift[at],
       };
       const key = hitKey(candidate);
       if (held.has(key)) continue;
