@@ -6,8 +6,9 @@
  * `{ job }`, progress on `GET ingest/<new id>/events`; what fails again is
  * the new job's dead letters.
  *
- * 404 `not_found`, 409 `busy` (`runningId`), 412 `no_credential`. OWNER
- * ONLY, cookie AND same origin, like every start.
+ * 404 `not_found`, 409 `busy` (`runningId`), 412 `no_credential`. The owner
+ * (cookie AND same origin) or the assistant through the MCP bearer, like
+ * every start.
  */
 import { flashAvailable } from "@/lib/prime-radiant/flash-client";
 import {
@@ -19,13 +20,13 @@ import {
   safeJobId,
   startIngest,
 } from "@/lib/prime-radiant/ingest";
-import { fail, json, ownerWriteGuard, vaultFailure } from "@/lib/prime-radiant/route-helpers";
+import { fail, json, vaultFailure, writerGuard } from "@/lib/prime-radiant/route-helpers";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: Request, ctx: { params: Promise<{ id: string }> }) {
-  const denied = await ownerWriteGuard(req, "Retrying an ingest");
-  if (denied) return denied;
+  const gate = await writerGuard(req, "Retrying an ingest");
+  if (!gate.ok) return gate.response;
   const id = safeJobId((await ctx.params).id);
   if (!id || !getIngestJob(id)) return fail("not_found", "No such ingest job.", 404);
   const running = runningJobId();
@@ -34,7 +35,7 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     return fail("no_credential", "Sign this box in to ClawBox AI first; Prime Radiant writes its pages with it.", 412);
   }
   try {
-    return json({ job: await startIngest({ kind: "retry", retryOf: id }) }, 202);
+    return json({ job: await startIngest({ kind: "retry", retryOf: id }, { author: gate.writer.author }) }, 202);
   } catch (err) {
     if (err instanceof IngestBusyError) {
       return json({ error: "An ingest is already running.", code: "busy", runningId: err.runningId }, 409);

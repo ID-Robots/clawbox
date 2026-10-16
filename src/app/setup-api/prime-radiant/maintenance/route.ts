@@ -19,8 +19,11 @@
  *
  * GET → `{ running, last: { [action]: result | { error } } }`.
  *
- * OWNER ONLY (POST: cookie AND same origin). 412 `not_initialised` before
- * the vault exists; 400 `invalid` for an unknown action.
+ * OWNER ONLY (POST: cookie AND same origin) — but the assistant, through the
+ * MCP bearer, may run `connect` (the owner's "run the connect pass now"). The
+ * other three stay the owner's: a reindex re-embeds the whole vault, and the
+ * rejudge and the migration are repairs. 412 `not_initialised` before the
+ * vault exists; 400 `invalid` for an unknown action.
  */
 import { processStore } from "@/lib/process-store";
 import { requireSession } from "@/lib/route-auth";
@@ -29,16 +32,18 @@ import { vaultDir } from "@/lib/prime-radiant/paths";
 import { migratePluginFrontmatter } from "@/lib/prime-radiant/plugin-compat";
 import { readPageVectors, reindexPrimeRadiantVault, vaultIndexingAllowed } from "@/lib/prime-radiant/shard-index";
 import { rejudgeOpenContradictions } from "@/lib/prime-radiant/rejudge";
-import { fail, json, ownerWriteGuard, readJsonBody, vaultFailure } from "@/lib/prime-radiant/route-helpers";
+import { fail, json, readJsonBody, vaultFailure, writerGuard } from "@/lib/prime-radiant/route-helpers";
+import type { VaultAuthor } from "@/lib/prime-radiant/git";
 import { readVaultSnapshot, vaultInitialised, vaultOperation, type VaultTx } from "@/lib/prime-radiant/vault";
 
 export const dynamic = "force-dynamic";
 
 const state = processStore("prime-radiant:maintenance", () => ({ running: null as string | null, last: {} as Record<string, unknown> }));
 
-function commitWith(vault: string) {
+/** Commits for a pass, authored by whoever started it (the assistant's connect pass names it). */
+function commitWith(vault: string, author: VaultAuthor) {
   return async (message: string, fn: (tx: VaultTx) => Promise<void>) => {
-    const { commit } = await vaultOperation(message, fn, { vault });
+    const { commit } = await vaultOperation(message, fn, { vault, author });
     return { commit };
   };
 }
@@ -65,11 +70,14 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
-  const denied = await ownerWriteGuard(req, "Running a vault maintenance pass");
-  if (denied) return denied;
+  const gate = await writerGuard(req, "Running a vault maintenance pass");
+  if (!gate.ok) return gate.response;
   const read = await readJsonBody(req);
   if (!read.ok) return read.response;
   const b = (read.body && typeof read.body === "object" ? read.body : {}) as { action?: unknown; dryRun?: unknown };
+  if (!gate.writer.person && b.action !== "connect") {
+    return fail("owner_only", "Only the owner can run that maintenance pass; the assistant may run the connect pass.", 403);
+  }
   if (!(await vaultInitialised())) return fail("not_initialised", "Open Prime Radiant once to create its vault first.", 412);
   const dryRun = b.dryRun === true;
   const vault = vaultDir();
@@ -86,14 +94,14 @@ export async function POST(req: Request) {
       }
       case "connect": {
         if (state.running) return busy();
-        if (dryRun) return json(await runConnectPass(await readVaultSnapshot(vault), commitWith(vault), { dryRun, vectors: await readPageVectors(vault) }));
-        background("connect", async () => runConnectPass(await readVaultSnapshot(vault), commitWith(vault), { vectors: await readPageVectors(vault) }));
+        if (dryRun) return json(await runConnectPass(await readVaultSnapshot(vault), commitWith(vault, gate.writer.author), { dryRun, vectors: await readPageVectors(vault) }));
+        background("connect", async () => runConnectPass(await readVaultSnapshot(vault), commitWith(vault, gate.writer.author), { vectors: await readPageVectors(vault) }));
         return json({ started: true }, 202);
       }
       case "migrate-frontmatter": {
         if (state.running) return busy();
-        if (dryRun) return json(await migratePluginFrontmatter(await readVaultSnapshot(vault), commitWith(vault), { dryRun }));
-        background("migrate-frontmatter", async () => migratePluginFrontmatter(await readVaultSnapshot(vault), commitWith(vault)));
+        if (dryRun) return json(await migratePluginFrontmatter(await readVaultSnapshot(vault), commitWith(vault, gate.writer.author), { dryRun }));
+        background("migrate-frontmatter", async () => migratePluginFrontmatter(await readVaultSnapshot(vault), commitWith(vault, gate.writer.author)));
         return json({ started: true }, 202);
       }
       default:

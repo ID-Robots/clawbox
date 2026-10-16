@@ -16,7 +16,7 @@ import { parsePage, serializePage, pageSummary, type ParsedPage } from "./frontm
 import { hasVerification, type PageFrontmatter } from "./schema";
 import { isKnowledgePage, pageAbsPath, RESERVED_DIRS, safePagePath, vaultDir } from "./paths";
 import { PLUGIN_GITIGNORE_LINES, stripManagedBlocks } from "./plugin-files";
-import { commitPaths, git, hasCommits, initRepo, isGitRepo, restorePaths, withVaultLock } from "./git";
+import { commitPaths, git, hasCommits, initRepo, isGitRepo, restorePaths, withVaultLock, type VaultAuthor } from "./git";
 import { lintSecretsInText, lintVault, type LintFinding } from "./lint";
 import { readRetiredLedger, recordRetired } from "./state-db";
 
@@ -316,6 +316,8 @@ export interface VaultOperationOptions {
    * (a merge that names its own paths) can switch it off.
    */
   reindex?: boolean;
+  /** Who the commit names as its author. Default Prime Radiant (git.ts). */
+  author?: VaultAuthor;
 }
 
 function txPath(rel: string): string {
@@ -405,7 +407,7 @@ export async function vaultOperation<T>(
     }
     let commit: string | null;
     try {
-      commit = await commitPaths(vault, message, changed());
+      commit = await commitPaths(vault, message, changed(), options.author);
     } catch (err) {
       await restorePaths(vault, changed());
       throw err;

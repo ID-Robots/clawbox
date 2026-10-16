@@ -15,7 +15,8 @@
 
 import crypto from "crypto";
 import fs from "fs/promises";
-import { statfsSync } from "fs";
+import { createReadStream, statfsSync } from "fs";
+import { Readable } from "stream";
 import path from "@/lib/runtime-path";
 import { boundedBody } from "@/lib/bounded-body";
 import { DISK_FREE_RESERVE_BYTES } from "@/lib/disk-reserve";
@@ -147,11 +148,15 @@ export async function stageUpload(
   if (declaredLength !== null && declaredLength > MAX_UPLOAD_FILE_BYTES) return { ok: false, code: "too_large", status: 413 };
 
   let batch: string;
+  // A batch made for this file: it goes again when the file is refused, so a
+  // failed first file leaves no empty batch behind.
+  let created = false;
   if (rawBatch === null || rawBatch === undefined || rawBatch === "") {
     batch = newBatchId();
     await fs.mkdir(uploadsRoot(), { recursive: true, mode: 0o700 });
     await pruneStaleBatches();
     await fs.mkdir(batchDir(batch), { mode: 0o700 });
+    created = true;
   } else {
     const safe = safeBatchId(rawBatch);
     if (!safe) return { ok: false, code: "unknown_batch", status: 404 };
@@ -164,6 +169,10 @@ export async function stageUpload(
     }
   }
   const dir = batchDir(batch);
+  const refuse = async (result: Exclude<StageResult, { ok: true }>): Promise<StageResult> => {
+    if (created) await fs.rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    return result;
+  };
   const usage = await batchUsage(dir);
   if (usage.files >= MAX_UPLOAD_FILES_PER_BATCH) return { ok: false, code: "batch_full", status: 409 };
   const roomInBatch = MAX_UPLOAD_BATCH_BYTES - usage.bytes;
@@ -178,10 +187,10 @@ export async function stageUpload(
     try {
       handle = await fs.open(path.join(dir, name), "wx", 0o600);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") return { ok: false, code: "write_failed", status: 500 };
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") return refuse({ ok: false, code: "write_failed", status: 500 });
     }
   }
-  if (!handle) return { ok: false, code: "write_failed", status: 500 };
+  if (!handle) return refuse({ ok: false, code: "write_failed", status: 500 });
   const target = path.join(dir, name);
 
   const free = freeBytes(dir);
@@ -210,7 +219,7 @@ export async function stageUpload(
   if (!failed && declaredLength !== null && metered.bytes() !== declaredLength) failed = { ok: false, code: "too_large", status: 413 };
   if (failed) {
     await fs.rm(target, { force: true });
-    return failed;
+    return refuse(failed as Exclude<StageResult, { ok: true }>);
   }
   return { ok: true, batch, name, bytes: metered.bytes() };
 }
@@ -228,4 +237,40 @@ export async function stagedBatch(rawBatch: unknown): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+/**
+ * Stage files the caller named by path (already resolved inside the Files
+ * app's tree, `resolveFileInsideBrowseRoot`) as one batch, through the same
+ * {@link stageUpload} a drop goes through: the same names, caps and disk
+ * reserve. A refusal names the offending file's `index`; the batch made so
+ * far is removed.
+ */
+export async function stageFiles(
+  files: ReadonlyArray<{ path: string; bytes: number }>,
+): Promise<{ ok: true; batch: string; dir: string } | { ok: false; code: Exclude<StageResult, { ok: true }>["code"]; status: number; index: number }> {
+  let batch: string | null = null;
+  for (const [index, file] of files.entries()) {
+    let result: StageResult;
+    // Destroyed whatever happens: a refusal before the body is read (a name or
+    // a size refused) would otherwise hold its file descriptor open.
+    let source: ReturnType<typeof createReadStream> | null = null;
+    try {
+      source = createReadStream(file.path);
+      // Node's web stream type and the DOM's differ only in their typings; the chunks are bytes.
+      const stream = Readable.toWeb(source) as unknown as ReadableStream<Uint8Array>;
+      result = await stageUpload(stream, path.basename(file.path), batch, file.bytes);
+    } catch {
+      result = { ok: false, code: "write_failed", status: 500 };
+    } finally {
+      source?.destroy();
+    }
+    if (!result.ok) {
+      if (batch) await fs.rm(batchDir(batch), { recursive: true, force: true }).catch(() => undefined);
+      return { ok: false, code: result.code, status: result.status, index };
+    }
+    batch = result.batch;
+  }
+  if (!batch) return { ok: false, code: "empty", status: 400, index: 0 };
+  return { ok: true, batch, dir: batchDir(batch) };
 }

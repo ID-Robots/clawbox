@@ -49,6 +49,7 @@ import { registerLocalAiTools } from "../../../mcp/tools/local-ai";
 import { registerMediaTools } from "../../../mcp/tools/media";
 import { registerMemoryTools } from "../../../mcp/tools/memory";
 import { registerOrientationTools } from "../../../mcp/tools/orientation";
+import { registerPrimeRadiantTools } from "../../../mcp/tools/prime-radiant";
 import { registerSkillTools } from "../../../mcp/tools/skills";
 import { registerSystemTools } from "../../../mcp/tools/system";
 import { saveEnv } from "../helpers/env";
@@ -116,6 +117,7 @@ function server(p: Posture): CaptureHarness {
     registerSkillTools(h.reg);
     registerHermesPluginTools(h.reg);
     registerMemoryTools(h.reg);
+    registerPrimeRadiantTools(h.reg);
     registerAiTools(h.reg, c);
     registerLocalAiTools(h.reg);
     registerSystemTools(h.reg, c);

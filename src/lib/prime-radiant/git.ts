@@ -1,9 +1,12 @@
 /**
- * The vault's git: one repository, one author, one operation at a time.
+ * The vault's git: one repository, one committer, one operation at a time.
  *
- * Every mutating operation on the vault is exactly ONE commit by
+ * Every mutating operation on the vault is exactly ONE commit committed by
  * `Prime Radiant <prime-radiant@localhost>`, so `git log -- <page>` is that
- * page's history and `git revert` is its undo. Operations are serialised by a
+ * page's history and `git revert` is its undo. The AUTHOR is Prime Radiant
+ * too, except for a change the assistant made through the MCP bearer: that
+ * commit is authored by {@link ASSISTANT_AUTHOR}, so History names who did it
+ * and the owner can undo it. Operations are serialised by a
  * per-vault async mutex kept in {@link processStore} — this module is compiled
  * more than once into the one web server (see process-store.ts), and a lock
  * per module copy would be no lock at all.
@@ -24,7 +27,15 @@ import { processStore } from "@/lib/process-store";
 import { createSerialLock, type SerialLock } from "@/lib/serial-lock";
 import path from "@/lib/runtime-path";
 
-export const VAULT_AUTHOR = Object.freeze({ name: "Prime Radiant", email: "prime-radiant@localhost" });
+/** Who a vault commit is authored by. The committer is always {@link VAULT_AUTHOR}. */
+export interface VaultAuthor {
+  readonly name: string;
+  readonly email: string;
+}
+
+export const VAULT_AUTHOR: VaultAuthor = Object.freeze({ name: "Prime Radiant", email: "prime-radiant@localhost" });
+/** The author of every change the assistant makes through the box's MCP server. */
+export const ASSISTANT_AUTHOR: VaultAuthor = Object.freeze({ name: "ClawBox assistant", email: "assistant@localhost" });
 export const VAULT_MAIN_BRANCH = "main";
 
 const GIT_TIMEOUT_MS = 30_000;
@@ -40,7 +51,7 @@ export class VaultGitError extends Error {
   }
 }
 
-export function gitEnv(): Record<string, string> {
+export function gitEnv(author: VaultAuthor = VAULT_AUTHOR): Record<string, string> {
   return {
     PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
     HOME: process.env.HOME ?? "/tmp",
@@ -50,8 +61,8 @@ export function gitEnv(): Record<string, string> {
     GIT_TERMINAL_PROMPT: "0",
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: "/dev/null",
-    GIT_AUTHOR_NAME: VAULT_AUTHOR.name,
-    GIT_AUTHOR_EMAIL: VAULT_AUTHOR.email,
+    GIT_AUTHOR_NAME: author.name,
+    GIT_AUTHOR_EMAIL: author.email,
     GIT_COMMITTER_NAME: VAULT_AUTHOR.name,
     GIT_COMMITTER_EMAIL: VAULT_AUTHOR.email,
   };
@@ -72,13 +83,15 @@ export interface GitOptions {
   timeoutMs?: number;
   /** Return a failed result instead of throwing. */
   allowFail?: boolean;
+  /** The author a commit made by this call records. Default {@link VAULT_AUTHOR}. */
+  author?: VaultAuthor;
 }
 
 /** Run git in the vault. Throws {@link VaultGitError} on a non-zero exit unless `allowFail`. */
 export async function git(vault: string, args: readonly string[], opts: GitOptions = {}): Promise<ChildResult> {
   const result = await runChild("git", [...FIXED_CONFIG, "-C", vault, ...args], {
     timeoutMs: opts.timeoutMs ?? GIT_TIMEOUT_MS,
-    env: gitEnv(),
+    env: gitEnv(opts.author),
     input: opts.input,
     notStarted: "git is not installed",
   });
@@ -195,8 +208,9 @@ export async function trackedAtHead(vault: string, rel: string): Promise<boolean
  * Stage exactly `paths` (additions, edits and deletions) and commit them as
  * one commit. Returns the new sha, or null when nothing in `paths` changed —
  * an operation that changed nothing records nothing. Callers hold the lock.
+ * `author` names who made the change (default {@link VAULT_AUTHOR}).
  */
-export async function commitPaths(vault: string, message: string, paths: readonly string[]): Promise<string | null> {
+export async function commitPaths(vault: string, message: string, paths: readonly string[], author: VaultAuthor = VAULT_AUTHOR): Promise<string | null> {
   const subject = message.replace(/[\r\n]+/g, " ").trim();
   if (subject === "") throw new Error("a vault commit needs a message");
   // A path neither on disk nor in HEAD (a remove of a page that never
@@ -214,9 +228,15 @@ export async function commitPaths(vault: string, message: string, paths: readonl
   await git(vault, ["add", "-A", "--", ...live]);
   const staged = await git(vault, ["diff", "--cached", "--quiet", "--", ...live], { allowFail: true });
   if (staged.code === 0) return null;
-  await git(vault, ["commit", "--quiet", "--no-verify", "-m", subject, "--", ...live]);
+  await git(vault, ["commit", "--quiet", "--no-verify", "-m", subject, "--", ...live], { author });
   const head = await headCommit(vault);
   return head?.sha ?? null;
+}
+
+/** The author email a commit records, or null when `sha` names no commit. */
+export async function commitAuthorEmail(vault: string, sha: string): Promise<string | null> {
+  const r = await git(vault, ["log", "-1", "--format=%ae", "--end-of-options", sha], { allowFail: true });
+  return r.code === 0 ? r.stdout.trim() : null;
 }
 
 /** Put `paths` back the way HEAD has them (a new file is removed). Callers hold the lock. */

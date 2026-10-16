@@ -7,17 +7,19 @@
  * every review item it raised has been resolved: `{ branch, commit, changed }`;
  * 409 `open_items` / `not_merged`, 404 `not_found`.
  *
- * OWNER ONLY, cookie AND same origin: a pass spends the owner's model
- * allowance and moves the vault's main branch.
+ * The owner (cookie AND same origin), or the assistant through the MCP bearer
+ * when the owner asks it to: a pass spends the owner's model allowance and
+ * moves the vault's main branch, and the assistant's own tool says so. Never
+ * another site.
  */
 import { HeldNightError, mergeHeldNight, NightlyBusyError, NightlyNotReadyError, startNightly } from "@/lib/prime-radiant/nightly";
-import { fail, json, ownerWriteGuard, readJsonBody, vaultFailure } from "@/lib/prime-radiant/route-helpers";
+import { fail, json, readJsonBody, vaultFailure, writerGuard } from "@/lib/prime-radiant/route-helpers";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
-  const denied = await ownerWriteGuard(req, "Running the nightly pass");
-  if (denied) return denied;
+  const gate = await writerGuard(req, "Running the nightly pass");
+  if (!gate.ok) return gate.response;
   const read = await readJsonBody(req);
   if (!read.ok) return read.response;
   const b = (read.body && typeof read.body === "object" ? read.body : {}) as { merge?: unknown };

@@ -14,17 +14,18 @@
  * 404/400 `folder_not_found`, 400 `folder_refused` (ClawBox's own output),
  * each with the folder's `index`.
  *
- * OWNER ONLY, cookie AND same origin: it lists what is in the owner's folders.
+ * The owner (cookie AND same origin), or the assistant through the MCP bearer:
+ * it lists what is in the owner's folders, so never another site.
  */
 import { previewFolders } from "@/lib/prime-radiant/ingest-sources";
-import { fail, json, ownerWriteGuard, readJsonBody, resolveIngestFolders } from "@/lib/prime-radiant/route-helpers";
+import { fail, json, readJsonBody, resolveIngestFolders, writerGuard } from "@/lib/prime-radiant/route-helpers";
 import { readSettings } from "@/lib/prime-radiant/settings";
 
 export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
-  const denied = await ownerWriteGuard(req, "Previewing an import");
-  if (denied) return denied;
+  const gate = await writerGuard(req, "Previewing an import");
+  if (!gate.ok) return gate.response;
   const read = await readJsonBody(req);
   if (!read.ok) return read.response;
   const b = (read.body && typeof read.body === "object" ? read.body : {}) as { folders?: unknown };

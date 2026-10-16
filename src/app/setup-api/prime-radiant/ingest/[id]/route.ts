@@ -10,13 +10,14 @@
  * DELETE — stop the job. 202 `{ stopping: true, job }`; the job settles on
  * its own (files it did not reach become dead letters) and its events stream
  * ends. 409 `not_running` (with the job) for one that already finished,
- * 404 `not_found`. OWNER ONLY, cookie AND same origin, like the start.
+ * 404 `not_found`. The owner (cookie AND same origin) or the assistant
+ * through the MCP bearer, like the start.
  */
 import { requireSession } from "@/lib/route-auth";
 import { getIngestJob, safeJobId, stopIngest } from "@/lib/prime-radiant/ingest";
 import { readDeadLetter } from "@/lib/prime-radiant/ingest-store";
 import { vaultDir } from "@/lib/prime-radiant/paths";
-import { fail, json, ownerWriteGuard, vaultFailure } from "@/lib/prime-radiant/route-helpers";
+import { fail, json, vaultFailure, writerGuard } from "@/lib/prime-radiant/route-helpers";
 
 export const dynamic = "force-dynamic";
 
@@ -36,8 +37,8 @@ export async function GET(req: Request, ctx: Ctx) {
 }
 
 export async function DELETE(req: Request, ctx: Ctx) {
-  const denied = await ownerWriteGuard(req, "Stopping an ingest");
-  if (denied) return denied;
+  const gate = await writerGuard(req, "Stopping an ingest");
+  if (!gate.ok) return gate.response;
   const id = safeJobId((await ctx.params).id);
   const job = id ? getIngestJob(id) : null;
   if (!id || !job) return fail("not_found", "No such ingest job.", 404);

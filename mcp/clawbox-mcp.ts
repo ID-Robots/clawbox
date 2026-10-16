@@ -93,6 +93,7 @@ import { registerOrientationTools } from "./tools/orientation";
 import { registerHermesPluginTools } from "./tools/hermes-plugins";
 import { registerSkillTools } from "./tools/skills";
 import { registerMemoryTools } from "./tools/memory";
+import { registerPrimeRadiantTools } from "./tools/prime-radiant";
 import { registerSystemTools } from "./tools/system";
 
 const VERSION = "3.2.0";
@@ -262,6 +263,7 @@ export async function buildServer(
   // reason this tool has to exist.
   registerHermesPluginTools(reg);
   registerMemoryTools(reg);
+  registerPrimeRadiantTools(reg);
   registerAiTools(reg, ctx);
   registerLocalAiTools(reg);
   registerSystemTools(reg, ctx);

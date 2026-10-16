@@ -21,6 +21,7 @@
  */
 
 import { buildClaimIndex, isClaimId, nowIso, retireClaimsOnPage } from "./claims";
+import type { VaultAuthor } from "./git";
 import { safePagePath, vaultDir } from "./paths";
 import type { Claim, ClaimEvidence, PageFrontmatter } from "./schema";
 import { readRetiredLedger, recordRetired } from "./state-db";
@@ -52,6 +53,14 @@ export interface VerifyInput {
   /** Evidence kept with the verified claim (e.g. the picked candidate's). */
   evidence?: readonly ClaimEvidence[];
   note?: string;
+  /** Who the commit names as its author (the assistant's verifications name it). */
+  author?: VaultAuthor;
+  /**
+   * Whether a person gave this verification. Default true: the page's
+   * `checked_by` becomes `human`. The assistant's verification leaves it as it
+   * was — the stamp says who verified, and `checked_by` is not a lie.
+   */
+  person?: boolean;
   vault?: string;
   now?: Date;
 }
@@ -137,13 +146,13 @@ export async function verifyClaim(input: VerifyInput): Promise<VerifyResult> {
           const claims = [...fm.claims];
           if (at >= 0) claims[at] = verified;
           else claims.push(verified);
-          fm = { ...fm, claims, checked_by: "human" };
+          fm = { ...fm, claims, ...(input.person === false ? {} : { checked_by: "human" as const }) };
         }
         await tx.writePage(page.path, fm, page.body);
       }
       return { page: target };
     },
-    { vault, now: input.now },
+    { vault, now: input.now, author: input.author },
   );
 
   // Every losing id is retired in the ledger, also one no page carried: the

@@ -1,12 +1,22 @@
 /**
- * GET /setup-api/prime-radiant/pages — the page list (no bodies), filtered by
- * `type`, `domain`, `status`, `verified` (true|false) and `q`, paged with
- * `offset` / `limit` (at most 500). Owner-only.
+ * /setup-api/prime-radiant/pages
+ *
+ * GET — the page list (no bodies), filtered by `type`, `domain`, `owner`,
+ * `status`, `verified` (true|false) and `q`, paged with `offset` / `limit` (at
+ * most 500). Owner-only.
+ *
+ * POST `{ type, title, domain, summary, body?, owner?, status?, privacy?,
+ * sources?, facts?, confidence? }` — a new page (lib/prime-radiant/edit.ts):
+ * 201 `{ path, commit, claims, findings }`, one commit `create: <path>`. The
+ * owner, or the assistant through the MCP bearer (its commit names it), from
+ * our own page. 400 `invalid`, 409 `exists` / `lint_blocked` (with
+ * `findings`), 412 `not_initialised`.
  */
 import { requireSession } from "@/lib/route-auth";
+import { createPage, readNewPage } from "@/lib/prime-radiant/edit";
 import { listPages, MAX_PAGE_LIST, type PageFilter } from "@/lib/prime-radiant/service";
 import { PAGE_STATUSES, PAGE_TYPES } from "@/lib/prime-radiant/schema";
-import { fail, json, vaultFailure } from "@/lib/prime-radiant/route-helpers";
+import { editFailure, fail, json, readJsonBody, vaultFailure, writerGuard } from "@/lib/prime-radiant/route-helpers";
 
 export const dynamic = "force-dynamic";
 
@@ -37,6 +47,11 @@ export async function GET(req: Request) {
     if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(domain)) return fail("invalid_domain", "Not a domain name.", 400);
     filter.domain = domain;
   }
+  const owner = params.get("owner");
+  if (owner) {
+    if (owner.length > 80) return fail("invalid_owner", "An owner is at most 80 characters.", 400);
+    filter.owner = owner;
+  }
   const verified = params.get("verified");
   if (verified !== null && verified !== "") {
     if (verified !== "true" && verified !== "false") return fail("invalid_verified", "verified must be true or false.", 400);
@@ -54,5 +69,17 @@ export async function GET(req: Request) {
     return json(await listPages(filter));
   } catch (err) {
     return vaultFailure("pages", err);
+  }
+}
+
+export async function POST(req: Request) {
+  const gate = await writerGuard(req, "Creating a page");
+  if (!gate.ok) return gate.response;
+  const read = await readJsonBody(req);
+  if (!read.ok) return read.response;
+  try {
+    return json(await createPage(readNewPage(read.body), gate.writer), 201);
+  } catch (err) {
+    return editFailure("page create", err);
   }
 }

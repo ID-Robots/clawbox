@@ -1,8 +1,10 @@
 /**
  * POST/GET /setup-api/prime-radiant/ingest, GET ingest/<id>/events (SSE),
  * POST ingest/upload and POST ingest/preview, over a real vault in a tmp dir with the model replaced
- * through the client override. The writes are owner-cookie AND same-origin;
- * folders come from the Files tree only; the GETs never create anything.
+ * through the client override. The writes are the owner's cookie or the
+ * assistant's MCP bearer, never another site (the drop stays the owner's);
+ * folders and named files come from the Files tree only; the GETs never
+ * create anything.
  */
 import fs from "fs";
 import os from "os";
@@ -21,6 +23,10 @@ const creds = vi.hoisted(() => ({
   proxyRefusedClawaiCredential: vi.fn(async () => false),
 }));
 vi.mock("@/lib/harness/credentials", () => creds);
+const bearer = vi.hoisted(() => ({ verifyMcpBearer: vi.fn((h: string | null) => h === "Bearer test-assistant-bearer") }));
+vi.mock("@/lib/mcp-token", () => bearer);
+/** The MCP server's headers: the bearer and no Origin (it is no browser). */
+const ASSISTANT = { authorization: "Bearer test-assistant-bearer", origin: "" };
 
 import { GET as listGET, POST as ingestPOST } from "@/app/setup-api/prime-radiant/ingest/route";
 import { GET as eventsGET } from "@/app/setup-api/prime-radiant/ingest/[id]/events/route";
@@ -33,6 +39,11 @@ import { FlashCallError, setFlashClientOverride, type FlashClient } from "@/lib/
 import { ingestFinished, listIngestJobs, stopIngest } from "@/lib/prime-radiant/ingest";
 import { readVaultSnapshot } from "@/lib/prime-radiant/vault";
 import { readWriterItems } from "@/lib/prime-radiant/writer";
+import { execFileSync } from "child_process";
+
+/** `<author>|<subject>` of the vault's last commit. */
+const gitLog = (vault: string) =>
+  execFileSync("git", ["-C", vault, "log", "-1", "--format=%an|%s"], { env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null" }, encoding: "utf8" }).trim();
 
 vi.setConfig({ testTimeout: 60_000, hookTimeout: 30_000 });
 
@@ -46,7 +57,8 @@ const ORIGIN = "http://clawbox.local";
 const API = `${ORIGIN}/setup-api/prime-radiant`;
 
 function post(url: string, body: BodyInit | null, headers: Record<string, string> = {}) {
-  return new Request(url, { method: "POST", body, headers: { origin: ORIGIN, ...headers }, duplex: "half" } as RequestInit);
+  const all = Object.fromEntries(Object.entries({ origin: ORIGIN, ...headers }).filter(([, v]) => v !== ""));
+  return new Request(url, { method: "POST", body, headers: all, duplex: "half" } as RequestInit);
 }
 const ingest = (body: unknown, headers: Record<string, string> = {}) =>
   ingestPOST(post(`${API}/ingest`, JSON.stringify(body), { "content-type": "application/json", ...headers }));
@@ -139,12 +151,31 @@ describe("auth", () => {
     expect(fs.existsSync(process.env.PRIME_RADIANT_DIR!)).toBe(false);
   });
 
-  it("refuses the MCP bearer (no owner cookie) on the writes", async () => {
+  it("refuses a caller with neither the owner's cookie nor the assistant's bearer on the writes", async () => {
     owner.hasOwnerSession.mockResolvedValue(false);
     for (const res of [await ingest({ folders: ["Documents"] }), await upload("a.md", "x")]) {
       expect(res.status).toBe(403);
       expect((await res.json()).code).toBe("owner_only");
     }
+  });
+
+  it("admits the assistant's bearer to start an ingest, but keeps the drop the owner's", async () => {
+    owner.hasOwnerSession.mockResolvedValue(false);
+    const drop = await uploadPOST(post(`${API}/ingest/upload?name=a.md`, "x", { ...ASSISTANT, "content-length": "1" }));
+    expect(drop.status).toBe(403);
+    expect((await drop.json()).code).toBe("owner_only");
+    const res = await ingest({ folders: ["Documents"] }, ASSISTANT);
+    expect(res.status).toBe(202);
+    const { job } = await res.json();
+    await ingestFinished(job.id);
+    // Its commits name it, so History shows who imported and the assistant can undo it.
+    expect(gitLog(vault)).toMatch(/^ClawBox assistant\|ingest: /);
+  });
+
+  it("names Prime Radiant on an import the owner started", async () => {
+    const { job } = await (await ingest({ folders: ["Documents"] })).json();
+    await ingestFinished(job.id);
+    expect(gitLog(vault)).toMatch(/^Prime Radiant\|ingest: /);
   });
 
   it("refuses a cross-site page riding the owner's cookie", async () => {
@@ -311,6 +342,49 @@ describe("drop: upload then ingest", () => {
     const big = await uploadPOST(post(`${API}/ingest/upload?name=a.md`, "x", { "content-length": String(20 * 1024 * 1024) }));
     expect(big.status).toBe(413);
     expect((await big.json()).code).toBe("too_large");
+  });
+});
+
+describe("named files: ingested as one staged batch", () => {
+  it("stages the files the assistant names, ingests them like a drop, and removes the staging", async () => {
+    owner.hasOwnerSession.mockResolvedValue(false);
+    const res = await ingest({ files: ["Documents/acme/catalogue.md", path.join(filesRoot, "Documents", "acme", "support.txt"), "Documents/acme/catalogue.md"] }, ASSISTANT);
+    expect(res.status).toBe(202);
+    const { job } = await res.json();
+    expect(job.kind).toBe("upload");
+    const frames = await readSse(await events(job.id));
+    expect(frames.at(-1)).toMatchObject({ event: "end", data: { status: "done", done: 2 } });
+    const labels = frames.filter((f) => f.event === "file").map((f) => (f.data as { label: string }).label.replace(/^upload\/[0-9a-f]+\//, "")).sort();
+    expect(labels).toEqual(["catalogue.md", "support.txt"]);
+    expect(fs.readdirSync(path.join(process.env.PRIME_RADIANT_DIR!, "uploads"))).toEqual([]);
+    // The originals are read, never moved.
+    expect(fs.existsSync(path.join(filesRoot, "Documents", "acme", "catalogue.md"))).toBe(true);
+  });
+
+  it("refuses a file outside the Files tree, a folder, a kind it cannot read and ClawBox's own, by index", async () => {
+    const outside = path.join(base, `outside-file-${n}.md`);
+    fs.writeFileSync(outside, "Outside the Files tree.");
+    fs.writeFileSync(path.join(filesRoot, "Documents", "photo.png"), "png");
+    for (const [file, status, code] of [
+      [outside, 404, "file_not_found"],
+      ["Documents/missing.md", 404, "file_not_found"],
+      ["Documents/acme", 400, "file_not_found"],
+      ["Documents/photo.png", 400, "invalid_name"],
+    ] as const) {
+      const res = await ingest({ files: ["Documents/acme/catalogue.md", file] }, ASSISTANT);
+      expect(res.status, file).toBe(status);
+      expect(await res.json()).toMatchObject({ code, index: 1 });
+    }
+    process.env.PRIME_RADIANT_DIR = path.join(filesRoot, "pr");
+    fs.mkdirSync(path.join(filesRoot, "pr", "vault"), { recursive: true });
+    fs.writeFileSync(path.join(filesRoot, "pr", "vault", "page.md"), "x");
+    const own = await ingest({ files: ["pr/vault/page.md"] }, ASSISTANT);
+    expect(own.status).toBe(400);
+    expect((await own.json()).code).toBe("file_refused");
+    for (const body of [{ files: [] }, { files: "a.md" }, { folders: ["Documents"], files: ["Documents/acme/catalogue.md"] }]) {
+      expect((await ingest(body, ASSISTANT)).status).toBe(400);
+    }
+    expect(fs.existsSync(path.join(filesRoot, "pr", "uploads"))).toBe(false);
   });
 });
 

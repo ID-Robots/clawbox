@@ -6,6 +6,9 @@
  *             verify.ts). One commit, `verify: <claimId>`.
  *   new     — none of them: the owner's own text is verified, every
  *             candidate's id retired.
+ *
+ * `by` is who settled it, as the stamp records it — "owner", or "assistant"
+ * when the agent did through the MCP bearer, whose commit then names it.
  *   later   — put off; the item stays in the queue as `later`.
  *   dismiss — nothing to change; resolved with no commit.
  *
@@ -19,6 +22,7 @@
 import { processStore } from "@/lib/process-store";
 import { createSerialLock, type SerialLock } from "@/lib/serial-lock";
 import { isClaimId } from "./claims";
+import type { VaultAuthor } from "./git";
 import { vaultDir } from "./paths";
 import { notifyVaultChanged } from "./reindex-hook";
 import {
@@ -86,7 +90,7 @@ export interface ResolveResult {
 export async function resolveReviewItem(
   id: string,
   action: ResolveAction,
-  options: { by: string; vault?: string; now?: Date } = { by: "owner" },
+  options: { by: string; author?: VaultAuthor; person?: boolean; vault?: string; now?: Date } = { by: "owner" },
 ): Promise<ResolveResult> {
   const vault = options.vault ?? vaultDir();
   return lockStore.lock(async () => {
@@ -130,6 +134,8 @@ export async function resolveReviewItem(
         page: page ?? item.pages[0] ?? null,
         evidence,
         note: `verified by ${options.by} from review ${item.id}`,
+        author: options.author,
+        person: options.person,
         vault,
         now: options.now,
       });

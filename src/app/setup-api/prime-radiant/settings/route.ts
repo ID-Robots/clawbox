@@ -15,14 +15,17 @@
  * nothing; `null` puts a field (or a whole section) back to its default. Ingest
  * folders follow the folder picker's rule (404 `folder_not_found`, 400
  * `folder_refused`, with `index`). The nightly timer is re-armed after a save.
- * OWNER ONLY, cookie AND same origin.
+ * The owner (cookie AND same origin), or the assistant through the MCP bearer
+ * — whose tool asks for the owner's word first — except the cost rates and
+ * the Opus model, which decide what the Opus cap measures (403 `owner_only`
+ * for the bearer). Never another site.
  */
 import { requireSession } from "@/lib/route-auth";
 import { resolveFolderInsideBrowseRoot } from "@/lib/browse-folder";
 import { isOwnOutput } from "@/lib/prime-radiant/ingest-sources";
 import { nextRunAtMs, refresh } from "@/lib/prime-radiant/nightly-scheduler";
 import { detectOpusSource } from "@/lib/prime-radiant/opus-source";
-import { fail, json, ownerWriteGuard, readJsonBody } from "@/lib/prime-radiant/route-helpers";
+import { fail, json, readJsonBody, writerGuard } from "@/lib/prime-radiant/route-helpers";
 import {
   defaultSettings,
   effectiveCostRates,
@@ -69,8 +72,8 @@ export async function GET(req: Request) {
 }
 
 export async function PUT(req: Request) {
-  const denied = await ownerWriteGuard(req, "Changing Prime Radiant's settings");
-  if (denied) return denied;
+  const gate = await writerGuard(req, "Changing Prime Radiant's settings");
+  if (!gate.ok) return gate.response;
   const read = await readJsonBody(req);
   if (!read.ok) return read.response;
   let patch;
@@ -78,6 +81,11 @@ export async function PUT(req: Request) {
     patch = readSettingsPatch(read.body);
   } catch (err) {
     return fail("invalid", err instanceof SettingsError ? err.message : "The settings could not be read.", 400);
+  }
+  // What the Opus dollar cap is MEASURED in stays the owner's: a rate of 0, or
+  // a model with no rate, prices every call at nothing and the cap never trips.
+  if (!gate.writer.person && (patch.costRates !== undefined || (patch.opus && patch.opus.model !== undefined))) {
+    return fail("owner_only", "Only the owner can change the cost rates or the Opus model: they are what the spending cap measures.", 403);
   }
   const folders = patch.ingest?.folders;
   if (Array.isArray(folders)) {

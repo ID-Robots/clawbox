@@ -83,7 +83,7 @@ export function authHeader(): string | null {
 }
 
 export interface ApiOptions {
-  method?: "GET" | "POST";
+  method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
   body?: Record<string, unknown>;
   query?: Record<string, string | number | boolean | undefined>;
   timeoutMs?: number;
