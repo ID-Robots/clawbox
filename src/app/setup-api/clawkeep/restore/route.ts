@@ -120,6 +120,13 @@ async function restartStateHolder(edition: string): Promise<RestartOutcome> {
       // gateway is still restarting, and it comes back on its own.
       settleBudgetMs: 30_000,
     });
+    // Never read once is not "still restarting": nothing can vouch the restart
+    // was even queued (the same rule `restartGateway` keeps).
+    if (restart.kind === "in-flight" && restart.state === null) {
+      const detail = "restart could not be confirmed: systemd did not answer about the unit after the restart's client gave up";
+      console.warn(`[clawkeep/restore] ${OPENCLAW_RESTART_UNIT} ${detail}`);
+      return { errors: [`${OPENCLAW_RESTART_UNIT}: ${detail}`], pending: [] };
+    }
     if (restart.kind === "in-flight") {
       const detail = "is still restarting with the restored state (the old gateway is finishing its work)";
       console.warn(`[clawkeep/restore] ${OPENCLAW_RESTART_UNIT} ${detail}`);

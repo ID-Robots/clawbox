@@ -17,10 +17,10 @@ import { logSafe } from "@/lib/log-safe";
  * The write path asked the running gateway first (`config.patch`), and a
  * gateway that is starting does not answer yet, so the write fell straight to
  * the CLI, which writes the file regardless. The owner's ruling: wait for the
- * gateway instead, about two minutes of its own start at most, then write;
- * still not ready, fail in plain words. The unit's ExecStartPre is waited out
- * as well and, by design, not counted against those two minutes: a cold
- * pre-start can legitimately take minutes. So the worst case is the
+ * gateway instead, about two minutes at most, then write; still not ready,
+ * fail in plain words. The unit's ExecStartPre is waited out as well and, by
+ * design, not counted against those two minutes, which are the gateway
+ * process's own start: a cold pre-start can legitimately take minutes. So the worst case is the
  * pre-start's own bound (600 s) plus the two minutes, and a write a page is
  * waiting on can outlast the tunnel's ~100 s on a cold pre-start, then land
  * after the page has given up. The units keep `RestartPreventExitStatus=78`.

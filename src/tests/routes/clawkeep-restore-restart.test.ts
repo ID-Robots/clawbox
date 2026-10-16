@@ -223,6 +223,39 @@ describe("POST /setup-api/clawkeep/restore — bringing the state holder back", 
     expect(body.restartErrors[0]).not.toMatch(/Command failed/);
   });
 
+  // Still running at the settle budget, and what that means depends on whether
+  // systemd answered at all: a job it reported is a restart it holds; no answer
+  // on any poll is a restart nobody can vouch for.
+  it.each<[string, string, "pending" | "error", RegExp]>([
+    [
+      "a job systemd still reports",
+      "Job=4711\nActiveState=deactivating\nSubState=stop-sigterm\nResult=success\n",
+      "pending",
+      /is still restarting with the restored state/,
+    ],
+    ["no answer from systemd on any poll", "", "error", /restart could not be confirmed/],
+  ])("answers a restart still in flight at the budget with %s", async (_what, show, kind, said) => {
+    vi.useFakeTimers();
+    try {
+      h.restartTimesOut = true;
+      h.unitShow = show;
+      const quiet = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const pending = post();
+      await vi.advanceTimersByTimeAsync(35_000);
+      const body = await (await pending).json();
+      quiet.mockRestore();
+      const [hit, other] = kind === "pending"
+        ? [body.restartPending, body.restartErrors]
+        : [body.restartErrors, body.restartPending];
+      expect(other).toEqual([]);
+      expect(hit).toHaveLength(1);
+      expect(hit[0]).toMatch(/^clawbox-gateway\.service: /);
+      expect(hit[0]).toMatch(said);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not call the OpenClaw restore done until the gateway is serving again", async () => {
     // `systemctl restart` on a Type=simple unit returns when the process is
     // forked. Reporting no restart errors there told the owner the restored

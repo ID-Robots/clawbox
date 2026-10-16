@@ -70,8 +70,10 @@ const UNIT_JOB_POLL_MS = 2_000;
 const UNIT_SHOW_TIMEOUT_MS = 10_000;
 
 /**
- * Raised when a restart job finished and the unit did not come back active.
- * A real failure, said in plain words: the caller still reports it as one.
+ * Raised when a restart job finished and the unit did not come back active, or
+ * when systemd never answered about a restart whose client gave up, so nothing
+ * can vouch it was taken. A real failure, said in plain words: the caller still
+ * reports it as one.
  */
 export class GatewayRestartFailedError extends Error {
   constructor(message: string) {
