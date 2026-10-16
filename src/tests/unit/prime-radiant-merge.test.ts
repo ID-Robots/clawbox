@@ -330,6 +330,35 @@ describe("mergePages", () => {
     expect(r.indexLines).toBe(2);
   });
 
+  it("names a page that links a merged page but does not parse, and leaves it as it is", async () => {
+    await seed();
+    // No frontmatter: written by hand, past the lint that would refuse it.
+    const broken = "See [[entities/acme-widgets-gmbh]] for the German arm.\n";
+    fs.writeFileSync(path.join(vault, "concepts/broken.md"), broken);
+    await git(vault, ["add", "concepts/broken.md"]);
+    await git(vault, ["commit", "-qm", "hand page"]);
+    const r = await mergePages(MERGE, OWNER, { now: NOW });
+    expect(r.commit).not.toBeNull();
+    expect(r.unparsed).toEqual(["concepts/broken.md"]);
+    expect(read("concepts/broken.md")).toBe(broken);
+    expect(r.relinked.map((p) => p.path)).not.toContain("concepts/broken.md");
+  });
+
+  it("refuses a claim whose id was retired, naming it, and changes nothing", async () => {
+    await seed();
+    // The staying page records BERLIN's id as retired: a state no commit may carry, so written by hand.
+    fs.writeFileSync(path.join(vault, INTO), pages({ into: { retiredClaimIds: [BERLIN.id] } })[INTO]);
+    await git(vault, ["commit", "-qam", "hand edit"]);
+    const head = (await headCommit(vault))?.sha;
+    await expect(mergePages(MERGE, OWNER, { now: NOW })).rejects.toMatchObject({
+      code: "retired",
+      status: 409,
+      message: expect.stringContaining(`${BERLIN.id} on ${GMBH}`),
+    });
+    expect((await headCommit(vault))?.sha).toBe(head);
+    expect(exists(GMBH)).toBe(true);
+  });
+
   it("lists the page that stays when only the merged pages were listed", async () => {
     await seed();
     // No line for it, and no other link to it in index.md: only the merged pages' lines.
