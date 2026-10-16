@@ -133,6 +133,24 @@ describe("spawnOpenclawCli and the core's maintenance refusal", () => {
   });
 });
 
+describe("withOpenclawMaintenanceRetry's device log", () => {
+  it("writes the label and the core's sentence as one line each, control characters replaced", async () => {
+    const { withOpenclawMaintenanceRetry } = await import("@/lib/openclaw-maintenance");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let asks = 0;
+    const answer = await withOpenclawMaintenanceRetry(async () => {
+      asks += 1;
+      if (asks === 1) throw new Error("\u001b[2Kstate undergoing offline maintenance; retry when it finishes.");
+      return "ok";
+    }, { timeoutMs: 10_000, label: "config set\n[openclaw] forged", pauseMs: 0 });
+    expect(answer).toBe("ok");
+    const lines = warn.mock.calls.map((call) => String(call[0]));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).not.toMatch(/[\r\n\u001b]/);
+    warn.mockRestore();
+  });
+});
+
 describe("isOpenclawMaintenanceRefusal", () => {
   it("reads an execFile failure's own stderr and stdout, both of the core's wordings", async () => {
     const { isOpenclawMaintenanceRefusal } = await import("@/lib/openclaw-maintenance");

@@ -1,5 +1,6 @@
 import fsSync from "fs";
 import { envPort } from "@/lib/port-probe";
+import { logSafe } from "@/lib/log-safe";
 
 /**
  * Never write openclaw.json under a gateway that is starting.
@@ -190,17 +191,21 @@ export async function gatewayStartPhase(): Promise<GatewayStartPhase> {
  */
 export async function holdWhileGatewayStarts(label: string, budgetMs = GATEWAY_START_WAIT_MS): Promise<boolean> {
   if ((await gatewayStartPhase()) !== "starting") return false;
-  console.warn(`[openclaw-config] ${label}: the gateway is starting; holding the write until it is ready`);
+  // JSON.stringify on top of logSafe: one record per line, and the shape
+  // CodeQL's js/log-injection reads as sanitised (it does not credit a
+  // replace with a visible stand-in character).
+  const what = JSON.stringify(logSafe(label));
+  console.warn(`[openclaw-config] ${what}: the gateway is starting; holding the write until it is ready`);
   const started = Date.now();
   while (Date.now() - started < budgetMs) {
     await new Promise((resolve) => setTimeout(resolve, POLL_MS));
     const phase = await gatewayStartPhase();
     if (phase !== "starting") {
-      console.warn(`[openclaw-config] ${label}: the gateway is ${phase === "started" ? "ready" : "no longer starting"} after ${Math.round((Date.now() - started) / 1000)}s; writing`);
+      console.warn(`[openclaw-config] ${what}: the gateway is ${phase === "started" ? "ready" : "no longer starting"} after ${Math.round((Date.now() - started) / 1000)}s; writing`);
       return true;
     }
   }
-  console.warn(`[openclaw-config] ${label}: the gateway was still starting after ${Math.round(budgetMs / 1000)}s; not writing`);
+  console.warn(`[openclaw-config] ${what}: the gateway was still starting after ${Math.round(budgetMs / 1000)}s; not writing`);
   throw new GatewayStillStartingError();
 }
 

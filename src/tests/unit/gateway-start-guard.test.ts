@@ -326,6 +326,20 @@ describe("a config write while the gateway is starting", () => {
     quiet.mockRestore();
   });
 
+  it("logs a caller's label as one line, whatever it carries", async () => {
+    vi.useFakeTimers();
+    host.startup = ["silent", "started"];
+    const { holdWhileGatewayStarts } = await import("@/lib/gateway-start-guard");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const held = holdWhileGatewayStarts("config set\n[openclaw-config] forged: written");
+    await vi.advanceTimersByTimeAsync(2_000);
+    await expect(held).resolves.toBe(true);
+    const lines = warn.mock.calls.map((call) => String(call[0]));
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) expect(line).not.toMatch(/[\r\n]/);
+    warn.mockRestore();
+  });
+
   it("writes at once when the gateway is not starting", async () => {
     host.procs = null;
     const lib = await import("@/lib/openclaw-config");
