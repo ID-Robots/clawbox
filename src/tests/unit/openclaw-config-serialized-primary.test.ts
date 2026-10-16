@@ -252,14 +252,27 @@ describe("serialized unvalidated primary-model fallback", () => {
     process.env.CLAWBOX_OPENCLAW_HOME = root;
     delete process.env.OPENCLAW_HOME;
     vi.resetModules();
-    const held = vi.fn<typeof import("@/lib/gateway-start-guard").holdWhileGatewayStarts>(async () => false);
+    // Pending until released, so the test can see the lock is still free
+    // while the hold waits: taken before the hold, it would be held here.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const held = vi.fn<typeof import("@/lib/gateway-start-guard").holdWhileGatewayStarts>(async () => {
+      await gate;
+      return false;
+    });
     vi.doMock("@/lib/gateway-start-guard", async (importOriginal) => ({
       ...(await importOriginal<typeof import("@/lib/gateway-start-guard")>()),
       holdWhileGatewayStarts: held,
     }));
     try {
       const { setPrimaryModelWithoutCatalogValidation } = await import("@/lib/openclaw-config");
-      await setPrimaryModelWithoutCatalogValidation("deepseek/deepseek-v4-pro");
+      const writing = setPrimaryModelWithoutCatalogValidation("deepseek/deepseek-v4-pro");
+      await vi.waitFor(() => expect(held).toHaveBeenCalledTimes(1));
+      const lock = await fs.open(path.join(root, "openclaw.json.lock"), "wx");
+      await lock.close();
+      await fs.unlink(path.join(root, "openclaw.json.lock"));
+      release();
+      await writing;
       expect(held.mock.calls.map(([label]) => label)).toEqual(["locked config write"]);
     } finally {
       vi.doUnmock("@/lib/gateway-start-guard");
