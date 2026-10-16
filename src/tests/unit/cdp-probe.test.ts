@@ -8,7 +8,7 @@ import http from "http";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { findPlaywrightChromium, focusCdpBrowser, parsePortOwner, portOwnerPid, probeCdp, upgradeStatus } from "@/lib/cdp-probe";
+import { findPlaywrightChromium, parsePortOwner, portOwnerPid, probeCdp, upgradeStatus } from "@/lib/cdp-probe";
 
 let server: http.Server | null = null;
 
@@ -118,82 +118,6 @@ describe("finding Playwright's Chromium on the box", () => {
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
-  });
-});
-
-/**
- * "Open Browser" on a browser that is already up — usually the owner's own,
- * signed in (TASK-1480): bring it forward over the DevTools HTTP endpoints
- * instead of starting a second one or doing nothing.
- */
-describe("focusCdpBrowser", () => {
-  let devtools: http.Server | null = null;
-  afterEach(() => {
-    devtools?.close();
-    devtools = null;
-  });
-
-  function fakeDevtools(targets: unknown[]): Promise<{ endpoint: string; calls: string[] }> {
-    const calls: string[] = [];
-    return new Promise((resolve) => {
-      devtools = http.createServer((req, res) => {
-        calls.push(`${req.method} ${req.url}`);
-        if (req.url === "/json/list") {
-          res.setHeader("content-type", "application/json");
-          res.end(JSON.stringify(targets));
-          return;
-        }
-        if (req.url?.startsWith("/json/activate/") || (req.url?.startsWith("/json/new?") && req.method === "PUT")) {
-          res.end("{}");
-          return;
-        }
-        res.statusCode = 405;
-        res.end();
-      });
-      devtools.listen(0, "127.0.0.1", () => {
-        resolve({ endpoint: `http://127.0.0.1:${(devtools!.address() as { port: number }).port}`, calls });
-      });
-    });
-  }
-
-  const PAGES = [
-    { id: "AAAA", type: "page", url: "https://mail.example.com/" },
-    { id: "BBBB", type: "page", url: "https://example.com/start" },
-    { id: "CCCC", type: "service_worker", url: "https://example.com/sw.js" },
-  ];
-
-  it("activates the first tab when the start page is blank — the window comes forward, nothing is opened", async () => {
-    const { endpoint, calls } = await fakeDevtools(PAGES);
-    expect(await focusCdpBrowser(endpoint, "about:blank")).toBe("activated");
-    expect(calls).toEqual(["GET /json/list", "GET /json/activate/AAAA"]);
-  });
-
-  it("activates the tab already showing the start page instead of opening it twice", async () => {
-    const { endpoint, calls } = await fakeDevtools(PAGES);
-    expect(await focusCdpBrowser(endpoint, "https://example.com/start")).toBe("activated");
-    expect(calls).toEqual(["GET /json/list", "GET /json/activate/BBBB"]);
-  });
-
-  it("opens the start page as a new tab (PUT, as Chrome now requires) when no tab shows it", async () => {
-    const { endpoint, calls } = await fakeDevtools(PAGES);
-    expect(await focusCdpBrowser(endpoint, "https://news.example.org/?a=1&b=2")).toBe("opened");
-    expect(calls).toEqual(["GET /json/list", `PUT /json/new?${encodeURIComponent("https://news.example.org/?a=1&b=2")}`]);
-  });
-
-  it("opens a blank tab in a browser with no tabs at all", async () => {
-    const { endpoint, calls } = await fakeDevtools([]);
-    expect(await focusCdpBrowser(endpoint, "about:blank")).toBe("opened");
-    expect(calls).toEqual(["GET /json/list", "PUT /json/new?about%3Ablank"]);
-  });
-
-  it("never puts a target id it does not trust into a path", async () => {
-    const { endpoint, calls } = await fakeDevtools([{ id: "../../json/close/X", type: "page", url: "about:blank" }]);
-    expect(await focusCdpBrowser(endpoint, "about:blank")).toBe("opened");
-    expect(calls.some((c) => c.includes(".."))).toBe(false);
-  });
-
-  it("says unreachable when nothing answers", async () => {
-    expect(await focusCdpBrowser("http://127.0.0.1:1", "about:blank")).toBe("unreachable");
   });
 });
 

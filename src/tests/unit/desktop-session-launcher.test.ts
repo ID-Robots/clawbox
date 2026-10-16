@@ -18,6 +18,9 @@
  *  5. Every Chrome it starts gets ONE --disable-features list (Chrome reads
  *     only the last), and that list keeps a hidden desktop's timers off
  *     Chrome's once-a-minute wake-up for pages hidden five minutes.
+ *  6. Every Chrome it starts starts clean (scripts/lib/browser-clean-start.sh):
+ *     a crashed profile's preferences say "new tab page" and a clean exit, and
+ *     no "Restore pages?" bubble — but never while another Chrome holds them.
  *
  * Everything runs on stand-ins in a temp dir: a `sleep` as the compositor
  * (LABWC_PID), a bash Chrome that takes the profile's SingletonLock or hands
@@ -39,6 +42,7 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 const ROOT = path.resolve(__dirname, "../../..");
 const BROWSER = path.join(ROOT, "scripts/x64-migration/kiosk/clawbox-desktop-browser");
 const TEMPLATE = path.join(ROOT, "kiosk/labwc/rc.xml.in");
+const CLEAN_START = path.join(ROOT, "scripts/lib/browser-clean-start.sh");
 const SOURCE_LINE = ". /etc/clawbox/kiosk.env";
 const URL = "http://localhost:3005/";
 
@@ -146,6 +150,8 @@ function env(compositorPid: number, extra: Record<string, string> = {}): NodeJS.
     CLAWBOX_LABWC_TEMPLATE: TEMPLATE,
     CLAWBOX_DESKTOP_LOCAL: path.join(tmp, "local"),
     CLAWBOX_DESKTOP_SHELF_PX: "56",
+    // The installed copy lives in /usr/local/lib/clawbox; the tree's is the same file.
+    CLAWBOX_BROWSER_CLEAN_START: CLEAN_START,
     ...extra,
   } as unknown as NodeJS.ProcessEnv;
 }
@@ -168,6 +174,19 @@ async function finished(done: Promise<number | null>, ms = 20_000): Promise<numb
     clearTimeout(timer);
   }
 }
+
+/** Preferences as Chrome leaves them after a crash, restoring its last session. */
+const CRASHED_PREFS = {
+  profile: { exit_type: "Crashed", exited_cleanly: false, name: "Person 1" },
+  session: { restore_on_startup: 1, startup_urls: ["https://example.com/"] },
+  partition: { per_host_zoom_levels: { x: { localhost: { zoom_level: 1.5 } } } },
+};
+const prefsFile = () => path.join(profile, "Default", "Preferences");
+function writeCrashedPrefs() {
+  fs.mkdirSync(path.dirname(prefsFile()), { recursive: true });
+  fs.writeFileSync(prefsFile(), JSON.stringify(CRASHED_PREFS));
+}
+const readPrefs = () => JSON.parse(fs.readFileSync(prefsFile(), "utf-8"));
 
 /** A stand-in compositor, alive until killed. */
 const compositor = () => spawnTracked(REAL_SLEEP, ["600"]);
@@ -364,6 +383,39 @@ describe.skipIf(!usable)("clawbox-desktop-browser in a session", { timeout: 30_0
       // Not the broad switch: hidden pages keep their one-wake-up-a-second throttling.
       expect(args, launch).not.toContain("--disable-background-timer-throttling");
     }
+  });
+
+  it("starts Chrome clean after a crash: no restored session, no restore bubble, the rest of the profile kept", async () => {
+    writeCrashedPrefs();
+    const labwc = compositor();
+    const { done } = startLauncher(env(labwc.pid!));
+    expect(await finished(done)).toBe(0);
+    expect(chromeLaunches()).toHaveLength(1);
+    expect(chromeLaunches()[0].split(" ")).toContain("--hide-crash-restore-bubble");
+    const prefs = readPrefs();
+    expect(prefs.profile).toEqual({ exit_type: "Normal", exited_cleanly: true, name: "Person 1" });
+    expect(prefs.session).toEqual({ restore_on_startup: 5, startup_urls: [] });
+    expect(prefs.partition).toEqual(CRASHED_PREFS.partition);
+    expect(readText(log)).toContain("session: ");
+    expect(readText(log)).not.toContain("not found; Chrome may restore");
+  });
+
+  it("leaves the preferences of a profile another Chrome holds to that Chrome, and starts clean once it is gone", async () => {
+    writeCrashedPrefs();
+    const labwc = compositor();
+    await sleepMs(60);
+    const holder = await profileHolder();
+    setWindow("up");
+    const { done } = startLauncher(env(labwc.pid!));
+    await waitFor("the launcher to adopt the holder", () => readText(log).includes("which this launcher did not start, holds the profile; watching it"));
+    expect(readText(log)).toContain("its preferences are left to it");
+    expect(readPrefs()).toEqual(CRASHED_PREFS);
+    holder.kill("SIGKILL");
+    expect(await finished(done)).toBe(0);
+    // Its own Chrome, after the holder: on preferences that now start clean.
+    expect(chromeLaunches()).toHaveLength(2);
+    expect(readPrefs().profile.exit_type).toBe("Normal");
+    expect(readPrefs().session.restore_on_startup).toBe(5);
   });
 
   it("reconfigures labwc once for a config it rendered, not on every pass", async () => {
