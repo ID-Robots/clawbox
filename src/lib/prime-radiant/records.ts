@@ -55,9 +55,19 @@ const w = (alternatives: readonly string[]) =>
 
 /** Ads, advertising, a campaign: what makes a receipt or invoice an ad platform's. */
 const AD_WORDS = w(["ads", "ad spend", "advertising", "adwords", "ad account", "ad campaign", "campaigns?", "sponsored", "рекламн[аи]", "реклама"]);
-const BILLING_WORDS = w(["receipts?", "invoices?", "billing", "charges?", "payments?", "statements?", "фактур[аи]", "разписк[аи]"]);
+const BILLING_WORDS = w(["receipts?", "invoices?", "billing", "charges?", "statements?", "фактур[аи]", "разписк[аи]"]);
 
-/** Most specific first: the first type whose words a title holds is the type. */
+/**
+ * Most specific first: the first type whose words a title holds is the type.
+ * A WEAK word ("transfer", "courier", "tracking") names a record only beside
+ * a code-shaped reference: "Transfer TR-88001234" is one, "Transfer of
+ * ownership 2026-03" is not.
+ */
+const WEAK_KINDS: ReadonlyArray<[RecordType, RegExp]> = [
+  ["shipment", w(["tracking", "courier", "parcels?", "пратк[аи]", "доставк[аи]"])],
+  ["bank-transfer", w(["transfers?", "преводи?"])],
+];
+
 const TITLE_KINDS: ReadonlyArray<[RecordType, RegExp]> = [
   ["credit-note", w(["credit notes?", "credit memos?", "debit notes?", "кредитн[оия]+ извести[ея]", "дебитн[оия]+ извести[ея]"])],
   [
@@ -70,15 +80,15 @@ const TITLE_KINDS: ReadonlyArray<[RecordType, RegExp]> = [
   [
     "shipment",
     w([
-      "waybills?", "air ?waybills?", "awb", "bills? of lading", "consignment notes?", "delivery notes?", "shipping labels?", "shipments?", "parcels?",
-      "consignments?", "tracking", "courier", "товарителниц[аи]", "пратк[аи]", "доставк[аи]",
+      "waybills?", "air ?waybills?", "awb", "bills? of lading", "consignment notes?", "delivery notes?", "shipping labels?", "shipments?",
+      "consignments?", "товарителниц[аи]",
     ]),
   ],
   [
     "bank-transfer",
     w([
-      "bank transfers?", "wire transfers?", "sepa transfers?", "transfers?", "payment orders?", "remittances?", "outgoing payments?", "incoming payments?",
-      "платежн[оия]+ нарежд(?:ане|ания)", "банков[и]? преводи?", "преводи?",
+      "bank transfers?", "wire transfers?", "sepa transfers?", "payment orders?", "remittances?", "outgoing payments?", "incoming payments?",
+      "платежн[оия]+ нарежд(?:ане|ания)", "банков[и]? преводи?",
     ]),
   ],
   ["receipt", w(["receipts?", "cash receipts?", "sales receipts?", "касов[аи] бележк[аи]", "разписк[аи]", "фискален бон"])],
@@ -86,7 +96,7 @@ const TITLE_KINDS: ReadonlyArray<[RecordType, RegExp]> = [
 ];
 
 /** The kind words a CLAIM uses for its document, with a reference after them ("invoice no. 4500012345"). */
-const CLAIM_KINDS: ReadonlyArray<[RecordType, RegExp]> = TITLE_KINDS;
+const CLAIM_KINDS: ReadonlyArray<[RecordType, RegExp]> = [...TITLE_KINDS, ...WEAK_KINDS];
 
 /** Currency codes and symbols an amount is read with. */
 const CURRENCY_CODES = ["EUR", "USD", "GBP", "BGN", "CHF", "PLN", "RON", "CZK", "HUF", "SEK", "NOK", "DKK", "JPY", "CNY", "CAD", "AUD", "TRY"];
@@ -158,7 +168,10 @@ export function readRecordFrontmatter(fm: Pick<PageFrontmatter, "record"> | Reco
 export function titleRecordType(title: string): RecordType | null {
   if (topicTitle(title)) return null;
   if (AD_WORDS.test(title) && BILLING_WORDS.test(title)) return "ad-receipt";
-  return TITLE_KINDS.find(([, re]) => re.test(title))?.[0] ?? null;
+  const strong = TITLE_KINDS.find(([, re]) => re.test(title))?.[0];
+  if (strong) return strong;
+  const weak = WEAK_KINDS.find(([, re]) => re.test(title))?.[0];
+  return weak && titleIdentifiers(title).ref.size > 0 ? weak : null;
 }
 
 /** The type most of a page's facts name next to a reference (theirs, or one in the page's title); null when none does, or two tie. */
@@ -366,12 +379,17 @@ export function classifyRecord(path: string, fm: PageFrontmatter, options: Class
  * across (pairing.ts `hub`). From the page's `record` frontmatter, else its
  * classification; null for a page that is no record leaf.
  */
-export function recordHubKey(path: string, fm: PageFrontmatter, options: ClassifyOptions = {}): string | null {
+export function recordHubKey(path: string, fm: PageFrontmatter): string | null {
   if (NON_RECORD_TYPES.has(fm.type) || fm.structure !== undefined) return null;
   const set = readRecordFrontmatter(fm);
-  if (set) return `${set.type}/${set.month}`;
-  const info = classifyRecord(path, fm, options);
-  return info ? `${info.type}/${info.month}` : null;
+  // A person's or the model's type stands; the rules' own is read again, as classifyRecord does.
+  if (set && set.by !== "rules") return `${set.type}/${set.month}`;
+  // The type and month only (classifyRecord's order, without amount and counterparty): the pass asks it of every page.
+  if (topicTitle(fm.title)) return null;
+  const type = titleRecordType(fm.title) ?? claimsRecordType(fm.claims.map((c) => c.text), titleIdentifiers(fm.title).ref.size > 0);
+  if (!type) return null;
+  const { month } = recordDate(fm);
+  return month ? `${type}/${month}` : null;
 }
 
 /** Amounts summed per currency, currencies in alphabetical order, to the cent. */

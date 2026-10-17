@@ -662,7 +662,10 @@ export function planStructure(snapshot: Pick<VaultSnapshot, "pages" | "indexBody
       const counts = new Map<string, Leaf[]>();
       for (const l of h.group) if (l.info.counterparty) counts.set(l.info.counterparty, [...(counts.get(l.info.counterparty) ?? []), l]);
       if (counts.size > 1 || sub.length > 0) {
-        const ranked = [...counts.entries()].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0])).slice(0, 10);
+        // Every counterparty with a hub of its own, then the biggest others, ten rows at least.
+        const ranked = [...counts.entries()]
+          .sort((a, b) => Number(subOf.has(b[0])) - Number(subOf.has(a[0])) || b[1].length - a[1].length || a[0].localeCompare(b[0]))
+          .slice(0, Math.max(10, sub.length));
         lines.push("", "## By counterparty", "", "| Counterparty | Records | Total |", "| --- | ---: | --- |");
         for (const [name, ls] of ranked) {
           const s = subOf.get(name);
@@ -980,13 +983,14 @@ export function planStructure(snapshot: Pick<VaultSnapshot, "pages" | "indexBody
       for (const e of topAll) lines.push(wikiLine(e.page.path, e.page.fm.title, ` (${plural(e.inbound, "link", "links")} in)`));
     }
     const rolled = domainHubDrafts.flatMap((d) => pagesByDomain.get(d.domain.name) ?? []);
+    const quoted = [...topAll.map((e) => e.page), ...decisions.slice(0, 5).map((d) => byPath.get(d.page)).filter((p): p is Page => !!p)];
     const fm = ourFrontmatter(rootPlace.prior, {
       type: "synthesis",
       title: rootTitle,
       domain: GENERAL_DOMAIN,
       owner: "unassigned",
       sources: rollupSources(rolled.length > 0 ? rolled : leaves.map((l) => l.page), 20),
-      privacy: "internal",
+      privacy: strictestPrivacy(quoted),
       structure: { kind: "root" },
     });
     setOurPage(rootPlace.path, rootPlace.prior, fm, lines.join("\n"));
