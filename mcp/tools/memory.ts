@@ -309,7 +309,7 @@ function describeMemoryStatus(s: MemoryStatusBody, searchHint: boolean): Record<
       guidance.push("An incremental pass picks up what reindex.reasons names: start it yourself with memory_shard_reindex (mode incremental) and tell the user.");
     }
     guidance.push(
-      "You may run incremental passes on your own — after adding a folder, or when files are waiting — they read only new and changed files."
+      "You may run incremental indexing passes on your own — after adding a folder, or when files are waiting — they read only new and changed files."
       + " A full re-embed, a provider change and a reset need the owner's go in this chat: those tools answer an estimate first and act only with confirm: true.",
     );
   }

@@ -113,7 +113,7 @@ describe("memory_shard_status", () => {
       schedule: "every day at 03:00 (box time)",
       next_scheduled_pass: "2026-09-19 03:00 UTC",
     });
-    expect(String(s.guidance)).toMatch(/You may run incremental passes on your own/);
+    expect(String(s.guidance)).toMatch(/You may run incremental indexing passes on your own/);
     expect(String(s.guidance)).toMatch(/A full re-embed, a provider change and a reset need the owner's go/);
     expect(String(s.guidance)).toMatch(/confirm: true/);
     expect(String(s.guidance)).not.toMatch(/memory_shard_search/);
