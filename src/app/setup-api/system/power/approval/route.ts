@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { hasPersonSession } from "@/lib/owner-session";
-import { isPowerAction, pendingPowerApproval, resolvePowerApproval } from "@/lib/power-approval";
+import { isApprovalAction, pendingPowerApproval, resolvePowerApproval } from "@/lib/power-approval";
 
 export const dynamic = "force-dynamic";
 const forbidden = () => NextResponse.json({ error: "Only the owner can confirm power requests" }, { status: 403 });
@@ -17,7 +17,7 @@ export async function POST(req: Request) {
   if (!(await hasPersonSession(req))) return forbidden();
   let body;
   try { body = await req.json(); } catch { return NextResponse.json({ error: "Invalid body" }, { status: 400 }); }
-  if (!body || typeof body.id !== "string" || !isPowerAction(body.action) || typeof body.approve !== "boolean") {
+  if (!body || typeof body.id !== "string" || !isApprovalAction(body.action) || typeof body.approve !== "boolean") {
     return NextResponse.json({ error: "Invalid confirmation" }, { status: 400 });
   }
   try {

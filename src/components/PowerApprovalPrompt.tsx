@@ -4,7 +4,7 @@ import { useT } from "@/lib/i18n";
 import { DESKTOP_LAYERS } from "@/lib/window-snap";
 import { setVisibleInterval } from "@/lib/visible-interval";
 
-interface Prompt { id: string; action: "restart" | "shutdown"; reason: string; expiresAt: number }
+interface Prompt { id: string; action: "restart" | "shutdown" | "update"; reason: string; expiresAt: number }
 
 /**
  * Fired on `window` by the desktop when the owner-notice ring says a power
@@ -101,7 +101,7 @@ const PowerApprovalPrompt = memo(function PowerApprovalPrompt() {
     className="fixed bottom-20 right-5 max-w-sm rounded-xl border border-white/20 bg-[var(--bg-elevated)] p-5 text-white shadow-xl"
     style={{ zIndex: DESKTOP_LAYERS.notice }}>
     <h2 id="power-approval-title" className="font-semibold">{t("chat.approval.title")}</h2>
-    {prompt && <p className="mt-2 text-lg">{t(prompt.action === "restart" ? "tray.restart" : "tray.shutDown")}</p>}
+    {prompt && <p className="mt-2 text-lg">{t(prompt.action === "restart" ? "tray.restart" : prompt.action === "update" ? "settings.systemUpdate" : "tray.shutDown")}</p>}
     <p className="mt-2 text-sm text-white/70">{t("chat.approval.summary")}</p>
     {prompt && <blockquote className="my-3 max-h-24 overflow-auto whitespace-pre-wrap break-words border-l-2 border-white/30 pl-3 text-sm">{prompt.reason}</blockquote>}
     {error && <p role="alert" className="mb-2 text-sm text-red-300">{t("chat.approval.failed")}</p>}

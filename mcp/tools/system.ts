@@ -4,10 +4,12 @@
 // Everything here is either a READ or a narrowly-scoped, closed-enum write.
 // Deliberately absent, because each is one injected sentence away from an
 // outage, a bill, a credential, or a device the customer can only recover by
-// walking over to it: wifi_connect, update_run, backup restore / pairing /
+// walking over to it: wifi_connect, backup restore / pairing /
 // passphrase, provider-key entry, any OAuth flow, factory reset, tunnel, portal,
 // harness switching, telegram configuration, and any cleanup tool that takes a
-// PATH rather than a closed target name.
+// PATH rather than a closed target name. update_run is here only because it
+// never installs on its own say: it asks the owner (desktop prompt + Telegram
+// Confirm/Cancel buttons) and the update starts only on their tap.
 
 import { mkdtemp, readFile, rm } from "fs/promises";
 import { tmpdir } from "os";
@@ -593,7 +595,7 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
 
   reg.tool(
     "update_check",
-    "Check whether a newer ClawBox software version is available, and report the installed version. This only reports — it never installs anything. If an update is waiting, tell the user to install it from Settings -> System Update. If `remote.reachable` is false the device could not reach GitHub for this check, so say the check failed and quote `remote.reason` — do NOT report the device as up to date.",
+    "Check whether a newer ClawBox version is available and report the installed one. Only reports, never installs; if an update is waiting, offer update_run (the owner confirms with a button). If `remote.reachable` is false the device could not reach GitHub for this check, so say the check failed and quote `remote.reason` — do NOT report the device as up to date.",
     {},
     { editions: ["openclaw", "hermes"], readOnly: true, openWorld: true, profile: "core" },
     // Shaped, not raw: the route always carries an `openclaw` component and
@@ -607,6 +609,23 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
           ctx,
         ),
       ),
+  );
+
+  reg.tool(
+    "update_run",
+    "Install the waiting ClawBox update, only when the user asked in this conversation (update_check first). It never installs by itself: the owner gets Update/Cancel buttons in Telegram and on the desktop, and it starts only on their tap. The desktop and chat go offline for a few minutes while it installs.",
+    {
+      confirm: zConfirm("Must be true. Set it only when the user asked for the update in their own words."),
+      reason: zText(200, "What the user asked for, in one sentence."),
+    },
+    { editions: ["openclaw", "hermes"], readOnly: false, destructive: true, openWorld: true },
+    async ({ reason }: { confirm: true; reason: string }) => {
+      const result = await apiPost("/setup-api/update/request", { reason }, { timeoutMs: 60_000 });
+      const response = result && typeof result === "object" ? result as Record<string, unknown> : {};
+      return text(response.pendingApproval
+        ? `Asked the owner to confirm the update ${response.telegramPromptSent ? "with the Update / Cancel buttons in Telegram (approvals bot) and on the ClawBox desktop" : "on the ClawBox desktop"}. Nothing installs until they tap Update; the question expires in 2 minutes.`
+        : "The update has started. The desktop and chat will be offline for a few minutes while it installs.");
+    },
   );
 
   if (ctx.capabilities.journal) {
