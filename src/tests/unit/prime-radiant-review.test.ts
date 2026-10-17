@@ -337,4 +337,38 @@ describe("history, diff and revert", () => {
     const rootSha = (await git(vault, ["rev-list", "--max-parents=0", "HEAD"])).stdout.trim();
     await expect(revertCommit({ sha: rootSha })).rejects.toMatchObject({ code: "invalid" });
   });
+
+  it("undoes a commit that created pages: the new pages go, the index edit comes off, nothing is left staged", async () => {
+    await seed({ "concepts/pricing.md": pageText({ claims: [PRICE_A] }) });
+    // What an ingest commits: new pages plus the index naming them.
+    const ingest = await vaultOperation("ingest: 2 documents", async (tx) => {
+      await tx.write("concepts/shipping.md", pageText({ title: "Shipping", claims: [PRICE_B] }));
+      await tx.write("entities/globex.md", pageText({ title: "Globex", claims: [claim("globex/profile/founded", "Globex was founded in 1990.")] }));
+      await tx.write("index.md", `${INDEX}- [[entities/globex]]\n`);
+    });
+    expect(ingest.commit).toBeTruthy();
+    const r = await revertCommit({ sha: ingest.commit! });
+    expect(r.commit).toBeTruthy();
+    expect([...r.changed].sort()).toEqual(["concepts/shipping.md", "entities/globex.md", "index.md"]);
+    expect(await showFileAt(vault, "HEAD", "concepts/shipping.md")).toBeNull();
+    expect(await showFileAt(vault, "HEAD", "entities/globex.md")).toBeNull();
+    expect(await showFileAt(vault, "HEAD", "index.md")).toBe(INDEX.trim());
+    expect(fs.existsSync(path.join(vault, "entities", "globex.md"))).toBe(false);
+    expect((await git(vault, ["status", "--porcelain"])).stdout.trim()).toBe("");
+    // The undo is itself undoable: the pages come back.
+    await revertCommit({ sha: r.commit! });
+    expect(await showFileAt(vault, "HEAD", "entities/globex.md")).not.toBeNull();
+  });
+
+  it("undoes only the page a commit created when asked for that page", async () => {
+    await seed({ "concepts/pricing.md": pageText({ claims: [PRICE_A] }) });
+    const ingest = await vaultOperation("ingest: 1 document", async (tx) => {
+      await tx.write("concepts/shipping.md", pageText({ title: "Shipping", claims: [PRICE_B] }));
+      await tx.write("index.md", INDEX.replace("- [[concepts/shipping]]\n", "- [[concepts/shipping]]\n- [[concepts/pricing]]\n"));
+    });
+    const r = await revertCommit({ sha: ingest.commit!, path: "concepts/shipping.md" });
+    expect(r.changed).toEqual(["concepts/shipping.md"]);
+    expect(await showFileAt(vault, "HEAD", "concepts/shipping.md")).toBeNull();
+    expect((await git(vault, ["status", "--porcelain"])).stdout.trim()).toBe("");
+  });
 });

@@ -264,15 +264,24 @@ export async function commitPaths(
   // existed, or a page written and removed again) is no change, and git
   // would refuse it as a pathspec that matches nothing.
   const live: string[] = [];
+  const present: string[] = [];
+  const gone: string[] = [];
   for (const p of paths) {
     const onDisk = await fs.lstat(path.join(vault, ...p.split("/"))).then(
       () => true,
       () => false,
     );
-    if (onDisk || (await trackedAtHead(vault, p))) live.push(p);
+    if (!onDisk && !(await trackedAtHead(vault, p))) continue;
+    live.push(p);
+    (onDisk ? present : gone).push(p);
   }
   if (live.length === 0) return null;
-  await git(vault, ["add", "-A", "--", ...live]);
+  if (present.length > 0) await git(vault, ["add", "-A", "--", ...present]);
+  // A deletion is staged with `git rm --cached`: a caller may have staged it
+  // already (a revert applies its patch with --index), and then the path is
+  // in neither the work tree nor the index, so `git add` refuses it as a
+  // pathspec that matches nothing.
+  if (gone.length > 0) await git(vault, ["rm", "-r", "--cached", "--quiet", "--ignore-unmatch", "--", ...gone]);
   const staged = await git(vault, ["diff", "--cached", "--quiet", "--", ...live], { allowFail: true });
   if (staged.code === 0) return null;
   await git(vault, ["commit", "--quiet", "--no-verify", "-m", subject, ...(block.length > 0 ? ["-m", block.join("\n")] : []), "--", ...live], { author });
