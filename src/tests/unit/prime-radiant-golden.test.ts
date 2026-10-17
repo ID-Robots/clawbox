@@ -12,6 +12,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { FlashCallError, type FlashClient } from "@/lib/prime-radiant/flash-client";
 import { stubGoldenVerdict } from "@/lib/prime-radiant/flash-stub";
 import { git } from "@/lib/prime-radiant/git";
+import { revertCommit } from "@/lib/prime-radiant/history";
 import {
   buildGoldenPrompt,
   GOLDEN_FILE,
@@ -203,6 +204,16 @@ describe("golden questions: the store in the vault", () => {
     expect((await readGoldenQuestions()).questions).toEqual([]);
     await expect(deleteGoldenQuestion(id)).rejects.toMatchObject({ code: "not_found", status: 404 });
     await expect(updateGoldenQuestion("gq-000000000000", { expected: "x" })).rejects.toBeInstanceOf(GoldenError);
+  });
+
+  it("is undone from History like any commit: the question comes back", async () => {
+    await seedPages();
+    const added = await addGoldenQuestion(PRICE_Q, { domains: [] });
+    const gone = await deleteGoldenQuestion(added.question!.id);
+    expect((await readGoldenQuestions()).questions).toEqual([]);
+    const undo = await revertCommit({ sha: gone.commit! });
+    expect(undo.commit).not.toBeNull();
+    expect((await readGoldenQuestions()).questions.map((q) => q.id)).toEqual([added.question!.id]);
   });
 
   it("creates nothing without a vault, and refuses a write there", async () => {
