@@ -260,8 +260,8 @@ describe("the reset", () => {
     expect(res.status).toBe(409);
     const body = await res.json();
     expect(body.kind).toBe("confirm_required");
-    expect(body.would.clears.join(" ")).toMatch(/switch.*schedule.*setup/s);
-    expect(body.would.keeps.join(" ")).toMatch(/folder list.*embedding model.*index already built.*nothing on disk is deleted/s);
+    expect(body.would.clears.join(" ")).toMatch(/switch.*schedule.*setup/);
+    expect(body.would.keeps.join(" ")).toMatch(/folder list.*embedding model.*index already built.*nothing on disk is deleted/);
     expect(lib.writeMemorySchedule).not.toHaveBeenCalled();
     expect(shard.setMemoryShardEnabled).not.toHaveBeenCalled();
   });
