@@ -347,6 +347,19 @@ describe("nightly pass", () => {
     expect(readComparedThrough(vaultDir())).toBe((await headCommit(vaultDir()))!.sha);
   });
 
+  it("never hands git a recorded mark that is no commit id, and compares every claim instead", async () => {
+    await ensureVault();
+    await runNightly("schedule", deps());
+    for (const bad of ["HEAD", "--all", "main~1", "0123456789abcdef", ""]) {
+      withStateDb(vaultDir(), (db) => db.prepare("UPDATE pass_state SET value = ? WHERE key = 'compared_through'").run(bad));
+      expect(readComparedThrough(vaultDir())).toBeNull();
+    }
+    const second = await runNightly("schedule", deps({ now: () => new Date(2026, 4, 21, 3, 0) }));
+    const s2 = second!.summary as unknown as NightlySummary;
+    expect(s2.contradictions.queried).toBe(s2.contradictions.claims);
+    expect(readComparedThrough(vaultDir())).toMatch(/^[0-9a-f]{40}$/);
+  });
+
   it("an offline night does not count as the full comparison", async () => {
     await ensureVault();
     await runNightly("schedule", deps({ online: async () => false }));
