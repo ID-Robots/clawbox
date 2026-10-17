@@ -500,6 +500,18 @@ describe("a full chunk budget: page vectors first", () => {
     expect(await claimsOf("concepts/a.md")).toEqual(["acme-sales/a/fact-2"]);
   });
 
+  it("lets an incremental run use the room a page that lost claims cannot take back until a whole-tree run", async () => {
+    // a keeps 2 of its 6 claims.
+    _setVaultMaxChunksForTests(3);
+    await commit({ "concepts/a.md": pageWith("a", 6) });
+    expect(await reindexPrimeRadiantVault()).toMatchObject({ partial: 1, chunks: 3 });
+    // More room, and a new page: an incremental run never reads a, so a asks
+    // for no more than it holds and b gets every claim that fits.
+    _setVaultMaxChunksForTests(8);
+    await commit({ "concepts/b.md": pageWith("b", 4) });
+    expect(await reindexPrimeRadiantPaths(["concepts/b.md"])).toMatchObject({ mode: "incremental", indexed: 1, partial: 0, chunks: 8 });
+  });
+
   it("counts the pages left without a page vector in the status", async () => {
     // Page chunks alone overrun a budget of one: the second page is capped.
     _setVaultMaxChunksForTests(1);

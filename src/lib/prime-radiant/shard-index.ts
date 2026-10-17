@@ -723,7 +723,10 @@ async function syncOnce(vault: string, paths: ReadonlySet<string> | null, signal
       planned.map((rel) => {
         const h = held.get(rel);
         const w = working.get(rel);
-        if (!w) return { pageChunks: h!.page, claimChunks: Math.max(h!.claim, h!.units - h!.page), held: h!.page + h!.claim, fixed: true };
+        // Only a whole-tree run reads a page it was not given and gives back
+        // claims the budget took (`grow` below): in an incremental run such a
+        // page asks for no more than it holds, or its share would sit unused.
+        if (!w) return { pageChunks: h!.page, claimChunks: full ? Math.max(h!.claim, h!.units - h!.page) : h!.claim, held: h!.page + h!.claim, fixed: true };
         const claims = claimsOf(w.units);
         return { pageChunks: w.units.length - claims, claimChunks: claims, held: h ? h.page + h.claim : 0 };
       }),
