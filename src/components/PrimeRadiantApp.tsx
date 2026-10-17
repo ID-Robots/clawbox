@@ -82,7 +82,7 @@ function isDrawableStatus(s: unknown): s is PrimeRadiantStatus {
   return !st.initialised || (!!st.vault && typeof st.vault === "object" && !!st.plugin && typeof st.plugin === "object");
 }
 export default function PrimeRadiantApp() {
-  const { t } = useT();
+  const { t, locale } = useT();
   /** For what shows before the dictionaries load (the window can be the first thing on screen): English, never a key. */
   const tr = useTr();
   const [status, setStatus] = useState<PrimeRadiantStatus | null>(null);
@@ -278,7 +278,7 @@ export default function PrimeRadiantApp() {
                 onClick={() => showTab("questions")}
                 data-testid="prime-radiant-count-accuracy"
               >
-                {t("primeRadiant.countAccuracy", { percent: status.golden.last.percent })}
+                {t("primeRadiant.countAccuracy", { percent: status.golden.last.percent.toLocaleString(locale) })}
               </button>
             )}
           </div>

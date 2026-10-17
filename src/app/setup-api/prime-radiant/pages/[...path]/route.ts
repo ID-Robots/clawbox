@@ -8,7 +8,7 @@
  * answers 404 exactly like a missing one.
  *
  * PATCH `{ title?, summary?, body?, status?, domain?, owner?, privacy?,
- * stale_after?, sources? }` — edit it (its claims are the `claims` routes'):
+ * stale_after?, as_of?, sources? }` — edit it (its claims are the `claims` routes'):
  * `{ path, commit, changed, findings }`, one commit `edit: <path>` (none when
  * nothing differed). DELETE — remove it and its index.md line: `{ path,
  * commit, claims, verified }`, one commit `delete: <path>`. Both: the owner,

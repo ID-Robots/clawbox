@@ -27,6 +27,8 @@ export type PrimeRadiantStatus = ServiceStatus & { golden?: GoldenStatus | null 
 /** What GET golden answers. */
 export interface GoldenListAnswer {
   questions: GoldenQuestion[];
+  /** Entries of golden.json that cannot be read: changes are refused until the file is mended. */
+  skipped?: number;
   verdicts: Record<string, { verdict: GoldenVerdict | null; why: string | null; at: string }>;
   score: GoldenStatus;
 }

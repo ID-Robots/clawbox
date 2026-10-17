@@ -265,6 +265,9 @@ function installFetch() {
       return ok({ question, commit: "c".repeat(40) }, 201);
     }
     if (url === `${p}/golden`) return ok({ questions: goldenQuestions, verdicts: { [GOLDEN_Q.id]: { verdict: "correct", why: "same", at: "2026-01-05T03:10:00.000Z" } }, score: GOLDEN_SCORE });
+    if (url.startsWith(`${p}/golden/`) && method === "PATCH") {
+      return ok({ error: "A golden question cannot hold a secret: it contains a password.", code: "lint_blocked" }, 409);
+    }
     if (url.startsWith(`${p}/golden/`) && method === "DELETE") {
       goldenQuestions = goldenQuestions.filter((q) => !url.endsWith((q as { id: string }).id));
       return ok({ question: GOLDEN_Q, commit: "d".repeat(40) });
@@ -276,6 +279,7 @@ function installFetch() {
         costRates: {}, nightly: { enabled: true, time: "03:00" },
         opus: { enabled: false, capUsd: 2, sampleRate: 0.02, model: "opus", ...(opusExtras ? { maxPages: opusExtras.maxPages } : {}) },
         contradictions: { enabled: true }, domains: [],
+        golden: { enabled: true, maxQuestions: 50 }, verification: { perOwner: 5, outbound: false, languages: [] },
         ...(searchIndexLimitMb !== null ? { search: { indexLimitMb: searchIndexLimitMb } } : {}),
       };
       return ok({
@@ -1141,6 +1145,43 @@ describe("PrimeRadiantApp — Questions", () => {
     expect(screen.getByTestId("prime-radiant-daily")).toHaveTextContent("Nothing is sent on its own.");
     fireEvent.click(outbound);
     await waitFor(() => expect(calls.find((c) => c.method === "PUT" && c.url.endsWith("/settings"))?.body).toEqual({ verification: { outbound: true } }));
+  });
+
+  it("keeps an edit open with what was typed when the save is refused, and shows the claim and a missing owner", async () => {
+    goldenQuestions = [{ ...GOLDEN_Q, owner: "unassigned", claimId: "sales/acme-widgets/price" }];
+    mount();
+    await openTab("questions");
+    const row = await screen.findByTestId("prime-radiant-golden-row");
+    expect(row).toHaveTextContent("No owner");
+    expect(screen.getByTestId("prime-radiant-golden-row-claim")).toHaveTextContent("sales/acme-widgets/price");
+    fireEvent.click(screen.getByTestId("prime-radiant-golden-edit"));
+    expect(screen.getByTestId("prime-radiant-golden-owner")).toHaveValue("");
+    expect(screen.getByTestId("prime-radiant-golden-claim")).toHaveValue("sales/acme-widgets/price");
+    fireEvent.change(screen.getByTestId("prime-radiant-golden-expected"), { target: { value: "12 EUR" } });
+    fireEvent.change(screen.getByTestId("prime-radiant-golden-claim"), { target: { value: "" } });
+    fireEvent.click(screen.getByTestId("prime-radiant-golden-save"));
+    await waitFor(() => expect(calls.find((c) => c.method === "PATCH")?.body).toMatchObject({ expected: "12 EUR", claimId: null, owner: null }));
+    expect(await within(screen.getByTestId("prime-radiant-golden")).findByRole("alert")).toBeInTheDocument();
+    expect(screen.getByTestId("prime-radiant-golden-form")).toBeInTheDocument();
+    expect(screen.getByTestId("prime-radiant-golden-expected")).toHaveValue("12 EUR");
+  });
+
+  it("sets the nightly golden check and the daily questions an owner gets under Checks", async () => {
+    mount();
+    await openTab("questions");
+    const enabled = await screen.findByTestId("prime-radiant-golden-enabled");
+    expect(enabled).toBeChecked();
+    expect(screen.getByTestId("prime-radiant-golden-max")).toHaveValue(50);
+    fireEvent.click(enabled);
+    await waitFor(() => expect(calls.filter((c) => c.method === "PUT" && c.url.endsWith("/settings")).map((c) => c.body)).toContainEqual({ golden: { enabled: false } }));
+    const perOwner = screen.getByTestId("prime-radiant-daily-per-owner");
+    fireEvent.change(perOwner, { target: { value: "99" } });
+    fireEvent.blur(perOwner);
+    expect(perOwner).toHaveValue(5);
+    fireEvent.change(perOwner, { target: { value: "3" } });
+    fireEvent.blur(perOwner);
+    await waitFor(() => expect(calls.filter((c) => c.method === "PUT" && c.url.endsWith("/settings")).map((c) => c.body)).toContainEqual({ verification: { perOwner: 3 } }));
+    expect(calls.filter((c) => c.method === "PUT" && c.url.endsWith("/settings")).map((c) => c.body)).not.toContainEqual({ verification: { perOwner: 99 } });
   });
 
   it("says so when there are no golden questions, no score and no owners yet", async () => {

@@ -125,7 +125,7 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 | Coding team (`coding_team_run/status/stop`) | when the owner switched it on | when the owner switched it on |
 | Steering and following runs (`coding_run_message`, `coding_run_list`, `coding_agent_resume`, `coding_project_status`) | when the owner switched the coding agent on | same |
 | Device state reads (`memory_shard_status`, `local_ai_status`, `clawbox_ai_usage`, `anthropic_accounts`) | yes | yes |
-| Prime Radiant (`prime_radiant_*`, 32 tools) | yes | yes |
+| Prime Radiant (`prime_radiant_*`, 37 tools) | yes | yes |
 | Coordinate browser control (`browser_click/type/keypress/scroll`) | yes | **no** — Hermes ships a richer browser toolset |
 | Media inside a run (`generate_image`, `generate_audio`) | when the owner's switch is on | when the owner's switch is on |
 | Everything else | yes | yes |
@@ -1198,12 +1198,12 @@ owner when it touches a verified page.
 | Add: Start (folders) / drop files | `POST ingest { folders }` / `ingest/upload` + `POST ingest { upload }` | `prime_radiant_ingest_start` (folders, or files by path: `POST ingest { files }`) |
 | Add: Stop | `DELETE ingest/<id>` | `prime_radiant_ingest_stop` |
 | Add: Retry failed files | `POST ingest/<id>/retry` | `prime_radiant_ingest_retry` |
-| Questions: the golden questions, their last verdicts, the % correct and its trend | `GET golden` | `prime_radiant_golden_list` (the % correct also in `prime_radiant_status`) |
+| Questions: the golden questions, their last verdicts, the % correct and its trend | `GET golden` | `prime_radiant_golden_list` (whole rows to its reply cap, narrowed by `domain` / `owner`; the % correct also in `prime_radiant_status`) |
 | Questions: add / edit / delete a golden question | `POST golden`, `PATCH` / `DELETE golden/<id>` | `prime_radiant_golden_add` / `_edit` / `_delete` |
-| Questions: an owner's daily questions, in their language | `GET daily?owner=` | `prime_radiant_daily_questions` (sending stays off until the owner turns it on; answers go back through `prime_radiant_claim_verify`, `prime_radiant_review_resolve` and `prime_radiant_page_edit`) |
+| Questions: an owner's daily questions, in their language | `GET daily?owner=` | `prime_radiant_daily_questions` (sending stays off until the owner turns it on; answers go back through `prime_radiant_claim_verify`, `prime_radiant_review_resolve` and `prime_radiant_page_edit`; a review item with no claim to verify carries `fix_first`: the page is put right, then the item dismissed) |
 | Settings: Run now / Merge a held night | `POST nightly/run` / `POST nightly/run { merge }` | `prime_radiant_nightly_run` / `prime_radiant_nightly_merge` |
 | — run the connect pass | `POST maintenance { action: "connect" }` | `prime_radiant_connect_run` |
-| Settings: Save (schedule, contradictions, Opus on/off + caps, domains and owners, golden check on/off + nightly cap, daily questions per owner and owners' languages, exclude list, parallel, skip code projects, nightly folders) | `PUT settings` | `prime_radiant_settings_update` |
+| Settings: Save (schedule, contradictions, Opus on/off + caps, domains and owners, exclude list, parallel, skip code projects, nightly folders); Questions → Checks (golden check on/off + nightly cap, daily questions per owner) and Daily questions (owners' languages) | `PUT settings` | `prime_radiant_settings_update` |
 
 The route refusals become instructions (`NEXT` in the module): `owner_only` says
 it is the owner's and not to retry, `not_initialised` sends the agent to

@@ -105,10 +105,14 @@ interface Draft {
   expected: string;
   domain: string;
   owner: string;
+  claimId: string;
   page: string;
 }
 
-const emptyDraft = (domain: string): Draft => ({ question: "", expected: "", domain, owner: "", page: "" });
+const emptyDraft = (domain: string): Draft => ({ question: "", expected: "", domain, owner: "", claimId: "", page: "" });
+
+/** The owner as the list shows it: the store's "unassigned" is no name. */
+const ownerLabel = (owner: string, t: (key: string) => string) => (owner === "unassigned" ? t("primeRadiant.questions.noOwner") : owner);
 
 function GoldenForm({ initial, domains, onSave, onCancel, busy }: { initial: Draft; domains: string[]; onSave: (d: Draft) => void; onCancel: () => void; busy: boolean }) {
   const { t } = useT();
@@ -132,7 +136,7 @@ function GoldenForm({ initial, domains, onSave, onCancel, busy }: { initial: Dra
         {t("primeRadiant.questions.expected")}
         <input className={`${FIELD} mt-1 w-full`} value={d.expected} onChange={set("expected")} maxLength={500} data-testid="prime-radiant-golden-expected" />
       </label>
-      <div className="grid gap-2 @md:grid-cols-3">
+      <div className="grid gap-2 @md:grid-cols-2">
         <label className="block text-[11px] text-[var(--text-muted)]">
           {t("primeRadiant.questions.domain")}
           <input className={`${FIELD} mt-1 w-full`} value={d.domain} onChange={set("domain")} list="prime-radiant-golden-domains" maxLength={64} data-testid="prime-radiant-golden-domain" />
@@ -147,6 +151,10 @@ function GoldenForm({ initial, domains, onSave, onCancel, busy }: { initial: Dra
         <label className="block text-[11px] text-[var(--text-muted)]">
           {t("primeRadiant.questions.pageOptional")}
           <input className={`${FIELD} mt-1 w-full`} value={d.page} onChange={set("page")} maxLength={512} data-testid="prime-radiant-golden-page" />
+        </label>
+        <label className="block text-[11px] text-[var(--text-muted)]">
+          {t("primeRadiant.questions.claimOptional")}
+          <input className={`${FIELD} mt-1 w-full font-mono`} value={d.claimId} onChange={set("claimId")} maxLength={200} spellCheck={false} data-testid="prime-radiant-golden-claim" />
         </label>
       </div>
       <div className="flex gap-2 justify-end">
@@ -170,7 +178,7 @@ function GoldenRow({
   verdict: GoldenVerdict | null;
   domains: string[];
   busy: boolean;
-  onSave: (d: Draft) => void;
+  onSave: (d: Draft) => Promise<boolean>;
   onDelete: () => void;
   onOpenPage: (path: string) => void;
 }) {
@@ -181,13 +189,15 @@ function GoldenRow({
     return (
       <li>
         <GoldenForm
-          initial={{ question: q.question, expected: q.expected, domain: q.domain, owner: q.owner, page: q.page ?? "" }}
+          initial={{ question: q.question, expected: q.expected, domain: q.domain, owner: q.owner === "unassigned" ? "" : q.owner, claimId: q.claimId ?? "", page: q.page ?? "" }}
           domains={domains}
           busy={busy}
           onCancel={() => setEditing(false)}
           onSave={(d) => {
-            onSave(d);
-            setEditing(false);
+            // The form stays open (with what was typed) until the change is saved.
+            void onSave(d).then((ok) => {
+              if (ok) setEditing(false);
+            });
           }}
         />
       </li>
@@ -199,8 +209,9 @@ function GoldenRow({
         <p className="text-sm text-[var(--text-primary)]">{q.question}</p>
         <p className="mt-0.5 text-xs text-[var(--text-secondary)]">→ {q.expected}</p>
         <p className="mt-1 text-[11px] text-[var(--text-muted)] flex flex-wrap gap-x-3">
-          <span>{q.owner}</span>
+          <span>{ownerLabel(q.owner, t)}</span>
           <span>{q.domain}</span>
+          {q.claimId && <span className="font-mono" data-testid="prime-radiant-golden-row-claim">{q.claimId}</span>}
           {q.page && (
             <button type="button" onClick={() => onOpenPage(q.page as string)} className="text-[var(--coral-bright)] hover:underline cursor-pointer">
               {pageLabel(q.page)}
@@ -233,10 +244,13 @@ function bodyOf(d: Draft, editing: boolean): Record<string, unknown> {
   const out: Record<string, unknown> = { question: d.question.trim(), expected: d.expected.trim(), domain: d.domain.trim() };
   const owner = d.owner.trim();
   const page = d.page.trim();
+  const claimId = d.claimId.trim();
   if (owner) out.owner = owner;
   else if (editing) out.owner = null;
   if (page) out.page = page;
   else if (editing) out.page = null;
+  if (claimId) out.claimId = claimId;
+  else if (editing) out.claimId = null;
   return out;
 }
 
@@ -261,15 +275,18 @@ function Golden({ revision, domains, onChanged, onOpenPage }: Pick<Props, "revis
     return () => ctl.abort();
   }, [revision, t]);
 
-  const write = async (url: string, init: RequestInit) => {
+  /** One change; whether it was saved (a refused one keeps its form open). */
+  const write = async (url: string, init: RequestInit): Promise<boolean> => {
     setBusy(true);
     try {
       await prJson(url, init);
       setError(null);
       setAdding(false);
       onChanged();
+      return true;
     } catch (err) {
       setError(errorText(err, t));
+      return false;
     } finally {
       setBusy(false);
     }
@@ -289,6 +306,11 @@ function Golden({ revision, domains, onChanged, onOpenPage }: Pick<Props, "revis
       </div>
       <p className="text-[11px] text-[var(--text-muted)]">{t("primeRadiant.questions.goldenHint")}</p>
       {error && <p role="alert" className="text-xs text-red-300">{error}</p>}
+      {(list?.skipped ?? 0) > 0 && (
+        <p role="status" className="text-xs text-amber-200" data-testid="prime-radiant-golden-unreadable">
+          {t("primeRadiant.questions.unreadable", { count: list?.skipped ?? 0 })}
+        </p>
+      )}
       {adding && (
         <GoldenForm
           initial={emptyDraft(domains[0] ?? "")}
@@ -311,7 +333,7 @@ function Golden({ revision, domains, onChanged, onOpenPage }: Pick<Props, "revis
               domains={domains}
               busy={busy}
               onOpenPage={onOpenPage}
-              onSave={(d) => void write(`${API}/golden/${encodeURIComponent(q.id)}`, jsonInit("PATCH", bodyOf(d, true)))}
+              onSave={(d) => write(`${API}/golden/${encodeURIComponent(q.id)}`, jsonInit("PATCH", bodyOf(d, true)))}
               onDelete={() => void write(`${API}/golden/${encodeURIComponent(q.id)}`, { method: "DELETE" })}
             />
           ))}
@@ -467,12 +489,120 @@ function Daily({ revision, onOpenPage, onOpenReview }: Pick<Props, "revision" | 
   );
 }
 
+/** A whole number typed in a small field, saved when the field is left with a new value in range. */
+function NumberSetting({ label, value, min, max, disabled, onSave, testId }: { label: string; value: number; min: number; max: number; disabled: boolean; onSave: (n: number) => void; testId: string }) {
+  const [text, setText] = useState(String(value));
+  useEffect(() => setText(String(value)), [value]);
+  const commit = () => {
+    const n = Number(text);
+    if (Number.isInteger(n) && n >= min && n <= max && n !== value) onSave(n);
+    else setText(String(value));
+  };
+  return (
+    <label className="flex items-center justify-between gap-3 text-xs text-[var(--text-primary)]">
+      <span>{label}</span>
+      <input
+        type="number"
+        inputMode="numeric"
+        min={min}
+        max={max}
+        step={1}
+        className={`${FIELD} w-20 text-right tabular-nums`}
+        value={text}
+        disabled={disabled}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+        }}
+        data-testid={testId}
+      />
+    </label>
+  );
+}
+
+/** The two checks' own settings: the nightly golden check (on, its cap) and the daily questions an owner gets. */
+function Checks({ revision, onChanged }: Pick<Props, "revision" | "onChanged">) {
+  const { t } = useT();
+  const [settings, setSettings] = useState<PrimeRadiantSettings | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    const ctl = new AbortController();
+    prJson<{ settings: PrimeRadiantSettings }>(`${API}/settings`, { signal: ctl.signal })
+      .then((r) => {
+        setSettings(r.settings);
+        setError(null);
+      })
+      .catch((err) => {
+        if ((err as Error)?.name === "AbortError") return;
+        setError(errorText(err, t));
+      });
+    return () => ctl.abort();
+  }, [revision, t]);
+
+  const save = async (patch: Record<string, unknown>) => {
+    setSaving(true);
+    try {
+      const r = await prJson<{ settings: PrimeRadiantSettings }>(`${API}/settings`, jsonInit("PUT", patch));
+      if (r?.settings) setSettings(r.settings);
+      setError(null);
+      onChanged();
+    } catch (err) {
+      setError(errorText(err, t));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!settings) return error ? <p role="alert" className="text-xs text-red-300">{error}</p> : null;
+  // An older server's settings have neither section: nothing to set here.
+  if (!settings.golden || !settings.verification) return null;
+  return (
+    <section className={`${CARD_SURFACE} p-4 space-y-3`} data-testid="prime-radiant-checks">
+      <h3 className={SECTION_LABEL}>{t("primeRadiant.questions.checks")}</h3>
+      {error && <p role="alert" className="text-xs text-red-300">{error}</p>}
+      <label className="flex items-center justify-between gap-3 text-xs text-[var(--text-primary)] cursor-pointer">
+        <span>{t("primeRadiant.questions.goldenNightly")}</span>
+        <input
+          type="checkbox"
+          className="accent-[var(--coral-bright)]"
+          checked={settings.golden.enabled}
+          disabled={saving}
+          onChange={(e) => void save({ golden: { enabled: e.target.checked } })}
+          data-testid="prime-radiant-golden-enabled"
+        />
+      </label>
+      <NumberSetting
+        label={t("primeRadiant.questions.goldenMax")}
+        value={settings.golden.maxQuestions}
+        min={1}
+        max={500}
+        disabled={saving || !settings.golden.enabled}
+        onSave={(n) => void save({ golden: { maxQuestions: n } })}
+        testId="prime-radiant-golden-max"
+      />
+      <NumberSetting
+        label={t("primeRadiant.questions.perOwner")}
+        value={settings.verification.perOwner}
+        min={1}
+        max={20}
+        disabled={saving}
+        onSave={(n) => void save({ verification: { perOwner: n } })}
+        testId="prime-radiant-daily-per-owner"
+      />
+    </section>
+  );
+}
+
 export default function PrimeRadiantQuestions({ revision, domains, golden, onChanged, onOpenPage, onOpenReview }: Props) {
   return (
     <div className="space-y-6" data-testid="prime-radiant-questions">
       <Accuracy score={golden} />
       <Golden revision={revision} domains={domains} onChanged={onChanged} onOpenPage={onOpenPage} />
       <Daily revision={revision} onOpenPage={onOpenPage} onOpenReview={onOpenReview} />
+      <Checks revision={revision} onChanged={onChanged} />
     </div>
   );
 }
