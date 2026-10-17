@@ -195,3 +195,39 @@ export function buildLinkGraph(
   }
   return { outbound, inbound, indexed };
 }
+
+/** The folders whose pages are the wiki's content: what orphans are counted over. */
+export const CONTENT_FOLDERS: readonly string[] = ["concepts/", "entities/", "syntheses/"];
+
+/** A content page: not index.md, not `_views/` or `reports/`, not a `sources/` page. */
+export function isContentPage(rel: string): boolean {
+  return CONTENT_FOLDERS.some((folder) => rel.startsWith(folder));
+}
+
+function anyContentOther(pages: ReadonlySet<string> | undefined, self: string): boolean {
+  if (pages) for (const p of pages) if (p !== self && isContentPage(p)) return true;
+  return false;
+}
+
+export interface ContentReach {
+  /**
+   * Content pages no OTHER content page links to. index.md lists every page,
+   * so a listing there (or a link from `_views/`, a report or a source page)
+   * does not count.
+   */
+  orphans: Set<string>;
+  /** The orphans that link to no other content page either: no link in or out. */
+  isolated: Set<string>;
+}
+
+/** Orphan and isolated content pages of a link graph, in one pass over its links. */
+export function contentReach(graph: Pick<LinkGraph, "outbound" | "inbound">): ContentReach {
+  const orphans = new Set<string>();
+  const isolated = new Set<string>();
+  for (const [page, out] of graph.outbound) {
+    if (!isContentPage(page) || anyContentOther(graph.inbound.get(page), page)) continue;
+    orphans.add(page);
+    if (!anyContentOther(out, page)) isolated.add(page);
+  }
+  return { orphans, isolated };
+}

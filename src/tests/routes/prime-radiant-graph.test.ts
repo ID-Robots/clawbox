@@ -102,8 +102,10 @@ describe("GET /setup-api/prime-radiant/graph", () => {
     expect(ids.sort()).toEqual(["concepts/holidays.md", "concepts/pricing.md", "concepts/support.md", "entities/acme-widgets.md"]);
     const at = (id: string) => graph.nodes.findIndex((x) => x.id === id);
     const widgets = graph.nodes[at("entities/acme-widgets.md")];
-    expect(widgets).toEqual({ id: "entities/acme-widgets.md", title: "Acme Widgets Ltd", domain: "acme-sales", degree: 2, links: 2, sources: 2 });
-    expect(graph.nodes[at("concepts/holidays.md")]).toMatchObject({ links: 0, sources: 0, domain: "acme-support" });
+    expect(widgets).toEqual({ id: "entities/acme-widgets.md", title: "Acme Widgets Ltd", domain: "acme-sales", degree: 2, links: 2, inbound: 1, sources: 2 });
+    expect(graph.nodes[at("concepts/holidays.md")]).toMatchObject({ links: 0, inbound: 0, sources: 0, domain: "acme-support" });
+    // Linked from a content page: no orphan, whatever links it has itself.
+    expect(graph.nodes[at("concepts/support.md")]).toMatchObject({ links: 1, inbound: 1 });
 
     // Every edge is [a, b, w] with a < b, indexes into nodes, one per pair.
     for (const [a, b, w] of graph.edges) {
@@ -236,7 +238,7 @@ describe("buildVaultGraph", () => {
 
   it("titles a page without a valid title by its file name, and keeps a missing domain as null", () => {
     const graph = buildVaultGraph([page("concepts/widget-sizes.md", { domain: null })], null);
-    expect(graph.nodes[0]).toEqual({ id: "concepts/widget-sizes.md", title: "widget-sizes", domain: null, degree: 0, links: 0, sources: 0 });
+    expect(graph.nodes[0]).toEqual({ id: "concepts/widget-sizes.md", title: "widget-sizes", domain: null, degree: 0, links: 0, inbound: 0, sources: 0 });
   });
 
   it("ties the pages no link reaches: a shared topic first, else neighbours in their own domain", () => {

@@ -109,7 +109,8 @@ function pages(over: { into?: Partial<PageFrontmatter>; intoBody?: string; gmbh?
       "Acme (old) was the first name of [[Acme Widgets Ltd]]; see [pricing](pricing.md).\n\n## History\n\nRenamed in 2001.\n",
     ),
     "concepts/pricing.md": pageText({ title: "Widget pricing" }, PRICING_BODY),
-    "concepts/shipping.md": pageText({ title: "Shipping" }, "Shipping for [[entities/acme]] takes a week.\n"),
+    // Pricing's one link from a content page once the legacy page is merged away (index.md and overview.md do not count).
+    "concepts/shipping.md": pageText({ title: "Shipping" }, "Shipping for [[entities/acme]] takes a week, priced as in [[concepts/pricing]].\n"),
     "overview.md": pageText({ type: "reference", title: "Overview" }, "Start at [[Acme (old)]] or [old](concepts/acme-legacy.md).\n"),
   };
 }
