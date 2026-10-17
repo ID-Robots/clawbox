@@ -449,6 +449,27 @@ describe("the pass", () => {
     }
   });
 
+  it("never calls the model with summaries.maxPages 0 or offline, and says which: every summary is the facts'", async () => {
+    const state = tmpState();
+    try {
+      for (const [opts, skipped] of [
+        [{ settings: settings({ maxPages: 0 }), online: true }, "disabled"],
+        [{ settings: settings(), online: false }, "offline"],
+      ] as const) {
+        const calls: FlashRequest[] = [];
+        const snap = { current: vault() };
+        const r = await runSummaries(snap.current, fakeRun(snap).run, { stateVault: state, rates: DEFAULT_COST_RATES, client: inventingClient(calls), now: () => NOW, ...opts });
+        expect(calls).toHaveLength(0);
+        expect(r.model).toMatchObject({ calls: 0, asked: 0, usdEstimate: 0, skipped });
+        expect(r).toMatchObject({ byModel: 0, byFacts: r.planned, written: r.planned });
+        expect(readSummaryMeta(fmOf(snap.current, "entities/globex-ltd.md"))).toMatchObject({ method: "facts" });
+        expect(readSummaryMeta(fmOf(snap.current, "entities/globex-ltd.md"))?.tried).toBeUndefined();
+      }
+    } finally {
+      dropState(state);
+    }
+  });
+
   it("skips an unchanged neighbourhood and writes a changed one again", async () => {
     const state = tmpState();
     try {
