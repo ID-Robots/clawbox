@@ -387,6 +387,40 @@ describe("the pass", () => {
     }
   });
 
+  it("keeps a model summary whose neighbourhood changed until the model can write again, and never writes over a page edited since the plan", async () => {
+    const state = tmpState();
+    try {
+      const snap = { current: vault() };
+      const { run } = fakeRun(snap);
+      await runSummaries(snap.current, run, { stateVault: state, settings: settings(), rates: DEFAULT_COST_RATES, client: inventingClient([]), online: true, now: () => NOW });
+      const before = fmOf(snap.current, "entities/globex-ltd.md");
+      expect(readSummaryMeta(before)?.method).toBe("model");
+
+      // A neighbour says something new; the model is off tonight: the model's summary stands, the page waits.
+      const audit = vaultPage("concepts/globex-audit.md", page({ title: "Globex audit", claims: [claim("finance/globex-audit/result", "Globex Ltd passed the 2026 supplier audit.")] }, "Audit of [[entities/globex-ltd]].\n"));
+      snap.current = { ...snap.current, pages: [...snap.current.pages, audit] };
+      const offline = await runSummaries(snap.current, run, { stateVault: state, settings: settings(), rates: DEFAULT_COST_RATES, online: false, now: () => NOW });
+      expect(offline.waiting).toBeGreaterThanOrEqual(1);
+      expect(fmOf(snap.current, "entities/globex-ltd.md")).toEqual(before);
+
+      // A person edits the page between the plan and the write: their text stands, the write is skipped.
+      const edited = { current: vault() };
+      const racing = fakeRun(edited);
+      const person = async (message: string, fn: (tx: VaultTx) => Promise<void>) => {
+        const target = edited.current.pages.find((p) => p.path === "entities/globex-ltd.md")!;
+        edited.current = { ...edited.current, pages: [...edited.current.pages.filter((p) => p !== target), vaultPage(target.path, `${target.text}\nA line a person added.\n`)] };
+        return racing.run(message, fn);
+      };
+      const r = await runSummaries(edited.current, person, { stateVault: state, settings: settings(), rates: DEFAULT_COST_RATES, online: false, now: () => NOW });
+      expect(r.written).toBe(r.planned - 1);
+      const kept = edited.current.pages.find((p) => p.path === "entities/globex-ltd.md")!;
+      expect(kept.text).toContain("A line a person added.");
+      expect(kept.parsed.ok && kept.parsed.frontmatter.summary).toBeFalsy();
+    } finally {
+      dropState(state);
+    }
+  });
+
   it("skips an unchanged neighbourhood and writes a changed one again", async () => {
     const state = tmpState();
     try {
