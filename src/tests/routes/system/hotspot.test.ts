@@ -15,6 +15,7 @@ vi.mock("fs/promises", () => ({
   default: {
     mkdir: vi.fn(),
     writeFile: vi.fn(),
+    readFile: vi.fn(),
   },
 }));
 
@@ -105,6 +106,7 @@ describe("/setup-api/system/hotspot", () => {
 
     mockFs.mkdir.mockResolvedValue(undefined);
     mockFs.writeFile.mockResolvedValue();
+    mockFs.readFile.mockRejectedValue(Object.assign(new Error("ENOENT"), { code: "ENOENT" }));
     mockGet.mockResolvedValue(undefined);
     mockSetMany.mockResolvedValue();
     mockGetAll.mockResolvedValue({});
@@ -146,6 +148,36 @@ describe("/setup-api/system/hotspot", () => {
       expect(body.ssid).toBe("MyHotspot");
       expect(body.hasPassword).toBe(true);
       expect(body.enabled).toBe(false);
+    });
+
+    it("reports the per-device sticker SSID start-ap.sh published", async () => {
+      mockFs.readFile.mockResolvedValue('AP_IP="10.42.0.1"\nAP_SUBNET="10.42.0.0/24"\nAP_SECURITY="device"\nAP_SSID="ClawBox-Q7M8"\n' as never);
+
+      const body = await (await hotspotGet()).json();
+
+      expect(body.ssid).toBe("ClawBox-Q7M8");
+      expect(body.hasPassword).toBe(true);
+      expect(body.deviceCredentials).toBe(true);
+    });
+
+    it("lets an owner's own SSID and password win over the device ones", async () => {
+      mockGetAll.mockResolvedValue({ hotspot_ssid: "MyHotspot", hotspot_password: "secret123" });
+      mockFs.readFile.mockResolvedValue('AP_SECURITY="owner"\nAP_SSID="MyHotspot"\n' as never);
+
+      const body = await (await hotspotGet()).json();
+
+      expect(body.ssid).toBe("MyHotspot");
+      expect(body.deviceCredentials).toBe(false);
+    });
+
+    it("keeps the legacy open hotspot on a box without device credentials", async () => {
+      mockFs.readFile.mockResolvedValue('AP_SECURITY="open"\nAP_SSID="ClawBox-Setup"\n' as never);
+
+      const body = await (await hotspotGet()).json();
+
+      expect(body.ssid).toBe("ClawBox-Setup");
+      expect(body.hasPassword).toBe(false);
+      expect(body.deviceCredentials).toBe(false);
     });
   });
 

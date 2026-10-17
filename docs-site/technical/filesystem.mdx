@@ -68,7 +68,7 @@ Rows marked **OpenClaw/dual** or **Hermes/dual** exist only on those editions. C
 | Ollama models | ✅ kept | ❌ deleted |
 | Saved Wi-Fi networks | ✅ kept | ❌ deleted (box returns to AP mode) |
 | SSH `authorized_keys`, shell history, browser profile (ClawBox's own, and one of yours the Browser app was pointed at) | ✅ kept | ❌ wiped |
-| System password | ✅ kept | ❌ reset to `clawbox` |
+| System password | ✅ kept | ❌ reset to the sticker Wi-Fi password (boxes with a sticker QR) or `clawbox` (older boxes) |
 | Voice models (Whisper/Kokoro caches) | ✅ kept | ✅ kept (can't re-download in AP mode) |
 
 The update mechanism achieves this with `git reset --hard <release>` + `git clean -fd` (note: no `-x` — gitignored paths like `data/` and `.env` are never cleaned). Details: [Update System](/technical/update-system).

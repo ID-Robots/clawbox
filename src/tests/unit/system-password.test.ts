@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as childProcess from "child_process";
+import fs from "fs";
+import os from "os";
+import path from "path";
 
 vi.mock("child_process", () => ({
   execFile: vi.fn(),
@@ -221,6 +224,41 @@ describe("@/lib/system-password", () => {
       await hasOwnerPassword("other");
       expect(mockExecFile).toHaveBeenCalledWith("/usr/bin/passwd", ["-S", "other"], expect.anything(), expect.any(Function));
       expect(mockSpawn).toHaveBeenCalledWith("/usr/sbin/unix_chkpwd", ["other", "nonull"], expect.anything());
+    });
+  });
+
+  describe("the provisioned sticker password (TASK-1572)", () => {
+    let etc: string;
+    beforeEach(() => {
+      etc = fs.mkdtempSync(path.join(os.tmpdir(), "sp-etc-"));
+      process.env.CLAWBOX_ETC = etc;
+    });
+    afterEach(() => {
+      delete process.env.CLAWBOX_ETC;
+      fs.rmSync(etc, { recursive: true, force: true });
+    });
+
+    it("counts as no owner while the marker matches passwd -S", async () => {
+      fs.writeFileSync(path.join(etc, "password-is-device"), "P 10/15/2026\n");
+      passwdSays("clawbox P 10/15/2026 0 99999 7 -1\n");
+      chkpwd(7);
+      const { hasOwnerPassword } = await import("@/lib/system-password");
+      await expect(hasOwnerPassword()).resolves.toBe(false);
+    });
+
+    it("is an owner again once the password changed after the marker", async () => {
+      fs.writeFileSync(path.join(etc, "password-is-device"), "P 10/15/2026\n");
+      passwdSays("clawbox P 10/16/2026 0 99999 7 -1\n");
+      chkpwd(7);
+      const { hasOwnerPassword } = await import("@/lib/system-password");
+      await expect(hasOwnerPassword()).resolves.toBe(true);
+    });
+
+    it("without a marker an own password is an owner, as before", async () => {
+      passwdSays("clawbox P 10/15/2026 0 99999 7 -1\n");
+      chkpwd(7);
+      const { hasOwnerPassword } = await import("@/lib/system-password");
+      await expect(hasOwnerPassword()).resolves.toBe(true);
     });
   });
 });

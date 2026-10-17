@@ -13,7 +13,7 @@ Key facts: web UI at http://<box-ip> port 80 (never :18789 — that's the token-
 
 ## Setup
 
-- [First Boot](https://docs.clawbox.com/setup/first-boot): unbox, join the ClawBox-Setup hotspot (open, 10.42.0.1 / fallback 10.43.0.1), run the 5-step browser wizard (Wi-Fi → update → password → AI provider → optional Telegram) — the first-run guide. There is NO QR-code pairing; the only QR in the product opens Telegram's @BotFather
+- [First Boot](https://docs.clawbox.com/setup/first-boot): unbox, scan the Wi-Fi QR code on the box's sticker to join its hotspot (SSID ClawBox-XXXX with a unique per-device WPA2 password; boxes made before this have the open ClawBox-Setup hotspot; 10.42.0.1 / fallback 10.43.0.1; the phone's captive sheet opens the wizard during first setup), run the 5-step browser wizard (Wi-Fi → update → password → AI provider → optional Telegram) — the first-run guide. The sticker QR is a standard Wi-Fi QR (WIFI:T:WPA;S:…;P:…;;) — it only joins the hotspot, there is no account pairing; the only QR shown in the product UI opens Telegram's @BotFather
 - [Connect to a Network](https://docs.clawbox.com/setup/connect-network): joining Wi-Fi or Ethernet after setup
 - [Choose Your AI Provider](https://docs.clawbox.com/setup/choose-ai-provider): ClawBox AI, Claude, GPT, Gemini, OpenRouter, local models — with an API-key tab AND a Subscription tab (Claude Pro/Max, ChatGPT Plus/Pro, Google One AI Premium OAuth); models a subscription does not cover are greyed out, not offered
 - [OpenClaw Setup](https://docs.clawbox.com/setup/openclaw-setup): gateway configuration

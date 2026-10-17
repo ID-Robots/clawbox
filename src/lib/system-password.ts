@@ -26,6 +26,7 @@
 import { execFile as execFileCb, spawn } from "child_process";
 import os from "os";
 import { promisify } from "util";
+import fsp from "fs/promises";
 
 const execFile = promisify(execFileCb);
 
@@ -57,6 +58,36 @@ function systemUsername(): string {
 }
 
 const PASSWD_BIN = "/usr/bin/passwd";
+
+/**
+ * Written root-side (scripts/device-secret.sh set-password) when a provisioned
+ * box's password is set to its sticker Wi-Fi password, with the `passwd -S`
+ * status and last-change date at that moment; removed by the chpasswd step as
+ * soon as anybody sets a password of their own. While it still matches, the
+ * account carries only the sticker password and has no owner yet.
+ */
+function devicePasswordMarkerPath(): string {
+  return `${process.env.CLAWBOX_ETC || "/etc/clawbox"}/password-is-device`;
+}
+
+/** Does the account still carry the provisioned sticker password? Fails to `false` (= owned). */
+export async function isDevicePassword(user: string = systemUsername()): Promise<boolean> {
+  let marker: string;
+  try {
+    marker = (await fsp.readFile(devicePasswordMarkerPath(), "utf8")).trim();
+  } catch {
+    return false;
+  }
+  if (!marker) return false;
+  try {
+    const { stdout } = await execFile(PASSWD_BIN, ["-S", user], { timeout: 5_000 });
+    const line = stdout.split("\n").find((l) => l.trim().length > 0) || "";
+    const [, status, changed] = line.trim().split(/\s+/);
+    return `${status} ${changed}` === marker;
+  } catch {
+    return false;
+  }
+}
 const UNIX_CHKPWD_BIN = "/usr/sbin/unix_chkpwd";
 
 // PAM return codes unix_chkpwd exits with. Anything else (PAM_USER_UNKNOWN when
@@ -162,6 +193,8 @@ export async function isFactoryDefaultPassword(user: string = systemUsername()):
 export async function hasOwnerPassword(user: string = systemUsername()): Promise<boolean | null> {
   const usable = await hasSystemPassword(user);
   if (usable !== true) return usable;
+  // A provisioned box ships with its sticker password: no owner yet either.
+  if (await isDevicePassword(user)) return false;
   const isDefault = await isFactoryDefaultPassword(user);
   return isDefault !== true;
 }

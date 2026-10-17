@@ -17,6 +17,30 @@ const HOTSPOT_ENV_PATH = path.join(
   "hotspot.env"
 );
 
+const AP_RUNTIME_PATH = path.join(
+  process.env.CLAWBOX_ROOT || "/home/clawbox/clawbox",
+  "data",
+  "ap-runtime.env"
+);
+
+/**
+ * What start-ap.sh last brought up: the SSID it broadcast and which passphrase
+ * protects it (`owner` | `device` | `open`). Neither is a secret — the device
+ * passphrase itself stays root-side. Missing or unreadable = unknown.
+ */
+async function readApRuntime(): Promise<{ ssid?: string; security?: string }> {
+  try {
+    const text = await fs.readFile(AP_RUNTIME_PATH, "utf8");
+    const pick = (key: string) => {
+      const m = text.match(new RegExp(`^${key}="?([^"\\n]*)"?$`, "m"));
+      return m ? m[1] : undefined;
+    };
+    return { ssid: pick("AP_SSID"), security: pick("AP_SECURITY") };
+  } catch {
+    return {};
+  }
+}
+
 let getCache: { body: unknown; at: number } | null = null;
 const GET_TTL_MS = 3_000;
 
@@ -37,8 +61,11 @@ export async function GET() {
     return NextResponse.json(getCache.body);
   }
   const config = await getAll();
-  const ssid = (config.hotspot_ssid as string) || "ClawBox-Setup";
-  const hasPassword = !!config.hotspot_password;
+  const runtime = await readApRuntime();
+  // An owner's own SSID wins; otherwise the per-device one from the sticker.
+  const ssid = (config.hotspot_ssid as string) || runtime.ssid || "ClawBox-Setup";
+  const hasPassword = !!config.hotspot_password || runtime.security === "device";
+  const deviceCredentials = !config.hotspot_password && runtime.security === "device";
   const enabled = config.hotspot_enabled !== false;
 
   const iface = process.env.NETWORK_INTERFACE || "wlP1p1s0";
@@ -59,7 +86,7 @@ export async function GET() {
     console.warn("[hotspot] nmcli unavailable:", err);
   }
 
-  const body = { ssid, hasPassword, enabled, active, blockedBy };
+  const body = { ssid, hasPassword, deviceCredentials, enabled, active, blockedBy };
   getCache = { body, at: Date.now() };
   return NextResponse.json(body);
 }
