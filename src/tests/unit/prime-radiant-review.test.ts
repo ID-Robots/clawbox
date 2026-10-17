@@ -146,6 +146,53 @@ describe("verify", () => {
     expect(readRetiredLedger(vault)).toEqual(expect.arrayContaining([PRICE_B.id, "acme-sales/old/never-seen"]));
   });
 
+  it("leaves no page stating the old value: Key facts re-rendered, stale prose noted, on every page", async () => {
+    const pricingBody =
+      "Acme sells the blue widget at 10 EUR per unit.\n\nShipping costs 10 EUR per order.\n\n## Key facts\n\n- A blue widget costs 10 EUR.\n- Orders ship within three days.\n\n## Sources\n\n- `Documents/pricing.md`\n";
+    const catalogueBody = "The catalogue lists the blue widget at 12 EUR.\n\n## Key facts\n\n- A blue widget costs 12 EUR.\n\n## Sources\n\n- `Documents/catalogue.txt`\n";
+    // A page with no claim on the fact whose text still states the losing value.
+    const flyerBody = "Our flyer says a blue widget costs 12 EUR.\n";
+    await seed({
+      "concepts/pricing.md": pageText({ claims: [PRICE_A] }, pricingBody),
+      "concepts/shipping.md": pageText({ title: "Catalogue", claims: [PRICE_B] }, catalogueBody),
+      "concepts/flyer.md": pageText({ title: "Flyer" }, flyerBody),
+    });
+    // The owner picks a third value: both pages' old values are now stale.
+    const r = await verifyClaim({ claimId: PRICE_A.id, text: "A blue widget costs 11 EUR.", by: "owner", retire: [PRICE_B.id] });
+    expect([...r.changed].sort()).toEqual(["concepts/flyer.md", "concepts/pricing.md", "concepts/shipping.md"]);
+    expect((await headCommit(vault))?.subject).toBe(`verify: ${PRICE_A.id}`);
+    const body = async (p: string) => {
+      const page = await readPage(p);
+      return page!.parsed.ok ? page!.parsed.body : "";
+    };
+
+    const pricing = await body("concepts/pricing.md");
+    expect(pricing).toContain("## Key facts\n\n- A blue widget costs 11 EUR.\n- Orders ship within three days.\n");
+    expect(pricing).not.toContain("- A blue widget costs 10 EUR.");
+    expect(pricing).toContain(
+      'Acme sells the blue widget at 10 EUR per unit.\n\n> **Stale:** this said "A blue widget costs 10 EUR."; the verified fact is "A blue widget costs 11 EUR."\n',
+    );
+    // A paragraph about something else with the same number is not the fact.
+    expect(pricing).toContain("Shipping costs 10 EUR per order.\n\n## Key facts");
+
+    const catalogue = await body("concepts/shipping.md");
+    expect(catalogue).toContain("- A blue widget costs 11 EUR. (verified on [[concepts/pricing]])");
+    expect(catalogue).not.toContain("- A blue widget costs 12 EUR.");
+    expect(catalogue).toContain('> **Stale:** this said "A blue widget costs 12 EUR."; the verified fact is "A blue widget costs 11 EUR." ([[concepts/pricing]])');
+
+    expect(await body("concepts/flyer.md")).toContain('Our flyer says a blue widget costs 12 EUR.\n\n> **Stale:** this said "A blue widget costs 12 EUR."');
+
+    // Verified again: one note per paragraph, naming the newest fact.
+    await verifyClaim({ claimId: PRICE_A.id, text: "A blue widget costs 13 EUR.", by: "owner" });
+    const again = await body("concepts/shipping.md");
+    expect(again).toContain("- A blue widget costs 13 EUR. (verified on [[concepts/pricing]])");
+    expect(again.match(/> \*\*Stale:\*\*/g)).toHaveLength(1);
+    expect(again).toContain('the verified fact is "A blue widget costs 13 EUR."');
+    const pricingAgain = await body("concepts/pricing.md");
+    expect(pricingAgain).toContain("- A blue widget costs 13 EUR.\n- Orders ship within three days.");
+    expect(pricingAgain.match(/> \*\*Stale:\*\*/g)).toHaveLength(1);
+  });
+
   it("removes a colliding copy of the kept id without retiring it", async () => {
     await vaultOperation(
       "seed: collision",
