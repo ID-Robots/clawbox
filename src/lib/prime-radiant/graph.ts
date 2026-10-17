@@ -1,7 +1,7 @@
 /**
  * The Map's data: every page of the vault as a node, and the edges between
  * them, in a compact shape the browser turns straight into typed arrays —
- * `{ nodes: [{ id, title, domain, degree, sources }], edges: [[a, b, w]] }`,
+ * `{ nodes: [{ id, title, domain, degree, links, inbound, sources }], edges: [[a, b, w]] }`,
  * where `a` and `b` index `nodes`.
  *
  * Three kinds of edge, one per pair of pages (graph-weights.ts):
@@ -33,7 +33,7 @@ import { createHash } from "crypto";
 import path from "@/lib/runtime-path";
 import { parseClaimId } from "./claims";
 import { LINK_WEIGHT, RELATED_WEIGHT, SOURCE_WEIGHT } from "./graph-weights";
-import { buildLinkGraph } from "./links";
+import { buildLinkGraph, isContentPage } from "./links";
 import { git } from "./git";
 import { vaultDir } from "./paths";
 import type { PageFrontmatter } from "./schema";
@@ -50,6 +50,8 @@ export interface GraphNode {
   degree: number;
   /** Its `[[wikilink]]` / Markdown links, either way (a shared source or a hint is not one). */
   links: number;
+  /** Content pages that link here (links.ts `isContentPage`; index.md is not a page): 0 on a content page is an orphan. */
+  inbound: number;
   /** Source documents the page names. */
   sources: number;
 }
@@ -207,6 +209,7 @@ export function buildVaultGraph(pages: readonly GraphPage[], revision: string | 
       domain: p.domain,
       degree: degree[i],
       links: linkCount[i],
+      inbound: [...(links.inbound.get(p.path) ?? [])].filter(isContentPage).length,
       sources: p.sources.length,
     })),
     edges,

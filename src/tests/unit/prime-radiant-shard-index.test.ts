@@ -7,7 +7,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { execFileSync } from "child_process";
-import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { embed } = vi.hoisted(() => ({
   embed: {
@@ -62,8 +62,11 @@ import {
   MAX_SCORE,
   VERIFIED_BOOST,
   _resetVaultIndexCacheForTests,
+  _setVaultMaxChunksForTests,
   pageIndexUnits,
+  planVaultChunks,
   rankVaultHits,
+  readPageVectors,
   reindexPrimeRadiantPaths,
   reindexPrimeRadiantVault,
   scheduleReindexAfterCommit,
@@ -71,6 +74,7 @@ import {
   searchPrimeRadiant,
   vaultIndexPathFor,
   vaultIndexStatus,
+  type ChunkBudgetPage,
   type RankCandidate,
 } from "@/lib/prime-radiant/shard-index";
 import { vaultDir } from "@/lib/prime-radiant/paths";
@@ -420,6 +424,100 @@ describe("the incremental reindex hook", () => {
     // The first run took what was queued by then; whichever found nothing left answers null.
     const runs = [a, b].filter((r) => r !== null);
     expect(runs.reduce((s, r) => s + r!.indexed, 0)).toBe(2);
+  });
+});
+
+describe("a full chunk budget: page vectors first", () => {
+  afterEach(() => _setVaultMaxChunksForTests(null));
+
+  it("plans every page's page chunks before any claim's, the pages with most claims giving theirs up first", () => {
+    const page = (claimChunks: number, extra: Partial<ChunkBudgetPage> = {}): ChunkBudgetPage => ({ pageChunks: 1, claimChunks, held: 0, ...extra });
+    // Room for all.
+    expect(planVaultChunks([page(6), page(2), page(1)], 12)).toEqual([6, 2, 1]);
+    // Three page chunks first, five claims left: up to two each.
+    expect(planVaultChunks([page(6), page(2), page(1)], 8)).toEqual([2, 2, 1]);
+    // The remainder goes one each to the first pages over the level.
+    expect(planVaultChunks([page(6), page(6), page(1)], 9)).toEqual([3, 2, 1]);
+    // A page whose page chunks do not fit is capped, and keeps what it holds.
+    expect(planVaultChunks([page(0, { pageChunks: 2 }), page(0, { pageChunks: 3, held: 1 })], 3)).toEqual([0, null]);
+    // A page the run leaves alone keeps its page chunks; its claims are shared like the others'.
+    expect(planVaultChunks([page(6, { held: 7, fixed: true }), page(1)], 0)).toEqual([4, 1]);
+  });
+
+  /** A page with `claims` claims, its body one chunk. */
+  const pageWith = (slug: string, claims: number) =>
+    pageText(
+      { title: `Widget ${slug}`, claims: Array.from({ length: claims }, (_, i) => claim(`acme-sales/${slug}/fact-${i}`, `Widget ${slug} fact ${i}.`)) },
+      `Widget ${slug} in short.\n`,
+    );
+
+  it("keeps a page vector for every page when claims would fill the budget, and makes room for a new page", async () => {
+    // 3 page chunks + 9 claim chunks into 8: the old path-order walk filled the
+    // budget with a-big's claims and left b and c without any vector.
+    _setVaultMaxChunksForTests(8);
+    await commit({ "concepts/a-big.md": pageWith("a", 6), "concepts/b.md": pageWith("b", 2), "concepts/c.md": pageWith("c", 1) });
+    expect(await reindexPrimeRadiantVault()).toMatchObject({ indexed: 3, capped: 0, partial: 1, chunks: 8, withoutPageVector: 0 });
+    expect([...(await readPageVectors()).keys()].sort()).toEqual(["concepts/a-big.md", "concepts/b.md", "concepts/c.md"]);
+    expect(await vaultIndexStatus()).toMatchObject({ chunks: 8, needsFullScan: false, withoutPageVector: 0 });
+
+    // A new page on a full budget: claims over the share go, the page gets its vector, incrementally.
+    await commit({ "concepts/d.md": pageWith("d", 1) });
+    expect(await reindexPrimeRadiantPaths(["concepts/d.md"])).toMatchObject({ mode: "incremental", indexed: 1, capped: 0, chunks: 8, withoutPageVector: 0 });
+    expect((await readPageVectors()).has("concepts/d.md")).toBe(true);
+    expect((await searchPrimeRadiant("widget d", 20)).some((h) => h.path === "concepts/d.md")).toBe(true);
+    expect((await vaultIndexStatus()).needsFullScan).toBe(false);
+
+    // Room again: an incremental run reads nothing more; a whole-tree run gives the claims back…
+    await commit({ "concepts/d.md": null });
+    expect(await reindexPrimeRadiantPaths(["concepts/d.md"])).toMatchObject({ removed: 1, chunks: 6 });
+    embed.texts = [];
+    expect(await reindexPrimeRadiantVault()).toMatchObject({ mode: "full", indexed: 2, chunks: 8, withoutPageVector: 0 });
+    expect(embed.texts.some((t) => t.startsWith("Widget c"))).toBe(false);
+    // …and a second one finds nothing to do.
+    embed.texts = [];
+    expect(await reindexPrimeRadiantVault()).toMatchObject({ indexed: 0, chunks: 8 });
+    expect(embed.texts).toEqual([]);
+  });
+
+  it("keeps a verified claim longest, when a page is embedded and when its claims are dropped", async () => {
+    const claimsOf = async (rel: string) =>
+      (await searchPrimeRadiant("widget", 20)).filter((h) => h.kind === "claim" && h.path === rel).map((h) => h.id).sort();
+    _setVaultMaxChunksForTests(4);
+    // The verified claim comes last on the page.
+    await commit({
+      "concepts/a.md": pageText(
+        { title: "Widget a", claims: [claim("acme-sales/a/fact-0", "Widget a fact 0."), claim("acme-sales/a/fact-1", "Widget a fact 1."), claim("acme-sales/a/fact-2", "Widget a fact 2.", { verified: VERIFIED })] },
+        "Widget a in short.\n",
+      ),
+      "concepts/b.md": pageWith("b", 0),
+    });
+    // Two page chunks, room for two of a's three claims: the verified one and the first.
+    expect(await reindexPrimeRadiantVault()).toMatchObject({ indexed: 2, partial: 1, chunks: 4 });
+    expect(await claimsOf("concepts/a.md")).toEqual(["acme-sales/a/fact-0", "acme-sales/a/fact-2"]);
+    // A new page takes one of them: the unverified one goes.
+    await commit({ "concepts/c.md": pageWith("c", 0) });
+    expect(await reindexPrimeRadiantPaths(["concepts/c.md"])).toMatchObject({ indexed: 1, chunks: 4, withoutPageVector: 0 });
+    expect(await claimsOf("concepts/a.md")).toEqual(["acme-sales/a/fact-2"]);
+  });
+
+  it("lets an incremental run use the room a page that lost claims cannot take back until a whole-tree run", async () => {
+    // a keeps 2 of its 6 claims.
+    _setVaultMaxChunksForTests(3);
+    await commit({ "concepts/a.md": pageWith("a", 6) });
+    expect(await reindexPrimeRadiantVault()).toMatchObject({ partial: 1, chunks: 3 });
+    // More room, and a new page: an incremental run never reads a, so a asks
+    // for no more than it holds and b gets every claim that fits.
+    _setVaultMaxChunksForTests(8);
+    await commit({ "concepts/b.md": pageWith("b", 4) });
+    expect(await reindexPrimeRadiantPaths(["concepts/b.md"])).toMatchObject({ mode: "incremental", indexed: 1, partial: 0, chunks: 8 });
+  });
+
+  it("counts the pages left without a page vector in the status", async () => {
+    // Page chunks alone overrun a budget of one: the second page is capped.
+    _setVaultMaxChunksForTests(1);
+    await commit({ "concepts/a.md": pageWith("a", 0), "concepts/b.md": pageWith("b", 0) });
+    expect(await reindexPrimeRadiantVault()).toMatchObject({ indexed: 1, capped: 1, withoutPageVector: 1 });
+    expect(await vaultIndexStatus()).toMatchObject({ needsFullScan: true, withoutPageVector: 1 });
   });
 });
 

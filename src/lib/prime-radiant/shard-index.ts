@@ -30,6 +30,13 @@
  * `needs_full` mark, so the next run scans the whole tree instead of trusting
  * the paths it was told about.
  *
+ * PAGE VECTORS FIRST. When the chunk budget is full, every page keeps its
+ * page vectors and the claims share what is left ({@link planVaultChunks}):
+ * the pages with the most claims give theirs up first, and a run makes room
+ * for a new page's page vector by dropping claim vectors over the share.
+ * Search and the connect pass's similar pages need the page vector; a page
+ * without some of its claim vectors is still found.
+ *
  * ONLY WHILE MEMORY SHARD IS ON AND THE VAULT EXISTS ({@link
  * vaultIndexingAllowed}), checked by every run. Switching Memory Shard on
  * starts a whole-vault run, which catches up on whatever was committed while it
@@ -85,10 +92,18 @@ export const VAULT_INDEX_DIMS = 1024;
  */
 export const VAULT_INDEX_BUDGET_BYTES = 160 * 1024 * 1024;
 
+let maxChunksOverride: number | null = null;
+
 /** The most chunks the vault index holds for vectors `dims` wide. */
 export function vaultMaxChunks(dims: number): number {
+  if (maxChunksOverride !== null) return maxChunksOverride;
   const width = Math.max(1, Math.min(VAULT_INDEX_DIMS, Number.isFinite(dims) && dims > 0 ? dims : VAULT_INDEX_DIMS));
   return Math.max(1, Math.floor(VAULT_INDEX_BUDGET_BYTES / (width * Float32Array.BYTES_PER_ELEMENT)));
+}
+
+/** For the tests: a chunk budget small enough to fill (null: the real one). */
+export function _setVaultMaxChunksForTests(chunks: number | null): void {
+  maxChunksOverride = chunks;
 }
 
 /** A vector cut to {@link VAULT_INDEX_DIMS} and normalised to unit length again (Matryoshka truncation). */
@@ -192,10 +207,14 @@ export interface VaultIndexResult {
    * only their row followed the new blob.
    */
   unchanged: number;
-  /** Pages not indexed because the chunk budget was full. */
+  /** Pages not indexed because even their page vectors did not fit the chunk budget. */
   capped: number;
+  /** Pages this run indexed with fewer claim vectors than claims: the budget went to every page's page vectors first. */
+  partial: number;
   pages: number;
   chunks: number;
+  /** Knowledge pages on `main` with no page vector in the index (capped, too big, unparseable, or no body). */
+  withoutPageVector: number;
 }
 
 export interface VaultIndexStatus {
@@ -207,6 +226,8 @@ export interface VaultIndexStatus {
   /** The last run did not finish; the next run scans the whole tree. */
   needsFullScan: boolean;
   builtAt: number | null;
+  /** Pages on `main` the last run left without a page vector; null before a run has counted them. */
+  withoutPageVector: number | null;
 }
 
 interface IndexOptions {
@@ -319,12 +340,92 @@ export function rankVaultHits(candidates: readonly RankCandidate[], limit: numbe
     .map(({ hit }) => ({ ...hit, score: round3(hit.score), similarity: round3(hit.similarity) }));
 }
 
+/** One page in {@link planVaultChunks}. */
+export interface ChunkBudgetPage {
+  /** Page chunks it needs (holds, for a page the run leaves alone). */
+  pageChunks: number;
+  /** Claim chunks it would take with room for all. */
+  claimChunks: number;
+  /** Chunks it holds now: free again once it is re-embedded. */
+  held: number;
+  /** A page the run does not re-embed: its page chunks stay, whatever the budget. */
+  fixed?: boolean;
+}
+
+/**
+ * Share the chunk budget between pages, PAGE VECTORS FIRST: a page without
+ * its page vector is missing from search and from the connect pass's
+ * similar pages, while a page without some claim vectors is still found.
+ *
+ * `free` is the budget not in use; each page's `held` chunks count as free
+ * too. Fixed pages keep their page chunks; then each other page, in order,
+ * takes its page chunks if they fit, else it is capped (null) and keeps what
+ * it holds. What is left goes to claims: all of them when they fit, else every
+ * page keeps claims up to one level — so the pages with the most claims give
+ * theirs up first — and the remainder goes one each to the first pages above
+ * it. Answers how many claim chunks each page keeps.
+ */
+export function planVaultChunks(pages: readonly ChunkBudgetPage[], free: number): Array<number | null> {
+  const out: Array<number | null> = pages.map(() => 0);
+  let room = free;
+  pages.forEach((p) => {
+    if (p.fixed) room += p.held - p.pageChunks;
+  });
+  pages.forEach((p, i) => {
+    if (p.fixed) return;
+    room += p.held;
+    if (p.pageChunks <= room) room -= p.pageChunks;
+    else {
+      room -= p.held;
+      out[i] = null;
+    }
+  });
+  room = Math.max(0, room);
+  const wants = pages.map((p, i) => (out[i] === null ? 0 : Math.max(0, p.claimChunks)));
+  const kept = (level: number) => wants.reduce((s, c) => s + Math.min(c, level), 0);
+  let level = wants.reduce((m, c) => Math.max(m, c), 0);
+  if (kept(level) > room) {
+    let lo = 0;
+    let hi = level;
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (kept(mid) <= room) lo = mid;
+      else hi = mid - 1;
+    }
+    level = lo;
+  }
+  let spare = room - kept(level);
+  wants.forEach((c, i) => {
+    if (out[i] === null) return;
+    out[i] = Math.min(c, level);
+    if (c > level && spare > 0) {
+      out[i] = level + 1;
+      spare -= 1;
+    }
+  });
+  return out;
+}
+
+/**
+ * The units of a page that fit when it keeps `claims` claim chunks: every
+ * page chunk, then its claims verified first, then in page order — returned
+ * in the page's own order.
+ */
+function unitsWithin(units: readonly VaultIndexUnit[], claims: number): VaultIndexUnit[] {
+  const claimAt = units.flatMap((u, i) => (u.kind === "claim" ? [i] : []));
+  if (claimAt.length <= claims) return [...units];
+  const keep = new Set([...claimAt].sort((a, b) => Number(units[b].verified) - Number(units[a].verified) || a - b).slice(0, claims));
+  return units.filter((u, i) => u.kind !== "claim" || keep.has(i));
+}
+
 // ─── the store ───────────────────────────────────────────────────────────────
 
 export function vaultIndexPathFor(vault: string): string {
   return path.join(path.dirname(path.resolve(vault)), VAULT_INDEX_FILE);
 }
 
+// `pages.chunks` is how many units the page has; it holds fewer chunks when
+// the budget took some of its claims ({@link planVaultChunks}).
 const SCHEMA = `
   CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
   CREATE TABLE IF NOT EXISTS pages (
@@ -558,8 +659,12 @@ async function syncOnce(vault: string, paths: ReadonlySet<string> | null, signal
     let removed = 0;
     let unchanged = 0;
     let capped = 0;
+    let partial = 0;
     let wrote = false;
 
+    // 1. The targets: a page `main` no longer has is dropped, one whose
+    // embedded text did not move keeps its vectors; the rest is embedded in 3.
+    const work: Array<{ rel: string; blob: string; page: VaultPageUnits | null; units: VaultIndexUnit[] }> = [];
     for (const rel of [...targets].sort()) {
       if (signal?.aborted) throw signal.reason ?? new Error("aborted");
       const entry = tree.get(rel);
@@ -594,10 +699,86 @@ async function syncOnce(vault: string, paths: ReadonlySet<string> | null, signal
         wrote = true;
         continue;
       }
-      if (chunkCount - existing + units.length > ceiling) {
+      work.push({ rel, blob: entry.blob, page, units });
+    }
+
+    // 2. The budget, page vectors first (planVaultChunks), over every page the
+    // store holds and every page this run embeds, in path order.
+    const held = new Map<string, { units: number; page: number; claim: number }>();
+    for (const raw of db
+      .prepare(
+        `SELECT p.path AS path, p.chunks AS units,
+                COALESCE(SUM(CASE WHEN c.kind = 'page' THEN 1 ELSE 0 END), 0) AS page,
+                COALESCE(SUM(CASE WHEN c.kind = 'claim' THEN 1 ELSE 0 END), 0) AS claim
+           FROM pages p LEFT JOIN chunks c ON c.path = p.path GROUP BY p.path`,
+      )
+      .iterate()) {
+      const row = raw as { path?: unknown; units?: unknown; page?: unknown; claim?: unknown };
+      if (typeof row.path === "string") held.set(row.path, { units: Number(row.units) || 0, page: Number(row.page) || 0, claim: Number(row.claim) || 0 });
+    }
+    const working = new Map(work.map((w) => [w.rel, w]));
+    const planned = [...new Set([...held.keys(), ...working.keys()])].sort();
+    const claimsOf = (units: readonly VaultIndexUnit[]) => units.filter((u) => u.kind === "claim").length;
+    const allowed = planVaultChunks(
+      planned.map((rel) => {
+        const h = held.get(rel);
+        const w = working.get(rel);
+        // Only a whole-tree run reads a page it was not given and gives back
+        // claims the budget took (`grow` below): in an incremental run such a
+        // page asks for no more than it holds, or its share would sit unused.
+        if (!w) return { pageChunks: h!.page, claimChunks: full ? Math.max(h!.claim, h!.units - h!.page) : h!.claim, held: h!.page + h!.claim, fixed: true };
+        const claims = claimsOf(w.units);
+        return { pageChunks: w.units.length - claims, claimChunks: claims, held: h ? h.page + h.claim : 0 };
+      }),
+      ceiling - chunkCount,
+    );
+    const claimsFor = new Map<string, number | null>();
+    const shrink: Array<[string, number]> = [];
+    const grow: string[] = [];
+    planned.forEach((rel, i) => {
+      claimsFor.set(rel, allowed[i]);
+      const h = held.get(rel);
+      if (working.has(rel) || !h) return;
+      const keep = allowed[i] ?? h.claim;
+      if (h.claim > keep) shrink.push([rel, keep]);
+      // A page the budget took claims from earlier gets them back on a
+      // whole-tree run once there is room (an incremental run never reads it).
+      else if (full && h.claim < keep && tree.get(rel)?.blob === stored.get(rel)) grow.push(rel);
+    });
+    // Claims over a page's share go, a verified claim last.
+    if (shrink.length > 0) {
+      const evict = db.prepare(
+        "DELETE FROM chunks WHERE id IN (SELECT id FROM chunks WHERE path = ? AND kind = 'claim' ORDER BY verified DESC, id LIMIT -1 OFFSET ?)",
+      );
+      tx(() => {
+        for (const [rel, keep] of shrink) evict.run(rel, keep);
+      });
+      chunkCount = countOf(db, "SELECT COUNT(*) AS n FROM chunks");
+      wrote = true;
+    }
+    for (const rel of grow) {
+      if (signal?.aborted) throw signal.reason ?? new Error("aborted");
+      const entry = tree.get(rel)!;
+      const text = await readBlob(vault, entry.blob);
+      const page = text === null ? null : pageIndexUnits(rel, text);
+      if (!page) continue;
+      work.push({ rel, blob: entry.blob, page, units: page.units });
+      unchanged -= 1;
+    }
+
+    // 3. Embed: each page its page chunks and the claims its share holds.
+    for (const { rel, blob, page, units: all } of work) {
+      if (signal?.aborted) throw signal.reason ?? new Error("aborted");
+      const existing = Number((sql.chunksFor.get(rel) as { n?: unknown } | undefined)?.n ?? 0) || 0;
+      const pageChunks = all.length - claimsOf(all);
+      // The plan, checked against the count itself: the budget is never overrun.
+      const room = ceiling - (chunkCount - existing);
+      const share = claimsFor.get(rel);
+      if (share === null || share === undefined || pageChunks > room) {
         capped += 1;
         continue;
       }
+      const units = unitsWithin(all, Math.min(share, room - pageChunks));
       const vectors: Float32Array[] = [];
       for (let at = 0; at < units.length; at += MEMORY_EMBED_BATCH_INPUTS) {
         const batch = units.slice(at, at + MEMORY_EMBED_BATCH_INPUTS).map((u) => u.text);
@@ -611,20 +792,31 @@ async function syncOnce(vault: string, paths: ReadonlySet<string> | null, signal
         // An unparseable page is recorded too (with no chunks), so its blob is
         // not read again until it changes.
         sql.upsertPage.run(
-          rel, entry.blob, page?.pageId ?? rel.replace(/\.md$/, ""), page?.title ?? "", page?.type ?? "",
-          page?.verified ? 1 : 0, units.length, Date.now(),
+          rel, blob, page?.pageId ?? rel.replace(/\.md$/, ""), page?.title ?? "", page?.type ?? "",
+          page?.verified ? 1 : 0, all.length, Date.now(),
         );
       });
       chunkCount = chunkCount - existing + units.length;
+      if (units.length < all.length) partial += 1;
       indexed += 1;
       wrote = true;
     }
+
+    // What search and the connect pass's similar pages miss: pages on `main` with no page vector.
+    const withVector = new Set<string>();
+    for (const raw of db.prepare("SELECT DISTINCT path FROM chunks WHERE kind = 'page'").iterate()) {
+      const row = raw as { path?: unknown };
+      if (typeof row.path === "string") withVector.add(row.path);
+    }
+    let withoutPageVector = 0;
+    for (const rel of tree.keys()) if (!withVector.has(rel)) withoutPageVector += 1;
 
     const dim = db.prepare("SELECT vec FROM chunks LIMIT 1").get() as { vec?: Uint8Array } | undefined;
     tx(() => {
       metaSet(db, "identity", identity);
       metaSet(db, "built_at", String(Date.now()));
       metaSet(db, "capped", capped > 0 ? "1" : "");
+      metaSet(db, "without_page_vector", String(withoutPageVector));
       // A capped page was never recorded; only a whole-tree run can pick it up.
       metaSet(db, "needs_full", capped > 0 ? "1" : "");
       if (dim?.vec) metaSet(db, "dim", String(dim.vec.byteLength / Float32Array.BYTES_PER_ELEMENT));
@@ -637,8 +829,10 @@ async function syncOnce(vault: string, paths: ReadonlySet<string> | null, signal
       removed,
       unchanged,
       capped,
+      partial,
       pages: countOf(db, "SELECT COUNT(*) AS n FROM pages"),
       chunks: countOf(db, "SELECT COUNT(*) AS n FROM chunks"),
+      withoutPageVector,
     };
   } finally {
     db.close();
@@ -739,11 +933,12 @@ export function scheduleReindexAfterCommit(vault: string, changed: readonly stri
 
 export async function vaultIndexStatus(vault: string = vaultDir()): Promise<VaultIndexStatus> {
   const db = await openForRead(vaultIndexPathFor(vault));
-  if (!db) return { exists: false, pages: 0, chunks: 0, identity: "missing", needsFullScan: false, builtAt: null };
+  if (!db) return { exists: false, pages: 0, chunks: 0, identity: "missing", needsFullScan: false, builtAt: null, withoutPageVector: null };
   try {
     const stored = metaGet(db, "identity");
     const now = storeIdentity(await resolveMemoryEmbedder(), vault);
     const built = Number(metaGet(db, "built_at"));
+    const without = Number(metaGet(db, "without_page_vector") ?? NaN);
     return {
       exists: true,
       pages: countOf(db, "SELECT COUNT(*) AS n FROM pages"),
@@ -751,6 +946,7 @@ export async function vaultIndexStatus(vault: string = vaultDir()): Promise<Vaul
       identity: stored === null ? "missing" : stored === now ? "valid" : "mismatched",
       needsFullScan: metaGet(db, "needs_full") === "1",
       builtAt: Number.isFinite(built) && built > 0 ? built : null,
+      withoutPageVector: Number.isInteger(without) && without >= 0 ? without : null,
     };
   } finally {
     db.close();

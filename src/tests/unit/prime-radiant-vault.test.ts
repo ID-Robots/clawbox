@@ -111,7 +111,8 @@ describe("prime radiant vault", () => {
       "index.md",
     ]);
     expect(gitOut(vault, "status", "--porcelain")).toBe("?? stray.txt");
-    expect(result.findings.map((f) => f.rule)).toEqual([]);
+    // index.md lists it, but no other page links it: still an orphan.
+    expect(result.findings.map((f) => f.rule)).toEqual(["orphan"]);
   });
 
   it("makes no commit when nothing changed", async () => {

@@ -19,7 +19,9 @@ function lintOne(text: string, opts: { index?: string | null; extra?: Record<str
 
 describe("prime radiant lint", () => {
   it("passes a well-formed page", () => {
-    const report = lintOne(pageText({ claims: [claim("acme-sales/widgets/sizes")] }));
+    const report = lintOne(pageText({ claims: [claim("acme-sales/widgets/sizes")] }), {
+      extra: { "syntheses/hub.md": pageText({ type: "synthesis" }, "Hub. See [[concepts/pricing]].") },
+    });
     expect(report.findings).toEqual([]);
     expect(report.ok).toBe(true);
     expect(report.checked).toBe(1);
@@ -77,7 +79,7 @@ describe("prime radiant lint", () => {
     expect(long.findings.find((f) => f.rule === "claim-too-long")?.details).toMatchObject({ claimId: "acme-sales/widgets/long" });
   });
 
-  it("finds orphans: no inbound link and not in index.md", () => {
+  it("finds orphans: no inbound link from another content page", () => {
     const report = lintOne(pageText(), { index: "# Index\n" });
     expect(rules(report)).toContain("orphan");
     const linked = lintOne(pageText(), {
@@ -96,6 +98,23 @@ describe("prime radiant lint", () => {
       extra: { "syntheses/hub.md": pageText({ type: "synthesis" }, "Hub. Write `[[concepts/pricing]]` to link.") },
     });
     expect(rules(inCode)).toContain("orphan");
+  });
+
+  it("counts a page index.md lists and no other page links as an orphan", () => {
+    // index.md lists every page, so a listing reaches nothing.
+    const listed = lintOne(pageText({}, "Pricing notes.\n"), { index: INDEX });
+    const f = listed.findings.find((x) => x.rule === "orphan")!;
+    expect(f).toMatchObject({ severity: "warning", blocksCommit: false, path: "concepts/pricing.md", details: { isolated: true } });
+    expect(f.message).toMatch(/index\.md does not count/);
+    // A link from a source page (not content) does not reach it either…
+    const fromSource = lintOne(pageText(), { extra: { "sources/price-list.md": pageText({ type: "source", title: "Price list" }, "See [[concepts/pricing]].") } });
+    expect(rules(fromSource)).toContain("orphan");
+    // …nor its own link out: it links somewhere, so it is not isolated.
+    const linksOut = lintOne(pageText({}, "Pricing. See [[entities/acme-widgets]]."));
+    expect(linksOut.findings.find((x) => x.rule === "orphan")?.details).toEqual({ isolated: false });
+    // Only content pages are judged: a source page is never an orphan.
+    const source = lintVault(snapshot({ "sources/price-list.md": pageText({ type: "source", title: "Price list" }) }, INDEX), { now: NOW });
+    expect(rules(source)).not.toContain("orphan");
   });
 
   it("requires sources and flags a passed stale_after", () => {

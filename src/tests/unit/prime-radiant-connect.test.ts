@@ -148,6 +148,94 @@ describe("planConnections", () => {
     expect(again.writes).toEqual([]);
   });
 
+  /** Warranty pages that share words, widget pages that share others, one page that shares none; every page in index.md. */
+  function wordVault(extra: { claimsVerified?: boolean; repairsBody?: string } = {}): VaultSnapshot {
+    const pages: Record<string, string> = {
+      "concepts/widget-assembly.md": page("Widget assembly line", { claims: ["The widget assembly line runs two shifts."] }),
+      "concepts/widget-paint.md": page("Widget paint shop", { claims: ["The widget paint shop runs one shift."] }),
+      "concepts/warranty-claims.md": serializePage(
+        frontmatter({
+          type: "concept",
+          title: "Warranty claims handling",
+          domain: "acme-ops",
+          sources: ["sources/warranty-claims.md"],
+          verified: extra.claimsVerified ? { at: "2026-09-01T00:00:00.000Z", by: "owner" } : null,
+          claims: [claim("acme-ops/warranty-claims/answer", "Warranty claims are answered within two days."), claim("acme-ops/warranty-claims/receipt", "Warranty returns need the original receipt.")],
+        }),
+        "How warranty claims and returns are handled.\n",
+      ),
+      "concepts/warranty-returns.md": page("Warranty returns policy", {
+        claims: ["Warranty returns are accepted within thirty days.", "Returns need the original receipt and the serial number."],
+        body: "The warranty returns policy.\n",
+      }),
+      "concepts/warranty-repairs.md": page("Warranty repairs", { claims: ["Warranty repairs take a week."], body: extra.repairsBody }),
+      "concepts/zqx.md": page("Zqx", { body: "Qq.\n" }),
+    };
+    const index = `# Index\n\n${Object.keys(pages).map((p) => `- [[${p.replace(/\.md$/, "")}]]`).join("\n")}\n`;
+    return snapshot(pages, index);
+  }
+
+  it("links a page the search index has no vector for by its words, and gets it an inbound link", async () => {
+    const snap = wordVault();
+    const vectors = await vectorsFor(snap);
+    vectors.delete("concepts/warranty-returns.md");
+    vectors.delete("concepts/zqx.md");
+    const plan = await planConnections(snap, { now: NOW, vectors });
+    const body = (p: string) => plan.writes.find((w) => w.path === p)?.body ?? "";
+
+    // Its "Similar pages" by words, nearest first.
+    expect(body("concepts/warranty-returns.md")).toMatch(/### Similar pages\n\n- \[\[concepts\/warranty-claims\]\]/);
+    expect(body("concepts/warranty-returns.md")).not.toContain("widget");
+    // Another content page links it (index.md listing it does not count).
+    expect(plan.writes.some((w) => w.path !== "concepts/warranty-returns.md" && w.body.includes("[[concepts/warranty-returns]]"))).toBe(true);
+    expect(plan.stats.pagesLexical).toBe(1);
+    // The page whose words tie it to nothing is left as it is, and counted:
+    // index.md lists it, and it is still the one orphan.
+    expect(plan.writes.some((w) => w.path === "concepts/zqx.md")).toBe(false);
+    expect(plan.stats).toMatchObject({ orphansAfter: 1, isolatedAfter: 1, unlinkable: 1 });
+
+    // Every other content page links somewhere and is linked from somewhere.
+    const { run } = fakeRun(snap);
+    await runConnectPass(snap, run, { now: NOW, vectors });
+    expect(lintVault(snap, { now: NOW }).findings.filter((f) => f.rule === "orphan").map((f) => f.path)).toEqual(["concepts/zqx.md"]);
+    // The same plan twice: nothing more to write.
+    expect((await planConnections(snap, { now: NOW, vectors })).writes).toEqual([]);
+  });
+
+  it("never rewrites a verified page or overfills a block to reach a page: it stays an orphan, counted", async () => {
+    const full = `Warranty repairs.\n\n${"Repairs are booked by phone and collected by courier. ".repeat(105)}\n`;
+    const snap = wordVault({ claimsVerified: true, repairsBody: full });
+    const vectors = new Map<string, Float32Array>();
+    const plan = await planConnections(snap, { now: NOW, vectors });
+    // The verified page is its owner's; the repairs page has no room left.
+    expect(plan.writes.some((w) => w.path === "concepts/warranty-claims.md")).toBe(false);
+    expect(plan.writes.find((w) => w.path === "concepts/warranty-repairs.md")?.body ?? "").not.toContain("[[concepts/warranty-returns]]");
+    // It still links out, to the verified page among others.
+    expect(plan.writes.find((w) => w.path === "concepts/warranty-returns.md")?.body).toContain("[[concepts/warranty-claims]]");
+    expect(plan.stats.orphansAfter).toBeGreaterThanOrEqual(2);
+    expect(plan.stats.unlinkable).toBe(1);
+  });
+
+  it("puts a page nobody lists among its similar pages into its nearest page's, within that page's budget", async () => {
+    // Six pages alike: each one's five nearest are the other five, so none
+    // lists the questions page, though it is near them all.
+    const pages: Record<string, string> = {};
+    for (const name of ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot"]) {
+      pages[`concepts/tariff-${name.toLowerCase()}.md`] = page(`Pallet tariff ${name}`, {
+        claims: ["Pallet courier tariff is charged per pallet and zone.", "Fuel surcharge applies to the pallet tariff."],
+        body: "Pallet tariff.\n",
+      });
+    }
+    pages["concepts/pallet-questions.md"] = page("Pallet tariff questions", { claims: ["Customers ask how the pallet tariff is charged."], body: "Questions.\n" });
+    pages["concepts/office-holidays.md"] = page("Office holidays", { claims: ["The office closes in August."] });
+    const plan = await planConnections(snapshot(pages, "# Index\n"), { now: NOW, vectors: new Map() });
+    const linking = plan.writes.filter((w) => w.body.includes("[[concepts/pallet-questions]]")).map((w) => w.path);
+    // The nearest (ties by path), and only it.
+    expect(linking).toEqual(["concepts/tariff-alpha.md"]);
+    expect(plan.writes.find((w) => w.path === "concepts/tariff-alpha.md")?.body).toMatch(/### Similar pages\n\n(- .*\n){5}- \[\[concepts\/pallet-questions\]\]/);
+    expect(plan.stats).toMatchObject({ pagesLexical: 7, orphansAfter: 1, isolatedAfter: 1, unlinkable: 1 });
+  });
+
   it("replaces its block, never duplicates it", () => {
     const body = `Summary.\n\n${RELATED_START}\n## Related\n\n- [[a]] — A\n${RELATED_END}\n`;
     expect(stripRelatedBlock(body)).toBe("Summary.\n");

@@ -26,6 +26,7 @@
 
 import { z } from "zod";
 import { CLAIM_ID_RE } from "../../src/lib/prime-radiant/claims";
+import { isContentPage } from "../../src/lib/prime-radiant/links";
 import { PAGE_STATUSES, PAGE_TYPES, PRIVACY_TIERS } from "../../src/lib/prime-radiant/schema";
 import { api, type ApiOptions } from "../lib/api";
 import { ApiError, ToolError, type ToolErrorCode } from "../lib/errors";
@@ -324,7 +325,7 @@ interface MergeBody {
 interface GraphBody {
   revision?: string | null;
   truncated?: boolean;
-  nodes?: Array<{ id: string; title?: string; domain?: string | null; degree?: number }>;
+  nodes?: Array<{ id: string; title?: string; domain?: string | null; degree?: number; inbound?: number }>;
   edges?: Array<[number, number, number]>;
 }
 
@@ -365,7 +366,10 @@ function mapOut(g: GraphBody, focus: string | undefined) {
   const edges = g.edges ?? [];
   const domains = new Map<string, number>();
   for (const n of nodes) domains.set(n.domain ?? "(none)", (domains.get(n.domain ?? "(none)") ?? 0) + 1);
-  const unconnected = nodes.filter((n) => (n.degree ?? 0) === 0);
+  // A content page no other content page links to; a shared source or a
+  // related hint keeps degree above 0, so degree never finds these. A server
+  // without `inbound` is read the old way.
+  const unconnected = nodes.filter((n) => (typeof n.inbound === "number" ? isContentPage(n.id) && n.inbound === 0 : (n.degree ?? 0) === 0));
   const out: Record<string, unknown> = {
     revision: short(g.revision),
     pages: nodes.length,
