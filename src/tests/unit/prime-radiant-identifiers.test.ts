@@ -271,7 +271,7 @@ describe("rejudge and record pages", () => {
       cand("sources/invoice-draft-starter-19.md", "The total amount due is €19.00.", { claimId: "finance/invoice-draft-starter-19/total" }),
       cand("sources/correction-4100000377.md", "The total amount due is €80.89."),
     );
-    const verifiedPage = raise(cand("sources/receipt-verified-page.md", "The receipt total is €0.05."), cand("sources/adnet-receipt-0604.md", "The receipt total is €0.07."));
+    raise(cand("sources/receipt-verified-page.md", "The receipt total is €0.05."), cand("sources/adnet-receipt-0604.md", "The receipt total is €0.07."));
 
     const dry = rejudgeOpenContradictions(vault, snap, { dryRun: true });
     expect(dry).toMatchObject({ checked: 9, closed: 7, keptVerified: 0, stillOpen: 2, dryRun: true });
