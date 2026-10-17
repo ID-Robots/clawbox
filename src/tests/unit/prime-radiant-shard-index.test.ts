@@ -338,6 +338,25 @@ describe("the incremental reindex hook", () => {
     expect((await searchPrimeRadiant("support", 5)).some((h) => h.path === "concepts/support-hours.md")).toBe(false);
   });
 
+  it("keeps the vectors of a page whose metadata alone changed, asking the embedder nothing, and follows its new blob", async () => {
+    await seed();
+    await reindexPrimeRadiantVault();
+    embed.texts = [];
+
+    const retagged = { type: "howto", title: "Support hours", domain: "billing", owner: "finance-team", privacy: "confidential", status: "stable" } as const;
+    await commit({ "concepts/support-hours.md": pageText(retagged, "Support answers on weekdays from nine to five.\n") });
+    expect(await reindexPrimeRadiantPaths(["concepts/support-hours.md"])).toMatchObject({ indexed: 0, unchanged: 1, pages: 2 });
+    expect(embed.texts).toEqual([]);
+    // The row took the new blob: asked again, the page is not even read.
+    expect(await reindexPrimeRadiantPaths(["concepts/support-hours.md"])).toMatchObject({ indexed: 0, unchanged: 1 });
+    expect((await searchPrimeRadiant("support", 1))[0]).toMatchObject({ path: "concepts/support-hours.md" });
+
+    // A new word in the body is embedded again.
+    await commit({ "concepts/support-hours.md": pageText(retagged, "Support answers every day from nine to five.\n") });
+    expect(await reindexPrimeRadiantPaths(["concepts/support-hours.md"])).toMatchObject({ indexed: 1, unchanged: 0 });
+    expect(embed.texts.length).toBeGreaterThan(0);
+  });
+
   it("ignores paths that are not knowledge pages", async () => {
     await seed();
     expect(await reindexPrimeRadiantPaths(["index.md", ".openclaw-wiki/x.md", "../escape.md"])).toBeNull();

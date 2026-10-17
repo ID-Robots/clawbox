@@ -186,7 +186,11 @@ export interface VaultIndexResult {
   indexed: number;
   /** Pages dropped because `main` no longer has them. */
   removed: number;
-  /** Pages left as they were because their blob had not moved. */
+  /**
+   * Pages whose vectors stayed as they were: their blob had not moved, or
+   * what is embedded of them had not (a frontmatter metadata change), and
+   * only their row followed the new blob.
+   */
   unchanged: number;
   /** Pages not indexed because the chunk budget was full. */
   capped: number;
@@ -469,6 +473,16 @@ async function isVaultRepo(vault: string): Promise<boolean> {
 
 // ─── one run ─────────────────────────────────────────────────────────────────
 
+/** Whether a page's stored chunks are exactly `units`, in order: the same ids, kinds, verification and text. */
+function sameUnits(rows: unknown[], units: readonly VaultIndexUnit[]): boolean {
+  if (rows.length !== units.length) return false;
+  return rows.every((row, i) => {
+    const r = row as { ref_id?: unknown; kind?: unknown; verified?: unknown; text?: unknown };
+    const u = units[i];
+    return r.ref_id === u.refId && r.kind === u.kind && Number(r.verified) === (u.verified ? 1 : 0) && r.text === u.text;
+  });
+}
+
 const PROBE_TEXT = "prime radiant vault index readiness check";
 
 /**
@@ -519,6 +533,7 @@ async function syncOnce(vault: string, paths: ReadonlySet<string> | null, signal
       dropChunks: db.prepare("DELETE FROM chunks WHERE path = ?"),
       dropPage: db.prepare("DELETE FROM pages WHERE path = ?"),
       chunksFor: db.prepare("SELECT COUNT(*) AS n FROM chunks WHERE path = ?"),
+      chunksOf: db.prepare("SELECT ref_id, kind, verified, text FROM chunks WHERE path = ? ORDER BY id"),
       insertChunk: db.prepare("INSERT INTO chunks (path, ref_id, kind, verified, text, vec) VALUES (?, ?, ?, ?, ?, ?)"),
       upsertPage: db.prepare(
         `INSERT INTO pages (path, blob, page_id, title, type, verified, chunks, indexed_at)
@@ -568,6 +583,17 @@ async function syncOnce(vault: string, paths: ReadonlySet<string> | null, signal
       const page = text === null ? null : pageIndexUnits(rel, text);
       const units = page?.units ?? [];
       const existing = Number((sql.chunksFor.get(rel) as { n?: unknown } | undefined)?.n ?? 0) || 0;
+      // What is embedded of the page did not move (its domain, owner, privacy
+      // or status changed, say): its vectors stay, only its row follows the
+      // new blob, and the embedder is not asked again.
+      if (page && existing > 0 && existing === units.length && sameUnits(sql.chunksOf.all(rel), units)) {
+        tx(() => {
+          sql.upsertPage.run(rel, entry.blob, page.pageId, page.title, page.type, page.verified ? 1 : 0, units.length, Date.now());
+        });
+        unchanged += 1;
+        wrote = true;
+        continue;
+      }
       if (chunkCount - existing + units.length > ceiling) {
         capped += 1;
         continue;

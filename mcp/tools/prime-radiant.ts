@@ -21,7 +21,7 @@
 // carry.
 //
 // Both editions: the vault is ClawBox's, not a harness's. `profile: "full"`
-// only — thirty-one tools are context a 4-8B model on the core profile should not
+// only — thirty-two tools are context a 4-8B model on the core profile should not
 // pay for; `memory_shard_search` already reads the wiki there.
 
 import { z } from "zod";
@@ -59,6 +59,7 @@ export const PRIME_RADIANT_TOOLS = [
   "prime_radiant_page_edit",
   "prime_radiant_page_delete",
   "prime_radiant_page_merge",
+  "prime_radiant_pages_bulk_edit",
   "prime_radiant_claim_add",
   "prime_radiant_claim_edit",
   "prime_radiant_claim_delete",
@@ -291,6 +292,17 @@ interface PageBody {
   links?: string[];
   inIndex?: boolean;
   lint?: { findings?: unknown[] };
+}
+
+/** Pages a bulk edit's answer names one by one; the rest are counted. */
+const BULK_LISTED = 100;
+
+interface BulkBody {
+  changed?: string[];
+  unchanged?: string[];
+  refused?: Array<{ path?: string; code?: string; error?: string }>;
+  commit?: string | null;
+  dryRun?: boolean;
 }
 
 interface MergeBody {
@@ -823,6 +835,46 @@ function registerEditTools(reg: Registrar): void {
         ...(r.unparsed?.length ? { not_relinked: r.unparsed } : {}),
         ...(r.reviewItems ? { review_items_followed: r.reviewItems } : {}),
         checks: findingsOut(r.findings),
+      });
+    },
+  );
+
+  reg.tool(
+    "prime_radiant_pages_bulk_edit",
+    "Set the domain, owner, privacy or status of many wiki pages at once (1 to 500), e.g. to re-tag them with a new domain: only their frontmatter changes, in ONE commit the owner can undo. A page that cannot change (not found, verified by a person, a bad value) is listed as refused; the rest still change. dry_run: true says what would change, writing nothing. You are named as the author.",
+    {
+      edits: z
+        .array(
+          z.object({
+            path: zPagePath("The page's vault path."),
+            domain: zDomain("New domain, lowercase kebab-case.").optional(),
+            owner: zOptText(80, "New owner."),
+            privacy: zEnumOf(PRIVACY_TIERS, "New privacy tier.").optional(),
+            status: zEnumOf(PAGE_STATUSES, "New status.").optional(),
+          }),
+        )
+        .min(1)
+        .max(500)
+        .describe("One entry per page: its path and the fields to set on it."),
+      dry_run: zOptBool("true: only say what would change; nothing is written."),
+    },
+    WRITE,
+    async (a: { edits: Array<{ path: string; domain?: string; owner?: string; privacy?: string; status?: string }>; dry_run?: boolean }) => {
+      const empty = a.edits.findIndex((e) => e.domain === undefined && e.owner === undefined && e.privacy === undefined && e.status === undefined);
+      if (empty >= 0) {
+        throw new ToolError("BAD_ARGUMENT", `Edit ${empty + 1} (${a.edits[empty].path}) changes nothing.`, "Give every entry at least one of domain, owner, privacy or status.");
+      }
+      const r = await pr<BulkBody>("POST", "/pages/bulk", { body: { edits: a.edits, ...(a.dry_run ? { dry_run: true } : {}) } });
+      const dry = r.dryRun === true;
+      const changed = r.changed ?? [];
+      const refused = (r.refused ?? []).map((x) => ({ path: x.path, code: x.code, error: x.error }));
+      const tally = `${changed.length} page(s) ${dry ? "would change" : "changed"}, ${r.unchanged?.length ?? 0} already said so, ${refused.length} refused.`;
+      return json({
+        result: dry ? `Dry run, nothing was changed: ${tally}` : committed(r.commit, `Bulk edit: ${tally}`),
+        changed: changed.slice(0, BULK_LISTED),
+        ...(changed.length > BULK_LISTED ? { changed_not_listed: changed.length - BULK_LISTED } : {}),
+        ...(refused.length ? { refused: refused.slice(0, BULK_LISTED), next: "Each refused page says why; fix those or leave them out and send them again, or tell the user." } : {}),
+        ...(refused.length > BULK_LISTED ? { refused_not_listed: refused.length - BULK_LISTED } : {}),
       });
     },
   );

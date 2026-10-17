@@ -239,6 +239,22 @@ const CASES: Case[] = [
     bad: { into: "entities/acme.md", from: [], confirm: true },
   },
   {
+    tool: "prime_radiant_pages_bulk_edit",
+    args: { edits: [{ path: "entities/acme.md", domain: "acme-sales" }, { path: "concepts/pricing.md", owner: "sales-team", privacy: "confidential" }] },
+    reply: {
+      changed: ["entities/acme.md"],
+      unchanged: [],
+      refused: [{ path: "concepts/pricing.md", code: "verified", error: "A person verified this page as a whole." }],
+      commit: SHA,
+      dryRun: false,
+    },
+    method: "POST",
+    path: `${BASE}/pages/bulk`,
+    sent: { body: { edits: [{ path: "entities/acme.md", domain: "acme-sales" }, { path: "concepts/pricing.md", owner: "sales-team", privacy: "confidential" }] } },
+    says: /Bulk edit: 1 page\(s\) changed, 0 already said so, 1 refused\. Commit 0123456789ab[\s\S]*"code": "verified"/,
+    bad: { edits: [] },
+  },
+  {
     tool: "prime_radiant_claim_add",
     args: { page: "concepts/pricing.md", text: "The green widget costs 9 EUR.", confidence: 60, source: "price-list.pdf" },
     reply: { id: "acme-sales/pricing/green", page: "concepts/pricing.md", commit: SHA, findings: [] },
@@ -688,5 +704,42 @@ describe("search states", () => {
     const out = await harness().call("prime_radiant_search", { query: "widgets", limit: 5 });
     expect(out.isError).toBe(false);
     if (!out.isError) expect(out.text).toMatch(says);
+  });
+});
+
+describe("prime_radiant_pages_bulk_edit", () => {
+  const shape = () => z.object(harness().get("prime_radiant_pages_bulk_edit").shape);
+
+  it("sends a dry run as one, and says nothing was changed", async () => {
+    api.mockResolvedValue({ changed: ["entities/acme.md", "concepts/pricing.md"], unchanged: ["concepts/shipping.md"], refused: [], commit: null, dryRun: true });
+    const out = await harness().call("prime_radiant_pages_bulk_edit", shape().parse({ edits: [{ path: "entities/acme.md", domain: "acme-sales" }], dry_run: true }));
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(call()[1].body).toEqual({ edits: [{ path: "entities/acme.md", domain: "acme-sales" }], dry_run: true });
+    expect(out.text).toMatch(/Dry run, nothing was changed: 2 page\(s\) would change, 1 already said so, 0 refused\./);
+    expect(out.text).not.toMatch(/refused"/);
+  });
+
+  it("refuses an entry that changes nothing, and more than 500 entries, before anything is sent", async () => {
+    const out = await harness().call("prime_radiant_pages_bulk_edit", shape().parse({ edits: [{ path: "entities/acme.md", domain: "acme-sales" }, { path: "concepts/pricing.md" }] }));
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("BAD_ARGUMENT");
+    expect(out.error.message).toMatch(/Edit 2 \(concepts\/pricing\.md\) changes nothing/);
+    expect(shape().safeParse({ edits: Array.from({ length: 501 }, (_, i) => ({ path: `concepts/p-${i}.md`, owner: "x" })) }).success).toBe(false);
+    expect(shape().safeParse({ edits: [{ path: "../setup-api/x", owner: "x" }] }).success).toBe(false);
+    expect(api).not.toHaveBeenCalled();
+  });
+
+  it("lists at most 100 changed pages and counts the rest", async () => {
+    const changed = Array.from({ length: 140 }, (_, i) => `concepts/p-${i}.md`);
+    api.mockResolvedValue({ changed, unchanged: [], refused: [], commit: SHA, dryRun: false });
+    const out = await harness().call("prime_radiant_pages_bulk_edit", shape().parse({ edits: [{ path: "concepts/p-0.md", owner: "x" }] }));
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    const body = JSON.parse(out.text);
+    expect(body.changed).toHaveLength(100);
+    expect(body.changed_not_listed).toBe(40);
+    expect(body.result).toMatch(/Bulk edit: 140 page\(s\) changed, 0 already said so, 0 refused\. Commit 0123456789ab/);
   });
 });
