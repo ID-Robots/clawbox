@@ -358,13 +358,17 @@ export function classifyRecord(path: string, fm: PageFrontmatter, options: Class
   }
   if (!type) return null;
   const date = recordDate(fm);
-  const month = date.month ?? (via === "frontmatter" ? set?.month ?? null : null);
+  // A month a person or the model set stands, as their type does (recordHubKey reads the same key); the page's own date only fills in.
+  const decided = via === "frontmatter" && set && set.by !== "rules" ? set : null;
+  const month = decided?.month ?? date.month;
   if (!month) return null;
+  // A day outside that month is no day of this record's month.
+  const day = date.day && date.day.startsWith(`${month}-`) ? date.day : null;
   const refs = [...titleIdentifiers(fm.title).ref].sort();
   return {
     type,
     month,
-    day: date.day,
+    day,
     counterparty: recordCounterparty(fm, fm.title, claimTexts, options.ownCompany),
     amount: frontmatterAmount(fm) ?? recordAmount(claimTexts),
     ref: refs[0] ?? null,

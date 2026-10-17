@@ -46,7 +46,8 @@ import {
   upsertBlock,
   type StructureOptions,
 } from "@/lib/prime-radiant/structure";
-import { buildClassifyPrompt, changeKey, classifyWithModel, modelCandidates, parseClassifyResponse } from "@/lib/prime-radiant/structure-run";
+import { buildClassifyPrompt, changeKey, CLASSIFY_BATCH, classifyMaxTokens, classifyWithModel, modelCandidates, parseClassifyResponse } from "@/lib/prime-radiant/structure-run";
+import { statusLinkDensity } from "@/lib/prime-radiant/service";
 import { DEFAULT_COST_RATES } from "@/lib/prime-radiant/cost-rates";
 import { FlashCallError, type FlashClient } from "@/lib/prime-radiant/flash-client";
 import { readCosts } from "@/lib/prime-radiant/ingest-store";
@@ -161,6 +162,25 @@ describe("record classification", () => {
     expect(classifyRecord("concepts/t.md", model)).toMatchObject({ type: "receipt", by: "model" });
     // `by: rules` is re-read: a title that is no record any more stops being one.
     expect(classifyRecord("concepts/u.md", fm({ title: "Meeting notes 2026-07-03", record: { type: "invoice", month: "2026-07", by: "rules" } }))).toBeNull();
+  });
+
+  it("keeps the month a person or the model set over a date the page reads, the same key the pass and the hubs use", () => {
+    const person = fm({ title: "Invoice INV-2026-000555 2026-08-14", record: { type: "invoice", month: "2026-07" } });
+    expect(classifyRecord("concepts/p.md", person)).toMatchObject({ type: "invoice", month: "2026-07", day: null, by: "owner" });
+    expect(recordHubKey("concepts/p.md", person)).toBe("invoice/2026-07");
+    const model = fm({ title: "Scan 0099 2026-08-02", record: { type: "receipt", month: "2026-07", by: "model" } });
+    expect(classifyRecord("concepts/m.md", model)).toMatchObject({ month: "2026-07", by: "model" });
+    expect(recordHubKey("concepts/m.md", model)).toBe("receipt/2026-07");
+    // The rules' own month is read from the page again.
+    const rules = fm({ title: "Invoice INV-2026-000556 2026-08-14", record: { type: "invoice", month: "2026-07", by: "rules" } });
+    expect(classifyRecord("concepts/r.md", rules)?.month).toBe("2026-08");
+    const snap = snapshot({
+      "concepts/p1.md": leaf("Invoice INV-2026-000561 2026-08-14", [], { record: { type: "invoice", month: "2026-07" } }),
+      "concepts/p2.md": leaf("Invoice INV-2026-000562 2026-08-15", [], { record: { type: "invoice", month: "2026-07" } }),
+    });
+    const plan = planStructure(snap, OPTIONS);
+    expect(plan.writes.filter((w) => readStructureMeta(w.frontmatter)?.kind === "record-hub").map((w) => w.frontmatter.title)).toEqual(["Invoices 2026-07"]);
+    expect(plan.writes.find((w) => w.path === "concepts/p1.md")?.frontmatter.record).toMatchObject({ month: "2026-07" });
   });
 
   it("reads amounts in either decimal style and sums per currency in cents", () => {
@@ -470,6 +490,17 @@ describe("links per page", () => {
     expect(linkDensity(g)).toEqual({ pages: 3, median: 1, mean: 1.33, atTarget: 0, target: 5 });
   });
 
+  it("keeps Status's links metric until a page changes", () => {
+    const snap = snapshot({ "concepts/a.md": structurePage({ title: "A" }, "[[concepts/b]]\n"), "concepts/b.md": structurePage({ title: "B" }, "B.\n") });
+    const first = statusLinkDensity("/synthetic-cache-vault", snap);
+    expect(first).toMatchObject({ pages: 2, median: 1 });
+    expect(statusLinkDensity("/synthetic-cache-vault", snap)).toBe(first);
+    const grown = { ...snap, pages: [...snap.pages, vaultPage("concepts/c.md", structurePage({ title: "C" }, "[[concepts/a]]\n"))] };
+    const second = statusLinkDensity("/synthetic-cache-vault", grown);
+    expect(second).not.toBe(first);
+    expect(second).toMatchObject({ pages: 3 });
+  });
+
   it("lifts the median to the target on the synthetic vault: a leaf links its hub, its counterparty, its neighbours and the counterparty's", () => {
     const snap = snapshot(syntheticVault(600), "# Index\n");
     const plan = planStructure(snap, OPTIONS);
@@ -668,5 +699,45 @@ describe("managed blocks a person broke", () => {
     expect(loneEnd).toBe(`${HUB_START}\nFresh.\n${HUB_END}\n\nNotes kept.\nMore notes.\n`);
     // An intact block is replaced in place, as before.
     expect(upsertBlock(`A.\n\n${HUB_START}\nold\n${HUB_END}\n\nB.\n`, HUB_START, HUB_END, "new", "start")).toBe(`A.\n\n${HUB_START}\nnew\n${HUB_END}\n\nB.\n`);
+  });
+});
+
+describe("the cheap-model fallback in batches", () => {
+  it("asks CLASSIFY_BATCH pages a call with an answer cap by size, and stops at a failed call without counting its pages", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pr-structure-batches-"));
+    const stateVault = path.join(root, "vault");
+    try {
+      const pages: Record<string, string> = {};
+      for (let i = 0; i < 250; i++) pages[`concepts/statement-${String(i).padStart(3, "0")}.md`] = leaf(`Statement 2026-0${1 + (i % 9)} Globex Ltd ${i}`, ["The statement lists movements."]);
+      const snap = snapshot(pages);
+      const calls: Array<{ items: number; maxTokens: number }> = [];
+      const answering = (failAfter = Infinity): FlashClient => ({
+        model: "deepseek-v4-flash",
+        async complete(req) {
+          if (calls.length >= failAfter) throw new FlashCallError("refused", "the proxy refused the call");
+          const items = (JSON.parse(req.user.split("ITEMS (JSON):\n")[1]) as unknown[]).length;
+          calls.push({ items, maxTokens: req.maxTokens });
+          return { text: JSON.stringify(Array.from({ length: items }, (_, i) => ({ i, type: "bank-transfer" }))), model: "deepseek-v4-flash", usage: { promptTokens: 100, completionTokens: 20 * items, cacheHitTokens: 0 } };
+        },
+      });
+      const opts = { stateVault, rates: DEFAULT_COST_RATES, runId: "run-batches", now: () => NOW };
+      const all = await classifyWithModel(snap, { ...opts, cap: 250, client: answering() });
+      expect(CLASSIFY_BATCH).toBe(100);
+      expect(calls).toEqual([
+        { items: 100, maxTokens: classifyMaxTokens(100) },
+        { items: 100, maxTokens: classifyMaxTokens(100) },
+        { items: 50, maxTokens: classifyMaxTokens(50) },
+      ]);
+      expect(all).toMatchObject({ candidates: 250, asked: 250, calls: 3 });
+      expect(all.assigned.size).toBe(250);
+      expect(readCosts(stateVault, "run-batches")).toHaveLength(3);
+
+      calls.length = 0;
+      const partial = await classifyWithModel(snap, { ...opts, cap: 250, client: answering(1) });
+      expect(partial).toMatchObject({ asked: 100, calls: 1, skipped: expect.stringMatching(/^failed: /) });
+      expect(partial.assigned.size).toBe(100);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });

@@ -34,8 +34,13 @@ import type { VaultPage, VaultSnapshot, VaultTx } from "./vault";
 /** Facts of a page the model is shown, at most, and characters of each. */
 const CLASSIFY_FACTS = 3;
 const CLASSIFY_FACT_CHARS = 200;
-/** The model's answer: one short object a page. */
-const CLASSIFY_MAX_TOKENS = 2_048;
+/** Pages one call asks about: the answer (one short object a page) stays well inside one reply. */
+export const CLASSIFY_BATCH = 100;
+
+/** The answer's cap for a call of `pages` pages: about 20 tokens a `{"i": 123, "type": "bank-transfer"}`, plus slack. */
+export function classifyMaxTokens(pages: number): number {
+  return 256 + 24 * pages;
+}
 /** Pages remembered as "no record" by the model, newest kept. */
 const MAX_REMEMBERED = 5_000;
 const REMEMBERED_KEY = "structure_model_none";
@@ -150,7 +155,13 @@ export interface ModelFallbackResult {
   skipped?: string;
 }
 
-/** Ask the cheap model for the types the rules could not tell, at most `cap` pages in one call. Never throws. */
+/**
+ * Ask the cheap model for the types the rules could not tell, at most `cap`
+ * pages, {@link CLASSIFY_BATCH} a call, each call's answer capped by its size
+ * ({@link classifyMaxTokens}). A call that fails stops the rest (they are
+ * asked another night); `asked` counts only the pages of calls that answered.
+ * Never throws.
+ */
 export async function classifyWithModel(
   snapshot: Pick<VaultSnapshot, "pages">,
   options: { stateVault: string; cap: number; client?: FlashClient; rates: CostRates; runId?: string | null; now?: () => Date; dryRun?: boolean },
@@ -164,34 +175,40 @@ export async function classifyWithModel(
   if (options.dryRun) return { ...result, skipped: "dry_run" };
   const items = candidates.slice(0, options.cap);
   const client = options.client ?? flashClient();
-  try {
-    const { response } = await completeWithRetry(client, { ...buildClassifyPrompt(items), maxTokens: CLASSIFY_MAX_TOKENS });
-    result.calls = 1;
-    result.asked = items.length;
-    const usd = estimateUsd(response.model, response.usage, options.rates);
-    result.usdEstimate = usd;
+  const none: string[] = [];
+  for (let at = 0; at < items.length; at += CLASSIFY_BATCH) {
+    const batch = items.slice(at, at + CLASSIFY_BATCH);
     try {
-      recordCost(options.stateVault, {
-        runId: options.runId ?? null,
-        operation: "structure-classify",
-        model: response.model,
-        tokensIn: response.usage.promptTokens,
-        tokensOut: response.usage.completionTokens,
-        usdEstimate: usd,
-        at: now().toISOString(),
-      });
-    } catch {
-      /* the answer still counts */
+      const { response } = await completeWithRetry(client, { ...buildClassifyPrompt(batch), maxTokens: classifyMaxTokens(batch.length) });
+      result.calls += 1;
+      result.asked += batch.length;
+      const usd = estimateUsd(response.model, response.usage, options.rates);
+      result.usdEstimate += usd;
+      try {
+        recordCost(options.stateVault, {
+          runId: options.runId ?? null,
+          operation: "structure-classify",
+          model: response.model,
+          tokensIn: response.usage.promptTokens,
+          tokensOut: response.usage.completionTokens,
+          usdEstimate: usd,
+          at: now().toISOString(),
+        });
+      } catch {
+        /* the answer still counts */
+      }
+      for (const [i, type] of parseClassifyResponse(response.text, batch.length)) {
+        if (type === "none") none.push(batch[i].key);
+        else result.assigned.set(batch[i].path, type);
+      }
+    } catch (err) {
+      result.skipped = err instanceof Error ? `failed: ${err.message.slice(0, 120)}` : "failed";
+      break;
     }
-    const answers = parseClassifyResponse(response.text, items.length);
-    const none: string[] = [];
-    for (const [i, type] of answers) {
-      if (type === "none") none.push(items[i].key);
-      else result.assigned.set(items[i].path, type);
-    }
-    if (none.length > 0) saveRemembered(options.stateVault, [...remembered.filter((k) => !none.includes(k)), ...none], now().toISOString());
-  } catch (err) {
-    result.skipped = err instanceof Error ? `failed: ${err.message.slice(0, 120)}` : "failed";
+  }
+  if (none.length > 0) {
+    const fresh = new Set(none);
+    saveRemembered(options.stateVault, [...remembered.filter((k) => !fresh.has(k)), ...none], now().toISOString());
   }
   return result;
 }

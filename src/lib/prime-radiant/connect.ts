@@ -627,7 +627,8 @@ export async function planConnections(snapshot: Pick<VaultSnapshot, "pages" | "i
       const others = entityPages.get(e) ?? [];
       if (others.length < 2 || others.length > SHARED_ENTITY_MAX_DF) continue;
       const w = 1 / Math.log(others.length + 1);
-      for (const o of others) if (o !== p.path && groupOf(o) !== groupOf(p.path)) score.set(o, (score.get(o) ?? 0) + w);
+      // Leaves of one hub are tied as siblings; pages in no hub may share entities with anything.
+      for (const o of others) if (o !== p.path && (!groupOf(p.path) || groupOf(o) !== groupOf(p.path))) score.set(o, (score.get(o) ?? 0) + w);
     }
     shared.set(
       p.path,

@@ -11,6 +11,7 @@
  * SERVER ONLY.
  */
 
+import { processStore } from "@/lib/process-store";
 import { buildLinkGraph, linkDensity, LINKS_PER_PAGE_TARGET, pathAliases, type LinkDensity } from "./links";
 import { lintVault, type LintReport } from "./lint";
 import { pageSummary } from "./frontmatter";
@@ -69,6 +70,36 @@ function staleNotes(vault: string): StaleClaimNote[] {
   }
 }
 
+/** The links metric per vault, with the vault fingerprint it was worked out for. */
+const densityCache = processStore("prime-radiant:link-density", () => new Map<string, { key: string; value: LinkDensity }>());
+
+/**
+ * Status's links metric (links.ts `linkDensity`), kept until a page changes:
+ * a status poll re-reads the snapshot, but builds the link graph again only
+ * when the pages' count, paths, sizes or newest change time moved.
+ */
+export function statusLinkDensity(vault: string, snapshot: Pick<VaultSnapshot, "pages">): LinkDensity {
+  let bytes = 0;
+  let newest = 0;
+  let paths = 0;
+  for (const p of snapshot.pages) {
+    bytes += p.bytes;
+    if (p.mtimeMs > newest) newest = p.mtimeMs;
+    for (let i = 0; i < p.path.length; i++) paths = (Math.imul(paths, 31) + p.path.charCodeAt(i)) | 0;
+  }
+  const key = `${snapshot.pages.length}|${bytes}|${newest}|${paths}`;
+  const held = densityCache.get(vault);
+  if (held && held.key === key) return held.value;
+  const value = linkDensity(
+    buildLinkGraph(
+      snapshot.pages.flatMap((p) => (p.parsed.ok ? [{ path: p.path, title: p.parsed.frontmatter.title, aliases: pathAliases(p.parsed.frontmatter.aliases), body: p.parsed.body }] : [])),
+      null,
+    ),
+  );
+  densityCache.set(vault, { key, value });
+  return value;
+}
+
 export async function getStatus(vault: string = vaultDir()): Promise<PrimeRadiantStatus> {
   if (!(await vaultInitialised(vault))) {
     return {
@@ -104,7 +135,7 @@ export async function getStatus(vault: string = vaultDir()): Promise<PrimeRadian
     git: { branch, head, commits },
     plugin,
     lint: { errors: report.errors, warnings: report.warnings, ok: report.ok },
-    links: linkDensity(buildLinkGraph(snapshot.pages.flatMap((p) => (p.parsed.ok ? [{ path: p.path, title: p.parsed.frontmatter.title, body: p.parsed.body }] : [])), null)),
+    links: statusLinkDensity(vault, snapshot),
   };
 }
 

@@ -45,7 +45,7 @@
 import { isClaimId, makeClaimId, slugify } from "./claims";
 import { RELATED_START, type PlannedWrite } from "./connect";
 import { titleIdentifiers } from "./identifiers";
-import { buildLinkGraph, isContentPage, linkDensity, relativeHref } from "./links";
+import { buildLinkGraph, isContentPage, linkDensity, pathAliases, relativeHref } from "./links";
 import { LIMITS } from "./lint";
 import {
   classifyRecord,
@@ -231,6 +231,13 @@ function strictestPrivacy(pages: readonly Page[]): PrivacyTier {
   let at = 1;
   for (const p of pages) at = Math.max(at, Math.min(2, PRIVACY_ORDER.indexOf(p.fm.privacy)));
   return PRIVACY_ORDER[at];
+}
+
+/** Append to a map's list in place: a spread per item would copy the whole list each time (O(n²) for one big key). */
+function pushTo<K, V>(map: Map<K, V[]>, key: K, value: V): void {
+  const list = map.get(key);
+  if (list) list.push(value);
+  else map.set(key, [value]);
 }
 
 /** The most common value, ties alphabetically. */
@@ -457,7 +464,8 @@ export function planStructure(snapshot: Pick<VaultSnapshot, "pages" | "indexBody
     linksMedianBefore: 0,
     linksMedianAfter: 0,
   };
-  const graphBefore = buildLinkGraph(pages.map((p) => ({ path: p.path, title: p.fm.title, body: p.body })), null);
+  // Former paths a renamed page keeps as aliases are reached by links too (links.ts `pathAliases`).
+  const graphBefore = buildLinkGraph(pages.map((p) => ({ path: p.path, title: p.fm.title, aliases: pathAliases(p.fm.aliases), body: p.body })), null);
   stats.linksMedianBefore = linkDensity(graphBefore).median;
 
   // The plan's pages as they will be: path -> { fm, body } (written only where they differ).
@@ -651,7 +659,10 @@ export function planStructure(snapshot: Pick<VaultSnapshot, "pages" | "indexBody
   // Inbound links for the top entities, over the vault WITHOUT what this pass wrote (its pages, a leaf's link
   // block): a re-run counts what the first run counted, so it plans the same pages.
   const structurePaths = new Set(pages.filter((p) => readStructureMeta(p.fm)).map((p) => p.path));
-  const graphBase = buildLinkGraph(pages.filter((p) => !structurePaths.has(p.path)).map((p) => ({ path: p.path, title: p.fm.title, body: stripRecordBlock(p.body) })), null);
+  const graphBase = buildLinkGraph(
+    pages.filter((p) => !structurePaths.has(p.path)).map((p) => ({ path: p.path, title: p.fm.title, aliases: pathAliases(p.fm.aliases), body: stripRecordBlock(p.body) })),
+    null,
+  );
   const linkingTo = (path: string) => [...(graphBase.inbound.get(path) ?? [])].filter((x) => x !== path);
   const inboundOf = (path: string) => linkingTo(path).filter(isContentPage).length;
   const entities = pages.filter((p) => isEntity(p) && !readStructureMeta(p.fm)).map((p) => ({ page: p, inbound: inboundOf(p.path) }));
@@ -691,7 +702,7 @@ export function planStructure(snapshot: Pick<VaultSnapshot, "pages" | "indexBody
       const sub = counterpartyHubsOf(type, month);
       const subOf = new Map(sub.map((s) => [s.meta.counterparty!, s]));
       const counts = new Map<string, Leaf[]>();
-      for (const l of h.group) if (l.info.counterparty) counts.set(l.info.counterparty, [...(counts.get(l.info.counterparty) ?? []), l]);
+      for (const l of h.group) if (l.info.counterparty) pushTo(counts, l.info.counterparty, l);
       if (counts.size > 1 || sub.length > 0) {
         // Every counterparty with a hub of its own, then the biggest others, ten rows at least.
         const ranked = [...counts.entries()]
@@ -753,7 +764,7 @@ export function planStructure(snapshot: Pick<VaultSnapshot, "pages" | "indexBody
   for (const l of leaves) {
     if (!l.info.counterparty || !hubOfLeaf.has(l.page.path)) continue;
     const key = normName(l.info.counterparty);
-    byParty.set(key, [...(byParty.get(key) ?? []), l]);
+    pushTo(byParty, key, l);
   }
   for (const list of byParty.values()) {
     list.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
@@ -882,7 +893,7 @@ export function planStructure(snapshot: Pick<VaultSnapshot, "pages" | "indexBody
 
   // ── domain hubs ──
   const reviewByPage = new Map<string, StructureReviewItem[]>();
-  for (const item of options.reviewItems ?? []) for (const p of item.pages) reviewByPage.set(p, [...(reviewByPage.get(p) ?? []), item]);
+  for (const item of options.reviewItems ?? []) for (const p of item.pages) pushTo(reviewByPage, p, item);
   for (const dh of domainHubDrafts) {
     const name = dh.domain.name;
     const members = pagesByDomain.get(name) ?? [];
@@ -959,7 +970,7 @@ export function planStructure(snapshot: Pick<VaultSnapshot, "pages" | "indexBody
     const years = new Map<string, Decision[]>();
     for (const d of older) {
       const y = d.date ? d.date.slice(0, 4) : "undated";
-      years.set(y, [...(years.get(y) ?? []), d]);
+      pushTo(years, y, d);
     }
     const yearPages: Array<{ path: string; title: string }> = [];
     for (const y of [...years.keys()].sort().reverse()) {
@@ -1011,7 +1022,7 @@ export function planStructure(snapshot: Pick<VaultSnapshot, "pages" | "indexBody
       for (const dh of domainHubDrafts) lines.push(wikiLine(dh.path, dh.title, dh.domain.owner !== "unassigned" ? ` (owner: ${cell(dh.domain.owner, 40)})` : ""));
     }
     const latest = new Map<RecordType, HubDraft[]>();
-    for (const h of monthHub.values()) latest.set(h.meta.type!, [...(latest.get(h.meta.type!) ?? []), h]);
+    for (const h of monthHub.values()) pushTo(latest, h.meta.type!, h);
     if (latest.size > 0) {
       lines.push("", "## Records", "");
       for (const t of RECORD_TYPES) {
@@ -1059,8 +1070,8 @@ export function planStructure(snapshot: Pick<VaultSnapshot, "pages" | "indexBody
 
   const after = buildLinkGraph(
     [
-      ...pages.filter((p) => !next.has(p.path)).map((p) => ({ path: p.path, title: p.fm.title, body: p.body })),
-      ...[...next.entries()].map(([path, v]) => ({ path, title: v.fm.title, body: v.body })),
+      ...pages.filter((p) => !next.has(p.path)).map((p) => ({ path: p.path, title: p.fm.title, aliases: pathAliases(p.fm.aliases), body: p.body })),
+      ...[...next.entries()].map(([path, v]) => ({ path, title: v.fm.title, aliases: pathAliases(v.fm.aliases), body: v.body })),
     ],
     null,
   );
