@@ -479,6 +479,27 @@ describe("a full chunk budget: page vectors first", () => {
     expect(embed.texts).toEqual([]);
   });
 
+  it("keeps a verified claim longest, when a page is embedded and when its claims are dropped", async () => {
+    const claimsOf = async (rel: string) =>
+      (await searchPrimeRadiant("widget", 20)).filter((h) => h.kind === "claim" && h.path === rel).map((h) => h.id).sort();
+    _setVaultMaxChunksForTests(4);
+    // The verified claim comes last on the page.
+    await commit({
+      "concepts/a.md": pageText(
+        { title: "Widget a", claims: [claim("acme-sales/a/fact-0", "Widget a fact 0."), claim("acme-sales/a/fact-1", "Widget a fact 1."), claim("acme-sales/a/fact-2", "Widget a fact 2.", { verified: VERIFIED })] },
+        "Widget a in short.\n",
+      ),
+      "concepts/b.md": pageWith("b", 0),
+    });
+    // Two page chunks, room for two of a's three claims: the verified one and the first.
+    expect(await reindexPrimeRadiantVault()).toMatchObject({ indexed: 2, partial: 1, chunks: 4 });
+    expect(await claimsOf("concepts/a.md")).toEqual(["acme-sales/a/fact-0", "acme-sales/a/fact-2"]);
+    // A new page takes one of them: the unverified one goes.
+    await commit({ "concepts/c.md": pageWith("c", 0) });
+    expect(await reindexPrimeRadiantPaths(["concepts/c.md"])).toMatchObject({ indexed: 1, chunks: 4, withoutPageVector: 0 });
+    expect(await claimsOf("concepts/a.md")).toEqual(["acme-sales/a/fact-2"]);
+  });
+
   it("counts the pages left without a page vector in the status", async () => {
     // Page chunks alone overrun a budget of one: the second page is capped.
     _setVaultMaxChunksForTests(1);
