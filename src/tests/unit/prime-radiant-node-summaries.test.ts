@@ -559,6 +559,22 @@ describe("the pass", () => {
     }
   });
 
+  it("answers the merge tool's refusal as the suggestion when a duplicate may not be merged away (both pages verified by a person)", async () => {
+    const state = tmpState();
+    try {
+      const both = vault({
+        "entities/initech.md": page({ type: "entity", title: "Initech", domain: "sales", verified: OWNER }, "Initech buys widgets.\n"),
+        "entities/initech-2.md": page({ type: "entity", title: "Initech", domain: "sales", verified: OWNER }, "Initech pays on time.\n"),
+      });
+      const r = await runSummaries(both, fakeRun({ current: both }).run, { stateVault: state, settings: settings(), rates: DEFAULT_COST_RATES, online: false, dryRun: true, now: () => NOW });
+      const s = r.mergeSuggestions.find((m) => m.into === "entities/initech.md");
+      expect(s).toMatchObject({ from: ["entities/initech-2.md"], reason: "suffix", ok: false, refused: { code: "verified" } });
+      expect(s?.claims).toBeUndefined();
+    } finally {
+      dropState(state);
+    }
+  });
+
   it("the stub model answers a summary call with sentences the check keeps", async () => {
     const hood = hoodOf(vault(), "entities/globex-ltd.md");
     const { text } = await createStubFlashClient().complete({ ...buildSummaryPrompt([hood]), maxTokens: summaryMaxTokens(1) });
