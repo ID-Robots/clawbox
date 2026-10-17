@@ -24,11 +24,13 @@
 // carry.
 //
 // Both editions: the vault is ClawBox's, not a harness's. `profile: "full"`
-// only — thirty-two tools are context a 4-8B model on the core profile should not
+// only — thirty-seven tools are context a 4-8B model on the core profile should not
 // pay for; `memory_shard_search` already reads the wiki there.
 
 import { z } from "zod";
 import { CLAIM_ID_RE } from "../../src/lib/prime-radiant/claims";
+import { DAILY_LANGUAGES } from "../../src/lib/prime-radiant/daily";
+import { recheckOf } from "../../src/lib/prime-radiant/recheck";
 import { isContentPage } from "../../src/lib/prime-radiant/links";
 import { PAGE_STATUSES, PAGE_TYPES, PRIVACY_TIERS } from "../../src/lib/prime-radiant/schema";
 import { api, type ApiOptions } from "../lib/api";
@@ -79,6 +81,11 @@ export const PRIME_RADIANT_TOOLS = [
   "prime_radiant_nightly_merge",
   "prime_radiant_connect_run",
   "prime_radiant_settings_update",
+  "prime_radiant_golden_list",
+  "prime_radiant_golden_add",
+  "prime_radiant_golden_edit",
+  "prime_radiant_golden_delete",
+  "prime_radiant_daily_questions",
 ] as const;
 
 const BASE = "/setup-api/prime-radiant";
@@ -100,6 +107,8 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_RE = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 const BRANCH_RE = /^dream\/\d{4}-\d{2}-\d{2}(?:-\d{1,3})?$/;
 const DOMAIN_OWNER_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*=.{1,80}$/;
+const GOLDEN_ID_RE = /^gq-[0-9a-f]{12}$/;
+const OWNER_LANGUAGE_RE = new RegExp(`^.{1,80}=(?:${DAILY_LANGUAGES.join("|")})$`);
 
 /**
  * A vault page path in the vault's own alphabet (`safePagePath`): every segment
@@ -267,6 +276,44 @@ interface StatusBody {
     exists?: boolean; usedMb?: number; limitMb?: number; chunks?: number; maxChunks?: number | null; pages?: number;
     cappedPages?: number | null; withoutPageVector?: number | null; needsFullScan?: boolean; migrationPending?: boolean;
   } | null;
+  golden?: GoldenScoreBody | null;
+}
+
+interface GoldenScoreBody {
+  questions?: number;
+  last?: { at?: string; percent?: number | null; asked?: number; correct?: number; wrong?: number; missing?: number; stale?: number; failed?: number } | null;
+  trend?: Array<{ at?: string; percent?: number }>;
+  change?: number | null;
+}
+
+interface GoldenQuestionBody {
+  id: string;
+  question?: string;
+  expected?: string;
+  owner?: string;
+  domain?: string;
+  claimId?: string | null;
+  page?: string | null;
+  updatedAt?: string;
+}
+
+interface GoldenListBody {
+  questions?: GoldenQuestionBody[];
+  verdicts?: Record<string, { verdict?: string | null; why?: string | null; at?: string }>;
+  score?: GoldenScoreBody | null;
+}
+
+interface DailyBody {
+  initialised?: boolean;
+  outbound?: boolean;
+  perOwner?: number;
+  owners?: Array<{ owner: string; domains?: string[]; language?: string; waiting?: number }>;
+  owner?: string | null;
+  language?: string | null;
+  questions?: Array<{
+    kind?: string; page?: string; title?: string; question?: string; options?: string[]; due?: string;
+    answer?: { tool?: string; args?: Record<string, string> };
+  }>;
 }
 
 interface PageEntry {
@@ -356,6 +403,17 @@ interface ReviewListBody {
   }>;
 }
 
+/** The page's re-check day: its own, else its type's (metrics 30 days after a check, records never). */
+function recheckOut(fm: Record<string, unknown>): Record<string, unknown> {
+  try {
+    const r = recheckOf(fm as unknown as Parameters<typeof recheckOf>[0]);
+    if (!r.date) return fm.stale_after ? { recheck_after: fm.stale_after } : {};
+    return { recheck_after: r.date, ...(r.by === "type" ? { recheck_by: "type" } : {}) };
+  } catch {
+    return fm.stale_after ? { recheck_after: fm.stale_after } : {};
+  }
+}
+
 function claimOut(c: ClaimBody) {
   const evidence = (c.evidence ?? []).slice(0, 4).map((e) => ({
     ...(e.kind ? { kind: e.kind } : {}),
@@ -427,12 +485,34 @@ function searchIndexOf(index: NonNullable<StatusBody["index"]>): Record<string, 
   };
 }
 
+/** The golden questions' score as the tools show it: the latest % correct, its change and trend. */
+function accuracyOf(g: GoldenScoreBody): Record<string, unknown> {
+  const last = g.last ?? null;
+  return {
+    golden_questions: g.questions ?? 0,
+    ...(last
+      ? {
+        percent_correct: last.percent ?? "not judged",
+        ...(typeof g.change === "number" ? { change_since_previous: g.change } : {}),
+        last_checked: last.at ?? null,
+        last_check: { asked: last.asked, correct: last.correct, wrong: last.wrong, missing: last.missing, stale: last.stale, not_judged: last.failed },
+        trend: (g.trend ?? []).map((t) => t.percent),
+      }
+      : { last_checked: "never" }),
+  };
+}
+
+const DAILY_SENDING_OFF = "Sending is off: show these only when the owner asks for their questions; do not message anyone.";
+const DAILY_SENDING_ON = "Sending is on: you may send them to this owner over chat as one short message in their language — not on a timer of your own.";
+const DAILY_ANSWERS =
+  "Put each answer back through the tool named: a fact confirmed (or corrected, with their text) → prime_radiant_claim_verify; a review item → prime_radiant_review_resolve; a page still current → prime_radiant_page_edit with a new recheck_after.";
+
 // ── read tools ─────────────────────────────────────────────────────────────
 
 function registerReadTools(reg: Registrar): void {
   reg.tool(
     "prime_radiant_status",
-    "Read the state of Prime Radiant, the owner's wiki: pages, claims and verified pages, its domains, open checks and review items, a running import, the nightly pass, and its search index (MB used of the size limit, chunks, pages capped by the limit). Call it first when the user asks about their wiki.",
+    "Read the state of Prime Radiant, the owner's wiki: pages, claims and verified pages, domains, open checks and review items, a running import, the nightly pass, the golden questions' % correct, and its search index (MB used of the limit, chunks, capped pages). Call it first when the user asks about their wiki.",
     {},
     READ,
     async () => {
@@ -474,6 +554,7 @@ function registerReadTools(reg: Registrar): void {
         ...(maintenance?.running ? { maintenance_running: maintenance.running } : {}),
         ...(maintenance?.last?.connect ? { connect_pass_last: maintenance.last.connect } : {}),
         ...(status.index ? { search_index: searchIndexOf(status.index) } : {}),
+        ...(status.golden ? { accuracy: accuracyOf(status.golden) } : {}),
       });
     },
   );
@@ -539,7 +620,7 @@ function registerReadTools(reg: Registrar): void {
             privacy: fm.privacy,
             written: fm.generated,
             checked_by: fm.checked_by,
-            ...(fm.stale_after ? { recheck_after: fm.stale_after } : {}),
+            ...recheckOut(fm),
           }
           : { valid: false, problems: (page.errors ?? []).slice(0, 5).map((e) => `${e.field || "frontmatter"}: ${e.message}`) }),
         verified: page.verified ?? false,
@@ -634,7 +715,7 @@ function registerReadTools(reg: Registrar): void {
 
   reg.tool(
     "prime_radiant_settings",
-    "Read Prime Radiant's settings: nightly schedule, contradiction pass, the Opus second opinion and its caps, the search index size limit (MB), domains and their owners, the import exclude list, parallelism and nightly folders — with the defaults and limits.",
+    "Read Prime Radiant's settings: nightly schedule, contradiction pass, Opus second opinion and caps, search index limit (MB), domains and owners, golden-question check, daily questions (per owner, languages, sending), import excludes, parallelism, nightly folders — with defaults and limits.",
     {},
     { ...READ, maxChars: 8_000 },
     async () => {
@@ -807,13 +888,15 @@ function registerEditTools(reg: Registrar): void {
       owner: zOptText(80, "New owner."),
       privacy: zEnumOf(PRIVACY_TIERS, "New privacy tier.").optional(),
       sources: zOptList(20, 300, "The page's whole new source list."),
-      recheck_after: z.string().regex(/^(?:\d{4}-\d{2}-\d{2}|never)$/, "YYYY-MM-DD or never").optional().describe("Date after which the page needs a re-check, or never."),
+      recheck_after: z.string().regex(/^(?:\d{4}-\d{2}-\d{2}|by_type|never)$/, "YYYY-MM-DD or by_type").optional()
+        .describe("Day after which the page needs a re-check, or by_type: its type decides (metrics 30 days, records never)."),
     },
     WRITE,
     async (a: { path: string; summary?: string; body?: string; title?: string; status?: string; domain?: string; owner?: string; privacy?: string; sources?: string[]; recheck_after?: string }) => {
       const patch: Record<string, unknown> = {};
       for (const key of ["summary", "body", "title", "status", "domain", "owner", "privacy", "sources"] as const) if (a[key] !== undefined) patch[key] = a[key];
-      if (a.recheck_after !== undefined) patch.stale_after = a.recheck_after === "never" ? null : a.recheck_after;
+      // by_type (and the older "never") clears the page's own date: its type's interval applies again.
+      if (a.recheck_after !== undefined) patch.stale_after = a.recheck_after === "by_type" || a.recheck_after === "never" ? null : a.recheck_after;
       if (Object.keys(patch).length === 0) {
         throw new ToolError("BAD_ARGUMENT", "Nothing to change was given.", "Pass at least one of summary, body, title, status, domain, owner, privacy, sources or recheck_after.");
       }
@@ -1155,7 +1238,7 @@ function registerPassTools(reg: Registrar): void {
 
   reg.tool(
     "prime_radiant_settings_update",
-    "Change the Prime Radiant settings the user asked for: nightly schedule, contradiction pass, Opus second opinion and its caps, search index size limit, domains and owners, exclude list, parallelism, skip code projects, nightly folders.",
+    "Change the Prime Radiant settings the user asked for: nightly schedule, contradiction pass, Opus second opinion and caps, search index limit, domains and owners, golden-question check, daily questions per owner and owners' languages, exclude list, parallelism, skip code projects, nightly folders.",
     {
       nightly_enabled: zOptBool("Run the nightly pass on its schedule."),
       nightly_time: z.string().regex(TIME_RE, "HH:MM, 24-hour").optional().describe("When the nightly pass runs, box time, HH:MM."),
@@ -1170,8 +1253,15 @@ function registerPassTools(reg: Registrar): void {
       ingest_parallel: z.number().int().min(1).max(256).optional().describe("How many documents an import reads at once."),
       skip_code_projects: zOptBool("Leave code projects out of imports."),
       nightly_folders: zOptList(20, 4096, "The whole list of folders the nightly pass imports, inside the owner's Files."),
-      reset: z.array(zEnumOf(["nightly", "contradictions", "opus", "domains", "ingest_exclude", "ingest_parallel", "skip_code_projects", "nightly_folders", "search_index_limit_mb"], "A setting to put back to its default."))
-        .max(9)
+      golden_enabled: zOptBool("Check the golden questions every night."),
+      golden_max_questions: z.number().int().min(1).max(500).optional().describe("Most golden questions one night checks."),
+      daily_per_owner: z.number().int().min(1).max(20).optional().describe("Most daily questions an owner gets a day."),
+      owner_languages: zOptList(100, 100, `The whole list of owners' languages, each owner=code (${DAILY_LANGUAGES.join(", ")}).`),
+      reset: z.array(zEnumOf(
+        ["nightly", "contradictions", "opus", "domains", "ingest_exclude", "ingest_parallel", "skip_code_projects", "nightly_folders", "search_index_limit_mb", "golden", "daily_per_owner", "owner_languages"],
+        "A setting to put back to its default.",
+      ))
+        .max(12)
         .optional()
         .describe("Settings to put back to their defaults."),
       confirm: zConfirm("Must be true. Set it only when the user asked for these settings."),
@@ -1180,6 +1270,7 @@ function registerPassTools(reg: Registrar): void {
     async (a: {
       nightly_enabled?: boolean; nightly_time?: string; contradictions_enabled?: boolean; opus_enabled?: boolean; opus_cap_usd?: number; opus_max_pages?: number; search_index_limit_mb?: number;
       domains?: string[]; ingest_exclude?: string[]; ingest_parallel?: number; skip_code_projects?: boolean; nightly_folders?: string[]; reset?: string[]; confirm: true;
+      golden_enabled?: boolean; golden_max_questions?: number; daily_per_owner?: number; owner_languages?: string[];
     }) => {
       const patch: Record<string, Record<string, unknown> | unknown[] | null> = {};
       const section = (name: string) => (patch[name] && !Array.isArray(patch[name]) ? patch[name] : (patch[name] = {})) as Record<string, unknown>;
@@ -1194,6 +1285,14 @@ function registerPassTools(reg: Registrar): void {
       if (a.ingest_parallel !== undefined) section("ingest").parallel = a.ingest_parallel;
       if (a.skip_code_projects !== undefined) section("ingest").skipCodeProjects = a.skip_code_projects;
       if (a.nightly_folders !== undefined) section("ingest").folders = a.nightly_folders;
+      if (a.golden_enabled !== undefined) section("golden").enabled = a.golden_enabled;
+      if (a.golden_max_questions !== undefined) section("golden").maxQuestions = a.golden_max_questions;
+      if (a.daily_per_owner !== undefined) section("verification").perOwner = a.daily_per_owner;
+      if (a.owner_languages !== undefined) {
+        const bad = a.owner_languages.find((l) => !OWNER_LANGUAGE_RE.test(l));
+        if (bad) throw new ToolError("BAD_ARGUMENT", `"${bad.slice(0, 60)}" is not owner=language.`, `Write each as the owner's name, =, then one of ${DAILY_LANGUAGES.join(", ")}.`);
+        section("verification").languages = a.owner_languages.map((l) => ({ owner: l.slice(0, l.lastIndexOf("=")).trim(), language: l.slice(l.lastIndexOf("=") + 1) }));
+      }
       if (a.domains !== undefined) {
         const bad = a.domains.find((d) => !DOMAIN_OWNER_RE.test(d));
         if (bad) throw new ToolError("BAD_ARGUMENT", `"${bad.slice(0, 60)}" is not name=owner.`, "Write each domain as its lowercase kebab-case name, =, then its owner.");
@@ -1206,6 +1305,9 @@ function registerPassTools(reg: Registrar): void {
         else if (r === "skip_code_projects") section("ingest").skipCodeProjects = null;
         else if (r === "nightly_folders") section("ingest").folders = null;
         else if (r === "search_index_limit_mb") section("search").indexLimitMb = null;
+        else if (r === "golden") patch.golden = null;
+        else if (r === "daily_per_owner") section("verification").perOwner = null;
+        else if (r === "owner_languages") section("verification").languages = null;
       }
       if (Object.keys(patch).length === 0) throw new ToolError("BAD_ARGUMENT", "No setting to change was given.", "Pass the settings the user asked to change.");
       const r = await pr<{ settings?: { ingest?: { exclude?: unknown[] } } & Record<string, unknown>; nightly?: { nextRunAt?: number } }>("PUT", "/settings", { body: patch });
@@ -1219,9 +1321,150 @@ function registerPassTools(reg: Registrar): void {
   );
 }
 
+// ── golden questions and the daily questions ──────────────────────────────
+
+function goldenOut(q: GoldenQuestionBody, verdicts: GoldenListBody["verdicts"]) {
+  const v = verdicts?.[q.id];
+  return {
+    id: q.id,
+    question: q.question,
+    expected: q.expected,
+    owner: q.owner,
+    domain: q.domain,
+    ...(q.claimId ? { claim_id: q.claimId } : {}),
+    ...(q.page ? { page: q.page } : {}),
+    last_verdict: v?.verdict ?? "not checked yet",
+    ...(v?.why ? { why: v.why } : {}),
+  };
+}
+
+function registerGoldenTools(reg: Registrar): void {
+  reg.tool(
+    "prime_radiant_golden_list",
+    `List the golden questions — the owner's own test of the wiki: question, expected answer, owner, domain, the claim or page that answers it, last night's verdict — and the % correct with its trend. ${INFORMATION}`,
+    {},
+    { ...READ, maxChars: LIST_MAX_CHARS },
+    async () => {
+      const r = await pr<GoldenListBody>("GET", "/golden");
+      const questions = r.questions ?? [];
+      return json({
+        ...(r.score ? accuracyOf(r.score) : {}),
+        questions: questions.slice(0, 100).map((q) => goldenOut(q, r.verdicts)),
+        ...(questions.length > 100 ? { more_questions: questions.length - 100 } : {}),
+      });
+    },
+  );
+
+  reg.tool(
+    "prime_radiant_golden_add",
+    "Add a golden question the user wants the wiki tested on every night: the question, the answer they expect, its domain, and optionally its owner and the claim or page that answers it.",
+    {
+      question: zText(300, "The question, as the user would ask it."),
+      expected: zText(500, "The answer the user expects, in their words."),
+      domain: zDomain("Its domain, lowercase kebab-case."),
+      owner: zOptText(80, "Who answers for it; leave out for the domain's owner."),
+      claim_id: zClaimId("The claim that answers it, when known.").optional(),
+      page: zOptPagePath("The page that answers it, when known."),
+    },
+    WRITE,
+    async (a: { question: string; expected: string; domain: string; owner?: string; claim_id?: string; page?: string }) => {
+      const r = await pr<{ question?: GoldenQuestionBody; commit?: string | null }>("POST", "/golden", {
+        body: {
+          question: a.question,
+          expected: a.expected,
+          domain: a.domain,
+          ...(a.owner ? { owner: a.owner } : {}),
+          ...(a.claim_id ? { claimId: a.claim_id } : {}),
+          ...(a.page ? { page: a.page } : {}),
+        },
+      });
+      return text(committed(r.commit, `Added golden question ${r.question?.id ?? ""} for ${r.question?.owner ?? "its owner"}; the nightly pass checks it from tonight.`));
+    },
+  );
+
+  reg.tool(
+    "prime_radiant_golden_edit",
+    "Change a golden question the way the user asked: its wording, expected answer, domain, owner, or the claim or page that answers it.",
+    {
+      id: z.string().regex(GOLDEN_ID_RE, "gq- and 12 hex characters").describe("The question's id from prime_radiant_golden_list."),
+      question: zOptText(300, "The new wording."),
+      expected: zOptText(500, "The new expected answer."),
+      domain: zDomain("The new domain.").optional(),
+      owner: zOptText(80, "The new owner."),
+      claim_id: zClaimId("The claim that answers it.").optional(),
+      page: zOptPagePath("The page that answers it."),
+      clear: z.array(zEnumOf(["owner", "claim_id", "page"], "A field to clear.")).max(3).optional().describe("Fields to clear (owner goes back to the domain's)."),
+    },
+    WRITE,
+    async (a: { id: string; question?: string; expected?: string; domain?: string; owner?: string; claim_id?: string; page?: string; clear?: string[] }) => {
+      const body: Record<string, unknown> = {};
+      if (a.question !== undefined) body.question = a.question;
+      if (a.expected !== undefined) body.expected = a.expected;
+      if (a.domain !== undefined) body.domain = a.domain;
+      if (a.owner !== undefined) body.owner = a.owner;
+      if (a.claim_id !== undefined) body.claimId = a.claim_id;
+      if (a.page !== undefined) body.page = a.page;
+      for (const c of a.clear ?? []) body[c === "claim_id" ? "claimId" : c] = null;
+      if (Object.keys(body).length === 0) throw new ToolError("BAD_ARGUMENT", "Nothing to change was given.", "Pass the fields the user asked to change, or clear.");
+      const r = await pr<{ question?: GoldenQuestionBody; commit?: string | null }>("PATCH", `/golden/${a.id}`, { body });
+      return text(committed(r.commit, `Edited golden question ${a.id}.`));
+    },
+  );
+
+  reg.tool(
+    "prime_radiant_golden_delete",
+    "Delete a golden question, only when the user asked for it to go. It stays in History, where the owner can undo it.",
+    {
+      id: z.string().regex(GOLDEN_ID_RE, "gq- and 12 hex characters").describe("The question's id from prime_radiant_golden_list."),
+      confirm: zConfirm("Must be true. Set it only when the user asked for this question to be deleted."),
+    },
+    DESTRUCTIVE,
+    async ({ id }: { id: string; confirm: true }) => {
+      const r = await pr<{ question?: GoldenQuestionBody; commit?: string | null }>("DELETE", `/golden/${id}`);
+      return text(committed(r.commit, `Deleted golden question ${id}.`));
+    },
+  );
+
+  reg.tool(
+    "prime_radiant_daily_questions",
+    `Read today's verification questions for one owner — review items, unverified key facts, pages due a re-check — in their language, each with the tool its answer goes back through; without owner, who has questions waiting. Never send them unless sending is on. ${INFORMATION}`,
+    { owner: zOptText(80, "The owner, as the domains list names them; leave out to list the owners.") },
+    { ...READ, maxChars: 6_000 },
+    async ({ owner }: { owner?: string }) => {
+      const r = await pr<DailyBody>("GET", "/daily", { query: owner ? { owner } : undefined });
+      if (r.initialised === false) {
+        return json({ initialised: false, guidance: `Prime Radiant has no vault yet. Opening the app creates it: ${OPEN_APP}.` });
+      }
+      const sending = r.outbound ? DAILY_SENDING_ON : DAILY_SENDING_OFF;
+      if (!owner) {
+        return json({
+          sending,
+          per_owner: r.perOwner,
+          owners: (r.owners ?? []).map((o) => ({ owner: o.owner, domains: o.domains ?? [], language: o.language, waiting_today: o.waiting ?? 0 })),
+        });
+      }
+      return json({
+        owner: r.owner ?? owner,
+        language: r.language ?? "en",
+        sending,
+        how_to_answer: DAILY_ANSWERS,
+        questions: (r.questions ?? []).map((q, i) => ({
+          n: i + 1,
+          ask: q.question,
+          ...(q.options?.length ? { options: q.options } : {}),
+          page: q.page,
+          ...(q.due ? { recheck_was_due: q.due } : {}),
+          answer_with: q.answer ? { tool: q.answer.tool, ...(q.answer.args ?? {}) } : null,
+        })),
+      });
+    },
+  );
+}
+
 export function registerPrimeRadiantTools(reg: Registrar): void {
   registerReadTools(reg);
   registerEditTools(reg);
   registerReviewTools(reg);
   registerPassTools(reg);
+  registerGoldenTools(reg);
 }

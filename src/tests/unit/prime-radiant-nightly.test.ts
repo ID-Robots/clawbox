@@ -11,6 +11,10 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vites
 import { createHashEmbedder, fullComparisonDone, readComparedThrough, readDeferredClaims } from "@/lib/prime-radiant/contradictions";
 import type { FlashClient } from "@/lib/prime-radiant/flash-client";
 import { git, headCommit } from "@/lib/prime-radiant/git";
+import { stubGoldenVerdict } from "@/lib/prime-radiant/flash-stub";
+import { readGoldenItems } from "@/lib/prime-radiant/golden";
+import { goldenStatus } from "@/lib/prime-radiant/golden-score";
+import { addGoldenQuestion } from "@/lib/prime-radiant/golden-store";
 import { readJudgeItems } from "@/lib/prime-radiant/judge";
 import {
   dreamBranchName,
@@ -364,6 +368,41 @@ describe("nightly pass", () => {
     await ensureVault();
     await runNightly("schedule", deps({ online: async () => false }));
     expect(fullComparisonDone(vaultDir())).toBe(false);
+  });
+
+  it("checks the golden questions against main once the night is merged, under the night's run", async () => {
+    await ensureVault();
+    await addGoldenQuestion({ question: "What does the blue widget cost?", expected: "10 EUR per unit", domain: "acme-sales" }, { domains: [] });
+    const asked: string[] = [];
+    const withGolden: FlashClient = {
+      model: client.model,
+      async complete(request) {
+        const golden = readGoldenItems(request.user);
+        if (!golden) return client.complete(request);
+        asked.push(...golden.map((g) => g.question));
+        const text = JSON.stringify(golden.map((g) => ({ i: g.i, verdict: stubGoldenVerdict(g.expected, g.facts), why: "fake" })));
+        return { text, model: client.model, usage: { promptTokens: 80, completionTokens: 10, cacheHitTokens: 0 } };
+      },
+    };
+    const search = vi.fn(async () => []);
+    const run = await runNightly("manual", deps({ client: withGolden, goldenSearch: search }));
+    expect(run?.status).toBe("merged");
+    const summary = run!.summary as unknown as NightlySummary;
+    // The night's own import is on main by then: the wiki answers with it.
+    expect(summary.golden).toMatchObject({ scoreId: run!.id, tally: { asked: 1, correct: 1, percent: 100 }, capped: 0, calls: 1, regressions: [] });
+    expect(asked).toEqual(["What does the blue widget cost?"]);
+    expect(search).toHaveBeenCalledTimes(1);
+    expect((await goldenStatus()).last).toMatchObject({ runId: run!.id, percent: 100 });
+  });
+
+  it("skips the golden check offline or when it is switched off, and says why", async () => {
+    await ensureVault();
+    await addGoldenQuestion({ question: "What does the blue widget cost?", expected: "10 EUR", domain: "acme-sales" }, { domains: [] });
+    const offline = await runNightly("schedule", deps({ online: async () => false }));
+    expect((offline!.summary as unknown as NightlySummary).golden).toEqual({ skipped: "offline" });
+    const off = await runNightly("schedule", deps({ online: async () => false, settings: { ...settings(), golden: { enabled: false, maxQuestions: 50 } } }));
+    expect((off!.summary as unknown as NightlySummary).golden).toEqual({ skipped: "disabled" });
+    expect((await goldenStatus()).last).toBeNull();
   });
 
   it("runs one pass at a time", async () => {
