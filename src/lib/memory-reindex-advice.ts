@@ -70,7 +70,11 @@ export function memoryReindexAdvice(s: MemoryStatusFacts, arm: MemoryIndexArm): 
   const hasFolders = (s.sourceCount ?? 0) > 0;
   const code = s.indexIdentityCode ?? "";
 
-  if (empty && hasFolders) {
+  // Empty AND not vouched for. An index whose last pass read the folders and
+  // found nothing to index is `valid` with zero chunks (see `identityOf` in
+  // memory-index-local.ts): another pass scans the same zero files, so calling
+  // it "nothing indexed yet" would ask the owner for a full pass forever.
+  if (empty && hasFolders && s.indexIdentity !== "valid") {
     reasons.push({
       code: "no_index",
       mode: "full",

@@ -37,6 +37,12 @@ describe("memoryReindexAdvice", () => {
     expect(memoryReindexAdvice({ ...HEALTHY, chunks: 0, files: 0, sourceCount: 0, indexIdentity: "missing" }, "local").needed).toBe(false);
   });
 
+  it("wants nothing of folders a finished pass found nothing to index in", () => {
+    // The index vouches for an empty scan (identity valid, zero chunks); a
+    // second pass would read the same zero files.
+    expect(memoryReindexAdvice({ ...HEALTHY, chunks: 0, files: 0, indexIdentity: "valid" }, "local")).toEqual({ needed: false, mode: null, reasons: [] });
+  });
+
   it("tells an embedder change from an update's new chunking", () => {
     const local = memoryReindexAdvice({ ...HEALTHY, indexIdentity: "mismatched" }, "local");
     expect(local).toMatchObject({ needed: true, mode: "full", reasons: [{ code: "embedder_changed", mode: "full" }] });
