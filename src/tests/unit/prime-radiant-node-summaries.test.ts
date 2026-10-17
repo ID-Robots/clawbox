@@ -34,7 +34,8 @@ import { pageBlurb } from "@/lib/prime-radiant/page-blurb";
 import { withPluginFields } from "@/lib/prime-radiant/plugin-compat";
 import type { PageFrontmatter } from "@/lib/prime-radiant/schema";
 import { defaultSettings, readSettings, readSettingsPatch, SettingsError, writeSettings, type PrimeRadiantSettings } from "@/lib/prime-radiant/settings";
-import { listEntry, type VaultSnapshot, type VaultTx } from "@/lib/prime-radiant/vault";
+import { getLint } from "@/lib/prime-radiant/service";
+import { ensureVault, listEntry, vaultOperation, type VaultSnapshot, type VaultTx } from "@/lib/prime-radiant/vault";
 import { claim, frontmatter, vaultPage } from "../helpers/prime-radiant-fixtures";
 
 const NOW = new Date("2026-10-17T03:00:00.000Z");
@@ -721,6 +722,31 @@ describe("domain mismatch", () => {
     expect(dup).toEqual([expect.objectContaining({ path: "entities/maria-ivanova-2.md", severity: "warning", details: { canonical: "entities/maria-ivanova.md", reason: "suffix" } })]);
     // Scoped lint judges only the scoped pages.
     expect(lintVault(vault(), { domains: DOMAINS, scope: ["entities/globex-ltd.md"] }).findings.filter((f) => f.rule === "domain-mismatch" || f.rule === "duplicate-entity")).toEqual([]);
+  });
+
+  it("the app's lint suggests only a configured domain, as the summaries pass does", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pr-summaries-lint-"));
+    const prev = process.env.PRIME_RADIANT_DIR;
+    process.env.PRIME_RADIANT_DIR = root;
+    try {
+      await ensureVault();
+      // A haulier filed under finance whose linked pages are all in logistics; sales has pages of its own.
+      await vaultOperation("seed: haulier", async (tx) => {
+        await tx.write("entities/hauler-co.md", page({ type: "entity", title: "Hauler Co", domain: "finance" }, "Hauler Co.\n"));
+        for (let i = 1; i <= 5; i++) await tx.write(`concepts/route-${i}.md`, page({ title: `Route ${i}`, domain: "logistics" }, `Route ${i} with [[entities/hauler-co]].\n`));
+        for (let i = 1; i <= 3; i++) await tx.write(`concepts/deal-${i}.md`, page({ title: `Deal ${i}`, domain: "sales" }, `Deal ${i}.\n`));
+      });
+      const mismatch = async () => (await getLint(["entities/hauler-co.md"])).findings.filter((f) => f.rule === "domain-mismatch");
+      // Nothing configured: the domains pages use.
+      expect(await mismatch()).toEqual([expect.objectContaining({ details: { domain: "finance", suggested: "logistics", reason: "neighbours" } })]);
+      // Configured without logistics: no domain the owner does not have is suggested.
+      writeSettings({ domains: [{ name: "finance", owner: "Finance desk" }, { name: "operations", owner: "Ops desk" }, { name: "sales", owner: "Sales desk" }] });
+      expect(await mismatch()).toEqual([]);
+    } finally {
+      if (prev === undefined) delete process.env.PRIME_RADIANT_DIR;
+      else process.env.PRIME_RADIANT_DIR = prev;
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("judges every entity when asked over the whole vault, and none when the vault knows one domain", () => {
