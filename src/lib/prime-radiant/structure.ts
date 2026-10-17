@@ -148,11 +148,42 @@ export function blockContent(body: string, start: string, end: string): string |
 }
 
 /**
+ * `body` without a marker left without its partner — a start no end follows
+ * before the next start, an end no start opened (a person deleted the other
+ * one). Only the marker goes, the text around it stays: else the next match,
+ * running from a lone start to a later block's end, would take a person's
+ * text with it.
+ */
+function dropLoneMarkers(body: string, start: string, end: string): string {
+  const marks: Array<{ at: number; len: number; kind: "start" | "end" }> = [];
+  for (const [kind, marker] of [["start", start], ["end", end]] as const) {
+    for (let at = body.indexOf(marker); at >= 0; at = body.indexOf(marker, at + marker.length)) marks.push({ at, len: marker.length, kind });
+  }
+  marks.sort((a, b) => a.at - b.at);
+  const lone: typeof marks = [];
+  let open: (typeof marks)[number] | null = null;
+  for (const m of marks) {
+    if (m.kind === "start") {
+      if (open) lone.push(open);
+      open = m;
+    } else if (open) open = null;
+    else lone.push(m);
+  }
+  if (open) lone.push(open);
+  let out = body;
+  for (const m of lone.sort((a, b) => b.at - a.at)) out = out.slice(0, m.at) + out.slice(m.at + m.len).replace(/^[ \t]*\n?/, "");
+  return out;
+}
+
+/**
  * `body` with the managed block holding `content`: replaced where it is, else
  * put before the connect pass's block (which closes a page), else at the end.
- * Empty `content` takes the block out. Text outside the block is kept as is.
+ * Empty `content` takes the block out. Text outside the block is kept as is;
+ * a marker a person left without its partner is dropped first (the text
+ * around it kept).
  */
-export function upsertBlock(body: string, start: string, end: string, content: string, where: "start" | "end" = "end"): string {
+export function upsertBlock(raw: string, start: string, end: string, content: string, where: "start" | "end" = "end"): string {
+  const body = raw.includes(start) || raw.includes(end) ? dropLoneMarkers(raw, start, end) : raw;
   const re = blockRe(start, end);
   const block = content === "" ? "" : `${start}\n${content.replace(/\n+$/, "")}\n${end}`;
   if (re.test(body)) {

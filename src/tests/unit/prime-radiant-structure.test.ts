@@ -645,3 +645,21 @@ describe("the cheap-model fallback on a state database", () => {
     }
   });
 });
+
+describe("managed blocks a person broke", () => {
+  it("never takes a person's text when they deleted a block's end or start marker", () => {
+    const leafBody = `Invoice one.\n\n${RECORD_START}\n- Filed under [[syntheses/old]] — Old\n\nPaid by hand on the 3rd.\n`;
+    const once = upsertBlock(leafBody, RECORD_START, RECORD_END, "- Filed under [[syntheses/new]] — New");
+    const twice = upsertBlock(once, RECORD_START, RECORD_END, "- Filed under [[syntheses/newer]] — Newer");
+    for (const b of [once, twice]) {
+      expect(b).toContain("Paid by hand on the 3rd.");
+      expect(b.split(RECORD_START)).toHaveLength(2);
+      expect(b.split(RECORD_END)).toHaveLength(2);
+    }
+    expect(blockContent(twice, RECORD_START, RECORD_END)).toBe("- Filed under [[syntheses/newer]] — Newer");
+    const loneEnd = upsertBlock(`Notes kept.\n${HUB_END}\nMore notes.\n`, HUB_START, HUB_END, "Fresh.", "start");
+    expect(loneEnd).toBe(`${HUB_START}\nFresh.\n${HUB_END}\n\nNotes kept.\nMore notes.\n`);
+    // An intact block is replaced in place, as before.
+    expect(upsertBlock(`A.\n\n${HUB_START}\nold\n${HUB_END}\n\nB.\n`, HUB_START, HUB_END, "new", "start")).toBe(`A.\n\n${HUB_START}\nnew\n${HUB_END}\n\nB.\n`);
+  });
+});
