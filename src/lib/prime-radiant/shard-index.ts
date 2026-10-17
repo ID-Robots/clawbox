@@ -358,9 +358,12 @@ export interface ChunkBudgetPage {
  * similar pages, while a page without some claim vectors is still found.
  *
  * `free` is the budget not in use; each page's `held` chunks count as free
- * too. Fixed pages keep their page chunks; then each other page, in order,
- * takes its page chunks if they fit, else it is capped (null) and keeps what
- * it holds. What is left goes to claims: all of them when they fit, else every
+ * too. Fixed pages keep their page chunks; then each other page takes its
+ * page chunks if they fit, else it is capped (null) and keeps what it holds —
+ * first the pages that need no more page chunks than they hold (they always
+ * fit, and free the rest), then the others in order, so a page that grows is
+ * never capped for room a page later in the list was about to free. The run
+ * embeds in the same spirit (shrinking pages first). What is left goes to claims: all of them when they fit, else every
  * page keeps claims up to one level — so the pages with the most claims give
  * theirs up first — and the remainder goes one each to the first pages above
  * it. Answers how many claim chunks each page keeps.
@@ -371,15 +374,16 @@ export function planVaultChunks(pages: readonly ChunkBudgetPage[], free: number)
   pages.forEach((p) => {
     if (p.fixed) room += p.held - p.pageChunks;
   });
-  pages.forEach((p, i) => {
-    if (p.fixed) return;
+  const others = pages.flatMap((p, i) => (p.fixed ? [] : [i]));
+  for (const i of [...others.filter((i) => pages[i].pageChunks <= pages[i].held), ...others.filter((i) => pages[i].pageChunks > pages[i].held)]) {
+    const p = pages[i];
     room += p.held;
     if (p.pageChunks <= room) room -= p.pageChunks;
     else {
       room -= p.held;
       out[i] = null;
     }
-  });
+  }
   room = Math.max(0, room);
   const wants = pages.map((p, i) => (out[i] === null ? 0 : Math.max(0, p.claimChunks)));
   const kept = (level: number) => wants.reduce((s, c) => s + Math.min(c, level), 0);
@@ -766,7 +770,21 @@ async function syncOnce(vault: string, paths: ReadonlySet<string> | null, signal
       unchanged -= 1;
     }
 
-    // 3. Embed: each page its page chunks and the claims its share holds.
+    // 3. Embed: each page its page chunks and the claims its share holds. The
+    // plan counted every re-embedded page's old chunks as free at once: the
+    // pages that end up no bigger than they are go first (their old chunks
+    // make that room), then the ones that grow; path order within each.
+    const heldBy = (rel: string) => {
+      const h = held.get(rel);
+      return h ? h.page + h.claim : 0;
+    };
+    const sizeAfter = (w: (typeof work)[number]) => {
+      const share = claimsFor.get(w.rel);
+      const claims = claimsOf(w.units);
+      return share === null || share === undefined ? 0 : w.units.length - claims + Math.min(share, claims);
+    };
+    const grows = new Set(work.filter((w) => sizeAfter(w) > heldBy(w.rel)).map((w) => w.rel));
+    work.sort((a, b) => Number(grows.has(a.rel)) - Number(grows.has(b.rel)) || (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
     for (const { rel, blob, page, units: all } of work) {
       if (signal?.aborted) throw signal.reason ?? new Error("aborted");
       const existing = Number((sql.chunksFor.get(rel) as { n?: unknown } | undefined)?.n ?? 0) || 0;

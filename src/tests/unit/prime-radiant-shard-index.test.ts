@@ -442,6 +442,8 @@ describe("a full chunk budget: page vectors first", () => {
     expect(planVaultChunks([page(0, { pageChunks: 2 }), page(0, { pageChunks: 3, held: 1 })], 3)).toEqual([0, null]);
     // A page the run leaves alone keeps its page chunks; its claims are shared like the others'.
     expect(planVaultChunks([page(6, { held: 7, fixed: true }), page(1)], 0)).toEqual([4, 1]);
+    // A page that shrinks frees its room before a page earlier in path order needs it.
+    expect(planVaultChunks([page(6, { pageChunks: 2 }), page(0, { held: 7 })], 1)).toEqual([5, 0]);
   });
 
   /** A page with `claims` claims, its body one chunk. */
@@ -510,6 +512,28 @@ describe("a full chunk budget: page vectors first", () => {
     _setVaultMaxChunksForTests(8);
     await commit({ "concepts/b.md": pageWith("b", 4) });
     expect(await reindexPrimeRadiantPaths(["concepts/b.md"])).toMatchObject({ mode: "incremental", indexed: 1, partial: 0, chunks: 8 });
+  });
+
+  it("embeds a page that shrinks before one that grows, so the room it frees is there in the same run", async () => {
+    // b holds 7 chunks (1 page + 6 claims) of a budget of 8.
+    _setVaultMaxChunksForTests(8);
+    await commit({ "concepts/b.md": pageWith("b", 6) });
+    expect(await reindexPrimeRadiantVault()).toMatchObject({ indexed: 1, chunks: 7 });
+    // b shrinks to its one page chunk; a, first in path order, brings 2 page chunks and 6 claims.
+    const paragraph = (n: number) => `Widget a part ${n}. `.repeat(42).trim();
+    await commit({
+      "concepts/a.md": pageText(
+        { title: "Widget a", claims: Array.from({ length: 6 }, (_, i) => claim(`acme-sales/a/fact-${i}`, `Widget a fact ${i}.`)) },
+        `${paragraph(1)}\n\n${paragraph(2)}\n`,
+      ),
+      "concepts/b.md": pageWith("b", 0),
+    });
+    // a gets both page vectors and the 5 claims left of the budget (1 + 2 + 5 = 8), in one run.
+    expect(await reindexPrimeRadiantPaths(["concepts/a.md", "concepts/b.md"])).toMatchObject({ indexed: 2, capped: 0, partial: 1, chunks: 8, withoutPageVector: 0 });
+    const hits = await searchPrimeRadiant("widget", 20);
+    expect(hits.filter((h) => h.path === "concepts/a.md" && h.kind === "claim")).toHaveLength(5);
+    expect((await readPageVectors()).has("concepts/a.md")).toBe(true);
+    expect((await vaultIndexStatus()).needsFullScan).toBe(false);
   });
 
   it("counts the pages left without a page vector in the status", async () => {
