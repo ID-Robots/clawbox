@@ -41,14 +41,23 @@
  *  - `classify-records`: read only — the record leaves by type and month
  *    (records.ts), and the record-like pages the rules could not type (what
  *    the capped model fallback would be asked).
- * `reindex`, `connect`, `migrate-frontmatter` and `structure` run on in the background:
+ *  - `summaries`: the summaries pass (node-summary.ts, also step 4c of the
+ *    nightly pass) — every node's summary written from its connections and
+ *    sources, entities first, the cheap model within `summaries.maxPages` and
+ *    `summaries.capUsd`, written in commits. Its answer carries the duplicate
+ *    entities as merge suggestions (the merge tool's dry run: `mergeSuggestions`)
+ *    and the entities filed under the wrong domain (`domainMismatches`).
+ *    `dryRun: true` answers what it would write (`would`) and those
+ *    suggestions, and never asks the model.
+ * `reindex`, `connect`, `migrate-frontmatter`, `structure` and `summaries` run on in the background:
  * 202 `{ started: true }`; 409 `busy` while one runs. A `dryRun` answers its
  * counts at once.
  *
  * GET → `{ running, last: { [action]: result | { error } } }`.
  *
  * OWNER ONLY (POST: cookie AND same origin) — but the assistant, through the
- * MCP bearer, may run `connect` (the owner's "run the connect pass now"). The
+ * MCP bearer, may run `connect` (the owner's "run the connect pass now") and
+ * the `summaries` DRY RUN (it writes nothing and asks no model). The
  * others stay the owner's: a reindex re-embeds the whole vault, the rejudge,
  * the renames and the migrations are repairs — and the assistant never makes
  * its own stamps the owner's. 412 `not_initialised` before the vault exists;
@@ -64,6 +73,7 @@ import { classifyRecord, RECORD_TYPES } from "@/lib/prime-radiant/records";
 import { flashAvailable } from "@/lib/prime-radiant/flash-client";
 import { effectiveCostRates, readSettings } from "@/lib/prime-radiant/settings";
 import { modelCandidates, runStructure } from "@/lib/prime-radiant/structure-run";
+import { runSummaries } from "@/lib/prime-radiant/node-summary-run";
 import { readPageVectors, reindexPrimeRadiantVault, vaultIndexingAllowed } from "@/lib/prime-radiant/shard-index";
 import { rejudgeOpenContradictions, rejudgeSummary } from "@/lib/prime-radiant/rejudge";
 import { renameMeaninglessPages } from "@/lib/prime-radiant/rename";
@@ -112,8 +122,8 @@ export async function POST(req: Request) {
   const read = await readJsonBody(req);
   if (!read.ok) return read.response;
   const b = (read.body && typeof read.body === "object" ? read.body : {}) as { action?: unknown; dryRun?: unknown };
-  if (!gate.writer.person && b.action !== "connect") {
-    return fail("owner_only", "Only the owner can run that maintenance pass; the assistant may run the connect pass.", 403);
+  if (!gate.writer.person && b.action !== "connect" && !(b.action === "summaries" && b.dryRun === true)) {
+    return fail("owner_only", "Only the owner can run that maintenance pass; the assistant may run the connect pass and the summaries dry run.", 403);
   }
   if (!(await vaultInitialised())) return fail("not_initialised", "Open Prime Radiant once to create its vault first.", 412);
   const dryRun = b.dryRun === true;
@@ -154,6 +164,22 @@ export async function POST(req: Request) {
           });
         if (dryRun) return json(await go(true));
         background("structure", () => go(false));
+        return json({ started: true }, 202);
+      }
+      case "summaries": {
+        if (state.running) return busy();
+        const settings = readSettings();
+        const go = async (dry: boolean) =>
+          runSummaries(await readVaultSnapshot(vault), commitWith(vault, gate.writer.author), {
+            stateVault: vault,
+            settings,
+            rates: effectiveCostRates(),
+            online: dry ? false : await flashAvailable().catch(() => false),
+            dryRun: dry,
+            mergePreviews: true,
+          });
+        if (dryRun) return json(await go(true));
+        background("summaries", () => go(false));
         return json({ started: true }, 202);
       }
       case "classify-records": {

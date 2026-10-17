@@ -168,6 +168,8 @@ describe("nightly pass", () => {
     expect(summary.contradictions.findings).toBe(1);
     expect(summary.gate.touched).toEqual([]);
     expect(run!.usdEstimate).toBeGreaterThan(0);
+    // Step 4c: every page summarised from its neighbourhood (this test's model answers no summary call, so the facts wrote them, not marked tried).
+    expect(summary.summaries).toMatchObject({ planned: 2, written: 2, byModel: 0, byFacts: 2, rejectedPages: 0, model: { calls: 1 } });
 
     // main has the pages; the branch and the worktree are gone.
     const snap = await readVaultSnapshot();
@@ -210,7 +212,9 @@ describe("nightly pass", () => {
     };
     compile();
 
-    const run = await runNightly("manual", deps());
+    // The summaries pass would add a summary to the page: off, these nights are about the repair alone.
+    const noSummaries = settings({ summaries: { ...defaultSettings().summaries, enabled: false } });
+    const run = await runNightly("manual", deps({ settings: noSummaries }));
     expect(run).toMatchObject({ status: "merged" });
     const summary = run!.summary as unknown as NightlySummary;
     expect(summary.held).toEqual([]);
@@ -221,7 +225,7 @@ describe("nightly pass", () => {
     // The plugin compiles again during the day; the next night still merges.
     compile();
     fs.writeFileSync(path.join(filesRoot, "Documents", "shipping.md"), "Orders ship within three working days.");
-    const second = await runNightly("schedule", deps({ now: () => new Date(2026, 4, 21, 3, 0) }));
+    const second = await runNightly("schedule", deps({ settings: noSummaries, now: () => new Date(2026, 4, 21, 3, 0) }));
     expect(second).toMatchObject({ status: "merged" });
     expect((second!.summary as unknown as NightlySummary).notes.join(" ")).not.toMatch(/memory-wiki/);
     expect(fs.readFileSync(path.join(v, "concepts", "terms.md"), "utf8")).toBe(page);
@@ -335,7 +339,7 @@ describe("nightly pass", () => {
   it("compares what reached main by day: the scope is everything changed since the last finished comparison", async () => {
     await ensureVault();
     // The structure pass would keep the domain hub's open review items current, a commit of its own; this is about the comparison's scope.
-    const quiet = settings({ structure: { ...defaultSettings().structure, enabled: false } });
+    const quiet = settings({ structure: { ...defaultSettings().structure, enabled: false }, summaries: { ...defaultSettings().summaries, enabled: false } });
     const first = await runNightly("schedule", deps({ settings: quiet }));
     expect((first!.summary as unknown as NightlySummary).contradictions.complete).toBe(true);
     const mark = readComparedThrough(vaultDir());

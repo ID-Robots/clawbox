@@ -25,7 +25,8 @@
 import { buildClaimIndex, claimCollisions, isClaimId, retiredReuse, transliterateCyrillic } from "./claims";
 import { pageSummary } from "./frontmatter";
 import { isPluginFormatFrontmatter } from "./plugin-files";
-import { buildLinkGraph, CONTENT_FOLDERS, contentReach, pathAliases } from "./links";
+import { domainMismatches, findDuplicateEntities } from "./entity-hygiene";
+import { buildLinkGraph, CONTENT_FOLDERS, contentReach, isContentPage, pathAliases } from "./links";
 import { scanSecrets } from "./redact";
 import { CLAIM_DATE_FIELDS, ownerVerified, type PageFrontmatter } from "./schema";
 import { isValidityDate } from "./validity";
@@ -57,6 +58,8 @@ export const LINT_RULES = [
   "claim-id-retired-reuse",
   "stale-against-verified",
   "plugin-format",
+  "duplicate-entity",
+  "domain-mismatch",
 ] as const;
 export type LintRule = (typeof LINT_RULES)[number];
 
@@ -119,6 +122,8 @@ export interface LintOptions {
   ledgerRetired?: Iterable<string>;
   /** Claims the judge found against an owner-verified claim (verify.ts `readStaleClaims`): warned about on their pages. */
   staleClaims?: ReadonlyArray<{ claimId: string; page: string; verifiedClaimId: string; verifiedPage: string; at: string }>;
+  /** The configured domain names (settings `domains`): what `domain-mismatch` may suggest. None: the domains pages use. */
+  domains?: readonly string[];
   now?: Date;
 }
 
@@ -455,6 +460,33 @@ export function lintVault(snapshot: VaultSnapshot, options: LintOptions = {}): L
         `claim ${note.claimId} disagrees with the owner-verified claim ${note.verifiedClaimId} on ${note.verifiedPage}; the verified claim wins`,
         { claimId: note.claimId, verifiedClaimId: note.verifiedClaimId, verifiedPage: note.verifiedPage },
       ),
+    );
+  }
+
+  // One entity under two pages, and an entity filed under a domain its neighbourhood disagrees with
+  // (entity-hygiene.ts): suggestions for the owner, never errors.
+  const entityPages = valid.map((v) => ({ path: v.page.path, fm: v.fm }));
+  const contentInbound = (p: string) => [...(graph.inbound.get(p) ?? [])].filter(isContentPage).length;
+  for (const g of findDuplicateEntities(entityPages, contentInbound)) {
+    for (const d of g.duplicates) {
+      if (!inScope(d)) continue;
+      const why = g.reason === "suffix" ? "a numbered copy of" : g.reason === "script" ? "the same name in another script as" : "the same name as";
+      findings.push(
+        finding("duplicate-entity", "warning", d, `this entity looks like ${why} ${g.canonical}; merge it into that page (the page merge, dry run first)`, {
+          canonical: g.canonical,
+          reason: g.reason,
+        }),
+      );
+    }
+  }
+  const linkedWith = (p: string) => [...(graph.inbound.get(p) ?? []), ...(graph.outbound.get(p) ?? [])].filter(isContentPage);
+  for (const m of domainMismatches(entityPages, linkedWith, { configured: options.domains, paths: scopeSet ?? undefined })) {
+    findings.push(
+      finding("domain-mismatch", "warning", m.path, `filed under ${m.domain}, but ${m.evidence}; suggested domain: ${m.suggested}`, {
+        domain: m.domain,
+        suggested: m.suggested,
+        reason: m.reason,
+      }),
     );
   }
 

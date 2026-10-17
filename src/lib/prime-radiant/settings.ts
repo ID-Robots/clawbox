@@ -86,6 +86,17 @@ export const DEFAULT_STRUCTURE_MODEL_FALLBACK = 25;
 export const MAX_STRUCTURE_MODEL_FALLBACK = 500;
 export const MAX_COMPANY_CHARS = 80;
 
+/**
+ * The summaries pass (node-summary.ts): on by default in the nightly pass.
+ * The cheap model writes at most `maxPages` summaries a night, never past
+ * `capUsd` of estimated spend; the rest are written from their facts' own
+ * words (0 pages: never the model).
+ */
+export const DEFAULT_SUMMARIES_MAX_PAGES = 150;
+export const MAX_SUMMARIES_MAX_PAGES = 2000;
+export const DEFAULT_SUMMARIES_CAP_USD = 0.25;
+export const MAX_SUMMARIES_CAP_USD = 100;
+
 export interface IngestSettings {
   /**
    * Folder-name patterns never walked into. A stored list that is a default
@@ -138,6 +149,14 @@ export interface StructureSettings {
   modelFallback: number;
 }
 
+export interface SummariesSettings {
+  enabled: boolean;
+  /** Summaries the cheap model writes a night, entities first; 0 leaves them all to the facts. */
+  maxPages: number;
+  /** Hard ceiling on one night's estimated model spend for summaries, USD. */
+  capUsd: number;
+}
+
 export interface DomainSetting {
   /** Lowercase kebab, as a page's `domain`. */
   name: string;
@@ -179,6 +198,7 @@ export interface PrimeRadiantSettings {
   contradictions: ContradictionSettings;
   search: SearchSettings;
   structure: StructureSettings;
+  summaries: SummariesSettings;
   domains: DomainSetting[];
   golden: GoldenSettings;
   verification: VerificationSettings;
@@ -193,6 +213,7 @@ export function defaultSettings(): PrimeRadiantSettings {
     contradictions: { enabled: true },
     search: { indexLimitMb: DEFAULT_SEARCH_INDEX_LIMIT_MB },
     structure: { enabled: true, company: "", enrichTop: DEFAULT_STRUCTURE_ENRICH_TOP, modelFallback: DEFAULT_STRUCTURE_MODEL_FALLBACK },
+    summaries: { enabled: true, maxPages: DEFAULT_SUMMARIES_MAX_PAGES, capUsd: DEFAULT_SUMMARIES_CAP_USD },
     domains: [],
     golden: { enabled: true, maxQuestions: DEFAULT_GOLDEN_MAX_QUESTIONS },
     verification: { perOwner: DEFAULT_DAILY_PER_OWNER, outbound: false, languages: [] },
@@ -340,6 +361,14 @@ const FIELDS = {
         ? { ok: true, value: v }
         : { ok: false, error: `structure.modelFallback must be a whole number from 0 to ${MAX_STRUCTURE_MODEL_FALLBACK}.` },
   },
+  summaries: {
+    enabled: (v: unknown) => readBool(v, "summaries.enabled"),
+    maxPages: (v: unknown): Read<number> =>
+      typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= MAX_SUMMARIES_MAX_PAGES
+        ? { ok: true, value: v }
+        : { ok: false, error: `summaries.maxPages must be a whole number from 0 to ${MAX_SUMMARIES_MAX_PAGES}.` },
+    capUsd: (v: unknown) => readNumber(v, 0, MAX_SUMMARIES_CAP_USD, "summaries.capUsd"),
+  },
 } as const;
 
 type SectionName = keyof typeof FIELDS;
@@ -408,6 +437,7 @@ export interface SettingsPatch {
   contradictions?: { enabled?: unknown } | null;
   search?: { indexLimitMb?: unknown } | null;
   structure?: { enabled?: unknown; company?: unknown; enrichTop?: unknown; modelFallback?: unknown } | null;
+  summaries?: { enabled?: unknown; maxPages?: unknown; capUsd?: unknown } | null;
   domains?: unknown;
   golden?: { enabled?: unknown; maxQuestions?: unknown } | null;
   verification?: { perOwner?: unknown; outbound?: unknown; languages?: unknown } | null;
@@ -423,6 +453,7 @@ const PATCH_KEYS: Readonly<Record<string, readonly string[]>> = {
   golden: Object.keys(FIELDS.golden),
   verification: Object.keys(FIELDS.verification),
   structure: Object.keys(FIELDS.structure),
+  summaries: Object.keys(FIELDS.summaries),
 };
 
 /** The vault search index's size limit in force, in bytes (shard-index.ts reads it at every run). */

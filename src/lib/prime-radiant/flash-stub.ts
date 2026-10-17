@@ -9,8 +9,9 @@
  * carry different numbers contradict, anything else is compatible — and
  * every golden-question judge call from the facts it was shown: a fact that
  * holds the expected answer's words is `correct`, no fact is `missing`,
- * anything else is `wrong`. Never selected outside test mode (see
- * flash-client).
+ * anything else is `wrong`; every node-summary call from the facts
+ * themselves — a node's first fact, word for word, citing itself. Never
+ * selected outside test mode (see flash-client).
  *
  * Pure apart from the interface it implements.
  */
@@ -18,6 +19,7 @@
 import type { FlashClient } from "./flash-client";
 import { readGoldenItems } from "./golden";
 import { readJudgeItems } from "./judge";
+import { readSummaryItems } from "./summary-meta";
 import { readWriterItems } from "./writer";
 
 export const STUB_MODEL = "stub-flash";
@@ -86,6 +88,11 @@ export function createStubFlashClient(): FlashClient {
       const golden = readGoldenItems(request.user);
       if (golden) {
         const text = JSON.stringify(golden.map((g) => ({ i: g.i, verdict: stubGoldenVerdict(g.expected, g.facts ?? []), why: "stub judge" })));
+        return { text, model: STUB_MODEL, usage: usage(request, text) };
+      }
+      const nodes = readSummaryItems(request.user);
+      if (nodes) {
+        const text = JSON.stringify(nodes.map((n) => ({ i: n.i, sentences: n.facts.slice(0, 1).map((f) => ({ text: f.text, from: [f.id] })) })));
         return { text, model: STUB_MODEL, usage: usage(request, text) };
       }
       const items = readWriterItems(request.user) ?? [];

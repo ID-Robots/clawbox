@@ -47,6 +47,8 @@ import {
   MAX_GOLDEN_MAX_QUESTIONS,
   MAX_OWNER_LANGUAGES,
   MIN_GOLDEN_MAX_QUESTIONS,
+  MAX_SUMMARIES_CAP_USD,
+  MAX_SUMMARIES_MAX_PAGES,
   MIN_INGEST_PARALLEL,
   MIN_OPUS_CAP_USD,
   MIN_OPUS_MAX_PAGES,
@@ -74,6 +76,8 @@ const LIMITS = {
   structureCompany: MAX_COMPANY_CHARS,
   structureEnrichTop: { min: 0, max: MAX_STRUCTURE_ENRICH_TOP },
   structureModelFallback: { min: 0, max: MAX_STRUCTURE_MODEL_FALLBACK },
+  summariesMaxPages: { min: 0, max: MAX_SUMMARIES_MAX_PAGES },
+  summariesCapUsd: { min: 0, max: MAX_SUMMARIES_CAP_USD },
 };
 
 const OPUS_SOURCE_BUDGET_MS = 3_000;

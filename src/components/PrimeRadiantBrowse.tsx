@@ -301,6 +301,19 @@ function PageView({ path, page, error, onBack, onOpen, onHistory, locale }: {
               )}
             </h2>
             <p className="mt-0.5 font-mono text-[11px] text-[var(--text-muted)] break-all">{page.path}</p>
+            {page.nodeSummary && (
+              <p
+                className="mt-2 text-sm text-[var(--text-secondary)] flex items-start gap-1.5"
+                title={t("primeRadiant.page.generatedSummary")}
+                data-testid="prime-radiant-page-summary"
+              >
+                <span className="material-symbols-rounded shrink-0 text-[var(--text-muted)]" style={{ fontSize: 14, marginTop: 2 }} aria-hidden="true">hub</span>
+                <span>
+                  <span className="sr-only">{t("primeRadiant.page.generatedSummary")}: </span>
+                  {page.nodeSummary.text}
+                </span>
+              </p>
+            )}
           </div>
 
           {fm ? (

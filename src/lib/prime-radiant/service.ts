@@ -16,12 +16,14 @@ import { buildLinkGraph, linkDensity, LINKS_PER_PAGE_TARGET, pathAliases, type L
 import { lintVault, type LintReport } from "./lint";
 import { pageSummary } from "./frontmatter";
 import { pageBlurb } from "./page-blurb";
+import { generatedSummary } from "./summary-meta";
 import { isPluginFormatFrontmatter } from "./plugin-files";
 import { hasVerification, type PageFrontmatter, type SchemaError } from "./schema";
 import { currentBranch, commitCount, headCommit, type CommitInfo } from "./git";
 import { adoptPluginPages, repairPluginWritesOnce, type PluginRepairResult } from "./plugin-repair";
 import { ensureMemoryWikiWiring, memoryWikiWiringStatus, type WiringPlan, type WiringResult } from "./plugin-wiring";
 import { vaultDir, safePagePath, isKnowledgePage } from "./paths";
+import { readSettings } from "./settings";
 import { readRetiredLedger } from "./state-db";
 import { readStaleClaims, type StaleClaimNote } from "./verify";
 import {
@@ -59,6 +61,11 @@ function ledger(vault: string): string[] {
   } catch {
     return [];
   }
+}
+
+/** The configured domain names (settings `domains`): what `domain-mismatch` may suggest, as the summaries pass reads them. */
+function configuredDomains(): string[] {
+  return readSettings().domains.map((d) => d.name);
 }
 
 /** The stale notes owner-verified claims left (verify.ts); none when the state database cannot be read. */
@@ -113,7 +120,7 @@ export async function getStatus(vault: string = vaultDir()): Promise<PrimeRadian
   }
   const snapshot = await readVaultSnapshot(vault);
   const valid = snapshot.pages.flatMap((p) => (p.parsed.ok ? [p.parsed.frontmatter] : []));
-  const report = lintVault(snapshot, { ledgerRetired: ledger(vault), staleClaims: staleNotes(vault) });
+  const report = lintVault(snapshot, { ledgerRetired: ledger(vault), staleClaims: staleNotes(vault), domains: configuredDomains() });
   const [branch, head, commits, plugin] = await Promise.all([
     currentBranch(vault),
     headCommit(vault),
@@ -180,6 +187,8 @@ export interface PageDetail {
   errors: SchemaError[] | null;
   body: string;
   summary: string | null;
+  /** The summary the summaries pass wrote from the page's connections and sources (node-summary.ts), for the page header; null when it has none of ours. */
+  nodeSummary: { text: string; method: "model" | "facts"; at: string } | null;
   verified: boolean;
   /** Pages that link here. */
   backlinks: string[];
@@ -230,11 +239,12 @@ function pageDetail(snapshot: VaultSnapshot, rel: string, vault: string): PageDe
     errors: page.parsed.ok ? null : page.parsed.errors,
     body: page.parsed.body,
     summary: pageSummary(page.parsed.body),
+    nodeSummary: fm ? generatedSummary(fm) : null,
     verified: fm ? hasVerification(fm) : false,
     backlinks: [...(graph.inbound.get(rel) ?? [])].sort(),
     links: [...(graph.outbound.get(rel) ?? [])].sort(),
     inIndex: graph.indexed.has(rel),
-    lint: lintVault(snapshot, { scope: [rel], ledgerRetired: ledger(vault), staleClaims: staleNotes(vault) }),
+    lint: lintVault(snapshot, { scope: [rel], ledgerRetired: ledger(vault), staleClaims: staleNotes(vault), domains: configuredDomains() }),
   };
 }
 
@@ -250,7 +260,7 @@ export async function getLint(paths: readonly string[] | null, vault: string = v
     paths && paths.length > 0
       ? paths.map((p) => safePagePath(p)).filter((p): p is string => p !== null && isKnowledgePage(p))
       : undefined;
-  return lintVault(snapshot, { scope, ledgerRetired: ledger(vault), staleClaims: staleNotes(vault), now });
+  return lintVault(snapshot, { scope, ledgerRetired: ledger(vault), staleClaims: staleNotes(vault), domains: configuredDomains(), now });
 }
 
 export interface InitialiseResult {
