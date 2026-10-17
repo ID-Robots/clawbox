@@ -20,7 +20,7 @@ import { addReviewItem, getReviewItem, settleReviewItem, type ReviewCandidate } 
 import { validateFrontmatter } from "@/lib/prime-radiant/schema";
 import { claimSubject, nameWords, sameSubject } from "@/lib/prime-radiant/subject";
 import { historicalClaim, pageValidity, periodsDisjoint, laterOf, textValidity, type Validity } from "@/lib/prime-radiant/validity";
-import { ownerVerified, readStaleClaims } from "@/lib/prime-radiant/verify";
+import { ownerVerified, readStaleClaims, recordStaleClaims } from "@/lib/prime-radiant/verify";
 import { documentName, sameDocument, versionGroups } from "@/lib/prime-radiant/versions";
 import { buildPage, claimDates, parseWriterResponse, type BuildContext } from "@/lib/prime-radiant/writer";
 import type { Claim, PageFrontmatter } from "@/lib/prime-radiant/schema";
@@ -151,6 +151,19 @@ describe("rule 2: dated facts", () => {
     for (const t of ["The invoice is dated 14.09.2026.", "Subscription period is 2026-07-10 to 2026-08-10.", "The pack costs €12.10 since then."]) {
       expect(textValidity(t, WRITTEN), t).toBeNull();
     }
+  });
+
+  it("reads no period from an impossible day, a yearless date with no year to read it in, or an amount", () => {
+    expect(textValidity("The rate holds as of 31.06.2026.", WRITTEN)).toBeNull();
+    expect(textValidity("The rate holds as of 30.02.", WRITTEN)).toBeNull();
+    // Yearless, and nothing says when it was written: no guess.
+    expect(textValidity("The cash balance is €12,000 as of 30.09.")).toBeNull();
+    expect(textValidity("The pack costs €12.10 as of 12.10 EUR.", WRITTEN)).toBeNull();
+    // Bulgarian "as of", and "until the end of" a month.
+    expect(textValidity("Наличността е 40 броя към 30.09.2026.", WRITTEN)).toMatchObject({ from: "2026-09-30", until: "2026-09-30" });
+    expect(textValidity("The promo runs until the end of February 2027.", WRITTEN)).toMatchObject({ until: "2027-02-28" });
+    // A snapshot title's amount is no date: only the report's own day is read.
+    expect(pageValidity("Weekly summary 14.10, spend €12.10", null, WRITTEN)).toMatchObject({ from: "2026-10-14", until: "2026-10-14" });
   });
 
   it("dates a snapshot page's claims by its title, never a record's", () => {
@@ -317,6 +330,15 @@ describe("owner-verified claims win", () => {
     expect(ownerVerified({ verified: null, status: "verified" })).toBe(true);
     expect(ownerVerified({ verified: null, status: "supported" }, { verified: OWNER })).toBe(true);
     expect(ownerVerified({ verified: null, status: "supported" }, { verified: null })).toBe(false);
+  });
+
+  it("keeps one stale note per claim and verified claim, a repeat refreshing it; reads none from a vault with no state", () => {
+    expect(readStaleClaims(vault)).toEqual([]);
+    const note = { claimId: "ops/support-faq/hours", page: "concepts/support-faq.md", verifiedClaimId: "ops/northwind-support/hours", verifiedPage: "concepts/northwind-support.md", why: "8-16 against 9-17", at: WRITTEN };
+    expect(recordStaleClaims(vault, [note])).toBe(1);
+    expect(recordStaleClaims(vault, [{ ...note, why: "hours differ", at: "2026-10-17T08:00:00.000Z" }])).toBe(1);
+    expect(recordStaleClaims(vault, [])).toBe(0);
+    expect(readStaleClaims(vault)).toEqual([{ ...note, why: "hours differ", at: "2026-10-17T08:00:00.000Z" }]);
   });
 });
 
