@@ -269,7 +269,7 @@ export interface UpgradeAssistantVerificationsResult {
   upgraded: UpgradedVerification[];
   /** Pages they are on (each now `checked_by: human`). */
   pages: string[];
-  /** Assistant stamps left as they were: no human-verification evidence line says the owner's word was behind them. */
+  /** Assistant stamps left as they were: no line the old verify flow wrote says the owner's word was behind them. */
   skipped: UpgradedVerification[];
 }
 
@@ -284,9 +284,24 @@ function assistantStamped(c: Claim): boolean {
 }
 
 /**
+ * The line the old verify flow wrote for the assistant's verification, and
+ * only that line: the LAST evidence entry, `human-verification`, its note
+ * `verified by assistant…`, stamped the moment the claim was verified. A
+ * `human-verification` line copied in from a review candidate's evidence
+ * (review.ts passes a picked candidate's evidence on) is none of that.
+ */
+function oldAssistantLine(c: Claim): number {
+  const at = c.evidence.length - 1;
+  const last = c.evidence[at];
+  const ok = !!last && last.kind === "human-verification" && typeof last.note === "string" && ASSISTANT_NOTE_RE.test(last.note) && last.updatedAt === c.verified?.at;
+  return ok ? at : -1;
+}
+
+/**
  * The migration worked out over a snapshot (pure): every claim stamped
- * `verified: { by: assistant }` that carries a `human-verification` evidence
- * line — the line verify.ts wrote for every verification before the
+ * `verified: { by: assistant }` whose evidence ends with the old flow's own
+ * `human-verification` line ({@link oldAssistantLine}) — the line verify.ts
+ * wrote for every verification before the
  * assistant's own were told apart, which the MCP tools only gave with the
  * user's own confirmation (`confirm: true`); an unconfirmed one made since
  * carries `assistant-verification` instead and stays as it is — gets
@@ -309,16 +324,15 @@ export function planAssistantVerificationUpgrade(snapshot: Pick<VaultSnapshot, "
     let changed = false;
     const claims = fm.claims.map((c) => {
       if (!assistantStamped(c) || !c.verified) return c;
-      if (!c.evidence.some((e) => e.kind === "human-verification")) {
+      const line = oldAssistantLine(c);
+      if (line < 0) {
         skipped.push({ claimId: c.id, page: p.path });
         return c;
       }
       changed = true;
       upgraded.push({ claimId: c.id, page: p.path });
-      const evidence = c.evidence.map((e) =>
-        e.kind === "human-verification" && typeof e.note === "string" && ASSISTANT_NOTE_RE.test(e.note)
-          ? { ...e, note: e.note.replace(ASSISTANT_NOTE_RE, `verified by ${OWNER_VERIFIER} via ${VIA_ASSISTANT}`).slice(0, 200) }
-          : e,
+      const evidence = c.evidence.map((e, i) =>
+        i === line && typeof e.note === "string" ? { ...e, note: e.note.replace(ASSISTANT_NOTE_RE, `verified by ${OWNER_VERIFIER} via ${VIA_ASSISTANT}`).slice(0, 200) } : e,
       );
       return { ...c, evidence, verified: { at: c.verified.at, by: OWNER_VERIFIER, via: VIA_ASSISTANT } };
     });

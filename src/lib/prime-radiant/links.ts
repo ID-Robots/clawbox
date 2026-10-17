@@ -7,8 +7,8 @@
  *   - a wikilink by vault path (with or without `.md`), then by a page's
  *     former path (a path-shaped alias: rename.ts keeps a renamed page's old
  *     path in its `aliases`, so a link to it still leads there), then by file
- *     name, then by page title (case-insensitive) — the first that is
- *     unambiguous.
+ *     name, then by page title (case-insensitive), then by a former file
+ *     name — the first that is unambiguous.
  */
 
 export interface LinkTargetPage {
@@ -153,10 +153,15 @@ export function createLinkResolver(pages: Iterable<LinkTargetPage>): LinkResolve
   const byPath = new Set<string>();
   const byFormerPath = new Map<string, string[]>();
   const byName = new Map<string, string[]>();
+  const byFormerName = new Map<string, string[]>();
   const byTitle = new Map<string, string[]>();
   for (const p of pages) {
     byPath.add(p.path);
-    for (const former of pathAliases(p.aliases)) byFormerPath.set(former, [...(byFormerPath.get(former) ?? []), p.path]);
+    for (const former of pathAliases(p.aliases)) {
+      byFormerPath.set(former, [...(byFormerPath.get(former) ?? []), p.path]);
+      const formerName = former.slice(former.lastIndexOf("/") + 1).replace(/\.md$/i, "").toLowerCase();
+      byFormerName.set(formerName, [...(byFormerName.get(formerName) ?? []), p.path]);
+    }
     const name = p.path.slice(p.path.lastIndexOf("/") + 1).replace(/\.md$/i, "").toLowerCase();
     byName.set(name, [...(byName.get(name) ?? []), p.path]);
     if (p.title) {
@@ -179,7 +184,9 @@ export function createLinkResolver(pages: Iterable<LinkTargetPage>): LinkResolve
       const moved = unique(byFormerPath.get(withExt));
       if (moved) return moved;
       const name = withExt.slice(withExt.lastIndexOf("/") + 1).replace(/\.md$/i, "").toLowerCase();
-      return unique(byName.get(name)) ?? unique(byTitle.get(t.toLowerCase()));
+      // A former file name (`[[x-3]]` after concepts/x-3.md moved) comes last: whatever a
+      // current page answers to — its path, name or title — is never overridden by it.
+      return unique(byName.get(name)) ?? unique(byTitle.get(t.toLowerCase())) ?? unique(byFormerName.get(name));
     },
   };
 }

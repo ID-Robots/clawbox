@@ -130,6 +130,22 @@ describe("meaningless names and former paths (pure)", () => {
     expect([...(graph.inbound.get("concepts/grazhdanski-dogovor.md") ?? [])]).toEqual(["concepts/pricing.md"]);
   });
 
+  it("resolves a bare former file name last: a current page's name or title always wins, two former owners are no answer", () => {
+    const renamed = { path: "concepts/grazhdanski-dogovor.md", title: "Граждански договор", aliases: ["concepts/x-3"] };
+    const alone = createLinkResolver([renamed, { path: "concepts/pricing.md", title: "Pricing" }]);
+    // An unparsed page's `[[x-3]]` was never rewritten: it still leads to the renamed page.
+    expect(alone.resolve("concepts/broken.md", { kind: "wiki", target: "x-3" })).toBe("concepts/grazhdanski-dogovor.md");
+    // A current page named x-3 (or titled so) is what x-3 means now.
+    const current = createLinkResolver([renamed, { path: "entities/x-3.md", title: "Something" }]);
+    expect(current.resolve("index.md", { kind: "wiki", target: "x-3" })).toBe("entities/x-3.md");
+    const titled = createLinkResolver([renamed, { path: "concepts/other.md", title: "x-3" }]);
+    expect(titled.resolve("index.md", { kind: "wiki", target: "x-3" })).toBe("concepts/other.md");
+    // Two pages that were once x-3 in different folders: no guess.
+    const two = createLinkResolver([renamed, { path: "entities/ivan-ivanov.md", aliases: ["entities/x-3"] }]);
+    expect(two.resolve("index.md", { kind: "wiki", target: "x-3" })).toBeNull();
+    expect(two.resolve("index.md", { kind: "wiki", target: "entities/x-3" })).toBe("entities/ivan-ivanov.md");
+  });
+
   it("plans names from titles in each page's own folder, -N on a taken one, and skips what it cannot name", () => {
     const plan = planSlugRenames(
       snapshot({
@@ -388,6 +404,22 @@ describe("upgradeAssistantVerifications (the one-off migration)", () => {
     const dry = await upgradeAssistantVerifications({ dryRun: true, vault });
     expect(dry.upgraded).toEqual([]);
     expect(dry.skipped).toEqual([{ claimId: "acme-sales/pricing/blue", page: "concepts/pricing.md" }]);
+  });
+
+  it("upgrades only the line the old verify flow wrote, never one copied in from a review candidate", () => {
+    const stamped = (evidence: Claim["evidence"]) => assistantClaim("acme-sales/pricing/blue", "The blue widget costs 10 EUR.", evidence);
+    const plan = (c: Claim) => planAssistantVerificationUpgrade(snapshot({ "concepts/pricing.md": pageText({ claims: [c] }) }));
+    // A candidate's human-verification line, then the assistant's own (unconfirmed) line last.
+    const copied = stamped([human("verified by owner"), { kind: "assistant-verification", note: "verified by assistant from review rev-0123456789ab", updatedAt: AT }]);
+    expect(plan(copied).upgraded).toEqual([]);
+    expect(plan(copied).skipped).toHaveLength(1);
+    // A last human-verification line that is not the assistant's note, or not stamped when the claim was verified.
+    expect(plan(stamped([human("verified by Jane Roe")])).upgraded).toEqual([]);
+    expect(plan(stamped([{ kind: "human-verification", note: "verified by assistant", updatedAt: "2026-09-02T00:00:00.000Z" }])).upgraded).toEqual([]);
+    // Only the old flow's own line changes its note; a copied line before it stays as it was.
+    const both = plan(stamped([human("verified by assistant (copied)"), human("verified by assistant")]));
+    expect(both.upgraded).toHaveLength(1);
+    expect(both.writes[0].frontmatter.claims[0].evidence).toEqual([human("verified by assistant (copied)"), human("verified by owner via assistant")]);
   });
 
   it("plans only assistant stamps a human-verification line backs (pure)", () => {
