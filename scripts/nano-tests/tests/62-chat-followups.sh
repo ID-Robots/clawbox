@@ -16,10 +16,16 @@
 source "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
 
 LIBS=$(board 'python3 -c "import docx, openpyxl, reportlab; print(\"libs-ok\")" 2>&1 | tail -n 1')
+# They come from install.sh's apt step, which a full install and every in-app
+# update run; a CI rebuild (scripts/force-update.sh) only checks out and builds.
+# So "missing" on a board that apt has never offered them is a skip; missing
+# while dpkg says they are installed is a failure.
 if [ "$LIBS" = libs-ok ]; then
   ok "python3 imports docx, openpyxl and reportlab"
+elif board 'dpkg-query -W -f="\${Status}\n" python3-docx python3-openpyxl python3-reportlab 2>/dev/null' | grep -q "install ok installed"; then
+  not_ok "document libraries are installed but do not import: $(printf '%s' "$LIBS" | head -c 200)"
 else
-  not_ok "document libraries missing: $(printf '%s' "$LIBS" | head -c 200)"
+  skip "document libraries not installed yet: this board was rebuilt without install.sh's apt step"
 fi
 
 # shellcheck disable=SC2016  # JavaScript, not shell
