@@ -102,12 +102,14 @@ export function serializePage(fm: PageFrontmatter, body: string): string {
  */
 export function pageSummary(body: string): string | null {
   const lines = body.split(/\r?\n/);
+  // A line that is only an HTML comment (a managed block's marker) renders as nothing: never the summary.
+  const comment = (line: string) => /^\s*<!--.*-->\s*$/.test(line);
   let i = 0;
-  while (i < lines.length && (lines[i].trim() === "" || /^#{1,6}\s/.test(lines[i]))) i++;
+  while (i < lines.length && (lines[i].trim() === "" || /^#{1,6}\s/.test(lines[i]) || comment(lines[i]))) i++;
   const para: string[] = [];
   for (; i < lines.length; i++) {
     const line = lines[i];
-    if (line.trim() === "" || /^#{1,6}\s/.test(line)) break;
+    if (line.trim() === "" || /^#{1,6}\s/.test(line) || comment(line)) break;
     para.push(line.trim());
   }
   const text = para.join(" ").trim();

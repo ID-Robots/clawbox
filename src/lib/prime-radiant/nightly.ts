@@ -15,6 +15,10 @@
  *                they never hold the night;
  *   4. Opus      optional, capped, sampled (opus.ts); its proposals are
  *                review items, its bookkeeping a commit on the branch;
+ *   4b. structure  monthly record hubs, domain hubs, the company's root
+ *                page, entity enrichment and the decisions register
+ *                (structure.ts), written on the branch — deterministic; the
+ *                capped cheap-model fallback for record types only online;
  *   5. lint      every page the branch changed (after every step that
  *                commits to it); an ERROR holds the night and becomes a
  *                `lint` review item;
@@ -58,6 +62,7 @@ import { insertRun, listRuns, newRunId, saveRun, settleOrphanRuns, type RunRecor
 import { effectiveCostRates, readSettings, type PrimeRadiantSettings } from "./settings";
 import { readRetiredLedger, stateDbExists } from "./state-db";
 import { rejudgeOpenContradictions } from "./rejudge";
+import { runStructure, type StructureNowResult } from "./structure-run";
 import { readVaultSnapshot, vaultInitialised, vaultOperation } from "./vault";
 
 export const DREAM_BRANCH_PREFIX = "dream/";
@@ -78,6 +83,11 @@ export interface NightlySummary {
     findings: number;
   };
   opus: Pick<OpusTierResult, "queued" | "reviewed" | "pending" | "calls" | "usdEstimate" | "capUsd" | "maxPages" | "source" | "stopped"> | { skipped: string };
+  structure:
+    | (Pick<StructureNowResult, "leaves" | "leavesInHubs" | "recordHubs" | "counterpartyHubs" | "domainHubs" | "root" | "entitiesEnriched" | "claimsAdded" | "decisions" | "registerPages" | "skippedVerified" | "linksMedianBefore" | "linksMedianAfter" | "written" | "created"> & {
+        model: StructureNowResult["model"];
+      })
+    | { skipped: string };
   gate: { touched: string[] };
   reviewItems: { raised: number };
   held: string[];
@@ -311,6 +321,7 @@ function emptySummary(): NightlySummary {
       findings: 0,
     },
     opus: { skipped: "not_run" },
+    structure: { skipped: "not_run" },
     gate: { touched: [] },
     reviewItems: { raised: 0 },
     held: [],
@@ -485,6 +496,40 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
           summary.opus = { skipped: "failed" };
           notes.push(`The Opus check could not be saved: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
         }
+      }
+    }
+    // 4b. structure: hubs, the root, enrichment and the register, on the branch
+    if (!settings.structure.enabled) summary.structure = { skipped: "disabled" };
+    else {
+      try {
+        const s = await runStructure(
+          await readVaultSnapshot(wt),
+          async (message, fn) => ({ commit: (await vaultOperation(message, fn, { vault: wt, now: now() })).commit }),
+          { stateVault: vault, settings, rates, client: deps.client, online, runId: run.id, now },
+        );
+        summary.structure = {
+          leaves: s.leaves,
+          leavesInHubs: s.leavesInHubs,
+          recordHubs: s.recordHubs,
+          counterpartyHubs: s.counterpartyHubs,
+          domainHubs: s.domainHubs,
+          root: s.root,
+          entitiesEnriched: s.entitiesEnriched,
+          claimsAdded: s.claimsAdded,
+          decisions: s.decisions,
+          registerPages: s.registerPages,
+          skippedVerified: s.skippedVerified,
+          linksMedianBefore: s.linksMedianBefore,
+          linksMedianAfter: s.linksMedianAfter,
+          written: s.written,
+          created: s.created,
+          model: s.model,
+        };
+        run.usdEstimate += s.model.usdEstimate;
+        if (s.written > 0) notes.push(`The structure pass wrote ${s.written} page(s): ${s.recordHubs} record hub(s), ${s.domainHubs} domain hub(s), ${s.entitiesEnriched} enriched entit${s.entitiesEnriched === 1 ? "y" : "ies"}.`);
+      } catch (err) {
+        summary.structure = { skipped: "failed" };
+        notes.push(`The structure pass could not be saved: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
       }
     }
     if (summary.ingest && "jobId" in summary.ingest) {

@@ -18,7 +18,10 @@
  *     in the title) up into dated HUB pages ("Courier shipments 2026-09"), with
  *     links hub → leaves, leaf → hub and neighbouring leaves, and hub → the
  *     previous and next month's hub. Hubs are `synthesis` pages; search ranks
- *     them above leaves;
+ *     them above leaves. A leaf the structure pass has filed under a monthly
+ *     record hub (`record.hub`, structure.ts) is that hub's: it is left out
+ *     here, and never "similar" to the other leaves of its hub; the structure
+ *     pass's own pages are not re-linked here either;
  *  4. makes every content page reachable: one that links to no other content
  *     page gets its nearest pages by words, and one no other content page links
  *     to is added to the "Similar pages" of its nearest page that has room (at
@@ -45,6 +48,7 @@ import { buildLinkGraph, contentReach, isContentPage, isPathAlias } from "./link
 import { ATOMIC_TYPES, LIMITS } from "./lint";
 import type { PageFrontmatter, PrivacyTier } from "./schema";
 import type { VaultSnapshot, VaultTx } from "./vault";
+import { readRecordFrontmatter } from "./records";
 import { addToIndex } from "./writer";
 
 export const RELATED_START = "<!-- prime-radiant:related:start -->";
@@ -394,7 +398,9 @@ export async function planConnections(snapshot: Pick<VaultSnapshot, "pages" | "i
 
   // Pages this pass made on an earlier run are rebuilt from scratch: their own text is no evidence.
   const isOurs = (p: ConnectPage) => p.fm.generated?.by === "connect";
-  const content = pages.filter((p) => !isOurs(p));
+  // The structure pass's hubs, domain hubs, root and register carry their own links.
+  const isStructure = (p: ConnectPage) => p.fm.structure !== undefined && p.fm.structure !== null;
+  const content = pages.filter((p) => !isOurs(p) && !isStructure(p));
 
   // 1. entities: the existing pages by name, then names that recur without one.
   const entityByName = new Map<string, string>();
@@ -479,8 +485,15 @@ export async function planConnections(snapshot: Pick<VaultSnapshot, "pages" | "i
 
   // 3. leaves and hubs (before related links, so siblings are not each other's "related").
   const leaves = new Map<string, LeafInfo>();
+  // A leaf filed under a monthly record hub belongs to it (structure.ts).
+  const recordHubOf = new Map<string, string>();
   for (const p of content) {
     if (p.fm.type === "entity" || p.path.startsWith("entities/")) continue;
+    const filed = readRecordFrontmatter(p.fm)?.hub;
+    if (filed && byPath.has(filed)) {
+      recordHubOf.set(p.path, filed);
+      continue;
+    }
     const info = leafInfo(p.fm.title, p.fm.claims.map((c) => c.text));
     if (info) leaves.set(p.path, info);
   }
@@ -549,6 +562,7 @@ export async function planConnections(snapshot: Pick<VaultSnapshot, "pages" | "i
   }
 
   // 2. related by embedding (cut to RELATED_DIMS), leaves of the same hub left out (they are tied as siblings).
+  const groupOf = (path: string) => hubOf.get(path) ?? recordHubOf.get(path);
   const related = new Map<string, string[]>();
   const vecPages = content.filter((p) => options.vectors?.has(p.path)).slice(0, MAX_RELATED_PAGES);
   const compared = new Set<string>();
@@ -562,10 +576,10 @@ export async function planConnections(snapshot: Pick<VaultSnapshot, "pages" | "i
       if (i % 32 === 0) await new Promise<void>((resolve) => setImmediate(resolve));
       if (!ok[i]) continue;
       const best: Array<{ j: number; s: number }> = [];
-      const hubI = hubOf.get(vecPages[i].path);
+      const hubI = groupOf(vecPages[i].path);
       for (let j = 0; j < vecPages.length; j++) {
         if (j === i || !ok[j]) continue;
-        if (hubI && hubOf.get(vecPages[j].path) === hubI) continue;
+        if (hubI && groupOf(vecPages[j].path) === hubI) continue;
         let s = 0;
         const a = vs[i];
         const b = vs[j];
@@ -586,8 +600,8 @@ export async function planConnections(snapshot: Pick<VaultSnapshot, "pages" | "i
   // 2b. a content page the index holds no vector for (it was full, or the page
   // is newer than it): its nearest pages by words, leaves of its hub left out.
   const sameHub = (path: string) => {
-    const hub = hubOf.get(path);
-    return (other: string) => !!hub && hubOf.get(other) === hub;
+    const hub = groupOf(path);
+    return (other: string) => !!hub && groupOf(other) === hub;
   };
   const wordPages = content.filter((p) => isContentPage(p.path));
   const lexical = buildLexicalIndex(wordPages.map((p) => ({ path: p.path, domain: p.fm.domain, text: lexicalText(p) })));
@@ -613,7 +627,7 @@ export async function planConnections(snapshot: Pick<VaultSnapshot, "pages" | "i
       const others = entityPages.get(e) ?? [];
       if (others.length < 2 || others.length > SHARED_ENTITY_MAX_DF) continue;
       const w = 1 / Math.log(others.length + 1);
-      for (const o of others) if (o !== p.path && hubOf.get(o) !== hubOf.get(p.path)) score.set(o, (score.get(o) ?? 0) + w);
+      for (const o of others) if (o !== p.path && groupOf(o) !== groupOf(p.path)) score.set(o, (score.get(o) ?? 0) + w);
     }
     shared.set(
       p.path,

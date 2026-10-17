@@ -11,7 +11,7 @@
  * SERVER ONLY.
  */
 
-import { buildLinkGraph, pathAliases } from "./links";
+import { buildLinkGraph, linkDensity, LINKS_PER_PAGE_TARGET, pathAliases, type LinkDensity } from "./links";
 import { lintVault, type LintReport } from "./lint";
 import { pageSummary } from "./frontmatter";
 import { pageBlurb } from "./page-blurb";
@@ -48,6 +48,8 @@ export interface PrimeRadiantStatus {
   git: { branch: string | null; head: CommitInfo | null; commits: number };
   plugin: WiringPlan;
   lint: { errors: number; warnings: number; ok: boolean };
+  /** Meaningful links per content page (links.ts `linkDensity`): the median, and the target it should reach. */
+  links: LinkDensity;
 }
 
 function ledger(vault: string): string[] {
@@ -75,6 +77,7 @@ export async function getStatus(vault: string = vaultDir()): Promise<PrimeRadian
       git: { branch: null, head: null, commits: 0 },
       plugin: await memoryWikiWiringStatus(vault),
       lint: { errors: 0, warnings: 0, ok: true },
+      links: { pages: 0, median: 0, mean: 0, atTarget: 0, target: LINKS_PER_PAGE_TARGET },
     };
   }
   const snapshot = await readVaultSnapshot(vault);
@@ -101,6 +104,7 @@ export async function getStatus(vault: string = vaultDir()): Promise<PrimeRadian
     git: { branch, head, commits },
     plugin,
     lint: { errors: report.errors, warnings: report.warnings, ok: report.ok },
+    links: linkDensity(buildLinkGraph(snapshot.pages.flatMap((p) => (p.parsed.ok ? [{ path: p.path, title: p.parsed.frontmatter.title, body: p.parsed.body }] : [])), null)),
   };
 }
 

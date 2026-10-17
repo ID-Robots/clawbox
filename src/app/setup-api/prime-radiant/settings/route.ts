@@ -31,7 +31,10 @@ import { fail, json, readJsonBody, writerGuard } from "@/lib/prime-radiant/route
 import {
   defaultSettings,
   effectiveCostRates,
+  MAX_COMPANY_CHARS,
   MAX_DOMAINS,
+  MAX_STRUCTURE_ENRICH_TOP,
+  MAX_STRUCTURE_MODEL_FALLBACK,
   MAX_INGEST_FOLDERS,
   MAX_INGEST_PARALLEL,
   MAX_OPUS_CAP_USD,
@@ -57,6 +60,9 @@ const LIMITS = {
   opusMaxPages: { min: MIN_OPUS_MAX_PAGES, max: MAX_OPUS_MAX_PAGES },
   searchIndexLimitMb: { min: MIN_SEARCH_INDEX_LIMIT_MB, max: MAX_SEARCH_INDEX_LIMIT_MB },
   domains: MAX_DOMAINS,
+  structureCompany: MAX_COMPANY_CHARS,
+  structureEnrichTop: { min: 0, max: MAX_STRUCTURE_ENRICH_TOP },
+  structureModelFallback: { min: 0, max: MAX_STRUCTURE_MODEL_FALLBACK },
 };
 
 const OPUS_SOURCE_BUDGET_MS = 3_000;

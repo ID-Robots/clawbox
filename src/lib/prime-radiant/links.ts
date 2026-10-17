@@ -255,6 +255,43 @@ export interface ContentReach {
   isolated: Set<string>;
 }
 
+/** The median of meaningful links a page should reach (the Status target). */
+export const LINKS_PER_PAGE_TARGET = 5;
+
+export interface LinkDensity {
+  /** Content pages counted. */
+  pages: number;
+  /** Median, over content pages, of the OTHER content pages each is linked with (either way, each counted once). */
+  median: number;
+  mean: number;
+  /** Content pages at or above {@link LINKS_PER_PAGE_TARGET}. */
+  atTarget: number;
+  target: number;
+}
+
+/**
+ * Meaningful links per page: for every content page, the other content pages
+ * it links to or is linked from, each once. index.md, `_views/`, reports and
+ * `sources/` pages do not count — a listing is no link a reader follows — nor
+ * does a link to a page that does not exist. One pass over the graph's links.
+ */
+export function linkDensity(graph: Pick<LinkGraph, "outbound" | "inbound">): LinkDensity {
+  const counts: number[] = [];
+  for (const [page, out] of graph.outbound) {
+    if (!isContentPage(page)) continue;
+    const near = new Set<string>();
+    for (const p of out) if (p !== page && isContentPage(p)) near.add(p);
+    for (const p of graph.inbound.get(page) ?? []) if (p !== page && isContentPage(p)) near.add(p);
+    counts.push(near.size);
+  }
+  counts.sort((a, b) => a - b);
+  const n = counts.length;
+  const mid = Math.floor(n / 2);
+  const median = n === 0 ? 0 : n % 2 ? counts[mid] : (counts[mid - 1] + counts[mid]) / 2;
+  const mean = n === 0 ? 0 : Math.round((counts.reduce((s, x) => s + x, 0) / n) * 100) / 100;
+  return { pages: n, median, mean, atTarget: counts.filter((c) => c >= LINKS_PER_PAGE_TARGET).length, target: LINKS_PER_PAGE_TARGET };
+}
+
 /** Orphan and isolated content pages of a link graph, in one pass over its links. */
 export function contentReach(graph: Pick<LinkGraph, "outbound" | "inbound">): ContentReach {
   const orphans = new Set<string>();

@@ -8,6 +8,10 @@
  *  1. SAME DOCUMENT: the two pages are versions of one document, a draft and
  *     its final, a copy and its original (versions.ts). Their claims differ
  *     where the versions do; that is no question for the owner.
+ *     SAME HUB: the two pages are record leaves of one monthly hub (two
+ *     invoices of September, two receipts of one month — records.ts,
+ *     structure.ts). They are alike because the documents are, and a
+ *     company's VAT number on both is no shared document.
  *  2. DIFFERENT SUBJECTS by identifiers (identifiers.ts): different
  *     references (invoice, waybill, transfer numbers, company ids), different
  *     days or months, two records with no reference in common. A reference
@@ -47,11 +51,14 @@ export interface PairClaim {
   historical?: boolean;
   /** Its page's `status` is `deprecated`. */
   deprecated?: boolean;
+  /** Its page's record hub (`<type>/<month>`, records.ts `recordHubKey`) when the page is a record leaf. */
+  hub?: string | null;
 }
 
 /** Why a pair is no pair, as a code the re-judge counts by. */
 export type NoPairCode =
   | "same-document"
+  | "same-hub"
   | "different-identifiers"
   | "different-dates"
   | "different-months"
@@ -79,6 +86,7 @@ const IDENTIFIER_CODES: Readonly<Record<string, NoPairCode>> = {
 /** Why two claims may not be judged as a pair, or null when they may (see the module comment). */
 export function noPairReason(a: PairClaim, b: PairClaim): NoPair | null {
   if (a.version && a.version === b.version) return { code: "same-document", detail: "same document: draft vs final" };
+  if (a.hub && a.hub === b.hub) return { code: "same-hub", detail: `two records of one monthly hub (${a.hub})` };
   const shared = !!a.ids && !!b.ids && sharedReference(a.ids.ref, b.ids.ref);
   if (!shared && a.ids && b.ids) {
     const why = differentSubjects(a.ids, b.ids);
@@ -107,6 +115,7 @@ export function noPairReason(a: PairClaim, b: PairClaim): NoPair | null {
  */
 export function pairable(a: PairClaim, b: PairClaim): boolean {
   if (a.version && a.version === b.version) return false;
+  if (a.hub && a.hub === b.hub) return false;
   const shared = !!a.ids && !!b.ids && sharedReference(a.ids.ref, b.ids.ref);
   if (!shared && !sameSubject(a.subject, b.subject)) return false;
   if (!shared && a.ids && b.ids && differentSubjects(a.ids, b.ids)) return false;

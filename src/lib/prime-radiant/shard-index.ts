@@ -77,8 +77,10 @@ import { stripRelatedBlock } from "./connect";
 import { parsePage } from "./frontmatter";
 import { currentBranch, git, VAULT_MAIN_BRANCH } from "./git";
 import { isKnowledgePage, safePagePath, vaultDir } from "./paths";
+import { readRecordFrontmatter } from "./records";
 import { redactText } from "./redact";
 import { searchIndexLimitBytes } from "./settings";
+import { stripRecordBlock } from "./structure";
 import { vaultInitialised } from "./vault";
 import type { PageFrontmatter } from "./schema";
 import { decodeVectorBlob, dequantizeQ8, dotQ8, encodeQ8Blob, float32FromBlob, q8BlobBytes, vectorBlobDims } from "./vector-q8";
@@ -207,6 +209,8 @@ export interface VaultPageUnits {
   title: string;
   type: string;
   verified: boolean;
+  /** The hub page that lists it, when the page is a record leaf (its `record.hub`): search never ranks it above that hub. */
+  hub: string | null;
   units: VaultIndexUnit[];
 }
 
@@ -306,8 +310,8 @@ export function pageIndexUnits(rel: string, text: string): VaultPageUnits | null
   const pageVerified = fm.verified != null;
   const title = fm.title.trim();
   const units: VaultIndexUnit[] = [];
-  // The connect pass's link block is navigation, not content: never embedded.
-  for (const chunk of chunkText(stripRelatedBlock(parsed.body))) {
+  // The connect pass's link block and a leaf's link up to its hub are navigation, not content: never embedded.
+  for (const chunk of chunkText(stripRecordBlock(stripRelatedBlock(parsed.body)))) {
     units.push({ refId: pageId, kind: "page", verified: pageVerified, text: redacted(`${title}\n\n${chunk}`) });
   }
   for (const claim of fm.claims) {
@@ -322,7 +326,8 @@ export function pageIndexUnits(rel: string, text: string): VaultPageUnits | null
   }
   // A page with neither body nor claims is still findable by its title.
   if (units.length === 0 && title) units.push({ refId: pageId, kind: "page", verified: pageVerified, text: redacted(title) });
-  return { pageId, title, type: fm.type, verified: pageVerified, units };
+  const hub = readRecordFrontmatter(fm)?.hub ?? null;
+  return { pageId, title, type: fm.type, verified: pageVerified, hub: hub && hub !== rel ? hub : null, units };
 }
 
 export interface RankCandidate {
@@ -334,7 +339,12 @@ export interface RankCandidate {
   text: string;
   verified: boolean;
   similarity: number;
+  /** The hub page of a record leaf (both its page and its claim hits): never ranked above that hub when the hub is a hit. */
+  hub?: string | null;
 }
+
+/** How far under its hub a leaf is put when it would have outranked it. */
+const BELOW_HUB = 1e-6;
 
 /** One hit per page or claim: the identity both the search and the ranking dedupe on. */
 function hitKey(c: Pick<RankCandidate, "kind" | "refId" | "path">): string {
@@ -349,13 +359,15 @@ function round3(n: number): number {
  * Boost, deduplicate and order candidate chunks: one hit per page or claim
  * (its best chunk), verified ones lifted by {@link VERIFIED_BOOST} up to
  * {@link MAX_SCORE}, ties broken by similarity and then by id so the order is
- * stable.
+ * stable. A record leaf (`hub` set) whose hub page is among the hits never
+ * outranks it: it is put just under the hub, its score no higher than the
+ * hub's (searchPrimeRadiant brings a leaf's hub in when it was not found).
  */
 export function rankVaultHits(candidates: readonly RankCandidate[], limit: number): VaultSearchHit[] {
   // Ordered by the UNCLAMPED lift, so a verified hit at the ceiling still
   // ranks above an unverified one that reached it on similarity alone; only
   // the score handed out is clamped.
-  const best = new Map<string, { hit: VaultSearchHit; rank: number }>();
+  const best = new Map<string, { hit: VaultSearchHit; rank: number; hub: string | null }>();
   for (const c of candidates) {
     const similarity = Math.max(0, Math.min(1, c.similarity));
     const rank = similarity + (c.verified ? VERIFIED_BOOST : 0) + (c.kind === "page" && HUB_TYPES.has(c.type) ? HUB_BOOST : 0);
@@ -364,6 +376,7 @@ export function rankVaultHits(candidates: readonly RankCandidate[], limit: numbe
     if (held && held.rank >= rank) continue;
     best.set(key, {
       rank,
+      hub: c.hub && c.hub !== c.path ? c.hub : null,
       hit: {
         source: "prime-radiant",
         path: c.path,
@@ -377,6 +390,18 @@ export function rankVaultHits(candidates: readonly RankCandidate[], limit: numbe
         verified: c.verified,
       },
     });
+  }
+  const hubRank = new Map<string, { rank: number; score: number }>();
+  for (const v of best.values()) {
+    if (v.hit.kind !== "page") continue;
+    const at = hubRank.get(v.hit.path);
+    if (!at || v.rank > at.rank) hubRank.set(v.hit.path, { rank: v.rank, score: v.hit.score });
+  }
+  for (const v of best.values()) {
+    const hub = v.hub ? hubRank.get(v.hub) : undefined;
+    if (!hub || v.rank < hub.rank) continue;
+    v.rank = hub.rank - BELOW_HUB;
+    v.hit = { ...v.hit, score: Math.min(v.hit.score, hub.score) };
   }
   return [...best.values()]
     .sort((a, b) => b.rank - a.rank || b.hit.similarity - a.hit.similarity || a.hit.id.localeCompare(b.hit.id))
@@ -515,6 +540,11 @@ const SCHEMA = `
   CREATE INDEX IF NOT EXISTS chunks_by_path ON chunks(path);
 `;
 
+/** Whether the store's `pages` rows say which hub a leaf is under (a store older than record hubs does not). */
+function hasHubColumn(db: DatabaseSync): boolean {
+  return (db.prepare("PRAGMA table_info(pages)").all() as Array<{ name?: unknown }>).some((c) => c.name === "hub");
+}
+
 async function openForWrite(file: string): Promise<DatabaseSync> {
   await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
   const db = openSqlite(file, false);
@@ -526,6 +556,8 @@ async function openForWrite(file: string): Promise<DatabaseSync> {
       /* a speed-up, not a rule */
     }
     db.exec(SCHEMA);
+    // A store from before record hubs: the column is added in place (no rebuild; a row fills it when its page moves).
+    if (!hasHubColumn(db)) db.exec("ALTER TABLE pages ADD COLUMN hub TEXT");
   } catch (err) {
     try { db.close(); } catch { /* nothing more to do */ }
     throw err;
@@ -774,10 +806,11 @@ async function syncOnce(vault: string, paths: ReadonlySet<string> | null, signal
       chunksOf: db.prepare("SELECT ref_id, kind, verified, text FROM chunks WHERE path = ? ORDER BY id"),
       insertChunk: db.prepare("INSERT INTO chunks (path, ref_id, kind, verified, text, vec) VALUES (?, ?, ?, ?, ?, ?)"),
       upsertPage: db.prepare(
-        `INSERT INTO pages (path, blob, page_id, title, type, verified, chunks, indexed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO pages (path, blob, page_id, title, type, verified, chunks, indexed_at, hub)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(path) DO UPDATE SET blob = excluded.blob, page_id = excluded.page_id, title = excluded.title,
-           type = excluded.type, verified = excluded.verified, chunks = excluded.chunks, indexed_at = excluded.indexed_at`,
+           type = excluded.type, verified = excluded.verified, chunks = excluded.chunks, indexed_at = excluded.indexed_at,
+           hub = excluded.hub`,
       ),
     };
     const tx = (fn: () => void) => {
@@ -830,7 +863,7 @@ async function syncOnce(vault: string, paths: ReadonlySet<string> | null, signal
       // new blob, and the embedder is not asked again.
       if (page && existing > 0 && existing === units.length && sameUnits(sql.chunksOf.all(rel), units)) {
         tx(() => {
-          sql.upsertPage.run(rel, entry.blob, page.pageId, page.title, page.type, page.verified ? 1 : 0, units.length, Date.now());
+          sql.upsertPage.run(rel, entry.blob, page.pageId, page.title, page.type, page.verified ? 1 : 0, units.length, Date.now(), page.hub);
         });
         unchanged += 1;
         wrote = true;
@@ -964,7 +997,7 @@ async function syncOnce(vault: string, paths: ReadonlySet<string> | null, signal
         // not read again until it changes.
         sql.upsertPage.run(
           rel, blob, page?.pageId ?? rel.replace(/\.md$/, ""), page?.title ?? "", page?.type ?? "",
-          page?.verified ? 1 : 0, all.length, Date.now(),
+          page?.verified ? 1 : 0, all.length, Date.now(), page?.hub ?? null,
         );
       });
       chunkCount = chunkCount - existing + units.length;
@@ -1203,6 +1236,8 @@ interface VectorCache {
   verified: Uint8Array;
   /** What each row is lifted by: verified, hub page. */
   lift: Float32Array;
+  /** Chunk id → row, built the first time a search brings a leaf's hub in. */
+  rowOf?: Map<number, number>;
 }
 
 interface CacheSlot {
@@ -1326,32 +1361,53 @@ export async function searchPrimeRadiant(
     }
     const order = Array.from(cache.ids.keys()).sort((a, b) => boostedAt[b] - boostedAt[a] || a - b);
 
+    const withHub = hasHubColumn(db);
     const detail = db.prepare(
       `SELECT c.path AS path, c.ref_id AS ref_id, c.kind AS kind, c.verified AS verified, c.text AS text,
-              p.title AS title, p.type AS type
+              p.title AS title, p.type AS type${withHub ? ", p.hub AS hub" : ""}
          FROM chunks c JOIN pages p ON p.path = c.path WHERE c.id = ?`,
     );
-    const candidates: RankCandidate[] = [];
-    const held = new Set<string>();
-    for (const at of order) {
-      if (held.size >= want) break;
+    const candidateAt = (at: number): RankCandidate | null => {
       const row = detail.get(cache.ids[at]) as Record<string, unknown> | undefined;
-      if (!row || typeof row.path !== "string" || typeof row.text !== "string") continue;
-      const verified = Number(row.verified) === 1;
-      const candidate: RankCandidate = {
+      if (!row || typeof row.path !== "string" || typeof row.text !== "string") return null;
+      return {
         path: row.path,
         refId: typeof row.ref_id === "string" ? row.ref_id : row.path,
         kind: row.kind === "claim" ? "claim" : "page",
         type: typeof row.type === "string" ? row.type : "",
         title: typeof row.title === "string" ? row.title : "",
         text: row.text,
-        verified,
+        verified: Number(row.verified) === 1,
         similarity: boostedAt[at] - cache.lift[at],
+        hub: typeof row.hub === "string" && row.hub !== "" ? row.hub : null,
       };
+    };
+    const candidates: RankCandidate[] = [];
+    const held = new Set<string>();
+    for (const at of order) {
+      if (held.size >= want) break;
+      const candidate = candidateAt(at);
+      if (!candidate) continue;
       const key = hitKey(candidate);
       if (held.has(key)) continue;
       held.add(key);
       candidates.push(candidate);
+    }
+    // A record leaf found without its hub brings the hub in at its own best page chunk, so the leaf never outranks it.
+    const pagesHeld = new Set(candidates.filter((c) => c.kind === "page").map((c) => c.path));
+    const wanted = [...new Set(candidates.map((c) => c.hub).filter((h): h is string => !!h && !pagesHeld.has(h)))];
+    if (wanted.length > 0) {
+      const rowOf = cache.rowOf ?? (cache.rowOf = new Map(cache.ids.map((id, row) => [id, row])));
+      const hubChunks = db.prepare("SELECT id FROM chunks WHERE path = ? AND kind = 'page'");
+      for (const hub of wanted) {
+        let bestAt = -1;
+        for (const r of hubChunks.all(hub) as Array<{ id?: unknown }>) {
+          const at = rowOf.get(Number(r.id));
+          if (at !== undefined && (bestAt < 0 || boostedAt[at] > boostedAt[bestAt])) bestAt = at;
+        }
+        const candidate = bestAt >= 0 ? candidateAt(bestAt) : null;
+        if (candidate) candidates.push(candidate);
+      }
     }
     return rankVaultHits(candidates, want);
   } finally {
