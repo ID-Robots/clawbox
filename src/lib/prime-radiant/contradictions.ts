@@ -4,9 +4,11 @@
  *
  * Blocking is by embedding AND subject: every active claim is embedded with
  * Memory Shard's own embedder (its text redacted first), and each claim in
- * scope is paired with its k = 5 nearest neighbours on OTHER pages that are
- * about the SAME thing ({@link sameSubject}: the same entity in their ids, or
- * subjects that share most of their words, or one naming the other's) — on
+ * scope is paired with EVERY claim on OTHER pages that is about the SAME
+ * thing ({@link sameSubject}: the same entity in their ids, or subjects that
+ * share most of their words, or one naming the other's), up to
+ * {@link SAME_SUBJECT_PARTNERS} — the nearest that many beyond — so nearer
+ * claims about the subject never crowd out the one that disagrees — on
  * the live test, pairing by wording alone sent a black hole against the US
  * Constitution, and 84 of 85 items were false. Measured on a 50,000-claim
  * vault, embedding blocking found every planted contradiction at k = 5,
@@ -225,10 +227,20 @@ export interface CandidatePair {
 export type PairFilter = (a: number, b: number) => boolean;
 
 /**
+ * The most partners one claim is paired with when the pass's filter says each
+ * one is about the same thing ({@link comparable}): up to this many, EVERY
+ * such claim on another page is a pair — five nearer ones about the same
+ * subject must not crowd out the one that disagrees. Over it (a subject on
+ * dozens of pages), the nearest this many.
+ */
+export const SAME_SUBJECT_PARTNERS = 32;
+
+/**
  * For each claim in `queries` (indexes into `vectors`), its `k` nearest
  * neighbours on another page with another id — and, given `allow`, only
- * among the claims it allows (the pass: about the same thing) — each
- * unordered pair once.
+ * among the claims it allows (the pass: about the same thing), of which it
+ * keeps every one up to {@link SAME_SUBJECT_PARTNERS} — each unordered pair
+ * once.
  */
 export function nearestPairs(
   claims: readonly Pick<PassClaim, "id" | "page">[],
@@ -238,6 +250,7 @@ export function nearestPairs(
   allow?: PairFilter,
 ): CandidatePair[] {
   const seen = new Map<string, CandidatePair>();
+  const keep = allow ? Math.max(k, SAME_SUBJECT_PARTNERS) : k;
   for (const q of queries) {
     const qv = vectors[q];
     const best: Array<{ at: number; score: number }> = [];
@@ -247,7 +260,7 @@ export function nearestPairs(
       const v = vectors[i];
       let score = 0;
       for (let d = 0; d < qv.length && d < v.length; d++) score += qv[d] * v[d];
-      if (best.length < k) {
+      if (best.length < keep) {
         best.push({ at: i, score });
         best.sort((x, y) => y.score - x.score);
       } else if (score > best[best.length - 1].score) {

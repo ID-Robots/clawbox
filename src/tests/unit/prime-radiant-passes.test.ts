@@ -15,6 +15,7 @@ import {
   nearestPairsYielding,
   pairHash,
   runContradictionPass,
+  SAME_SUBJECT_PARTNERS,
   type ClaimEmbedder,
 } from "@/lib/prime-radiant/contradictions";
 import { DEFAULT_COST_RATES, mergeCostRates } from "@/lib/prime-radiant/cost-rates";
@@ -95,6 +96,26 @@ describe("contradiction pass: pieces", () => {
     expect(pairs.map((p) => [p.a, p.b])).toEqual([[1, 2], [0, 2]]);
   });
 
+  // Five nearer claims about the same subject must not crowd out the one that disagrees.
+  it("pairs a claim with every claim about the same thing on other pages, however many are nearer", () => {
+    const at = (deg: number) => Float32Array.from([Math.cos((deg * Math.PI) / 180), Math.sin((deg * Math.PI) / 180)]);
+    // X and Y 60 degrees apart; six others between them, each nearer to both than they are to each other.
+    const degrees = [0, 60, 28, 29, 30, 31, 32, 33];
+    const claims = degrees.map((_, i) => ({ id: `acme-sales/blue-widget/price-${i}`, page: `concepts/sheet-${i}.md` }));
+    const vectors = degrees.map(at);
+    const has = (pairs: Array<{ a: number; b: number }>) => pairs.some((p) => p.a === 0 && p.b === 1);
+    // Unfiltered, k is the cap: the pair is crowded out (the contract the k=1 test above pins).
+    expect(has(nearestPairs(claims, vectors, [0, 1], 5))).toBe(false);
+    // Filtered to the same subject, every partner is kept — from either side's query.
+    expect(has(nearestPairs(claims, vectors, [0, 1], 5, () => true))).toBe(true);
+    expect(has(nearestPairs(claims, vectors, [0], 5, () => true))).toBe(true);
+    expect(nearestPairs(claims, vectors, [0], 5, () => true)).toHaveLength(7);
+    // Beyond the bound, the nearest SAME_SUBJECT_PARTNERS.
+    const many = Array.from({ length: SAME_SUBJECT_PARTNERS + 10 }, (_, i) => ({ id: `acme-sales/blue-widget/p-${i}`, page: `concepts/s-${i}.md` }));
+    const manyVectors = many.map((_, i) => at(i));
+    expect(nearestPairs(many, manyVectors, [0], 5, () => true)).toHaveLength(SAME_SUBJECT_PARTNERS);
+  });
+
   it("finds the same pairs in slices that yield as in one synchronous call, and stops on abort", async () => {
     let seed = 7;
     const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648) - 0.5;
@@ -157,9 +178,9 @@ describe("contradiction pass: pieces", () => {
 });
 
 describe("contradiction pass", () => {
-  async function seedVault() {
+  async function seedVault(pages: Record<string, string> = PAGES) {
     await vaultOperation("seed: pages", async (tx) => {
-      for (const [p, t] of Object.entries(PAGES)) await tx.write(p, t);
+      for (const [p, t] of Object.entries(pages)) await tx.write(p, t);
     });
     return readVaultSnapshot();
   }
@@ -192,6 +213,38 @@ describe("contradiction pass", () => {
     expect(again.findings).toHaveLength(1);
     // Still one waiting item for the same pair.
     expect(listReviewItems(vaultDir()).total).toBe(1);
+  });
+
+  it("judges a same-subject pair on two pages on a scoped night, though six nearer claims are about the subject too", async () => {
+    // Every claim is about the blue widget's price; X's page is the one the night changed.
+    const texts = [
+      "The blue widget costs 10 EUR per unit.",
+      "The blue widget costs 99 EUR per unit.",
+      ...[11, 12, 13, 14, 15, 16].map((n) => `The blue widget costs ${n} EUR per unit.`),
+    ];
+    const titles = ["Price list", "Clearance flyer", "Catalogue", "Brochure", "Newsletter", "Quote", "Order form", "Trade offer"];
+    const pages: Record<string, string> = {};
+    texts.forEach((t, i) => {
+      pages[`concepts/${titles[i].toLowerCase().replace(/ /g, "-")}.md`] = pageText({ title: titles[i], claims: [claim(`acme-sales/blue-widget/price-${i}`, t)] });
+    });
+    const snap = await seedVault(pages);
+    // X and Y 60 degrees apart, the six others between them.
+    const degrees = new Map(texts.map((t, i) => [t, [0, 60, 28, 29, 30, 31, 32, 33][i]]));
+    const embedder: ClaimEmbedder = {
+      identity: async () => "angles",
+      embed: async (batch) => batch.map((t) => Float32Array.from([Math.cos(((degrees.get(t) ?? 90) * Math.PI) / 180), Math.sin(((degrees.get(t) ?? 90) * Math.PI) / 180)])),
+    };
+    const asked: Array<[string, string]> = [];
+    const client = judge(
+      (a, b) => {
+        asked.push([a, b]);
+        return "compatible";
+      },
+    );
+    const r = await runContradictionPass(snap, { stateVault: vaultDir(), scope: ["concepts/price-list.md"], client, embedder, raiseItems: false });
+    expect(r.queried).toBe(1);
+    expect(asked.some(([a, b]) => [a, b].sort().join("|") === [texts[0], texts[1]].sort().join("|"))).toBe(true);
+    expect(r.pairs).toBe(7);
   });
 
   it("queries only the claims in scope", async () => {
