@@ -16,6 +16,7 @@ import { buildLinkGraph, linkDensity, LINKS_PER_PAGE_TARGET, pathAliases, type L
 import { lintVault, type LintReport } from "./lint";
 import { pageSummary } from "./frontmatter";
 import { pageBlurb } from "./page-blurb";
+import { generatedSummary } from "./summary-meta";
 import { isPluginFormatFrontmatter } from "./plugin-files";
 import { hasVerification, type PageFrontmatter, type SchemaError } from "./schema";
 import { currentBranch, commitCount, headCommit, type CommitInfo } from "./git";
@@ -180,6 +181,8 @@ export interface PageDetail {
   errors: SchemaError[] | null;
   body: string;
   summary: string | null;
+  /** The summary the summaries pass wrote from the page's connections and sources (node-summary.ts), for the page header; null when it has none of ours. */
+  nodeSummary: { text: string; method: "model" | "facts"; at: string } | null;
   verified: boolean;
   /** Pages that link here. */
   backlinks: string[];
@@ -230,6 +233,7 @@ function pageDetail(snapshot: VaultSnapshot, rel: string, vault: string): PageDe
     errors: page.parsed.ok ? null : page.parsed.errors,
     body: page.parsed.body,
     summary: pageSummary(page.parsed.body),
+    nodeSummary: fm ? generatedSummary(fm) : null,
     verified: fm ? hasVerification(fm) : false,
     backlinks: [...(graph.inbound.get(rel) ?? [])].sort(),
     links: [...(graph.outbound.get(rel) ?? [])].sort(),

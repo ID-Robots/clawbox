@@ -1203,6 +1203,26 @@ function followReviewItems(vault: string, plan: MergePlan["result"], dryRun: boo
 }
 
 /**
+ * A merge worked out on a snapshot the caller already holds, written nowhere:
+ * what {@link mergePages} would do in a dry run, or the refusal it would
+ * answer (the summaries pass's merge suggestions for duplicate entities).
+ */
+export function previewMerge(
+  snapshot: VaultSnapshot,
+  input: Pick<PageMerge, "into" | "from">,
+  who: EditWho,
+  options: { vault: string; now?: Date },
+): { ok: true; result: MergePlan["result"] } | { ok: false; code: string; message: string } {
+  try {
+    const plan = planMerge(snapshot, options.vault, { ...input, dryRun: true, keepIntoBody: true }, who, nowIso(options.now));
+    return { ok: true, result: plan.result };
+  } catch (err) {
+    if (err instanceof PageEditError) return { ok: false, code: err.code, message: err.message };
+    throw err;
+  }
+}
+
+/**
  * Fold duplicate pages into one: one commit, `merge: <from, …> -> <into>`,
  * that Undo reverses whole. Every claim of the merged pages moves onto `into`
  * as it is (see the header), their sources and names join its own, every

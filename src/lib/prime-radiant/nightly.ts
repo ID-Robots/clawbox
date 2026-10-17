@@ -19,6 +19,11 @@
  *                page, entity enrichment and the decisions register
  *                (structure.ts), written on the branch — deterministic; the
  *                capped cheap-model fallback for record types only online;
+ *   4c. summaries  every node's summary written from its connections and
+ *                sources (node-summary.ts), entities first, on the branch —
+ *                the cheap model within its page and dollar caps when online,
+ *                the facts' own words otherwise; unchanged neighbourhoods
+ *                are skipped;
  *   5. lint      every page the branch changed (after every step that
  *                commits to it); an ERROR holds the night and becomes a
  *                `lint` review item;
@@ -70,6 +75,7 @@ import { effectiveCostRates, readSettings, type PrimeRadiantSettings } from "./s
 import { readRetiredLedger, stateDbExists } from "./state-db";
 import { rejudgeOpenContradictions } from "./rejudge";
 import { runStructure, type StructureNowResult } from "./structure-run";
+import { runSummaries, type SummariesRunResult } from "./node-summary-run";
 import { readVaultSnapshot, vaultInitialised, vaultOperation } from "./vault";
 
 export const DREAM_BRANCH_PREFIX = "dream/";
@@ -93,6 +99,12 @@ export interface NightlySummary {
   structure:
     | (Pick<StructureNowResult, "leaves" | "leavesInHubs" | "recordHubs" | "counterpartyHubs" | "domainHubs" | "root" | "entitiesEnriched" | "claimsAdded" | "decisions" | "registerPages" | "skippedVerified" | "linksMedianBefore" | "linksMedianAfter" | "written" | "created"> & {
         model: StructureNowResult["model"];
+      })
+    | { skipped: string };
+  summaries:
+    | (Pick<SummariesRunResult, "planned" | "written" | "byModel" | "byFacts" | "waiting" | "unchanged" | "rejected" | "rejectedPages" | "skippedVerified" | "keptPerson" | "model"> & {
+        mergeSuggestions: number;
+        domainMismatches: number;
       })
     | { skipped: string };
   gate: { touched: string[] };
@@ -332,6 +344,7 @@ function emptySummary(): NightlySummary {
     },
     opus: { skipped: "not_run" },
     structure: { skipped: "not_run" },
+    summaries: { skipped: "not_run" },
     gate: { touched: [] },
     golden: { skipped: "not_run" },
     reviewItems: { raised: 0 },
@@ -541,6 +554,38 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
       } catch (err) {
         summary.structure = { skipped: "failed" };
         notes.push(`The structure pass could not be saved: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
+      }
+    }
+    // 4c. summaries: every node's summary from its connections and sources, on the branch (after the structure pass, whose hubs and enrichment it reads)
+    if (!settings.summaries.enabled) summary.summaries = { skipped: "disabled" };
+    else {
+      try {
+        const s = await runSummaries(
+          await readVaultSnapshot(wt),
+          async (message, fn) => ({ commit: (await vaultOperation(message, fn, { vault: wt, now: now() })).commit }),
+          { stateVault: vault, settings, rates, client: deps.client, online, runId: run.id, now },
+        );
+        summary.summaries = {
+          planned: s.planned,
+          written: s.written,
+          byModel: s.byModel,
+          byFacts: s.byFacts,
+          waiting: s.waiting,
+          unchanged: s.unchanged,
+          rejected: s.rejected,
+          rejectedPages: s.rejectedPages,
+          skippedVerified: s.skippedVerified,
+          keptPerson: s.keptPerson,
+          model: s.model,
+          mergeSuggestions: s.mergeSuggestions.length,
+          domainMismatches: s.domainMismatches.length,
+        };
+        run.usdEstimate += s.model.usdEstimate;
+        if (s.written > 0) notes.push(`The summaries pass wrote ${s.written} summar${s.written === 1 ? "y" : "ies"} (${s.byModel} by the model, ${s.byFacts} from facts).`);
+        if (s.mergeSuggestions.length > 0) notes.push(`${s.mergeSuggestions.length} duplicate entit${s.mergeSuggestions.length === 1 ? "y looks" : "ies look"} worth merging (Maintenance → summaries, dry run, lists them).`);
+      } catch (err) {
+        summary.summaries = { skipped: "failed" };
+        notes.push(`The summaries pass could not be saved: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
       }
     }
     if (summary.ingest && "jobId" in summary.ingest) {
