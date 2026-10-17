@@ -70,9 +70,10 @@ let root: string;
 let openclawHome: string;
 let configPath: string;
 
-function run(): { status: number; stdout: string; stderr: string } {
+function run(store?: string): { status: number; stdout: string; stderr: string } {
   const program = [
     "set -euo pipefail",
+    ...(store !== undefined ? [`CLAWBOX_DEVICE_STORE=${JSON.stringify(store)}`] : []),
     `CLAWBOX_ROOT=${JSON.stringify(root)}`,
     `OPENCLAW_CONFIG=${JSON.stringify(configPath)}`,
     `OPENCLAW_HOME_DIR=${JSON.stringify(openclawHome)}`,
@@ -120,6 +121,51 @@ afterEach(() => {
 });
 
 d("gateway-pre-start.sh — the protected-path deny hook", () => {
+  describe("the owner's switch (TASK-1661)", () => {
+    function store(body: string): string {
+      const p = path.join(dir, "config.json");
+      writeFileSync(p, body);
+      return p;
+    }
+
+    it("installs but does not enable the plugin when the switch is off, and survives the next boot", () => {
+      const off = store(JSON.stringify({ clawbox_path_guard_enabled: false }));
+      let r = run(off);
+      expect(r.status).toBe(0);
+      expect(installedFiles()).toContain("path-guard.mjs");
+      expect(enabled()).toBe(false);
+      expect(r.stderr).toContain("switched clawbox-path-guard off");
+      r = run(off);
+      expect(enabled()).toBe(false);
+    });
+
+    it("enables it again when the switch goes back on", () => {
+      const p = store(JSON.stringify({ clawbox_path_guard_enabled: false }));
+      run(p);
+      expect(enabled()).toBe(false);
+      writeFileSync(p, JSON.stringify({ clawbox_path_guard_enabled: true }));
+      const r = run(p);
+      expect(enabled()).toBe(true);
+      expect(r.stderr).toBe("");
+    });
+
+    it("treats an absent key or store as on", () => {
+      run(store("{}"));
+      expect(enabled()).toBe(true);
+      run(path.join(dir, "missing.json"));
+      expect(enabled()).toBe(true);
+    });
+
+    it("leaves the entry alone when the store exists and cannot be read", () => {
+      run(store(JSON.stringify({ clawbox_path_guard_enabled: false })));
+      expect(enabled()).toBe(false);
+      const r = run(store("{torn"));
+      expect(r.status).toBe(0);
+      expect(enabled()).toBe(false);
+      expect(r.stdout).toContain("left exactly as it is");
+    });
+  });
+
   it("installs the plugin with its rule table and enables it", () => {
     const r = run();
     expect(r.status).toBe(0);
