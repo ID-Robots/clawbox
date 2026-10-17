@@ -20,6 +20,7 @@ import PrimeRadiantBrowse from "./PrimeRadiantBrowse";
 import PrimeRadiantReview from "./PrimeRadiantReview";
 import PrimeRadiantHistory from "./PrimeRadiantHistory";
 import PrimeRadiantLint from "./PrimeRadiantLint";
+import PrimeRadiantQuestions from "./PrimeRadiantQuestions";
 import PrimeRadiantIngest from "./PrimeRadiantIngest";
 import PrimeRadiantSettings from "./PrimeRadiantSettings";
 import PrimeRadiantUsage from "./PrimeRadiantUsage";
@@ -65,10 +66,12 @@ function rememberRepairNotice(): void {
  * shown with a retry button rather than retried on its own — it writes the
  * agent's configuration, and doing that in a loop is the wrong failure mode.
  *
- * Five tabs: Map (the start page of a vault with pages; an empty vault opens
+ * Six tabs: Map (the start page of a vault with pages; an empty vault opens
  * on Pages, whose empty state leads to Add), Pages (the list and its search,
  * each page with its history), Review (open questions, then failed checks),
- * Add, and Settings (with the token usage). The app shows no money anywhere.
+ * Questions (the golden questions and the wiki's % correct, and each owner's
+ * daily questions), Add, and Settings (with the token usage). The app shows
+ * no money anywhere.
  */
 
 /** A status the window can draw: a vault that exists carries its counts and its wiring. */
@@ -268,6 +271,16 @@ export default function PrimeRadiantApp() {
             <span>{t("primeRadiant.countPages", { n: status.vault.pages })}</span>
             <span>{t("primeRadiant.countClaims", { n: status.vault.claims })}</span>
             <span>{t("primeRadiant.countVerified", { n: status.vault.verifiedPages })}</span>
+            {typeof status.golden?.last?.percent === "number" && (
+              <button
+                type="button"
+                className="hover:text-[var(--text-secondary)] cursor-pointer"
+                onClick={() => showTab("questions")}
+                data-testid="prime-radiant-count-accuracy"
+              >
+                {t("primeRadiant.countAccuracy", { percent: status.golden.last.percent })}
+              </button>
+            )}
           </div>
         )}
       </header>
@@ -390,6 +403,16 @@ export default function PrimeRadiantApp() {
                   <PrimeRadiantLint revision={revision} onOpenPage={openPage} />
                 </section>
               </div>
+            )}
+            {tab === "questions" && (
+              <PrimeRadiantQuestions
+                revision={revision}
+                domains={status.vault.domains}
+                golden={status.golden}
+                onChanged={changed}
+                onOpenPage={openPage}
+                onOpenReview={() => showTab("review")}
+              />
             )}
             {tab === "ingest" && <PrimeRadiantIngest onChanged={changed} />}
             {tab === "settings" && (

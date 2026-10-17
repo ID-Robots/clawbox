@@ -137,6 +137,30 @@ class FakeEventSource {
 
 interface Call { url: string; method: string; body: unknown }
 
+const GOLDEN_Q = {
+  id: "gq-00000000000a", question: "What does the blue widget cost?", expected: "10 EUR", owner: "Иван Иванов", domain: "sales",
+  claimId: null, page: "entities/acme-widgets.md", createdAt: "2026-01-02T10:00:00.000Z", updatedAt: "2026-01-02T10:00:00.000Z",
+};
+const GOLDEN_SCORE = {
+  questions: 1,
+  last: { id: "run-0123456789ab", runId: "run-0123456789ab", at: "2026-01-05T03:10:00.000Z", asked: 4, correct: 3, wrong: 1, missing: 0, stale: 0, failed: 0, percent: 75 },
+  trend: [{ at: "2026-01-04T03:10:00.000Z", percent: 50 }, { at: "2026-01-05T03:10:00.000Z", percent: 75 }],
+  change: 25,
+};
+const DAILY_OWNERS = {
+  initialised: true, outbound: false, perOwner: 5, owner: null, language: null, questions: [],
+  owners: [{ owner: "Иван Иванов", domains: ["sales"], pages: 2, language: "bg", waiting: 1 }],
+};
+const DAILY_MINE = {
+  ...DAILY_OWNERS, owner: "Иван Иванов", language: "bg",
+  questions: [{
+    kind: "claim", owner: "Иван Иванов", domain: "sales", page: "entities/acme-widgets.md", title: "Acme Widgets Ltd", claimId: "sales/acme-widgets/hq-city",
+    text: "Based in Springfield.", question: "Още ли е вярно? „Based in Springfield.“ (Acme Widgets Ltd)",
+    answer: { tool: "prime_radiant_claim_verify", args: { id: "sales/acme-widgets/hq-city" } },
+  }],
+};
+let goldenQuestions: unknown[];
+
 let status: Record<string, unknown>;
 let calls: Call[];
 let searchStatus: number;
@@ -235,6 +259,17 @@ function installFetch() {
       if (refusal) return ok({ error: "The job could not be stopped", code: "stop_failed" }, refusal);
       return ok({ stopping: true, job: RUNNING_JOB }, 202);
     }
+    if (url === `${p}/golden` && method === "POST") {
+      const question = { ...GOLDEN_Q, id: "gq-00000000000b", ...(body as Record<string, unknown>) };
+      goldenQuestions = [...goldenQuestions, question];
+      return ok({ question, commit: "c".repeat(40) }, 201);
+    }
+    if (url === `${p}/golden`) return ok({ questions: goldenQuestions, verdicts: { [GOLDEN_Q.id]: { verdict: "correct", why: "same", at: "2026-01-05T03:10:00.000Z" } }, score: GOLDEN_SCORE });
+    if (url.startsWith(`${p}/golden/`) && method === "DELETE") {
+      goldenQuestions = goldenQuestions.filter((q) => !url.endsWith((q as { id: string }).id));
+      return ok({ question: GOLDEN_Q, commit: "d".repeat(40) });
+    }
+    if (url.startsWith(`${p}/daily`)) return ok(url.includes("owner=") ? DAILY_MINE : DAILY_OWNERS);
     if (url === `${p}/settings`) {
       const settings = {
         ingest: { exclude: [".git", "node_modules"], skipCodeProjects, parallel: 128, folders: [] },
@@ -309,6 +344,7 @@ beforeEach(() => {
   initRepair = { ran: true, cleaned: [], removed: [], commit: null };
   window.localStorage.removeItem("clawbox.primeRadiant.repairNoticeSeen");
   listed = [LIST_ENTRY];
+  goldenQuestions = [GOLDEN_Q];
   FakeEventSource.last = null;
   installFetch();
   // The Map's canvas: no WebGL or 2D context in jsdom (its own suite mocks one), so it lists the pages.
@@ -405,12 +441,12 @@ describe("PrimeRadiantApp", () => {
     expect(calls.some((c) => c.url === "/setup-api/prime-radiant/graph")).toBe(true);
   });
 
-  it("has five tabs: Map, Pages, Review, Add and Settings", async () => {
+  it("has six tabs: Map, Pages, Review, Questions, Add and Settings", async () => {
     await mount();
     await screen.findByTestId("prime-radiant-tab-map");
     const labels = screen.getAllByRole("tab").map((tab) => tab.textContent ?? "");
-    expect(labels).toHaveLength(5);
-    ["Map", "Pages", "Review", "Add", "Settings"].forEach((label, i) => expect(labels[i].endsWith(label)).toBe(true));
+    expect(labels).toHaveLength(6);
+    ["Map", "Pages", "Review", "Questions", "Add", "Settings"].forEach((label, i) => expect(labels[i].endsWith(label)).toBe(true));
   });
 
   it("lists the failed checks under Review, after the questions", async () => {
@@ -1066,5 +1102,53 @@ describe("prJson", () => {
       },
     })));
     await expect(prJson("/setup-api/prime-radiant/pages", { signal: ctl.signal })).rejects.toMatchObject({ name: "AbortError" });
+  });
+});
+
+describe("PrimeRadiantApp — Questions", () => {
+  it("shows the accuracy with its change and trend, keeps the golden questions, and lists an owner's daily questions in their language", async () => {
+    status = { ...STATUS, golden: GOLDEN_SCORE };
+    mount();
+    expect(await screen.findByTestId("prime-radiant-count-accuracy")).toHaveTextContent("Accuracy 75%");
+    await openTab("questions");
+    expect(await screen.findByTestId("prime-radiant-accuracy-percent")).toHaveTextContent("75% correct");
+    expect(screen.getByTestId("prime-radiant-accuracy-change")).toHaveTextContent("+25 points since the last check");
+    expect(screen.getByTestId("prime-radiant-accuracy-trend")).toBeInTheDocument();
+    const row = await screen.findByTestId("prime-radiant-golden-row");
+    expect(row).toHaveAttribute("data-verdict", "correct");
+    expect(row).toHaveTextContent("What does the blue widget cost?");
+
+    fireEvent.click(screen.getByTestId("prime-radiant-golden-add"));
+    fireEvent.change(screen.getByTestId("prime-radiant-golden-question"), { target: { value: "Where is Acme based?" } });
+    fireEvent.change(screen.getByTestId("prime-radiant-golden-expected"), { target: { value: "Springfield" } });
+    fireEvent.click(screen.getByTestId("prime-radiant-golden-save"));
+    await waitFor(() =>
+      expect(calls.find((c) => c.url === "/setup-api/prime-radiant/golden" && c.method === "POST")?.body).toEqual({ question: "Where is Acme based?", expected: "Springfield", domain: "sales" }),
+    );
+    await waitFor(() => expect(screen.getAllByTestId("prime-radiant-golden-row")).toHaveLength(2));
+
+    fireEvent.click((await screen.findAllByTestId("prime-radiant-golden-delete"))[0]);
+    fireEvent.click(await screen.findByTestId("prime-radiant-golden-delete-confirm"));
+    await waitFor(() => expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith(`/golden/${GOLDEN_Q.id}`))).toBe(true));
+
+    const daily = await screen.findAllByTestId("prime-radiant-daily-question");
+    expect(daily).toHaveLength(1);
+    expect(daily[0]).toHaveAttribute("data-kind", "claim");
+    expect(daily[0]).toHaveTextContent("Още ли е вярно?");
+    expect(screen.getByTestId("prime-radiant-daily-language")).toHaveValue("bg");
+    const outbound = screen.getByTestId("prime-radiant-daily-outbound");
+    expect(outbound).not.toBeChecked();
+    expect(screen.getByTestId("prime-radiant-daily")).toHaveTextContent("Nothing is sent on its own.");
+    fireEvent.click(outbound);
+    await waitFor(() => expect(calls.find((c) => c.method === "PUT" && c.url.endsWith("/settings"))?.body).toEqual({ verification: { outbound: true } }));
+  });
+
+  it("says so when there are no golden questions, no score and no owners yet", async () => {
+    goldenQuestions = [];
+    mount();
+    await openTab("questions");
+    expect(await screen.findByTestId("prime-radiant-golden-empty")).toBeInTheDocument();
+    expect(screen.getByTestId("prime-radiant-accuracy")).toHaveTextContent("Not checked yet");
+    expect(screen.queryByTestId("prime-radiant-count-accuracy")).toBeNull();
   });
 });

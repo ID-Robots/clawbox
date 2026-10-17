@@ -27,6 +27,19 @@ import type { PageFrontmatter } from "./schema";
 export const DAILY_LANGUAGES = ["en", "bg", "de", "es", "fr", "it", "ja", "nl", "sv", "zh"] as const;
 export type DailyLanguage = (typeof DAILY_LANGUAGES)[number];
 export const DEFAULT_DAILY_LANGUAGE: DailyLanguage = "en";
+/** Each language by its own name, the same in every UI language. */
+export const DAILY_LANGUAGE_NAMES: Readonly<Record<DailyLanguage, string>> = Object.freeze({
+  en: "English",
+  bg: "Български",
+  de: "Deutsch",
+  es: "Español",
+  fr: "Français",
+  it: "Italiano",
+  ja: "日本語",
+  nl: "Nederlands",
+  sv: "Svenska",
+  zh: "中文",
+});
 
 /** Questions an owner gets a day, by default. */
 export const DEFAULT_DAILY_PER_OWNER = 5;
