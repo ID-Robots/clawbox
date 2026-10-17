@@ -25,9 +25,47 @@ export function isClaimId(value: unknown): value is string {
   return typeof value === "string" && value.length <= 3 * MAX_SLUG_CHARS + 2 && CLAIM_ID_RE.test(value);
 }
 
-/** Any text to lowercase kebab-case (ASCII; accents folded, the rest dropped). */
+/**
+ * Cyrillic to Latin, lowercase: Bulgarian's official system (the 2009
+ * Transliteration Act — щ sht, ъ a, ь y, ю yu, я ya, and `-ия` at a word's end
+ * `ia`) for every letter Bulgarian has, then the Russian, Ukrainian,
+ * Belarusian, Serbian and Macedonian letters it lacks by their own common
+ * Latin forms. A letter the table does not know is left for the slugger to drop.
+ */
+const CYRILLIC_TO_LATIN: Readonly<Record<string, string>> = {
+  а: "a", б: "b", в: "v", г: "g", д: "d", е: "e", ж: "zh", з: "z", и: "i", й: "y",
+  к: "k", л: "l", м: "m", н: "n", о: "o", п: "p", р: "r", с: "s", т: "t", у: "u",
+  ф: "f", х: "h", ц: "ts", ч: "ch", ш: "sh", щ: "sht", ъ: "a", ь: "y", ю: "yu", я: "ya",
+  // Russian / Belarusian
+  ё: "yo", ы: "y", э: "e", ў: "u",
+  // Ukrainian
+  є: "ye", і: "i", ї: "yi", ґ: "g",
+  // Serbian / Macedonian
+  ђ: "dj", ј: "j", љ: "lj", њ: "nj", ћ: "c", џ: "dz", ѓ: "gj", ќ: "kj", ѕ: "dz",
+};
+
+const CYRILLIC_RE = /[Ѐ-ӿ]/;
+const CYRILLIC_LETTERS_RE = /[Ѐ-ӿ]/g;
+/** `-ия` closing a word (България → bulgaria, София → sofia). */
+const WORD_FINAL_IYA_RE = /ия(?![\p{L}\p{M}\p{N}])/gu;
+
+/** Cyrillic letters in `text` written in Latin (the rest untouched). Deterministic. */
+export function transliterateCyrillic(text: string): string {
+  if (!CYRILLIC_RE.test(text)) return text;
+  return text
+    .normalize("NFC")
+    .toLowerCase()
+    .replace(WORD_FINAL_IYA_RE, "ia")
+    .replace(CYRILLIC_LETTERS_RE, (ch) => CYRILLIC_TO_LATIN[ch] ?? CYRILLIC_TO_LATIN[ch.normalize("NFD")[0]] ?? ch);
+}
+
+/**
+ * Any text to lowercase kebab-case ASCII: Cyrillic transliterated
+ * ({@link transliterateCyrillic}), accents folded, the rest dropped; at most
+ * `max` characters, never cut mid-dash; `x` when nothing is left.
+ */
 export function slugify(text: string, max = MAX_SLUG_CHARS): string {
-  const slug = text
+  const slug = transliterateCyrillic(text)
     .normalize("NFKD")
     .replace(/[̀-ͯ]/g, "")
     .toLowerCase()

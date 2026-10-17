@@ -36,6 +36,45 @@ describe("claim id namespace", () => {
     expect(makeClaimId("Acme Sales", "Acme Widgets", "Blue price")).toBe("acme-sales/acme-widgets/blue-price");
   });
 
+  it("transliterates Bulgarian titles by the official system instead of dropping them", () => {
+    expect(slugify("Граждански договор — Петър Ангелов")).toBe("grazhdanski-dogovor-petar-angelov");
+    expect(slugify("Щастие, юни, ябълка")).toBe("shtastie-yuni-yabalka");
+    expect(slugify("Жълт цвят, чаша, шише, йога, Мальовица")).toBe("zhalt-tsvyat-chasha-shishe-yoga-malyovitsa");
+    // `-ия` closing a word is `ia`; inside one it is `iya`.
+    expect(slugify("Компания София")).toBe("kompania-sofia");
+    expect(slugify("Ияков")).toBe("iyakov");
+    // Upper case, a decomposed й and ѝ (и with a grave accent) read as the letters they are.
+    expect(slugify("ДОГОВОР ЗА НАЕМ")).toBe("dogovor-za-naem");
+    expect(slugify("Край на ЮЛИ")).toBe("kray-na-yuli");
+    expect(slugify("Кра\u0438\u0306 и \u045d")).toBe("kray-i-i");
+  });
+
+  it("transliterates Russian, Ukrainian and Serbian letters Bulgarian lacks, and mixed scripts", () => {
+    expect(slugify("Ёлка, мыло, эхо")).toBe("yolka-mylo-eho");
+    expect(slugify("Київ, Євген, ґанок")).toBe("kiyiv-yevgen-ganok");
+    expect(slugify("Ђорђе Љубић Њеш Џеп")).toBe("djordje-ljubic-njesh-dzep");
+    expect(slugify("Договор с Acme Ltd № 12 (2026)")).toBe("dogovor-s-acme-ltd-no-12-2026");
+    expect(slugify("Globex — Фактура 0042")).toBe("globex-faktura-0042");
+    // Other scripts are still dropped; nothing at all is still `x`.
+    expect(slugify("東京")).toBe("x");
+    expect(slugify("Отчёт 東京")).toBe("otchyot");
+  });
+
+  it("keeps the length cap after transliteration and never ends on a dash", () => {
+    const long = slugify("Щъркел ".repeat(30), 80);
+    expect(long.length).toBeLessThanOrEqual(80);
+    expect(long.startsWith("shtarkel-shtarkel")).toBe(true);
+    expect(long.endsWith("-")).toBe(false);
+    expect(slugify("Щъ щъ", 5)).toBe("shta");
+    expect(slugify("Щ", 2)).toBe("sh");
+  });
+
+  it("is deterministic", () => {
+    const title = "Протокол № 3 от общото събрание — Globex ЕООД";
+    expect(slugify(title)).toBe(slugify(title));
+    expect(slugify(title)).toBe("protokol-no-3-ot-obshtoto-sabranie-globex-eood");
+  });
+
   it("finds collisions across pages and inside one", () => {
     const index = buildClaimIndex([page("a.md", ["d/e/f", "d/e/g"]), page("b.md", ["d/e/f"]), page("c.md", ["d/x/y", "d/x/y"])]);
     expect(claimCollisions(index).map((c) => c.id)).toEqual(["d/e/f", "d/x/y"]);
