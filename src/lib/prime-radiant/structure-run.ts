@@ -46,8 +46,18 @@ export interface ClassifyCandidate {
   path: string;
   title: string;
   facts: string[];
-  /** Hash of what the model is shown: a change asks again. */
+  /** {@link changeKey} of what the model is shown: a change asks again. */
   key: string;
+}
+
+/**
+ * What says a page changed since the model last saw it: its path and a
+ * SHA-256 digest of the title and facts it would be shown. A content
+ * fingerprint for change detection, kept in the box's own state database.
+ */
+export function changeKey(path: string, title: string, factTexts: readonly string[]): string {
+  const digest = crypto.createHash("sha256").update(JSON.stringify([title, factTexts])).digest("hex");
+  return `${path}@${digest.slice(0, 16)}`;
 }
 
 /** Pages the rules could not type that look like records and carry a date, path order. */
@@ -60,10 +70,13 @@ export function modelCandidates(pages: readonly VaultPage[], remembered: Readonl
     // A verified page is never rewritten (structure.ts), so a type the model gave it would never be kept: asking again every night would spend the cap on it.
     if (hasVerification(fm)) continue;
     if (classifyRecord(p.path, fm) || !recordDate(fm).month) continue;
-    const title = redactText(fm.title.slice(0, 200)).text;
-    const facts = fm.claims.slice(0, CLASSIFY_FACTS).map((c) => redactText(c.text.slice(0, CLASSIFY_FACT_CHARS)).text);
-    const key = `${p.path}@${crypto.createHash("sha1").update(JSON.stringify([title, facts])).digest("hex").slice(0, 12)}`;
+    const shownTitle = fm.title.slice(0, 200);
+    const shownFacts = fm.claims.slice(0, CLASSIFY_FACTS).map((c) => c.text.slice(0, CLASSIFY_FACT_CHARS));
+    const key = changeKey(p.path, shownTitle, shownFacts);
     if (remembered.has(key)) continue;
+    // Redacted only now, for the call: the change key above is the page's own, kept on the box.
+    const title = redactText(shownTitle).text;
+    const facts = shownFacts.map((t) => redactText(t).text);
     out.push({ path: p.path, title, facts, key });
   }
   return out.sort((a, b) => a.path.localeCompare(b.path));

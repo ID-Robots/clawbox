@@ -46,7 +46,7 @@ import {
   upsertBlock,
   type StructureOptions,
 } from "@/lib/prime-radiant/structure";
-import { buildClassifyPrompt, classifyWithModel, modelCandidates, parseClassifyResponse } from "@/lib/prime-radiant/structure-run";
+import { buildClassifyPrompt, changeKey, classifyWithModel, modelCandidates, parseClassifyResponse } from "@/lib/prime-radiant/structure-run";
 import { DEFAULT_COST_RATES } from "@/lib/prime-radiant/cost-rates";
 import { FlashCallError, type FlashClient } from "@/lib/prime-radiant/flash-client";
 import { readCosts } from "@/lib/prime-radiant/ingest-store";
@@ -566,6 +566,10 @@ describe("the cheap-model fallback", () => {
     const asked = modelCandidates(snap.pages);
     expect(asked.map((c) => c.path)).toEqual(["concepts/statement.md"]);
     expect(modelCandidates(snap.pages, new Set([asked[0].key]))).toEqual([]);
+    // The change key: the path and a SHA-256 digest of what the model is shown; a changed fact is a new key.
+    expect(asked[0].key).toBe(changeKey("concepts/statement.md", "Statement 2026-09 Globex Ltd", ["The statement lists four movements."]));
+    expect(asked[0].key).toMatch(/^concepts\/statement\.md@[0-9a-f]{16}$/);
+    expect(changeKey("concepts/statement.md", "Statement 2026-09 Globex Ltd", ["The statement lists five movements."])).not.toBe(asked[0].key);
     // A verified page is never rewritten, so a type the model gave it would never be kept: it is never asked (else every night's cap goes to it again).
     const verified = snapshot({ "concepts/statement-v.md": leaf("Statement 2026-09 Initech GmbH", ["The statement lists two movements."], { verified: { at: "2026-09-30", by: "owner" } }) });
     expect(modelCandidates(verified.pages)).toEqual([]);
