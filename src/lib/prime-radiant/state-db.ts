@@ -19,7 +19,7 @@ import { openSqlite } from "@/lib/openclaw-session-store";
 import path from "@/lib/runtime-path";
 
 export const STATE_DB_FILE = "prime-radiant.sqlite";
-export const STATE_SCHEMA_VERSION = 7;
+export const STATE_SCHEMA_VERSION = 8;
 
 export function stateDbPathFor(vault: string): string {
   return path.join(path.dirname(vault), STATE_DB_FILE);
@@ -206,6 +206,24 @@ ALTER TABLE costs ADD COLUMN basis TEXT NOT NULL DEFAULT 'estimate';
 `;
 
 /**
+ * v8 — what an owner-verified claim left behind: `stale_claims` holds every
+ * claim the judge found against a claim the owner verified. The verified one
+ * wins, so the other is no question for the owner but a lint warning on its
+ * own page (lint.ts `stale-against-verified`), until it is rewritten or gone.
+ */
+const SCHEMA_V8 = `
+CREATE TABLE IF NOT EXISTS stale_claims (
+  claim_id           TEXT NOT NULL,
+  page               TEXT NOT NULL,
+  verified_claim_id  TEXT NOT NULL,
+  verified_page      TEXT NOT NULL,
+  why                TEXT,
+  at                 TEXT NOT NULL,
+  PRIMARY KEY (claim_id, verified_claim_id)
+);
+`;
+
+/**
  * Run `fn` in one transaction. A failed ROLLBACK (SQLite may already have
  * ended the transaction after an I/O or disk-full error) is logged and never
  * replaces the error that caused it.
@@ -243,6 +261,7 @@ export function openStateDb(vault: string): DatabaseSync {
       [5, SCHEMA_V5],
       [6, SCHEMA_V6],
       [7, SCHEMA_V7],
+      [8, SCHEMA_V8],
     ];
     for (const [target, sql] of steps) {
       if (version >= target) continue;

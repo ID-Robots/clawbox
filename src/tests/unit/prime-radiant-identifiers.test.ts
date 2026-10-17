@@ -19,7 +19,7 @@ import {
   titleIdentifiers,
   type PairSide,
 } from "@/lib/prime-radiant/identifiers";
-import { rejudgeOpenContradictions, rejudgeReason, touchesVerified, verifiedIndex } from "@/lib/prime-radiant/rejudge";
+import { identifierReason, rejudgeOpenContradictions, rejudgeReason, rejudgeVerdict, touchesVerified, verifiedIndex } from "@/lib/prime-radiant/rejudge";
 import { addReviewItem, getReviewItem, type ReviewCandidate } from "@/lib/prime-radiant/review-store";
 import { claimSubject } from "@/lib/prime-radiant/subject";
 import { claim, pageText, snapshot } from "../helpers/prime-radiant-fixtures";
@@ -259,8 +259,10 @@ describe("rejudge and record pages", () => {
     const receipts = raise(cand("sources/adnet-receipt-0604.md", RECEIPT_4.text), cand("sources/adnet-receipt-0607.md", RECEIPT_7.text));
     const vat = raise(cand("sources/invoice-7000000202.md", VAT_A.text), cand("sources/customs-7712009999.md", VAT_B.text));
     const dated = raise(cand("sources/payment-receipt-0321.md", DATED_B.text), cand("sources/invoice-7000000192.md", DATED_A.text));
+    // Not a record on one side, but the two claims name only a document's fields ("The total amount due") on pages
+    // with different names: different subjects once template words are out.
     const notRecord = raise(cand("sources/correction-4100000318.md", CORRECTION.text), cand("entities/acme-widgets-pro.md", DRAFT.text));
-    // Different records, but a person verified one side: never closed here.
+    // Different records, and a person verified one side: the verified claim is untouched, the item closes for its reason.
     const verifiedSide = raise(
       cand("sources/customs-7712004455.md", "The declaration lists 4 parcels."),
       cand("sources/export-redacted.md", "The declaration lists 6 parcels.", { evidence: [{ kind: "verified-claim", page: "sources/export-redacted.md" }] }),
@@ -272,23 +274,28 @@ describe("rejudge and record pages", () => {
     const verifiedPage = raise(cand("sources/receipt-verified-page.md", "The receipt total is €0.05."), cand("sources/adnet-receipt-0604.md", "The receipt total is €0.07."));
 
     const dry = rejudgeOpenContradictions(vault, snap, { dryRun: true });
-    expect(dry).toMatchObject({ checked: 9, closed: 3, keptVerified: 3, dryRun: true });
+    expect(dry).toMatchObject({ checked: 9, closed: 7, keptVerified: 0, stillOpen: 2, dryRun: true });
     expect(getReviewItem(vault, declarations.id)?.status).toBe("open");
 
     const done = rejudgeOpenContradictions(vault, snap);
-    expect(done).toMatchObject({ checked: 9, closed: 3, keptVerified: 3 });
-    expect(Object.fromEntries(done.sample.map((s) => [s.id, s.reason]))).toEqual({
+    expect(done).toMatchObject({ checked: 9, closed: 7, keptVerified: 0, stillOpen: 2 });
+    const reasons = Object.fromEntries(done.sample.map((s) => [s.id, s.reason]));
+    expect(reasons).toMatchObject({
       [declarations.id]: DIFFERENT_RECORDS,
       [drafts.id]: DIFFERENT_RECORDS,
       [receipts.id]: "different dates",
+      [verifiedSide.id]: DIFFERENT_RECORDS,
+      [verifiedId.id]: DIFFERENT_RECORDS,
     });
+    expect(done.sample.find((s) => s.id === notRecord.id)?.code).toBe("different-subjects");
     for (const item of [declarations, drafts]) {
       expect(getReviewItem(vault, item.id)?.resolution).toMatchObject({ action: "dismiss", by: "auto", note: RECORD_FILTER_NOTE });
     }
     expect(getReviewItem(vault, receipts.id)?.resolution).toMatchObject({ action: "dismiss", note: IDENTIFIER_FILTER_NOTE });
-    for (const item of [vat, dated, notRecord, verifiedSide, verifiedId, verifiedPage]) expect(getReviewItem(vault, item.id)?.status, item.id).toBe("open");
+    // One invoice on two pages: still the owner's question.
+    for (const item of [vat, dated]) expect(getReviewItem(vault, item.id)?.status, item.id).toBe("open");
     // Nothing left to close: a second run changes nothing.
-    expect(rejudgeOpenContradictions(vault, snap)).toMatchObject({ checked: 6, closed: 0, keptVerified: 3 });
+    expect(rejudgeOpenContradictions(vault, snap)).toMatchObject({ checked: 2, closed: 0, keptVerified: 0, stillOpen: 2 });
   });
 
   it("reads the page type: an entity page is never a record", () => {
@@ -298,7 +305,10 @@ describe("rejudge and record pages", () => {
       ["c.md", { title: DRAFT.title!, type: "source" }],
     ]);
     const item = (b: string) => ({ kind: "contradiction" as const, candidates: [cand("sources/customs-7712004455.md", CORRECTION.text, { page: "a.md" }), cand("sources/customs-7712004455.md", DRAFT.text, { page: b })] });
-    expect(rejudgeReason(item("b.md"), pages)).toBeNull();
+    // The identifier filter alone: an entity page is no record.
+    expect(identifierReason(item("b.md"), pages)).toBeNull();
+    // The full rules: two claims naming only a document's fields, on pages of different names, are different subjects.
+    expect(rejudgeVerdict({ ...item("b.md"), createdAt: "" }, pages)?.code).toBe("different-subjects");
     expect(rejudgeReason(item("c.md"), pages)).toBe(DIFFERENT_RECORDS);
     // A title alone (no type known) is read as before.
     expect(rejudgeReason(item("c.md"), new Map([["a.md", CORRECTION.title!], ["c.md", DRAFT.title!]]))).toBe(DIFFERENT_RECORDS);

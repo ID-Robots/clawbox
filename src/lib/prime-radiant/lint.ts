@@ -52,6 +52,7 @@ export const LINT_RULES = [
   "frontmatter-invalid",
   "claim-id-collision",
   "claim-id-retired-reuse",
+  "stale-against-verified",
 ] as const;
 export type LintRule = (typeof LINT_RULES)[number];
 
@@ -112,6 +113,8 @@ export interface LintOptions {
   scope?: readonly string[];
   /** Retired ids the state database remembers. */
   ledgerRetired?: Iterable<string>;
+  /** Claims the judge found against an owner-verified claim (verify.ts `readStaleClaims`): warned about on their pages. */
+  staleClaims?: ReadonlyArray<{ claimId: string; page: string; verifiedClaimId: string; verifiedPage: string; at: string }>;
   now?: Date;
 }
 
@@ -400,6 +403,25 @@ export function lintVault(snapshot: VaultSnapshot, options: LintOptions = {}): L
         }),
       );
     }
+  }
+
+  // A claim the judge found against an owner-verified one: the verified claim wins, this one is stale — while it
+  // stands as it stood then (not rewritten since) and the claim it disagrees with is still verified.
+  for (const note of options.staleClaims ?? []) {
+    if (!inScope(note.page)) continue;
+    const here = (index.active.get(note.claimId) ?? []).find((l) => l.page === note.page);
+    const at = Date.parse(note.at);
+    if (!here || (Number.isFinite(at) && Date.parse(here.claim.updatedAt) > at)) continue;
+    if (!(index.active.get(note.verifiedClaimId) ?? []).some((l) => !!l.claim.verified || l.claim.status === "verified")) continue;
+    findings.push(
+      finding(
+        "stale-against-verified",
+        "warning",
+        note.page,
+        `claim ${note.claimId} disagrees with the owner-verified claim ${note.verifiedClaimId} on ${note.verifiedPage}; the verified claim wins`,
+        { claimId: note.claimId, verifiedClaimId: note.verifiedClaimId, verifiedPage: note.verifiedPage },
+      ),
+    );
   }
 
   findings.sort((a, b) => a.path.localeCompare(b.path) || LINT_RULES.indexOf(a.rule) - LINT_RULES.indexOf(b.rule));

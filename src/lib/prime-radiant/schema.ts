@@ -63,8 +63,21 @@ export interface Claim {
   evidence: ClaimEvidence[];
   /** Set by a human verification only. */
   verified?: Stamp | null;
+  /**
+   * When the fact holds, when its source says so (validity.ts): from this ISO
+   * date (or datetime) on, through that one. Either may be absent (open).
+   */
+  valid_from?: string | null;
+  valid_until?: string | null;
+  /** The day (or moment) the fact was true on: "as of 30.09". */
+  as_of?: string | null;
+  /** A past state of things ("the launch price was €399"): never paired with a current claim. */
+  historical?: boolean;
   [key: string]: unknown;
 }
+
+/** A claim's dated fields, the ones validity.ts reads. */
+export const CLAIM_DATE_FIELDS = ["valid_from", "valid_until", "as_of"] as const;
 
 export interface PageFrontmatter {
   type: PageType;
@@ -82,6 +95,8 @@ export interface PageFrontmatter {
   opus_pending: boolean;
   claims: Claim[];
   retiredClaimIds: string[];
+  /** The page this one is a version of (a draft of that final, a copy of that original): versions.ts never pairs their claims. */
+  version_of?: string | null;
   [key: string]: unknown;
 }
 
@@ -182,6 +197,14 @@ function validateClaim(raw: unknown, index: number, errors: SchemaError[]): Clai
   } else if (raw.verified === null) {
     verified = null;
   }
+  for (const key of CLAIM_DATE_FIELDS) {
+    const value = raw[key];
+    if (value !== undefined && value !== null && !isIsoDate(value)) errors.push({ field: `${field}.${key}`, message: "must be an ISO date or null" });
+  }
+  if (isIsoDate(raw.valid_from) && isIsoDate(raw.valid_until) && Date.parse(raw.valid_from) > Date.parse(raw.valid_until)) {
+    errors.push({ field: `${field}.valid_until`, message: "must not be before valid_from" });
+  }
+  if (raw.historical !== undefined && typeof raw.historical !== "boolean") errors.push({ field: `${field}.historical`, message: "must be true or false" });
   if (errors.length !== before) return null;
   const claim: Claim = {
     ...raw,
@@ -261,6 +284,9 @@ export function validateFrontmatter(raw: unknown): ValidationResult {
   const retired = raw.retiredClaimIds ?? [];
   if (!Array.isArray(retired) || !retired.every(nonEmptyString)) {
     errors.push({ field: "retiredClaimIds", message: "must be a list of claim ids" });
+  }
+  if (raw.version_of !== undefined && raw.version_of !== null && !nonEmptyString(raw.version_of)) {
+    errors.push({ field: "version_of", message: "must be a page path or null" });
   }
 
   if (errors.length > 0) return { ok: false, errors };

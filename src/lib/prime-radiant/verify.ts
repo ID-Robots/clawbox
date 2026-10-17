@@ -17,15 +17,84 @@
  * A claim id that is on no page yet is written to `page` (the caller names
  * where a new answer goes), provided the id was never retired.
  *
+ * An OWNER-verified claim wins ({@link ownerVerified}): a claim on another
+ * page that the judge finds against it is no question for the owner (the
+ * owner already answered) but a STALE note on that page
+ * ({@link recordStaleClaims}), which the lint reports as a warning until the
+ * claim is rewritten or gone. The assistant's verifications (stamped
+ * `assistant`) settle a fact for the record, not for the owner: they win
+ * nothing here.
+ *
  * SERVER ONLY.
  */
 
 import { buildClaimIndex, isClaimId, nowIso, retireClaimsOnPage } from "./claims";
 import type { VaultAuthor } from "./git";
 import { safePagePath, vaultDir } from "./paths";
-import type { Claim, ClaimEvidence, PageFrontmatter } from "./schema";
-import { readRetiredLedger, recordRetired } from "./state-db";
+import type { Claim, ClaimEvidence, PageFrontmatter, Stamp } from "./schema";
+import { readRetiredLedger, recordRetired, runInTransaction, stateDbExists, withStateDb } from "./state-db";
 import { vaultOperation, type VaultOperationResult } from "./vault";
+
+/** Who the assistant's verification stamps name (route-helpers.ts's writer `by`). */
+export const ASSISTANT_VERIFIER = "assistant";
+
+/** Whether a stamp is a person's: every verifier but the assistant. */
+function personsStamp(stamp: Stamp | null | undefined): boolean {
+  return !!stamp && stamp.by !== ASSISTANT_VERIFIER;
+}
+
+/**
+ * Whether a claim is OWNER-verified: a person's verification stamp on it, or
+ * `status: verified` with no stamp (a person's hand edit), or a page a person
+ * verified as a whole.
+ */
+export function ownerVerified(claim: Pick<Claim, "verified" | "status">, page?: Pick<PageFrontmatter, "verified"> | null): boolean {
+  if (claim.verified) return personsStamp(claim.verified);
+  return claim.status === "verified" || personsStamp(page?.verified);
+}
+
+/** A claim the judge found against an owner-verified one: the verified one wins, this one is stale. */
+export interface StaleClaimNote {
+  claimId: string;
+  page: string;
+  verifiedClaimId: string;
+  verifiedPage: string;
+  /** The judge's few words, when it gave them. */
+  why: string;
+  at: string;
+}
+
+/** Record stale notes (one per claim and verified claim; a repeat refreshes it). Answers how many were written. */
+export function recordStaleClaims(vault: string, notes: readonly StaleClaimNote[]): number {
+  if (notes.length === 0) return 0;
+  return withStateDb(vault, (db) => {
+    const stmt = db.prepare(
+      `INSERT INTO stale_claims (claim_id, page, verified_claim_id, verified_page, why, at) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(claim_id, verified_claim_id) DO UPDATE SET page = excluded.page, verified_page = excluded.verified_page, why = excluded.why, at = excluded.at`,
+    );
+    runInTransaction(db, () => {
+      for (const n of notes) stmt.run(n.claimId, n.page, n.verifiedClaimId, n.verifiedPage, n.why.slice(0, 200), n.at);
+    });
+    return notes.length;
+  });
+}
+
+/** Every stale note. Never creates the database. */
+export function readStaleClaims(vault: string): StaleClaimNote[] {
+  if (!stateDbExists(vault)) return [];
+  return withStateDb(vault, (db) =>
+    (
+      db.prepare("SELECT claim_id, page, verified_claim_id, verified_page, why, at FROM stale_claims ORDER BY page, claim_id").all() as Array<{
+        claim_id: string;
+        page: string;
+        verified_claim_id: string;
+        verified_page: string;
+        why: string | null;
+        at: string;
+      }>
+    ).map((r) => ({ claimId: r.claim_id, page: r.page, verifiedClaimId: r.verified_claim_id, verifiedPage: r.verified_page, why: r.why ?? "", at: r.at })),
+  );
+}
 
 /** A verified claim is one line a person read: the lint's claim limit. */
 export const MAX_VERIFIED_TEXT = 240;

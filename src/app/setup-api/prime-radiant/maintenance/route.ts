@@ -2,13 +2,18 @@
  * /setup-api/prime-radiant/maintenance — owner-run whole-vault passes.
  *
  * POST `{ action, dryRun? }`:
- *  - `rejudge-reviews`: close the OPEN contradiction items whose two sides
- *    carry different identifiers (waybills, invoices, transfers, dates), with
- *    the note "auto: different subjects (identifier filter)", or are two
- *    record pages with no reference in common, with the note "auto: different
- *    records, no shared reference (identifier filter)". An item touching a
- *    verified claim stays open. Nothing else is closed. Answers the result.
- *    `dryRun: true` only counts.
+ *  - `rejudge-reviews`: re-run every OPEN contradiction item through today's
+ *    pairing rules (rejudge.ts) and close the ones that no longer qualify,
+ *    each with a note saying why: "different subjects" (identifiers, records,
+ *    or subjects once template words are out), "superseded" (an old fact
+ *    against the current one), "same document: draft vs final", or "verified
+ *    claim wins" (the other side becomes a stale note on its page). Items the
+ *    owner settled are never touched; an item with both sides owner-verified
+ *    stays open. Answers the result with its counts per reason (`byReason`,
+ *    `summary`). `dryRun: true` only counts — run it first.
+ *  - `version-groups`: list the pages that are versions of one document (a
+ *    draft and its final, a copy and its original; versions.ts), the version
+ *    kept first. Read only: merge them with the page merge if you like.
  *  - `reindex`: start a whole-vault search reindex (every page on `main`,
  *    vectors at 1,024-d); `GET status` follows it (`index.needsFullScan`
  *    clears when it finishes uncapped).
@@ -34,7 +39,8 @@ import { RELATED_DIMS, runConnectPass } from "@/lib/prime-radiant/connect";
 import { vaultDir } from "@/lib/prime-radiant/paths";
 import { migratePluginFrontmatter } from "@/lib/prime-radiant/plugin-compat";
 import { readPageVectors, reindexPrimeRadiantVault, vaultIndexingAllowed } from "@/lib/prime-radiant/shard-index";
-import { rejudgeOpenContradictions } from "@/lib/prime-radiant/rejudge";
+import { rejudgeOpenContradictions, rejudgeSummary } from "@/lib/prime-radiant/rejudge";
+import { versionGroups, versionPages } from "@/lib/prime-radiant/versions";
 import { fail, json, readJsonBody, vaultFailure, writerGuard } from "@/lib/prime-radiant/route-helpers";
 import type { VaultAuthor } from "@/lib/prime-radiant/git";
 import { readVaultSnapshot, vaultInitialised, vaultOperation, type VaultTx } from "@/lib/prime-radiant/vault";
@@ -87,8 +93,14 @@ export async function POST(req: Request) {
   const busy = () => json({ error: "A maintenance pass is already running.", code: "busy", running: state.running }, 409);
   try {
     switch (b.action) {
-      case "rejudge-reviews":
-        return json(rejudgeOpenContradictions(vault, await readVaultSnapshot(vault), { dryRun }));
+      case "rejudge-reviews": {
+        const result = rejudgeOpenContradictions(vault, await readVaultSnapshot(vault), { dryRun });
+        return json({ ...result, summary: rejudgeSummary(result) });
+      }
+      case "version-groups": {
+        const groups = versionGroups(versionPages(await readVaultSnapshot(vault)));
+        return json({ groups, count: groups.length, pages: groups.reduce((n, g) => n + g.pages.length, 0) });
+      }
       case "reindex": {
         if (!(await vaultIndexingAllowed())) return fail("shard_off", "Switch Memory Shard on to index the vault.", 409);
         if (state.running) return busy();
