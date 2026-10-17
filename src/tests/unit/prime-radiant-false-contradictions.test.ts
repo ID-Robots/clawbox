@@ -259,6 +259,10 @@ describe("rule 3: a draft and its final are one document", () => {
     expect(same("Daily report 2026-10-12", "Daily report 2026-10-13")).toBe(false);
     expect(same("Invoice INV-2026-0050 Fabrikam", "Invoice INV-2026-0050 Contoso")).toBe(false);
     expect(same("Invoice INV-2026-0001 Initech", "Invoice INV-2026-0002 Initech")).toBe(false);
+    // One commit, two boards: each title has a reference the other lacks.
+    expect(same("Bench run at a1b2c3d4 board-1700000000001", "Bench run at a1b2c3d4 board-1700000000002")).toBe(false);
+    // A declaration that cites an invoice is not that invoice.
+    expect(same("Customs declaration Initech invoice INV-2026-0077", "Invoice INV-2026-0077 Initech")).toBe(false);
     expect(same("Northwind Robotics", "Northwind Robotics 2025")).toBe(false);
     expect(same("Invoice draft", "Invoice")).toBe(false);
   });

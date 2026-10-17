@@ -15,16 +15,20 @@
  * file format, the dates and times and the version words ("draft", "final",
  * "copy", "v2", "signed") are taken out ({@link documentName}), and their
  * identifiers agree ({@link sameDocument}):
- *  - both titles carry references: they share one, and the names are the
- *    same or one is the other's plus words ("Invoice INV-7 Acme" and
- *    "ClawBox invoice INV-7 Acme second copy");
+ *  - both titles carry references: they share one, neither has one the
+ *    other lacks on both sides (one commit, two boards), and the names are
+ *    the same or one is the other's plus a name ("Invoice INV-7 Acme" and
+ *    "ClawBox invoice INV-7 Acme second copy") — never plus another kind of
+ *    document ("Customs declaration Acme invoice INV-7" is no invoice);
  *  - otherwise the names are the same, name something beyond a document's
  *    type ("Export declaration Acme", never just "Invoice"), and one of the
  *    titles says it is a version or a format (a draft, a copy, a .pdf) or
  *    names a document type: "Acme" and "Acme 2025" are two pages, not two
  *    versions;
  *  - both titles dated, on different days, are two documents (two days'
- *    reports), never two versions of one.
+ *    reports), never two versions of one;
+ *  - one identifying title twice ("31.12.2025" and "31.12.2025", the second
+ *    ingested as "-2") is one document.
  * A page may name its group itself: `version_of: <path>` in its frontmatter
  * links it to that page whatever the titles say.
  *
@@ -91,6 +95,12 @@ function equal(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
   return true;
 }
 
+/** Whether `a` holds a reference that names nothing in `b`. */
+function unmatched(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  for (const x of a) if (!sharedReference(new Set([x]), b)) return true;
+  return false;
+}
+
 function subsetOf(small: ReadonlySet<string>, large: ReadonlySet<string>): boolean {
   for (const x of small) if (!large.has(x)) return false;
   return true;
@@ -111,10 +121,13 @@ export function sameDocument(a: DocumentName, b: DocumentName): boolean {
   if (a.normalized !== "" && a.normalized === b.normalized && a.refs.size + a.dates.size + a.core.size > 0) return true;
   if (a.refs.size > 0 && b.refs.size > 0) {
     if (!sharedReference(a.refs, b.refs)) return false;
+    // Each with a reference the other lacks (one commit, two boards; one order, two invoices): two documents.
+    if (unmatched(a.refs, b.refs) && unmatched(b.refs, a.refs)) return false;
     if (equal(a.words, b.words)) return true;
     const [small, large] = a.words.size <= b.words.size ? [a, b] : [b, a];
-    // "Invoice INV-7 Acme" in "ClawBox invoice INV-7 Acme second copy": the smaller name must still name someone.
-    return small.core.size >= 1 && subsetOf(small.words, large.words);
+    // "Invoice INV-7 Acme" in "ClawBox invoice INV-7 Acme second copy": the smaller name must still name someone,
+    // and the larger may add a name ("ClawBox") but no other kind of document ("Customs declaration … invoice INV-7").
+    return small.core.size >= 1 && subsetOf(small.words, large.words) && ![...large.words].some((w) => !small.words.has(w) && DOCUMENT_TYPE_WORDS.has(w));
   }
   if (!equal(a.words, b.words) || a.core.size === 0) return false;
   return a.marked || b.marked || a.typed || b.typed;
