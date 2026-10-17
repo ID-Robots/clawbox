@@ -22,6 +22,8 @@ EXPECTED=(
   prime_radiant_claim_verify prime_radiant_review_resolve prime_radiant_review_raise prime_radiant_undo
   prime_radiant_ingest_preview prime_radiant_ingest_start prime_radiant_ingest_stop prime_radiant_ingest_retry
   prime_radiant_nightly_run prime_radiant_nightly_merge prime_radiant_connect_run prime_radiant_settings_update
+  prime_radiant_golden_list prime_radiant_golden_add prime_radiant_golden_edit prime_radiant_golden_delete
+  prime_radiant_daily_questions
 )
 
 # One MCP session: list the tools, then the read-only calls. Printed as one

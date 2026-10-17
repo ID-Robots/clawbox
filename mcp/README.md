@@ -1155,12 +1155,15 @@ document drop (`ingest/upload` — the assistant names files by path,
 `reindex`, `rejudge-reviews` and `migrate-frontmatter` maintenance passes (the
 bearer may run `connect` only), and the settings' cost rates and Opus model —
 what the Opus dollar cap is measured in (a rate of 0, or an unpriced model, and
-the cap never trips); the bearer may change the cap itself.
+the cap never trips); the bearer may change the cap itself. So is
+`verification.outbound`, whether the assistant may send the daily questions
+over chat at all: off by default, and `prime_radiant_daily_questions` says
+which way it is set — it never sends anything itself.
 
 **Destructive tools** (`destructiveHint`) carry `confirm: true` (`zConfirm`):
 `prime_radiant_page_delete`, `prime_radiant_page_merge`, `prime_radiant_claim_delete`, `prime_radiant_undo`,
-`prime_radiant_settings_update` and `prime_radiant_nightly_merge` (it moves the
-wiki's main branch) — and so do the ones that give someone's word
+`prime_radiant_settings_update`, `prime_radiant_nightly_merge` (it moves the
+wiki's main branch) and `prime_radiant_golden_delete` — and so do the ones that give someone's word
 (`prime_radiant_claim_verify`, `prime_radiant_review_resolve`).
 
 **Imports and connect passes the assistant starts** commit as it, like its
@@ -1195,9 +1198,12 @@ owner when it touches a verified page.
 | Add: Start (folders) / drop files | `POST ingest { folders }` / `ingest/upload` + `POST ingest { upload }` | `prime_radiant_ingest_start` (folders, or files by path: `POST ingest { files }`) |
 | Add: Stop | `DELETE ingest/<id>` | `prime_radiant_ingest_stop` |
 | Add: Retry failed files | `POST ingest/<id>/retry` | `prime_radiant_ingest_retry` |
+| Questions: the golden questions, their last verdicts, the % correct and its trend | `GET golden` | `prime_radiant_golden_list` (the % correct also in `prime_radiant_status`) |
+| Questions: add / edit / delete a golden question | `POST golden`, `PATCH` / `DELETE golden/<id>` | `prime_radiant_golden_add` / `_edit` / `_delete` |
+| Questions: an owner's daily questions, in their language | `GET daily?owner=` | `prime_radiant_daily_questions` (sending stays off until the owner turns it on; answers go back through `prime_radiant_claim_verify`, `prime_radiant_review_resolve` and `prime_radiant_page_edit`) |
 | Settings: Run now / Merge a held night | `POST nightly/run` / `POST nightly/run { merge }` | `prime_radiant_nightly_run` / `prime_radiant_nightly_merge` |
 | — run the connect pass | `POST maintenance { action: "connect" }` | `prime_radiant_connect_run` |
-| Settings: Save (schedule, contradictions, Opus on/off + caps, domains and owners, exclude list, parallel, skip code projects, nightly folders) | `PUT settings` | `prime_radiant_settings_update` |
+| Settings: Save (schedule, contradictions, Opus on/off + caps, domains and owners, golden check on/off + nightly cap, daily questions per owner and owners' languages, exclude list, parallel, skip code projects, nightly folders) | `PUT settings` | `prime_radiant_settings_update` |
 
 The route refusals become instructions (`NEXT` in the module): `owner_only` says
 it is the owner's and not to retry, `not_initialised` sends the agent to
