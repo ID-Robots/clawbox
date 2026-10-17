@@ -441,6 +441,8 @@ describe("the pass", () => {
       };
       const r = await runSummaries(edited.current, person, { stateVault: state, settings: settings(), rates: DEFAULT_COST_RATES, online: false, now: () => NOW });
       expect(r.written).toBe(r.planned - 1);
+      // What the run says it wrote is what it wrote: the skipped page is counted nowhere.
+      expect(r.byModel + r.byFacts).toBe(r.written);
       const kept = edited.current.pages.find((p) => p.path === "entities/globex-ltd.md")!;
       expect(kept.text).toContain("A line a person added.");
       expect(kept.parsed.ok && kept.parsed.frontmatter.summary).toBeFalsy();

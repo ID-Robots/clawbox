@@ -88,6 +88,7 @@ export interface SummariesRunResult extends SummaryPlanStats {
   planned: number;
   byReason: Record<SummaryReason, number>;
   written: number;
+  /** Of `written`, the summaries the model wrote and the ones the facts did (a page edited since the plan is in neither). */
   byModel: number;
   byFacts: number;
   /** Model summaries whose neighbourhood changed, left until the model can write them. */
@@ -110,6 +111,7 @@ interface Planned {
   frontmatter: PageFrontmatter;
   body: string;
   expected: string;
+  method: "model" | "facts";
 }
 
 /**
@@ -168,9 +170,7 @@ export async function runSummaries(
   const write = (job: SummaryJob, accepted: ReturnType<typeof checkSentences>["accepted"], method: "model" | "facts", tried = false) => {
     const page = pageOf.get(job.hood.path);
     if (!page || !page.parsed.ok || accepted.length === 0) return;
-    writes.push({ path: page.path, frontmatter: withSummary(page.parsed.frontmatter, accepted, method, job.hood.hash, at, tried), body: page.parsed.body, expected: page.text });
-    if (method === "model") result.byModel++;
-    else result.byFacts++;
+    writes.push({ path: page.path, frontmatter: withSummary(page.parsed.frontmatter, accepted, method, job.hood.hash, at, tried), body: page.parsed.body, expected: page.text, method });
   };
   const fromFacts = (job: SummaryJob) => {
     // Due the model and not reached: the facts' summary it has stands as it is (writing it again would change nothing but its date).
@@ -250,6 +250,9 @@ export async function runSummaries(
         if ((current?.text ?? null) !== w.expected) continue;
         await tx.writePage(w.path, w.frontmatter, w.body);
         result.written++;
+        // Counted as written, not as planned: a page skipped above is in neither.
+        if (w.method === "model") result.byModel++;
+        else result.byFacts++;
       }
     });
     if (commit) result.commits.push(commit);

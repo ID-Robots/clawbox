@@ -582,7 +582,7 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
         };
         run.usdEstimate += s.model.usdEstimate;
         if (s.written > 0) notes.push(`The summaries pass wrote ${s.written} summar${s.written === 1 ? "y" : "ies"} (${s.byModel} by the model, ${s.byFacts} from facts).`);
-        if (s.mergeSuggestions.length > 0) notes.push(`${s.mergeSuggestions.length} duplicate entit${s.mergeSuggestions.length === 1 ? "y looks" : "ies look"} worth merging (Maintenance → summaries, dry run, lists them).`);
+        if (s.mergeSuggestions.length > 0) notes.push(`${s.mergeSuggestions.length} duplicate entit${s.mergeSuggestions.length === 1 ? "y looks" : "ies look"} worth merging (the Checks tab lists them as duplicate-entity warnings, each naming the page to merge into).`);
       } catch (err) {
         summary.summaries = { skipped: "failed" };
         notes.push(`The summaries pass could not be saved: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
