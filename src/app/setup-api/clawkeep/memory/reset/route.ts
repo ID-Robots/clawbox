@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { DEFAULT_MEMORY_SCHEDULE, writeMemorySchedule } from "@/lib/clawkeep-memory";
 import { refresh as refreshMemoryScheduler } from "@/lib/clawkeep-memory-scheduler";
-import { hasPersonSession } from "@/lib/owner-session";
+import { confirmed, confirmRequired, memoryShardWriter } from "@/lib/memory-shard-writer";
 import { setMemoryShardEnabled, setMemoryShardSetupComplete } from "@/lib/memory-shard";
 
 export const dynamic = "force-dynamic";
@@ -16,16 +16,32 @@ export const dynamic = "force-dynamic";
  * the download — and a "start over" that deleted a working index would be an
  * hours-long re-embed the owner never asked for.
  *
- * OWNER ONLY, like every other write here: middleware admits the MCP bearer and
- * the agent holds it, so without this check the assistant could reopen its
- * owner's onboarding.
+ * WHO: a signed-in person or the box's assistant (`memoryShardWriter`). From
+ * the assistant it needs `confirm: true` — it switches the owner's index off
+ * and sends them back through setup — and without it the answer is 409
+ * `confirm_required` naming exactly what would be cleared and what is kept, so
+ * the owner can be asked in those words.
  */
+const RESET_EFFECT = {
+  clears: [
+    "the Memory Shard switch: it is turned off, so no pass runs and search answers nothing until it is on again",
+    "the saved refresh schedule: back to off (daily at 03:00)",
+    "the record that setup was finished: the setup wizard runs again the next time Memory Shard is opened",
+  ],
+  keeps: [
+    "the folder list",
+    "the embedding model on the box and where the index is embedded",
+    "the index already built (nothing is re-embedded)",
+    "every file in the folders: nothing on disk is deleted",
+  ],
+} as const;
+
 export async function POST(request: Request) {
-  if (!(await hasPersonSession(request))) {
-    return NextResponse.json(
-      { error: "Resetting Memory Shard needs a signed-in browser session.", kind: "owner_only" },
-      { status: 403 },
-    );
+  const writer = await memoryShardWriter(request, "Resetting Memory Shard");
+  if (!writer.ok) return writer.response;
+  const body = await request.json().catch(() => ({}));
+  if (!confirmed(writer.by, body)) {
+    return confirmRequired("Resetting Memory Shard needs the owner's go first; nothing was changed.", { would: RESET_EFFECT });
   }
 
   try {
@@ -55,10 +71,10 @@ export async function POST(request: Request) {
     // indexing at an hour the owner had just tried to forget.
     await refreshMemoryScheduler().catch(() => {});
   }
-  console.error("[memory-shard] reset by the owner; the setup wizard will run again");
+  console.error(`[memory-shard] reset by the ${writer.by}; the setup wizard will run again`);
 
   return NextResponse.json(
-    { enabled: false, setupComplete: false },
+    { enabled: false, setupComplete: false, cleared: RESET_EFFECT.clears, kept: RESET_EFFECT.keeps },
     { headers: { "Cache-Control": "no-store" } },
   );
 }

@@ -211,10 +211,19 @@ passes have no tool.
 
 ### Memory Shard
 `memory_shard_status` — **both editions** — reports whether Memory Shard is on and healthy, how
-many folders, files and chunks it holds, and how far a running indexing pass has got (files done
-of the total, chunks, percent). The agent cannot start a reindex: that re-embeds all your
-documents and can take hours, so it opens the Memory Shard app for you to press **Reindex**, and
-then reports the progress.
+many folders, files and chunks it holds, why it wants a reindex (a folder added, files changed, the
+embedding model switched…) and how far a running indexing pass has got (files done of the total,
+chunks, percent).
+
+Everything else the Memory Shard app does is a tool too, on both editions: start or stop an
+indexing pass (`memory_shard_reindex`, `memory_shard_reindex_stop`), list, add and remove folders
+(`memory_shard_sources_*` — adding one says how many files it holds), read and change the refresh
+schedule (`memory_shard_schedule_*`) and where the index is embedded (`memory_shard_provider_*`),
+switch it on or off (`memory_shard_enable`) and start over (`memory_shard_reset`). The agent runs
+**incremental** passes on its own — they read only new and changed files. A **full** re-embed, a
+**move to another embedding model** and a **reset** wait for your yes in the chat: the agent first
+tells you what it would cost (files, time, embedding tokens) or exactly what a reset clears, and
+acts only after you agree.
 
 `memory_shard_search` — **Hermes edition only** — searches the documents and notes in the folders you added to
 [Memory Shard](/guides/memory-shard), returning the file each passage came from, the

@@ -4,11 +4,12 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
  * GET /setup-api/clawkeep/memory/search — the read half of Memory Shard on the
  * edition where ClawBox owns the index.
  *
- * The one thing worth pinning above all others is the exception this route
- * makes. Every other route under `clawkeep/memory` is a WRITE that changes what
- * the box does — which folders are read, whether indexing runs — and every one
- * of them refuses the MCP bearer, because the agent must not be able to widen
- * its owner's decisions. This one is deliberately reachable by the agent: the
+ * The one thing worth pinning above all others is that this route needs no
+ * second credential check at all. Every other route under `clawkeep/memory` is
+ * a WRITE that changes what the box does — which folders are read, whether
+ * indexing runs — and each asks again WHO is writing (a signed-in person or the
+ * assistant's own bearer, `memoryShardWriter`), holding the expensive ones to
+ * the owner's confirm. This one is a read the agent is meant to make: the
  * whole feature is that it can search the owner's documents mid-conversation.
  * A future tidy-up that "fixes the missing owner check" would take the feature
  * out while leaving every panel looking exactly the same, so the decision is

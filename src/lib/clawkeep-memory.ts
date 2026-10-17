@@ -43,6 +43,7 @@ import {
 import { isLoopbackBaseUrl } from "@/lib/embed-runtime-ids";
 import { memoryStatusTimeoutMs } from "@/lib/memory-status-timeout";
 import { processStore } from "@/lib/process-store";
+import { memoryReindexAdvice, type MemoryReindexAdvice } from "@/lib/memory-reindex-advice";
 import { isOpenclawMaintenanceRefusal, withOpenclawMaintenanceRetry } from "@/lib/openclaw-maintenance";
 import {
   countIndexChunks,
@@ -209,6 +210,12 @@ export interface ClawKeepMemoryStatus {
   run: MemoryRunState;
   schedule: MemoryIndexSchedule;
   nextRunAtMs: number;
+  /**
+   * Why the index wants a pass, and which one — the reading of the fields
+   * above that `memoryReindexAdvice` makes. Set by `getMemoryStatus`; absent
+   * from the raw probe readings it is built on.
+   */
+  reindex?: MemoryReindexAdvice;
 }
 
 export const DEFAULT_MEMORY_SCHEDULE: MemoryIndexSchedule = {
@@ -496,6 +503,25 @@ function processIsAlive(pid: number): boolean {
  */
 function settlingPasses(): Set<number> {
   return processStore("clawkeep-memory.settling-passes", () => new Set<number>());
+}
+
+/**
+ * The pass this process is supervising, so a stop can reach it: the
+ * `IndexPass` handle lives only inside `startMemoryIndex`, and on the local arm
+ * the run record's `childPid` is this web server's own pid, so signalling by
+ * pid would stop the server rather than the pass. Keyed by the run's
+ * `startedAtMs`, so a stop aimed at a run that has since ended cannot reach the
+ * next one. Process-wide for the same reason as `settlingPasses`.
+ */
+interface SupervisedPass {
+  startedAtMs: number;
+  abandon(): void;
+  /** Set by `stopMemoryIndex`, read by `finish` to say "stopped" rather than "interrupted". */
+  stopRequested: boolean;
+}
+
+function supervisedPass(): { current: SupervisedPass | null } {
+  return processStore("clawkeep-memory.supervised-pass", () => ({ current: null as SupervisedPass | null }));
 }
 
 function runIsAlive(pid: number): boolean {
@@ -1174,7 +1200,14 @@ export async function getMemoryStatus(): Promise<ClawKeepMemoryStatus> {
   // happens: the scheduler arms no timer at all in that state, and this is the
   // number every surface prints. The schedule itself is left as the owner saved
   // it, so switching back on restores the hour they chose.
-  return { ...live, enabled, setupComplete, planGate, nextRunAtMs: enabled ? live.nextRunAtMs : 0 };
+  return {
+    ...live,
+    enabled,
+    setupComplete,
+    planGate,
+    nextRunAtMs: enabled ? live.nextRunAtMs : 0,
+    reindex: memoryReindexAdvice(live, openclawIsAbsent() ? "local" : "openclaw"),
+  };
 }
 
 /**
@@ -1371,6 +1404,39 @@ async function acquireRunLock(): Promise<boolean> {
     throw err;
   }
 }
+
+/**
+ * A pass `stopMemoryIndex` ended. The same code as any other interruption —
+ * the index is in the same state either way — worded so nobody reads a stop
+ * they asked for as a fault, and worded BY MODE, because the two leave
+ * different things behind. A stopped incremental pass committed every file it
+ * finished, and the next incremental pass skips them. A stopped FULL pass did
+ * not: ClawBox's own rebuild empties the store and drops its identity first,
+ * and OpenClaw's `--force` builds into a temporary database it never swaps in.
+ * The next pass that completes it is a full one (planIndexPass upgrades an
+ * incremental ask over the stale identity), so saying "an incremental pass
+ * carries on" there would send the assistant to a pass that is not one.
+ */
+const STOPPED_FAILURE = {
+  error: "Indexing was stopped before it finished. An incremental pass carries on from the files already indexed.",
+  errorCode: "interrupted" as const,
+};
+/**
+ * A stopped FULL pass, by arm. OpenClaw's `--force` builds into a temporary
+ * database it never swapped in, so its index stays as it was. ClawBox's own
+ * rebuild emptied the store before it began, so the index holds only what it
+ * re-embedded by the stop — "stays as it was" would be untrue there.
+ */
+const STOPPED_FULL_FAILURE = {
+  openclaw: {
+    error: "The full reindex was stopped before it finished; the index stays as it was. Only a new full reindex rebuilds it, and that needs the owner's go.",
+    errorCode: "interrupted" as const,
+  },
+  local: {
+    error: "The full reindex was stopped before it finished; the index holds only the files it re-embedded so far. Only a new full reindex rebuilds it, and that needs the owner's go.",
+    errorCode: "interrupted" as const,
+  },
+};
 
 /** The two verdicts both arms can reach, said once. */
 const TIMED_OUT_FAILURE = {
@@ -1768,7 +1834,8 @@ export async function startMemoryIndex(
       .catch(() => { /* the next report tries again */ })
       .finally(() => { reportInFlight = false; });
   };
-  const pass = openclawIsAbsent()
+  const localArm = openclawIsAbsent();
+  const pass = localArm
     ? startLocalPass(mode, publishProgress, trigger !== "schedule")
     : startOpenclawPass(mode, publishProgress);
   if (pass.pid) settlingPasses().add(pass.pid);
@@ -1786,6 +1853,8 @@ export async function startMemoryIndex(
     await fs.rm(RUN_LOCK_PATH, { recursive: true, force: true }).catch(() => {});
     throw err;
   }
+  const supervised: SupervisedPass = { startedAtMs, abandon: () => pass.abandon(), stopRequested: false };
+  supervisedPass().current = supervised;
   // Deliberately no cache invalidation here: nothing the probe reports changes
   // until the pass ends, and dropping the reading at spawn time made the
   // panel's very next read block on the cold probe for the whole run.
@@ -1800,6 +1869,7 @@ export async function startMemoryIndex(
     // running run's bar back over the settled record.
     settled = true;
     clearTimeout(timer);
+    if (supervisedPass().current === supervised) supervisedPass().current = null;
     const finishedAtMs = Date.now();
     const ok = !timedOut && outcome.kind === "exit" && outcome.code === 0;
     // The timeout first, because it is the one verdict that does not depend on
@@ -1809,9 +1879,11 @@ export async function startMemoryIndex(
       ? null
       : timedOut
         ? TIMED_OUT_FAILURE
-        : outcome.kind === "threw"
-          ? localFailure(outcome.error)
-          : fixedFailure(outcome.code, outcome.signal);
+        : supervised.stopRequested
+          ? (mode === "full" ? STOPPED_FULL_FAILURE[localArm ? "local" : "openclaw"] : STOPPED_FAILURE)
+          : outcome.kind === "threw"
+            ? localFailure(outcome.error)
+            : fixedFailure(outcome.code, outcome.signal);
     // The catch-all, and ONLY the catch-all, gives way to the cause the plan
     // already found. Every other verdict above is a fact about how this pass
     // ended — a timeout, a signal, a missing binary — and stays what it is:
@@ -1883,4 +1955,26 @@ export async function startMemoryIndex(
   void pass.ended.then(finish);
 
   return { accepted: true, run: publicMemoryRunState(state) };
+}
+
+/**
+ * Stop the running pass, if this process is supervising it. The pass ends the
+ * way an interrupted one does — on the local arm between two files, on the
+ * OpenClaw arm by SIGTERM to its CLI child — and its own `finish` writes the
+ * settled record, frees the lock and refreshes the status, so a stop leaves
+ * nothing behind that the next pass trips over. Files an incremental pass
+ * indexed before the stop stay indexed; a stopped full pass is completed only
+ * by another full one (see STOPPED_FULL_FAILURE).
+ *
+ * `stopped: false` when there is nothing this process can stop: no pass
+ * running, or a run record that is not the pass held here (one a restarted
+ * server left behind is reconciled by `readMemoryRunState` itself).
+ */
+export async function stopMemoryIndex(): Promise<{ stopped: boolean; run: MemoryRunState }> {
+  const run = await readMemoryRunState();
+  const held = supervisedPass().current;
+  if (run.status !== "running" || !held || held.startedAtMs !== run.startedAtMs) return { stopped: false, run };
+  held.stopRequested = true;
+  held.abandon();
+  return { stopped: true, run };
 }

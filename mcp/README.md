@@ -126,6 +126,8 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 | Steering and following runs (`coding_run_message`, `coding_run_list`, `coding_agent_resume`, `coding_project_status`) | when the owner switched the coding agent on | same |
 | Device state reads (`memory_shard_status`, `local_ai_status`, `clawbox_ai_usage`, `anthropic_accounts`) | yes | yes |
 | Prime Radiant (`prime_radiant_*`, 37 tools) | yes | yes |
+| Memory Shard management (`memory_shard_reindex`, `_reindex_stop`, `_sources_*`, `_schedule_*`, `_provider_*`, `_enable`, `_reset`) | yes | yes |
+| Memory Shard search (`memory_shard_search`) | **no** — the index is OpenClaw's, searched in its own turn | yes |
 | Coordinate browser control (`browser_click/type/keypress/scroll`) | yes | **no** — Hermes ships a richer browser toolset |
 | Media inside a run (`generate_image`, `generate_audio`) | when the owner's switch is on | when the owner's switch is on |
 | Everything else | yes | yes |
@@ -1094,7 +1096,11 @@ to the approved senders (`src/lib/coding-agent-notify.ts`).
 
 ### Memory Shard
 
-`memory_shard_status` (both editions) · `memory_shard_search` (Hermes only)
+`memory_shard_status` (both editions) · `memory_shard_search` (Hermes only) ·
+`memory_shard_reindex`, `memory_shard_reindex_stop`, `memory_shard_sources_list`
+/ `_add` / `_remove`, `memory_shard_schedule_get` / `_set`,
+`memory_shard_provider_get` / `_set`, `memory_shard_enable`,
+`memory_shard_reset` (both editions)
 
 `memory_shard_status` reads `GET /setup-api/clawkeep/memory` — the same status
 the Memory Shard app draws: switched on, set up, the paid-plan gate, health,
@@ -1114,13 +1120,31 @@ the vault-relative page `path`, the page or claim `id`, `kind`, the page `type`
 and `verified`, and a verified page or claim ranks first (on OpenClaw the
 memory-wiki plugin is what reaches the vault).
 
-**There is no reindex tool.** `POST /setup-api/clawkeep/memory/index` answers
-this bearer 403 `owner_only` on purpose — before that check the assistant could
-start a full re-embed of the owner's documents on its own, an hours-long pass
-that spends the embedding allowance. The status says so, and tells the agent to
-open the app (`ui_open_app("memory-shard")`) for the owner to press Reindex, and
-then to report progress from this tool — not to poll it in a loop. The switch,
-the folders, the provider and the schedule are owner-only for the same reason.
+The status also says WHY the index wants a pass (`reindex.reasons`, from
+`src/lib/memory-reindex-advice.ts`): nothing indexed yet, the embedder or the
+index format changed, a missing identity (all fixed only by a full pass), files
+waiting in the folders, files changed, a pass that was stopped (an incremental
+pass), or the size ceiling and a fallen-back provider (no pass fixes those).
+
+**Everything the Memory Shard app does is a tool**, through the app's own
+`clawkeep/memory/*` routes. Those routes ask again who is writing
+(`src/lib/memory-shard-writer.ts`): a signed-in person, or this server's bearer;
+anything else is 403 `owner_only`. The assistant starts an **incremental** pass
+on its own — it reads only new and changed files. A **full** pass (asked for, or
+the one an incremental ask would really run on a missing or disowned index, or
+the first build an armed schedule would start over an empty one — saving a
+schedule that is on, or switching Memory Shard on over one), a
+**provider move** (which re-embeds everything) and the **reset** answer this
+bearer 409 `confirm_required` until the body carries `confirm: true`: with the
+estimate (files, minutes, the embedding tokens and who pays) or the exact list
+of what a reset clears and keeps. The tools return that answer as-is and set
+`confirm: true` only once the owner said yes in chat. A stopped incremental
+pass is carried on by the next one; a stopped full pass is finished only by a
+new full one, and the stop says which. Adding a folder is held
+to the picker's rules (inside the Files root, never hidden, never a secret
+store) and answers how many files a pass would read from it. A pass is stopped
+with `DELETE /setup-api/clawkeep/memory/index`. The status tells the agent to
+report progress from it, not to poll it in a loop.
 
 ### Prime Radiant (both editions)
 
@@ -1285,7 +1309,6 @@ is also what Hermes' circuit breaker counts against every ClawBox tool:
 | Pipeline default | `POST/PUT …/pipeline` | a switch a tool could flip would make the owner's answer temporary |
 | The file tree's writes, project import/delete | `PUT …/tree`, `projects/*` | the owner's repository and folders |
 | Pause, discard a draft, remove a run's copy | `…/pause`, `DELETE …/draft`, `…/worktree` | agent-callable for the agent's own runs but left out: owner gestures `coding_agent_stop` already covers |
-| Reindex, Memory Shard switch/folders/provider/schedule/reset | `clawkeep/memory/*` writes | an hours-long re-embed of the owner's documents |
 | Installing or removing Kokoro, Whisper, embeddings, models | `tts/install`, `whisper`, `embed/install`, `ollama/*`, `llamacpp/models` | root install steps, gigabytes of downloads |
 | MCP switch, background jobs | `harness/mcp`, `background-jobs` | consent |
 | Prime Radiant setup, the document drop, reindex / rejudge / migration, undoing a change the assistant did not make | `prime-radiant/init`, `…/ingest/upload`, `…/maintenance` (all but `connect`), `…/revert` of another author's commit | they write openclaw.json, re-embed the whole vault or reverse the owner's own work |

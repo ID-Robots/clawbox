@@ -21,11 +21,12 @@ const DEFAULT_LIMIT = 5;
  * agent can answer "what did that lease say about the deposit?" out of the
  * owner's own PDFs.
  *
- * DELIBERATELY NOT OWNER-ONLY, and that is the one exception on this route
+ * NO SECOND CREDENTIAL CHECK, and that is the one exception on this route
  * family rather than an oversight. Every other memory route is a WRITE that
  * changes what the box does — which folders are read, whether indexing runs at
- * all — and the agent must not be able to widen any of them, so they refuse the
- * MCP bearer. This one is a READ, and the agent is the intended caller: the
+ * all — so each asks again WHO is writing (`memoryShardWriter`: a signed-in
+ * person or the assistant's own bearer, the expensive writes behind the
+ * owner's confirm). This one is a READ, and the agent is the intended caller: the
  * whole point is that it can search mid-conversation. The consent it rides on
  * is the one already given — the owner switched Memory Shard on and chose the
  * folders — which is exactly the consent under which the index was built in the

@@ -60,7 +60,7 @@ export const TOOL_NOTES: readonly ToolNote[] = [
   },
   {
     tool: "memory_shard_status",
-    note: "Starting a reindex is the owner's, in the Memory Shard app.",
+    note: "Run incremental passes yourself (memory_shard_reindex); a full re-embed, a provider change or a reset waits for the owner's yes in chat (confirm: true).",
   },
   {
     tool: "memory_shard_search",
