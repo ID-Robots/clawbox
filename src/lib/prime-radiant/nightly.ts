@@ -24,7 +24,12 @@
  *                branch (fast-forward, else one merge commit), the result is
  *                linted for the blocking rules once more (and put back if it
  *                fails them), the branch is deleted and the changed pages are
- *                handed to Memory Shard's reindex hook.
+ *                handed to Memory Shard's reindex hook;
+ *   8. golden    every night that did not fail, merged or not: the golden
+ *                questions answered from `main` and judged by Flash, capped
+ *                (golden-score.ts) — the score history and its % correct; a
+ *                question right last time and wrong now is a `lint` review
+ *                item that never holds a night.
  *
  * A held night keeps its branch; once the owner has dealt with its review
  * items, `mergeHeldNight` merges it by hand.
@@ -45,6 +50,8 @@ import type { CostRates } from "./cost-rates";
 import { flashAvailable, type FlashClient } from "./flash-client";
 import { verifiedTouches, type VerifiedTouch } from "./gate";
 import { changedPaths, git, VAULT_MAIN_BRANCH, withVaultLock } from "./git";
+import { runGoldenScore, type GoldenScoreResult } from "./golden-score";
+import type { GoldenHit } from "./golden";
 import { getIngestJob, ingestFinished, IngestBusyError, startIngest } from "./ingest";
 import { isOwnOutput } from "./ingest-sources";
 import { lintVault, type LintFinding } from "./lint";
@@ -79,6 +86,7 @@ export interface NightlySummary {
   };
   opus: Pick<OpusTierResult, "queued" | "reviewed" | "pending" | "calls" | "usdEstimate" | "capUsd" | "maxPages" | "source" | "stopped"> | { skipped: string };
   gate: { touched: string[] };
+  golden: Pick<GoldenScoreResult, "scoreId" | "tally" | "capped" | "calls" | "usdEstimate" | "regressions"> | { skipped: string };
   reviewItems: { raised: number };
   held: string[];
   notes: string[];
@@ -95,6 +103,8 @@ export interface NightlyDeps {
   random?: () => number;
   /** Whether ClawBox AI can be asked (default: a credential is on the box). */
   online?: () => Promise<boolean>;
+  /** The vault search the golden check answers with (default: Memory Shard's index of the vault, when it is there). */
+  goldenSearch?: (question: string) => Promise<readonly GoldenHit[]>;
 }
 
 export class NightlyBusyError extends Error {
@@ -312,6 +322,7 @@ function emptySummary(): NightlySummary {
     },
     opus: { skipped: "not_run" },
     gate: { touched: [] },
+    golden: { skipped: "not_run" },
     reviewItems: { raised: 0 },
     held: [],
     notes: [],
@@ -537,6 +548,45 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
   }
 }
 
+/** Memory Shard's index of the vault, when it is there; else no hits (the claims' words alone answer). */
+async function shardSearch(vault: string, question: string): Promise<readonly GoldenHit[]> {
+  const { searchPrimeRadiant, vaultIndexingAllowed } = await import("./shard-index");
+  if (!(await vaultIndexingAllowed(vault))) return [];
+  return searchPrimeRadiant(question, 8, undefined, vault);
+}
+
+/** 8. the golden questions, against `main` as the night left it. Never throws. */
+async function goldenStep(run: RunRecord, summary: NightlySummary, deps: NightlyDeps, vault: string): Promise<void> {
+  const settings = deps.settings ?? readSettings();
+  if (!settings.golden.enabled) {
+    summary.golden = { skipped: "disabled" };
+    return;
+  }
+  try {
+    const online = await (deps.online ?? flashAvailable)().catch(() => false);
+    const g = await runGoldenScore({
+      vault,
+      runId: run.id,
+      client: deps.client,
+      rates: deps.rates ?? effectiveCostRates(),
+      now: deps.now,
+      maxQuestions: settings.golden.maxQuestions,
+      online,
+      search: deps.goldenSearch ?? ((q) => shardSearch(vault, q)),
+    });
+    summary.golden = g.skipped
+      ? { skipped: g.skipped }
+      : { scoreId: g.scoreId, tally: g.tally, capped: g.capped, calls: g.calls, usdEstimate: g.usdEstimate, regressions: g.regressions };
+    summary.reviewItems.raised += g.reviewItems.length;
+    summary.notes.push(...g.notes);
+    if (g.capped > 0) summary.notes.push(`${g.capped} golden question(s) were left for the next nights (the cap is ${settings.golden.maxQuestions} a night).`);
+    run.usdEstimate += g.usdEstimate;
+  } catch (err) {
+    summary.golden = { skipped: "failed" };
+    summary.notes.push(`The golden questions could not be checked: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
+  }
+}
+
 async function execute(run: RunRecord, deps: NightlyDeps, vault: string): Promise<RunRecord> {
   const now = deps.now ?? (() => new Date());
   const summary = emptySummary();
@@ -547,6 +597,7 @@ async function execute(run: RunRecord, deps: NightlyDeps, vault: string): Promis
     summary.notes.push(`The pass stopped: ${err instanceof Error ? err.message.slice(0, 200) : "error"}.`);
     console.warn("[prime-radiant] nightly pass failed:", err instanceof Error ? err.message : err);
   }
+  if (run.status !== "failed") await goldenStep(run, summary, deps, vault);
   run.finishedAt = now().toISOString();
   run.usdEstimate = Math.round(run.usdEstimate * 1e6) / 1e6;
   run.summary = summary as unknown as Record<string, unknown>;

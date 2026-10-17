@@ -104,6 +104,12 @@ export interface PageFrontmatter {
   retiredClaimIds: string[];
   /** The page this one is a version of (a draft of that final, a copy of that original): versions.ts never pairs their claims. */
   version_of?: string | null;
+  /**
+   * The day (or moment) the page's figures were true on. A metric page needs
+   * it — or every claim its own — or the lint warns (`as-of-missing`); a value
+   * that is no ISO date counts as none, it never makes the page invalid.
+   */
+  as_of?: unknown;
   [key: string]: unknown;
 }
 

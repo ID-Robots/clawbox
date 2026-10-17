@@ -188,6 +188,7 @@ describe("prime radiant lint", () => {
         "orphan",
         "no-sources",
         "stale-after-passed",
+        "as-of-missing",
         "secret-pattern",
         "frontmatter-invalid",
         "claim-id-collision",

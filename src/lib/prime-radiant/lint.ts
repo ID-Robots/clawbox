@@ -27,7 +27,7 @@ import { pageSummary } from "./frontmatter";
 import { isPluginFormatFrontmatter } from "./plugin-files";
 import { buildLinkGraph, CONTENT_FOLDERS, contentReach, pathAliases } from "./links";
 import { scanSecrets } from "./redact";
-import { ownerVerified, type PageFrontmatter } from "./schema";
+import { CLAIM_DATE_FIELDS, isIsoDate, ownerVerified, type PageFrontmatter } from "./schema";
 import type { VaultPage, VaultSnapshot } from "./vault";
 
 export const LIMITS = Object.freeze({
@@ -49,6 +49,7 @@ export const LINT_RULES = [
   "orphan",
   "no-sources",
   "stale-after-passed",
+  "as-of-missing",
   "secret-pattern",
   "frontmatter-invalid",
   "claim-id-collision",
@@ -294,6 +295,25 @@ function lintPageShape(page: VaultPage, fm: PageFrontmatter, body: string, now: 
   if (staleAfterPassed(fm.stale_after, now)) {
     out.push(finding("stale-after-passed", "warning", page.path, `stale_after ${fm.stale_after} has passed`, { staleAfter: fm.stale_after }));
   }
+  if (metricWithoutAsOf(fm)) {
+    const undated = fm.claims.filter((c) => !claimDated(c)).length;
+    out.push(
+      finding("as-of-missing", "warning", page.path, "a metric page needs an as_of date (the day its figures were true on), on the page or on every claim", {
+        claims: fm.claims.length,
+        undated,
+      }),
+    );
+  }
+}
+
+function claimDated(claim: PageFrontmatter["claims"][number]): boolean {
+  return CLAIM_DATE_FIELDS.some((key) => isIsoDate(claim[key]));
+}
+
+/** A metric page with no `as_of` of its own and a claim (or no claim at all) that names no day either. */
+export function metricWithoutAsOf(fm: Pick<PageFrontmatter, "type" | "claims" | "as_of">): boolean {
+  if (fm.type !== "metric" || isIsoDate(fm.as_of)) return false;
+  return fm.claims.length === 0 || !fm.claims.every(claimDated);
 }
 
 /**

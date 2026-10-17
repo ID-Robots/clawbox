@@ -5,7 +5,9 @@
  * settings in force (the file's valid sections over the defaults — ingest
  * exclude list, parallelism and nightly folders; cost-rate overrides; the
  * nightly schedule; the Opus tier; the contradiction pass; the search index's
- * size limit; domains and their owners), the defaults, the cost rates they price with, and which account
+ * size limit; domains and their owners; the golden questions' nightly check;
+ * the daily questions — how many an owner gets, each owner's language, and
+ * whether the assistant may send them), the defaults, the cost rates they price with, and which account
  * the second opinion would use tonight (`opusSource`: `api_key`,
  * `subscription` or `none` — a read of the account pool and the `claude`
  * sign-in, never a model call). Never creates anything.
@@ -19,11 +21,13 @@
  * fills or trims the index to it.
  * The owner (cookie AND same origin), or the assistant through the MCP bearer
  * — whose tool asks for the owner's word first — except the cost rates and
- * the Opus model, which decide what the Opus cap measures (403 `owner_only`
- * for the bearer). Never another site.
+ * the Opus model, which decide what the Opus cap measures, and
+ * `verification.outbound`, whether the assistant may message the owners at
+ * all (403 `owner_only` for the bearer). Never another site.
  */
 import { requireSession } from "@/lib/route-auth";
 import { resolveFolderInsideBrowseRoot } from "@/lib/browse-folder";
+import { DAILY_LANGUAGES, MAX_DAILY_PER_OWNER, MIN_DAILY_PER_OWNER } from "@/lib/prime-radiant/daily";
 import { isOwnOutput } from "@/lib/prime-radiant/ingest-sources";
 import { nextRunAtMs, refresh } from "@/lib/prime-radiant/nightly-scheduler";
 import { detectOpusSource } from "@/lib/prime-radiant/opus-source";
@@ -37,6 +41,9 @@ import {
   MAX_OPUS_CAP_USD,
   MAX_OPUS_MAX_PAGES,
   MAX_SEARCH_INDEX_LIMIT_MB,
+  MAX_GOLDEN_MAX_QUESTIONS,
+  MAX_OWNER_LANGUAGES,
+  MIN_GOLDEN_MAX_QUESTIONS,
   MIN_INGEST_PARALLEL,
   MIN_OPUS_CAP_USD,
   MIN_OPUS_MAX_PAGES,
@@ -57,6 +64,10 @@ const LIMITS = {
   opusMaxPages: { min: MIN_OPUS_MAX_PAGES, max: MAX_OPUS_MAX_PAGES },
   searchIndexLimitMb: { min: MIN_SEARCH_INDEX_LIMIT_MB, max: MAX_SEARCH_INDEX_LIMIT_MB },
   domains: MAX_DOMAINS,
+  goldenMaxQuestions: { min: MIN_GOLDEN_MAX_QUESTIONS, max: MAX_GOLDEN_MAX_QUESTIONS },
+  dailyPerOwner: { min: MIN_DAILY_PER_OWNER, max: MAX_DAILY_PER_OWNER },
+  ownerLanguages: MAX_OWNER_LANGUAGES,
+  languages: DAILY_LANGUAGES,
 };
 
 const OPUS_SOURCE_BUDGET_MS = 3_000;
@@ -91,6 +102,10 @@ export async function PUT(req: Request) {
   // a model with no rate, prices every call at nothing and the cap never trips.
   if (!gate.writer.person && (patch.costRates !== undefined || (patch.opus && patch.opus.model !== undefined))) {
     return fail("owner_only", "Only the owner can change the cost rates or the Opus model: they are what the spending cap measures.", 403);
+  }
+  // Whether the assistant may message the owners is the owner's to say, never the assistant's own.
+  if (!gate.writer.person && (patch.verification === null || (patch.verification && patch.verification.outbound !== undefined))) {
+    return fail("owner_only", "Only the owner can let the assistant send the daily questions.", 403);
   }
   const folders = patch.ingest?.folders;
   if (Array.isArray(folders)) {
