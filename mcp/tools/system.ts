@@ -623,7 +623,7 @@ export function registerSystemTools(reg: Registrar, ctx: McpContext): void {
       const result = await apiPost("/setup-api/update/request", { reason }, { timeoutMs: 60_000 });
       const response = result && typeof result === "object" ? result as Record<string, unknown> : {};
       return text(response.pendingApproval
-        ? `Asked the owner to confirm the update${response.telegramPromptSent ? " with the Update / Cancel buttons in Telegram (approvals bot)" : ""} and on the ClawBox desktop. Nothing installs until they tap Update; the question expires in 2 minutes.`
+        ? `Asked the owner to confirm the update ${response.telegramPromptSent ? "with the Update / Cancel buttons in Telegram (approvals bot) and on the ClawBox desktop" : "on the ClawBox desktop"}. Nothing installs until they tap Update; the question expires in 2 minutes.`
         : "The update has started. The desktop and chat will be offline for a few minutes while it installs.");
     },
   );
