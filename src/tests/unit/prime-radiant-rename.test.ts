@@ -14,7 +14,7 @@ const shard = vi.hoisted(() => ({ scheduleReindexAfterCommit: vi.fn() }));
 vi.mock("@/lib/prime-radiant/shard-index", () => shard);
 
 import { parsePage } from "@/lib/prime-radiant/frontmatter";
-import { git, logForPath, verifiedTrailers } from "@/lib/prime-radiant/git";
+import { commitPaths, git, logForPath, verifiedTrailers } from "@/lib/prime-radiant/git";
 import { revertCommit } from "@/lib/prime-radiant/history";
 import { buildLinkGraph, createLinkResolver, isPathAlias, pathAliases } from "@/lib/prime-radiant/links";
 import { vaultDir } from "@/lib/prime-radiant/paths";
@@ -308,6 +308,20 @@ describe("the owner's verification given through the assistant", () => {
     expect(parsed.ok && parsed.frontmatter.claims[0].verified).toEqual(via);
     expect(verifiedTrailers(via)).toEqual(["Verified-by: owner", "Verified-via: assistant"]);
     expect(verifiedTrailers({ by: "owner\nVerified-via: assistant" })).toEqual(["Verified-by: owner Verified-via assistant"]);
+  });
+
+  it("commits only well-formed trailer lines, and reads a verifier only from its own trailers", async () => {
+    await seed({ "concepts/pricing.md": pageText() });
+    fs.appendFileSync(path.join(vault, "concepts/pricing.md"), "More.\n");
+    const sha = await commitPaths(vault, "edit: pricing", ["concepts/pricing.md"], undefined, ["Verified-by: owner", "not a trailer", "Bad Key: x", "Reviewed-by: someone", "Verified-via:"]);
+    const [commit] = await logForPath(vault, "concepts/pricing.md", 1);
+    expect(commit).toMatchObject({ sha, subject: "edit: pricing", verified: { by: "owner" } });
+    const message = (await git(vault, ["log", "-1", "--format=%B"])).stdout.trim();
+    expect(message).toBe("edit: pricing\n\nVerified-by: owner\nReviewed-by: someone");
+    // A commit with no trailers names no verifier.
+    fs.appendFileSync(path.join(vault, "concepts/pricing.md"), "Even more.\n");
+    await commitPaths(vault, "edit: pricing again", ["concepts/pricing.md"]);
+    expect((await logForPath(vault, "concepts/pricing.md", 1))[0].verified).toBeUndefined();
   });
 
   it("verifyClaim stamps it, marks the page checked by a human and says it in the commit's trailers", async () => {
