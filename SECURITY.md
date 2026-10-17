@@ -25,7 +25,7 @@ and routed traffic are unchanged, so hotspot internet sharing keeps working.
 
 | Port | Service |
 | ---- | ------- |
-| 22/tcp | SSH |
+| 22/tcp | SSH — off by default; only listening once the owner turns it on in Settings → System → Remote access |
 | 80/tcp | ClawBox web OS |
 | 443/tcp | ClawBox web OS over TLS, when certs are installed in `data/certs/` |
 | 18789/tcp | OpenClaw gateway |

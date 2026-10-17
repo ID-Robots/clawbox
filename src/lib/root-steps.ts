@@ -108,6 +108,13 @@ export const WEB_ROOT_STEPS: readonly string[] = [
   // Off UI_ROOT_STEPS, like set_hostname, so `install/run-step` — the endpoint
   // the agent's bearer reaches with a step NAME — cannot start it. TASK-514.
   "set_timezone",
+  // SSH off by default (Settings → System → Remote access) and the factory
+  // reset's removal of the owner password. Reads ONE word from a 0600 file
+  // under data/ like chpasswd; install.sh refuses `enable` unless /etc/shadow
+  // holds an owner's password, so the clawbox account cannot open SSH on an
+  // unowned box. Started only by owner-cookie routes (system/ssh, setup/reset);
+  // off UI_ROOT_STEPS so the agent's bearer on `install/run-step` cannot.
+  "ssh_policy",
   // Settings → Users (TASK-1256): create / remove a ClawBox user's Linux
   // account. Each reads ONE record from a 0600 file under data/, like
   // chpasswd, and install.sh holds them to accounts in `clawbox-users` — never

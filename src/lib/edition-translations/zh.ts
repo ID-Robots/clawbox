@@ -1824,4 +1824,20 @@ export const zh: Record<string, string> = {
   "codingAgent.budgetTimelineKindNote": "备注",
   "codingAgent.budgetTimelineKindCheckpoint": "检查点",
   "codingAgent.budgetTimelineKindMargin": "安全余量",
+
+  // === Remote access (SSH) card, Settings › System ===
+  "settings.ssh.title": "远程访问（SSH）",
+  "settings.ssh.desc": "SSH 可让你从另一台电脑使用设备密码登录，在此设备上打开终端。默认关闭。",
+  "settings.ssh.loading": "正在检查…",
+  "settings.ssh.on": "SSH 已开启",
+  "settings.ssh.off": "SSH 已关闭",
+  "settings.ssh.turnOn": "开启",
+  "settings.ssh.turnOff": "关闭",
+  "settings.ssh.needPassword": "请先为设备设置密码——在此之前 SSH 保持关闭。",
+  "settings.ssh.confirmPrompt": "请输入当前密码以确认。",
+  "settings.ssh.cancel": "取消",
+  "settings.ssh.saving": "正在保存…",
+  "settings.ssh.nowOn": "SSH 现已开启。",
+  "settings.ssh.nowOff": "SSH 现已关闭。",
+  "settings.ssh.failed": "无法更改远程访问。",
 };

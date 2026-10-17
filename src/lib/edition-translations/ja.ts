@@ -1816,4 +1816,20 @@ export const ja: Record<string, string> = {
   "codingAgent.budgetTimelineKindNote": "メモ",
   "codingAgent.budgetTimelineKindCheckpoint": "チェックポイント",
   "codingAgent.budgetTimelineKindMargin": "安全マージン",
+
+  // === Remote access (SSH) card, Settings › System ===
+  "settings.ssh.title": "リモートアクセス（SSH）",
+  "settings.ssh.desc": "SSH を使うと、別のコンピューターからボックスのパスワードでサインインして、このボックスのターミナルを開けます。既定ではオフです。",
+  "settings.ssh.loading": "確認中…",
+  "settings.ssh.on": "SSH はオンです",
+  "settings.ssh.off": "SSH はオフです",
+  "settings.ssh.turnOn": "オンにする",
+  "settings.ssh.turnOff": "オフにする",
+  "settings.ssh.needPassword": "先にボックスのパスワードを設定してください。それまで SSH はオフのままです。",
+  "settings.ssh.confirmPrompt": "確認のため現在のパスワードを入力してください。",
+  "settings.ssh.cancel": "キャンセル",
+  "settings.ssh.saving": "保存中…",
+  "settings.ssh.nowOn": "SSH をオンにしました。",
+  "settings.ssh.nowOff": "SSH をオフにしました。",
+  "settings.ssh.failed": "リモートアクセスを変更できませんでした。",
 };

@@ -14,6 +14,11 @@ describe("middleware", () => {
    * temp CLAWBOX_ROOT — the auth gate skips /setup-api/* until this flag
    * flips, so most authenticated tests need to call this first.
    */
+  function markProvisioned() {
+    fs.mkdirSync(process.env.CLAWBOX_ETC as string, { recursive: true });
+    fs.writeFileSync(path.join(process.env.CLAWBOX_ETC as string, "provisioned"), "1\n");
+  }
+
   function markSetupComplete() {
     const dataDir = path.join(tmpRoot, "data");
     fs.mkdirSync(dataDir, { recursive: true });
@@ -27,6 +32,7 @@ describe("middleware", () => {
     vi.resetModules();
     tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-mw-"));
     process.env.CLAWBOX_ROOT = tmpRoot;
+    process.env.CLAWBOX_ETC = path.join(tmpRoot, "etc-clawbox");
     delete process.env.PORTAL_URL;
     delete process.env.SESSION_SECRET;
     delete process.env.CLAWBOX_TEST_MODE;
@@ -39,6 +45,7 @@ describe("middleware", () => {
     delete process.env.SESSION_SECRET;
     delete process.env.CLAWBOX_TEST_MODE;
     delete process.env.CLAWBOX_ROOT;
+    delete process.env.CLAWBOX_ETC;
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   });
 
@@ -229,25 +236,93 @@ describe("middleware", () => {
     });
   });
 
+  describe("connectivity probes once setup is complete", () => {
+    // A hotspot can stay up after the wizard (an Ethernet-connected box), and
+    // captive-probes.conf lingers until start-ap.sh next runs. The probes must
+    // then report "online", or a joined phone keeps a "Sign in" prompt.
+    it.each([
+      ["/generate_204", 204, ""],
+      ["/gen_204", 204, ""],
+      ["/redirect", 204, ""],
+      ["/connecttest.txt", 200, "Microsoft Connect Test"],
+      ["/ncsi.txt", 200, "Microsoft NCSI"],
+      ["/success.txt", 200, "success\n"],
+    ])("%s answers %i like an online network", async (probe, status, body) => {
+      markSetupComplete();
+      markProvisioned();
+      const response = await middleware(createRequest(probe));
+
+      expect(response.status).toBe(status);
+      expect(response.headers.get("Location")).toBeNull();
+      expect(await response.text()).toBe(body);
+    });
+
+    it("/canonical.html answers Firefox's expected page", async () => {
+      markSetupComplete();
+      markProvisioned();
+      const response = await middleware(createRequest("/canonical.html"));
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Type")).toContain("text/html");
+      expect(await response.text()).toContain("support.mozilla.org/kb/captive-portal");
+    });
+  });
+
+  describe("boxes set up before per-device provisioning keep the old answers", () => {
+    // TASK-1572: an update must not change anything on an existing owner's box.
+    it.each(["/generate_204", "/gen_204", "/connecttest.txt", "/ncsi.txt", "/success.txt", "/canonical.html"])(
+      "%s still redirects to the portal on a set-up, unprovisioned box",
+      async (probe) => {
+        markSetupComplete();
+        const response = await middleware(createRequest(probe));
+        expect(response.status).toBe(302);
+      },
+    );
+
+    it("Apple probe keeps the legacy page on a set-up, unprovisioned box", async () => {
+      markSetupComplete();
+      const response = await middleware(createRequest("/hotspot-detect.html"));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Content-Type")).toBe("text/html");
+      expect(await response.text()).toBe(
+        "<!DOCTYPE html><HTML><HEAD><TITLE>ClawBox Setup</TITLE></HEAD><BODY>Please complete setup.</BODY></HTML>",
+      );
+    });
+  });
+
   describe("Apple captive portal", () => {
-    it("returns HTML response for /hotspot-detect.html", async () => {
+    it("sends the iOS captive sheet to the setup wizard while setup is open", async () => {
       const request = createRequest("/hotspot-detect.html");
       const response = await middleware(request);
 
       expect(response.status).toBe(200);
-      expect(response.headers.get("Content-Type")).toBe("text/html");
+      expect(response.headers.get("Content-Type")).toContain("text/html");
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
 
       const body = await response.text();
-      expect(body).toContain("ClawBox Setup");
-      expect(body).toContain("<!DOCTYPE html>");
+      // Not "Success" — that would tell iOS the network is open and no sheet opens.
+      expect(body).not.toContain("<BODY>Success</BODY>");
+      expect(body).toContain('http-equiv="refresh" content="0;url=http://10.42.0.1/setup"');
+      expect(body).toContain('href="http://10.42.0.1/setup"');
     });
 
-    it("returns HTML response for /library/test/success.html", async () => {
+    it("answers /library/test/success.html the same way during setup", async () => {
       const request = createRequest("/library/test/success.html");
       const response = await middleware(request);
 
       expect(response.status).toBe(200);
-      expect(response.headers.get("Content-Type")).toBe("text/html");
+      expect(await response.text()).toContain("http://10.42.0.1/setup");
+    });
+
+    it("answers Success once setup is complete, so no device sees a captive network", async () => {
+      markSetupComplete();
+      markProvisioned();
+      const response = await middleware(createRequest("/hotspot-detect.html"));
+
+      expect(response.status).toBe(200);
+      const body = await response.text();
+      expect(body).toContain("<BODY>Success</BODY>");
+      expect(body).not.toContain("/setup");
     });
   });
 
@@ -283,7 +358,7 @@ describe("middleware", () => {
       const response = await middleware(request);
 
       expect(response.status).toBe(200);
-      expect(response.headers.get("Content-Type")).toBe("text/html");
+      expect(response.headers.get("Content-Type")).toContain("text/html");
     });
   });
 

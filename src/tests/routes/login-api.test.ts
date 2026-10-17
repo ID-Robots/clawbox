@@ -307,9 +307,9 @@ describe("/login-api", () => {
     });
 
     // The security property that makes trusting shadow safe: hasOwnerPassword()
-    // is false for the published factory default, so an as-flashed box is still
+    // is false for the published legacy image password, so an unowned box is still
     // refused here and must go through the wizard.
-    it("keeps refusing an as-flashed box, whose account holds only the factory default", async () => {
+    it("keeps refusing an unowned box, whose account holds only the legacy image password", async () => {
       mockGet
         .mockResolvedValueOnce(null as never)
         .mockResolvedValueOnce(false as never);

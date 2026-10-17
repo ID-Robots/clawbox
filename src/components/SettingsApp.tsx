@@ -6,6 +6,7 @@ import SystemUpdateApp, { componentNeedsUpdate, shipsOpenclaw, type VersionInfo 
 import Image from "next/image";
 import { createPortal } from "react-dom";
 import StatusMessage from "./StatusMessage";
+import RemoteAccessPanel from "./RemoteAccessPanel";
 import SignalBars from "./SignalBars";
 import AIProviderIcon from "./AIProviderIcon";
 import AiProviderList from "./AiProviderList";
@@ -6505,6 +6506,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
               </div>
               {sysPasswordStatus && <div className="mt-3"><StatusMessage type={sysPasswordStatus.type} message={sysPasswordStatus.message} /></div>}
             </div>
+
+            {/* Remote access (SSH) — off by default, the owner's switch. */}
+            <RemoteAccessPanel />
           </div>
         )}
 
