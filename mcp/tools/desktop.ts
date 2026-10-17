@@ -529,7 +529,7 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
 
   reg.tool(
     "webapp_create",
-    "Create a one-file web app on the ClawBox desktop from complete standalone HTML (read clawbox_context first for the storage and styling rules).",
+    "Create a one-file web app on the ClawBox desktop from complete standalone HTML: use it for any page, landing page, form or small tool the user asks for, and send the link it returns. Never start your own web server or tunnel for this. Read clawbox_context first for the storage and styling rules.",
     {
       app_id: zSlug("Unique id, lowercase with hyphens, e.g. \"todo-list\""),
       name: zText(60, "Name shown under the desktop icon"),

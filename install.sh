@@ -3303,6 +3303,14 @@ step_apt_update() {
   # /usr/bin/libreoffice launcher) — the full `libreoffice` metapackage would add
   # Calc, Impress, Base and a Java runtime for nothing the box ever converts.
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq git curl network-manager avahi-daemon iptables ufw iw python3 python3-pip python-is-python3 pipx gh build-essential cmake ninja-build pkg-config poppler-utils libreoffice-writer
+  # Document libraries for the agent: Word (python-docx), Excel (openpyxl) and
+  # PDF writing (reportlab). "Make me an offer / a quote / a spreadsheet" is an
+  # everyday chat request, and without these the agent spent the first minutes
+  # of each one pip-installing them. Distro packages, so they need no network
+  # index and update with the OS. Separate and non-fatal: a mirror that lacks
+  # one of them must not fail the base install above.
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-docx python3-openpyxl python3-reportlab \
+    || echo "  Warning: document libraries (python3-docx/openpyxl/reportlab) not installed" >&2
   # Node.js for production server and OpenClaw. The floor is the pinned core's
   # `engines.node` ($OPENCLAW_NODE_ENGINE): 2026.9.3 refuses Node 22 outright,
   # so an older ClawBox image — every one of which shipped Node 22 — takes the
