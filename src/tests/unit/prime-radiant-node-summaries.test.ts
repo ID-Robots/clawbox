@@ -305,7 +305,14 @@ describe("the plan", () => {
     expect(paths).not.toContain("entities/acme-widgets-ltd.md");
     expect(paths).not.toContain("concepts/globex-supply-agreement.md");
     expect(paths).not.toContain("entities/maria-ivanova-2.md");
-    expect(plan.stats).toMatchObject({ skippedVerified: 2, duplicates: 1, leaves: 1 });
+    expect(plan.stats).toMatchObject({ skippedVerified: 2, duplicates: 1, leaves: 1, secret: 0 });
+  });
+
+  it("gives a secret-ref page no summary: its facts never go to a model", () => {
+    const plan = planSummaries(vault({ "concepts/vault-keys.md": page({ title: "Vault keys", privacy: "secret-ref", claims: [claim("finance/vault-keys/where", "Globex Ltd keeps the keys in the safe.")] }, "See [[entities/globex-ltd]].\n") }));
+    expect(plan.jobs.map((j) => j.hood.path)).not.toContain("concepts/vault-keys.md");
+    expect(plan.stats.secret).toBe(1);
+    expect(plan.jobs.flatMap((j) => j.hood.facts).some((f) => /safe/.test(f.text))).toBe(false);
   });
 
   it("keeps a summary a person wrote, and one of ours a person edited since", () => {

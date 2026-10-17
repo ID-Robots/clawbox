@@ -29,7 +29,8 @@
  * Order: entities (people, companies, products) → hubs → concepts, the most
  * linked first. Record leaves keep their short summary; a verified page is
  * never rewritten; a `summary` a person wrote (or edited) is theirs; a
- * duplicate entity's summary lives on its canonical page (entity-hygiene.ts).
+ * `secret-ref` page gets none (its facts never leave it); a duplicate
+ * entity's summary lives on its canonical page (entity-hygiene.ts).
  *
  * Pure apart from hashing.
  */
@@ -514,6 +515,8 @@ export interface SummaryPlanStats {
   duplicates: number;
   /** Record leaves and source pages: they keep their short summary. */
   leaves: number;
+  /** `secret-ref` pages: their facts never go to a model, nor into a summary. */
+  secret: number;
 }
 
 export interface SummaryPlan {
@@ -547,7 +550,7 @@ export function planSummaries(snapshot: Pick<VaultSnapshot, "pages">, options: S
   const mismatches = domainMismatches(pages, linked, { configured: options.domains });
   const ctx: Context = { byPath, graph, duplicatesOf };
 
-  const stats: SummaryPlanStats = { eligible: 0, byTier: { entity: 0, hub: 0, concept: 0 }, unchanged: 0, skippedVerified: 0, keptPerson: 0, noFacts: 0, duplicates: 0, leaves: 0 };
+  const stats: SummaryPlanStats = { eligible: 0, byTier: { entity: 0, hub: 0, concept: 0 }, unchanged: 0, skippedVerified: 0, keptPerson: 0, noFacts: 0, duplicates: 0, leaves: 0, secret: 0 };
   const jobs: SummaryJob[] = [];
   for (const p of pages) {
     const tier = summaryTier(p.path, p.fm);
@@ -563,6 +566,10 @@ export function planSummaries(snapshot: Pick<VaultSnapshot, "pages">, options: S
     }
     if (hasVerification(p.fm)) {
       stats.skippedVerified++;
+      continue;
+    }
+    if (p.fm.privacy === "secret-ref") {
+      stats.secret++;
       continue;
     }
     const owner = summaryOwner(p.fm);

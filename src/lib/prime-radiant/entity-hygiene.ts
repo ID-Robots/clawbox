@@ -211,7 +211,7 @@ export interface DomainSuggestion {
  * The domain an entity's neighbourhood says it belongs in, when that is not
  * the one it is filed under; null when nothing says so clearly.
  *  - `roleTexts`: what is said about the entity with it as the subject (a
- *    fact that opens with its name: "Maria Petrova is the COO …", never
+ *    fact that opens with its name: "Maria Ivanova is the COO …", never
  *    "… is the COO of Acme") — a role there that maps to ONE domain that
  *    exists decides;
  *  - `neighbourDomains`: the domains of the content pages linked with it
