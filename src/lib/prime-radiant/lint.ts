@@ -24,7 +24,7 @@
 
 import { buildClaimIndex, claimCollisions, isClaimId, retiredReuse } from "./claims";
 import { pageSummary } from "./frontmatter";
-import { buildLinkGraph, contentReach } from "./links";
+import { buildLinkGraph, CONTENT_FOLDERS, contentReach } from "./links";
 import { scanSecrets } from "./redact";
 import type { PageFrontmatter } from "./schema";
 import type { VaultPage, VaultSnapshot } from "./vault";
@@ -368,7 +368,9 @@ export function lintVault(snapshot: VaultSnapshot, options: LintOptions = {}): L
           "orphan",
           "warning",
           page.path,
-          isolated ? "no other wiki page links here and it links to none (index.md does not count)" : "no other wiki page links here (index.md does not count)",
+          isolated
+            ? `no other content page (${CONTENT_FOLDERS.join(", ")}) links here and it links to none (index.md, sources and reports do not count)`
+            : `no other content page (${CONTENT_FOLDERS.join(", ")}) links here (index.md, sources and reports do not count)`,
           { isolated },
         ),
       );
