@@ -113,10 +113,16 @@ export function reconcileStaleText(
   options: ReconcileOptions = {},
 ): StaleTextResult {
   const prose = options.prose !== false;
-  const matchers = facts.map(matcherFor).filter((m): m is Matcher => m !== null);
+  const here = page === verifiedOn;
+  // A verification reads every page: one that cannot state an old value (not its text, not every
+  // changed word as a substring — a folded word is a prefix of its original) is passed over unread.
+  const flat = here ? "" : body.replace(/\s+/g, " ").toLowerCase();
+  const matchers = facts
+    .map(matcherFor)
+    .filter((m): m is Matcher => m !== null)
+    .filter((m) => here || flat.includes(m.before) || (m.changed.size > 0 && [...m.changed].every((w) => flat.includes(w))));
   const result: StaleTextResult = { body, keyFacts: 0, stale: 0 };
   if (matchers.length === 0) return result;
-  const here = page === verifiedOn;
   const lines = body.split("\n");
   const out: string[] = [];
   let section: string | null = null;
