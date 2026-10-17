@@ -277,6 +277,8 @@ describe("pages", () => {
     await vaultOperation("seed: duplicate", async (tx) => {
       await tx.write("concepts/prices.md", pageText({ title: "Widget prices", claims: [GREEN] }, "Widget prices in brief.\n"));
       await tx.write("concepts/shipping.md", pageText({ title: "Shipping" }, "Shipping is priced as in [[concepts/prices|the list]].\n"));
+      // A content page links shipping: index.md listing it does not keep it from being an orphan.
+      await tx.write("concepts/returns.md", pageText({ title: "Returns" }, "Returns go back as in [[concepts/shipping]].\n"));
       await tx.write("index.md", "# Index\n\n- [[concepts/pricing]] — Widget pricing\n- [[concepts/prices]] — Widget prices\n- [[concepts/shipping]] — Shipping\n");
     });
     const before = { pricing: read("concepts/pricing.md"), prices: read("concepts/prices.md"), shipping: read("concepts/shipping.md"), index: read("index.md") };
