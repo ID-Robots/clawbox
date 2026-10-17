@@ -176,6 +176,7 @@ export async function POST(req: Request) {
             rates: effectiveCostRates(),
             online: dry ? false : await flashAvailable().catch(() => false),
             dryRun: dry,
+            mergePreviews: true,
           });
         if (dryRun) return json(await go(true));
         background("summaries", () => go(false));

@@ -577,12 +577,12 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
           skippedVerified: s.skippedVerified,
           keptPerson: s.keptPerson,
           model: s.model,
-          mergeSuggestions: s.mergeSuggestions.length,
+          mergeSuggestions: s.mergeGroups,
           domainMismatches: s.domainMismatches.length,
         };
         run.usdEstimate += s.model.usdEstimate;
         if (s.written > 0) notes.push(`The summaries pass wrote ${s.written} summar${s.written === 1 ? "y" : "ies"} (${s.byModel} by the model, ${s.byFacts} from facts).`);
-        if (s.mergeSuggestions.length > 0) notes.push(`${s.mergeSuggestions.length} duplicate entit${s.mergeSuggestions.length === 1 ? "y looks" : "ies look"} worth merging (the Checks tab lists them as duplicate-entity warnings, each naming the page to merge into).`);
+        if (s.mergeGroups > 0) notes.push(`${s.mergeGroups} duplicate entit${s.mergeGroups === 1 ? "y looks" : "ies look"} worth merging (the Checks tab lists them as duplicate-entity warnings, each naming the page to merge into).`);
       } catch (err) {
         summary.summaries = { skipped: "failed" };
         notes.push(`The summaries pass could not be saved: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
@@ -595,7 +595,7 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
 
     // 5. lint everything the branch changed — after every step that commits to it
     const finalChanged = await changedPages(wt, VAULT_MAIN_BRANCH, "HEAD");
-    const report = lintVault(await readVaultSnapshot(wt), { scope: finalChanged, ledgerRetired: ledger(vault), now: now() });
+    const report = lintVault(await readVaultSnapshot(wt), { scope: finalChanged, ledgerRetired: ledger(vault), domains: settings.domains.map((d) => d.name), now: now() });
     const errors = report.findings.filter((f) => f.severity === "error");
     summary.lint = { errors: report.errors, warnings: report.warnings, checked: report.checked };
     const at = now().toISOString();

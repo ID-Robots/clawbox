@@ -260,6 +260,37 @@ describe("the check step: nothing invented", () => {
     ]);
   });
 
+  it("rejects a negation the cited facts do not carry, in English and in Bulgarian, and keeps one they do", () => {
+    const r = checkSentences(
+      [
+        { text: "Globex Ltd does not supply aluminium housings to Acme Widgets Ltd.", from: [id(/supplies/)] },
+        { text: "Globex Ltd doesn't supply aluminium housings to Acme Widgets Ltd.", from: [id(/supplies/)] },
+        { text: "Globex Ltd never delivered 1,200 housings in Q3 2026.", from: [id(/delivered/)] },
+      ],
+      hood,
+    );
+    expect(r.accepted).toEqual([]);
+    expect(r.rejected.map((x) => x.reason)).toEqual(["unsupported_negation:not", "unsupported_negation:t", "unsupported_negation:never"]);
+
+    const bg = vault({
+      "entities/globeks-ood.md": page({ type: "entity", title: "Глобекс ООД", domain: "operations" }, "Глобекс ООД is named on 2 pages of this wiki.\n"),
+      "concepts/dostavki.md": page({ title: "Доставки", domain: "operations", claims: [claim("operations/dostavki/korpusi", "Глобекс ООД доставя алуминиеви корпуси на Акме ООД."), claim("operations/dostavki/sklad", "Глобекс ООД няма склад в София.")] }, "Доставки от [[entities/globeks-ood]].\n"),
+    });
+    const h = hoodOf(bg, "entities/globeks-ood.md");
+    const korpusi = h.facts.find((x) => /доставя/.test(x.text))!.id;
+    const sklad = h.facts.find((x) => /склад/.test(x.text))!.id;
+    const b = checkSentences(
+      [
+        { text: "Глобекс ООД не доставя алуминиеви корпуси на Акме ООД.", from: [korpusi] },
+        // The fact says "няма" itself: the sentence may too.
+        { text: "Глобекс ООД няма склад в София.", from: [sklad] },
+      ],
+      h,
+    );
+    expect(b.rejected).toEqual([{ text: "Глобекс ООД не доставя алуминиеви корпуси на Акме ООД.", reason: "unsupported_negation:не" }]);
+    expect(b.accepted.map((x) => x.text)).toEqual(["Глобекс ООД няма склад в София."]);
+  });
+
   it("reads a sentence's capitalised first word as the word it is, in English and in Bulgarian — never an invented name", () => {
     const bg = vault({
       "entities/globeks-ood.md": page({ type: "entity", title: "Глобекс ООД", domain: "operations" }, "Глобекс ООД is named on 2 pages of this wiki.\n"),
@@ -390,7 +421,15 @@ describe("the pass", () => {
       const snap = { current: vault() };
       const { run, commits } = fakeRun(snap);
       const calls: FlashRequest[] = [];
-      const silent: FlashClient = { model: "deepseek-v4-flash", complete: async (req) => (calls.push(req), { text: "[]", model: "deepseek-v4-flash", usage: { promptTokens: 300, completionTokens: 2, cacheHitTokens: 0 } }) };
+      // The model answers every node, with no sentence it can stand behind.
+      const silent: FlashClient = {
+        model: "deepseek-v4-flash",
+        complete: async (req) => {
+          calls.push(req);
+          const text = JSON.stringify((readSummaryItems(req.user) ?? []).map((n) => ({ i: n.i, sentences: [] })));
+          return { text, model: "deepseek-v4-flash", usage: { promptTokens: 300, completionTokens: 2, cacheHitTokens: 0 } };
+        },
+      };
       const opts = { stateVault: state, settings: settings(), rates: DEFAULT_COST_RATES, client: silent, online: true, now: () => NOW };
       const first = await runSummaries(snap.current, run, opts);
       expect(first.rejectedPages).toBe(first.planned);
@@ -410,6 +449,32 @@ describe("the pass", () => {
       expect(capped.byReason.upgrade).toBe(capped.planned);
       expect(capped).toMatchObject({ written: 0, byFacts: 0, model: { calls: 0, skipped: "cost_cap" } });
       expect(off.commits).toHaveLength(1);
+    } finally {
+      dropState(state);
+    }
+  });
+
+  it("never marks tried a node the model did not answer (no array, cut at the cap): the facts write it and the model is asked again", async () => {
+    const state = tmpState();
+    try {
+      for (const garbled of ["[]", '[{"i": 0, "sentences": [{"text": "Globex Ltd supp', "I cannot help with that."]) {
+        const snap = { current: vault() };
+        const { run } = fakeRun(snap);
+        const calls: FlashRequest[] = [];
+        const client: FlashClient = { model: "deepseek-v4-flash", complete: async (req) => (calls.push(req), { text: garbled, model: "deepseek-v4-flash", usage: { promptTokens: 300, completionTokens: 2, cacheHitTokens: 0 } }) };
+        const opts = { stateVault: state, settings: settings(), rates: DEFAULT_COST_RATES, client, online: true, now: () => NOW };
+        const first = await runSummaries(snap.current, run, opts);
+        expect(first).toMatchObject({ rejectedPages: 0, byModel: 0, byFacts: first.planned });
+        const meta = readSummaryMeta(fmOf(snap.current, "entities/globex-ltd.md"));
+        expect(meta).toMatchObject({ method: "facts" });
+        expect(meta?.tried).toBeUndefined();
+        // Next run: due the model again (an upgrade), asked again, nothing rewritten while it still answers nothing.
+        const asked = calls.length;
+        const again = await runSummaries(snap.current, run, opts);
+        expect(again.byReason.upgrade).toBe(again.planned);
+        expect(calls.length).toBeGreaterThan(asked);
+        expect(again.written).toBe(0);
+      }
     } finally {
       dropState(state);
     }
@@ -545,7 +610,11 @@ describe("the pass", () => {
     try {
       const calls: FlashRequest[] = [];
       const { run, commits } = fakeRun({ current: vault() });
-      const r = await runSummaries(vault(), run, { stateVault: state, settings: settings(), rates: DEFAULT_COST_RATES, client: inventingClient(calls), online: true, dryRun: true, now: () => NOW });
+      const r = await runSummaries(vault(), run, { stateVault: state, settings: settings(), rates: DEFAULT_COST_RATES, client: inventingClient(calls), online: true, dryRun: true, mergePreviews: true, now: () => NOW });
+      // Without previews asked for (the nightly pass), the groups are counted and the merge tool is never run.
+      const counted = await runSummaries(vault(), run, { stateVault: state, settings: settings(), rates: DEFAULT_COST_RATES, online: false, dryRun: true, now: () => NOW });
+      expect(counted).toMatchObject({ mergeGroups: 1, mergeSuggestions: [] });
+      expect(r.mergeGroups).toBe(1);
       expect(calls).toHaveLength(0);
       expect(commits).toHaveLength(0);
       expect(r).toMatchObject({ dryRun: true, written: 0, model: { skipped: "dry_run" } });
@@ -568,7 +637,7 @@ describe("the pass", () => {
         "entities/initech.md": page({ type: "entity", title: "Initech", domain: "sales", verified: OWNER }, "Initech buys widgets.\n"),
         "entities/initech-2.md": page({ type: "entity", title: "Initech", domain: "sales", verified: OWNER }, "Initech pays on time.\n"),
       });
-      const r = await runSummaries(both, fakeRun({ current: both }).run, { stateVault: state, settings: settings(), rates: DEFAULT_COST_RATES, online: false, dryRun: true, now: () => NOW });
+      const r = await runSummaries(both, fakeRun({ current: both }).run, { stateVault: state, settings: settings(), rates: DEFAULT_COST_RATES, online: false, dryRun: true, mergePreviews: true, now: () => NOW });
       const s = r.mergeSuggestions.find((m) => m.into === "entities/initech.md");
       expect(s).toMatchObject({ from: ["entities/initech-2.md"], reason: "suffix", ok: false, refused: { code: "verified" } });
       expect(s?.claims).toBeUndefined();

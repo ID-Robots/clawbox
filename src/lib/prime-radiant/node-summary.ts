@@ -21,8 +21,9 @@
  * facts alone, each sentence naming the facts it rests on; then
  * {@link checkSentences} — the check step — rejects any sentence that cites no
  * fact, or carries a number, a name or a content word the cited facts (and
- * the page's own names) do not hold. Without the model, or when every
- * sentence it wrote is rejected, {@link factsSummary} composes the summary
+ * the page's own names) do not hold, or a negation they do not carry.
+ * Without the model, or when every sentence it wrote is rejected,
+ * {@link factsSummary} composes the summary
  * from the facts' own words. Either way every sentence is traceable: the page
  * keeps, beside `summary`, the facts each sentence came from.
  *
@@ -398,6 +399,13 @@ function numberTokens(text: string): Array<{ value: string; runs: string[] }> {
 
 const STOP_WORDS: ReadonlySet<string> = new Set([...NAME_STOP].map((w) => w.toLowerCase()));
 
+/**
+ * Words that turn a fact into its opposite (English and Bulgarian; "t" is what
+ * "doesn't" leaves). Short ones pass the content-word check, so a sentence may
+ * carry one only when the facts it cites do.
+ */
+const NEGATIONS: readonly string[] = ["not", "no", "never", "none", "nor", "neither", "nothing", "nobody", "without", "cannot", "t", "не", "няма", "никога", "нито", "нищо", "без"];
+
 export interface CheckedSummary {
   accepted: Array<{ text: string; refs: string[]; verified: boolean }>;
   rejected: Array<{ text: string; reason: string }>;
@@ -439,6 +447,8 @@ export function checkSentences(drafts: readonly DraftSentence[], hood: Neighbour
       if (m.index === 0 && lower.length >= 5 && !/\d/.test(lower) && (CONNECTIVE.has(lower) || stems.has(lower.slice(0, 5)))) continue;
       return reject(`unsupported_name:${w}`);
     }
+    const said = new Set(words(text));
+    for (const neg of NEGATIONS) if (said.has(neg) && !corpusWords.has(neg)) return reject(`unsupported_negation:${neg}`);
     for (const w of words(text)) {
       if (w.length < 5 || /\d/.test(w) || CONNECTIVE.has(w) || STOP_WORDS.has(w) || corpusWords.has(w) || stems.has(w.slice(0, 5))) continue;
       return reject(`unsupported_word:${w}`);

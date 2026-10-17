@@ -168,8 +168,8 @@ describe("nightly pass", () => {
     expect(summary.contradictions.findings).toBe(1);
     expect(summary.gate.touched).toEqual([]);
     expect(run!.usdEstimate).toBeGreaterThan(0);
-    // Step 4c: every page summarised from its neighbourhood (this test's model answers no summary call, so the facts wrote them).
-    expect(summary.summaries).toMatchObject({ planned: 2, written: 2, byModel: 0, byFacts: 2, rejectedPages: 2, model: { calls: 1 } });
+    // Step 4c: every page summarised from its neighbourhood (this test's model answers no summary call, so the facts wrote them, not marked tried).
+    expect(summary.summaries).toMatchObject({ planned: 2, written: 2, byModel: 0, byFacts: 2, rejectedPages: 0, model: { calls: 1 } });
 
     // main has the pages; the branch and the worktree are gone.
     const snap = await readVaultSnapshot();

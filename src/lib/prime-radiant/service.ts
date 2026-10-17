@@ -23,6 +23,7 @@ import { currentBranch, commitCount, headCommit, type CommitInfo } from "./git";
 import { adoptPluginPages, repairPluginWritesOnce, type PluginRepairResult } from "./plugin-repair";
 import { ensureMemoryWikiWiring, memoryWikiWiringStatus, type WiringPlan, type WiringResult } from "./plugin-wiring";
 import { vaultDir, safePagePath, isKnowledgePage } from "./paths";
+import { readSettings } from "./settings";
 import { readRetiredLedger } from "./state-db";
 import { readStaleClaims, type StaleClaimNote } from "./verify";
 import {
@@ -60,6 +61,11 @@ function ledger(vault: string): string[] {
   } catch {
     return [];
   }
+}
+
+/** The configured domain names (settings `domains`): what `domain-mismatch` may suggest, as the summaries pass reads them. */
+function configuredDomains(): string[] {
+  return readSettings().domains.map((d) => d.name);
 }
 
 /** The stale notes owner-verified claims left (verify.ts); none when the state database cannot be read. */
@@ -114,7 +120,7 @@ export async function getStatus(vault: string = vaultDir()): Promise<PrimeRadian
   }
   const snapshot = await readVaultSnapshot(vault);
   const valid = snapshot.pages.flatMap((p) => (p.parsed.ok ? [p.parsed.frontmatter] : []));
-  const report = lintVault(snapshot, { ledgerRetired: ledger(vault), staleClaims: staleNotes(vault) });
+  const report = lintVault(snapshot, { ledgerRetired: ledger(vault), staleClaims: staleNotes(vault), domains: configuredDomains() });
   const [branch, head, commits, plugin] = await Promise.all([
     currentBranch(vault),
     headCommit(vault),
@@ -238,7 +244,7 @@ function pageDetail(snapshot: VaultSnapshot, rel: string, vault: string): PageDe
     backlinks: [...(graph.inbound.get(rel) ?? [])].sort(),
     links: [...(graph.outbound.get(rel) ?? [])].sort(),
     inIndex: graph.indexed.has(rel),
-    lint: lintVault(snapshot, { scope: [rel], ledgerRetired: ledger(vault), staleClaims: staleNotes(vault) }),
+    lint: lintVault(snapshot, { scope: [rel], ledgerRetired: ledger(vault), staleClaims: staleNotes(vault), domains: configuredDomains() }),
   };
 }
 
@@ -254,7 +260,7 @@ export async function getLint(paths: readonly string[] | null, vault: string = v
     paths && paths.length > 0
       ? paths.map((p) => safePagePath(p)).filter((p): p is string => p !== null && isKnowledgePage(p))
       : undefined;
-  return lintVault(snapshot, { scope, ledgerRetired: ledger(vault), staleClaims: staleNotes(vault), now });
+  return lintVault(snapshot, { scope, ledgerRetired: ledger(vault), staleClaims: staleNotes(vault), domains: configuredDomains(), now });
 }
 
 export interface InitialiseResult {

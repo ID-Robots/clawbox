@@ -15,10 +15,12 @@
  * whose neighbourhood changed; a model summary whose neighbourhood changed,
  * and a facts' summary only due an upgrade, wait for the model.
  *
- * Duplicate entities come back as MERGE SUGGESTIONS, each planned by the
+ * Duplicate entities come back as MERGE SUGGESTIONS: counted every run, and
+ * — when `mergePreviews` asks (the maintenance action) — each planned by the
  * merge tool on the same snapshot without writing anything (edit.ts
- * `previewMerge`); domain mismatches come back as suggestions too (lint warns
- * with them). Nothing is merged or moved here.
+ * `previewMerge`, one claim index for all of them); domain mismatches come
+ * back as suggestions too (lint warns with them). Nothing is merged or moved
+ * here.
  *
  * A dry run asks no model and writes nothing: it answers what would be
  * written, the suggestions and the stats.
@@ -27,7 +29,7 @@
  */
 
 import { estimateUsd, type CostRates } from "./cost-rates";
-import { previewMerge } from "./edit";
+import { mergeClaimIndex, previewMerge } from "./edit";
 import { completeWithRetry, flashClient, type FlashClient } from "./flash-client";
 import { recordCost } from "./ingest-store";
 import {
@@ -98,6 +100,9 @@ export interface SummariesRunResult extends SummaryPlanStats {
   /** Pages whose every model sentence was rejected (their facts wrote the summary). */
   rejectedPages: number;
   model: { asked: number; calls: number; usdEstimate: number; capUsd: number; maxPages: number; skipped?: string };
+  /** Duplicate entity groups found (each a merge suggestion). */
+  mergeGroups: number;
+  /** Each group as the merge tool's dry run plans it — only when `mergePreviews` is asked for (the maintenance action; a nightly pass counts them). */
   mergeSuggestions: MergeSuggestion[];
   domainMismatches: DomainMismatch[];
   commits: string[];
@@ -132,6 +137,8 @@ export async function runSummaries(
     runId?: string | null;
     now?: () => Date;
     dryRun?: boolean;
+    /** Plan each duplicate group with the merge tool (a dry run each, over the whole vault): the maintenance action's detail. Default false. */
+    mergePreviews?: boolean;
   },
 ): Promise<SummariesRunResult> {
   const now = options.now ?? (() => new Date());
@@ -151,7 +158,8 @@ export async function runSummaries(
     rejected: 0,
     rejectedPages: 0,
     model: { asked: 0, calls: 0, usdEstimate: 0, capUsd: s.capUsd, maxPages: s.maxPages },
-    mergeSuggestions: mergeSuggestions(snapshot, plan.duplicates, options.stateVault, now()),
+    mergeGroups: plan.duplicates.length,
+    mergeSuggestions: options.mergePreviews ? mergeSuggestions(snapshot, plan.duplicates, options.stateVault, now()) : [],
     domainMismatches: plan.mismatches,
     commits: [],
     dryRun: !!options.dryRun,
@@ -230,10 +238,13 @@ export async function runSummaries(
       continue;
     }
     batch.forEach((job, k) => {
-      const checked = checkSentences(answer.get(k) ?? [], shown[k]);
+      const drafts = answer.get(k);
+      // No answer for this node (no array, cut at the cap, answered twice): not tried, the model may be asked again.
+      if (drafts === undefined) return fromFacts(job);
+      const checked = checkSentences(drafts, shown[k]);
       result.rejected += checked.rejected.length;
       if (checked.accepted.length > 0) return write(job, checked.accepted, "model");
-      // Every sentence rejected: the facts write it, and the model is not asked again until the neighbourhood changes.
+      // The model answered and every sentence was rejected (or it wrote none): the facts write it, and the model is not asked again until the neighbourhood changes.
       result.rejectedPages++;
       write(job, checkSentences(factsSummary(job.hood), job.hood).accepted, "facts", true);
     });
@@ -267,12 +278,15 @@ function mergeSuggestions(
   stateVault: string,
   now: Date,
 ): MergeSuggestion[] {
+  if (groups.length === 0) return [];
   const full: VaultSnapshot = { vault: snapshot.vault ?? stateVault, pages: snapshot.pages, indexBody: snapshot.indexBody, truncated: snapshot.truncated ?? false };
+  // One claim index (and one read of the retired ledger) for every preview: the merges plan against the same snapshot.
+  const claimIndex = mergeClaimIndex(full, stateVault);
   return groups.slice(0, MAX_MERGE_SUGGESTIONS).map((g) => {
     const from = g.duplicates.slice(0, 20);
     let preview: ReturnType<typeof previewMerge>;
     try {
-      preview = previewMerge(full, { into: g.canonical, from }, { by: SUMMARIES_BY }, { vault: stateVault, now });
+      preview = previewMerge(full, { into: g.canonical, from }, { by: SUMMARIES_BY }, { vault: stateVault, now, claimIndex });
     } catch (err) {
       preview = { ok: false, code: "failed", message: err instanceof Error ? err.message.slice(0, 200) : "failed" };
     }

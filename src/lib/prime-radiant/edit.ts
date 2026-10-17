@@ -991,7 +991,7 @@ function mdLink(link: FoundLink & { kind: "md" }, href: string): string {
  * Throws the refusal when the merge may not happen. Pure apart from the
  * retired-id ledger it reads.
  */
-function planMerge(snapshot: VaultSnapshot, vault: string, input: PageMerge, who: EditWho, at: string): MergePlan {
+function planMerge(snapshot: VaultSnapshot, vault: string, input: PageMerge, who: EditWho, at: string, claimIndex?: ClaimIndex): MergePlan {
   const into = mergePage(snapshot, input.into);
   if (input.from.includes(into.path)) throw bad("A page cannot be merged into itself: leave the target out of from.");
   const fm = into.frontmatter;
@@ -1007,7 +1007,7 @@ function planMerge(snapshot: VaultSnapshot, vault: string, input: PageMerge, who
   }
 
   // Claims move as they are: id, text, status, evidence and verification.
-  const index = indexOf(snapshot, vault);
+  const index = claimIndex ?? indexOf(snapshot, vault);
   const claims = [...fm.claims];
   const slot = new Map(claims.map((c, i) => [c.id, i]));
   const holder = new Map(claims.map((c) => [c.id, into.path]));
@@ -1202,6 +1202,11 @@ function followReviewItems(vault: string, plan: MergePlan["result"], dryRun: boo
   }
 }
 
+/** The claim index a merge plans against (the snapshot's claims, the retired ledger): built once for many {@link previewMerge} calls on one snapshot. */
+export function mergeClaimIndex(snapshot: VaultSnapshot, vault: string): ClaimIndex {
+  return indexOf(snapshot, vault);
+}
+
 /**
  * A merge worked out on a snapshot the caller already holds, written nowhere:
  * what {@link mergePages} would do in a dry run, or the refusal it would
@@ -1211,10 +1216,10 @@ export function previewMerge(
   snapshot: VaultSnapshot,
   input: Pick<PageMerge, "into" | "from">,
   who: EditWho,
-  options: { vault: string; now?: Date },
+  options: { vault: string; now?: Date; claimIndex?: ClaimIndex },
 ): { ok: true; result: MergePlan["result"] } | { ok: false; code: string; message: string } {
   try {
-    const plan = planMerge(snapshot, options.vault, { ...input, dryRun: true, keepIntoBody: true }, who, nowIso(options.now));
+    const plan = planMerge(snapshot, options.vault, { ...input, dryRun: true, keepIntoBody: true }, who, nowIso(options.now), options.claimIndex);
     return { ok: true, result: plan.result };
   } catch (err) {
     if (err instanceof PageEditError) return { ok: false, code: err.code, message: err.message };
