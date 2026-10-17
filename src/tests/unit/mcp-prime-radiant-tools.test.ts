@@ -521,6 +521,26 @@ describe("prime_radiant_status", () => {
     });
   });
 
+  it("shows the search index's size against the owner's limit", async () => {
+    answer(
+      [/\/status$/, {
+        initialised: true,
+        vault: { pages: 3 },
+        index: { exists: true, usedMb: 41.3, limitMb: 160, chunks: 42_100, maxChunks: 163_047, pages: 3, cappedPages: 2, withoutPageVector: 2, needsFullScan: true, migrationPending: true },
+      }],
+      [/./, {}],
+    );
+    const out = await harness().call("prime_radiant_status", {});
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(JSON.parse(out.text).search_index).toEqual({
+      used_mb: 41.3, limit_mb: 160, chunks: 42_100, max_chunks: 163_047, pages: 3, capped_pages: 2, pages_without_page_vector: 2, converting_to_8bit: true,
+    });
+    answer([/\/status$/, { initialised: true, vault: { pages: 0 }, index: { exists: false, limitMb: 64 } }], [/./, {}]);
+    const none = await harness().call("prime_radiant_status", {});
+    if (!none.isError) expect(JSON.parse(none.text).search_index).toEqual({ built: false, limit_mb: 64 });
+  });
+
   it("sends the agent to open the app when there is no vault yet", async () => {
     answer([/\/status$/, { initialised: false }], [/./, {}]);
     const out = await harness().call("prime_radiant_status", {});
@@ -536,6 +556,39 @@ describe("prime_radiant_status", () => {
     const out = await harness().call("prime_radiant_status", {});
     expect(out.isError).toBe(false);
     if (!out.isError) expect(JSON.parse(out.text)).toMatchObject({ pages: 1, import: "unknown", nightly: "unknown", review_items_open: "unknown" });
+  });
+});
+
+describe("the search index size limit", () => {
+  it("is set and reset in MB through the settings route, and refused outside 32..4096 before anything is sent", async () => {
+    answer([/\/settings$/, { settings: { search: { indexLimitMb: 512 } } }]);
+    const set = await harness().call("prime_radiant_settings_update", { search_index_limit_mb: 512, confirm: true });
+    expect(set.isError).toBe(false);
+    expect(call(0)[0]).toBe(`${BASE}/settings`);
+    expect(call(0)[1]).toMatchObject({ method: "PUT", body: { search: { indexLimitMb: 512 } } });
+    if (!set.isError) expect(JSON.parse(set.text).settings.search).toEqual({ indexLimitMb: 512 });
+
+    api.mockClear();
+    await harness().call("prime_radiant_settings_update", { reset: ["search_index_limit_mb"], confirm: true });
+    expect(call(0)[1]).toMatchObject({ method: "PUT", body: { search: { indexLimitMb: null } } });
+
+    const shape = z.object(harness().get("prime_radiant_settings_update").shape);
+    for (const bad of [16, 31, 4097, 100.5, "160"]) {
+      expect(shape.safeParse({ search_index_limit_mb: bad, confirm: true }).success, String(bad)).toBe(false);
+    }
+    for (const ok of [32, 160, 4096]) expect(shape.safeParse({ search_index_limit_mb: ok, confirm: true }).success, String(ok)).toBe(true);
+  });
+
+  it("is read back with its default and limits", async () => {
+    answer([/\/settings$/, { settings: { search: { indexLimitMb: 256 } }, defaults: { search: { indexLimitMb: 160 } }, limits: { searchIndexLimitMb: { min: 32, max: 4096 } } }]);
+    const out = await harness().call("prime_radiant_settings", {});
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(JSON.parse(out.text)).toMatchObject({
+      settings: { search: { indexLimitMb: 256 } },
+      defaults: { search: { indexLimitMb: 160 } },
+      limits: { searchIndexLimitMb: { min: 32, max: 4096 } },
+    });
   });
 });
 
