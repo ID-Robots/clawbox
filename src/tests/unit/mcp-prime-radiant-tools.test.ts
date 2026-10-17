@@ -579,6 +579,35 @@ describe("golden and daily questions", () => {
     expect(body.questions[1].options).toEqual(["10 EUR", "12 EUR"]);
   });
 
+  it("hands on a recheck answer's recheck_after, so page edit has the day to set", async () => {
+    api.mockResolvedValue({
+      initialised: true,
+      outbound: false,
+      owner: "Sales team",
+      language: "en",
+      questions: [
+        {
+          kind: "recheck",
+          page: "howtos/restock.md",
+          due: "2026-09-30",
+          question: "Is “Restocking” still current? Its re-check was due 2026-09-30.",
+          answer: { tool: "prime_radiant_page_edit", args: { path: "howtos/restock.md", recheck_after: "2027-04-15" } },
+        },
+      ],
+    });
+    const out = await harness().call("prime_radiant_daily_questions", { owner: "Sales team" });
+    if (out.isError) throw new Error(out.error.message);
+    const body = JSON.parse(out.text);
+    expect(body.questions[0]).toMatchObject({
+      recheck_was_due: "2026-09-30",
+      answer_with: { tool: "prime_radiant_page_edit", path: "howtos/restock.md", recheck_after: "2027-04-15" },
+    });
+    expect(body.how_to_answer).toMatch(/recheck_after given/);
+    // The day handed on is one page edit accepts.
+    const edit = z.object(harness().get("prime_radiant_page_edit").shape).safeParse({ path: "howtos/restock.md", recheck_after: "2027-04-15" });
+    expect(edit.success).toBe(true);
+  });
+
   it("lists golden questions in whole rows, narrowed by domain or owner, saying how many are left", async () => {
     const many = Array.from({ length: 60 }, (_, i) => ({
       id: `gq-${i.toString(16).padStart(12, "0")}`,
