@@ -105,13 +105,15 @@ describe("prime radiant lint", () => {
     const listed = lintOne(pageText({}, "Pricing notes.\n"), { index: INDEX });
     const f = listed.findings.find((x) => x.rule === "orphan")!;
     expect(f).toMatchObject({ severity: "warning", blocksCommit: false, path: "concepts/pricing.md", details: { isolated: true } });
-    expect(f.message).toMatch(/index\.md does not count/);
+    expect(f.message).toBe("no other content page (concepts/, entities/, syntheses/) links here and it links to none (index.md, sources and reports do not count)");
     // A link from a source page (not content) does not reach it either…
     const fromSource = lintOne(pageText(), { extra: { "sources/price-list.md": pageText({ type: "source", title: "Price list" }, "See [[concepts/pricing]].") } });
     expect(rules(fromSource)).toContain("orphan");
     // …nor its own link out: it links somewhere, so it is not isolated.
     const linksOut = lintOne(pageText({}, "Pricing. See [[entities/acme-widgets]]."));
-    expect(linksOut.findings.find((x) => x.rule === "orphan")?.details).toEqual({ isolated: false });
+    const linked = linksOut.findings.find((x) => x.rule === "orphan")!;
+    expect(linked.details).toEqual({ isolated: false });
+    expect(linked.message).toBe("no other content page (concepts/, entities/, syntheses/) links here (index.md, sources and reports do not count)");
     // Only content pages are judged: a source page is never an orphan.
     const source = lintVault(snapshot({ "sources/price-list.md": pageText({ type: "source", title: "Price list" }) }, INDEX), { now: NOW });
     expect(rules(source)).not.toContain("orphan");
