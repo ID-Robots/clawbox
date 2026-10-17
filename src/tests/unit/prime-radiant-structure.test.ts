@@ -467,12 +467,12 @@ describe("links per page", () => {
     expect(linkDensity(g)).toEqual({ pages: 3, median: 1, mean: 1.33, atTarget: 0, target: 5 });
   });
 
-  it("lifts the median on the synthetic vault: a leaf links its hub, its counterparty and its neighbours", () => {
+  it("lifts the median to the target on the synthetic vault: a leaf links its hub, its counterparty, its neighbours and the counterparty's", () => {
     const snap = snapshot(syntheticVault(600), "# Index\n");
     const plan = planStructure(snap, OPTIONS);
     expect(plan.stats.linksMedianBefore).toBeLessThanOrEqual(1);
-    expect(plan.stats.linksMedianAfter).toBeGreaterThanOrEqual(4);
-    const leafWrite = plan.writes.find((w) => w.frontmatter.record && w.body.includes("- Counterparty: [[entities/"));
+    expect(plan.stats.linksMedianAfter).toBeGreaterThanOrEqual(5);
+    const leafWrite = plan.writes.find((w) => w.frontmatter.record && w.body.includes("- Counterparty: [[entities/") && w.body.includes("- Earlier with "));
     expect(leafWrite).toBeDefined();
   });
 });

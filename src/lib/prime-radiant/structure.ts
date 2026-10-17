@@ -716,6 +716,18 @@ export function planStructure(snapshot: Pick<VaultSnapshot, "pages" | "indexBody
     const list = h.siblings.flatMap((s) => hubByPath.get(s)?.leaves ?? []);
     list.forEach((l, i) => neighbours.set(l.page.path, { prev: list[i - 1] ?? null, next: list[i + 1] ?? null }));
   }
+  // A counterparty's timeline: its records of every type and month, in date order.
+  const timeline = new Map<string, { prev: Leaf | null; next: Leaf | null }>();
+  const byParty = new Map<string, Leaf[]>();
+  for (const l of leaves) {
+    if (!l.info.counterparty || !hubOfLeaf.has(l.page.path)) continue;
+    const key = normName(l.info.counterparty);
+    byParty.set(key, [...(byParty.get(key) ?? []), l]);
+  }
+  for (const list of byParty.values()) {
+    list.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+    list.forEach((l, i) => timeline.set(l.page.path, { prev: list[i - 1] ?? null, next: list[i + 1] ?? null }));
+  }
   for (const l of leaves) {
     const hub = hubOfLeaf.get(l.page.path) ?? null;
     const record = { type: l.info.type, month: l.info.month, ...(hub ? { hub: hub.path } : {}), by: l.info.by };
@@ -727,6 +739,10 @@ export function planStructure(snapshot: Pick<VaultSnapshot, "pages" | "indexBody
       const near = neighbours.get(l.page.path);
       if (near?.prev) lines.push(`- Previous: [[${near.prev.page.path.replace(/\.md$/, "")}]] — ${cell(near.prev.page.fm.title, 80)}`);
       if (near?.next) lines.push(`- Next: [[${near.next.page.path.replace(/\.md$/, "")}]] — ${cell(near.next.page.fm.title, 80)}`);
+      const partyName = cell(l.info.counterparty ?? "", 40);
+      const line = timeline.get(l.page.path);
+      if (line?.prev && line.prev !== near?.prev) lines.push(`- Earlier with ${partyName}: [[${line.prev.page.path.replace(/\.md$/, "")}]] — ${cell(line.prev.page.fm.title, 80)}`);
+      if (line?.next && line.next !== near?.next) lines.push(`- Later with ${partyName}: [[${line.next.page.path.replace(/\.md$/, "")}]] — ${cell(line.next.page.fm.title, 80)}`);
     }
     const body = upsertBlock(l.page.body, RECORD_START, RECORD_END, lines.join("\n"));
     const fm: PageFrontmatter = { ...l.page.fm, record };
