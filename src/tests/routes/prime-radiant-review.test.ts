@@ -263,7 +263,9 @@ describe("history, diff, revert", () => {
 describe("settings", () => {
   it("exposes every section, saves a patch, validates folders and refuses a bad field whole", async () => {
     const get = await (await settingsGET(req("GET", "/settings"))).json();
-    expect(Object.keys(get.settings).sort()).toEqual(["contradictions", "costRates", "domains", "golden", "ingest", "nightly", "opus", "search", "structure", "verification"]);
+    expect(Object.keys(get.settings).sort()).toEqual(["contradictions", "costRates", "domains", "golden", "ingest", "nightly", "opus", "search", "structure", "summaries", "verification"]);
+    expect(get.limits.summariesMaxPages).toEqual({ min: 0, max: 2000 });
+    expect(get.defaults.summaries).toEqual({ enabled: true, maxPages: 150, capUsd: 0.25 });
     expect(get.limits.opusCapUsd).toEqual({ min: 0.01, max: 1000 });
     expect(get.limits.searchIndexLimitMb).toEqual({ min: 32, max: 4096 });
     expect(get.defaults.search).toEqual({ indexLimitMb: 160 });

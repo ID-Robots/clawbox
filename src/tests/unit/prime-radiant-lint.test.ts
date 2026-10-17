@@ -195,6 +195,8 @@ describe("prime radiant lint", () => {
         "claim-id-retired-reuse",
         "stale-against-verified",
         "plugin-format",
+        "duplicate-entity",
+        "domain-mismatch",
       ].sort(),
     );
     expect([...BLOCKING_RULES].sort()).toEqual(["claim-id-collision", "claim-id-retired-reuse", "frontmatter-invalid", "secret-pattern"]);

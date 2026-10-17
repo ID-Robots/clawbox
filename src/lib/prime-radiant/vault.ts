@@ -14,6 +14,7 @@ import path, { untraced } from "@/lib/runtime-path";
 import { withPluginFields } from "./plugin-compat";
 import { parsePage, serializePage, pageSummary, type ParsedPage } from "./frontmatter";
 import { hasVerification, type PageFrontmatter } from "./schema";
+import { generatedSummary } from "./summary-meta";
 import { isKnowledgePage, pageAbsPath, RESERVED_DIRS, safePagePath, vaultDir } from "./paths";
 import { PLUGIN_GITIGNORE_LINES, stripManagedBlocks } from "./plugin-files";
 import { commitPaths, git, hasCommits, initRepo, isGitRepo, restorePaths, withVaultLock, type VaultAuthor } from "./git";
@@ -313,7 +314,8 @@ export function listEntry(page: VaultPage): PageListEntry {
     privacy: fm?.privacy ?? null,
     verified: fm ? hasVerification(fm) : false,
     claims: fm?.claims.length ?? 0,
-    summary: pageSummary(p.body),
+    // The summary written from the page's connections, when it has one; else its own first paragraph.
+    summary: (fm ? generatedSummary(fm)?.text : null) ?? pageSummary(p.body),
     bodyChars: p.body.length,
     mtimeMs: page.mtimeMs,
   };

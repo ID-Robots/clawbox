@@ -566,6 +566,7 @@ function registerReadTools(reg: Registrar): void {
         ...(maintenance?.running ? { maintenance_running: maintenance.running } : {}),
         ...(maintenance?.last?.connect ? { connect_pass_last: maintenance.last.connect } : {}),
         ...(maintenance?.last?.structure ? { structure_pass_last: maintenance.last.structure } : {}),
+        ...(maintenance?.last?.summaries ? { summaries_pass_last: maintenance.last.summaries } : {}),
         ...(status.index ? { search_index: searchIndexOf(status.index) } : {}),
         ...(status.golden ? { accuracy: accuracyOf(status.golden) } : {}),
       });
