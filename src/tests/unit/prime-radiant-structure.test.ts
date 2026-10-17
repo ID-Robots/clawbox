@@ -46,7 +46,10 @@ import {
   upsertBlock,
   type StructureOptions,
 } from "@/lib/prime-radiant/structure";
-import { buildClassifyPrompt, modelCandidates, parseClassifyResponse } from "@/lib/prime-radiant/structure-run";
+import { buildClassifyPrompt, classifyWithModel, modelCandidates, parseClassifyResponse } from "@/lib/prime-radiant/structure-run";
+import { DEFAULT_COST_RATES } from "@/lib/prime-radiant/cost-rates";
+import { FlashCallError, type FlashClient } from "@/lib/prime-radiant/flash-client";
+import { readCosts } from "@/lib/prime-radiant/ingest-store";
 import type { VaultSnapshot, VaultTx } from "@/lib/prime-radiant/vault";
 import { claim, frontmatter, snapshot, vaultPage } from "../helpers/prime-radiant-fixtures";
 import { COUNTERPARTIES, DOMAINS, OWN_COMPANY, structurePage, syntheticVault } from "../helpers/prime-radiant-structure-fixtures";
@@ -585,6 +588,58 @@ describe("structure settings", () => {
       expect(() => readSettingsPatch({ structure: { colour: "red" } })).toThrow(/Unknown setting: structure\.colour/);
       expect(readSettings(root).structure.enrichTop).toBe(0);
       expect(writeSettings({ structure: null }, root).structure.enrichTop).toBe(25);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("the cheap-model fallback on a state database", () => {
+  function record(n: number): Record<string, string> {
+    const pages: Record<string, string> = {};
+    for (let i = 0; i < n; i++) pages[`concepts/statement-${i}.md`] = leaf(`Statement 2026-0${1 + (i % 9)} Globex Ltd ${i}`, ["The statement lists four movements."]);
+    return pages;
+  }
+  function client(answer: (items: number) => string, asked: number[]): FlashClient {
+    return {
+      model: "deepseek-v4-flash",
+      async complete(req) {
+        const items = (JSON.parse(req.user.split("ITEMS (JSON):\n")[1]) as unknown[]).length;
+        asked.push(items);
+        return { text: answer(items), model: "deepseek-v4-flash", usage: { promptTokens: 400, completionTokens: 40, cacheHitTokens: 0 } };
+      },
+    };
+  }
+
+  it("asks at most its cap in one recorded call, remembers a 'none', never asks on a dry run or with no cap, and never throws", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pr-structure-model-"));
+    const stateVault = path.join(root, "vault");
+    try {
+      const snap = snapshot(record(5));
+      const asked: number[] = [];
+      const answers = (n: number) => JSON.stringify(Array.from({ length: n }, (_, i) => ({ i, type: i === 0 ? "none" : "bank-transfer" })));
+      const opts = { stateVault, rates: DEFAULT_COST_RATES, runId: "run-structure-test", now: () => NOW };
+
+      expect(await classifyWithModel(snap, { ...opts, cap: 3, client: client(answers, asked), dryRun: true })).toMatchObject({ candidates: 5, asked: 0, skipped: "dry_run" });
+      expect(await classifyWithModel(snap, { ...opts, cap: 0, client: client(answers, asked) })).toMatchObject({ asked: 0, skipped: "disabled" });
+      expect(asked).toEqual([]);
+
+      const first = await classifyWithModel(snap, { ...opts, cap: 3, client: client(answers, asked) });
+      expect(asked).toEqual([3]);
+      expect(first).toMatchObject({ candidates: 5, asked: 3, calls: 1 });
+      expect(first.assigned.size).toBe(2);
+      expect([...first.assigned.values()]).toEqual(["bank-transfer", "bank-transfer"]);
+      expect(readCosts(stateVault, "run-structure-test")).toMatchObject([{ operation: "structure-classify", model: "deepseek-v4-flash", tokensIn: 400, tokensOut: 40 }]);
+
+      // The page the model called none is not asked again (until its title or facts change).
+      const second = await classifyWithModel(snap, { ...opts, cap: 10, client: client(answers, asked) });
+      expect(second.candidates).toBe(4);
+      expect(asked).toEqual([3, 4]);
+
+      const failing: FlashClient = { model: "deepseek-v4-flash", complete: async () => { throw new FlashCallError("refused", "the proxy refused the call"); } };
+      const failed = await classifyWithModel(snap, { ...opts, cap: 3, client: failing });
+      expect(failed.assigned.size).toBe(0);
+      expect(failed.skipped).toMatch(/^failed: /);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
