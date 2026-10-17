@@ -6,7 +6,8 @@
  * The FALLBACK is capped and optional: a page that looks like one record of
  * many (identifiers.ts `recordPage`: a document word beside an identifier),
  * carries a date, and whose type the rules could not tell, may be asked of the
- * Flash model — at most `structure.modelFallback` pages a run (settings, 0 =
+ * Flash model (never a verified page, which the pass does not rewrite) — at
+ * most `structure.modelFallback` pages a run (settings, 0 =
  * never), in one call, titles and facts redacted first, the call recorded with
  * `recordCost`. A type it answers becomes the leaf's `record.by: model` (read
  * back from the page from then on); a page it calls none is remembered in
@@ -23,6 +24,7 @@ import { recordPage } from "./identifiers";
 import { recordCost } from "./ingest-store";
 import { classifyRecord, isRecordType, readRecordFrontmatter, recordDate, RECORD_TYPES, type RecordType } from "./records";
 import { redactText } from "./redact";
+import { hasVerification } from "./schema";
 import { listReviewItems, MAX_REVIEW_LIST } from "./review-store";
 import type { PrimeRadiantSettings } from "./settings";
 import { readRetiredLedger, stateDbExists, withStateDb } from "./state-db";
@@ -55,6 +57,8 @@ export function modelCandidates(pages: readonly VaultPage[], remembered: Readonl
     if (!p.parsed.ok) continue;
     const fm = p.parsed.frontmatter;
     if (readStructureMeta(fm) || readRecordFrontmatter(fm) || !recordPage(fm.title, fm.type)) continue;
+    // A verified page is never rewritten (structure.ts), so a type the model gave it would never be kept: asking again every night would spend the cap on it.
+    if (hasVerification(fm)) continue;
     if (classifyRecord(p.path, fm) || !recordDate(fm).month) continue;
     const title = redactText(fm.title.slice(0, 200)).text;
     const facts = fm.claims.slice(0, CLASSIFY_FACTS).map((c) => redactText(c.text.slice(0, CLASSIFY_FACT_CHARS)).text);

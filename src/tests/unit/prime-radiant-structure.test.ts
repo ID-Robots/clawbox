@@ -566,6 +566,9 @@ describe("the cheap-model fallback", () => {
     const asked = modelCandidates(snap.pages);
     expect(asked.map((c) => c.path)).toEqual(["concepts/statement.md"]);
     expect(modelCandidates(snap.pages, new Set([asked[0].key]))).toEqual([]);
+    // A verified page is never rewritten, so a type the model gave it would never be kept: it is never asked (else every night's cap goes to it again).
+    const verified = snapshot({ "concepts/statement-v.md": leaf("Statement 2026-09 Initech GmbH", ["The statement lists two movements."], { verified: { at: "2026-09-30", by: "owner" } }) });
+    expect(modelCandidates(verified.pages)).toEqual([]);
     const prompt = buildClassifyPrompt(asked);
     expect(prompt.user).toContain("ITEMS (JSON):");
     expect(parseClassifyResponse('Sure:\n```json\n[{"i": 0, "type": "bank-transfer"}, {"i": 7, "type": "invoice"}, {"i": 0}]\n```', 1)).toEqual(new Map([[0, "bank-transfer"]]));
