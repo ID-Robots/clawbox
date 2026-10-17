@@ -212,6 +212,9 @@ test.describe("Prime Radiant", () => {
   test("a golden question added in Questions is checked by the nightly pass, and the accuracy shows", async ({ page }) => {
     test.setTimeout(180_000);
     const app = await openPrimeRadiant(page);
+    // The mascot wanders the shelf at real timer speed and can sit on the app's
+    // header buttons (Refresh among them); it has nothing to do with this test.
+    await page.evaluate(() => window.dispatchEvent(new Event("clawbox-hide-mascot")));
     await app.getByTestId("prime-radiant-tab-ingest").click();
     await app.getByTestId("prime-radiant-file-input").setInputFiles(DOCUMENTS.map((name) => path.join(FIXTURES, name)));
     await expect(app.getByTestId("prime-radiant-ingest-job").first()).toContainText("Finished", { timeout: 60_000 });
