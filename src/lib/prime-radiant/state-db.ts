@@ -19,7 +19,7 @@ import { openSqlite } from "@/lib/openclaw-session-store";
 import path from "@/lib/runtime-path";
 
 export const STATE_DB_FILE = "prime-radiant.sqlite";
-export const STATE_SCHEMA_VERSION = 8;
+export const STATE_SCHEMA_VERSION = 9;
 
 export function stateDbPathFor(vault: string): string {
   return path.join(path.dirname(vault), STATE_DB_FILE);
@@ -224,6 +224,41 @@ CREATE TABLE IF NOT EXISTS stale_claims (
 `;
 
 /**
+ * v9 — the golden questions' score history (golden-score.ts): one
+ * `golden_scores` row a check (the nightly pass's, by its run id), one
+ * `golden_results` row a question asked in it — its verdict and the claims
+ * the wiki answered with, and whether the vault search failed for it (such a
+ * verdict is shown, never the next night's baseline). The questions themselves live in the vault
+ * (`golden.json`), versioned with the pages.
+ */
+const SCHEMA_V9 = `
+CREATE TABLE IF NOT EXISTS golden_scores (
+  id        TEXT PRIMARY KEY,
+  run_id    TEXT,
+  at        TEXT NOT NULL,
+  asked     INTEGER NOT NULL,
+  correct   INTEGER NOT NULL,
+  wrong     INTEGER NOT NULL,
+  missing   INTEGER NOT NULL,
+  stale     INTEGER NOT NULL,
+  failed    INTEGER NOT NULL,
+  percent   REAL
+);
+CREATE INDEX IF NOT EXISTS golden_scores_at ON golden_scores (at);
+CREATE TABLE IF NOT EXISTS golden_results (
+  score_id     TEXT NOT NULL,
+  question_id  TEXT NOT NULL,
+  verdict      TEXT,
+  why          TEXT,
+  claim_ids    TEXT NOT NULL DEFAULT '[]',
+  at           TEXT NOT NULL,
+  search_failed INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (score_id, question_id)
+);
+CREATE INDEX IF NOT EXISTS golden_results_question ON golden_results (question_id, at);
+`;
+
+/**
  * Run `fn` in one transaction. A failed ROLLBACK (SQLite may already have
  * ended the transaction after an I/O or disk-full error) is logged and never
  * replaces the error that caused it.
@@ -262,6 +297,7 @@ export function openStateDb(vault: string): DatabaseSync {
       [6, SCHEMA_V6],
       [7, SCHEMA_V7],
       [8, SCHEMA_V8],
+      [9, SCHEMA_V9],
     ];
     for (const [target, sql] of steps) {
       if (version >= target) continue;

@@ -6,13 +6,17 @@
  * heading (or the file name), the summary from the first sentences, a fact
  * per further sentence — and every contradiction-judge call from the pairs
  * themselves: two statements that share a word of five letters or more and
- * carry different numbers contradict, anything else is compatible. Never
- * selected outside test mode (see flash-client).
+ * carry different numbers contradict, anything else is compatible — and
+ * every golden-question judge call from the facts it was shown: a fact that
+ * holds the expected answer's words is `correct`, no fact is `missing`,
+ * anything else is `wrong`. Never selected outside test mode (see
+ * flash-client).
  *
  * Pure apart from the interface it implements.
  */
 
 import type { FlashClient } from "./flash-client";
+import { readGoldenItems } from "./golden";
 import { readJudgeItems } from "./judge";
 import { readWriterItems } from "./writer";
 
@@ -59,6 +63,17 @@ function usage(request: { system: string; user: string }, text: string) {
   };
 }
 
+/** The stub's golden verdict: the expected answer's words all in one fact is correct. */
+export function stubGoldenVerdict(expected: string, facts: ReadonlyArray<{ text: string }>): "correct" | "wrong" | "missing" {
+  if (facts.length === 0) return "missing";
+  const words = expected.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
+  const holds = facts.some((f) => {
+    const text = f.text.toLowerCase();
+    return words.length > 0 && words.every((w) => text.includes(w));
+  });
+  return holds ? "correct" : "wrong";
+}
+
 export function createStubFlashClient(): FlashClient {
   return {
     model: STUB_MODEL,
@@ -66,6 +81,11 @@ export function createStubFlashClient(): FlashClient {
       const pairs = readJudgeItems(request.user);
       if (pairs) {
         const text = JSON.stringify(pairs.map((p) => ({ i: p.i, verdict: stubVerdict(p.a, p.b), why: "stub judge" })));
+        return { text, model: STUB_MODEL, usage: usage(request, text) };
+      }
+      const golden = readGoldenItems(request.user);
+      if (golden) {
+        const text = JSON.stringify(golden.map((g) => ({ i: g.i, verdict: stubGoldenVerdict(g.expected, g.facts ?? []), why: "stub judge" })));
         return { text, model: STUB_MODEL, usage: usage(request, text) };
       }
       const items = readWriterItems(request.user) ?? [];

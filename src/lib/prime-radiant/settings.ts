@@ -20,6 +20,7 @@ import os from "os";
 import path, { untraced } from "@/lib/runtime-path";
 import { DEFAULT_INGEST_EXCLUDES, EXCLUDE_DEFAULTS_GENERATION, isDefaultExcludeList, readExcludeList } from "./ingest-exclude";
 import { mergeCostRates, readRateOverrides, type CostRates, type ModelRate } from "./cost-rates";
+import { DAILY_LANGUAGES, DEFAULT_DAILY_PER_OWNER, isDailyLanguage, MAX_DAILY_PER_OWNER, MIN_DAILY_PER_OWNER, type DailyLanguage } from "./daily";
 import { primeRadiantRoot } from "./paths";
 
 export const SETTINGS_FILE = "settings.json";
@@ -67,6 +68,12 @@ export const BYTES_PER_MB = 1024 * 1024;
 export const MAX_DOMAINS = 100;
 const MAX_OWNER_CHARS = 80;
 
+/** The golden questions' nightly check: on, at most this many questions a night (the ones asked longest ago first). */
+export const DEFAULT_GOLDEN_MAX_QUESTIONS = 50;
+export const MIN_GOLDEN_MAX_QUESTIONS = 1;
+export const MAX_GOLDEN_MAX_QUESTIONS = 500;
+/** Owners with a language of their own for the daily questions. */
+export const MAX_OWNER_LANGUAGES = 100;
 /**
  * The structure pass (structure.ts): on by default in the nightly pass. The
  * owner's company names the root page; the top entities by inbound links get
@@ -137,6 +144,32 @@ export interface DomainSetting {
   owner: string;
 }
 
+export interface GoldenSettings {
+  /** Check the golden questions every night. */
+  enabled: boolean;
+  /** Questions one night asks at most (each one a share of a cheap model call). */
+  maxQuestions: number;
+}
+
+export interface OwnerLanguage {
+  owner: string;
+  language: DailyLanguage;
+}
+
+export interface VerificationSettings {
+  /** Daily questions an owner gets at most. */
+  perOwner: number;
+  /**
+   * Whether the assistant may SEND an owner their daily questions over chat.
+   * Off by default: until the owner turns it on, the questions are only shown
+   * — in the app, and to the assistant when someone asks for them. Nothing is
+   * ever sent on a timer.
+   */
+  outbound: boolean;
+  /** The language each owner's questions are written in (English when not listed). */
+  languages: OwnerLanguage[];
+}
+
 export interface PrimeRadiantSettings {
   ingest: IngestSettings;
   /** The owner's rate overrides, model by model (empty = the defaults). */
@@ -147,6 +180,8 @@ export interface PrimeRadiantSettings {
   search: SearchSettings;
   structure: StructureSettings;
   domains: DomainSetting[];
+  golden: GoldenSettings;
+  verification: VerificationSettings;
 }
 
 export function defaultSettings(): PrimeRadiantSettings {
@@ -159,6 +194,8 @@ export function defaultSettings(): PrimeRadiantSettings {
     search: { indexLimitMb: DEFAULT_SEARCH_INDEX_LIMIT_MB },
     structure: { enabled: true, company: "", enrichTop: DEFAULT_STRUCTURE_ENRICH_TOP, modelFallback: DEFAULT_STRUCTURE_MODEL_FALLBACK },
     domains: [],
+    golden: { enabled: true, maxQuestions: DEFAULT_GOLDEN_MAX_QUESTIONS },
+    verification: { perOwner: DEFAULT_DAILY_PER_OWNER, outbound: false, languages: [] },
   };
 }
 
@@ -226,6 +263,20 @@ function readDomains(v: unknown): Read<DomainSetting[]> {
   return { ok: true, value: out };
 }
 
+function readOwnerLanguages(v: unknown): Read<OwnerLanguage[]> {
+  if (!Array.isArray(v) || v.length > MAX_OWNER_LANGUAGES) return { ok: false, error: `verification.languages must be a list of at most ${MAX_OWNER_LANGUAGES}.` };
+  const out: OwnerLanguage[] = [];
+  for (const entry of v) {
+    const o = section(entry);
+    const owner = typeof o.owner === "string" ? o.owner.replace(/[\u0000-\u001f\u007f]/g, " ").trim() : "";
+    if (owner === "" || owner.length > MAX_OWNER_CHARS) return { ok: false, error: `An owner must be 1 to ${MAX_OWNER_CHARS} characters.` };
+    if (!isDailyLanguage(o.language)) return { ok: false, error: `A language must be one of ${DAILY_LANGUAGES.join(", ")}.` };
+    if (out.some((x) => x.owner.toLowerCase() === owner.toLowerCase())) return { ok: false, error: `The owner ${owner} is listed twice.` };
+    out.push({ owner, language: o.language });
+  }
+  return { ok: true, value: out };
+}
+
 /**
  * Each field a section may carry, read strictly. The same readers serve the
  * file (a bad field reads as its default) and a patch (a bad field refuses
@@ -256,6 +307,21 @@ const FIELDS = {
       typeof v === "number" && Number.isInteger(v) && v >= MIN_SEARCH_INDEX_LIMIT_MB && v <= MAX_SEARCH_INDEX_LIMIT_MB
         ? { ok: true, value: v }
         : { ok: false, error: `search.indexLimitMb must be a whole number of MB from ${MIN_SEARCH_INDEX_LIMIT_MB} to ${MAX_SEARCH_INDEX_LIMIT_MB}.` },
+  },
+  golden: {
+    enabled: (v: unknown) => readBool(v, "golden.enabled"),
+    maxQuestions: (v: unknown): Read<number> =>
+      typeof v === "number" && Number.isInteger(v) && v >= MIN_GOLDEN_MAX_QUESTIONS && v <= MAX_GOLDEN_MAX_QUESTIONS
+        ? { ok: true, value: v }
+        : { ok: false, error: `golden.maxQuestions must be a whole number from ${MIN_GOLDEN_MAX_QUESTIONS} to ${MAX_GOLDEN_MAX_QUESTIONS}.` },
+  },
+  verification: {
+    perOwner: (v: unknown): Read<number> =>
+      typeof v === "number" && Number.isInteger(v) && v >= MIN_DAILY_PER_OWNER && v <= MAX_DAILY_PER_OWNER
+        ? { ok: true, value: v }
+        : { ok: false, error: `verification.perOwner must be a whole number from ${MIN_DAILY_PER_OWNER} to ${MAX_DAILY_PER_OWNER}.` },
+    outbound: (v: unknown) => readBool(v, "verification.outbound"),
+    languages: (v: unknown) => readOwnerLanguages(v),
   },
   structure: {
     enabled: (v: unknown) => readBool(v, "structure.enabled"),
@@ -343,6 +409,8 @@ export interface SettingsPatch {
   search?: { indexLimitMb?: unknown } | null;
   structure?: { enabled?: unknown; company?: unknown; enrichTop?: unknown; modelFallback?: unknown } | null;
   domains?: unknown;
+  golden?: { enabled?: unknown; maxQuestions?: unknown } | null;
+  verification?: { perOwner?: unknown; outbound?: unknown; languages?: unknown } | null;
 }
 
 /** The keys a patch may carry, per section — anything else is refused, never stored. */
@@ -352,6 +420,8 @@ const PATCH_KEYS: Readonly<Record<string, readonly string[]>> = {
   opus: Object.keys(FIELDS.opus),
   contradictions: Object.keys(FIELDS.contradictions),
   search: Object.keys(FIELDS.search),
+  golden: Object.keys(FIELDS.golden),
+  verification: Object.keys(FIELDS.verification),
   structure: Object.keys(FIELDS.structure),
 };
 

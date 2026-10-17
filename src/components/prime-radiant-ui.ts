@@ -13,13 +13,32 @@ import type { IngestJob, DeadLetter, FileStatus } from "@/lib/prime-radiant/inge
 import type { SkipCounts, SkipReason } from "@/lib/prime-radiant/ingest-exclude";
 import type { IngestPreview } from "@/lib/prime-radiant/ingest-sources";
 import type { PageListEntry } from "@/lib/prime-radiant/vault";
-import type { PageDetail, PrimeRadiantStatus } from "@/lib/prime-radiant/service";
+import type { PageDetail, PrimeRadiantStatus as ServiceStatus } from "@/lib/prime-radiant/service";
+import type { GoldenStatus } from "@/lib/prime-radiant/golden-score";
+import type { GoldenQuestion, GoldenVerdict } from "@/lib/prime-radiant/golden";
+import type { DailyAnswerBody } from "@/lib/prime-radiant/daily-questions";
 import type { PrimeRadiantSettings } from "@/lib/prime-radiant/settings";
 import type { CostSummary, RunRecord } from "@/lib/prime-radiant/runs";
 import type { DiffResult } from "@/lib/prime-radiant/history";
 
+/** What GET status answers: the vault's state with the golden questions' score beside it. */
+export type PrimeRadiantStatus = ServiceStatus & { golden?: GoldenStatus | null };
+
+/** What GET golden answers. */
+export interface GoldenListAnswer {
+  questions: GoldenQuestion[];
+  /** Entries of golden.json that cannot be read: changes are refused until the file is mended. */
+  skipped?: number;
+  verdicts: Record<string, { verdict: GoldenVerdict | null; why: string | null; at: string }>;
+  score: GoldenStatus;
+}
+
 export type {
   CommitInfo,
+  DailyAnswerBody,
+  GoldenQuestion,
+  GoldenStatus,
+  GoldenVerdict,
   CostSummary,
   DeadLetter,
   DiffResult,
@@ -31,7 +50,6 @@ export type {
   PageDetail,
   PageListEntry,
   PrimeRadiantSettings,
-  PrimeRadiantStatus,
   ReviewItem,
   ReviewStatus,
   RunRecord,
@@ -209,16 +227,19 @@ export function pageUrl(base: string, path: string): string {
 /**
  * Tabs the app has, in order: Map (the start page of a vault with pages),
  * Pages (`browse`: the list, its search and each page with its history),
- * Review (open questions and failed checks), Add (`ingest`) and Settings
- * (with the token usage). The ids are stable; only the words changed.
+ * Review (open questions and failed checks), Questions (the golden questions
+ * with the wiki's % correct, and each owner's daily questions), Add
+ * (`ingest`) and Settings (with the token usage). The ids are stable; only
+ * the words changed.
  */
-export const TABS = ["map", "browse", "review", "ingest", "settings"] as const;
+export const TABS = ["map", "browse", "review", "questions", "ingest", "settings"] as const;
 export type Tab = (typeof TABS)[number];
 
 export const TAB_ICONS: Record<Tab, string> = {
   map: "hub",
   browse: "description",
   review: "inbox",
+  questions: "quiz",
   ingest: "add_circle",
   settings: "tune",
 };
