@@ -21,6 +21,7 @@ import { repairPluginWritesOnce, type PluginRepairResult } from "./plugin-repair
 import { ensureMemoryWikiWiring, memoryWikiWiringStatus, type WiringPlan, type WiringResult } from "./plugin-wiring";
 import { vaultDir, safePagePath, isKnowledgePage } from "./paths";
 import { readRetiredLedger } from "./state-db";
+import { readStaleClaims, type StaleClaimNote } from "./verify";
 import {
   ensureVault,
   listEntry,
@@ -56,6 +57,15 @@ function ledger(vault: string): string[] {
   }
 }
 
+/** The stale notes owner-verified claims left (verify.ts); none when the state database cannot be read. */
+function staleNotes(vault: string): StaleClaimNote[] {
+  try {
+    return readStaleClaims(vault);
+  } catch {
+    return [];
+  }
+}
+
 export async function getStatus(vault: string = vaultDir()): Promise<PrimeRadiantStatus> {
   if (!(await vaultInitialised(vault))) {
     return {
@@ -68,7 +78,7 @@ export async function getStatus(vault: string = vaultDir()): Promise<PrimeRadian
   }
   const snapshot = await readVaultSnapshot(vault);
   const valid = snapshot.pages.flatMap((p) => (p.parsed.ok ? [p.parsed.frontmatter] : []));
-  const report = lintVault(snapshot, { ledgerRetired: ledger(vault) });
+  const report = lintVault(snapshot, { ledgerRetired: ledger(vault), staleClaims: staleNotes(vault) });
   const [branch, head, commits, plugin] = await Promise.all([
     currentBranch(vault),
     headCommit(vault),
@@ -187,7 +197,7 @@ function pageDetail(snapshot: VaultSnapshot, rel: string, vault: string): PageDe
     backlinks: [...(graph.inbound.get(rel) ?? [])].sort(),
     links: [...(graph.outbound.get(rel) ?? [])].sort(),
     inIndex: graph.indexed.has(rel),
-    lint: lintVault(snapshot, { scope: [rel], ledgerRetired: ledger(vault) }),
+    lint: lintVault(snapshot, { scope: [rel], ledgerRetired: ledger(vault), staleClaims: staleNotes(vault) }),
   };
 }
 
@@ -203,7 +213,7 @@ export async function getLint(paths: readonly string[] | null, vault: string = v
     paths && paths.length > 0
       ? paths.map((p) => safePagePath(p)).filter((p): p is string => p !== null && isKnowledgePage(p))
       : undefined;
-  return lintVault(snapshot, { scope, ledgerRetired: ledger(vault), now });
+  return lintVault(snapshot, { scope, ledgerRetired: ledger(vault), staleClaims: staleNotes(vault), now });
 }
 
 export interface InitialiseResult {

@@ -393,10 +393,16 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
       run.usdEstimate += pass.usdEstimate;
     }
 
-    // 3b. open contradiction items about two different things (identifier filter) are closed with a reason
+    // 3b. open contradiction items today's rules would not raise (different subjects, superseded, one document's
+    // versions, an owner-verified side) are closed, each with a reason
     try {
       const re = rejudgeOpenContradictions(vault, snapshot, { now });
-      if (re.closed > 0) notes.push(`${re.closed} open contradiction item(s) were closed: different subjects or records (identifier filter).`);
+      if (re.closed > 0) {
+        const why = Object.entries(re.byFamily)
+          .map(([family, n]) => `${family} ${n}`)
+          .join(", ");
+        notes.push(`${re.closed} open contradiction item(s) were closed: ${why}.`);
+      }
     } catch (err) {
       notes.push(`The open contradiction items could not be re-checked: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
     }

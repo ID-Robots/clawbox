@@ -26,7 +26,7 @@ import { buildClaimIndex, claimCollisions, isClaimId, retiredReuse } from "./cla
 import { pageSummary } from "./frontmatter";
 import { buildLinkGraph, CONTENT_FOLDERS, contentReach } from "./links";
 import { scanSecrets } from "./redact";
-import type { PageFrontmatter } from "./schema";
+import { ownerVerified, type PageFrontmatter } from "./schema";
 import type { VaultPage, VaultSnapshot } from "./vault";
 
 export const LIMITS = Object.freeze({
@@ -52,6 +52,7 @@ export const LINT_RULES = [
   "frontmatter-invalid",
   "claim-id-collision",
   "claim-id-retired-reuse",
+  "stale-against-verified",
 ] as const;
 export type LintRule = (typeof LINT_RULES)[number];
 
@@ -112,6 +113,8 @@ export interface LintOptions {
   scope?: readonly string[];
   /** Retired ids the state database remembers. */
   ledgerRetired?: Iterable<string>;
+  /** Claims the judge found against an owner-verified claim (verify.ts `readStaleClaims`): warned about on their pages. */
+  staleClaims?: ReadonlyArray<{ claimId: string; page: string; verifiedClaimId: string; verifiedPage: string; at: string }>;
   now?: Date;
 }
 
@@ -309,6 +312,7 @@ export function lintVault(snapshot: VaultSnapshot, options: LintOptions = {}): L
   const findings: LintFinding[] = [];
 
   const valid = snapshot.pages.flatMap((p) => (p.parsed.ok ? [{ page: p, fm: p.parsed.frontmatter, body: p.parsed.body }] : []));
+  const frontmatterByPath = new Map(valid.map((v) => [v.page.path, v.fm]));
   const index = buildClaimIndex(
     valid.map((v) => ({ path: v.page.path, frontmatter: v.fm })),
     options.ledgerRetired ?? [],
@@ -400,6 +404,28 @@ export function lintVault(snapshot: VaultSnapshot, options: LintOptions = {}): L
         }),
       );
     }
+  }
+
+  // A claim the judge found against an owner-verified one: the verified claim wins, this one is stale — while it
+  // stands as it stood then (not rewritten since) and the claim it disagrees with is still verified.
+  for (const note of options.staleClaims ?? []) {
+    if (!inScope(note.page)) continue;
+    const here = (index.active.get(note.claimId) ?? []).find((l) => l.page === note.page);
+    const at = Date.parse(note.at);
+    if (!here || (Number.isFinite(at) && Date.parse(here.claim.updatedAt) > at)) continue;
+    // The claim that won must still be owner-verified where it won: on its recorded page, by a person's stamp on it
+    // or on that page — never the assistant's, and never a copy of its id elsewhere.
+    const winner = (index.active.get(note.verifiedClaimId) ?? []).find((l) => l.page === note.verifiedPage);
+    if (!winner || !ownerVerified(winner.claim, frontmatterByPath.get(note.verifiedPage))) continue;
+    findings.push(
+      finding(
+        "stale-against-verified",
+        "warning",
+        note.page,
+        `claim ${note.claimId} disagrees with the owner-verified claim ${note.verifiedClaimId} on ${note.verifiedPage}; the verified claim wins`,
+        { claimId: note.claimId, verifiedClaimId: note.verifiedClaimId, verifiedPage: note.verifiedPage },
+      ),
+    );
   }
 
   findings.sort((a, b) => a.path.localeCompare(b.path) || LINT_RULES.indexOf(a.rule) - LINT_RULES.indexOf(b.rule));

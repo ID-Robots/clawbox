@@ -49,8 +49,12 @@ import { buildJudgePrompt, JudgeParseError, JUDGE_VERDICTS, parseJudgeResponse, 
 import { redactText } from "./redact";
 import { addReviewItem, type ReviewItem } from "./review-store";
 import { runInTransaction, stateDbExists, withStateDb } from "./state-db";
-import { differentSubjects, sideIdentifiers, type Identifiers } from "./identifiers";
-import { claimSubject, sameSubject, type ClaimSubject } from "./subject";
+import { sideIdentifiers, type Identifiers } from "./identifiers";
+import { pairable } from "./pairing";
+import { claimSubject, type ClaimSubject } from "./subject";
+import { fieldValidity, historicalClaim, pageValidity, textValidity, type Validity } from "./validity";
+import { ownerVerified, recordStaleClaims, type StaleClaimNote } from "./verify";
+import { versionGroups, versionIndex, versionPages } from "./versions";
 import type { VaultSnapshot } from "./vault";
 
 export const KNN_K = 5;
@@ -149,36 +153,63 @@ export interface PassClaim {
   /** The claim text, redacted — the only form that leaves the box. */
   text: string;
   verified: boolean;
+  /** A person verified it (or its page): it wins against any claim the judge finds against it (verify.ts). */
+  ownerVerified?: boolean;
   /** What the claim is about (its own subject, else its page's), for {@link sameSubject}. */
   subject: ClaimSubject;
   /** The identifiers its page title and its text carry (waybill, invoice, transfer numbers, dates), and whether its page is a record. */
   ids?: Identifiers;
+  /** Its page's version group (the winner's path) when the page is one of several versions of a document (versions.ts). */
+  version?: string | null;
+  /** When it holds: its own fields, its text, or its snapshot page's date (validity.ts). */
+  validity?: Validity | null;
+  /** Marked or worded as a past state of things. */
+  historical?: boolean;
+  /** Its page is deprecated. */
+  deprecated?: boolean;
 }
 
 /** Every active claim on a valid page, redacted, in page order. */
 export function collectClaims(snapshot: Pick<VaultSnapshot, "pages">): PassClaim[] {
+  const versions = versionIndex(versionGroups(versionPages(snapshot)));
   const out: PassClaim[] = [];
   for (const page of snapshot.pages) {
     if (!page.parsed.ok) continue;
-    const { title, type } = page.parsed.frontmatter;
-    for (const c of page.parsed.frontmatter.claims) {
+    const fm = page.parsed.frontmatter;
+    const { title, type } = fm;
+    // A snapshot page's period, read once for all its claims (validity.ts claimValidity, the page step).
+    const pagePeriod = pageValidity(title, type, fm.generated?.at ?? null);
+    for (const c of fm.claims) {
       const text = redactText(c.text.slice(0, MAX_CLAIM_CHARS)).text;
-      out.push({ id: c.id, page: page.path, text, verified: !!c.verified, subject: claimSubject(c.id, text, title), ids: sideIdentifiers(title, text, type) });
+      out.push({
+        id: c.id,
+        page: page.path,
+        text,
+        verified: !!c.verified,
+        ownerVerified: ownerVerified(c, fm),
+        subject: claimSubject(c.id, text, title),
+        ids: sideIdentifiers(title, text, type),
+        version: versions.get(page.path) ?? null,
+        validity: fieldValidity(c) ?? textValidity(c.text, c.updatedAt) ?? pagePeriod,
+        historical: historicalClaim(c),
+        deprecated: fm.status === "deprecated",
+      });
     }
   }
   return out;
 }
 
+type Comparable = Pick<PassClaim, "text" | "subject" | "ids" | "version" | "validity" | "historical" | "deprecated">;
+
 /**
- * Whether two claims of the pass may be judged as a pair: about the same
- * thing ({@link sameSubject}), and not the same statement twice (that can
- * never contradict itself).
+ * Whether two claims of the pass may be judged as a pair: not the same
+ * statement twice (that can never contradict itself), and nothing in
+ * pairing.ts parts them — not two versions of one document, not two
+ * different subjects (identifiers, or words once template words are out),
+ * not an old fact against the current one.
  */
-export function comparable(a: Pick<PassClaim, "text" | "subject" | "ids">, b: Pick<PassClaim, "text" | "subject" | "ids">): boolean {
-  if (a.text === b.text || !sameSubject(a.subject, b.subject)) return false;
-  // Two waybills, two transfers, two days' reports: different identifiers are different things;
-  // two record pages (invoices, receipts, declarations) are one document only when they share a reference.
-  return !(a.ids && b.ids && differentSubjects(a.ids, b.ids));
+export function comparable(a: Comparable, b: Comparable): boolean {
+  return a.text !== b.text && pairable(a, b);
 }
 
 export interface CandidatePair {
@@ -303,8 +334,8 @@ export async function nearestPairsYielding(
 // ── the pass ──────────────────────────────────────────────────────────────
 
 export interface ContradictionFinding {
-  a: { id: string; page: string; text: string; verified: boolean };
-  b: { id: string; page: string; text: string; verified: boolean };
+  a: { id: string; page: string; text: string; verified: boolean; ownerVerified?: boolean };
+  b: { id: string; page: string; text: string; verified: boolean; ownerVerified?: boolean };
   verdict: "contradiction" | "unsure";
   why: string;
   score: number;
@@ -334,6 +365,8 @@ export interface ContradictionPassResult {
   findings: ContradictionFinding[];
   /** Review items raised (new ones and ones already waiting). */
   reviewItems: ReviewItem[];
+  /** Findings against an owner-verified claim: the verified claim wins, the other became a stale note (no review item). */
+  staleNotes: number;
   /** Why the pass did nothing or stopped short, when it did. */
   skipped: string | null;
   notes: string[];
@@ -502,6 +535,7 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
     usdEstimate: 0,
     findings: [],
     reviewItems: [],
+    staleNotes: 0,
     skipped: null,
     notes: [],
   };
@@ -731,12 +765,28 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
     if (!v || v.verdict === "compatible") return;
     const a = claims[p.a];
     const b = claims[p.b];
-    const side = (c: PassClaim) => ({ id: c.id, page: c.page, text: c.text, verified: c.verified });
+    const side = (c: PassClaim) => ({ id: c.id, page: c.page, text: c.text, verified: c.verified, ownerVerified: !!c.ownerVerified });
     result.findings.push({ a: side(a), b: side(b), verdict: v.verdict, why: v.why, score: Math.round(p.score * 1000) / 1000 });
   });
 
   if (options.raiseItems !== false) {
+    // The owner already answered one side: the verified claim wins, the other is a stale note on its page, not a question.
+    const oneVerified = (f: ContradictionFinding) => !!f.a.ownerVerified !== !!f.b.ownerVerified;
+    const stale: StaleClaimNote[] = result.findings.filter(oneVerified).map((f) => {
+      const [won, lost] = f.a.ownerVerified ? [f.a, f.b] : [f.b, f.a];
+      return { claimId: lost.id, page: lost.page, verifiedClaimId: won.id, verifiedPage: won.page, why: f.why, at: now().toISOString() };
+    });
+    let staleKept = false;
+    try {
+      result.staleNotes = recordStaleClaims(options.stateVault, stale);
+      staleKept = true;
+    } catch {
+      // Not recorded: those findings are raised as items instead, so nothing is lost.
+      result.notes.push("The claims found against a verified claim could not be marked stale; they were raised for review instead.");
+    }
+    if (result.staleNotes > 0) result.notes.push(`${result.staleNotes} claim(s) disagree with an owner-verified claim: marked stale on their pages, no review item.`);
     for (const f of result.findings) {
+      if (staleKept && oneVerified(f)) continue;
       // The claim the item is about: the one that is NOT verified (a person
       // already settled the other), else the newer side of the pair.
       const [subject, other] = f.a.verified && !f.b.verified ? [f.b, f.a] : [f.a, f.b];

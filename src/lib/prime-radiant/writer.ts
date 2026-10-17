@@ -15,10 +15,12 @@
 import { allocateClaimId, slugify, type ClaimIndex } from "./claims";
 import { redactText } from "./redact";
 import { selfContainedClaim } from "./subject";
+import { historicalClaim, isValidityDate, textValidity, validityRange } from "./validity";
 import {
   PAGE_TYPES,
   SLUG_RE,
   folderForType,
+  isIsoDate,
   type Claim,
   type PageFrontmatter,
   type PageType,
@@ -72,13 +74,15 @@ export const WRITER_SYSTEM_PROMPT = [
   ' "domain": a lowercase-kebab business area, e.g. "sales", "support", "finance", "engineering",',
   ' "summary": at most 2 sentences and 300 characters: what it is and why it matters,',
   ' "details": optional Markdown with the important specifics (no top-level heading), may be "",',
-  ' "facts": up to 8 atomic facts [{"fact": "one sentence", "quote": "<= 12 words copied word for word from THIS item\'s text", "confidence": 0.0-1.0}],',
+  ' "facts": up to 8 atomic facts [{"fact": "one sentence", "quote": "<= 12 words copied word for word from THIS item\'s text", "confidence": 0.0-1.0,',
+  '   optional: "valid_from": "YYYY-MM-DD", "valid_until": "YYYY-MM-DD", "as_of": "YYYY-MM-DD", "historical": true}],',
   ' "sensitivity": "public"|"internal"|"confidential",',
   ' "confidence": 0.0-1.0}',
   "Every fact must be true read ALONE, away from the page and the other facts: it names its subject.",
   'Write "The Art of War is Project Gutenberg eBook #132", never "It is Project Gutenberg eBook #132"; "The Art of War is called the oldest military treatise", never "The work is called …".',
   "Never open a fact with a pronoun (it, its, this, they, he, she) or a stand-in (the document, the work, the book, the company, the author).",
   "An item's facts and quotes come from that item's own text only — never from another item in the same call.",
+  'When the item says WHEN a fact holds — since a date ("since 22.09.2026"), until one ("until February"), or as of one ("as of 30.09") — give it as valid_from, valid_until or as_of (ISO dates; a date without a year is in the year the item was written). A fact about a past state that no longer holds (a launch price, a former address) gets "historical": true. Leave these out when the item does not say; never guess.',
 ].join("\n");
 
 export function buildWriterPrompt(items: readonly WriterItem[]): { system: string; user: string } {
@@ -107,6 +111,52 @@ export interface DraftFact {
    * Absent: the page's own document.
    */
   source?: string;
+  /** When the fact holds, as the model read it from the document (ISO dates); absent when it did not say. */
+  validFrom?: string;
+  validUntil?: string;
+  asOf?: string;
+  /** A past state of things, as the model read it. */
+  historical?: boolean;
+}
+
+/** The dated fields of one fact of the model's answer: ISO dates only, a period that runs forwards (a backwards one loses its two bounds, nothing else). */
+function draftValidity(fo: Record<string, unknown>): Pick<DraftFact, "validFrom" | "validUntil" | "asOf" | "historical"> {
+  const out: Pick<DraftFact, "validFrom" | "validUntil" | "asOf" | "historical"> = {};
+  const iso = (v: unknown) => (typeof v === "string" && isValidityDate(v.trim()) && isIsoDate(v.trim()) ? v.trim() : undefined);
+  const from = iso(fo.valid_from);
+  const until = iso(fo.valid_until);
+  if (!(from && until && !validityRange({ from, until, source: "claim" }))) {
+    if (from) out.validFrom = from;
+    if (until) out.validUntil = until;
+  }
+  const asOf = iso(fo.as_of);
+  if (asOf) out.asOf = asOf;
+  if (fo.historical === true) out.historical = true;
+  return out;
+}
+
+/**
+ * The dated fields a claim is written with: what the model read from the
+ * document, else what the fact's own text states ("as of 30.09", "since
+ * 22.09.2026"), else none; `historical` when the model said so or the text
+ * reads as a past state ("formerly", "the launch price was").
+ */
+export function claimDates(fact: DraftFact, written: string): Pick<Claim, "valid_from" | "valid_until" | "as_of" | "historical"> {
+  const out: Pick<Claim, "valid_from" | "valid_until" | "as_of" | "historical"> = {};
+  if (fact.validFrom || fact.validUntil || fact.asOf) {
+    if (fact.validFrom) out.valid_from = fact.validFrom;
+    if (fact.validUntil) out.valid_until = fact.validUntil;
+    if (fact.asOf) out.as_of = fact.asOf;
+  } else {
+    const stated = textValidity(fact.fact, written);
+    if (stated && stated.from && stated.from === stated.until) out.as_of = stated.from;
+    else if (stated) {
+      if (stated.from) out.valid_from = stated.from;
+      if (stated.until) out.valid_until = stated.until;
+    }
+  }
+  if (fact.historical || historicalClaim({ text: fact.fact })) out.historical = true;
+  return out;
 }
 
 export interface PageDraft {
@@ -192,6 +242,7 @@ export function readDraft(raw: unknown, expected: ReadonlySet<number>): ItemVerd
         fact: fact.length > MAX_CLAIM_CHARS ? cleanLine(fact, MAX_CLAIM_CHARS) : fact,
         quote: typeof fo.quote === "string" ? cleanLine(fo.quote, 160) : "",
         confidence: clamp01(fo.confidence, clamp01(o.confidence, 0.6)),
+        ...draftValidity(fo),
       });
       if (facts.length >= MAX_FACTS_PER_PAGE) break;
     }
@@ -313,7 +364,9 @@ export function checkEvidence(draft: PageDraft, own: WriterItem, items: readonly
     if (f.quote === "" || quoteIn(words.get(own.i) ?? "", f.quote)) return f;
     const elsewhere = items.filter((it) => it.i !== own.i && quoteIn(words.get(it.i) ?? "", f.quote));
     if (elsewhere.length === 1 && elsewhere[0].path !== own.path) return { ...f, source: elsewhere[0].path };
-    return { fact: f.fact, quote: "", confidence: f.confidence };
+    const { source: _source, ...kept } = f;
+    void _source;
+    return { ...kept, quote: "" };
   });
   return { ...draft, facts };
 }
@@ -437,6 +490,7 @@ export function buildPage(draft: PageDraft, source: string, ctx: BuildContext): 
       status: "proposed",
       updatedAt,
       evidence: [{ kind: "source", path: fact.source ?? source, ...(fact.quote ? { note: fact.quote } : {}) }],
+      ...claimDates(fact, updatedAt),
     };
     claims.push(claim);
     const list = ctx.claimIndex.active.get(id) ?? [];
