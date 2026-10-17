@@ -375,10 +375,10 @@ export interface VaultOperationOptions {
    * and retired ids as they were (a frontmatter metadata edit): the
    * vault-wide rules (the claim namespace, the link graph) then come out no
    * different than before the change, and a page is refused for what the
-   * change did to it, exactly as a PATCH of that page alone would be. When a
-   * touched page is one index.md does not list, they are all judged against
-   * the whole vault after all: only every other page can tell whether it is
-   * an orphan.
+   * change did to it, exactly as a PATCH of that page alone would be. A
+   * touched page index.md does not list is judged against the whole vault
+   * after all (only every other page can tell whether it is an orphan); the
+   * listed ones still on their own.
    */
   lint?: boolean | "pages";
   /** Clock for the lint's stale check (tests). */
@@ -514,15 +514,22 @@ async function lintTouched(
     const indexBody = await readIndexBody(vault);
     // index.md read once for them all. Judged alone, a page index.md does not
     // list has no inbound links at all, and whether another page links it
-    // takes the whole vault to tell; one it lists is no orphan.
-    const listed = buildLinkGraph(own.map((p) => ({ path: p.path, title: p.parsed.ok ? p.parsed.frontmatter.title : undefined, body: "" })), indexBody).indexed;
-    if (own.every((p) => !p.parsed.ok || listed.has(p.path))) {
-      const findings = own.flatMap((p) =>
-        lintVault({ vault, pages: [p], indexBody: null, truncated: false }, { scope: [p.path], ledgerRetired, now }).findings.filter((f) => f.rule !== "orphan"),
-      );
-      findings.sort((a, b) => a.path.localeCompare(b.path) || LINT_RULES.indexOf(a.rule) - LINT_RULES.indexOf(b.rule));
-      return [...findings, ...indexSecrets(indexBody)];
+    // takes the whole vault to tell; one it lists is no orphan. So a listed
+    // page is judged on its own, as its own PATCH would be, and only the
+    // unlisted ones against the whole vault.
+    const listed = listedIn(indexBody, own);
+    const alone = own.filter((p) => !p.parsed.ok || listed.has(p.path));
+    const findings = alone.flatMap((p) =>
+      lintVault({ vault, pages: [p], indexBody: null, truncated: false }, { scope: [p.path], ledgerRetired, now }).findings.filter((f) => f.rule !== "orphan"),
+    );
+    const unlisted = own.filter((p) => !alone.includes(p)).map((p) => p.path);
+    if (unlisted.length > 0) {
+      const before = await vaultBefore();
+      const pages = [...before.pages.filter((p) => !touched.has(p.path)), ...own].sort((a, b) => walkOrder(a.path, b.path));
+      findings.push(...lintVault({ vault, pages, indexBody, truncated: before.truncated }, { scope: unlisted, ledgerRetired, now }).findings);
     }
+    findings.sort((a, b) => a.path.localeCompare(b.path) || LINT_RULES.indexOf(a.rule) - LINT_RULES.indexOf(b.rule));
+    return [...findings, ...indexSecrets(indexBody)];
   }
   const before = await vaultBefore();
   const indexBody = changed.includes(INDEX_FILE) ? await readIndexBody(vault) : before.indexBody;
@@ -531,6 +538,21 @@ async function lintTouched(
   const pages = [...before.pages.filter((p) => !touched.has(p.path)), ...own].sort((a, b) => walkOrder(a.path, b.path));
   const report = lintVault({ vault, pages, indexBody, truncated: before.truncated }, { scope: changed.filter((p) => p !== INDEX_FILE), ledgerRetired, now });
   return [...report.findings, ...indexSecrets(indexBody)];
+}
+
+/** Which of `pages` index.md lists, its links resolved as the lint resolves them (`buildLinkGraph(...).indexed`). */
+function listedIn(indexBody: string | null, pages: readonly VaultPage[]): Set<string> {
+  return buildLinkGraph(pages.map((p) => ({ path: p.path, title: p.parsed.ok ? p.parsed.frontmatter.title : undefined, body: "" })), indexBody).indexed;
+}
+
+/**
+ * Which of the pages at `rels` index.md lists now — whether the `"pages"`
+ * lint judges each on its own or against the whole vault (see
+ * {@link VaultOperationOptions.lint}).
+ */
+export async function indexedPaths(vault: string, rels: readonly string[]): Promise<Set<string>> {
+  const pages = (await Promise.all(rels.map((rel) => readListedPage(rel, vault)))).filter((p): p is VaultPage => p !== null);
+  return listedIn(await readIndexBody(vault), pages);
 }
 
 function readRetiredLedgerSafe(vault: string): string[] {

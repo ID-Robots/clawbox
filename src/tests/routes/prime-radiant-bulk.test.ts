@@ -258,6 +258,39 @@ describe("POST pages/bulk", () => {
     expect(log()[0]).toBe("ClawBox assistant|Prime Radiant|bulk: 1 page");
   });
 
+  it("refuses an unlisted page whose claim id a listed page in the same batch carries, and still changes the listed one", async () => {
+    await ensureVault();
+    await seed();
+    // index.md does not list the copy; it carries the claim id concepts/pricing.md does (written past the lint, as a hand edit would).
+    await vaultOperation("seed: unlisted copy", async (tx) => tx.write("concepts/copy.md", pageText({ title: "Copy", claims: [PRICE] }, "A copy.\n")), { lint: false });
+    const before = read("concepts/copy.md");
+    const res = await bulk("assistant", { edits: [{ path: "concepts/copy.md", domain: "billing" }, { path: "concepts/pricing.md", domain: "billing" }] });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ changed: ["concepts/pricing.md"], unchanged: [], refused: [{ path: "concepts/copy.md", code: "lint_blocked" }] });
+    expect(res.body.refused[0].error).toMatch(/claim-id-collision/);
+    expect(read("concepts/copy.md")).toBe(before);
+    expect(read("concepts/pricing.md")).toContain("domain: billing");
+    expect(log()[0]).toBe("ClawBox assistant|Prime Radiant|bulk: 1 page");
+  });
+
+  it("judges a listed page on its own even when an unlisted page in the batch sends the lint to the whole vault", async () => {
+    await ensureVault();
+    await seed();
+    // concepts/shipping.md (left out of the batch) already shares a claim id with concepts/pricing.md; concepts/loose.md is unlisted and carries none.
+    await vaultOperation(
+      "seed: shared claim id, unlisted page",
+      async (tx) => {
+        await tx.write("concepts/shipping.md", pageText({ title: "Shipping", claims: [PRICE] }, "Shipping is priced per parcel.\n"));
+        await tx.write("concepts/loose.md", pageText({ title: "Loose" }, "Nobody lists this page.\n"));
+      },
+      { lint: false },
+    );
+    const res = await bulk("assistant", { edits: [{ path: "concepts/loose.md", owner: "finance-team" }, { path: "concepts/pricing.md", owner: "finance-team" }] });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ changed: ["concepts/loose.md", "concepts/pricing.md"], refused: [] });
+    expect(log()[0]).toBe("ClawBox assistant|Prime Radiant|bulk: 2 pages");
+  });
+
   it("commits nothing when every page already says what the edit asks", async () => {
     await ensureVault();
     await seed();

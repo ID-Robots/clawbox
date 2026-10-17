@@ -56,6 +56,7 @@ import { readSettings } from "./settings";
 import { readRetiredLedger, syncActiveClaims } from "./state-db";
 import {
   INDEX_FILE,
+  indexedPaths,
   readListedPage,
   readVaultSnapshot,
   vaultInitialised,
@@ -672,8 +673,8 @@ export async function bulkEditPages(input: PageBulkEdit, who: EditWho, options: 
   await requireVault(vault);
   const at = nowIso(options.now);
   // Pages the vault's own lint refused when it judged them against the whole
-  // vault (one of them is not in index.md, and a claim id it carries is on
-  // another page too): left out, and the rest tried again.
+  // vault (a page index.md does not list, a claim id of which is on another
+  // page too): left out, and the rest tried again.
   const lintRefused = new Map<string, BulkRefusal>();
   const plan = async (read: (rel: string) => Promise<VaultPage | null>, write: ((rel: string, text: string) => Promise<unknown>) | null) => {
     const ledgerRetired = ledger(vault);
@@ -708,9 +709,14 @@ export async function bulkEditPages(input: PageBulkEdit, who: EditWho, options: 
       const named = err.findings.filter((f) => !lintRefused.has(f.path) && input.edits.some((e) => "edit" in e && e.edit.path === f.path));
       // A finding on no page of ours, or none left to take out: the refusal stands.
       if (named.length === 0 || named.length < err.findings.length) throw err;
-      for (const f of named) {
-        const rules = err.findings.filter((x) => x.path === f.path).map((x) => x.rule);
-        lintRefused.set(f.path, { path: f.path, code: "lint_blocked", error: `That change breaks a rule of the vault: ${[...new Set(rules)].join(", ")}.` });
+      // The unlisted pages first: they are the ones judged against the whole
+      // vault. A listed page refused beside them is tried again, on its own.
+      const blocked = [...new Set(named.map((f) => f.path))];
+      const listed = await indexedPaths(vault, blocked);
+      const unlisted = blocked.filter((p) => !listed.has(p));
+      for (const path of unlisted.length > 0 ? unlisted : blocked) {
+        const rules = err.findings.filter((x) => x.path === path).map((x) => x.rule);
+        lintRefused.set(path, { path, code: "lint_blocked", error: `That change breaks a rule of the vault: ${[...new Set(rules)].join(", ")}.` });
       }
     }
   }
