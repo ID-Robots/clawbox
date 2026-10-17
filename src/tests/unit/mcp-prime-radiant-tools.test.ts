@@ -500,7 +500,7 @@ describe("prime_radiant_map", () => {
 describe("prime_radiant_status", () => {
   it("reads the vault, the import, the nightly pass and the queue in one answer", async () => {
     answer(
-      [/\/status$/, { initialised: true, vault: { pages: 3, verifiedPages: 1, claims: 4, domains: ["acme-sales"] }, git: { head: { sha: SHA, subject: "edit: x", at: "t", author: "ClawBox assistant" } }, lint: { errors: 1, warnings: 2 } }],
+      [/\/status$/, { initialised: true, vault: { pages: 3, verifiedPages: 1, claims: 4, domains: ["acme-sales"] }, git: { head: { sha: SHA, subject: "edit: x", at: "t", author: "ClawBox assistant" } }, lint: { errors: 1, warnings: 2 }, links: { pages: 3, median: 4, mean: 4, atTarget: 1, target: 5 } }],
       [/\/ingest$/, { running: null, jobs: [{ id: JOB, status: "done", pages: 2, failed: 0 }] }],
       [/\/nightly$/, { running: null, nextRunAt: 0, runs: [] }],
       [/\/maintenance$/, { running: null, last: {} }],
@@ -516,6 +516,7 @@ describe("prime_radiant_status", () => {
       claims: 4,
       last_change: { commit: SHA.slice(0, 12), by: "ClawBox assistant" },
       checks: { errors: 1, warnings: 2 },
+      links_per_page: { median: 4, target: 5 },
       review_items_open: 2,
       import: { running: null },
       nightly: { next_run: "off" },

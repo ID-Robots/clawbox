@@ -33,7 +33,15 @@
  *    the owner's, `{ by: owner, via: assistant }`, which wins like a
  *    verification in the app; ONE commit. `{ upgraded, pages, skipped }`;
  *    `dryRun: true` lists them — run it first, and `rejudge-reviews` after.
- * `reindex`, `connect` and `migrate-frontmatter` run on in the background:
+ *  - `structure`: the structure pass (structure.ts, also step 4b of the
+ *    nightly pass) — monthly record hubs, domain hubs, the company's root
+ *    page, entity enrichment and the decisions register, written in commits.
+ *    `dryRun: true` answers what it would write (`would`) and never asks the
+ *    cheap model.
+ *  - `classify-records`: read only — the record leaves by type and month
+ *    (records.ts), and the record-like pages the rules could not type (what
+ *    the capped model fallback would be asked).
+ * `reindex`, `connect`, `migrate-frontmatter` and `structure` run on in the background:
  * 202 `{ started: true }`; 409 `busy` while one runs. A `dryRun` answers its
  * counts at once.
  *
@@ -52,6 +60,10 @@ import { requireSession } from "@/lib/route-auth";
 import { RELATED_DIMS, runConnectPass } from "@/lib/prime-radiant/connect";
 import { vaultDir } from "@/lib/prime-radiant/paths";
 import { migratePluginFrontmatter } from "@/lib/prime-radiant/plugin-compat";
+import { classifyRecord, RECORD_TYPES } from "@/lib/prime-radiant/records";
+import { flashAvailable } from "@/lib/prime-radiant/flash-client";
+import { effectiveCostRates, readSettings } from "@/lib/prime-radiant/settings";
+import { modelCandidates, runStructure } from "@/lib/prime-radiant/structure-run";
 import { readPageVectors, reindexPrimeRadiantVault, vaultIndexingAllowed } from "@/lib/prime-radiant/shard-index";
 import { rejudgeOpenContradictions, rejudgeSummary } from "@/lib/prime-radiant/rejudge";
 import { renameMeaninglessPages } from "@/lib/prime-radiant/rename";
@@ -128,6 +140,40 @@ export async function POST(req: Request) {
         if (dryRun) return json(await runConnectPass(await readVaultSnapshot(vault), commitWith(vault, gate.writer.author), { dryRun, vectors: await readPageVectors(vault, { dims: RELATED_DIMS }) }));
         background("connect", async () => runConnectPass(await readVaultSnapshot(vault), commitWith(vault, gate.writer.author), { vectors: await readPageVectors(vault, { dims: RELATED_DIMS }) }));
         return json({ started: true }, 202);
+      }
+      case "structure": {
+        if (state.running) return busy();
+        const settings = readSettings();
+        const go = async (dry: boolean) =>
+          runStructure(await readVaultSnapshot(vault), commitWith(vault, gate.writer.author), {
+            stateVault: vault,
+            settings,
+            rates: effectiveCostRates(),
+            online: dry ? false : await flashAvailable().catch(() => false),
+            dryRun: dry,
+          });
+        if (dryRun) return json(await go(true));
+        background("structure", () => go(false));
+        return json({ started: true }, 202);
+      }
+      case "classify-records": {
+        const snapshot = await readVaultSnapshot(vault);
+        const company = readSettings().structure.company;
+        const byType = Object.fromEntries(RECORD_TYPES.map((t) => [t, 0])) as Record<string, number>;
+        const byMonth: Record<string, number> = {};
+        const sample: Array<{ path: string; type: string; month: string; counterparty: string | null; via: string }> = [];
+        let leaves = 0;
+        for (const p of snapshot.pages) {
+          if (!p.parsed.ok) continue;
+          const info = classifyRecord(p.path, p.parsed.frontmatter, { ownCompany: company });
+          if (!info) continue;
+          leaves++;
+          byType[info.type]++;
+          byMonth[info.month] = (byMonth[info.month] ?? 0) + 1;
+          if (sample.length < 50) sample.push({ path: p.path, type: info.type, month: info.month, counterparty: info.counterparty, via: info.via });
+        }
+        const untyped = modelCandidates(snapshot.pages);
+        return json({ pages: snapshot.pages.length, leaves, byType, byMonth, sample, untyped: untyped.length, untypedSample: untyped.slice(0, 50).map((c) => c.path) });
       }
       case "migrate-frontmatter": {
         if (state.running) return busy();

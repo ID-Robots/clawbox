@@ -27,6 +27,8 @@ interface SettingsAnswer {
     opusMaxPages?: { min: number; max: number };
     /** Absent on a server from before the setting. */
     searchIndexLimitMb?: { min: number; max: number };
+    /** Absent on a server from before the structure pass. */
+    structureCompany?: number;
   };
   nightly: { nextRunAt: number | null };
   /** Which account the second opinion would use tonight (absent on an older server). */
@@ -58,6 +60,8 @@ interface Draft {
   skipCodeProjects: boolean;
   folders: string[];
   domains: Array<{ name: string; owner: string }>;
+  structure: boolean;
+  company: string;
 }
 
 function draftOf(s: Settings): Draft {
@@ -73,6 +77,9 @@ function draftOf(s: Settings): Draft {
     skipCodeProjects: s.ingest.skipCodeProjects,
     folders: [...s.ingest.folders],
     domains: s.domains.map((d) => ({ ...d })),
+    // Absent on a server from before the structure pass.
+    structure: s.structure?.enabled ?? true,
+    company: s.structure?.company ?? "",
   };
 }
 
@@ -149,6 +156,7 @@ export default function PrimeRadiantSettings({ onChanged }: { onChanged: () => v
           folders: draft.folders,
         },
         ...(indexLimit ? { search: { indexLimitMb } } : {}),
+        ...(answer.settings.structure ? { structure: { enabled: draft.structure, company: draft.company.trim() } } : {}),
         domains,
       }));
       setAnswer(next);
@@ -182,6 +190,9 @@ export default function PrimeRadiantSettings({ onChanged }: { onChanged: () => v
               <p className="text-[11px] text-[var(--text-muted)]">{t("primeRadiant.settings.nextRun", { at: formatWhen(answer.nightly.nextRunAt, locale) })}</p>
             )}
             <Toggle label={t("primeRadiant.settings.contradictions")} checked={draft.contradictions} onChange={(v) => set({ contradictions: v })} testId="prime-radiant-contradictions" />
+            {answer.settings.structure && (
+              <Toggle label={t("primeRadiant.settings.structure")} checked={draft.structure} onChange={(v) => set({ structure: v })} testId="prime-radiant-structure" />
+            )}
             <div>
               <p className="text-xs text-[var(--text-secondary)]">{t("primeRadiant.settings.nightlyFolders")}</p>
               <p className="text-[11px] text-[var(--text-muted)]">{t("primeRadiant.settings.nightlyFoldersBody")}</p>
@@ -224,6 +235,19 @@ export default function PrimeRadiantSettings({ onChanged }: { onChanged: () => v
 
           <section className={`${CARD_SURFACE} p-4 space-y-3`}>
             <h3 className={SECTION_LABEL}>{t("primeRadiant.settings.domainsTitle")}</h3>
+            {answer.settings.structure && (
+              <label className="block space-y-1">
+                <span className="text-xs text-[var(--text-secondary)]">{t("primeRadiant.settings.company")}</span>
+                <input
+                  className={`${FIELD} text-xs w-full`}
+                  value={draft.company}
+                  maxLength={answer.limits.structureCompany ?? 80}
+                  onChange={(e) => set({ company: e.target.value })}
+                  data-testid="prime-radiant-company"
+                />
+                <span className="block text-[11px] text-[var(--text-muted)]">{t("primeRadiant.settings.companyBody")}</span>
+              </label>
+            )}
             <p className="text-[11px] text-[var(--text-muted)]">{t("primeRadiant.settings.domainsBody")}</p>
             <ul className="space-y-1.5" data-testid="prime-radiant-domains">
               {draft.domains.map((d, i) => (

@@ -114,6 +114,33 @@ describe("nightly pass", () => {
     expect(listNightlyRuns()).toEqual([]);
   });
 
+  it("builds the structure layer on the branch, offline too, and merges it; a second night has nothing left to do", async () => {
+    await ensureVault();
+    await vaultOperation("seed: invoices", async (tx) => {
+      for (let d = 1; d <= 3; d++) {
+        const title = `Invoice INV-2026-00000${d} Globex Ltd`;
+        await tx.write(
+          `concepts/invoice-inv-2026-00000${d}.md`,
+          pageText({ type: "reference", title, domain: "acme-sales", claims: [claim(`acme-sales/invoice-inv-2026-00000${d}/total`, `The invoice total is EUR ${d}00.00, dated 2026-04-0${d}.`)] }, `${title}.\n`),
+        );
+      }
+    });
+    const withStructure = settings({ domains: [{ name: "acme-sales", owner: "Sales team" }], structure: { ...defaultSettings().structure, company: "Acme Widgets Ltd" } });
+    const run = await runNightly("manual", deps({ online: async () => false, settings: withStructure }));
+    expect(run?.status).toBe("merged");
+    expect((run!.summary as unknown as NightlySummary).structure).toMatchObject({ recordHubs: 1, domainHubs: 1, root: true, leavesInHubs: 3, model: { skipped: "offline" } });
+    const snap = await readVaultSnapshot(vaultDir());
+    const hub = snap.pages.find((p) => p.path === "syntheses/invoices-2026-04.md");
+    expect(hub?.parsed.ok && hub.parsed.frontmatter.structure).toMatchObject({ kind: "record-hub", type: "invoice", month: "2026-04", leaves: 3 });
+    expect(snap.pages.map((p) => p.path)).toEqual(expect.arrayContaining(["syntheses/acme-widgets-ltd.md", "syntheses/acme-sales-domain-hub.md"]));
+    const leaf = snap.pages.find((p) => p.path === "concepts/invoice-inv-2026-000001.md");
+    expect(leaf?.parsed.ok && leaf.parsed.frontmatter.record).toEqual({ type: "invoice", month: "2026-04", hub: "syntheses/invoices-2026-04.md", by: "rules" });
+
+    const again = await runNightly("manual", deps({ online: async () => false, settings: withStructure }));
+    expect(again?.status).toBe("nothing");
+    expect((again!.summary as unknown as NightlySummary).structure).toMatchObject({ written: 0 });
+  });
+
   it("names its branch dream/<local date>, and the next free one on a second run that day", async () => {
     await ensureVault();
     expect(localDate(NOW)).toBe("2026-05-20");
@@ -303,7 +330,9 @@ describe("nightly pass", () => {
 
   it("compares what reached main by day: the scope is everything changed since the last finished comparison", async () => {
     await ensureVault();
-    const first = await runNightly("schedule", deps());
+    // The structure pass would keep the domain hub's open review items current, a commit of its own; this is about the comparison's scope.
+    const quiet = settings({ structure: { ...defaultSettings().structure, enabled: false } });
+    const first = await runNightly("schedule", deps({ settings: quiet }));
     expect((first!.summary as unknown as NightlySummary).contradictions.complete).toBe(true);
     const mark = readComparedThrough(vaultDir());
     const items = () => listReviewItems(vaultDir(), { kind: "contradiction" }).items;
@@ -314,12 +343,12 @@ describe("nightly pass", () => {
       await tx.write("concepts/daytime-price.md", pageText({ title: "Daytime price", claims: [claim("acme-sales/daytime-price/blue", "The blue widget costs 15 EUR per unit.")] }));
     });
     // An offline night compares nothing and does not move the mark.
-    const offline = await runNightly("schedule", deps({ online: async () => false, now: () => new Date(2026, 4, 21, 3, 0) }));
+    const offline = await runNightly("schedule", deps({ settings: quiet, online: async () => false, now: () => new Date(2026, 4, 21, 3, 0) }));
     expect((offline!.summary as unknown as NightlySummary).contradictions.skipped).toBe("offline");
     expect(readComparedThrough(vaultDir())).toBe(mark);
 
     // The next night ingests nothing new (its branch changes nothing), and still compares the daytime page.
-    const second = await runNightly("schedule", deps({ now: () => new Date(2026, 4, 22, 3, 0) }));
+    const second = await runNightly("schedule", deps({ settings: quiet, now: () => new Date(2026, 4, 22, 3, 0) }));
     const s2 = second!.summary as unknown as NightlySummary;
     expect(s2.commits).toBe(0);
     expect(s2.contradictions.queried).toBe(1);
@@ -332,7 +361,7 @@ describe("nightly pass", () => {
     expect(after).toBe((await headCommit(vaultDir()))!.sha);
 
     // Compared once is compared: the night after is quiet again.
-    const third = await runNightly("schedule", deps({ now: () => new Date(2026, 4, 23, 3, 0) }));
+    const third = await runNightly("schedule", deps({ settings: quiet, now: () => new Date(2026, 4, 23, 3, 0) }));
     expect((third!.summary as unknown as NightlySummary).contradictions).toMatchObject({ queried: 0, skipped: "nothing_to_compare" });
   });
 

@@ -268,6 +268,15 @@ export default function PrimeRadiantApp() {
             <span>{t("primeRadiant.countPages", { n: status.vault.pages })}</span>
             <span>{t("primeRadiant.countClaims", { n: status.vault.claims })}</span>
             <span>{t("primeRadiant.countVerified", { n: status.vault.verifiedPages })}</span>
+            {status.links && status.links.pages > 0 && (
+              <span
+                data-testid="prime-radiant-links"
+                className={status.links.median >= status.links.target ? undefined : "text-amber-200/80"}
+                title={t("primeRadiant.countLinksHint", { target: status.links.target })}
+              >
+                {t("primeRadiant.countLinks", { median: status.links.median })}
+              </span>
+            )}
           </div>
         )}
       </header>

@@ -263,6 +263,8 @@ interface StatusBody {
   vault?: { pages?: number; invalidPages?: number; verifiedPages?: number; claims?: number; domains?: string[]; truncated?: boolean };
   git?: { branch?: string | null; head?: { sha?: string; subject?: string; at?: string; author?: string } | null; commits?: number };
   lint?: { errors?: number; warnings?: number };
+  /** Meaningful links per content page (absent on a server from before the structure pass). */
+  links?: { pages?: number; median?: number; target?: number } | null;
   index?: {
     exists?: boolean; usedMb?: number; limitMb?: number; chunks?: number; maxChunks?: number | null; pages?: number;
     cappedPages?: number | null; withoutPageVector?: number | null; needsFullScan?: boolean; migrationPending?: boolean;
@@ -462,6 +464,7 @@ function registerReadTools(reg: Registrar): void {
           ? { commit: short(status.git.head.sha), what: status.git.head.subject, at: status.git.head.at, by: status.git.head.author }
           : null,
         checks: { errors: status.lint?.errors ?? "unknown", warnings: status.lint?.warnings ?? "unknown" },
+        ...(status.links && typeof status.links.median === "number" ? { links_per_page: { median: status.links.median, target: status.links.target ?? 5 } } : {}),
         review_items_open: review?.counts?.open ?? "unknown",
         import: ingest ? { running: ingest.running ?? null, recent: (ingest.jobs ?? []).slice(0, 3).map((j) => ({ id: j.id, status: j.status, pages: j.pages, failed: j.failed })) } : "unknown",
         nightly: nightly
@@ -473,6 +476,7 @@ function registerReadTools(reg: Registrar): void {
           : "unknown",
         ...(maintenance?.running ? { maintenance_running: maintenance.running } : {}),
         ...(maintenance?.last?.connect ? { connect_pass_last: maintenance.last.connect } : {}),
+        ...(maintenance?.last?.structure ? { structure_pass_last: maintenance.last.structure } : {}),
         ...(status.index ? { search_index: searchIndexOf(status.index) } : {}),
       });
     },
