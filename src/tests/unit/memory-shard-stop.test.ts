@@ -49,6 +49,23 @@ describe("stopping an index pass", () => {
     expect((await stopMemoryIndex()).stopped).toBe(false);
   });
 
+  it("claims no stop for a running record this process is not supervising", async () => {
+    // A live pid and a fresh start: the reconcile keeps it "running", but no
+    // pass handle is held here, so nothing can be stopped. Answering
+    // `stopped: true` would be a false success the assistant relays as done.
+    const startedAtMs = Date.now();
+    await fs.writeFile(path.join(tmpDir, "memory-index-state.json"), JSON.stringify({
+      status: "running", mode: "incremental", trigger: "manual", startedAtMs,
+      finishedAtMs: 0, durationMs: 0, error: "", errorCode: "", progress: null, childPid: process.pid,
+    }));
+    const { stopMemoryIndex } = await import("@/lib/clawkeep-memory");
+    const stop = await stopMemoryIndex();
+    expect(stop.stopped).toBe(false);
+    expect(stop.run).toMatchObject({ status: "running", startedAtMs });
+    // Left exactly as it was: no settled record written over somebody else's pass.
+    expect(JSON.parse(await fs.readFile(path.join(tmpDir, "memory-index-state.json"), "utf8")).status).toBe("running");
+  });
+
   it("ends the running pass, settles it as stopped and frees the lock for the next one", async () => {
     const script = path.join(tmpDir, "fake-index");
     const started = path.join(tmpDir, "started");
