@@ -308,7 +308,7 @@ function Golden({ revision, domains, onChanged, onOpenPage }: Pick<Props, "revis
       {error && <p role="alert" className="text-xs text-red-300">{error}</p>}
       {(list?.skipped ?? 0) > 0 && (
         <p role="status" className="text-xs text-amber-200" data-testid="prime-radiant-golden-unreadable">
-          {t("primeRadiant.questions.unreadable", { count: list?.skipped ?? 0 })}
+          {t("primeRadiant.questions.unreadable")}
         </p>
       )}
       {adding && (
@@ -454,7 +454,8 @@ function Daily({ revision, onOpenPage, onOpenReview }: Pick<Props, "revision" | 
                       {q.options.map((o, j) => <li key={j}>{o}</li>)}
                     </ul>
                   )}
-                  {q.due && <p className="mt-0.5 text-[11px] text-[var(--text-muted)]">{t("primeRadiant.questions.due", { date: q.due })}</p>}
+                  {/* The question itself names the day in every language it is worded in; a second line would repeat it. */}
+                  {q.due && !q.question.includes(q.due) && <p className="mt-0.5 text-[11px] text-[var(--text-muted)]">{t("primeRadiant.questions.due", { date: q.due })}</p>}
                 </div>
                 {q.kind === "review" ? (
                   <button type="button" className={BTN_QUIET} onClick={onOpenReview} data-testid="prime-radiant-daily-open-review">{t("primeRadiant.questions.openReview")}</button>
@@ -490,7 +491,7 @@ function Daily({ revision, onOpenPage, onOpenReview }: Pick<Props, "revision" | 
 }
 
 /** A whole number typed in a small field, saved when the field is left with a new value in range. */
-function NumberSetting({ label, value, min, max, disabled, onSave, testId }: { label: string; value: number; min: number; max: number; disabled: boolean; onSave: (n: number) => void; testId: string }) {
+function NumberSetting({ label, value, min, max, disabled, onSave, testId }: { label: string; value: number; min: number; max: number; disabled: boolean; onSave: (n: number) => Promise<boolean>; testId: string }) {
   const [text, setText] = useState(String(value));
   // A new saved value replaces what the field shows, adjusted while rendering rather than in an effect.
   const [shown, setShown] = useState(value);
@@ -500,8 +501,12 @@ function NumberSetting({ label, value, min, max, disabled, onSave, testId }: { l
   }
   const commit = () => {
     const n = Number(text);
-    if (Number.isInteger(n) && n >= min && n <= max && n !== value) onSave(n);
-    else setText(String(value));
+    if (Number.isInteger(n) && n >= min && n <= max && n !== value) {
+      // A refused save shows the value that is still in force, not the one typed.
+      void onSave(n).then((ok) => {
+        if (!ok) setText(String(value));
+      });
+    } else setText(String(value));
   };
   return (
     <label className="flex items-center justify-between gap-3 text-xs text-[var(--text-primary)]">
@@ -547,15 +552,18 @@ function Checks({ revision, onChanged }: Pick<Props, "revision" | "onChanged">) 
     return () => ctl.abort();
   }, [revision, t]);
 
-  const save = async (patch: Record<string, unknown>) => {
+  /** One change; whether it was saved. */
+  const save = async (patch: Record<string, unknown>): Promise<boolean> => {
     setSaving(true);
     try {
       const r = await prJson<{ settings: PrimeRadiantSettings }>(`${API}/settings`, jsonInit("PUT", patch));
       if (r?.settings) setSettings(r.settings);
       setError(null);
       onChanged();
+      return true;
     } catch (err) {
       setError(errorText(err, t));
+      return false;
     } finally {
       setSaving(false);
     }
@@ -585,7 +593,7 @@ function Checks({ revision, onChanged }: Pick<Props, "revision" | "onChanged">) 
         min={1}
         max={500}
         disabled={saving || !settings.golden.enabled}
-        onSave={(n) => void save({ golden: { maxQuestions: n } })}
+        onSave={(n) => save({ golden: { maxQuestions: n } })}
         testId="prime-radiant-golden-max"
       />
       <NumberSetting
@@ -594,7 +602,7 @@ function Checks({ revision, onChanged }: Pick<Props, "revision" | "onChanged">) 
         min={1}
         max={20}
         disabled={saving}
-        onSave={(n) => void save({ verification: { perOwner: n } })}
+        onSave={(n) => save({ verification: { perOwner: n } })}
         testId="prime-radiant-daily-per-owner"
       />
     </section>

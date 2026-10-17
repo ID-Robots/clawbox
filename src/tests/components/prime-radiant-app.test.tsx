@@ -160,6 +160,8 @@ const DAILY_MINE = {
   }],
 };
 let goldenQuestions: unknown[];
+/** A settings PUT the server refuses (the Questions tab's Checks). */
+let refuseSettingsPut: boolean;
 
 let status: Record<string, unknown>;
 let calls: Call[];
@@ -273,6 +275,7 @@ function installFetch() {
       return ok({ question: GOLDEN_Q, commit: "d".repeat(40) });
     }
     if (url.startsWith(`${p}/daily`)) return ok(url.includes("owner=") ? DAILY_MINE : DAILY_OWNERS);
+    if (url === `${p}/settings` && method === "PUT" && refuseSettingsPut) return ok({ error: "The settings could not be saved.", code: "vault_unavailable" }, 503);
     if (url === `${p}/settings`) {
       const settings = {
         ingest: { exclude: [".git", "node_modules"], skipCodeProjects, parallel: 128, folders: [] },
@@ -349,6 +352,7 @@ beforeEach(() => {
   window.localStorage.removeItem("clawbox.primeRadiant.repairNoticeSeen");
   listed = [LIST_ENTRY];
   goldenQuestions = [GOLDEN_Q];
+  refuseSettingsPut = false;
   FakeEventSource.last = null;
   installFetch();
   // The Map's canvas: no WebGL or 2D context in jsdom (its own suite mocks one), so it lists the pages.
@@ -1182,6 +1186,18 @@ describe("PrimeRadiantApp — Questions", () => {
     fireEvent.blur(perOwner);
     await waitFor(() => expect(calls.filter((c) => c.method === "PUT" && c.url.endsWith("/settings")).map((c) => c.body)).toContainEqual({ verification: { perOwner: 3 } }));
     expect(calls.filter((c) => c.method === "PUT" && c.url.endsWith("/settings")).map((c) => c.body)).not.toContainEqual({ verification: { perOwner: 99 } });
+  });
+
+  it("puts back the value in force when the server refuses a Checks save", async () => {
+    refuseSettingsPut = true;
+    mount();
+    await openTab("questions");
+    const perOwner = await screen.findByTestId("prime-radiant-daily-per-owner");
+    fireEvent.change(perOwner, { target: { value: "3" } });
+    fireEvent.blur(perOwner);
+    await waitFor(() => expect(calls.some((c) => c.method === "PUT" && c.url.endsWith("/settings"))).toBe(true));
+    expect(await within(screen.getByTestId("prime-radiant-checks")).findByRole("alert")).toBeInTheDocument();
+    await waitFor(() => expect(perOwner).toHaveValue(5));
   });
 
   it("says so when there are no golden questions, no score and no owners yet", async () => {
