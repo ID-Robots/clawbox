@@ -25,7 +25,7 @@ import type { VaultAuthor } from "./git";
 import { safePagePath, vaultDir } from "./paths";
 import type { Claim, ClaimEvidence, PageFrontmatter } from "./schema";
 import { readRetiredLedger, recordRetired } from "./state-db";
-import { readVaultSnapshot, vaultOperation, type VaultOperationResult } from "./vault";
+import { vaultOperation, type VaultOperationResult } from "./vault";
 
 /** A verified claim is one line a person read: the lint's claim limit. */
 export const MAX_VERIFIED_TEXT = 240;
@@ -108,7 +108,7 @@ export async function verifyClaim(input: VerifyInput): Promise<VerifyResult> {
     `verify: ${claimId}`,
     async (tx) => {
       // Read under the lock: what the commit changes is what is on disk now.
-      const snapshot = await readVaultSnapshot(tx.vault);
+      const snapshot = await tx.snapshot();
       const valid = snapshot.pages.flatMap((p) => (p.parsed.ok ? [{ path: p.path, frontmatter: p.parsed.frontmatter, body: p.parsed.body }] : []));
       const index = buildClaimIndex(valid, ledger(tx.vault));
       if (index.retired.has(claimId)) throw new VerifyError("retired", `The claim id ${claimId} was retired and cannot be verified again.`);

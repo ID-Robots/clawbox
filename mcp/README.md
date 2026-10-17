@@ -125,7 +125,7 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 | Coding team (`coding_team_run/status/stop`) | when the owner switched it on | when the owner switched it on |
 | Steering and following runs (`coding_run_message`, `coding_run_list`, `coding_agent_resume`, `coding_project_status`) | when the owner switched the coding agent on | same |
 | Device state reads (`memory_shard_status`, `local_ai_status`, `clawbox_ai_usage`, `anthropic_accounts`) | yes | yes |
-| Prime Radiant (`prime_radiant_*`, 31 tools) | yes | yes |
+| Prime Radiant (`prime_radiant_*`, 32 tools) | yes | yes |
 | Coordinate browser control (`browser_click/type/keypress/scroll`) | yes | **no** — Hermes ships a richer browser toolset |
 | Media inside a run (`generate_image`, `generate_audio`) | when the owner's switch is on | when the owner's switch is on |
 | Everything else | yes | yes |
@@ -1178,6 +1178,7 @@ owner when it touches a verified page.
 | — edit a page's summary, body or fields | `PATCH pages/<path>` | `prime_radiant_page_edit` |
 | — delete a page | `DELETE pages/<path>` | `prime_radiant_page_delete` |
 | — merge duplicate pages into one (claims, aliases, links; `dry_run` previews) | `POST pages/merge` | `prime_radiant_page_merge` |
+| — set domain, owner, privacy or status on 1–500 pages in one commit (refused pages listed, the rest change; `dry_run` previews) | `POST pages/bulk` | `prime_radiant_pages_bulk_edit` |
 | — add / edit / delete a claim | `POST claims`, `PATCH` / `DELETE claims/<id>` | `prime_radiant_claim_add` / `_edit` / `_delete` |
 | Review: pick / new answer (verifies); — verify a claim directly | `POST review/<id>/resolve`; `POST claims/verify` | `prime_radiant_review_resolve`, `prime_radiant_claim_verify` |
 | Review: later / dismiss | `POST review/<id>/resolve` | `prime_radiant_review_resolve` |

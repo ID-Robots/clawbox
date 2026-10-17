@@ -26,12 +26,24 @@
  * (into itself), 409 `deprecated` / `verified` / `taken` / `retired` /
  * `too_many_claims` / `too_long` / `into_links` / `invalid_page` /
  * `lint_blocked`, 412
- * `not_initialised`. It is answered here rather than from a `merge/` folder,
- * which would take GET, PATCH and DELETE of a page at `merge.md` from this
- * route; a POST to any other page path is 405.
+ * `not_initialised`.
+ *
+ * POST /setup-api/prime-radiant/pages/bulk `{ edits: [1..500 of { path,
+ * domain?, owner?, privacy?, status? }], dry_run? }` — set metadata on many
+ * pages at once (edit.ts `bulkEditPages`): ONE commit `bulk: N pages`, or
+ * with `dry_run: true` the same answer and no commit. `{ changed, unchanged,
+ * refused: [{ path, code, error }], commit, dryRun }`: a page its own PATCH
+ * would refuse (`not_found`, `invalid`, `invalid_page`, `verified`,
+ * `lint_blocked`) is listed in `refused` and the others still change. The
+ * same writers as PATCH; 400 `invalid` for the request's own shape, 413 past
+ * 512 KB, 412 `not_initialised`.
+ *
+ * Both are answered here rather than from a `merge/` or `bulk/` folder, which
+ * would take GET, PATCH and DELETE of a page at `merge.md` or `bulk.md` from
+ * this route; a POST to any other page path is 405.
  */
 import { requireSession } from "@/lib/route-auth";
-import { deletePage, editPage, mergePages, readPageMerge, readPagePatch } from "@/lib/prime-radiant/edit";
+import { bulkEditPages, deletePage, editPage, mergePages, readPageBulk, readPageMerge, readPagePatch } from "@/lib/prime-radiant/edit";
 import { getPage, getPageBlurb } from "@/lib/prime-radiant/service";
 import { editFailure, fail, json, readJsonBody, vaultFailure, writerGuard } from "@/lib/prime-radiant/route-helpers";
 
@@ -77,10 +89,14 @@ export async function DELETE(req: Request, { params }: Params) {
   }
 }
 
+/** A bulk edit's body: 500 edits with long paths and owners still fit. */
+const MAX_BULK_BODY_BYTES = 512 * 1024;
+
 export async function POST(req: Request, { params }: Params) {
   const segments = (await params).path ?? [];
+  if (segments.length === 1 && segments[0] === "bulk") return bulkPOST(req);
   if (segments.length !== 1 || segments[0] !== "merge") {
-    return fail("method_not_allowed", "Pages are created with POST pages and merged with POST pages/merge.", 405);
+    return fail("method_not_allowed", "Pages are created with POST pages, merged with POST pages/merge and edited in bulk with POST pages/bulk.", 405);
   }
   const gate = await writerGuard(req, "Merging pages");
   if (!gate.ok) return gate.response;
@@ -90,5 +106,17 @@ export async function POST(req: Request, { params }: Params) {
     return json(await mergePages(readPageMerge(read.body), gate.writer));
   } catch (err) {
     return editFailure("page merge", err);
+  }
+}
+
+async function bulkPOST(req: Request) {
+  const gate = await writerGuard(req, "Editing pages in bulk");
+  if (!gate.ok) return gate.response;
+  const read = await readJsonBody(req, MAX_BULK_BODY_BYTES);
+  if (!read.ok) return read.response;
+  try {
+    return json(await bulkEditPages(readPageBulk(read.body), gate.writer));
+  } catch (err) {
+    return editFailure("page bulk edit", err);
   }
 }

@@ -32,10 +32,10 @@
  */
 
 import { allocateClaimId, assertClaimIdAvailable, buildClaimIndex, ClaimIdError, isClaimId, nowIso, slugify, type ClaimIndex } from "./claims";
-import { pageSummary, serializeFrontmatter, splitFrontmatter } from "./frontmatter";
+import { pageSummary, parsePage, serializeFrontmatter, splitFrontmatter } from "./frontmatter";
 import type { VaultAuthor } from "./git";
 import { createLinkResolver, extractLinks, relativeHref, rewriteLinks, type FoundLink } from "./links";
-import { LIMITS, type LintFinding } from "./lint";
+import { LIMITS, lintVault, type LintFinding } from "./lint";
 import { isKnowledgePage, safePagePath, vaultDir } from "./paths";
 import { withPluginFields } from "./plugin-compat";
 import { followMovedClaims } from "./review-store";
@@ -54,7 +54,19 @@ import {
 } from "./schema";
 import { readSettings } from "./settings";
 import { readRetiredLedger, syncActiveClaims } from "./state-db";
-import { INDEX_FILE, readVaultSnapshot, vaultInitialised, vaultOperation, type VaultSnapshot } from "./vault";
+import {
+  INDEX_FILE,
+  indexedPaths,
+  readListedPage,
+  readVaultSnapshot,
+  vaultInitialised,
+  VaultLintBlockedError,
+  vaultOperation,
+  VaultPathError,
+  type VaultPage,
+  type VaultSnapshot,
+  type VaultTx,
+} from "./vault";
 import { cleanVerifiedText, MAX_VERIFIED_TEXT, verifyClaim, type VerifyResult } from "./verify";
 import { addToIndex, DEFAULT_OWNER, pathFor, removeFromIndex } from "./writer";
 
@@ -428,7 +440,7 @@ export async function createPage(input: NewPage, who: EditWho, options: EditOpti
   const op = await vaultOperation(
     `create: ${path}`,
     async (tx) => {
-      const snapshot = await readVaultSnapshot(tx.vault);
+      const snapshot = await tx.snapshot();
       if (snapshot.pages.some((p) => p.path === path)) throw new PageEditError("exists", "A page was written at that path a moment ago; try again.", 409);
       const index = indexOf(snapshot, tx.vault);
       const entity = slugify(input.title, 48);
@@ -470,17 +482,48 @@ export interface PageEditResult extends PageWriteResult {
   changed: string[];
 }
 
-/** Change a page's body, summary or frontmatter fields: one commit, `edit: <path>`. Its claims are untouched. */
+/**
+ * The fields a metadata edit changes. None of them moves a title, a word of
+ * the body, a claim or a link, so a change of these alone is linted on its
+ * own page (vault.ts `lint: "pages"`) and leaves Memory Shard's index as it
+ * is: what it embeds of a page is its title, body and claims.
+ */
+const METADATA_FIELDS: ReadonlySet<string> = new Set(["status", "domain", "owner", "privacy", "stale_after", "sources"]);
+
+/** The page `rel` under the lock, read alone; null also for a path deeper than the vault's walk reaches (`tx.read` refuses it), which is no page. */
+function txRead(tx: VaultTx, rel: string): Promise<VaultPage | null> {
+  return tx.read(rel).catch((err) => {
+    if (err instanceof VaultPathError) return null;
+    throw err;
+  });
+}
+
+/** The page `rel` under the lock, read alone, or the refusal that says why not. */
+async function txPage(tx: VaultTx, rel: string): Promise<{ path: string; frontmatter: PageFrontmatter; body: string; text: string }> {
+  const page = await txRead(tx, rel);
+  if (!page) throw new PageEditError("not_found", "No such page.", 404);
+  if (!page.parsed.ok) {
+    throw new PageEditError("invalid_page", "That page's frontmatter does not parse; fix it by hand before editing it here.", 409);
+  }
+  return { path: page.path, frontmatter: page.parsed.frontmatter, body: page.parsed.body, text: page.text };
+}
+
+/**
+ * Change a page's body, summary or frontmatter fields: one commit, `edit: <path>`. Its claims are untouched.
+ * The page is read alone; a change of {@link METADATA_FIELDS} only is linted
+ * on that page alone and not re-embedded.
+ */
 export async function editPage(rel: string, patch: PagePatch, who: EditWho, options: EditOptions = {}): Promise<PageEditResult> {
   const vault = options.vault ?? vaultDir();
   const path = pagePathOf(rel);
   await requireVault(vault);
   const at = nowIso(options.now);
   const changed: string[] = [];
+  const metadataOnly = Object.keys(patch).every((key) => METADATA_FIELDS.has(key));
   const op = await vaultOperation(
     `edit: ${path}`,
     async (tx) => {
-      const page = pageIn(await readVaultSnapshot(tx.vault), path);
+      const page = await txPage(tx, path);
       if (page.frontmatter.verified && !who.person) {
         throw new PageEditError("verified", "A person verified this page as a whole; raise a review item for the owner instead of editing it.", 409);
       }
@@ -499,9 +542,184 @@ export async function editPage(rel: string, patch: PagePatch, who: EditWho, opti
       fm.generated = { at, by: who.by };
       await tx.writePage(path, fm, body);
     },
-    { vault, now: options.now, author: who.author },
+    { vault, now: options.now, author: who.author, ...(metadataOnly ? { lint: "pages" as const, reindex: false } : {}) },
   );
   return { path, commit: op.commit, claims: [], changed, findings: findingsOf(op.findings) };
+}
+
+// ── bulk metadata edits ────────────────────────────────────────────────────
+
+/** Pages one bulk metadata edit names, at most. */
+export const MAX_BULK_EDITS = 500;
+/** The fields a bulk edit may set on a page: its metadata, never its title, body or claims. */
+export const BULK_FIELDS = ["domain", "owner", "privacy", "status"] as const;
+
+export interface BulkPageEdit {
+  path: string;
+  domain?: string;
+  owner?: string;
+  privacy?: PrivacyTier;
+  status?: PageStatus;
+}
+
+/** A page a bulk edit leaves as it is, and why: the code a PATCH of that page alone would answer. */
+export interface BulkRefusal {
+  path: string;
+  code: PageEditError["code"] | "lint_blocked";
+  error: string;
+}
+
+export interface PageBulkEdit {
+  /** In the request's order: an edit to make, or one refused as it was read. */
+  edits: Array<{ edit: BulkPageEdit } | { refused: BulkRefusal }>;
+  dryRun: boolean;
+}
+
+/** One edit of `POST pages/bulk`: `{ path, domain?, owner?, privacy?, status? }`, read as strictly as PATCH reads its body. */
+function readBulkEdit(value: unknown): BulkPageEdit {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw bad("Each edit is a JSON object: { path, domain?, owner?, privacy?, status? }.");
+  const b = objectBody(value, ["path", ...BULK_FIELDS]);
+  const edit: BulkPageEdit = { path: mergePath(b.path, "path") };
+  if (b.domain !== undefined) edit.domain = domainName(b.domain);
+  if (b.owner !== undefined) edit.owner = oneLine(b.owner, MAX_OWNER_CHARS, "owner");
+  if (b.privacy !== undefined) edit.privacy = oneOf(PRIVACY_TIERS, b.privacy, "privacy");
+  if (b.status !== undefined) edit.status = oneOf(PAGE_STATUSES, b.status, "status");
+  if (Object.keys(edit).length === 1) throw bad(`Name at least one of ${BULK_FIELDS.join(", ")} to change.`);
+  return edit;
+}
+
+/**
+ * `POST pages/bulk`: `{ edits: [1..500 of { path, domain?, owner?, privacy?, status? }], dry_run? }`.
+ * The request itself is read strictly (a 400 for its shape); an edit that is
+ * wrong on its own — a bad domain, no such page, an unknown field, a page
+ * named twice — is refused alone, the others still go.
+ */
+export function readPageBulk(body: unknown): PageBulkEdit {
+  const b = objectBody(body, ["edits", "dry_run"]);
+  if (!Array.isArray(b.edits) || b.edits.length === 0 || b.edits.length > MAX_BULK_EDITS) {
+    throw bad(`edits is a list of 1 to ${MAX_BULK_EDITS} edits, each { path, domain?, owner?, privacy?, status? }.`);
+  }
+  if (b.dry_run !== undefined && typeof b.dry_run !== "boolean") throw bad("dry_run is true or false.");
+  const seen = new Set<string>();
+  const edits = b.edits.map((value: unknown): PageBulkEdit["edits"][number] => {
+    const asked = value && typeof value === "object" && typeof (value as { path?: unknown }).path === "string" ? (value as { path: string }).path.slice(0, 200) : "";
+    try {
+      const edit = readBulkEdit(value);
+      if (seen.has(edit.path)) throw bad("This page is named more than once; give it one edit with every field it changes.");
+      seen.add(edit.path);
+      return { edit };
+    } catch (err) {
+      if (!(err instanceof PageEditError)) throw err;
+      return { refused: { path: asked, code: err.code, error: err.message } };
+    }
+  });
+  return { edits, dryRun: b.dry_run === true };
+}
+
+export interface PageBulkResult {
+  /** Pages whose metadata changed (or, in a dry run, would). */
+  changed: string[];
+  /** Pages that already said what the edit asked. */
+  unchanged: string[];
+  refused: BulkRefusal[];
+  /** The one commit, `bulk: N pages`; null for a dry run or when nothing changed. */
+  commit: string | null;
+  dryRun: boolean;
+}
+
+type BulkTally = Omit<PageBulkResult, "commit" | "dryRun">;
+type BulkOutcome = { path: string; changed: false } | { path: string; changed: true; text: string } | { refused: BulkRefusal };
+
+/**
+ * What one edit does to its page, written nowhere: the page's new text (its
+ * body the bytes it was, behind the new frontmatter), or the refusal the
+ * page's own PATCH would answer — `not_found`, `invalid_page`, `verified`, or
+ * `lint_blocked` when the page with its new frontmatter breaks a blocking rule.
+ */
+function planBulkEdit(page: VaultPage | null, edit: BulkPageEdit, who: EditWho, at: string, ledgerRetired: readonly string[], now: Date | undefined): BulkOutcome {
+  const refuse = (code: BulkRefusal["code"], error: string): BulkOutcome => ({ refused: { path: edit.path, code, error } });
+  if (!page) return refuse("not_found", "No such page.");
+  if (!page.parsed.ok) return refuse("invalid_page", "That page's frontmatter does not parse; fix it by hand before editing it here.");
+  const before = page.parsed.frontmatter;
+  if (before.verified && !who.person) return refuse("verified", "A person verified this page as a whole; raise a review item for the owner instead of editing it.");
+  const fm: PageFrontmatter = { ...before };
+  let differs = false;
+  for (const key of BULK_FIELDS) {
+    const value = edit[key];
+    if (value === undefined || fm[key] === value) continue;
+    (fm as Record<string, unknown>)[key] = value;
+    differs = true;
+  }
+  if (!differs) return { path: edit.path, changed: false };
+  fm.generated = { at, by: who.by };
+  const text = `---\n${serializeFrontmatter(withPluginFields(edit.path, fm))}---\n${splitFrontmatter(page.text).body}`;
+  const own = { ...page, text, parsed: parsePage(text) };
+  const blocking = lintVault({ vault: "", pages: [own], indexBody: null, truncated: false }, { scope: [edit.path], ledgerRetired, now }).findings.filter((f) => f.blocksCommit);
+  if (blocking.length > 0) return refuse("lint_blocked", `That change breaks a rule of the vault: ${blocking.map((f) => f.rule).join(", ")}.`);
+  return { path: edit.path, changed: true, text };
+}
+
+/**
+ * Set metadata (domain, owner, privacy, status) on many pages at once: ONE
+ * commit, `bulk: N pages`, that Undo reverses whole. Each page is read alone
+ * under the lock and only its frontmatter is rewritten; a page that its own
+ * PATCH would refuse is listed in `refused`, and the rest still go. The
+ * pages are linted on their own (vault.ts `lint: "pages"`) and nothing is
+ * re-embedded: no title, body, claim or link changes. `dryRun` answers the
+ * same without writing anything.
+ */
+export async function bulkEditPages(input: PageBulkEdit, who: EditWho, options: EditOptions = {}): Promise<PageBulkResult> {
+  const vault = options.vault ?? vaultDir();
+  await requireVault(vault);
+  const at = nowIso(options.now);
+  // Pages the vault's own lint refused when it judged them against the whole
+  // vault (a page index.md does not list, a claim id of which is on another
+  // page too): left out, and the rest tried again.
+  const lintRefused = new Map<string, BulkRefusal>();
+  const plan = async (read: (rel: string) => Promise<VaultPage | null>, write: ((rel: string, text: string) => Promise<unknown>) | null) => {
+    const ledgerRetired = ledger(vault);
+    const out: BulkTally = { changed: [], unchanged: [], refused: [] };
+    for (const item of input.edits) {
+      if ("refused" in item) {
+        out.refused.push(item.refused);
+        continue;
+      }
+      const blocked = lintRefused.get(item.edit.path);
+      const outcome = blocked ? { refused: blocked } : planBulkEdit(await read(item.edit.path), item.edit, who, at, ledgerRetired, options.now);
+      if ("refused" in outcome) out.refused.push(outcome.refused);
+      else if (!outcome.changed) out.unchanged.push(outcome.path);
+      else {
+        if (write) await write(outcome.path, outcome.text);
+        out.changed.push(outcome.path);
+      }
+    }
+    return out;
+  };
+  if (input.dryRun) return { ...(await plan((rel) => readListedPage(rel, vault), null)), commit: null, dryRun: true };
+  for (;;) {
+    try {
+      const op = await vaultOperation<BulkTally>(
+        (r) => `bulk: ${r.changed.length} ${r.changed.length === 1 ? "page" : "pages"}`,
+        (tx) => plan((rel) => txRead(tx, rel), (rel, text) => tx.write(rel, text)),
+        { vault, now: options.now, author: who.author, lint: "pages", reindex: false },
+      );
+      return { ...op.result, commit: op.commit, dryRun: false };
+    } catch (err) {
+      if (!(err instanceof VaultLintBlockedError)) throw err;
+      const named = err.findings.filter((f) => !lintRefused.has(f.path) && input.edits.some((e) => "edit" in e && e.edit.path === f.path));
+      // A finding on no page of ours, or none left to take out: the refusal stands.
+      if (named.length === 0 || named.length < err.findings.length) throw err;
+      // The unlisted pages first: they are the ones judged against the whole
+      // vault. A listed page refused beside them is tried again, on its own.
+      const blocked = [...new Set(named.map((f) => f.path))];
+      const listed = await indexedPaths(vault, blocked);
+      const unlisted = blocked.filter((p) => !listed.has(p));
+      for (const path of unlisted.length > 0 ? unlisted : blocked) {
+        const rules = err.findings.filter((x) => x.path === path).map((x) => x.rule);
+        lintRefused.set(path, { path, code: "lint_blocked", error: `That change breaks a rule of the vault: ${[...new Set(rules)].join(", ")}.` });
+      }
+    }
+  }
 }
 
 export interface PageDeleteResult {
@@ -520,7 +738,7 @@ export async function deletePage(rel: string, who: EditWho, options: EditOptions
   const op = await vaultOperation(
     `delete: ${path}`,
     async (tx): Promise<Claim[]> => {
-      const snapshot = await readVaultSnapshot(tx.vault);
+      const snapshot = await tx.snapshot();
       const page = snapshot.pages.find((p) => p.path === path);
       if (!page) throw new PageEditError("not_found", "No such page.", 404);
       await tx.remove(path);
@@ -559,7 +777,7 @@ export async function addClaim(input: NewClaim, who: EditWho, options: EditOptio
   const op = await vaultOperation(
     `claim: add ${id}`,
     async (tx) => {
-      const snapshot = await readVaultSnapshot(tx.vault);
+      const snapshot = await tx.snapshot();
       const page = pageIn(snapshot, input.page);
       if (page.frontmatter.claims.some((c) => c.id === id)) {
         throw new PageEditError("exists", "That page already carries this claim id; edit the claim instead.", 409);
@@ -606,7 +824,7 @@ export async function editClaim(rawId: string, patch: ClaimPatch, who: EditWho, 
   const op = await vaultOperation(
     `claim: edit ${id}`,
     async (tx) => {
-      const page = holderOf(await readVaultSnapshot(tx.vault), tx.vault, id, patch.page ?? null);
+      const page = holderOf(await tx.snapshot(), tx.vault, id, patch.page ?? null);
       const claims = page.frontmatter.claims.map((c) => {
         if (c.id !== id) return c;
         if (c.verified) throw new PageEditError("verified", "This claim is verified; verify it again with the new text instead of editing it.", 409);
@@ -639,7 +857,7 @@ export async function deleteClaim(rawId: string, page: string | null, who: EditW
   const op = await vaultOperation(
     `claim: delete ${id}`,
     async (tx) => {
-      const holder = holderOf(await readVaultSnapshot(tx.vault), tx.vault, id, page);
+      const holder = holderOf(await tx.snapshot(), tx.vault, id, page);
       await tx.writePage(holder.path, { ...holder.frontmatter, claims: holder.frontmatter.claims.filter((c) => c.id !== id) }, holder.body);
       return { page: holder.path, wasVerified: holder.frontmatter.claims.some((c) => c.id === id && !!c.verified) };
     },
@@ -984,7 +1202,7 @@ export async function mergePages(input: PageMerge, who: EditWho, options: EditOp
   const op = await vaultOperation(
     `merge: ${input.from.join(", ")} -> ${input.into}`,
     async (tx) => {
-      const plan = planMerge(await readVaultSnapshot(tx.vault), tx.vault, input, who, at);
+      const plan = planMerge(await tx.snapshot(), tx.vault, input, who, at);
       if (plan.page.text !== null) await tx.write(plan.result.into, plan.page.text);
       else await tx.writePage(plan.result.into, plan.page.frontmatter, plan.page.body);
       for (const w of plan.rewrites) await tx.writePage(w.path, w.frontmatter, w.body);

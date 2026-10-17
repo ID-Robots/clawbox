@@ -17,7 +17,8 @@ import { hasVerification, type PageFrontmatter } from "./schema";
 import { isKnowledgePage, pageAbsPath, RESERVED_DIRS, safePagePath, vaultDir } from "./paths";
 import { PLUGIN_GITIGNORE_LINES, stripManagedBlocks } from "./plugin-files";
 import { commitPaths, git, hasCommits, initRepo, isGitRepo, restorePaths, withVaultLock, type VaultAuthor } from "./git";
-import { lintSecretsInText, lintVault, type LintFinding } from "./lint";
+import { buildLinkGraph } from "./links";
+import { LINT_RULES, lintSecretsInText, lintVault, type LintFinding } from "./lint";
 import { readRetiredLedger, recordRetired } from "./state-db";
 
 /** A page bigger than this is not read whole; it is reported, never parsed. */
@@ -185,6 +186,18 @@ export async function readPage(rel: string, vault: string = vaultDir()): Promise
   return readPageAt(vault, safe);
 }
 
+/**
+ * One page by vault-relative path the way a snapshot would list it: null also
+ * when the walk would not reach it (a folder on its way is a symlink, or it
+ * lies deeper than the walk goes) — so a read of one page agrees with a read
+ * of them all.
+ */
+export async function readListedPage(rel: string, vault: string = vaultDir()): Promise<VaultPage | null> {
+  const safe = safePagePath(rel);
+  if (!safe || !isKnowledgePage(safe) || safe.split("/").length > MAX_PAGE_SEGMENTS || !(await reachedByWalk(vault, safe))) return null;
+  return readPageAt(vault, safe);
+}
+
 /** Every knowledge page in the vault, sorted by path. Symlinks and dot-folders are never followed. */
 export async function readVaultSnapshot(vault: string = vaultDir()): Promise<VaultSnapshot> {
   const rels: string[] = [];
@@ -214,19 +227,59 @@ export async function readVaultSnapshot(vault: string = vaultDir()): Promise<Vau
     }
   }
   await walk("", 0);
-  const pages: VaultPage[] = [];
-  for (const rel of rels) {
-    const page = await readPageAt(vault, rel);
-    if (page) pages.push(page);
-  }
-  let indexBody: string | null = null;
+  // A few reads in flight at once: one after the other, a large vault spends
+  // most of its read waiting on each file in turn. The order stays the walk's.
+  const read: Array<VaultPage | null> = new Array(rels.length).fill(null);
+  let next = 0;
+  const reader = async () => {
+    while (next < rels.length) {
+      const at = next++;
+      read[at] = await readPageAt(vault, rels[at]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(SNAPSHOT_READS_IN_FLIGHT, rels.length) }, reader));
+  const pages = read.filter((p): p is VaultPage => p !== null);
+  return { vault, pages, indexBody: await readIndexBody(vault), truncated };
+}
+
+/** Page files one snapshot reads at the same time. */
+const SNAPSHOT_READS_IN_FLIGHT = 16;
+
+/** index.md without memory-wiki's "## Generated" block (its links index nothing of ours), or null when there is none. */
+async function readIndexBody(vault: string): Promise<string | null> {
   try {
-    // Without memory-wiki's "## Generated" block: its links index nothing of ours.
-    indexBody = stripManagedBlocks(await fs.readFile(path.join(vault, INDEX_FILE), "utf8")).text;
+    return stripManagedBlocks(await fs.readFile(path.join(vault, INDEX_FILE), "utf8")).text;
   } catch {
-    indexBody = null;
+    return null;
   }
-  return { vault, pages, indexBody, truncated };
+}
+
+/** The order the snapshot walk lists pages in: folder by folder, each one's entries by name. */
+function walkOrder(a: string, b: string): number {
+  const x = a.split("/");
+  const y = b.split("/");
+  for (let i = 0; i < Math.min(x.length, y.length); i++) {
+    if (x[i] !== y[i]) return x[i].localeCompare(y[i]);
+  }
+  return x.length - y.length;
+}
+
+/**
+ * Whether the walk reaches `rel`: every folder on its way a real folder, not
+ * a symlink (the walk follows none), so a page read by its path alone is one
+ * a snapshot would list too.
+ */
+async function reachedByWalk(vault: string, rel: string): Promise<boolean> {
+  const segments = rel.split("/");
+  for (let i = 1; i < segments.length; i++) {
+    try {
+      const st = await fs.lstat(path.join(vault, ...segments.slice(0, i)));
+      if (!st.isDirectory()) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
 }
 
 /** What a page listing shows for one page — never the body. */
@@ -271,7 +324,15 @@ export function listEntry(page: VaultPage): PageListEntry {
 /** What an operation may do to the vault. Every path is vault-relative and checked. */
 export interface VaultTx {
   readonly vault: string;
+  /** One page as it is on disk now, or null when the snapshot walk would not list it. */
   read(rel: string): Promise<VaultPage | null>;
+  /**
+   * The whole vault, read once per operation (later calls answer the same
+   * snapshot). Read it BEFORE writing: the operation's lint then starts from
+   * it and reads again only the paths the operation touched, instead of the
+   * whole vault a second time.
+   */
+  snapshot(): Promise<VaultSnapshot>;
   /** Write raw text to a knowledge page (or to index.md). */
   write(rel: string, text: string): Promise<string>;
   /** Write a page from frontmatter + body (serialised deterministically). */
@@ -306,8 +367,20 @@ export interface VaultOperationResult<T> {
 
 export interface VaultOperationOptions {
   vault?: string;
-  /** Run the scoped lint and refuse on a blocking finding. Default true. */
-  lint?: boolean;
+  /**
+   * Run the scoped lint and refuse on a blocking finding. Default true: the
+   * touched pages judged against the whole vault. `"pages"` judges each one
+   * on its own, against index.md and the retired-id ledger, without reading
+   * the rest — only for a change that leaves every page's title, body, claims
+   * and retired ids as they were (a frontmatter metadata edit): the
+   * vault-wide rules (the claim namespace, the link graph) then come out no
+   * different than before the change, and a page is refused for what the
+   * change did to it, exactly as a PATCH of that page alone would be. A
+   * touched page index.md does not list is judged against the whole vault
+   * after all (only every other page can tell whether it is an orphan); the
+   * listed ones still on their own.
+   */
+  lint?: boolean | "pages";
   /** Clock for the lint's stale check (tests). */
   now?: Date;
   /**
@@ -330,12 +403,13 @@ function txPath(rel: string): string {
 
 /**
  * Run one mutating operation on the vault: exactly one commit with `message`
- * (conventional form, e.g. `ingest: acme-widgets`), or none when nothing
- * changed. On a blocking lint finding or a throw, every file the operation
- * touched is put back and nothing is committed.
+ * (conventional form, e.g. `ingest: acme-widgets`; or worked out from what
+ * the operation answered, e.g. how many pages it changed), or none when
+ * nothing changed. On a blocking lint finding or a throw, every file the
+ * operation touched is put back and nothing is committed.
  */
 export async function vaultOperation<T>(
-  message: string,
+  message: string | ((result: T) => string),
   fn: (tx: VaultTx) => Promise<T>,
   options: VaultOperationOptions = {},
 ): Promise<VaultOperationResult<T>> {
@@ -343,12 +417,17 @@ export async function vaultOperation<T>(
   await ensureVault(vault);
   return withVaultLock(vault, async () => {
     const touched = new Set<string>();
+    let base: Promise<VaultSnapshot> | null = null;
     const tx: VaultTx = {
       vault,
       touched,
       async read(rel) {
         const p = txPath(rel);
-        return p === INDEX_FILE ? null : readPageAt(vault, p);
+        return p === INDEX_FILE ? null : readListedPage(p, vault);
+      },
+      snapshot() {
+        base ??= readVaultSnapshot(vault);
+        return base;
       },
       async write(rel, text) {
         const p = txPath(rel);
@@ -380,42 +459,100 @@ export async function vaultOperation<T>(
       throw err;
     }
     let findings: LintFinding[] = [];
+    // The touched pages as they are now: what the lint judges and what the retired-id ledger records.
+    const current = new Map<string, VaultPage | null>();
+    const touchedPages = async () => {
+      for (const p of changed()) if (p !== INDEX_FILE && !current.has(p)) current.set(p, await readPageAt(vault, p));
+      return current;
+    };
     if (options.lint !== false && touched.size > 0) {
-      const snapshot = await readVaultSnapshot(vault);
-      // Every touched page is judged, also one the walk did not return (a
-      // truncated snapshot): the blocking rules hold for every commit.
-      const known = new Set(snapshot.pages.map((p) => p.path));
-      for (const p of changed()) {
-        if (p === INDEX_FILE || known.has(p)) continue;
-        const page = await readPageAt(vault, p);
-        if (page) snapshot.pages.push(page);
+      let blocking: LintFinding[];
+      try {
+        findings = await lintTouched(vault, changed(), await touchedPages(), options.lint === "pages", () => base ?? readVaultSnapshot(vault), options.now);
+        blocking = findings.filter((f) => f.blocksCommit);
+      } catch (err) {
+        await restorePaths(vault, changed());
+        throw err;
       }
-      const report = lintVault(snapshot, {
-        scope: changed().filter((p) => p !== INDEX_FILE),
-        ledgerRetired: readRetiredLedgerSafe(vault),
-        now: options.now,
-      });
-      if (touched.has(INDEX_FILE) && snapshot.indexBody !== null) {
-        report.findings.push(...lintSecretsInText(INDEX_FILE, snapshot.indexBody));
-      }
-      const blocking = report.findings.filter((f) => f.blocksCommit);
       if (blocking.length > 0) {
         await restorePaths(vault, changed());
         throw new VaultLintBlockedError(blocking);
       }
-      findings = report.findings;
     }
     let commit: string | null;
     try {
-      commit = await commitPaths(vault, message, changed(), options.author);
+      commit = await commitPaths(vault, typeof message === "string" ? message : message(result), changed(), options.author);
     } catch (err) {
       await restorePaths(vault, changed());
       throw err;
     }
-    if (commit) recordRetiredFromPages(vault, await Promise.all(changed().map((p) => (p === INDEX_FILE ? null : readPageAt(vault, p)))));
+    if (commit) recordRetiredFromPages(vault, [...(await touchedPages()).values()]);
     if (commit && options.reindex !== false) reindexAfterCommit(vault, changed());
     return { result, commit, changed: changed(), findings };
   });
+}
+
+/**
+ * The lint of one operation's touched pages, as they are now. The vault it
+ * judges them against is `vaultBefore()` — read before the operation wrote,
+ * or just now — brought up to date with the touched paths alone: the vault as
+ * a fresh read would find it, since the lock keeps every other writer out.
+ * `pagesOnly` is the `"pages"` lint (see {@link VaultOperationOptions.lint}).
+ */
+async function lintTouched(
+  vault: string,
+  changed: readonly string[],
+  touched: ReadonlyMap<string, VaultPage | null>,
+  pagesOnly: boolean,
+  vaultBefore: () => Promise<VaultSnapshot>,
+  now: Date | undefined,
+): Promise<LintFinding[]> {
+  const ledgerRetired = readRetiredLedgerSafe(vault);
+  const own = [...touched.values()].filter((p): p is VaultPage => p !== null);
+  const indexSecrets = (indexBody: string | null) => (changed.includes(INDEX_FILE) && indexBody !== null ? lintSecretsInText(INDEX_FILE, indexBody) : []);
+  if (pagesOnly) {
+    const indexBody = await readIndexBody(vault);
+    // index.md read once for them all. Judged alone, a page index.md does not
+    // list has no inbound links at all, and whether another page links it
+    // takes the whole vault to tell; one it lists is no orphan. So a listed
+    // page is judged on its own, as its own PATCH would be, and only the
+    // unlisted ones against the whole vault.
+    const listed = listedIn(indexBody, own);
+    const alone = own.filter((p) => !p.parsed.ok || listed.has(p.path));
+    const findings = alone.flatMap((p) =>
+      lintVault({ vault, pages: [p], indexBody: null, truncated: false }, { scope: [p.path], ledgerRetired, now }).findings.filter((f) => f.rule !== "orphan"),
+    );
+    const unlisted = own.filter((p) => !alone.includes(p)).map((p) => p.path);
+    if (unlisted.length > 0) {
+      const before = await vaultBefore();
+      const pages = [...before.pages.filter((p) => !touched.has(p.path)), ...own].sort((a, b) => walkOrder(a.path, b.path));
+      findings.push(...lintVault({ vault, pages, indexBody, truncated: before.truncated }, { scope: unlisted, ledgerRetired, now }).findings);
+    }
+    findings.sort((a, b) => a.path.localeCompare(b.path) || LINT_RULES.indexOf(a.rule) - LINT_RULES.indexOf(b.rule));
+    return [...findings, ...indexSecrets(indexBody)];
+  }
+  const before = await vaultBefore();
+  const indexBody = changed.includes(INDEX_FILE) ? await readIndexBody(vault) : before.indexBody;
+  // Every touched page is judged, also one the walk did not return (a
+  // truncated snapshot): the blocking rules hold for every commit.
+  const pages = [...before.pages.filter((p) => !touched.has(p.path)), ...own].sort((a, b) => walkOrder(a.path, b.path));
+  const report = lintVault({ vault, pages, indexBody, truncated: before.truncated }, { scope: changed.filter((p) => p !== INDEX_FILE), ledgerRetired, now });
+  return [...report.findings, ...indexSecrets(indexBody)];
+}
+
+/** Which of `pages` index.md lists, its links resolved as the lint resolves them (`buildLinkGraph(...).indexed`). */
+function listedIn(indexBody: string | null, pages: readonly VaultPage[]): Set<string> {
+  return buildLinkGraph(pages.map((p) => ({ path: p.path, title: p.parsed.ok ? p.parsed.frontmatter.title : undefined, body: "" })), indexBody).indexed;
+}
+
+/**
+ * Which of the pages at `rels` index.md lists now — whether the `"pages"`
+ * lint judges each on its own or against the whole vault (see
+ * {@link VaultOperationOptions.lint}).
+ */
+export async function indexedPaths(vault: string, rels: readonly string[]): Promise<Set<string>> {
+  const pages = (await Promise.all(rels.map((rel) => readListedPage(rel, vault)))).filter((p): p is VaultPage => p !== null);
+  return listedIn(await readIndexBody(vault), pages);
 }
 
 function readRetiredLedgerSafe(vault: string): string[] {

@@ -90,7 +90,7 @@ import { repairPluginWritesOnce } from "./plugin-repair";
 import { DEFAULT_INGEST_PARALLEL, MAX_INGEST_PARALLEL, effectiveCostRates, readSettings } from "./settings";
 import { readRetiredLedger, stateDbPathFor, syncActiveClaims } from "./state-db";
 import type { VaultAuthor } from "./git";
-import { INDEX_FILE, VaultLintBlockedError, ensureVault, readVaultSnapshot, vaultOperation } from "./vault";
+import { INDEX_FILE, VaultLintBlockedError, ensureVault, vaultOperation } from "./vault";
 import {
   MAX_BATCH_CHARS,
   WRITER_BATCH_SIZE,
@@ -815,7 +815,7 @@ async function processBatch(
       const op = await vaultOperation(
         `ingest: ${files.length - refused.size} document(s) (${job.id})`,
         async (tx) => {
-          const snapshot = await readVaultSnapshot(tx.vault);
+          const snapshot = await tx.snapshot();
           const valid = snapshot.pages.flatMap((p) => (p.parsed.ok ? [{ path: p.path, frontmatter: p.parsed.frontmatter }] : []));
           let ledger: string[] = [];
           try {

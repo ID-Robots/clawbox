@@ -79,6 +79,10 @@ export const TOOL_NOTES: readonly ToolNote[] = [
     note: "Run it with `dry_run: true` first and tell the user what would move and which pages' links would change; merge once they agree. The page that stays keeps its text exactly as it is (pick the fuller page as `into`); a link in it to a page being merged refuses the merge until it is taken out, or until the user lets its text change (`keep_into_body: false`).",
   },
   {
+    tool: "prime_radiant_pages_bulk_edit",
+    note: "For a change of domain, owner, privacy or status on more than one page — re-tagging pages with a new domain, say — use this instead of one `prime_radiant_page_edit` per page: up to 500 pages in one commit. Run it with `dry_run: true` first and tell the user how many pages would change; a refused page says why, and the others still change.",
+  },
+  {
     tool: "prime_radiant_claim_verify",
     note: "A verification is final for the wiki: a later import never overwrites the page, and only verifying again changes the text. Verify only what the user confirmed; when you are unsure, `prime_radiant_review_raise` asks the owner instead.",
   },
