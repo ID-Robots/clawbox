@@ -100,6 +100,20 @@ export function noPairReason(a: PairClaim, b: PairClaim): NoPair | null {
   return null;
 }
 
+/**
+ * The same rules as {@link noPairReason}, as a yes/no with no reason built:
+ * the pass asks it for every candidate pair (thousands per claim), so the
+ * check that parts most pairs, the subject, comes first.
+ */
+export function pairable(a: PairClaim, b: PairClaim): boolean {
+  if (a.version && a.version === b.version) return false;
+  const shared = !!a.ids && !!b.ids && sharedReference(a.ids.ref, b.ids.ref);
+  if (!shared && !sameSubject(a.subject, b.subject)) return false;
+  if (!shared && a.ids && b.ids && differentSubjects(a.ids, b.ids)) return false;
+  if (!!a.deprecated !== !!b.deprecated || !!a.historical !== !!b.historical) return false;
+  return !(a.validity && b.validity && periodsDisjoint(a.validity, b.validity));
+}
+
 /** A subject as a short label: its words, at most six. */
 function subjectLabel(s: ClaimSubject): string {
   const words = [...s.words].slice(0, 6).join(" ");

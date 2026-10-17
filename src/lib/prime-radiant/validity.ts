@@ -73,13 +73,19 @@ function bound(value: string, end: boolean): number {
   return Number.isFinite(t) ? t : Number.NaN;
 }
 
+/** Ranges already worked out: the pass compares one claim's period with thousands of others. */
+const RANGES = new WeakMap<Validity, [number, number] | null>();
+
 /** The period as milliseconds `[from, until]`, or null when it says nothing (or nothing sane). */
 export function validityRange(v: Validity | null | undefined): [number, number] | null {
   if (!v || (!v.from && !v.until)) return null;
+  const known = RANGES.get(v);
+  if (known !== undefined) return known;
   const lo = v.from ? bound(v.from, false) : Number.NEGATIVE_INFINITY;
   const hi = v.until ? bound(v.until, true) : Number.POSITIVE_INFINITY;
-  if (Number.isNaN(lo) || Number.isNaN(hi) || lo > hi) return null;
-  return [lo, hi];
+  const range: [number, number] | null = Number.isNaN(lo) || Number.isNaN(hi) || lo > hi ? null : [lo, hi];
+  RANGES.set(v, range);
+  return range;
 }
 
 /** Whether two claims' periods are both known and do not overlap: one supersedes the other. */

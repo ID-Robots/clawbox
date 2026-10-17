@@ -14,7 +14,7 @@ import { collectClaims, comparable, createHashEmbedder, runContradictionPass, ty
 import type { FlashClient } from "@/lib/prime-radiant/flash-client";
 import { readJudgeItems } from "@/lib/prime-radiant/judge";
 import { lintVault } from "@/lib/prime-radiant/lint";
-import { noPairReason } from "@/lib/prime-radiant/pairing";
+import { noPairReason, pairable } from "@/lib/prime-radiant/pairing";
 import { rejudgeOpenContradictions, rejudgeSummary, rejudgeVerdict, titleFromPath } from "@/lib/prime-radiant/rejudge";
 import { addReviewItem, getReviewItem, settleReviewItem, type ReviewCandidate } from "@/lib/prime-radiant/review-store";
 import { validateFrontmatter } from "@/lib/prime-radiant/schema";
@@ -288,6 +288,21 @@ describe("rule 3: a draft and its final are one document", () => {
   it("rebuilds a gone page's title from its path, dates and references joined", () => {
     expect(titleFromPath("concepts/export-declaration-fabrikam-inv-2026-0021-pdf-23-02-2026.md")).toBe("export declaration fabrikam inv-2026-0021 pdf 23.02.2026");
     expect(titleFromPath("concepts/daily-report-2026-10-12.md")).toBe("daily report 2026-10-12");
+  });
+});
+
+describe("one rule set", () => {
+  it("answers the pass's yes/no exactly as the re-judge's reasons, for every pair", () => {
+    const claims = collectClaims(snapshot(PAGES));
+    let parted = 0;
+    for (const a of claims) {
+      for (const b of claims) {
+        if (a === b) continue;
+        expect(pairable(a, b), `${a.id} / ${b.id}`).toBe(noPairReason(a, b) === null);
+        if (!pairable(a, b)) parted += 1;
+      }
+    }
+    expect(parted).toBeGreaterThan(0);
   });
 });
 

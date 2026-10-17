@@ -50,9 +50,9 @@ import { redactText } from "./redact";
 import { addReviewItem, type ReviewItem } from "./review-store";
 import { runInTransaction, stateDbExists, withStateDb } from "./state-db";
 import { sideIdentifiers, type Identifiers } from "./identifiers";
-import { noPairReason } from "./pairing";
+import { pairable } from "./pairing";
 import { claimSubject, type ClaimSubject } from "./subject";
-import { claimValidity, historicalClaim, type Validity } from "./validity";
+import { fieldValidity, historicalClaim, pageValidity, textValidity, type Validity } from "./validity";
 import { ownerVerified, recordStaleClaims, type StaleClaimNote } from "./verify";
 import { versionGroups, versionIndex, versionPages } from "./versions";
 import type { VaultSnapshot } from "./vault";
@@ -177,7 +177,8 @@ export function collectClaims(snapshot: Pick<VaultSnapshot, "pages">): PassClaim
     if (!page.parsed.ok) continue;
     const fm = page.parsed.frontmatter;
     const { title, type } = fm;
-    const pageInfo = { title, type, generatedAt: fm.generated?.at ?? null };
+    // A snapshot page's period, read once for all its claims (validity.ts claimValidity, the page step).
+    const pagePeriod = pageValidity(title, type, fm.generated?.at ?? null);
     for (const c of fm.claims) {
       const text = redactText(c.text.slice(0, MAX_CLAIM_CHARS)).text;
       out.push({
@@ -189,7 +190,7 @@ export function collectClaims(snapshot: Pick<VaultSnapshot, "pages">): PassClaim
         subject: claimSubject(c.id, text, title),
         ids: sideIdentifiers(title, text, type),
         version: versions.get(page.path) ?? null,
-        validity: claimValidity(c, pageInfo),
+        validity: fieldValidity(c) ?? textValidity(c.text, c.updatedAt) ?? pagePeriod,
         historical: historicalClaim(c),
         deprecated: fm.status === "deprecated",
       });
@@ -208,7 +209,7 @@ type Comparable = Pick<PassClaim, "text" | "subject" | "ids" | "version" | "vali
  * not an old fact against the current one.
  */
 export function comparable(a: Comparable, b: Comparable): boolean {
-  return a.text !== b.text && noPairReason(a, b) === null;
+  return a.text !== b.text && pairable(a, b);
 }
 
 export interface CandidatePair {
