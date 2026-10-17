@@ -4,8 +4,8 @@
  * GET → `{ settings, defaults, limits, nightly: { nextRunAt }, rates, opusSource }`: the
  * settings in force (the file's valid sections over the defaults — ingest
  * exclude list, parallelism and nightly folders; cost-rate overrides; the
- * nightly schedule; the Opus tier; the contradiction pass; domains and their
- * owners), the defaults, the cost rates they price with, and which account
+ * nightly schedule; the Opus tier; the contradiction pass; the search index's
+ * size limit; domains and their owners), the defaults, the cost rates they price with, and which account
  * the second opinion would use tonight (`opusSource`: `api_key`,
  * `subscription` or `none` — a read of the account pool and the `claude`
  * sign-in, never a model call). Never creates anything.
@@ -14,7 +14,9 @@
  * strictly; a bad field refuses the whole patch (400 `invalid`) and writes
  * nothing; `null` puts a field (or a whole section) back to its default. Ingest
  * folders follow the folder picker's rule (404 `folder_not_found`, 400
- * `folder_refused`, with `index`). The nightly timer is re-armed after a save.
+ * `folder_refused`, with `index`). The nightly timer is re-armed after a save,
+ * and a changed `search.indexLimitMb` queues a whole-vault index run that
+ * fills or trims the index to it.
  * The owner (cookie AND same origin), or the assistant through the MCP bearer
  * — whose tool asks for the owner's word first — except the cost rates and
  * the Opus model, which decide what the Opus cap measures (403 `owner_only`
@@ -34,9 +36,11 @@ import {
   MAX_INGEST_PARALLEL,
   MAX_OPUS_CAP_USD,
   MAX_OPUS_MAX_PAGES,
+  MAX_SEARCH_INDEX_LIMIT_MB,
   MIN_INGEST_PARALLEL,
   MIN_OPUS_CAP_USD,
   MIN_OPUS_MAX_PAGES,
+  MIN_SEARCH_INDEX_LIMIT_MB,
   readSettings,
   readSettingsPatch,
   SettingsError,
@@ -51,6 +55,7 @@ const LIMITS = {
   opusCapUsd: { min: MIN_OPUS_CAP_USD, max: MAX_OPUS_CAP_USD },
   opusSampleRate: { min: 0, max: 1 },
   opusMaxPages: { min: MIN_OPUS_MAX_PAGES, max: MAX_OPUS_MAX_PAGES },
+  searchIndexLimitMb: { min: MIN_SEARCH_INDEX_LIMIT_MB, max: MAX_SEARCH_INDEX_LIMIT_MB },
   domains: MAX_DOMAINS,
 };
 
@@ -99,13 +104,21 @@ export async function PUT(req: Request) {
     }
     patch = { ...patch, ingest: { ...patch.ingest, folders: resolved } };
   }
+  const limitBefore = readSettings().search.indexLimitMb;
+  let saved;
   try {
-    writeSettings(patch);
+    saved = writeSettings(patch);
   } catch (err) {
     if (err instanceof SettingsError) return fail("invalid", err.message, 400);
     console.error("[prime-radiant] settings:", err instanceof Error ? err.message : err);
     return fail("write_failed", "The settings could not be saved.", 500);
   }
   await refresh().catch(() => undefined);
+  // A new index size limit: the index re-plans to it in the background (filled up when raised, trimmed when lowered).
+  if (saved.search.indexLimitMb !== limitBefore) {
+    void import("@/lib/prime-radiant/shard-index").then((m) => m.vaultIndexLimitChanged()).catch((err) => {
+      console.warn(`[prime-radiant] the search index did not follow its new size limit yet: ${err instanceof Error ? err.message : String(err)}`);
+    });
+  }
   return json(await answer());
 }

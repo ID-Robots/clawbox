@@ -60,9 +60,11 @@ vi.mock("@/lib/memory-shard", () => ({ getMemoryShardEnabled: async () => shardS
 import { vaultOperation, ensureVault } from "@/lib/prime-radiant/vault";
 import {
   MAX_SCORE,
+  VAULT_INDEX_BUDGET_BYTES,
   VERIFIED_BOOST,
   _resetVaultIndexCacheForTests,
   _setVaultMaxChunksForTests,
+  migrateVaultVectors,
   pageIndexUnits,
   planVaultChunks,
   rankVaultHits,
@@ -72,12 +74,19 @@ import {
   scheduleReindexAfterCommit,
   vaultIndexingAllowed,
   searchPrimeRadiant,
+  vaultChunkBytes,
+  vaultIndexBudgetBytes,
+  vaultIndexLimitChanged,
   vaultIndexPathFor,
   vaultIndexStatus,
+  vaultMaxChunks,
   type ChunkBudgetPage,
   type RankCandidate,
 } from "@/lib/prime-radiant/shard-index";
 import { vaultDir } from "@/lib/prime-radiant/paths";
+import { writeSettings } from "@/lib/prime-radiant/settings";
+import { encodeQ8Blob, q8BlobBytes } from "@/lib/prime-radiant/vector-q8";
+import { openSqlite } from "@/lib/openclaw-session-store";
 import { claim, pageText } from "../helpers/prime-radiant-fixtures";
 
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
@@ -446,6 +455,18 @@ describe("a full chunk budget: page vectors first", () => {
     expect(planVaultChunks([page(6, { pageChunks: 2 }), page(0, { held: 7 })], 1)).toEqual([5, 0]);
   });
 
+  it("caps pages the run leaves alone only when a lowered budget cannot hold their page chunks — the biggest first", () => {
+    const fixed = (pageChunks: number, claimChunks: number): ChunkBudgetPage => ({ pageChunks, claimChunks, held: pageChunks + claimChunks, fixed: true });
+    // 6 page chunks + 6 claims held, a budget of 6 now (free -6): every claim goes, every page vector stays.
+    expect(planVaultChunks([fixed(1, 2), fixed(2, 2), fixed(3, 2)], -6)).toEqual([0, 0, 0]);
+    // A budget of 4: page chunks alone are 6, so the page with 3 goes whole; the rest keep theirs and one claim is left over.
+    expect(planVaultChunks([fixed(1, 2), fixed(2, 2), fixed(3, 2)], -8)).toEqual([1, 0, null]);
+    // Equal sizes: a later path goes first.
+    expect(planVaultChunks([fixed(1, 0), fixed(1, 0), fixed(1, 0)], -1)).toEqual([0, 0, null]);
+    // What a page being re-embedded holds is free again: it does not cap a fixed one.
+    expect(planVaultChunks([fixed(2, 0), { pageChunks: 1, claimChunks: 0, held: 4 }], -3)).toEqual([0, 0]);
+  });
+
   /** A page with `claims` claims, its body one chunk. */
   const pageWith = (slug: string, claims: number) =>
     pageText(
@@ -536,6 +557,48 @@ describe("a full chunk budget: page vectors first", () => {
     expect((await vaultIndexStatus()).needsFullScan).toBe(false);
   });
 
+  it("follows a lowered limit — claims first, then the biggest pages — and fills back up when it is raised", async () => {
+    _setVaultMaxChunksForTests(9);
+    await commit({ "concepts/a.md": pageWith("a", 4), "concepts/b.md": pageWith("b", 2), "concepts/c.md": pageWith("c", 1) });
+    expect(await reindexPrimeRadiantVault()).toMatchObject({ indexed: 3, capped: 0, chunks: 9 });
+
+    // Lowered to 4: three page vectors and one claim (a's, the page with most claims, gives all of its up).
+    _setVaultMaxChunksForTests(4);
+    embed.texts = [];
+    expect(await vaultIndexLimitChanged()).toMatchObject({ mode: "full", capped: 0, chunks: 4, withoutPageVector: 0 });
+    expect(embed.texts).toEqual([]);
+    expect([...(await readPageVectors()).keys()].sort()).toEqual(["concepts/a.md", "concepts/b.md", "concepts/c.md"]);
+
+    // Lowered to 2: below the page vectors alone, so one page goes whole (a later path among equals) and shows as capped.
+    _setVaultMaxChunksForTests(2);
+    expect(await vaultIndexLimitChanged()).toMatchObject({ capped: 1, chunks: 2, withoutPageVector: 1 });
+    expect([...(await readPageVectors()).keys()].sort()).toEqual(["concepts/a.md", "concepts/b.md"]);
+    expect(await vaultIndexStatus()).toMatchObject({ cappedPages: 1, chunks: 2, needsFullScan: true });
+
+    // Raised again: the capped page and the claims come back, without re-embedding the pages that kept theirs whole.
+    _setVaultMaxChunksForTests(9);
+    expect(await vaultIndexLimitChanged()).toMatchObject({ capped: 0, chunks: 9, withoutPageVector: 0 });
+    expect(await vaultIndexStatus()).toMatchObject({ cappedPages: 0, chunks: 9, needsFullScan: false });
+  });
+
+  it("marks the store for a whole-tree run on a limit change even while Memory Shard is off", async () => {
+    _setVaultMaxChunksForTests(2);
+    await commit({ "concepts/a.md": pageWith("a", 0), "concepts/b.md": pageWith("b", 0), "concepts/c.md": pageWith("c", 0) });
+    expect(await reindexPrimeRadiantVault()).toMatchObject({ capped: 1 });
+    // A run that fits clears the marks…
+    _setVaultMaxChunksForTests(3);
+    expect(await reindexPrimeRadiantVault()).toMatchObject({ capped: 0, chunks: 3 });
+    expect((await vaultIndexStatus()).needsFullScan).toBe(false);
+    // …and a limit change while the switch is off embeds nothing but leaves the mark for the run switching it on starts.
+    shardSwitch.on = false;
+    expect(await vaultIndexLimitChanged()).toBeNull();
+    expect(await vaultIndexStatus()).toMatchObject({ needsFullScan: true, cappedPages: null });
+    // No store: nothing is created.
+    process.env.PRIME_RADIANT_DIR = path.join(base, `case-${++n}`);
+    expect(await vaultIndexLimitChanged()).toBeNull();
+    expect(fs.existsSync(vaultIndexPathFor(vaultDir()))).toBe(false);
+  });
+
   it("counts the pages left without a page vector in the status", async () => {
     // Page chunks alone overrun a budget of one: the second page is capped.
     _setVaultMaxChunksForTests(1);
@@ -555,5 +618,165 @@ describe("vault vector width", () => {
     const narrow = new Float32Array(384).fill(0.1);
     expect(truncateVector(narrow)).toBe(narrow);
     expect(vaultMaxChunks(3072)).toBeGreaterThanOrEqual(25_000);
+  });
+});
+
+// ─── 8-bit vectors ───────────────────────────────────────────────────────────
+
+/** Every chunk row of this case's store, in id order. */
+function storedRows(): Array<{ id: number; text: string; vec: Uint8Array }> {
+  const db = openSqlite(vaultIndexPathFor(vaultDir()), true);
+  try {
+    return (db.prepare("SELECT id, text, vec FROM chunks ORDER BY id").all() as Array<{ id: number; text: string; vec: Uint8Array }>).map((r) => ({
+      id: Number(r.id),
+      text: r.text,
+      vec: new Uint8Array(r.vec),
+    }));
+  } finally {
+    db.close();
+  }
+}
+
+function storedMeta(key: string): string | null {
+  const db = openSqlite(vaultIndexPathFor(vaultDir()), true);
+  try {
+    return ((db.prepare("SELECT value FROM meta WHERE key = ?").get(key) as { value?: string } | undefined)?.value) ?? null;
+  } finally {
+    db.close();
+  }
+}
+
+/** Rewrite the store the way a build from before the 8-bit index left it: float32 rows, no 8-bit mark. */
+function asFloat32Store(): void {
+  const db = openSqlite(vaultIndexPathFor(vaultDir()), false);
+  try {
+    const put = db.prepare("UPDATE chunks SET vec = ? WHERE id = ?");
+    for (const row of db.prepare("SELECT id, text FROM chunks").all() as Array<{ id: number; text: string }>) {
+      const v = stubVector(row.text);
+      put.run(new Uint8Array(v.buffer, v.byteOffset, v.byteLength), row.id);
+    }
+    db.prepare("DELETE FROM meta WHERE key = 'vec_q8'").run();
+  } finally {
+    db.close();
+  }
+  _resetVaultIndexCacheForTests();
+}
+
+describe("8-bit vectors", () => {
+  it("stores every vector as int8 codes and one scale: about a byte a dimension", async () => {
+    await seed();
+    await reindexPrimeRadiantVault();
+    const rows = storedRows();
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      expect(row.vec.byteLength).toBe(q8BlobBytes(5));
+      expect(Array.from(row.vec)).toEqual(Array.from(encodeQ8Blob(stubVector(row.text))));
+    }
+    expect(await vaultIndexStatus()).toMatchObject({
+      chunks: rows.length,
+      usedBytes: rows.length * q8BlobBytes(5),
+      limitBytes: VAULT_INDEX_BUDGET_BYTES,
+      migrationPending: false,
+      cappedPages: 0,
+    });
+  });
+
+  it("converts a float32 store in place on the next run: nothing re-embedded, nothing dropped, same identity, same answers", async () => {
+    await seed();
+    await reindexPrimeRadiantVault();
+    const before = await searchPrimeRadiant("who makes widgets?", 5);
+    const identity = storedMeta("identity");
+    const ids = storedRows().map((r) => r.id);
+
+    asFloat32Store();
+    expect(storedRows().every((r) => r.vec.byteLength === 5 * 4)).toBe(true);
+    // Read as it is until a run converts it: search and the connect pass's page vectors still answer.
+    expect(await vaultIndexStatus()).toMatchObject({ identity: "valid", migrationPending: true, usedBytes: ids.length * 20 });
+    expect(await searchPrimeRadiant("who makes widgets?", 5)).toEqual(before);
+    expect([...(await readPageVectors()).keys()].sort()).toEqual(["concepts/support-hours.md", "entities/acme-widgets.md"]);
+
+    embed.texts = [];
+    expect(await reindexPrimeRadiantVault()).toMatchObject({ mode: "full", indexed: 0, removed: 0, pages: 2, chunks: ids.length });
+    expect(embed.texts).toEqual([]);
+    const after = storedRows();
+    expect(after.map((r) => r.id)).toEqual(ids);
+    expect(after.every((r) => r.vec.byteLength === q8BlobBytes(5))).toBe(true);
+    expect(storedMeta("identity")).toBe(identity);
+    expect(await vaultIndexStatus()).toMatchObject({ identity: "valid", migrationPending: false });
+    expect(await searchPrimeRadiant("who makes widgets?", 5)).toEqual(before);
+  });
+
+  it("is idempotent, works in batches and picks up where a run cut short stopped", async () => {
+    await commit(Object.fromEntries(Array.from({ length: 7 }, (_, i) => [`concepts/widget-${i}.md`, pageText({ title: `Widget ${i}` }, `Widget ${i} ships blue.\n`)])));
+    await reindexPrimeRadiantVault();
+    const expected = storedRows().map((r) => Array.from(r.vec));
+    asFloat32Store();
+
+    const db = openSqlite(vaultIndexPathFor(vaultDir()), false);
+    try {
+      // An abort before the first batch leaves every row as it was.
+      await expect(migrateVaultVectors(db, AbortSignal.abort(), 2)).rejects.toThrow();
+      expect(storedRows().every((r) => r.vec.byteLength === 20)).toBe(true);
+      // A crash after some batches: the first three rows are already 8-bit.
+      const put = db.prepare("UPDATE chunks SET vec = ? WHERE id = ?");
+      for (const row of storedRows().slice(0, 3)) put.run(encodeQ8Blob(stubVector(row.text)), row.id);
+      // The next pass converts only the rest, two rows a transaction, to the same bytes a straight conversion writes.
+      expect(await migrateVaultVectors(db, undefined, 2)).toBe(expected.length - 3);
+      expect(storedRows().map((r) => Array.from(r.vec))).toEqual(expected);
+      // Done: the mark says so, and a second pass is a meta read.
+      expect(await migrateVaultVectors(db, undefined, 2)).toBe(0);
+    } finally {
+      db.close();
+    }
+    expect(storedMeta("vec_q8")).toBe(storedMeta("generation"));
+    expect((await vaultIndexStatus()).migrationPending).toBe(false);
+  });
+
+  it("looks again when something else wrote float32 rows after the mark (a build from before, run once more)", async () => {
+    await seed();
+    await reindexPrimeRadiantVault();
+    const db = openSqlite(vaultIndexPathFor(vaultDir()), false);
+    try {
+      const row = db.prepare("SELECT id, text FROM chunks ORDER BY id LIMIT 1").get() as { id: number; text: string };
+      const v = stubVector(row.text);
+      db.prepare("UPDATE chunks SET vec = ? WHERE id = ?").run(new Uint8Array(v.buffer), row.id);
+      // That build moves the generation, not the mark.
+      db.prepare("UPDATE meta SET value = CAST(value + 1 AS TEXT) WHERE key = 'generation'").run();
+    } finally {
+      db.close();
+    }
+    expect((await vaultIndexStatus()).migrationPending).toBe(true);
+    await reindexPrimeRadiantVault();
+    expect(storedRows().every((r) => r.vec.byteLength === q8BlobBytes(5))).toBe(true);
+    expect((await vaultIndexStatus()).migrationPending).toBe(false);
+  });
+});
+
+describe("the index size budget", () => {
+  it("counts real bytes a chunk: the default 160 MB holds ~4x the float32 index's 40,960 chunks", () => {
+    expect(VAULT_INDEX_BUDGET_BYTES).toBe(160 * 1024 * 1024);
+    expect(vaultChunkBytes(1024)).toBe(1029);
+    expect(vaultMaxChunks(1024)).toBe(Math.floor(VAULT_INDEX_BUDGET_BYTES / 1029));
+    expect(vaultMaxChunks(1024)).toBeGreaterThan(3.9 * 40_960);
+    // A wider embedder is cut to 1,024-d, so it holds the same.
+    expect(vaultMaxChunks(3072)).toBe(vaultMaxChunks(1024));
+    expect(vaultMaxChunks(1024) * vaultChunkBytes(1024)).toBeLessThanOrEqual(VAULT_INDEX_BUDGET_BYTES);
+    expect(vaultMaxChunks(1024, 32 * 1024 * 1024)).toBe(32_608);
+    expect(vaultMaxChunks(1024, 4096 * 1024 * 1024)).toBe(Math.floor((4096 * 1024 * 1024) / 1029));
+    expect(vaultMaxChunks(768)).toBe(Math.floor(VAULT_INDEX_BUDGET_BYTES / 773));
+    // A nonsense budget falls back to the default.
+    expect(vaultMaxChunks(1024, Number.NaN)).toBe(vaultMaxChunks(1024));
+  });
+
+  it("is the owner's searchIndexLimitMb, read at every run and shown in the status", async () => {
+    expect(vaultIndexBudgetBytes()).toBe(VAULT_INDEX_BUDGET_BYTES);
+    writeSettings({ search: { indexLimitMb: 64 } });
+    expect(vaultIndexBudgetBytes()).toBe(64 * 1024 * 1024);
+    expect(await vaultIndexStatus()).toMatchObject({ exists: false, limitBytes: 64 * 1024 * 1024, maxChunks: Math.floor((64 * 1024 * 1024) / 1029) });
+    await seed();
+    await reindexPrimeRadiantVault();
+    expect(await vaultIndexStatus()).toMatchObject({ limitBytes: 64 * 1024 * 1024, maxChunks: Math.floor((64 * 1024 * 1024) / q8BlobBytes(5)) });
+    writeSettings({ search: null });
+    expect(vaultIndexBudgetBytes()).toBe(VAULT_INDEX_BUDGET_BYTES);
   });
 });

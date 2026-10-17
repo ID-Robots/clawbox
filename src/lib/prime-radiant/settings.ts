@@ -5,8 +5,8 @@
  * This module owns every section: ingest (the exclude list, whether code
  * projects are skipped, the model-call parallelism, the folders the nightly
  * pass re-reads), the cost rates, the
- * nightly schedule, the optional Opus tier, the contradiction pass and the
- * domains with their owners. Keys it does not know are kept on every
+ * nightly schedule, the optional Opus tier, the contradiction pass, the
+ * search index's size limit and the domains with their owners. Keys it does not know are kept on every
  * write, so a section another module adds survives an ingest setting being
  * changed. A read never creates the file; a file that cannot be parsed reads
  * as the defaults (and is logged), so a bad edit cannot stop an ingest.
@@ -16,6 +16,7 @@
 
 import crypto from "crypto";
 import fs from "fs";
+import os from "os";
 import path, { untraced } from "@/lib/runtime-path";
 import { DEFAULT_INGEST_EXCLUDES, EXCLUDE_DEFAULTS_GENERATION, isDefaultExcludeList, readExcludeList } from "./ingest-exclude";
 import { mergeCostRates, readRateOverrides, type CostRates, type ModelRate } from "./cost-rates";
@@ -51,6 +52,17 @@ export const DEFAULT_OPUS_SAMPLE_RATE = 0.02;
 export const DEFAULT_OPUS_MAX_PAGES = 100;
 export const MIN_OPUS_MAX_PAGES = 4;
 export const MAX_OPUS_MAX_PAGES = 2000;
+
+/**
+ * How big the vault's search index may grow, in MB (MiB: 1 MB = 1,048,576
+ * bytes): what its 8-bit vectors take on disk, and about what search holds in
+ * memory. 160 MB holds ~160k chunks at 1,024-d and is safe on an 8 GB box;
+ * past the limit, page vectors are kept before claim vectors (shard-index.ts).
+ */
+export const DEFAULT_SEARCH_INDEX_LIMIT_MB = 160;
+export const MIN_SEARCH_INDEX_LIMIT_MB = 32;
+export const MAX_SEARCH_INDEX_LIMIT_MB = 4096;
+export const BYTES_PER_MB = 1024 * 1024;
 
 export const MAX_DOMAINS = 100;
 const MAX_OWNER_CHARS = 80;
@@ -92,6 +104,11 @@ export interface ContradictionSettings {
   enabled: boolean;
 }
 
+export interface SearchSettings {
+  /** The vault search index's size limit, MB (whole number). */
+  indexLimitMb: number;
+}
+
 export interface DomainSetting {
   /** Lowercase kebab, as a page's `domain`. */
   name: string;
@@ -105,6 +122,7 @@ export interface PrimeRadiantSettings {
   nightly: NightlySettings;
   opus: OpusSettings;
   contradictions: ContradictionSettings;
+  search: SearchSettings;
   domains: DomainSetting[];
 }
 
@@ -115,6 +133,7 @@ export function defaultSettings(): PrimeRadiantSettings {
     nightly: { enabled: true, time: DEFAULT_NIGHTLY_TIME },
     opus: { enabled: false, capUsd: DEFAULT_OPUS_CAP_USD, sampleRate: DEFAULT_OPUS_SAMPLE_RATE, model: DEFAULT_OPUS_MODEL, maxPages: DEFAULT_OPUS_MAX_PAGES },
     contradictions: { enabled: true },
+    search: { indexLimitMb: DEFAULT_SEARCH_INDEX_LIMIT_MB },
     domains: [],
   };
 }
@@ -208,6 +227,12 @@ const FIELDS = {
   contradictions: {
     enabled: (v: unknown) => readBool(v, "contradictions.enabled"),
   },
+  search: {
+    indexLimitMb: (v: unknown): Read<number> =>
+      typeof v === "number" && Number.isInteger(v) && v >= MIN_SEARCH_INDEX_LIMIT_MB && v <= MAX_SEARCH_INDEX_LIMIT_MB
+        ? { ok: true, value: v }
+        : { ok: false, error: `search.indexLimitMb must be a whole number of MB from ${MIN_SEARCH_INDEX_LIMIT_MB} to ${MAX_SEARCH_INDEX_LIMIT_MB}.` },
+  },
 } as const;
 
 type SectionName = keyof typeof FIELDS;
@@ -274,6 +299,7 @@ export interface SettingsPatch {
   nightly?: { enabled?: unknown; time?: unknown } | null;
   opus?: { enabled?: unknown; capUsd?: unknown; sampleRate?: unknown; model?: unknown; maxPages?: unknown } | null;
   contradictions?: { enabled?: unknown } | null;
+  search?: { indexLimitMb?: unknown } | null;
   domains?: unknown;
 }
 
@@ -283,7 +309,17 @@ const PATCH_KEYS: Readonly<Record<string, readonly string[]>> = {
   nightly: Object.keys(FIELDS.nightly),
   opus: Object.keys(FIELDS.opus),
   contradictions: Object.keys(FIELDS.contradictions),
+  search: Object.keys(FIELDS.search),
 };
+
+/** The vault search index's size limit in force, in bytes (shard-index.ts reads it at every run). */
+export function searchIndexLimitBytes(root: string = primeRadiantRoot(), totalMem: number = os.totalmem()): number {
+  const asked = readSettings(root).search.indexLimitMb * BYTES_PER_MB;
+  // Search holds the whole index in memory: never more than a quarter of the
+  // box's RAM, whatever was saved (a 4,096 MB limit on an 8 GB box stays 2 GB).
+  const ceiling = Math.max(MIN_SEARCH_INDEX_LIMIT_MB * BYTES_PER_MB, Math.floor(totalMem / 4));
+  return Math.min(asked, ceiling);
+}
 
 /** A patch as a route received it: only known sections and keys. Throws {@link SettingsError}. */
 export function readSettingsPatch(body: unknown): SettingsPatch {

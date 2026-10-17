@@ -256,6 +256,10 @@ interface StatusBody {
   vault?: { pages?: number; invalidPages?: number; verifiedPages?: number; claims?: number; domains?: string[]; truncated?: boolean };
   git?: { branch?: string | null; head?: { sha?: string; subject?: string; at?: string; author?: string } | null; commits?: number };
   lint?: { errors?: number; warnings?: number };
+  index?: {
+    exists?: boolean; usedMb?: number; limitMb?: number; chunks?: number; maxChunks?: number | null; pages?: number;
+    cappedPages?: number | null; withoutPageVector?: number | null; needsFullScan?: boolean; migrationPending?: boolean;
+  } | null;
 }
 
 interface PageEntry {
@@ -400,12 +404,28 @@ function mapOut(g: GraphBody, focus: string | undefined) {
   return out;
 }
 
+/** The vault search index as prime_radiant_status shows it: its size against the owner's limit. */
+function searchIndexOf(index: NonNullable<StatusBody["index"]>): Record<string, unknown> {
+  if (!index.exists) return { built: false, limit_mb: index.limitMb ?? "unknown" };
+  return {
+    used_mb: index.usedMb ?? "unknown",
+    limit_mb: index.limitMb ?? "unknown",
+    chunks: index.chunks ?? "unknown",
+    ...(typeof index.maxChunks === "number" ? { max_chunks: index.maxChunks } : {}),
+    pages: index.pages ?? "unknown",
+    capped_pages: index.cappedPages ?? "unknown",
+    ...(index.withoutPageVector ? { pages_without_page_vector: index.withoutPageVector } : {}),
+    ...(index.migrationPending ? { converting_to_8bit: true } : {}),
+    ...(index.needsFullScan ? { full_scan_pending: true } : {}),
+  };
+}
+
 // ── read tools ─────────────────────────────────────────────────────────────
 
 function registerReadTools(reg: Registrar): void {
   reg.tool(
     "prime_radiant_status",
-    "Read the state of Prime Radiant, the owner's wiki: pages, claims and verified pages, its domains, open checks and review items, a running import and the nightly pass. Call it first when the user asks about their wiki.",
+    "Read the state of Prime Radiant, the owner's wiki: pages, claims and verified pages, its domains, open checks and review items, a running import, the nightly pass, and its search index (MB used of the size limit, chunks, pages capped by the limit). Call it first when the user asks about their wiki.",
     {},
     READ,
     async () => {
@@ -446,6 +466,7 @@ function registerReadTools(reg: Registrar): void {
           : "unknown",
         ...(maintenance?.running ? { maintenance_running: maintenance.running } : {}),
         ...(maintenance?.last?.connect ? { connect_pass_last: maintenance.last.connect } : {}),
+        ...(status.index ? { search_index: searchIndexOf(status.index) } : {}),
       });
     },
   );
@@ -606,7 +627,7 @@ function registerReadTools(reg: Registrar): void {
 
   reg.tool(
     "prime_radiant_settings",
-    "Read Prime Radiant's settings: nightly schedule, contradiction pass, the Opus second opinion and its caps, domains and their owners, the import exclude list, parallelism and nightly folders — with the defaults and limits.",
+    "Read Prime Radiant's settings: nightly schedule, contradiction pass, the Opus second opinion and its caps, the search index size limit (MB), domains and their owners, the import exclude list, parallelism and nightly folders — with the defaults and limits.",
     {},
     { ...READ, maxChars: 8_000 },
     async () => {
@@ -1127,7 +1148,7 @@ function registerPassTools(reg: Registrar): void {
 
   reg.tool(
     "prime_radiant_settings_update",
-    "Change the Prime Radiant settings the user asked for: nightly schedule, contradiction pass, Opus second opinion and its caps, domains and owners, exclude list, parallelism, skip code projects, nightly folders.",
+    "Change the Prime Radiant settings the user asked for: nightly schedule, contradiction pass, Opus second opinion and its caps, search index size limit, domains and owners, exclude list, parallelism, skip code projects, nightly folders.",
     {
       nightly_enabled: zOptBool("Run the nightly pass on its schedule."),
       nightly_time: z.string().regex(TIME_RE, "HH:MM, 24-hour").optional().describe("When the nightly pass runs, box time, HH:MM."),
@@ -1135,20 +1156,22 @@ function registerPassTools(reg: Registrar): void {
       opus_enabled: zOptBool("Have Opus give a second opinion on a sample of pages (it costs money)."),
       opus_cap_usd: z.number().min(0.01).max(1000).optional().describe("Most the Opus check may spend a night, in US dollars."),
       opus_max_pages: z.number().int().min(4).max(2000).optional().describe("Most pages the Opus check reads a night."),
+      search_index_limit_mb: z.number().int().min(32).max(4096).optional()
+        .describe("Most MB the wiki's search index may take (default 160); more lets a big wiki be searched, using that much more memory."),
       domains: zOptList(100, 150, "The whole domain list, each name=owner, e.g. acme-widgets=Sales team."),
       ingest_exclude: zOptList(500, 300, "The whole list of folder and file patterns imports leave out."),
       ingest_parallel: z.number().int().min(1).max(256).optional().describe("How many documents an import reads at once."),
       skip_code_projects: zOptBool("Leave code projects out of imports."),
       nightly_folders: zOptList(20, 4096, "The whole list of folders the nightly pass imports, inside the owner's Files."),
-      reset: z.array(zEnumOf(["nightly", "contradictions", "opus", "domains", "ingest_exclude", "ingest_parallel", "skip_code_projects", "nightly_folders"], "A setting to put back to its default."))
-        .max(8)
+      reset: z.array(zEnumOf(["nightly", "contradictions", "opus", "domains", "ingest_exclude", "ingest_parallel", "skip_code_projects", "nightly_folders", "search_index_limit_mb"], "A setting to put back to its default."))
+        .max(9)
         .optional()
         .describe("Settings to put back to their defaults."),
       confirm: zConfirm("Must be true. Set it only when the user asked for these settings."),
     },
     DESTRUCTIVE,
     async (a: {
-      nightly_enabled?: boolean; nightly_time?: string; contradictions_enabled?: boolean; opus_enabled?: boolean; opus_cap_usd?: number; opus_max_pages?: number;
+      nightly_enabled?: boolean; nightly_time?: string; contradictions_enabled?: boolean; opus_enabled?: boolean; opus_cap_usd?: number; opus_max_pages?: number; search_index_limit_mb?: number;
       domains?: string[]; ingest_exclude?: string[]; ingest_parallel?: number; skip_code_projects?: boolean; nightly_folders?: string[]; reset?: string[]; confirm: true;
     }) => {
       const patch: Record<string, Record<string, unknown> | unknown[] | null> = {};
@@ -1159,6 +1182,7 @@ function registerPassTools(reg: Registrar): void {
       if (a.opus_enabled !== undefined) section("opus").enabled = a.opus_enabled;
       if (a.opus_cap_usd !== undefined) section("opus").capUsd = a.opus_cap_usd;
       if (a.opus_max_pages !== undefined) section("opus").maxPages = a.opus_max_pages;
+      if (a.search_index_limit_mb !== undefined) section("search").indexLimitMb = a.search_index_limit_mb;
       if (a.ingest_exclude !== undefined) section("ingest").exclude = a.ingest_exclude;
       if (a.ingest_parallel !== undefined) section("ingest").parallel = a.ingest_parallel;
       if (a.skip_code_projects !== undefined) section("ingest").skipCodeProjects = a.skip_code_projects;
@@ -1174,6 +1198,7 @@ function registerPassTools(reg: Registrar): void {
         else if (r === "ingest_parallel") section("ingest").parallel = null;
         else if (r === "skip_code_projects") section("ingest").skipCodeProjects = null;
         else if (r === "nightly_folders") section("ingest").folders = null;
+        else if (r === "search_index_limit_mb") section("search").indexLimitMb = null;
       }
       if (Object.keys(patch).length === 0) throw new ToolError("BAD_ARGUMENT", "No setting to change was given.", "Pass the settings the user asked to change.");
       const r = await pr<{ settings?: { ingest?: { exclude?: unknown[] } } & Record<string, unknown>; nightly?: { nextRunAt?: number } }>("PUT", "/settings", { body: patch });

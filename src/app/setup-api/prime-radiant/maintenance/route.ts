@@ -30,7 +30,7 @@
  */
 import { processStore } from "@/lib/process-store";
 import { requireSession } from "@/lib/route-auth";
-import { runConnectPass } from "@/lib/prime-radiant/connect";
+import { RELATED_DIMS, runConnectPass } from "@/lib/prime-radiant/connect";
 import { vaultDir } from "@/lib/prime-radiant/paths";
 import { migratePluginFrontmatter } from "@/lib/prime-radiant/plugin-compat";
 import { readPageVectors, reindexPrimeRadiantVault, vaultIndexingAllowed } from "@/lib/prime-radiant/shard-index";
@@ -97,8 +97,8 @@ export async function POST(req: Request) {
       }
       case "connect": {
         if (state.running) return busy();
-        if (dryRun) return json(await runConnectPass(await readVaultSnapshot(vault), commitWith(vault, gate.writer.author), { dryRun, vectors: await readPageVectors(vault) }));
-        background("connect", async () => runConnectPass(await readVaultSnapshot(vault), commitWith(vault, gate.writer.author), { vectors: await readPageVectors(vault) }));
+        if (dryRun) return json(await runConnectPass(await readVaultSnapshot(vault), commitWith(vault, gate.writer.author), { dryRun, vectors: await readPageVectors(vault, { dims: RELATED_DIMS }) }));
+        background("connect", async () => runConnectPass(await readVaultSnapshot(vault), commitWith(vault, gate.writer.author), { vectors: await readPageVectors(vault, { dims: RELATED_DIMS }) }));
         return json({ started: true }, 202);
       }
       case "migrate-frontmatter": {

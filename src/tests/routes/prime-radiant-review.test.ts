@@ -263,8 +263,10 @@ describe("history, diff, revert", () => {
 describe("settings", () => {
   it("exposes every section, saves a patch, validates folders and refuses a bad field whole", async () => {
     const get = await (await settingsGET(req("GET", "/settings"))).json();
-    expect(Object.keys(get.settings).sort()).toEqual(["contradictions", "costRates", "domains", "ingest", "nightly", "opus"]);
+    expect(Object.keys(get.settings).sort()).toEqual(["contradictions", "costRates", "domains", "ingest", "nightly", "opus", "search"]);
     expect(get.limits.opusCapUsd).toEqual({ min: 0.01, max: 1000 });
+    expect(get.limits.searchIndexLimitMb).toEqual({ min: 32, max: 4096 });
+    expect(get.defaults.search).toEqual({ indexLimitMb: 160 });
     expect(get.rates.basis).toBe("estimate");
 
     const saved = await settingsPUT(req("PUT", "/settings", { nightly: { time: "02:15" }, opus: { enabled: true, capUsd: 3 }, ingest: { folders: ["Documents"], parallel: 32 } }));

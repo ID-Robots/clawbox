@@ -6,7 +6,8 @@
  */
 import { describe, expect, it } from "vitest";
 import { createHashEmbedder } from "@/lib/prime-radiant/contradictions";
-import { candidateNames, leafInfo, planConnections, RELATED_END, RELATED_START, runConnectPass, stripRelatedBlock } from "@/lib/prime-radiant/connect";
+import { candidateNames, leafInfo, planConnections, RELATED_DIMS, RELATED_END, RELATED_K, RELATED_MIN_SIMILARITY, RELATED_START, runConnectPass, stripRelatedBlock } from "@/lib/prime-radiant/connect";
+import { decodeVectorBlob, dequantizeQ8, encodeQ8Blob } from "@/lib/prime-radiant/vector-q8";
 import { parsePage, serializePage } from "@/lib/prime-radiant/frontmatter";
 import { lintVault } from "@/lib/prime-radiant/lint";
 import { migratePluginFrontmatter, needsPluginFields, withPluginFields } from "@/lib/prime-radiant/plugin-compat";
@@ -262,5 +263,103 @@ describe("memory-wiki frontmatter", () => {
     expect(done.updated).toBe(dry.updated);
     expect(snap.pages.every((p) => p.parsed.ok && !needsPluginFields(p.path, p.parsed.frontmatter))).toBe(true);
     expect(lintVault(snap, { now: NOW }).errors).toBe(0);
+  });
+});
+
+// ── 8-bit page vectors (the search index stores vectors in 8 bits) ────────
+
+/** A vector the way the index hands it to the pass: stored in 8 bits, read back cut to `dims` and at unit length (readPageVectors). */
+function viaIndex(v: Float32Array, dims = v.length): Float32Array {
+  const back = dequantizeQ8(decodeVectorBlob(encodeQ8Blob(v))!).slice(0, dims);
+  return unitLength(back);
+}
+
+function unitLength(v: Float32Array): Float32Array {
+  let n = 0;
+  for (const x of v) n += x * x;
+  n = Math.sqrt(n) || 1;
+  return v.map((x) => x / n);
+}
+
+function cosine(a: Float32Array, b: Float32Array): number {
+  let s = 0;
+  for (let i = 0; i < a.length; i++) s += a[i] * b[i];
+  return s;
+}
+
+/** The pass's rule: the RELATED_K closest pages at RELATED_MIN_SIMILARITY or more. */
+function neighbours(sims: number[], self: number): number[] {
+  return sims
+    .map((s, j) => [s, j] as const)
+    .filter(([s, j]) => j !== self && s >= RELATED_MIN_SIMILARITY)
+    .sort((a, b) => b[0] - a[0] || a[1] - b[1])
+    .slice(0, RELATED_K)
+    .map(([, j]) => j);
+}
+
+describe("8-bit page vectors", () => {
+  it("give the pass the same links as float32 on the fixture vault, at the default threshold and a low one", async () => {
+    for (const minSimilarity of [undefined, 0.1]) {
+      const exact = await vectorsFor(vault());
+      const stored = new Map([...exact].map(([p, v]) => [p, viaIndex(v)]));
+      const a = await planConnections(vault(), { now: NOW, vectors: exact, minSimilarity });
+      const b = await planConnections(vault(), { now: NOW, vectors: stored, minSimilarity });
+      expect(b.writes.length).toBeGreaterThan(0);
+      expect(b.writes).toEqual(a.writes);
+    }
+  });
+
+  it("keep recall@10 at 1 on the fixture vault's vectors", async () => {
+    const exact = [...(await vectorsFor(vault())).values()];
+    const stored = exact.map((v) => viaIndex(v));
+    let recall = 0;
+    exact.forEach((q) => {
+      const top = (vs: Float32Array[]) => vs.map((v, j) => [cosine(q, v), j] as const).sort((x, y) => y[0] - x[0] || x[1] - y[1]).slice(0, 10).map(([, j]) => j);
+      const truth = new Set(top(exact));
+      recall += top(stored).filter((j) => truth.has(j)).length / 10;
+    });
+    expect(recall / exact.length).toBe(1);
+  });
+
+  it("keep the same neighbours over the threshold on a seeded set, but for pairs within 0.01 of a boundary", () => {
+    // 240 pages in 24 topics, each page a different mix of its topic and its own noise, so
+    // similarities spread across the threshold (1,024-d stored, RELATED_DIMS compared).
+    let seed = 1234;
+    const rand = () => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed / 2147483648;
+    };
+    const gauss = () => Math.sqrt(-2 * Math.log(rand() || 1e-12)) * Math.cos(2 * Math.PI * rand());
+    const D = 1024;
+    const topics = Array.from({ length: 24 }, () => unitLength(Float32Array.from({ length: D }, gauss)));
+    const pages = Array.from({ length: 240 }, (_, i) => {
+      const mix = 0.3 + 0.5 * rand();
+      const noise = unitLength(Float32Array.from({ length: D }, gauss));
+      return unitLength(Float32Array.from(topics[i % 24], (x, d) => mix * x + (1 - mix) * noise[d]));
+    });
+    const exact = pages.map((v) => unitLength(v.slice(0, RELATED_DIMS)));
+    const stored = pages.map((v) => viaIndex(v, RELATED_DIMS));
+    let same = 0;
+    let linked = 0;
+    let maxError = 0;
+    exact.forEach((_, i) => {
+      const fs32 = exact.map((v) => cosine(exact[i], v));
+      const fs8 = stored.map((v) => cosine(stored[i], v));
+      fs32.forEach((s, j) => (maxError = Math.max(maxError, Math.abs(s - fs8[j]))));
+      const a = neighbours(fs32, i);
+      const b = neighbours(fs8, i);
+      linked += a.length;
+      if (a.join() === b.join()) same += 1;
+      // Any page that is a neighbour one way and not the other sits on a boundary: the threshold or the K-th place.
+      const kth = [...fs32].filter((_, j) => j !== i).sort((x, y) => y - x)[RELATED_K - 1];
+      for (const j of [...a.filter((j) => !b.includes(j)), ...b.filter((j) => !a.includes(j))]) {
+        expect(Math.min(Math.abs(fs32[j] - RELATED_MIN_SIMILARITY), Math.abs(fs32[j] - kth)), `page ${i} → ${j}`).toBeLessThan(0.01);
+      }
+    });
+    // The set exercises the threshold: plenty of links, not every pair.
+    expect(linked).toBeGreaterThan(200);
+    expect(linked).toBeLessThan(240 * RELATED_K);
+    expect(maxError).toBeLessThan(0.01);
+    expect(same / exact.length).toBeGreaterThanOrEqual(0.95);
   });
 });

@@ -152,6 +152,8 @@ let previewAnswer: Record<string, unknown> | null;
 let skipCodeProjects: boolean;
 /** The settings GET's Opus source and page cap; null answers as an older server (neither field). */
 let opusExtras: { source: "api_key" | "subscription" | "none"; maxPages: number } | null;
+/** The search index size limit, MB, on a server that has the setting (null: an older one). */
+let searchIndexLimitMb: number | null;
 /** What `POST init` says its one-time memory-wiki repair did. */
 let initRepair: Record<string, unknown> | null;
 /** What `GET pages?…` lists. */
@@ -236,12 +238,14 @@ function installFetch() {
         costRates: {}, nightly: { enabled: true, time: "03:00" },
         opus: { enabled: false, capUsd: 2, sampleRate: 0.02, model: "opus", ...(opusExtras ? { maxPages: opusExtras.maxPages } : {}) },
         contradictions: { enabled: true }, domains: [],
+        ...(searchIndexLimitMb !== null ? { search: { indexLimitMb: searchIndexLimitMb } } : {}),
       };
       return ok({
-        settings, defaults: settings,
+        settings, defaults: searchIndexLimitMb !== null ? { ...settings, search: { indexLimitMb: 160 } } : settings,
         limits: {
           ingestParallel: { min: 1, max: 256 }, ingestFolders: 20, opusCapUsd: { min: 0.01, max: 1000 }, opusSampleRate: { min: 0, max: 1 }, domains: 100,
           ...(opusExtras ? { opusMaxPages: { min: 4, max: 2000 } } : {}),
+          ...(searchIndexLimitMb !== null ? { searchIndexLimitMb: { min: 32, max: 4096 } } : {}),
         },
         nightly: { nextRunAt: null }, rates: {},
         ...(opusExtras ? { opusSource: opusExtras.source } : {}),
@@ -296,6 +300,7 @@ beforeEach(() => {
   previewAnswer = PREVIEW;
   skipCodeProjects = true;
   opusExtras = null;
+  searchIndexLimitMb = null;
   initRepair = { ran: true, cleaned: [], removed: [], commit: null };
   window.localStorage.removeItem("clawbox.primeRadiant.repairNoticeSeen");
   listed = [LIST_ENTRY];
@@ -698,6 +703,37 @@ describe("PrimeRadiantApp", () => {
     await mount();
     await openTab("settings");
     expect(await screen.findByTestId("prime-radiant-opus-source")).toHaveTextContent(/no Anthropic API key and no Claude sign-in/);
+  });
+
+  it("shows the search index size limit with its default, refuses one out of range and saves it", async () => {
+    searchIndexLimitMb = 256;
+    await mount();
+    await openTab("settings");
+    const limit = await screen.findByTestId("prime-radiant-search-index-limit");
+    expect(limit).toHaveValue(256);
+    expect(screen.getByTestId("prime-radiant-settings")).toHaveTextContent("The default is 160 MB");
+    fireEvent.change(limit, { target: { value: "16" } });
+    fireEvent.click(screen.getByTestId("prime-radiant-settings-save"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("The search index size limit must be a whole number of MB from 32 to 4096.");
+    expect(calls.some((c) => c.url.endsWith("/settings") && c.method === "PUT")).toBe(false);
+    fireEvent.change(limit, { target: { value: "512" } });
+    fireEvent.click(screen.getByTestId("prime-radiant-settings-save"));
+    await waitFor(() => {
+      const put = calls.find((c) => c.url.endsWith("/settings") && c.method === "PUT");
+      expect((put?.body as { search: unknown }).search).toEqual({ indexLimitMb: 512 });
+    });
+  });
+
+  it("offers no index size limit to a server that does not know it, and sends none", async () => {
+    await mount();
+    await openTab("settings");
+    await screen.findByTestId("prime-radiant-settings-save");
+    expect(screen.queryByTestId("prime-radiant-search-index-limit")).toBeNull();
+    fireEvent.click(screen.getByTestId("prime-radiant-settings-save"));
+    await waitFor(() => {
+      const put = calls.find((c) => c.url.endsWith("/settings") && c.method === "PUT");
+      expect(put?.body).not.toHaveProperty("search");
+    });
   });
 
   it("shows the tokens an import and a night used, and no money", async () => {
