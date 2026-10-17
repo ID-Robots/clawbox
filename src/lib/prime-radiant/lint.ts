@@ -24,7 +24,7 @@
 
 import { buildClaimIndex, claimCollisions, isClaimId, retiredReuse } from "./claims";
 import { pageSummary } from "./frontmatter";
-import { buildLinkGraph } from "./links";
+import { buildLinkGraph, contentReach } from "./links";
 import { scanSecrets } from "./redact";
 import type { PageFrontmatter } from "./schema";
 import type { VaultPage, VaultSnapshot } from "./vault";
@@ -321,6 +321,7 @@ export function lintVault(snapshot: VaultSnapshot, options: LintOptions = {}): L
     })),
     snapshot.indexBody,
   );
+  const reach = contentReach(graph);
 
   let checked = 0;
   for (const page of snapshot.pages) {
@@ -359,9 +360,18 @@ export function lintVault(snapshot: VaultSnapshot, options: LintOptions = {}): L
       );
     }
     lintPageShape(page, fm, page.parsed.body, now, findings);
-    const inbound = graph.inbound.get(page.path);
-    if ((!inbound || inbound.size === 0) && !graph.indexed.has(page.path)) {
-      findings.push(finding("orphan", "warning", page.path, "no page links here and index.md does not list it"));
+    // index.md lists every page, so a listing there does not make one reachable.
+    if (reach.orphans.has(page.path)) {
+      const isolated = reach.isolated.has(page.path);
+      findings.push(
+        finding(
+          "orphan",
+          "warning",
+          page.path,
+          isolated ? "no other wiki page links here and it links to none (index.md does not count)" : "no other wiki page links here (index.md does not count)",
+          { isolated },
+        ),
+      );
     }
   }
 

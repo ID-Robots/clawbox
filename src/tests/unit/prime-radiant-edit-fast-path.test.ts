@@ -2,7 +2,8 @@
  * The quick road a metadata edit takes (edit.ts `editPage`, vault.ts
  * `lint: "pages"`): the page is read alone and linted alone, and nothing is
  * re-embedded — with every answer the slow road gave. Its findings are the
- * ones a lint of the whole vault gives (an orphan included), a verified page
+ * ones a lint of the whole vault gives (an orphan included, for a page
+ * index.md does not list; for a listed one that is the vault-wide lint's), a verified page
  * is still refused, a blocking rule still refuses the commit, each edit is
  * one commit naming its author. And an operation that reads the vault before
  * it writes is linted against that read, not a second one.
@@ -99,7 +100,12 @@ describe("a metadata edit", () => {
     expect(value.commit).toMatch(/^[0-9a-f]{40}$/);
     // The old road read all 34 pages twice.
     expect(opens).toBeLessThanOrEqual(3);
-    expect(value.findings).toEqual(await wholeVaultFindings("concepts/indexed.md"));
+    // Only index.md lists it, so the whole vault calls it an orphan; that
+    // takes every page to tell (and an edit of its metadata does not change
+    // it), so the page judged alone leaves it to the vault-wide lint.
+    const whole = await wholeVaultFindings("concepts/indexed.md");
+    expect(whole.map((f) => f.rule)).toContain("orphan");
+    expect(value.findings).toEqual(whole.filter((f) => f.rule !== "orphan"));
     expect(read("concepts/indexed.md")).toContain("domain: billing\nowner: finance-team\n");
     expect(read("concepts/indexed.md")).toContain(TAKEN.id);
   });

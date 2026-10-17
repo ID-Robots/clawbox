@@ -514,9 +514,11 @@ async function lintTouched(
     const indexBody = await readIndexBody(vault);
     // index.md read once for them all. Judged alone, a page index.md does not
     // list has no inbound links at all, and whether another page links it
-    // takes the whole vault to tell; one it lists is no orphan. So a listed
-    // page is judged on its own, as its own PATCH would be, and only the
-    // unlisted ones against the whole vault.
+    // takes the whole vault to tell. A listing does not reach a page either
+    // (links.ts `contentReach`), but an edit of a listed page (the quick road
+    // a metadata edit takes) does not change who links it: it is judged on
+    // its own, as its own PATCH would be, its orphan warning left to the
+    // vault-wide lint, and only the unlisted ones against the whole vault.
     const listed = listedIn(indexBody, own);
     const alone = own.filter((p) => !p.parsed.ok || listed.has(p.path));
     const findings = alone.flatMap((p) =>

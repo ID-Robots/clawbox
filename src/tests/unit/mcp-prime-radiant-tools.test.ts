@@ -476,6 +476,26 @@ describe.each(CASES)("$tool", (c) => {
   });
 });
 
+describe("prime_radiant_map", () => {
+  it("calls a content page no other content page links to unconnected, whatever its degree", async () => {
+    api.mockResolvedValue({
+      revision: SHA,
+      nodes: [
+        // Listed in index.md and tied by a shared source: degree 1, still reached by nobody.
+        { id: "concepts/listed.md", title: "Listed", degree: 1, inbound: 0 },
+        { id: "concepts/linked.md", title: "Linked", degree: 1, inbound: 1 },
+        // Not a content page: never an orphan.
+        { id: "sources/price-list.md", title: "Price list", degree: 0, inbound: 0 },
+      ],
+      edges: [[0, 1, 0.5]],
+    });
+    const out = await harness().call("prime_radiant_map", {});
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(JSON.parse(out.text).unconnected).toEqual({ count: 1, pages: ["concepts/listed.md"] });
+  });
+});
+
 describe("prime_radiant_status", () => {
   it("reads the vault, the import, the nightly pass and the queue in one answer", async () => {
     answer(

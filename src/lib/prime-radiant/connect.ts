@@ -10,13 +10,20 @@
  *     product name) and has no page yet;
  *  2. links each page to its nearest pages by embedding (top-k above a
  *     threshold, from the vault's search index) and to the pages sharing its
- *     rarest entities;
+ *     rarest entities. A page the index holds no vector for (it was full, or
+ *     the page is newer than the index) gets its nearest pages by its words
+ *     instead (lexical.ts: TF-IDF over title, claims and summary);
  *  3. rolls the one-page-per-thing leaves (a shipment, a bank transfer, an
  *     invoice, a daily report — told by a kind word and an identifier or date
  *     in the title) up into dated HUB pages ("Courier shipments 2026-09"), with
  *     links hub → leaves, leaf → hub and neighbouring leaves, and hub → the
  *     previous and next month's hub. Hubs are `synthesis` pages; search ranks
- *     them above leaves.
+ *     them above leaves;
+ *  4. makes every content page reachable: one that links to no other content
+ *     page gets its nearest pages by words, and one no other content page links
+ *     to is added to the "Similar pages" of its nearest page that has room (at
+ *     most {@link MAX_INBOUND_ADDS} such pages each). A page whose words tie it
+ *     to no other page is left as it is, and counted.
  *
  * Every link the pass writes lives in one managed block at the end of the
  * page body, replaced whole on every run (never hand-edited text):
@@ -31,8 +38,10 @@
  */
 
 import { slugify } from "./claims";
+import { pageSummary } from "./frontmatter";
 import { titleIdentifiers } from "./identifiers";
-import { buildLinkGraph } from "./links";
+import { buildLexicalIndex } from "./lexical";
+import { buildLinkGraph, contentReach, isContentPage } from "./links";
 import { ATOMIC_TYPES, LIMITS } from "./lint";
 import type { PageFrontmatter, PrivacyTier } from "./schema";
 import type { VaultSnapshot, VaultTx } from "./vault";
@@ -68,6 +77,14 @@ export const MIN_HUB_LEAVES = 3;
 export const HUB_MAX_LEAVES = 50;
 /** Pages one commit of the pass writes. */
 export const CONNECT_BATCH = 400;
+/** The TF-IDF cosine a neighbour by words needs (a page without a vector). */
+export const LEXICAL_MIN_SIMILARITY = 0.2;
+/** The one link that makes a page reachable may take a weaker neighbour by words, down to this. */
+export const LEXICAL_FLOOR = 0.05;
+/** Unreached pages one page takes into its "Similar pages", at most. */
+export const MAX_INBOUND_ADDS = 3;
+/** Neighbours tried, best first, for a page nothing links to. */
+const INBOUND_CANDIDATES = 12;
 
 const BLOCK_BUDGET_SLACK = 200;
 
@@ -219,11 +236,18 @@ export interface ConnectStats {
   hubs: number;
   leaves: number;
   pagesWithEmbeddings: number;
+  /** Pages without a vector that got "Similar pages" by their words. */
+  pagesLexical: number;
   /** Links a page has after the pass (either way, distinct), median and mean. */
   linksMedian: number;
   linksMean: number;
   linksMedianBefore: number;
+  /** Content pages no other content page links to (links.ts `contentReach`; index.md does not count). */
   orphansAfter: number;
+  /** Content pages with no link in or out. */
+  isolatedAfter: number;
+  /** Content pages still unreached or linking nowhere that nothing ties to another page (no shared word, no vector neighbour): left as they are. */
+  unlinkable: number;
 }
 
 export interface ConnectPlan {
@@ -255,8 +279,8 @@ interface Section {
   bare?: boolean;
 }
 
-/** The managed block for `sections`, as many lines as fit in `budget` characters. */
-export function renderBlock(sections: readonly Section[], titleOf: (p: string) => string, budget: number): string {
+/** The managed block for `sections` and the targets it holds: as many lines as fit in `budget` characters. */
+function layoutBlock(sections: readonly Section[], titleOf: (p: string) => string, budget: number): { block: string; kept: Set<string> } {
   const lines: string[] = [];
   let used = RELATED_START.length + RELATED_END.length + 16;
   const seen = new Set<string>();
@@ -273,8 +297,13 @@ export function renderBlock(sections: readonly Section[], titleOf: (p: string) =
     }
     if (own.length > 0) lines.push(`### ${s.heading}`, "", ...own, "");
   }
-  if (lines.length === 0) return "";
-  return [RELATED_START, "## Related", "", ...lines, RELATED_END].join("\n");
+  if (lines.length === 0) return { block: "", kept: seen };
+  return { block: [RELATED_START, "## Related", "", ...lines, RELATED_END].join("\n"), kept: seen };
+}
+
+/** The managed block for `sections`, as many lines as fit in `budget` characters. */
+export function renderBlock(sections: readonly Section[], titleOf: (p: string) => string, budget: number): string {
+  return layoutBlock(sections, titleOf, budget).block;
 }
 
 function median(xs: number[]): number {
@@ -284,17 +313,22 @@ function median(xs: number[]): number {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 }
 
-function linkCounts(pages: ReadonlyArray<{ path: string; title?: string; body: string }>, indexBody: string | null): { counts: number[]; orphans: number } {
-  const g = buildLinkGraph(pages, indexBody);
+/** Links per page (either way, distinct), and the content pages nothing reaches (index.md lists every page: it does not count). */
+function linkCounts(pages: ReadonlyArray<{ path: string; title?: string; body: string }>): { counts: number[]; orphans: number; isolated: number } {
+  const g = buildLinkGraph(pages, null);
   const counts: number[] = [];
-  let orphans = 0;
   for (const p of pages) {
     const set = new Set<string>([...(g.outbound.get(p.path) ?? []), ...(g.inbound.get(p.path) ?? [])]);
     set.delete(p.path);
     counts.push(set.size);
-    if ((g.inbound.get(p.path)?.size ?? 0) === 0 && !g.indexed.has(p.path)) orphans++;
   }
-  return { counts, orphans };
+  const reach = contentReach(g);
+  return { counts, orphans: reach.orphans.size, isolated: reach.isolated.size };
+}
+
+/** What a page says it is about, in its own words: title (twice, it weighs most), claims and summary. */
+function lexicalText(p: ConnectPage): string {
+  return [p.fm.title, p.fm.title, ...p.fm.claims.map((c) => c.text), pageSummary(p.body) ?? ""].join("\n");
 }
 
 function cut(vec: Float32Array, dims: number): Float32Array {
@@ -356,7 +390,6 @@ export async function planConnections(snapshot: Pick<VaultSnapshot, "pages" | "i
   const originals = new Map(snapshot.pages.map((p) => [p.path, p]));
   const before = linkCounts(
     snapshot.pages.map((p) => ({ path: p.path, title: p.parsed.ok ? p.parsed.frontmatter.title : undefined, body: p.parsed.body })),
-    snapshot.indexBody,
   );
 
   // Pages this pass made on an earlier run are rebuilt from scratch: their own text is no evidence.
@@ -517,10 +550,12 @@ export async function planConnections(snapshot: Pick<VaultSnapshot, "pages" | "i
   // 2. related by embedding (cut to RELATED_DIMS), leaves of the same hub left out (they are tied as siblings).
   const related = new Map<string, string[]>();
   const vecPages = content.filter((p) => options.vectors?.has(p.path)).slice(0, MAX_RELATED_PAGES);
+  const compared = new Set<string>();
   if (vecPages.length > 1) {
     const dims = Math.min(RELATED_DIMS, options.vectors!.get(vecPages[0].path)!.length);
     const vs = vecPages.map((p) => cut(options.vectors!.get(p.path)!, dims));
     const ok = vs.map((v) => v.length === dims);
+    vecPages.forEach((p, i) => ok[i] && compared.add(p.path));
     for (let i = 0; i < vecPages.length; i++) {
       // A few thousand pages is billions of multiply-adds: the event loop is let through between rows.
       if (i % 32 === 0) await new Promise<void>((resolve) => setImmediate(resolve));
@@ -545,6 +580,28 @@ export async function planConnections(snapshot: Pick<VaultSnapshot, "pages" | "i
       }
       related.set(vecPages[i].path, best.map((b) => vecPages[b.j].path));
     }
+  }
+
+  // 2b. a content page the index holds no vector for (it was full, or the page
+  // is newer than it): its nearest pages by words, leaves of its hub left out.
+  const sameHub = (path: string) => {
+    const hub = hubOf.get(path);
+    return (other: string) => !!hub && hubOf.get(other) === hub;
+  };
+  const wordPages = content.filter((p) => isContentPage(p.path));
+  const lexical = buildLexicalIndex(wordPages.map((p) => ({ path: p.path, domain: p.fm.domain, text: lexicalText(p) })));
+  const breathe = async (n: number) => {
+    if (n % 64 === 0) await new Promise<void>((resolve) => setImmediate(resolve));
+  };
+  let asked = 0;
+  let pagesLexical = 0;
+  for (const p of wordPages) {
+    if (compared.has(p.path)) continue;
+    await breathe(++asked);
+    const near = lexical.neighbours(p.path, RELATED_K, LEXICAL_MIN_SIMILARITY, sameHub(p.path));
+    if (near.length === 0) continue;
+    related.set(p.path, near.map((x) => x.path));
+    pagesLexical++;
   }
 
   // Shared rare entities.
@@ -586,17 +643,18 @@ export async function planConnections(snapshot: Pick<VaultSnapshot, "pages" | "i
     const cap = ATOMIC_TYPES.has(p.fm.type) ? LIMITS.atomicMaxChars : LIMITS.bodySoftChars;
     return Math.max(0, cap - p.body.trim().length - BLOCK_BUDGET_SLACK);
   };
-  const writes: PlannedWrite[] = [];
   const finalBodies = new Map<string, string>();
-  const compose = (p: ConnectPage, sections: Section[]): string => {
-    const block = renderBlock(
+  const compose = (p: ConnectPage, sections: Section[]): { body: string; kept: Set<string> } => {
+    const { block, kept } = layoutBlock(
       sections.map((s) => ({ ...s, targets: s.targets.filter((t) => t !== p.path && byPath.has(t)) })),
       titleOf,
       budgetFor(p),
     );
-    return block ? `${p.body.trimEnd()}\n\n${block}\n` : p.body;
+    return { body: block ? `${p.body.trimEnd()}\n\n${block}\n` : p.body, kept };
   };
 
+  // The pages the pass may rewrite, with what their block holds (step 5 adds to it).
+  const drafts = new Map<string, { page: ConnectPage; sections: Section[]; kept: Set<string> }>();
   for (const p of content) {
     const hub = hubOf.get(p.path);
     const siblings: string[] = [];
@@ -622,15 +680,15 @@ export async function planConnections(snapshot: Pick<VaultSnapshot, "pages" | "i
     ];
     // An entity page lists the pages that name it (its backlinks).
     if (p.fm.type === "entity" || p.path.startsWith("entities/")) sections.push({ heading: "Named on", targets: entityPages.get(p.path) ?? [] });
-    const body = compose(p, sections);
-    finalBodies.set(p.path, body);
-    const original = originals.get(p.path);
     if (p.fm.verified || p.fm.claims.some((c) => c.verified)) {
-      finalBodies.set(p.path, original?.parsed.body ?? p.body);
+      finalBodies.set(p.path, originals.get(p.path)?.parsed.body ?? p.body);
       continue;
     }
-    if (original && original.parsed.body.trim() !== body.trim()) writes.push({ path: p.path, frontmatter: p.fm, body, created: false, expected: original.text });
+    const { body, kept } = compose(p, sections);
+    finalBodies.set(p.path, body);
+    drafts.set(p.path, { page: p, sections, kept });
   }
+  const createdWrites: PlannedWrite[] = [];
   for (const c of created) {
     const page = byPath.get(c.path)!;
     // A page of ours a person verified is theirs now.
@@ -644,21 +702,88 @@ export async function planConnections(snapshot: Pick<VaultSnapshot, "pages" | "i
           { heading: "Other months", targets: prevNextHub.get(c.path) ?? [] },
         ]
       : [{ heading: "Named on", targets: entityPages.get(c.path) ?? [] }];
-    const body = compose(page, sections);
+    const { body } = compose(page, sections);
     finalBodies.set(c.path, body);
     const original = originals.get(c.path);
     if (!original || original.parsed.body.trim() !== body.trim() || JSON.stringify(original.parsed.ok ? original.parsed.frontmatter.sources : null) !== JSON.stringify(c.frontmatter.sources)) {
-      writes.push({ ...c, body });
+      createdWrites.push({ ...c, body });
     }
   }
   // Pages this pass made before and no longer wants are left alone (never removed by a pass).
-
-  const indexBody = addToIndex(snapshot.indexBody, created.filter((c) => c.created).map((c) => ({ path: c.path, title: c.frontmatter.title })));
-  const all = [
+  const linksNow = () => [
     ...pages.filter((p) => !finalBodies.has(p.path)).map((p) => ({ path: p.path, title: p.fm.title, body: p.body })),
     ...[...finalBodies.entries()].map(([path, body]) => ({ path, title: titleOf(path), body })),
   ];
-  const after = linkCounts(all, indexBody);
+
+  // 5. reachability, over the links as they now stand: content pages count
+  // (links.ts `isContentPage`), index.md does not.
+  const linksIn = new Map<string, number>();
+  const linksOut = new Map<string, number>();
+  const tie = (from: string, to: string) => {
+    linksOut.set(from, (linksOut.get(from) ?? 0) + 1);
+    linksIn.set(to, (linksIn.get(to) ?? 0) + 1);
+  };
+  for (const [from, targets] of buildLinkGraph(linksNow(), null).outbound) {
+    if (isContentPage(from)) for (const t of targets) if (t !== from && isContentPage(t)) tie(from, t);
+  }
+  // `add` joins the page's "Similar pages" only when the block then still holds
+  // everything it held: a page reached through it is never cut off again.
+  const addSimilar = (draft: { page: ConnectPage; sections: Section[]; kept: Set<string> }, add: readonly string[]): string[] => {
+    const want = add.filter((t) => t !== draft.page.path && byPath.has(t) && !draft.kept.has(t));
+    if (want.length === 0) return [];
+    const sections = draft.sections.map((s) => (s.heading === "Similar pages" ? { ...s, targets: [...s.targets, ...want.filter((t) => !s.targets.includes(t))] } : s));
+    const { body, kept } = compose(draft.page, sections);
+    const fresh = want.filter((t) => kept.has(t));
+    if (fresh.length === 0 || [...draft.kept].some((t) => !kept.has(t))) return [];
+    draft.sections = sections;
+    draft.kept = kept;
+    finalBodies.set(draft.page.path, body);
+    return fresh;
+  };
+  const unlinkable = new Set<string>();
+  const wordOrder = wordPages.map((p) => p.path).sort();
+  // A page that links to no other content page: its nearest by words (the
+  // weaker floor when none clears the bar). A verified page is never rewritten.
+  for (const path of wordOrder) {
+    const draft = drafts.get(path);
+    if (!draft || (linksOut.get(path) ?? 0) > 0) continue;
+    await breathe(++asked);
+    let near = lexical.neighbours(path, RELATED_K, LEXICAL_MIN_SIMILARITY, sameHub(path));
+    if (near.length === 0) near = lexical.neighbours(path, 1, LEXICAL_FLOOR, sameHub(path));
+    if (near.length === 0) {
+      unlinkable.add(path);
+      continue;
+    }
+    for (const t of addSimilar(draft, near.map((x) => x.path))) if (isContentPage(t)) tie(path, t);
+  }
+  // A page no other content page links to: into the "Similar pages" of its
+  // nearest page (by vector, then by words) that has room for one more.
+  const adds = new Map<string, number>();
+  for (const path of wordOrder) {
+    if ((linksIn.get(path) ?? 0) > 0) continue;
+    await breathe(++asked);
+    const candidates = new Set([...(related.get(path) ?? []), ...lexical.neighbours(path, INBOUND_CANDIDATES, LEXICAL_FLOOR, sameHub(path)).map((x) => x.path)]);
+    candidates.delete(path);
+    if (candidates.size === 0) unlinkable.add(path);
+    for (const from of candidates) {
+      const draft = drafts.get(from);
+      if (!draft || !isContentPage(from) || (adds.get(from) ?? 0) >= MAX_INBOUND_ADDS) continue;
+      if (addSimilar(draft, [path]).length === 0) continue;
+      adds.set(from, (adds.get(from) ?? 0) + 1);
+      tie(from, path);
+      break;
+    }
+  }
+
+  const writes: PlannedWrite[] = [];
+  for (const [path, draft] of drafts) {
+    const body = finalBodies.get(path)!;
+    const original = originals.get(path);
+    if (original && original.parsed.body.trim() !== body.trim()) writes.push({ path, frontmatter: draft.page.fm, body, created: false, expected: original.text });
+  }
+  writes.push(...createdWrites);
+
+  const after = linkCounts(linksNow());
   const mean = after.counts.reduce((s, x) => s + x, 0) / Math.max(1, after.counts.length);
   return {
     writes,
@@ -669,10 +794,13 @@ export async function planConnections(snapshot: Pick<VaultSnapshot, "pages" | "i
       hubs: hubMembers.size,
       leaves: hubOf.size,
       pagesWithEmbeddings: vecPages.length,
+      pagesLexical,
       linksMedian: median(after.counts),
       linksMean: Math.round(mean * 100) / 100,
       linksMedianBefore: median(before.counts),
       orphansAfter: after.orphans,
+      isolatedAfter: after.isolated,
+      unlinkable: unlinkable.size,
     },
   };
 }
