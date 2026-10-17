@@ -25,6 +25,8 @@ export interface SummaryMeta {
   at: string;
   /** Per sentence, what it traces to (claim ids, page paths, sources). */
   from: string[][];
+  /** The model was asked for this neighbourhood and every sentence it wrote was rejected: not asked again until the neighbourhood changes. */
+  tried?: boolean;
 }
 
 /** The summary of ours on a page (its text unchanged since we wrote it), or null. */
@@ -34,7 +36,7 @@ export function readSummaryMeta(fm: Record<string, unknown>): SummaryMeta | null
   const r = raw as Record<string, unknown>;
   if (r.by !== SUMMARIES_BY || (r.method !== "model" && r.method !== "facts") || typeof r.hash !== "string" || typeof r.digest !== "string") return null;
   const from = Array.isArray(r.from) ? r.from.map((x) => (Array.isArray(x) ? x.filter((y): y is string => typeof y === "string") : [])) : [];
-  return { by: SUMMARIES_BY, method: r.method, hash: r.hash, digest: r.digest, at: typeof r.at === "string" ? r.at : "", from };
+  return { by: SUMMARIES_BY, method: r.method, hash: r.hash, digest: r.digest, at: typeof r.at === "string" ? r.at : "", from, ...(r.tried === true ? { tried: true } : {}) };
 }
 
 export function summaryDigest(text: string): string {

@@ -525,6 +525,24 @@ describe("PrimeRadiantApp", () => {
     }
   });
 
+  it("shows the summary written from the page's connections in its header, and none when the page has none of ours", async () => {
+    pageOverride = { ...PAGE, nodeSummary: { text: "Acme Widgets Ltd makes widgets and buys housings from Globex Ltd.", method: "model", at: "2026-10-17T03:00:00.000Z" } };
+    const view = await mount();
+    await openTab("browse");
+    fireEvent.click(await screen.findByTestId("prime-radiant-page-row"));
+    const header = await screen.findByTestId("prime-radiant-page-summary");
+    expect(header).toHaveTextContent("Acme Widgets Ltd makes widgets and buys housings from Globex Ltd.");
+    expect(header).toHaveAttribute("title", "Summary written from this page's connections and sources");
+    view.unmount();
+
+    pageOverride = { ...PAGE, nodeSummary: null };
+    await mount();
+    await openTab("browse");
+    fireEvent.click(await screen.findByTestId("prime-radiant-page-row"));
+    await screen.findByTestId("prime-radiant-backlinks");
+    expect(screen.queryByTestId("prime-radiant-page-summary")).toBeNull();
+  });
+
   it("filters the page list by domain and type", async () => {
     await mount();
     await openTab("browse");

@@ -97,17 +97,17 @@ function vault(extra: Record<string, string> = {}): VaultSnapshot {
       { type: "reference", title: "Invoice INV-0917 Globex Ltd", record: { type: "invoice", month: "2026-09", hub: "syntheses/invoices-2026-09.md", by: "rules" }, claims: [claim("finance/invoice-inv-0917/total", "Invoice INV-0917 from Globex Ltd totals 4,100.00 EUR.")] },
       "Invoice INV-0917 from [[entities/globex-ltd]].\n",
     ),
-    "entities/maria-petrova.md": page(
-      { type: "entity", title: "Maria Petrova", domain: "finance", claims: [claim("finance/maria-petrova/role", "Maria Petrova is the COO of Acme Widgets Ltd.")] },
-      "Maria Petrova runs the day-to-day work at [[entities/acme-widgets-ltd]].\n",
+    "entities/maria-ivanova.md": page(
+      { type: "entity", title: "Maria Ivanova", domain: "finance", claims: [claim("finance/maria-ivanova/role", "Maria Ivanova is the COO of Acme Widgets Ltd.")] },
+      "Maria Ivanova runs the day-to-day work at [[entities/acme-widgets-ltd]].\n",
     ),
-    "entities/maria-petrova-2.md": page(
-      { type: "entity", title: "Мария Петрова", domain: "finance", generated: { at: "2026-09-01T00:00:00.000Z", by: "connect" } },
-      "Мария Петрова is named on 6 pages of this wiki.\n",
+    "entities/maria-ivanova-2.md": page(
+      { type: "entity", title: "Мария Иванова", domain: "finance", generated: { at: "2026-09-01T00:00:00.000Z", by: "connect" } },
+      "Мария Иванова is named on 6 pages of this wiki.\n",
     ),
     "concepts/ops-weekly.md": page(
-      { title: "Operations weekly", domain: "operations", claims: [claim("operations/ops-weekly/chair", "Мария Петрова chairs the operations weekly.")] },
-      "The weekly with [[entities/maria-petrova-2]] and [[entities/maria-petrova]].\n",
+      { title: "Operations weekly", domain: "operations", claims: [claim("operations/ops-weekly/chair", "Мария Иванова chairs the operations weekly.")] },
+      "The weekly with [[entities/maria-ivanova-2]] and [[entities/maria-ivanova]].\n",
     ),
     "concepts/sales-plan.md": page({ title: "Sales plan", domain: "sales" }, "The plan for [[entities/acme-widgets-ltd]].\n"),
     ...extra,
@@ -171,8 +171,15 @@ function inventingClient(calls: FlashRequest[], usage?: (req: FlashRequest) => {
   };
 }
 
+/** A vault folder of the test's own: the state database lives beside it (state-db.ts), inside the temp folder, never in the shared tmp. */
 function tmpState(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "pr-summaries-"));
+  const vaultDir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "pr-summaries-")), "vault");
+  fs.mkdirSync(vaultDir);
+  return vaultDir;
+}
+
+function dropState(vaultDir: string): void {
+  fs.rmSync(path.dirname(vaultDir), { recursive: true, force: true });
 }
 
 function hoodOf(snap: VaultSnapshot, rel: string): Neighbourhood {
@@ -297,7 +304,7 @@ describe("the plan", () => {
     expect(paths).not.toContain("concepts/invoice-inv-0917-globex-ltd.md");
     expect(paths).not.toContain("entities/acme-widgets-ltd.md");
     expect(paths).not.toContain("concepts/globex-supply-agreement.md");
-    expect(paths).not.toContain("entities/maria-petrova-2.md");
+    expect(paths).not.toContain("entities/maria-ivanova-2.md");
     expect(plan.stats).toMatchObject({ skippedVerified: 2, duplicates: 1, leaves: 1 });
   });
 
@@ -338,7 +345,38 @@ describe("the pass", () => {
       expect(again.model.calls).toBe(0);
       expect(commits).toHaveLength(1);
     } finally {
-      fs.rmSync(state, { recursive: true, force: true });
+      dropState(state);
+    }
+  });
+
+  it("asks the model once for a neighbourhood it could not summarise: the facts write it, the next run asks nothing", async () => {
+    const state = tmpState();
+    try {
+      const snap = { current: vault() };
+      const { run, commits } = fakeRun(snap);
+      const calls: FlashRequest[] = [];
+      const silent: FlashClient = { model: "deepseek-v4-flash", complete: async (req) => (calls.push(req), { text: "[]", model: "deepseek-v4-flash", usage: { promptTokens: 300, completionTokens: 2, cacheHitTokens: 0 } }) };
+      const opts = { stateVault: state, settings: settings(), rates: DEFAULT_COST_RATES, client: silent, online: true, now: () => NOW };
+      const first = await runSummaries(snap.current, run, opts);
+      expect(first.rejectedPages).toBe(first.planned);
+      expect(first.byFacts).toBe(first.planned);
+      expect(readSummaryMeta(fmOf(snap.current, "entities/globex-ltd.md"))).toMatchObject({ method: "facts", tried: true });
+      const asked = calls.length;
+      const again = await runSummaries(snap.current, run, opts);
+      expect(again).toMatchObject({ planned: 0, written: 0 });
+      expect(calls).toHaveLength(asked);
+      expect(commits).toHaveLength(1);
+
+      // A facts' summary written offline is due the model once it can write; until it does, it is left as it is.
+      const offline = { current: vault() };
+      const off = fakeRun(offline);
+      await runSummaries(offline.current, off.run, { ...opts, online: false });
+      const capped = await runSummaries(offline.current, off.run, { ...opts, settings: settings({ capUsd: 0 }) });
+      expect(capped.byReason.upgrade).toBe(capped.planned);
+      expect(capped).toMatchObject({ written: 0, byFacts: 0, model: { calls: 0, skipped: "cost_cap" } });
+      expect(off.commits).toHaveLength(1);
+    } finally {
+      dropState(state);
     }
   });
 
@@ -359,7 +397,7 @@ describe("the pass", () => {
       expect(fmOf(snap.current, "entities/globex-ltd.md").summary).toMatch(/2026 supplier audit|supplies aluminium/);
       expect(r.unchanged).toBeGreaterThan(0);
     } finally {
-      fs.rmSync(state, { recursive: true, force: true });
+      dropState(state);
     }
   });
 
@@ -389,7 +427,7 @@ describe("the pass", () => {
       const none = await runSummaries(vault(many), fakeRun({ current: vault(many) }).run, { stateVault: state, settings: settings({ capUsd: 0 }), rates: DEFAULT_COST_RATES, client: inventingClient([]), online: true, now: () => NOW });
       expect(none.model).toMatchObject({ calls: 0, skipped: "cost_cap", usdEstimate: 0 });
     } finally {
-      fs.rmSync(state, { recursive: true, force: true });
+      dropState(state);
     }
   });
 
@@ -406,7 +444,7 @@ describe("the pass", () => {
       expect(capped.byModel).toBe(1);
       expect(capped.byFacts).toBe(capped.planned - 1);
     } finally {
-      fs.rmSync(state, { recursive: true, force: true });
+      dropState(state);
     }
   });
 
@@ -422,12 +460,12 @@ describe("the pass", () => {
       expect(r.would?.[0]).toMatchObject({ path: "entities/globex-ltd.md", tier: "entity", reason: "new" });
       // The duplicate: the merge tool's own dry run, the summary on the canonical page.
       expect(r.mergeSuggestions).toEqual([
-        expect.objectContaining({ into: "entities/maria-petrova.md", from: ["entities/maria-petrova-2.md"], reason: "suffix", ok: true, aliases: ["Мария Петрова"] }),
+        expect.objectContaining({ into: "entities/maria-ivanova.md", from: ["entities/maria-ivanova-2.md"], reason: "suffix", ok: true, aliases: ["Мария Иванова"] }),
       ]);
       // Her role is hers: "… is the COO of Acme Widgets Ltd" says nothing of Acme's domain.
-      expect(r.domainMismatches).toEqual([{ path: "entities/maria-petrova.md", domain: "finance", suggested: "operations", reason: "role", evidence: 'its role "COO" points to operations' }]);
+      expect(r.domainMismatches).toEqual([{ path: "entities/maria-ivanova.md", domain: "finance", suggested: "operations", reason: "role", evidence: 'its role "COO" points to operations' }]);
     } finally {
-      fs.rmSync(state, { recursive: true, force: true });
+      dropState(state);
     }
   });
 
@@ -452,14 +490,14 @@ describe("duplicate entities", () => {
         ["entities/ivan-ivanov.md", "Ivan Ivanov"],
         ["entities/ivan-ivanov-cyr.md", "Иван Иванов"],
         ["entities/ivan-petrov.md", "Ivan Petrov"],
-        ["entities/georgi-dimitrov.md", "Georgi Dimitrov"],
-        ["entities/georgiy-dimitrov.md", "Георгий Димитров"],
+        ["entities/petar-petrov.md", "Petar Petrov"],
+        ["entities/petar-petrov-bg.md", "Петър Петров"],
       ]),
     );
     expect(groups).toEqual([
-      { canonical: "entities/georgi-dimitrov.md", duplicates: ["entities/georgiy-dimitrov.md"], reason: "script", key: "georgi dimitrov" },
       { canonical: "entities/globex-ltd.md", duplicates: ["entities/globex-ltd-2.md"], reason: "suffix", key: "globeks ltd" },
       { canonical: "entities/ivan-ivanov.md", duplicates: ["entities/ivan-ivanov-cyr.md"], reason: "script", key: "ivan ivanov" },
+      { canonical: "entities/petar-petrov.md", duplicates: ["entities/petar-petrov-bg.md"], reason: "script", key: "petar petrov" },
     ]);
   });
 
@@ -471,8 +509,8 @@ describe("duplicate entities", () => {
   });
 
   it("spells names alike whatever the transliteration", () => {
-    expect(nameSkeleton("Мария Петрова")).toBe(nameSkeleton("Maria Petrova"));
-    expect(nameSkeleton("Цветан Христов")).toBe(nameSkeleton("Tsvetan Hristov"));
+    expect(nameSkeleton("Мария Иванова")).toBe(nameSkeleton("Maria Ivanova"));
+    expect(nameSkeleton("Цветан Цветанов")).toBe(nameSkeleton("Tsvetan Tsvetanov"));
     expect(nameSkeleton("Ivan Ivanov")).not.toBe(nameSkeleton("Ivan Petrov"));
   });
 });
@@ -481,11 +519,11 @@ describe("domain mismatch", () => {
   const known = new Set(DOMAINS);
 
   it("suggests the domain a role names, when that domain exists", () => {
-    expect(suggestDomain("finance", ["Maria Petrova is the COO of Acme Widgets Ltd."], [], known)).toMatchObject({ suggested: "operations", reason: "role" });
+    expect(suggestDomain("finance", ["Maria Ivanova is the COO of Acme Widgets Ltd."], [], known)).toMatchObject({ suggested: "operations", reason: "role" });
     // "coo" inside a word is no COO; a domain the vault lacks is never suggested.
     expect(suggestDomain("finance", ["The cooperation runs well."], [], known)).toBeNull();
     expect(suggestDomain("finance", ["She is our general counsel."], [], known)).toBeNull();
-    expect(suggestDomain("operations", ["Maria Petrova is the COO."], [], known)).toBeNull();
+    expect(suggestDomain("operations", ["Maria Ivanova is the COO."], [], known)).toBeNull();
   });
 
   it("else the domain a clear majority of its linked pages share", () => {
@@ -499,11 +537,11 @@ describe("domain mismatch", () => {
     expect(LINT_RULES).toContain("domain-mismatch");
     const mismatch = report.findings.filter((f) => f.rule === "domain-mismatch");
     expect(mismatch).toEqual([
-      expect.objectContaining({ path: "entities/maria-petrova.md", severity: "warning", blocksCommit: false, details: { domain: "finance", suggested: "operations", reason: "role" } }),
+      expect.objectContaining({ path: "entities/maria-ivanova.md", severity: "warning", blocksCommit: false, details: { domain: "finance", suggested: "operations", reason: "role" } }),
     ]);
     expect(mismatch[0].message).toBe('filed under finance, but its role "COO" points to operations; suggested domain: operations');
     const dup = report.findings.filter((f) => f.rule === "duplicate-entity");
-    expect(dup).toEqual([expect.objectContaining({ path: "entities/maria-petrova-2.md", severity: "warning", details: { canonical: "entities/maria-petrova.md", reason: "suffix" } })]);
+    expect(dup).toEqual([expect.objectContaining({ path: "entities/maria-ivanova-2.md", severity: "warning", details: { canonical: "entities/maria-ivanova.md", reason: "suffix" } })]);
     // Scoped lint judges only the scoped pages.
     expect(lintVault(vault(), { domains: DOMAINS, scope: ["entities/globex-ltd.md"] }).findings.filter((f) => f.rule === "domain-mismatch" || f.rule === "duplicate-entity")).toEqual([]);
   });
@@ -531,7 +569,7 @@ describe("where the summary shows", () => {
       // The body keeps its line, byte for byte: the fallback when the summary goes.
       expect(written.parsed.body).toContain("Globex Ltd is named on 4 pages of this wiki.");
     } finally {
-      fs.rmSync(state, { recursive: true, force: true });
+      dropState(state);
     }
   });
 });

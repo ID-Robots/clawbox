@@ -576,7 +576,8 @@ export function planSummaries(snapshot: Pick<VaultSnapshot, "pages">, options: S
       continue;
     }
     const prior = owner === "ours" ? readSummaryMeta(p.fm) : null;
-    if (prior && prior.hash === hood.hash && !(prior.method === "facts" && options.modelAvailable)) {
+    // A facts' summary is due the model when it can write, unless the model already failed this very neighbourhood.
+    if (prior && prior.hash === hood.hash && !(prior.method === "facts" && !prior.tried && options.modelAvailable)) {
       stats.unchanged++;
       continue;
     }
@@ -593,15 +594,16 @@ export function planSummaries(snapshot: Pick<VaultSnapshot, "pages">, options: S
   return { jobs, stats, duplicates, mismatches };
 }
 
-/** A page's frontmatter with `summary` and its meta set from accepted sentences. */
+/** A page's frontmatter with `summary` and its meta set from accepted sentences (`tried`: the model's own were all rejected). */
 export function withSummary(
   fm: PageFrontmatter,
   accepted: CheckedSummary["accepted"],
   method: SummaryMeta["method"],
   hash: string,
   at: string,
+  tried = false,
 ): PageFrontmatter {
   const text = accepted.map((s) => s.text).join(" ");
-  const meta: SummaryMeta = { by: SUMMARIES_BY, method, hash, digest: summaryDigest(text), at, from: accepted.map((s) => s.refs) };
+  const meta: SummaryMeta = { by: SUMMARIES_BY, method, hash, digest: summaryDigest(text), at, from: accepted.map((s) => s.refs), ...(tried ? { tried: true } : {}) };
   return { ...fm, summary: text, summary_meta: meta };
 }

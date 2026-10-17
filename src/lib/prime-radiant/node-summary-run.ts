@@ -8,10 +8,12 @@
  * cap) is checked against what is left of `summaries.capUsd` before it is
  * made, so a run never spends past the cap, and every call is recorded with
  * `recordCost`. Each answer goes through the check step; a page whose every
- * sentence is rejected gets the summary from its facts' own words instead.
+ * sentence is rejected gets the summary from its facts' own words instead,
+ * marked `tried` so the model is not asked again for the same neighbourhood.
  * Pages the model does not reach (off, offline, the cap, a failed call) get
- * the facts' summary when they have none of ours yet or only a facts' one; a
- * model summary whose neighbourhood changed waits for the model.
+ * the facts' summary when they have none of ours yet or only a facts' one
+ * whose neighbourhood changed; a model summary whose neighbourhood changed,
+ * and a facts' summary only due an upgrade, wait for the model.
  *
  * Duplicate entities come back as MERGE SUGGESTIONS, each planned by the
  * merge tool on the same snapshot without writing anything (edit.ts
@@ -163,14 +165,16 @@ export async function runSummaries(
   const pageOf = new Map(snapshot.pages.map((p) => [p.path, p]));
   const at = now().toISOString();
   const writes: Planned[] = [];
-  const write = (job: SummaryJob, accepted: ReturnType<typeof checkSentences>["accepted"], method: "model" | "facts") => {
+  const write = (job: SummaryJob, accepted: ReturnType<typeof checkSentences>["accepted"], method: "model" | "facts", tried = false) => {
     const page = pageOf.get(job.hood.path);
     if (!page || !page.parsed.ok || accepted.length === 0) return;
-    writes.push({ path: page.path, frontmatter: withSummary(page.parsed.frontmatter, accepted, method, job.hood.hash, at), body: page.parsed.body, expected: page.text });
+    writes.push({ path: page.path, frontmatter: withSummary(page.parsed.frontmatter, accepted, method, job.hood.hash, at, tried), body: page.parsed.body, expected: page.text });
     if (method === "model") result.byModel++;
     else result.byFacts++;
   };
   const fromFacts = (job: SummaryJob) => {
+    // Due the model and not reached: the facts' summary it has stands as it is (writing it again would change nothing but its date).
+    if (job.reason === "upgrade") return;
     // A model summary whose neighbourhood changed is kept until the model can write it again.
     if (job.prior?.method === "model") {
       result.waiting++;
@@ -229,8 +233,9 @@ export async function runSummaries(
       const checked = checkSentences(answer.get(k) ?? [], shown[k]);
       result.rejected += checked.rejected.length;
       if (checked.accepted.length > 0) return write(job, checked.accepted, "model");
+      // Every sentence rejected: the facts write it, and the model is not asked again until the neighbourhood changes.
       result.rejectedPages++;
-      write(job, checkSentences(factsSummary(job.hood), job.hood).accepted, "facts");
+      write(job, checkSentences(factsSummary(job.hood), job.hood).accepted, "facts", true);
     });
   }
   rest.forEach(fromFacts);
