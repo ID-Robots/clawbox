@@ -49,7 +49,7 @@ import { getIngestJob, ingestFinished, IngestBusyError, startIngest } from "./in
 import { isOwnOutput } from "./ingest-sources";
 import { lintVault, type LintFinding } from "./lint";
 import { isKnowledgePage, vaultDir } from "./paths";
-import { repairPluginWritesOnce, restorePluginOnlyEdits } from "./plugin-repair";
+import { adoptPluginPages, repairPluginWritesOnce, restorePluginOnlyEdits } from "./plugin-repair";
 import { notifyVaultChanged } from "./reindex-hook";
 import { addReviewItem, countWaitingForRuns, listReviewItems } from "./review-store";
 import { buildOpusQueue, runOpusTier, type OpusClient, type OpusTierResult } from "./opus";
@@ -334,6 +334,13 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
     }
   } catch (err) {
     notes.push(`memory-wiki's generated files could not be taken out of the vault: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
+  }
+  // Every night, before the branch is cut: a page memory-wiki wrote in its own format becomes a Prime Radiant page.
+  try {
+    const adopt = await adoptPluginPages(vault, now);
+    if (adopt.adopted.length > 0) notes.push(`${adopt.adopted.length} page(s) memory-wiki wrote in its own format were made Prime Radiant pages.`);
+  } catch (err) {
+    notes.push(`The pages memory-wiki wrote in its own format could not be converted: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
   }
 
   const branch = await dreamBranchName(vault, now());

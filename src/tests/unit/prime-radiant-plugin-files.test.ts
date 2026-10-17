@@ -36,7 +36,10 @@ import { parsePage, serializePage } from "@/lib/prime-radiant/frontmatter";
 import { git, headCommit } from "@/lib/prime-radiant/git";
 import { lintVault } from "@/lib/prime-radiant/lint";
 import { isKnowledgePage, vaultDir } from "@/lib/prime-radiant/paths";
+import { isClaimId } from "@/lib/prime-radiant/claims";
+import { editPage } from "@/lib/prime-radiant/edit";
 import {
+  isPluginFormatFrontmatter,
   isPluginOwnedPath,
   isPristineInbox,
   isPristinePluginIndex,
@@ -46,8 +49,15 @@ import {
   stripManagedBlocks,
   withPluginGitignore,
 } from "@/lib/prime-radiant/plugin-files";
-import { pluginRepairDone, REPAIR_COMMIT_MESSAGE, repairPluginWritesOnce, restorePluginOnlyEdits } from "@/lib/prime-radiant/plugin-repair";
-import { ensureVault, readVaultSnapshot, vaultOperation } from "@/lib/prime-radiant/vault";
+import {
+  ADOPT_COMMIT_PREFIX,
+  adoptPluginPages,
+  pluginRepairDone,
+  REPAIR_COMMIT_MESSAGE,
+  repairPluginWritesOnce,
+  restorePluginOnlyEdits,
+} from "@/lib/prime-radiant/plugin-repair";
+import { ensureVault, readPage, readVaultSnapshot, vaultOperation } from "@/lib/prime-radiant/vault";
 import { claim, frontmatter, pageText, snapshot } from "../helpers/prime-radiant-fixtures";
 
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
@@ -257,6 +267,78 @@ async function pollutedVault(): Promise<void> {
   fs.mkdirSync(at("_views"), { recursive: true });
   fs.mkdirSync(at("_attachments/empty"), { recursive: true });
 }
+
+/** A page as the plugin's create_synthesis writes it: its own frontmatter, none of Prime Radiant's contract. */
+const PLUGIN_SYNTHESIS = [
+  "---",
+  "pageType: synthesis",
+  "id: synthesis.acme-roadmap",
+  "title: Acme roadmap",
+  "sourceIds:",
+  "  - source.acme-plan",
+  "status: active",
+  'updatedAt: "2026-03-02T09:00:00.000Z"',
+  "claims:",
+  "  - id: claim.acme.roadmap.green",
+  "    text: Acme Widgets Ltd ships the green widget in the third quarter.",
+  "    status: supported",
+  "    confidence: 0.7",
+  "    evidence:",
+  "      - kind: source",
+  "        sourceId: source.acme-plan",
+  "---",
+  "# Acme roadmap",
+  "",
+  "Acme Widgets Ltd plans the green widget for the third quarter.",
+  "",
+].join("\n");
+
+describe("a page memory-wiki wrote in its own format", () => {
+  it("is told apart from Prime Radiant's own pages (which carry pageType too)", () => {
+    expect(isPluginFormatFrontmatter({ pageType: "synthesis", sourceIds: ["source.x"], status: "active" })).toBe(true);
+    expect(isPluginFormatFrontmatter({ ...frontmatter(), pageType: "concept" })).toBe(false);
+    expect(isPluginFormatFrontmatter({ title: "No kind" })).toBe(false);
+    expect(isPluginFormatFrontmatter(null)).toBe(false);
+  });
+
+  it("never breaks the lint, and the next pass makes it a Prime Radiant page the owner can edit", async () => {
+    await pollutedVault();
+    write("syntheses/acme-roadmap.md", PLUGIN_SYNTHESIS);
+    const report = lintVault(await readVaultSnapshot(), {});
+    expect(report.findings.filter((f) => f.severity === "error")).toEqual([]);
+    expect(report.findings.filter((f) => f.path === "syntheses/acme-roadmap.md").map((f) => [f.rule, f.blocksCommit])).toEqual([["plugin-format", false]]);
+    // Nothing else is held by it: a change to another page commits.
+    await vaultOperation("edit: shipping", async (tx) => tx.write("concepts/shipping.md", SHIPPING.replace("Shipping", "Shipping and returns")));
+
+    const adopted = await adoptPluginPages(vaultDir(), () => new Date("2026-05-20T03:00:00.000Z"));
+    expect(adopted.adopted).toEqual(["syntheses/acme-roadmap.md"]);
+    expect((await headCommit(vaultDir()))?.subject).toBe(`${ADOPT_COMMIT_PREFIX} (1)`);
+    const page = await readPage("syntheses/acme-roadmap.md");
+    expect(page?.parsed.ok).toBe(true);
+    const fm = page!.parsed.ok ? page!.parsed.frontmatter : null;
+    expect(fm).toMatchObject({
+      type: "synthesis",
+      title: "Acme roadmap",
+      status: "draft",
+      sources: ["source.acme-plan"],
+      generated: { at: "2026-03-02T09:00:00.000Z", by: "memory-wiki" },
+      pageType: "synthesis",
+      id: "synthesis.acme-roadmap",
+    });
+    expect(fm!.claims).toHaveLength(1);
+    expect(fm!.claims[0]).toMatchObject({ text: "Acme Widgets Ltd ships the green widget in the third quarter.", status: "supported", confidence: 0.7 });
+    expect(isClaimId(fm!.claims[0].id)).toBe(true);
+    expect(page!.parsed.body).toContain("Acme Widgets Ltd plans the green widget for the third quarter.");
+    expect(read("index.md")).toContain("[[syntheses/acme-roadmap]]");
+    const after = lintVault(await readVaultSnapshot(), {});
+    expect(after.findings.filter((f) => f.severity === "error")).toEqual([]);
+    expect(after.findings.some((f) => f.rule === "plugin-format")).toBe(false);
+
+    // The owner edits it like any page; a second pass has nothing to do.
+    await editPage("syntheses/acme-roadmap.md", { summary: "Acme Widgets Ltd's plan for the green widget." }, { by: "owner", person: true });
+    expect(await adoptPluginPages()).toEqual({ adopted: [], commit: null });
+  });
+});
 
 describe("a vault memory-wiki wrote into", () => {
   it("is read, linted and listed as if the plugin had not been there", async () => {

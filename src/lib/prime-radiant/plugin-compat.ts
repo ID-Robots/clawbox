@@ -16,11 +16,18 @@
  * Applied on every page write (vault.ts `writePage`) and, for pages written
  * before, by {@link migratePluginFrontmatter}.
  *
+ * The other way round, {@link adoptPluginFrontmatter}: a page the plugin wrote
+ * in its own format (plugin-files.ts `isPluginFormatFrontmatter`) is given
+ * Prime Radiant's page contract — its fields kept beside, its claims given
+ * ids in the vault's namespace.
+ *
  * Pure, except the migration.
  */
 
-import type { PageFrontmatter } from "./schema";
+import { allocateClaimId, slugify, type ClaimIndex } from "./claims";
+import { CLAIM_STATUSES, PAGE_TYPES, PRIVACY_TIERS, SLUG_RE, type Claim, type ClaimEvidence, type PageFrontmatter, type PageType } from "./schema";
 import type { VaultSnapshot, VaultTx } from "./vault";
+import { DEFAULT_DOMAIN, DEFAULT_OWNER } from "./writer";
 
 const FOLDER_KINDS: ReadonlyArray<[string, string]> = [
   ["entities/", "entity"],
@@ -120,4 +127,98 @@ export async function migratePluginFrontmatter(
     if (commit) result.commits.push(commit);
   }
   return result;
+}
+
+function isIso(v: unknown): v is string {
+  return typeof v === "string" && /^\d{4}-\d{2}-\d{2}/.test(v) && Number.isFinite(Date.parse(v));
+}
+
+function firstHeading(body: string): string | null {
+  const m = /^#[ \t]+(.+?)[ \t#]*$/m.exec(body);
+  return m ? m[1].trim() : null;
+}
+
+/** The plugin's privacy tier as one of Prime Radiant's: one it shares stays, none is internal, any other is confidential. */
+function privacyOf(raw: Record<string, unknown>): PageFrontmatter["privacy"] {
+  const tier = typeof raw.privacyTier === "string" ? raw.privacyTier.trim().toLowerCase() : "";
+  if ((PRIVACY_TIERS as readonly string[]).includes(tier)) return tier as PageFrontmatter["privacy"];
+  // Any other tier (local-private, sensitive, confirm-before-use) is one the plugin flags for review.
+  return tier === "" ? "internal" : "confidential";
+}
+
+export interface AdoptedPage {
+  frontmatter: PageFrontmatter;
+  /** The plugin's claims that became the page's, with their new ids. */
+  claims: number;
+}
+
+/**
+ * Prime Radiant frontmatter for a page memory-wiki wrote in its own format at
+ * `rel`: `type` from its `pageType` (else its folder's kind), the title it
+ * gave (else the page's first heading, else the file name), the plugin's
+ * `sourceIds` as `sources`, `status: draft` (the plugin's `active` says
+ * nothing a person checked), `generated` by memory-wiki at its `updatedAt`.
+ * Its claims keep their text, confidence and evidence under ids allocated in
+ * the vault's namespace (`ctx.claimIndex` is updated, so the next page sees
+ * them); a claim with no text is dropped. Every other field it wrote is kept
+ * as it was. Pure.
+ */
+export function adoptPluginFrontmatter(rel: string, raw: Record<string, unknown>, body: string, ctx: { claimIndex: ClaimIndex; now: Date }): AdoptedPage {
+  const kind = typeof raw.pageType === "string" ? raw.pageType.trim() : "";
+  const type: PageType = (PAGE_TYPES as readonly string[]).includes(kind)
+    ? (kind as PageType)
+    : (((PAGE_TYPES as readonly string[]).includes(pluginKindFor(rel) ?? "") ? pluginKindFor(rel) : "concept") as PageType);
+  const leaf = rel.split("/").pop()!.replace(/\.md$/, "");
+  const title = (typeof raw.title === "string" && raw.title.trim()) || firstHeading(body) || leaf.replace(/[-_]+/g, " ");
+  const domain = typeof raw.domain === "string" && SLUG_RE.test(raw.domain) && raw.domain.length <= 48 ? raw.domain : DEFAULT_DOMAIN;
+  const at = isIso(raw.updatedAt) ? raw.updatedAt : ctx.now.toISOString();
+  const sources = [...new Set([...stringList(raw.sources), ...stringList(raw.sourceIds)])];
+
+  const claims: Claim[] = [];
+  const used = new Set<string>();
+  const entity = slugify(title, 48);
+  for (const c of Array.isArray(raw.claims) ? raw.claims : []) {
+    if (typeof c !== "object" || c === null || Array.isArray(c)) continue;
+    const pc = c as Record<string, unknown>;
+    const text = typeof pc.text === "string" ? pc.text.replace(/\s+/g, " ").trim() : "";
+    if (text === "") continue;
+    const id = allocateClaimId(ctx.claimIndex, domain, entity, slugify(text, 48), rel, used);
+    used.add(id);
+    const confidence = typeof pc.confidence === "number" && Number.isFinite(pc.confidence) && pc.confidence >= 0 && pc.confidence <= 1 ? pc.confidence : 0.5;
+    const status = typeof pc.status === "string" && (CLAIM_STATUSES as readonly string[]).includes(pc.status) && pc.status !== "verified" ? pc.status : "proposed";
+    const evidence = Array.isArray(pc.evidence) ? (pc.evidence.filter((e) => typeof e === "object" && e !== null && !Array.isArray(e)) as ClaimEvidence[]) : [];
+    const claim: Claim = {
+      id,
+      text,
+      confidence,
+      status: status as Claim["status"],
+      updatedAt: isIso(pc.updatedAt) ? pc.updatedAt : at,
+      evidence: [...evidence.slice(0, 10), { kind: "memory-wiki", note: typeof pc.id === "string" ? `memory-wiki claim ${pc.id.slice(0, 120)}` : "memory-wiki claim" }],
+    };
+    claims.push(claim);
+    const list = ctx.claimIndex.active.get(id) ?? [];
+    list.push({ page: rel, claim });
+    ctx.claimIndex.active.set(id, list);
+  }
+
+  const kept = { ...raw };
+  for (const key of ["status", "claims", "verified", "stale_after", "retiredClaimIds", "checked_by", "opus_pending"]) delete kept[key];
+  const frontmatter: PageFrontmatter = {
+    ...kept,
+    type,
+    title: title.slice(0, 200),
+    domain,
+    owner: typeof raw.owner === "string" && raw.owner.trim() ? raw.owner.trim() : DEFAULT_OWNER,
+    status: "draft",
+    generated: { at, by: "memory-wiki" },
+    verified: null,
+    stale_after: null,
+    sources,
+    privacy: privacyOf(raw),
+    checked_by: "flash",
+    opus_pending: false,
+    claims,
+    retiredClaimIds: [],
+  };
+  return { frontmatter, claims: claims.length };
 }
