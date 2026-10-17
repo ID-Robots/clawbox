@@ -50,6 +50,16 @@ describe("reconcileStaleText", () => {
     expect(without.body).toBe("Summary.\n\n## Key facts\n\n- Globex is in Springfield.\n- Globex pays suppliers within 45 days.\n");
   });
 
+  it("reads a page written with CRLF line endings, and keeps them", () => {
+    const body = "Globex pays suppliers within 30 days.\r\n\r\n## Key facts\r\n\r\n- Globex pays suppliers within 30 days.\r\n- Globex is in Springfield.\r\n";
+    const r = reconcileStaleText(body, [FACT], "concepts/terms.md", "concepts/terms.md");
+    expect(r).toMatchObject({ keyFacts: 1, stale: 1 });
+    expect(r.body).toBe(
+      `Globex pays suppliers within 30 days.\r\n\r\n${STALE_NOTE_PREFIX} this said "Globex pays suppliers within 30 days."; the verified fact is "Globex pays suppliers within 45 days."\r\n\r\n## Key facts\r\n\r\n- Globex pays suppliers within 45 days.\r\n- Globex is in Springfield.\r\n`,
+    );
+    expect(reconcileStaleText(r.body, [FACT], "concepts/terms.md", "concepts/terms.md").body).toBe(r.body);
+  });
+
   it("is idempotent: a second pass over its own output changes nothing", () => {
     const body = "Globex pays suppliers within 30 days.\n\n## Key facts\n\n- Globex pays suppliers within 30 days.\n";
     const once = reconcileStaleText(body, [FACT], "concepts/terms.md", "concepts/policy.md").body;

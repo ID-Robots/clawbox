@@ -123,7 +123,9 @@ export function reconcileStaleText(
     .filter((m) => here || flat.includes(m.before) || (m.changed.size > 0 && [...m.changed].every((w) => flat.includes(w))));
   const result: StaleTextResult = { body, keyFacts: 0, stale: 0 };
   if (matchers.length === 0) return result;
-  const lines = body.split("\n");
+  // A page written with CRLF keeps them: read line by line without the CR, written back with it.
+  const eol = body.includes("\r\n") ? "\r\n" : "\n";
+  const lines = body.split(/\r?\n/);
   const out: string[] = [];
   let section: string | null = null;
   let inFence = false;
@@ -230,6 +232,6 @@ export function reconcileStaleText(
       result.keyFacts += missing.length;
     }
   }
-  result.body = out.join("\n");
+  result.body = out.join(eol);
   return result;
 }
