@@ -162,6 +162,22 @@ describe("memory-wiki wiring plan", () => {
     expect(pluginVaultNow(wired({}, { path: "relative/wiki" }))).toBeNull();
   });
 
+  // Never re-point what was not seen to be empty.
+  it("counts a vault it cannot read, or one holding a link, as holding pages", async () => {
+    const linked = folder(SCAFFOLD);
+    fs.symlinkSync(path.join(tmp, "elsewhere.md"), path.join(linked, "concepts", "acme-plan.md"));
+    expect(await vaultHoldsPages(linked)).toBe(true);
+    // Root reads through a mode of 000, so only a non-root run can see the refusal.
+    if (process.getuid?.() === 0) return;
+    const closed = folder(SCAFFOLD);
+    fs.chmodSync(path.join(closed, "concepts"), 0o000);
+    try {
+      expect(await vaultHoldsPages(closed)).toBe(true);
+    } finally {
+      fs.chmodSync(path.join(closed, "concepts"), 0o700);
+    }
+  });
+
   it("treats a ~/ path to the same folder as the same vault", () => {
     const home = process.env.HOME;
     process.env.HOME = "/srv/box";
