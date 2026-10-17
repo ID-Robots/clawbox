@@ -8,15 +8,16 @@
  *  1. SAME DOCUMENT: the two pages are versions of one document, a draft and
  *     its final, a copy and its original (versions.ts). Their claims differ
  *     where the versions do; that is no question for the owner.
- *     SAME HUB: the two pages are record leaves of one monthly hub (two
- *     invoices of September, two receipts of one month — records.ts,
- *     structure.ts). They are alike because the documents are, and a
- *     company's VAT number on both is no shared document.
  *  2. DIFFERENT SUBJECTS by identifiers (identifiers.ts): different
  *     references (invoice, waybill, transfer numbers, company ids), different
  *     days or months, two records with no reference in common. A reference
  *     both sides share means one thing, and from here on nothing below can
  *     part the pair by its words.
+ *  2b. SAME HUB: the two pages are record leaves of one monthly hub (two
+ *     invoices of September, two receipts of one month — records.ts,
+ *     structure.ts), and nothing above parted them: they are alike because
+ *     the documents are, and a company's VAT number on both is a shared
+ *     reference but no shared document.
  *  3. SUPERSEDED (validity.ts): one claim sits on a deprecated page, or is
  *     historical, and the other is current; or their periods do not overlap
  *     (as of 12.10 against as of 14.10, the 2023 accounts against the 2025
@@ -86,12 +87,12 @@ const IDENTIFIER_CODES: Readonly<Record<string, NoPairCode>> = {
 /** Why two claims may not be judged as a pair, or null when they may (see the module comment). */
 export function noPairReason(a: PairClaim, b: PairClaim): NoPair | null {
   if (a.version && a.version === b.version) return { code: "same-document", detail: "same document: draft vs final" };
-  if (a.hub && a.hub === b.hub) return { code: "same-hub", detail: `two records of one monthly hub (${a.hub})` };
   const shared = !!a.ids && !!b.ids && sharedReference(a.ids.ref, b.ids.ref);
   if (!shared && a.ids && b.ids) {
     const why = differentSubjects(a.ids, b.ids);
     if (why) return { code: IDENTIFIER_CODES[why] ?? "different-identifiers", detail: why };
   }
+  if (a.hub && a.hub === b.hub) return { code: "same-hub", detail: `two records of one monthly hub (${a.hub})` };
   if (!!a.deprecated !== !!b.deprecated) {
     return { code: "superseded-deprecated", detail: "a claim on a deprecated page against a current one", current: a.deprecated ? "b" : "a" };
   }

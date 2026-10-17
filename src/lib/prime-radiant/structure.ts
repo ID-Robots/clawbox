@@ -617,8 +617,12 @@ export function planStructure(snapshot: Pick<VaultSnapshot, "pages" | "indexBody
   const registerTitle = "Decisions register";
   const registerPlace = decisions.length > 0 ? placeFor({ kind: "decisions" }, registerTitle) : null;
 
-  // Inbound links (content pages only), for the top entities.
-  const inboundOf = (path: string) => [...(graphBefore.inbound.get(path) ?? [])].filter((x) => isContentPage(x) && x !== path).length;
+  // Inbound links for the top entities, over the vault WITHOUT what this pass wrote (its pages, a leaf's link
+  // block): a re-run counts what the first run counted, so it plans the same pages.
+  const structurePaths = new Set(pages.filter((p) => readStructureMeta(p.fm)).map((p) => p.path));
+  const graphBase = buildLinkGraph(pages.filter((p) => !structurePaths.has(p.path)).map((p) => ({ path: p.path, title: p.fm.title, body: stripRecordBlock(p.body) })), null);
+  const linkingTo = (path: string) => [...(graphBase.inbound.get(path) ?? [])].filter((x) => x !== path);
+  const inboundOf = (path: string) => linkingTo(path).filter(isContentPage).length;
   const entities = pages.filter((p) => isEntity(p) && !readStructureMeta(p.fm)).map((p) => ({ page: p, inbound: inboundOf(p.path) }));
   entities.sort((a, b) => b.inbound - a.inbound || a.page.path.localeCompare(b.page.path));
 
@@ -699,12 +703,29 @@ export function planStructure(snapshot: Pick<VaultSnapshot, "pages" | "indexBody
     return hubByPath.get(path)?.title ?? titleOf(path);
   }
 
-  // ── the leaves: frontmatter `record` and the link up ──
+  // ── the leaves: frontmatter `record`, the link up, the counterparty and the neighbours in the hub ──
+  const entityByName = new Map<string, string>();
+  for (const e of entities) for (const n of [e.page.fm.title, ...stringList(e.page.fm.aliases)]) if (normName(n).length >= 3 && !entityByName.has(normName(n))) entityByName.set(normName(n), e.page.path);
+  const neighbours = new Map<string, { prev: Leaf | null; next: Leaf | null }>();
+  for (const h of hubs) {
+    if ((h.meta.part ?? 1) !== 1) continue;
+    // One list across its parts, in date order.
+    const list = h.siblings.flatMap((s) => hubByPath.get(s)?.leaves ?? []);
+    list.forEach((l, i) => neighbours.set(l.page.path, { prev: list[i - 1] ?? null, next: list[i + 1] ?? null }));
+  }
   for (const l of leaves) {
     const hub = hubOfLeaf.get(l.page.path) ?? null;
     const record = { type: l.info.type, month: l.info.month, ...(hub ? { hub: hub.path } : {}), by: l.info.by };
-    const line = hub ? `Filed under [[${hub.path.replace(/\.md$/, "")}]] — ${cell(hub.title, 80)}.` : "";
-    const body = upsertBlock(l.page.body, RECORD_START, RECORD_END, line);
+    const lines: string[] = [];
+    if (hub) {
+      lines.push(`- Filed under [[${hub.path.replace(/\.md$/, "")}]] — ${cell(hub.title, 80)}`);
+      const party = l.info.counterparty ? entityByName.get(normName(l.info.counterparty)) : undefined;
+      if (party && party !== l.page.path) lines.push(`- Counterparty: [[${party.replace(/\.md$/, "")}]] — ${cell(titleOf(party), 80)}`);
+      const near = neighbours.get(l.page.path);
+      if (near?.prev) lines.push(`- Previous: [[${near.prev.page.path.replace(/\.md$/, "")}]] — ${cell(near.prev.page.fm.title, 80)}`);
+      if (near?.next) lines.push(`- Next: [[${near.next.page.path.replace(/\.md$/, "")}]] — ${cell(near.next.page.fm.title, 80)}`);
+    }
+    const body = upsertBlock(l.page.body, RECORD_START, RECORD_END, lines.join("\n"));
     const fm: PageFrontmatter = { ...l.page.fm, record };
     next.set(l.page.path, { fm, body, created: false });
   }
@@ -729,7 +750,7 @@ export function planStructure(snapshot: Pick<VaultSnapshot, "pages" | "indexBody
   const entityPaths = new Set(entities.map((e) => e.page.path));
   for (const { page: ent } of top) {
     const names = new Set([ent.fm.title, ...stringList(ent.fm.aliases)].map(normName).filter((n) => n.length >= 3));
-    const linking = [...(graphBefore.inbound.get(ent.path) ?? [])].filter((x) => x !== ent.path);
+    const linking = linkingTo(ent.path);
     const recs = new Map<string, Leaf>();
     for (const x of linking) {
       const l = leafByPath.get(x);
@@ -750,7 +771,7 @@ export function planStructure(snapshot: Pick<VaultSnapshot, "pages" | "indexBody
     }
     // Who it appears with: other entities the same pages link to.
     const co = new Map<string, number>();
-    for (const x of linking) for (const t of graphBefore.outbound.get(x) ?? []) if (t !== ent.path && entityPaths.has(t)) co.set(t, (co.get(t) ?? 0) + 1);
+    for (const x of linking) for (const t of graphBase.outbound.get(x) ?? []) if (t !== ent.path && entityPaths.has(t)) co.set(t, (co.get(t) ?? 0) + 1);
     const withWhom = [...co.entries()].filter(([, n]) => n >= 2).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 3).map(([t]) => cell(titleOf(t), 50));
     if (withWhom.length > 0) {
       const list = withWhom.length === 1 ? withWhom[0] : `${withWhom.slice(0, -1).join(", ")} and ${withWhom[withWhom.length - 1]}`;
@@ -817,7 +838,8 @@ export function planStructure(snapshot: Pick<VaultSnapshot, "pages" | "indexBody
     const members = pagesByDomain.get(name) ?? [];
     const types = new Map<string, number>();
     for (const p of members) types.set(p.fm.type, (types.get(p.fm.type) ?? 0) + 1);
-    const claimsAll = members.flatMap((p) => p.fm.claims.filter((c) => c.status !== "contested").map((c) => ({ c, p })));
+    // The pass's own enrichment claims are no evidence for a hub (and would change it on every re-run).
+    const claimsAll = members.flatMap((p) => p.fm.claims.filter((c) => c.status !== "contested" && c.origin !== STRUCTURE_BY).map((c) => ({ c, p })));
     const verified = claimsAll.filter(({ c, p }) => ownerVerified(c, p.fm)).length;
     const domainLeaves = leaves.filter((l) => l.page.fm.domain === name);
     const months = domainLeaves.map((l) => l.info.month).sort();

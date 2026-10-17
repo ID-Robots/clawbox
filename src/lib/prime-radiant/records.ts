@@ -161,10 +161,10 @@ export function titleRecordType(title: string): RecordType | null {
   return TITLE_KINDS.find(([, re]) => re.test(title))?.[0] ?? null;
 }
 
-/** The type most of a page's facts name next to a reference; null when none does, or two tie. */
-export function claimsRecordType(claimTexts: readonly string[]): RecordType | null {
+/** The type most of a page's facts name next to a reference (theirs, or one in the page's title); null when none does, or two tie. */
+export function claimsRecordType(claimTexts: readonly string[], titleHasRef = false): RecordType | null {
   const votes = new Map<RecordType, number>();
-  let referenced = false;
+  let referenced = titleHasRef;
   for (const text of claimTexts) {
     const type = AD_WORDS.test(text) && BILLING_WORDS.test(text) ? "ad-receipt" : CLAIM_KINDS.find(([, re]) => re.test(text))?.[0];
     if (!type) continue;
@@ -334,7 +334,7 @@ export function classifyRecord(path: string, fm: PageFrontmatter, options: Class
   } else {
     type = titleRecordType(fm.title);
     if (!type && !topicTitle(fm.title)) {
-      type = claimsRecordType(claimTexts);
+      type = claimsRecordType(claimTexts, titleIdentifiers(fm.title).ref.size > 0);
       via = "claims";
     }
     if (!type && options.assign) {
