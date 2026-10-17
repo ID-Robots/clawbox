@@ -50,6 +50,27 @@ describe("reconcileStaleText", () => {
     expect(without.body).toBe("Summary.\n\n## Key facts\n\n- Globex is in Springfield.\n- Globex pays suppliers within 45 days.\n");
   });
 
+  it("lists the verified fact once when its bullet comes after the superseded one", () => {
+    const body = "Summary.\n\n## Key facts\n\n- Globex pays suppliers within 30 days.\n- Globex pays suppliers within 45 days.\n- Globex is in Springfield.\n";
+    const r = reconcileStaleText(body, [FACT], "concepts/terms.md", "concepts/terms.md");
+    expect(r.body).toBe("Summary.\n\n## Key facts\n\n- Globex pays suppliers within 45 days.\n- Globex is in Springfield.\n");
+  });
+
+  it("keeps an older note about another fact of the same paragraph", () => {
+    const price = { before: "The blue widget costs 10 EUR.", after: "The blue widget costs 12 EUR." };
+    const shipping = { before: "The blue widget ships within 3 days.", after: "The blue widget ships within 5 days." };
+    const body = "The blue widget costs 10 EUR and ships within 3 days.\n";
+    const once = reconcileStaleText(body, [price], "concepts/widget.md", "concepts/pricing.md").body;
+    expect(once).toContain('this said "The blue widget costs 10 EUR."');
+    const twice = reconcileStaleText(once, [shipping], "concepts/widget.md", "concepts/shipping.md").body;
+    // Both stale values are still said to be stale: the price note was not dropped for the shipping one.
+    expect(twice).toContain('this said "The blue widget costs 10 EUR."');
+    expect(twice).toContain('this said "The blue widget ships within 3 days."');
+    expect(twice.match(/\*\*Stale:\*\*/g)).toHaveLength(2);
+    // And a pass that says the same again still writes one note per fact.
+    expect(reconcileStaleText(twice, [shipping], "concepts/widget.md", "concepts/shipping.md").body).toBe(twice);
+  });
+
   it("reads a page written with CRLF line endings, and keeps them", () => {
     const body = "Globex pays suppliers within 30 days.\r\n\r\n## Key facts\r\n\r\n- Globex pays suppliers within 30 days.\r\n- Globex is in Springfield.\r\n";
     const r = reconcileStaleText(body, [FACT], "concepts/terms.md", "concepts/terms.md");

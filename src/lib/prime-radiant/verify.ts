@@ -18,7 +18,10 @@
  *     text, a losing claim's) says so ({@link reconcileStaleText}): its
  *     "## Key facts" bullet becomes the verified text, and a prose paragraph
  *     that states the old value gets a `> **Stale:**` note naming the
- *     verified fact — so no page reads the old value as current.
+ *     verified fact — so no page reads the old value as current. A page
+ *     touched only for its text that already breaks a blocking rule (a
+ *     secret, a claim id another page holds) keeps its text: the
+ *     verification is never refused for a page it does not otherwise change.
  *
  * A claim id that is on no page yet is written to `page` (the caller names
  * where a new answer goes), provided the id was never retired.
@@ -42,6 +45,7 @@
 
 import { buildClaimIndex, isClaimId, nowIso, retireClaimsOnPage } from "./claims";
 import { verifiedTrailers, type VaultAuthor } from "./git";
+import { lintVault } from "./lint";
 import { safePagePath, vaultDir } from "./paths";
 import { ASSISTANT_VERIFIER, OWNER_VERIFIER, VIA_ASSISTANT, type Claim, type ClaimEvidence, type PageFrontmatter } from "./schema";
 import { reconcileStaleText, type SupersededFact } from "./stale-text";
@@ -214,13 +218,26 @@ export async function verifyClaim(input: VerifyInput): Promise<VerifyResult> {
           if (removed || (c.id === claimId && page.path === target)) superseded.push({ before: c.text, after: text });
         }
       }
+      // Every page whose text states what was superseded says so: its Key facts re-rendered, its prose noted.
+      const carriesFact = (page: (typeof valid)[number]) =>
+        page.path === target || page.frontmatter.claims.some((c) => retireSet.has(c.id) || (page.path !== target && c.id === claimId));
+      const bodies = new Map(valid.map((page) => [page.path, reconcileStaleText(page.body, superseded, page.path, target).body]));
+      // A page touched only for its text that already breaks a blocking rule (a secret, a claim id
+      // another page holds) keeps its text: the verification is never refused for a page it does not change.
+      const textOnly = valid.filter((page) => !carriesFact(page) && bodies.get(page.path) !== page.body).map((page) => page.path);
+      const refused =
+        textOnly.length === 0
+          ? new Set<string>()
+          : new Set(
+              lintVault(snapshot, { scope: textOnly, ledgerRetired: ledger(tx.vault) })
+                .findings.filter((f) => f.blocksCommit)
+                .map((f) => f.path),
+            );
       for (const page of valid) {
         const isTarget = page.path === target;
-        const carries = page.frontmatter.claims.some((c) => retireSet.has(c.id) || (!isTarget && c.id === claimId));
-        // Every page whose text states what was superseded says so: its Key facts re-rendered, its prose noted.
-        const body = reconcileStaleText(page.body, superseded, page.path, target).body;
-        if (!carries && !isTarget) {
-          if (body !== page.body) await tx.writePage(page.path, page.frontmatter, body);
+        const body = bodies.get(page.path) ?? page.body;
+        if (!carriesFact(page)) {
+          if (body !== page.body && !refused.has(page.path)) await tx.writePage(page.path, page.frontmatter, body);
           continue;
         }
         let fm: PageFrontmatter = page.frontmatter;

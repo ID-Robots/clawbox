@@ -338,6 +338,29 @@ describe("a page memory-wiki wrote in its own format", () => {
     expect(validateFrontmatter(bare).ok).toBe(true);
   });
 
+  it("converts the pages it can, and leaves out one the commit would be refused for", async () => {
+    await pollutedVault();
+    write("syntheses/acme-roadmap.md", PLUGIN_SYNTHESIS);
+    // A synthetic token shape, built so no literal credential sits in the file.
+    const token = "ghp" + "_" + "Ab3dE5gH7jK9mN1pQ3rS5tU7vW9xY1zA3bC5";
+    write("syntheses/acme-keys.md", PLUGIN_SYNTHESIS.replace("id: synthesis.acme-roadmap", "id: synthesis.acme-keys").replace("plans the green widget", `stores ${token} for the green widget`));
+    // A field of its own that breaks the page contract even converted.
+    write("syntheses/acme-old.md", PLUGIN_SYNTHESIS.replace("id: synthesis.acme-roadmap", "id: synthesis.acme-old\nversion_of: 7"));
+
+    const adopted = await adoptPluginPages(vaultDir(), () => new Date("2026-05-20T03:00:00.000Z"));
+    expect(adopted.adopted).toEqual(["syntheses/acme-roadmap.md"]);
+    expect((await headCommit(vaultDir()))?.subject).toBe(`${ADOPT_COMMIT_PREFIX} (1)`);
+    expect((await readPage("syntheses/acme-roadmap.md"))?.parsed.ok).toBe(true);
+    // The two left out are as the plugin wrote them, still a warning (and the secret its own error).
+    expect(read("syntheses/acme-keys.md")).toContain("pageType: synthesis");
+    expect(read("syntheses/acme-old.md")).toContain("version_of: 7");
+    const report = lintVault(await readVaultSnapshot(), {});
+    expect(report.findings.filter((f) => f.rule === "plugin-format").map((f) => f.path).sort()).toEqual(["syntheses/acme-keys.md", "syntheses/acme-old.md"]);
+    expect(report.findings.filter((f) => f.blocksCommit).map((f) => [f.rule, f.path])).toEqual([["secret-pattern", "syntheses/acme-keys.md"]]);
+    // A second pass has nothing more it can do, and commits nothing.
+    expect(await adoptPluginPages()).toEqual({ adopted: [], commit: null });
+  });
+
   it("never breaks the lint, and the next pass makes it a Prime Radiant page the owner can edit", async () => {
     await pollutedVault();
     write("syntheses/acme-roadmap.md", PLUGIN_SYNTHESIS);

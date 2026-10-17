@@ -49,6 +49,8 @@ import {
 import { buildClaimIndex } from "./claims";
 import { adoptPluginFrontmatter } from "./plugin-compat";
 import { isPluginFormatFrontmatter } from "./plugin-files";
+import { scanSecrets } from "./redact";
+import { validateFrontmatter } from "./schema";
 import { readRetiredLedger, stateDbExists, withStateDb } from "./state-db";
 import { INDEX_FILE, readVaultSnapshot, vaultInitialised, vaultOperation } from "./vault";
 import { addToIndex } from "./writer";
@@ -298,9 +300,11 @@ export interface PluginAdoptResult {
 /**
  * Make every page memory-wiki wrote in its own format a Prime Radiant page, in
  * ONE commit: the plugin's fields kept, the page contract added, its claims
- * given ids in the vault's namespace, the page listed in `index.md`. Nothing
- * to do is no commit. Throws what the vault operation throws (a page holding
- * a secret is refused by the lint like any other change).
+ * given ids in the vault's namespace, the page listed in `index.md`. A page
+ * the commit would be refused for — one holding a secret, one whose own
+ * fields break the contract even converted — is left as it is (still a
+ * warning, its own error said by the lint), so it never holds the others
+ * back. Nothing to do is no commit. Throws what the vault operation throws.
  */
 export async function adoptPluginPages(vault: string = vaultDir(), now: () => Date = () => new Date()): Promise<PluginAdoptResult> {
   if (!(await vaultInitialised(vault))) return { adopted: [], commit: null };
@@ -314,7 +318,7 @@ export async function adoptPluginPages(vault: string = vaultDir(), now: () => Da
     ledger = [];
   }
   const op = await vaultOperation(
-    `${ADOPT_COMMIT_PREFIX} (${count})`,
+    (paths: string[]) => `${ADOPT_COMMIT_PREFIX} (${paths.length})`,
     async (tx) => {
       // Read under the lock: what the commit changes is what is on disk now.
       const snapshot = await tx.snapshot();
@@ -323,7 +327,12 @@ export async function adoptPluginPages(vault: string = vaultDir(), now: () => Da
       const adopted: Array<{ path: string; title: string }> = [];
       for (const page of snapshot.pages) {
         if (page.parsed.ok || !isPluginFormatFrontmatter(page.parsed.raw)) continue;
+        // A page the commit would be refused for stays as it is and never holds the others back: one
+        // holding a secret (its secret-pattern error says why), or one whose own fields still break
+        // the page contract once converted.
+        if (scanSecrets(page.text).length > 0) continue;
         const { frontmatter } = adoptPluginFrontmatter(page.path, page.parsed.raw as Record<string, unknown>, page.parsed.body, { claimIndex, now: now() });
+        if (!validateFrontmatter(frontmatter).ok) continue;
         await tx.writePage(page.path, frontmatter, page.parsed.body);
         adopted.push({ path: page.path, title: frontmatter.title });
       }

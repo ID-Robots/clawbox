@@ -215,10 +215,14 @@ export async function revertCommit(
     try {
       commit = await commitPaths(vault, `revert: ${sha.slice(0, 12)} ${subject}`, staged, options.author);
     } catch (err) {
-      await git(vault, ["reset", "--quiet", "--hard", "HEAD"], { allowFail: true });
-      // Answer what git said, not a generic "could not be read".
-      const detail = err instanceof Error ? err.message : String(err);
-      throw new HistoryError("commit_failed", `The undo could not be committed: ${detail}`, 500);
+      const reset = await git(vault, ["reset", "--quiet", "--hard", "HEAD"], { allowFail: true });
+      // Answer what git said, not a generic "could not be read" — and say so when putting the vault back failed too.
+      const detail = (err instanceof Error ? err.message : String(err)).replace(/[.\s]+$/, "");
+      const recovery =
+        reset.code === 0
+          ? " The vault is as it was."
+          : ` Putting the vault back failed too (${(reset.stderr || reset.stdout).trim().split("\n").slice(-1)[0] || `exit ${reset.code}`}); it may still hold the undo's uncommitted changes.`;
+      throw new HistoryError("commit_failed", `The undo could not be committed: ${detail}.${recovery}`, 500);
     }
     // Retirements the reverted pages list are the ledger's too.
     const retired: Array<{ id: string; page: string }> = [];

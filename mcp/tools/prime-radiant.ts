@@ -173,7 +173,10 @@ const NEXT: Record<string, { code: ToolErrorCode; next: string }> = {
   invalid_page: { code: "CONFLICT", next: "Tell the user the page needs fixing by hand; prime_radiant_lint says what is wrong." },
   conflict: { code: "CONFLICT", next: "A later change touched the same lines: undo the later commit first, or edit the page instead." },
   nothing_to_revert: { code: "CONFLICT", next: "Check what that commit did with prime_radiant_diff." },
-  commit_failed: { code: "CONFLICT", next: "Do not retry; tell the user what git said — the vault is unchanged." },
+  commit_failed: {
+    code: "CONFLICT",
+    next: "Do not retry; tell the user what git said. When it says the vault could not be put back, check prime_radiant_status and prime_radiant_history before any other change.",
+  },
   dirty: { code: "CONFLICT", next: "Try again in a moment, once." },
   already_resolved: { code: "CONFLICT", next: "List the queue again with prime_radiant_review_list." },
   no_claim: { code: "CONFLICT", next: "That item is about no single claim: dismiss it once it has been dealt with." },

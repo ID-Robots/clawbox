@@ -193,6 +193,28 @@ describe("verify", () => {
     expect(pricingAgain.match(/> \*\*Stale:\*\*/g)).toHaveLength(1);
   });
 
+  it("is never refused for a page it would touch only for its text when that page already breaks a blocking rule", async () => {
+    const leaky = `Our flyer says a blue widget costs 12 EUR. The key is ${FAKE_TOKEN}.\n`;
+    await vaultOperation(
+      "seed: pages",
+      async (tx) => {
+        await tx.write("concepts/pricing.md", pageText({ claims: [PRICE_A] }, "Summary.\n\n## Key facts\n\n- A blue widget costs 10 EUR.\n"));
+        await tx.write("concepts/shipping.md", pageText({ title: "Catalogue", claims: [PRICE_B] }));
+        // A page with a secret in it (written before the rule held): it states the losing value and carries no claim.
+        await tx.write("concepts/flyer.md", pageText({ title: "Flyer" }, leaky));
+        await tx.write("index.md", INDEX);
+      },
+      { lint: false },
+    );
+    const r = await verifyClaim({ claimId: PRICE_A.id, text: "A blue widget costs 11 EUR.", by: "owner", retire: [PRICE_B.id] });
+    expect([...r.changed].sort()).toEqual(["concepts/pricing.md", "concepts/shipping.md"]);
+    const pricing = await readPage("concepts/pricing.md");
+    expect(pricing!.parsed.ok && pricing!.parsed.body).toContain("- A blue widget costs 11 EUR.");
+    // The leaky page is as it was: its own error is the lint's to report, not this verification's to refuse.
+    const flyer = await readPage("concepts/flyer.md");
+    expect(flyer!.parsed.ok && flyer!.parsed.body.trim()).toBe(leaky.trim());
+  });
+
   it("removes a colliding copy of the kept id without retiring it", async () => {
     await vaultOperation(
       "seed: collision",

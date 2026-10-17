@@ -135,8 +135,10 @@ export function reconcileStaleText(
   const listed = new Set<string>();
   /** The prose paragraph being read (its lines are in `out` already). */
   let paragraph: string[] = [];
-  /** The paragraph that closed last got a note from this pass: an older note under it goes. */
+  /** The paragraph that closed last got a note from this pass: an older note under it saying the same goes. */
   let noted = false;
+  /** How that note begins (`> **Stale:** this said "…";`): an older one about another fact stays. */
+  let notedSaid = "";
 
   const note = (m: Matcher) =>
     `${STALE_NOTE_PREFIX} this said ${quoted(m.fact.before)}; the verified fact is ${quoted(m.fact.after)}${here ? "" : ` (${linkTo(verifiedOn)})`}`;
@@ -149,6 +151,7 @@ export function reconcileStaleText(
     const m = matchers.find((x) => statesIt(text, x));
     noted = !!m;
     if (!m) return;
+    notedSaid = `${STALE_NOTE_PREFIX} this said ${quoted(m.fact.before)};`;
     out.push("", note(m));
     result.stale++;
   };
@@ -171,7 +174,7 @@ export function reconcileStaleText(
       continue;
     }
     if (line.startsWith(STALE_NOTE_PREFIX) && paragraph.length === 0) {
-      if (noted) {
+      if (noted && line.startsWith(notedSaid)) {
         // Replaced by the note this pass just wrote above it: the blank lines between them go too.
         while (out.length > 0 && out[out.length - 1].trim() === "") out.pop();
         continue;
@@ -200,7 +203,13 @@ export function reconcileStaleText(
       if (bullet) {
         const m = matchers.find((x) => norm(bullet[2]) === x.before);
         if (!m) {
-          if (here) listed.add(norm(bullet[2]));
+          const key = norm(bullet[2]);
+          // The verified text, listed already from a superseded bullet above it: this copy goes.
+          if (here && listed.has(key) && matchers.some((x) => norm(x.fact.after) === key)) {
+            factsEnd = out.length;
+            continue;
+          }
+          if (here) listed.add(key);
           out.push(line);
         } else {
           const after = m.fact.after.replace(/\s+/g, " ").trim();

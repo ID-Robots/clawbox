@@ -9,12 +9,19 @@ import os from "os";
 import path from "path";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-/** How many of the next vault commits fail. */
-const commitFault = vi.hoisted(() => ({ failures: 0 }));
+/** How many of the next vault commits fail, and how many of the next `git reset --hard` (the putting back). */
+const commitFault = vi.hoisted(() => ({ failures: 0, resetFailures: 0 }));
 vi.mock("@/lib/prime-radiant/git", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/prime-radiant/git")>();
   return {
     ...actual,
+    git: async (...args: Parameters<typeof actual.git>) => {
+      if (commitFault.resetFailures > 0 && args[1][0] === "reset" && args[1].includes("--hard")) {
+        commitFault.resetFailures -= 1;
+        return { code: 128, stdout: "", stderr: "fatal: Unable to write new index file", signal: null, timedOut: false, startFailed: false };
+      }
+      return actual.git(...args);
+    },
     commitPaths: async (...args: Parameters<typeof actual.commitPaths>) => {
       if (commitFault.failures > 0) {
         commitFault.failures -= 1;
@@ -39,6 +46,7 @@ let n = 0;
 
 beforeEach(async () => {
   commitFault.failures = 0;
+  commitFault.resetFailures = 0;
   process.env.PRIME_RADIANT_DIR = path.join(base, `case-${++n}`);
   await ensureVault();
 });
@@ -62,6 +70,7 @@ describe("an undo whose commit fails", () => {
     expect(err).toBeInstanceOf(HistoryError);
     expect(err).toMatchObject({ code: "commit_failed", status: 500 });
     expect((err as HistoryError).message).toContain("index.lock");
+    expect((err as HistoryError).message).toContain("The vault is as it was.");
 
     // Nothing half-done: the same head, the page still there, nothing staged or deleted on disk.
     expect((await headCommit(vaultDir()))!.sha).toBe(head);
@@ -73,5 +82,22 @@ describe("an undo whose commit fails", () => {
     const undone = await revertCommit({ sha: ingest.commit! });
     expect(undone.commit).toBeTruthy();
     expect(await showFileAt(vaultDir(), "HEAD", "entities/globex.md")).toBeNull();
+  });
+
+  it("says so when putting the vault back failed too, instead of claiming it is unchanged", async () => {
+    const ingest = await vaultOperation("ingest: 1 document", async (tx) => {
+      await tx.write("entities/globex.md", pageText({ title: "Globex", claims: [claim("globex/profile/founded", "Globex was founded in 1990.")] }));
+      await tx.write("index.md", "# Index\n\n- [[entities/globex]]\n");
+    });
+    commitFault.failures = 1;
+    commitFault.resetFailures = 1;
+    const err = await revertCommit({ sha: ingest.commit! }).catch((e: unknown) => e);
+    expect(err).toMatchObject({ code: "commit_failed", status: 500 });
+    const message = (err as HistoryError).message;
+    expect(message).toContain("index.lock");
+    expect(message).toContain("Putting the vault back failed too (fatal: Unable to write new index file)");
+    expect(message).not.toContain("The vault is as it was.");
+    // What was left is real: the undo's deletion still staged, as the message says.
+    expect((await git(vaultDir(), ["status", "--porcelain"])).stdout).toContain("entities/globex.md");
   });
 });
