@@ -492,7 +492,12 @@ function Daily({ revision, onOpenPage, onOpenReview }: Pick<Props, "revision" | 
 /** A whole number typed in a small field, saved when the field is left with a new value in range. */
 function NumberSetting({ label, value, min, max, disabled, onSave, testId }: { label: string; value: number; min: number; max: number; disabled: boolean; onSave: (n: number) => void; testId: string }) {
   const [text, setText] = useState(String(value));
-  useEffect(() => setText(String(value)), [value]);
+  // A new saved value replaces what the field shows, adjusted while rendering rather than in an effect.
+  const [shown, setShown] = useState(value);
+  if (shown !== value) {
+    setShown(value);
+    setText(String(value));
+  }
   const commit = () => {
     const n = Number(text);
     if (Number.isInteger(n) && n >= min && n <= max && n !== value) onSave(n);
