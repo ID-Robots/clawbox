@@ -68,3 +68,23 @@ async function resolveInsideBrowseRoot(
     return { ok: false, status: 404 };
   }
 }
+
+/**
+ * True when a folder {@link resolveFolderInsideBrowseRoot} admitted sits in, or
+ * is, a hidden (dot-named) folder under the Files root. The folder picker never
+ * lists those — it skips dot-names, as the memory index's own walk does — so a
+ * folder named by path rather than picked is held to the same rule: `.cache`,
+ * `.local` or `.openclaw` are the box's and the apps' own, not the owner's
+ * documents.
+ */
+export async function isHiddenInsideBrowseRoot(dir: string): Promise<boolean> {
+  const configured = path.resolve(filesBrowseRoot());
+  let root: string;
+  try {
+    root = await fs.realpath(configured);
+  } catch {
+    root = configured;
+  }
+  const rel = path.relative(root, dir);
+  return rel !== "" && rel.split(path.sep).some((segment) => segment.startsWith("."));
+}

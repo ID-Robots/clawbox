@@ -1,13 +1,11 @@
 /**
- * Memory Shard's new owner-only routes.
+ * Memory Shard's write routes, as a signed-in person and as nobody.
  *
- * The property that matters: the ASSISTANT must not be able to switch the index
- * on, widen what it reads, or move where the owner's memories are embedded.
- * Middleware admits the MCP bearer on every /setup-api path and the agent holds
- * it, so each of these routes refuses in-handler with hasPersonSession — the same
- * rule as coding-agent/enable. (The three memory routes that existed before this
- * have no such check at all, which is how the agent can start a full reindex
- * today; that is noted for a separate change.)
+ * Middleware admits the MCP bearer on every /setup-api path, so each of these
+ * routes asks again WHO is writing (`memoryShardWriter`): a signed-in person, or
+ * the assistant's own bearer — whose expensive writes wait on the owner's
+ * confirm, see memory-shard-assistant.test.ts. A request with neither is
+ * refused in-handler, which is what this file pins.
  *
  * The provider switch also has to be OUR PAGE's: the owner's browser attaches
  * the session cookie to a POST any other site fires at the box, and this route
