@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # timeout: 300
 # parallel: probes
-# covers: mcp/tools/email.ts mcp/tools/system.ts mcp/tools/coding-agent.ts mcp/tools/desktop.ts install.sh config/default-skills/clawbox-handbook/SKILL.md
+# covers: mcp/tools/email.ts mcp/tools/system.ts mcp/tools/coding-agent.ts mcp/tools/desktop.ts config/default-skills/clawbox-handbook/SKILL.md
 #
 # Telegram-first follow-ups on the real box:
 #   - the document libraries the agent uses for "make me a quote / a letter / a

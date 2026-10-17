@@ -1121,7 +1121,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
 
   reg.tool(
     "coding_agent_run",
-    "Use for any request to build or fix an app, site, script or tool bigger than one HTML page: don't code it yourself or start servers. Runs a Claude Code session in the background in one folder (project_id or directory); the task must stand alone. Returns a run id at once: tell the user it is running, then STOP; no coding_agent_status until they ask. Do not start a second run.",
+    "Use for any request to build or fix an app, site, script or tool bigger than one page; don't code it yourself or start servers. A Claude Code session works in the background in one folder (project_id or directory); the task must stand alone, budget caps how long it may work. Returns a run id at once: say it is running, then STOP; no coding_agent_status until asked. Do not start a second run.",
     {
       task: zText(MAX_TASK_CHARS, "What to build or change, with enough detail to work unattended. Name the files or features involved."),
       project_id: zOptText(64, "A code project id from code_project_list. Give this OR directory."),
