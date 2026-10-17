@@ -227,6 +227,23 @@ describe("POST pages/bulk", () => {
     expect(log()[0]).toBe("ClawBox assistant|Prime Radiant|bulk: 1 page");
   });
 
+  it("refuses alone an edit that is no object or names no path, and still applies the rest", async () => {
+    await ensureVault();
+    await seed();
+    const res = await bulk("assistant", { edits: ["concepts/pricing.md", null, { path: 42, owner: "x" }, { path: "../index.md", owner: "x" }, { path: "concepts/pricing.md" }, { path: "concepts/support.md", owner: "finance-team" }] });
+    expect(res.status).toBe(200);
+    expect(res.body.changed).toEqual(["concepts/support.md"]);
+    expect(res.body.refused.map((r: { path: string; code: string }) => [r.path, r.code])).toEqual([
+      ["", "invalid"],
+      ["", "invalid"],
+      ["", "invalid"],
+      ["../index.md", "not_found"],
+      ["concepts/pricing.md", "invalid"],
+    ]);
+    expect(res.body.refused[4].error).toMatch(/Name at least one of domain, owner, privacy, status/);
+    expect(log()[0]).toBe("ClawBox assistant|Prime Radiant|bulk: 1 page");
+  });
+
   it("commits nothing when every page already says what the edit asks", async () => {
     await ensureVault();
     await seed();
