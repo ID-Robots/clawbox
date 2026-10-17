@@ -260,6 +260,34 @@ describe("the check step: nothing invented", () => {
     ]);
   });
 
+  it("reads a sentence's capitalised first word as the word it is, in English and in Bulgarian — never an invented name", () => {
+    const bg = vault({
+      "entities/globeks-ood.md": page({ type: "entity", title: "Глобекс ООД", domain: "operations" }, "Глобекс ООД is named on 2 pages of this wiki.\n"),
+      "concepts/dostavki.md": page({ title: "Доставки", domain: "operations", claims: [claim("operations/dostavki/korpusi", "Глобекс ООД доставя алуминиеви корпуси на Акме ООД.")] }, "Доставки от [[entities/globeks-ood]].\n"),
+    });
+    const h = hoodOf(bg, "entities/globeks-ood.md");
+    const f = h.facts.find((x) => /доставя/.test(x.text))!.id;
+    const r = checkSentences(
+      [
+        { text: "Тя доставя алуминиеви корпуси на Акме ООД.", from: [f] },
+        { text: "Иван Петров доставя корпуси.", from: [f] },
+        { text: "Доставчик е на Акме ООД.", from: [f] },
+      ],
+      h,
+    );
+    expect(r.accepted.map((s) => s.text)).toEqual(["Тя доставя алуминиеви корпуси на Акме ООД.", "Доставчик е на Акме ООД."]);
+    expect(r.rejected).toEqual([{ text: "Иван Петров доставя корпуси.", reason: "unsupported_name:Иван" }]);
+    const en = checkSentences(
+      [
+        { text: "Delivering 1,200 housings in Q3 2026 is what Globex Ltd did.", from: [id(/delivered/)] },
+        { text: "Initech delivered housings.", from: [id(/delivered/)] },
+      ],
+      hood,
+    );
+    expect(en.accepted).toHaveLength(1);
+    expect(en.rejected).toEqual([expect.objectContaining({ reason: "unsupported_name:Initech" })]);
+  });
+
   it("puts sentences resting on an owner-verified fact first, three at most, 400 characters together", () => {
     const r = checkSentences(
       [

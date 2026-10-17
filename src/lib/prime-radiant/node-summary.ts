@@ -358,14 +358,15 @@ export function parseSummaryResponse(text: string, count: number): Map<number, D
 
 // ── the check step ────────────────────────────────────────────────────────────
 
-/** Capitalised words that are no name: sentence openers, pronouns, months, weekdays. */
+/** Capitalised words that are no name: sentence openers, pronouns, months, weekdays (English and Bulgarian). */
 const NAME_STOP: ReadonlySet<string> = new Set(
   (
     "The A An This That These Those It Its Their They Them He She His Her Hers Our We You Your Both Each Every All Most Some Several Many Few One Two Three " +
     "In On At For From To By With And Or But As Of About Over Under Since Until Through Between Among After Before During While When Where Which Who Whose " +
     "Also Mainly Mostly Often Together According Here There Its Is Was Are Were Has Have Had " +
     "January February March April May June July August September October November December Jan Feb Mar Apr Jun Jul Aug Sep Sept Oct Nov Dec " +
-    "Monday Tuesday Wednesday Thursday Friday Saturday Sunday"
+    "Monday Tuesday Wednesday Thursday Friday Saturday Sunday " +
+    "Той Тя То Те Това Тази Този Тези Техният Нейният Неговият Негов Неин Техен Като През При Във В На От За С Със И А Но Също Според Освен След Преди Докато Когато Където Който Която Което Които"
   ).split(" "),
 );
 
@@ -429,9 +430,13 @@ export function checkSentences(drafts: readonly DraftSentence[], hood: Neighbour
     for (const n of numberTokens(text)) {
       if (!corpusNumbers.has(n.value) && !n.runs.every((r) => corpusNumbers.has(r))) return reject(`unsupported_number:${n.value}`);
     }
-    for (const raw of text.match(/(?<![\p{L}\p{N}])\p{Lu}[\p{L}\p{N}]*/gu) ?? []) {
-      const w = raw.replace(/(?:'s|’s)$/u, "");
+    for (const m of text.matchAll(/(?<![\p{L}\p{N}])\p{Lu}[\p{L}\p{N}]*/gu)) {
+      const w = m[0].replace(/(?:'s|’s)$/u, "");
       if (NAME_STOP.has(w) || corpusWords.has(w.toLowerCase())) continue;
+      // The word opening the sentence is capitalised for that alone: a content word ("Delivering …") the facts hold
+      // by its stem stands, as it would mid-sentence; a short or unknown one is still taken for a name.
+      const lower = w.toLowerCase();
+      if (m.index === 0 && lower.length >= 5 && !/\d/.test(lower) && (CONNECTIVE.has(lower) || stems.has(lower.slice(0, 5)))) continue;
       return reject(`unsupported_name:${w}`);
     }
     for (const w of words(text)) {
