@@ -209,7 +209,12 @@ describe("POST /setup-api/clawkeep/memory/reset", () => {
 
     const res = await resetPOST(post("reset"));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ enabled: false, setupComplete: false });
+    // Beside the two flags, what was cleared and what was kept — the words the
+    // assistant relays when it resets for the owner.
+    const body = await res.json();
+    expect(body).toMatchObject({ enabled: false, setupComplete: false });
+    expect(body.cleared).toHaveLength(3);
+    expect(body.kept.join(" ")).toMatch(/folder list/);
 
     // EXPLICIT false, not a deleted key: an absent flag falls back to the
     // switch, and a box that had been switched on would then still believe it
@@ -246,7 +251,9 @@ describe("POST /setup-api/clawkeep/memory/reset", () => {
     expect(scheduler.refresh).toHaveBeenCalledTimes(1);
   });
 
-  it("refuses the agent, which holds the same bearer middleware admits", async () => {
+  // The assistant's own bearer is admitted, and its reset waits on confirm
+  // (memory-shard-assistant.test.ts); a request carrying neither is refused.
+  it("refuses a caller that is neither a signed-in person nor the assistant", async () => {
     await shard.setMemoryShardEnabled(true);
     await shard.setMemoryShardSetupComplete(true);
     ownerSession.value = false;
