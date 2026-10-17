@@ -267,6 +267,16 @@ describe("settings", () => {
     expect(get.limits.opusCapUsd).toEqual({ min: 0.01, max: 1000 });
     expect(get.limits.searchIndexLimitMb).toEqual({ min: 32, max: 4096 });
     expect(get.defaults.search).toEqual({ indexLimitMb: 160 });
+    // The golden check, the daily questions and the structure pass answer their limits and defaults side by side.
+    expect(get.limits).toMatchObject({
+      goldenMaxQuestions: { min: 1, max: 500 },
+      dailyPerOwner: { min: 1, max: 20 },
+      structureEnrichTop: { min: 0, max: 200 },
+      structureModelFallback: { min: 0, max: 500 },
+    });
+    expect(get.defaults.golden).toEqual({ enabled: true, maxQuestions: 50 });
+    expect(get.defaults.verification).toEqual({ perOwner: 5, outbound: false, languages: [] });
+    expect(get.defaults.structure).toMatchObject({ enabled: true, enrichTop: 25, modelFallback: 25 });
     expect(get.rates.basis).toBe("estimate");
 
     const saved = await settingsPUT(req("PUT", "/settings", { nightly: { time: "02:15" }, opus: { enabled: true, capUsd: 3 }, ingest: { folders: ["Documents"], parallel: 32 } }));
