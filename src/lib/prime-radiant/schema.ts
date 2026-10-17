@@ -10,6 +10,8 @@
  * module owns and passes everything else through untouched.
  */
 
+import { validityRange } from "./validity";
+
 export const PAGE_TYPES = [
   "entity",
   "concept",
@@ -201,7 +203,8 @@ function validateClaim(raw: unknown, index: number, errors: SchemaError[]): Clai
     const value = raw[key];
     if (value !== undefined && value !== null && !isIsoDate(value)) errors.push({ field: `${field}.${key}`, message: "must be an ISO date or null" });
   }
-  if (isIsoDate(raw.valid_from) && isIsoDate(raw.valid_until) && Date.parse(raw.valid_from) > Date.parse(raw.valid_until)) {
+  // Read as validity.ts reads a period: a bare day as "until" runs through that day's end.
+  if (isIsoDate(raw.valid_from) && isIsoDate(raw.valid_until) && !validityRange({ from: raw.valid_from, until: raw.valid_until, source: "claim" })) {
     errors.push({ field: `${field}.valid_until`, message: "must not be before valid_from" });
   }
   if (raw.historical !== undefined && typeof raw.historical !== "boolean") errors.push({ field: `${field}.historical`, message: "must be true or false" });

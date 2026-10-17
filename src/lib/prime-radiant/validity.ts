@@ -222,9 +222,14 @@ function quarter(y: number, q: number): Omit<Span, "length"> {
   return { from: `${y}-${pad(first)}-01`, until: lastDay(y, first + 2), grain: "quarter" };
 }
 
-/** The date expression that starts at `at` in `text`, or null. */
-function dateAt(text: string, at: number, ref: RefDate | null): Span | null {
-  for (const form of FORMS) {
+/**
+ * The date expression that starts at `at` in `text`, or null. A bare month
+ * name ("February", "May") is a date only after a word that says one follows
+ * ("until February"): anywhere else "may" is a verb and "march" a walk, so a
+ * title never reads one (`bareMonth: false`).
+ */
+function dateAt(text: string, at: number, ref: RefDate | null, bareMonth = true): Span | null {
+  for (const form of bareMonth ? FORMS : FORMS.slice(0, -1)) {
     form.re.lastIndex = at;
     const m = form.re.exec(text);
     if (!m) continue;
@@ -305,7 +310,7 @@ const SNAPSHOT_WORDS = new RegExp(
   "iu",
 );
 
-/** Every date expression in a text, left to right, none overlapping. */
+/** Every date expression in a title, left to right, none overlapping; never a bare month name. */
 function datesIn(text: string, ref: RefDate | null): Span[] {
   const out: Span[] = [];
   for (let at = 0; at < text.length; ) {
@@ -314,7 +319,7 @@ function datesIn(text: string, ref: RefDate | null): Span[] {
       at += 1;
       continue;
     }
-    const span = dateAt(text, at, ref);
+    const span = dateAt(text, at, ref, false);
     if (span && !/[\p{L}\p{N}]/u.test(text[at + span.length] ?? "")) {
       out.push(span);
       at += span.length;

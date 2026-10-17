@@ -162,6 +162,11 @@ describe("rule 2: dated facts", () => {
     // Bulgarian "as of", and "until the end of" a month.
     expect(textValidity("Наличността е 40 броя към 30.09.2026.", WRITTEN)).toMatchObject({ from: "2026-09-30", until: "2026-09-30" });
     expect(textValidity("The promo runs until the end of February 2027.", WRITTEN)).toMatchObject({ until: "2027-02-28" });
+    // A bare month name in a title is a word ("may", "march"), never a period; after "until" it is one.
+    expect(pageValidity("Weekly summary: risks that may delay launch", null, WRITTEN)).toBeNull();
+    expect(pageValidity("Board minutes June", null, WRITTEN)).toBeNull();
+    expect(pageValidity("Board minutes June 2026", null, WRITTEN)).toMatchObject({ from: "2026-06-01", until: "2026-06-30" });
+    expect(textValidity("The offer holds until May.", WRITTEN)).toMatchObject({ until: "2027-05-31" });
     // A snapshot title's amount is no date: only the report's own day is read.
     expect(pageValidity("Weekly summary 14.10, spend €12.10", null, WRITTEN)).toMatchObject({ from: "2026-10-14", until: "2026-10-14" });
   });
@@ -221,6 +226,8 @@ describe("rule 2: dated facts", () => {
     expect(bad.ok).toBe(false);
     const backwards = validateFrontmatter({ ...frontmatter(), claims: [c("x/y/z", "A fact.", { valid_from: "2026-12-31", valid_until: "2026-01-01" })] });
     expect(!backwards.ok && backwards.errors.map((e) => e.field)).toEqual(["claims[0].valid_until"]);
+    // One day, from 09:00 through that day ("until" a bare day runs to its end): a period, not a backwards one.
+    expect(validateFrontmatter({ ...frontmatter(), claims: [c("x/y/z", "A fact.", { valid_from: "2026-10-15T09:00:00Z", valid_until: "2026-10-15" })] }).ok).toBe(true);
     expect(validateFrontmatter({ ...frontmatter(), claims: [c("x/y/z", "A fact.", { historical: "yes" as unknown as boolean })] }).ok).toBe(false);
     expect(validateFrontmatter({ ...frontmatter(), version_of: 7 }).ok).toBe(false);
   });

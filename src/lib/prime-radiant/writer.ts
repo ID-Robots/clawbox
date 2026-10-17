@@ -15,7 +15,7 @@
 import { allocateClaimId, slugify, type ClaimIndex } from "./claims";
 import { redactText } from "./redact";
 import { selfContainedClaim } from "./subject";
-import { historicalClaim, isValidityDate, textValidity } from "./validity";
+import { historicalClaim, isValidityDate, textValidity, validityRange } from "./validity";
 import {
   PAGE_TYPES,
   SLUG_RE,
@@ -125,7 +125,7 @@ function draftValidity(fo: Record<string, unknown>): Pick<DraftFact, "validFrom"
   const iso = (v: unknown) => (typeof v === "string" && isValidityDate(v.trim()) && isIsoDate(v.trim()) ? v.trim() : undefined);
   const from = iso(fo.valid_from);
   const until = iso(fo.valid_until);
-  if (from && until && Date.parse(from) > Date.parse(until)) return out;
+  if (from && until && !validityRange({ from, until, source: "claim" })) return out;
   if (from) out.validFrom = from;
   if (until) out.validUntil = until;
   const asOf = iso(fo.as_of);
