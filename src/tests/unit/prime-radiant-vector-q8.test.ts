@@ -168,5 +168,5 @@ describe("recall@10, 8-bit against float32 (seeded synthetic sets, 1,024-d)", ()
   ])("is at least 0.95 with %s", (_label, shape) => {
     const recall = recallAt10(42, { docs: 2000, dims: 1024, queries: 60, ...shape });
     expect(recall).toBeGreaterThanOrEqual(0.95);
-  });
+  }, 60_000); // 2,000 × 1,024-d docs: a few seconds locally, more on a shared CI runner.
 });
