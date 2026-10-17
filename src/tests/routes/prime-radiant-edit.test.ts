@@ -37,7 +37,9 @@ import { POST as revertPOST } from "@/app/setup-api/prime-radiant/revert/route";
 import { POST as resolvePOST } from "@/app/setup-api/prime-radiant/review/[id]/resolve/route";
 import { GET as maintenanceGET, POST as maintenancePOST } from "@/app/setup-api/prime-radiant/maintenance/route";
 import { addReviewItem } from "@/lib/prime-radiant/review-store";
-import { commitAuthorEmail } from "@/lib/prime-radiant/git";
+import { commitAuthorEmail, logForPath } from "@/lib/prime-radiant/git";
+import { parsePage } from "@/lib/prime-radiant/frontmatter";
+import { ownerVerified } from "@/lib/prime-radiant/schema";
 import { ensureVault, vaultOperation } from "@/lib/prime-radiant/vault";
 import { claim, pageText } from "../helpers/prime-radiant-fixtures";
 
@@ -399,6 +401,36 @@ describe("claims", () => {
     expect(read("concepts/pricing.md")).toContain("checked_by: human");
     expect(log()[0]).toBe(`Prime Radiant|Prime Radiant|verify: ${PRICE.id}`);
   });
+
+  it("stamps a verification the assistant makes on the owner's confirmation as the owner's, via the assistant", async () => {
+    await ensureVault();
+    await seed();
+    const res = await verifyPOST(req("POST", "/claims/verify", "assistant", { id: PRICE.id, confirm: true }));
+    expect(res.status).toBe(200);
+    // The assistant made the commit; the stamp says whose word it was.
+    expect(log()[0]).toBe(`ClawBox assistant|Prime Radiant|verify: ${PRICE.id}`);
+    const page = parsePage(read("concepts/pricing.md"));
+    if (!page.ok) throw new Error("page does not parse");
+    const verified = page.frontmatter.claims.find((c) => c.id === PRICE.id);
+    expect(verified?.verified).toMatchObject({ by: "owner", via: "assistant" });
+    expect(verified?.evidence.at(-1)).toMatchObject({ kind: "human-verification", note: "verified by owner via assistant" });
+    expect(page.frontmatter.checked_by).toBe("human");
+    expect(ownerVerified(verified!)).toBe(true);
+    // History reads who verified from the commit's trailers.
+    const [head] = await logForPath(vault, "concepts/pricing.md", 1);
+    expect(head).toMatchObject({ subject: `verify: ${PRICE.id}`, author: "ClawBox assistant", verified: { by: "owner", via: "assistant" } });
+    // `confirm` is a yes or a no, nothing else.
+    expect((await verifyPOST(req("POST", "/claims/verify", "assistant", { id: PRICE.id, confirm: "yes" }))).status).toBe(400);
+  });
+
+  it("keeps a confirm from the owner's own browser the owner's, with no via", async () => {
+    await ensureVault();
+    await seed();
+    expect((await verifyPOST(req("POST", "/claims/verify", "owner", { id: PRICE.id, confirm: true }))).status).toBe(200);
+    const [head] = await logForPath(vault, "concepts/pricing.md", 1);
+    expect(head.verified).toEqual({ by: "owner" });
+    expect(read("concepts/pricing.md")).not.toContain("via: assistant");
+  });
 });
 
 describe("commitAuthorEmail", () => {
@@ -455,10 +487,34 @@ describe("undo, review and passes for the assistant", () => {
     expect(read("concepts/pricing.md")).toContain("The blue widget costs 12 EUR.");
   });
 
+  it("settles a review item the user told the assistant how to settle as the owner's answer, via the assistant", async () => {
+    await ensureVault();
+    await seed();
+    const { item } = addReviewItem(vault, {
+      kind: "contradiction",
+      claimId: PRICE.id,
+      pages: ["concepts/pricing.md"],
+      candidates: [
+        { text: "The blue widget costs 10 EUR.", page: "concepts/pricing.md", claimId: PRICE.id, evidence: [] },
+        { text: "The blue widget costs 12 EUR.", page: null, evidence: [] },
+      ],
+    });
+    const res = await resolvePOST(req("POST", `/review/${item.id}/resolve`, "assistant", { action: "pick", candidate: 1, confirm: true }), reviewCtx(item.id));
+    expect(res.status).toBe(200);
+    expect((await res.json()).item.resolution).toMatchObject({ action: "pick", by: "owner", via: "assistant" });
+    expect(log()[0]).toBe(`ClawBox assistant|Prime Radiant|verify: ${PRICE.id}`);
+    const page = parsePage(read("concepts/pricing.md"));
+    if (!page.ok) throw new Error("page does not parse");
+    const verified = page.frontmatter.claims.find((c) => c.id === PRICE.id);
+    expect(verified).toMatchObject({ text: "The blue widget costs 12 EUR.", verified: { by: "owner", via: "assistant" } });
+    expect(verified?.evidence.at(-1)?.note).toBe(`verified by owner via assistant from review ${item.id}`);
+    expect(ownerVerified(verified!)).toBe(true);
+  });
+
   it("lets the assistant run the connect pass, and only that pass", async () => {
     await ensureVault();
     await seed();
-    for (const action of ["reindex", "rejudge-reviews", "migrate-frontmatter"]) {
+    for (const action of ["reindex", "rejudge-reviews", "migrate-frontmatter", "rename-slugs", "upgrade-assistant-verifications"]) {
       const res = await maintenancePOST(req("POST", "/maintenance", "assistant", { action, dryRun: true }));
       expect(res.status, action).toBe(403);
       expect((await res.json()).code).toBe("owner_only");
@@ -466,6 +522,49 @@ describe("undo, review and passes for the assistant", () => {
     const dry = await maintenancePOST(req("POST", "/maintenance", "assistant", { action: "connect", dryRun: true }));
     expect(dry.status).toBe(200);
     expect(await dry.json()).toMatchObject({ dryRun: true });
+  });
+
+  it("lets the owner rename meaningless pages and upgrade the assistant's confirmed verifications, dry run first", async () => {
+    await ensureVault();
+    await vaultOperation("seed: legacy pages", async (tx) => {
+      const assistants = claim("bg-legal/x/term", "Договорът е за 12 месеца.", {
+        status: "verified",
+        confidence: 1,
+        verified: { at: "2026-09-01T00:00:00.000Z", by: "assistant" },
+        evidence: [{ kind: "human-verification", note: "verified by assistant", updatedAt: "2026-09-01T00:00:00.000Z" }],
+      });
+      await tx.write("concepts/x-3.md", pageText({ title: "Граждански договор — Петър Ангелов", claims: [assistants] }, "Договор за услуги.\n"));
+      await tx.write("concepts/pricing.md", pageText({ claims: [PRICE] }, "Prices. See [[concepts/x-3]] and [[x-3|the contract]].\n"));
+      await tx.write("index.md", "# Index\n\n- [[concepts/pricing]] — Widget pricing\n- [[concepts/x-3]] — Граждански договор — Петър Ангелов\n");
+    });
+    const head = () => execFileSync("git", ["-C", vault, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const before = head();
+
+    const dryRename = await maintenancePOST(req("POST", "/maintenance", "owner", { action: "rename-slugs", dryRun: true }));
+    expect(dryRename.status).toBe(200);
+    expect(await dryRename.json()).toMatchObject({ dryRun: true, commit: null, renamed: [{ from: "concepts/x-3.md", to: "concepts/grazhdanski-dogovor-petar-angelov.md" }], links: 3 });
+    expect(head()).toBe(before);
+
+    const rename = await maintenancePOST(req("POST", "/maintenance", "owner", { action: "rename-slugs" }));
+    expect(rename.status).toBe(200);
+    expect(await rename.json()).toMatchObject({ dryRun: false, renamed: [{ to: "concepts/grazhdanski-dogovor-petar-angelov.md" }] });
+    expect(log()[0]).toBe("Prime Radiant|Prime Radiant|rename: 1 page with meaningless names");
+    expect(fs.existsSync(path.join(vault, "concepts/x-3.md"))).toBe(false);
+    expect(read("concepts/pricing.md")).toContain("See [[concepts/grazhdanski-dogovor-petar-angelov]] and [[concepts/grazhdanski-dogovor-petar-angelov|the contract]].");
+    expect(read("index.md")).toContain("- [[concepts/grazhdanski-dogovor-petar-angelov]] — Граждански договор");
+
+    const dryUpgrade = await maintenancePOST(req("POST", "/maintenance", "owner", { action: "upgrade-assistant-verifications", dryRun: true }));
+    expect(await dryUpgrade.json()).toMatchObject({ dryRun: true, commit: null, upgraded: [{ claimId: "bg-legal/x/term", page: "concepts/grazhdanski-dogovor-petar-angelov.md" }] });
+    expect(read("concepts/grazhdanski-dogovor-petar-angelov.md")).toContain("by: assistant");
+
+    const upgrade = await maintenancePOST(req("POST", "/maintenance", "owner", { action: "upgrade-assistant-verifications" }));
+    expect(upgrade.status).toBe(200);
+    expect(await upgrade.json()).toMatchObject({ dryRun: false, upgraded: [{ claimId: "bg-legal/x/term" }], pages: ["concepts/grazhdanski-dogovor-petar-angelov.md"] });
+    expect(log()[0]).toBe("Prime Radiant|Prime Radiant|migrate: 1 assistant verification -> owner via the assistant");
+    expect(read("concepts/grazhdanski-dogovor-petar-angelov.md")).toContain("via: assistant");
+    // Run again: nothing left to do, nothing committed.
+    const again = await maintenancePOST(req("POST", "/maintenance", "owner", { action: "upgrade-assistant-verifications" }));
+    expect(await again.json()).toMatchObject({ commit: null, upgraded: [] });
   });
 
   it("names the assistant on the commits of a connect pass it started", async () => {

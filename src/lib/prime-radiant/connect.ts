@@ -41,7 +41,7 @@ import { slugify } from "./claims";
 import { pageSummary } from "./frontmatter";
 import { titleIdentifiers } from "./identifiers";
 import { buildLexicalIndex } from "./lexical";
-import { buildLinkGraph, contentReach, isContentPage } from "./links";
+import { buildLinkGraph, contentReach, isContentPage, isPathAlias } from "./links";
 import { ATOMIC_TYPES, LIMITS } from "./lint";
 import type { PageFrontmatter, PrivacyTier } from "./schema";
 import type { VaultSnapshot, VaultTx } from "./vault";
@@ -402,7 +402,8 @@ export async function planConnections(snapshot: Pick<VaultSnapshot, "pages" | "i
     if ((p.fm.type !== "entity" && !p.path.startsWith("entities/")) || p.fm.generated?.by === "connect") continue;
     for (const n of [p.fm.title, ...stringList(p.fm.aliases)]) {
       const name = n.trim();
-      if (name.length >= 3 && !entityByName.has(name)) entityByName.set(name, p.path);
+      // A former path (rename.ts) is where the page was, not a name it goes by.
+      if (name.length >= 3 && !isPathAlias(name) && !entityByName.has(name)) entityByName.set(name, p.path);
     }
   }
   const existingEntities = new Set(entityByName.values()).size;

@@ -1137,9 +1137,16 @@ wiki for a small model on the core profile.
 owner's cookie (from our own page) from this server's bearer, which it checks
 again itself. A change made through the bearer is the assistant's: its commit is
 authored `ClawBox assistant <assistant@localhost>` (committed by Prime Radiant),
-so the owner sees it in **History** and can **Undo** it, and a verification it
-gives is stamped `verified.by: assistant` without marking the page
-`checked_by: human`. Undo is the owner's: the bearer may revert only a commit
+so the owner sees it in **History** and can **Undo** it. A verification it
+gives — `prime_radiant_claim_verify` / `prime_radiant_review_resolve`, whose
+`confirm: true` says the user confirmed the fact in their own words, sent on to
+the route — is the owner's, through the assistant: stamped
+`verified: { by: owner, via: assistant }` (`verified_via` in the tools' claim
+output), the page `checked_by: human`, and it wins over a claim that disagrees
+with it exactly like one the owner made in the app; History and the page say
+"verified by the owner (via the assistant)". A route call from the bearer
+without `confirm: true` stays the assistant's own (`verified.by: assistant`,
+which wins nothing). Undo is the owner's: the bearer may revert only a commit
 whose author is the assistant (403 `owner_only` otherwise).
 
 **Stays the owner's, no tool:** `POST init` (it writes openclaw.json), the

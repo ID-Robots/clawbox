@@ -21,22 +21,28 @@
  * page that the judge finds against it is no question for the owner (the
  * owner already answered) but a STALE note on that page
  * ({@link recordStaleClaims}), which the lint reports as a warning until the
- * claim is rewritten or gone. The assistant's verifications (stamped
- * `assistant`) settle a fact for the record, not for the owner: they win
- * nothing here.
+ * claim is rewritten or gone. A verification the assistant made on the
+ * owner's word (the MCP tools' `confirm: true`: the user confirmed the fact
+ * in their own words) is the owner's — stamped `{ by: owner, via: assistant }`
+ * — and wins exactly like one made in the app. The assistant's own
+ * verifications (stamped `assistant`) settle a fact for the record, not for
+ * the owner: they win nothing here.
+ *
+ * The commit carries who verified as its trailers (`Verified-by`,
+ * `Verified-via`; git.ts `verifiedTrailers`), so History says it.
  *
  * SERVER ONLY.
  */
 
 import { buildClaimIndex, isClaimId, nowIso, retireClaimsOnPage } from "./claims";
-import type { VaultAuthor } from "./git";
+import { verifiedTrailers, type VaultAuthor } from "./git";
 import { safePagePath, vaultDir } from "./paths";
-import type { Claim, ClaimEvidence, PageFrontmatter } from "./schema";
+import { ASSISTANT_VERIFIER, OWNER_VERIFIER, VIA_ASSISTANT, type Claim, type ClaimEvidence, type PageFrontmatter } from "./schema";
 import { readRetiredLedger, recordRetired, runInTransaction, stateDbExists, withStateDb } from "./state-db";
-import { vaultOperation, type VaultOperationResult } from "./vault";
+import { readVaultSnapshot, vaultOperation, type VaultOperationResult, type VaultSnapshot } from "./vault";
 
 // Who counts as the owner is the page contract's (pure, so the lint reads it too).
-export { ASSISTANT_VERIFIER, ownerVerified } from "./schema";
+export { ASSISTANT_VERIFIER, OWNER_VERIFIER, ownerVerified, VIA_ASSISTANT, verifiedViaAssistant } from "./schema";
 
 /** A claim the judge found against an owner-verified one: the verified one wins, this one is stale. */
 export interface StaleClaimNote {
@@ -81,6 +87,22 @@ export function readStaleClaims(vault: string): StaleClaimNote[] {
   );
 }
 
+/** Stale notes follow renamed pages (rename.ts): old path -> new path, on either side. Answers how many rows moved. */
+export function followMovedStaleNotes(vault: string, moved: ReadonlyMap<string, string>): number {
+  if (moved.size === 0 || !stateDbExists(vault)) return 0;
+  return withStateDb(vault, (db) => {
+    const page = db.prepare("UPDATE stale_claims SET page = ? WHERE page = ?");
+    const verifiedPage = db.prepare("UPDATE stale_claims SET verified_page = ? WHERE verified_page = ?");
+    let n = 0;
+    runInTransaction(db, () => {
+      for (const [from, to] of moved) {
+        n += Number(page.run(to, from).changes) + Number(verifiedPage.run(to, from).changes);
+      }
+    });
+    return n;
+  });
+}
+
 /** A verified claim is one line a person read: the lint's claim limit. */
 export const MAX_VERIFIED_TEXT = 240;
 export const MAX_RETIRE = 20;
@@ -100,6 +122,8 @@ export interface VerifyInput {
   text: string;
   /** Who verified, as the stamp records it. */
   by: string;
+  /** Who carried it out for them (`assistant`: the owner's word, given through the assistant). */
+  via?: string;
   /** Losing claim ids, retired everywhere. */
   retire?: readonly string[];
   /** Where the claim goes when no page carries it yet. */
@@ -154,6 +178,8 @@ export async function verifyClaim(input: VerifyInput): Promise<VerifyResult> {
   const retire = [...new Set(input.retire ?? [])].filter((id) => id !== claimId);
   if (retire.length > MAX_RETIRE || !retire.every(isClaimId)) throw new VerifyError("invalid", "The ids to retire are not claim ids.");
   const by = (input.by || "owner").replace(CONTROL_RE, " ").trim().slice(0, 80) || "owner";
+  const via = (input.via ?? "").replace(CONTROL_RE, " ").trim().slice(0, 80);
+  const who = via ? `${by} via ${via}` : by;
   const stamp = nowIso(input.now);
   const asked = input.page == null ? null : safePagePath(input.page);
   if (input.page != null && !asked) throw new VerifyError("invalid", "That is not a page path.");
@@ -184,7 +210,7 @@ export async function verifyClaim(input: VerifyInput): Promise<VerifyResult> {
           const previous = page.frontmatter.claims.find((c) => c.id === claimId);
           const evidence: ClaimEvidence[] = [
             ...(input.evidence ?? []).slice(0, 10),
-            { kind: "human-verification", note: (input.note ?? `verified by ${by}`).replace(CONTROL_RE, " ").slice(0, 200), updatedAt: stamp },
+            { kind: "human-verification", note: (input.note ?? `verified by ${who}`).replace(CONTROL_RE, " ").slice(0, 200), updatedAt: stamp },
           ];
           const verified: Claim = {
             ...(previous ?? {}),
@@ -194,7 +220,7 @@ export async function verifyClaim(input: VerifyInput): Promise<VerifyResult> {
             status: "verified",
             updatedAt: stamp,
             evidence,
-            verified: { at: stamp, by },
+            verified: via ? { at: stamp, by, via } : { at: stamp, by },
           };
           const at = fm.claims.findIndex((c) => c.id === claimId);
           const claims = [...fm.claims];
@@ -206,7 +232,7 @@ export async function verifyClaim(input: VerifyInput): Promise<VerifyResult> {
       }
       return { page: target };
     },
-    { vault, now: input.now, author: input.author },
+    { vault, now: input.now, author: input.author, trailers: verifiedTrailers(via ? { by, via } : { by }) },
   );
 
   // Every losing id is retired in the ledger, also one no page carried: the
@@ -219,4 +245,107 @@ export async function verifyClaim(input: VerifyInput): Promise<VerifyResult> {
     }
   }
   return { claimId, page: op.result.page, retired: retire, changed: op.changed, commit: op.commit };
+}
+
+// ── the one-off migration: the assistant's confirmed verifications are the owner's ──
+
+/** A claim the migration upgrades, and where. */
+export interface UpgradedVerification {
+  claimId: string;
+  page: string;
+}
+
+export interface UpgradeAssistantVerificationsResult {
+  dryRun: boolean;
+  commit: string | null;
+  /** Claims whose `verified: { by: assistant }` became `{ by: owner, via: assistant }`. */
+  upgraded: UpgradedVerification[];
+  /** Pages they are on (each now `checked_by: human`). */
+  pages: string[];
+  /** Assistant stamps left as they were: no human-verification evidence line says the owner's word was behind them. */
+  skipped: UpgradedVerification[];
+}
+
+const ASSISTANT_NOTE_RE = /^verified by assistant\b/;
+
+/**
+ * Whether a claim carries the assistant's OWN verification stamp from before
+ * owner confirmations were stamped as the owner's: `by: assistant`, no `via`.
+ */
+function assistantStamped(c: Claim): boolean {
+  return !!c.verified && c.verified.by === ASSISTANT_VERIFIER && !c.verified.via;
+}
+
+/**
+ * The migration worked out over a snapshot (pure): every claim stamped
+ * `verified: { by: assistant }` that carries a `human-verification` evidence
+ * line — the line verify.ts writes when a verification is given, which the
+ * MCP tools only gave with the user's own confirmation (`confirm: true`) — gets
+ * `{ by: owner, via: assistant }`, its moment kept, and that line's note says
+ * so; its page becomes `checked_by: human`, as a verification in the app makes
+ * it. A stamp with no such line is left as it is and listed in `skipped`.
+ * Answers the pages to write.
+ */
+export function planAssistantVerificationUpgrade(snapshot: Pick<VaultSnapshot, "pages">): {
+  writes: Array<{ path: string; frontmatter: PageFrontmatter; body: string }>;
+  upgraded: UpgradedVerification[];
+  skipped: UpgradedVerification[];
+} {
+  const writes: Array<{ path: string; frontmatter: PageFrontmatter; body: string }> = [];
+  const upgraded: UpgradedVerification[] = [];
+  const skipped: UpgradedVerification[] = [];
+  for (const p of snapshot.pages) {
+    if (!p.parsed.ok) continue;
+    const fm = p.parsed.frontmatter;
+    let changed = false;
+    const claims = fm.claims.map((c) => {
+      if (!assistantStamped(c) || !c.verified) return c;
+      if (!c.evidence.some((e) => e.kind === "human-verification")) {
+        skipped.push({ claimId: c.id, page: p.path });
+        return c;
+      }
+      changed = true;
+      upgraded.push({ claimId: c.id, page: p.path });
+      const evidence = c.evidence.map((e) =>
+        e.kind === "human-verification" && typeof e.note === "string" && ASSISTANT_NOTE_RE.test(e.note)
+          ? { ...e, note: e.note.replace(ASSISTANT_NOTE_RE, `verified by ${OWNER_VERIFIER} via ${VIA_ASSISTANT}`).slice(0, 200) }
+          : e,
+      );
+      return { ...c, evidence, verified: { at: c.verified.at, by: OWNER_VERIFIER, via: VIA_ASSISTANT } };
+    });
+    if (changed) writes.push({ path: p.path, frontmatter: { ...fm, claims, checked_by: "human" }, body: p.parsed.body });
+  }
+  return { writes, upgraded, skipped };
+}
+
+/**
+ * The maintenance route's `upgrade-assistant-verifications` (owner only, run
+ * once): {@link planAssistantVerificationUpgrade} as ONE commit
+ * `migrate: N assistant verifications -> owner via the assistant` (trailers
+ * `Verified-by: owner`, `Verified-via: assistant`), which Undo reverses whole;
+ * none when nothing is left to upgrade, so a second run changes nothing.
+ * `dryRun` answers the same and writes nothing — run it first. Contradiction
+ * items waiting on an upgraded claim are not touched here: the
+ * `rejudge-reviews` pass settles them now that one side is owner-verified.
+ */
+export async function upgradeAssistantVerifications(
+  options: { dryRun?: boolean; vault?: string; author?: VaultAuthor; now?: Date } = {},
+): Promise<UpgradeAssistantVerificationsResult> {
+  const vault = options.vault ?? vaultDir();
+  const pagesOf = (u: UpgradedVerification[]) => [...new Set(u.map((x) => x.page))].sort();
+  if (options.dryRun) {
+    const plan = planAssistantVerificationUpgrade(await readVaultSnapshot(vault));
+    return { dryRun: true, commit: null, upgraded: plan.upgraded, pages: pagesOf(plan.upgraded), skipped: plan.skipped };
+  }
+  const op = await vaultOperation(
+    (plan: ReturnType<typeof planAssistantVerificationUpgrade>) =>
+      `migrate: ${plan.upgraded.length} assistant verification${plan.upgraded.length === 1 ? "" : "s"} -> owner via the assistant`,
+    async (tx) => {
+      const plan = planAssistantVerificationUpgrade(await tx.snapshot());
+      for (const w of plan.writes) await tx.writePage(w.path, w.frontmatter, w.body);
+      return plan;
+    },
+    { vault, now: options.now, author: options.author, trailers: verifiedTrailers({ by: OWNER_VERIFIER, via: VIA_ASSISTANT }) },
+  );
+  return { dryRun: false, commit: op.commit, upgraded: op.result.upgraded, pages: pagesOf(op.result.upgraded), skipped: op.result.skipped };
 }

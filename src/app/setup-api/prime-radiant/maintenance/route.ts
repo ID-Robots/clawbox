@@ -21,6 +21,18 @@
  *    pages, related pages, dated hubs — written in commits.
  *  - `migrate-frontmatter`: write memory-wiki's fields (id, pageType,
  *    sourceIds, updatedAt) into every page that lacks them.
+ *  - `rename-slugs`: pages whose file name says nothing (`x.md`, `x-3.md`,
+ *    `2026.md`, `3.md` — a Cyrillic title from before the slugger
+ *    transliterated) get the name their title transliterates to (rename.ts):
+ *    the old path kept as an alias the links still reach, every link to it
+ *    rewritten, ONE commit Undo reverses. `{ renamed, skipped, more, … }`;
+ *    `dryRun: true` lists them — run it first.
+ *  - `upgrade-assistant-verifications`: the one-off migration (verify.ts):
+ *    every claim stamped `verified: { by: assistant }` with a
+ *    human-verification line — given on the user's own confirmation — becomes
+ *    the owner's, `{ by: owner, via: assistant }`, which wins like a
+ *    verification in the app; ONE commit. `{ upgraded, pages, skipped }`;
+ *    `dryRun: true` lists them — run it first, and `rejudge-reviews` after.
  * `reindex`, `connect` and `migrate-frontmatter` run on in the background:
  * 202 `{ started: true }`; 409 `busy` while one runs. A `dryRun` answers its
  * counts at once.
@@ -29,9 +41,11 @@
  *
  * OWNER ONLY (POST: cookie AND same origin) — but the assistant, through the
  * MCP bearer, may run `connect` (the owner's "run the connect pass now"). The
- * other three stay the owner's: a reindex re-embeds the whole vault, and the
- * rejudge and the migration are repairs. 412 `not_initialised` before the
- * vault exists; 400 `invalid` for an unknown action.
+ * others stay the owner's: a reindex re-embeds the whole vault, the rejudge,
+ * the renames and the migrations are repairs — and the assistant never makes
+ * its own stamps the owner's. 412 `not_initialised` before the vault exists;
+ * 400 `invalid` for an unknown action; 409 `lint_blocked` when a blocking
+ * lint finding refuses a rename or the migration (nothing is written).
  */
 import { processStore } from "@/lib/process-store";
 import { requireSession } from "@/lib/route-auth";
@@ -40,8 +54,10 @@ import { vaultDir } from "@/lib/prime-radiant/paths";
 import { migratePluginFrontmatter } from "@/lib/prime-radiant/plugin-compat";
 import { readPageVectors, reindexPrimeRadiantVault, vaultIndexingAllowed } from "@/lib/prime-radiant/shard-index";
 import { rejudgeOpenContradictions, rejudgeSummary } from "@/lib/prime-radiant/rejudge";
+import { renameMeaninglessPages } from "@/lib/prime-radiant/rename";
+import { upgradeAssistantVerifications } from "@/lib/prime-radiant/verify";
 import { versionGroups, versionPages } from "@/lib/prime-radiant/versions";
-import { fail, json, readJsonBody, vaultFailure, writerGuard } from "@/lib/prime-radiant/route-helpers";
+import { editFailure, fail, json, readJsonBody, writerGuard } from "@/lib/prime-radiant/route-helpers";
 import type { VaultAuthor } from "@/lib/prime-radiant/git";
 import { readVaultSnapshot, vaultInitialised, vaultOperation, type VaultTx } from "@/lib/prime-radiant/vault";
 
@@ -119,10 +135,19 @@ export async function POST(req: Request) {
         background("migrate-frontmatter", async () => migratePluginFrontmatter(await readVaultSnapshot(vault), commitWith(vault, gate.writer.author)));
         return json({ started: true }, 202);
       }
+      case "rename-slugs": {
+        if (state.running) return busy();
+        return json(await renameMeaninglessPages({ dryRun, vault, author: gate.writer.author }));
+      }
+      case "upgrade-assistant-verifications": {
+        if (state.running) return busy();
+        return json(await upgradeAssistantVerifications({ dryRun, vault, author: gate.writer.author }));
+      }
       default:
         return fail("invalid", "Unknown action.", 400);
     }
   } catch (err) {
-    return vaultFailure(`maintenance ${String(b.action).slice(0, 40)}`, err);
+    // A rename or migration a blocking lint finding refuses is a 409 `lint_blocked`, as any edit's.
+    return editFailure(`maintenance ${String(b.action).slice(0, 40)}`, err);
   }
 }

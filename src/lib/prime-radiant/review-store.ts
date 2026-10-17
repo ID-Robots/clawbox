@@ -60,6 +60,8 @@ export interface ReviewResolution {
   commit?: string | null;
   retired?: string[];
   by: string;
+  /** `assistant` when the assistant settled it on the owner's word (`by: owner`). */
+  via?: string;
   /** Why it was settled, when a pass (not a person) settled it. */
   note?: string;
 }

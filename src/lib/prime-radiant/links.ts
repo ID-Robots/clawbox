@@ -4,13 +4,36 @@
  *
  * Pure. A link is resolved against the set of known page paths:
  *   - a Markdown link relative to the linking page's folder;
- *   - a wikilink by vault path (with or without `.md`), then by file name,
- *     then by page title (case-insensitive) — the first that is unambiguous.
+ *   - a wikilink by vault path (with or without `.md`), then by a page's
+ *     former path (a path-shaped alias: rename.ts keeps a renamed page's old
+ *     path in its `aliases`, so a link to it still leads there), then by file
+ *     name, then by page title (case-insensitive) — the first that is
+ *     unambiguous.
  */
 
 export interface LinkTargetPage {
   path: string;
   title?: string;
+  /** The page's `aliases`; only path-shaped ones ({@link isPathAlias}) are link targets. */
+  aliases?: readonly string[];
+}
+
+const PATH_ALIAS_RE = /^[a-z0-9][a-z0-9._-]*(?:\/[a-z0-9][a-z0-9._-]*)+$/;
+
+/** An alias that is a vault path a page was once at (`concepts/x-3`), not a name it goes by. */
+export function isPathAlias(alias: string): boolean {
+  return PATH_ALIAS_RE.test(alias.trim());
+}
+
+/** The path-shaped aliases in a frontmatter's `aliases` (a string or a list), as `.md` paths. */
+export function pathAliases(aliases: unknown): string[] {
+  const list = typeof aliases === "string" ? [aliases] : Array.isArray(aliases) ? aliases : [];
+  return list
+    .filter((a): a is string => typeof a === "string" && isPathAlias(a))
+    .map((a) => {
+      const t = a.trim();
+      return t.toLowerCase().endsWith(".md") ? t : `${t}.md`;
+    });
 }
 
 const WIKILINK_RE = /\[\[([^\]|#\n]+)(?:#[^\]|\n]*)?(?:\|[^\]\n]*)?\]\]/g;
@@ -128,10 +151,12 @@ export interface LinkResolver {
 
 export function createLinkResolver(pages: Iterable<LinkTargetPage>): LinkResolver {
   const byPath = new Set<string>();
+  const byFormerPath = new Map<string, string[]>();
   const byName = new Map<string, string[]>();
   const byTitle = new Map<string, string[]>();
   for (const p of pages) {
     byPath.add(p.path);
+    for (const former of pathAliases(p.aliases)) byFormerPath.set(former, [...(byFormerPath.get(former) ?? []), p.path]);
     const name = p.path.slice(p.path.lastIndexOf("/") + 1).replace(/\.md$/i, "").toLowerCase();
     byName.set(name, [...(byName.get(name) ?? []), p.path]);
     if (p.title) {
@@ -145,11 +170,14 @@ export function createLinkResolver(pages: Iterable<LinkTargetPage>): LinkResolve
       if (link.kind === "md") {
         const dir = fromPage.includes("/") ? fromPage.slice(0, fromPage.lastIndexOf("/")) : "";
         const joined = normalizeJoin(dir, link.target);
-        return joined !== null && byPath.has(joined) ? joined : null;
+        if (joined === null) return null;
+        return byPath.has(joined) ? joined : unique(byFormerPath.get(joined));
       }
       const t = link.target.replace(/^\.\//, "");
       const withExt = t.toLowerCase().endsWith(".md") ? t : `${t}.md`;
       if (byPath.has(withExt)) return withExt;
+      const moved = unique(byFormerPath.get(withExt));
+      if (moved) return moved;
       const name = withExt.slice(withExt.lastIndexOf("/") + 1).replace(/\.md$/i, "").toLowerCase();
       return unique(byName.get(name)) ?? unique(byTitle.get(t.toLowerCase()));
     },
