@@ -114,7 +114,14 @@ export const TOOL_STEP_APPS: Readonly<Record<ToolBrand, ToolStepApp>> = Object.f
     app: "memory-shard",
     english: "Memory Shard",
     tint: "#9fd3ff",
-    tools: { memory_search: "search", memory_get: "read", memory_shard_search: "search", memory_shard_status: "status" },
+    tools: {
+      memory_search: "search", memory_get: "read", memory_shard_search: "search", memory_shard_status: "status",
+      memory_shard_reindex: "index", memory_shard_reindex_stop: "stop",
+      memory_shard_sources_list: "list", memory_shard_sources_add: "create", memory_shard_sources_remove: "remove",
+      memory_shard_schedule_get: "settings", memory_shard_schedule_set: "settings",
+      memory_shard_provider_get: "settings", memory_shard_provider_set: "settings",
+      memory_shard_enable: "settings", memory_shard_reset: "settings",
+    },
     cli: { "openclaw memory": { search: "search", status: "status", index: "index", get: "read" } },
   },
   // OpenClaw's `wiki_*` tools read and write the Prime Radiant vault (the

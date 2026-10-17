@@ -6,7 +6,7 @@ import {
   writeMemorySchedule,
 } from "@/lib/clawkeep-memory";
 import { refresh as refreshMemoryScheduler } from "@/lib/clawkeep-memory-scheduler";
-import { hasPersonSession } from "@/lib/owner-session";
+import { memoryShardWriter } from "@/lib/memory-shard-writer";
 
 export const dynamic = "force-dynamic";
 
@@ -19,15 +19,12 @@ export async function GET() {
 }
 
 export async function PUT(request: NextRequest) {
-  // OWNER ONLY: the schedule decides when the box spends an hour re-embedding.
-  // Middleware admits the MCP bearer, so without this the agent could rewrite
-  // when — and how often — that happens.
-  if (!(await hasPersonSession(request))) {
-    return NextResponse.json(
-      { error: "Changing the index schedule needs a signed-in browser session.", kind: "owner_only" },
-      { status: 403 },
-    );
-  }
+  // A signed-in person or the box's assistant (`memoryShardWriter`), nobody
+  // else: the schedule decides when the box spends an hour re-embedding, and
+  // the passes it starts are incremental — the same pass the assistant may
+  // start by hand.
+  const writer = await memoryShardWriter(request, "Changing the index schedule");
+  if (!writer.ok) return writer.response;
   const body = await request.json().catch(() => ({}));
   try {
     const schedule = await writeMemorySchedule(body);

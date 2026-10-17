@@ -62,6 +62,7 @@ import type { Capabilities, McpContext } from "./lib/context";
 import { API_BASE } from "./lib/api";
 import type { Ed } from "./lib/register";
 import { PRIME_RADIANT_TOOLS } from "./tools/prime-radiant";
+import { MEMORY_SHARD_TOOLS } from "./tools/memory";
 
 /**
  * Everything a posture must decide: the context minus the server's identity.
@@ -268,6 +269,10 @@ const UNGATED_COMMON = [
   // Prime Radiant's family: a box with no vault yet answers "open the app
   // once", never a refusal to register — the vault is ClawBox's on both editions.
   ...PRIME_RADIANT_TOOLS,
+  // Memory Shard's management tools: a box with it switched off answers
+  // "switched off", never a missing tool. Search is Hermes-only (the index on
+  // an OpenClaw box is OpenClaw's), so it is not common.
+  ...MEMORY_SHARD_TOOLS.filter((name) => name !== "memory_shard_status" && name !== "memory_shard_search"),
 ];
 
 /** The gate that points the OTHER way: it exists where the box cannot draw. */

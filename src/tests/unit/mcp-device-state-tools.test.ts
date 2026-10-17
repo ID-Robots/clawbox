@@ -5,9 +5,11 @@
  * All three are registered on every box, both editions, and answer every state
  * the device can be in — off, unlinked, not installed, refused by the portal —
  * as an ANSWER rather than an error, because that is exactly the box the agent
- * needs them on and an error there only feeds Hermes' circuit breaker. None of
- * them can start the work it reports on: reindexing and installing are the
- * owner's, and each answer says where the owner's button is.
+ * needs them on and an error there only feeds Hermes' circuit breaker. They
+ * only read: installing an engine and changing the plan stay the owner's. The
+ * Memory Shard tools that DO start work — passes, folders, the provider — are
+ * covered in mcp-memory-shard-tools.test.ts; here the status says which pass
+ * the assistant may start itself and which waits for the owner's yes.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -59,10 +61,10 @@ describe("registration", () => {
     expect(harness("openclaw").get("memory_shard_status").description).not.toMatch(/memory_shard_search/);
   });
 
-  it("offers no tool that starts a reindex, installs an engine or changes the plan", () => {
+  it("offers no tool that installs an engine or changes the plan", () => {
     for (const edition of ["openclaw", "hermes"] as const) {
       const names = harness(edition).names();
-      expect(names.some((n) => /reindex|index_start|install|plan|credit/.test(n))).toBe(false);
+      expect(names.some((n) => /install|plan|credit/.test(n))).toBe(false);
     }
   });
 });
@@ -92,7 +94,7 @@ const MEMORY = {
 };
 
 describe("memory_shard_status", () => {
-  it("reports the index, the last pass and the schedule, and that reindexing is the owner's", async () => {
+  it("reports the index, the last pass and the schedule, and which passes are the assistant's to start", async () => {
     apiGet.mockResolvedValue(MEMORY);
     const out = await harness("openclaw").call("memory_shard_status", {});
     expect(out.isError).toBe(false);
@@ -111,8 +113,9 @@ describe("memory_shard_status", () => {
       schedule: "every day at 03:00 (box time)",
       next_scheduled_pass: "2026-09-19 03:00 UTC",
     });
-    expect(String(s.guidance)).toMatch(/cannot start indexing/);
-    expect(String(s.guidance)).toMatch(/ui_open_app\("memory-shard"\)/);
+    expect(String(s.guidance)).toMatch(/You may run incremental passes on your own/);
+    expect(String(s.guidance)).toMatch(/A full re-embed, a provider change and a reset need the owner's go/);
+    expect(String(s.guidance)).toMatch(/confirm: true/);
     expect(String(s.guidance)).not.toMatch(/memory_shard_search/);
   });
 
