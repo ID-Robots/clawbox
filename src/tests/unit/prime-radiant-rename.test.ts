@@ -159,6 +159,18 @@ describe("meaningless names and former paths (pure)", () => {
     expect(capped.result.more).toBe(1);
   });
 
+  it("keeps a memory-wiki id set by hand, never adds a former path twice, and counts a name taken in another case as taken", () => {
+    const plan = planSlugRenames(
+      snapshot({
+        "concepts/x.md": pageText({ title: "Едно", id: "acme-handpicked-id", aliases: ["One", "concepts/x"] }, "Текст.\n"),
+        "concepts/Edno.md": pageText({ title: "Edno upper" }, "Taken in another case.\n"),
+      }),
+    );
+    expect(plan.result.renamed).toEqual([{ from: "concepts/x.md", to: "concepts/edno-2.md", title: "Едно" }]);
+    expect(plan.moves[0].frontmatter.id).toBe("acme-handpicked-id");
+    expect(plan.moves[0].frontmatter.aliases).toEqual(["One", "concepts/x"]);
+  });
+
   it("leaves a link by the page's title alone, and plans nothing on a vault with good names", () => {
     const plan = planSlugRenames(
       snapshot(
