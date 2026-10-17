@@ -292,6 +292,8 @@ function installFetch() {
         settings, defaults: searchIndexLimitMb !== null ? { ...settings, search: { indexLimitMb: 160 } } : settings,
         limits: {
           ingestParallel: { min: 1, max: 256 }, ingestFolders: 20, opusCapUsd: { min: 0.01, max: 1000 }, opusSampleRate: { min: 0, max: 1 }, domains: 100,
+          // A per-owner bound unlike the app's own default, so a test sees the field follow the server.
+          goldenMaxQuestions: { min: 1, max: 500 }, dailyPerOwner: { min: 1, max: 12 },
           ...(opusExtras ? { opusMaxPages: { min: 4, max: 2000 } } : {}),
           ...(searchIndexLimitMb !== null ? { searchIndexLimitMb: { min: 32, max: 4096 } } : {}),
         },
@@ -1208,6 +1210,34 @@ describe("PrimeRadiantApp — Questions", () => {
     expect(await within(screen.getByTestId("prime-radiant-golden")).findByRole("alert")).toBeInTheDocument();
     expect(screen.getByTestId("prime-radiant-golden-form")).toBeInTheDocument();
     expect(screen.getByTestId("prime-radiant-golden-expected")).toHaveValue("12 EUR");
+  });
+
+  it("takes the number fields' bounds from the server's limits", async () => {
+    mount();
+    await openTab("questions");
+    const perOwner = await screen.findByTestId("prime-radiant-daily-per-owner");
+    expect(perOwner).toHaveAttribute("max", "12");
+    expect(screen.getByTestId("prime-radiant-golden-max")).toHaveAttribute("max", "500");
+    // 15 is inside the app's old fixed bound (20) but outside the server's: it is put back, never sent.
+    fireEvent.change(perOwner, { target: { value: "15" } });
+    fireEvent.blur(perOwner);
+    expect(perOwner).toHaveValue(5);
+    expect(calls.some((c) => c.method === "PUT" && c.url.endsWith("/settings"))).toBe(false);
+  });
+
+  it("asks again for a delete once the armed confirm lost the focus, and after a delete", async () => {
+    mount();
+    await openTab("questions");
+    fireEvent.click(await screen.findByTestId("prime-radiant-golden-delete"));
+    const armed = screen.getByTestId("prime-radiant-golden-delete-confirm");
+    expect(armed).toHaveFocus();
+    fireEvent.blur(armed);
+    expect(screen.queryByTestId("prime-radiant-golden-delete-confirm")).toBeNull();
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+    fireEvent.click(screen.getByTestId("prime-radiant-golden-delete"));
+    fireEvent.click(screen.getByTestId("prime-radiant-golden-delete-confirm"));
+    await waitFor(() => expect(calls.some((c) => c.method === "DELETE")).toBe(true));
+    expect(screen.queryByTestId("prime-radiant-golden-delete-confirm")).toBeNull();
   });
 
   it("sets the nightly golden check and the daily questions an owner gets under Checks", async () => {

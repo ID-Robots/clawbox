@@ -227,7 +227,8 @@ CREATE TABLE IF NOT EXISTS stale_claims (
  * v9 — the golden questions' score history (golden-score.ts): one
  * `golden_scores` row a check (the nightly pass's, by its run id), one
  * `golden_results` row a question asked in it — its verdict and the claims
- * the wiki answered with. The questions themselves live in the vault
+ * the wiki answered with, and whether the vault search failed for it (such a
+ * verdict is shown, never the next night's baseline). The questions themselves live in the vault
  * (`golden.json`), versioned with the pages.
  */
 const SCHEMA_V9 = `
@@ -251,6 +252,7 @@ CREATE TABLE IF NOT EXISTS golden_results (
   why          TEXT,
   claim_ids    TEXT NOT NULL DEFAULT '[]',
   at           TEXT NOT NULL,
+  search_failed INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (score_id, question_id)
 );
 CREATE INDEX IF NOT EXISTS golden_results_question ON golden_results (question_id, at);

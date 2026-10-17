@@ -15,7 +15,12 @@
  * a failed night, never a 0 % in the history. A question answered `correct`
  * last time and `wrong` now becomes a `lint` review item for its owner (no run
  * id: it never holds a night) — unless the search failed for it that night:
- * an answer from the claims' words alone is no proof the wiki changed.
+ * an answer from the claims' words alone is no proof the wiki changed. Such
+ * a verdict is stored (`search_failed`) and shown, but it is never the
+ * baseline the next night compares with: that stays the last verdict a
+ * working search gave, so a real regression is still raised once the search
+ * works again. The night's signal reaches every search, and none starts once
+ * it has fired.
  *
  * The history is in the state database (state v9: `golden_scores`,
  * `golden_results`); `goldenStatus` reads it for the status route without
@@ -81,8 +86,8 @@ export interface GoldenScoreOptions {
   maxQuestions?: number;
   /** Whether ClawBox AI can be asked at all (the nightly pass's own check). */
   online?: boolean;
-  /** The vault search for one question (default: none — the claims' words alone). */
-  search?: (question: string) => Promise<readonly GoldenHit[]>;
+  /** The vault search for one question (default: none — the claims' words alone); handed the night's signal. */
+  search?: (question: string, signal?: AbortSignal) => Promise<readonly GoldenHit[]>;
   snapshot?: VaultSnapshot;
   signal?: AbortSignal;
 }
@@ -91,16 +96,18 @@ function emptyResult(skipped: string | null, asked = 0): GoldenScoreResult {
   return { skipped, scoreId: null, tally: goldenTally(new Array(asked).fill(null)), capped: 0, calls: 0, usdEstimate: 0, regressions: [], reviewItems: [], notes: [] };
 }
 
-/** Each question's latest verdict and when it was last asked. */
+/** Each question's baseline verdict (the regression check's) and when it was last asked. */
 function lastResults(vault: string): Map<string, { verdict: GoldenVerdict | null; at: string }> {
   const out = new Map<string, { verdict: GoldenVerdict | null; at: string }>();
   if (!stateDbExists(vault)) return out;
   withStateDb(vault, (db) => {
     const rows = db
-      .prepare("SELECT question_id, verdict, at FROM golden_results ORDER BY at ASC, score_id ASC")
-      .all() as Array<{ question_id: string; verdict: string | null; at: string }>;
+      .prepare("SELECT question_id, verdict, at, search_failed FROM golden_results ORDER BY at ASC, score_id ASC")
+      .all() as Array<{ question_id: string; verdict: string | null; at: string; search_failed: number }>;
     for (const r of rows) {
-      const verdict = (GOLDEN_VERDICTS as readonly string[]).includes(r.verdict ?? "") ? (r.verdict as GoldenVerdict) : null;
+      const judged = (GOLDEN_VERDICTS as readonly string[]).includes(r.verdict ?? "") ? (r.verdict as GoldenVerdict) : null;
+      // A verdict given without the search is no baseline: the question still counts as asked then (its turn).
+      const verdict = r.search_failed ? null : judged;
       // A question asked and left unjudged keeps the verdict it had: a failed call is no change of answer.
       const prior = out.get(r.question_id);
       out.set(r.question_id, { verdict: verdict ?? prior?.verdict ?? null, at: r.at });
@@ -142,9 +149,11 @@ export async function runGoldenScore(options: GoldenScoreOptions = {}): Promise<
   const evidence = new Map<string, GoldenEvidence[]>();
   const searchFailed = new Set<string>();
   for (const q of asked) {
+    // Past the night's budget no search starts: the judge loop stops on the same signal.
+    if (options.signal?.aborted) break;
     let hits: readonly GoldenHit[] = [];
     if (options.search) {
-      hits = await options.search(redactText(q.question).text).catch(() => {
+      hits = await options.search(redactText(q.question).text, options.signal).catch(() => {
         searchFailed.add(q.id);
         return [];
       });
@@ -267,10 +276,10 @@ export async function runGoldenScore(options: GoldenScoreOptions = {}): Promise<
       db.prepare(
         "INSERT OR REPLACE INTO golden_scores (id, run_id, at, asked, correct, wrong, missing, stale, failed, percent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       ).run(scoreId, options.runId ?? null, atIso, t.asked, t.correct, t.wrong, t.missing, t.stale, t.failed, t.percent);
-      const put = db.prepare("INSERT OR REPLACE INTO golden_results (score_id, question_id, verdict, why, claim_ids, at) VALUES (?, ?, ?, ?, ?, ?)");
+      const put = db.prepare("INSERT OR REPLACE INTO golden_results (score_id, question_id, verdict, why, claim_ids, at, search_failed) VALUES (?, ?, ?, ?, ?, ?, ?)");
       for (const q of asked) {
         const v = verdicts.get(q.id);
-        put.run(scoreId, q.id, v?.verdict ?? null, v?.why ?? null, JSON.stringify((evidence.get(q.id) ?? []).map((e) => e.claimId)), atIso);
+        put.run(scoreId, q.id, v?.verdict ?? null, v?.why ?? null, JSON.stringify((evidence.get(q.id) ?? []).map((e) => e.claimId)), atIso, searchFailed.has(q.id) ? 1 : 0);
       }
     }),
   );

@@ -17,6 +17,8 @@
  * answer is a verification like any other and the question is gone from the
  * next list (any verification answers it: a claim stamped `verified` is no
  * longer unverified, and a verification restarts its page's re-check clock).
+ * A page past its re-check day that is still current is answered with page
+ * edit and the `recheck_after` its type gives it from today (`nextRecheck`).
  * A review item with no claim to verify (a lint finding, a golden question
  * gone wrong with no claim named) is answered by putting the page right and
  * dismissing the item. Nothing here sends anything: delivery is the
@@ -214,6 +216,18 @@ function fill(template: string, values: Record<string, string>): string {
   return template.replace(/\{(\w+)\}/g, (m, key: string) => values[key] ?? m);
 }
 
+const DAY_MS = 86_400_000;
+
+/**
+ * The re-check day a "still current" answer sets: the page type's interval
+ * counted from today (`as_of` and the type policy are left as they are), or
+ * `by_type` for a page whose type is never re-checked (a record whose own
+ * date passed), which clears that date. Any value page edit accepts.
+ */
+export function nextRecheck(days: number | null, now: Date): string {
+  return days === null ? "by_type" : new Date(now.getTime() + days * DAY_MS).toISOString().slice(0, 10);
+}
+
 // ── selection ──────────────────────────────────────────────────────────────
 
 /** The owners who answer for at least one page, with their domains, sorted by name. */
@@ -312,9 +326,12 @@ export function pickDailyQuestions(input: DailyInput, owner: string, options: { 
   // 3. pages past their re-check day, longest overdue first
   const overdue = mine
     .filter((p) => !askedPages.has(p.path) && recheckPassed(p.fm, input.now))
-    .map((p) => ({ p, due: recheckOf(p.fm).date as string }))
+    .map((p) => {
+      const recheck = recheckOf(p.fm);
+      return { p, recheck, due: recheck.date as string };
+    })
     .sort((a, b) => (a.due < b.due ? -1 : a.due > b.due ? 1 : a.p.path.localeCompare(b.p.path)));
-  for (const { p, due } of overdue) {
+  for (const { p, recheck, due } of overdue) {
     if (out.length >= cap) break;
     out.push({
       kind: "recheck",
@@ -324,7 +341,7 @@ export function pickDailyQuestions(input: DailyInput, owner: string, options: { 
       title: p.fm.title,
       due,
       question: fill(words.recheck, { title: quote(p.fm.title), date: due }),
-      answer: { tool: "prime_radiant_page_edit", args: { path: p.path } },
+      answer: { tool: "prime_radiant_page_edit", args: { path: p.path, recheck_after: nextRecheck(recheck.days, input.now) } },
     });
   }
   return out;

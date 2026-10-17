@@ -412,6 +412,48 @@ describe("golden questions: the nightly score", () => {
     expect(verdicts).toEqual(["correct", "wrong"]);
   });
 
+  it("keeps a failed-search night out of the baseline: the regression is raised the night the search works again", async () => {
+    await seedPages();
+    await addGoldenQuestion(PRICE_Q, { domains: [] });
+    const day = (n: number) => () => new Date(NOW.getTime() + n * 86_400_000);
+    await runGoldenScore({ runId: "run-0000000000d1", client: judge(), online: true, now: day(0) });
+    // The price really changes; that night the search is down.
+    await vaultOperation("test: new price", async (tx) => {
+      await tx.write("concepts/blue-widget.md", pageText({ title: "Blue widget", claims: [{ ...PRICE, text: "The blue widget costs 14 EUR per unit." }, STOCK] }));
+    });
+    const down = async () => {
+      throw new Error("embeddings unavailable");
+    };
+    const second = await runGoldenScore({ runId: "run-0000000000d2", client: judge(), online: true, search: down, now: day(1) });
+    expect(second.tally.wrong).toBe(1);
+    expect(second.regressions).toEqual([]);
+    // The list shows what that night answered…
+    expect(Object.values(readLatestVerdicts()).map((v) => v.verdict)).toEqual(["wrong"]);
+    // …but the next night, with the search back, still compares with the last verdict a working search gave.
+    const third = await runGoldenScore({ runId: "run-0000000000d3", client: judge(), online: true, search: async () => [], now: day(2) });
+    expect(third.regressions).toHaveLength(1);
+    expect(listReviewItems(vaultDir(), { status: "open" }).items).toHaveLength(1);
+  });
+
+  it("hands the night's signal to every search and starts none once it has fired", async () => {
+    await seedPages();
+    await addGoldenQuestion(PRICE_Q, { domains: [] });
+    await addGoldenQuestion(OFFICE_Q, { domains: [] });
+    const ctl = new AbortController();
+    const seen: Array<AbortSignal | undefined> = [];
+    const search = async (_q: string, signal?: AbortSignal) => {
+      seen.push(signal);
+      ctl.abort(); // the night's budget runs out during the first search
+      return [];
+    };
+    const calls: string[] = [];
+    const r = await runGoldenScore({ client: judge(calls), online: true, search, signal: ctl.signal, now: () => NOW });
+    expect(seen).toEqual([ctl.signal]);
+    expect(calls).toEqual([]);
+    expect(r.skipped).toBe("model_unavailable");
+    expect(readGoldenHistory()).toEqual([]);
+  });
+
   it("counts a question the judge left out as not judged, never as wrong", async () => {
     await seedPages();
     await addGoldenQuestion(PRICE_Q, { domains: [] });

@@ -185,6 +185,11 @@ function GoldenRow({
   const { t } = useT();
   const [editing, setEditing] = useState(false);
   const [confirming, setConfirming] = useState(false);
+  const confirmRef = useRef<HTMLButtonElement>(null);
+  // The armed confirm takes the focus, so leaving it (a click or Tab elsewhere) disarms it.
+  useEffect(() => {
+    if (confirming) confirmRef.current?.focus();
+  }, [confirming]);
   if (editing) {
     return (
       <li>
@@ -227,7 +232,19 @@ function GoldenRow({
           {t("primeRadiant.questions.edit")}
         </button>
         {confirming ? (
-          <button type="button" className={BTN_DANGER} onClick={onDelete} disabled={busy} data-testid="prime-radiant-golden-delete-confirm">
+          // Armed only while it has the focus: a click elsewhere, or the delete itself, asks again next time.
+          <button
+            ref={confirmRef}
+            type="button"
+            className={BTN_DANGER}
+            onClick={() => {
+              setConfirming(false);
+              onDelete();
+            }}
+            onBlur={() => setConfirming(false)}
+            disabled={busy}
+            data-testid="prime-radiant-golden-delete-confirm"
+          >
             {t("primeRadiant.questions.deleteConfirm")}
           </button>
         ) : (
@@ -531,18 +548,26 @@ function NumberSetting({ label, value, min, max, disabled, onSave, testId }: { l
   );
 }
 
+/** The bounds GET settings answers for these fields (an older server answers none: the fields keep the ones it had). */
+interface CheckLimits {
+  goldenMaxQuestions?: { min: number; max: number };
+  dailyPerOwner?: { min: number; max: number };
+}
+
 /** The two checks' own settings: the nightly golden check (on, its cap) and the daily questions an owner gets. */
 function Checks({ revision, onChanged }: Pick<Props, "revision" | "onChanged">) {
   const { t } = useT();
   const [settings, setSettings] = useState<PrimeRadiantSettings | null>(null);
+  const [limits, setLimits] = useState<CheckLimits>({});
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     const ctl = new AbortController();
-    prJson<{ settings: PrimeRadiantSettings }>(`${API}/settings`, { signal: ctl.signal })
+    prJson<{ settings: PrimeRadiantSettings; limits?: CheckLimits }>(`${API}/settings`, { signal: ctl.signal })
       .then((r) => {
         setSettings(r.settings);
+        setLimits(r.limits ?? {});
         setError(null);
       })
       .catch((err) => {
@@ -590,8 +615,8 @@ function Checks({ revision, onChanged }: Pick<Props, "revision" | "onChanged">) 
       <NumberSetting
         label={t("primeRadiant.questions.goldenMax")}
         value={settings.golden.maxQuestions}
-        min={1}
-        max={500}
+        min={limits.goldenMaxQuestions?.min ?? 1}
+        max={limits.goldenMaxQuestions?.max ?? 500}
         disabled={saving || !settings.golden.enabled}
         onSave={(n) => save({ golden: { maxQuestions: n } })}
         testId="prime-radiant-golden-max"
@@ -599,8 +624,8 @@ function Checks({ revision, onChanged }: Pick<Props, "revision" | "onChanged">) 
       <NumberSetting
         label={t("primeRadiant.questions.perOwner")}
         value={settings.verification.perOwner}
-        min={1}
-        max={20}
+        min={limits.dailyPerOwner?.min ?? 1}
+        max={limits.dailyPerOwner?.max ?? 20}
         disabled={saving}
         onSave={(n) => save({ verification: { perOwner: n } })}
         testId="prime-radiant-daily-per-owner"

@@ -516,7 +516,7 @@ function accuracyOf(g: GoldenScoreBody): Record<string, unknown> {
 const DAILY_SENDING_OFF = "Sending is off: show these only when the owner asks for their questions; do not message anyone.";
 const DAILY_SENDING_ON = "Sending is on: you may send them to this owner over chat as one short message in their language — not on a timer of your own.";
 const DAILY_ANSWERS =
-  "Put each answer back through the tool named in answer_with: a fact confirmed (or corrected, with their text) → prime_radiant_claim_verify; a review item → prime_radiant_review_resolve with action pick and the option's number as candidate, or own_answer with their words; one with fix_first has no claim to verify — put the page right with that tool first, then dismiss the item; a page still current → prime_radiant_page_edit with a new recheck_after.";
+  "Put each answer back through the tool named in answer_with: a fact confirmed (or corrected, with their text) → prime_radiant_claim_verify; a review item → prime_radiant_review_resolve with action pick and the option's number as candidate, or own_answer with their words; one with fix_first has no claim to verify — put the page right with that tool first, then dismiss the item; a page still current → prime_radiant_page_edit with the recheck_after given (its type's interval from today).";
 
 // ── read tools ─────────────────────────────────────────────────────────────
 

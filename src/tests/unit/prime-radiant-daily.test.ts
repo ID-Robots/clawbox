@@ -15,6 +15,7 @@ import {
   dailyOwners,
   HUB_MIN_INBOUND,
   pageOwner,
+  nextRecheck,
   pickDailyQuestions,
   type DailyInput,
   type DailyPage,
@@ -152,7 +153,8 @@ describe("daily questions: who and in what order", () => {
     expect(qs[1].options).toEqual(["10 EUR", "12 EUR"]);
     expect(qs[2].answer).toEqual({ tool: "prime_radiant_claim_verify", args: { id: "acme-sales/globex/hq" } });
     expect(qs[0].answer).toEqual({ tool: "prime_radiant_review_resolve", args: { id: "rev-000000000001" } });
-    expect(qs[5]).toMatchObject({ due: "2025-06-30", answer: { tool: "prime_radiant_page_edit", args: { path: "concepts/old-howto.md" } } });
+    // "Still current" sets the howto's 180 days from today: an answer page edit accepts, so the question can be closed.
+    expect(qs[5]).toMatchObject({ due: "2025-06-30", answer: { tool: "prime_radiant_page_edit", args: { path: "concepts/old-howto.md", recheck_after: "2026-11-16" } } });
     // no claim of a plain concept page, a verified claim, a deprecated page or another owner's page
     const asked = qs.map((q) => q.claimId);
     for (const id of ["acme-sales/plain/x", "acme-sales/p/done", "acme-sales/gone/x", "acme-ops/m/x"]) expect(asked).not.toContain(id);
@@ -177,6 +179,16 @@ describe("daily questions: who and in what order", () => {
     const a = pickDailyQuestions(input, "Иван Иванов", { perOwner: 20 });
     const later = pickDailyQuestions({ ...input, now: new Date("2026-05-20T22:00:00.000Z"), pages: [...input.pages].reverse(), reviewItems: [...items].reverse() }, "Иван Иванов", { perOwner: 20 });
     expect(later).toEqual(a);
+  });
+
+  it("answers a page still current with its type's interval from today, a type never re-checked with by_type", () => {
+    expect(nextRecheck(30, NOW)).toBe("2026-06-19");
+    expect(nextRecheck(null, NOW)).toBe("by_type");
+    // A record whose own date passed: the answer clears the date, and its type never asks again.
+    const record = page("concepts/invoice-2026-0042.md", { type: "reference", title: "Invoice 2026-0042 from Globex", domain: "acme-sales", stale_after: "2026-05-01" });
+    const qs = pickDailyQuestions({ ...input, pages: [record], reviewItems: [] }, "Иван Иванов");
+    expect(qs).toHaveLength(1);
+    expect(qs[0].answer).toEqual({ tool: "prime_radiant_page_edit", args: { path: "concepts/invoice-2026-0042.md", recheck_after: "by_type" } });
   });
 
   it("caps each owner at perOwner, five by default", () => {

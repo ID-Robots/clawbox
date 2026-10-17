@@ -114,7 +114,7 @@ export interface NightlyDeps {
   /** Whether ClawBox AI can be asked (default: a credential is on the box). */
   online?: () => Promise<boolean>;
   /** The vault search the golden check answers with (default: Memory Shard's index of the vault, when it is there). */
-  goldenSearch?: (question: string) => Promise<readonly GoldenHit[]>;
+  goldenSearch?: (question: string, signal?: AbortSignal) => Promise<readonly GoldenHit[]>;
 }
 
 export class NightlyBusyError extends Error {
@@ -597,10 +597,10 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
 const GOLDEN_STEP_MS = 20 * 60_000;
 
 /** Memory Shard's index of the vault, when it is there; else no hits (the claims' words alone answer). */
-async function shardSearch(vault: string, question: string): Promise<readonly GoldenHit[]> {
+async function shardSearch(vault: string, question: string, signal?: AbortSignal): Promise<readonly GoldenHit[]> {
   const { searchPrimeRadiant, vaultIndexingAllowed } = await import("./shard-index");
   if (!(await vaultIndexingAllowed(vault))) return [];
-  return searchPrimeRadiant(question, 8, undefined, vault);
+  return searchPrimeRadiant(question, 8, signal, vault);
 }
 
 /** 8. the golden questions, against `main` as the night left it. Never throws. */
@@ -620,7 +620,7 @@ async function goldenStep(run: RunRecord, summary: NightlySummary, deps: Nightly
       now: deps.now,
       maxQuestions: settings.golden.maxQuestions,
       online,
-      search: deps.goldenSearch ?? ((q) => shardSearch(vault, q)),
+      search: deps.goldenSearch ?? ((q, signal) => shardSearch(vault, q, signal)),
       // A model that hangs must not keep the night (and the busy flag every manual run waits on) for hours.
       signal: AbortSignal.timeout(GOLDEN_STEP_MS),
     });
