@@ -69,10 +69,10 @@ async function seed(files: Record<string, string>): Promise<string> {
 describe("page paths for Cyrillic titles", () => {
   it("names a Bulgarian document by its transliterated title, and two documents of one title apart by -N", () => {
     const taken = new Set<string>();
-    const first = pathFor("concept", "Граждански договор — Петър Ангелов", taken);
-    expect(first).toBe("concepts/grazhdanski-dogovor-petar-angelov.md");
+    const first = pathFor("concept", "Граждански договор — Иван Иванов", taken);
+    expect(first).toBe("concepts/grazhdanski-dogovor-ivan-ivanov.md");
     taken.add(first);
-    expect(pathFor("concept", "Граждански договор — Петър Ангелов", taken)).toBe("concepts/grazhdanski-dogovor-petar-angelov-2.md");
+    expect(pathFor("concept", "Граждански договор — Иван Иванов", taken)).toBe("concepts/grazhdanski-dogovor-ivan-ivanov-2.md");
     // Different Bulgarian documents no longer collide into one `x`.
     expect(pathFor("concept", "Фактура 0042", taken)).toBe("concepts/faktura-0042.md");
     expect(pathFor("entity", "Индекс", taken)).toBe("entities/indeks.md");
@@ -136,7 +136,7 @@ describe("meaningless names and former paths (pure)", () => {
         "concepts/x.md": pageText({ title: "Граждански договор" }, "Текст.\n"),
         "concepts/x-2.md": pageText({ title: "Граждански договор" }, "Друг договор.\n"),
         "concepts/grazhdanski-dogovor-3.md": pageText({ title: "Something else" }, "Taken name.\n"),
-        "entities/3.md": pageText({ type: "entity", title: "Петър Ангелов" }, "Човек.\n"),
+        "entities/3.md": pageText({ type: "entity", title: "Иван Иванов" }, "Човек.\n"),
         "concepts/2026.md": pageText({ title: "2026" }, "A year.\n"),
         "concepts/2026-09-14.md": pageText({ title: "Отчет 14.09.2026" }, "Отчет.\n"),
         "concepts/acme.md": pageText({ title: "Акме" }, "A good name already.\n"),
@@ -147,7 +147,7 @@ describe("meaningless names and former paths (pure)", () => {
       { from: "concepts/2026-09-14.md", to: "concepts/otchet-14-09-2026.md", title: "Отчет 14.09.2026" },
       { from: "concepts/x-2.md", to: "concepts/grazhdanski-dogovor.md", title: "Граждански договор" },
       { from: "concepts/x.md", to: "concepts/grazhdanski-dogovor-2.md", title: "Граждански договор" },
-      { from: "entities/3.md", to: "entities/petar-angelov.md", title: "Петър Ангелов" },
+      { from: "entities/3.md", to: "entities/ivan-ivanov.md", title: "Иван Иванов" },
     ]);
     expect(plan.result.skipped).toEqual([
       { path: "concepts/2026.md", reason: "no-better-name" },
@@ -183,14 +183,14 @@ describe("meaningless names and former paths (pure)", () => {
 describe("renameMeaninglessPages", () => {
   const CONTRACT_CLAIM = claim("bg-legal/grazhdanski-dogovor/term", "Договорът е за 12 месеца.");
   const files = () => ({
-    "concepts/x-3.md": pageText({ title: "Граждански договор — Петър Ангелов", claims: [CONTRACT_CLAIM], id: "concepts/x-3" }, "Договор за услуги с [[entities/3]].\n"),
-    "entities/3.md": pageText({ type: "entity", title: "Петър Ангелов", aliases: ["Петър"] }, "Изпълнител по [[concepts/x-3|договора]].\n"),
+    "concepts/x-3.md": pageText({ title: "Граждански договор — Иван Иванов", claims: [CONTRACT_CLAIM], id: "concepts/x-3" }, "Договор за услуги с [[entities/3]].\n"),
+    "entities/3.md": pageText({ type: "entity", title: "Иван Иванов", aliases: ["Иван"] }, "Изпълнител по [[concepts/x-3|договора]].\n"),
     "concepts/pricing.md": pageText({}, "Prices. See [[concepts/x-3]] and [the contract](x-3.md).\n"),
     "concepts/2026.md": pageText({ title: "2026" }, "The year in review, see [[concepts/pricing]].\n"),
-    "index.md": "# Index\n\n- [[concepts/pricing]] — Widget pricing\n- [[concepts/x-3]] — Граждански договор — Петър Ангелов\n- [[entities/3]] — Петър Ангелов\n",
+    "index.md": "# Index\n\n- [[concepts/pricing]] — Widget pricing\n- [[concepts/x-3]] — Граждански договор — Иван Иванов\n- [[entities/3]] — Иван Иванов\n",
   });
-  const CONTRACT = "concepts/grazhdanski-dogovor-petar-angelov.md";
-  const PERSON = "entities/petar-angelov.md";
+  const CONTRACT = "concepts/grazhdanski-dogovor-ivan-ivanov.md";
+  const PERSON = "entities/ivan-ivanov.md";
 
   it("lists what it would do on a dry run and writes nothing", async () => {
     const seeded = await seed(files());
@@ -231,14 +231,14 @@ describe("renameMeaninglessPages", () => {
     expect(exists("entities/3.md")).toBe(false);
     const contract = frontmatterOf(CONTRACT);
     expect(contract.aliases).toEqual(["concepts/x-3"]);
-    expect(contract.id).toBe("concepts/grazhdanski-dogovor-petar-angelov");
+    expect(contract.id).toBe("concepts/grazhdanski-dogovor-ivan-ivanov");
     expect(contract.claims.map((c) => c.id)).toEqual([CONTRACT_CLAIM.id]);
-    expect(frontmatterOf(PERSON).aliases).toEqual(["Петър", "entities/3"]);
-    expect(read(CONTRACT)).toContain("Договор за услуги с [[entities/petar-angelov]].");
-    expect(read(PERSON)).toContain("Изпълнител по [[concepts/grazhdanski-dogovor-petar-angelov|договора]].");
-    expect(read("concepts/pricing.md")).toContain("See [[concepts/grazhdanski-dogovor-petar-angelov]] and [the contract](grazhdanski-dogovor-petar-angelov.md).");
+    expect(frontmatterOf(PERSON).aliases).toEqual(["Иван", "entities/3"]);
+    expect(read(CONTRACT)).toContain("Договор за услуги с [[entities/ivan-ivanov]].");
+    expect(read(PERSON)).toContain("Изпълнител по [[concepts/grazhdanski-dogovor-ivan-ivanov|договора]].");
+    expect(read("concepts/pricing.md")).toContain("See [[concepts/grazhdanski-dogovor-ivan-ivanov]] and [the contract](grazhdanski-dogovor-ivan-ivanov.md).");
     expect(read("index.md")).toBe(
-      "# Index\n\n- [[concepts/pricing]] — Widget pricing\n- [[concepts/grazhdanski-dogovor-petar-angelov]] — Граждански договор — Петър Ангелов\n- [[entities/petar-angelov]] — Петър Ангелов\n",
+      "# Index\n\n- [[concepts/pricing]] — Widget pricing\n- [[concepts/grazhdanski-dogovor-ivan-ivanov]] — Граждански договор — Иван Иванов\n- [[entities/ivan-ivanov]] — Иван Иванов\n",
     );
     expect(exists("concepts/2026.md")).toBe(true);
 

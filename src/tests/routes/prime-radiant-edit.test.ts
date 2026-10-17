@@ -533,35 +533,35 @@ describe("undo, review and passes for the assistant", () => {
         verified: { at: "2026-09-01T00:00:00.000Z", by: "assistant" },
         evidence: [{ kind: "human-verification", note: "verified by assistant", updatedAt: "2026-09-01T00:00:00.000Z" }],
       });
-      await tx.write("concepts/x-3.md", pageText({ title: "Граждански договор — Петър Ангелов", claims: [assistants] }, "Договор за услуги.\n"));
+      await tx.write("concepts/x-3.md", pageText({ title: "Граждански договор — Иван Иванов", claims: [assistants] }, "Договор за услуги.\n"));
       await tx.write("concepts/pricing.md", pageText({ claims: [PRICE] }, "Prices. See [[concepts/x-3]] and [[x-3|the contract]].\n"));
-      await tx.write("index.md", "# Index\n\n- [[concepts/pricing]] — Widget pricing\n- [[concepts/x-3]] — Граждански договор — Петър Ангелов\n");
+      await tx.write("index.md", "# Index\n\n- [[concepts/pricing]] — Widget pricing\n- [[concepts/x-3]] — Граждански договор — Иван Иванов\n");
     });
     const head = () => execFileSync("git", ["-C", vault, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
     const before = head();
 
     const dryRename = await maintenancePOST(req("POST", "/maintenance", "owner", { action: "rename-slugs", dryRun: true }));
     expect(dryRename.status).toBe(200);
-    expect(await dryRename.json()).toMatchObject({ dryRun: true, commit: null, renamed: [{ from: "concepts/x-3.md", to: "concepts/grazhdanski-dogovor-petar-angelov.md" }], links: 3 });
+    expect(await dryRename.json()).toMatchObject({ dryRun: true, commit: null, renamed: [{ from: "concepts/x-3.md", to: "concepts/grazhdanski-dogovor-ivan-ivanov.md" }], links: 3 });
     expect(head()).toBe(before);
 
     const rename = await maintenancePOST(req("POST", "/maintenance", "owner", { action: "rename-slugs" }));
     expect(rename.status).toBe(200);
-    expect(await rename.json()).toMatchObject({ dryRun: false, renamed: [{ to: "concepts/grazhdanski-dogovor-petar-angelov.md" }] });
+    expect(await rename.json()).toMatchObject({ dryRun: false, renamed: [{ to: "concepts/grazhdanski-dogovor-ivan-ivanov.md" }] });
     expect(log()[0]).toBe("Prime Radiant|Prime Radiant|rename: 1 page with meaningless names");
     expect(fs.existsSync(path.join(vault, "concepts/x-3.md"))).toBe(false);
-    expect(read("concepts/pricing.md")).toContain("See [[concepts/grazhdanski-dogovor-petar-angelov]] and [[concepts/grazhdanski-dogovor-petar-angelov|the contract]].");
-    expect(read("index.md")).toContain("- [[concepts/grazhdanski-dogovor-petar-angelov]] — Граждански договор");
+    expect(read("concepts/pricing.md")).toContain("See [[concepts/grazhdanski-dogovor-ivan-ivanov]] and [[concepts/grazhdanski-dogovor-ivan-ivanov|the contract]].");
+    expect(read("index.md")).toContain("- [[concepts/grazhdanski-dogovor-ivan-ivanov]] — Граждански договор");
 
     const dryUpgrade = await maintenancePOST(req("POST", "/maintenance", "owner", { action: "upgrade-assistant-verifications", dryRun: true }));
-    expect(await dryUpgrade.json()).toMatchObject({ dryRun: true, commit: null, upgraded: [{ claimId: "bg-legal/x/term", page: "concepts/grazhdanski-dogovor-petar-angelov.md" }] });
-    expect(read("concepts/grazhdanski-dogovor-petar-angelov.md")).toContain("by: assistant");
+    expect(await dryUpgrade.json()).toMatchObject({ dryRun: true, commit: null, upgraded: [{ claimId: "bg-legal/x/term", page: "concepts/grazhdanski-dogovor-ivan-ivanov.md" }] });
+    expect(read("concepts/grazhdanski-dogovor-ivan-ivanov.md")).toContain("by: assistant");
 
     const upgrade = await maintenancePOST(req("POST", "/maintenance", "owner", { action: "upgrade-assistant-verifications" }));
     expect(upgrade.status).toBe(200);
-    expect(await upgrade.json()).toMatchObject({ dryRun: false, upgraded: [{ claimId: "bg-legal/x/term" }], pages: ["concepts/grazhdanski-dogovor-petar-angelov.md"] });
+    expect(await upgrade.json()).toMatchObject({ dryRun: false, upgraded: [{ claimId: "bg-legal/x/term" }], pages: ["concepts/grazhdanski-dogovor-ivan-ivanov.md"] });
     expect(log()[0]).toBe("Prime Radiant|Prime Radiant|migrate: 1 assistant verification -> owner via the assistant");
-    expect(read("concepts/grazhdanski-dogovor-petar-angelov.md")).toContain("via: assistant");
+    expect(read("concepts/grazhdanski-dogovor-ivan-ivanov.md")).toContain("via: assistant");
     // Run again: nothing left to do, nothing committed.
     const again = await maintenancePOST(req("POST", "/maintenance", "owner", { action: "upgrade-assistant-verifications" }));
     expect(await again.json()).toMatchObject({ commit: null, upgraded: [] });

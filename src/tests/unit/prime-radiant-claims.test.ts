@@ -37,7 +37,7 @@ describe("claim id namespace", () => {
   });
 
   it("transliterates Bulgarian titles by the official system instead of dropping them", () => {
-    expect(slugify("Граждански договор — Петър Ангелов")).toBe("grazhdanski-dogovor-petar-angelov");
+    expect(slugify("Граждански договор — Иван Иванов")).toBe("grazhdanski-dogovor-ivan-ivanov");
     expect(slugify("Щастие, юни, ябълка")).toBe("shtastie-yuni-yabalka");
     expect(slugify("Жълт цвят, чаша, шише, йога, Мальовица")).toBe("zhalt-tsvyat-chasha-shishe-yoga-malyovitsa");
     // `-ия` closing a word is `ia`; inside one it is `iya`.
