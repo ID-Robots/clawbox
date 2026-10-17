@@ -36,7 +36,9 @@ import { parsePage, serializePage } from "@/lib/prime-radiant/frontmatter";
 import { git, headCommit } from "@/lib/prime-radiant/git";
 import { lintVault } from "@/lib/prime-radiant/lint";
 import { isKnowledgePage, vaultDir } from "@/lib/prime-radiant/paths";
-import { isClaimId } from "@/lib/prime-radiant/claims";
+import { buildClaimIndex, isClaimId } from "@/lib/prime-radiant/claims";
+import { adoptPluginFrontmatter } from "@/lib/prime-radiant/plugin-compat";
+import { validateFrontmatter } from "@/lib/prime-radiant/schema";
 import { editPage } from "@/lib/prime-radiant/edit";
 import {
   isPluginFormatFrontmatter,
@@ -299,6 +301,41 @@ describe("a page memory-wiki wrote in its own format", () => {
     expect(isPluginFormatFrontmatter({ ...frontmatter(), pageType: "concept" })).toBe(false);
     expect(isPluginFormatFrontmatter({ title: "No kind" })).toBe(false);
     expect(isPluginFormatFrontmatter(null)).toBe(false);
+  });
+
+  it("is converted to a valid page whatever the plugin left out or set oddly", () => {
+    const now = new Date("2026-05-20T03:00:00.000Z");
+    const taken = claim("general/acme-roadmap/acme-ships-the-green-widget-in-q3", "Acme ships the green widget in Q3.");
+    const claimIndex = buildClaimIndex([{ path: "concepts/plans.md", frontmatter: frontmatter({ claims: [taken] }) }]);
+    const { frontmatter: fm, claims } = adoptPluginFrontmatter(
+      "syntheses/acme-roadmap.md",
+      {
+        pageType: "dashboard",
+        domain: "Not A Slug",
+        privacyTier: "local-private",
+        updatedAt: "yesterday",
+        claims: [
+          { id: "claim.a", text: "Acme ships the green widget in Q3.", status: "verified", confidence: 7 },
+          { id: "claim.b", text: "   " },
+          "not a claim",
+        ],
+      },
+      "# Acme roadmap\n\nPlans.\n",
+      { claimIndex, now },
+    );
+    expect(validateFrontmatter(fm).ok).toBe(true);
+    // An unknown kind takes its folder's; the title its first heading; the domain and the date safe defaults.
+    expect(fm).toMatchObject({ type: "synthesis", title: "Acme roadmap", domain: "general", privacy: "confidential", generated: { at: now.toISOString(), by: "memory-wiki" } });
+    // Only a claim with text is kept: never verified by the plugin's say-so, its confidence in range, its id free.
+    expect(claims).toBe(1);
+    expect(fm.claims[0]).toMatchObject({ text: "Acme ships the green widget in Q3.", status: "proposed", confidence: 0.5 });
+    expect(isClaimId(fm.claims[0].id)).toBe(true);
+    expect(fm.claims[0].id).not.toBe(taken.id);
+
+    // No title, no heading: the file name; outside the plugin's folders, a concept; a tier Prime Radiant knows is kept.
+    const bare = adoptPluginFrontmatter("notes/globex_launch-plan.md", { pageType: "page", privacyTier: "public" }, "No heading here.\n", { claimIndex, now }).frontmatter;
+    expect(bare).toMatchObject({ type: "concept", title: "globex launch plan", privacy: "public", sources: [], claims: [] });
+    expect(validateFrontmatter(bare).ok).toBe(true);
   });
 
   it("never breaks the lint, and the next pass makes it a Prime Radiant page the owner can edit", async () => {
