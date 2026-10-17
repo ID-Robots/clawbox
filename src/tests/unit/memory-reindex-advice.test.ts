@@ -65,6 +65,14 @@ describe("memoryReindexAdvice", () => {
     expect(codes({ ...HEALTHY, run: { status: "failed", errorCode: "timed_out" } })).toEqual(["last_pass_stopped"]);
   });
 
+  it("never sends a stopped FULL pass to an incremental one", () => {
+    // A full pass stopped part-way is finished only by a new full pass; what
+    // it left behind (a missing identity here) is the reason that says so.
+    expect(codes({ ...HEALTHY, run: { status: "failed", mode: "full", errorCode: "interrupted" } })).toEqual([]);
+    expect(memoryReindexAdvice({ ...HEALTHY, indexIdentity: "missing", run: { status: "failed", mode: "full", errorCode: "interrupted" } }, "local"))
+      .toMatchObject({ mode: "full", reasons: [{ code: "identity_missing" }] });
+  });
+
   it("reads `dirty` on ClawBox's own index as the size ceiling, which no pass fixes", () => {
     expect(memoryReindexAdvice({ ...HEALTHY, dirty: true }, "local")).toMatchObject({ needed: false, mode: null, reasons: [{ code: "size_ceiling", mode: "none" }] });
   });

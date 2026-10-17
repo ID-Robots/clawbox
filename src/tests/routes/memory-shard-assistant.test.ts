@@ -190,6 +190,61 @@ describe("who may write", () => {
   });
 });
 
+describe("arming the schedule over an index with nothing in it yet", () => {
+  // A scheduled pass holds back a full rebuild of a disowned index but builds
+  // an empty one from scratch, so arming the timer is a full pass, later.
+  const SCHEDULE = { enabled: true, frequency: "daily", timeOfDay: "03:00", weekday: 0 };
+
+  it("answers the assistant's schedule with the first build's estimate, and saves nothing", async () => {
+    h.resolvedMode = "full";
+    const { schedule } = await routes();
+    const res = await schedule.PUT(req("PUT", "/schedule", SCHEDULE) as never);
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body).toMatchObject({ kind: "confirm_required", mode: "full", requested: "schedule" });
+    expect(body.estimate).toMatchObject({ files: 140, chunks: 3_000 });
+    expect(lib.resolveIndexMode).toHaveBeenCalledWith("incremental", "schedule");
+    expect(lib.writeMemorySchedule).not.toHaveBeenCalled();
+    expect(refreshScheduler).not.toHaveBeenCalled();
+  });
+
+  it("saves it with confirm: true, and never gates a schedule that is off or a pass that is incremental", async () => {
+    h.resolvedMode = "full";
+    const { schedule } = await routes();
+    expect((await schedule.PUT(req("PUT", "/schedule", { ...SCHEDULE, confirm: true }) as never)).status).toBe(200);
+    expect((await schedule.PUT(req("PUT", "/schedule", { ...SCHEDULE, enabled: false }) as never)).status).toBe(200);
+    h.resolvedMode = "incremental";
+    expect((await schedule.PUT(req("PUT", "/schedule", SCHEDULE) as never)).status).toBe(200);
+    expect(lib.writeMemorySchedule).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not ask the person: their click is the decision", async () => {
+    Object.assign(h, { person: true, resolvedMode: "full" });
+    const { schedule } = await routes();
+    expect((await schedule.PUT(req("PUT", "/schedule", SCHEDULE, null) as never)).status).toBe(200);
+    expect(lib.resolveIndexMode).not.toHaveBeenCalled();
+  });
+
+  it("gates switching Memory Shard on over a saved schedule the same way", async () => {
+    h.resolvedMode = "full";
+    lib.readMemorySchedule.mockResolvedValue(SCHEDULE);
+    try {
+      const { enable } = await routes();
+      const held = await enable.POST(req("POST", "/enable", { enabled: true }));
+      expect(held.status).toBe(409);
+      expect((await held.json()).kind).toBe("confirm_required");
+      expect(shard.setMemoryShardEnabled).not.toHaveBeenCalled();
+
+      expect((await enable.POST(req("POST", "/enable", { enabled: true, confirm: true }))).status).toBe(200);
+      expect(shard.setMemoryShardEnabled).toHaveBeenCalledWith(true);
+      // Switching OFF disarms; it never needs a confirm.
+      expect((await enable.POST(req("POST", "/enable", { enabled: false }))).status).toBe(200);
+    } finally {
+      lib.readMemorySchedule.mockResolvedValue({ enabled: false, frequency: "daily", timeOfDay: "03:00", weekday: 0 });
+    }
+  });
+});
+
 describe("the index route", () => {
   it("starts an incremental pass for the assistant without confirm", async () => {
     const { index } = await routes();

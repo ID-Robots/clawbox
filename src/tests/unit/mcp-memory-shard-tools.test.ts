@@ -184,6 +184,16 @@ describe("memory_shard_reindex_stop", () => {
     expect(out.text).toMatch(/carries on from there/);
   });
 
+  it("says a stopped FULL pass is finished only by a new full one, behind the owner's yes", async () => {
+    routes({ [`DELETE ${BASE}/index`]: { stopped: true, run: { status: "running", mode: "full" } } });
+    const out = await harness().call("memory_shard_reindex_stop", {});
+    if (out.isError) throw new Error(JSON.stringify(out.error));
+    expect(out.text).toMatch(/Stopping the full reindex/);
+    expect(out.text).toMatch(/an incremental pass will not finish it/);
+    expect(out.text).toMatch(/only a new full pass rebuilds the index, and that needs the owner's yes/);
+    expect(out.text).not.toMatch(/carries on from there/);
+  });
+
   it("says there is nothing to stop", async () => {
     routes({ [`DELETE ${BASE}/index`]: refusal(409, { kind: "not_running", error: "No indexing pass is running." }) });
     const out = await harness().call("memory_shard_reindex_stop", {});
@@ -279,6 +289,26 @@ describe("the schedule", () => {
     expect(out.text).toMatch(/every Friday at 03:00/);
   });
 
+  it("answers a schedule that would start a first full build with its estimate, and saves it only with confirm", async () => {
+    const current = { schedule: { enabled: false, frequency: "daily", timeOfDay: "03:00", weekday: 0 } };
+    routes({
+      [`GET ${BASE}/schedule`]: current,
+      [`PUT ${BASE}/schedule`]: refusal(409, { kind: "confirm_required", mode: "full", requested: "schedule", estimate: ESTIMATE }),
+    });
+    let out = await harness().call("memory_shard_schedule_set", { enabled: true });
+    if (out.isError) throw new Error(JSON.stringify(out.error));
+    expect(sent(1)[1].body).toEqual({ enabled: true, frequency: "daily", timeOfDay: "03:00", weekday: 0 });
+    expect(JSON.parse(out.text)).toMatchObject({ saved: false, files: 140, time: "about 10–40 min" });
+    expect(out.text).toMatch(/no index to update yet/);
+
+    api.mockClear();
+    routes({ [`GET ${BASE}/schedule`]: current, [`PUT ${BASE}/schedule`]: { schedule: { ...current.schedule, enabled: true }, nextRunAtMs: 0 } });
+    out = await harness().call("memory_shard_schedule_set", { enabled: true, confirm: true });
+    if (out.isError) throw new Error(JSON.stringify(out.error));
+    expect(sent(1)[1].body).toMatchObject({ enabled: true, confirm: true });
+    expect(out.text).toMatch(/^Saved: Memory Shard refreshes every day at 03:00/);
+  });
+
   it("refuses an empty change and a time that is not one", async () => {
     const out = await harness().call("memory_shard_schedule_set", {});
     expect(out.isError && out.error.code).toBe("BAD_ARGUMENT");
@@ -370,6 +400,21 @@ describe("memory_shard_enable", () => {
     routes({ [`POST ${BASE}/enable`]: { enabled: false, setupComplete: true } });
     out = await harness().call("memory_shard_enable", { on: false });
     if (!out.isError) expect(out.text).toMatch(/folders and the index are kept/);
+  });
+
+  it("answers switching on over a schedule that would start a first full build with its estimate", async () => {
+    routes({ [`POST ${BASE}/enable`]: refusal(409, { kind: "confirm_required", mode: "full", requested: "schedule", estimate: ESTIMATE }) });
+    let out = await harness().call("memory_shard_enable", { on: true });
+    if (out.isError) throw new Error(JSON.stringify(out.error));
+    expect(sent()[1].body).toEqual({ enabled: true });
+    expect(JSON.parse(out.text)).toMatchObject({ switched_on: false, files: 140 });
+
+    api.mockClear();
+    routes({ [`POST ${BASE}/enable`]: { enabled: true, setupComplete: true } });
+    out = await harness().call("memory_shard_enable", { on: true, confirm: true });
+    if (out.isError) throw new Error(JSON.stringify(out.error));
+    expect(sent()[1].body).toEqual({ enabled: true, confirm: true });
+    expect(out.text).toMatch(/Memory Shard is on/);
   });
 
   it("says the paid plan is the owner's, in the gate's own words", async () => {

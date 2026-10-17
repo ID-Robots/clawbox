@@ -61,6 +61,35 @@ export function confirmed(by: MemoryShardWriter, body: unknown): boolean {
 }
 
 /**
+ * An assistant's write that would ARM the refresh schedule — saving one that
+ * is on, or switching Memory Shard on over one — when the next scheduled pass
+ * would run in FULL. That happens on an index with nothing in it yet: a
+ * scheduled pass holds back a full rebuild of a disowned index, but builds an
+ * empty one from scratch (see planIndexPass), so arming the timer would start
+ * the very full pass the index route keeps behind the owner's confirm, only
+ * later. Null when it may go ahead: a person's click, `confirm: true`, or a
+ * scheduled pass that would be incremental (or held back).
+ */
+export async function scheduledFullPassRefusal(by: MemoryShardWriter, body: unknown): Promise<NextResponse | null> {
+  if (confirmed(by, body)) return null;
+  const [memory, { estimateFullReindex }] = await Promise.all([
+    import("@/lib/clawkeep-memory"),
+    import("@/lib/memory-reindex-advice"),
+  ]);
+  if ((await memory.resolveIndexMode("incremental", "schedule")) !== "full") return null;
+  const status = await memory.getMemoryStatus();
+  return confirmRequired(
+    "The next scheduled pass would build this index in full, embedding every file, because there is no index to update yet. Ask the owner first; nothing was changed.",
+    {
+      mode: "full",
+      requested: "schedule",
+      reasons: status.reindex?.reasons ?? [],
+      estimate: estimateFullReindex(status, status.location === "cloud" ? "cloud" : "local", status.model || undefined),
+    },
+  );
+}
+
+/**
  * The answer to an assistant's expensive write that came without
  * `confirm: true`: 409 `confirm_required`, nothing done, and what the write
  * WOULD cost so the assistant can put it to the owner.

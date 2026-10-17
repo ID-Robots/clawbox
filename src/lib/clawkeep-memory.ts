@@ -1407,13 +1407,35 @@ async function acquireRunLock(): Promise<boolean> {
 
 /**
  * A pass `stopMemoryIndex` ended. The same code as any other interruption —
- * the index is in the same state either way: every file finished before the
- * stop is committed, and the next incremental pass skips them — worded so
- * nobody reads a stop they asked for as a fault.
+ * the index is in the same state either way — worded so nobody reads a stop
+ * they asked for as a fault, and worded BY MODE, because the two leave
+ * different things behind. A stopped incremental pass committed every file it
+ * finished, and the next incremental pass skips them. A stopped FULL pass did
+ * not: ClawBox's own rebuild empties the store and drops its identity first,
+ * and OpenClaw's `--force` builds into a temporary database it never swaps in.
+ * The next pass that completes it is a full one (planIndexPass upgrades an
+ * incremental ask over the stale identity), so saying "an incremental pass
+ * carries on" there would send the assistant to a pass that is not one.
  */
 const STOPPED_FAILURE = {
   error: "Indexing was stopped before it finished. An incremental pass carries on from the files already indexed.",
   errorCode: "interrupted" as const,
+};
+/**
+ * A stopped FULL pass, by arm. OpenClaw's `--force` builds into a temporary
+ * database it never swapped in, so its index stays as it was. ClawBox's own
+ * rebuild emptied the store before it began, so the index holds only what it
+ * re-embedded by the stop — "stays as it was" would be untrue there.
+ */
+const STOPPED_FULL_FAILURE = {
+  openclaw: {
+    error: "The full reindex was stopped before it finished; the index stays as it was. Only a new full reindex rebuilds it, and that needs the owner's go.",
+    errorCode: "interrupted" as const,
+  },
+  local: {
+    error: "The full reindex was stopped before it finished; the index holds only the files it re-embedded so far. Only a new full reindex rebuilds it, and that needs the owner's go.",
+    errorCode: "interrupted" as const,
+  },
 };
 
 /** The two verdicts both arms can reach, said once. */
@@ -1812,7 +1834,8 @@ export async function startMemoryIndex(
       .catch(() => { /* the next report tries again */ })
       .finally(() => { reportInFlight = false; });
   };
-  const pass = openclawIsAbsent()
+  const localArm = openclawIsAbsent();
+  const pass = localArm
     ? startLocalPass(mode, publishProgress, trigger !== "schedule")
     : startOpenclawPass(mode, publishProgress);
   if (pass.pid) settlingPasses().add(pass.pid);
@@ -1857,7 +1880,7 @@ export async function startMemoryIndex(
       : timedOut
         ? TIMED_OUT_FAILURE
         : supervised.stopRequested
-          ? STOPPED_FAILURE
+          ? (mode === "full" ? STOPPED_FULL_FAILURE[localArm ? "local" : "openclaw"] : STOPPED_FAILURE)
           : outcome.kind === "threw"
             ? localFailure(outcome.error)
             : fixedFailure(outcome.code, outcome.signal);
@@ -1939,8 +1962,9 @@ export async function startMemoryIndex(
  * way an interrupted one does — on the local arm between two files, on the
  * OpenClaw arm by SIGTERM to its CLI child — and its own `finish` writes the
  * settled record, frees the lock and refreshes the status, so a stop leaves
- * nothing behind that the next pass trips over. Files indexed before the stop
- * stay indexed.
+ * nothing behind that the next pass trips over. Files an incremental pass
+ * indexed before the stop stay indexed; a stopped full pass is completed only
+ * by another full one (see STOPPED_FULL_FAILURE).
  *
  * `stopped: false` when there is nothing this process can stop: no pass
  * running, or a run record that is not the pass held here (one a restarted

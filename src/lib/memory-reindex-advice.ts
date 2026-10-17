@@ -124,7 +124,10 @@ export function memoryReindexAdvice(s: MemoryStatusFacts, arm: MemoryIndexArm): 
       detail: "The index reached its size limit and left some files out; another pass will not fit them. Fewer or smaller folders would.",
     });
   }
-  if (s.run?.status === "failed" && (s.run.errorCode === "interrupted" || s.run.errorCode === "timed_out") && !empty) {
+  // Only a pass that was incremental: a stopped FULL pass is completed by
+  // another full one, and what it left behind already says so (an empty
+  // store or a missing identity, above; OpenClaw keeps its old index whole).
+  if (s.run?.status === "failed" && s.run.mode !== "full" && (s.run.errorCode === "interrupted" || s.run.errorCode === "timed_out") && !empty) {
     reasons.push({
       code: "last_pass_stopped",
       mode: "incremental",

@@ -1131,12 +1131,16 @@ pass), or the size ceiling and a fallen-back provider (no pass fixes those).
 (`src/lib/memory-shard-writer.ts`): a signed-in person, or this server's bearer;
 anything else is 403 `owner_only`. The assistant starts an **incremental** pass
 on its own — it reads only new and changed files. A **full** pass (asked for, or
-the one an incremental ask would really run on a missing or disowned index), a
+the one an incremental ask would really run on a missing or disowned index, or
+the first build an armed schedule would start over an empty one — saving a
+schedule that is on, or switching Memory Shard on over one), a
 **provider move** (which re-embeds everything) and the **reset** answer this
 bearer 409 `confirm_required` until the body carries `confirm: true`: with the
 estimate (files, minutes, the embedding tokens and who pays) or the exact list
 of what a reset clears and keeps. The tools return that answer as-is and set
-`confirm: true` only once the owner said yes in chat. Adding a folder is held
+`confirm: true` only once the owner said yes in chat. A stopped incremental
+pass is carried on by the next one; a stopped full pass is finished only by a
+new full one, and the stop says which. Adding a folder is held
 to the picker's rules (inside the Files root, never hidden, never a secret
 store) and answers how many files a pass would read from it. A pass is stopped
 with `DELETE /setup-api/clawkeep/memory/index`. The status tells the agent to

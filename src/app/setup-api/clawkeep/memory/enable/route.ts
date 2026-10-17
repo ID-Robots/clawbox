@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { refresh as refreshMemoryScheduler } from "@/lib/clawkeep-memory-scheduler";
-import { memoryShardWriter } from "@/lib/memory-shard-writer";
+import { readMemorySchedule } from "@/lib/clawkeep-memory";
+import { memoryShardWriter, scheduledFullPassRefusal } from "@/lib/memory-shard-writer";
 import { bodyWouldEnable } from "@/lib/paid-plan-gate";
 import { readPlanGate, refusePaidPlan } from "@/lib/paid-plan-gate-server";
 import {
@@ -19,7 +20,10 @@ export const dynamic = "force-dynamic";
  * asked for the assistant to be able to do whatever the Memory Shard app does,
  * and switching it on or off is one click there. Anything else is refused 403
  * `owner_only`. The switch costs nothing by itself — the passes it allows are
- * gated on their own — so it needs no `confirm`.
+ * gated on their own — so it needs no `confirm`, with one exception: switching
+ * it ON re-arms the saved schedule, and over an index with nothing in it yet
+ * that schedule's next pass is a full build, which from the assistant waits
+ * for `confirm: true` (409 `confirm_required`).
  *
  * POST { enabled?: boolean, setupComplete?: boolean } → the new state.
  *
@@ -57,6 +61,10 @@ export async function POST(request: Request) {
   if (bodyWouldEnable(body)) {
     const gate = await readPlanGate();
     if (!gate.satisfied) return refusePaidPlan("memory_shard", gate);
+  }
+  if (writer.by === "assistant" && body.enabled === true && (await readMemorySchedule()).enabled) {
+    const refused = await scheduledFullPassRefusal(writer.by, body);
+    if (refused) return refused;
   }
 
   if (hasEnabled) {

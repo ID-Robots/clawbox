@@ -252,6 +252,19 @@ function estimateOut(e: ConfirmBody["estimate"]): Record<string, unknown> {
   };
 }
 
+/**
+ * A schedule or switch write the route held because the next scheduled pass
+ * would build an empty index in full: what that pass would cost, for the owner.
+ */
+function firstBuildOut(gate: ConfirmBody, done: string): Record<string, unknown> {
+  return {
+    [done]: false,
+    why: "There is no index to update yet, so the next scheduled pass would build it in full, embedding every file.",
+    ...estimateOut(gate.estimate),
+    next: ASK_FIRST,
+  };
+}
+
 function reasonsOut(reasons: ReindexReason[] | undefined): Array<Record<string, unknown>> {
   return (reasons ?? []).map((r) => ({ why: r.code, fixed_by: r.mode === "none" ? "no pass" : `${r.mode} pass`, detail: r.detail }));
 }
@@ -411,11 +424,18 @@ function registerPassTools(reg: Registrar): void {
 
   reg.tool(
     "memory_shard_reindex_stop",
-    "Stop the running Memory Shard indexing pass, when the user asked. What it already indexed stays; the next incremental pass carries on from there.",
+    "Stop the running Memory Shard indexing pass, when the user asked. A stopped incremental pass keeps what it indexed; a stopped full pass is finished only by another full one.",
     {},
     WRITE,
     async () => {
-      await call("DELETE", "/index");
+      const r = await call<{ run?: RunBody }>("DELETE", "/index");
+      if (r.run?.mode === "full") {
+        return text(
+          "Stopping the full reindex; it settles in a moment. It is not finished, and an incremental pass will not finish it:"
+          + " only a new full pass rebuilds the index, and that needs the owner's yes (memory_shard_reindex with mode full and confirm: true)."
+          + " memory_shard_status shows what the index holds meanwhile.",
+        );
+      }
       return text("Stopping the indexing pass; it settles in a moment. What it indexed so far stays, and memory_shard_reindex (incremental) carries on from there.");
     },
   );
@@ -525,15 +545,16 @@ function registerSettingTools(reg: Registrar): void {
 
   reg.tool(
     "memory_shard_schedule_set",
-    "Change when Memory Shard refreshes its index on its own, as the user asked: on or off, daily or weekly, the time (box time) and the weekday. What you leave out stays as it is.",
+    "Change when Memory Shard refreshes its index on its own, as the user asked: on or off, daily or weekly, the time (box time) and the weekday. What you leave out stays as it is. Over an empty index the first scheduled pass is a full build: it then answers the estimate and saves only with confirm: true.",
     {
       enabled: z.boolean().optional().describe("Refresh on the schedule (true) or only by hand (false)."),
       frequency: zEnumOf(["daily", "weekly"], "daily or weekly.").optional(),
       time_of_day: z.string().regex(TIME_RE, "HH:MM, 24-hour").optional().describe("When, box time, HH:MM (24-hour)."),
       weekday: zEnumOf(WEEKDAY_NAMES, "For weekly: the day.").optional(),
+      confirm: zBool(false, "true only after the owner said yes to a first full build's estimate in this chat."),
     },
     WRITE,
-    async (a: { enabled?: boolean; frequency?: string; time_of_day?: string; weekday?: string }) => {
+    async (a: { enabled?: boolean; frequency?: string; time_of_day?: string; weekday?: string; confirm?: boolean }) => {
       if (a.enabled === undefined && a.frequency === undefined && a.time_of_day === undefined && a.weekday === undefined) {
         throw new ToolError("BAD_ARGUMENT", "Nothing to change was given.", "Pass enabled, frequency, time_of_day or weekday.");
       }
@@ -551,7 +572,9 @@ function registerSettingTools(reg: Registrar): void {
         timeOfDay: a.time_of_day ?? current.timeOfDay ?? "03:00",
         weekday: weekday ?? current.weekday ?? 0,
       };
-      const r = await call<{ schedule?: ScheduleBody; nextRunAtMs?: number }>("PUT", "/schedule", { body: { ...next } });
+      const saved = await ms<{ schedule?: ScheduleBody; nextRunAtMs?: number }>("PUT", "/schedule", { body: { ...next, ...(a.confirm === true ? { confirm: true } : {}) } });
+      if (saved.gated) return json(firstBuildOut(saved.body, "saved"));
+      const r = saved.body;
       return text(`Saved: Memory Shard refreshes ${scheduleWords(r.schedule ?? next)}. Next pass: ${isoMinute(r.nextRunAtMs) ?? "none"}.`);
     },
   );
@@ -613,12 +636,17 @@ function registerSettingTools(reg: Registrar): void {
 
   reg.tool(
     "memory_shard_enable",
-    "Switch Memory Shard on or off, when the user asked. Off stops its passes and its search; the folders and the index stay. On needs a paid ClawBox AI plan.",
-    { on: z.boolean().describe("true switches it on, false off.") },
+    "Switch Memory Shard on or off, when the user asked. Off stops its passes and its search; the folders and the index stay. On needs a paid ClawBox AI plan, and over an empty index with a schedule saved it answers the first full build's estimate, switching on only with confirm: true.",
+    {
+      on: z.boolean().describe("true switches it on, false off."),
+      confirm: zBool(false, "true only after the owner said yes to a first full build's estimate in this chat."),
+    },
     WRITE,
-    async ({ on }: { on: boolean }) => {
+    async ({ on, confirm }: { on: boolean; confirm?: boolean }) => {
       if (typeof on !== "boolean") throw new ToolError("BAD_ARGUMENT", "Say on: true or on: false.", "Call again with on set.");
-      const r = await call<{ enabled?: boolean; setupComplete?: boolean }>("POST", "/enable", { body: { enabled: on } });
+      const switched = await ms<{ enabled?: boolean; setupComplete?: boolean }>("POST", "/enable", { body: { enabled: on, ...(confirm === true ? { confirm: true } : {}) } });
+      if (switched.gated) return json(firstBuildOut(switched.body, "switched_on"));
+      const r = switched.body;
       if (r.enabled !== on) return text(`Memory Shard did not switch ${on ? "on" : "off"}; it is ${r.enabled ? "on" : "off"}.`);
       return text(on
         ? `Memory Shard is on.${r.setupComplete === false ? " Its setup was never finished: the owner finishes it in the Memory Shard app." : " Its saved schedule is armed again; memory_shard_reindex (incremental) catches up now."}`

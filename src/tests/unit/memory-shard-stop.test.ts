@@ -66,35 +66,59 @@ describe("stopping an index pass", () => {
     expect(JSON.parse(await fs.readFile(path.join(tmpDir, "memory-index-state.json"), "utf8")).status).toBe("running");
   });
 
-  it("ends the running pass, settles it as stopped and frees the lock for the next one", async () => {
+  /**
+   * A fake `openclaw` that indexes until signalled. Its `memory status` fails
+   * at once, so the status probe answers "unavailable" and an incremental ask
+   * is planned as asked rather than upgraded.
+   */
+  async function foreverIndexer(): Promise<string> {
     const script = path.join(tmpDir, "fake-index");
     const started = path.join(tmpDir, "started");
     await fs.writeFile(script, [
       "#!/bin/sh",
+      'case "$*" in *status*) exit 1 ;; esac',
       "trap 'exit 143' TERM",
       `touch '${started}'`,
       "while :; do sleep 0.1; done",
       "",
     ].join("\n"), { mode: 0o755 });
     process.env.CLAWKEEP_MEMORY_OPENCLAW_BIN = script;
+    return started;
+  }
+
+  async function startThenStop(mode: "full" | "incremental") {
+    const started = await foreverIndexer();
     vi.resetModules();
     const { startMemoryIndex, stopMemoryIndex } = await import("@/lib/clawkeep-memory");
-
-    expect((await startMemoryIndex("full", "manual")).accepted).toBe(true);
+    const start = await startMemoryIndex(mode, "manual");
+    expect(start.accepted).toBe(true);
+    expect(start.run.mode).toBe(mode);
     for (let i = 0; i < 200; i += 1) {
       if (await fs.stat(started).then(() => true, () => false)) break;
       await new Promise((r) => setTimeout(r, 25));
     }
-
     const stop = await stopMemoryIndex();
     expect(stop.stopped).toBe(true);
-    expect(stop.run.status).toBe("running");
+    expect(stop.run).toMatchObject({ status: "running", mode });
+    return { run: await settledMemoryRun(tmpDir), stopMemoryIndex };
+  }
 
-    const run = await settledMemoryRun(tmpDir);
+  it("says a stopped incremental pass is carried on by the next incremental one", async () => {
+    const { run } = await startThenStop("incremental");
     expect(run.status).toBe("failed");
     expect(run.errorCode).toBe("interrupted");
     expect(run.error).toMatch(/stopped before it finished/);
     expect(run.error).toMatch(/incremental pass carries on/);
+  });
+
+  it("ends a running full pass, says only a new full one rebuilds the index, and frees the lock", async () => {
+    const { run, stopMemoryIndex } = await startThenStop("full");
+    expect(run.status).toBe("failed");
+    expect(run.errorCode).toBe("interrupted");
+    // The OpenClaw arm: `--force` never swapped its new database in.
+    expect(run.error).toMatch(/full reindex was stopped before it finished; the index stays as it was/);
+    expect(run.error).toMatch(/Only a new full reindex rebuilds it, and that needs the owner's go/);
+    expect(run.error).not.toMatch(/incremental pass carries on/);
 
     // The lock went with it: a stop that left it behind would refuse the next pass.
     expect(await fs.stat(path.join(tmpDir, "memory-index.lock")).then(() => true, () => false)).toBe(false);
