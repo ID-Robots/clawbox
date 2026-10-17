@@ -233,6 +233,7 @@ describe("GET /status", () => {
     expect(body.vault).toMatchObject({ pages: 3, invalidPages: 0, verifiedPages: 1, claims: 1, domains: ["acme-sales", "acme-support"] });
     expect(body.git.commits).toBe(2);
     expect(body.lint.errors).toBeGreaterThan(0); // support page names no sources
+    expect(body.links).toMatchObject({ pages: expect.any(Number), median: expect.any(Number), target: 5 });
   });
 });
 

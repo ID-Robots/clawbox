@@ -114,6 +114,33 @@ describe("nightly pass", () => {
     expect(listNightlyRuns()).toEqual([]);
   });
 
+  it("builds the structure layer on the branch, offline too, and merges it; a second night has nothing left to do", async () => {
+    await ensureVault();
+    await vaultOperation("seed: invoices", async (tx) => {
+      for (let d = 1; d <= 3; d++) {
+        const title = `Invoice INV-2026-00000${d} Globex Ltd`;
+        await tx.write(
+          `concepts/invoice-inv-2026-00000${d}.md`,
+          pageText({ type: "reference", title, domain: "acme-sales", claims: [claim(`acme-sales/invoice-inv-2026-00000${d}/total`, `The invoice total is EUR ${d}00.00, dated 2026-04-0${d}.`)] }, `${title}.\n`),
+        );
+      }
+    });
+    const withStructure = settings({ domains: [{ name: "acme-sales", owner: "Sales team" }], structure: { ...defaultSettings().structure, company: "Acme Widgets Ltd" } });
+    const run = await runNightly("manual", deps({ online: async () => false, settings: withStructure }));
+    expect(run?.status).toBe("merged");
+    expect((run!.summary as unknown as NightlySummary).structure).toMatchObject({ recordHubs: 1, domainHubs: 1, root: true, leavesInHubs: 3, model: { skipped: "offline" } });
+    const snap = await readVaultSnapshot(vaultDir());
+    const hub = snap.pages.find((p) => p.path === "syntheses/invoices-2026-04.md");
+    expect(hub?.parsed.ok && hub.parsed.frontmatter.structure).toMatchObject({ kind: "record-hub", type: "invoice", month: "2026-04", leaves: 3 });
+    expect(snap.pages.map((p) => p.path)).toEqual(expect.arrayContaining(["syntheses/acme-widgets-ltd.md", "syntheses/acme-sales-domain-hub.md"]));
+    const leaf = snap.pages.find((p) => p.path === "concepts/invoice-inv-2026-000001.md");
+    expect(leaf?.parsed.ok && leaf.parsed.frontmatter.record).toEqual({ type: "invoice", month: "2026-04", hub: "syntheses/invoices-2026-04.md", by: "rules" });
+
+    const again = await runNightly("manual", deps({ online: async () => false, settings: withStructure }));
+    expect(again?.status).toBe("nothing");
+    expect((again!.summary as unknown as NightlySummary).structure).toMatchObject({ written: 0 });
+  });
+
   it("names its branch dream/<local date>, and the next free one on a second run that day", async () => {
     await ensureVault();
     expect(localDate(NOW)).toBe("2026-05-20");

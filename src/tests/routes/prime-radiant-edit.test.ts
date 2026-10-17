@@ -530,7 +530,7 @@ describe("undo, review and passes for the assistant", () => {
   it("lets the assistant run the connect pass, and only that pass", async () => {
     await ensureVault();
     await seed();
-    for (const action of ["reindex", "rejudge-reviews", "migrate-frontmatter", "rename-slugs", "upgrade-assistant-verifications"]) {
+    for (const action of ["reindex", "rejudge-reviews", "migrate-frontmatter", "rename-slugs", "upgrade-assistant-verifications", "structure", "classify-records"]) {
       const res = await maintenancePOST(req("POST", "/maintenance", "assistant", { action, dryRun: true }));
       expect(res.status, action).toBe(403);
       expect((await res.json()).code).toBe("owner_only");
@@ -581,6 +581,19 @@ describe("undo, review and passes for the assistant", () => {
     // Run again: nothing left to do, nothing committed.
     const again = await maintenancePOST(req("POST", "/maintenance", "owner", { action: "upgrade-assistant-verifications" }));
     expect(await again.json()).toMatchObject({ commit: null, upgraded: [] });
+  });
+
+  it("answers the owner's structure dry run with what it would write and commits nothing; classify-records only reads", async () => {
+    await ensureVault();
+    await seed();
+    const before = log()[0];
+    const dry = await maintenancePOST(req("POST", "/maintenance", "owner", { action: "structure", dryRun: true }));
+    expect(dry.status).toBe(200);
+    expect(await dry.json()).toMatchObject({ dryRun: true, commits: [], model: { skipped: "offline" } });
+    const report = await maintenancePOST(req("POST", "/maintenance", "owner", { action: "classify-records" }));
+    expect(report.status).toBe(200);
+    expect(await report.json()).toMatchObject({ pages: expect.any(Number), leaves: 0, byType: { invoice: 0 }, untyped: 0 });
+    expect(log()[0]).toBe(before);
   });
 
   it("names the assistant on the commits of a connect pass it started", async () => {

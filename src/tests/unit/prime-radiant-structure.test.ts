@@ -6,6 +6,9 @@
  * the contradiction pass (two leaves of one hub never paired). Every fixture
  * is synthetic.
  */
+import fs from "fs";
+import os from "os";
+import path from "path";
 import { describe, expect, it } from "vitest";
 import { collectClaims, comparable } from "@/lib/prime-radiant/contradictions";
 import { planConnections } from "@/lib/prime-radiant/connect";
@@ -26,6 +29,7 @@ import {
 } from "@/lib/prime-radiant/records";
 import { rejudgeVerdict, type RejudgePage } from "@/lib/prime-radiant/rejudge";
 import type { PageFrontmatter } from "@/lib/prime-radiant/schema";
+import { readSettings, readSettingsPatch, SettingsError, writeSettings } from "@/lib/prime-radiant/settings";
 import { pageIndexUnits, rankVaultHits, type RankCandidate } from "@/lib/prime-radiant/shard-index";
 import {
   blockContent,
@@ -560,5 +564,24 @@ describe("the cheap-model fallback", () => {
     expect(parseClassifyResponse('[{"i":0,"type":"invoice"},{"i":0,"type":"receipt"}]', 1).size).toBe(0);
     const plan = planStructure(snap, { ...OPTIONS, assigned: new Map([["concepts/statement.md", "bank-transfer" as RecordType]]) });
     expect(plan.writes.find((w) => w.path === "concepts/statement.md")?.frontmatter.record).toEqual({ type: "bank-transfer", month: "2026-09", by: "model" });
+  });
+});
+
+describe("structure settings", () => {
+  it("default to on, read every field strictly and put a section back with null", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "pr-structure-settings-"));
+    try {
+      expect(readSettings(root).structure).toEqual({ enabled: true, company: "", enrichTop: 25, modelFallback: 25 });
+      const saved = writeSettings({ structure: { company: " Acme\u0007Widgets Ltd ", enrichTop: 0 } }, root);
+      expect(saved.structure).toEqual({ enabled: true, company: "Acme Widgets Ltd", enrichTop: 0, modelFallback: 25 });
+      expect(() => writeSettings({ structure: { enrichTop: 500 } }, root)).toThrow(SettingsError);
+      expect(() => writeSettings({ structure: { modelFallback: -1 } }, root)).toThrow(SettingsError);
+      expect(() => writeSettings({ structure: { company: "x".repeat(81) } }, root)).toThrow(/at most 80 characters/);
+      expect(() => readSettingsPatch({ structure: { colour: "red" } })).toThrow(/Unknown setting: structure\.colour/);
+      expect(readSettings(root).structure.enrichTop).toBe(0);
+      expect(writeSettings({ structure: null }, root).structure.enrichTop).toBe(25);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
