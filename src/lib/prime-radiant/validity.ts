@@ -60,9 +60,10 @@ function lastDay(y: number, m: number): string {
   return `${y}-${pad(m)}-${pad(new Date(Date.UTC(y, m, 0)).getUTCDate())}`;
 }
 
-/** A field value the schema accepts as a date: `YYYY-MM-DD` or an ISO datetime. */
+/** A field value the schema accepts as a date: `YYYY-MM-DD` or an ISO datetime, on a day the calendar has ("2026-02-30" is none). */
 export function isValidityDate(value: unknown): value is string {
-  return typeof value === "string" && ISO_RE.test(value) && Number.isFinite(Date.parse(value));
+  if (typeof value !== "string" || !ISO_RE.test(value) || !Number.isFinite(Date.parse(value))) return false;
+  return day(+value.slice(0, 4), +value.slice(5, 7), +value.slice(8, 10)) !== null;
 }
 
 function bound(value: string, end: boolean): number {

@@ -119,15 +119,16 @@ export interface DraftFact {
   historical?: boolean;
 }
 
-/** The dated fields of one fact of the model's answer: ISO dates only, a period that runs forwards. */
+/** The dated fields of one fact of the model's answer: ISO dates only, a period that runs forwards (a backwards one loses its two bounds, nothing else). */
 function draftValidity(fo: Record<string, unknown>): Pick<DraftFact, "validFrom" | "validUntil" | "asOf" | "historical"> {
   const out: Pick<DraftFact, "validFrom" | "validUntil" | "asOf" | "historical"> = {};
   const iso = (v: unknown) => (typeof v === "string" && isValidityDate(v.trim()) && isIsoDate(v.trim()) ? v.trim() : undefined);
   const from = iso(fo.valid_from);
   const until = iso(fo.valid_until);
-  if (from && until && !validityRange({ from, until, source: "claim" })) return out;
-  if (from) out.validFrom = from;
-  if (until) out.validUntil = until;
+  if (!(from && until && !validityRange({ from, until, source: "claim" }))) {
+    if (from) out.validFrom = from;
+    if (until) out.validUntil = until;
+  }
   const asOf = iso(fo.as_of);
   if (asOf) out.asOf = asOf;
   if (fo.historical === true) out.historical = true;

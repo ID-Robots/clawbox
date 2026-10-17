@@ -31,27 +31,12 @@
 import { buildClaimIndex, isClaimId, nowIso, retireClaimsOnPage } from "./claims";
 import type { VaultAuthor } from "./git";
 import { safePagePath, vaultDir } from "./paths";
-import type { Claim, ClaimEvidence, PageFrontmatter, Stamp } from "./schema";
+import type { Claim, ClaimEvidence, PageFrontmatter } from "./schema";
 import { readRetiredLedger, recordRetired, runInTransaction, stateDbExists, withStateDb } from "./state-db";
 import { vaultOperation, type VaultOperationResult } from "./vault";
 
-/** Who the assistant's verification stamps name (route-helpers.ts's writer `by`). */
-export const ASSISTANT_VERIFIER = "assistant";
-
-/** Whether a stamp is a person's: every verifier but the assistant. */
-function personsStamp(stamp: Stamp | null | undefined): boolean {
-  return !!stamp && stamp.by !== ASSISTANT_VERIFIER;
-}
-
-/**
- * Whether a claim is OWNER-verified: a person's verification stamp on it, or
- * `status: verified` with no stamp (a person's hand edit), or a page a person
- * verified as a whole.
- */
-export function ownerVerified(claim: Pick<Claim, "verified" | "status">, page?: Pick<PageFrontmatter, "verified"> | null): boolean {
-  if (claim.verified) return personsStamp(claim.verified);
-  return claim.status === "verified" || personsStamp(page?.verified);
-}
+// Who counts as the owner is the page contract's (pure, so the lint reads it too).
+export { ASSISTANT_VERIFIER, ownerVerified } from "./schema";
 
 /** A claim the judge found against an owner-verified one: the verified one wins, this one is stale. */
 export interface StaleClaimNote {

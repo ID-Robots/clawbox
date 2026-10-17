@@ -135,10 +135,19 @@ export const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const ISO_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})$/;
 
+/** Whether an ISO date's year, month and day are a day on the calendar: `Date.parse` takes "2026-02-30" for 2 March. */
+export function isCalendarDay(value: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
+  if (!m) return false;
+  const month = +m[2];
+  const day = +m[3];
+  return month >= 1 && month <= 12 && day >= 1 && day <= new Date(Date.UTC(+m[1], month, 0)).getUTCDate();
+}
+
 export function isIsoDate(value: unknown): value is string {
   if (typeof value !== "string") return false;
   if (!ISO_DATE_RE.test(value) && !ISO_DATETIME_RE.test(value)) return false;
-  return !Number.isNaN(Date.parse(value));
+  return !Number.isNaN(Date.parse(value)) && isCalendarDay(value);
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -313,6 +322,24 @@ export function validateFrontmatter(raw: unknown): ValidationResult {
       retiredClaimIds: [...new Set((retired as string[]).map((s) => s.trim()))],
     },
   };
+}
+
+/** Who the assistant's verification stamps name (route-helpers.ts's writer `by`). */
+export const ASSISTANT_VERIFIER = "assistant";
+
+/** Whether a stamp is a person's: every verifier but the assistant. */
+function personsStamp(stamp: Stamp | null | undefined): boolean {
+  return !!stamp && stamp.by !== ASSISTANT_VERIFIER;
+}
+
+/**
+ * Whether a claim is OWNER-verified: a person's verification stamp on it, or
+ * `status: verified` with no stamp (a person's hand edit), or a page a person
+ * verified as a whole. The assistant's stamps verify nothing here.
+ */
+export function ownerVerified(claim: Pick<Claim, "verified" | "status">, page?: Pick<PageFrontmatter, "verified"> | null): boolean {
+  if (claim.verified) return personsStamp(claim.verified);
+  return claim.status === "verified" || personsStamp(page?.verified);
 }
 
 /** True when the page itself or any claim on it carries a human verification. */

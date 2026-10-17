@@ -17,9 +17,9 @@ import { lintVault } from "@/lib/prime-radiant/lint";
 import { noPairReason, pairable } from "@/lib/prime-radiant/pairing";
 import { rejudgeOpenContradictions, rejudgeSummary, rejudgeVerdict, titleFromPath } from "@/lib/prime-radiant/rejudge";
 import { addReviewItem, getReviewItem, settleReviewItem, type ReviewCandidate } from "@/lib/prime-radiant/review-store";
-import { validateFrontmatter } from "@/lib/prime-radiant/schema";
+import { isIsoDate, validateFrontmatter } from "@/lib/prime-radiant/schema";
 import { claimSubject, nameWords, sameSubject } from "@/lib/prime-radiant/subject";
-import { historicalClaim, pageValidity, periodsDisjoint, laterOf, textValidity, type Validity } from "@/lib/prime-radiant/validity";
+import { fieldValidity, historicalClaim, isValidityDate, pageValidity, periodsDisjoint, laterOf, textValidity, type Validity } from "@/lib/prime-radiant/validity";
 import { ownerVerified, readStaleClaims, recordStaleClaims } from "@/lib/prime-radiant/verify";
 import { documentName, sameDocument, versionGroups } from "@/lib/prime-radiant/versions";
 import { buildPage, claimDates, parseWriterResponse, type BuildContext } from "@/lib/prime-radiant/writer";
@@ -217,6 +217,35 @@ describe("rule 2: dated facts", () => {
     const a = { ...claimsById().get("sales/widget-pro-launch/price")! };
     const b = { ...a, text: "The Widget Pro launch price was €349.", subject: claimSubject("sales/widget-pro-old/price", "The Widget Pro launch price was €349.", "Widget Pro history") };
     expect(noPairReason(a, b)).toBeNull();
+  });
+
+  it("refuses a day the calendar does not have, in both date checks", () => {
+    for (const d of ["2026-02-30", "2026-04-31", "2026-02-30T10:00:00Z"]) {
+      expect(isIsoDate(d), d).toBe(false);
+      expect(isValidityDate(d), d).toBe(false);
+    }
+    expect(isIsoDate("2028-02-29")).toBe(true);
+    expect(isValidityDate("2026-10-15T09:00:00Z")).toBe(true);
+    expect(validateFrontmatter({ ...frontmatter(), claims: [c("x/y/z", "A fact.", { as_of: "2026-02-30" })] }).ok).toBe(false);
+    expect(fieldValidity({ valid_from: "2026-04-31" })).toBeNull();
+  });
+
+  it("drops only the bounds of a backwards range from the model, never its as_of or historical mark", () => {
+    const items = [{ i: 0, path: "~/Documents/note.txt", kind: "text", text: "The office was at 1 Harbor Road." }];
+    const answer = JSON.stringify([
+      {
+        i: 0,
+        type: "concept",
+        title: "Office history",
+        domain: "ops",
+        summary: "Where the office was.",
+        facts: [{ fact: "The office was at 1 Harbor Road.", quote: "", confidence: 0.9, valid_from: "2026-12-31", valid_until: "2026-01-01", as_of: "2026-03-01", historical: true }],
+      },
+    ]);
+    const verdict = parseWriterResponse(answer, items).get(0)!;
+    expect(verdict.ok && verdict.draft.facts[0]).toMatchObject({ asOf: "2026-03-01", historical: true });
+    expect(verdict.ok && verdict.draft.facts[0].validFrom).toBeUndefined();
+    expect(verdict.ok && verdict.draft.facts[0].validUntil).toBeUndefined();
   });
 
   it("validates the dated fields in the page contract", () => {
@@ -417,6 +446,23 @@ describe("the contradiction pass under the new rules", () => {
   });
 });
 
+describe("the stale warning follows the verified claim where it won", () => {
+  const note = { claimId: "ops/support-faq/hours", page: "concepts/support-faq.md", verifiedClaimId: "ops/northwind-support/hours", verifiedPage: "concepts/northwind-support.md", why: "", at: WRITTEN };
+  const warned = (pages: Record<string, string>) => lintVault(snapshot(pages), { staleClaims: [note] }).findings.some((f) => f.rule === "stale-against-verified");
+  const winner = (extra: Partial<Claim>, pageExtra: Partial<PageFrontmatter> = {}) =>
+    page("Northwind support hours", [c("ops/northwind-support/hours", "The Northwind support line is open from 9 to 17.", extra)], pageExtra);
+
+  it("keeps it for a person's stamp on the claim or on its page, drops it for the assistant's or for a copy of the id elsewhere", () => {
+    expect(warned(PAGES)).toBe(true);
+    expect(warned({ ...PAGES, "concepts/northwind-support.md": winner({}, { verified: OWNER }) })).toBe(true);
+    expect(warned({ ...PAGES, "concepts/northwind-support.md": winner({ status: "verified", verified: ASSISTANT }) })).toBe(false);
+    expect(warned({ ...PAGES, "concepts/northwind-support.md": winner({}, { verified: ASSISTANT }) })).toBe(false);
+    // The winning claim moved off its recorded page; a verified copy of its id elsewhere is not it.
+    const moved = { ...PAGES, "concepts/northwind-support.md": page("Northwind support hours", []), "concepts/other.md": page("Other", [c("ops/northwind-support/hours", "The Northwind support line is open from 9 to 17.", { status: "verified", verified: OWNER })]) };
+    expect(warned(moved)).toBe(false);
+  });
+});
+
 // ── the re-judge ──────────────────────────────────────────────────────────
 
 describe("re-judging the open queue", () => {
@@ -545,6 +591,23 @@ describe("re-judging the open queue", () => {
     const pages = { ...PAGES, "concepts/support-faq.md": page("Support FAQ", []) };
     expect(rejudgeOpenContradictions(vault, snapshot(pages))).toMatchObject({ checked: 1, closed: 0, stillOpen: 1, staleNotes: 0 });
     expect(getReviewItem(vault, unnamed.id)?.status).toBe("open");
+    expect(readStaleClaims(vault)).toEqual([]);
+  });
+
+  it("reads who verified from the snapshot now: an assistant's stamp or a verification undone since wins nothing", () => {
+    const evidence = [{ kind: "verified-claim", page: "concepts/northwind-support.md" }];
+    const item = raise(
+      side("ops/support-faq/hours", "concepts/support-faq.md", "The Northwind support line is open from 8 to 16."),
+      side("ops/northwind-support/hours", "concepts/northwind-support.md", "The Northwind support line is open from 9 to 17.", { evidence }),
+    );
+    const assistantOnly = {
+      ...PAGES,
+      "concepts/northwind-support.md": page("Northwind support hours", [c("ops/northwind-support/hours", "The Northwind support line is open from 9 to 17.", { status: "verified", verified: ASSISTANT })]),
+    };
+    expect(rejudgeOpenContradictions(vault, snapshot(assistantOnly))).toMatchObject({ checked: 1, closed: 0, stillOpen: 1, staleNotes: 0 });
+    const undone = { ...PAGES, "concepts/northwind-support.md": page("Northwind support hours", [c("ops/northwind-support/hours", "The Northwind support line is open from 9 to 17.")]) };
+    expect(rejudgeOpenContradictions(vault, snapshot(undone))).toMatchObject({ checked: 1, closed: 0, stillOpen: 1, staleNotes: 0 });
+    expect(getReviewItem(vault, item.id)?.status).toBe("open");
     expect(readStaleClaims(vault)).toEqual([]);
   });
 

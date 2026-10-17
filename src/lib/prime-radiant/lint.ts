@@ -26,7 +26,7 @@ import { buildClaimIndex, claimCollisions, isClaimId, retiredReuse } from "./cla
 import { pageSummary } from "./frontmatter";
 import { buildLinkGraph, CONTENT_FOLDERS, contentReach } from "./links";
 import { scanSecrets } from "./redact";
-import type { PageFrontmatter } from "./schema";
+import { ownerVerified, type PageFrontmatter } from "./schema";
 import type { VaultPage, VaultSnapshot } from "./vault";
 
 export const LIMITS = Object.freeze({
@@ -312,6 +312,7 @@ export function lintVault(snapshot: VaultSnapshot, options: LintOptions = {}): L
   const findings: LintFinding[] = [];
 
   const valid = snapshot.pages.flatMap((p) => (p.parsed.ok ? [{ page: p, fm: p.parsed.frontmatter, body: p.parsed.body }] : []));
+  const frontmatterByPath = new Map(valid.map((v) => [v.page.path, v.fm]));
   const index = buildClaimIndex(
     valid.map((v) => ({ path: v.page.path, frontmatter: v.fm })),
     options.ledgerRetired ?? [],
@@ -412,7 +413,10 @@ export function lintVault(snapshot: VaultSnapshot, options: LintOptions = {}): L
     const here = (index.active.get(note.claimId) ?? []).find((l) => l.page === note.page);
     const at = Date.parse(note.at);
     if (!here || (Number.isFinite(at) && Date.parse(here.claim.updatedAt) > at)) continue;
-    if (!(index.active.get(note.verifiedClaimId) ?? []).some((l) => !!l.claim.verified || l.claim.status === "verified")) continue;
+    // The claim that won must still be owner-verified where it won: on its recorded page, by a person's stamp on it
+    // or on that page — never the assistant's, and never a copy of its id elsewhere.
+    const winner = (index.active.get(note.verifiedClaimId) ?? []).find((l) => l.page === note.verifiedPage);
+    if (!winner || !ownerVerified(winner.claim, frontmatterByPath.get(note.verifiedPage))) continue;
     findings.push(
       finding(
         "stale-against-verified",

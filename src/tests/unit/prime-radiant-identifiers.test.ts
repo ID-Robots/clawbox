@@ -314,17 +314,31 @@ describe("rejudge and record pages", () => {
     expect(rejudgeReason(item("c.md"), new Map([["a.md", CORRECTION.title!], ["c.md", DRAFT.title!]]))).toBe(DIFFERENT_RECORDS);
   });
 
-  it("tells an item touching a verified claim by evidence, claim id, claim text or a verified page", () => {
+  it("tells an item touching an owner-verified claim by the snapshot alone: claim id on its page, claim text, or a verified page", () => {
     const index = verifiedIndex(snapshot(PAGES));
     expect([...index.claims]).toEqual(["finance/invoice-draft-starter-19/total"]);
     expect([...index.pages]).toEqual(["sources/receipt-verified-page.md"]);
     const plain = cand("sources/correction-4100000377.md", "The total amount due is €80.89.");
-    const touches = (c: ReviewCandidate, claimId: string | null = null) => touchesVerified({ claimId, candidates: [plain, c] }, index);
+    const touches = (c: ReviewCandidate) => touchesVerified({ candidates: [plain, c] }, index);
     expect(touches(cand("sources/adnet-receipt-0604.md", "The receipt total is €0.07."))).toBe(false);
-    expect(touches(cand("sources/adnet-receipt-0604.md", "x", { evidence: [{ kind: "verified-claim" }] }))).toBe(true);
-    expect(touches(cand("sources/adnet-receipt-0604.md", "x", { claimId: "finance/invoice-draft-starter-19/total" }))).toBe(true);
+    // The evidence an item was raised with is history (any verifier, maybe undone since): not read.
+    expect(touches(cand("sources/adnet-receipt-0604.md", "x", { evidence: [{ kind: "verified-claim" }] }))).toBe(false);
+    // A verified claim's id on ANOTHER page (an old collision) is not that claim.
+    expect(touches(cand("sources/adnet-receipt-0604.md", "x", { claimId: "finance/invoice-draft-starter-19/total" }))).toBe(false);
+    expect(touches(cand("sources/invoice-draft-starter-19.md", "x", { claimId: "finance/invoice-draft-starter-19/total" }))).toBe(true);
     expect(touches(cand("sources/invoice-draft-starter-19.md", "The total amount due is €19.00."))).toBe(true);
     expect(touches(cand("sources/receipt-verified-page.md", "Anything on a verified page."))).toBe(true);
-    expect(touches(cand("sources/adnet-receipt-0604.md", "x"), "finance/invoice-draft-starter-19/total")).toBe(true);
+    // The assistant's verifications verify nothing here.
+    const assistant = verifiedIndex(
+      snapshot({
+        "sources/assistant-checked.md": pageText({
+          title: "Adnet receipt email 0.05 10 jun 2026",
+          type: "source",
+          verified: { at: "2026-02-01T00:00:00.000Z", by: "assistant" },
+          claims: [claim("finance/assistant-checked/total", "The receipt total is €0.05.", { verified: { at: "2026-02-01T00:00:00.000Z", by: "assistant" }, status: "verified" })],
+        }),
+      }),
+    );
+    expect([...assistant.claims, ...assistant.pages]).toEqual([]);
   });
 });

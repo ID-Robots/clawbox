@@ -77,6 +77,8 @@ export interface RejudgePage {
 export interface VerifiedIndex {
   /** Ids of the owner-verified claims. */
   claims: ReadonlySet<string>;
+  /** Per owner-verified claim id, the pages it is verified on: an id is one claim only on its own page (an old collision may repeat it elsewhere). */
+  claimPages: ReadonlyMap<string, ReadonlySet<string>>;
   /** Per page, the texts of its owner-verified claims, as written and as the pass redacts them. */
   texts: ReadonlyMap<string, ReadonlySet<string>>;
   /** Pages a person verified as a whole. */
@@ -86,6 +88,7 @@ export interface VerifiedIndex {
 /** The owner-verified claims (and pages) of a snapshot. Pure. */
 export function verifiedIndex(snapshot: Pick<VaultSnapshot, "pages">): VerifiedIndex {
   const claims = new Set<string>();
+  const claimPages = new Map<string, Set<string>>();
   const texts = new Map<string, Set<string>>();
   const pages = new Set<string>();
   for (const p of snapshot.pages) {
@@ -95,27 +98,31 @@ export function verifiedIndex(snapshot: Pick<VaultSnapshot, "pages">): VerifiedI
     for (const c of fm.claims) {
       if (!ownerVerified(c)) continue;
       claims.add(c.id);
+      claimPages.set(c.id, (claimPages.get(c.id) ?? new Set<string>()).add(p.path));
       const onPage = texts.get(p.path) ?? new Set<string>();
       onPage.add(c.text);
       onPage.add(redactText(c.text.slice(0, MAX_CLAIM_CHARS)).text);
       texts.set(p.path, onPage);
     }
   }
-  return { claims, texts, pages };
+  return { claims, claimPages, texts, pages };
 }
 
-/** Whether one candidate is owner-verified: marked so by the pass, a verified claim's id or text on its page, or a verified page. Pure. */
+/**
+ * Whether one candidate is owner-verified NOW, by the snapshot alone: its
+ * claim id verified on its own page, a verified claim's text on its page, or
+ * a page a person verified as a whole. The `verified-claim` evidence an item
+ * was raised with is not read: it was written when the item was raised, for
+ * any verification (the assistant's too), and a person may have undone it
+ * since. Pure.
+ */
 export function candidateVerified(c: ReviewCandidate, verified: VerifiedIndex): boolean {
-  return (
-    c.evidence.some((e) => e.kind === "verified-claim") ||
-    (!!c.claimId && verified.claims.has(c.claimId)) ||
-    (!!c.page && (verified.pages.has(c.page) || !!verified.texts.get(c.page)?.has(c.text)))
-  );
+  if (!c.page) return false;
+  return (!!c.claimId && !!verified.claimPages.get(c.claimId)?.has(c.page)) || verified.pages.has(c.page) || !!verified.texts.get(c.page)?.has(c.text);
 }
 
-/** Whether an item touches something a person verified (either side, or the claim it is filed under). Pure. */
-export function touchesVerified(item: Pick<ReviewItem, "claimId" | "candidates">, verified: VerifiedIndex): boolean {
-  if (item.claimId && verified.claims.has(item.claimId)) return true;
+/** Whether an item touches something a person verified now: either side, as {@link candidateVerified} reads it. Pure. */
+export function touchesVerified(item: Pick<ReviewItem, "candidates">, verified: VerifiedIndex): boolean {
   return item.candidates.some((c) => candidateVerified(c, verified));
 }
 
@@ -300,8 +307,8 @@ export function rejudgeOpenContradictions(
       continue;
     }
     const [a, b] = sides;
-    const aVerified = candidateVerified(a.candidate, verified) || (!!item.claimId && item.claimId === a.claimId && verified.claims.has(item.claimId));
-    const bVerified = candidateVerified(b.candidate, verified) || (!!item.claimId && item.claimId === b.claimId && verified.claims.has(item.claimId));
+    const aVerified = candidateVerified(a.candidate, verified);
+    const bVerified = candidateVerified(b.candidate, verified);
     // Two facts a person settled disagree: a person decides.
     if (aVerified && bVerified) {
       result.keptVerified += 1;
