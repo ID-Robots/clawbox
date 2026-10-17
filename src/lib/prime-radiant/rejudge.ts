@@ -25,6 +25,7 @@
 
 import { DIFFERENT_RECORDS, differentSubjectSides, IDENTIFIER_FILTER_NOTE, RECORD_FILTER_NOTE, sideIdentifiers } from "./identifiers";
 import { noPairFamily, noPairReason, type NoPair, type NoPairCode, type PairClaim } from "./pairing";
+import { recordHubKey } from "./records";
 import { redactText } from "./redact";
 import { listReviewItems, MAX_REVIEW_LIST, settleReviewItem, type ReviewCandidate, type ReviewItem } from "./review-store";
 import type { Claim, PageFrontmatter } from "./schema";
@@ -182,6 +183,7 @@ function sideOf(c: ReviewCandidate, pages: ReadonlyMap<string, string | RejudgeP
     validity,
     historical: claim ? historicalClaim(claim) : historicalClaim({ text: c.text }),
     deprecated: info?.status === "deprecated",
+    hub: info?.frontmatter && c.page ? recordHubKey(c.page, info.frontmatter) : null,
   };
 }
 
@@ -251,6 +253,7 @@ export function rejudgeNote(reason: string, context: { code?: RejudgeCode; pages
 
 const FAMILY: Readonly<Record<RejudgeCode, string>> = {
   "same-document": "same document",
+  "same-hub": "different subjects",
   "different-identifiers": "different subjects",
   "different-dates": "different subjects",
   "different-months": "different subjects",

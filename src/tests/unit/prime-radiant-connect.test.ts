@@ -237,6 +237,26 @@ describe("planConnections", () => {
     expect(plan.stats).toMatchObject({ pagesLexical: 7, orphansAfter: 1, isolatedAfter: 1, unlinkable: 1 });
   });
 
+  it("links pages in no hub that share a rare entity (only leaves of one hub are left out)", async () => {
+    const pages: Record<string, string> = { "entities/globex-ltd.md": page("Globex Ltd", { type: "entity", body: "Globex Ltd is a supplier.\n" }) };
+    for (const name of ["alpha", "bravo", "charlie"]) {
+      pages[`concepts/${name}-notes.md`] = page(`${name} notes`, { claims: [`The ${name} notes mention Globex Ltd.`], body: `${name} notes in short.\n` });
+    }
+    const snap = snapshot(pages, null);
+    // Orthogonal vectors: no page is "similar" to another, so a shared entity is the only tie between them.
+    const vectors = new Map<string, Float32Array>([
+      ["concepts/alpha-notes.md", Float32Array.from([1, 0, 0, 0])],
+      ["concepts/bravo-notes.md", Float32Array.from([0, 1, 0, 0])],
+      ["concepts/charlie-notes.md", Float32Array.from([0, 0, 1, 0])],
+      ["entities/globex-ltd.md", Float32Array.from([0, 0, 0, 1])],
+    ]);
+    const plan = await planConnections(snap, { now: NOW, vectors });
+    const alpha = plan.writes.find((w) => w.path === "concepts/alpha-notes.md")!;
+    expect(alpha.body).toContain("### Shares entities with");
+    expect(alpha.body).toContain("[[concepts/bravo-notes]]");
+    expect(alpha.body).toContain("[[concepts/charlie-notes]]");
+  });
+
   it("replaces its block, never duplicates it", () => {
     const body = `Summary.\n\n${RELATED_START}\n## Related\n\n- [[a]] — A\n${RELATED_END}\n`;
     expect(stripRelatedBlock(body)).toBe("Summary.\n");

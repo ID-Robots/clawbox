@@ -183,6 +183,8 @@ let skipCodeProjects: boolean;
 let opusExtras: { source: "api_key" | "subscription" | "none"; maxPages: number } | null;
 /** The search index size limit, MB, on a server that has the setting (null: an older one). */
 let searchIndexLimitMb: number | null;
+/** The structure pass's settings section; null: a server from before it. */
+let structureSettings: { enabled: boolean; company: string; enrichTop: number; modelFallback: number } | null;
 /** What `POST init` says its one-time memory-wiki repair did. */
 let initRepair: Record<string, unknown> | null;
 /** What `GET pages?…` lists. */
@@ -284,6 +286,7 @@ function installFetch() {
         contradictions: { enabled: true }, domains: [],
         golden: { enabled: true, maxQuestions: 50 }, verification: { perOwner: 5, outbound: false, languages: [] },
         ...(searchIndexLimitMb !== null ? { search: { indexLimitMb: searchIndexLimitMb } } : {}),
+        ...(structureSettings ? { structure: structureSettings } : {}),
       };
       return ok({
         settings, defaults: searchIndexLimitMb !== null ? { ...settings, search: { indexLimitMb: 160 } } : settings,
@@ -348,6 +351,7 @@ beforeEach(() => {
   skipCodeProjects = true;
   opusExtras = null;
   searchIndexLimitMb = null;
+  structureSettings = null;
   initRepair = { ran: true, cleaned: [], removed: [], commit: null };
   window.localStorage.removeItem("clawbox.primeRadiant.repairNoticeSeen");
   listed = [LIST_ENTRY];
@@ -528,6 +532,15 @@ describe("PrimeRadiantApp", () => {
     await waitFor(() => {
       expect(calls.some((c) => c.url.includes("/pages?") && c.url.includes("type=entity") && c.url.includes("domain=sales"))).toBe(true);
     });
+  });
+
+  it("shows the median links per page beside the counts, flagged while under its target", async () => {
+    status = { ...STATUS, links: { pages: 10, median: 3, mean: 3.2, atTarget: 2, target: 5 } };
+    await mount();
+    const links = await screen.findByTestId("prime-radiant-links");
+    expect(links).toHaveTextContent("3 links/page");
+    expect(links).toHaveAttribute("title", "Median meaningful links per page (target 5)");
+    expect(links.className).toMatch(/amber/);
   });
 
   it("keeps the window drawn when a refresh answers a status it cannot draw", async () => {
@@ -765,6 +778,33 @@ describe("PrimeRadiantApp", () => {
     await waitFor(() => {
       const put = calls.find((c) => c.url.endsWith("/settings") && c.method === "PUT");
       expect((put?.body as { opus: unknown }).opus).toEqual({ enabled: true, capUsd: 2, maxPages: 40 });
+    });
+  });
+
+  it("shows the company field and the structure switch, and saves them with the rest", async () => {
+    structureSettings = { enabled: true, company: "", enrichTop: 25, modelFallback: 25 };
+    await mount();
+    await openTab("settings");
+    fireEvent.change(await screen.findByTestId("prime-radiant-company"), { target: { value: "  Acme Widgets Ltd " } });
+    fireEvent.click(screen.getByTestId("prime-radiant-structure"));
+    fireEvent.click(screen.getByTestId("prime-radiant-settings-save"));
+    await waitFor(() => {
+      const put = calls.find((c) => c.url.endsWith("/settings") && c.method === "PUT");
+      expect((put?.body as { structure: unknown }).structure).toEqual({ enabled: false, company: "Acme Widgets Ltd" });
+    });
+  });
+
+  it("offers no structure fields to a server from before them, and sends none", async () => {
+    await mount();
+    await openTab("settings");
+    await screen.findByTestId("prime-radiant-settings-save");
+    expect(screen.queryByTestId("prime-radiant-company")).toBeNull();
+    expect(screen.queryByTestId("prime-radiant-structure")).toBeNull();
+    fireEvent.click(screen.getByTestId("prime-radiant-settings-save"));
+    await waitFor(() => {
+      const put = calls.find((c) => c.url.endsWith("/settings") && c.method === "PUT");
+      expect(put).toBeDefined();
+      expect((put?.body as Record<string, unknown>).structure).toBeUndefined();
     });
   });
 

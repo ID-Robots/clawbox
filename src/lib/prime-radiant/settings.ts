@@ -74,6 +74,17 @@ export const MIN_GOLDEN_MAX_QUESTIONS = 1;
 export const MAX_GOLDEN_MAX_QUESTIONS = 500;
 /** Owners with a language of their own for the daily questions. */
 export const MAX_OWNER_LANGUAGES = 100;
+/**
+ * The structure pass (structure.ts): on by default in the nightly pass. The
+ * owner's company names the root page; the top entities by inbound links get
+ * claims worked out from their pages; the cheap model may type at most
+ * `modelFallback` record pages a night that the rules could not (0: never).
+ */
+export const DEFAULT_STRUCTURE_ENRICH_TOP = 25;
+export const MAX_STRUCTURE_ENRICH_TOP = 200;
+export const DEFAULT_STRUCTURE_MODEL_FALLBACK = 25;
+export const MAX_STRUCTURE_MODEL_FALLBACK = 500;
+export const MAX_COMPANY_CHARS = 80;
 
 export interface IngestSettings {
   /**
@@ -117,6 +128,16 @@ export interface SearchSettings {
   indexLimitMb: number;
 }
 
+export interface StructureSettings {
+  enabled: boolean;
+  /** The owner's company: the root page's title (empty: "Company overview"). */
+  company: string;
+  /** Entities enriched a night, the most linked first; 0 switches enrichment off. */
+  enrichTop: number;
+  /** Record pages the cheap model may type a night where the rules could not; 0 switches it off. */
+  modelFallback: number;
+}
+
 export interface DomainSetting {
   /** Lowercase kebab, as a page's `domain`. */
   name: string;
@@ -157,6 +178,7 @@ export interface PrimeRadiantSettings {
   opus: OpusSettings;
   contradictions: ContradictionSettings;
   search: SearchSettings;
+  structure: StructureSettings;
   domains: DomainSetting[];
   golden: GoldenSettings;
   verification: VerificationSettings;
@@ -170,6 +192,7 @@ export function defaultSettings(): PrimeRadiantSettings {
     opus: { enabled: false, capUsd: DEFAULT_OPUS_CAP_USD, sampleRate: DEFAULT_OPUS_SAMPLE_RATE, model: DEFAULT_OPUS_MODEL, maxPages: DEFAULT_OPUS_MAX_PAGES },
     contradictions: { enabled: true },
     search: { indexLimitMb: DEFAULT_SEARCH_INDEX_LIMIT_MB },
+    structure: { enabled: true, company: "", enrichTop: DEFAULT_STRUCTURE_ENRICH_TOP, modelFallback: DEFAULT_STRUCTURE_MODEL_FALLBACK },
     domains: [],
     golden: { enabled: true, maxQuestions: DEFAULT_GOLDEN_MAX_QUESTIONS },
     verification: { perOwner: DEFAULT_DAILY_PER_OWNER, outbound: false, languages: [] },
@@ -300,6 +323,23 @@ const FIELDS = {
     outbound: (v: unknown) => readBool(v, "verification.outbound"),
     languages: (v: unknown) => readOwnerLanguages(v),
   },
+  structure: {
+    enabled: (v: unknown) => readBool(v, "structure.enabled"),
+    company: (v: unknown): Read<string> => {
+      const clean = typeof v === "string" ? v.replace(/[\u0000-\u001f\u007f]/g, " ").trim() : null;
+      return clean !== null && clean.length <= MAX_COMPANY_CHARS
+        ? { ok: true, value: clean }
+        : { ok: false, error: `structure.company must be text of at most ${MAX_COMPANY_CHARS} characters.` };
+    },
+    enrichTop: (v: unknown): Read<number> =>
+      typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= MAX_STRUCTURE_ENRICH_TOP
+        ? { ok: true, value: v }
+        : { ok: false, error: `structure.enrichTop must be a whole number from 0 to ${MAX_STRUCTURE_ENRICH_TOP}.` },
+    modelFallback: (v: unknown): Read<number> =>
+      typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= MAX_STRUCTURE_MODEL_FALLBACK
+        ? { ok: true, value: v }
+        : { ok: false, error: `structure.modelFallback must be a whole number from 0 to ${MAX_STRUCTURE_MODEL_FALLBACK}.` },
+  },
 } as const;
 
 type SectionName = keyof typeof FIELDS;
@@ -367,6 +407,7 @@ export interface SettingsPatch {
   opus?: { enabled?: unknown; capUsd?: unknown; sampleRate?: unknown; model?: unknown; maxPages?: unknown } | null;
   contradictions?: { enabled?: unknown } | null;
   search?: { indexLimitMb?: unknown } | null;
+  structure?: { enabled?: unknown; company?: unknown; enrichTop?: unknown; modelFallback?: unknown } | null;
   domains?: unknown;
   golden?: { enabled?: unknown; maxQuestions?: unknown } | null;
   verification?: { perOwner?: unknown; outbound?: unknown; languages?: unknown } | null;
@@ -381,6 +422,7 @@ const PATCH_KEYS: Readonly<Record<string, readonly string[]>> = {
   search: Object.keys(FIELDS.search),
   golden: Object.keys(FIELDS.golden),
   verification: Object.keys(FIELDS.verification),
+  structure: Object.keys(FIELDS.structure),
 };
 
 /** The vault search index's size limit in force, in bytes (shard-index.ts reads it at every run). */

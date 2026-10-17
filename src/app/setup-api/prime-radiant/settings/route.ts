@@ -35,7 +35,10 @@ import { fail, json, readJsonBody, writerGuard } from "@/lib/prime-radiant/route
 import {
   defaultSettings,
   effectiveCostRates,
+  MAX_COMPANY_CHARS,
   MAX_DOMAINS,
+  MAX_STRUCTURE_ENRICH_TOP,
+  MAX_STRUCTURE_MODEL_FALLBACK,
   MAX_INGEST_FOLDERS,
   MAX_INGEST_PARALLEL,
   MAX_OPUS_CAP_USD,
@@ -68,6 +71,9 @@ const LIMITS = {
   dailyPerOwner: { min: MIN_DAILY_PER_OWNER, max: MAX_DAILY_PER_OWNER },
   ownerLanguages: MAX_OWNER_LANGUAGES,
   languages: DAILY_LANGUAGES,
+  structureCompany: MAX_COMPANY_CHARS,
+  structureEnrichTop: { min: 0, max: MAX_STRUCTURE_ENRICH_TOP },
+  structureModelFallback: { min: 0, max: MAX_STRUCTURE_MODEL_FALLBACK },
 };
 
 const OPUS_SOURCE_BUDGET_MS = 3_000;

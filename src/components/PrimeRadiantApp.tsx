@@ -281,6 +281,15 @@ export default function PrimeRadiantApp() {
                 {t("primeRadiant.countAccuracy", { percent: status.golden.last.percent.toLocaleString(locale) })}
               </button>
             )}
+            {status.links && status.links.pages > 0 && (
+              <span
+                data-testid="prime-radiant-links"
+                className={status.links.median >= status.links.target ? undefined : "text-amber-200/80"}
+                title={t("primeRadiant.countLinksHint", { target: status.links.target })}
+              >
+                {t("primeRadiant.countLinks", { median: status.links.median })}
+              </span>
+            )}
           </div>
         )}
       </header>
