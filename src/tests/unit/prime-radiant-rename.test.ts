@@ -171,6 +171,21 @@ describe("meaningless names and former paths (pure)", () => {
     expect(plan.moves[0].frontmatter.aliases).toEqual(["One", "concepts/x"]);
   });
 
+  it("skips a page whose old path could not be kept as a working alias, instead of renaming it with a dead redirect", () => {
+    const plan = planSlugRenames(
+      snapshot({
+        "Notes/x.md": pageText({ title: "Едно" }, "Upper-case folder.\n"),
+        "my notes/y.md": pageText({ title: "Две" }, "A folder with a space.\n"),
+        "concepts/z.md": pageText({ title: "Три" }, "A plain folder.\n"),
+      }),
+    );
+    expect(plan.result.renamed.map((r) => r.from)).toEqual(["concepts/z.md"]);
+    expect(plan.result.skipped).toEqual([
+      { path: "my notes/y.md", reason: "no-alias" },
+      { path: "Notes/x.md", reason: "no-alias" },
+    ]);
+  });
+
   it("leaves a link by the page's title alone, and plans nothing on a vault with good names", () => {
     const plan = planSlugRenames(
       snapshot(
@@ -360,6 +375,19 @@ describe("upgradeAssistantVerifications (the one-off migration)", () => {
         claim("acme-sales/catalogue/colour", "Widgets come in blue.", { status: "proposed" }),
       ],
     }),
+  });
+
+  it("never upgrades the assistant's own verification made without the owner's confirmation", async () => {
+    await seed({ "concepts/pricing.md": pageText({ claims: [claim("acme-sales/pricing/blue", "The blue widget costs 10 EUR.")] }) });
+    // A bearer call without `confirm: true` stays the assistant's own (route-helpers.ts `verifierOf`).
+    await verifyClaim({ claimId: "acme-sales/pricing/blue", text: "The blue widget costs 10 EUR.", by: "assistant", person: false, vault });
+    const fm = frontmatterOf("concepts/pricing.md");
+    expect(fm.claims[0].verified).toMatchObject({ by: "assistant" });
+    expect(fm.claims[0].evidence.some((e) => e.kind === "human-verification")).toBe(false);
+    expect(fm.claims[0].evidence.at(-1)).toMatchObject({ kind: "assistant-verification", note: "verified by assistant" });
+    const dry = await upgradeAssistantVerifications({ dryRun: true, vault });
+    expect(dry.upgraded).toEqual([]);
+    expect(dry.skipped).toEqual([{ claimId: "acme-sales/pricing/blue", page: "concepts/pricing.md" }]);
   });
 
   it("plans only assistant stamps a human-verification line backs (pure)", () => {

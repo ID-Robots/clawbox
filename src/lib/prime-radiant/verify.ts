@@ -6,7 +6,8 @@
  *
  *   - the claim `claimId` on its page becomes the verified text, with
  *     `status: verified`, `confidence: 1`, `verified: {at, by}` and a
- *     human-verification line in its evidence; the page's `checked_by`
+ *     human-verification line in its evidence (an `assistant-verification`
+ *     line for the assistant's own, unconfirmed one); the page's `checked_by`
  *     becomes `human`;
  *   - every LOSING id (`retire`) is removed from every page that carries it
  *     and listed in that page's `retiredClaimIds` — and in the ledger, so the
@@ -210,7 +211,13 @@ export async function verifyClaim(input: VerifyInput): Promise<VerifyResult> {
           const previous = page.frontmatter.claims.find((c) => c.id === claimId);
           const evidence: ClaimEvidence[] = [
             ...(input.evidence ?? []).slice(0, 10),
-            { kind: "human-verification", note: (input.note ?? `verified by ${who}`).replace(CONTROL_RE, " ").slice(0, 200), updatedAt: stamp },
+            {
+              // The assistant's OWN verification (no owner's word behind it) is no human's: the
+              // migration below upgrades only stamps a human-verification line backs.
+              kind: by === ASSISTANT_VERIFIER && !via ? "assistant-verification" : "human-verification",
+              note: (input.note ?? `verified by ${who}`).replace(CONTROL_RE, " ").slice(0, 200),
+              updatedAt: stamp,
+            },
           ];
           const verified: Claim = {
             ...(previous ?? {}),
@@ -279,8 +286,10 @@ function assistantStamped(c: Claim): boolean {
 /**
  * The migration worked out over a snapshot (pure): every claim stamped
  * `verified: { by: assistant }` that carries a `human-verification` evidence
- * line — the line verify.ts writes when a verification is given, which the
- * MCP tools only gave with the user's own confirmation (`confirm: true`) — gets
+ * line — the line verify.ts wrote for every verification before the
+ * assistant's own were told apart, which the MCP tools only gave with the
+ * user's own confirmation (`confirm: true`); an unconfirmed one made since
+ * carries `assistant-verification` instead and stays as it is — gets
  * `{ by: owner, via: assistant }`, its moment kept, and that line's note says
  * so; its page becomes `checked_by: human`, as a verification in the app makes
  * it. A stamp with no such line is left as it is and listed in `skipped`.

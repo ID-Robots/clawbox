@@ -11,6 +11,8 @@
  *     only digits, a single letter, or a date, with any `-N` suffixes) and its
  *     title slugs to a name that is not (a title that is itself only a year
  *     keeps its page, `no-better-name`); a taken name gets `-2`, `-3`, …;
+ *     a page whose old path cannot be a working alias (an upper-case letter
+ *     or a space in a folder name) is left as it is (`no-alias`);
  *   - the old path stays the page's own: it joins its `aliases`
  *     (`concepts/x-3`), and the link resolver (links.ts) leads a link to it
  *     to the page — a redirect for whatever still names it;
@@ -31,7 +33,7 @@
 
 import { slugify } from "./claims";
 import type { VaultAuthor } from "./git";
-import { createLinkResolver, extractLinks, pathAliases, relativeHref, rewriteLinks, type FoundLink } from "./links";
+import { createLinkResolver, extractLinks, isPathAlias, pathAliases, relativeHref, rewriteLinks, type FoundLink } from "./links";
 import { isKnowledgePage, vaultDir } from "./paths";
 import { followMovedClaims } from "./review-store";
 import type { PageFrontmatter } from "./schema";
@@ -62,8 +64,13 @@ export interface PageRename {
 
 export interface RenameSkip {
   path: string;
-  /** `unparsed`: its frontmatter does not parse; `no-better-name`: its title slugs to a meaningless name too. */
-  reason: "unparsed" | "no-better-name";
+  /**
+   * `unparsed`: its frontmatter does not parse; `no-better-name`: its title
+   * slugs to a meaningless name too; `no-alias`: its path (an upper-case
+   * letter or a space in a folder) is no path-shaped alias the link resolver
+   * reads, so the redirect would lead nowhere.
+   */
+  reason: "unparsed" | "no-better-name" | "no-alias";
 }
 
 export interface SlugRenameResult {
@@ -122,6 +129,10 @@ export function planSlugRenames(snapshot: Pick<VaultSnapshot, "pages" | "indexBo
   for (const p of candidates) {
     if (!p.parsed.ok) {
       skipped.push({ path: p.path, reason: "unparsed" });
+      continue;
+    }
+    if (!isPathAlias(p.path.replace(/\.md$/, ""))) {
+      skipped.push({ path: p.path, reason: "no-alias" });
       continue;
     }
     const base = slugify(p.parsed.frontmatter.title, SLUG_CHARS);
