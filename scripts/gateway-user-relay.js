@@ -31,6 +31,13 @@
 //     the user was shown) pass as they are; everything else is refused with
 //     the gateway's own error frame shape, so the chat reports it like any
 //     other refusal.
+//   * `sessions.reset` (the chat's /new and /reset) is the one exception to
+//     "never admin": OpenClaw requires `operator.admin` from any caller that
+//     declares scopes before it resets a session, so the user's socket can
+//     never do it. Once the key has passed the same ownership check, the relay
+//     runs that one reset on a short-lived socket of its own that declares
+//     admin, sends nothing else on it, and closes it. The browser's socket
+//     keeps its scopes; the user can reset only their own sessions.
 //   * Every event the gateway broadcasts is dropped unless it names one of the
 //     user's sessions, so the owner's turns never stream into a user's window.
 //
@@ -48,6 +55,9 @@ const { openclawUserMainKey, userMayUseKey } = require("./chat-scope.js");
 const RELAY_CLIENT = Object.freeze({ id: "openclaw-control-ui", mode: "webchat", platform: "linux", version: "clawbox-user-relay" });
 /** Never `operator.admin` or `operator.pairing`: nothing a user's chat sends needs either. */
 const RELAY_SCOPES = Object.freeze(["operator.read", "operator.write", "operator.approvals", "operator.questions"]);
+/** The scopes of the one-shot socket that runs a user's `sessions.reset`, and nothing else. */
+const RESET_SCOPES = Object.freeze([...RELAY_SCOPES, "operator.admin"]);
+const RESET_TIMEOUT_MS = 15_000;
 const PROTOCOL = 4;
 
 /** Requests that act on one session, and the param that names it. The key is required. */
@@ -113,8 +123,9 @@ function isRecord(value) {
 
 /**
  * What to do with one frame from the browser, once the handshake is done:
- * `{ toGateway }` to pass it on, `{ toClient }` to answer it here, or `{}` to
- * drop it.
+ * `{ toGateway }` to pass it on, `{ toClient }` to answer it here, `{ reset }`
+ * to run a reset of the user's own session on the relay's admin socket, or
+ * `{}` to drop it.
  */
 function filterClientFrame(state, frame) {
   if (!isRecord(frame) || frame.type !== "req" || typeof frame.id !== "string" || typeof frame.method !== "string") {
@@ -129,6 +140,13 @@ function filterClientFrame(state, frame) {
   if (keyParam) {
     if (!userMayUseKey(state.username, params[keyParam])) {
       return { toClient: refusalFrame(id, "That conversation belongs to someone else on this ClawBox.") };
+    }
+    if (method === "sessions.reset") {
+      // Only the key and the reason travel: nothing else of the browser's frame
+      // reaches a socket that holds operator.admin.
+      const resetParams = { key: params.key };
+      if (typeof params.reason === "string") resetParams.reason = params.reason.slice(0, 32);
+      return { reset: { id, params: resetParams } };
     }
   } else if (!KEYLESS_METHODS.has(method)) {
     return { toClient: refusalFrame(id, `"${method}" is not available to this ClawBox user's chat.`) };
@@ -265,9 +283,9 @@ function relayDeviceParams(identity, { nonce, ts, token, scopes }) {
 }
 
 /** The relay's own connect request, under the id the browser's connect used. */
-function buildRelayConnect(state, clientFrame, { token, identity }) {
+function buildRelayConnect(state, clientFrame, { token, identity, scopes: wanted = RELAY_SCOPES }) {
   const clientParams = isRecord(clientFrame.params) ? clientFrame.params : {};
-  const scopes = [...RELAY_SCOPES];
+  const scopes = [...wanted];
   const challenge = isRecord(state.challenge) ? state.challenge : {};
   const device = identity ? relayDeviceParams(identity, { nonce: challenge.nonce, ts: challenge.ts, token, scopes }) : null;
   return {
@@ -304,6 +322,60 @@ function readGatewayToken(configPath) {
   } catch {
     return "";
   }
+}
+
+// ── A user's reset ──────────────────────────────────────────────────────────
+
+/**
+ * Run one `sessions.reset` on a socket of the relay's own that declares
+ * `operator.admin`, and resolve with the gateway's `res` under the browser's
+ * request id. The caller has already checked that the key is the user's.
+ * Never rejects: a failure is a refusal frame the chat reports as usual.
+ */
+function runAdminReset({ id, params, connectUpstream, token, identity, timeoutMs = RESET_TIMEOUT_MS }) {
+  return new Promise((resolve) => {
+    let ws;
+    let settled = false;
+    let timer;
+    const state = createRelayState("");
+    const connectId = `reset-connect-${crypto.randomUUID()}`;
+    const resetId = `reset-${crypto.randomUUID()}`;
+    const finish = (frame) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { ws?.close(); } catch { /* gone */ }
+      resolve(frame);
+    };
+    const fail = () => finish(refusalFrame(id, "The conversation could not be reset. Try again."));
+    timer = setTimeout(fail, timeoutMs);
+    try {
+      ws = connectUpstream();
+    } catch {
+      fail();
+      return;
+    }
+    ws.on("message", (raw, isBinary) => {
+      if (isBinary) return;
+      let frame;
+      try { frame = JSON.parse(String(raw)); } catch { return; }
+      if (!isRecord(frame)) return;
+      if (frame.type === "event" && frame.event === "connect.challenge") {
+        state.challenge = isRecord(frame.payload) ? frame.payload : null;
+        ws.send(JSON.stringify(buildRelayConnect(state, { id: connectId }, { token, identity, scopes: RESET_SCOPES })));
+        return;
+      }
+      if (frame.type !== "res") return;
+      if (frame.id === connectId) {
+        if (!frame.ok) { fail(); return; }
+        ws.send(JSON.stringify({ type: "req", id: resetId, method: "sessions.reset", params }));
+        return;
+      }
+      if (frame.id === resetId) finish({ ...frame, id });
+    });
+    ws.on("error", fail);
+    ws.on("close", fail);
+  });
 }
 
 // ── One connection ──────────────────────────────────────────────────────────
@@ -360,6 +432,11 @@ function relayUserChat({ clientWs, username, connectUpstream, token, identity, l
     const out = filterClientFrame(state, frame);
     if (out.toClient) sendClient(out.toClient);
     if (out.toGateway) sendGateway(out.toGateway);
+    if (out.reset) {
+      runAdminReset({ ...out.reset, connectUpstream, token, identity }).then((res) => {
+        if (!closed) sendClient(res);
+      });
+    }
   };
 
   clientWs.on("message", (raw, isBinary) => {
@@ -396,6 +473,8 @@ function relayUserChat({ clientWs, username, connectUpstream, token, identity, l
 
 module.exports = {
   RELAY_SCOPES,
+  RESET_SCOPES,
+  runAdminReset,
   KEYED_METHODS,
   KEYLESS_METHODS,
   createRelayState,
