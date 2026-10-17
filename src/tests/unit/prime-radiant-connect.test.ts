@@ -318,7 +318,7 @@ describe("8-bit page vectors", () => {
       const truth = new Set(top(exact));
       recall += top(stored).filter((j) => truth.has(j)).length / 10;
     });
-    expect(recall / exact.length).toBeGreaterThanOrEqual(0.95);
+    expect(recall / exact.length).toBe(1);
   });
 
   it("keep the same neighbours over the threshold on a seeded set, but for pairs within 0.01 of a boundary", () => {

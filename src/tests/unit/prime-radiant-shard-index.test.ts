@@ -715,16 +715,16 @@ describe("8-bit vectors", () => {
     const db = openSqlite(vaultIndexPathFor(vaultDir()), false);
     try {
       // An abort before the first batch leaves every row as it was.
-      expect(() => migrateVaultVectors(db, AbortSignal.abort(), 2)).toThrow();
+      await expect(migrateVaultVectors(db, AbortSignal.abort(), 2)).rejects.toThrow();
       expect(storedRows().every((r) => r.vec.byteLength === 20)).toBe(true);
       // A crash after some batches: the first three rows are already 8-bit.
       const put = db.prepare("UPDATE chunks SET vec = ? WHERE id = ?");
       for (const row of storedRows().slice(0, 3)) put.run(encodeQ8Blob(stubVector(row.text)), row.id);
       // The next pass converts only the rest, two rows a transaction, to the same bytes a straight conversion writes.
-      expect(migrateVaultVectors(db, undefined, 2)).toBe(expected.length - 3);
+      expect(await migrateVaultVectors(db, undefined, 2)).toBe(expected.length - 3);
       expect(storedRows().map((r) => Array.from(r.vec))).toEqual(expected);
       // Done: the mark says so, and a second pass is a meta read.
-      expect(migrateVaultVectors(db, undefined, 2)).toBe(0);
+      expect(await migrateVaultVectors(db, undefined, 2)).toBe(0);
     } finally {
       db.close();
     }

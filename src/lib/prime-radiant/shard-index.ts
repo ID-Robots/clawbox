@@ -606,10 +606,11 @@ function vectorsAllQ8(db: DatabaseSync): boolean {
  * format is its blob's length (a float32 blob is a multiple of 4 bytes, an
  * 8-bit one never is), so the work is idempotent and a run cut short — a
  * crash, an abort — is picked up where it stopped. Nothing is re-embedded, the
- * store's identity is left as it is, and no row is dropped. Answers how many
- * rows it converted.
+ * store's identity is left as it is, and no row is dropped. The event loop is
+ * let through between batches (a large store is tens of batches). Answers how
+ * many rows it converted.
  */
-export function migrateVaultVectors(db: DatabaseSync, signal?: AbortSignal, batch: number = VECTOR_MIGRATION_BATCH): number {
+export async function migrateVaultVectors(db: DatabaseSync, signal?: AbortSignal, batch: number = VECTOR_MIGRATION_BATCH): Promise<number> {
   if (vectorsAllQ8(db)) return 0;
   const pick = db.prepare("SELECT id, vec FROM chunks WHERE id > ? AND length(vec) % 4 = 0 ORDER BY id LIMIT ?");
   const put = db.prepare("UPDATE chunks SET vec = ? WHERE id = ? AND length(vec) % 4 = 0");
@@ -632,6 +633,7 @@ export function migrateVaultVectors(db: DatabaseSync, signal?: AbortSignal, batc
       throw err;
     }
     converted += rows.length;
+    await new Promise<void>((resolve) => setImmediate(resolve));
   }
   db.exec("BEGIN");
   try {
@@ -751,7 +753,7 @@ async function syncOnce(vault: string, paths: ReadonlySet<string> | null, signal
 
     // A store from before the 8-bit index: its float32 rows are converted
     // first, so the budget below counts what the rows really take.
-    if (migrateVaultVectors(db, signal) > 0) dropVectorCache(vaultIndexPathFor(vault));
+    if ((await migrateVaultVectors(db, signal)) > 0) dropVectorCache(vaultIndexPathFor(vault));
 
     const stored = new Map<string, string>();
     for (const row of db.prepare("SELECT path, blob FROM pages").all() as { path?: unknown; blob?: unknown }[]) {
