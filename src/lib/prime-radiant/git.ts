@@ -160,7 +160,7 @@ export const VERIFIED_VIA_TRAILER = "Verified-via";
 
 /** `Verified-by: <by>` (and `Verified-via: <via>`) lines for a commit's trailer block. */
 export function verifiedTrailers(stamp: { by: string; via?: string }): string[] {
-  const clean = (v: string) => v.replace(/[\r\n:]+/g, " ").trim().slice(0, 80);
+  const clean = (v: string) => v.replace(/[\r\n:]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 80);
   const out = [`${VERIFIED_BY_TRAILER}: ${clean(stamp.by)}`];
   if (stamp.via) out.push(`${VERIFIED_VIA_TRAILER}: ${clean(stamp.via)}`);
   return out;
