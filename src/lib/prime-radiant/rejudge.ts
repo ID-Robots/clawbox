@@ -288,7 +288,6 @@ export function rejudgeOpenContradictions(
     dryRun: !!options.dryRun,
   };
   const at = (options.now ?? (() => new Date()))().toISOString();
-  const stale: StaleClaimNote[] = [];
   for (const item of open) {
     // An open item a person already answered (put off, then reopened by hand): theirs, never this pass's.
     if (item.resolution && item.resolution.by !== "auto") {
@@ -312,41 +311,51 @@ export function rejudgeOpenContradictions(
     let code: RejudgeCode;
     let reason: string;
     let current: Side | null = null;
-    let lost: { side: Side; won: Side } | null = null;
+    let staleNote: StaleClaimNote | null = null;
     if (why) {
       code = why.code;
       reason = why.detail;
       if (why.current) current = why.current === "a" ? a : b;
     } else if (aVerified !== bVerified) {
       const [won, other] = aVerified ? [a, b] : [b, a];
+      // The losing claim must be named to be marked stale; one that cannot be stays the owner's question.
+      if (!other.claimId || !other.candidate.page || !won.claimId || !won.candidate.page) {
+        result.stillOpen += 1;
+        continue;
+      }
       code = "verified-wins";
-      reason = `${other.candidate.page ?? "the other claim"} disagrees with the owner-verified claim on ${won.candidate.page ?? "its page"}; marked stale there, not a question`;
-      lost = { side: other, won };
+      reason = `${other.candidate.page} disagrees with the owner-verified claim on ${won.candidate.page}; marked stale there, not a question`;
+      staleNote = {
+        claimId: other.claimId,
+        page: other.candidate.page,
+        verifiedClaimId: won.claimId,
+        verifiedPage: won.candidate.page,
+        why: item.evidence.find((e) => e.kind === "judge")?.note ?? "",
+        at,
+      };
     } else {
       result.stillOpen += 1;
       continue;
     }
     const winner = code === "same-document" ? (a.candidate.page ? (groups.find((g) => g.pages.includes(a.candidate.page!))?.winner ?? null) : null) : null;
     const note = rejudgeNote(reason, { code, pages: [a.candidate.page, b.candidate.page], current: current?.candidate.page ?? null, winner });
+    if (staleNote && !options.dryRun) {
+      // The stale note first: an item is never closed as "marked stale" when the mark could not be written.
+      try {
+        recordStaleClaims(stateVault, [staleNote]);
+      } catch {
+        result.stillOpen += 1;
+        continue;
+      }
+    }
     const moved = options.dryRun ? true : settleReviewItem(stateVault, item.id, "resolved", { action: "dismiss", by: "auto", note }, at);
     if (!moved) continue;
     result.closed += 1;
     result.byReason[code] = (result.byReason[code] ?? 0) + 1;
     result.byFamily[FAMILY[code]] = (result.byFamily[FAMILY[code]] ?? 0) + 1;
-    if (lost && lost.side.claimId && lost.side.candidate.page && lost.won.claimId && lost.won.candidate.page) {
-      stale.push({
-        claimId: lost.side.claimId,
-        page: lost.side.candidate.page,
-        verifiedClaimId: lost.won.claimId,
-        verifiedPage: lost.won.candidate.page,
-        why: item.evidence.find((e) => e.kind === "judge")?.note ?? "",
-        at,
-      });
-    }
+    if (staleNote) result.staleNotes += 1;
     if (result.sample.length < SAMPLE) result.sample.push({ id: item.id, reason, code, note });
   }
-  result.staleNotes = stale.length;
-  if (!options.dryRun && stale.length > 0) recordStaleClaims(stateVault, stale);
   return result;
 }
 

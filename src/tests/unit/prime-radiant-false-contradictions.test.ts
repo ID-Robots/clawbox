@@ -512,6 +512,17 @@ describe("re-judging the open queue", () => {
     expect(getReviewItem(vault, both.id)?.status).toBe("open");
   });
 
+  it("leaves a verified-side item open when the losing claim cannot be named to be marked stale", () => {
+    const unnamed = raise(
+      { text: "The Northwind support line is open from 8 to 16.", page: "concepts/support-faq.md", evidence: [] },
+      side("ops/northwind-support/hours", "concepts/northwind-support.md", "The Northwind support line is open from 9 to 17.", { evidence: [{ kind: "verified-claim", page: "concepts/northwind-support.md" }] }),
+    );
+    const pages = { ...PAGES, "concepts/support-faq.md": page("Support FAQ", []) };
+    expect(rejudgeOpenContradictions(vault, snapshot(pages))).toMatchObject({ checked: 1, closed: 0, stillOpen: 1, staleNotes: 0 });
+    expect(getReviewItem(vault, unnamed.id)?.status).toBe("open");
+    expect(readStaleClaims(vault)).toEqual([]);
+  });
+
   it("reads a page the vault no longer holds by its path", () => {
     const item = {
       kind: "contradiction" as const,
