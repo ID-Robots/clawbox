@@ -16,6 +16,7 @@
 
 import crypto from "crypto";
 import fs from "fs";
+import os from "os";
 import path, { untraced } from "@/lib/runtime-path";
 import { DEFAULT_INGEST_EXCLUDES, EXCLUDE_DEFAULTS_GENERATION, isDefaultExcludeList, readExcludeList } from "./ingest-exclude";
 import { mergeCostRates, readRateOverrides, type CostRates, type ModelRate } from "./cost-rates";
@@ -312,8 +313,12 @@ const PATCH_KEYS: Readonly<Record<string, readonly string[]>> = {
 };
 
 /** The vault search index's size limit in force, in bytes (shard-index.ts reads it at every run). */
-export function searchIndexLimitBytes(root: string = primeRadiantRoot()): number {
-  return readSettings(root).search.indexLimitMb * BYTES_PER_MB;
+export function searchIndexLimitBytes(root: string = primeRadiantRoot(), totalMem: number = os.totalmem()): number {
+  const asked = readSettings(root).search.indexLimitMb * BYTES_PER_MB;
+  // Search holds the whole index in memory: never more than a quarter of the
+  // box's RAM, whatever was saved (a 4,096 MB limit on an 8 GB box stays 2 GB).
+  const ceiling = Math.max(MIN_SEARCH_INDEX_LIMIT_MB * BYTES_PER_MB, Math.floor(totalMem / 4));
+  return Math.min(asked, ceiling);
 }
 
 /** A patch as a route received it: only known sections and keys. Throws {@link SettingsError}. */

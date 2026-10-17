@@ -416,6 +416,7 @@ function searchIndexOf(index: NonNullable<StatusBody["index"]>): Record<string, 
     capped_pages: index.cappedPages ?? "unknown",
     ...(index.withoutPageVector ? { pages_without_page_vector: index.withoutPageVector } : {}),
     ...(index.migrationPending ? { converting_to_8bit: true } : {}),
+    ...(index.needsFullScan ? { full_scan_pending: true } : {}),
   };
 }
 

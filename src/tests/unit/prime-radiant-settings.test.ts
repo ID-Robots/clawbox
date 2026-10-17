@@ -125,18 +125,28 @@ describe("the search index size limit", () => {
     expect([DEFAULT_SEARCH_INDEX_LIMIT_MB, MIN_SEARCH_INDEX_LIMIT_MB, MAX_SEARCH_INDEX_LIMIT_MB]).toEqual([160, 32, 4096]);
     expect(defaultSettings().search).toEqual({ indexLimitMb: 160 });
     expect(readSettings().search.indexLimitMb).toBe(160);
-    expect(searchIndexLimitBytes()).toBe(160 * 1024 * 1024);
+    expect(searchIndexLimitBytes(undefined, 64 * 1024 ** 3)).toBe(160 * 1024 * 1024);
     expect(fs.existsSync(settingsPath())).toBe(false);
 
     for (const ok of [32, 512, 4096]) {
       expect(writeSettings({ search: { indexLimitMb: ok } }).search.indexLimitMb).toBe(ok);
-      expect(searchIndexLimitBytes()).toBe(ok * 1024 * 1024);
+      expect(searchIndexLimitBytes(undefined, 64 * 1024 ** 3)).toBe(ok * 1024 * 1024);
     }
     // The other sections are left as they were.
     expect(readSettings().ingest.parallel).toBe(DEFAULT_INGEST_PARALLEL);
     expect(writeSettings({ search: { indexLimitMb: null } }).search.indexLimitMb).toBe(160);
     writeSettings({ search: { indexLimitMb: 256 } });
     expect(writeSettings({ search: null }).search.indexLimitMb).toBe(160);
+  });
+
+  it("never budgets more than a quarter of the box's memory, nor less than the minimum", () => {
+    writeSettings({ search: { indexLimitMb: 4096 } });
+    expect(searchIndexLimitBytes(undefined, 8 * 1024 ** 3)).toBe(2048 * 1024 * 1024);
+    expect(searchIndexLimitBytes(undefined, 64 * 1024 ** 3)).toBe(4096 * 1024 * 1024);
+    expect(searchIndexLimitBytes(undefined, 64 * 1024 * 1024)).toBe(32 * 1024 * 1024);
+    writeSettings({ search: { indexLimitMb: 160 } });
+    expect(searchIndexLimitBytes(undefined, 8 * 1024 ** 3)).toBe(160 * 1024 * 1024);
+    writeSettings({ search: null });
   });
 
   it("refuses a limit out of range, fractional or not a number, whole, and writes nothing", () => {

@@ -534,7 +534,7 @@ describe("prime_radiant_status", () => {
     expect(out.isError).toBe(false);
     if (out.isError) return;
     expect(JSON.parse(out.text).search_index).toEqual({
-      used_mb: 41.3, limit_mb: 160, chunks: 42_100, max_chunks: 163_047, pages: 3, capped_pages: 2, pages_without_page_vector: 2, converting_to_8bit: true,
+      used_mb: 41.3, limit_mb: 160, chunks: 42_100, max_chunks: 163_047, pages: 3, capped_pages: 2, pages_without_page_vector: 2, converting_to_8bit: true, full_scan_pending: true,
     });
     answer([/\/status$/, { initialised: true, vault: { pages: 0 }, index: { exists: false, limitMb: 64 } }], [/./, {}]);
     const none = await harness().call("prime_radiant_status", {});
