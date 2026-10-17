@@ -26,10 +26,15 @@ import {
 } from "@/lib/prime-radiant/ingest-exclude";
 import {
   DEFAULT_INGEST_PARALLEL,
+  DEFAULT_SEARCH_INDEX_LIMIT_MB,
+  MAX_SEARCH_INDEX_LIMIT_MB,
+  MIN_SEARCH_INDEX_LIMIT_MB,
   SettingsError,
+  defaultSettings,
   effectiveCostRates,
   readSettings,
   readSettingsPatch,
+  searchIndexLimitBytes,
   settingsPath,
   writeSettings,
 } from "@/lib/prime-radiant/settings";
@@ -112,6 +117,46 @@ describe("writeSettings", () => {
       expect(() => writeSettings(patch), JSON.stringify(patch).slice(0, 60)).toThrow(SettingsError);
     }
     expect(fs.existsSync(settingsPath())).toBe(false);
+  });
+});
+
+describe("the search index size limit", () => {
+  it("is 160 MB by default, from 32 to 4,096, whole MB, and is what the index budgets in bytes", () => {
+    expect([DEFAULT_SEARCH_INDEX_LIMIT_MB, MIN_SEARCH_INDEX_LIMIT_MB, MAX_SEARCH_INDEX_LIMIT_MB]).toEqual([160, 32, 4096]);
+    expect(defaultSettings().search).toEqual({ indexLimitMb: 160 });
+    expect(readSettings().search.indexLimitMb).toBe(160);
+    expect(searchIndexLimitBytes()).toBe(160 * 1024 * 1024);
+    expect(fs.existsSync(settingsPath())).toBe(false);
+
+    for (const ok of [32, 512, 4096]) {
+      expect(writeSettings({ search: { indexLimitMb: ok } }).search.indexLimitMb).toBe(ok);
+      expect(searchIndexLimitBytes()).toBe(ok * 1024 * 1024);
+    }
+    // The other sections are left as they were.
+    expect(readSettings().ingest.parallel).toBe(DEFAULT_INGEST_PARALLEL);
+    expect(writeSettings({ search: { indexLimitMb: null } }).search.indexLimitMb).toBe(160);
+    writeSettings({ search: { indexLimitMb: 256 } });
+    expect(writeSettings({ search: null }).search.indexLimitMb).toBe(160);
+  });
+
+  it("refuses a limit out of range, fractional or not a number, whole, and writes nothing", () => {
+    writeSettings({ search: { indexLimitMb: 256 } });
+    for (const bad of [31, 4097, 0, -160, 100.5, "160", true, Number.NaN]) {
+      expect(() => writeSettings({ search: { indexLimitMb: bad } }), String(bad)).toThrow(SettingsError);
+    }
+    expect(() => writeSettings({ search: { indexLimitMb: 31 } })).toThrow(/from 32 to 4096/);
+    expect(readSettings().search.indexLimitMb).toBe(256);
+    expect(() => readSettingsPatch({ search: { limitMb: 64 } })).toThrow(SettingsError);
+    expect(() => readSettingsPatch({ search: 64 })).toThrow(SettingsError);
+    expect(readSettingsPatch({ search: { indexLimitMb: 64 } })).toEqual({ search: { indexLimitMb: 64 } });
+  });
+
+  it("reads a bad stored value as the default, never as a budget of nothing", () => {
+    fs.mkdirSync(root, { recursive: true });
+    for (const stored of [8, 10_000, "512", null, 64.5]) {
+      fs.writeFileSync(settingsPath(), JSON.stringify({ search: { indexLimitMb: stored } }));
+      expect(readSettings().search.indexLimitMb, String(stored)).toBe(160);
+    }
   });
 });
 
