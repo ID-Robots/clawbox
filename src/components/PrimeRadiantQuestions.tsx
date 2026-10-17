@@ -381,7 +381,7 @@ function Daily({ revision, onOpenPage, onOpenReview }: Pick<Props, "revision" | 
     });
   };
 
-  const owners = answer?.owners ?? [];
+  const owners = useMemo(() => answer?.owners ?? [], [answer]);
   const current = useMemo(() => owners.find((o) => o.owner === owner) ?? null, [owners, owner]);
   const outbound = answer?.outbound ?? false;
 

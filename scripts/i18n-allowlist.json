@@ -15,6 +15,8 @@
     { "key": "app.store", "locales": ["de", "it"], "reason": "\"Store\" is the loanword in German and Italian." },
     { "key": "app.terminal", "locales": ["de", "es", "fr", "nl", "sv"], "reason": "\"Terminal\" is the same word in these languages." },
     { "key": "chat.audioPause", "locales": ["de", "fr"], "reason": "\"Pause\" is the German and French word." },
+    { "key": "primeRadiant.tab.questions", "locales": ["fr"], "reason": "\"Questions\" is the French word too." },
+    { "key": "primeRadiant.questions.question", "locales": ["fr"], "reason": "\"Question\" is the French word too." },
     { "key": "chat.desktop", "locales": ["de", "it"], "reason": "\"Desktop\" is the loanword in German and Italian." },
     { "key": "chat.detailsSummary", "locales": ["de", "nl"], "reason": "\"Details\" is the German and Dutch word too." },
     { "key": "chat.effort.minimal", "locales": ["de", "fr", "sv"], "reason": "\"Minimal\" is spelt the same in German, French and Swedish." },
