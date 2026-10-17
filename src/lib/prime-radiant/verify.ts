@@ -13,7 +13,15 @@
  *     and listed in that page's `retiredClaimIds` — and in the ledger, so the
  *     id can never be reused, also when no page carried it;
  *   - a second copy of `claimId` on another page (a collision) is removed
- *     there without being retired: the id lives on, on its page.
+ *     there without being retired: the id lives on, on its page;
+ *   - every page whose TEXT states what was superseded (the claim's old
+ *     text, a losing claim's) says so ({@link reconcileStaleText}): its
+ *     "## Key facts" bullet becomes the verified text, and a prose paragraph
+ *     that states the old value gets a `> **Stale:**` note naming the
+ *     verified fact — so no page reads the old value as current. A page
+ *     touched only for its text that already breaks a blocking rule (a
+ *     secret, a claim id another page holds) keeps its text: the
+ *     verification is never refused for a page it does not otherwise change.
  *
  * A claim id that is on no page yet is written to `page` (the caller names
  * where a new answer goes), provided the id was never retired.
@@ -37,8 +45,10 @@
 
 import { buildClaimIndex, isClaimId, nowIso, retireClaimsOnPage } from "./claims";
 import { verifiedTrailers, type VaultAuthor } from "./git";
+import { lintVault } from "./lint";
 import { safePagePath, vaultDir } from "./paths";
 import { ASSISTANT_VERIFIER, OWNER_VERIFIER, VIA_ASSISTANT, type Claim, type ClaimEvidence, type PageFrontmatter } from "./schema";
+import { reconcileStaleText, type SupersededFact } from "./stale-text";
 import { readRetiredLedger, recordRetired, runInTransaction, stateDbExists, withStateDb } from "./state-db";
 import { readVaultSnapshot, vaultOperation, type VaultOperationResult, type VaultSnapshot } from "./vault";
 
@@ -200,10 +210,36 @@ export async function verifyClaim(input: VerifyInput): Promise<VerifyResult> {
       if (!targetPage) throw new VerifyError("no_page", `There is no valid page at ${target}.`);
 
       const retireSet = new Set(retire);
+      // What the vault said before: the claim's own old text, and every claim this removes (retired, or a collision copy).
+      const superseded: SupersededFact[] = [];
+      for (const page of valid) {
+        for (const c of page.frontmatter.claims) {
+          const removed = retireSet.has(c.id) || (c.id === claimId && page.path !== target);
+          if (removed || (c.id === claimId && page.path === target)) superseded.push({ before: c.text, after: text });
+        }
+      }
+      // Every page whose text states what was superseded says so: its Key facts re-rendered, its prose noted.
+      const carriesFact = (page: (typeof valid)[number]) =>
+        page.path === target || page.frontmatter.claims.some((c) => retireSet.has(c.id) || (page.path !== target && c.id === claimId));
+      const bodies = new Map(valid.map((page) => [page.path, reconcileStaleText(page.body, superseded, page.path, target).body]));
+      // A page touched only for its text that already breaks a blocking rule (a secret, a claim id
+      // another page holds) keeps its text: the verification is never refused for a page it does not change.
+      const textOnly = valid.filter((page) => !carriesFact(page) && bodies.get(page.path) !== page.body).map((page) => page.path);
+      const refused =
+        textOnly.length === 0
+          ? new Set<string>()
+          : new Set(
+              lintVault(snapshot, { scope: textOnly, ledgerRetired: ledger(tx.vault) })
+                .findings.filter((f) => f.blocksCommit)
+                .map((f) => f.path),
+            );
       for (const page of valid) {
         const isTarget = page.path === target;
-        const carries = page.frontmatter.claims.some((c) => retireSet.has(c.id) || (!isTarget && c.id === claimId));
-        if (!carries && !isTarget) continue;
+        const body = bodies.get(page.path) ?? page.body;
+        if (!carriesFact(page)) {
+          if (body !== page.body && !refused.has(page.path)) await tx.writePage(page.path, page.frontmatter, body);
+          continue;
+        }
         let fm: PageFrontmatter = page.frontmatter;
         if (!isTarget) fm = { ...fm, claims: fm.claims.filter((c) => c.id !== claimId) };
         fm = retireClaimsOnPage(fm, retireSet).frontmatter;
@@ -235,7 +271,7 @@ export async function verifyClaim(input: VerifyInput): Promise<VerifyResult> {
           else claims.push(verified);
           fm = { ...fm, claims, ...(input.person === false ? {} : { checked_by: "human" as const }) };
         }
-        await tx.writePage(page.path, fm, page.body);
+        await tx.writePage(page.path, fm, body);
       }
       return { page: target };
     },

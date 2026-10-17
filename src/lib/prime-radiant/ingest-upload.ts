@@ -38,8 +38,11 @@ export const UPLOAD_BATCH_TTL_MS = 24 * 60 * 60 * 1000;
 
 const HEX = "0123456789abcdef";
 const BATCH_HEX = 16;
-const NAME_CHARS = /[A-Za-z0-9._ +()-]/;
+/** Letters and digits of any script (and their marks), and a few safe signs: the owner's own name, never a path or a control character. */
+const NAME_CHARS = /[\p{L}\p{M}\p{N}._ +()-]/u;
 const MAX_NAME_CHARS = 120;
+/** Under the file system's 255-byte name limit, with room for a ` (NN)` clash suffix. */
+const MAX_NAME_BYTES = 200;
 
 export function uploadsRoot(): string {
   return path.join(primeRadiantRoot(), "uploads");
@@ -62,20 +65,25 @@ export function safeBatchId(input: unknown): string | null {
 }
 
 /**
- * A dropped file's name rebuilt for the staging folder: the last path segment,
- * every character outside the alphabet replaced, no leading dots, an
- * ingestible extension (lowercased). Null when there is no such extension.
+ * A dropped file's name rebuilt for the staging folder: the last path segment
+ * (NFC), every character outside the alphabet replaced — letters of any
+ * script stay, so `Ценоразпис.pdf` is still its own name, which the page's
+ * source then shows —, no leading dots, an ingestible extension (lowercased),
+ * at most {@link MAX_NAME_CHARS} characters and {@link MAX_NAME_BYTES} bytes.
+ * Null when there is no such extension.
  */
 export function safeUploadName(input: unknown): { name: string; ext: IngestExtension } | null {
   if (typeof input !== "string") return null;
-  const leaf = input.split(/[\\/]/).pop() ?? "";
+  const leaf = (input.split(/[\\/]/).pop() ?? "").normalize("NFC");
   const dot = leaf.lastIndexOf(".");
   if (dot <= 0) return null;
   const ext = leaf.slice(dot).toLowerCase();
   if (!isIngestExtension(ext)) return null;
   let stem = "";
   for (const ch of leaf.slice(0, dot)) stem += NAME_CHARS.test(ch) ? ch : "_";
-  stem = stem.replace(/^[.\s]+/, "").trim().slice(0, MAX_NAME_CHARS - ext.length);
+  let chars = [...stem.replace(/^[.\s]+/, "").trim()].slice(0, MAX_NAME_CHARS - ext.length);
+  while (chars.length > 0 && Buffer.byteLength(chars.join("") + ext) > MAX_NAME_BYTES) chars = chars.slice(0, -1);
+  stem = chars.join("").trim();
   if (stem === "") stem = "document";
   return { name: `${stem}${ext}`, ext };
 }

@@ -53,6 +53,7 @@ import {
   type PrivacyTier,
 } from "./schema";
 import { readSettings } from "./settings";
+import { reconcileStaleText, type SupersededFact } from "./stale-text";
 import { readRetiredLedger, syncActiveClaims } from "./state-db";
 import {
   INDEX_FILE,
@@ -831,14 +832,18 @@ export async function editClaim(rawId: string, patch: ClaimPatch, who: EditWho, 
     `claim: edit ${id}`,
     async (tx) => {
       const page = holderOf(await tx.snapshot(), tx.vault, id, patch.page ?? null);
+      const superseded: SupersededFact[] = [];
       const claims = page.frontmatter.claims.map((c) => {
         if (c.id !== id) return c;
         if (c.verified) throw new PageEditError("verified", "This claim is verified; verify it again with the new text instead of editing it.", 409);
         const next: Claim = { ...c, ...(patch.text !== undefined ? { text: patch.text } : {}), ...(patch.confidence !== undefined ? { confidence: patch.confidence } : {}) };
         if (next.text === c.text && next.confidence === c.confidence) return c;
+        if (next.text !== c.text) superseded.push({ before: c.text, after: next.text });
         return { ...next, updatedAt: at, evidence: [...c.evidence, { kind: "edit", note: `edited by ${who.by}`, updatedAt: at }].slice(-20) };
       });
-      await tx.writePage(page.path, { ...page.frontmatter, claims }, page.body);
+      // The page's Key facts list the claim as it reads now.
+      const body = reconcileStaleText(page.body, superseded, page.path, page.path, { prose: false }).body;
+      await tx.writePage(page.path, { ...page.frontmatter, claims }, body);
       return page.path;
     },
     { vault, now: options.now, author: who.author },

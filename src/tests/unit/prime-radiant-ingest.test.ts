@@ -357,6 +357,33 @@ describe("an ingest job", () => {
     expect(getIngestJob(started[0].id, vault)?.status).toBe("done");
   });
 
+  // The live test: one call writing two documents left a claim on the first one's page with the second one's evidence.
+  it("writes two documents of one call as two pages, each with only its own document's claims", async () => {
+    write("pricing.md", "The blue widget costs 10 EUR per unit.");
+    write("shipping.md", "Orders ship within three working days.");
+    const fake = fakeClient((items) =>
+      items.map((it) => ({
+        ...cardFor(it),
+        // Every card also states the other document's fact, quoting it.
+        facts: items.map((other) => ({ fact: other.text.trim(), quote: other.text.trim().replace(/\.$/, ""), confidence: 0.8 })),
+      })),
+    );
+    const job = await run({ kind: "folders", folders: [docs] }, deps({ client: fake.client, batchSize: 2 }));
+    expect(job).toMatchObject({ done: 2, pages: 2 });
+    expect(fake.calls).toBe(1);
+    const pages = (await readVaultSnapshot(vault)).pages.flatMap((p) => (p.parsed.ok ? [p.parsed.frontmatter] : []));
+    expect(pages).toHaveLength(2);
+    for (const fm of pages) {
+      expect(fm.sources).toHaveLength(1);
+      expect(fm.claims).toHaveLength(1);
+      // Evidence is the file the claim came from: the page's own document.
+      for (const c of fm.claims) expect(c.evidence.map((e) => e.path)).toEqual(fm.sources);
+    }
+    const textOf = (source: RegExp) => pages.find((fm) => source.test(fm.sources[0]))!.claims.map((c) => c.text);
+    expect(textOf(/pricing\.md$/)).toEqual(["The blue widget costs 10 EUR per unit."]);
+    expect(textOf(/shipping\.md$/)).toEqual(["Orders ship within three working days."]);
+  });
+
   it("keeps two dropped files of the same name apart", async () => {
     const fake = fakeClient((items) => items.map((it) => ({ ...cardFor(it), title: `Acme notes ${fake.calls}` })));
     for (const [batch, text] of [["0123456789abcdef", "Acme notes, spring."], ["fedcba9876543210", "Acme notes, autumn."]] as const) {
@@ -365,7 +392,10 @@ describe("an ingest job", () => {
       fs.writeFileSync(path.join(staged, "notes.md"), text);
       await run({ kind: "upload", dir: staged, batch }, deps({ client: fake.client }));
     }
-    expect((await readVaultSnapshot(vault)).pages).toHaveLength(2);
+    const pages = (await readVaultSnapshot(vault)).pages;
+    expect(pages).toHaveLength(2);
+    // Each by the name the owner dropped it under; the second numbered as a clash is.
+    expect(pages.flatMap((p) => (p.parsed.ok ? p.parsed.frontmatter.sources : [])).sort()).toEqual(["notes (2).md", "notes.md"]);
   });
 
   it("keeps two documents apart whose paths read alike once redacted", async () => {
@@ -405,8 +435,13 @@ describe("an ingest job", () => {
     const fake = fakeClient();
     const job = await run({ kind: "upload", dir: staged, batch: "0123456789abcdef" }, deps({ client: fake.client }));
     expect(job).toMatchObject({ kind: "upload", folders: ["upload/0123456789abcdef"], done: 1 });
-    expect(fake.prompts[0].user).toContain('"path":"upload/0123456789abcdef/price-list.md"');
+    expect(fake.prompts[0].user).toContain('"path":"price-list.md"');
     expect(fs.existsSync(staged)).toBe(false);
+    // The page's source is the file's own name, not the staging folder's path.
+    const page = (await readVaultSnapshot(vault)).pages[0];
+    expect(page.parsed.ok && page.parsed.frontmatter.sources).toEqual(["price-list.md"]);
+    expect(page.parsed.ok && page.parsed.frontmatter.claims.every((c) => c.evidence[0].path === "price-list.md")).toBe(true);
+    expect(page.parsed.body).toContain("## Sources\n\n- `price-list.md`");
   });
   it("redacts a dropped file's name before the model sees it, and keeps redacted twins apart", async () => {
     const staged = path.join(root, "staged-pii");
@@ -421,7 +456,7 @@ describe("an ingest job", () => {
     expect(paths).toHaveLength(3);
     for (const p of paths) {
       expect(p).not.toMatch(/555|7946|0958/);
-      expect(p).toMatch(/^upload\/0123456789abcdef\/.*\[REDACTED:PHONE\].*#[0-9a-f]{12}$/);
+      expect(p).toMatch(/^[^/]*\[REDACTED:PHONE\].*#[0-9a-f]{12}$/);
     }
     // Two names that read alike once redacted stay two documents.
     expect(new Set(paths).size).toBe(3);

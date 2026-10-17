@@ -328,7 +328,8 @@ describe("drop: upload then ingest", () => {
     const frames = await readSse(await events(job.id));
     expect(frames.at(-1)).toMatchObject({ event: "end", data: { status: "done", done: 2 } });
     const labels = frames.filter((f) => f.event === "file").map((f) => (f.data as { label: string }).label).sort();
-    expect(labels).toEqual([`upload/${batch}/Price list.md`, `upload/${batch}/notes.txt`]);
+    // Each file by the name it was dropped under.
+    expect(labels).toEqual(["Price list.md", "notes.txt"]);
     expect(fs.existsSync(path.join(process.env.PRIME_RADIANT_DIR!, "uploads", batch))).toBe(false);
   });
 
@@ -354,7 +355,7 @@ describe("named files: ingested as one staged batch", () => {
     expect(job.kind).toBe("upload");
     const frames = await readSse(await events(job.id));
     expect(frames.at(-1)).toMatchObject({ event: "end", data: { status: "done", done: 2 } });
-    const labels = frames.filter((f) => f.event === "file").map((f) => (f.data as { label: string }).label.replace(/^upload\/[0-9a-f]+\//, "")).sort();
+    const labels = frames.filter((f) => f.event === "file").map((f) => (f.data as { label: string }).label).sort();
     expect(labels).toEqual(["catalogue.md", "support.txt"]);
     expect(fs.readdirSync(path.join(process.env.PRIME_RADIANT_DIR!, "uploads"))).toEqual([]);
     // The originals are read, never moved.

@@ -15,9 +15,10 @@ import { buildLinkGraph, pathAliases } from "./links";
 import { lintVault, type LintReport } from "./lint";
 import { pageSummary } from "./frontmatter";
 import { pageBlurb } from "./page-blurb";
+import { isPluginFormatFrontmatter } from "./plugin-files";
 import { hasVerification, type PageFrontmatter, type SchemaError } from "./schema";
 import { currentBranch, commitCount, headCommit, type CommitInfo } from "./git";
-import { repairPluginWritesOnce, type PluginRepairResult } from "./plugin-repair";
+import { adoptPluginPages, repairPluginWritesOnce, type PluginRepairResult } from "./plugin-repair";
 import { ensureMemoryWikiWiring, memoryWikiWiringStatus, type WiringPlan, type WiringResult } from "./plugin-wiring";
 import { vaultDir, safePagePath, isKnowledgePage } from "./paths";
 import { readRetiredLedger } from "./state-db";
@@ -90,7 +91,8 @@ export async function getStatus(vault: string = vaultDir()): Promise<PrimeRadian
     vault: {
       path: vault,
       pages: snapshot.pages.length,
-      invalidPages: snapshot.pages.length - valid.length,
+      // A page memory-wiki wrote in its own format is converted on the next pass, not broken.
+      invalidPages: snapshot.pages.filter((p) => !p.parsed.ok && !isPluginFormatFrontmatter(p.parsed.raw)).length,
       verifiedPages: valid.filter(hasVerification).length,
       claims: valid.reduce((n, fm) => n + fm.claims.length, 0),
       domains: [...new Set(valid.map((fm) => fm.domain))].sort(),
@@ -250,6 +252,11 @@ export async function initialise(vault: string = vaultDir()): Promise<Initialise
   } catch (err) {
     console.warn(`[prime-radiant] memory-wiki repair failed: ${err instanceof Error ? err.message : String(err)}`);
     repair = null;
+  }
+  try {
+    await adoptPluginPages(vault);
+  } catch (err) {
+    console.warn(`[prime-radiant] memory-wiki's own pages could not be converted: ${err instanceof Error ? err.message : String(err)}`);
   }
   return { created, plugin, repair };
 }

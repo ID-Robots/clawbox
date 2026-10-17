@@ -375,6 +375,22 @@ describe("claims", () => {
     expect(read("concepts/pricing.md")).toContain("retiredClaimIds: []");
   });
 
+  it("an edited claim's text is what the page's Key facts list", async () => {
+    await ensureVault();
+    const body = "Acme prices its widgets.\n\n## Key facts\n\n- The blue widget costs 10 EUR.\n- The red widget costs 14 EUR.\n";
+    await vaultOperation("seed: pages", async (tx) => {
+      await tx.write("concepts/pricing.md", pageText({ claims: [PRICE, VERIFIED] }, body));
+      await tx.write("index.md", "# Index\n\n- [[concepts/pricing]] — Widget pricing\n");
+    });
+    const edited = await claimPATCH(req("PATCH", `/claims/${PRICE.id}`, "assistant", { text: "The blue widget costs 11 EUR." }), idCtx(PRICE.id));
+    expect(edited.status).toBe(200);
+    const text = read("concepts/pricing.md");
+    expect(text).toContain("## Key facts\n\n- The blue widget costs 11 EUR.\n- The red widget costs 14 EUR.\n");
+    expect(text).not.toContain("- The blue widget costs 10 EUR.");
+    // An edit is no verification: prose gets no stale note.
+    expect(text).not.toContain("**Stale:**");
+  });
+
   it("refuses to edit a verified claim's text, and a bad claim id or confidence", async () => {
     await ensureVault();
     await seed();
