@@ -16,6 +16,13 @@
  * the vault or the nightly pass. A run whose commit fails is not marked done,
  * and the next one commits what it had already deleted and written too.
  *
+ * {@link adoptPluginPages} runs on every pass (`POST init`, each night): a
+ * page the plugin wrote in its OWN format — its `create_synthesis` puts one
+ * into `syntheses/` with `pageType`, `sourceIds`, `status: active` — is made
+ * a Prime Radiant page (plugin-compat.ts `adoptPluginFrontmatter`) in one
+ * commit of its own and listed in `index.md`. Until then the lint warns about
+ * it (`plugin-format`) and nothing is held by it.
+ *
  * {@link restorePluginOnlyEdits} is what the nightly merge and a revert ask
  * first: a tracked page whose only change is a managed block the plugin
  * wrote since is put back as committed, so the plugin cannot make the vault
@@ -39,8 +46,14 @@ import {
   stripManagedBlocks,
   withPluginGitignore,
 } from "./plugin-files";
-import { stateDbExists, withStateDb } from "./state-db";
-import { INDEX_FILE, readVaultSnapshot, vaultInitialised } from "./vault";
+import { buildClaimIndex } from "./claims";
+import { adoptPluginFrontmatter } from "./plugin-compat";
+import { isPluginFormatFrontmatter } from "./plugin-files";
+import { scanSecrets } from "./redact";
+import { validateFrontmatter } from "./schema";
+import { readRetiredLedger, stateDbExists, withStateDb } from "./state-db";
+import { INDEX_FILE, readVaultSnapshot, vaultInitialised, vaultOperation } from "./vault";
+import { addToIndex } from "./writer";
 
 /** The `pass_state` key that says the repair has run on this vault. */
 export const REPAIR_STATE_KEY = "memory_wiki_repair";
@@ -274,4 +287,62 @@ export async function restorePluginOnlyEdits(vault: string): Promise<string[]> {
   }
   if (restored.length > 0) await git(vault, ["checkout", "--", ...restored]);
   return restored;
+}
+
+export const ADOPT_COMMIT_PREFIX = "adopt: memory-wiki's own pages";
+
+export interface PluginAdoptResult {
+  /** Pages made Prime Radiant pages. */
+  adopted: string[];
+  commit: string | null;
+}
+
+/**
+ * Make every page memory-wiki wrote in its own format a Prime Radiant page, in
+ * ONE commit: the plugin's fields kept, the page contract added, its claims
+ * given ids in the vault's namespace, the page listed in `index.md`. A page
+ * the commit would be refused for — one holding a secret, one whose own
+ * fields break the contract even converted — is left as it is (still a
+ * warning, its own error said by the lint), so it never holds the others
+ * back. Nothing to do is no commit. Throws what the vault operation throws.
+ */
+export async function adoptPluginPages(vault: string = vaultDir(), now: () => Date = () => new Date()): Promise<PluginAdoptResult> {
+  if (!(await vaultInitialised(vault))) return { adopted: [], commit: null };
+  const before = await readVaultSnapshot(vault);
+  const count = before.pages.filter((p) => !p.parsed.ok && isPluginFormatFrontmatter(p.parsed.raw)).length;
+  if (count === 0) return { adopted: [], commit: null };
+  let ledger: string[] = [];
+  try {
+    ledger = readRetiredLedger(vault);
+  } catch {
+    ledger = [];
+  }
+  const op = await vaultOperation(
+    (paths: string[]) => `${ADOPT_COMMIT_PREFIX} (${paths.length})`,
+    async (tx) => {
+      // Read under the lock: what the commit changes is what is on disk now.
+      const snapshot = await tx.snapshot();
+      const valid = snapshot.pages.flatMap((p) => (p.parsed.ok ? [{ path: p.path, frontmatter: p.parsed.frontmatter }] : []));
+      const claimIndex = buildClaimIndex(valid, ledger);
+      const adopted: Array<{ path: string; title: string }> = [];
+      for (const page of snapshot.pages) {
+        if (page.parsed.ok || !isPluginFormatFrontmatter(page.parsed.raw)) continue;
+        // A page the commit would be refused for stays as it is and never holds the others back: one
+        // holding a secret (its secret-pattern error says why), or one whose own fields still break
+        // the page contract once converted.
+        if (scanSecrets(page.text).length > 0) continue;
+        const { frontmatter } = adoptPluginFrontmatter(page.path, page.parsed.raw as Record<string, unknown>, page.parsed.body, { claimIndex, now: now() });
+        if (!validateFrontmatter(frontmatter).ok) continue;
+        await tx.writePage(page.path, frontmatter, page.parsed.body);
+        adopted.push({ path: page.path, title: frontmatter.title });
+      }
+      if (adopted.length > 0) {
+        const next = addToIndex(snapshot.indexBody, adopted);
+        if (next !== snapshot.indexBody) await tx.write(INDEX_FILE, next);
+      }
+      return adopted.map((a) => a.path);
+    },
+    { vault, now: now() },
+  );
+  return { adopted: op.result, commit: op.commit };
 }

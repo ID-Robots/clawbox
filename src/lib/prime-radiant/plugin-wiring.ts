@@ -23,10 +23,13 @@
  *
  * IDEMPOTENT: each key is written only when it differs, so a wired box makes
  * no write (and no gateway restart). NEVER CLOBBERS: a value the owner set on
- * purpose — the plugin explicitly switched off, a bridge/unsafe-local mode, a
- * vault elsewhere, agent scope, a deny-list entry — is reported as a
- * `conflict` and left alone unless the caller passes `force` (the owner's own
- * "use Prime Radiant's vault" from its settings).
+ * purpose — the plugin explicitly switched off, a bridge/unsafe-local mode,
+ * agent scope, a deny-list entry — is reported as a `conflict` and left alone
+ * unless the caller passes `force` (the owner's own "use Prime Radiant's
+ * vault" from its settings). The plugin's vault — the one `vault.path` names,
+ * or its default `<state-dir>/wiki/main` when unset — is re-pointed only when
+ * it holds no pages ({@link vaultHoldsPages}); one that does is the owner's
+ * wiki, reported as `other-vault-path`, left as it is and logged.
  *
  * On the edition with no OpenClaw this is `unavailable`, never an error.
  *
@@ -40,9 +43,13 @@ import {
   type OpenClawConfig,
   type OpenclawConfigSetArgs,
 } from "@/lib/openclaw-config";
+import type { Dirent } from "fs";
+import fs from "fs/promises";
+import { openclawStateDir } from "@/lib/openclaw-state-store";
 import { processStore } from "@/lib/process-store";
 import path from "@/lib/runtime-path";
 import { vaultDir } from "./paths";
+import { isPluginOwnedPath } from "./plugin-files";
 
 export const MEMORY_WIKI_PLUGIN_ID = "memory-wiki";
 const ENTRY = `plugins.entries.${MEMORY_WIKI_PLUGIN_ID}`;
@@ -82,15 +89,87 @@ function obj(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
 
+function expandHome(p: string): string {
+  const home = process.env.HOME ?? "";
+  return p.startsWith("~/") && home ? path.join(home, p.slice(2)) : p;
+}
+
 function samePath(a: unknown, b: string): boolean {
   if (typeof a !== "string" || a.trim() === "") return false;
-  const home = process.env.HOME ?? "";
-  const expanded = a.startsWith("~/") && home ? path.join(home, a.slice(2)) : a;
+  const expanded = expandHome(a);
   return path.isAbsolute(expanded) && path.resolve(expanded) === path.resolve(b);
 }
 
-/** What has to change in `config` for the plugin to read `vault` (pure). */
-export function planMemoryWikiWiring(config: OpenClawConfig, vault: string): WiringPlan {
+/** A `vault.path` that names a folder (not unset, null or blank). */
+function setVaultPath(config: OpenClawConfig): string | null {
+  const entry = obj(obj(obj(config.plugins)?.entries)?.[MEMORY_WIKI_PLUGIN_ID]);
+  const p = obj(obj(entry?.config)?.vault)?.path;
+  return typeof p === "string" && p.trim() !== "" ? p : null;
+}
+
+/**
+ * The folder the plugin reads now: the `vault.path` set, or — unset — its
+ * default, `<state-dir>/wiki/main` (pinned OpenClaw's memory-wiki: the state
+ * dir is `OPENCLAW_STATE_DIR`, else the OpenClaw home). Null when that path is
+ * not absolute.
+ */
+export function pluginVaultNow(config: OpenClawConfig): string | null {
+  const set = setVaultPath(config);
+  const p = set === null ? path.join(openclawStateDir(), "wiki", "main") : expandHome(set);
+  return path.isAbsolute(p) ? path.resolve(p) : null;
+}
+
+/** The most entries {@link vaultHoldsPages} looks at before it calls a folder full. */
+const PROBE_ENTRIES = 2000;
+/** Top-level files a vault holds that are no page of anybody's. */
+const SCAFFOLD_FILES = new Set(["index.md", "log.md", "AGENTS.md"]);
+
+/**
+ * Whether the folder holds anything but the plugin's own scaffolding
+ * (`WIKI.md`, `inbox.md`, `reports/`, `<group>/index.md`, dot files, the
+ * top-level index): a page, a source, any file of the owner's. Missing is
+ * empty; a file in its place, a folder it cannot read or one too big to look
+ * through counts as holding pages — never re-point what was not seen to be
+ * empty. Reads names only, never a file's contents.
+ */
+export async function vaultHoldsPages(dir: string): Promise<boolean> {
+  let seen = 0;
+  const walk = async (abs: string, rel: string): Promise<boolean> => {
+    let entries: Dirent[];
+    try {
+      entries = await fs.readdir(abs, { withFileTypes: true });
+    } catch {
+      return true;
+    }
+    for (const e of entries) {
+      if (++seen > PROBE_ENTRIES) return true;
+      if (e.name.startsWith(".")) continue;
+      const childRel = rel === "" ? e.name : `${rel}/${e.name}`;
+      if (isPluginOwnedPath(childRel) || (rel === "" && SCAFFOLD_FILES.has(e.name))) continue;
+      if (e.isDirectory()) {
+        if (await walk(path.join(abs, e.name), childRel)) return true;
+        continue;
+      }
+      return true;
+    }
+    return false;
+  };
+  try {
+    const st = await fs.lstat(dir);
+    if (!st.isDirectory()) return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code !== "ENOENT";
+  }
+  return walk(dir, "");
+}
+
+/**
+ * What has to change in `config` for the plugin to read `vault` (pure).
+ * `currentVaultEmpty` says whether the vault the plugin reads now holds no
+ * pages (see {@link vaultHoldsPages}); unknown, a `vault.path` set elsewhere
+ * is the owner's and an unset one is written.
+ */
+export function planMemoryWikiWiring(config: OpenClawConfig, vault: string, currentVaultEmpty?: boolean): WiringPlan {
   const plugins = obj(config.plugins);
   const entry = obj(obj(plugins?.entries)?.[MEMORY_WIKI_PLUGIN_ID]);
   const cfg = obj(entry?.config);
@@ -113,7 +192,9 @@ export function planMemoryWikiWiring(config: OpenClawConfig, vault: string): Wir
     writes.push({ key: WIRING_KEYS.vaultMode, value: "isolated" });
   }
   if (!samePath(vaultCfg?.path, vault)) {
-    if (vaultCfg?.path !== undefined) conflicts.push("other-vault-path");
+    // The vault the plugin reads now (set, or its default) is re-pointed only when it holds no pages.
+    const keep = currentVaultEmpty === undefined ? setVaultPath(config) !== null : !currentVaultEmpty;
+    if (keep) conflicts.push("other-vault-path");
     writes.push({ key: WIRING_KEYS.vaultPath, value: vault });
   }
   // Agent scope turns vault.path into a PARENT; Prime Radiant is one vault.
@@ -142,7 +223,13 @@ export async function memoryWikiWiringStatus(vault: string = vaultDir()): Promis
   } catch {
     return { state: "unavailable", vault, reason: "config-unreadable" };
   }
-  return planMemoryWikiWiring(config, vault);
+  let currentVaultEmpty: boolean | undefined;
+  if (!samePath(setVaultPath(config), vault)) {
+    const now = pluginVaultNow(config);
+    // A relative path is the plugin's to resolve: not seen to be empty, so kept.
+    currentVaultEmpty = now !== null && (path.resolve(now) === path.resolve(vault) || !(await vaultHoldsPages(now)));
+  }
+  return planMemoryWikiWiring(config, vault, currentVaultEmpty);
 }
 
 export interface EnsureWiringOptions {
@@ -185,6 +272,9 @@ async function wireOnce(options: EnsureWiringOptions): Promise<WiringResult> {
   const plan = await memoryWikiWiringStatus(vault);
   if (plan.state === "wired" || plan.state === "unavailable") return { ...plan, wrote: false };
   if (plan.state === "conflict" && !(options.force && plan.conflicts.every((c) => FORCEABLE.has(c)))) {
+    if (plan.conflicts.includes("other-vault-path")) {
+      console.warn("[prime-radiant] memory-wiki reads another vault that holds pages; its vault path was left as it is.");
+    }
     return { ...plan, wrote: false };
   }
   const batch: OpenclawConfigSetArgs[] = plan.writes.map((w) => [w.key, JSON.stringify(w.value), "--json"]);

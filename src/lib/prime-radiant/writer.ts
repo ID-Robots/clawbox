@@ -105,12 +105,6 @@ export interface DraftFact {
   fact: string;
   quote: string;
   confidence: number;
-  /**
-   * The label of the document the quote was found in when it is not the
-   * page's own (another item of the same call): the evidence is filed there.
-   * Absent: the page's own document.
-   */
-  source?: string;
   /** When the fact holds, as the model read it from the document (ISO dates); absent when it did not say. */
   validFrom?: string;
   validUntil?: string;
@@ -351,23 +345,27 @@ export function quoteIn(documentWords: string, quote: string): boolean {
 
 /**
  * Each fact's quote checked against the page's OWN document: on the live
- * test the page for `Office move.txt` cited "The ID Robots office is at 25
- * Tsar Boris III Blvd", a line of another file in the same call. A quote in
- * the page's own text stays; one found in exactly one other document of the
- * call is filed under that document ({@link DraftFact.source}); one found in
- * none, or in several others, is dropped (the fact keeps its page's source
- * and loses the note).
+ * test the page for `Office move.txt` cited a line of another file in the
+ * same call, and a call writing two documents left claims on one page whose
+ * evidence was the other. A page keeps the claims of its own document, so a
+ * claim's evidence is always the file it came from: a quote in the page's
+ * own text stays; a fact whose quote is in exactly one OTHER document of the
+ * call is that document's, not this page's, and is left out (its own
+ * document's card states what it says); a quote found in none, or in
+ * several others, is dropped and the fact keeps its page.
  */
 export function checkEvidence(draft: PageDraft, own: WriterItem, items: readonly WriterItem[], words: ReadonlyMap<number, string>): PageDraft {
   if (draft.facts.every((f) => f.quote === "")) return draft;
-  const facts = draft.facts.map((f): DraftFact => {
-    if (f.quote === "" || quoteIn(words.get(own.i) ?? "", f.quote)) return f;
+  const facts: DraftFact[] = [];
+  for (const f of draft.facts) {
+    if (f.quote === "" || quoteIn(words.get(own.i) ?? "", f.quote)) {
+      facts.push(f);
+      continue;
+    }
     const elsewhere = items.filter((it) => it.i !== own.i && quoteIn(words.get(it.i) ?? "", f.quote));
-    if (elsewhere.length === 1 && elsewhere[0].path !== own.path) return { ...f, source: elsewhere[0].path };
-    const { source: _source, ...kept } = f;
-    void _source;
-    return { ...kept, quote: "" };
-  });
+    if (elsewhere.length === 1 && elsewhere[0].path !== own.path) continue;
+    facts.push({ ...f, quote: "" });
+  }
   return { ...draft, facts };
 }
 
@@ -489,7 +487,8 @@ export function buildPage(draft: PageDraft, source: string, ctx: BuildContext): 
       confidence: Math.round(fact.confidence * 100) / 100,
       status: "proposed",
       updatedAt,
-      evidence: [{ kind: "source", path: fact.source ?? source, ...(fact.quote ? { note: fact.quote } : {}) }],
+      // The page's own document: a claim is never filed under another one (checkEvidence).
+      evidence: [{ kind: "source", path: source, ...(fact.quote ? { note: fact.quote } : {}) }],
       ...claimDates(fact, updatedAt),
     };
     claims.push(claim);

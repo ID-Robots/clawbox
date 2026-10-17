@@ -22,9 +22,10 @@
  * Pure apart from the snapshot it is handed.
  */
 
-import { buildClaimIndex, claimCollisions, isClaimId, retiredReuse } from "./claims";
+import { buildClaimIndex, claimCollisions, isClaimId, retiredReuse, transliterateCyrillic } from "./claims";
 import { pageSummary } from "./frontmatter";
-import { buildLinkGraph, CONTENT_FOLDERS, contentReach } from "./links";
+import { isPluginFormatFrontmatter } from "./plugin-files";
+import { buildLinkGraph, CONTENT_FOLDERS, contentReach, pathAliases } from "./links";
 import { scanSecrets } from "./redact";
 import { ownerVerified, type PageFrontmatter } from "./schema";
 import type { VaultPage, VaultSnapshot } from "./vault";
@@ -53,6 +54,7 @@ export const LINT_RULES = [
   "claim-id-collision",
   "claim-id-retired-reuse",
   "stale-against-verified",
+  "plugin-format",
 ] as const;
 export type LintRule = (typeof LINT_RULES)[number];
 
@@ -142,7 +144,7 @@ export function staleAfterPassed(staleAfter: string | null, now: Date): boolean 
 }
 
 function slugifyTitle(text: string): string {
-  const s = text
+  const s = transliterateCyrillic(text)
     .normalize("NFKD")
     .replace(/[̀-ͯ]/g, "")
     .toLowerCase()
@@ -321,6 +323,7 @@ export function lintVault(snapshot: VaultSnapshot, options: LintOptions = {}): L
     snapshot.pages.map((p) => ({
       path: p.path,
       title: p.parsed.ok ? p.parsed.frontmatter.title : undefined,
+      aliases: p.parsed.ok ? pathAliases(p.parsed.frontmatter.aliases) : undefined,
       body: p.parsed.body,
     })),
     snapshot.indexBody,
@@ -334,6 +337,11 @@ export function lintVault(snapshot: VaultSnapshot, options: LintOptions = {}): L
     const kinds = scanSecrets(page.text);
     if (kinds.length > 0) {
       findings.push(finding("secret-pattern", "error", page.path, `the page contains what looks like ${kinds.join(", ")}`, { kinds }));
+    }
+    if (!page.parsed.ok && isPluginFormatFrontmatter(page.parsed.raw)) {
+      // memory-wiki's own page (create_synthesis): converted on the next pass, never an error that holds the vault.
+      findings.push(finding("plugin-format", "warning", page.path, "memory-wiki wrote this page in its own format; the next nightly pass makes it a Prime Radiant page"));
+      continue;
     }
     if (!page.parsed.ok) {
       findings.push(

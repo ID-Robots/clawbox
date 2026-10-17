@@ -40,6 +40,11 @@ export type ClaimStatus = (typeof CLAIM_STATUSES)[number];
 export interface Stamp {
   at: string;
   by: string;
+  /**
+   * Who carried it out for them, when not they themselves: `assistant` on an
+   * owner's verification the assistant made on the owner's word (verify.ts).
+   */
+  via?: string;
 }
 
 export interface ClaimEvidence {
@@ -63,7 +68,7 @@ export interface Claim {
   /** ISO 8601 */
   updatedAt: string;
   evidence: ClaimEvidence[];
-  /** Set by a human verification only. */
+  /** Set by a verification (verify.ts): the owner's, the owner's via the assistant, or the assistant's own. */
   verified?: Stamp | null;
   /**
    * When the fact holds, when its source says so (validity.ts): from this ISO
@@ -166,8 +171,8 @@ export function parseStamp(value: unknown): Stamp | null {
   if (isPlainObject(value)) {
     const at = value.at;
     const by = value.by;
-    if (isIsoDate(at) && nonEmptyString(by)) return { at, by: by.trim() };
-    return null;
+    if (!isIsoDate(at) || !nonEmptyString(by)) return null;
+    return nonEmptyString(value.via) ? { at, by: by.trim(), via: value.via.trim() } : { at, by: by.trim() };
   }
   if (typeof value === "string") {
     const m = /^(\S+)\s+by\s+(.+)$/.exec(value.trim());
@@ -324,18 +329,40 @@ export function validateFrontmatter(raw: unknown): ValidationResult {
   };
 }
 
-/** Who the assistant's verification stamps name (route-helpers.ts's writer `by`). */
+/** Who the assistant's own verification stamps name (route-helpers.ts's writer `by`). */
 export const ASSISTANT_VERIFIER = "assistant";
+/** Who an owner's verification stamps name, also one the assistant made on the owner's word. */
+export const OWNER_VERIFIER = "owner";
+/** The `via` of an owner's verification the assistant carried out: `{ by: owner, via: assistant }`. */
+export const VIA_ASSISTANT = "assistant";
 
 /** Whether a stamp is a person's: every verifier but the assistant. */
 function personsStamp(stamp: Stamp | null | undefined): boolean {
   return !!stamp && stamp.by !== ASSISTANT_VERIFIER;
 }
 
+/** The owner's verification, given through the assistant (the user confirmed the fact in their own words). */
+export function verifiedViaAssistant(stamp: Stamp | null | undefined): boolean {
+  return personsStamp(stamp) && stamp?.via === VIA_ASSISTANT;
+}
+
 /**
- * Whether a claim is OWNER-verified: a person's verification stamp on it, or
- * `status: verified` with no stamp (a person's hand edit), or a page a person
- * verified as a whole. The assistant's stamps verify nothing here.
+ * Who a verification stamp says verified, as the app words it: the owner
+ * (also through the assistant), the assistant on its own, or the stamp's own
+ * name for anyone else (a legacy or hand-written stamp).
+ */
+export function verifierKind(stamp: Pick<Stamp, "by" | "via">): "owner" | "owner-via-assistant" | "assistant" | "other" {
+  if (stamp.by === ASSISTANT_VERIFIER) return "assistant";
+  if (stamp.by !== OWNER_VERIFIER) return "other";
+  return stamp.via === VIA_ASSISTANT ? "owner-via-assistant" : "owner";
+}
+
+/**
+ * Whether a claim is OWNER-verified: a person's verification stamp on it —
+ * the owner's own, or the owner's given through the assistant
+ * (`{ by: owner, via: assistant }`) — or `status: verified` with no stamp (a
+ * person's hand edit), or a page a person verified as a whole. The
+ * assistant's own stamps (`by: assistant`) verify nothing here.
  */
 export function ownerVerified(claim: Pick<Claim, "verified" | "status">, page?: Pick<PageFrontmatter, "verified"> | null): boolean {
   if (claim.verified) return personsStamp(claim.verified);

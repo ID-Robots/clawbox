@@ -210,6 +210,11 @@ const TOPIC_WORDS = words([
   "процес", "политика", "правила", "шаблон", "ръководство", "инструкци[яи]",
 ]);
 
+/** Whether a title is about documents rather than one of them ("Invoice process", "Receipt policy", "Waybill template"). */
+export function topicTitle(title: string | null | undefined): boolean {
+  return !!title && TOPIC_WORDS.test(title);
+}
+
 /**
  * Whether a page is a RECORD — one document of many alike (an invoice, a
  * receipt, a waybill, a declaration, a transfer, a statement, a day's report):

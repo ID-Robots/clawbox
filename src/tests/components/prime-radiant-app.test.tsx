@@ -145,6 +145,9 @@ let searchAnswer: Record<string, unknown>;
 let reviewGate: Promise<void> | null;
 let reviewItems: unknown[];
 let nightlyRuns: unknown[];
+const INGEST_COMMIT = { sha: "a".repeat(40), subject: "ingest: acme-overview.md", at: "2026-01-02T10:00:00.000Z", author: "Prime Radiant" };
+let historyCommits: unknown[];
+let pageOverride: unknown;
 let ingestJobs: unknown[];
 /** Refusals the fake answers the next `DELETE ingest/<id>` calls with, first first. */
 let stopRefusals: number[];
@@ -154,6 +157,8 @@ let skipCodeProjects: boolean;
 let opusExtras: { source: "api_key" | "subscription" | "none"; maxPages: number } | null;
 /** The search index size limit, MB, on a server that has the setting (null: an older one). */
 let searchIndexLimitMb: number | null;
+/** The structure pass's settings section; null: a server from before it. */
+let structureSettings: { enabled: boolean; company: string; enrichTop: number; modelFallback: number } | null;
 /** What `POST init` says its one-time memory-wiki repair did. */
 let initRepair: Record<string, unknown> | null;
 /** What `GET pages?…` lists. */
@@ -179,7 +184,7 @@ function installFetch() {
     }
     if (url.startsWith(`${p}/pages?`)) return ok({ total: listed.length, pages: listed });
     if (url === `${p}/graph`) return ok(listed.length > 0 ? GRAPH : { revision: null, truncated: false, nodes: [], edges: [] });
-    if (url === `${p}/pages/entities/acme-widgets.md`) return ok(PAGE);
+    if (url === `${p}/pages/entities/acme-widgets.md`) return ok(pageOverride ?? PAGE);
     if (url.startsWith(`${p}/search?`)) {
       if (searchStatus === 404) return ok({ error: "Not found" }, 404);
       return ok(searchAnswer);
@@ -196,7 +201,7 @@ function installFetch() {
     if (url === `${p}/nightly`) return ok({ running: null, nextRunAt: null, runs: nightlyRuns });
     if (url === `${p}/nightly/run` && method === "POST") return ok({ branch: "dream/2026-01-05", commit: "def5678abc", changed: [] });
     if (url.startsWith(`${p}/history/`)) {
-      return ok({ path: "entities/acme-widgets.md", commits: [{ sha: "a".repeat(40), subject: "ingest: acme-overview.md", at: "2026-01-02T10:00:00.000Z", author: "Prime Radiant" }] });
+      return ok({ path: "entities/acme-widgets.md", commits: historyCommits });
     }
     if (url.startsWith(`${p}/diff?`)) return ok({ from: null, to: "a".repeat(40), path: "entities/acme-widgets.md", commit: null, files: [], diff: "+added line", truncated: false });
     if (url === `${p}/revert` && method === "POST") return ok({ reverted: "a".repeat(40), commit: "b".repeat(40), changed: [] });
@@ -239,6 +244,7 @@ function installFetch() {
         opus: { enabled: false, capUsd: 2, sampleRate: 0.02, model: "opus", ...(opusExtras ? { maxPages: opusExtras.maxPages } : {}) },
         contradictions: { enabled: true }, domains: [],
         ...(searchIndexLimitMb !== null ? { search: { indexLimitMb: searchIndexLimitMb } } : {}),
+        ...(structureSettings ? { structure: structureSettings } : {}),
       };
       return ok({
         settings, defaults: searchIndexLimitMb !== null ? { ...settings, search: { indexLimitMb: 160 } } : settings,
@@ -295,12 +301,15 @@ beforeEach(() => {
   reviewGate = null;
   reviewItems = [REVIEW_ITEM];
   nightlyRuns = [];
+  historyCommits = [INGEST_COMMIT];
+  pageOverride = null;
   ingestJobs = [];
   stopRefusals = [];
   previewAnswer = PREVIEW;
   skipCodeProjects = true;
   opusExtras = null;
   searchIndexLimitMb = null;
+  structureSettings = null;
   initRepair = { ran: true, cleaned: [], removed: [], commit: null };
   window.localStorage.removeItem("clawbox.primeRadiant.repairNoticeSeen");
   listed = [LIST_ENTRY];
@@ -454,6 +463,22 @@ describe("PrimeRadiantApp", () => {
     expect(screen.getByTestId("prime-radiant-backlinks")).toHaveTextContent("widget-pricing");
   });
 
+  it("says who verified a fact: the owner, the owner via the assistant, or the assistant", async () => {
+    const stamp = (verified: Record<string, string>) => ({ ...PAGE, frontmatter: { ...FM, claims: [{ ...FM.claims[0], verified }] } });
+    for (const [verified, words] of [
+      [{ at: "2026-01-03T10:00:00.000Z", by: "owner", via: "assistant" }, "Verified by the owner (via the assistant)"],
+      [{ at: "2026-01-03T10:00:00.000Z", by: "owner" }, "Verified by the owner,"],
+      [{ at: "2026-01-03T10:00:00.000Z", by: "assistant" }, "Verified by the assistant,"],
+    ] as const) {
+      pageOverride = stamp(verified);
+      const view = await mount();
+      await openTab("browse");
+      fireEvent.click(await screen.findByTestId("prime-radiant-page-row"));
+      expect(await screen.findByTestId("prime-radiant-claim-verified")).toHaveTextContent(words);
+      view.unmount();
+    }
+  });
+
   it("filters the page list by domain and type", async () => {
     await mount();
     await openTab("browse");
@@ -463,6 +488,15 @@ describe("PrimeRadiantApp", () => {
     await waitFor(() => {
       expect(calls.some((c) => c.url.includes("/pages?") && c.url.includes("type=entity") && c.url.includes("domain=sales"))).toBe(true);
     });
+  });
+
+  it("shows the median links per page beside the counts, flagged while under its target", async () => {
+    status = { ...STATUS, links: { pages: 10, median: 3, mean: 3.2, atTarget: 2, target: 5 } };
+    await mount();
+    const links = await screen.findByTestId("prime-radiant-links");
+    expect(links).toHaveTextContent("3 links/page");
+    expect(links).toHaveAttribute("title", "Median meaningful links per page (target 5)");
+    expect(links.className).toMatch(/amber/);
   });
 
   it("keeps the window drawn when a refresh answers a status it cannot draw", async () => {
@@ -590,6 +624,23 @@ describe("PrimeRadiantApp", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
+  it("labels a verification in History: verified by the owner (via the assistant)", async () => {
+    historyCommits = [
+      { sha: "c".repeat(40), subject: "verify: sales/acme-widgets/hq-city", at: "2026-01-03T10:00:00.000Z", author: "ClawBox assistant", verified: { by: "owner", via: "assistant" } },
+      { sha: "d".repeat(40), subject: "verify: sales/acme-widgets/founded", at: "2026-01-02T12:00:00.000Z", author: "Prime Radiant", verified: { by: "owner" } },
+      INGEST_COMMIT,
+    ];
+    await mount();
+    await openTab("browse");
+    fireEvent.click(await screen.findByTestId("prime-radiant-page-row"));
+    fireEvent.click(await screen.findByTestId("prime-radiant-page-history"));
+    const [viaAssistant, owners, ingest] = await screen.findAllByTestId("prime-radiant-commit");
+    expect(within(viaAssistant).getByTestId("prime-radiant-commit-verified")).toHaveTextContent("verified by the owner (via the assistant)");
+    expect(viaAssistant).toHaveTextContent("ClawBox assistant");
+    expect(within(owners).getByTestId("prime-radiant-commit-verified")).toHaveTextContent(/^· verified by the owner$/);
+    expect(within(ingest).queryByTestId("prime-radiant-commit-verified")).toBeNull();
+  });
+
   it("shows a page's history and undoes a change after confirmation", async () => {
     await mount();
     await openTab("browse");
@@ -683,6 +734,33 @@ describe("PrimeRadiantApp", () => {
     await waitFor(() => {
       const put = calls.find((c) => c.url.endsWith("/settings") && c.method === "PUT");
       expect((put?.body as { opus: unknown }).opus).toEqual({ enabled: true, capUsd: 2, maxPages: 40 });
+    });
+  });
+
+  it("shows the company field and the structure switch, and saves them with the rest", async () => {
+    structureSettings = { enabled: true, company: "", enrichTop: 25, modelFallback: 25 };
+    await mount();
+    await openTab("settings");
+    fireEvent.change(await screen.findByTestId("prime-radiant-company"), { target: { value: "  Acme Widgets Ltd " } });
+    fireEvent.click(screen.getByTestId("prime-radiant-structure"));
+    fireEvent.click(screen.getByTestId("prime-radiant-settings-save"));
+    await waitFor(() => {
+      const put = calls.find((c) => c.url.endsWith("/settings") && c.method === "PUT");
+      expect((put?.body as { structure: unknown }).structure).toEqual({ enabled: false, company: "Acme Widgets Ltd" });
+    });
+  });
+
+  it("offers no structure fields to a server from before them, and sends none", async () => {
+    await mount();
+    await openTab("settings");
+    await screen.findByTestId("prime-radiant-settings-save");
+    expect(screen.queryByTestId("prime-radiant-company")).toBeNull();
+    expect(screen.queryByTestId("prime-radiant-structure")).toBeNull();
+    fireEvent.click(screen.getByTestId("prime-radiant-settings-save"));
+    await waitFor(() => {
+      const put = calls.find((c) => c.url.endsWith("/settings") && c.method === "PUT");
+      expect(put).toBeDefined();
+      expect((put?.body as Record<string, unknown>).structure).toBeUndefined();
     });
   });
 

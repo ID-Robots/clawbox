@@ -8,11 +8,17 @@
  *                daytime operations keep committing to `main` meanwhile;
  *   2. ingest    the folders the settings name, into the branch (new and
  *                changed documents only: the ingest's hash-first dedupe);
- *   3. contradictions  claims the branch changed (every claim, the first
- *                night) against their 5 nearest neighbours, judged by Flash;
- *                findings become review items, they never hold the night;
+ *   3. contradictions  claims on every page changed since the last finished
+ *                comparison — the branch's and what reached `main` by day —
+ *                (every claim, the first night) against their 5 nearest
+ *                neighbours, judged by Flash; findings become review items,
+ *                they never hold the night;
  *   4. Opus      optional, capped, sampled (opus.ts); its proposals are
  *                review items, its bookkeeping a commit on the branch;
+ *   4b. structure  monthly record hubs, domain hubs, the company's root
+ *                page, entity enrichment and the decisions register
+ *                (structure.ts), written on the branch — deterministic; the
+ *                capped cheap-model fallback for record types only online;
  *   5. lint      every page the branch changed (after every step that
  *                commits to it); an ERROR holds the night and becomes a
  *                `lint` review item;
@@ -38,7 +44,7 @@ import fs from "fs/promises";
 import { processStore } from "@/lib/process-store";
 import { resolveFolderInsideBrowseRoot } from "@/lib/browse-folder";
 import path from "@/lib/runtime-path";
-import { fullComparisonDone, runContradictionPass, type ClaimEmbedder, type ContradictionPassResult } from "./contradictions";
+import { fullComparisonDone, readComparedThrough, runContradictionPass, type ClaimEmbedder, type ContradictionPassResult } from "./contradictions";
 import type { CostRates } from "./cost-rates";
 import { flashAvailable, type FlashClient } from "./flash-client";
 import { verifiedTouches, type VerifiedTouch } from "./gate";
@@ -47,7 +53,7 @@ import { getIngestJob, ingestFinished, IngestBusyError, startIngest } from "./in
 import { isOwnOutput } from "./ingest-sources";
 import { lintVault, type LintFinding } from "./lint";
 import { isKnowledgePage, vaultDir } from "./paths";
-import { repairPluginWritesOnce, restorePluginOnlyEdits } from "./plugin-repair";
+import { adoptPluginPages, repairPluginWritesOnce, restorePluginOnlyEdits } from "./plugin-repair";
 import { notifyVaultChanged } from "./reindex-hook";
 import { addReviewItem, countWaitingForRuns, listReviewItems } from "./review-store";
 import { buildOpusQueue, runOpusTier, type OpusClient, type OpusTierResult } from "./opus";
@@ -56,6 +62,7 @@ import { insertRun, listRuns, newRunId, saveRun, settleOrphanRuns, type RunRecor
 import { effectiveCostRates, readSettings, type PrimeRadiantSettings } from "./settings";
 import { readRetiredLedger, stateDbExists } from "./state-db";
 import { rejudgeOpenContradictions } from "./rejudge";
+import { runStructure, type StructureNowResult } from "./structure-run";
 import { readVaultSnapshot, vaultInitialised, vaultOperation } from "./vault";
 
 export const DREAM_BRANCH_PREFIX = "dream/";
@@ -76,6 +83,11 @@ export interface NightlySummary {
     findings: number;
   };
   opus: Pick<OpusTierResult, "queued" | "reviewed" | "pending" | "calls" | "usdEstimate" | "capUsd" | "maxPages" | "source" | "stopped"> | { skipped: string };
+  structure:
+    | (Pick<StructureNowResult, "leaves" | "leavesInHubs" | "recordHubs" | "counterpartyHubs" | "domainHubs" | "root" | "entitiesEnriched" | "claimsAdded" | "decisions" | "registerPages" | "skippedVerified" | "linksMedianBefore" | "linksMedianAfter" | "written" | "created"> & {
+        model: StructureNowResult["model"];
+      })
+    | { skipped: string };
   gate: { touched: string[] };
   reviewItems: { raised: number };
   held: string[];
@@ -177,6 +189,25 @@ async function resolveFolders(folders: readonly string[], notes: string[]): Prom
 /** The knowledge pages `head` changed since it left `base`. */
 async function changedPages(vault: string, base: string, head: string): Promise<string[]> {
   return (await changedPaths(vault, base, head)).filter((p) => isKnowledgePage(p)).sort();
+}
+
+/**
+ * The contradiction pass's scope: every knowledge page changed since the
+ * commit the last finished comparison compared, up to the branch's HEAD — the
+ * night's own ingest, and what reached `main` by day (Add documents, an edit,
+ * the assistant) since. Null — compare every claim — when no comparison is
+ * recorded or its commit is gone.
+ */
+async function pagesSinceComparison(vault: string, wt: string): Promise<string[] | null> {
+  let through: string | null;
+  try {
+    through = readComparedThrough(vault);
+  } catch {
+    return null;
+  }
+  if (!through) return null;
+  if ((await git(wt, ["cat-file", "-e", `${through}^{commit}`], { allowFail: true })).code !== 0) return null;
+  return changedPages(wt, through, "HEAD");
 }
 
 /** Keyed by branch as {@link touchItem} is: an item another night raised must not stand in for this night's. */
@@ -290,6 +321,7 @@ function emptySummary(): NightlySummary {
       findings: 0,
     },
     opus: { skipped: "not_run" },
+    structure: { skipped: "not_run" },
     gate: { touched: [] },
     reviewItems: { raised: 0 },
     held: [],
@@ -313,6 +345,13 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
     }
   } catch (err) {
     notes.push(`memory-wiki's generated files could not be taken out of the vault: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
+  }
+  // Every night, before the branch is cut: a page memory-wiki wrote in its own format becomes a Prime Radiant page.
+  try {
+    const adopt = await adoptPluginPages(vault, now);
+    if (adopt.adopted.length > 0) notes.push(`${adopt.adopted.length} page(s) memory-wiki wrote in its own format were made Prime Radiant pages.`);
+  } catch (err) {
+    notes.push(`The pages memory-wiki wrote in its own format could not be converted: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
   }
 
   const branch = await dreamBranchName(vault, now());
@@ -349,8 +388,9 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
       }
     }
 
-    // What the branch changed so far: the contradiction pass's scope and the Opus queue's.
+    // What the branch changed so far: the Opus queue's scope.
     let changed = await changedPages(wt, VAULT_MAIN_BRANCH, "HEAD");
+    const compared = (await git(wt, ["rev-parse", "HEAD"])).stdout.trim();
     const snapshot = await readVaultSnapshot(wt);
 
     // 3. contradictions
@@ -359,11 +399,17 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
     else {
       // Every claim until one pass has compared them all and judged every pair:
       // a night that merely finished (offline, a judge that failed) does not count.
+      // After that, every page changed since the last finished comparison — not
+      // only the branch's: a page added by day went straight to main.
       // Claims an earlier pass left unjudged are added to a scoped pass by the pass itself.
       const firstNight = !fullComparisonDone(vault);
+      const scope = firstNight ? null : await pagesSinceComparison(vault, wt);
+      const byDay = scope ? scope.filter((p) => !changed.includes(p)).length : 0;
+      if (byDay > 0) notes.push(`${byDay} page(s) changed since the last comparison outside this night's branch were compared too.`);
       const pass = await runContradictionPass(snapshot, {
         stateVault: vault,
-        scope: firstNight ? null : changed,
+        scope,
+        comparedThrough: compared,
         runId: run.id,
         client: deps.client,
         embedder: deps.embedder,
@@ -450,6 +496,40 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
           summary.opus = { skipped: "failed" };
           notes.push(`The Opus check could not be saved: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
         }
+      }
+    }
+    // 4b. structure: hubs, the root, enrichment and the register, on the branch
+    if (!settings.structure.enabled) summary.structure = { skipped: "disabled" };
+    else {
+      try {
+        const s = await runStructure(
+          await readVaultSnapshot(wt),
+          async (message, fn) => ({ commit: (await vaultOperation(message, fn, { vault: wt, now: now() })).commit }),
+          { stateVault: vault, settings, rates, client: deps.client, online, runId: run.id, now },
+        );
+        summary.structure = {
+          leaves: s.leaves,
+          leavesInHubs: s.leavesInHubs,
+          recordHubs: s.recordHubs,
+          counterpartyHubs: s.counterpartyHubs,
+          domainHubs: s.domainHubs,
+          root: s.root,
+          entitiesEnriched: s.entitiesEnriched,
+          claimsAdded: s.claimsAdded,
+          decisions: s.decisions,
+          registerPages: s.registerPages,
+          skippedVerified: s.skippedVerified,
+          linksMedianBefore: s.linksMedianBefore,
+          linksMedianAfter: s.linksMedianAfter,
+          written: s.written,
+          created: s.created,
+          model: s.model,
+        };
+        run.usdEstimate += s.model.usdEstimate;
+        if (s.written > 0) notes.push(`The structure pass wrote ${s.written} page(s): ${s.recordHubs} record hub(s), ${s.domainHubs} domain hub(s), ${s.entitiesEnriched} enriched entit${s.entitiesEnriched === 1 ? "y" : "ies"}.`);
+      } catch (err) {
+        summary.structure = { skipped: "failed" };
+        notes.push(`The structure pass could not be saved: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
       }
     }
     if (summary.ingest && "jobId" in summary.ingest) {

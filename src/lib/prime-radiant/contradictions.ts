@@ -4,9 +4,11 @@
  *
  * Blocking is by embedding AND subject: every active claim is embedded with
  * Memory Shard's own embedder (its text redacted first), and each claim in
- * scope is paired with its k = 5 nearest neighbours on OTHER pages that are
- * about the SAME thing ({@link sameSubject}: the same entity in their ids, or
- * subjects that share most of their words, or one naming the other's) — on
+ * scope is paired with EVERY claim on OTHER pages that is about the SAME
+ * thing ({@link sameSubject}: the same entity in their ids, or subjects that
+ * share most of their words, or one naming the other's), up to
+ * {@link SAME_SUBJECT_PARTNERS} — the nearest that many beyond — so nearer
+ * claims about the subject never crowd out the one that disagrees — on
  * the live test, pairing by wording alone sent a black hole against the US
  * Constitution, and 84 of 85 items were false. Measured on a 50,000-claim
  * vault, embedding blocking found every planted contradiction at k = 5,
@@ -33,7 +35,10 @@
  * whatever that night's scope is, until its pairs are judged. A pass that
  * compared every claim and left nothing deferred records `full_comparison`
  * ({@link fullComparisonDone}) — the nightly pass compares the whole vault
- * until one has.
+ * until one has. A pass that compared (or deferred) every claim in its scope
+ * records the commit it compared (`compared_through`,
+ * {@link readComparedThrough}); the next night's scope is every page changed
+ * since that commit, so what reached `main` by day is compared too.
  *
  * Every model dependency is injectable; nothing here throws for a model that
  * cannot answer — the pass reports what it skipped.
@@ -51,6 +56,7 @@ import { addReviewItem, type ReviewItem } from "./review-store";
 import { runInTransaction, stateDbExists, withStateDb } from "./state-db";
 import { sideIdentifiers, type Identifiers } from "./identifiers";
 import { pairable } from "./pairing";
+import { recordHubKey } from "./records";
 import { claimSubject, type ClaimSubject } from "./subject";
 import { fieldValidity, historicalClaim, pageValidity, textValidity, type Validity } from "./validity";
 import { ownerVerified, recordStaleClaims, type StaleClaimNote } from "./verify";
@@ -167,6 +173,8 @@ export interface PassClaim {
   historical?: boolean;
   /** Its page is deprecated. */
   deprecated?: boolean;
+  /** Its page's record hub when the page is a record leaf (records.ts `recordHubKey`): never paired inside it. */
+  hub?: string | null;
 }
 
 /** Every active claim on a valid page, redacted, in page order. */
@@ -179,6 +187,7 @@ export function collectClaims(snapshot: Pick<VaultSnapshot, "pages">): PassClaim
     const { title, type } = fm;
     // A snapshot page's period, read once for all its claims (validity.ts claimValidity, the page step).
     const pagePeriod = pageValidity(title, type, fm.generated?.at ?? null);
+    const hub = recordHubKey(page.path, fm);
     for (const c of fm.claims) {
       const text = redactText(c.text.slice(0, MAX_CLAIM_CHARS)).text;
       out.push({
@@ -193,13 +202,14 @@ export function collectClaims(snapshot: Pick<VaultSnapshot, "pages">): PassClaim
         validity: fieldValidity(c) ?? textValidity(c.text, c.updatedAt) ?? pagePeriod,
         historical: historicalClaim(c),
         deprecated: fm.status === "deprecated",
+        hub,
       });
     }
   }
   return out;
 }
 
-type Comparable = Pick<PassClaim, "text" | "subject" | "ids" | "version" | "validity" | "historical" | "deprecated">;
+type Comparable = Pick<PassClaim, "text" | "subject" | "ids" | "version" | "validity" | "historical" | "deprecated" | "hub">;
 
 /**
  * Whether two claims of the pass may be judged as a pair: not the same
@@ -222,10 +232,20 @@ export interface CandidatePair {
 export type PairFilter = (a: number, b: number) => boolean;
 
 /**
+ * The most partners one claim is paired with when the pass's filter says each
+ * one is about the same thing ({@link comparable}): up to this many, EVERY
+ * such claim on another page is a pair — five nearer ones about the same
+ * subject must not crowd out the one that disagrees. Over it (a subject on
+ * dozens of pages), the nearest this many.
+ */
+export const SAME_SUBJECT_PARTNERS = 32;
+
+/**
  * For each claim in `queries` (indexes into `vectors`), its `k` nearest
  * neighbours on another page with another id — and, given `allow`, only
- * among the claims it allows (the pass: about the same thing) — each
- * unordered pair once.
+ * among the claims it allows (the pass: about the same thing), of which it
+ * keeps every one up to {@link SAME_SUBJECT_PARTNERS} — each unordered pair
+ * once.
  */
 export function nearestPairs(
   claims: readonly Pick<PassClaim, "id" | "page">[],
@@ -235,6 +255,7 @@ export function nearestPairs(
   allow?: PairFilter,
 ): CandidatePair[] {
   const seen = new Map<string, CandidatePair>();
+  const keep = allow ? Math.max(k, SAME_SUBJECT_PARTNERS) : k;
   for (const q of queries) {
     const qv = vectors[q];
     const best: Array<{ at: number; score: number }> = [];
@@ -244,7 +265,7 @@ export function nearestPairs(
       const v = vectors[i];
       let score = 0;
       for (let d = 0; d < qv.length && d < v.length; d++) score += qv[d] * v[d];
-      if (best.length < k) {
+      if (best.length < keep) {
         best.push({ at: i, score });
         best.sort((x, y) => y.score - x.score);
       } else if (score > best[best.length - 1].score) {
@@ -389,6 +410,12 @@ export interface ContradictionPassOptions {
   parallel?: number;
   /** Raise review items for the findings (default true). */
   raiseItems?: boolean;
+  /**
+   * The commit whose pages `snapshot` holds. Recorded ({@link readComparedThrough})
+   * once every claim in scope was compared or deferred to the next pass, so
+   * the next pass's scope can be everything changed since.
+   */
+  comparedThrough?: string | null;
 }
 
 interface CachedVector {
@@ -459,6 +486,22 @@ function storeJudged(vault: string, rows: ReadonlyArray<{ hash: string; verdict:
 // ── the carry-over ────────────────────────────────────────────────────────
 
 const FULL_COMPARISON_KEY = "full_comparison";
+/** The `pass_state` key holding the commit the last finished comparison compared. */
+const COMPARED_THROUGH_KEY = "compared_through";
+const FULL_SHA = /^[0-9a-f]{40}$/;
+
+/**
+ * The commit the last finished comparison compared — every claim in its scope
+ * was compared or deferred — or null when none is recorded. Never creates the
+ * database.
+ */
+export function readComparedThrough(vault: string): string | null {
+  if (!stateDbExists(vault)) return null;
+  const row = withStateDb(vault, (db) => db.prepare("SELECT value FROM pass_state WHERE key = ?").get(COMPARED_THROUGH_KEY)) as
+    | { value: string | null }
+    | undefined;
+  return row?.value && FULL_SHA.test(row.value) ? row.value : null;
+}
 
 /** Ids of the claims an earlier pass could not finish judging. Never creates the database. */
 export function readDeferredClaims(vault: string): Set<string> {
@@ -480,7 +523,15 @@ export function fullComparisonDone(vault: string): boolean {
  */
 function settleDeferred(
   vault: string,
-  input: { compared: readonly string[]; present: ReadonlySet<string>; deferred: ReadonlyArray<{ id: string; page: string }>; reason: string; full: boolean },
+  input: {
+    compared: readonly string[];
+    present: ReadonlySet<string>;
+    deferred: ReadonlyArray<{ id: string; page: string }>;
+    reason: string;
+    full: boolean;
+    /** The commit to record as compared through, or null to leave the mark where it is. */
+    through: string | null;
+  },
   at: string,
 ): void {
   withStateDb(vault, (db) => {
@@ -490,15 +541,13 @@ function settleDeferred(
       `INSERT INTO deferred_claims (claim_id, page, reason, at) VALUES (?, ?, ?, ?)
        ON CONFLICT(claim_id) DO UPDATE SET page = excluded.page, reason = excluded.reason, at = excluded.at`,
     );
+    const mark = db.prepare(`INSERT INTO pass_state (key, value, at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, at = excluded.at`);
     runInTransaction(db, () => {
       for (const id of input.compared) drop.run(id);
       for (const id of existing) if (!input.present.has(id)) drop.run(id);
       for (const c of input.deferred) add.run(c.id, c.page, input.reason, at);
-      if (input.full) {
-        db.prepare(
-          `INSERT INTO pass_state (key, value, at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, at = excluded.at`,
-        ).run(FULL_COMPARISON_KEY, at, at);
-      }
+      if (input.full) mark.run(FULL_COMPARISON_KEY, at, at);
+      if (input.through) mark.run(COMPARED_THROUGH_KEY, input.through, at);
     });
   });
 }
@@ -570,10 +619,13 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
     result.deferredClaims = deferred.length;
     // Nothing to compare is not a failure: a vault of one claim has compared everything.
     result.complete = (!result.skipped || result.skipped === "nothing_to_compare") && unjudged.size === 0 && result.deferredPairs === 0 && !overCap;
+    // Every claim in scope was compared or is deferred (and so carried): the
+    // next pass may start from this commit. Over the cap, some were neither.
+    const through = !overCap && options.comparedThrough && FULL_SHA.test(options.comparedThrough) ? options.comparedThrough : null;
     try {
       settleDeferred(
         options.stateVault,
-        { compared: queries.map((i) => claims[i].id), present, deferred, reason, full: result.complete && !scope },
+        { compared: queries.map((i) => claims[i].id), present, deferred, reason, full: result.complete && !scope, through },
         now().toISOString(),
       );
     } catch {

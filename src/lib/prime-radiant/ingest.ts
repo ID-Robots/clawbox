@@ -68,6 +68,7 @@ import { dropKeptCopies, keepFailedUploads, pruneKeptCopies } from "./ingest-dea
 import {
   claimDeadLetter,
   ingestedHashes,
+  ingestLabels,
   insertFiles,
   insertJob,
   listJobs,
@@ -90,7 +91,7 @@ import { repairPluginWritesOnce } from "./plugin-repair";
 import { DEFAULT_INGEST_PARALLEL, MAX_INGEST_PARALLEL, effectiveCostRates, readSettings } from "./settings";
 import { readRetiredLedger, stateDbPathFor, syncActiveClaims } from "./state-db";
 import type { VaultAuthor } from "./git";
-import { INDEX_FILE, VaultLintBlockedError, ensureVault, vaultOperation } from "./vault";
+import { INDEX_FILE, VaultLintBlockedError, ensureVault, readVaultSnapshot, vaultOperation } from "./vault";
 import {
   MAX_BATCH_CHARS,
   WRITER_BATCH_SIZE,
@@ -370,13 +371,44 @@ interface PreparedFile {
 }
 
 /**
- * An upload's files by batch and name: two drops of a `notes.md` are two
- * documents, not one page. The name is the owner's and goes to ClawBox AI
- * with the text, so it is redacted like a folder file's path — with the same
- * keyed tag when that folded something away.
+ * An upload's files by the name the owner gave them — the page's source says
+ * `Price list.md`, not the staging folder's `upload/<batch>/…`. Two drops of
+ * a `notes.md` are still two documents, not one page: a name an earlier
+ * document already goes by (`taken`) is numbered the way the staging folder
+ * numbers a clash, `notes (2).md`. The name is the owner's and goes to
+ * ClawBox AI with the text, so it is redacted like a folder file's path —
+ * with the same keyed tag when that folded something away.
  */
-function uploadLabel(dir: string, batch: string): (abs: string) => string {
-  return (abs) => redactedLabel(`upload/${batch}/${path.relative(dir, abs).split(path.sep).join("/")}`, abs);
+function uploadLabel(dir: string, taken: Set<string>): (abs: string) => string {
+  const given = new Map<string, string>();
+  return (abs) => {
+    const known = given.get(abs);
+    if (known !== undefined) return known;
+    const rel = path.relative(dir, abs).split(path.sep).join("/");
+    const ext = path.posix.extname(rel);
+    const stem = rel.slice(0, rel.length - ext.length);
+    let label = redactedLabel(rel, abs);
+    for (let n = 2; taken.has(label) && n < 10_000; n++) label = redactedLabel(`${stem} (${n})${ext}`, abs);
+    taken.add(label);
+    given.set(abs, label);
+    return label;
+  };
+}
+
+/** The labels documents already go by: every page's sources and every file an ingest recorded. Read once, before a drop is named. */
+async function labelsInUse(vault: string): Promise<Set<string>> {
+  const taken = new Set<string>();
+  try {
+    for (const label of ingestLabels(vault)) taken.add(label);
+  } catch {
+    // The pages still say which names are taken.
+  }
+  try {
+    for (const p of (await readVaultSnapshot(vault)).pages) if (p.parsed.ok) for (const s of p.parsed.frontmatter.sources) taken.add(s);
+  } catch {
+    // An unreadable vault fails the job's own write later; the names are the ingest store's.
+  }
+  return taken;
 }
 
 /** Dead letters as files to read again; one whose kind is not ingestible any more is left out. */
@@ -456,7 +488,8 @@ async function runJob(
       input.kind === "retry"
         ? { files: retryFiles(claimed), notes: [] as string[], skips: emptySkipCounts(), truncated: false }
         : await scanFolders(input.kind === "folders" ? input.folders : [input.dir], {
-            labelOf: chosen ? uploadLabel(input.dir, input.batch) : undefined,
+            labelOf: chosen ? uploadLabel(input.dir, await labelsInUse(vault)) : undefined,
+            folderLabelOf: chosen ? () => `upload/${input.batch}` : undefined,
             signal,
             exclude: deps.exclude ?? settings.ingest.exclude,
             skipCodeProjects: deps.skipCodeProjects ?? settings.ingest.skipCodeProjects,

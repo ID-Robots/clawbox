@@ -204,32 +204,34 @@ describe("self-contained claims", () => {
 });
 
 // The live test: the page for "Office move.txt" cited a line of another
-// document of the same call as evidence from its own source.
-describe("evidence from the page's own document", () => {
+// document of the same call as evidence from its own source, and a call
+// writing two documents left claims on one page whose evidence was the other.
+describe("claims kept per document", () => {
   const batch: WriterItem[] = [
     { i: 0, path: "~/Documents/Office move.txt", kind: "txt", text: "We move on 1 March. The movers come at 8 in the morning.\nPack your desk the day before." },
-    { i: 1, path: "~/Documents/Company info.txt", kind: "txt", text: "ID Robots Ltd.\nThe ID Robots office is at 25 Tsar Boris III Blvd, Sofia.\nPhone the front desk first." },
+    { i: 1, path: "~/Documents/Company info.txt", kind: "txt", text: "Globex Ltd.\nThe Globex office is at 12 Example Street, Springfield.\nPhone the front desk first." },
   ];
   const answer = (facts: Array<{ fact: string; quote: string }>) =>
     JSON.stringify([card(0, { title: "Office move", facts: facts.map((f) => ({ ...f, confidence: 0.8 })) }), card(1, { title: "Company info", facts: [] })]);
 
   it("keeps a quote found in the page's own text, whatever its case, quotes and punctuation", () => {
     const v = parseWriterResponse(answer([{ fact: "The office move is on 1 March.", quote: "we move on 1 March" }, { fact: "The movers come at 8 in the morning.", quote: "“The movers come at 8 in the morning…”" }]), batch).get(0)!;
-    expect(v.ok && v.draft.facts.map((f) => [f.quote, f.source])).toEqual([
-      ["we move on 1 March", undefined],
-      ["“The movers come at 8 in the morning…”", undefined],
-    ]);
+    expect(v.ok && v.draft.facts.map((f) => f.quote)).toEqual(["we move on 1 March", "“The movers come at 8 in the morning…”"]);
   });
 
-  it("files a quote from another document of the call under that document", () => {
-    const v = parseWriterResponse(answer([{ fact: "The ID Robots office is at 25 Tsar Boris III Blvd.", quote: "The ID Robots office is at 25 Tsar Boris III Blvd" }]), batch).get(0)!;
+  it("leaves out of a page a fact whose quote is another document's of the call: no claim with another file's evidence", () => {
+    const v = parseWriterResponse(
+      answer([
+        { fact: "The office move is on 1 March.", quote: "We move on 1 March" },
+        { fact: "The Globex office is at 12 Example Street.", quote: "The Globex office is at 12 Example Street" },
+      ]),
+      batch,
+    ).get(0)!;
     expect(v.ok).toBe(true);
     if (!v.ok) return;
-    expect(v.draft.facts[0]).toMatchObject({ quote: "The ID Robots office is at 25 Tsar Boris III Blvd", source: "~/Documents/Company info.txt" });
+    expect(v.draft.facts.map((f) => f.fact)).toEqual(["The office move is on 1 March."]);
     const built = buildPage(v.draft, batch[0].path, ctx());
-    expect(built.ok && built.frontmatter.claims[0].evidence).toEqual([
-      { kind: "source", path: "~/Documents/Company info.txt", note: "The ID Robots office is at 25 Tsar Boris III Blvd" },
-    ]);
+    expect(built.ok && built.frontmatter.claims.map((c) => c.evidence)).toEqual([[{ kind: "source", path: batch[0].path, note: "We move on 1 March" }]]);
     expect(built.ok && built.frontmatter.sources).toEqual([batch[0].path]);
   });
 

@@ -127,12 +127,31 @@ export async function ownerWriteGuard(req: Request, what: string): Promise<NextR
  */
 export interface VaultWriter {
   by: "owner" | "assistant";
+  /** `assistant`: the owner's word, carried out by the assistant ({@link OWNER_VIA_ASSISTANT_WRITER}). */
+  via?: "assistant";
   author: VaultAuthor;
   person: boolean;
 }
 
 export const OWNER_WRITER: VaultWriter = Object.freeze({ by: "owner", author: VAULT_AUTHOR, person: true });
 export const ASSISTANT_WRITER: VaultWriter = Object.freeze({ by: "assistant", author: ASSISTANT_AUTHOR, person: false });
+/**
+ * The owner's verification given through the assistant: the MCP tools'
+ * `confirm: true` (the user confirmed the fact in their own words). Stamped
+ * `{ by: owner, via: assistant }` — owner-verified, it wins as one made in
+ * the app does — and committed under the assistant's name, so History shows
+ * who carried it out.
+ */
+export const OWNER_VIA_ASSISTANT_WRITER: VaultWriter = Object.freeze({ by: "owner", via: "assistant", author: ASSISTANT_AUTHOR, person: true });
+
+/**
+ * Who a VERIFICATION is made as: the assistant's with the owner's
+ * confirmation (`confirm: true` in the body) is the owner's, through the
+ * assistant; without it, the assistant's own. A person's stays theirs.
+ */
+export function verifierOf(writer: VaultWriter, confirm: unknown): VaultWriter {
+  return writer.by === "assistant" && confirm === true ? OWNER_VIA_ASSISTANT_WRITER : writer;
+}
 
 /**
  * The gate a Prime Radiant change the ASSISTANT may also make keeps: a

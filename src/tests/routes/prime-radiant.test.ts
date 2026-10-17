@@ -45,6 +45,9 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
 const base = fs.mkdtempSync(path.join(os.tmpdir(), "prime-radiant-routes-"));
 const prevDir = process.env.PRIME_RADIANT_DIR;
+const prevStateDir = process.env.OPENCLAW_STATE_DIR;
+// memory-wiki's default vault (vault.path unset) is looked into before it is re-pointed: never the real one.
+process.env.OPENCLAW_STATE_DIR = path.join(base, "openclaw-state");
 let n = 0;
 
 const ORIGIN = "http://clawbox.local/setup-api/prime-radiant";
@@ -80,6 +83,8 @@ beforeEach(() => {
 afterAll(() => {
   if (prevDir === undefined) delete process.env.PRIME_RADIANT_DIR;
   else process.env.PRIME_RADIANT_DIR = prevDir;
+  if (prevStateDir === undefined) delete process.env.OPENCLAW_STATE_DIR;
+  else process.env.OPENCLAW_STATE_DIR = prevStateDir;
   fs.rmSync(base, { recursive: true, force: true });
 });
 
@@ -228,6 +233,7 @@ describe("GET /status", () => {
     expect(body.vault).toMatchObject({ pages: 3, invalidPages: 0, verifiedPages: 1, claims: 1, domains: ["acme-sales", "acme-support"] });
     expect(body.git.commits).toBe(2);
     expect(body.lint.errors).toBeGreaterThan(0); // support page names no sources
+    expect(body.links).toMatchObject({ pages: expect.any(Number), median: expect.any(Number), target: 5 });
   });
 });
 

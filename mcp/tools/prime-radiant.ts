@@ -9,8 +9,11 @@
 //
 // WHO. The routes tell the owner's browser (cookie) from this server (the MCP
 // bearer). A change made here is the ASSISTANT's: its commit is authored
-// "ClawBox assistant", so the owner sees it in History and can Undo it, and a
-// verification it gives is stamped `verified.by: assistant`. Undo itself stays
+// "ClawBox assistant", so the owner sees it in History and can Undo it. A
+// verification it gives (claim_verify, review_resolve: `confirm: true`, only
+// when the user confirmed the fact in their own words) is the owner's, through
+// the assistant — stamped `verified: { by: owner, via: assistant }`, it wins
+// like one the owner made in the app. Undo itself stays
 // the owner's — the assistant may undo only a commit it made — and so do init,
 // the document drop, and the reindex / rejudge / migration passes, which have
 // no tool here.
@@ -170,6 +173,10 @@ const NEXT: Record<string, { code: ToolErrorCode; next: string }> = {
   invalid_page: { code: "CONFLICT", next: "Tell the user the page needs fixing by hand; prime_radiant_lint says what is wrong." },
   conflict: { code: "CONFLICT", next: "A later change touched the same lines: undo the later commit first, or edit the page instead." },
   nothing_to_revert: { code: "CONFLICT", next: "Check what that commit did with prime_radiant_diff." },
+  commit_failed: {
+    code: "CONFLICT",
+    next: "Do not retry; tell the user what git said. When it says the vault could not be put back, check prime_radiant_status and prime_radiant_history before any other change.",
+  },
   dirty: { code: "CONFLICT", next: "Try again in a moment, once." },
   already_resolved: { code: "CONFLICT", next: "List the queue again with prime_radiant_review_list." },
   no_claim: { code: "CONFLICT", next: "That item is about no single claim: dismiss it once it has been dealt with." },
@@ -256,6 +263,8 @@ interface StatusBody {
   vault?: { pages?: number; invalidPages?: number; verifiedPages?: number; claims?: number; domains?: string[]; truncated?: boolean };
   git?: { branch?: string | null; head?: { sha?: string; subject?: string; at?: string; author?: string } | null; commits?: number };
   lint?: { errors?: number; warnings?: number };
+  /** Meaningful links per content page (absent on a server from before the structure pass). */
+  links?: { pages?: number; median?: number; target?: number } | null;
   index?: {
     exists?: boolean; usedMb?: number; limitMb?: number; chunks?: number; maxChunks?: number | null; pages?: number;
     cappedPages?: number | null; withoutPageVector?: number | null; needsFullScan?: boolean; migrationPending?: boolean;
@@ -281,7 +290,7 @@ interface ClaimBody {
   confidence?: number;
   status?: string;
   updatedAt?: string;
-  verified?: { at?: string; by?: string } | null;
+  verified?: { at?: string; by?: string; via?: string } | null;
   evidence?: Array<Record<string, unknown>>;
 }
 
@@ -360,7 +369,7 @@ function claimOut(c: ClaimBody) {
     text: c.text,
     confidence: c.confidence,
     status: c.status,
-    ...(c.verified ? { verified_by: c.verified.by, verified_at: c.verified.at } : {}),
+    ...(c.verified ? { verified_by: c.verified.by, ...(c.verified.via ? { verified_via: c.verified.via } : {}), verified_at: c.verified.at } : {}),
     ...(evidence.length ? { evidence } : {}),
   };
 }
@@ -455,6 +464,7 @@ function registerReadTools(reg: Registrar): void {
           ? { commit: short(status.git.head.sha), what: status.git.head.subject, at: status.git.head.at, by: status.git.head.author }
           : null,
         checks: { errors: status.lint?.errors ?? "unknown", warnings: status.lint?.warnings ?? "unknown" },
+        ...(status.links && typeof status.links.median === "number" ? { links_per_page: { median: status.links.median, target: status.links.target ?? 5 } } : {}),
         review_items_open: review?.counts?.open ?? "unknown",
         import: ingest ? { running: ingest.running ?? null, recent: (ingest.jobs ?? []).slice(0, 3).map((j) => ({ id: j.id, status: j.status, pages: j.pages, failed: j.failed })) } : "unknown",
         nightly: nightly
@@ -466,6 +476,7 @@ function registerReadTools(reg: Registrar): void {
           : "unknown",
         ...(maintenance?.running ? { maintenance_running: maintenance.running } : {}),
         ...(maintenance?.last?.connect ? { connect_pass_last: maintenance.last.connect } : {}),
+        ...(maintenance?.last?.structure ? { structure_pass_last: maintenance.last.structure } : {}),
         ...(status.index ? { search_index: searchIndexOf(status.index) } : {}),
       });
     },
@@ -961,7 +972,7 @@ function registerEditTools(reg: Registrar): void {
 
   reg.tool(
     "prime_radiant_claim_verify",
-    "Mark a claim verified — as it stands, or with the text the user confirms (a new id also needs page) — only when the user confirmed the fact in their own words. The stamp says you verified it, for the user.",
+    "Mark a claim verified — as it stands, or with the text the user confirms (a new id also needs page) — only when the user confirmed the fact in their own words. It is stamped as the owner's verification, given through you, and wins over claims that disagree with it like one the owner made in the app.",
     {
       id: zClaimId("The claim id."),
       text: zOptText(240, "The confirmed text, when it differs from the claim's."),
@@ -971,9 +982,9 @@ function registerEditTools(reg: Registrar): void {
     WRITE,
     async (a: { id: string; text?: string; page?: string; confirm: true }) => {
       const r = await pr<{ claimId: string; page: string; commit?: string | null; retired?: string[] }>("POST", "/claims/verify", {
-        body: { id: a.id, ...(a.text ? { text: a.text } : {}), ...(a.page ? { page: a.page } : {}) },
+        body: { id: a.id, ...(a.text ? { text: a.text } : {}), ...(a.page ? { page: a.page } : {}), confirm: true },
       });
-      return text(committed(r.commit, `Verified ${r.claimId} on ${r.page}, stamped as verified by the assistant.`));
+      return text(committed(r.commit, `Verified ${r.claimId} on ${r.page}, stamped as verified by the owner (via the assistant).`));
     },
   );
 }
@@ -983,7 +994,7 @@ function registerEditTools(reg: Registrar): void {
 function registerReviewTools(reg: Registrar): void {
   reg.tool(
     "prime_radiant_review_resolve",
-    "Settle a review item the way the user told you: pick a numbered candidate or give their own answer (either is verified under the item's claim), put it off till later, or dismiss it.",
+    "Settle a review item the way the user told you: pick a numbered candidate or give their own answer (either is verified under the item's claim as the owner's verification, given through you), put it off till later, or dismiss it.",
     {
       id: z.string().regex(REVIEW_ID_RE, "rev- and 12 hex characters").describe("The item id from prime_radiant_review_list."),
       action: zEnumOf(["pick", "own_answer", "later", "dismiss"], "pick a candidate, the user's own answer, later, or dismiss."),
@@ -1004,10 +1015,10 @@ function registerReviewTools(reg: Registrar): void {
       } else {
         body = { action: a.action };
       }
-      const r = await pr<{ item?: { id?: string; status?: string; claimId?: string | null }; commit?: string | null; retired?: string[] }>("POST", `/review/${a.id}/resolve`, { body });
+      const r = await pr<{ item?: { id?: string; status?: string; claimId?: string | null }; commit?: string | null; retired?: string[] }>("POST", `/review/${a.id}/resolve`, { body: { ...body, confirm: true } });
       if (a.action === "later" || a.action === "dismiss") return text(`Review item ${a.id} is now ${r.item?.status ?? a.action}.`);
       const retired = r.retired?.length ? ` Retired the other answers' ids: ${r.retired.join(", ")}.` : "";
-      return text(committed(r.commit, `Settled ${a.id}: verified under ${r.item?.claimId ?? "its claim"}.${retired}`));
+      return text(committed(r.commit, `Settled ${a.id}: verified under ${r.item?.claimId ?? "its claim"} by the owner (via the assistant).${retired}`));
     },
   );
 

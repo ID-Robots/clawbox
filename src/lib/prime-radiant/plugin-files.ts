@@ -56,6 +56,22 @@ export function isPluginOwnedPath(rel: string): boolean {
   return segments.length === 2 && segments[1] === "index.md" && PLUGIN_INDEX_DIRS.includes(segments[0]);
 }
 
+/**
+ * Frontmatter the plugin wrote in its OWN format — a page its
+ * `create_synthesis` (`wiki_apply`) put into `syntheses/`: a `pageType`
+ * (`synthesis`, `entity`, …), `sourceIds`, `status: active`, and none of
+ * Prime Radiant's page contract. Prime Radiant's own pages carry `pageType`
+ * too (plugin-compat.ts writes it beside `type`), so what tells them apart is
+ * the missing `type` and `generated`. Such a page is no broken page of the
+ * owner's: the lint warns about it and the next pass converts it
+ * (plugin-repair.ts `adoptPluginPages`).
+ */
+export function isPluginFormatFrontmatter(raw: unknown): boolean {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return false;
+  const r = raw as Record<string, unknown>;
+  return typeof r.pageType === "string" && r.pageType.trim() !== "" && r.type === undefined && r.generated === undefined;
+}
+
 /** Every marker the plugin writes starts with this. */
 export const MANAGED_MARKER_PREFIX = "<!-- openclaw:wiki:";
 

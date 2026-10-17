@@ -79,7 +79,7 @@ const CASES: Case[] = [
     args: { path: "concepts/pricing.md", include_body: true },
     reply: {
       path: "concepts/pricing.md",
-      frontmatter: { title: "Widget pricing", type: "concept", domain: "acme-sales", owner: "sales-team", status: "draft", sources: ["a.md"], claims: [{ id: CLAIM, text: "10 EUR.", confidence: 1, status: "verified", verified: { at: "2026-02-01", by: "owner" }, evidence: [{ kind: "source", path: "a.md" }] }] },
+      frontmatter: { title: "Widget pricing", type: "concept", domain: "acme-sales", owner: "sales-team", status: "draft", sources: ["a.md"], claims: [{ id: CLAIM, text: "10 EUR.", confidence: 1, status: "verified", verified: { at: "2026-02-01", by: "owner", via: "assistant" }, evidence: [{ kind: "source", path: "a.md" }] }] },
       body: "Prices.\n\nMore.",
       summary: "Prices.",
       verified: true,
@@ -89,7 +89,7 @@ const CASES: Case[] = [
     },
     method: "GET",
     path: `${BASE}/pages/concepts/pricing.md`,
-    says: /"verified_by": "owner"[\s\S]*"backlinks": \[\s*"entities\/acme\.md"/,
+    says: /"verified_by": "owner",\s*"verified_via": "assistant"[\s\S]*"backlinks": \[\s*"entities\/acme\.md"/,
     bad: { path: "" },
   },
   {
@@ -290,8 +290,9 @@ const CASES: Case[] = [
     reply: { claimId: CLAIM, page: "concepts/pricing.md", commit: SHA, retired: [] },
     method: "POST",
     path: `${BASE}/claims/verify`,
-    sent: { body: { id: CLAIM } },
-    says: /Verified acme-sales\/pricing\/blue-widget on concepts\/pricing\.md, stamped as verified by the assistant/,
+    // The tool's confirm goes on to the route: the owner's verification, through the assistant.
+    sent: { body: { id: CLAIM, confirm: true } },
+    says: /Verified acme-sales\/pricing\/blue-widget on concepts\/pricing\.md, stamped as verified by the owner \(via the assistant\)/,
     bad: { id: CLAIM },
   },
   {
@@ -300,8 +301,8 @@ const CASES: Case[] = [
     reply: { item: { id: REV, status: "resolved", claimId: CLAIM }, commit: SHA, retired: ["acme-sales/catalogue/blue-widget"] },
     method: "POST",
     path: `${BASE}/review/${REV}/resolve`,
-    sent: { body: { action: "pick", candidate: 1 } },
-    says: /verified under acme-sales\/pricing\/blue-widget\. Retired the other answers' ids: acme-sales\/catalogue\/blue-widget/,
+    sent: { body: { action: "pick", candidate: 1, confirm: true } },
+    says: /verified under acme-sales\/pricing\/blue-widget by the owner \(via the assistant\)\. Retired the other answers' ids: acme-sales\/catalogue\/blue-widget/,
     bad: { id: REV, action: "approve", confirm: true },
   },
   {
@@ -499,7 +500,7 @@ describe("prime_radiant_map", () => {
 describe("prime_radiant_status", () => {
   it("reads the vault, the import, the nightly pass and the queue in one answer", async () => {
     answer(
-      [/\/status$/, { initialised: true, vault: { pages: 3, verifiedPages: 1, claims: 4, domains: ["acme-sales"] }, git: { head: { sha: SHA, subject: "edit: x", at: "t", author: "ClawBox assistant" } }, lint: { errors: 1, warnings: 2 } }],
+      [/\/status$/, { initialised: true, vault: { pages: 3, verifiedPages: 1, claims: 4, domains: ["acme-sales"] }, git: { head: { sha: SHA, subject: "edit: x", at: "t", author: "ClawBox assistant" } }, lint: { errors: 1, warnings: 2 }, links: { pages: 3, median: 4, mean: 4, atTarget: 1, target: 5 } }],
       [/\/ingest$/, { running: null, jobs: [{ id: JOB, status: "done", pages: 2, failed: 0 }] }],
       [/\/nightly$/, { running: null, nextRunAt: 0, runs: [] }],
       [/\/maintenance$/, { running: null, last: {} }],
@@ -515,6 +516,7 @@ describe("prime_radiant_status", () => {
       claims: 4,
       last_change: { commit: SHA.slice(0, 12), by: "ClawBox assistant" },
       checks: { errors: 1, warnings: 2 },
+      links_per_page: { median: 4, target: 5 },
       review_items_open: 2,
       import: { running: null },
       nightly: { next_run: "off" },
@@ -656,7 +658,7 @@ describe("arguments the handler checks itself", () => {
     }
     api.mockResolvedValue({ item: { id: REV, status: "resolved", claimId: CLAIM }, commit: SHA, retired: [] });
     await harness().call("prime_radiant_review_resolve", { id: REV, action: "own_answer", text: "11 EUR.", confirm: true });
-    expect(call()[1].body).toEqual({ action: "new", text: "11 EUR." });
+    expect(call()[1].body).toEqual({ action: "new", text: "11 EUR.", confirm: true });
   });
 
   it("reads domains as name=owner", async () => {

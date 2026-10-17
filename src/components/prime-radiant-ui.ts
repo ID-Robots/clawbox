@@ -62,6 +62,22 @@ export function skipEntries(skips: Partial<SkipCounts> | null | undefined): Arra
 export const API = "/setup-api/prime-radiant";
 
 /**
+ * Which words say who a verification names (a claim's `verified` stamp, a
+ * commit's `verified` trailers) — the suffix of its `…verifiedBy<Suffix>`
+ * string: `Owner`, `OwnerViaAssistant` (`{ by: "owner", via: "assistant" }`:
+ * the user confirmed the fact to the assistant in their own words) or
+ * `Assistant` (the assistant on its own). Null for any other name, which the
+ * plain `…verifiedBy` string shows as it is written. Mirrors schema.ts
+ * `verifierKind` (this module stays free of server code).
+ */
+export function verifierKey(stamp: { by: string; via?: string | null } | null | undefined): "Owner" | "OwnerViaAssistant" | "Assistant" | null {
+  if (!stamp) return null;
+  if (stamp.by === "assistant") return "Assistant";
+  if (stamp.by !== "owner") return null;
+  return stamp.via === "assistant" ? "OwnerViaAssistant" : "Owner";
+}
+
+/**
  * Fired on the page when this window made or changed the vault, so another
  * window on the same desktop (Memory Shard's source line) reads it again.
  */

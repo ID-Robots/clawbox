@@ -34,7 +34,7 @@
 import { allocateClaimId, assertClaimIdAvailable, buildClaimIndex, ClaimIdError, isClaimId, nowIso, slugify, type ClaimIndex } from "./claims";
 import { pageSummary, parsePage, serializeFrontmatter, splitFrontmatter } from "./frontmatter";
 import type { VaultAuthor } from "./git";
-import { createLinkResolver, extractLinks, relativeHref, rewriteLinks, type FoundLink } from "./links";
+import { createLinkResolver, extractLinks, pathAliases, relativeHref, rewriteLinks, type FoundLink } from "./links";
 import { LIMITS, lintVault, type LintFinding } from "./lint";
 import { isKnowledgePage, safePagePath, vaultDir } from "./paths";
 import { withPluginFields } from "./plugin-compat";
@@ -53,6 +53,7 @@ import {
   type PrivacyTier,
 } from "./schema";
 import { readSettings } from "./settings";
+import { reconcileStaleText, type SupersededFact } from "./stale-text";
 import { readRetiredLedger, syncActiveClaims } from "./state-db";
 import {
   INDEX_FILE,
@@ -104,6 +105,8 @@ export class PageEditError extends Error {
 export interface EditWho {
   /** "owner" or "assistant". */
   by: string;
+  /** "assistant" on the owner's word carried out by the assistant (route-helpers.ts `OWNER_VIA_ASSISTANT_WRITER`). */
+  via?: string;
   author?: VaultAuthor;
   /** A person's word (the owner's), not the assistant's. Default false. */
   person?: boolean;
@@ -316,15 +319,19 @@ export interface VerifyRequest {
   id: string;
   text: string | null;
   page: string | null;
+  /** The assistant's word that the user confirmed the fact (the MCP tool's `confirm: true`); the route reads it. */
+  confirm: boolean;
 }
 
-/** `POST claims/verify`: `{ id, text?, page? }` — no text verifies the claim as it stands. */
+/** `POST claims/verify`: `{ id, text?, page?, confirm? }` — no text verifies the claim as it stands. */
 export function readVerifyRequest(body: unknown): VerifyRequest {
-  const b = objectBody(body, ["id", "text", "page"]);
+  const b = objectBody(body, ["id", "text", "page", "confirm"]);
+  if (b.confirm !== undefined && typeof b.confirm !== "boolean") throw bad("confirm must be true or false.");
   return {
     id: claimIdOf(b.id),
     text: b.text === undefined || b.text === null ? null : claimText(b.text),
     page: b.page === undefined || b.page === null ? null : pagePathOf(b.page),
+    confirm: b.confirm === true,
   };
 }
 
@@ -825,14 +832,18 @@ export async function editClaim(rawId: string, patch: ClaimPatch, who: EditWho, 
     `claim: edit ${id}`,
     async (tx) => {
       const page = holderOf(await tx.snapshot(), tx.vault, id, patch.page ?? null);
+      const superseded: SupersededFact[] = [];
       const claims = page.frontmatter.claims.map((c) => {
         if (c.id !== id) return c;
         if (c.verified) throw new PageEditError("verified", "This claim is verified; verify it again with the new text instead of editing it.", 409);
         const next: Claim = { ...c, ...(patch.text !== undefined ? { text: patch.text } : {}), ...(patch.confidence !== undefined ? { confidence: patch.confidence } : {}) };
         if (next.text === c.text && next.confidence === c.confidence) return c;
+        if (next.text !== c.text) superseded.push({ before: c.text, after: next.text });
         return { ...next, updatedAt: at, evidence: [...c.evidence, { kind: "edit", note: `edited by ${who.by}`, updatedAt: at }].slice(-20) };
       });
-      await tx.writePage(page.path, { ...page.frontmatter, claims }, page.body);
+      // The page's Key facts list the claim as it reads now.
+      const body = reconcileStaleText(page.body, superseded, page.path, page.path, { prose: false }).body;
+      await tx.writePage(page.path, { ...page.frontmatter, claims }, body);
       return page.path;
     },
     { vault, now: options.now, author: who.author },
@@ -884,8 +895,9 @@ export async function verifyClaimAs(input: VerifyRequest, who: EditWho, options:
     claimId: input.id,
     text,
     by: who.by,
+    ...(who.via ? { via: who.via } : {}),
     page: input.page,
-    note: `verified by ${who.by}`,
+    note: who.via ? `verified by ${who.by} via ${who.via}` : `verified by ${who.by}`,
     author: who.author,
     person: who.person === true,
     vault,
@@ -1056,7 +1068,7 @@ function planMerge(snapshot: VaultSnapshot, vault: string, input: PageMerge, who
 
   // Links: every one that resolves to a merged page today, as lint resolves it.
   const gone = new Set(froms.map((f) => f.path));
-  const resolver = createLinkResolver(snapshot.pages.map((p) => ({ path: p.path, title: p.parsed.ok ? p.parsed.frontmatter.title : undefined })));
+  const resolver = createLinkResolver(snapshot.pages.map((p) => ({ path: p.path, title: p.parsed.ok ? p.parsed.frontmatter.title : undefined, aliases: p.parsed.ok ? pathAliases(p.parsed.frontmatter.aliases) : undefined })));
   const intoLink = into.path.replace(/\.md$/, "");
   const retarget = (page: string) => (link: FoundLink): string | null => {
     const target = resolver.resolve(page, link);
