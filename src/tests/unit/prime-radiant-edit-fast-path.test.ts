@@ -20,7 +20,7 @@ vi.mock("@/lib/prime-radiant/shard-index", () => shard);
 import { editPage, PageEditError } from "@/lib/prime-radiant/edit";
 import { ASSISTANT_AUTHOR } from "@/lib/prime-radiant/git";
 import { lintVault } from "@/lib/prime-radiant/lint";
-import { ensureVault, readVaultSnapshot, VaultLintBlockedError, vaultOperation } from "@/lib/prime-radiant/vault";
+import { ensureVault, readListedPage, readPage, readVaultSnapshot, VaultLintBlockedError, vaultOperation } from "@/lib/prime-radiant/vault";
 import { claim, pageText } from "../helpers/prime-radiant-fixtures";
 
 vi.setConfig({ testTimeout: 60_000, hookTimeout: 30_000 });
@@ -176,5 +176,18 @@ describe("an operation that read the vault before it wrote", () => {
     expect(log()[0]).toBe(head);
     // One read of the vault (34 pages) and the page it wrote, not two reads.
     expect(opens).toBeLessThanOrEqual(34 + 1);
+  });
+});
+
+describe("a page read alone", () => {
+  it("is one the snapshot walk lists: a page reached through a symlinked folder is no page to edit", async () => {
+    fs.symlinkSync(path.join(vault, "concepts"), path.join(vault, "shortcut"), "dir");
+    expect(await readPage("shortcut/indexed.md", vault)).not.toBeNull();
+    expect(await readListedPage("shortcut/indexed.md", vault)).toBeNull();
+    expect((await readVaultSnapshot(vault)).pages.some((p) => p.path.startsWith("shortcut/"))).toBe(false);
+    const head = log()[0];
+    await expect(editPage("shortcut/indexed.md", { domain: "billing" }, ASSISTANT, { vault })).rejects.toMatchObject({ code: "not_found", status: 404 });
+    expect(log()[0]).toBe(head);
+    expect(await readListedPage("concepts/indexed.md", vault)).not.toBeNull();
   });
 });
