@@ -38,6 +38,8 @@ afterAll(() => fs.rmSync(base, { recursive: true, force: true }));
 const WRITTEN = "2026-10-16T08:00:00.000Z";
 const OWNER = { at: "2026-10-01T09:00:00.000Z", by: "owner" };
 const ASSISTANT = { at: "2026-10-01T09:00:00.000Z", by: "assistant" };
+/** The owner's verification given through the assistant (the MCP tools' `confirm: true`). */
+const VIA_ASSISTANT = { at: "2026-10-01T09:00:00.000Z", by: "owner", via: "assistant" };
 
 /** A page of the synthetic vault: its title, its claims (id → text, or a claim), and anything else. */
 function page(title: string, claims: Array<Claim>, extra: Partial<PageFrontmatter> = {}): string {
@@ -381,6 +383,7 @@ describe("owner-verified claims win", () => {
   it("is a person's stamp, never the assistant's", () => {
     expect(ownerVerified({ verified: OWNER, status: "verified" })).toBe(true);
     expect(ownerVerified({ verified: ASSISTANT, status: "verified" })).toBe(false);
+    expect(ownerVerified({ verified: VIA_ASSISTANT, status: "verified" })).toBe(true);
     expect(ownerVerified({ verified: null, status: "verified" })).toBe(true);
     expect(ownerVerified({ verified: null, status: "supported" }, { verified: OWNER })).toBe(true);
     expect(ownerVerified({ verified: null, status: "supported" }, { verified: null })).toBe(false);
@@ -456,6 +459,7 @@ describe("the stale warning follows the verified claim where it won", () => {
     expect(warned(PAGES)).toBe(true);
     expect(warned({ ...PAGES, "concepts/northwind-support.md": winner({}, { verified: OWNER }) })).toBe(true);
     expect(warned({ ...PAGES, "concepts/northwind-support.md": winner({ status: "verified", verified: ASSISTANT }) })).toBe(false);
+    expect(warned({ ...PAGES, "concepts/northwind-support.md": winner({ status: "verified", verified: VIA_ASSISTANT }) })).toBe(true);
     expect(warned({ ...PAGES, "concepts/northwind-support.md": winner({}, { verified: ASSISTANT }) })).toBe(false);
     // The winning claim moved off its recorded page; a verified copy of its id elsewhere is not it.
     const moved = { ...PAGES, "concepts/northwind-support.md": page("Northwind support hours", []), "concepts/other.md": page("Other", [c("ops/northwind-support/hours", "The Northwind support line is open from 9 to 17.", { status: "verified", verified: OWNER })]) };
@@ -580,6 +584,34 @@ describe("re-judging the open queue", () => {
     );
     const r = rejudgeOpenContradictions(vault, snapshot(pages));
     expect(r).toMatchObject({ checked: 1, closed: 0, keptVerified: 1 });
+    expect(getReviewItem(vault, both.id)?.status).toBe("open");
+  });
+
+  it("lets the owner's verification given through the assistant win over an unverified claim, like one made in the app", () => {
+    const item = raise(
+      side("ops/support-faq/hours", "concepts/support-faq.md", "The Northwind support line is open from 8 to 16."),
+      side("ops/northwind-support/hours", "concepts/northwind-support.md", "The Northwind support line is open from 9 to 17.", { evidence: [{ kind: "verified-claim", page: "concepts/northwind-support.md" }] }),
+    );
+    const viaAssistant = {
+      ...PAGES,
+      "concepts/northwind-support.md": page("Northwind support hours", [c("ops/northwind-support/hours", "The Northwind support line is open from 9 to 17.", { status: "verified", verified: VIA_ASSISTANT })]),
+    };
+    expect(rejudgeOpenContradictions(vault, snapshot(viaAssistant))).toMatchObject({ checked: 1, closed: 1, stillOpen: 0, keptVerified: 0, staleNotes: 1 });
+    expect(getReviewItem(vault, item.id)?.status).toBe("resolved");
+    expect(getReviewItem(vault, item.id)?.resolution?.note).toMatch(/^auto: verified claim wins/);
+    expect(readStaleClaims(vault)).toEqual([expect.objectContaining({ claimId: "ops/support-faq/hours", verifiedClaimId: "ops/northwind-support/hours" })]);
+  });
+
+  it("still leaves an item open when both sides are owner-verified, one of them through the assistant", () => {
+    const pages = {
+      ...PAGES,
+      "concepts/support-faq.md": page("Support FAQ", [c("ops/support-faq/hours", "The Northwind support line is open from 8 to 16.", { verified: VIA_ASSISTANT, status: "verified" })]),
+    };
+    const both = raise(
+      side("ops/support-faq/hours", "concepts/support-faq.md", "The Northwind support line is open from 8 to 16."),
+      side("ops/northwind-support/hours", "concepts/northwind-support.md", "The Northwind support line is open from 9 to 17."),
+    );
+    expect(rejudgeOpenContradictions(vault, snapshot(pages))).toMatchObject({ checked: 1, closed: 0, keptVerified: 1, staleNotes: 0 });
     expect(getReviewItem(vault, both.id)?.status).toBe("open");
   });
 

@@ -9,8 +9,11 @@
 //
 // WHO. The routes tell the owner's browser (cookie) from this server (the MCP
 // bearer). A change made here is the ASSISTANT's: its commit is authored
-// "ClawBox assistant", so the owner sees it in History and can Undo it, and a
-// verification it gives is stamped `verified.by: assistant`. Undo itself stays
+// "ClawBox assistant", so the owner sees it in History and can Undo it. A
+// verification it gives (claim_verify, review_resolve: `confirm: true`, only
+// when the user confirmed the fact in their own words) is the owner's, through
+// the assistant — stamped `verified: { by: owner, via: assistant }`, it wins
+// like one the owner made in the app. Undo itself stays
 // the owner's — the assistant may undo only a commit it made — and so do init,
 // the document drop, and the reindex / rejudge / migration passes, which have
 // no tool here.
@@ -281,7 +284,7 @@ interface ClaimBody {
   confidence?: number;
   status?: string;
   updatedAt?: string;
-  verified?: { at?: string; by?: string } | null;
+  verified?: { at?: string; by?: string; via?: string } | null;
   evidence?: Array<Record<string, unknown>>;
 }
 
@@ -360,7 +363,7 @@ function claimOut(c: ClaimBody) {
     text: c.text,
     confidence: c.confidence,
     status: c.status,
-    ...(c.verified ? { verified_by: c.verified.by, verified_at: c.verified.at } : {}),
+    ...(c.verified ? { verified_by: c.verified.by, ...(c.verified.via ? { verified_via: c.verified.via } : {}), verified_at: c.verified.at } : {}),
     ...(evidence.length ? { evidence } : {}),
   };
 }
@@ -961,7 +964,7 @@ function registerEditTools(reg: Registrar): void {
 
   reg.tool(
     "prime_radiant_claim_verify",
-    "Mark a claim verified — as it stands, or with the text the user confirms (a new id also needs page) — only when the user confirmed the fact in their own words. The stamp says you verified it, for the user.",
+    "Mark a claim verified — as it stands, or with the text the user confirms (a new id also needs page) — only when the user confirmed the fact in their own words. It is stamped as the owner's verification, given through you, and wins over claims that disagree with it like one the owner made in the app.",
     {
       id: zClaimId("The claim id."),
       text: zOptText(240, "The confirmed text, when it differs from the claim's."),
@@ -971,9 +974,9 @@ function registerEditTools(reg: Registrar): void {
     WRITE,
     async (a: { id: string; text?: string; page?: string; confirm: true }) => {
       const r = await pr<{ claimId: string; page: string; commit?: string | null; retired?: string[] }>("POST", "/claims/verify", {
-        body: { id: a.id, ...(a.text ? { text: a.text } : {}), ...(a.page ? { page: a.page } : {}) },
+        body: { id: a.id, ...(a.text ? { text: a.text } : {}), ...(a.page ? { page: a.page } : {}), confirm: true },
       });
-      return text(committed(r.commit, `Verified ${r.claimId} on ${r.page}, stamped as verified by the assistant.`));
+      return text(committed(r.commit, `Verified ${r.claimId} on ${r.page}, stamped as verified by the owner (via the assistant).`));
     },
   );
 }
@@ -983,7 +986,7 @@ function registerEditTools(reg: Registrar): void {
 function registerReviewTools(reg: Registrar): void {
   reg.tool(
     "prime_radiant_review_resolve",
-    "Settle a review item the way the user told you: pick a numbered candidate or give their own answer (either is verified under the item's claim), put it off till later, or dismiss it.",
+    "Settle a review item the way the user told you: pick a numbered candidate or give their own answer (either is verified under the item's claim as the owner's verification, given through you), put it off till later, or dismiss it.",
     {
       id: z.string().regex(REVIEW_ID_RE, "rev- and 12 hex characters").describe("The item id from prime_radiant_review_list."),
       action: zEnumOf(["pick", "own_answer", "later", "dismiss"], "pick a candidate, the user's own answer, later, or dismiss."),
@@ -1004,10 +1007,10 @@ function registerReviewTools(reg: Registrar): void {
       } else {
         body = { action: a.action };
       }
-      const r = await pr<{ item?: { id?: string; status?: string; claimId?: string | null }; commit?: string | null; retired?: string[] }>("POST", `/review/${a.id}/resolve`, { body });
+      const r = await pr<{ item?: { id?: string; status?: string; claimId?: string | null }; commit?: string | null; retired?: string[] }>("POST", `/review/${a.id}/resolve`, { body: { ...body, confirm: true } });
       if (a.action === "later" || a.action === "dismiss") return text(`Review item ${a.id} is now ${r.item?.status ?? a.action}.`);
       const retired = r.retired?.length ? ` Retired the other answers' ids: ${r.retired.join(", ")}.` : "";
-      return text(committed(r.commit, `Settled ${a.id}: verified under ${r.item?.claimId ?? "its claim"}.${retired}`));
+      return text(committed(r.commit, `Settled ${a.id}: verified under ${r.item?.claimId ?? "its claim"} by the owner (via the assistant).${retired}`));
     },
   );
 

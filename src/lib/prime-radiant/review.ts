@@ -90,7 +90,7 @@ export interface ResolveResult {
 export async function resolveReviewItem(
   id: string,
   action: ResolveAction,
-  options: { by: string; author?: VaultAuthor; person?: boolean; vault?: string; now?: Date } = { by: "owner" },
+  options: { by: string; via?: string; author?: VaultAuthor; person?: boolean; vault?: string; now?: Date } = { by: "owner" },
 ): Promise<ResolveResult> {
   const vault = options.vault ?? vaultDir();
   return lockStore.lock(async () => {
@@ -100,7 +100,7 @@ export async function resolveReviewItem(
     const at = (options.now ?? new Date()).toISOString();
 
     if (action.action === "later" || action.action === "dismiss") {
-      const resolution: ReviewResolution = { action: action.action, by: options.by };
+      const resolution: ReviewResolution = { action: action.action, by: options.by, ...(options.via ? { via: options.via } : {}) };
       settleReviewItem(vault, id, action.action === "later" ? "later" : "resolved", resolution, at);
       return { item: getReviewItem(vault, id) ?? item, commit: null, retired: [] };
     }
@@ -130,10 +130,11 @@ export async function resolveReviewItem(
         claimId: item.claimId,
         text,
         by: options.by,
+        ...(options.via ? { via: options.via } : {}),
         retire,
         page: page ?? item.pages[0] ?? null,
         evidence,
-        note: `verified by ${options.by} from review ${item.id}`,
+        note: `verified by ${options.via ? `${options.by} via ${options.via}` : options.by} from review ${item.id}`,
         author: options.author,
         person: options.person,
         vault,
@@ -152,6 +153,7 @@ export async function resolveReviewItem(
       commit: verified.commit,
       retired: verified.retired,
       by: options.by,
+      ...(options.via ? { via: options.via } : {}),
     };
     settleReviewItem(vault, id, "resolved", resolution, at);
     // Items still waiting on a claim this verification retired ask about nothing now.

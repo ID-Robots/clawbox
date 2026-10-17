@@ -14,6 +14,7 @@ import {
   pageUrl,
   prJson,
   shortSha,
+  verifierKey,
   type CommitInfo,
   type DiffResult,
   type PageListEntry,
@@ -150,6 +151,12 @@ export default function PrimeRadiantHistory({ initialPage, revision, onChanged, 
                   <span className="block text-sm text-[var(--text-primary)] truncate">{c.subject}</span>
                   <span className="block text-[11px] text-[var(--text-muted)]">
                     <span className="font-mono">{shortSha(c.sha)}</span> · {c.author} · {formatWhen(c.at, locale)}
+                    {c.verified && (
+                      <span data-testid="prime-radiant-commit-verified">
+                        {" · "}
+                        {t(`primeRadiant.history.verifiedBy${verifierKey(c.verified) ?? ""}`, { by: c.verified.by })}
+                      </span>
+                    )}
                   </span>
                 </button>
                 <button

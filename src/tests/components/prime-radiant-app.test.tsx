@@ -145,6 +145,9 @@ let searchAnswer: Record<string, unknown>;
 let reviewGate: Promise<void> | null;
 let reviewItems: unknown[];
 let nightlyRuns: unknown[];
+const INGEST_COMMIT = { sha: "a".repeat(40), subject: "ingest: acme-overview.md", at: "2026-01-02T10:00:00.000Z", author: "Prime Radiant" };
+let historyCommits: unknown[];
+let pageOverride: unknown;
 let ingestJobs: unknown[];
 /** Refusals the fake answers the next `DELETE ingest/<id>` calls with, first first. */
 let stopRefusals: number[];
@@ -179,7 +182,7 @@ function installFetch() {
     }
     if (url.startsWith(`${p}/pages?`)) return ok({ total: listed.length, pages: listed });
     if (url === `${p}/graph`) return ok(listed.length > 0 ? GRAPH : { revision: null, truncated: false, nodes: [], edges: [] });
-    if (url === `${p}/pages/entities/acme-widgets.md`) return ok(PAGE);
+    if (url === `${p}/pages/entities/acme-widgets.md`) return ok(pageOverride ?? PAGE);
     if (url.startsWith(`${p}/search?`)) {
       if (searchStatus === 404) return ok({ error: "Not found" }, 404);
       return ok(searchAnswer);
@@ -196,7 +199,7 @@ function installFetch() {
     if (url === `${p}/nightly`) return ok({ running: null, nextRunAt: null, runs: nightlyRuns });
     if (url === `${p}/nightly/run` && method === "POST") return ok({ branch: "dream/2026-01-05", commit: "def5678abc", changed: [] });
     if (url.startsWith(`${p}/history/`)) {
-      return ok({ path: "entities/acme-widgets.md", commits: [{ sha: "a".repeat(40), subject: "ingest: acme-overview.md", at: "2026-01-02T10:00:00.000Z", author: "Prime Radiant" }] });
+      return ok({ path: "entities/acme-widgets.md", commits: historyCommits });
     }
     if (url.startsWith(`${p}/diff?`)) return ok({ from: null, to: "a".repeat(40), path: "entities/acme-widgets.md", commit: null, files: [], diff: "+added line", truncated: false });
     if (url === `${p}/revert` && method === "POST") return ok({ reverted: "a".repeat(40), commit: "b".repeat(40), changed: [] });
@@ -295,6 +298,8 @@ beforeEach(() => {
   reviewGate = null;
   reviewItems = [REVIEW_ITEM];
   nightlyRuns = [];
+  historyCommits = [INGEST_COMMIT];
+  pageOverride = null;
   ingestJobs = [];
   stopRefusals = [];
   previewAnswer = PREVIEW;
@@ -454,6 +459,22 @@ describe("PrimeRadiantApp", () => {
     expect(screen.getByTestId("prime-radiant-backlinks")).toHaveTextContent("widget-pricing");
   });
 
+  it("says who verified a fact: the owner, the owner via the assistant, or the assistant", async () => {
+    const stamp = (verified: Record<string, string>) => ({ ...PAGE, frontmatter: { ...FM, claims: [{ ...FM.claims[0], verified }] } });
+    for (const [verified, words] of [
+      [{ at: "2026-01-03T10:00:00.000Z", by: "owner", via: "assistant" }, "Verified by the owner (via the assistant)"],
+      [{ at: "2026-01-03T10:00:00.000Z", by: "owner" }, "Verified by the owner,"],
+      [{ at: "2026-01-03T10:00:00.000Z", by: "assistant" }, "Verified by the assistant,"],
+    ] as const) {
+      pageOverride = stamp(verified);
+      const view = await mount();
+      await openTab("browse");
+      fireEvent.click(await screen.findByTestId("prime-radiant-page-row"));
+      expect(await screen.findByTestId("prime-radiant-claim-verified")).toHaveTextContent(words);
+      view.unmount();
+    }
+  });
+
   it("filters the page list by domain and type", async () => {
     await mount();
     await openTab("browse");
@@ -588,6 +609,23 @@ describe("PrimeRadiantApp", () => {
     const notice = await screen.findByTestId("prime-radiant-search-notice");
     expect(notice).toHaveAttribute("data-notice", "unavailable");
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("labels a verification in History: verified by the owner (via the assistant)", async () => {
+    historyCommits = [
+      { sha: "c".repeat(40), subject: "verify: sales/acme-widgets/hq-city", at: "2026-01-03T10:00:00.000Z", author: "ClawBox assistant", verified: { by: "owner", via: "assistant" } },
+      { sha: "d".repeat(40), subject: "verify: sales/acme-widgets/founded", at: "2026-01-02T12:00:00.000Z", author: "Prime Radiant", verified: { by: "owner" } },
+      INGEST_COMMIT,
+    ];
+    await mount();
+    await openTab("browse");
+    fireEvent.click(await screen.findByTestId("prime-radiant-page-row"));
+    fireEvent.click(await screen.findByTestId("prime-radiant-page-history"));
+    const [viaAssistant, owners, ingest] = await screen.findAllByTestId("prime-radiant-commit");
+    expect(within(viaAssistant).getByTestId("prime-radiant-commit-verified")).toHaveTextContent("verified by the owner (via the assistant)");
+    expect(viaAssistant).toHaveTextContent("ClawBox assistant");
+    expect(within(owners).getByTestId("prime-radiant-commit-verified")).toHaveTextContent(/^· verified by the owner$/);
+    expect(within(ingest).queryByTestId("prime-radiant-commit-verified")).toBeNull();
   });
 
   it("shows a page's history and undoes a change after confirmation", async () => {

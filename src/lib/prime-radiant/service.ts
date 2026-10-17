@@ -11,7 +11,7 @@
  * SERVER ONLY.
  */
 
-import { buildLinkGraph } from "./links";
+import { buildLinkGraph, pathAliases } from "./links";
 import { lintVault, type LintReport } from "./lint";
 import { pageSummary } from "./frontmatter";
 import { pageBlurb } from "./page-blurb";
@@ -182,7 +182,7 @@ export async function getPageBlurb(rel: string, vault: string = vaultDir()): Pro
 function pageDetail(snapshot: VaultSnapshot, rel: string, vault: string): PageDetail {
   const page = snapshot.pages.find((p) => p.path === rel)!;
   const graph = buildLinkGraph(
-    snapshot.pages.map((p) => ({ path: p.path, title: p.parsed.ok ? p.parsed.frontmatter.title : undefined, body: p.parsed.body })),
+    snapshot.pages.map((p) => ({ path: p.path, title: p.parsed.ok ? p.parsed.frontmatter.title : undefined, aliases: p.parsed.ok ? pathAliases(p.parsed.frontmatter.aliases) : undefined, body: p.parsed.body })),
     snapshot.indexBody,
   );
   const fm = page.parsed.ok ? page.parsed.frontmatter : null;

@@ -13,6 +13,7 @@ import {
   pageLabel,
   pageUrl,
   prJson,
+  verifierKey,
   type PageDetail,
   type PageListEntry,
 } from "./prime-radiant-ui";
@@ -342,7 +343,11 @@ function PageView({ path, page, error, onBack, onOpen, onHistory, locale }: {
                         {t("primeRadiant.page.confidence", { value: percent(c.confidence) })}
                       </span>
                       <span>{t(`primeRadiant.claimStatus.${c.status}`)}</span>
-                      {c.verified && <span>{t("primeRadiant.page.verifiedBy", { by: c.verified.by, at: formatWhen(c.verified.at, locale) })}</span>}
+                      {c.verified && (
+                        <span data-testid="prime-radiant-claim-verified">
+                          {t(`primeRadiant.page.verifiedBy${verifierKey(c.verified) ?? ""}`, { by: c.verified.by, at: formatWhen(c.verified.at, locale) })}
+                        </span>
+                      )}
                     </div>
                     {c.evidence.length > 0 && (
                       <ul className="mt-1.5 space-y-0.5 text-[11px] text-[var(--text-secondary)]">

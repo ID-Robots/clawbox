@@ -22,9 +22,9 @@
  * Pure apart from the snapshot it is handed.
  */
 
-import { buildClaimIndex, claimCollisions, isClaimId, retiredReuse } from "./claims";
+import { buildClaimIndex, claimCollisions, isClaimId, retiredReuse, transliterateCyrillic } from "./claims";
 import { pageSummary } from "./frontmatter";
-import { buildLinkGraph, CONTENT_FOLDERS, contentReach } from "./links";
+import { buildLinkGraph, CONTENT_FOLDERS, contentReach, pathAliases } from "./links";
 import { scanSecrets } from "./redact";
 import { ownerVerified, type PageFrontmatter } from "./schema";
 import type { VaultPage, VaultSnapshot } from "./vault";
@@ -142,7 +142,7 @@ export function staleAfterPassed(staleAfter: string | null, now: Date): boolean 
 }
 
 function slugifyTitle(text: string): string {
-  const s = text
+  const s = transliterateCyrillic(text)
     .normalize("NFKD")
     .replace(/[̀-ͯ]/g, "")
     .toLowerCase()
@@ -321,6 +321,7 @@ export function lintVault(snapshot: VaultSnapshot, options: LintOptions = {}): L
     snapshot.pages.map((p) => ({
       path: p.path,
       title: p.parsed.ok ? p.parsed.frontmatter.title : undefined,
+      aliases: p.parsed.ok ? pathAliases(p.parsed.frontmatter.aliases) : undefined,
       body: p.parsed.body,
     })),
     snapshot.indexBody,
