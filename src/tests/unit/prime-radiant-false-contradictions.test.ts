@@ -294,6 +294,24 @@ describe("rule 3: a draft and its final are one document", () => {
     ]);
   });
 
+  it("reads `version_of` from a page's frontmatter: two titles that say nothing alike are one document", () => {
+    const pages = {
+      "concepts/supply-agreement-contoso.md": page("Supply agreement Contoso", [c("legal/supply-agreement-contoso/term", "The Contoso supply term is 12 months.")]),
+      "concepts/contoso-contract-as-signed.md": page("Contoso contract as signed", [c("legal/contoso-contract-as-signed/term", "The Contoso supply term is 24 months.")], {
+        version_of: "concepts/supply-agreement-contoso.md",
+      }),
+    };
+    const all = claimsById(pages);
+    const a = all.get("legal/supply-agreement-contoso/term")!;
+    const b = all.get("legal/contoso-contract-as-signed/term")!;
+    expect(a.version).toBeTruthy();
+    expect(a.version).toBe(b.version);
+    expect(noPairReason(a, b)).toMatchObject({ code: "same-document" });
+    // Without the link, the same two claims are a pair.
+    const unlinked = claimsById({ ...pages, "concepts/contoso-contract-as-signed.md": page("Contoso contract as signed", [c("legal/contoso-contract-as-signed/term", "The Contoso supply term is 24 months.")]) });
+    expect(comparable(unlinked.get("legal/supply-agreement-contoso/term")!, unlinked.get("legal/contoso-contract-as-signed/term")!)).toBe(true);
+  });
+
   it("never pairs two versions' claims", () => {
     const all = claimsById();
     const a = all.get("customs/export-declaration-fabrikam-inv-2026-0021-docx/invoice")!;
