@@ -244,6 +244,20 @@ describe("POST pages/bulk", () => {
     expect(log()[0]).toBe("ClawBox assistant|Prime Radiant|bulk: 1 page");
   });
 
+  it("refuses alone, as not_found, a path deeper than the vault's walk reaches — the dry run and the real run alike", async () => {
+    await ensureVault();
+    await seed();
+    const deep = `${Array.from({ length: 10 }, (_, i) => `d${i}`).join("/")}/page.md`;
+    const edits = [{ path: deep, owner: "x" }, { path: "concepts/support.md", owner: "finance-team" }];
+    const dry = await bulk("assistant", { edits, dry_run: true });
+    const real = await bulk("assistant", { edits });
+    for (const res of [dry, real]) {
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ changed: ["concepts/support.md"], refused: [{ path: deep, code: "not_found" }] });
+    }
+    expect(log()[0]).toBe("ClawBox assistant|Prime Radiant|bulk: 1 page");
+  });
+
   it("commits nothing when every page already says what the edit asks", async () => {
     await ensureVault();
     await seed();

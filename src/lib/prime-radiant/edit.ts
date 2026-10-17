@@ -489,12 +489,17 @@ export interface PageEditResult extends PageWriteResult {
  */
 const METADATA_FIELDS: ReadonlySet<string> = new Set(["status", "domain", "owner", "privacy", "stale_after", "sources"]);
 
-/** The page `rel` under the lock, read alone, or the refusal that says why not. */
-async function txPage(tx: VaultTx, rel: string): Promise<{ path: string; frontmatter: PageFrontmatter; body: string; text: string }> {
-  const page = await tx.read(rel).catch((err) => {
+/** The page `rel` under the lock, read alone; null also for a path deeper than the vault's walk reaches (`tx.read` refuses it), which is no page. */
+function txRead(tx: VaultTx, rel: string): Promise<VaultPage | null> {
+  return tx.read(rel).catch((err) => {
     if (err instanceof VaultPathError) return null;
     throw err;
   });
+}
+
+/** The page `rel` under the lock, read alone, or the refusal that says why not. */
+async function txPage(tx: VaultTx, rel: string): Promise<{ path: string; frontmatter: PageFrontmatter; body: string; text: string }> {
+  const page = await txRead(tx, rel);
   if (!page) throw new PageEditError("not_found", "No such page.", 404);
   if (!page.parsed.ok) {
     throw new PageEditError("invalid_page", "That page's frontmatter does not parse; fix it by hand before editing it here.", 409);
@@ -694,7 +699,7 @@ export async function bulkEditPages(input: PageBulkEdit, who: EditWho, options: 
     try {
       const op = await vaultOperation<BulkTally>(
         (r) => `bulk: ${r.changed.length} ${r.changed.length === 1 ? "page" : "pages"}`,
-        (tx) => plan((rel) => tx.read(rel), (rel, text) => tx.write(rel, text)),
+        (tx) => plan((rel) => txRead(tx, rel), (rel, text) => tx.write(rel, text)),
         { vault, now: options.now, author: who.author, lint: "pages", reindex: false },
       );
       return { ...op.result, commit: op.commit, dryRun: false };
