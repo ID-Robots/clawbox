@@ -33,7 +33,10 @@
  * whatever that night's scope is, until its pairs are judged. A pass that
  * compared every claim and left nothing deferred records `full_comparison`
  * ({@link fullComparisonDone}) — the nightly pass compares the whole vault
- * until one has.
+ * until one has. A pass that compared (or deferred) every claim in its scope
+ * records the commit it compared (`compared_through`,
+ * {@link readComparedThrough}); the next night's scope is every page changed
+ * since that commit, so what reached `main` by day is compared too.
  *
  * Every model dependency is injectable; nothing here throws for a model that
  * cannot answer — the pass reports what it skipped.
@@ -389,6 +392,12 @@ export interface ContradictionPassOptions {
   parallel?: number;
   /** Raise review items for the findings (default true). */
   raiseItems?: boolean;
+  /**
+   * The commit whose pages `snapshot` holds. Recorded ({@link readComparedThrough})
+   * once every claim in scope was compared or deferred to the next pass, so
+   * the next pass's scope can be everything changed since.
+   */
+  comparedThrough?: string | null;
 }
 
 interface CachedVector {
@@ -459,6 +468,22 @@ function storeJudged(vault: string, rows: ReadonlyArray<{ hash: string; verdict:
 // ── the carry-over ────────────────────────────────────────────────────────
 
 const FULL_COMPARISON_KEY = "full_comparison";
+/** The `pass_state` key holding the commit the last finished comparison compared. */
+const COMPARED_THROUGH_KEY = "compared_through";
+const FULL_SHA = /^[0-9a-f]{40}$/;
+
+/**
+ * The commit the last finished comparison compared — every claim in its scope
+ * was compared or deferred — or null when none is recorded. Never creates the
+ * database.
+ */
+export function readComparedThrough(vault: string): string | null {
+  if (!stateDbExists(vault)) return null;
+  const row = withStateDb(vault, (db) => db.prepare("SELECT value FROM pass_state WHERE key = ?").get(COMPARED_THROUGH_KEY)) as
+    | { value: string | null }
+    | undefined;
+  return row?.value && FULL_SHA.test(row.value) ? row.value : null;
+}
 
 /** Ids of the claims an earlier pass could not finish judging. Never creates the database. */
 export function readDeferredClaims(vault: string): Set<string> {
@@ -480,7 +505,15 @@ export function fullComparisonDone(vault: string): boolean {
  */
 function settleDeferred(
   vault: string,
-  input: { compared: readonly string[]; present: ReadonlySet<string>; deferred: ReadonlyArray<{ id: string; page: string }>; reason: string; full: boolean },
+  input: {
+    compared: readonly string[];
+    present: ReadonlySet<string>;
+    deferred: ReadonlyArray<{ id: string; page: string }>;
+    reason: string;
+    full: boolean;
+    /** The commit to record as compared through, or null to leave the mark where it is. */
+    through: string | null;
+  },
   at: string,
 ): void {
   withStateDb(vault, (db) => {
@@ -490,15 +523,13 @@ function settleDeferred(
       `INSERT INTO deferred_claims (claim_id, page, reason, at) VALUES (?, ?, ?, ?)
        ON CONFLICT(claim_id) DO UPDATE SET page = excluded.page, reason = excluded.reason, at = excluded.at`,
     );
+    const mark = db.prepare(`INSERT INTO pass_state (key, value, at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, at = excluded.at`);
     runInTransaction(db, () => {
       for (const id of input.compared) drop.run(id);
       for (const id of existing) if (!input.present.has(id)) drop.run(id);
       for (const c of input.deferred) add.run(c.id, c.page, input.reason, at);
-      if (input.full) {
-        db.prepare(
-          `INSERT INTO pass_state (key, value, at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, at = excluded.at`,
-        ).run(FULL_COMPARISON_KEY, at, at);
-      }
+      if (input.full) mark.run(FULL_COMPARISON_KEY, at, at);
+      if (input.through) mark.run(COMPARED_THROUGH_KEY, input.through, at);
     });
   });
 }
@@ -570,10 +601,13 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
     result.deferredClaims = deferred.length;
     // Nothing to compare is not a failure: a vault of one claim has compared everything.
     result.complete = (!result.skipped || result.skipped === "nothing_to_compare") && unjudged.size === 0 && result.deferredPairs === 0 && !overCap;
+    // Every claim in scope was compared or is deferred (and so carried): the
+    // next pass may start from this commit. Over the cap, some were neither.
+    const through = !overCap && options.comparedThrough && FULL_SHA.test(options.comparedThrough) ? options.comparedThrough : null;
     try {
       settleDeferred(
         options.stateVault,
-        { compared: queries.map((i) => claims[i].id), present, deferred, reason, full: result.complete && !scope },
+        { compared: queries.map((i) => claims[i].id), present, deferred, reason, full: result.complete && !scope, through },
         now().toISOString(),
       );
     } catch {

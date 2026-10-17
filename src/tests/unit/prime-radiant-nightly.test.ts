@@ -8,7 +8,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createHashEmbedder, fullComparisonDone, readDeferredClaims } from "@/lib/prime-radiant/contradictions";
+import { createHashEmbedder, fullComparisonDone, readComparedThrough, readDeferredClaims } from "@/lib/prime-radiant/contradictions";
 import type { FlashClient } from "@/lib/prime-radiant/flash-client";
 import { git, headCommit } from "@/lib/prime-radiant/git";
 import { readJudgeItems } from "@/lib/prime-radiant/judge";
@@ -31,6 +31,7 @@ import { setVaultReindexHook } from "@/lib/prime-radiant/reindex-hook";
 import { resolveReviewItem } from "@/lib/prime-radiant/review";
 import { listReviewItems } from "@/lib/prime-radiant/review-store";
 import { defaultSettings, type PrimeRadiantSettings } from "@/lib/prime-radiant/settings";
+import { withStateDb } from "@/lib/prime-radiant/state-db";
 import { ensureVault, readVaultSnapshot, vaultOperation } from "@/lib/prime-radiant/vault";
 import { readWriterItems } from "@/lib/prime-radiant/writer";
 import { claim, pageText } from "../helpers/prime-radiant-fixtures";
@@ -298,6 +299,52 @@ describe("nightly pass", () => {
     const third = await runNightly("schedule", deps({ now: () => new Date(2026, 4, 22, 3, 0) }));
     const s3 = third!.summary as unknown as NightlySummary;
     expect(s3.contradictions).toMatchObject({ queried: 0, carried: 0, skipped: "nothing_to_compare" });
+  });
+
+  it("compares what reached main by day: the scope is everything changed since the last finished comparison", async () => {
+    await ensureVault();
+    const first = await runNightly("schedule", deps());
+    expect((first!.summary as unknown as NightlySummary).contradictions.complete).toBe(true);
+    const mark = readComparedThrough(vaultDir());
+    const items = () => listReviewItems(vaultDir(), { kind: "contradiction" }).items;
+    expect(items()).toHaveLength(1);
+
+    // By day: Add documents (or an edit) commits straight to main, not to a dream branch.
+    await vaultOperation("ingest: 1 document", async (tx) => {
+      await tx.write("concepts/daytime-price.md", pageText({ title: "Daytime price", claims: [claim("acme-sales/daytime-price/blue", "The blue widget costs 15 EUR per unit.")] }));
+    });
+    // An offline night compares nothing and does not move the mark.
+    const offline = await runNightly("schedule", deps({ online: async () => false, now: () => new Date(2026, 4, 21, 3, 0) }));
+    expect((offline!.summary as unknown as NightlySummary).contradictions.skipped).toBe("offline");
+    expect(readComparedThrough(vaultDir())).toBe(mark);
+
+    // The next night ingests nothing new (its branch changes nothing), and still compares the daytime page.
+    const second = await runNightly("schedule", deps({ now: () => new Date(2026, 4, 22, 3, 0) }));
+    const s2 = second!.summary as unknown as NightlySummary;
+    expect(s2.commits).toBe(0);
+    expect(s2.contradictions.queried).toBe(1);
+    expect(s2.contradictions.findings).toBeGreaterThan(0);
+    expect(s2.notes.join(" ")).toMatch(/1 page\(s\) changed since the last comparison outside this night's branch were compared too/);
+    expect(items().filter((i) => i.pages.includes("concepts/daytime-price.md")).length).toBeGreaterThan(0);
+    expect(mark).toMatch(/^[0-9a-f]{40}$/);
+    const after = readComparedThrough(vaultDir());
+    expect(after).not.toBe(mark);
+    expect(after).toBe((await headCommit(vaultDir()))!.sha);
+
+    // Compared once is compared: the night after is quiet again.
+    const third = await runNightly("schedule", deps({ now: () => new Date(2026, 4, 23, 3, 0) }));
+    expect((third!.summary as unknown as NightlySummary).contradictions).toMatchObject({ queried: 0, skipped: "nothing_to_compare" });
+  });
+
+  it("compares every claim when the recorded comparison's commit is gone", async () => {
+    await ensureVault();
+    await runNightly("schedule", deps());
+    withStateDb(vaultDir(), (db) => db.prepare("UPDATE pass_state SET value = ? WHERE key = 'compared_through'").run("0".repeat(40)));
+    const second = await runNightly("schedule", deps({ now: () => new Date(2026, 4, 21, 3, 0) }));
+    const s2 = second!.summary as unknown as NightlySummary;
+    expect(s2.contradictions.queried).toBe(s2.contradictions.claims);
+    expect(s2.contradictions.queried).toBeGreaterThan(0);
+    expect(readComparedThrough(vaultDir())).toBe((await headCommit(vaultDir()))!.sha);
   });
 
   it("an offline night does not count as the full comparison", async () => {
