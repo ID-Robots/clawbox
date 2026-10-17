@@ -4,7 +4,7 @@
  * Each question carries the answer its owner expects and, when known, the
  * claim or page that answers it. The set lives IN the vault, as
  * `golden.json` beside index.md — versioned with the pages, so a change to it
- * is a commit in History that Undo can take back (golden-store.ts writes it).
+ * is a commit that undo can take back by its id (golden-store.ts writes it).
  *
  * Every night (golden-score.ts) each question is answered from the wiki — its
  * search hits and the claims that share its words, ranked here by
@@ -16,7 +16,6 @@
  */
 
 import { lexicalTokens } from "./lexical";
-import { recheckPassed } from "./recheck";
 import { isClaimId } from "./claims";
 import { SLUG_RE, type PageFrontmatter } from "./schema";
 
@@ -35,6 +34,10 @@ export const GOLDEN_LIMITS = Object.freeze({
   evidence: 6,
   /** Questions in one judge call. */
   batch: 6,
+  /** What one night's check may spend, whatever the question cap: past it the rest wait for the next night. */
+  usdPerNight: 0.5,
+  /** Judge calls in a row that may fail (not refused) before the night's check stops. */
+  failuresInRow: 2,
 });
 
 export const GOLDEN_ID_RE = /^gq-[0-9a-f]{12}$/;
@@ -204,7 +207,7 @@ export interface GoldenEvidence {
   title: string;
   asOf: string | null;
   verified: boolean;
-  /** Past its date: a historical claim, one whose period ended, or a page past its re-check. */
+  /** Past its date: a historical claim, or one whose period ended. A page merely due a re-check is not. */
   dated: boolean;
 }
 
@@ -225,20 +228,21 @@ function claimEvidence(page: GoldenPage, c: PageFrontmatter["claims"][number], n
     title: page.fm.title,
     asOf,
     verified: !!c.verified || c.status === "verified",
-    dated: c.historical === true || (!Number.isNaN(until) && until < now.getTime()) || recheckPassed(page.fm, now),
+    dated: c.historical === true || (!Number.isNaN(until) && until < now.getTime()),
   };
 }
 
 /**
- * The claims that answer `question` best: the search hits first (a claim hit
- * as it is, a page hit by its claims that share the question's words), then
- * the vault's claims ranked by the question's words (TF-IDF over claim text
- * and page title), up to `k`. Deprecated pages are left out.
+ * The claims that answer `question` best: the claim (and page) its owner
+ * named as the answer first, then the search hits (a claim hit as it is, a
+ * page hit by its claims that share the question's words), then the vault's
+ * claims ranked by the question's words (TF-IDF over claim text and page
+ * title), up to `k`. Deprecated pages are left out.
  */
 export function goldenEvidence(
   question: string,
   pages: readonly GoldenPage[],
-  options: { hits?: readonly GoldenHit[]; k?: number; now?: Date } = {},
+  options: { hits?: readonly GoldenHit[]; k?: number; now?: Date; answeredBy?: { claimId: string | null; page: string | null } } = {},
 ): GoldenEvidence[] {
   const k = options.k ?? GOLDEN_LIMITS.evidence;
   const now = options.now ?? new Date();
@@ -266,6 +270,22 @@ export function goldenEvidence(
     out.push(claimEvidence(page, claim, now));
   };
   const byPath = new Map(live.map((p) => [p.path, p]));
+  // The owner's own pointer to the answer goes first: a named claim, wherever it lives, then the named page's best two.
+  const named = options.answeredBy;
+  if (named?.claimId) {
+    for (const page of live) {
+      const claim = page.fm.claims.find((c) => c.id === named.claimId);
+      if (claim) {
+        take(page, claim);
+        break;
+      }
+    }
+  }
+  const namedPage = named?.page ? byPath.get(named.page) : undefined;
+  if (namedPage) {
+    const best = scored.filter((x) => x.d.page === namedPage).sort((a, b) => b.s - a.s || a.d.claim.id.localeCompare(b.d.claim.id));
+    best.slice(0, 2).forEach((x) => take(x.d.page, x.d.claim));
+  }
   for (const hit of options.hits ?? []) {
     const page = byPath.get(hit.path);
     if (!page) continue;

@@ -201,13 +201,14 @@ const CASES: Case[] = [
   },
   {
     tool: "prime_radiant_page_edit",
-    args: { path: "concepts/pricing.md", summary: "New summary.", recheck_after: "never" },
-    reply: { path: "concepts/pricing.md", commit: SHA, changed: ["summary", "stale_after"], findings: [] },
+    args: { path: "concepts/pricing.md", summary: "New summary.", recheck_after: "by_type", as_of: "2026-09-30" },
+    reply: { path: "concepts/pricing.md", commit: SHA, changed: ["summary", "stale_after", "as_of"], findings: [] },
     method: "PATCH",
     path: `${BASE}/pages/concepts/pricing.md`,
-    sent: { body: { summary: "New summary.", stale_after: null } },
-    says: /Edited concepts\/pricing\.md \(summary, stale_after\)/,
-    bad: { path: "concepts/pricing.md", recheck_after: "tomorrow" },
+    sent: { body: { summary: "New summary.", stale_after: null, as_of: "2026-09-30" } },
+    says: /Edited concepts\/pricing\.md \(summary, stale_after, as_of\)/,
+    // "never" would clear the page's date and leave its type's interval running: refused, not a false success.
+    bad: { path: "concepts/pricing.md", recheck_after: "never" },
   },
   {
     tool: "prime_radiant_page_delete",
@@ -553,6 +554,63 @@ describe("golden and daily questions", () => {
     const on = await harness().call("prime_radiant_daily_questions", { owner: "Sales team" });
     if (on.isError) throw new Error(on.error.message);
     expect(JSON.parse(on.text).sending).toMatch(/^Sending is on: you may send them .* not on a timer of your own\.$/);
+  });
+
+  it("hands the assistant the answer path of each daily question, a review item with no claim fixed first, then dismissed", async () => {
+    api.mockResolvedValue({
+      initialised: true,
+      outbound: false,
+      owner: "Sales team",
+      language: "en",
+      questions: [
+        { kind: "review", page: "concepts/sales.md", question: "A question about “Widget sales” is waiting for you.", answer: { tool: "prime_radiant_review_resolve", args: { id: "rev-0123456789ab", action: "dismiss" }, fixFirst: { tool: "prime_radiant_page_edit", args: { path: "concepts/sales.md" } } } },
+        { kind: "review", page: "concepts/price.md", options: ["10 EUR", "12 EUR"], question: "Which is right about “Price”?", answer: { tool: "prime_radiant_review_resolve", args: { id: "rev-0123456789ac" } } },
+      ],
+    });
+    const out = await harness().call("prime_radiant_daily_questions", { owner: "Sales team" });
+    if (out.isError) throw new Error(out.error.message);
+    const body = JSON.parse(out.text);
+    expect(body.how_to_answer).toMatch(/action pick and the option's number as candidate[\s\S]*fix_first/);
+    expect(body.questions[0]).toMatchObject({
+      answer_with: { tool: "prime_radiant_review_resolve", id: "rev-0123456789ab", action: "dismiss" },
+      fix_first: { tool: "prime_radiant_page_edit", path: "concepts/sales.md" },
+    });
+    expect(body.questions[1].fix_first).toBeUndefined();
+    expect(body.questions[1].options).toEqual(["10 EUR", "12 EUR"]);
+  });
+
+  it("lists golden questions in whole rows, narrowed by domain or owner, saying how many are left", async () => {
+    const many = Array.from({ length: 60 }, (_, i) => ({
+      id: `gq-${i.toString(16).padStart(12, "0")}`,
+      question: `What does widget ${i} cost? ${"detail ".repeat(10)}`,
+      expected: `${i} EUR`,
+      owner: i % 2 ? "Sales team" : "Ops desk",
+      domain: i % 2 ? "acme-sales" : "acme-ops",
+      claimId: null,
+      page: null,
+    }));
+    api.mockResolvedValue({ questions: many, verdicts: {}, score: null });
+    const all = await harness().call("prime_radiant_golden_list", {});
+    if (all.isError) throw new Error(all.error.message);
+    const body = JSON.parse(all.text);
+    expect(body.total).toBe(60);
+    expect(body.questions.length + body.more_questions).toBe(60);
+    expect(body.more_questions).toBeGreaterThan(0);
+    expect(body.narrow).toMatch(/domain or owner/);
+    const ops = await harness().call("prime_radiant_golden_list", { domain: "ACME-OPS", owner: "ops desk" });
+    if (ops.isError) throw new Error(ops.error.message);
+    const narrowed = JSON.parse(ops.text);
+    expect(narrowed.total).toBe(30);
+    expect(narrowed.questions.every((q: { domain: string }) => q.domain === "acme-ops")).toBe(true);
+  });
+
+  it("tells the assistant to delete a golden question first when the set is full", async () => {
+    refuse(409, "too_many");
+    const out = await harness().call("prime_radiant_golden_add", { question: "Q?", expected: "A", domain: "acme-sales" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("CONFLICT");
+    expect(out.error.next).toMatch(/prime_radiant_golden_delete/);
   });
 
   it("shows the golden accuracy in status, and a page's re-check day by its type", async () => {

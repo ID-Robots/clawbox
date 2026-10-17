@@ -133,7 +133,7 @@ describe("golden questions: the answer from the wiki", () => {
     expect(byPage[0].claimId).toBe(STOCK.id);
   });
 
-  it("flags a dated fact: historical, a period that ended, a page past its re-check", () => {
+  it("flags a dated fact: historical, or a period that ended — a page merely due a re-check is not, its as_of goes along", () => {
     const dated: GoldenPage[] = [
       { path: "concepts/a.md", fm: frontmatter({ title: "Widget price", claims: [claim("acme-sales/a/price", "The widget price was 9 EUR.", { historical: true })] }) },
       { path: "concepts/b.md", fm: frontmatter({ title: "Widget price list", claims: [claim("acme-sales/b/price", "The widget price is 11 EUR.", { valid_until: "2026-01-31" })] }) },
@@ -141,8 +141,17 @@ describe("golden questions: the answer from the wiki", () => {
     ];
     const ev = goldenEvidence("widget price", dated, { now: NOW });
     expect(ev).toHaveLength(3);
-    expect(ev.every((e) => e.dated)).toBe(true);
+    expect(Object.fromEntries(ev.map((e) => [e.page, e.dated]))).toEqual({ "concepts/a.md": true, "concepts/b.md": true, "concepts/c.md": false });
     expect(ev.find((e) => e.page === "concepts/c.md")?.asOf).toBe("2026-01-01");
+  });
+
+  it("puts the claim and page the owner named as the answer first, even when they share no word with the question", () => {
+    const ev = goldenEvidence("Where do we sit?", pages, { now: NOW, answeredBy: { claimId: OFFICE.id, page: null } });
+    expect(ev[0].claimId).toBe(OFFICE.id);
+    const byPage = goldenEvidence("zebra quantum", pages, { now: NOW, answeredBy: { claimId: null, page: "concepts/blue-widget.md" } });
+    expect(byPage.map((e) => e.claimId).sort()).toEqual([PRICE.id, STOCK.id].sort());
+    // A named claim on a deprecated page is no answer.
+    expect(goldenEvidence("zebra quantum", pages, { now: NOW, answeredBy: { claimId: "acme-sales/old/price", page: null } })).toEqual([]);
   });
 });
 
@@ -206,7 +215,7 @@ describe("golden questions: the store in the vault", () => {
     await expect(updateGoldenQuestion("gq-000000000000", { expected: "x" })).rejects.toBeInstanceOf(GoldenError);
   });
 
-  it("is undone from History like any commit: the question comes back", async () => {
+  it("is undone by its commit id like any vault commit: the question comes back", async () => {
     await seedPages();
     const added = await addGoldenQuestion(PRICE_Q, { domains: [] });
     const gone = await deleteGoldenQuestion(added.question!.id);
@@ -214,6 +223,35 @@ describe("golden questions: the store in the vault", () => {
     const undo = await revertCommit({ sha: gone.commit! });
     expect(undo.commit).not.toBeNull();
     expect((await readGoldenQuestions()).questions.map((q) => q.id)).toEqual([added.question!.id]);
+  });
+
+  it("never writes over entries it cannot read: a broken file refuses every change until it is mended", async () => {
+    await seedPages();
+    const added = await addGoldenQuestion(PRICE_Q, { domains: [] });
+    const file = path.join(vaultDir(), GOLDEN_FILE);
+    const good = fs.readFileSync(file, "utf8");
+    const head = (await git(vaultDir(), ["rev-parse", "HEAD"])).stdout.trim();
+    // One entry hand-broken beside a good one, then the whole file unparseable.
+    const parsed = JSON.parse(good) as { version: number; questions: unknown[] };
+    for (const broken of [JSON.stringify({ ...parsed, questions: [...parsed.questions, { id: "gq-0123456789ab", question: 7 }] }), "{ not json"]) {
+      fs.writeFileSync(file, broken);
+      expect((await readGoldenQuestions()).skipped).toBe(1);
+      await expect(addGoldenQuestion(OFFICE_Q, { domains: [] })).rejects.toMatchObject({ code: "unreadable", status: 409 });
+      await expect(deleteGoldenQuestion(added.question!.id)).rejects.toMatchObject({ code: "unreadable" });
+      expect(fs.readFileSync(file, "utf8")).toBe(broken);
+      expect((await git(vaultDir(), ["rev-parse", "HEAD"])).stdout.trim()).toBe(head);
+    }
+    fs.writeFileSync(file, good);
+    expect((await addGoldenQuestion(OFFICE_Q, { domains: [] })).commit).not.toBeNull();
+  });
+
+  it("refuses a secret in a question or its answer, as a page would, and commits nothing", async () => {
+    await seedPages();
+    const head = (await git(vaultDir(), ["rev-parse", "HEAD"])).stdout.trim();
+    await expect(addGoldenQuestion({ ...PRICE_Q, expected: "password: Placeholder-Only-1234" }, { domains: [] })).rejects.toMatchObject({ code: "lint_blocked", status: 409 });
+    expect(fs.existsSync(path.join(vaultDir(), GOLDEN_FILE))).toBe(false);
+    expect((await git(vaultDir(), ["rev-parse", "HEAD"])).stdout.trim()).toBe(head);
+    expect((await git(vaultDir(), ["status", "--porcelain"])).stdout.trim()).toBe("");
   });
 
   it("creates nothing without a vault, and refuses a write there", async () => {
@@ -303,6 +341,75 @@ describe("golden questions: the nightly score", () => {
     const r = await runGoldenScore({ client: refusing, online: true });
     expect(r.skipped).toBe("model_unavailable");
     expect(readGoldenHistory()).toEqual([]);
+  });
+
+  it("stores no score when no call judged anything, and stops after two failed calls in a row", async () => {
+    await seedPages();
+    for (let i = 0; i < 18; i++) await addGoldenQuestion({ ...PRICE_Q, question: `What does the blue widget cost? (${i})` }, { domains: [] });
+    let calls = 0;
+    const broken: FlashClient = {
+      model: "deepseek-v4-flash",
+      async complete() {
+        calls++;
+        throw new FlashCallError("bad_response", "garbled");
+      },
+    };
+    const r = await runGoldenScore({ runId: "run-0000000000f1", client: broken, online: true, now: () => NOW });
+    expect(r.skipped).toBe("model_unavailable");
+    expect(calls).toBe(2); // three batches of six; the third is never sent
+    expect(r.notes.join(" ")).toMatch(/in a row failed/);
+    expect(readGoldenHistory()).toEqual([]);
+    expect((await goldenStatus()).last).toBeNull();
+  });
+
+  it("stops at the night's spending cap, whatever the question cap", async () => {
+    await seedPages();
+    for (let i = 0; i < 12; i++) await addGoldenQuestion({ ...PRICE_Q, question: `What does the blue widget cost? (${i})` }, { domains: [] });
+    const calls: string[] = [];
+    const base = judge(calls);
+    const dear: FlashClient = {
+      model: base.model,
+      async complete(request) {
+        const out = await base.complete(request);
+        return { ...out, usage: { promptTokens: 50_000_000, completionTokens: 0, cacheHitTokens: 0 } };
+      },
+    };
+    const r = await runGoldenScore({ runId: "run-0000000000f2", client: dear, online: true, now: () => NOW });
+    expect(calls).toHaveLength(1);
+    expect(r.usdEstimate).toBeGreaterThan(0.5);
+    expect(r.tally).toMatchObject({ asked: 12, correct: 6, failed: 6 });
+    expect(r.notes.join(" ")).toMatch(/spending cap/);
+  });
+
+  it("raises no regression for a question the search failed on, and keeps the last verdict in the list", async () => {
+    await seedPages();
+    await addGoldenQuestion(PRICE_Q, { domains: [] });
+    await runGoldenScore({ runId: "run-0000000000e1", client: judge(), online: true, now: () => NOW });
+    await vaultOperation("test: new price", async (tx) => {
+      await tx.write("concepts/blue-widget.md", pageText({ title: "Blue widget", claims: [{ ...PRICE, text: "The blue widget costs 14 EUR per unit." }, STOCK] }));
+    });
+    const down = async () => {
+      throw new Error("embeddings unavailable");
+    };
+    const r = await runGoldenScore({ runId: "run-0000000000e2", client: judge(), online: true, search: down, now: () => new Date(NOW.getTime() + 86_400_000) });
+    expect(r.tally.wrong).toBe(1);
+    expect(r.regressions).toEqual([]);
+    expect(r.notes.join(" ")).toMatch(/search failed/);
+    expect(listReviewItems(vaultDir(), { status: "open" }).items).toEqual([]);
+
+    // A night the judge leaves the question out keeps its verdict beside it.
+    const silent: FlashClient = {
+      model: "deepseek-v4-flash",
+      async complete() {
+        return { text: "[]", model: "deepseek-v4-flash", usage: { promptTokens: 1, completionTokens: 1, cacheHitTokens: 0 } };
+      },
+    };
+    await addGoldenQuestion(OFFICE_Q, { domains: [] });
+    const third = await runGoldenScore({ runId: "run-0000000000e3", client: judge(), online: true, now: () => new Date(NOW.getTime() + 2 * 86_400_000) });
+    expect(third.tally.asked).toBe(2);
+    await runGoldenScore({ runId: "run-0000000000e4", client: silent, online: true, now: () => new Date(NOW.getTime() + 3 * 86_400_000) });
+    const verdicts = Object.values(readLatestVerdicts()).map((v) => v.verdict).sort();
+    expect(verdicts).toEqual(["correct", "wrong"]);
   });
 
   it("counts a question the judge left out as not judged, never as wrong", async () => {

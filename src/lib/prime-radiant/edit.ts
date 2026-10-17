@@ -249,12 +249,14 @@ export interface PagePatch {
   privacy?: PrivacyTier;
   /** null clears it. */
   stale_after?: string | null;
+  /** The day the page's figures were true on (a metric page needs one); null clears it. */
+  as_of?: string | null;
   sources?: string[];
 }
 
-/** `PATCH pages/<path>`: any of `{ title, summary, body, status, domain, owner, privacy, stale_after, sources }`. */
+/** `PATCH pages/<path>`: any of `{ title, summary, body, status, domain, owner, privacy, stale_after, as_of, sources }`. */
 export function readPagePatch(body: unknown): PagePatch {
-  const b = objectBody(body, ["title", "summary", "body", "status", "domain", "owner", "privacy", "stale_after", "sources"]);
+  const b = objectBody(body, ["title", "summary", "body", "status", "domain", "owner", "privacy", "stale_after", "as_of", "sources"]);
   const patch: PagePatch = {};
   if (b.title !== undefined) patch.title = oneLine(b.title, MAX_TITLE_CHARS, "title");
   if (b.summary !== undefined) patch.summary = summaryText(b.summary);
@@ -266,6 +268,10 @@ export function readPagePatch(body: unknown): PagePatch {
   if (b.stale_after !== undefined) {
     if (b.stale_after !== null && !isIsoDate(b.stale_after)) throw bad("stale_after is an ISO date (YYYY-MM-DD) or null.");
     patch.stale_after = b.stale_after as string | null;
+  }
+  if (b.as_of !== undefined) {
+    if (b.as_of !== null && !isIsoDate(b.as_of)) throw bad("as_of is an ISO date (YYYY-MM-DD) or null.");
+    patch.as_of = b.as_of as string | null;
   }
   if (b.sources !== undefined) patch.sources = sourceList(b.sources);
   if (Object.keys(patch).length === 0) throw bad("Name at least one field to change.");
@@ -495,7 +501,7 @@ export interface PageEditResult extends PageWriteResult {
  * own page (vault.ts `lint: "pages"`) and leaves Memory Shard's index as it
  * is: what it embeds of a page is its title, body and claims.
  */
-const METADATA_FIELDS: ReadonlySet<string> = new Set(["status", "domain", "owner", "privacy", "stale_after", "sources"]);
+const METADATA_FIELDS: ReadonlySet<string> = new Set(["status", "domain", "owner", "privacy", "stale_after", "as_of", "sources"]);
 
 /** The page `rel` under the lock, read alone; null also for a path deeper than the vault's walk reaches (`tx.read` refuses it), which is no page. */
 function txRead(tx: VaultTx, rel: string): Promise<VaultPage | null> {
@@ -544,6 +550,11 @@ export async function editPage(rel: string, patch: PagePatch, who: EditWho, opti
         (fm as Record<string, unknown>)[key] = value;
       };
       for (const key of ["title", "status", "domain", "owner", "privacy", "stale_after", "sources"] as const) set(key);
+      if (patch.as_of !== undefined && JSON.stringify(fm.as_of ?? null) !== JSON.stringify(patch.as_of)) {
+        changed.push("as_of");
+        if (patch.as_of === null) delete fm.as_of;
+        else fm.as_of = patch.as_of;
+      }
       if (body.trim() !== page.body.trim()) changed.push(patch.summary !== undefined && patch.body === undefined ? "summary" : "body");
       if (changed.length === 0) return;
       fm.generated = { at, by: who.by };

@@ -66,6 +66,25 @@ describe("re-check day by page type", () => {
     expect(recheckOf(fm).date).toBe("2026-05-31");
     expect(recheckOf({ ...fm, stale_after: "2027-01-01" })).toEqual({ date: "2027-01-01", by: "page", days: 30 });
   });
+
+  it("counts a metric with an as_of of its own from that day, however recently it was written", () => {
+    const fm = frontmatter({ type: "metric", title: "Widget stock", as_of: "2026-01-31", generated: { at: "2026-05-15T10:00:00.000Z", by: "flash" } });
+    expect(lastChecked(fm)).toBe(Date.parse("2026-01-31T00:00:00.000Z"));
+    expect(recheckOf(fm).date).toBe("2026-03-02");
+    expect(recheckPassed(fm, NOW)).toBe(true);
+    // A verification since restarts it; a concept's own as_of never pulls its clock back.
+    expect(recheckOf({ ...fm, verified: { at: "2026-05-10T00:00:00.000Z", by: "owner" } }).date).toBe("2026-06-09");
+    expect(lastChecked(frontmatter({ type: "concept", as_of: "2026-01-31", generated: { at: "2026-05-15T10:00:00.000Z", by: "flash" } }))).toBe(Date.parse("2026-05-15T10:00:00.000Z"));
+    // A zoneless moment is read as UTC, as the pass reads it.
+    expect(lastChecked(frontmatter({ type: "metric", as_of: "2026-01-31T12:00", generated: { at: "2026-05-15T10:00:00.000Z", by: "flash" } }))).toBe(Date.parse("2026-01-31T12:00:00.000Z"));
+  });
+
+  it("holds a page's own moment from that moment, a bare day through its end", () => {
+    const fm = frontmatter({ type: "concept", stale_after: "2026-05-20T08:00:00.000Z" });
+    expect(recheckPassed(fm, new Date("2026-05-20T07:59:00.000Z"))).toBe(false);
+    expect(recheckPassed(fm, new Date("2026-05-20T08:01:00.000Z"))).toBe(true);
+    expect(recheckPassed({ ...fm, stale_after: "2026-05-20" }, new Date("2026-05-20T23:00:00.000Z"))).toBe(false);
+  });
 });
 
 describe("as-of-missing", () => {
@@ -81,6 +100,15 @@ describe("as-of-missing", () => {
     expect(f).toMatchObject({ severity: "warning", blocksCommit: false, path: "concepts/sales.md", details: { claims: 1, undated: 1 } });
     // A page-level as_of that is no date is no error of the page: it still parses.
     expect(validateFrontmatter({ ...frontmatter({ type: "metric" }), as_of: "soon" }).ok).toBe(true);
+  });
+
+  it("is silenced in the lint by a page-level or per-claim as_of, and reads a zoneless moment as a date", () => {
+    const rules = (text: string) => lintVault(snapshot({ "concepts/sales.md": text }), { now: NOW }).findings.map((x) => x.rule);
+    expect(rules(pageText({ type: "metric", title: "Widget sales", as_of: "2026-04-30", claims: [claim("acme-sales/widget/sales")] }))).not.toContain("as-of-missing");
+    expect(rules(pageText({ type: "metric", title: "Widget sales", claims: [claim("acme-sales/widget/sales", "Sold 40.", { as_of: "2026-04-30" })] }))).not.toContain("as-of-missing");
+    expect(rules(pageText({ type: "metric", title: "Widget sales", as_of: "2026-04-30T09:00", claims: [claim("acme-sales/widget/sales")] }))).not.toContain("as-of-missing");
+    expect(rules(pageText({ type: "concept", title: "Widget notes", claims: [claim("acme-sales/widget/notes")] }))).not.toContain("as-of-missing");
+    expect(metricWithoutAsOf(frontmatter({ type: "metric", as_of: "2026-02-30", claims: [claim("a/b/c")] }))).toBe(true);
   });
 });
 
@@ -128,6 +156,27 @@ describe("daily questions: who and in what order", () => {
     // no claim of a plain concept page, a verified claim, a deprecated page or another owner's page
     const asked = qs.map((q) => q.claimId);
     for (const id of ["acme-sales/plain/x", "acme-sales/p/done", "acme-sales/gone/x", "acme-ops/m/x"]) expect(asked).not.toContain(id);
+  });
+
+  it("numbers a review item's options as the review list does, and answers one with no claim by fixing the page and dismissing it", () => {
+    const five = ["A", "", "C", "D", "E"].map((text) => ({ text, page: "concepts/plain.md" }));
+    const withClaim = item("rev-00000000000a", ["concepts/plain.md"], "2026-05-01T00:00:00.000Z", { claimId: "acme-sales/plain/x", candidates: five });
+    const lint = item("rev-00000000000b", ["concepts/sales-metric.md"], "2026-05-02T00:00:00.000Z", { kind: "lint" });
+    const qs = pickDailyQuestions({ ...input, reviewItems: [withClaim, lint] }, "Иван Иванов", { perOwner: 2 });
+    expect(qs[0].options).toEqual(["A", "—", "C", "D"]);
+    expect(qs[0].answer).toEqual({ tool: "prime_radiant_review_resolve", args: { id: "rev-00000000000a" } });
+    expect(qs[1].question).toBe("A question about “Widget sales” is waiting for you.");
+    expect(qs[1].answer).toEqual({
+      tool: "prime_radiant_review_resolve",
+      args: { id: "rev-00000000000b", action: "dismiss" },
+      fixFirst: { tool: "prime_radiant_page_edit", args: { path: "concepts/sales-metric.md" } },
+    });
+  });
+
+  it("is the same list all day, until something is answered", () => {
+    const a = pickDailyQuestions(input, "Иван Иванов", { perOwner: 20 });
+    const later = pickDailyQuestions({ ...input, now: new Date("2026-05-20T22:00:00.000Z"), pages: [...input.pages].reverse(), reviewItems: [...items].reverse() }, "Иван Иванов", { perOwner: 20 });
+    expect(later).toEqual(a);
   });
 
   it("caps each owner at perOwner, five by default", () => {
@@ -200,4 +249,20 @@ describe("daily questions: settings", () => {
     expect(mine.questions.map((q) => q.kind)).toEqual(["review", "claim"]);
     expect(mine.questions[0].question).toBe("Кое е вярно за „A note“?");
   });
+
+  it("finds an owner's oldest review item behind hundreds of newer ones", async () => {
+    await ensureVault();
+    writeSettings({ domains: DOMAINS });
+    await vaultOperation("test: seed", async (tx) => {
+      await tx.write("concepts/note.md", pageText({ type: "concept", title: "A note", domain: "acme-sales", claims: [claim("acme-sales/note/x", "A note.")] }));
+      await tx.write("concepts/ops.md", pageText({ type: "concept", title: "Ops note", domain: "acme-ops", claims: [claim("acme-ops/note/x", "An ops note.")] }));
+    });
+    const oldest = addReviewItem(vaultDir(), { kind: "lint", pages: ["concepts/note.md"], dedupeKey: "test:oldest" }, "2026-01-01T00:00:00.000Z");
+    // One page more than the review list answers at a time (200).
+    for (let i = 0; i < 201; i++) {
+      addReviewItem(vaultDir(), { kind: "lint", pages: ["concepts/ops.md"], dedupeKey: `test:ops-${i}` }, new Date(Date.UTC(2026, 3, 1) + i * 60_000).toISOString());
+    }
+    const mine = await readDailyQuestions("Иван Иванов", { now: NOW });
+    expect(mine.questions[0]).toMatchObject({ kind: "review", reviewId: oldest.item.id });
+  }, 60_000);
 });

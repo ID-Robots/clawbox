@@ -27,7 +27,8 @@ import { pageSummary } from "./frontmatter";
 import { isPluginFormatFrontmatter } from "./plugin-files";
 import { buildLinkGraph, CONTENT_FOLDERS, contentReach, pathAliases } from "./links";
 import { scanSecrets } from "./redact";
-import { CLAIM_DATE_FIELDS, isIsoDate, ownerVerified, type PageFrontmatter } from "./schema";
+import { CLAIM_DATE_FIELDS, ownerVerified, type PageFrontmatter } from "./schema";
+import { isValidityDate } from "./validity";
 import type { VaultPage, VaultSnapshot } from "./vault";
 
 export const LIMITS = Object.freeze({
@@ -298,7 +299,7 @@ function lintPageShape(page: VaultPage, fm: PageFrontmatter, body: string, now: 
   if (metricWithoutAsOf(fm)) {
     const undated = fm.claims.filter((c) => !claimDated(c)).length;
     out.push(
-      finding("as-of-missing", "warning", page.path, "a metric page needs an as_of date (the day its figures were true on), on the page or on every claim", {
+      finding("as-of-missing", "warning", page.path, "a metric page needs an as_of date (the day its figures were true on), on the page or on every claim (a claim's valid_from or valid_until dates it too)", {
         claims: fm.claims.length,
         undated,
       }),
@@ -306,13 +307,14 @@ function lintPageShape(page: VaultPage, fm: PageFrontmatter, body: string, now: 
   }
 }
 
+/** A claim that names the day (or period) it holds on; validity.ts's reading, so the pass and the lint agree on what a date is. */
 function claimDated(claim: PageFrontmatter["claims"][number]): boolean {
-  return CLAIM_DATE_FIELDS.some((key) => isIsoDate(claim[key]));
+  return CLAIM_DATE_FIELDS.some((key) => isValidityDate(claim[key]));
 }
 
 /** A metric page with no `as_of` of its own and a claim (or no claim at all) that names no day either. */
 export function metricWithoutAsOf(fm: Pick<PageFrontmatter, "type" | "claims" | "as_of">): boolean {
-  if (fm.type !== "metric" || isIsoDate(fm.as_of)) return false;
+  if (fm.type !== "metric" || isValidityDate(fm.as_of)) return false;
   return fm.claims.length === 0 || !fm.claims.every(claimDated);
 }
 

@@ -17,8 +17,11 @@
  * answer is a verification like any other and the question is gone from the
  * next list (any verification answers it: a claim stamped `verified` is no
  * longer unverified, and a verification restarts its page's re-check clock).
- * Nothing here sends anything: delivery is the assistant's, and only when the
- * owner turned it on (`verification.outbound`, off by default).
+ * A review item with no claim to verify (a lint finding, a golden question
+ * gone wrong with no claim named) is answered by putting the page right and
+ * dismissing the item. Nothing here sends anything: delivery is the
+ * assistant's, and only when the owner turned it on (`verification.outbound`,
+ * off by default).
  */
 
 import { recheckOf, recheckPassed } from "./recheck";
@@ -50,6 +53,8 @@ export const HUB_MIN_INBOUND = 5;
 /** Nobody: a page with this owner and no domain owner gets no questions. */
 export const NO_OWNER = "unassigned";
 const MAX_QUOTED = 160;
+/** A review item's candidates shown with its question, numbered as the review list numbers them. */
+export const MAX_DAILY_OPTIONS = 4;
 
 export type DailyKind = "review" | "claim" | "recheck";
 
@@ -74,6 +79,8 @@ export interface DailyAnswer {
   tool: "prime_radiant_review_resolve" | "prime_radiant_claim_verify" | "prime_radiant_page_edit";
   /** The arguments that name what is asked about. */
   args: Record<string, string>;
+  /** A review item with no claim to verify: the page is put right with this first, then the item dismissed with `tool`. */
+  fixFirst?: { tool: "prime_radiant_page_edit"; args: { path: string } };
 }
 
 export interface DailyQuestion {
@@ -86,8 +93,9 @@ export interface DailyQuestion {
   reviewId?: string;
   /** The claim asked about (kind `claim`, and a review item about one claim). */
   claimId?: string;
-  /** The claim's text, or the review item's candidate answers. */
+  /** The claim's text. */
   text?: string;
+  /** A review item's candidate answers, in its own order: option n is candidate n of the review list. */
   options?: string[];
   /** The page's re-check day (kind `recheck`). */
   due?: string;
@@ -256,7 +264,8 @@ export function pickDailyQuestions(input: DailyInput, owner: string, options: { 
     if (out.length >= cap) break;
     const page = item.pages.map((p) => byPath.get(p)).find(Boolean) ?? item.candidates.map((c) => (c.page ? byPath.get(c.page) : undefined)).find(Boolean);
     if (!page) continue;
-    const options = item.candidates.map((c) => quote(c.text)).filter((t) => t !== "");
+    // Unfiltered, so the numbers stay the review list's (`candidate` of review_resolve's pick).
+    const options = item.candidates.slice(0, MAX_DAILY_OPTIONS).map((c) => quote(c.text.trim()) || "—");
     out.push({
       kind: "review",
       owner,
@@ -267,7 +276,9 @@ export function pickDailyQuestions(input: DailyInput, owner: string, options: { 
       ...(item.claimId ? { claimId: item.claimId } : {}),
       ...(options.length > 0 ? { options } : {}),
       question: fill(options.length > 1 ? words.review : words.reviewOpen, { title: quote(page.fm.title) }),
-      answer: { tool: "prime_radiant_review_resolve", args: { id: item.id } },
+      answer: item.claimId
+        ? { tool: "prime_radiant_review_resolve", args: { id: item.id } }
+        : { tool: "prime_radiant_review_resolve", args: { id: item.id, action: "dismiss" }, fixFirst: { tool: "prime_radiant_page_edit", args: { path: page.path } } },
     });
     if (item.claimId) askedClaims.add(item.claimId);
   }

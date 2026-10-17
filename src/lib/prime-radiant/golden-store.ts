@@ -2,9 +2,13 @@
  * The golden questions in the vault: `golden.json` beside index.md (golden.ts
  * says what it holds). Read without creating anything; changed under the
  * vault's lock as ONE commit `golden: <what>`, authored by whoever asked (the
- * owner, or the assistant through the MCP bearer), so History shows it and
- * Undo takes it back like any page change. The file is no page: the lint and
- * the nightly gate never read it, memory-wiki never lists it.
+ * owner, or the assistant through the MCP bearer); undo takes a commit back
+ * by its id (the newest cleanly — an older one may sit next to a later
+ * change, and is refused as a conflict rather than merged). The file is no
+ * page: the lint and the nightly gate never read it, memory-wiki never lists
+ * it, no page History shows it. A file with entries that cannot be read is
+ * never written over (`unreadable`), and a secret in a question or its
+ * answer is refused like one in a page (`lint_blocked`).
  *
  * SERVER ONLY.
  */
@@ -12,8 +16,9 @@
 import crypto from "crypto";
 import fs from "fs/promises";
 import path from "@/lib/runtime-path";
-import { commitPaths, VAULT_AUTHOR, withVaultLock, type VaultAuthor } from "./git";
+import { commitPaths, restorePaths, VAULT_AUTHOR, withVaultLock, type VaultAuthor } from "./git";
 import { GOLDEN_FILE, GOLDEN_ID_RE, GOLDEN_LIMITS, parseGoldenFile, serializeGoldenFile, type GoldenInput, type GoldenQuestion } from "./golden";
+import { lintSecretsInText } from "./lint";
 import { vaultDir } from "./paths";
 import { readSettings, type DomainSetting } from "./settings";
 import { vaultInitialised } from "./vault";
@@ -23,7 +28,7 @@ export const GOLDEN_DEFAULT_OWNER = "unassigned";
 
 export class GoldenError extends Error {
   constructor(
-    readonly code: "not_found" | "not_initialised" | "too_many",
+    readonly code: "not_found" | "not_initialised" | "too_many" | "unreadable" | "lint_blocked",
     message: string,
     readonly status: number,
   ) {
@@ -36,11 +41,13 @@ export function goldenFilePath(vault: string = vaultDir()): string {
   return path.join(vault, GOLDEN_FILE);
 }
 
+/** The file's text, or null when there is none. Any other read error throws: a file that is there but unreadable is no empty list. */
 async function readFileOrNull(file: string): Promise<string | null> {
   try {
     return await fs.readFile(file, "utf8");
-  } catch {
-    return null;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return null;
+    throw err;
   }
 }
 
@@ -88,9 +95,20 @@ async function changeGolden(
   return withVaultLock(vault, async () => {
     const file = goldenFilePath(vault);
     const before = await readFileOrNull(file);
-    const { questions, question } = fn(parseGoldenFile(before).questions);
+    const parsed = parseGoldenFile(before);
+    // Writing back what was read would drop what could not be read: a hand-broken file is mended first, never overwritten.
+    if (parsed.skipped > 0) {
+      throw new GoldenError(
+        "unreadable",
+        `${GOLDEN_FILE} holds ${parsed.skipped} entr${parsed.skipped === 1 ? "y" : "ies"} that cannot be read; undo the change that broke it, or mend the file by hand, before changing the questions.`,
+        409,
+      );
+    }
+    const { questions, question } = fn(parsed.questions);
     const text = serializeGoldenFile(questions);
     if (text === before) return { question, commit: null };
+    const secrets = lintSecretsInText(GOLDEN_FILE, text);
+    if (secrets.length > 0) throw new GoldenError("lint_blocked", `A golden question cannot hold a secret: ${secrets[0].message.replace(/^the page contains/, "it contains")}.`, 409);
     const tmp = `${file}.${crypto.randomBytes(6).toString("hex")}.tmp`;
     await fs.writeFile(tmp, text, { mode: 0o644, flag: "wx" });
     try {
@@ -103,9 +121,12 @@ async function changeGolden(
       const commit = await commitPaths(vault, message, [GOLDEN_FILE], options.author ?? VAULT_AUTHOR);
       return { question, commit };
     } catch (err) {
-      // Put the file back as it was: an uncommitted golden.json would ride along in the next commit of someone else.
-      if (before === null) await fs.rm(file, { force: true });
-      else await fs.writeFile(file, before);
+      // Put the file and the index back as HEAD has them: a staged golden.json would ride along in
+      // someone else's next commit, and keep Undo and the nightly merge refusing a dirty vault.
+      await restorePaths(vault, [GOLDEN_FILE]).catch(async () => {
+        if (before === null) await fs.rm(file, { force: true });
+        else await fs.writeFile(file, before);
+      });
       throw err;
     }
   });

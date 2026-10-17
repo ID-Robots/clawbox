@@ -6,12 +6,16 @@
  * the claims that share the question's words (golden.ts `goldenEvidence`) —
  * and has Flash judge each answer against the one its owner expects, in
  * batches of {@link GOLDEN_LIMITS.batch}. CAPPED: at most `maxQuestions` a
- * night (the ones asked longest ago first, so a big set takes turns) and
- * `goldenMaxTokens` an answer, every call recorded with `recordCost` under the
- * night's run. SKIPPABLE: offline, with no question, or when the model refuses
- * (no credential, auth), the check is skipped and says why — never a failed
- * night. A question answered `correct` last time and `wrong` now becomes a
- * `lint` review item for its owner (no run id: it never holds a night).
+ * night (the ones asked longest ago first, so a big set takes turns),
+ * `goldenMaxTokens` an answer and `GOLDEN_LIMITS.usdPerNight` a night, every
+ * call recorded with `recordCost` under the night's run; two calls in a row
+ * that fail stop the night's check. SKIPPABLE: offline, with no question,
+ * when the model refuses (no credential, auth) or when no call of the night
+ * judged anything, the check is skipped, says why and stores no score — never
+ * a failed night, never a 0 % in the history. A question answered `correct`
+ * last time and `wrong` now becomes a `lint` review item for its owner (no run
+ * id: it never holds a night) — unless the search failed for it that night:
+ * an answer from the claims' words alone is no proof the wiki changed.
  *
  * The history is in the state database (state v9: `golden_scores`,
  * `golden_results`); `goldenStatus` reads it for the status route without
@@ -136,17 +140,35 @@ export async function runGoldenScore(options: GoldenScoreOptions = {}): Promise<
   const pages = pagesOf(snapshot);
   const at = now();
   const evidence = new Map<string, GoldenEvidence[]>();
+  const searchFailed = new Set<string>();
   for (const q of asked) {
     let hits: readonly GoldenHit[] = [];
-    if (options.search) hits = await options.search(redactText(q.question).text).catch(() => []);
-    evidence.set(q.id, goldenEvidence(q.question, pages, { hits, now: at }).map(redactEvidence));
+    if (options.search) {
+      hits = await options.search(redactText(q.question).text).catch(() => {
+        searchFailed.add(q.id);
+        return [];
+      });
+    }
+    evidence.set(q.id, goldenEvidence(q.question, pages, { hits, now: at, answeredBy: { claimId: q.claimId, page: q.page } }).map(redactEvidence));
+  }
+  if (searchFailed.size > 0) {
+    result.notes.push(`The vault search failed for ${searchFailed.size} golden question(s); they were answered from the claims' words alone and raise no regression tonight.`);
   }
 
   const client = options.client ?? flashClient();
   const verdicts = new Map<string, { verdict: GoldenVerdict; why: string }>();
   let refusal: string | null = null;
+  let failuresInRow = 0;
   for (let start = 0; start < asked.length && !refusal; start += GOLDEN_LIMITS.batch) {
     if (options.signal?.aborted) break;
+    if (failuresInRow >= GOLDEN_LIMITS.failuresInRow) {
+      result.notes.push(`${failuresInRow} golden-question judge calls in a row failed; the rest of tonight's questions wait for the next night.`);
+      break;
+    }
+    if (result.usdEstimate >= GOLDEN_LIMITS.usdPerNight) {
+      result.notes.push(`The golden questions reached tonight's spending cap ($${GOLDEN_LIMITS.usdPerNight}); the rest wait for the next night.`);
+      break;
+    }
     const batch = asked.slice(start, start + GOLDEN_LIMITS.batch);
     const { system, user } = buildGoldenPrompt(
       batch.map((q) => ({ question: redactText(q.question).text, expected: redactText(q.expected).text, evidence: evidence.get(q.id) ?? [] })),
@@ -169,9 +191,11 @@ export async function runGoldenScore(options: GoldenScoreOptions = {}): Promise<
       try {
         answers = parseGoldenResponse(response.text, batch.length);
       } catch {
+        failuresInRow++;
         result.notes.push("The golden-question judge answered with no verdict for one batch; those questions count as not judged.");
         continue;
       }
+      failuresInRow = 0;
       batch.forEach((q, i) => {
         const a = answers.get(i);
         if (a) verdicts.set(q.id, { verdict: a.verdict, why: redactText(a.why).text });
@@ -179,40 +203,34 @@ export async function runGoldenScore(options: GoldenScoreOptions = {}): Promise<
     } catch (err) {
       const kind = err instanceof FlashCallError ? err.kind : "network";
       if (MODEL_REFUSALS.has(kind)) refusal = kind;
-      else result.notes.push(`A golden-question judge call failed (${kind}); its questions count as not judged.`);
+      else {
+        failuresInRow++;
+        result.notes.push(`A golden-question judge call failed (${kind}); its questions count as not judged.`);
+      }
     }
   }
-  if (refusal && verdicts.size === 0) {
+  if (verdicts.size === 0) {
+    // Nothing judged is no score: an outage must not read as 0 % correct, nor hide the last real score.
     const skipped = emptyResult("model_unavailable");
     skipped.calls = result.calls;
-    skipped.usdEstimate = result.usdEstimate;
-    skipped.notes.push(`ClawBox AI refused the golden-question judge (${refusal}); the check was skipped.`);
+    skipped.usdEstimate = Math.round(result.usdEstimate * 1e6) / 1e6;
+    skipped.notes.push(...result.notes);
+    skipped.notes.push(refusal ? `ClawBox AI refused the golden-question judge (${refusal}); the check was skipped.` : "No golden question could be judged tonight; the check was skipped.");
     return skipped;
   }
   if (refusal) result.notes.push(`ClawBox AI refused the golden-question judge part way (${refusal}); the rest count as not judged.`);
 
   result.tally = goldenTally(asked.map((q) => verdicts.get(q.id)?.verdict ?? null));
   const scoreId = options.runId ?? `gs-${crypto.randomBytes(6).toString("hex")}`;
-  result.scoreId = scoreId;
   const atIso = now().toISOString();
-  withStateDb(vault, (db) =>
-    runInTransaction(db, () => {
-      const t = result.tally;
-      db.prepare(
-        "INSERT OR REPLACE INTO golden_scores (id, run_id, at, asked, correct, wrong, missing, stale, failed, percent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      ).run(scoreId, options.runId ?? null, atIso, t.asked, t.correct, t.wrong, t.missing, t.stale, t.failed, t.percent);
-      const put = db.prepare("INSERT OR REPLACE INTO golden_results (score_id, question_id, verdict, why, claim_ids, at) VALUES (?, ?, ?, ?, ?, ?)");
-      for (const q of asked) {
-        const v = verdicts.get(q.id);
-        put.run(scoreId, q.id, v?.verdict ?? null, v?.why ?? null, JSON.stringify((evidence.get(q.id) ?? []).map((e) => e.claimId)), atIso);
-      }
-    }),
-  );
 
+  // The review items first: once the score below is stored, tonight's `wrong` is the verdict the next
+  // night compares with, so an item lost to an error after it would never be raised again. Raising is
+  // idempotent (one open item a question, by its dedupe key).
   const previous = new Map<string, GoldenVerdict>();
   for (const [id, r] of last) if (r.verdict) previous.set(id, r.verdict);
   const current = new Map<string, GoldenVerdict>();
-  for (const [id, v] of verdicts) current.set(id, v.verdict);
+  for (const [id, v] of verdicts) if (!searchFailed.has(id)) current.set(id, v.verdict);
   result.regressions = goldenRegressions(previous, current);
   for (const id of result.regressions) {
     const q = asked.find((x) => x.id === id) as GoldenQuestion;
@@ -242,6 +260,21 @@ export async function runGoldenScore(options: GoldenScoreOptions = {}): Promise<
     );
     if (item.created) result.reviewItems.push(item.item.id);
   }
+
+  withStateDb(vault, (db) =>
+    runInTransaction(db, () => {
+      const t = result.tally;
+      db.prepare(
+        "INSERT OR REPLACE INTO golden_scores (id, run_id, at, asked, correct, wrong, missing, stale, failed, percent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      ).run(scoreId, options.runId ?? null, atIso, t.asked, t.correct, t.wrong, t.missing, t.stale, t.failed, t.percent);
+      const put = db.prepare("INSERT OR REPLACE INTO golden_results (score_id, question_id, verdict, why, claim_ids, at) VALUES (?, ?, ?, ?, ?, ?)");
+      for (const q of asked) {
+        const v = verdicts.get(q.id);
+        put.run(scoreId, q.id, v?.verdict ?? null, v?.why ?? null, JSON.stringify((evidence.get(q.id) ?? []).map((e) => e.claimId)), atIso);
+      }
+    }),
+  );
+  result.scoreId = scoreId;
   result.usdEstimate = Math.round(result.usdEstimate * 1e6) / 1e6;
   return result;
 }
@@ -280,7 +313,11 @@ export function readGoldenHistory(vault: string = vaultDir(), limit = GOLDEN_TRE
   );
 }
 
-/** Each question's latest verdict, for the list beside it. Never creates the database. */
+/**
+ * Each question's latest verdict, for the list beside it: a night that left
+ * it unjudged keeps the verdict (and its why) from before, as the nightly
+ * check itself does. Never creates the database.
+ */
 export function readLatestVerdicts(vault: string = vaultDir()): Record<string, { verdict: GoldenVerdict | null; why: string | null; at: string }> {
   const out: Record<string, { verdict: GoldenVerdict | null; why: string | null; at: string }> = {};
   if (!stateDbExists(vault)) return out;
@@ -290,7 +327,8 @@ export function readLatestVerdicts(vault: string = vaultDir()): Record<string, {
       .all() as Array<{ question_id: string; verdict: string | null; why: string | null; at: string }>;
     for (const r of rows) {
       const verdict = (GOLDEN_VERDICTS as readonly string[]).includes(r.verdict ?? "") ? (r.verdict as GoldenVerdict) : null;
-      out[r.question_id] = { verdict, why: r.why, at: r.at };
+      const prior = out[r.question_id];
+      out[r.question_id] = verdict === null && prior ? { ...prior, at: r.at } : { verdict, why: r.why, at: r.at };
     }
   });
   return out;

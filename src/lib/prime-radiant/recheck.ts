@@ -8,11 +8,19 @@
  * `recordPage`), nor a source page, nor one of the connect pass's dated hubs
  * (a list of records). "Last looked at" is the latest of the page's writing,
  * its own `as_of`, and any verification on it — so a claim verified on the
- * page (the owner's answer to a daily question) starts its clock again.
+ * page (the owner's answer to a daily question) starts its clock again. A
+ * METRIC with an `as_of` of its own counts from that day instead of its
+ * writing: figures true on 31 January are due a look in March, however
+ * recently a pass rewrote the page (or a bulk edit changed its owner).
+ *
+ * A page's own date that is a moment (`2026-06-01T08:00:00Z`) is due from
+ * that moment, as the lint's `stale-after-passed` has it; a bare day runs
+ * through its end (UTC).
  */
 
 import { recordPage } from "./identifiers";
-import { isIsoDate, type PageFrontmatter, type PageType } from "./schema";
+import type { PageFrontmatter, PageType } from "./schema";
+import { isValidityDate } from "./validity";
 
 /** Days between re-checks by page type; null = never. */
 export const RECHECK_DAYS: Readonly<Record<PageType, number | null>> = Object.freeze({
@@ -44,13 +52,21 @@ export function recheckDays(fm: Pick<RecheckFields, "type" | "title" | "hub">): 
   return RECHECK_DAYS[fm.type] ?? null;
 }
 
+/** A date field as epoch ms (a datetime without a zone read as UTC, as validity.ts reads it); NaN when it is none. */
+function moment(value: unknown): number {
+  if (!isValidityDate(value)) return Number.NaN;
+  return Date.parse(value.includes("T") && !/(?:[zZ]|[+-]\d{2}:?\d{2})$/.test(value) ? `${value}Z` : value);
+}
+
 /** The latest moment someone (or the writer) looked at the page, as epoch ms; NaN when nothing parses. */
-export function lastChecked(fm: Pick<RecheckFields, "generated" | "verified" | "claims" | "as_of">): number {
-  const moments = [fm.generated?.at, fm.verified?.at, typeof fm.as_of === "string" ? fm.as_of : null, ...fm.claims.map((c) => c.verified?.at)];
+export function lastChecked(fm: Pick<RecheckFields, "generated" | "verified" | "claims" | "as_of"> & { type?: PageType }): number {
+  // A metric's figures age from the day they were true on, not from when they were last written down.
+  const written = fm.type === "metric" && isValidityDate(fm.as_of) ? null : fm.generated?.at;
+  const moments = [written, fm.verified?.at, fm.as_of, ...fm.claims.map((c) => c.verified?.at)];
   let best = Number.NaN;
   for (const m of moments) {
-    if (typeof m !== "string" || !isIsoDate(m)) continue;
-    const t = Date.parse(m);
+    const t = moment(m);
+    if (Number.isNaN(t)) continue;
     if (Number.isNaN(best) || t > best) best = t;
   }
   return best;
@@ -72,9 +88,13 @@ export function recheckOf(fm: RecheckFields): Recheck {
   return { date: isoDay(from + days * DAY_MS), by: "type", days };
 }
 
-/** Whether the page is past its re-check day (a day runs through its end, UTC). */
+/** Whether the page is past its re-check day (a day runs through its end, UTC; the page's own moment from that moment). */
 export function recheckPassed(fm: RecheckFields, now: Date): boolean {
-  const { date } = recheckOf(fm);
-  if (!date) return false;
-  return now.getTime() > Date.parse(`${date}T23:59:59.999Z`);
+  const r = recheckOf(fm);
+  if (!r.date) return false;
+  if (r.by === "page" && typeof fm.stale_after === "string" && fm.stale_after.includes("T")) {
+    const at = moment(fm.stale_after);
+    if (!Number.isNaN(at)) return now.getTime() > at;
+  }
+  return now.getTime() > Date.parse(`${r.date}T23:59:59.999Z`);
 }

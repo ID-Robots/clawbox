@@ -10,7 +10,7 @@
 import { dailyOwners, DEFAULT_DAILY_LANGUAGE, pickDailyQuestions, type DailyLanguage, type DailyPage, type DailyQuestion, type DailyReviewItem } from "./daily";
 import { buildLinkGraph, isContentPage } from "./links";
 import { vaultDir } from "./paths";
-import { listReviewItems } from "./review-store";
+import { listReviewItems, MAX_REVIEW_LIST } from "./review-store";
 import { readSettings, type PrimeRadiantSettings } from "./settings";
 import { stateDbExists } from "./state-db";
 import { readVaultSnapshot, vaultInitialised, type VaultSnapshot } from "./vault";
@@ -55,13 +55,19 @@ export function dailyPages(snapshot: VaultSnapshot): DailyPage[] {
   return out;
 }
 
+/** Open review items read at most, the oldest included (the list pages newest first). */
+const MAX_OPEN_ITEMS = 5_000;
+
+/** Every open review item, up to {@link MAX_OPEN_ITEMS}. A state database that cannot be read throws: no silent empty step. */
 function openItems(vault: string): DailyReviewItem[] {
   if (!stateDbExists(vault)) return [];
-  try {
-    return listReviewItems(vault, { status: "open", limit: 200 }).items;
-  } catch {
-    return [];
+  const out: DailyReviewItem[] = [];
+  for (let offset = 0; offset < MAX_OPEN_ITEMS; offset += MAX_REVIEW_LIST) {
+    const page = listReviewItems(vault, { status: "open", limit: MAX_REVIEW_LIST, offset });
+    out.push(...page.items);
+    if (page.items.length < MAX_REVIEW_LIST || out.length >= page.total) break;
   }
+  return out;
 }
 
 /**

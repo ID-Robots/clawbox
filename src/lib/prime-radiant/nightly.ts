@@ -548,6 +548,9 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
   }
 }
 
+/** The longest the golden step may take; past it the questions not judged yet wait for the next night. */
+const GOLDEN_STEP_MS = 20 * 60_000;
+
 /** Memory Shard's index of the vault, when it is there; else no hits (the claims' words alone answer). */
 async function shardSearch(vault: string, question: string): Promise<readonly GoldenHit[]> {
   const { searchPrimeRadiant, vaultIndexingAllowed } = await import("./shard-index");
@@ -573,6 +576,8 @@ async function goldenStep(run: RunRecord, summary: NightlySummary, deps: Nightly
       maxQuestions: settings.golden.maxQuestions,
       online,
       search: deps.goldenSearch ?? ((q) => shardSearch(vault, q)),
+      // A model that hangs must not keep the night (and the busy flag every manual run waits on) for hours.
+      signal: AbortSignal.timeout(GOLDEN_STEP_MS),
     });
     summary.golden = g.skipped
       ? { skipped: g.skipped }

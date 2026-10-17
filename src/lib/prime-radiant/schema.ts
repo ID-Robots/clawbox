@@ -94,7 +94,7 @@ export interface PageFrontmatter {
   status: PageStatus;
   generated: Stamp;
   verified: Stamp | null;
-  /** ISO date (YYYY-MM-DD) or datetime after which the page needs a re-check; null = never. */
+  /** ISO date (YYYY-MM-DD) or datetime after which the page needs a re-check; null = its type decides (recheck.ts). */
   stale_after: string | null;
   sources: string[];
   privacy: PrivacyTier;

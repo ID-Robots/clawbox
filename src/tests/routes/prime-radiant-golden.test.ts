@@ -74,7 +74,7 @@ describe("golden routes", () => {
   it("read nothing into being: no vault, an empty list and no score", async () => {
     const res = await goldenGET(req("GET", "/golden"));
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ questions: [], verdicts: {}, score: { questions: 0, last: null, trend: [], change: null } });
+    expect(await res.json()).toEqual({ questions: [], skipped: 0, verdicts: {}, score: { questions: 0, last: null, trend: [], change: null } });
     const daily = await dailyGET(req("GET", "/daily?owner=Sales%20team"));
     expect(await daily.json()).toMatchObject({ initialised: false, outbound: false, owners: [], questions: [] });
     expect(fs.existsSync(vaultDir())).toBe(false);

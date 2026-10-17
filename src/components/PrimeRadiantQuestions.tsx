@@ -27,7 +27,7 @@ import {
  *    its change and a trend line — with how many came back right, wrong,
  *    missing or out of date.
  *  - Golden questions: each with its expected answer, owner and last verdict;
- *    add, edit and delete them (one commit each, in History).
+ *    add, edit and delete them (one commit each, undone by its id).
  *  - Daily questions: one owner at a time, in their language — open review
  *    items, unverified key facts, pages due a re-check — each opening the
  *    page or the Review tab, where it is answered like any other question.

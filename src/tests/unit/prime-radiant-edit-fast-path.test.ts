@@ -18,7 +18,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 const shard = vi.hoisted(() => ({ scheduleReindexAfterCommit: vi.fn() }));
 vi.mock("@/lib/prime-radiant/shard-index", () => shard);
 
-import { editPage, PageEditError } from "@/lib/prime-radiant/edit";
+import { editPage, PageEditError, readPagePatch } from "@/lib/prime-radiant/edit";
 import { ASSISTANT_AUTHOR } from "@/lib/prime-radiant/git";
 import { lintVault } from "@/lib/prime-radiant/lint";
 import { ensureVault, readListedPage, readPage, readVaultSnapshot, VaultLintBlockedError, vaultOperation } from "@/lib/prime-radiant/vault";
@@ -128,6 +128,22 @@ describe("a metadata edit", () => {
     const same = await editPage("concepts/linked.md", { owner: "finance-team" }, OWNER, { vault, now });
     expect(same).toMatchObject({ commit: null, changed: [] });
     expect(log()[0]).toBe(head);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(shard.scheduleReindexAfterCommit).not.toHaveBeenCalled();
+  });
+
+  it("sets and clears a page's as_of as metadata, refusing one that is no date", async () => {
+    const set = await editPage("concepts/linked.md", { as_of: "2026-09-30" }, OWNER, { vault, now });
+    expect(set.changed).toEqual(["as_of"]);
+    const page = await readPage("concepts/linked.md", vault);
+    expect(page?.parsed.ok && page.parsed.frontmatter.as_of).toBe("2026-09-30");
+    expect((await editPage("concepts/linked.md", { as_of: "2026-09-30" }, OWNER, { vault, now })).commit).toBeNull();
+    const cleared = await editPage("concepts/linked.md", { as_of: null }, OWNER, { vault, now });
+    expect(cleared.changed).toEqual(["as_of"]);
+    const after = await readPage("concepts/linked.md", vault);
+    expect(after?.parsed.ok && "as_of" in after.parsed.frontmatter).toBe(false);
+    expect(readPagePatch({ as_of: "2026-09-30" })).toEqual({ as_of: "2026-09-30" });
+    expect(() => readPagePatch({ as_of: "last month" })).toThrow(PageEditError);
     await new Promise((r) => setTimeout(r, 50));
     expect(shard.scheduleReindexAfterCommit).not.toHaveBeenCalled();
   });

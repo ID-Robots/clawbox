@@ -176,6 +176,8 @@ const NEXT: Record<string, { code: ToolErrorCode; next: string }> = {
   taken: { code: "CONFLICT", next: "Leave the id out so one is allocated, or choose another." },
   retired: { code: "CONFLICT", next: "A retired id is never reused: leave the id out so a new one is allocated." },
   too_many_claims: { code: "CONFLICT", next: "Put the fact on another page, or delete a claim first." },
+  too_many: { code: "CONFLICT", next: "Delete a golden question the user no longer needs first (prime_radiant_golden_list, then prime_radiant_golden_delete), then add." },
+  unreadable: { code: "CONFLICT", next: "Tell the user the golden questions file needs mending: undo the change that broke it (prime_radiant_undo, if you made it) or let them fix it by hand." },
   deprecated: { code: "CONFLICT", next: "Merge into the page that replaced it (prime_radiant_pages), or ask the user which page should stay." },
   too_long: { code: "CONFLICT", next: "Shorten the page that stays (prime_radiant_page_edit) or merge fewer pages at once, then try again." },
   into_links: { code: "CONFLICT", next: "Ask the user: take those links out of the page that stays (prime_radiant_page_edit), or merge with keep_into_body: false." },
@@ -265,6 +267,13 @@ function committed(commit: unknown, what: string): string {
     : `${what} Nothing changed, so nothing was committed.`;
 }
 
+/** The same for golden.json, which is no page: no page History lists it, the commit id is the handle. */
+function goldenCommitted(commit: unknown, what: string): string {
+  return commit
+    ? `${what} Commit ${short(commit)}; prime_radiant_undo with that id takes it back while no later golden change sits next to it — else edit or delete the question instead.`
+    : `${what} Nothing changed, so nothing was committed.`;
+}
+
 // ── shapes the routes answer (the fields read here; older builds answer fewer) ─
 
 interface StatusBody {
@@ -312,7 +321,7 @@ interface DailyBody {
   language?: string | null;
   questions?: Array<{
     kind?: string; page?: string; title?: string; question?: string; options?: string[]; due?: string;
-    answer?: { tool?: string; args?: Record<string, string> };
+    answer?: { tool?: string; args?: Record<string, string>; fixFirst?: { tool: string; args: Record<string, string> } };
   }>;
 }
 
@@ -505,7 +514,7 @@ function accuracyOf(g: GoldenScoreBody): Record<string, unknown> {
 const DAILY_SENDING_OFF = "Sending is off: show these only when the owner asks for their questions; do not message anyone.";
 const DAILY_SENDING_ON = "Sending is on: you may send them to this owner over chat as one short message in their language — not on a timer of your own.";
 const DAILY_ANSWERS =
-  "Put each answer back through the tool named: a fact confirmed (or corrected, with their text) → prime_radiant_claim_verify; a review item → prime_radiant_review_resolve; a page still current → prime_radiant_page_edit with a new recheck_after.";
+  "Put each answer back through the tool named in answer_with: a fact confirmed (or corrected, with their text) → prime_radiant_claim_verify; a review item → prime_radiant_review_resolve with action pick and the option's number as candidate, or own_answer with their words; one with fix_first has no claim to verify — put the page right with that tool first, then dismiss the item; a page still current → prime_radiant_page_edit with a new recheck_after.";
 
 // ── read tools ─────────────────────────────────────────────────────────────
 
@@ -877,7 +886,7 @@ function registerEditTools(reg: Registrar): void {
 
   reg.tool(
     "prime_radiant_page_edit",
-    "Edit a wiki page: replace its summary (first paragraph) or whole markdown body, or change title, status, domain, owner, privacy, sources or re-check date. Claims change with the claim tools. You are named as the author in History.",
+    "Edit a wiki page: replace its summary (first paragraph) or whole markdown body, or change title, status, domain, owner, privacy, sources, re-check date or as_of (the day a metric's figures were true on). Claims change with the claim tools. You are named as the author in History.",
     {
       path: zPagePath("The page's vault path."),
       summary: zOptText(300, "New first paragraph; the rest of the body stays."),
@@ -888,17 +897,20 @@ function registerEditTools(reg: Registrar): void {
       owner: zOptText(80, "New owner."),
       privacy: zEnumOf(PRIVACY_TIERS, "New privacy tier.").optional(),
       sources: zOptList(20, 300, "The page's whole new source list."),
-      recheck_after: z.string().regex(/^(?:\d{4}-\d{2}-\d{2}|by_type|never)$/, "YYYY-MM-DD or by_type").optional()
+      recheck_after: z.string().regex(/^(?:\d{4}-\d{2}-\d{2}|by_type)$/, "YYYY-MM-DD or by_type (records are never re-checked by type; give a far day to keep another page out)").optional()
         .describe("Day after which the page needs a re-check, or by_type: its type decides (metrics 30 days, records never)."),
+      as_of: z.string().regex(/^(?:\d{4}-\d{2}-\d{2}|none)$/, "YYYY-MM-DD or none").optional()
+        .describe("The day the page's figures were true on (a metric page needs one), or none to clear it."),
     },
     WRITE,
-    async (a: { path: string; summary?: string; body?: string; title?: string; status?: string; domain?: string; owner?: string; privacy?: string; sources?: string[]; recheck_after?: string }) => {
+    async (a: { path: string; summary?: string; body?: string; title?: string; status?: string; domain?: string; owner?: string; privacy?: string; sources?: string[]; recheck_after?: string; as_of?: string }) => {
       const patch: Record<string, unknown> = {};
       for (const key of ["summary", "body", "title", "status", "domain", "owner", "privacy", "sources"] as const) if (a[key] !== undefined) patch[key] = a[key];
-      // by_type (and the older "never") clears the page's own date: its type's interval applies again.
-      if (a.recheck_after !== undefined) patch.stale_after = a.recheck_after === "by_type" || a.recheck_after === "never" ? null : a.recheck_after;
+      // by_type clears the page's own date: its type's interval applies again.
+      if (a.recheck_after !== undefined) patch.stale_after = a.recheck_after === "by_type" ? null : a.recheck_after;
+      if (a.as_of !== undefined) patch.as_of = a.as_of === "none" ? null : a.as_of;
       if (Object.keys(patch).length === 0) {
-        throw new ToolError("BAD_ARGUMENT", "Nothing to change was given.", "Pass at least one of summary, body, title, status, domain, owner, privacy, sources or recheck_after.");
+        throw new ToolError("BAD_ARGUMENT", "Nothing to change was given.", "Pass at least one of summary, body, title, status, domain, owner, privacy, sources, recheck_after or as_of.");
       }
       const r = await pr<{ path: string; commit?: string | null; changed?: string[]; findings?: unknown[] }>("PATCH", `/pages/${segments(a.path)}`, { body: patch });
       return json({ result: committed(r.commit, `Edited ${r.path}${r.changed?.length ? ` (${r.changed.join(", ")})` : ""}.`), checks: findingsOut(r.findings) });
@@ -1341,16 +1353,31 @@ function goldenOut(q: GoldenQuestionBody, verdicts: GoldenListBody["verdicts"]) 
 function registerGoldenTools(reg: Registrar): void {
   reg.tool(
     "prime_radiant_golden_list",
-    `List the golden questions — the owner's own test of the wiki: question, expected answer, owner, domain, the claim or page that answers it, last night's verdict — and the % correct with its trend. ${INFORMATION}`,
-    {},
+    `List the golden questions — the owner's own test of the wiki: question, expected answer, owner, domain, the claim or page that answers it, last night's verdict — and the % correct with its trend; narrow by domain or owner. ${INFORMATION}`,
+    {
+      domain: zOptText(64, "Only this domain's questions."),
+      owner: zOptText(80, "Only this owner's questions."),
+    },
     { ...READ, maxChars: LIST_MAX_CHARS },
-    async () => {
+    async ({ domain, owner }: { domain?: string; owner?: string }) => {
       const r = await pr<GoldenListBody>("GET", "/golden");
-      const questions = r.questions ?? [];
+      const same = (a: string | undefined, b: string | undefined) => (a ?? "").toLowerCase() === (b ?? "").toLowerCase();
+      const questions = (r.questions ?? []).filter((q) => (!domain || same(q.domain, domain)) && (!owner || same(q.owner, owner)));
+      // Whole rows to a budget under the reply's cap: a cut mid-row would be JSON no one can read.
+      const rows: Array<ReturnType<typeof goldenOut>> = [];
+      let used = 600;
+      for (const q of questions) {
+        const row = goldenOut(q, r.verdicts);
+        used += JSON.stringify(row, null, 2).length + 8;
+        if (used > LIST_MAX_CHARS - 400) break;
+        rows.push(row);
+      }
+      const more = questions.length - rows.length;
       return json({
         ...(r.score ? accuracyOf(r.score) : {}),
-        questions: questions.slice(0, 100).map((q) => goldenOut(q, r.verdicts)),
-        ...(questions.length > 100 ? { more_questions: questions.length - 100 } : {}),
+        total: questions.length,
+        questions: rows,
+        ...(more > 0 ? { more_questions: more, narrow: "Call again with domain or owner to see the rest." } : {}),
       });
     },
   );
@@ -1378,7 +1405,7 @@ function registerGoldenTools(reg: Registrar): void {
           ...(a.page ? { page: a.page } : {}),
         },
       });
-      return text(committed(r.commit, `Added golden question ${r.question?.id ?? ""} for ${r.question?.owner ?? "its owner"}; the nightly pass checks it from tonight.`));
+      return text(goldenCommitted(r.commit, `Added golden question ${r.question?.id ?? ""} for ${r.question?.owner ?? "its owner"}; the nightly pass checks it from tonight.`));
     },
   );
 
@@ -1407,13 +1434,13 @@ function registerGoldenTools(reg: Registrar): void {
       for (const c of a.clear ?? []) body[c === "claim_id" ? "claimId" : c] = null;
       if (Object.keys(body).length === 0) throw new ToolError("BAD_ARGUMENT", "Nothing to change was given.", "Pass the fields the user asked to change, or clear.");
       const r = await pr<{ question?: GoldenQuestionBody; commit?: string | null }>("PATCH", `/golden/${a.id}`, { body });
-      return text(committed(r.commit, `Edited golden question ${a.id}.`));
+      return text(goldenCommitted(r.commit, `Edited golden question ${a.id}.`));
     },
   );
 
   reg.tool(
     "prime_radiant_golden_delete",
-    "Delete a golden question, only when the user asked for it to go. It stays in History, where the owner can undo it.",
+    "Delete a golden question, only when the user asked for it to go. The commit it makes can be undone with prime_radiant_undo.",
     {
       id: z.string().regex(GOLDEN_ID_RE, "gq- and 12 hex characters").describe("The question's id from prime_radiant_golden_list."),
       confirm: zConfirm("Must be true. Set it only when the user asked for this question to be deleted."),
@@ -1421,7 +1448,7 @@ function registerGoldenTools(reg: Registrar): void {
     DESTRUCTIVE,
     async ({ id }: { id: string; confirm: true }) => {
       const r = await pr<{ question?: GoldenQuestionBody; commit?: string | null }>("DELETE", `/golden/${id}`);
-      return text(committed(r.commit, `Deleted golden question ${id}.`));
+      return text(goldenCommitted(r.commit, `Deleted golden question ${id}.`));
     },
   );
 
@@ -1429,7 +1456,7 @@ function registerGoldenTools(reg: Registrar): void {
     "prime_radiant_daily_questions",
     `Read today's verification questions for one owner — review items, unverified key facts, pages due a re-check — in their language, each with the tool its answer goes back through; without owner, who has questions waiting. Never send them unless sending is on. ${INFORMATION}`,
     { owner: zOptText(80, "The owner, as the domains list names them; leave out to list the owners.") },
-    { ...READ, maxChars: 6_000 },
+    { ...READ, maxChars: 16_000 },
     async ({ owner }: { owner?: string }) => {
       const r = await pr<DailyBody>("GET", "/daily", { query: owner ? { owner } : undefined });
       if (r.initialised === false) {
@@ -1455,6 +1482,7 @@ function registerGoldenTools(reg: Registrar): void {
           page: q.page,
           ...(q.due ? { recheck_was_due: q.due } : {}),
           answer_with: q.answer ? { tool: q.answer.tool, ...(q.answer.args ?? {}) } : null,
+          ...(q.answer?.fixFirst ? { fix_first: { tool: q.answer.fixFirst.tool, ...q.answer.fixFirst.args } } : {}),
         })),
       });
     },

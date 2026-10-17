@@ -33,14 +33,15 @@ export async function GET(req: Request) {
   const denied = await requireSession(req);
   if (denied) return denied;
   try {
-    const [{ questions }, score] = await Promise.all([readGoldenQuestions(), goldenStatus()]);
+    const [{ questions, skipped }, score] = await Promise.all([readGoldenQuestions(), goldenStatus()]);
     let verdicts: ReturnType<typeof readLatestVerdicts> = {};
     try {
       verdicts = readLatestVerdicts();
     } catch {
       verdicts = {};
     }
-    return json({ questions, verdicts, score });
+    // `skipped`: entries of golden.json that cannot be read — the list refuses changes until the file is mended.
+    return json({ questions, skipped, verdicts, score });
   } catch (err) {
     return vaultFailure("golden list", err);
   }
