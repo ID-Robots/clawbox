@@ -74,12 +74,17 @@ function ask(text) {
   } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
 }
 
-const files = fs.readdirSync(dir).filter((f) => f.endsWith(".json") && !["meta.json", "summary.json"].includes(f));
+// Scores live in a sidecar (<spec>.judge.json) so re-running acceptance or
+// copying results again never loses them.
+const files = fs.readdirSync(dir).filter((f) => f.endsWith(".json") && !f.endsWith(".judge.json") && !["meta.json", "summary.json"].includes(f));
 const all = [];
 for (const f of files) {
   const file = path.join(dir, f);
   const r = JSON.parse(fs.readFileSync(file, "utf8"));
   if (!r.spec) continue;
+  const side = file.replace(/\.json$/, ".judge.json");
+  if (fs.existsSync(side)) r.judge = JSON.parse(fs.readFileSync(side, "utf8"));
+  else if (r.judge) fs.writeFileSync(side, JSON.stringify(r.judge, null, 2));
   if (r.harnessError || !r.diff) { all.push(r); continue; }
   if (r.judge && !force) { all.push(r); continue; }
   const got = [];
@@ -91,7 +96,7 @@ for (const f of files) {
     const scores = Object.fromEntries(CRITERIA.map((c) => [c, Math.round(mean(c) * 10) / 10]));
     const overall = Math.round((CRITERIA.reduce((a, c) => a + scores[c], 0) / CRITERIA.length) * 10) / 10;
     r.judge = { model, samples: got.length, ...scores, overall, notes: got.map((g) => g.notes).filter(Boolean) };
-    fs.writeFileSync(file, JSON.stringify(r, null, 2));
+    fs.writeFileSync(side, JSON.stringify(r.judge, null, 2));
   }
   console.log(`${r.spec}: judge ${r.judge?.overall ?? "–"}`);
   all.push(r);

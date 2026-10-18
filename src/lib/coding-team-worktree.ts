@@ -150,6 +150,12 @@ export const GENERATED_ARTIFACT_EXCLUDES = [
   ".mypy_cache/",
   ".ruff_cache/",
   "node_modules/",
+  // The LINK a run's worktree gets (linkSharedNodeModules): a pattern with a
+  // trailing slash matches directories only, so `node_modules/` let a settle's
+  // `git add -A` commit the symlink — an absolute path into the project that
+  // is broken in every other checkout (bench kanban-app, 2026-10-18: the
+  // merged project could not start or run its tests anywhere else).
+  "/node_modules",
   ".venv/",
   "venv/",
   ".DS_Store",

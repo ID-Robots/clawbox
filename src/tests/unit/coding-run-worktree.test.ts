@@ -250,13 +250,16 @@ describe("a run's worktree", () => {
    * staged in the tree with the branch where it was.
    */
   it("says whether the tree holds work its branch does not, never counting the linked node_modules", async () => {
-    // The box excludes `node_modules/` with a trailing slash, which a symlink
-    // does not match: git lists the worktree's link as untracked.
+    // `node_modules/` (trailing slash) matches directories only; the box also
+    // excludes `/node_modules`, so the worktree's LINK is neither untracked
+    // nor swept into the branch by a settle's `git add -A`.
     fs.mkdirSync(path.join(dir, "node_modules"));
     const made = await addRunWorktree({ projectDir: dir, runId: "run-unsaved0", protectedRoot: PROTECTED });
     if (!made.ok) throw new Error(made.detail);
     expect(fs.lstatSync(path.join(made.path, "node_modules")).isSymbolicLink()).toBe(true);
-    expect(git(made.path, "status", "--porcelain")).toContain("node_modules");
+    expect(git(made.path, "status", "--porcelain")).not.toContain("node_modules");
+    git(made.path, "add", "-A");
+    expect(git(made.path, "diff", "--cached", "--name-only")).not.toContain("node_modules");
     expect(await worktreeHasChanges(made.path)).toBe(false);
 
     fs.writeFileSync(path.join(made.path, "draft.txt"), "untracked\n");

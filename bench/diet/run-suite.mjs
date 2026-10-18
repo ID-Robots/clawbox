@@ -189,10 +189,25 @@ async function acceptance(spec, projectDir, base, sha) {
   fs.rmSync(evalDir, { recursive: true, force: true });
   git(projectDir, "worktree", "add", "-q", "--detach", evalDir, sha);
   try {
+    // A run's worktree links the project's node_modules; a box without the
+    // `/node_modules` exclude committed that link (an absolute path into the
+    // project). Judge the code, not the link — and say it happened.
+    let committedLink = false;
+    try {
+      if (fs.lstatSync(path.join(evalDir, "node_modules")).isSymbolicLink()) { fs.unlinkSync(path.join(evalDir, "node_modules")); committedLink = true; }
+    } catch { /* none */ }
     // Dependencies the setup installed are not in git: lend them.
+    // When the project's own copy is broken (a merged link pointing at
+    // itself), install afresh in the checkout instead.
+    let lent = false;
     for (const dep of ["node_modules"]) {
       const src = path.join(projectDir, dep);
-      if (fs.existsSync(src) && !fs.existsSync(path.join(evalDir, dep))) fs.symlinkSync(src, path.join(evalDir, dep));
+      let usable = false;
+      try { usable = fs.statSync(src).isDirectory(); } catch { usable = false; }
+      if (usable && !fs.existsSync(path.join(evalDir, dep))) { fs.symlinkSync(src, path.join(evalDir, dep)); lent = true; }
+    }
+    if (!lent && spec.setup && fs.existsSync(path.join(evalDir, "package.json"))) {
+      try { sh(`cd '${evalDir}' && ${spec.setup}`, { stdio: ["ignore", "ignore", "pipe"], timeout: 20 * 60_000 }); } catch { /* the steps will say */ }
     }
     const hidden = path.join(spec.dir, "hidden");
     if (fs.existsSync(hidden)) {
@@ -203,12 +218,14 @@ async function acceptance(spec, projectDir, base, sha) {
       const t0 = Date.now();
       const r = spawnSync("bash", ["-c", step.cmd], {
         cwd: evalDir, encoding: "utf8", timeout: (step.timeoutSec ?? 300) * 1000, maxBuffer: 64 << 20,
-        env: { ...process.env, BASE: base, HIDDEN: hidden, PROJECT: projectDir, CI: "1" },
+        // PROJECT is the checkout under test (the run's final commit), never
+        // the owner's folder, which may not hold the run's work.
+        env: { ...process.env, BASE: base, HIDDEN: hidden, PROJECT: evalDir, CI: "1" },
       });
       steps.push({ name: step.name, ok: r.status === 0, exit: r.status, signal: r.signal ?? null, ms: Date.now() - t0, tail: `${r.stdout ?? ""}${r.stderr ?? ""}`.slice(-1500) });
     }
     const pr = await probe(spec, evalDir);
-    return { steps, probe: pr, pass: steps.every((s) => s.ok) && (pr ? pr.ok : true) };
+    return { steps, probe: pr, committedNodeModulesLink: committedLink, pass: steps.every((s) => s.ok) && (pr ? pr.ok : true) };
   } finally {
     try { git(projectDir, "worktree", "remove", "--force", evalDir); } catch { fs.rmSync(evalDir, { recursive: true, force: true }); }
   }
