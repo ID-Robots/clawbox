@@ -16,7 +16,7 @@ import { FlashCallError, type FlashClient, type FlashRequest } from "@/lib/prime
 import { createStubFlashClient } from "@/lib/prime-radiant/flash-stub";
 import { serializePage } from "@/lib/prime-radiant/frontmatter";
 import { readCosts } from "@/lib/prime-radiant/ingest-store";
-import { LINT_RULES, lintVault } from "@/lib/prime-radiant/lint";
+import { LINT_RULES, lintSecretsInText, lintVault } from "@/lib/prime-radiant/lint";
 import {
   buildSummaryPrompt,
   checkSentences,
@@ -35,7 +35,7 @@ import { withPluginFields } from "@/lib/prime-radiant/plugin-compat";
 import type { PageFrontmatter } from "@/lib/prime-radiant/schema";
 import { defaultSettings, readSettings, readSettingsPatch, SettingsError, writeSettings, type PrimeRadiantSettings } from "@/lib/prime-radiant/settings";
 import { getLint } from "@/lib/prime-radiant/service";
-import { ensureVault, listEntry, vaultOperation, type VaultSnapshot, type VaultTx } from "@/lib/prime-radiant/vault";
+import { ensureVault, listEntry, VaultLintBlockedError, vaultOperation, type VaultSnapshot, type VaultTx } from "@/lib/prime-radiant/vault";
 import { claim, frontmatter, vaultPage } from "../helpers/prime-radiant-fixtures";
 
 const NOW = new Date("2026-10-17T03:00:00.000Z");
@@ -142,6 +142,40 @@ function fakeRun(snap: { current: VaultSnapshot }) {
     return { commit: `c${commits.length}` };
   };
   return { run, commits };
+}
+
+/**
+ * {@link fakeRun} with the vault's secret check: a commit whose pages carry a
+ * secret is put back whole and refused, as `vaultOperation` refuses it.
+ */
+function lintingRun(snap: { current: VaultSnapshot }) {
+  const inner = fakeRun(snap);
+  const refusals: string[][] = [];
+  const run = async (message: string, fn: (tx: VaultTx) => Promise<void>) => {
+    const before = snap.current;
+    const touched: string[] = [];
+    const tracked = (tx: VaultTx) =>
+      ({
+        ...tx,
+        async writePage(rel: string, f: PageFrontmatter, body: string) {
+          touched.push(rel);
+          return tx.writePage(rel, f, body);
+        },
+      }) as VaultTx;
+    let findings: ReturnType<typeof lintSecretsInText> = [];
+    const r = await inner.run(message, async (tx) => {
+      await fn(tracked(tx));
+      findings = touched.flatMap((rel) => lintSecretsInText(rel, snap.current.pages.find((p) => p.path === rel)!.text));
+    });
+    if (findings.length > 0) {
+      snap.current = before;
+      inner.commits.pop();
+      refusals.push(findings.map((f) => f.path));
+      throw new VaultLintBlockedError(findings);
+    }
+    return r;
+  };
+  return { run, commits: inner.commits, refusals };
 }
 
 function fmOf(snap: VaultSnapshot, rel: string): PageFrontmatter {
@@ -642,6 +676,58 @@ describe("the pass", () => {
       const s = r.mergeSuggestions.find((m) => m.into === "entities/initech.md");
       expect(s).toMatchObject({ from: ["entities/initech-2.md"], reason: "suffix", ok: false, refused: { code: "verified" } });
       expect(s?.claims).toBeUndefined();
+    } finally {
+      dropState(state);
+    }
+  });
+
+  it("leaves out a page whose summary the lint refuses and saves every other one", async () => {
+    const state = tmpState();
+    try {
+      // A page whose text reads like a card number: any write of it is refused by the secret check.
+      const deposit = (body: string) =>
+        vault({
+          "concepts/deposit.md": page(
+            { title: "Deposit", claims: [claim("finance/deposit/paid", "Globex Ltd paid the deposit on 2026-09-02.")] },
+            `The deposit from [[entities/globex-ltd]]. ${body}\n`,
+          ),
+        });
+      const cleanSnap = { current: deposit("Paid by bank transfer.") };
+      const clean = await runSummaries(cleanSnap.current, lintingRun(cleanSnap).run, { stateVault: state, settings: settings(), rates: DEFAULT_COST_RATES, online: false, now: () => NOW });
+      expect(clean.refused).toEqual([]);
+      expect(generatedSummary(fmOf(cleanSnap.current, "concepts/deposit.md"))).toBeTruthy();
+
+      const snap = { current: deposit("Paid with card 4111 1111 1111 1111.") };
+      const original = snap.current.pages.find((p) => p.path === "concepts/deposit.md")!.text;
+      const { run, commits, refusals } = lintingRun(snap);
+      const r = await runSummaries(snap.current, run, { stateVault: state, settings: settings(), rates: DEFAULT_COST_RATES, online: false, now: () => NOW });
+      expect(refusals).toEqual([["concepts/deposit.md"]]);
+      expect(r.refused).toEqual([{ path: "concepts/deposit.md", reason: "secret-pattern (CARD)" }]);
+      // The page stays as it was; the rest of the commit is made without it, and counted once.
+      expect(snap.current.pages.find((p) => p.path === "concepts/deposit.md")!.text).toBe(original);
+      expect(commits).toHaveLength(1);
+      expect(r.commits).toEqual(["c1"]);
+      expect(r.written).toBe(clean.written - 1);
+      expect(r.byModel + r.byFacts).toBe(r.written);
+      expect(generatedSummary(fmOf(snap.current, "entities/globex-ltd.md"))).toBeTruthy();
+    } finally {
+      dropState(state);
+    }
+  });
+
+  it("still fails on a commit that fails for any other reason", async () => {
+    const state = tmpState();
+    try {
+      const opts = { stateVault: state, settings: settings(), rates: DEFAULT_COST_RATES, online: false, now: () => NOW };
+      const broken = async () => {
+        throw new Error("disk full");
+      };
+      await expect(runSummaries(vault(), broken, opts)).rejects.toThrow("disk full");
+      // A lint refusal of a page this pass did not write is no page to leave out.
+      const elsewhere = async () => {
+        throw new VaultLintBlockedError([{ rule: "secret-pattern", severity: "error", path: "concepts/elsewhere.md", message: "the page contains what looks like CARD", blocksCommit: true }]);
+      };
+      await expect(runSummaries(vault(), elsewhere, opts)).rejects.toBeInstanceOf(VaultLintBlockedError);
     } finally {
       dropState(state);
     }
