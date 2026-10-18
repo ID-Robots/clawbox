@@ -259,8 +259,6 @@ and **PR comment** reports it.
    board's address is masked in the log as soon as the reservation is read.
 4. **Rebuild** the board from the PR's branch, `nano-ci rebuild <serial>
    <branch>` (≤ 45 min) — the commit under test is written to the board first,
-   and so is `CLAWBOX_CODING_MIN_BUDGET_MINUTES=1` in the board's `.env`
-   (the shortest coding budget this test board takes; see `45-` below),
    and the rebuild checks the board reached exactly that commit, retrying once
    with the memory freed when the build failed — **wait** for `nano-ci health` (≤ 10 min), and
    **verify** that the board's `git rev-parse HEAD` is the head commit. A board
@@ -422,7 +420,6 @@ have waited out the gateway's settling) and `77-` and `78-` (`after-boot`).
 | `25-gateway-channels` | 5 min | the gateway's own `/startupz` answers 200 and `/readyz` reports its event loop not degraded on two probes in a row (a gateway that just started says `degraded: cpu` for its first seconds: that is waited out for up to 180 s, not reported); `/readyz` lists nothing in `failing`; `openclaw channels status --json` has no status issue and every enabled channel account is running with no last error | — (no channel configured: only the gateway half runs) |
 | `30-chat-turn` | 11 min | `openclaw agent --agent main -m "Reply with exactly this text and nothing else: NANO-CI-OK <serial>" --json` answers `NANO-CI-OK <serial>` within 240 s through the `main` agent's configured provider (ClawBox AI on every lab board); retried once after 60 s | — |
 | `40-coding-agent-run` | 10 min | `POST /setup-api/coding-agent/run` in a fresh `~/Projects/nano-ci-<run id>` (or inside the owner's project folder if one is set) asks for `hello.txt` with one given line; `runs?id=` is long-polled until the run settles; it must be `completed` and the file must hold exactly that line | — |
-| `45-coding-agent-time-budget` | 15 min | the coding agent's time budget on the real box: `POST /setup-api/coding-agent/run` refuses a budget the box would not take (too short — `2m` under a 5-minute floor, `0.5m` under a 1-minute one — in the past, not a budget) with 400 and `code: budget`; a run started with `budget: "5m"` on a trivial task answers with the resolved budget (deadline exactly 5 min after `setAt`, source `picker`, not routed to a team), stores it on the run record, exposes `timeRecord` while running, completes with stop reason `done` and `leftMs > 0`, starts no extra work (the whole budget is inside the safety margin), and serves `time-record.json` and `time-record.log`; a run whose task says "You have N minutes" — N the shortest budget the box takes, `minTimeBudgetMinutes` on `/setup-api/coding-agent/status`: 5 as shipped, 1 on a CI board, whose `.env` the workflow gives `CLAWBOX_CODING_MIN_BUDGET_MINUTES=1` before the rebuild — and is told to keep working 30 s longer gets the budget from its words (source `text`), has a `Safety margin:` note on its record, and is ended by the box itself — stopped at the deadline (stop reason `time`, resumable, within 120 s of the deadline, `leftMs ≤ 0`) or completed sooner with stop reason `done` | — |
 | `50-memory-pressure` | 7 min | swap is on with at least 1 GB; a throwaway hog (oom_score_adj 1000, random bytes so zram cannot compress it away) takes memory down to ~350 MB available and holds 45 s; the gateway's `/healthz` and the dashboard's `/login` must answer at least 3 in 4 probes meanwhile; afterwards `clawbox-gateway` and `clawbox-setup` are the same processes (no OOM kill, no restart) and the gateway settles again | — |
 | `55-multi-user` | 10 min | the owner adds a user through `POST /setup-api/users` (the real `user_add` root step) and the account is a `clawbox-users` member in no admin group, with `signIn.available` true; a wrong password is refused 401 and the user's own password signs them in through `/login-api`; with their cookie the routes that used to answer `owner_only` (preferences, kv, coding-agent runs, Files, store, VNC, ClawKeep, Prime Radiant, Users, Wi-Fi, AI status) answer them and the desktop page serves, while the owner's password route and the gateway console page answer 403 and `ws-config` hands them no token; their chat socket gets a hello naming `agent:main:clawbox-user-<name>` and no device token, the owner's `chat.history` is refused `FORBIDDEN`, a real turn on their key is answered and no frame of another session arrives; the owner removes them, the Linux account is gone and their password no longer signs in. Both cookies are minted on the board from `data/.session-secret` and never leave it | — |
 | `60-media-tools` | 10 min | a coding run asked to use `generate_image` leaves a PNG of at least 4 KB and 64×64 px (`generate_audio` and a clip of at least 8 KB when only audio is on), and the run's `mediaGenerated` counter shows the tool was used | the coding agent's `generateImages` and `generateAudio` are both off |
@@ -515,9 +512,7 @@ nano-ci recycle "$SERIAL"                           # to the reflash queue; no l
 Always recycle, also when the tests fail; only when `nano-ci recycle` itself
 fails, release the board with `nano-ci release "$SERIAL"`. `NANO_SHA` defaults
 to the commit your checkout is on — `10-build-identity` compares the board
-with it. `45-coding-agent-time-budget` waits a 5-minute deadline on a board
-whose `.env` does not lower the floor (`CLAWBOX_CODING_MIN_BUDGET_MINUTES=1`,
-then restart `clawbox-setup`, gives it the CI board's 1 minute).
+with it.
 
 ## Adding a test
 

@@ -72,17 +72,6 @@ import {
   TEAM_MESSAGE_WINDOW_MS,
 } from "../../src/lib/coding-team-messages";
 import { teamRunContext } from "../lib/run-context";
-// Pure too: the one reader of a budget token, so this end classifies a token
-// the way the routes read it and words a deadline the way the box stores it.
-import {
-  describeBudget,
-  MIN_BUDGET_TOKEN_CAP,
-  parseBudgetToken,
-  parseDuration,
-  parseIsoInstant,
-  safeTimeZone,
-  type TimeBudget,
-} from "../../src/lib/coding-time-budget";
 
 const MAX_TASK_CHARS = 4_000;
 /**
@@ -150,133 +139,6 @@ function routeCode(err: ApiError): string | null {
 
 const PROVIDER_CHOICE_NEXT =
   "The working folder was not the problem: do not change it. Call again with no provider and no model to use the owner's default account, or name a provider with a model it offers.";
-
-/** The longest `budget` token the routes read (parseBudgetToken's own ceiling). */
-const MAX_BUDGET_TOKEN_CHARS = 200;
-/** The largest `budget_token_cap` the schema takes: far above any real run, bounded like every number here. */
-const MAX_BUDGET_TOKEN_CAP = 1_000_000_000;
-
-const BUDGET_NEXT =
-  "The working folder was not the problem: do not change it. Call again with a budget the ClawBox takes — 30m, 1h, morning, 1d, a length such as 90m, an end time or \"start/end\" — or with no budget.";
-
-/** The two time-budget parameters coding_agent_run and coding_team_run share. */
-const BUDGET_PARAMS = {
-  budget: zOptText(
-    MAX_BUDGET_TOKEN_CHARS,
-    "How long it may work: 30m, 1h, morning, 1d, 90m, an end time (ISO; no offset = box time), start/end, or none.",
-  ),
-  budget_token_cap: zInt(
-    0,
-    MAX_BUDGET_TOKEN_CAP,
-    0,
-    `With budget: also stop once this many tokens are spent (at least ${MIN_BUDGET_TOKEN_CAP}). 0: no such ceiling.`,
-  ),
-};
-
-/**
- * The `budget` field of a start request, from the tool's two arguments — or
- * undefined when the caller named no budget, so the body is the body it always
- * was and the device decides as before (the task's words, the owner's default).
- *
- * Without a token ceiling the token travels as given and the DEVICE reads it,
- * on its own clock and in its own zone. With one, it travels in the object
- * shape the routes read beside a `tokenCap` (readBudgetInput): a chip as
- * `{ preset }`, an end time or a period as `{ preset: "custom", end, start? }`
- * with the strings untouched (an end without an offset is still read on the
- * box's wall clock), and a length as the end it comes to from now. A token
- * this end cannot place still travels as an object, so the device refuses it
- * with its own sentence rather than the ceiling being quietly dropped.
- */
-export function startBudgetField(
-  budget: string | undefined,
-  tokenCap: number | undefined,
-  now: number = Date.now(),
-): string | Record<string, unknown> | undefined {
-  const token = typeof budget === "string" ? budget.trim() : "";
-  const cap = typeof tokenCap === "number" && tokenCap > 0 ? tokenCap : null;
-  if (!token) {
-    if (cap === null) return undefined;
-    throw new ToolError(
-      "BAD_ARGUMENT",
-      "budget_token_cap is the spend ceiling of a time budget, and no budget was given.",
-      "Pass a budget with it, or leave budget_token_cap out.",
-    );
-  }
-  if (cap === null) return token;
-  if (!Number.isInteger(cap) || cap < MIN_BUDGET_TOKEN_CAP) {
-    throw new ToolError(
-      "BAD_ARGUMENT",
-      `budget_token_cap must be a whole number of at least ${MIN_BUDGET_TOKEN_CAP} tokens.`,
-      "Raise it, or pass 0 for no ceiling.",
-    );
-  }
-  if (token.toLowerCase() === "none") {
-    throw new ToolError(
-      "BAD_ARGUMENT",
-      "budget \"none\" sets no time budget, so there is nothing for budget_token_cap to belong to.",
-      "Leave budget_token_cap out with \"none\", or pass a budget.",
-    );
-  }
-  if (token.includes("/")) {
-    const parts = token.split("/").map((p) => p.trim());
-    if (parts.length === 2 && parts[0] && parts[1]) return { preset: "custom", start: parts[0], end: parts[1], tokenCap: cap };
-    return { preset: token, tokenCap: cap };
-  }
-  if (parseIsoInstant(token, "UTC") !== null) return { preset: "custom", end: token, tokenCap: cap };
-  // A chip or one of its spellings ("1hour", "tomorrow-morning"), or a length
-  // that IS a chip ("60m"): only the preset's name travels, and the device
-  // works out its deadline on its own clock. The zone does not matter here.
-  const read = parseBudgetToken(token, now, "UTC");
-  if (read.ok && read.budget && read.budget.preset !== "custom") return { preset: read.budget.preset, tokenCap: cap };
-  const ms = parseDuration(token);
-  if (ms !== null) return { preset: "custom", end: new Date(now + ms).toISOString(), tokenCap: cap };
-  return { preset: token, tokenCap: cap };
-}
-
-/** The budget half of a start route's answer (budgetAnswer in src/lib/coding-time-budget-server.ts). */
-interface BudgetAnswer {
-  timeBudget?: TimeBudget | null;
-  timeBudgetIgnored?: { phrase?: unknown; error?: unknown } | null;
-}
-
-/**
- * The run route's answer: a run — or, for a budget over 30 minutes, the team
- * it started instead (`routedToTeam: true`), or a run it kept one despite the
- * budget (`routedToTeam: false` and the `routeNote` that says why).
- */
-type RunStartAnswer = {
-  started?: boolean;
-  queued?: boolean;
-  run?: RunPayload;
-  team?: TeamPayload;
-  routedToTeam?: boolean;
-  routeNote?: string;
-} & BudgetAnswer;
-
-/**
- * What the answer says about the time budget, as sentences ending in a space
- * — "" when it named none and ignored none, so an answer without a budget is
- * the answer it always was. The deadline is worded on the BOX's clock: the
- * zone comes from the status route, which is the zone the box stores budgets
- * in, and only when there is a deadline to word.
- */
-async function budgetSentences(res: BudgetAnswer): Promise<string> {
-  const parts: string[] = [];
-  const budget = res.timeBudget;
-  if (budget && typeof budget.deadline === "string") {
-    const status = await apiTry<{ timeZone?: unknown }>("/setup-api/coding-agent/status", { timeoutMs: 5_000 });
-    const tz = safeTimeZone(status?.timeZone);
-    parts.push(
-      `Time budget: ${describeBudget(budget, Date.now(), tz)}. The ClawBox holds the work to it by itself and stops it cleanly at the deadline; tell the user when that is.`,
-    );
-  }
-  const ignored = res.timeBudgetIgnored;
-  if (ignored && typeof ignored.phrase === "string") {
-    const why = typeof ignored.error === "string" && ignored.error.trim() ? ` (${ignored.error.trim()})` : "";
-    parts.push(`The task's words "${ignored.phrase}" named a time budget the ClawBox would not take${why}, so that budget was not used — tell the user.`);
-  }
-  return parts.map((p) => `${p} `).join("");
-}
 
 const SWITCH_NEXT =
   "Do not retry. Tell the user the coding agent is switched off and that they can turn it on in the Coding Agent app on the ClawBox desktop.";
@@ -1121,7 +983,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
 
   reg.tool(
     "coding_agent_run",
-    "Use for any request to build or fix an app, site, script or tool bigger than one page; don't code it yourself or start servers. A Claude Code session works in the background in one folder (project_id or directory); the task must stand alone, budget caps how long it may work. Returns a run id at once: say it is running, then STOP; no coding_agent_status until asked. Do not start a second run.",
+    "Use for any request to build or fix an app, site, script or tool bigger than one page; don't code it yourself or start servers. A Claude Code session works in the background in one folder (project_id or directory); the task must stand alone. Returns a run id at once: say it is running, then STOP; no coding_agent_status until asked. Do not start a second run.",
     {
       task: zText(MAX_TASK_CHARS, "What to build or change, with enough detail to work unattended. Name the files or features involved."),
       project_id: zOptText(64, "A code project id from code_project_list. Give this OR directory."),
@@ -1151,16 +1013,12 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
         `Comma-separated relative paths (at most ${MAX_DELIVERABLE_PATHS}) the run MUST leave behind, not empty, e.g. "src/app.js,index.html".`,
       ),
       fix_ci: zBool(false, "With resume_run_id: fix that run's FAILED pull-request checks; the box appends what failed to the task."),
-      // Over 30 minutes the device starts a coding TEAM on the task instead of
-      // one run (unless the request names something only a run carries), and
-      // the answer below says so.
-      ...BUDGET_PARAMS,
     },
     { editions: ["openclaw", "hermes"], readOnly: false, openWorld: true, maxChars: 3_000 },
-    async ({ task, project_id, directory, resume_run_id, provider, model, deliverable_files, delivery_pipeline, input_files, fix_ci, budget, budget_token_cap }: {
+    async ({ task, project_id, directory, resume_run_id, provider, model, deliverable_files, delivery_pipeline, input_files, fix_ci }: {
       task: string; project_id?: string; directory?: string; resume_run_id?: string;
       provider?: string; model?: string; deliverable_files?: string; delivery_pipeline?: boolean;
-      input_files?: string; fix_ci?: boolean; budget?: string; budget_token_cap?: number;
+      input_files?: string; fix_ci?: boolean;
     }) => {
       if (fix_ci === true && !resume_run_id) {
         throw new ToolError("BAD_ARGUMENT", "fix_ci continues the run whose pull request failed its checks.", "Pass that run's id as resume_run_id with fix_ci.");
@@ -1224,13 +1082,9 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       // owner's own per-project default, which is the switch that makes the
       // flow automatic for a project they ship from every day.
       if (delivery_pipeline === true) body.pipeline = true;
-      // Only a budget the caller named travels, like the provider: without one
-      // the device reads the task's words and the owner's default.
-      const budgetField = startBudgetField(budget, budget_token_cap);
-      if (budgetField !== undefined) body.budget = budgetField;
-      let res: RunStartAnswer;
+      let res: { started?: boolean; queued?: boolean; run?: RunPayload };
       try {
-        res = await apiPost<RunStartAnswer>(
+        res = await apiPost<{ started?: boolean; queued?: boolean; run?: RunPayload }>(
           "/setup-api/coding-agent/run",
           body,
           { timeoutMs: 20_000, rules: RUN_RULES },
@@ -1248,26 +1102,15 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
           // default, which this process cannot read, so the pair can only be
           // refused at the route — and answering that with "pass a different
           // project_id" sent the caller to change a folder that was fine.
-          const code = routeCode(err);
+          const wrongPair = routeCode(err) === "provider";
           throw new ToolError(
             "BAD_ARGUMENT",
-            routeReason(err) ?? (code === "budget" ? "The ClawBox refused that time budget." : "The ClawBox refused that working folder."),
-            code === "provider" ? PROVIDER_CHOICE_NEXT : code === "budget" ? BUDGET_NEXT : WORKING_FOLDER_NEXT,
+            routeReason(err) ?? "The ClawBox refused that working folder.",
+            wrongPair ? PROVIDER_CHOICE_NEXT : WORKING_FOLDER_NEXT,
           );
         }
         throw err;
       }
-      const budgetText = await budgetSentences(res);
-      // A budget over 30 minutes: the device started a coding TEAM on the task
-      // instead of one run. Said first, so the assistant follows the team with
-      // the team's tool rather than looking for a run that does not exist.
-      if (res.routedToTeam === true && res.team?.id) {
-        const lead = "The time budget is over 30 minutes, so the ClawBox handed the task to a coding team instead of one run — that is expected. ";
-        return text(teamStartedText(res.team, res.queued === true, lead, budgetText));
-      }
-      // One run after all, though the budget is over 30 minutes: the route's
-      // own sentence says what kept it a run.
-      const routeNote = typeof res.routeNote === "string" && res.routeNote.trim() ? `${res.routeNote.trim()} ` : "";
       const run = res.run;
       // QUEUED, not refused: the box was already running every run the owner
       // allows. The run starts by itself, in order, when one ends.
@@ -1275,8 +1118,6 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
         return text(
           `Queued coding run "${run.id}" for ${run.directory}${run.projectId ? ` (project "${run.projectId}")` : ""}: this ClawBox is already running as many coding runs as the owner allows`
           + `${run.queued?.position ? `, so it is number ${run.queued.position} in line` : ""}. It starts by itself when a running run ends — after a restart too — and only the owner can cancel it. `
-          + budgetText
-          + routeNote
           + `Do NOT start it again. Tell the user it is queued and stop; coding_run_list shows its place in line.`,
         );
       }
@@ -1301,8 +1142,6 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
         // an asset that did not arrive is something the user can fix — and
         // something the run will otherwise be blamed for not using.
         + inputsSentence(run, inputs.length)
-        + budgetText
-        + routeNote
         + "It works in the background on the ClawBox and may take several minutes. "
         + `Tell the user it is running and stop — the device shows its progress and tells them when it finishes. Check on it with coding_agent_status (run_id "${run.id}") only when the user asks.`,
       );
@@ -1908,30 +1747,6 @@ export function teamAdviceSentence(team: Pick<TeamPayload, "advice" | "singleRun
   return `Advice: ${advice.overlap}% of the files this plan's tasks name are shared with another task, so they cannot run side by side — a single coding_agent_run would likely have been cheaper. Prefer one next time for a goal like this.`;
 }
 
-/**
- * What a started (or queued) team is told to the assistant — by
- * coding_team_run, and by coding_agent_run when the device started a team for
- * a budget over 30 minutes instead of one run. `lead` opens it and `extra`
- * (sentences ending in a space — the time budget) goes just before the closing
- * "tell the user and stop".
- */
-function teamStartedText(team: TeamPayload, queued: boolean, lead = "", extra = ""): string {
-  if (queued) {
-    return `${lead}Queued coding team "${team.id}" for ${team.directory}${team.projectId ? ` (project "${team.projectId}")` : ""}: another team is working on this ClawBox`
-      + `${team.queuePosition ? `, so it is number ${team.queuePosition} in line` : ""}. It starts by itself when the team ahead of it finishes — after a restart too — and only the owner can cancel it. `
-      + extra
-      + "Do NOT start it again. Tell the user it is queued and stop; coding_team_status shows its place.";
-  }
-  const advice = teamAdviceSentence(team);
-  return `${lead}Started coding team "${team.id}" in ${team.directory}${team.projectId ? ` (project "${team.projectId}")` : ""}. `
-    + "The planner is reading the folder; workers follow — side by side in a folder project, one at a time in a code project. This takes a while. "
-    + (advice
-      ? `${advice} `
-      : "If the plan comes back with one task it runs as one ordinary run, and coding_team_status says so — and says when a single run would have been cheaper. ")
-    + extra
-    + "Tell the user it is running and stop — check on it later with coding_team_status.";
-}
-
 function describeTeam(team: TeamPayload, withLog: boolean): string {
   const parts: string[] = [];
   parts.push(`Team ${team.id}: ${team.status}${team.status === "queued" && team.queuePosition ? ` — number ${team.queuePosition} in line` : ""}${team.error ? ` — ${team.error}` : ""}`);
@@ -2013,44 +1828,46 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
 
   reg.tool(
     "coding_team_run",
-    "Hand a LARGER goal with several INDEPENDENT parts to a coding team: a planner splits it, workers do the tasks separately, a reviewer checks each. Prefer ONE coding_agent_run, which is cheaper, for one focused change or parts that edit mostly the same files; a one-task plan runs as one run anyway. Works in the background in ONE folder, within budget if set; follow it with coding_team_status.",
+    "Hand a LARGER goal with several INDEPENDENT parts to a coding team: a planner splits it, workers do the tasks in separate sessions, a reviewer checks each. Prefer ONE coding_agent_run, which is cheaper, for one focused change or parts that edit mostly the same files; a one-task plan runs as one run anyway. Works in the background in ONE folder; follow it with coding_team_status.",
     {
       goal: zText(MAX_GOAL_CHARS, "What to build or change, as a whole: the outcome and any constraints, not a task list. The planner writes the tasks."),
       project_id: zOptText(64, "A code project id from code_project_list. Give this OR directory."),
       directory: zOptText(512, "A folder inside the owner's project folder to work in (its name, or its absolute path), when it is not a code project."),
-      ...BUDGET_PARAMS,
     },
     { editions: ["openclaw", "hermes"], readOnly: false, openWorld: true, maxChars: 3_000 },
-    async ({ goal, project_id, directory, budget, budget_token_cap }: {
-      goal: string; project_id?: string; directory?: string; budget?: string; budget_token_cap?: number;
-    }) => {
+    async ({ goal, project_id, directory }: { goal: string; project_id?: string; directory?: string }) => {
       const body: Record<string, unknown> = { goal };
       if (project_id) body.projectId = project_id;
       if (directory) body.directory = directory;
-      // Only a budget the caller named travels: without one the device reads
-      // the goal's words and the owner's default, as it always has.
-      const budgetField = startBudgetField(budget, budget_token_cap);
-      if (budgetField !== undefined) body.budget = budgetField;
-      let res: { started?: boolean; queued?: boolean; team?: TeamPayload } & BudgetAnswer;
+      let res: { started?: boolean; queued?: boolean; team?: TeamPayload };
       try {
-        res = await apiPost<{ started?: boolean; queued?: boolean; team?: TeamPayload } & BudgetAnswer>("/setup-api/coding-agent/team", body, { timeoutMs: 20_000, rules: TEAM_RULES });
+        res = await apiPost<{ started?: boolean; queued?: boolean; team?: TeamPayload }>("/setup-api/coding-agent/team", body, { timeoutMs: 20_000, rules: TEAM_RULES });
       } catch (err) {
         if (err instanceof ApiError && err.status === 400) {
-          const wrongBudget = routeCode(err) === "budget";
-          throw new ToolError(
-            "BAD_ARGUMENT",
-            routeReason(err) ?? (wrongBudget ? "The ClawBox refused that time budget." : "The ClawBox refused that working folder."),
-            wrongBudget ? BUDGET_NEXT : WORKING_FOLDER_NEXT,
-          );
+          throw new ToolError("BAD_ARGUMENT", routeReason(err) ?? "The ClawBox refused that working folder.", WORKING_FOLDER_NEXT);
         }
         throw err;
       }
       const team = res.team;
-      if (res.queued && team?.id) return text(teamStartedText(team, true, "", await budgetSentences(res)));
+      if (res.queued && team?.id) {
+        return text(
+          `Queued coding team "${team.id}" for ${team.directory}${team.projectId ? ` (project "${team.projectId}")` : ""}: another team is working on this ClawBox`
+          + `${team.queuePosition ? `, so it is number ${team.queuePosition} in line` : ""}. It starts by itself when the team ahead of it finishes — after a restart too — and only the owner can cancel it. `
+          + "Do NOT start it again. Tell the user it is queued and stop; coding_team_status shows its place.",
+        );
+      }
       if (!res.started || !team?.id) {
         throw new ToolError("ENDPOINT_DOWN", "The ClawBox did not start the team.", "Call coding_team_status to see whether a team appeared; if not, tell the user and do not retry more than once.");
       }
-      return text(teamStartedText(team, false, "", await budgetSentences(res)));
+      const advice = teamAdviceSentence(team);
+      return text(
+        `Started coding team "${team.id}" in ${team.directory}${team.projectId ? ` (project "${team.projectId}")` : ""}. `
+        + "The planner is reading the folder; workers follow — side by side in a folder project, one at a time in a code project. This takes a while. "
+        + (advice
+          ? `${advice} `
+          : "If the plan comes back with one task it runs as one ordinary run, and coding_team_status says so — and says when a single run would have been cheaper. ")
+        + "Tell the user it is running and stop — check on it later with coding_team_status.",
+      );
     },
   );
 

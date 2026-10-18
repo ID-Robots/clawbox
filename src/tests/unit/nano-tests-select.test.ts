@@ -45,7 +45,7 @@ describe.skipIf(!canRun)("scripts/nano-tests/select-tests.sh", () => {
 
   it("runs only the core smoke set for changes that never reach a board", () => {
     for (const p of [
-      "src/tests/unit/coding-time-budget.test.ts",
+      "src/tests/unit/coding-team.test.ts",
       "e2e/desktop.spec.ts",
       "e2e-install/10-setup-wizard.spec.ts",
       ".github/workflows/e2e-tests.yml",
@@ -60,11 +60,11 @@ describe.skipIf(!canRun)("scripts/nano-tests/select-tests.sh", () => {
   });
 
   it("adds the tests whose map covers a changed file", () => {
-    expect(select(["src/lib/coding-agent.ts"]).tests).toEqual([...CORE, "40-coding-agent-run", "45-coding-agent-time-budget", "60-media-tools"]);
+    expect(select(["src/lib/coding-agent.ts"]).tests).toEqual([...CORE, "40-coding-agent-run", "60-media-tools"]);
     expect(select(["src/lib/shared-browser.ts"]).tests).toEqual([...CORE, "78-one-browser", "79-browser-clean-start"]);
     expect(select(["scripts/setup-optimizations.sh"]).tests).toEqual([...CORE, "50-memory-pressure"]);
     expect(select(["config/clawbox-gateway.service", "src/components/Desktop.tsx"]).tests).toEqual([...CORE, "75-full-reboot", "78-one-browser", "79-browser-clean-start"]);
-    expect(select(["src/lib/coding-agent.ts"]).reason).toMatch(/^the core smoke set and 40-coding-agent-run 45-coding-agent-time-budget 60-media-tools, from 1 of 1 changed files/);
+    expect(select(["src/lib/coding-agent.ts"]).reason).toMatch(/^the core smoke set and 40-coding-agent-run 60-media-tools, from 1 of 1 changed files/);
   });
 
   it("runs a test whose own file changed, and nothing for a test that was removed", () => {

@@ -21,24 +21,6 @@ vi.mock("@/lib/route-auth", async () => {
   return { ...actual, requireSession };
 });
 vi.mock("@/lib/owner-session", () => ({ hasPersonSession }));
-// The owner's default time budget (none unless a case sets one) and the box's zone.
-const getDefaultTimeBudget = vi.hoisted(() => vi.fn());
-const getTokenLimit = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/coding-agent", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/coding-agent")>()),
-  getDefaultTimeBudget,
-  getTokenLimit,
-}));
-vi.mock("@/lib/timezone", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/timezone")>()),
-  readOsTimeZone: vi.fn(async () => "Europe/Sofia"),
-}));
-// A budgeted team's time record, as the store would answer it (none unless a case says).
-const readTimeRecordSummary = vi.hoisted(() => vi.fn());
-vi.mock("@/lib/coding-time-record", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("@/lib/coding-time-record")>()),
-  readTimeRecordSummary,
-}));
 
 let GET: (req: Request) => Promise<Response>;
 let POST: (req: Request) => Promise<Response>;
@@ -58,13 +40,10 @@ beforeEach(async () => {
   vi.clearAllMocks();
   requireSession.mockResolvedValue(null);
   hasPersonSession.mockResolvedValue(false);
-  getDefaultTimeBudget.mockResolvedValue(null);
-  getTokenLimit.mockResolvedValue(null);
   team.startTeam.mockResolvedValue(BOARD);
   team.stopTeam.mockReturnValue({ ...BOARD, status: "stopped" });
   team.getTeam.mockReturnValue(BOARD);
   team.listTeams.mockReturnValue([BOARD]);
-  readTimeRecordSummary.mockReturnValue(null);
   ({ GET, POST } = await import("@/app/setup-api/coding-agent/team/route"));
   ({ POST: STOP } = await import("@/app/setup-api/coding-agent/team/stop/route"));
 });
@@ -131,8 +110,6 @@ describe("POST", () => {
     expect(res.status).toBe(202);
     expect(await res.json()).toEqual({ started: true, queued: false, team: BOARD });
     expect(team.startTeam).toHaveBeenCalledWith({ goal: "Build it", projectId: null, directory: "site", source: "agent" });
-    // Absent, not `undefined`: toHaveBeenCalledWith cannot tell the two apart.
-    expect(team.startTeam.mock.calls[0][0]).not.toHaveProperty("timeBudget");
   });
 
   it("records the owner's cookie as the source", async () => {
@@ -217,107 +194,5 @@ describe("POST stop", () => {
     hasPersonSession.mockResolvedValueOnce(true);
     expect((await STOP(req("team/stop", { id: OWNERS.id }))).status).toBe(200);
     expect(team.stopTeam).toHaveBeenCalledWith(OWNERS.id);
-  });
-});
-
-/**
- * THE TIME BUDGET a team works to (src/lib/coding-time-budget.ts): the
- * picker's `budget`, else the goal's own words, else the owner's default —
- * resolved here on the box's clock and handed to the orchestrator, which keeps
- * it on the board. Without one, the call and the answer are what they were.
- */
-describe("POST with a time budget", () => {
-  const MIN = 60_000;
-  const span = (b: { deadline: string; setAt: string }) => Date.parse(b.deadline) - Date.parse(b.setAt);
-
-  it("hands the picker's budget to the orchestrator and names it in the answer", async () => {
-    const res = await POST(req("team", { goal: "Build it", projectId: "site", budget: "1d" }));
-    expect(res.status).toBe(202);
-    const body = await res.json();
-    expect(body).toMatchObject({ started: true, queued: false, team: BOARD, timeBudget: { preset: "1d", source: "picker", label: "1 day" } });
-    expect(span(body.timeBudget)).toBe(24 * 60 * MIN);
-    expect(team.startTeam).toHaveBeenCalledWith({ goal: "Build it", projectId: "site", directory: null, source: "agent", timeBudget: body.timeBudget });
-  });
-
-  it("reads the goal's words when the picker named none, and lets the picker beat them", async () => {
-    const said = await (await POST(req("team", { goal: "Arbeite bis morgen früh an dem Scraper" }))).json();
-    expect(said.timeBudget).toMatchObject({ preset: "morning", source: "text" });
-    const picked = await (await POST(req("team", { goal: "You have 2 hours", budget: "1h" }))).json();
-    expect(picked.timeBudget).toMatchObject({ preset: "1h", source: "picker" });
-  });
-
-  it("falls back to the owner's default, which \"none\" overrides", async () => {
-    getDefaultTimeBudget.mockResolvedValue("morning");
-    const fallback = await (await POST(req("team", { goal: "Build it" }))).json();
-    expect(fallback.timeBudget).toMatchObject({ preset: "morning", source: "default" });
-    const none = await (await POST(req("team", { goal: "Build it", budget: "none" }))).json();
-    expect(none).toEqual({ started: true, queued: false, team: BOARD });
-    expect(team.startTeam).toHaveBeenLastCalledWith({ goal: "Build it", projectId: null, directory: null, source: "agent" });
-    expect(team.startTeam.mock.calls[team.startTeam.mock.calls.length - 1][0]).not.toHaveProperty("timeBudget");
-  });
-
-  it("lets the goal's words beat the owner's default", async () => {
-    getDefaultTimeBudget.mockResolvedValue("morning");
-    const body = await (await POST(req("team", { goal: "You have 2 hours: build the invoice app" }))).json();
-    expect(body.timeBudget).toMatchObject({ preset: "custom", source: "text", label: "2 hours" });
-    expect(team.startTeam).toHaveBeenLastCalledWith(expect.objectContaining({ timeBudget: body.timeBudget }));
-  });
-
-  it("turns an unexpected failure into a 500 with a plain message", async () => {
-    team.startTeam.mockRejectedValueOnce(new Error("disk full"));
-    const res = await POST(req("team", { goal: "Build it", budget: "1h" }));
-    expect(res.status).toBe(500);
-    expect((await res.json()).error).toBe("disk full");
-  });
-
-  it("refuses a budget it cannot read, or one in the past, with 400 and a sentence — no team started", async () => {
-    for (const budget of ["later", "2020-01-01T00:00:00Z", { preset: "custom" }]) {
-      const res = await POST(req("team", { goal: "Build it", budget }));
-      expect(res.status, JSON.stringify(budget)).toBe(400);
-      expect(await res.json()).toMatchObject({ kind: "invalid", code: "budget", error: expect.stringMatching(/time budget/) });
-    }
-    expect(team.startTeam).not.toHaveBeenCalled();
-  });
-
-  it("answers a queued team with its budget too", async () => {
-    team.startTeam.mockResolvedValueOnce({ ...BOARD, status: "queued", queuePosition: 2 });
-    const body = await (await POST(req("team", { goal: "Build it", budget: "1h" }))).json();
-    expect(body).toMatchObject({ started: false, queued: true, timeBudget: { preset: "1h" } });
-  });
-
-  it("carries the owner's token cap on a budget over two hours as its spend ceiling", async () => {
-    getTokenLimit.mockResolvedValue(750_000);
-    // "1d", not "morning": the morning's length depends on the hour the suite runs at.
-    const body = await (await POST(req("team", { goal: "Scrape the catalogue", budget: "1d" }))).json();
-    expect(body.timeBudget).toMatchObject({ preset: "1d", tokenCap: 750_000 });
-    expect(team.startTeam).toHaveBeenLastCalledWith(expect.objectContaining({ timeBudget: body.timeBudget }));
-  });
-});
-
-describe("GET a team with a time budget", () => {
-  const BUDGET = { deadline: "2026-10-15T05:00:00.000Z", label: "Until tomorrow morning", preset: "morning", source: "picker", setAt: "2026-10-14T15:00:00.000Z" };
-  const TIMED = { ...BOARD, id: "team-timed001", timeBudget: BUDGET };
-  const RECORD = { budget: BUDGET, estimateMs: 3_600_000, tasks: [{ taskId: "t1", estimateMs: 3_600_000, actualMs: null }], startedAt: "2026-10-14T15:01:00.000Z", finishedAt: null, usedMs: 60_000, leftMs: null, stopReason: null, tokenCap: null, tokensUsed: null, extras: [], skipped: ["the e2e suite"], records: [], omittedRecords: 0 };
-
-  it("carries its time record — the plan, estimates and skips as of now — and no key without a budget or a record", async () => {
-    team.getTeam.mockReturnValueOnce(TIMED);
-    readTimeRecordSummary.mockReturnValueOnce(RECORD);
-    expect(await (await GET(req("team?id=team-timed001"))).json()).toEqual({ team: { ...TIMED, timeRecord: RECORD } });
-    expect(readTimeRecordSummary).toHaveBeenCalledWith("team-timed001", expect.any(Number), undefined);
-    // A budget, but no record yet (still queued): the board as it is.
-    team.getTeam.mockReturnValueOnce(TIMED);
-    expect(await (await GET(req("team?id=team-timed001"))).json()).toEqual({ team: TIMED });
-    // No budget: the store is not even asked.
-    readTimeRecordSummary.mockClear();
-    expect(await (await GET(req("team?id=team-abcd1234"))).json()).toEqual({ team: BOARD });
-    expect(readTimeRecordSummary).not.toHaveBeenCalled();
-  });
-
-  it("carries it on each budgeted team of the list, cut to the latest record lines", async () => {
-    team.listTeams.mockReturnValueOnce([TIMED, BOARD]);
-    readTimeRecordSummary.mockImplementation((id: string) => (id === TIMED.id ? RECORD : null));
-    expect(await (await GET(req("team"))).json()).toEqual({ teams: [{ ...TIMED, timeRecord: RECORD }, BOARD] });
-    expect(readTimeRecordSummary).toHaveBeenCalledTimes(1);
-    expect(readTimeRecordSummary).toHaveBeenCalledWith("team-timed001", expect.any(Number), 50);
   });
 });
