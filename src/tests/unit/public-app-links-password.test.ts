@@ -177,12 +177,73 @@ describe("a link with a password asks for it first", () => {
     expect(JSON.stringify(res.headers)).not.toMatch(/clawbox|next\.js/i);
   });
 
-  it("is not shown to a visitor without the link's token — that is still a bare 404", async () => {
-    const res = await ask(`/apps/${APP}/`, { token: false });
-    expect(res.status).toBe(404);
-    expect(res.body).not.toContain("<form");
+  /**
+   * TASK-1746 — the address copied from the browser's bar after the app
+   * opened has no token in it (the redirect took it out). On a link with a
+   * password that address still opens: the password is the secret.
+   */
+  it("is shown to a visitor without the link's token too, and the password lets them in — with both cookies, nothing of either in the address", async () => {
+    const locked = await ask(`/apps/${APP}/?tab=2`, { token: false });
+    expect(locked.status).toBe(401);
+    expect(locked.body).toContain("<form method=\"post\" action=\"/.link/unlock\">");
+    expect(locked.headers["set-cookie"]).toBeUndefined();
+    expect((await ask(`/apps/${APP}/api/x`, { token: false })).status).toBe(401);
+    expect(seen).toHaveLength(0);
+
+    expect((await unlock("not it", { token: false })).status).toBe(401);
+    const res = await unlock(PASSWORD, { token: false, next: `/apps/${APP}/?tab=2` });
+    expect(res.status).toBe(303);
+    expect(res.headers.location).toBe(`/apps/${APP}/?tab=2`);
+    const cookies = ([] as string[]).concat(res.headers["set-cookie"] ?? []);
+    expect(cookies).toHaveLength(2);
+    expect(cookies.find((c) => c.startsWith(`${links.COOKIE_NAME}=`))).toMatch(new RegExp(`^${links.COOKIE_NAME}=${TOKEN}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=\\d+$`));
+    expect(cookies.find((c) => c.startsWith(`${links.UNLOCK_COOKIE_NAME}=`))).toMatch(/; Path=\/; Secure; HttpOnly; SameSite=Lax; Max-Age=\d+$/);
+
+    // A cold client that holds exactly what the browser would now: both cookies.
+    const jar = cookies.map((c) => c.split(";")[0]).join("; ");
+    const open = await ask(`/apps/${APP}/?tab=2`, { headers: { cookie: jar } });
+    expect(open.status).toBe(200);
+    expect(open.body).toBe(`app:GET:/apps/${APP}/?tab=2`);
+    expect(seen[0].headers.cookie).toBeUndefined();
+    // The unlock cookie alone (a signed proof of this link's password) is enough as well.
+    expect((await ask(`/apps/${APP}/`, { token: false, unlock: unlockCookie(res) })).status).toBe(200);
+  });
+
+  it("without the token, a visitor is not counted as a token guesser — a bare address is not an attack", async () => {
+    for (let i = 0; i < 15; i += 1) expect((await ask(`/apps/${APP}/`, { token: false, ip: "203.0.113.77" })).status).toBe(401);
+    expect((await unlock(PASSWORD, { token: false, ip: "203.0.113.77" })).status).toBe(303);
+  });
+
+  it("the token-less way in exists only for a link with a password: an open link's bare address is still a 404", async () => {
+    writeLinks([link({ password: undefined })]);
+    expect((await ask(`/apps/${APP}/`, { token: false })).status).toBe(404);
     expect((await unlock(PASSWORD, { token: false })).status).toBe(404);
     expect(seen).toHaveLength(0);
+  });
+
+  it("a cookieless client walks the whole flow the way a new device does: ?k= → password → app → its API", async () => {
+    writeLinks([link({ apiAllow: ["/api"] })]);
+    const first = await ask(`/apps/${APP}/?k=${TOKEN}`, { token: false });
+    expect(first.status).toBe(303);
+    expect(first.headers.location).toBe(`/apps/${APP}/`);
+    let jar = ([] as string[]).concat(first.headers["set-cookie"] ?? []).map((c) => c.split(";")[0]).join("; ");
+    const page = await ask(`/apps/${APP}/`, { headers: { cookie: jar } });
+    expect(page.status).toBe(401);
+    expect(page.body).toContain("<form");
+    const form = new URLSearchParams({ next: `/apps/${APP}/`, password: PASSWORD }).toString();
+    const unlockRes = await ask(links.UNLOCK_PATH, { method: "POST", headers: { cookie: jar, "content-type": "application/x-www-form-urlencoded" }, body: form });
+    expect(unlockRes.status).toBe(303);
+    jar = `${jar}; ${([] as string[]).concat(unlockRes.headers["set-cookie"] ?? []).map((c) => c.split(";")[0]).join("; ")}`;
+    expect((await ask(`/apps/${APP}/`, { headers: { cookie: jar } })).status).toBe(200);
+    const api = await ask(`/apps/${APP}/api/items`, { headers: { cookie: jar } });
+    expect(api.status).toBe(200);
+    expect(api.body).toBe(`app:GET:/apps/${APP}/api/items`);
+    const post = await ask(`/apps/${APP}/api/items`, { method: "POST", headers: { cookie: jar, "content-type": "application/json" }, body: "{\"n\":1}" });
+    expect(post.status).toBe(200);
+    // Read-only: the same link, reads only.
+    writeLinks([link({ apiAllow: ["/api"], apiReadOnly: true })]);
+    expect((await ask(`/apps/${APP}/api/items`, { headers: { cookie: jar } })).status).toBe(200);
+    expect((await ask(`/apps/${APP}/api/items`, { method: "POST", headers: { cookie: jar, "content-type": "application/json" }, body: "{\"n\":2}" })).status).toBe(403);
   });
 
   it("stands in front of everything the link serves: allow-listed API paths and writes too", async () => {

@@ -185,18 +185,58 @@ describe("the app proxy", () => {
     expect(styled.headers.get("access-control-allow-origin")).toBe("https://studio.example");
   });
 
-  it("gives the app's DATA no CORS answer, only its code", async () => {
+  it("gives the app's pages and files no CORS answer beyond its code", async () => {
     // `Origin: null` proves nothing — any page on the web can send it from a
     // sandboxed iframe of its own, and over plain HTTP no second header tells
-    // the two apart. So the answer reaches the types that are CORS-fetched by
-    // construction and carry no per-request data; a notes app's notes are
-    // JSON, and JSON stays unreadable to another origin.
+    // the two apart. So outside the app's own /api tree the answer reaches
+    // the types that are CORS-fetched by construction and carry no
+    // per-request data; a JSON file or an HTML page stays unreadable.
     meta("site");
     for (const type of ["application/json", "text/html", "text/plain", "image/png"]) {
       handler = (_r, res) => { res.writeHead(200, { "content-type": type }); res.end("{}"); };
-      const res = await routes.GET(req("/apps/site/api/notes", { headers: { origin: "null" } }), ctx("site", ["api", "notes"]));
+      const res = await routes.GET(req("/apps/site/data/notes", { headers: { origin: "null" } }), ctx("site", ["data", "notes"]));
       expect(res.headers.get("access-control-allow-origin"), type).toBeNull();
     }
+  });
+
+  it("answers the sandboxed document's calls to the app's OWN /api (TASK-1746): any type, no credentials, range headers readable, preflight 204", async () => {
+    // The document the proxy serves has the origin `null` (its CSP sandbox),
+    // so the app's fetch of its own API was a CORS request its server never
+    // answered: every app with an API loaded and then did nothing.
+    meta("site");
+    handler = (_r, res) => { res.writeHead(206, { "content-type": "audio/mpeg", "content-range": "bytes 0-3/4", "accept-ranges": "bytes" }); res.end("abcd"); };
+    const res = await routes.GET(req("/apps/site/api/track/1", { headers: { origin: "null", range: "bytes=0-3" } }), ctx("site", ["api", "track", "1"]));
+    expect(res.status).toBe(206);
+    expect(res.headers.get("access-control-allow-origin")).toBe("null");
+    expect(res.headers.get("access-control-allow-credentials")).toBeNull();
+    expect(res.headers.get("access-control-expose-headers")).toContain("Content-Range");
+    expect(res.headers.get("vary")).toBe("Origin");
+    expect(res.headers.get("content-security-policy")).toContain("sandbox");
+
+    handler = (_r, res) => { res.writeHead(200, { "content-type": "application/json" }); res.end("{}"); };
+    expect((await routes.GET(req("/apps/site/api/notes", { headers: { origin: "null" } }), ctx("site", ["api", "notes"]))).headers.get("access-control-allow-origin")).toBe("null");
+    // Only the opaque origin the proxy itself makes — no other page's.
+    expect((await routes.GET(req("/apps/site/api/notes", { headers: { origin: "https://evil.example" } }), ctx("site", ["api", "notes"]))).headers.get("access-control-allow-origin")).toBeNull();
+    expect((await routes.GET(req("/apps/site/api/notes"), ctx("site", ["api", "notes"]))).headers.get("access-control-allow-origin")).toBeNull();
+    // An app that sets its own policy keeps it.
+    handler = (_r, res) => { res.writeHead(200, { "content-type": "application/json", "access-control-allow-origin": "https://partner.example" }); res.end("{}"); };
+    expect((await routes.GET(req("/apps/site/api/notes", { headers: { origin: "null" } }), ctx("site", ["api", "notes"]))).headers.get("access-control-allow-origin")).toBe("https://partner.example");
+
+    // A JSON POST preflights; the proxy answers it so a server that never
+    // heard of OPTIONS still works from inside the frame. Nothing reaches it.
+    seen.length = 0;
+    const preflight = await routes.OPTIONS(req("/apps/site/api/notes", { method: "OPTIONS", headers: { origin: "null", "access-control-request-method": "POST", "access-control-request-headers": "content-type" } }), ctx("site", ["api", "notes"]));
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get("access-control-allow-origin")).toBe("null");
+    expect(preflight.headers.get("access-control-allow-methods")).toContain("POST");
+    expect(preflight.headers.get("access-control-allow-headers")).toBe("content-type");
+    expect(seen).toHaveLength(0);
+    // A preflight for anything but the API, or from any other origin, goes to the app as before.
+    handler = (_r, res) => { res.writeHead(200, { allow: "GET" }); res.end(); };
+    const other = await routes.OPTIONS(req("/apps/site/page", { method: "OPTIONS", headers: { origin: "null", "access-control-request-method": "POST" } }), ctx("site", ["page"]));
+    expect(other.status).toBe(200);
+    expect(other.headers.get("access-control-allow-origin")).toBeNull();
+    expect(seen).toHaveLength(1);
   });
 
   it("carries a POST body through and hands a redirect back rather than following it", async () => {
