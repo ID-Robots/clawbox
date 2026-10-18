@@ -226,6 +226,18 @@ describe("redaction", () => {
     expect(redactText("4111  1111  1111  1111").kinds).not.toContain("CARD");
   });
 
+  it("never reads the tail of a longer grouped number as a card", () => {
+    // A DHL piece id: its last four groups are Luhn-valid 4-4-4-4.
+    const piece = "Ref: JD01 4600 0128 1089 8354";
+    expect(luhnValid("4600012810898354")).toBe(true);
+    expect(redactText(piece).text).toBe(piece);
+    expect(scanSecrets(piece)).toEqual([]);
+    expect(redactText("4111-1111-1111-1111-22").kinds).not.toContain("CARD");
+    expect(redactText("7 4111 1111 1111 1111").kinds).not.toContain("CARD");
+    // A card still stands out next to words and punctuation.
+    expect(redactText("card no. 4111 1111 1111 1111, exp 12/29").text).toBe(`card no. ${placeholder("CARD")}, exp 12/29`);
+  });
+
   it("never mistakes a Unix timestamp for a card number", () => {
     // A millisecond timestamp that happens to pass Luhn.
     let ms = 1_760_000_000_000;

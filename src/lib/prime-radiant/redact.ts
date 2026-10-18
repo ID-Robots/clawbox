@@ -276,10 +276,13 @@ function redactIbans(text: string, onHit: () => void): string {
  * separator throughout (all spaces or all hyphens). It stands alone: no
  * letter or digit of any script touches it on either side, so a hex hash
  * (`…498113d`), the digits of an IBAN-shaped word (`BG80BNBG4111…`) and a
- * column of small numbers (`7607 1214 138 14 6254`) are never cards.
+ * column of small numbers (`7607 1214 138 14 6254`) are never cards. Nor is
+ * a run that is the tail of a longer spaced or hyphenated number: a digit
+ * group one separator away on either side (a DHL piece id, `JD01 4600 0128
+ * 1089 8354`) makes the whole thing something else.
  */
 const CARD_RE =
-  /(?<![\p{L}\p{N}.,-])(?:\d{13,19}|\d{4}([ -])\d{4}\1\d{4}\1\d{4}(?:\1\d{3})?|\d{4}([ -])\d{6}\2\d{5})(?![\p{L}\p{N}])/gu;
+  /(?<![\p{L}\p{N}.,-])(?<!\p{N}[ -])(?:\d{13,19}|\d{4}([ -])\d{4}\1\d{4}\1\d{4}(?:\1\d{3})?|\d{4}([ -])\d{6}\2\d{5})(?![\p{L}\p{N}])(?![ -]\p{N})/gu;
 
 const EMAIL_RE = /(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,24}(?![A-Za-z0-9-])/g;
 
