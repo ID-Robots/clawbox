@@ -6063,6 +6063,10 @@ const LEAN_BRIEF_HEAD = [
   "The ClawBox checkout (/home/clawbox/clawbox), its data/ folder, your run record and session files are off limits, except your evidence folder ($CLAWBOX_RUN_ARTIFACTS_DIR). Folders beside yours are the owner's other projects: never list, search or read them.",
   "Files you were given are in $CLAWBOX_RUN_INPUTS_DIR; if one is missing, say so rather than look elsewhere.",
   "Bash may chain, pipe and background; end what you started by PID (pkill, killall and fuser are refused).",
+  // Every turn re-sends everything already in the context, so what enters it
+  // is paid for again on each later turn (bench/diet tabulate-refactor: a
+  // 2,700-line module read whole kept the context at ~150k for 40+ turns).
+  "Keep your context small — everything in it is re-sent every turn: Grep before you Read, read a large file in ranges (offset/limit) rather than whole, never re-read a file you already have, and keep command output short (quiet flags, `| tail -n 40` on long test or build output).",
 ];
 
 const LEAN_BRIEF_MIDDLE = [
