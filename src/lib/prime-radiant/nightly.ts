@@ -23,7 +23,8 @@
  *                sources (node-summary.ts), entities first, on the branch —
  *                the cheap model within its page and dollar caps when online,
  *                the facts' own words otherwise; unchanged neighbourhoods
- *                are skipped;
+ *                are skipped, and a page whose summary the lint refuses is
+ *                left as it was (a note names it), the rest still saved;
  *   5. lint      every page the branch changed (after every step that
  *                commits to it); an ERROR holds the night and becomes a
  *                `lint` review item;
@@ -102,7 +103,7 @@ export interface NightlySummary {
       })
     | { skipped: string };
   summaries:
-    | (Pick<SummariesRunResult, "planned" | "written" | "byModel" | "byFacts" | "waiting" | "unchanged" | "rejected" | "rejectedPages" | "skippedVerified" | "keptPerson" | "model"> & {
+    | (Pick<SummariesRunResult, "planned" | "written" | "byModel" | "byFacts" | "waiting" | "unchanged" | "rejected" | "rejectedPages" | "refused" | "skippedVerified" | "keptPerson" | "model"> & {
         mergeSuggestions: number;
         domainMismatches: number;
       })
@@ -556,7 +557,8 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
         notes.push(`The structure pass could not be saved: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
       }
     }
-    // 4c. summaries: every node's summary from its connections and sources, on the branch (after the structure pass, whose hubs and enrichment it reads)
+    // 4c. summaries: every node's summary from its connections and sources, on the branch (after the structure pass, whose hubs and enrichment it reads);
+    // a page whose summary the lint refuses is left out (`refused`), only a failed commit fails the step
     if (!settings.summaries.enabled) summary.summaries = { skipped: "disabled" };
     else {
       try {
@@ -574,6 +576,7 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
           unchanged: s.unchanged,
           rejected: s.rejected,
           rejectedPages: s.rejectedPages,
+          refused: s.refused.slice(0, MAX_SUMMARY_PATHS),
           skippedVerified: s.skippedVerified,
           keptPerson: s.keptPerson,
           model: s.model,
@@ -582,6 +585,11 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
         };
         run.usdEstimate += s.model.usdEstimate;
         if (s.written > 0) notes.push(`The summaries pass wrote ${s.written} summar${s.written === 1 ? "y" : "ies"} (${s.byModel} by the model, ${s.byFacts} from facts).`);
+        if (s.refused.length > 0) {
+          const shown = s.refused.slice(0, 5).map((r) => `${r.path} (${r.reason})`).join(", ");
+          const more = s.refused.length > 5 ? ` and ${s.refused.length - 5} more` : "";
+          notes.push(`The lint refused the new summary of ${s.refused.length} page${s.refused.length === 1 ? "" : "s"}, each left as it was: ${shown}${more}.`);
+        }
         if (s.mergeGroups > 0) notes.push(`${s.mergeGroups} duplicate entit${s.mergeGroups === 1 ? "y looks" : "ies look"} worth merging (the Checks tab lists them as duplicate-entity warnings, each naming the page to merge into).`);
       } catch (err) {
         summary.summaries = { skipped: "failed" };

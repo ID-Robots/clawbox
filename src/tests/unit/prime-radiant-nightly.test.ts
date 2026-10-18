@@ -242,6 +242,32 @@ describe("nightly pass", () => {
     expect(summary.notes.join(" ")).toMatch(/not reachable/);
   });
 
+  it("a page whose summary the lint refuses is left as it was; every other summary is still saved and merged", async () => {
+    await ensureVault();
+    const card = pageText({ title: "Deposit", claims: [claim("acme-sales/deposit/paid", "Acme Widgets Ltd received the deposit on 2026-05-02.")] }, "Paid with card 4111 1111 1111 1111.\n");
+    const terms = pageText({ title: "Terms", claims: [claim("acme-sales/terms/net", "Acme Widgets Ltd pays suppliers within 30 days.")] }, "Acme terms.\n");
+    // Written before the secret check could refuse it (lint off): no rewrite of it may land.
+    await vaultOperation(
+      "seed: pages",
+      async (tx) => {
+        await tx.write("concepts/deposit.md", card);
+        await tx.write("concepts/terms.md", terms);
+        await tx.write("index.md", "# Index\n\n- [[concepts/deposit]]\n- [[concepts/terms]]\n");
+      },
+      { lint: false },
+    );
+    const s = settings({ structure: { ...defaultSettings().structure, enabled: false } });
+    const run = await runNightly("manual", deps({ settings: { ...s, ingest: { ...s.ingest, folders: [] } }, online: async () => false }));
+    expect(run?.status).toBe("merged");
+    const summary = run!.summary as unknown as NightlySummary;
+    expect(summary.summaries).toMatchObject({ written: 1, refused: [{ path: "concepts/deposit.md", reason: "secret-pattern (CARD)" }] });
+    expect(summary.notes.join(" ")).toMatch(/The lint refused the new summary of 1 page, each left as it was: concepts\/deposit\.md \(secret-pattern \(CARD\)\)\./);
+    expect(summary.notes.join(" ")).not.toMatch(/could not be saved/);
+    const v = vaultDir();
+    expect(fs.readFileSync(path.join(v, "concepts", "deposit.md"), "utf8")).toBe(card);
+    expect(fs.readFileSync(path.join(v, "concepts", "terms.md"), "utf8")).not.toBe(terms);
+  });
+
   it("holds a night whose change carries a lint error; the owner merges it once its items are resolved", async () => {
     await ensureVault();
     // A page over the hard size cap: any change to it is a lint error.
