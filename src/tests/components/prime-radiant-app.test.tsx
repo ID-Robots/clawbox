@@ -1182,6 +1182,7 @@ describe("PrimeRadiantApp — Questions", () => {
     expect(await screen.findByTestId("prime-radiant-accuracy-percent")).toHaveTextContent("75% correct");
     expect(screen.getByTestId("prime-radiant-accuracy-change")).toHaveTextContent("+25 points since the last check");
     expect(screen.getByTestId("prime-radiant-accuracy-trend")).toBeInTheDocument();
+    expect(screen.queryByTestId("prime-radiant-accuracy-not-judged")).toBeNull();
     const row = await screen.findByTestId("prime-radiant-golden-row");
     expect(row).toHaveAttribute("data-verdict", "correct");
     expect(row).toHaveTextContent("What does the blue widget cost?");
@@ -1286,6 +1287,14 @@ describe("PrimeRadiantApp — Questions", () => {
     await waitFor(() => expect(calls.some((c) => c.method === "PUT" && c.url.endsWith("/settings"))).toBe(true));
     expect(await within(screen.getByTestId("prime-radiant-checks")).findByRole("alert")).toBeInTheDocument();
     await waitFor(() => expect(perOwner).toHaveValue(5));
+  });
+
+  it("says how many questions were not judged beside the % of those that were", async () => {
+    status = { ...STATUS, golden: { ...GOLDEN_SCORE, last: { ...GOLDEN_SCORE.last, asked: 30, correct: 5, wrong: 1, failed: 24, percent: 83.3 } } };
+    mount();
+    await openTab("questions");
+    expect(await screen.findByTestId("prime-radiant-accuracy-percent")).toHaveTextContent("83.3% correct");
+    expect(screen.getByTestId("prime-radiant-accuracy-not-judged")).toHaveTextContent("24 not judged");
   });
 
   it("says so when there are no golden questions, no score and no owners yet", async () => {
