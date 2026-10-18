@@ -1097,10 +1097,11 @@ function registerReviewTools(reg: Registrar): void {
       candidate: z.number().int().min(1).max(8).optional().describe("For pick: the candidate's number from prime_radiant_review_list."),
       text: zOptText(240, "For own_answer: the user's answer, one line."),
       page: zOptPagePath("For own_answer: the page it goes on, when not the item's first page."),
+      reason: zOptText(500, "Why, in the user's words when they gave one (kept on the item)."),
       confirm: zConfirm("Must be true. Set it only when the user told you how to settle this item."),
     },
     WRITE,
-    async (a: { id: string; action: string; candidate?: number; text?: string; page?: string; confirm: true }) => {
+    async (a: { id: string; action: string; candidate?: number; text?: string; page?: string; reason?: string; confirm: true }) => {
       let body: Record<string, unknown>;
       if (a.action === "pick") {
         if (a.candidate === undefined) throw new ToolError("BAD_ARGUMENT", "pick needs the candidate's number.", "Call again with candidate set to the number prime_radiant_review_list showed.");
@@ -1111,6 +1112,7 @@ function registerReviewTools(reg: Registrar): void {
       } else {
         body = { action: a.action };
       }
+      if (a.reason) body.reason = a.reason;
       const r = await pr<{ item?: { id?: string; status?: string; claimId?: string | null }; commit?: string | null; retired?: string[] }>("POST", `/review/${a.id}/resolve`, { body: { ...body, confirm: true } });
       if (a.action === "later" || a.action === "dismiss") return text(`Review item ${a.id} is now ${r.item?.status ?? a.action}.`);
       const retired = r.retired?.length ? ` Retired the other answers' ids: ${r.retired.join(", ")}.` : "";

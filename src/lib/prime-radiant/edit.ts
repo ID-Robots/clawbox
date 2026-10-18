@@ -18,10 +18,14 @@
  *   - a deleted claim is REMOVED, not retired. Retiring is what a verification
  *     does to a losing answer, and a retired id is refused for good — so the
  *     delete could not be undone (lint's `claim-id-retired-reuse`). The id is
- *     free to come back.
+ *     free to come back. The review items still waiting on it are closed
+ *     ("claim removed"); a later night asks again if it does come back.
  *   - a merge MOVES claims: the same id, the same text, the same verification
  *     on the page that stays. One it cannot move so — its id on a different
- *     claim there already — refuses the merge, and says which. The page that
+ *     claim there already — refuses the merge, and says which. The same fact
+ *     under two ids (a second copy of one document) becomes one claim there:
+ *     the first kept, the others' sources joined to its evidence
+ *     (`foldDuplicateClaims`); a verified claim is never folded. The page that
  *     stays keeps its body byte for byte unless the caller lets it change
  *     (`keep_into_body: false`): only its frontmatter takes the merge.
  *
@@ -31,14 +35,14 @@
  * SERVER ONLY.
  */
 
-import { allocateClaimId, assertClaimIdAvailable, buildClaimIndex, ClaimIdError, isClaimId, nowIso, slugify, type ClaimIndex } from "./claims";
+import { allocateClaimId, assertClaimIdAvailable, buildClaimIndex, ClaimIdError, foldDuplicateClaims, isClaimId, nowIso, slugify, type ClaimIndex } from "./claims";
 import { pageSummary, parsePage, serializeFrontmatter, splitFrontmatter } from "./frontmatter";
 import type { VaultAuthor } from "./git";
 import { createLinkResolver, extractLinks, pathAliases, relativeHref, rewriteLinks, type FoundLink } from "./links";
 import { LIMITS, lintVault, type LintFinding } from "./lint";
 import { isKnowledgePage, safePagePath, vaultDir } from "./paths";
 import { withPluginFields } from "./plugin-compat";
-import { followMovedClaims } from "./review-store";
+import { closeItemsForRemoved, followMovedClaims } from "./review-store";
 import {
   isIsoDate,
   PAGE_STATUSES,
@@ -871,7 +875,11 @@ export interface ClaimDeleteResult {
   wasVerified: boolean;
 }
 
-/** Remove a claim from its page — removed, not retired, so Undo can bring it back: one commit, `claim: delete <id>`. */
+/**
+ * Remove a claim from its page — removed, not retired, so Undo can bring it
+ * back: one commit, `claim: delete <id>`. The review items waiting on it ask
+ * about nothing now: they are closed, `claim removed`.
+ */
 export async function deleteClaim(rawId: string, page: string | null, who: EditWho, options: EditOptions = {}): Promise<ClaimDeleteResult> {
   const vault = options.vault ?? vaultDir();
   const id = claimIdOf(rawId);
@@ -885,6 +893,13 @@ export async function deleteClaim(rawId: string, page: string | null, who: EditW
     },
     { vault, now: options.now, author: who.author },
   );
+  if (op.commit) {
+    try {
+      closeItemsForRemoved(vault, [id], who.by, "claim removed", nowIso(options.now));
+    } catch {
+      /* they can be dismissed by hand */
+    }
+  }
   return { id, page: op.result.page, commit: op.commit, wasVerified: op.result.wasVerified };
 }
 
@@ -926,6 +941,8 @@ export interface PageMergeResult {
   commit: string | null;
   /** Ids of the claims the merged pages carried, now on `into` unchanged; `verified` the ones whose verification moved with them. */
   claims: string[];
+  /** Claims that said a fact `into` (or an earlier merged page) already held, folded into that claim: its id, the one it lives on under. */
+  folded: Array<{ id: string; into: string }>;
   verified: string[];
   /** Names `into` gained as aliases: the merged pages' titles and their own aliases. */
   aliases: string[];
@@ -1042,6 +1059,12 @@ function planMerge(snapshot: VaultSnapshot, vault: string, input: PageMerge, who
       }
     }
   }
+  // The same fact under two ids — a second copy of a document — is one claim on the page that stays.
+  const fold = foldDuplicateClaims(claims, at);
+  const foldedAway = new Set(fold.folded.map((f) => f.id));
+  claims.splice(0, claims.length, ...fold.claims);
+  for (let i = movedIds.length - 1; i >= 0; i--) if (foldedAway.has(movedIds[i])) movedIds.splice(i, 1);
+  for (const [i, c] of claims.entries()) slot.set(c.id, i);
   if (claims.length > fm.claims.length && claims.length > LIMITS.maxClaims) {
     throw new PageEditError(
       "too_many_claims",
@@ -1176,6 +1199,7 @@ function planMerge(snapshot: VaultSnapshot, vault: string, input: PageMerge, who
       into: into.path,
       from: froms.map((f) => f.path),
       claims: movedIds,
+      folded: fold.folded,
       verified: movedIds.filter((id) => claims[slot.get(id) ?? -1]?.verified),
       aliases: gainedAliases,
       sources: gainedSources,
@@ -1199,6 +1223,18 @@ function followReviewItems(vault: string, plan: MergePlan["result"], dryRun: boo
   } catch {
     // The items still name the claims, which is how they are settled.
     return 0;
+  }
+}
+
+/** The waiting review items about claims folded into a same-worded one: the question lives on under the kept claim. */
+export function closeFoldedItems(vault: string, folded: ReadonlyArray<{ id: string; into: string }>, by: string, at: string): void {
+  if (folded.length === 0) return;
+  const into = new Map(folded.map((f) => [f.id, f.into]));
+  try {
+    // One pass: an item whose claim and candidate both folded is closed once, with both ids.
+    closeItemsForRemoved(vault, [...into.keys()], by, (id) => `claim folded into ${into.get(id) ?? id}`, at);
+  } catch {
+    /* they can be dismissed by hand */
   }
 }
 
@@ -1266,6 +1302,7 @@ export async function mergePages(input: PageMerge, who: EditWho, options: EditOp
     const moved = new Set(plan.result.claims);
     syncClaims(vault, plan.page.frontmatter.claims.filter((c) => moved.has(c.id)).map((c) => ({ id: c.id, page: plan.result.into, updatedAt: c.updatedAt })));
     reviewItems = followReviewItems(vault, plan.result, false);
+    closeFoldedItems(vault, plan.result.folded, who.by, at);
   }
   return { ...plan.result, dryRun: false, commit: op.commit, reviewItems, findings: findingsOf(op.findings) };
 }

@@ -561,8 +561,7 @@ export function planSummaries(snapshot: Pick<VaultSnapshot, "pages">, options: S
   const duplicates = findDuplicateEntities(pages, inboundOf);
   const duplicatesOf = new Map(duplicates.map((g) => [g.canonical, g.duplicates]));
   const duplicate = new Set(duplicates.flatMap((g) => g.duplicates));
-  const linked = (p: string) => [...(graph.inbound.get(p) ?? []), ...(graph.outbound.get(p) ?? [])].filter(isContentPage);
-  const mismatches = domainMismatches(pages, linked, { configured: options.domains });
+  const mismatches = domainMismatches(pages, { configured: options.domains });
   const ctx: Context = { byPath, graph, duplicatesOf };
 
   const stats: SummaryPlanStats = { eligible: 0, byTier: { entity: 0, hub: 0, concept: 0 }, unchanged: 0, skippedVerified: 0, keptPerson: 0, noFacts: 0, duplicates: 0, leaves: 0, secret: 0 };

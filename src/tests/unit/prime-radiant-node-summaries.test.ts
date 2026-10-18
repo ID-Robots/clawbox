@@ -11,7 +11,8 @@ import os from "os";
 import path from "path";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_COST_RATES } from "@/lib/prime-radiant/cost-rates";
-import { domainMismatches, findDuplicateEntities, nameSkeleton, suggestDomain } from "@/lib/prime-radiant/entity-hygiene";
+import { slugify } from "@/lib/prime-radiant/claims";
+import { domainMismatches, findDuplicateEntities, nameSkeleton, rolePhrase, suggestDomain } from "@/lib/prime-radiant/entity-hygiene";
 import { FlashCallError, type FlashClient, type FlashRequest } from "@/lib/prime-radiant/flash-client";
 import { createStubFlashClient } from "@/lib/prime-radiant/flash-stub";
 import { serializePage } from "@/lib/prime-radiant/frontmatter";
@@ -783,17 +784,55 @@ describe("domain mismatch", () => {
   const known = new Set(DOMAINS);
 
   it("suggests the domain a role names, when that domain exists", () => {
-    expect(suggestDomain("finance", ["Maria Ivanova is the COO of Acme Widgets Ltd."], [], known)).toMatchObject({ suggested: "operations", reason: "role" });
+    expect(suggestDomain("finance", ["COO of Acme Widgets Ltd."], known)).toMatchObject({ suggested: "operations", reason: "role" });
     // "coo" inside a word is no COO; a domain the vault lacks is never suggested.
-    expect(suggestDomain("finance", ["The cooperation runs well."], [], known)).toBeNull();
-    expect(suggestDomain("finance", ["She is our general counsel."], [], known)).toBeNull();
-    expect(suggestDomain("operations", ["Maria Ivanova is the COO."], [], known)).toBeNull();
+    expect(suggestDomain("finance", ["cooperation lead."], known)).toBeNull();
+    expect(suggestDomain("finance", ["general counsel."], known)).toBeNull();
+    expect(suggestDomain("operations", ["COO."], known)).toBeNull();
+    // A role word that only opens a longer noun is no role.
+    expect(suggestDomain("sales", ["developer board for robots."], new Set([...DOMAINS, "engineering"]))).toBeNull();
+    expect(suggestDomain("sales", ["developer at Globex."], new Set([...DOMAINS, "engineering"]))).toMatchObject({ suggested: "engineering" });
+    // An attached hyphen is part of the noun; a dash after a space ends the role.
+    expect(suggestDomain("sales", ["developer-board for robots."], new Set([...DOMAINS, "engineering"]))).toBeNull();
+    expect(suggestDomain("sales", ["developer – robotics platforms."], new Set([...DOMAINS, "engineering"]))).toMatchObject({ suggested: "engineering" });
   });
 
-  it("else the domain a clear majority of its linked pages share", () => {
-    expect(suggestDomain("sales", [], ["finance", "finance", "finance", "finance", "operations", "general"], known)).toMatchObject({ suggested: "finance", reason: "neighbours", evidence: "4 of 5 linked pages are in finance" });
-    expect(suggestDomain("sales", [], ["finance", "finance", "operations", "operations", "sales"], known)).toBeNull();
-    expect(suggestDomain("sales", [], ["finance", "finance", "finance"], known)).toBeNull();
+  it("reads a role only from what a fact says the entity IS", () => {
+    const names = ["Maria Ivanova"];
+    expect(rolePhrase("Maria Ivanova is the COO of Acme Widgets Ltd.", names)).toBe("COO of Acme Widgets Ltd.");
+    expect(rolePhrase("Maria Ivanova serves as our interim CFO.", names)).toBe("CFO.");
+    expect(rolePhrase("Maria Ivanova's accountant is Jane Roe.", names)).toBeNull();
+    expect(rolePhrase("Maria Ivanova met the COO.", names)).toBeNull();
+    expect(rolePhrase("Acme's COO is Maria Ivanova.", names)).toBeNull();
+    // A dash after a space is a role boundary; one glued to the noun is not.
+    expect(rolePhrase("Maria Ivanova is the COO - Acme Widgets.", names)).toBe("COO - Acme Widgets.");
+  });
+
+  it("suggests nothing from role words said of others, nor from the domains of linked pages", () => {
+    const fm = (title: string, domain: string, texts: string[], type: "entity" | "concept" = "entity") =>
+      frontmatter({ type, title, domain, claims: texts.map((t, i) => claim(`${domain}/${slugify(title)}/f-${i}`, t)) });
+    const pages = [
+      // A company whose accountant and COO are named: its facts give roles to OTHERS.
+      { path: "entities/acme-ltd.md", fm: fm("Acme Ltd", "sales", ["Acme Ltd's accountant is Jane Roe.", "Acme Ltd has a new COO since May."]) },
+      // A product whose name holds a role word.
+      { path: "entities/jetson-developer-kit.md", fm: fm("Jetson Developer Kit", "sales", ["Jetson Developer Kit is a developer board."]) },
+      // An entity all of whose neighbours are in finance.
+      { path: "entities/hauler-co.md", fm: fm("Hauler Co", "sales", ["Hauler Co carries our parcels."]) },
+      ...[1, 2, 3].map((i) => ({ path: `concepts/f-${i}.md`, fm: fm(`F ${i}`, "finance", [`Invoice ${i} names Hauler Co.`], "concept") })),
+      ...[1, 2, 3].map((i) => ({ path: `concepts/o-${i}.md`, fm: fm(`O ${i}`, "operations", [`Route ${i}.`], "concept") })),
+    ];
+    expect(domainMismatches(pages, { configured: [...DOMAINS, "engineering"] })).toEqual([]);
+  });
+
+  it("takes no role from a historical claim", () => {
+    const page = (historical: boolean) => ({
+      path: "entities/acme-ltd.md",
+      fm: frontmatter({ type: "entity", title: "Acme Ltd", domain: "finance", claims: [claim("finance/acme-ltd/f-0", "Acme Ltd is the COO of Globex.", { historical })] }),
+    });
+    const known = new Set([...DOMAINS, "operations"]);
+    // Past its date, the fact says nothing about today's role.
+    expect(domainMismatches([page(true)], { configured: [...known] })).toEqual([]);
+    expect(domainMismatches([page(false)], { configured: [...known] })[0]).toMatchObject({ reason: "role", suggested: "operations" });
   });
 
   it("is a lint warning with the suggested domain, beside the duplicate-entity warning", () => {
@@ -816,17 +855,20 @@ describe("domain mismatch", () => {
     process.env.PRIME_RADIANT_DIR = root;
     try {
       await ensureVault();
-      // A haulier filed under finance whose linked pages are all in logistics; sales has pages of its own.
+      // A haulier filed under finance whose own fact says it is a logistics coordinator; sales has pages of its own.
       await vaultOperation("seed: haulier", async (tx) => {
-        await tx.write("entities/hauler-co.md", page({ type: "entity", title: "Hauler Co", domain: "finance" }, "Hauler Co.\n"));
-        for (let i = 1; i <= 5; i++) await tx.write(`concepts/route-${i}.md`, page({ title: `Route ${i}`, domain: "logistics" }, `Route ${i} with [[entities/hauler-co]].\n`));
+        await tx.write(
+          "entities/hauler-co.md",
+          page({ type: "entity", title: "Hauler Co", domain: "finance", claims: [claim("finance/hauler-co/role", "Hauler Co is our logistics coordinator for Plovdiv.")] }, "Hauler Co.\n"),
+        );
+        for (let i = 1; i <= 3; i++) await tx.write(`concepts/route-${i}.md`, page({ title: `Route ${i}`, domain: "logistics" }, `Route ${i} with [[entities/hauler-co]].\n`));
         for (let i = 1; i <= 3; i++) await tx.write(`concepts/deal-${i}.md`, page({ title: `Deal ${i}`, domain: "sales" }, `Deal ${i}.\n`));
       });
       const mismatch = async () => (await getLint(["entities/hauler-co.md"])).findings.filter((f) => f.rule === "domain-mismatch");
       // Nothing configured: the domains pages use.
-      expect(await mismatch()).toEqual([expect.objectContaining({ details: { domain: "finance", suggested: "logistics", reason: "neighbours" } })]);
-      // Configured without logistics: no domain the owner does not have is suggested.
-      writeSettings({ domains: [{ name: "finance", owner: "Finance desk" }, { name: "operations", owner: "Ops desk" }, { name: "sales", owner: "Sales desk" }] });
+      expect(await mismatch()).toEqual([expect.objectContaining({ details: { domain: "finance", suggested: "logistics", reason: "role" } })]);
+      // Configured without logistics (nor ops/operations under that role's names): no domain the owner does not have is suggested.
+      writeSettings({ domains: [{ name: "finance", owner: "Finance desk" }, { name: "sales", owner: "Sales desk" }] });
       expect(await mismatch()).toEqual([]);
     } finally {
       if (prev === undefined) delete process.env.PRIME_RADIANT_DIR;
@@ -837,7 +879,7 @@ describe("domain mismatch", () => {
 
   it("judges every entity when asked over the whole vault, and none when the vault knows one domain", () => {
     const pages = [{ path: "entities/x-corp.md", fm: frontmatter({ type: "entity", title: "X Corp", domain: "finance", claims: [claim("finance/x-corp/cfo", "X Corp's CFO signs the budget.")] }) }];
-    expect(domainMismatches(pages, () => [], { configured: ["finance"] })).toEqual([]);
+    expect(domainMismatches(pages, { configured: ["finance"] })).toEqual([]);
   });
 });
 

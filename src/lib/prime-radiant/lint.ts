@@ -463,7 +463,7 @@ export function lintVault(snapshot: VaultSnapshot, options: LintOptions = {}): L
     );
   }
 
-  // One entity under two pages, and an entity filed under a domain its neighbourhood disagrees with
+  // One entity under two pages, and an entity filed under a domain its own facts disagree with
   // (entity-hygiene.ts): suggestions for the owner, never errors.
   const entityPages = valid.map((v) => ({ path: v.page.path, fm: v.fm }));
   const contentInbound = (p: string) => [...(graph.inbound.get(p) ?? [])].filter(isContentPage).length;
@@ -479,8 +479,7 @@ export function lintVault(snapshot: VaultSnapshot, options: LintOptions = {}): L
       );
     }
   }
-  const linkedWith = (p: string) => [...(graph.inbound.get(p) ?? []), ...(graph.outbound.get(p) ?? [])].filter(isContentPage);
-  for (const m of domainMismatches(entityPages, linkedWith, { configured: options.domains, paths: scopeSet ?? undefined })) {
+  for (const m of domainMismatches(entityPages, { configured: options.domains, paths: scopeSet ?? undefined })) {
     findings.push(
       finding("domain-mismatch", "warning", m.path, `filed under ${m.domain}, but ${m.evidence}; suggested domain: ${m.suggested}`, {
         domain: m.domain,

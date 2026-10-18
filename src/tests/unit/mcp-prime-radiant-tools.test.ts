@@ -308,6 +308,16 @@ const CASES: Case[] = [
     bad: { id: REV, action: "approve", confirm: true },
   },
   {
+    tool: "prime_radiant_review_resolve",
+    args: { id: REV, action: "dismiss", reason: "The reminder adds a late fee.", confirm: true },
+    reply: { item: { id: REV, status: "resolved", claimId: CLAIM }, commit: null, retired: [] },
+    method: "POST",
+    path: `${BASE}/review/${REV}/resolve`,
+    sent: { body: { action: "dismiss", reason: "The reminder adds a late fee.", confirm: true } },
+    says: /is now resolved/,
+    bad: { id: REV, action: "dismiss", reason: 7, confirm: true },
+  },
+  {
     tool: "prime_radiant_review_raise",
     args: { claim_id: CLAIM, candidates: ["10 EUR", "12 EUR"], note: "The price list changed." },
     reply: { item: { id: REV } },

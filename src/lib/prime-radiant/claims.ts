@@ -199,6 +199,63 @@ export function allocateClaimId(
   throw new ClaimIdError("taken", base, `no free claim id near ${base}`);
 }
 
+// ── one claim per fact ────────────────────────────────────────────────────
+
+/** A claim's text as duplicates are told apart: Unicode-normalised, spacing and case folded, a closing stop dropped. */
+export function claimTextKey(text: string): string {
+  return text.normalize("NFKC").replace(/\s+/g, " ").trim().replace(/[\s.;,]+$/u, "").toLowerCase();
+}
+
+/**
+ * The fact a claim states, as duplicates are told apart: its text
+ * ({@link claimTextKey}) and the time it holds for — same-worded facts of two
+ * periods are two facts.
+ */
+export function claimFactKey(c: Pick<Claim, "text"> & Partial<Pick<Claim, "valid_from" | "valid_until" | "as_of" | "historical">>): string {
+  return JSON.stringify([claimTextKey(c.text), c.valid_from ?? null, c.valid_until ?? null, c.as_of ?? null, !!c.historical]);
+}
+
+const evidenceKey = (e: Claim["evidence"][number]) => JSON.stringify([e.kind ?? null, e.path ?? null, e.sourceId ?? null, e.lines ?? null]);
+
+export interface FoldedClaims {
+  claims: Claim[];
+  /** Each claim folded into another: its id and the id it lives on under. */
+  folded: Array<{ id: string; into: string }>;
+}
+
+/**
+ * One claim per fact on a page (pure): claims whose text reads the same
+ * ({@link claimTextKey}) for the same dates are one. The first is kept — its
+ * id, text, quote and status — with the higher confidence and the other
+ * copies' evidence joined to its own (a second copy of a document is a second
+ * source, never dropped). A verified claim is left as it is, neither kept
+ * into nor folded away: that is its owner's to settle. `at` stamps a kept
+ * claim that changed.
+ */
+export function foldDuplicateClaims(claims: readonly Claim[], at?: string): FoldedClaims {
+  const out: Claim[] = [];
+  const folded: FoldedClaims["folded"] = [];
+  const firstOf = new Map<string, number>();
+  for (const c of claims) {
+    const key = claimFactKey(c);
+    const slot = c.verified ? undefined : firstOf.get(key);
+    const kept = slot === undefined ? undefined : out[slot];
+    if (slot === undefined || !kept || kept.id === c.id) {
+      if (!c.verified && !firstOf.has(key)) firstOf.set(key, out.length);
+      out.push(c);
+      continue;
+    }
+    const have = new Set(kept.evidence.map(evidenceKey));
+    const evidence = [...kept.evidence, ...c.evidence.filter((e) => !have.has(evidenceKey(e)))];
+    const confidence = Math.max(kept.confidence, c.confidence);
+    if (evidence.length !== kept.evidence.length || confidence !== kept.confidence) {
+      out[slot] = { ...kept, evidence, confidence, ...(at ? { updatedAt: at } : {}) };
+    }
+    folded.push({ id: c.id, into: kept.id });
+  }
+  return { claims: out, folded };
+}
+
 /** Current time as the ISO string every `updatedAt` uses. */
 export function nowIso(now: Date = new Date()): string {
   return now.toISOString();

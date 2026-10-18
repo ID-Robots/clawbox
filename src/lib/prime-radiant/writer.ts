@@ -12,7 +12,7 @@
  * Pure: no fs, no network.
  */
 
-import { allocateClaimId, slugify, type ClaimIndex } from "./claims";
+import { allocateClaimId, claimFactKey, claimTextKey, slugify, type ClaimIndex } from "./claims";
 import { redactText } from "./redact";
 import { selfContainedClaim } from "./subject";
 import { historicalClaim, isValidityDate, textValidity, validityRange } from "./validity";
@@ -440,7 +440,10 @@ export function pathFor(type: PageType, title: string, taken: ReadonlySet<string
 export function pageBody(draft: PageDraft, source: string): string {
   const parts = [draft.summary];
   if (draft.details) parts.push(draft.details);
-  if (draft.facts.length > 0) parts.push(["## Key facts", "", ...draft.facts.map((f) => `- ${f.fact}`)].join("\n"));
+  // A fact the draft repeats is listed once, as it is one claim.
+  const seen = new Set<string>();
+  const facts = draft.facts.map((f) => f.fact).filter((f) => !seen.has(claimTextKey(f)) && !!seen.add(claimTextKey(f)));
+  if (facts.length > 0) parts.push(["## Key facts", "", ...facts.map((f) => `- ${f}`)].join("\n"));
   parts.push(["## Sources", "", `- \`${source.replace(/`/g, "'")}\``].join("\n"));
   return `${parts.join("\n\n")}\n`;
 }
@@ -478,19 +481,30 @@ export function buildPage(draft: PageDraft, source: string, ctx: BuildContext): 
   const entity = slugify(draft.title, 48);
   const claims: Claim[] = [];
   const usedOnPage = new Set<string>();
+  const byFact = new Map<string, Claim>();
   for (const fact of draft.facts) {
+    const confidence = Math.round(fact.confidence * 100) / 100;
+    const dates = claimDates(fact, updatedAt);
+    // The same fact said twice is one claim (the first, at the higher confidence), never a `-2` id beside it.
+    const key = claimFactKey({ text: fact.fact, ...dates });
+    const twin = byFact.get(key);
+    if (twin) {
+      twin.confidence = Math.max(twin.confidence, confidence);
+      continue;
+    }
     const id = allocateClaimId(ctx.claimIndex, draft.domain, entity, slugify(fact.fact, 48), path, usedOnPage);
     usedOnPage.add(id);
     const claim: Claim = {
       id,
       text: fact.fact,
-      confidence: Math.round(fact.confidence * 100) / 100,
+      confidence,
       status: "proposed",
       updatedAt,
       // The page's own document: a claim is never filed under another one (checkEvidence).
       evidence: [{ kind: "source", path: source, ...(fact.quote ? { note: fact.quote } : {}) }],
-      ...claimDates(fact, updatedAt),
+      ...dates,
     };
+    byFact.set(key, claim);
     claims.push(claim);
     const list = ctx.claimIndex.active.get(id) ?? [];
     list.push({ page: path, claim });
