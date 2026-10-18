@@ -199,7 +199,7 @@ describe("routing to ClawBox AI", () => {
     // into the owner's terminal the moment it opens there; the delegated runs
     // already restrict sources the same way.
     runWrapper({}, ["--setting-sources", "project", "-p", "x"]);
-    expect(readFileSync(claudeLog, "utf-8")).toBe("--effort\nultracode\n--setting-sources\nproject\n-p\nx\n");
+    expect(readFileSync(claudeLog, "utf-8")).toBe("--setting-sources\nproject\n-p\nx\n");
   });
 
   it("passes its arguments through to Claude Code untouched on a pinned level", () => {
@@ -220,10 +220,11 @@ describe("routing to ClawBox AI", () => {
  * terminal must follow the same setting the delegated runs use.
  */
 describe("effort", () => {
-  it("asks for ultracode with the flag and no env pin when nothing else was chosen", () => {
+  it("pins xhigh through the env, with no flag, when nothing else was chosen", () => {
+    // xhigh is the box's default since TASK-1749; ultracode is opt-in.
     runWrapper({}, ["-p", "explain this repo"]);
-    expect(readFileSync(claudeLog, "utf-8")).toBe("--effort\nultracode\n--setting-sources\nuser\n-p\nexplain this repo\n");
-    expect(capturedEnv().CLAUDE_CODE_EFFORT_LEVEL).toBeUndefined();
+    expect(readFileSync(claudeLog, "utf-8")).toBe("--setting-sources\nuser\n-p\nexplain this repo\n");
+    expect(capturedEnv().CLAUDE_CODE_EFFORT_LEVEL).toBe("xhigh");
   });
 
   it("follows the effort the owner picked in the Coding Agent app", () => {

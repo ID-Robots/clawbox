@@ -464,9 +464,11 @@ export const CODING_AGENT_DIR_CONFIG_KEY = "coding_agent_default_directory";
  *
  * "ultracode" is not a thinking level but Claude Code's own mode on top of
  * one: xhigh effort plus a standing opt-in to orchestrate the work with its
- * Workflow tool (fan-out, adversarial verification). It is the default
- * because a delegated run is unattended — the owner is not watching to notice
- * it gave up early — and it is the most thorough setting the harness has.
+ * Workflow tool (fan-out, adversarial verification). It was the default until
+ * TASK-1749: its fan-outs multiply every run's tokens (an owner measured a job
+ * at 20-30 million tokens that a single-agent tool did in ~500k), so the
+ * default is now xhigh — the same thinking level without the standing
+ * fan-out — and ultracode stays one tap away in the picker.
  * The wrapper requests it with `--effort ultracode` instead of the env pin
  * the fixed levels use, because a pinned CLAUDE_CODE_EFFORT_LEVEL blocks the
  * mode ("clear it and ultracode takes over"). Checked on this box: a -p run
@@ -489,7 +491,7 @@ export const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max", "ultracod
  */
 export const OFFERED_EFFORT_LEVELS: readonly CodingEffort[] = ["low", "xhigh", "max", "ultracode"];
 export type CodingEffort = (typeof EFFORT_LEVELS)[number];
-export const DEFAULT_EFFORT: CodingEffort = "ultracode";
+export const DEFAULT_EFFORT: CodingEffort = "xhigh";
 /** The one level the wrapper cannot pin through the environment — see EFFORT_LEVELS. */
 export const ULTRACODE_EFFORT: CodingEffort = "ultracode";
 export const CODING_AGENT_EFFORT_CONFIG_KEY = "coding_agent_effort";
@@ -539,6 +541,28 @@ const IDLE_CHECK_MS = 60_000;
  *  builds, verifies in the browser and opens a pull request was hitting the
  *  ceiling on ordinary tasks. */
 export const DEFAULT_MAX_TURNS = 400;
+
+/** A run's tokens by the four ways a provider bills them — see CodingRun.tokenBreakdown. */
+export interface TokenBreakdown {
+  input: number;
+  output: number;
+  cacheCreation: number;
+  cacheRead: number;
+}
+
+export function emptyTokenBreakdown(): TokenBreakdown {
+  return { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 };
+}
+
+/** A stored breakdown, leniently: a missing or bad figure is 0. */
+export function readTokenBreakdown(raw: unknown): TokenBreakdown {
+  const o = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const n = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0);
+  return { input: n(o.input), output: n(o.output), cacheCreation: n(o.cacheCreation), cacheRead: n(o.cacheRead) };
+}
+
+/** How many per-spawn figures a record keeps. */
+export const MAX_SPAWN_TOKENS_KEPT = 20;
 export const MIN_MAX_TURNS = 10;
 export const MAX_MAX_TURNS = 2_000;
 export const CODING_AGENT_TURNS_CONFIG_KEY = "coding_agent_max_turns";
@@ -1652,6 +1676,22 @@ export interface CodingRun {
   maxTurns: number;
   /** Tokens spent so far, summed the way a bill is — see the config key. */
   tokensUsed: number;
+  /**
+   * `tokensUsed` split the way a provider bills it: fresh input, output, and
+   * the cached prefix written and read back. Cache reads are most of a long
+   * run's total and cost a fraction of fresh input, so a total alone could not
+   * be compared with another tool's input/output figures (TASK-1749). Summed
+   * over every spawn of this record; a record from before the field reads as
+   * all zeros.
+   */
+  tokenBreakdown: TokenBreakdown;
+  /**
+   * The tokens each spawn of this record cost, in order: the first is the run
+   * itself, every later one a completion attempt, a Fix CI lap or a resume.
+   * A review pass is a record of its own (`reviewOf`). Capped at
+   * MAX_SPAWN_TOKENS_KEPT, the newest kept.
+   */
+  spawnTokens: number[];
   /** The ceiling that applied, or null when the run was uncapped. */
   tokenLimit: number | null;
   /**
@@ -4246,6 +4286,10 @@ function normalizeRun(raw: CodingRun): CodingRun {
       ? raw.modelsUsed.filter((m): m is string => typeof m === "string") : [],
     maxTurns: typeof raw.maxTurns === "number" ? raw.maxTurns : DEFAULT_MAX_TURNS,
     tokensUsed: typeof raw.tokensUsed === "number" ? raw.tokensUsed : 0,
+    tokenBreakdown: readTokenBreakdown((raw as { tokenBreakdown?: unknown }).tokenBreakdown),
+    spawnTokens: Array.isArray((raw as { spawnTokens?: unknown }).spawnTokens)
+      ? ((raw as { spawnTokens: unknown[] }).spawnTokens).filter((t): t is number => typeof t === "number" && Number.isFinite(t) && t >= 0).slice(-MAX_SPAWN_TOKENS_KEPT)
+      : [],
     tokenLimit: typeof raw.tokenLimit === "number" ? raw.tokenLimit : null,
     thinkingTokens: typeof raw.thinkingTokens === "number" ? raw.thinkingTokens : 0,
     lastActivityAt: typeof raw.lastActivityAt === "number" ? raw.lastActivityAt : 0,
@@ -4721,6 +4765,8 @@ interface LiveRun {
    * second try seconds later, at the same work.
    */
   tokensAtSpawn: number;
+  /** `run.tokenBreakdown` when this process began: the CLI's modelUsage counts from zero per process. */
+  breakdownAtSpawn: TokenBreakdown;
   /**
    * tool_use ids of sub-agents that have started and not yet reported back.
    * Ids rather than a counter: a tool_result can arrive out of order, and a
@@ -5054,6 +5100,7 @@ function detachedState(run: CodingRun, tools: SpawnTools, lostToRestart: boolean
     // the process being reattached is the spawn that billed it.
     sawModelAnswer: false,
     tokensAtSpawn: 0,
+    breakdownAtSpawn: { ...run.tokenBreakdown },
     sawThinking: false,
     thinkingSeen: 0,
     tools,
@@ -5204,6 +5251,8 @@ function cloneRun(run: CodingRun): CodingRun {
     filesTouched: [...run.filesTouched],
     progress: [...run.progress],
     progressAt: [...run.progressAt],
+    tokenBreakdown: { ...run.tokenBreakdown },
+    spawnTokens: [...run.spawnTokens],
     deniedActions: [...run.deniedActions],
     denials: run.denials.map((d) => ({ ...d })),
     allowRules: [...run.allowRules],
@@ -7296,6 +7345,30 @@ export const parseTodosForTests = parseTodos;
  * reports. Marked resumable: the work is real, it simply ran out of room —
  * the same shape as a step ceiling.
  */
+/**
+ * The breakdown raised to the CLI's own per-category bill for this process
+ * (modelUsage: every model, sub-agents and workflow agents included, counted
+ * from zero per process), never lowered — the live sum from the assistant
+ * events misses what a workflow's agents read from cache.
+ */
+function raiseTokenBreakdown(run: CodingRun, base: TokenBreakdown, modelUsage: Record<string, unknown>): void {
+  const proc = emptyTokenBreakdown();
+  for (const m of Object.values(modelUsage)) {
+    if (!m || typeof m !== "object") continue;
+    const u = m as Record<string, unknown>;
+    const n = (k: string) => (typeof u[k] === "number" && Number.isFinite(u[k] as number) ? (u[k] as number) : 0);
+    proc.input += n("inputTokens");
+    proc.output += n("outputTokens");
+    proc.cacheCreation += n("cacheCreationInputTokens");
+    proc.cacheRead += n("cacheReadInputTokens");
+  }
+  const b = run.tokenBreakdown;
+  b.input = Math.max(b.input, base.input + proc.input);
+  b.output = Math.max(b.output, base.output + proc.output);
+  b.cacheCreation = Math.max(b.cacheCreation, base.cacheCreation + proc.cacheCreation);
+  b.cacheRead = Math.max(b.cacheRead, base.cacheRead + proc.cacheRead);
+}
+
 function noteTokens(run: CodingRun, state: LiveRun, tokens: number): boolean {
   if (!(tokens > 0)) return false;
   run.tokensUsed += tokens;
@@ -7585,6 +7658,10 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
       const u = usage as Record<string, unknown>;
       const n = (k: string) => (typeof u[k] === "number" ? (u[k] as number) : 0);
       state.outputBilledInSegment += n("output_tokens");
+      run.tokenBreakdown.input += n("input_tokens");
+      run.tokenBreakdown.output += n("output_tokens");
+      run.tokenBreakdown.cacheCreation += n("cache_creation_input_tokens");
+      run.tokenBreakdown.cacheRead += n("cache_read_input_tokens");
       const stoppedNow = noteTokens(run, state, n("input_tokens") + n("output_tokens")
         + n("cache_creation_input_tokens") + n("cache_read_input_tokens"));
       if (stoppedNow) return;
@@ -7734,7 +7811,10 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
     // The segment's output, less what its assistant events already billed.
     if (event.usage && typeof event.usage === "object") {
       const out = (event.usage as { output_tokens?: unknown }).output_tokens;
-      if (typeof out === "number" && out > state.outputBilledInSegment) noteTokens(run, state, out - state.outputBilledInSegment);
+      if (typeof out === "number" && out > state.outputBilledInSegment) {
+        run.tokenBreakdown.output += out - state.outputBilledInSegment;
+        noteTokens(run, state, out - state.outputBilledInSegment);
+      }
     }
     state.outputBilledInSegment = 0;
     // Which models actually did work — the main run and every sub-agent.
@@ -7763,6 +7843,7 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
         if (state.openSubagents.size > 0) noteTokens(run, state, total - run.tokensUsed);
         else run.tokensUsed = total;
       }
+      raiseTokenBreakdown(run, state.breakdownAtSpawn, usage);
     }
     if (Array.isArray(event.permission_denials)) {
       const parsed = denialsFrom(event.permission_denials);
@@ -11207,6 +11288,7 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // like any other failure of the run, and nothing is remembered.
   // THIS spawn's bill (and its retry's), not the record's: see tokensAtSpawn.
   const spawnTokens = Math.max(0, run.tokensUsed - state.tokensAtSpawn);
+  run.spawnTokens = [...run.spawnTokens, spawnTokens].slice(-MAX_SPAWN_TOKENS_KEPT);
   const harnessVerdict = run.status === "failed"
     ? classifyHarnessFailure(run.error, { tokensUsed: spawnTokens, sawModelAnswer: state.sawModelAnswer })
     : null;
@@ -11640,6 +11722,7 @@ function spawnRun(
     sawWriteAttempt: false,
     sawModelAnswer: false,
     tokensAtSpawn: run.tokensUsed,
+    breakdownAtSpawn: { ...run.tokenBreakdown },
     sawThinking: false,
     thinkingSeen: 0,
     tools,
@@ -12937,6 +13020,8 @@ function newRunRecord(fields: {
     commit: null,
     maxTurns: fields.settings.maxTurns,
     tokensUsed: 0,
+    tokenBreakdown: emptyTokenBreakdown(),
+    spawnTokens: [],
     tokenLimit: fields.settings.tokenLimit,
     thinkingTokens: 0,
     lastActivityAt: now,

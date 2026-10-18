@@ -436,12 +436,17 @@ describe("a run", () => {
     // the command deny-list is gone. The FILE rules below still ship.
     expect(joined).toContain(`--tools ${lib.toolsFor(true, run.effort)}`);
     expect(argv[argv.indexOf("--allowedTools") + 1]).toBe("Bash(*)");
-    // The default effort is ultracode, and ultracode's orchestration tool is
-    // listed AND pre-approved — listed alone it is refused headlessly.
-    expect(run.effort).toBe(lib.ULTRACODE_EFFORT);
-    expect(argv[argv.indexOf("--tools") + 1].split(",")).toContain(lib.WORKFLOW_TOOL);
-    expect(argv[argv.indexOf("--allowedTools") + 2]).toBe(lib.WORKFLOW_TOOL);
-    expect(argv[argv.indexOf("--append-system-prompt") + 1]).toContain("Ultracode is on");
+    // The default effort is xhigh (TASK-1749): no standing workflow fan-out,
+    // so neither the Workflow tool nor the ultracode brief rides along.
+    expect(run.effort).toBe("xhigh");
+    expect(argv[argv.indexOf("--tools") + 1].split(",")).not.toContain(lib.WORKFLOW_TOOL);
+    expect(argv[argv.indexOf("--append-system-prompt") + 1]).not.toContain("Ultracode is on");
+    // Chosen, ultracode's orchestration tool is listed AND pre-approved —
+    // listed alone it is refused headlessly.
+    const ultra = lib.buildRunArgs({ effort: lib.ULTRACODE_EFFORT });
+    expect(ultra[ultra.indexOf("--tools") + 1].split(",")).toContain(lib.WORKFLOW_TOOL);
+    expect(ultra[ultra.indexOf("--allowedTools") + 2]).toBe(lib.WORKFLOW_TOOL);
+    expect(ultra[ultra.indexOf("--append-system-prompt") + 1]).toContain("Ultracode is on");
     for (const rule of lib.BASH_DENYLIST) expect(argv).not.toContain(rule);
     expect(argv).toContain("--disallowedTools");
     // The one command list that IS shipped: killing by name, and killing
@@ -1837,6 +1842,9 @@ describe("counting sub-agents", () => {
     makeProject("site");
     const run = await finished((await lib.startRun({ task: "count", projectId: "site", source: "agent" })).id);
     expect(run.tokensUsed).toBe(3 * 6_100);
+    // The same bill by category: cache reads are most of it (TASK-1749).
+    expect(run.tokenBreakdown).toEqual({ input: 3_000, output: 300, cacheCreation: 0, cacheRead: 15_000 });
+    expect(run.spawnTokens).toEqual([3 * 6_100]);
     expect(run.commandsRun).toBe(1);
     expect(run.progress.join("\n")).not.toContain("helper says hi");
     expect(run.progress.join("\n")).not.toContain("npm test");
@@ -1865,6 +1873,7 @@ describe("counting sub-agents", () => {
     const run = await finished((await lib.startRun({ task: "count", projectId: "site", source: "agent" })).id);
     // 5,000 twice (one message each), then 700 + 9 of output the events never carried.
     expect(run.tokensUsed).toBe(10_000 + 700 + 9);
+    expect(run.tokenBreakdown).toEqual({ input: 10_000, output: 709, cacheCreation: 0, cacheRead: 0 });
   });
 
   it("raises the bill to the CLI's own modelUsage total at the end, never lowers it", async () => {
@@ -1879,12 +1888,15 @@ describe("counting sub-agents", () => {
     makeProject("site");
     let run = await finished((await lib.startRun({ task: "bill", projectId: "site", source: "agent" })).id);
     expect(run.tokensUsed).toBe(33_250);
+    // Raised by category to the process's modelUsage, every model summed.
+    expect(run.tokenBreakdown).toEqual({ input: 4_000, output: 250, cacheCreation: 0, cacheRead: 29_000 });
     expect(run.modelsUsed).toEqual(["deepseek-v4-flash", "deepseek-v4-pro[1m]"]);
 
     const RESULT_LOW = JSON.stringify({ type: "result", subtype: "success", num_turns: 1, result: "done", modelUsage: { "deepseek-v4-pro[1m]": { inputTokens: 10 } } });
     installFakeWrapper([`echo '${INIT}'`, `echo '${A}'`, `echo '${RESULT_LOW}'`, "exit 0"].join("\n"));
     run = await finished((await lib.startRun({ task: "bill", projectId: "site", source: "agent" })).id);
     expect(run.tokensUsed).toBe(1_000);
+    expect(run.tokenBreakdown).toEqual({ input: 1_000, output: 0, cacheCreation: 0, cacheRead: 0 });
   });
 });
 

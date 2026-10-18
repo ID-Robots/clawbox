@@ -37,6 +37,7 @@ import {
   buildRunEnv,
   CODING_AGENT_EFFORT_CONFIG_KEY,
   DEFAULT_EFFORT,
+  OFFERED_EFFORT_LEVELS,
   EFFORT_LEVELS,
   getEffort,
   setEffort,
@@ -55,14 +56,20 @@ describe("effort", () => {
     // `claude --effort bogus` names these five and ignores anything else;
     // ultracode is the CLI's xhigh-plus-workflows mode on top of them.
     expect([...EFFORT_LEVELS]).toEqual(["low", "medium", "high", "xhigh", "max", "ultracode"]);
-    expect(DEFAULT_EFFORT).toBe("ultracode");
+    // xhigh since TASK-1749: ultracode's standing fan-out multiplied every
+    // run's tokens; it stays on offer, never the default.
+    expect(DEFAULT_EFFORT).toBe("xhigh");
+    expect(OFFERED_EFFORT_LEVELS).toContain("ultracode");
   });
 
-  it("defaults to ultracode when unset, and when the stored value is junk", async () => {
-    expect(await getEffort()).toBe("ultracode");
+  it("defaults to xhigh when unset, and when the stored value is junk", async () => {
+    expect(await getEffort()).toBe("xhigh");
     configGet.mockResolvedValue("turbo");
-    expect(await getEffort()).toBe("ultracode");
+    expect(await getEffort()).toBe("xhigh");
     configGet.mockResolvedValue(7);
+    expect(await getEffort()).toBe("xhigh");
+    // An owner who chose ultracode keeps it.
+    configGet.mockResolvedValue("ultracode");
     expect(await getEffort()).toBe("ultracode");
   });
 

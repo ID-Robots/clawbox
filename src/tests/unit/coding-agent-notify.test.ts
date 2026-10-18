@@ -84,6 +84,8 @@ function run(over: Partial<CodingRun> = {}): CodingRun {
     modelsUsed: [],
     maxTurns: 400,
     tokensUsed: 0,
+    tokenBreakdown: { input: 0, output: 0, cacheCreation: 0, cacheRead: 0 },
+    spawnTokens: [],
     tokenLimit: null,
     thinkingTokens: 0,
     lastActivityAt: 1_000_000 + 95_000,
