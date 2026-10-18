@@ -1812,4 +1812,20 @@ export const sv: Record<string, string> = {
   "codingAgent.budgetTimelineKindNote": "Anteckning",
   "codingAgent.budgetTimelineKindCheckpoint": "Kontrollpunkt",
   "codingAgent.budgetTimelineKindMargin": "Säkerhetsmarginal",
+
+  // === Remote access (SSH) card, Settings › System ===
+  "settings.ssh.title": "Fjärråtkomst (SSH)",
+  "settings.ssh.desc": "Med SSH kan du öppna en terminal på den här boxen från en annan dator och logga in med boxens lösenord. Det är avstängt som standard.",
+  "settings.ssh.loading": "Kontrollerar…",
+  "settings.ssh.on": "SSH är på",
+  "settings.ssh.off": "SSH är av",
+  "settings.ssh.turnOn": "Slå på",
+  "settings.ssh.turnOff": "Stäng av",
+  "settings.ssh.needPassword": "Ange först ett lösenord för boxen — tills dess förblir SSH avstängt.",
+  "settings.ssh.confirmPrompt": "Ange ditt nuvarande lösenord för att bekräfta.",
+  "settings.ssh.cancel": "Avbryt",
+  "settings.ssh.saving": "Sparar…",
+  "settings.ssh.nowOn": "SSH är nu på.",
+  "settings.ssh.nowOff": "SSH är nu av.",
+  "settings.ssh.failed": "Det gick inte att ändra fjärråtkomsten.",
 };

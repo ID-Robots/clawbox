@@ -15,7 +15,7 @@ Everything load-bearing about a ClawBox on one page. Facts only — explanations
 | Repo | `github.com/ID-Robots/clawbox` · releases = `vX.Y.Z` tags on `main` · integration branch `beta` |
 | System user | `clawbox` (uid 1000) · one password for SSH **and** browser login |
 | Web UI | `http://<box-ip>` (port 80) · `http://clawbox.local` when mDNS works |
-| Setup hotspot | SSID `ClawBox-Setup` → `http://10.42.0.1` (fallback subnet `10.43.0.1`) |
+| Setup hotspot | SSID `ClawBox-XXXX` + per-device WPA2 password from the sticker (Wi-Fi QR); `ClawBox-Setup` (open) on boxes without a device secret → `http://10.42.0.1` (fallback subnet `10.43.0.1`) |
 | Stack | Next.js 16 / React 19 / Node 24 runtime / Bun builds · AI harness: OpenClaw gateway (npm-pinned) on OpenClaw/dual, Hermes CLI + dashboard on Hermes/dual |
 
 ## Ports
@@ -29,7 +29,7 @@ Inbound is **default-deny** (ufw). "LAN" below means *private IPv4 source ranges
 | 18789 | OpenClaw gateway — **OpenClaw/dual only** | LAN, token-gated — **never browse it directly**. Closed on Hermes |
 | 8090 | Hermes dashboard auth proxy — **Hermes/dual only** | LAN, ClawBox-session-gated |
 | 9119 | Hermes dashboard itself | `127.0.0.2` loopback |
-| 22 | SSH | LAN |
+| 22 | SSH — **off by default**; Settings → System → Remote access (SSH) | LAN |
 | 3006 | Terminal WS — an **unauthenticated PTY** if reached directly | **Closed to the LAN** — use the session-gated `/terminal-ws` on port 80 |
 | 5900 / 6080 | VNC / noVNC websockify | localhost only — reach it through `/novnc-ws` on port 80 |
 | 18800 | Chromium CDP (AI browser; `CLAWBOX_BROWSER_CDP_PORT` moves it — see [Filesystem](/technical/filesystem#the-desktop-browser)) | localhost |
@@ -158,7 +158,7 @@ curl -sS -X POST http://localhost/login-api -H 'Content-Type: application/json' 
 6. **Secrets live in `auth-profiles.json`** (OpenClaw/dual), not `openclaw.json` (metadata only). The codex session is *additionally* per-agent in `codex-home/auth.json`. On Hermes, credentials are held by `hermes auth add` under `~/.hermes`.
 7. **`clawbox.local` failing ≠ box down** — mDNS/Windows/router multicast issue; the IP always works.
 8. **The last update step reboots the box** — 1–2 min offline is normal, not a hang.
-9. **Factory reset password is `clawbox`** — and the box comes back in AP mode (`ClawBox-Setup` → `10.42.0.1`). It keeps `data/network.env`, `data/llamacpp/models` and the Hermes agent install (`~/.hermes/hermes-agent`, `installs/`, `tools/`, `bin/`), and the portal device id is re-derived from `/etc/machine-id`. Never hand-roll it with `rm -rf ~/.hermes` or `rm -rf data/*` — see [Recovery D](/support/recovery#d--factory-reset-wipes-everything).
+9. **There is no default password** on boxes with a sticker QR — a new one and a factory-reset one have none (the wizard runs without a login) and SSH is off (boxes made before stickers are unchanged by updates and their reset still restores the shipped password); the box comes back in AP mode on its sticker hotspot (`ClawBox-XXXX`, unique WPA2 password, Wi-Fi QR on the sticker; `ClawBox-Setup` on boxes made before stickers) → `10.42.0.1`. It keeps `data/network.env`, `data/llamacpp/models` and the Hermes agent install (`~/.hermes/hermes-agent`, `installs/`, `tools/`, `bin/`), and the portal device id is re-derived from `/etc/machine-id`. Never hand-roll it with `rm -rf ~/.hermes` or `rm -rf data/*` — see [Recovery D](/support/recovery#d--factory-reset-wipes-everything).
 10. **Version label ≠ running code** — `package.json` is read live; verify actual deployment via `.next/BUILD_ID` mtime.
 11. **Plan gates are internal names off by one** — the internal `flash` tier is marketed **Pro**, internal `pro` is **Max**. Memory Shard and the Coding Agent need either paid tier; the cloud voice and the [edition swap](/editions/switching) need **Max**; cloud transcription is on every connected box including Free.
 12. **ClawBox AI chat has no model picker** — the chat is pinned to the flash alias (a saved pro-alias choice is migrated to it) and renders no model pill. Plan differences are allowance and device features.

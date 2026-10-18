@@ -9,10 +9,11 @@
  * overwrite the owner's OS password.
  *
  * But "there is a hash in /etc/shadow" is not the same as "someone owns this
- * box". The shipped image and a factory reset (setup/reset) both leave the
- * published default password on the account, so a gate keyed on the hash
- * alone locks the first-boot wizard out of every new device — wifi/connect,
- * update/run and system/credentials all answered 401 on an as-flashed box.
+ * box". Boxes flashed from older images (and stock not yet provisioned) still
+ * carry the legacy image password, which is public, so a gate keyed on the
+ * hash alone would lock the first-boot wizard out of them — wifi/connect,
+ * update/run and system/credentials all answered 401 on such a box. A
+ * provisioned box and a factory reset leave NO password at all (`L`/`NP`).
  * `hasOwnerPassword` below is the question the gates actually need answered.
  *
  * `passwd -S <user>` prints `<user> <status> ...` where status is
@@ -30,11 +31,15 @@ import { promisify } from "util";
 const execFile = promisify(execFileCb);
 
 /**
- * The password every ClawBox ships with, and the one a factory reset puts back
- * (src/app/setup-api/setup/reset/route.ts). It is public knowledge — it is in
- * this repository — so an account still carrying it has no owner.
+ * The password older ClawBox images were built with. ClawBox never sets it
+ * any more: provisioning and factory reset remove the password entirely, and
+ * the hotspot uses per-device credentials from the box's sticker. It is only
+ * recognised so a box flashed from an older image (and stock not yet
+ * provisioned) is treated as unowned — it is public knowledge, so an account
+ * still carrying it has no owner. Mirrored root-side by install.sh's SSH
+ * policy, which never enables SSH on an account that still carries it.
  */
-export const FACTORY_DEFAULT_PASSWORD = "clawbox";
+export const LEGACY_IMAGE_PASSWORD = "clawbox";
 
 /**
  * The install user. Duplicated from `@/lib/auth`'s `getSystemUsername` rather
@@ -94,9 +99,9 @@ export async function hasSystemPassword(user: string = systemUsername()): Promis
 }
 
 /**
- * Does the account's password verify as the shipping default?
+ * Does the account's password verify as the legacy image password?
  *
- * `true`  — it does: the box is in its as-flashed / factory-reset state
+ * `true`  — it does: the box was flashed from an older image and is unowned
  * `false` — it does not: somebody has set a password of their own
  * `null`  — couldn't tell (helper missing, refused, timed out)
  *
@@ -108,7 +113,7 @@ export async function hasSystemPassword(user: string = systemUsername()): Promis
  * consult the config flag first and only ask here when it says "no owner", so
  * the line only ever appears on a box whose flag and /etc/shadow disagree.
  */
-export async function isFactoryDefaultPassword(user: string = systemUsername()): Promise<boolean | null> {
+export async function isLegacyImagePassword(user: string = systemUsername()): Promise<boolean | null> {
   return new Promise((resolve) => {
     // Everything inside the try: a spawn failure (helper missing, EACCES) must
     // resolve `null` rather than reject, so the gates above fail closed instead
@@ -124,7 +129,7 @@ export async function isFactoryDefaultPassword(user: string = systemUsername()):
         killSignal: "SIGKILL",
       });
       child.on("error", (err) => {
-        console.warn("[system-password] unix_chkpwd could not be spawned — cannot tell whether the factory default is set, failing closed:", err.message);
+        console.warn("[system-password] unix_chkpwd could not be spawned — cannot tell whether the legacy image password is set, failing closed:", err.message);
         resolve(null);
       });
       child.on("close", (code, signal) => {
@@ -132,14 +137,14 @@ export async function isFactoryDefaultPassword(user: string = systemUsername()):
         else if (code === PAM_AUTH_ERR) resolve(false);
         else {
           // Any 401 the bootstrap gate answers from here is otherwise silent.
-          console.warn(`[system-password] unix_chkpwd exited ${signal ? `by ${signal}` : `with code ${code}`} — cannot tell whether the factory default is set, failing closed`);
+          console.warn(`[system-password] unix_chkpwd exited ${signal ? `by ${signal}` : `with code ${code}`} — cannot tell whether the legacy image password is set, failing closed`);
           resolve(null);
         }
       });
       // The helper can exit before it reads stdin (bad user, missing shadow
       // access); the resulting EPIPE must not surface as an unhandled error.
       child.stdin?.on("error", () => {});
-      child.stdin?.end(FACTORY_DEFAULT_PASSWORD + "\0");
+      child.stdin?.end(LEGACY_IMAGE_PASSWORD + "\0");
     } catch {
       resolve(null);
     }
@@ -148,20 +153,20 @@ export async function isFactoryDefaultPassword(user: string = systemUsername()):
 
 /**
  * Does the OS account carry a password that identifies an OWNER — a usable
- * password that is not the published factory default?
+ * password that is not the published legacy image password?
  *
  * `true`  — yes: someone set this, and every sensitive route must fail closed
- * `false` — no: there is no password, or only the shipping default, which
+ * `false` — no: there is no password, or only the legacy image one, which
  *           anyone can already log in with. The box is nobody's yet and the
  *           first-boot wizard may claim it.
  * `null`  — /etc/shadow state could not be read at all (see hasSystemPassword)
  *
  * Fails closed on the second step: if shadow says a password exists but the
- * default-password check itself cannot run, the answer is `true`.
+ * legacy-password check itself cannot run, the answer is `true`.
  */
 export async function hasOwnerPassword(user: string = systemUsername()): Promise<boolean | null> {
   const usable = await hasSystemPassword(user);
   if (usable !== true) return usable;
-  const isDefault = await isFactoryDefaultPassword(user);
+  const isDefault = await isLegacyImagePassword(user);
   return isDefault !== true;
 }

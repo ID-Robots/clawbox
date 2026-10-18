@@ -1811,4 +1811,20 @@ export const es: Record<string, string> = {
   "codingAgent.budgetTimelineKindNote": "Nota",
   "codingAgent.budgetTimelineKindCheckpoint": "Punto de control",
   "codingAgent.budgetTimelineKindMargin": "Margen de seguridad",
+
+  // === Remote access (SSH) card, Settings › System ===
+  "settings.ssh.title": "Acceso remoto (SSH)",
+  "settings.ssh.desc": "SSH te permite abrir un terminal en esta caja desde otro ordenador, iniciando sesión con la contraseña de la caja. Está desactivado por defecto.",
+  "settings.ssh.loading": "Comprobando…",
+  "settings.ssh.on": "SSH está activado",
+  "settings.ssh.off": "SSH está desactivado",
+  "settings.ssh.turnOn": "Activar",
+  "settings.ssh.turnOff": "Desactivar",
+  "settings.ssh.needPassword": "Primero establece una contraseña para la caja; hasta entonces SSH permanece desactivado.",
+  "settings.ssh.confirmPrompt": "Introduce tu contraseña actual para confirmar.",
+  "settings.ssh.cancel": "Cancelar",
+  "settings.ssh.saving": "Guardando…",
+  "settings.ssh.nowOn": "SSH está ahora activado.",
+  "settings.ssh.nowOff": "SSH está ahora desactivado.",
+  "settings.ssh.failed": "No se pudo cambiar el acceso remoto.",
 };

@@ -83,4 +83,20 @@ export const settingsSecurityEn: Record<string, string> = {
   // === Saved Wi-Fi password editor ===
   "settings.security.wifiPasswordLength": "Password must be 8–63 characters",
   "settings.security.wifiPasswordUpdated": "Password updated for {ssid}",
+
+  // === Remote access (SSH) card, Settings › System ===
+  "settings.ssh.title": "Remote access (SSH)",
+  "settings.ssh.desc": "SSH lets you open a terminal on this box from another computer, signing in with the box password. It is off by default.",
+  "settings.ssh.loading": "Checking…",
+  "settings.ssh.on": "SSH is on",
+  "settings.ssh.off": "SSH is off",
+  "settings.ssh.turnOn": "Turn on",
+  "settings.ssh.turnOff": "Turn off",
+  "settings.ssh.needPassword": "Set a password for the box first — SSH stays off until then.",
+  "settings.ssh.confirmPrompt": "Enter your current password to confirm.",
+  "settings.ssh.cancel": "Cancel",
+  "settings.ssh.saving": "Saving…",
+  "settings.ssh.nowOn": "SSH is now on.",
+  "settings.ssh.nowOff": "SSH is now off.",
+  "settings.ssh.failed": "Could not change remote access.",
 };

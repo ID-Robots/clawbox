@@ -30,6 +30,13 @@ vi.mock("fs/promises", () => ({
   },
 }));
 
+// Most tests run on a provisioned box (the per-device flow); the legacy
+// factory reset of boxes set up before it is covered explicitly below.
+const provisioned = vi.hoisted(() => ({ value: true }));
+vi.mock("@/lib/device-provisioning", () => ({
+  isProvisionedDevice: () => provisioned.value,
+}));
+
 vi.mock("@/lib/updater", () => ({
   resetUpdateState: vi.fn(),
 }));
@@ -62,7 +69,6 @@ vi.mock("@/lib/login-rate-limit", () => ({
 }));
 
 import { resetUpdateState } from "@/lib/updater";
-import { getSystemUsername } from "@/lib/auth";
 import { startOllamaService } from "@/lib/local-ai-runtime";
 import { startRootStep } from "@/lib/root-step-runner";
 
@@ -548,28 +554,73 @@ describe("POST /setup-api/setup/reset", () => {
     expect(body.success).toBe(true);
   });
 
-  it("resets the system password to the default 'clawbox' after wiping data", async () => {
+  it("removes the owner password and switches SSH off after wiping data", async () => {
     await resetPost();
 
-    // chpasswd input must be `clawbox:clawbox\n` (chpasswd parses line by
-    // line; a missing newline drops the entry on some impls).
-    const chpasswdCall = mockFs.writeFile.mock.calls.find(
-      ([p]) => typeof p === "string" && p.endsWith(".chpasswd-input"),
+    // One word, 0600, for install.sh::step_ssh_policy — never a password:
+    // there is no default to restore any more.
+    const request = mockFs.writeFile.mock.calls.find(
+      ([p]) => typeof p === "string" && p.endsWith(".ssh-policy-request"),
     );
-    expect(chpasswdCall).toBeDefined();
-    expect(chpasswdCall![1]).toBe("clawbox:clawbox\n");
-    expect((chpasswdCall![2] as { mode: number }).mode).toBe(0o600);
+    expect(request).toBeDefined();
+    expect(request![1]).toBe("factory_reset");
+    expect((request![2] as { mode: number }).mode).toBe(0o600);
+    expect(mockFs.writeFile.mock.calls.some(
+      ([p]) => typeof p === "string" && p.endsWith(".chpasswd-input"),
+    )).toBe(false);
 
     // The root step must have been started — without it, the file we just
-    // wrote is just an inert text file. Through the root-owned launcher now:
-    // the unprivileged systemctl call this replaced only worked because of the
-    // unscoped polkit `manage-units` grant. TASK-539.
+    // wrote is just an inert text file. Through the root-owned launcher.
+    expect(vi.mocked(startRootStep)).toHaveBeenCalledWith("ssh_policy", expect.anything());
+    expect(vi.mocked(startRootStep)).not.toHaveBeenCalledWith("chpasswd", expect.anything());
+  });
+
+  it("keeps the old reset on a box set up before per-device provisioning: legacy password back, SSH untouched", async () => {
+    provisioned.value = false;
+    try {
+      await resetPost();
+      const writes = mockFs.writeFile.mock.calls.filter(
+        ([p]) => typeof p === "string" && p.endsWith(".chpasswd-input"),
+      );
+      expect(writes).toHaveLength(1);
+      expect(String(writes[0][1])).toMatch(/^[a-z_][a-z0-9_-]*:clawbox\n$/);
+      expect(vi.mocked(startRootStep)).toHaveBeenCalledWith("chpasswd", expect.anything());
+      expect(vi.mocked(startRootStep)).not.toHaveBeenCalledWith("ssh_policy", expect.anything());
+      expect(
+        mockFs.writeFile.mock.calls.some(([p]) => typeof p === "string" && p.endsWith(".ssh-policy-request")),
+      ).toBe(false);
+    } finally {
+      provisioned.value = true;
+    }
+  });
+
+  it("falls back to an unknowable random password when the ssh_policy step is unavailable", async () => {
+    // e.g. a platform whose root dispatcher has no ssh_policy step: the
+    // previous owner's password must still go, and never to a known default.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.mocked(startRootStep).mockImplementation(async (step: string) => {
+      if (step === "ssh_policy") throw new Error("unknown step");
+    });
+
+    const first = await resetPost();
+    expect(first.status).toBe(200);
+    const records = () => mockFs.writeFile.mock.calls
+      .filter(([p]) => typeof p === "string" && p.endsWith(".chpasswd-input"))
+      .map(([, data]) => String(data));
+    const [record] = records();
+    expect(record).toMatch(/^[a-z_][a-z0-9_-]*:[A-Za-z0-9_-]{43}\n$/);
+    expect(record).not.toMatch(/:clawbox\n$/);
     expect(vi.mocked(startRootStep)).toHaveBeenCalledWith("chpasswd", expect.anything());
+
+    await resetPost();
+    const [, second] = records();
+    expect(second).toBeDefined();
+    expect(second).not.toBe(record);
+    errSpy.mockRestore();
   });
 
   it("continues the reset when the password reset fails (non-fatal)", async () => {
-    // chpasswd service failure must not strand the user on a half-reset box;
-    // the wizard's CredentialsStep on first boot re-prompts and overwrites.
+    // A root-step failure must not strand the user on a half-reset box.
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     vi.mocked(startRootStep).mockRejectedValueOnce(new Error("not permitted"));
 
@@ -583,26 +634,6 @@ describe("POST /setup-api/setup/reset", () => {
       expect.stringContaining("[Reset][SECURITY]"),
       expect.anything(),
     );
-    errSpy.mockRestore();
-  });
-
-  it("refuses to write a chpasswd record for an unsafe username", async () => {
-    // The username comes from env vars; a value with ":" or a newline would
-    // inject extra entries into the colon/newline-delimited chpasswd format.
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    vi.mocked(getSystemUsername).mockReturnValueOnce("evil:root\nroot");
-
-    const res = await resetPost();
-    const body = await res.json();
-
-    // Reset still completes (password reset is best-effort)…
-    expect(res.status).toBe(200);
-    expect(body.success).toBe(true);
-    // …but no chpasswd input was ever written.
-    const chpasswdCall = mockFs.writeFile.mock.calls.find(
-      ([p]) => typeof p === "string" && p.endsWith(".chpasswd-input"),
-    );
-    expect(chpasswdCall).toBeUndefined();
     errSpy.mockRestore();
   });
 
@@ -755,9 +786,9 @@ describe("POST /setup-api/setup/reset", () => {
     expect(JSON.stringify(body.failures)).toContain(".ssh");
   });
 
-  it("scrubs the plaintext chpasswd input file if the password reset fails", async () => {
-    // writeFile succeeds but the service start fails: the plaintext credential
-    // must be unlinked so it isn't left readable on disk.
+  it("removes the SSH policy request if the root step fails", async () => {
+    // writeFile succeeds but the step fails: a stale request must not be left
+    // for a later, unrelated start of the step to act on.
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     vi.mocked(startRootStep).mockRejectedValueOnce(new Error("not permitted"));
 
@@ -765,7 +796,7 @@ describe("POST /setup-api/setup/reset", () => {
     errSpy.mockRestore();
 
     const unlinkInputCall = mockFs.unlink.mock.calls.find(
-      ([p]) => typeof p === "string" && p.endsWith(".chpasswd-input"),
+      ([p]) => typeof p === "string" && p.endsWith(".ssh-policy-request"),
     );
     expect(unlinkInputCall).toBeDefined();
   });
@@ -1036,7 +1067,7 @@ describe("POST /setup-api/setup/reset — Hermes agent + offline model survive",
     expect(calls.some((c) => c.includes("connection delete"))).toBe(false);
     // The password reset goes through the mocked root-step launcher, never
     // execFile — asserting on the exec transcript here would always pass.
-    expect(vi.mocked(startRootStep)).not.toHaveBeenCalledWith("chpasswd", expect.anything());
+    expect(vi.mocked(startRootStep)).not.toHaveBeenCalledWith("ssh_policy", expect.anything());
     expect(calls.some((c) => c.includes("systemctl reboot"))).toBe(false);
   });
 });
@@ -1175,7 +1206,7 @@ describe("POST /setup-api/setup/reset — a non-directory where a directory belo
     const commands = mockExecFile.mock.calls.map(([cmd, args]) => `${cmd} ${(args ?? []).join(" ")}`);
     expect(commands.some((c) => c.startsWith("nmcli connection delete"))).toBe(false);
     expect(commands.some((c) => c.includes("reboot"))).toBe(false);
-    expect(vi.mocked(startRootStep).mock.calls.map(([step]) => step)).not.toContain("chpasswd");
+    expect(vi.mocked(startRootStep).mock.calls.map(([step]) => step)).not.toContain("ssh_policy");
   });
 
   it("finishes the reset when a plain file sits where ~/.hermes should be", async () => {

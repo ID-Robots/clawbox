@@ -1816,4 +1816,20 @@ export const fr: Record<string, string> = {
   "codingAgent.budgetTimelineKindNote": "Remarque",
   "codingAgent.budgetTimelineKindCheckpoint": "Point de contrôle",
   "codingAgent.budgetTimelineKindMargin": "Marge de sécurité",
+
+  // === Remote access (SSH) card, Settings › System ===
+  "settings.ssh.title": "Accès à distance (SSH)",
+  "settings.ssh.desc": "SSH vous permet d'ouvrir un terminal sur cette box depuis un autre ordinateur, en vous connectant avec le mot de passe de la box. Il est désactivé par défaut.",
+  "settings.ssh.loading": "Vérification…",
+  "settings.ssh.on": "SSH est activé",
+  "settings.ssh.off": "SSH est désactivé",
+  "settings.ssh.turnOn": "Activer",
+  "settings.ssh.turnOff": "Désactiver",
+  "settings.ssh.needPassword": "Définissez d'abord un mot de passe pour la box — SSH reste désactivé d'ici là.",
+  "settings.ssh.confirmPrompt": "Saisissez votre mot de passe actuel pour confirmer.",
+  "settings.ssh.cancel": "Annuler",
+  "settings.ssh.saving": "Enregistrement…",
+  "settings.ssh.nowOn": "SSH est maintenant activé.",
+  "settings.ssh.nowOff": "SSH est maintenant désactivé.",
+  "settings.ssh.failed": "Impossible de modifier l'accès à distance.",
 };

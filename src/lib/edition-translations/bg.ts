@@ -1802,4 +1802,20 @@ export const bg: Record<string, string> = {
   "codingAgent.budgetTimelineKindNote": "Бележка",
   "codingAgent.budgetTimelineKindCheckpoint": "Контролна точка",
   "codingAgent.budgetTimelineKindMargin": "Буфер за сигурност",
+
+  // === Remote access (SSH) card, Settings › System ===
+  "settings.ssh.title": "Отдалечен достъп (SSH)",
+  "settings.ssh.desc": "SSH ви позволява да отворите терминал на това устройство от друг компютър, като влизате с паролата на устройството. По подразбиране е изключен.",
+  "settings.ssh.loading": "Проверка…",
+  "settings.ssh.on": "SSH е включен",
+  "settings.ssh.off": "SSH е изключен",
+  "settings.ssh.turnOn": "Включи",
+  "settings.ssh.turnOff": "Изключи",
+  "settings.ssh.needPassword": "Първо задайте парола за устройството — дотогава SSH остава изключен.",
+  "settings.ssh.confirmPrompt": "Въведете текущата си парола за потвърждение.",
+  "settings.ssh.cancel": "Отказ",
+  "settings.ssh.saving": "Запазване…",
+  "settings.ssh.nowOn": "SSH вече е включен.",
+  "settings.ssh.nowOff": "SSH вече е изключен.",
+  "settings.ssh.failed": "Отдалеченият достъп не можа да бъде променен.",
 };

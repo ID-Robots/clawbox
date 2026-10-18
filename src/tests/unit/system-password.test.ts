@@ -112,24 +112,24 @@ describe("@/lib/system-password", () => {
     });
   });
 
-  describe("isFactoryDefaultPassword", () => {
+  describe("isLegacyImagePassword", () => {
     it("feeds the shipping default to unix_chkpwd for the install user", async () => {
       const child = chkpwd(0);
-      const { isFactoryDefaultPassword, FACTORY_DEFAULT_PASSWORD } = await import("@/lib/system-password");
-      await expect(isFactoryDefaultPassword()).resolves.toBe(true);
+      const { isLegacyImagePassword, LEGACY_IMAGE_PASSWORD } = await import("@/lib/system-password");
+      await expect(isLegacyImagePassword()).resolves.toBe(true);
       expect(mockSpawn).toHaveBeenCalledWith(
         "/usr/sbin/unix_chkpwd",
         ["clawbox", "nonull"],
         expect.objectContaining({ stdio: ["pipe", "ignore", "ignore"], timeout: 5_000, killSignal: "SIGKILL" }),
       );
-      expect(child.stdin.end).toHaveBeenCalledWith(FACTORY_DEFAULT_PASSWORD + "\0");
-      expect(FACTORY_DEFAULT_PASSWORD).toBe("clawbox");
+      expect(child.stdin.end).toHaveBeenCalledWith(LEGACY_IMAGE_PASSWORD + "\0");
+      expect(LEGACY_IMAGE_PASSWORD).toBe("clawbox");
     });
 
     it("is false on PAM_AUTH_ERR (somebody set their own password)", async () => {
       chkpwd(7);
-      const { isFactoryDefaultPassword } = await import("@/lib/system-password");
-      await expect(isFactoryDefaultPassword()).resolves.toBe(false);
+      const { isLegacyImagePassword } = await import("@/lib/system-password");
+      await expect(isLegacyImagePassword()).resolves.toBe(false);
     });
 
     it.each([
@@ -138,14 +138,14 @@ describe("@/lib/system-password", () => {
       ["killed by signal / timeout", null],
     ])("is null when the helper could not tell (%s)", async (_label, code) => {
       chkpwd(code);
-      const { isFactoryDefaultPassword } = await import("@/lib/system-password");
-      await expect(isFactoryDefaultPassword()).resolves.toBeNull();
+      const { isLegacyImagePassword } = await import("@/lib/system-password");
+      await expect(isLegacyImagePassword()).resolves.toBeNull();
     });
 
     it("kills with SIGKILL on timeout — unix_chkpwd ignores SIGTERM", async () => {
       chkpwd(0);
-      const { isFactoryDefaultPassword } = await import("@/lib/system-password");
-      await isFactoryDefaultPassword();
+      const { isLegacyImagePassword } = await import("@/lib/system-password");
+      await isLegacyImagePassword();
       const opts = mockSpawn.mock.calls[0][2] as { killSignal?: string; timeout?: number };
       expect(opts.killSignal).toBe("SIGKILL");
       expect(opts.timeout).toBe(5_000);
@@ -153,20 +153,20 @@ describe("@/lib/system-password", () => {
 
     it("is null when the child errors instead of closing", async () => {
       chkpwd("error");
-      const { isFactoryDefaultPassword } = await import("@/lib/system-password");
-      await expect(isFactoryDefaultPassword()).resolves.toBeNull();
+      const { isLegacyImagePassword } = await import("@/lib/system-password");
+      await expect(isLegacyImagePassword()).resolves.toBeNull();
     });
 
     it("is null — and never rejects — when spawn itself throws", async () => {
       chkpwd("throw");
-      const { isFactoryDefaultPassword } = await import("@/lib/system-password");
-      await expect(isFactoryDefaultPassword()).resolves.toBeNull();
+      const { isLegacyImagePassword } = await import("@/lib/system-password");
+      await expect(isLegacyImagePassword()).resolves.toBeNull();
     });
 
     it("swallows a stdin EPIPE from a helper that exits early", async () => {
       const child = chkpwd(7);
-      const { isFactoryDefaultPassword } = await import("@/lib/system-password");
-      await isFactoryDefaultPassword();
+      const { isLegacyImagePassword } = await import("@/lib/system-password");
+      await isLegacyImagePassword();
       expect(child.stdin.on).toHaveBeenCalledWith("error", expect.any(Function));
     });
   });
@@ -186,7 +186,7 @@ describe("@/lib/system-password", () => {
       expect(mockSpawn).not.toHaveBeenCalled();
     });
 
-    it("is false when the only password is the factory default (as-flashed / factory reset)", async () => {
+    it("is false when the only password is the legacy image password (older image, unprovisioned)", async () => {
       passwdSays("clawbox P 05/08/2026 0 99999 7 -1\n");
       chkpwd(0);
       const { hasOwnerPassword } = await import("@/lib/system-password");

@@ -4,7 +4,7 @@ icon: "life-ring"
 summary: "Recovery options ordered from least to most destructive — password reset, service restart, safe reinstall, and full factory reset."
 ---
 
-When something is badly wrong, work **top to bottom** — the options are roughly ordered from least to most drastic. Everything here runs over SSH (`ssh clawbox@YOUR_BOX_IP`) unless noted.
+When something is badly wrong, work **top to bottom** — the options are roughly ordered from least to most drastic. Everything here runs in a terminal on the box — the Terminal app, or SSH (`ssh clawbox@YOUR_BOX_IP`) — unless noted. SSH is **off by default**; the owner turns it on in **Settings → System → Remote access (SSH)**, which needs the box password.
 
 <Warning>
 Before anything destructive, note what is safe: your **settings, AI keys, chats, and Telegram pairing** live in `data/` and in your edition's agent state — `~/.openclaw` on the OpenClaw edition, `~/.hermes` on [Hermes](/editions/hermes). They survive options A–C untouched. Only the factory reset (D) erases them.
@@ -95,7 +95,7 @@ The script defaults to `main`; `CLAWBOX_BRANCH` keeps a box on its own channel.
 ## D — Factory reset (wipes everything)
 
 <Warning>
-**This erases:** AI provider config and keys, chats and agent state, Telegram pairing, ClawKeep backup pairing, saved Wi-Fi networks, downloaded Ollama models, files in Documents/Downloads/Desktop, SSH authorized keys, shell history, and all settings. The system password resets to **`clawbox`**. The box reboots into first-boot setup mode.
+**This erases:** AI provider config and keys, chats and agent state, Telegram pairing, ClawKeep backup pairing, saved Wi-Fi networks, downloaded Ollama models, files in Documents/Downloads/Desktop, SSH authorized keys, shell history, and all settings. The system password is **removed** (there is no default password) and SSH is turned **off**. The box reboots into first-boot setup mode on its sticker hotspot — the same Wi-Fi QR code and password as on day one.
 </Warning>
 
 <Info>
@@ -113,7 +113,7 @@ portal as the same device.
 
 ### From the UI (preferred)
 
-Open **Settings → System → Factory reset** (also offered at the end of the setup wizard). The device wipes itself and reboots into the **ClawBox-Setup** hotspot. This is the only path that performs the *complete* wipe described above — prefer it whenever you can still log in.
+Open **Settings → System → Factory reset** (also offered at the end of the setup wizard). The device wipes itself and reboots into its setup hotspot (the sticker's QR code and password). This is the only path that performs the *complete* wipe described above — prefer it whenever you can still log in.
 
 ### Over SSH (when you can't log in to the UI)
 
@@ -225,8 +225,10 @@ step fails you can stop and retry without stranding the box.
       | while IFS= read -r n; do nmcli connection delete "$n"; done
     nmcli connection delete ClawBox-Setup 2>/dev/null || true
 
-    # Back to the shipping default; the wizard makes you change it on first boot.
-    echo "clawbox:clawbox" | sudo chpasswd
+    # No password and SSH off, like the UI reset; the wizard sets a new password.
+    echo factory_reset > /home/clawbox/clawbox/data/.ssh-policy-request
+    chmod 600 /home/clawbox/clawbox/data/.ssh-policy-request
+    sudo bash /home/clawbox/clawbox/install.sh --step ssh_policy
 
     sudo reboot
     ```
@@ -243,10 +245,14 @@ regenerates both — so they are left out of the SSH path.
 
 <Steps>
   <Step title="Join the setup hotspot">
-    Wait ~2 minutes, then connect your phone or laptop to the **ClawBox-Setup** Wi-Fi network.
+    Wait ~2 minutes, then scan the Wi-Fi QR code on the box's sticker with your phone (or join
+    the `ClawBox-XXXX` network with the sticker password; `ClawBox-Setup`, open, on boxes made
+    before stickers). Lost the sticker? [Support](mailto:yanko@idrobots.com) can recover the
+    hotspot credentials after verifying your order.
   </Step>
   <Step title="Open the wizard">
-    Browse to `http://10.42.0.1`. If a login is requested, the password is `clawbox`.
+    Most phones open it on their own; otherwise browse to `http://10.42.0.1`. No login is
+    asked — the box has no password until you set one.
   </Step>
   <Step title="Run through setup">
     Wi-Fi → new password → AI provider → Telegram — the same flow as [First Boot](/setup/first-boot).

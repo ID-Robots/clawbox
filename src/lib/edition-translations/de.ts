@@ -1815,4 +1815,20 @@ export const de: Record<string, string> = {
   "codingAgent.budgetTimelineKindNote": "Notiz",
   "codingAgent.budgetTimelineKindCheckpoint": "Kontrollpunkt",
   "codingAgent.budgetTimelineKindMargin": "Sicherheitspuffer",
+
+  // === Remote access (SSH) card, Settings › System ===
+  "settings.ssh.title": "Fernzugriff (SSH)",
+  "settings.ssh.desc": "Mit SSH öffnen Sie von einem anderen Computer aus ein Terminal auf dieser Box und melden sich mit dem Passwort der Box an. Standardmäßig ist SSH aus.",
+  "settings.ssh.loading": "Wird geprüft…",
+  "settings.ssh.on": "SSH ist an",
+  "settings.ssh.off": "SSH ist aus",
+  "settings.ssh.turnOn": "Einschalten",
+  "settings.ssh.turnOff": "Ausschalten",
+  "settings.ssh.needPassword": "Legen Sie zuerst ein Passwort für die Box fest — bis dahin bleibt SSH aus.",
+  "settings.ssh.confirmPrompt": "Geben Sie zur Bestätigung Ihr aktuelles Passwort ein.",
+  "settings.ssh.cancel": "Abbrechen",
+  "settings.ssh.saving": "Wird gespeichert…",
+  "settings.ssh.nowOn": "SSH ist jetzt an.",
+  "settings.ssh.nowOff": "SSH ist jetzt aus.",
+  "settings.ssh.failed": "Der Fernzugriff konnte nicht geändert werden.",
 };

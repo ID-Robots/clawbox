@@ -83,7 +83,7 @@ function setupExecFileMock(results: Record<string, { stdout: string; stderr: str
 
 /**
  * Stand in for `/usr/sbin/unix_chkpwd`, which @/lib/system-password spawns to
- * ask whether the account's password is still the factory default. `exitCode`
+ * ask whether the account's password is still the legacy image password. `exitCode`
  * follows PAM: 0 = it is, 7 = it is not, anything else = the helper could not
  * tell. `null` mimics a signal/timeout kill.
  */
@@ -332,7 +332,7 @@ describe("POST /setup-api/system/credentials", () => {
       process.env.CLAWBOX_USER = "clawbox";
     });
 
-    it("sets the initial password without a session while the account still carries the factory default", async () => {
+    it("sets the initial password without a session while the account still carries the legacy image password", async () => {
       // As-flashed / factory-reset state: /etc/shadow has a usable hash, and it
       // verifies as the published default. This is the exact request the
       // wizard's CredentialsStep makes on step 3, and it 401'd on every new box.

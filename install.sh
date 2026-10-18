@@ -8100,6 +8100,12 @@ step_captive_portal_dns() {
   rm -f "$DNSMASQ_DIR/captive-portal.conf"
   # Install upstream DNS forwarding for hotspot clients
   cp "$SRC_DIR/config/dnsmasq-upstream.conf" "$DNSMASQ_DIR/upstream-dns.conf"
+  # captive-probes.conf (probe hosts only, never a wildcard) is start-ap.sh's
+  # during FIRST SETUP and must survive this step then; once setup is complete
+  # nothing should send a joined phone to a "sign in" sheet, so drop it.
+  if grep -E -q '"setup_complete":[[:space:]]*true' "$PROJECT_DIR/data/config.json" 2>/dev/null; then
+    rm -f "$DNSMASQ_DIR/captive-probes.conf"
+  fi
   echo "  Removed captive portal DNS, installed upstream DNS forwarding"
 }
 
@@ -8657,6 +8663,7 @@ install_root_libexec() {
   fi
   for src in optimize-ollama.sh clawbox-desktop-mode.sh clawbox-power-mode.sh \
              clawbox-resource-limits.sh gateway-restart-when-online.sh \
+             device-secret.sh provision-device.sh \
              wifi-failover.sh start-ap.sh stop-ap.sh ap-watchdog.sh ensure-vnc-on-first-boot.sh; do
     case "$src" in
       wifi-failover.sh|start-ap.sh|stop-ap.sh) [ "$wifi_helper_ready" -eq 1 ] || continue ;;
@@ -10640,6 +10647,130 @@ step_chpasswd() {
   printf '%s\n' "$record" | /usr/sbin/chpasswd
 }
 
+# ── SSH policy ───────────────────────────────────────────────────────────────
+#
+# SSH is OFF by default on provisioned boxes (scripts/provision-device.sh) and
+# only an owner turns it on (Settings → System → Remote access). No update
+# touches SSH: a box set up before per-device provisioning keeps its SSH state
+# exactly as it is until its owner uses the switch. The decision is persisted root-side in /etc/clawbox/ssh-policy
+# (`enabled` | `disabled`), outside data/, so a factory reset's data/ wipe does
+# not decide it — the reset asks for `factory_reset` below instead.
+#
+# "Owner password present" is answered from /etc/shadow, never from data/:
+# `passwd -S` must say P (a usable password) AND the password must not be the
+# legacy image one, which older images were built with and which is public.
+# src/lib/system-password.ts asks the same question for the web gates; its
+# LEGACY_IMAGE_PASSWORD and the constant below are pinned together by
+# src/tests/unit/install-ssh-policy.test.ts.
+SSH_POLICY_FILE="/etc/clawbox/ssh-policy"
+SSH_LEGACY_IMAGE_PASSWORD="clawbox"
+
+# 0 = an owner's password is set; 1 = no usable password, or only the legacy
+# one; 2 = could not tell (helper missing or refused).
+ssh_owner_password_state() {
+  local status rc=0
+  status="$(passwd -S "$CLAWBOX_USER" 2>/dev/null | awk 'NR==1 {print $2}')" || true
+  case "$status" in
+    P) ;;
+    NP|L) return 1 ;;
+    *) return 2 ;;
+  esac
+  # unix_chkpwd checks the CALLER's own account, so ask as that user. 0 means
+  # the legacy password verifies; 7 (PAM_AUTH_ERR) means it does not.
+  printf '%s\0' "$SSH_LEGACY_IMAGE_PASSWORD" \
+    | runuser -u "$CLAWBOX_USER" -- /usr/sbin/unix_chkpwd "$CLAWBOX_USER" nonull \
+    >/dev/null 2>&1 || rc=$?
+  case "$rc" in
+    0) return 1 ;;
+    7) return 0 ;;
+    *) return 2 ;;
+  esac
+}
+
+write_ssh_policy() {
+  local value="$1" dir tmp
+  dir="$(dirname "$SSH_POLICY_FILE")"
+  install -d -m 0755 "$dir"
+  tmp="$(mktemp "$dir/.ssh-policy.XXXXXX")"
+  printf '%s\n' "$value" >"$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$SSH_POLICY_FILE"
+}
+
+read_ssh_policy() {
+  [ -f "$SSH_POLICY_FILE" ] && [ ! -L "$SSH_POLICY_FILE" ] || return 0
+  head -n1 "$SSH_POLICY_FILE" 2>/dev/null | tr -d '[:space:]'
+}
+
+# Stopping sshd does not end sessions already open (each has its own process),
+# which is what lets the owner — or the factory station — finish what it was
+# doing over the connection that asked for the change.
+# ssh.socket too: on a socket-activated sshd, disabling only ssh.service leaves
+# port 22 listening and starts sshd on the next connection.
+ssh_service_off() {
+  systemctl disable --now ssh.socket >/dev/null 2>&1 || true
+  systemctl disable --now ssh >/dev/null 2>&1 || systemctl disable --now ssh
+}
+
+# Web step, started by /setup-api/system/ssh (owner session + current
+# password) and by the factory reset. ONE word in a 0600 file under data/,
+# read once and removed, symlinks refused — step_chpasswd's shape.
+#
+# Privilege note: like chpasswd, anything running as the clawbox account can
+# write this file and start the step. `enable` is refused root-side without an
+# owner password, so it cannot open SSH on an unowned box; `disable` and
+# `factory_reset` can switch SSH off or clear the owner's password, which is
+# no more than chpasswd already lets that account do to its own password.
+step_ssh_policy() {
+  local INPUT_FILE="$PROJECT_DIR/data/.ssh-policy-request" request
+  if [ -L "$INPUT_FILE" ]; then
+    rm -f "$INPUT_FILE"
+    echo "Error: SSH policy request is a symlink; refusing" >&2
+    exit 64
+  fi
+  if [ ! -f "$INPUT_FILE" ]; then
+    echo "Error: SSH policy request not found" >&2
+    exit 1
+  fi
+  request="$(head -c 64 "$INPUT_FILE")"
+  rm -f "$INPUT_FILE"
+  case "$request" in
+    enable)
+      if ! ssh_owner_password_state; then
+        echo "Error: SSH stays off until the owner has set a password" >&2
+        exit 65
+      fi
+      write_ssh_policy enabled
+      systemctl enable --now ssh
+      echo "  SSH enabled"
+      ;;
+    disable)
+      write_ssh_policy disabled
+      ssh_service_off
+      echo "  SSH disabled"
+      ;;
+    factory_reset)
+      # Provisioned boxes only. A box set up before per-device provisioning
+      # keeps its old factory reset (the web side resets it the old way), so
+      # this refuses rather than take its password and SSH away.
+      if [ ! -f "${CLAWBOX_ETC:-/etc/clawbox}/provisioned" ]; then
+        echo "Error: factory_reset SSH policy is for provisioned boxes only" >&2
+        exit 66
+      fi
+      # No password at all — neither a default nor the previous owner's — so
+      # the box is unowned (`passwd -S` reads L) and the wizard can claim it.
+      usermod -p '!' "$CLAWBOX_USER"
+      write_ssh_policy disabled
+      ssh_service_off
+      echo "  Owner password removed and SSH disabled (factory reset)"
+      ;;
+    *)
+      echo "Error: unknown SSH policy request" >&2
+      exit 64
+      ;;
+  esac
+}
+
 # ── ClawBox users (TASK-1256) ────────────────────────────────────────────────
 #
 # Every ClawBox user other than the owner is a real Linux account, created and
@@ -12533,6 +12664,10 @@ DISPATCH_STEPS=(
   # and on no web or UI list — the web server it heals cannot start it.
   heal_build
   chpasswd gateway_setup ffmpeg_install polkit_rules systemd_services
+  # SSH off by default on provisioned boxes: ssh_policy is the owner's switch
+  # and the factory reset. No update ever changes SSH: TASK-1572, a box set up
+  # before this flow keeps its SSH exactly as it is.
+  ssh_policy
   # Settings → Users, multi-user ClawBox OS: TASK-1256. On WEB_ROOT_STEPS, never on the UI list.
   user_add user_remove
   directories_permissions captive_portal_dns desktop_theme

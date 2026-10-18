@@ -135,9 +135,9 @@ export async function POST(request: Request) {
       // opening the wizard.
       //
       // Trusting shadow here does NOT weaken the gate. hasOwnerPassword() is
-      // false for both "no password" and the published factory default, so an
-      // as-flashed box still gets the 400 and still cannot be logged into with
-      // the default everyone knows — only a password somebody deliberately set
+      // false for both "no password" and the published legacy image password,
+      // so an unowned box still gets the 400 and still cannot be logged into
+      // with the password everyone knows — only a password somebody deliberately set
       // opens this path, and the caller must still prove it below.
       await set("password_configured", true);
       await set("password_configured_at", new Date().toISOString());
