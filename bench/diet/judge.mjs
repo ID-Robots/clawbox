@@ -18,6 +18,7 @@ const argv = process.argv.slice(2);
 const dir = argv.find((a) => !a.startsWith("--"));
 const opt = (name, def) => { const i = argv.indexOf(`--${name}`); return i >= 0 ? argv[i + 1] : def; };
 const model = opt("model", "claude-opus-5-5");
+const RUBRIC_VERSION = 2; // bump when the prompt changes: scores of different versions are not comparable
 const samples = Number(opt("samples", 2));
 const force = argv.includes("--force");
 if (!dir) { console.error("usage: node bench/diet/judge.mjs <results/<label>> [--model M] [--samples N] [--force]"); process.exit(2); }
@@ -50,6 +51,9 @@ ${r.diff?.patch ?? "(no diff)"}
 
 ## The agent's closing report
 ${(r.summary || "(none)").slice(0, 4000)}
+
+## Environment facts (do not score these)
+The device the agent ran on writes favicon.png and favicon.ico into every project by itself and commits them; they are not the agent's doing and must not count against any criterion, nor must the report's silence about them.
 
 ## Rubric — integers 0–10 each
 - correctness: does the code do what was asked, including edge cases; would it work for a real user? Failing acceptance caps this at 4.
@@ -84,7 +88,8 @@ for (const f of files) {
   if (!r.spec) continue;
   const side = file.replace(/\.json$/, ".judge.json");
   if (fs.existsSync(side)) r.judge = JSON.parse(fs.readFileSync(side, "utf8"));
-  else if (r.judge) fs.writeFileSync(side, JSON.stringify(r.judge, null, 2));
+  if (r.judge && r.judge.rubric !== RUBRIC_VERSION) r.judge = null;
+  else if (r.judge && r.judge.rubric === RUBRIC_VERSION) fs.writeFileSync(side, JSON.stringify(r.judge, null, 2));
   if (r.harnessError || !r.diff) { all.push(r); continue; }
   if (r.judge && !force) { all.push(r); continue; }
   const got = [];
@@ -95,7 +100,7 @@ for (const f of files) {
     const mean = (c) => got.reduce((a, g) => a + g[c], 0) / got.length;
     const scores = Object.fromEntries(CRITERIA.map((c) => [c, Math.round(mean(c) * 10) / 10]));
     const overall = Math.round((CRITERIA.reduce((a, c) => a + scores[c], 0) / CRITERIA.length) * 10) / 10;
-    r.judge = { model, samples: got.length, ...scores, overall, notes: got.map((g) => g.notes).filter(Boolean) };
+    r.judge = { model, rubric: RUBRIC_VERSION, samples: got.length, ...scores, overall, notes: got.map((g) => g.notes).filter(Boolean) };
     fs.writeFileSync(side, JSON.stringify(r.judge, null, 2));
   }
   console.log(`${r.spec}: judge ${r.judge?.overall ?? "–"}`);

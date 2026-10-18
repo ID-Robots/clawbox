@@ -152,7 +152,7 @@ describe("helpers: lean", () => {
     expect(prompt).not.toContain(DELEGATION_START);
     expect(prompt).toMatch(/Run the project's tests and builds yourself in your shell — cheaper than a helper/);
     expect(prompt).toMatch(/explorer only for a codebase too large to read directly, handing it the paths and the question/);
-    expect(prompt).toMatch(/reviewer at most once, at the end of a large multi-file change, handing it the changed files and what to check/);
+    expect(prompt).toMatch(/send the reviewer exactly once, handing it the changed files, the task.s requirements and the edge cases/);
   });
 
   it("does not send the reviewer at all when a separate review reads the diff", () => {

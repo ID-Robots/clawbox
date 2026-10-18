@@ -5887,7 +5887,11 @@ export function leanHelpersBrief(reviewedSeparately: boolean): string {
     "Use the explorer only for a codebase too large to read directly, handing it the paths and the question.",
     reviewedSeparately
       ? "Do not send the reviewer: a separate review on this device reads your diff."
-      : "Use the reviewer at most once, at the end of a large multi-file change, handing it the changed files and what to check instead of letting it re-read the project.",
+      // Measured on bench/diet (2026-10-18): with the reviewer kept for
+      // "large" changes only, quality fell 0.65 of a point on the judge's
+      // ten — id reuse after a delete, a missing viewport tag, a circular
+      // import, all what one cheap last look catches. So: once, always.
+      : "When the work is done and your own checks pass, send the reviewer exactly once, handing it the changed files, the task's requirements and the edge cases to check instead of letting it re-read the project; fix what it finds, then finish.",
     "Helpers never edit.",
   ].join(" ");
 }
