@@ -78,6 +78,7 @@ describe("decide", () => {
     const d = decide([r("a", true, 1000, 8), r("b", false, 1000, 5)], [r("a", true, 400, 7.8), r("b", false, 300, 5)]);
     expect(d.keep).toBe(true);
     expect(d.tokenRatio).toBeCloseTo(0.35);
+    expect(d.geoRatio).toBeCloseTo(Math.sqrt(0.4 * 0.3));
   });
 
   it("rejects a lever that breaks a spec that passed, however cheap", () => {
@@ -89,6 +90,15 @@ describe("decide", () => {
   it("rejects a judge drop of 0.5 or more", () => {
     expect(decide([r("a", true, 1000, 8)], [r("a", true, 500, 7.5)]).keep).toBe(false);
     expect(decide([r("a", true, 1000, 8)], [r("a", true, 500, 7.6)]).keep).toBe(true);
+  });
+
+  it("judges tokens per spec, so the largest spec alone cannot decide", () => {
+    // The big spec got 10% dearer, the three small ones halved: kept.
+    const base = [r("big", true, 10_000, 8), r("a", true, 100, 8), r("b", true, 100, 8), r("c", true, 100, 8)];
+    const cand = [r("big", true, 11_000, 8), r("a", true, 50, 8), r("b", true, 50, 8), r("c", true, 50, 8)];
+    const d = decide(base, cand);
+    expect(d.tokenRatio).toBeGreaterThan(1);
+    expect(d.keep).toBe(true);
   });
 
   it("rejects when tokens do not fall, and refuses to compare changed specs", () => {

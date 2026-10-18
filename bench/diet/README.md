@@ -75,7 +75,9 @@ the run's session, and the CLI reports a resumed session's whole history.
 
 `compare.mjs` prints the before/after table and the verdict. A lever is
 **kept** only when no spec that passed before fails now, the pass count does
-not fall, the mean judge score drops by less than 0.5, and total tokens fall.
+not fall, the mean judge score drops by less than 0.5, and tokens fall — judged as the
+geometric mean of the per-spec ratios, so every spec counts once (a raw total
+is decided by the largest spec alone, whose own run-to-run spread is ±30%).
 Levers are applied one at a time, each on top of the last kept configuration.
 A spec whose files changed between two runs (`specHash`) is not comparable and
 blocks the verdict.

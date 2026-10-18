@@ -52,8 +52,13 @@ export function decide(base, cand) {
   if (c.passed < b.passed) reasons.push(`passes ${c.passed} < ${b.passed}`);
   if (b.judgeMean != null && c.judgeMean != null && b.judgeMean - c.judgeMean >= 0.5) reasons.push(`judge ${c.judgeMean} vs ${b.judgeMean} (drop ≥ 0.5)`);
   if (b.judgeMean != null && c.judgeMean == null) reasons.push("candidate not judged");
-  if (!(c.tokens < b.tokens)) reasons.push(`tokens did not fall (${k(c.tokens)} vs ${k(b.tokens)})`);
-  return { keep: reasons.length === 0, reasons, base: b, cand: c, tokenRatio: b.tokens ? c.tokens / b.tokens : null, regressions };
+  // Tokens: the geometric mean of the per-spec ratios, so every spec counts
+  // once — a raw sum is decided by the largest spec alone, and one run of it
+  // varies by ±30% from run to run on its own.
+  const ratios = common.map((r) => [tokensOf(r), tokensOf(bySpec.get(r.spec))]).filter(([x, y]) => x > 0 && y > 0).map(([x, y]) => x / y);
+  const geoRatio = ratios.length ? Math.exp(ratios.reduce((a, x) => a + Math.log(x), 0) / ratios.length) : null;
+  if (!(geoRatio !== null && geoRatio < 1)) reasons.push(`tokens did not fall (per-spec geometric mean ${geoRatio?.toFixed(2) ?? "–"}x)`);
+  return { keep: reasons.length === 0, reasons, base: b, cand: c, tokenRatio: b.tokens ? c.tokens / b.tokens : null, geoRatio, regressions };
 }
 
 export function compareTable(base, cand, baseLabel, candLabel) {
@@ -70,6 +75,6 @@ export function compareTable(base, cand, baseLabel, candLabel) {
   }
   const d = decide(base, cand);
   out.push("");
-  out.push(`Decision: **${d.keep ? "KEEP" : "REJECT"}**${d.reasons.length ? ` — ${d.reasons.join("; ")}` : ""}. Tokens ${k(d.base.tokens)} → ${k(d.cand.tokens)}${d.tokenRatio ? ` (${d.tokenRatio.toFixed(2)}x)` : ""}, passes ${d.base.passed} → ${d.cand.passed}, judge ${d.base.judgeMean ?? "–"} → ${d.cand.judgeMean ?? "–"}.`);
+  out.push(`Decision: **${d.keep ? "KEEP" : "REJECT"}**${d.reasons.length ? ` — ${d.reasons.join("; ")}` : ""}. Tokens ${k(d.base.tokens)} → ${k(d.cand.tokens)}${d.tokenRatio ? ` (${d.tokenRatio.toFixed(2)}x total, ${d.geoRatio?.toFixed(2)}x per-spec geometric mean)` : ""}, passes ${d.base.passed} → ${d.cand.passed}, judge ${d.base.judgeMean ?? "–"} → ${d.cand.judgeMean ?? "–"}.`);
   return `${out.join("\n")}\n`;
 }
