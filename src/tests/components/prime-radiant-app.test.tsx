@@ -1297,6 +1297,15 @@ describe("PrimeRadiantApp — Questions", () => {
     expect(screen.getByTestId("prime-radiant-accuracy-not-judged")).toHaveTextContent("24 not judged");
   });
 
+  it("still says how many were not judged for a stored score with no %", async () => {
+    status = { ...STATUS, golden: { ...GOLDEN_SCORE, last: { ...GOLDEN_SCORE.last, asked: 6, correct: 0, wrong: 0, failed: 6, percent: null } } };
+    mount();
+    await openTab("questions");
+    expect(await screen.findByTestId("prime-radiant-accuracy-not-judged")).toHaveTextContent("6 not judged");
+    expect(screen.getByTestId("prime-radiant-accuracy")).toHaveTextContent("Not checked yet");
+    expect(screen.queryByTestId("prime-radiant-accuracy-percent")).toBeNull();
+  });
+
   it("says so when there are no golden questions, no score and no owners yet", async () => {
     goldenQuestions = [];
     mount();

@@ -74,7 +74,16 @@ function Accuracy({ score }: { score: GoldenStatus | null | undefined }) {
     <section className={`${CARD_SURFACE} p-4`} data-testid="prime-radiant-accuracy">
       <h3 className={SECTION_LABEL}>{t("primeRadiant.questions.accuracy")}</h3>
       {!last || last.percent === null ? (
-        <p className="mt-2 text-sm text-[var(--text-muted)]">{t("primeRadiant.questions.accuracyNone")}</p>
+        <p className="mt-2 text-sm text-[var(--text-muted)]">
+          {t("primeRadiant.questions.accuracyNone")}
+          {/* An early score could be stored with nothing judged: its unjudged questions are still said. */}
+          {last && last.failed > 0 && (
+            <span className="text-[11px] text-amber-200" data-testid="prime-radiant-accuracy-not-judged">
+              {" · "}
+              {t("primeRadiant.questions.notJudged", { n: last.failed })}
+            </span>
+          )}
+        </p>
       ) : (
         <div className="mt-2 flex flex-wrap items-end justify-between gap-4">
           <div>

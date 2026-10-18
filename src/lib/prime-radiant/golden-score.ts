@@ -196,32 +196,40 @@ export async function runGoldenScore(options: GoldenScoreOptions = {}): Promise<
     const { system, user } = buildGoldenPrompt(
       batch.map((q) => ({ question: redactText(q.question).text, expected: redactText(q.expected).text, evidence: evidence.get(q.id) ?? [] })),
     );
+    const maxTokens = goldenMaxTokens(batch.length);
+    const charge = (model: string, usage: FlashResponse["usage"]) => {
+      result.calls++;
+      const usd = estimateUsd(model, usage, options.rates);
+      result.usdEstimate += usd;
+      recordCost(vault, {
+        runId: options.runId ?? null,
+        operation: "golden",
+        model,
+        tokensIn: usage.promptTokens,
+        tokensOut: usage.completionTokens,
+        usdEstimate: usd,
+        at: now().toISOString(),
+      });
+    };
     let response: FlashResponse;
     try {
-      ({ response } = await completeWithRetry(client, { system, user, maxTokens: goldenMaxTokens(batch.length), signal: options.signal }, retry));
+      ({ response } = await completeWithRetry(client, { system, user, maxTokens, signal: options.signal }, retry));
     } catch (err) {
       const kind = err instanceof FlashCallError ? err.kind : "network";
       if (MODEL_REFUSALS.has(kind)) refusal = kind;
-      else if (kind === "bad_response") failuresInRow = 0; // the provider answered: no outage
-      else {
+      else if (kind === "bad_response") {
+        // The provider answered (no outage), and an empty or capped answer still spent its tokens: no usage
+        // came with it, so it is charged as the whole prompt (~4 characters a token) plus the whole output cap.
+        failuresInRow = 0;
+        charge(client.model, { promptTokens: Math.ceil((system.length + user.length) / 4), completionTokens: maxTokens, cacheHitTokens: 0 });
+      } else {
         failuresInRow++;
         outages.set(kind, (outages.get(kind) ?? 0) + 1);
       }
       return { ok: false, kind };
     }
     failuresInRow = 0;
-    result.calls++;
-    const usd = estimateUsd(response.model, response.usage, options.rates);
-    result.usdEstimate += usd;
-    recordCost(vault, {
-      runId: options.runId ?? null,
-      operation: "golden",
-      model: response.model,
-      tokensIn: response.usage.promptTokens,
-      tokensOut: response.usage.completionTokens,
-      usdEstimate: usd,
-      at: now().toISOString(),
-    });
+    charge(response.model, response.usage);
     let answers: Map<number, { verdict: GoldenVerdict; why: string }>;
     try {
       answers = parseGoldenResponse(response.text, batch.length);

@@ -385,8 +385,12 @@ describe("golden questions: the nightly score", () => {
     expect(sizes).toEqual([6, 3, 2, 1, 3, 2, 1]);
     expect(caps[0]).toBe(goldenMaxTokens(6));
     expect(r.tally).toMatchObject({ asked: 6, correct: 6, failed: 0, percent: 100 });
-    expect(r.calls).toBe(4); // the answered calls, each a cost row
-    expect(readCosts(vaultDir(), "run-0000000000c1")).toHaveLength(4);
+    // Every call is a cost row; an empty answer brings no usage, so it is charged its whole output cap.
+    expect(r.calls).toBe(7);
+    const costs = readCosts(vaultDir(), "run-0000000000c1");
+    expect(costs).toHaveLength(7);
+    expect(costs.filter((c) => c.tokensOut >= goldenMaxTokens(3)).map((c) => c.tokensOut)).toEqual([goldenMaxTokens(6), goldenMaxTokens(3), goldenMaxTokens(3)]);
+    expect(costs.every((c) => c.tokensIn > 0 && c.usdEstimate > 0)).toBe(true);
     expect(r.notes.join(" ")).toMatch(/asked again in smaller calls/);
   });
 
@@ -430,9 +434,31 @@ describe("golden questions: the nightly score", () => {
     expect(r.skipped).toBeNull();
     expect(r.tally).toMatchObject({ asked: 18, correct: 12, failed: 6 });
     expect(calls).toBe(11 + 2); // the first batch split down to six single calls, then the two others
+    expect(r.calls).toBe(13);
     expect(r.notes.join(" ")).not.toMatch(/in a row failed/);
     expect(r.notes.join(" ")).toMatch(/no verdict for 6 question\(s\) even asked alone/);
     expect(readGoldenHistory()[0]).toMatchObject({ asked: 18, correct: 12, failed: 6, percent: 100 });
+  });
+
+  it("counts an empty answer's estimated cost towards the night's spending cap", async () => {
+    await seedPages();
+    for (let i = 0; i < 12; i++) await addGoldenQuestion({ ...PRICE_Q, question: `What does the blue widget cost? (${i})` }, { domains: [] });
+    let calls = 0;
+    const empty: FlashClient = {
+      model: "deepseek-v4-flash",
+      async complete() {
+        calls++;
+        throw new FlashCallError("bad_response", "ClawBox AI reached the output cap before it answered.");
+      },
+    };
+    // At these rates one capped six-question call (4,096 output tokens) costs more than the night may spend.
+    const rates = { basis: "estimate", currency: "USD", unit: "per-million-tokens", models: { "deepseek-v4-flash": { input: 0, cachedInput: 0, output: 200 } } } as const;
+    const r = await runGoldenScore({ runId: "run-0000000000f3", client: empty, rates, online: true, now: () => NOW });
+    expect(calls).toBe(1);
+    expect(r.calls).toBe(1);
+    expect(r.usdEstimate).toBeGreaterThan(0.5);
+    expect(r.notes.join(" ")).toMatch(/spending cap/);
+    expect(readCosts(vaultDir(), "run-0000000000f3")).toMatchObject([{ operation: "golden", tokensOut: goldenMaxTokens(6) }]);
   });
 
   it("stops at the night's spending cap, whatever the question cap", async () => {
