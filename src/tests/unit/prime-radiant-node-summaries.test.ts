@@ -706,6 +706,9 @@ describe("domain mismatch", () => {
     // A role word that only opens a longer noun is no role.
     expect(suggestDomain("sales", ["developer board for robots."], new Set([...DOMAINS, "engineering"]))).toBeNull();
     expect(suggestDomain("sales", ["developer at Globex."], new Set([...DOMAINS, "engineering"]))).toMatchObject({ suggested: "engineering" });
+    // An attached hyphen is part of the noun; a dash after a space ends the role.
+    expect(suggestDomain("sales", ["developer-board for robots."], new Set([...DOMAINS, "engineering"]))).toBeNull();
+    expect(suggestDomain("sales", ["developer – robotics platforms."], new Set([...DOMAINS, "engineering"]))).toMatchObject({ suggested: "engineering" });
   });
 
   it("reads a role only from what a fact says the entity IS", () => {
@@ -715,6 +718,8 @@ describe("domain mismatch", () => {
     expect(rolePhrase("Maria Ivanova's accountant is Jane Roe.", names)).toBeNull();
     expect(rolePhrase("Maria Ivanova met the COO.", names)).toBeNull();
     expect(rolePhrase("Acme's COO is Maria Ivanova.", names)).toBeNull();
+    // A dash after a space is a role boundary; one glued to the noun is not.
+    expect(rolePhrase("Maria Ivanova is the COO - Acme Widgets.", names)).toBe("COO - Acme Widgets.");
   });
 
   it("suggests nothing from role words said of others, nor from the domains of linked pages", () => {
@@ -731,6 +736,17 @@ describe("domain mismatch", () => {
       ...[1, 2, 3].map((i) => ({ path: `concepts/o-${i}.md`, fm: fm(`O ${i}`, "operations", [`Route ${i}.`], "concept") })),
     ];
     expect(domainMismatches(pages, { configured: [...DOMAINS, "engineering"] })).toEqual([]);
+  });
+
+  it("takes no role from a historical claim", () => {
+    const page = (historical: boolean) => ({
+      path: "entities/acme-ltd.md",
+      fm: frontmatter({ type: "entity", title: "Acme Ltd", domain: "finance", claims: [claim("finance/acme-ltd/f-0", "Acme Ltd is the COO of Globex.", { historical })] }),
+    });
+    const known = new Set([...DOMAINS, "operations"]);
+    // Past its date, the fact says nothing about today's role.
+    expect(domainMismatches([page(true)], { configured: [...known] })).toEqual([]);
+    expect(domainMismatches([page(false)], { configured: [...known] })[0]).toMatchObject({ reason: "role", suggested: "operations" });
   });
 
   it("is a lint warning with the suggested domain, beside the duplicate-entity warning", () => {

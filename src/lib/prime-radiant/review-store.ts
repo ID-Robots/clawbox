@@ -403,12 +403,18 @@ export function closeItemsForRetired(vault: string, retired: readonly string[], 
 
 /**
  * Close every still-waiting item about claims removed from their page (a
- * delete, or a fold into a same-worded claim — `note` says which): the one
- * about the claim, and a contradiction one of its sides. Not a dismissal a
- * person made, so the same question about a claim that comes back is asked
- * again.
+ * delete, or a fold into a same-worded claim — `note` says which, or answers
+ * it for each removed claim id): the one about the claim, and a contradiction
+ * one of its sides. Not a dismissal a person made, so the same question about
+ * a claim that comes back is asked again.
  */
-export function closeItemsForRemoved(vault: string, removed: readonly string[], by: string, note: string, at: string = new Date().toISOString()): number {
+export function closeItemsForRemoved(
+  vault: string,
+  removed: readonly string[],
+  by: string,
+  note: string | ((removedId: string) => string),
+  at: string = new Date().toISOString(),
+): number {
   if (removed.length === 0 || !stateDbExists(vault)) return 0;
   const ids = new Set(removed);
   return withStateDb(vault, (db) => {
@@ -418,7 +424,9 @@ export function closeItemsForRemoved(vault: string, removed: readonly string[], 
     for (const item of rows.map(fromRow)) {
       const hit = [item.claimId, ...(item.kind === "contradiction" ? item.candidates.map((c) => c.claimId) : [])].filter((id): id is string => !!id && ids.has(id));
       if (hit.length === 0) continue;
-      n += Number(close.run(at, JSON.stringify({ action: "dismiss", by, note, removed: [...new Set(hit)] } satisfies ReviewResolution), item.id).changes);
+      const removedIds = [...new Set(hit)];
+      const noteText = typeof note === "string" ? note : [...new Set(removedIds.map((id) => note(id)))].join("; ");
+      n += Number(close.run(at, JSON.stringify({ action: "dismiss", by, note: noteText, removed: removedIds } satisfies ReviewResolution), item.id).changes);
     }
     return n;
   });

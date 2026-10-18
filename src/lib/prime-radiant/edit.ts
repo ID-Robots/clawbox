@@ -1228,8 +1228,11 @@ function followReviewItems(vault: string, plan: MergePlan["result"], dryRun: boo
 
 /** The waiting review items about claims folded into a same-worded one: the question lives on under the kept claim. */
 export function closeFoldedItems(vault: string, folded: ReadonlyArray<{ id: string; into: string }>, by: string, at: string): void {
+  if (folded.length === 0) return;
+  const into = new Map(folded.map((f) => [f.id, f.into]));
   try {
-    for (const f of folded) closeItemsForRemoved(vault, [f.id], by, `claim folded into ${f.into}`, at);
+    // One pass: an item whose claim and candidate both folded is closed once, with both ids.
+    closeItemsForRemoved(vault, [...into.keys()], by, (id) => `claim folded into ${into.get(id) ?? id}`, at);
   } catch {
     /* they can be dismissed by hand */
   }

@@ -55,8 +55,9 @@
  *    and the entities filed under the wrong domain (`domainMismatches`).
  *    `dryRun: true` answers what it would write (`would`) and those
  *    suggestions, and never asks the model.
- * `reindex`, `connect`, `migrate-frontmatter`, `structure` and `summaries` run on in the background:
- * 202 `{ started: true }`; 409 `busy` while one runs. A `dryRun` answers its
+ * `reindex`, `connect`, `migrate-frontmatter`, `fold-duplicate-claims`,
+ * `structure` and `summaries` run on in the background: 202
+ * `{ started: true }`; 409 `busy` while one runs. A `dryRun` answers its
  * counts at once.
  *
  * GET → `{ running, last: { [action]: result | { error } } }`.
@@ -220,7 +221,10 @@ export async function POST(req: Request) {
       }
       case "fold-duplicate-claims": {
         if (state.running) return busy();
-        return json(await foldDuplicateClaimsInVault({ dryRun, vault, author: gate.writer.author }));
+        const author = gate.writer.author;
+        if (dryRun) return json(await foldDuplicateClaimsInVault({ dryRun: true, vault, author }));
+        background("fold-duplicate-claims", () => foldDuplicateClaimsInVault({ vault, author }));
+        return json({ started: true }, 202);
       }
       case "upgrade-assistant-verifications": {
         if (state.running) return busy();

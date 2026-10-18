@@ -188,7 +188,7 @@ const ROLE_DOMAINS: ReadonlyArray<{ domains: readonly string[]; words: RegExp }>
 ];
 
 /** What may follow a role that is the whole complement: the sentence's end, a clause, or "of Acme", "at Globex", "since 2024". */
-const ROLE_END_RE = /^(?:$|\s*[.,;:()\u2013\u2014-]|\s+(?:of|at|for|in|and|since|from|with|to|on|до|на|в|от|и)(?![\p{L}\p{N}]))/iu;
+const ROLE_END_RE = /^(?:$|\s*[.,;:()]|\s+[\u2013\u2014-]|\s+(?:of|at|for|in|and|since|from|with|to|on|до|на|в|от|и)(?![\p{L}\p{N}]))/iu;
 
 /**
  * The role a role phrase opens with, as written: the whole complement, never
@@ -281,7 +281,7 @@ export function domainMismatches(pages: readonly HygienePage[], options: { confi
     if (!isEntityPage(p) || (options.paths && !options.paths.has(p.path))) continue;
     const names = pageNames(p.fm);
     // Only its own facts, and only what they say it IS: a neighbour's fact, or a role word elsewhere, is no evidence.
-    const roleTexts = p.fm.claims.filter((c) => c.status !== "contested").flatMap((c) => rolePhrase(c.text, names) ?? []);
+    const roleTexts = p.fm.claims.filter((c) => c.status !== "contested" && c.historical !== true).flatMap((c) => rolePhrase(c.text, names) ?? []);
     const s = suggestDomain(p.fm.domain, roleTexts, known);
     if (s) out.push({ path: p.path, domain: p.fm.domain, ...s });
   }
