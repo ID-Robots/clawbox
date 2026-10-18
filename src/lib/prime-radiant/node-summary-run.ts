@@ -22,6 +22,13 @@
  * back as suggestions too (lint warns with them). Nothing is merged or moved
  * here.
  *
+ * A page whose new summary the vault's lint refuses (`blocksCommit`: a
+ * secret-pattern hit, say, from a fact or a body that reads like a card) is
+ * left as it was and listed in `refused` with the rules that refused it; the
+ * rest of its commit is made without it. Anything else that fails a commit
+ * (git, the disk, a lint finding on a page this pass did not write) still
+ * fails the pass.
+ *
  * A dry run asks no model and writes nothing: it answers what would be
  * written, the suggestions and the stats.
  *
@@ -50,7 +57,7 @@ import {
 import type { DomainMismatch, DuplicateReason } from "./entity-hygiene";
 import type { PageFrontmatter } from "./schema";
 import type { PrimeRadiantSettings } from "./settings";
-import type { VaultSnapshot, VaultTx } from "./vault";
+import { VaultLintBlockedError, type VaultSnapshot, type VaultTx } from "./vault";
 
 /** Pages one model call summarises. */
 export const SUMMARY_BATCH = 8;
@@ -99,6 +106,8 @@ export interface SummariesRunResult extends SummaryPlanStats {
   rejected: number;
   /** Pages whose every model sentence was rejected (their facts wrote the summary). */
   rejectedPages: number;
+  /** Pages whose new summary the vault's lint refused: each left as it was, with why (e.g. `secret-pattern (CARD)`). */
+  refused: Array<{ path: string; reason: string }>;
   model: { asked: number; calls: number; usdEstimate: number; capUsd: number; maxPages: number; skipped?: string };
   /** Duplicate entity groups found (each a merge suggestion). */
   mergeGroups: number;
@@ -122,7 +131,8 @@ interface Planned {
 /**
  * Plan and write the node summaries over `snapshot` (the nightly branch's, or
  * `main`'s for the maintenance action), each commit through `run`. Never throws
- * for a model failure: the pages it did not reach are written from their facts.
+ * for a model failure: the pages it did not reach are written from their facts;
+ * nor for a page the lint refuses: it is left out of its commit (`refused`).
  */
 export async function runSummaries(
   snapshot: Pick<VaultSnapshot, "pages" | "indexBody"> & Partial<Pick<VaultSnapshot, "vault" | "truncated">>,
@@ -157,6 +167,7 @@ export async function runSummaries(
     waiting: 0,
     rejected: 0,
     rejectedPages: 0,
+    refused: [],
     model: { asked: 0, calls: 0, usdEstimate: 0, capUsd: s.capUsd, maxPages: s.maxPages },
     mergeGroups: plan.duplicates.length,
     mergeSuggestions: options.mergePreviews ? mergeSuggestions(snapshot, plan.duplicates, options.stateVault, now()) : [],
@@ -253,22 +264,62 @@ export async function runSummaries(
   result.model.usdEstimate = Math.round(result.model.usdEstimate * 1e6) / 1e6;
 
   for (let i = 0; i < writes.length; i += SUMMARIES_COMMIT_BATCH) {
-    const batch = writes.slice(i, i + SUMMARIES_COMMIT_BATCH);
-    const { commit } = await run(`summaries: node summaries from their connections (${i + 1}-${i + batch.length} of ${writes.length})`, async (tx) => {
-      for (const w of batch) {
-        // Edited since the plan was made: left as the person left it.
-        const current = await tx.read(w.path);
-        if ((current?.text ?? null) !== w.expected) continue;
-        await tx.writePage(w.path, w.frontmatter, w.body);
-        result.written++;
-        // Counted as written, not as planned: a page skipped above is in neither.
-        if (w.method === "model") result.byModel++;
-        else result.byFacts++;
+    let batch = writes.slice(i, i + SUMMARIES_COMMIT_BATCH);
+    const message = `summaries: node summaries from their connections (${i + 1}-${i + batch.length} of ${writes.length})`;
+    // Each refusal takes at least one page out, so this ends; the lint names every refused page of a commit at once, so it is mostly one retry.
+    while (batch.length > 0) {
+      // Counted once the commit stands: a refused one is put back whole.
+      const counts = { written: 0, byModel: 0, byFacts: 0 };
+      let commit: string | null;
+      try {
+        ({ commit } = await run(message, async (tx) => {
+          for (const w of batch) {
+            // Edited since the plan was made: left as the person left it.
+            const current = await tx.read(w.path);
+            if ((current?.text ?? null) !== w.expected) continue;
+            await tx.writePage(w.path, w.frontmatter, w.body);
+            counts.written++;
+            // Counted as written, not as planned: a page skipped above is in neither.
+            if (w.method === "model") counts.byModel++;
+            else counts.byFacts++;
+          }
+        }));
+      } catch (err) {
+        const refused = refusedPages(err, batch);
+        if (!refused) throw err;
+        for (const [path, reason] of refused) result.refused.push({ path, reason });
+        batch = batch.filter((w) => !refused.has(w.path));
+        continue;
       }
-    });
-    if (commit) result.commits.push(commit);
+      result.written += counts.written;
+      result.byModel += counts.byModel;
+      result.byFacts += counts.byFacts;
+      if (commit) result.commits.push(commit);
+      break;
+    }
   }
   return result;
+}
+
+/**
+ * The pages of `batch` the vault's lint refused in `err`, each with the rules
+ * (and secret kinds) that refused it — or null when `err` is anything else,
+ * or names a page this batch did not write: that is no page to leave out but
+ * a failure of the commit.
+ */
+function refusedPages(err: unknown, batch: readonly Planned[]): Map<string, string> | null {
+  if (!(err instanceof VaultLintBlockedError) || err.findings.length === 0) return null;
+  const paths = new Set(batch.map((w) => w.path));
+  const refused = new Map<string, string[]>();
+  for (const f of err.findings) {
+    if (!paths.has(f.path)) return null;
+    const kinds = Array.isArray(f.details?.kinds) ? (f.details.kinds as unknown[]).filter((k): k is string => typeof k === "string") : [];
+    const why = kinds.length > 0 ? `${f.rule} (${kinds.join(", ")})` : f.rule;
+    const list = refused.get(f.path) ?? [];
+    if (!list.includes(why)) list.push(why);
+    refused.set(f.path, list);
+  }
+  return new Map([...refused].map(([p, why]) => [p, why.join(", ")]));
 }
 
 /** Each duplicate group as the merge tool would fold it, planned on `snapshot`, written nowhere. */
