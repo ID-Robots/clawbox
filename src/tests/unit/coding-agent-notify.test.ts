@@ -98,7 +98,7 @@ function run(over: Partial<CodingRun> = {}): CodingRun {
     exitCode: 0,
     media: { images: true, audio: true },
     reviewPass: false,
-    diet: { brief: "full", helpers: "always", visualTools: "always" },
+    diet: { brief: "full", helpers: "always", visualTools: "always", context: "full" },
     visual: null,
     mediaGenerated: { images: 0, audio: 0 },
     pgid: null,

@@ -53,7 +53,7 @@ function flagValues(args: string[], flag: string): string[] {
 
 const RUN = { id: "run-aaaaaaaa", directory: "/home/clawbox/Projects/site", media: { images: true, audio: true } };
 const TEAM_RUN = { ...RUN, team: { id: "team-aaaaaaaa", role: "worker" as const, taskId: "t1" } };
-const LEAN: CodingDiet = { brief: "lean", helpers: "lean", visualTools: "auto" };
+const LEAN: CodingDiet = { brief: "lean", helpers: "lean", visualTools: "auto", context: "full" };
 const DELEGATION_START = "Delegate instead of doing everything in one thread";
 
 describe("the legacy diet changes nothing", () => {
@@ -170,7 +170,7 @@ describe("brief: lean", () => {
 
 describe("helpers: lean", () => {
   it.each(["full", "lean"] as const)("replaces the delegation sentence in the %s brief", (brief) => {
-    const prompt = systemPrompt(buildRunArgs({ effort: "xhigh", run: RUN, diet: { brief, helpers: "lean", visualTools: "always" } }));
+    const prompt = systemPrompt(buildRunArgs({ effort: "xhigh", run: RUN, diet: { brief, helpers: "lean", visualTools: "always", context: "full" } }));
     expect(prompt).toContain(leanHelpersBrief(false));
     expect(prompt).not.toContain(DELEGATION_START);
     expect(prompt).toMatch(/Run the project's tests and builds yourself in your shell — cheaper than a helper/);
@@ -272,3 +272,14 @@ describe("decideRunVisual", () => {
     for (const d of [plain, site, app]) fs.rmSync(d, { recursive: true, force: true });
   });
 });
+
+describe("context: capped", () => {
+  it("sets the compaction window in the run's environment, and nothing when full", async () => {
+    const { buildRunEnv } = await import("@/lib/coding-agent");
+    const { DEFAULT_DIET } = await import("@/lib/coding-diet");
+    expect(buildRunEnv({ diet: { ...DEFAULT_DIET, context: "capped" } }).CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe("128000");
+    expect(buildRunEnv({ diet: { ...DEFAULT_DIET, context: "full" } }).CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined();
+    expect(buildRunEnv({}).CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBeUndefined();
+  });
+});
+

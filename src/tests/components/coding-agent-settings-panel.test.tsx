@@ -1081,7 +1081,7 @@ describe("the attempts at a run's deliverable", () => {
  * answers without `diet`.
  */
 describe("the token diet", () => {
-  const DEFAULT_DIET = { brief: "full", helpers: "always", visualTools: "always" };
+  const DEFAULT_DIET = { brief: "full", helpers: "always", visualTools: "always", context: "full" };
 
   it("draws the three knobs with what the device answered", async () => {
     stubFetch({ enabled: true, readiness: READY }, { diet: { ...DEFAULT_DIET, helpers: "lean" } });

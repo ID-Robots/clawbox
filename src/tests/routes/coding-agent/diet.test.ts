@@ -49,19 +49,19 @@ afterEach(async () => {
 describe("the diet setting", () => {
   it("reports the lean defaults (TASK-1749's measurement) on a box that never set it", async () => {
     const lib = await import("@/lib/coding-agent");
-    expect((await lib.getCodingAgentStatus()).diet).toEqual({ brief: "lean", helpers: "lean", visualTools: "auto" });
-    expect(await lib.getDiet()).toEqual({ brief: "lean", helpers: "lean", visualTools: "auto" });
+    expect((await lib.getCodingAgentStatus()).diet).toEqual({ brief: "lean", helpers: "lean", visualTools: "auto", context: "full" });
+    expect(await lib.getDiet()).toEqual({ brief: "lean", helpers: "lean", visualTools: "auto", context: "full" });
     expect(savedConfig()).not.toHaveProperty("coding_agent_diet");
   });
 
   it("merges a partial patch over the lean defaults when nothing is stored, then over what is stored", async () => {
     let res = await post({ diet: { brief: "full" } });
     expect(res.status).toBe(200);
-    expect((await res.json()).diet).toEqual({ brief: "full", helpers: "lean", visualTools: "auto" });
-    expect(savedConfig().coding_agent_diet).toEqual({ brief: "full", helpers: "lean", visualTools: "auto" });
+    expect((await res.json()).diet).toEqual({ brief: "full", helpers: "lean", visualTools: "auto", context: "full" });
+    expect(savedConfig().coding_agent_diet).toEqual({ brief: "full", helpers: "lean", visualTools: "auto", context: "full" });
     res = await post({ diet: { visualTools: "always", helpers: "always" } });
-    expect((await res.json()).diet).toEqual({ brief: "full", helpers: "always", visualTools: "always" });
-    expect(savedConfig().coding_agent_diet).toEqual({ brief: "full", helpers: "always", visualTools: "always" });
+    expect((await res.json()).diet).toEqual({ brief: "full", helpers: "always", visualTools: "always", context: "full" });
+    expect(savedConfig().coding_agent_diet).toEqual({ brief: "full", helpers: "always", visualTools: "always", context: "full" });
   });
 
   it.each([
@@ -88,7 +88,7 @@ describe("the diet setting", () => {
   it("reports a stored junk value as the default it reads as", async () => {
     fs.writeFileSync(path.join(session.root, "data", "config.json"), JSON.stringify({ ...savedConfig(), coding_agent_diet: { brief: "tiny", visualTools: "always" } }));
     const lib = await import("@/lib/coding-agent");
-    expect((await lib.getCodingAgentStatus()).diet).toEqual({ brief: "lean", helpers: "lean", visualTools: "always" });
+    expect((await lib.getCodingAgentStatus()).diet).toEqual({ brief: "lean", helpers: "lean", visualTools: "always", context: "full" });
   });
 
   it("is cleared by the reset with every other setting", async () => {
@@ -113,19 +113,19 @@ describe("a run record's frozen diet", () => {
   // resumes must keep it byte for byte.
   it("round-trips the diet and the visual decision, and reads a record from before them as the legacy full prompt", async () => {
     fs.writeFileSync(path.join(session.root, "data", "coding-agent-runs.json"), JSON.stringify([
-      record("run-aaaaaaaa", { diet: { brief: "lean", helpers: "lean", visualTools: "auto" }, visual: false }),
+      record("run-aaaaaaaa", { diet: { brief: "lean", helpers: "lean", visualTools: "auto", context: "full" }, visual: false }),
       record("run-bbbbbbbb", {}),
       record("run-cccccccc", { diet: { brief: "short", helpers: "lean" }, visual: "yes" }),
     ]));
     const lib = await import("@/lib/coding-agent");
     const a = lib.getRun("run-aaaaaaaa")!;
-    expect(a.diet).toEqual({ brief: "lean", helpers: "lean", visualTools: "auto" });
+    expect(a.diet).toEqual({ brief: "lean", helpers: "lean", visualTools: "auto", context: "full" });
     expect(a.visual).toBe(false);
     const b = lib.getRun("run-bbbbbbbb")!;
-    expect(b.diet).toEqual({ brief: "full", helpers: "always", visualTools: "always" });
+    expect(b.diet).toEqual({ brief: "full", helpers: "always", visualTools: "always", context: "full" });
     expect(b.visual).toBeNull();
     const c = lib.getRun("run-cccccccc")!;
-    expect(c.diet).toEqual({ brief: "full", helpers: "lean", visualTools: "always" });
+    expect(c.diet).toEqual({ brief: "full", helpers: "lean", visualTools: "always", context: "full" });
     expect(c.visual).toBeNull();
   });
 });

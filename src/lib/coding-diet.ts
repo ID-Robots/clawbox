@@ -38,34 +38,47 @@
 export const DIET_BRIEF_MODES = ["full", "lean"] as const;
 export const DIET_HELPER_MODES = ["always", "lean"] as const;
 export const DIET_VISUAL_TOOL_MODES = ["always", "auto"] as const;
+export const DIET_CONTEXT_MODES = ["full", "capped"] as const;
 
 export type DietBrief = (typeof DIET_BRIEF_MODES)[number];
 export type DietHelpers = (typeof DIET_HELPER_MODES)[number];
 export type DietVisualTools = (typeof DIET_VISUAL_TOOL_MODES)[number];
+export type DietContext = (typeof DIET_CONTEXT_MODES)[number];
 
 export interface CodingDiet {
   brief: DietBrief;
   helpers: DietHelpers;
   visualTools: DietVisualTools;
+  /**
+   * "capped": Claude Code compacts the conversation once it nears
+   * CONTEXT_CAP_WINDOW tokens. On a 1M-token model ("full") its automatic
+   * compaction effectively never runs, so a long run re-sends a context of
+   * 150–200k tokens on every turn.
+   */
+  context: DietContext;
 }
+
+/** The compaction window a "capped" run is given (CLAUDE_CODE_AUTO_COMPACT_WINDOW). */
+export const CONTEXT_CAP_WINDOW = 128_000;
 
 /**
  * The behaviour before the diet existed, on every knob: what a run record
  * written without a `diet` field — and a prompt built without one — means.
  */
-export const LEGACY_DIET: Readonly<CodingDiet> = Object.freeze({ brief: "full", helpers: "always", visualTools: "always" });
+export const LEGACY_DIET: Readonly<CodingDiet> = Object.freeze({ brief: "full", helpers: "always", visualTools: "always", context: "full" });
 
 /**
  * The owner's setting when nothing is stored (TASK-1749): measured on
  * bench/diet (2026-10-18), the lean brief, the lean helper sentence and the
  * per-run visual decision did the same work for fewer tokens.
  */
-export const DEFAULT_DIET: Readonly<CodingDiet> = Object.freeze({ brief: "lean", helpers: "lean", visualTools: "auto" });
+export const DEFAULT_DIET: Readonly<CodingDiet> = Object.freeze({ brief: "lean", helpers: "lean", visualTools: "auto", context: "full" });
 
 const ALLOWED: { readonly [K in keyof CodingDiet]: readonly CodingDiet[K][] } = {
   brief: DIET_BRIEF_MODES,
   helpers: DIET_HELPER_MODES,
   visualTools: DIET_VISUAL_TOOL_MODES,
+  context: DIET_CONTEXT_MODES,
 };
 
 const DIET_KEYS = Object.keys(ALLOWED) as (keyof CodingDiet)[];
@@ -91,6 +104,7 @@ export function readDiet(raw: unknown, fallback: Readonly<CodingDiet>): CodingDi
     brief: pick("brief", o.brief, fallback),
     helpers: pick("helpers", o.helpers, fallback),
     visualTools: pick("visualTools", o.visualTools, fallback),
+    context: pick("context", o.context, fallback),
   };
 }
 
@@ -113,12 +127,12 @@ export type DietPatchResult =
  */
 export function validateDietPatch(raw: unknown): DietPatchResult {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return { ok: false, code: "diet_not_object", error: "The diet must be an object: { brief?, helpers?, visualTools? }." };
+    return { ok: false, code: "diet_not_object", error: "The diet must be an object: { brief?, helpers?, visualTools?, context? }." };
   }
   const patch: Partial<CodingDiet> = {};
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     if (!(DIET_KEYS as string[]).includes(key)) {
-      return { ok: false, code: "diet_unknown_key", error: `The diet has no setting "${key.slice(0, 40)}": use brief, helpers or visualTools.` };
+      return { ok: false, code: "diet_unknown_key", error: `The diet has no setting "${key.slice(0, 40)}": use brief, helpers, visualTools or context.` };
     }
     const k = key as keyof CodingDiet;
     if (!(ALLOWED[k] as readonly unknown[]).includes(value)) {
