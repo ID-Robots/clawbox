@@ -388,7 +388,7 @@ import {
 } from "@/lib/coding-run-unit";
 import { cpuBudgetBrief, hostCpuCount, MAX_CPU_BUDGET, onBatteryPower, RUN_CPU_BUDGET_ENV, runCpuBudget } from "@/lib/coding-run-cpu";
 import { LESSON_CHANNEL_BRIEF, readRunNotes, runNotesBlock, settleRunNotes } from "@/lib/coding-run-notes";
-import { type CodingDiet, DEFAULT_DIET, looksVisual, mentionsPullRequest, mergeDiet, readDiet, validateDietPatch } from "@/lib/coding-diet";
+import { type CodingDiet, DEFAULT_DIET, LEGACY_DIET, looksVisual, mentionsPullRequest, mergeDiet, readDiet, validateDietPatch } from "@/lib/coding-diet";
 import {
   applyRoleModelsPatch,
   CODING_AGENT_ROLE_MODELS_CONFIG_KEY,
@@ -538,10 +538,14 @@ export const RUN_IDLE_TIMEOUT_MS = 30 * 60_000;
 const IDLE_CHECK_MS = 60_000;
 /** Default agent turns before Claude Code stops itself (`error_max_turns`).
  *  The owner can change it; a long project needs more than a short one.
- *  400, raised from 150 (owner's decision, 2026-09-15): a delivery run that
+ *  Raised from 150 to 400 (owner's decision, 2026-09-15): a delivery run that
  *  builds, verifies in the browser and opens a pull request was hitting the
- *  ceiling on ordinary tasks. */
-export const DEFAULT_MAX_TURNS = 400;
+ *  ceiling on ordinary tasks. Lowered to 200 (TASK-1749): measured on
+ *  bench/diet 2026-10-18, the longest run of nine specs, a full-stack XL build
+ *  included, needed 72 turns; a runaway at 400 turns of ~150k context is ~60M
+ *  tokens, and 200 halves that worst case while leaving ~3x headroom. Owners
+ *  can raise it (up to MAX_MAX_TURNS). */
+export const DEFAULT_MAX_TURNS = 200;
 
 /** A run's tokens by the four ways a provider bills them — see CodingRun.tokenBreakdown. */
 export interface TokenBreakdown {
@@ -771,8 +775,8 @@ export const CODING_TEAM_DYNAMIC_CONFIG_KEY = "coding_team_dynamic";
 /**
  * The token diet (src/lib/coding-diet.ts): `{ brief, helpers, visualTools }`,
  * one object. Absent — or any field this build does not offer — reads as
- * today's behaviour on that knob, so a box that never set it sends exactly the
- * prompt and the tools it always did. Read at a run's start and frozen on its
+ * DEFAULT_DIET on that knob (lean / lean / auto since TASK-1749's measurement),
+ * so a box that never set it gets the lean run. Read at a run's start and frozen on its
  * record (CodingRun.diet), like the effort: the prompt a session was opened
  * with must not change under its resumes.
  */
@@ -1803,8 +1807,8 @@ export interface CodingRun {
    * (src/lib/coding-diet.ts), frozen like `effort`: the brief and the tools a
    * session was opened with must not change under its respawns and resumes, or
    * the provider's prefix cache is lost and the run's tools move under it. A
-   * record written before the diet existed reads as DEFAULT_DIET, today's
-   * behaviour, so its resumes keep their prompt.
+   * record written before the diet existed reads as LEGACY_DIET (full / always
+   * / always) — NOT the lean DEFAULT_DIET — so its resumes keep their prompt.
    */
   diet: CodingDiet;
   /**
@@ -3013,9 +3017,9 @@ export async function setAutoMerge(on: unknown): Promise<boolean> {
   return on;
 }
 
-/** The owner's token diet, every knob it does not name at today's behaviour. */
+/** The owner's token diet, every knob it does not name at DEFAULT_DIET's (lean) value. */
 export async function getDiet(): Promise<CodingDiet> {
-  return readDiet(await configGet(CODING_AGENT_DIET_CONFIG_KEY));
+  return readDiet(await configGet(CODING_AGENT_DIET_CONFIG_KEY), DEFAULT_DIET);
 }
 
 /**
@@ -4042,8 +4046,8 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     // Absent means the default, like the review rounds above: a box that
     // predates the setting still gives a run with a deliverable its three goes.
     completionAttempts: completionAttemptsFrom(config[CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY]),
-    // The effective diet: today's behaviour on every knob the owner never set.
-    diet: readDiet(config[CODING_AGENT_DIET_CONFIG_KEY]),
+    // The effective diet: DEFAULT_DIET (lean) on every knob the owner never set.
+    diet: readDiet(config[CODING_AGENT_DIET_CONFIG_KEY], DEFAULT_DIET),
     minCompletionAttempts: MIN_COMPLETION_ATTEMPTS,
     maxCompletionAttempts: MAX_COMPLETION_ATTEMPTS,
     // Absent means the default here too: a box that predates the setting runs
@@ -4397,9 +4401,10 @@ function normalizeRun(raw: CodingRun): CodingRun {
     // "off" is the truth about that run and not merely a safe default.
     media: normalizeMedia(raw.media),
     reviewPass: raw.reviewPass === true,
-    // Strict, and never a throw: a record from before the diet reads as the
-    // default, which is the brief and the tools it was started with.
-    diet: readDiet((raw as { diet?: unknown }).diet),
+    // Strict, and never a throw: a record from before the diet reads as
+    // LEGACY_DIET — the brief and the tools it was started with — and never as
+    // the lean DEFAULT_DIET, or its resumes would change prompt mid-session.
+    diet: readDiet((raw as { diet?: unknown }).diet, LEGACY_DIET),
     visual: typeof (raw as { visual?: unknown }).visual === "boolean" ? (raw as { visual: boolean }).visual : null,
     mediaGenerated: {
       images: countOf(raw.mediaGenerated?.images),
@@ -5909,10 +5914,10 @@ function helpersSentence(diet: CodingDiet, reviewedSeparately: boolean): string 
  * helper sentence; `visual` and `pullRequest` matter to the LEAN brief only:
  * its browser block is there only for a visual run, and its auto-merge
  * sentence only for a run that can open a pull request or was asked about
- * one. Omitted, the answer is today's brief byte for byte.
+ * one. Omitted, `diet` is LEGACY_DIET: the pre-diet brief byte for byte.
  */
 export function headlessBrief(opts: { reviewedSeparately: boolean; team?: boolean; diet?: CodingDiet; visual?: boolean; pullRequest?: boolean }): string {
-  const diet = opts.diet ?? DEFAULT_DIET;
+  const diet = opts.diet ?? LEGACY_DIET;
   const helpers = helpersSentence(diet, opts.reviewedSeparately);
   // A team's run is told the opposite of PR_AUTO_MERGE_BRIEF, in its place: a
   // team goal that asks for a merge is the ORCHESTRATOR's to carry out, once,
@@ -6085,10 +6090,10 @@ export const HEADLESS_BRIEF = headlessBrief({ reviewedSeparately: false });
 
 /**
  * The lean brief of an ordinary run that is not visual and has no pull
- * request in sight, with today's helper sentence — the counterpart of
+ * request in sight, with the original ("always") helper sentence — the counterpart of
  * HEADLESS_BRIEF, exported for its size test.
  */
-export const LEAN_HEADLESS_BRIEF = headlessBrief({ reviewedSeparately: false, diet: { ...DEFAULT_DIET, brief: "lean" }, visual: false, pullRequest: false });
+export const LEAN_HEADLESS_BRIEF = headlessBrief({ reviewedSeparately: false, diet: { ...LEGACY_DIET, brief: "lean" }, visual: false, pullRequest: false });
 
 /**
  * Added for a run whose branch the box will open a pull request from (the
@@ -6483,15 +6488,15 @@ export function buildRunMcpConfig(run: { id: string; directory: string; media?: 
 
 /** The argv handed to the wrapper. Exported for the contract test. */
 export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; experience?: string | null; reviewedSeparately?: boolean; draftPullRequests?: boolean; allowRules?: readonly string[]; provider?: CodingProvider; streamInput?: boolean; hookSettings?: string | null; cpuBudget?: number | null; runNotes?: string | null; lessonChannel?: boolean; run?: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null };
-  /** The token diet frozen on the run (CodingRun.diet); omitted = DEFAULT_DIET, today's argv. */
+  /** The token diet frozen on the run (CodingRun.diet); omitted = LEGACY_DIET, the pre-diet argv. */
   diet?: CodingDiet;
   /** The run's frozen visual decision (CodingRun.visual); only read under `visualTools: "auto"`. */
   visual?: boolean;
   /** The task talks about a pull request — the lean brief's auto-merge sentence. */
   pullRequestMentioned?: boolean;
 }): string[] {
-  const diet = opts.diet ?? DEFAULT_DIET;
-  // Does this run hold the browser and media tools? Always under the default
+  const diet = opts.diet ?? LEGACY_DIET;
+  // Does this run hold the browser and media tools? Always under the legacy
   // diet; under "auto", only a run judged visual. An undecided run errs on
   // the side of the tools.
   const visual = diet.visualTools === "always" || opts.visual !== false;

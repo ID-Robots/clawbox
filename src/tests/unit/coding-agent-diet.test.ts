@@ -1,9 +1,12 @@
 /**
  * The token diet as `buildRunArgs` applies it (TASK-1749, src/lib/coding-diet.ts):
  *
- *   - the DEFAULT diet changes nothing — the appended prompt is pinned by
- *     fingerprints taken from the build before the diet existed, and an
- *     explicit DEFAULT_DIET is the same argv as no diet at all;
+ *   - the LEGACY diet (full / always / always — what a record without a
+ *     `diet` field and a call without one mean) changes nothing: the appended
+ *     prompt is pinned by fingerprints taken from the build before the diet
+ *     existed, and an explicit LEGACY_DIET is the same argv as no diet at all;
+ *   - the DEFAULT diet (the owner's setting when nothing is stored, lean /
+ *     lean / auto since TASK-1749's measurement) is NOT that prompt;
  *   - `brief: "lean"` keeps every failure-preventing rule in at most 40% of
  *     HEADLESS_BRIEF, with the browser block only for a visual run and the
  *     auto-merge sentence only where a pull request is in sight;
@@ -35,7 +38,7 @@ import {
   TEAM_NO_MERGE_BRIEF,
   ULTRACODE_EFFORT,
 } from "@/lib/coding-agent";
-import { type CodingDiet, DEFAULT_DIET } from "@/lib/coding-diet";
+import { type CodingDiet, DEFAULT_DIET, LEGACY_DIET } from "@/lib/coding-diet";
 
 const sha = (s: string) => crypto.createHash("sha256").update(s).digest("hex");
 const systemPrompt = (args: string[]) => args[args.indexOf("--append-system-prompt") + 1];
@@ -53,7 +56,7 @@ const TEAM_RUN = { ...RUN, team: { id: "team-aaaaaaaa", role: "worker" as const,
 const LEAN: CodingDiet = { brief: "lean", helpers: "lean", visualTools: "auto" };
 const DELEGATION_START = "Delegate instead of doing everything in one thread";
 
-describe("the default diet changes nothing", () => {
+describe("the legacy diet changes nothing", () => {
   // Taken from the build BEFORE the diet existed (d6cc266cd), so a change to
   // any default byte of the prompt fails here and not on a box.
   it("keeps HEADLESS_BRIEF and its variants byte for byte", () => {
@@ -77,11 +80,31 @@ describe("the default diet changes nothing", () => {
     ["a team worker", { effort: "xhigh" as const, run: TEAM_RUN }],
     ["a read-only planner", { effort: "xhigh" as const, readOnly: true, run: { ...TEAM_RUN, team: { ...TEAM_RUN.team, role: "planner" as const, taskId: null } } }],
     ["a run with no run context", { effort: "high" as const }],
-  ])("gives %s the same argv with an explicit DEFAULT_DIET, whatever the visual decision says", (_name, opts) => {
+  ])("gives %s the same argv with an explicit LEGACY_DIET, whatever the visual decision says", (_name, opts) => {
     const before = buildRunArgs(opts);
-    expect(buildRunArgs({ ...opts, diet: { ...DEFAULT_DIET } })).toEqual(before);
+    expect(buildRunArgs({ ...opts, diet: { ...LEGACY_DIET } })).toEqual(before);
     // `visualTools: "always"` ignores the decision: the tools stay.
-    expect(buildRunArgs({ ...opts, diet: { ...DEFAULT_DIET }, visual: false, pullRequestMentioned: true })).toEqual(before);
+    expect(buildRunArgs({ ...opts, diet: { ...LEGACY_DIET }, visual: false, pullRequestMentioned: true })).toEqual(before);
+  });
+});
+
+describe("the owner's default diet (nothing stored)", () => {
+  it("is the lean brief with the lean helper sentence, and drops the tools from a run judged not visual", () => {
+    const args = buildRunArgs({ effort: "xhigh", provider: "clawbox-ai", run: RUN, diet: { ...DEFAULT_DIET }, visual: false });
+    const prompt = systemPrompt(args);
+    expect(prompt).not.toBe(HEADLESS_BRIEF);
+    expect(prompt).toContain(leanHelpersBrief(false));
+    expect(prompt).not.toContain(DELEGATION_START);
+    expect(prompt).not.toContain(LEAN_VISUAL_BRIEF);
+    expect(prompt.length).toBeLessThanOrEqual(HEADLESS_BRIEF.length * 0.4);
+    expect(args).not.toContain("--mcp-config");
+    expect(args).toContain("--strict-mcp-config");
+  });
+
+  it("keeps the browser block and the tools for a run judged visual", () => {
+    const args = buildRunArgs({ effort: "xhigh", provider: "clawbox-ai", run: RUN, diet: { ...DEFAULT_DIET }, visual: true });
+    expect(systemPrompt(args)).toContain(LEAN_VISUAL_BRIEF);
+    expect(args).toContain("--mcp-config");
   });
 });
 
@@ -156,14 +179,14 @@ describe("helpers: lean", () => {
   });
 
   it("does not send the reviewer at all when a separate review reads the diff", () => {
-    const prompt = systemPrompt(buildRunArgs({ effort: "xhigh", run: RUN, reviewedSeparately: true, diet: { ...DEFAULT_DIET, helpers: "lean" } }));
+    const prompt = systemPrompt(buildRunArgs({ effort: "xhigh", run: RUN, reviewedSeparately: true, diet: { ...LEGACY_DIET, helpers: "lean" } }));
     expect(prompt).toContain(leanHelpersBrief(true));
     expect(prompt).toMatch(/Do not send the reviewer/);
     expect(prompt).not.toMatch(/reviewer at most once/);
   });
 
   it("leaves the full brief otherwise exactly as it was", () => {
-    const lean = headlessBrief({ reviewedSeparately: false, diet: { ...DEFAULT_DIET, helpers: "lean" } });
+    const lean = headlessBrief({ reviewedSeparately: false, diet: { ...LEGACY_DIET, helpers: "lean" } });
     const full = HEADLESS_BRIEF;
     const at = full.indexOf(DELEGATION_START);
     expect(lean.slice(0, at)).toBe(full.slice(0, at));
@@ -177,7 +200,7 @@ describe("helpers: lean", () => {
 
 describe("visualTools: auto", () => {
   const nonVisual = (extra: Partial<Parameters<typeof buildRunArgs>[0]> = {}) =>
-    buildRunArgs({ effort: "xhigh", provider: "clawbox-ai", run: RUN, diet: { ...DEFAULT_DIET, visualTools: "auto" }, visual: false, ...extra });
+    buildRunArgs({ effort: "xhigh", provider: "clawbox-ai", run: RUN, diet: { ...LEGACY_DIET, visualTools: "auto" }, visual: false, ...extra });
 
   it("gives a run that is not visual no MCP server — but keeps --strict-mcp-config", () => {
     const args = nonVisual();
@@ -212,7 +235,7 @@ describe("visualTools: auto", () => {
   });
 
   it("gives a visual run exactly today's tools and media briefs", () => {
-    const args = buildRunArgs({ effort: "xhigh", provider: "clawbox-ai", run: RUN, diet: { ...DEFAULT_DIET, visualTools: "auto" }, visual: true });
+    const args = buildRunArgs({ effort: "xhigh", provider: "clawbox-ai", run: RUN, diet: { ...LEGACY_DIET, visualTools: "auto" }, visual: true });
     expect(args).toEqual(buildRunArgs({ effort: "xhigh", provider: "clawbox-ai", run: RUN }));
   });
 
@@ -226,11 +249,11 @@ describe("decideRunVisual", () => {
   const dir = () => fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-diet-"));
 
   it("is always yes under visualTools: always", () => {
-    expect(decideRunVisual(DEFAULT_DIET, "fix the parser", "/nonexistent")).toBe(true);
+    expect(decideRunVisual(LEGACY_DIET, "fix the parser", "/nonexistent")).toBe(true);
   });
 
   it("judges the task and the folder's top-level entries under auto", () => {
-    const auto = { ...DEFAULT_DIET, visualTools: "auto" as const };
+    const auto = { ...LEGACY_DIET, visualTools: "auto" as const };
     const plain = dir();
     fs.writeFileSync(path.join(plain, "main.py"), "");
     expect(decideRunVisual(auto, "fix the parser", plain)).toBe(false);

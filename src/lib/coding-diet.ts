@@ -9,19 +9,27 @@
  * is the main cost of a run — and Claude Code's own MCP tool search does not
  * switch on through the proxy, so dropping tools has to be done here.
  *
- * - `brief`: "full" is today's HEADLESS_BRIEF; "lean" is LEAN_HEADLESS_BRIEF —
+ * - `brief`: "full" is the original HEADLESS_BRIEF; "lean" is LEAN_HEADLESS_BRIEF —
  *   every rule that prevents a real failure, said in as few words as possible,
  *   with the browser/visual sentences split into a block of their own.
- * - `helpers`: "always" is today's delegation sentence (explorer before every
+ * - `helpers`: "always" is the original delegation sentence (explorer before every
  *   edit, tester after each batch, reviewer before the report); "lean" says to
  *   run the checks in the run's own shell and to use the helpers only where
  *   they pay for themselves.
  * - `visualTools`: "always" gives every run the browser and media tools, as
- *   today; "auto" gives them only to a run whose task or folder looks visual
+ *   before the diet; "auto" gives them only to a run whose task or folder looks visual
  *   (`looksVisual`), decided ONCE per run and frozen on its record.
  *
- * Every default is today's behaviour, so a box that never set the diet sends a
- * byte-for-byte identical prompt (pinned by coding-diet.test.ts).
+ * Two baselines, never to be confused:
+ * - DEFAULT_DIET (lean / lean / auto) is what the owner's SETTING reads as when
+ *   nothing is stored — the defaults since TASK-1749's measurement on
+ *   bench/diet (2026-10-18), so a new run on a box that never set the diet
+ *   gets the lean brief, the lean helper sentence and the visual decision.
+ * - LEGACY_DIET (full / always / always) is the behaviour before the diet
+ *   existed: what a run RECORD without a `diet` field, and buildRunArgs or
+ *   headlessBrief called without one, still mean — so a resume of a run started
+ *   before the change keeps its prompt byte for byte (pinned by
+ *   coding-agent-diet.test.ts).
  *
  * Pure: no fs, no config store — the reader, the patch validator and the
  * heuristic, so the route, the runner and the tests read one rule.
@@ -41,8 +49,18 @@ export interface CodingDiet {
   visualTools: DietVisualTools;
 }
 
-/** Today's behaviour on every knob. */
-export const DEFAULT_DIET: Readonly<CodingDiet> = Object.freeze({ brief: "full", helpers: "always", visualTools: "always" });
+/**
+ * The behaviour before the diet existed, on every knob: what a run record
+ * written without a `diet` field — and a prompt built without one — means.
+ */
+export const LEGACY_DIET: Readonly<CodingDiet> = Object.freeze({ brief: "full", helpers: "always", visualTools: "always" });
+
+/**
+ * The owner's setting when nothing is stored (TASK-1749): measured on
+ * bench/diet (2026-10-18), the lean brief, the lean helper sentence and the
+ * per-run visual decision did the same work for fewer tokens.
+ */
+export const DEFAULT_DIET: Readonly<CodingDiet> = Object.freeze({ brief: "lean", helpers: "lean", visualTools: "auto" });
 
 const ALLOWED: { readonly [K in keyof CodingDiet]: readonly CodingDiet[K][] } = {
   brief: DIET_BRIEF_MODES,
@@ -52,24 +70,31 @@ const ALLOWED: { readonly [K in keyof CodingDiet]: readonly CodingDiet[K][] } = 
 
 const DIET_KEYS = Object.keys(ALLOWED) as (keyof CodingDiet)[];
 
-function pick<K extends keyof CodingDiet>(key: K, value: unknown): CodingDiet[K] {
-  return (ALLOWED[key] as readonly unknown[]).includes(value) ? (value as CodingDiet[K]) : DEFAULT_DIET[key];
+function pick<K extends keyof CodingDiet>(key: K, value: unknown, fallback: Readonly<CodingDiet>): CodingDiet[K] {
+  return (ALLOWED[key] as readonly unknown[]).includes(value) ? (value as CodingDiet[K]) : fallback[key];
 }
 
 /**
  * A stored setting or a run record's frozen value, read strictly and never
- * thrown on: anything that is not an object is the default, and each field
- * this build does not recognise falls back to ITS default alone. A record
- * written before the field existed therefore reads as today's behaviour, which
- * is what keeps a resume's prompt the one its session was opened with.
+ * thrown on: anything that is not an object is `fallback`, and each field this
+ * build does not recognise falls back to ITS value in `fallback` alone.
+ *
+ * The fallback is explicit because the two callers mean different things: the
+ * owner's stored SETTING falls back to DEFAULT_DIET (the lean defaults), a run
+ * RECORD to LEGACY_DIET — a record written before the field existed was
+ * started with the full prompt, and its resumes must keep it.
  */
-export function readDiet(raw: unknown): CodingDiet {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ...DEFAULT_DIET };
+export function readDiet(raw: unknown, fallback: Readonly<CodingDiet>): CodingDiet {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ...fallback };
   const o = raw as Record<string, unknown>;
-  return { brief: pick("brief", o.brief), helpers: pick("helpers", o.helpers), visualTools: pick("visualTools", o.visualTools) };
+  return {
+    brief: pick("brief", o.brief, fallback),
+    helpers: pick("helpers", o.helpers, fallback),
+    visualTools: pick("visualTools", o.visualTools, fallback),
+  };
 }
 
-/** True when every knob is today's behaviour. */
+/** True when every knob is at the setting's default (DEFAULT_DIET). */
 export function isDefaultDiet(diet: CodingDiet): boolean {
   return DIET_KEYS.every((key) => diet[key] === DEFAULT_DIET[key]);
 }
@@ -104,9 +129,12 @@ export function validateDietPatch(raw: unknown): DietPatchResult {
   return { ok: true, patch };
 }
 
-/** A validated patch merged over what is stored. */
+/**
+ * A validated patch merged over what is stored — or over DEFAULT_DIET when
+ * nothing is, so a partial patch on a fresh box keeps the other knobs lean.
+ */
 export function mergeDiet(stored: unknown, patch: Partial<CodingDiet>): CodingDiet {
-  return readDiet({ ...readDiet(stored), ...patch });
+  return readDiet({ ...readDiet(stored, DEFAULT_DIET), ...patch }, DEFAULT_DIET);
 }
 
 /**
@@ -133,7 +161,7 @@ const VISUAL_DIRS = new Set(["public", "src/components"]);
  * top-level entries include a page, a stylesheet, a component, a front-end
  * build config, `public/` or `src/components`. Entries are names as
  * `folderEntries` lists them (folders with a trailing slash); a trailing slash
- * is optional here. Deliberately generous: a false yes costs today's tokens, a
+ * is optional here. Deliberately generous: a false yes costs the tools' tokens, a
  * false no costs a run the tools it needed.
  */
 export function looksVisual(task: string, entries: readonly string[]): boolean {

@@ -492,6 +492,37 @@ describe("a run", () => {
     expect(env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe("1");
   });
 
+  // TASK-1749: with nothing stored, a NEW run gets the lean defaults
+  // (DEFAULT_DIET) — the lean brief, the lean helper sentence and the per-run
+  // visual decision — frozen on its record. A record WITHOUT a diet keeps the
+  // legacy full prompt (routes/coding-agent/diet.test.ts).
+  it("gives a new run on a box that never set the diet the lean brief, lean helpers and the visual decision", async () => {
+    const dir = makeProject("parser");
+    fs.rmSync(path.join(dir, "index.html"));
+    fs.writeFileSync(path.join(dir, "main.py"), "print('hi')\n");
+    const { DEFAULT_DIET } = await import("@/lib/coding-diet");
+    const plain = await finished((await lib.startRun({ task: "Fix the parser in main.py", projectId: "parser", source: "agent" })).id);
+    expect(plain.diet).toEqual(DEFAULT_DIET);
+    expect(plain.visual).toBe(false);
+    let argv = fs.readFileSync(argvFile(), "utf-8").split("\n").filter(Boolean);
+    let prompt = argv[argv.indexOf("--append-system-prompt") + 1];
+    expect(prompt).not.toContain(lib.HEADLESS_BRIEF);
+    expect(prompt).not.toContain("Delegate instead of doing everything in one thread");
+    expect([lib.leanHelpersBrief(false), lib.leanHelpersBrief(true)].some((s) => prompt.includes(s))).toBe(true);
+    expect(prompt).not.toContain(lib.LEAN_VISUAL_BRIEF);
+    expect(argv).not.toContain("--mcp-config");
+
+    makeProject("site");
+    const visual = await finished((await lib.startRun({ task: "Fix the parser", projectId: "site", source: "agent" })).id);
+    expect(visual.diet).toEqual(DEFAULT_DIET);
+    // The folder has an index.html: the run keeps the tools and the browser block.
+    expect(visual.visual).toBe(true);
+    argv = fs.readFileSync(argvFile(), "utf-8").split("\n").filter(Boolean);
+    prompt = argv[argv.indexOf("--append-system-prompt") + 1];
+    expect(prompt).toContain(lib.LEAN_VISUAL_BRIEF);
+    expect(argv).toContain("--mcp-config");
+  });
+
   it("turns the stream-json into a faithful record and tells the owner", async () => {
     makeProject("site");
     const started = await lib.startRun({ task: "Add a dark mode toggle", projectId: "site", source: "owner" });
@@ -749,8 +780,11 @@ describe("a run", () => {
       // The pass runs the verification itself and claims only what it ran.
       expect(task).toMatch(/Start by running the project's own verification/);
       expect(task).toMatch(/a result from the earlier session is not yours to claim/);
-      // The pass IS the review: it is told not to send the reviewer helper.
-      expect(argv[argv.indexOf("--append-system-prompt") + 1]).toMatch(/do not send the reviewer helper over your own work/);
+      // The pass IS the review: it is told not to send the reviewer helper —
+      // in the lean helper sentence, since a box that never set the diet
+      // runs on the lean defaults (TASK-1749) and the pass inherits them.
+      expect(review.diet).toEqual(first.diet);
+      expect(argv[argv.indexOf("--append-system-prompt") + 1]).toContain(lib.leanHelpersBrief(true));
 
       // The review pass itself completed and touched files — and must NOT
       // chain: once ITS commit attempt is over (the moment a follow-up would

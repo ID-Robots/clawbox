@@ -47,19 +47,21 @@ afterEach(async () => {
 });
 
 describe("the diet setting", () => {
-  it("is today's behaviour on a box that never set it", async () => {
+  it("reports the lean defaults (TASK-1749's measurement) on a box that never set it", async () => {
     const lib = await import("@/lib/coding-agent");
-    expect((await lib.getCodingAgentStatus()).diet).toEqual({ brief: "full", helpers: "always", visualTools: "always" });
-    expect(await lib.getDiet()).toEqual({ brief: "full", helpers: "always", visualTools: "always" });
+    expect((await lib.getCodingAgentStatus()).diet).toEqual({ brief: "lean", helpers: "lean", visualTools: "auto" });
+    expect(await lib.getDiet()).toEqual({ brief: "lean", helpers: "lean", visualTools: "auto" });
+    expect(savedConfig()).not.toHaveProperty("coding_agent_diet");
   });
 
-  it("merges a partial patch over what is stored and answers the status carrying it", async () => {
-    let res = await post({ diet: { brief: "lean" } });
+  it("merges a partial patch over the lean defaults when nothing is stored, then over what is stored", async () => {
+    let res = await post({ diet: { brief: "full" } });
     expect(res.status).toBe(200);
-    expect((await res.json()).diet).toEqual({ brief: "lean", helpers: "always", visualTools: "always" });
-    res = await post({ diet: { visualTools: "auto", helpers: "lean" } });
-    expect((await res.json()).diet).toEqual({ brief: "lean", helpers: "lean", visualTools: "auto" });
-    expect(savedConfig().coding_agent_diet).toEqual({ brief: "lean", helpers: "lean", visualTools: "auto" });
+    expect((await res.json()).diet).toEqual({ brief: "full", helpers: "lean", visualTools: "auto" });
+    expect(savedConfig().coding_agent_diet).toEqual({ brief: "full", helpers: "lean", visualTools: "auto" });
+    res = await post({ diet: { visualTools: "always", helpers: "always" } });
+    expect((await res.json()).diet).toEqual({ brief: "full", helpers: "always", visualTools: "always" });
+    expect(savedConfig().coding_agent_diet).toEqual({ brief: "full", helpers: "always", visualTools: "always" });
   });
 
   it.each([
@@ -84,9 +86,9 @@ describe("the diet setting", () => {
   });
 
   it("reports a stored junk value as the default it reads as", async () => {
-    fs.writeFileSync(path.join(session.root, "data", "config.json"), JSON.stringify({ ...savedConfig(), coding_agent_diet: { brief: "tiny", visualTools: "auto" } }));
+    fs.writeFileSync(path.join(session.root, "data", "config.json"), JSON.stringify({ ...savedConfig(), coding_agent_diet: { brief: "tiny", visualTools: "always" } }));
     const lib = await import("@/lib/coding-agent");
-    expect((await lib.getCodingAgentStatus()).diet).toEqual({ brief: "full", helpers: "always", visualTools: "auto" });
+    expect((await lib.getCodingAgentStatus()).diet).toEqual({ brief: "lean", helpers: "lean", visualTools: "always" });
   });
 
   it("is cleared by the reset with every other setting", async () => {
@@ -106,7 +108,10 @@ describe("a run record's frozen diet", () => {
     ...extra,
   });
 
-  it("round-trips the diet and the visual decision, and reads a record from before them as today's behaviour", async () => {
+  // A record is read against LEGACY_DIET, NOT the lean DEFAULT_DIET: a run
+  // started before the diet existed was opened with the full prompt, and its
+  // resumes must keep it byte for byte.
+  it("round-trips the diet and the visual decision, and reads a record from before them as the legacy full prompt", async () => {
     fs.writeFileSync(path.join(session.root, "data", "coding-agent-runs.json"), JSON.stringify([
       record("run-aaaaaaaa", { diet: { brief: "lean", helpers: "lean", visualTools: "auto" }, visual: false }),
       record("run-bbbbbbbb", {}),

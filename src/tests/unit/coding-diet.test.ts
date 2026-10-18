@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_DIET,
   isDefaultDiet,
+  LEGACY_DIET,
   looksVisual,
   mentionsPullRequest,
   mergeDiet,
@@ -16,34 +17,57 @@ import {
   validateDietPatch,
 } from "@/lib/coding-diet";
 
-describe("DEFAULT_DIET", () => {
-  it("is today's behaviour on every knob", () => {
-    expect(DEFAULT_DIET).toEqual({ brief: "full", helpers: "always", visualTools: "always" });
+describe("DEFAULT_DIET and LEGACY_DIET", () => {
+  it("defaults the owner's setting to lean / lean / auto since TASK-1749's measurement", () => {
+    expect(DEFAULT_DIET).toEqual({ brief: "lean", helpers: "lean", visualTools: "auto" });
     expect(isDefaultDiet(DEFAULT_DIET)).toBe(true);
-    expect(isDefaultDiet({ ...DEFAULT_DIET, brief: "lean" })).toBe(false);
+    expect(isDefaultDiet({ ...DEFAULT_DIET, brief: "full" })).toBe(false);
+  });
+
+  it("keeps the pre-diet behaviour as LEGACY_DIET, which is not the default any more", () => {
+    expect(LEGACY_DIET).toEqual({ brief: "full", helpers: "always", visualTools: "always" });
+    expect(isDefaultDiet(LEGACY_DIET)).toBe(false);
+    expect(Object.isFrozen(LEGACY_DIET)).toBe(true);
+    expect(Object.isFrozen(DEFAULT_DIET)).toBe(true);
   });
 });
 
 describe("readDiet", () => {
-  it.each([undefined, null, "lean", 3, true, [], ["lean"]])("reads %j as the default", (raw) => {
-    expect(readDiet(raw)).toEqual(DEFAULT_DIET);
+  // A run RECORD is read with LEGACY_DIET as its fallback: a record written
+  // before the field existed was started with the full prompt.
+  it.each([undefined, null, "lean", 3, true, [], ["lean"]])("reads a record's %j as LEGACY_DIET", (raw) => {
+    expect(readDiet(raw, LEGACY_DIET)).toEqual(LEGACY_DIET);
   });
 
-  it("keeps every value this build offers", () => {
-    expect(readDiet({ brief: "lean", helpers: "lean", visualTools: "auto" })).toEqual({ brief: "lean", helpers: "lean", visualTools: "auto" });
+  // The owner's stored SETTING is read with DEFAULT_DIET as its fallback.
+  it.each([undefined, null, "lean", 3, true, [], ["lean"]])("reads a stored setting's %j as DEFAULT_DIET", (raw) => {
+    expect(readDiet(raw, DEFAULT_DIET)).toEqual(DEFAULT_DIET);
   });
 
-  it("puts each unknown or missing field back to ITS default alone, and drops unknown keys", () => {
-    expect(readDiet({ brief: "lean" })).toEqual({ brief: "lean", helpers: "always", visualTools: "always" });
-    expect(readDiet({ brief: "tiny", helpers: "lean", visualTools: 1, extra: "x" })).toEqual({ brief: "full", helpers: "lean", visualTools: "always" });
-    expect(readDiet({ visualTools: "AUTO" })).toEqual(DEFAULT_DIET);
+  it("keeps every value this build offers, whatever the fallback", () => {
+    for (const fallback of [LEGACY_DIET, DEFAULT_DIET]) {
+      expect(readDiet({ brief: "lean", helpers: "lean", visualTools: "auto" }, fallback)).toEqual({ brief: "lean", helpers: "lean", visualTools: "auto" });
+      expect(readDiet({ brief: "full", helpers: "always", visualTools: "always" }, fallback)).toEqual({ brief: "full", helpers: "always", visualTools: "always" });
+    }
   });
 
-  it("answers a fresh object, never the frozen default itself", () => {
-    const read = readDiet(undefined);
-    expect(read).not.toBe(DEFAULT_DIET);
-    read.brief = "lean";
-    expect(DEFAULT_DIET.brief).toBe("full");
+  it("puts each unknown or missing field back to the FALLBACK's value alone, and drops unknown keys", () => {
+    expect(readDiet({ brief: "lean" }, LEGACY_DIET)).toEqual({ brief: "lean", helpers: "always", visualTools: "always" });
+    expect(readDiet({ brief: "tiny", helpers: "lean", visualTools: 1, extra: "x" }, LEGACY_DIET)).toEqual({ brief: "full", helpers: "lean", visualTools: "always" });
+    expect(readDiet({ visualTools: "AUTO" }, LEGACY_DIET)).toEqual(LEGACY_DIET);
+    expect(readDiet({ brief: "full" }, DEFAULT_DIET)).toEqual({ brief: "full", helpers: "lean", visualTools: "auto" });
+    expect(readDiet({ brief: "tiny", helpers: "always", visualTools: 1 }, DEFAULT_DIET)).toEqual({ brief: "lean", helpers: "always", visualTools: "auto" });
+  });
+
+  it("answers a fresh object, never the frozen fallback itself", () => {
+    const legacy = readDiet(undefined, LEGACY_DIET);
+    expect(legacy).not.toBe(LEGACY_DIET);
+    legacy.brief = "lean";
+    expect(LEGACY_DIET.brief).toBe("full");
+    const lean = readDiet(undefined, DEFAULT_DIET);
+    expect(lean).not.toBe(DEFAULT_DIET);
+    lean.brief = "full";
+    expect(DEFAULT_DIET.brief).toBe("lean");
   });
 });
 
@@ -76,14 +100,15 @@ describe("validateDietPatch", () => {
 });
 
 describe("mergeDiet", () => {
-  it("merges a patch over what is stored, the rest at their defaults", () => {
-    expect(mergeDiet(undefined, { brief: "lean" })).toEqual({ brief: "lean", helpers: "always", visualTools: "always" });
-    expect(mergeDiet({ brief: "lean", visualTools: "auto" }, { helpers: "lean" })).toEqual({ brief: "lean", helpers: "lean", visualTools: "auto" });
-    expect(mergeDiet({ brief: "lean" }, { brief: "full" })).toEqual(DEFAULT_DIET);
+  it("merges a patch over what is stored, or over DEFAULT_DIET when nothing is", () => {
+    expect(mergeDiet(undefined, { brief: "full" })).toEqual({ brief: "full", helpers: "lean", visualTools: "auto" });
+    expect(mergeDiet(undefined, {})).toEqual(DEFAULT_DIET);
+    expect(mergeDiet({ brief: "full", visualTools: "always" }, { helpers: "always" })).toEqual(LEGACY_DIET);
+    expect(mergeDiet({ brief: "full", helpers: "always", visualTools: "always" }, { brief: "lean" })).toEqual({ brief: "lean", helpers: "always", visualTools: "always" });
   });
 
-  it("repairs a stored junk value to its default rather than keeping it", () => {
-    expect(mergeDiet({ brief: "tiny" }, { helpers: "lean" })).toEqual({ brief: "full", helpers: "lean", visualTools: "always" });
+  it("repairs a stored junk value to the setting's default rather than keeping it", () => {
+    expect(mergeDiet({ brief: "tiny" }, { helpers: "always" })).toEqual({ brief: "lean", helpers: "always", visualTools: "auto" });
   });
 });
 
