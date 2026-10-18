@@ -8,8 +8,11 @@
  * batches of {@link GOLDEN_LIMITS.batch}. CAPPED: at most `maxQuestions` a
  * night (the ones asked longest ago first, so a big set takes turns),
  * `goldenMaxTokens` an answer and `GOLDEN_LIMITS.usdPerNight` a night, every
- * call recorded with `recordCost` under the night's run; two calls in a row
- * that fail stop the night's check. SKIPPABLE: offline, with no question,
+ * call recorded with `recordCost` under the night's run. An empty, cut-off or
+ * unreadable answer is asked again in halves, down to one question a call
+ * (as the contradiction judge does), and never stops the later batches; only
+ * two calls in a row the provider fails (unreachable, 5xx, busy) stop the
+ * night's check. SKIPPABLE: offline, with no question,
  * when the model refuses (no credential, auth) or when no call of the night
  * judged anything, the check is skipped, says why and stores no score — never
  * a failed night, never a 0 % in the history. A question answered `correct`
@@ -31,7 +34,7 @@
 
 import crypto from "crypto";
 import type { CostRates } from "./cost-rates";
-import { completeWithRetry, estimateUsd, FlashCallError, flashClient, type FlashClient } from "./flash-client";
+import { completeWithRetry, estimateUsd, FlashCallError, flashClient, type FlashClient, type FlashResponse, type RetryOptions } from "./flash-client";
 import {
   buildGoldenPrompt,
   GOLDEN_LIMITS,
@@ -90,6 +93,8 @@ export interface GoldenScoreOptions {
   search?: (question: string, signal?: AbortSignal) => Promise<readonly GoldenHit[]>;
   snapshot?: VaultSnapshot;
   signal?: AbortSignal;
+  /** The judge calls' retries (tests pass a sleep that does not wait). */
+  retry?: RetryOptions;
 }
 
 function emptyResult(skipped: string | null, asked = 0): GoldenScoreResult {
@@ -166,58 +171,117 @@ export async function runGoldenScore(options: GoldenScoreOptions = {}): Promise<
 
   const client = options.client ?? flashClient();
   const verdicts = new Map<string, { verdict: GoldenVerdict; why: string }>();
+  // An empty or cut-off answer is asked again in smaller calls, never resent as it was.
+  const retry: RetryOptions = {
+    ...options.retry,
+    retryOn: (err) => err.kind !== "bad_response" && (options.retry?.retryOn?.(err) ?? true),
+  };
   let refusal: string | null = null;
+  let stop: string | null = null;
   let failuresInRow = 0;
-  for (let start = 0; start < asked.length && !refusal; start += GOLDEN_LIMITS.batch) {
-    if (options.signal?.aborted) break;
-    if (failuresInRow >= GOLDEN_LIMITS.failuresInRow) {
-      result.notes.push(`${failuresInRow} golden-question judge calls in a row failed; the rest of tonight's questions wait for the next night.`);
-      break;
-    }
-    if (result.usdEstimate >= GOLDEN_LIMITS.usdPerNight) {
-      result.notes.push(`The golden questions reached tonight's spending cap ($${GOLDEN_LIMITS.usdPerNight}); the rest wait for the next night.`);
-      break;
-    }
-    const batch = asked.slice(start, start + GOLDEN_LIMITS.batch);
+  let askedAgain = 0;
+  let unanswered = 0;
+  const outages = new Map<string, number>();
+
+  /** Whether no further call may start: a refusal, the signal, the provider down for calls in a row, the night's spend. */
+  const halted = (): boolean => {
+    if (refusal || stop || options.signal?.aborted) return true;
+    if (failuresInRow >= GOLDEN_LIMITS.failuresInRow) stop = `${failuresInRow} golden-question judge calls in a row failed; the rest of tonight's questions wait for the next night.`;
+    else if (result.usdEstimate >= GOLDEN_LIMITS.usdPerNight) stop = `The golden questions reached tonight's spending cap ($${GOLDEN_LIMITS.usdPerNight}); the rest wait for the next night.`;
+    return stop !== null;
+  };
+
+  /** One call: the questions a readable answer left out (`cut`: it reached the output cap), or why there was none. Never throws for the model. */
+  async function judgeOnce(batch: readonly GoldenQuestion[]): Promise<{ ok: true; missing: GoldenQuestion[]; cut: boolean } | { ok: false; kind: string }> {
     const { system, user } = buildGoldenPrompt(
       batch.map((q) => ({ question: redactText(q.question).text, expected: redactText(q.expected).text, evidence: evidence.get(q.id) ?? [] })),
     );
-    try {
-      const { response } = await completeWithRetry(client, { system, user, maxTokens: goldenMaxTokens(batch.length), signal: options.signal }, { retryOn: (err) => err.kind !== "bad_response" });
+    const maxTokens = goldenMaxTokens(batch.length);
+    const charge = (model: string, usage: FlashResponse["usage"]) => {
       result.calls++;
-      const usd = estimateUsd(response.model, response.usage, options.rates);
+      const usd = estimateUsd(model, usage, options.rates);
       result.usdEstimate += usd;
       recordCost(vault, {
         runId: options.runId ?? null,
         operation: "golden",
-        model: response.model,
-        tokensIn: response.usage.promptTokens,
-        tokensOut: response.usage.completionTokens,
+        model,
+        tokensIn: usage.promptTokens,
+        tokensOut: usage.completionTokens,
         usdEstimate: usd,
         at: now().toISOString(),
       });
-      let answers: Map<number, { verdict: GoldenVerdict; why: string }>;
-      try {
-        answers = parseGoldenResponse(response.text, batch.length);
-      } catch {
-        failuresInRow++;
-        result.notes.push("The golden-question judge answered with no verdict for one batch; those questions count as not judged.");
-        continue;
-      }
-      failuresInRow = 0;
-      batch.forEach((q, i) => {
-        const a = answers.get(i);
-        if (a) verdicts.set(q.id, { verdict: a.verdict, why: redactText(a.why).text });
-      });
+    };
+    let response: FlashResponse;
+    try {
+      ({ response } = await completeWithRetry(client, { system, user, maxTokens, signal: options.signal }, retry));
     } catch (err) {
       const kind = err instanceof FlashCallError ? err.kind : "network";
       if (MODEL_REFUSALS.has(kind)) refusal = kind;
-      else {
+      else if (kind === "bad_response") {
+        // The provider answered (no outage), and an empty or capped answer still spent its tokens: no usage
+        // came with it, so it is charged as the whole prompt (~4 characters a token) plus the whole output cap.
+        failuresInRow = 0;
+        charge(client.model, { promptTokens: Math.ceil((system.length + user.length) / 4), completionTokens: maxTokens, cacheHitTokens: 0 });
+      } else {
         failuresInRow++;
-        result.notes.push(`A golden-question judge call failed (${kind}); its questions count as not judged.`);
+        outages.set(kind, (outages.get(kind) ?? 0) + 1);
       }
+      return { ok: false, kind };
+    }
+    failuresInRow = 0;
+    charge(response.model, response.usage);
+    let answers: Map<number, { verdict: GoldenVerdict; why: string }>;
+    try {
+      answers = parseGoldenResponse(response.text, batch.length);
+    } catch {
+      return { ok: false, kind: "bad_response" };
+    }
+    batch.forEach((q, i) => {
+      const a = answers.get(i);
+      if (a) verdicts.set(q.id, { verdict: a.verdict, why: redactText(a.why).text });
+    });
+    return { ok: true, missing: batch.filter((_, i) => !answers.has(i)), cut: response.finishReason === "length" };
+  }
+
+  /**
+   * Judge `batch`. An empty, cut-off or unreadable answer is asked again in
+   * halves, down to one question a call, and the questions a cut-off answer
+   * left out in one smaller call; only then is a question not judged. A
+   * refusal or an outage leaves the batch for the next night.
+   */
+  async function judge(batch: readonly GoldenQuestion[]): Promise<void> {
+    if (halted()) return;
+    const out = await judgeOnce(batch);
+    if (!out.ok && out.kind !== "bad_response") return;
+    const again = out.ok ? (out.cut ? out.missing : []) : batch;
+    if (again.length === 0) return;
+    if (again.length < batch.length) {
+      askedAgain++;
+      await judge(again);
+    } else if (batch.length === 1) {
+      unanswered++;
+    } else {
+      askedAgain++;
+      const half = Math.ceil(batch.length / 2);
+      await judge(batch.slice(0, half));
+      await judge(batch.slice(half));
     }
   }
+
+  // A batch that fails is split, never a reason to leave the later batches unasked.
+  for (let start = 0; start < asked.length && !halted(); start += GOLDEN_LIMITS.batch) {
+    await judge(asked.slice(start, start + GOLDEN_LIMITS.batch));
+  }
+  for (const [kind, count] of outages) {
+    result.notes.push(
+      count === 1
+        ? `A golden-question judge call failed (${kind}); its questions count as not judged.`
+        : `${count} golden-question judge calls failed (${kind}); their questions count as not judged.`,
+    );
+  }
+  if (askedAgain > 0) result.notes.push(`${askedAgain} golden-question judge answer(s) came back empty, cut off or unreadable; their questions were asked again in smaller calls.`);
+  if (unanswered > 0) result.notes.push(`The golden-question judge gave no verdict for ${unanswered} question(s) even asked alone; they count as not judged.`);
+  if (stop) result.notes.push(stop);
   if (verdicts.size === 0) {
     // Nothing judged is no score: an outage must not read as 0 % correct, nor hide the last real score.
     const skipped = emptyResult("model_unavailable");

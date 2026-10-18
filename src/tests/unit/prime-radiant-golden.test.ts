@@ -166,8 +166,10 @@ describe("golden questions: the judge", () => {
     expect(items).toHaveLength(2);
     expect(items![0]).toMatchObject({ i: 0, question: "Q1", expected: "A1", facts: [{ n: 1, text: "Fact", page: "P", as_of: "2026-01-01", verified: true }] });
     expect(readGoldenItems("PAIRS (JSON): []")).toBeNull();
-    expect(goldenMaxTokens(6)).toBe(640);
-    expect(goldenMaxTokens(1000)).toBe(2048);
+    // Room for a model that reasons before it answers: the cap counts the reasoning too.
+    expect(goldenMaxTokens(1)).toBe(1536);
+    expect(goldenMaxTokens(6)).toBe(4096);
+    expect(goldenMaxTokens(1000)).toBe(4096);
   });
 
   it("reads a verdict wherever it sits, leaves out a garbled or conflicting one, and throws only on none", () => {
@@ -343,23 +345,120 @@ describe("golden questions: the nightly score", () => {
     expect(readGoldenHistory()).toEqual([]);
   });
 
-  it("stores no score when no call judged anything, and stops after two failed calls in a row", async () => {
+  it("stores no score when no call judged anything, and stops after two calls in a row the provider failed", async () => {
     await seedPages();
     for (let i = 0; i < 18; i++) await addGoldenQuestion({ ...PRICE_Q, question: `What does the blue widget cost? (${i})` }, { domains: [] });
     let calls = 0;
-    const broken: FlashClient = {
+    const down: FlashClient = {
       model: "deepseek-v4-flash",
       async complete() {
         calls++;
-        throw new FlashCallError("bad_response", "garbled");
+        throw new FlashCallError("server", "answered 503");
       },
     };
-    const r = await runGoldenScore({ runId: "run-0000000000f1", client: broken, online: true, now: () => NOW });
+    const r = await runGoldenScore({ runId: "run-0000000000f1", client: down, online: true, now: () => NOW, retry: { attempts: 1 } });
     expect(r.skipped).toBe("model_unavailable");
-    expect(calls).toBe(2); // three batches of six; the third is never sent
+    expect(calls).toBe(2); // three batches of six; an outage is not split, and the third is never sent
     expect(r.notes.join(" ")).toMatch(/in a row failed/);
     expect(readGoldenHistory()).toEqual([]);
     expect((await goldenStatus()).last).toBeNull();
+  });
+
+  it("asks a cut-off batch again in halves, down to one question a call, until every question is judged", async () => {
+    await seedPages();
+    for (let i = 0; i < 6; i++) await addGoldenQuestion({ ...PRICE_Q, question: `What does the blue widget cost? (${i})` }, { domains: [] });
+    const sizes: number[] = [];
+    const caps: number[] = [];
+    const base = judge();
+    // More than two questions run out of room before the first verdict: the empty answer flash-client throws on.
+    const tight: FlashClient = {
+      model: base.model,
+      async complete(request) {
+        const n = readGoldenItems(request.user)?.length ?? 0;
+        sizes.push(n);
+        caps.push(request.maxTokens);
+        if (n > 2) throw new FlashCallError("bad_response", "ClawBox AI reached the output cap before it answered.");
+        return base.complete(request);
+      },
+    };
+    const r = await runGoldenScore({ runId: "run-0000000000c1", client: tight, online: true, now: () => NOW });
+    expect(sizes).toEqual([6, 3, 2, 1, 3, 2, 1]);
+    expect(caps[0]).toBe(goldenMaxTokens(6));
+    expect(r.tally).toMatchObject({ asked: 6, correct: 6, failed: 0, percent: 100 });
+    // Every call is a cost row; an empty answer brings no usage, so it is charged its whole output cap.
+    expect(r.calls).toBe(7);
+    const costs = readCosts(vaultDir(), "run-0000000000c1");
+    expect(costs).toHaveLength(7);
+    expect(costs.filter((c) => c.tokensOut >= goldenMaxTokens(3)).map((c) => c.tokensOut)).toEqual([goldenMaxTokens(6), goldenMaxTokens(3), goldenMaxTokens(3)]);
+    expect(costs.every((c) => c.tokensIn > 0 && c.usdEstimate > 0)).toBe(true);
+    expect(r.notes.join(" ")).toMatch(/asked again in smaller calls/);
+  });
+
+  it("asks again the questions a cut-off answer left out", async () => {
+    await seedPages();
+    for (let i = 0; i < 6; i++) await addGoldenQuestion({ ...PRICE_Q, question: `What does the blue widget cost? (${i})` }, { domains: [] });
+    const sizes: number[] = [];
+    const base = judge();
+    const cut: FlashClient = {
+      model: base.model,
+      async complete(request) {
+        const items = readGoldenItems(request.user) ?? [];
+        sizes.push(items.length);
+        const out = await base.complete(request);
+        if (items.length < 6) return out;
+        // Two verdicts, then the cap: the third object is cut half way.
+        return { ...out, text: '[{"i":0,"verdict":"correct"},{"i":1,"verdict":"correct"},{"i":2,"verd', finishReason: "length" };
+      },
+    };
+    const r = await runGoldenScore({ client: cut, online: true, now: () => NOW });
+    expect(sizes).toEqual([6, 4]);
+    expect(r.tally).toMatchObject({ asked: 6, correct: 6, failed: 0 });
+  });
+
+  it("never lets a batch that keeps failing starve the batches after it", async () => {
+    await seedPages();
+    for (let i = 0; i < 18; i++) await addGoldenQuestion({ ...PRICE_Q, question: `What does the blue widget cost? (${i})` }, { domains: [] });
+    const base = judge();
+    let calls = 0;
+    // The first batch's questions never get an answer, however small the call; every other one is judged.
+    const stuck: FlashClient = {
+      model: base.model,
+      async complete(request) {
+        calls++;
+        const items = readGoldenItems(request.user) ?? [];
+        if (items.some((g) => /\((?:[0-5])\)$/.test(g.question))) throw new FlashCallError("bad_response", "ClawBox AI answered with no text.");
+        return base.complete(request);
+      },
+    };
+    const r = await runGoldenScore({ runId: "run-0000000000c2", client: stuck, online: true, now: () => NOW });
+    expect(r.skipped).toBeNull();
+    expect(r.tally).toMatchObject({ asked: 18, correct: 12, failed: 6 });
+    expect(calls).toBe(11 + 2); // the first batch split down to six single calls, then the two others
+    expect(r.calls).toBe(13);
+    expect(r.notes.join(" ")).not.toMatch(/in a row failed/);
+    expect(r.notes.join(" ")).toMatch(/no verdict for 6 question\(s\) even asked alone/);
+    expect(readGoldenHistory()[0]).toMatchObject({ asked: 18, correct: 12, failed: 6, percent: 100 });
+  });
+
+  it("counts an empty answer's estimated cost towards the night's spending cap", async () => {
+    await seedPages();
+    for (let i = 0; i < 12; i++) await addGoldenQuestion({ ...PRICE_Q, question: `What does the blue widget cost? (${i})` }, { domains: [] });
+    let calls = 0;
+    const empty: FlashClient = {
+      model: "deepseek-v4-flash",
+      async complete() {
+        calls++;
+        throw new FlashCallError("bad_response", "ClawBox AI reached the output cap before it answered.");
+      },
+    };
+    // At these rates one capped six-question call (4,096 output tokens) costs more than the night may spend.
+    const rates = { basis: "estimate", currency: "USD", unit: "per-million-tokens", models: { "deepseek-v4-flash": { input: 0, cachedInput: 0, output: 200 } } } as const;
+    const r = await runGoldenScore({ runId: "run-0000000000f3", client: empty, rates, online: true, now: () => NOW });
+    expect(calls).toBe(1);
+    expect(r.calls).toBe(1);
+    expect(r.usdEstimate).toBeGreaterThan(0.5);
+    expect(r.notes.join(" ")).toMatch(/spending cap/);
+    expect(readCosts(vaultDir(), "run-0000000000f3")).toMatchObject([{ operation: "golden", tokensOut: goldenMaxTokens(6) }]);
   });
 
   it("stops at the night's spending cap, whatever the question cap", async () => {

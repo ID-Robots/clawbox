@@ -36,7 +36,10 @@ export const GOLDEN_LIMITS = Object.freeze({
   batch: 6,
   /** What one night's check may spend, whatever the question cap: past it the rest wait for the next night. */
   usdPerNight: 0.5,
-  /** Judge calls in a row that may fail (not refused) before the night's check stops. */
+  /**
+   * Judge calls in a row the provider may fail (unreachable, 5xx, busy — after their retries) before
+   * the night's check stops. An empty, cut-off or unreadable answer is no outage: it is asked again smaller.
+   */
   failuresInRow: 2,
 });
 
@@ -405,9 +408,20 @@ export function parseGoldenResponse(text: string, count: number): Map<number, Go
   return found;
 }
 
-/** Tokens one judge call may answer with: a short object a question, a margin, a ceiling. */
+/** The output ceiling of any golden judge call. */
+export const GOLDEN_MAX_TOKENS = 4_096;
+/** A judge call's output budget: this much, plus {@link GOLDEN_TOKENS_PER_QUESTION} a question. */
+export const GOLDEN_BASE_TOKENS = 1_024;
+/**
+ * Room per question for a model that thinks before it answers: the cap counts
+ * the hidden reasoning too, and at 64 a question (640 for six) most calls were
+ * cut off before the first verdict. The verdict itself is ~20 tokens.
+ */
+export const GOLDEN_TOKENS_PER_QUESTION = 512;
+
+/** Tokens one judge call may answer with, reasoning included. */
 export function goldenMaxTokens(questions: number): number {
-  return Math.min(2048, 256 + 64 * questions);
+  return Math.min(GOLDEN_MAX_TOKENS, GOLDEN_BASE_TOKENS + GOLDEN_TOKENS_PER_QUESTION * Math.max(1, questions));
 }
 
 // ── the score ──────────────────────────────────────────────────────────────

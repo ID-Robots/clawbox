@@ -25,7 +25,7 @@ import {
  *
  *  - Accuracy: the latest nightly check of the golden questions — % correct,
  *    its change and a trend line — with how many came back right, wrong,
- *    missing or out of date.
+ *    missing or out of date, and how many were not judged (the % leaves them out).
  *  - Golden questions: each with its expected answer, owner and last verdict;
  *    add, edit and delete them (one commit each, undone by its id).
  *  - Daily questions: one owner at a time, in their language — open review
@@ -74,7 +74,16 @@ function Accuracy({ score }: { score: GoldenStatus | null | undefined }) {
     <section className={`${CARD_SURFACE} p-4`} data-testid="prime-radiant-accuracy">
       <h3 className={SECTION_LABEL}>{t("primeRadiant.questions.accuracy")}</h3>
       {!last || last.percent === null ? (
-        <p className="mt-2 text-sm text-[var(--text-muted)]">{t("primeRadiant.questions.accuracyNone")}</p>
+        <p className="mt-2 text-sm text-[var(--text-muted)]">
+          {t("primeRadiant.questions.accuracyNone")}
+          {/* An early score could be stored with nothing judged: its unjudged questions are still said. */}
+          {last && last.failed > 0 && (
+            <span className="text-[11px] text-amber-200" data-testid="prime-radiant-accuracy-not-judged">
+              {" · "}
+              {t("primeRadiant.questions.notJudged", { n: last.failed })}
+            </span>
+          )}
+        </p>
       ) : (
         <div className="mt-2 flex flex-wrap items-end justify-between gap-4">
           <div>
@@ -91,6 +100,13 @@ function Accuracy({ score }: { score: GoldenStatus | null | undefined }) {
             </p>
             <p className="mt-1 text-[11px] text-[var(--text-secondary)]">
               {t("primeRadiant.questions.tally", { correct: last.correct, wrong: last.wrong, missing: last.missing, stale: last.stale })}
+              {/* The % is of the questions judged: the ones the judge left unjudged are said beside it. */}
+              {last.failed > 0 && (
+                <span className="text-amber-200" data-testid="prime-radiant-accuracy-not-judged">
+                  {" · "}
+                  {t("primeRadiant.questions.notJudged", { n: last.failed })}
+                </span>
+              )}
             </p>
           </div>
           <Sparkline points={(score?.trend ?? []).map((p) => p.percent)} />
