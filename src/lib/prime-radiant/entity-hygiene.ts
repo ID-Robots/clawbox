@@ -9,9 +9,12 @@
  *     made one. The CANONICAL page of a group is a verified one, else one with
  *     no `-N` suffix, else the most linked; the others are suggested as merges
  *     into it (the summaries pass plans them with the merge tool, dry run).
- *  2. DOMAIN MISMATCH — an entity filed under a domain its neighbourhood says
- *     it is not in: a role its facts name ("COO" → an operations domain) when
- *     that domain exists, else the domain most of its linked pages share. A
+ *  2. DOMAIN MISMATCH — an entity filed under a domain its OWN facts say it
+ *     is not in: a role a fact gives it as what it is ("Maria Ivanova is the
+ *     COO of Acme" → an operations domain) when that domain exists. A role
+ *     word anywhere else ("Acme's accountant is …", "the Developer Kit is a
+ *     developer board") and the domains of its linked pages decide nothing:
+ *     on a real vault both were wrong far more often than right. A
  *     suggestion, never a move: lint warns with it.
  *
  * Pure.
@@ -21,12 +24,6 @@ import { transliterateCyrillic } from "./claims";
 import { isPathAlias } from "./links";
 import { hasVerification, type PageFrontmatter } from "./schema";
 
-/** Linked content pages with a domain an entity needs before their majority suggests one. */
-export const DOMAIN_MIN_NEIGHBOURS = 5;
-/** The share of them the suggested domain must hold. */
-export const DOMAIN_MAJORITY = 0.6;
-/** The most of them the page's own domain may hold for the majority to count. */
-export const DOMAIN_OWN_MAX = 0.2;
 /** The domain that is no domain: never suggested, never counted. */
 const GENERAL = "general";
 
@@ -190,40 +187,56 @@ const ROLE_DOMAINS: ReadonlyArray<{ domains: readonly string[]; words: RegExp }>
   },
 ];
 
-/** The role words a text holds, as written; an acronym counts only in capitals (a "Coo" is no COO). */
+/** What may follow a role that is the whole complement: the sentence's end, a clause, or "of Acme", "at Globex", "since 2024". */
+const ROLE_END_RE = /^(?:$|\s*[.,;:()\u2013\u2014-]|\s+(?:of|at|for|in|and|since|from|with|to|on|до|на|в|от|и)(?![\p{L}\p{N}]))/iu;
+
+/**
+ * The role a role phrase opens with, as written: the whole complement, never
+ * the first word of a longer noun ("developer board"); an acronym counts only
+ * in capitals (a "Coo" is no COO).
+ */
 function roleWord(re: RegExp, text: string): string | null {
-  const all = new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`);
-  for (const m of text.matchAll(all)) {
-    const hit = m[0];
-    if (!/^[A-Z]{2,5}$/i.test(hit) || hit === hit.toUpperCase()) return hit;
+  const m = new RegExp(`^(?:${re.source})`, re.flags.replace("g", "")).exec(text);
+  if (!m) return null;
+  const hit = m[0];
+  if (/^[A-Z]{2,5}$/i.test(hit) && hit !== hit.toUpperCase()) return null;
+  return ROLE_END_RE.test(text.slice(hit.length)) ? hit : null;
+}
+
+/** "is the", "serves as our", "е" …: what says the subject IS the role that follows. */
+const ROLE_PREDICATE_RE = /^\s*(?:,\s*)?(?:is|serves as|works as|acts as|е|работи като)\s+(?:(?:the|our|their|its|a|an|acting|interim|senior|chief|lead)\s+)*/iu;
+
+/**
+ * The role phrase of a fact said of the entity — it opens with one of its
+ * `names` and goes on "is the …" — or null: "Maria Ivanova is the COO of Acme"
+ * gives "COO of Acme"; "Acme's accountant is Jane Roe" gives nothing.
+ */
+export function rolePhrase(text: string, names: readonly string[]): string | null {
+  const hay = text.trim();
+  for (const raw of names) {
+    const name = raw.trim();
+    if (name.length < 3 || hay.slice(0, name.length).toLowerCase() !== name.toLowerCase()) continue;
+    const m = ROLE_PREDICATE_RE.exec(hay.slice(name.length));
+    if (m) return hay.slice(name.length + m[0].length);
   }
   return null;
 }
 
 export interface DomainSuggestion {
   suggested: string;
-  reason: "role" | "neighbours";
-  /** What says so, as a clause: `its role "COO" points to operations`, `4 of 5 linked pages are in finance`. */
+  reason: "role";
+  /** What says so, as a clause: `its role "COO" points to operations`. */
   evidence: string;
 }
 
 /**
- * The domain an entity's neighbourhood says it belongs in, when that is not
- * the one it is filed under; null when nothing says so clearly.
- *  - `roleTexts`: what is said about the entity with it as the subject (a
- *    fact that opens with its name: "Maria Ivanova is the COO …", never
- *    "… is the COO of Acme") — a role there that maps to ONE domain that
- *    exists decides;
- *  - `neighbourDomains`: the domains of the content pages linked with it
- *    (either way) — a clear majority decides when no role does.
- * `known`: the domains that exist (configured, else the ones pages use).
+ * The domain an entity's own facts say it belongs in, when that is not the
+ * one it is filed under; null when nothing says so clearly. `roleTexts`: the
+ * role phrases of its facts ({@link rolePhrase}: "COO of Acme Widgets Ltd.")
+ * — a role that maps to ONE domain that exists decides. `known`: the domains
+ * that exist (configured, else the ones pages use).
  */
-export function suggestDomain(
-  current: string,
-  roleTexts: readonly string[],
-  neighbourDomains: readonly string[],
-  known: ReadonlySet<string>,
-): DomainSuggestion | null {
+export function suggestDomain(current: string, roleTexts: readonly string[], known: ReadonlySet<string>): DomainSuggestion | null {
   const hits = new Map<string, { n: number; word: string }>();
   for (const role of ROLE_DOMAINS) {
     const domain = role.domains.find((d) => known.has(d));
@@ -237,19 +250,10 @@ export function suggestDomain(
     }
   }
   const roles = [...hits.entries()].sort((a, b) => b[1].n - a[1].n || a[0].localeCompare(b[0]));
-  if (roles.length > 0 && (roles.length === 1 || roles[0][1].n > roles[1][1].n)) {
-    const [domain, { word }] = roles[0];
-    if (domain === current) return null;
-    return { suggested: domain, reason: "role", evidence: `its role "${word}" points to ${domain}` };
-  }
-  const counted = neighbourDomains.filter((d) => d !== GENERAL && d !== "");
-  if (counted.length < DOMAIN_MIN_NEIGHBOURS) return null;
-  const c = new Map<string, number>();
-  for (const d of counted) c.set(d, (c.get(d) ?? 0) + 1);
-  const [top, n] = [...c.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0];
-  if (top === current || !known.has(top)) return null;
-  if (n / counted.length < DOMAIN_MAJORITY || (c.get(current) ?? 0) / counted.length > DOMAIN_OWN_MAX) return null;
-  return { suggested: top, reason: "neighbours", evidence: `${n} of ${counted.length} linked pages are in ${top}` };
+  if (roles.length === 0 || (roles.length > 1 && roles[0][1].n === roles[1][1].n)) return null;
+  const [domain, { word }] = roles[0];
+  if (domain === current) return null;
+  return { suggested: domain, reason: "role", evidence: `its role "${word}" points to ${domain}` };
 }
 
 /** The domains that exist: the configured ones, else every domain at least three pages use (never `general`). */
@@ -260,46 +264,26 @@ export function knownDomains(pages: readonly HygienePage[], configured: readonly
   return new Set([...c.entries()].filter(([d, n]) => n >= 3 && d !== GENERAL).map(([d]) => d));
 }
 
-/** Whether `text` opens with one of `names` (any case): the fact is said of it, it is the subject. */
-export function opensWith(text: string, names: readonly string[]): boolean {
-  const hay = text.trim().toLowerCase();
-  return names.some((raw) => {
-    const name = raw.trim().toLowerCase();
-    return name.length >= 3 && hay.startsWith(name) && !/[\p{L}\p{N}]/u.test(hay.charAt(name.length));
-  });
-}
-
 export interface DomainMismatch extends DomainSuggestion {
   path: string;
   domain: string;
 }
 
 /**
- * The entity pages filed under a domain their neighbourhood disagrees with.
- * `linked(path)`: the pages linked with a page either way (content pages);
- * only `paths` are judged (all entities when absent).
+ * The entity pages filed under a domain their own facts disagree with (see
+ * {@link suggestDomain}); only `paths` are judged (all entities when absent).
  */
-export function domainMismatches(
-  pages: readonly HygienePage[],
-  linked: (path: string) => Iterable<string>,
-  options: { configured?: readonly string[]; paths?: ReadonlySet<string> } = {},
-): DomainMismatch[] {
-  const byPath = new Map(pages.map((p) => [p.path, p]));
+export function domainMismatches(pages: readonly HygienePage[], options: { configured?: readonly string[]; paths?: ReadonlySet<string> } = {}): DomainMismatch[] {
   const known = knownDomains(pages, options.configured ?? []);
   if (known.size < 2) return [];
   const out: DomainMismatch[] = [];
   for (const p of pages) {
     if (!isEntityPage(p) || (options.paths && !options.paths.has(p.path))) continue;
     const names = pageNames(p.fm);
-    const neighbours = [...new Set(linked(p.path))].map((x) => byPath.get(x)).filter((x): x is HygienePage => !!x && x.path !== p.path);
-    // What is said of it, its name the subject: its own facts and its neighbours'.
-    const roleTexts = [p, ...neighbours].flatMap((n) => n.fm.claims.filter((c) => c.status !== "contested" && opensWith(c.text, names)).map((c) => c.text));
-    const s = suggestDomain(p.fm.domain, roleTexts, neighbours.filter((n) => !isStructurePage(n)).map((n) => n.fm.domain), known);
+    // Only its own facts, and only what they say it IS: a neighbour's fact, or a role word elsewhere, is no evidence.
+    const roleTexts = p.fm.claims.filter((c) => c.status !== "contested").flatMap((c) => rolePhrase(c.text, names) ?? []);
+    const s = suggestDomain(p.fm.domain, roleTexts, known);
     if (s) out.push({ path: p.path, domain: p.fm.domain, ...s });
   }
   return out;
-}
-
-function isStructurePage(p: HygienePage): boolean {
-  return p.fm.structure !== undefined && p.fm.structure !== null;
 }

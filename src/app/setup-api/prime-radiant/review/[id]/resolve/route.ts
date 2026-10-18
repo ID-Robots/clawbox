@@ -5,7 +5,8 @@
  * verified under the item's claim id and every other candidate's id is
  * retired, one commit), `{ action: "new", text, page? }` (the owner's own
  * answer, verified the same way), `{ action: "later" }` or
- * `{ action: "dismiss" }`. → `{ item, commit, retired }`.
+ * `{ action: "dismiss" }`; any of them may carry `reason` (text, kept on the
+ * item as `resolution.note`). → `{ item, commit, retired }`.
  *
  * The owner (cookie AND same origin), or the assistant through the MCP bearer
  * — never another site. A verification is someone's word, so it says whose:

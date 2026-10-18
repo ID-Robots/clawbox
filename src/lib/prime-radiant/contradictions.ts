@@ -47,6 +47,7 @@
  */
 
 import { processStore } from "@/lib/process-store";
+import { claimTextKey } from "./claims";
 import { estimateUsd, type CostRates } from "./cost-rates";
 import { completeWithRetry, FlashCallError, flashClient, stubEnabled, type FlashClient, type FlashResponse, type RetryOptions } from "./flash-client";
 import { recordCost } from "./ingest-store";
@@ -80,6 +81,11 @@ export const JUDGE_MAX_TOKENS = 4_096;
 export const JUDGE_BASE_TOKENS = 512;
 /** Room per pair for a model that thinks before it answers; the verdict itself is ~15 tokens. */
 export const JUDGE_TOKENS_PER_PAIR = 384;
+
+/** A contradiction item's dedupe key: the two sides' pages and texts as duplicates are told apart, never their ids. */
+export function contradictionKey(a: { page: string; text: string }, b: { page: string; text: string }): string {
+  return `contradiction:${JSON.stringify([[a.page, claimTextKey(a.text)], [b.page, claimTextKey(b.text)]].sort((x, y) => (x.join("\u0000") < y.join("\u0000") ? -1 : 1)))}`;
+}
 
 /** The output cap of a judge call carrying `pairs` pairs. */
 export function judgeMaxTokens(pairs: number): number {
@@ -843,7 +849,7 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
       // already settled the other), else the newer side of the pair.
       const [subject, other] = f.a.verified && !f.b.verified ? [f.b, f.a] : [f.a, f.b];
       try {
-        const { item } = addReviewItem(
+        const { item, dismissed } = addReviewItem(
           options.stateVault,
           {
             kind: "contradiction",
@@ -859,12 +865,17 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
               },
             ],
             evidence: [{ kind: "judge", verdict: f.verdict, note: f.why, source: "flash" }],
-            dedupeKey: `contradiction:${[f.a.id, f.b.id].sort().join("|")}`,
+            // One question per pair of FACTS: the same text filed twice on a page (two ids) is one item, not two.
+            dedupeKey: contradictionKey(f.a, f.b),
+            legacyKeys: [`contradiction:${[f.a.id, f.b.id].sort().join("|")}`],
+            // A pair the owner dismissed is not asked again from the cached verdict; a changed text is a new pair.
+            keepDismissed: true,
             runId: options.runId ?? null,
           },
           now().toISOString(),
         );
-        result.reviewItems.push(item);
+        // Two findings of one question (one text under two ids) answer with the same item: listed once.
+        if (!dismissed && !result.reviewItems.some((x) => x.id === item.id)) result.reviewItems.push(item);
       } catch {
         result.notes.push("A review item could not be saved.");
       }

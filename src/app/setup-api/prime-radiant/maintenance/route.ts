@@ -33,6 +33,12 @@
  *    the owner's, `{ by: owner, via: assistant }`, which wins like a
  *    verification in the app; ONE commit. `{ upgraded, pages, skipped }`;
  *    `dryRun: true` lists them — run it first, and `rejudge-reviews` after.
+ *  - `fold-duplicate-claims`: the one-off repair (claim-folds.ts): the same
+ *    fact filed twice on a page (a `-2` id, a second copy of a document)
+ *    becomes one claim, the other copies' sources joined to its evidence; a
+ *    verified claim or page is left as it is. In commits of 50 pages Undo
+ *    reverses; idempotent. `{ pages, folds, skipped, commits }`; `dryRun: true`
+ *    lists them — run it first.
  *  - `structure`: the structure pass (structure.ts, also step 4b of the
  *    nightly pass) — monthly record hubs, domain hubs, the company's root
  *    page, entity enrichment and the decisions register, written in commits.
@@ -69,6 +75,7 @@ import { requireSession } from "@/lib/route-auth";
 import { RELATED_DIMS, runConnectPass } from "@/lib/prime-radiant/connect";
 import { vaultDir } from "@/lib/prime-radiant/paths";
 import { migratePluginFrontmatter } from "@/lib/prime-radiant/plugin-compat";
+import { foldDuplicateClaimsInVault } from "@/lib/prime-radiant/claim-folds";
 import { classifyRecord, RECORD_TYPES } from "@/lib/prime-radiant/records";
 import { flashAvailable } from "@/lib/prime-radiant/flash-client";
 import { effectiveCostRates, readSettings } from "@/lib/prime-radiant/settings";
@@ -210,6 +217,10 @@ export async function POST(req: Request) {
       case "rename-slugs": {
         if (state.running) return busy();
         return json(await renameMeaninglessPages({ dryRun, vault, author: gate.writer.author }));
+      }
+      case "fold-duplicate-claims": {
+        if (state.running) return busy();
+        return json(await foldDuplicateClaimsInVault({ dryRun, vault, author: gate.writer.author }));
       }
       case "upgrade-assistant-verifications": {
         if (state.running) return busy();
