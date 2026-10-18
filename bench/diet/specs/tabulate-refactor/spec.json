@@ -1,0 +1,13 @@
+{
+  "id": "tabulate-refactor",
+  "tier": "long",
+  "project": "python-tabulate",
+  "task": "This folder is a clone of the open-source python-tabulate library (v0.9.0); all of it lives in one 2700-line tabulate/__init__.py. Refactor it into a package of at least four cohesive submodules (for example: table formats, cell/number formatting, wide-character and text wrapping, the core tabulate() function and the CLI), leaving tabulate/__init__.py as a thin re-export under 400 lines. Every function, class and constant the module defines today (public or underscore-prefixed) must stay importable from `tabulate`, behaviour must not change (including the command-line entry point), and the existing suite must stay green: run it with `python3 -m pytest -q`. Do not edit the tests. Commit nothing yourself.",
+  "source": { "kind": "git", "url": "https://github.com/astanin/python-tabulate", "ref": "v0.9.0" },
+  "accept": [
+    { "name": "test suite (python3 -m pytest -q)", "cmd": "python3 -m pytest -q -p no:cacheprovider test", "timeoutSec": 300 },
+    { "name": "tests unchanged", "cmd": "git diff --quiet \"$BASE\" -- test/", "timeoutSec": 30 },
+    { "name": "hidden: structure, names, CLI", "cmd": "python3 -I __acceptance__/tabulate_check.py __acceptance__/tabulate-names.json", "timeoutSec": 120 }
+  ],
+  "rubric": "Check the split is cohesive (formats/TableFormat definitions, number and cell formatting, ANSI/wide-char width and wrapping, core tabulate() and the CLI) with one-way imports and no circular-import workarounds hidden in function bodies. Module-level switches the tests and users mutate on the package (tabulate.PRESERVE_WHITESPACE, tabulate.WIDE_CHARS_MODE) must still take effect, and `python tabulate/__init__.py` must still work as a script; look at how that was solved. The re-export in __init__.py should be explicit (names or __all__ plus the private helpers), code moved verbatim rather than rewritten, no behaviour changes, no leftover copies of moved code, and pyproject/packaging still finds the package."
+}

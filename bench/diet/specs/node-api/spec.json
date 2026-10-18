@@ -1,0 +1,15 @@
+{
+  "id": "node-api",
+  "tier": "short",
+  "project": "todo-api",
+  "task": "This folder is a small Node.js Express API (index.js, package.json, test/). Add a GET /todos/:id endpoint that returns the todo with that id as JSON, or 404 with {\"error\":\"not found\"} when there is none, and a POST /todos endpoint that validates a non-empty string `title` (400 otherwise) and returns 201 with the created todo. Add tests for both endpoints (node:test + supertest are already in package.json) and make `npm test` pass. Commit nothing yourself.",
+  "source": { "kind": "seed" },
+  "setup": "npm ci --no-audit --no-fund",
+  "accept": [
+    { "name": "own tests (npm test)", "cmd": "npm test", "timeoutSec": 120 },
+    { "name": "hidden: endpoints", "cmd": "node --test __acceptance__/todos.accept.js", "timeoutSec": 60 },
+    { "name": "tests were added", "cmd": "c() { awk -F: '{s+=$NF} END {print s+0}'; }; before=$(git grep -cE '\\b(it|test)\\(' \"$BASE\" -- ':(glob)**/*test*' ':(exclude)__acceptance__' | c); after=$(git grep --untracked -cE '\\b(it|test)\\(' -- ':(glob)**/*test*' ':(exclude)__acceptance__' | c); echo \"test cases: $before -> $after\"; [ \"$after\" -gt \"$before\" ]", "timeoutSec": 30 }
+  ],
+  "probe": { "start": "npm start", "url": "http://127.0.0.1:{port}/todos", "expectStatus": 200, "expectBodyIncludes": "Buy milk" },
+  "rubric": "Check id parsing (Number/parseInt of the param, no string-vs-number comparison bug, sensible handling of non-numeric ids), that new ids cannot collide with existing ones after deletes or restarts of the in-memory list, and that validation rejects non-strings and empty titles before mutating state. Whitespace-only titles are a judgment call; trimming is a plus. The created todo should have a consistent shape with the seed todos (id, title, done:false). Tests should cover the 404 body and each 400 case, and must not depend on test order through shared state in a fragile way."
+}

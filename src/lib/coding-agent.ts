@@ -388,6 +388,7 @@ import {
 } from "@/lib/coding-run-unit";
 import { cpuBudgetBrief, hostCpuCount, MAX_CPU_BUDGET, onBatteryPower, RUN_CPU_BUDGET_ENV, runCpuBudget } from "@/lib/coding-run-cpu";
 import { LESSON_CHANNEL_BRIEF, readRunNotes, runNotesBlock, settleRunNotes } from "@/lib/coding-run-notes";
+import { type CodingDiet, DEFAULT_DIET, looksVisual, mentionsPullRequest, mergeDiet, readDiet, validateDietPatch } from "@/lib/coding-diet";
 import {
   applyRoleModelsPatch,
   CODING_AGENT_ROLE_MODELS_CONFIG_KEY,
@@ -768,6 +769,16 @@ export const CODING_AGENT_REAL_BROWSER_CONFIG_KEY = "coding_agent_real_browser";
 export const CODING_TEAM_DYNAMIC_CONFIG_KEY = "coding_team_dynamic";
 
 /**
+ * The token diet (src/lib/coding-diet.ts): `{ brief, helpers, visualTools }`,
+ * one object. Absent — or any field this build does not offer — reads as
+ * today's behaviour on that knob, so a box that never set it sends exactly the
+ * prompt and the tools it always did. Read at a run's start and frozen on its
+ * record (CodingRun.diet), like the effort: the prompt a session was opened
+ * with must not change under its resumes.
+ */
+export const CODING_AGENT_DIET_CONFIG_KEY = "coding_agent_diet";
+
+/**
 
 /**
  * The owner's standing answer to "may a run do this?" — the permission rules
@@ -821,6 +832,7 @@ export const CODING_AGENT_RESET_KEYS = [
   CODING_AGENT_GEN_AUDIO_CONFIG_KEY,
   CODING_AGENT_REAL_BROWSER_CONFIG_KEY,
   CODING_TEAM_DYNAMIC_CONFIG_KEY,
+  CODING_AGENT_DIET_CONFIG_KEY,
   CODING_AGENT_ALLOW_RULES_CONFIG_KEY,
   // The commit identity is a SETTING — the owner chose who the box signs their
   // work as — so "start over" puts it back to the project's own git config and
@@ -1786,6 +1798,24 @@ export interface CodingRun {
    * run no review at all, or two.
    */
   reviewPass: boolean;
+  /**
+   * The owner's token diet as it stood when the run STARTED
+   * (src/lib/coding-diet.ts), frozen like `effort`: the brief and the tools a
+   * session was opened with must not change under its respawns and resumes, or
+   * the provider's prefix cache is lost and the run's tools move under it. A
+   * record written before the diet existed reads as DEFAULT_DIET, today's
+   * behaviour, so its resumes keep their prompt.
+   */
+  diet: CodingDiet;
+  /**
+   * Does this run hold the browser and media tools under `visualTools: "auto"`?
+   * Decided ONCE, at the first spawn (`visualTools === "always"`, or
+   * `looksVisual` over the task and the folder's top-level entries), and kept
+   * for every respawn so the tools and the prompt prefix stay the same. Null
+   * until that spawn; a resume inherits a `true` (a run that had the tools
+   * keeps them) and decides afresh otherwise.
+   */
+  visual: boolean | null;
   /** Pictures and clips this run has already been given, against the caps. */
   mediaGenerated: { images: number; audio: number };
   /**
@@ -2251,6 +2281,8 @@ export interface CodingAgentStatus {
   historyLiveKept: number;
   /** Attempts a run with a deliverable gets at it, its own first turn included. */
   completionAttempts: number;
+  /** The token diet in effect — the stored one, every unset knob at its default. */
+  diet: CodingDiet;
   /** The range the app offers, so it does not have to guess the bounds. */
   minCompletionAttempts: number;
   maxCompletionAttempts: number;
@@ -2979,6 +3011,24 @@ export async function setAutoMerge(on: unknown): Promise<boolean> {
   }
   await configSet(CODING_AGENT_AUTO_MERGE_CONFIG_KEY, on);
   return on;
+}
+
+/** The owner's token diet, every knob it does not name at today's behaviour. */
+export async function getDiet(): Promise<CodingDiet> {
+  return readDiet(await configGet(CODING_AGENT_DIET_CONFIG_KEY));
+}
+
+/**
+ * Merge a partial diet over the stored one. The patch is refused WHOLE — an
+ * unknown key or a value this build does not offer — before anything is
+ * written, with the refusal's stable code in the message's place for the route.
+ */
+export async function setDiet(patch: unknown): Promise<CodingDiet> {
+  const checked = validateDietPatch(patch);
+  if (!checked.ok) throw new CodingAgentError("invalid", checked.error);
+  const next = mergeDiet(await configGet(CODING_AGENT_DIET_CONFIG_KEY), checked.patch);
+  await configSet(CODING_AGENT_DIET_CONFIG_KEY, next);
+  return next;
 }
 
 /** How many attempts at its deliverable a run gets. Absent means the default. */
@@ -3992,6 +4042,8 @@ export async function getCodingAgentStatus(): Promise<CodingAgentStatus> {
     // Absent means the default, like the review rounds above: a box that
     // predates the setting still gives a run with a deliverable its three goes.
     completionAttempts: completionAttemptsFrom(config[CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY]),
+    // The effective diet: today's behaviour on every knob the owner never set.
+    diet: readDiet(config[CODING_AGENT_DIET_CONFIG_KEY]),
     minCompletionAttempts: MIN_COMPLETION_ATTEMPTS,
     maxCompletionAttempts: MAX_COMPLETION_ATTEMPTS,
     // Absent means the default here too: a box that predates the setting runs
@@ -4345,6 +4397,10 @@ function normalizeRun(raw: CodingRun): CodingRun {
     // "off" is the truth about that run and not merely a safe default.
     media: normalizeMedia(raw.media),
     reviewPass: raw.reviewPass === true,
+    // Strict, and never a throw: a record from before the diet reads as the
+    // default, which is the brief and the tools it was started with.
+    diet: readDiet((raw as { diet?: unknown }).diet),
+    visual: typeof (raw as { visual?: unknown }).visual === "boolean" ? (raw as { visual: boolean }).visual : null,
     mediaGenerated: {
       images: countOf(raw.mediaGenerated?.images),
       audio: countOf(raw.mediaGenerated?.audio),
@@ -4767,6 +4823,15 @@ interface LiveRun {
   tokensAtSpawn: number;
   /** `run.tokenBreakdown` when this process began: the CLI's modelUsage counts from zero per process. */
   breakdownAtSpawn: TokenBreakdown;
+  /**
+   * This process continues an earlier session (`--resume`): a review pass, a
+   * completion attempt, the owner's Resume. Its CLI reports modelUsage for the
+   * WHOLE session, history included (measured 2026-10-18: a review pass's
+   * record read 270,596 = the run's own 125,100 + its 145,496), so the
+   * raise-to-modelUsage below would bill the earlier spawns again. Such a
+   * process is billed from its own assistant events only.
+   */
+  resumedSession?: boolean;
   /**
    * tool_use ids of sub-agents that have started and not yet reported back.
    * Ids rather than a counter: a tool_result can arrive out of order, and a
@@ -5794,12 +5859,73 @@ const REVIEWER_CLAUSE_SLOT = "{{REVIEWER_CLAUSE}}";
 const REVIEWER_CLAUSE_HELPER = "before your final report, send the reviewer over your changes (name the files) and fix what it finds.";
 const REVIEWER_CLAUSE_SEPARATE = "your changes get a separate, automatic adversarial review on this device — do not send the reviewer helper over your own work; spend that time on the tester.";
 
-/** The brief for a run whose changes are (or are not) reviewed separately. */
-export function headlessBrief(opts: { reviewedSeparately: boolean; team?: boolean }): string {
-  const brief = HEADLESS_BRIEF_TEMPLATE.replace(REVIEWER_CLAUSE_SLOT, opts.reviewedSeparately ? REVIEWER_CLAUSE_SEPARATE : REVIEWER_CLAUSE_HELPER);
+/**
+ * The place in the brief where the run is told how to use its helpers — the
+ * delegation sentence (with its reviewer slot) under the diet's `helpers:
+ * "always"`, LEAN_HELPERS_BRIEF under `"lean"`.
+ */
+const HELPERS_SLOT = "{{HELPERS}}";
+
+// Measured on bench runs run-y3i3y1lk and run-35aq5yh2 (2026-09-03): with
+// the softer "when sub-agents are available, use them" the tier model read,
+// tested and reviewed everything in its own thread and reported
+// subagentsTotal 0 every time — the helpers existed and were never named
+// as a step. So the protocol is spelled out as steps, with the reason.
+const DELEGATION_SENTENCE =
+  "Delegate instead of doing everything in one thread — the sub-agents are how a run stays fast and keeps its own context small: before you edit code that already exists here and you have not read, send the explorer to map it (an empty or freshly scaffolded folder has nothing to map — skip that); after each batch of changes, send the tester to run whatever check exists — the build, the tests, or a script you wrote; and " + REVIEWER_CLAUSE_SLOT + " Do the writing yourself: the explorer, tester and reviewer read, run and review, they never edit.";
+
+/**
+ * The diet's `helpers: "lean"` in place of the delegation sentence (TASK-1749).
+ * Every helper is a separate context that re-reads what the run already read,
+ * so the cheap way to check work is the run's own shell; a helper earns its
+ * tokens only on a codebase too large to read, or as one last look at a large
+ * change — and never as a second review of a diff a separate pass will read.
+ */
+export function leanHelpersBrief(reviewedSeparately: boolean): string {
+  return [
+    "Run the project's tests and builds yourself in your shell — cheaper than a helper.",
+    "Use the explorer only for a codebase too large to read directly, handing it the paths and the question.",
+    reviewedSeparately
+      ? "Do not send the reviewer: a separate review on this device reads your diff."
+      : "Use the reviewer at most once, at the end of a large multi-file change, handing it the changed files and what to check instead of letting it re-read the project.",
+    "Helpers never edit.",
+  ].join(" ");
+}
+
+function helpersSentence(diet: CodingDiet, reviewedSeparately: boolean): string {
+  return diet.helpers === "lean"
+    ? leanHelpersBrief(reviewedSeparately)
+    : DELEGATION_SENTENCE.replace(REVIEWER_CLAUSE_SLOT, reviewedSeparately ? REVIEWER_CLAUSE_SEPARATE : REVIEWER_CLAUSE_HELPER);
+}
+
+/**
+ * The brief for a run whose changes are (or are not) reviewed separately.
+ *
+ * `diet` (src/lib/coding-diet.ts) picks the full brief or the lean one and the
+ * helper sentence; `visual` and `pullRequest` matter to the LEAN brief only:
+ * its browser block is there only for a visual run, and its auto-merge
+ * sentence only for a run that can open a pull request or was asked about
+ * one. Omitted, the answer is today's brief byte for byte.
+ */
+export function headlessBrief(opts: { reviewedSeparately: boolean; team?: boolean; diet?: CodingDiet; visual?: boolean; pullRequest?: boolean }): string {
+  const diet = opts.diet ?? DEFAULT_DIET;
+  const helpers = helpersSentence(diet, opts.reviewedSeparately);
   // A team's run is told the opposite of PR_AUTO_MERGE_BRIEF, in its place: a
   // team goal that asks for a merge is the ORCHESTRATOR's to carry out, once,
   // at the end — never a worker's, whatever its task text quotes of the goal.
+  if (diet.brief === "lean") {
+    const merge = opts.team ? TEAM_NO_MERGE_BRIEF : opts.pullRequest ? PR_AUTO_MERGE_BRIEF : null;
+    return [
+      ...LEAN_BRIEF_HEAD,
+      helpers,
+      ...LEAN_BRIEF_MIDDLE,
+      ...(opts.visual !== false ? [LEAN_VISUAL_BRIEF] : []),
+      ...LEAN_BRIEF_TAIL,
+      ...(merge ? [merge] : []),
+      LEAN_FINAL_MESSAGE,
+    ].join(" ");
+  }
+  const brief = HEADLESS_BRIEF_TEMPLATE.replace(HELPERS_SLOT, helpers);
   return opts.team ? brief.replace(PR_AUTO_MERGE_BRIEF, TEAM_NO_MERGE_BRIEF) : brief;
 }
 
@@ -5878,12 +6004,8 @@ const HEADLESS_BRIEF_TEMPLATE = [
   // split its commands anyway. The one command rule that IS enforced is the
   // kill-by-name list (BASH_KILL_DENYLIST).
   "You may chain commands with && or ;, pipe, redirect, use a heredoc and start a server in the background inside one Bash call — keep each call to one purpose. End anything you started by its PID: pkill, killall and fuser are refused.",
-  // Measured on bench runs run-y3i3y1lk and run-35aq5yh2 (2026-09-03): with
-  // the softer "when sub-agents are available, use them" the tier model read,
-  // tested and reviewed everything in its own thread and reported
-  // subagentsTotal 0 every time — the helpers existed and were never named
-  // as a step. So the protocol is spelled out as steps, with the reason.
-  "Delegate instead of doing everything in one thread — the sub-agents are how a run stays fast and keeps its own context small: before you edit code that already exists here and you have not read, send the explorer to map it (an empty or freshly scaffolded folder has nothing to map — skip that); after each batch of changes, send the tester to run whatever check exists — the build, the tests, or a script you wrote; and " + REVIEWER_CLAUSE_SLOT + " Do the writing yourself: the explorer, tester and reviewer read, run and review, they never edit.",
+  // The delegation sentence (DELEGATION_SENTENCE), or the diet's lean one.
+  HELPERS_SLOT,
   // The -p mechanics, measured on this box (2026-09-03): a helper is launched
   // in the background, the model's turn ends, and the CLI restarts the same
   // session with each result. Left unsaid, the model spent its steps asking
@@ -5916,8 +6038,53 @@ const HEADLESS_BRIEF_TEMPLATE = [
   "Your final message is delivered to the person who delegated the task. State what you changed (file names), how they can check it, anything you could not finish, and every assumption you made where the task left a choice open — name the convention or default you picked and why.",
 ].join(" ");
 
+/**
+ * The diet's LEAN brief (TASK-1749, src/lib/coding-diet.ts): every rule of
+ * HEADLESS_BRIEF that prevents a real failure, said in as few words as
+ * possible and without the anecdotes — the comments on HEADLESS_BRIEF_TEMPLATE
+ * keep the reasons. Assembled by `headlessBrief`: the head, the helper
+ * sentence, the middle, the browser block for a visual run only, the tail, the
+ * merge sentence where it applies, and the final-message rule.
+ */
+const LEAN_BRIEF_HEAD = [
+  "You run unattended on a ClawBox, a small Linux device, in the folder you were started in, for the device's assistant.",
+  "Nobody can answer questions: make sensible assumptions and keep going. Stay in this folder; install no system packages, change no device settings.",
+  "A refused Read, Write or Edit is a decision: never reach that path another way (no sed, tee, redirection or scripts through Bash) — report it undone.",
+  "Make the in-folder edits you are sure of FIRST. A step on a file outside this folder: try it once with Edit or Write, never Bash, then carry on.",
+  "The ClawBox checkout (/home/clawbox/clawbox), its data/ folder, your run record and session files are off limits, except your evidence folder ($CLAWBOX_RUN_ARTIFACTS_DIR). Folders beside yours are the owner's other projects: never list, search or read them.",
+  "Files you were given are in $CLAWBOX_RUN_INPUTS_DIR; if one is missing, say so rather than look elsewhere.",
+  "Bash may chain, pipe and background; end what you started by PID (pkill, killall and fuser are refused).",
+];
+
+const LEAN_BRIEF_MIDDLE = [
+  "Helpers run in the background: when only waiting is left, end your turn with one line on what is out — you are restarted with each result. Never poll them or read their transcripts.",
+];
+
+/** The lean brief's browser and visual-verification block — a visual run's only. */
+export const LEAN_VISUAL_BRIEF = [
+  "To check a web app, start it as a background child in this folder and browser_open http://127.0.0.1:PORT (an unprivileged port; only your own listener is reachable) — or run `node \"$CLAWBOX_PREVIEW\" --ttl 900`, which builds, serves and prints PREVIEW_PID and PREVIEW_URL. Verify the real API-backed UI, not a static shim; stop test servers when done.",
+  "You cannot see images: browser_view_local (a standalone HTML file), browser_open and browser_screenshot save a screenshot to the evidence folder and answer with its description — read it before you report done.",
+  "Set fields with browser_fill and use browser_click; never drive a page key by key — prove logic with a small node script, and spend the browser on ONE pass, one screenshot per state that matters.",
+].join(" ");
+
+const LEAN_BRIEF_TAIL = [
+  "Save test output to the evidence folder and MOVE (mv, never copy) any checker script you wrote there.",
+  "Deliver complete, polished work: exactly the files the task names, nothing beside them. If a file the task relies on is not where it says, look once, then report that step undone — never search the disk.",
+  "Finish decisively: once ONE verification pass (the build or tests you have) passes, report and stop.",
+];
+
+const LEAN_FINAL_MESSAGE =
+  "Your final message goes to the person who delegated: what you changed (file names), how to check it, what is unfinished, and every assumption you made where the task left a choice open, and why.";
+
 /** The brief of a run with no separate review — the reviewer helper is its review. */
 export const HEADLESS_BRIEF = headlessBrief({ reviewedSeparately: false });
+
+/**
+ * The lean brief of an ordinary run that is not visual and has no pull
+ * request in sight, with today's helper sentence — the counterpart of
+ * HEADLESS_BRIEF, exported for its size test.
+ */
+export const LEAN_HEADLESS_BRIEF = headlessBrief({ reviewedSeparately: false, diet: { ...DEFAULT_DIET, brief: "lean" }, visual: false, pullRequest: false });
 
 /**
  * Added for a run whose branch the box will open a pull request from (the
@@ -6265,8 +6432,12 @@ export function runMediaEnv(media: RunMedia | undefined): string {
  * data/.mcp-token itself through its normal file fallback. Exported for the
  * contract test.
  */
-export function buildRunMcpConfig(run: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null }): string {
-  const media = runMediaEnv(run.media);
+export function buildRunMcpConfig(run: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null }, opts: { visual?: boolean } = {}): string {
+  // A run the diet judged NOT visual (src/lib/coding-diet.ts) holds neither the
+  // browser family nor the media tools: its server is told so, and registers
+  // only what is left (a team run's `team_message`). Omitted, today's server.
+  const visual = opts.visual !== false;
+  const media = visual ? runMediaEnv(run.media) : "";
   return JSON.stringify({
     mcpServers: {
       clawbox: {
@@ -6284,6 +6455,9 @@ export function buildRunMcpConfig(run: { id: string; directory: string; media?: 
           CLAWBOX_RUN_INPUTS_DIR: runInputsDir(run.id),
           CLAWBOX_RUN_DIR: run.directory,
           ...(media ? { CLAWBOX_RUN_MEDIA: media } : {}),
+          // Absent means the browser family registers, as it always has; "0"
+          // is a run that holds none of it (mcp/lib/run-context.ts).
+          ...(visual ? {} : { CLAWBOX_RUN_BROWSER: "0" }),
           // Only for a run of a coding team, and all four or none: the server
           // registers `team_message` from them (mcp/lib/run-context.ts), and
           // the tool speaks as THIS run — the route then checks the claim
@@ -6304,10 +6478,30 @@ export function buildRunMcpConfig(run: { id: string; directory: string; media?: 
 }
 
 /** The argv handed to the wrapper. Exported for the contract test. */
-export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; experience?: string | null; reviewedSeparately?: boolean; draftPullRequests?: boolean; allowRules?: readonly string[]; provider?: CodingProvider; streamInput?: boolean; hookSettings?: string | null; cpuBudget?: number | null; runNotes?: string | null; lessonChannel?: boolean; run?: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null } }): string[] {
+export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?: number; effort?: CodingEffort; readOnly?: boolean; extraBrief?: string | null; experience?: string | null; reviewedSeparately?: boolean; draftPullRequests?: boolean; allowRules?: readonly string[]; provider?: CodingProvider; streamInput?: boolean; hookSettings?: string | null; cpuBudget?: number | null; runNotes?: string | null; lessonChannel?: boolean; run?: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null };
+  /** The token diet frozen on the run (CodingRun.diet); omitted = DEFAULT_DIET, today's argv. */
+  diet?: CodingDiet;
+  /** The run's frozen visual decision (CodingRun.visual); only read under `visualTools: "auto"`. */
+  visual?: boolean;
+  /** The task talks about a pull request — the lean brief's auto-merge sentence. */
+  pullRequestMentioned?: boolean;
+}): string[] {
+  const diet = opts.diet ?? DEFAULT_DIET;
+  // Does this run hold the browser and media tools? Always under the default
+  // diet; under "auto", only a run judged visual. An undecided run errs on
+  // the side of the tools.
+  const visual = diet.visualTools === "always" || opts.visual !== false;
   // A run whose diff a separate review will read is told not to review it
   // twice — see REVIEWER_CLAUSE_SLOT. A team's run is told it never merges.
-  const headless = headlessBrief({ reviewedSeparately: opts.reviewedSeparately === true, team: Boolean(opts.run?.team) });
+  const headless = headlessBrief({
+    reviewedSeparately: opts.reviewedSeparately === true,
+    team: Boolean(opts.run?.team),
+    diet,
+    visual,
+    pullRequest: opts.draftPullRequests === true || opts.pullRequestMentioned === true,
+  });
+  // The media the run actually holds: none for a run without the tools.
+  const media = visual ? opts.run?.media : undefined;
   const brief = [
     // A read-only run has no Bash, no browser and no Write: the brief that
     // describes them would spend its steps on calls that are refused.
@@ -6318,8 +6512,8 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     // tool to a run without one would spend steps on a call that is not there.
     // A read-only run holds no media tool either (runMcpTools is skipped for
     // it below), so it hears nothing about drawing or speaking.
-    ...(opts.run?.media?.images && !opts.readOnly ? [MEDIA_BRIEF_IMAGES] : []),
-    ...(opts.run?.media?.audio && !opts.readOnly ? [MEDIA_BRIEF_AUDIO] : []),
+    ...(media?.images && !opts.readOnly ? [MEDIA_BRIEF_IMAGES] : []),
+    ...(media?.audio && !opts.readOnly ? [MEDIA_BRIEF_AUDIO] : []),
     ...(opts.draftPullRequests && !opts.readOnly ? [PR_DRAFT_BRIEF] : []),
     // The run's share of the CPU (src/lib/coding-run-cpu.ts). Not for a
     // read-only run: it runs no command, so it starts no build to cap.
@@ -6366,7 +6560,10 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     // servers an owner configured for their own interactive claude-ds
     // sessions (~/.claude-ds) never leak into a delegated run.
     args.push("--strict-mcp-config");
-    args.push("--mcp-config", buildRunMcpConfig(opts.run));
+    // A run without the visual tools that is not in a team has nothing left
+    // for our server to register, so it gets no server at all — and the
+    // strict flag alone still keeps the owner's own servers out.
+    if (visual || opts.run.team) args.push("--mcp-config", buildRunMcpConfig(opts.run, { visual }));
     // acceptEdits only covers the working folder; without this, the run's own
     // Write into its evidence folder is denied — the brief's promise broken
     // (measured on run-yuyqta4t: pomodoro-verification.md refused).
@@ -6417,7 +6614,7 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     const allowRules = normalizeAllowRules(opts.allowRules, allowRuleHomeContext());
     // A team run's `team_message` is approved whatever else the run may do —
     // read-only included (see MCP_TEAM_TOOL) — and only for a team run.
-    args.push("--allowedTools", ...(opts.readOnly ? [] : ["Bash(*)"]), ...(opts.effort === ULTRACODE_EFFORT ? [WORKFLOW_TOOL] : []), ...(opts.run && !opts.readOnly ? runMcpTools(opts.run.media) : []), ...(opts.run?.team ? [MCP_TEAM_TOOL] : []), TMP_READ_RULE, inputsReadRule(), ...allowRules);
+    args.push("--allowedTools", ...(opts.readOnly ? [] : ["Bash(*)"]), ...(opts.effort === ULTRACODE_EFFORT ? [WORKFLOW_TOOL] : []), ...(opts.run && !opts.readOnly && visual ? runMcpTools(opts.run.media) : []), ...(opts.run?.team ? [MCP_TEAM_TOOL] : []), TMP_READ_RULE, inputsReadRule(), ...allowRules);
     // The file rules, and the one command list that is enforced: nothing a
     // run runs may kill the box's own server by name (BASH_KILL_DENYLIST).
     //
@@ -7481,22 +7678,52 @@ const FOLDER_LISTING_MAX = 30;
  * and a folder that cannot be read is simply not described.
  */
 export function folderListing(directory: string): string {
+  const names = folderEntries(directory);
+  if (names === null) return "the working folder could not be listed.";
+  if (names.length === 0) return "this folder is empty.";
+  if (names.length > FOLDER_LISTING_MAX) return `this folder has ${names.length} top-level entries.`;
+  return `this folder contains: ${names.join(", ")}`;
+}
+
+/**
+ * The working folder's top-level entries as `folderListing` names them —
+ * `.git` left out, folders with a trailing slash, sorted — or null when the
+ * folder cannot be read. Shared with the token diet's visual decision
+ * (`decideRunVisual`), so the run is judged on the folder it is told about.
+ */
+export function folderEntries(directory: string): string[] | null {
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(directory, { withFileTypes: true }).filter((e) => e.name !== ".git");
   } catch {
-    return "the working folder could not be listed.";
+    return null;
   }
-  if (entries.length === 0) return "this folder is empty.";
-  if (entries.length > FOLDER_LISTING_MAX) return `this folder has ${entries.length} top-level entries.`;
   // Each name printable and short: a name is data the run would see in its
   // first `ls` regardless, but a newline or a control character in one
   // would break the ONE line this is, and a very long one is not a name.
-  const names = entries
+  return entries
     .map((e) => `${e.name.replace(/[\u0000-\u001f\u007f]/g, "").slice(0, 80)}${e.isDirectory() ? "/" : ""}`)
     .filter((n) => n !== "/" && n !== "")
     .sort((a, b) => a.localeCompare(b));
-  return `this folder contains: ${names.join(", ")}`;
+}
+
+/**
+ * The token diet's visual decision for a run (CodingRun.visual): always yes
+ * under `visualTools: "always"`; under "auto", `looksVisual` over the task and
+ * the working folder's top-level entries — plus `src/components` when `src/`
+ * holds one, the one nested folder the rule names.
+ */
+export function decideRunVisual(diet: CodingDiet, task: string, directory: string): boolean {
+  if (diet.visualTools === "always") return true;
+  const entries = folderEntries(directory) ?? [];
+  if (entries.includes("src/")) {
+    try {
+      if (fs.statSync(path.join(directory, "src", "components")).isDirectory()) entries.push("src/components/");
+    } catch {
+      // no src/components — nothing to add
+    }
+  }
+  return looksVisual(task, entries);
 }
 
 /**
@@ -7839,11 +8066,15 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
       // reported its outcome, and crossing the ceiling here must not turn a
       // finished run into a device stop (noteTokens would, and finishRun
       // would then discard the outcome and settle it as stopped, resumable).
-      if (total > run.tokensUsed) {
-        if (state.openSubagents.size > 0) noteTokens(run, state, total - run.tokensUsed);
-        else run.tokensUsed = total;
+      // Not for a resumed session: its modelUsage carries the session's
+      // history too (see LiveRun.resumedSession).
+      if (!state.resumedSession) {
+        if (total > run.tokensUsed) {
+          if (state.openSubagents.size > 0) noteTokens(run, state, total - run.tokensUsed);
+          else run.tokensUsed = total;
+        }
+        raiseTokenBreakdown(run, state.breakdownAtSpawn, usage);
       }
-      raiseTokenBreakdown(run, state.breakdownAtSpawn, usage);
     }
     if (Array.isArray(event.permission_denials)) {
       const parsed = denialsFrom(event.permission_denials);
@@ -11612,7 +11843,11 @@ function spawnRun(
   // The project's run notes, read at EVERY spawn (src/lib/coding-run-notes.ts):
   // a completion attempt or a resume sees a lesson the owner added meanwhile.
   const runNotes = runNotesBlock(readRunNotes(run.directory));
-  const dropped = buildSpawnArgv(tools.setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, experience: run.experienceBrief, reviewedSeparately, draftPullRequests, allowRules: run.allowRules, provider: run.provider, streamInput, hookSettings: hookSettings?.json ?? null, cpuBudget, runNotes, lessonChannel: !run.readOnly, run: { id: run.id, directory: run.directory, media: run.media, team: run.team } }));
+  // The token diet's visual decision, made ONCE — at this record's first
+  // spawn — and kept for every respawn, so the run's tools and its prompt
+  // prefix never move under it (CodingRun.visual).
+  if (run.visual === null) run.visual = decideRunVisual(run.diet, run.task, run.directory);
+  const dropped = buildSpawnArgv(tools.setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, experience: run.experienceBrief, reviewedSeparately, draftPullRequests, allowRules: run.allowRules, provider: run.provider, streamInput, hookSettings: hookSettings?.json ?? null, cpuBudget, runNotes, lessonChannel: !run.readOnly, run: { id: run.id, directory: run.directory, media: run.media, team: run.team }, diet: run.diet, visual: run.visual, pullRequestMentioned: mentionsPullRequest(run.task) }));
   // One evidence path everywhere — env, MCP config and --add-dir must never
   // disagree about where it is. Creation is best-effort: the MCP layer also
   // mkdirs lazily, so a failure here degrades evidence, never the run.
@@ -11723,6 +11958,7 @@ function spawnRun(
     sawModelAnswer: false,
     tokensAtSpawn: run.tokensUsed,
     breakdownAtSpawn: { ...run.tokenBreakdown },
+    resumedSession: Boolean(resumeSessionId),
     sawThinking: false,
     thinkingSeen: 0,
     tools,
@@ -12493,6 +12729,11 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // and on the fresh path — where the run has no memory to lean on — the
     // owner's current setting could be the weaker of the two.
     if (previous && typeof input.reviewLoopOf === "string") settings.effort = previous.effort;
+    // Every continuation — a resume, the review pass, a review round, a Fix CI
+    // — keeps the diet the work was started under (CodingRun.diet): the same
+    // session re-read with a different brief would lose the provider's prefix
+    // cache, and the tools it holds would move under it.
+    if (previous) settings.diet = previous.diet;
     // A TEAM's run gets its role's model and effort (src/lib/coding-role-models.ts):
     // a planner, a lead and a reviewer the provider's cheaper model and at most
     // `xhigh` unless the owner chose otherwise; a worker the owner's own, and a
@@ -12549,6 +12790,11 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // harness reads that line. Never fatal — an asset that could not be copied
     // is reported to the run (and drawn on its page) rather than losing the
     // task it was an input to.
+    // A continuation of a run that HAD the visual tools keeps them, so its
+    // session's tools and prompt prefix stay what they were; one that did not
+    // is decided afresh at its first spawn, from its own task and the folder
+    // as it is then (a review pass over pages the run just wrote gets them).
+    if (previous?.visual === true) run.visual = true;
     await stageInputs(run, input.inputs);
     if (ciFixOf) {
       run.ciFixOf = ciFixOf;
@@ -12874,6 +13120,8 @@ interface RunSettings {
   completionAttempts: number;
   /** The owner's permission rules, frozen on the record for the same reason. */
   allowRules: string[];
+  /** The token diet, frozen on the record (CodingRun.diet) for the same reason. */
+  diet: CodingDiet;
 }
 
 /**
@@ -12890,13 +13138,14 @@ async function ownerOrRoleProvider(role: ModelRole | null): Promise<CodingProvid
 }
 
 async function readRunSettings(): Promise<RunSettings> {
-  const [provider, effort, maxTurns, tokenLimit, generateImages, generateAudio, reviewPass, completionAttempts, allowRules] = await Promise.all([
+  const [provider, effort, maxTurns, tokenLimit, generateImages, generateAudio, reviewPass, completionAttempts, allowRules, diet] = await Promise.all([
     getCodingProvider(), getEffort(), getMaxTurns(), getTokenLimit(), getGenerateImages(), getGenerateAudio(), getReviewPass(),
     getCompletionAttempts(),
     // With the device's own context: these rules are about to be frozen on the
     // record and handed to the CLI, which is exactly where a rule that has gone
     // inert must not travel.
     getAllowRules(allowRuleContext()),
+    getDiet(),
   ]);
   return {
     provider,
@@ -12909,6 +13158,7 @@ async function readRunSettings(): Promise<RunSettings> {
     reviewPass,
     completionAttempts,
     allowRules,
+    diet,
   };
 }
 
@@ -13050,6 +13300,9 @@ function newRunRecord(fields: {
     exitCode: null,
     media: { images: fields.settings.generateImages, audio: fields.settings.generateAudio },
     reviewPass: fields.settings.reviewPass,
+    diet: fields.settings.diet,
+    // Decided at the first spawn, from the folder as it is then — see CodingRun.visual.
+    visual: null,
     mediaGenerated: { images: 0, audio: 0 },
     pgid: null,
     unit: null,
@@ -13617,6 +13870,7 @@ async function startDraftRunOnce(id: string): Promise<CodingRun> {
     run.tokenLimit = settings.tokenLimit;
     run.media = { images: settings.generateImages, audio: settings.generateAudio };
     run.completionAttempts = settings.completionAttempts;
+    run.diet = settings.diet;
     run.status = "running";
     run.queued = null;
     run.startedAt = Date.now();

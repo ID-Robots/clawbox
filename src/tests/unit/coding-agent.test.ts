@@ -1900,6 +1900,30 @@ describe("counting sub-agents", () => {
   });
 });
 
+describe("a resumed session's bill", () => {
+  beforeEach(() => readyDevice());
+
+  it("is its own assistant events, never the CLI's modelUsage — which carries the session's history", async () => {
+    // Measured 2026-10-18: a review pass resumes the run's session and its
+    // CLI reports modelUsage for the whole session, so raising the record to
+    // it billed the run's own tokens a second time.
+    const A = JSON.stringify({ type: "assistant", message: { id: "m1", usage: { input_tokens: 1_000, output_tokens: 0 }, content: [{ type: "text", text: "hi" }] } });
+    const FIRST = JSON.stringify({ type: "result", subtype: "error_max_turns", is_error: true, num_turns: 1, session_id: "sess-abc-123", modelUsage: { m: { inputTokens: 30_000 } } });
+    installFakeWrapper([`echo '${INIT}'`, `echo '${A}'`, `echo '${FIRST}'`, "exit 0"].join("\n"));
+    makeProject("site");
+    const first = await finished((await lib.startRun({ task: "big", projectId: "site", source: "agent" })).id);
+    expect(first.tokensUsed).toBe(30_000);
+
+    const B = JSON.stringify({ type: "assistant", message: { id: "m2", usage: { input_tokens: 2_000, output_tokens: 0 }, content: [{ type: "text", text: "more" }] } });
+    // The resumed process's modelUsage: the first spawn's 30,000 + this one's 2,000.
+    const SECOND = JSON.stringify({ type: "result", subtype: "success", num_turns: 1, result: "done", modelUsage: { m: { inputTokens: 32_000 } } });
+    installFakeWrapper([`echo '${INIT}'`, `echo '${B}'`, `echo '${SECOND}'`, "exit 0"].join("\n"));
+    const resumed = await finished((await lib.startRun({ task: "finish", resumeRunId: first.id, source: "agent" })).id);
+    // A resume is a record of its own: its bill is its own 2,000, not 32,000.
+    expect(resumed.tokensUsed).toBe(2_000);
+  });
+});
+
 describe("clearing the history", () => {
   beforeEach(() => readyDevice());
 

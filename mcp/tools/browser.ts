@@ -23,7 +23,7 @@ import path from "path";
 import { pathToFileURL } from "url";
 import { isInside } from "../../src/lib/file-guard";
 import { recordShotNote } from "../../src/lib/coding-shot-notes";
-import { runContext } from "../lib/run-context";
+import { runBrowserAllowed, runContext } from "../lib/run-context";
 import { apiPost } from "../lib/api";
 import { ToolError, type ErrorRule } from "../lib/errors";
 import { text, type Registrar, type ToolResult } from "../lib/register";
@@ -427,6 +427,9 @@ export function registerBrowserTools(reg: Registrar): void {
   // and evidence folders): a tool that exists but answers "no run active" on
   // the assistant's own server would trip Hermes' circuit breaker for nothing.
   const run = runContext();
+  // A run its token diet judged not visual holds none of this family: a tool
+  // described on every turn and never used is the cost the diet removes.
+  if (run && !runBrowserAllowed()) return;
   if (run) {
     // The route's realpath check against the ACTIVE run is the one containment
     // implementation; this rule only turns its refusal into a clear next step.

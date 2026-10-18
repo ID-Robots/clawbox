@@ -1,0 +1,9 @@
+{
+  "name": "orderkit",
+  "version": "1.4.2",
+  "description": "Small helpers for order lists, money and dashboards",
+  "private": true,
+  "main": "src/index.js",
+  "scripts": { "test": "node --test" },
+  "license": "MIT"
+}
