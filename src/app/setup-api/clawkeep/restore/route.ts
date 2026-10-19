@@ -6,7 +6,7 @@ import {
   RestoreNeedsPassphraseError,
   runRestore,
 } from "@/lib/clawkeep";
-import { getTunnelServiceState, reenableTunnelAfterRestore } from "@/lib/cloudflared";
+import { reenableTunnelAfterRestore } from "@/lib/cloudflared";
 import { getEdition } from "@/lib/harness";
 import { readNamedTunnelCredential } from "@/lib/named-tunnel";
 import { HERMES_DASHBOARD_UNIT } from "@/lib/hermes-dashboard-auth";
@@ -211,12 +211,6 @@ export async function POST(request: NextRequest) {
       ? passphraseRaw
       : undefined;
 
-    // Remote access as it was BEFORE the restore: the restore may swap the
-    // tunnel's data, and the unit's enablement is not part of any backup.
-    const tunnelWasActive = await getTunnelServiceState()
-      .then((st) => st === "active" || st === "activating")
-      .catch(() => false);
-
     const result = await runRestore(name, { passphrase });
 
     // The restore itself has succeeded by here. A process that could not be
@@ -225,12 +219,12 @@ export async function POST(request: NextRequest) {
     // field that says which KIND of unfinished this is.
     const restart = await restartStateHolder(getEdition());
 
-    // TASK-1754: a restored box must come back reachable. Re-enable the
-    // tunnel unit and start it when remote access is configured.
+    // TASK-1754: a restored box must ALWAYS come back reachable, whether or
+    // not the tunnel ran before the backup. Enable the unit and make sure it
+    // runs (a quick tunnel needs no credential; a restored named one is used).
     const tunnel = await reenableTunnelAfterRestore({
-      wasActive: tunnelWasActive,
       hasNamedCredential: (await readNamedTunnelCredential().catch(() => null)) !== null,
-    }).catch((e) => ({ enabled: false, started: false, warnings: [String(e)] }));
+    }).catch((e) => ({ enabled: false, started: false, running: false, warnings: [String(e)] }));
 
     return NextResponse.json(
       {
@@ -254,6 +248,7 @@ export async function POST(request: NextRequest) {
         restartPending: restart.pending,
         tunnelEnabled: tunnel.enabled,
         tunnelStarted: tunnel.started,
+        tunnelRunning: tunnel.running,
         tunnelWarnings: tunnel.warnings,
       },
       { headers: { "Cache-Control": "no-store" } },

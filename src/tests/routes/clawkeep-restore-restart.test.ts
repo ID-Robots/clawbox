@@ -41,16 +41,16 @@ const h = vi.hoisted(() => ({
   restoreExtra: {} as Record<string, unknown>,
   tunnelState: "inactive" as string,
   namedCred: false,
-  tunnelCalls: [] as { wasActive: boolean; hasNamedCredential: boolean }[],
+  tunnelCalls: [] as { hasNamedCredential: boolean }[],
 }));
 
 // The tunnel re-arm (TASK-1754) is unit-tested in cloudflared-restore.test.ts;
 // here only the route's wiring is asserted.
 vi.mock("@/lib/cloudflared", () => ({
   getTunnelServiceState: async () => h.tunnelState,
-  reenableTunnelAfterRestore: async (o: { wasActive: boolean; hasNamedCredential: boolean }) => {
+  reenableTunnelAfterRestore: async (o: { hasNamedCredential: boolean }) => {
     h.tunnelCalls.push(o);
-    return { enabled: true, started: o.wasActive || o.hasNamedCredential, warnings: [] };
+    return { enabled: true, started: h.tunnelState !== "active", running: true, warnings: [] };
   },
 }));
 vi.mock("@/lib/named-tunnel", () => ({
@@ -154,24 +154,26 @@ beforeEach(() => {
 });
 
 describe("POST /setup-api/clawkeep/restore — remote access (TASK-1754)", () => {
-  it("re-enables the tunnel after every restore", async () => {
+  it("re-arms and starts the tunnel after every restore, even with no credential", async () => {
     const body = await (await post()).json();
-    expect(h.tunnelCalls).toEqual([{ wasActive: false, hasNamedCredential: false }]);
+    expect(h.tunnelCalls).toEqual([{ hasNamedCredential: false }]);
     expect(body.tunnelEnabled).toBe(true);
-    expect(body.tunnelStarted).toBe(false);
+    expect(body.tunnelStarted).toBe(true);
+    expect(body.tunnelRunning).toBe(true);
   });
 
   it("asks for a start when a named tunnel is configured", async () => {
     h.namedCred = true;
     const body = await (await post()).json();
-    expect(h.tunnelCalls).toEqual([{ wasActive: false, hasNamedCredential: true }]);
+    expect(h.tunnelCalls).toEqual([{ hasNamedCredential: true }]);
     expect(body.tunnelStarted).toBe(true);
   });
 
-  it("passes the pre-restore running state through", async () => {
+  it("re-arms the tunnel even when it was already running before the restore", async () => {
     h.tunnelState = "active";
-    await post();
-    expect(h.tunnelCalls[0].wasActive).toBe(true);
+    const body = await (await post()).json();
+    expect(h.tunnelCalls).toEqual([{ hasNamedCredential: false }]);
+    expect(body.tunnelRunning).toBe(true);
   });
 
   it("does not touch the tunnel when the owner gate refuses", async () => {

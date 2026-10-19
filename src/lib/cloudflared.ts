@@ -221,29 +221,54 @@ export async function getTunnelServiceState(): Promise<TunnelUnitState> {
 export interface TunnelRestoreResult {
   /** `systemctl enable` succeeded, so the tunnel comes back on the next boot. */
   enabled: boolean;
-  /** The unit was (re)started because remote access was configured. */
+  /** The unit was (re)started by this call. */
   started: boolean;
+  /** The unit is active (or still activating) when this call returns. */
+  running: boolean;
   /** Human-readable problems; empty when everything that was asked worked. */
   warnings: string[];
+}
+
+export const TUNNEL_MODE_FILE = path.join(CLOUDFLARED_DIR, "tunnel.mode");
+
+async function readTunnelMode(): Promise<string | null> {
+  try {
+    return (await fs.readFile(TUNNEL_MODE_FILE, "utf-8")).trim() || null;
+  } catch {
+    return null;
+  }
 }
 
 /**
  * Re-arm clawbox-tunnel.service after a ClawKeep restore.
  *
- * A restore can land on a freshly flashed box (or one whose unit was disabled
- * on the way), where the restored data says remote access is set up but the
- * unit is neither enabled nor running — the box silently stays unreachable.
- * So: always `enable`; and when remote access is configured (a named-tunnel
- * credential is on disk, or the unit was running before the restore) and the
- * unit is not active now, `restart` it (sudoers grants `restart`, never
- * `start`). Never throws: the restore already succeeded; problems are reported.
- * Idempotent — running it twice leaves the same state.
+ * A restored box must ALWAYS come back reachable, whatever the unit's state
+ * was before the backup or the restore: the enablement is not part of any
+ * backup, and a restore often lands on a freshly flashed box. A Quick Tunnel
+ * needs no credential at all, so whenever cloudflared is installed the tunnel
+ * can run; a restored named-tunnel credential is used when present.
+ *
+ * So: always `enable`; then `restart` (sudoers grants `restart`, never
+ * `start`) when the unit is not running, or when it runs a quick tunnel while
+ * a named credential is now on disk (the restore brought the box's own
+ * hostname back). A tunnel already serving the right mode is not bounced.
+ * Afterwards wait briefly for the unit to settle and report whether it runs.
+ * Never throws: the restore already succeeded; problems are reported.
  */
 export async function reenableTunnelAfterRestore(opts: {
-  wasActive: boolean;
   hasNamedCredential: boolean;
+  /** How long to wait for the unit to become active after a restart. */
+  settleMs?: number;
+  pollMs?: number;
 }): Promise<TunnelRestoreResult> {
   const warnings: string[] = [];
+  const settleMs = opts.settleMs ?? 15_000;
+  const pollMs = opts.pollMs ?? 500;
+  if (!(await isInstalled())) {
+    warnings.push(`cloudflared is not installed at ${CLOUDFLARED_BIN}; remote access cannot start`);
+    for (const w of warnings) console.warn(`[cloudflared] post-restore ${w}`);
+    return { enabled: false, started: false, running: false, warnings };
+  }
   let enabled = false;
   try {
     await execFileAsync("sudo", ["-n", "/usr/bin/systemctl", "enable", TUNNEL_SERVICE]);
@@ -251,18 +276,28 @@ export async function reenableTunnelAfterRestore(opts: {
   } catch (err) {
     warnings.push(`${TUNNEL_SERVICE}: enable failed: ${err instanceof Error ? err.message : String(err)}`);
   }
+  let state = await getTunnelServiceState();
+  const isUp = (st: TunnelUnitState) => st === "active" || st === "activating";
+  const wrongMode = isUp(state) && opts.hasNamedCredential && (await readTunnelMode()) === "quick";
   let started = false;
-  if (opts.wasActive || opts.hasNamedCredential) {
-    const state = await getTunnelServiceState();
-    if (state !== "active" && state !== "activating") {
-      try {
-        await execFileAsync("sudo", ["-n", "/usr/bin/systemctl", "restart", TUNNEL_SERVICE]);
-        started = true;
-      } catch (err) {
-        warnings.push(`${TUNNEL_SERVICE}: start failed: ${err instanceof Error ? err.message : String(err)}`);
+  if (!isUp(state) || wrongMode) {
+    try {
+      await execFileAsync("sudo", ["-n", "/usr/bin/systemctl", "restart", TUNNEL_SERVICE]);
+      started = true;
+    } catch (err) {
+      warnings.push(`${TUNNEL_SERVICE}: start failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (started) {
+      const deadline = Date.now() + settleMs;
+      state = await getTunnelServiceState();
+      while (state !== "active" && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, pollMs));
+        state = await getTunnelServiceState();
       }
     }
   }
+  const running = isUp(state);
+  if (started && !running) warnings.push(`${TUNNEL_SERVICE}: not running after restart (state: ${state})`);
   for (const w of warnings) console.warn(`[cloudflared] post-restore ${w}`);
-  return { enabled, started, warnings };
+  return { enabled, started, running, warnings };
 }
