@@ -68,9 +68,7 @@ export async function startHarnessTest(
     const res = await fetch("/setup-api/coding-agent/run", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      // "none": a smoke test is one short run whatever the owner's default
-      // time budget is — a default over 30 minutes would start a team.
-      body: JSON.stringify({ directory: HARNESS_TEST_PROJECT, task: HARNESS_TEST_TASK, budget: "none" }),
+      body: JSON.stringify({ directory: HARNESS_TEST_PROJECT, task: HARNESS_TEST_TASK }),
     });
     if (!res.ok) {
       const out = (await res.json().catch(() => null)) as { error?: string } | null;

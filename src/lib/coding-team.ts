@@ -83,7 +83,6 @@ import {
   teamRoleModelMap,
   teamSpawnSlot,
   waitForRun,
-  wrapUpRun,
   type CodingRun,
   type CodingRunSource,
   type RunTeam,
@@ -117,40 +116,6 @@ import { decideMerge, markPullRequestReady, mergePullRequest, openPullRequest, r
 import { pushBranch, readFailedCheckLogs, readReviewSnapshot } from "@/lib/coding-review";
 import { isLive, isSettled } from "@/lib/coding-agent-status";
 import {
-  budgetStopReason,
-  describeBudget,
-  elapsedMs,
-  formatDuration,
-  formatLocalDeadline,
-  marginCutoffMs,
-  MINUTE_MS,
-  remainingMs,
-  safeTimeZone,
-  summarizeTimeRecords,
-  timeRecord,
-  type TimeBudget,
-  type TimeRecord,
-  type TimeRecordSummary,
-  type TimeStopReason,
-} from "@/lib/coding-time-budget";
-import {
-  calibrateEstimate,
-  calibrationApplies,
-  calibrationNote,
-  checkExtraItem,
-  estimateAccuracyLine,
-  EXTRA_ITEM_ESTIMATE_MS,
-  extraWorkPrompt,
-  extraWorkScope,
-  isBehindEstimate,
-  lastExtraClaim,
-  MAX_EXTRA_ITEMS,
-  nextItemAllowed,
-  type EstimateCalibration,
-} from "@/lib/coding-time-plan";
-import { appendTimeRecord, currentEstimateCalibration, loadTimeRecords } from "@/lib/coding-time-record";
-import { readOsTimeZone } from "@/lib/timezone";
-import {
   allComplete,
   blockedBy,
   BoardAccessError,
@@ -167,14 +132,10 @@ import {
   ownHarnessStateDenial,
   readOnlyDenial,
   readyTasks,
-  recordTeamExtra,
-  recordTimeSkips,
   refModel,
   repoMapText,
-  retireForTime,
   saveBoard,
   setTeamStatus,
-  setTimeStop,
   startedDependents,
   teamAdvice,
   teamAgents,
@@ -198,7 +159,7 @@ import {
  */
 export type TeamView = TeamBoard & { agents: TeamAgents; advice: TeamAdvice | null; queuePosition?: number };
 import { TeamBus, type Delivered, type TeamMessage } from "@/lib/coding-team-bus";
-import { clippedNote, fitLine, fitPlan, leadRoom, leadShouldRun, leadTask, parsePlan, parseReplan, plannerBrief, providerWords, REPLAN_BRIEF, replanContext, replanTask, withTeamModels, type TimePlan } from "@/lib/coding-team-planner";
+import { clippedNote, leadRoom, leadShouldRun, leadTask, parsePlan, parseReplan, PLANNER_BRIEF, providerWords, REPLAN_BRIEF, replanContext, replanTask, withTeamModels } from "@/lib/coding-team-planner";
 
 /** A team stops after this many alerts: something is going wrong repeatedly. */
 export const MAX_ALERTS = 3;
@@ -214,8 +175,6 @@ const HELD_POLL_MS = 2_000;
 const REVIEWER_SLOT_POLL_MS = 3_000;
 /** A planner, a worker, a reviewer or a lead that has not settled by then is stopped. */
 export const RUN_BUDGET_MS = 60 * 60_000;
-/** A budgeted team's run is stopped this long past the deadline at the latest, if the deadline's own stop has not ended it. */
-const RUN_PAST_DEADLINE_MS = 5 * 60_000;
 /** A teammate at work is named by its run and its task's first line, cut here. */
 const TEAMMATE_QUOTE_CHARS = 160;
 
@@ -236,12 +195,6 @@ export interface StartTeamInput {
   projectId?: string | null;
   directory?: string | null;
   source: CodingRunSource;
-  /**
-   * The time budget the route resolved (src/lib/coding-time-budget.ts):
-   * absolute, so a team that waits in the queue spends its wait against it.
-   * Kept on the board; absent, the team works as every team did before.
-   */
-  timeBudget?: TimeBudget | null;
 }
 
 interface LiveTeam {
@@ -284,39 +237,7 @@ interface LiveTeam {
    * shared by this many (`StartRunInput.cpuShare`).
    */
   workerSlots: number;
-  /** A budgeted team's clock and what was done against it; null for a team without a budget. */
-  time: TeamTime | null;
   done: Promise<void>;
-}
-
-/** A budgeted team's clock (see "Time budget: a team works to its deadline"). */
-interface TeamTime {
-  budget: TimeBudget;
-  /** The box's zone, as read when the team began. */
-  tz: string;
-  timer: NodeJS.Timeout | null;
-  /** Why the budget ran out — the deadline, the spend ceiling, a usage limit the deadline found it waiting on — once it did. */
-  up: TimeStopReason | null;
-  /** The runs at work were told the safety margin began. */
-  marginSent: boolean;
-  lastCheckpointAt: number;
-  /** When each task's current worker started, ms: what its time taken is measured from. */
-  started: Map<string, number>;
-  /** Tasks whose current worker already set off the re-plan trigger: once per attempt, while it runs or when it finishes. */
-  replanned: Set<string>;
-  /** A worker task was dispatched: the team's first is never refused for its estimate alone. */
-  dispatched: boolean;
-  /** Tasks were left out because the safety margin began before they could start. */
-  cutoffHit: boolean;
-  /** The extra phase ran (once per team), and why it ended. */
-  extrasRan: boolean;
-  extraStop: TimeStopReason | null;
-  /** A plan of one task ran as one run: how that run's own budget ended. */
-  singleRunStop: TimeStopReason | null;
-  /** Time records, one after the other in the order written. */
-  writes: Promise<TimeRecordSummary | null>;
-  /** The record's stop is written. */
-  closed: boolean;
 }
 
 const live = new Map<string, LiveTeam>();
@@ -381,7 +302,7 @@ export async function startTeam(input: StartTeamInput): Promise<TeamView> {
 
   // The owner's team is created in the owner's name; the assistant's by the
   // system on its behalf — the audit says which, and the routes gate on it.
-  const board = createBoard({ goal, projectId, directory, source: input.source, dynamic, timeBudget: input.timeBudget ?? null }, input.source === "owner" ? OWNER : SYSTEM);
+  const board = createBoard({ goal, projectId, directory, source: input.source, dynamic }, input.source === "owner" ? OWNER : SYSTEM);
   if (busy || waiting.length) {
     setTeamStatus(board, SYSTEM, "queued", busy ? `Waiting for team ${busy} to finish` : `Waiting behind ${waiting.length} queued team(s)`);
     saveBoard(board);
@@ -446,7 +367,7 @@ async function assertTeamRolesReady(): Promise<void> {
 /** The board's orchestrator, in this process, from its planner to its verdict; the next queued team once it settles. */
 function launchTeam(board: TeamBoard): void {
   const bus = new TeamBus(board);
-  const team: LiveTeam = { board, bus, stopRequested: false, currentRunIds: new Set(), pendingMessages: new Map(), uncountedAlerts: 0, leadTurnsAt: [0, 0], held: new Map(), workerSlots: 1, time: null, done: Promise.resolve() };
+  const team: LiveTeam = { board, bus, stopRequested: false, currentRunIds: new Set(), pendingMessages: new Map(), uncountedAlerts: 0, leadTurnsAt: [0, 0], held: new Map(), workerSlots: 1, done: Promise.resolve() };
   // A task reopened — rejected, sent back by the suite, or itself held — sets
   // back whatever started on it, wherever the reopening came from.
   bus.subscribe((delivered) => holdDependents(team, delivered));
@@ -497,21 +418,6 @@ export async function startNextQueuedTeam(): Promise<TeamView | null> {
   if (activeTeamId()) return null;
   const next = queuedBoards()[0];
   if (!next) return null;
-  // Its deadline passed while it waited: it does not start, and says why —
-  // the next one in the queue gets its turn instead.
-  if (next.timeBudget && remainingMs(next.timeBudget, Date.now()) === 0) {
-    const budget = next.timeBudget;
-    const tz = await readOsTimeZone().catch(() => "UTC");
-    if (activeTeamId() || next.status !== "queued") return null;
-    setTimeStop(next, SYSTEM, "time");
-    setTeamStatus(next, SYSTEM, "failed", `Its time budget ended while it waited in the queue (the deadline was ${formatLocalDeadline(budget.deadline, safeTimeZone(tz))}). Start it again with a new budget.`);
-    saveBoard(next);
-    const now = Date.now();
-    for (const r of [timeRecord("budget", `Budget: ${describeBudget(budget, now, tz)}`, now), timeRecord("stop", "the deadline came while it waited in the queue", now, { reason: "time" })]) {
-      await appendTimeRecord(next.id, budget, r);
-    }
-    return startNextQueuedTeam();
-  }
   next.dynamic = dynamic;
   setTeamStatus(next, SYSTEM, "planning", "Its turn in the queue came");
   saveBoard(next);
@@ -826,683 +732,13 @@ export function _resetCodingTeamStateForTests(): void {
 
 // ─── The loop ────────────────────────────────────────────────────────────────
 
-/**
- * A budgeted team's plan against its time, before any work starts
- * (coding-team-planner.ts `fitPlan`): do the must-have estimates fit before
- * the safety-margin cutoff? The answer goes on the log in one line — plainly
- * when they do not — beside anything the planner said about the time being
- * too short. What will be skipped — the planner's own list, and the tasks cut
- * from the bottom of the plan to fit — is marked on the board (`skipped`).
- * What is cut does not run: it is retired (retireForTime). The plan, each
- * task's estimate and every skip go into the team's time record (owner: the
- * team's id), after the budget's line its clock wrote. A record the disk
- * refuses is left out (appendTimeRecord never throws): the work goes on.
- * When the estimates were calibrated (already scaled on the board), the log
- * says so first, and the plan's record line carries the factor.
- */
-async function planAgainstBudget(team: LiveTeam, budget: TimeBudget, timePlan: TimePlan | null, tz: string, calibration: EstimateCalibration | null = null): Promise<void> {
-  const { board, bus } = team;
-  const now = Date.now();
-  const calibrated = calibrationNote(calibration);
-  if (calibrated) bus.send(SYSTEM, { type: "note", text: calibrated });
-  const fit = fitPlan(board.tasks.map((t) => ({ id: t.task_id, estimateMs: t.estimateMs, optional: t.optional === true, dependsOn: t.depends_on })), budget, now);
-  const line = fitLine(fit, budget, tz);
-  bus.send(SYSTEM, { type: "note", text: line });
-  const tooShort = timePlan?.tooShort ? `The planner says the time is too short for the goal: ${timePlan.tooShort}` : null;
-  if (tooShort) bus.send(SYSTEM, { type: "note", text: tooShort });
-  const described = (id: string) => firstLine(board.tasks.find((t) => t.task_id === id)?.task_description ?? "", 160);
-  const skips = [
-    ...(timePlan?.skipped ?? []).map((text) => ({ text, by: "planner" as const })),
-    ...fit.cut.map((id) => ({
-      taskId: id,
-      text: `${fit.dragged.includes(id) ? "waits on a task cut to fit the time" : "does not fit before the cutoff"}: ${described(id)}`,
-      by: "fit" as const,
-    })),
-  ];
-  if (skips.length) {
-    recordTimeSkips(board, SYSTEM, skips);
-    // What was cut does not run: retired, out of the way of nothing (what
-    // waits on a cut task was cut with it), and said once above.
-    for (const s of skips) if ("taskId" in s) retireForTime(board, SYSTEM, s.taskId, s.text);
-    saveBoard(board);
-  }
 
-  const records: TimeRecord[] = [];
-  const optional = board.tasks.filter((t) => t.optional).length;
-  const estimated = board.tasks.reduce((sum, t) => sum + (t.estimateMs ?? 0), 0);
-  // The planner's own estimate of the whole plan, else its tasks' summed.
-  const planMs = timePlan?.estimateMs ?? (estimated > 0 ? estimated : null);
-  const planned = `${board.tasks.length} ${board.tasks.length === 1 ? "task" : "tasks"} planned${optional ? `, ${optional} optional` : ""}`;
-  records.push(timeRecord("plan", `${planned}; ${line.replace(/^Time plan: /, "")}`, now, {
-    ...(planMs ? { estimateMs: planMs } : {}),
-    ...(calibrated && calibration ? { calibration: calibration.factor } : {}),
-  }));
-  if (calibrated) records.push(timeRecord("note", calibrated, now));
-  for (const t of board.tasks) {
-    const what = `${t.optional ? "optional — " : ""}${t.estimateMs ? "" : "no estimate — "}${firstLine(t.task_description, 200)}`;
-    records.push(timeRecord("estimate", what, now, { taskId: t.task_id, ...(t.estimateMs ? { estimateMs: t.estimateMs } : {}) }));
-  }
-  for (const s of skips) records.push(timeRecord("skip", s.text, now, "taskId" in s ? { taskId: s.taskId } : {}));
-  if (tooShort) records.push(timeRecord("note", tooShort, now));
-  // One after the other, in this order: the log reads as the plan was made.
-  await writeTeamTime(team, records);
-}
-
-// ─── Time budget: a team works to its deadline ───────────────────────────────
-//
-// A budgeted team (board.timeBudget) is held to its deadline by THIS
-// orchestrator — its runs have no budget of their own (coding-agent.ts gives a
-// team's run none), so the team's clock is the only one:
-//  - a timer (TeamTime) writes a checkpoint every TEAM_CHECKPOINT_MS, tells the
-//    runs at work to commit and finish their step when the safety margin
-//    begins, and at the deadline — or once the team's summed spend reaches
-//    the budget's ceiling — ends them cleanly (wrapUpRun) and leaves every
-//    task not yet started out (retireForTime), the reason on the board
-//    (setTimeStop) and in the time record;
-//  - no task starts that cannot finish before the cutoff (nextItemAllowed with
-//    its estimate; the team's first task excepted, as fitPlan keeps it), and
-//    none at all after it;
-//  - each task's start and finish go into the record with the time it took,
-//    and a task more than 25% over its estimate re-plans what is left: cut
-//    from the bottom of the priority list until it fits, each cut said why;
-//  - work done early, the spare time goes to extra items from the allowlist
-//    (teamExtraWork), one worker and one merge each, until nothing valuable
-//    is left, the cutoff, a ceiling or MAX_EXTRA_ITEMS;
-//  - the record closes with why the work stopped and how the estimates held.
-// A team without a budget has no clock and works exactly as before.
-
-/** How often a budgeted team's clock looks at the time and the spend. */
-const TEAM_CLOCK_TICK_MS = 5_000;
-/** A checkpoint goes into a working team's time record this often. */
-export const TEAM_CHECKPOINT_MS = 10 * MINUTE_MS;
-const clockTuning = { tickMs: TEAM_CLOCK_TICK_MS, checkpointMs: TEAM_CHECKPOINT_MS };
-
-/** Tests only: a faster clock (null puts a value back). */
-export function _setTeamClockForTests(opts: { tickMs?: number | null; checkpointMs?: number | null }): void {
-  if (opts.tickMs !== undefined) clockTuning.tickMs = opts.tickMs ?? TEAM_CLOCK_TICK_MS;
-  if (opts.checkpointMs !== undefined) clockTuning.checkpointMs = opts.checkpointMs ?? TEAM_CHECKPOINT_MS;
-}
-
-/** Why a team's work stopped, in a few English words. */
-const TEAM_STOP_WORDS: Record<TimeStopReason, string> = {
-  done: "the work was done",
-  time: "the deadline came",
-  cost: "the budget's spend ceiling was reached",
-  token_cap: "the owner's token limit stopped a run",
-  quota: "the provider's usage limit held a run at the deadline",
-  nothing_left: "nothing valuable was left to do",
-  stopped: "the owner stopped the team",
-  failed: "the team failed",
-};
-
-/** Add lines to the team's time record, in order — after every line asked for before them. Never rejects. */
-function writeTeamTime(team: LiveTeam, records: TimeRecord[]): Promise<TimeRecordSummary | null> {
-  const time = team.time;
-  const budget = time?.budget ?? team.board.timeBudget;
-  if (!budget || !records.length) return time?.writes ?? Promise.resolve(null);
-  const write = async () => {
-    let last: TimeRecordSummary | null = null;
-    for (const r of records) last = (await appendTimeRecord(team.board.id, budget, r)) ?? last;
-    return last;
-  };
-  if (!time) return write();
-  time.writes = time.writes.then(write, write);
-  return time.writes;
-}
-
-/** What the team has spent so far, in tokens: its runs at work as they stand, the settled ones as the board noted them. */
-function teamTokens(team: LiveTeam): number {
-  let sum = 0;
-  for (const ref of team.board.runs) {
-    if (team.currentRunIds.has(ref.id)) {
-      const run = getRun(ref.id);
-      if (run && typeof run.tokensUsed === "number" && Number.isFinite(run.tokensUsed)) {
-        sum += run.tokensUsed;
-        continue;
-      }
-    }
-    sum += ref.tokens ?? 0;
-  }
-  return sum;
-}
-
-/** The box-local time of `at`, with the zone — how the team's notes say a time. */
-function localTime(team: LiveTeam, at: number | string): string {
-  const zone = safeTimeZone(team.time?.tz);
-  return `${formatLocalDeadline(at, zone)} (${zone})`;
-}
-
-/** Start a budgeted team's clock. */
-function armTeamClock(team: LiveTeam): void {
-  const time = team.time;
-  if (!time || time.timer || time.closed) return;
-  const timer = setInterval(() => teamClockTick(team), clockTuning.tickMs);
-  timer.unref?.();
-  time.timer = timer;
-}
-
-function stopTeamClock(team: LiveTeam): void {
-  if (team.time?.timer) clearInterval(team.time.timer);
-  if (team.time) team.time.timer = null;
-}
-
-/** What the clock owes now: the deadline's (or the ceiling's) stop, the margin's message, a checkpoint. */
-function teamClockTick(team: LiveTeam): void {
-  const time = team.time;
-  const { board, bus } = team;
-  if (!time || time.closed || team.stopRequested || isSettledStatus(board.status)) {
-    stopTeamClock(team);
-    return;
-  }
-  const now = Date.now();
-  if (!time.up) {
-    const reason = budgetStopReason(time.budget, now, teamTokens(team));
-    if (reason) {
-      timeIsUp(team, reason, now);
-      return;
-    }
-    if (!time.marginSent && now >= marginCutoffMs(time.budget)) {
-      time.marginSent = true;
-      const left = formatDuration(remainingMs(time.budget, now));
-      const text = `Time budget: the team's safety margin has begun — ${left} left before the deadline at ${localTime(team, time.budget.deadline)}. Start nothing new. Commit your work now, finish only the step you are on, and write your report.`;
-      let told = 0;
-      for (const id of team.currentRunIds) {
-        try {
-          queueRunMessage(id, text);
-          told++;
-        } catch {
-          // Settled meanwhile, or its queue is full: the deadline's stop still reaches it.
-        }
-      }
-      bus.send(SYSTEM, { type: "note", text: `Safety margin: ${left} left before the deadline — no new task starts; ${told} run${told === 1 ? "" : "s"} at work told to commit and finish the step under way.` });
-      saveBoard(board);
-      void writeTeamTime(team, [timeRecord("note", `Safety margin: began with ${left} left; ${told} run${told === 1 ? "" : "s"} at work told to commit and finish`, now, { tokensUsed: teamTokens(team) })]);
-    }
-  }
-  // The re-plan trigger while a task runs, not only when it ends: a worker
-  // already more than 25% over its estimate re-plans what is left now —
-  // before the cutoff only: past it nothing new starts, so there is nothing
-  // left to re-plan.
-  if (!time.up && now < marginCutoffMs(time.budget)) {
-    for (const task of board.tasks) {
-      if (task.status !== "in_progress" || !task.estimateMs || time.replanned.has(task.task_id)) continue;
-      const began = time.started.get(task.task_id);
-      if (began === undefined || !isBehindEstimate(task.estimateMs, now - began)) continue;
-      replanIfBehind(team, task, now - began, true);
-    }
-  }
-  if (now - time.lastCheckpointAt >= clockTuning.checkpointMs) {
-    time.lastCheckpointAt = now;
-    void writeTeamTime(team, [
-      timeRecord("note", `Checkpoint: ${formatDuration(elapsedMs(time.budget, now))} used, ${formatDuration(remainingMs(time.budget, now))} left`, now, { tokensUsed: teamTokens(team) }),
-    ]);
-  }
-}
-
-/**
- * The budget has run out: the deadline came, or the team's spend reached the
- * budget's ceiling. Said once — on the board (setTimeStop), the log and the
- * record — every run at work is ended cleanly after its step (wrapUpRun: its
- * work committed on its branch, never cut off mid-write), and every task not
- * started yet is left out. A run the deadline finds waiting on a provider's
- * usage limit names that as the reason: it stopped the work first.
- */
-function timeIsUp(team: LiveTeam, reason: "time" | "cost", now: number): void {
-  const time = team.time;
-  if (!time || time.up) return;
-  const { board, bus } = team;
-  const waiting = reason === "time" && [...team.currentRunIds].some((id) => {
-    const run = getRun(id);
-    return run?.status === "paused" && run.pauseReason?.kind === "allowance";
-  });
-  const up: TimeStopReason = waiting ? "quota" : reason;
-  time.up = up;
-  setTimeStop(board, SYSTEM, up);
-  const working = [...team.currentRunIds];
-  const what = reason === "time" ? `the deadline (${localTime(team, time.budget.deadline)}) is here` : `the team has spent its budget's ceiling of ${time.budget.tokenCap} tokens`;
-  bus.send(SYSTEM, { type: "note", text: `Time budget: ${what}${waiting ? " while a run waited on the provider's usage limit" : ""}. ${working.length ? `Ending ${working.join(", ")} after the step under way; ` : ""}no new task starts.` });
-  retirePendingForTime(team, reason === "time" ? "the deadline came before it could start" : "the budget's spend ceiling was reached before it could start");
-  saveBoard(board);
-  for (const id of working) {
-    void wrapUpRun(id, up).catch((err: unknown) => {
-      console.error(`[coding-team] ${board.id}: could not end ${id} at the budget's end:`, err instanceof Error ? err.message : err);
-    });
-  }
-  void writeTeamTime(team, [timeRecord("note", `Budget spent (${up}): ${working.length} run${working.length === 1 ? "" : "s"} at work ended after their step; nothing new starts`, now, { tokensUsed: teamTokens(team) })]);
-}
-
-/** Leave tasks out to fit the time — each retired, recorded as skipped with why, and in the time record. */
-function cutForTime(team: LiveTeam, cuts: ReadonlyArray<{ id: string; why: string }>): string[] {
-  const { board } = team;
-  const now = Date.now();
-  const done: string[] = [];
-  const records: TimeRecord[] = [];
-  for (const c of cuts) {
-    const task = retireForTime(board, SYSTEM, c.id, c.why);
-    if (!task) continue;
-    done.push(c.id);
-    records.push(timeRecord("skip", c.why, now, { taskId: c.id }));
-  }
-  if (done.length) {
-    saveBoard(board);
-    void writeTeamTime(team, records);
-  }
-  return done;
-}
-
-/** Every task not started yet, left out — the margin, the deadline or the ceiling came first. */
-function retirePendingForTime(team: LiveTeam, why: string): string[] {
-  const pending = team.board.tasks.filter((t) => t.status === "pending");
-  return cutForTime(team, pending.map((t) => ({ id: t.task_id, why: `${why}: ${firstLine(t.task_description, 160)}` })));
-}
-
-/** `taskId` and every pending task that waits on it, however far down — they could never start without it. */
-function withPendingDependents(board: TeamBoard, taskId: string): string[] {
-  const out = [taskId];
-  for (let grew = true; grew;) {
-    grew = false;
-    for (const t of board.tasks) {
-      if (t.status !== "pending" || out.includes(t.task_id) || !t.depends_on.some((d) => out.includes(d))) continue;
-      out.push(t.task_id);
-      grew = true;
-    }
-  }
-  return out;
-}
-
-/**
- * May this ready task start now? Not once the budget is spent, not after the
- * cutoff (everything not started is then left out), and not when its
- * estimate cannot finish before the cutoff (it and what waits on it are left
- * out) — except the team's first task, which starts whatever its estimate
- * says (the deadline stops it). Always true without a budget.
- */
-function mayDispatch(team: LiveTeam, task: TeamTask): boolean {
-  const time = team.time;
-  if (!time) return true;
-  const { board } = team;
-  if (time.up) {
-    retirePendingForTime(team, "the budget was spent before it could start");
-    return false;
-  }
-  const now = Date.now();
-  const allowed = nextItemAllowed(time.budget, now, teamTokens(team), task.estimateMs);
-  if (allowed.ok) {
-    time.dispatched = true;
-    return true;
-  }
-  if (allowed.reason === "cost" || remainingMs(time.budget, now) === 0) {
-    timeIsUp(team, allowed.reason === "cost" ? "cost" : "time", now);
-    return false;
-  }
-  // The team's first task starts whatever its estimate says, inside the
-  // margin too — the planner was told to plan one small step then — and the
-  // deadline stops it.
-  if (!time.dispatched) {
-    time.dispatched = true;
-    return true;
-  }
-  const cutoff = marginCutoffMs(time.budget);
-  if (now >= cutoff) {
-    time.cutoffHit = true;
-    retirePendingForTime(team, `the safety margin began at ${localTime(team, cutoff)} before it could start`);
-    return false;
-  }
-  const left = formatDuration(cutoff - now);
-  const est = formatDuration(task.estimateMs ?? 0);
-  const ids = withPendingDependents(board, task.task_id);
-  const cut = cutForTime(team, ids.map((id) => {
-    const t = board.tasks.find((x) => x.task_id === id);
-    const why = id === task.task_id
-      ? `its estimate (~${est}) cannot finish before the cutoff, ${left} away`
-      : `it waits on ${task.task_id}, which cannot finish before the cutoff`;
-    return { id, why: `${why}: ${firstLine(t?.task_description ?? "", 160)}` };
-  }));
-  if (cut.length) team.bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `Time budget: ${idsText(cut)} left out — ${task.task_id}'s estimate (~${est}) cannot finish before the cutoff, ${left} away.` });
-  return false;
-}
-
-/** "t3", "t3 and t4", "t3, t4 and t5". */
-function idsText(ids: readonly string[]): string {
-  return ids.length <= 1 ? (ids[0] ?? "") : `${ids.slice(0, -1).join(", ")} and ${ids[ids.length - 1]}`;
-}
-
-/** A task's worker started: its clock starts, and the record says so. */
-function noteTaskStart(team: LiveTeam, task: TeamTask, runId: string): void {
-  const time = team.time;
-  if (!time) return;
-  const now = Date.now();
-  time.started.set(task.task_id, now);
-  // A new attempt has a clock of its own, and its own re-plan trigger.
-  time.replanned.delete(task.task_id);
-  void writeTeamTime(team, [
-    timeRecord("start", `${task.attempts > 0 ? `Attempt ${task.attempts + 1}: ` : ""}${firstLine(task.task_description, 200)}`, now, { taskId: task.task_id, runId, ...(task.estimateMs ? { estimateMs: task.estimateMs } : {}), tokensUsed: teamTokens(team) }),
-  ]);
-}
-
-/** A task's worker settled: the time it took into the record — and a re-plan when it ran more than 25% over its estimate. */
-function noteTaskFinish(team: LiveTeam, task: TeamTask, runId: string, run: CodingRun | null): void {
-  const time = team.time;
-  if (!time) return;
-  const now = Date.now();
-  const began = time.started.get(task.task_id) ?? now;
-  time.started.delete(task.task_id);
-  const actualMs = Math.max(0, now - began);
-  void writeTeamTime(team, [
-    timeRecord("finish", `The worker ended ${run?.status ?? "without a record"}`, now, { taskId: task.task_id, runId, actualMs, tokensUsed: teamTokens(team) }),
-  ]);
-  // Once per attempt: a worker the clock already found behind has re-planned.
-  if (run?.status === "completed" && !time.replanned.has(task.task_id)) replanIfBehind(team, task, actualMs);
-  time.replanned.delete(task.task_id);
-}
-
-/**
- * The re-plan trigger: a task more than 25% over its estimate
- * (isBehindEstimate) — found by the team's clock while its worker runs
- * (`running`), else when it finishes — puts the rest of the plan against the
- * time again: the tasks not started, most important first, after what the
- * other ones at work still need by their estimates. What does not fit is cut
- * from the bottom (fitPlan: nice-to-haves first), each cut recorded with why.
- * Said either way, on the log and in the record; once per attempt.
- */
-function replanIfBehind(team: LiveTeam, task: TeamTask, actualMs: number, running = false): void {
-  const time = team.time;
-  if (!time || time.up || team.stopRequested) return;
-  const est = task.estimateMs;
-  if (!est || !isBehindEstimate(est, actualMs)) return;
-  time.replanned.add(task.task_id);
-  const { board, bus } = team;
-  const now = Date.now();
-  const over = Math.round((actualMs / est - 1) * 100);
-  const head = `Re-plan: ${task.task_id} ${running ? "has taken" : "took"} ${formatDuration(actualMs)} against ~${formatDuration(est)} (+${over}%)${running ? " and is still at work" : ""}`;
-  const rank = (t: TeamTask) => t.priority ?? Number.MAX_SAFE_INTEGER;
-  const pending = board.tasks.filter((t) => t.status === "pending").sort((a, b) => rank(a) - rank(b));
-  const atWork = board.tasks
-    .filter((t) => t.status === "in_progress" && t.task_id !== task.task_id)
-    .reduce((sum, t) => sum + Math.max(0, (t.estimateMs ?? 0) - (now - (time.started.get(t.task_id) ?? now))), 0);
-  const fit = fitPlan(pending.map((t) => ({ id: t.task_id, estimateMs: t.estimateMs, optional: t.optional === true, dependsOn: t.depends_on })), time.budget, now + atWork);
-  let text: string;
-  if (!pending.length) {
-    text = `${head}; nothing is left to start.`;
-  } else if (!fit.cut.length) {
-    text = `${head}; what is left still fits before the cutoff — nothing cut.`;
-  } else {
-    const short = Math.max(0, fit.totalMs - fit.availableMs);
-    const described = (id: string) => firstLine(board.tasks.find((t) => t.task_id === id)?.task_description ?? "", 160);
-    const cut = cutForTime(team, fit.cut.map((id) => ({
-      id,
-      why: `cut at a re-plan, ${task.task_id} having run +${over}% over its estimate${fit.dragged.includes(id) ? " (it waits on a task cut)" : ""}: ${described(id)}`,
-    })));
-    text = cut.length
-      ? `${head}; what is left is ${formatDuration(short)} more than fits before the cutoff, so ${idsText(cut)} ${cut.length === 1 ? "is" : "are"} cut from the bottom of the plan.`
-      : `${head}; what is left does not fit, and nothing more could be cut.`;
-  }
-  bus.send(SYSTEM, { type: "note", task_id: task.task_id, text });
-  saveBoard(board);
-  void writeTeamTime(team, [timeRecord("note", text, now, { taskId: task.task_id, tokensUsed: teamTokens(team) })]);
-}
-
-/** The worker task of one extra item: the team's context, then the extra-work prompt. */
-function extraTeamTask(board: TeamBoard, n: number, folder: string | null, prompt: string): string {
-  const own = folder && folder !== board.directory ? folder : null;
-  const here = (text: string): string => (own ? toFolderPaths(text, board.directory, own) : text);
-  const parts = [`Extra item ${n} for the coding team: every task of the team's plan is done, reviewed and merged.`];
-  if (own) parts.push(`Your folder: ${own} — your own working copy of the project, and the ONLY folder you work in.`);
-  parts.push(`Team goal: ${here(board.goal)}`, prompt);
-  const text = parts.join("\n\n");
-  return text.length > MAX_TASK_CHARS ? `${text.slice(0, MAX_TASK_CHARS - 1)}…` : text;
-}
-
-type ExtraOutcome = { kind: "done"; text: string } | { kind: "end"; stop: TimeStopReason; why: string };
-
-/**
- * ONE extra item: a worker of its own (a worktree off the team branch when
- * there is one), told the allowlist, the scope and what is already done.
- * Its closing line is read (lastExtraClaim) and its files checked against the
- * scope (checkExtraItem) BEFORE anything of it is merged: an item off the
- * allowlist or outside the scope is set aside unmerged and ends the extra
- * work; `NOTHING_LEFT` ends it as a good ending. One merge per item.
- */
-async function extraItem(team: LiveTeam, n: number, scope: readonly string[], done: readonly string[], source: CodingRunSource): Promise<ExtraOutcome> {
-  const { board, bus } = team;
-  const time = team.time!;
-  const end = (stop: TimeStopReason, why: string): ExtraOutcome => ({ kind: "end", stop, why });
-  let directory = board.directory;
-  let worktree: { path: string; branch: string } | null = null;
-  if (board.branch) {
-    const made = await addWorkerWorktree(board.directory, board.id, `x${n}`, 1);
-    if (!made.ok) return end("done", `no worktree for extra item ${n}: ${firstLine(made.detail, 200)}`);
-    worktree = { path: made.path, branch: made.branch };
-    directory = made.path;
-  }
-  const setAside = async () => {
-    if (worktree) await removeWorktree(board.directory, worktree.path, { dropBranch: worktree.branch });
-  };
-  if (team.stopRequested) {
-    await setAside();
-    return end("stopped", "the owner stopped the team");
-  }
-  const now = Date.now();
-  const cutoff = marginCutoffMs(time.budget);
-  const prompt = extraWorkPrompt({ leftMs: cutoff - now, cutoff: localTime(team, cutoff), scope, done, n });
-  let run: CodingRun;
-  try {
-    run = await startRun({
-      task: extraTeamTask(board, n, worktree?.path ?? null, prompt),
-      projectId: worktree ? null : board.projectId,
-      directory,
-      source,
-      team: { id: board.id, role: "worker", taskId: null },
-      extraBrief: withRepoMap(WORKER_BRIEF, board, worktree?.path ?? null),
-      cpuShare: 1,
-    });
-  } catch (err) {
-    await setAside();
-    return end("done", `extra item ${n} could not start: ${firstLine(err instanceof Error ? err.message : String(err), 200)}`);
-  }
-  board.runs.push(castRef(run, "worker", null));
-  saveBoard(board);
-  bus.send(SYSTEM, { type: "note", text: `Extra item ${n} (${run.id}): spare time on tests, fixes, edge cases, docs or a verify pass, inside the team's own files — ${formatDuration(cutoff - now)} before the cutoff.` });
-  void writeTeamTime(team, [timeRecord("note", `Extra item ${n} began, ${formatDuration(cutoff - now)} before the cutoff`, now, { runId: run.id, tokensUsed: teamTokens(team) })]);
-  const settled = await settle(team, run.id);
-  if (team.stopRequested) {
-    await setAside();
-    return end("stopped", "the owner stopped the team");
-  }
-  if (!settled || settled.status !== "completed") {
-    await setAside();
-    return end(time.up ?? (settled?.status === "stopped" ? "stopped" : "failed"), `extra item ${n} did not finish: its run ended ${settled?.status ?? "without a record"}`);
-  }
-  const claim = lastExtraClaim(settled.resultText ?? settled.summary);
-  if (claim?.type === "nothing_left") {
-    await setAside();
-    return end("nothing_left", `nothing valuable is left to do${claim.reason ? ` — ${claim.reason}` : ""}`);
-  }
-  if (claim?.type !== "extra") {
-    await setAside();
-    const why = claim?.type === "invalid" ? claim.error : 'its reply ended on neither an "EXTRA:" nor a "NOTHING_LEFT" line';
-    return end("done", `extra item ${n} was not counted: ${why}`);
-  }
-  const files = worktree ? await changedFiles(board.directory, worktree.branch) : settled.filesTouched;
-  const check = checkExtraItem({ kind: claim.kind, files }, scope);
-  if (!check.ok) {
-    await setAside();
-    const kept = worktree ? "Nothing of it was merged" : "Its changes are in the project: look them over";
-    return end("done", `extra item ${n} (${claim.kind}: ${claim.summary}) was refused — ${check.error} ${kept}`);
-  }
-  if (worktree) {
-    const merged = await mergeWorkerBranch(board.directory, worktree.branch, `Coding team ${board.id}: extra ${n} — ${claim.kind}: ${firstLine(claim.summary, 60)}`);
-    await removeWorktree(board.directory, worktree.path, merged.ok ? {} : { dropBranch: worktree.branch });
-    if (!merged.ok) return end("done", `extra item ${n} could not be merged: ${firstLine(merged.detail, 200)}`);
-  }
-  recordTeamExtra(board, SYSTEM, { kind: claim.kind, summary: claim.summary, runId: run.id });
-  saveBoard(board);
-  const text = `${claim.kind}: ${claim.summary}`;
-  void writeTeamTime(team, [timeRecord("extra", text, Date.now(), { runId: run.id, actualMs: Math.max(0, Date.now() - now), tokensUsed: teamTokens(team) })]);
-  return { kind: "done", text };
-}
-
-/**
- * Every task done with time to spare: the rest of it goes to extra items
- * from the allowlist, one at a time, until nothing valuable is left, the
- * cutoff (an item starts only while it can finish before it), a ceiling, or
- * MAX_EXTRA_ITEMS. Once per team, before the suite, the final review and
- * the pull request — so they see the extras too.
- */
-async function teamExtraWork(team: LiveTeam, source: CodingRunSource): Promise<void> {
-  const time = team.time;
-  if (!time || time.extrasRan || time.up) return;
-  time.extrasRan = true;
-  const { board, bus } = team;
-  const touched = board.runs
-    .filter((r) => r.role === "worker" && r.taskId && board.tasks.find((t) => t.task_id === r.taskId)?.status === "complete")
-    .flatMap((r) => getRun(r.id)?.filesTouched ?? []);
-  const scope = extraWorkScope([...board.tasks.filter((t) => t.status === "complete").flatMap((t) => t.files_hint), ...touched]);
-  const done: string[] = [];
-  let stop: TimeStopReason = "done";
-  let why = "";
-  let tried = 0;
-  for (let n = 1; ; n++) {
-    if (team.stopRequested || isSettledStatus(board.status)) return;
-    const now = Date.now();
-    if (time.up) {
-      stop = time.up;
-      why = TEAM_STOP_WORDS[time.up];
-      break;
-    }
-    if (done.length >= MAX_EXTRA_ITEMS) {
-      why = `${done.length} extra items is the most a team does`;
-      break;
-    }
-    const allowed = nextItemAllowed(time.budget, now, teamTokens(team), EXTRA_ITEM_ESTIMATE_MS);
-    if (!allowed.ok) {
-      if (allowed.reason === "cost") timeIsUp(team, "cost", now);
-      stop = n === 1 && allowed.reason === "time" ? "done" : allowed.reason;
-      why = allowed.reason === "cost"
-        ? "the budget's spend ceiling is reached"
-        : `${formatDuration(Math.max(0, marginCutoffMs(time.budget) - now))} is left before the cutoff, less than the ${formatDuration(EXTRA_ITEM_ESTIMATE_MS)} an item takes`;
-      break;
-    }
-    if (n === 1) {
-      const left = formatDuration(marginCutoffMs(time.budget) - now);
-      bus.send(SYSTEM, { type: "note", text: `Time budget: every task is done with ${left} left before the cutoff — the spare time goes to extra checks, tests and fixes inside the team's own files.` });
-      void writeTeamTime(team, [timeRecord("note", `Extra work: every task done with ${left} left before the cutoff; the spare time goes to the extra-work allowlist`, now, { tokensUsed: teamTokens(team) })]);
-    }
-    tried = n;
-    const item = await extraItem(team, n, scope, done, source);
-    if (item.kind === "done") {
-      done.push(item.text);
-      continue;
-    }
-    stop = item.stop;
-    why = item.why;
-    break;
-  }
-  time.extraStop = stop;
-  const text = tried > 0 || stop !== "done"
-    ? `Extra work ended after ${done.length} item${done.length === 1 ? "" : "s"}: ${why}.`
-    : `Done; no extra work: ${why}.`;
-  bus.send(SYSTEM, { type: "note", text: `Time budget: ${text}` });
-  saveBoard(board);
-  void writeTeamTime(team, [timeRecord("note", text, Date.now(), { ...(stop !== "done" ? { reason: stop } : {}), tokensUsed: teamTokens(team) })]);
-}
-
-/**
- * The team's time record, closed — whatever ended the team: why its work
- * stopped (the budget's own stop, a stop the owner made, the extra work's
- * ending, done or failed) on the board and in the record, and one line on how
- * the estimates held, on the log beside it. Never throws.
- */
-async function closeTeamTime(team: LiveTeam): Promise<void> {
-  const time = team.time;
-  if (!time || time.closed) return;
-  stopTeamClock(team);
-  time.closed = true;
-  const { board, bus } = team;
-  try {
-    const reason: TimeStopReason = board.timeStop ?? time.up ?? time.singleRunStop
-      ?? (team.stopRequested || board.status === "stopped" ? "stopped"
-        : board.status === "done" ? (time.cutoffHit ? "time" : time.extraStop ?? "done") : "failed");
-    if (!board.timeStop) setTimeStop(board, SYSTEM, reason);
-    const now = Date.now();
-    const summary = await writeTeamTime(team, [timeRecord("stop", TEAM_STOP_WORDS[reason], now, { reason, tokensUsed: teamTokens(team) })]);
-    const line = estimateAccuracyLine(summary ?? summarizeTimeRecords(time.budget, [], now));
-    bus.send(SYSTEM, { type: "note", text: `Time budget: ${TEAM_STOP_WORDS[reason]} (${reason}). ${line}.` });
-    saveBoard(board);
-    await writeTeamTime(team, [timeRecord("note", line, now)]);
-  } catch (err) {
-    console.error(`[coding-team] ${board.id}: could not close the time record:`, err instanceof Error ? err.message : err);
-  }
-}
-
-/**
- * The verdict on a team whose budget ran out before it was through: done when
- * every task it kept was accepted (what was left out is on the skipped list),
- * else stopped — not failed: the owner's budget ended it — with the tasks it
- * did not finish named, and where their work is.
- */
-function finishOnBudget(team: LiveTeam): void {
-  const { board } = team;
-  const up = team.time?.up ?? "time";
-  if (board.timeBudget) setTimeStop(board, SYSTEM, up);
-  if (allComplete(board)) {
-    setTeamStatus(board, SYSTEM, "done", `${TEAM_STOP_WORDS[up]}; what was left out is on the skipped list`);
-  } else {
-    const open = board.tasks.filter((t) => t.status !== "complete" && t.status !== "retired").map((t) => t.task_id);
-    const where = board.branch ? ` What was accepted is on ${board.branch}; a stopped worker's commits stay on its own branch.` : "";
-    setTeamStatus(board, SYSTEM, "stopped", `Stopped: ${TEAM_STOP_WORDS[up]} with ${idsText(open) || "no task"} not finished.${where}`);
-  }
-  saveBoard(board);
-}
-
-/** The orchestrator, its time record closed however it ends. */
 async function runTeam(team: LiveTeam, source: CodingRunSource): Promise<void> {
-  try {
-    await runTeamWork(team, source);
-  } finally {
-    await closeTeamTime(team);
-  }
-}
-
-async function runTeamWork(team: LiveTeam, source: CodingRunSource): Promise<void> {
   const { board, bus } = team;
-  // A budgeted team's planner is told the deadline in the box's zone, the
-  // time left and the cutoff, and asked for estimates — worked out afresh for
-  // every ask, on the box's clock. Without a budget: the brief and the plan
-  // as they always were.
-  const budget = board.timeBudget ?? null;
-  const tz = budget ? await readOsTimeZone().catch(() => "UTC") : "UTC";
-  // How past estimates on this box held: the planner is told, and its
-  // estimates are scaled by it before the plan is fitted to the time.
-  const calibration = budget ? currentEstimateCalibration() : null;
   // What every role runs on and costs, after the brief: the planner weighs
   // which tasks to mark bulk by it. Read once, as the team begins.
   const models = await readTeamModels();
-  const brief = () => withTeamModels(plannerBrief(budget, Date.now(), tz, calibration), models);
-  const timed = { timed: budget !== null };
-  // Its clock, from the planner on: the deadline holds the planning too.
-  if (budget) {
-    team.time = {
-      budget,
-      tz,
-      timer: null,
-      up: null,
-      marginSent: Date.now() >= marginCutoffMs(budget),
-      lastCheckpointAt: Date.now(),
-      started: new Map(),
-      replanned: new Set(),
-      dispatched: false,
-      cutoffHit: false,
-      extrasRan: false,
-      extraStop: null,
-      singleRunStop: null,
-      writes: Promise.resolve(null),
-      closed: false,
-    };
-    const now = Date.now();
-    if (!loadTimeRecords(board.id)) void writeTeamTime(team, [timeRecord("budget", `Budget: ${describeBudget(budget, now, tz)}`, now)]);
-    armTeamClock(team);
-  }
+  const brief = () => withTeamModels(PLANNER_BRIEF, models);
 
   // 1. The planner: a read-only run whose final message is the plan.
   const planner = await startRun({
@@ -1525,7 +761,7 @@ async function runTeamWork(team: LiveTeam, source: CodingRunSource): Promise<voi
     return;
   }
   let answer = planned.resultText ?? planned.summary;
-  let plan = parsePlan(answer, timed);
+  let plan = parsePlan(answer);
   // More than one correction, because one was not enough. On the box, a planner
   // told only to "shorten" a 2835-character description answered 3013 the second
   // time and the board died with no task ever posted — twice, on two devices.
@@ -1558,7 +794,7 @@ async function runTeamWork(team: LiveTeam, source: CodingRunSource): Promise<voi
       break;
     }
     answer = replanned.resultText ?? replanned.summary;
-    plan = parsePlan(answer, timed);
+    plan = parsePlan(answer);
   }
   if (!plan.ok) {
     setTeamStatus(board, SYSTEM, "failed", plan.reason);
@@ -1575,20 +811,9 @@ async function runTeamWork(team: LiveTeam, source: CodingRunSource): Promise<voi
     const { files, entryPoints, testCommands, gotchas } = plan.repoMap;
     bus.send(PLANNER, { type: "repo_map", files, entry_points: entryPoints, test_commands: testCommands, gotchas });
   }
-  // A calibrated plan's estimates go on the board scaled: the work is fitted,
-  // gated and re-planned with them, and the plan's record line keeps the factor.
-  if (budget && calibrationApplies(calibration)) {
-    for (const task of plan.tasks) if (task.estimateMs) task.estimateMs = calibrateEstimate(task.estimateMs, calibration);
-    if (plan.timePlan?.estimateMs) plan.timePlan.estimateMs = calibrateEstimate(plan.timePlan.estimateMs, calibration);
-  }
   for (const task of plan.tasks) bus.send(PLANNER, { type: "task", ...task });
   // Text over its bound was cut, not refused: one note says so — never an alert.
   if (plan.clipped) bus.send(SYSTEM, { type: "note", text: clippedNote(plan.clipped) });
-  // A budgeted plan against its time, before any work starts.
-  if (budget) {
-    await planAgainstBudget(team, budget, plan.timePlan ?? null, tz, calibration);
-    if (team.stopRequested) return;
-  }
 
   // ONE task is one run's worth of work: it runs as one ordinary run, not
   // inside the team's branch, worktree and reviewer machinery around it.
@@ -1670,8 +895,7 @@ async function runTeamWork(team: LiveTeam, source: CodingRunSource): Promise<voi
       // already going go on meanwhile — and every one that settles while it
       // thinks waits for ONE next turn, not a turn each.
       const settledTasks = leadAfter.splice(0);
-      // Not once a budget is spent: there is nothing left for the lead to plan.
-      if (settledTasks.length && !team.time?.up) {
+      if (settledTasks.length) {
         await leadTurn(team, settledTasks, source, () => new Set(inFlight.keys()), () => starting.size);
         continue;
       }
@@ -1686,10 +910,6 @@ async function runTeamWork(team: LiveTeam, source: CodingRunSource): Promise<voi
       let waitingForRoom = false;
       for (const task of ready) {
         if (inFlight.size >= slots) break;
-        // A budgeted team's gate (mayDispatch): a task that cannot finish
-        // before the cutoff — or any, once it or the budget is spent — is
-        // left out, said why, and never started.
-        if (task.status !== "pending" || !mayDispatch(team, task)) continue;
         if (inFlight.size >= 1) {
           // A worker whose worktree is still being added has no persisted
           // run yet; without the reservation the memory guard would not even
@@ -1723,14 +943,6 @@ async function runTeamWork(team: LiveTeam, source: CodingRunSource): Promise<voi
           // on (the lead, when there is one, looks first); red again, the team
           // fails with the failing tests named.
           if (allComplete(board)) {
-            // A budgeted team done early spends the rest on bounded extra
-            // work first (once), so the suite, the final review and the pull
-            // request see it too. Its budget spent, nothing more starts.
-            if (team.time) {
-              if (team.time.up) break;
-              await teamExtraWork(team, source);
-              if (team.stopRequested || team.time.up) break;
-            }
             const gate = await suiteGate(team, suiteRounds++ === 0);
             if (team.stopRequested) break;
             if (gate.reoffered.length) {
@@ -1753,14 +965,6 @@ async function runTeamWork(team: LiveTeam, source: CodingRunSource): Promise<voi
     await Promise.allSettled([...inFlight.values()]);
     if (team.stopRequested) return;
     if (isSettledStatus(board.status)) return;
-    // The budget ran out (the deadline, the spend ceiling): the runs at work
-    // were ended cleanly and nothing new starts — no suite round, review or
-    // pull request after it. What was accepted is on the team's branch. So
-    // too a team whose unfinished work the margin left out.
-    if (team.time?.up || (team.time?.cutoffHit && !allComplete(board))) {
-      finishOnBudget(team);
-      return;
-    }
     if (suiteFailed) {
       setTeamStatus(board, SYSTEM, "failed", suiteFailed);
       saveBoard(board);
@@ -1773,10 +977,6 @@ async function runTeamWork(team: LiveTeam, source: CodingRunSource): Promise<voi
     if (allComplete(board) && board.shape?.review === "final" && !board.finalReview) {
       const verdict = await finalReview(team, source, suitePassed);
       if (team.stopRequested || isSettledStatus(board.status)) return;
-      if (team.time?.up) {
-        finishOnBudget(team);
-        return;
-      }
       if (verdict?.verdict === "rejected") {
         setTeamStatus(board, SYSTEM, "failed", `The final review rejected the merged work: ${verdict.notes}`);
         saveBoard(board);
@@ -1789,11 +989,6 @@ async function runTeamWork(team: LiveTeam, source: CodingRunSource): Promise<voi
     if (!wantsPr || !allComplete(board)) break;
     const pr = await teamPullRequest(team);
     if (pr === null || team.stopRequested) return;
-    // The deadline came while CI was read: no round of fixes after it.
-    if (pr.kind === "reoffered" && team.time?.up) {
-      finishOnBudget(team);
-      return;
-    }
     if (pr.kind === "reoffered") {
       if (board.dynamic) leadAfter.push(...pr.tasks);
       setTeamStatus(board, SYSTEM, "working", `Fixing what failed on pull request #${board.pr?.number ?? "?"}`);
@@ -1856,9 +1051,6 @@ async function runAsSingleRun(team: LiveTeam, task: TeamTask, source: CodingRunS
         directory: board.directory,
         source,
         extraBrief: repoMapBrief(board, null),
-        // An ordinary run keeps its own budget: the team's deadline, held by
-        // the run's own clock — its spare time, margin and stop included.
-        ...(board.timeBudget ? { timeBudget: board.timeBudget } : {}),
       });
     } catch (err) {
       if (err instanceof SlotsFullError && Date.now() - waitingSince < RUN_BUDGET_MS) {
@@ -1875,17 +1067,8 @@ async function runAsSingleRun(team: LiveTeam, task: TeamTask, source: CodingRunS
   board.runs.push(castRef(run, "worker", task.task_id));
   saveBoard(board);
   bus.send(me, { type: "status_update", task_id: task.task_id, status: "in_progress", worker_id: run.id });
-  if (team.time) {
-    // The run keeps the deadline itself: the team's clock steps aside, and
-    // its record points at the run's.
-    stopTeamClock(team);
-    bus.send(SYSTEM, { type: "note", task_id: task.task_id, text: `Time budget: ${run.id} works to the team's deadline on its own clock — its time record has the checkpoints, any extra work and its stop.` });
-    noteTaskStart(team, task, run.id);
-  }
 
   const settled = await settle(team, run.id);
-  noteTaskFinish(team, task, run.id, settled);
-  if (team.time && settled) team.time.singleRunStop = singleRunStop(settled);
   if (team.stopRequested) return;
   const ok = settled?.status === "completed";
   const result = settled?.summary?.trim() || settled?.error || (ok ? "(no summary)" : `The run ended ${settled?.status ?? "without a record"}.`);
@@ -1897,14 +1080,6 @@ async function runAsSingleRun(team: LiveTeam, task: TeamTask, source: CodingRunS
   if (allComplete(board)) setTeamStatus(board, SYSTEM, "done");
   else setTeamStatus(board, SYSTEM, "failed", `The run for the plan's one task did not finish: ${settled?.error ?? settled?.status ?? "no run"}.`);
   saveBoard(board);
-}
-
-/** How a one-task plan's run ended against its own budget: its time record's stop, else what its status says. */
-function singleRunStop(run: CodingRun): TimeStopReason {
-  const recorded = run.timeRecord?.stopReason;
-  if (recorded) return recorded;
-  if (run.status === "completed") return run.extraWork?.stop ?? "done";
-  return run.status === "stopped" ? "stopped" : "failed";
 }
 
 /**
@@ -1978,10 +1153,8 @@ async function workTask(team: LiveTeam, task: TeamTask, source: CodingRunSource,
   board.runs.push(castRef(run, "worker", task.task_id));
   saveBoard(board);
   bus.send(me, { type: "status_update", task_id: task.task_id, status: "in_progress", worker_id: run.id });
-  noteTaskStart(team, task, run.id);
 
   const settled = await settle(team, run.id);
-  noteTaskFinish(team, task, run.id, settled);
   if (team.stopRequested) {
     if (worktree) await removeWorktree(board.directory, worktree.path);
     return false;
@@ -2538,11 +1711,6 @@ async function settle(team: LiveTeam, runId: string): Promise<CodingRun | null> 
     noteTokens(team.board, run);
     return run;
   };
-  // A budgeted team's run may work up to the deadline — a long job runs until
-  // the cutoff by design — and the team's clock ends it there; this cap is the
-  // backstop a little after it.
-  const deadline = team.time ? Date.parse(team.time.budget.deadline) : NaN;
-  const limit = Number.isFinite(deadline) ? Math.max(RUN_BUDGET_MS, deadline - started + RUN_PAST_DEADLINE_MS) : RUN_BUDGET_MS;
   try {
     for (;;) {
       const run = await waitForRun(runId, WAIT_SLICE_MS);
@@ -2558,7 +1726,7 @@ async function settle(team: LiveTeam, runId: string): Promise<CodingRun | null> 
         try { stopRun(runId); } catch { /* raced with its own settle */ }
         return spent(getRun(runId));
       }
-      if (Date.now() - started > limit) {
+      if (Date.now() - started > RUN_BUDGET_MS) {
         team.bus.send(SYSTEM, { type: "alert", reason: `Run ${runId} outlived the team's budget and was stopped.` });
         try { stopRun(runId); } catch { /* raced */ }
         return spent(getRun(runId));
@@ -3067,22 +2235,7 @@ function teamPrBody(board: TeamBoard): string {
     "",
     "Tasks, each accepted:",
     ...tasks,
-    ...teamPrTimeLines(board),
   ].join("\n");
-}
-
-/** A budgeted team's part of its pull request: the budget, how the estimates held, what was left out, the extra work. */
-function teamPrTimeLines(board: TeamBoard): string[] {
-  if (!board.timeBudget) return [];
-  const stored = loadTimeRecords(board.id);
-  const summary = summarizeTimeRecords(board.timeBudget, stored?.records ?? [], Date.now());
-  return [
-    "",
-    `Time budget: ${board.timeBudget.label}`,
-    `- ${estimateAccuracyLine(summary)}`,
-    ...(board.skipped?.length ? [`- Left out to fit the time: ${board.skipped.map((s) => (s.taskId ? `${s.taskId} (${s.text})` : s.text)).join("; ")}`] : []),
-    ...(board.extras?.length ? [`- Extra work with time to spare: ${board.extras.map((e) => `${e.kind}: ${e.summary}`).join("; ")}`] : []),
-  ];
 }
 
 /** Is `taskId` still the finished result its reviewer is reading — not held, not reopened, since? */
@@ -3100,11 +2253,6 @@ function isSettledStatus(status: TeamBoard["status"]): boolean {
 function settleOrphan(board: TeamBoard): TeamBoard {
   if (isSettledStatus(board.status) || live.has(board.id) || board.status === "queued") return board;
   setTeamStatus(board, SYSTEM, "failed", "The web server restarted while the team was working.");
-  // A budgeted team's record closes with it, as of now: nothing works against its deadline any more.
-  if (board.timeBudget && !board.timeStop) {
-    setTimeStop(board, SYSTEM, "failed");
-    void appendTimeRecord(board.id, board.timeBudget, timeRecord("stop", "the web server restarted while the team was working", Date.now(), { reason: "failed" }));
-  }
   saveBoard(board);
   return board;
 }

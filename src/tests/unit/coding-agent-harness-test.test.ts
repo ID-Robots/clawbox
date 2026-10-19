@@ -115,8 +115,7 @@ describe("starting the run", () => {
     await startHarnessTest("/home/clawbox/projects", t);
     expect(requestOf(1)).toEqual({
       url: "/setup-api/coding-agent/run",
-      // An explicit "no budget": the owner's default must not turn a smoke test into a team.
-      body: { directory: HARNESS_TEST_PROJECT, task: HARNESS_TEST_TASK, budget: "none" },
+      body: { directory: HARNESS_TEST_PROJECT, task: HARNESS_TEST_TASK },
     });
   });
 

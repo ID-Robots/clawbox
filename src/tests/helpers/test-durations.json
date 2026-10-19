@@ -231,7 +231,6 @@
   "src/tests/unit/coding-agent-pause-reason.test.ts": 9.1,
   "src/tests/unit/coding-agent-reset-drain.test.ts": 14.5,
   "src/tests/unit/coding-agent-run-queue.test.ts": 10.9,
-  "src/tests/unit/coding-agent-time-budget.test.ts": 41.1,
   "src/tests/unit/coding-agent-wait-commit.test.ts": 5.7,
   "src/tests/unit/coding-agent-worktree-hint.test.ts": 2.6,
   "src/tests/unit/coding-agent.test.ts": 43.8,
