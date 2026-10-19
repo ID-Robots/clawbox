@@ -216,3 +216,53 @@ export async function getTunnelServiceState(): Promise<TunnelUnitState> {
     return "unknown";
   }
 }
+
+/** What a post-restore tunnel re-arm did (TASK-1754). */
+export interface TunnelRestoreResult {
+  /** `systemctl enable` succeeded, so the tunnel comes back on the next boot. */
+  enabled: boolean;
+  /** The unit was (re)started because remote access was configured. */
+  started: boolean;
+  /** Human-readable problems; empty when everything that was asked worked. */
+  warnings: string[];
+}
+
+/**
+ * Re-arm clawbox-tunnel.service after a ClawKeep restore.
+ *
+ * A restore can land on a freshly flashed box (or one whose unit was disabled
+ * on the way), where the restored data says remote access is set up but the
+ * unit is neither enabled nor running — the box silently stays unreachable.
+ * So: always `enable`; and when remote access is configured (a named-tunnel
+ * credential is on disk, or the unit was running before the restore) and the
+ * unit is not active now, `restart` it (sudoers grants `restart`, never
+ * `start`). Never throws: the restore already succeeded; problems are reported.
+ * Idempotent — running it twice leaves the same state.
+ */
+export async function reenableTunnelAfterRestore(opts: {
+  wasActive: boolean;
+  hasNamedCredential: boolean;
+}): Promise<TunnelRestoreResult> {
+  const warnings: string[] = [];
+  let enabled = false;
+  try {
+    await execFileAsync("sudo", ["-n", "/usr/bin/systemctl", "enable", TUNNEL_SERVICE]);
+    enabled = true;
+  } catch (err) {
+    warnings.push(`${TUNNEL_SERVICE}: enable failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  let started = false;
+  if (opts.wasActive || opts.hasNamedCredential) {
+    const state = await getTunnelServiceState();
+    if (state !== "active" && state !== "activating") {
+      try {
+        await execFileAsync("sudo", ["-n", "/usr/bin/systemctl", "restart", TUNNEL_SERVICE]);
+        started = true;
+      } catch (err) {
+        warnings.push(`${TUNNEL_SERVICE}: start failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  }
+  for (const w of warnings) console.warn(`[cloudflared] post-restore ${w}`);
+  return { enabled, started, warnings };
+}
