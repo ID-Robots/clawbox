@@ -42,11 +42,14 @@ export function totals(results) {
 export function decide(base, cand) {
   const bySpec = new Map(base.map((r) => [r.spec, r]));
   const common = cand.filter((r) => bySpec.has(r.spec));
+  const candSpecs = new Set(cand.map((r) => r.spec));
+  const missing = base.filter((r) => !candSpecs.has(r.spec)).map((r) => r.spec);
   const b = totals(common.map((r) => bySpec.get(r.spec)));
   const c = totals(common);
   const changed = common.filter((r) => r.specHash && bySpec.get(r.spec).specHash && r.specHash !== bySpec.get(r.spec).specHash).map((r) => r.spec);
   const regressions = common.filter((r) => bySpec.get(r.spec).pass && !r.pass).map((r) => r.spec);
   const reasons = [];
+  if (missing.length) reasons.push(`candidate never ran ${missing.join(", ")} — not comparable`);
   if (changed.length) reasons.push(`spec changed between the two runs: ${changed.join(", ")} — not comparable`);
   if (regressions.length) reasons.push(`acceptance regressed on ${regressions.join(", ")}`);
   if (c.passed < b.passed) reasons.push(`passes ${c.passed} < ${b.passed}`);

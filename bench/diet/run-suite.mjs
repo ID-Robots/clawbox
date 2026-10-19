@@ -232,7 +232,10 @@ async function acceptance(spec, projectDir, base, sha) {
 }
 
 function diffFor(projectDir, base, sha) {
-  const exclude = [":(exclude)**/package-lock.json", ":(exclude)**/node_modules/**", ":(exclude)**/*.lock", ":(exclude)dist/**"];
+  // `glob` magic so `**/` also matches at the root (plain pathspecs only match
+  // the pattern under a directory); the bare `node_modules` entry catches a
+  // committed root symlink, which `**/node_modules/**` does not.
+  const exclude = [":(glob,exclude)**/package-lock.json", ":(glob,exclude)**/yarn.lock", ":(glob,exclude)**/*.lock", ":(glob,exclude)**/node_modules/**", ":(exclude)node_modules", ":(glob,exclude)**/dist/**"];
   const stat = git(projectDir, "diff", "--stat", base, sha, "--", ".", ...exclude);
   const names = git(projectDir, "diff", "--name-status", base, sha).split("\n").filter(Boolean);
   let patch = git(projectDir, "diff", base, sha, "--", ".", ...exclude);

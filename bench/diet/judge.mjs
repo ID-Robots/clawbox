@@ -13,12 +13,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { summaryTable } from "./lib/report.mjs";
+import { RUBRIC_VERSION } from "./lib/rubric.mjs";
 
 const argv = process.argv.slice(2);
 const dir = argv.find((a) => !a.startsWith("--"));
 const opt = (name, def) => { const i = argv.indexOf(`--${name}`); return i >= 0 ? argv[i + 1] : def; };
 const model = opt("model", "claude-opus-5-5");
-const RUBRIC_VERSION = 2; // bump when the prompt changes: scores of different versions are not comparable
 const samples = Number(opt("samples", 2));
 const force = argv.includes("--force");
 if (!dir) { console.error("usage: node bench/diet/judge.mjs <results/<label>> [--model M] [--samples N] [--force]"); process.exit(2); }

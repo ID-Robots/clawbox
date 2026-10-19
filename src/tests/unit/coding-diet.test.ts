@@ -121,6 +121,9 @@ describe("looksVisual", () => {
     "Add a logo",
     "refactor the React component",
     "Make it responsive",
+    "build a website",
+    "Create a portfolio with a dashboard and a navbar",
+    "add a loading animation",
   ])("is true for a task that names a visual surface: %s", (task) => {
     expect(looksVisual(task, [])).toBe(true);
   });
@@ -150,6 +153,11 @@ describe("looksVisual", () => {
     ["src/components/"],
   ])("is true for a folder holding %s", (entry) => {
     expect(looksVisual("tidy up the code", ["package.json", entry])).toBe(true);
+  });
+
+  it("keeps visual tools for a website task in an empty folder", () => {
+    expect(looksVisual("build a website", [])).toBe(true);
+    expect(looksVisual("build a website for my bakery", [])).toBe(true);
   });
 
   it("is false for a folder with nothing that renders", () => {

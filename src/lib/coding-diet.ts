@@ -161,7 +161,7 @@ export function mentionsPullRequest(task: string): boolean {
 }
 
 /** Words in a task that name a surface someone LOOKS at. Whole words, any case. */
-const VISUAL_WORDS = /\b(?:page|site|web|html|css|ui|screen|component|react|vue|svelte|frontend|browser|button|layout|responsive|style|game|canvas|picture|image|icon|logo|design)\b/i;
+const VISUAL_WORDS = /\b(?:page|site|web|website|webpage|homepage|landing|dashboard|widget|navbar|storefront|blog|portfolio|svg|animation|html|css|ui|screen|component|react|vue|svelte|frontend|browser|button|layout|responsive|style|game|canvas|picture|image|icon|logo|design)\b/i;
 
 /** Top-level entries that mean the folder renders something. */
 const VISUAL_FILE = /\.(?:html|css|jsx|tsx|vue|svelte)$/i;

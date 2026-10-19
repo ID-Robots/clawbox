@@ -1081,10 +1081,11 @@ describe("the attempts at a run's deliverable", () => {
  * answers without `diet`.
  */
 describe("the token diet", () => {
-  const DEFAULT_DIET = { brief: "full", helpers: "always", visualTools: "always", context: "full" };
+  // The pre-diet values (LEGACY_DIET), so every select starts on its first option.
+  const LEGACY_DIET_FIXTURE = { brief: "full", helpers: "always", visualTools: "always", context: "full" };
 
   it("draws the three knobs with what the device answered", async () => {
-    stubFetch({ enabled: true, readiness: READY }, { diet: { ...DEFAULT_DIET, helpers: "lean" } });
+    stubFetch({ enabled: true, readiness: READY }, { diet: { ...LEGACY_DIET_FIXTURE, helpers: "lean" } });
     render(<CodingAgentSettingsPanel />);
     const brief = await screen.findByTestId("coding-agent-diet-brief") as HTMLSelectElement;
     const helpers = screen.getByTestId("coding-agent-diet-helpers") as HTMLSelectElement;
@@ -1113,7 +1114,7 @@ describe("the token diet", () => {
     ["coding-agent-diet-helpers", "helpers", "lean"],
     ["coding-agent-diet-visual-tools", "visualTools", "auto"],
   ])("%s posts its own knob alone and renders the answer", async (testId, knob, value) => {
-    stubFetch({ enabled: true, readiness: READY }, { diet: { ...DEFAULT_DIET } });
+    stubFetch({ enabled: true, readiness: READY }, { diet: { ...LEGACY_DIET_FIXTURE } });
     render(<CodingAgentSettingsPanel />);
     const select = await screen.findByTestId(testId) as HTMLSelectElement;
     fireEvent.change(select, { target: { value } });

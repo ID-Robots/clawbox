@@ -10,7 +10,7 @@ It spends real tokens and real wall-clock. It is **never** part of `test:*`.
 
 ## The suite
 
-Eight specs under `specs/<id>/`: `spec.json` (the prompt, setup, acceptance,
+Nine specs under `specs/<id>/`: `spec.json` (the prompt, setup, acceptance,
 probe, rubric), `seed/` (the starting project; tabulate is cloned from its
 public repository instead) and `hidden/` (acceptance tests the run never sees,
 copied over the finished project before acceptance runs).
@@ -25,6 +25,7 @@ copied over the finished project before acceptance runs).
 | bugfix-lib | short | Node library | three planted bugs from symptoms; regression tests; tests untouched |
 | inventory-api | long | Express | six features from a spec, failing suite to green, modules, no new deps |
 | tabulate-refactor | long | Python (python-tabulate 0.9.0) | split a 2,700-line module into a package, behaviour and API unchanged |
+| kanban-app | long | Express + plain JS UI | a full multi-user kanban API and browser UI from a precise SPEC.md; own test suite; Express-only runtime |
 
 Acceptance is AUTOMATED and strict: each step is a shell command that must
 exit 0 on a clean checkout of what the run left behind (its branch, merged or
