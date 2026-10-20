@@ -45,7 +45,10 @@ function run(extraEnv: Record<string, string> = {}) {
       CLAWBOX_OPENCLAW_V2: "1",
       OC_CALLS: calls,
       ...extraEnv,
-    },
+      // The child's whole environment, built on purpose; the cast only drops
+      // the NODE_ENV this repo's ProcessEnv typing insists on (the idiom the
+      // other spawning suites use).
+    } as unknown as NodeJS.ProcessEnv,
   });
 }
 
