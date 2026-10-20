@@ -165,7 +165,9 @@ describe("GET", () => {
 });
 
 describe("POST — who may switch", () => {
-  it("refuses the MCP bearer before anything is written", async () => {
+  // The assistant's bearer is admitted, behind a confirm gate of its own
+  // (memory-shard-assistant.test.ts); a caller with neither credential is not.
+  it("refuses a caller that is neither a signed-in person nor the assistant before anything is written", async () => {
     h.owner = false;
     const res = await (await route()).POST(post({ source: "cloud" }));
     expect(res.status).toBe(403);

@@ -627,6 +627,21 @@ else:
 # table. The failure that leaves is a deny slightly wider than the current
 # table, which is the safe direction; the failure it prevents is this script
 # silently deleting a rule someone added on purpose.
+def path_guard_switched_off():
+    """`clawbox_path_guard_enabled` in the device store, the rule of
+    src/lib/path-guard-switch.ts: only the boolean false is off. A store that
+    cannot be read counts as ON here, because this block only ever adds when
+    on, so the unknown case keeps the safe direction."""
+    store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or os.path.join(
+        os.environ.get("PROJECT_DIR", ""), "data", "config.json")
+    try:
+        with open(store_path, encoding="utf-8") as fh:
+            store = json.load(fh)
+    except Exception:
+        return False
+    return isinstance(store, dict) and store.get("clawbox_path_guard_enabled") is False
+
+
 try:
     with open(os.environ["CLAWBOX_PROTECTED_PATHS"]) as f:
         protected = json.load(f)
@@ -705,7 +720,18 @@ else:
             print("[register-mcp] WARNING: approvals.deny is not a list; leaving it "
                   "alone — the model folder and the ClawBox tree are NOT deny-listed.",
                   file=sys.stderr)
-        if current is not None:
+        if current is not None and path_guard_switched_off():
+            # The owner's switch (Settings -> "Protect ClawBox files from the
+            # agent", TASK-1661). Off removes ONLY the globs this table renders,
+            # exact matches; an owner's own deny rule is still not ours to drop.
+            ours = set(desired_deny)
+            kept = [g for g in current if g not in ours]
+            if len(kept) != len(current):
+                approvals_cfg["deny"] = kept
+                changed = True
+                print(f"[register-mcp] removed {len(current) - len(kept)} approvals.deny rules — "
+                      "the owner switched the ClawBox file protection off in Settings")
+        elif current is not None:
             missing = [g for g in desired_deny if g not in current]
             if missing:
                 approvals_cfg["deny"] = current + missing

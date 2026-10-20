@@ -11,16 +11,21 @@
  * SERVER ONLY.
  */
 
-import { buildLinkGraph } from "./links";
+import { processStore } from "@/lib/process-store";
+import { buildLinkGraph, linkDensity, LINKS_PER_PAGE_TARGET, pathAliases, type LinkDensity } from "./links";
 import { lintVault, type LintReport } from "./lint";
 import { pageSummary } from "./frontmatter";
 import { pageBlurb } from "./page-blurb";
+import { generatedSummary } from "./summary-meta";
+import { isPluginFormatFrontmatter } from "./plugin-files";
 import { hasVerification, type PageFrontmatter, type SchemaError } from "./schema";
 import { currentBranch, commitCount, headCommit, type CommitInfo } from "./git";
-import { repairPluginWritesOnce, type PluginRepairResult } from "./plugin-repair";
+import { adoptPluginPages, repairPluginWritesOnce, type PluginRepairResult } from "./plugin-repair";
 import { ensureMemoryWikiWiring, memoryWikiWiringStatus, type WiringPlan, type WiringResult } from "./plugin-wiring";
 import { vaultDir, safePagePath, isKnowledgePage } from "./paths";
+import { readSettings } from "./settings";
 import { readRetiredLedger } from "./state-db";
+import { readStaleClaims, type StaleClaimNote } from "./verify";
 import {
   ensureVault,
   listEntry,
@@ -46,6 +51,8 @@ export interface PrimeRadiantStatus {
   git: { branch: string | null; head: CommitInfo | null; commits: number };
   plugin: WiringPlan;
   lint: { errors: number; warnings: number; ok: boolean };
+  /** Meaningful links per content page (links.ts `linkDensity`): the median, and the target it should reach. */
+  links: LinkDensity;
 }
 
 function ledger(vault: string): string[] {
@@ -56,6 +63,50 @@ function ledger(vault: string): string[] {
   }
 }
 
+/** The configured domain names (settings `domains`): what `domain-mismatch` may suggest, as the summaries pass reads them. */
+function configuredDomains(): string[] {
+  return readSettings().domains.map((d) => d.name);
+}
+
+/** The stale notes owner-verified claims left (verify.ts); none when the state database cannot be read. */
+function staleNotes(vault: string): StaleClaimNote[] {
+  try {
+    return readStaleClaims(vault);
+  } catch {
+    return [];
+  }
+}
+
+/** The links metric per vault, with the vault fingerprint it was worked out for. */
+const densityCache = processStore("prime-radiant:link-density", () => new Map<string, { key: string; value: LinkDensity }>());
+
+/**
+ * Status's links metric (links.ts `linkDensity`), kept until a page changes:
+ * a status poll re-reads the snapshot, but builds the link graph again only
+ * when the pages' count, paths, sizes or newest change time moved.
+ */
+export function statusLinkDensity(vault: string, snapshot: Pick<VaultSnapshot, "pages">): LinkDensity {
+  let bytes = 0;
+  let newest = 0;
+  let paths = 0;
+  for (const p of snapshot.pages) {
+    bytes += p.bytes;
+    if (p.mtimeMs > newest) newest = p.mtimeMs;
+    for (let i = 0; i < p.path.length; i++) paths = (Math.imul(paths, 31) + p.path.charCodeAt(i)) | 0;
+  }
+  const key = `${snapshot.pages.length}|${bytes}|${newest}|${paths}`;
+  const held = densityCache.get(vault);
+  if (held && held.key === key) return held.value;
+  const value = linkDensity(
+    buildLinkGraph(
+      snapshot.pages.flatMap((p) => (p.parsed.ok ? [{ path: p.path, title: p.parsed.frontmatter.title, aliases: pathAliases(p.parsed.frontmatter.aliases), body: p.parsed.body }] : [])),
+      null,
+    ),
+  );
+  densityCache.set(vault, { key, value });
+  return value;
+}
+
 export async function getStatus(vault: string = vaultDir()): Promise<PrimeRadiantStatus> {
   if (!(await vaultInitialised(vault))) {
     return {
@@ -64,11 +115,12 @@ export async function getStatus(vault: string = vaultDir()): Promise<PrimeRadian
       git: { branch: null, head: null, commits: 0 },
       plugin: await memoryWikiWiringStatus(vault),
       lint: { errors: 0, warnings: 0, ok: true },
+      links: { pages: 0, median: 0, mean: 0, atTarget: 0, target: LINKS_PER_PAGE_TARGET },
     };
   }
   const snapshot = await readVaultSnapshot(vault);
   const valid = snapshot.pages.flatMap((p) => (p.parsed.ok ? [p.parsed.frontmatter] : []));
-  const report = lintVault(snapshot, { ledgerRetired: ledger(vault) });
+  const report = lintVault(snapshot, { ledgerRetired: ledger(vault), staleClaims: staleNotes(vault), domains: configuredDomains() });
   const [branch, head, commits, plugin] = await Promise.all([
     currentBranch(vault),
     headCommit(vault),
@@ -80,7 +132,8 @@ export async function getStatus(vault: string = vaultDir()): Promise<PrimeRadian
     vault: {
       path: vault,
       pages: snapshot.pages.length,
-      invalidPages: snapshot.pages.length - valid.length,
+      // A page memory-wiki wrote in its own format is converted on the next pass, not broken.
+      invalidPages: snapshot.pages.filter((p) => !p.parsed.ok && !isPluginFormatFrontmatter(p.parsed.raw)).length,
       verifiedPages: valid.filter(hasVerification).length,
       claims: valid.reduce((n, fm) => n + fm.claims.length, 0),
       domains: [...new Set(valid.map((fm) => fm.domain))].sort(),
@@ -89,6 +142,7 @@ export async function getStatus(vault: string = vaultDir()): Promise<PrimeRadian
     git: { branch, head, commits },
     plugin,
     lint: { errors: report.errors, warnings: report.warnings, ok: report.ok },
+    links: statusLinkDensity(vault, snapshot),
   };
 }
 
@@ -133,6 +187,8 @@ export interface PageDetail {
   errors: SchemaError[] | null;
   body: string;
   summary: string | null;
+  /** The summary the summaries pass wrote from the page's connections and sources (node-summary.ts), for the page header; null when it has none of ours. */
+  nodeSummary: { text: string; method: "model" | "facts"; at: string } | null;
   verified: boolean;
   /** Pages that link here. */
   backlinks: string[];
@@ -172,7 +228,7 @@ export async function getPageBlurb(rel: string, vault: string = vaultDir()): Pro
 function pageDetail(snapshot: VaultSnapshot, rel: string, vault: string): PageDetail {
   const page = snapshot.pages.find((p) => p.path === rel)!;
   const graph = buildLinkGraph(
-    snapshot.pages.map((p) => ({ path: p.path, title: p.parsed.ok ? p.parsed.frontmatter.title : undefined, body: p.parsed.body })),
+    snapshot.pages.map((p) => ({ path: p.path, title: p.parsed.ok ? p.parsed.frontmatter.title : undefined, aliases: p.parsed.ok ? pathAliases(p.parsed.frontmatter.aliases) : undefined, body: p.parsed.body })),
     snapshot.indexBody,
   );
   const fm = page.parsed.ok ? page.parsed.frontmatter : null;
@@ -183,11 +239,12 @@ function pageDetail(snapshot: VaultSnapshot, rel: string, vault: string): PageDe
     errors: page.parsed.ok ? null : page.parsed.errors,
     body: page.parsed.body,
     summary: pageSummary(page.parsed.body),
+    nodeSummary: fm ? generatedSummary(fm) : null,
     verified: fm ? hasVerification(fm) : false,
     backlinks: [...(graph.inbound.get(rel) ?? [])].sort(),
     links: [...(graph.outbound.get(rel) ?? [])].sort(),
     inIndex: graph.indexed.has(rel),
-    lint: lintVault(snapshot, { scope: [rel], ledgerRetired: ledger(vault) }),
+    lint: lintVault(snapshot, { scope: [rel], ledgerRetired: ledger(vault), staleClaims: staleNotes(vault), domains: configuredDomains() }),
   };
 }
 
@@ -203,7 +260,7 @@ export async function getLint(paths: readonly string[] | null, vault: string = v
     paths && paths.length > 0
       ? paths.map((p) => safePagePath(p)).filter((p): p is string => p !== null && isKnowledgePage(p))
       : undefined;
-  return lintVault(snapshot, { scope, ledgerRetired: ledger(vault), now });
+  return lintVault(snapshot, { scope, ledgerRetired: ledger(vault), staleClaims: staleNotes(vault), domains: configuredDomains(), now });
 }
 
 export interface InitialiseResult {
@@ -240,6 +297,11 @@ export async function initialise(vault: string = vaultDir()): Promise<Initialise
   } catch (err) {
     console.warn(`[prime-radiant] memory-wiki repair failed: ${err instanceof Error ? err.message : String(err)}`);
     repair = null;
+  }
+  try {
+    await adoptPluginPages(vault);
+  } catch (err) {
+    console.warn(`[prime-radiant] memory-wiki's own pages could not be converted: ${err instanceof Error ? err.message : String(err)}`);
   }
   return { created, plugin, repair };
 }

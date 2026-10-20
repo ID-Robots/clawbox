@@ -411,6 +411,14 @@ export function ingestedHashes(vault: string): Set<string> {
   });
 }
 
+/** Every label a document of some job went by (a duplicate's aside: it made no page). */
+export function ingestLabels(vault: string): Set<string> {
+  return withStateDb(vault, (db) => {
+    const rows = db.prepare("SELECT DISTINCT label FROM ingest_files WHERE status != 'duplicate'").all() as Array<{ label: string }>;
+    return new Set(rows.map((r) => r.label));
+  });
+}
+
 export interface CostRecord {
   runId: string | null;
   operation: string;

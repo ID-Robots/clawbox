@@ -1241,51 +1241,6 @@ describe("CodingAgentApp", () => {
       expect(within(settled).getByTestId("coding-agent-run-activity-steps").querySelector("li")).toHaveAttribute("data-kind", "command");
     });
 
-    it("shows a budgeted run's time budget — bar, figures, why it stopped and its checkpoints — and none on a run without one", async () => {
-      const iso = (ms: number) => new Date(ms).toISOString();
-      const budget = { deadline: iso(RUN.startedAt + 30 * 60_000), label: "30 minutes", preset: "30m", source: "picker", setAt: iso(RUN.startedAt) };
-      const timeRecord = {
-        budget,
-        estimateMs: 20 * 60_000,
-        tasks: [],
-        startedAt: iso(RUN.startedAt),
-        finishedAt: iso(RUN.completedAt),
-        usedMs: 85_000,
-        leftMs: 30 * 60_000 - 85_000,
-        stopReason: "nothing_left",
-        tokenCap: null,
-        tokensUsed: 4_200,
-        extras: ["tests: covered the toggle"],
-        skipped: [],
-        records: [
-          { at: iso(RUN.startedAt), kind: "budget", text: "Budget set when the run was started: 30 minutes" },
-          { at: iso(RUN.completedAt - 30_000), kind: "extra", text: "tests: covered the toggle" },
-          { at: iso(RUN.completedAt), kind: "stop", text: "nothing valuable was left to do", reason: "nothing_left" },
-        ],
-        omittedRecords: 0,
-      };
-      stubFetch({ enabled: true, readiness: READY }, [{ ...RUN, timeBudget: budget, timeRecord }], { projects: [SITE_PROJECT] });
-      const { unmount } = render(<CodingAgentApp />);
-      await openRuns();
-      fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
-      await screen.findByTestId("coding-agent-run-page");
-      const card = await screen.findByTestId("coding-agent-run-budget");
-      expect(within(card).getByTestId("coding-agent-run-budget-label")).toHaveTextContent(t("codingAgent.budgetPickerChip30m"));
-      expect(within(card).getByTestId("coding-agent-run-budget-status")).toHaveTextContent(t("codingAgent.budgetTimelineStopNothingLeft"));
-      expect(within(card).getByTestId("coding-agent-run-budget-spend")).toHaveTextContent("4,200");
-      expect(within(card).getByTestId("coding-agent-run-budget-extras")).toHaveTextContent("tests: covered the toggle");
-      expect(within(card).getByTestId("coding-agent-run-budget-estimate")).toBeInTheDocument();
-      expect(within(card).getAllByTestId("coding-agent-run-budget-mark")).toHaveLength(2);
-      unmount();
-
-      stubFetch({ enabled: true, readiness: READY }, [RUN], { projects: [SITE_PROJECT] });
-      render(<CodingAgentApp />);
-      await openRuns();
-      fireEvent.click(await screen.findByTestId("coding-agent-details-run-k3x9q2ab"));
-      await screen.findByTestId("coding-agent-run-page");
-      expect(screen.queryByTestId("coding-agent-run-budget")).toBeNull();
-    });
-
     it("says when each step happened — beside every step, in full when a step is opened — when the record carries the times", async () => {
       const startedAt = RUN.startedAt;
       const run = { ...RUN, progress: ["$ bun install", "Writing app.js"], progressAt: [startedAt + 12_000, startedAt + 3 * 60_000 + 5_000] };

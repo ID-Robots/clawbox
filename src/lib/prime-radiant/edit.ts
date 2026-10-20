@@ -18,10 +18,14 @@
  *   - a deleted claim is REMOVED, not retired. Retiring is what a verification
  *     does to a losing answer, and a retired id is refused for good — so the
  *     delete could not be undone (lint's `claim-id-retired-reuse`). The id is
- *     free to come back.
+ *     free to come back. The review items still waiting on it are closed
+ *     ("claim removed"); a later night asks again if it does come back.
  *   - a merge MOVES claims: the same id, the same text, the same verification
  *     on the page that stays. One it cannot move so — its id on a different
- *     claim there already — refuses the merge, and says which. The page that
+ *     claim there already — refuses the merge, and says which. The same fact
+ *     under two ids (a second copy of one document) becomes one claim there:
+ *     the first kept, the others' sources joined to its evidence
+ *     (`foldDuplicateClaims`); a verified claim is never folded. The page that
  *     stays keeps its body byte for byte unless the caller lets it change
  *     (`keep_into_body: false`): only its frontmatter takes the merge.
  *
@@ -31,14 +35,14 @@
  * SERVER ONLY.
  */
 
-import { allocateClaimId, assertClaimIdAvailable, buildClaimIndex, ClaimIdError, isClaimId, nowIso, slugify, type ClaimIndex } from "./claims";
+import { allocateClaimId, assertClaimIdAvailable, buildClaimIndex, ClaimIdError, foldDuplicateClaims, isClaimId, nowIso, slugify, type ClaimIndex } from "./claims";
 import { pageSummary, parsePage, serializeFrontmatter, splitFrontmatter } from "./frontmatter";
 import type { VaultAuthor } from "./git";
-import { createLinkResolver, extractLinks, relativeHref, rewriteLinks, type FoundLink } from "./links";
+import { createLinkResolver, extractLinks, pathAliases, relativeHref, rewriteLinks, type FoundLink } from "./links";
 import { LIMITS, lintVault, type LintFinding } from "./lint";
 import { isKnowledgePage, safePagePath, vaultDir } from "./paths";
 import { withPluginFields } from "./plugin-compat";
-import { followMovedClaims } from "./review-store";
+import { closeItemsForRemoved, followMovedClaims } from "./review-store";
 import {
   isIsoDate,
   PAGE_STATUSES,
@@ -53,6 +57,7 @@ import {
   type PrivacyTier,
 } from "./schema";
 import { readSettings } from "./settings";
+import { reconcileStaleText, type SupersededFact } from "./stale-text";
 import { readRetiredLedger, syncActiveClaims } from "./state-db";
 import {
   INDEX_FILE,
@@ -104,6 +109,8 @@ export class PageEditError extends Error {
 export interface EditWho {
   /** "owner" or "assistant". */
   by: string;
+  /** "assistant" on the owner's word carried out by the assistant (route-helpers.ts `OWNER_VIA_ASSISTANT_WRITER`). */
+  via?: string;
   author?: VaultAuthor;
   /** A person's word (the owner's), not the assistant's. Default false. */
   person?: boolean;
@@ -246,12 +253,14 @@ export interface PagePatch {
   privacy?: PrivacyTier;
   /** null clears it. */
   stale_after?: string | null;
+  /** The day the page's figures were true on (a metric page needs one); null clears it. */
+  as_of?: string | null;
   sources?: string[];
 }
 
-/** `PATCH pages/<path>`: any of `{ title, summary, body, status, domain, owner, privacy, stale_after, sources }`. */
+/** `PATCH pages/<path>`: any of `{ title, summary, body, status, domain, owner, privacy, stale_after, as_of, sources }`. */
 export function readPagePatch(body: unknown): PagePatch {
-  const b = objectBody(body, ["title", "summary", "body", "status", "domain", "owner", "privacy", "stale_after", "sources"]);
+  const b = objectBody(body, ["title", "summary", "body", "status", "domain", "owner", "privacy", "stale_after", "as_of", "sources"]);
   const patch: PagePatch = {};
   if (b.title !== undefined) patch.title = oneLine(b.title, MAX_TITLE_CHARS, "title");
   if (b.summary !== undefined) patch.summary = summaryText(b.summary);
@@ -263,6 +272,10 @@ export function readPagePatch(body: unknown): PagePatch {
   if (b.stale_after !== undefined) {
     if (b.stale_after !== null && !isIsoDate(b.stale_after)) throw bad("stale_after is an ISO date (YYYY-MM-DD) or null.");
     patch.stale_after = b.stale_after as string | null;
+  }
+  if (b.as_of !== undefined) {
+    if (b.as_of !== null && !isIsoDate(b.as_of)) throw bad("as_of is an ISO date (YYYY-MM-DD) or null.");
+    patch.as_of = b.as_of as string | null;
   }
   if (b.sources !== undefined) patch.sources = sourceList(b.sources);
   if (Object.keys(patch).length === 0) throw bad("Name at least one field to change.");
@@ -316,15 +329,19 @@ export interface VerifyRequest {
   id: string;
   text: string | null;
   page: string | null;
+  /** The assistant's word that the user confirmed the fact (the MCP tool's `confirm: true`); the route reads it. */
+  confirm: boolean;
 }
 
-/** `POST claims/verify`: `{ id, text?, page? }` — no text verifies the claim as it stands. */
+/** `POST claims/verify`: `{ id, text?, page?, confirm? }` — no text verifies the claim as it stands. */
 export function readVerifyRequest(body: unknown): VerifyRequest {
-  const b = objectBody(body, ["id", "text", "page"]);
+  const b = objectBody(body, ["id", "text", "page", "confirm"]);
+  if (b.confirm !== undefined && typeof b.confirm !== "boolean") throw bad("confirm must be true or false.");
   return {
     id: claimIdOf(b.id),
     text: b.text === undefined || b.text === null ? null : claimText(b.text),
     page: b.page === undefined || b.page === null ? null : pagePathOf(b.page),
+    confirm: b.confirm === true,
   };
 }
 
@@ -488,7 +505,7 @@ export interface PageEditResult extends PageWriteResult {
  * own page (vault.ts `lint: "pages"`) and leaves Memory Shard's index as it
  * is: what it embeds of a page is its title, body and claims.
  */
-const METADATA_FIELDS: ReadonlySet<string> = new Set(["status", "domain", "owner", "privacy", "stale_after", "sources"]);
+const METADATA_FIELDS: ReadonlySet<string> = new Set(["status", "domain", "owner", "privacy", "stale_after", "as_of", "sources"]);
 
 /** The page `rel` under the lock, read alone; null also for a path deeper than the vault's walk reaches (`tx.read` refuses it), which is no page. */
 function txRead(tx: VaultTx, rel: string): Promise<VaultPage | null> {
@@ -537,6 +554,11 @@ export async function editPage(rel: string, patch: PagePatch, who: EditWho, opti
         (fm as Record<string, unknown>)[key] = value;
       };
       for (const key of ["title", "status", "domain", "owner", "privacy", "stale_after", "sources"] as const) set(key);
+      if (patch.as_of !== undefined && JSON.stringify(fm.as_of ?? null) !== JSON.stringify(patch.as_of)) {
+        changed.push("as_of");
+        if (patch.as_of === null) delete fm.as_of;
+        else fm.as_of = patch.as_of;
+      }
       if (body.trim() !== page.body.trim()) changed.push(patch.summary !== undefined && patch.body === undefined ? "summary" : "body");
       if (changed.length === 0) return;
       fm.generated = { at, by: who.by };
@@ -825,14 +847,18 @@ export async function editClaim(rawId: string, patch: ClaimPatch, who: EditWho, 
     `claim: edit ${id}`,
     async (tx) => {
       const page = holderOf(await tx.snapshot(), tx.vault, id, patch.page ?? null);
+      const superseded: SupersededFact[] = [];
       const claims = page.frontmatter.claims.map((c) => {
         if (c.id !== id) return c;
         if (c.verified) throw new PageEditError("verified", "This claim is verified; verify it again with the new text instead of editing it.", 409);
         const next: Claim = { ...c, ...(patch.text !== undefined ? { text: patch.text } : {}), ...(patch.confidence !== undefined ? { confidence: patch.confidence } : {}) };
         if (next.text === c.text && next.confidence === c.confidence) return c;
+        if (next.text !== c.text) superseded.push({ before: c.text, after: next.text });
         return { ...next, updatedAt: at, evidence: [...c.evidence, { kind: "edit", note: `edited by ${who.by}`, updatedAt: at }].slice(-20) };
       });
-      await tx.writePage(page.path, { ...page.frontmatter, claims }, page.body);
+      // The page's Key facts list the claim as it reads now.
+      const body = reconcileStaleText(page.body, superseded, page.path, page.path, { prose: false }).body;
+      await tx.writePage(page.path, { ...page.frontmatter, claims }, body);
       return page.path;
     },
     { vault, now: options.now, author: who.author },
@@ -849,7 +875,11 @@ export interface ClaimDeleteResult {
   wasVerified: boolean;
 }
 
-/** Remove a claim from its page — removed, not retired, so Undo can bring it back: one commit, `claim: delete <id>`. */
+/**
+ * Remove a claim from its page — removed, not retired, so Undo can bring it
+ * back: one commit, `claim: delete <id>`. The review items waiting on it ask
+ * about nothing now: they are closed, `claim removed`.
+ */
 export async function deleteClaim(rawId: string, page: string | null, who: EditWho, options: EditOptions = {}): Promise<ClaimDeleteResult> {
   const vault = options.vault ?? vaultDir();
   const id = claimIdOf(rawId);
@@ -863,6 +893,13 @@ export async function deleteClaim(rawId: string, page: string | null, who: EditW
     },
     { vault, now: options.now, author: who.author },
   );
+  if (op.commit) {
+    try {
+      closeItemsForRemoved(vault, [id], who.by, "claim removed", nowIso(options.now));
+    } catch {
+      /* they can be dismissed by hand */
+    }
+  }
   return { id, page: op.result.page, commit: op.commit, wasVerified: op.result.wasVerified };
 }
 
@@ -884,8 +921,9 @@ export async function verifyClaimAs(input: VerifyRequest, who: EditWho, options:
     claimId: input.id,
     text,
     by: who.by,
+    ...(who.via ? { via: who.via } : {}),
     page: input.page,
-    note: `verified by ${who.by}`,
+    note: who.via ? `verified by ${who.by} via ${who.via}` : `verified by ${who.by}`,
     author: who.author,
     person: who.person === true,
     vault,
@@ -903,6 +941,8 @@ export interface PageMergeResult {
   commit: string | null;
   /** Ids of the claims the merged pages carried, now on `into` unchanged; `verified` the ones whose verification moved with them. */
   claims: string[];
+  /** Claims that said a fact `into` (or an earlier merged page) already held, folded into that claim: its id, the one it lives on under. */
+  folded: Array<{ id: string; into: string }>;
   verified: string[];
   /** Names `into` gained as aliases: the merged pages' titles and their own aliases. */
   aliases: string[];
@@ -968,7 +1008,7 @@ function mdLink(link: FoundLink & { kind: "md" }, href: string): string {
  * Throws the refusal when the merge may not happen. Pure apart from the
  * retired-id ledger it reads.
  */
-function planMerge(snapshot: VaultSnapshot, vault: string, input: PageMerge, who: EditWho, at: string): MergePlan {
+function planMerge(snapshot: VaultSnapshot, vault: string, input: PageMerge, who: EditWho, at: string, claimIndex?: ClaimIndex): MergePlan {
   const into = mergePage(snapshot, input.into);
   if (input.from.includes(into.path)) throw bad("A page cannot be merged into itself: leave the target out of from.");
   const fm = into.frontmatter;
@@ -984,7 +1024,7 @@ function planMerge(snapshot: VaultSnapshot, vault: string, input: PageMerge, who
   }
 
   // Claims move as they are: id, text, status, evidence and verification.
-  const index = indexOf(snapshot, vault);
+  const index = claimIndex ?? indexOf(snapshot, vault);
   const claims = [...fm.claims];
   const slot = new Map(claims.map((c, i) => [c.id, i]));
   const holder = new Map(claims.map((c) => [c.id, into.path]));
@@ -1019,6 +1059,12 @@ function planMerge(snapshot: VaultSnapshot, vault: string, input: PageMerge, who
       }
     }
   }
+  // The same fact under two ids — a second copy of a document — is one claim on the page that stays.
+  const fold = foldDuplicateClaims(claims, at);
+  const foldedAway = new Set(fold.folded.map((f) => f.id));
+  claims.splice(0, claims.length, ...fold.claims);
+  for (let i = movedIds.length - 1; i >= 0; i--) if (foldedAway.has(movedIds[i])) movedIds.splice(i, 1);
+  for (const [i, c] of claims.entries()) slot.set(c.id, i);
   if (claims.length > fm.claims.length && claims.length > LIMITS.maxClaims) {
     throw new PageEditError(
       "too_many_claims",
@@ -1056,7 +1102,7 @@ function planMerge(snapshot: VaultSnapshot, vault: string, input: PageMerge, who
 
   // Links: every one that resolves to a merged page today, as lint resolves it.
   const gone = new Set(froms.map((f) => f.path));
-  const resolver = createLinkResolver(snapshot.pages.map((p) => ({ path: p.path, title: p.parsed.ok ? p.parsed.frontmatter.title : undefined })));
+  const resolver = createLinkResolver(snapshot.pages.map((p) => ({ path: p.path, title: p.parsed.ok ? p.parsed.frontmatter.title : undefined, aliases: p.parsed.ok ? pathAliases(p.parsed.frontmatter.aliases) : undefined })));
   const intoLink = into.path.replace(/\.md$/, "");
   const retarget = (page: string) => (link: FoundLink): string | null => {
     const target = resolver.resolve(page, link);
@@ -1153,6 +1199,7 @@ function planMerge(snapshot: VaultSnapshot, vault: string, input: PageMerge, who
       into: into.path,
       from: froms.map((f) => f.path),
       claims: movedIds,
+      folded: fold.folded,
       verified: movedIds.filter((id) => claims[slot.get(id) ?? -1]?.verified),
       aliases: gainedAliases,
       sources: gainedSources,
@@ -1176,6 +1223,43 @@ function followReviewItems(vault: string, plan: MergePlan["result"], dryRun: boo
   } catch {
     // The items still name the claims, which is how they are settled.
     return 0;
+  }
+}
+
+/** The waiting review items about claims folded into a same-worded one: the question lives on under the kept claim. */
+export function closeFoldedItems(vault: string, folded: ReadonlyArray<{ id: string; into: string }>, by: string, at: string): void {
+  if (folded.length === 0) return;
+  const into = new Map(folded.map((f) => [f.id, f.into]));
+  try {
+    // One pass: an item whose claim and candidate both folded is closed once, with both ids.
+    closeItemsForRemoved(vault, [...into.keys()], by, (id) => `claim folded into ${into.get(id) ?? id}`, at);
+  } catch {
+    /* they can be dismissed by hand */
+  }
+}
+
+/** The claim index a merge plans against (the snapshot's claims, the retired ledger): built once for many {@link previewMerge} calls on one snapshot. */
+export function mergeClaimIndex(snapshot: VaultSnapshot, vault: string): ClaimIndex {
+  return indexOf(snapshot, vault);
+}
+
+/**
+ * A merge worked out on a snapshot the caller already holds, written nowhere:
+ * what {@link mergePages} would do in a dry run, or the refusal it would
+ * answer (the summaries pass's merge suggestions for duplicate entities).
+ */
+export function previewMerge(
+  snapshot: VaultSnapshot,
+  input: Pick<PageMerge, "into" | "from">,
+  who: EditWho,
+  options: { vault: string; now?: Date; claimIndex?: ClaimIndex },
+): { ok: true; result: MergePlan["result"] } | { ok: false; code: string; message: string } {
+  try {
+    const plan = planMerge(snapshot, options.vault, { ...input, dryRun: true, keepIntoBody: true }, who, nowIso(options.now), options.claimIndex);
+    return { ok: true, result: plan.result };
+  } catch (err) {
+    if (err instanceof PageEditError) return { ok: false, code: err.code, message: err.message };
+    throw err;
   }
 }
 
@@ -1218,6 +1302,7 @@ export async function mergePages(input: PageMerge, who: EditWho, options: EditOp
     const moved = new Set(plan.result.claims);
     syncClaims(vault, plan.page.frontmatter.claims.filter((c) => moved.has(c.id)).map((c) => ({ id: c.id, page: plan.result.into, updatedAt: c.updatedAt })));
     reviewItems = followReviewItems(vault, plan.result, false);
+    closeFoldedItems(vault, plan.result.folded, who.by, at);
   }
   return { ...plan.result, dryRun: false, commit: op.commit, reviewItems, findings: findingsOf(op.findings) };
 }

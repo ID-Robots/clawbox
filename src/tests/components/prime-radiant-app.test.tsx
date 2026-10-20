@@ -137,6 +137,32 @@ class FakeEventSource {
 
 interface Call { url: string; method: string; body: unknown }
 
+const GOLDEN_Q = {
+  id: "gq-00000000000a", question: "What does the blue widget cost?", expected: "10 EUR", owner: "Иван Иванов", domain: "sales",
+  claimId: null, page: "entities/acme-widgets.md", createdAt: "2026-01-02T10:00:00.000Z", updatedAt: "2026-01-02T10:00:00.000Z",
+};
+const GOLDEN_SCORE = {
+  questions: 1,
+  last: { id: "run-0123456789ab", runId: "run-0123456789ab", at: "2026-01-05T03:10:00.000Z", asked: 4, correct: 3, wrong: 1, missing: 0, stale: 0, failed: 0, percent: 75 },
+  trend: [{ at: "2026-01-04T03:10:00.000Z", percent: 50 }, { at: "2026-01-05T03:10:00.000Z", percent: 75 }],
+  change: 25,
+};
+const DAILY_OWNERS = {
+  initialised: true, outbound: false, perOwner: 5, owner: null, language: null, questions: [],
+  owners: [{ owner: "Иван Иванов", domains: ["sales"], pages: 2, language: "bg", waiting: 1 }],
+};
+const DAILY_MINE = {
+  ...DAILY_OWNERS, owner: "Иван Иванов", language: "bg",
+  questions: [{
+    kind: "claim", owner: "Иван Иванов", domain: "sales", page: "entities/acme-widgets.md", title: "Acme Widgets Ltd", claimId: "sales/acme-widgets/hq-city",
+    text: "Based in Springfield.", question: "Още ли е вярно? „Based in Springfield.“ (Acme Widgets Ltd)",
+    answer: { tool: "prime_radiant_claim_verify", args: { id: "sales/acme-widgets/hq-city" } },
+  }],
+};
+let goldenQuestions: unknown[];
+/** A settings PUT the server refuses (the Questions tab's Checks). */
+let refuseSettingsPut: boolean;
+
 let status: Record<string, unknown>;
 let calls: Call[];
 let searchStatus: number;
@@ -145,6 +171,9 @@ let searchAnswer: Record<string, unknown>;
 let reviewGate: Promise<void> | null;
 let reviewItems: unknown[];
 let nightlyRuns: unknown[];
+const INGEST_COMMIT = { sha: "a".repeat(40), subject: "ingest: acme-overview.md", at: "2026-01-02T10:00:00.000Z", author: "Prime Radiant" };
+let historyCommits: unknown[];
+let pageOverride: unknown;
 let ingestJobs: unknown[];
 /** Refusals the fake answers the next `DELETE ingest/<id>` calls with, first first. */
 let stopRefusals: number[];
@@ -152,6 +181,10 @@ let previewAnswer: Record<string, unknown> | null;
 let skipCodeProjects: boolean;
 /** The settings GET's Opus source and page cap; null answers as an older server (neither field). */
 let opusExtras: { source: "api_key" | "subscription" | "none"; maxPages: number } | null;
+/** The search index size limit, MB, on a server that has the setting (null: an older one). */
+let searchIndexLimitMb: number | null;
+/** The structure pass's settings section; null: a server from before it. */
+let structureSettings: { enabled: boolean; company: string; enrichTop: number; modelFallback: number } | null;
 /** What `POST init` says its one-time memory-wiki repair did. */
 let initRepair: Record<string, unknown> | null;
 /** What `GET pages?…` lists. */
@@ -177,7 +210,7 @@ function installFetch() {
     }
     if (url.startsWith(`${p}/pages?`)) return ok({ total: listed.length, pages: listed });
     if (url === `${p}/graph`) return ok(listed.length > 0 ? GRAPH : { revision: null, truncated: false, nodes: [], edges: [] });
-    if (url === `${p}/pages/entities/acme-widgets.md`) return ok(PAGE);
+    if (url === `${p}/pages/entities/acme-widgets.md`) return ok(pageOverride ?? PAGE);
     if (url.startsWith(`${p}/search?`)) {
       if (searchStatus === 404) return ok({ error: "Not found" }, 404);
       return ok(searchAnswer);
@@ -194,7 +227,7 @@ function installFetch() {
     if (url === `${p}/nightly`) return ok({ running: null, nextRunAt: null, runs: nightlyRuns });
     if (url === `${p}/nightly/run` && method === "POST") return ok({ branch: "dream/2026-01-05", commit: "def5678abc", changed: [] });
     if (url.startsWith(`${p}/history/`)) {
-      return ok({ path: "entities/acme-widgets.md", commits: [{ sha: "a".repeat(40), subject: "ingest: acme-overview.md", at: "2026-01-02T10:00:00.000Z", author: "Prime Radiant" }] });
+      return ok({ path: "entities/acme-widgets.md", commits: historyCommits });
     }
     if (url.startsWith(`${p}/diff?`)) return ok({ from: null, to: "a".repeat(40), path: "entities/acme-widgets.md", commit: null, files: [], diff: "+added line", truncated: false });
     if (url === `${p}/revert` && method === "POST") return ok({ reverted: "a".repeat(40), commit: "b".repeat(40), changed: [] });
@@ -230,18 +263,39 @@ function installFetch() {
       if (refusal) return ok({ error: "The job could not be stopped", code: "stop_failed" }, refusal);
       return ok({ stopping: true, job: RUNNING_JOB }, 202);
     }
+    if (url === `${p}/golden` && method === "POST") {
+      const question = { ...GOLDEN_Q, id: "gq-00000000000b", ...(body as Record<string, unknown>) };
+      goldenQuestions = [...goldenQuestions, question];
+      return ok({ question, commit: "c".repeat(40) }, 201);
+    }
+    if (url === `${p}/golden`) return ok({ questions: goldenQuestions, verdicts: { [GOLDEN_Q.id]: { verdict: "correct", why: "same", at: "2026-01-05T03:10:00.000Z" } }, score: GOLDEN_SCORE });
+    if (url.startsWith(`${p}/golden/`) && method === "PATCH") {
+      return ok({ error: "A golden question cannot hold a secret: it contains a password.", code: "lint_blocked" }, 409);
+    }
+    if (url.startsWith(`${p}/golden/`) && method === "DELETE") {
+      goldenQuestions = goldenQuestions.filter((q) => !url.endsWith((q as { id: string }).id));
+      return ok({ question: GOLDEN_Q, commit: "d".repeat(40) });
+    }
+    if (url.startsWith(`${p}/daily`)) return ok(url.includes("owner=") ? DAILY_MINE : DAILY_OWNERS);
+    if (url === `${p}/settings` && method === "PUT" && refuseSettingsPut) return ok({ error: "The settings could not be saved.", code: "vault_unavailable" }, 503);
     if (url === `${p}/settings`) {
       const settings = {
         ingest: { exclude: [".git", "node_modules"], skipCodeProjects, parallel: 128, folders: [] },
         costRates: {}, nightly: { enabled: true, time: "03:00" },
         opus: { enabled: false, capUsd: 2, sampleRate: 0.02, model: "opus", ...(opusExtras ? { maxPages: opusExtras.maxPages } : {}) },
         contradictions: { enabled: true }, domains: [],
+        golden: { enabled: true, maxQuestions: 50 }, verification: { perOwner: 5, outbound: false, languages: [] },
+        ...(searchIndexLimitMb !== null ? { search: { indexLimitMb: searchIndexLimitMb } } : {}),
+        ...(structureSettings ? { structure: structureSettings } : {}),
       };
       return ok({
-        settings, defaults: settings,
+        settings, defaults: searchIndexLimitMb !== null ? { ...settings, search: { indexLimitMb: 160 } } : settings,
         limits: {
           ingestParallel: { min: 1, max: 256 }, ingestFolders: 20, opusCapUsd: { min: 0.01, max: 1000 }, opusSampleRate: { min: 0, max: 1 }, domains: 100,
+          // A per-owner bound unlike the app's own default, so a test sees the field follow the server.
+          goldenMaxQuestions: { min: 1, max: 500 }, dailyPerOwner: { min: 1, max: 12 },
           ...(opusExtras ? { opusMaxPages: { min: 4, max: 2000 } } : {}),
+          ...(searchIndexLimitMb !== null ? { searchIndexLimitMb: { min: 32, max: 4096 } } : {}),
         },
         nightly: { nextRunAt: null }, rates: {},
         ...(opusExtras ? { opusSource: opusExtras.source } : {}),
@@ -291,14 +345,20 @@ beforeEach(() => {
   reviewGate = null;
   reviewItems = [REVIEW_ITEM];
   nightlyRuns = [];
+  historyCommits = [INGEST_COMMIT];
+  pageOverride = null;
   ingestJobs = [];
   stopRefusals = [];
   previewAnswer = PREVIEW;
   skipCodeProjects = true;
   opusExtras = null;
+  searchIndexLimitMb = null;
+  structureSettings = null;
   initRepair = { ran: true, cleaned: [], removed: [], commit: null };
   window.localStorage.removeItem("clawbox.primeRadiant.repairNoticeSeen");
   listed = [LIST_ENTRY];
+  goldenQuestions = [GOLDEN_Q];
+  refuseSettingsPut = false;
   FakeEventSource.last = null;
   installFetch();
   // The Map's canvas: no WebGL or 2D context in jsdom (its own suite mocks one), so it lists the pages.
@@ -395,12 +455,12 @@ describe("PrimeRadiantApp", () => {
     expect(calls.some((c) => c.url === "/setup-api/prime-radiant/graph")).toBe(true);
   });
 
-  it("has five tabs: Map, Pages, Review, Add and Settings", async () => {
+  it("has six tabs: Map, Pages, Review, Questions, Add and Settings", async () => {
     await mount();
     await screen.findByTestId("prime-radiant-tab-map");
     const labels = screen.getAllByRole("tab").map((tab) => tab.textContent ?? "");
-    expect(labels).toHaveLength(5);
-    ["Map", "Pages", "Review", "Add", "Settings"].forEach((label, i) => expect(labels[i].endsWith(label)).toBe(true));
+    expect(labels).toHaveLength(6);
+    ["Map", "Pages", "Review", "Questions", "Add", "Settings"].forEach((label, i) => expect(labels[i].endsWith(label)).toBe(true));
   });
 
   it("lists the failed checks under Review, after the questions", async () => {
@@ -449,6 +509,40 @@ describe("PrimeRadiantApp", () => {
     expect(screen.getByTestId("prime-radiant-backlinks")).toHaveTextContent("widget-pricing");
   });
 
+  it("says who verified a fact: the owner, the owner via the assistant, or the assistant", async () => {
+    const stamp = (verified: Record<string, string>) => ({ ...PAGE, frontmatter: { ...FM, claims: [{ ...FM.claims[0], verified }] } });
+    for (const [verified, words] of [
+      [{ at: "2026-01-03T10:00:00.000Z", by: "owner", via: "assistant" }, "Verified by the owner (via the assistant)"],
+      [{ at: "2026-01-03T10:00:00.000Z", by: "owner" }, "Verified by the owner,"],
+      [{ at: "2026-01-03T10:00:00.000Z", by: "assistant" }, "Verified by the assistant,"],
+    ] as const) {
+      pageOverride = stamp(verified);
+      const view = await mount();
+      await openTab("browse");
+      fireEvent.click(await screen.findByTestId("prime-radiant-page-row"));
+      expect(await screen.findByTestId("prime-radiant-claim-verified")).toHaveTextContent(words);
+      view.unmount();
+    }
+  });
+
+  it("shows the summary written from the page's connections in its header, and none when the page has none of ours", async () => {
+    pageOverride = { ...PAGE, nodeSummary: { text: "Acme Widgets Ltd makes widgets and buys housings from Globex Ltd.", method: "model", at: "2026-10-17T03:00:00.000Z" } };
+    const view = await mount();
+    await openTab("browse");
+    fireEvent.click(await screen.findByTestId("prime-radiant-page-row"));
+    const header = await screen.findByTestId("prime-radiant-page-summary");
+    expect(header).toHaveTextContent("Acme Widgets Ltd makes widgets and buys housings from Globex Ltd.");
+    expect(header).toHaveAttribute("title", "Summary written from this page's connections and sources");
+    view.unmount();
+
+    pageOverride = { ...PAGE, nodeSummary: null };
+    await mount();
+    await openTab("browse");
+    fireEvent.click(await screen.findByTestId("prime-radiant-page-row"));
+    await screen.findByTestId("prime-radiant-backlinks");
+    expect(screen.queryByTestId("prime-radiant-page-summary")).toBeNull();
+  });
+
   it("filters the page list by domain and type", async () => {
     await mount();
     await openTab("browse");
@@ -458,6 +552,15 @@ describe("PrimeRadiantApp", () => {
     await waitFor(() => {
       expect(calls.some((c) => c.url.includes("/pages?") && c.url.includes("type=entity") && c.url.includes("domain=sales"))).toBe(true);
     });
+  });
+
+  it("shows the median links per page beside the counts, flagged while under its target", async () => {
+    status = { ...STATUS, links: { pages: 10, median: 3, mean: 3.2, atTarget: 2, target: 5 } };
+    await mount();
+    const links = await screen.findByTestId("prime-radiant-links");
+    expect(links).toHaveTextContent("3 links/page");
+    expect(links).toHaveAttribute("title", "Median meaningful links per page (target 5)");
+    expect(links.className).toMatch(/amber/);
   });
 
   it("keeps the window drawn when a refresh answers a status it cannot draw", async () => {
@@ -585,6 +688,23 @@ describe("PrimeRadiantApp", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
+  it("labels a verification in History: verified by the owner (via the assistant)", async () => {
+    historyCommits = [
+      { sha: "c".repeat(40), subject: "verify: sales/acme-widgets/hq-city", at: "2026-01-03T10:00:00.000Z", author: "ClawBox assistant", verified: { by: "owner", via: "assistant" } },
+      { sha: "d".repeat(40), subject: "verify: sales/acme-widgets/founded", at: "2026-01-02T12:00:00.000Z", author: "Prime Radiant", verified: { by: "owner" } },
+      INGEST_COMMIT,
+    ];
+    await mount();
+    await openTab("browse");
+    fireEvent.click(await screen.findByTestId("prime-radiant-page-row"));
+    fireEvent.click(await screen.findByTestId("prime-radiant-page-history"));
+    const [viaAssistant, owners, ingest] = await screen.findAllByTestId("prime-radiant-commit");
+    expect(within(viaAssistant).getByTestId("prime-radiant-commit-verified")).toHaveTextContent("verified by the owner (via the assistant)");
+    expect(viaAssistant).toHaveTextContent("ClawBox assistant");
+    expect(within(owners).getByTestId("prime-radiant-commit-verified")).toHaveTextContent(/^· verified by the owner$/);
+    expect(within(ingest).queryByTestId("prime-radiant-commit-verified")).toBeNull();
+  });
+
   it("shows a page's history and undoes a change after confirmation", async () => {
     await mount();
     await openTab("browse");
@@ -681,6 +801,33 @@ describe("PrimeRadiantApp", () => {
     });
   });
 
+  it("shows the company field and the structure switch, and saves them with the rest", async () => {
+    structureSettings = { enabled: true, company: "", enrichTop: 25, modelFallback: 25 };
+    await mount();
+    await openTab("settings");
+    fireEvent.change(await screen.findByTestId("prime-radiant-company"), { target: { value: "  Acme Widgets Ltd " } });
+    fireEvent.click(screen.getByTestId("prime-radiant-structure"));
+    fireEvent.click(screen.getByTestId("prime-radiant-settings-save"));
+    await waitFor(() => {
+      const put = calls.find((c) => c.url.endsWith("/settings") && c.method === "PUT");
+      expect((put?.body as { structure: unknown }).structure).toEqual({ enabled: false, company: "Acme Widgets Ltd" });
+    });
+  });
+
+  it("offers no structure fields to a server from before them, and sends none", async () => {
+    await mount();
+    await openTab("settings");
+    await screen.findByTestId("prime-radiant-settings-save");
+    expect(screen.queryByTestId("prime-radiant-company")).toBeNull();
+    expect(screen.queryByTestId("prime-radiant-structure")).toBeNull();
+    fireEvent.click(screen.getByTestId("prime-radiant-settings-save"));
+    await waitFor(() => {
+      const put = calls.find((c) => c.url.endsWith("/settings") && c.method === "PUT");
+      expect(put).toBeDefined();
+      expect((put?.body as Record<string, unknown>).structure).toBeUndefined();
+    });
+  });
+
   it("never lets the page cap block a save while the second opinion is off", async () => {
     opusExtras = { source: "api_key", maxPages: 100 };
     await mount();
@@ -698,6 +845,37 @@ describe("PrimeRadiantApp", () => {
     await mount();
     await openTab("settings");
     expect(await screen.findByTestId("prime-radiant-opus-source")).toHaveTextContent(/no Anthropic API key and no Claude sign-in/);
+  });
+
+  it("shows the search index size limit with its default, refuses one out of range and saves it", async () => {
+    searchIndexLimitMb = 256;
+    await mount();
+    await openTab("settings");
+    const limit = await screen.findByTestId("prime-radiant-search-index-limit");
+    expect(limit).toHaveValue(256);
+    expect(screen.getByTestId("prime-radiant-settings")).toHaveTextContent("The default is 160 MB");
+    fireEvent.change(limit, { target: { value: "16" } });
+    fireEvent.click(screen.getByTestId("prime-radiant-settings-save"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("The search index size limit must be a whole number of MB from 32 to 4096.");
+    expect(calls.some((c) => c.url.endsWith("/settings") && c.method === "PUT")).toBe(false);
+    fireEvent.change(limit, { target: { value: "512" } });
+    fireEvent.click(screen.getByTestId("prime-radiant-settings-save"));
+    await waitFor(() => {
+      const put = calls.find((c) => c.url.endsWith("/settings") && c.method === "PUT");
+      expect((put?.body as { search: unknown }).search).toEqual({ indexLimitMb: 512 });
+    });
+  });
+
+  it("offers no index size limit to a server that does not know it, and sends none", async () => {
+    await mount();
+    await openTab("settings");
+    await screen.findByTestId("prime-radiant-settings-save");
+    expect(screen.queryByTestId("prime-radiant-search-index-limit")).toBeNull();
+    fireEvent.click(screen.getByTestId("prime-radiant-settings-save"));
+    await waitFor(() => {
+      const put = calls.find((c) => c.url.endsWith("/settings") && c.method === "PUT");
+      expect(put?.body).not.toHaveProperty("search");
+    });
   });
 
   it("shows the tokens an import and a night used, and no money", async () => {
@@ -992,5 +1170,148 @@ describe("prJson", () => {
       },
     })));
     await expect(prJson("/setup-api/prime-radiant/pages", { signal: ctl.signal })).rejects.toMatchObject({ name: "AbortError" });
+  });
+});
+
+describe("PrimeRadiantApp — Questions", () => {
+  it("shows the accuracy with its change and trend, keeps the golden questions, and lists an owner's daily questions in their language", async () => {
+    status = { ...STATUS, golden: GOLDEN_SCORE };
+    mount();
+    expect(await screen.findByTestId("prime-radiant-count-accuracy")).toHaveTextContent("Accuracy 75%");
+    await openTab("questions");
+    expect(await screen.findByTestId("prime-radiant-accuracy-percent")).toHaveTextContent("75% correct");
+    expect(screen.getByTestId("prime-radiant-accuracy-change")).toHaveTextContent("+25 points since the last check");
+    expect(screen.getByTestId("prime-radiant-accuracy-trend")).toBeInTheDocument();
+    expect(screen.queryByTestId("prime-radiant-accuracy-not-judged")).toBeNull();
+    const row = await screen.findByTestId("prime-radiant-golden-row");
+    expect(row).toHaveAttribute("data-verdict", "correct");
+    expect(row).toHaveTextContent("What does the blue widget cost?");
+
+    fireEvent.click(screen.getByTestId("prime-radiant-golden-add"));
+    fireEvent.change(screen.getByTestId("prime-radiant-golden-question"), { target: { value: "Where is Acme based?" } });
+    fireEvent.change(screen.getByTestId("prime-radiant-golden-expected"), { target: { value: "Springfield" } });
+    fireEvent.click(screen.getByTestId("prime-radiant-golden-save"));
+    await waitFor(() =>
+      expect(calls.find((c) => c.url === "/setup-api/prime-radiant/golden" && c.method === "POST")?.body).toEqual({ question: "Where is Acme based?", expected: "Springfield", domain: "sales" }),
+    );
+    await waitFor(() => expect(screen.getAllByTestId("prime-radiant-golden-row")).toHaveLength(2));
+
+    fireEvent.click((await screen.findAllByTestId("prime-radiant-golden-delete"))[0]);
+    fireEvent.click(await screen.findByTestId("prime-radiant-golden-delete-confirm"));
+    await waitFor(() => expect(calls.some((c) => c.method === "DELETE" && c.url.endsWith(`/golden/${GOLDEN_Q.id}`))).toBe(true));
+
+    const daily = await screen.findAllByTestId("prime-radiant-daily-question");
+    expect(daily).toHaveLength(1);
+    expect(daily[0]).toHaveAttribute("data-kind", "claim");
+    expect(daily[0]).toHaveTextContent("Още ли е вярно?");
+    expect(screen.getByTestId("prime-radiant-daily-language")).toHaveValue("bg");
+    const outbound = screen.getByTestId("prime-radiant-daily-outbound");
+    expect(outbound).not.toBeChecked();
+    expect(screen.getByTestId("prime-radiant-daily")).toHaveTextContent("Nothing is sent on its own.");
+    fireEvent.click(outbound);
+    await waitFor(() => expect(calls.find((c) => c.method === "PUT" && c.url.endsWith("/settings"))?.body).toEqual({ verification: { outbound: true } }));
+  });
+
+  it("keeps an edit open with what was typed when the save is refused, and shows the claim and a missing owner", async () => {
+    goldenQuestions = [{ ...GOLDEN_Q, owner: "unassigned", claimId: "sales/acme-widgets/price" }];
+    mount();
+    await openTab("questions");
+    const row = await screen.findByTestId("prime-radiant-golden-row");
+    expect(row).toHaveTextContent("No owner");
+    expect(screen.getByTestId("prime-radiant-golden-row-claim")).toHaveTextContent("sales/acme-widgets/price");
+    fireEvent.click(screen.getByTestId("prime-radiant-golden-edit"));
+    expect(screen.getByTestId("prime-radiant-golden-owner")).toHaveValue("");
+    expect(screen.getByTestId("prime-radiant-golden-claim")).toHaveValue("sales/acme-widgets/price");
+    fireEvent.change(screen.getByTestId("prime-radiant-golden-expected"), { target: { value: "12 EUR" } });
+    fireEvent.change(screen.getByTestId("prime-radiant-golden-claim"), { target: { value: "" } });
+    fireEvent.click(screen.getByTestId("prime-radiant-golden-save"));
+    await waitFor(() => expect(calls.find((c) => c.method === "PATCH")?.body).toMatchObject({ expected: "12 EUR", claimId: null, owner: null }));
+    expect(await within(screen.getByTestId("prime-radiant-golden")).findByRole("alert")).toBeInTheDocument();
+    expect(screen.getByTestId("prime-radiant-golden-form")).toBeInTheDocument();
+    expect(screen.getByTestId("prime-radiant-golden-expected")).toHaveValue("12 EUR");
+  });
+
+  it("takes the number fields' bounds from the server's limits", async () => {
+    mount();
+    await openTab("questions");
+    const perOwner = await screen.findByTestId("prime-radiant-daily-per-owner");
+    expect(perOwner).toHaveAttribute("max", "12");
+    expect(screen.getByTestId("prime-radiant-golden-max")).toHaveAttribute("max", "500");
+    // 15 is inside the app's old fixed bound (20) but outside the server's: it is put back, never sent.
+    fireEvent.change(perOwner, { target: { value: "15" } });
+    fireEvent.blur(perOwner);
+    expect(perOwner).toHaveValue(5);
+    expect(calls.some((c) => c.method === "PUT" && c.url.endsWith("/settings"))).toBe(false);
+  });
+
+  it("asks again for a delete once the armed confirm lost the focus, and after a delete", async () => {
+    mount();
+    await openTab("questions");
+    fireEvent.click(await screen.findByTestId("prime-radiant-golden-delete"));
+    const armed = screen.getByTestId("prime-radiant-golden-delete-confirm");
+    expect(armed).toHaveFocus();
+    fireEvent.blur(armed);
+    expect(screen.queryByTestId("prime-radiant-golden-delete-confirm")).toBeNull();
+    expect(calls.some((c) => c.method === "DELETE")).toBe(false);
+    fireEvent.click(screen.getByTestId("prime-radiant-golden-delete"));
+    fireEvent.click(screen.getByTestId("prime-radiant-golden-delete-confirm"));
+    await waitFor(() => expect(calls.some((c) => c.method === "DELETE")).toBe(true));
+    expect(screen.queryByTestId("prime-radiant-golden-delete-confirm")).toBeNull();
+  });
+
+  it("sets the nightly golden check and the daily questions an owner gets under Checks", async () => {
+    mount();
+    await openTab("questions");
+    const enabled = await screen.findByTestId("prime-radiant-golden-enabled");
+    expect(enabled).toBeChecked();
+    expect(screen.getByTestId("prime-radiant-golden-max")).toHaveValue(50);
+    fireEvent.click(enabled);
+    await waitFor(() => expect(calls.filter((c) => c.method === "PUT" && c.url.endsWith("/settings")).map((c) => c.body)).toContainEqual({ golden: { enabled: false } }));
+    const perOwner = screen.getByTestId("prime-radiant-daily-per-owner");
+    fireEvent.change(perOwner, { target: { value: "99" } });
+    fireEvent.blur(perOwner);
+    expect(perOwner).toHaveValue(5);
+    fireEvent.change(perOwner, { target: { value: "3" } });
+    fireEvent.blur(perOwner);
+    await waitFor(() => expect(calls.filter((c) => c.method === "PUT" && c.url.endsWith("/settings")).map((c) => c.body)).toContainEqual({ verification: { perOwner: 3 } }));
+    expect(calls.filter((c) => c.method === "PUT" && c.url.endsWith("/settings")).map((c) => c.body)).not.toContainEqual({ verification: { perOwner: 99 } });
+  });
+
+  it("puts back the value in force when the server refuses a Checks save", async () => {
+    refuseSettingsPut = true;
+    mount();
+    await openTab("questions");
+    const perOwner = await screen.findByTestId("prime-radiant-daily-per-owner");
+    fireEvent.change(perOwner, { target: { value: "3" } });
+    fireEvent.blur(perOwner);
+    await waitFor(() => expect(calls.some((c) => c.method === "PUT" && c.url.endsWith("/settings"))).toBe(true));
+    expect(await within(screen.getByTestId("prime-radiant-checks")).findByRole("alert")).toBeInTheDocument();
+    await waitFor(() => expect(perOwner).toHaveValue(5));
+  });
+
+  it("says how many questions were not judged beside the % of those that were", async () => {
+    status = { ...STATUS, golden: { ...GOLDEN_SCORE, last: { ...GOLDEN_SCORE.last, asked: 30, correct: 5, wrong: 1, failed: 24, percent: 83.3 } } };
+    mount();
+    await openTab("questions");
+    expect(await screen.findByTestId("prime-radiant-accuracy-percent")).toHaveTextContent("83.3% correct");
+    expect(screen.getByTestId("prime-radiant-accuracy-not-judged")).toHaveTextContent("24 not judged");
+  });
+
+  it("still says how many were not judged for a stored score with no %", async () => {
+    status = { ...STATUS, golden: { ...GOLDEN_SCORE, last: { ...GOLDEN_SCORE.last, asked: 6, correct: 0, wrong: 0, failed: 6, percent: null } } };
+    mount();
+    await openTab("questions");
+    expect(await screen.findByTestId("prime-radiant-accuracy-not-judged")).toHaveTextContent("6 not judged");
+    expect(screen.getByTestId("prime-radiant-accuracy")).toHaveTextContent("Not checked yet");
+    expect(screen.queryByTestId("prime-radiant-accuracy-percent")).toBeNull();
+  });
+
+  it("says so when there are no golden questions, no score and no owners yet", async () => {
+    goldenQuestions = [];
+    mount();
+    await openTab("questions");
+    expect(await screen.findByTestId("prime-radiant-golden-empty")).toBeInTheDocument();
+    expect(screen.getByTestId("prime-radiant-accuracy")).toHaveTextContent("Not checked yet");
+    expect(screen.queryByTestId("prime-radiant-count-accuracy")).toBeNull();
   });
 });

@@ -6,12 +6,16 @@
  *
  * The owner, or the assistant through the MCP bearer: the stamp says who
  * verified (`verified.by`) and the assistant's commit names it, so History
- * shows it and the owner can undo it. From our own page. 400 `invalid`, 404
+ * shows it and the owner can undo it. The assistant's `confirm: true` (the
+ * user confirmed the fact in their own words) makes it the OWNER's
+ * verification, through the assistant — `{ by: owner, via: assistant }`,
+ * which wins like one made in the app; without it the stamp is the
+ * assistant's own. From our own page. 400 `invalid`, 404
  * `not_found` / `no_page`, 409 `retired` / `lint_blocked`, 412
  * `not_initialised`.
  */
 import { readVerifyRequest, verifyClaimAs } from "@/lib/prime-radiant/edit";
-import { editFailure, json, readJsonBody, writerGuard } from "@/lib/prime-radiant/route-helpers";
+import { editFailure, json, readJsonBody, verifierOf, writerGuard } from "@/lib/prime-radiant/route-helpers";
 
 export const dynamic = "force-dynamic";
 
@@ -21,7 +25,8 @@ export async function POST(req: Request) {
   const read = await readJsonBody(req);
   if (!read.ok) return read.response;
   try {
-    return json(await verifyClaimAs(readVerifyRequest(read.body), gate.writer));
+    const input = readVerifyRequest(read.body);
+    return json(await verifyClaimAs(input, verifierOf(gate.writer, input.confirm)));
   } catch (err) {
     return editFailure("claim verify", err);
   }

@@ -25,11 +25,11 @@ vi.mock("@/lib/clawkeep-memory-scheduler", () => ({
   nextRunAtMs: vi.fn(() => 0),
 }));
 
-// Starting a run and rewriting the schedule are OWNER-ONLY: middleware admits
-// the MCP bearer on every /setup-api route, so without that gate the assistant
-// could kick off an hours-long full reindex, or change how often one happens.
-// These cases are about what the OWNER gets, so the session answers yes; the
-// refusal itself is asserted in its own block below.
+// Starting a run and rewriting the schedule answer a signed-in person or the
+// assistant's own bearer, and nobody else; the assistant's full pass waits on
+// confirm (memory-shard-assistant.test.ts). These cases are about what the
+// OWNER gets, so the session answers yes; the refusal of a caller with neither
+// credential is asserted in its own block below.
 const { ownerSession } = vi.hoisted(() => ({ ownerSession: { value: true } }));
 vi.mock("@/lib/owner-session", () => ({
   hasPersonSession: vi.fn(async () => ownerSession.value),
@@ -316,10 +316,9 @@ describe("the bar on an OpenClaw box, across the HTTP boundary", () => {
 });
 
 describe("the owner gate on the two routes that spend the box's time", () => {
-  // Middleware admits the MCP bearer on every /setup-api route, so "signed in"
-  // is not the same question as "the PERSON asked". Reading the status stays
-  // open to the agent; starting an hours-long re-embed, or moving when one
-  // happens unattended, does not.
+  // Middleware admits the MCP bearer on every /setup-api route, so the routes
+  // ask again who it is: a signed-in person, or the assistant's bearer itself.
+  // A request with neither — no cookie, no bearer — is refused.
   beforeEach(() => { ownerSession.value = false; });
 
   it("refuses to start an index run without an owner session", async () => {

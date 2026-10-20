@@ -11,6 +11,12 @@
  * The same question raised again (the same pair on the next night, the same
  * lint finding) is NOT a second item: `dedupe_key` names it, and an item still
  * open or put off ("later") under that key is answered instead of a new one.
+ * A key past {@link MAX_DEDUPE_KEY} characters is stored as the SHA-256 of
+ * the whole key ({@link storedDedupeKey}) — it was cut there once, which let
+ * two questions whose keys began alike pass for one. A key a caller used
+ * before (`legacyKeys`) still finds the item waiting under it. With
+ * `keepDismissed`, a question a person dismissed is not asked again while its
+ * candidates read as they did then.
  *
  * Reads never create the database (`stateDbExists` first).
  *
@@ -19,7 +25,7 @@
 
 import crypto from "crypto";
 import type { DatabaseSync } from "node:sqlite";
-import { isClaimId } from "./claims";
+import { claimTextKey, isClaimId } from "./claims";
 import { safePagePath } from "./paths";
 import { stateDbExists, withStateDb } from "./state-db";
 
@@ -60,8 +66,12 @@ export interface ReviewResolution {
   commit?: string | null;
   retired?: string[];
   by: string;
-  /** Why it was settled, when a pass (not a person) settled it. */
+  /** `assistant` when the assistant settled it on the owner's word (`by: owner`). */
+  via?: string;
+  /** Why it was settled: a pass's reason, or the one the person gave. */
   note?: string;
+  /** Claims removed from their page (deleted, or folded into a same-worded claim): the item asks about nothing now. */
+  removed?: string[];
 }
 
 export interface ReviewItem {
@@ -85,6 +95,10 @@ export interface NewReviewItem {
   candidates?: readonly ReviewCandidate[];
   evidence?: readonly ReviewEvidence[];
   dedupeKey?: string | null;
+  /** Keys the same question was stored under before: an item waiting under one answers too. */
+  legacyKeys?: readonly string[];
+  /** Answer, never re-raise, a question a person dismissed under the key while its candidates read the same. */
+  keepDismissed?: boolean;
   runId?: string | null;
 }
 
@@ -199,28 +213,65 @@ function fromRow(r: Row): ReviewItem {
 
 const COLUMNS = "id, kind, claim_id, pages, candidates, evidence, status, created_at, resolved_at, resolution, run_id";
 
-function findOpenByKey(db: DatabaseSync, key: string): ReviewItem | null {
-  const row = db
-    .prepare(`SELECT ${COLUMNS} FROM review_items WHERE dedupe_key = ? AND status IN ('open', 'later') ORDER BY created_at LIMIT 1`)
-    .get(key) as Row | undefined;
-  return row ? fromRow(row) : null;
+/** The longest dedupe key stored as it is. */
+export const MAX_DEDUPE_KEY = 200;
+
+/** A dedupe key as the table holds it: itself up to {@link MAX_DEDUPE_KEY} characters, else the SHA-256 of all of it. */
+export function storedDedupeKey(key: string): string {
+  return key.length <= MAX_DEDUPE_KEY ? key : `sha256:${crypto.createHash("sha256").update(key).digest("hex")}`;
+}
+
+function findOpenByKey(db: DatabaseSync, keys: readonly string[]): ReviewItem | null {
+  const stmt = db.prepare(`SELECT ${COLUMNS} FROM review_items WHERE dedupe_key = ? AND status IN ('open', 'later') ORDER BY created_at LIMIT 1`);
+  for (const key of keys) {
+    const row = stmt.get(key) as Row | undefined;
+    if (row) return fromRow(row);
+  }
+  return null;
+}
+
+const candidateTexts = (list: readonly ReviewCandidate[]) => JSON.stringify(list.map((c) => claimTextKey(c.text)).sort());
+
+/**
+ * A person's dismissal of the same question with the same candidate texts:
+ * not one a pass made (`auto`), nor one closed because a claim was retired or
+ * removed — the claims of such a question are gone, a new one is new.
+ */
+function findDismissed(db: DatabaseSync, keys: readonly string[], candidates: readonly ReviewCandidate[]): ReviewItem | null {
+  const stmt = db.prepare(`SELECT ${COLUMNS} FROM review_items WHERE dedupe_key = ? AND status = 'resolved' ORDER BY resolved_at DESC`);
+  const texts = candidateTexts(candidates);
+  for (const key of keys) {
+    for (const item of (stmt.all(key) as unknown as Row[]).map(fromRow)) {
+      const r = item.resolution;
+      if (!r || r.action !== "dismiss" || r.by === "auto" || (r.retired?.length ?? 0) > 0 || (r.removed?.length ?? 0) > 0) continue;
+      if (candidateTexts(item.candidates) === texts) return item;
+    }
+  }
+  return null;
 }
 
 /**
  * Add an item, or answer the one already waiting under the same dedupe key
- * (`created: false`). Everything is cleaned here, so every caller (the
- * nightly pass, the POST route) stores the same shape.
+ * (`created: false`), or — with `keepDismissed` — the dismissal that already
+ * answered it (`dismissed: true`). Everything is cleaned here, so every
+ * caller (the nightly pass, the POST route) stores the same shape.
  */
 export function addReviewItem(
   vault: string,
   input: NewReviewItem,
   at: string = new Date().toISOString(),
-): { item: ReviewItem; created: boolean } {
+): { item: ReviewItem; created: boolean; dismissed?: boolean } {
   return withStateDb(vault, (db) => {
-    const key = input.dedupeKey ? input.dedupeKey.slice(0, 200) : null;
+    const key = input.dedupeKey ? storedDedupeKey(input.dedupeKey) : null;
     if (key) {
-      const existing = findOpenByKey(db, key);
+      // An old key was stored as it was only when it fitted; one that was cut is no key to look for.
+      const keys = [key, ...(input.legacyKeys ?? []).filter((k) => k.length <= MAX_DEDUPE_KEY && k !== key)];
+      const existing = findOpenByKey(db, keys);
       if (existing) return { item: existing, created: false };
+      if (input.keepDismissed) {
+        const dismissed = findDismissed(db, keys, cleanCandidates(input.candidates));
+        if (dismissed) return { item: dismissed, created: false, dismissed: true };
+      }
     }
     const item: ReviewItem = {
       id: newReviewId(),
@@ -345,6 +396,37 @@ export function closeItemsForRetired(vault: string, retired: readonly string[], 
     let n = 0;
     for (const id of retired) {
       n += Number(stmt.run(at, JSON.stringify({ action: "dismiss", by, retired: [id] } satisfies ReviewResolution), id).changes);
+    }
+    return n;
+  });
+}
+
+/**
+ * Close every still-waiting item about claims removed from their page (a
+ * delete, or a fold into a same-worded claim — `note` says which, or answers
+ * it for each removed claim id): the one about the claim, and a contradiction
+ * one of its sides. Not a dismissal a person made, so the same question about
+ * a claim that comes back is asked again.
+ */
+export function closeItemsForRemoved(
+  vault: string,
+  removed: readonly string[],
+  by: string,
+  note: string | ((removedId: string) => string),
+  at: string = new Date().toISOString(),
+): number {
+  if (removed.length === 0 || !stateDbExists(vault)) return 0;
+  const ids = new Set(removed);
+  return withStateDb(vault, (db) => {
+    const rows = db.prepare(`SELECT ${COLUMNS} FROM review_items WHERE status IN ('open', 'later')`).all() as unknown as Row[];
+    const close = db.prepare("UPDATE review_items SET status = 'resolved', resolved_at = ?, resolution = ? WHERE id = ? AND status IN ('open', 'later')");
+    let n = 0;
+    for (const item of rows.map(fromRow)) {
+      const hit = [item.claimId, ...(item.kind === "contradiction" ? item.candidates.map((c) => c.claimId) : [])].filter((id): id is string => !!id && ids.has(id));
+      if (hit.length === 0) continue;
+      const removedIds = [...new Set(hit)];
+      const noteText = typeof note === "string" ? note : [...new Set(removedIds.map((id) => note(id)))].join("; ");
+      n += Number(close.run(at, JSON.stringify({ action: "dismiss", by, note: noteText, removed: removedIds } satisfies ReviewResolution), item.id).changes);
     }
     return n;
   });

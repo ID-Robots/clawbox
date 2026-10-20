@@ -35,7 +35,15 @@
  * the pages with the most claims give theirs up first, and a run makes room
  * for a new page's page vector by dropping claim vectors over the share.
  * Search and the connect pass's similar pages need the page vector; a page
- * without some of its claim vectors is still found.
+ * without some of its claim vectors is still found. The budget is the owner's
+ * (`searchIndexLimitMb`); lowered below what the page vectors alone take, the
+ * pages with the most page chunks are capped first.
+ *
+ * 8-BIT VECTORS ({@link ./vector-q8}): a vector is stored as int8 codes and one
+ * scale, ~1 KB at 1,024-d, and kept that way in memory for search. A store
+ * written before (float32 rows) is converted in place by the next run, in
+ * batches, before anything else — no re-embedding, same identity — and read
+ * as it is until then: a row's format is told by its blob's length.
  *
  * ONLY WHILE MEMORY SHARD IS ON AND THE VAULT EXISTS ({@link
  * vaultIndexingAllowed}), checked by every run. Switching Memory Shard on
@@ -69,9 +77,13 @@ import { stripRelatedBlock } from "./connect";
 import { parsePage } from "./frontmatter";
 import { currentBranch, git, VAULT_MAIN_BRANCH } from "./git";
 import { isKnowledgePage, safePagePath, vaultDir } from "./paths";
+import { readRecordFrontmatter } from "./records";
 import { redactText } from "./redact";
+import { searchIndexLimitBytes } from "./settings";
+import { stripRecordBlock } from "./structure";
 import { vaultInitialised } from "./vault";
 import type { PageFrontmatter } from "./schema";
+import { decodeVectorBlob, dequantizeQ8, dotQ8, encodeQ8Blob, float32FromBlob, q8BlobBytes, vectorBlobDims } from "./vector-q8";
 
 /** Bumped when the tables or what goes into them change: the store is rebuilt. */
 const VAULT_INDEX_SCHEMA = "2";
@@ -86,19 +98,43 @@ const VAULT_INDEX_SCHEMA = "2";
 export const VAULT_INDEX_DIMS = 1024;
 
 /**
- * The vault's own vector budget (Shard's is for the owner's folders): enough
- * for ~40k chunks at {@link VAULT_INDEX_DIMS}, a vault of several thousand
- * pages with room to grow.
+ * The vault's own vector budget when the owner has not set one (Shard's is
+ * for the owner's folders; the owner's limit is the Prime Radiant setting
+ * `searchIndexLimitMb`, read by every run): enough for ~160k chunks at
+ * {@link VAULT_INDEX_DIMS} in 8-bit ({@link vaultChunkBytes}), a vault of tens
+ * of thousands of pages. The vectors held in memory for search take about the
+ * same as the budget, the same as the float32 index's ~40k chunks did.
  */
 export const VAULT_INDEX_BUDGET_BYTES = 160 * 1024 * 1024;
 
 let maxChunksOverride: number | null = null;
 
-/** The most chunks the vault index holds for vectors `dims` wide. */
-export function vaultMaxChunks(dims: number): number {
+function indexWidth(dims: number): number {
+  return Math.max(1, Math.min(VAULT_INDEX_DIMS, Number.isFinite(dims) && dims > 0 ? dims : VAULT_INDEX_DIMS));
+}
+
+/** What one chunk's vector costs, in the store and in memory: one byte a dimension plus its scale (vector-q8.ts). */
+export function vaultChunkBytes(dims: number): number {
+  return q8BlobBytes(indexWidth(dims));
+}
+
+/** The most chunks the vault index holds for vectors `dims` wide within `budgetBytes`. */
+export function vaultMaxChunks(dims: number, budgetBytes: number = VAULT_INDEX_BUDGET_BYTES): number {
   if (maxChunksOverride !== null) return maxChunksOverride;
-  const width = Math.max(1, Math.min(VAULT_INDEX_DIMS, Number.isFinite(dims) && dims > 0 ? dims : VAULT_INDEX_DIMS));
-  return Math.max(1, Math.floor(VAULT_INDEX_BUDGET_BYTES / (width * Float32Array.BYTES_PER_ELEMENT)));
+  const budget = Number.isFinite(budgetBytes) && budgetBytes > 0 ? budgetBytes : VAULT_INDEX_BUDGET_BYTES;
+  return Math.max(1, Math.floor(budget / vaultChunkBytes(dims)));
+}
+
+/**
+ * The owner's limit (`searchIndexLimitMb`, in the settings beside the vault),
+ * read at every run; the default when the settings cannot be read.
+ */
+export function vaultIndexBudgetBytes(vault: string = vaultDir()): number {
+  try {
+    return searchIndexLimitBytes(path.dirname(path.resolve(vault)));
+  } catch {
+    return VAULT_INDEX_BUDGET_BYTES;
+  }
 }
 
 /** For the tests: a chunk budget small enough to fill (null: the real one). */
@@ -173,6 +209,8 @@ export interface VaultPageUnits {
   title: string;
   type: string;
   verified: boolean;
+  /** The hub page that lists it, when the page is a record leaf (its `record.hub`): search never ranks it above that hub. */
+  hub: string | null;
   units: VaultIndexUnit[];
 }
 
@@ -228,6 +266,16 @@ export interface VaultIndexStatus {
   builtAt: number | null;
   /** Pages on `main` the last run left without a page vector; null before a run has counted them. */
   withoutPageVector: number | null;
+  /** What the stored vectors take, bytes (the measure the limit is in; text and sqlite's own pages aside). */
+  usedBytes: number;
+  /** The owner's limit in force (`searchIndexLimitMb`), bytes. */
+  limitBytes: number;
+  /** The most chunks that limit holds at the index's width. */
+  maxChunks: number;
+  /** Pages the last run could not fit (not even their page vectors); null before a run has counted them. */
+  cappedPages: number | null;
+  /** Float32 rows from before the 8-bit index are still waiting for the next run to convert them. */
+  migrationPending: boolean;
 }
 
 interface IndexOptions {
@@ -262,8 +310,8 @@ export function pageIndexUnits(rel: string, text: string): VaultPageUnits | null
   const pageVerified = fm.verified != null;
   const title = fm.title.trim();
   const units: VaultIndexUnit[] = [];
-  // The connect pass's link block is navigation, not content: never embedded.
-  for (const chunk of chunkText(stripRelatedBlock(parsed.body))) {
+  // The connect pass's link block and a leaf's link up to its hub are navigation, not content: never embedded.
+  for (const chunk of chunkText(stripRecordBlock(stripRelatedBlock(parsed.body)))) {
     units.push({ refId: pageId, kind: "page", verified: pageVerified, text: redacted(`${title}\n\n${chunk}`) });
   }
   for (const claim of fm.claims) {
@@ -278,7 +326,8 @@ export function pageIndexUnits(rel: string, text: string): VaultPageUnits | null
   }
   // A page with neither body nor claims is still findable by its title.
   if (units.length === 0 && title) units.push({ refId: pageId, kind: "page", verified: pageVerified, text: redacted(title) });
-  return { pageId, title, type: fm.type, verified: pageVerified, units };
+  const hub = readRecordFrontmatter(fm)?.hub ?? null;
+  return { pageId, title, type: fm.type, verified: pageVerified, hub: hub && hub !== rel ? hub : null, units };
 }
 
 export interface RankCandidate {
@@ -290,7 +339,12 @@ export interface RankCandidate {
   text: string;
   verified: boolean;
   similarity: number;
+  /** The hub page of a record leaf (both its page and its claim hits): never ranked above that hub when the hub is a hit. */
+  hub?: string | null;
 }
+
+/** How far under its hub a leaf is put when it would have outranked it. */
+const BELOW_HUB = 1e-6;
 
 /** One hit per page or claim: the identity both the search and the ranking dedupe on. */
 function hitKey(c: Pick<RankCandidate, "kind" | "refId" | "path">): string {
@@ -305,13 +359,15 @@ function round3(n: number): number {
  * Boost, deduplicate and order candidate chunks: one hit per page or claim
  * (its best chunk), verified ones lifted by {@link VERIFIED_BOOST} up to
  * {@link MAX_SCORE}, ties broken by similarity and then by id so the order is
- * stable.
+ * stable. A record leaf (`hub` set) whose hub page is among the hits never
+ * outranks it: it is put just under the hub, its score no higher than the
+ * hub's (searchPrimeRadiant brings a leaf's hub in when it was not found).
  */
 export function rankVaultHits(candidates: readonly RankCandidate[], limit: number): VaultSearchHit[] {
   // Ordered by the UNCLAMPED lift, so a verified hit at the ceiling still
   // ranks above an unverified one that reached it on similarity alone; only
   // the score handed out is clamped.
-  const best = new Map<string, { hit: VaultSearchHit; rank: number }>();
+  const best = new Map<string, { hit: VaultSearchHit; rank: number; hub: string | null }>();
   for (const c of candidates) {
     const similarity = Math.max(0, Math.min(1, c.similarity));
     const rank = similarity + (c.verified ? VERIFIED_BOOST : 0) + (c.kind === "page" && HUB_TYPES.has(c.type) ? HUB_BOOST : 0);
@@ -320,6 +376,7 @@ export function rankVaultHits(candidates: readonly RankCandidate[], limit: numbe
     if (held && held.rank >= rank) continue;
     best.set(key, {
       rank,
+      hub: c.hub && c.hub !== c.path ? c.hub : null,
       hit: {
         source: "prime-radiant",
         path: c.path,
@@ -333,6 +390,18 @@ export function rankVaultHits(candidates: readonly RankCandidate[], limit: numbe
         verified: c.verified,
       },
     });
+  }
+  const hubRank = new Map<string, { rank: number; score: number }>();
+  for (const v of best.values()) {
+    if (v.hit.kind !== "page") continue;
+    const at = hubRank.get(v.hit.path);
+    if (!at || v.rank > at.rank) hubRank.set(v.hit.path, { rank: v.rank, score: v.hit.score });
+  }
+  for (const v of best.values()) {
+    const hub = v.hub ? hubRank.get(v.hub) : undefined;
+    if (!hub || v.rank < hub.rank) continue;
+    v.rank = hub.rank - BELOW_HUB;
+    v.hit = { ...v.hit, score: Math.min(v.hit.score, hub.score) };
   }
   return [...best.values()]
     .sort((a, b) => b.rank - a.rank || b.hit.similarity - a.hit.similarity || a.hit.id.localeCompare(b.hit.id))
@@ -367,6 +436,11 @@ export interface ChunkBudgetPage {
  * page keeps claims up to one level — so the pages with the most claims give
  * theirs up first — and the remainder goes one each to the first pages above
  * it. Answers how many claim chunks each page keeps.
+ *
+ * A budget lowered below what the fixed pages' page chunks alone take (the
+ * owner's limit went down) caps fixed pages too, the ones with the most page
+ * chunks first (a later path first among equals), until the rest fit: the
+ * fewest pages leave search for the room the budget lost.
  */
 export function planVaultChunks(pages: readonly ChunkBudgetPage[], free: number): Array<number | null> {
   const out: Array<number | null> = pages.map(() => 0);
@@ -374,6 +448,18 @@ export function planVaultChunks(pages: readonly ChunkBudgetPage[], free: number)
   pages.forEach((p) => {
     if (p.fixed) room += p.held - p.pageChunks;
   });
+  // What the pages being re-embedded hold is free once they are; only the fixed pages' page chunks are certain.
+  const releasable = pages.reduce((s, p) => s + (p.fixed ? 0 : p.held), 0);
+  if (room + releasable < 0) {
+    const largest = pages
+      .flatMap((p, i) => (p.fixed && p.pageChunks > 0 ? [i] : []))
+      .sort((a, b) => pages[b].pageChunks - pages[a].pageChunks || b - a);
+    for (const i of largest) {
+      if (room + releasable >= 0) break;
+      room += pages[i].pageChunks;
+      out[i] = null;
+    }
+  }
   const others = pages.flatMap((p, i) => (p.fixed ? [] : [i]));
   for (const i of [...others.filter((i) => pages[i].pageChunks <= pages[i].held), ...others.filter((i) => pages[i].pageChunks > pages[i].held)]) {
     const p = pages[i];
@@ -454,6 +540,11 @@ const SCHEMA = `
   CREATE INDEX IF NOT EXISTS chunks_by_path ON chunks(path);
 `;
 
+/** Whether the store's `pages` rows say which hub a leaf is under (a store older than record hubs does not). */
+function hasHubColumn(db: DatabaseSync): boolean {
+  return (db.prepare("PRAGMA table_info(pages)").all() as Array<{ name?: unknown }>).some((c) => c.name === "hub");
+}
+
 async function openForWrite(file: string): Promise<DatabaseSync> {
   await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
   const db = openSqlite(file, false);
@@ -465,6 +556,8 @@ async function openForWrite(file: string): Promise<DatabaseSync> {
       /* a speed-up, not a rule */
     }
     db.exec(SCHEMA);
+    // A store from before record hubs: the column is added in place (no rebuild; a row fills it when its page moves).
+    if (!hasHubColumn(db)) db.exec("ALTER TABLE pages ADD COLUMN hub TEXT");
   } catch (err) {
     try { db.close(); } catch { /* nothing more to do */ }
     throw err;
@@ -518,8 +611,76 @@ function storeIdentity(embedder: ResolvedEmbedder, vault: string): string {
     .slice(0, 16);
 }
 
+/** A vector as the store keeps it: 8-bit codes and a scale (vector-q8.ts). */
 function toBlob(vec: Float32Array): Uint8Array {
-  return new Uint8Array(vec.buffer, vec.byteOffset, vec.byteLength);
+  return encodeQ8Blob(vec);
+}
+
+// ─── float32 rows → 8-bit ────────────────────────────────────────────────────
+
+/** Rows converted per transaction: bounded memory (~4 MB of float32 at 1,024-d), and a crash loses one batch at most. */
+export const VECTOR_MIGRATION_BATCH = 1024;
+
+/**
+ * `vec_q8` holds the generation at which every row was known to be 8-bit.
+ * Each run that writes moves the generation and this mark with it (it only
+ * writes 8-bit rows), so the mark stops matching only when something else
+ * wrote float32 rows — a build from before the 8-bit index — and the next run
+ * looks again. Checking is a meta read, not a table scan.
+ */
+function vectorsAllQ8(db: DatabaseSync): boolean {
+  return metaGet(db, "vec_q8") === (metaGet(db, "generation") ?? "0");
+}
+
+/**
+ * Convert the store's float32 rows to 8-bit in place, {@link
+ * VECTOR_MIGRATION_BATCH} at a time, each batch its own transaction. A row's
+ * format is its blob's length (a float32 blob is a multiple of 4 bytes, an
+ * 8-bit one never is), so the work is idempotent and a run cut short — a
+ * crash, an abort — is picked up where it stopped. Nothing is re-embedded, the
+ * store's identity is left as it is, and no row is dropped. The event loop is
+ * let through between batches (a large store is tens of batches). Answers how
+ * many rows it converted.
+ */
+export async function migrateVaultVectors(db: DatabaseSync, signal?: AbortSignal, batch: number = VECTOR_MIGRATION_BATCH): Promise<number> {
+  if (vectorsAllQ8(db)) return 0;
+  const pick = db.prepare("SELECT id, vec FROM chunks WHERE id > ? AND length(vec) % 4 = 0 ORDER BY id LIMIT ?");
+  const put = db.prepare("UPDATE chunks SET vec = ? WHERE id = ? AND length(vec) % 4 = 0");
+  let after = 0;
+  let converted = 0;
+  for (;;) {
+    if (signal?.aborted) throw signal.reason ?? new Error("aborted");
+    const rows = pick.all(after, Math.max(1, batch)) as { id?: unknown; vec?: unknown }[];
+    if (rows.length === 0) break;
+    db.exec("BEGIN");
+    try {
+      for (const row of rows) {
+        const id = Number(row.id);
+        if (row.vec instanceof Uint8Array && row.vec.byteLength > 0) put.run(toBlob(float32FromBlob(row.vec)), id);
+        after = Math.max(after, id);
+      }
+      db.exec("COMMIT");
+    } catch (err) {
+      db.exec("ROLLBACK");
+      throw err;
+    }
+    converted += rows.length;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  db.exec("BEGIN");
+  try {
+    // The vectors moved (if only by rounding): readers holding the old ones reload.
+    const generation = converted > 0 ? String(Number(metaGet(db, "generation") ?? 0) + 1) : (metaGet(db, "generation") ?? "0");
+    if (converted > 0) metaSet(db, "generation", generation);
+    metaSet(db, "vec_q8", generation);
+    const dim = db.prepare("SELECT vec FROM chunks LIMIT 1").get() as { vec?: Uint8Array } | undefined;
+    if (dim?.vec) metaSet(db, "dim", String(vectorBlobDims(dim.vec)));
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+  return converted;
 }
 
 function errorText(err: unknown): string {
@@ -604,7 +765,7 @@ async function syncOnce(vault: string, paths: ReadonlySet<string> | null, signal
 
   const embedder = await resolveMemoryEmbedder();
   const identity = storeIdentity(embedder, vault);
-  const ceiling = vaultMaxChunks(embedder.dimensions);
+  const ceiling = vaultMaxChunks(embedder.dimensions, vaultIndexBudgetBytes(vault));
   const db = await openForWrite(vaultIndexPathFor(vault));
   try {
     const disowned = metaGet(db, "identity") !== identity;
@@ -621,6 +782,10 @@ async function syncOnce(vault: string, paths: ReadonlySet<string> | null, signal
       db.exec("DELETE FROM chunks; DELETE FROM pages;");
       db.prepare("DELETE FROM meta WHERE key = 'identity'").run();
     }
+
+    // A store from before the 8-bit index: its float32 rows are converted
+    // first, so the budget below counts what the rows really take.
+    if ((await migrateVaultVectors(db, signal)) > 0) dropVectorCache(vaultIndexPathFor(vault));
 
     const stored = new Map<string, string>();
     for (const row of db.prepare("SELECT path, blob FROM pages").all() as { path?: unknown; blob?: unknown }[]) {
@@ -641,10 +806,11 @@ async function syncOnce(vault: string, paths: ReadonlySet<string> | null, signal
       chunksOf: db.prepare("SELECT ref_id, kind, verified, text FROM chunks WHERE path = ? ORDER BY id"),
       insertChunk: db.prepare("INSERT INTO chunks (path, ref_id, kind, verified, text, vec) VALUES (?, ?, ?, ?, ?, ?)"),
       upsertPage: db.prepare(
-        `INSERT INTO pages (path, blob, page_id, title, type, verified, chunks, indexed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO pages (path, blob, page_id, title, type, verified, chunks, indexed_at, hub)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(path) DO UPDATE SET blob = excluded.blob, page_id = excluded.page_id, title = excluded.title,
-           type = excluded.type, verified = excluded.verified, chunks = excluded.chunks, indexed_at = excluded.indexed_at`,
+           type = excluded.type, verified = excluded.verified, chunks = excluded.chunks, indexed_at = excluded.indexed_at,
+           hub = excluded.hub`,
       ),
     };
     const tx = (fn: () => void) => {
@@ -697,7 +863,7 @@ async function syncOnce(vault: string, paths: ReadonlySet<string> | null, signal
       // new blob, and the embedder is not asked again.
       if (page && existing > 0 && existing === units.length && sameUnits(sql.chunksOf.all(rel), units)) {
         tx(() => {
-          sql.upsertPage.run(rel, entry.blob, page.pageId, page.title, page.type, page.verified ? 1 : 0, units.length, Date.now());
+          sql.upsertPage.run(rel, entry.blob, page.pageId, page.title, page.type, page.verified ? 1 : 0, units.length, Date.now(), page.hub);
         });
         unchanged += 1;
         wrote = true;
@@ -739,16 +905,36 @@ async function syncOnce(vault: string, paths: ReadonlySet<string> | null, signal
     const claimsFor = new Map<string, number | null>();
     const shrink: Array<[string, number]> = [];
     const grow: string[] = [];
+    const drop: string[] = [];
     planned.forEach((rel, i) => {
       claimsFor.set(rel, allowed[i]);
       const h = held.get(rel);
       if (working.has(rel) || !h) return;
+      // The owner lowered the limit below what the page vectors alone take:
+      // this page goes whole, unrecorded, so a whole-tree run with room takes
+      // it back.
+      if (allowed[i] === null) {
+        drop.push(rel);
+        return;
+      }
       const keep = allowed[i] ?? h.claim;
       if (h.claim > keep) shrink.push([rel, keep]);
       // A page the budget took claims from earlier gets them back on a
       // whole-tree run once there is room (an incremental run never reads it).
       else if (full && h.claim < keep && tree.get(rel)?.blob === stored.get(rel)) grow.push(rel);
     });
+    if (drop.length > 0) {
+      tx(() => {
+        for (const rel of drop) {
+          sql.dropChunks.run(rel);
+          sql.dropPage.run(rel);
+        }
+      });
+      capped += drop.length;
+      unchanged -= drop.filter((rel) => targets.has(rel)).length;
+      chunkCount = countOf(db, "SELECT COUNT(*) AS n FROM chunks");
+      wrote = true;
+    }
     // Claims over a page's share go, a verified claim last.
     if (shrink.length > 0) {
       const evict = db.prepare(
@@ -811,7 +997,7 @@ async function syncOnce(vault: string, paths: ReadonlySet<string> | null, signal
         // not read again until it changes.
         sql.upsertPage.run(
           rel, blob, page?.pageId ?? rel.replace(/\.md$/, ""), page?.title ?? "", page?.type ?? "",
-          page?.verified ? 1 : 0, all.length, Date.now(),
+          page?.verified ? 1 : 0, all.length, Date.now(), page?.hub ?? null,
         );
       });
       chunkCount = chunkCount - existing + units.length;
@@ -834,11 +1020,17 @@ async function syncOnce(vault: string, paths: ReadonlySet<string> | null, signal
       metaSet(db, "identity", identity);
       metaSet(db, "built_at", String(Date.now()));
       metaSet(db, "capped", capped > 0 ? "1" : "");
+      metaSet(db, "capped_pages", String(capped));
       metaSet(db, "without_page_vector", String(withoutPageVector));
       // A capped page was never recorded; only a whole-tree run can pick it up.
       metaSet(db, "needs_full", capped > 0 ? "1" : "");
-      if (dim?.vec) metaSet(db, "dim", String(dim.vec.byteLength / Float32Array.BYTES_PER_ELEMENT));
-      if (wrote) metaSet(db, "generation", String(Number(metaGet(db, "generation") ?? 0) + 1));
+      if (dim?.vec) metaSet(db, "dim", String(vectorBlobDims(dim.vec)));
+      if (wrote) {
+        const generation = String(Number(metaGet(db, "generation") ?? 0) + 1);
+        metaSet(db, "generation", generation);
+        // Every row was 8-bit after the migration above, and a run writes no other kind.
+        metaSet(db, "vec_q8", generation);
+      }
     });
     if (wrote) dropVectorCache(vaultIndexPathFor(vault));
     return {
@@ -950,35 +1142,102 @@ export function scheduleReindexAfterCommit(vault: string, changed: readonly stri
 // ─── status and search ───────────────────────────────────────────────────────
 
 export async function vaultIndexStatus(vault: string = vaultDir()): Promise<VaultIndexStatus> {
+  const limitBytes = vaultIndexBudgetBytes(vault);
   const db = await openForRead(vaultIndexPathFor(vault));
-  if (!db) return { exists: false, pages: 0, chunks: 0, identity: "missing", needsFullScan: false, builtAt: null, withoutPageVector: null };
+  if (!db) {
+    return {
+      exists: false, pages: 0, chunks: 0, identity: "missing", needsFullScan: false, builtAt: null, withoutPageVector: null,
+      usedBytes: 0, limitBytes, maxChunks: vaultMaxChunks(VAULT_INDEX_DIMS, limitBytes), cappedPages: null, migrationPending: false,
+    };
+  }
   try {
+    const embedder = await resolveMemoryEmbedder();
     const stored = metaGet(db, "identity");
-    const now = storeIdentity(await resolveMemoryEmbedder(), vault);
+    const now = storeIdentity(embedder, vault);
     const built = Number(metaGet(db, "built_at"));
     const without = Number(metaGet(db, "without_page_vector") ?? NaN);
+    // Cleared ("") by a limit change until the next run counts again.
+    const capped = Number(metaGet(db, "capped_pages") || NaN);
+    const chunks = countOf(db, "SELECT COUNT(*) AS n FROM chunks");
+    let dim = Number(metaGet(db, "dim"));
+    if (!(Number.isInteger(dim) && dim > 0) && chunks > 0) {
+      const one = db.prepare("SELECT vec FROM chunks LIMIT 1").get() as { vec?: unknown } | undefined;
+      dim = one?.vec instanceof Uint8Array ? vectorBlobDims(one.vec) : 0;
+    }
+    const migrationPending = chunks > 0 && !vectorsAllQ8(db);
+    // Counted from the width rather than summed row by row (a table scan on every status
+    // read); a store still waiting for its migration is counted at float32 width.
+    const perChunk = dim > 0 ? (migrationPending ? dim * Float32Array.BYTES_PER_ELEMENT : q8BlobBytes(dim)) : 0;
     return {
       exists: true,
       pages: countOf(db, "SELECT COUNT(*) AS n FROM pages"),
-      chunks: countOf(db, "SELECT COUNT(*) AS n FROM chunks"),
+      chunks,
       identity: stored === null ? "missing" : stored === now ? "valid" : "mismatched",
       needsFullScan: metaGet(db, "needs_full") === "1",
       builtAt: Number.isFinite(built) && built > 0 ? built : null,
       withoutPageVector: Number.isInteger(without) && without >= 0 ? without : null,
+      usedBytes: chunks * perChunk,
+      limitBytes,
+      maxChunks: vaultMaxChunks(dim > 0 ? dim : embedder.dimensions, limitBytes),
+      cappedPages: Number.isInteger(capped) && capped >= 0 ? capped : null,
+      migrationPending,
     };
   } finally {
     db.close();
   }
 }
 
+/**
+ * The owner changed the index's size limit: the marks the last run left
+ * under the old one are cleared — `capped` (it was full at a limit no longer
+ * in force) — and the store is marked for a whole-tree run, which a run is
+ * queued for now: raised, it fills up to the new limit (capped pages are
+ * picked up, claims the budget took come back); lowered, it trims, claims
+ * first and page vectors last ({@link planVaultChunks}). With Memory Shard off
+ * nothing is embedded; the mark stays for the run switching it on starts.
+ * Never creates a store.
+ */
+export async function vaultIndexLimitChanged(options: IndexOptions = {}): Promise<VaultIndexResult | null> {
+  const vault = options.vault ?? vaultDir();
+  await queueFor(vault).lock(async () => {
+    const db = await openForRead(vaultIndexPathFor(vault));
+    if (!db) return;
+    try {
+      db.exec("BEGIN");
+      try {
+        metaSet(db, "capped", "");
+        metaSet(db, "capped_pages", "");
+        metaSet(db, "needs_full", "1");
+        db.exec("COMMIT");
+      } catch (err) {
+        db.exec("ROLLBACK");
+        throw err;
+      }
+    } finally {
+      db.close();
+    }
+  });
+  return enqueue(vault, null, options.signal);
+}
+
+/**
+ * In memory, as on disk, a vector is its 8-bit codes and one scale: about one
+ * byte a dimension. A float32 row (a store the migration has not reached yet)
+ * is quantised as it is loaded, the same way the migration will.
+ */
 interface VectorCache {
   stamp: string;
   dim: number;
-  vectors: Float32Array;
+  /** Row-major, `dim` codes a row. */
+  codes: Int8Array;
+  /** Each row's 1/‖codes‖: `codes · query × scale` is the cosine. */
+  scales: Float32Array;
   ids: number[];
   verified: Uint8Array;
   /** What each row is lifted by: verified, hub page. */
   lift: Float32Array;
+  /** Chunk id → row, built the first time a search brings a leaf's hub in. */
+  rowOf?: Map<number, number>;
 }
 
 interface CacheSlot {
@@ -1023,31 +1282,41 @@ function loadVectors(db: DatabaseSync, file: string): VectorCache | null {
   }
   const total = countOf(db, "SELECT COUNT(*) AS n FROM chunks");
   if (total === 0) return null;
-  let vectors: Float32Array | null = null;
-  let bytes: Uint8Array | null = null;
+  let codes: Int8Array | null = null;
   let dim = 0;
   const ids: number[] = [];
+  const scales = new Float32Array(total);
   const verified = new Uint8Array(total);
   const lift = new Float32Array(total);
   for (const raw of db
     .prepare("SELECT c.id AS id, c.verified AS verified, c.vec AS vec, c.kind AS kind, p.type AS type FROM chunks c LEFT JOIN pages p ON p.path = c.path ORDER BY c.id")
     .iterate()) {
     const row = raw as { id?: unknown; verified?: unknown; vec?: unknown; kind?: unknown; type?: unknown };
-    const vec = row.vec as Uint8Array;
-    if (!vectors) {
-      dim = vec.byteLength / Float32Array.BYTES_PER_ELEMENT;
-      if (!Number.isInteger(dim) || dim === 0) return null;
-      vectors = new Float32Array(total * dim);
-      bytes = new Uint8Array(vectors.buffer);
+    if (!(row.vec instanceof Uint8Array)) continue;
+    if (!codes) {
+      dim = vectorBlobDims(row.vec);
+      if (dim === 0) return null;
+      codes = new Int8Array(total * dim);
     }
-    if (vec.byteLength !== dim * Float32Array.BYTES_PER_ELEMENT || ids.length >= total) continue;
-    bytes!.set(vec, ids.length * dim * Float32Array.BYTES_PER_ELEMENT);
+    if (vectorBlobDims(row.vec) !== dim || ids.length >= total) continue;
+    const q = decodeVectorBlob(row.vec);
+    if (!q) continue;
+    codes.set(q.codes, ids.length * dim);
+    scales[ids.length] = q.scale;
     verified[ids.length] = Number(row.verified) ? 1 : 0;
     lift[ids.length] = (Number(row.verified) ? VERIFIED_BOOST : 0) + (row.kind === "page" && typeof row.type === "string" && HUB_TYPES.has(row.type) ? HUB_BOOST : 0);
     ids.push(Number(row.id));
   }
-  if (!vectors || ids.length === 0) return null;
-  slot.cache = { stamp, dim, vectors: vectors.subarray(0, ids.length * dim), ids, verified: verified.subarray(0, ids.length), lift: lift.subarray(0, ids.length) };
+  if (!codes || ids.length === 0) return null;
+  slot.cache = {
+    stamp,
+    dim,
+    codes: codes.subarray(0, ids.length * dim),
+    scales: scales.subarray(0, ids.length),
+    ids,
+    verified: verified.subarray(0, ids.length),
+    lift: lift.subarray(0, ids.length),
+  };
   arm();
   return slot.cache;
 }
@@ -1088,39 +1357,57 @@ export async function searchPrimeRadiant(
     // seen for an identity is the one `rankVaultHits` would keep.
     const boostedAt = new Float64Array(cache.ids.length);
     for (let row = 0; row < cache.ids.length; row += 1) {
-      let s = 0;
-      const base = row * cache.dim;
-      for (let i = 0; i < cache.dim; i += 1) s += cache.vectors[base + i] * q[i];
-      boostedAt[row] = s + cache.lift[row];
+      boostedAt[row] = dotQ8(q, cache.codes, row, cache.dim, cache.scales[row]) + cache.lift[row];
     }
     const order = Array.from(cache.ids.keys()).sort((a, b) => boostedAt[b] - boostedAt[a] || a - b);
 
+    const withHub = hasHubColumn(db);
     const detail = db.prepare(
       `SELECT c.path AS path, c.ref_id AS ref_id, c.kind AS kind, c.verified AS verified, c.text AS text,
-              p.title AS title, p.type AS type
+              p.title AS title, p.type AS type${withHub ? ", p.hub AS hub" : ""}
          FROM chunks c JOIN pages p ON p.path = c.path WHERE c.id = ?`,
     );
-    const candidates: RankCandidate[] = [];
-    const held = new Set<string>();
-    for (const at of order) {
-      if (held.size >= want) break;
+    const candidateAt = (at: number): RankCandidate | null => {
       const row = detail.get(cache.ids[at]) as Record<string, unknown> | undefined;
-      if (!row || typeof row.path !== "string" || typeof row.text !== "string") continue;
-      const verified = Number(row.verified) === 1;
-      const candidate: RankCandidate = {
+      if (!row || typeof row.path !== "string" || typeof row.text !== "string") return null;
+      return {
         path: row.path,
         refId: typeof row.ref_id === "string" ? row.ref_id : row.path,
         kind: row.kind === "claim" ? "claim" : "page",
         type: typeof row.type === "string" ? row.type : "",
         title: typeof row.title === "string" ? row.title : "",
         text: row.text,
-        verified,
+        verified: Number(row.verified) === 1,
         similarity: boostedAt[at] - cache.lift[at],
+        hub: typeof row.hub === "string" && row.hub !== "" ? row.hub : null,
       };
+    };
+    const candidates: RankCandidate[] = [];
+    const held = new Set<string>();
+    for (const at of order) {
+      if (held.size >= want) break;
+      const candidate = candidateAt(at);
+      if (!candidate) continue;
       const key = hitKey(candidate);
       if (held.has(key)) continue;
       held.add(key);
       candidates.push(candidate);
+    }
+    // A record leaf found without its hub brings the hub in at its own best page chunk, so the leaf never outranks it.
+    const pagesHeld = new Set(candidates.filter((c) => c.kind === "page").map((c) => c.path));
+    const wanted = [...new Set(candidates.map((c) => c.hub).filter((h): h is string => !!h && !pagesHeld.has(h)))];
+    if (wanted.length > 0) {
+      const rowOf = cache.rowOf ?? (cache.rowOf = new Map(cache.ids.map((id, row) => [id, row])));
+      const hubChunks = db.prepare("SELECT id FROM chunks WHERE path = ? AND kind = 'page'");
+      for (const hub of wanted) {
+        let bestAt = -1;
+        for (const r of hubChunks.all(hub) as Array<{ id?: unknown }>) {
+          const at = rowOf.get(Number(r.id));
+          if (at !== undefined && (bestAt < 0 || boostedAt[at] > boostedAt[bestAt])) bestAt = at;
+        }
+        const candidate = bestAt >= 0 ? candidateAt(bestAt) : null;
+        if (candidate) candidates.push(candidate);
+      }
     }
     return rankVaultHits(candidates, want);
   } finally {
@@ -1132,22 +1419,31 @@ export async function searchPrimeRadiant(
  * One vector per indexed page — the mean of its page chunks, unit length —
  * for the connect pass's related-page links. Empty when there is no index
  * (or it answers to another embedder). Read-only.
+ *
+ * `dims` keeps only the leading dimensions (Matryoshka; the mean of the cut
+ * chunks is the cut of the mean): the connect pass compares 256 of them, and
+ * a vault of 160k pages in full float32 width would be 650 MB.
  */
-export async function readPageVectors(vault: string = vaultDir()): Promise<Map<string, Float32Array>> {
+export async function readPageVectors(vault: string = vaultDir(), options: { dims?: number } = {}): Promise<Map<string, Float32Array>> {
   const out = new Map<string, Float32Array>();
   const db = await openForRead(vaultIndexPathFor(vault));
   if (!db) return out;
+  const keep = options.dims !== undefined && Number.isInteger(options.dims) && options.dims > 0 ? options.dims : Infinity;
   try {
     if (metaGet(db, "identity") !== storeIdentity(await resolveMemoryEmbedder(), vault)) return out;
     const sums = new Map<string, Float32Array>();
     for (const raw of db.prepare("SELECT path, vec FROM chunks WHERE kind = 'page'").iterate()) {
       const row = raw as { path?: unknown; vec?: unknown };
-      if (typeof row.path !== "string" || !(row.vec instanceof Uint8Array) || row.vec.byteLength % 4 !== 0) continue;
-      const copy = new Float32Array(row.vec.byteLength / 4);
-      new Uint8Array(copy.buffer).set(row.vec);
-      const sum = sums.get(row.path);
-      if (!sum) sums.set(row.path, copy);
-      else if (sum.length === copy.length) for (let i = 0; i < sum.length; i++) sum[i] += copy[i];
+      if (typeof row.path !== "string" || !(row.vec instanceof Uint8Array)) continue;
+      const q = decodeVectorBlob(row.vec);
+      if (!q) continue;
+      const width = Math.min(keep, q.codes.length);
+      let sum = sums.get(row.path);
+      if (!sum) {
+        sum = new Float32Array(width);
+        sums.set(row.path, sum);
+      }
+      if (sum.length === width) dequantizeQ8({ codes: q.codes.subarray(0, width), scale: q.scale }, sum);
     }
     for (const [p, v] of sums) {
       let n = 0;

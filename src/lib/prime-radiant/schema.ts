@@ -10,6 +10,8 @@
  * module owns and passes everything else through untouched.
  */
 
+import { validityRange } from "./validity";
+
 export const PAGE_TYPES = [
   "entity",
   "concept",
@@ -38,6 +40,11 @@ export type ClaimStatus = (typeof CLAIM_STATUSES)[number];
 export interface Stamp {
   at: string;
   by: string;
+  /**
+   * Who carried it out for them, when not they themselves: `assistant` on an
+   * owner's verification the assistant made on the owner's word (verify.ts).
+   */
+  via?: string;
 }
 
 export interface ClaimEvidence {
@@ -61,10 +68,23 @@ export interface Claim {
   /** ISO 8601 */
   updatedAt: string;
   evidence: ClaimEvidence[];
-  /** Set by a human verification only. */
+  /** Set by a verification (verify.ts): the owner's, the owner's via the assistant, or the assistant's own. */
   verified?: Stamp | null;
+  /**
+   * When the fact holds, when its source says so (validity.ts): from this ISO
+   * date (or datetime) on, through that one. Either may be absent (open).
+   */
+  valid_from?: string | null;
+  valid_until?: string | null;
+  /** The day (or moment) the fact was true on: "as of 30.09". */
+  as_of?: string | null;
+  /** A past state of things ("the launch price was €399"): never paired with a current claim. */
+  historical?: boolean;
   [key: string]: unknown;
 }
+
+/** A claim's dated fields, the ones validity.ts reads. */
+export const CLAIM_DATE_FIELDS = ["valid_from", "valid_until", "as_of"] as const;
 
 export interface PageFrontmatter {
   type: PageType;
@@ -74,7 +94,7 @@ export interface PageFrontmatter {
   status: PageStatus;
   generated: Stamp;
   verified: Stamp | null;
-  /** ISO date (YYYY-MM-DD) or datetime after which the page needs a re-check; null = never. */
+  /** ISO date (YYYY-MM-DD) or datetime after which the page needs a re-check; null = its type decides (recheck.ts). */
   stale_after: string | null;
   sources: string[];
   privacy: PrivacyTier;
@@ -82,6 +102,14 @@ export interface PageFrontmatter {
   opus_pending: boolean;
   claims: Claim[];
   retiredClaimIds: string[];
+  /** The page this one is a version of (a draft of that final, a copy of that original): versions.ts never pairs their claims. */
+  version_of?: string | null;
+  /**
+   * The day (or moment) the page's figures were true on. A metric page needs
+   * it — or every claim its own — or the lint warns (`as-of-missing`); a value
+   * that is no ISO date counts as none, it never makes the page invalid.
+   */
+  as_of?: unknown;
   [key: string]: unknown;
 }
 
@@ -118,10 +146,19 @@ export const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const ISO_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:?\d{2})$/;
 
+/** Whether an ISO date's year, month and day are a day on the calendar: `Date.parse` takes "2026-02-30" for 2 March. */
+export function isCalendarDay(value: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(value);
+  if (!m) return false;
+  const month = +m[2];
+  const day = +m[3];
+  return month >= 1 && month <= 12 && day >= 1 && day <= new Date(Date.UTC(+m[1], month, 0)).getUTCDate();
+}
+
 export function isIsoDate(value: unknown): value is string {
   if (typeof value !== "string") return false;
   if (!ISO_DATE_RE.test(value) && !ISO_DATETIME_RE.test(value)) return false;
-  return !Number.isNaN(Date.parse(value));
+  return !Number.isNaN(Date.parse(value)) && isCalendarDay(value);
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -140,8 +177,8 @@ export function parseStamp(value: unknown): Stamp | null {
   if (isPlainObject(value)) {
     const at = value.at;
     const by = value.by;
-    if (isIsoDate(at) && nonEmptyString(by)) return { at, by: by.trim() };
-    return null;
+    if (!isIsoDate(at) || !nonEmptyString(by)) return null;
+    return nonEmptyString(value.via) ? { at, by: by.trim(), via: value.via.trim() } : { at, by: by.trim() };
   }
   if (typeof value === "string") {
     const m = /^(\S+)\s+by\s+(.+)$/.exec(value.trim());
@@ -182,6 +219,15 @@ function validateClaim(raw: unknown, index: number, errors: SchemaError[]): Clai
   } else if (raw.verified === null) {
     verified = null;
   }
+  for (const key of CLAIM_DATE_FIELDS) {
+    const value = raw[key];
+    if (value !== undefined && value !== null && !isIsoDate(value)) errors.push({ field: `${field}.${key}`, message: "must be an ISO date or null" });
+  }
+  // Read as validity.ts reads a period: a bare day as "until" runs through that day's end.
+  if (isIsoDate(raw.valid_from) && isIsoDate(raw.valid_until) && !validityRange({ from: raw.valid_from, until: raw.valid_until, source: "claim" })) {
+    errors.push({ field: `${field}.valid_until`, message: "must not be before valid_from" });
+  }
+  if (raw.historical !== undefined && typeof raw.historical !== "boolean") errors.push({ field: `${field}.historical`, message: "must be true or false" });
   if (errors.length !== before) return null;
   const claim: Claim = {
     ...raw,
@@ -262,6 +308,9 @@ export function validateFrontmatter(raw: unknown): ValidationResult {
   if (!Array.isArray(retired) || !retired.every(nonEmptyString)) {
     errors.push({ field: "retiredClaimIds", message: "must be a list of claim ids" });
   }
+  if (raw.version_of !== undefined && raw.version_of !== null && !nonEmptyString(raw.version_of)) {
+    errors.push({ field: "version_of", message: "must be a page path or null" });
+  }
 
   if (errors.length > 0) return { ok: false, errors };
   return {
@@ -284,6 +333,46 @@ export function validateFrontmatter(raw: unknown): ValidationResult {
       retiredClaimIds: [...new Set((retired as string[]).map((s) => s.trim()))],
     },
   };
+}
+
+/** Who the assistant's own verification stamps name (route-helpers.ts's writer `by`). */
+export const ASSISTANT_VERIFIER = "assistant";
+/** Who an owner's verification stamps name, also one the assistant made on the owner's word. */
+export const OWNER_VERIFIER = "owner";
+/** The `via` of an owner's verification the assistant carried out: `{ by: owner, via: assistant }`. */
+export const VIA_ASSISTANT = "assistant";
+
+/** Whether a stamp is a person's: every verifier but the assistant. */
+function personsStamp(stamp: Stamp | null | undefined): boolean {
+  return !!stamp && stamp.by !== ASSISTANT_VERIFIER;
+}
+
+/** The owner's verification, given through the assistant (the user confirmed the fact in their own words). */
+export function verifiedViaAssistant(stamp: Stamp | null | undefined): boolean {
+  return personsStamp(stamp) && stamp?.via === VIA_ASSISTANT;
+}
+
+/**
+ * Who a verification stamp says verified, as the app words it: the owner
+ * (also through the assistant), the assistant on its own, or the stamp's own
+ * name for anyone else (a legacy or hand-written stamp).
+ */
+export function verifierKind(stamp: Pick<Stamp, "by" | "via">): "owner" | "owner-via-assistant" | "assistant" | "other" {
+  if (stamp.by === ASSISTANT_VERIFIER) return "assistant";
+  if (stamp.by !== OWNER_VERIFIER) return "other";
+  return stamp.via === VIA_ASSISTANT ? "owner-via-assistant" : "owner";
+}
+
+/**
+ * Whether a claim is OWNER-verified: a person's verification stamp on it —
+ * the owner's own, or the owner's given through the assistant
+ * (`{ by: owner, via: assistant }`) — or `status: verified` with no stamp (a
+ * person's hand edit), or a page a person verified as a whole. The
+ * assistant's own stamps (`by: assistant`) verify nothing here.
+ */
+export function ownerVerified(claim: Pick<Claim, "verified" | "status">, page?: Pick<PageFrontmatter, "verified"> | null): boolean {
+  if (claim.verified) return personsStamp(claim.verified);
+  return claim.status === "verified" || personsStamp(page?.verified);
 }
 
 /** True when the page itself or any claim on it carries a human verification. */

@@ -25,6 +25,10 @@ interface SettingsAnswer {
     ingestFolders: number;
     domains: number;
     opusMaxPages?: { min: number; max: number };
+    /** Absent on a server from before the setting. */
+    searchIndexLimitMb?: { min: number; max: number };
+    /** Absent on a server from before the structure pass. */
+    structureCompany?: number;
   };
   nightly: { nextRunAt: number | null };
   /** Which account the second opinion would use tonight (absent on an older server). */
@@ -51,10 +55,13 @@ interface Draft {
   opusEnabled: boolean;
   opusMaxPages: string;
   parallel: string;
+  searchIndexLimitMb: string;
   exclude: string;
   skipCodeProjects: boolean;
   folders: string[];
   domains: Array<{ name: string; owner: string }>;
+  structure: boolean;
+  company: string;
 }
 
 function draftOf(s: Settings): Draft {
@@ -65,10 +72,14 @@ function draftOf(s: Settings): Draft {
     opusEnabled: s.opus.enabled,
     opusMaxPages: String(s.opus.maxPages ?? ""),
     parallel: String(s.ingest.parallel),
+    searchIndexLimitMb: String(s.search?.indexLimitMb ?? ""),
     exclude: s.ingest.exclude.join("\n"),
     skipCodeProjects: s.ingest.skipCodeProjects,
     folders: [...s.ingest.folders],
     domains: s.domains.map((d) => ({ ...d })),
+    // Absent on a server from before the structure pass.
+    structure: s.structure?.enabled ?? true,
+    company: s.structure?.company ?? "",
   };
 }
 
@@ -77,7 +88,8 @@ const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 /**
  * Settings: the nightly pass (on/off, its time, the folders it re-reads), the
  * contradiction pass, the optional Opus tier, the domains and their owners,
- * the ingest exclude list and how many model calls run at once — and the
+ * the ingest exclude list, how many model calls run at once and how big the
+ * search index may grow — and the
  * nightly pass itself: Run now, the last nights with the tokens each used, and
  * a Merge button for a night that was held for review once its items are
  * settled.
@@ -124,6 +136,11 @@ export default function PrimeRadiantSettings({ onChanged }: { onChanged: () => v
     if (pagesLimit && (!Number.isInteger(maxPages) || maxPages < pagesLimit.min || maxPages > pagesLimit.max)) {
       return setError(t("primeRadiant.settings.badOpusMaxPages", { min: pagesLimit.min, max: pagesLimit.max }));
     }
+    const indexLimit = answer.limits.searchIndexLimitMb;
+    const indexLimitMb = Number(draft.searchIndexLimitMb);
+    if (indexLimit && (!Number.isInteger(indexLimitMb) || indexLimitMb < indexLimit.min || indexLimitMb > indexLimit.max)) {
+      return setError(t("primeRadiant.settings.badSearchIndexLimit", { min: indexLimit.min, max: indexLimit.max }));
+    }
     const domains = draft.domains.map((d) => ({ name: d.name.trim(), owner: d.owner.trim() })).filter((d) => d.name);
     setSaving(true);
     setError(null);
@@ -138,6 +155,8 @@ export default function PrimeRadiantSettings({ onChanged }: { onChanged: () => v
           skipCodeProjects: draft.skipCodeProjects,
           folders: draft.folders,
         },
+        ...(indexLimit ? { search: { indexLimitMb } } : {}),
+        ...(answer.settings.structure ? { structure: { enabled: draft.structure, company: draft.company.trim() } } : {}),
         domains,
       }));
       setAnswer(next);
@@ -171,6 +190,9 @@ export default function PrimeRadiantSettings({ onChanged }: { onChanged: () => v
               <p className="text-[11px] text-[var(--text-muted)]">{t("primeRadiant.settings.nextRun", { at: formatWhen(answer.nightly.nextRunAt, locale) })}</p>
             )}
             <Toggle label={t("primeRadiant.settings.contradictions")} checked={draft.contradictions} onChange={(v) => set({ contradictions: v })} testId="prime-radiant-contradictions" />
+            {answer.settings.structure && (
+              <Toggle label={t("primeRadiant.settings.structure")} checked={draft.structure} onChange={(v) => set({ structure: v })} testId="prime-radiant-structure" />
+            )}
             <div>
               <p className="text-xs text-[var(--text-secondary)]">{t("primeRadiant.settings.nightlyFolders")}</p>
               <p className="text-[11px] text-[var(--text-muted)]">{t("primeRadiant.settings.nightlyFoldersBody")}</p>
@@ -213,6 +235,19 @@ export default function PrimeRadiantSettings({ onChanged }: { onChanged: () => v
 
           <section className={`${CARD_SURFACE} p-4 space-y-3`}>
             <h3 className={SECTION_LABEL}>{t("primeRadiant.settings.domainsTitle")}</h3>
+            {answer.settings.structure && (
+              <label className="block space-y-1">
+                <span className="text-xs text-[var(--text-secondary)]">{t("primeRadiant.settings.company")}</span>
+                <input
+                  className={`${FIELD} text-xs w-full`}
+                  value={draft.company}
+                  maxLength={answer.limits.structureCompany ?? 80}
+                  onChange={(e) => set({ company: e.target.value })}
+                  data-testid="prime-radiant-company"
+                />
+                <span className="block text-[11px] text-[var(--text-muted)]">{t("primeRadiant.settings.companyBody")}</span>
+              </label>
+            )}
             <p className="text-[11px] text-[var(--text-muted)]">{t("primeRadiant.settings.domainsBody")}</p>
             <ul className="space-y-1.5" data-testid="prime-radiant-domains">
               {draft.domains.map((d, i) => (
@@ -279,6 +314,30 @@ export default function PrimeRadiantSettings({ onChanged }: { onChanged: () => v
               {t("primeRadiant.settings.excludeDefaults")}
             </button>
           </section>
+
+          {answer.limits.searchIndexLimitMb && (
+            <section className={`${CARD_SURFACE} p-4 space-y-3`}>
+              <h3 className={SECTION_LABEL}>{t("primeRadiant.settings.searchTitle")}</h3>
+              <label className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+                {t("primeRadiant.settings.searchIndexLimit")}
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  min={answer.limits.searchIndexLimitMb.min}
+                  max={answer.limits.searchIndexLimitMb.max}
+                  step={1}
+                  className={`${FIELD} text-xs w-24`}
+                  value={draft.searchIndexLimitMb}
+                  onChange={(e) => set({ searchIndexLimitMb: e.target.value })}
+                  data-testid="prime-radiant-search-index-limit"
+                />
+                <span className="text-[var(--text-muted)]">MB</span>
+              </label>
+              <p className="text-[11px] text-[var(--text-muted)]">
+                {t("primeRadiant.settings.searchIndexLimitBody", { n: answer.defaults.search.indexLimitMb })}
+              </p>
+            </section>
+          )}
 
           <div className="flex items-center gap-3">
             <button type="button" className={BTN_PRIMARY} onClick={() => void save()} disabled={saving} data-testid="prime-radiant-settings-save">

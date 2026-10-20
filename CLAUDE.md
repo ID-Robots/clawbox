@@ -269,7 +269,9 @@ of them kept failing.
     `ui_notify`, `app_uninstall`, `webapp_create`, `webapp_update`,
     `code_project_init/list/build/delete`, `browser_open/navigate/screenshot/close`,
     `describe_image`, `memory_shard_status`, `local_ai_status`, `clawbox_ai_usage`
-    (read-only; installs, reindexing and the plan stay the owner's),
+    (read-only; installs and the plan stay the owner's), the `memory_shard_*`
+    management tools (incremental passes on its own; a full re-embed, a
+    provider move or a reset only with `confirm: true` after the owner's yes),
     `coding_agent_run/status/stop`, `coding_run_message`, `coding_run_list`,
     `coding_agent_resume`, `coding_project_status`, `coding_secret_list`
     (registered only while the owner's switch is on

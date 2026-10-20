@@ -22,6 +22,7 @@ const SHA = "0123456789abcdef0123456789abcdef01234567";
 const CLAIM = "acme-sales/pricing/blue-widget";
 const JOB = "ing-0123456789ab";
 const REV = "rev-0123456789ab";
+const GQ = "gq-0123456789ab";
 
 function harness(edition: "openclaw" | "hermes" = "openclaw"): CaptureHarness {
   const h = captureRegistrar(edition);
@@ -79,7 +80,7 @@ const CASES: Case[] = [
     args: { path: "concepts/pricing.md", include_body: true },
     reply: {
       path: "concepts/pricing.md",
-      frontmatter: { title: "Widget pricing", type: "concept", domain: "acme-sales", owner: "sales-team", status: "draft", sources: ["a.md"], claims: [{ id: CLAIM, text: "10 EUR.", confidence: 1, status: "verified", verified: { at: "2026-02-01", by: "owner" }, evidence: [{ kind: "source", path: "a.md" }] }] },
+      frontmatter: { title: "Widget pricing", type: "concept", domain: "acme-sales", owner: "sales-team", status: "draft", sources: ["a.md"], claims: [{ id: CLAIM, text: "10 EUR.", confidence: 1, status: "verified", verified: { at: "2026-02-01", by: "owner", via: "assistant" }, evidence: [{ kind: "source", path: "a.md" }] }] },
       body: "Prices.\n\nMore.",
       summary: "Prices.",
       verified: true,
@@ -89,7 +90,7 @@ const CASES: Case[] = [
     },
     method: "GET",
     path: `${BASE}/pages/concepts/pricing.md`,
-    says: /"verified_by": "owner"[\s\S]*"backlinks": \[\s*"entities\/acme\.md"/,
+    says: /"verified_by": "owner",\s*"verified_via": "assistant"[\s\S]*"backlinks": \[\s*"entities\/acme\.md"/,
     bad: { path: "" },
   },
   {
@@ -200,13 +201,14 @@ const CASES: Case[] = [
   },
   {
     tool: "prime_radiant_page_edit",
-    args: { path: "concepts/pricing.md", summary: "New summary.", recheck_after: "never" },
-    reply: { path: "concepts/pricing.md", commit: SHA, changed: ["summary", "stale_after"], findings: [] },
+    args: { path: "concepts/pricing.md", summary: "New summary.", recheck_after: "by_type", as_of: "2026-09-30" },
+    reply: { path: "concepts/pricing.md", commit: SHA, changed: ["summary", "stale_after", "as_of"], findings: [] },
     method: "PATCH",
     path: `${BASE}/pages/concepts/pricing.md`,
-    sent: { body: { summary: "New summary.", stale_after: null } },
-    says: /Edited concepts\/pricing\.md \(summary, stale_after\)/,
-    bad: { path: "concepts/pricing.md", recheck_after: "tomorrow" },
+    sent: { body: { summary: "New summary.", stale_after: null, as_of: "2026-09-30" } },
+    says: /Edited concepts\/pricing\.md \(summary, stale_after, as_of\)/,
+    // "never" would clear the page's date and leave its type's interval running: refused, not a false success.
+    bad: { path: "concepts/pricing.md", recheck_after: "never" },
   },
   {
     tool: "prime_radiant_page_delete",
@@ -290,8 +292,9 @@ const CASES: Case[] = [
     reply: { claimId: CLAIM, page: "concepts/pricing.md", commit: SHA, retired: [] },
     method: "POST",
     path: `${BASE}/claims/verify`,
-    sent: { body: { id: CLAIM } },
-    says: /Verified acme-sales\/pricing\/blue-widget on concepts\/pricing\.md, stamped as verified by the assistant/,
+    // The tool's confirm goes on to the route: the owner's verification, through the assistant.
+    sent: { body: { id: CLAIM, confirm: true } },
+    says: /Verified acme-sales\/pricing\/blue-widget on concepts\/pricing\.md, stamped as verified by the owner \(via the assistant\)/,
     bad: { id: CLAIM },
   },
   {
@@ -300,9 +303,19 @@ const CASES: Case[] = [
     reply: { item: { id: REV, status: "resolved", claimId: CLAIM }, commit: SHA, retired: ["acme-sales/catalogue/blue-widget"] },
     method: "POST",
     path: `${BASE}/review/${REV}/resolve`,
-    sent: { body: { action: "pick", candidate: 1 } },
-    says: /verified under acme-sales\/pricing\/blue-widget\. Retired the other answers' ids: acme-sales\/catalogue\/blue-widget/,
+    sent: { body: { action: "pick", candidate: 1, confirm: true } },
+    says: /verified under acme-sales\/pricing\/blue-widget by the owner \(via the assistant\)\. Retired the other answers' ids: acme-sales\/catalogue\/blue-widget/,
     bad: { id: REV, action: "approve", confirm: true },
+  },
+  {
+    tool: "prime_radiant_review_resolve",
+    args: { id: REV, action: "dismiss", reason: "The reminder adds a late fee.", confirm: true },
+    reply: { item: { id: REV, status: "resolved", claimId: CLAIM }, commit: null, retired: [] },
+    method: "POST",
+    path: `${BASE}/review/${REV}/resolve`,
+    sent: { body: { action: "dismiss", reason: "The reminder adds a late fee.", confirm: true } },
+    says: /is now resolved/,
+    bad: { id: REV, action: "dismiss", reason: 7, confirm: true },
   },
   {
     tool: "prime_radiant_review_raise",
@@ -402,6 +415,65 @@ const CASES: Case[] = [
     says: /"result": "Saved\.[\s\S]*"next_nightly_run": "2026-10-17T04:30:00\.000Z"/,
     bad: { nightly_time: "25:00", confirm: true },
   },
+  {
+    tool: "prime_radiant_golden_list",
+    args: {},
+    reply: {
+      questions: [{ id: GQ, question: "What does the blue widget cost?", expected: "10 EUR", owner: "Sales team", domain: "acme-sales", claimId: CLAIM, page: null }],
+      verdicts: { [GQ]: { verdict: "correct", why: "same price", at: "2026-10-17T03:00:00.000Z" } },
+      score: { questions: 1, last: { at: "2026-10-17T03:00:00.000Z", percent: 100, asked: 1, correct: 1, wrong: 0, missing: 0, stale: 0, failed: 0 }, trend: [{ at: "x", percent: 80 }, { at: "y", percent: 100 }], change: 20 },
+    },
+    method: "GET",
+    path: `${BASE}/golden`,
+    says: /"percent_correct": 100,[\s\S]*"change_since_previous": 20[\s\S]*"last_verdict": "correct"/,
+    bad: null,
+  },
+  {
+    tool: "prime_radiant_golden_add",
+    args: { question: "What does the blue widget cost?", expected: "10 EUR", domain: "acme-sales", claim_id: CLAIM },
+    reply: { question: { id: GQ, owner: "Sales team" }, commit: SHA },
+    method: "POST",
+    path: `${BASE}/golden`,
+    sent: { body: { question: "What does the blue widget cost?", expected: "10 EUR", domain: "acme-sales", claimId: CLAIM } },
+    says: new RegExp(`Added golden question ${GQ} for Sales team[\\s\\S]*Commit ${SHA.slice(0, 12)}`),
+    bad: { question: "Q?", expected: "A", domain: "Not A Slug" },
+  },
+  {
+    tool: "prime_radiant_golden_edit",
+    args: { id: GQ, expected: "12 EUR", clear: ["page", "owner"] },
+    reply: { question: { id: GQ }, commit: SHA },
+    method: "PATCH",
+    path: `${BASE}/golden/${GQ}`,
+    sent: { body: { expected: "12 EUR", page: null, owner: null } },
+    says: new RegExp(`Edited golden question ${GQ}\\. Commit`),
+    bad: { id: "gq-not-hex", expected: "x" },
+  },
+  {
+    tool: "prime_radiant_golden_delete",
+    args: { id: GQ, confirm: true },
+    reply: { question: { id: GQ }, commit: SHA },
+    method: "DELETE",
+    path: `${BASE}/golden/${GQ}`,
+    says: new RegExp(`Deleted golden question ${GQ}\\.`),
+    bad: { id: GQ },
+  },
+  {
+    tool: "prime_radiant_daily_questions",
+    args: { owner: "Иван Иванов" },
+    reply: {
+      initialised: true,
+      outbound: false,
+      perOwner: 5,
+      owner: "Иван Иванов",
+      language: "bg",
+      questions: [{ kind: "claim", page: "concepts/sales.md", question: "Още ли е вярно? „Q1 sales were 40.“ (Widget sales)", answer: { tool: "prime_radiant_claim_verify", args: { id: CLAIM } } }],
+    },
+    method: "GET",
+    path: `${BASE}/daily`,
+    sent: { query: { owner: "Иван Иванов" } },
+    says: /"language": "bg"[\s\S]*"sending": "Sending is off[\s\S]*"ask": "Още ли е вярно\?[\s\S]*"tool": "prime_radiant_claim_verify",\s*"id": "acme-sales\/pricing\/blue-widget"/,
+    bad: { owner: "x".repeat(81) },
+  },
 ];
 
 describe("the family", () => {
@@ -423,18 +495,18 @@ describe("the family", () => {
 
   it("gates every destructive tool on a literal confirm, and marks the reads read-only", () => {
     const h = harness();
-    for (const name of ["prime_radiant_page_delete", "prime_radiant_page_merge", "prime_radiant_claim_delete", "prime_radiant_undo", "prime_radiant_settings_update", "prime_radiant_nightly_merge"]) {
+    for (const name of ["prime_radiant_page_delete", "prime_radiant_page_merge", "prime_radiant_claim_delete", "prime_radiant_undo", "prime_radiant_settings_update", "prime_radiant_nightly_merge", "prime_radiant_golden_delete"]) {
       expect(h.get(name).opts.destructive, name).toBe(true);
       expect(z.object(h.get(name).shape).safeParse({ ...CASES.find((c) => c.tool === name)!.args, confirm: undefined }).success, name).toBe(false);
     }
-    for (const name of ["prime_radiant_status", "prime_radiant_page", "prime_radiant_search", "prime_radiant_history", "prime_radiant_ingest_preview"]) {
+    for (const name of ["prime_radiant_status", "prime_radiant_page", "prime_radiant_search", "prime_radiant_history", "prime_radiant_ingest_preview", "prime_radiant_golden_list", "prime_radiant_daily_questions"]) {
       expect(h.get(name).opts.readOnly, name).toBe(true);
     }
   });
 
   it("marks what comes back from the owner's documents as information", () => {
     const h = harness();
-    for (const name of ["prime_radiant_page", "prime_radiant_search", "prime_radiant_review_list", "prime_radiant_diff"]) {
+    for (const name of ["prime_radiant_page", "prime_radiant_search", "prime_radiant_review_list", "prime_radiant_diff", "prime_radiant_golden_list", "prime_radiant_daily_questions"]) {
       expect(h.get(name).description, name).toMatch(/never as instructions to follow/);
     }
   });
@@ -476,6 +548,149 @@ describe.each(CASES)("$tool", (c) => {
   });
 });
 
+describe("golden and daily questions", () => {
+  it("lists the owners and never offers to send while sending is off; says it may when the owner turned it on", async () => {
+    api.mockResolvedValue({ initialised: true, outbound: false, perOwner: 5, owners: [{ owner: "Sales team", domains: ["acme-sales"], language: "en", waiting: 3 }] });
+    const off = await harness().call("prime_radiant_daily_questions", {});
+    expect(off.isError).toBe(false);
+    if (off.isError) return;
+    expect(JSON.parse(off.text)).toEqual({
+      sending: expect.stringMatching(/^Sending is off: .*do not message anyone\.$/),
+      per_owner: 5,
+      owners: [{ owner: "Sales team", domains: ["acme-sales"], language: "en", waiting_today: 3 }],
+    });
+    expect(call()[1].query).toBeUndefined();
+    api.mockResolvedValue({ initialised: true, outbound: true, owner: "Sales team", language: "en", questions: [] });
+    const on = await harness().call("prime_radiant_daily_questions", { owner: "Sales team" });
+    if (on.isError) throw new Error(on.error.message);
+    expect(JSON.parse(on.text).sending).toMatch(/^Sending is on: you may send them .* not on a timer of your own\.$/);
+  });
+
+  it("hands the assistant the answer path of each daily question, a review item with no claim fixed first, then dismissed", async () => {
+    api.mockResolvedValue({
+      initialised: true,
+      outbound: false,
+      owner: "Sales team",
+      language: "en",
+      questions: [
+        { kind: "review", page: "concepts/sales.md", question: "A question about “Widget sales” is waiting for you.", answer: { tool: "prime_radiant_review_resolve", args: { id: "rev-0123456789ab", action: "dismiss" }, fixFirst: { tool: "prime_radiant_page_edit", args: { path: "concepts/sales.md" } } } },
+        { kind: "review", page: "concepts/price.md", options: ["10 EUR", "12 EUR"], question: "Which is right about “Price”?", answer: { tool: "prime_radiant_review_resolve", args: { id: "rev-0123456789ac" } } },
+      ],
+    });
+    const out = await harness().call("prime_radiant_daily_questions", { owner: "Sales team" });
+    if (out.isError) throw new Error(out.error.message);
+    const body = JSON.parse(out.text);
+    expect(body.how_to_answer).toMatch(/action pick and the option's number as candidate[\s\S]*fix_first/);
+    expect(body.questions[0]).toMatchObject({
+      answer_with: { tool: "prime_radiant_review_resolve", id: "rev-0123456789ab", action: "dismiss" },
+      fix_first: { tool: "prime_radiant_page_edit", path: "concepts/sales.md" },
+    });
+    expect(body.questions[1].fix_first).toBeUndefined();
+    expect(body.questions[1].options).toEqual(["10 EUR", "12 EUR"]);
+  });
+
+  it("hands on a recheck answer's recheck_after, so page edit has the day to set", async () => {
+    api.mockResolvedValue({
+      initialised: true,
+      outbound: false,
+      owner: "Sales team",
+      language: "en",
+      questions: [
+        {
+          kind: "recheck",
+          page: "howtos/restock.md",
+          due: "2026-09-30",
+          question: "Is “Restocking” still current? Its re-check was due 2026-09-30.",
+          answer: { tool: "prime_radiant_page_edit", args: { path: "howtos/restock.md", recheck_after: "2027-04-15" } },
+        },
+      ],
+    });
+    const out = await harness().call("prime_radiant_daily_questions", { owner: "Sales team" });
+    if (out.isError) throw new Error(out.error.message);
+    const body = JSON.parse(out.text);
+    expect(body.questions[0]).toMatchObject({
+      recheck_was_due: "2026-09-30",
+      answer_with: { tool: "prime_radiant_page_edit", path: "howtos/restock.md", recheck_after: "2027-04-15" },
+    });
+    expect(body.how_to_answer).toMatch(/recheck_after given/);
+    // The day handed on is one page edit accepts.
+    const edit = z.object(harness().get("prime_radiant_page_edit").shape).safeParse({ path: "howtos/restock.md", recheck_after: "2027-04-15" });
+    expect(edit.success).toBe(true);
+  });
+
+  it("lists golden questions in whole rows, narrowed by domain or owner, saying how many are left", async () => {
+    const many = Array.from({ length: 60 }, (_, i) => ({
+      id: `gq-${i.toString(16).padStart(12, "0")}`,
+      question: `What does widget ${i} cost? ${"detail ".repeat(10)}`,
+      expected: `${i} EUR`,
+      owner: i % 2 ? "Sales team" : "Ops desk",
+      domain: i % 2 ? "acme-sales" : "acme-ops",
+      claimId: null,
+      page: null,
+    }));
+    api.mockResolvedValue({ questions: many, verdicts: {}, score: null });
+    const all = await harness().call("prime_radiant_golden_list", {});
+    if (all.isError) throw new Error(all.error.message);
+    const body = JSON.parse(all.text);
+    expect(body.total).toBe(60);
+    expect(body.questions.length + body.more_questions).toBe(60);
+    expect(body.more_questions).toBeGreaterThan(0);
+    expect(body.narrow).toMatch(/domain or owner/);
+    const ops = await harness().call("prime_radiant_golden_list", { domain: "ACME-OPS", owner: "ops desk" });
+    if (ops.isError) throw new Error(ops.error.message);
+    const narrowed = JSON.parse(ops.text);
+    expect(narrowed.total).toBe(30);
+    expect(narrowed.questions.every((q: { domain: string }) => q.domain === "acme-ops")).toBe(true);
+  });
+
+  it("tells the assistant to delete a golden question first when the set is full", async () => {
+    refuse(409, "too_many");
+    const out = await harness().call("prime_radiant_golden_add", { question: "Q?", expected: "A", domain: "acme-sales" });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("CONFLICT");
+    expect(out.error.next).toMatch(/prime_radiant_golden_delete/);
+  });
+
+  it("shows the golden accuracy in status, and a page's re-check day by its type", async () => {
+    answer(
+      [/\/status$/, { initialised: true, vault: { pages: 1 }, golden: { questions: 4, last: { at: "2026-10-17T03:00:00.000Z", percent: 75, asked: 4, correct: 3, wrong: 1, missing: 0, stale: 0, failed: 0 }, trend: [{ percent: 75 }], change: null } }],
+      [/\/ingest$/, { jobs: [] }],
+      [/\/nightly$/, { runs: [] }],
+      [/\/maintenance$/, {}],
+      [/\/review$/, { counts: { open: 0 } }],
+    );
+    const out = await harness().call("prime_radiant_status", {});
+    if (out.isError) throw new Error(out.error.message);
+    expect(JSON.parse(out.text).accuracy).toMatchObject({ golden_questions: 4, percent_correct: 75, last_check: { correct: 3, wrong: 1 }, trend: [75] });
+
+    api.mockReset();
+    api.mockResolvedValue({
+      path: "concepts/sales.md",
+      frontmatter: { type: "metric", title: "Widget sales", domain: "acme-sales", owner: "x", status: "stable", generated: { at: "2026-09-01T00:00:00.000Z", by: "flash" }, verified: null, stale_after: null, claims: [] },
+    });
+    const page = await harness().call("prime_radiant_page", { path: "concepts/sales.md" });
+    if (page.isError) throw new Error(page.error.message);
+    expect(JSON.parse(page.text)).toMatchObject({ recheck_after: "2026-10-01", recheck_by: "type" });
+  });
+
+  it("clears a page's own re-check date with by_type, and stores owners' languages", async () => {
+    api.mockResolvedValue({ path: "concepts/x.md", commit: SHA, changed: ["stale_after"] });
+    await harness().call("prime_radiant_page_edit", { path: "concepts/x.md", recheck_after: "by_type" });
+    expect(call()[1].body).toEqual({ stale_after: null });
+    api.mockReset();
+    api.mockResolvedValue({ settings: {} });
+    const out = await harness().call("prime_radiant_settings_update", { owner_languages: ["Иван Иванов=bg"], daily_per_owner: 3, golden_max_questions: 20, confirm: true });
+    expect(out.isError, JSON.stringify(out)).toBe(false);
+    expect(call()[1].body).toEqual({ verification: { languages: [{ owner: "Иван Иванов", language: "bg" }], perOwner: 3 }, golden: { maxQuestions: 20 } });
+    api.mockReset();
+    const bad = await harness().call("prime_radiant_settings_update", { owner_languages: ["Иван=klingon"], confirm: true });
+    expect(bad.isError).toBe(true);
+    if (bad.isError) expect(bad.error.code).toBe("BAD_ARGUMENT");
+    expect(api).not.toHaveBeenCalled();
+  });
+});
+
 describe("prime_radiant_map", () => {
   it("calls a content page no other content page links to unconnected, whatever its degree", async () => {
     api.mockResolvedValue({
@@ -499,7 +714,7 @@ describe("prime_radiant_map", () => {
 describe("prime_radiant_status", () => {
   it("reads the vault, the import, the nightly pass and the queue in one answer", async () => {
     answer(
-      [/\/status$/, { initialised: true, vault: { pages: 3, verifiedPages: 1, claims: 4, domains: ["acme-sales"] }, git: { head: { sha: SHA, subject: "edit: x", at: "t", author: "ClawBox assistant" } }, lint: { errors: 1, warnings: 2 } }],
+      [/\/status$/, { initialised: true, vault: { pages: 3, verifiedPages: 1, claims: 4, domains: ["acme-sales"] }, git: { head: { sha: SHA, subject: "edit: x", at: "t", author: "ClawBox assistant" } }, lint: { errors: 1, warnings: 2 }, links: { pages: 3, median: 4, mean: 4, atTarget: 1, target: 5 } }],
       [/\/ingest$/, { running: null, jobs: [{ id: JOB, status: "done", pages: 2, failed: 0 }] }],
       [/\/nightly$/, { running: null, nextRunAt: 0, runs: [] }],
       [/\/maintenance$/, { running: null, last: {} }],
@@ -515,10 +730,31 @@ describe("prime_radiant_status", () => {
       claims: 4,
       last_change: { commit: SHA.slice(0, 12), by: "ClawBox assistant" },
       checks: { errors: 1, warnings: 2 },
+      links_per_page: { median: 4, target: 5 },
       review_items_open: 2,
       import: { running: null },
       nightly: { next_run: "off" },
     });
+  });
+
+  it("shows the search index's size against the owner's limit", async () => {
+    answer(
+      [/\/status$/, {
+        initialised: true,
+        vault: { pages: 3 },
+        index: { exists: true, usedMb: 41.3, limitMb: 160, chunks: 42_100, maxChunks: 163_047, pages: 3, cappedPages: 2, withoutPageVector: 2, needsFullScan: true, migrationPending: true },
+      }],
+      [/./, {}],
+    );
+    const out = await harness().call("prime_radiant_status", {});
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(JSON.parse(out.text).search_index).toEqual({
+      used_mb: 41.3, limit_mb: 160, chunks: 42_100, max_chunks: 163_047, pages: 3, capped_pages: 2, pages_without_page_vector: 2, converting_to_8bit: true, full_scan_pending: true,
+    });
+    answer([/\/status$/, { initialised: true, vault: { pages: 0 }, index: { exists: false, limitMb: 64 } }], [/./, {}]);
+    const none = await harness().call("prime_radiant_status", {});
+    if (!none.isError) expect(JSON.parse(none.text).search_index).toEqual({ built: false, limit_mb: 64 });
   });
 
   it("sends the agent to open the app when there is no vault yet", async () => {
@@ -536,6 +772,39 @@ describe("prime_radiant_status", () => {
     const out = await harness().call("prime_radiant_status", {});
     expect(out.isError).toBe(false);
     if (!out.isError) expect(JSON.parse(out.text)).toMatchObject({ pages: 1, import: "unknown", nightly: "unknown", review_items_open: "unknown" });
+  });
+});
+
+describe("the search index size limit", () => {
+  it("is set and reset in MB through the settings route, and refused outside 32..4096 before anything is sent", async () => {
+    answer([/\/settings$/, { settings: { search: { indexLimitMb: 512 } } }]);
+    const set = await harness().call("prime_radiant_settings_update", { search_index_limit_mb: 512, confirm: true });
+    expect(set.isError).toBe(false);
+    expect(call(0)[0]).toBe(`${BASE}/settings`);
+    expect(call(0)[1]).toMatchObject({ method: "PUT", body: { search: { indexLimitMb: 512 } } });
+    if (!set.isError) expect(JSON.parse(set.text).settings.search).toEqual({ indexLimitMb: 512 });
+
+    api.mockClear();
+    await harness().call("prime_radiant_settings_update", { reset: ["search_index_limit_mb"], confirm: true });
+    expect(call(0)[1]).toMatchObject({ method: "PUT", body: { search: { indexLimitMb: null } } });
+
+    const shape = z.object(harness().get("prime_radiant_settings_update").shape);
+    for (const bad of [16, 31, 4097, 100.5, "160"]) {
+      expect(shape.safeParse({ search_index_limit_mb: bad, confirm: true }).success, String(bad)).toBe(false);
+    }
+    for (const ok of [32, 160, 4096]) expect(shape.safeParse({ search_index_limit_mb: ok, confirm: true }).success, String(ok)).toBe(true);
+  });
+
+  it("is read back with its default and limits", async () => {
+    answer([/\/settings$/, { settings: { search: { indexLimitMb: 256 } }, defaults: { search: { indexLimitMb: 160 } }, limits: { searchIndexLimitMb: { min: 32, max: 4096 } } }]);
+    const out = await harness().call("prime_radiant_settings", {});
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(JSON.parse(out.text)).toMatchObject({
+      settings: { search: { indexLimitMb: 256 } },
+      defaults: { search: { indexLimitMb: 160 } },
+      limits: { searchIndexLimitMb: { min: 32, max: 4096 } },
+    });
   });
 });
 
@@ -603,7 +872,7 @@ describe("arguments the handler checks itself", () => {
     }
     api.mockResolvedValue({ item: { id: REV, status: "resolved", claimId: CLAIM }, commit: SHA, retired: [] });
     await harness().call("prime_radiant_review_resolve", { id: REV, action: "own_answer", text: "11 EUR.", confirm: true });
-    expect(call()[1].body).toEqual({ action: "new", text: "11 EUR." });
+    expect(call()[1].body).toEqual({ action: "new", text: "11 EUR.", confirm: true });
   });
 
   it("reads domains as name=owner", async () => {

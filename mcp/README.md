@@ -125,7 +125,9 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 | Coding team (`coding_team_run/status/stop`) | when the owner switched it on | when the owner switched it on |
 | Steering and following runs (`coding_run_message`, `coding_run_list`, `coding_agent_resume`, `coding_project_status`) | when the owner switched the coding agent on | same |
 | Device state reads (`memory_shard_status`, `local_ai_status`, `clawbox_ai_usage`, `anthropic_accounts`) | yes | yes |
-| Prime Radiant (`prime_radiant_*`, 32 tools) | yes | yes |
+| Prime Radiant (`prime_radiant_*`, 37 tools) | yes | yes |
+| Memory Shard management (`memory_shard_reindex`, `_reindex_stop`, `_sources_*`, `_schedule_*`, `_provider_*`, `_enable`, `_reset`) | yes | yes |
+| Memory Shard search (`memory_shard_search`) | **no** — the index is OpenClaw's, searched in its own turn | yes |
 | Coordinate browser control (`browser_click/type/keypress/scroll`) | yes | **no** — Hermes ships a richer browser toolset |
 | Media inside a run (`generate_image`, `generate_audio`) | when the owner's switch is on | when the owner's switch is on |
 | Everything else | yes | yes |
@@ -787,30 +789,6 @@ exists to prevent. `anthropic` works only where the owner has connected their
 own Anthropic access; `coding_agent_status` and the Coding Agent app say
 whether they have, and a run against an unconnected account is 409 /
 do-not-retry, never something to try again.
-
-`coding_agent_run` and `coding_team_run` take an optional `budget`: how long
-the work may take (`src/lib/coding-time-budget.ts`, `parseBudgetToken`) — a
-chip (`30m`, `1h`, `morning` = the next 08:00 box time at least an hour away,
-`1d`), a length (`90m`, `3h`, `2d`, `PT2H`), an end time in ISO 8601 (one with
-no offset is read on the BOX's clock, never this process's), a period
-`start/end`, or `none` for an explicit no-budget that also overrides the
-task's words and the owner's default. It travels as the routes' `budget`
-field only when the caller named one, so a start without it is the request
-it always was. The device refuses a past end, one more than 14 days away or
-a budget under 5 minutes with 400 `code: "budget"`, which the tool passes
-through as BAD_ARGUMENT with its own sentence. `budget_token_cap` (0 = none,
-otherwise at least 10,000) adds a spend ceiling: work stops at whichever
-comes first; with it the budget travels in the routes' object shape
-(`{ preset, end?, start?, tokenCap }`). The answer states the resolved
-`timeBudget` — label, deadline on the box's clock and zone (read from
-`…/status`), time left — and a `timeBudgetIgnored` (the task's words named a
-budget the box would not take). A budget over 30 minutes on
-`coding_agent_run` makes the route start a coding TEAM instead
-(`routedToTeam`), and the answer says so and points at `coding_team_status`;
-a request naming something only a run carries stays one run, and the route's
-`routeNote` is passed on. The Create App card's time-budget picker
-(`src/components/CodingBudgetPicker.tsx`) is what usually fills it in: the
-message it hands the chat says `pass budget: "<token>"`.
 `coding_secret_list` answers the NAMES of the owner's stored secrets
 (`src/lib/project-secrets.ts`), their scope (`box` or a project id), whether
 each is handed to runs and whether this box can still decrypt it. There is no
@@ -1003,9 +981,6 @@ for room rather than being skipped; one that cannot start at all (another
 run holds the box, the switch is off) is an alert that does not count
 toward the three. `coding_team_run` is for a goal that spans
 several parts; `coding_agent_run` is still the tool for one focused change.
-`coding_team_run` takes the same optional `budget` and `budget_token_cap` as
-`coding_agent_run` (see the coding agent section) and answers the resolved
-deadline the same way.
 `coding_team_status` answers the plan, each task's status, worker, reviewer
 and result — and for a pending one what it is waiting for, or why it was
 held — the alerts, the team's branch, its pull request, `agents` (planner,
@@ -1094,7 +1069,11 @@ to the approved senders (`src/lib/coding-agent-notify.ts`).
 
 ### Memory Shard
 
-`memory_shard_status` (both editions) · `memory_shard_search` (Hermes only)
+`memory_shard_status` (both editions) · `memory_shard_search` (Hermes only) ·
+`memory_shard_reindex`, `memory_shard_reindex_stop`, `memory_shard_sources_list`
+/ `_add` / `_remove`, `memory_shard_schedule_get` / `_set`,
+`memory_shard_provider_get` / `_set`, `memory_shard_enable`,
+`memory_shard_reset` (both editions)
 
 `memory_shard_status` reads `GET /setup-api/clawkeep/memory` — the same status
 the Memory Shard app draws: switched on, set up, the paid-plan gate, health,
@@ -1114,13 +1093,31 @@ the vault-relative page `path`, the page or claim `id`, `kind`, the page `type`
 and `verified`, and a verified page or claim ranks first (on OpenClaw the
 memory-wiki plugin is what reaches the vault).
 
-**There is no reindex tool.** `POST /setup-api/clawkeep/memory/index` answers
-this bearer 403 `owner_only` on purpose — before that check the assistant could
-start a full re-embed of the owner's documents on its own, an hours-long pass
-that spends the embedding allowance. The status says so, and tells the agent to
-open the app (`ui_open_app("memory-shard")`) for the owner to press Reindex, and
-then to report progress from this tool — not to poll it in a loop. The switch,
-the folders, the provider and the schedule are owner-only for the same reason.
+The status also says WHY the index wants a pass (`reindex.reasons`, from
+`src/lib/memory-reindex-advice.ts`): nothing indexed yet, the embedder or the
+index format changed, a missing identity (all fixed only by a full pass), files
+waiting in the folders, files changed, a pass that was stopped (an incremental
+pass), or the size ceiling and a fallen-back provider (no pass fixes those).
+
+**Everything the Memory Shard app does is a tool**, through the app's own
+`clawkeep/memory/*` routes. Those routes ask again who is writing
+(`src/lib/memory-shard-writer.ts`): a signed-in person, or this server's bearer;
+anything else is 403 `owner_only`. The assistant starts an **incremental** pass
+on its own — it reads only new and changed files. A **full** pass (asked for, or
+the one an incremental ask would really run on a missing or disowned index, or
+the first build an armed schedule would start over an empty one — saving a
+schedule that is on, or switching Memory Shard on over one), a
+**provider move** (which re-embeds everything) and the **reset** answer this
+bearer 409 `confirm_required` until the body carries `confirm: true`: with the
+estimate (files, minutes, the embedding tokens and who pays) or the exact list
+of what a reset clears and keeps. The tools return that answer as-is and set
+`confirm: true` only once the owner said yes in chat. A stopped incremental
+pass is carried on by the next one; a stopped full pass is finished only by a
+new full one, and the stop says which. Adding a folder is held
+to the picker's rules (inside the Files root, never hidden, never a secret
+store) and answers how many files a pass would read from it. A pass is stopped
+with `DELETE /setup-api/clawkeep/memory/index`. The status tells the agent to
+report progress from it, not to poll it in a loop.
 
 ### Prime Radiant (both editions)
 
@@ -1137,9 +1134,16 @@ wiki for a small model on the core profile.
 owner's cookie (from our own page) from this server's bearer, which it checks
 again itself. A change made through the bearer is the assistant's: its commit is
 authored `ClawBox assistant <assistant@localhost>` (committed by Prime Radiant),
-so the owner sees it in **History** and can **Undo** it, and a verification it
-gives is stamped `verified.by: assistant` without marking the page
-`checked_by: human`. Undo is the owner's: the bearer may revert only a commit
+so the owner sees it in **History** and can **Undo** it. A verification it
+gives — `prime_radiant_claim_verify` / `prime_radiant_review_resolve`, whose
+`confirm: true` says the user confirmed the fact in their own words, sent on to
+the route — is the owner's, through the assistant: stamped
+`verified: { by: owner, via: assistant }` (`verified_via` in the tools' claim
+output), the page `checked_by: human`, and it wins over a claim that disagrees
+with it exactly like one the owner made in the app; History and the page say
+"verified by the owner (via the assistant)". A route call from the bearer
+without `confirm: true` stays the assistant's own (`verified.by: assistant`,
+which wins nothing). Undo is the owner's: the bearer may revert only a commit
 whose author is the assistant (403 `owner_only` otherwise).
 
 **Stays the owner's, no tool:** `POST init` (it writes openclaw.json), the
@@ -1148,12 +1152,15 @@ document drop (`ingest/upload` — the assistant names files by path,
 `reindex`, `rejudge-reviews` and `migrate-frontmatter` maintenance passes (the
 bearer may run `connect` only), and the settings' cost rates and Opus model —
 what the Opus dollar cap is measured in (a rate of 0, or an unpriced model, and
-the cap never trips); the bearer may change the cap itself.
+the cap never trips); the bearer may change the cap itself. So is
+`verification.outbound`, whether the assistant may send the daily questions
+over chat at all: off by default, and `prime_radiant_daily_questions` says
+which way it is set — it never sends anything itself.
 
 **Destructive tools** (`destructiveHint`) carry `confirm: true` (`zConfirm`):
 `prime_radiant_page_delete`, `prime_radiant_page_merge`, `prime_radiant_claim_delete`, `prime_radiant_undo`,
-`prime_radiant_settings_update` and `prime_radiant_nightly_merge` (it moves the
-wiki's main branch) — and so do the ones that give someone's word
+`prime_radiant_settings_update`, `prime_radiant_nightly_merge` (it moves the
+wiki's main branch) and `prime_radiant_golden_delete` — and so do the ones that give someone's word
 (`prime_radiant_claim_verify`, `prime_radiant_review_resolve`).
 
 **Imports and connect passes the assistant starts** commit as it, like its
@@ -1188,9 +1195,12 @@ owner when it touches a verified page.
 | Add: Start (folders) / drop files | `POST ingest { folders }` / `ingest/upload` + `POST ingest { upload }` | `prime_radiant_ingest_start` (folders, or files by path: `POST ingest { files }`) |
 | Add: Stop | `DELETE ingest/<id>` | `prime_radiant_ingest_stop` |
 | Add: Retry failed files | `POST ingest/<id>/retry` | `prime_radiant_ingest_retry` |
+| Questions: the golden questions, their last verdicts, the % correct and its trend | `GET golden` | `prime_radiant_golden_list` (whole rows to its reply cap, narrowed by `domain` / `owner`; the % correct also in `prime_radiant_status`) |
+| Questions: add / edit / delete a golden question | `POST golden`, `PATCH` / `DELETE golden/<id>` | `prime_radiant_golden_add` / `_edit` / `_delete` |
+| Questions: an owner's daily questions, in their language | `GET daily?owner=` | `prime_radiant_daily_questions` (sending stays off until the owner turns it on; answers go back through `prime_radiant_claim_verify`, `prime_radiant_review_resolve` and `prime_radiant_page_edit`; a review item with no claim to verify carries `fix_first`: the page is put right, then the item dismissed; a page still current is answered with the `recheck_after` its type gives it from today, or `by_type` for a type never re-checked) |
 | Settings: Run now / Merge a held night | `POST nightly/run` / `POST nightly/run { merge }` | `prime_radiant_nightly_run` / `prime_radiant_nightly_merge` |
 | — run the connect pass | `POST maintenance { action: "connect" }` | `prime_radiant_connect_run` |
-| Settings: Save (schedule, contradictions, Opus on/off + caps, domains and owners, exclude list, parallel, skip code projects, nightly folders) | `PUT settings` | `prime_radiant_settings_update` |
+| Settings: Save (schedule, contradictions, Opus on/off + caps, domains and owners, exclude list, parallel, skip code projects, nightly folders); Questions → Question settings (golden check on/off + nightly cap, daily questions per owner) and Daily questions (owners' languages) | `PUT settings` | `prime_radiant_settings_update` |
 
 The route refusals become instructions (`NEXT` in the module): `owner_only` says
 it is the owner's and not to retry, `not_initialised` sends the agent to
@@ -1272,7 +1282,6 @@ is also what Hermes' circuit breaker counts against every ClawBox tool:
 | Pipeline default | `POST/PUT …/pipeline` | a switch a tool could flip would make the owner's answer temporary |
 | The file tree's writes, project import/delete | `PUT …/tree`, `projects/*` | the owner's repository and folders |
 | Pause, discard a draft, remove a run's copy | `…/pause`, `DELETE …/draft`, `…/worktree` | agent-callable for the agent's own runs but left out: owner gestures `coding_agent_stop` already covers |
-| Reindex, Memory Shard switch/folders/provider/schedule/reset | `clawkeep/memory/*` writes | an hours-long re-embed of the owner's documents |
 | Installing or removing Kokoro, Whisper, embeddings, models | `tts/install`, `whisper`, `embed/install`, `ollama/*`, `llamacpp/models` | root install steps, gigabytes of downloads |
 | MCP switch, background jobs | `harness/mcp`, `background-jobs` | consent |
 | Prime Radiant setup, the document drop, reindex / rejudge / migration, undoing a change the assistant did not make | `prime-radiant/init`, `…/ingest/upload`, `…/maintenance` (all but `connect`), `…/revert` of another author's commit | they write openclaw.json, re-embed the whole vault or reverse the owner's own work |

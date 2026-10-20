@@ -21,8 +21,22 @@
  * Words, not meaning: cheap, deterministic and explainable, and it errs
  * towards pairing — a pair it lets through still goes to the judge.
  *
+ * TEMPLATE words never make two claims about the same thing
+ * ({@link TEMPLATE_WORDS}): a document's type ("credit note", "invoice",
+ * "export declaration", "transfer", "waybill", "receipt", "order",
+ * "statement"), its version ("draft", "final", "second copy") and its file
+ * format ("pdf", "docx") — nor do the dates in a title. In an owner's sample
+ * of open items four in ten paired two different documents of one type
+ * ("credit note draft A, net €429.75" against "credit note draft B, net
+ * €7.50"). And a claim that names nothing but a document's FIELDS ("The net
+ * amount is …", "The beneficiary bank is …", "The receipt's reference number
+ * is …") is about its own page's document, so its page's name says which
+ * ({@link claimSubject}).
+ *
  * Pure.
  */
+
+import { withoutDates } from "./identifiers";
 
 /** Openers that point back at something the claim does not name. */
 const POINTERS: ReadonlySet<string> = new Set(["it", "it's", "its", "this", "that", "these", "those", "they", "they're", "them", "their", "theirs", "he", "he's", "his", "him", "she", "she's", "her", "hers", "we", "our", "us", "i", "my", "you", "your"]);
@@ -105,6 +119,73 @@ export function contentWords(text: string): Set<string> {
   for (const raw of text.split(/[\s/_-]+/)) {
     const w = normWord(raw);
     if (w !== "" && !STOP.has(w) && (w.length >= 2 || /\d/.test(w))) out.add(w);
+  }
+  return out;
+}
+
+const folded = (list: readonly string[]): ReadonlySet<string> => new Set(list.map((w) => normWord(w)));
+
+/** Words that name a KIND of document, not which one: "credit note", "invoice", "export declaration", "waybill". */
+export const DOCUMENT_TYPE_WORDS: ReadonlySet<string> = folded([
+  "invoice", "inv", "e-invoice", "proforma", "pro-forma", "receipt", "credit", "debit", "note", "memo", "waybill", "awb",
+  "airwaybill", "bill", "lading", "consignment", "declaration", "customs", "export", "import", "transfer", "wire",
+  "remittance", "payment", "order", "statement", "extract", "report", "daily", "nightly", "weekly", "monthly", "slip",
+  "payslip", "voucher", "quote", "quotation", "label", "form", "document", "doc", "file", "scan", "scanned", "email",
+  "e-mail", "letter", "domestic", "foreign",
+  "фактура", "фактури", "проформа", "кредитно", "дебитно", "известие", "касова", "бележка", "разписка", "товарителница",
+  "митническа", "износна", "експортна", "декларация", "платежно", "нареждане", "банково", "извлечение", "дневен", "отчет",
+  "превод", "поръчка", "плащане", "протокол",
+]);
+/** File formats a title may carry ("… pdf", "….docx"). */
+export const FORMAT_WORDS: ReadonlySet<string> = folded([
+  "pdf", "docx", "doc", "odt", "rtf", "xlsx", "xls", "ods", "csv", "txt", "md", "html", "htm", "eml", "msg", "png", "jpg",
+  "jpeg", "zip",
+]);
+/** Words that name a VERSION of a document: "draft", "final", "second copy", "v2", "signed". */
+export const VERSION_WORDS: ReadonlySet<string> = folded([
+  "draft", "final", "copy", "copies", "duplicate", "dup", "version", "ver", "revision", "rev", "revised", "updated",
+  "corrected", "correction", "preview", "signed", "unsigned", "original", "second", "third", "dated", "undated", "sent",
+  "issued", "wip", "чернова", "копие", "дубликат", "окончателен", "окончателна", "подписан", "подписана",
+]);
+
+/** A template word: a document's type, version or format ("invoice", "draft", "pdf", "v2"). */
+export function isTemplateWord(w: string): boolean {
+  return DOCUMENT_TYPE_WORDS.has(w) || FORMAT_WORDS.has(w) || VERSION_WORDS.has(w) || /^(?:v|rev)\d{1,3}$/.test(w);
+}
+
+/** Every template word, for a reader that wants the list. */
+export const TEMPLATE_WORDS: ReadonlySet<string> = new Set([...DOCUMENT_TYPE_WORDS, ...FORMAT_WORDS, ...VERSION_WORDS]);
+
+/**
+ * Words for a FIELD of a document, not a thing of its own: "the net amount",
+ * "the beneficiary bank", "the statement number", "the customs value". A
+ * claim whose subject is only these (and template words) is about its page's
+ * document.
+ */
+export const FIELD_WORDS: ReadonlySet<string> = folded([
+  "amount", "net", "gross", "total", "subtotal", "sum", "payable", "due", "vat", "tax", "base", "rate", "balance",
+  "opening", "closing", "final", "initial", "turnover", "number", "no", "nr", "num", "id", "date", "day", "time", "period",
+  "term", "value", "declared", "weight", "size", "dimension", "bank", "beneficiary", "iban", "bic", "swift", "account",
+  "holder", "sender", "recipient", "receiver", "payer", "payee", "consignee", "consignor", "shipper", "exporter",
+  "importer", "issuer", "customer", "client", "buyer", "seller", "supplier", "vendor", "address", "price", "cost", "fee",
+  "charge", "threshold", "status", "reference", "ref", "transaction", "txn", "currency", "quantity", "qty", "unit", "issue",
+  "execution", "validity", "delivery", "shipping", "discount", "deposit", "method", "card", "description", "line",
+  "tracking", "origin", "destination", "incoterm", "tariff", "code", "mrn", "subscription", "next", "billing", "actual",
+  "estimated", "expected", "proposed", "referenced", "cited", "stated", "listed", "main", "remaining", "outstanding",
+  "paid", "unpaid", "received", "pack", "package", "parcel", "shipment", "item", "event", "terms",
+]);
+
+/** A word that names nothing on its own: an article, a pointer, a conjunction, a preposition ("to", "for", "with"). */
+export function isFunctionWord(w: string): boolean {
+  return STOP.has(w) || PREPOSITIONS.has(w);
+}
+
+/** The words that NAME something in a title or an id's slug: content words, without template words, dates or a bare year. */
+export function nameWords(text: string): Set<string> {
+  const out = new Set<string>();
+  for (const w of contentWords(withoutDates(text))) {
+    if (isTemplateWord(w) || /^(?:19|20)\d{2}$/.test(w)) continue;
+    out.add(w);
   }
   return out;
 }
@@ -193,6 +274,8 @@ export function subjectWords(text: string): Set<string> {
   const words = rawWords(text);
   let at = 0;
   while (at < words.length && ARTICLES.has(bare(words[at]))) at += 1;
+  // "24 payments of €500 …", "€0.05 Meta charge …": a leading count or amount is the fact's value, not a numbered subject.
+  if (at < words.length - 1 && /^[€$£]?\d[\d.,]*[%€$]?$/.test(words[at]) && !/^(?:19|20)\d{2}$/.test(words[at])) at += 1;
   const phrase: string[] = [];
   for (; at < words.length && phrase.length < MAX_SUBJECT_WORDS; at++) {
     const raw = words[at];
@@ -209,23 +292,33 @@ export function subjectWords(text: string): Set<string> {
 export interface ClaimSubject {
   /** The entity segment of the claim's id: the page's subject when the claim was written. */
   entity: string;
-  /** What the claim is about: its own subject, or its page's when it names none (or one word only). */
+  /** What the claim is about: its own subject, or its page's when it names none (or one word only, or only a document's fields). */
   words: ReadonlySet<string>;
   /** Every content word the claim mentions. */
   mentions: ReadonlySet<string>;
+  /**
+   * Whether the entity names something beyond template words: "credit-note-draft" names no one document, so two
+   * claims filed under it are not one subject for that alone. Absent: it does.
+   */
+  entityNamed?: boolean;
+  /** What the claim names ITSELF, template words out — empty when it names only a document's fields. Absent: unknown. */
+  own?: ReadonlySet<string>;
 }
 
 /** What a claim (`<domain>/<entity>/<fact>`, its text, its page's title) is about. */
 export function claimSubject(id: string, text: string, title?: string | null): ClaimSubject {
   const entity = id.split("/")[1] ?? "";
-  const own = subjectWords(text);
+  // Template words never tell what a claim is about: "The credit note's net amount" names a field, not a credit note.
+  const own = new Set([...subjectWords(text)].filter((w) => !isTemplateWord(w)));
   const words = new Set(own);
-  // Named by one word or not at all ("The price is …", "It is …"): the page's subject says what of.
-  if (own.size <= 1) {
-    for (const w of contentWords(entity)) words.add(w);
-    if (title) for (const w of contentWords(title)) words.add(w);
+  // Named by one word or not at all ("The price is …", "It is …"), or only by a document's fields ("The net amount",
+  // "The beneficiary bank"): the page's subject says what of — its NAME, without its type, version, format or date.
+  const fieldsOnly = [...own].every((w) => FIELD_WORDS.has(w));
+  if (own.size <= 1 || fieldsOnly) {
+    for (const w of nameWords(entity)) words.add(w);
+    if (title) for (const w of nameWords(title)) words.add(w);
   }
-  return { entity, words, mentions: contentWords(text) };
+  return { entity, words, mentions: contentWords(text), entityNamed: nameWords(entity).size > 0, own: fieldsOnly ? new Set() : own };
 }
 
 function intersection(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
@@ -248,16 +341,20 @@ export const SUBJECT_SIMILARITY = 0.5;
  * claim naming the other's subject of two words or more ("Sun Tzu wrote The
  * Art of War" and "The Art of War is …"). Wording alike is not enough, and
  * two subjects numbered differently ("widget model 0", "widget model 1")
- * are two subjects.
+ * are two subjects. An entity of template words alone ("credit-note-draft")
+ * is no one subject.
  */
 export function sameSubject(a: ClaimSubject, b: ClaimSubject): boolean {
-  if (a.entity !== "" && a.entity === b.entity) return true;
+  if (a.entity !== "" && a.entity === b.entity && a.entityNamed !== false) return true;
   if (a.words.size === 0 || b.words.size === 0) return false;
   // "Widget model 0" and "widget model 1", invoice 2026-118 and 2026-121: two numbered things are two things.
   const ids = (s: ReadonlySet<string>) => new Set([...s].filter((w) => /\d/.test(w)));
   const idsA = ids(a.words);
   const idsB = ids(b.words);
   if (idsA.size > 0 && idsB.size > 0 && intersection(idsA, idsB) === 0) return false;
+  // Both name the same thing themselves ("The widget costs …" on "Widget pricing" and on "Widget price list"):
+  // one subject, whatever their pages are called. Fields alone ("The net amount") name nothing.
+  if (a.own && b.own && a.own.size > 0 && a.own.size === b.own.size && intersection(a.own, b.own) === a.own.size) return true;
   const shared = intersection(a.words, b.words);
   if (shared > 0) {
     const union = a.words.size + b.words.size - shared;

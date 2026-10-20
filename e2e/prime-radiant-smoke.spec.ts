@@ -208,4 +208,40 @@ test.describe("Prime Radiant", () => {
       for (const top of tops) fs.rmSync(path.join(home, top), { recursive: true, force: true });
     }
   });
+
+  test("a golden question added in Questions is checked by the nightly pass, and the accuracy shows", async ({ page }) => {
+    test.setTimeout(180_000);
+    const app = await openPrimeRadiant(page);
+    // The mascot wanders the shelf at real timer speed and can sit on the app's
+    // header buttons (Refresh among them); it has nothing to do with this test.
+    await page.evaluate(() => window.dispatchEvent(new Event("clawbox-hide-mascot")));
+    await app.getByTestId("prime-radiant-tab-ingest").click();
+    await app.getByTestId("prime-radiant-file-input").setInputFiles(DOCUMENTS.map((name) => path.join(FIXTURES, name)));
+    await expect(app.getByTestId("prime-radiant-ingest-job").first()).toContainText("Finished", { timeout: 60_000 });
+
+    // ── Questions: nothing checked yet; add the owner's own test question
+    await app.getByTestId("prime-radiant-tab-questions").click();
+    await expect(app.getByTestId("prime-radiant-accuracy")).toContainText("Not checked yet");
+    await expect(app.getByTestId("prime-radiant-golden-empty")).toBeVisible();
+    await app.getByTestId("prime-radiant-golden-add").click();
+    await app.getByTestId("prime-radiant-golden-question").fill("How many crates of sprockets does the warehouse store?");
+    await app.getByTestId("prime-radiant-golden-expected").fill("950 crates");
+    await app.getByTestId("prime-radiant-golden-domain").fill("general");
+    await app.getByTestId("prime-radiant-golden-save").click();
+    const row = app.getByTestId("prime-radiant-golden-row");
+    await expect(row).toHaveCount(1);
+    await expect(row).toHaveAttribute("data-verdict", "none");
+
+    // ── the nightly pass answers it from the wiki; the stub judge finds the expected figure
+    await app.getByTestId("prime-radiant-tab-settings").click();
+    await app.getByTestId("prime-radiant-nightly-run").click();
+    await expect(app.getByTestId("prime-radiant-nightly-run-row").first()).toHaveAttribute("data-status", /^(merged|held|nothing)$/, { timeout: 60_000 });
+    await app.getByTestId("prime-radiant-refresh").click();
+    await app.getByTestId("prime-radiant-tab-questions").click();
+    await expect(app.getByTestId("prime-radiant-accuracy-percent")).toHaveText("100% correct");
+    await expect(row).toHaveAttribute("data-verdict", "correct");
+    await expect(app.getByTestId("prime-radiant-count-accuracy")).toHaveText("Accuracy 100%");
+    // No domain has an owner yet: no daily questions, and sending is off.
+    await expect(app.getByTestId("prime-radiant-daily-none")).toBeVisible();
+  });
 });

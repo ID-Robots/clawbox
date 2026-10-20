@@ -41,10 +41,10 @@ export async function GET(req: Request) {
       return json({ initialised, shardEnabled, indexing: false, results: [] });
     }
     const index = await vaultIndexStatus();
-    // No index, one built for another embedder, or a run that did not finish:
-    // a whole-vault run puts it right. Queued, never awaited — it coalesces with
-    // any run already going.
-    if (!index.exists || index.identity !== "valid" || index.needsFullScan) {
+    // No index, one built for another embedder, a run that did not finish, or
+    // float32 rows from before the 8-bit index: a whole-vault run puts it
+    // right. Queued, never awaited — it coalesces with any run already going.
+    if (!index.exists || index.identity !== "valid" || index.needsFullScan || index.migrationPending) {
       void reindexPrimeRadiantVault().catch((err) => {
         console.warn(`[prime-radiant] vault index build did not finish: ${err instanceof Error ? err.message : String(err)}`);
       });

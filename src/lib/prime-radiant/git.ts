@@ -146,9 +146,40 @@ export interface CommitInfo {
   /** ISO 8601 committer date. */
   at: string;
   author: string;
+  /**
+   * Who the verification this commit made names (its `Verified-by` /
+   * `Verified-via` trailers, verify.ts): `{ by: "owner", via: "assistant" }`
+   * when the assistant verified on the owner's word. Absent on every other commit.
+   */
+  verified?: { by: string; via?: string };
 }
 
-const LOG_FORMAT = "%H%x1f%s%x1f%cI%x1f%an%x1e";
+/** The trailers a verification commit carries, read back by {@link CommitInfo}'s `verified`. */
+export const VERIFIED_BY_TRAILER = "Verified-by";
+export const VERIFIED_VIA_TRAILER = "Verified-via";
+
+/** `Verified-by: <by>` (and `Verified-via: <via>`) lines for a commit's trailer block. */
+export function verifiedTrailers(stamp: { by: string; via?: string }): string[] {
+  const clean = (v: string) => v.replace(/[\r\n:]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 80);
+  const out = [`${VERIFIED_BY_TRAILER}: ${clean(stamp.by)}`];
+  if (stamp.via) out.push(`${VERIFIED_VIA_TRAILER}: ${clean(stamp.via)}`);
+  return out;
+}
+
+// Trailers only (git >= 2.15), unfolded, as the last field: a commit body
+// never reaches the record, only its `Key: value` lines.
+const LOG_FORMAT = "%H%x1f%s%x1f%cI%x1f%an%x1f%(trailers:only,unfold)%x1e";
+
+function trailerValue(trailers: string, key: string): string | null {
+  for (const line of trailers.split("\n")) {
+    const colon = line.indexOf(":");
+    if (colon > 0 && line.slice(0, colon).trim().toLowerCase() === key.toLowerCase()) {
+      const value = line.slice(colon + 1).trim();
+      if (value !== "") return value;
+    }
+  }
+  return null;
+}
 
 function parseLog(stdout: string): CommitInfo[] {
   return stdout
@@ -156,8 +187,14 @@ function parseLog(stdout: string): CommitInfo[] {
     .map((rec) => rec.trim())
     .filter((rec) => rec !== "")
     .map((rec) => {
-      const [sha, subject, at, author] = rec.split("\x1f");
-      return { sha, subject, at, author };
+      const [sha, subject, at, author, trailers = ""] = rec.split("\x1f");
+      const info: CommitInfo = { sha, subject, at, author };
+      const by = trailerValue(trailers, VERIFIED_BY_TRAILER);
+      if (by) {
+        const via = trailerValue(trailers, VERIFIED_VIA_TRAILER);
+        info.verified = via ? { by, via } : { by };
+      }
+      return info;
     });
 }
 
@@ -208,27 +245,46 @@ export async function trackedAtHead(vault: string, rel: string): Promise<boolean
  * Stage exactly `paths` (additions, edits and deletions) and commit them as
  * one commit. Returns the new sha, or null when nothing in `paths` changed —
  * an operation that changed nothing records nothing. Callers hold the lock.
- * `author` names who made the change (default {@link VAULT_AUTHOR}).
+ * `author` names who made the change (default {@link VAULT_AUTHOR});
+ * `trailers` (`Key: value` lines, e.g. {@link verifiedTrailers}) close the
+ * message as its trailer block.
  */
-export async function commitPaths(vault: string, message: string, paths: readonly string[], author: VaultAuthor = VAULT_AUTHOR): Promise<string | null> {
+export async function commitPaths(
+  vault: string,
+  message: string,
+  paths: readonly string[],
+  author: VaultAuthor = VAULT_AUTHOR,
+  trailers: readonly string[] = [],
+): Promise<string | null> {
   const subject = message.replace(/[\r\n]+/g, " ").trim();
+  // A trailer is one `Key: value` line; anything else would end the block.
+  const block = trailers.map((t) => t.replace(/[\r\n]+/g, " ").trim()).filter((t) => /^[A-Za-z][A-Za-z0-9-]*: \S/.test(t));
   if (subject === "") throw new Error("a vault commit needs a message");
   // A path neither on disk nor in HEAD (a remove of a page that never
   // existed, or a page written and removed again) is no change, and git
   // would refuse it as a pathspec that matches nothing.
   const live: string[] = [];
+  const present: string[] = [];
+  const gone: string[] = [];
   for (const p of paths) {
     const onDisk = await fs.lstat(path.join(vault, ...p.split("/"))).then(
       () => true,
       () => false,
     );
-    if (onDisk || (await trackedAtHead(vault, p))) live.push(p);
+    if (!onDisk && !(await trackedAtHead(vault, p))) continue;
+    live.push(p);
+    (onDisk ? present : gone).push(p);
   }
   if (live.length === 0) return null;
-  await git(vault, ["add", "-A", "--", ...live]);
+  if (present.length > 0) await git(vault, ["add", "-A", "--", ...present]);
+  // A deletion is staged with `git rm --cached`: a caller may have staged it
+  // already (a revert applies its patch with --index), and then the path is
+  // in neither the work tree nor the index, so `git add` refuses it as a
+  // pathspec that matches nothing.
+  if (gone.length > 0) await git(vault, ["rm", "-r", "--cached", "--quiet", "--ignore-unmatch", "--", ...gone]);
   const staged = await git(vault, ["diff", "--cached", "--quiet", "--", ...live], { allowFail: true });
   if (staged.code === 0) return null;
-  await git(vault, ["commit", "--quiet", "--no-verify", "-m", subject, "--", ...live], { author });
+  await git(vault, ["commit", "--quiet", "--no-verify", "-m", subject, ...(block.length > 0 ? ["-m", block.join("\n")] : []), "--", ...live], { author });
   const head = await headCommit(vault);
   return head?.sha ?? null;
 }

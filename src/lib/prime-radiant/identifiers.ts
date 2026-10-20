@@ -54,8 +54,15 @@ export interface Identifiers {
   record: boolean;
 }
 
+/**
+ * The words a reference follows. A company's own identifiers are among them
+ * (TIN, VAT number, EIK/BULSTAT, IBAN): two claims that name one company by
+ * its id are about that company, whatever documents they sit on, so a claim
+ * pair "exporter Acme EOOD, TIN X" / "importer Acme OOD, TIN X" is one subject.
+ */
 const REF_WORDS =
-  "waybill|awb|invoice|inv|order|transfer|parcel|package|tracking|shipment|consignment|receipt|reference|ref|transaction|txn|proforma|credit\\s+note|#|№";
+  "waybill|awb|invoice|inv|order|transfer|parcel|package|tracking|shipment|consignment|receipt|reference|ref|transaction|txn|proforma|credit\\s+note|" +
+  "tin|vat\\s+(?:no|number|id|reg(?:istration)?(?:\\s+no)?)\\.?|vat|eik|еик|bulstat|булстат|uic|company\\s+(?:id|no|number)|registration\\s+(?:no|number)|ддс\\s*№?|iban|#|№";
 
 const REF_AFTER_WORD = new RegExp(`(?:^|[^\\p{L}])(?:${REF_WORDS})\\s*[:#№]?\\s*([A-Za-z]{0,6}[-/]?\\d[\\dA-Za-z/-]{2,})`, "giu");
 const HASH_REF = /[#№]\s*([A-Za-z]{0,6}\d[\dA-Za-z-]{2,})/gu;
@@ -67,7 +74,14 @@ const MONTHS: Readonly<Record<string, number>> = {
   януари: 1, яну: 1, февруари: 2, фев: 2, март: 3, мар: 3, април: 4, апр: 4, май: 5, юни: 6, юли: 7, август: 8, авг: 8,
   септември: 9, септ: 9, сеп: 9, октомври: 10, окт: 10, ноември: 11, ное: 11, декември: 12, дек: 12,
 };
-const MONTH = `(${Object.keys(MONTHS).sort((a, b) => b.length - a.length).join("|")})(?!\\p{L})\\.?`;
+/** The month names (and abbreviations) a date may be written with, longest first, as a regex alternation. */
+export const MONTH_NAMES = Object.keys(MONTHS).sort((a, b) => b.length - a.length).join("|");
+const MONTH = `(${MONTH_NAMES})(?!\\p{L})\\.?`;
+
+/** The month (1-12) a month name or abbreviation names, or null. */
+export function monthNumber(name: string): number | null {
+  return MONTHS[name.toLowerCase().replace(/\.$/, "")] ?? null;
+}
 /** Not inside a word or a number, and not the decimals of an amount ("0.02 Jun 2026" is no 2 June). */
 const START = "(?<![\\p{L}\\p{N}])(?<!\\d[.,])";
 const END = "(?![\\p{L}\\p{N}])";
@@ -134,6 +148,11 @@ function readDates(text: string, out: Identifiers): string {
   return rest;
 }
 
+/** A text with its dates and months blanked: what names a thing, without when. */
+export function withoutDates(text: string): string {
+  return readDates(text, empty());
+}
+
 /** The identifiers a page title carries. */
 export function titleIdentifiers(title: string | null | undefined): Identifiers {
   const out = empty();
@@ -190,6 +209,11 @@ const TOPIC_WORDS = words([
   "workflows?", "overview", "checklists?", "formats?", "requirements?", "numbering", "setup", "settings", "system", "faq",
   "процес", "политика", "правила", "шаблон", "ръководство", "инструкци[яи]",
 ]);
+
+/** Whether a title is about documents rather than one of them ("Invoice process", "Receipt policy", "Waybill template"). */
+export function topicTitle(title: string | null | undefined): boolean {
+  return !!title && TOPIC_WORDS.test(title);
+}
 
 /**
  * Whether a page is a RECORD — one document of many alike (an invoice, a
@@ -264,6 +288,11 @@ function sameRef(x: string, y: string): boolean {
 function sharedRef(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
   for (const x of a) for (const y of b) if (sameRef(x, y)) return true;
   return false;
+}
+
+/** Whether two sets of references name one thing: a reference on both sides, however each is written. */
+export function sharedReference(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  return sharedRef(a, b);
 }
 
 function disjoint(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {

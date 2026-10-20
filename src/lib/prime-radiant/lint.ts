@@ -22,11 +22,14 @@
  * Pure apart from the snapshot it is handed.
  */
 
-import { buildClaimIndex, claimCollisions, isClaimId, retiredReuse } from "./claims";
+import { buildClaimIndex, claimCollisions, isClaimId, retiredReuse, transliterateCyrillic } from "./claims";
 import { pageSummary } from "./frontmatter";
-import { buildLinkGraph, CONTENT_FOLDERS, contentReach } from "./links";
+import { isPluginFormatFrontmatter } from "./plugin-files";
+import { domainMismatches, findDuplicateEntities } from "./entity-hygiene";
+import { buildLinkGraph, CONTENT_FOLDERS, contentReach, isContentPage, pathAliases } from "./links";
 import { scanSecrets } from "./redact";
-import type { PageFrontmatter } from "./schema";
+import { CLAIM_DATE_FIELDS, ownerVerified, type PageFrontmatter } from "./schema";
+import { isValidityDate } from "./validity";
 import type { VaultPage, VaultSnapshot } from "./vault";
 
 export const LIMITS = Object.freeze({
@@ -48,10 +51,15 @@ export const LINT_RULES = [
   "orphan",
   "no-sources",
   "stale-after-passed",
+  "as-of-missing",
   "secret-pattern",
   "frontmatter-invalid",
   "claim-id-collision",
   "claim-id-retired-reuse",
+  "stale-against-verified",
+  "plugin-format",
+  "duplicate-entity",
+  "domain-mismatch",
 ] as const;
 export type LintRule = (typeof LINT_RULES)[number];
 
@@ -112,6 +120,10 @@ export interface LintOptions {
   scope?: readonly string[];
   /** Retired ids the state database remembers. */
   ledgerRetired?: Iterable<string>;
+  /** Claims the judge found against an owner-verified claim (verify.ts `readStaleClaims`): warned about on their pages. */
+  staleClaims?: ReadonlyArray<{ claimId: string; page: string; verifiedClaimId: string; verifiedPage: string; at: string }>;
+  /** The configured domain names (settings `domains`): what `domain-mismatch` may suggest. None: the domains pages use. */
+  domains?: readonly string[];
   now?: Date;
 }
 
@@ -139,7 +151,7 @@ export function staleAfterPassed(staleAfter: string | null, now: Date): boolean 
 }
 
 function slugifyTitle(text: string): string {
-  const s = text
+  const s = transliterateCyrillic(text)
     .normalize("NFKD")
     .replace(/[̀-ͯ]/g, "")
     .toLowerCase()
@@ -289,6 +301,26 @@ function lintPageShape(page: VaultPage, fm: PageFrontmatter, body: string, now: 
   if (staleAfterPassed(fm.stale_after, now)) {
     out.push(finding("stale-after-passed", "warning", page.path, `stale_after ${fm.stale_after} has passed`, { staleAfter: fm.stale_after }));
   }
+  if (metricWithoutAsOf(fm)) {
+    const undated = fm.claims.filter((c) => !claimDated(c)).length;
+    out.push(
+      finding("as-of-missing", "warning", page.path, "a metric page needs an as_of date (the day its figures were true on), on the page or on every claim (a claim's valid_from or valid_until dates it too)", {
+        claims: fm.claims.length,
+        undated,
+      }),
+    );
+  }
+}
+
+/** A claim that names the day (or period) it holds on; validity.ts's reading, so the pass and the lint agree on what a date is. */
+function claimDated(claim: PageFrontmatter["claims"][number]): boolean {
+  return CLAIM_DATE_FIELDS.some((key) => isValidityDate(claim[key]));
+}
+
+/** A metric page with no `as_of` of its own and a claim (or no claim at all) that names no day either. */
+export function metricWithoutAsOf(fm: Pick<PageFrontmatter, "type" | "claims" | "as_of">): boolean {
+  if (fm.type !== "metric" || isValidityDate(fm.as_of)) return false;
+  return fm.claims.length === 0 || !fm.claims.every(claimDated);
 }
 
 /**
@@ -309,6 +341,7 @@ export function lintVault(snapshot: VaultSnapshot, options: LintOptions = {}): L
   const findings: LintFinding[] = [];
 
   const valid = snapshot.pages.flatMap((p) => (p.parsed.ok ? [{ page: p, fm: p.parsed.frontmatter, body: p.parsed.body }] : []));
+  const frontmatterByPath = new Map(valid.map((v) => [v.page.path, v.fm]));
   const index = buildClaimIndex(
     valid.map((v) => ({ path: v.page.path, frontmatter: v.fm })),
     options.ledgerRetired ?? [],
@@ -317,6 +350,7 @@ export function lintVault(snapshot: VaultSnapshot, options: LintOptions = {}): L
     snapshot.pages.map((p) => ({
       path: p.path,
       title: p.parsed.ok ? p.parsed.frontmatter.title : undefined,
+      aliases: p.parsed.ok ? pathAliases(p.parsed.frontmatter.aliases) : undefined,
       body: p.parsed.body,
     })),
     snapshot.indexBody,
@@ -330,6 +364,11 @@ export function lintVault(snapshot: VaultSnapshot, options: LintOptions = {}): L
     const kinds = scanSecrets(page.text);
     if (kinds.length > 0) {
       findings.push(finding("secret-pattern", "error", page.path, `the page contains what looks like ${kinds.join(", ")}`, { kinds }));
+    }
+    if (!page.parsed.ok && isPluginFormatFrontmatter(page.parsed.raw)) {
+      // memory-wiki's own page (create_synthesis): converted on the next pass, never an error that holds the vault.
+      findings.push(finding("plugin-format", "warning", page.path, "memory-wiki wrote this page in its own format; the next nightly pass makes it a Prime Radiant page"));
+      continue;
     }
     if (!page.parsed.ok) {
       findings.push(
@@ -400,6 +439,54 @@ export function lintVault(snapshot: VaultSnapshot, options: LintOptions = {}): L
         }),
       );
     }
+  }
+
+  // A claim the judge found against an owner-verified one: the verified claim wins, this one is stale — while it
+  // stands as it stood then (not rewritten since) and the claim it disagrees with is still verified.
+  for (const note of options.staleClaims ?? []) {
+    if (!inScope(note.page)) continue;
+    const here = (index.active.get(note.claimId) ?? []).find((l) => l.page === note.page);
+    const at = Date.parse(note.at);
+    if (!here || (Number.isFinite(at) && Date.parse(here.claim.updatedAt) > at)) continue;
+    // The claim that won must still be owner-verified where it won: on its recorded page, by a person's stamp on it
+    // or on that page — never the assistant's, and never a copy of its id elsewhere.
+    const winner = (index.active.get(note.verifiedClaimId) ?? []).find((l) => l.page === note.verifiedPage);
+    if (!winner || !ownerVerified(winner.claim, frontmatterByPath.get(note.verifiedPage))) continue;
+    findings.push(
+      finding(
+        "stale-against-verified",
+        "warning",
+        note.page,
+        `claim ${note.claimId} disagrees with the owner-verified claim ${note.verifiedClaimId} on ${note.verifiedPage}; the verified claim wins`,
+        { claimId: note.claimId, verifiedClaimId: note.verifiedClaimId, verifiedPage: note.verifiedPage },
+      ),
+    );
+  }
+
+  // One entity under two pages, and an entity filed under a domain its own facts disagree with
+  // (entity-hygiene.ts): suggestions for the owner, never errors.
+  const entityPages = valid.map((v) => ({ path: v.page.path, fm: v.fm }));
+  const contentInbound = (p: string) => [...(graph.inbound.get(p) ?? [])].filter(isContentPage).length;
+  for (const g of findDuplicateEntities(entityPages, contentInbound)) {
+    for (const d of g.duplicates) {
+      if (!inScope(d)) continue;
+      const why = g.reason === "suffix" ? "a numbered copy of" : g.reason === "script" ? "the same name in another script as" : "the same name as";
+      findings.push(
+        finding("duplicate-entity", "warning", d, `this entity looks like ${why} ${g.canonical}; merge it into that page (the page merge, dry run first)`, {
+          canonical: g.canonical,
+          reason: g.reason,
+        }),
+      );
+    }
+  }
+  for (const m of domainMismatches(entityPages, { configured: options.domains, paths: scopeSet ?? undefined })) {
+    findings.push(
+      finding("domain-mismatch", "warning", m.path, `filed under ${m.domain}, but ${m.evidence}; suggested domain: ${m.suggested}`, {
+        domain: m.domain,
+        suggested: m.suggested,
+        reason: m.reason,
+      }),
+    );
   }
 
   findings.sort((a, b) => a.path.localeCompare(b.path) || LINT_RULES.indexOf(a.rule) - LINT_RULES.indexOf(b.rule));

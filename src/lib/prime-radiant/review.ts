@@ -10,7 +10,10 @@
  * `by` is who settled it, as the stamp records it — "owner", or "assistant"
  * when the agent did through the MCP bearer, whose commit then names it.
  *   later   — put off; the item stays in the queue as `later`.
- *   dismiss — nothing to change; resolved with no commit.
+ *   dismiss — nothing to change; resolved with no commit. A contradiction
+ *             dismissed so is not raised again while its two texts stay as
+ *             they were (review-store.ts `keepDismissed`).
+ * Any of them may carry the settler's `reason`, kept as `resolution.note`.
  *
  * Resolutions are serialised (one at a time per process), so two tabs
  * pressing "pick" on the same item verify once: the second finds the item
@@ -39,11 +42,18 @@ import {
 import type { ClaimEvidence } from "./schema";
 import { cleanVerifiedText, MAX_VERIFIED_TEXT, verifyClaim, VerifyError } from "./verify";
 
-export type ResolveAction =
+export type ResolveAction = (
   | { action: "pick"; candidate: number }
   | { action: "new"; text: string; page?: string | null }
   | { action: "later" }
-  | { action: "dismiss" };
+  | { action: "dismiss" }
+) & {
+  /** Why, in the settler's words: kept on the item (`resolution.note`). */
+  reason?: string;
+};
+
+/** The longest reason kept on an item. */
+export const MAX_RESOLVE_REASON = 500;
 
 export class ReviewError extends Error {
   constructor(
@@ -59,6 +69,13 @@ export class ReviewError extends Error {
 /** A resolve body read strictly. Throws {@link ReviewError} `invalid`. */
 export function readResolveAction(body: unknown): ResolveAction {
   const b = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+  if (b.reason !== undefined && b.reason !== null && typeof b.reason !== "string") throw new ReviewError("invalid", "reason must be text.", 400);
+  const reason = typeof b.reason === "string" ? b.reason.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, MAX_RESOLVE_REASON) : "";
+  const action = readAction(b);
+  return reason ? { ...action, reason } : action;
+}
+
+function readAction(b: Record<string, unknown>): ResolveAction {
   switch (b.action) {
     case "pick":
       if (typeof b.candidate !== "number" || !Number.isInteger(b.candidate) || b.candidate < 0) {
@@ -90,7 +107,7 @@ export interface ResolveResult {
 export async function resolveReviewItem(
   id: string,
   action: ResolveAction,
-  options: { by: string; author?: VaultAuthor; person?: boolean; vault?: string; now?: Date } = { by: "owner" },
+  options: { by: string; via?: string; author?: VaultAuthor; person?: boolean; vault?: string; now?: Date } = { by: "owner" },
 ): Promise<ResolveResult> {
   const vault = options.vault ?? vaultDir();
   return lockStore.lock(async () => {
@@ -100,7 +117,7 @@ export async function resolveReviewItem(
     const at = (options.now ?? new Date()).toISOString();
 
     if (action.action === "later" || action.action === "dismiss") {
-      const resolution: ReviewResolution = { action: action.action, by: options.by };
+      const resolution: ReviewResolution = { action: action.action, by: options.by, ...(options.via ? { via: options.via } : {}), ...(action.reason ? { note: action.reason } : {}) };
       settleReviewItem(vault, id, action.action === "later" ? "later" : "resolved", resolution, at);
       return { item: getReviewItem(vault, id) ?? item, commit: null, retired: [] };
     }
@@ -130,10 +147,11 @@ export async function resolveReviewItem(
         claimId: item.claimId,
         text,
         by: options.by,
+        ...(options.via ? { via: options.via } : {}),
         retire,
         page: page ?? item.pages[0] ?? null,
         evidence,
-        note: `verified by ${options.by} from review ${item.id}`,
+        note: `verified by ${options.via ? `${options.by} via ${options.via}` : options.by} from review ${item.id}`,
         author: options.author,
         person: options.person,
         vault,
@@ -152,6 +170,8 @@ export async function resolveReviewItem(
       commit: verified.commit,
       retired: verified.retired,
       by: options.by,
+      ...(options.via ? { via: options.via } : {}),
+      ...(action.reason ? { note: action.reason } : {}),
     };
     settleReviewItem(vault, id, "resolved", resolution, at);
     // Items still waiting on a claim this verification retired ask about nothing now.

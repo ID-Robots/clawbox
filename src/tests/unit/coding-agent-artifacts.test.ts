@@ -232,52 +232,6 @@ describe("run id containment", () => {
 });
 
 /**
- * A team keeps its time record in an evidence folder of its own. The owner-id
- * variant takes a team id as well as a run id, with the same two guards — and
- * the run-only gates (artifactsDir, safeRunId) still refuse a team id.
- */
-describe("owner id containment", () => {
-  const TEAM_ID = "team-0aezpvrw";
-
-  it("rebuilds an ordinary run or team id unchanged", () => {
-    expect(lib.safeOwnerId(RUN_ID)).toBe(RUN_ID);
-    expect(lib.safeOwnerId(TEAM_ID)).toBe(TEAM_ID);
-    expect(lib.ARTIFACT_TEAM_ID_RE.test(TEAM_ID)).toBe(true);
-  });
-
-  it("leaves the run-only gates as they were", () => {
-    expect(lib.safeRunId(TEAM_ID)).toBeNull();
-    expect(() => lib.artifactsDir(TEAM_ID)).toThrow();
-    expect(lib.listArtifacts(TEAM_ID)).toEqual([]);
-  });
-
-  it.each([
-    ["parent traversal", "team-../../et"],
-    ["separator inside the suffix", "team-ab/cd123"],
-    ["a dot segment", "team-....1234"],
-    ["uppercase outside the alphabet", "team-ABC12345"],
-    ["too short", "team-abc1234"],
-    ["too long", "team-abc123456"],
-    ["another prefix", "proj-abc12345"],
-    ["a NUL byte", `team-abc1234${String.fromCharCode(0)}`],
-    ["a non-string", 12345678],
-    ["an object with a toString", { toString: () => TEAM_ID }],
-  ])("refuses %s", (_label, bad) => {
-    expect(lib.safeOwnerId(bad)).toBeNull();
-    expect(() => lib.ownerArtifactsDir(bad as string)).toThrow();
-  });
-
-  it("creates a team's folder under the evidence root, at the mode the store owns", () => {
-    const made = lib.ensureOwnerArtifactsDir(TEAM_ID);
-    expect(made).toBe(path.join(lib.artifactsRoot(), TEAM_ID));
-    expect(fs.statSync(made).mode & 0o777).toBe(0o700);
-    expect(lib.ownerArtifactsDir(RUN_ID)).toBe(lib.artifactsDir(RUN_ID));
-    expect(() => lib.ensureOwnerArtifactsDir(`team-..${path.sep}escaped`)).toThrow();
-    expect(fs.existsSync(path.join(base, "escaped"))).toBe(false);
-  });
-});
-
-/**
  * What a settled run's evidence folder may not keep (pruneArtifacts).
  *
  * A run made a Python environment inside its evidence folder; its

@@ -5,8 +5,8 @@
  * This module owns every section: ingest (the exclude list, whether code
  * projects are skipped, the model-call parallelism, the folders the nightly
  * pass re-reads), the cost rates, the
- * nightly schedule, the optional Opus tier, the contradiction pass and the
- * domains with their owners. Keys it does not know are kept on every
+ * nightly schedule, the optional Opus tier, the contradiction pass, the
+ * search index's size limit and the domains with their owners. Keys it does not know are kept on every
  * write, so a section another module adds survives an ingest setting being
  * changed. A read never creates the file; a file that cannot be parsed reads
  * as the defaults (and is logged), so a bad edit cannot stop an ingest.
@@ -16,9 +16,11 @@
 
 import crypto from "crypto";
 import fs from "fs";
+import os from "os";
 import path, { untraced } from "@/lib/runtime-path";
 import { DEFAULT_INGEST_EXCLUDES, EXCLUDE_DEFAULTS_GENERATION, isDefaultExcludeList, readExcludeList } from "./ingest-exclude";
 import { mergeCostRates, readRateOverrides, type CostRates, type ModelRate } from "./cost-rates";
+import { DAILY_LANGUAGES, DEFAULT_DAILY_PER_OWNER, isDailyLanguage, MAX_DAILY_PER_OWNER, MIN_DAILY_PER_OWNER, type DailyLanguage } from "./daily";
 import { primeRadiantRoot } from "./paths";
 
 export const SETTINGS_FILE = "settings.json";
@@ -52,8 +54,48 @@ export const DEFAULT_OPUS_MAX_PAGES = 100;
 export const MIN_OPUS_MAX_PAGES = 4;
 export const MAX_OPUS_MAX_PAGES = 2000;
 
+/**
+ * How big the vault's search index may grow, in MB (MiB: 1 MB = 1,048,576
+ * bytes): what its 8-bit vectors take on disk, and about what search holds in
+ * memory. 160 MB holds ~160k chunks at 1,024-d and is safe on an 8 GB box;
+ * past the limit, page vectors are kept before claim vectors (shard-index.ts).
+ */
+export const DEFAULT_SEARCH_INDEX_LIMIT_MB = 160;
+export const MIN_SEARCH_INDEX_LIMIT_MB = 32;
+export const MAX_SEARCH_INDEX_LIMIT_MB = 4096;
+export const BYTES_PER_MB = 1024 * 1024;
+
 export const MAX_DOMAINS = 100;
 const MAX_OWNER_CHARS = 80;
+
+/** The golden questions' nightly check: on, at most this many questions a night (the ones asked longest ago first). */
+export const DEFAULT_GOLDEN_MAX_QUESTIONS = 50;
+export const MIN_GOLDEN_MAX_QUESTIONS = 1;
+export const MAX_GOLDEN_MAX_QUESTIONS = 500;
+/** Owners with a language of their own for the daily questions. */
+export const MAX_OWNER_LANGUAGES = 100;
+/**
+ * The structure pass (structure.ts): on by default in the nightly pass. The
+ * owner's company names the root page; the top entities by inbound links get
+ * claims worked out from their pages; the cheap model may type at most
+ * `modelFallback` record pages a night that the rules could not (0: never).
+ */
+export const DEFAULT_STRUCTURE_ENRICH_TOP = 25;
+export const MAX_STRUCTURE_ENRICH_TOP = 200;
+export const DEFAULT_STRUCTURE_MODEL_FALLBACK = 25;
+export const MAX_STRUCTURE_MODEL_FALLBACK = 500;
+export const MAX_COMPANY_CHARS = 80;
+
+/**
+ * The summaries pass (node-summary.ts): on by default in the nightly pass.
+ * The cheap model writes at most `maxPages` summaries a night, never past
+ * `capUsd` of estimated spend; the rest are written from their facts' own
+ * words (0 pages: never the model).
+ */
+export const DEFAULT_SUMMARIES_MAX_PAGES = 150;
+export const MAX_SUMMARIES_MAX_PAGES = 2000;
+export const DEFAULT_SUMMARIES_CAP_USD = 0.25;
+export const MAX_SUMMARIES_CAP_USD = 100;
 
 export interface IngestSettings {
   /**
@@ -92,10 +134,59 @@ export interface ContradictionSettings {
   enabled: boolean;
 }
 
+export interface SearchSettings {
+  /** The vault search index's size limit, MB (whole number). */
+  indexLimitMb: number;
+}
+
+export interface StructureSettings {
+  enabled: boolean;
+  /** The owner's company: the root page's title (empty: "Company overview"). */
+  company: string;
+  /** Entities enriched a night, the most linked first; 0 switches enrichment off. */
+  enrichTop: number;
+  /** Record pages the cheap model may type a night where the rules could not; 0 switches it off. */
+  modelFallback: number;
+}
+
+export interface SummariesSettings {
+  enabled: boolean;
+  /** Summaries the cheap model writes a night, entities first; 0 leaves them all to the facts. */
+  maxPages: number;
+  /** Hard ceiling on one night's estimated model spend for summaries, USD. */
+  capUsd: number;
+}
+
 export interface DomainSetting {
   /** Lowercase kebab, as a page's `domain`. */
   name: string;
   owner: string;
+}
+
+export interface GoldenSettings {
+  /** Check the golden questions every night. */
+  enabled: boolean;
+  /** Questions one night asks at most (each one a share of a cheap model call). */
+  maxQuestions: number;
+}
+
+export interface OwnerLanguage {
+  owner: string;
+  language: DailyLanguage;
+}
+
+export interface VerificationSettings {
+  /** Daily questions an owner gets at most. */
+  perOwner: number;
+  /**
+   * Whether the assistant may SEND an owner their daily questions over chat.
+   * Off by default: until the owner turns it on, the questions are only shown
+   * — in the app, and to the assistant when someone asks for them. Nothing is
+   * ever sent on a timer.
+   */
+  outbound: boolean;
+  /** The language each owner's questions are written in (English when not listed). */
+  languages: OwnerLanguage[];
 }
 
 export interface PrimeRadiantSettings {
@@ -105,7 +196,12 @@ export interface PrimeRadiantSettings {
   nightly: NightlySettings;
   opus: OpusSettings;
   contradictions: ContradictionSettings;
+  search: SearchSettings;
+  structure: StructureSettings;
+  summaries: SummariesSettings;
   domains: DomainSetting[];
+  golden: GoldenSettings;
+  verification: VerificationSettings;
 }
 
 export function defaultSettings(): PrimeRadiantSettings {
@@ -115,7 +211,12 @@ export function defaultSettings(): PrimeRadiantSettings {
     nightly: { enabled: true, time: DEFAULT_NIGHTLY_TIME },
     opus: { enabled: false, capUsd: DEFAULT_OPUS_CAP_USD, sampleRate: DEFAULT_OPUS_SAMPLE_RATE, model: DEFAULT_OPUS_MODEL, maxPages: DEFAULT_OPUS_MAX_PAGES },
     contradictions: { enabled: true },
+    search: { indexLimitMb: DEFAULT_SEARCH_INDEX_LIMIT_MB },
+    structure: { enabled: true, company: "", enrichTop: DEFAULT_STRUCTURE_ENRICH_TOP, modelFallback: DEFAULT_STRUCTURE_MODEL_FALLBACK },
+    summaries: { enabled: true, maxPages: DEFAULT_SUMMARIES_MAX_PAGES, capUsd: DEFAULT_SUMMARIES_CAP_USD },
     domains: [],
+    golden: { enabled: true, maxQuestions: DEFAULT_GOLDEN_MAX_QUESTIONS },
+    verification: { perOwner: DEFAULT_DAILY_PER_OWNER, outbound: false, languages: [] },
   };
 }
 
@@ -183,6 +284,20 @@ function readDomains(v: unknown): Read<DomainSetting[]> {
   return { ok: true, value: out };
 }
 
+function readOwnerLanguages(v: unknown): Read<OwnerLanguage[]> {
+  if (!Array.isArray(v) || v.length > MAX_OWNER_LANGUAGES) return { ok: false, error: `verification.languages must be a list of at most ${MAX_OWNER_LANGUAGES}.` };
+  const out: OwnerLanguage[] = [];
+  for (const entry of v) {
+    const o = section(entry);
+    const owner = typeof o.owner === "string" ? o.owner.replace(/[\u0000-\u001f\u007f]/g, " ").trim() : "";
+    if (owner === "" || owner.length > MAX_OWNER_CHARS) return { ok: false, error: `An owner must be 1 to ${MAX_OWNER_CHARS} characters.` };
+    if (!isDailyLanguage(o.language)) return { ok: false, error: `A language must be one of ${DAILY_LANGUAGES.join(", ")}.` };
+    if (out.some((x) => x.owner.toLowerCase() === owner.toLowerCase())) return { ok: false, error: `The owner ${owner} is listed twice.` };
+    out.push({ owner, language: o.language });
+  }
+  return { ok: true, value: out };
+}
+
 /**
  * Each field a section may carry, read strictly. The same readers serve the
  * file (a bad field reads as its default) and a patch (a bad field refuses
@@ -207,6 +322,52 @@ const FIELDS = {
   },
   contradictions: {
     enabled: (v: unknown) => readBool(v, "contradictions.enabled"),
+  },
+  search: {
+    indexLimitMb: (v: unknown): Read<number> =>
+      typeof v === "number" && Number.isInteger(v) && v >= MIN_SEARCH_INDEX_LIMIT_MB && v <= MAX_SEARCH_INDEX_LIMIT_MB
+        ? { ok: true, value: v }
+        : { ok: false, error: `search.indexLimitMb must be a whole number of MB from ${MIN_SEARCH_INDEX_LIMIT_MB} to ${MAX_SEARCH_INDEX_LIMIT_MB}.` },
+  },
+  golden: {
+    enabled: (v: unknown) => readBool(v, "golden.enabled"),
+    maxQuestions: (v: unknown): Read<number> =>
+      typeof v === "number" && Number.isInteger(v) && v >= MIN_GOLDEN_MAX_QUESTIONS && v <= MAX_GOLDEN_MAX_QUESTIONS
+        ? { ok: true, value: v }
+        : { ok: false, error: `golden.maxQuestions must be a whole number from ${MIN_GOLDEN_MAX_QUESTIONS} to ${MAX_GOLDEN_MAX_QUESTIONS}.` },
+  },
+  verification: {
+    perOwner: (v: unknown): Read<number> =>
+      typeof v === "number" && Number.isInteger(v) && v >= MIN_DAILY_PER_OWNER && v <= MAX_DAILY_PER_OWNER
+        ? { ok: true, value: v }
+        : { ok: false, error: `verification.perOwner must be a whole number from ${MIN_DAILY_PER_OWNER} to ${MAX_DAILY_PER_OWNER}.` },
+    outbound: (v: unknown) => readBool(v, "verification.outbound"),
+    languages: (v: unknown) => readOwnerLanguages(v),
+  },
+  structure: {
+    enabled: (v: unknown) => readBool(v, "structure.enabled"),
+    company: (v: unknown): Read<string> => {
+      const clean = typeof v === "string" ? v.replace(/[\u0000-\u001f\u007f]/g, " ").trim() : null;
+      return clean !== null && clean.length <= MAX_COMPANY_CHARS
+        ? { ok: true, value: clean }
+        : { ok: false, error: `structure.company must be text of at most ${MAX_COMPANY_CHARS} characters.` };
+    },
+    enrichTop: (v: unknown): Read<number> =>
+      typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= MAX_STRUCTURE_ENRICH_TOP
+        ? { ok: true, value: v }
+        : { ok: false, error: `structure.enrichTop must be a whole number from 0 to ${MAX_STRUCTURE_ENRICH_TOP}.` },
+    modelFallback: (v: unknown): Read<number> =>
+      typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= MAX_STRUCTURE_MODEL_FALLBACK
+        ? { ok: true, value: v }
+        : { ok: false, error: `structure.modelFallback must be a whole number from 0 to ${MAX_STRUCTURE_MODEL_FALLBACK}.` },
+  },
+  summaries: {
+    enabled: (v: unknown) => readBool(v, "summaries.enabled"),
+    maxPages: (v: unknown): Read<number> =>
+      typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= MAX_SUMMARIES_MAX_PAGES
+        ? { ok: true, value: v }
+        : { ok: false, error: `summaries.maxPages must be a whole number from 0 to ${MAX_SUMMARIES_MAX_PAGES}.` },
+    capUsd: (v: unknown) => readNumber(v, 0, MAX_SUMMARIES_CAP_USD, "summaries.capUsd"),
   },
 } as const;
 
@@ -274,7 +435,12 @@ export interface SettingsPatch {
   nightly?: { enabled?: unknown; time?: unknown } | null;
   opus?: { enabled?: unknown; capUsd?: unknown; sampleRate?: unknown; model?: unknown; maxPages?: unknown } | null;
   contradictions?: { enabled?: unknown } | null;
+  search?: { indexLimitMb?: unknown } | null;
+  structure?: { enabled?: unknown; company?: unknown; enrichTop?: unknown; modelFallback?: unknown } | null;
+  summaries?: { enabled?: unknown; maxPages?: unknown; capUsd?: unknown } | null;
   domains?: unknown;
+  golden?: { enabled?: unknown; maxQuestions?: unknown } | null;
+  verification?: { perOwner?: unknown; outbound?: unknown; languages?: unknown } | null;
 }
 
 /** The keys a patch may carry, per section — anything else is refused, never stored. */
@@ -283,7 +449,21 @@ const PATCH_KEYS: Readonly<Record<string, readonly string[]>> = {
   nightly: Object.keys(FIELDS.nightly),
   opus: Object.keys(FIELDS.opus),
   contradictions: Object.keys(FIELDS.contradictions),
+  search: Object.keys(FIELDS.search),
+  golden: Object.keys(FIELDS.golden),
+  verification: Object.keys(FIELDS.verification),
+  structure: Object.keys(FIELDS.structure),
+  summaries: Object.keys(FIELDS.summaries),
 };
+
+/** The vault search index's size limit in force, in bytes (shard-index.ts reads it at every run). */
+export function searchIndexLimitBytes(root: string = primeRadiantRoot(), totalMem: number = os.totalmem()): number {
+  const asked = readSettings(root).search.indexLimitMb * BYTES_PER_MB;
+  // Search holds the whole index in memory: never more than a quarter of the
+  // box's RAM, whatever was saved (a 4,096 MB limit on an 8 GB box stays 2 GB).
+  const ceiling = Math.max(MIN_SEARCH_INDEX_LIMIT_MB * BYTES_PER_MB, Math.floor(totalMem / 4));
+  return Math.min(asked, ceiling);
+}
 
 /** A patch as a route received it: only known sections and keys. Throws {@link SettingsError}. */
 export function readSettingsPatch(body: unknown): SettingsPatch {

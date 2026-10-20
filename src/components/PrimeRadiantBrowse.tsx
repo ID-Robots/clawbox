@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useT } from "@/lib/i18n";
 import { renderText } from "@/lib/chat-markdown";
+import { recheckOf } from "@/lib/prime-radiant/recheck";
 import { BTN_PRIMARY, BTN_SECONDARY, CARD_SURFACE, FIELD, INSET_SURFACE, SECTION_LABEL } from "./coding-agent-ui";
 import {
   API,
@@ -13,10 +14,22 @@ import {
   pageLabel,
   pageUrl,
   prJson,
+  verifierKey,
   type PageDetail,
   type PageListEntry,
 } from "./prime-radiant-ui";
 import PrimeRadiantSearch, { type SearchRequest } from "./PrimeRadiantSearch";
+
+/** The page's re-check day: its own date, else the one its type gives it (a record: never, "—"). */
+function recheckLabel(fm: Parameters<typeof recheckOf>[0], t: (key: string, vars?: Record<string, string | number>) => string): string {
+  try {
+    const r = recheckOf(fm);
+    if (!r.date) return "—";
+    return r.by === "type" ? t("primeRadiant.page.recheckByType", { date: r.date }) : r.date;
+  } catch {
+    return fm.stale_after ?? "—";
+  }
+}
 
 interface Props {
   domains: string[];
@@ -288,6 +301,19 @@ function PageView({ path, page, error, onBack, onOpen, onHistory, locale }: {
               )}
             </h2>
             <p className="mt-0.5 font-mono text-[11px] text-[var(--text-muted)] break-all">{page.path}</p>
+            {page.nodeSummary && (
+              <p
+                className="mt-2 text-sm text-[var(--text-secondary)] flex items-start gap-1.5"
+                title={t("primeRadiant.page.generatedSummary")}
+                data-testid="prime-radiant-page-summary"
+              >
+                <span className="material-symbols-rounded shrink-0 text-[var(--text-muted)]" style={{ fontSize: 14, marginTop: 2 }} aria-hidden="true">hub</span>
+                <span>
+                  <span className="sr-only">{t("primeRadiant.page.generatedSummary")}: </span>
+                  {page.nodeSummary.text}
+                </span>
+              </p>
+            )}
           </div>
 
           {fm ? (
@@ -300,7 +326,7 @@ function PageView({ path, page, error, onBack, onOpen, onHistory, locale }: {
                 ["primeRadiant.page.privacy", t(`primeRadiant.privacy.${keyPart(fm.privacy)}`)],
                 ["primeRadiant.page.checkedBy", t(`primeRadiant.checkedBy.${fm.checked_by}`)],
                 ["primeRadiant.page.generated", formatWhen(fm.generated?.at, locale)],
-                ["primeRadiant.page.staleAfter", fm.stale_after ?? "—"],
+                ["primeRadiant.page.staleAfter", recheckLabel(fm, t)],
               ] as const).map(([key, value]) => (
                 <div key={key} className={`${INSET_SURFACE} px-2.5 py-1.5`}>
                   <dt className="text-[10px] uppercase tracking-wider text-[var(--text-muted)]">{t(key)}</dt>
@@ -342,7 +368,11 @@ function PageView({ path, page, error, onBack, onOpen, onHistory, locale }: {
                         {t("primeRadiant.page.confidence", { value: percent(c.confidence) })}
                       </span>
                       <span>{t(`primeRadiant.claimStatus.${c.status}`)}</span>
-                      {c.verified && <span>{t("primeRadiant.page.verifiedBy", { by: c.verified.by, at: formatWhen(c.verified.at, locale) })}</span>}
+                      {c.verified && (
+                        <span data-testid="prime-radiant-claim-verified">
+                          {t(`primeRadiant.page.verifiedBy${verifierKey(c.verified) ?? ""}`, { by: c.verified.by, at: formatWhen(c.verified.at, locale) })}
+                        </span>
+                      )}
                     </div>
                     {c.evidence.length > 0 && (
                       <ul className="mt-1.5 space-y-0.5 text-[11px] text-[var(--text-secondary)]">

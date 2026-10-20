@@ -30,7 +30,6 @@ import CodingRunWorktreeCard, { worktreeCardApplies, type RunWorktreeView } from
 import CodingTaskDialog from "./CodingTaskDialog";
 import type { RunMessage } from "@/lib/coding-run-messages";
 import RunProgressBar, { RUN_TONE } from "./RunProgressBar";
-import CodingBudgetTimeline from "./CodingBudgetTimeline";
 // The "3h ago" the rest of the desktop speaks — ClawKeep's helper and its
 // keys, translated in every locale, rather than a second English-only one.
 import { timeAgo } from "./clawkeep-ui";
@@ -213,11 +212,6 @@ interface Run {
    *  whether the harness has had each of them yet. Absent on a server that
    *  predates the queue, which is why the card reads it defensively. */
   messages?: RunMessage[];
-  /** The run's time budget and how it is being spent (its time record), on a
-   *  run that has one — read defensively by CodingBudgetTimeline. Absent
-   *  otherwise, and from an older server. */
-  timeBudget?: unknown;
-  timeRecord?: unknown;
 }
 
 /**
@@ -2712,18 +2706,6 @@ export default function CodingAgentApp() {
                     className="mt-2"
                   />
                 )}
-                {/* A budgeted run's time: the bar to its deadline, the
-                    estimate, the spend and the checkpoints of its record. */}
-                {run.timeBudget !== undefined && run.timeBudget !== null && (
-                  <CodingBudgetTimeline
-                    budget={run.timeBudget}
-                    record={run.timeRecord}
-                    live={isLive(run.status)}
-                    timeZone={status?.timeZone}
-                    tokensUsed={run.tokensUsed}
-                    testId="coding-agent-run-budget"
-                  />
-                )}
                 {/* A run that finished on its own keeps whatever it started:
                     an app that serves itself on a port is meant to stay up,
                     so the device says what survived instead of killing it
@@ -3358,7 +3340,6 @@ export default function CodingAgentApp() {
                       onOpenRun={(id) => showRun(id)}
                       onPlan={standalone ? undefined : () => openNewAppCard({ project: p.directory, team: true })}
                       runs={runs}
-                      timeZone={status?.timeZone}
                     />
                   </div>
                 )}

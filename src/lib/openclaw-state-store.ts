@@ -40,7 +40,7 @@ import { OPENCLAW_HOME_DEFAULT, openSqlite } from "./openclaw-session-store";
  * and a relative path is taken from the cwd; without one it is the OpenClaw
  * home. A literal `~/...` here would stat a path the gateway never writes.
  */
-function stateDir(home: string): string {
+export function openclawStateDir(home: string = OPENCLAW_HOME_DEFAULT): string {
   const override = process.env.OPENCLAW_STATE_DIR?.trim();
   if (!override) return home;
   return path.resolve(override.replace(/^~(?=$|[\\/])/, () => process.env.HOME || os.homedir()));
@@ -48,7 +48,7 @@ function stateDir(home: string): string {
 
 /** The gateway-wide SQLite store, or null when this OpenClaw has not migrated to it. */
 export function statePath(home: string = OPENCLAW_HOME_DEFAULT): string | null {
-  const p = path.join(stateDir(home), "state", "openclaw.sqlite");
+  const p = path.join(openclawStateDir(home), "state", "openclaw.sqlite");
   try {
     return fs.statSync(p).isFile() ? p : null;
   } catch {

@@ -4,13 +4,36 @@
  *
  * Pure. A link is resolved against the set of known page paths:
  *   - a Markdown link relative to the linking page's folder;
- *   - a wikilink by vault path (with or without `.md`), then by file name,
- *     then by page title (case-insensitive) — the first that is unambiguous.
+ *   - a wikilink by vault path (with or without `.md`), then by a page's
+ *     former path (a path-shaped alias: rename.ts keeps a renamed page's old
+ *     path in its `aliases`, so a link to it still leads there), then by file
+ *     name, then by page title (case-insensitive), then by a former file
+ *     name — the first that is unambiguous.
  */
 
 export interface LinkTargetPage {
   path: string;
   title?: string;
+  /** The page's `aliases`; only path-shaped ones ({@link isPathAlias}) are link targets. */
+  aliases?: readonly string[];
+}
+
+const PATH_ALIAS_RE = /^[a-z0-9][a-z0-9._-]*(?:\/[a-z0-9][a-z0-9._-]*)+$/;
+
+/** An alias that is a vault path a page was once at (`concepts/x-3`), not a name it goes by. */
+export function isPathAlias(alias: string): boolean {
+  return PATH_ALIAS_RE.test(alias.trim());
+}
+
+/** The path-shaped aliases in a frontmatter's `aliases` (a string or a list), as `.md` paths. */
+export function pathAliases(aliases: unknown): string[] {
+  const list = typeof aliases === "string" ? [aliases] : Array.isArray(aliases) ? aliases : [];
+  return list
+    .filter((a): a is string => typeof a === "string" && isPathAlias(a))
+    .map((a) => {
+      const t = a.trim();
+      return t.toLowerCase().endsWith(".md") ? t : `${t}.md`;
+    });
 }
 
 const WIKILINK_RE = /\[\[([^\]|#\n]+)(?:#[^\]|\n]*)?(?:\|[^\]\n]*)?\]\]/g;
@@ -128,10 +151,17 @@ export interface LinkResolver {
 
 export function createLinkResolver(pages: Iterable<LinkTargetPage>): LinkResolver {
   const byPath = new Set<string>();
+  const byFormerPath = new Map<string, string[]>();
   const byName = new Map<string, string[]>();
+  const byFormerName = new Map<string, string[]>();
   const byTitle = new Map<string, string[]>();
   for (const p of pages) {
     byPath.add(p.path);
+    for (const former of pathAliases(p.aliases)) {
+      byFormerPath.set(former, [...(byFormerPath.get(former) ?? []), p.path]);
+      const formerName = former.slice(former.lastIndexOf("/") + 1).replace(/\.md$/i, "").toLowerCase();
+      byFormerName.set(formerName, [...(byFormerName.get(formerName) ?? []), p.path]);
+    }
     const name = p.path.slice(p.path.lastIndexOf("/") + 1).replace(/\.md$/i, "").toLowerCase();
     byName.set(name, [...(byName.get(name) ?? []), p.path]);
     if (p.title) {
@@ -145,13 +175,18 @@ export function createLinkResolver(pages: Iterable<LinkTargetPage>): LinkResolve
       if (link.kind === "md") {
         const dir = fromPage.includes("/") ? fromPage.slice(0, fromPage.lastIndexOf("/")) : "";
         const joined = normalizeJoin(dir, link.target);
-        return joined !== null && byPath.has(joined) ? joined : null;
+        if (joined === null) return null;
+        return byPath.has(joined) ? joined : unique(byFormerPath.get(joined));
       }
       const t = link.target.replace(/^\.\//, "");
       const withExt = t.toLowerCase().endsWith(".md") ? t : `${t}.md`;
       if (byPath.has(withExt)) return withExt;
+      const moved = unique(byFormerPath.get(withExt));
+      if (moved) return moved;
       const name = withExt.slice(withExt.lastIndexOf("/") + 1).replace(/\.md$/i, "").toLowerCase();
-      return unique(byName.get(name)) ?? unique(byTitle.get(t.toLowerCase()));
+      // A former file name (`[[x-3]]` after concepts/x-3.md moved) comes last: whatever a
+      // current page answers to — its path, name or title — is never overridden by it.
+      return unique(byName.get(name)) ?? unique(byTitle.get(t.toLowerCase())) ?? unique(byFormerName.get(name));
     },
   };
 }
@@ -218,6 +253,43 @@ export interface ContentReach {
   orphans: Set<string>;
   /** The orphans that link to no other content page either: no link in or out. */
   isolated: Set<string>;
+}
+
+/** The median of meaningful links a page should reach (the Status target). */
+export const LINKS_PER_PAGE_TARGET = 5;
+
+export interface LinkDensity {
+  /** Content pages counted. */
+  pages: number;
+  /** Median, over content pages, of the OTHER content pages each is linked with (either way, each counted once). */
+  median: number;
+  mean: number;
+  /** Content pages at or above {@link LINKS_PER_PAGE_TARGET}. */
+  atTarget: number;
+  target: number;
+}
+
+/**
+ * Meaningful links per page: for every content page, the other content pages
+ * it links to or is linked from, each once. index.md, `_views/`, reports and
+ * `sources/` pages do not count — a listing is no link a reader follows — nor
+ * does a link to a page that does not exist. One pass over the graph's links.
+ */
+export function linkDensity(graph: Pick<LinkGraph, "outbound" | "inbound">): LinkDensity {
+  const counts: number[] = [];
+  for (const [page, out] of graph.outbound) {
+    if (!isContentPage(page)) continue;
+    const near = new Set<string>();
+    for (const p of out) if (p !== page && isContentPage(p)) near.add(p);
+    for (const p of graph.inbound.get(page) ?? []) if (p !== page && isContentPage(p)) near.add(p);
+    counts.push(near.size);
+  }
+  counts.sort((a, b) => a - b);
+  const n = counts.length;
+  const mid = Math.floor(n / 2);
+  const median = n === 0 ? 0 : n % 2 ? counts[mid] : (counts[mid - 1] + counts[mid]) / 2;
+  const mean = n === 0 ? 0 : Math.round((counts.reduce((s, x) => s + x, 0) / n) * 100) / 100;
+  return { pages: n, median, mean, atTarget: counts.filter((c) => c >= LINKS_PER_PAGE_TARGET).length, target: LINKS_PER_PAGE_TARGET };
 }
 
 /** Orphan and isolated content pages of a link graph, in one pass over its links. */

@@ -20,6 +20,7 @@ import PrimeRadiantBrowse from "./PrimeRadiantBrowse";
 import PrimeRadiantReview from "./PrimeRadiantReview";
 import PrimeRadiantHistory from "./PrimeRadiantHistory";
 import PrimeRadiantLint from "./PrimeRadiantLint";
+import PrimeRadiantQuestions from "./PrimeRadiantQuestions";
 import PrimeRadiantIngest from "./PrimeRadiantIngest";
 import PrimeRadiantSettings from "./PrimeRadiantSettings";
 import PrimeRadiantUsage from "./PrimeRadiantUsage";
@@ -65,10 +66,12 @@ function rememberRepairNotice(): void {
  * shown with a retry button rather than retried on its own — it writes the
  * agent's configuration, and doing that in a loop is the wrong failure mode.
  *
- * Five tabs: Map (the start page of a vault with pages; an empty vault opens
+ * Six tabs: Map (the start page of a vault with pages; an empty vault opens
  * on Pages, whose empty state leads to Add), Pages (the list and its search,
  * each page with its history), Review (open questions, then failed checks),
- * Add, and Settings (with the token usage). The app shows no money anywhere.
+ * Questions (the golden questions and the wiki's % correct, and each owner's
+ * daily questions), Add, and Settings (with the token usage). The app shows
+ * no money anywhere.
  */
 
 /** A status the window can draw: a vault that exists carries its counts and its wiring. */
@@ -79,7 +82,7 @@ function isDrawableStatus(s: unknown): s is PrimeRadiantStatus {
   return !st.initialised || (!!st.vault && typeof st.vault === "object" && !!st.plugin && typeof st.plugin === "object");
 }
 export default function PrimeRadiantApp() {
-  const { t } = useT();
+  const { t, locale } = useT();
   /** For what shows before the dictionaries load (the window can be the first thing on screen): English, never a key. */
   const tr = useTr();
   const [status, setStatus] = useState<PrimeRadiantStatus | null>(null);
@@ -268,6 +271,25 @@ export default function PrimeRadiantApp() {
             <span>{t("primeRadiant.countPages", { n: status.vault.pages })}</span>
             <span>{t("primeRadiant.countClaims", { n: status.vault.claims })}</span>
             <span>{t("primeRadiant.countVerified", { n: status.vault.verifiedPages })}</span>
+            {typeof status.golden?.last?.percent === "number" && (
+              <button
+                type="button"
+                className="hover:text-[var(--text-secondary)] cursor-pointer"
+                onClick={() => showTab("questions")}
+                data-testid="prime-radiant-count-accuracy"
+              >
+                {t("primeRadiant.countAccuracy", { percent: status.golden.last.percent.toLocaleString(locale) })}
+              </button>
+            )}
+            {status.links && status.links.pages > 0 && (
+              <span
+                data-testid="prime-radiant-links"
+                className={status.links.median >= status.links.target ? undefined : "text-amber-200/80"}
+                title={t("primeRadiant.countLinksHint", { target: status.links.target })}
+              >
+                {t("primeRadiant.countLinks", { median: status.links.median })}
+              </span>
+            )}
           </div>
         )}
       </header>
@@ -390,6 +412,16 @@ export default function PrimeRadiantApp() {
                   <PrimeRadiantLint revision={revision} onOpenPage={openPage} />
                 </section>
               </div>
+            )}
+            {tab === "questions" && (
+              <PrimeRadiantQuestions
+                revision={revision}
+                domains={status.vault.domains}
+                golden={status.golden}
+                onChanged={changed}
+                onOpenPage={openPage}
+                onOpenReview={() => showTab("review")}
+              />
             )}
             {tab === "ingest" && <PrimeRadiantIngest onChanged={changed} />}
             {tab === "settings" && (

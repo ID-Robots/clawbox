@@ -122,7 +122,9 @@ describe("redaction", () => {
     expect(typo.kinds).toEqual(["IBAN"]);
     // An IBAN-shaped word that is no IBAN keeps its digits: half of it masked as a card would read as safe.
     expect(redactText("BG80BNBG4111111111111111").text).toBe("BG80BNBG4111111111111111");
-    expect(redactText("card4111111111111111").text).toBe(`card${placeholder("CARD")}`);
+    // Digits glued to a word are part of that word (a code, a hash), not a card standing alone.
+    expect(redactText("card4111111111111111").kinds).not.toContain("CARD");
+    expect(redactText("card:4111111111111111").text).toBe(`card:${placeholder("CARD")}`);
     expect(redactText(`IBAN ${unspaced}, card 4111 1111 1111 1111`).kinds).toEqual(["IBAN", "CARD"]);
   });
 
@@ -195,6 +197,45 @@ describe("redaction", () => {
     expect(redactText("card 4111-1111-1111-1111").text).toBe(`card ${placeholder("CARD")}`);
     expect(redactText("card 4111111111111111").text).toBe(`card ${placeholder("CARD")}`);
     expect(redactText("order 4111111111111112").kinds).not.toContain("CARD");
+    // Amex 4-6-5, a 19-digit card as 4-4-4-4-3, and test cards of other networks.
+    expect(redactText("amex 3782 822463 10005.").text).toBe(`amex ${placeholder("CARD")}.`);
+    expect(redactText("amex 3782-822463-10005").text).toBe(`amex ${placeholder("CARD")}`);
+    expect(redactText("amex 378282246310005").kinds).toContain("CARD");
+    expect(redactText("(5555 5555 5555 4444)").text).toBe(`(${placeholder("CARD")})`);
+    expect(redactText("long 6011 0000 0000 0000 001").text).toBe(`long ${placeholder("CARD")}`);
+    expect(redactText("scan_4111111111111111.pdf").text).toBe(`scan_${placeholder("CARD")}.pdf`);
+  });
+
+  it("never reads a hex hash or a column of small numbers as a card", () => {
+    // A hash whose first 15 characters are digits (Luhn-valid) and the 16th a letter.
+    expect(luhnValid("854177235498113")).toBe(true);
+    for (const hash of ["854177235498113d", "commit 854177235498113d", "d854177235498113", "x4111111111111111y"]) {
+      expect(redactText(hash).text).toBe(hash);
+      expect(scanSecrets(hash)).toEqual([]);
+    }
+    // A memory table row: groups of one to four digits, 17 digits that pass Luhn.
+    const row = "Mem:           7607 1214 138 14 6254";
+    expect(luhnValid("76071214138146254")).toBe(true);
+    expect(redactText(row).text).toBe(row);
+    expect(scanSecrets(`              total        used        free      shared  buff/cache   available\n${row}`)).toEqual([]);
+    // Digits of another script touch it just as ASCII ones do.
+    expect(redactText("٣4111111111111111").kinds).not.toContain("CARD");
+    // Separators mixed, or groups that are no card's: not a card either.
+    expect(redactText("4111 1111-1111 1111").kinds).not.toContain("CARD");
+    expect(redactText("41 1111 1111 1111 11").kinds).not.toContain("CARD");
+    expect(redactText("4111  1111  1111  1111").kinds).not.toContain("CARD");
+  });
+
+  it("never reads the tail of a longer grouped number as a card", () => {
+    // A DHL piece id: its last four groups are Luhn-valid 4-4-4-4.
+    const piece = "Ref: JD01 4600 0128 1089 8354";
+    expect(luhnValid("4600012810898354")).toBe(true);
+    expect(redactText(piece).text).toBe(piece);
+    expect(scanSecrets(piece)).toEqual([]);
+    expect(redactText("4111-1111-1111-1111-22").kinds).not.toContain("CARD");
+    expect(redactText("7 4111 1111 1111 1111").kinds).not.toContain("CARD");
+    // A card still stands out next to words and punctuation.
+    expect(redactText("card no. 4111 1111 1111 1111, exp 12/29").text).toBe(`card no. ${placeholder("CARD")}, exp 12/29`);
   });
 
   it("never mistakes a Unix timestamp for a card number", () => {
@@ -205,9 +246,9 @@ describe("redaction", () => {
     expect(redactText(`at ${ms} the job ran`).text).toBe(`at ${ms} the job ran`);
     expect(looksLikeUnixTimestamp("1760000000")).toBe(true);
     expect(looksLikeUnixTimestamp("0000000001")).toBe(false);
-    // The same digits WITH separators are written like a card, and redacted as one.
+    // Grouped 4-4-5 it is no card's way of writing 13 digits either.
     const grouped = String(ms).replace(/^(\d{4})(\d{4})(\d{5})$/, "$1 $2 $3");
-    expect(redactText(grouped).kinds).toContain("CARD");
+    expect(redactText(grouped).kinds).not.toContain("CARD");
     // A 13-digit card outside the timestamp range is still a card.
     expect(looksLikeUnixTimestamp("4222222222222")).toBe(false);
     expect(redactText("visa 4222222222222").kinds).toContain("CARD");

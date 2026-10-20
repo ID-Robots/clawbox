@@ -1,13 +1,15 @@
 import { NextResponse } from "next/server";
-import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
 import { readEmbeddingPlacement, switchToLocalEmbeddings } from "@/lib/memory-shard";
 import { noteOwnerChoice } from "@/lib/clawai-cloud-choice";
-import { invalidateMemoryStatusCache } from "@/lib/clawkeep-memory";
+import { getMemoryStatus, invalidateMemoryStatusCache } from "@/lib/clawkeep-memory";
+import { estimateFullReindex } from "@/lib/memory-reindex-advice";
+import { confirmRequired, memoryShardWriter, type MemoryShardWriter } from "@/lib/memory-shard-writer";
 // The PURE half of the cloud-defaults rule (client-safe, one type import
 // behind it): the server half is loaded lazily below with the probe it owns.
 import { resolveClawaiCloudDefaults } from "@/lib/clawai-cloud-defaults-state";
 import {
+  LOCAL_EMBEDDING_BYTES,
   LOCAL_EMBEDDING_ENGINE,
   LOCAL_EMBEDDING_MODEL,
   LOCAL_EMBEDDING_PROVIDER,
@@ -105,36 +107,46 @@ async function readEmbedderChoice(): Promise<EmbedderChoiceStatus> {
 }
 
 /**
- * POST `{ source?: "cloud" | "local" }` → point the index there. No body, or
- * no `source`, is the model on this box — the call every caller made before
- * the cloud half existed.
+ * POST `{ source?: "cloud" | "local", confirm?: true }` → point the index
+ * there. No body, or no `source`, is the model on this box — the call every
+ * caller made before the cloud half existed.
  *
- * OWNER ONLY: it changes where the owner's memories are embedded. And OUR PAGE
- * ONLY, the same guard the wizard's other write (embed/install) keeps: the
- * owner's browser attaches the session cookie to a POST any other site's page
- * fires at the box, and a page refused the model download must not be able to
- * move the index onto a model that is not there — or off the box.
+ * WHO: a signed-in person or the box's assistant (`memoryShardWriter`). It
+ * changes where the owner's memories are embedded, and a change of place means
+ * every file is embedded again — so from the assistant a change needs
+ * `confirm: true`, and without it the answer is 409 `confirm_required` with
+ * what that re-embed would cost. The assistant is also refused a move onto the
+ * on-box model while it is not downloaded: the owner's card downloads it first
+ * (embed/install, 640 MB, the owner's own), and an index pointed at a model
+ * that is not there finds nothing.
+ *
+ * And OUR PAGE ONLY, the same guard the wizard's other write (embed/install)
+ * keeps: the owner's browser attaches the session cookie to a POST any other
+ * site's page fires at the box, and a page refused the model download must not
+ * be able to move the index onto a model that is not there — or off the box.
+ * The MCP server sends no Origin, which that guard admits.
  */
 export async function POST(request: Request) {
-  if (!(await hasPersonSession(request))) {
-    return NextResponse.json(
-      { error: "Changing the embedding provider needs a signed-in browser session.", kind: "owner_only" },
-      { status: 403 },
-    );
-  }
+  const writer = await memoryShardWriter(request, "Changing the embedding provider");
+  if (!writer.ok) return writer.response;
   if (!isSameOriginRequest(request)) {
     return NextResponse.json(
       { error: "Changing the embedding provider only works from this ClawBox's own pages.", kind: "cross_origin" },
       { status: 403 },
     );
   }
-  const source = await requestedSource(request);
-  if (source === null) {
+  const change = await requestedChange(request);
+  if (change === null) {
     return NextResponse.json({ error: 'Invalid body. Expected { source: "cloud" | "local" }.', kind: "invalid" }, { status: 400 });
   }
+  const { source } = change;
 
   try {
-    if (source === "cloud") return await switchCloud();
+    if (writer.by === "assistant") {
+      const refused = await assistantGate(source, change.confirm);
+      if (refused) return refused;
+    }
+    if (source === "cloud") return await switchCloud(writer.by);
     // The owner pinned the embedder on the box: the ClawBox AI cloud default
     // must not move the index back at the next boot, which would cost a full
     // reindex nobody asked for. BEFORE the switch, because the two orders fail
@@ -146,7 +158,7 @@ export async function POST(request: Request) {
     await switchToLocalEmbeddings();
     invalidateMemoryStatusCache();
     console.error(
-      `[memory-shard] embedding provider set to ${LOCAL_EMBEDDING_PROVIDER}/${LOCAL_EMBEDDING_MODEL} (${LOCAL_EMBEDDING_ENGINE}) by the owner`,
+      `[memory-shard] embedding provider set to ${LOCAL_EMBEDDING_PROVIDER}/${LOCAL_EMBEDDING_MODEL} (${LOCAL_EMBEDDING_ENGINE}) by the ${writer.by}`,
     );
     return NextResponse.json({
       source: "local",
@@ -165,18 +177,57 @@ export async function POST(request: Request) {
   }
 }
 
-async function requestedSource(request: Request): Promise<EmbeddingSource | null> {
+async function requestedChange(request: Request): Promise<{ source: EmbeddingSource; confirm: boolean } | null> {
   const text = await request.text().catch(() => "");
-  if (!text.trim()) return "local";
+  if (!text.trim()) return { source: "local", confirm: false };
   try {
     const body = JSON.parse(text) as unknown;
     if (!body || typeof body !== "object" || Array.isArray(body)) return null;
     const value = (body as { source?: unknown }).source;
-    if (value === undefined) return "local";
-    return value === "cloud" || value === "local" ? value : null;
+    const confirm = (body as { confirm?: unknown }).confirm === true;
+    if (value === undefined) return { source: "local", confirm };
+    return value === "cloud" || value === "local" ? { source: value, confirm } : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * What the assistant may not do without more: move the index onto a model
+ * that is not on the box, or move it at all without `confirm`. Null when the
+ * switch may go ahead — including a "switch" to where the index already is,
+ * which re-embeds nothing.
+ */
+async function assistantGate(source: EmbeddingSource, confirm: boolean): Promise<NextResponse | null> {
+  const current = await readEmbedderChoice();
+  if (source === "cloud" && !current.cloudAvailable) {
+    // switchCloud's own refusal, said before the estimate rather than after
+    // it: an estimate for a move that cannot happen is a question nobody can
+    // answer yes to.
+    return NextResponse.json(
+      {
+        error: "The ClawBox AI cloud model is not available on this box right now: it needs a ClawBox AI plan and a reachable service.",
+        kind: "cloud_unavailable",
+      },
+      { status: 409 },
+    );
+  }
+  if (source === "local" && current.source !== "local" && !current.localInstalled) {
+    return NextResponse.json(
+      {
+        error: `The embedding model for this box is not downloaded yet (about ${Math.round(LOCAL_EMBEDDING_BYTES / 1_000_000)} MB). The owner chooses "On this box" in Memory Shard's settings, which downloads it.`,
+        kind: "local_not_installed",
+      },
+      { status: 409 },
+    );
+  }
+  if (current.source === source || confirm) return null;
+  const [status, cloud] = await Promise.all([getMemoryStatus(), import("@/lib/clawai-cloud-embeddings")]);
+  const model = source === "cloud" ? cloud.CLOUD_EMBEDDING_MODEL : LOCAL_EMBEDDING_MODEL;
+  return confirmRequired(
+    `Moving the index ${source === "cloud" ? "to the ClawBox AI cloud" : "onto this box"} embeds every file again. Ask the owner first; nothing was changed.`,
+    { from: current.source, to: source, model, estimate: estimateFullReindex(status, source, model) },
+  );
 }
 
 /**
@@ -185,7 +236,7 @@ async function requestedSource(request: Request): Promise<EmbeddingSource | null
  * cloud embedder does not answer would report a healthy index that finds
  * nothing.
  */
-async function switchCloud(): Promise<NextResponse> {
+async function switchCloud(by: MemoryShardWriter): Promise<NextResponse> {
   const [{ readCloudDefaultsFacts }, { resolveClawaiToken }, cloud, { switchToCloudEmbeddings }] = await Promise.all([
     import("@/lib/clawai-cloud-defaults"),
     import("@/lib/harness/credentials"),
@@ -207,7 +258,7 @@ async function switchCloud(): Promise<NextResponse> {
   await switchToCloudEmbeddings(cloud.cloudEmbeddingsUrl(), token);
   invalidateMemoryStatusCache();
   console.error(
-    `[memory-shard] embedding provider set to ${cloud.CLOUD_EMBEDDING_PROVIDER}/${cloud.CLOUD_EMBEDDING_MODEL} (${cloud.CLOUD_EMBEDDING_ENGINE}) by the owner`,
+    `[memory-shard] embedding provider set to ${cloud.CLOUD_EMBEDDING_PROVIDER}/${cloud.CLOUD_EMBEDDING_MODEL} (${cloud.CLOUD_EMBEDDING_ENGINE}) by the ${by}`,
   );
   return NextResponse.json({
     source: "cloud",

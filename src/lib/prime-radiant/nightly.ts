@@ -8,11 +8,23 @@
  *                daytime operations keep committing to `main` meanwhile;
  *   2. ingest    the folders the settings name, into the branch (new and
  *                changed documents only: the ingest's hash-first dedupe);
- *   3. contradictions  claims the branch changed (every claim, the first
- *                night) against their 5 nearest neighbours, judged by Flash;
- *                findings become review items, they never hold the night;
+ *   3. contradictions  claims on every page changed since the last finished
+ *                comparison — the branch's and what reached `main` by day —
+ *                (every claim, the first night) against their 5 nearest
+ *                neighbours, judged by Flash; findings become review items,
+ *                they never hold the night;
  *   4. Opus      optional, capped, sampled (opus.ts); its proposals are
  *                review items, its bookkeeping a commit on the branch;
+ *   4b. structure  monthly record hubs, domain hubs, the company's root
+ *                page, entity enrichment and the decisions register
+ *                (structure.ts), written on the branch — deterministic; the
+ *                capped cheap-model fallback for record types only online;
+ *   4c. summaries  every node's summary written from its connections and
+ *                sources (node-summary.ts), entities first, on the branch —
+ *                the cheap model within its page and dollar caps when online,
+ *                the facts' own words otherwise; unchanged neighbourhoods
+ *                are skipped, and a page whose summary the lint refuses is
+ *                left as it was (a note names it), the rest still saved;
  *   5. lint      every page the branch changed (after every step that
  *                commits to it); an ERROR holds the night and becomes a
  *                `lint` review item;
@@ -22,7 +34,12 @@
  *                branch (fast-forward, else one merge commit), the result is
  *                linted for the blocking rules once more (and put back if it
  *                fails them), the branch is deleted and the changed pages are
- *                handed to Memory Shard's reindex hook.
+ *                handed to Memory Shard's reindex hook;
+ *   8. golden    every night that did not fail, merged or not: the golden
+ *                questions answered from `main` and judged by Flash, capped
+ *                (golden-score.ts) — the score history and its % correct; a
+ *                question right last time and wrong now is a `lint` review
+ *                item that never holds a night.
  *
  * A held night keeps its branch; once the owner has dealt with its review
  * items, `mergeHeldNight` merges it by hand.
@@ -38,16 +55,18 @@ import fs from "fs/promises";
 import { processStore } from "@/lib/process-store";
 import { resolveFolderInsideBrowseRoot } from "@/lib/browse-folder";
 import path from "@/lib/runtime-path";
-import { fullComparisonDone, runContradictionPass, type ClaimEmbedder, type ContradictionPassResult } from "./contradictions";
+import { fullComparisonDone, readComparedThrough, runContradictionPass, type ClaimEmbedder, type ContradictionPassResult } from "./contradictions";
 import type { CostRates } from "./cost-rates";
 import { flashAvailable, type FlashClient } from "./flash-client";
 import { verifiedTouches, type VerifiedTouch } from "./gate";
 import { changedPaths, git, VAULT_MAIN_BRANCH, withVaultLock } from "./git";
+import { runGoldenScore, type GoldenScoreResult } from "./golden-score";
+import type { GoldenHit } from "./golden";
 import { getIngestJob, ingestFinished, IngestBusyError, startIngest } from "./ingest";
 import { isOwnOutput } from "./ingest-sources";
 import { lintVault, type LintFinding } from "./lint";
 import { isKnowledgePage, vaultDir } from "./paths";
-import { repairPluginWritesOnce, restorePluginOnlyEdits } from "./plugin-repair";
+import { adoptPluginPages, repairPluginWritesOnce, restorePluginOnlyEdits } from "./plugin-repair";
 import { notifyVaultChanged } from "./reindex-hook";
 import { addReviewItem, countWaitingForRuns, listReviewItems } from "./review-store";
 import { buildOpusQueue, runOpusTier, type OpusClient, type OpusTierResult } from "./opus";
@@ -56,6 +75,8 @@ import { insertRun, listRuns, newRunId, saveRun, settleOrphanRuns, type RunRecor
 import { effectiveCostRates, readSettings, type PrimeRadiantSettings } from "./settings";
 import { readRetiredLedger, stateDbExists } from "./state-db";
 import { rejudgeOpenContradictions } from "./rejudge";
+import { runStructure, type StructureNowResult } from "./structure-run";
+import { runSummaries, type SummariesRunResult } from "./node-summary-run";
 import { readVaultSnapshot, vaultInitialised, vaultOperation } from "./vault";
 
 export const DREAM_BRANCH_PREFIX = "dream/";
@@ -76,7 +97,19 @@ export interface NightlySummary {
     findings: number;
   };
   opus: Pick<OpusTierResult, "queued" | "reviewed" | "pending" | "calls" | "usdEstimate" | "capUsd" | "maxPages" | "source" | "stopped"> | { skipped: string };
+  structure:
+    | (Pick<StructureNowResult, "leaves" | "leavesInHubs" | "recordHubs" | "counterpartyHubs" | "domainHubs" | "root" | "entitiesEnriched" | "claimsAdded" | "decisions" | "registerPages" | "skippedVerified" | "linksMedianBefore" | "linksMedianAfter" | "written" | "created"> & {
+        model: StructureNowResult["model"];
+      })
+    | { skipped: string };
+  summaries:
+    | (Pick<SummariesRunResult, "planned" | "written" | "byModel" | "byFacts" | "waiting" | "unchanged" | "rejected" | "rejectedPages" | "refused" | "skippedVerified" | "keptPerson" | "model"> & {
+        mergeSuggestions: number;
+        domainMismatches: number;
+      })
+    | { skipped: string };
   gate: { touched: string[] };
+  golden: Pick<GoldenScoreResult, "scoreId" | "tally" | "capped" | "calls" | "usdEstimate" | "regressions"> | { skipped: string };
   reviewItems: { raised: number };
   held: string[];
   notes: string[];
@@ -93,6 +126,8 @@ export interface NightlyDeps {
   random?: () => number;
   /** Whether ClawBox AI can be asked (default: a credential is on the box). */
   online?: () => Promise<boolean>;
+  /** The vault search the golden check answers with (default: Memory Shard's index of the vault, when it is there). */
+  goldenSearch?: (question: string, signal?: AbortSignal) => Promise<readonly GoldenHit[]>;
 }
 
 export class NightlyBusyError extends Error {
@@ -177,6 +212,25 @@ async function resolveFolders(folders: readonly string[], notes: string[]): Prom
 /** The knowledge pages `head` changed since it left `base`. */
 async function changedPages(vault: string, base: string, head: string): Promise<string[]> {
   return (await changedPaths(vault, base, head)).filter((p) => isKnowledgePage(p)).sort();
+}
+
+/**
+ * The contradiction pass's scope: every knowledge page changed since the
+ * commit the last finished comparison compared, up to the branch's HEAD — the
+ * night's own ingest, and what reached `main` by day (Add documents, an edit,
+ * the assistant) since. Null — compare every claim — when no comparison is
+ * recorded or its commit is gone.
+ */
+async function pagesSinceComparison(vault: string, wt: string): Promise<string[] | null> {
+  let through: string | null;
+  try {
+    through = readComparedThrough(vault);
+  } catch {
+    return null;
+  }
+  if (!through) return null;
+  if ((await git(wt, ["cat-file", "-e", `${through}^{commit}`], { allowFail: true })).code !== 0) return null;
+  return changedPages(wt, through, "HEAD");
 }
 
 /** Keyed by branch as {@link touchItem} is: an item another night raised must not stand in for this night's. */
@@ -290,7 +344,10 @@ function emptySummary(): NightlySummary {
       findings: 0,
     },
     opus: { skipped: "not_run" },
+    structure: { skipped: "not_run" },
+    summaries: { skipped: "not_run" },
     gate: { touched: [] },
+    golden: { skipped: "not_run" },
     reviewItems: { raised: 0 },
     held: [],
     notes: [],
@@ -313,6 +370,13 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
     }
   } catch (err) {
     notes.push(`memory-wiki's generated files could not be taken out of the vault: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
+  }
+  // Every night, before the branch is cut: a page memory-wiki wrote in its own format becomes a Prime Radiant page.
+  try {
+    const adopt = await adoptPluginPages(vault, now);
+    if (adopt.adopted.length > 0) notes.push(`${adopt.adopted.length} page(s) memory-wiki wrote in its own format were made Prime Radiant pages.`);
+  } catch (err) {
+    notes.push(`The pages memory-wiki wrote in its own format could not be converted: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
   }
 
   const branch = await dreamBranchName(vault, now());
@@ -349,8 +413,9 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
       }
     }
 
-    // What the branch changed so far: the contradiction pass's scope and the Opus queue's.
+    // What the branch changed so far: the Opus queue's scope.
     let changed = await changedPages(wt, VAULT_MAIN_BRANCH, "HEAD");
+    const compared = (await git(wt, ["rev-parse", "HEAD"])).stdout.trim();
     const snapshot = await readVaultSnapshot(wt);
 
     // 3. contradictions
@@ -359,11 +424,17 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
     else {
       // Every claim until one pass has compared them all and judged every pair:
       // a night that merely finished (offline, a judge that failed) does not count.
+      // After that, every page changed since the last finished comparison — not
+      // only the branch's: a page added by day went straight to main.
       // Claims an earlier pass left unjudged are added to a scoped pass by the pass itself.
       const firstNight = !fullComparisonDone(vault);
+      const scope = firstNight ? null : await pagesSinceComparison(vault, wt);
+      const byDay = scope ? scope.filter((p) => !changed.includes(p)).length : 0;
+      if (byDay > 0) notes.push(`${byDay} page(s) changed since the last comparison outside this night's branch were compared too.`);
       const pass = await runContradictionPass(snapshot, {
         stateVault: vault,
-        scope: firstNight ? null : changed,
+        scope,
+        comparedThrough: compared,
         runId: run.id,
         client: deps.client,
         embedder: deps.embedder,
@@ -393,10 +464,16 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
       run.usdEstimate += pass.usdEstimate;
     }
 
-    // 3b. open contradiction items about two different things (identifier filter) are closed with a reason
+    // 3b. open contradiction items today's rules would not raise (different subjects, superseded, one document's
+    // versions, an owner-verified side) are closed, each with a reason
     try {
       const re = rejudgeOpenContradictions(vault, snapshot, { now });
-      if (re.closed > 0) notes.push(`${re.closed} open contradiction item(s) were closed: different subjects or records (identifier filter).`);
+      if (re.closed > 0) {
+        const why = Object.entries(re.byFamily)
+          .map(([family, n]) => `${family} ${n}`)
+          .join(", ");
+        notes.push(`${re.closed} open contradiction item(s) were closed: ${why}.`);
+      }
     } catch (err) {
       notes.push(`The open contradiction items could not be re-checked: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
     }
@@ -446,6 +523,79 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
         }
       }
     }
+    // 4b. structure: hubs, the root, enrichment and the register, on the branch
+    if (!settings.structure.enabled) summary.structure = { skipped: "disabled" };
+    else {
+      try {
+        const s = await runStructure(
+          await readVaultSnapshot(wt),
+          async (message, fn) => ({ commit: (await vaultOperation(message, fn, { vault: wt, now: now() })).commit }),
+          { stateVault: vault, settings, rates, client: deps.client, online, runId: run.id, now },
+        );
+        summary.structure = {
+          leaves: s.leaves,
+          leavesInHubs: s.leavesInHubs,
+          recordHubs: s.recordHubs,
+          counterpartyHubs: s.counterpartyHubs,
+          domainHubs: s.domainHubs,
+          root: s.root,
+          entitiesEnriched: s.entitiesEnriched,
+          claimsAdded: s.claimsAdded,
+          decisions: s.decisions,
+          registerPages: s.registerPages,
+          skippedVerified: s.skippedVerified,
+          linksMedianBefore: s.linksMedianBefore,
+          linksMedianAfter: s.linksMedianAfter,
+          written: s.written,
+          created: s.created,
+          model: s.model,
+        };
+        run.usdEstimate += s.model.usdEstimate;
+        if (s.written > 0) notes.push(`The structure pass wrote ${s.written} page(s): ${s.recordHubs} record hub(s), ${s.domainHubs} domain hub(s), ${s.entitiesEnriched} enriched entit${s.entitiesEnriched === 1 ? "y" : "ies"}.`);
+      } catch (err) {
+        summary.structure = { skipped: "failed" };
+        notes.push(`The structure pass could not be saved: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
+      }
+    }
+    // 4c. summaries: every node's summary from its connections and sources, on the branch (after the structure pass, whose hubs and enrichment it reads);
+    // a page whose summary the lint refuses is left out (`refused`), only a failed commit fails the step
+    if (!settings.summaries.enabled) summary.summaries = { skipped: "disabled" };
+    else {
+      try {
+        const s = await runSummaries(
+          await readVaultSnapshot(wt),
+          async (message, fn) => ({ commit: (await vaultOperation(message, fn, { vault: wt, now: now() })).commit }),
+          { stateVault: vault, settings, rates, client: deps.client, online, runId: run.id, now },
+        );
+        summary.summaries = {
+          planned: s.planned,
+          written: s.written,
+          byModel: s.byModel,
+          byFacts: s.byFacts,
+          waiting: s.waiting,
+          unchanged: s.unchanged,
+          rejected: s.rejected,
+          rejectedPages: s.rejectedPages,
+          refused: s.refused.slice(0, MAX_SUMMARY_PATHS),
+          skippedVerified: s.skippedVerified,
+          keptPerson: s.keptPerson,
+          model: s.model,
+          mergeSuggestions: s.mergeGroups,
+          domainMismatches: s.domainMismatches.length,
+        };
+        run.usdEstimate += s.model.usdEstimate;
+        if (s.written > 0) notes.push(`The summaries pass wrote ${s.written} summar${s.written === 1 ? "y" : "ies"} (${s.byModel} by the model, ${s.byFacts} from facts).`);
+        if (s.refused.length > 0) {
+          const shown = s.refused.slice(0, 5).map((r) => `${r.path} (${r.reason})`).join(", ");
+          const more = s.refused.length > 5 ? ` and ${s.refused.length - 5} more` : "";
+          notes.push(`The lint refused the new summary of ${s.refused.length} page${s.refused.length === 1 ? "" : "s"}, each left as it was: ${shown}${more}.`);
+        }
+        if (s.mergeGroups > 0) notes.push(`${s.mergeGroups} duplicate entit${s.mergeGroups === 1 ? "y looks" : "ies look"} worth merging (the Checks tab lists them as duplicate-entity warnings, each naming the page to merge into).`);
+      } catch (err) {
+        summary.summaries = { skipped: "failed" };
+        notes.push(`The summaries pass could not be saved: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
+      }
+    }
     if (summary.ingest && "jobId" in summary.ingest) {
       const job = getIngestJob(summary.ingest.jobId, vault);
       if (job) run.usdEstimate += job.usdEstimate;
@@ -453,7 +603,7 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
 
     // 5. lint everything the branch changed — after every step that commits to it
     const finalChanged = await changedPages(wt, VAULT_MAIN_BRANCH, "HEAD");
-    const report = lintVault(await readVaultSnapshot(wt), { scope: finalChanged, ledgerRetired: ledger(vault), now: now() });
+    const report = lintVault(await readVaultSnapshot(wt), { scope: finalChanged, ledgerRetired: ledger(vault), domains: settings.domains.map((d) => d.name), now: now() });
     const errors = report.findings.filter((f) => f.severity === "error");
     summary.lint = { errors: report.errors, warnings: report.warnings, checked: report.checked };
     const at = now().toISOString();
@@ -496,6 +646,50 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
   }
 }
 
+/** The longest the golden step may take; past it the questions not judged yet wait for the next night. */
+const GOLDEN_STEP_MS = 20 * 60_000;
+
+/** Memory Shard's index of the vault, when it is there; else no hits (the claims' words alone answer). */
+async function shardSearch(vault: string, question: string, signal?: AbortSignal): Promise<readonly GoldenHit[]> {
+  const { searchPrimeRadiant, vaultIndexingAllowed } = await import("./shard-index");
+  if (!(await vaultIndexingAllowed(vault))) return [];
+  return searchPrimeRadiant(question, 8, signal, vault);
+}
+
+/** 8. the golden questions, against `main` as the night left it. Never throws. */
+async function goldenStep(run: RunRecord, summary: NightlySummary, deps: NightlyDeps, vault: string): Promise<void> {
+  const settings = deps.settings ?? readSettings();
+  if (!settings.golden.enabled) {
+    summary.golden = { skipped: "disabled" };
+    return;
+  }
+  try {
+    const online = await (deps.online ?? flashAvailable)().catch(() => false);
+    const g = await runGoldenScore({
+      vault,
+      runId: run.id,
+      client: deps.client,
+      rates: deps.rates ?? effectiveCostRates(),
+      now: deps.now,
+      maxQuestions: settings.golden.maxQuestions,
+      online,
+      search: deps.goldenSearch ?? ((q, signal) => shardSearch(vault, q, signal)),
+      // A model that hangs must not keep the night (and the busy flag every manual run waits on) for hours.
+      signal: AbortSignal.timeout(GOLDEN_STEP_MS),
+    });
+    summary.golden = g.skipped
+      ? { skipped: g.skipped }
+      : { scoreId: g.scoreId, tally: g.tally, capped: g.capped, calls: g.calls, usdEstimate: g.usdEstimate, regressions: g.regressions };
+    summary.reviewItems.raised += g.reviewItems.length;
+    summary.notes.push(...g.notes);
+    if (g.capped > 0) summary.notes.push(`${g.capped} golden question(s) were left for the next nights (the cap is ${settings.golden.maxQuestions} a night).`);
+    run.usdEstimate += g.usdEstimate;
+  } catch (err) {
+    summary.golden = { skipped: "failed" };
+    summary.notes.push(`The golden questions could not be checked: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
+  }
+}
+
 async function execute(run: RunRecord, deps: NightlyDeps, vault: string): Promise<RunRecord> {
   const now = deps.now ?? (() => new Date());
   const summary = emptySummary();
@@ -506,6 +700,7 @@ async function execute(run: RunRecord, deps: NightlyDeps, vault: string): Promis
     summary.notes.push(`The pass stopped: ${err instanceof Error ? err.message.slice(0, 200) : "error"}.`);
     console.warn("[prime-radiant] nightly pass failed:", err instanceof Error ? err.message : err);
   }
+  if (run.status !== "failed") await goldenStep(run, summary, deps, vault);
   run.finishedAt = now().toISOString();
   run.usdEstimate = Math.round(run.usdEstimate * 1e6) / 1e6;
   run.summary = summary as unknown as Record<string, unknown>;

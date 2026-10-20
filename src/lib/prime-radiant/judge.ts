@@ -25,6 +25,8 @@ export const JUDGE_SYSTEM_PROMPT = [
   "Each item is a pair of statements. Say whether they CONTRADICT: they cannot both be true about the same thing at the same time.",
   "Statements about different things — different works, people, products, invoices, months or entities — are NOT contradictions, however alike their wording. A statement that is merely more specific is not one either.",
   "Statements that name different identifiers — waybill, tracking, parcel, invoice, order, transfer or payment numbers, or different dates or reporting periods (two daily reports of different days) — are about different things: answer compatible.",
+  "Two documents of the same type (two credit notes, two transfers to different payees) are different things; a document type, a draft, a copy or a file format in common does not make them one.",
+  "A value at one time and another value at a later time (a launch price and today's price, a balance as of two different days) is a change, not a contradiction: answer compatible. So is a draft against its final version.",
   "Answer contradiction only when both statements are clearly about the very same thing and give incompatible values for it; when that is not certain, answer compatible or unsure.",
   `Answer with one compact JSON array, one object per item, in item order: {"i":<n>,"verdict":"compatible"} — or, for "contradiction" or "unsure" only, add "why" in at most ${JUDGE_WHY_WORDS} words: {"i":<n>,"verdict":"contradiction","why":"10 EUR against 12 EUR"}.`,
   "Do not explain your reasoning. No prose before or after the array, no code fence, and exactly one object for every item.",

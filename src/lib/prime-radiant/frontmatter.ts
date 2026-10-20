@@ -97,11 +97,32 @@ export function serializePage(fm: PageFrontmatter, body: string): string {
 }
 
 /**
+ * `text` without its complete HTML comments, `<!--` to the next `-->`, across
+ * lines too (a scan, not a pattern). The line breaks a comment spanned stay,
+ * so the paragraphs around it stay apart; an unclosed `<!--` is left as
+ * written.
+ */
+function withoutHtmlComments(text: string): string {
+  let out = "";
+  let at = 0;
+  for (;;) {
+    const open = text.indexOf("<!--", at);
+    if (open < 0) break;
+    const close = text.indexOf("-->", open + 4);
+    if (close < 0) break;
+    out += text.slice(at, open) + "\n".repeat(text.slice(open, close).split("\n").length - 1);
+    at = close + 3;
+  }
+  return out + text.slice(at);
+}
+
+/**
  * The page's summary: its first paragraph of prose, after any leading
  * headings. Null when the body has none.
  */
 export function pageSummary(body: string): string | null {
-  const lines = body.split(/\r?\n/);
+  // An HTML comment (a managed block's marker, a note across several lines) renders as nothing: never the summary.
+  const lines = withoutHtmlComments(body).split(/\r?\n/);
   let i = 0;
   while (i < lines.length && (lines[i].trim() === "" || /^#{1,6}\s/.test(lines[i]))) i++;
   const para: string[] = [];

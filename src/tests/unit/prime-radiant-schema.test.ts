@@ -90,6 +90,16 @@ describe("prime radiant frontmatter", () => {
     expect(pageSummary("# Only a heading\n\n## Another\n")).toBeNull();
   });
 
+  it("never takes an HTML comment for the summary, on one line or across several", () => {
+    expect(pageSummary("<!-- prime-radiant:hub:start -->\nInvoices 2026-09: 6 invoices.\n\n## Totals\n")).toBe("Invoices 2026-09: 6 invoices.");
+    expect(pageSummary("<!--\n  a note to the editor,\n  over three lines\n-->\nThe real summary.\n")).toBe("The real summary.");
+    expect(pageSummary("First part.\n<!-- one\ntwo -->\nSecond paragraph.\n")).toBe("First part.");
+    expect(pageSummary("Widgets <!-- inline\nnote --> ship weekly.")).toBe("Widgets ship weekly.");
+    expect(pageSummary("<!-- only a comment -->\n")).toBeNull();
+    // An unclosed comment opener is text, as before.
+    expect(pageSummary("Use <!-- to open a comment.")).toBe("Use <!-- to open a comment.");
+  });
+
   it("maps types onto memory-wiki folders", () => {
     expect(folderForType("entity")).toBe("entities");
     expect(folderForType("synthesis")).toBe("syntheses");

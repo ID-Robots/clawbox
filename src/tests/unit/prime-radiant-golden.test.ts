@@ -1,0 +1,569 @@
+/**
+ * Golden questions: the store in the vault (one commit a change, never a
+ * page), the answer from the wiki's claims, the judge's prompt and tolerant
+ * reader, the nightly score with its history, its cap and its skips, and a
+ * regression (correct → wrong) as a `lint` review item. A synthetic set over
+ * synthetic pages; the model is a fake.
+ */
+import fs from "fs";
+import os from "os";
+import path from "path";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { FlashCallError, type FlashClient } from "@/lib/prime-radiant/flash-client";
+import { stubGoldenVerdict } from "@/lib/prime-radiant/flash-stub";
+import { git } from "@/lib/prime-radiant/git";
+import { revertCommit } from "@/lib/prime-radiant/history";
+import {
+  buildGoldenPrompt,
+  GOLDEN_FILE,
+  goldenEvidence,
+  goldenMaxTokens,
+  goldenRegressions,
+  goldenTally,
+  GoldenInputError,
+  GoldenParseError,
+  parseGoldenFile,
+  parseGoldenResponse,
+  readGoldenInput,
+  readGoldenItems,
+  serializeGoldenFile,
+  type GoldenPage,
+  type GoldenQuestion,
+} from "@/lib/prime-radiant/golden";
+import { goldenStatus, readGoldenHistory, readLatestVerdicts, runGoldenScore } from "@/lib/prime-radiant/golden-score";
+import { addGoldenQuestion, deleteGoldenQuestion, GoldenError, readGoldenQuestions, safeGoldenId, updateGoldenQuestion } from "@/lib/prime-radiant/golden-store";
+import { readCosts } from "@/lib/prime-radiant/ingest-store";
+import { vaultDir } from "@/lib/prime-radiant/paths";
+import { listReviewItems } from "@/lib/prime-radiant/review-store";
+import { ensureVault, readVaultSnapshot, vaultOperation } from "@/lib/prime-radiant/vault";
+import { claim, frontmatter, pageText } from "../helpers/prime-radiant-fixtures";
+
+vi.setConfig({ testTimeout: 30_000 });
+
+const base = fs.mkdtempSync(path.join(os.tmpdir(), "prime-radiant-golden-"));
+const prev = process.env.PRIME_RADIANT_DIR;
+let n = 0;
+const NOW = new Date("2026-05-20T03:00:00.000Z");
+
+beforeEach(() => {
+  process.env.PRIME_RADIANT_DIR = path.join(base, `case-${++n}`, "prime-radiant");
+});
+
+afterAll(() => {
+  if (prev === undefined) delete process.env.PRIME_RADIANT_DIR;
+  else process.env.PRIME_RADIANT_DIR = prev;
+  fs.rmSync(base, { recursive: true, force: true });
+});
+
+const PRICE = claim("acme-sales/blue-widget/price", "The blue widget costs 10 EUR per unit.");
+const STOCK = claim("acme-sales/blue-widget/stock", "Globex keeps 400 blue widgets in stock.");
+const OFFICE = claim("acme-ops/office/city", "The Acme office is in Plovdiv.");
+
+async function seedPages(price = PRICE.text): Promise<void> {
+  await ensureVault();
+  await vaultOperation("test: seed", async (tx) => {
+    await tx.write("concepts/blue-widget.md", pageText({ title: "Blue widget", claims: [{ ...PRICE, text: price }, STOCK] }));
+    await tx.write("concepts/acme-office.md", pageText({ title: "Acme office", domain: "acme-ops", claims: [OFFICE] }));
+  });
+}
+
+/** The judge: correct when a fact holds the expected answer's words, missing with no fact, else wrong — the stub's rule. */
+function judge(calls: string[] = []): FlashClient {
+  return {
+    model: "deepseek-v4-flash",
+    async complete(request) {
+      calls.push(request.user);
+      const items = readGoldenItems(request.user) ?? [];
+      const text = JSON.stringify(items.map((g) => ({ i: g.i, verdict: stubGoldenVerdict(g.expected, g.facts), why: "fake judge" })));
+      return { text, model: "deepseek-v4-flash", usage: { promptTokens: 200, completionTokens: 30, cacheHitTokens: 0 } };
+    },
+  };
+}
+
+const PRICE_Q = { question: "What does the blue widget cost?", expected: "10 EUR per unit", domain: "acme-sales" };
+const OFFICE_Q = { question: "Which city is the Acme office in?", expected: "Plovdiv", domain: "acme-ops" };
+
+describe("golden questions: input and file", () => {
+  it("reads a question strictly and a patch by its fields", () => {
+    expect(readGoldenInput({ ...PRICE_Q, owner: "  Sales  team ", page: "concepts/blue-widget" }, false)).toEqual({
+      ...PRICE_Q,
+      owner: "Sales team",
+      page: "concepts/blue-widget.md",
+    });
+    expect(readGoldenInput({ expected: "12 EUR", owner: null }, true)).toEqual({ expected: "12 EUR", owner: null });
+    for (const bad of [{}, { ...PRICE_Q, domain: "Acme Sales" }, { ...PRICE_Q, claimId: "not an id" }, { ...PRICE_Q, page: "../etc/passwd" }, { ...PRICE_Q, extra: 1 }, { ...PRICE_Q, question: "x".repeat(301) }]) {
+      expect(() => readGoldenInput(bad, false)).toThrow(GoldenInputError);
+    }
+    expect(() => readGoldenInput({}, true)).toThrow(GoldenInputError);
+    expect(() => readGoldenInput({ question: "" }, true)).toThrow(GoldenInputError);
+  });
+
+  it("round-trips the file deterministically and skips a garbled entry", () => {
+    const q: GoldenQuestion = { id: "gq-0123456789ab", ...PRICE_Q, owner: "Sales team", claimId: null, page: null, createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() };
+    const text = serializeGoldenFile([q]);
+    expect(serializeGoldenFile(parseGoldenFile(text).questions)).toBe(text);
+    const mixed = JSON.stringify({ version: 1, questions: [q, { id: "bad" }, q] });
+    expect(parseGoldenFile(mixed)).toEqual({ questions: [q], skipped: 2 });
+    expect(parseGoldenFile("{not json")).toEqual({ questions: [], skipped: 1 });
+    expect(parseGoldenFile(null)).toEqual({ questions: [], skipped: 0 });
+    expect(safeGoldenId("gq-0123456789ab")).toBe("gq-0123456789ab");
+    expect(safeGoldenId("gq-../x")).toBeNull();
+  });
+});
+
+describe("golden questions: the answer from the wiki", () => {
+  const pages: GoldenPage[] = [
+    { path: "concepts/blue-widget.md", fm: frontmatter({ title: "Blue widget", claims: [PRICE, STOCK] }) },
+    { path: "concepts/acme-office.md", fm: frontmatter({ title: "Acme office", claims: [OFFICE] }) },
+    { path: "concepts/old.md", fm: frontmatter({ title: "Old blue widget price", status: "deprecated", claims: [claim("acme-sales/old/price", "The blue widget costs 8 EUR.")] }) },
+  ];
+
+  it("ranks the claims sharing the question's words, never a deprecated page's", () => {
+    const ev = goldenEvidence("What does the blue widget cost?", pages, { now: NOW });
+    expect(ev[0]).toMatchObject({ claimId: PRICE.id, page: "concepts/blue-widget.md", title: "Blue widget" });
+    expect(ev.map((e) => e.claimId)).not.toContain("acme-sales/old/price");
+    expect(goldenEvidence("zebra quantum", pages, { now: NOW })).toEqual([]);
+  });
+
+  it("puts the search's hits first: a claim hit as it is, a page hit by its best claims", () => {
+    const ev = goldenEvidence("Which city?", pages, { now: NOW, hits: [{ kind: "claim", id: OFFICE.id, path: "concepts/acme-office.md" }] });
+    expect(ev[0].claimId).toBe(OFFICE.id);
+    const byPage = goldenEvidence("blue widget stock", pages, { now: NOW, hits: [{ kind: "page", id: "concepts/blue-widget.md", path: "concepts/blue-widget.md" }], k: 1 });
+    expect(byPage).toHaveLength(1);
+    expect(byPage[0].claimId).toBe(STOCK.id);
+  });
+
+  it("flags a dated fact: historical, or a period that ended — a page merely due a re-check is not, its as_of goes along", () => {
+    const dated: GoldenPage[] = [
+      { path: "concepts/a.md", fm: frontmatter({ title: "Widget price", claims: [claim("acme-sales/a/price", "The widget price was 9 EUR.", { historical: true })] }) },
+      { path: "concepts/b.md", fm: frontmatter({ title: "Widget price list", claims: [claim("acme-sales/b/price", "The widget price is 11 EUR.", { valid_until: "2026-01-31" })] }) },
+      { path: "concepts/c.md", fm: frontmatter({ type: "metric", title: "Widget price metric", claims: [claim("acme-sales/c/price", "The widget price is 12 EUR.", { as_of: "2026-01-01" })] }) },
+    ];
+    const ev = goldenEvidence("widget price", dated, { now: NOW });
+    expect(ev).toHaveLength(3);
+    expect(Object.fromEntries(ev.map((e) => [e.page, e.dated]))).toEqual({ "concepts/a.md": true, "concepts/b.md": true, "concepts/c.md": false });
+    expect(ev.find((e) => e.page === "concepts/c.md")?.asOf).toBe("2026-01-01");
+  });
+
+  it("puts the claim and page the owner named as the answer first, even when they share no word with the question", () => {
+    const ev = goldenEvidence("Where do we sit?", pages, { now: NOW, answeredBy: { claimId: OFFICE.id, page: null } });
+    expect(ev[0].claimId).toBe(OFFICE.id);
+    const byPage = goldenEvidence("zebra quantum", pages, { now: NOW, answeredBy: { claimId: null, page: "concepts/blue-widget.md" } });
+    expect(byPage.map((e) => e.claimId).sort()).toEqual([PRICE.id, STOCK.id].sort());
+    // A named claim on a deprecated page is no answer.
+    expect(goldenEvidence("zebra quantum", pages, { now: NOW, answeredBy: { claimId: "acme-sales/old/price", page: null } })).toEqual([]);
+  });
+});
+
+describe("golden questions: the judge", () => {
+  it("builds one prompt for a batch, its facts flagged", () => {
+    const { system, user } = buildGoldenPrompt([
+      { question: "Q1", expected: "A1", evidence: [{ claimId: "x/y/z", text: "Fact", page: "concepts/p.md", title: "P", asOf: "2026-01-01", verified: true, dated: false }] },
+      { question: "Q2", expected: "A2", evidence: [] },
+    ]);
+    expect(system).toContain("missing");
+    const items = readGoldenItems(user);
+    expect(items).toHaveLength(2);
+    expect(items![0]).toMatchObject({ i: 0, question: "Q1", expected: "A1", facts: [{ n: 1, text: "Fact", page: "P", as_of: "2026-01-01", verified: true }] });
+    expect(readGoldenItems("PAIRS (JSON): []")).toBeNull();
+    // Room for a model that reasons before it answers: the cap counts the reasoning too.
+    expect(goldenMaxTokens(1)).toBe(1536);
+    expect(goldenMaxTokens(6)).toBe(4096);
+    expect(goldenMaxTokens(1000)).toBe(4096);
+  });
+
+  it("reads a verdict wherever it sits, leaves out a garbled or conflicting one, and throws only on none", () => {
+    const answer = '```json\n[{"i":0,"verdict":"correct","why":"same"}, {"i":1,"verdict":"Stale"}, {"i":2,"verdict":"maybe"}, {"i":9,"verdict":"wrong"}, {"i":3,"verdict":"wrong"}, {"i":3,"verdict":"correct"}]\n```';
+    const got = parseGoldenResponse(answer, 4);
+    expect([...got.entries()]).toEqual([
+      [0, { verdict: "correct", why: "same" }],
+      [1, { verdict: "stale", why: "" }],
+    ]);
+    expect(() => parseGoldenResponse("I cannot say.", 2)).toThrow(GoldenParseError);
+  });
+
+  it("tallies the % correct of what was judged, and names correct → wrong only as a regression", () => {
+    expect(goldenTally(["correct", "wrong", "missing", null, "correct"])).toEqual({ asked: 5, correct: 2, wrong: 1, missing: 1, stale: 0, failed: 1, percent: 50 });
+    expect(goldenTally([null]).percent).toBeNull();
+    const prev = new Map([["a", "correct"], ["b", "correct"], ["c", "wrong"], ["d", "missing"]] as const);
+    const cur = new Map([["a", "wrong"], ["b", "missing"], ["c", "wrong"], ["d", "wrong"]] as const);
+    expect(goldenRegressions(prev, cur)).toEqual(["a"]);
+  });
+});
+
+describe("golden questions: the store in the vault", () => {
+  it("adds, edits and deletes as one commit each, golden.json beside index.md — never a page", async () => {
+    await seedPages();
+    const added = await addGoldenQuestion(PRICE_Q, { domains: [{ name: "acme-sales", owner: "Sales team" }], now: NOW });
+    expect(added.question).toMatchObject({ ...PRICE_Q, owner: "Sales team", claimId: null, page: null });
+    expect(added.commit).toMatch(/^[0-9a-f]{40}$/);
+    expect(fs.existsSync(path.join(vaultDir(), GOLDEN_FILE))).toBe(true);
+    const log = (await git(vaultDir(), ["log", "-1", "--format=%s", "--name-only"])).stdout;
+    expect(log).toContain("golden: add What does the blue widget cost?");
+    expect(log).toContain(GOLDEN_FILE);
+    expect((await readVaultSnapshot()).pages.map((p) => p.path)).not.toContain(GOLDEN_FILE);
+
+    const id = added.question!.id;
+    const edited = await updateGoldenQuestion(id, { expected: "10 EUR", claimId: PRICE.id }, { domains: [], now: new Date(NOW.getTime() + 1000) });
+    expect(edited.question).toMatchObject({ expected: "10 EUR", claimId: PRICE.id, owner: "Sales team" });
+    expect(edited.commit).not.toBeNull();
+    expect((await updateGoldenQuestion(id, { expected: "10 EUR" }, { domains: [] })).commit).toBeNull();
+    const cleared = await updateGoldenQuestion(id, { owner: null }, { domains: [{ name: "acme-sales", owner: "Pricing desk" }] });
+    expect(cleared.question?.owner).toBe("Pricing desk");
+
+    expect((await deleteGoldenQuestion(id)).commit).not.toBeNull();
+    expect((await readGoldenQuestions()).questions).toEqual([]);
+    await expect(deleteGoldenQuestion(id)).rejects.toMatchObject({ code: "not_found", status: 404 });
+    await expect(updateGoldenQuestion("gq-000000000000", { expected: "x" })).rejects.toBeInstanceOf(GoldenError);
+  });
+
+  it("is undone by its commit id like any vault commit: the question comes back", async () => {
+    await seedPages();
+    const added = await addGoldenQuestion(PRICE_Q, { domains: [] });
+    const gone = await deleteGoldenQuestion(added.question!.id);
+    expect((await readGoldenQuestions()).questions).toEqual([]);
+    const undo = await revertCommit({ sha: gone.commit! });
+    expect(undo.commit).not.toBeNull();
+    expect((await readGoldenQuestions()).questions.map((q) => q.id)).toEqual([added.question!.id]);
+  });
+
+  it("never writes over entries it cannot read: a broken file refuses every change until it is mended", async () => {
+    await seedPages();
+    const added = await addGoldenQuestion(PRICE_Q, { domains: [] });
+    const file = path.join(vaultDir(), GOLDEN_FILE);
+    const good = fs.readFileSync(file, "utf8");
+    const head = (await git(vaultDir(), ["rev-parse", "HEAD"])).stdout.trim();
+    // One entry hand-broken beside a good one, then the whole file unparseable.
+    const parsed = JSON.parse(good) as { version: number; questions: unknown[] };
+    for (const broken of [JSON.stringify({ ...parsed, questions: [...parsed.questions, { id: "gq-0123456789ab", question: 7 }] }), "{ not json"]) {
+      fs.writeFileSync(file, broken);
+      expect((await readGoldenQuestions()).skipped).toBe(1);
+      await expect(addGoldenQuestion(OFFICE_Q, { domains: [] })).rejects.toMatchObject({ code: "unreadable", status: 409 });
+      await expect(deleteGoldenQuestion(added.question!.id)).rejects.toMatchObject({ code: "unreadable" });
+      expect(fs.readFileSync(file, "utf8")).toBe(broken);
+      expect((await git(vaultDir(), ["rev-parse", "HEAD"])).stdout.trim()).toBe(head);
+    }
+    fs.writeFileSync(file, good);
+    expect((await addGoldenQuestion(OFFICE_Q, { domains: [] })).commit).not.toBeNull();
+  });
+
+  it("refuses a secret in a question or its answer, as a page would, and commits nothing", async () => {
+    await seedPages();
+    const head = (await git(vaultDir(), ["rev-parse", "HEAD"])).stdout.trim();
+    await expect(addGoldenQuestion({ ...PRICE_Q, expected: "password: Placeholder-Only-1234" }, { domains: [] })).rejects.toMatchObject({ code: "lint_blocked", status: 409 });
+    expect(fs.existsSync(path.join(vaultDir(), GOLDEN_FILE))).toBe(false);
+    expect((await git(vaultDir(), ["rev-parse", "HEAD"])).stdout.trim()).toBe(head);
+    expect((await git(vaultDir(), ["status", "--porcelain"])).stdout.trim()).toBe("");
+  });
+
+  it("creates nothing without a vault, and refuses a write there", async () => {
+    expect((await readGoldenQuestions()).questions).toEqual([]);
+    await expect(addGoldenQuestion(PRICE_Q, { domains: [] })).rejects.toMatchObject({ code: "not_initialised", status: 412 });
+    expect(fs.existsSync(vaultDir())).toBe(false);
+    expect(await goldenStatus()).toEqual({ questions: 0, last: null, trend: [], change: null });
+  });
+});
+
+describe("golden questions: the nightly score", () => {
+  it("answers each question from the wiki, judges it, stores the score and records every call's cost", async () => {
+    await seedPages();
+    await addGoldenQuestion(PRICE_Q, { domains: [] });
+    await addGoldenQuestion(OFFICE_Q, { domains: [] });
+    await addGoldenQuestion({ question: "Who repairs zebra quantum drives?", expected: "Initech", domain: "acme-ops" }, { domains: [] });
+    const calls: string[] = [];
+    const r = await runGoldenScore({ runId: "run-0123456789ab", client: judge(calls), online: true, now: () => NOW });
+    expect(r.skipped).toBeNull();
+    expect(r.tally).toEqual({ asked: 3, correct: 2, wrong: 0, missing: 1, stale: 0, failed: 0, percent: 66.7 });
+    expect(r.calls).toBe(1);
+    expect(calls).toHaveLength(1);
+    expect(readCosts(vaultDir(), "run-0123456789ab").map((c) => c.operation)).toEqual(["golden"]);
+    const history = readGoldenHistory();
+    expect(history).toHaveLength(1);
+    expect(history[0]).toMatchObject({ id: "run-0123456789ab", runId: "run-0123456789ab", asked: 3, correct: 2, percent: 66.7 });
+    const verdicts = readLatestVerdicts();
+    expect(Object.values(verdicts).map((v) => v.verdict).sort()).toEqual(["correct", "correct", "missing"]);
+    expect((await goldenStatus()).last?.percent).toBe(66.7);
+  });
+
+  it("raises a lint review item when a question answered right turns wrong — never for one that was wrong already", async () => {
+    await seedPages();
+    await addGoldenQuestion(PRICE_Q, { domains: [] });
+    await runGoldenScore({ runId: "run-00000000000a", client: judge(), online: true, now: () => NOW });
+    // The price page changes: the wiki now answers 14 EUR.
+    await vaultOperation("test: new price", async (tx) => {
+      await tx.write("concepts/blue-widget.md", pageText({ title: "Blue widget", claims: [{ ...PRICE, text: "The blue widget costs 14 EUR per unit." }, STOCK] }));
+    });
+    const later = new Date(NOW.getTime() + 86_400_000);
+    const r = await runGoldenScore({ runId: "run-00000000000b", client: judge(), online: true, now: () => later });
+    expect(r.tally).toMatchObject({ correct: 0, wrong: 1, percent: 0 });
+    expect(r.regressions).toHaveLength(1);
+    expect(r.reviewItems).toHaveLength(1);
+    const items = listReviewItems(vaultDir(), { status: "open" }).items;
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ kind: "lint", runId: null, pages: ["concepts/blue-widget.md"] });
+    expect(items[0].candidates[0].text).toBe("10 EUR per unit");
+    expect(items[0].evidence[0]).toMatchObject({ kind: "golden", verdict: "wrong" });
+    // Still wrong the next night: the waiting item answers, no second one.
+    const third = await runGoldenScore({ runId: "run-00000000000c", client: judge(), online: true, now: () => new Date(later.getTime() + 86_400_000) });
+    expect(third.regressions).toEqual([]);
+    expect(listReviewItems(vaultDir(), { status: "open" }).items).toHaveLength(1);
+    const status = await goldenStatus();
+    expect(status.trend.map((t) => t.percent)).toEqual([100, 0, 0]);
+    expect(status.change).toBe(0);
+  });
+
+  it("asks at most the night's cap, the ones asked longest ago first, in batches", async () => {
+    await seedPages();
+    const ids: string[] = [];
+    for (let i = 0; i < 8; i++) ids.push((await addGoldenQuestion({ ...PRICE_Q, question: `What does the blue widget cost? (${i})` }, { domains: [] })).question!.id);
+    const calls: string[] = [];
+    const first = await runGoldenScore({ runId: "run-0000000000a1", client: judge(calls), online: true, maxQuestions: 7, now: () => NOW });
+    expect(first.tally.asked).toBe(7);
+    expect(first.capped).toBe(1);
+    expect(calls).toHaveLength(2);
+    const second = await runGoldenScore({ runId: "run-0000000000a2", client: judge(), online: true, maxQuestions: 1, now: () => new Date(NOW.getTime() + 1000) });
+    expect(second.tally.asked).toBe(1);
+    expect(Object.keys(readLatestVerdicts())).toHaveLength(8);
+    expect(readGoldenHistory(vaultDir(), 1)[0].id).toBe("run-0000000000a2");
+  });
+
+  it("is skipped, writing nothing, with no questions, offline, or when the model refuses", async () => {
+    await seedPages();
+    expect((await runGoldenScore({ client: judge(), online: true })).skipped).toBe("no_questions");
+    await addGoldenQuestion(PRICE_Q, { domains: [] });
+    const calls: string[] = [];
+    expect((await runGoldenScore({ client: judge(calls), online: false })).skipped).toBe("offline");
+    expect(calls).toEqual([]);
+    const refusing: FlashClient = {
+      model: "deepseek-v4-flash",
+      async complete() {
+        throw new FlashCallError("no_credential", "not signed in");
+      },
+    };
+    const r = await runGoldenScore({ client: refusing, online: true });
+    expect(r.skipped).toBe("model_unavailable");
+    expect(readGoldenHistory()).toEqual([]);
+  });
+
+  it("stores no score when no call judged anything, and stops after two calls in a row the provider failed", async () => {
+    await seedPages();
+    for (let i = 0; i < 18; i++) await addGoldenQuestion({ ...PRICE_Q, question: `What does the blue widget cost? (${i})` }, { domains: [] });
+    let calls = 0;
+    const down: FlashClient = {
+      model: "deepseek-v4-flash",
+      async complete() {
+        calls++;
+        throw new FlashCallError("server", "answered 503");
+      },
+    };
+    const r = await runGoldenScore({ runId: "run-0000000000f1", client: down, online: true, now: () => NOW, retry: { attempts: 1 } });
+    expect(r.skipped).toBe("model_unavailable");
+    expect(calls).toBe(2); // three batches of six; an outage is not split, and the third is never sent
+    expect(r.notes.join(" ")).toMatch(/in a row failed/);
+    expect(readGoldenHistory()).toEqual([]);
+    expect((await goldenStatus()).last).toBeNull();
+  });
+
+  it("asks a cut-off batch again in halves, down to one question a call, until every question is judged", async () => {
+    await seedPages();
+    for (let i = 0; i < 6; i++) await addGoldenQuestion({ ...PRICE_Q, question: `What does the blue widget cost? (${i})` }, { domains: [] });
+    const sizes: number[] = [];
+    const caps: number[] = [];
+    const base = judge();
+    // More than two questions run out of room before the first verdict: the empty answer flash-client throws on.
+    const tight: FlashClient = {
+      model: base.model,
+      async complete(request) {
+        const n = readGoldenItems(request.user)?.length ?? 0;
+        sizes.push(n);
+        caps.push(request.maxTokens);
+        if (n > 2) throw new FlashCallError("bad_response", "ClawBox AI reached the output cap before it answered.");
+        return base.complete(request);
+      },
+    };
+    const r = await runGoldenScore({ runId: "run-0000000000c1", client: tight, online: true, now: () => NOW });
+    expect(sizes).toEqual([6, 3, 2, 1, 3, 2, 1]);
+    expect(caps[0]).toBe(goldenMaxTokens(6));
+    expect(r.tally).toMatchObject({ asked: 6, correct: 6, failed: 0, percent: 100 });
+    // Every call is a cost row; an empty answer brings no usage, so it is charged its whole output cap.
+    expect(r.calls).toBe(7);
+    const costs = readCosts(vaultDir(), "run-0000000000c1");
+    expect(costs).toHaveLength(7);
+    expect(costs.filter((c) => c.tokensOut >= goldenMaxTokens(3)).map((c) => c.tokensOut)).toEqual([goldenMaxTokens(6), goldenMaxTokens(3), goldenMaxTokens(3)]);
+    expect(costs.every((c) => c.tokensIn > 0 && c.usdEstimate > 0)).toBe(true);
+    expect(r.notes.join(" ")).toMatch(/asked again in smaller calls/);
+  });
+
+  it("asks again the questions a cut-off answer left out", async () => {
+    await seedPages();
+    for (let i = 0; i < 6; i++) await addGoldenQuestion({ ...PRICE_Q, question: `What does the blue widget cost? (${i})` }, { domains: [] });
+    const sizes: number[] = [];
+    const base = judge();
+    const cut: FlashClient = {
+      model: base.model,
+      async complete(request) {
+        const items = readGoldenItems(request.user) ?? [];
+        sizes.push(items.length);
+        const out = await base.complete(request);
+        if (items.length < 6) return out;
+        // Two verdicts, then the cap: the third object is cut half way.
+        return { ...out, text: '[{"i":0,"verdict":"correct"},{"i":1,"verdict":"correct"},{"i":2,"verd', finishReason: "length" };
+      },
+    };
+    const r = await runGoldenScore({ client: cut, online: true, now: () => NOW });
+    expect(sizes).toEqual([6, 4]);
+    expect(r.tally).toMatchObject({ asked: 6, correct: 6, failed: 0 });
+  });
+
+  it("never lets a batch that keeps failing starve the batches after it", async () => {
+    await seedPages();
+    for (let i = 0; i < 18; i++) await addGoldenQuestion({ ...PRICE_Q, question: `What does the blue widget cost? (${i})` }, { domains: [] });
+    const base = judge();
+    let calls = 0;
+    // The first batch's questions never get an answer, however small the call; every other one is judged.
+    const stuck: FlashClient = {
+      model: base.model,
+      async complete(request) {
+        calls++;
+        const items = readGoldenItems(request.user) ?? [];
+        if (items.some((g) => /\((?:[0-5])\)$/.test(g.question))) throw new FlashCallError("bad_response", "ClawBox AI answered with no text.");
+        return base.complete(request);
+      },
+    };
+    const r = await runGoldenScore({ runId: "run-0000000000c2", client: stuck, online: true, now: () => NOW });
+    expect(r.skipped).toBeNull();
+    expect(r.tally).toMatchObject({ asked: 18, correct: 12, failed: 6 });
+    expect(calls).toBe(11 + 2); // the first batch split down to six single calls, then the two others
+    expect(r.calls).toBe(13);
+    expect(r.notes.join(" ")).not.toMatch(/in a row failed/);
+    expect(r.notes.join(" ")).toMatch(/no verdict for 6 question\(s\) even asked alone/);
+    expect(readGoldenHistory()[0]).toMatchObject({ asked: 18, correct: 12, failed: 6, percent: 100 });
+  });
+
+  it("counts an empty answer's estimated cost towards the night's spending cap", async () => {
+    await seedPages();
+    for (let i = 0; i < 12; i++) await addGoldenQuestion({ ...PRICE_Q, question: `What does the blue widget cost? (${i})` }, { domains: [] });
+    let calls = 0;
+    const empty: FlashClient = {
+      model: "deepseek-v4-flash",
+      async complete() {
+        calls++;
+        throw new FlashCallError("bad_response", "ClawBox AI reached the output cap before it answered.");
+      },
+    };
+    // At these rates one capped six-question call (4,096 output tokens) costs more than the night may spend.
+    const rates = { basis: "estimate", currency: "USD", unit: "per-million-tokens", models: { "deepseek-v4-flash": { input: 0, cachedInput: 0, output: 200 } } } as const;
+    const r = await runGoldenScore({ runId: "run-0000000000f3", client: empty, rates, online: true, now: () => NOW });
+    expect(calls).toBe(1);
+    expect(r.calls).toBe(1);
+    expect(r.usdEstimate).toBeGreaterThan(0.5);
+    expect(r.notes.join(" ")).toMatch(/spending cap/);
+    expect(readCosts(vaultDir(), "run-0000000000f3")).toMatchObject([{ operation: "golden", tokensOut: goldenMaxTokens(6) }]);
+  });
+
+  it("stops at the night's spending cap, whatever the question cap", async () => {
+    await seedPages();
+    for (let i = 0; i < 12; i++) await addGoldenQuestion({ ...PRICE_Q, question: `What does the blue widget cost? (${i})` }, { domains: [] });
+    const calls: string[] = [];
+    const base = judge(calls);
+    const dear: FlashClient = {
+      model: base.model,
+      async complete(request) {
+        const out = await base.complete(request);
+        return { ...out, usage: { promptTokens: 50_000_000, completionTokens: 0, cacheHitTokens: 0 } };
+      },
+    };
+    const r = await runGoldenScore({ runId: "run-0000000000f2", client: dear, online: true, now: () => NOW });
+    expect(calls).toHaveLength(1);
+    expect(r.usdEstimate).toBeGreaterThan(0.5);
+    expect(r.tally).toMatchObject({ asked: 12, correct: 6, failed: 6 });
+    expect(r.notes.join(" ")).toMatch(/spending cap/);
+  });
+
+  it("raises no regression for a question the search failed on, and keeps the last verdict in the list", async () => {
+    await seedPages();
+    await addGoldenQuestion(PRICE_Q, { domains: [] });
+    await runGoldenScore({ runId: "run-0000000000e1", client: judge(), online: true, now: () => NOW });
+    await vaultOperation("test: new price", async (tx) => {
+      await tx.write("concepts/blue-widget.md", pageText({ title: "Blue widget", claims: [{ ...PRICE, text: "The blue widget costs 14 EUR per unit." }, STOCK] }));
+    });
+    const down = async () => {
+      throw new Error("embeddings unavailable");
+    };
+    const r = await runGoldenScore({ runId: "run-0000000000e2", client: judge(), online: true, search: down, now: () => new Date(NOW.getTime() + 86_400_000) });
+    expect(r.tally.wrong).toBe(1);
+    expect(r.regressions).toEqual([]);
+    expect(r.notes.join(" ")).toMatch(/search failed/);
+    expect(listReviewItems(vaultDir(), { status: "open" }).items).toEqual([]);
+
+    // A night the judge leaves the question out keeps its verdict beside it.
+    const silent: FlashClient = {
+      model: "deepseek-v4-flash",
+      async complete() {
+        return { text: "[]", model: "deepseek-v4-flash", usage: { promptTokens: 1, completionTokens: 1, cacheHitTokens: 0 } };
+      },
+    };
+    await addGoldenQuestion(OFFICE_Q, { domains: [] });
+    const third = await runGoldenScore({ runId: "run-0000000000e3", client: judge(), online: true, now: () => new Date(NOW.getTime() + 2 * 86_400_000) });
+    expect(third.tally.asked).toBe(2);
+    await runGoldenScore({ runId: "run-0000000000e4", client: silent, online: true, now: () => new Date(NOW.getTime() + 3 * 86_400_000) });
+    const verdicts = Object.values(readLatestVerdicts()).map((v) => v.verdict).sort();
+    expect(verdicts).toEqual(["correct", "wrong"]);
+  });
+
+  it("keeps a failed-search night out of the baseline: the regression is raised the night the search works again", async () => {
+    await seedPages();
+    await addGoldenQuestion(PRICE_Q, { domains: [] });
+    const day = (n: number) => () => new Date(NOW.getTime() + n * 86_400_000);
+    await runGoldenScore({ runId: "run-0000000000d1", client: judge(), online: true, now: day(0) });
+    // The price really changes; that night the search is down.
+    await vaultOperation("test: new price", async (tx) => {
+      await tx.write("concepts/blue-widget.md", pageText({ title: "Blue widget", claims: [{ ...PRICE, text: "The blue widget costs 14 EUR per unit." }, STOCK] }));
+    });
+    const down = async () => {
+      throw new Error("embeddings unavailable");
+    };
+    const second = await runGoldenScore({ runId: "run-0000000000d2", client: judge(), online: true, search: down, now: day(1) });
+    expect(second.tally.wrong).toBe(1);
+    expect(second.regressions).toEqual([]);
+    // The list shows what that night answered…
+    expect(Object.values(readLatestVerdicts()).map((v) => v.verdict)).toEqual(["wrong"]);
+    // …but the next night, with the search back, still compares with the last verdict a working search gave.
+    const third = await runGoldenScore({ runId: "run-0000000000d3", client: judge(), online: true, search: async () => [], now: day(2) });
+    expect(third.regressions).toHaveLength(1);
+    expect(listReviewItems(vaultDir(), { status: "open" }).items).toHaveLength(1);
+  });
+
+  it("hands the night's signal to every search and starts none once it has fired", async () => {
+    await seedPages();
+    await addGoldenQuestion(PRICE_Q, { domains: [] });
+    await addGoldenQuestion(OFFICE_Q, { domains: [] });
+    const ctl = new AbortController();
+    const seen: Array<AbortSignal | undefined> = [];
+    const search = async (_q: string, signal?: AbortSignal) => {
+      seen.push(signal);
+      ctl.abort(); // the night's budget runs out during the first search
+      return [];
+    };
+    const calls: string[] = [];
+    const r = await runGoldenScore({ client: judge(calls), online: true, search, signal: ctl.signal, now: () => NOW });
+    expect(seen).toEqual([ctl.signal]);
+    expect(calls).toEqual([]);
+    expect(r.skipped).toBe("model_unavailable");
+    expect(readGoldenHistory()).toEqual([]);
+  });
+
+  it("counts a question the judge left out as not judged, never as wrong", async () => {
+    await seedPages();
+    await addGoldenQuestion(PRICE_Q, { domains: [] });
+    await addGoldenQuestion(OFFICE_Q, { domains: [] });
+    const partial: FlashClient = {
+      model: "deepseek-v4-flash",
+      async complete() {
+        return { text: '[{"i":0,"verdict":"correct"}]', model: "deepseek-v4-flash", usage: { promptTokens: 1, completionTokens: 1, cacheHitTokens: 0 } };
+      },
+    };
+    const r = await runGoldenScore({ client: partial, online: true });
+    expect(r.tally).toMatchObject({ asked: 2, correct: 1, failed: 1, percent: 100 });
+  });
+});

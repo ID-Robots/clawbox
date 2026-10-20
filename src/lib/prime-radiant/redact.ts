@@ -11,7 +11,8 @@
  * Every numeric pattern is validated, not just matched: an IBAN must pass its
  * mod-97 check or have exactly its country's registered shape, and is
  * replaced WHOLE, spaced or not (never its account part as a "card"); a card
- * number must pass the Luhn check and stand alone — and a bare 10- or
+ * number must be written as one (in a row, or in its standard groups), pass
+ * the Luhn check and stand alone, no letter or digit touching it — and a bare 10- or
  * 13-digit run that reads as a Unix timestamp (seconds or milliseconds) is
  * never a card, since millisecond timestamps pass Luhn about one time in ten.
  *
@@ -269,19 +270,19 @@ function redactIbans(text: string, onHit: () => void): string {
   return last === 0 ? text : out + text.slice(last);
 }
 
-const CARD_RE = /(?<![\d.,-])\d(?:[ -]?\d){12,18}(?![\d])/g;
-
 /**
- * Whether the digits at `offset` are the account part of an IBAN-shaped word
- * (`BG80BNBG9661…`) — one that is not a valid IBAN, or it would be gone
- * already. Such digits are never a card: half an IBAN masked as a card
- * reads as if the rest were safe to show.
+ * A card number as it is written: 13–19 digits in a row, or the standard
+ * groups — 4-4-4-4, 4-4-4-4-3, or Amex 4-6-5 — split by one kind of
+ * separator throughout (all spaces or all hyphens). It stands alone: no
+ * letter or digit of any script touches it on either side, so a hex hash
+ * (`…498113d`), the digits of an IBAN-shaped word (`BG80BNBG4111…`) and a
+ * column of small numbers (`7607 1214 138 14 6254`) are never cards. Nor is
+ * a run that is the tail of a longer spaced or hyphenated number: a digit
+ * group one separator away on either side (a DHL piece id, `JD01 4600 0128
+ * 1089 8354`) makes the whole thing something else.
  */
-function ibanTail(text: string, offset: number): boolean {
-  let from = offset;
-  while (from > 0 && /[A-Za-z0-9]/.test(text[from - 1])) from -= 1;
-  return from < offset && /^[A-Z]{2}\d{2}/.test(text.slice(from, offset + 4));
-}
+const CARD_RE =
+  /(?<![\p{L}\p{N}.,-])(?<!\p{N}[ -])(?:\d{13,19}|\d{4}([ -])\d{4}\1\d{4}\1\d{4}(?:\1\d{3})?|\d{4}([ -])\d{6}\2\d{5})(?![\p{L}\p{N}])(?![ -]\p{N})/gu;
 
 const EMAIL_RE = /(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,24}(?![A-Za-z0-9-])/g;
 
@@ -334,9 +335,8 @@ export function redactText(input: string, options: RedactOptions = {}): Redactio
     },
   );
   text = redactIbans(text, () => bump("IBAN"));
-  text = text.replace(CARD_RE, (m: string, offset: number, whole: string) => {
+  text = text.replace(CARD_RE, (m: string) => {
     const digits = m.replace(/\D/g, "");
-    if (digits.length < 13 || digits.length > 19 || ibanTail(whole, offset)) return m;
     if (digits === m && looksLikeUnixTimestamp(digits)) return m;
     if (/^(\d)\1+$/.test(digits) || !luhnValid(digits)) return m;
     bump("CARD");

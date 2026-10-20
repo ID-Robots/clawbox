@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import fs from "fs";
+import os from "os";
+import path from "path";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const oc = vi.hoisted(() => ({
   openclawIsAbsent: vi.fn(() => false),
@@ -7,9 +10,44 @@ const oc = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/openclaw-config", () => oc);
 
-import { ensureMemoryWikiWiring, planMemoryWikiWiring, WIRING_KEYS } from "@/lib/prime-radiant/plugin-wiring";
+import { ensureMemoryWikiWiring, planMemoryWikiWiring, pluginVaultNow, vaultHoldsPages, WIRING_KEYS } from "@/lib/prime-radiant/plugin-wiring";
 
 const VAULT = "/srv/box/data/prime-radiant/vault";
+
+// memory-wiki's default vault (vault.path unset) is <state-dir>/wiki/main: a tmp state dir, never the real one.
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "prime-radiant-wiring-"));
+const prevStateDir = process.env.OPENCLAW_STATE_DIR;
+process.env.OPENCLAW_STATE_DIR = path.join(tmp, "state");
+const DEFAULT_VAULT = path.join(tmp, "state", "wiki", "main");
+let folders = 0;
+
+/** A folder laid out as `files` (relative path → text). */
+function folder(files: Record<string, string>): string {
+  const dir = path.join(tmp, `vault-${++folders}`);
+  fs.mkdirSync(dir, { recursive: true });
+  for (const [rel, text] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
+    fs.writeFileSync(path.join(dir, rel), text);
+  }
+  return dir;
+}
+
+/** What the plugin creates in a vault it starts on, before anybody wrote a page. */
+const SCAFFOLD = {
+  "WIKI.md": "# Memory Wiki\n",
+  "inbox.md": "# Inbox\n",
+  "index.md": "# Index\n",
+  "entities/index.md": "# Entities\n",
+  "concepts/index.md": "# Concepts\n",
+  "reports/open-questions.md": "# Open questions\n",
+  ".openclaw-wiki/state.json": "{}",
+};
+
+afterAll(() => {
+  if (prevStateDir === undefined) delete process.env.OPENCLAW_STATE_DIR;
+  else process.env.OPENCLAW_STATE_DIR = prevStateDir;
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
 
 /** The plugin a reader of the vault: its compile writers off. */
 const READER = { ingest: { autoCompile: false }, render: { createBacklinks: false, createDashboards: false } };
@@ -109,6 +147,37 @@ describe("memory-wiki wiring plan", () => {
     expect(planMemoryWikiWiring({ plugins: { allow: ["telegram"] } }, VAULT)).toMatchObject({ conflicts: ["plugin-not-allowed"] });
   });
 
+  it("holds the vault the plugin reads now to be empty only when nothing but its own scaffolding is there", async () => {
+    expect(await vaultHoldsPages(path.join(tmp, "missing"))).toBe(false);
+    expect(await vaultHoldsPages(folder(SCAFFOLD))).toBe(false);
+    expect(await vaultHoldsPages(folder({ ...SCAFFOLD, "entities/globex.md": "# Globex\n" }))).toBe(true);
+    // A source file, a note in a folder of its own: the owner's, whatever its name.
+    expect(await vaultHoldsPages(folder({ "sources/acme-contract.pdf": "%PDF" }))).toBe(true);
+    expect(await vaultHoldsPages(folder({ "notes/todo.txt": "call Globex" }))).toBe(true);
+    // A file where the folder should be is not a vault to re-point.
+    const file = path.join(folder({ "x.txt": "x" }), "x.txt");
+    expect(await vaultHoldsPages(file)).toBe(true);
+    // Unset: the plugin's default under the state dir; set: that path, ~/ expanded.
+    expect(pluginVaultNow({ plugins: { entries: { "memory-wiki": { config: { vault: { path: "" } } } } } })).toBe(DEFAULT_VAULT);
+    expect(pluginVaultNow(wired({}, { path: "relative/wiki" }))).toBeNull();
+  });
+
+  // Never re-point what was not seen to be empty.
+  it("counts a vault it cannot read, or one holding a link, as holding pages", async () => {
+    const linked = folder(SCAFFOLD);
+    fs.symlinkSync(path.join(tmp, "elsewhere.md"), path.join(linked, "concepts", "acme-plan.md"));
+    expect(await vaultHoldsPages(linked)).toBe(true);
+    // Root reads through a mode of 000, so only a non-root run can see the refusal.
+    if (process.getuid?.() === 0) return;
+    const closed = folder(SCAFFOLD);
+    fs.chmodSync(path.join(closed, "concepts"), 0o000);
+    try {
+      expect(await vaultHoldsPages(closed)).toBe(true);
+    } finally {
+      fs.chmodSync(path.join(closed, "concepts"), 0o700);
+    }
+  });
+
   it("treats a ~/ path to the same folder as the same vault", () => {
     const home = process.env.HOME;
     process.env.HOME = "/srv/box";
@@ -180,12 +249,13 @@ describe("ensureMemoryWikiWiring", () => {
   });
 
   it("leaves a conflict alone unless forced, and never forces a deny-list or agent scope", async () => {
-    oc.readConfigStrict.mockResolvedValue(wired({}, { path: "/somewhere/else" }));
+    const elsewhere = folder({ "entities/globex.md": "# Globex\n" });
+    oc.readConfigStrict.mockResolvedValue(wired({}, { path: elsewhere }));
     expect(await ensureMemoryWikiWiring({ vault: VAULT })).toMatchObject({ state: "conflict", wrote: false });
     expect(oc.runOpenclawConfigSetBatch).not.toHaveBeenCalled();
     // Forced: the write lands and the read-back finds the vault where it was put.
     oc.readConfigStrict.mockReset();
-    oc.readConfigStrict.mockResolvedValueOnce(wired({}, { path: "/somewhere/else" })).mockResolvedValueOnce(wired());
+    oc.readConfigStrict.mockResolvedValueOnce(wired({}, { path: elsewhere })).mockResolvedValueOnce(wired());
     expect(await ensureMemoryWikiWiring({ vault: VAULT, force: true })).toMatchObject({ state: "wired", wrote: true });
     expect(oc.runOpenclawConfigSetBatch).toHaveBeenCalledWith([[WIRING_KEYS.vaultPath, JSON.stringify(VAULT), "--json"]]);
 
@@ -193,6 +263,59 @@ describe("ensureMemoryWikiWiring", () => {
     oc.readConfigStrict.mockResolvedValue(wired({}, { scope: "agent" }));
     expect(await ensureMemoryWikiWiring({ vault: VAULT, force: true })).toMatchObject({ state: "conflict", wrote: false });
     expect(oc.runOpenclawConfigSetBatch).not.toHaveBeenCalled();
+  });
+
+  it("re-points a vault path set elsewhere only when that vault holds no pages", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      for (const empty of [folder(SCAFFOLD), path.join(tmp, "never-created")]) {
+        oc.runOpenclawConfigSetBatch.mockClear();
+        oc.readConfigStrict.mockReset();
+        oc.readConfigStrict.mockResolvedValueOnce(wired({}, { path: empty })).mockResolvedValueOnce(wired());
+        expect(await ensureMemoryWikiWiring({ vault: VAULT })).toMatchObject({ state: "wired", wrote: true });
+        expect(oc.runOpenclawConfigSetBatch).toHaveBeenCalledWith([[WIRING_KEYS.vaultPath, JSON.stringify(VAULT), "--json"]]);
+      }
+      expect(warn).not.toHaveBeenCalled();
+
+      // The owner's wiki: pages beside the plugin's scaffolding. Left alone, and said so.
+      oc.runOpenclawConfigSetBatch.mockClear();
+      const owners = folder({ ...SCAFFOLD, "concepts/globex-pricing.md": "# Globex pricing\n" });
+      oc.readConfigStrict.mockReset();
+      oc.readConfigStrict.mockResolvedValue(wired({}, { path: owners }));
+      expect(await ensureMemoryWikiWiring({ vault: VAULT })).toMatchObject({ state: "conflict", conflicts: ["other-vault-path"], wrote: false });
+      expect(oc.runOpenclawConfigSetBatch).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("[prime-radiant] memory-wiki reads another vault that holds pages"));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("does not re-point the plugin's default vault (vault.path unset) when it holds pages", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      fs.mkdirSync(path.join(DEFAULT_VAULT, "syntheses"), { recursive: true });
+      fs.writeFileSync(path.join(DEFAULT_VAULT, "syntheses", "acme-roadmap.md"), "# Acme roadmap\n");
+      oc.readConfigStrict.mockResolvedValue({});
+      const result = await ensureMemoryWikiWiring({ vault: VAULT });
+      expect(result).toMatchObject({ state: "conflict", conflicts: ["other-vault-path"], wrote: false });
+      expect(oc.runOpenclawConfigSetBatch).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledTimes(1);
+
+      // Emptied (only what the plugin itself made): pointed at Prime Radiant's vault.
+      fs.rmSync(DEFAULT_VAULT, { recursive: true, force: true });
+      for (const [rel, text] of Object.entries(SCAFFOLD)) {
+        fs.mkdirSync(path.dirname(path.join(DEFAULT_VAULT, rel)), { recursive: true });
+        fs.writeFileSync(path.join(DEFAULT_VAULT, rel), text);
+      }
+      oc.readConfigStrict.mockReset();
+      oc.readConfigStrict.mockResolvedValueOnce({}).mockResolvedValueOnce(wired());
+      expect(await ensureMemoryWikiWiring({ vault: VAULT })).toMatchObject({ state: "wired", wrote: true });
+      expect(oc.runOpenclawConfigSetBatch).toHaveBeenCalledTimes(1);
+      expect(pluginVaultNow({})).toBe(DEFAULT_VAULT);
+    } finally {
+      warn.mockRestore();
+      fs.rmSync(DEFAULT_VAULT, { recursive: true, force: true });
+    }
   });
 
   it("is unavailable, never an error, without OpenClaw or with an unreadable config", async () => {

@@ -14,10 +14,11 @@ import path, { untraced } from "@/lib/runtime-path";
 import { withPluginFields } from "./plugin-compat";
 import { parsePage, serializePage, pageSummary, type ParsedPage } from "./frontmatter";
 import { hasVerification, type PageFrontmatter } from "./schema";
+import { generatedSummary } from "./summary-meta";
 import { isKnowledgePage, pageAbsPath, RESERVED_DIRS, safePagePath, vaultDir } from "./paths";
 import { PLUGIN_GITIGNORE_LINES, stripManagedBlocks } from "./plugin-files";
 import { commitPaths, git, hasCommits, initRepo, isGitRepo, restorePaths, withVaultLock, type VaultAuthor } from "./git";
-import { buildLinkGraph } from "./links";
+import { buildLinkGraph, pathAliases } from "./links";
 import { LINT_RULES, lintSecretsInText, lintVault, type LintFinding } from "./lint";
 import { readRetiredLedger, recordRetired } from "./state-db";
 
@@ -313,7 +314,8 @@ export function listEntry(page: VaultPage): PageListEntry {
     privacy: fm?.privacy ?? null,
     verified: fm ? hasVerification(fm) : false,
     claims: fm?.claims.length ?? 0,
-    summary: pageSummary(p.body),
+    // The summary written from the page's connections, when it has one; else its own first paragraph.
+    summary: (fm ? generatedSummary(fm)?.text : null) ?? pageSummary(p.body),
     bodyChars: p.body.length,
     mtimeMs: page.mtimeMs,
   };
@@ -381,6 +383,8 @@ export interface VaultOperationOptions {
    * listed ones still on their own.
    */
   lint?: boolean | "pages";
+  /** `Key: value` lines that close the commit message (git.ts `commitPaths`), e.g. who a verification names. */
+  trailers?: readonly string[];
   /** Clock for the lint's stale check (tests). */
   now?: Date;
   /**
@@ -481,7 +485,7 @@ export async function vaultOperation<T>(
     }
     let commit: string | null;
     try {
-      commit = await commitPaths(vault, typeof message === "string" ? message : message(result), changed(), options.author);
+      commit = await commitPaths(vault, typeof message === "string" ? message : message(result), changed(), options.author, options.trailers);
     } catch (err) {
       await restorePaths(vault, changed());
       throw err;
@@ -544,7 +548,7 @@ async function lintTouched(
 
 /** Which of `pages` index.md lists, its links resolved as the lint resolves them (`buildLinkGraph(...).indexed`). */
 function listedIn(indexBody: string | null, pages: readonly VaultPage[]): Set<string> {
-  return buildLinkGraph(pages.map((p) => ({ path: p.path, title: p.parsed.ok ? p.parsed.frontmatter.title : undefined, body: "" })), indexBody).indexed;
+  return buildLinkGraph(pages.map((p) => ({ path: p.path, title: p.parsed.ok ? p.parsed.frontmatter.title : undefined, aliases: p.parsed.ok ? pathAliases(p.parsed.frontmatter.aliases) : undefined, body: "" })), indexBody).indexed;
 }
 
 /**

@@ -58,7 +58,16 @@ describe("safeUploadName", () => {
     expect(safeUploadName("Acme Catalogue.PDF")).toEqual({ name: "Acme Catalogue.pdf", ext: ".pdf" });
     expect(safeUploadName("../../etc/notes.md")).toEqual({ name: "notes.md", ext: ".md" });
     expect(safeUploadName("C:\\Users\\x\\plan.docx")).toEqual({ name: "plan.docx", ext: ".docx" });
-    expect(safeUploadName("rép;ort$.txt")).toEqual({ name: "r_p_ort_.txt", ext: ".txt" });
+    expect(safeUploadName("rép;ort$.txt")).toEqual({ name: "rép_ort_.txt", ext: ".txt" });
+    // The owner's own name, in any script: the page's source shows it.
+    expect(safeUploadName("Ценоразпис 2026.PDF")).toEqual({ name: "Ценоразпис 2026.pdf", ext: ".pdf" });
+    expect(safeUploadName("Re\u0301sume\u0301.md")?.name).toBe("Résumé.md");
+    // Never a control or a direction-override character.
+    expect(safeUploadName("a\u0007b\u202Ec.md")?.name).toBe("a_b_c.md");
+    // Within the file system's name limit in bytes, not only in characters.
+    const wide = safeUploadName(`${"価".repeat(119)}.md`)!.name;
+    expect(Buffer.byteLength(wide)).toBeLessThanOrEqual(200);
+    expect(wide.endsWith(".md")).toBe(true);
     expect(safeUploadName("...hidden.md")).toEqual({ name: "hidden.md", ext: ".md" });
     expect(safeUploadName("$$$.md")?.name).toBe("___.md");
     expect(safeUploadName(`${"a".repeat(500)}.md`)?.name.length).toBeLessThanOrEqual(120);

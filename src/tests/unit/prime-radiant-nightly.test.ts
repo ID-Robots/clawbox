@@ -8,9 +8,13 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createHashEmbedder, fullComparisonDone, readDeferredClaims } from "@/lib/prime-radiant/contradictions";
+import { createHashEmbedder, fullComparisonDone, readComparedThrough, readDeferredClaims } from "@/lib/prime-radiant/contradictions";
 import type { FlashClient } from "@/lib/prime-radiant/flash-client";
 import { git, headCommit } from "@/lib/prime-radiant/git";
+import { stubGoldenVerdict } from "@/lib/prime-radiant/flash-stub";
+import { readGoldenItems } from "@/lib/prime-radiant/golden";
+import { goldenStatus } from "@/lib/prime-radiant/golden-score";
+import { addGoldenQuestion } from "@/lib/prime-radiant/golden-store";
 import { readJudgeItems } from "@/lib/prime-radiant/judge";
 import {
   dreamBranchName,
@@ -31,6 +35,7 @@ import { setVaultReindexHook } from "@/lib/prime-radiant/reindex-hook";
 import { resolveReviewItem } from "@/lib/prime-radiant/review";
 import { listReviewItems } from "@/lib/prime-radiant/review-store";
 import { defaultSettings, type PrimeRadiantSettings } from "@/lib/prime-radiant/settings";
+import { withStateDb } from "@/lib/prime-radiant/state-db";
 import { ensureVault, readVaultSnapshot, vaultOperation } from "@/lib/prime-radiant/vault";
 import { readWriterItems } from "@/lib/prime-radiant/writer";
 import { claim, pageText } from "../helpers/prime-radiant-fixtures";
@@ -113,6 +118,33 @@ describe("nightly pass", () => {
     expect(listNightlyRuns()).toEqual([]);
   });
 
+  it("builds the structure layer on the branch, offline too, and merges it; a second night has nothing left to do", async () => {
+    await ensureVault();
+    await vaultOperation("seed: invoices", async (tx) => {
+      for (let d = 1; d <= 3; d++) {
+        const title = `Invoice INV-2026-00000${d} Globex Ltd`;
+        await tx.write(
+          `concepts/invoice-inv-2026-00000${d}.md`,
+          pageText({ type: "reference", title, domain: "acme-sales", claims: [claim(`acme-sales/invoice-inv-2026-00000${d}/total`, `The invoice total is EUR ${d}00.00, dated 2026-04-0${d}.`)] }, `${title}.\n`),
+        );
+      }
+    });
+    const withStructure = settings({ domains: [{ name: "acme-sales", owner: "Sales team" }], structure: { ...defaultSettings().structure, company: "Acme Widgets Ltd" } });
+    const run = await runNightly("manual", deps({ online: async () => false, settings: withStructure }));
+    expect(run?.status).toBe("merged");
+    expect((run!.summary as unknown as NightlySummary).structure).toMatchObject({ recordHubs: 1, domainHubs: 1, root: true, leavesInHubs: 3, model: { skipped: "offline" } });
+    const snap = await readVaultSnapshot(vaultDir());
+    const hub = snap.pages.find((p) => p.path === "syntheses/invoices-2026-04.md");
+    expect(hub?.parsed.ok && hub.parsed.frontmatter.structure).toMatchObject({ kind: "record-hub", type: "invoice", month: "2026-04", leaves: 3 });
+    expect(snap.pages.map((p) => p.path)).toEqual(expect.arrayContaining(["syntheses/acme-widgets-ltd.md", "syntheses/acme-sales-domain-hub.md"]));
+    const leaf = snap.pages.find((p) => p.path === "concepts/invoice-inv-2026-000001.md");
+    expect(leaf?.parsed.ok && leaf.parsed.frontmatter.record).toEqual({ type: "invoice", month: "2026-04", hub: "syntheses/invoices-2026-04.md", by: "rules" });
+
+    const again = await runNightly("manual", deps({ online: async () => false, settings: withStructure }));
+    expect(again?.status).toBe("nothing");
+    expect((again!.summary as unknown as NightlySummary).structure).toMatchObject({ written: 0 });
+  });
+
   it("names its branch dream/<local date>, and the next free one on a second run that day", async () => {
     await ensureVault();
     expect(localDate(NOW)).toBe("2026-05-20");
@@ -136,6 +168,8 @@ describe("nightly pass", () => {
     expect(summary.contradictions.findings).toBe(1);
     expect(summary.gate.touched).toEqual([]);
     expect(run!.usdEstimate).toBeGreaterThan(0);
+    // Step 4c: every page summarised from its neighbourhood (this test's model answers no summary call, so the facts wrote them, not marked tried).
+    expect(summary.summaries).toMatchObject({ planned: 2, written: 2, byModel: 0, byFacts: 2, rejectedPages: 0, model: { calls: 1 } });
 
     // main has the pages; the branch and the worktree are gone.
     const snap = await readVaultSnapshot();
@@ -178,7 +212,9 @@ describe("nightly pass", () => {
     };
     compile();
 
-    const run = await runNightly("manual", deps());
+    // The summaries pass would add a summary to the page: off, these nights are about the repair alone.
+    const noSummaries = settings({ summaries: { ...defaultSettings().summaries, enabled: false } });
+    const run = await runNightly("manual", deps({ settings: noSummaries }));
     expect(run).toMatchObject({ status: "merged" });
     const summary = run!.summary as unknown as NightlySummary;
     expect(summary.held).toEqual([]);
@@ -189,7 +225,7 @@ describe("nightly pass", () => {
     // The plugin compiles again during the day; the next night still merges.
     compile();
     fs.writeFileSync(path.join(filesRoot, "Documents", "shipping.md"), "Orders ship within three working days.");
-    const second = await runNightly("schedule", deps({ now: () => new Date(2026, 4, 21, 3, 0) }));
+    const second = await runNightly("schedule", deps({ settings: noSummaries, now: () => new Date(2026, 4, 21, 3, 0) }));
     expect(second).toMatchObject({ status: "merged" });
     expect((second!.summary as unknown as NightlySummary).notes.join(" ")).not.toMatch(/memory-wiki/);
     expect(fs.readFileSync(path.join(v, "concepts", "terms.md"), "utf8")).toBe(page);
@@ -204,6 +240,32 @@ describe("nightly pass", () => {
     expect(summary.ingest).toEqual({ skipped: "offline" });
     expect(summary.contradictions.skipped).toBe("offline");
     expect(summary.notes.join(" ")).toMatch(/not reachable/);
+  });
+
+  it("a page whose summary the lint refuses is left as it was; every other summary is still saved and merged", async () => {
+    await ensureVault();
+    const card = pageText({ title: "Deposit", claims: [claim("acme-sales/deposit/paid", "Acme Widgets Ltd received the deposit on 2026-05-02.")] }, "Paid with card 4111 1111 1111 1111.\n");
+    const terms = pageText({ title: "Terms", claims: [claim("acme-sales/terms/net", "Acme Widgets Ltd pays suppliers within 30 days.")] }, "Acme terms.\n");
+    // Written before the secret check could refuse it (lint off): no rewrite of it may land.
+    await vaultOperation(
+      "seed: pages",
+      async (tx) => {
+        await tx.write("concepts/deposit.md", card);
+        await tx.write("concepts/terms.md", terms);
+        await tx.write("index.md", "# Index\n\n- [[concepts/deposit]]\n- [[concepts/terms]]\n");
+      },
+      { lint: false },
+    );
+    const s = settings({ structure: { ...defaultSettings().structure, enabled: false } });
+    const run = await runNightly("manual", deps({ settings: { ...s, ingest: { ...s.ingest, folders: [] } }, online: async () => false }));
+    expect(run?.status).toBe("merged");
+    const summary = run!.summary as unknown as NightlySummary;
+    expect(summary.summaries).toMatchObject({ written: 1, refused: [{ path: "concepts/deposit.md", reason: "secret-pattern (CARD)" }] });
+    expect(summary.notes.join(" ")).toMatch(/The lint refused the new summary of 1 page, each left as it was: concepts\/deposit\.md \(secret-pattern \(CARD\)\)\./);
+    expect(summary.notes.join(" ")).not.toMatch(/could not be saved/);
+    const v = vaultDir();
+    expect(fs.readFileSync(path.join(v, "concepts", "deposit.md"), "utf8")).toBe(card);
+    expect(fs.readFileSync(path.join(v, "concepts", "terms.md"), "utf8")).not.toBe(terms);
   });
 
   it("holds a night whose change carries a lint error; the owner merges it once its items are resolved", async () => {
@@ -300,10 +362,106 @@ describe("nightly pass", () => {
     expect(s3.contradictions).toMatchObject({ queried: 0, carried: 0, skipped: "nothing_to_compare" });
   });
 
+  it("compares what reached main by day: the scope is everything changed since the last finished comparison", async () => {
+    await ensureVault();
+    // The structure pass would keep the domain hub's open review items current, a commit of its own; this is about the comparison's scope.
+    const quiet = settings({ structure: { ...defaultSettings().structure, enabled: false }, summaries: { ...defaultSettings().summaries, enabled: false } });
+    const first = await runNightly("schedule", deps({ settings: quiet }));
+    expect((first!.summary as unknown as NightlySummary).contradictions.complete).toBe(true);
+    const mark = readComparedThrough(vaultDir());
+    const items = () => listReviewItems(vaultDir(), { kind: "contradiction" }).items;
+    expect(items()).toHaveLength(1);
+
+    // By day: Add documents (or an edit) commits straight to main, not to a dream branch.
+    await vaultOperation("ingest: 1 document", async (tx) => {
+      await tx.write("concepts/daytime-price.md", pageText({ title: "Daytime price", claims: [claim("acme-sales/daytime-price/blue", "The blue widget costs 15 EUR per unit.")] }));
+    });
+    // An offline night compares nothing and does not move the mark.
+    const offline = await runNightly("schedule", deps({ settings: quiet, online: async () => false, now: () => new Date(2026, 4, 21, 3, 0) }));
+    expect((offline!.summary as unknown as NightlySummary).contradictions.skipped).toBe("offline");
+    expect(readComparedThrough(vaultDir())).toBe(mark);
+
+    // The next night ingests nothing new (its branch changes nothing), and still compares the daytime page.
+    const second = await runNightly("schedule", deps({ settings: quiet, now: () => new Date(2026, 4, 22, 3, 0) }));
+    const s2 = second!.summary as unknown as NightlySummary;
+    expect(s2.commits).toBe(0);
+    expect(s2.contradictions.queried).toBe(1);
+    expect(s2.contradictions.findings).toBeGreaterThan(0);
+    expect(s2.notes.join(" ")).toMatch(/1 page\(s\) changed since the last comparison outside this night's branch were compared too/);
+    expect(items().filter((i) => i.pages.includes("concepts/daytime-price.md")).length).toBeGreaterThan(0);
+    expect(mark).toMatch(/^[0-9a-f]{40}$/);
+    const after = readComparedThrough(vaultDir());
+    expect(after).not.toBe(mark);
+    expect(after).toBe((await headCommit(vaultDir()))!.sha);
+
+    // Compared once is compared: the night after is quiet again.
+    const third = await runNightly("schedule", deps({ settings: quiet, now: () => new Date(2026, 4, 23, 3, 0) }));
+    expect((third!.summary as unknown as NightlySummary).contradictions).toMatchObject({ queried: 0, skipped: "nothing_to_compare" });
+  });
+
+  it("compares every claim when the recorded comparison's commit is gone", async () => {
+    await ensureVault();
+    await runNightly("schedule", deps());
+    withStateDb(vaultDir(), (db) => db.prepare("UPDATE pass_state SET value = ? WHERE key = 'compared_through'").run("0".repeat(40)));
+    const second = await runNightly("schedule", deps({ now: () => new Date(2026, 4, 21, 3, 0) }));
+    const s2 = second!.summary as unknown as NightlySummary;
+    expect(s2.contradictions.queried).toBe(s2.contradictions.claims);
+    expect(s2.contradictions.queried).toBeGreaterThan(0);
+    expect(readComparedThrough(vaultDir())).toBe((await headCommit(vaultDir()))!.sha);
+  });
+
+  it("never hands git a recorded mark that is no commit id, and compares every claim instead", async () => {
+    await ensureVault();
+    await runNightly("schedule", deps());
+    for (const bad of ["HEAD", "--all", "main~1", "0123456789abcdef", ""]) {
+      withStateDb(vaultDir(), (db) => db.prepare("UPDATE pass_state SET value = ? WHERE key = 'compared_through'").run(bad));
+      expect(readComparedThrough(vaultDir())).toBeNull();
+    }
+    const second = await runNightly("schedule", deps({ now: () => new Date(2026, 4, 21, 3, 0) }));
+    const s2 = second!.summary as unknown as NightlySummary;
+    expect(s2.contradictions.queried).toBe(s2.contradictions.claims);
+    expect(readComparedThrough(vaultDir())).toMatch(/^[0-9a-f]{40}$/);
+  });
+
   it("an offline night does not count as the full comparison", async () => {
     await ensureVault();
     await runNightly("schedule", deps({ online: async () => false }));
     expect(fullComparisonDone(vaultDir())).toBe(false);
+  });
+
+  it("checks the golden questions against main once the night is merged, under the night's run", async () => {
+    await ensureVault();
+    await addGoldenQuestion({ question: "What does the blue widget cost?", expected: "10 EUR per unit", domain: "acme-sales" }, { domains: [] });
+    const asked: string[] = [];
+    const withGolden: FlashClient = {
+      model: client.model,
+      async complete(request) {
+        const golden = readGoldenItems(request.user);
+        if (!golden) return client.complete(request);
+        asked.push(...golden.map((g) => g.question));
+        const text = JSON.stringify(golden.map((g) => ({ i: g.i, verdict: stubGoldenVerdict(g.expected, g.facts), why: "fake" })));
+        return { text, model: client.model, usage: { promptTokens: 80, completionTokens: 10, cacheHitTokens: 0 } };
+      },
+    };
+    const search = vi.fn(async () => []);
+    const run = await runNightly("manual", deps({ client: withGolden, goldenSearch: search }));
+    expect(run?.status).toBe("merged");
+    const summary = run!.summary as unknown as NightlySummary;
+    // The night's own import is on main by then: the wiki answers with it.
+    expect(summary.golden).toMatchObject({ scoreId: run!.id, tally: { asked: 1, correct: 1, percent: 100 }, capped: 0, calls: 1, regressions: [] });
+    expect(asked).toEqual(["What does the blue widget cost?"]);
+    expect(search).toHaveBeenCalledTimes(1);
+    expect((await goldenStatus()).last).toMatchObject({ runId: run!.id, percent: 100 });
+  });
+
+  it("skips the golden check offline or when it is switched off, and says why", async () => {
+    await ensureVault();
+    await addGoldenQuestion({ question: "What does the blue widget cost?", expected: "10 EUR", domain: "acme-sales" }, { domains: [] });
+    const offline = await runNightly("schedule", deps({ online: async () => false }));
+    expect((offline!.summary as unknown as NightlySummary).golden).toEqual({ skipped: "offline" });
+    const off = await runNightly("schedule", deps({ online: async () => false, settings: { ...settings(), golden: { enabled: false, maxQuestions: 50 } } }));
+    expect((off!.summary as unknown as NightlySummary).golden).toEqual({ skipped: "disabled" });
+    expect((await goldenStatus()).last).toBeNull();
   });
 
   it("runs one pass at a time", async () => {
