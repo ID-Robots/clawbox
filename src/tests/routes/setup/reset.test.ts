@@ -30,6 +30,11 @@ vi.mock("fs/promises", () => ({
   },
 }));
 
+const provisioned = vi.hoisted(() => ({ value: false }));
+vi.mock("@/lib/device-provisioning", () => ({
+  isProvisionedDevice: () => provisioned.value,
+}));
+
 vi.mock("@/lib/updater", () => ({
   resetUpdateState: vi.fn(),
 }));
@@ -546,6 +551,20 @@ describe("POST /setup-api/setup/reset", () => {
     // Should still succeed (seeding is non-fatal)
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
+  });
+
+  it("on a provisioned box asks for the sticker password back, never the universal default", async () => {
+    provisioned.value = true;
+    try {
+      await resetPost();
+      const req = mockFs.writeFile.mock.calls.find(([p]) => typeof p === "string" && p.endsWith(".chpasswd-device"));
+      expect(req).toBeDefined();
+      expect((req![2] as { mode: number }).mode).toBe(0o600);
+      expect(mockFs.writeFile.mock.calls.some(([p]) => typeof p === "string" && p.endsWith(".chpasswd-input"))).toBe(false);
+      expect(JSON.stringify(mockFs.writeFile.mock.calls)).not.toContain("clawbox:clawbox");
+    } finally {
+      provisioned.value = false;
+    }
   });
 
   it("resets the system password to the default 'clawbox' after wiping data", async () => {

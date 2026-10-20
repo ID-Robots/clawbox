@@ -15,6 +15,12 @@ import path from "@/lib/runtime-path";
 import { DATA_DIR } from "@/lib/config-store";
 
 export const CHPASSWD_INPUT_PATH = path.join(DATA_DIR, ".chpasswd-input");
+/**
+ * Present instead of {@link CHPASSWD_INPUT_PATH}: ask the chpasswd step for the
+ * box's sticker password back (factory reset of a provisioned box). Holds no
+ * credential; install.sh refuses it on a box that was not provisioned.
+ */
+export const CHPASSWD_DEVICE_REQUEST_PATH = path.join(DATA_DIR, ".chpasswd-device");
 export const CHPASSWD_SERVICE_NAME = "clawbox-root-update@chpasswd.service";
 /** The step name behind that unit, for `startRootStep()`. */
 export const CHPASSWD_STEP = "chpasswd";

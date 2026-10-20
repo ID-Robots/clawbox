@@ -1,10 +1,11 @@
 /**
  * Captive-portal detection — when a phone/laptop joins the ClawBox-Setup
  * AP, the OS issues a probe request to a vendor-specific URL. ClawBox's
- * middleware (src/middleware.ts) intercepts those probes and either
- * redirects to the setup UI at http://10.42.0.1/ or returns the magic
- * "no internet" response, which prompts the OS to pop a captive-portal
- * notification.
+ * middleware (src/middleware.ts) intercepts those probes: Android, Windows
+ * and Firefox get a 302 to the portal, Apple gets a 200 page that is NOT
+ * "Success" and refreshes to the setup wizard, so the iOS captive sheet opens
+ * on the wizard. During first setup start-ap.sh resolves only the probe hosts
+ * to the AP (scripts/start-ap.sh, captive-probes.conf).
  *
  * Runs at NN=05 so it executes before the real wizard mutates state.
  */
@@ -15,7 +16,7 @@ const PROBES = [
   // Android — looks for HTTP 204 with a 0-byte body. Anything else == captive.
   { ua: "Dalvik/2.1.0 (Linux; U; Android 14)", path: "/generate_204" },
   { ua: "Dalvik/2.1.0 (Linux; U; Android 14)", path: "/gen_204" },
-  // Apple — expects "Success\n". Anything else == captive.
+  // Apple — expects "Success". Anything else == captive; ours opens the wizard.
   { ua: "CaptiveNetworkSupport-410.0.1 wispr", path: "/hotspot-detect.html" },
   { ua: "CaptiveNetworkSupport-410.0.1 wispr", path: "/library/test/success.html" },
   // Windows — expects "Microsoft NCSI" body.
@@ -39,6 +40,16 @@ test.describe("captive portal middleware", () => {
       // 200 / 204 / 30x are all acceptable: each tells the OS something
       // sensible. 5xx = our middleware crashed and needs fixing.
       expect(res.status(), `${probe.path} returned 5xx`).toBeLessThan(500);
+      if (probe.ua.startsWith("CaptiveNetworkSupport")) {
+        // Before the wizard runs the Apple probe must open the wizard, never
+        // claim the network is open.
+        expect(res.status()).toBe(200);
+        const body = await res.text();
+        expect(body).not.toMatch(/<BODY>Success<\/BODY>/);
+        expect(body).toMatch(/http-equiv="refresh" content="0;url=[^"]*\/setup"/);
+      } else {
+        expect(res.status()).toBe(302);
+      }
     });
   }
 

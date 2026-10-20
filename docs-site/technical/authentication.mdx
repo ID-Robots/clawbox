@@ -8,7 +8,7 @@ ClawBox has **one human password** and several machine tokens. Understanding whi
 
 ## The one password
 
-The browser/desktop login and SSH use the **same Linux system password** (account `clawbox`). There is no separate admin or web password. Changing it anywhere changes it everywhere:
+The browser/desktop login and SSH use the **same Linux system password** (account `clawbox`). On boxes with a sticker QR its initial value is the Wi-Fi password printed on the sticker (unique per box, not a shared default); the setup wizard replaces it with the owner's own, and a factory reset restores the sticker one. Older boxes start with `clawbox`. There is no separate admin or web password. Changing it anywhere changes it everywhere:
 
 - **Settings → System → Change password** (web) — validated, rate-limited, applied via a privileged `chpasswd` step.
 - `sudo passwd clawbox` (SSH) — takes effect for the browser immediately.
