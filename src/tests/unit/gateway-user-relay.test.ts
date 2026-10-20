@@ -212,10 +212,13 @@ describe("a user's chat end to end through the relay", () => {
   type Frame = { type?: string; id?: string; method?: string; event?: string; ok?: boolean; params?: Record<string, unknown> & { auth?: unknown; sessionKey?: string; device?: { signature?: string } }; payload?: Record<string, unknown> & { snapshot?: { sessionDefaults: { mainSessionKey: string } } } };
   let seenByGateway: Frame[];
   let port: number;
+  // When set, the stand-in gateway holds every reset's answer until it resolves.
+  let resetGate: Promise<void> | null;
 
   beforeEach(async () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-relay-e2e-"));
     seenByGateway = [];
+    resetGate = null;
     // A stand-in gateway: challenge, hello naming the owner's main, and a
     // broadcast of BOTH the owner's and the user's chat to every socket.
     gateway = new WebSocketServer({ port: 0 });
@@ -233,9 +236,11 @@ describe("a user's chat end to end through the relay", () => {
         }
         if (frame.method === "sessions.reset") {
           // OpenClaw's rule for callers that declare scopes.
-          ws.send(JSON.stringify(scopes.includes("operator.admin")
+          const answer = JSON.stringify(scopes.includes("operator.admin")
             ? { type: "res", id: frame.id, ok: true, payload: { ok: true, key: frame.params.key } }
-            : { type: "res", id: frame.id, ok: false, error: { code: "INVALID_REQUEST", message: "Gateway resets require operator.admin." } }));
+            : { type: "res", id: frame.id, ok: false, error: { code: "INVALID_REQUEST", message: "Gateway resets require operator.admin." } });
+          if (resetGate) void resetGate.then(() => ws.send(answer));
+          else ws.send(answer);
           return;
         }
         if (frame.method === "chat.send") {
@@ -333,6 +338,45 @@ describe("a user's chat end to end through the relay", () => {
     const connects = seenByGateway.filter((f) => f.method === "connect");
     expect(connects.map((f) => f.params?.scopes)).toEqual([[...relay.RELAY_SCOPES], [...relay.RESET_SCOPES]]);
     expect(JSON.stringify(received)).not.toContain("operator.admin");
+  });
+
+  it("keeps one admin reset socket per chat: a reset sent while one runs is refused, the next one after it runs", async () => {
+    let release!: () => void;
+    resetGate = new Promise<void>((resolve) => { release = resolve; });
+    const browser = new WebSocket(`ws://127.0.0.1:${port}/`);
+    const received: Frame[] = [];
+    await new Promise<void>((resolve, reject) => {
+      browser.on("message", (raw) => {
+        const frame = JSON.parse(String(raw));
+        received.push(frame);
+        if (frame.event === "connect.challenge") {
+          browser.send(JSON.stringify({ type: "req", id: "conn", method: "connect", params: { auth: { token: "" } } }));
+        } else if (frame.id === "conn") {
+          for (let i = 0; i < 5; i++) {
+            browser.send(JSON.stringify({ type: "req", id: `burst-${i}`, method: "sessions.reset", params: { key: ALICE_MAIN, reason: "new" } }));
+          }
+        } else if (frame.id === "burst-4") {
+          // The last of the burst was refused while the first is still held: let it finish.
+          release();
+        } else if (frame.id === "burst-0") {
+          browser.send(JSON.stringify({ type: "req", id: "after", method: "sessions.reset", params: { key: ALICE_MAIN, reason: "new" } }));
+        } else if (frame.id === "after") {
+          resolve();
+        }
+      });
+      browser.on("error", reject);
+    });
+    browser.close();
+
+    expect(received.find((f) => f.id === "burst-0")).toMatchObject({ type: "res", ok: true, payload: { key: ALICE_MAIN } });
+    for (let i = 1; i < 5; i++) {
+      expect(received.find((f) => f.id === `burst-${i}`)).toMatchObject({ ok: false, error: { code: "FORBIDDEN" } });
+    }
+    expect(received.find((f) => f.id === "after")).toMatchObject({ type: "res", ok: true, payload: { key: ALICE_MAIN } });
+    // The burst opened one admin socket, and the reset after it one more.
+    const adminConnects = seenByGateway.filter((f) => f.method === "connect" && (f.params?.scopes as string[] | undefined)?.includes("operator.admin"));
+    expect(adminConnects).toHaveLength(2);
+    expect(seenByGateway.filter((f) => f.method === "sessions.reset")).toHaveLength(2);
   });
 
   it("closes the browser's socket when the box has no gateway token to speak with", async () => {

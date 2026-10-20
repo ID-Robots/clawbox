@@ -397,6 +397,9 @@ function relayUserChat({ clientWs, username, connectUpstream, token, identity, l
   const queued = [];
   let upstream;
   let closed = false;
+  // One admin reset socket per browser connection at a time: a burst of
+  // /new frames must not open a burst of admin sockets on the gateway.
+  let resetInFlight = false;
 
   const sendClient = (frame) => {
     if (clientWs.readyState === WebSocket.OPEN) clientWs.send(JSON.stringify(frame));
@@ -433,9 +436,18 @@ function relayUserChat({ clientWs, username, connectUpstream, token, identity, l
     if (out.toClient) sendClient(out.toClient);
     if (out.toGateway) sendGateway(out.toGateway);
     if (out.reset) {
-      runAdminReset({ ...out.reset, connectUpstream, token, identity }).then((res) => {
-        if (!closed) sendClient(res);
-      });
+      if (resetInFlight) {
+        sendClient(refusalFrame(out.reset.id, "A reset is already running. Try again in a moment."));
+        return;
+      }
+      resetInFlight = true;
+      runAdminReset({ ...out.reset, connectUpstream, token, identity })
+        .then((res) => {
+          if (!closed) sendClient(res);
+        })
+        .finally(() => {
+          resetInFlight = false;
+        });
     }
   };
 
