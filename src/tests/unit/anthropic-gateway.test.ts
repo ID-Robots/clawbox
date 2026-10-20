@@ -7,8 +7,9 @@
  *
  *  1. THE POOL IN THE GATEWAY — every Claude account is its own profile, the
  *     access token only, in an order that follows the pool (the active account
- *     first, the limited ones last, the chat's own sign-in after them); never
- *     a restart.
+ *     first, the chat's own sign-in last); a limited account out of the order
+ *     while another can answer, so no session core pinned to it stays there,
+ *     and back at its reset; never a restart.
  *  2. NOTHING TAKEN FOR NOTHING — a chat on another provider is never moved;
  *     an unreadable config removes nothing; the owner's own profiles are never
  *     written or removed; a write core refused is owed, not claimed.
@@ -196,7 +197,7 @@ describe("the pool in the gateway", () => {
     // A coding run hit Work's limit.
     await pool.markLimited(work.id, Date.now() + H, "weekly", { source: "coding" });
     await swap.whenSwapsSettled();
-    expect(core.order).toEqual([p(personal.id), p(work.id), "anthropic:default"]);
+    expect(core.order).toEqual([p(personal.id), "anthropic:default"]);
     const view = await pool.describePool();
     expect(view.gateway).toMatchObject({ following: true, accountId: personal.id, label: "Personal Max" });
     expect(view.lastSwap?.consumers.gateway).toEqual({ status: "ok", code: "switched", count: 2 });
@@ -279,6 +280,65 @@ describe("the pool in the gateway", () => {
     expect(await gw.keepGatewayMirror()).toBe("synced");
     expect(core.profiles.get(p(work.id))?.secret).toBe("sk-ant-oat01-work-v2");
     expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: work.id, pending: false, fingerprint: fp("sk-ant-oat01-work-v2") });
+  });
+});
+
+describe("a limited account and the sessions core pinned to it", () => {
+  // Core keeps a session's automatic auth pin on any profile that is in the
+  // stored order and not cooling down for that session's model. A spent
+  // account left in the order, even last, kept answering the sessions pinned
+  // to it with the provider's limit text whenever core's own backoff lapsed.
+  // Left out of the order, core drops that pin on the session's next turn.
+  it("leaves a limited account out of the order while another can answer, and keeps its profile, renewed, for the reset", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+
+    await pool.markLimited(work.id, Date.now() + H, "weekly", { source: "chat" });
+    await swap.whenSwapsSettled();
+    expect(core.order).toEqual([p(personal.id), "anthropic:default"]);
+    // Out of the order, not out of the store: nothing to paste back at the reset.
+    expect(core.logouts).toEqual([]);
+    expect(core.profiles.has(p(work.id))).toBe(true);
+    // A token the pool renews meanwhile still goes in.
+    await pool.replaceCredential(work.id, { kind: "oauth", tokens: oauth("sk-ant-oat01-work-v2"), email: "work@example.com" });
+    await gw.keepGatewayMirror();
+    expect(core.profiles.get(p(work.id))?.secret).toBe("sk-ant-oat01-work-v2");
+    expect(core.order).toEqual([p(personal.id), "anthropic:default"]);
+
+    // Back (here by the owner's clear): in again, after the active account.
+    await pool.clearLimit(work.id);
+    await gw.syncGatewayNow();
+    expect(core.order).toEqual([p(personal.id), p(work.id), "anthropic:default"]);
+  });
+
+  it("keeps every limited account in, by its reset, when none can answer: the order is never emptied", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    await pool.markLimited(work.id, Date.now() + 2 * H, "weekly");
+    await pool.markLimited(personal.id, Date.now() + H, "session");
+    await swap.whenSwapsSettled();
+    await gw.syncGatewayNow();
+    // An empty or cleared order falls back to openclaw.json's order or
+    // profiles, which re-admits every pool account.
+    expect(core.order).toEqual([p(personal.id), p(work.id), "anthropic:default"]);
+    expect(core.orders.every((ids) => ids.length > 0)).toBe(true);
+  });
+
+  it("puts an account back in at its reset, without waiting for the keeper", async () => {
+    const core = fakeCore();
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    await pool.markLimited(work.id, Date.now() + H, "weekly");
+    await vi.waitFor(() => expect(core.order).toEqual([p(personal.id), "anthropic:default"]));
+    // The pool's reset wake comes 20 s past the reset; the keeper's ten-minute pass does not run here.
+    await vi.advanceTimersByTimeAsync(H + 30_000);
+    await vi.waitFor(() => expect(core.order).toEqual([p(personal.id), p(work.id), "anthropic:default"]));
   });
 });
 
@@ -438,7 +498,7 @@ describe("what core saw", () => {
     const limited = (await pool.readAccounts()).find((a) => a.id === work.id);
     expect(limited).toMatchObject({ status: "limited", limitKind: "session", limitedUntil: resetsAt });
     expect((await pool.readPoolState()).activeId).toBe(personal.id);
-    expect(core.order).toEqual([p(personal.id), p(work.id), "anthropic:default"]);
+    expect(core.order).toEqual([p(personal.id), "anthropic:default"]);
     expect(announceAnthropicLimit).toHaveBeenCalledTimes(1);
     // One failure is one limit: seen again, nothing more happens.
     await pool.clearLimit(work.id);

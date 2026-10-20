@@ -304,8 +304,9 @@ describe("the chat on the box's Claude accounts (TASK-1260, 2026-10-14)", () => 
     expect(Math.abs((limited?.limitedUntil ?? 0) - resetsAt)).toBeLessThan(2_000);
     expect(state.activeId).toBe(personal.id);
     expect(state.lastSwap).toMatchObject({ fromId: work.id, toId: personal.id, cause: "limit" });
-    // The gateway's order follows the pool: the limited account last of the pool's.
-    expect(storedOrder()).toEqual([`anthropic:clawbox-${personal.id}`, `anthropic:clawbox-${work.id}`, "anthropic:default"]);
+    // The gateway's order follows the pool: the limited account out of it
+    // until its reset, so no session core pinned to it stays there.
+    expect(storedOrder()).toEqual([`anthropic:clawbox-${personal.id}`, "anthropic:default"]);
     expect(h.restarts).toBe(0);
   });
 
