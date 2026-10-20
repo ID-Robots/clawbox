@@ -19,7 +19,8 @@
  * report and a cron scan, never of a Telegram turn or of a turn core rescued
  * with a model fallback.
  *
- * HARNESS FIRST — every mechanism here is core's own (OpenClaw 2026.10.2):
+ * HARNESS FIRST — every mechanism here is core's own (OpenClaw 2026.10.2;
+ * the order filtering below read in 2026.10.3, the pin):
  *  - THE PROFILES: `anthropic:clawbox-<pool id>`, written by core's own writer,
  *    `openclaw models auth paste-token --provider anthropic --profile-id <id>
  *    --expires-in <n>s`, the token on stdin. A `token` profile is a bearer core
@@ -29,11 +30,24 @@
  *    and config entries. The CLI tells the running gateway; nothing restarts.
  *  - THE ORDER: core's stored per-agent order, `openclaw models auth order set
  *    --provider anthropic <ids…>`: the active account first, then the pool's
- *    other accounts that can answer, in the owner's order, then the limited
- *    ones by their reset, then every other Anthropic profile the store holds.
- *    An explicit order is the WHOLE candidate list, so nothing the owner put
- *    there is dropped. The CLI's `order set`, not the `models.authOrderSet`
- *    RPC: `paste-token` registers each profile in openclaw.json's
+ *    other accounts that can answer, in the owner's order, then every other
+ *    Anthropic profile the store holds. An explicit order is the WHOLE
+ *    candidate list, so nothing the owner put there is dropped — and a
+ *    LIMITED account is left out of it while one that can answer is held.
+ *    Core keeps a session's automatic profile pin on any profile in the order
+ *    that is not cooling down for that session's model, so a spent account,
+ *    even last, went on answering the sessions pinned to it with the limit
+ *    text whenever core's own backoff lapsed. Out of the order, core drops
+ *    that pin on the session's next turn ("Explicit auth order filtering" in
+ *    docs/auth-credential-semantics.md). Its profile stays and is renewed, so
+ *    it rejoins at the reset with no paste. With none that can answer, the
+ *    limited ones stay in by their reset, ahead of the owner's own sign-in
+ *    (THE OWNER'S OWN SIGN-IN, below), and an order is never emptied: an
+ *    empty one falls back to openclaw.json's order or profiles and re-admits
+ *    every pool account. In that state a session pinned to a limited account
+ *    still meets its limit until a reset.
+ *    The CLI's `order set`, not the `models.authOrderSet` RPC: `paste-token`
+ *    registers each profile in openclaw.json's
  *    `auth.profiles`, and beside an `anthropic:default` sign-in of another
  *    mode that also writes a CONFIG `auth.order.anthropic`, over which the
  *    RPC refuses ("controlled by auth configuration") while the stored order
@@ -77,6 +91,7 @@ import { createSerialLock, type SerialLock } from "@/lib/serial-lock";
 import {
   gatewayCredentialFor,
   markLimited,
+  onLimitReset,
   probeAccountCredential,
   readPoolState,
   setGatewayMirror,
@@ -279,15 +294,16 @@ function outcome(status: SwapConsumerOutcome["status"], code: string, count: num
 
 /**
  * The order core should try the Anthropic profiles in: the active account,
- * the pool's other accounts that can answer in the owner's order, the limited
- * ones by their reset — then every profile that is not the pool's, in the
- * order core has them, the owner's own sign-in among them.
+ * the pool's other accounts that can answer in the owner's order — then every
+ * profile that is not the pool's, in the order core has them, the owner's own
+ * sign-in among them. The limited accounts are left out while one that can
+ * answer is held (header, THE ORDER); with none, they stay in by their reset.
  */
 function gatewayOrder(pool: PoolState, held: ReadonlySet<string>, others: readonly string[], now: number): string[] {
   const inGateway = pool.accounts.filter((a) => a.kind === "oauth" && held.has(poolProfileId(a.id)));
   const usable = inGateway.filter((a) => effectiveStatus(a, now) === "ok");
   const active = usable.find((a) => a.id === pool.activeId);
-  const limited = inGateway
+  const limited = usable.length > 0 ? [] : inGateway
     .filter((a) => effectiveStatus(a, now) === "limited")
     .sort((a, b) => (a.limitedUntil ?? 0) - (b.limitedUntil ?? 0));
   return [...(active ? [active] : []), ...usable.filter((a) => a !== active), ...limited].map((a) => poolProfileId(a.id)).concat(others);
@@ -938,6 +954,9 @@ export function startGatewaySwap(): void {
   if (!state.registered) {
     state.registered = true;
     registerSwapConsumer({ name: "gateway", apply: applyGatewaySwap });
+    // A limited account is out of core's order until its reset (gatewayOrder):
+    // back in at the pool's reset wake, not at the keeper's next pass.
+    onLimitReset(() => void syncGatewayNow());
   }
   if (!state.keeper) {
     state.keeper = setInterval(() => void guarded(() => keepGatewayMirror()), KEEPER_MS);
