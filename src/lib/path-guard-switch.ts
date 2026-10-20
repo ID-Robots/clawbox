@@ -65,7 +65,8 @@ export interface PathGuardApplyResult {
  * pre-start writes `plugins.entries.<id>.enabled` from the switch, so the
  * restart IS the apply (same pattern as the MCP switch). Hermes: re-run
  * register-mcp.sh, which adds or removes the rendered deny globs, then restart
- * a running messaging gateway. Never throws.
+ * a running messaging gateway; a restart that fails is reported, not applied.
+ * Never throws.
  */
 export async function applyPathGuardSwitch(enabled: boolean): Promise<PathGuardApplyResult> {
   const here = harnessesHere();
@@ -91,12 +92,20 @@ export async function applyPathGuardSwitch(enabled: boolean): Promise<PathGuardA
         timeout: 180_000,
         maxBuffer: 1024 * 1024,
       });
-      await restartHermesGatewayIfRunning();
-      result.hermes = { applied: true };
     } catch (err) {
       console.error("[path-guard] register-mcp.sh failed:", err instanceof Error ? err.message : err);
       result.hermes = { applied: false };
       result.error ??= "The switch is saved, but Hermes' config could not be updated. The next web-server start applies it.";
+    }
+    if (!result.hermes) {
+      // Never throws: false = a running gateway did not restart (or its status
+      // could not be read), so it still holds the old approvals; null = none
+      // was running, and the next start reads the new config.
+      const restarted = await restartHermesGatewayIfRunning();
+      result.hermes = { applied: restarted !== false };
+      if (restarted === false) {
+        result.error ??= "The switch is saved and Hermes' config updated, but the messaging gateway did not restart. The next gateway start applies it.";
+      }
     }
   }
   return result;
