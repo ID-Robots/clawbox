@@ -19,7 +19,8 @@
  * report and a cron scan, never of a Telegram turn or of a turn core rescued
  * with a model fallback.
  *
- * HARNESS FIRST — every mechanism here is core's own (OpenClaw 2026.10.2):
+ * HARNESS FIRST — every mechanism here is core's own (OpenClaw 2026.10.2;
+ * the order filtering below read in 2026.10.3, the pin):
  *  - THE PROFILES: `anthropic:clawbox-<pool id>`, written by core's own writer,
  *    `openclaw models auth paste-token --provider anthropic --profile-id <id>
  *    --expires-in <n>s`, the token on stdin. A `token` profile is a bearer core
@@ -40,8 +41,11 @@
  *    that pin on the session's next turn ("Explicit auth order filtering" in
  *    docs/auth-credential-semantics.md). Its profile stays and is renewed, so
  *    it rejoins at the reset with no paste. With none that can answer, the
- *    limited ones stay in by their reset: an empty order falls back to
- *    openclaw.json's order or profiles and re-admits every pool account.
+ *    limited ones stay in by their reset, ahead of the owner's own sign-in
+ *    (THE OWNER'S OWN SIGN-IN, below), and an order is never emptied: an
+ *    empty one falls back to openclaw.json's order or profiles and re-admits
+ *    every pool account. In that state a session pinned to a limited account
+ *    still meets its limit until a reset.
  *    The CLI's `order set`, not the `models.authOrderSet` RPC: `paste-token`
  *    registers each profile in openclaw.json's
  *    `auth.profiles`, and beside an `anthropic:default` sign-in of another

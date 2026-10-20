@@ -322,9 +322,30 @@ describe("a limited account and the sessions core pinned to it", () => {
     await pool.markLimited(personal.id, Date.now() + H, "session");
     await swap.whenSwapsSettled();
     await gw.syncGatewayNow();
-    // An empty or cleared order falls back to openclaw.json's order or
-    // profiles, which re-admits every pool account.
     expect(core.order).toEqual([p(personal.id), p(work.id), "anthropic:default"]);
+  });
+
+  it("never empties the order on a box with no sign-in of the owner's: every account limited, or the one that can answer not held", async () => {
+    const core = fakeCore();
+    core.profiles.delete("anthropic:default");
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    await pool.markLimited(work.id, Date.now() + 2 * H, "weekly");
+    await pool.markLimited(personal.id, Date.now() + H, "session");
+    await swap.whenSwapsSettled();
+    await gw.syncGatewayNow();
+    // An empty order is `order clear`, which falls back to openclaw.json's
+    // order or profiles and re-admits every pool account.
+    expect(core.order).toEqual([p(personal.id), p(work.id)]);
+
+    // Personal can answer again, but core would not take its token: only a
+    // HELD account that can answer lets the limited one out.
+    await pool.clearLimit(personal.id);
+    core.refusePasteOf.add(p(personal.id));
+    core.profiles.delete(p(personal.id));
+    await gw.syncGatewayNow();
+    expect(core.order).toEqual([p(work.id)]);
     expect(core.orders.every((ids) => ids.length > 0)).toBe(true);
   });
 
