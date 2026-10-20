@@ -47,7 +47,7 @@ export function isThinkingLevel(value: unknown): value is ThinkingLevel {
 // `isClawboxAiProvider`) defaulted to `off` so simple prompts stayed fast; the
 // owner's ruling of 2026-09-15 is Medium, so a fresh ClawBox AI session thinks
 // before it answers and the owner turns it DOWN rather than up. Both legacy
-// ClawBox AI model ids serve Flash 4.1 and share the same default.
+// ClawBox AI model ids serve DeepSeek V4 Flash and share the same default.
 export interface ProviderReasoningConfig {
   levels: readonly ThinkingLevel[];
   default: ThinkingLevel;

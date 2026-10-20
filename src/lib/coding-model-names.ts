@@ -12,7 +12,8 @@
  */
 const NAMES: Readonly<Record<string, string>> = {
   "deepseek-v4-flash": "DeepSeek Flash",
-  "deepseek-v4-pro": "DeepSeek Pro",
+  // The Max plan's id, served by the same Flash model.
+  "deepseek-v4-pro": "DeepSeek Flash",
   "claude-opus-5-5": "Opus 5.5",
   "claude-fable-5-1": "Fable 5.1",
   "claude-opus-5": "Opus 5",

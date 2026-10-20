@@ -327,10 +327,12 @@ function clearFailedRefresh(provider: string): void {
   failedRefreshes.delete(provider);
 }
 
-// ClawBox AI catalog is hardcoded — Mike's gateway routes via DeepSeek
+// ClawBox AI catalog is hardcoded — the gateway routes via DeepSeek
 // upstream but the only end-user-pickable variants are the two device
-// tiers (Flash + Pro), gated by subscription. Skipping the openclaw
-// spawn for clawai also dodges the 3-min CLI execution time on Jetson.
+// tiers (Flash + Pro ids), gated by subscription. Both ids are served by
+// DeepSeek V4 Flash, so the hints name that model and the Max row is only
+// a plan gate. Skipping the openclaw spawn for clawai also dodges the
+// 3-min CLI execution time on Jetson.
 export const CLAWAI_STATIC_MODELS: CatalogModel[] = [
   // 1M/text matches what the provider definition writes to openclaw.json and
   // what a real device reports back from `openclaw models list`. The previous
@@ -342,14 +344,14 @@ export const CLAWAI_STATIC_MODELS: CatalogModel[] = [
     label: "Free/Pro Tier",
     contextWindow: 1_000_000,
     input: "text",
-    hint: "Default. Faster.",
+    hint: "DeepSeek V4 Flash. Default.",
   },
   {
     id: "deepseek-v4-pro",
     label: "Max Tier",
     contextWindow: 1_000_000,
     input: "text",
-    hint: "1.6T frontier model. Max plan only.",
+    hint: "DeepSeek V4 Flash. Max plan only.",
   },
 ];
 
