@@ -43,7 +43,7 @@
     "@xterm/xterm": "^6.0.0",
     "busboy": "^1.6.0",
     "js-yaml": "^4.3.2",
-    "next": "16.4.0",
+    "next": "16.4.2",
     "node-pty": "^1.1.0",
     "playwright": "^1.63.0",
     "prismjs": "1.30.0",
@@ -68,7 +68,7 @@
     "@types/react-dom": "^19.3.0",
     "@vitest/coverage-v8": "^4.1.11",
     "eslint": "^9.0.0",
-    "eslint-config-next": "16.4.0",
+    "eslint-config-next": "16.4.2",
     "jsdom": "^28.1.0",
     "tailwindcss": "^4.3.3",
     "typescript": "5.9.3",
@@ -76,18 +76,20 @@
     "vitest": "^4.1.11"
   },
   "overrides": {
-    "undici": "^7.29.0",
+    "undici": "^7.29.1",
     "postcss": "^8.5.23",
-    "sharp": "^0.35.4",
+    "sharp": "^0.35.5",
     "nanoid": "^3.3.17",
     "vite": "^7.3.5",
-    "fast-uri": "3.1.7",
+    "fast-uri": "3.1.9",
     "hono": "^4.13.7",
     "js-yaml": "^4.3.2",
     "qs": "^6.16.0",
-    "ip-address": "^10.3.1"
+    "ip-address": "^10.7.1",
+    "proxy-addr": "^2.0.8",
+    "source-map-js": "^1.2.2"
   },
   "resolutions": {
-    "fast-uri": "3.1.7"
+    "fast-uri": "3.1.9"
   }
 }
