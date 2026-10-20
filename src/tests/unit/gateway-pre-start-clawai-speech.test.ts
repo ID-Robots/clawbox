@@ -57,7 +57,7 @@ function slice(from: string, to: string): string {
 const PROXY_HOSTS = hasPython3 ? slice("from urllib.parse import urlsplit", "def _is_our_image_row(_row):") : "";
 const SAME_ENDPOINT = hasPython3 ? slice("def _same_endpoint(_a, _b):", "if _clawai_openai_route_is_ours:") : "";
 const POLICY = hasPython3
-  ? slice("# Migration: ClawBox AI cloud voice (text to speech).", "if isinstance(ds_models, list):")
+  ? slice("# Migration: ClawBox AI cloud voice (text to speech).", "# Migration: ClawBox AI music generation.")
   : "";
 
 let dir: string;

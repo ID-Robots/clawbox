@@ -3999,6 +3999,242 @@ elif _clawai_openai_route_is_ours and _clawai_speech_withdrawable:
             changed = True
 
 
+# Migration: ClawBox AI music generation.
+#
+# OpenClaw registers `music_generate` only when a music-generation provider is
+# configured. A Max box whose media flag says `music` gets one: the bundled
+# `fal` provider pointed at the ClawBox AI proxy's shared media route
+# (`<proxy>/media`), and `agents.defaults.mediaModels.music` naming Lyria 3 Pro
+# on it. Everything else — the flag off, a plan RECORDED below Max, a refused
+# credential — takes back exactly what this wrote and nothing an owner did.
+#
+# Mirrors buildClawboxAiMusicOps() in
+# src/app/setup-api/ai-models/configure/route.ts; the two must stay in step,
+# and src/tests/unit/gateway-pre-start-clawai-music.test.ts pins the constants
+# below to src/lib/clawbox-ai-models.ts and src/lib/clawai-media-flags.ts. See
+# CLAWBOX_AI_MUSIC_PROVIDER there for why `fal` and no other id: it is the only
+# bundled music provider that takes a custom baseUrl, publishes no chat
+# catalog, and is not one ClawBox offers owners for their own key.
+#
+# THE GATE IS THE CLOUD VOICE'S, read from the same stamps above: ARM on the
+# plan, or on the badge while the plan is unknown; WITHDRAW on the plan alone,
+# never the badge. Plus the media flag, which is the rollout switch — off unless
+# the device store names `music`, and switching it off is the rollback.
+#
+# Inside the `claw_` gate, like every other reader of `_clawbox_proxy_hosts`
+# (see the note where that set is built): on a box with no ClawBox AI token the
+# set's live host is not ours to trust, so nothing here runs at all.
+#
+# OpenClaw 2 only: `mediaModels` is the v2 home and a v1 core has no music slot.
+CLAWBOX_MUSIC_PROVIDER = "fal"
+CLAWBOX_MUSIC_MODEL_REF = "fal/google/lyria-3-pro-preview"
+CLAWBOX_MUSIC_TIER = "pro"
+CLAWBOX_MEDIA_PATH = "/media"
+CLAWBOX_MEDIA_FLAGS_KEY = "clawai_media_flags"
+CLAWBOX_MEDIA_FLAG_WORDS = ("music", "video_frames")
+# Where `fal` sends a request when nothing names a host: a row with no baseUrl
+# of its own resolves here, which is never ours.
+FAL_DEFAULT_BASE_URL = "https://fal.run"
+
+
+def _clawai_media_flags():
+    """The media flags the device store switches on; an empty set otherwise.
+
+    `parseClawaiMediaFlags` in src/lib/clawai-media-flags.ts, transcribed: an
+    array of words or a comma list, case and whitespace forgiven, unknown words
+    ignored. Unreadable, absent and malformed all mean "no flag", and `except
+    Exception` is as wide as the sibling readers for the same reason — this runs
+    bare under `set -euo pipefail`, so an escape costs the box its gateway.
+    """
+    _store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or ""
+    if not _store_path:
+        return set()
+    try:
+        with open(_store_path) as _fh:
+            _store = json.load(_fh)
+    except Exception:
+        return set()
+    if not isinstance(_store, dict):
+        return set()
+    _raw = _store.get(CLAWBOX_MEDIA_FLAGS_KEY)
+    if isinstance(_raw, str):
+        _raw = _raw.split(",")
+    if not isinstance(_raw, list):
+        return set()
+    return {
+        _word.strip().lower()
+        for _word in _raw
+        if isinstance(_word, str) and _word.strip().lower() in CLAWBOX_MEDIA_FLAG_WORDS
+    }
+
+
+def _music_ref_is_ours(_ref):
+    return isinstance(_ref, str) and _ref.strip().lower() == CLAWBOX_MUSIC_MODEL_REF.lower()
+
+
+def _music_slot_is_ours(_slot):
+    """Exactly `{primary: <our ref>}`, or the bare string — musicSlotIsOurs()."""
+    if isinstance(_slot, str):
+        return _music_ref_is_ours(_slot)
+    if not isinstance(_slot, dict) or list(_slot.keys()) != ["primary"]:
+        return False
+    return _music_ref_is_ours(_slot.get("primary"))
+
+
+def _music_slot_configured(_slot):
+    """hasToolModelConfig(): a bare string, a primary, or any fallback."""
+    if isinstance(_slot, str):
+        return bool(_slot.strip())
+    if not isinstance(_slot, dict):
+        return False
+    _primary = _slot.get("primary")
+    if isinstance(_primary, str) and _primary.strip():
+        return True
+    _fallbacks = _slot.get("fallbacks")
+    return isinstance(_fallbacks, list) and any(
+        isinstance(_ref, str) and _ref.strip() for _ref in _fallbacks
+    )
+
+
+def _music_route_is_foreign(_entry):
+    """Would a key on this entry leave the ClawBox AI proxy? foreignImageProviderRoute()."""
+    if not isinstance(_entry, dict):
+        return False
+    _base = _entry.get("baseUrl")
+    _base = _base.strip() if isinstance(_base, str) else ""
+    if _base and _url_host(_base) not in _clawbox_proxy_hosts:
+        return True
+    _rows = _entry.get("models")
+    for _row in _rows if isinstance(_rows, list) else []:
+        if not isinstance(_row, dict):
+            continue
+        _row_base = _row.get("baseUrl")
+        if isinstance(_row_base, str) and _row_base.strip():
+            _row_base = _row_base.strip()
+        else:
+            _row_base = _base or FAL_DEFAULT_BASE_URL
+        if _url_host(_row_base) not in _clawbox_proxy_hosts:
+            return True
+    return False
+
+
+def _owner_has_own_fal():
+    """A `fal` auth profile, or FAL_KEY / FAL_API_KEY in env.vars — ownerHasOwnFal()."""
+    _auth = cfg.get("auth")
+    _profiles = _auth.get("profiles") if isinstance(_auth, dict) else None
+    if isinstance(_profiles, dict):
+        for _profile in _profiles.values():
+            _provider = _profile.get("provider") if isinstance(_profile, dict) else None
+            if isinstance(_provider, str) and _provider.strip().lower() == CLAWBOX_MUSIC_PROVIDER:
+                return True
+    _env = cfg.get("env")
+    _vars = _env.get("vars") if isinstance(_env, dict) else None
+    if isinstance(_vars, dict):
+        for _name in ("FAL_KEY", "FAL_API_KEY"):
+            _value = _vars.get(_name)
+            if (_value.strip() != "") if isinstance(_value, str) else (_value is not None):
+                return True
+    return False
+
+
+if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
+    _music_flags = _clawai_media_flags()
+    _music_armable = (
+        "music" in _music_flags
+        and (_clawai_plan_tier or _clawai_device_tier) == CLAWBOX_MUSIC_TIER
+    )
+    _music_withdrawable = "music" not in _music_flags or bool(
+        _clawai_plan_tier and _clawai_plan_tier != CLAWBOX_MUSIC_TIER
+    )
+    _music_media = agents_defaults.get("mediaModels")
+    _music_slot = _music_media.get("music") if isinstance(_music_media, dict) else None
+    _music_entry = models_providers.get(CLAWBOX_MUSIC_PROVIDER)
+    if not isinstance(_music_entry, dict):
+        _music_entry = None
+    # The refusal stops the arm and takes our fields back, the image
+    # migration's stand-down; the route only declines to arm (it owns no
+    # take-back on refusal). Asked only when it could matter.
+    _music_refused = (not _music_withdrawable) and _clawai_credential_refused()
+
+    if _music_withdrawable or _music_refused:
+        _music_took_back = False
+        if _music_slot_is_ours(_music_slot):
+            del _music_media["music"]
+            _music_took_back = True
+        if _music_entry is not None:
+            _music_key = _music_entry.get("apiKey")
+            _music_base = _music_entry.get("baseUrl")
+            _music_base = _music_base.strip() if isinstance(_music_base, str) else ""
+            if (
+                isinstance(_music_key, str)
+                and _music_key.strip().startswith("claw_")
+                and _music_base
+                and _url_host(_music_base) in _clawbox_proxy_hosts
+            ):
+                if set(_music_entry.keys()) <= {"apiKey", "baseUrl"}:
+                    del models_providers[CLAWBOX_MUSIC_PROVIDER]
+                else:
+                    # The owner's own settings on the entry stay; only our
+                    # credential and endpoint go.
+                    for _key in ("apiKey", "baseUrl"):
+                        _music_entry.pop(_key, None)
+                _music_took_back = True
+        if _music_took_back:
+            print(
+                "  Removed the ClawBox AI music provider: "
+                + (
+                    "the proxy has refused this box's credential"
+                    if _music_refused
+                    else "the music flag is off"
+                    if "music" not in _music_flags
+                    else "this box's plan no longer includes it"
+                )
+            )
+            changed = True
+    elif _music_armable:
+        _music_key = _music_entry.get("apiKey") if _music_entry is not None else None
+        _music_key_ours = _music_key is None or (
+            isinstance(_music_key, str)
+            and (not _music_key.strip() or _music_key.strip().startswith("claw_"))
+        )
+        if _music_slot_configured(_music_slot) and not _music_slot_is_ours(_music_slot):
+            print("  Left the music model alone: agents.defaults.mediaModels.music already names one")
+        elif not _music_key_ours:
+            print(
+                "  Skipped ClawBox AI music provider: models.providers."
+                + CLAWBOX_MUSIC_PROVIDER
+                + ".apiKey holds a non-ClawBox key we will not overwrite"
+            )
+        elif _music_route_is_foreign(_music_entry):
+            print(
+                "  Skipped ClawBox AI music provider: models.providers."
+                + CLAWBOX_MUSIC_PROVIDER
+                + " already routes away from the ClawBox AI proxy"
+            )
+        elif _owner_has_own_fal():
+            print("  Skipped ClawBox AI music provider: this box has its own fal sign-in")
+        elif not _clawbox_v2:
+            print("  Left the music model alone: an OpenClaw 1 core has no music slot")
+        else:
+            _music_base_url = _clawai_image_base_url.strip().rstrip("/") + CLAWBOX_MEDIA_PATH
+            if _music_entry is None:
+                _music_entry = {}
+                models_providers[CLAWBOX_MUSIC_PROVIDER] = _music_entry
+            if _music_entry.get("apiKey") != _clawai_token:
+                _music_entry["apiKey"] = _clawai_token
+                changed = True
+            if _music_entry.get("baseUrl") != _music_base_url:
+                _music_entry["baseUrl"] = _music_base_url
+                changed = True
+            _music_slot_value = {"primary": CLAWBOX_MUSIC_MODEL_REF}
+            if _music_slot != _music_slot_value:
+                if not isinstance(_music_media, dict):
+                    _music_media = {}
+                _music_media["music"] = _music_slot_value
+                agents_defaults["mediaModels"] = _music_media
+                changed = True
+
+
 if isinstance(ds_models, list):
     target_efforts = ["off", "high", "xhigh"]
     for model in ds_models:

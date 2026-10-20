@@ -589,6 +589,85 @@ export function clawboxAiNonChatModelReason(ref: string): string {
 }
 
 /* ---------------------------------------------------------------------------
+ * ClawBox AI media generation (music now, video later)
+ * ------------------------------------------------------------------------ */
+
+/**
+ * The path the ClawBox AI proxy serves its SHARED media-generation route on,
+ * under the same base as chat, images and speech.
+ *
+ * One route for every long-running media kind, not one per kind: a music track
+ * and a video clip are both "submit a prompt, wait tens of seconds, fetch a
+ * file", and the proxy keeps the job, the server-side provider key and the
+ * per-plan weekly cap behind it. The device only ever names a model under it.
+ *
+ * VIDEO GENERATION IS DEFERRED. It will sit on this same route and the same
+ * provider id below once its own cost and cap are settled; nothing on the box
+ * names a video model yet, and nothing here should until then.
+ */
+export const CLAWBOX_AI_MEDIA_PATH = "/media";
+
+/** `<proxy>/media`, for a proxy URL with or without a trailing slash. */
+export function clawboxAiMediaBaseUrl(proxyUrl: string): string {
+  return `${proxyUrl.trim().replace(/\/+$/, "")}${CLAWBOX_AI_MEDIA_PATH}`;
+}
+
+/**
+ * The provider id ClawBox parks the music entry under: OpenClaw's bundled `fal`.
+ *
+ * WHY THIS ID. On the pinned core `music_generate` is served only by the bundled
+ * comfy, fal, google, minimax and openrouter providers — there is no generic
+ * OpenAI-compatible music provider the way `litellm` is one for images. Of
+ * those, `fal` is the only one that is all three of:
+ *   - a CUSTOM-ENDPOINT provider: `models.providers.fal.baseUrl` overrides its
+ *     host, and its model ids are free-form endpoint paths the proxy can serve;
+ *   - MEDIA-ONLY: it registers no chat catalog, so arming it adds no rows to
+ *     any chat picker (the residual `CLAWBOX_AI_IMAGE_PROVIDER` documents);
+ *   - not a provider ClawBox offers owners for their OWN key. `google` and
+ *     `openrouter` both are, and repointing either at the proxy would carry an
+ *     owner's chat along with it.
+ * It is also the provider whose video path is already queue-backed, which is
+ * what the deferred video half of the shared route will need.
+ */
+export const CLAWBOX_AI_MUSIC_PROVIDER = "fal" as const;
+
+/**
+ * The music model the proxy serves: Google Lyria 3 Pro.
+ *
+ * The bare id is Google's own (`lyria-3-pro-preview`) under its vendor prefix,
+ * the spelling OpenRouter uses for the same model, so a log line on either end
+ * names the upstream unambiguously. NOT env-overridable, unlike the chat and
+ * image ids: the boot migration in scripts/gateway-pre-start.sh has to
+ * recognise this exact ref as ours to take it back, and it does not see the web
+ * app's environment.
+ */
+export const CLAWBOX_AI_MUSIC_MODEL_ID = "google/lyria-3-pro-preview";
+
+/** Fully-qualified ref written to `agents.defaults.mediaModels.music.primary`. */
+export const CLAWBOX_AI_MUSIC_MODEL = `${CLAWBOX_AI_MUSIC_PROVIDER}/${CLAWBOX_AI_MUSIC_MODEL_ID}`;
+
+/**
+ * The plan tier music is sold on: MAX, whose internal tier name is `pro` (the
+ * names are off by one on purpose — see `mapPortalPlanTier`). The same tier the
+ * cloud voice is gated on.
+ */
+export const CLAWBOX_AI_MUSIC_TIER: ClawboxAiTier = "pro";
+
+/**
+ * Tracks a Max account may generate per rolling week.
+ *
+ * ENFORCED BY THE PROXY, not here — the device cannot count another device's
+ * tracks. This is the number the box shows when the portal has not reported a
+ * music meter yet.
+ */
+export const CLAWBOX_AI_MUSIC_WEEKLY_TRACKS = 10;
+
+/** Is `ref` the ClawBox AI music entry, in any casing? */
+export function isClawboxAiMusicModelRef(ref: unknown): boolean {
+  return typeof ref === "string" && ref.trim().toLowerCase() === CLAWBOX_AI_MUSIC_MODEL.toLowerCase();
+}
+
+/* ---------------------------------------------------------------------------
  * ClawBox AI vision (image understanding)
  * ------------------------------------------------------------------------ */
 

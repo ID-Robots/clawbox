@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 import { spawn } from "child_process";
 import fs from "fs/promises";
 import path, { untraced } from "@/lib/runtime-path";
-import { getAll, set as setConfigKey, setMany } from "@/lib/config-store";
+import { get as getConfigKey, getAll, set as setConfigKey, setMany } from "@/lib/config-store";
 import { HANDOFF_TOKENS_PATH, HANDOFF_TTL_MS } from "@/lib/oauth-handoff";
 import {
   restartGateway,
@@ -63,8 +63,16 @@ import { applyClawaiToHermes, ClawaiApplyError } from "@/lib/hermes-clawai";
 import {
   CLAWAI_PLAN_TIER_KEY,
   clawaiPlanTierForStore,
+  readClawaiEntitlementTier,
+  type ClawaiPlanTier,
   type ClawaiPortalPlan,
 } from "@/lib/clawai-plan-tier";
+import {
+  clawaiMusicArmable,
+  clawaiMusicWithdrawable,
+  readClawaiMediaFlags,
+  type ClawaiMediaFlag,
+} from "@/lib/clawai-media-flags";
 import { isClawboxAiVisionId, resolveVisionModelId } from "@/lib/clawbox-ai-vision";
 import { applyCloudProviderKeyToHermes, HermesCloudApplyError } from "@/lib/hermes-cloud-provider";
 import {
@@ -91,6 +99,10 @@ import {
   CLAWBOX_AI_LEGACY_IMAGE_PROVIDER,
   CLAWBOX_AI_IMAGE_MODEL,
   CLAWBOX_AI_IMAGE_MODEL_ID,
+  CLAWBOX_AI_MUSIC_MODEL,
+  CLAWBOX_AI_MUSIC_PROVIDER,
+  clawboxAiMediaBaseUrl,
+  isClawboxAiMusicModelRef,
   clawboxAiNonChatModelReason,
   isClawboxAiImageModelRef,
   isClawboxAiNonChatModelRef,
@@ -1590,6 +1602,213 @@ async function buildClawboxAiImageOps(
 }
 
 /**
+ * Where the bundled `fal` provider sends a request when nothing names a host.
+ * Used only to answer "where would a row with no baseUrl of its own send our
+ * token" — see `foreignImageProviderRoute`, which asks it for this id too.
+ */
+const FAL_DEFAULT_BASE_URL = "https://fal.run";
+
+/** The music slot. OpenClaw 2 only: a v1 core has no `mediaModels`. */
+const MUSIC_SLOT_PATH = "agents.defaults.mediaModels.music";
+const MUSIC_PROVIDER_PATH = `models.providers.${CLAWBOX_AI_MUSIC_PROVIDER}`;
+
+/**
+ * What the music gate reads: the media flag and the two tier stamps, taken once
+ * per save from the device store — the same pair the boot script reads.
+ */
+interface ClawboxAiMusicGate {
+  flags: ReadonlySet<ClawaiMediaFlag>;
+  /** The RECORDED plan alone — the withdraw side may read nothing else. */
+  planTier: unknown;
+  /** Plan, else badge — the arm side's tier (`clawaiEntitlementTier`). */
+  entitlementTier: ClawaiPlanTier | null;
+}
+
+async function readClawboxAiMusicGate(): Promise<ClawboxAiMusicGate> {
+  const [flags, planTier, entitlementTier] = await Promise.all([
+    readClawaiMediaFlags(),
+    getConfigKey(CLAWAI_PLAN_TIER_KEY).catch(() => undefined),
+    readClawaiEntitlementTier().catch(() => null),
+  ]);
+  return { flags, planTier, entitlementTier };
+}
+
+/**
+ * The music writes for one save: `config set` ops for the batch, and
+ * `config unset` paths to run after it (the CLI's only removal verb, which
+ * cannot ride in `--batch-json`).
+ */
+interface ClawboxAiMusicPlan {
+  ops: OpenclawConfigSetArgs[];
+  unsets: string[];
+}
+
+const NO_MUSIC_CHANGE: ClawboxAiMusicPlan = { ops: [], unsets: [] };
+
+/**
+ * Is the music slot exactly what WE write into an empty one — `{ primary: <our
+ * ref> }`, or the bare string the core coerces to the same model? The image
+ * slot's rule (`imageSlotIsOurs`): an owner who added fallbacks owns the object.
+ */
+function musicSlotIsOurs(existing: unknown): boolean {
+  if (typeof existing === "string") return isClawboxAiMusicModelRef(existing);
+  if (typeof existing !== "object" || existing === null) return false;
+  const keys = Object.keys(existing as Record<string, unknown>);
+  if (keys.length !== 1 || keys[0] !== "primary") return false;
+  return isClawboxAiMusicModelRef((existing as { primary?: unknown }).primary);
+}
+
+/**
+ * Has the OWNER set `fal` up for themselves somewhere other than the provider
+ * entry — a `fal` auth profile, or `FAL_KEY` / `FAL_API_KEY` in the config's
+ * env block? Then a `baseUrl` of ours on that id would carry their own fal
+ * media to the ClawBox AI proxy, so the music provider is not ours to arm.
+ */
+function ownerHasOwnFal(snapshot: OpenClawConfig | null): boolean {
+  const profiles = snapshot?.auth?.profiles;
+  if (profiles && typeof profiles === "object") {
+    for (const profile of Object.values(profiles)) {
+      const provider = typeof profile?.provider === "string" ? profile.provider.trim().toLowerCase() : "";
+      if (provider === CLAWBOX_AI_MUSIC_PROVIDER) return true;
+    }
+  }
+  const env = snapshot?.env as { vars?: Record<string, unknown> } | undefined;
+  const vars = env?.vars;
+  if (vars && typeof vars === "object") {
+    for (const name of ["FAL_KEY", "FAL_API_KEY"]) {
+      const value = vars[name];
+      if (typeof value === "string" ? value.trim().length > 0 : value != null) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Take back what ClawBox wrote for music — only what is positively ours.
+ *
+ *   - the slot, by `musicSlotIsOurs`; an owner's own music model is never named;
+ *   - the `fal` entry when its key is a `claw_` portal token AND its baseUrl a
+ *     host ClawBox has written. With nothing else on it the WHOLE entry goes
+ *     (a present-but-empty provider entry is still one the core reads);
+ *     otherwise only our two leaves, and whatever the owner added stays.
+ *
+ * The slot goes first, so the config never names a provider entry that is gone.
+ */
+function withdrawClawboxAiMusic(
+  slot: unknown,
+  falEntry: OpenAiProviderConfig | undefined,
+  proxyHosts: ReadonlySet<string>,
+): ClawboxAiMusicPlan {
+  const unsets: string[] = [];
+  if (musicSlotIsOurs(slot)) unsets.push(MUSIC_SLOT_PATH);
+  const key = falEntry?.apiKey;
+  const baseUrl = typeof falEntry?.baseUrl === "string" ? falEntry.baseUrl.trim() : "";
+  const host = baseUrl ? hostOfUrl(baseUrl) : null;
+  const entryIsOurs = typeof key === "string"
+    && key.trim().startsWith(CLAWBOX_AI_TOKEN_PREFIX)
+    && host !== null
+    && proxyHosts.has(host);
+  if (entryIsOurs && falEntry) {
+    const others = Object.keys(falEntry).filter((name) => name !== "apiKey" && name !== "baseUrl");
+    if (others.length === 0) unsets.push(MUSIC_PROVIDER_PATH);
+    else unsets.push(`${MUSIC_PROVIDER_PATH}.apiKey`, `${MUSIC_PROVIDER_PATH}.baseUrl`);
+  }
+  return unsets.length > 0 ? { ops: [], unsets } : NO_MUSIC_CHANGE;
+}
+
+/**
+ * Point OpenClaw's `music_generate` tool at the ClawBox AI proxy's shared media
+ * route, on a Max box whose music flag is on — or take it back when either
+ * stops being true.
+ *
+ * The harness-native mechanism, as for images: on the pinned core
+ * `music_generate` is registered only when a music-generation provider is
+ * configured, and naming one in `agents.defaults.mediaModels.music` is what
+ * both plans the tool and enables the bundled plugin that serves it. The
+ * provider is `fal` with its documented `models.providers.fal.baseUrl`
+ * override — see `CLAWBOX_AI_MUSIC_PROVIDER` for why that id and no other.
+ *
+ * Arming is the image path's rules, for the same reasons:
+ *   - never over a non-`claw_` key on the entry, a route the owner points
+ *     elsewhere, or any other sign the owner runs fal themselves;
+ *   - the slot only when empty or exactly ours — and on an owner's own music
+ *     model nothing at all, because a `fal` baseUrl of ours could reroute it;
+ *   - OpenClaw 2 only. `mediaModels` is the v2 home and v1 has no music slot,
+ *     so a v1 or unidentifiable core gets neither half.
+ *
+ * The gate is the cloud voice's, transcribed beside it in
+ * scripts/gateway-pre-start.sh: arm on the plan, or on the badge while the plan
+ * is unknown; withdraw on the flag going off or a RECORDED plan below Max,
+ * never on the badge. `credentialRefused` stops the arm (the boot script owns
+ * taking a refused box's routes back) but not a withdrawal.
+ */
+async function buildClawboxAiMusicOps(
+  clawboxAiToken: string,
+  snapshot: OpenClawConfig | null,
+  gate: ClawboxAiMusicGate,
+  credentialRefused: boolean,
+): Promise<ClawboxAiMusicPlan> {
+  const rawEntry: unknown = snapshot?.models?.providers?.[CLAWBOX_AI_MUSIC_PROVIDER];
+  const falEntry = typeof rawEntry === "object" && rawEntry !== null && !Array.isArray(rawEntry)
+    ? rawEntry as OpenAiProviderConfig
+    : undefined;
+  const defaults = snapshot?.agents?.defaults as { mediaModels?: { music?: unknown } } | undefined;
+  const slot: unknown = defaults?.mediaModels?.music;
+  const proxyHosts = clawboxProxyHosts(snapshot?.models?.providers?.[CLAWBOX_AI_PROVIDER]);
+
+  if (clawaiMusicWithdrawable(gate.flags, gate.planTier)) {
+    const plan = withdrawClawboxAiMusic(slot, falEntry, proxyHosts);
+    if (plan.unsets.length > 0) {
+      console.log(
+        `[AI Config] Taking back the ClawBox AI music provider: ${gate.flags.has("music") ? "the recorded plan is not Max" : "the music flag is off"}`,
+      );
+    }
+    return plan;
+  }
+  if (!clawaiMusicArmable(gate.flags, gate.entitlementTier) || credentialRefused) return NO_MUSIC_CHANGE;
+
+  if (hasToolModelConfig(slot) && !musicSlotIsOurs(slot)) {
+    console.log("[AI Config] Left the music model alone: agents.defaults.mediaModels.music already names one");
+    return NO_MUSIC_CHANGE;
+  }
+  if (!canOwnClawboxAiImageApiKey(falEntry?.apiKey)) {
+    console.warn(
+      `[AI Config] Skipped ClawBox AI music provider: ${MUSIC_PROVIDER_PATH}.apiKey holds a non-ClawBox key we will not overwrite`,
+    );
+    return NO_MUSIC_CHANGE;
+  }
+  // Every configured route under the id has to stay on the proxy, for the
+  // reason `foreignImageProviderRoute` gives: the key is provider-wide.
+  const foreignRoute = foreignImageProviderRoute(falEntry, proxyHosts, FAL_DEFAULT_BASE_URL);
+  if (foreignRoute) {
+    console.warn(
+      `[AI Config] Skipped ClawBox AI music provider: ${MUSIC_PROVIDER_PATH} already routes to ${logSafe(hostOfUrl(foreignRoute) ?? "an unparseable URL")}`,
+    );
+    return NO_MUSIC_CHANGE;
+  }
+  if (ownerHasOwnFal(snapshot)) {
+    console.warn("[AI Config] Skipped ClawBox AI music provider: this box has its own fal sign-in");
+    return NO_MUSIC_CHANGE;
+  }
+  const generation = await installedOpenclawCoreGeneration();
+  if (generation !== "v2") {
+    console.log(`[AI Config] Left the music model alone: the installed OpenClaw core is ${generation}, which has no music slot`);
+    return NO_MUSIC_CHANGE;
+  }
+
+  // Leaf paths, never the whole entry, and no `models[]` row: the fal provider
+  // takes the provider-level baseUrl and the model path from the slot.
+  return {
+    ops: [
+      [`${MUSIC_PROVIDER_PATH}.apiKey`, clawboxAiToken],
+      [`${MUSIC_PROVIDER_PATH}.baseUrl`, clawboxAiMediaBaseUrl(CLAWBOX_AI_PROXY_URL)],
+      [MUSIC_SLOT_PATH, JSON.stringify({ primary: CLAWBOX_AI_MUSIC_MODEL }), "--json"],
+    ],
+    unsets: [],
+  };
+}
+
+/**
  * Provision ClawBox AI: the auth profile, the provider definition, image
  * understanding, image generation, and optionally the fallback slot.
  *
@@ -1777,7 +1996,8 @@ async function configureClawboxAi(
   // do with ClawBox AI. Without this gate, configuring any other provider on a
   // refused box re-armed the image path and restarted the gateway on top of it.
   // Read AFTER the clear above, so a genuine re-link arms as it always did.
-  if (await clawaiCredentialRefusalOnRecord()) {
+  const credentialRefused = await clawaiCredentialRefusalOnRecord();
+  if (credentialRefused) {
     console.log(
       "[AI Config] Left the ClawBox AI image model alone: the proxy has refused this box's credential",
     );
@@ -1790,6 +2010,24 @@ async function configureClawboxAi(
         err instanceof Error ? logSafe(err.message) : err,
       );
     }
+  }
+
+  // Music rides the same token and proxy, behind its media flag and the Max
+  // plan. Non-fatal like images: a chat provider that works is worth more than
+  // a music tool, so neither the gate read nor the build may fail the save.
+  let musicPlan = NO_MUSIC_CHANGE;
+  try {
+    musicPlan = await buildClawboxAiMusicOps(
+      clawboxAiToken,
+      snapshot,
+      await readClawboxAiMusicGate(),
+      credentialRefused,
+    );
+  } catch (err) {
+    console.warn(
+      "[AI Config] Failed to configure ClawBox AI music provider:",
+      err instanceof Error ? logSafe(err.message) : err,
+    );
   }
 
   await applyConfigSetGroups([
@@ -1823,6 +2061,18 @@ async function configureClawboxAi(
       onError: (err) =>
         console.warn(
           "[AI Config] Failed to configure ClawBox AI image provider:",
+          err instanceof Error ? logSafe(err.message) : err,
+        ),
+    },
+    {
+      ops: musicPlan.ops,
+      onApplied: () =>
+        console.log(
+          `[AI Config] Set ClawBox AI music provider ${CLAWBOX_AI_MUSIC_MODEL} via ${clawboxAiMediaBaseUrl(CLAWBOX_AI_PROXY_URL)}`,
+        ),
+      onError: (err) =>
+        console.warn(
+          "[AI Config] Failed to configure ClawBox AI music provider:",
           err instanceof Error ? logSafe(err.message) : err,
         ),
     },
@@ -1865,6 +2115,19 @@ async function configureClawboxAi(
       {
         onError: (err) => console.warn(
           `[AI Config] Failed to remove the legacy ClawBox AI image provider entry (${path}):`,
+          err instanceof Error ? logSafe(err.message) : err,
+        ),
+      },
+      () => runOpenclawConfigUnset(path, { uid: CLAWBOX_UID, gid: CLAWBOX_GID }),
+    );
+  }
+  // The music take-back, after the batch for the same reason, each path in its
+  // own boundary. Every path was read off the snapshot, so none is absent.
+  for (const path of musicPlan.unsets) {
+    await configWriteBoundary(
+      {
+        onError: (err) => console.warn(
+          `[AI Config] Failed to take back the ClawBox AI music provider (${path}):`,
           err instanceof Error ? logSafe(err.message) : err,
         ),
       },
