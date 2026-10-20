@@ -69,6 +69,27 @@ jobs:
       - name: Doc image paths
         run: ./scripts/check-doc-images.sh
 
+      # CLAUDE.md is a short map; the per-area notes live in docs/agents/
+      # (scripts/check-claude-md-no-loss.mjs says why). While a pull request's
+      # BASE still carries the long CLAUDE.md, every paragraph, bullet and
+      # heading in it must appear verbatim in this tree's CLAUDE.md or a
+      # docs/agents/*.md, so the move proves itself on every rebase and a note
+      # beta gained meanwhile cannot be dropped resolving a conflict. Once the
+      # base is the map, the script says so and passes; the size guard is
+      # src/tests/unit/claude-md-map.test.ts. Seconds, no toolchain.
+      #
+      # Pull requests into BETA only, where the move happens. main keeps the
+      # long form until a release carries the map there, so a release PR would
+      # be checked against paragraphs beta has edited since — measured against
+      # main at the time of the move, 33 of 254 read as lost.
+      - name: CLAUDE.md move loses nothing
+        if: ${{ github.event_name == 'pull_request' && github.base_ref == 'beta' }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE_SHA"
+          node scripts/check-claude-md-no-loss.mjs "$BASE_SHA"
+
       # The on-device suite (scripts/nano-tests/, TASK-1324) runs on a lab
       # board, in its own workflow and only once `plan` there says the PR
       # needs one (TASK-1362) — but its RUNNER is
