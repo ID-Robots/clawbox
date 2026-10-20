@@ -1500,6 +1500,7 @@ export const ja: Record<string, string> = {
   "clawaiUsage.notReadable": "現在は表示できません",
   "clawaiUsage.metersTitle": "今週",
   "clawaiUsage.meterImages": "画像",
+  "clawaiUsage.meterMusic": "音楽トラック",
   "clawaiUsage.meterSpeech": "音声読み上げ (分)",
   "clawaiUsage.meterTranscription": "音声認識 (分)",
   "clawaiUsage.meterEmbeddings": "メモリのインデックス作成",

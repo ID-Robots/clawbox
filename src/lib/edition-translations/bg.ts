@@ -1485,6 +1485,7 @@ export const bg: Record<string, string> = {
   "clawaiUsage.notReadable": "В момента не е налично",
   "clawaiUsage.metersTitle": "Тази седмица",
   "clawaiUsage.meterImages": "Изображения",
+  "clawaiUsage.meterMusic": "Музикални песни",
   "clawaiUsage.meterSpeech": "Минути синтез на реч",
   "clawaiUsage.meterTranscription": "Минути разпознаване на реч",
   "clawaiUsage.meterEmbeddings": "Индексиране на паметта",

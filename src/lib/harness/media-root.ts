@@ -48,6 +48,23 @@ export async function chatSpokenReplyDir(): Promise<string> {
   return path.join(await chatMediaRoot(), "chat-spoken");
 }
 
+/** Where a music track this box generated is written. */
+export async function chatGeneratedMusicDir(): Promise<string> {
+  return path.join(await chatMediaRoot(), "chat-music");
+}
+
+/**
+ * How long a generated track is kept.
+ *
+ * The same 30 days as a picture, so a track and the bubble naming it age out
+ * together. 300 MB is some sixty full-length tracks — six weeks of a Max plan's
+ * ten a week — and still bounded on a disk shared with the models.
+ */
+export const GENERATED_MUSIC_RETENTION: MediaRetention = {
+  maxAgeMs: 30 * 24 * 60 * 60 * 1000,
+  maxBytes: 300 * 1024 * 1024,
+};
+
 /**
  * How long a spoken reply is kept.
  *

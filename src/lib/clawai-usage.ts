@@ -32,8 +32,15 @@ export const PORTAL_PLANS_URL = `${PORTAL_DASHBOARD_URL}#subscription`;
  */
 export const YEARLY_SAVINGS_PCT = 18;
 
-/** The four rolling-week meters, in the order the card lists them. */
-export const CLAWAI_USAGE_METERS = ["images", "speechSeconds", "audioSeconds", "embeddingsTokens"] as const;
+/**
+ * The rolling-week meters, in the order the card lists them.
+ *
+ * `musicTracks` counts ClawBox AI music tracks, a Max-plan meter. The portal
+ * reports it only once the proxy's media route serves music, and a meter the
+ * portal does not send is simply not drawn — so listing it here changes
+ * nothing on a box until then.
+ */
+export const CLAWAI_USAGE_METERS = ["images", "musicTracks", "speechSeconds", "audioSeconds", "embeddingsTokens"] as const;
 
 export type ClawaiUsageMeter = (typeof CLAWAI_USAGE_METERS)[number];
 

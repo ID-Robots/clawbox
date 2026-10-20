@@ -28,6 +28,7 @@ export const clawaiUsageEn: Record<string, string> = {
   // The four rolling-week meters.
   "clawaiUsage.metersTitle": "This week",
   "clawaiUsage.meterImages": "Images",
+  "clawaiUsage.meterMusic": "Music tracks",
   "clawaiUsage.meterSpeech": "Text-to-speech minutes",
   "clawaiUsage.meterTranscription": "Speech-to-text minutes",
   "clawaiUsage.meterEmbeddings": "Memory indexing",

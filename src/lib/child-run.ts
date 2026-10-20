@@ -115,6 +115,9 @@ const ALLOWED_COMMANDS: Readonly<Record<string, string>> = Object.freeze({
   git: "git",
   gh: "gh",
   ffmpeg: "ffmpeg",
+  // ffmpeg's own prober, from the same package: reads a video's length so its
+  // frames can be spread across it (src/lib/video-frames.ts).
+  ffprobe: "ffprobe",
   pdftotext: "pdftotext",
   libreoffice: "libreoffice",
   ss: "ss",

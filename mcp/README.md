@@ -328,6 +328,23 @@ an agent that had already scanned its plugins — nothing reachable over the soc
 re-scans them — the dashboard is bounced instead, and only when its unit promises
 to come back.
 
+
+### Music
+
+`music_generate` (Hermes only, **only where the box CAN make music**)
+
+Hermes has no music tool of its own; an OpenClaw box makes music through its
+harness's own `music_generate`, armed in `agents.defaults.mediaModels.music` on
+the bundled `fal` provider pointed at the ClawBox AI proxy's shared media route
+(the configure route and the boot migration), so ClawBox registers nothing of
+its own there. The probe is `canGenerateMusic` off `GET /setup-api/ai-models/music`,
+which says yes only with the `music` media flag on in the device store, a linked
+credential the proxy has not refused, and the Max plan. The call goes to the
+same route (`POST`), which makes the track through the proxy's media route
+(`src/lib/clawai-media.ts`) and writes it into the chat's media tree; the tool
+answers with the `MEDIA:` line the chat plays. One track at a time per box; a
+spent weekly allowance, a busy box and every gate reason come back as their own
+`CONFLICT` with a next step, never a retry.
 ### Device
 `system_stats` · `system_info` · `system_power` (needs `confirm: true` + a
 `reason`) · `disk_usage` · `disk_cleanup` · `update_check` (reports only, never
@@ -607,7 +624,8 @@ nothing has been sent when it refuses, and a folded retry still spends a slot.
 `browser_open` · `browser_navigate` · `browser_screenshot` · `browser_close`
 (both editions) · `browser_click` · `browser_type` · `browser_fill` · `browser_keypress` ·
 `browser_scroll` (OpenClaw only) · `browser_view_local` (only inside a
-coding-agent run — see below) · `describe_image` (both editions)
+coding-agent run — see below) · `describe_image` (both editions) ·
+`describe_video` (both editions, only with the `video_frames` media flag on)
 
 `describe_image` is not a browser tool but lives in the same family so a
 coding-agent run gets it: a written description of a local image file
@@ -622,6 +640,14 @@ backend retries a transient flap of the vision proxy once inside its own
 60 s budget (`src/lib/vision-describe.ts`), and this tool waits longer than
 that budget rather than re-firing. It answers a clean error when ClawBox AI
 is not linked.
+
+`describe_video` is video understanding without a video model: the route
+(`/setup-api/vision/describe-video`, the same fence as `describe_image`)
+samples a few frames across the file with ffmpeg and describes them together,
+in order, through the same vision model (`src/lib/video-frames.ts`). It sees
+stills only — no sound, no speech — and says so. Registered only where
+`GET` on that route says the `video_frames` media flag is on and ClawBox AI is
+linked (`canDescribeVideo`).
 
 `browser_type` reports a character count, never the text — it is the tool that
 types passwords.

@@ -268,7 +268,7 @@ export async function buildServer(
   registerLocalAiTools(reg);
   registerSystemTools(reg, ctx);
   registerDesktopTools(reg, ctx);
-  registerBrowserTools(reg);
+  registerBrowserTools(reg, ctx);
   registerMediaTools(reg);
   registerEmailTools(reg, ctx);
   registerCodingTools(reg);

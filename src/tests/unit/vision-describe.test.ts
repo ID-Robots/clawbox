@@ -20,7 +20,7 @@ vi.mock("@/lib/clawbox-ai-vision", () => ({
   resolveVisionModelId: mocks.resolveVisionModelId,
 }));
 
-import { DESCRIBE_TIMEOUT_MS, MIN_RETRY_MS, RETRY_DELAY_MS, describeImage } from "@/lib/vision-describe";
+import { DESCRIBE_TIMEOUT_MS, MIN_RETRY_MS, RETRY_DELAY_MS, describeImage, describeImages } from "@/lib/vision-describe";
 
 const fetchMock = vi.fn<(input: unknown, init?: RequestInit) => Promise<Response>>();
 
@@ -130,4 +130,39 @@ it("records requested and actual vision model plus usage separately for every at
   expect(result.vision?.attempts[0]).toMatchObject({ status: 503, usage: null, responseModel: null });
   expect(result.vision?.attempts[1]).toMatchObject({ requestedModel: "vision-x", responseModel: "deepseek-v4-flash-vision-exp", usage: { total_tokens: 130 } });
   expect(JSON.stringify(result)).not.toContain("tok-1234567890");
+});
+
+describe("several pictures at once (a video's frames)", () => {
+  it("sends every picture, in order, after the prompt, in ONE request", async () => {
+    fetchMock.mockResolvedValueOnce(answer("a cat crosses the room"));
+    const pending = describeImages(
+      [{ base64: "QQ==", mime: "image/jpeg" }, { base64: "Qg==", mime: "image/jpeg" }, { base64: "Qw==", mime: "image/png" }],
+      "These are frames",
+    );
+    await vi.runAllTimersAsync();
+
+    expect(await pending).toMatchObject({ text: "a cat crosses the room", error: null });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
+    expect(body.messages[0].content).toEqual([
+      { type: "text", text: "These are frames" },
+      { type: "image_url", image_url: { url: "data:image/jpeg;base64,QQ==" } },
+      { type: "image_url", image_url: { url: "data:image/jpeg;base64,Qg==" } },
+      { type: "image_url", image_url: { url: "data:image/png;base64,Qw==" } },
+    ]);
+  });
+
+  it("answers in a sentence when there is nothing to describe, without asking anyone", async () => {
+    expect(await describeImages([], "nothing")).toMatchObject({ text: null, error: "there was nothing to describe" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps the single-picture call exactly as it was", async () => {
+    fetchMock.mockResolvedValueOnce(answer("a red square"));
+    await describeNow();
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
+    expect(body.messages[0].content).toHaveLength(2);
+    expect(body.messages[0].content[1]).toEqual({ type: "image_url", image_url: { url: "data:image/png;base64,aGk=" } });
+  });
 });

@@ -1509,6 +1509,7 @@ export const zh: Record<string, string> = {
   "clawaiUsage.notReadable": "暂时无法显示",
   "clawaiUsage.metersTitle": "本周",
   "clawaiUsage.meterImages": "图片",
+  "clawaiUsage.meterMusic": "音乐曲目",
   "clawaiUsage.meterSpeech": "文字转语音分钟数",
   "clawaiUsage.meterTranscription": "语音转文字分钟数",
   "clawaiUsage.meterEmbeddings": "记忆索引",

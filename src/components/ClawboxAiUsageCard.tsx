@@ -44,6 +44,7 @@ type UsageResponse =
  */
 const METER_KEY: Record<ClawaiUsageMeter, string> = {
   images: "clawaiUsage.meterImages",
+  musicTracks: "clawaiUsage.meterMusic",
   speechSeconds: "clawaiUsage.meterSpeech",
   audioSeconds: "clawaiUsage.meterTranscription",
   embeddingsTokens: "clawaiUsage.meterEmbeddings",
@@ -177,7 +178,9 @@ export default function ClawboxAiUsageCard() {
       });
     }
     const params = { used: formatUsageCount(window.used, locale), limit: formatUsageCount(window.limit, locale) };
-    return meter === "images" ? t("clawaiUsage.countOf", params) : t("clawaiUsage.tokensOf", params);
+    return meter === "images" || meter === "musicTracks"
+      ? t("clawaiUsage.countOf", params)
+      : t("clawaiUsage.tokensOf", params);
   };
 
   // Only a window holding usage has anything to free up; a readable one with

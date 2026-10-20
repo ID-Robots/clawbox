@@ -236,6 +236,23 @@ export interface McpContext {
    * the absence gets a voice. See registerAiTools.
    */
   canGenerateImages: boolean;
+  /**
+   * Whether this box may make a ClawBox AI music track through ClawBox's own
+   * route — the `music` media flag on, a linked credential, the Max plan
+   * (GET /setup-api/ai-models/music answers it). Asked on Hermes only: an
+   * OpenClaw box makes music through its harness's own `music_generate`, and a
+   * second tool of the same name beside it would contradict it.
+   *
+   * Optional so the many hand-built contexts in the tests read as "no", which
+   * is also what an older device that has no such route answers.
+   */
+  canGenerateMusic?: boolean;
+  /**
+   * Whether the `video_frames` media flag is on and the box is linked, so a
+   * video can be described by sampling frames into the vision model the box
+   * already uses (GET /setup-api/vision/describe-video answers it).
+   */
+  canDescribeVideo?: boolean;
 }
 
 const SCREEN_GRABBERS = ["scrot", "gnome-screenshot", "spectacle", "import"];
@@ -369,6 +386,19 @@ async function probeImageGeneration(): Promise<boolean> {
   return capabilitiesFor(body.harness, body.facts).canGenerateImages;
 }
 
+/**
+ * Ask a media route whether its feature is available on this box.
+ *
+ * The route answers `{ available }` itself — the flag, the link and (for music)
+ * the plan are decided in one place on the device, never restated here. Fails
+ * closed like its neighbours: a device that cannot be asked, or an older one
+ * with no such route, registers no tool that could only refuse.
+ */
+async function probeMediaRoute(route: string): Promise<boolean> {
+  const body = await apiTry<{ available?: boolean }>(route, { timeoutMs: 3_000 });
+  return body?.available === true;
+}
+
 export async function buildContext(
   edition: Ed,
   install: "openclaw" | "hermes" | "dual",
@@ -394,10 +424,12 @@ export async function buildContext(
     hasBinary("du"),
   ]);
 
-  const [emailCanRead, coding, canGenerateImages] = await Promise.all([
+  const [emailCanRead, coding, canGenerateImages, canGenerateMusic, canDescribeVideo] = await Promise.all([
     probeEmailRead(),
     probeCodingAgent(),
     probeImageGeneration(),
+    edition === "hermes" ? probeMediaRoute("/setup-api/ai-models/music") : Promise.resolve(false),
+    probeMediaRoute("/setup-api/vision/describe-video"),
   ]);
   const codingAgent = coding;
 
@@ -428,5 +460,7 @@ export async function buildContext(
     emailCanRead,
     codingAgent,
     canGenerateImages,
+    canGenerateMusic,
+    canDescribeVideo,
   };
 }

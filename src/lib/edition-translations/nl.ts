@@ -1499,6 +1499,7 @@ export const nl: Record<string, string> = {
   "clawaiUsage.notReadable": "Nu niet beschikbaar",
   "clawaiUsage.metersTitle": "Deze week",
   "clawaiUsage.meterImages": "Afbeeldingen",
+  "clawaiUsage.meterMusic": "Muzieknummers",
   "clawaiUsage.meterSpeech": "Minuten tekst-naar-spraak",
   "clawaiUsage.meterTranscription": "Minuten spraak-naar-tekst",
   "clawaiUsage.meterEmbeddings": "Geheugenindexering",

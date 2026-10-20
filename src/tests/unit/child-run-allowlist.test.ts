@@ -9,7 +9,7 @@ const ENV = { PATH: process.env.PATH ?? "/usr/bin:/bin", LANG: "C" };
 
 describe("resolveBin", () => {
   it("allows the fixed bare commands", () => {
-    for (const b of ["git", "gh", "ffmpeg", "pdftotext", "libreoffice", "ss"]) expect(resolveBin(b)).toBe(b);
+    for (const b of ["git", "gh", "ffmpeg", "ffprobe", "pdftotext", "libreoffice", "ss"]) expect(resolveBin(b)).toBe(b);
   });
   it("allows absolute non-shell programs", () => {
     expect(resolveBin(process.execPath)).toBe(process.execPath);

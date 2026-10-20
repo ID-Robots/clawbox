@@ -1495,6 +1495,7 @@ export const sv: Record<string, string> = {
   "clawaiUsage.notReadable": "Inte tillgängligt just nu",
   "clawaiUsage.metersTitle": "Den här veckan",
   "clawaiUsage.meterImages": "Bilder",
+  "clawaiUsage.meterMusic": "Musikspår",
   "clawaiUsage.meterSpeech": "Minuter text till tal",
   "clawaiUsage.meterTranscription": "Minuter tal till text",
   "clawaiUsage.meterEmbeddings": "Minnesindexering",

@@ -28,6 +28,7 @@ import { apiPost } from "../lib/api";
 import { ToolError, type ErrorRule } from "../lib/errors";
 import { text, type Registrar, type ToolResult } from "../lib/register";
 import { zEnumOf, zInt, zText } from "../lib/schema";
+import type { McpContext } from "../lib/context";
 
 interface BrowserReply {
   sessionId?: string;
@@ -254,6 +255,48 @@ const ACTION_TIMEOUT_MS = 45_000;
  */
 export const DESCRIBE_CALL_TIMEOUT_MS = 90_000;
 
+/**
+ * describe_video's wait: the frame sampling (a probe plus one seek per frame,
+ * bounded in src/lib/video-frames.ts) and then a multi-picture vision call
+ * (90 s in the describe-video route), with room — and inside the 300 s Hermes
+ * gives one tool call. src/tests/unit/mcp-describe-video.test.ts pins it.
+ */
+export const DESCRIBE_VIDEO_CALL_TIMEOUT_MS = 270_000;
+
+/** describe_video's refusals: the picture rules' fence, worded for a video. */
+const DESCRIBE_VIDEO_RULES: ErrorRule[] = [
+  {
+    status: 409,
+    code: "CONFLICT",
+    message: "Video understanding is not switched on for this ClawBox, or it is not linked to ClawBox AI.",
+    next: "Say so plainly. Do not retry, and do not try to read the video some other way.",
+  },
+  {
+    status: 403,
+    code: "BLOCKED_PATH",
+    message: "That file is outside the folders this caller may look in.",
+    next: "Inside a run, pass a file in the working folder or the evidence folder; do not retry that path.",
+  },
+  {
+    status: 404,
+    code: "NOT_FOUND",
+    message: "There is no video file at that path.",
+    next: "Check the path and pass an existing .mp4, .mov, .webm, .mkv, .m4v or .avi file.",
+  },
+  {
+    status: 413,
+    code: "BAD_ARGUMENT",
+    message: "The video is too large to describe.",
+    next: "Pass a shorter clip, at most 1 GB.",
+  },
+  {
+    status: 400,
+    code: "BAD_ARGUMENT",
+    message: "The device refused that file.",
+    next: "Pass an existing .mp4, .mov, .webm, .mkv, .m4v or .avi file by absolute path.",
+  },
+];
+
 async function browserCall(
   action: string,
   params: Record<string, unknown> = {},
@@ -422,7 +465,13 @@ function describeParam(): { describe?: true } {
   return runContext() ? { describe: true } : {};
 }
 
-export function registerBrowserTools(reg: Registrar): void {
+/**
+ * `ctx` carries the one probe this family is gated on — whether the box can
+ * describe a video (mcp/lib/context.ts). Optional, and absent means no: every
+ * caller that builds the family on its own (the tests) gets exactly the tools
+ * it always did.
+ */
+export function registerBrowserTools(reg: Registrar, ctx?: Pick<McpContext, "canDescribeVideo">): void {
   // Registered only inside a coding-agent run (the runner names the working
   // and evidence folders): a tool that exists but answers "no run active" on
   // the assistant's own server would trip Hermes' circuit breaker for nothing.
@@ -517,6 +566,55 @@ export function registerBrowserTools(reg: Registrar): void {
       );
     },
   );
+
+  // Video understanding WITHOUT a video model: the device samples frames and
+  // describes them together with the same vision model describe_image uses.
+  // Behind the `video_frames` media flag, so only where the device said yes.
+  if (ctx?.canDescribeVideo) {
+    reg.tool(
+      "describe_video",
+      "Get a written description of a local video file (.mp4, .mov, .webm, .mkv, .m4v, .avi) from frames sampled across it, to understand a clip you were given or recorded. It sees still frames only: no sound, no speech.",
+      {
+        path: zText(512, "Video file to describe. Relative paths resolve against the working folder."),
+        prompt: zText(600, "What to look for, in one sentence. Omit for a general description.").optional(),
+        frames: zInt(1, 8, 6, "How many frames to sample across the video; more see more and take longer."),
+      },
+      { editions: ["openclaw", "hermes"], family: "browser", readOnly: true },
+      async ({ path: given, prompt, frames }: { path: string; prompt?: string; frames: number }) => {
+        const run = runContext();
+        const abs = path.isAbsolute(given) ? given : path.join(run ? run.workingDir : process.cwd(), given);
+        if (run && !isInside(abs, run.workingDir) && !isInside(abs, run.artifactsDir)) {
+          // A courtesy for a typo'd path; the route enforces the real fence.
+          throw new ToolError(
+            "BLOCKED_PATH",
+            "That file is outside this run's folders.",
+            "Pass a path inside the working folder or the evidence folder.",
+          );
+        }
+        const reply = await apiPost<{ description?: string | null; error?: string | null; frames?: number[]; durationSeconds?: number | null }>(
+          "/setup-api/vision/describe-video",
+          {
+            path: abs,
+            frames,
+            ...(prompt ? { prompt } : {}),
+            ...(run && /^run-[a-z0-9]{8}$/.test(path.basename(run.artifactsDir)) ? { codingRunId: path.basename(run.artifactsDir) } : {}),
+          },
+          { timeoutMs: DESCRIBE_VIDEO_CALL_TIMEOUT_MS, rules: DESCRIBE_VIDEO_RULES },
+        );
+        if (typeof reply.description === "string" && reply.description) {
+          const at = Array.isArray(reply.frames) && reply.frames.length
+            ? `\n(From ${reply.frames.length} frames at ${reply.frames.map((s) => `${s}s`).join(", ")}.)`
+            : "";
+          return text(reply.description + at);
+        }
+        throw new ToolError(
+          "ENDPOINT_DOWN",
+          reply.error || "The vision model did not answer.",
+          "The video could not be described right now. Try once more at most, or report what you can without it.",
+        );
+      },
+    );
+  }
 
   reg.tool(
     "browser_open",

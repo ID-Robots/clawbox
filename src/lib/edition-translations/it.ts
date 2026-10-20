@@ -1510,6 +1510,7 @@ export const it: Record<string, string> = {
   "clawaiUsage.notReadable": "Non disponibile al momento",
   "clawaiUsage.metersTitle": "Questa settimana",
   "clawaiUsage.meterImages": "Immagini",
+  "clawaiUsage.meterMusic": "Brani musicali",
   "clawaiUsage.meterSpeech": "Minuti di sintesi vocale",
   "clawaiUsage.meterTranscription": "Minuti di trascrizione vocale",
   "clawaiUsage.meterEmbeddings": "Indicizzazione della memoria",

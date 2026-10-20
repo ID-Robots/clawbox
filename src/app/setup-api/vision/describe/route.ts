@@ -2,11 +2,11 @@ import { NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "@/lib/runtime-path";
 import { requireSession } from "@/lib/route-auth";
-import { hasPersonSession } from "@/lib/owner-session";
-import { filesBrowseRoot, isProtectedFilePath } from "@/lib/file-guard";
-import { activeRunDirectory, activeRunId, getRun } from "@/lib/coding-agent";
-import { artifactsDir, INLINE_IMAGE_MIME, safeRunId } from "@/lib/coding-agent-artifacts";
+import { isProtectedFilePath } from "@/lib/file-guard";
+import { getRun } from "@/lib/coding-agent";
+import { INLINE_IMAGE_MIME, safeRunId } from "@/lib/coding-agent-artifacts";
 import { describeImage, isVisionImageMime, type VisionImageMime } from "@/lib/vision-describe";
+import { visionAllowedRoots } from "@/lib/vision-file-fence";
 
 export const dynamic = "force-dynamic";
 
@@ -22,40 +22,6 @@ const MIME_FOR: Record<string, VisionImageMime> = Object.fromEntries(
   Object.entries(INLINE_IMAGE_MIME).filter((entry): entry is [string, VisionImageMime] => isVisionImageMime(entry[1])),
 );
 const ACCEPTED_EXTENSIONS = Object.keys(MIME_FOR).join(", ").replace(/, ([^,]+)$/, " and $1");
-
-/**
- * The folders the caller may read from — decided HERE, not in the MCP tool
- * that calls this. The tool's own check is a courtesy for a mistyped path,
- * and a courtesy is not a boundary: the bearer it holds is also the
- * credential a prompt-injected run holds.
- *
- * A person at the desktop (session cookie) may describe any image under the
- * tree the Files app browses. The bearer — the agent's, and the run's — gets
- * the fence browser_view_local lives behind: while a run is live, its working
- * folder and its evidence folder, the two places its own pictures are; with
- * no run live, the same Files tree. Credential stores are refused for
- * everyone before this is asked. Roots are resolved through realpath so a
- * symlinked root grants exactly what it points at; one that does not exist
- * grants nothing.
- */
-async function allowedRoots(request: Request, requestedRunId?: string): Promise<{ roots: string[]; refusal: string }> {
-  const owner = await hasPersonSession(request);
-  const runId = owner ? null : (requestedRunId ?? activeRunId());
-  const runDir = owner ? null : (requestedRunId ? getRun(requestedRunId)?.directory : activeRunDirectory());
-  const wanted = runId && runDir ? [runDir, artifactsDir(runId)] : [filesBrowseRoot()];
-  const roots: string[] = [];
-  for (const root of wanted) {
-    try {
-      roots.push(await fs.realpath(root));
-    } catch {
-      // a root that does not exist grants nothing
-    }
-  }
-  const refusal = runId && runDir
-    ? "That file is outside the active coding run's working and evidence folders."
-    : "That file is outside the home folder.";
-  return { roots, refusal };
-}
 
 /**
  * POST { path, prompt? } → { description, error } — a written description of a
@@ -106,7 +72,8 @@ export async function POST(request: Request) {
   // as typed, before anything touches the disk; the second is on the real
   // file after symlinks are resolved, so a link planted under a root cannot
   // lead out of it. A root itself is a folder, never an image.
-  const { roots, refusal } = await allowedRoots(request, requestedRunId);
+  // The fence lives in @/lib/vision-file-fence, shared with describe-video.
+  const { roots, refusal } = await visionAllowedRoots(request, requestedRunId);
   const resolved = path.resolve(given);
   let typed: string | null = null;
   for (const root of roots) {

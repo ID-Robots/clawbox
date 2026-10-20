@@ -182,6 +182,8 @@ const ALL_CAPABILITIES: Posture = {
   emailCanRead: true,
   codingAgent: true,
   canGenerateImages: true,
+  canGenerateMusic: true,
+  canDescribeVideo: true,
   providers: ["anthropic", "openai"],
 };
 
@@ -200,6 +202,8 @@ const NO_CAPABILITIES: Posture = {
   emailCanRead: false,
   codingAgent: false,
   canGenerateImages: false,
+  canGenerateMusic: false,
+  canDescribeVideo: false,
   providers: [],
 };
 
@@ -238,14 +242,15 @@ const PROBE_GATED_COMMON = [
 /**
  * …PER EDITION, because a gate is an edition-specific fact.
  *
- * Every family here happens to be gated on both today, so both entries name
- * the same list. The dimension exists because without it the only way to record
- * a family that becomes gated on one edition — `coding_agent_run` going
- * Hermes-only, an ordinary change — was to WEAKEN the assertion for both.
+ * `describe_video` is gated on both (the `video_frames` media flag), and
+ * `music_generate` on Hermes alone: an OpenClaw box makes music through its
+ * harness's own tool, so ClawBox registers none there. The dimension exists for
+ * exactly that — without it the only way to record a family gated on one
+ * edition was to WEAKEN the assertion for both.
  */
 const PROBE_GATED_TOOLS: Record<Ed, readonly string[]> = {
-  openclaw: PROBE_GATED_COMMON,
-  hermes: PROBE_GATED_COMMON,
+  openclaw: [...PROBE_GATED_COMMON, "describe_video"],
+  hermes: [...PROBE_GATED_COMMON, "describe_video", "music_generate"],
 };
 
 /**
@@ -303,7 +308,7 @@ const RUN_ONLY_TOOLS = ["browser_view_local", "generate_audio", "generate_image"
  * the four that never spawn anything.
  */
 const SPAWN_PROBES = ["du", "journal", "screen", "imageConvert"];
-const API_PROBES = ["email", "codingAgent", "images", "providers"];
+const API_PROBES = ["email", "codingAgent", "images", "music", "videoFrames", "providers"];
 
 /** The environment the coding-agent runner sets around a run's MCP server. */
 const RUN_ENV = {
@@ -388,9 +393,10 @@ async function check(): Promise<void> {
       email: ctx.emailCanRead,
       codingAgent: ctx.codingAgent,
       images: ctx.canGenerateImages,
-      // Asked on Hermes only, so it is recorded on Hermes only — an entry that
-      // is always false on OpenClaw would report a probe that never ran.
-      ...(edition === "hermes" ? { providers: ctx.providers.length > 0 } : {}),
+      videoFrames: ctx.canDescribeVideo === true,
+      // Asked on Hermes only, so they are recorded on Hermes only — an entry
+      // that is always false on OpenClaw would report a probe that never ran.
+      ...(edition === "hermes" ? { music: ctx.canGenerateMusic === true, providers: ctx.providers.length > 0 } : {}),
     };
 
     const { reg: fullReg } = await buildServer(edition, "full", edition, ALL_CAPABILITIES);

@@ -19,7 +19,7 @@ import { apiGet, apiPost } from "../lib/api";
 import { ToolError, type ErrorRule } from "../lib/errors";
 import { json, text, type Registrar } from "../lib/register";
 import { CURRENT_CHAT_MODEL_NOTE, hermesDeviceDefault, type HermesDefaultSource } from "../lib/report";
-import { zEnumOf, zText } from "../lib/schema";
+import { zBool, zEnumOf, zText } from "../lib/schema";
 import type { McpContext } from "../lib/context";
 
 interface ModelRow {
@@ -141,6 +141,92 @@ const SET_RULES: ErrorRule[] = [
 const IMAGE_GEN_UNAVAILABLE =
   "Picture generation is not available on this ClawBox. It runs on ClawBox AI and this device is not connected to one. Tell the user that in their own language, and that they can connect it in Settings -> AI Providers. Do NOT try to make the picture some other way — not with the terminal, not by writing an SVG or HTML and converting it, not with a Python imaging library. A file made that way cannot be displayed in this chat, so the user would get a broken image instead of an answer.";
 
+/**
+ * How long music_generate waits for the device. The device gives the proxy's
+ * media job 240 s (CLAWAI_MEDIA_JOB_BUDGET_MS in src/lib/clawai-media.ts), and
+ * the client's budget must sit ABOVE it — a client that gives up first pays for
+ * a track it discards — while staying inside the 300 s Hermes gives one tool
+ * call (scripts/register-mcp.sh). src/tests/unit/mcp-music-tool.test.ts pins
+ * both, since neither constant can be imported across the alias boundary.
+ */
+export const MUSIC_CALL_TIMEOUT_MS = 270_000;
+
+/** The music route's answers, turned into a next step. First match wins. */
+const MUSIC_RULES: ErrorRule[] = [
+  {
+    status: 429,
+    match: /"code"\s*:\s*"busy"/,
+    code: "CONFLICT",
+    message: "This ClawBox is already making a track. Nothing was charged for this call.",
+    next: "Tell the user the box is busy with another track and offer to try again in a minute. Do not retry on your own.",
+  },
+  {
+    status: 429,
+    code: "CONFLICT",
+    message: "This week's ClawBox AI music allowance is used up.",
+    next: "Tell the user in their own language; the allowance frees up as the week rolls on and Settings -> Providers shows it. Do not retry and do not make the music any other way.",
+  },
+  // The route's `reason`, one rule each: a rule's message replaces the body, so
+  // the reason would otherwise be lost between the device and the model.
+  {
+    status: 409,
+    match: /"reason"\s*:\s*"not_max"/,
+    code: "CONFLICT",
+    message: "Music generation is part of the ClawBox AI Max plan, and this account is not on it.",
+    next: "Tell the user in their own language; they can change the plan on clawbox.com. Do not retry and do not make the music any other way.",
+  },
+  {
+    status: 409,
+    match: /"reason"\s*:\s*"not_linked"/,
+    code: "CONFLICT",
+    message: "This ClawBox is not linked to ClawBox AI, so it cannot make music.",
+    next: "Tell the user they can link it in Settings -> Providers. Do not retry.",
+  },
+  {
+    status: 409,
+    match: /"reason"\s*:\s*"refused"/,
+    code: "CONFLICT",
+    message: "ClawBox AI has refused this box's credential.",
+    next: "Tell the user to re-link ClawBox AI in Settings -> Providers. Do not retry.",
+  },
+  {
+    status: 409,
+    code: "CONFLICT",
+    message: "Music generation is not switched on for this ClawBox.",
+    next: "Tell the user music is not available on this box yet. Do not retry and do not make the music any other way.",
+  },
+  {
+    status: 403,
+    code: "CONFLICT",
+    message: "ClawBox AI refused this music request for this account.",
+    next: "Tell the user that music needs the ClawBox AI Max plan. Do not retry.",
+  },
+  {
+    status: 503,
+    code: "ENDPOINT_DOWN",
+    message: "ClawBox AI does not serve music yet.",
+    next: "Tell the user music is not available yet. Do not retry in this conversation.",
+  },
+  {
+    status: 504,
+    code: "ENDPOINT_DOWN",
+    message: "The track took too long to make.",
+    next: "Tell the user it timed out; they may ask once more. Do not retry on your own.",
+  },
+  {
+    status: 502,
+    code: "ENDPOINT_DOWN",
+    message: "ClawBox AI could not make that track.",
+    next: "Say so plainly. Try once more at most if the user asks, then stop.",
+  },
+  {
+    status: 400,
+    code: "BAD_ARGUMENT",
+    message: "The device refused those arguments.",
+    next: "Describe the track in plain words (and keep lyrics under 3000 characters), then call once more.",
+  },
+];
+
 /** One allowance window as GET /setup-api/ai-models/usage answers it (`ClawaiUsageWindow`). */
 interface UsageWindow {
   used?: number;
@@ -184,6 +270,7 @@ const tokensOf: OfLine = (used, limit) => `${used.toLocaleString("en-US")} of ${
 /** What each weekly meter counts, and how to say a number of it. */
 const METERS: Record<string, { label: string; of: OfLine }> = {
   images: { label: "pictures", of: countOf },
+  musicTracks: { label: "music tracks", of: countOf },
   speechSeconds: { label: "spoken replies", of: minutesOf },
   audioSeconds: { label: "transcribed audio", of: minutesOf },
   embeddingsTokens: { label: "memory indexing", of: tokensOf },
@@ -373,6 +460,41 @@ export function registerAiTools(reg: Registrar, ctx: McpContext): void {
       // boxes that need it most. It costs an empty schema and two sentences.
       { editions: ["openclaw", "hermes"], readOnly: true, profile: "core" },
       async () => text(IMAGE_GEN_UNAVAILABLE),
+    );
+  }
+
+  // Hermes has no music tool of its own, so a Max box whose music flag is on
+  // gets this one; an OpenClaw box makes music through its harness's own
+  // `music_generate`, armed in its config, and never sees this. Registered only
+  // where the device said it can be used (mcp/lib/context.ts) — the reasons it
+  // cannot are the route's to word, at call time, if the state changes later.
+  if (ctx.canGenerateMusic) {
+    reg.tool(
+      "music_generate",
+      "Make a music track from a description with ClawBox AI — when the user asks for a song, a jingle, a beat or background music. Takes up to a few minutes and counts against the weekly music allowance.",
+      {
+        prompt: zText(2_000, "The music to make: genre, mood, instruments, tempo, and what it is for."),
+        lyrics: zText(3_000, "Words to sing. Omit for the model to write its own or for an instrumental.").optional(),
+        instrumental: zBool(false, "true for a track with no vocals."),
+      },
+      { editions: ["hermes"], readOnly: false, openWorld: true },
+      async ({ prompt, lyrics, instrumental }: { prompt: string; lyrics?: string; instrumental: boolean }) => {
+        const reply = await apiPost<{ path?: string; bytes?: number; weeklyTracks?: number }>(
+          "/setup-api/ai-models/music",
+          { prompt, ...(lyrics ? { lyrics } : {}), ...(instrumental ? { instrumental } : {}) },
+          { timeoutMs: MUSIC_CALL_TIMEOUT_MS, rules: MUSIC_RULES },
+        );
+        if (typeof reply.path !== "string" || !reply.path) {
+          throw new ToolError("ENDPOINT_DOWN", "The device made no track.", "Say so plainly and do not retry.");
+        }
+        const size = typeof reply.bytes === "number" ? ` (${Math.max(1, Math.round(reply.bytes / 1024))} KB)` : "";
+        const allowance = typeof reply.weeklyTracks === "number"
+          ? ` The plan includes ${reply.weeklyTracks} tracks a week; clawbox_ai_usage says how many are left.`
+          : "";
+        return text(
+          `The track is ready${size}. Put this line on its own in your reply, exactly as written, so the user can play it:\nMEDIA:${reply.path}\n${allowance.trim()}`.trim(),
+        );
+      },
     );
   }
 

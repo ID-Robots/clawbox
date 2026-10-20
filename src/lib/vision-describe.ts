@@ -106,12 +106,17 @@ async function visionModelId(token: string): Promise<string> {
   return resolved.id;
 }
 
+/** One picture in a vision request. */
+export interface VisionImage {
+  base64: string;
+  mime: VisionImageMime;
+}
+
 async function ask(
   token: string,
   model: string,
   prompt: string,
-  imageBase64: string,
-  mime: VisionImageMime,
+  images: VisionImage[],
   timeoutMs: number,
   attempts: VisionAttempt[],
 ): Promise<Attempt> {
@@ -132,9 +137,14 @@ async function ask(
           max_tokens: MAX_DESCRIPTION_TOKENS,
           messages: [{
             role: "user",
+            // The images in the order given: for a video's frames the order
+            // IS the timeline, and the prompt says so.
             content: [
               { type: "text", text: prompt },
-              { type: "image_url", image_url: { url: `data:${mime};base64,${imageBase64}` } },
+              ...images.map((image) => ({
+                type: "image_url",
+                image_url: { url: `data:${image.mime};base64,${image.base64}` },
+              })),
             ],
           }],
         }),
@@ -180,11 +190,29 @@ async function ask(
 
 /** Describe a PNG through the box's vision model. */
 export async function describeImage(imageBase64: string, prompt: string = DEFAULT_PROMPT, mime: VisionImageMime = "image/png"): Promise<VisionDescription> {
+  return describeImages([{ base64: imageBase64, mime }], prompt);
+}
+
+/**
+ * Describe several pictures TOGETHER, in one request to the same vision model —
+ * a video's sampled frames (src/lib/video-frames.ts) are the caller. One
+ * question rather than one per picture, so the model can say what changes
+ * between them, and the box pays one round trip.
+ *
+ * `timeoutMs` is the whole call's budget, retry included, like
+ * {@link DESCRIBE_TIMEOUT_MS} for a single image; more pictures take longer.
+ */
+export async function describeImages(
+  images: VisionImage[],
+  prompt: string,
+  timeoutMs: number = DESCRIBE_TIMEOUT_MS,
+): Promise<VisionDescription> {
+  if (images.length === 0) return { text: null, error: "there was nothing to describe" };
   const token = await configGet("clawai_token");
   if (typeof token !== "string" || !token.trim()) {
     return { text: null, error: "ClawBox AI is not connected on this device" };
   }
-  const deadline = Date.now() + DESCRIBE_TIMEOUT_MS;
+  const deadline = Date.now() + timeoutMs;
   let model: string;
   try {
     model = await visionModelId(token.trim());
@@ -192,13 +220,13 @@ export async function describeImage(imageBase64: string, prompt: string = DEFAUL
     return { text: null, error: "could not resolve a vision model" };
   }
   const attempts: VisionAttempt[] = [];
-  const first = await ask(token.trim(), model, prompt, imageBase64, mime, Math.max(1, deadline - Date.now()), attempts);
+  const first = await ask(token.trim(), model, prompt, images, Math.max(1, deadline - Date.now()), attempts);
   if (!first.transient || deadline - Date.now() - RETRY_DELAY_MS < MIN_RETRY_MS) {
     return { text: first.text, error: first.error, vision: { attempts } };
   }
   await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
   // The retry lives inside the SAME budget, so a caller sized against
   // DESCRIBE_TIMEOUT_MS never sees the two attempts as one long hang.
-  const second = await ask(token.trim(), model, prompt, imageBase64, mime, deadline - Date.now(), attempts);
+  const second = await ask(token.trim(), model, prompt, images, deadline - Date.now(), attempts);
   return { text: second.text, error: second.error, vision: { attempts } };
 }
