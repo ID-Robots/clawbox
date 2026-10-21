@@ -135,6 +135,14 @@ export type SecretRefusal =
   | "value_too_short"
   | "full"
   | "not_found"
+  /** An import that would replace an entry the owner already has. */
+  | "exists"
+  /** An import of a name on the assistant's own-wiring denylist. */
+  | "not_importable"
+  /** An import of a key the assistant does not hold, or holds in a form the store would refuse. */
+  | "not_held"
+  /** The assistant's own key file could not be read for an import. */
+  | "source_unreadable"
   | "store_unreadable"
   | "store_unwritable"
   | "key_unavailable";

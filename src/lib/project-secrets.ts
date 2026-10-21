@@ -61,6 +61,7 @@ import fs from "fs/promises";
 import path, { untraced } from "@/lib/runtime-path";
 import { DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store";
 import { getOrCreateSecret } from "@/lib/auth";
+import { appendSecretAudit, type SecretImportSource } from "@/lib/secrets-audit";
 import {
   BOX_SCOPE,
   isDeviceSecretScope,
@@ -285,8 +286,24 @@ function requireSecretValue(value: unknown): string {
   return trimmed;
 }
 
+/**
+ * True when `requireSecretValue` would accept it. For a list that must only
+ * offer what a save can keep — the assistant's keys (src/lib/assistant-secrets.ts),
+ * where a button that always ends in a refusal is no offer at all.
+ */
+export function isStorableSecretValue(value: unknown): boolean {
+  try {
+    requireSecretValue(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ── the file ────────────────────────────────────────────────────────────────
 
+// A copy from the assistant (`importSecret`) is a row of exactly this shape —
+// no extra field — so this check, and an older build's, read it unchanged.
 function isStoredSecret(value: unknown): value is StoredSecret {
   if (typeof value !== "object" || value === null) return false;
   const v = value as Record<string, unknown>;
@@ -424,11 +441,58 @@ export async function setSecret(input: { name: unknown; value: unknown; scope?: 
   const scope = requireSecretScope(input.scope);
   const value = requireSecretValue(input.value);
   const inject = typeof input.inject === "boolean" ? input.inject : null;
+  return putSecret({ name, scope, value, inject, createOnly: false, audit: { action: "save" } });
+}
+
+/**
+ * Save a value COPIED from where the box already holds it — the "Import from
+ * assistant" button (src/lib/assistant-secrets.ts is the only caller, and it
+ * reads the value server-side; no surface ever sends or receives one).
+ *
+ * Two differences from `setSecret`, and both are the safe reading of a copy:
+ *
+ *  - A NEW ENTRY ONLY. A name already stored in that scope is refused
+ *    (`exists`), never replaced: the owner's own value under that name, and
+ *    their tick on it, are a decision this button must not overwrite.
+ *  - NEVER TICKED. `inject` is false whatever is asked, so a copied key reaches
+ *    no run until the owner ticks it — the same three gates as a typed one.
+ *
+ * The row is the same shape as a typed one — no provenance field, no expiry —
+ * so an older build after a rollback reads and keeps it unchanged. Where it
+ * came from is on the audit line instead (src/lib/secrets-audit.ts).
+ */
+export async function importSecret(input: {
+  name: unknown;
+  value: unknown;
+  scope?: unknown;
+  source: SecretImportSource;
+}): Promise<SecretView> {
+  const name = requireSecretName(input.name);
+  const scope = requireSecretScope(input.scope);
+  const value = requireSecretValue(input.value);
+  return putSecret({ name, scope, value, inject: false, createOnly: true, audit: { action: "import", source: input.source } });
+}
+
+/** The one write path for an owner entry: `setSecret` and `importSecret`. */
+function putSecret(input: {
+  name: string;
+  scope: string;
+  value: string;
+  inject: boolean | null;
+  createOnly: boolean;
+  audit: { action: "save" | "import"; source?: SecretImportSource };
+}): Promise<SecretView> {
+  const { name, scope, value, inject } = input;
   return serialised(async () => {
     const k = await storeKey();
     const entries = await readStore();
     const at = indexOf(entries, name, scope);
     const now = Date.now();
+    if (at >= 0 && input.createOnly) {
+      // Checked inside the chain, against the list as it stands now — a check
+      // made before it could be beaten by a save landing in between.
+      throw new SecretStoreError("exists", `There is already a secret called ${name} in that scope on this ClawBox. Remove it first to copy the assistant's.`);
+    }
     if (at < 0 && ownerEntries(entries).length >= MAX_SECRETS) {
       // Refused, never evicted: the list is what the owner believes a run can
       // reach, and a save that quietly dropped the oldest entry would take a
@@ -442,6 +506,7 @@ export async function setSecret(input: { name: unknown; value: unknown; scope?: 
     if (at < 0) entries.push(entry);
     else entries[at] = entry;
     await writeStore(entries);
+    await appendSecretAudit({ ...input.audit, name, scope });
     return viewOf(entry, k);
   });
 }
@@ -461,6 +526,7 @@ export async function setSecretInject(input: { name: unknown; scope?: unknown; i
     if (at < 0) throw new SecretStoreError("not_found", `There is no secret called ${name} in that scope on this ClawBox.`);
     entries[at] = { ...entries[at], inject, updatedAt: Date.now() };
     await writeStore(entries);
+    await appendSecretAudit({ action: inject ? "tick" : "untick", name, scope });
     return viewOf(entries[at], k);
   });
 }
@@ -491,6 +557,7 @@ export async function deleteSecretsForScope(scope: unknown): Promise<string[]> {
     const removed = entries.filter((entry) => entry.scope === key).map((entry) => entry.name);
     if (!removed.length) return [];
     await writeStore(entries.filter((entry) => entry.scope !== key));
+    await appendSecretAudit({ action: "delete", names: removed, scope: key, reason: "project_deleted" });
     return removed;
   });
 }
@@ -506,6 +573,7 @@ export async function deleteSecret(input: { name: unknown; scope?: unknown }): P
     if (at < 0) throw new SecretStoreError("not_found", `There is no secret called ${name} in that scope on this ClawBox.`);
     entries.splice(at, 1);
     await writeStore(entries);
+    await appendSecretAudit({ action: "delete", name, scope });
     return sortViews(ownerEntries(entries).map((e) => viewOf(e, k)));
   });
 }
@@ -565,9 +633,29 @@ const NOTHING: ResolvedRunSecrets = { env: {}, names: [], unreadable: [] };
  * failing the run over it would be the worse outcome, and the resolved names go
  * on the record so a run that got nothing can be told why.
  */
-export async function resolveSecretsForRun(run: { project?: string | null }): Promise<ResolvedRunSecrets> {
+export async function resolveSecretsForRun(run: { project?: string | null; runId?: string }): Promise<ResolvedRunSecrets> {
+  const { resolved, scopeOf } = await resolveRunSecrets(run);
+  // The NAMES a run was handed go on the audit trail beside the copies and the
+  // ticks that put them there — never the values, and nothing at all for a run
+  // that was handed none. One line per scope the values came FROM: a box-wide
+  // key handed to a project's run is still a box-wide key, and a line that
+  // filed it under the project would tell the owner the project holds it.
+  const byScope = new Map<string, string[]>();
+  for (const name of resolved.names) {
+    const scope = scopeOf.get(name) ?? BOX_SCOPE;
+    byScope.set(scope, [...(byScope.get(scope) ?? []), name]);
+  }
+  for (const [scope, names] of byScope) {
+    await appendSecretAudit({ action: "inject", names, scope, runId: run.runId });
+  }
+  return resolved;
+}
+
+/** The run's secrets, and which scope each handed name's value came from (for the audit line only). */
+async function resolveRunSecrets(run: { project?: string | null }): Promise<{ resolved: ResolvedRunSecrets; scopeOf: Map<string, string> }> {
+  const scopeOf = new Map<string, string>();
   try {
-    if (!(await getInjectSecrets())) return NOTHING;
+    if (!(await getInjectSecrets())) return { resolved: NOTHING, scopeOf };
     const [entries, k] = await Promise.all([readStore(), storeKey()]);
     const project = typeof run.project === "string" && isValidSecretScope(run.project) ? run.project : null;
     const env: Record<string, string> = {};
@@ -594,16 +682,17 @@ export async function resolveSecretsForRun(run: { project?: string | null }): Pr
           continue;
         }
         env[entry.name] = value;
+        scopeOf.set(entry.name, scope);
         // The other direction: a box-wide entry this box cannot open, overridden
         // by a project entry it can, is not a problem to report.
         const stale = unreadable.indexOf(entry.name);
         if (stale >= 0) unreadable.splice(stale, 1);
       }
     }
-    return { env, names: Object.keys(env), unreadable };
+    return { resolved: { env, names: Object.keys(env), unreadable }, scopeOf };
   } catch (err) {
     console.error("[secrets] could not resolve the secrets for a run:", err instanceof Error ? err.message : err);
-    return NOTHING;
+    return { resolved: NOTHING, scopeOf: new Map() };
   }
 }
 

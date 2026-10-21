@@ -441,3 +441,102 @@ describe("the switch", () => {
     expect(await store.getInjectSecrets()).toBe(false);
   });
 });
+
+describe("a copy from the assistant (importSecret)", () => {
+  it("files a NEW entry, never ticked, whatever the caller asked", async () => {
+    const view = await store.importSecret({ name: "GITHUB_TOKEN", value: TOKEN, scope: store.BOX_SCOPE, source: "hermes" });
+    expect(view).toMatchObject({ name: "GITHUB_TOKEN", scope: store.BOX_SCOPE, inject: false, readable: true });
+    expect(fileText()).not.toContain(TOKEN);
+    // Un-ticked means no run gets it, even with the owner's switch on.
+    switchOn(true);
+    expect((await store.resolveSecretsForRun({ project: null })).names).toEqual([]);
+  });
+
+  it("refuses to replace an entry already there, and leaves it exactly as it was", async () => {
+    await store.setSecret({ name: "GITHUB_TOKEN", value: "the-owners-own-value-0000", scope: store.BOX_SCOPE, inject: true });
+    const before = rows();
+    await expect(store.importSecret({ name: "GITHUB_TOKEN", value: TOKEN, scope: store.BOX_SCOPE, source: "hermes" }))
+      .rejects.toMatchObject({ code: "exists" });
+    expect(rows()).toEqual(before);
+    // The same name in another scope is a different entry, and is fine.
+    await expect(store.importSecret({ name: "GITHUB_TOKEN", value: TOKEN, scope: "shop", source: "hermes" }))
+      .resolves.toMatchObject({ scope: "shop", inject: false });
+  });
+
+  it("writes a row of the ordinary shape, so an older build reads it unchanged", async () => {
+    await store.importSecret({ name: "GITHUB_TOKEN", value: TOKEN, scope: store.BOX_SCOPE, source: "hermes" });
+    expect(Object.keys(rows()[0]).sort()).toEqual(["createdAt", "inject", "iv", "keyId", "name", "scope", "tag", "updatedAt", "value"]);
+  });
+
+  it("applies the store's own rules to the copied value", async () => {
+    await expect(store.importSecret({ name: "SHORT_TOKEN", value: "abc", scope: store.BOX_SCOPE, source: "hermes" }))
+      .rejects.toMatchObject({ code: "value_too_short" });
+    await expect(store.importSecret({ name: "LD_PRELOAD", value: TOKEN, scope: store.BOX_SCOPE, source: "hermes" }))
+      .rejects.toMatchObject({ code: "reserved_name" });
+    expect(fs.existsSync(secretsPath())).toBe(false);
+  });
+});
+
+describe("the audit trail", () => {
+  function audit(): Record<string, unknown>[] {
+    const file = path.join(dataDir, "secrets-audit.log");
+    if (!fs.existsSync(file)) return [];
+    return fs.readFileSync(file, "utf-8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  }
+
+  it("records every change by name and scope, and never a value", async () => {
+    await store.setSecret({ name: "DEPLOY_TOKEN", value: TOKEN, scope: store.BOX_SCOPE });
+    await store.importSecret({ name: "GITHUB_TOKEN", value: "imported-value-0000", scope: "shop", source: "hermes" });
+    await store.setSecretInject({ name: "GITHUB_TOKEN", scope: "shop", inject: true });
+    await store.setSecretInject({ name: "GITHUB_TOKEN", scope: "shop", inject: false });
+    await store.deleteSecret({ name: "DEPLOY_TOKEN", scope: store.BOX_SCOPE });
+    await store.deleteSecretsForScope("shop");
+
+    expect(audit().map(({ at, ...rest }) => (typeof at === "string" ? rest : { at, ...rest }))).toEqual([
+      { action: "save", name: "DEPLOY_TOKEN", scope: store.BOX_SCOPE },
+      { action: "import", name: "GITHUB_TOKEN", scope: "shop", source: "hermes" },
+      { action: "tick", name: "GITHUB_TOKEN", scope: "shop" },
+      { action: "untick", name: "GITHUB_TOKEN", scope: "shop" },
+      { action: "delete", name: "DEPLOY_TOKEN", scope: store.BOX_SCOPE },
+      { action: "delete", names: ["GITHUB_TOKEN"], scope: "shop", reason: "project_deleted" },
+    ]);
+    const text = fs.readFileSync(path.join(dataDir, "secrets-audit.log"), "utf-8");
+    expect(text).not.toContain(TOKEN);
+    expect(text).not.toContain("imported-value-0000");
+    expect((fs.statSync(path.join(dataDir, "secrets-audit.log")).mode & 0o777).toString(8)).toBe("600");
+  });
+
+  it("records what a run was handed, by name and run id, and nothing for a run handed none", async () => {
+    await store.setSecret({ name: "DEPLOY_TOKEN", value: TOKEN, scope: store.BOX_SCOPE, inject: true });
+    await store.setSecret({ name: "SHOP_TOKEN", value: "shop-token-value-0000", scope: "shop", inject: true });
+    switchOn(true);
+    await store.resolveSecretsForRun({ project: "shop", runId: "run-0000abcd" });
+    switchOn(false);
+    await store.resolveSecretsForRun({ project: "shop", runId: "run-0000beef" });
+
+    // One line per scope the values came from: the box-wide key handed to the
+    // shop's run is still filed under the box, not under the shop.
+    const injects = audit().filter((line) => line.action === "inject");
+    expect(injects).toHaveLength(2);
+    expect(injects).toEqual(expect.arrayContaining([
+      expect.objectContaining({ names: ["DEPLOY_TOKEN"], scope: store.BOX_SCOPE, runId: "run-0000abcd" }),
+      expect.objectContaining({ names: ["SHOP_TOKEN"], scope: "shop", runId: "run-0000abcd" }),
+    ]));
+  });
+
+  it("files a project's override of a box-wide name under the project it came from", async () => {
+    await store.setSecret({ name: "DEPLOY_TOKEN", value: TOKEN, scope: store.BOX_SCOPE, inject: true });
+    await store.setSecret({ name: "DEPLOY_TOKEN", value: "shop-deploy-value-0000", scope: "shop", inject: true });
+    switchOn(true);
+    await store.resolveSecretsForRun({ project: "shop", runId: "run-0000cafe" });
+
+    const injects = audit().filter((line) => line.action === "inject");
+    expect(injects).toEqual([expect.objectContaining({ names: ["DEPLOY_TOKEN"], scope: "shop", runId: "run-0000cafe" })]);
+  });
+
+  it("records nothing for a change the store refused", async () => {
+    await expect(store.setSecret({ name: "PATH", value: TOKEN })).rejects.toMatchObject({ code: "reserved_name" });
+    await expect(store.deleteSecret({ name: "MISSING_TOKEN" })).rejects.toMatchObject({ code: "not_found" });
+    expect(audit()).toEqual([]);
+  });
+});
