@@ -353,6 +353,8 @@ describe("plugin-repair — recording a row from the server side", () => {
   it("knows which plugins have a Settings row of their own and which do not", async () => {
     const { pluginHasSettingsRow } = await load();
     expect(pluginHasSettingsRow("discord")).toBe(true);
+    // The guided channels have rows of their own, so their repairs are badged there and not listed again.
+    for (const id of ["slack", "@openclaw/signal", "msteams"]) expect(pluginHasSettingsRow(id)).toBe(true);
     expect(pluginHasSettingsRow("@openclaw/deepseek-provider")).toBe(true);
     expect(pluginHasSettingsRow("byteplus")).toBe(false);
     expect(pluginHasSettingsRow("vydra")).toBe(false);

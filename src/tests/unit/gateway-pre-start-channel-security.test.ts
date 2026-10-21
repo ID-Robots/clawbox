@@ -252,3 +252,18 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh channel security", () => {
     });
   });
 });
+
+describe("the gateway units load the guided channels' secrets", () => {
+  // The SecretRefs in openclaw.json name SLACK_* and MSTEAMS_APP_PASSWORD; a
+  // unit that never loads their files leaves them unresolved on that edition.
+  it("on the appliance and on x64 alike", () => {
+    const appliance = readFileSync(path.resolve(process.cwd(), "config/clawbox-gateway.service"), "utf-8");
+    const x64 = readFileSync(path.resolve(process.cwd(), "install-x64.sh"), "utf-8");
+    const x64Unit = x64.slice(x64.indexOf('cat > "$gateway_unit" <<EOF'), x64.indexOf("WantedBy=multi-user.target", x64.indexOf('cat > "$gateway_unit" <<EOF')));
+    for (const file of ["slack.env", "msteams.env"]) {
+      expect(appliance).toMatch(new RegExp(`^EnvironmentFile=-\\S+/data/${file.replace(".", "\\.")}$`, "m"));
+      expect(x64Unit).toMatch(new RegExp(`^EnvironmentFile=-\\$PROJECT_DIR/data/${file.replace(".", "\\.")}$`, "m"));
+    }
+  });
+});
+

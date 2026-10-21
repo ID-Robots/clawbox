@@ -1640,6 +1640,10 @@ Environment=GATEWAY_PORT=$GATEWAY_PORT
 Environment=OPENCLAW_GATEWAY_PORT=$GATEWAY_PORT
 Environment=NODE_ENV=production
 Environment=PATH=$NPM_PREFIX/bin:$NODE_DIST_ROOT/bin:$CLAWBOX_HOME/.bun/bin:$CLAWBOX_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
+# The Slack and Teams secrets, which their SecretRefs in openclaw.json name
+# (written 0600 by the Settings setup; optional until a channel is set up).
+EnvironmentFile=-$PROJECT_DIR/data/slack.env
+EnvironmentFile=-$PROJECT_DIR/data/msteams.env
 ExecStartPre=$PROJECT_DIR/scripts/gateway-pre-start.sh
 ExecStart=$OPENCLAW_BIN gateway --allow-unconfigured --bind loopback
 Restart=always

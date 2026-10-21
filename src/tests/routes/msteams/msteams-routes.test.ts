@@ -50,7 +50,14 @@ import {
   waitForChannelConnected,
   type ChannelStatus,
 } from "@/lib/openclaw-channels";
-import { approveHermesChannelPairing, ensureHermesGateway, setHermesChannelSecrets } from "@/lib/hermes-channels";
+import {
+  approveHermesChannelPairing,
+  ensureHermesGateway,
+  hermesGatewayStatus,
+  hermesPlatformRegistered,
+  readHermesGatewaySnapshot,
+  setHermesChannelSecrets,
+} from "@/lib/hermes-channels";
 import { getHermesEnvValue, setHermesEnvValues } from "@/lib/hermes-env";
 
 const APP = "11111111-2222-3333-4444-555555555555";
@@ -205,6 +212,17 @@ describe("GET /setup-api/msteams/status", () => {
     const json = await (await GET()).json();
     expect(json).toMatchObject({ configured: true, state: "listening", receiving: null, account: APP });
     expect(mocks.row).toHaveBeenCalledWith("msteams");
+  });
+
+  it("calls a running Hermes Teams adapter listening too — never connected", async () => {
+    mocks.harness.mockResolvedValue("hermes");
+    mocks.get.mockResolvedValue(APP);
+    vi.mocked(hermesPlatformRegistered).mockResolvedValue(true);
+    vi.mocked(hermesGatewayStatus).mockResolvedValue({ running: true, answered: true } as never);
+    vi.mocked(readHermesGatewaySnapshot).mockResolvedValue({ gatewayState: "running", platform: { state: "connected" } } as never);
+    const { GET } = await import("@/app/setup-api/msteams/status/route");
+    const json = await (await GET()).json();
+    expect(json).toMatchObject({ configured: true, state: "listening", receiving: null, account: APP });
   });
 
   it("uses Hermes' Bot Framework port, 3978 when unset", async () => {

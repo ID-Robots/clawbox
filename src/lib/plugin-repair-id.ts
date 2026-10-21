@@ -39,6 +39,9 @@ export const ROW_PLUGIN_IDS: Readonly<Record<string, string>> = {
   openai: "codex",
   discord: "discord",
   whatsapp: "whatsapp",
+  slack: "slack",
+  signal: "signal",
+  msteams: "msteams",
 };
 
 /**

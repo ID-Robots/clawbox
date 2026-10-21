@@ -208,11 +208,16 @@ function receivingOf(state: GuidedChannelState | null): boolean | null {
 export function mapHermesGuidedState(
   gatewayRunning: boolean,
   snapshot: HermesGatewaySnapshot,
+  transport: GuidedChannelSpec["transport"] = "socket",
 ): GuidedChannelState {
   if (!gatewayRunning) return "offline";
   // A snapshot left behind by a gateway that is no longer the running one.
   if (snapshot.gatewayState !== null && snapshot.gatewayState !== "running") return "offline";
-  return snapshot.platform?.state === "connected" ? "connected" : "offline";
+  const up = snapshot.platform?.state === "connected";
+  // Hermes' "connected" for a webhook platform is its own listener being up:
+  // whether the service reaches it is still unknown, as on OpenClaw.
+  if (transport === "webhook") return up ? "listening" : "offline";
+  return up ? "connected" : "offline";
 }
 
 export interface GuidedChannelLiveStatus {
@@ -278,7 +283,7 @@ export async function readGuidedChannelStatus(
       readHermesGatewaySnapshot(spec.hermesPlatform),
     ]);
     const configured = registered ?? true;
-    const state = configured ? mapHermesGuidedState(gateway.running, snapshot) : "offline";
+    const state = configured ? mapHermesGuidedState(gateway.running, snapshot, spec.transport) : "offline";
     return {
       configured,
       verified: registered !== null,
