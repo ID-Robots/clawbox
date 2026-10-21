@@ -1840,6 +1840,32 @@ describe("counting sub-agents", () => {
       expect(announce).toHaveBeenCalledTimes(1);
     });
 
+    it("says the deliverable is there when the nudge for the helper cannot be started", async () => {
+      // The agent switched off while the run worked: the gate's nudge is refused
+      // at the spawn gate. `gave_up` would read "the deliverable is still not
+      // there" over a deliverable the card shows as met.
+      const flag = path.join(base, "settle-flag");
+      writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_completion_attempts: 2 });
+      installFakeWrapper([
+        `echo '${INIT}'`, `echo '${TESTER}'`, `echo '${TESTER_RECEIPT}'`, `echo '${WAITING}'`,
+        `while [ ! -f "${flag}" ]; do sleep 0.05; done`, `echo '${SUCCESS}'`, "exit 0",
+      ].join("\n"));
+      makeProject("site");
+      const id = (await lib.startRun({ task: "fix it", projectId: "site", source: "agent", deliverable: { kind: "paths", paths: ["index.html"] } })).id;
+      await vi.waitFor(() => { expect(lib.getRun(id)?.subagentsActive).toBe(1); }, { timeout: 15_000 });
+      writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: false, coding_agent_completion_attempts: 2 });
+      fs.writeFileSync(flag, "");
+      const run = await announced(id);
+      expect(run.deliverableCheck).toMatchObject({ ok: true });
+      expect(run.status).toBe("failed");
+      expect(run.resumable).toBe(true);
+      expect(run.error).toContain("tester (run the full suite)");
+      expect(run.error).toContain("Another attempt could not be started");
+      expect(run.error).not.toMatch(/still not there/);
+      expect(run.attempts).toHaveLength(1);
+      expect(announce).toHaveBeenCalledTimes(1);
+    });
+
     /** First spawn: touches a file and leaves the tester out. Later spawns (the review pass) run `review`. */
     const reviewedBody = (review: string[]) => [
       `n=$(cat "${spawnsFile()}" 2>/dev/null | wc -l); echo spawned >> "${spawnsFile()}"`,

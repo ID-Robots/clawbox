@@ -9783,8 +9783,9 @@ function leftBehindText(helpers: string[]): string {
 /** The ending for a run that left a helper behind with no attempt left to spend on it. */
 function failLeftBehind(run: CodingRun, why: string): void {
   run.status = "failed";
-  run.resumable = true;
-  run.error = `${why} Resume it to carry on in the same session.`.slice(0, MAX_ERROR_CHARS);
+  // Resumable when there is a session to carry on in, and only then said so.
+  run.resumable = run.sessionId !== null;
+  run.error = (run.resumable ? `${why} Resume it to carry on in the same session.` : why).slice(0, MAX_ERROR_CHARS);
   pushProgress(run, RUNNER_STEP.finished(run.status));
   persist(true);
   announceGatedRun(run);
@@ -10028,7 +10029,7 @@ async function enforceDeliverable(finished: CodingRun, ended: "stop" | "pause" |
       else giveUp(origin, missing, made);
       return;
     }
-    await startCompletionAttempt(origin, deliverable, missing, made + 1);
+    await startCompletionAttempt(origin, deliverable, missing, made + 1, unused !== null);
   } catch (err) {
     // The check itself broke. NOT a pass: that is the whole point of the
     // feature. The run is recorded as not having got there, with what went
@@ -10090,7 +10091,15 @@ async function startCompletionAttempt(
   deliverable: Deliverable,
   missing: string,
   attempt: number,
+  forHelper = false,
 ): Promise<void> {
+  // A nudge that cannot be made ends the run the way its reason says: the
+  // deliverable is there when the nudge was for an unused helper, and
+  // `gave_up`'s reason would say it is not.
+  const cannotGoAgain = (why: string) => {
+    if (forHelper) failLeftBehind(run, why);
+    else giveUp(run, why, run.attempts.length);
+  };
   // No session means there is nothing to CARRY ON from, and this loop's whole
   // premise is that there is: the nudge says "do not start over" because the
   // transcript of the attempt that just ended is still in front of the harness.
@@ -10098,7 +10107,7 @@ async function startCompletionAttempt(
   // missing file — the task redone from nothing, charged to the owner under the
   // name of "one more attempt". So the honest ending is recorded instead.
   if (!run.sessionId) {
-    giveUp(run, `${missing} There is no session to carry on in, so the box did not try again.`, run.attempts.length);
+    cannotGoAgain(`${missing} There is no session to carry on in, so the box did not try again.`);
     return;
   }
 
@@ -10120,7 +10129,7 @@ async function startCompletionAttempt(
     // the deliverable is not there. The reason says both halves, so the owner
     // is not left wondering why the attempts stopped short.
     const why = err instanceof Error ? err.message : String(err);
-    giveUp(run, `${missing} Another attempt could not be started: ${why}`, run.attempts.length);
+    cannotGoAgain(`${missing} Another attempt could not be started: ${why}`);
     return;
   }
   releaseSlot?.();
