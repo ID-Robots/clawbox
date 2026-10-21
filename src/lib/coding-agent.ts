@@ -9751,7 +9751,9 @@ function deliverableGateApplies(run: CodingRun): boolean {
  * Exact, not a heuristic: a named deliverable is frozen on the record and never
  * removed, and a run that got the implied one always had `openAttempt` push an
  * entry at its start — so "no deliverable and no attempt" is precisely a run
- * that was never gated, which `finishRun` announced itself.
+ * that was never gated, which `finishRun` announced itself. The one exception
+ * is a run held only for a helper it left behind (`store.helpersLeftBehind`):
+ * `enforceDeliverable`'s `leftBehind` branches announce that one, not this.
  */
 function wasGated(run: CodingRun): boolean {
   // `none` was never gated: `finishRun` announced it, so the gate must not again.
@@ -9919,7 +9921,10 @@ function announceGatedRun(run: CodingRun): void {
  * (`completed` stands), it is not and there are attempts left (the same record
  * goes back in, same session, with a nudge naming what is missing), or it is
  * not and there are none (`gave_up`, with the missing thing as the reason and
- * Resume as the way on).
+ * Resume as the way on). A helper's result the run never used counts as one
+ * more thing missing, with one difference at the end: the deliverable is
+ * there, so a run out of attempts — or with no deliverable at all — ends
+ * `failed` and resumable, its reason naming the helper (failLeftBehind).
  *
  * Never throws: it runs inside the settle chain, and a thrown error here would
  * leave a record whose notice was held back by `finishRun` and never sent.

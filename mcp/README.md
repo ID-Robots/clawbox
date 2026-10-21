@@ -903,9 +903,10 @@ shell tool, not less and not more:
   implied bar and nothing else, so a run that does commit still gets its pull
   request, and it cannot be combined with `deliverable_files`. When the check fails
   the device resumes the run IN ITS OWN SESSION with a nudge naming what is
-  missing, up to `coding_agent_completion_attempts` (default 3, the run's own
-  first turn counted as one), and then settles it as `gave_up` — a status of
-  its own, because the session is intact and Resume is what helps, where
+  missing, up to `coding_agent_completion_attempts` (default 1, the run's own
+  first turn counted as one, so there is no nudge until the owner raises it),
+  and then settles it as `gave_up` — a status of its own, because the session
+  is intact and Resume is what helps, where
   `failed` means the harness could not finish at all. `coding_agent_status`
   reports the bar, the verdict and the attempts, and says plainly not to start
   a fresh run for a `gave_up` one. A run that ended before it used the result
