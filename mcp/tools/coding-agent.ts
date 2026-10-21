@@ -1638,6 +1638,8 @@ interface TeamMetricsPayload {
   tokensUsed: number;
   /** The tokens by the role that spent them. Absent from an older server. */
   tokensByRole?: { planner: number; worker: number; reviewer: number; lead: number };
+  /** The tokens by the four ways a provider bills them. Absent from an older server. */
+  tokenBreakdown?: { input: number; output: number; cacheCreation: number; cacheRead: number };
   wallMs: number;
   /** Absent from an older server. */
   messagesSent?: number;
@@ -1768,7 +1770,8 @@ function describeTeam(team: TeamPayload, withLog: boolean): string {
     parts.push(
       `Metrics: runs planner ${m.plannerRuns}, worker ${m.workerRuns}, reviewer ${m.reviewerRuns}, lead ${m.leadRuns}; `
       + `tasks planned ${m.tasksPlanned}, added ${m.tasksAdded}, retired ${m.tasksRetired}, accepted first try ${m.tasksAcceptedFirstTry}, rejected ${m.tasksRejected}; `
-      + `tokens ${m.tokensUsed}${m.tokensByRole ? ` (planner ${m.tokensByRole.planner}, workers ${m.tokensByRole.worker}, reviewers ${m.tokensByRole.reviewer}, lead ${m.tokensByRole.lead})` : ""}; wall ${Math.round(m.wallMs / 1000)} s.`
+      + `tokens ${m.tokensUsed}${m.tokensByRole ? ` (planner ${m.tokensByRole.planner}, workers ${m.tokensByRole.worker}, reviewers ${m.tokensByRole.reviewer}, lead ${m.tokensByRole.lead})` : ""}`
+      + `${m.tokenBreakdown ? ` — input ${m.tokenBreakdown.input}, output ${m.tokenBreakdown.output}, cache write ${m.tokenBreakdown.cacheCreation}, cache read ${m.tokenBreakdown.cacheRead}` : ""}; wall ${Math.round(m.wallMs / 1000)} s.`
       + (typeof m.messagesSent === "number"
         ? ` Messages: ${m.messagesSent} sent — ${m.messagesToLead ?? 0} to the lead, ${m.messagesToSibling ?? 0} to a sibling, ${m.messagesUndelivered ?? 0} not delivered.`
         : ""),

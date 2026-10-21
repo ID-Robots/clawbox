@@ -703,9 +703,11 @@ export function maxParallelRunsFrom(raw: unknown): number {
  * A run with neither settles exactly as it always did, so this setting costs a
  * box that does not use deliverables nothing at all.
  *
- * Three by default, and the count includes the run's own first turn — so the
- * default buys two resumes. One is a real setting and means "check it, tell me,
- * spend nothing more".
+ * One by default (`DEFAULT_COMPLETION_ATTEMPTS`), and the count includes the
+ * run's own first turn — so the default buys no resume: check it, tell me,
+ * spend nothing more. An owner can raise it to six in all
+ * (`MAX_COMPLETION_ATTEMPTS`); each attempt past the first is one resume of
+ * the whole session.
  */
 export const CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY = "coding_agent_completion_attempts";
 

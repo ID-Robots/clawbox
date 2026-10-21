@@ -64,6 +64,12 @@ describe("the diet setting", () => {
     expect(savedConfig().coding_agent_diet).toEqual({ brief: "full", helpers: "always", visualTools: "always", context: "full" });
   });
 
+  it("names every diet setting in its usage answer", async () => {
+    const res = await post({ nothing: true });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("{ diet: { brief?, helpers?, visualTools?, context? } }");
+  });
+
   it.each([
     [{ brief: "tiny" }, "diet_invalid_value"],
     [{ visualTools: false }, "diet_invalid_value"],

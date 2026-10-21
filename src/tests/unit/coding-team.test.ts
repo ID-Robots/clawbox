@@ -91,6 +91,7 @@ type Team = typeof import("@/lib/coding-team");
 let team: Team;
 
 type RoleModelMap = import("@/lib/coding-agent").TeamRoleModelMap;
+type TokenBreakdown = import("@/lib/coding-agent").TokenBreakdown;
 /**
  * What each role starts on, as `teamRoleModelMap` answers: every role on
  * ClawBox AI and ready — the box every case here ran on before there were
@@ -113,7 +114,7 @@ let starts: Array<Record<string, unknown>>;
 let seq: number;
 /** Worker/planner runs take the scripted `outcomes` in order; reviewer runs take `reviews`, accepting by default. */
 let workerSeq: number;
-let reviews: Array<{ summary?: string; status?: string; error?: string; tokensUsed?: number }>;
+let reviews: Array<{ summary?: string; status?: string; error?: string; tokensUsed?: number; tokenBreakdown?: TokenBreakdown }>;
 /** Lead runs take these in order; a lead with nothing scripted answers `{}` (the plan stands). */
 let leadAnswers: Array<{ summary?: string; status?: string; error?: string; tokensUsed?: number }>;
 let merges: Array<{ ok: boolean; conflict?: boolean }>;
@@ -146,7 +147,7 @@ function fakeRun(input: Record<string, unknown>): Record<string, unknown> {
  * way. Deliberately not called `then` — an object with a `then` field is a
  * thenable, and the fake runner returns these records from an async function.
  */
-let outcomes: Array<Partial<{ status: string; summary: string; resultText: string; error: string; filesTouched: string[]; permissionDenials: number; deniedActions: string[]; denials: Array<{ text: string; rule: string | null; refusal: null; worktreePath?: string; fullText?: string }>; worktreeHints: number; commitError: string | null; tokensUsed: number; model: string; modelsUsed: string[]; resumesAs: Record<string, unknown> }>>;
+let outcomes: Array<Partial<{ status: string; summary: string; resultText: string; error: string; filesTouched: string[]; permissionDenials: number; deniedActions: string[]; denials: Array<{ text: string; rule: string | null; refusal: null; worktreePath?: string; fullText?: string }>; worktreeHints: number; commitError: string | null; tokensUsed: number; tokenBreakdown: TokenBreakdown; model: string; modelsUsed: string[]; resumesAs: Record<string, unknown> }>>;
 
 beforeEach(async () => {
   root = fs.mkdtempSync(path.join(os.tmpdir(), "coding-team-"));
@@ -2478,6 +2479,41 @@ describe("the team's figures", () => {
     expect(done.finishedAt).toEqual(expect.any(Number));
     expect(done.metrics.wallMs).toBe(done.finishedAt! - done.createdAt);
     const onDisk = JSON.parse(fs.readFileSync(path.join(root, "data", "coding-team", `${board.id}.json`), "utf8"));
+    expect(onDisk.metrics).toEqual(done.metrics);
+  });
+
+  it("copies each run's tokens by kind from its own record onto the cast list and adds them up, in total and by role", async () => {
+    const kind = (input: number, output: number, cacheCreation: number, cacheRead: number) => ({ input, output, cacheCreation, cacheRead });
+    outcomes = [
+      { summary: PLAN, tokensUsed: 1_100, tokenBreakdown: kind(600, 100, 400, 0) },
+      { summary: "index", filesTouched: ["index.html"], tokensUsed: 20_000, tokenBreakdown: kind(2_000, 500, 1_500, 16_000) },
+      { summary: "app", filesTouched: ["app.js"], tokensUsed: 30_000, tokenBreakdown: kind(3_000, 700, 1_300, 25_000) },
+    ];
+    reviews = [
+      { summary: JSON.stringify({ verdict: "accepted", notes: "" }), tokensUsed: 5_000, tokenBreakdown: kind(1_000, 200, 0, 3_800) },
+      // A record without the field: its total counts, its kinds stay off the cast list.
+      { summary: JSON.stringify({ verdict: "accepted", notes: "" }), tokensUsed: 6_000 },
+    ];
+    const board = await team.startTeam({ goal: "Build it", directory: "site", source: "owner" });
+    const done = await finished(board.id);
+    expect(done.status).toBe("done");
+    expect(done.runs.map((r) => [r.role, r.tokens, r.tokenBreakdown])).toEqual([
+      ["planner", 1_100, kind(600, 100, 400, 0)],
+      ["worker", 20_000, kind(2_000, 500, 1_500, 16_000)],
+      ["reviewer", 5_000, kind(1_000, 200, 0, 3_800)],
+      ["worker", 30_000, kind(3_000, 700, 1_300, 25_000)],
+      ["reviewer", 6_000, undefined],
+    ]);
+    expect(done.metrics.tokensUsed).toBe(62_100);
+    expect(done.metrics.tokenBreakdown).toEqual(kind(6_600, 1_500, 3_200, 44_800));
+    expect(done.metrics.tokenBreakdownByRole).toEqual({
+      planner: kind(600, 100, 400, 0),
+      worker: kind(5_000, 1_200, 2_800, 41_000),
+      reviewer: kind(1_000, 200, 0, 3_800),
+      lead: kind(0, 0, 0, 0),
+    });
+    const onDisk = JSON.parse(fs.readFileSync(path.join(root, "data", "coding-team", `${board.id}.json`), "utf8"));
+    expect(onDisk.runs.map((r: { tokenBreakdown?: unknown }) => r.tokenBreakdown)).toEqual(done.runs.map((r) => r.tokenBreakdown));
     expect(onDisk.metrics).toEqual(done.metrics);
   });
 });

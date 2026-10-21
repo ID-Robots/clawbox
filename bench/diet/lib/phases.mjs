@@ -6,6 +6,9 @@
 // block), each carrying the whole message's usage, and a helper's first line
 // can carry output_tokens 0 — so each message id is counted ONCE with the
 // LARGEST figure its lines carry (the rule ../../lib/transcript.mjs learned).
+//
+// A coding TEAM's runs are not split here: the team board accounts for them
+// (its metrics' tokenBreakdown, in total and by role, from each run's record).
 import fs from "node:fs";
 import path from "node:path";
 
