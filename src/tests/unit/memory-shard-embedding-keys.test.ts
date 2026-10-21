@@ -65,6 +65,7 @@ vi.mock("@/lib/memory-embedder", async (importOriginal) => ({
 const cloudEmbeddingsOff = vi.hoisted(() => ({ value: false }));
 vi.mock("@/lib/clawai-cloud-embeddings", () => ({
   CLOUD_EMBEDDING_MODEL: "text-embedding-3-large",
+  OPENCLAW_CLOUD_EMBEDDING_MODEL: "text-embedding-3-small",
   CLOUD_EMBEDDING_PROVIDER: "openai-compatible",
   cloudEmbeddingsUrl: () => CLOUD_ENDPOINT,
   embeddingsBaseUrlOf: (endpoint: string) => endpoint.replace(/\/+$/, "").replace(/\/embeddings$/, ""),
@@ -264,6 +265,20 @@ describe("switchToLocalEmbeddings", () => {
     expect(stampLocalEmbeddingIdentity).toHaveBeenCalledTimes(1);
     expect(runOpenclawConfigSetBatch).not.toHaveBeenCalled();
     expect(readFile).not.toHaveBeenCalled();
+  });
+});
+
+describe("switchToCloudEmbeddings on an OpenClaw box", () => {
+  it("points OpenClaw's index at the SMALL cloud model, never the 3,072-dimension one", async () => {
+    // OpenClaw keeps its vectors in every agent's database beside the sessions;
+    // on a box with ~10 GB agent databases the index was 82 % of the file.
+    installedCore("2026.10.3");
+    await switchToCloudEmbeddings(CLOUD_ENDPOINT, "claw_test");
+    expect(runOpenclawConfigSetBatch).toHaveBeenCalledTimes(1);
+    const [batch] = runOpenclawConfigSetBatch.mock.calls[0] as unknown as [string[][]];
+    expect(batch).toContainEqual(["memory.search.model", "text-embedding-3-small"]);
+    expect(batch.some(([, value]) => value === "text-embedding-3-large")).toBe(false);
+    expect(batch[batch.length - 1]).toEqual(["memory.search.provider", "openai-compatible"]);
   });
 });
 

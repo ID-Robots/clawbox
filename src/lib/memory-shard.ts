@@ -27,8 +27,8 @@ import {
 } from "@/lib/memory-embedder";
 import { getEmbedProxyBaseUrl } from "@/lib/embed-server";
 import {
-  CLOUD_EMBEDDING_MODEL,
   CLOUD_EMBEDDING_PROVIDER,
+  OPENCLAW_CLOUD_EMBEDDING_MODEL,
   cloudEmbeddingsSwitchedOff,
   embeddingEndpointParseable,
   embeddingsBaseUrlOf,
@@ -441,8 +441,10 @@ export async function switchToCloudEmbeddings(endpoint: string, token: string): 
     return;
   }
   const home = embeddingConfigHome(await installedOpenclawVersion());
+  // OpenClaw's index on the SMALL cloud model: its vectors sit in every agent's
+  // database beside the sessions (see OPENCLAW_CLOUD_EMBEDDING_MODEL).
   await runOpenclawConfigSetBatch([
-    [`${home}.model`, CLOUD_EMBEDDING_MODEL],
+    [`${home}.model`, OPENCLAW_CLOUD_EMBEDDING_MODEL],
     [`${home}.remote.baseUrl`, embeddingsBaseUrlOf(endpoint)],
     [`${home}.remote.apiKey`, token],
     [`${home}.provider`, CLOUD_EMBEDDING_PROVIDER],
