@@ -106,6 +106,8 @@ const STEP_KEY: Record<ProgressLabelKey, string> = {
   droppedSteps: "codingAgent.stepDropped",
   secretsInjected: "codingAgent.stepSecretsInjected",
   secretsUnreadable: "codingAgent.stepSecretsUnreadable",
+  mcpServers: "codingAgent.stepMcpServers",
+  mcpServersMissing: "codingAgent.stepMcpServersMissing",
   anthropicAccount: "codingAgent.stepAnthropicAccount",
   accountSwitched: "codingAgent.stepAccountSwitched",
   accountRefused: "codingAgent.stepAccountRefused",

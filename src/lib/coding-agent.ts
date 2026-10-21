@@ -200,6 +200,8 @@ import {
   type ResolvedRunSecrets,
 } from "@/lib/project-secrets";
 import { forgetRunSecrets, redactForRun, registerRunSecrets } from "@/lib/secret-redact";
+import { CLAWBOX_READ_ONLY_TOOLS, RUN_READ_PROFILE } from "@/lib/clawbox-run-read-tools";
+import { CLAWBOX_READ_ONLY_ENTRY, resolveRunMcpPlan, type RunMcpPlan } from "@/lib/project-mcp-servers";
 import {
   anotherAccountLikely,
   accountsSnapshot,
@@ -1030,6 +1032,58 @@ function streamLogPath(runId: string): string {
 
 function stderrLogPath(runId: string): string {
   return path.join(STREAM_DIR, `${runId}.err`);
+}
+
+/**
+ * A run's MCP config when its project opted into more than today's server
+ * (src/lib/project-mcp-servers.ts): the harness server entries WITH their
+ * env and headers, so a FILE — 0600, beside the stream logs — and never argv,
+ * which is world-readable in /proc, nor the evidence folder, which the run
+ * itself reads through --add-dir. Beside the stream logs because that folder
+ * is already denied to every run by name (DATA_SECRET_FILES), so the file
+ * adds no entry under data/ for any other run's deny list to discover — and a
+ * team's runs are live together. One file per spawn; the settle deletes it
+ * (cleanupRunResources), and the boot hook takes what a crash left.
+ */
+const RUN_MCP_CONFIG_RE = /^(run-[A-Za-z0-9_-]+)\.mcp-[0-9a-f]+\.json$/;
+
+/** Write one spawn's MCP config; answers the path for `--mcp-config`. Synchronous — the spawn is. */
+export function writeRunMcpConfig(runId: string, json: string): string {
+  // The id itself, not the basename of what it joins to: a separator in it
+  // would put the file somewhere the deny list does not name.
+  if (!/^run-[A-Za-z0-9_-]+$/.test(runId)) throw new Error("invalid run id for an MCP config");
+  fs.mkdirSync(STREAM_DIR, { recursive: true, mode: 0o700 });
+  const file = path.join(STREAM_DIR, `${runId}.mcp-${randomBytes(6).toString("hex")}.json`);
+  // `wx`: never over the top of something already there.
+  fs.writeFileSync(file, json, { mode: 0o600, flag: "wx" });
+  fs.chmodSync(file, 0o600);
+  return file;
+}
+
+/** Remove every MCP config this run's spawns were given. */
+export function removeRunMcpConfigs(runId: string): void {
+  let names: string[];
+  try {
+    names = fs.readdirSync(STREAM_DIR);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (RUN_MCP_CONFIG_RE.exec(name)?.[1] === runId) fs.rmSync(path.join(STREAM_DIR, name), { force: true });
+  }
+}
+
+/** At boot: every MCP config a server that died left behind. A harness reads its config once, at start, so even a run that is reattached no longer needs its file. */
+function sweepRunMcpConfigs(): void {
+  let names: string[];
+  try {
+    names = fs.readdirSync(STREAM_DIR);
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    if (RUN_MCP_CONFIG_RE.test(name)) fs.rmSync(path.join(STREAM_DIR, name), { force: true });
+  }
 }
 
 /** How often the tail of a live run's stream log is read. */
@@ -4960,6 +5014,8 @@ interface RunStore {
   runSecretEnv: Map<string, Record<string, string>>;
   /** The Anthropic account a run's next spawn uses, credential included — see runAnthropicCredential. */
   runAnthropicCredential: Map<string, RunAnthropicCredential>;
+  /** The MCP servers a run's project opted into, credentials included — see runMcpPlan. */
+  runMcpPlan: Map<string, RunMcpPlan>;
   /** The runs whose pull request or review is already being watched. */
   prWatchers: Set<string>;
   reviewWatchers: Set<string>;
@@ -5003,6 +5059,7 @@ const store = processStore<RunStore>(RUNS_PATH, () => ({
   exitHookInstalled: false,
   runSecretEnv: new Map<string, Record<string, string>>(),
   runAnthropicCredential: new Map<string, RunAnthropicCredential>(),
+  runMcpPlan: new Map<string, RunMcpPlan>(),
   prWatchers: new Set<string>(),
   reviewWatchers: new Set<string>(),
   settling: new Set<Promise<void>>(),
@@ -5053,6 +5110,10 @@ const LOST_TO_RESTART = "The box restarted while the run was live, so it did not
  * before this existed — can only ever be the third.
  */
 export async function reconcileAfterRestart(): Promise<number> {
+  // What a server that died mid-run left of its runs' MCP config files: each
+  // was read by its harness at start, and its credentials are not left lying
+  // about for the next settle to maybe find.
+  sweepRunMcpConfigs();
   const list = loadRuns();
   let repaired = 0;
   let changed = false;
@@ -6218,6 +6279,9 @@ const FILE_TOOLS = ["Read", "Edit", "Write", "NotebookEdit", "Glob", "Grep"] as 
 // spawn, after that spawn's rules have already been computed from what was on
 // disk, so discovery alone would leave it open for one run — every other run's
 // log is deleted at its settle, but a team's three workers are live together.
+// It is also where a run's MCP config FILE waits (writeRunMcpConfig) when its
+// project opted into a harness server: that file holds the server's env and
+// headers, and is denied to every run — its own included — by this one name.
 //
 // secrets.json is the newest and the plainest of them: the owner's own
 // credentials, encrypted with a key derived from `.session-secret` — which is
@@ -6420,6 +6484,15 @@ export const MCP_MEDIA_TOOLS: Record<keyof RunMedia, string> = {
  */
 export const MCP_TEAM_TOOL = "mcp__clawbox__team_message";
 
+/**
+ * "ClawBox read-only tools", approved by name for a run whose project ticked
+ * them (src/lib/project-mcp-servers.ts) — the same readOnly set the run's
+ * server registers under the `run-read` profile (src/lib/clawbox-run-read-tools.ts).
+ * Never a whole-server `mcp__clawbox`: a write tool the profile ever let
+ * through would still wait for an approval nobody is there to give.
+ */
+export const MCP_READ_ONLY_TOOLS: readonly string[] = CLAWBOX_READ_ONLY_TOOLS.map((tool) => `mcp__clawbox__${tool}`);
+
 /** Every MCP tool this run may call: the browser family, plus what it may draw and say. */
 export function runMcpTools(media: RunMedia | undefined): string[] {
   const tools: string[] = [...MCP_BROWSER_TOOLS];
@@ -6446,48 +6519,86 @@ export function runMediaEnv(media: RunMedia | undefined): string {
  * contract test.
  */
 export function buildRunMcpConfig(run: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null }, opts: { visual?: boolean } = {}): string {
+  return JSON.stringify({ mcpServers: { clawbox: runClawboxServer(run, { visual: opts.visual !== false, readOnlyTools: false }) } });
+}
+
+/**
+ * The MCP config FILE of a run whose project opted into more
+ * (writeRunMcpConfig): the run's own clawbox server — in the `run-read`
+ * profile when the read-only tools were ticked, and only when it has anything
+ * to register — beside the harness servers exactly as the plan carries them.
+ * Exported for the contract test.
+ */
+export function buildRunMcpFileConfig(run: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null }, plan: Pick<RunMcpPlan, "servers" | "readOnlyTools">, opts: { visual: boolean }): string {
+  const clawbox = opts.visual || run.team || plan.readOnlyTools
+    ? { clawbox: runClawboxServer(run, { visual: opts.visual, readOnlyTools: plan.readOnlyTools }) }
+    : {};
+  return JSON.stringify({ mcpServers: { ...clawbox, ...plan.servers } }, null, 2);
+}
+
+/** The run's own clawbox server entry. */
+function runClawboxServer(run: { id: string; directory: string; media?: RunMedia; team?: RunTeam | null }, opts: { visual: boolean; readOnlyTools: boolean }) {
   // A run the diet judged NOT visual (src/lib/coding-diet.ts) holds neither the
   // browser family nor the media tools: its server is told so, and registers
   // only what is left (a team run's `team_message`). Omitted, today's server.
-  const visual = opts.visual !== false;
+  const visual = opts.visual;
   const media = visual ? runMediaEnv(run.media) : "";
-  return JSON.stringify({
-    mcpServers: {
-      clawbox: {
-        command: path.join(homeDir(), ".bun", "bin", "bun"),
-        args: ["run", path.join(CONFIG_ROOT, "mcp", "clawbox-mcp.ts")],
-        env: {
-          CLAWBOX_API_BASE: `http://127.0.0.1:${process.env.PORT || "80"}`,
-          CLAWBOX_ROOT: CONFIG_ROOT,
-          CLAWBOX_MCP_PROFILE: "browser",
-          CLAWBOX_RUN_ARTIFACTS_DIR: artifactsDir(run.id),
-          // Where the assets this run was handed were staged. Named the same
-          // way the evidence folder is, and for the same reason: the brief
-          // talks about it, so it has to be one string the run can read rather
-          // than a path it is expected to guess.
-          CLAWBOX_RUN_INPUTS_DIR: runInputsDir(run.id),
-          CLAWBOX_RUN_DIR: run.directory,
-          ...(media ? { CLAWBOX_RUN_MEDIA: media } : {}),
-          // Absent means the browser family registers, as it always has; "0"
-          // is a run that holds none of it (mcp/lib/run-context.ts).
-          ...(visual ? {} : { CLAWBOX_RUN_BROWSER: "0" }),
-          // Only for a run of a coding team, and all four or none: the server
-          // registers `team_message` from them (mcp/lib/run-context.ts), and
-          // the tool speaks as THIS run — the route then checks the claim
-          // against the team's board, so a variable is a name, not a pass.
-          // `none` for the planner, whose run has no task of its own.
-          ...(run.team
-            ? {
-                CLAWBOX_RUN_ID: run.id,
-                CLAWBOX_TEAM_ID: run.team.id,
-                CLAWBOX_TEAM_ROLE: run.team.role,
-                CLAWBOX_TEAM_TASK: run.team.taskId ?? "none",
-              }
-            : {}),
-        },
-      },
+  return {
+    command: path.join(homeDir(), ".bun", "bin", "bun"),
+    args: ["run", path.join(CONFIG_ROOT, "mcp", "clawbox-mcp.ts")],
+    env: {
+      CLAWBOX_API_BASE: `http://127.0.0.1:${process.env.PORT || "80"}`,
+      CLAWBOX_ROOT: CONFIG_ROOT,
+      // `run-read` only for a project that ticked "ClawBox read-only
+      // tools": the browser family as below, plus every readOnly tool.
+      CLAWBOX_MCP_PROFILE: opts.readOnlyTools ? RUN_READ_PROFILE : "browser",
+      CLAWBOX_RUN_ARTIFACTS_DIR: artifactsDir(run.id),
+      // Where the assets this run was handed were staged. Named the same
+      // way the evidence folder is, and for the same reason: the brief
+      // talks about it, so it has to be one string the run can read rather
+      // than a path it is expected to guess.
+      CLAWBOX_RUN_INPUTS_DIR: runInputsDir(run.id),
+      CLAWBOX_RUN_DIR: run.directory,
+      ...(media ? { CLAWBOX_RUN_MEDIA: media } : {}),
+      // Absent means the browser family registers, as it always has; "0"
+      // is a run that holds none of it (mcp/lib/run-context.ts).
+      ...(visual ? {} : { CLAWBOX_RUN_BROWSER: "0" }),
+      // Only for a run of a coding team, and all four or none: the server
+      // registers `team_message` from them (mcp/lib/run-context.ts), and
+      // the tool speaks as THIS run — the route then checks the claim
+      // against the team's board, so a variable is a name, not a pass.
+      // `none` for the planner, whose run has no task of its own.
+      ...(run.team
+        ? {
+            CLAWBOX_RUN_ID: run.id,
+            CLAWBOX_TEAM_ID: run.team.id,
+            CLAWBOX_TEAM_ROLE: run.team.role,
+            CLAWBOX_TEAM_TASK: run.team.taskId ?? "none",
+          }
+        : {}),
     },
-  });
+  };
+}
+
+/**
+ * Does this run hold the browser and media tools? Always under the legacy
+ * diet; under "auto", only a run judged visual. An undecided run errs on the
+ * side of the tools. One rule for the argv and the run's MCP config file.
+ */
+export function runHoldsVisualTools(diet: CodingDiet, visual: boolean | null | undefined): boolean {
+  return diet.visualTools === "always" || visual !== false;
+}
+
+/** What a run whose project opted into more MCP servers adds to its argv (spawnRun). */
+export interface RunMcpArgs {
+  /** The 0600 file writeRunMcpConfig wrote for this spawn. */
+  configFile: string;
+  /** The harness servers' approvals: `mcp__<server>` or `mcp__<server>__<tool>`. */
+  allowedTools: readonly string[];
+  /** What the harness's own exclude filters name. */
+  disallowedTools: readonly string[];
+  /** The run's server is in the `run-read` profile: approve MCP_READ_ONLY_TOOLS. */
+  readOnlyTools: boolean;
 }
 
 /** The argv handed to the wrapper. Exported for the contract test. */
@@ -6498,12 +6609,19 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
   visual?: boolean;
   /** The task talks about a pull request — the lean brief's auto-merge sentence. */
   pullRequestMentioned?: boolean;
+  /**
+   * The MCP servers the run's project opted into (src/lib/project-mcp-servers.ts).
+   * Omitted — every run whose project ticked nothing — is today's argv, byte
+   * for byte. Never for a read-only run.
+   */
+  mcp?: RunMcpArgs | null;
 }): string[] {
   const diet = opts.diet ?? LEGACY_DIET;
-  // Does this run hold the browser and media tools? Always under the legacy
-  // diet; under "auto", only a run judged visual. An undecided run errs on
-  // the side of the tools.
-  const visual = diet.visualTools === "always" || opts.visual !== false;
+  // Does this run hold the browser and media tools? See runHoldsVisualTools.
+  const visual = runHoldsVisualTools(diet, opts.visual);
+  // The project's extra servers: a writing run's only (prepareRunMcp hands a
+  // read-only run none, and this is the last place before argv).
+  const mcp = opts.run && !opts.readOnly ? opts.mcp ?? null : null;
   // A run whose diff a separate review will read is told not to review it
   // twice — see REVIEWER_CLAUSE_SLOT. A team's run is told it never merges.
   const headless = headlessBrief({
@@ -6576,7 +6694,12 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     // A run without the visual tools that is not in a team has nothing left
     // for our server to register, so it gets no server at all — and the
     // strict flag alone still keeps the owner's own servers out.
-    if (visual || opts.run.team) args.push("--mcp-config", buildRunMcpConfig(opts.run, { visual }));
+    // A run whose project opted into more names the FILE holding them —
+    // ours, plus the harness servers the owner ticked, with their
+    // credentials, which is why it is not inline. The strict flag above
+    // stays: still nothing the owner did not tick for THIS project.
+    if (mcp) args.push("--mcp-config", mcp.configFile);
+    else if (visual || opts.run.team) args.push("--mcp-config", buildRunMcpConfig(opts.run, { visual }));
     // acceptEdits only covers the working folder; without this, the run's own
     // Write into its evidence folder is denied — the brief's promise broken
     // (measured on run-yuyqta4t: pomodoro-verification.md refused).
@@ -6627,7 +6750,11 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     const allowRules = normalizeAllowRules(opts.allowRules, allowRuleHomeContext());
     // A team run's `team_message` is approved whatever else the run may do —
     // read-only included (see MCP_TEAM_TOOL) — and only for a team run.
-    args.push("--allowedTools", ...(opts.readOnly ? [] : ["Bash(*)"]), ...(opts.effort === ULTRACODE_EFFORT ? [WORKFLOW_TOOL] : []), ...(opts.run && !opts.readOnly && visual ? runMcpTools(opts.run.media) : []), ...(opts.run?.team ? [MCP_TEAM_TOOL] : []), TMP_READ_RULE, inputsReadRule(), ...allowRules);
+    // The project's extra servers come right after the run's own MCP tools:
+    // the read-only ClawBox tools by name, a harness server as a whole or by
+    // the tools its own filter names.
+    const mcpAllowed = mcp ? [...(mcp.readOnlyTools ? MCP_READ_ONLY_TOOLS : []), ...mcp.allowedTools] : [];
+    args.push("--allowedTools", ...(opts.readOnly ? [] : ["Bash(*)"]), ...(opts.effort === ULTRACODE_EFFORT ? [WORKFLOW_TOOL] : []), ...(opts.run && !opts.readOnly && visual ? runMcpTools(opts.run.media) : []), ...(opts.run?.team ? [MCP_TEAM_TOOL] : []), ...mcpAllowed, TMP_READ_RULE, inputsReadRule(), ...allowRules);
     // The file rules, and the one command list that is enforced: nothing a
     // run runs may kill the box's own server by name (BASH_KILL_DENYLIST).
     //
@@ -6635,7 +6762,9 @@ export function buildRunArgs(opts: { resumeSessionId?: string | null; maxTurns?:
     // outranks an allow rule: without handing them over here, an owner rule for
     // the harness's own project notes would sit in argv underneath the
     // wholesale `~/.claude-ds/**` deny and grant exactly nothing.
-    args.push("--disallowedTools", ...fileDenyRules(allowRules), ...(opts.readOnly ? [] : BASH_KILL_DENYLIST), ...(opts.run?.team && !opts.readOnly ? TEAM_MERGE_DENYLIST : []));
+    // A harness server's exclude filter holds in the run too, and a deny
+    // outranks the whole-server approval above.
+    args.push("--disallowedTools", ...fileDenyRules(allowRules), ...(opts.readOnly ? [] : BASH_KILL_DENYLIST), ...(opts.run?.team && !opts.readOnly ? TEAM_MERGE_DENYLIST : []), ...(mcp?.disallowedTools ?? []));
   }
   return args;
 }
@@ -6700,12 +6829,16 @@ const runSecretEnv = store.runSecretEnv;
  * would hand a run a token and then print it.
  */
 async function prepareRunSecrets(run: CodingRun): Promise<ResolvedRunSecrets> {
-  const resolved = await resolveSecretsForRun({ project: await projectScopeFor(run) });
+  const project = await projectScopeFor(run);
+  const resolved = await resolveSecretsForRun({ project });
   runSecretEnv.set(run.id, resolved.env);
   // The Anthropic account rides the same path: every async spawn comes through
   // here just before it, which is exactly where "which account is first in
   // line right now" should be asked (TASK-902).
   await prepareRunAccount(run);
+  // …and the project's MCP servers, whose credentials the table below must
+  // know before the child that holds them exists.
+  await prepareRunMcp(run, project);
   registerRunRedaction(run.id);
   run.secretNames = resolved.names;
   if (resolved.names.length > 0) pushProgress(run, RUNNER_STEP.secretsInjected(resolved.names));
@@ -6729,6 +6862,47 @@ interface RunAnthropicCredential {
 
 const runAnthropicCredential: Map<string, RunAnthropicCredential> =
   store.runAnthropicCredential ?? (store.runAnthropicCredential = new Map<string, RunAnthropicCredential>());
+
+/**
+ * The MCP servers a run's project opted into (src/lib/project-mcp-servers.ts),
+ * WITH the env and header values its config file carries — in memory beside
+ * the owner's secrets, dropped with them, never on the record, which names the
+ * servers in the run's feed and nothing else.
+ */
+const runMcpPlan: Map<string, RunMcpPlan> =
+  store.runMcpPlan ?? (store.runMcpPlan = new Map<string, RunMcpPlan>());
+
+/** How the run's feed names an allowlist entry. */
+function mcpEntryLabel(name: string): string {
+  return name === CLAWBOX_READ_ONLY_ENTRY ? "ClawBox read-only tools" : name;
+}
+
+/**
+ * Read what this run's project ticked, against what this box's harness is
+ * configured with right now. Re-read at every spawn, like the secrets: a
+ * resume does not hand back a server the owner has since un-ticked.
+ *
+ * Never throws, and fails CLOSED: anything that cannot be read is a run with
+ * exactly today's tools. A read-only run gets none of it — it has no Bash, no
+ * Write and no browser, and a third-party server's own "read-only" hint is not
+ * something this box can check.
+ */
+async function prepareRunMcp(run: CodingRun, project: string | null): Promise<void> {
+  runMcpPlan.delete(run.id);
+  if (run.readOnly) return;
+  let plan: RunMcpPlan | null = null;
+  try {
+    plan = await resolveRunMcpPlan(project);
+  } catch (err) {
+    console.error(`[coding-agent] ${run.id}: the project's MCP servers could not be read:`, err instanceof Error ? err.message : err);
+  }
+  if (!plan) return;
+  if (plan.names.length > 0) {
+    runMcpPlan.set(run.id, plan);
+    pushProgress(run, RUNNER_STEP.mcpServers(plan.names.map(mcpEntryLabel)));
+  }
+  if (plan.missing.length > 0) pushProgress(run, RUNNER_STEP.mcpServersMissing(plan.missing.map(mcpEntryLabel)));
+}
 
 /**
  * Choose the account for an `anthropic` run's next spawn: the first usable one
@@ -6768,6 +6942,9 @@ function registerRunRedaction(runId: string): void {
   const list = Object.entries(runSecretEnv.get(runId) ?? {}).map(([name, value]) => ({ name, value }));
   const account = runAnthropicCredential.get(runId);
   if (account?.credential.secret) list.push({ name: "ANTHROPIC_ACCOUNT", value: account.credential.secret });
+  // Every env and header value of the project's MCP servers: the run holds
+  // them through its config file, and one it echoes must not reach the record.
+  list.push(...(runMcpPlan.get(runId)?.secrets ?? []));
   registerRunSecrets(runId, list);
 }
 
@@ -6788,9 +6965,10 @@ function registerRunRedaction(runId: string): void {
  * the deliverable gate. Those are the paths where re-reading is the right
  * answer, because time has passed and the owner may have changed their mind.
  */
-function restoreRunSecrets(runId: string, env: Record<string, string>, account?: RunAnthropicCredential): void {
+function restoreRunSecrets(runId: string, env: Record<string, string>, account?: RunAnthropicCredential, mcp?: RunMcpPlan): void {
   runSecretEnv.set(runId, env);
   if (account) runAnthropicCredential.set(runId, account);
+  if (mcp) runMcpPlan.set(runId, mcp);
   registerRunRedaction(runId);
 }
 
@@ -6799,6 +6977,7 @@ function restoreRunSecrets(runId: string, env: Record<string, string>, account?:
 function dropRunSecrets(runId: string): void {
   runSecretEnv.delete(runId);
   runAnthropicCredential.delete(runId);
+  runMcpPlan.delete(runId);
   forgetRunSecrets(runId);
 }
 
@@ -7055,6 +7234,8 @@ function cleanupRunResources(run: CodingRun, state: LiveRun | null): void {
   // A credential handoff the wrapper never got to read (it died first, or
   // never started) goes with the process it was written for.
   removeCredentialHandoffs(run.id);
+  // …and so does the MCP config file with the project's server credentials.
+  removeRunMcpConfigs(run.id);
   // The run's own tab, never the owner's: browser sessions are tagged with the
   // run that opened them and a run always gets a new page (browser-sessions.ts).
   void closeSessionsForRun(run.id).catch(() => {});
@@ -10928,6 +11109,7 @@ async function continueOnAnotherAccount(
   why: AccountTrouble,
   carriedSecrets: Record<string, string> | undefined,
   carriedAccount: RunAnthropicCredential | undefined,
+  carriedMcp: RunMcpPlan | undefined,
 ): Promise<void> {
   const fromId = run.anthropicAccount;
   const fromLabel = carriedAccount?.label ?? accountsSnapshot()?.find((a) => a.id === fromId)?.label ?? null;
@@ -11020,7 +11202,7 @@ async function continueOnAnotherAccount(
     accountId: prepared.account.id,
     label: prepared.account.label,
     credential: prepared.credential,
-  });
+  }, carriedMcp);
   const from = fromLabel ?? "the previous account";
   if (why.kind === "limit") pushProgress(run, RUNNER_STEP.accountSwitched(from, prepared.account.label, formatResetClock(why.found.until)));
   else if (why.kind === "auth") pushProgress(run, RUNNER_STEP.accountRefused(from, prepared.account.label));
@@ -11388,6 +11570,8 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // …and the Anthropic account it was on, for the same branch and for the
   // account switch below.
   const carriedAccount = runAnthropicCredential.get(run.id);
+  // …and its project's MCP servers, for the same two continuations.
+  const carriedMcp = runMcpPlan.get(run.id);
   // …and its process group, which the cleanup forgets once it has signalled
   // it: the prune below waits for that group to be gone.
   const settledGroup = run.pgid;
@@ -11419,7 +11603,7 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       : accountDecision === "auth"
         ? { kind: "auth", text: accountAuthText ?? "" }
         : { kind: "moved" };
-    trackSettleWork(continueOnAnotherAccount(run, state, exitCode, why, carriedSecrets, carriedAccount));
+    trackSettleWork(continueOnAnotherAccount(run, state, exitCode, why, carriedSecrets, carriedAccount, carriedMcp));
     return;
   }
   // Not carried on: this stretch of the run is over, and its refused-credential
@@ -11480,7 +11664,7 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       // The same credentials and the same redaction table as the attempt that
       // got nowhere: this is one run making a second try at the same work, not
       // a new decision by the owner.
-      if (carriedSecrets || carriedAccount) restoreRunSecrets(run.id, carriedSecrets ?? {}, carriedAccount);
+      if (carriedSecrets || carriedAccount || carriedMcp) restoreRunSecrets(run.id, carriedSecrets ?? {}, carriedAccount, carriedMcp);
       try {
         spawnRun(run, null, state.tools, state.settings);
         // The retry is the same run's second try at the same work, seconds
@@ -11863,7 +12047,20 @@ function spawnRun(
   // spawn — and kept for every respawn, so the run's tools and its prompt
   // prefix never move under it (CodingRun.visual).
   if (run.visual === null) run.visual = decideRunVisual(run.diet, run.task, run.directory);
-  const dropped = buildSpawnArgv(tools.setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, experience: run.experienceBrief, reviewedSeparately, draftPullRequests, allowRules: run.allowRules, provider: run.provider, streamInput, hookSettings: hookSettings?.json ?? null, cpuBudget, runNotes, lessonChannel: !run.readOnly, run: { id: run.id, directory: run.directory, media: run.media, team: run.team }, diet: run.diet, visual: run.visual, pullRequestMentioned: mentionsPullRequest(run.task) }));
+  // The project's MCP servers (prepareRunMcp), written for THIS spawn into a
+  // 0600 file the harness reads at start; the settle deletes it. A run whose
+  // project ticked nothing has no plan, writes nothing and keeps today's argv.
+  removeRunMcpConfigs(run.id);
+  const mcpPlan = run.readOnly ? undefined : runMcpPlan.get(run.id);
+  const runMcp: RunMcpArgs | null = mcpPlan
+    ? {
+        configFile: writeRunMcpConfig(run.id, buildRunMcpFileConfig({ id: run.id, directory: run.directory, media: run.media, team: run.team }, mcpPlan, { visual: runHoldsVisualTools(run.diet, run.visual) })),
+        allowedTools: mcpPlan.allowedTools,
+        disallowedTools: mcpPlan.disallowedTools,
+        readOnlyTools: mcpPlan.readOnlyTools,
+      }
+    : null;
+  const dropped = buildSpawnArgv(tools.setprivPath, buildRunArgs({ resumeSessionId, maxTurns: settings.maxTurns, effort: settings.effort, readOnly: run.readOnly, extraBrief: run.extraBrief, experience: run.experienceBrief, reviewedSeparately, draftPullRequests, allowRules: run.allowRules, provider: run.provider, streamInput, hookSettings: hookSettings?.json ?? null, cpuBudget, runNotes, lessonChannel: !run.readOnly, run: { id: run.id, directory: run.directory, media: run.media, team: run.team }, diet: run.diet, visual: run.visual, pullRequestMentioned: mentionsPullRequest(run.task), mcp: runMcp }));
   // One evidence path everywhere — env, MCP config and --add-dir must never
   // disagree about where it is. Creation is best-effort: the MCP layer also
   // mkdirs lazily, so a failure here degrades evidence, never the run.
@@ -14525,6 +14722,7 @@ function endEveryLiveRun(): ChildProcess[] {
   store.unannounced.clear();
   transitions.clear();
   runSecretEnv.clear();
+  runMcpPlan.clear();
   // What ends the watchers' loops: a poll already in flight is waited for by
   // the drain, and neither it nor a timer armed earlier polls again once its
   // run is gone from these — see `runWatcherPoll`.

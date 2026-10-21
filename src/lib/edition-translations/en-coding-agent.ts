@@ -997,6 +997,19 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.secretsRefusedGone": "That secret is no longer there.",
   "codingAgent.stepSecretsInjected": "Secrets in the environment: {names}",
   "codingAgent.stepSecretsUnreadable": "Could not read these secrets: {names}",
+  "codingAgent.stepMcpServers": "MCP servers in this run: {names}",
+  "codingAgent.stepMcpServersMissing": "Not available to this run: {names}",
+  "codingAgent.mcpServers.title": "MCP servers",
+  "codingAgent.mcpServers.loadFailed": "Could not read this project's MCP servers.",
+  "codingAgent.mcpServers.saveFailed": "The change could not be saved.",
+  "codingAgent.mcpServers.clawboxReadOnly": "ClawBox read-only tools",
+  "codingAgent.mcpServers.clawboxReadOnlyHint": "This box's device status, logs, apps, projects and runs — tools that read and change nothing.",
+  "codingAgent.mcpServers.count": "{n} for this project's runs",
+  "codingAgent.mcpServers.none": "browser tools only",
+  "codingAgent.mcpServers.help": "Servers this project's coding runs start with, beside the browser tools every run has. Nothing is ticked until you tick it. A server's credentials stay in the harness's own config: never in a run's prompt, log or evidence.",
+  "codingAgent.mcpServers.empty": "This box's harness has no other MCP server configured.",
+  "codingAgent.mcpServers.unusable": "A run cannot use it: {reason}",
+  "codingAgent.mcpServers.unreadable": "Could not read the {harness} config, so its servers are not listed.",
   // Which of the owner's Anthropic accounts a run is on, and the moves between
   // them when one hits its usage limit (TASK-902). {label}, {from} and {to} are
   // the owner's own account names; {time} is the reset in the box's clock.
