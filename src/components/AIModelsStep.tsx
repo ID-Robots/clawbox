@@ -680,7 +680,7 @@ export default function AIModelsStep({
   // back to the hardcoded "flash" and rendered "Pro plan · €9/month". On a Max
   // box that sat directly under a MAX badge in the same panel, contradicting
   // it, and the same state is what `payload.clawaiTier` writes on save, so a
-  // save from that screen downgraded a €49 account off the frontier weights
+  // save from that screen downgraded a €49 account off its Max model id
   // without saying so. (TASK-468.)
   //
   // `resolveUiTier` is the rule the Hermes panel has always used; it now lives

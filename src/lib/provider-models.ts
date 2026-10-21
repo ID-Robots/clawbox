@@ -359,12 +359,13 @@ export const XAI_DEFAULT_MODEL_ID = "grok-4.6";
 // ClawBox AI tiers — surfaced via the secondary model picker after
 // consolidating Flash/Pro into one "ClawBox AI" provider row in the
 // chat dropdown. Model ids are the upstream DeepSeek slugs since
-// Mike's gateway forwards via the deepseek provider; the UI labels
+// the gateway forwards via the deepseek provider; the UI labels
 // match the subscription plans (Flash → "Pro plan", Pro → "Max plan")
-// so users see the same word on the device that they paid for.
+// so users see the same word on the device that they paid for. Both ids
+// are served by DeepSeek V4 Flash, and the hints say so.
 export const CLAWAI_MODELS: readonly ProviderModelOption[] = [
-  { id: "deepseek-v4-flash", label: "Free/Pro Tier", hint: "Default. Faster." },
-  { id: "deepseek-v4-pro", label: "Max Tier", hint: "1.6T frontier model. Max plan only." },
+  { id: "deepseek-v4-flash", label: "Free/Pro Tier", hint: "DeepSeek V4 Flash. Default." },
+  { id: "deepseek-v4-pro", label: "Max Tier", hint: "DeepSeek V4 Flash. Max plan only." },
 ] as const;
 
 // Provider IDs the live-catalog route knows how to fetch from upstream

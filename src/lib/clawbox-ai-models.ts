@@ -12,20 +12,21 @@
  * so a staging proxy with a different alias map can point them elsewhere
  * without code changes.
  *
- * Per the April 24 2026 DeepSeek refresh, the legacy `deepseek-chat` and
- * `deepseek-reasoner` aliases both resolve to V4 *Flash* on the upstream
- * proxy and retire on July 24 2026. The Pro tier therefore needs the new
- * explicit `deepseek-v4-pro` slug to actually route to the 1.6T frontier
- * weights instead of being silently downgraded.
+ * The proxy serves BOTH ids with DeepSeek V4 Flash: `deepseek-v4-pro` is the
+ * Max plan's id, a plan gate the portal and proxy check, not a bigger model.
+ * Copy on the box names the model that answers ("DeepSeek V4 Flash"), never
+ * "V4 Pro". The ids stay as they are: saved openclaw.json and Hermes configs,
+ * the boot script's allowlists and the portal's entitlement lists all carry
+ * them.
  */
 export const CLAWBOX_AI_PROVIDER = "deepseek" as const;
 
 export const CLAWBOX_AI_FLASH_MODEL_ID =
   process.env.CLAWBOX_AI_FLASH_MODEL_ID?.trim() || "deepseek-v4-flash";
 
-// The proxy serves Flash 4.1 through the existing V4 Flash and Pro aliases.
-// Chat uses the Flash alias; keep the wire IDs and subscription tiers stable.
-export const CLAWBOX_AI_CHAT_MODEL_LABEL = "Flash 4.1";
+// The proxy serves DeepSeek V4 Flash through both the Flash and Pro ids.
+// Chat uses the Flash id; keep the wire IDs and subscription tiers stable.
+export const CLAWBOX_AI_CHAT_MODEL_LABEL = "DeepSeek V4 Flash";
 
 export const CLAWBOX_AI_PRO_MODEL_ID =
   process.env.CLAWBOX_AI_PRO_MODEL_ID?.trim() || "deepseek-v4-pro";
