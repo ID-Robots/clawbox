@@ -10,7 +10,7 @@ export const dynamic = "force-dynamic";
  * the listener check and the containment). Every method; the body streamed
  * both ways; redirects handed back to the browser rather than followed on
  * its behalf; the sandbox on every response — and, for the app's own `/api`
- * tree, the CORS answer that sandbox makes necessary (TASK-1746).
+ * tree, the CORS answer that sandbox makes necessary.
  */
 
 /** Hop-by-hop headers, never forwarded in either direction. */
@@ -51,7 +51,7 @@ async function proxy(request: NextRequest, params: Promise<{ id: string; path?: 
   const requestOrigin = request.headers.get("origin");
 
   // A preflight from the app's own sandboxed document for its own API
-  // (TASK-1746, see appProxyAllowOrigin): answered here, so an app whose
+  // (see appProxyAllowOrigin): answered here, so an app whose
   // server never heard of OPTIONS still works from inside the frame. Any
   // other preflight goes to the app as before.
   if (request.method.toUpperCase() === "OPTIONS" && apiPath && requestOrigin === "null" && request.headers.has("access-control-request-method")) {

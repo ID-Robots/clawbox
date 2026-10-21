@@ -199,7 +199,7 @@ describe("the app proxy", () => {
     }
   });
 
-  it("answers the sandboxed document's calls to the app's OWN /api (TASK-1746): any type, no credentials, range headers readable, preflight 204", async () => {
+  it("answers the sandboxed document's calls to the app's OWN /api: any type, no credentials, range headers readable, preflight 204", async () => {
     // The document the proxy serves has the origin `null` (its CSP sandbox),
     // so the app's fetch of its own API was a CORS request its server never
     // answered: every app with an API loaded and then did nothing.

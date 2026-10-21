@@ -86,7 +86,7 @@ export const APP_PROXY_CSP = "sandbox allow-scripts allow-forms allow-popups all
  * CORS header and stay unreadable to another origin, which is where a notes
  * app's notes live.
  *
- * The one exception is the app's OWN API, `/apps/<id>/api/…` (TASK-1746).
+ * The one exception is the app's OWN API, `/apps/<id>/api/…`.
  * Every app with a server calls it from its own document, and under the
  * sandbox that document's fetch is a CORS request the app's server never
  * answers — so every such app was a page that loads and then does nothing
@@ -95,10 +95,12 @@ export const APP_PROXY_CSP = "sandbox allow-scripts allow-forms allow-popups all
  * still without credentials. What that costs: a sandboxed frame some other
  * page puts on screen can read the API of an app on this box if it can
  * reach the box at all — which, for a box on a LAN, the browser's local
- * network access rules are what stand in the way of. Writes to it were
- * reachable that way before this (a form post needs no CORS), so what is
- * new is the read; the listener check above keeps it to the app's own
- * process.
+ * network access rules are what stand in the way of. A simple write (a
+ * form-encoded or plain-text POST) was reachable that way before this, since
+ * it needs no CORS; what is new is the read, and — through the preflight the
+ * proxy answers for this tree — the writes a form cannot send: a JSON body,
+ * PUT, PATCH and DELETE. The listener check above keeps all of it to the
+ * app's own process.
  */
 const CORS_READABLE_TYPES = [
   "text/css",

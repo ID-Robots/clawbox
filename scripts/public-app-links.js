@@ -31,7 +31,7 @@
  *   5. the link's secret — `?k=<token>` once (exchanged for a host-only,
  *      Secure, HttpOnly cookie on the link's own origin, then redirected
  *      away so the token leaves the address bar), the cookie afterwards.
- *      On a link WITH a password (TASK-1746) a visitor who has neither — the
+ *      On a link WITH a password a visitor who has neither — the
  *      address was copied from the browser's bar after the redirect, so the
  *      token is not in it — is shown the password page instead of a 404, and
  *      the password unlocks the link's cookie too: for such a link the
@@ -45,7 +45,7 @@
  *   8. the method policy: GET/HEAD of anything but the app's `/api` tree by
  *      default; `/api`, and any write, only under a prefix the owner
  *      allow-listed for this link (the owner's half lists `/api` unless told
- *      otherwise, TASK-1746), and with `apiReadOnly` the allow-listed
+ *      otherwise), and with `apiReadOnly` the allow-listed
  *      prefixes answer GET/HEAD only. WebSocket upgrades are refused.
  */
 
@@ -71,7 +71,14 @@ const UNLOCK_BODY_MAX = 4096;
 const PASSWORD_MAX_LENGTH = 128;
 const PASSWORD_HASH_RE = /^scrypt\$(\d{4,7})\$(\d{1,2})\$(\d{1,2})\$([A-Za-z0-9_-]{22,64})\$([A-Za-z0-9_-]{43,86})$/;
 const UNLOCK_KEY_RE = /^[A-Za-z0-9_-]{43}$/;
-/** Password attempts, right or wrong, in one window: per visitor of a link, and per link. */
+/**
+ * Password attempts, right or wrong, in one window: per visitor (client
+ * address) of a link, and — for visitors WITHOUT the link's key only — per
+ * link. The link-wide budget is what stops guessing spread over many
+ * addresses; it is never applied to a visitor who holds the key (the address
+ * the owner shared carries it), so a stranger who burns it cannot lock the
+ * people the link was sent to out of their own link.
+ */
 const PASSWORD_WINDOW_MS = 15 * 60_000;
 const PASSWORD_TRIES_PER_VISITOR = 5;
 const PASSWORD_TRIES_PER_LINK = 20;
@@ -566,6 +573,12 @@ function createLinkHandler(linkId, opts) {
    * was disabled, expired or given another password in the meantime is not
    * unlocked by an answer to the old one.
    */
+  /** Is this visitor out of password attempts? Keyless visitors also share the link's budget. */
+  function passwordLocked(link, visitor, hasToken) {
+    if (limiter.count(`pw:${link.id}:${visitor}`) >= PASSWORD_TRIES_PER_VISITOR) return true;
+    return !hasToken && limiter.count(`pwl:${link.id}`) >= PASSWORD_TRIES_PER_LINK;
+  }
+
   async function unlockAttempt(req, res, link, visitor, issueToken) {
     const site = req.headers["sec-fetch-site"];
     if (typeof site === "string" && site !== "same-origin" && site !== "none") return refuse(res, 403, "Forbidden.");
@@ -576,13 +589,16 @@ function createLinkHandler(linkId, opts) {
     const next = safeNext(form.get("next"));
     const password = form.get("password") || "";
 
+    // `issueToken` is set exactly when the visitor came without the key.
+    const hasToken = !issueToken;
     const visitorKey = `pw:${link.id}:${visitor}`;
-    const linkKey = `pwl:${link.id}`;
-    if (limiter.count(visitorKey) >= PASSWORD_TRIES_PER_VISITOR || limiter.count(linkKey) >= PASSWORD_TRIES_PER_LINK || hashWaiting >= PASSWORD_QUEUE_MAX) {
+    // Only keyless attempts draw on the link-wide budget (see PASSWORD_TRIES_PER_LINK).
+    const linkKey = hasToken ? null : `pwl:${link.id}`;
+    if (passwordLocked(link, visitor, hasToken) || hashWaiting >= PASSWORD_QUEUE_MAX) {
       return sendPasswordPage(req, res, 429, next, "locked", { "retry-after": String(PASSWORD_WINDOW_MS / 1000) });
     }
     limiter.hit(visitorKey, Infinity, PASSWORD_WINDOW_MS);
-    limiter.hit(linkKey, Infinity, PASSWORD_WINDOW_MS);
+    if (linkKey) limiter.hit(linkKey, Infinity, PASSWORD_WINDOW_MS);
 
     let ok = false;
     if (password.length > 0 && password.length <= PASSWORD_MAX_LENGTH) {
@@ -603,10 +619,10 @@ function createLinkHandler(linkId, opts) {
       return sendPasswordPage(req, res, 401, next, "wrong");
     }
     limiter.refund(visitorKey);
-    limiter.refund(linkKey);
+    if (linkKey) limiter.refund(linkKey);
     const cookie = unlockCookieValue(current, now());
     const cookies = [`${UNLOCK_COOKIE_NAME}=${cookie.value}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${cookie.maxAge}`];
-    // A visitor who came without the token (TASK-1746) gets the link's
+    // A visitor who came without the token gets the link's
     // cookie with the unlock: the password stood in for the token once, and
     // from here on the two cookies are what every other visitor holds.
     if (issueToken) cookies.push(tokenCookie(current, now()));
@@ -660,7 +676,7 @@ function createLinkHandler(linkId, opts) {
     }
     const hasToken = timingSafeTokenEqual(cookieValue(req.headers.cookie, COOKIE_NAME), link.token);
     // No token: a bare 404 — unless the link has a password, which is then
-    // the secret asked for (TASK-1746: the address copied from the browser's
+    // the secret asked for (the address copied from the browser's
     // bar after the redirect has no token in it, and must still open for
     // the person it was sent to). A link without a password has no other
     // secret, so there the token stays the only way in.
@@ -678,8 +694,7 @@ function createLinkHandler(linkId, opts) {
         return undefined;
       }
       if (method !== "GET" && method !== "HEAD") return refuse(res, 401, "Password required.");
-      const locked = limiter.count(`pw:${link.id}:${visitor}`) >= PASSWORD_TRIES_PER_VISITOR || limiter.count(`pwl:${link.id}`) >= PASSWORD_TRIES_PER_LINK;
-      return sendPasswordPage(req, res, 401, safeNext(`${target.path}${target.search}`), locked ? "locked" : undefined);
+      return sendPasswordPage(req, res, 401, safeNext(`${target.path}${target.search}`), passwordLocked(link, visitor, hasToken) ? "locked" : undefined);
     }
     // Already unlocked (a second tab, the back button): the form's address
     // leads back into the app rather than to a 404.

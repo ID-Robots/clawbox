@@ -12,7 +12,7 @@ import { sessionIdentity } from "@/lib/route-auth";
 import { verifyPassword } from "@/lib/auth";
 import { DATA_DIR } from "@/lib/config-store";
 import { DELETE, GET, PATCH, POST } from "@/app/setup-api/apps/public-link/route";
-import { MAX_LINKS, createPublicLink, disablePublicLink, listPublicLinks, parseApiAllow, setPublicLinkPassword, verifyLinkPasswordHash } from "@/lib/public-app-links";
+import { MAX_API_ALLOW, MAX_LINKS, createPublicLink, disablePublicLink, listPublicLinks, parseApiAllow, setPublicLinkPassword, verifyLinkPasswordHash } from "@/lib/public-app-links";
 
 /**
  * TASK-1478 — the owner's half of public app links: who may publish, what is
@@ -95,7 +95,7 @@ describe("publishing", () => {
     const res = await POST(req("POST", { appId: "notes", mode: "temporary", ttlMinutes: 60, apiAllow: ["/api/scores", " ", "/api/scores"] }));
     expect(res.status).toBe(201);
     const { link } = await res.json();
-    expect(link).toMatchObject({ appId: "notes", mode: "temporary", state: "starting", url: null, apiAllow: ["/api", "/api/scores"], apiReadOnly: false });
+    expect(link).toMatchObject({ appId: "notes", mode: "temporary", state: "starting", url: null, apiAllow: ["/api", "/api/scores"], apiReadOnly: true });
     expect(JSON.stringify(link)).not.toMatch(/token/);
 
     const file = path.join(LINKS_DIR, "links.json");
@@ -143,12 +143,25 @@ describe("publishing", () => {
     expect(() => parseApiAllow(Array.from({ length: 17 }, (_, i) => `/a${i}`))).toThrow();
   });
 
-  /** TASK-1746 — a link that cannot reach the app's own API is a blank page for the visitor. */
-  it("opens the app's own /api by default, read-only or not at all when asked, and the serving side enforces the choice", async () => {
+  /**
+   * A link that cannot reach the app's own API is a blank page for the
+   * visitor, so a new link opens it — for reading only unless the owner asks
+   * for read and write: strangers changing the app's data is an explicit choice.
+   */
+  it("opens the app's own /api read-only by default, read-write or not at all when asked, and the serving side enforces the choice", async () => {
     const res = await POST(req("POST", { appId: "notes", mode: "permanent" }));
-    expect((await res.json()).link).toMatchObject({ apiAllow: ["/api"], apiReadOnly: false });
+    expect((await res.json()).link).toMatchObject({ apiAllow: ["/api"], apiReadOnly: true });
     let served = serving.validLink(serving.readLinks(ROOT)[0]) as { apiAllow: string[]; apiReadOnly: boolean };
     expect(served.apiAllow).toEqual(["/api"]);
+    expect(served.apiReadOnly).toBe(true);
+    expect(serving.methodAllowed(served, "GET", "/api/items")).toBe(true);
+    expect(serving.methodAllowed(served, "POST", "/api/items")).toBe(false);
+    expect(serving.methodAllowed(served, "POST", "/upload")).toBe(false);
+    await disablePublicLink("notes");
+
+    await createPublicLink({ appId: "notes", mode: "permanent", apiAccess: "full" });
+    expect((await listPublicLinks())[0]).toMatchObject({ apiAllow: ["/api"], apiReadOnly: false });
+    served = serving.validLink(serving.readLinks(ROOT)[0]) as typeof served;
     expect(serving.methodAllowed(served, "GET", "/api/items")).toBe(true);
     expect(serving.methodAllowed(served, "POST", "/api/items")).toBe(true);
     expect(serving.methodAllowed(served, "POST", "/upload")).toBe(false);
@@ -172,6 +185,44 @@ describe("publishing", () => {
 
     expect((await POST(req("POST", { appId: "notes", mode: "permanent", apiAccess: "all" }))).status).toBe(400);
     expect(serving.readLinks(ROOT)).toHaveLength(0);
+  });
+
+  /** The serving side matches API paths by prefix, so "/" and "/api/" open the app's own /api as surely as "/api". */
+  it("refuses a typed path that would open the app's own /api again on a link whose API is off", async () => {
+    for (const apiAllow of [["/"], ["/api"], ["/api/"], ["/upload", "/api//"]]) {
+      const res = await POST(req("POST", { appId: "notes", mode: "permanent", apiAccess: "none", apiAllow }));
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe("bad_api_allow");
+      expect(serving.readLinks(ROOT)).toHaveLength(0);
+    }
+
+    // A path beside the app's own /api is still the owner's to open.
+    expect((await POST(req("POST", { appId: "notes", mode: "permanent", apiAccess: "none", apiAllow: ["/upload", "/apis"] }))).status).toBe(201);
+    expect((await listPublicLinks())[0]).toMatchObject({ apiAllow: ["/upload", "/apis"], apiReadOnly: false });
+    await disablePublicLink("notes");
+  });
+
+  /** The serving side refuses a list longer than MAX_API_ALLOW: a link stored with one would be answered 201 here and never served. */
+  it("counts the /api a new link opens against the cap on API paths, so it never stores a list the serving side refuses", async () => {
+    const sixteen = Array.from({ length: MAX_API_ALLOW }, (_, i) => `/p${i}`);
+    const res = await POST(req("POST", { appId: "notes", mode: "permanent", apiAllow: sixteen }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("bad_api_allow");
+    expect(serving.readLinks(ROOT)).toHaveLength(0);
+
+    // Off adds nothing: sixteen typed paths are the whole list.
+    expect((await POST(req("POST", { appId: "notes", mode: "permanent", apiAccess: "none", apiAllow: sixteen }))).status).toBe(201);
+    expect(serving.validLink(serving.readLinks(ROOT)[0])).not.toBeNull();
+    await disablePublicLink("notes");
+
+    // Fifteen typed paths and /api fill the list exactly; an /api the owner typed is not counted twice.
+    for (const typed of [sixteen.slice(1), ["/api", ...sixteen.slice(1)]]) {
+      const ok = await POST(req("POST", { appId: "notes", mode: "permanent", apiAccess: "read", apiAllow: typed }));
+      expect(ok.status).toBe(201);
+      expect((await ok.json()).link.apiAllow).toHaveLength(MAX_API_ALLOW);
+      expect(serving.validLink(serving.readLinks(ROOT)[0])).not.toBeNull();
+      await disablePublicLink("notes");
+    }
   });
 });
 
@@ -288,7 +339,7 @@ describe("a link password", () => {
   });
 
   /**
-   * TASK-1746 — the passwords the dialog actually produces, checked by both
+   * The passwords the dialog actually produces, checked by both
    * halves: the owner's own verify (run before the record is written) and
    * the serving side's (run on a visitor's answer). A generated 20-character
    * password, one with spaces, one with accented letters typed in either

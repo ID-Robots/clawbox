@@ -121,7 +121,7 @@ describe("the path and the request", () => {
     expect(lib.appProxyAllowOrigin("null", null, "")).toBeNull();
   });
 
-  it("the app's own /api tree is the exception (TASK-1746): answered for the opaque origin whatever its type, and for no other origin", () => {
+  it("the app's own /api tree is the exception: answered for the opaque origin whatever its type, and for no other origin", () => {
     for (const type of ["application/json", "text/plain", "audio/mpeg", "application/octet-stream", null, ""]) {
       expect(lib.appProxyAllowOrigin("null", null, type, true), String(type)).toBe("null");
     }

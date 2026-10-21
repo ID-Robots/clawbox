@@ -18,9 +18,11 @@
  *     an 8 GB board);
  *   - the app's `/api` tree and every write stay closed unless a prefix is in
  *     `apiAllow`. A new link lists `/api` itself unless the owner chose
- *     otherwise (`apiAccess`, TASK-1746: an app that cannot reach its own
+ *     otherwise (`apiAccess`: an app that cannot reach its own
  *     API is a blank page for the visitor), and `apiReadOnly` keeps the
- *     listed prefixes to GET/HEAD;
+ *     listed prefixes to GET/HEAD. A new link is read-only unless the owner
+ *     chose "read and write": a visitor can load the app's data but not
+ *     change it;
  *   - a link may carry a password of its own (TASK-1515). Only its salted
  *     scrypt hash is stored, next to a random key the serving side signs
  *     unlock cookies with. Setting, changing or removing it never touches the
@@ -149,17 +151,35 @@ function asStored(raw: unknown): StoredPublicLink | null {
   return { ...(l as unknown as StoredPublicLink), apiAllow: apiAllow as string[], ...(l.apiReadOnly === true ? { apiReadOnly: true } : {}) };
 }
 
-/** `apiAccess` as given (nothing is `full`), or a PublicLinkError. */
+/** `apiAccess` as given (nothing is `read`, the safe default), or a PublicLinkError. */
 export function parseApiAccess(input: unknown): PublicLinkApiAccess {
-  if (input === undefined || input === null) return "full";
+  if (input === undefined || input === null) return "read";
   if (typeof input === "string" && (API_ACCESS_VALUES as readonly string[]).includes(input)) return input as PublicLinkApiAccess;
   throw new PublicLinkError("apiAccess must be full, read or none.", 400, "bad_api_access");
 }
 
-/** The prefixes a link opens: the app's `/api` for `full` and `read`, plus whatever the owner typed. */
+/** Does this prefix open the app's own /api tree? "/" opens everything, "/api/" is "/api". */
+export function opensAppApi(prefix: string): boolean {
+  const p = prefix.replace(/\/+$/, "");
+  return p === "" || p === DEFAULT_API_PREFIX;
+}
+
+/**
+ * The prefixes a link opens: the app's `/api` for `full` and `read`, plus
+ * whatever the owner typed. The cap counts the `/api` added here too: the
+ * serving side refuses a longer list, and a link it refuses is never served.
+ */
 export function apiAllowFor(access: PublicLinkApiAccess, typed: string[]): string[] {
-  if (access === "none") return typed;
-  return typed.includes(DEFAULT_API_PREFIX) ? typed : [DEFAULT_API_PREFIX, ...typed];
+  // "Off" closes the app's own /api, so a typed path may not open it again:
+  // the serving side matches by prefix, and "/" or "/api/" covers that tree.
+  if (access === "none" && typed.some(opensAppApi)) {
+    throw new PublicLinkError("With the app's API off, a path cannot open the app's own /api or the whole app.", 400, "bad_api_allow");
+  }
+  const out = access === "none" || typed.includes(DEFAULT_API_PREFIX) ? typed : [DEFAULT_API_PREFIX, ...typed];
+  if (out.length > MAX_API_ALLOW) {
+    throw new PublicLinkError(`At most ${MAX_API_ALLOW} API paths, the app's own /api included.`, 400, "bad_api_allow");
+  }
+  return out;
 }
 
 /**
@@ -230,7 +250,7 @@ const STORED_HASH_RE = /^scrypt\$(\d+)\$(\d+)\$(\d+)\$([A-Za-z0-9_-]+)\$([A-Za-z
  * Does `password` hash to the stored `hash`? The same derivation the serving
  * side runs on a visitor's answer (scripts/public-app-links.js,
  * verifyPasswordHash), kept here so what the owner's dialog stores can be
- * checked against it before it is written (TASK-1746). False for a record
+ * checked against it before it is written. False for a record
  * that is not one of ours.
  */
 export async function verifyLinkPasswordHash(password: string, hash: string): Promise<boolean> {

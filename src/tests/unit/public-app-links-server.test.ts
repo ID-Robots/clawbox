@@ -384,7 +384,7 @@ describe("the policy functions", () => {
     expect(links.methodAllowed(open, "DELETE", "/api/a/1")).toBe(true);
     expect(links.methodAllowed(open, "GET", "/api/a")).toBe(true);
     expect(links.methodAllowed(open, "GET", "/api/ab")).toBe(false);
-    // Read-only (TASK-1746): the listed prefixes answer GET/HEAD and nothing else.
+    // Read-only: the listed prefixes answer GET/HEAD and nothing else.
     const readOnly = { apiAllow: ["/api"], apiReadOnly: true };
     expect(links.methodAllowed(readOnly, "GET", "/api/a")).toBe(true);
     expect(links.methodAllowed(readOnly, "HEAD", "/api/a")).toBe(true);

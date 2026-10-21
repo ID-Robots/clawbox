@@ -11,8 +11,9 @@ export const dynamic = "force-dynamic";
  *
  *   GET                       every link, with its URL once the tunnel is up
  *   POST   {appId, mode, ttlMinutes?, apiAccess?, apiAllow?, password?}   publish
- *                             (apiAccess: full — the default, the app's /api
- *                             is open — read, or none; apiAllow adds prefixes)
+ *                             (apiAccess: read — the default, the app's /api
+ *                             answers GET/HEAD — full, or none; apiAllow adds
+ *                             prefixes)
  *   PATCH  {appId, password}  set or change the link's password (a string),
  *                             or remove it (null); the link stays the same
  *   DELETE {appId}            disable — immediate

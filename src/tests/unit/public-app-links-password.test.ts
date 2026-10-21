@@ -178,7 +178,7 @@ describe("a link with a password asks for it first", () => {
   });
 
   /**
-   * TASK-1746 — the address copied from the browser's bar after the app
+   * The address copied from the browser's bar after the app
    * opened has no token in it (the redirect took it out). On a link with a
    * password that address still opens: the password is the secret.
    */
@@ -373,11 +373,42 @@ describe("attempt limiting", () => {
     expect((await unlock(PASSWORD, { ip: "203.0.113.9" })).status).toBe(303);
   });
 
-  it("caps wrong passwords per link, whatever address they come from", async () => {
+  it("caps wrong passwords per link from visitors without the key, whatever address they come from", async () => {
+    for (let i = 0; i < links.PASSWORD_TRIES_PER_LINK; i += 1) {
+      expect((await unlock("wrong", { token: false, ip: `192.0.2.${i + 1}` })).status).toBe(401);
+    }
+    expect((await unlock(PASSWORD, { token: false, ip: "192.0.2.200" })).status).toBe(429);
+    const page = await ask(`/apps/${APP}/`, { token: false, ip: "192.0.2.201" });
+    expect(page.status).toBe(401);
+    expect(page.body).toContain("Too many attempts");
+  });
+
+  /**
+   * The bare address of a password link reaches the password page, so anyone
+   * who learns it can type wrong passwords. That must not lock out the people
+   * the link was sent to: they hold the key, and only the per-address limit
+   * applies to them.
+   */
+  it("a stranger burning the link's attempts does not lock out a visitor who holds the key", async () => {
+    for (let i = 0; i < links.PASSWORD_TRIES_PER_LINK + 5; i += 1) {
+      await unlock("wrong", { token: false, ip: `192.0.2.${i + 1}` });
+    }
+    expect((await unlock(PASSWORD, { token: false, ip: "192.0.2.250" })).status).toBe(429);
+    const page = await ask(`/apps/${APP}/`, { ip: "198.51.100.20" });
+    expect(page.status).toBe(401);
+    expect(page.body).not.toContain("Too many attempts");
+    expect((await unlock("still wrong", { ip: "198.51.100.20" })).status).toBe(401);
+    expect((await unlock(PASSWORD, { ip: "198.51.100.20" })).status).toBe(303);
+    // The key holder is still limited per address.
+    for (let i = 0; i < links.PASSWORD_TRIES_PER_VISITOR; i += 1) await unlock(`wrong-${i}`, { ip: "198.51.100.21" });
+    expect((await unlock(PASSWORD, { ip: "198.51.100.21" })).status).toBe(429);
+  });
+
+  it("wrong passwords from key holders do not draw on the keyless budget", async () => {
     for (let i = 0; i < links.PASSWORD_TRIES_PER_LINK; i += 1) {
       expect((await unlock("wrong", { ip: `192.0.2.${i + 1}` })).status).toBe(401);
     }
-    expect((await unlock(PASSWORD, { ip: "192.0.2.200" })).status).toBe(429);
+    expect((await unlock(PASSWORD, { token: false, ip: "192.0.2.200" })).status).toBe(303);
   });
 
   it("does not count right passwords against the link", async () => {
