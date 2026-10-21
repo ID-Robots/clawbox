@@ -33,6 +33,9 @@ export const whatsNewEn: Record<string, string> = {
   "whatsNew.agentChartTitle": "The Coding Agent, on a live chart",
   "whatsNew.agentChartBody":
     "The Coding Agent opens on a chart of its agents at work. You can message a run while it works, extra runs and teams wait in line instead of being refused, and Fix CI sends a pull request whose checks failed back to be fixed.",
+  "whatsNew.primeRadiantTitle": "Prime Radiant, a living wiki",
+  "whatsNew.primeRadiantBody":
+    "A new app that keeps a wiki for you. Point it at your documents and it writes one page per subject, listing each fact with where it came from and how sure it is. Every night it tidies the wiki, looks for facts that contradict each other, and asks you about anything it cannot settle alone.",
 
   "whatsNew.readMore": "Read what's new in 4.3",
 

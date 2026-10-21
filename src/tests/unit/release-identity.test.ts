@@ -166,6 +166,14 @@ describe("the release-facing documents follow the release", () => {
     expect(read(`RELEASE-NOTES-${PACKAGE_VERSION}.md`)).toContain(`Previous release: v${PREVIOUS_RELEASE}.0, 5 October 2026.`);
   });
 
+  it("this release's notes and docs page name the pinned OpenClaw", () => {
+    // config/openclaw-target.txt is what install.sh installs; the notes and the
+    // docs page must not announce an older pin.
+    const pinned = `OpenClaw is updated to ${read("config/openclaw-target.txt").trim()}`;
+    expect(read(`RELEASE-NOTES-${PACKAGE_VERSION}.md`)).toContain(pinned);
+    expect(read("docs-site/whats-new.mdx")).toContain(pinned);
+  });
+
   it("the README still links the previous release's notes", () => {
     expect(read("README.md")).toContain("](RELEASE-NOTES-4.2.0.md)");
   });

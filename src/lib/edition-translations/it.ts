@@ -1717,6 +1717,8 @@ export const it: Record<string, string> = {
   "whatsNew.holdToTalkBody": "Tieni premuto il pulsante del microfono della chat, o F8, mentre parli, e rilascia per inviare. Le risposte parlate si scaricano diverse volte più leggere, e in Impostazioni → Voce puoi far leggere ad alta voce ogni risposta, anche quelle alle domande che hai scritto.",
   "whatsNew.agentChartTitle": "L'agente di codice, in un grafico dal vivo",
   "whatsNew.agentChartBody": "L'agente di codice si apre su un grafico dei suoi agenti al lavoro. Puoi scrivere a un'esecuzione mentre lavora, le esecuzioni e i team in più aspettano in coda invece di essere rifiutati, e Correggi CI rimanda a correggere una pull request i cui controlli sono falliti.",
+  "whatsNew.primeRadiantTitle": "Prime Radiant, un wiki vivo",
+  "whatsNew.primeRadiantBody": "Una nuova app che tiene un wiki per te. Indicale i tuoi documenti e scrive una pagina per argomento, indicando per ogni fatto da dove viene e quanto è sicuro. Ogni notte riordina il wiki, cerca i fatti che si contraddicono e ti chiede di ciò che non riesce a risolvere da sola.",
   "whatsNew.readMore": "Leggi le novità della 4.3",
   "whatsNew.planTitle": "Sbloccalo con un piano ClawBox AI",
   "whatsNew.planPaidFeatures": "L'agente di codice e Memory Shard richiedono il piano Pro o Max.",
