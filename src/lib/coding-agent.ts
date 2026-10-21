@@ -199,6 +199,7 @@ import {
   SECRETS_FILE_NAME,
   type ResolvedRunSecrets,
 } from "@/lib/project-secrets";
+import { SECRETS_AUDIT_FILE_NAME } from "@/lib/secrets-audit";
 import { forgetRunSecrets, redactForRun, registerRunSecrets } from "@/lib/secret-redact";
 import {
   anotherAccountLikely,
@@ -6000,7 +6001,12 @@ const FILE_TOOLS = ["Read", "Edit", "Write", "NotebookEdit", "Glob", "Grep"] as 
 // inputs and transcripts (src/lib/coding-run-history.ts). Named rather than
 // discovered for the stream logs' reason: the first run to leave the live list
 // creates them, possibly while another run is already working.
-const DATA_SECRET_FILES = ["config.json", "kv.json", ".mcp-token", ".session-secret", "email-pending.json", "email-outcomes.json", "email-approval-prompts.json", "coding-agent-runs.json", "coding-agent-streams", "coding-agent-history", "coding-agent-archive", SECRETS_FILE_NAME];
+//
+// secrets-audit.log is the secret store's trail (src/lib/secrets-audit.ts):
+// names, scopes and run ids, never a value — but which projects hold which keys
+// and which runs were handed them is the owner's to read, not a run's. Named
+// for the same reason: the first copy, tick or injection creates it.
+const DATA_SECRET_FILES = ["config.json", "kv.json", ".mcp-token", ".session-secret", "email-pending.json", "email-outcomes.json", "email-approval-prompts.json", "coding-agent-runs.json", "coding-agent-streams", "coding-agent-history", "coding-agent-archive", SECRETS_FILE_NAME, SECRETS_AUDIT_FILE_NAME];
 
 /**
  * Entries of the harness's state directories (`HARNESS_STATE_SUBTREES`) that
@@ -6441,7 +6447,7 @@ const runSecretEnv = store.runSecretEnv;
  * would hand a run a token and then print it.
  */
 async function prepareRunSecrets(run: CodingRun): Promise<ResolvedRunSecrets> {
-  const resolved = await resolveSecretsForRun({ project: await projectScopeFor(run) });
+  const resolved = await resolveSecretsForRun({ project: await projectScopeFor(run), runId: run.id });
   runSecretEnv.set(run.id, resolved.env);
   // The Anthropic account rides the same path: every async spawn comes through
   // here just before it, which is exactly where "which account is first in

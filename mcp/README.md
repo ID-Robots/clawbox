@@ -798,7 +798,12 @@ everything a run then says is scrubbed of it before it reaches the run record
 (`src/lib/secret-redact.ts`). There is deliberately no tool for the master
 switch either, for the reason `browser_auto_open` has none: handing an
 unattended shell the owner's credentials is a consent, and a tool that could
-turn it back on would make their "no" temporary.
+turn it back on would make their "no" temporary. For the same reason there is
+no tool for "Import from assistant", which copies a key the assistant already
+holds into this store: its route (`/setup-api/coding-agent/secrets/import`)
+refuses the MCP bearer and answers names only, the copy arrives un-ticked, and
+`coding_secret_list` never lists the assistant's own keys. If a run needs one,
+ask the owner to copy it from the Coding Agent's settings.
 
 
 The run lives in the web server (`src/lib/coding-agent.ts`,
