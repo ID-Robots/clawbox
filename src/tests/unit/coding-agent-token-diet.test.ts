@@ -18,7 +18,7 @@ import {
   ULTRACODE_BRIEF,
   ULTRACODE_EFFORT,
 } from "@/lib/coding-agent";
-import { completionAttemptsFrom, DEFAULT_COMPLETION_ATTEMPTS } from "@/lib/coding-deliverable";
+import { completionAttemptsFrom, DEFAULT_COMPLETION_ATTEMPTS, MAX_COMPLETION_ATTEMPTS } from "@/lib/coding-deliverable";
 import { EXPERIENCE_BLOCK_MAX_CHARS } from "@/lib/coding-experience";
 import { MAX_RUN_NOTES_CHARS, runNotesBlock } from "@/lib/coding-run-notes";
 
@@ -52,6 +52,8 @@ describe("the token diet's defaults", () => {
     const word = words[DEFAULT_COMPLETION_ATTEMPTS];
     expect(comment).toContain(`${word} by default`);
     expect(comment).not.toMatch(new RegExp(`\\b(${words.filter((w) => w !== word).join("|")}) by default`));
+    // The ceiling counts the first turn too: "six in all", never six more.
+    expect(comment).toContain(`${words[MAX_COMPLETION_ATTEMPTS].toLowerCase()} in all`);
 
     const doc = readFileSync(path.join(process.cwd(), "docs/agents/coding-agent.md"), "utf8");
     expect(doc).toContain(`the default is \`${DEFAULT_EFFORT}\``);

@@ -705,7 +705,8 @@ export function maxParallelRunsFrom(raw: unknown): number {
  *
  * One by default (`DEFAULT_COMPLETION_ATTEMPTS`), and the count includes the
  * run's own first turn — so the default buys no resume: check it, tell me,
- * spend nothing more. Each attempt an owner adds, up to six, is one resume of
+ * spend nothing more. An owner can raise it to six in all
+ * (`MAX_COMPLETION_ATTEMPTS`); each attempt past the first is one resume of
  * the whole session.
  */
 export const CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY = "coding_agent_completion_attempts";
