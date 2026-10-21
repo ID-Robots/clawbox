@@ -265,16 +265,28 @@ export async function packProject(projectDir: string): Promise<PackedProject> {
   async function* entries(): AsyncGenerator<TarEntry> {
     for (const rel of candidates) {
       const abs = path.join(root, ...rel.split("/"));
-      // lstat, not stat: a symlink is skipped, never followed.
-      const stat = await fs.promises.lstat(abs).catch(() => null);
-      if (!stat?.isFile()) continue;
-      rawBytes += stat.size;
-      if (rawBytes > PACKAGE_MAX_RAW_BYTES) {
-        throw new PackError("too_large", `The project's files add up to more than ${PACKAGE_MAX_RAW_BYTES / (1024 * 1024)} MB.`);
+      // ONE handle, opened without following a symlink (a symlink is skipped,
+      // never packed), and every question asked of the handle rather than of
+      // the path: a check on the path and a read of it are two moments, and a
+      // link swapped in between would publish whatever it points at.
+      const handle = await fs.promises.open(abs, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW).catch(() => null);
+      if (!handle) continue;
+      let entry: TarEntry | null = null;
+      try {
+        const stat = await handle.stat();
+        if (stat.isFile()) {
+          rawBytes += stat.size;
+          if (rawBytes > PACKAGE_MAX_RAW_BYTES) {
+            throw new PackError("too_large", `The project's files add up to more than ${PACKAGE_MAX_RAW_BYTES / (1024 * 1024)} MB.`);
+          }
+          entry = { path: rel, type: "file", mode: stat.mode, mtime: Math.floor(stat.mtimeMs / 1000), data: await handle.readFile() };
+        }
+      } finally {
+        await handle.close().catch(() => undefined);
       }
-      const data = await fs.promises.readFile(abs);
+      if (!entry) continue;
       files.push(rel);
-      yield { path: rel, type: "file", mode: stat.mode, mtime: Math.floor(stat.mtimeMs / 1000), data };
+      yield entry;
     }
   }
 

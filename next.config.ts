@@ -68,7 +68,12 @@ const nextConfig: NextConfig = {
   // a Vite dev server insists on with the slash — reaches the proxy as
   // typed; the middleware keeps that redirect for every other path.
   skipTrailingSlashRedirect: true,
-  serverExternalPackages: ["better-sqlite3", "busboy", "sharp"],
+  // @vercel/blob (the ClawBox Store's large-package upload, src/lib/store-publish.ts)
+  // is loaded from node_modules at run time, not bundled: it brings undici,
+  // whose optional `node:sqlite` cache store Turbopack compiles into a
+  // throwing stub, and scripts/check-bundled-builtins.sh refuses any build
+  // that carries one.
+  serverExternalPackages: ["better-sqlite3", "busboy", "sharp", "@vercel/blob"],
   // sharp's native addon dlopen()s libvips at runtime, so Next's file tracing
   // — which follows `require`/`import` — never sees the shared object and
   // leaves it out of `.next/standalone`. The addon itself IS traced, which is
