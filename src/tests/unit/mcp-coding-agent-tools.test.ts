@@ -743,6 +743,9 @@ describe("the deliverable", () => {
     if (out.isError) return;
     expect(out.text).toContain("[deliverable] It left behind the file app.js");
     expect(out.text).not.toMatch(/counts as finished/);
+    // Carried on in the same session — and not told it hit a ceiling it never hit.
+    expect(out.text).toMatch(/resume_run_id/);
+    expect(out.text).not.toMatch(/hit a ceiling/);
   });
 
   it("says what is missing on a run that gave up, and NOT to start a fresh one", async () => {

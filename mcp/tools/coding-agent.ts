@@ -719,7 +719,12 @@ function describeRun(run: RunPayload, tail: number): string {
     // it for an authentication or transport failure is what turned one
     // transient upstream error into a project that failed forever: the agent
     // dutifully resumed the poisoned session and re-enacted the failure.
-    parts.push("It hit a ceiling with work already done: call coding_agent_run with resume_run_id set to this id and a narrower task.");
+    // A turn or cost ceiling, or a helper's result the run never used: the
+    // error says which, and the way on is the same session either way.
+    parts.push(
+      "Its work is on disk and its session is intact; the error says why it stopped. To carry on in the same session,"
+      + " call coding_agent_run with resume_run_id set to this id — with a narrower task if it stopped at a turn or cost ceiling.",
+    );
   } else if (run.status === "failed") {
     parts.push("Do not resume this one — start a fresh run. Tell the user what failed if it looks like the device rather than the task.");
   }
@@ -1415,7 +1420,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
           run.status === "draft"
             ? "Do not retry. A draft is started by the owner in the Coding Agent app."
             : run.status === "failed" && run.resumable && run.sessionId
-              ? "Do not retry this tool. To carry that work on, call coding_agent_run with resume_run_id set to this id and a narrower task."
+              ? "Do not retry this tool. To carry that work on, call coding_agent_run with resume_run_id set to this id (a narrower task if it stopped at a ceiling)."
               : "Do not retry. Start a fresh run with coding_agent_run if more work is needed.",
         );
       }
