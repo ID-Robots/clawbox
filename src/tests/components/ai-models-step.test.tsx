@@ -388,6 +388,65 @@ describe("AIModelsStep variants", () => {
     });
   });
 
+  it("pre-selects Free on an unpaired box and sends it on Connect", async () => {
+    // First boot: no ClawBox AI account on the box and nothing stored in this
+    // browser. Nobody has chosen a paid plan, so Connect must not ask for one.
+    window.localStorage.clear();
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input instanceof Request ? input.url : input.toString();
+      if (url.includes("/setup-api/ai-models/oauth/providers")) {
+        return { ok: true, json: async () => ({ providers: [] }) } as Response;
+      }
+      if (url.includes("/setup-api/ai-models/status")) {
+        return {
+          ok: true,
+          json: async () => ({ clawaiConfigured: false, tierSource: "picker", clawaiAccountTier: null }),
+        } as Response;
+      }
+      if (url.includes("/setup-api/ai-models/clawai/start")) {
+        return {
+          ok: true,
+          json: async () => ({
+            user_code: "ABCD-1234",
+            verification_url: "https://clawbox.com/portal/connect",
+            interval: 5,
+          }),
+        } as Response;
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    });
+
+    const { getByRole } = render(
+      <AIModelsStep
+        embedded
+        providerIds={["clawai", "openai"]}
+        defaultProviderId="clawai"
+        title="Connect AI Provider"
+        description="Primary provider"
+      />,
+    );
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/setup-api/ai-models/status",
+        expect.objectContaining({ cache: "no-store" }),
+      );
+    });
+
+    fireEvent.click(getByRole("button", { name: /^Plan/ }));
+    const freeChecked = getByRole("radio", { name: /^Free tier/ }).getAttribute("aria-checked");
+    fireEvent.click(getByRole("button", { name: /Get device code/i }));
+
+    let startCall: Parameters<typeof fetch> | undefined;
+    await waitFor(() => {
+      startCall = fetchMock.mock.calls.find(([input]) => input === "/setup-api/ai-models/clawai/start");
+      expect(startCall).toBeDefined();
+    });
+    expect(JSON.parse(String(startCall![1]!.body)).tier).toBe("free");
+    expect(freeChecked).toBe("true");
+  });
+
   it("selects the currently configured provider alias in settings mode", async () => {
     const { getByRole } = render(
       <AIModelsStep

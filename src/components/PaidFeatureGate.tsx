@@ -101,9 +101,10 @@ export default function PaidFeatureGate({
 
   const clawaiLogin = useClawaiDeviceLogin({
     scope: "primary",
-    // The tier the connect flow last pre-selected, exactly as the Providers
-    // panel resolves it. Choosing one here would either downgrade a Max
-    // subscriber's badge or 402 a Pro one.
+    // The tier the customer last chose in the Providers panel. Choosing one
+    // here would either downgrade a Max subscriber's badge or 402 a Pro one.
+    // With nothing stored it stays Pro, not the panel's unpaired Free default:
+    // this card connects someone to a feature only a paid plan unlocks.
     getTier: () => readStoredUiTier(),
     onStart: () => setError(null),
     onBusyChange: setBusy,

@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
+import { act, fireEvent, render, screen, waitFor } from "@/tests/helpers/test-utils";
 import HermesProviderConfig from "@/components/HermesProviderConfig";
 
 // The Hermes edition's AI-provider step. AIModelsStep hands the whole step to
@@ -169,4 +169,69 @@ describe("HermesProviderConfig auto-advance", () => {
     await new Promise((resolve) => setTimeout(resolve, 1_500));
     expect(onNext).not.toHaveBeenCalled();
   }, 10_000);
+});
+
+describe("HermesProviderConfig ClawBox AI plan on an unpaired box", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+    window.localStorage.clear();
+  });
+
+  it("pre-selects Free and sends it on Connect", async () => {
+    // First boot: no ClawBox AI account and nothing stored in this browser.
+    // The harness holds no credential either, so the wizard opens on ClawBox AI.
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/setup-api/hermes/clawai") {
+        return {
+          ok: true,
+          json: async () => ({ hasToken: false, tier: "flash", tierStored: null, active: false, model: "" }),
+        } as Response;
+      }
+      if (url === "/setup-api/hermes/oauth") {
+        return { ok: true, json: async () => ({ providers: [] }) } as Response;
+      }
+      if (url === "/setup-api/hermes/models") {
+        return { ok: true, json: async () => ({ provider: "openrouter", current: "", providers: [] }) } as Response;
+      }
+      if (url === "/setup-api/ai-models/clawai/start") {
+        return {
+          ok: true,
+          json: async () => ({
+            user_code: "ABCD-1234",
+            verification_url: "https://clawbox.com/portal/connect",
+            interval: 5,
+          }),
+        } as Response;
+      }
+      return { ok: true, json: async () => ({}) } as Response;
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<HermesProviderConfig onNext={vi.fn()} testId="hermes-ai" />);
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith("/setup-api/hermes/clawai", expect.objectContaining({ cache: "no-store" }));
+      expect(fetchMock).toHaveBeenCalledWith("/setup-api/hermes/models", expect.objectContaining({ cache: "no-store" }));
+    });
+    // Let the mount read's answer (hasToken false) re-resolve the plan first, so
+    // this reads what that answer leaves selected, not just the initial state.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^Plan/ }));
+    const freeChecked = screen.getByRole("radio", { name: /^Free tier/ }).getAttribute("aria-checked");
+    fireEvent.click(screen.getByRole("button", { name: /Get device code/i }));
+
+    let startCall: Parameters<typeof fetch> | undefined;
+    await waitFor(() => {
+      startCall = fetchMock.mock.calls.find(([input]) => input === "/setup-api/ai-models/clawai/start") as
+        | Parameters<typeof fetch>
+        | undefined;
+      expect(startCall).toBeDefined();
+    });
+    expect(JSON.parse(String(startCall![1]!.body)).tier).toBe("free");
+    expect(freeChecked).toBe("true");
+  });
 });
