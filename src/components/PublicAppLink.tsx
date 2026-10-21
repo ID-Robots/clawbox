@@ -19,11 +19,38 @@ export interface PublicLinkInfo {
   createdAt: number;
   expiresAt: number | null;
   apiAllow: string[];
+  /** The allow-listed prefixes answer reads only. */
+  apiReadOnly?: boolean;
   /** Visitors are asked for a password. The password itself is never sent back. */
   passwordProtected?: boolean;
   state: "starting" | "live" | "restarting" | "offline";
   url: string | null;
+  /** The token in `url` is masked: only the owner is answered it in clear. */
+  tokenMasked?: boolean;
 }
+
+/**
+ * The address this viewer can hand on, or null when there is none. The owner's
+ * URL carries the token; anyone else is answered it masked, and a masked token
+ * opens nothing. On a link with a password the address without the token shows
+ * the password page, so that is the one to share; a link without a password has
+ * no address but the owner's.
+ */
+export function shareableLinkUrl(link: Pick<PublicLinkInfo, "url" | "tokenMasked" | "passwordProtected">): string | null {
+  if (!link.url) return null;
+  if (!link.tokenMasked) return link.url;
+  if (!link.passwordProtected) return null;
+  try {
+    const bare = new URL(link.url);
+    bare.searchParams.delete("k");
+    return bare.toString();
+  } catch {
+    return null;
+  }
+}
+
+/** What visitors may do with the app's own `/api`: everything (the default), read it, or nothing. */
+export type PublicLinkApiAccess = "full" | "read" | "none";
 
 /** Why the server refused: its message, and its code when it gave one. */
 export interface PublicLinkFailure {
@@ -35,6 +62,7 @@ export interface PublicLinkCreateInput {
   appId: string;
   mode: "temporary" | "permanent";
   ttlMinutes?: number;
+  apiAccess?: PublicLinkApiAccess;
   apiAllow?: string[];
   password?: string;
 }
@@ -167,6 +195,7 @@ export function PublicLinkMenuItems({
     );
   }
   const url = link.url;
+  const shareUrl = shareableLinkUrl(link);
   return (
     <>
       <div data-testid="ctx-public-link-status" className="px-4 py-1.5 text-xs text-emerald-300/90 font-medium flex items-center gap-2">
@@ -178,12 +207,12 @@ export function PublicLinkMenuItems({
         {t(link.passwordProtected ? "publicLink.password.statusOn" : "publicLink.password.statusOff")}
       </div>
       <div data-testid="ctx-public-link-address-note" className="px-4 pb-1.5 text-[11px] text-white/60">{t("publicLink.addressChanges")}</div>
-      {url && (
+      {shareUrl && (
         <>
-          <button onClick={() => { void navigator.clipboard?.writeText(url); }} data-testid="ctx-public-link-copy" className={ROW}>
+          <button onClick={() => { void navigator.clipboard?.writeText(shareUrl); }} data-testid="ctx-public-link-copy" className={ROW}>
             <span className="material-symbols-rounded" style={{ fontSize: 16 }}>content_copy</span> {t("publicLink.copy")}
           </button>
-          <button onClick={() => { window.open(url, "_blank", "noopener,noreferrer"); }} data-testid="ctx-public-link-open" className={ROW}>
+          <button onClick={() => { window.open(shareUrl, "_blank", "noopener,noreferrer"); }} data-testid="ctx-public-link-open" className={ROW}>
             <span className="material-symbols-rounded" style={{ fontSize: 16 }}>open_in_new</span> {t("publicLink.open")}
           </button>
         </>
@@ -389,6 +418,9 @@ export function PublicLinkDialog({
   const panelRef = useModalDialog<HTMLDivElement>({ open, onClose });
   const [mode, setMode] = useState<"temporary" | "permanent">("temporary");
   const [minutes, setMinutes] = useState(DURATIONS[1].minutes);
+  // The app's own API is open by default: a visitor of an app
+  // that cannot reach its API sees a page that loads and then does nothing.
+  const [apiAccess, setApiAccess] = useState<PublicLinkApiAccess>("full");
   const [api, setApi] = useState("");
   // No default: whether a link needs a password is the owner's call, every time.
   const [protection, setProtection] = useState<"none" | "password" | null>(null);
@@ -408,7 +440,7 @@ export function PublicLinkDialog({
     setError(null);
     const apiAllow = api.split(/[\s,]+/).map((p) => p.trim()).filter(Boolean);
     const withPassword = protection === "password";
-    const failure = await onCreate({ appId, mode, ...(mode === "temporary" ? { ttlMinutes: minutes } : {}), ...(apiAllow.length ? { apiAllow } : {}), ...(withPassword ? { password } : {}) }).catch((): PublicLinkFailure => ({ message: "error" }));
+    const failure = await onCreate({ appId, mode, ...(mode === "temporary" ? { ttlMinutes: minutes } : {}), apiAccess, ...(apiAllow.length ? { apiAllow } : {}), ...(withPassword ? { password } : {}) }).catch((): PublicLinkFailure => ({ message: "error" }));
     setBusy(false);
     if (failure) {
       setError(failureText(t, failure));
@@ -443,8 +475,14 @@ export function PublicLinkDialog({
           <div style={{ marginTop: 14 }}>
             {link.url ? (
               <>
-                <input readOnly value={link.url} aria-label={t("publicLink.copy")} data-testid="public-link-url" onFocus={(e) => e.currentTarget.select()} style={{ ...field, width: "100%" }} />
-                <p data-testid="public-link-address-note" style={{ margin: "8px 0 0", fontSize: 12, lineHeight: 1.5, color: "rgba(255,255,255,0.6)" }}>{t("publicLink.addressChanges")}</p>
+                <input readOnly value={shareableLinkUrl(link) ?? link.url} aria-label={t("publicLink.copy")} data-testid="public-link-url" onFocus={(e) => e.currentTarget.select()} style={{ ...field, width: "100%" }} />
+                {/* The note is about the address with the key in it, which only the owner is shown. */}
+                {!link.tokenMasked && <p data-testid="public-link-share-note" style={{ margin: "8px 0 0", fontSize: 12, lineHeight: 1.5, color: "rgba(255,255,255,0.75)" }}>{t(link.passwordProtected ? "publicLink.shareThisAddressPassword" : "publicLink.shareThisAddress")}</p>}
+                <p data-testid="public-link-address-note" style={{ margin: "6px 0 0", fontSize: 12, lineHeight: 1.5, color: "rgba(255,255,255,0.6)" }}>{t("publicLink.addressChanges")}</p>
+                <p data-testid="public-link-api-status" style={{ margin: "6px 0 0", fontSize: 12, lineHeight: 1.5, color: "rgba(255,255,255,0.6)" }}>
+                  {/* The app's own /api is what the choice opens; a path typed on top of "Off" does not make it "read and write". */}
+                  {t(!link.apiAllow.includes("/api") ? "publicLink.apiAccess.statusNone" : link.apiReadOnly ? "publicLink.apiAccess.statusRead" : "publicLink.apiAccess.statusFull")}
+                </p>
               </>
             ) : (
               <p data-testid="public-link-starting" style={{ margin: 0, fontSize: 12.5, color: "rgba(255,255,255,0.8)" }}>{t("publicLink.starting")}</p>
@@ -452,11 +490,11 @@ export function PublicLinkDialog({
             <LinkPasswordManager appId={appId} link={link} justSet={justSet} onSetPassword={onSetPassword} onJustSet={setJustSet} />
             <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
               <button type="button" onClick={onClose} data-testid="public-link-close" style={quiet}>{t("publicLink.done")}</button>
-              {link.url && (
+              {shareableLinkUrl(link) && (
                 <button
                   type="button"
                   data-testid="public-link-copy"
-                  onClick={() => { void navigator.clipboard?.writeText(link.url ?? ""); setCopied(true); }}
+                  onClick={() => { void navigator.clipboard?.writeText(shareableLinkUrl(link) ?? ""); setCopied(true); }}
                   style={primary}
                 >
                   {copied ? t("publicLink.copied") : t("publicLink.copy")}
@@ -511,6 +549,25 @@ export function PublicLinkDialog({
               {protection === null && <p data-testid="public-link-protection-choose" style={NOTE}>{t("publicLink.password.choose")}</p>}
               {protection === "none" && <p data-testid="public-link-protection-none-note" style={NOTE}>{t("publicLink.password.noneNote")}</p>}
               {protection === "password" && <LinkPasswordField value={password} onChange={(value) => { setPassword(value); setError(null); }} />}
+            </div>
+            <div style={{ display: "grid", gap: 8 }}>
+              <span id="public-link-api-access-label" style={{ fontSize: 12, color: "rgba(255,255,255,0.7)" }}>{t("publicLink.apiAccess.legend")}</span>
+              <div role="radiogroup" aria-labelledby="public-link-api-access-label" style={{ display: "flex", gap: 8 }}>
+                {(["full", "read", "none"] as const).map((a) => (
+                  <button
+                    key={a}
+                    type="button"
+                    role="radio"
+                    aria-checked={apiAccess === a}
+                    data-testid={`public-link-api-access-${a}`}
+                    onClick={() => setApiAccess(a)}
+                    style={{ ...quiet, flex: 1, background: apiAccess === a ? "rgba(249,115,22,0.22)" : quiet.background, color: apiAccess === a ? "#fdba74" : quiet.color, outline: apiAccess === a ? "1px solid rgba(249,115,22,0.6)" : "none" }}
+                  >
+                    {t(`publicLink.apiAccess.${a}`)}
+                  </button>
+                ))}
+              </div>
+              <p data-testid="public-link-api-access-note" style={NOTE}>{t(`publicLink.apiAccess.${apiAccess}Note`)}</p>
             </div>
             <label style={{ display: "grid", gap: 6, fontSize: 12, color: "rgba(255,255,255,0.7)" }}>
               {t("publicLink.api")}

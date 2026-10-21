@@ -84,9 +84,23 @@ export const APP_PROXY_CSP = "sandbox allow-scripts allow-forms allow-popups all
  * bytes the app hands to everyone who opens it — and they carry no
  * per-request data. An app's own JSON, HTML or plain-text responses get no
  * CORS header and stay unreadable to another origin, which is where a notes
- * app's notes live. An app that wants to call its own API from inside the
- * sandbox needs a capability it can prove, not a hole opened for every page
- * on the web by accident.
+ * app's notes live.
+ *
+ * The one exception is the app's OWN API, `/apps/<id>/api/…`.
+ * Every app with a server calls it from its own document, and under the
+ * sandbox that document's fetch is a CORS request the app's server never
+ * answers — so every such app was a page that loads and then does nothing
+ * ("blocked by CORS policy" in a console nobody reads). For that tree, and
+ * that tree only, the proxy answers the opaque origin for any content type,
+ * still without credentials. What that costs: a sandboxed frame some other
+ * page puts on screen can read the API of an app on this box if it can
+ * reach the box at all — which, for a box on a LAN, the browser's local
+ * network access rules are what stand in the way of. A simple write (a
+ * form-encoded or plain-text POST) was reachable that way before this, since
+ * it needs no CORS; what is new is the read, and — through the preflight the
+ * proxy answers for this tree — the writes a form cannot send: a JSON body,
+ * PUT, PATCH and DELETE. The listener check above keeps all of it to the
+ * app's own process.
  */
 const CORS_READABLE_TYPES = [
   "text/css",
@@ -117,15 +131,30 @@ export function appProxyAllowOrigin(
   requestOrigin: string | null,
   upstreamAllowOrigin: string | null,
   contentType: string | null,
+  /** Is this the app's own `/api` tree (see isAppApiPath)? Answered whatever its type. */
+  apiPath = false,
 ): string | null {
   if (upstreamAllowOrigin) return null;
   if (requestOrigin !== "null") return null;
+  if (apiPath) return "null";
   const type = (contentType ?? "").split(";")[0].trim().toLowerCase();
   if (!type) return null;
   return CORS_READABLE_TYPES.some((allowed) => (allowed.endsWith("/") || allowed.endsWith("-") ? type.startsWith(allowed) : type === allowed))
     ? "null"
     : null;
 }
+
+/** Is `rest` (the path below `/apps/<id>`) the app's own API tree? */
+export function isAppApiPath(rest: string): boolean {
+  const lower = rest.toLowerCase();
+  return lower === "/api" || lower.startsWith("/api/");
+}
+
+/** The headers of an API answer a sandboxed document may read: what a media player needs for range requests, and what a paged list needs. */
+export const APP_API_EXPOSED_HEADERS = "Content-Range, Content-Length, Accept-Ranges, Content-Type, ETag, Last-Modified, Location, Link, X-Total-Count";
+/** The methods and headers a preflight for the app's API is answered with. */
+export const APP_API_PREFLIGHT_METHODS = "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS";
+export const APP_API_PREFLIGHT_MAX_AGE_S = 600;
 
 /** How long a listener verdict is trusted: an "owned" one for this long, a refusal for a fraction of it, so a server just started is picked up on the next try. */
 export const LISTENER_CHECK_TTL_MS = 30_000;

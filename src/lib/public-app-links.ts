@@ -16,15 +16,18 @@
  *     timer that has to fire;
  *   - one link per app, at most MAX_LINKS at once (each is a tunnel process on
  *     an 8 GB board);
- *   - the app's `/api` tree and every write stay closed unless the owner names
- *     a prefix in `apiAllow`;
+ *   - the app's `/api` tree and every write stay closed unless a prefix is in
+ *     `apiAllow`. A new link lists `/api` itself unless the owner chose
+ *     otherwise (`apiAccess`: an app that cannot reach its own
+ *     API is a blank page for the visitor), and `apiReadOnly` keeps the
+ *     listed prefixes to GET/HEAD;
  *   - a link may carry a password of its own (TASK-1515). Only its salted
  *     scrypt hash is stored, next to a random key the serving side signs
  *     unlock cookies with. Setting, changing or removing it never touches the
  *     link's id or token, so the address stays the same; a change makes a new
  *     key, so everyone who had typed the old password is asked again.
  */
-import { randomBytes, scrypt } from "crypto";
+import { randomBytes, scrypt, timingSafeEqual } from "crypto";
 import fs from "fs/promises";
 import path from "@/lib/runtime-path";
 import { DATA_DIR } from "@/lib/config-store";
@@ -45,6 +48,16 @@ const SCRYPT = { N: 32768, r: 8, p: 3, keyLength: 32, saltLength: 16 } as const;
 
 export type PublicLinkMode = "temporary" | "permanent";
 
+/**
+ * What visitors may do with the app's own `/api` tree: use it (`full`, the
+ * default — a new link lists `/api`), read it (`read`: GET/HEAD only), or
+ * nothing beyond the prefixes the owner typed (`none`).
+ */
+export type PublicLinkApiAccess = "full" | "read" | "none";
+export const API_ACCESS_VALUES: readonly PublicLinkApiAccess[] = ["full", "read", "none"];
+/** The prefix a new link opens by default: the app's own API, under its base path. */
+export const DEFAULT_API_PREFIX = "/api";
+
 export interface StoredPublicLink {
   id: string;
   appId: string;
@@ -53,6 +66,8 @@ export interface StoredPublicLink {
   createdAt: number;
   expiresAt: number | null;
   apiAllow: string[];
+  /** When true the allow-listed prefixes answer GET/HEAD only; absent means writes are allowed under them. */
+  apiReadOnly?: boolean;
   /** Present when visitors must type a password. Never the password itself. */
   password?: StoredLinkPassword | null;
 }
@@ -72,6 +87,7 @@ export interface PublicLinkView {
   createdAt: number;
   expiresAt: number | null;
   apiAllow: string[];
+  apiReadOnly: boolean;
   /** Whether visitors are asked for a password. The password itself is not kept anywhere. */
   passwordProtected: boolean;
   /** `starting` until the tunnel has a hostname; `offline` when the serving side has no record of it. */
@@ -129,7 +145,28 @@ function asStored(raw: unknown): StoredPublicLink | null {
     && typeof l.token === "string" && typeof l.createdAt === "number")) return null;
   const apiAllow = l.apiAllow === undefined || l.apiAllow === null ? [] : l.apiAllow;
   if (!Array.isArray(apiAllow)) return null;
-  return { ...(l as unknown as StoredPublicLink), apiAllow: apiAllow as string[] };
+  if (l.apiReadOnly !== undefined && l.apiReadOnly !== null && typeof l.apiReadOnly !== "boolean") return null;
+  return { ...(l as unknown as StoredPublicLink), apiAllow: apiAllow as string[], ...(l.apiReadOnly === true ? { apiReadOnly: true } : {}) };
+}
+
+/** `apiAccess` as given (nothing is `full`), or a PublicLinkError. */
+export function parseApiAccess(input: unknown): PublicLinkApiAccess {
+  if (input === undefined || input === null) return "full";
+  if (typeof input === "string" && (API_ACCESS_VALUES as readonly string[]).includes(input)) return input as PublicLinkApiAccess;
+  throw new PublicLinkError("apiAccess must be full, read or none.", 400, "bad_api_access");
+}
+
+/**
+ * The prefixes a link opens: the app's `/api` for `full` and `read`, plus
+ * whatever the owner typed. The cap counts the `/api` added here too: the
+ * serving side refuses a longer list, and a link it refuses is never served.
+ */
+export function apiAllowFor(access: PublicLinkApiAccess, typed: string[]): string[] {
+  const out = access === "none" || typed.includes(DEFAULT_API_PREFIX) ? typed : [DEFAULT_API_PREFIX, ...typed];
+  if (out.length > MAX_API_ALLOW) {
+    throw new PublicLinkError(`At most ${MAX_API_ALLOW} API paths, the app's own /api included.`, 400, "bad_api_allow");
+  }
+  return out;
 }
 
 /**
@@ -188,17 +225,44 @@ async function checkedPassword(input: unknown): Promise<string> {
   return password;
 }
 
-/** The record stored for a password: a fresh salt, the slow hash, a fresh unlock key. */
+function scryptAsync(password: string, salt: Buffer, N: number, r: number, p: number, keyLength: number): Promise<Buffer> {
+  return new Promise<Buffer>((resolve, reject) => {
+    scrypt(password, salt, keyLength, { N, r, p, maxmem: 256 * 1024 * 1024 }, (err, key) => (err ? reject(err) : resolve(key)));
+  });
+}
+
+const STORED_HASH_RE = /^scrypt\$(\d+)\$(\d+)\$(\d+)\$([A-Za-z0-9_-]+)\$([A-Za-z0-9_-]+)$/;
+
+/**
+ * Does `password` hash to the stored `hash`? The same derivation the serving
+ * side runs on a visitor's answer (scripts/public-app-links.js,
+ * verifyPasswordHash), kept here so what the owner's dialog stores can be
+ * checked against it before it is written. False for a record
+ * that is not one of ours.
+ */
+export async function verifyLinkPasswordHash(password: string, hash: string): Promise<boolean> {
+  const m = STORED_HASH_RE.exec(hash);
+  if (!m) return false;
+  const key = Buffer.from(m[5], "base64url");
+  const derived = await scryptAsync(password.normalize("NFC"), Buffer.from(m[4], "base64url"), Number(m[1]), Number(m[2]), Number(m[3]), key.length).catch(() => null);
+  return derived !== null && derived.length === key.length && timingSafeEqual(derived, key);
+}
+
+/**
+ * The record stored for a password: a fresh salt, the slow hash, a fresh
+ * unlock key — and the hash checked against the password it is for before
+ * anything is written, the way the serving side will check a visitor's
+ * answer. A record that would not verify is never stored: the owner would
+ * hand out a password nobody can use.
+ */
 async function hashedPassword(password: string, now: number): Promise<StoredLinkPassword> {
   const salt = randomBytes(SCRYPT.saltLength);
-  const derived = await new Promise<Buffer>((resolve, reject) => {
-    scrypt(password, salt, SCRYPT.keyLength, { N: SCRYPT.N, r: SCRYPT.r, p: SCRYPT.p, maxmem: 256 * 1024 * 1024 }, (err, key) => (err ? reject(err) : resolve(key)));
-  });
-  return {
-    hash: `scrypt$${SCRYPT.N}$${SCRYPT.r}$${SCRYPT.p}$${salt.toString("base64url")}$${derived.toString("base64url")}`,
-    key: randomBytes(32).toString("base64url"),
-    setAt: now,
-  };
+  const derived = await scryptAsync(password, salt, SCRYPT.N, SCRYPT.r, SCRYPT.p, SCRYPT.keyLength);
+  const hash = `scrypt$${SCRYPT.N}$${SCRYPT.r}$${SCRYPT.p}$${salt.toString("base64url")}$${derived.toString("base64url")}`;
+  if (!(await verifyLinkPasswordHash(password, hash))) {
+    throw new PublicLinkError("The password could not be stored in a form that verifies. Try again.", 500, "password_unverifiable");
+  }
+  return { hash, key: randomBytes(32).toString("base64url"), setAt: now };
 }
 
 async function audit(event: string, fields: Record<string, unknown>): Promise<void> {
@@ -268,6 +332,7 @@ export async function listPublicLinks(now = Date.now()): Promise<PublicLinkView[
         createdAt: l.createdAt,
         expiresAt: l.expiresAt,
         apiAllow: l.apiAllow,
+        apiReadOnly: l.apiReadOnly === true,
         passwordProtected: hasPassword(l),
         state: origin && state === "live" ? "live" : state === "live" ? "starting" : state,
         url: origin && state === "live" ? publicLinkUrl(origin, l, await isServerApp(l.appId)) : null,
@@ -281,7 +346,10 @@ export interface CreatePublicLinkInput {
   appId: unknown;
   mode: unknown;
   ttlMinutes?: unknown;
+  /** Extra prefixes below the app's base path, on top of what `apiAccess` opens. */
   apiAllow?: unknown;
+  /** `full` (default), `read` or `none` — see PublicLinkApiAccess. */
+  apiAccess?: unknown;
   /** A password for this link, or nothing for an open one. */
   password?: unknown;
 }
@@ -300,7 +368,9 @@ export async function createPublicLink(input: CreatePublicLinkInput, now = Date.
     }
     expiresAt = now + ttl * 60_000;
   }
-  const apiAllow = parseApiAllow(input.apiAllow);
+  const apiAccess = parseApiAccess(input.apiAccess);
+  const apiAllow = apiAllowFor(apiAccess, parseApiAllow(input.apiAllow));
+  const apiReadOnly = apiAccess === "read";
   // Hashed before the lock is taken: it is slow, and nothing it needs is shared.
   const password = input.password === undefined || input.password === null ? null : await hashedPassword(await checkedPassword(input.password), now);
 
@@ -323,11 +393,12 @@ export async function createPublicLink(input: CreatePublicLinkInput, now = Date.
       createdAt: now,
       expiresAt,
       apiAllow,
+      ...(apiReadOnly ? { apiReadOnly: true } : {}),
       ...(password ? { password } : {}),
     };
     await writeStored([...links, link]);
-    await audit("created", { link: link.id, app: appId, mode, expiresAt, apiAllow, password: password !== null });
-    return { appId, mode, createdAt: now, expiresAt, apiAllow, passwordProtected: password !== null, state: "starting", url: null };
+    await audit("created", { link: link.id, app: appId, mode, expiresAt, apiAllow, apiReadOnly, password: password !== null });
+    return { appId, mode, createdAt: now, expiresAt, apiAllow, apiReadOnly, passwordProtected: password !== null, state: "starting", url: null };
   });
 }
 

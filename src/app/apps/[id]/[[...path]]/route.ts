@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { APP_PROXY_CSP, appProxyAllowOrigin, resolveAppProxyTarget } from "@/lib/app-proxy";
+import { APP_API_EXPOSED_HEADERS, APP_API_PREFLIGHT_MAX_AGE_S, APP_API_PREFLIGHT_METHODS, APP_PROXY_CSP, appProxyAllowOrigin, isAppApiPath, resolveAppProxyTarget } from "@/lib/app-proxy";
 
 export const dynamic = "force-dynamic";
 
@@ -9,7 +9,8 @@ export const dynamic = "force-dynamic";
  * any host the desktop is viewed from (see src/lib/app-proxy.ts for the why,
  * the listener check and the containment). Every method; the body streamed
  * both ways; redirects handed back to the browser rather than followed on
- * its behalf; the sandbox on every response.
+ * its behalf; the sandbox on every response — and, for the app's own `/api`
+ * tree, the CORS answer that sandbox makes necessary.
  */
 
 /** Hop-by-hop headers, never forwarded in either direction. */
@@ -43,10 +44,27 @@ async function proxy(request: NextRequest, params: Promise<{ id: string; path?: 
   const { target } = resolved;
   const incoming = request.nextUrl;
   const prefix = `/apps/${id}`;
-  const upstreamPath = target.stripBasePath
-    ? (incoming.pathname.slice(prefix.length) || "/")
-    : incoming.pathname;
+  const rest = incoming.pathname.slice(prefix.length) || "/";
+  const upstreamPath = target.stripBasePath ? rest : incoming.pathname;
   const url = `http://127.0.0.1:${target.port}${upstreamPath}${incoming.search}`;
+  const apiPath = isAppApiPath(rest);
+  const requestOrigin = request.headers.get("origin");
+
+  // A preflight from the app's own sandboxed document for its own API
+  // (see appProxyAllowOrigin): answered here, so an app whose
+  // server never heard of OPTIONS still works from inside the frame. Any
+  // other preflight goes to the app as before.
+  if (request.method.toUpperCase() === "OPTIONS" && apiPath && requestOrigin === "null" && request.headers.has("access-control-request-method")) {
+    const headers = new Headers({
+      "access-control-allow-origin": "null",
+      "access-control-allow-methods": APP_API_PREFLIGHT_METHODS,
+      "access-control-allow-headers": request.headers.get("access-control-request-headers") || "Content-Type, Range, Accept, Authorization, X-Requested-With",
+      "access-control-max-age": String(APP_API_PREFLIGHT_MAX_AGE_S),
+      vary: "Origin",
+      "content-security-policy": APP_PROXY_CSP,
+    });
+    return new NextResponse(null, { status: 204, headers });
+  }
 
   const headers = new Headers();
   request.headers.forEach((value, key) => {
@@ -114,9 +132,12 @@ async function proxy(request: NextRequest, params: Promise<{ id: string; path?: 
   // `null`, so its module scripts and `crossorigin` stylesheets are CORS
   // fetches the app's server was never asked to answer (see
   // appProxyAllowOrigin). Vary on Origin, since the answer now depends on it.
-  const allowOrigin = appProxyAllowOrigin(request.headers.get("origin"), out.get("access-control-allow-origin"), out.get("content-type"));
+  const allowOrigin = appProxyAllowOrigin(requestOrigin, out.get("access-control-allow-origin"), out.get("content-type"), apiPath);
   if (allowOrigin) {
     out.set("access-control-allow-origin", allowOrigin);
+    // The app's API: a media player reads Content-Range off a 206, a list
+    // its paging headers — none of which a CORS response exposes by default.
+    if (apiPath && !out.has("access-control-expose-headers")) out.set("access-control-expose-headers", APP_API_EXPOSED_HEADERS);
     const vary = out.get("vary");
     if (!vary) out.set("vary", "Origin");
     else if (!/(^|,)\s*origin\s*(,|$)/i.test(vary)) out.set("vary", `${vary}, Origin`);
