@@ -431,7 +431,9 @@ step_apt_update() {
   # without libreoffice-writer every .docx/.odt/.rtf an import reads fails as
   # "extract-failed" (seen on the owner's laptop, 2026-10-15). Same packages as
   # install.sh's Jetson list; this step also runs on every update, so an
-  # installed PC picks them up too.
+  # installed PC picks them up too. Podman is NOT on this list, as on the
+  # Jetson's: agent_sandbox_provision installs it once the owner switches the
+  # agent tool sandbox on, so a PC that never uses it carries none of it.
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
     git curl python3 python3-pip pipx build-essential cmake ninja-build \
     pkg-config openssl ffmpeg ca-certificates sudo \
@@ -805,6 +807,11 @@ PY
     chown -R "$CLAWBOX_USER:$CLAWBOX_USER" "$OPENCLAW_HOME"
     echo "  OpenClaw 2 local gateway configuration seeded"
 
+    # The agent tool sandbox, agents.defaults.sandbox: the same answer
+    # install.sh writes and the gateway's pre-start applies (agent_sandbox_config
+    # below). Never fatal.
+    agent_sandbox_config
+
     local CLAWHUB_BIN="$NPM_PREFIX/bin/clawhub"
     if [ ! -x "$CLAWHUB_BIN" ]; then
       as_user_runtime "$NODE_DIST_ROOT/bin/npm" install -g clawhub --prefix "$NPM_PREFIX" 2>/dev/null \
@@ -930,6 +937,137 @@ NODE
   fi
 
   echo "  OpenClaw configured for local access"
+}
+
+# The agent tool sandbox: OpenClaw's agents.defaults.sandbox, rootless Podman
+# for every session except the agent's main chat, behind the owner's switch in
+# Settings -> Harness, OFF until its cost is measured. install.sh writes the
+# same answer, and gateway-pre-start.sh applies it on every gateway start; all
+# three ask scripts/agent-sandbox-config.mjs (posture: config/agent-sandbox.json).
+#
+# This step runs as root out of a single-file copy of this installer, while the
+# helper, the posture and the image script sit in the user-writable project. So
+# every one of them runs as the user, never as root; root only installs the
+# fixed package list and the subordinate IDs. Never fatal: a refused write
+# costs the box this setting, not its install.
+agent_sandbox_config() {
+  local line sw="" mode="" sandbox="" policy_key="" policy_value=""
+  while IFS= read -r line; do
+    case "$line" in
+      switch=*) sw="${line#switch=}" ;;
+      mode=*) mode="${line#mode=}" ;;
+      sandbox=*) sandbox="${line#sandbox=}" ;;
+      policy-key=*) policy_key="${line#policy-key=}" ;;
+      policy-value=*) policy_value="${line#policy-value=}" ;;
+    esac
+  done < <(as_user_runtime node "$PROJECT_DIR/scripts/agent-sandbox-config.mjs" plan "$PROJECT_DIR/data/config.json" "$OPENCLAW_HOME/openclaw.json" || true)
+  if [ -z "$sandbox" ]; then
+    echo "  Warning: the agent tool sandbox settings were not written (openclaw.json could not be read, or the posture helper failed)" >&2
+    return 0
+  fi
+  if [ "$sw" = "unknown" ]; then
+    echo "  Warning: data/config.json could not be read; the agent tool sandbox keeps the mode it has ($mode)" >&2
+  fi
+  if as_user_runtime "$OPENCLAW_BIN" config set agents.defaults.sandbox "$sandbox" --strict-json; then
+    echo "  Agent tool sandbox: mode $mode (Podman, rootless; owner's switch: $sw)"
+  else
+    echo "  Warning: OpenClaw refused agents.defaults.sandbox; the agent tool sandbox setting is unchanged" >&2
+  fi
+  # ClawBox's MCP tools inside a sandboxed turn. Two literal keys, not one
+  # computed one, so the harness contract checks both against the schema.
+  case "$policy_key" in
+    alsoAllow)
+      as_user_runtime "$OPENCLAW_BIN" config set tools.sandbox.tools.alsoAllow "$policy_value" --strict-json \
+        || echo "  Warning: OpenClaw refused tools.sandbox.tools.alsoAllow; sandboxed sessions do not get the ClawBox tools" >&2
+      ;;
+    allow)
+      as_user_runtime "$OPENCLAW_BIN" config set tools.sandbox.tools.allow "$policy_value" --strict-json \
+        || echo "  Warning: OpenClaw refused tools.sandbox.tools.allow; sandboxed sessions do not get the ClawBox tools" >&2
+      ;;
+  esac
+  if [ "$sw" = "on" ]; then
+    agent_sandbox_provision \
+      || echo "  Warning: the agent tool sandbox is switched on but its runtime is not ready; sandboxed sessions' tools fail until it is" >&2
+  fi
+  return 0
+}
+
+# A subordinate ID range for the user in /etc/subuid or /etc/subgid ($1), which
+# rootless Podman maps the sandbox's user namespace onto. A missing range is
+# appended past the highest one already there, so it never overlaps another's.
+agent_sandbox_subids() {
+  local file="/etc/$1" flag="--add-sub${1#sub}s" start
+  if grep -q "^$CLAWBOX_USER:" "$file" 2>/dev/null; then
+    return 0
+  fi
+  start=$(awk -F: 'BEGIN { m = 100000 } NF >= 3 && $2 + $3 > m { m = $2 + $3 } END { print m }' "$file" 2>/dev/null || true)
+  [ -n "$start" ] || start=100000
+  usermod "$flag" "$start-$((start + 65535))" "$CLAWBOX_USER"
+}
+
+# The user's session for the gateway ($1), the process that starts the sandbox
+# containers: a SYSTEM unit running as the user (step_systemd_services), so it
+# has no XDG_RUNTIME_DIR, and rootless Podman then finds no systemd user
+# session, falls back to the cgroupfs manager and cannot hold a container to
+# its memory cap. The drop-in hands it the lingering user manager's runtime dir
+# and orders it after that manager; install.sh does the same for the Jetson's
+# unit. Written only when it changes, and then a RUNNING gateway is restarted
+# once; an unchanged drop-in restarts nothing. $2 is the drop-in dir, for the
+# tests.
+agent_sandbox_gateway_session() {
+  local unit="$1" dir="${2:-/etc/systemd/system/$1.d}" uid file want
+  uid="$(id -u "$CLAWBOX_USER" 2>/dev/null)" || return 1
+  [ -n "$uid" ] || return 1
+  file="$dir/agent-sandbox.conf"
+  want="[Unit]
+After=user@$uid.service
+
+[Service]
+Environment=XDG_RUNTIME_DIR=/run/user/$uid"
+  if [ -f "$file" ] && [ "$(cat "$file" 2>/dev/null)" = "$want" ]; then
+    return 0
+  fi
+  mkdir -p "$dir" && printf '%s\n' "$want" > "$file" || return 1
+  systemctl daemon-reload || return 1
+  if systemctl is-active --quiet "$unit" 2>/dev/null; then
+    systemctl restart "$unit" \
+      || echo "  Warning: $unit did not restart; it gets the user session for the sandbox on its next start" >&2
+  fi
+  echo "  $unit runs with $CLAWBOX_USER's user session (XDG_RUNTIME_DIR=/run/user/$uid) for rootless Podman"
+}
+
+# The sandbox runtime, installed only once the owner switched the sandbox on:
+# rootless Podman with `catatonit` for the `--init` OpenClaw starts every
+# sandbox with, the user's subordinate IDs, a lingering user manager for the
+# memory cap's cgroup, `dbus-user-session` for the bus Podman reaches it
+# through, the gateway pointed at that session, and the image, built into the
+# user's own store. Never Docker: a user in the `docker` group is root in all
+# but name.
+agent_sandbox_provision() {
+  local image
+  image=$(as_user_runtime node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).sandbox.docker.image)' "$PROJECT_DIR/config/agent-sandbox.json" 2>/dev/null || true)
+  if [ -z "$image" ]; then
+    echo "  Warning: config/agent-sandbox.json names no sandbox image; the agent tool sandbox runtime was not installed" >&2
+    return 1
+  fi
+  wait_for_apt
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq podman catatonit uidmap dbus-user-session; then
+    echo "  Warning: podman could not be installed; the sandboxed sessions' tools cannot run until it is" >&2
+    return 1
+  fi
+  if ! agent_sandbox_subids subuid || ! agent_sandbox_subids subgid; then
+    echo "  Warning: no subordinate ID range could be given to $CLAWBOX_USER; rootless Podman cannot start the sandbox" >&2
+    return 1
+  fi
+  loginctl enable-linger "$CLAWBOX_USER" 2>/dev/null \
+    || echo "  Warning: could not enable lingering for $CLAWBOX_USER; the sandbox's memory cap may not be enforced" >&2
+  agent_sandbox_gateway_session "$GATEWAY_SERVICE" \
+    || echo "  Warning: the gateway could not be given $CLAWBOX_USER's user session; the sandbox's memory cap may not be enforced" >&2
+  if ! as_user_runtime bash "$PROJECT_DIR/scripts/agent-sandbox-image.sh" "$image"; then
+    echo "  Warning: the sandbox image $image could not be built; the sandboxed sessions' tools cannot run until it is" >&2
+    return 1
+  fi
+  echo "  Agent tool sandbox runtime ready (rootless Podman, image $image)"
 }
 
 step_directories_permissions() {

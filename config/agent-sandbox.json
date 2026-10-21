@@ -1,0 +1,34 @@
+{
+  "_doc": [
+    "The agent tool sandbox: OpenClaw's agents.defaults.sandbox, as ClawBox runs it.",
+    "One file, three readers: scripts/agent-sandbox-config.mjs (install.sh, install-x64.sh, gateway-pre-start.sh) and src/lib/agent-sandbox.ts (Settings). src/tests/unit/openclaw-sandbox-default.test.ts and src/tests/unit/agent-sandbox.test.ts hold them to one answer.",
+    "The owner's switch is storeKey in data/config.json, OFF unless it is exactly true. On, every session except the agent's main chat runs its tools in the sandbox (modeWhenOn). The main chat stays on the box, with the Coding Agent and the browser.",
+    "Rootless Podman as the clawbox user: no daemon, and no docker group, which would be root in all but name. One container for the agent (scope agent), so its memory cap is also the total. No network, a read-only root, every capability dropped, and the harness's isolated workspace (workspaceAccess none, skills mirrored in read-only).",
+    "budget is what the Settings card and scripts/agent-sandbox-measure.sh hold a box to: 512 MB of memory for the container, 2 GB of disk for the image, the container store and the sandbox workspaces."
+  ],
+  "storeKey": "clawbox_agent_sandbox_enabled",
+  "modeWhenOn": "non-main",
+  "modeWhenOff": "off",
+  "sandbox": {
+    "backend": "podman",
+    "scope": "agent",
+    "workspaceAccess": "none",
+    "docker": {
+      "image": "openclaw-sandbox:bookworm-slim",
+      "network": "none",
+      "readOnlyRoot": true,
+      "capDrop": ["ALL"],
+      "memory": "512m",
+      "memorySwap": "512m",
+      "pidsLimit": 256
+    },
+    "browser": {
+      "enabled": false
+    }
+  },
+  "mcpToolGlob": "clawbox__*",
+  "budget": {
+    "memoryBytes": 536870912,
+    "diskBytes": 2147483648
+  }
+}

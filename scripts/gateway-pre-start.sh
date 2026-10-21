@@ -6928,6 +6928,37 @@ then
 fi
 unset CLAWBOX_MCP_TOKEN_VAL
 
+# ── The agent tool sandbox (rootless Podman, behind the owner's switch) ─────
+#
+# OpenClaw can run an agent's tool calls inside a container
+# (agents.defaults.sandbox), which limits what a bad command or a
+# prompt-injected page can reach. This is where a box ALREADY IN THE FIELD gets
+# the key: install.sh writes the same answer through the CLI on installs and
+# updates, and both ask scripts/agent-sandbox-config.mjs for it, so the two
+# cannot drift. The posture is config/agent-sandbox.json: rootless Podman, one
+# container for the agent capped at 512 MB with no swap on top, no network, a
+# read-only root and every capability dropped, plus ClawBox's MCP tools let
+# through the sandbox tool policy (the server registered just above).
+#
+# The MODE follows the owner's switch in Settings -> Harness,
+# `clawbox_agent_sandbox_enabled` in the device store. OFF unless it is exactly
+# true, which is the default until the cost has been measured on a Nano; on, it
+# is "non-main": every session but the agent's main chat runs its tools in the
+# container (channels, groups, the owner's extra chat tabs and the other users'
+# chats), while the main chat keeps the Coding Agent and the browser on the box.
+# A store that exists and cannot be read keeps the mode the config already has.
+#
+# Gen 1 cores are left alone, and nothing here can stop the gateway: a failure
+# is one WARN and an untouched openclaw.json.
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
+  CLAWBOX_SANDBOX_NODE="$(clawbox_node_bin 2>/dev/null || true)"
+  if [ -z "$CLAWBOX_SANDBOX_NODE" ]; then
+    echo "  WARN: no node to run scripts/agent-sandbox-config.mjs; the agent tool sandbox settings are left as they are this boot" >&2
+  elif ! "$CLAWBOX_SANDBOX_NODE" "$CLAWBOX_ROOT/scripts/agent-sandbox-config.mjs" apply "${CLAWBOX_DEVICE_STORE:-}" "$OPENCLAW_CONFIG"; then
+    echo "  WARN: the agent tool sandbox settings could not be applied this boot; openclaw.json is left as it was" >&2
+  fi
+fi
+
 # ── Installing a ClawBox hook plugin into ~/.openclaw/extensions ────────────
 #
 # ONE INSTALLER FOR BOTH of the plugins ClawBox ships (the protected-path deny
