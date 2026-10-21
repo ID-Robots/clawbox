@@ -903,7 +903,10 @@ shell tool, not less and not more:
   its own, because the session is intact and Resume is what helps, where
   `failed` means the harness could not finish at all. `coding_agent_status`
   reports the bar, the verdict and the attempts, and says plainly not to start
-  a fresh run for a `gave_up` one. There is deliberately no `command`
+  a fresh run for a `gave_up` one. A run that ended before it used the result
+  of a helper it launched (still out, or back with no turn after it) is held
+  to the same gate, deliverable or not: nudged while attempts remain, then
+  `failed` with `resumable: true`. There is deliberately no `command`
   deliverable on this tool surface: that kind has the box RUN something, which
   is execution the agent does not otherwise hold on the Hermes edition, so it
   is the owner's to set in the Coding Agent app.

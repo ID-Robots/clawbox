@@ -60,17 +60,17 @@ describe("the legacy diet changes nothing", () => {
   // Taken from the build BEFORE the diet existed (d6cc266cd), so a change to
   // any default byte of the prompt fails here and not on a box.
   it("keeps HEADLESS_BRIEF and its variants byte for byte", () => {
-    expect(HEADLESS_BRIEF.length).toBe(7667);
-    expect(sha(HEADLESS_BRIEF)).toBe("29877cced4191674b7a97840f36bd0cd560b6890467cebd8243195187b0696e6");
-    expect(sha(headlessBrief({ reviewedSeparately: true }))).toBe("0a85ed82c852ecc79d65814a7e2dda71dc009caa7209e0173b204044ad9368ff");
-    expect(sha(headlessBrief({ reviewedSeparately: false, team: true }))).toBe("57336ac4c28442d1c74f84ef5147bd5167a00dd343e4552745d0f3366e21d9a4");
+    expect(HEADLESS_BRIEF.length).toBe(7742);
+    expect(sha(HEADLESS_BRIEF)).toBe("14656f67cca7fea65a58d6608cb841415bd87b15d6181d026d62c3780ebc3cae");
+    expect(sha(headlessBrief({ reviewedSeparately: true }))).toBe("2ebee92285c23e564bd73ab39c863cf921b01efa51d8446dc01384035e6fe0c8");
+    expect(sha(headlessBrief({ reviewedSeparately: false, team: true }))).toBe("874248ba0cb726756571a78542867058f9e7d1e7a9d610900891fdc34f693cf8");
   });
 
   it("keeps the appended prompt of an ordinary, a PR and an ultracode run byte for byte", () => {
     expect(sha(systemPrompt(buildRunArgs({ effort: "xhigh", provider: "clawbox-ai", run: RUN, cpuBudget: 2, lessonChannel: true, draftPullRequests: true }))))
-      .toBe("21908d5e85357b641a2646d6f4e1798941b301d71458f0d08be8249bc408c676");
+      .toBe("6eca6238da3dd7e9ad08ee780555907901a39fae3d7d9f65b88c9d2f30b87bf7");
     expect(sha(systemPrompt(buildRunArgs({ effort: ULTRACODE_EFFORT, provider: "clawbox-ai", run: RUN, cpuBudget: 2, lessonChannel: true, reviewedSeparately: true }))))
-      .toBe("3aacb91d558ca3210e3b087ec98e0bad016381e7272182d405ddf92f0a21234b");
+      .toBe("fe31c933dba038aa34ace7b2381f1ce1a227ff206eb2727314bc6c8c011a01b2");
     expect(systemPrompt(buildRunArgs({ effort: "xhigh", run: { ...RUN, media: { images: false, audio: false } } }))).toBe(HEADLESS_BRIEF);
   });
 

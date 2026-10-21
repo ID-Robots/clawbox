@@ -1762,6 +1762,114 @@ describe("counting sub-agents", () => {
     expect(progress.match(/Sub-agent finished \(explorer\)/g) ?? []).toHaveLength(1);
   });
 
+  describe("a helper whose result the run never used (F-N1)", () => {
+    // Night of 2026-10-20: nine fix runs ended their turn "still waiting for the
+    // tester", the CLI exited 0 about ten minutes later without a turn on the
+    // tester's result, and every one settled `completed` with nothing pushed.
+    const TESTER = JSON.stringify({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", id: "call_t", name: "Agent", input: { subagent_type: "tester", description: "run the full suite" } }] },
+    });
+    const TESTER_RECEIPT = JSON.stringify({
+      type: "user",
+      message: { content: [{ type: "tool_result", tool_use_id: "call_t", content: [{ type: "text", text: "Async agent launched successfully.\nagentId: t1" }] }] },
+    });
+    const WAITING = JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "Still running: the tester, on the full suite." }] } });
+    const TESTER_DONE = JSON.stringify({ type: "system", subtype: "task_notification", task_id: "t1", tool_use_id: "call_t", status: "completed" });
+    const SUCCESS = '{"type":"result","subtype":"success","num_turns":4,"result":"Still running: the tester."}';
+
+    /** Settled AND judged: the finish notice is what says the box has decided. */
+    async function announced(id: string) {
+      await vi.waitFor(() => {
+        expect(announce.mock.calls.some(([r]) => (r as { id: string }).id === id)).toBe(true);
+      }, { timeout: 25_000, interval: 50 });
+      return lib.getRun(id)!;
+    }
+
+    it("is not completed when the CLI exits with the helper still out", async () => {
+      installFakeWrapper([`echo '${INIT}'`, `echo '${TESTER}'`, `echo '${TESTER_RECEIPT}'`, `echo '${WAITING}'`, `echo '${SUCCESS}'`, "exit 0"].join("\n"));
+      makeProject("site");
+      const run = await announced((await lib.startRun({ task: "fix it", projectId: "site", source: "agent" })).id);
+      expect(run.status).toBe("failed");
+      expect(run.resumable).toBe(true);
+      expect(run.error).toContain("tester (run the full suite)");
+      expect(announce).toHaveBeenCalledTimes(1);
+      expect(announce.mock.calls[0][0]).toMatchObject({ status: "failed" });
+    });
+
+    it("is not completed when the helper reported back but no model turn followed", async () => {
+      installFakeWrapper([`echo '${INIT}'`, `echo '${TESTER}'`, `echo '${TESTER_RECEIPT}'`, `echo '${WAITING}'`, `echo '${TESTER_DONE}'`, `echo '${SUCCESS}'`, "exit 0"].join("\n"));
+      makeProject("site");
+      const run = await announced((await lib.startRun({ task: "fix it", projectId: "site", source: "agent" })).id);
+      expect(run.status).toBe("failed");
+      expect(run.resumable).toBe(true);
+      expect(run.error).toContain("tester (run the full suite)");
+    });
+
+    it("goes back into the same session through the deliverable gate when the deliverable is there", async () => {
+      writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_completion_attempts: 2 });
+      installFakeWrapper([`echo '${INIT}'`, `echo '${TESTER}'`, `echo '${TESTER_RECEIPT}'`, `echo '${WAITING}'`, `echo '${SUCCESS}'`, "exit 0"].join("\n"));
+      makeProject("site");
+      const run = await announced((await lib.startRun({ task: "fix it", projectId: "site", source: "agent", deliverable: { kind: "paths", paths: ["index.html"] } })).id);
+      // index.html is there, so only the helper keeps it from `completed` —
+      // and `gave_up` would say the deliverable is missing, which it is not.
+      expect(run.deliverableCheck).toMatchObject({ ok: true });
+      expect(run.status).toBe("failed");
+      expect(run.resumable).toBe(true);
+      expect(run.error).toContain("tester (run the full suite)");
+      expect(run.attempts.map((a) => a.reason)).toEqual([expect.stringContaining("tester"), expect.stringContaining("tester")]);
+      // The second attempt was the nudge, in the same session, naming the helper.
+      expect(stdinText()).toContain("tester (run the full suite)");
+      expect(fs.readFileSync(argvFile(), "utf-8")).toContain("sess-abc-123");
+      expect(announce).toHaveBeenCalledTimes(1);
+    });
+
+    /** First spawn: touches a file and leaves the tester out. Later spawns (the review pass) run `review`. */
+    const reviewedBody = (review: string[]) => [
+      `n=$(cat "${spawnsFile()}" 2>/dev/null | wc -l); echo spawned >> "${spawnsFile()}"`,
+      'if [ "$n" -eq 0 ]; then',
+      `echo '${INIT}'`, `echo '${ASSISTANT}' | sed "s|__DIR__|$PWD|"`, `echo '${TOOL_RESULTS}'`,
+      `echo '${TESTER}'`, `echo '${TESTER_RECEIPT}'`, `echo '${SUCCESS}'`,
+      "else", ...review, "fi", "exit 0",
+    ].join("\n");
+    const reviewRunOf = (id: string) => lib.listRuns().find((r) => r.reviewOf === id);
+
+    it("lets the review pass run first, then holds the run it reviewed", async () => {
+      writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_review_pass: true });
+      installFakeWrapper(reviewedBody([`echo '${INIT}'`, `echo '{"type":"result","subtype":"success","num_turns":1,"result":"Reviewed."}'`]));
+      makeProject("site");
+      const run = await announced((await lib.startRun({ task: "fix it", projectId: "site", source: "agent" })).id);
+      expect(reviewRunOf(run.id)?.status).toBe("completed");
+      expect(run.status).toBe("failed");
+      expect(run.error).toContain("tester (run the full suite)");
+      expect(announce.mock.calls.filter(([r]) => (r as { id: string }).id === run.id)).toHaveLength(1);
+    });
+
+    it("still sends the held notice, once, when the owner stops that review pass", async () => {
+      const flag = path.join(base, "review-stop-flag");
+      writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_review_pass: true });
+      installFakeWrapper(reviewedBody([`echo '${INIT}'`, `while [ ! -f "${flag}" ]; do sleep 0.05; done`]));
+      makeProject("site");
+      const id = (await lib.startRun({ task: "fix it", projectId: "site", source: "agent" })).id;
+      await vi.waitFor(() => { expect(reviewRunOf(id)?.status).toBe("running"); }, { timeout: 15_000 });
+      lib.stopRun(reviewRunOf(id)!.id);
+      const run = await announced(id);
+      // The owner's stop closed the question: not judged, but told about.
+      expect(run.status).toBe("completed");
+      expect(announce.mock.calls.filter(([r]) => (r as { id: string }).id === id)).toHaveLength(1);
+      fs.writeFileSync(flag, "");
+    });
+
+    it("stays completed when a model turn followed the helper's result", async () => {
+      const USED = JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "The tester passed." }] } });
+      installFakeWrapper([`echo '${INIT}'`, `echo '${TESTER}'`, `echo '${TESTER_RECEIPT}'`, `echo '${WAITING}'`, `echo '${TESTER_DONE}'`, `echo '${INIT}'`, `echo '${USED}'`, `echo '${SUCCESS}'`, "exit 0"].join("\n"));
+      makeProject("site");
+      const run = await announced((await lib.startRun({ task: "fix it", projectId: "site", source: "agent" })).id);
+      expect(run.status).toBe("completed");
+      expect(run.error).toBeNull();
+    });
+  });
+
   it("bills a workflow as it runs, from its task_progress totals, and stops at the ceiling", async () => {
     // The CLI reports a workflow's cumulative spend on every task_progress
     // (0 → 2368 → 2368 in the probe); the ceiling must hold while the

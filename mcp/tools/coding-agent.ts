@@ -432,7 +432,10 @@ function describeDeliverableState(run: RunPayload): string | null {
   const made = attempts && run.completionAttempts ? ` after ${attempts} of ${run.completionAttempts} attempts` : "";
   const check = run.deliverableCheck;
   if (!check) return `[deliverable] It had to leave behind ${describeDeliverable(deliverable)}. The device has not checked yet.`;
-  if (check.ok) return `[deliverable] It left behind ${describeDeliverable(deliverable)}${made}, which is why this counts as finished.`;
+  // Met is not always finished: a run that left a helper's result unused ends
+  // `failed` with the deliverable there, and its error says why.
+  const finished = run.status === "completed" ? ", which is why this counts as finished" : "";
+  if (check.ok) return `[deliverable] It left behind ${describeDeliverable(deliverable)}${made}${finished}.`;
   // WHY A COMMAND DELIVERABLE SAYS LESS HERE THAN THE CARD DOES.
   //
   // For `pr` and `paths` the reason is the device's own vocabulary — "app.js was
