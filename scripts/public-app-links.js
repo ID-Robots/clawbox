@@ -25,7 +25,7 @@
  * WHAT A REQUEST MUST PASS, in order — anything else is refused:
  *   1. the link still exists and has not expired (410 otherwise);
  *   2. it arrived over HTTPS (cloudflared's X-Forwarded-Proto);
- *   3. the per-visitor and per-link rate limits;
+ *   3. the per-visitor and per-link request rate limits;
  *   4. a canonical path: no `..`, `.`, empty segments, backslashes, `;`, NUL
  *      or encoded slashes/dots;
  *   5. the link's secret — `?k=<token>` once (exchanged for a host-only,
@@ -71,12 +71,19 @@ const UNLOCK_BODY_MAX = 4096;
 const PASSWORD_MAX_LENGTH = 128;
 const PASSWORD_HASH_RE = /^scrypt\$(\d{4,7})\$(\d{1,2})\$(\d{1,2})\$([A-Za-z0-9_-]{22,64})\$([A-Za-z0-9_-]{43,86})$/;
 const UNLOCK_KEY_RE = /^[A-Za-z0-9_-]{43}$/;
-/** Password attempts, right or wrong, in one window: per visitor of a link, and per link. */
+/**
+ * Password attempts, right or wrong, in one window — per VISITOR of a link
+ * only. There is deliberately no per-link count: it would let anyone who
+ * guesses wrong 20 times lock out every visitor who knows the password.
+ * What bounds a distributed guesser instead is the hash queue below: one
+ * scrypt at a time per link, and a full queue is a 429 for a few seconds —
+ * never a lock-out that outlives the flood.
+ */
 const PASSWORD_WINDOW_MS = 15 * 60_000;
 const PASSWORD_TRIES_PER_VISITOR = 5;
-const PASSWORD_TRIES_PER_LINK = 20;
 /** Hashes waiting behind the one that is running; more than this and the answer is 429. */
 const PASSWORD_QUEUE_MAX = 4;
+const PASSWORD_BUSY_RETRY_S = 5;
 const MAX_URL_LENGTH = 4096;
 const MAX_BODY_BYTES = 10 * 1024 * 1024;
 const HEADERS_TIMEOUT_MS = 120_000;
@@ -432,16 +439,16 @@ function unlocked(link, cookie, nowMs) {
 
 /** The password page's words. The visitor's browser language picks one; English otherwise. */
 const PASSWORD_PAGE_TEXT = {
-  en: ["Password required", "This page is protected. Enter the password to continue.", "Password", "Continue", "Wrong password. Try again.", "Too many attempts. Try again later."],
-  bg: ["Нужна е парола", "Тази страница е защитена. Въведете паролата, за да продължите.", "Парола", "Продължи", "Грешна парола. Опитайте отново.", "Твърде много опити. Опитайте по-късно."],
-  de: ["Passwort erforderlich", "Diese Seite ist geschützt. Geben Sie das Passwort ein, um fortzufahren.", "Passwort", "Weiter", "Falsches Passwort. Versuchen Sie es erneut.", "Zu viele Versuche. Versuchen Sie es später erneut."],
-  es: ["Se requiere contraseña", "Esta página está protegida. Introduce la contraseña para continuar.", "Contraseña", "Continuar", "Contraseña incorrecta. Inténtalo de nuevo.", "Demasiados intentos. Inténtalo más tarde."],
-  fr: ["Mot de passe requis", "Cette page est protégée. Saisissez le mot de passe pour continuer.", "Mot de passe", "Continuer", "Mot de passe incorrect. Réessayez.", "Trop de tentatives. Réessayez plus tard."],
-  it: ["Password richiesta", "Questa pagina è protetta. Inserisci la password per continuare.", "Password", "Continua", "Password errata. Riprova.", "Troppi tentativi. Riprova più tardi."],
-  ja: ["パスワードが必要です", "このページは保護されています。続行するにはパスワードを入力してください。", "パスワード", "続行", "パスワードが違います。もう一度お試しください。", "試行回数が多すぎます。しばらくしてからお試しください。"],
-  nl: ["Wachtwoord vereist", "Deze pagina is beveiligd. Voer het wachtwoord in om door te gaan.", "Wachtwoord", "Doorgaan", "Onjuist wachtwoord. Probeer het opnieuw.", "Te veel pogingen. Probeer het later opnieuw."],
-  sv: ["Lösenord krävs", "Den här sidan är skyddad. Ange lösenordet för att fortsätta.", "Lösenord", "Fortsätt", "Fel lösenord. Försök igen.", "För många försök. Försök igen senare."],
-  zh: ["需要密码", "此页面受保护。请输入密码以继续。", "密码", "继续", "密码错误，请重试。", "尝试次数过多，请稍后再试。"],
+  en: ["Password required", "This page is protected. Enter the password to continue.", "Password", "Continue", "Wrong password. Try again.", "Too many attempts. Try again later.", "Busy right now. Try again in a few seconds."],
+  bg: ["Нужна е парола", "Тази страница е защитена. Въведете паролата, за да продължите.", "Парола", "Продължи", "Грешна парола. Опитайте отново.", "Твърде много опити. Опитайте по-късно.", "В момента е заето. Опитайте отново след няколко секунди."],
+  de: ["Passwort erforderlich", "Diese Seite ist geschützt. Geben Sie das Passwort ein, um fortzufahren.", "Passwort", "Weiter", "Falsches Passwort. Versuchen Sie es erneut.", "Zu viele Versuche. Versuchen Sie es später erneut.", "Gerade ausgelastet. Versuchen Sie es in ein paar Sekunden erneut."],
+  es: ["Se requiere contraseña", "Esta página está protegida. Introduce la contraseña para continuar.", "Contraseña", "Continuar", "Contraseña incorrecta. Inténtalo de nuevo.", "Demasiados intentos. Inténtalo más tarde.", "Ocupado en este momento. Inténtalo de nuevo en unos segundos."],
+  fr: ["Mot de passe requis", "Cette page est protégée. Saisissez le mot de passe pour continuer.", "Mot de passe", "Continuer", "Mot de passe incorrect. Réessayez.", "Trop de tentatives. Réessayez plus tard.", "Occupé pour le moment. Réessayez dans quelques secondes."],
+  it: ["Password richiesta", "Questa pagina è protetta. Inserisci la password per continuare.", "Password", "Continua", "Password errata. Riprova.", "Troppi tentativi. Riprova più tardi.", "Occupato al momento. Riprova tra qualche secondo."],
+  ja: ["パスワードが必要です", "このページは保護されています。続行するにはパスワードを入力してください。", "パスワード", "続行", "パスワードが違います。もう一度お試しください。", "試行回数が多すぎます。しばらくしてからお試しください。", "現在混み合っています。数秒後にもう一度お試しください。"],
+  nl: ["Wachtwoord vereist", "Deze pagina is beveiligd. Voer het wachtwoord in om door te gaan.", "Wachtwoord", "Doorgaan", "Onjuist wachtwoord. Probeer het opnieuw.", "Te veel pogingen. Probeer het later opnieuw.", "Even bezet. Probeer het over een paar seconden opnieuw."],
+  sv: ["Lösenord krävs", "Den här sidan är skyddad. Ange lösenordet för att fortsätta.", "Lösenord", "Fortsätt", "Fel lösenord. Försök igen.", "För många försök. Försök igen senare.", "Upptaget just nu. Försök igen om några sekunder."],
+  zh: ["需要密码", "此页面受保护。请输入密码以继续。", "密码", "继续", "密码错误，请重试。", "尝试次数过多，请稍后再试。", "当前繁忙，请几秒后再试。"],
 };
 
 function pageLanguage(header) {
@@ -459,11 +466,11 @@ function escapeHtml(text) {
 /**
  * The password page. Written here, whole: no asset, script, font or name of
  * the box or of the app, so a visitor without the password learns only that
- * there is one. `problem` is "wrong", "locked" or nothing.
+ * there is one. `problem` is "wrong", "locked", "busy" or nothing.
  */
 function passwordPage(lang, next, problem) {
-  const [title, intro, label, button, wrong, locked] = PASSWORD_PAGE_TEXT[lang] || PASSWORD_PAGE_TEXT.en;
-  const note = problem === "wrong" ? wrong : problem === "locked" ? locked : "";
+  const [title, intro, label, button, wrong, locked, busy] = PASSWORD_PAGE_TEXT[lang] || PASSWORD_PAGE_TEXT.en;
+  const note = problem === "wrong" ? wrong : problem === "locked" ? locked : problem === "busy" ? busy : "";
   return `<!doctype html>
 <html lang="${lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex, nofollow"><title>${escapeHtml(title)}</title>
 <style>html{color-scheme:light dark}body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;font:16px/1.5 system-ui,sans-serif;background:Canvas;color:CanvasText}main{width:min(22rem,100% - 3rem)}h1{font-size:1.25rem;margin:0 0 .5rem}p{margin:0 0 1rem}label{display:block;font-size:.875rem;margin-bottom:.25rem}input,button{font:inherit;box-sizing:border-box;width:100%;padding:.6rem .7rem;border-radius:.5rem;border:1px solid GrayText}button{margin-top:.75rem;cursor:pointer;font-weight:600}.e{color:#c62828;font-size:.875rem}@media (prefers-color-scheme:dark){.e{color:#ff8a80}}</style></head>
@@ -545,6 +552,26 @@ function clientAddress(req) {
 }
 
 /**
+ * Who the rate limits count: the client address (Cloudflare's
+ * cf-connecting-ip — the listener's only peer is cloudflared), with an IPv6
+ * address cut to its /64. One home or phone gets a whole /64, so counting
+ * single IPv6 addresses would hand one guesser 2^64 fresh allowances.
+ */
+function visitorKey(address) {
+  const a = String(address).trim().toLowerCase().replace(/^\[|\]$/g, "").replace(/%.*$/, "");
+  const mapped = /^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(a);
+  if (mapped) return mapped[1];
+  if (!a.includes(":")) return a;
+  const [head, tail = ""] = a.split("::");
+  const left = head ? head.split(":") : [];
+  const right = tail ? tail.split(":") : [];
+  if (!a.includes("::") && left.length !== 8) return a;
+  const groups = [...left, ...Array(Math.max(0, 8 - left.length - right.length)).fill("0"), ...right];
+  if (groups.length !== 8 || !groups.every((g) => /^[0-9a-f]{1,4}$/.test(g))) return a;
+  return `${groups.slice(0, 4).map((g) => g.replace(/^0+(?=.)/, "")).join(":")}::/64`;
+}
+
+/**
  * The request handler for ONE link. `opts.root` is the ClawBox root;
  * `opts.resolveApp(root, id)` and `opts.requireHttps` are seams for the tests.
  */
@@ -576,13 +603,15 @@ function createLinkHandler(linkId, opts) {
     const next = safeNext(form.get("next"));
     const password = form.get("password") || "";
 
-    const visitorKey = `pw:${link.id}:${visitor}`;
-    const linkKey = `pwl:${link.id}`;
-    if (limiter.count(visitorKey) >= PASSWORD_TRIES_PER_VISITOR || limiter.count(linkKey) >= PASSWORD_TRIES_PER_LINK || hashWaiting >= PASSWORD_QUEUE_MAX) {
+    const triesKey = `pw:${link.id}:${visitor}`;
+    if (limiter.count(triesKey) >= PASSWORD_TRIES_PER_VISITOR) {
       return sendPasswordPage(req, res, 429, next, "locked", { "retry-after": String(PASSWORD_WINDOW_MS / 1000) });
     }
-    limiter.hit(visitorKey, Infinity, PASSWORD_WINDOW_MS);
-    limiter.hit(linkKey, Infinity, PASSWORD_WINDOW_MS);
+    // Busy, not locked: the form stays usable and nothing is counted.
+    if (hashWaiting >= PASSWORD_QUEUE_MAX) {
+      return sendPasswordPage(req, res, 429, next, "busy", { "retry-after": String(PASSWORD_BUSY_RETRY_S) });
+    }
+    limiter.hit(triesKey, Infinity, PASSWORD_WINDOW_MS);
 
     let ok = false;
     if (password.length > 0 && password.length <= PASSWORD_MAX_LENGTH) {
@@ -602,8 +631,7 @@ function createLinkHandler(linkId, opts) {
     if (!ok || !current.password || current.password.hash !== link.password.hash || current.password.key !== link.password.key) {
       return sendPasswordPage(req, res, 401, next, "wrong");
     }
-    limiter.refund(visitorKey);
-    limiter.refund(linkKey);
+    limiter.refund(triesKey);
     const cookie = unlockCookieValue(current, now());
     const cookies = [`${UNLOCK_COOKIE_NAME}=${cookie.value}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${cookie.maxAge}`];
     // A visitor who came without the token gets the link's
@@ -627,7 +655,7 @@ function createLinkHandler(linkId, opts) {
       return refuse(res, 403, "HTTPS only.");
     }
 
-    const visitor = clientAddress(req);
+    const visitor = visitorKey(clientAddress(req));
     if (limiter.count(`bad:${link.id}:${visitor}`) >= BAD_TOKEN_PER_VISITOR) {
       return refuse(res, 429, "Too many requests.", { "retry-after": "60" });
     }
@@ -678,7 +706,7 @@ function createLinkHandler(linkId, opts) {
         return undefined;
       }
       if (method !== "GET" && method !== "HEAD") return refuse(res, 401, "Password required.");
-      const locked = limiter.count(`pw:${link.id}:${visitor}`) >= PASSWORD_TRIES_PER_VISITOR || limiter.count(`pwl:${link.id}`) >= PASSWORD_TRIES_PER_LINK;
+      const locked = limiter.count(`pw:${link.id}:${visitor}`) >= PASSWORD_TRIES_PER_VISITOR;
       return sendPasswordPage(req, res, 401, safeNext(`${target.path}${target.search}`), locked ? "locked" : undefined);
     }
     // Already unlocked (a second tab, the back button): the form's address
@@ -1035,7 +1063,8 @@ module.exports = {
   UNLOCK_COOKIE_NAME,
   UNLOCK_PATH,
   PASSWORD_TRIES_PER_VISITOR,
-  PASSWORD_TRIES_PER_LINK,
+  PASSWORD_QUEUE_MAX,
+  visitorKey,
   PASSWORD_WINDOW_MS,
   verifyPasswordHash,
   TOKEN_PARAM,

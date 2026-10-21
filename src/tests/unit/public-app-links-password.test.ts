@@ -20,8 +20,9 @@ const links = require_("../../../scripts/public-app-links.js") as {
   UNLOCK_COOKIE_NAME: string;
   UNLOCK_PATH: string;
   PASSWORD_TRIES_PER_VISITOR: number;
-  PASSWORD_TRIES_PER_LINK: number;
+  PASSWORD_QUEUE_MAX: number;
   PASSWORD_WINDOW_MS: number;
+  visitorKey: (address: string) => string;
   linkPaths: (root: string) => { dir: string; links: string; audit: string };
   validLink: (raw: unknown) => { password: { hash: string; key: string } | null } | null;
   verifyPasswordHash: (password: string, hash: string) => Promise<boolean>;
@@ -373,17 +374,53 @@ describe("attempt limiting", () => {
     expect((await unlock(PASSWORD, { ip: "203.0.113.9" })).status).toBe(303);
   });
 
-  it("caps wrong passwords per link, whatever address they come from", async () => {
-    for (let i = 0; i < links.PASSWORD_TRIES_PER_LINK; i += 1) {
-      expect((await unlock("wrong", { ip: `192.0.2.${i + 1}` })).status).toBe(401);
-    }
-    expect((await unlock(PASSWORD, { ip: "192.0.2.200" })).status).toBe(429);
+  it("21 wrong passwords from one visitor lock that visitor only: another one with the right password gets in", async () => {
+    const statuses: number[] = [];
+    for (let i = 0; i < 21; i += 1) statuses.push((await unlock(`wrong-${i}`, { ip: "203.0.113.20" })).status);
+    expect(statuses.slice(0, links.PASSWORD_TRIES_PER_VISITOR).every((s) => s === 401)).toBe(true);
+    expect(statuses.slice(links.PASSWORD_TRIES_PER_VISITOR).every((s) => s === 429)).toBe(true);
+    const other = await unlock(PASSWORD, { ip: "198.51.100.21" });
+    expect(other.status).toBe(303);
+    expect((await ask(`/apps/${APP}/`, { ip: "198.51.100.21", unlock: unlockCookie(other) })).status).toBe(200);
+    // And the page a fresh visitor is shown is not the locked one.
+    const page = await ask(`/apps/${APP}/`, { ip: "198.51.100.22" });
+    expect(page.status).toBe(401);
+    expect(page.body).not.toContain("Too many attempts");
+    expect(page.body).not.toContain("disabled");
   });
 
-  it("does not count right passwords against the link", async () => {
-    for (let i = 0; i < links.PASSWORD_TRIES_PER_LINK + 5; i += 1) {
-      expect((await unlock(PASSWORD, { ip: `192.0.2.${i + 1}` })).status).toBe(303);
+  it("has no per-link lock-out: many wrong guessers from many addresses never lock out the right password", async () => {
+    for (let i = 0; i < 30; i += 1) {
+      expect((await unlock("wrong", { ip: `192.0.2.${i + 1}` })).status).toBe(401);
     }
+    expect((await unlock(PASSWORD, { ip: "192.0.2.200" })).status).toBe(303);
+  });
+
+  it("does not count right passwords against anyone", async () => {
+    for (let i = 0; i < 25; i += 1) {
+      expect((await unlock(PASSWORD, { ip: "192.0.2.77" })).status).toBe(303);
+    }
+  });
+
+  it("counts an IPv6 visitor by /64, so rotating addresses inside one network does not reset the count", async () => {
+    for (let i = 0; i < links.PASSWORD_TRIES_PER_VISITOR; i += 1) {
+      expect((await unlock("wrong", { ip: `2001:db8:1:2::${(i + 1).toString(16)}` })).status).toBe(401);
+    }
+    expect((await unlock(PASSWORD, { ip: "2001:db8:1:2:aaaa:bbbb:cccc:dddd" })).status).toBe(429);
+    // Another /64 is another visitor.
+    expect((await unlock(PASSWORD, { ip: "2001:db8:1:3::1" })).status).toBe(303);
+  });
+
+  it("answers a flood with a short 'busy', not a lock-out, and the right password works once it passes", async () => {
+    const replies = await Promise.all(Array.from({ length: 20 }, (_, i) => unlock(`flood-${i}`, { ip: `198.18.0.${i + 1}` })));
+    const busy = replies.filter((r) => r.status === 429);
+    expect(busy.length).toBeGreaterThan(0);
+    for (const r of busy) {
+      expect(r.headers["retry-after"]).toBe("5");
+      expect(r.body).toContain("Busy right now");
+      expect(r.body).not.toContain("disabled");
+    }
+    expect((await unlock(PASSWORD, { ip: "198.18.1.1" })).status).toBe(303);
   });
 
   it("counts parallel guesses before it hashes them", async () => {
@@ -391,6 +428,18 @@ describe("attempt limiting", () => {
     const refused = replies.filter((r) => r.status === 429).length;
     expect(replies.filter((r) => r.status === 401).length).toBeLessThanOrEqual(links.PASSWORD_TRIES_PER_VISITOR);
     expect(refused).toBeGreaterThanOrEqual(12 - links.PASSWORD_TRIES_PER_VISITOR);
+  });
+});
+
+describe("visitorKey", () => {
+  it("keeps IPv4 addresses whole and cuts IPv6 to its /64", () => {
+    expect(links.visitorKey("203.0.113.7")).toBe("203.0.113.7");
+    expect(links.visitorKey("::ffff:203.0.113.7")).toBe("203.0.113.7");
+    expect(links.visitorKey("2001:db8:1:2::5")).toBe("2001:db8:1:2::/64");
+    expect(links.visitorKey("2001:0DB8:0001:0002:aaaa:bbbb:cccc:dddd")).toBe("2001:db8:1:2::/64");
+    expect(links.visitorKey("[2001:db8::1]")).toBe("2001:db8:0:0::/64");
+    expect(links.visitorKey("fe80::1%eth0")).toBe("fe80:0:0:0::/64");
+    expect(links.visitorKey("unknown")).toBe("unknown");
   });
 });
 
