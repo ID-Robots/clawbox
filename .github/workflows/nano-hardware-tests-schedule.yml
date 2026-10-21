@@ -1,0 +1,23 @@
+name: Nano hardware tests (every 2nd night)
+
+# Starts the full on-device suite on beta's head every second night, so beta
+# stays covered while pull requests into beta no longer take a board each.
+# It only dispatches nano-hardware-tests.yml; that workflow does the work.
+on:
+  schedule:
+    - cron: "0 1 */2 * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  dispatch:
+    if: github.repository == 'ID-Robots/clawbox'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch the board run on beta
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run nano-hardware-tests.yml --repo "$GITHUB_REPOSITORY" --ref beta -f ref=beta

@@ -70,3 +70,32 @@ describe("config.toml legacy server migration", () => {
       .toBe(`server="https://clawbox.com"\r\nx = 1\r\n`);
   });
 });
+
+describe("pair-state verificationUrl legacy migration (TASK-1754)", () => {
+  const STATE = path.join(DATA_DIR, "pair-state.json");
+  const session = (verificationUrl: string) => ({
+    device_id: "dev", user_code: "ABCD-EFGH", interval: 5, createdAt: Date.now(),
+    status: "pending", deviceName: "box", verificationUrl,
+  });
+
+  it("rewrites and persists a legacy verificationUrl, idempotently", async () => {
+    const { readClawKeepSession } = await import("@/lib/clawkeep-connect");
+    await fs.writeFile(STATE, JSON.stringify(session("https://www.openclawhardware.dev/connect?x=1")));
+    const first = await readClawKeepSession();
+    expect(first?.verificationUrl).toBe("https://clawbox.com/connect?x=1");
+    const onDisk = JSON.parse(await fs.readFile(STATE, "utf8"));
+    expect(onDisk.verificationUrl).toBe("https://clawbox.com/connect?x=1");
+    const mtime = (await fs.stat(STATE)).mtimeMs;
+    const second = await readClawKeepSession();
+    expect(second?.verificationUrl).toBe("https://clawbox.com/connect?x=1");
+    expect((await fs.stat(STATE)).mtimeMs).toBe(mtime);
+  });
+
+  it("leaves a custom portal URL untouched", async () => {
+    const { readClawKeepSession } = await import("@/lib/clawkeep-connect");
+    const raw = JSON.stringify(session("https://backup.example.org/connect"));
+    await fs.writeFile(STATE, raw);
+    expect((await readClawKeepSession())?.verificationUrl).toBe("https://backup.example.org/connect");
+    expect(await fs.readFile(STATE, "utf8")).toBe(raw);
+  });
+});

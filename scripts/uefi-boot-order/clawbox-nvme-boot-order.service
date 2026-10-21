@@ -1,0 +1,16 @@
+[Unit]
+Description=ClawBox: keep NVMe first in UEFI BootOrder, network boot inactive
+ConditionPathIsDirectory=/sys/firmware/efi/efivars
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/clawbox-nvme-boot-order
+# Again on the way down, so an order that drifted while the box was up (a
+# firmware capsule staged by a package upgrade, a hand edit) is right before
+# the reboot too, not only after it.
+ExecStop=/usr/local/sbin/clawbox-nvme-boot-order
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

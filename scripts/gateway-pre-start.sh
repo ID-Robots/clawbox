@@ -7014,11 +7014,18 @@ install_clawbox_hook_plugin() {
   # disk, a partition remounted read-only after an unclean shutdown) would
   # otherwise re-raise out of the write below, fail the unit, and leave the box
   # with no agent at all — over a hook this very block calls optional.
-  if ! CLAWBOX_HOOK_PLUGIN_ID="$plugin_id" python3 - "$OPENCLAW_CONFIG" <<'PY'
+  #
+  # CLAWBOX_HOOK_PLUGIN_WANT (on|off|unknown, default on) is the owner's switch
+  # for a plugin that has one (the path guard, TASK-1661): off writes
+  # `enabled: false` so the files stay installed but the gateway does not load
+  # them, unknown (a device store that exists and cannot be read) leaves the
+  # entry exactly as the last readable boot left it.
+  if ! CLAWBOX_HOOK_PLUGIN_ID="$plugin_id" CLAWBOX_HOOK_PLUGIN_WANT="${CLAWBOX_HOOK_PLUGIN_WANT:-on}" python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, os, sys, tempfile
 
 cfg_path = sys.argv[1]
 plugin_id = os.environ["CLAWBOX_HOOK_PLUGIN_ID"]
+want = os.environ.get("CLAWBOX_HOOK_PLUGIN_WANT", "on")
 try:
     with open(cfg_path) as f:
         cfg = json.load(f)
@@ -7047,11 +7054,16 @@ if not isinstance(entry, dict):
     entry = {}
     entries[plugin_id] = entry
 
-if entry.get("enabled") is True:
-    print(f"  {plugin_id} already enabled, skipping write")
+if want == "unknown":
+    print(f"  WARN: the device store could not be read; {plugin_id} is left exactly as it is")
+    sys.exit(0)
+desired = want != "off"
+
+if entry.get("enabled") is desired:
+    print(f"  {plugin_id} already {'enabled' if desired else 'disabled by the owner'}, skipping write")
     sys.exit(0)
 
-entry["enabled"] = True
+entry["enabled"] = desired
 tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(cfg_path), prefix=".openclaw.", suffix=".tmp")
 try:
     with os.fdopen(tmp_fd, "w") as f:
@@ -7063,7 +7075,7 @@ except Exception:
     except Exception:
         pass
     raise
-print(f"  Enabled {plugin_id}")
+print(f"  {'Enabled' if desired else 'Disabled (owner switch)'} {plugin_id}")
 PY
   then
     echo "  WARNING: could not enable the $plugin_id plugin in $OPENCLAW_CONFIG — $consequence" >&2
@@ -7095,7 +7107,30 @@ CLAWBOX_PATH_GUARD_ID="clawbox-path-guard"
 CLAWBOX_PATH_GUARD_SRC="$CLAWBOX_ROOT/scripts/openclaw-plugins/$CLAWBOX_PATH_GUARD_ID"
 CLAWBOX_PATH_GUARD_DST="$OPENCLAW_HOME_DIR/extensions/$CLAWBOX_PATH_GUARD_ID"
 CLAWBOX_PATH_GUARD_TABLE="$CLAWBOX_ROOT/config/protected-paths.json"
-install_clawbox_hook_plugin "$CLAWBOX_PATH_GUARD_ID" "$CLAWBOX_PATH_GUARD_DST" \
+# The owner's switch (Settings -> "Protect ClawBox files from the agent",
+# TASK-1661): `clawbox_path_guard_enabled` in the device store, the same rule
+# as src/lib/path-guard-switch.ts — only the boolean false is off, an absent
+# key or store is on, and a store that exists but cannot be read is unknown.
+# The plugin is installed either way; the switch only decides
+# plugins.entries.<id>.enabled.
+CLAWBOX_PATH_GUARD_WANT="$(CLAWBOX_DEVICE_STORE="${CLAWBOX_DEVICE_STORE:-}" python3 -c '
+import json, os
+p = os.environ.get("CLAWBOX_DEVICE_STORE") or ""
+if not p:
+    print("on"); raise SystemExit
+try:
+    with open(p, encoding="utf-8") as fh:
+        store = json.load(fh)
+except FileNotFoundError:
+    print("on"); raise SystemExit
+except Exception:
+    print("unknown"); raise SystemExit
+if not isinstance(store, dict):
+    print("unknown")
+else:
+    print("off" if store.get("clawbox_path_guard_enabled") is False else "on")
+' 2>/dev/null || echo unknown)"
+CLAWBOX_HOOK_PLUGIN_WANT="$CLAWBOX_PATH_GUARD_WANT" install_clawbox_hook_plugin "$CLAWBOX_PATH_GUARD_ID" "$CLAWBOX_PATH_GUARD_DST" \
   "the ClawBox tree and the local-model folders are NOT protected from the agent's tool calls" \
   "$CLAWBOX_PATH_GUARD_SRC/openclaw.plugin.json" \
   "$CLAWBOX_PATH_GUARD_SRC/package.json" \
@@ -7119,6 +7154,8 @@ install_clawbox_hook_plugin "$CLAWBOX_PATH_GUARD_ID" "$CLAWBOX_PATH_GUARD_DST" \
 CLAWBOX_PATH_GUARD_NODE="$(command -v node 2>/dev/null || true)"
 if [ "$CLAWBOX_HOOK_PLUGIN_READY" != "1" ]; then
   :
+elif [ "$CLAWBOX_PATH_GUARD_WANT" = "off" ]; then
+  echo "  NOTE: the owner switched $CLAWBOX_PATH_GUARD_ID off in Settings — the ClawBox tree and the local-model folders are NOT protected from the agent's tool calls" >&2
 elif [ -z "$CLAWBOX_PATH_GUARD_NODE" ]; then
   echo "  NOTE: no node on PATH, so the installed $CLAWBOX_PATH_GUARD_ID plugin was not exercised here — it is installed and enabled, and the gateway loads it with its own node" >&2
 else

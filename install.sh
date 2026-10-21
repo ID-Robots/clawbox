@@ -8348,6 +8348,56 @@ step_system_config() {
   # start_services ever ran. A hardening step must never brick a flash.
   step_firewall || echo "  Warning: firewall step failed (non-fatal)"
   step_persistent_journal
+  step_uefi_boot_order || echo "  Warning: UEFI boot order step failed (non-fatal)"
+}
+
+step_uefi_boot_order() {
+  # Keep the NVMe SSD first in the UEFI BootOrder (TASK-1636).
+  #
+  # The firmware rewrites BootOrder by itself: an option it re-creates (after a
+  # bootloader capsule update, an NVRAM reset, a boot where the SSD enumerated
+  # late) is appended at the END. A box whose SSD slid below the network, USB
+  # and shell entries does not boot until someone moves it back in the UEFI
+  # menu. The factory installs this guard on units it flashes now; units from
+  # before that only get it here, which is why post_update calls this too.
+  #
+  # Jetson only: an x64 PC's boot order belongs to its owner. Idempotent: the
+  # guard writes nothing when the order is already right.
+  if is_test_mode; then
+    echo "  CLAWBOX_TEST_MODE=1, skipping UEFI boot order guard"
+    return 0
+  fi
+  if [ ! -f /etc/nv_tegra_release ] || [ ! -d /sys/firmware/efi/efivars ]; then
+    echo "  Not a Jetson UEFI board, skipping UEFI boot order guard"
+    return 0
+  fi
+  local dir="$SRC_DIR/scripts/uefi-boot-order"
+  if [ ! -f "$dir/clawbox-nvme-boot-order.sh" ] || [ ! -f "$dir/clawbox-nvme-boot-order.service" ]; then
+    echo "  Warning: $dir missing, skipping UEFI boot order guard"
+    return 0
+  fi
+  if ! command -v efibootmgr >/dev/null 2>&1; then
+    wait_for_apt
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq efibootmgr \
+      || { echo "  Warning: could not install efibootmgr; UEFI boot order guard not installed" >&2; return 1; }
+  fi
+  install -D -m 0755 "$dir/clawbox-nvme-boot-order.sh" /usr/local/sbin/clawbox-nvme-boot-order
+  install -D -m 0644 "$dir/clawbox-nvme-boot-order.service" /etc/systemd/system/clawbox-nvme-boot-order.service
+  systemctl daemon-reload
+  systemctl enable clawbox-nvme-boot-order.service >/dev/null 2>&1 || true
+  # Apply now: an update reboots into whatever order is stored at that moment.
+  /usr/local/sbin/clawbox-nvme-boot-order | sed 's/^/  /'
+  # (Re)start the unit as well, so its ExecStop re-applies the order at shutdown.
+  systemctl restart clawbox-nvme-boot-order.service >/dev/null 2>&1 || true
+  # Prove it: --check exits 0 only when NVMe is first, network boot is inactive
+  # and new devices are added at the bottom.
+  local check rc=0
+  check="$(/usr/local/sbin/clawbox-nvme-boot-order --check 2>&1)" || rc=$?
+  echo "  $check"
+  if [ "$rc" -ne 0 ]; then
+    echo "  Warning: UEFI boot order is not NVMe-first after the guard ran" >&2
+    return 1
+  fi
 }
 
 step_persistent_journal() {
@@ -9340,6 +9390,10 @@ step_post_update() {
   # Without this call the persistent journal would be fresh-install-only, and
   # every already-shipped box would keep losing its whole log on each reboot.
   optional_step persistent_journal step_persistent_journal
+  # Without this call the NVMe-first boot order guard would be factory-only, and
+  # every box flashed before it would keep a BootOrder the firmware can push the
+  # SSD to the bottom of. TASK-1636.
+  optional_step uefi_boot_order step_uefi_boot_order
   # Re-assert the cgroup memory guards and re-sync /etc/clawbox/resource-limits.env
   # from the repo. Without this the guards would be fresh-install-only and every
   # already-shipped box would keep running an unbounded ollama. Idempotent.
