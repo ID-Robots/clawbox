@@ -1702,7 +1702,7 @@ export const es: Record<string, string> = {
   "whatsNew.agentChartTitle": "El agente de código, en un gráfico en vivo",
   "whatsNew.agentChartBody": "El agente de código se abre con un gráfico de sus agentes trabajando. Puedes escribir a una ejecución mientras trabaja, las ejecuciones y los equipos de más esperan en cola en lugar de ser rechazados, y Arreglar CI devuelve para corregir un pull request cuyas comprobaciones fallaron.",
   "whatsNew.primeRadiantTitle": "Prime Radiant, una wiki viva",
-  "whatsNew.primeRadiantBody": "Una aplicación nueva que mantiene una wiki para ti. Indícale tus documentos y escribe una página por tema, y de cada dato dice de dónde sale y lo seguro que es. Cada noche ordena la wiki, busca datos que se contradicen y te pregunta por lo que no puede resolver por sí sola.",
+  "whatsNew.primeRadiantBody": "Una app nueva que mantiene una wiki para ti. Indícale tus documentos y escribe una página por cada uno, con los datos que encontró y, de cada dato, de dónde sale y lo seguro que es. Cada noche ordena la wiki, busca datos que se contradicen y te pregunta por lo que no puede resolver por sí sola.",
   "whatsNew.readMore": "Lee las novedades de la 4.3",
   "whatsNew.planTitle": "Desbloquéalo con un plan de ClawBox AI",
   "whatsNew.planPaidFeatures": "El agente de código y Memory Shard necesitan el plan Pro o Max.",

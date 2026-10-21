@@ -75,10 +75,10 @@ details and for how to get a separate assistant browser back.
 Right-click an app the Coding Agent built, on the desktop, and choose **Create public link**:
 **Temporary**, which stops working after the time you choose, or **Permanent**, which stays on
 until you disable it. Visitors reach only that app, never your desktop, files or other apps.
-By default they can load the app's data from its own `/api` but not change it: **The app's own
-data** in the dialog is **Read only** unless you choose **Read and write**, or **Off** to serve
-only the app's pages. Choose **Require a password** to give the link a
-password of its own, which you can change or remove later without changing the link. The
+For an app with its own server, by default they can load its data from its own `/api` but not
+change it: **The app's own data** in the dialog is **Read only** unless you choose **Read and
+write**, or **Off** to serve only the app's pages. Choose **Require a password** to give the
+link a password of its own, which you can change or remove later without changing the link. The
 link's address changes when the box restarts.
 
 ### xAI Grok, and model changes without a restart
@@ -110,21 +110,22 @@ project page.
 Runs use fewer tokens by default. Under **Advanced**, the Coding Agent's settings have a new
 **Token use** group: **Run instructions** (**Short instructions** by default), **Helper
 agents** (**Only when it pays off**) and **Browser and media tools** (**Only for visual
-work**). Unless you changed them, a new run starts at **Very high** effort instead of
-**Ultracode**, takes at most 200 steps instead of 400, and gets one attempt at what it had to
-deliver instead of three. A run whose task does not look visual no longer gets the browser,
-picture or speech tools; set **Browser and media tools** to **Always** to give them to every
-run.
+work**). Unless you changed them, a new run takes at most 200 steps instead of 400 and gets one
+attempt at what it had to deliver instead of three. A box with no effort saved starts runs at
+**Very high** instead of **Ultracode**; a box whose Coding Agent setup was finished before 4.3
+keeps the Ultracode that setup saved until you change it. A run whose task and folder do not
+look visual no longer gets the browser, picture or speech tools; set **Browser and media
+tools** to **Always** to give them to every run.
 
 ### Prime Radiant, a living wiki
 
 **Prime Radiant** is a new app, on both editions, that keeps a wiki for you. Point it at your
-documents and it writes one page per subject, listing each fact with where it came from and
-how sure it is. Every night it tidies the wiki, looks for facts that contradict each other,
-and asks you in **Review** about anything it cannot settle alone; a page you verified is never
-rewritten without asking you first. **History** shows every change and **Undo** reverses one.
-Open it from its icon on the desktop, next to Memory Shard. Adding documents needs the box
-signed in to ClawBox AI. See [Prime Radiant](/guides/prime-radiant).
+documents and it writes a page for each one, listing the facts it found with where each came
+from and how sure it is. Every night it tidies the wiki, looks for facts that contradict each
+other, and asks you in **Review** about anything it cannot settle alone; a page you verified
+is never rewritten without asking you first. **History** shows every change and **Undo**
+reverses one. Open it from its icon on the desktop, next to Memory Shard. Adding documents
+needs the box signed in to ClawBox AI. See [Prime Radiant](/guides/prime-radiant).
 
 ### Switching between Anthropic accounts, fixed
 

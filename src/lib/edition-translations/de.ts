@@ -1706,7 +1706,7 @@ export const de: Record<string, string> = {
   "whatsNew.agentChartTitle": "Der Coding-Agent als Live-Diagramm",
   "whatsNew.agentChartBody": "Der Coding-Agent öffnet sich mit einem Diagramm seiner Agenten bei der Arbeit. Sie können einem Lauf schreiben, während er arbeitet, weitere Läufe und Teams warten in einer Warteschlange, statt abgelehnt zu werden, und „CI beheben“ schickt einen Pull-Request mit fehlgeschlagenen Prüfungen zur Korrektur zurück.",
   "whatsNew.primeRadiantTitle": "Prime Radiant, ein lebendiges Wiki",
-  "whatsNew.primeRadiantBody": "Eine neue App, die ein Wiki für Sie führt. Geben Sie ihr Ihre Dokumente, und sie schreibt eine Seite pro Thema und nennt bei jeder Tatsache, woher sie stammt und wie sicher sie ist. Jede Nacht räumt sie das Wiki auf, sucht nach Tatsachen, die einander widersprechen, und fragt Sie nach allem, was sie nicht allein klären kann.",
+  "whatsNew.primeRadiantBody": "Eine neue App, die ein Wiki für Sie führt. Geben Sie ihr Ihre Dokumente, und sie schreibt zu jedem eine Seite mit den gefundenen Tatsachen und nennt bei jeder, woher sie stammt und wie sicher sie ist. Jede Nacht räumt sie das Wiki auf, sucht nach Tatsachen, die einander widersprechen, und fragt Sie nach allem, was sie nicht allein klären kann.",
   "whatsNew.readMore": "Lesen Sie, was neu in 4.3 ist",
   "whatsNew.planTitle": "Mit einem ClawBox-AI-Plan freischalten",
   "whatsNew.planPaidFeatures": "Coding-Agent und Memory Shard benötigen den Plan Pro oder Max.",
