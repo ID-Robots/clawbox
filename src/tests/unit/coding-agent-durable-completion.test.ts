@@ -594,9 +594,13 @@ describe("a run whose caller asked for no deliverable", () => {
       task: "Refute the finding; change no files.", projectId: "site", source: "agent",
       deliverable: { kind: "none" },
     });
+    // The first run's whole chain is over — its PR step is the last before the
+    // gate — before the continuation works the same repository.
+    await vi.waitFor(() => expect(lib.getRun(first.id)?.pr?.phase).toBe("blocked"), { timeout: 25_000, interval: 50 });
     await settledForGood(first.id);
     const next = await lib.startRun({ task: "Finish the verdict.", resumeRunId: first.id, source: "agent" });
     await vi.waitFor(() => {
+      expect(lib.getRun(next.id)?.pr?.phase).toBe("blocked");
       expect(announceCodingAgent.mock.calls.some(([r]) => (r as { id: string }).id === next.id)).toBe(true);
     }, { timeout: 25_000, interval: 50 });
     const run = lib.getRun(next.id)!;
