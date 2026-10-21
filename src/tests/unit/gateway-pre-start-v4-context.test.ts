@@ -148,4 +148,44 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh V4 context migration", () => 
     const [m] = migrate([{ id: "deepseek-v4-flash", input: [] }]);
     expect(m.input).toEqual(["text"]);
   });
+
+  // Long sessions on the 1M window were never compacted early: OpenClaw
+  // compacts at the ACTIVE window minus its reserve, so with only
+  // `contextWindow: 1000000` a session grew to 0.7M–1.4M input tokens per
+  // request before anything trimmed it. `contextTokens` is the native
+  // active-input cap (explicit wins over the catalog), and the compaction
+  // threshold follows it.
+  it.each(V4_IDS)("caps the active input of %s at 131,072 tokens and keeps the native 1M window", (id) => {
+    const [m] = migrate([{ id, contextWindow: 1_000_000 }]);
+    expect(m.contextTokens).toBe(131_072);
+    expect(m.contextWindow).toBe(1_000_000);
+  });
+
+  it("adds the cap in the same pass that repairs an old 128K window", () => {
+    const [m] = migrate([{ id: "deepseek-v4-pro", contextWindow: 128000 }]);
+    expect(m.contextWindow).toBe(1_000_000);
+    expect(m.contextTokens).toBe(131_072);
+  });
+
+  it("keeps a cap the owner set, larger or smaller", () => {
+    const models = migrate([
+      { id: "deepseek-v4-flash", contextWindow: 1_000_000, contextTokens: 400_000 },
+      { id: "deepseek-v4-pro", contextWindow: 1_000_000, contextTokens: 64_000 },
+    ]);
+    expect(models.map((m) => m.contextTokens)).toEqual([400_000, 64_000]);
+  });
+
+  it("reports no change once the cap is in place", () => {
+    const once = migrate([{ id: "deepseek-v4-flash" }]);
+    expect(once[0].contextTokens).toBe(131_072);
+    expect(migrateChanged(once)).toBe(false);
+  });
+
+  it("never caps the vision entry or another deepseek id", () => {
+    const models = migrate([
+      { id: "deepseek-v4-flash-vision-exp", contextWindow: 128000 },
+      { id: "deepseek-chat", contextWindow: 65536 },
+    ]);
+    expect(models.map((m) => m.contextTokens)).toEqual([undefined, undefined]);
+  });
 });

@@ -956,6 +956,14 @@ async function getConfiguredClawboxAiToken(preferredToken?: string) {
 // 2026.7.1 (2026-08-17): with these fields absent, `openclaw models list`
 // resolved both V4 models to 200K; with them present it reports 1M.
 const CLAWBOX_AI_CONTEXT_WINDOW = 1_000_000;
+// The ACTIVE-input cap (`contextTokens`, OpenClaw's own per-model key; explicit
+// wins over the catalog). OpenClaw compacts at the active window minus its
+// built-in reserve, so with only the 1M window a long session was never trimmed
+// early and every request re-sent 0.7M–1.4M tokens of history. Capped here it
+// compacts near 128K, while `contextWindow` keeps describing the real model.
+// Mirrored by the V4 block in scripts/gateway-pre-start.sh for boxes already
+// configured.
+const CLAWBOX_AI_CONTEXT_TOKENS = 131_072;
 // 393,216 (384 x 1024) is the ceiling the upstream actually enforces, measured
 // against the live proxy on 2026-08-18: max_tokens=393216 is accepted, 400000
 // comes back 400 "the valid range of max_tokens is [1, 393216]". The previous
@@ -998,6 +1006,7 @@ function buildClawboxAiProviderDefinition(apiKey: string, visionModelId: string 
         reasoning: true,
         input: [...CLAWBOX_AI_INPUT_MODALITIES],
         contextWindow: CLAWBOX_AI_CONTEXT_WINDOW,
+        contextTokens: CLAWBOX_AI_CONTEXT_TOKENS,
         maxTokens: CLAWBOX_AI_MAX_TOKENS,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         compat: {
@@ -1011,6 +1020,7 @@ function buildClawboxAiProviderDefinition(apiKey: string, visionModelId: string 
         reasoning: true,
         input: [...CLAWBOX_AI_INPUT_MODALITIES],
         contextWindow: CLAWBOX_AI_CONTEXT_WINDOW,
+        contextTokens: CLAWBOX_AI_CONTEXT_TOKENS,
         maxTokens: CLAWBOX_AI_MAX_TOKENS,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         compat: {
