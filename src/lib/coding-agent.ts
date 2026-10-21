@@ -9771,9 +9771,9 @@ function wasGated(run: CodingRun): boolean {
  * `finishRun` records them for the runs the gate judges; it cannot decide
  * there, because the review pass and the pull request run only on `completed`.
  */
-function takeHelpersLeftBehind(run: CodingRun): string[] | null {
-  const left = store.helpersLeftBehind?.get(run.id) ?? null;
-  store.helpersLeftBehind?.delete(run.id);
+function takeHelpersLeftBehind(runId: string): string[] | null {
+  const left = store.helpersLeftBehind?.get(runId) ?? null;
+  store.helpersLeftBehind?.delete(runId);
   return left;
 }
 
@@ -9948,6 +9948,9 @@ async function enforceDeliverable(finished: CodingRun, ended: "stop" | "pause" |
   // own settle is a different object.
   const originId = finished.reviewOf ?? finished.id;
   const origin = loadRuns().find((r) => r.id === originId);
+  // Taken before any of the returns below: a run the gate will not judge (gone
+  // from the list, re-settled, not one it judges) must not keep the record.
+  const leftBehind = takeHelpersLeftBehind(originId);
   if (!origin) return;
   // The same conditions `deliverableGateApplies` reads, taken apart — because
   // the LAST of them can have changed since `finishRun` held the notice, and
@@ -9956,7 +9959,6 @@ async function enforceDeliverable(finished: CodingRun, ended: "stop" | "pause" |
   if (origin.reviewOf !== null || origin.reviewLoopOf !== null) return;
   if (origin.readOnly || origin.team) return;
 
-  const leftBehind = takeHelpersLeftBehind(origin);
   const deliverable = deliverableFor(origin);
   if (!deliverable) {
     // No deliverable to send it back in for: `finishRun` held the notice for
