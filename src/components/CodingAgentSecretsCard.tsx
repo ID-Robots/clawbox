@@ -150,14 +150,16 @@ function assistantKeysOf(data: unknown): AssistantKey[] | null {
  */
 type AssistantKeys = AssistantKey[] | null | "unreadable";
 
-async function fetchAssistantKeys(): Promise<AssistantKeys> {
+async function fetchAssistantKeys(): Promise<AssistantKeys | undefined> {
   try {
     const res = await fetch("/setup-api/coding-agent/secrets/import", { cache: "no-store" });
     if (res.ok) return assistantKeysOf(await res.json());
     const refusal = await res.json().catch(() => null) as { code?: unknown } | null;
     return refusal?.code === "source_unreadable" ? "unreadable" : null;
   } catch {
-    return null;
+    // No answer at all (the network blinked) is not "nothing to offer": the
+    // caller keeps what it last knew rather than taking the import away.
+    return undefined;
   }
 }
 
@@ -241,7 +243,7 @@ export default function CodingAgentSecretsCard() {
   // a key added to the assistant meanwhile is offered.
   useEffect(() => {
     let active = true;
-    void fetchAssistantKeys().then((keys) => { if (active) setAssistantKeys(keys); });
+    void fetchAssistantKeys().then((keys) => { if (active && keys !== undefined) setAssistantKeys(keys); });
     return () => { active = false; };
   }, []);
 
@@ -349,11 +351,23 @@ export default function CodingAgentSecretsCard() {
     return keys.find((k) => !isHere(k.name, importScope))?.name ?? "";
   })();
 
+  /** Ask again what is on offer; no answer at all keeps what the card last knew. */
+  const refreshAssistantKeys = () => {
+    void fetchAssistantKeys().then((keys) => { if (keys !== undefined) setAssistantKeys(keys); });
+  };
+
   const openImport = () => {
     setImportOpen(true);
     setError(null);
     setCopied(null);
-    void fetchAssistantKeys().then(setAssistantKeys);
+    // Every opening starts from "no expiry": a choice left behind by a Cancel
+    // must not ride along on the next copy unseen.
+    setImportExpiry("none");
+    setImportUntil("");
+    refreshAssistantKeys();
+    // And the list itself: a one-run copy goes when its run ends, and the
+    // picker must not keep calling that name "already here".
+    void load();
   };
 
   const copyFromAssistant = async () => {
@@ -390,7 +404,7 @@ export default function CodingAgentSecretsCard() {
       // A refusal can mean the assistant's side moved — the key gone from its
       // file, the feature switched off — so ask again what is on offer rather
       // than keep offering the same refused name. The refusal stays on screen.
-      void fetchAssistantKeys().then(setAssistantKeys);
+      refreshAssistantKeys();
     }
   };
 
@@ -481,7 +495,7 @@ export default function CodingAgentSecretsCard() {
                 )}
                 {/* A copy the owner limited: how long it may still reach runs,
                     or that it no longer reaches any. */}
-                {row.expiresAt && (
+                {(row.expiresAt || row.expired) && (
                   <p
                     className={`mt-0.5 text-[11px] leading-relaxed ${row.expired ? "text-amber-300" : "text-[var(--text-muted)]"}`}
                     data-testid="coding-agent-secret-expiry"

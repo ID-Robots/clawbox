@@ -200,6 +200,7 @@ import {
   SECRET_INJECT_CONFIG_KEY,
   SECRET_NAME_RE,
   SECRETS_FILE_NAME,
+  withoutExpiredSecrets,
   type ResolvedRunSecrets,
 } from "@/lib/project-secrets";
 import { appendSecretAudit, SECRETS_AUDIT_FILE_NAME } from "@/lib/secrets-audit";
@@ -6762,6 +6763,17 @@ function auditRunHandOff(runId: string, handOff: RunHandOff | null, handed: bool
 }
 
 /**
+ * For a caller whose `spawnRun` THREW: "not handed", unless a child had already
+ * been registered (`live`), whose own "spawn" or "error" event says it instead.
+ * A throw anywhere before the child exists — the stream logs, the environment,
+ * the credential handoff, `spawn` itself — reaches the caller this way. Called
+ * before the caller drops the run's tables, while the names are still there.
+ */
+function auditUnstartedSpawn(runId: string): void {
+  if (!live.has(runId)) auditRunHandOff(runId, runHandOffOf(runId), false);
+}
+
+/**
  * Work out what this run may have, put it where the spawn can reach it, and
  * arm the redaction table for everything the run will say.
  *
@@ -11093,7 +11105,10 @@ async function continueOnAnotherAccount(
     run.accountSwitches = [...run.accountSwitches, switched].slice(-MAX_ACCOUNT_SWITCHES);
   }
   run.anthropicAccount = prepared.account.id;
-  restoreRunSecrets(run.id, carriedSecrets ?? {}, {
+  // Carried on, as the move is the same run's next try — but never past a
+  // copy's last day, which may have gone by while this run waited for an account.
+  const carried = carriedSecrets ? await withoutExpiredSecrets(carriedSecrets, runSecretScopes.get(run.id) ?? {}) : {};
+  restoreRunSecrets(run.id, carried, {
     accountId: prepared.account.id,
     label: prepared.account.label,
     credential: prepared.credential,
@@ -11575,6 +11590,7 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
         run.status = "failed";
         run.completedAt = Date.now();
         run.error = `Retry could not start: ${err instanceof Error ? err.message : String(err)}`.slice(0, MAX_ERROR_CHARS);
+        auditUnstartedSpawn(run.id);
         // And take back what restoreRunSecrets put in memory for a child that
         // never came into being. The cleanup above this branch has already run
         // and will not run again, so without this the owner's plaintext would
@@ -11655,9 +11671,6 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // settles, and until it was tracked nothing — not even the module's own
   // reset — could wait for it. See `trackSettleWork`.
   const settled = run.status;
-  // Over, unless paused: the copies the owner limited to this one run go. After
-  // the retry and the account switch above, which carry its secrets on.
-  if (settled !== "paused") endRunSecrets(run);
   // Read now, not after the commit below: the owner's Kill clears it while the
   // group it named may still be on its way out.
   const leftRunning = run.leftover;
@@ -11703,8 +11716,18 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     // review is the team's own reviewer's, and it never opens a pull
     // request — the assets, review pass and PR below would run in a folder
     // that is gone. The planner works in the project itself and keeps them.
-    if (run.team && run.team.role !== "planner") return;
-    await reviewAndShip(run, state.endRequested);
+    try {
+      if (run.team && run.team.role !== "planner") return;
+      await reviewAndShip(run, state.endRequested);
+    } finally {
+      // The copies the owner limited to this one run go once it is over — here,
+      // at the END of the chain and not at the settle above it: the deliverable
+      // gate and the delivery pipeline (both inside reviewAndShip) can put this
+      // very record back to work, and that attempt is still its one run. A
+      // pause, or a record back at work, keeps them; that attempt's own settle
+      // comes back through here.
+      if (!isRunGoing(run.id)) endRunSecrets(run);
+    }
   })());
   // A pause is the owner's own gesture — no finish notice for it.
   //
@@ -12006,10 +12029,6 @@ function spawnRun(
       // `finally` below may close this process's copies at once.
       stdio: ["pipe", logs.out, logs.err],
     });
-  } catch (err) {
-    // No child at all: nothing was handed.
-    auditRunHandOff(run.id, handOff, false);
-    throw err;
   } finally {
     // Node has dup'd them into the child (or there is no child); this process
     // has no use for them and a leaked descriptor would keep a deleted log
@@ -14539,6 +14558,7 @@ function spawnOrSettle(
   try {
     spawnRun(run, resumeSessionId, tools, settings, stdinText, continuingRecord);
   } catch (err) {
+    auditUnstartedSpawn(run.id);
     run.status = "failed";
     run.error = `Could not start ${CODING_HARNESS_COMMAND}: ${err instanceof Error ? err.message : String(err)}`.slice(0, MAX_ERROR_CHARS);
     run.completedAt = Date.now();

@@ -550,6 +550,41 @@ describe("a copy that expires", () => {
     expect((await store.listSecrets()).map((s) => s.name)).toEqual(["IMPORT_ME_TOKEN"]);
   });
 
+  it("hands nothing when the owner's switch went off between the first look and the hand-out", async () => {
+    await importTicked(new Date(Date.now() + DAY).toISOString());
+    // ON for the look before the store's chain, OFF by the time the chain runs.
+    let asked = 0;
+    configGet.mockImplementation(async (key: string) => (key === store.SECRET_INJECT_CONFIG_KEY ? ++asked === 1 : undefined));
+    expect((await store.resolveSecretsForRun({ project: null, runId: "run-0000aaaa" })).names).toEqual([]);
+  });
+
+  it("drops a dated copy from values carried on to a later spawn once its day has gone by", async () => {
+    await importTicked(new Date(Date.now() + DAY).toISOString());
+    await store.setSecret({ name: "DEPLOY_TOKEN", value: "deploy-value-00000000", scope: store.BOX_SCOPE, inject: true });
+    const resolved = await store.resolveSecretsForRun({ project: null, runId: "run-0000aaaa" });
+    expect(Object.keys(resolved.env).sort()).toEqual(["DEPLOY_TOKEN", "IMPORT_ME_TOKEN"]);
+    expect(await store.withoutExpiredSecrets(resolved.env, resolved.scopes)).toEqual(resolved.env);
+
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 2 * DAY);
+    expect(await store.withoutExpiredSecrets(resolved.env, resolved.scopes)).toEqual({ DEPLOY_TOKEN: "deploy-value-00000000" });
+  });
+
+  it.skipIf(process.getuid?.() === 0)("names a one-run copy it could not claim, and hands it to nobody", async () => {
+    await importTicked("run");
+    // A store this box can read but not write: the claim cannot be recorded.
+    fs.chmodSync(dataDir, 0o500);
+    try {
+      const resolved = await store.resolveSecretsForRun({ project: null, runId: "run-0000aaaa" });
+      expect(resolved.names).toEqual([]);
+      expect(resolved.unreadable).toEqual(["IMPORT_ME_TOKEN"]);
+    } finally {
+      fs.chmodSync(dataDir, 0o700);
+    }
+    // Still unclaimed, so a later run with a writable store gets it.
+    expect((await store.resolveSecretsForRun({ project: null, runId: "run-0000bbbb" })).names).toEqual(["IMPORT_ME_TOKEN"]);
+  });
+
   it("refuses an expiry that is already over, or is not one", async () => {
     for (const expiresAt of ["2001-01-01T00:00:00.000Z", "soon", 42, "2026-13-45"]) {
       await expect(store.importSecret({ name: "IMPORT_ME_TOKEN", value: TOKEN, scope: "@box", source: "hermes", expiresAt }))

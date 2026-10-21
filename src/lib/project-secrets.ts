@@ -712,8 +712,10 @@ export async function resolveSecretsForRun(run: { project?: string | null; runId
   try {
     if (!(await getInjectSecrets())) return NOTHING;
     // On the store's chain: a one-run copy is claimed by a write, and two runs
-    // resolving at once must see each other's claim.
-    return await serialised(() => resolveRunSecrets(run));
+    // resolving at once must see each other's claim. The switch is asked again
+    // in there, where the owner turning it off (setInjectSecrets, on the same
+    // chain) cannot land between the answer and the hand-out.
+    return await serialised(async () => ((await getInjectSecrets()) ? resolveRunSecrets(run) : NOTHING));
   } catch (err) {
     console.error("[secrets] could not resolve the secrets for a run:", err instanceof Error ? err.message : err);
     return NOTHING;
@@ -785,15 +787,49 @@ async function resolveRunSecrets(run: { project?: string | null; runId?: string 
       await writeStore(entries);
     } catch (err) {
       // Not written means not claimed, and an unclaimed one-run copy could go
-      // to a second run as well. So this run does not get it either.
+      // to a second run as well. So this run does not get it either — nor a
+      // box-wide value of the same name it was overriding, for the reason an
+      // unopenable override takes it (see above) — and it is NAMED, like an
+      // unreadable entry, so the run's feed says what it went without.
       console.error("[secrets] could not claim a one-run secret for a run:", err instanceof Error ? err.message : err);
       for (const entry of unclaimed) {
         delete env[entry.name];
         delete scopes[entry.name];
+        if (!unreadable.includes(entry.name)) unreadable.push(entry.name);
       }
     }
   }
   return { env, names: Object.keys(env), unreadable, scopes };
+}
+
+/**
+ * A run's values carried on to a later spawn of the same run (the account
+ * switch), less every copy whose date has gone by since they were resolved. The
+ * carry is otherwise deliberate — the same run's next try at the same work — but
+ * a dated copy is never handed after its day, whoever is handing it. A store this
+ * box cannot read leaves the carry as it was: nothing is known about any entry.
+ */
+export async function withoutExpiredSecrets(
+  env: Readonly<Record<string, string>>,
+  scopes: Readonly<Record<string, string>>,
+): Promise<Record<string, string>> {
+  let entries: StoredSecret[];
+  try {
+    entries = await readStore();
+  } catch (err) {
+    console.error("[secrets] could not re-check carried secrets for expiry:", err instanceof Error ? err.message : err);
+    return { ...env };
+  }
+  const now = Date.now();
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(env)) {
+    const scope = scopes[name] ?? BOX_SCOPE;
+    const entry = entries.find((e) => e.name === name && e.scope === scope);
+    const expiry = entry ? readSecretExpiry(entry.expiresAt) : undefined;
+    if (typeof expiry === "number" && expiry <= now) continue;
+    out[name] = value;
+  }
+  return out;
 }
 
 /**

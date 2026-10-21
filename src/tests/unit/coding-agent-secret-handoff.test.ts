@@ -144,7 +144,8 @@ describe("the hand-off line", () => {
     const run = await lib.startRun({ task: "deploy the site", projectId: "site", source: "agent" });
 
     child!.emit("error", Object.assign(new Error("spawn claude-ds ENOENT"), { code: "ENOENT" }));
-    await until(async () => (await secrets.listSecrets()).every((s) => s.name !== "IMPORT_ME_TOKEN"), "the one-run copy to go");
+    // The audit line, not the list: the line is appended after the store write the list reads.
+    await until(() => audit().some((line) => line.action === "delete" && line.runId === run.id), "the one-run copy's removal line");
 
     const lines = audit().filter((line) => line.runId === run.id);
     expect(lines.some((line) => line.action === "inject")).toBe(false);
@@ -159,11 +160,29 @@ describe("the hand-off line", () => {
     await expect(lib.startRun({ task: "deploy the site", projectId: "site", source: "agent" })).rejects.toMatchObject({ kind: "not_ready" });
     const [run] = lib.listRuns();
 
-    await until(async () => (await secrets.listSecrets()).length === 1, "the one-run copy to go");
+    // The audit line, not the list: the line is appended after the store write the list reads.
+    await until(() => audit().some((line) => line.action === "delete" && line.runId === run.id), "the one-run copy's removal line");
     const lines = audit().filter((line) => line.runId === run.id);
     expect(lines.some((line) => line.action === "inject")).toBe(false);
     expect(lines).toContainEqual(expect.objectContaining({ action: "not_handed", reason: "spawn_failed" }));
     expect(lines).toContainEqual(expect.objectContaining({ action: "delete", names: ["IMPORT_ME_TOKEN"], reason: "run_ended" }));
+  });
+});
+
+describe("a spawn that fails before the child is asked for", () => {
+  it("still says NOT handed, and takes the one-run copy back", async () => {
+    // The stream logs are opened before `spawn` is called: a file where their
+    // folder should be makes that step throw, so no child is ever asked for.
+    fs.writeFileSync(path.join(root, "data", "coding-agent-streams"), "");
+    harnessSpawnsAs(() => harnessChild());
+    await expect(lib.startRun({ task: "deploy the site", projectId: "site", source: "agent" })).rejects.toMatchObject({ kind: "not_ready" });
+    const [run] = lib.listRuns();
+    expect(spawnMock.mock.calls.some(([cmd, args]) => isHarness(cmd, args))).toBe(false);
+
+    await until(() => audit().some((line) => line.action === "delete" && line.runId === run.id), "the one-run copy's removal line");
+    const lines = audit().filter((line) => line.runId === run.id);
+    expect(lines.some((line) => line.action === "inject")).toBe(false);
+    expect(lines).toContainEqual(expect.objectContaining({ action: "not_handed", names: ["DEPLOY_TOKEN", "IMPORT_ME_TOKEN"], reason: "spawn_failed" }));
   });
 });
 
@@ -178,7 +197,8 @@ describe("a one-run copy", () => {
     lib.stopRun(run.id);
     child!.emit("exit", null, "SIGTERM");
     child!.emit("close", null, "SIGTERM");
-    await until(async () => (await secrets.listSecrets()).length === 1, "the one-run copy to go");
+    // The audit line, not the list: the line is appended after the store write the list reads.
+    await until(() => audit().some((line) => line.action === "delete" && line.runId === run.id), "the one-run copy's removal line");
     expect((await secrets.listSecrets()).map((s) => s.name)).toEqual(["DEPLOY_TOKEN"]);
     expect(audit().at(-1)).toMatchObject({ action: "delete", names: ["IMPORT_ME_TOKEN"], runId: run.id, reason: "run_ended" });
     expect(fs.readFileSync(path.join(root, "data", "secrets-audit.log"), "utf-8")).not.toContain("imported-value-0000");
