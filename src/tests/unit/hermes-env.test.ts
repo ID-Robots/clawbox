@@ -151,6 +151,18 @@ describe("parseHermesEnv", () => {
     expect(parseHermesEnv('A="two words"\n')).toEqual({ A: "two words" });
   });
 
+  it("drops an inline comment the way Hermes' dotenv loader does", () => {
+    const env = parseHermesEnv([
+      "A=value # rotated in spring",
+      "B=val#ue",
+      'C="quoted # kept" # note',
+      "D='single # kept' # note",
+      'E="say \\"hi\\"" # note',
+      "F=tabbed\t# note",
+    ].join("\n"));
+    expect(env).toEqual({ A: "value", B: "val#ue", C: "quoted # kept", D: "single # kept", E: 'say "hi"', F: "tabbed" });
+  });
+
   it("tolerates a BOM", () => {
     expect(parseHermesEnv("﻿A=1\n")).toEqual({ A: "1" });
   });
