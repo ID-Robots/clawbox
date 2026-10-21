@@ -1678,6 +1678,8 @@ export const sv: Record<string, string> = {
   "whatsNew.holdToTalkBody": "Håll ned chattens mikrofonknapp, eller F8, medan du pratar och släpp för att skicka. Talade svar laddas ned flera gånger mindre, och under Inställningar → Röst kan varje svar läsas upp, även svar på frågor du har skrivit.",
   "whatsNew.agentChartTitle": "Kodagenten i ett livediagram",
   "whatsNew.agentChartBody": "Kodagenten öppnas med ett diagram över sina agenter i arbete. Du kan skriva till en körning medan den arbetar, extra körningar och team väntar i kö i stället för att nekas, och Laga CI skickar tillbaka en pull request vars kontroller misslyckades för att lagas.",
+  "whatsNew.primeRadiantTitle": "Prime Radiant, en levande wiki",
+  "whatsNew.primeRadiantBody": "En ny app som håller en wiki åt dig. Peka ut dina dokument så skriver den en sida per ämne och anger för varje uppgift var den kommer ifrån och hur säker den är. Varje natt städar den wikin, letar efter uppgifter som motsäger varandra och frågar dig om det den inte kan avgöra själv.",
   "whatsNew.readMore": "Läs vad som är nytt i 4.3",
   "whatsNew.planTitle": "Lås upp med en ClawBox AI-plan",
   "whatsNew.planPaidFeatures": "Kodagenten och Memory Shard kräver planen Pro eller Max.",
