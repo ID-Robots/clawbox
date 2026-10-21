@@ -1,0 +1,8 @@
+{
+  "name": "todo-cli",
+  "version": "1.0.0",
+  "type": "module",
+  "bin": { "todo": "./todo.js" },
+  "scripts": { "test": "vitest run" },
+  "devDependencies": { "vitest": "^3.2.4" }
+}

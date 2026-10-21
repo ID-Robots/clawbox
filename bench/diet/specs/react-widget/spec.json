@@ -1,0 +1,44 @@
+{
+  "id": "react-widget",
+  "tier": "short",
+  "project": "shop-front",
+  "task": "This is a small Vite + React 18 shop front with Vitest and Testing Library already set up (`npm test`, `npm run build`). I need a shopping cart widget next to the product list.\n\nPlease create `src/components/Cart.jsx` with a named export `Cart`, taking props `products` (the same `{ id, name, price }` array the product list uses) and an optional `storageKey` (default `\"cart\"`). Requirements:\n\n- For each product, a button with the accessible name `Add <name> to cart`. Adding a product that is already in the cart increases its quantity by 1.\n- Each cart line is an element with `data-testid=\"cart-line-<id>\"` showing the product name, an `<input type=\"number\">` labelled `Quantity for <name>`, and a button `Remove <name>`. Typing a new whole-number quantity updates the line; a quantity of 0 removes the line.\n- The total is shown in an element with `data-testid=\"cart-total\"`, formatted like the rest of the shop (`$12.50`, two decimals, no floating-point noise). When the cart is empty show `Your cart is empty` and a total of `$0.00`.\n- Persist the cart in `localStorage` under `storageKey` after every change and restore it on mount; missing or corrupt stored data must not crash the widget (just start empty).\n- Fully keyboard accessible: native buttons and inputs, sensible labels, no click handlers on divs.\n\nRender it in `App` with the existing `PRODUCTS`. Add tests for the component with Vitest + Testing Library, and make sure `npm test` and `npm run build` both pass. Don't add new dependencies. Commit nothing yourself.",
+  "source": {
+    "kind": "seed"
+  },
+  "setup": "npm ci --no-audit --no-fund",
+  "accept": [
+    {
+      "name": "own tests (npm test)",
+      "cmd": "npm test",
+      "timeoutSec": 180
+    },
+    {
+      "name": "build (npm run build)",
+      "cmd": "npm run build",
+      "timeoutSec": 180
+    },
+    {
+      "name": "hidden: Cart behaviour",
+      "cmd": "npx vitest run --config __acceptance__/vitest.accept.config.mjs",
+      "timeoutSec": 180
+    },
+    {
+      "name": "cart tests were added",
+      "cmd": "git diff --name-only --diff-filter=AM \"$BASE\" -- src | grep -E '\\.test\\.(js|jsx)$' | xargs -r grep -l 'Cart' | grep -q . || { echo 'no new/changed test file mentions Cart'; exit 1; }",
+      "timeoutSec": 30
+    },
+    {
+      "name": "no new dependencies",
+      "cmd": "node -e 'const cp=require(\"child_process\");const a=JSON.parse(cp.execSync(\"git show \"+process.env.BASE+\":package.json\"));const b=require(process.cwd()+\"/package.json\");for(const k of [\"dependencies\",\"devDependencies\"]){const x=Object.keys(a[k]||{}).sort().join(),y=Object.keys(b[k]||{}).sort().join();if(x!==y){console.error(k+\" changed: \"+x+\" -> \"+y);process.exit(1)}}'",
+      "timeoutSec": 30
+    }
+  ],
+  "probe": {
+    "start": "npm run build >/dev/null && npx vite preview --host 127.0.0.1 --port \"$PORT\" --strictPort",
+    "url": "http://127.0.0.1:{port}/",
+    "expectStatus": 200,
+    "expectBodyIncludes": "<div id=\"root\">"
+  },
+  "rubric": "State should live in one place (a reducer or a single useState of lines keyed by product id) with the total derived, not stored; money should be summed in cents or rounded once at display. Persistence should be a single effect keyed on the cart state (plus a lazy initial state reading storage inside try/catch), with no write-on-first-render clobbering a stored cart, and StrictMode double-invocation must not double-add. Quantity input should handle empty/negative/non-integer input sanely (ignore or clamp, not NaN totals). Check labels are real (<label htmlFor> or aria-label), Remove buttons are reachable by Tab, and tests use accessible queries rather than class names."
+}

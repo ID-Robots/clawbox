@@ -847,7 +847,7 @@ shell tool, not less and not more:
   as a full writer on the tier model (measured: the first ultracode bench
   run typed none of its four agents). The writing stays with the main loop
   on the tier model. Under
-  ultracode (the default effort) the run also gets Claude Code's `Workflow`
+  ultracode (an opt-in effort since TASK-1749; xhigh is the default) the run also gets Claude Code's `Workflow`
   tool, listed AND pre-approved (`--allowedTools Workflow` — listed alone a
   headless run is refused with "Review dynamic workflow before running"),
   plus a brief paragraph on what to fan out; a fixed effort level is no
@@ -881,7 +881,7 @@ shell tool, not less and not more:
   stored default project folder is used — the same fallback the run route
   documents;
 - one run at a time, thirty idle minutes before the device gives up on it,
-  400 turns by default (10–2000), an optional token ceiling the device itself
+  200 turns by default (10–2000), an optional token ceiling the device itself
   enforces, an explicit environment (no session secret, no service tokens),
   `--setting-sources user` so the OS checkout's own CLAUDE.md never steers a
   project that sits under it;

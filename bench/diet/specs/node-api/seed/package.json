@@ -1,0 +1,4 @@
+{ "name": "todo-api", "version": "1.0.0", "private": true, "main": "index.js",
+  "scripts": { "start": "node index.js", "test": "node --test" },
+  "dependencies": { "express": "^4.21.2" },
+  "devDependencies": { "supertest": "^7.0.0" } }

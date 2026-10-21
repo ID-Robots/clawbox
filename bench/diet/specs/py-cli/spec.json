@@ -1,0 +1,27 @@
+{
+  "id": "py-cli",
+  "tier": "short",
+  "project": "notes-cli",
+  "task": "This folder is a small Python command-line tool (notes/cli.py with argparse, notes/store.py, tests/). Add a `search` subcommand: `python -m notes search <text>` prints every note whose title or body contains the text, case-insensitive, one per line as `<id>: <title>`, and prints `no matches` when there are none. Add unit tests for it in tests/ and make `python -m unittest` pass. Commit nothing yourself.",
+  "source": {
+    "kind": "seed"
+  },
+  "accept": [
+    {
+      "name": "own tests (python3 -m unittest)",
+      "cmd": "python3 -m unittest",
+      "timeoutSec": 60
+    },
+    {
+      "name": "hidden: search subcommand",
+      "cmd": "python3 __acceptance__/search_accept.py -v",
+      "timeoutSec": 60
+    },
+    {
+      "name": "search tests were added",
+      "cmd": "grep -rqi 'search' tests/ || { echo 'no search tests in tests/'; exit 1; }; before=$(git grep -cE 'def test' \"$BASE\" -- tests/ | awk -F: '{s+=$NF} END {print s+0}'); after=$(grep -rcE 'def test' tests/ --include='*.py' | awk -F: '{s+=$NF} END {print s+0}'); echo \"test cases: $before -> $after\"; [ \"$after\" -gt \"$before\" ]",
+      "timeoutSec": 30
+    }
+  ],
+  "rubric": "Search logic belongs in the store (or a small helper) with the CLI only formatting output; matching should use casefold()/lower() on both title and body and list each note once, in store order. Whether `no matches` exits 0 or 1 is a judgment call but should be deliberate and tested. Tests should cover title-only, body-only, case-insensitivity and the no-match path, capturing stdout rather than printing. No leftover debug prints, no new dependencies, existing `list`/`show` behaviour untouched."
+}

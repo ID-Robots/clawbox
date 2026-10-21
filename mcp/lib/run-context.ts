@@ -79,3 +79,16 @@ export function runMedia(): RunMediaAllowed {
   const allowed = new Set((process.env.CLAWBOX_RUN_MEDIA ?? "").split(",").map((part) => part.trim()));
   return { images: allowed.has("images"), audio: allowed.has("audio") };
 }
+
+/**
+ * May this run hold the browser family (and `describe_image` beside it)?
+ *
+ * ABSENT means yes — every run before the token diet held it, and the runner
+ * sets nothing for a run that still does. Only the exact "0" the runner writes
+ * for a run its diet judged not visual (buildRunMcpConfig) takes it away, and
+ * only inside a run: outside one the variable means nothing.
+ */
+export function runBrowserAllowed(): boolean {
+  if (!runContext()) return true;
+  return (process.env.CLAWBOX_RUN_BROWSER ?? "").trim() !== "0";
+}

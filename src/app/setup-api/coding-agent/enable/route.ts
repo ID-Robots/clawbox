@@ -24,6 +24,7 @@ import {
   setAutoMerge,
   setAutoPr,
   setCompletionAttempts,
+  setDiet,
   setMaxParallelRuns,
   setPrBodyIncludesTask,
   setGenerateAudio,
@@ -38,6 +39,7 @@ import {
   setTokenLimit,
 } from "@/lib/coding-agent";
 import { PR_BODY_TASK_MODES } from "@/lib/coding-pr-body";
+import { validateDietPatch } from "@/lib/coding-diet";
 
 export const dynamic = "force-dynamic";
 
@@ -145,6 +147,15 @@ function forbidden() {
  * credentials to an unattended shell, which is the fence the permission rules
  * and the import routes carry for the same reason. The status still REPORTS it
  * (`injectSecrets`), because reading is not the half that needs the fence.
+ * POST { diet: { brief?: "full"|"lean", helpers?: "always"|"lean",
+ * visualTools?: "always"|"auto" } } → the token diet (src/lib/coding-diet.ts):
+ * the brief a run is given, how it is told to use its helpers, and whether a
+ * run that does not look visual still holds the browser and media tools. A
+ * PARTIAL patch, merged over what is stored; every knob never set is today's
+ * behaviour. The whole patch is refused, before anything in the body is saved,
+ * on an unknown key or value, with a stable `code` (`diet_not_object`,
+ * `diet_unknown_key`, `diet_invalid_value`). A run freezes the diet it started
+ * with; the status reports the effective one as `diet`.
  * POST { reviewPass: boolean } → the automatic review pass: one extra run in
  * the same session after every completed run that changed project files
  * (the status payload reports it as `reviewPass`; a review run carries
@@ -205,6 +216,7 @@ export async function POST(request: Request) {
     historyRetention?: unknown;
     historyLimit?: unknown;
     roleModels?: unknown;
+    diet?: unknown;
   };
   const hasEnabled = typeof fields.enabled === "boolean";
   const hasReviewPass = typeof fields.reviewPass === "boolean";
@@ -247,7 +259,9 @@ export async function POST(request: Request) {
   // A team's per-role model and effort (src/lib/coding-role-models.ts):
   // presence decides, and a wrong shape is refused below, whole.
   const hasRoleModels = "roleModels" in fields;
-  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasPrBodyIncludesTask && !hasReviewRounds && !hasAutoMerge && !hasCompletionAttempts && !hasMaxParallelRuns && !hasGenImages && !hasGenAudio && !hasRealBrowser && !hasTeamDynamic && !hasGitAuthorName && !hasGitAuthorEmail && !hasHistoryRetention && !hasHistoryLimit && !hasRoleModels && !clearsFault) {
+  // The token diet: presence decides, and a wrong shape is refused below, whole.
+  const hasDiet = "diet" in fields;
+  if (!hasEnabled && !hasDirectory && !hasEffort && !hasProvider && !hasTurns && !hasTokens && !hasReviewPass && !hasSetupComplete && !hasAutoPr && !hasPrBodyIncludesTask && !hasReviewRounds && !hasAutoMerge && !hasCompletionAttempts && !hasMaxParallelRuns && !hasGenImages && !hasGenAudio && !hasRealBrowser && !hasTeamDynamic && !hasGitAuthorName && !hasGitAuthorEmail && !hasHistoryRetention && !hasHistoryLimit && !hasRoleModels && !hasDiet && !clearsFault) {
     return NextResponse.json(
       {
         error:
@@ -263,6 +277,7 @@ export async function POST(request: Request) {
           + "{ gitAuthorName: string | null }, { gitAuthorEmail: string | null }, "
           + "{ prBodyIncludesTask: string }, "
           + "{ roleModels: { planner?|worker?|reviewer?|bulk?: { provider?, model?, effort? } } }, "
+          + "{ diet: { brief?, helpers?, visualTools? } }, "
           + "{ setupComplete: boolean }, { autoPr: boolean } or { clearHarnessFault: true }.",
       },
       { status: 400 },
@@ -312,6 +327,12 @@ export async function POST(request: Request) {
       { error: `The number of runs to keep must be one of: ${HISTORY_EXTENDED_LIMITS.join(", ")}.`, kind: "invalid" },
       { status: 400 },
     );
+  }
+  if (hasDiet) {
+    const checked = validateDietPatch(fields.diet);
+    if (!checked.ok) {
+      return NextResponse.json({ error: checked.error, kind: "invalid", code: checked.code }, { status: 400 });
+    }
   }
   if (hasPrBodyIncludesTask && !(PR_BODY_TASK_MODES as readonly unknown[]).includes(fields.prBodyIncludesTask)) {
     return NextResponse.json(
@@ -455,6 +476,11 @@ export async function POST(request: Request) {
     if (hasRealBrowser) {
       const saved = await setRealBrowser(fields.realBrowser);
       console.error(`[coding-agent] runs will verify their work in the ${saved ? "desktop" : "headless"} browser, by the owner's choice`);
+    }
+    if (hasDiet) {
+      const saved = await setDiet(fields.diet);
+      // Values from the diet's own fixed lists by now.
+      console.error(`[coding-agent] token diet set by the owner: brief ${logSafe(saved.brief)}, helpers ${logSafe(saved.helpers)}, visual tools ${logSafe(saved.visualTools)}`);
     }
     if (hasTeamDynamic) {
       const saved = await setTeamDynamic(fields.teamDynamic);

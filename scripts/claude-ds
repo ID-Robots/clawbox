@@ -360,7 +360,7 @@ fi
 # EFFORT: A PIN FOR THE FIXED LEVELS, A FLAG FOR ULTRACODE.
 #
 # CLAUDE_DS_EFFORT (the delegated run's setting) outranks the owner's stored
-# choice, which outranks the default — ultracode, the same default the Coding
+# choice, which outranks the default — xhigh, the same default the Coding
 # Agent app applies when the owner never touched its picker, so a terminal
 # and a delegated run agree. The fixed levels are pinned through
 # CLAUDE_CODE_EFFORT_LEVEL as before.
@@ -376,7 +376,7 @@ fi
 # is added only when the caller passed none, and the pin is skipped too —
 # pinned, `claude-ds --effort ultracode` against a stored fixed level would
 # silently stay at that level. So `claude-ds --effort low` still means low.
-EFFORT="${CLAUDE_DS_EFFORT:-${OWNER_EFFORT:-ultracode}}"
+EFFORT="${CLAUDE_DS_EFFORT:-${OWNER_EFFORT:-xhigh}}"
 EFFORT_ARGS=()
 wants_own_effort=0
 wants_own_sources=0

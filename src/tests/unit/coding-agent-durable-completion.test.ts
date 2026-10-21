@@ -228,7 +228,9 @@ beforeEach(async () => {
   process.env.CLAWBOX_ROOT = root;
   process.env.SESSION_SECRET = "the-web-servers-secret";
   process.env.CLAWBOX_MCP_TOKEN = "the-mcp-bearer-token-value";
-  writeConfig({});
+  // Three attempts: the cycle these cases exercise. The box's own default is
+  // one since TASK-1749, which the cases that need it set explicitly.
+  writeConfig({ coding_agent_completion_attempts: 3 });
   // Re-armed per test: `mockResolvedValueOnce` chains in one test must not leak
   // into the next, and the default here is the device's ordinary answer.
   commitRunWork.mockReset();

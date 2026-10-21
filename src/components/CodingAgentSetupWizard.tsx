@@ -177,9 +177,9 @@ export default function CodingAgentSetupWizard({
   // is one tap. The folder need not exist yet — saving creates it, as long as
   // it is inside the owner's home.
   const [folder, setFolder] = useState(status.defaultDirectory ?? status.suggestedDirectory ?? "");
-  // Ultracode is the default the wizard proposes: it is what the harness ships
-  // with, and the step says plainly what that costs.
-  const [effort, setEffort] = useState<Effort>(status.effort ?? "ultracode");
+  // The box's own default (xhigh since TASK-1749) is what the wizard proposes;
+  // ultracode stays on offer and the step says what it costs.
+  const [effort, setEffort] = useState<Effort>(status.effort ?? "xhigh");
   const [reviewPass, setReviewPass] = useState(status.reviewPass);
 
   const [browse, setBrowse] = useState<BrowseAnswer | null>(null);

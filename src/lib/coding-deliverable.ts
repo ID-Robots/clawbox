@@ -63,8 +63,12 @@ export const MAX_DELIVERABLE_COMMAND_CHARS = 300;
  */
 export const MAX_MISSING_CHARS = 300;
 
-/** Attempts at the deliverable a run gets by default, the original included. */
-export const DEFAULT_COMPLETION_ATTEMPTS = 3;
+/**
+ * Attempts at the deliverable a run gets by default, the original included.
+ * One since TASK-1749: every further attempt resumes the whole session, so
+ * its cost is a second run's, and the owner can still raise it to six.
+ */
+export const DEFAULT_COMPLETION_ATTEMPTS = 1;
 /**
  * One is a real setting: check the deliverable, and if it is not there say so
  * rather than nudging. That is the whole feature for an owner who wants the

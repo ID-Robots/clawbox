@@ -1,0 +1,6 @@
+body { font-family: system-ui, sans-serif; margin: 0; color: #1f2937; }
+main { max-width: 880px; margin: 0 auto; padding: 24px; }
+.product-list { list-style: none; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 16px; }
+.product { border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; }
+.product h3 { margin: 0 0 4px; font-size: 1rem; }
+.price { color: #4b5563; }

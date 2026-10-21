@@ -9,7 +9,7 @@ const eslintConfig = defineConfig([
   // coding agent's evidence folders and streams — not source. `eslint` with no
   // arguments lints the whole checkout, and on a box that means whatever a run
   // left there.
-  globalIgnores([".next/**", "out/**", "build/**", "coverage/**", "next-env.d.ts", "bench/tasks/**/seed/**", "data/**"]),
+  globalIgnores([".next/**", "out/**", "build/**", "coverage/**", "next-env.d.ts", "bench/tasks/**/seed/**", "bench/diet/specs/**", "data/**"]),
 ]);
 
 export default eslintConfig;

@@ -105,6 +105,9 @@ function stubFetch(
     /** What each role starts on now (status.roleModelMap). Absent: a server
      *  that predates it. */
     roleModelMap?: Record<string, unknown>;
+    /** The token diet as the status reports it. Absent: a server that
+     *  predates the diet, which answers with no such field at all. */
+    diet?: Record<string, string>;
   } = {},
 ) {
   posts = [];
@@ -137,6 +140,7 @@ function stubFetch(
       reviewer: { provider: "auto", model: "auto", effort: "auto" },
       bulk: { provider: "auto", model: "auto", effort: "auto" },
     };
+  const diet: Record<string, string> | null = opts.diet ? { ...opts.diet } : null;
   const payload = () => ({
     enabled: status.enabled,
     ready: status.enabled && status.readiness.ready,
@@ -166,6 +170,7 @@ function stubFetch(
     ...(opts.noPrBodyTask ? {} : { prBodyIncludesTask }),
     ...(opts.noRoleModels ? {} : { roleModels: JSON.parse(JSON.stringify(roleModels)) }),
     ...(opts.roleModelMap ? { roleModelMap: opts.roleModelMap } : {}),
+    ...(diet ? { diet: { ...diet } } : {}),
   });
   vi.stubGlobal("fetch", vi.fn(async (input: string | URL, init?: RequestInit) => {
     const url = input.toString();
@@ -243,6 +248,8 @@ function stubFetch(
         }
       }
       if (typeof body.completionAttempts === "number") completionAttempts = body.completionAttempts;
+      // The route merges a partial diet over the stored one.
+      if (diet && body.diet && typeof body.diet === "object") Object.assign(diet, body.diet);
       if (typeof body.maxParallelRuns === "number") {
         if (body.maxParallelRuns < 1 || body.maxParallelRuns > 4) {
           return json({ error: "The number of runs at once must be between 1 and 4.", kind: "invalid" }, 400);
@@ -1064,6 +1071,66 @@ describe("the attempts at a run's deliverable", () => {
     await screen.findByRole("switch", { name: SWITCH });
     expect(screen.queryByTestId("coding-agent-completion-attempts")).toBeNull();
     expect(screen.queryByText(translations.en["codingAgent.completionAttemptsLabel"])).toBeNull();
+  });
+});
+
+/**
+ * The token diet (src/lib/coding-diet.ts): three selects in the Advanced fold's
+ * Token use group, each posting `{ diet: { <knob>: value } }` alone — the route
+ * merges a partial diet over the stored one. Not drawn for a server that
+ * answers without `diet`.
+ */
+describe("the token diet", () => {
+  // The pre-diet values (LEGACY_DIET), so every select starts on its first option.
+  const LEGACY_DIET_FIXTURE = { brief: "full", helpers: "always", visualTools: "always", context: "full" };
+
+  it("draws the three knobs with what the device answered", async () => {
+    stubFetch({ enabled: true, readiness: READY }, { diet: { ...LEGACY_DIET_FIXTURE, helpers: "lean" } });
+    render(<CodingAgentSettingsPanel />);
+    const brief = await screen.findByTestId("coding-agent-diet-brief") as HTMLSelectElement;
+    const helpers = screen.getByTestId("coding-agent-diet-helpers") as HTMLSelectElement;
+    const visual = screen.getByTestId("coding-agent-diet-visual-tools") as HTMLSelectElement;
+    expect(brief.value).toBe("full");
+    expect(helpers.value).toBe("lean");
+    expect(visual.value).toBe("always");
+    expect(screen.getByText(translations.en["codingAgent.settingsGroupTokens"])).toBeInTheDocument();
+    // Every option is a catalogue string, in the order the module offers them.
+    expect([...brief.options].map((o) => [o.value, o.text])).toEqual([
+      ["full", translations.en["codingAgent.dietBriefFull"]],
+      ["lean", translations.en["codingAgent.dietBriefLean"]],
+    ]);
+    expect([...helpers.options].map((o) => [o.value, o.text])).toEqual([
+      ["always", translations.en["codingAgent.dietHelpersAlways"]],
+      ["lean", translations.en["codingAgent.dietHelpersLean"]],
+    ]);
+    expect([...visual.options].map((o) => [o.value, o.text])).toEqual([
+      ["always", translations.en["codingAgent.dietVisualToolsAlways"]],
+      ["auto", translations.en["codingAgent.dietVisualToolsAuto"]],
+    ]);
+  });
+
+  it.each([
+    ["coding-agent-diet-brief", "brief", "lean"],
+    ["coding-agent-diet-helpers", "helpers", "lean"],
+    ["coding-agent-diet-visual-tools", "visualTools", "auto"],
+  ])("%s posts its own knob alone and renders the answer", async (testId, knob, value) => {
+    stubFetch({ enabled: true, readiness: READY }, { diet: { ...LEGACY_DIET_FIXTURE } });
+    render(<CodingAgentSettingsPanel />);
+    const select = await screen.findByTestId(testId) as HTMLSelectElement;
+    fireEvent.change(select, { target: { value } });
+    await waitFor(() => { expect(posts).toEqual([{ url: "/setup-api/coding-agent/enable", body: { diet: { [knob]: value } } }]); });
+    await waitFor(() => { expect((screen.getByTestId(testId) as HTMLSelectElement).value).toBe(value); });
+  });
+
+  it("draws no Token use group on a server that predates the diet", async () => {
+    stubFetch({ enabled: true, readiness: READY });
+    render(<CodingAgentSettingsPanel />);
+    await screen.findByRole("switch", { name: SWITCH });
+    expect(screen.queryByTestId("coding-agent-diet")).toBeNull();
+    expect(screen.queryByTestId("coding-agent-diet-brief")).toBeNull();
+    expect(screen.queryByTestId("coding-agent-diet-helpers")).toBeNull();
+    expect(screen.queryByTestId("coding-agent-diet-visual-tools")).toBeNull();
+    expect(screen.queryByText(translations.en["codingAgent.settingsGroupTokens"])).toBeNull();
   });
 });
 

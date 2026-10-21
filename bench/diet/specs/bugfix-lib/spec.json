@@ -1,0 +1,14 @@
+{
+  "id": "bugfix-lib",
+  "tier": "short",
+  "project": "orderkit",
+  "task": "orderkit is our small dependency-free helper library (src/, tests in test/, `npm test`). Since the last release people have reported three problems:\n\n1. In the admin order list, page 1 shows the second batch of orders (11-20 with the default page size) and the last page is always blank.\n2. Some invoices come out one cent short: an item priced 19.99 is billed as 19.98, but most other prices look fine.\n3. After the dashboard renders its \"latest orders\" widget, the full order table, which is rendered from the same array, suddenly shows up in a different order.\n\n`npm test` is failing as well, probably related. Please find the root causes and fix them in src/. Do not weaken, skip or edit the existing tests: leave the files currently in test/ exactly as they are. Add one regression test per bug in a new test file under test/, using inputs other than the ones the existing tests already use, and make `npm test` pass. Briefly tell me what each bug was. Commit nothing yourself.",
+  "source": { "kind": "seed" },
+  "accept": [
+    { "name": "own tests (npm test)", "cmd": "npm test", "timeoutSec": 60 },
+    { "name": "hidden: the three bugs", "cmd": "node --test __acceptance__/bugs.accept.js", "timeoutSec": 60 },
+    { "name": "existing tests unchanged", "cmd": "git diff --quiet \"$BASE\" -- test/paginate.test.js test/money.test.js test/report.test.js && test -f test/paginate.test.js && test -f test/money.test.js && test -f test/report.test.js", "timeoutSec": 30 },
+    { "name": "regression tests added (>= 3 new cases)", "cmd": "c() { awk -F: '{s+=$NF} END {print s+0}'; }; before=$(git grep -cE '\\b(it|test)\\(' \"$BASE\" -- test/ | c); after=$(git grep --untracked -cE '\\b(it|test)\\(' -- test/ | c); echo \"test cases: $before -> $after\"; [ \"$after\" -ge $((before + 3)) ]", "timeoutSec": 30 }
+  ],
+  "rubric": "Each fix should address the root cause with a minimal change: start index (page - 1) * perPage in paginate; Math.round (or string-based parsing) instead of Math.floor in toCents, not an epsilon hack that only fixes 19.99; a copy before sorting ([...orders].sort or toSorted) in latestOrders. No unrelated rewrites, no edits to the existing test files, and no special-casing of the reported values. Regression tests should fail on the original code and use fresh inputs; the explanation should name the cause of each bug, not just the symptom."
+}

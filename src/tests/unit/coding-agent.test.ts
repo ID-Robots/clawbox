@@ -436,12 +436,17 @@ describe("a run", () => {
     // the command deny-list is gone. The FILE rules below still ship.
     expect(joined).toContain(`--tools ${lib.toolsFor(true, run.effort)}`);
     expect(argv[argv.indexOf("--allowedTools") + 1]).toBe("Bash(*)");
-    // The default effort is ultracode, and ultracode's orchestration tool is
-    // listed AND pre-approved — listed alone it is refused headlessly.
-    expect(run.effort).toBe(lib.ULTRACODE_EFFORT);
-    expect(argv[argv.indexOf("--tools") + 1].split(",")).toContain(lib.WORKFLOW_TOOL);
-    expect(argv[argv.indexOf("--allowedTools") + 2]).toBe(lib.WORKFLOW_TOOL);
-    expect(argv[argv.indexOf("--append-system-prompt") + 1]).toContain("Ultracode is on");
+    // The default effort is xhigh (TASK-1749): no standing workflow fan-out,
+    // so neither the Workflow tool nor the ultracode brief rides along.
+    expect(run.effort).toBe("xhigh");
+    expect(argv[argv.indexOf("--tools") + 1].split(",")).not.toContain(lib.WORKFLOW_TOOL);
+    expect(argv[argv.indexOf("--append-system-prompt") + 1]).not.toContain("Ultracode is on");
+    // Chosen, ultracode's orchestration tool is listed AND pre-approved —
+    // listed alone it is refused headlessly.
+    const ultra = lib.buildRunArgs({ effort: lib.ULTRACODE_EFFORT });
+    expect(ultra[ultra.indexOf("--tools") + 1].split(",")).toContain(lib.WORKFLOW_TOOL);
+    expect(ultra[ultra.indexOf("--allowedTools") + 2]).toBe(lib.WORKFLOW_TOOL);
+    expect(ultra[ultra.indexOf("--append-system-prompt") + 1]).toContain("Ultracode is on");
     for (const rule of lib.BASH_DENYLIST) expect(argv).not.toContain(rule);
     expect(argv).toContain("--disallowedTools");
     // The one command list that IS shipped: killing by name, and killing
@@ -485,6 +490,37 @@ describe("a run", () => {
     expect(env.SESSION_SECRET).toBeUndefined();
     expect(env.CLAWBOX_MCP_TOKEN).toBeUndefined();
     expect(env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC).toBe("1");
+  });
+
+  // TASK-1749: with nothing stored, a NEW run gets the lean defaults
+  // (DEFAULT_DIET) — the lean brief, the lean helper sentence and the per-run
+  // visual decision — frozen on its record. A record WITHOUT a diet keeps the
+  // legacy full prompt (routes/coding-agent/diet.test.ts).
+  it("gives a new run on a box that never set the diet the lean brief, lean helpers and the visual decision", async () => {
+    const dir = makeProject("parser");
+    fs.rmSync(path.join(dir, "index.html"));
+    fs.writeFileSync(path.join(dir, "main.py"), "print('hi')\n");
+    const { DEFAULT_DIET } = await import("@/lib/coding-diet");
+    const plain = await finished((await lib.startRun({ task: "Fix the parser in main.py", projectId: "parser", source: "agent" })).id);
+    expect(plain.diet).toEqual(DEFAULT_DIET);
+    expect(plain.visual).toBe(false);
+    let argv = fs.readFileSync(argvFile(), "utf-8").split("\n").filter(Boolean);
+    let prompt = argv[argv.indexOf("--append-system-prompt") + 1];
+    expect(prompt).not.toContain(lib.HEADLESS_BRIEF);
+    expect(prompt).not.toContain("Delegate instead of doing everything in one thread");
+    expect([lib.leanHelpersBrief(false), lib.leanHelpersBrief(true)].some((s) => prompt.includes(s))).toBe(true);
+    expect(prompt).not.toContain(lib.LEAN_VISUAL_BRIEF);
+    expect(argv).not.toContain("--mcp-config");
+
+    makeProject("site");
+    const visual = await finished((await lib.startRun({ task: "Fix the parser", projectId: "site", source: "agent" })).id);
+    expect(visual.diet).toEqual(DEFAULT_DIET);
+    // The folder has an index.html: the run keeps the tools and the browser block.
+    expect(visual.visual).toBe(true);
+    argv = fs.readFileSync(argvFile(), "utf-8").split("\n").filter(Boolean);
+    prompt = argv[argv.indexOf("--append-system-prompt") + 1];
+    expect(prompt).toContain(lib.LEAN_VISUAL_BRIEF);
+    expect(argv).toContain("--mcp-config");
   });
 
   it("turns the stream-json into a faithful record and tells the owner", async () => {
@@ -744,8 +780,11 @@ describe("a run", () => {
       // The pass runs the verification itself and claims only what it ran.
       expect(task).toMatch(/Start by running the project's own verification/);
       expect(task).toMatch(/a result from the earlier session is not yours to claim/);
-      // The pass IS the review: it is told not to send the reviewer helper.
-      expect(argv[argv.indexOf("--append-system-prompt") + 1]).toMatch(/do not send the reviewer helper over your own work/);
+      // The pass IS the review: it is told not to send the reviewer helper —
+      // in the lean helper sentence, since a box that never set the diet
+      // runs on the lean defaults (TASK-1749) and the pass inherits them.
+      expect(review.diet).toEqual(first.diet);
+      expect(argv[argv.indexOf("--append-system-prompt") + 1]).toContain(lib.leanHelpersBrief(true));
 
       // The review pass itself completed and touched files — and must NOT
       // chain: once ITS commit attempt is over (the moment a follow-up would
@@ -1837,6 +1876,9 @@ describe("counting sub-agents", () => {
     makeProject("site");
     const run = await finished((await lib.startRun({ task: "count", projectId: "site", source: "agent" })).id);
     expect(run.tokensUsed).toBe(3 * 6_100);
+    // The same bill by category: cache reads are most of it (TASK-1749).
+    expect(run.tokenBreakdown).toEqual({ input: 3_000, output: 300, cacheCreation: 0, cacheRead: 15_000 });
+    expect(run.spawnTokens).toEqual([3 * 6_100]);
     expect(run.commandsRun).toBe(1);
     expect(run.progress.join("\n")).not.toContain("helper says hi");
     expect(run.progress.join("\n")).not.toContain("npm test");
@@ -1865,6 +1907,7 @@ describe("counting sub-agents", () => {
     const run = await finished((await lib.startRun({ task: "count", projectId: "site", source: "agent" })).id);
     // 5,000 twice (one message each), then 700 + 9 of output the events never carried.
     expect(run.tokensUsed).toBe(10_000 + 700 + 9);
+    expect(run.tokenBreakdown).toEqual({ input: 10_000, output: 709, cacheCreation: 0, cacheRead: 0 });
   });
 
   it("raises the bill to the CLI's own modelUsage total at the end, never lowers it", async () => {
@@ -1879,12 +1922,39 @@ describe("counting sub-agents", () => {
     makeProject("site");
     let run = await finished((await lib.startRun({ task: "bill", projectId: "site", source: "agent" })).id);
     expect(run.tokensUsed).toBe(33_250);
+    // Raised by category to the process's modelUsage, every model summed.
+    expect(run.tokenBreakdown).toEqual({ input: 4_000, output: 250, cacheCreation: 0, cacheRead: 29_000 });
     expect(run.modelsUsed).toEqual(["deepseek-v4-flash", "deepseek-v4-pro[1m]"]);
 
     const RESULT_LOW = JSON.stringify({ type: "result", subtype: "success", num_turns: 1, result: "done", modelUsage: { "deepseek-v4-pro[1m]": { inputTokens: 10 } } });
     installFakeWrapper([`echo '${INIT}'`, `echo '${A}'`, `echo '${RESULT_LOW}'`, "exit 0"].join("\n"));
     run = await finished((await lib.startRun({ task: "bill", projectId: "site", source: "agent" })).id);
     expect(run.tokensUsed).toBe(1_000);
+    expect(run.tokenBreakdown).toEqual({ input: 1_000, output: 0, cacheCreation: 0, cacheRead: 0 });
+  });
+});
+
+describe("a resumed session's bill", () => {
+  beforeEach(() => readyDevice());
+
+  it("is its own assistant events, never the CLI's modelUsage — which carries the session's history", async () => {
+    // Measured 2026-10-18: a review pass resumes the run's session and its
+    // CLI reports modelUsage for the whole session, so raising the record to
+    // it billed the run's own tokens a second time.
+    const A = JSON.stringify({ type: "assistant", message: { id: "m1", usage: { input_tokens: 1_000, output_tokens: 0 }, content: [{ type: "text", text: "hi" }] } });
+    const FIRST = JSON.stringify({ type: "result", subtype: "error_max_turns", is_error: true, num_turns: 1, session_id: "sess-abc-123", modelUsage: { m: { inputTokens: 30_000 } } });
+    installFakeWrapper([`echo '${INIT}'`, `echo '${A}'`, `echo '${FIRST}'`, "exit 0"].join("\n"));
+    makeProject("site");
+    const first = await finished((await lib.startRun({ task: "big", projectId: "site", source: "agent" })).id);
+    expect(first.tokensUsed).toBe(30_000);
+
+    const B = JSON.stringify({ type: "assistant", message: { id: "m2", usage: { input_tokens: 2_000, output_tokens: 0 }, content: [{ type: "text", text: "more" }] } });
+    // The resumed process's modelUsage: the first spawn's 30,000 + this one's 2,000.
+    const SECOND = JSON.stringify({ type: "result", subtype: "success", num_turns: 1, result: "done", modelUsage: { m: { inputTokens: 32_000 } } });
+    installFakeWrapper([`echo '${INIT}'`, `echo '${B}'`, `echo '${SECOND}'`, "exit 0"].join("\n"));
+    const resumed = await finished((await lib.startRun({ task: "finish", resumeRunId: first.id, source: "agent" })).id);
+    // A resume is a record of its own: its bill is its own 2,000, not 32,000.
+    expect(resumed.tokensUsed).toBe(2_000);
   });
 });
 
