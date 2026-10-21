@@ -4202,11 +4202,23 @@ else:
         _video_skip = "tools.media is not an object this block can extend"
     elif isinstance(_video_cfg, dict) and _video_cfg.get("enabled") is False:
         _video_skip = "tools.media.video.enabled is false"
-    elif _video_v2 and isinstance(_video_cfg, dict) and "models" in _video_cfg:
-        # ON THE KEY, like the speech-to-text guard: a legacy list the core's
-        # own migration has not moved yet, `null` included. Seeding the v2
-        # home beside it is the dual-home write that guard stands down over.
-        _video_skip = "a legacy tools.media.video.models list is still waiting for the core's own migration"
+    elif _video_v2 and isinstance(_video_media, dict) and any(
+        isinstance(_video_media.get(_kind), dict) and "models" in _video_media[_kind]
+        for _kind in ("audio", "image", "video")
+    ):
+        # ON THE KEY, like the speech-to-text guard: a legacy per-kind list the
+        # core's own migration has not moved yet, `null` included. Seeding the
+        # v2 home beside ANY of them is the dual-home write that guard stands
+        # down over: once the shared list exists, the next boot's speech block
+        # no longer sees its legacy list as in flight and seeds beside it.
+        _video_legacy = next(
+            _kind
+            for _kind in ("audio", "image", "video")
+            if isinstance(_video_media.get(_kind), dict) and "models" in _video_media[_kind]
+        )
+        _video_skip = (
+            "a legacy tools.media.%s.models list is still waiting for the core's own migration" % _video_legacy
+        )
     elif _video_models is not None and not isinstance(_video_models, list):
         _video_skip = "the media model list is not a list"
     elif isinstance(_video_models, list) and not _video_models:

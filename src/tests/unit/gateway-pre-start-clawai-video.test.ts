@@ -380,5 +380,19 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI video understandin
       expect(changed).toBe(false);
       expect(media(cfg)).toEqual(legacy);
     });
+
+    it("does not seed the shared list beside a legacy audio or image list either", () => {
+      for (const legacy of [
+        { audio: { models: [{ provider: "openai", model: "whisper-1" }] } },
+        { audio: { models: null } },
+        { image: { models: [] } },
+      ]) {
+        const { cfg, changed, log } = migrate(withMedia(legacy));
+
+        expect(changed).toBe(false);
+        expect(media(cfg)).toEqual(legacy);
+        expect(log).toMatch(/legacy tools\.media\.(audio|image)\.models list is still waiting/);
+      }
+    });
   });
 });
