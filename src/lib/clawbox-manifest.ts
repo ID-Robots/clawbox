@@ -19,7 +19,8 @@
  *     "kind": "server",                       // server | webapp | site | tool
  *     "port": 4230,                           // a server app's local port; the box proxies /apps/<folder>/ to it
  *     "start": "bun run dev",                 // how to start it (≤ 200): the box runs it in the project folder when a run settles and nothing listens on the port
- *     "stripBasePath": false                  // true: the proxy sends "/" upstream instead of "/apps/<folder>/"
+ *     "stripBasePath": false,                 // true: the proxy sends "/" upstream instead of "/apps/<folder>/"
+ *     "slug": "tinder-clone"                  // the app's id in the ClawBox Store (≤ 64, a-z 0-9 and inner dashes); derived from `name` when absent
  *   }
  *
  * `parseClawboxManifest` never throws and never repairs: a manifest that is
@@ -37,6 +38,9 @@ export const CLAWBOX_MANIFEST_FILE = "clawbox.json";
 export const MANIFEST_NAME_MAX = 60;
 export const MANIFEST_DESCRIPTION_MAX = 300;
 export const MANIFEST_START_MAX = 200;
+export const MANIFEST_SLUG_MAX = 64;
+/** A ClawBox Store slug: lowercase letters and digits, dashes inside, at most 64. */
+export const MANIFEST_SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 /** The largest manifest read: anything past this is not one of ours. */
 export const MANIFEST_MAX_BYTES = 16 * 1024;
 
@@ -52,6 +56,8 @@ export interface ClawboxManifest {
   start: string | null;
   /** True when the proxy should send `/` upstream rather than `/apps/<folder>/`. */
   stripBasePath: boolean;
+  /** The app's ClawBox Store slug — present only when the manifest names a valid one (`manifestSlug` derives it otherwise). */
+  slug?: string;
 }
 
 function cleanText(value: unknown, max: number): string | null {
@@ -79,6 +85,7 @@ export function parseClawboxManifest(text: string): ClawboxManifest | null {
   const name = cleanText(m.name, MANIFEST_NAME_MAX);
   if (!name) return null;
   const kind = typeof m.kind === "string" && (MANIFEST_KINDS as readonly string[]).includes(m.kind) ? (m.kind as ClawboxAppKind) : null;
+  const slug = typeof m.slug === "string" && MANIFEST_SLUG_RE.test(m.slug) ? m.slug : null;
   return {
     name,
     description: cleanText(m.description, MANIFEST_DESCRIPTION_MAX),
@@ -86,7 +93,32 @@ export function parseClawboxManifest(text: string): ClawboxManifest | null {
     port: isProxyablePort(m.port) ? m.port : null,
     start: cleanText(m.start, MANIFEST_START_MAX),
     stripBasePath: m.stripBasePath === true,
+    ...(slug ? { slug } : {}),
   };
+}
+
+/**
+ * A Store slug made from free text — "Tinder Clone!" is `tinder-clone`.
+ * Accents are folded to their letter; anything else outside a-z 0-9 becomes
+ * one dash. Null when nothing usable is left (a name written only in another
+ * script): the caller asks for a slug rather than inventing one.
+ */
+export function slugFromName(text: string): string | null {
+  const folded = text.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  let slug = "";
+  for (const ch of folded) {
+    if ((ch >= "a" && ch <= "z") || (ch >= "0" && ch <= "9")) slug += ch;
+    else if (slug && !slug.endsWith("-")) slug += "-";
+    if (slug.length > MANIFEST_SLUG_MAX) break;
+  }
+  slug = slug.slice(0, MANIFEST_SLUG_MAX);
+  while (slug.endsWith("-")) slug = slug.slice(0, -1);
+  return MANIFEST_SLUG_RE.test(slug) ? slug : null;
+}
+
+/** The app's Store slug: the manifest's own, else one derived from its name, else from the folder. */
+export function manifestSlug(manifest: ClawboxManifest, folder?: string): string | null {
+  return manifest.slug ?? slugFromName(manifest.name) ?? (folder ? slugFromName(folder) : null);
 }
 
 /**

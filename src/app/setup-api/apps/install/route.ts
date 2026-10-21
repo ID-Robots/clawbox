@@ -13,6 +13,9 @@ import { isClawhubHandle, lookupClawhubOwner, pickClawhubMatch } from "@/lib/cla
 import { refreshSkillsCache } from "@/lib/openclaw-skill-info";
 import { ICONS_DIR, safeAppId, webappIconPath } from "@/lib/webapp-icon";
 import { withOpenclawMaintenanceRetry } from "@/lib/openclaw-maintenance";
+import { CLAWBOX_APP_SOURCE } from "@/lib/store-categories";
+import { clawboxStoreAppFrom, installClawboxApp } from "@/lib/store-install";
+import { storePortalBase } from "@/lib/store-publish";
 
 const STORE_API = "https://clawbox.com/api/store/apps";
 const STORE_ICONS_BASE = "https://clawbox.com/store/icons";
@@ -58,9 +61,10 @@ const REF = /^@([A-Za-z0-9][A-Za-z0-9._-]{0,39})\/([A-Za-z0-9_-]+)$/;
  * ClawHub's ambiguity answer lists, and what app_search may hand the agent).
  * The owner is only ever the CLI argument; `appId` in the answer is the slug.
  */
-function parseInstallRequest(body: unknown): { appId: string; owner?: string } | { error: string } {
-  const { appId, owner } = (body && typeof body === "object" ? body : {}) as { appId?: unknown; owner?: unknown };
+function parseInstallRequest(body: unknown): { appId: string; owner?: string; clawbox: boolean } | { error: string } {
+  const { appId, owner, source } = (body && typeof body === "object" ? body : {}) as { appId?: unknown; owner?: unknown; source?: unknown };
   if (typeof appId !== "string") return { error: "Invalid appId" };
+  if (source !== undefined && source !== CLAWBOX_APP_SOURCE && source !== "clawhub") return { error: "Invalid source" };
   let slug = appId;
   let refOwner: string | undefined;
   const ref = REF.exec(appId);
@@ -77,7 +81,56 @@ function parseInstallRequest(body: unknown): { appId: string; owner?: string } |
   if (!safeSlug) return { error: "Invalid appId" };
   if (owner !== undefined && !isClawhubHandle(owner)) return { error: "Invalid owner" };
   if (owner && refOwner && owner.toLowerCase() !== refOwner.toLowerCase()) return { error: "owner does not match appId" };
-  return { appId: safeSlug, owner: owner || refOwner };
+  if (source === CLAWBOX_APP_SOURCE && (owner !== undefined || refOwner)) return { error: "A ClawBox app has no ClawHub publisher" };
+  return { appId: safeSlug, owner: owner || refOwner, clawbox: source === CLAWBOX_APP_SOURCE };
+}
+
+/**
+ * A ClawBox app from the Store (`source: "clawbox"` — a project another box
+ * published) is not a ClawHub skill: it is downloaded, checked against its
+ * published SHA-256 and unpacked into the owner's project folder by
+ * src/lib/store-install.ts. Its record is read from the Store HERE, never
+ * taken from the caller, so the package and the digest it is checked against
+ * both come from the Store.
+ */
+async function installFromStore(appId: string): Promise<NextResponse> {
+  let raw: unknown = null;
+  try {
+    const res = await fetch(`${storePortalBase()}/api/store/apps/${encodeURIComponent(appId)}`, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (res.status === 404) {
+      return NextResponse.json({ ok: false, error: `The ClawBox Store has no app named "${appId}".`, code: "not_found", retryable: false, appId, source: CLAWBOX_APP_SOURCE }, { status: 404 });
+    }
+    if (!res.ok) {
+      return NextResponse.json({ ok: false, error: `The ClawBox Store answered HTTP ${res.status}. Try again in a moment.`, code: "upstream", retryable: true, appId, source: CLAWBOX_APP_SOURCE }, { status: 502 });
+    }
+    raw = await res.json();
+  } catch {
+    return NextResponse.json({ ok: false, error: "The ClawBox Store could not be reached. Check the box's internet connection and try again.", code: "offline", retryable: true, appId, source: CLAWBOX_APP_SOURCE }, { status: 502 });
+  }
+  const app = clawboxStoreAppFrom(raw);
+  if (!app || app.slug !== appId) {
+    return NextResponse.json({ ok: false, error: `The Store's record of "${appId}" is not a ClawBox app the box can install.`, code: "invalid_listing", retryable: false, appId, source: CLAWBOX_APP_SOURCE }, { status: 502 });
+  }
+  const outcome = await installClawboxApp(app);
+  if (!outcome.ok) {
+    return NextResponse.json({ ok: false, error: outcome.error, code: outcome.code, retryable: outcome.retryable, appId, source: CLAWBOX_APP_SOURCE }, { status: outcome.status });
+  }
+  return NextResponse.json({
+    ok: true,
+    appId,
+    source: CLAWBOX_APP_SOURCE,
+    version: outcome.version,
+    folder: outcome.folder,
+    kind: outcome.kind,
+    registered: outcome.registered,
+    webappUrl: outcome.webappUrl,
+    detail: outcome.detail,
+    alreadyInstalled: outcome.alreadyInstalled,
+    iconPath: `/setup-api/apps/icon/${appId}`,
+  });
 }
 
 function titleCaseFromSlug(slug: string): string {
@@ -314,6 +367,7 @@ export async function POST(req: Request) {
     if ("error" in parsed) return NextResponse.json({ error: parsed.error }, { status: 400 });
     const { appId } = parsed;
     let owner = parsed.owner;
+    if (parsed.clawbox) return await installFromStore(appId);
 
     const openclawBin = findOpenclawBin();
     // The SAME expression the uninstall route deletes under. Two spellings of
@@ -371,6 +425,9 @@ export async function POST(req: Request) {
       if (lookup.status === "found") {
         owner = lookup.ownerHandle;
       } else if (lookup.status === "not_found") {
+        // Not a skill — but it may be a ClawBox app, named by a caller that
+        // did not say so (the agent's app_install, a script).
+        if (clawboxStoreAppFrom(await storeDetail)) return await installFromStore(appId);
         return NextResponse.json(
           { ok: false, error: `ClawHub has no skill named "${appId}".`, code: "not_found", appId },
           { status: 404 },

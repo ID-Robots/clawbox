@@ -231,6 +231,9 @@ const PROBE_GATED_COMMON = [
   // or resume, and its routes refuse the call anyway.
   "coding_run_list", "coding_agent_resume", "coding_project_status",
   "coding_team_run", "coding_team_status", "coding_team_stop",
+  // Publishing a project to the ClawBox Store: a project is the coding
+  // agent's, so the tool is behind the same switch.
+  "app_publish",
   "disk_cleanup", "disk_usage", "email_list", "email_read",
   "logs_tail", "screen_capture",
 ];

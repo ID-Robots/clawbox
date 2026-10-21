@@ -23,7 +23,7 @@
 
 import { basename } from "path";
 import { apiGet, apiPost, apiTry } from "../lib/api";
-import { ApiError, classifyError, redact, ToolError, type ErrorRule } from "../lib/errors";
+import { ApiError, classifyError, redact, ToolError, type ErrorRule, type ToolErrorCode } from "../lib/errors";
 import { json, LIST_MAX_CHARS, text, type Registrar } from "../lib/register";
 import { zBool, zEnumOf, zInt, zOptText, zText } from "../lib/schema";
 import type { McpContext } from "../lib/context";
@@ -1929,6 +1929,95 @@ export function registerCodingTeamTools(reg: Registrar, ctx: Pick<McpContext, "c
       }
       const team = data.team;
       return text(team ? `Team ${team.id} is ${team.status}. ${describeTeam(team, false)}` : `Asked the ClawBox to stop team ${team_id}.`);
+    },
+  );
+}
+
+// ── Publishing a ClawBox app to the ClawBox Store ───────────────────────────
+
+/**
+ * What the agent is told for each refusal of POST /setup-api/apps/publish
+ * (src/lib/store-publish.ts): the route's own sentence is relayed as the
+ * message — it names the field, the limit or the portal's words — and the
+ * next step is the one that can change the answer. A code not named here
+ * (owner_only, a cross-origin refusal) falls to the generic classification.
+ */
+const PUBLISH_NEXT: Record<string, { code: ToolErrorCode; next: string }> = {
+  coming_soon: {
+    code: "NOT_SUPPORTED_HERE",
+    next: "Tell the user publishing to the ClawBox Store is coming soon with the Developer plan; the Publish button in the Coding Agent app opens the plan on the ClawBox website. Do not retry.",
+  },
+  not_linked: { code: "AUTH_FAILED", next: "Ask the user to sign in to ClawBox AI in Settings, then call app_publish again." },
+  token_rejected: { code: "AUTH_FAILED", next: "Ask the user to sign in to ClawBox AI again in Settings, then call app_publish again." },
+  invalid: { code: "BAD_ARGUMENT", next: "Fix what the message names (a version looks like 1.0.0; two projects sharing a name need directory from coding_project_status) and call app_publish again." },
+  not_found: { code: "NOT_FOUND", next: "Call coding_project_status for the projects and pass a folder name from it as project_id." },
+  no_manifest: {
+    code: "BAD_ARGUMENT",
+    next: "The project needs a clawbox.json with at least a \"name\" at its root before it can be published; offer to have a coding run add it.",
+  },
+  slug_taken: {
+    code: "CONFLICT",
+    next: "Ask the user for another slug, put it in the project's clawbox.json as \"slug\", then call app_publish again.",
+  },
+  package_too_large: {
+    code: "TOO_LARGE",
+    next: "Tell the user. Build output, dependencies and large media are the usual cause: keep them out of the project or list them in its .gitignore.",
+  },
+  store_unavailable: { code: "ENDPOINT_DOWN", next: "Wait a few minutes and call app_publish once more; if it refuses again, tell the user what the Store said." },
+  upstream: { code: "ENDPOINT_DOWN", next: "Wait a few minutes and call app_publish once more; if it refuses again, tell the user what the Store said." },
+  unreachable: { code: "ENDPOINT_DOWN", next: "Call clawbox_health to check the box is online, then call app_publish once more." },
+  failed: { code: "INTERNAL", next: "Tell the user publishing failed on the box and quote the message." },
+};
+
+/** The route's typed refusal as a ToolError, or null when the answer is not one of its codes. */
+export function publishToolError(err: unknown): ToolError | null {
+  if (!(err instanceof ApiError)) return null;
+  let body: { code?: unknown; message?: unknown; upgradeUrl?: unknown };
+  try {
+    body = JSON.parse(err.body) as typeof body;
+  } catch {
+    return null;
+  }
+  const rule = typeof body.code === "string" ? PUBLISH_NEXT[body.code] : undefined;
+  if (!rule) return null;
+  const message = typeof body.message === "string" && body.message.trim() ? body.message.trim() : `The ClawBox Store refused the app (${String(body.code)}).`;
+  const upgrade = body.code === "coming_soon" && typeof body.upgradeUrl === "string" ? ` The Developer plan: ${body.upgradeUrl}` : "";
+  return new ToolError(rule.code, `${message}${upgrade}`, rule.next);
+}
+
+/**
+ * `app_publish`: the Coding Agent's "Publish to ClawBox Store", for chat.
+ * Behind the coding agent's own switch — a project is the coding agent's —
+ * and on both editions, since publishing involves no harness at all.
+ */
+export function registerAppPublishTools(reg: Registrar, ctx: Pick<McpContext, "codingAgent">): void {
+  if (!ctx.codingAgent) return;
+
+  reg.tool(
+    "app_publish",
+    "Publish one of the owner's Coding Agent projects that has a clawbox.json to the ClawBox Store, under this box's ClawBox account. Only when the USER asks to publish; confirm the version with them first. Publishing may not be open for their account yet — then say so, do not retry.",
+    {
+      project_id: zText(128, "The project's folder name, as coding_project_status lists it."),
+      directory: zOptText(512, "The project's absolute folder, as coding_project_status names it. Only needed when two projects share project_id."),
+      version: zText(32, "The version to publish, three numbers like 1.0.0, higher than the one already in the Store."),
+      description: zOptText(300, "What the app does, for its Store page. Omit to use the clawbox.json description."),
+    },
+    { editions: ["openclaw", "hermes"], readOnly: false },
+    async ({ project_id, directory, version, description }: { project_id: string; directory?: string; version: string; description?: string }) => {
+      let data: { app?: Record<string, unknown>; created?: boolean; storeUrl?: string };
+      try {
+        data = await apiPost<typeof data>(
+          "/setup-api/apps/publish",
+          { projectId: project_id, ...(directory ? { directory } : {}), version, ...(description ? { description } : {}) },
+          { timeoutMs: 180_000 },
+        );
+      } catch (err) {
+        throw publishToolError(err) ?? err;
+      }
+      const name = typeof data.app?.name === "string" ? data.app.name : project_id;
+      const published = typeof data.app?.version === "string" ? data.app.version : version;
+      const where = data.storeUrl ? ` The owner can see it at ${data.storeUrl}.` : "";
+      return text(`${data.created ? "Published" : "Published a new version of"} ${name} ${published} to the ClawBox Store.${where}`);
     },
   );
 }

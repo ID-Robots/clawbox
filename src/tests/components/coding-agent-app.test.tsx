@@ -2993,3 +2993,21 @@ describe("the whole task", () => {
     expect(within(page).queryByTestId("coding-agent-run-task-open")).toBeNull();
   });
 });
+
+describe("publishing a ClawBox app to the Store", () => {
+  it("offers Publish to ClawBox Store only on a project with clawbox.json, and opens its dialog", async () => {
+    stubFetch({ enabled: true, readiness: READY }, [], {
+      projects: [
+        { ...PROJECT, app: { name: "My Site", description: null, kind: "webapp", port: null } },
+        { ...PROJECT, folder: "scratch", directory: "/home/clawbox/Projects/scratch", name: "scratch", app: null },
+      ],
+    });
+    render(<CodingAgentApp />);
+    await screen.findByTestId("coding-agent-projects");
+    expect(screen.queryByTestId("coding-agent-publish-scratch")).not.toBeInTheDocument();
+    const publish = screen.getByTestId("coding-agent-publish-site");
+    expect(publish).toHaveAccessibleName(translations.en["codingAgent.publishFor"].replace("{name}", "My Site"));
+    fireEvent.click(publish);
+    expect(await screen.findByTestId("store-publish-dialog")).toBeInTheDocument();
+  });
+});

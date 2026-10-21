@@ -36,6 +36,7 @@
     "@noble/hashes": "^1",
     "@novnc/novnc": "1.7.0",
     "@types/ws": "^8.18.2",
+    "@vercel/blob": "^2.8.2",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-unicode11": "^0.9.0",
     "@xterm/addon-web-links": "^0.12.0",

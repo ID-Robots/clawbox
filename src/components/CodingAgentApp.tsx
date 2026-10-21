@@ -28,6 +28,7 @@ import CodingRunInputs, { type RunInputs } from "./CodingRunInputs";
 import CodingRunMessageBox from "./CodingRunMessageBox";
 import CodingRunWorktreeCard, { worktreeCardApplies, type RunWorktreeView } from "./CodingRunWorktreeCard";
 import CodingTaskDialog from "./CodingTaskDialog";
+import StorePublishDialog from "./StorePublishDialog";
 import type { RunMessage } from "@/lib/coding-run-messages";
 import RunProgressBar, { RUN_TONE } from "./RunProgressBar";
 // The "3h ago" the rest of the desktop speaks — ClawKeep's helper and its
@@ -642,6 +643,8 @@ export default function CodingAgentApp() {
    * folder) while every request it makes is keyed by the folder and the kind.
    */
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
+  /** The project the "Publish to ClawBox Store" dialog is open for — its folder AND directory, since one name can be two projects. */
+  const [publishTarget, setPublishTarget] = useState<{ folder: string; directory: string } | null>(null);
   /** Where the last removed project went — the line the list keeps afterwards. */
   const [removedProject, setRemovedProject] = useState<{ folder: string; trashPath: string } | null>(null);
   // Pull requests opened from a project's page this session, by folder.
@@ -2400,6 +2403,21 @@ export default function CodingAgentApp() {
                         {project.onDesktop ? t("codingAgent.open") : t("launcher.addToDesktop")}
                       </button>
                     )}
+                    {/* Only a ClawBox app (a clawbox.json at its root) can go to
+                        the Store; quiet and an icon for the same reason as the
+                        delete beside it — the words are its name and title. */}
+                    {project.app && (
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); setPublishTarget({ folder: project.folder, directory: project.directory }); }}
+                        data-testid={`coding-agent-publish-${project.folder}`}
+                        title={t("codingAgent.publish")}
+                        aria-label={t("codingAgent.publishFor", { name: project.name })}
+                        className={BTN_QUIET}
+                      >
+                        <span className="material-symbols-rounded" style={{ fontSize: 16 }} aria-hidden="true">storefront</span>
+                      </button>
+                    )}
                     {/* Removing the folder. Quiet rather than secondary, and an
                         icon rather than a word: it sits on every row of a list
                         whose purpose is to OPEN a project, and a red button per
@@ -2807,6 +2825,16 @@ export default function CodingAgentApp() {
                       data-testid="coding-agent-project-open-app"
                     >
                       {project.onDesktop ? t("codingAgent.open") : t("launcher.addToDesktop")}
+                    </button>
+                  )}
+                  {project?.app && (
+                    <button
+                      type="button"
+                      onClick={() => setPublishTarget({ folder: project.folder, directory: project.directory })}
+                      className={BTN_SECONDARY}
+                      data-testid="coding-agent-project-publish"
+                    >
+                      {t("codingAgent.publish")}
                     </button>
                   )}
                 </div>
@@ -3350,6 +3378,10 @@ export default function CodingAgentApp() {
 
       </div>
       </div>
+
+      {publishTarget && (
+        <StorePublishDialog key={publishTarget.directory} projectId={publishTarget.folder} directory={publishTarget.directory} onClose={() => setPublishTarget(null)} />
+      )}
 
       {/* Mounted at the top level rather than inside the row, so the backdrop
           covers the window and the focus trap has the whole app behind it. */}

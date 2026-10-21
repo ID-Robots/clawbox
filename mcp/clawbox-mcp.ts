@@ -79,7 +79,7 @@ import { createRegistrar, hasActiveToolCalls, type Profile, type Registrar } fro
 import { registerAiTools } from "./tools/ai";
 import { registerBrowserTools } from "./tools/browser";
 import { registerCodingTools } from "./tools/coding";
-import { registerCodingAgentTools, registerCodingTeamTools, registerTeamRunTools } from "./tools/coding-agent";
+import { registerAppPublishTools, registerCodingAgentTools, registerCodingTeamTools, registerTeamRunTools } from "./tools/coding-agent";
 import { registerDesktopTools } from "./tools/desktop";
 import {
   hasMailboxSurface,
@@ -281,6 +281,7 @@ export async function buildServer(
   registerCodingTools(reg);
   registerCodingAgentTools(reg, ctx);
   registerCodingTeamTools(reg, ctx);
+  registerAppPublishTools(reg, ctx);
   // Inside a coding team's run only (the run context says so), like the media
   // tools; everywhere else it is simply not there.
   registerTeamRunTools(reg);
