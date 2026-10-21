@@ -31,7 +31,7 @@ const notes = (version: string) =>
   fs.readFileSync(path.join(process.cwd(), `RELEASE-NOTES-${version}.md`), "utf-8");
 
 describe("parseReleaseHighlights on the releases this repo shipped", () => {
-  it("reads the six 4.3.0 highlights, title and body, in order, all of them within the panel's handful", () => {
+  it("reads the seven 4.3.0 highlights, title and body, in order, all of them within the panel's handful", () => {
     const highlights = parseReleaseHighlights(notes("4.3.0"));
     expect(highlights.map((h) => h.title)).toEqual([
       "Screenshots, built in",
@@ -40,8 +40,9 @@ describe("parseReleaseHighlights on the releases this repo shipped", () => {
       "xAI Grok, and model changes without a restart",
       "Hold to talk",
       "The Coding Agent, on a live chart",
+      "Prime Radiant, a living wiki",
     ]);
-    // Six, and nothing past the panel's cap was cut to get there.
+    // Seven, and nothing past the panel's cap was cut to get there.
     expect(parseReleaseHighlights(notes("4.3.0"), 100)).toEqual(highlights);
     expect(highlights.length).toBeLessThanOrEqual(MAX_HIGHLIGHTS);
     // Wrapped lines are joined with single spaces, and "Settings → Voice" is

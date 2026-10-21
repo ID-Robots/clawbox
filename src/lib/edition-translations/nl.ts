@@ -1706,6 +1706,8 @@ export const nl: Record<string, string> = {
   "whatsNew.holdToTalkBody": "Houd de microfoonknop van de chat, of F8, ingedrukt terwijl je praat, en laat los om te versturen. Gesproken antwoorden zijn bij het downloaden een stuk kleiner, en in Instellingen → Spraak kun je elk antwoord laten voorlezen, ook antwoorden op vragen die je typte.",
   "whatsNew.agentChartTitle": "De codeeragent als live diagram",
   "whatsNew.agentChartBody": "De codeeragent opent met een diagram van zijn agents aan het werk. Je kunt een run een bericht sturen terwijl die bezig is, extra runs en teams wachten in de rij in plaats van te worden geweigerd, en CI repareren stuurt een pull request met mislukte checks terug om te repareren.",
+  "whatsNew.primeRadiantTitle": "Prime Radiant, een levende wiki",
+  "whatsNew.primeRadiantBody": "Een nieuwe app die een wiki voor je bijhoudt. Wijs hem je documenten aan en hij schrijft voor elk ervan een pagina, met de gevonden feiten en bij elk feit waar het vandaan komt en hoe zeker het is. Elke nacht ruimt hij de wiki op, zoekt hij naar feiten die elkaar tegenspreken en vraagt hij je naar alles wat hij niet zelf kan beslissen.",
   "whatsNew.readMore": "Lees wat er nieuw is in 4.3",
   "whatsNew.planTitle": "Ontgrendel met een ClawBox AI-abonnement",
   "whatsNew.planPaidFeatures": "De codeeragent en Memory Shard hebben het abonnement Pro of Max nodig.",

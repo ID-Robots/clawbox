@@ -42,6 +42,7 @@ export const WHATS_NEW_HIGHLIGHTS = [
   { icon: "smart_toy", title: "whatsNew.grokTitle", body: "whatsNew.grokBody" },
   { icon: "mic", title: "whatsNew.holdToTalkTitle", body: "whatsNew.holdToTalkBody" },
   { icon: "account_tree", title: "whatsNew.agentChartTitle", body: "whatsNew.agentChartBody" },
+  { icon: "menu_book", title: "whatsNew.primeRadiantTitle", body: "whatsNew.primeRadiantBody" },
 ] as const;
 
 /**
