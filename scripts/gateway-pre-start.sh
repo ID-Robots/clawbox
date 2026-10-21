@@ -4035,6 +4035,20 @@ if isinstance(ds_models, list):
         if model.get("contextWindow") in (None, 128000, 131072, 200000):
             model["contextWindow"] = 1000000
             changed = True
+        # contextTokens: the ACTIVE-input cap, OpenClaw's own key for it
+        # (models.providers.*.models[].contextTokens, explicit wins over the
+        # catalog). Its compaction threshold is the active window minus the
+        # built-in reserve, so with only the native 1M window a long session
+        # was never trimmed early: input per request grew from 0.7M to 1.4M
+        # tokens with session age on a box measured for this. 131,072 makes
+        # it compact near 128K. The native window above stays 1M: the cap
+        # limits what OpenClaw sends, it does not misdescribe the model.
+        # Written only when absent — a cap someone set is theirs, larger or
+        # smaller. Mirrors CLAWBOX_AI_CONTEXT_TOKENS in
+        # src/app/setup-api/ai-models/configure/route.ts.
+        if model.get("contextTokens") is None:
+            model["contextTokens"] = 131072
+            changed = True
         # maxTokens: filled in when absent, and corrected when it holds a
         # number this migration itself put there. 384000 shipped first and is
         # 9,216 short of the ceiling the upstream enforces (393216 = 384*1024,
