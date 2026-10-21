@@ -282,6 +282,22 @@ describe("contradiction pass", () => {
     expect(q.findings).toEqual([]);
   });
 
+  it("stops the judge at a spent ClawBox AI allowance instead of failing batch after batch", async () => {
+    const snap = await seedVault();
+    let calls = 0;
+    const spent: FlashClient = {
+      model: "deepseek-v4-flash",
+      complete: async () => {
+        calls += 1;
+        throw new FlashCallError("allowance", "ClawBox AI's weekly allowance is used up.", 429);
+      },
+    };
+    const r = await runContradictionPass(snap, { stateVault: vaultDir(), scope: null, client: spent, embedder: createHashEmbedder(), parallel: 1, k: 8 });
+    expect(r.skipped).toBe("judge_unavailable");
+    expect(r.notes.join(" ")).toMatch(/The judge stopped: allowance/);
+    expect(calls).toBe(1);
+  });
+
   it("works with the deterministic stub model", async () => {
     const snap = await seedVault();
     const r = await runContradictionPass(snap, { stateVault: vaultDir(), scope: null, client: createStubFlashClient(), embedder: createHashEmbedder(), k: 3 });

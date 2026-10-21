@@ -6,7 +6,13 @@
  * Every figure computed from these is an ESTIMATE (`basis: "estimate"`): the
  * upstream model's public list rates per million tokens, used to put an order
  * of magnitude on a job. What the account is actually charged is the ClawBox
- * AI plan's business, not this table's.
+ * AI plan's business, not this table's: the Flash calls are counted against
+ * the plan's rolling allowance like a chat turn, and `allowance-meter.ts`
+ * shows Prime Radiant's share of the week. Priced here, a million Flash tokens
+ * cost from $0.0028 (all cache hits) to $0.28 (all output); a prompt-heavy
+ * mix of nine prompt tokens to one output token with no cache hits is about
+ * $0.15. Multiply that by a night's measured tokens (the Costs view or
+ * `GET costs`) for a cost per box and month.
  *
  * Pure.
  */

@@ -175,6 +175,8 @@ const INGEST_COMMIT = { sha: "a".repeat(40), subject: "ingest: acme-overview.md"
 let historyCommits: unknown[];
 let pageOverride: unknown;
 let ingestJobs: unknown[];
+/** The account half of `GET costs?allowance=1`. */
+let allowanceAccount: unknown;
 /** Refusals the fake answers the next `DELETE ingest/<id>` calls with, first first. */
 let stopRefusals: number[];
 let previewAnswer: Record<string, unknown> | null;
@@ -232,8 +234,17 @@ function installFetch() {
     if (url.startsWith(`${p}/diff?`)) return ok({ from: null, to: "a".repeat(40), path: "entities/acme-widgets.md", commit: null, files: [], diff: "+added line", truncated: false });
     if (url === `${p}/revert` && method === "POST") return ok({ reverted: "a".repeat(40), commit: "b".repeat(40), changed: [] });
     if (url.startsWith(`${p}/lint`)) return ok({ scope: "all", checked: 2, findings: [], errors: 0, warnings: 0, ok: true });
-    if (url === `${p}/costs`) {
+    if (url === `${p}/costs` || url === `${p}/costs?allowance=1`) {
       return ok({
+        ...(url.endsWith("?allowance=1")
+          ? {
+              allowance: {
+                countedAgainst: "clawbox-ai", windowDays: 7, since: "2026-01-01T12:00:00.000Z",
+                primeRadiant: { calls: 6, tokensIn: 5200, tokensOut: 900, usdEstimate: 0.01 },
+                account: allowanceAccount,
+              },
+            }
+          : {}),
         basis: "estimate", currency: "USD", rates: {}, since: null,
         totals: { calls: 3, tokensIn: 1200, tokensOut: 300, usdEstimate: 0.0042 },
         byOperation: [{ operation: "ingest", calls: 3, tokensIn: 1200, tokensOut: 300, usdEstimate: 0.0042 }],
@@ -345,6 +356,11 @@ beforeEach(() => {
   reviewGate = null;
   reviewItems = [REVIEW_ITEM];
   nightlyRuns = [];
+  allowanceAccount = {
+    available: true, plan: "max", timeZone: "UTC",
+    weekly: { used: 3_400_000, limit: 10_000_000, percentUsed: 34, isOverLimit: false, resetAt: "2026-01-09T14:05:00.000Z" },
+    burst: null,
+  };
   historyCommits = [INGEST_COMMIT];
   pageOverride = null;
   ingestJobs = [];
@@ -751,6 +767,34 @@ describe("PrimeRadiantApp", () => {
     expect(screen.getByTestId("prime-radiant-usage-by-task")).toHaveTextContent("ingest 1.5K");
     expect(screen.getByRole("table", { name: "Per import and night" })).toHaveTextContent("1.2K");
     expect(screen.getByTestId("prime-radiant-app").textContent).not.toMatch(/\$|USD|US dollars|cost/i);
+  });
+
+  it("meters Prime Radiant's tokens against the ClawBox AI allowance, and says what stops when it is spent", async () => {
+    const first = await mount();
+    await openTab("settings");
+    const meter = await screen.findByTestId("prime-radiant-usage-allowance");
+    expect(meter).toHaveTextContent("Last 7 days: 6.1K tokens in 6 model calls, counted against this box's ClawBox AI allowance like chat");
+    expect(screen.getByTestId("prime-radiant-usage-allowance-weekly")).toHaveTextContent(/^Weekly allowance 34% used · frees up .+/);
+    expect(screen.queryByTestId("prime-radiant-usage-allowance-spent")).toBeNull();
+    expect(calls.some((c) => c.url.endsWith("/costs?allowance=1"))).toBe(true);
+    first.unmount();
+
+    allowanceAccount = {
+      available: true, plan: "max", timeZone: "UTC",
+      weekly: { used: 10_000_000, limit: 10_000_000, percentUsed: 100, isOverLimit: true, resetAt: "2026-01-09T14:05:00.000Z" },
+      burst: null,
+    };
+    const spent = await mount();
+    await openTab("settings");
+    expect(await screen.findByTestId("prime-radiant-usage-allowance-spent")).toHaveTextContent(/^The allowance is used up: imports stop and the nightly pass skips its model steps until it frees up \(.+\)\.$/);
+    expect(screen.getByTestId("prime-radiant-usage-allowance-weekly")).toHaveTextContent(/^Weekly allowance 100% used$/);
+    spent.unmount();
+
+    allowanceAccount = { available: false, reason: "unreachable" };
+    await mount();
+    await openTab("settings");
+    expect(await screen.findByTestId("prime-radiant-usage-allowance-unread")).toHaveTextContent(/could not be read just now/);
+    expect(screen.queryByTestId("prime-radiant-usage-allowance-weekly")).toBeNull();
   });
 
   it("merges a held night from the nightly card", async () => {

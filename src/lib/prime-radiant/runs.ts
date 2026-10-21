@@ -10,6 +10,7 @@
  */
 
 import crypto from "crypto";
+import type { AllowanceMeter } from "./allowance-meter";
 import type { CostRates } from "./cost-rates";
 import type { CostBasis } from "./ingest-store";
 import { stateDbExists, withStateDb } from "./state-db";
@@ -174,6 +175,8 @@ export interface CostSummary {
    * usage. Said, so a total is never read as complete.
    */
   notMeasured: CostNotMeasured[];
+  /** Prime Radiant's share of the ClawBox AI allowance (`GET costs?allowance=1` only). */
+  allowance?: AllowanceMeter;
 }
 
 export interface CostNotMeasured {
@@ -194,6 +197,19 @@ function totals(r: { calls: number; tokens_in: number; tokens_out: number; usd: 
 }
 
 const AGG = "COUNT(*) AS calls, COALESCE(SUM(tokens_in), 0) AS tokens_in, COALESCE(SUM(tokens_out), 0) AS tokens_out, COALESCE(SUM(usd_estimate), 0) AS usd";
+
+/**
+ * One total over the calls since an instant, leaving out the operations
+ * named. Zero, creating nothing, before the state database exists.
+ */
+export function readCostTotals(vault: string, options: { since: string; excludeOperations?: readonly string[] }): CostTotals {
+  if (!stateDbExists(vault)) return { calls: 0, tokensIn: 0, tokensOut: 0, usdEstimate: 0 };
+  const excluded = [...new Set(options.excludeOperations ?? [])];
+  const not = excluded.length > 0 ? ` AND operation NOT IN (${excluded.map(() => "?").join(", ")})` : "";
+  return withStateDb(vault, (db) =>
+    totals(db.prepare(`SELECT ${AGG} FROM costs WHERE at >= ?${not}`).get(options.since, ...excluded) as { calls: number; tokens_in: number; tokens_out: number; usd: number }),
+  );
+}
 
 export function readCostSummary(vault: string, rates: CostRates, options: { since?: string | null; runId?: string | null; limit?: number } = {}): CostSummary {
   const empty: CostSummary = {

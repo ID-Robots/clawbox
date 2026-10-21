@@ -64,7 +64,7 @@ import { readVaultSnapshot, type VaultSnapshot } from "./vault";
 export const GOLDEN_TREND_POINTS = 14;
 
 /** A refusal no later call of the night can get past: the check stops there. */
-const MODEL_REFUSALS = new Set(["no_credential", "auth", "refused", "aborted"]);
+const MODEL_REFUSALS = new Set(["no_credential", "auth", "refused", "allowance", "aborted"]);
 
 export interface GoldenScoreResult {
   /** Why nothing was asked: `offline`, `disabled`, `no_questions`, `model_unavailable`. */

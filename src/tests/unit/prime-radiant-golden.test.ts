@@ -345,6 +345,23 @@ describe("golden questions: the nightly score", () => {
     expect(readGoldenHistory()).toEqual([]);
   });
 
+  it("stops at a spent ClawBox AI allowance after one call: no later call of the night can get past it", async () => {
+    await seedPages();
+    for (let i = 0; i < 18; i++) await addGoldenQuestion({ ...PRICE_Q, question: `What does the blue widget cost? (${i})` }, { domains: [] });
+    let calls = 0;
+    const spent: FlashClient = {
+      model: "deepseek-v4-flash",
+      async complete() {
+        calls++;
+        throw new FlashCallError("allowance", "ClawBox AI's weekly allowance is used up.", 429);
+      },
+    };
+    const r = await runGoldenScore({ runId: "run-0000000000f2", client: spent, online: true, now: () => NOW, retry: { attempts: 1 } });
+    expect(r.skipped).toBe("model_unavailable");
+    expect(calls).toBe(1);
+    expect(readGoldenHistory()).toEqual([]);
+  });
+
   it("stores no score when no call judged anything, and stops after two calls in a row the provider failed", async () => {
     await seedPages();
     for (let i = 0; i < 18; i++) await addGoldenQuestion({ ...PRICE_Q, question: `What does the blue widget cost? (${i})` }, { domains: [] });

@@ -712,7 +712,7 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
 
   /**
    * One call: the pairs a readable answer left out, or why there was none.
-   * Only a refused credential, plan or abort throws.
+   * Only a refused credential or plan, a spent allowance or an abort throws.
    */
   async function judgeOnce(batch: readonly number[]): Promise<{ ok: true; missing: number[] } | { ok: false; kind: string }> {
     const { system, user } = buildJudgePrompt(batch.map((n) => ({ a: claims[pairs[n].a].text, b: claims[pairs[n].b].text })));
@@ -721,7 +721,7 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
       ({ response } = await completeWithRetry(client, { system, user, maxTokens: judgeMaxTokens(batch.length), signal: options.signal }, retry));
     } catch (err) {
       const e = err instanceof FlashCallError ? err : null;
-      if (e && (e.kind === "no_credential" || e.kind === "auth" || e.kind === "refused" || e.kind === "aborted")) throw e;
+      if (e && (e.kind === "no_credential" || e.kind === "auth" || e.kind === "refused" || e.kind === "allowance" || e.kind === "aborted")) throw e;
       return { ok: false, kind: e?.kind ?? "error" };
     }
     const usd = estimateUsd(response.model, response.usage, rates);
@@ -781,7 +781,7 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
           if (!small.ok) batchFailed(small.kind);
         }
       } catch (err) {
-        // A refused credential or plan, or an abort, stops the pass.
+        // A refused credential or plan, a spent allowance, or an abort, stops the pass.
         stop = err instanceof FlashCallError ? err.kind : "error";
       }
     }),
