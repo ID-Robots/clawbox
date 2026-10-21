@@ -102,6 +102,7 @@ import {
   normalizeClawboxAiTier,
   type ClawboxAiTier,
 } from "@/lib/clawbox-ai-models";
+import { uiTierToDeviceTier } from "@/lib/clawbox-ai-tiers";
 import { OPENROUTER_CURATED_MODELS, OPENROUTER_DEFAULT_MODEL_ID } from "@/lib/openrouter-models";
 import { resolveEntitledCodexModel } from "@/lib/codex-model-probe";
 import { chatgptDefaultModelId, chatgptUpgradeCandidates } from "@/lib/chatgpt-surface";
@@ -2483,7 +2484,14 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     }
     requestProvider = provider;
     requestScope = scope;
-    const requestedClawboxAiTier = normalizeClawboxAiTier(body.clawaiTier);
+    // `clawaiTier` arrives in the plan picker's vocabulary — from the panel's
+    // save and from `clawai/poll` forwarding the session's tier — where Free is
+    // a plan the device runs on "flash", as `uiTierToDeviceTier` and both Hermes
+    // paths already map it. Read as "no pick", Free let the badge a previous
+    // account left behind choose the model, Max's included.
+    const requestedClawboxAiTier = body.clawaiTier === "free"
+      ? uiTierToDeviceTier("free")
+      : normalizeClawboxAiTier(body.clawaiTier);
     const normalizedApiKey = typeof apiKey === "string" ? apiKey.trim() : "";
     // Normalized once, like the key above: this handler reads the `model`
     // field in four branches, and inlining the same ternary in each let the
@@ -2748,7 +2756,7 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     //
     // `requestedClawboxAiTier` is the wizard's plan PICKER, and during a first
     // pairing that is whatever the card defaulted to before anyone had an
-    // account to look at — "flash" (Pro). Trusting it wrote the €9 model onto
+    // account to look at — "flash" (Free or Pro). Trusting it wrote the €9 model onto
     // boxes paired with a €49 Max token, with no way to reach the frontier
     // model afterwards: the picker had already been consulted and the account
     // never was (TASK-481). We hold the token and the portal will answer
