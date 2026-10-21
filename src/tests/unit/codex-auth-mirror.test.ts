@@ -1323,9 +1323,8 @@ describe("codex-auth-mirror.js", () => {
     // does not hold — one of the two tokens of a single-use family, which is
     // the `refresh_token_reused` shape this whole file exists to prevent.
     //
-    // Only the sqlite store is seeded: an auth-profiles.json would make `wrote`
-    // true through the untransactional legacy loop and prove nothing about this
-    // one (see the note at its `wrote = true`).
+    // Only the sqlite store is seeded; the same lock with an auth-profiles.json
+    // beside it is the "leaves the legacy JSON file alone" case below.
     seedAgentStore({
       "openai:chatgpt": {
         type: "oauth",
@@ -1368,6 +1367,171 @@ describe("codex-auth-mirror.js", () => {
     // Nothing was half-written: core still holds the token it held, and the
     // app-server's live rotation was left alone rather than overwritten with
     // the spent one.
+    expect(readAgentStore().profiles["openai:chatgpt"].refresh).toBe("refresh-spent");
+    expect(JSON.parse(readFileSync(codexHomeAuthPath, "utf-8")).tokens.refresh_token)
+      .toBe("refresh-rotated-by-appserver");
+  }, 20_000);
+
+  /** Core keeps both of its databases in WAL mode; the fixtures must too. */
+  function useWal(file: string): void {
+    const db = new DatabaseSync(file);
+    db.exec("PRAGMA journal_mode = WAL");
+    db.close();
+  }
+
+  /**
+   * A second connection in the middle of a write, the way the gateway is while
+   * it records a session or indexes memory: the write lock taken and a row
+   * written but not committed. Released (rolled back) by the caller.
+   */
+  function holdWriteLock(file: string): InstanceType<typeof DatabaseSync> {
+    const db = new DatabaseSync(file);
+    db.exec("CREATE TABLE IF NOT EXISTS gateway_writes (id INTEGER PRIMARY KEY, payload TEXT)");
+    db.exec("BEGIN IMMEDIATE");
+    db.prepare("INSERT INTO gateway_writes (payload) VALUES (?)").run("in flight");
+    return db;
+  }
+
+  function release(db: InstanceType<typeof DatabaseSync>): void {
+    db.exec("ROLLBACK");
+    db.close();
+  }
+
+  it("takes no write lock on an agent store that does not hold the profile — a busy gateway does not stall the pass", () => {
+    // A `state-db` box: the login lives in the shared store, the agent's own
+    // row is the empty one a migrated box keeps, and the app-server has
+    // rotated. Nothing in the agent DB can record that rotation, so the
+    // write-back has no reason to queue for its write lock — which the gateway
+    // holds for as long as each of its own writes takes. Queuing there makes
+    // every timer pass wait out the full busy_timeout for nothing.
+    const live = {
+      type: "oauth",
+      provider: "openai",
+      access: accessToken("acct-1", "old"),
+      refresh: "refresh-spent",
+      expires: Date.now() + 3_600_000,
+    };
+    seedSharedStore({ "openai:chatgpt": live });
+    seedAgentStore({});
+    const agentDb = path.join(agentDir, "openclaw-agent.sqlite");
+    useWal(sharedStorePath());
+    useWal(agentDb);
+    mkdirSync(path.dirname(codexHomeAuthPath), { recursive: true });
+    writeFileSync(
+      codexHomeAuthPath,
+      JSON.stringify({
+        OPENAI_API_KEY: null,
+        tokens: {
+          access_token: accessToken("acct-1", "rotated"),
+          refresh_token: "refresh-rotated-by-appserver",
+          account_id: "acct-1",
+        },
+      }),
+    );
+    const before = readAgentStore();
+
+    const blocker = holdWriteLock(agentDb);
+    let result: { stdout: string; stderr: string; status: number | null };
+    let elapsedMs: number;
+    try {
+      const started = performance.now();
+      result = runCapturing();
+      elapsedMs = performance.now() - started;
+    } finally {
+      release(blocker);
+    }
+
+    // Well inside the 5 s busy_timeout a queued BEGIN IMMEDIATE would wait out.
+    expect(elapsedMs).toBeLessThan(2000);
+    expect(result.status).toBe(0);
+    // The shared store is never written, so there is still nowhere to record
+    // the rotation: not adopted, and the app-server's live token left alone.
+    expect(result.stdout).not.toContain("adopted app-server rotation");
+    expect(result.stderr).toContain("core's store could not be updated");
+    expect(JSON.parse(readFileSync(codexHomeAuthPath, "utf-8")).tokens.refresh_token)
+      .toBe("refresh-rotated-by-appserver");
+    // And the agent's row is exactly what it was once the writer is gone.
+    expect(readAgentStore()).toEqual(before);
+    expect(readSharedStore().profiles["openai:chatgpt"].refresh).toBe("refresh-spent");
+  }, 20_000);
+
+  it("reads core's stores without waiting on a writer — both are WAL, so a busy gateway never stalls the read", () => {
+    // The guard for the reads, which already open read-only in autocommit: a
+    // write transaction open on BOTH databases for the whole pass must not
+    // delay them, nor hide the credential behind a lock.
+    const live = accessToken("acct-1", "live");
+    seedSharedStore({
+      "openai:chatgpt": {
+        type: "oauth",
+        provider: "openai",
+        access: live,
+        refresh: "refresh-live",
+        expires: Date.now() + 3_600_000,
+      },
+    });
+    seedAgentStore({});
+    const agentDb = path.join(agentDir, "openclaw-agent.sqlite");
+    useWal(sharedStorePath());
+    useWal(agentDb);
+
+    const blockers = [holdWriteLock(sharedStorePath()), holdWriteLock(agentDb)];
+    let elapsedMs: number;
+    try {
+      const started = performance.now();
+      run();
+      elapsedMs = performance.now() - started;
+    } finally {
+      blockers.forEach(release);
+    }
+
+    expect(JSON.parse(readFileSync(homeAuthPath, "utf-8")).tokens.access_token).toBe(live);
+    expect(JSON.parse(readFileSync(codexHomeAuthPath, "utf-8")).tokens.access_token).toBe(live);
+    expect(elapsedMs).toBeLessThan(1000);
+  }, 20_000);
+
+  it("leaves the legacy JSON file alone, and adopts nothing, when core's SQLite store could not take the rotation", () => {
+    // The JSON file is the store this script reads FIRST. Writing the rotation
+    // into it while the SQLite write is rolled back is a false success twice
+    // over: main() adopts a token core does not hold, and from the next tick on
+    // the script reads that token back as core's, sees no divergence and never
+    // retries the store core actually hands out.
+    const spent = {
+      type: "oauth",
+      provider: "openai",
+      access: accessToken("acct-1", "old"),
+      refresh: "refresh-spent",
+      expires: Date.now() + 3_600_000,
+    };
+    seedAgentStore({ "openai:chatgpt": spent });
+    const jsonPath = path.join(agentDir, "auth-profiles.json");
+    writeFileSync(jsonPath, JSON.stringify({ profiles: { "openai:chatgpt": spent } }));
+    mkdirSync(path.dirname(codexHomeAuthPath), { recursive: true });
+    writeFileSync(
+      codexHomeAuthPath,
+      JSON.stringify({
+        OPENAI_API_KEY: null,
+        tokens: {
+          access_token: accessToken("acct-1", "rotated"),
+          refresh_token: "refresh-rotated-by-appserver",
+          account_id: "acct-1",
+        },
+      }),
+    );
+
+    const blocker = new DatabaseSync(path.join(agentDir, "openclaw-agent.sqlite"));
+    blocker.exec("BEGIN IMMEDIATE");
+    let result: { stdout: string; stderr: string; status: number | null };
+    try {
+      result = runCapturing();
+    } finally {
+      blocker.exec("ROLLBACK");
+      blocker.close();
+    }
+
+    expect(result.stdout).not.toContain("adopted app-server rotation");
+    expect(result.stderr).toContain("core's store could not be updated");
+    expect(result.status).toBe(0);
+    expect(JSON.parse(readFileSync(jsonPath, "utf-8")).profiles["openai:chatgpt"].refresh).toBe("refresh-spent");
     expect(readAgentStore().profiles["openai:chatgpt"].refresh).toBe("refresh-spent");
     expect(JSON.parse(readFileSync(codexHomeAuthPath, "utf-8")).tokens.refresh_token)
       .toBe("refresh-rotated-by-appserver");
