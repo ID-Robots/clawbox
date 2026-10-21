@@ -407,12 +407,13 @@ def _on_signal(signum, _frame):
     sys.exit(128 + signum)
 
 
-def _run(binary, argv, timeout):
+def _run(executable, argv, timeout):
     """Run the core's CLI in its own process group; (rc, stdout, stderr).
-    rc is None when the deadline ran out (SIGTERM, then SIGKILL)."""
+    rc is None when the deadline ran out (SIGTERM, then SIGKILL). Every caller
+    passes the argv as a literal list, which the harness-contract scan reads."""
     try:
         proc = subprocess.Popen(
-            [binary] + list(argv),
+            [executable] + list(argv),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -484,10 +485,14 @@ def integrity_of(report):
 
 
 def run_compact(binary, db, timeout):
+    # Every `_run(binary, [...])` below is written as a literal list on one line
+    # with the CLI named `binary`: that is the shape scripts/harness-contract
+    # reads, so each command and flag is checked against the pinned core.
     if db["kind"] == "state":
         rc, out, err = _run(binary, ["doctor", "--state-sqlite", "compact", "--json"], timeout)
     else:
-        rc, out, err = _run(binary, ["doctor", "--session-sqlite", "compact", "--session-sqlite-agent", db["agentId"], "--json"], timeout)
+        agent_id = db["agentId"]
+        rc, out, err = _run(binary, ["doctor", "--session-sqlite", "compact", "--session-sqlite-agent", agent_id, "--json"], timeout)
     report = last_json_object(out)
     integrity = integrity_of(report) if report is not None else "unreported"
     tail = (err.strip().splitlines() or out.strip().splitlines() or [""])[-1][:300]
@@ -794,7 +799,8 @@ def cleanup(args, dbs, core, status, record, deadline):
             # updater has not seen a later successful update for — on ClawBox
             # that is all of them — but whatever it does retire is retired by
             # its owner, manifests and all.
-            rc, out, err = _run(args.openclaw_bin, ["update", "cleanup", "--yes", "--json"], int(min(120, deadline - time.monotonic() - KILL_GRACE_S)))
+            binary = args.openclaw_bin
+            rc, out, err = _run(binary, ["update", "cleanup", "--yes", "--json"], int(min(120, deadline - time.monotonic() - KILL_GRACE_S)))
             report = last_json_object(out) or {}
             totals = report.get("totals") if isinstance(report.get("totals"), dict) else {}
             log("openclaw update cleanup: exit %s%s" % (rc, (", removed %s" % human(totals.get("removedBytes"))) if totals.get("removedBytes") else ""))
@@ -1015,8 +1021,9 @@ def cmd_memory_rebuild(args):
     # cache is what lets `index --force` re-embed nothing it has seen — on a box
     # embedding with its own model, a reset would make the rebuild re-embed every
     # memory file and Memory Shard folder on the device itself.
+    binary = args.openclaw_bin
     if "model" in (rec.get("reasons") or []) and not rec.get("resetAt"):
-        rc, out, err = _run(args.openclaw_bin, ["memory", "reset", "--yes"], args.reset_timeout)
+        rc, out, err = _run(binary, ["memory", "reset", "--yes"], args.reset_timeout)
         if rc != 0:
             rec["lastError"] = "memory reset: %s" % ("timed out" if rc is None else "exit %s" % rc)
             write_json(path, rec)
@@ -1025,7 +1032,7 @@ def cmd_memory_rebuild(args):
         rec["resetAt"] = iso(time.time())
         write_json(path, rec)
         log("memory index reset: the old vectors, transcript chunks and embedding cache are gone (sessions and memory files kept)")
-    rc, out, err = _run(args.openclaw_bin, ["memory", "index", "--force"], args.index_timeout)
+    rc, out, err = _run(binary, ["memory", "index", "--force"], args.index_timeout)
     if rc != 0:
         rec["lastError"] = "memory index: %s" % ("timed out" if rc is None else "exit %s" % rc)
         write_json(path, rec)
