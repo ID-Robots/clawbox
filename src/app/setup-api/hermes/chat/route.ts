@@ -27,7 +27,10 @@ import {
   isSmallLocalModel,
   slimLocalProfileEnabled,
   smallLocalModelToolsets,
+  SMALL_LOCAL_MODEL_TOOLSETS,
 } from "@/lib/local-model-profile";
+import { get as getStored } from "@/lib/config-store";
+import { COMPUTER_USE_KEY, computerUseSwitchFromValue, withoutComputerUse } from "@/lib/computer-use-switch";
 import {
   cachedModelOptions,
   getModelOptions,
@@ -1172,7 +1175,13 @@ export async function POST(request: Request) {
       && slimLocalProfileEnabled()
       && isSmallLocalModel({ modelId: rawModel || payload.current.model })
     ) {
-      slimToolsets = smallLocalModelToolsets();
+      // `-t` bypasses the platform selection `hermes tools disable` wrote, so
+      // an operator's CLAWBOX_SMALL_MODEL_TOOLSETS naming computer_use must not
+      // hand back what the owner switched off (src/lib/computer-use-switch.ts).
+      // Filtered down to nothing, it is the built-in list, never `-t ""`.
+      const stored = await getStored(COMPUTER_USE_KEY);
+      const kept = withoutComputerUse(smallLocalModelToolsets(), computerUseSwitchFromValue(stored));
+      slimToolsets = kept.length ? kept : SMALL_LOCAL_MODEL_TOOLSETS;
     }
 
     // Same pairing gate the config POST enforces: a provider must never run a
