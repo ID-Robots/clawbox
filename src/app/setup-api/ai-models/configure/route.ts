@@ -2732,8 +2732,8 @@ async function configureModel(request: Request, gateway: GatewayTracker): Promis
     // `requestedClawboxAiTier` is the wizard's plan PICKER, and during a first
     // pairing that is whatever the card defaulted to before anyone had an
     // account to look at — "flash" (Pro). Trusting it wrote the €9 model onto
-    // boxes paired with a €49 Max token, with no way to reach the frontier
-    // model afterwards: the picker had already been consulted and the account
+    // boxes paired with a €49 Max token, with no way to reach the Max model
+    // id afterwards: the picker had already been consulted and the account
     // never was (TASK-481). We hold the token and the portal will answer
     // truthfully, so ask it, exactly as the Codex branch below asks ChatGPT
     // for entitlement and for the same reason.

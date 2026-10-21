@@ -205,7 +205,7 @@ const PROVIDER_ORDER = ["clawai", "openai", "anthropic", "google", "openrouter",
 // it here would answer every Grok pick with the "isn't fully configured" 409.
 const OPENAI_COMPAT_PROVIDERS = new Set<string>(["openrouter", "google", "anthropic"]);
 // ClawBox AI chat uses the existing Flash alias. The former Pro alias also
-// serves Flash 4.1, so remembered plan choices do not select another model.
+// serves DeepSeek V4 Flash, so remembered plan choices do not select another model.
 const DEFAULT_PROVIDER_MODELS: Record<string, string> = {
   clawai: CLAWBOX_AI_MODEL_BY_TIER.flash,
   deepseek: CLAWBOX_AI_MODEL_BY_TIER.flash,

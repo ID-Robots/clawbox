@@ -114,9 +114,11 @@ export const CLAWAI_TIER_INFO: Record<ClawaiTier, ClawaiTierInfo> = {
     pricePeriod: "/month",
     pricePeriodKey: "ai.planPeriodMonth",
     hasTrial: true,
+    // Max is served by the same DeepSeek V4 Flash as Free and Pro: the proxy
+    // answers its `deepseek-v4-pro` id with Flash, so the card says Flash.
     features: [
       "Maximum usage",
-      "DeepSeek V4 Pro (frontier)",
+      "DeepSeek V4 Flash",
       "50 GB ClawKeep cloud backups",
       "Remote Desktop access",
       "Highest priority",
@@ -124,7 +126,7 @@ export const CLAWAI_TIER_INFO: Record<ClawaiTier, ClawaiTierInfo> = {
     ],
     featureKeys: [
       "ai.planFeatureMaxUsage",
-      "ai.planFeatureProModel",
+      "ai.planFeatureFlashModel",
       "ai.planFeatureBackups50gb",
       "ai.planFeatureRemoteDesktop",
       "ai.planFeatureHighestPriority",
@@ -156,9 +158,10 @@ export function normalizeClawaiUiTier(value: unknown): ClawaiTier | null {
 }
 
 /**
- * UI tier → *device* tier (which model gets configured). Free and Pro both run
- * DeepSeek V4 Flash (see CLAWAI_TIER_INFO.free.features); only Max gets the
- * frontier weights. `ClawboxAiTier` has no "free" member because the device has
+ * UI tier → *device* tier (which model id gets configured). Free and Pro are
+ * configured with `deepseek-v4-flash`, Max with `deepseek-v4-pro`; the proxy
+ * serves both ids with DeepSeek V4 Flash, so the id is a plan gate, not a
+ * bigger model. `ClawboxAiTier` has no "free" member because the device has
  * nothing different to configure for it.
  */
 export function uiTierToDeviceTier(tier: ClawaiTier): ClawboxAiTier {
