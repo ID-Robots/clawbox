@@ -2145,6 +2145,39 @@ describe("POST /setup-api/ai-models/configure", () => {
 
       expect(keyWrite("tts")).toBeUndefined();
     });
+
+    // The Max realtime Talk entry the boot script arms carries the same token
+    // under the same stamp, so it moves by the same rule.
+    const talkKeyWrite = () =>
+      findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), "talk.realtime.providers.clawbox.apiKey");
+    const talk = (apiKey: string, stamped = true) => ({
+      realtime: {
+        provider: "clawbox",
+        providers: { clawbox: { baseUrl: "https://clawbox.com/api/ai", apiKey, ...(stamped ? { clawboxManaged: true } : {}) } },
+      },
+    });
+
+    it("moves the realtime Talk entry it armed to the new portal token, beside the voice", async () => {
+      mockGetAll.mockResolvedValue({ clawai_token: "old-portal-token" });
+      mockReadOpenClawConfig.mockResolvedValue({
+        tts: { providers: { openai: voice("old-portal-token") } },
+        talk: talk("old-portal-token"),
+      });
+
+      await configurePost(jsonRequest({ provider: "clawai", apiKey: "new-portal-token" }));
+
+      expect(keyWrite("tts")?.value).toBe("new-portal-token");
+      expect(talkKeyWrite()?.value).toBe("new-portal-token");
+    });
+
+    it("leaves an unstamped realtime Talk entry alone even when it holds our old token", async () => {
+      mockGetAll.mockResolvedValue({ clawai_token: "old-portal-token" });
+      mockReadOpenClawConfig.mockResolvedValue({ talk: talk("old-portal-token", false) });
+
+      await configurePost(jsonRequest({ provider: "clawai", apiKey: "new-portal-token" }));
+
+      expect(talkKeyWrite()).toBeUndefined();
+    });
   });
 
   it("does not restart the gateway after a configuration it applied live", async () => {

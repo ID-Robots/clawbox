@@ -62,6 +62,7 @@ import { applyClawaiToHermes, ClawaiApplyError } from "@/lib/hermes-clawai";
 // one of them DELETES on it, so neither may outlive the credential (TASK-744).
 import {
   CLAWAI_PLAN_TIER_KEY,
+  CLAWAI_REALTIME_PROVIDER_ID,
   clawaiPlanTierForStore,
   type ClawaiPortalPlan,
 } from "@/lib/clawai-plan-tier";
@@ -1894,7 +1895,18 @@ async function configureClawboxAi(
  * (`_clawai_route_is_ours` in that script; `@/lib/clawai-cloud-defaults` says why
  * a second opinion on those must not live here). Rewriting our own field with
  * our own new value is the worst this can do. `tts` hot-applies.
+ *
+ * The realtime Talk entry the same script arms on a Max box
+ * (`talk.realtime.providers.clawbox`) carries the same token under the same
+ * stamp, and is carried over by the same rule. `talk` needs no reload: the
+ * provider reads its entry when a Talk session starts.
  */
+const CLAWAI_TOKEN_ENTRIES: readonly string[] = [
+  "tts.providers.openai",
+  "messages.tts.providers.openai",
+  `talk.realtime.providers.${CLAWAI_REALTIME_PROVIDER_ID}`,
+];
+
 async function clawaiSpeechKeyRefresh(
   previousToken: string,
   token: string,
@@ -1907,23 +1919,31 @@ async function clawaiSpeechKeyRefresh(
     return null;
   }
   const ops: OpenclawConfigSetArgs[] = [];
-  for (const home of ["tts", "messages.tts"]) {
+  for (const entryPath of CLAWAI_TOKEN_ENTRIES) {
     let node: unknown = current;
-    for (const key of [...home.split("."), "providers", "openai"]) {
+    for (const key of entryPath.split(".")) {
       node = node && typeof node === "object" && !Array.isArray(node)
         ? (node as Record<string, unknown>)[key]
         : undefined;
     }
-    const speech = node && typeof node === "object" && !Array.isArray(node)
+    const entry = node && typeof node === "object" && !Array.isArray(node)
       ? (node as Record<string, unknown>)
       : null;
-    if (speech?.clawboxManaged !== true || speech.apiKey !== previousToken) continue;
-    ops.push([`${home}.providers.openai.apiKey`, token]);
+    if (entry?.clawboxManaged !== true || entry.apiKey !== previousToken) continue;
+    ops.push([`${entryPath}.apiKey`, token]);
   }
   if (ops.length === 0) return null;
   return {
     ops,
-    onApplied: () => console.log("[AI Config] Moved the ClawBox AI cloud voice to the new portal token"),
+    onApplied: () => {
+      const talk = ops.some((op) => op[0]?.startsWith("talk.") === true);
+      const what = !talk
+        ? "the ClawBox AI cloud voice"
+        : ops.length > 1
+          ? "the ClawBox AI cloud voice and realtime Talk"
+          : "ClawBox AI realtime Talk";
+      console.log(`[AI Config] Moved ${what} to the new portal token`);
+    },
     // Non-fatal: the chat works without it, and the next gateway start writes
     // the same field from the same token.
     onError: (err) =>

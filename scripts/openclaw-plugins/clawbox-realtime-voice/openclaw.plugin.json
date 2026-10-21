@@ -1,0 +1,8 @@
+{
+  "id": "clawbox-realtime-voice",
+  "name": "ClawBox realtime voice",
+  "description": "Realtime Talk through the ClawBox AI proxy: trades the box's ClawBox AI token for a short-lived OpenAI realtime client secret, so no OpenAI key is kept on the box.",
+  "activation": { "onStartup": true },
+  "contracts": { "realtimeVoiceProviders": ["clawbox"] },
+  "configSchema": { "type": "object", "additionalProperties": false }
+}

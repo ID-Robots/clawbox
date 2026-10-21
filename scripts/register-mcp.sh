@@ -1219,6 +1219,15 @@ fi
 # proxy publishes `modelTiers: {"gpt-image-1-mini": ["free","pro","max"]}`, so
 # the image backend has no tier to be downgraded from, and §"Re-arm the ClawAI
 # image backend" above already reconciles it every boot.
+#
+# NOR IS REALTIME TALK, and that is the harness rather than a choice. The
+# OpenClaw edition's Max realtime Talk (gateway-pre-start.sh, "Migration:
+# ClawBox AI realtime Talk") rides on a realtime voice provider plugin that
+# fetches a short-lived secret from our proxy. Hermes v0.21.7's only live voice
+# is its desktop GPT-Live mode, which takes an OpenAI key directly
+# (`voice.gpt_live.*`, OPENAI_API_KEY) and has no slot for a proxy-minted
+# secret, so this edition keeps hold-to-talk and nothing here writes
+# `voice.gpt_live`.
 # ONE binding each for the endpoint and the model, read by the decision below
 # and by the writes after it, so what we call ours and what we write cannot
 # disagree. Two literals would drift the day one of them moved: the verdict

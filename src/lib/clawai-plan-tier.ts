@@ -113,6 +113,75 @@ export function clawaiSpeechWithdrawable(planTier: unknown, entitledTier: string
 }
 
 /**
+ * Realtime Talk — a live spoken conversation instead of hold-to-talk — on the
+ * MAX plan, through the ClawBox AI proxy.
+ *
+ * `scripts/gateway-pre-start.sh` arms OpenClaw's `talk.realtime` with ClawBox's
+ * own realtime voice provider (the `clawbox-realtime-voice` plugin), whose
+ * bridge trades the box's portal token at the proxy for a short-lived OpenAI
+ * client secret. No OpenAI key is kept on the box; the proxy checks the plan
+ * and the weekly minutes. These constants and the two rules below are that
+ * script's, transcribed — a shell cannot import them — and the suite pins the
+ * two together.
+ *
+ * ON FOR MAX, with an OFF SWITCH: {@link CLAWAI_REALTIME_TALK_KEY} in the device
+ * store, and only the boolean `false`, keeps a Max box on hold-to-talk and takes
+ * back what the boot script wrote at the next gateway start. An absent key
+ * follows the plan.
+ */
+export const CLAWAI_REALTIME_TALK_KEY = "clawai_realtime_talk_enabled";
+
+/** The realtime voice provider id the plugin registers and `talk.realtime.provider` names. */
+export const CLAWAI_REALTIME_PROVIDER_ID = "clawbox";
+
+/** The Talk mode the boot script writes: Android Talk takes the relay only on `realtime`. */
+export const CLAWAI_REALTIME_MODE = "realtime";
+
+/** The one realtime model the proxy mints secrets for. */
+export const CLAWAI_REALTIME_MODEL_ID = "gpt-realtime-2.1-mini";
+
+/**
+ * The Max plan's weekly realtime allowance, in minutes. The proxy meters it;
+ * the plugin uses it only as the ceiling on one session when the proxy names
+ * none (`MAX_SESSION_SECONDS` in its realtime-bridge.mjs).
+ */
+export const CLAWAI_REALTIME_WEEKLY_MINUTES = 60;
+
+/**
+ * ARM side: may this box be GIVEN realtime Talk? Not switched off, then the
+ * cloud voice's own arm rule — {@link clawaiEntitlementTier} — because it is the same
+ * entitlement: the Max plan, read off the plan when known and the badge until
+ * then.
+ *
+ * @param entitledTier the tier the proxy serves realtime to (`"pro"`, the tier
+ *   of the MAX plan), passed in for the same reason as on
+ *   {@link clawaiSpeechWithdrawable}.
+ */
+export function clawaiRealtimeTalkEntitled(
+  planTier: unknown,
+  deviceTier: unknown,
+  switchValue: unknown,
+  entitledTier: string,
+): boolean {
+  return switchValue !== false && clawaiEntitlementTier(planTier, deviceTier) === entitledTier;
+}
+
+/**
+ * WITHDRAW side: may the realtime Talk the boot script armed be TAKEN BACK?
+ * When it is switched off, or on the plan alone — {@link clawaiSpeechWithdrawable}
+ * — never on the badge. Both read a store that could be read: a store that
+ * exists and cannot be is "we do not know", and the boot script takes nothing
+ * back over it.
+ */
+export function clawaiRealtimeTalkWithdrawable(
+  planTier: unknown,
+  switchValue: unknown,
+  entitledTier: string,
+): boolean {
+  return switchValue === false || clawaiSpeechWithdrawable(planTier, entitledTier);
+}
+
+/**
  * The same ARM rule, over the two stamps as they sit in `data/config.json`.
  *
  * The one TypeScript reader, so no surface derives the pair for itself. Reads

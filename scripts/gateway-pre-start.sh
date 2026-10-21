@@ -3999,6 +3999,196 @@ elif _clawai_openai_route_is_ours and _clawai_speech_withdrawable:
             changed = True
 
 
+# Migration: ClawBox AI realtime Talk (a live spoken conversation), Max only.
+#
+# OpenClaw's Talk mode reads `talk.realtime`. Every realtime provider the pinned
+# core bundles mints its session secret on the box from an OpenAI Platform key
+# the box holds (`talk.realtime.providers.<id>.apiKey`), and a ClawBox holds
+# none. So the box selects ClawBox's OWN realtime provider instead —
+# `clawbox-realtime-voice`, installed further down like the path guard — whose
+# bridge trades the box's `claw_` token at the proxy for a short-lived OpenAI
+# client secret. The provider key never leaves the proxy, and the proxy is what
+# checks the Max plan and the weekly minute cap; the box carries nothing it did
+# not already carry for the cloud voice above.
+#
+# HARNESS NATIVE: `talk.realtime.{provider,mode,transport,model}` plus a provider
+# entry under `talk.realtime.providers`, the core's documented Talk config, and
+# a provider registered through the plugin API's own
+# `registerRealtimeVoiceProvider`. `gateway-relay` because the bridge runs on the
+# Gateway: provider audio stays there, and it is the one transport Android Talk
+# uses. `mode: "realtime"` is spelled out because Android Talk takes the relay
+# only when the mode says realtime AND the transport is `gateway-relay`;
+# otherwise the phone stays on its native speech loop. Written here rather than with `openclaw config set` for the reason the
+# cloud voice above is: this is the pre-start pass that already owns the
+# ClawBox AI routes in this file, the gateway is not running yet, and one atomic
+# write covers every route it repairs.
+#
+# THE STAMP LIVES ON THE PROVIDER ENTRY, never on `talk.realtime` itself. The
+# core's config surface lists a fixed set of keys for `talk.realtime`, and an
+# unrecognised key on a fixed object is a config the gateway refuses to load;
+# `talk.realtime.providers.<id>` is provider-owned and open
+# (`talk.realtime.providers.*.*`), which is where the cloud voice keeps its
+# stamp too.
+#
+# ON FOR MAX. The gate is the cloud voice's own (Max is the "pro" tier; the plan
+# when known, the badge only to ARM, the plan alone to WITHDRAW) because it is
+# the same entitlement: `clawaiRealtimeTalkEntitled` in
+# src/lib/clawai-plan-tier.ts is the TypeScript half.
+#
+# OFF SWITCH. A device store holding `clawai_realtime_talk_enabled: false` — the
+# boolean, nothing else — keeps a Max box on hold-to-talk, and setting it on a
+# box that was armed takes back exactly what this wrote at the next gateway
+# start. That is the per-box rollback; an absent key follows the plan.
+#
+# A box that is not Max, or switched off, keeps hold-to-talk: no
+# `talk.realtime` is written, and the clawbox-realtime-voice plugin is not
+# enabled.
+CLAWBOX_TALK_PROVIDER_ID = "clawbox"
+CLAWBOX_TALK_MODE = "realtime"
+CLAWBOX_TALK_TRANSPORT = "gateway-relay"
+# The model the proxy mints secrets for; it serves exactly this one, as it does
+# exactly one speech model. Duplicated from CLAWAI_REALTIME_MODEL_ID in
+# src/lib/clawai-plan-tier.ts because a shell migration cannot import it.
+CLAWBOX_TALK_MODEL_ID = "gpt-realtime-2.1-mini"
+CLAWBOX_TALK_FLAG_KEY = "clawai_realtime_talk_enabled"
+
+
+def _clawai_realtime_talk_switch():
+    """"on", "off", or None for a device store that exists but cannot be read.
+
+    Only the boolean false is off. An absent store or key is on — the plan
+    decides — and an unreadable one is "we do not know", which neither arms nor
+    takes anything back.
+    """
+    _store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or ""
+    if not _store_path:
+        return "on"
+    try:
+        with open(_store_path) as _fh:
+            _store = json.load(_fh)
+    except FileNotFoundError:
+        return "on"
+    except Exception:
+        return None
+    if not isinstance(_store, dict):
+        return None
+    return "off" if _store.get(CLAWBOX_TALK_FLAG_KEY) is False else "on"
+
+
+_clawai_talk_switch = _clawai_realtime_talk_switch()
+_talk = cfg.get("talk")
+_talk_realtime = _talk.get("realtime") if isinstance(_talk, dict) else None
+_talk_rt_providers = _talk_realtime.get("providers") if isinstance(_talk_realtime, dict) else None
+_talk_entry = (
+    _talk_rt_providers.get(CLAWBOX_TALK_PROVIDER_ID) if isinstance(_talk_rt_providers, dict) else None
+)
+
+
+def _clawai_talk_entry_is_ours(_entry, _stamped_only):
+    """Is the `talk.realtime.providers.clawbox` entry ours — to refresh, or to remove?
+
+    The cloud voice's own rule, `_clawai_route_is_ours`, with the same split:
+    a `claw_` token or an empty entry is enough to REFRESH, only the stamp is
+    enough to REMOVE, and a host that is none of ours is the owner's whatever
+    the entry says.
+    """
+    if not isinstance(_entry, dict):
+        return False
+    _stamped = _entry.get(CLAWBOX_SPEECH_MANAGED_KEY) is True
+    if _stamped_only:
+        _base = _entry.get("baseUrl")
+        if not (_stamped and isinstance(_base, str) and _base.strip()):
+            return False
+    return _clawai_route_is_ours(_entry.get("baseUrl"), _entry.get("apiKey"), _stamped, _clawai_proxy_base_url)
+
+
+def _clawai_talk_slot_taken():
+    """Why `talk.realtime` is the owner's, or None when it is ours to write."""
+    if _talk is not None and not isinstance(_talk, dict):
+        return "talk is not an object"
+    if _talk_realtime is None:
+        return None
+    if not isinstance(_talk_realtime, dict):
+        return "talk.realtime is not an object"
+    if _talk_rt_providers is not None and not isinstance(_talk_rt_providers, dict):
+        return "talk.realtime.providers is not an object"
+    _named = _talk_realtime.get("provider")
+    _named = _named.strip() if isinstance(_named, str) else ""
+    _others = [_id for _id in (_talk_rt_providers or {}) if _id != CLAWBOX_TALK_PROVIDER_ID]
+    # A provider the owner named, or — with none named — one they configured:
+    # Talk selects a sole configured provider on its own, so that is a working
+    # setup of theirs, not an empty slot.
+    if (_named and _named != CLAWBOX_TALK_PROVIDER_ID) or (not _named and _others):
+        return "talk.realtime already names its own realtime provider"
+    if _talk_entry is not None and not _clawai_talk_entry_is_ours(_talk_entry, False):
+        return "talk.realtime.providers." + CLAWBOX_TALK_PROVIDER_ID + " already names its own route"
+    return None
+
+
+if _clawai_openai_route_is_ours and _clawai_speech_entitled and _clawai_talk_switch == "on":
+    _talk_taken = _clawai_talk_slot_taken()
+    if _talk_taken:
+        print("  Skipped ClawBox AI realtime Talk: " + _talk_taken)
+    else:
+        _talk_obj = _talk if isinstance(_talk, dict) else {}
+        _rt = _talk_realtime if isinstance(_talk_realtime, dict) else {}
+        _rt_before = json.dumps(_rt, sort_keys=True)
+        _rt_providers = _talk_rt_providers if isinstance(_talk_rt_providers, dict) else {}
+        _entry = dict(_talk_entry) if isinstance(_talk_entry, dict) else {}
+        # Our fields only. A voice the owner picked in Settings -> Talk, and every
+        # other key on the entry or on talk.realtime, stays as it is.
+        _entry["baseUrl"] = _clawai_proxy_base_url
+        _entry["apiKey"] = _clawai_token
+        _entry[CLAWBOX_SPEECH_MANAGED_KEY] = True
+        _rt_providers[CLAWBOX_TALK_PROVIDER_ID] = _entry
+        _rt["providers"] = _rt_providers
+        _rt["provider"] = CLAWBOX_TALK_PROVIDER_ID
+        _rt["mode"] = CLAWBOX_TALK_MODE
+        _rt["transport"] = CLAWBOX_TALK_TRANSPORT
+        _rt["model"] = CLAWBOX_TALK_MODEL_ID
+        if json.dumps(_rt, sort_keys=True) != _rt_before:
+            _talk_obj["realtime"] = _rt
+            cfg["talk"] = _talk_obj
+            print("  Set up ClawBox AI realtime Talk: talk.realtime uses the ClawBox realtime provider (Max)")
+            changed = True
+
+elif _clawai_openai_route_is_ours and (_clawai_speech_withdrawable or _clawai_talk_switch == "off"):
+    # The other direction, on a plan we were TOLD is below Max or a switch that
+    # is off — never on a plan nobody has answered for, and never on a store we
+    # could not read. Only what we wrote: our provider selected AND our stamped
+    # entry at an address of ours. The owner's own Talk settings beside ours
+    # (instructions, a voice, a locale) stay, and a mode, model or transport
+    # they changed is theirs too.
+    if (
+        isinstance(_talk_realtime, dict)
+        and _talk_realtime.get("provider") == CLAWBOX_TALK_PROVIDER_ID
+        and _clawai_talk_entry_is_ours(_talk_entry, True)
+    ):
+        del _talk_rt_providers[CLAWBOX_TALK_PROVIDER_ID]
+        if not _talk_rt_providers:
+            del _talk_realtime["providers"]
+        del _talk_realtime["provider"]
+        if _talk_realtime.get("mode") == CLAWBOX_TALK_MODE:
+            del _talk_realtime["mode"]
+        if _talk_realtime.get("transport") == CLAWBOX_TALK_TRANSPORT:
+            del _talk_realtime["transport"]
+        if _talk_realtime.get("model") == CLAWBOX_TALK_MODEL_ID:
+            del _talk_realtime["model"]
+        if not _talk_realtime:
+            del _talk["realtime"]
+        if not _talk:
+            del cfg["talk"]
+        print(
+            "  Removed ClawBox AI realtime Talk: %s"
+            % (
+                "it is switched off on this box"
+                if _clawai_talk_switch == "off"
+                else "this box's plan no longer includes it"
+            )
+        )
+        changed = True
+
+
 if isinstance(ds_models, list):
     target_efforts = ["off", "high", "xhigh"]
     for model in ds_models:
@@ -7173,6 +7363,67 @@ else
     if (!denied) throw new Error("the installed rule does not refuse a model-folder delete");
   ' 2>&1; then
     echo "  WARNING: the installed $CLAWBOX_PATH_GUARD_ID plugin did not load or did not refuse a model-folder delete — the ClawBox tree and the local-model folders are NOT protected from the agent's tool calls" >&2
+  fi
+fi
+
+# ── The realtime Talk provider plugin ───────────────────────────────────────
+#
+# `clawbox-realtime-voice` registers the `clawbox` realtime voice provider that
+# the realtime Talk migration in the config pass above selects on a Max box
+# whose realtime Talk is not switched off (see "Migration: ClawBox AI realtime
+# Talk").
+# Its bridge trades the box's ClawBox AI token at the proxy for a short-lived
+# OpenAI client secret, so no OpenAI key is kept here.
+#
+# FOLLOWS THE CONFIG THAT PASS WROTE, rather than re-deciding the plan: on when
+# `talk.realtime.provider` names `clawbox`, off otherwise, unknown when
+# openclaw.json cannot be read (the installer then leaves the entry as it is).
+# One decision, made once, so the plugin can never be loaded on a box whose Talk
+# does not use it, or missing on one whose Talk does.
+#
+# NOTHING AT ALL ON A BOX THAT NEVER HAD IT. Off — or unknown — with no copy
+# installed means no files and no `plugins.entries` key are written — a box
+# that is not Max, or switched off, keeps exactly the plugin set it had. A copy that IS there (the
+# box was armed once) is refreshed and disabled, the same as the path guard's
+# off switch. Copied, never `plugins install`ed, so like the path guard it has
+# no install record and cannot raise a capability-consent refusal.
+CLAWBOX_REALTIME_PLUGIN_ID="clawbox-realtime-voice"
+CLAWBOX_REALTIME_PLUGIN_SRC="$CLAWBOX_ROOT/scripts/openclaw-plugins/$CLAWBOX_REALTIME_PLUGIN_ID"
+CLAWBOX_REALTIME_PLUGIN_DST="$OPENCLAW_HOME_DIR/extensions/$CLAWBOX_REALTIME_PLUGIN_ID"
+CLAWBOX_REALTIME_PLUGIN_WANT="$(python3 - "$OPENCLAW_CONFIG" <<'PY' 2>/dev/null || echo unknown
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        cfg = json.load(fh)
+except Exception:
+    print("unknown"); raise SystemExit
+talk = cfg.get("talk") if isinstance(cfg, dict) else None
+realtime = talk.get("realtime") if isinstance(talk, dict) else None
+provider = realtime.get("provider") if isinstance(realtime, dict) else None
+print("on" if provider == "clawbox" else "off")
+PY
+)"
+CLAWBOX_REALTIME_PLUGIN_NODE="$(command -v node 2>/dev/null || true)"
+if [ "$CLAWBOX_REALTIME_PLUGIN_WANT" != "on" ] && [ ! -e "$CLAWBOX_REALTIME_PLUGIN_DST" ]; then
+  :
+else
+  CLAWBOX_HOOK_PLUGIN_WANT="$CLAWBOX_REALTIME_PLUGIN_WANT" install_clawbox_hook_plugin "$CLAWBOX_REALTIME_PLUGIN_ID" "$CLAWBOX_REALTIME_PLUGIN_DST" \
+    "realtime Talk is not available on this box and Talk stays on hold-to-talk" \
+    "$CLAWBOX_REALTIME_PLUGIN_SRC/openclaw.plugin.json" \
+    "$CLAWBOX_REALTIME_PLUGIN_SRC/package.json" \
+    "$CLAWBOX_REALTIME_PLUGIN_SRC/index.mjs" \
+    "$CLAWBOX_REALTIME_PLUGIN_SRC/realtime-bridge.mjs"
+  # Prove the installed copy registers the provider Talk names — one cheap
+  # `node` import, as for the path guard, and only where it is meant to load.
+  if [ "$CLAWBOX_HOOK_PLUGIN_READY" = "1" ] && [ "$CLAWBOX_REALTIME_PLUGIN_WANT" = "on" ] && [ -n "$CLAWBOX_REALTIME_PLUGIN_NODE" ]; then
+    if ! CLAWBOX_REALTIME_PLUGIN_DST="$CLAWBOX_REALTIME_PLUGIN_DST" "$CLAWBOX_REALTIME_PLUGIN_NODE" --input-type=module -e '
+      const plugin = (await import(`${process.env.CLAWBOX_REALTIME_PLUGIN_DST}/index.mjs`)).default;
+      const ids = [];
+      plugin.register({ registerRealtimeVoiceProvider: (p) => ids.push(p && p.id) });
+      if (!ids.includes("clawbox")) throw new Error("no clawbox realtime voice provider");
+    ' 2>&1; then
+      echo "  WARNING: the installed $CLAWBOX_REALTIME_PLUGIN_ID plugin did not load or did not register the clawbox provider — realtime Talk will not start on this box" >&2
+    fi
   fi
 fi
 

@@ -111,6 +111,10 @@ function migrate(cfg: Config, opts: Options = {}): { cfg: Config; changed: boole
       storeBody ?? JSON.stringify({
         ...(deviceTier === null ? {} : { clawai_tier: deviceTier }),
         ...(planTier === null ? {} : { clawai_plan_tier: planTier }),
+        // The realtime Talk block runs in this same slice and arms on Max too;
+        // switched off here so `changed` speaks for the cloud voice alone
+        // (gateway-pre-start-clawai-talk.test.ts covers Talk).
+        clawai_realtime_talk_enabled: false,
       }),
     );
   }
