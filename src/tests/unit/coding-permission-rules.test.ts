@@ -163,6 +163,9 @@ describe("the floor: what no rule may ever reach", () => {
       "//home/clawbox/Projects/app/.env",
       "//home/clawbox/anywhere/.git-credentials",
       "//home/clawbox/clawbox/data/config.json",
+      "//home/clawbox/clawbox/data/secrets.json",
+      // Names, not values — but which project holds which credential is the owner's to know.
+      "//home/clawbox/clawbox/data/secrets-audit.log",
     ];
     for (const spec of paths) {
       expect(verdict(`Read(${spec})`, [], context()), spec).toBe("protected");

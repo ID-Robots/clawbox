@@ -191,14 +191,19 @@ import {
 } from "@/lib/coding-permission-rules";
 import { MAX_PROJECT_NAME_LENGTH, projectPath, validateProjectId, webappPath } from "@/lib/code-projects";
 import {
+  getInjectSecrets,
   isReservedSecretName,
   MAX_SECRETS,
+  recordRunSecretsHanded,
+  releaseRunSecrets,
   resolveSecretsForRun,
   SECRET_INJECT_CONFIG_KEY,
   SECRET_NAME_RE,
   SECRETS_FILE_NAME,
+  withoutExpiredSecrets,
   type ResolvedRunSecrets,
 } from "@/lib/project-secrets";
+import { appendSecretAudit, SECRETS_AUDIT_FILE_NAME } from "@/lib/secrets-audit";
 import { forgetRunSecrets, redactForRun, registerRunSecrets } from "@/lib/secret-redact";
 import {
   anotherAccountLikely,
@@ -3313,9 +3318,14 @@ export async function setSetupComplete(done: unknown): Promise<boolean> {
  * @returns how many finished runs were cleared, so the caller can say so.
  */
 export async function resetCodingAgentSetup(): Promise<number> {
+  const wasInjecting = await getInjectSecrets().catch(() => false);
   for (const key of CODING_AGENT_RESET_KEYS) {
     await configSet(key, undefined);
   }
+  // The list above withdraws the owner's consent for injection too — a
+  // switch-off the secrets' audit trail records like the owner's own, once the
+  // config has actually been cleared.
+  if (wasInjecting) await appendSecretAudit({ action: "switch_off", reason: "reset" });
   // The history setting is back to standard, so Claude Code's transcript
   // period goes back to whatever it was before "keep everything" changed it.
   // The ARCHIVE is not touched: it is kept data with a Clear of its own, not
@@ -4958,6 +4968,8 @@ interface RunStore {
   exitHookInstalled: boolean;
   /** A run's injected secrets, kept off the record — see runSecretEnv. */
   runSecretEnv: Map<string, Record<string, string>>;
+  /** Which scope each of those came from, names only — see runSecretScopes. Optional: a store from an older module. */
+  runSecretScopes?: Map<string, Record<string, string>>;
   /** The Anthropic account a run's next spawn uses, credential included — see runAnthropicCredential. */
   runAnthropicCredential: Map<string, RunAnthropicCredential>;
   /** The runs whose pull request or review is already being watched. */
@@ -6229,7 +6241,12 @@ const FILE_TOOLS = ["Read", "Edit", "Write", "NotebookEdit", "Glob", "Grep"] as 
 // inputs and transcripts (src/lib/coding-run-history.ts). Named rather than
 // discovered for the stream logs' reason: the first run to leave the live list
 // creates them, possibly while another run is already working.
-const DATA_SECRET_FILES = ["config.json", "kv.json", ".mcp-token", ".session-secret", "email-pending.json", "email-outcomes.json", "email-approval-prompts.json", "coding-agent-runs.json", "coding-agent-streams", "coding-agent-history", "coding-agent-archive", SECRETS_FILE_NAME];
+//
+// secrets-audit.log is the secret store's trail (src/lib/secrets-audit.ts):
+// names, scopes and run ids, never a value — but which projects hold which keys
+// and which runs were handed them is the owner's to read, not a run's. Named
+// for the same reason: the first copy, tick or injection creates it.
+const DATA_SECRET_FILES = ["config.json", "kv.json", ".mcp-token", ".session-secret", "email-pending.json", "email-outcomes.json", "email-approval-prompts.json", "coding-agent-runs.json", "coding-agent-streams", "coding-agent-history", "coding-agent-archive", SECRETS_FILE_NAME, SECRETS_AUDIT_FILE_NAME];
 
 /**
  * Entries of the harness's state directories (`HARNESS_STATE_SUBTREES`) that
@@ -6692,6 +6709,71 @@ async function projectScopeFor(run: Pick<CodingRun, "projectId" | "directory">):
 const runSecretEnv = store.runSecretEnv;
 
 /**
+ * The scope each injected name's value came from, by run id — names and scopes
+ * only, for the hand-off's audit line (`auditRunHandOff`). Set with the values
+ * by `prepareRunSecrets` and, unlike them, kept through a settle: the transient
+ * retry and the account switch respawn with the carried values, and their
+ * hand-off is filed under the same scopes. Dropped when the run ends
+ * (`endRunSecrets`).
+ */
+const runSecretScopes: Map<string, Record<string, string>> =
+  store.runSecretScopes ?? (store.runSecretScopes = new Map<string, Record<string, string>>());
+
+/** Statuses a run can still be handed its one-run secrets in (again). */
+const SECRET_HOLDING_STATUSES: ReadonlySet<CodingRunStatus> = new Set(["running", "paused", "queued", "draft"]);
+
+/** True while a run may still use what it was handed: in flight, or held to resume. */
+function isRunGoing(runId: string): boolean {
+  if (runSecretEnv.has(runId) || live.has(runId)) return true;
+  const run = loadRuns().find((r) => r.id === runId);
+  return run !== undefined && SECRET_HOLDING_STATUSES.has(run.status);
+}
+
+/**
+ * The run is over — finished, failed, stopped, or never started — so the copies
+ * the owner limited to it go from the store, with their audit line. Tracked
+ * settle work: the store write is asynchronous and must not be lost to a reset.
+ */
+function endRunSecrets(run: CodingRun): void {
+  runSecretScopes.delete(run.id);
+  trackSettleWork(releaseRunSecrets((runId) => runId === run.id));
+}
+
+/** What one spawn's environment carries of the owner's secrets: names and scopes, never a value. */
+interface RunHandOff {
+  names: string[];
+  scopes: Record<string, string>;
+}
+
+/** Taken just before the spawn: by the time its outcome is known, a failed child's settle has dropped the tables. */
+function runHandOffOf(runId: string): RunHandOff | null {
+  const names = Object.keys(runSecretEnv.get(runId) ?? {});
+  return names.length ? { names, scopes: { ...(runSecretScopes.get(runId) ?? {}) } } : null;
+}
+
+/**
+ * The hand-off's audit line, once it is known: written when the child has
+ * actually started ("inject"), or when it failed to ("not_handed"). Before that
+ * nothing was handed — the resolve alone is not a hand-off. Nothing is written
+ * for a spawn that carried none.
+ */
+function auditRunHandOff(runId: string, handOff: RunHandOff | null, handed: boolean): void {
+  if (!handOff) return;
+  trackSettleWork(recordRunSecretsHanded({ runId, ...handOff, handed }));
+}
+
+/**
+ * For a caller whose `spawnRun` THREW: "not handed", unless a child had already
+ * been registered (`live`), whose own "spawn" or "error" event says it instead.
+ * A throw anywhere before the child exists — the stream logs, the environment,
+ * the credential handoff, `spawn` itself — reaches the caller this way. Called
+ * before the caller drops the run's tables, while the names are still there.
+ */
+function auditUnstartedSpawn(runId: string): void {
+  if (!live.has(runId)) auditRunHandOff(runId, runHandOffOf(runId), false);
+}
+
+/**
  * Work out what this run may have, put it where the spawn can reach it, and
  * arm the redaction table for everything the run will say.
  *
@@ -6700,8 +6782,15 @@ const runSecretEnv = store.runSecretEnv;
  * would hand a run a token and then print it.
  */
 async function prepareRunSecrets(run: CodingRun): Promise<ResolvedRunSecrets> {
-  const resolved = await resolveSecretsForRun({ project: await projectScopeFor(run) });
+  // A one-run copy whose run ended while this server was not there to see it
+  // (a restart mid-run, a start that threw before its spawn) goes before
+  // anything is handed out. Never this run's own: it may be resuming with it.
+  await releaseRunSecrets((runId) => runId !== run.id && !isRunGoing(runId)).catch((err) => {
+    console.error("[coding-agent] could not clear spent one-run secrets:", err instanceof Error ? err.message : err);
+  });
+  const resolved = await resolveSecretsForRun({ project: await projectScopeFor(run), runId: run.id });
   runSecretEnv.set(run.id, resolved.env);
+  runSecretScopes.set(run.id, resolved.scopes);
   // The Anthropic account rides the same path: every async spawn comes through
   // here just before it, which is exactly where "which account is first in
   // line right now" should be asked (TASK-902).
@@ -11016,7 +11105,10 @@ async function continueOnAnotherAccount(
     run.accountSwitches = [...run.accountSwitches, switched].slice(-MAX_ACCOUNT_SWITCHES);
   }
   run.anthropicAccount = prepared.account.id;
-  restoreRunSecrets(run.id, carriedSecrets ?? {}, {
+  // Carried on, as the move is the same run's next try — but never past a
+  // copy's last day, which may have gone by while this run waited for an account.
+  const carried = carriedSecrets ? await withoutExpiredSecrets(carriedSecrets, runSecretScopes.get(run.id) ?? {}) : {};
+  restoreRunSecrets(run.id, carried, {
     accountId: prepared.account.id,
     label: prepared.account.label,
     credential: prepared.credential,
@@ -11498,6 +11590,7 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
         run.status = "failed";
         run.completedAt = Date.now();
         run.error = `Retry could not start: ${err instanceof Error ? err.message : String(err)}`.slice(0, MAX_ERROR_CHARS);
+        auditUnstartedSpawn(run.id);
         // And take back what restoreRunSecrets put in memory for a child that
         // never came into being. The cleanup above this branch has already run
         // and will not run again, so without this the owner's plaintext would
@@ -11623,8 +11716,18 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     // review is the team's own reviewer's, and it never opens a pull
     // request — the assets, review pass and PR below would run in a folder
     // that is gone. The planner works in the project itself and keeps them.
-    if (run.team && run.team.role !== "planner") return;
-    await reviewAndShip(run, state.endRequested);
+    try {
+      if (run.team && run.team.role !== "planner") return;
+      await reviewAndShip(run, state.endRequested);
+    } finally {
+      // The copies the owner limited to this one run go once it is over — here,
+      // at the END of the chain and not at the settle above it: the deliverable
+      // gate and the delivery pipeline (both inside reviewAndShip) can put this
+      // very record back to work, and that attempt is still its one run. A
+      // pause, or a record back at work, keeps them; that attempt's own settle
+      // comes back through here.
+      if (!isRunGoing(run.id)) endRunSecrets(run);
+    }
   })());
   // A pause is the owner's own gesture — no finish notice for it.
   //
@@ -11899,6 +12002,9 @@ function spawnRun(
   // itself never is, and never in argv. No entry means the wrapper's own
   // fallback: the legacy key, else the `claude` sign-in.
   const account = run.provider === "anthropic" ? runAnthropicCredential.get(run.id) : undefined;
+  // The owner's secrets this spawn carries, for the audit line that is written
+  // once the child's fate is known — see auditRunHandOff.
+  const handOff = runHandOffOf(run.id);
   let child: ChildProcess;
   try {
     // Inside the `try`: the handoff can throw (a full disk, a folder it cannot
@@ -11930,6 +12036,18 @@ function spawnRun(
     fs.closeSync(logs.out);
     fs.closeSync(logs.err);
   }
+  // `spawn` returning is not the process starting: an exec that fails (the
+  // wrapper missing, ENOENT) arrives as "error" instead of "spawn", and the line
+  // follows whichever comes first. A later "error" (a signal that could not be
+  // delivered) is about a child that had started, and changes nothing here.
+  let started = false;
+  child.once("spawn", () => {
+    started = true;
+    auditRunHandOff(run.id, handOff, true);
+  });
+  child.once("error", () => {
+    if (!started) auditRunHandOff(run.id, handOff, false);
+  });
   // A run with no scope of its own gets the scope's nice level by hand, so the
   // desktop is preferred over it either way. Set on the harness before it has
   // forked anything worth the name; every child inherits it. Best effort: a
@@ -12939,9 +13057,17 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // Before the record is persisted, so the names and the two progress lines are
     // in the first thing the app reads rather than appearing a poll later.
     await prepareRunSecrets(run);
+    // A start refused between here and the insert never reaches a settle, so it
+    // gives back what it was just handed: the values out of memory, and the
+    // one-run copies it claimed back out of the store.
+    const abandon = (err: unknown): never => {
+      dropRunSecrets(run.id);
+      endRunSecrets(run);
+      throw err;
+    };
     // Read before the insert, never between it and the write: the insert and
     // persist are one synchronous step (see the runs store).
-    const history = await getHistoryPolicy();
+    const history = await getHistoryPolicy().catch(abandon);
     const list = loadRuns();
     // A QUEUED run's turn: this record takes the queued one's place, with what
     // it was told while it waited and the steps it already showed — never a
@@ -12949,7 +13075,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
     // it while this start was on its way), it does not start at all.
     const waited = queuedRunId ? list.findIndex((r) => r.id === queuedRunId) : -1;
     if (queuedRunId && (waited < 0 || list[waited].status !== "queued")) {
-      throw new CodingAgentError("invalid", "That queued run is no longer waiting: it was canceled or has already started.");
+      abandon(new CodingAgentError("invalid", "That queued run is no longer waiting: it was canceled or has already started."));
     }
     // The failure it fixes now names it, so it is never offered twice.
     if (ciFixOf && previous?.ci) previous.ci = { ...previous.ci, fixRunId: run.id };
@@ -13491,6 +13617,8 @@ export function stopRun(id: string): CodingRun {
     // folder, and anything it started is still wanted); closing the book on it
     // is where that stops being true.
     cleanupRunResources(run, null);
+    // The pause kept its one-run copies for the resume that is not coming now.
+    endRunSecrets(run);
     // The pull request the pause kept "opening" (see maybeOpenPullRequest)
     // ends here with the run: this path never reaches finishRun, so nothing
     // else would settle it.
@@ -13518,6 +13646,7 @@ export function stopRun(id: string): CodingRun {
     run.error = "Stopped.";
     run.completedAt = Date.now();
     cleanupRunResources(run, null);
+    endRunSecrets(run);
     stopPipelineFor(run, "The run was stopped, so the pipeline stopped here.");
     persist(true);
     wakeWaiters(id);
@@ -14429,12 +14558,15 @@ function spawnOrSettle(
   try {
     spawnRun(run, resumeSessionId, tools, settings, stdinText, continuingRecord);
   } catch (err) {
+    auditUnstartedSpawn(run.id);
     run.status = "failed";
     run.error = `Could not start ${CODING_HARNESS_COMMAND}: ${err instanceof Error ? err.message : String(err)}`.slice(0, MAX_ERROR_CHARS);
     run.completedAt = Date.now();
     // Nothing settles this run through finishRun either, so the tab a previous
     // attempt of the same record opened is closed here.
     cleanupRunResources(run, null);
+    // …and a run that never started has ended: its one-run copies go too.
+    endRunSecrets(run);
     // …and neither does the aftermath run, which is where a run's copy of the
     // project is normally decided. A run that never started left nothing on
     // its branch, so this removes both.

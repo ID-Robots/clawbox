@@ -95,21 +95,45 @@ export function envLineDefinesKey(line: string, key: string): boolean {
   return stripExport(line).startsWith(`${key}=`);
 }
 
-/** Inverse of quoteEnvValue, matching how Hermes' load_env unquotes. */
+/**
+ * Inverse of quoteEnvValue, and the value half of a line the way Hermes'
+ * dotenv loader reads it (python-dotenv's rules):
+ *
+ *  - quoted, the value is what is between the quotes, and whatever follows the
+ *    closing quote may only be blanks or a `#` comment;
+ *  - unquoted, a `#` that follows whitespace starts a comment, and one that does
+ *    not (`val#ue`) is part of the value.
+ *
+ * Without the comment rule a hand-written `KEY=value # note` read as the value
+ * "value # note" — a key ClawBox would then show, compare or copy wrongly.
+ */
 export function parseEnvValue(raw: string): string {
   const value = raw.trim();
-  if (value.length >= 2) {
-    const first = value[0];
-    const last = value[value.length - 1];
-    if (first === '"' && last === '"') {
+  const quote = value[0];
+  if (quote === '"' || quote === "'") {
+    const close = closingQuote(value, quote);
+    if (close > 0 && /^(\s*#.*)?\s*$/.test(value.slice(close + 1))) {
+      const inner = value.slice(1, close);
       // Only the double-quoted form carries backslash escapes.
-      return value.slice(1, -1).replace(/\\(["\\])/g, "$1");
+      return quote === '"' ? inner.replace(/\\(["\\])/g, "$1") : inner;
     }
-    if (first === "'" && last === "'") {
-      return value.slice(1, -1);
-    }
+    // An unterminated quote, or text after the closing one that is not a
+    // comment: not a form this module writes. Read as it stands, as before.
+    return value;
   }
-  return value;
+  return value.replace(/\s+#.*$/, "");
+}
+
+/** Index of the quote that closes `value[0]`, honouring `\"` inside double quotes; -1 for none. */
+function closingQuote(value: string, quote: string): number {
+  for (let i = 1; i < value.length; i++) {
+    if (quote === '"' && value[i] === "\\") {
+      i++;
+      continue;
+    }
+    if (value[i] === quote) return i;
+  }
+  return -1;
 }
 
 /** Hermes' `_quote_env_value`, character for character. */
