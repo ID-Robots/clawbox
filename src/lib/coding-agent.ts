@@ -9782,7 +9782,11 @@ function leftBehindText(helpers: string[]): string {
   return `It ended before it used the result of ${which} ${helpers.join(", ")}.`.slice(0, MAX_MISSING_CHARS);
 }
 
-/** The ending for a run that left a helper behind with no attempt left to spend on it. */
+/**
+ * The ending for a run that left a helper's result unused and will not go back
+ * in for it: no attempt left, no deliverable to send it back in for, or a nudge
+ * that could not be started. Resumable only when there is a session to carry on in.
+ */
 function failLeftBehind(run: CodingRun, why: string): void {
   run.status = "failed";
   // Resumable when there is a session to carry on in, and only then said so.
@@ -9924,7 +9928,8 @@ function announceGatedRun(run: CodingRun): void {
  * Resume as the way on). A helper's result the run never used counts as one
  * more thing missing, with one difference at the end: the deliverable is
  * there, so a run out of attempts — or with no deliverable at all — ends
- * `failed` and resumable, its reason naming the helper (failLeftBehind).
+ * `failed`, resumable when it has a session, its reason naming the helper
+ * (failLeftBehind).
  *
  * Never throws: it runs inside the settle chain, and a thrown error here would
  * leave a record whose notice was held back by `finishRun` and never sent.
@@ -10133,8 +10138,9 @@ async function startCompletionAttempt(
   } catch (err) {
     releaseSlot?.();
     // Another attempt cannot be made now. The ending is still the honest one:
-    // the deliverable is not there. The reason says both halves, so the owner
-    // is not left wondering why the attempts stopped short.
+    // the deliverable is not there — or, for a nudge about an unused helper,
+    // that helper's result is still unused (cannotGoAgain). The reason says both
+    // halves, so the owner is not left wondering why the attempts stopped short.
     const why = err instanceof Error ? err.message : String(err);
     cannotGoAgain(`${missing} Another attempt could not be started: ${why}`);
     return;

@@ -726,12 +726,12 @@ function describeRun(run: RunPayload, tail: number): string {
       + " harness asks for.",
     );
   } else if (run.status === "failed" && run.resumable && run.sessionId) {
-    // Only where a resume can actually help — a turn or cost ceiling. Advising
-    // it for an authentication or transport failure is what turned one
-    // transient upstream error into a project that failed forever: the agent
-    // dutifully resumed the poisoned session and re-enacted the failure.
-    // A turn or cost ceiling, or a helper's result the run never used: the
-    // error says which, and the way on is the same session either way.
+    // Only where a resume can actually help — a turn or cost ceiling, or a
+    // helper's result the run never used; the error says which, and the way on
+    // is the same session either way. Advising it for an authentication or
+    // transport failure is what turned one transient upstream error into a
+    // project that failed forever: the agent dutifully resumed the poisoned
+    // session and re-enacted the failure.
     parts.push(
       "Its work is on disk and its session is intact; the error says why it stopped. To carry on in the same session,"
       + " call coding_agent_run with resume_run_id set to this id — with a narrower task if it stopped at a turn or cost ceiling."

@@ -909,13 +909,16 @@ shell tool, not less and not more:
   missing, up to `coding_agent_completion_attempts` (default 1, the run's own
   first turn counted as one, so there is no nudge until the owner raises it),
   and then settles it as `gave_up` — a status of its own, because the session
-  is intact and Resume is what helps, where
-  `failed` means the harness could not finish at all. `coding_agent_status`
+  is intact and Resume is what helps, where `failed` usually means the harness
+  could not finish at all. `coding_agent_status`
   reports the bar, the verdict and the attempts, and says plainly not to start
   a fresh run for a `gave_up` one. A run that ended before it used the result
   of a helper it launched (still out, or back with no turn after it) is held
-  to the same gate, deliverable or not: nudged while attempts remain, then
-  `failed` with `resumable: true`. There is deliberately no `command`
+  to the same gate, deliverable or not. With a deliverable that is there it is
+  nudged while attempts remain; with none (or `no_deliverable`) it is never
+  nudged. Either way it then ends `failed`, resumable when it has a session,
+  its error naming the helper — `failed` here is not the harness's failure, and
+  the way on is a continuation (`resume_run_id`). There is deliberately no `command`
   deliverable on this tool surface: that kind has the box RUN something, which
   is execution the agent does not otherwise hold on the Hermes edition, so it
   is the owner's to set in the Coding Agent app.
