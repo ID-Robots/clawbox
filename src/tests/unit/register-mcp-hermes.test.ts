@@ -462,6 +462,119 @@ d("register-mcp.sh — bundled email-skill distractors", () => {
   });
 });
 
+// "Connect Google" (off by default) stores the owner's Calendar + Drive grant as
+// google_token.json under HERMES_HOME, the file the bundled google-workspace
+// skill reads. Only with the flag on AND a usable token there does the skill
+// stop being a distractor: it is then the device's connected Google account,
+// not an unprovisioned CLI that ends in a clarify nobody can answer.
+d("register-mcp.sh — google-workspace once Google is connected", () => {
+  let hermesHome: string;
+
+  function disabledSkills(): unknown {
+    const skills = readConfig().skills as Record<string, unknown> | undefined;
+    return skills?.disabled;
+  }
+
+  // Placeholders in the authorized-user shape google-auth reads; never a real grant.
+  function writeToken(body: unknown = {
+    token: "test-access-token",
+    refresh_token: "test-refresh-token",
+    token_uri: "https://oauth2.googleapis.com/token",
+    client_id: "000000000000-test.apps.googleusercontent.com",
+    client_secret: "test-client-secret",
+    scopes: [
+      "https://www.googleapis.com/auth/calendar.events",
+      "https://www.googleapis.com/auth/drive.file",
+    ],
+  }): void {
+    fs.writeFileSync(
+      path.join(hermesHome, "google_token.json"),
+      typeof body === "string" ? body : JSON.stringify(body),
+      { mode: 0o600 },
+    );
+  }
+
+  beforeEach(() => {
+    hermesHome = path.join(home, ".hermes");
+    fs.writeFileSync(configPath, "model:\n  default: x\n");
+  });
+
+  it("keeps google-workspace enabled when the flag is on and a token is present", () => {
+    writeToken();
+    const r = run({ CLAWBOX_GOOGLE_CONNECT: "1", HERMES_HOME: hermesHome });
+    expect(r.status).toBe(0);
+    expect(disabledSkills()).not.toContain("google-workspace");
+    // The email distractors are a separate trap and stay retired.
+    expect(disabledSkills()).toEqual(["himalaya", "email-inbox-triage"]);
+  });
+
+  it("takes google-workspace back out of a list an earlier boot put it in", () => {
+    fs.writeFileSync(
+      configPath,
+      "skills:\n  disabled:\n    - my-own-skill\n    - himalaya\n    - email-inbox-triage\n    - google-workspace\n",
+    );
+    writeToken();
+    const r = run({ CLAWBOX_GOOGLE_CONNECT: "1", HERMES_HOME: hermesHome });
+    expect(r.status).toBe(0);
+    expect(disabledSkills()).toEqual(["my-own-skill", "himalaya", "email-inbox-triage"]);
+    expect(r.stdout).toMatch(/google-workspace/);
+  });
+
+  it("looks for the token under HERMES_HOME, not beside HERMES_CONFIG", () => {
+    const otherHome = path.join(home, "profile-home");
+    fs.mkdirSync(otherHome, { recursive: true });
+    writeToken();
+    // The token sits beside config.yaml, but Hermes reads it from HERMES_HOME.
+    run({ CLAWBOX_GOOGLE_CONNECT: "1", HERMES_HOME: otherHome });
+    expect(disabledSkills()).toContain("google-workspace");
+  });
+
+  it("keeps it disabled with the flag on but no token", () => {
+    run({ CLAWBOX_GOOGLE_CONNECT: "1", HERMES_HOME: hermesHome });
+    expect(disabledSkills()).toContain("google-workspace");
+  });
+
+  it("keeps it disabled with a token but the flag off — beta's behaviour", () => {
+    writeToken();
+    run({ HERMES_HOME: hermesHome });
+    expect(disabledSkills()).toEqual(["himalaya", "email-inbox-triage", "google-workspace"]);
+  });
+
+  it("reads the flag as exactly \"1\"", () => {
+    writeToken();
+    run({ CLAWBOX_GOOGLE_CONNECT: "true", HERMES_HOME: hermesHome });
+    expect(disabledSkills()).toContain("google-workspace");
+  });
+
+  it("puts it back when the flag is switched off again", () => {
+    writeToken();
+    run({ CLAWBOX_GOOGLE_CONNECT: "1", HERMES_HOME: hermesHome });
+    expect(disabledSkills()).not.toContain("google-workspace");
+    run({ HERMES_HOME: hermesHome });
+    expect(disabledSkills()).toContain("google-workspace");
+  });
+
+  it.each([
+    ["an empty file", ""],
+    ["a torn file", "{\"token\": \"x\""],
+    ["no refresh token", { token: "test-access-token", client_id: "c", client_secret: "s" }],
+    ["not an object", "[]"],
+  ])("does not count %s as a connected account", (_label, body) => {
+    writeToken(body);
+    run({ CLAWBOX_GOOGLE_CONNECT: "1", HERMES_HOME: hermesHome });
+    expect(disabledSkills()).toContain("google-workspace");
+  });
+
+  it("rewrites nothing on a second run once connected", () => {
+    writeToken();
+    run({ CLAWBOX_GOOGLE_CONNECT: "1", HERMES_HOME: hermesHome });
+    const first = fs.readFileSync(configPath, "utf-8");
+    const second = run({ CLAWBOX_GOOGLE_CONNECT: "1", HERMES_HOME: hermesHome });
+    expect(second.stdout).toContain("already current");
+    expect(fs.readFileSync(configPath, "utf-8")).toBe(first);
+  });
+});
+
 // Hermes parks the agent's worker thread on a clarify for `agent.clarify_timeout`
 // seconds — 3600 by default, and `<= 0` means forever. On an appliance that is
 // an hour of a session nobody can use for anything else because one question

@@ -340,6 +340,12 @@ export CLAWBOX_DEVICE_STORE="$PROJECT_DIR/data/config.json"
 # The protected-path table (TASK-605). The same file the OpenClaw hook plugin
 # reads; see the block that renders approvals.deny from it below.
 export CLAWBOX_PROTECTED_PATHS="$PROJECT_DIR/config/protected-paths.json"
+# Where "Connect Google" leaves the owner's grant: the file the bundled
+# google-workspace skill reads, under HERMES_HOME for the same reason the plugin
+# directory above is. Read only when CLAWBOX_GOOGLE_CONNECT is exactly "1"; see
+# the distractor block below.
+export CLAWBOX_GOOGLE_TOKEN_FILE="${HERMES_HOME:-$HOME_DIR/.hermes}/google_token.json"
+export CLAWBOX_GOOGLE_CONNECT="${CLAWBOX_GOOGLE_CONNECT:-}"
 
 python3 - <<'PY'
 import ast, json, os, sys, tempfile
@@ -502,6 +508,35 @@ else:
 # a connector CLI that is not provisioned on this image, outbidding the
 # device's own email tools.
 DISTRACTOR_SKILLS = ["himalaya", "email-inbox-triage", "google-workspace"]
+GOOGLE_SKILL = "google-workspace"
+
+
+def google_connected():
+    """Has the owner connected Google through "Connect Google"?
+
+    Off by default: only CLAWBOX_GOOGLE_CONNECT exactly "1" turns the question
+    on. With it on, the skill stops being a distractor only when its token file
+    holds a usable grant — a JSON object with a refresh token, the field
+    google-auth's from_authorized_user_info refuses to load without. An empty,
+    torn or half-written file is NOT a connected account: enabling the skill on
+    one would send the agent straight back into the skill's own setup and the
+    clarify nobody can answer, which is the incident that disabled it.
+    """
+    if os.environ.get("CLAWBOX_GOOGLE_CONNECT") != "1":
+        return False
+    try:
+        with open(os.environ.get("CLAWBOX_GOOGLE_TOKEN_FILE") or "", encoding="utf-8") as fh:
+            token = json.load(fh)
+    except Exception:
+        return False
+    if not isinstance(token, dict):
+        return False
+    refresh = token.get("refresh_token")
+    return isinstance(refresh, str) and refresh.strip() != ""
+
+
+google_is_connected = google_connected()
+distractors = [n for n in DISTRACTOR_SKILLS if not (google_is_connected and n == GOOGLE_SKILL)]
 skills_cfg = cfg.get("skills")
 if skills_cfg is None:
     skills_cfg = {}
@@ -533,12 +568,21 @@ if isinstance(skills_cfg, dict):
         names = None
         print("[register-mcp] WARNING: skills.disabled is not a list or a string; "
               "leaving the bundled email skills enabled.", file=sys.stderr)
-    missing = [] if names is None else [n for n in DISTRACTOR_SKILLS if n not in names]
-    if missing:
-        skills_cfg["disabled"] = names + missing
+    missing = [] if names is None else [n for n in distractors if n not in names]
+    # Once connected, an entry an earlier boot of this script wrote is taken
+    # back out — otherwise the box that just connected Google keeps the skill
+    # hidden for good. Connecting through the button is the owner saying they
+    # want it, so this is the one name the append-only rule gives up; switching
+    # the flag off or removing the token puts it back on the next boot.
+    released = [] if names is None or not google_is_connected else [n for n in names if n == GOOGLE_SKILL]
+    if missing or released:
+        skills_cfg["disabled"] = [n for n in names if n not in released] + missing
         changed = True
+    if missing:
         print("[register-mcp] disabled bundled email skills: " + ", ".join(missing)
               + " — mailbox requests go through the ClawBox email_* tools")
+    if released:
+        print("[register-mcp] Google is connected; re-enabled the " + GOOGLE_SKILL + " skill")
 else:
     print("[register-mcp] WARNING: skills is not a mapping; "
           "leaving the bundled email skills enabled.", file=sys.stderr)

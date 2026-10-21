@@ -46,6 +46,7 @@ import { DISCORD_INVITE_URL } from "@/lib/community";
 import BackgroundJobsPanel from "./BackgroundJobsPanel";
 import ClawboxMcpPanel from "./ClawboxMcpPanel";
 import PathGuardPanel from "./PathGuardPanel";
+import GoogleConnectPanel from "./GoogleConnectPanel";
 import UsersPanel from "./UsersPanel";
 import MonitorsPanel from "./MonitorsPanel";
 // From the pure module, never `@/lib/plugin-repair`: that one reads the
@@ -6102,6 +6103,10 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                 switch (owner's request, 2026-09-15). Beside the harness it
                 runs on, because that is the thing it is a capability OF. */}
             <ClawboxMcpPanel />
+            {/* The owner's Google account for the assistant's Calendar and
+                Drive — another capability of the harness. Draws nothing
+                unless the box has CLAWBOX_GOOGLE_CONNECT=1. */}
+            <GoogleConnectPanel />
             {/* Owner-only switch for the protected-path guard (TASK-1661). */}
             <PathGuardPanel />
             <BackgroundJobsPanel />
