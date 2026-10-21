@@ -773,9 +773,13 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
     // dead page under a "view on ClawHub" label. The store's own page is the
     // honest fallback — labelled as the store page, not as ClawHub. See
     // src/lib/clawhub-url.ts.
-    const hubUrl = clawhubSkillUrl(selectedApp.id, detail?.ownerHandle || undefined)
-      || (detail === null || "ownerHandle" in detail ? undefined : clawhubSkillUrl(selectedApp.id, selectedApp.developer))
-      || selectedApp.url;
+    // A ClawBox app (published from a box) has no ClawHub page at all: only
+    // the Store's own link, never a guess built from its developer's name.
+    const hubUrl = selectedApp.source === CLAWBOX_APP_SOURCE
+      ? selectedApp.url
+      : clawhubSkillUrl(selectedApp.id, detail?.ownerHandle || undefined)
+        || (detail === null || "ownerHandle" in detail ? undefined : clawhubSkillUrl(selectedApp.id, selectedApp.developer))
+        || selectedApp.url;
     const hubIsClawhub = !!hubUrl && hubUrl.startsWith("https://clawhub.ai/");
 
     return (

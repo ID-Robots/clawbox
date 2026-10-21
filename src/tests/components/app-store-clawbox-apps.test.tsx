@@ -77,6 +77,22 @@ describe("ClawBox Apps in the Store", () => {
     expect(screen.getByRole("button", { name: "ClawBox Apps" })).toBeInTheDocument();
   });
 
+  it("never links a ClawBox app to a ClawHub page guessed from its developer", async () => {
+    const withDeveloper = { ...CLAWBOX_APP, developer: "someone" };
+    vi.mocked(fetch).mockImplementation(((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/setup-api/apps/store?slug=")) return jsonResponse(withDeveloper);
+      if (url.startsWith("/setup-api/apps/store")) return jsonResponse({ ...LIST, apps: [SKILL, withDeveloper] });
+      return jsonResponse({});
+    }) as typeof fetch);
+    render(<AppStore installedAppIds={[]} onInstall={vi.fn()} onUninstall={vi.fn()} />);
+    fireEvent.click(await screen.findByText("Tinder Clone"));
+    await screen.findByTestId("store-clawbox-app-badge");
+    await waitFor(() => expect(vi.mocked(fetch).mock.calls.some(([u]) => String(u).includes("slug=tinder-clone"))).toBe(true));
+    const links = screen.queryAllByRole("link").map((a) => a.getAttribute("href") ?? "");
+    expect(links.filter((href) => href.startsWith("https://clawhub.ai/"))).toEqual([]);
+  });
+
   it("installs a ClawBox app by its source, and hands the desktop its window", async () => {
     const onInstall = await installTinder();
     await waitFor(() => expect(onInstall).toHaveBeenCalledTimes(1));
