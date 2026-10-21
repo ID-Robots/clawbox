@@ -24,6 +24,7 @@ import {
 import {
   CLAWAI_TIER_INFO,
   CLAWAI_TIER_STORAGE_KEY,
+  UNPAIRED_DEFAULT_UI_TIER,
   resolveUiTier,
   uiTierToDeviceTier,
   type ClawaiTier,
@@ -421,7 +422,9 @@ export default function HermesProviderConfig({
 
   // ClawBox AI — a managed provider that still runs THROUGH Hermes.
   const [clawai, setClawai] = useState<ClawaiState | null>(null);
-  const [uiTier, setUiTier] = useState<ClawaiTier>("flash");
+  // The unpaired default until the mount read below answers; `resolveUiTier`
+  // then keeps a stored choice and moves a paired box to its real plan.
+  const [uiTier, setUiTier] = useState<ClawaiTier>(UNPAIRED_DEFAULT_UI_TIER);
   // The UI tier the device is currently RUNNING (null until we know). Compared
   // against `uiTier` to decide whether "Switch to …" is actionable — comparing
   // device tiers instead collapsed Free and Pro onto the same value, so a Free

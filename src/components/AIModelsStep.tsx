@@ -46,7 +46,8 @@ import { cachedEdition, fetchHarness } from "@/lib/client-harness";
 // the Hermes provider panel renders the SAME experience instead of a lookalike.
 import {
   CLAWAI_TIER_STORAGE_KEY,
-  readStoredUiTier,
+  UNPAIRED_DEFAULT_UI_TIER,
+  readStoredUiTierChoice,
   resolveUiTier,
   type ClawaiTier,
 } from "@/lib/clawbox-ai-tiers";
@@ -586,8 +587,12 @@ export default function AIModelsStep({
   // Seeded from local storage because that is all this panel can know before it
   // has asked the box anything; the effect below reconciles it against the
   // portal-confirmed account as soon as an answer arrives. Local storage alone
-  // is NOT the answer for a paired box — see TASK-468.
-  const [clawaiTier, setClawaiTier] = useState<ClawaiTier>(() => readStoredUiTier());
+  // is NOT the answer for a paired box — see TASK-468. With nothing stored this
+  // is the unpaired default (Free): it is what Connect sends on first boot, and
+  // a paired box is moved to its real plan by that reconcile.
+  const [clawaiTier, setClawaiTier] = useState<ClawaiTier>(
+    () => readStoredUiTierChoice() ?? UNPAIRED_DEFAULT_UI_TIER,
+  );
   // Whether the box has been TOLD what the account is on. The seed above is a
   // stored intent, not an answer: it printed as "Pro plan · €9/month" on a box
   // whose own portal page said Max. Until the reconcile below hears from the
@@ -686,7 +691,7 @@ export default function AIModelsStep({
   // `resolveUiTier` is the rule the Hermes panel has always used; it now lives
   // in the shared tier module so these two panels cannot drift again. It reads
   // the account only when the box is actually paired, so the wizard's
-  // choose-a-plan flow on an unpaired box is untouched.
+  // choose-a-plan flow on an unpaired box keeps the seed above.
   //
   // Not once per mount but on a slow poll (TASK-516): the desktop keeps the
   // Settings window mounted while it is "closed", so a mount-only read froze
