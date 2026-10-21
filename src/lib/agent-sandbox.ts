@@ -57,6 +57,24 @@ export async function readAgentSandboxSwitch(): Promise<{ enabled: boolean; know
   return { enabled: known && isAgentSandboxEnabledValue(value), known };
 }
 
+/**
+ * The drop-in the installer writes to hand the gateway the lingering user
+ * manager's session (`agent_sandbox_gateway_session` in install.sh and
+ * install-x64.sh). Without it rootless Podman finds no systemd user session in
+ * the gateway and its containers run with no memory cap, image or not.
+ */
+const GATEWAY_SESSION_DROPIN = "/etc/systemd/system/clawbox-gateway.service.d/agent-sandbox.conf";
+
+/** Has the gateway been given the user session the sandbox's cap needs? */
+export function agentSandboxGatewaySessionInPlace(): boolean {
+  const file = process.env.CLAWBOX_AGENT_SANDBOX_DROPIN || GATEWAY_SESSION_DROPIN;
+  try {
+    return /^Environment=XDG_RUNTIME_DIR=\/run\/user\/\d+$/m.test(fs.readFileSync(file, "utf-8"));
+  } catch {
+    return false;
+  }
+}
+
 /** Is there an OpenClaw on this box for the switch to act on? */
 export function agentSandboxAvailable(): boolean {
   return harnessesHere().openclaw;
@@ -169,7 +187,10 @@ export async function applyAgentSandboxSwitch(enabled: boolean): Promise<AgentSa
   }
 
   if (!enabled) return result;
-  if ((await readAgentSandboxRuntime()) === "ready") return result;
+  // The image alone is not a finished install: the installer's session steps
+  // only warn, so an image can exist while the gateway still has no user
+  // session. The install is idempotent, so a missing drop-in runs it again.
+  if ((await readAgentSandboxRuntime()) === "ready" && agentSandboxGatewaySessionInPlace()) return result;
   if ((await agentSandboxProvisioning()) === true) {
     result.provisioning = true;
     return result;

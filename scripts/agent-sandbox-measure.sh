@@ -110,6 +110,8 @@ print(json.dumps({
     "gatewayHasUserSession": {"yes": True, "no": False}.get(gateway_session),
     "startMs": starts,
     "startMsMedian": statistics.median(starts) if starts else None,
-    "withinBudget": enforced and disk <= disk_budget,
+    # Only with the gateway's own session: the cap seen from this shell says
+    # nothing about the containers the gateway starts without one.
+    "withinBudget": enforced and disk <= disk_budget and gateway_session == "yes",
 }, indent=2))
 PY

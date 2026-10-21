@@ -61,7 +61,7 @@ const writeStore = (body: unknown) => fs.writeFileSync(storePath(), typeof body 
 const withMode = (mode: string) => ({ agents: { defaults: { sandbox: { mode } } } });
 
 beforeAll(async () => {
-  restoreEnv = saveEnv("CLAWBOX_ROOT", "CLAWBOX_EDITION", "CLAWBOX_EDITION_FILE");
+  restoreEnv = saveEnv("CLAWBOX_ROOT", "CLAWBOX_EDITION", "CLAWBOX_EDITION_FILE", "CLAWBOX_AGENT_SANDBOX_DROPIN");
   root = fs.mkdtempSync(path.join(os.tmpdir(), "clawbox-agent-sandbox-"));
   process.env.CLAWBOX_ROOT = root;
   process.env.CLAWBOX_EDITION = "openclaw";
@@ -75,8 +75,13 @@ afterAll(() => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
+const dropIn = () => path.join(root, "agent-sandbox.conf");
+
 beforeEach(() => {
   process.env.CLAWBOX_EDITION = "openclaw";
+  // The gateway has its user session unless a test takes it away.
+  process.env.CLAWBOX_AGENT_SANDBOX_DROPIN = dropIn();
+  fs.writeFileSync(dropIn(), "[Unit]\nAfter=user@1000.service\n\n[Service]\nEnvironment=XDG_RUNTIME_DIR=/run/user/1000\n");
   fs.mkdirSync(path.join(root, "data"), { recursive: true });
   fs.rmSync(storePath(), { force: true });
   h.openclawConfig = {};
@@ -224,6 +229,14 @@ describe("applyAgentSandboxSwitch", () => {
     const r = await lib.applyAgentSandboxSwitch(true);
     expect(r).toEqual({ openclaw: { restarted: true }, provisioning: false, error: null });
     expect(h.startRootStep).not.toHaveBeenCalled();
+  });
+
+  it("on with the image but no user session for the gateway: runs the install again", async () => {
+    fs.rmSync(dropIn());
+    h.restartGateway.mockImplementation(async () => { h.openclawConfig = withMode("non-main"); });
+    const r = await lib.applyAgentSandboxSwitch(true);
+    expect(r).toEqual({ openclaw: { restarted: true }, provisioning: true, error: null });
+    expect(h.startRootStep).toHaveBeenCalledWith("openclaw_config", { noBlock: true });
   });
 
   it("on with no runtime: starts the install AFTER the restart, so its writes never race the pre-start's", async () => {
