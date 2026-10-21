@@ -148,9 +148,10 @@ function forbidden() {
  * and the import routes carry for the same reason. The status still REPORTS it
  * (`injectSecrets`), because reading is not the half that needs the fence.
  * POST { diet: { brief?: "full"|"lean", helpers?: "always"|"lean",
- * visualTools?: "always"|"auto" } } → the token diet (src/lib/coding-diet.ts):
- * the brief a run is given, how it is told to use its helpers, and whether a
- * run that does not look visual still holds the browser and media tools. A
+ * visualTools?: "always"|"auto", context?: "full"|"capped" } } → the token
+ * diet (src/lib/coding-diet.ts): the brief a run is given, how it is told to
+ * use its helpers, whether a run that does not look visual still holds the
+ * browser and media tools, and whether its context window is capped. A
  * PARTIAL patch, merged over what is stored; every knob never set is today's
  * behaviour. The whole patch is refused, before anything in the body is saved,
  * on an unknown key or value, with a stable `code` (`diet_not_object`,
@@ -277,7 +278,7 @@ export async function POST(request: Request) {
           + "{ gitAuthorName: string | null }, { gitAuthorEmail: string | null }, "
           + "{ prBodyIncludesTask: string }, "
           + "{ roleModels: { planner?|worker?|reviewer?|bulk?: { provider?, model?, effort? } } }, "
-          + "{ diet: { brief?, helpers?, visualTools? } }, "
+          + "{ diet: { brief?, helpers?, visualTools?, context? } }, "
           + "{ setupComplete: boolean }, { autoPr: boolean } or { clearHarnessFault: true }.",
       },
       { status: 400 },

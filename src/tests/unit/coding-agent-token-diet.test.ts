@@ -10,6 +10,8 @@
  * would break the provider's prefix cache and bill the prefix fresh each run.
  */
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import {
   buildRunArgs,
   DEFAULT_EFFORT,
@@ -40,6 +42,20 @@ describe("the token diet's defaults", () => {
     expect(DEFAULT_COMPLETION_ATTEMPTS).toBe(1);
     expect(completionAttemptsFrom(undefined)).toBe(1);
     expect(completionAttemptsFrom(3)).toBe(3);
+  });
+
+  it("is what the code's own comment and the agent docs say the defaults are", () => {
+    const source = readFileSync(path.join(process.cwd(), "src/lib/coding-agent.ts"), "utf8");
+    const key = source.indexOf("export const CODING_AGENT_COMPLETION_ATTEMPTS_CONFIG_KEY");
+    const comment = source.slice(source.lastIndexOf("/**", key), key);
+    const words = ["Zero", "One", "Two", "Three", "Four", "Five", "Six"];
+    const word = words[DEFAULT_COMPLETION_ATTEMPTS];
+    expect(comment).toContain(`${word} by default`);
+    expect(comment).not.toMatch(new RegExp(`\\b(${words.filter((w) => w !== word).join("|")}) by default`));
+
+    const doc = readFileSync(path.join(process.cwd(), "docs/agents/coding-agent.md"), "utf8");
+    expect(doc).toContain(`the default is \`${DEFAULT_EFFORT}\``);
+    expect(doc).not.toMatch(/ultracode[^.]*\bthe default\)/);
   });
 });
 

@@ -26,6 +26,7 @@
 import fs from "fs";
 import os from "os";
 import type { CiFailure } from "@/lib/coding-ci";
+import { emptyTokenBreakdown, readTokenBreakdown, type TokenBreakdown } from "@/lib/coding-agent";
 import { CODING_PROVIDERS, isCodingProvider, type CodingProvider } from "@/lib/coding-provider";
 import { MODEL_ROLES, type ModelRole } from "@/lib/coding-role-models";
 import path, { untraced } from "@/lib/runtime-path";
@@ -136,6 +137,9 @@ export interface RoleTokens {
   lead: number;
 }
 
+/** Tokens the team's runs spent by kind, by the role they ran in. */
+export type RoleTokenBreakdown = Record<keyof RoleTokens, TokenBreakdown>;
+
 /**
  * Which kind of worker a task wants. `bulk`: token-heavy and not critical —
  * scraping, mass data, repetitive edits, long test runs — so its worker may
@@ -178,6 +182,15 @@ export interface TeamMetrics {
   tokensUsed: number;
   /** The same tokens by role: what the planner, the workers, the reviewers and the lead each cost. */
   tokensByRole: RoleTokens;
+  /**
+   * The same tokens by the four ways a provider bills them — fresh input,
+   * output, cache written, cache read — summed from each run's own
+   * breakdown (`TeamRunRef.tokenBreakdown`), in total and by role. A run on a
+   * board from before the field has none: its tokens are in `tokensUsed` and
+   * in neither of these, which then read as zeros.
+   */
+  tokenBreakdown: TokenBreakdown;
+  tokenBreakdownByRole: RoleTokenBreakdown;
   /**
    * The same tokens by the provider each run was paid from (`TeamRunRef.provider`)
    * — a team whose roles sit on different accounts costs each its own share.
@@ -345,6 +358,11 @@ export interface TeamRunRef {
   sentAt?: number[];
   /** Tokens the run spent, from its record once it settled; absent before. */
   tokens?: number;
+  /**
+   * The same tokens by kind, from the record's own `tokenBreakdown` once it
+   * settled; absent before, and on a board from before the field.
+   */
+  tokenBreakdown?: TokenBreakdown;
   /**
    * The account the run was paid from, and its model there — from its record
    * when it started, the model brought up to what answered once it settled;
@@ -600,6 +618,8 @@ function normalizeBoard(raw: unknown): TeamBoard | null {
             : [];
           const run: TeamRunRef = { id: ref.id, role: ref.role as TeamRunRef["role"], taskId: typeof ref.taskId === "string" ? ref.taskId : null, ...(sentAt.length ? { sentAt } : {}) };
           if (typeof ref.tokens === "number" && Number.isFinite(ref.tokens) && ref.tokens >= 0) run.tokens = ref.tokens;
+          // Leniently, figure by figure: a bad one reads as 0, a field that is no breakdown as none.
+          if (ref.tokenBreakdown && typeof ref.tokenBreakdown === "object" && !Array.isArray(ref.tokenBreakdown)) run.tokenBreakdown = readTokenBreakdown(ref.tokenBreakdown);
           // Who paid and on what: each re-read on its own, absent when the
           // file has none this box could have written — a board from before.
           if (isCodingProvider(ref.provider)) run.provider = ref.provider;
@@ -1570,11 +1590,17 @@ function noProviderTokens(): ProviderTokens {
   return Object.fromEntries(CODING_PROVIDERS.map((p) => [p, 0])) as ProviderTokens;
 }
 
+/** Every role at nothing spent, by kind. */
+function noRoleBreakdown(): RoleTokenBreakdown {
+  return { planner: emptyTokenBreakdown(), worker: emptyTokenBreakdown(), reviewer: emptyTokenBreakdown(), lead: emptyTokenBreakdown() };
+}
+
 /** Nothing counted yet: the figures of a board that has only just been made. */
 const EMPTY_METRICS: TeamMetrics = {
   plannerRuns: 0, workerRuns: 0, reviewerRuns: 0, leadRuns: 0,
   tasksPlanned: 0, tasksAdded: 0, tasksRetired: 0, tasksAcceptedFirstTry: 0, tasksRejected: 0,
   tokensUsed: 0, tokensByRole: { planner: 0, worker: 0, reviewer: 0, lead: 0 }, tokensByProvider: noProviderTokens(), wallMs: 0,
+  tokenBreakdown: emptyTokenBreakdown(), tokenBreakdownByRole: noRoleBreakdown(),
   messagesSent: 0, messagesToLead: 0, messagesToSibling: 0, messagesUndelivered: 0,
   readOnlyRefusals: 0,
 };
@@ -1602,6 +1628,8 @@ export function teamMetrics(board: TeamBoard, now: number = Date.now()): TeamMet
     tasksRejected: board.tasks.filter((t) => t.rejections > 0).length,
     tokensUsed: board.runs.reduce((sum, r) => sum + runTokens(r), 0),
     tokensByRole: board.runs.reduce<RoleTokens>((by, r) => ({ ...by, [r.role]: by[r.role] + runTokens(r) }), { planner: 0, worker: 0, reviewer: 0, lead: 0 }),
+    tokenBreakdown: board.runs.reduce((sum, r) => withRunBreakdown(sum, r), emptyTokenBreakdown()),
+    tokenBreakdownByRole: board.runs.reduce<RoleTokenBreakdown>((by, r) => ({ ...by, [r.role]: withRunBreakdown(by[r.role], r) }), noRoleBreakdown()),
     // Each run on the account it was paid from; one from before the field is on none.
     tokensByProvider: board.runs.reduce<ProviderTokens>((by, r) => (r.provider ? { ...by, [r.provider]: by[r.provider] + runTokens(r) } : by), noProviderTokens()),
     wallMs: board.createdAt > 0 ? Math.max(0, ended - board.createdAt) : 0,
@@ -1619,6 +1647,12 @@ export function teamMetrics(board: TeamBoard, now: number = Date.now()): TeamMet
 /** One run's tokens as the figures count them: what its record said once it settled, 0 before. */
 function runTokens(r: TeamRunRef): number {
   return typeof r.tokens === "number" && Number.isFinite(r.tokens) && r.tokens >= 0 ? r.tokens : 0;
+}
+
+/** A sum with one run's breakdown added: each finite, non-negative figure it holds; none, or a bad one, adds 0. */
+function withRunBreakdown(sum: TokenBreakdown, r: TeamRunRef): TokenBreakdown {
+  const own = readTokenBreakdown(r.tokenBreakdown);
+  return { input: sum.input + own.input, output: sum.output + own.output, cacheCreation: sum.cacheCreation + own.cacheCreation, cacheRead: sum.cacheRead + own.cacheRead };
 }
 
 /** Path hints compared: no `./`, no trailing slash, forward slashes. */
