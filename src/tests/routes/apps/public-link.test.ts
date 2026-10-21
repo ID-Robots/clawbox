@@ -12,7 +12,7 @@ import { sessionIdentity } from "@/lib/route-auth";
 import { verifyPassword } from "@/lib/auth";
 import { DATA_DIR } from "@/lib/config-store";
 import { DELETE, GET, PATCH, POST } from "@/app/setup-api/apps/public-link/route";
-import { MAX_LINKS, createPublicLink, disablePublicLink, listPublicLinks, parseApiAllow, setPublicLinkPassword } from "@/lib/public-app-links";
+import { MAX_API_ALLOW, MAX_LINKS, createPublicLink, disablePublicLink, listPublicLinks, parseApiAllow, setPublicLinkPassword, verifyLinkPasswordHash } from "@/lib/public-app-links";
 
 /**
  * TASK-1478 — the owner's half of public app links: who may publish, what is
@@ -23,6 +23,7 @@ const require_ = createRequire(import.meta.url);
 const serving = require_("../../../../scripts/public-app-links.js") as {
   readLinks: (root: string) => { id: string; appId: string; token: string; password: { hash: string; key: string } | null }[];
   validLink: (raw: unknown) => unknown;
+  methodAllowed: (link: unknown, method: string, rest: string) => boolean;
   verifyPasswordHash: (password: string, hash: string) => Promise<boolean>;
 };
 
@@ -94,7 +95,7 @@ describe("publishing", () => {
     const res = await POST(req("POST", { appId: "notes", mode: "temporary", ttlMinutes: 60, apiAllow: ["/api/scores", " ", "/api/scores"] }));
     expect(res.status).toBe(201);
     const { link } = await res.json();
-    expect(link).toMatchObject({ appId: "notes", mode: "temporary", state: "starting", url: null, apiAllow: ["/api/scores"] });
+    expect(link).toMatchObject({ appId: "notes", mode: "temporary", state: "starting", url: null, apiAllow: ["/api", "/api/scores"], apiReadOnly: true });
     expect(JSON.stringify(link)).not.toMatch(/token/);
 
     const file = path.join(LINKS_DIR, "links.json");
@@ -140,6 +141,88 @@ describe("publishing", () => {
     expect(parseApiAllow(["/api/a", "/api/a", ""])).toEqual(["/api/a"]);
     expect(() => parseApiAllow("x")).toThrow();
     expect(() => parseApiAllow(Array.from({ length: 17 }, (_, i) => `/a${i}`))).toThrow();
+  });
+
+  /**
+   * A link that cannot reach the app's own API is a blank page for the
+   * visitor, so a new link opens it — for reading only unless the owner asks
+   * for read and write: strangers changing the app's data is an explicit choice.
+   */
+  it("opens the app's own /api read-only by default, read-write or not at all when asked, and the serving side enforces the choice", async () => {
+    const res = await POST(req("POST", { appId: "notes", mode: "permanent" }));
+    expect((await res.json()).link).toMatchObject({ apiAllow: ["/api"], apiReadOnly: true });
+    let served = serving.validLink(serving.readLinks(ROOT)[0]) as { apiAllow: string[]; apiReadOnly: boolean };
+    expect(served.apiAllow).toEqual(["/api"]);
+    expect(served.apiReadOnly).toBe(true);
+    expect(serving.methodAllowed(served, "GET", "/api/items")).toBe(true);
+    expect(serving.methodAllowed(served, "POST", "/api/items")).toBe(false);
+    expect(serving.methodAllowed(served, "POST", "/upload")).toBe(false);
+    await disablePublicLink("notes");
+
+    await createPublicLink({ appId: "notes", mode: "permanent", apiAccess: "full" });
+    expect((await listPublicLinks())[0]).toMatchObject({ apiAllow: ["/api"], apiReadOnly: false });
+    served = serving.validLink(serving.readLinks(ROOT)[0]) as typeof served;
+    expect(serving.methodAllowed(served, "GET", "/api/items")).toBe(true);
+    expect(serving.methodAllowed(served, "POST", "/api/items")).toBe(true);
+    expect(serving.methodAllowed(served, "POST", "/upload")).toBe(false);
+    expect(JSON.parse(fs.readFileSync(path.join(LINKS_DIR, "links.json"), "utf-8")).links[0]).not.toHaveProperty("apiReadOnly");
+    await disablePublicLink("notes");
+
+    await createPublicLink({ appId: "notes", mode: "permanent", apiAccess: "read", apiAllow: ["/upload"] });
+    expect((await listPublicLinks())[0]).toMatchObject({ apiAllow: ["/api", "/upload"], apiReadOnly: true });
+    served = serving.validLink(serving.readLinks(ROOT)[0]) as typeof served;
+    expect(served.apiReadOnly).toBe(true);
+    expect(serving.methodAllowed(served, "GET", "/api/items")).toBe(true);
+    expect(serving.methodAllowed(served, "POST", "/api/items")).toBe(false);
+    expect(serving.methodAllowed(served, "POST", "/upload")).toBe(false);
+    await disablePublicLink("notes");
+
+    await createPublicLink({ appId: "notes", mode: "permanent", apiAccess: "none" });
+    expect((await listPublicLinks())[0]).toMatchObject({ apiAllow: [], apiReadOnly: false });
+    served = serving.validLink(serving.readLinks(ROOT)[0]) as typeof served;
+    expect(serving.methodAllowed(served, "GET", "/api/items")).toBe(false);
+    await disablePublicLink("notes");
+
+    expect((await POST(req("POST", { appId: "notes", mode: "permanent", apiAccess: "all" }))).status).toBe(400);
+    expect(serving.readLinks(ROOT)).toHaveLength(0);
+  });
+
+  /** The serving side matches API paths by prefix, so "/" and "/api/" open the app's own /api as surely as "/api". */
+  it("refuses a typed path that would open the app's own /api again on a link whose API is off", async () => {
+    for (const apiAllow of [["/"], ["/api"], ["/api/"], ["/upload", "/api//"], ["/API"], ["/Api/"]]) {
+      const res = await POST(req("POST", { appId: "notes", mode: "permanent", apiAccess: "none", apiAllow }));
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe("bad_api_allow");
+      expect(serving.readLinks(ROOT)).toHaveLength(0);
+    }
+
+    // A path beside the app's own /api is still the owner's to open.
+    expect((await POST(req("POST", { appId: "notes", mode: "permanent", apiAccess: "none", apiAllow: ["/upload", "/apis"] }))).status).toBe(201);
+    expect((await listPublicLinks())[0]).toMatchObject({ apiAllow: ["/upload", "/apis"], apiReadOnly: false });
+    await disablePublicLink("notes");
+  });
+
+  /** The serving side refuses a list longer than MAX_API_ALLOW: a link stored with one would be answered 201 here and never served. */
+  it("counts the /api a new link opens against the cap on API paths, so it never stores a list the serving side refuses", async () => {
+    const sixteen = Array.from({ length: MAX_API_ALLOW }, (_, i) => `/p${i}`);
+    const res = await POST(req("POST", { appId: "notes", mode: "permanent", apiAllow: sixteen }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("bad_api_allow");
+    expect(serving.readLinks(ROOT)).toHaveLength(0);
+
+    // Off adds nothing: sixteen typed paths are the whole list.
+    expect((await POST(req("POST", { appId: "notes", mode: "permanent", apiAccess: "none", apiAllow: sixteen }))).status).toBe(201);
+    expect(serving.validLink(serving.readLinks(ROOT)[0])).not.toBeNull();
+    await disablePublicLink("notes");
+
+    // Fifteen typed paths and /api fill the list exactly; an /api the owner typed is not counted twice.
+    for (const typed of [sixteen.slice(1), ["/api", ...sixteen.slice(1)]]) {
+      const ok = await POST(req("POST", { appId: "notes", mode: "permanent", apiAccess: "read", apiAllow: typed }));
+      expect(ok.status).toBe(201);
+      expect((await ok.json()).link.apiAllow).toHaveLength(MAX_API_ALLOW);
+      expect(serving.validLink(serving.readLinks(ROOT)[0])).not.toBeNull();
+      await disablePublicLink("notes");
+    }
   });
 });
 
@@ -255,6 +338,33 @@ describe("a link password", () => {
     expect(await serving.verifyPasswordHash(`${PASSWORD}x`, record.hash)).toBe(false);
   });
 
+  /**
+   * The passwords the dialog actually produces, checked by both
+   * halves: the owner's own verify (run before the record is written) and
+   * the serving side's (run on a visitor's answer). A generated 20-character
+   * password, one with spaces, one with accented letters typed in either
+   * Unicode form, and a long one.
+   */
+  it("every password the dialog can set verifies on the serving side, in the owner's own check too", async () => {
+    const passwords = ["Kq7mWn2PzRt4Hx9cVb3Y", "correct horse battery staple", "café-résumé-naïve-2026", "café-résumé-naïve-2026", "ключ-за-връзката-2026"];
+    for (const password of passwords) {
+      const res = await POST(req("POST", { appId: "notes", mode: "permanent", password }));
+      expect(res.status, password).toBe(201);
+      const record = stored()[0].password as { hash: string };
+      expect(await serving.verifyPasswordHash(password, record.hash), password).toBe(true);
+      expect(await verifyLinkPasswordHash(password, record.hash), password).toBe(true);
+      expect(await serving.verifyPasswordHash(`${password}!`, record.hash), password).toBe(false);
+      expect(await verifyLinkPasswordHash(`${password}!`, record.hash), password).toBe(false);
+      await disablePublicLink("notes");
+    }
+    // The two Unicode forms of the same word are one password.
+    await createPublicLink({ appId: "notes", mode: "permanent", password: passwords[2] });
+    expect(await serving.verifyPasswordHash(passwords[3], (stored()[0].password as { hash: string }).hash)).toBe(true);
+    // A record that is not one of ours never verifies, and never throws.
+    expect(await verifyLinkPasswordHash(passwords[0], "scrypt$1$1$1$x$y")).toBe(false);
+    expect(await verifyLinkPasswordHash(passwords[0], "")).toBe(false);
+  }, 120_000); // each password is hashed at the real cost, three times over
+
   it("the list says only that there is one — no hash, no key", async () => {
     await createPublicLink({ appId: "notes", mode: "permanent", password: PASSWORD });
     const res = await GET(req("GET"));
@@ -307,7 +417,7 @@ describe("a link password", () => {
     const same = () => {
       const now = serving.readLinks(ROOT)[0];
       expect({ id: now.id, token: now.token, appId: now.appId }).toEqual({ id: before.id, token: before.token, appId: before.appId });
-      expect(stored()[0]).toMatchObject({ mode: "temporary", apiAllow: ["/api/scores"] });
+      expect(stored()[0]).toMatchObject({ mode: "temporary", apiAllow: ["/api", "/api/scores"] });
       return now;
     };
 

@@ -21,7 +21,7 @@ const links = require_("../../../scripts/public-app-links.js") as {
   linkPaths: (root: string) => { dir: string; links: string; runtime: string; audit: string };
   validLink: (raw: unknown) => unknown;
   canonicalTarget: (url: string) => { path: string; search: string } | null;
-  methodAllowed: (link: { apiAllow: string[] }, method: string, rest: string) => boolean;
+  methodAllowed: (link: { apiAllow: string[]; apiReadOnly?: boolean }, method: string, rest: string) => boolean;
   appCookies: (header: string | undefined) => string | null;
   rewriteLocation: (location: string, port: number) => string;
   createLinkServer: (id: string, opts: Record<string, unknown>) => http.Server;
@@ -384,12 +384,20 @@ describe("the policy functions", () => {
     expect(links.methodAllowed(open, "DELETE", "/api/a/1")).toBe(true);
     expect(links.methodAllowed(open, "GET", "/api/a")).toBe(true);
     expect(links.methodAllowed(open, "GET", "/api/ab")).toBe(false);
+    // Read-only: the listed prefixes answer GET/HEAD and nothing else.
+    const readOnly = { apiAllow: ["/api"], apiReadOnly: true };
+    expect(links.methodAllowed(readOnly, "GET", "/api/a")).toBe(true);
+    expect(links.methodAllowed(readOnly, "HEAD", "/api/a")).toBe(true);
+    for (const method of ["POST", "PUT", "PATCH", "DELETE"]) expect(links.methodAllowed(readOnly, method, "/api/a"), method).toBe(false);
+    expect(links.methodAllowed(readOnly, "POST", "/page")).toBe(false);
   });
 
   it("validLink refuses anything malformed", () => {
     expect(links.validLink(link())).not.toBeNull();
     expect(links.validLink(link({ mode: "temporary", expiresAt: 5 }))).not.toBeNull();
-    for (const bad of [null, link({ id: "x" }), link({ appId: "../x" }), link({ mode: "forever" }), link({ mode: "temporary" }), link({ expiresAt: 5 }), link({ token: "abc" }), link({ apiAllow: ["api"] }), link({ apiAllow: ["/a/../b"] }), link({ apiAllow: "x" })]) {
+    expect((links.validLink(link()) as { apiReadOnly: boolean }).apiReadOnly).toBe(false);
+    expect((links.validLink(link({ apiReadOnly: true })) as { apiReadOnly: boolean }).apiReadOnly).toBe(true);
+    for (const bad of [null, link({ id: "x" }), link({ appId: "../x" }), link({ mode: "forever" }), link({ mode: "temporary" }), link({ expiresAt: 5 }), link({ token: "abc" }), link({ apiAllow: ["api"] }), link({ apiAllow: ["/a/../b"] }), link({ apiAllow: "x" }), link({ apiReadOnly: "yes" })]) {
       expect(links.validLink(bad)).toBeNull();
     }
   });

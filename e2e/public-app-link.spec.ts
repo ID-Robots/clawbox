@@ -20,6 +20,17 @@ const COMPLETE_SETUP = {
 
 const URL = "https://calm-river-test.trycloudflare.com/?k=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
+/**
+ * The API fields the route answers a POST with (src/lib/public-app-links.ts,
+ * apiAllowFor): the app's own `/api` unless access is off, read-only on
+ * `read`, and whatever paths were typed on top.
+ */
+function apiFields(body: Record<string, unknown>): { apiAllow: string[]; apiReadOnly: boolean } {
+  const typed = Array.isArray(body.apiAllow) ? (body.apiAllow as string[]) : [];
+  const access = body.apiAccess ?? "read";
+  return { apiAllow: access === "none" || typed.includes("/api") ? typed : ["/api", ...typed], apiReadOnly: access === "read" };
+}
+
 test("an app is published from its icon's menu, shown as public, and disabled from the same menu", async ({ page }) => {
   await installClawboxMocks(page, {
     initialSetup: COMPLETE_SETUP,
@@ -37,7 +48,7 @@ test("an app is published from its icon's menu, shown as public, and disabled fr
     if (request.method() === "POST") {
       posted.push(request.postDataJSON());
       const body = request.postDataJSON() as { mode: string; ttlMinutes?: number };
-      link = { appId: "notes", mode: body.mode, createdAt: Date.now(), expiresAt: body.mode === "temporary" ? Date.now() + (body.ttlMinutes ?? 0) * 60_000 : null, apiAllow: [], state: "starting", url: null };
+      link = { appId: "notes", mode: body.mode, createdAt: Date.now(), expiresAt: body.mode === "temporary" ? Date.now() + (body.ttlMinutes ?? 0) * 60_000 : null, ...apiFields(body), state: "starting", url: null };
       await route.fulfill({ status: 201, json: { link } });
       return;
     }
@@ -69,10 +80,16 @@ test("an app is published from its icon's menu, shown as public, and disabled fr
   await expect(dialog.getByTestId("public-link-protection-none")).toHaveAttribute("aria-checked", "false");
   await dialog.getByTestId("public-link-protection-none").click();
   await expect(dialog.getByTestId("public-link-password-input")).toHaveCount(0);
+  // The app's own API is open for reading by default: an app that cannot reach it is a blank
+  // page for the visitor, and letting visitors change its data is the owner's explicit choice.
+  await expect(dialog.getByTestId("public-link-api-access-read")).toHaveAttribute("aria-checked", "true");
+  await expect(dialog.getByTestId("public-link-api-access-full")).toHaveAttribute("aria-checked", "false");
   await dialog.getByTestId("public-link-submit").click();
 
-  await expect.poll(() => posted).toEqual([{ appId: "notes", mode: "temporary", ttlMinutes: 60 }]);
+  await expect.poll(() => posted).toEqual([{ appId: "notes", mode: "temporary", ttlMinutes: 60, apiAccess: "read" }]);
   await expect(dialog.getByTestId("public-link-url")).toHaveValue(URL, { timeout: 15_000 });
+  await expect(dialog.getByTestId("public-link-share-note")).toContainText("Share this exact address");
+  await expect(dialog.getByTestId("public-link-api-status")).toHaveText("App data: read only");
   await dialog.getByTestId("public-link-close").click();
   await expect(page.getByTestId("public-link-badge-notes")).toBeVisible();
 
@@ -115,7 +132,7 @@ test("a link is created with a password of its own, which is then changed and re
         await route.fulfill({ status: 400, json: { error: "That is your ClawBox password.", code: "password_is_system" } });
         return;
       }
-      link = { appId: "notes", mode: body.mode, createdAt: Date.now(), expiresAt: null, apiAllow: [], passwordProtected: typeof body.password === "string", state: "live", url: URL };
+      link = { appId: "notes", mode: body.mode, createdAt: Date.now(), expiresAt: null, ...apiFields(body), passwordProtected: typeof body.password === "string", state: "live", url: URL };
       await route.fulfill({ status: 201, json: { link } });
       return;
     }
@@ -162,8 +179,10 @@ test("a link is created with a password of its own, which is then changed and re
   expect(generated).toMatch(/^[A-HJ-NP-Za-km-z2-9]{20}$/);
   await dialog.getByTestId("public-link-submit").click();
 
-  await expect.poll(() => posted.at(-1)).toEqual({ appId: "notes", mode: "permanent", password: generated });
+  await expect.poll(() => posted.at(-1)).toEqual({ appId: "notes", mode: "permanent", apiAccess: "read", password: generated });
   await expect(dialog.getByTestId("public-link-url")).toHaveValue(URL);
+  // The address from the browser's bar after the redirect has no key; on this link the password opens it.
+  await expect(dialog.getByTestId("public-link-share-note")).toContainText("asked for the link password instead");
   await expect(dialog.getByTestId("public-link-password-status")).toHaveText(/Password protected/);
   // The one moment the password can still be copied.
   await expect(dialog.getByTestId("public-link-password-value")).toHaveValue(generated);
@@ -204,6 +223,74 @@ test("a link is created with a password of its own, which is then changed and re
   await expect.poll(() => patched.at(-1)).toEqual({ appId: "notes", password: "added-afterwards" });
   await expect(dialog.getByTestId("public-link-password-status")).toHaveText(/Password protected/);
   await expect(dialog.getByTestId("public-link-password-changed")).toHaveCount(0);
+});
+
+/**
+ * The app's own /api is read-only by default; the owner can open it for
+ * reading and writing or switch it off, and the link's dialog then says
+ * which it is — a path typed on top of "Off" does not turn it on.
+ */
+test("the app's own API can be opened for writing or switched off, and the dialog says which", async ({ page }) => {
+  await installClawboxMocks(page, {
+    initialSetup: COMPLETE_SETUP,
+    preferences: {
+      installed_apps: ["notes"],
+      installed_meta: { notes: { name: "Notes", color: "#f97316", iconUrl: "", webappUrl: "/setup-api/webapps?app=notes" } },
+    },
+  });
+
+  let link: Record<string, unknown> | null = null;
+  const posted: Record<string, unknown>[] = [];
+  await page.route("**/setup-api/apps/public-link", async (route) => {
+    const request = route.request();
+    if (request.method() === "POST") {
+      const body = request.postDataJSON() as Record<string, unknown>;
+      posted.push(body);
+      link = { appId: "notes", mode: body.mode, createdAt: Date.now(), expiresAt: null, ...apiFields(body), passwordProtected: false, state: "live", url: URL };
+      await route.fulfill({ status: 201, json: { link } });
+      return;
+    }
+    if (request.method() === "DELETE") {
+      link = null;
+      await route.fulfill({ json: { ok: true, removed: true } });
+      return;
+    }
+    await route.fulfill({ json: { links: link ? [link] : [] } });
+  });
+
+  await page.goto("/");
+  await expect(page.getByTestId("desktop-root")).toBeVisible();
+  const icon = page.locator('[data-desktop-icon-id="notes"] button');
+  await expect(icon).toBeVisible();
+  const dialog = page.getByTestId("public-link-dialog");
+
+  const cases = [
+    { access: "full", typed: "", expected: { appId: "notes", mode: "permanent", apiAccess: "full" }, note: "load and save its data", status: "App data: read and write" },
+    { access: "none", typed: "/upload", expected: { appId: "notes", mode: "permanent", apiAccess: "none", apiAllow: ["/upload"] }, note: "pages only", status: "App data: off" },
+  ] as const;
+  for (const c of cases) {
+    await icon.click({ button: "right" });
+    await page.getByTestId("ctx-public-link-create").click();
+    await expect(dialog).toBeVisible();
+    await dialog.getByTestId("public-link-mode-permanent").click();
+    await dialog.getByTestId("public-link-protection-none").click();
+    await dialog.getByTestId(`public-link-api-access-${c.access}`).click();
+    await expect(dialog.getByTestId(`public-link-api-access-${c.access}`)).toHaveAttribute("aria-checked", "true");
+    await expect(dialog.getByTestId("public-link-api-access-read")).toHaveAttribute("aria-checked", "false");
+    await expect(dialog.getByTestId("public-link-api-access-note")).toContainText(c.note);
+    if (c.typed) await dialog.getByTestId("public-link-api").fill(c.typed);
+    await dialog.getByTestId("public-link-submit").click();
+
+    await expect.poll(() => posted.at(-1)).toEqual(c.expected);
+    await expect(dialog.getByTestId("public-link-url")).toHaveValue(URL);
+    await expect(dialog.getByTestId("public-link-api-status")).toHaveText(c.status);
+    await dialog.getByTestId("public-link-close").click();
+
+    await icon.click({ button: "right" });
+    await page.getByTestId("desktop-context-menu").getByTestId("ctx-public-link-disable").click();
+    await expect(page.getByTestId("public-link-badge-notes")).toHaveCount(0);
+  }
+  expect(posted).toHaveLength(cases.length);
 });
 
 test("built-in apps offer no public link", async ({ page }) => {

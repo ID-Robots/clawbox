@@ -30,7 +30,13 @@
  *      or encoded slashes/dots;
  *   5. the link's secret — `?k=<token>` once (exchanged for a host-only,
  *      Secure, HttpOnly cookie on the link's own origin, then redirected
- *      away so the token leaves the address bar), the cookie afterwards;
+ *      away so the token leaves the address bar), the cookie afterwards.
+ *      On a link WITH a password a visitor who has neither — the
+ *      address was copied from the browser's bar after the redirect, so the
+ *      token is not in it — is shown the password page instead of a 404, and
+ *      the password unlocks the link's cookie too: for such a link the
+ *      password is the secret, and it is rate-limited and slow-hashed as one.
+ *      A link without a password still needs the token: a bare path is 404;
  *   6. the link's password, when the owner set one (TASK-1515): until the
  *      visitor has typed it, every request is answered by a small password
  *      page this listener writes itself — never by the app, its files or its
@@ -38,7 +44,9 @@
  *   7. the app's own path (`/apps/<id>/…` for a server app);
  *   8. the method policy: GET/HEAD of anything but the app's `/api` tree by
  *      default; `/api`, and any write, only under a prefix the owner
- *      allow-listed for this link. WebSocket upgrades are refused.
+ *      allow-listed for this link (the owner's half lists `/api` unless told
+ *      otherwise), and with `apiReadOnly` the allow-listed
+ *      prefixes answer GET/HEAD only. WebSocket upgrades are refused.
  */
 
 /* eslint-disable @typescript-eslint/no-require-imports */
@@ -63,7 +71,14 @@ const UNLOCK_BODY_MAX = 4096;
 const PASSWORD_MAX_LENGTH = 128;
 const PASSWORD_HASH_RE = /^scrypt\$(\d{4,7})\$(\d{1,2})\$(\d{1,2})\$([A-Za-z0-9_-]{22,64})\$([A-Za-z0-9_-]{43,86})$/;
 const UNLOCK_KEY_RE = /^[A-Za-z0-9_-]{43}$/;
-/** Password attempts, right or wrong, in one window: per visitor of a link, and per link. */
+/**
+ * Password attempts, right or wrong, in one window: per visitor (client
+ * address) of a link, and — for visitors WITHOUT the link's key only — per
+ * link. The link-wide budget is what stops guessing spread over many
+ * addresses; it is never applied to a visitor who holds the key (the address
+ * the owner shared carries it), so a stranger who burns it cannot lock the
+ * people the link was sent to out of their own link.
+ */
 const PASSWORD_WINDOW_MS = 15 * 60_000;
 const PASSWORD_TRIES_PER_VISITOR = 5;
 const PASSWORD_TRIES_PER_LINK = 20;
@@ -147,6 +162,8 @@ function validLink(raw) {
   if (mode === "permanent" && expiresAt !== null && expiresAt !== undefined) return null;
   const apiAllow = validApiAllow(raw.apiAllow ?? []);
   if (!apiAllow) return null;
+  if (raw.apiReadOnly !== undefined && raw.apiReadOnly !== null && typeof raw.apiReadOnly !== "boolean") return null;
+  const apiReadOnly = raw.apiReadOnly === true;
   // A password record that cannot be used makes the whole link unusable: a
   // link the owner protected is never served as an open one.
   let password = null;
@@ -154,7 +171,7 @@ function validLink(raw) {
     password = validPassword(raw.password);
     if (!password) return null;
   }
-  return { id, appId, mode, token, createdAt, expiresAt: mode === "temporary" ? expiresAt : null, apiAllow, password };
+  return { id, appId, mode, token, createdAt, expiresAt: mode === "temporary" ? expiresAt : null, apiAllow, apiReadOnly, password };
 }
 
 /** `scrypt$N$r$p$salt$key` (base64url salt and key) taken apart, or null. */
@@ -302,13 +319,14 @@ function isApiPath(rest) {
 /**
  * May `method` reach `rest` (the path below the app's base) on this link?
  * GET/HEAD of the app's pages and assets by default; its `/api` tree and every
- * write only under a prefix the owner allow-listed. Never OPTIONS, CONNECT or
- * TRACE: there is no cross-origin caller this link answers.
+ * write only under a prefix the owner allow-listed — and, on a read-only link
+ * (`apiReadOnly`), no write at all. Never OPTIONS, CONNECT or TRACE: there is
+ * no cross-origin caller this link answers.
  */
 function methodAllowed(link, method, rest) {
   const allowed = link.apiAllow.some((prefix) => underPrefix(rest, prefix));
   if (method === "GET" || method === "HEAD") return allowed || !isApiPath(rest);
-  if (WRITE_METHODS.has(method)) return allowed;
+  if (WRITE_METHODS.has(method)) return allowed && link.apiReadOnly !== true;
   return false;
 }
 
@@ -497,6 +515,12 @@ function readSmallBody(req, max) {
   });
 }
 
+/** The link's own cookie — the token, host-only on the link's origin — for as long as the link lasts. */
+function tokenCookie(link, nowMs) {
+  const maxAge = link.mode === "temporary" ? Math.max(1, Math.floor((link.expiresAt - nowMs) / 1000)) : 60 * 60 * 24 * 365;
+  return `${COOKIE_NAME}=${link.token}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`;
+}
+
 /** Where to send the visitor after the password: a canonical path on this origin, or the top. */
 function safeNext(raw) {
   const target = typeof raw === "string" ? canonicalTarget(raw) : null;
@@ -549,7 +573,13 @@ function createLinkHandler(linkId, opts) {
    * was disabled, expired or given another password in the meantime is not
    * unlocked by an answer to the old one.
    */
-  async function unlockAttempt(req, res, link, visitor) {
+  /** Is this visitor out of password attempts? Keyless visitors also share the link's budget. */
+  function passwordLocked(link, visitor, hasToken) {
+    if (limiter.count(`pw:${link.id}:${visitor}`) >= PASSWORD_TRIES_PER_VISITOR) return true;
+    return !hasToken && limiter.count(`pwl:${link.id}`) >= PASSWORD_TRIES_PER_LINK;
+  }
+
+  async function unlockAttempt(req, res, link, visitor, issueToken) {
     const site = req.headers["sec-fetch-site"];
     if (typeof site === "string" && site !== "same-origin" && site !== "none") return refuse(res, 403, "Forbidden.");
     if (!/^application\/x-www-form-urlencoded\b/i.test(String(req.headers["content-type"] || ""))) return refuse(res, 415, "Unsupported media type.");
@@ -559,13 +589,16 @@ function createLinkHandler(linkId, opts) {
     const next = safeNext(form.get("next"));
     const password = form.get("password") || "";
 
+    // `issueToken` is set exactly when the visitor came without the key.
+    const hasToken = !issueToken;
     const visitorKey = `pw:${link.id}:${visitor}`;
-    const linkKey = `pwl:${link.id}`;
-    if (limiter.count(visitorKey) >= PASSWORD_TRIES_PER_VISITOR || limiter.count(linkKey) >= PASSWORD_TRIES_PER_LINK || hashWaiting >= PASSWORD_QUEUE_MAX) {
+    // Only keyless attempts draw on the link-wide budget (see PASSWORD_TRIES_PER_LINK).
+    const linkKey = hasToken ? null : `pwl:${link.id}`;
+    if (passwordLocked(link, visitor, hasToken) || hashWaiting >= PASSWORD_QUEUE_MAX) {
       return sendPasswordPage(req, res, 429, next, "locked", { "retry-after": String(PASSWORD_WINDOW_MS / 1000) });
     }
     limiter.hit(visitorKey, Infinity, PASSWORD_WINDOW_MS);
-    limiter.hit(linkKey, Infinity, PASSWORD_WINDOW_MS);
+    if (linkKey) limiter.hit(linkKey, Infinity, PASSWORD_WINDOW_MS);
 
     let ok = false;
     if (password.length > 0 && password.length <= PASSWORD_MAX_LENGTH) {
@@ -586,11 +619,16 @@ function createLinkHandler(linkId, opts) {
       return sendPasswordPage(req, res, 401, next, "wrong");
     }
     limiter.refund(visitorKey);
-    limiter.refund(linkKey);
+    if (linkKey) limiter.refund(linkKey);
     const cookie = unlockCookieValue(current, now());
+    const cookies = [`${UNLOCK_COOKIE_NAME}=${cookie.value}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${cookie.maxAge}`];
+    // A visitor who came without the token gets the link's
+    // cookie with the unlock: the password stood in for the token once, and
+    // from here on the two cookies are what every other visitor holds.
+    if (issueToken) cookies.push(tokenCookie(current, now()));
     res.writeHead(303, {
       location: next,
-      "set-cookie": `${UNLOCK_COOKIE_NAME}=${cookie.value}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${cookie.maxAge}`,
+      "set-cookie": cookies,
       "cache-control": "no-store",
       ...SECURITY_HEADERS,
     });
@@ -628,16 +666,21 @@ function createLinkHandler(linkId, opts) {
       if (method !== "GET" && method !== "HEAD") return refuse(res, 405, "Method not allowed.");
       params.delete(TOKEN_PARAM);
       const rest = params.toString();
-      const maxAge = link.mode === "temporary" ? Math.max(1, Math.floor((link.expiresAt - now()) / 1000)) : 60 * 60 * 24 * 365;
       res.writeHead(303, {
         location: `${target.path}${rest ? `?${rest}` : ""}`,
-        "set-cookie": `${COOKIE_NAME}=${link.token}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`,
+        "set-cookie": tokenCookie(link, now()),
         "cache-control": "no-store",
         ...SECURITY_HEADERS,
       });
       return res.end();
     }
-    if (!timingSafeTokenEqual(cookieValue(req.headers.cookie, COOKIE_NAME), link.token)) {
+    const hasToken = timingSafeTokenEqual(cookieValue(req.headers.cookie, COOKIE_NAME), link.token);
+    // No token: a bare 404 — unless the link has a password, which is then
+    // the secret asked for (the address copied from the browser's
+    // bar after the redirect has no token in it, and must still open for
+    // the person it was sent to). A link without a password has no other
+    // secret, so there the token stays the only way in.
+    if (!hasToken && !link.password) {
       limiter.hit(`bad:${link.id}:${visitor}`, Infinity);
       return refuse(res, 404, "Not found.");
     }
@@ -647,12 +690,11 @@ function createLinkHandler(linkId, opts) {
     if (link.password && !unlocked(link, cookieValue(req.headers.cookie, UNLOCK_COOKIE_NAME), now())) {
       if (target.path === UNLOCK_PATH) {
         if (method !== "POST") return refuse(res, 405, "Method not allowed.");
-        unlockAttempt(req, res, link, visitor).catch(() => refuse(res, 500, "Something went wrong."));
+        unlockAttempt(req, res, link, visitor, !hasToken).catch(() => refuse(res, 500, "Something went wrong."));
         return undefined;
       }
       if (method !== "GET" && method !== "HEAD") return refuse(res, 401, "Password required.");
-      const locked = limiter.count(`pw:${link.id}:${visitor}`) >= PASSWORD_TRIES_PER_VISITOR || limiter.count(`pwl:${link.id}`) >= PASSWORD_TRIES_PER_LINK;
-      return sendPasswordPage(req, res, 401, safeNext(`${target.path}${target.search}`), locked ? "locked" : undefined);
+      return sendPasswordPage(req, res, 401, safeNext(`${target.path}${target.search}`), passwordLocked(link, visitor, hasToken) ? "locked" : undefined);
     }
     // Already unlocked (a second tab, the back button): the form's address
     // leads back into the app rather than to a 404.

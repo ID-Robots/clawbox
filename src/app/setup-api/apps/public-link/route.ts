@@ -10,7 +10,10 @@ export const dynamic = "force-dynamic";
  * scripts/public-app-links.js.
  *
  *   GET                       every link, with its URL once the tunnel is up
- *   POST   {appId, mode, ttlMinutes?, apiAllow?, password?}   publish
+ *   POST   {appId, mode, ttlMinutes?, apiAccess?, apiAllow?, password?}   publish
+ *                             (apiAccess: read — the default, the app's /api
+ *                             answers GET/HEAD — full, or none; apiAllow adds
+ *                             prefixes)
  *   PATCH  {appId, password}  set or change the link's password (a string),
  *                             or remove it (null); the link stays the same
  *   DELETE {appId}            disable — immediate
@@ -80,7 +83,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
   }
   try {
-    const link = await createPublicLink({ appId: body.appId, mode: body.mode, ttlMinutes: body.ttlMinutes, apiAllow: body.apiAllow, password: body.password });
+    const link = await createPublicLink({ appId: body.appId, mode: body.mode, ttlMinutes: body.ttlMinutes, apiAllow: body.apiAllow, apiAccess: body.apiAccess, password: body.password });
     return NextResponse.json({ link: forViewer(who.owner, link) }, { status: 201, headers: NO_STORE });
   } catch (err) {
     return failure(err);

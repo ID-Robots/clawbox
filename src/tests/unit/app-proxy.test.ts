@@ -121,6 +121,21 @@ describe("the path and the request", () => {
     expect(lib.appProxyAllowOrigin("null", null, "")).toBeNull();
   });
 
+  it("the app's own /api tree is the exception: answered for the opaque origin whatever its type, and for no other origin", () => {
+    for (const type of ["application/json", "text/plain", "audio/mpeg", "application/octet-stream", null, ""]) {
+      expect(lib.appProxyAllowOrigin("null", null, type, true), String(type)).toBe("null");
+    }
+    expect(lib.appProxyAllowOrigin("https://evil.example", null, "application/json", true)).toBeNull();
+    expect(lib.appProxyAllowOrigin(null, null, "application/json", true)).toBeNull();
+    expect(lib.appProxyAllowOrigin("null", "*", "application/json", true)).toBeNull();
+    expect(lib.isAppApiPath("/api")).toBe(true);
+    expect(lib.isAppApiPath("/api/notes")).toBe(true);
+    expect(lib.isAppApiPath("/API/notes")).toBe(true);
+    expect(lib.isAppApiPath("/apix")).toBe(false);
+    expect(lib.isAppApiPath("/data/api")).toBe(false);
+    expect(lib.isAppApiPath("/")).toBe(false);
+  });
+
   it("names the same config key the runner does", async () => {
     const { CODING_AGENT_DIR_CONFIG_KEY } = await import("@/lib/coding-agent");
     expect(lib.PROJECT_FOLDER_CONFIG_KEY).toBe(CODING_AGENT_DIR_CONFIG_KEY);
@@ -281,5 +296,17 @@ describe("registerServerApp", () => {
 
   it("escapes the name in the stub", () => {
     expect(lib.serverAppStubHtml("<b>&'\"", "x")).toContain("<title>&lt;b&gt;&amp;&#39;&quot;</title>");
+  });
+});
+
+describe("mergeExposedHeaders", () => {
+  it("adds the API's headers to the app's own list, keeping its entries and order, without duplicates", () => {
+    expect(lib.mergeExposedHeaders(null)).toBe(lib.APP_API_EXPOSED_HEADERS);
+    expect(lib.mergeExposedHeaders("")).toBe(lib.APP_API_EXPOSED_HEADERS);
+    const merged = lib.mergeExposedHeaders("X-Request-Id, content-range");
+    expect(merged.startsWith("X-Request-Id, content-range, ")).toBe(true);
+    expect(merged.match(/content-range/gi)).toHaveLength(1);
+    expect(merged).toContain("X-Total-Count");
+    expect(lib.mergeExposedHeaders("*")).toBe("*");
   });
 });
