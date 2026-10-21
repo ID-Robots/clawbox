@@ -211,7 +211,8 @@ describe("mapPublishResponse", () => {
   it("the token errors map to token_rejected — and never to a 401 of the box's own", () => {
     for (const status of [401, 403]) {
       const out = mapPublishResponse(status, { error: { message: "Invalid token.", type: "auth", code: "invalid_token" } }, BASE);
-      expect(out).toMatchObject({ ok: false, code: "token_rejected", status: 409 });
+      // The portal's sentence alone: the dialog and app_publish say what to do next.
+      expect(out).toMatchObject({ ok: false, code: "token_rejected", status: 409, message: "Invalid token." });
     }
     expect(mapPublishResponse(503, { error: { message: "Down.", type: "x", code: "unavailable" } }, BASE)).toMatchObject({ code: "store_unavailable" });
   });

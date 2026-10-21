@@ -643,8 +643,8 @@ export default function CodingAgentApp() {
    * folder) while every request it makes is keyed by the folder and the kind.
    */
   const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
-  /** The project (folder) the "Publish to ClawBox Store" dialog is open for. */
-  const [publishTarget, setPublishTarget] = useState<string | null>(null);
+  /** The project the "Publish to ClawBox Store" dialog is open for — its folder AND directory, since one name can be two projects. */
+  const [publishTarget, setPublishTarget] = useState<{ folder: string; directory: string } | null>(null);
   /** Where the last removed project went — the line the list keeps afterwards. */
   const [removedProject, setRemovedProject] = useState<{ folder: string; trashPath: string } | null>(null);
   // Pull requests opened from a project's page this session, by folder.
@@ -2409,7 +2409,7 @@ export default function CodingAgentApp() {
                     {project.app && (
                       <button
                         type="button"
-                        onClick={(e) => { e.stopPropagation(); setPublishTarget(project.folder); }}
+                        onClick={(e) => { e.stopPropagation(); setPublishTarget({ folder: project.folder, directory: project.directory }); }}
                         data-testid={`coding-agent-publish-${project.folder}`}
                         title={t("codingAgent.publish")}
                         aria-label={t("codingAgent.publishFor", { name: project.name })}
@@ -2830,7 +2830,7 @@ export default function CodingAgentApp() {
                   {project?.app && (
                     <button
                       type="button"
-                      onClick={() => setPublishTarget(project.folder)}
+                      onClick={() => setPublishTarget({ folder: project.folder, directory: project.directory })}
                       className={BTN_SECONDARY}
                       data-testid="coding-agent-project-publish"
                     >
@@ -3380,7 +3380,7 @@ export default function CodingAgentApp() {
       </div>
 
       {publishTarget && (
-        <StorePublishDialog key={publishTarget} projectId={publishTarget} onClose={() => setPublishTarget(null)} />
+        <StorePublishDialog key={publishTarget.directory} projectId={publishTarget.folder} directory={publishTarget.directory} onClose={() => setPublishTarget(null)} />
       )}
 
       {/* Mounted at the top level rather than inside the row, so the backdrop

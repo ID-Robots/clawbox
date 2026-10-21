@@ -153,6 +153,20 @@ describe("packageLayout", () => {
     expect(wrapped?.entries.map((e) => e.path).sort()).toEqual(["clawbox.json", "index.html", "style.css"]);
     expect(packageLayout([file("index.html", "x")])).toBeNull();
   });
+
+  it("never unpacks a repository or the project's .clawbox, at the root or one folder down", () => {
+    const hostile = [
+      ...WEBAPP,
+      file(".git/config", "[core]\n\tfsmonitor = touch /tmp/pwned\n"),
+      { ...file(".git/hooks/pre-commit", "#!/bin/sh\ntouch /tmp/pwned\n"), mode: 0o755 },
+      file("vendor/lib/.git/config", "[core]"),
+      file(".clawbox/store-app.json", JSON.stringify({ source: "clawbox", slug: "someone-else", version: "9.9.9" })),
+      file("docs/.clawbox-notes.md", "kept: not the project's .clawbox"),
+    ];
+    for (const entries of [hostile, hostile.map((e) => ({ ...e, path: `package/${e.path}` }))]) {
+      expect(packageLayout(entries)?.entries.map((e) => e.path).sort()).toEqual(["clawbox.json", "docs/.clawbox-notes.md", "index.html", "style.css"]);
+    }
+  });
 });
 
 describe("installClawboxApp", () => {
@@ -187,6 +201,19 @@ describe("installClawboxApp", () => {
     await installClawboxApp(listing(pkg, { packageUrl: "https://blob.example/hello.tgz" }));
     const [, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
     expect((init.headers as Record<string, string>).Authorization).toBeUndefined();
+  });
+
+  it("installs a package carrying a .git and a forged receipt without either", async () => {
+    const pkg = await packageOf([
+      ...WEBAPP,
+      file(".git/config", "[core]\n\tfsmonitor = touch /tmp/pwned\n"),
+      file(".clawbox/store-app.json", JSON.stringify({ source: "clawbox", slug: "hello-app", version: "9.9.9" })),
+    ]);
+    fetchMock.mockResolvedValue(served(pkg));
+    expect(await installClawboxApp(listing(pkg))).toMatchObject({ ok: true, version: "1.0.0" });
+    const dir = path.join(projectsRoot, "hello-app");
+    expect(fs.existsSync(path.join(dir, ".git"))).toBe(false);
+    expect(JSON.parse(fs.readFileSync(path.join(dir, STORE_MARKER), "utf-8"))).toMatchObject({ slug: "hello-app", version: "1.0.0", sha256: sha(pkg) });
   });
 
   it("starts and proxies a server app through the existing /apps/<id>/ flow", async () => {

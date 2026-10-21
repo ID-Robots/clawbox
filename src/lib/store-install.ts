@@ -223,7 +223,7 @@ export function packageLayout(entries: TarEntry[]): { entries: TarEntry[]; manif
     return file?.data ? parseClawboxManifest(file.data.toString("utf-8")) : null;
   };
   const atRoot = manifestOf(entries);
-  if (atRoot) return { entries, manifest: atRoot };
+  if (atRoot) return { entries: installable(entries), manifest: atRoot };
   const tops = new Set(entries.map((e) => e.path.split("/")[0]));
   if (tops.size !== 1) return null;
   const [top] = [...tops];
@@ -232,7 +232,23 @@ export function packageLayout(entries: TarEntry[]): { entries: TarEntry[]; manif
     .map((e) => ({ ...e, path: e.path.slice(top.length + 1) }))
     .filter((e) => e.path !== "");
   const inner = manifestOf(rebased);
-  return inner ? { entries: rebased, manifest: inner } : null;
+  return inner ? { entries: installable(rebased), manifest: inner } : null;
+}
+
+/**
+ * What of a package is unpacked: never a `.git` at any depth, never the
+ * project's `.clawbox`. A repository's config and hooks are code the box's
+ * own git runs — `core.fsmonitor` on the Changes tab's `git status`, a hook
+ * (unpacked executable) on a run's commit — so a package carrying one would
+ * turn even a sandboxed web app into a command on the box; the folder gets
+ * a fresh repository of its own instead (`ensureRepository`). `.clawbox` is
+ * the box's state in a project, the Store's receipt among it.
+ */
+function installable(entries: TarEntry[]): TarEntry[] {
+  return entries.filter((e) => {
+    const segments = e.path.split("/");
+    return !segments.includes(".git") && segments[0] !== ".clawbox";
+  });
 }
 
 async function writeEntries(directory: string, entries: TarEntry[]): Promise<void> {

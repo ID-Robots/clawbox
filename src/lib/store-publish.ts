@@ -433,7 +433,10 @@ export function mapPublishResponse(status: number, rawBody: unknown, base: strin
   const token = tokenError(body);
   if (token) {
     if (status === 503) return publishFailure("store_unavailable", token.message);
-    if (status === 401 || status === 403) return publishFailure("token_rejected", token.message ? `${token.message} Sign in to ClawBox AI again in Settings, then publish again.` : undefined);
+    // The portal's own sentence alone: every surface already says what to do
+    // next (the dialog's body, app_publish's `next`), and appending it here
+    // put the same instruction on screen twice.
+    if (status === 401 || status === 403) return publishFailure("token_rejected", token.message);
   }
   if (status === 403 && code === "coming_soon") {
     return publishFailure("coming_soon", message, { upgradeUrl: portalUrl(body?.upgradeUrl ?? PORTAL_APPS_PATH, base) });

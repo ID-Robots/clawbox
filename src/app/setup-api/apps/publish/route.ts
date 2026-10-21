@@ -20,10 +20,10 @@ export const dynamic = "force-dynamic";
  * Publish a Coding Agent project that carries clawbox.json to the ClawBox
  * Store (src/lib/store-publish.ts).
  *
- *   GET  [?projectId=<folder>] — may this box publish (the portal's
+ *   GET  [?projectId=<folder>[&directory=<path>]] — may this box publish (the portal's
  *        `canPublish`), the owner's apps already in the Store, and — for a
  *        project — the name, slug and next version the dialog starts from.
- *   POST { projectId, version, description?, iconUrl?, slug? } —
+ *   POST { projectId, directory?, version, description?, iconUrl?, slug? } —
  *        `{ ok: true, app, created, storeUrl }` or
  *        `{ ok: false, code, message, field?, upgradeUrl?, retryable }`.
  *
@@ -31,10 +31,15 @@ export const dynamic = "force-dynamic";
  * agent's MCP bearer (`app_publish`, which the owner asks for in chat) —
  * never another ClawBox user, who gets 403 `owner_only`. A project is found
  * through the Coding Agent's own listing by its folder name, so nothing but
- * one of the owner's projects can be packed and sent.
+ * one of the owner's projects can be packed and sent. A folder name can be
+ * two projects (an owner's folder and a code project of the same name), so
+ * the app's dialog also sends the row's `directory`, and a request naming
+ * only a folder that is two projects is refused rather than guessed at —
+ * publishing the wrong one puts it on a public store.
  */
 
 const MAX_PROJECT_ID = 128;
+const MAX_DIRECTORY = 4096;
 
 async function gate(request: Request): Promise<NextResponse | null> {
   const denied = await requireSession(request);
@@ -53,10 +58,29 @@ function projectIdFrom(value: unknown): string | null {
     : null;
 }
 
-async function findProject(projectId: string): Promise<PublishableProject | null> {
+/** The row's directory: undefined when not sent, null when sent and not one. */
+function directoryFrom(value: unknown): string | null | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  return typeof value === "string" && value.length <= MAX_DIRECTORY && !value.includes("\0") ? value : null;
+}
+
+type Found = { ok: true; project: PublishableProject } | { ok: false; failure: PublishFailure };
+
+async function findProject(projectId: string, directory: string | undefined): Promise<Found> {
   const { projects } = await listProjects();
-  const project = projects.find((p) => p.folder === projectId) ?? null;
-  return project ? { folder: project.folder, directory: project.directory } : null;
+  const matches = projects.filter((p) => p.folder === projectId && (directory === undefined || p.directory === directory));
+  if (matches.length === 0) return { ok: false, failure: publishFailure("not_found") };
+  if (matches.length > 1) {
+    return {
+      ok: false,
+      failure: publishFailure(
+        "invalid",
+        `Two of your projects are named "${projectId}" — a folder and a code project. Publish it from its row in the Coding Agent app, which says which one it means.`,
+        { field: "projectId" },
+      ),
+    };
+  }
+  return { ok: true, project: { folder: matches[0].folder, directory: matches[0].directory } };
 }
 
 function failureResponse(failure: PublishFailure): NextResponse {
@@ -68,20 +92,23 @@ export async function GET(request: Request) {
   const blocked = await gate(request);
   if (blocked) return blocked;
   try {
-    const raw = new URL(request.url).searchParams.get("projectId");
+    const query = new URL(request.url).searchParams;
+    const raw = query.get("projectId");
     const projectId = raw === null ? null : projectIdFrom(raw);
     if (raw !== null && !projectId) return failureResponse(publishFailure("invalid", "Name the project by its folder.", { field: "projectId" }));
+    const directory = directoryFrom(query.get("directory"));
+    if (directory === null) return failureResponse(publishFailure("invalid", "The project's directory is not one.", { field: "directory" }));
 
     let project: Record<string, unknown> | undefined;
     if (projectId) {
-      const found = await findProject(projectId);
-      if (!found) return failureResponse(publishFailure("not_found"));
-      const manifest = await readClawboxManifest(found.directory);
+      const found = await findProject(projectId, directory);
+      if (!found.ok) return failureResponse(found.failure);
+      const manifest = await readClawboxManifest(found.project.directory);
       if (!manifest) return failureResponse(publishFailure("no_manifest"));
       project = {
-        projectId: found.folder,
+        projectId: found.project.folder,
         name: manifest.name,
-        slug: manifestSlug(manifest, found.folder),
+        slug: manifestSlug(manifest, found.project.folder),
         description: manifest.description ?? "",
         kind: publishKind(manifest),
       };
@@ -122,9 +149,13 @@ export async function POST(request: Request) {
   if (description === null) return failureResponse(publishFailure("invalid", "The description must be text.", { field: "description" }));
   if (iconUrl === null) return failureResponse(publishFailure("invalid", "The icon URL must be text.", { field: "iconUrl" }));
   if (slug === null) return failureResponse(publishFailure("invalid", "The slug must be text.", { field: "slug" }));
+  const directory = directoryFrom(body.directory);
+  if (directory === null) return failureResponse(publishFailure("invalid", "The project's directory is not one.", { field: "directory" }));
 
   try {
-    const outcome = await publishProject(projectId, { version: body.version.trim(), description, iconUrl, slug }, findProject);
+    const found = await findProject(projectId, directory);
+    if (!found.ok) return failureResponse(found.failure);
+    const outcome = await publishProject(projectId, { version: body.version.trim(), description, iconUrl, slug }, async () => found.project);
     if (!outcome.ok) return failureResponse(outcome);
     return NextResponse.json({ ok: true, app: outcome.app, created: outcome.created, storeUrl: outcome.storeUrl }, { status: outcome.created ? 201 : 200 });
   } catch (err) {

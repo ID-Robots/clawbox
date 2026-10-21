@@ -95,7 +95,49 @@ describe("POST", () => {
     expect(id).toBe(path.basename(project));
     expect(input).toEqual({ version: "1.0.0", description: "Swipe", iconUrl: "https://i.example/x.png", slug: "tinder" });
     expect(await resolve(path.basename(project))).toEqual({ folder: path.basename(project), directory: project });
-    expect(await resolve("not-listed")).toBeNull();
+  });
+
+  it("is 404 for a project the listing does not have, before anything is packed", async () => {
+    const res = await route.POST(request("POST", "", { projectId: "not-listed", version: "1.0.0" }, owner()));
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ ok: false, code: "not_found" });
+    expect(publishProject).not.toHaveBeenCalled();
+  });
+
+  describe("one name, two projects (a folder and a code project)", () => {
+    const codeProject = () => path.join(os.tmpdir(), "code-projects", path.basename(project));
+    beforeEach(() => {
+      listProjects.mockResolvedValue({
+        directory: path.dirname(project),
+        projects: [
+          { folder: path.basename(project), directory: project, name: "Tinder Clone" },
+          { folder: path.basename(project), directory: codeProject(), name: "Other" },
+        ],
+      });
+    });
+
+    it("refuses to guess which one a bare name means", async () => {
+      const res = await route.POST(request("POST", "", { projectId: path.basename(project), version: "1.0.0" }, owner()));
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ ok: false, code: "invalid", field: "projectId" });
+      expect(publishProject).not.toHaveBeenCalled();
+    });
+
+    it("publishes exactly the row's project when its directory is named", async () => {
+      publishProject.mockResolvedValue({ ok: true, app: { slug: "other" }, created: true, storeUrl: "https://portal.example/portal/apps" });
+      const res = await route.POST(request("POST", "", { projectId: path.basename(project), directory: codeProject(), version: "1.0.0" }, owner()));
+      expect(res.status).toBe(201);
+      const resolve = publishProject.mock.calls[0][2];
+      expect(await resolve(path.basename(project))).toEqual({ folder: path.basename(project), directory: codeProject() });
+    });
+
+    it("answers the status for the row's project too", async () => {
+      const res = await route.GET(request("GET", `?projectId=${encodeURIComponent(path.basename(project))}&directory=${encodeURIComponent(project)}`, undefined, owner()));
+      expect(res.status).toBe(200);
+      expect((await res.json()).project).toMatchObject({ name: "Tinder Clone" });
+      const bare = await route.GET(request("GET", `?projectId=${encodeURIComponent(path.basename(project))}`, undefined, owner()));
+      expect(bare.status).toBe(400);
+    });
   });
 
   it("answers a refusal with its own status and body — coming_soon with the upgrade page", async () => {

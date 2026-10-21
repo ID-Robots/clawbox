@@ -72,9 +72,11 @@ function openExternal(url: string): void {
   window.open(url, "_blank", "noopener,noreferrer");
 }
 
-export default function StorePublishDialog({ projectId, onClose }: {
+export default function StorePublishDialog({ projectId, directory, onClose }: {
   /** The project's folder name, as the Coding Agent lists it. */
   projectId: string;
+  /** The row's folder on disk: one name can be two projects (a folder and a code project). */
+  directory?: string;
   onClose: () => void;
 }) {
   const { t } = useT();
@@ -99,7 +101,8 @@ export default function StorePublishDialog({ projectId, onClose }: {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`/setup-api/apps/publish?projectId=${encodeURIComponent(projectId)}`, { cache: "no-store" });
+        const query = new URLSearchParams({ projectId, ...(directory ? { directory } : {}) });
+        const res = await fetch(`/setup-api/apps/publish?${query}`, { cache: "no-store" });
         const data = (await res.json().catch(() => ({}))) as StatusAnswer;
         if (cancelled) return;
         if (!res.ok || data.ok === false) {
@@ -127,7 +130,7 @@ export default function StorePublishDialog({ projectId, onClose }: {
     })();
     return () => { cancelled = true; };
     // Asked once per project: `t` is not a dependency, the answer is stored untranslated.
-  }, [projectId]);
+  }, [projectId, directory]);
 
   const publish = useCallback(async () => {
     setBusy(true);
@@ -136,7 +139,7 @@ export default function StorePublishDialog({ projectId, onClose }: {
       const res = await fetch("/setup-api/apps/publish", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ projectId, version: version.trim(), slug: slug.trim(), description, iconUrl: iconUrl.trim() }),
+        body: JSON.stringify({ projectId, ...(directory ? { directory } : {}), version: version.trim(), slug: slug.trim(), description, iconUrl: iconUrl.trim() }),
       });
       const data = (await res.json().catch(() => ({}))) as PublishAnswer;
       if (!alive.current) return;
@@ -163,7 +166,7 @@ export default function StorePublishDialog({ projectId, onClose }: {
     } finally {
       if (alive.current) setBusy(false);
     }
-  }, [description, iconUrl, info?.name, projectId, slug, t, version]);
+  }, [description, directory, iconUrl, info?.name, projectId, slug, t, version]);
 
   const fieldError = (field: string) => refusal?.field === field
     ? <p className="mt-1 text-[11px] text-red-300" data-testid={`store-publish-error-${field}`}>{refusal.message}</p>
