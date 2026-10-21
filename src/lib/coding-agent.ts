@@ -5525,7 +5525,10 @@ export function clearFinishedRuns(policy: HistoryPolicy = store.historyPolicy ??
   // drop a record and keep its artifacts, or the other way round.
   const keep: CodingRun[] = [];
   const dropped: CodingRun[] = [];
-  for (const r of list) (heldOn(r) || isPrPending(r.pr) ? keep : dropped).push(r);
+  const held = new Set(list.filter(heldOn));
+  // What a kept held run still points at stays with it — see namedByHeldRuns.
+  const named = namedByHeldRuns(held);
+  for (const r of list) (held.has(r) || isPrPending(r.pr) || named.has(r.id) ? keep : dropped).push(r);
   // The older runs a history mode kept are finished runs of this same list,
   // so the owner's Clear takes them too. Under archive they are ARCHIVED like
   // everything else leaving the list, which is what that mode promises.
@@ -13346,8 +13349,9 @@ function newRunRecord(fields: {
 
 /**
  * Put a new record at the head of the list, newest first, and make room.
- * Never drops a held run (live, paused, drafted); trims the oldest finished
- * ones. What happens to a run that leaves is the owner's history setting
+ * Never drops a held run (live, paused, drafted), nor a run one of them still
+ * names (namedByHeldRuns); trims the oldest finished ones. What happens to a
+ * run that leaves is the owner's history setting
  * (src/lib/coding-run-history.ts):
  *
  *  - standard — deleted with its evidence folder and its inputs, exactly as
@@ -13372,8 +13376,10 @@ function retainRuns(list: CodingRun[], policy: HistoryPolicy): void {
   // A standard box never asks the disk anything — its trim is the one it
   // always had.
   const low = policy.mode !== "standard" && isDiskLow(diskSpace());
+  // Once, before the loop: the records that name runs are held, so it never splices one.
+  const named = namedByHeldRuns(list);
   while (list.length > MAX_RUNS_KEPT) {
-    const idx = findLastFinished(list);
+    const idx = findLastFinished(list, named);
     if (idx < 0) break;
     const [leaving] = list.splice(idx, 1);
     if (!low && keepsOlderRuns(policy) && writeOlderRun(leaving as unknown as HistoryRecord)) continue;
@@ -13442,15 +13448,36 @@ function folderPresent(directory: string): boolean {
   }
 }
 
-/** The oldest run that is history — see isHeld for what is not, and
- *  isPrPending for the run that has settled but is still being watched. */
-function findLastFinished(list: CodingRun[]): number {
+/**
+ * Settled runs a HELD record still names, so neither the trim nor the owner's
+ * Clear may take them: the run a queued continuation resumes when its turn
+ * comes, and the run a live or paused review pass reads back when it settles.
+ * The same idea as isPrPending — settled, but something is waiting on it. The
+ * queue's own insert used to trim the very run it continued, and the
+ * continuation then failed with "There is no coding run with that id to
+ * resume" (night 2026-10-20/21, a list full of held runs).
+ */
+function namedByHeldRuns(list: Iterable<CodingRun>): Set<string> {
+  const named = new Set<string>();
+  for (const r of list) {
+    if (!isHeld(r.status)) continue;
+    const resumes = r.status === "queued" ? r.queued?.start?.resumeRunId : null;
+    if (resumes) named.add(resumes);
+    if (r.reviewOf) named.add(r.reviewOf);
+  }
+  return named;
+}
+
+/** The oldest run that is history — see isHeld for what is not, isPrPending
+ *  for the run that has settled but is still being watched, and
+ *  namedByHeldRuns for the one a held run still points at. */
+function findLastFinished(list: CodingRun[], named: ReadonlySet<string>): number {
   for (let i = list.length - 1; i >= 0; i -= 1) {
     // `holdsResumableSession`, not `isHeld`: a run that GAVE UP is settled, but
     // its session is intact and its card offers Resume, so trimming it to make
     // room for a new run would take that session and its evidence folder with
     // it — unasked, and past the rail's newest dozen, invisibly.
-    if (!holdsResumableSession(list[i].status) && !isPrPending(list[i].pr)) return i;
+    if (!holdsResumableSession(list[i].status) && !isPrPending(list[i].pr) && !named.has(list[i].id)) return i;
   }
   return -1;
 }
