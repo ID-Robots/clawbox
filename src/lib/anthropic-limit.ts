@@ -363,6 +363,44 @@ export interface PoolMember {
   id: string;
   status: AnthropicAccountStatus;
   limitedUntil: number | null;
+  /** `oauth`, `api_key` or `login` (src/lib/anthropic-accounts.ts); only the "most room" pick reads it. */
+  kind?: string;
+}
+
+/**
+ * How the next account is picked when one has to be: `order`, the owner's
+ * order (the default); or `most-room`, the subscription whose fullest usage
+ * window has the most room left.
+ */
+export type PickMode = "order" | "most-room";
+
+export const PICK_MODES: readonly PickMode[] = ["order", "most-room"];
+
+export interface PickOptions {
+  /** Unset is `order`. */
+  mode?: PickMode;
+  /**
+   * Per account id, how full its fullest window is (five-hour or seven-day,
+   * Anthropic's percent): the window closest to running out decides. An
+   * account with no entry has no reading.
+   */
+  fullness?: ReadonlyMap<string, number>;
+}
+
+/**
+ * The "most room" ranking: the `oauth` accounts with a reading, the least
+ * full first; then every other subscription (an `oauth` account with no
+ * reading, the `login`), then the API keys — an API key never goes ahead of a
+ * subscription. The owner's order breaks every tie.
+ */
+function byMostRoom<T extends PoolMember>(accounts: readonly T[], fullness: ReadonlyMap<string, number>): T[] {
+  const tier = (a: T) => (a.kind === "api_key" ? 2 : a.kind === "oauth" && fullness.has(a.id) ? 0 : 1);
+  return accounts
+    .map((a, i) => ({ a, i }))
+    .sort((x, y) => tier(x.a) - tier(y.a)
+      || (tier(x.a) === 0 ? (fullness.get(x.a.id) ?? 0) - (fullness.get(y.a.id) ?? 0) : 0)
+      || x.i - y.i)
+    .map(({ a }) => a);
 }
 
 /** The status as of `now`: a limit whose time has come is simply over. */
@@ -386,9 +424,15 @@ export function isUsable(account: PoolMember, now: number): boolean {
  * account again and the next pick is it. `exclude` is the account that has just
  * refused — named so a caller that has not recorded the limit yet cannot be
  * handed the same account straight back.
+ *
+ * With the owner's `most-room` pick (`opts`), the first usable one in THAT
+ * ranking (byMostRoom) instead; with no reading at all it is the owner's
+ * order with the API keys after the subscriptions.
  */
-export function pickAccount<T extends PoolMember>(accounts: readonly T[], now: number, exclude: ReadonlySet<string> = new Set()): T | null {
-  return accounts.find((a) => !exclude.has(a.id) && isUsable(a, now)) ?? null;
+export function pickAccount<T extends PoolMember>(accounts: readonly T[], now: number, exclude: ReadonlySet<string> = new Set(), opts: PickOptions = {}): T | null {
+  const usable = accounts.filter((a) => !exclude.has(a.id) && isUsable(a, now));
+  if (opts.mode !== "most-room") return usable[0] ?? null;
+  return byMostRoom(usable, opts.fullness ?? new Map())[0] ?? null;
 }
 
 /**
@@ -405,33 +449,40 @@ export function pickAccount<T extends PoolMember>(accounts: readonly T[], now: n
  * pool's behaviour before TASK-1260). `reselect` is a one-off of the same rule,
  * for a change the owner made to the order: the account they put first is the
  * one they mean.
+ *
+ * The pick itself is pickAccount's, in the owner's `mode`: sticky either way,
+ * so "most room" decides only when the active account has to move. With
+ * `returnToPrimary` or `reselect` the owner's order decides — "the first
+ * account" is the one they put first.
  */
 export function resolveActiveAccount<T extends PoolMember>(
   accounts: readonly T[],
   activeId: string | null,
   now: number,
-  opts: { returnToPrimary?: boolean; reselect?: boolean } = {},
+  opts: { returnToPrimary?: boolean; reselect?: boolean } & PickOptions = {},
 ): T | null {
   if (!opts.returnToPrimary && !opts.reselect && activeId) {
     const current = accounts.find((a) => a.id === activeId);
     if (current && isUsable(current, now)) return current;
   }
-  return pickAccount(accounts, now);
+  return pickAccount(accounts, now, new Set(), opts.reselect || opts.returnToPrimary ? {} : opts);
 }
 
 /**
  * The account a spawn should use: the active one, unless the caller has just
- * seen it refuse (`exclude`) — then the first other usable one in order.
+ * seen it refuse (`exclude`) — then the first other usable one, by pickAccount
+ * in the owner's `mode`.
  */
 export function pickForSpawn<T extends PoolMember>(
   accounts: readonly T[],
   activeId: string | null,
   now: number,
   exclude: ReadonlySet<string> = new Set(),
+  opts: PickOptions = {},
 ): T | null {
   const active = activeId ? accounts.find((a) => a.id === activeId) : undefined;
   if (active && !exclude.has(active.id) && isUsable(active, now)) return active;
-  return pickAccount(accounts, now, exclude);
+  return pickAccount(accounts, now, exclude, opts);
 }
 
 export interface PoolHealth {
