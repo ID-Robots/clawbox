@@ -179,6 +179,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "publicLink.apiAccess.fullNote": "Visitors can use the app as you do: it can load and save its data.",
     "publicLink.apiAccess.readNote": "Visitors can load the app's data but not change it.",
     "publicLink.apiAccess.noneNote": "Visitors see the app's pages only. An app that needs its API to show anything will stay blank.",
+    "publicLink.apiAccess.ownerOnlyNote": "Only the box owner can create a link that lets visitors change the app's data.",
     "publicLink.apiAccess.statusFull": "App data: read and write",
     "publicLink.apiAccess.statusRead": "App data: read only",
     "publicLink.apiAccess.statusNone": "App data: off",

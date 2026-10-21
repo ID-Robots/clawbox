@@ -25,6 +25,11 @@ export const dynamic = "force-dynamic";
  * coding-agent/enable draw). The e2e-install harness's test mode is the one
  * documented exception.
  *
+ * Only the owner may publish a link that lets visitors WRITE (apiAccess
+ * full, or typed prefixes that are not read-only): anyone else signed in
+ * gets 403 `write_owner_only` for `full`, and their typed prefixes are
+ * stored read-only. Test mode counts as the owner, as above.
+ *
  * A link's URL carries its access token (`?k=…`), and a token is a secret the
  * owner alone sees in clear: everyone else is answered the URL with the token
  * masked (`tokenMasked: true`).
@@ -82,7 +87,7 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
   }
   try {
-    const link = await createPublicLink({ appId: body.appId, mode: body.mode, ttlMinutes: body.ttlMinutes, apiAllow: body.apiAllow, apiAccess: body.apiAccess, password: body.password });
+    const link = await createPublicLink({ appId: body.appId, mode: body.mode, ttlMinutes: body.ttlMinutes, apiAllow: body.apiAllow, apiAccess: body.apiAccess, password: body.password, canGrantWrite: who.owner });
     return NextResponse.json({ link: forViewer(who.owner, link) }, { status: 201, headers: NO_STORE });
   } catch (err) {
     return failure(err);

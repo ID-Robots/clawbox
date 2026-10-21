@@ -264,6 +264,7 @@ type Translate = (key: string, params?: Record<string, string | number>) => stri
 function failureText(t: Translate, failure: PublicLinkFailure): string {
   if (failure.code === "password_too_short") return t("publicLink.password.errShort", { min: MIN_LINK_PASSWORD_LENGTH });
   if (failure.code === "password_is_system") return t("publicLink.password.errSame");
+  if (failure.code === "write_owner_only") return t("publicLink.apiAccess.ownerOnlyNote");
   return failure.message === "error" ? t("publicLink.error") : failure.message;
 }
 
@@ -411,6 +412,7 @@ export function PublicLinkDialog({
   onCreate,
   onSetPassword,
   onClose,
+  canGrantWrite = true,
 }: {
   open: boolean;
   appId: string;
@@ -419,6 +421,8 @@ export function PublicLinkDialog({
   onCreate: (input: PublicLinkCreateInput) => Promise<PublicLinkFailure | null>;
   onSetPassword: (appId: string, password: string | null) => Promise<PublicLinkFailure | null>;
   onClose: () => void;
+  /** Only the box owner may publish a link visitors can write through; the server enforces it too. */
+  canGrantWrite?: boolean;
 }) {
   const { t } = useT();
   const panelRef = useModalDialog<HTMLDivElement>({ open, onClose });
@@ -426,7 +430,8 @@ export function PublicLinkDialog({
   const [minutes, setMinutes] = useState(DURATIONS[1].minutes);
   // The app's own API is open by default: a visitor of an app
   // that cannot reach its API sees a page that loads and then does nothing.
-  const [apiAccess, setApiAccess] = useState<PublicLinkApiAccess>("full");
+  // Anyone but the owner can only publish read-only (the server refuses "full").
+  const [apiAccess, setApiAccess] = useState<PublicLinkApiAccess>(canGrantWrite ? "full" : "read");
   const [api, setApi] = useState("");
   // No default: whether a link needs a password is the owner's call, every time.
   const [protection, setProtection] = useState<"none" | "password" | null>(null);
@@ -567,14 +572,16 @@ export function PublicLinkDialog({
                     role="radio"
                     aria-checked={apiAccess === a}
                     data-testid={`public-link-api-access-${a}`}
+                    disabled={a === "full" && !canGrantWrite}
                     onClick={() => setApiAccess(a)}
-                    style={{ ...quiet, flex: 1, background: apiAccess === a ? "rgba(249,115,22,0.22)" : quiet.background, color: apiAccess === a ? "#fdba74" : quiet.color, outline: apiAccess === a ? "1px solid rgba(249,115,22,0.6)" : "none" }}
+                    style={{ ...quiet, flex: 1, ...(a === "full" && !canGrantWrite ? { opacity: 0.45, cursor: "not-allowed" } : {}), background: apiAccess === a ? "rgba(249,115,22,0.22)" : quiet.background, color: apiAccess === a ? "#fdba74" : quiet.color, outline: apiAccess === a ? "1px solid rgba(249,115,22,0.6)" : "none" }}
                   >
                     {t(`publicLink.apiAccess.${a}`)}
                   </button>
                 ))}
               </div>
               <p data-testid="public-link-api-access-note" style={NOTE}>{t(`publicLink.apiAccess.${apiAccess}Note`)}</p>
+              {!canGrantWrite && <p data-testid="public-link-api-access-owner-only" style={NOTE}>{t("publicLink.apiAccess.ownerOnlyNote")}</p>}
             </div>
             <label style={{ display: "grid", gap: 6, fontSize: 12, color: "rgba(255,255,255,0.7)" }}>
               {t("publicLink.api")}

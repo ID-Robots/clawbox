@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@/tests/helpers/test-utils";
-import { PublicLinkDialog, PublicLinkMenuItems, shareableLinkUrl, type PublicLinkInfo } from "@/components/PublicAppLink";
+import { PublicLinkDialog, PublicLinkMenuItems, shareableLinkUrl, type PublicLinkCreateInput, type PublicLinkInfo } from "@/components/PublicAppLink";
 
 /**
  * Anyone but the owner is answered a link's URL with its token masked
@@ -107,5 +107,46 @@ describe("the link dialog", () => {
       cleanup();
       expect(open).not.toBe(off);
     }
+  });
+});
+
+describe("the create form, for someone who is not the box owner", () => {
+  function renderCreate(canGrantWrite: boolean, onCreate = vi.fn(async (_input: PublicLinkCreateInput) => null)) {
+    render(
+      <PublicLinkDialog
+        open
+        appId="notes"
+        appName="Notes"
+        link={undefined}
+        onCreate={onCreate}
+        onSetPassword={async () => null}
+        onClose={() => {}}
+        canGrantWrite={canGrantWrite}
+      />,
+    );
+    return onCreate;
+  }
+
+  it("starts on read only, cannot pick read and write, and says why", async () => {
+    const onCreate = renderCreate(false);
+    const full = screen.getByTestId("public-link-api-access-full") as HTMLButtonElement;
+    expect(full.disabled).toBe(true);
+    expect(screen.getByTestId("public-link-api-access-read").getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByTestId("public-link-api-access-owner-only").textContent).toMatch(/owner/i);
+    fireEvent.click(full);
+    expect(screen.getByTestId("public-link-api-access-read").getAttribute("aria-checked")).toBe("true");
+
+    fireEvent.click(screen.getByTestId("public-link-protection-none"));
+    fireEvent.click(screen.getByTestId("public-link-submit"));
+    await vi.waitFor(() => expect(onCreate).toHaveBeenCalled());
+    expect(onCreate.mock.calls[0][0]).toMatchObject({ apiAccess: "read" });
+  });
+
+  it("leaves the owner's form as it was: read and write, selected by default", () => {
+    renderCreate(true);
+    const full = screen.getByTestId("public-link-api-access-full") as HTMLButtonElement;
+    expect(full.disabled).toBe(false);
+    expect(full.getAttribute("aria-checked")).toBe("true");
+    expect(screen.queryByTestId("public-link-api-access-owner-only")).toBeNull();
   });
 });

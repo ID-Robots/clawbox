@@ -3956,6 +3956,7 @@ function ChromeDesktopInner() {
           onCreate={publicAppLinks.create}
           onSetPassword={publicAppLinks.setPassword}
           onClose={() => setPublicLinkDialogApp(null)}
+          canGrantWrite={isOwner}
         />
       )}
 

@@ -12,7 +12,7 @@ import { sessionIdentity } from "@/lib/route-auth";
 import { verifyPassword } from "@/lib/auth";
 import { DATA_DIR } from "@/lib/config-store";
 import { DELETE, GET, PATCH, POST } from "@/app/setup-api/apps/public-link/route";
-import { MAX_API_ALLOW, MAX_LINKS, createPublicLink, disablePublicLink, listPublicLinks, parseApiAllow, setPublicLinkPassword, verifyLinkPasswordHash } from "@/lib/public-app-links";
+import { MAX_API_ALLOW, MAX_LINKS, createPublicLink, grantsWrite, disablePublicLink, listPublicLinks, parseApiAllow, setPublicLinkPassword, verifyLinkPasswordHash } from "@/lib/public-app-links";
 
 /**
  * TASK-1478 — the owner's half of public app links: who may publish, what is
@@ -72,7 +72,7 @@ describe("who may publish", () => {
 
   it("lets another signed-in ClawBox user publish, and shows them a live link with its token masked", async () => {
     vi.mocked(sessionIdentity).mockResolvedValue(member);
-    const res = await POST(req("POST", { appId: "notes", mode: "permanent" }));
+    const res = await POST(req("POST", { appId: "notes", mode: "permanent", apiAccess: "read" }));
     expect(res.status).toBe(201);
 
     const { id, token } = serving.readLinks(ROOT)[0];
@@ -87,6 +87,75 @@ describe("who may publish", () => {
     const owners = (await (await GET(req("GET"))).json()).links;
     expect(owners[0].url).toBe(`https://calm-river.trycloudflare.com/?k=${token}`);
     expect(owners[0].tokenMasked).toBeUndefined();
+  });
+});
+
+/** Only the box owner may publish a link that lets strangers change the app's data. */
+describe("who may grant write access", () => {
+  const storedLinks = () => serving.readLinks(ROOT).map((l) => serving.validLink(l) as { apiAllow: string[]; apiReadOnly: boolean });
+
+  it("refuses a non-owner a read-and-write link — explicit or by default — and stores nothing", async () => {
+    vi.mocked(sessionIdentity).mockResolvedValue(member);
+    for (const body of [{ appId: "notes", mode: "permanent", apiAccess: "full" }, { appId: "notes", mode: "permanent" }, { appId: "notes", mode: "temporary", ttlMinutes: 60, apiAccess: "full", apiAllow: ["/upload"] }]) {
+      const res = await POST(req("POST", body));
+      expect(res.status).toBe(403);
+      expect((await res.json()).code).toBe("write_owner_only");
+    }
+    expect(fs.existsSync(path.join(LINKS_DIR, "links.json"))).toBe(false);
+  });
+
+  it("lets a non-owner publish read-only, and the serving side refuses every write on it", async () => {
+    vi.mocked(sessionIdentity).mockResolvedValue(member);
+    const res = await POST(req("POST", { appId: "notes", mode: "permanent", apiAccess: "read", apiAllow: ["/upload"] }));
+    expect(res.status).toBe(201);
+    expect((await res.json()).link).toMatchObject({ apiAllow: ["/api", "/upload"], apiReadOnly: true });
+    const [served] = storedLinks();
+    expect(grantsWrite(served)).toBe(false);
+    for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+      expect(serving.methodAllowed(served, method, "/api/items")).toBe(false);
+      expect(serving.methodAllowed(served, method, "/upload")).toBe(false);
+    }
+    expect(serving.methodAllowed(served, "GET", "/api/items")).toBe(true);
+  });
+
+  it("stores a non-owner's typed paths read-only on a link whose app API is off", async () => {
+    vi.mocked(sessionIdentity).mockResolvedValue(member);
+    const res = await POST(req("POST", { appId: "notes", mode: "permanent", apiAccess: "none", apiAllow: ["/upload"] }));
+    expect(res.status).toBe(201);
+    const [served] = storedLinks();
+    expect(served).toMatchObject({ apiAllow: ["/upload"], apiReadOnly: true });
+    expect(serving.methodAllowed(served, "POST", "/upload")).toBe(false);
+    expect(serving.methodAllowed(served, "GET", "/upload")).toBe(true);
+    await disablePublicLink("notes");
+
+    // Off with nothing typed opens nothing: nothing to make read-only.
+    expect((await POST(req("POST", { appId: "notes", mode: "permanent", apiAccess: "none" }))).status).toBe(201);
+    expect(grantsWrite(storedLinks()[0])).toBe(false);
+  });
+
+  it("lets the owner publish read-and-write, and typed paths stay writable for them", async () => {
+    const res = await POST(req("POST", { appId: "notes", mode: "permanent", apiAccess: "full" }));
+    expect(res.status).toBe(201);
+    const [served] = storedLinks();
+    expect(grantsWrite(served)).toBe(true);
+    expect(serving.methodAllowed(served, "POST", "/api/items")).toBe(true);
+    await disablePublicLink("notes");
+
+    expect((await POST(req("POST", { appId: "notes", mode: "permanent", apiAccess: "none", apiAllow: ["/upload"] }))).status).toBe(201);
+    expect(serving.methodAllowed(storedLinks()[0], "POST", "/upload")).toBe(true);
+  });
+
+  it("the library publishes read-only unless told the creator is the owner", async () => {
+    await expect(createPublicLink({ appId: "notes", mode: "permanent" })).rejects.toMatchObject({ status: 403, code: "write_owner_only" });
+    await expect(createPublicLink({ appId: "notes", mode: "permanent", apiAccess: "full", canGrantWrite: false })).rejects.toMatchObject({ code: "write_owner_only" });
+    await createPublicLink({ appId: "notes", mode: "permanent", apiAccess: "none", apiAllow: ["/x"] });
+    expect(grantsWrite(storedLinks()[0])).toBe(false);
+  });
+
+  it("the audit log records a non-owner's link as read-only", async () => {
+    vi.mocked(sessionIdentity).mockResolvedValue(member);
+    await POST(req("POST", { appId: "notes", mode: "permanent", apiAccess: "read" }));
+    expect(fs.readFileSync(path.join(LINKS_DIR, "audit.log"), "utf-8")).toContain("\"apiReadOnly\":true");
   });
 });
 
@@ -124,11 +193,11 @@ describe("publishing", () => {
   });
 
   it("one link per app, and a cap on how many apps are public", async () => {
-    await createPublicLink({ appId: "notes", mode: "permanent" });
+    await createPublicLink({ canGrantWrite: true, appId: "notes", mode: "permanent" });
     expect((await POST(req("POST", { appId: "notes", mode: "permanent" }))).status).toBe(409);
     for (let i = 1; i < MAX_LINKS; i += 1) {
       makeApp(`app${i}`);
-      await createPublicLink({ appId: `app${i}`, mode: "permanent" });
+      await createPublicLink({ canGrantWrite: true, appId: `app${i}`, mode: "permanent" });
     }
     makeApp("onetoomany");
     const res = await POST(req("POST", { appId: "onetoomany", mode: "permanent" }));
@@ -215,7 +284,7 @@ describe("publishing", () => {
 
 describe("listing", () => {
   it("shows the full link only once the tunnel reports a trycloudflare origin", async () => {
-    await createPublicLink({ appId: "notes", mode: "permanent" });
+    await createPublicLink({ canGrantWrite: true, appId: "notes", mode: "permanent" });
     const id = serving.readLinks(ROOT)[0].id;
     const token = serving.readLinks(ROOT)[0].token;
     expect((await listPublicLinks())[0]).toMatchObject({ state: "offline", url: null });
@@ -235,7 +304,7 @@ describe("listing", () => {
 
   it("drops expired temporary links from the list", async () => {
     const t0 = Date.now();
-    await createPublicLink({ appId: "notes", mode: "temporary", ttlMinutes: 1 }, t0);
+    await createPublicLink({ canGrantWrite: true, appId: "notes", mode: "temporary", ttlMinutes: 1 }, t0);
     expect(await listPublicLinks(t0 + 30_000)).toHaveLength(1);
     expect(await listPublicLinks(t0 + 60_000)).toHaveLength(0);
     expect(serving.readLinks(ROOT)).toHaveLength(0);
@@ -245,14 +314,14 @@ describe("listing", () => {
 
 describe("disabling", () => {
   it("removes the link at once; a new link gets a new token", async () => {
-    await createPublicLink({ appId: "notes", mode: "permanent" });
+    await createPublicLink({ canGrantWrite: true, appId: "notes", mode: "permanent" });
     const first = serving.readLinks(ROOT)[0];
     const res = await DELETE(req("DELETE", { appId: "notes" }));
     expect(await res.json()).toEqual({ ok: true, removed: true });
     expect(serving.readLinks(ROOT)).toHaveLength(0);
     expect(fs.readFileSync(path.join(LINKS_DIR, "audit.log"), "utf-8")).toContain("\"disabled\"");
 
-    await createPublicLink({ appId: "notes", mode: "permanent" });
+    await createPublicLink({ canGrantWrite: true, appId: "notes", mode: "permanent" });
     const second = serving.readLinks(ROOT)[0];
     expect(second.id).not.toBe(first.id);
     expect(second.token).not.toBe(first.token);
@@ -273,7 +342,7 @@ describe("disabling", () => {
   });
 
   it("a list that cannot be rewritten stops an uninstall before the app is removed", async () => {
-    await createPublicLink({ appId: "notes", mode: "permanent" });
+    await createPublicLink({ canGrantWrite: true, appId: "notes", mode: "permanent" });
     // The atomic write's rename over links.json fails once.
     const rename = vi.spyOn(fs.promises, "rename").mockRejectedValueOnce(Object.assign(new Error("EIO"), { code: "EIO" }));
     const during = vi.fn(async () => undefined);
@@ -287,7 +356,7 @@ describe("disabling", () => {
   });
 
   it("an entry the serving side would serve without apiAllow is one the owner can see and disable", async () => {
-    await createPublicLink({ appId: "notes", mode: "permanent" });
+    await createPublicLink({ canGrantWrite: true, appId: "notes", mode: "permanent" });
     const file = path.join(LINKS_DIR, "links.json");
     const stored = JSON.parse(fs.readFileSync(file, "utf-8"));
     delete stored.links[0].apiAllow;
@@ -345,7 +414,7 @@ describe("a link password", () => {
       await disablePublicLink("notes");
     }
     // The two Unicode forms of the same word are one password.
-    await createPublicLink({ appId: "notes", mode: "permanent", password: passwords[2] });
+    await createPublicLink({ canGrantWrite: true, appId: "notes", mode: "permanent", password: passwords[2] });
     expect(await serving.verifyPasswordHash(passwords[3], (stored()[0].password as { hash: string }).hash)).toBe(true);
     // A record that is not one of ours never verifies, and never throws.
     expect(await verifyLinkPasswordHash(passwords[0], "scrypt$1$1$1$x$y")).toBe(false);
@@ -353,7 +422,7 @@ describe("a link password", () => {
   }, 120_000); // each password is hashed at the real cost, three times over
 
   it("the list says only that there is one — no hash, no key", async () => {
-    await createPublicLink({ appId: "notes", mode: "permanent", password: PASSWORD });
+    await createPublicLink({ canGrantWrite: true, appId: "notes", mode: "permanent", password: PASSWORD });
     const res = await GET(req("GET"));
     const text = JSON.stringify(await res.json());
     expect(text).toContain("\"passwordProtected\":true");
@@ -388,7 +457,7 @@ describe("a link password", () => {
     expect(verifyPassword).toHaveBeenCalledWith(PASSWORD);
     expect(serving.readLinks(ROOT)).toHaveLength(0);
 
-    await createPublicLink({ appId: "notes", mode: "permanent" });
+    await createPublicLink({ canGrantWrite: true, appId: "notes", mode: "permanent" });
     expect((await PATCH(req("PATCH", { appId: "notes", password: PASSWORD }))).status).toBe(400);
     expect(serving.readLinks(ROOT)[0].password).toBeNull();
   });
@@ -399,7 +468,7 @@ describe("a link password", () => {
   });
 
   it("is added, changed and removed without changing the link", async () => {
-    await createPublicLink({ appId: "notes", mode: "temporary", ttlMinutes: 60, apiAllow: ["/api/scores"] });
+    await createPublicLink({ canGrantWrite: true, appId: "notes", mode: "temporary", ttlMinutes: 60, apiAllow: ["/api/scores"] });
     const before = serving.readLinks(ROOT)[0];
     const same = () => {
       const now = serving.readLinks(ROOT)[0];
@@ -435,7 +504,7 @@ describe("a link password", () => {
   });
 
   it("is a person's to change: no session and the agent's bearer 401", async () => {
-    await createPublicLink({ appId: "notes", mode: "permanent", password: PASSWORD });
+    await createPublicLink({ canGrantWrite: true, appId: "notes", mode: "permanent", password: PASSWORD });
     const before = stored()[0].password;
     vi.mocked(sessionIdentity).mockResolvedValue(null);
     expect((await PATCH(req("PATCH", { appId: "notes", password: null }))).status).toBe(401);
@@ -443,7 +512,7 @@ describe("a link password", () => {
   });
 
   it("a request that does not name the password changes nothing", async () => {
-    await createPublicLink({ appId: "notes", mode: "permanent", password: PASSWORD });
+    await createPublicLink({ canGrantWrite: true, appId: "notes", mode: "permanent", password: PASSWORD });
     const before = stored()[0].password;
     for (const body of [{ appId: "notes" }, { appId: "notes", password: 5 }, { appId: "notes", password: undefined }]) {
       expect((await PATCH(req("PATCH", body))).status).toBe(400);
@@ -461,9 +530,9 @@ describe("a link password", () => {
   });
 
   it("goes with the link: disabling removes it, and a new link starts without one", async () => {
-    await createPublicLink({ appId: "notes", mode: "permanent", password: PASSWORD });
+    await createPublicLink({ canGrantWrite: true, appId: "notes", mode: "permanent", password: PASSWORD });
     expect((await DELETE(req("DELETE", { appId: "notes" }))).status).toBe(200);
-    await createPublicLink({ appId: "notes", mode: "permanent" });
+    await createPublicLink({ canGrantWrite: true, appId: "notes", mode: "permanent" });
     expect(serving.readLinks(ROOT)[0].password).toBeNull();
   });
 });

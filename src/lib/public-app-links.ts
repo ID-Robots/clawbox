@@ -25,7 +25,11 @@
  *     scrypt hash is stored, next to a random key the serving side signs
  *     unlock cookies with. Setting, changing or removing it never touches the
  *     link's id or token, so the address stays the same; a change makes a new
- *     key, so everyone who had typed the old password is asked again.
+ *     key, so everyone who had typed the old password is asked again;
+ *   - only the box owner may publish a link that lets visitors WRITE
+ *     (`canGrantWrite`). Anyone else signed in to the box gets read-only
+ *     links: `apiAccess: "full"` is refused, and the prefixes they type are
+ *     stored read-only.
  */
 import { randomBytes, scrypt, timingSafeEqual } from "crypto";
 import fs from "fs/promises";
@@ -363,6 +367,16 @@ export interface CreatePublicLinkInput {
   apiAccess?: unknown;
   /** A password for this link, or nothing for an open one. */
   password?: unknown;
+  /**
+   * May this link let visitors write? True only for the box owner's session;
+   * the route decides. Anything but `true` publishes read-only.
+   */
+  canGrantWrite?: boolean;
+}
+
+/** Does a link with these settings let visitors write (POST/PUT/PATCH/DELETE) anywhere? */
+export function grantsWrite(link: Pick<StoredPublicLink, "apiAllow" | "apiReadOnly">): boolean {
+  return link.apiAllow.length > 0 && link.apiReadOnly !== true;
 }
 
 /** Publish an app. One link per app; a desktop webapp (data/webapps/<id>/) only. */
@@ -380,8 +394,13 @@ export async function createPublicLink(input: CreatePublicLinkInput, now = Date.
     expiresAt = now + ttl * 60_000;
   }
   const apiAccess = parseApiAccess(input.apiAccess);
+  const canGrantWrite = input.canGrantWrite === true;
+  if (apiAccess === "full" && !canGrantWrite) {
+    throw new PublicLinkError("Only the box owner can create a link that lets visitors change the app's data. Choose read only.", 403, "write_owner_only");
+  }
   const apiAllow = apiAllowFor(apiAccess, parseApiAllow(input.apiAllow));
-  const apiReadOnly = apiAccess === "read";
+  // Typed prefixes would be writable too; for anyone but the owner they answer GET/HEAD only.
+  const apiReadOnly = apiAccess === "read" || (!canGrantWrite && apiAllow.length > 0);
   // Hashed before the lock is taken: it is slow, and nothing it needs is shared.
   const password = input.password === undefined || input.password === null ? null : await hashedPassword(await checkedPassword(input.password), now);
 
