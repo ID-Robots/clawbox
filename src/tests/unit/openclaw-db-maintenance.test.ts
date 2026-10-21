@@ -380,6 +380,45 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py prestart — the migrat
     expect(r.out).toMatch(/rollback copy of agent main kept until a compaction has checked its integrity/);
   });
 
+  it("checks every database after an update capture, and only then retires it — with no .bak anywhere", () => {
+    // The capture holds the whole state; no rollback copy forces a compaction
+    // here, so the capture itself must.
+    makeDb(agentDb("main"), { userVersion: AGENT_SCHEMA, rows: 100, deleted: 1 });
+    const captures = `${stateDir}.update-captures`;
+    mkdirSync(path.join(captures, "run-1"), { recursive: true });
+    writeFileSync(path.join(captures, ".openclaw-private-update-capture"), "openclaw-private-update-capture-v1\n");
+    writeFileSync(path.join(captures, "run-1", "openclaw.sqlite"), "y".repeat(5_000));
+
+    const r = prestart();
+
+    expect(calledWith()).toEqual([
+      "doctor --session-sqlite compact --session-sqlite-agent main --json",
+      "doctor --state-sqlite compact --json",
+    ]);
+    expect(existsSync(path.join(captures, "run-1"))).toBe(false);
+    expect(existsSync(captures)).toBe(false);
+    expect(r.out).toMatch(/removed the update capture run-1/);
+  });
+
+  it("keeps an update capture while any database has not passed its check since", () => {
+    makeDb(agentDb("main"), { userVersion: AGENT_SCHEMA, rows: 100, deleted: 1 });
+    const captures = `${stateDir}.update-captures`;
+    mkdirSync(path.join(captures, "run-1"), { recursive: true });
+    writeFileSync(path.join(captures, "run-1", ".openclaw-private-update-capture"), "openclaw-private-update-capture-v1\n");
+    const r = prestart([], { OC_COMPACT_EXIT: "1" });
+    expect(existsSync(path.join(captures, "run-1"))).toBe(true);
+    expect(r.out).toMatch(/update capture run-1 kept until agent main has passed a compaction's integrity check/);
+  });
+
+  it("never retires an update capture when there are no databases left — it may be the only copy", () => {
+    rmSync(stateDb());
+    const captures = `${stateDir}.update-captures`;
+    mkdirSync(path.join(captures, "run-1"), { recursive: true });
+    writeFileSync(path.join(captures, "run-1", ".openclaw-private-update-capture"), "openclaw-private-update-capture-v1\n");
+    prestart();
+    expect(existsSync(path.join(captures, "run-1"))).toBe(true);
+  });
+
   it("retires the core's marked update captures once everything is verified, and nothing unmarked", () => {
     makeDb(agentDb("main"), { userVersion: AGENT_SCHEMA, rows: 100, deleted: 1 });
     backup(agentDb("main"));
@@ -474,8 +513,8 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py memory-rebuild (after t
     });
   }
 
-  it("resets, then rebuilds, once — and records it done", async () => {
-    writeFileSync(rebuildRecord(), JSON.stringify({ pending: true, reasons: ["sources"] }));
+  it("for a new model: resets, then rebuilds, once — and records it done", async () => {
+    writeFileSync(rebuildRecord(), JSON.stringify({ pending: true, reasons: ["model", "sources"] }));
     const r = await rebuild();
     expect(r.code).toBe(0);
     expect(calledWith()).toEqual(["memory reset --yes", "memory index --force"]);
@@ -484,6 +523,24 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py memory-rebuild (after t
     expect(rec.doneAt).toBeTruthy();
     await rebuild();
     expect(calledWith()).toHaveLength(2);
+  });
+
+  it("for a change of sources alone keeps the embedding cache: no reset, so nothing it has seen is embedded again", async () => {
+    // A box embedding with its own model would otherwise re-embed every memory
+    // file and Memory Shard folder on the device itself.
+    writeFileSync(rebuildRecord(), JSON.stringify({ pending: true, reasons: ["rememberAcrossConversations", "sources"] }));
+    const r = await rebuild();
+    expect(r.code).toBe(0);
+    expect(calledWith()).toEqual(["memory index --force"]);
+    expect(JSON.parse(readFileSync(rebuildRecord(), "utf-8"))).toMatchObject({ pending: false, attempts: 1 });
+  });
+
+  it("stops trying after three attempts, rather than at every gateway start for ever", async () => {
+    writeFileSync(rebuildRecord(), JSON.stringify({ pending: true, reasons: ["model"], attempts: 3, lastError: "memory index: timed out" }));
+    const r = await rebuild();
+    expect(r.code).toBe(0);
+    expect(calledWith()).toEqual([]);
+    expect(r.out).toMatch(/memory index rebuild stopped after 3 attempts \(memory index: timed out\); a full reindex from Memory Shard finishes it/);
   });
 
   it("does nothing while an update owns the box, and leaves the rebuild pending", async () => {
@@ -504,7 +561,7 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py memory-rebuild (after t
   });
 
   it("keeps the rebuild pending, with the reason, when the reset fails — and does not index over it", async () => {
-    writeFileSync(rebuildRecord(), JSON.stringify({ pending: true }));
+    writeFileSync(rebuildRecord(), JSON.stringify({ pending: true, reasons: ["model"] }));
     await rebuild({ OC_RESET_EXIT: "3" });
     expect(calledWith()).toEqual(["memory reset --yes"]);
     const rec = JSON.parse(readFileSync(rebuildRecord(), "utf-8"));
