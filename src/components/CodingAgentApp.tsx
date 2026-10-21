@@ -60,6 +60,7 @@ import CodingAgentBreadcrumb from "./CodingAgentBreadcrumb";
 import CodingProjectWorkspace, { type WorkspaceTab } from "./CodingProjectWorkspace";
 import CodingTeamCard, { isTeamActive, type TeamView } from "./CodingTeamCard";
 import CodingRunNotesCard from "./CodingRunNotesCard";
+import CodingProjectMcpServersCard from "./CodingProjectMcpServersCard";
 import CodingAgentLiveAgents, { RunAgentsDiagram } from "./CodingAgentLiveAgents";
 import { DiagramDetails } from "./CodingAgentDiagram";
 import { livePreviewCommand } from "@/lib/coding-run-preview";
@@ -3342,6 +3343,12 @@ export default function CodingAgentApp() {
                 directory={p.directory}
                 projectId={p.kind === "codeProject" ? p.folder : null}
               />
+              {/* Which MCP servers this project's runs start with
+                  (src/lib/project-mcp-servers.ts): the harness's configured
+                  servers and the ClawBox read-only tools, all unticked until
+                  the owner ticks one. Keyed by the project's scope — the same
+                  `folder` a run's secrets are scoped by. */}
+              <CodingProjectMcpServersCard key={`mcp-${p.folder}`} project={p.folder} />
               {/* Four tabs, each with the whole width: the folder, what changed,
                   the runs, the team. The runs sat in a 22rem rail before and
                   their rows wrapped three deep. */}
