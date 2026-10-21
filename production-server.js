@@ -21,6 +21,11 @@ const {
   sessionIdentityFromCookieHeader,
 } = require("./scripts/session-cookie.js");
 const { loadOrCreateRelayIdentity, readGatewayToken, relayUserChat } = require("./scripts/gateway-user-relay.js");
+const {
+  PHONE_WS_PATH,
+  authorizePhoneUpgrade,
+  phonePairingEnabledFromConfig,
+} = require("./scripts/phone-upgrade.js");
 
 // Same rule as envPort() in src/lib/port-probe.ts, written out because this
 // entry point is standalone CommonJS and cannot import the TypeScript helper:
@@ -58,9 +63,16 @@ const IS_DEV = process.env.NODE_ENV === "development";
 // (without it the PTY server refuses the connection, so a local account cannot
 // dial 127.0.0.1:3006 for the owner's shell) and, for a non-owner, the
 // username the PTY server starts the shell AS (scripts/terminal-server.mjs).
+//
+//   /phone-ws     → the OpenClaw gateway, for paired phones only. `phone` marks
+//                   the route whose upgrades carry the client's real address
+//                   instead of none, so the gateway never mistakes a phone for
+//                   a process on the box; it is closed while the owner has
+//                   phone pairing switched off. See scripts/phone-upgrade.js.
 const UPGRADE_ROUTES = [
   { prefix: "/terminal-ws", targetPort: TERMINAL_WS_PORT, stripPrefix: true, requireAuth: true, terminal: true },
   { prefix: "/novnc-ws", targetPort: NOVNC_WS_PORT, stripPrefix: true, requireAuth: true, sanitizeClose: true },
+  { prefix: PHONE_WS_PATH, targetPort: GATEWAY_PORT, stripPrefix: true, phone: true },
 ];
 
 // Headers this proxy alone may set on the way to the PTY server. Whatever a
@@ -96,7 +108,22 @@ function resolveAppPort(reqUrl) {
   return resolveRegisteredApp(process.env.CLAWBOX_ROOT || __dirname, m[1]);
 }
 
-function resolveUpgradeTarget(reqUrl) {
+// An absolute-form target (`GET http://host/phone-ws`, legal in HTTP/1.1) is
+// routed by its path exactly like the origin form, so no route's gate is walked
+// past by spelling the same path another way. Anything URL cannot parse is
+// left as it came and falls through to the default route, as before.
+function originFormTarget(reqUrl) {
+  if (reqUrl.startsWith("/")) return reqUrl;
+  try {
+    const parsed = new URL(reqUrl);
+    return `${parsed.pathname}${parsed.search}`;
+  } catch {
+    return reqUrl;
+  }
+}
+
+function resolveUpgradeTarget(rawUrl) {
+  const reqUrl = originFormTarget(rawUrl);
   const path = reqUrl.split("?")[0];
   const app = resolveAppPort(path);
   if (app) {
@@ -117,6 +144,7 @@ function resolveUpgradeTarget(reqUrl) {
         ownerOnly: !!r.ownerOnly,
         terminal: !!r.terminal,
         sanitizeClose: !!r.sanitizeClose,
+        phone: !!r.phone,
       };
     }
   }
@@ -129,6 +157,8 @@ function resolveUpgradeTarget(reqUrl) {
 // middleware enforces (src/middleware.ts). Without this, a revoked cookie would
 // still be accepted at the /terminal-ws (root shell) and /novnc-ws gates until
 // natural expiry. Defaults to generation 0 and no users on any read error.
+// The owner's phone-pairing switch rides the same cached read: it decides
+// whether the /phone-ws upgrade route exists, and an unreadable file is OFF.
 const CONFIG_JSON_PATH = path.join(process.env.CLAWBOX_ROOT || __dirname, "data", "config.json");
 let sessionConfigCache = null;
 function readSessionConfig() {
@@ -149,11 +179,15 @@ function readSessionConfig() {
     const gen = typeof parsed.session_generation === "number" && Number.isFinite(parsed.session_generation)
       ? parsed.session_generation
       : 0;
-    const value = { gen, users: parseUserRegistry(parsed[USERS_CONFIG_KEY], ownerUsername()) };
+    const value = {
+      gen,
+      users: parseUserRegistry(parsed[USERS_CONFIG_KEY], ownerUsername()),
+      phonePairing: phonePairingEnabledFromConfig(parsed),
+    };
     sessionConfigCache = { mtimeMs: stat.mtimeMs, value };
     return value;
   } catch {
-    const value = { gen: 0, users: new Map() };
+    const value = { gen: 0, users: new Map(), phonePairing: false };
     sessionConfigCache = { mtimeMs: -1, value };
     return value;
   }
@@ -180,9 +214,12 @@ function upgradeSessionIdentity(req) {
 
 /**
  * The gate for one upgrade: `{ ok: true, identity }` to proxy it (identity is
- * null on an ungated route), or `{ ok: false, status }` to refuse it.
+ * null on an ungated route), or `{ ok: false, status }` to refuse it. The
+ * phone link's verdict also carries `forwarded`: the attribution headers the
+ * proxy adds in place of the client's own (scripts/phone-upgrade.js).
  */
 function authorizeUpgrade(gate, req) {
+  if (gate.phone) return authorizePhoneUpgrade(req, readSessionConfig().phonePairing === true);
   if (!gate.requireAuth) return { ok: true, identity: null };
   const identity = upgradeSessionIdentity(req);
   if (!identity) return { ok: false, status: 401 };
@@ -246,7 +283,9 @@ function rejectUpgrade(socket, status = 401) {
   try {
     socket.write(status === 403
       ? "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n"
-      : "HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+      : status === 404
+        ? "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n"
+        : "HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
   } catch {
     // socket already gone
   }
@@ -503,6 +542,11 @@ process.on("SIGINT", () => shutdown("SIGINT"));
 // looks like the clean loopback client it is - exactly what LAN requests
 // already look like - which also keeps the gateway loopback device-pairing
 // auto-approval working for tunnel browsers.
+// The phone link (/phone-ws) is the one exception, and still strips first:
+// the client's own forwarded headers are dropped here like everywhere else,
+// and the gate's `forwarded` set — the address THIS proxy saw — is written in
+// their place, so a phone is a remote client behind a trusted loopback proxy
+// to the gateway, never the box itself (scripts/phone-upgrade.js).
 // The x-forwarded-* FAMILY is matched by prefix at the call site — OpenClaw 2
 // treats any of them (x-forwarded-user included) as forwarded-client
 // evidence; this set carries the attribution headers that do not share the
@@ -669,7 +713,9 @@ function attachUpgradeProxy(server) {
     if (chatUser) {
       return relayUserChatUpgrade(req, socket, head, url, chatUser);
     }
-    const extraHeaders = terminalHeadersFor(gate, auth.identity);
+    // Added after the client's headers, all of whose forwarded-client names
+    // were dropped below, so the phone link's attribution is an overwrite.
+    const extraHeaders = { ...terminalHeadersFor(gate, auth.identity), ...auth.forwarded };
     const upstream = net.connect(targetPort, "127.0.0.1", () => {
       const hostHeader = `127.0.0.1:${targetPort}`;
       const originHeader = "http://127.0.0.1";
@@ -753,6 +799,9 @@ function startHttpsServer(httpServer) {
             origin: "http://127.0.0.1",
             host: `127.0.0.1:${targetPort}`,
             ...terminalHeadersFor(gate, auth.identity),
+            // The phone link's attribution (scripts/phone-upgrade.js). No
+            // client header is copied on this branch, so it is the only set.
+            ...auth.forwarded,
           },
         });
 

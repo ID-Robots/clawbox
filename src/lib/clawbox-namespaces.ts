@@ -57,6 +57,7 @@ export const CLAWBOX_PAGE_ROOTS = [
   "/portal",
   "/updating",
   "/app",
+  "/phone-pair",
 ] as const;
 
 /**

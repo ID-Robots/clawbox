@@ -125,6 +125,8 @@ describe("translations", () => {
         "openclaw",
         "drawer",
         "login",
+        // The page a phone opens from the owner's QR invite (Settings → Phones).
+        "phonePair",
         "improvement",
         "updateNotification",
         "remoteControl",

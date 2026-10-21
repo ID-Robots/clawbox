@@ -6,6 +6,7 @@ import { monitorsTranslations } from "./monitors-translations";
 import { screenshotTranslations } from "./screenshot-translations";
 import { primeRadiantTranslations } from "./prime-radiant-translations";
 import { chatStepTranslations } from "./chat-step-translations";
+import { phonesTranslations } from "./phones-translations";
 
 // Merge setup + desktop + clawkeep + edition translations per locale.
 // Order matters: later sources override earlier ones, so a clawkeep-specific
@@ -21,6 +22,7 @@ function mergeTranslations(
   screenshot: Record<Locale, Record<string, string>>,
   primeRadiant: Record<Locale, Record<string, string>>,
   chatStep: Record<Locale, Record<string, string>>,
+  phones: Record<Locale, Record<string, string>>,
 ): Record<Locale, Record<string, string>> {
   const merged = {} as Record<Locale, Record<string, string>>;
   for (const locale of Object.keys(setup) as Locale[]) {
@@ -37,6 +39,8 @@ function mergeTranslations(
       ...primeRadiant[locale],
       // A chat step's words after its app's name: "Memory Shard Search".
       ...chatStep[locale],
+      // Settings → Phones and the /phone-pair page: one module for the surface.
+      ...phones[locale],
     };
   }
   return merged;
@@ -9099,4 +9103,5 @@ export const translations = mergeTranslations(
   screenshotTranslations,
   primeRadiantTranslations,
   chatStepTranslations,
+  phonesTranslations,
 );

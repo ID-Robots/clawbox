@@ -341,6 +341,20 @@ const PUBLIC_EXACT = new Set([
   "/clawbox-icon.png",
   "/clawbox-logo.png",
   "/portal/subscribe",
+  // The page a phone opens from the owner's QR invite (Settings → Phones). It
+  // holds no data of its own; everything it learns comes from the two
+  // PHONE_PAIRING_API_PATHS below, which answer only to an invite or a claim.
+  "/phone-pair",
+]);
+
+// What a phone's browser calls while it asks to pair: it has no ClawBox
+// session, the owner approves it from theirs. POST only. Both routes answer
+// 404 while the owner has phone pairing switched off, rate-limit themselves,
+// and reveal nothing without the invite or the claim they were given — see
+// src/app/setup-api/nodes/request.
+const PHONE_PAIRING_API_PATHS = new Set([
+  "/setup-api/nodes/request",
+  "/setup-api/nodes/request/status",
 ]);
 
 /** `/apps/<id>/…` — see src/lib/app-proxy.ts. The prefix alone, no import: middleware runs on the edge runtime. */
@@ -365,6 +379,7 @@ function isPublicPath(pathname: string, method: string): boolean {
   // handler and the gateway catch-all both answer GET only), which makes the
   // list safe by accident of what sits behind it rather than by construction.
   if (PUBLIC_EXACT.has(pathname)) return method === "GET" || method === "HEAD";
+  if (PHONE_PAIRING_API_PATHS.has(pathname)) return method === "POST";
   if (PRE_AUTH_API_PATHS.has(pathname)) return true;
   // `/setup-api/...` also starts with `/setup`, so this must not be a bare
   // prefix test — isWizardPagePath matches on a segment boundary.

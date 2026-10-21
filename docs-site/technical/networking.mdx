@@ -99,6 +99,14 @@ Inspect the live policy on the box with `sudo ufw status verbose`.
 - **SSH** — standard Ubuntu OpenSSH on port 22, user `clawbox`, same password as the browser login. Reachable from the private source ranges listed under [Firewall](#firewall) — which includes a Tailscale address, since the tailnet lives in `100.64.0.0/10`.
 - On the OpenClaw/dual editions, the gateway's allowed origins are managed automatically (localhost, `<hostname>.local`, the AP addresses, and the box's live LAN IPs) — refreshed on every gateway start.
 
+### Phones (OpenClaw nodes)
+
+**Settings → Phones** pairs the official OpenClaw app on a phone with the box, so the assistant can use it as a node (camera, location, notifications, Talk). It is **off by default** and on the OpenClaw/dual editions only.
+
+- **No phone ever gets the box's shared gateway key.** The owner opens a one-use QR invite; the phone opens it in its browser (`/phone-pair`), names itself and asks. The owner approves *that* phone in Settings → Phones, and only then does the box mint the phone's own setup code with the core's `device.pair.setupCode` (a single-use bootstrap that expires after ten minutes, with limited operator access). The box decodes every code before handing it to the phone's browser and refuses any that carries more than that bootstrap, the shared token included. Pairing requests the gateway holds itself are approved or rejected from the same list (`device.pair.approve` / `device.pair.reject`).
+- **Revoking a phone** is the core's `device.pair.remove`: the phone's record and tokens are deleted and its sockets closed. It cannot reconnect or pair again without a new code the owner approves. Revoke works whether the switch is on or off.
+- **Phones connect over the permanent link only**, at `wss://<box-handle>.clawbox.tech/phone-ws`. A quick-tunnel address changes on restart and would strand every phone. `production-server.js` routes `/phone-ws` to the gateway and, unlike every other gateway upgrade, sends the client's real address (`X-Forwarded-For`, rebuilt by the proxy, never passed through from the client) so the gateway treats a phone as a remote client, never as a process on the box. That is why turning the switch on adds loopback to `gateway.trustedProxies` through `openclaw config set` (and turning it off removes exactly what it added). Requests with no forwarded headers, which is every other client on the box, are still treated as local by the gateway. `/phone-ws` answers 404 while the switch is off and 403 when the proxy cannot say who the client is.
+
 ### Portal heartbeat
 
 `clawbox-heartbeat.timer` fires `clawbox-heartbeat.service` every 5 minutes (30 s after

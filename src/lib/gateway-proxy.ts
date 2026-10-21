@@ -357,6 +357,12 @@ export async function serveGatewayHTML(
 // but then rejects any request whose resolved client IP is itself loopback
 // (`isLoopbackAddress(clientIp)` -> unattributable-proxy), so browsing the
 // desktop from the box's own browser would keep 403ing.
+//
+// The phone link is the one place attribution is SENT rather than dropped,
+// and it is a WebSocket path only (/phone-ws, scripts/phone-upgrade.js): the
+// list does list loopback while phone pairing is on, which leaves this strip
+// unchanged — a request with no forwarded header at all is still the clean
+// `direct-local` client to the core (2026.10.3 checks that case first).
 const FORWARDED_CLIENT_HEADERS = new Set([
   "x-real-ip", "forwarded", "true-client-ip", "cdn-loop",
   "cf-connecting-ip", "cf-connecting-ipv6", "cf-ipcountry", "cf-visitor", "cf-ray", "cf-warp-tag-id",

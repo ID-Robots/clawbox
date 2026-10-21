@@ -17,6 +17,9 @@ const APP_DIR = path.resolve(__dirname, "../../app");
 const NOT_SESSION_PAGES: Record<string, string> = {
   // A public, server-rendered price page — the same for everyone, signed in or not.
   "portal/subscribe/page.tsx": "public plan page, no session",
+  // The page a phone opens from the owner's QR invite: the phone has no
+  // ClawBox session to follow, only its claim in sessionStorage.
+  "phone-pair/page.tsx": "a phone's public pairing page, no session",
 };
 
 function pages(dir: string): string[] {
