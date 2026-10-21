@@ -38,9 +38,10 @@ carry, and this is ClawBox's half of each, driving OpenClaw's OWN commands:
     Records the migration verdict for the status file.
 
 ``memory-rebuild`` (detached from the pre-start, runs after the gateway starts)
-    Runs ``openclaw memory reset --yes`` then ``openclaw memory index --force``
-    once after the box changed the memory index's identity (see the memory
-    block in gateway-pre-start.sh), bounded and niced, never twice at once.
+    Runs ``openclaw memory index --force`` once after the box changed the
+    memory index's identity (see the memory block in gateway-pre-start.sh),
+    preceded by ``openclaw memory reset --yes`` only when the MODEL changed;
+    bounded, niced, never twice at once, at most three attempts.
 
 Nothing here writes an OpenClaw database: measurements open them READ-ONLY,
 every change is the core's own command. The one thing deleted by hand is the
@@ -512,8 +513,10 @@ def disk_needed(db, tmp):
     return max(db["bytes"], live), live
 
 
-def plan_compaction(dbs, core, record, threshold, rate, overhead=CLI_OVERHEAD_S):
-    """[(db, why)] to compact, in the order to do them, and [(db, reason)] skipped."""
+def plan_compaction(dbs, core, record, threshold, rate, overhead=CLI_OVERHEAD_S, capture_time=None):
+    """[(db, why)] to compact, in the order to do them, and [(db, reason)] skipped.
+    `capture_time`: when the newest update capture waiting to be retired was
+    written — a capture holds every database, so each must be checked after it."""
     todo, skipped = [], []
     tmp = temp_dir()
     for db in dbs:
@@ -529,6 +532,8 @@ def plan_compaction(dbs, core, record, threshold, rate, overhead=CLI_OVERHEAD_S)
             why = "%d%% free pages" % round(db["freeRatio"] * 100)
         elif db["backups"] and not db["capturing"] and not verified_after_backup(db, record):
             why = "migrated: its rollback copy waits for this integrity check"
+        elif capture_time is not None and not verified_since(db, record, capture_time):
+            why = "an update capture waits for this integrity check"
         if not why:
             skipped.append((db, None))
             continue
@@ -547,20 +552,28 @@ def plan_compaction(dbs, core, record, threshold, rate, overhead=CLI_OVERHEAD_S)
     return todo, skipped
 
 
-def verified_after_backup(db, record):
-    """A successful compaction recorded after the newest rollback copy was
-    taken, of the database on the schema it is on now."""
+def verified_since(db, record, moment):
+    """A successful compaction — OpenClaw's integrity checks — recorded at or
+    after `moment`, of the database on the schema it is on now."""
     entry = ((record.get("databases") or {}).get(key_of(db)) or {}).get("lastCompact") or {}
     if not entry.get("ok") or entry.get("integrity") == "failed":
         return False
     if entry.get("userVersion") != db.get("userVersion"):
         return False
-    newest = max([b["mtime"] for b in db["backups"]] or [0])
-    return isinstance(entry.get("at"), (int, float)) and entry["at"] >= newest
+    return isinstance(entry.get("at"), (int, float)) and entry["at"] >= moment
+
+
+def verified_after_backup(db, record):
+    """Verified after the newest rollback copy beside it was taken."""
+    return verified_since(db, record, max([b["mtime"] for b in db["backups"]] or [0]))
 
 
 def compact_all(args, dbs, core, record, deadline):
-    todo, skipped = plan_compaction(dbs, core, record, args.threshold, args.live_rate_bps, args.cli_overhead_seconds)
+    _root, runs = capture_dirs(args.state_dir)
+    capture_time = max([tree_time(run) for run in runs]) if runs and dbs else None
+    todo, skipped = plan_compaction(
+        dbs, core, record, args.threshold, args.live_rate_bps, args.cli_overhead_seconds, capture_time,
+    )
     for db, reason in skipped:
         if reason:
             log("%s not compacted: %s" % (label(db), reason))
@@ -692,6 +705,20 @@ def tree_bytes(root):
     return total
 
 
+def tree_time(root):
+    """The latest mtime or ctime of anything under `root`, `root` included:
+    when the capture was last written to."""
+    latest = 0.0
+    for base, dirs, files in os.walk(root, followlinks=False):
+        for name in [""] + files + dirs:
+            try:
+                st = os.lstat(os.path.join(base, name) if name else base)
+            except OSError:
+                continue
+            latest = max(latest, st.st_mtime, st.st_ctime)
+    return latest
+
+
 def capture_dirs(state_dir):
     """Run directories under `<state-dir>.update-captures/` carrying the core's
     private-capture marker (in the run directory or the root above it)."""
@@ -779,10 +806,19 @@ def cleanup(args, dbs, core, status, record, deadline):
         removed += freed
         log("removed the pre-migration copy of %s (%s): the migrated database passed its integrity check" % (label(db), human(freed)))
     for run in runs:
+        # A capture is a copy of the whole state: it goes only when EVERY
+        # database passed a compaction after it was written — and never when
+        # there are no databases left, where it may be the only copy there is.
+        written = tree_time(run)
+        unchecked = [db for db in dbs if not verified_since(db, record, written)]
+        if not dbs or unchecked:
+            log("update capture %s kept until %s has passed a compaction's integrity check" % (
+                os.path.basename(run), label(unchecked[0]) if unchecked else "a database"))
+            continue
         freed = remove_tree(run)
         removed += freed
         log("removed the update capture %s (%s)" % (os.path.basename(run), human(freed)))
-    if runs:
+    if runs and os.path.isdir(root):
         try:
             leftover = [n for n in os.listdir(root) if n != CAPTURE_MARKER]
             if not leftover:
@@ -960,13 +996,26 @@ def cmd_memory_rebuild(args):
     rec = read_json(path)
     if not rec or rec.get("pending") is not True:
         return 0
+    attempts = int(rec.get("attempts") or 0)
+    if attempts >= args.max_attempts:
+        # Bounded, so a rebuild that cannot finish on this box is not restarted
+        # at every gateway start for ever. Memory Shard's "Run a full reindex"
+        # is the owner's way to finish it.
+        log("memory index rebuild stopped after %d attempts (%s); a full reindex from Memory Shard finishes it"
+            % (attempts, rec.get("lastError") or "no error recorded"))
+        return 0
     try:
         os.nice(10)
     except OSError:
         pass
-    rec["attempts"] = int(rec.get("attempts") or 0) + 1
+    rec["attempts"] = attempts + 1
     rec["lastAttemptAt"] = iso(time.time())
-    if not rec.get("resetAt"):
+    # The reset only for a NEW MODEL: its old vectors and embedding cache are
+    # dead weight (3,072-d, twice over). For a change of sources alone the
+    # cache is what lets `index --force` re-embed nothing it has seen — on a box
+    # embedding with its own model, a reset would make the rebuild re-embed every
+    # memory file and Memory Shard folder on the device itself.
+    if "model" in (rec.get("reasons") or []) and not rec.get("resetAt"):
         rc, out, err = _run(args.openclaw_bin, ["memory", "reset", "--yes"], args.reset_timeout)
         if rc != 0:
             rec["lastError"] = "memory reset: %s" % ("timed out" if rc is None else "exit %s" % rc)
@@ -986,7 +1035,7 @@ def cmd_memory_rebuild(args):
     rec["doneAt"] = iso(time.time())
     rec.pop("lastError", None)
     write_json(path, rec)
-    log("memory index rebuilt from the memory files for the new settings; its freed pages are compacted at the next gateway start")
+    log("memory index rebuilt for the new settings (session transcripts no longer indexed); its freed pages are compacted at the next gateway start")
     return 0
 
 
@@ -995,7 +1044,9 @@ def cmd_memory_rebuild(args):
 
 def main(argv=None):
     for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-        signal.signal(signum, _on_signal)
+        # A signal the launcher set to be ignored (nohup's SIGHUP) stays ignored.
+        if signal.getsignal(signum) is not signal.SIG_IGN:
+            signal.signal(signum, _on_signal)
     parser = argparse.ArgumentParser(prog="openclaw-db-maintenance")
     sub = parser.add_subparsers(dest="cmd")
 
@@ -1033,6 +1084,7 @@ def main(argv=None):
     p.add_argument("--lock-wait-seconds", type=int, default=600)
     p.add_argument("--reset-timeout", type=int, default=600)
     p.add_argument("--index-timeout", type=int, default=1800)
+    p.add_argument("--max-attempts", type=int, default=3)
 
     args = parser.parse_args(argv)
     if not args.cmd:

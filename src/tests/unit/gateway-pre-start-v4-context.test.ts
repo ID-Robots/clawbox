@@ -48,13 +48,14 @@ type MigratedModel = {
 };
 
 /** Run the extracted block over a model list and return the migrated models. */
-function migrate(models: Record<string, unknown>[]): MigratedModel[] {
+function migrate(models: Record<string, unknown>[], opts: { core2026_10?: boolean } = {}): MigratedModel[] {
   const file = path.join(dir, "models.json");
   writeFileSync(file, JSON.stringify(models));
   const program = [
     "import json, sys",
     "ds_models = json.load(open(sys.argv[1]))",
     "changed = False",
+    `CLAWBOX_OPENCLAW_2026_10 = ${opts.core2026_10 === false ? "False" : "True"}`,
     POLICY,
     "print(json.dumps({'models': ds_models, 'changed': changed}))",
   ].join("\n");
@@ -70,6 +71,7 @@ function migrateChanged(models: Record<string, unknown>[]): boolean {
     "import json, sys",
     "ds_models = json.load(open(sys.argv[1]))",
     "changed = False",
+    "CLAWBOX_OPENCLAW_2026_10 = True",
     POLICY,
     "print(json.dumps({'changed': changed}))",
   ].join("\n");
@@ -179,6 +181,14 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh V4 context migration", () => 
     const once = migrate([{ id: "deepseek-v4-flash" }]);
     expect(once[0].contextTokens).toBe(131_072);
     expect(migrateChanged(once)).toBe(false);
+  });
+
+  it("hands a core older than 2026.10 no cap, and still repairs its window", () => {
+    // The cap is verified on 2026.10; an older core's strict schema may refuse
+    // an unknown key, and a refused config is a gateway that will not start.
+    const [m] = migrate([{ id: "deepseek-v4-flash", contextWindow: 128000 }], { core2026_10: false });
+    expect(m.contextTokens).toBeUndefined();
+    expect(m.contextWindow).toBe(1_000_000);
   });
 
   it("never caps the vision entry or another deepseek id", () => {

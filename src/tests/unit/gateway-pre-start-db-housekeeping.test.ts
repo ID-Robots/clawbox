@@ -54,7 +54,7 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-function pass(config: unknown, opts: { v2?: boolean } = {}) {
+function pass(config: unknown, opts: { v2?: boolean; core2026_10?: boolean } = {}) {
   writeFileSync(cfgPath, JSON.stringify(config));
   const r = spawnSync("python3", ["-", cfgPath], {
     input: CONFIG_PASS,
@@ -63,6 +63,7 @@ function pass(config: unknown, opts: { v2?: boolean } = {}) {
       PATH: "/usr/bin:/bin",
       HOME: dir,
       CLAWBOX_OPENCLAW_V2: opts.v2 === false ? "0" : "1",
+      CLAWBOX_OPENCLAW_2026_10: opts.v2 === false || opts.core2026_10 === false ? "0" : "1",
       CLAWBOX_MEMORY_REBUILD_RECORD: recordPath,
       CLAWBOX_DEVICE_STORE: path.join(dir, "data", "config.json"),
     },
@@ -131,13 +132,21 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh memory index defaults", () =>
     expect(existsSync(recordPath)).toBe(false);
   });
 
+  it("writes nothing under memory on a 2026.9 core, which these keys are not verified on", () => {
+    // A box whose update the disk pre-flight refused runs the new ClawBox on
+    // the old core: a key that core refuses would be a gateway that never starts.
+    const { cfg } = pass({ memory: { search: { ...BOX_CLOUD } } }, { core2026_10: false });
+    expect(cfg.memory.search).toEqual(BOX_CLOUD);
+    expect(existsSync(recordPath)).toBe(false);
+  });
+
   it.skipIf(isRoot)("asks for no rebuild when the config it changed could not be written", () => {
     writeFileSync(cfgPath, JSON.stringify({}));
     chmodSync(dir, 0o555);
     const r = spawnSync("python3", ["-", cfgPath], {
       input: CONFIG_PASS,
       encoding: "utf-8",
-      env: { PATH: "/usr/bin:/bin", HOME: dir, CLAWBOX_OPENCLAW_V2: "1", CLAWBOX_MEMORY_REBUILD_RECORD: recordPath },
+      env: { PATH: "/usr/bin:/bin", HOME: dir, CLAWBOX_OPENCLAW_V2: "1", CLAWBOX_OPENCLAW_2026_10: "1", CLAWBOX_MEMORY_REBUILD_RECORD: recordPath },
     });
     chmodSync(dir, 0o755);
     expect(r.status).toBe(0);
@@ -174,14 +183,14 @@ async function waitFor(file: string): Promise<boolean> {
 describe("gateway-pre-start.sh memory rebuild launch", () => {
   const LAUNCH = between("# The one memory-index rebuild the defaults block", "# Ensure the per-install MCP bearer token exists");
 
-  function launch(record: string | null, v2 = "1") {
+  function launch(record: string | null, core2026_10 = "1") {
     stubPython(path.join(dir, "bin"));
     if (record !== null) writeFileSync(recordPath, record);
     const args = path.join(dir, "py-args");
     const r = runBlock(LAUNCH, {
       SCRIPT_DIR: path.resolve(process.cwd(), "scripts"),
       CLAWBOX_ROOT: dir,
-      CLAWBOX_OPENCLAW_V2: v2,
+      CLAWBOX_OPENCLAW_2026_10: core2026_10,
       CLAWBOX_MEMORY_REBUILD_RECORD: recordPath,
       CLAWBOX_DEVICE_STORE: path.join(dir, "data", "config.json"),
       OPENCLAW_BIN: "/opt/openclaw/bin/openclaw",
@@ -209,7 +218,7 @@ describe("gateway-pre-start.sh memory rebuild launch", () => {
     expect(await waitFor(args)).toBe(false);
   });
 
-  it("starts nothing on a core older than OpenClaw 2", async () => {
+  it("starts nothing on a core older than 2026.10", async () => {
     const { r, args } = launch(JSON.stringify({ pending: true }), "0");
     expect(r.status).toBe(0);
     expect(await waitFor(args)).toBe(false);
@@ -219,13 +228,13 @@ describe("gateway-pre-start.sh memory rebuild launch", () => {
 describe("gateway-pre-start.sh agent database housekeeping block", () => {
   const BLOCK = between("# ── Agent databases: migration status, compaction, migration copies", "# ── End of pre-start");
 
-  function housekeeping(env: Record<string, string> = {}, v2 = "1") {
+  function housekeeping(env: Record<string, string> = {}, core2026_10 = "1") {
     stubPython(path.join(dir, "bin"));
     const args = path.join(dir, "py-args");
     const r = runBlock(BLOCK, {
       SCRIPT_DIR: path.resolve(process.cwd(), "scripts"),
       CLAWBOX_ROOT: dir,
-      CLAWBOX_OPENCLAW_V2: v2,
+      CLAWBOX_OPENCLAW_2026_10: core2026_10,
       OPENCLAW_STATE_DIR: path.join(dir, ".openclaw"),
       OPENCLAW_CONFIG: path.join(dir, ".openclaw", "openclaw.json"),
       OPENCLAW_BIN: "/opt/oc/bin/openclaw",
@@ -270,7 +279,7 @@ describe("gateway-pre-start.sh agent database housekeeping block", () => {
     expect(r.stderr).toMatch(/WARN: agent database housekeeping stopped \(exit 9\); the gateway starts on the databases as they are/);
   });
 
-  it("does nothing on a core older than OpenClaw 2", () => {
+  it("does nothing on a core older than 2026.10, whose compaction commands are not verified", () => {
     const { r, argv } = housekeeping({}, "0");
     expect(r.status).toBe(0);
     expect(argv).toEqual([]);
@@ -291,5 +300,37 @@ describe("gateway-pre-start.sh agent database housekeeping block", () => {
     expect(after.split("\n").filter((l) => /^\s*[^#\s]/.test(l)).length).toBeGreaterThan(0);
     expect(SRC.trimEnd().endsWith("# ── End of pre-start ────────────────────────────────────────────────────────")).toBe(true);
     expect(SRC.indexOf("# ── Agent databases:")).toBeGreaterThan(SRC.indexOf("# ── Report the installed Claude Code to Anthropic"));
+  });
+});
+
+describe("gateway-pre-start.sh 2026.10 gate", () => {
+  const GATE = between("# OpenClaw 2026.10 or later.", "# ── First boot on a NEW OpenClaw core");
+
+  function gate(effective: string, explicit?: string): string {
+    const r = spawnSync("bash", ["-c", [
+      "set -euo pipefail",
+      `CLAWBOX_OPENCLAW_EFFECTIVE=${JSON.stringify(effective)}`,
+      GATE,
+      'printf "%s" "$CLAWBOX_OPENCLAW_2026_10"',
+    ].join("\n")], { encoding: "utf-8", env: { PATH: "/usr/bin:/bin", ...(explicit === undefined ? {} : { CLAWBOX_OPENCLAW_2026_10: explicit }) } });
+    if (r.status !== 0) throw new Error(r.stderr);
+    return r.stdout;
+  }
+
+  it.each([
+    ["2026.10.3", "1"],
+    ["2026.10.0", "1"],
+    ["2026.11.2", "1"],
+    ["2027.1.0", "1"],
+    ["2026.9.4", "0"],
+    ["2026.8.1", "0"],
+    ["", "0"],
+  ])("reads core %j as %s", (effective, expected) => {
+    expect(gate(effective)).toBe(expected);
+  });
+
+  it("lets an explicit value win, as CLAWBOX_OPENCLAW_V2 does", () => {
+    expect(gate("2026.9.4", "1")).toBe("1");
+    expect(gate("2026.10.3", "0")).toBe("0");
   });
 });

@@ -238,6 +238,7 @@ vi.mock("@/lib/local-ai-runtime", () => ({
 // generation is stated rather than inherited from wherever the suite runs.
 vi.mock("@/lib/openclaw-core-generation", () => ({
   installedOpenclawCoreGeneration: vi.fn(async () => "v2"),
+  installedOpenclawCoreAtLeast: vi.fn(async () => true),
 }));
 
 // The gateway's own auth store, which a Claude sign-in reads back after a
@@ -679,6 +680,24 @@ describe("POST /setup-api/ai-models/configure", () => {
       expect(mockRestartGateway).not.toHaveBeenCalled();
     } finally {
       vi.doUnmock("@/lib/clawai-cloud-defaults");
+    }
+  });
+
+  it("hands an older core no contextTokens, which its strict schema may refuse", async () => {
+    // The cap is verified on 2026.10; the boot script adds it once the core is.
+    const { installedOpenclawCoreAtLeast } = await import("@/lib/openclaw-core-generation");
+    vi.mocked(installedOpenclawCoreAtLeast).mockResolvedValueOnce(false);
+    const res = await configurePost(jsonRequest({ provider: "clawai", apiKey: "portal-token-123" }));
+    expect(res.status).toBe(200);
+    const providerCall = findConfigSet(vi.mocked(runOpenclawConfigSet), vi.mocked(runOpenclawConfigSetBatch), "models.providers.deepseek");
+    const providerDef = providerCall ? JSON.parse(providerCall.value || "{}") : {};
+    const chatTiers = providerDef.models.filter(
+      (m: { id: string }) => m.id === "deepseek-v4-flash" || m.id === "deepseek-v4-pro",
+    );
+    expect(chatTiers).toHaveLength(2);
+    for (const model of chatTiers) {
+      expect(model.contextWindow).toBe(1_000_000);
+      expect(model.contextTokens).toBeUndefined();
     }
   });
 

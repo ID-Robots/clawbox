@@ -206,6 +206,25 @@ if [ -z "${CLAWBOX_OPENCLAW_V2:-}" ]; then
 fi
 export CLAWBOX_OPENCLAW_V2
 
+# OpenClaw 2026.10 or later. What this script drives for the agent databases —
+# the memory-index defaults (`memory.search.rememberAcrossConversations`,
+# `memory.search.sources`), the DeepSeek `contextTokens` cap and the offline
+# `doctor --session-sqlite/--state-sqlite compact` maintenance — is verified
+# against the 2026.10 core and NOT against older ones, and a config key an older
+# core does not know is a refused gateway, which the repair above (doctor --fix
+# drops unknown keys) and the next pass (writes them again) would turn into a
+# loop. A box can run this script on an older core: an update whose disk
+# pre-flight refused the new core leaves the new ClawBox on the old one. Same
+# precedence as CLAWBOX_OPENCLAW_V2: an explicit value wins; an unknown core is 0.
+if [ -z "${CLAWBOX_OPENCLAW_2026_10:-}" ]; then
+  CLAWBOX_OPENCLAW_2026_10=0
+  if [ -n "${CLAWBOX_OPENCLAW_EFFECTIVE:-}" ] \
+     && [ "$(printf '%s\n' 2026.10 "$CLAWBOX_OPENCLAW_EFFECTIVE" | sort -V | head -1)" = "2026.10" ]; then
+    CLAWBOX_OPENCLAW_2026_10=1
+  fi
+fi
+export CLAWBOX_OPENCLAW_2026_10
+
 # ── First boot on a NEW OpenClaw core: make the config loadable again ───────
 #
 # THE INCIDENT (TASK-737). A customer box was dark for 25 hours after the
@@ -1047,6 +1066,8 @@ import json, os, re, sys, tempfile, secrets, shutil, time
 
 # OpenClaw 2 config homes — see the bash block that computes this.
 CLAWBOX_OPENCLAW_V2 = os.environ.get("CLAWBOX_OPENCLAW_V2") == "1"
+# OpenClaw 2026.10+: the keys the agent-database work writes (see the bash block).
+CLAWBOX_OPENCLAW_2026_10 = os.environ.get("CLAWBOX_OPENCLAW_2026_10") == "1"
 
 # Gateway auth token gates LAN access to the agent's privileged tools
 # (run_command / file_write / system_power). Earlier builds wrote the public
@@ -4075,7 +4096,9 @@ def _record_memory_rebuild(changes):
         print("  WARN: could not record the memory index rebuild (%s: %s)" % (type(exc).__name__, exc), file=sys.stderr)
 
 
-if CLAWBOX_OPENCLAW_V2:
+# Read through globals() like the other migrations here, so a suite that runs a
+# neighbouring block verbatim without the flag gets a no-op, not a NameError.
+if bool(globals().get("CLAWBOX_OPENCLAW_2026_10", False)):
     _memory_block = cfg.get("memory")
     if _memory_block is None:
         _memory_block = {}
@@ -4153,7 +4176,8 @@ if isinstance(ds_models, list):
         # Written only when absent — a cap someone set is theirs, larger or
         # smaller. Mirrors CLAWBOX_AI_CONTEXT_TOKENS in
         # src/app/setup-api/ai-models/configure/route.ts.
-        if model.get("contextTokens") is None:
+        # 2026.10+ only (CLAWBOX_OPENCLAW_2026_10): not a key to hand an older core.
+        if bool(globals().get("CLAWBOX_OPENCLAW_2026_10", False)) and model.get("contextTokens") is None:
             model["contextTokens"] = 131072
             changed = True
         # maxTokens: filled in when absent, and corrected when it holds a
@@ -6768,7 +6792,7 @@ fi
 # next start.
 CLAWBOX_DB_MAINTENANCE="$SCRIPT_DIR/openclaw-db-maintenance.py"
 MEMORY_REBUILD_LOG="$CLAWBOX_ROOT/data/openclaw-memory-rebuild.log"
-if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ -f "$CLAWBOX_MEMORY_REBUILD_RECORD" ] \
+if [ "${CLAWBOX_OPENCLAW_2026_10:-0}" = "1" ] && [ -f "$CLAWBOX_MEMORY_REBUILD_RECORD" ] \
    && grep -Eq '"pending"[[:space:]]*:[[:space:]]*true' "$CLAWBOX_MEMORY_REBUILD_RECORD" \
    && [ -f "$CLAWBOX_DB_MAINTENANCE" ]; then
   mkdir -p "$(dirname "$MEMORY_REBUILD_LOG")" 2>/dev/null || true
@@ -9252,7 +9276,7 @@ fi
 CLAWBOX_DB_MAINTENANCE="$SCRIPT_DIR/openclaw-db-maintenance.py"
 CLAWBOX_PRESTART_CEILING_S="${CLAWBOX_PRESTART_CEILING_S:-600}"
 CLAWBOX_DB_COMPACT_BUDGET_S="${CLAWBOX_DB_COMPACT_BUDGET_S:-360}"
-if [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ -f "$CLAWBOX_DB_MAINTENANCE" ] && command -v python3 >/dev/null 2>&1; then
+if [ "${CLAWBOX_OPENCLAW_2026_10:-0}" = "1" ] && [ -f "$CLAWBOX_DB_MAINTENANCE" ] && command -v python3 >/dev/null 2>&1; then
   # 90 s held back: 30 s of slack for the helper itself, a minute for systemd
   # and the gateway's own start. Non-numeric overrides fall back to the defaults.
   [[ "$CLAWBOX_PRESTART_CEILING_S" =~ ^[0-9]+$ ]] || CLAWBOX_PRESTART_CEILING_S=600

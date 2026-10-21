@@ -88,6 +88,22 @@ export async function installedOpenclawCoreGeneration(): Promise<OpenclawCoreGen
 }
 
 /**
+ * Whether the INSTALLED core is `year.month` or later: for a config key one
+ * release introduced and an older core would refuse (its config schema is
+ * strict, so an unknown key is `Unrecognized key` and a gateway that will not
+ * start). `false` for an older core, and also for one that cannot be read: a
+ * key that may be refused is not written on a guess — the boot script, which
+ * reads the same manifest, adds it at the next start once the core is known.
+ */
+export async function installedOpenclawCoreAtLeast(year: number, month: number): Promise<boolean> {
+  const version = await installedOpenclawCoreVersion();
+  const match = version === null ? null : CORE_VERSION_RE.exec(version);
+  if (!match) return false;
+  const [y, m] = [Number(match[1]), Number(match[2])];
+  return y > year || (y === year && m >= month);
+}
+
+/**
  * The installed core's version STRING, or null when it cannot be read.
  *
  * Exported from here rather than read a fourth time elsewhere: this module

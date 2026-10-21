@@ -154,7 +154,7 @@ import {
 import { logSafe } from "@/lib/log-safe";
 import { deepseekPluginOnDisk, installDeepseekProviderPlugin } from "@/lib/openclaw-deepseek-plugin";
 import { canonicalPluginId, clearPluginRepair, readPluginRepairs } from "@/lib/plugin-repair";
-import { installedOpenclawCoreGeneration } from "@/lib/openclaw-core-generation";
+import { installedOpenclawCoreAtLeast, installedOpenclawCoreGeneration } from "@/lib/openclaw-core-generation";
 
 const OPENCLAW_BIN = findOpenclawBin();
 const OPENCLAW_HOME_DIR =
@@ -962,7 +962,9 @@ const CLAWBOX_AI_CONTEXT_WINDOW = 1_000_000;
 // early and every request re-sent 0.7M–1.4M tokens of history. Capped here it
 // compacts near 128K, while `contextWindow` keeps describing the real model.
 // Mirrored by the V4 block in scripts/gateway-pre-start.sh for boxes already
-// configured.
+// configured. Written for a 2026.10+ core only (verified there; an older core's
+// strict schema may refuse it, and this write is the whole provider): the boot
+// script backfills it once the core is known to take it.
 const CLAWBOX_AI_CONTEXT_TOKENS = 131_072;
 // 393,216 (384 x 1024) is the ceiling the upstream actually enforces, measured
 // against the live proxy on 2026-08-18: max_tokens=393216 is accepted, 400000
@@ -974,7 +976,12 @@ const CLAWBOX_AI_MAX_TOKENS = 393_216;
 // never offers image attachments the proxy would reject.
 const CLAWBOX_AI_INPUT_MODALITIES = ["text"] as const;
 
-function buildClawboxAiProviderDefinition(apiKey: string, visionModelId: string = CLAWBOX_AI_VISION_MODEL_ID) {
+function buildClawboxAiProviderDefinition(
+  apiKey: string,
+  visionModelId: string = CLAWBOX_AI_VISION_MODEL_ID,
+  capContext = true,
+) {
+  const contextCap = capContext ? { contextTokens: CLAWBOX_AI_CONTEXT_TOKENS } : {};
   // Emit the proxy URL, our auth, per-tier identity/branding/reasoning, and
   // the context/output/modality limits above.
   // `cost` stays zero to mark these as included-in-subscription so the
@@ -1006,7 +1013,7 @@ function buildClawboxAiProviderDefinition(apiKey: string, visionModelId: string 
         reasoning: true,
         input: [...CLAWBOX_AI_INPUT_MODALITIES],
         contextWindow: CLAWBOX_AI_CONTEXT_WINDOW,
-        contextTokens: CLAWBOX_AI_CONTEXT_TOKENS,
+        ...contextCap,
         maxTokens: CLAWBOX_AI_MAX_TOKENS,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         compat: {
@@ -1020,7 +1027,7 @@ function buildClawboxAiProviderDefinition(apiKey: string, visionModelId: string 
         reasoning: true,
         input: [...CLAWBOX_AI_INPUT_MODALITIES],
         contextWindow: CLAWBOX_AI_CONTEXT_WINDOW,
-        contextTokens: CLAWBOX_AI_CONTEXT_TOKENS,
+        ...contextCap,
         maxTokens: CLAWBOX_AI_MAX_TOKENS,
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         compat: {
@@ -1716,7 +1723,7 @@ async function configureClawboxAi(
     ],
     [
       `models.providers.${CLAWBOX_AI_PROVIDER}`,
-      buildClawboxAiProviderDefinition(clawboxAiToken, visionId),
+      buildClawboxAiProviderDefinition(clawboxAiToken, visionId, await installedOpenclawCoreAtLeast(2026, 10)),
       "--json",
     ],
     ...(extra?.requiredOps ?? []),
