@@ -650,6 +650,21 @@ describe("what core saw", () => {
     expect(core.profiles.get(p(work.id))?.secret).toBe("sk-ant-oat01-work-renewed");
     expect((await pool.readAccounts()).find((a) => a.id === work.id)?.status).toBe("ok");
   });
+
+  it("does not renew again when the token core was refused with is one the pool has already replaced", async () => {
+    const core = fakeCore();
+    const { work } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    const fetchMock = vi.fn<(url: string) => Promise<Response>>(async () => new Response(JSON.stringify({ access_token: "sk-ant-oat01-work-renewed", refresh_token: "r2", expires_in: 28_800 }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    // A coding run on the same account was refused first, and its re-check renewed the grant.
+    expect(await pool.probeAccountCredential(work.id, async () => "ok", {}, fp("sk-ant-oat01-work"))).toBe("ok");
+    core.failures[p(work.id)] = { ...rateLimited(), cooldownReason: "auth" };
+    expect(await gw.noteGatewayCooldowns()).toBe(1);
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes("/oauth/token"))).toHaveLength(1);
+    expect(core.profiles.get(p(work.id))?.secret).toBe("sk-ant-oat01-work-renewed");
+    expect((await pool.readAccounts()).find((a) => a.id === work.id)?.status).toBe("ok");
+  });
 });
 
 describe("failed gateway turns", () => {

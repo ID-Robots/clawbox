@@ -232,6 +232,7 @@ import {
 } from "@/lib/anthropic-limit";
 import { registerSwapConsumer, type SwapContext } from "@/lib/anthropic-swap";
 import { startGatewaySwap } from "@/lib/anthropic-gateway";
+import { tokenFingerprint } from "@/lib/anthropic-gateway-auth";
 import { announceCodingAgent } from "@/lib/coding-agent-notify";
 import {
   collectVisualEvidence,
@@ -11042,7 +11043,7 @@ async function continueOnAnotherAccount(
   const exclude = new Set<string>();
   let recorded: LimitRecorded | null = null;
   // What asking Anthropic about a refused credential answered, when it was asked.
-  let authVerdict: "ok" | "dead" | "unknown" | null = null;
+  let authVerdict: "ok" | "stale" | "dead" | "unknown" | null = null;
   if (why.kind === "limit") {
     recorded = await recordAccountLimit(run, why.found);
     if (fromId) exclude.add(fromId);
@@ -11054,12 +11055,19 @@ async function continueOnAnotherAccount(
     // An account its organisation switched off is not asked about: its grant
     // renews fine, so the probe would keep it and put the run straight back on it.
     const disabled = detectAnthropicAccountDisabled(why.text);
+    // The token this run was refused with: one the pool has replaced since is renewed no more (F-N5').
+    const refused = carriedAccount?.accountId === fromId && carriedAccount.credential.kind === "oauth" ? tokenFingerprint(carriedAccount.credential.secret) : undefined;
     const verdict = disabled
       ? await markCredentialProblem(fromId, "revoked", { source: "coding", runId: run.id }).then(() => "dead" as const, () => "unknown" as const)
-      : await probeAccountCredential(fromId, verifyAnthropicKey, { source: "coding", runId: run.id }).catch(() => "unknown" as const);
+      : await probeAccountCredential(fromId, verifyAnthropicKey, { source: "coding", runId: run.id }, refused).catch(() => "unknown" as const);
     console.error(`[coding-agent] ${run.id}: Anthropic refused account ${fromId}'s credential; ${disabled ? "its organization switched it off, so" : "asked again,"} it is ${verdict}`);
     authVerdict = verdict;
-    if (verdict !== "ok") exclude.add(fromId);
+    // A refusal the token's own age explains is not one of MAX_AUTH_SWITCHES,
+    // or a run that outlives a few renewals fails on the cap. Only after real
+    // answers: a spawn refused before any still counts, so no run bounces for ever.
+    const spent = store.anthropicAuthRetries?.get(run.id) ?? 0;
+    if (verdict === "stale" && state.sawModelAnswer && spent > 0) store.anthropicAuthRetries?.set(run.id, spent - 1);
+    if (verdict !== "ok" && verdict !== "stale") exclude.add(fromId);
   }
   let prepared: PreparedAccount | null = null;
   let nextResetAt: number | null = recorded?.health.nextResetAt ?? null;
