@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { afterEach, describe, expect, it, vi, beforeEach } from "vitest";
 
 const isPortOpenMock = vi.fn();
 // PARTIAL mock — only the probe is replaceable. A factory mock replaces the
@@ -49,5 +49,46 @@ describe("/setup-api/gateway/health", () => {
       over();
     }
     expect(await (await GET()).json()).toEqual({ available: true, port: 18789, restarting: false });
+  });
+
+  describe("the agents' databases", () => {
+    const saved = process.env.CLAWBOX_ROOT;
+    let root: string;
+    beforeEach(async () => {
+      const { mkdtempSync, mkdirSync } = await import("node:fs");
+      const os = await import("node:os");
+      const path = await import("node:path");
+      root = mkdtempSync(path.join(os.tmpdir(), "health-migration-"));
+      mkdirSync(path.join(root, "data"), { recursive: true });
+      process.env.CLAWBOX_ROOT = root;
+    });
+    afterEach(async () => {
+      process.env.CLAWBOX_ROOT = saved;
+      (await import("node:fs")).rmSync(root, { recursive: true, force: true });
+    });
+
+    it("carries a degraded migration beside a gateway that is up, never instead of it", async () => {
+      // A 10.x gateway on 9.x agent databases listens and reports ready while
+      // every agent is refused: the port alone was a silent ready.
+      const { writeFileSync } = await import("node:fs");
+      const path = await import("node:path");
+      writeFileSync(path.join(root, "data", "openclaw-migration-status.json"), JSON.stringify({
+        state: "degraded", reason: "schema-behind", requiredBytes: 61_000_000_000, freeBytes: 80_000_000_000,
+        databases: { total: 3, behind: 2 }, core: "2026.10.3",
+      }));
+      isPortOpenMock.mockResolvedValue(true);
+      expect(await (await GET()).json()).toEqual({
+        available: true, port: 18789, restarting: false,
+        migration: { state: "degraded", reason: "schema-behind", requiredBytes: 61_000_000_000, freeBytes: 80_000_000_000 },
+      });
+    });
+
+    it("says nothing when the databases are fine", async () => {
+      const { writeFileSync } = await import("node:fs");
+      const path = await import("node:path");
+      writeFileSync(path.join(root, "data", "openclaw-migration-status.json"), JSON.stringify({ state: "ok", reason: null }));
+      isPortOpenMock.mockResolvedValue(true);
+      expect(await (await GET()).json()).toEqual({ available: true, port: 18789, restarting: false });
+    });
   });
 });
