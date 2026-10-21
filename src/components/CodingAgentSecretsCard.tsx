@@ -32,6 +32,8 @@ import HelpTip from "./HelpTip";
  * server-side (src/lib/assistant-secrets.ts). The value never reaches the
  * browser — not in the picker, not in the answer — and the copy arrives
  * un-ticked, so the three parts above still decide whether a run gets it. The
+ * picker can also limit the copy to one run or to a last day (none by
+ * default), and the row then says so — or that it no longer reaches a run. The
  * button is drawn only when the import route answers this session with a
  * source to copy from: another ClawBox user, a box without one, or a box with
  * the feature switched off sees the card exactly as before.
@@ -51,6 +53,32 @@ interface SecretRow {
   updatedAt: number;
   inject: boolean;
   readable: boolean;
+  /** A copy's expiry: "run" or an ISO instant (SecretExpiry). Absent for most rows. */
+  expiresAt?: string;
+  /** No run will be handed it again — see SecretView. */
+  expired?: boolean;
+}
+
+/** The import picker's expiry choice. "none" is the default and sends nothing. */
+type ImportExpiry = "none" | "run" | "date";
+
+/** Today in the browser's own calendar, as a date input writes it (YYYY-MM-DD). */
+function todayInput(): string {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+}
+
+/**
+ * The end of the chosen day in the owner's own time zone, as the instant the
+ * box stores — "until the 25th" means through the 25th where the owner is. Null
+ * for a day that is not one, or that is already over.
+ */
+function endOfDay(day: string): string | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  if (!m) return null;
+  const end = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 23, 59, 59, 999);
+  if (Number.isNaN(end.getTime()) || end.getDate() !== Number(m[3]) || end.getTime() <= Date.now()) return null;
+  return end.toISOString();
 }
 
 interface SecretsPayload {
@@ -159,6 +187,8 @@ export default function CodingAgentSecretsCard() {
   const [importOpen, setImportOpen] = useState(false);
   const [importName, setImportName] = useState("");
   const [importScope, setImportScope] = useState(BOX_SCOPE);
+  const [importExpiry, setImportExpiry] = useState<ImportExpiry>("none");
+  const [importUntil, setImportUntil] = useState("");
   const [copied, setCopied] = useState<string | null>(null);
 
   const apply = useCallback((payload: SecretsPayload) => {
@@ -329,13 +359,23 @@ export default function CodingAgentSecretsCard() {
   const copyFromAssistant = async () => {
     if (!importChoice) return;
     const name = importChoice;
+    let expiresAt: string | undefined;
+    if (importExpiry === "run") expiresAt = "run";
+    if (importExpiry === "date") {
+      const until = endOfDay(importUntil);
+      if (!until) {
+        setError(t("codingAgent.secretsImportUntilInvalid"));
+        return;
+      }
+      expiresAt = until;
+    }
     const ok = await write(
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        // The name and the scope, and nothing else: the box reads the value
-        // itself and never sends it here.
-        body: JSON.stringify({ name, scope: importScope }),
+        // The name, the scope and the expiry, and nothing else: the box reads
+        // the value itself and never sends it here.
+        body: JSON.stringify({ name, scope: importScope, ...(expiresAt ? { expiresAt } : {}) }),
       },
       "/setup-api/coding-agent/secrets/import",
       "import",
@@ -343,6 +383,8 @@ export default function CodingAgentSecretsCard() {
     if (ok) {
       setImportOpen(false);
       setImportName("");
+      setImportExpiry("none");
+      setImportUntil("");
       setCopied(name);
     } else {
       // A refusal can mean the assistant's side moved — the key gone from its
@@ -350,6 +392,15 @@ export default function CodingAgentSecretsCard() {
       // than keep offering the same refused name. The refusal stays on screen.
       void fetchAssistantKeys().then(setAssistantKeys);
     }
+  };
+
+  const expiryText = (row: SecretRow): string => {
+    if (row.expiresAt === "run") return t(row.expired ? "codingAgent.secretsExpiryUsed" : "codingAgent.secretsExpiryRun");
+    if (row.expired) return t("codingAgent.secretsExpired");
+    const until = new Date(row.expiresAt ?? "");
+    return Number.isNaN(until.getTime())
+      ? t("codingAgent.secretsExpired")
+      : t("codingAgent.secretsExpiryUntil", { date: until.toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" }) });
   };
 
   const scopeLabel = (s: string): string => {
@@ -426,6 +477,16 @@ export default function CodingAgentSecretsCard() {
                 {!row.readable && (
                   <p className="mt-0.5 text-[11px] text-amber-300 leading-relaxed" data-testid="coding-agent-secret-unreadable">
                     {t("codingAgent.secretsUnreadable")}
+                  </p>
+                )}
+                {/* A copy the owner limited: how long it may still reach runs,
+                    or that it no longer reaches any. */}
+                {row.expiresAt && (
+                  <p
+                    className={`mt-0.5 text-[11px] leading-relaxed ${row.expired ? "text-amber-300" : "text-[var(--text-muted)]"}`}
+                    data-testid="coding-agent-secret-expiry"
+                  >
+                    {expiryText(row)}
                   </p>
                 )}
               </div>
@@ -584,6 +645,36 @@ export default function CodingAgentSecretsCard() {
                   </select>
                 </div>
               )}
+              {/* How long the copy may reach runs. None by default: the copy is
+                  inert until ticked whatever is picked here. */}
+              {assistantKeys.length > 0 && (
+                <div className="flex flex-col sm:flex-row gap-1.5">
+                  <select
+                    value={importExpiry}
+                    onChange={(e) => setImportExpiry(e.target.value as ImportExpiry)}
+                    disabled={busy !== null}
+                    aria-label={t("codingAgent.secretsImportExpiryLabel")}
+                    data-testid="coding-agent-secrets-import-expiry"
+                    className={`flex-1 min-w-0 text-base sm:text-xs ${FIELD}`}
+                  >
+                    <option value="none">{t("codingAgent.secretsImportExpiryNone")}</option>
+                    <option value="run">{t("codingAgent.secretsImportExpiryRun")}</option>
+                    <option value="date">{t("codingAgent.secretsImportExpiryDate")}</option>
+                  </select>
+                  {importExpiry === "date" && (
+                    <input
+                      type="date"
+                      value={importUntil}
+                      min={todayInput()}
+                      onChange={(e) => setImportUntil(e.target.value)}
+                      disabled={busy !== null}
+                      aria-label={t("codingAgent.secretsImportUntilLabel")}
+                      data-testid="coding-agent-secrets-import-until"
+                      className={`flex-1 min-w-0 text-base sm:text-xs ${FIELD}`}
+                    />
+                  )}
+                </div>
+              )}
               <div className="flex items-center justify-end gap-1.5">
                 <button
                   type="button"
@@ -655,6 +746,7 @@ const REFUSAL_KEYS: Record<string, string> = {
   not_held: "codingAgent.secretsImportGone",
   source_unreadable: "codingAgent.secretsImportSourceFailed",
   disabled: "codingAgent.secretsImportDisabled",
+  invalid_expiry: "codingAgent.secretsImportUntilInvalid",
   store_unreadable: "codingAgent.secretsStoreFailed",
   store_unwritable: "codingAgent.secretsStoreFailed",
   key_unavailable: "codingAgent.secretsKeyFailed",

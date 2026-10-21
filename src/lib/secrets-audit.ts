@@ -15,9 +15,11 @@
  * bundle collects; the owner's question — "when did this key get copied, and
  * which runs were handed it?" — wants a short list of exactly these events that
  * outlives a reboot. The same discipline as the store beside it: 0600, under
- * `data/`, and on the coding agent's list of files a run may never read
- * (`DATA_SECRET_FILES` in src/lib/coding-agent.ts) — names are not values, but
- * which projects hold which credentials is the owner's to know.
+ * `data/`, on the coding agent's list of files a run may never read
+ * (`DATA_SECRET_FILES` in src/lib/coding-agent.ts) and among the names no owner
+ * allow rule may reach (`HARD_SEGMENTS` in src/lib/coding-permission-rules.ts)
+ * — names are not values, but which projects hold which credentials is the
+ * owner's to know.
  *
  * BOUNDED. Past `MAX_AUDIT_BYTES` the oldest half is dropped, so the file can
  * never fill the eMMC however many runs a box starts.
@@ -31,7 +33,7 @@ import crypto from "crypto";
 import fs from "fs/promises";
 import path, { untraced } from "@/lib/runtime-path";
 import { DATA_DIR } from "@/lib/config-store";
-import { isDeviceSecretScope, isValidSecretScope, SECRET_NAME_RE } from "@/lib/project-secrets-shape";
+import { isDeviceSecretScope, isValidSecretScope, readSecretExpiry, SECRET_NAME_RE } from "@/lib/project-secrets-shape";
 
 export const SECRETS_AUDIT_FILE_NAME = "secrets-audit.log";
 
@@ -53,10 +55,15 @@ export type SecretAuditAction =
   /** Ticked for a run's environment, or taken out of it. */
   | "tick"
   | "untick"
-  /** Taken back by the owner, or with a deleted project's folder. */
+  /** Taken back by the owner, with a deleted project's folder, or with the one run it was for. */
   | "delete"
-  /** Handed to a run as environment variables. */
-  | "inject";
+  /** Handed to a run as environment variables — written once the child has started. */
+  | "inject"
+  /** Resolved for a run whose child then never started: nothing was handed. */
+  | "not_handed"
+  /** The owner's injection switch, turned on or off. */
+  | "switch_on"
+  | "switch_off";
 
 /** Where a copied value came from. Only the assistant, today. */
 export type SecretImportSource = "hermes";
@@ -69,8 +76,10 @@ export interface SecretAuditEvent {
   names?: string[];
   scope?: string;
   source?: SecretImportSource;
+  /** A copy's expiry: "run" or an ISO instant. A label, like the name. */
+  expiresAt?: string;
   runId?: string;
-  /** Why, when it was not the owner's own click — "project_deleted". */
+  /** Why, when it was not the owner's own click — "project_deleted", "run_ended", "spawn_failed", "reset". */
   reason?: string;
 }
 
@@ -98,6 +107,9 @@ export function auditLine(event: SecretAuditEvent, at: Date = new Date()): strin
   const scope = cleanScope(event.scope);
   if (scope) line.scope = scope;
   if (event.source === "hermes") line.source = event.source;
+  // Only an expiry this store could have written — "run" or a readable instant.
+  const expiry = readSecretExpiry(event.expiresAt);
+  if (expiry === "run" || (typeof expiry === "number" && Number.isFinite(expiry))) line.expiresAt = event.expiresAt;
   if (typeof event.runId === "string" && RUN_ID_RE.test(event.runId)) line.runId = event.runId;
   if (typeof event.reason === "string" && REASON_RE.test(event.reason)) line.reason = event.reason;
   return `${JSON.stringify(line)}\n`;

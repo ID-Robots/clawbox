@@ -143,6 +143,8 @@ export type SecretRefusal =
   | "not_held"
   /** The assistant's own key file could not be read for an import. */
   | "source_unreadable"
+  /** An import's expiry that is neither "run" nor a date still to come. */
+  | "invalid_expiry"
   | "store_unreadable"
   | "store_unwritable"
   | "key_unavailable";
@@ -170,6 +172,52 @@ export interface SecretView {
    * is to type the value again under it.
    */
   readable: boolean;
+  /** Only on an entry that has one — see SecretExpiry. */
+  expiresAt?: SecretExpiry;
+  /**
+   * Beside `expiresAt` only: true once no run will be handed this entry again —
+   * its date has passed, or it was the one run's and that run has had it.
+   */
+  expired?: boolean;
+}
+
+/**
+ * How long a COPY from the assistant may reach runs (src/lib/assistant-secrets.ts).
+ *
+ *  - absent: like a typed entry, until the owner removes it;
+ *  - `"run"`: the next run handed it, and no other — the entry is removed when
+ *    that run ends (src/lib/coding-agent.ts);
+ *  - an ISO-8601 instant: until then, and never after.
+ *
+ * An optional field on the row, so a row without one — every row an older build
+ * wrote — is read exactly as before.
+ */
+export type SecretExpiry = "run" | string;
+
+export const SECRET_EXPIRY_RUN = "run";
+
+/**
+ * A stored expiry, read for a decision: `undefined` for none, `"run"`, or the
+ * instant in milliseconds. Anything else a row holds — a hand edit, a format a
+ * later build wrote — reads as already over (`-Infinity`): an expiry this build
+ * cannot read is one it must not extend.
+ */
+export function readSecretExpiry(value: unknown): undefined | "run" | number {
+  if (value === undefined || value === null) return undefined;
+  if (value === SECRET_EXPIRY_RUN) return SECRET_EXPIRY_RUN;
+  const at = typeof value === "string" && ISO_INSTANT_RE.test(value) ? Date.parse(value) : NaN;
+  return Number.isFinite(at) ? at : -Infinity;
+}
+
+/** A full ISO-8601 instant as `Date#toISOString` writes it, or with an offset. */
+const ISO_INSTANT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[+-]\d{2}:\d{2})$/;
+
+/** True when an entry with this expiry may no longer reach any run but the one that has it. */
+export function isSecretExpired(expiresAt: unknown, usedBy: unknown, now: number = Date.now()): boolean {
+  const expiry = readSecretExpiry(expiresAt);
+  if (expiry === undefined) return false;
+  if (expiry === SECRET_EXPIRY_RUN) return typeof usedBy === "string" && usedBy.length > 0;
+  return expiry <= now;
 }
 
 /** True when `scope` is one this store recognises. */

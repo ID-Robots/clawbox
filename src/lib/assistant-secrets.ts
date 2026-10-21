@@ -11,6 +11,9 @@
  *    `hermes config set` routed there, and the ones the owner added by hand.
  *    The pinned Hermes has no grant or export mechanism of its own, so the
  *    file is read through src/lib/hermes-env.ts, the box's one reader of it.
+ *    Not `hermes config get`: nothing at the pin confirms it answers a secret
+ *    unredacted, and a copy of a masked value would be a broken key that looks
+ *    like a working one.
  *  - OPENCLAW offers nothing to copy, by design. The pinned gateway keeps
  *    credentials in its shared secret store as `secret`-kind entries, whose
  *    values are write-only: `secrets store get` refuses them and
@@ -21,7 +24,8 @@
  * WHAT IS NEVER OFFERED, whatever the file holds — the assistant's and the
  * box's OWN wiring (`isImportableSecretName`): the session secret, ClawBox's
  * gateway, MCP, portal and local-AI tokens, every chat-channel and mail
- * credential, the model-provider keys the assistant answers with, and a secret
+ * credential, the model-provider keys the assistant answers with (the pinned
+ * Hermes' whole `provider` list, and every `AWS_` credential), and a secret
  * manager's master token (Bitwarden, 1Password). Those
  * are how the box itself works; a coding run that needs one of them is the
  * owner's to give by typing it, not something a button should make easy. On
@@ -46,6 +50,7 @@ import {
   importSecret,
   isReservedSecretName,
   isStorableSecretValue,
+  requireSecretExpiry,
   requireSecretName,
   requireSecretScope,
   SECRET_NAME_RE,
@@ -96,15 +101,18 @@ const BOX_OWN_PREFIXES: readonly string[] = [
 ];
 
 /**
- * The model-provider variables the assistant answers with: the pinned Hermes'
- * own `provider` catalogue, less the ones the store's `ANTHROPIC_` / `CLAUDE_`
- * reservation already refuses.
+ * The model-provider variables the assistant answers with: every name pinned
+ * Hermes v0.21.7 files under `provider` in its env-var catalogue (87), less the
+ * ones a prefix already refuses — the store's `ANTHROPIC_` / `CLAUDE_`
+ * reservation, `HERMES_` above and `AWS_` below. Taken from the pin, not from
+ * memory: a pin bump re-reads that category and updates this list and its test
+ * (src/tests/unit/assistant-secrets.test.ts) together.
  */
 const MODEL_PROVIDER_NAMES: ReadonlySet<string> = new Set([
   "ACTUAL_API_KEY", "AI_GATEWAY_API_KEY", "ALIBABA_CODING_PLAN_API_KEY", "ALIBABA_CODING_PLAN_BASE_URL",
   "ALIBABA_CODING_PLAN_CN_API_KEY", "ALIBABA_CODING_PLAN_CN_BASE_URL", "ALIBABA_TOKEN_PLAN_API_KEY",
   "ALIBABA_TOKEN_PLAN_BASE_URL", "ALIBABA_TOKEN_PLAN_CN_API_KEY", "ALIBABA_TOKEN_PLAN_CN_BASE_URL",
-  "ARCEEAI_API_KEY", "ARCEE_BASE_URL", "AWS_PROFILE", "AWS_REGION", "AZURE_FOUNDRY_API_KEY",
+  "ARCEEAI_API_KEY", "ARCEE_BASE_URL", "AZURE_FOUNDRY_API_KEY",
   "AZURE_FOUNDRY_BASE_URL", "COMMANDCODE_ANTHROPIC_BASE_URL", "COMMANDCODE_API_KEY", "COMMANDCODE_BASE_URL",
   "DASHSCOPE_API_KEY", "DASHSCOPE_BASE_URL", "DASHSCOPE_CN_BASE_URL", "DEEPINFRA_API_KEY", "DEEPINFRA_BASE_URL",
   "DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "FIREWORKS_API_KEY", "GEMINI_API_KEY", "GEMINI_BASE_URL",
@@ -121,13 +129,23 @@ const MODEL_PROVIDER_NAMES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Whole families of provider credentials. `AWS_`: Hermes' Bedrock provider
+ * names `AWS_PROFILE` and `AWS_REGION`, and authenticates through the standard
+ * AWS chain — `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`
+ * — which its catalogue does not list. Every one of them is the owner's cloud
+ * account, not one job's key, so the prefix rather than today's names.
+ */
+const MODEL_PROVIDER_PREFIXES: readonly string[] = ["AWS_"];
+
+/**
  * True when a name may be offered and copied: a valid secret name, not one the
- * store reserves, and not the assistant's or the box's own wiring.
+ * store reserves (which includes every `CLAWBOX_` name), and not the
+ * assistant's or the box's own wiring.
  */
 export function isImportableSecretName(name: string): boolean {
   if (!SECRET_NAME_RE.test(name) || isReservedSecretName(name)) return false;
   if (BOX_OWN_NAMES.has(name) || MODEL_PROVIDER_NAMES.has(name)) return false;
-  return !BOX_OWN_PREFIXES.some((prefix) => name.startsWith(prefix));
+  return ![...BOX_OWN_PREFIXES, ...MODEL_PROVIDER_PREFIXES].some((prefix) => name.startsWith(prefix));
 }
 
 /**
@@ -172,16 +190,19 @@ export function assistantSecretSources(): SecretImportSource[] {
 }
 
 /**
- * Copy ONE of the assistant's keys into the owner's store, un-ticked.
+ * Copy ONE of the assistant's keys into the owner's store, un-ticked, with the
+ * expiry the owner picked (none, "run" or a date — see SecretExpiry).
  *
- * The name and the scope are checked BEFORE the assistant's file is read, so a
- * request that could never succeed costs nothing and learns nothing. The name
- * must then be one the list above would offer: a denylisted name is refused even
- * when the file holds it. Answers the stored entry's view — never the value.
+ * The name, the scope and the expiry are checked BEFORE the assistant's file is
+ * read, so a request that could never succeed costs nothing and learns nothing.
+ * The name must then be one the list above would offer: a denylisted name is
+ * refused even when the file holds it. Answers the stored entry's view — never
+ * the value.
  */
-export async function importAssistantSecret(input: { name: unknown; scope?: unknown }): Promise<SecretView & { source: SecretImportSource }> {
+export async function importAssistantSecret(input: { name: unknown; scope?: unknown; expiresAt?: unknown }): Promise<SecretView & { source: SecretImportSource }> {
   const name = requireSecretName(input.name);
   const scope = requireSecretScope(input.scope);
+  requireSecretExpiry(input.expiresAt);
   if (!isImportableSecretName(name)) {
     throw new SecretStoreError(
       "not_importable",
@@ -195,6 +216,6 @@ export async function importAssistantSecret(input: { name: unknown; scope?: unkn
     // changed, and the card words the two differently.
     throw new SecretStoreError("not_held", `The assistant holds no key called ${name} that this ClawBox can copy.`);
   }
-  const view = await importSecret({ name, value: held.value, scope, source: held.source });
+  const view = await importSecret({ name, value: held.value, scope, source: held.source, expiresAt: input.expiresAt });
   return { ...view, source: held.source };
 }

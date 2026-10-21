@@ -47,6 +47,49 @@ describe("isImportableSecretName", () => {
     }
   });
 
+  it("never offers any provider credential of the pinned Hermes", () => {
+    // Every name pinned Hermes v0.21.7 files under the `provider` category of
+    // its env-var catalogue, taken from the pin rather than from memory. A pin
+    // bump that adds a provider adds it here and to MODEL_PROVIDER_NAMES together.
+    const pinned = [
+      "ACTUAL_API_KEY", "AI_GATEWAY_API_KEY", "ALIBABA_CODING_PLAN_API_KEY", "ALIBABA_CODING_PLAN_BASE_URL", "ALIBABA_CODING_PLAN_CN_API_KEY",
+      "ALIBABA_CODING_PLAN_CN_BASE_URL", "ALIBABA_TOKEN_PLAN_API_KEY", "ALIBABA_TOKEN_PLAN_BASE_URL", "ALIBABA_TOKEN_PLAN_CN_API_KEY", "ALIBABA_TOKEN_PLAN_CN_BASE_URL",
+      "ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "ARCEEAI_API_KEY", "ARCEE_BASE_URL", "AWS_PROFILE",
+      "AWS_REGION", "AZURE_FOUNDRY_API_KEY", "AZURE_FOUNDRY_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN", "COMMANDCODE_ANTHROPIC_BASE_URL",
+      "COMMANDCODE_API_KEY", "COMMANDCODE_BASE_URL", "DASHSCOPE_API_KEY", "DASHSCOPE_BASE_URL", "DASHSCOPE_CN_BASE_URL",
+      "DEEPINFRA_API_KEY", "DEEPINFRA_BASE_URL", "DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "FIREWORKS_API_KEY",
+      "GEMINI_API_KEY", "GEMINI_BASE_URL", "GLM_API_KEY", "GLM_BASE_URL", "GMI_API_KEY",
+      "GMI_BASE_URL", "GOOGLE_API_KEY", "HERMES_ANON_API_SECRET", "HERMES_QWEN_BASE_URL", "HF_BASE_URL",
+      "HF_TOKEN", "KILOCODE_API_KEY", "KIMI_API_KEY", "KIMI_BASE_URL", "KIMI_CN_API_KEY",
+      "KIMI_CODING_API_KEY", "LM_API_KEY", "LM_BASE_URL", "META_API_KEY", "META_BASE_URL",
+      "META_MODEL_API_KEY", "MINIMAX_API_KEY", "MINIMAX_BASE_URL", "MINIMAX_CN_API_KEY", "MINIMAX_CN_BASE_URL",
+      "MODEL_API_KEY", "NEBIUS_API_KEY", "NEBIUS_BASE_URL", "NEBIUS_TOKEN_FACTORY_API_KEY", "NOUS_BASE_URL",
+      "NOVITA_API_KEY", "NOVITA_BASE_URL", "NVIDIA_API_KEY", "NVIDIA_BASE_URL", "OLLAMA_API_KEY",
+      "OLLAMA_BASE_URL", "OPENCODE_GO_API_KEY", "OPENCODE_GO_BASE_URL", "OPENCODE_ZEN_API_KEY", "OPENCODE_ZEN_BASE_URL",
+      "OPENROUTER_API_KEY", "RAMP_ROUTER_API_KEY", "RAMP_ROUTER_BASE_URL", "ROUTER_API_KEY", "STEPFUN_API_KEY",
+      "STEPFUN_BASE_URL", "TOKENHUB_API_KEY", "TOKENHUB_BASE_URL", "UPSTAGE_API_KEY", "UPSTAGE_BASE_URL",
+      "VERTEX_CREDENTIALS_PATH", "XAI_API_KEY", "XAI_BASE_URL", "XIAOMI_API_KEY", "XIAOMI_BASE_URL",
+      "Z_AI_API_KEY", "ZAI_API_KEY",
+    ];
+    expect(pinned).toHaveLength(87);
+    for (const name of pinned) expect(isImportableSecretName(name), name).toBe(false);
+  });
+
+  it("never offers an AWS credential, whichever AWS_ name it goes by", () => {
+    // Bedrock reads the standard AWS chain, which is not in Hermes' provider
+    // list; the whole prefix is the assistant's cloud account.
+    for (const name of ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_BEARER_TOKEN_BEDROCK"]) {
+      expect(isImportableSecretName(name), name).toBe(false);
+    }
+  });
+
+  it("never offers one of the box's own CLAWBOX_ names", () => {
+    // The store's reserved prefix is what refuses it, not a list of today's names.
+    for (const name of ["CLAWBOX_AI_TOKEN", "CLAWBOX_MCP_TOKEN", "CLAWBOX_ANYTHING_NEW"]) {
+      expect(isImportableSecretName(name), name).toBe(false);
+    }
+  });
+
   it("never offers a secret manager's master token", () => {
     for (const name of ["BWS_ACCESS_TOKEN", "OP_SERVICE_ACCOUNT_TOKEN", "OP_CONNECT_TOKEN"]) {
       expect(isImportableSecretName(name), name).toBe(false);

@@ -124,6 +124,13 @@ beforeEach(async () => {
     "SHORT_TOKEN=abc",
     "CONTROL_TOKEN=control-\u0001-placeholder",
     "export EXPORTED_API_KEY=exported-placeholder-0000",
+    // Cloud credentials and the box's own plan token: held, never offered.
+    "AWS_ACCESS_KEY_ID=aws-key-id-placeholder-0000",
+    "AWS_SECRET_ACCESS_KEY=aws-secret-placeholder-0000",
+    "AWS_SESSION_TOKEN=aws-session-placeholder-0000",
+    "CLAWBOX_AI_TOKEN=clawbox-ai-placeholder-0000",
+    // An inline comment is not part of the value, the way Hermes reads it.
+    "COMMENTED_TOKEN=commented-value-0000 # rotated in spring",
     "",
   ].join("\n"));
 
@@ -199,6 +206,37 @@ describe("the copy", () => {
     expect(auditText()).not.toContain(VALUE);
     expect((fs.statSync(path.join(root, "data", "secrets-audit.log")).mode & 0o777).toString(8)).toBe("600");
   });
+
+  it("copies with the expiry the owner picked: one run, or a date", async () => {
+    const res = await route.POST(request({ cookie: ownerCookie(), body: { name: "IMPORT_ME_TOKEN", scope: "@box", expiresAt: "run" } }));
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).not.toContain(VALUE);
+    expect(JSON.parse(text).imported).toEqual({ name: "IMPORT_ME_TOKEN", scope: "@box", expiresAt: "run" });
+    expect(await store.listSecrets()).toContainEqual(expect.objectContaining({ name: "IMPORT_ME_TOKEN", inject: false, expiresAt: "run", expired: false }));
+
+    const until = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+    const dated = await route.POST(request({ cookie: ownerCookie(), body: { name: "IMPORT_ME_TOKEN", scope: "shop", expiresAt: until } }));
+    expect(dated.status).toBe(200);
+    expect(await store.listSecrets()).toContainEqual(expect.objectContaining({ scope: "shop", inject: false, expiresAt: until }));
+    expect(auditText()).not.toContain(VALUE);
+  });
+
+  it("refuses an expiry that is already over, and copies nothing", async () => {
+    const res = await route.POST(request({ cookie: ownerCookie(), body: { name: "IMPORT_ME_TOKEN", scope: "@box", expiresAt: "2001-01-01T00:00:00.000Z" } }));
+    expect(res.status).toBe(400);
+    expect((await res.json()).code).toBe("invalid_expiry");
+    expect(await store.listSecrets()).toEqual([]);
+    expect(auditText()).toBe("");
+  });
+
+  it("copies the value without the line's inline comment", async () => {
+    const res = await route.POST(request({ cookie: ownerCookie(), body: { name: "COMMENTED_TOKEN", scope: "@box" } }));
+    expect(res.status).toBe(200);
+    await store.setSecretInject({ name: "COMMENTED_TOKEN", scope: "@box", inject: true });
+    config[store.SECRET_INJECT_CONFIG_KEY] = true;
+    expect((await store.resolveSecretsForRun({ project: null, runId: "run-0000c0de" })).env).toEqual({ COMMENTED_TOKEN: "commented-value-0000" });
+  });
 });
 
 describe("who may copy", () => {
@@ -234,7 +272,10 @@ describe("who may copy", () => {
 
 describe("what may be copied", () => {
   it("refuses a denylisted name even when the assistant holds it", async () => {
-    for (const name of ["SESSION_SECRET", "TELEGRAM_BOT_TOKEN", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"]) {
+    for (const name of [
+      "SESSION_SECRET", "TELEGRAM_BOT_TOKEN", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY",
+      "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "CLAWBOX_AI_TOKEN",
+    ]) {
       const res = await route.POST(request({ cookie: ownerCookie(), body: { name, scope: "@box" } }));
       expect(res.status, name).toBe(400);
       const body = await res.json();
@@ -283,9 +324,17 @@ describe("the picker's list", () => {
     const names = body.names.map((n: { name: string }) => n.name);
     // SHORT_TOKEN and CONTROL_TOKEN are held, but the store would refuse their
     // values, so offering them would only lead to a refusal.
-    expect(names).toEqual(["EXPORTED_API_KEY", "IMPORT_ME_TOKEN"]);
+    expect(names).toEqual(["COMMENTED_TOKEN", "EXPORTED_API_KEY", "IMPORT_ME_TOKEN"]);
     for (const row of body.names) expect(Object.keys(row).sort()).toEqual(["name", "source"]);
     expect(body.sources).toEqual(["hermes"]);
+  });
+
+  it("never offers an AWS credential or one of the box's CLAWBOX_ names", async () => {
+    const { listAssistantSecrets } = await import("@/lib/assistant-secrets");
+    const names = (await listAssistantSecrets()).map((n) => n.name);
+    for (const name of ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "CLAWBOX_AI_TOKEN"]) {
+      expect(names, name).not.toContain(name);
+    }
   });
 
   it("answers an empty list on a box whose assistant has no .env", async () => {

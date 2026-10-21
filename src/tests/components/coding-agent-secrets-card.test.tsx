@@ -70,8 +70,9 @@ function stubFetch(): void {
         return assistant ? json(assistant) : json({ error: "owner only", kind: "owner_only" }, 403);
       }
       if (refuse) { const r = refuse; refuse = null; return json(r.body, r.status); }
-      secrets = [...secrets, { name: body.name, scope: body.scope, inject: false, readable: true, createdAt: 1, updatedAt: 1 }];
-      return json({ imported: { name: body.name, scope: body.scope }, ...payload() });
+      const expiry = body.expiresAt ? { expiresAt: body.expiresAt, expired: false } : {};
+      secrets = [...secrets, { name: body.name, scope: body.scope, inject: false, readable: true, createdAt: 1, updatedAt: 1, ...expiry }];
+      return json({ imported: { name: body.name, scope: body.scope, ...(body.expiresAt ? { expiresAt: body.expiresAt } : {}) }, ...payload() });
     }
     if (url.startsWith("/setup-api/coding-agent/secrets")) {
       if (method === "GET") return json(payload());
@@ -409,6 +410,61 @@ describe("import from assistant", () => {
     const row = await screen.findByTestId("coding-agent-secret-row");
     expect(row).toHaveTextContent("NOTION_API_KEY");
     expect(screen.getByTestId("coding-agent-secret-inject")).toHaveAttribute("aria-checked", "false");
+  });
+
+  it("sends no expiry unless the owner picks one, and limits the copy to one run when they do", async () => {
+    assistant = offered();
+    await mounted();
+    fireEvent.click(await screen.findByTestId("coding-agent-secrets-import-open"));
+    expect(await screen.findByTestId("coding-agent-secrets-import-expiry")).toHaveValue("none");
+    fireEvent.change(screen.getByTestId("coding-agent-secrets-import-expiry"), { target: { value: "run" } });
+    fireEvent.click(screen.getByTestId("coding-agent-secrets-import-copy"));
+
+    await waitFor(() => expect(calls).toHaveLength(1));
+    expect(calls[0].body).toEqual({ name: "GITHUB_TOKEN", scope: BOX_SCOPE, expiresAt: "run" });
+    expect(await screen.findByTestId("coding-agent-secret-expiry")).toHaveTextContent(t("codingAgent.secretsExpiryRun"));
+    // Still un-ticked: the expiry narrows a grant, it never makes one.
+    expect(screen.getByTestId("coding-agent-secret-inject")).toHaveAttribute("aria-checked", "false");
+
+    // And the next copy starts from "none" again.
+    fireEvent.click(screen.getByTestId("coding-agent-secrets-import-open"));
+    fireEvent.click(await screen.findByTestId("coding-agent-secrets-import-copy"));
+    await waitFor(() => expect(calls).toHaveLength(2));
+    expect(calls[1].body).toEqual({ name: "NOTION_API_KEY", scope: BOX_SCOPE });
+  });
+
+  it("sends the end of the chosen day, and refuses a day already over before anything is posted", async () => {
+    assistant = offered();
+    await mounted();
+    fireEvent.click(await screen.findByTestId("coding-agent-secrets-import-open"));
+    fireEvent.change(await screen.findByTestId("coding-agent-secrets-import-expiry"), { target: { value: "date" } });
+    const until = await screen.findByTestId("coding-agent-secrets-import-until");
+
+    fireEvent.change(until, { target: { value: "2001-01-01" } });
+    fireEvent.click(screen.getByTestId("coding-agent-secrets-import-copy"));
+    expect(await screen.findByTestId("coding-agent-secrets-error")).toHaveTextContent(t("codingAgent.secretsImportUntilInvalid"));
+    expect(calls).toEqual([]);
+
+    const day = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000);
+    const input = `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`;
+    fireEvent.change(until, { target: { value: input } });
+    fireEvent.click(screen.getByTestId("coding-agent-secrets-import-copy"));
+    await waitFor(() => expect(calls).toHaveLength(1));
+    const end = new Date(day.getFullYear(), day.getMonth(), day.getDate(), 23, 59, 59, 999).toISOString();
+    expect(calls[0].body).toEqual({ name: "GITHUB_TOKEN", scope: BOX_SCOPE, expiresAt: end });
+    expect(await screen.findByTestId("coding-agent-secret-expiry")).toHaveTextContent(
+      t("codingAgent.secretsExpiryUntil", { date: new Date(end).toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" }) }),
+    );
+  });
+
+  it("says when a copy no longer reaches any run", async () => {
+    secrets = [
+      { name: "ONE_RUN_TOKEN", scope: BOX_SCOPE, inject: true, readable: true, createdAt: 1, updatedAt: 1, expiresAt: "run", expired: true },
+      { name: "OLD_TOKEN", scope: BOX_SCOPE, inject: true, readable: true, createdAt: 1, updatedAt: 1, expiresAt: "2001-01-01T00:00:00.000Z", expired: true },
+    ];
+    await mounted();
+    const lines = await screen.findAllByTestId("coding-agent-secret-expiry");
+    expect(lines.map((line) => line.textContent)).toEqual([t("codingAgent.secretsExpiryUsed"), t("codingAgent.secretsExpired")]);
   });
 
   it("will not offer a name already in the list for the chosen scope", async () => {

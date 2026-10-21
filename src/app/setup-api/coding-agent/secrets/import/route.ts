@@ -40,10 +40,13 @@ export const dynamic = "force-dynamic";
  * log line — not even its length.
  *
  * GET               → { names: [{ name, source }], sources }
- * POST { name, scope } → { imported: { name, scope }, secrets, max, maxValueChars, injectSecrets }
+ * POST { name, scope, expiresAt? } → { imported: { name, scope, expiresAt? }, secrets, max, maxValueChars, injectSecrets }
  *
  * The copy lands UN-TICKED and refuses to replace an entry already there (409):
- * the owner's three gates on the secrets card decide the rest.
+ * the owner's three gates on the secrets card decide the rest. `expiresAt` is
+ * optional — "run" (the next run handed it, then removed) or an ISO instant
+ * still to come; anything else is refused (400 `invalid_expiry`) before the
+ * assistant's file is read.
  */
 
 function refuse(status: number, kind: string, error: string, code?: string) {
@@ -86,9 +89,9 @@ function failed(err: unknown) {
   return NextResponse.json({ error: "Could not copy the assistant's key" }, { status: 500 });
 }
 
-/** A name and a scope, and nothing else: a few hundred bytes is generous. */
+/** A name, a scope and an expiry, and nothing else: a few hundred bytes is generous. */
 const MAX_BODY_BYTES = 4_096;
-const TOO_LONG = "That request is larger than a name and a scope can be.";
+const TOO_LONG = "That request is larger than a name, a scope and an expiry can be.";
 
 export async function GET(request: Request) {
   const denied = await guard(request, false);
@@ -107,16 +110,19 @@ export async function POST(request: Request) {
   if (!read.ok) {
     return read.reason === "too_long"
       ? refuse(413, "invalid", TOO_LONG, "too_long")
-      : refuse(400, "invalid", "Invalid body. Expected { name, scope }.", "malformed");
+      : refuse(400, "invalid", "Invalid body. Expected { name, scope, expiresAt? }.", "malformed");
   }
   try {
-    const copied = await importAssistantSecret({ name: read.body.name, scope: read.body.scope });
+    const copied = await importAssistantSecret({ name: read.body.name, scope: read.body.scope, expiresAt: read.body.expiresAt });
     // The NAME, the scope and where it came from — never the value or its
     // length. The audit trail has its own line (src/lib/secrets-audit.ts).
     console.error(
-      `[secrets] ${copied.name} copied from the assistant by the owner for ${copied.scope === BOX_SCOPE ? "the whole box" : `project ${copied.scope}`}, not yet given to runs`,
+      `[secrets] ${copied.name} copied from the assistant by the owner for ${copied.scope === BOX_SCOPE ? "the whole box" : `project ${copied.scope}`}${copied.expiresAt === "run" ? " for one run" : copied.expiresAt ? ` until ${copied.expiresAt}` : ""}, not yet given to runs`,
     );
-    return NextResponse.json({ imported: { name: copied.name, scope: copied.scope }, ...(await payload()) });
+    return NextResponse.json({
+      imported: { name: copied.name, scope: copied.scope, ...(copied.expiresAt ? { expiresAt: copied.expiresAt } : {}) },
+      ...(await payload()),
+    });
   } catch (err) {
     return failed(err);
   }

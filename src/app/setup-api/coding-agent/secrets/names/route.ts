@@ -33,8 +33,10 @@ export async function GET(request: Request) {
       // `inject` and `readable` travel with each name because both change what
       // a run will actually find: an un-ticked entry is stored and not handed
       // over, and an unreadable one cannot be handed over at all. An agent told
-      // only the name would promise a credential that never arrives.
-      names: secrets.map((s) => ({ name: s.name, scope: s.scope, inject: s.inject, readable: s.readable })),
+      // only the name would promise a credential that never arrives. For the
+      // same reason a copy past its expiry, or a one-run copy its run already
+      // has, reads as not given: ticked, and still reaching no new run.
+      names: secrets.map((s) => ({ name: s.name, scope: s.scope, inject: s.inject && s.expired !== true, readable: s.readable })),
     });
   } catch (err) {
     if (err instanceof SecretStoreError) {

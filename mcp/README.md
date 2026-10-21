@@ -803,7 +803,9 @@ no tool for "Import from assistant", which copies a key the assistant already
 holds into this store: its route (`/setup-api/coding-agent/secrets/import`)
 refuses the MCP bearer and answers names only, the copy arrives un-ticked, and
 `coding_secret_list` never lists the assistant's own keys. If a run needs one,
-ask the owner to copy it from the Coding Agent's settings.
+ask the owner to copy it from the Coding Agent's settings. The owner may limit
+a copy to one run or to a last day; once it is spent or past that day,
+`coding_secret_list` reports it with `given_to_runs: false`.
 
 
 The run lives in the web server (`src/lib/coding-agent.ts`,
