@@ -360,7 +360,7 @@ describe("a limited account and the sessions core pinned to it", () => {
     }
   });
 
-  it("puts the owner's subscription sign-in ahead of an API key the store holds beside it, and a static token that has run out is no sign-in", async () => {
+  it("leaves an API key the store holds beside the sign-in out while the sign-in leads — the turn's one rotation must not spend it — and a static token that has run out is no sign-in", async () => {
     const core = fakeCore();
     core.profiles.set("anthropic:key", { type: "api_key", secret: "sk-ant-api03-owner", expires: null });
     core.order = ["anthropic:key", "anthropic:default"];
@@ -372,7 +372,8 @@ describe("a limited account and the sessions core pinned to it", () => {
     await pool.markLimited(personal.id, Date.now() + H, "session");
     await swap.whenSwapsSettled();
     await gw.syncGatewayNow();
-    expect(core.order).toEqual(["anthropic:default", "anthropic:key"]);
+    expect(core.order).toEqual(["anthropic:default"]);
+    expect(core.profiles.has("anthropic:key")).toBe(true);
 
     core.profiles.set("anthropic:default", { type: "token", secret: OWN, expires: Date.now() - 60_000 });
     await gw.syncGatewayNow();

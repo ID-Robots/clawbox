@@ -57,7 +57,8 @@
  * (src/lib/anthropic-limit.ts). Anthropic's windows are read only then, just
  * before the move or a spawn's pick, at most every ten minutes per account
  * (`readRoom`), never on a timer; the gateway learns the pick only as the
- * account its order leads with.
+ * account its order leads with. "Return to the first account" and the
+ * owner's reorder are the owner's order, whatever the pick.
  */
 
 import crypto from "crypto";
@@ -440,6 +441,8 @@ interface PoolRuntime {
   wakeAt: number | null;
   /** Per account, how full its fullest usage window was and when that was asked (readRoom); `percent` null: no answer. */
   room: Map<string, { percent: number | null; at: number }>;
+  /** The last readRoom pass: each waits for the one before it. */
+  roomRead: Promise<void>;
 }
 
 function runtime(): PoolRuntime {
@@ -452,6 +455,7 @@ function runtime(): PoolRuntime {
     wakeTimer: null,
     wakeAt: null,
     room: new Map(),
+    roomRead: Promise.resolve(),
   }));
 }
 
@@ -1048,14 +1052,23 @@ function roomNow(now: number): Map<string, number> {
  * answering, or the ones a spawn has seen refuse): Anthropic's usage windows
  * for every `oauth` account that could be picked and was not asked within
  * ROOM_TTL_MS, all at once. A pool that is not about to move asks nothing,
- * and nothing asks on a timer. Read with the access token the pool holds —
- * never renewed for it: one at its end has no reading, and the pick takes it
- * in the owner's order. Never throws.
+ * and nothing asks on a timer; with "return to the first account" on, the
+ * owner's order decides and nothing is asked either. Read with the access
+ * token the pool holds — never renewed for it: one at its end has no
+ * reading, and the pick takes it in the owner's order. One read at a time,
+ * so a move just behind another one finds its readings. Never throws.
  */
-async function readRoom(leaving: ReadonlySet<string>): Promise<void> {
+function readRoom(leaving: ReadonlySet<string>): Promise<void> {
   const state = runtime();
-  const file = state.snapshot;
-  if (!file || file.pickMode !== "most-room") return;
+  const next = state.roomRead.then(() => readRoomNow(leaving)).catch(() => {});
+  state.roomRead = next;
+  return next;
+}
+
+async function readRoomNow(leaving: ReadonlySet<string>): Promise<void> {
+  const state = runtime();
+  const file = state.snapshot ?? (await serialised(loadLocked));
+  if (file.pickMode !== "most-room" || file.returnToPrimary) return;
   const now = Date.now();
   const active = file.activeId ? file.accounts.find((a) => a.id === file.activeId) : undefined;
   if (active && !leaving.has(active.id) && isUsable(active, now)) return;
@@ -1401,7 +1414,7 @@ export async function prepareAccount(opts: { exclude?: ReadonlySet<string>; fall
     const now = Date.now();
     const file = await serialised(loadLocked);
     const accounts = file.accounts.map((a) => ({ ...a }));
-    const next = pickForSpawn(accounts, file.activeId, now, tried, { mode: file.pickMode, fullness: roomNow(now) });
+    const next = pickForSpawn(accounts, file.activeId, now, tried, file.returnToPrimary ? {} : { mode: file.pickMode, fullness: roomNow(now) });
     if (!next) {
       if (opts.fallback) {
         for (const account of accounts) {
@@ -1671,6 +1684,7 @@ export function _resetAnthropicAccountsForTests(): void {
   state.wakeListeners.clear();
   state.changeListeners.clear();
   state.room.clear();
+  state.roomRead = Promise.resolve();
 }
 
 export { isUsable };

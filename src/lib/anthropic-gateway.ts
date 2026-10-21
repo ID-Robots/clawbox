@@ -45,7 +45,12 @@
  *    answer, the limited ones are left out for the owner's own subscription
  *    sign-in, which leads (THE OWNER'S OWN SIGN-IN, below), so a session
  *    pinned to a spent account moves to it on its next turn — never inside a
- *    turn. Only with no such sign-in — an API key, a profile whose kind the
+ *    turn. An API key of the owner's is out of that order too: the turn's one
+ *    rotation would land on it when the sign-in is spent as well, and a box
+ *    whose accounts are all out answers with the limit, never on a key. Both
+ *    are back with the first account that can answer, because every profile
+ *    the store holds is read again for each order (otherProfiles). Only with
+ *    no such sign-in — an API key, a profile whose kind the
  *    store does not say, or nothing — do the limited ones stay in, by their
  *    reset, ahead of the rest, because an order is never emptied: an empty
  *    one falls back to openclaw.json's order or profiles and re-admits every
@@ -327,8 +332,9 @@ function isOwnSubscription(profile: ProviderAuthProfile, now: number): boolean {
  * profile that is not the pool's, in the order core has them, the owner's own
  * sign-in among them. The limited accounts are left out while one that can
  * answer is held (header, THE ORDER); with none, they are left out for the
- * owner's own subscription sign-in, which leads, and only with none of those
- * either do they stay in, by their reset, ahead of what else there is.
+ * owner's own subscription sign-in, which leads — with an API key out too,
+ * where the turn's one rotation would otherwise spend it — and only with no
+ * such sign-in do they stay in, by their reset, ahead of what else there is.
  */
 function gatewayOrder(pool: PoolState, held: ReadonlySet<string>, others: readonly ProviderAuthProfile[], now: number): string[] {
   const usable = pool.accounts.filter((a) => a.kind === "oauth" && held.has(poolProfileId(a.id)) && effectiveStatus(a, now) === "ok");
@@ -336,8 +342,10 @@ function gatewayOrder(pool: PoolState, held: ReadonlySet<string>, others: readon
   const otherIds = others.map((p) => p.profileId);
   if (usable.length > 0) return [...(active ? [active] : []), ...usable.filter((a) => a !== active)].map((a) => poolProfileId(a.id)).concat(otherIds);
   const limited = limitedByReset(pool, held, now);
-  const signIns = otherIds.filter((id, i) => isOwnSubscription(others[i], now));
-  if (limited.length > 0 && signIns.length > 0) return [...signIns, ...otherIds.filter((id) => !signIns.includes(id))];
+  const signIns = others.filter((p) => isOwnSubscription(p, now));
+  if (limited.length > 0 && signIns.length > 0) {
+    return [...signIns, ...others.filter((p) => !signIns.includes(p) && p.type !== "api_key")].map((p) => p.profileId);
+  }
   return limited.map((a) => poolProfileId(a.id)).concat(otherIds);
 }
 

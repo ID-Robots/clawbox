@@ -299,6 +299,7 @@ describe("the owner's pick: their order, or the most room", () => {
     expect(resolveActiveAccount(pool, "a", NOW_P, opts)?.id).toBe("a");
     expect(resolveActiveAccount([of("a", "oauth", "limited"), pool[1], pool[2]], "a", NOW_P, opts)?.id).toBe("c");
     expect(resolveActiveAccount(pool, "b", NOW_P, { ...opts, reselect: true })?.id).toBe("a");
+    expect(resolveActiveAccount(pool, "b", NOW_P, { ...opts, returnToPrimary: true })?.id).toBe("a");
     expect(pickForSpawn(pool, "a", NOW_P, new Set(), opts)?.id).toBe("a");
     expect(pickForSpawn(pool, "a", NOW_P, new Set(["a"]), opts)?.id).toBe("c");
   });

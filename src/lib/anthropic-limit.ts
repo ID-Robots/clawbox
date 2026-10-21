@@ -451,7 +451,9 @@ export function pickAccount<T extends PoolMember>(accounts: readonly T[], now: n
  * one they mean.
  *
  * The pick itself is pickAccount's, in the owner's `mode`: sticky either way,
- * so "most room" decides only when the active account has to move.
+ * so "most room" decides only when the active account has to move. With
+ * `returnToPrimary` or `reselect` the owner's order decides — "the first
+ * account" is the one they put first.
  */
 export function resolveActiveAccount<T extends PoolMember>(
   accounts: readonly T[],
@@ -463,8 +465,7 @@ export function resolveActiveAccount<T extends PoolMember>(
     const current = accounts.find((a) => a.id === activeId);
     if (current && isUsable(current, now)) return current;
   }
-  // The owner who just put an account first means THAT one, whatever the room.
-  return pickAccount(accounts, now, new Set(), opts.reselect ? {} : opts);
+  return pickAccount(accounts, now, new Set(), opts.reselect || opts.returnToPrimary ? {} : opts);
 }
 
 /**
