@@ -11,6 +11,13 @@ name: Nano hardware tests
 # Everything that needs the real hardware and nothing that the container CI
 # already covers: see docs/nano-hardware-tests.md.
 #
+# Batched (owner ruling): a pull request into beta no longer takes a board —
+# the job is skipped (a skipped required check passes) unless the PR carries
+# `nano-full` or `nano-long`. The board runs on every beta → main promotion PR
+# (mandatory), on a dispatch, and every second night on beta's head through
+# nano-hardware-tests-schedule.yml. Pushes to beta or main no longer start it.
+# The rules below still apply to the PRs that do run.
+#
 # Part of the suite of EVERY pull request of ours (TASK-1362), no label needed:
 #   - every pull request into beta or main whose branch is in this repository,
 #     DRAFTS INCLUDED (the coding agent opens most PRs as drafts), when it is
@@ -87,8 +94,6 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
     branches: [beta, main]
-  push:
-    branches: [beta, main]
   workflow_dispatch:
     inputs:
       ref:
@@ -122,7 +127,10 @@ jobs:
       (github.event_name == 'push' && github.repository == 'ID-Robots/clawbox') ||
       (github.event_name == 'pull_request' &&
        github.event.pull_request.head.repo.full_name == github.repository &&
-       !contains(github.event.pull_request.labels.*.name, 'skip-nano'))
+       !contains(github.event.pull_request.labels.*.name, 'skip-nano') &&
+       (github.event.pull_request.base.ref == 'main' ||
+        contains(github.event.pull_request.labels.*.name, 'nano-full') ||
+        contains(github.event.pull_request.labels.*.name, 'nano-long')))
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # The PR's live labels (`nano-full`, `nano-long`) are read through the API.
@@ -637,13 +645,6 @@ jobs:
           #   - the commit under test, for `nano-ci rebuild` to check the
           #     board against (and to retry a failed build once before it
           #     reports);
-          #   - the shortest coding budget the box takes, lowered from 5
-          #     minutes to 1 on this test board only
-          #     (src/lib/coding-time-budget.ts), so the deadline test
-          #     (45-coding-agent-time-budget) waits a 1-minute deadline. Into
-          #     the .env clawbox-setup.service loads, before the rebuild, whose
-          #     restart of the web server reads it; the recycle restores the
-          #     board from the golden image afterwards;
           #   - what the rebuild can reuse (scripts/force-update.sh): the
           #     stamp of the last dependency install and the framework's build
           #     cache, for the log, never a verdict;
@@ -654,14 +655,12 @@ jobs:
           fi
           # shellcheck disable=SC2016  # expanded on the board
           probe='printf "%s\n" "build cache $([ -d .next/cache ] && du -sh .next/cache | cut -f1 || echo none), dependency stamp $([ -f node_modules/.clawbox-deps-stamp ] && echo present || echo absent)"'
-          answer=$(nano-ci ssh "$SERIAL" "echo $SHA > /tmp/nano-ci-want-sha; cd /home/clawbox/clawbox && touch .env && sed -i '/^CLAWBOX_CODING_MIN_BUDGET_MINUTES=/d' .env && echo CLAWBOX_CODING_MIN_BUDGET_MINUTES=1 >> .env && echo floor-set; $probe; git rev-parse HEAD" 2>"$err") || true
+          answer=$(nano-ci ssh "$SERIAL" "echo $SHA > /tmp/nano-ci-want-sha; cd /home/clawbox/clawbox && $probe; git rev-parse HEAD" 2>"$err") || true
           before=$(printf '%s\n' "$answer" | tail -n 1 | tr -d '[:space:]')
           if ! [[ $before =~ ^[0-9a-f]{40}$ ]]; then
             before=""
             "$RUNNER_TEMP/nano-redact" < "$err"
           fi
-          grep -q '^floor-set$' <<<"$answer" ||
-            echo "::warning title=Budget floor not set::the board keeps the 5-minute floor, so 45-coding-agent-time-budget waits 5 minutes"
           echo "Before the rebuild: $(grep -m 1 '^build cache ' <<<"$answer" | "$RUNNER_TEMP/nano-redact")"
           echo "before=$before" >> "$GITHUB_OUTPUT"
           echo "$SERIAL is at ${before:-an unreadable commit}; rebuilding it from branch $BRANCH, whose head is $SHA"

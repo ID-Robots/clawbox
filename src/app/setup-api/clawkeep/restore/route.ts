@@ -6,7 +6,9 @@ import {
   RestoreNeedsPassphraseError,
   runRestore,
 } from "@/lib/clawkeep";
+import { reenableTunnelAfterRestore } from "@/lib/cloudflared";
 import { getEdition } from "@/lib/harness";
+import { readNamedTunnelCredential } from "@/lib/named-tunnel";
 import { HERMES_DASHBOARD_UNIT } from "@/lib/hermes-dashboard-auth";
 import { bounceHermesDashboardShared } from "@/lib/hermes-bounce-claim";
 import { GATEWAY_PORT, gatewayReadyWaitMs } from "@/lib/openclaw-config";
@@ -217,6 +219,13 @@ export async function POST(request: NextRequest) {
     // field that says which KIND of unfinished this is.
     const restart = await restartStateHolder(getEdition());
 
+    // TASK-1754: a restored box must ALWAYS come back reachable, whether or
+    // not the tunnel ran before the backup. Enable the unit and make sure it
+    // runs (a quick tunnel needs no credential; a restored named one is used).
+    const tunnel = await reenableTunnelAfterRestore({
+      hasNamedCredential: (await readNamedTunnelCredential().catch(() => null)) !== null,
+    }).catch((e) => ({ enabled: false, started: false, running: false, warnings: [String(e)] }));
+
     return NextResponse.json(
       {
         ok: true,
@@ -237,6 +246,10 @@ export async function POST(request: NextRequest) {
         // manual `systemctl restart` for that one, and prescribing it over a
         // service that is mid-start is how a slow restore became a broken box.
         restartPending: restart.pending,
+        tunnelEnabled: tunnel.enabled,
+        tunnelStarted: tunnel.started,
+        tunnelRunning: tunnel.running,
+        tunnelWarnings: tunnel.warnings,
       },
       { headers: { "Cache-Control": "no-store" } },
     );

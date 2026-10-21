@@ -253,45 +253,7 @@ const SCAFFOLD_SENTENCE: Record<NewAppTemplate, string> = {
   blank: "Scaffold it as a single-page HTML app in a new git folder under my project folder — not as a code project under ClawBox's own data directory — build it with the coding agent, verify it in the browser, and put it on my desktop with an icon.",
 };
 
-/**
- * The time budget the owner picked on the card, for the start the message
- * asks for: the token the run and team routes read (parseBudgetToken in
- * src/lib/coding-time-budget.ts — "1h", "morning", "none", an end time, a
- * "start/end" period) and an optional spend ceiling in tokens. Absent, the
- * message says nothing about a budget and the start resolves one as it
- * always did: the task's own words, then the owner's default.
- */
-export interface PromptBudget {
-  budget?: string | null;
-  budgetTokenCap?: number | null;
-}
-
-/** The longest budget token a message carries — the routes' own ceiling. */
-const MAX_PROMPT_BUDGET_CHARS = 200;
-
-/**
- * The line that hands the picked budget to the tool that starts the work, or
- * null without one. The argument is spelled the way the tool takes it, so the
- * assistant passes it on verbatim; a quote or a line break in a token (none
- * the picker makes) is dropped rather than allowed to end the sentence early.
- */
-export function budgetPromptLine(req: PromptBudget, tool: "coding_agent_run" | "coding_team_run"): string | null {
-  const token = typeof req.budget === "string"
-    ? req.budget.replace(/["\p{Cc}]+/gu, " ").replace(/\s+/g, " ").trim().slice(0, MAX_PROMPT_BUDGET_CHARS)
-    : "";
-  if (!token) return null;
-  if (token.toLowerCase() === "none") {
-    return `Time budget: pass budget: "none" to ${tool} — I chose no time limit, so none is set, whatever the task's words or my default would say.`;
-  }
-  const cap = req.budgetTokenCap;
-  const capArg = typeof cap === "number" && Number.isInteger(cap) && cap > 0 ? ` and budget_token_cap: ${cap}` : "";
-  return `Time budget: pass budget: "${token}"${capArg} to ${tool} — the time budget I picked. Pass it exactly as written; do not change it or leave it out.`
-    + (tool === "coding_agent_run"
-      ? " If the ClawBox answers with a coding team instead of one run (it does for a budget over 30 minutes), follow that team with coding_team_status."
-      : "");
-}
-
-export interface NewAppRequest extends PromptBudget {
+export interface NewAppRequest {
   name: string;
   description: string;
   template: NewAppTemplate;
@@ -311,16 +273,14 @@ export function buildNewAppPrompt(req: NewAppRequest): string {
   // One sentence, whatever punctuation the owner typed: strip a trailing full
   // stop so the description does not end "...timer.." after ours.
   const what = req.description.trim().replace(/[.\s]+$/u, "");
-  const budget = budgetPromptLine(req, "coding_agent_run");
   return [
     `Create a new ClawBox app called "${name}": ${what}.`,
     SCAFFOLD_SENTENCE[req.template],
-    ...(budget ? [budget] : []),
   ].join("\n");
 }
 
 /** An existing project the wizard can point the next run at — the projects route's row, trimmed. */
-export interface ResumeProjectRequest extends PromptBudget {
+export interface ResumeProjectRequest {
   name: string;
   directory: string;
   kind: "folder" | "codeProject";
@@ -345,11 +305,9 @@ export function buildResumeProjectPrompt(req: ResumeProjectRequest): string {
   const what = req.instructions.trim().replace(/[.\s]+$/u, "");
   const last = req.latestRun;
   const lastTask = last ? last.task.trim().split(/\r?\n/)[0].slice(0, 160) : "";
-  const budget = budgetPromptLine(req, "coding_agent_run");
   const lines = [
     `Continue the existing ClawBox project "${req.name.trim()}" in ${req.directory}: ${what}.`,
     `Start a coding agent run in that folder (coding_agent_run with directory "${req.directory}") — do not scaffold a new project.`,
-    ...(budget ? [budget] : []),
     last
       ? `Its last run (${last.id}, ${last.status}) was: "${lastTask}". Read that run's summary and the project's recent commits before changing anything, so this run picks up where it left off.`
       : "Read the project's recent commits and its files before changing anything, so this run picks up where the last work left off.",
@@ -375,11 +333,9 @@ export function buildTeamProjectPrompt(req: Omit<ResumeProjectRequest, "latestRu
   const trimmed = req.instructions.trim();
   const goal = trimmed.replace(/[.\s]+$/u, "") || trimmed;
   const target = req.kind === "codeProject" ? `project_id "${req.folder}"` : `directory "${req.directory}"`;
-  const budget = budgetPromptLine(req, "coding_team_run");
   return [
     `Run a coding TEAM on the existing ClawBox project "${req.name.trim()}" in ${req.directory}: ${goal}.`,
     `Start it with coding_team_run (${target}) — the planner reads the folder and splits the goal into tasks, workers do them one after another, and a reviewer checks each result. Do not start single runs for the parts yourself.`,
-    ...(budget ? [budget] : []),
     "Tell me when it is running, and check on it later with coding_team_status; when it is done, summarise what each task did and what was verified.",
     ...(req.kind === "codeProject" ? ["When the team is done, rebuild the code project with code_project_build so the desktop app shows the change."] : []),
   ].join("\n");

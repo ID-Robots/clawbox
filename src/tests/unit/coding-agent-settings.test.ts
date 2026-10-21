@@ -736,35 +736,3 @@ describe("what every run now gets, permanently", () => {
   });
 });
 
-
-describe("the default time budget", () => {
-  it("is none until the owner sets a chip, and the status says so with the box's zone", async () => {
-    const lib = await import("@/lib/coding-agent");
-    configGetAll.mockResolvedValue({});
-    let status = await lib.getCodingAgentStatus();
-    expect(status.defaultTimeBudget).toBeNull();
-    expect(typeof status.timeZone).toBe("string");
-    expect(status.timeZone.length).toBeGreaterThan(0);
-    configGetAll.mockResolvedValue({ coding_agent_default_budget: "morning" });
-    status = await lib.getCodingAgentStatus();
-    expect(status.defaultTimeBudget).toBe("morning");
-    // Something this box would not have written is no default at all.
-    configGetAll.mockResolvedValue({ coding_agent_default_budget: "custom" });
-    expect((await lib.getCodingAgentStatus()).defaultTimeBudget).toBeNull();
-  });
-
-  it("stores a chip, clears with null, and refuses anything else", async () => {
-    const lib = await import("@/lib/coding-agent");
-    await expect(lib.setDefaultTimeBudget("1h")).resolves.toBe("1h");
-    expect(configSet).toHaveBeenCalledWith("coding_agent_default_budget", "1h");
-    await expect(lib.setDefaultTimeBudget(null)).resolves.toBeNull();
-    expect(configSet).toHaveBeenLastCalledWith("coding_agent_default_budget", undefined);
-    for (const bad of ["custom", "2h", 3, undefined]) {
-      await expect(lib.setDefaultTimeBudget(bad)).rejects.toBeInstanceOf(lib.CodingAgentError);
-    }
-    configGet.mockResolvedValue("1d");
-    expect(await lib.getDefaultTimeBudget()).toBe("1d");
-    configGet.mockResolvedValue("forever");
-    expect(await lib.getDefaultTimeBudget()).toBeNull();
-  });
-});

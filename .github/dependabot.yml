@@ -1,39 +1,51 @@
-# Dependabot config. Posture: security-first, low-churn.
+# Dependabot config. Posture: security fixes + major versions only.
 #
-# All dependency changes are reviewed and tested on beta before release.
-# Keep Dependabot alerts enabled, but automatic SECURITY UPDATE PRs disabled
-# in repository Settings > Code security: GitHub always targets those at the
-# default branch and ignores target-branch. The setting is repository-owned,
-# not controlled by this YAML. Triage alerts into tested beta fixes instead.
-# Scheduled Bun/Actions version PRs below target beta; majors stay opt-in.
+# Minor and patch version PRs are switched off: they were too much churn for
+# too little value. Dependabot opens, per ecosystem, ONE monthly PR grouping
+# the available MAJOR updates, against beta (all dependency changes are
+# reviewed and tested on beta before release).
+#
+# Security fixes: the `update-types` ignore rules below only affect VERSION
+# updates, never security updates (GitHub docs, dependabot.yml options
+# reference, `ignore` > `update-types`). A `dependency-name` ignore without
+# update-types, like the @novnc/novnc one, does also block security updates
+# for that package.
+# Dependabot SECURITY UPDATE PRs stay disabled in repository Settings > Code
+# security: GitHub always targets them at the default branch and ignores
+# target-branch, which would bypass beta. Instead
+# .github/workflows/dependency-audit.yml audits bun.lock weekly and keeps one
+# tracking issue open while a vulnerable package is present; the fix lands
+# as a tested PR to beta. Dependabot alerts stay enabled.
+#
 # Keep package-lock.json synchronized for the dependency graph, and validate
 # the authoritative bun.lock with bun install --frozen-lockfile before a PR.
 version: 2
 updates:
-  # Version updates for the bun-managed app. bun.lock is authoritative
-  # (CI runs `bun install --frozen-lockfile`). Weekly, grouped, minor+patch only.
+  # bun-managed app. bun.lock is authoritative (CI runs
+  # `bun install --frozen-lockfile`). Monthly, majors only, one grouped PR.
   - package-ecosystem: "bun"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
     target-branch: "beta"
     groups:
-      minor-and-patch:
-        update-types: ["minor", "patch"]
+      majors:
+        update-types: ["major"]
     ignore:
-      # Majors are opt-in — do them by hand, not on Dependabot's schedule.
+      # No minor/patch version PRs (security fixes are unaffected, see above).
       - dependency-name: "*"
-        update-types: ["version-update:semver-major"]
-      # @novnc/novnc 1.7.0 is a breaking change wearing a minor version number:
-      # it drops lib/ for core/ and declares `"exports": "./core/rfb.js"` as a
-      # bare string, so EVERY subpath import is refused — including the
-      # keysymdef one src/lib/vnc-keys.ts needs. There is no drop-in rewrite,
-      # so the manifest pins 1.6.0 exactly (src/tests/unit/novnc-pin.test.ts
-      # guards it). Without this rule the weekly run rewrites that pin and
-      # opens a PR that can only ever fail. Remove this when upstream restores
-      # subpath exports — then take the bump by hand.
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
+      # @novnc/novnc stays pinned at exactly 1.6.0 — ignore ALL its updates.
+      # 1.7.0 is a breaking change wearing a minor version number: it drops
+      # lib/ for core/ and declares `"exports": "./core/rfb.js"` as a bare
+      # string, so EVERY subpath import is refused — including the keysymdef
+      # one src/lib/vnc-keys.ts needs. There is no drop-in rewrite, so the
+      # manifest pins 1.6.0 (src/tests/unit/novnc-pin.test.ts guards it), and
+      # any automated bump, major included, could only ever fail. Remove this
+      # when upstream restores subpath exports — then take the bump by hand.
       - dependency-name: "@novnc/novnc"
-        update-types: ["version-update:semver-minor"]
 
   # Disable duplicate npm version PRs. This does NOT disable security PRs;
   # the repository setting above does. Keep an explicit beta target so this
@@ -45,14 +57,18 @@ updates:
     target-branch: "beta"
     open-pull-requests-limit: 0
 
-  # GitHub Actions pins (checkout, setup-node, gh-pages, …). Minor+patch only;
-  # action majors are opt-in for the same reason as above.
+  # GitHub Actions pins (checkout, setup-node, gh-pages, …). Majors only,
+  # one grouped monthly PR.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 3
+      interval: "monthly"
     target-branch: "beta"
+    groups:
+      majors:
+        update-types: ["major"]
     ignore:
       - dependency-name: "*"
-        update-types: ["version-update:semver-major"]
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"

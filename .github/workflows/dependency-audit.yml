@@ -1,0 +1,83 @@
+name: Dependency audit
+
+# Security path for dependencies that respects beta-first (see the header of
+# .github/dependabot.yml). Dependabot security-update PRs would target main,
+# so they are disabled; this job audits bun.lock weekly against the GitHub
+# advisory database with `bun audit` and keeps ONE tracking issue in sync:
+# opened/updated while a vulnerable package is present, closed when clean.
+# The fix itself is a normal PR to beta (`bun update <pkg>` for a direct
+# dependency, an `overrides` entry for a transitive one, then
+# `bun install --frozen-lockfile`). Needs no secret: the built-in token only
+# writes issues. Runs on GitHub's runners only.
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: dependency-audit
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: beta
+      # `bun audit` needs bun >= 1.2.15. It only reads bun.lock, so this
+      # newer bun never rewrites the lockfile the rest of CI installs with.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.5"
+      - name: Audit bun.lock
+        id: audit
+        run: |
+          set +e
+          bun audit --json > audit.json
+          set -e
+          node - <<'EOF' > report.md
+          const fs = require("fs");
+          let data = {};
+          try { data = JSON.parse(fs.readFileSync("audit.json", "utf8") || "{}"); } catch { data = {}; }
+          const rank = { critical: 4, high: 3, moderate: 2, medium: 2, low: 1 };
+          const rows = Object.entries(data).map(([pkg, advs]) => {
+            const worst = advs.reduce((a, b) => ((rank[b.severity] || 0) > (rank[a.severity] || 0) ? b : a));
+            return { pkg, severity: worst.severity, advs };
+          }).sort((a, b) => (rank[b.severity] || 0) - (rank[a.severity] || 0));
+          if (!rows.length) process.exit(0);
+          console.log("Vulnerable packages in `bun.lock` on beta (from `bun audit`).\n");
+          console.log("| Package | Worst severity | Advisories |\n|---|---|---|");
+          for (const r of rows) {
+            const links = [...new Set(r.advs.map((a) => a.url))].map((u) => `[${u.split("/").pop()}](${u})`).join(", ");
+            console.log(`| \`${r.pkg}\` | ${r.severity} | ${links} |`);
+          }
+          console.log("\nFix with a PR to beta: `bun update <pkg>` for a direct dependency, an `overrides` entry for a transitive one, then `bun install --frozen-lockfile`. This issue closes itself when the weekly audit is clean.");
+          EOF
+          if [ -s report.md ]; then echo "found=true" >> "$GITHUB_OUTPUT"; else echo "found=false" >> "$GITHUB_OUTPUT"; fi
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+      - name: Sync tracking issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FOUND: ${{ steps.audit.outputs.found }}
+        run: |
+          title="Security: vulnerable dependencies on beta"
+          num="$(gh issue list --state open --search "\"$title\" in:title" --json number,title \
+            --jq "map(select(.title == \"$title\")) | .[0].number // empty")"
+          if [ "$FOUND" = "true" ]; then
+            if [ -n "$num" ]; then
+              gh issue edit "$num" --body-file report.md
+            else
+              gh issue create --title "$title" --body-file report.md
+            fi
+          elif [ -n "$num" ]; then
+            gh issue close "$num" --comment "Weekly \`bun audit\` on beta is clean."
+          fi

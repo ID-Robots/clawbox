@@ -39,6 +39,22 @@ const h = vi.hoisted(() => ({
   sameOrigin: true,
   restoreCalls: 0,
   restoreExtra: {} as Record<string, unknown>,
+  tunnelState: "inactive" as string,
+  namedCred: false,
+  tunnelCalls: [] as { hasNamedCredential: boolean }[],
+}));
+
+// The tunnel re-arm (TASK-1754) is unit-tested in cloudflared-restore.test.ts;
+// here only the route's wiring is asserted.
+vi.mock("@/lib/cloudflared", () => ({
+  getTunnelServiceState: async () => h.tunnelState,
+  reenableTunnelAfterRestore: async (o: { hasNamedCredential: boolean }) => {
+    h.tunnelCalls.push(o);
+    return { enabled: true, started: h.tunnelState !== "active", running: true, warnings: [] };
+  },
+}));
+vi.mock("@/lib/named-tunnel", () => ({
+  readNamedTunnelCredential: async () => (h.namedCred ? { hostname: "x.clawbox.tech", token: "t" } : null),
 }));
 
 // A restore is OWNER-ONLY and same-origin: middleware admits the MCP bearer to
@@ -132,6 +148,39 @@ beforeEach(() => {
   h.sameOrigin = true;
   h.restoreCalls = 0;
   h.restoreExtra = {};
+  h.tunnelState = "inactive";
+  h.namedCred = false;
+  h.tunnelCalls.length = 0;
+});
+
+describe("POST /setup-api/clawkeep/restore — remote access (TASK-1754)", () => {
+  it("re-arms and starts the tunnel after every restore, even with no credential", async () => {
+    const body = await (await post()).json();
+    expect(h.tunnelCalls).toEqual([{ hasNamedCredential: false }]);
+    expect(body.tunnelEnabled).toBe(true);
+    expect(body.tunnelStarted).toBe(true);
+    expect(body.tunnelRunning).toBe(true);
+  });
+
+  it("asks for a start when a named tunnel is configured", async () => {
+    h.namedCred = true;
+    const body = await (await post()).json();
+    expect(h.tunnelCalls).toEqual([{ hasNamedCredential: true }]);
+    expect(body.tunnelStarted).toBe(true);
+  });
+
+  it("re-arms the tunnel even when it was already running before the restore", async () => {
+    h.tunnelState = "active";
+    const body = await (await post()).json();
+    expect(h.tunnelCalls).toEqual([{ hasNamedCredential: false }]);
+    expect(body.tunnelRunning).toBe(true);
+  });
+
+  it("does not touch the tunnel when the owner gate refuses", async () => {
+    h.ownerSession = false;
+    await post();
+    expect(h.tunnelCalls).toEqual([]);
+  });
 });
 
 describe("POST /setup-api/clawkeep/restore — who may ask", () => {

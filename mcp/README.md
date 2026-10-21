@@ -789,30 +789,6 @@ exists to prevent. `anthropic` works only where the owner has connected their
 own Anthropic access; `coding_agent_status` and the Coding Agent app say
 whether they have, and a run against an unconnected account is 409 /
 do-not-retry, never something to try again.
-
-`coding_agent_run` and `coding_team_run` take an optional `budget`: how long
-the work may take (`src/lib/coding-time-budget.ts`, `parseBudgetToken`) — a
-chip (`30m`, `1h`, `morning` = the next 08:00 box time at least an hour away,
-`1d`), a length (`90m`, `3h`, `2d`, `PT2H`), an end time in ISO 8601 (one with
-no offset is read on the BOX's clock, never this process's), a period
-`start/end`, or `none` for an explicit no-budget that also overrides the
-task's words and the owner's default. It travels as the routes' `budget`
-field only when the caller named one, so a start without it is the request
-it always was. The device refuses a past end, one more than 14 days away or
-a budget under 5 minutes with 400 `code: "budget"`, which the tool passes
-through as BAD_ARGUMENT with its own sentence. `budget_token_cap` (0 = none,
-otherwise at least 10,000) adds a spend ceiling: work stops at whichever
-comes first; with it the budget travels in the routes' object shape
-(`{ preset, end?, start?, tokenCap }`). The answer states the resolved
-`timeBudget` — label, deadline on the box's clock and zone (read from
-`…/status`), time left — and a `timeBudgetIgnored` (the task's words named a
-budget the box would not take). A budget over 30 minutes on
-`coding_agent_run` makes the route start a coding TEAM instead
-(`routedToTeam`), and the answer says so and points at `coding_team_status`;
-a request naming something only a run carries stays one run, and the route's
-`routeNote` is passed on. The Create App card's time-budget picker
-(`src/components/CodingBudgetPicker.tsx`) is what usually fills it in: the
-message it hands the chat says `pass budget: "<token>"`.
 `coding_secret_list` answers the NAMES of the owner's stored secrets
 (`src/lib/project-secrets.ts`), their scope (`box` or a project id), whether
 each is handed to runs and whether this box can still decrypt it. There is no
@@ -1005,9 +981,6 @@ for room rather than being skipped; one that cannot start at all (another
 run holds the box, the switch is off) is an alert that does not count
 toward the three. `coding_team_run` is for a goal that spans
 several parts; `coding_agent_run` is still the tool for one focused change.
-`coding_team_run` takes the same optional `budget` and `budget_token_cap` as
-`coding_agent_run` (see the coding agent section) and answers the resolved
-deadline the same way.
 `coding_team_status` answers the plan, each task's status, worker, reviewer
 and result — and for a pending one what it is waiting for, or why it was
 held — the alerts, the team's branch, its pull request, `agents` (planner,

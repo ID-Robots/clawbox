@@ -44,38 +44,16 @@ const RUN_ID_SUFFIX_CHARS = 8;
  * them — no separator, no dot, nothing that could walk out of the root.
  */
 export function safeRunId(runId: unknown): string | null {
-  return rebuildId(runId, RUN_ID_PREFIX);
-}
-
-/** `prefix` + eight characters of the alphabet, rebuilt out of the alphabet's own copy — or null. */
-function rebuildId(raw: unknown, prefix: string): string | null {
-  if (typeof raw !== "string") return null;
-  if (raw.length !== prefix.length + RUN_ID_SUFFIX_CHARS) return null;
-  if (!raw.startsWith(prefix)) return null;
-  let safe = prefix;
-  for (const ch of raw.slice(prefix.length)) {
+  if (typeof runId !== "string") return null;
+  if (runId.length !== RUN_ID_PREFIX.length + RUN_ID_SUFFIX_CHARS) return null;
+  if (!runId.startsWith(RUN_ID_PREFIX)) return null;
+  let safe = RUN_ID_PREFIX;
+  for (const ch of runId.slice(RUN_ID_PREFIX.length)) {
     const at = RUN_ID_ALPHABET.indexOf(ch);
     if (at < 0) return null;
     safe += RUN_ID_ALPHABET[at];
   }
   return safe;
-}
-
-/**
- * What a team id looks like — coding-team-board's TEAM_ID_RE, restated here
- * because this leaf may not import the board. A team keeps its time record
- * (coding-time-record.ts) in an evidence folder of its own, beside its runs'.
- */
-export const ARTIFACT_TEAM_ID_RE = /^team-[a-z0-9]{8}$/;
-const TEAM_ID_PREFIX = "team-";
-
-/**
- * A run id or a team id, rebuilt out of the alphabet (see safeRunId) — or
- * null. Only for the folders both may own: a run's evidence route still goes
- * through safeRunId and artifactsDir, which take a run id and nothing else.
- */
-export function safeOwnerId(ownerId: unknown): string | null {
-  return rebuildId(ownerId, RUN_ID_PREFIX) ?? rebuildId(ownerId, TEAM_ID_PREFIX);
 }
 
 /** Fifty files per run is plenty of history; a run writing hundreds is misbehaving. */
@@ -174,21 +152,6 @@ export function artifactsDir(runId: string): string {
   return dir;
 }
 
-/**
- * The evidence folder of a run OR a team — artifactsDir's twin for the one
- * thing both keep there, the time record. The same two guards: the id is
- * rebuilt from the alphabet (safeOwnerId), and the folder is asserted to sit
- * under the artifacts root. Throws on anything else.
- */
-export function ownerArtifactsDir(ownerId: string): string {
-  const safe = safeOwnerId(ownerId);
-  if (safe === null) throw new Error(`not a run or team id: ${ownerId}`);
-  const root = path.resolve(artifactsRoot());
-  const dir = path.resolve(root, safe);
-  if (!dir.startsWith(root + path.sep)) throw new Error(`not a run or team id: ${ownerId}`);
-  return dir;
-}
-
 export function artifactKind(name: string): ArtifactKind {
   const ext = path.extname(name).toLowerCase();
   if (IMAGE_EXTENSIONS.has(ext)) return "image";
@@ -244,13 +207,6 @@ export function writeRunReport(runId: string, markdown: string): boolean {
  */
 export function ensureArtifactsDir(runId: string): string {
   const dir = artifactsDir(runId);
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  return dir;
-}
-
-/** ensureArtifactsDir for a run or a team id (ownerArtifactsDir), at the same 0700. */
-export function ensureOwnerArtifactsDir(ownerId: string): string {
-  const dir = ownerArtifactsDir(ownerId);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   return dir;
 }
