@@ -44,7 +44,7 @@ describe("app_publish registration", () => {
     const tool = harness().get("app_publish");
     expect("app_publish").toMatch(TOOL_NAME_RE);
     for (const param of Object.keys(tool.shape)) expect(param).toMatch(PARAM_NAME_RE);
-    expect(Object.keys(tool.shape).sort()).toEqual(["description", "project_id", "version"]);
+    expect(Object.keys(tool.shape).sort()).toEqual(["description", "directory", "project_id", "version"]);
     expect(tool.description.length).toBeLessThanOrEqual(MAX_DESCRIPTION_CHARS);
     expect(tool.description).not.toMatch(BANNED_DESCRIPTION_RE);
     expect(tool.opts.editions).toEqual(["openclaw", "hermes"]);
@@ -60,6 +60,12 @@ describe("app_publish", () => {
     if (out.isError) return;
     expect(out.text).toBe("Published Tinder Clone 1.0.0 to the ClawBox Store. The owner can see it at https://portal.example/portal/apps.");
     expect(apiPost).toHaveBeenCalledWith("/setup-api/apps/publish", { projectId: "tinder-clone", version: "1.0.0", description: "Swipe" }, expect.objectContaining({ timeoutMs: expect.any(Number) }));
+  });
+
+  it("names the project's directory when the caller gives one, for two projects that share a name", async () => {
+    apiPost.mockResolvedValue({ ok: true, app: { name: "Tinder Clone", version: "1.0.0" }, created: true });
+    await harness().call("app_publish", { project_id: "tinder-clone", directory: "/home/clawbox/Projects/tinder-clone", version: "1.0.0" });
+    expect(apiPost.mock.calls[0][1]).toEqual({ projectId: "tinder-clone", directory: "/home/clawbox/Projects/tinder-clone", version: "1.0.0" });
   });
 
   it("says a new version is a new version", async () => {

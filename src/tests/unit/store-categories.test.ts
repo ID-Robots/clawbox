@@ -33,6 +33,15 @@ describe("mergeStoreCategories", () => {
     expect(merged.map((c) => c.id)).toEqual([CLAWBOX_APPS_CATEGORY, "productivity", "developer"]);
   });
 
+  it("keeps a tab it has shown when a filtered list carries no ClawBox app", () => {
+    const shown = mergeStoreCategories(skills, [{ source: "clawbox", category: CLAWBOX_APPS_CATEGORY }]);
+    const filtered = mergeStoreCategories(skills, [{ category: "developer" }], shown);
+    expect(filtered[0]).toEqual({ id: CLAWBOX_APPS_CATEGORY, name: CLAWBOX_APPS_CATEGORY_NAME, count: 1 });
+    expect(filtered.map((c) => c.id)).toEqual([CLAWBOX_APPS_CATEGORY, "productivity", "developer"]);
+    // The portal's own entry, once it names one, wins over the remembered tab.
+    expect(mergeStoreCategories([...skills, { id: CLAWBOX_APPS_CATEGORY, name: "ClawBox Apps", count: 7 }], [], shown)[0].count).toBe(7);
+  });
+
   it("shows no ClawBox Apps tab when there is no ClawBox app", () => {
     expect(mergeStoreCategories(skills, [{ category: "developer" }])).toEqual(skills);
     expect(mergeStoreCategories([], [])).toEqual([]);

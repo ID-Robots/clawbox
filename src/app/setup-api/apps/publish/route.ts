@@ -75,7 +75,7 @@ async function findProject(projectId: string, directory: string | undefined): Pr
       ok: false,
       failure: publishFailure(
         "invalid",
-        `Two of your projects are named "${projectId}" — a folder and a code project. Publish it from its row in the Coding Agent app, which says which one it means.`,
+        `Two of your projects are named "${projectId}" — a folder and a code project. Name its directory as well, or publish it from its row in the Coding Agent app.`,
         { field: "projectId" },
       ),
     };

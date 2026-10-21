@@ -111,6 +111,12 @@ export interface PackedProject {
   manifest: ClawboxManifest;
 }
 
+/** True when `child` is `parent` or inside it (both real paths). */
+function isWithin(parent: string, child: string): boolean {
+  const rel = path.relative(parent, child);
+  return rel === "" || (!path.isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${path.sep}`));
+}
+
 /** Folder names never packed, at any depth. */
 const EXCLUDED_DIRS = new Set(["node_modules", ".git", ".next", "dist", "build", ".clawbox"]);
 
@@ -262,19 +268,32 @@ export async function packProject(projectDir: string): Promise<PackedProject> {
 
   const files: string[] = [];
   let rawBytes = 0;
+  const resolvedRoot = await fs.promises.realpath(root).catch(() => null);
+  if (!resolvedRoot) throw new PackError("failed", "The project folder could not be read.");
+  const realRoot: string = resolvedRoot;
   async function* entries(): AsyncGenerator<TarEntry> {
     for (const rel of candidates) {
       const abs = path.join(root, ...rel.split("/"));
+      // The file's FOLDER must really be inside the project. O_NOFOLLOW below
+      // guards the last name only, and git's index still lists `sub/x` after
+      // `sub` has been replaced by a symlink to somewhere else — `sub/id_rsa`
+      // would then be read from outside the project and published.
+      const realParent = await fs.promises.realpath(path.dirname(abs)).catch(() => null);
+      if (!realParent || !isWithin(realRoot, realParent)) continue;
+      const real = path.join(realParent, path.basename(abs));
       // ONE handle, opened without following a symlink (a symlink is skipped,
       // never packed), and every question asked of the handle rather than of
       // the path: a check on the path and a read of it are two moments, and a
       // link swapped in between would publish whatever it points at.
-      const handle = await fs.promises.open(abs, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW).catch(() => null);
+      const handle = await fs.promises.open(real, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW).catch(() => null);
       if (!handle) continue;
       let entry: TarEntry | null = null;
       try {
         const stat = await handle.stat();
-        if (stat.isFile()) {
+        // And the file opened is the one at that path inside the project, not
+        // one a folder swapped in after the check above led to.
+        const there = await fs.promises.lstat(real).catch(() => null);
+        if (stat.isFile() && there && there.ino === stat.ino && there.dev === stat.dev) {
           rawBytes += stat.size;
           if (rawBytes > PACKAGE_MAX_RAW_BYTES) {
             throw new PackError("too_large", `The project's files add up to more than ${PACKAGE_MAX_RAW_BYTES / (1024 * 1024)} MB.`);

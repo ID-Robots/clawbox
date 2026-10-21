@@ -22,9 +22,16 @@ vi.mock("@/lib/project-import", () => ({ ensureRepository, freeBytes: vi.fn(asyn
 const registerOrStartServerApp = vi.hoisted(() => vi.fn());
 vi.mock("@/lib/app-server-start", () => ({ registerOrStartServerApp }));
 const deployWebapp = vi.hoisted(() => vi.fn());
+// Where deployed web apps live, per test — never the box's own data folder.
+const desk = vi.hoisted(() => ({ webapps: "", prefs: {} as Record<string, unknown> }));
 vi.mock("@/lib/code-projects", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/code-projects")>()),
   deployWebapp,
+  webappPath: (id: string) => `${desk.webapps}/${id}`,
+}));
+vi.mock("@/lib/config-store", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/config-store")>()),
+  getAll: vi.fn(async () => desk.prefs),
 }));
 
 import {
@@ -86,6 +93,8 @@ beforeEach(() => {
   restoreEnv = saveEnv("PORTAL_WEB");
   process.env.PORTAL_WEB = BASE;
   projectsRoot = fs.mkdtempSync(path.join(os.tmpdir(), "store-install-"));
+  desk.webapps = path.join(projectsRoot, ".webapps");
+  desk.prefs = {};
   getDefaultDirectory.mockResolvedValue(projectsRoot);
   resolveClawaiToken.mockResolvedValue("claw_test_0123456789abcdef");
   ensureRepository.mockResolvedValue({ initialized: true, detail: null });
@@ -261,6 +270,18 @@ describe("installClawboxApp", () => {
     expect(await installClawboxApp(listing(Buffer.from("x")))).toMatchObject({ ok: false, code: "exists", status: 409 });
     expect(fs.readFileSync(path.join(projectsRoot, "hello-app", "mine.txt"), "utf-8")).toBe("the owner's");
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["a web app the agent built", () => { fs.mkdirSync(path.join(desk.webapps, "hello-app"), { recursive: true }); }],
+    ["an installed skill", () => { desk.prefs = { "pref:installed_apps": ["hello-app"], "pref:installed_meta": { "hello-app": { name: "Hello", color: "#000", iconUrl: "" } } }; }],
+    ["an app listed only in installed_meta", () => { desk.prefs = { "pref:installed_meta": { "hello-app": { name: "Hello", color: "#000", iconUrl: "" } } }; }],
+  ])("never writes over %s that has the same id", async (_what, arrange) => {
+    arrange();
+    expect(await installClawboxApp(listing(Buffer.from("x")))).toMatchObject({ ok: false, code: "exists", status: 409 });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(deployWebapp).not.toHaveBeenCalled();
+    expect(fs.existsSync(path.join(projectsRoot, "hello-app"))).toBe(false);
   });
 
   it("installing again over the Store's own folder only retries the registration", async () => {

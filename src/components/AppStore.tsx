@@ -248,8 +248,10 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
         seenSlugsRef.current = new Set(fresh.map(a => a.id));
         // "ClawBox Apps" first, named even before the portal's category list
         // carries it (src/lib/store-categories.ts).
-        const merged = mergeStoreCategories(data.categories ?? [], data.apps);
-        if (merged.length > 0) setCategories(merged);
+        setCategories((previous) => {
+          const merged = mergeStoreCategories(data.categories ?? [], data.apps, previous);
+          return merged.length > 0 ? merged : previous;
+        });
         // The header's count is the CATALOGUE size; a search/category fetch
         // answers the filter's total and must not rewrite it.
         if (category === "All" && !search) setTotalApps(data.total);

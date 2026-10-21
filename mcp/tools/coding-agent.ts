@@ -1949,7 +1949,7 @@ const PUBLISH_NEXT: Record<string, { code: ToolErrorCode; next: string }> = {
   },
   not_linked: { code: "AUTH_FAILED", next: "Ask the user to sign in to ClawBox AI in Settings, then call app_publish again." },
   token_rejected: { code: "AUTH_FAILED", next: "Ask the user to sign in to ClawBox AI again in Settings, then call app_publish again." },
-  invalid: { code: "BAD_ARGUMENT", next: "Fix what the message names (a version looks like 1.0.0) and call app_publish again." },
+  invalid: { code: "BAD_ARGUMENT", next: "Fix what the message names (a version looks like 1.0.0; two projects sharing a name need directory from coding_project_status) and call app_publish again." },
   not_found: { code: "NOT_FOUND", next: "Call coding_project_status for the projects and pass a folder name from it as project_id." },
   no_manifest: {
     code: "BAD_ARGUMENT",
@@ -1998,16 +1998,17 @@ export function registerAppPublishTools(reg: Registrar, ctx: Pick<McpContext, "c
     "Publish one of the owner's Coding Agent projects that has a clawbox.json to the ClawBox Store, under this box's ClawBox account. Only when the USER asks to publish; confirm the version with them first. Publishing may not be open for their account yet — then say so, do not retry.",
     {
       project_id: zText(128, "The project's folder name, as coding_project_status lists it."),
+      directory: zOptText(512, "The project's absolute folder, as coding_project_status names it. Only needed when two projects share project_id."),
       version: zText(32, "The version to publish, three numbers like 1.0.0, higher than the one already in the Store."),
       description: zOptText(300, "What the app does, for its Store page. Omit to use the clawbox.json description."),
     },
     { editions: ["openclaw", "hermes"], readOnly: false },
-    async ({ project_id, version, description }: { project_id: string; version: string; description?: string }) => {
+    async ({ project_id, directory, version, description }: { project_id: string; directory?: string; version: string; description?: string }) => {
       let data: { app?: Record<string, unknown>; created?: boolean; storeUrl?: string };
       try {
         data = await apiPost<typeof data>(
           "/setup-api/apps/publish",
-          { projectId: project_id, version, ...(description ? { description } : {}) },
+          { projectId: project_id, ...(directory ? { directory } : {}), version, ...(description ? { description } : {}) },
           { timeoutMs: 180_000 },
         );
       } catch (err) {

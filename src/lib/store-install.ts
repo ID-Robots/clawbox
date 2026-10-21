@@ -38,7 +38,8 @@ import { isPng, placeIcon, safeAppId, webappIconPath } from "./webapp-icon";
 import { getDefaultDirectory } from "./coding-agent";
 import { ensureRepository, freeBytes, IMPORT_FREE_RESERVE_BYTES } from "./project-import";
 import { registerOrStartServerApp } from "./app-server-start";
-import { bundleFolderHtml, deployWebapp } from "./code-projects";
+import { bundleFolderHtml, deployWebapp, webappPath } from "./code-projects";
+import { getAll as configGetAll } from "./config-store";
 import { resolveClawaiToken } from "./harness/credentials";
 import { isClawboxAiToken } from "./clawai-token";
 
@@ -342,6 +343,33 @@ async function saveListingIcon(appId: string, iconUrl: string | null): Promise<v
 
 // ── Install and remove ───────────────────────────────────────────────────────
 
+/**
+ * Is `appId` already something else on the desktop: a web app the agent
+ * built (`data/webapps/<id>`), a skill, any installed app? Registering would
+ * write over it (`deployWebapp` replaces its only copy of the page), and the
+ * uninstall that follows would take both. Asked only when no folder of the
+ * Store's own stands for the id. Preferences that cannot be read are not a
+ * claim: the deployed folder — what would be overwritten — is checked first.
+ */
+async function desktopIdTaken(appId: string): Promise<boolean> {
+  let deployed: string;
+  try {
+    deployed = webappPath(appId);
+  } catch {
+    return true;
+  }
+  if (await fs.promises.lstat(deployed).then(() => true, () => false)) return true;
+  try {
+    const prefs = await configGetAll();
+    const apps = prefs["pref:installed_apps"];
+    const meta = prefs["pref:installed_meta"];
+    if (Array.isArray(apps) && apps.includes(appId)) return true;
+    return !!meta && typeof meta === "object" && Object.prototype.hasOwnProperty.call(meta, appId);
+  } catch {
+    return false;
+  }
+}
+
 /** Install one ClawBox app the Store listed. */
 export async function installClawboxApp(app: ClawboxStoreApp): Promise<StoreInstallOutcome> {
   const appId = safeAppId(app.slug);
@@ -364,6 +392,9 @@ export async function installClawboxApp(app: ClawboxStoreApp): Promise<StoreInst
     if (!manifest) return failure("invalid_package", `The installed "${appId}" no longer has a valid ${CLAWBOX_MANIFEST_FILE}. Uninstall it and install it again.`, 409);
     const registration = await registerInstalledApp(appId, directory, manifest, app.description);
     return { ok: true, appId, folder: appId, directory, version: marker.version, kind: manifest.kind, ...registration, alreadyInstalled: true };
+  }
+  if (await desktopIdTaken(appId)) {
+    return failure("exists", `There is already an app called "${appId}" on this desktop. Uninstall it first, then install this one.`, 409);
   }
 
   const downloaded = await downloadPackage(app);

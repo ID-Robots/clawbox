@@ -151,6 +151,20 @@ describe("packProject", () => {
     expect(packedPaths(pack)).toEqual([...kept, "notes/.gitignore"].sort());
   });
 
+  it("never reads through a folder that became a symlink out of the project", async () => {
+    const dir = tempProject({ "clawbox.json": JSON.stringify({ name: "A" }), "sub/id_rsa": "the project's own", "keep.txt": "k" });
+    execFileSync("git", ["init", "--quiet"], { cwd: dir });
+    execFileSync("git", ["add", "-A"], { cwd: dir });
+    // git's index still lists sub/id_rsa once sub is a link to somewhere else.
+    const outside = tempProject({ id_rsa: "SECRET from outside the project" });
+    fs.rmSync(path.join(dir, "sub"), { recursive: true });
+    fs.symlinkSync(outside, path.join(dir, "sub"));
+    const pack = await packProject(dir);
+    expect(packedPaths(pack)).toEqual(["clawbox.json", "keep.txt"]);
+    const unpacked = readTarGz(pack.buffer, { maxBytes: 1e7, maxEntries: 100 });
+    expect(unpacked.some((e) => e.data?.toString().includes("SECRET"))).toBe(false);
+  });
+
   it("packs clawbox.json even where .gitignore names it", async () => {
     const dir = tempProject({ "clawbox.json": JSON.stringify({ name: "A" }), ".gitignore": "clawbox.json\n", "a.txt": "a" });
     expect(packedPaths(await packProject(dir))).toEqual([".gitignore", "a.txt", "clawbox.json"]);

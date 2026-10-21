@@ -55,10 +55,17 @@ export function isClawboxListing(listing: { source?: unknown } | null | undefine
  * even when the portal's category list does not carry it yet but the apps
  * do, and never twice. No ClawBox app anywhere, no tab — an empty one would
  * only be a dead end.
+ *
+ * `previous` is the tab row already on screen. A filtered or searched list
+ * (or a first page of 200 that holds none) carries no ClawBox app, and on a
+ * portal whose category list does not name the category yet the tab would
+ * vanish the moment the owner picked another one; a tab this Store has
+ * shown stays.
  */
 export function mergeStoreCategories(
   categories: readonly StoreCategory[],
   apps: ReadonlyArray<{ source?: unknown; category?: unknown }>,
+  previous: readonly StoreCategory[] = [],
 ): StoreCategory[] {
   const listed = apps.filter((app) => isClawboxListing(app) || app.category === CLAWBOX_APPS_CATEGORY).length;
   const seen = new Set<string>();
@@ -78,6 +85,10 @@ export function mergeStoreCategories(
     }
   }
   if (!clawbox && listed > 0) clawbox = { id: CLAWBOX_APPS_CATEGORY, name: CLAWBOX_APPS_CATEGORY_NAME, count: listed };
+  if (!clawbox) {
+    const shown = previous.find((category) => category?.id === CLAWBOX_APPS_CATEGORY);
+    if (shown) clawbox = shown;
+  }
   return clawbox ? [clawbox, ...rest] : rest;
 }
 

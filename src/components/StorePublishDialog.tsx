@@ -81,6 +81,7 @@ export default function StorePublishDialog({ projectId, directory, onClose }: {
 }) {
   const { t } = useT();
   const titleId = useId();
+  const formId = useId();
   const panelRef = useModalDialog<HTMLDivElement>({ onClose });
   const [face, setFace] = useState<Face>({ kind: "loading" });
   const [info, setInfo] = useState<PublishProjectInfo | null>(null);
@@ -240,8 +241,11 @@ export default function StorePublishDialog({ projectId, directory, onClose }: {
 
             {face.kind === "form" && (
               <form
+                id={formId}
                 className="space-y-3"
-                onSubmit={(e) => { e.preventDefault(); if (!busy) void publish(); }}
+                // The Publish button in the footer is this form's submit button
+                // (`form={formId}`), so Enter in any field publishes too.
+                onSubmit={(e) => { e.preventDefault(); if (!busy && version.trim()) void publish(); }}
                 data-testid="store-publish-form"
               >
                 <label className="block">
@@ -283,7 +287,7 @@ export default function StorePublishDialog({ projectId, directory, onClose }: {
             {face.kind === "form" ? (
               <>
                 <button type="button" onClick={onClose} className={BTN_SECONDARY} disabled={busy}>{t("codingAgent.publishCancel")}</button>
-                <button type="button" onClick={() => void publish()} className={BTN_PRIMARY} disabled={busy || !version.trim()} data-testid="store-publish-submit">
+                <button type="submit" form={formId} className={BTN_PRIMARY} disabled={busy || !version.trim()} data-testid="store-publish-submit">
                   {busy ? t("codingAgent.publishing") : t("codingAgent.publishSubmit")}
                 </button>
               </>

@@ -63,6 +63,20 @@ describe("ClawBox Apps in the Store", () => {
     expect(screen.getAllByLabelText("store.clawboxApp").length).toBeGreaterThan(0);
   });
 
+  it("keeps the ClawBox Apps tab when another category's list holds no ClawBox app", async () => {
+    render(<AppStore installedAppIds={[]} onInstall={vi.fn()} onUninstall={vi.fn()} />);
+    await screen.findByText("Tinder Clone");
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/setup-api/apps/store")) return jsonResponse({ total: 1, categories: LIST.categories, apps: [SKILL] });
+      return jsonResponse({});
+    }) as typeof fetch);
+    fireEvent.click(screen.getByRole("button", { name: "Utilities" }));
+    await waitFor(() => expect(screen.queryByText("Tinder Clone")).toBeNull());
+    expect(screen.getByRole("button", { name: "ClawBox Apps" })).toBeInTheDocument();
+  });
+
   it("installs a ClawBox app by its source, and hands the desktop its window", async () => {
     const onInstall = await installTinder();
     await waitFor(() => expect(onInstall).toHaveBeenCalledTimes(1));

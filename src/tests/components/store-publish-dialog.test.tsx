@@ -64,6 +64,23 @@ describe("StorePublishDialog", () => {
     expect(JSON.parse(String((fetchMock.mock.calls[1][1] as RequestInit).body))).toMatchObject({ projectId: "tinder-clone", directory: "/home/clawbox/Projects/tinder-clone" });
   });
 
+  it("publishes on Enter in a field, and not with no version", async () => {
+    fetchMock
+      .mockResolvedValueOnce(status({}))
+      .mockResolvedValueOnce(json(201, { ok: true, app: { name: "Tinder Clone", version: "1.0.0" }, created: true, storeUrl: "https://portal.example/portal/apps" }));
+    render(<StorePublishDialog projectId="tinder-clone" onClose={onClose} />);
+    const version = await screen.findByTestId("store-publish-version");
+    expect(screen.getByTestId("store-publish-submit")).toHaveAttribute("type", "submit");
+    expect(screen.getByTestId("store-publish-submit")).toHaveAttribute("form", screen.getByTestId("store-publish-form").id);
+    fireEvent.change(version, { target: { value: "  " } });
+    fireEvent.submit(screen.getByTestId("store-publish-form"));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    fireEvent.change(version, { target: { value: "1.0.0" } });
+    fireEvent.submit(screen.getByTestId("store-publish-form"));
+    expect(await screen.findByTestId("store-publish-done")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("starts from the version after the Store's", async () => {
     fetchMock.mockResolvedValueOnce(status({ project: { ...PROJECT, published: { version: "1.4.2" }, suggestedVersion: "1.4.3" } }));
     render(<StorePublishDialog projectId="tinder-clone" onClose={onClose} />);
