@@ -896,7 +896,12 @@ shell tool, not less and not more:
   that its own pull-request flow could not run (no repository to branch, or
   `pr.phase === "failed"`), since nudging the harness for a pull request the
   DEVICE cannot open would spend every attempt on the one thing the harness
-  cannot fix. When the check fails
+  cannot fix. `no_deliverable` (`{ kind: "none" }` on the run route) is the
+  caller's "this run owes nothing", for a run whose result is not a pull
+  request from its own branch — a verdict, a CI pass on other pull requests —
+  which would otherwise end `gave_up` "Nothing was committed"; it turns off the
+  implied bar and nothing else, so a run that does commit still gets its pull
+  request, and it cannot be combined with `deliverable_files`. When the check fails
   the device resumes the run IN ITS OWN SESSION with a nudge naming what is
   missing, up to `coding_agent_completion_attempts` (default 3, the run's own
   first turn counted as one), and then settles it as `gave_up` — a status of

@@ -136,6 +136,16 @@ describe("reading a deliverable off a creation request", () => {
       .toMatchObject({ ok: false, code: "command_too_long" });
   });
 
+  it("reads `none` from the owner and the agent alike", () => {
+    // A run whose result is not a pull request from its own branch — a
+    // verdict, a CI pass on other pull requests — says so with this, or the
+    // bar auto-PR implies ends it `gave_up` "Nothing was committed". It grants
+    // the bearer nothing: `paths` already replaces that implied bar.
+    for (const who of [OWNER, AGENT]) {
+      expect(readDeliverableInput({ kind: "none" }, who)).toEqual({ ok: true, deliverable: { kind: "none" } });
+    }
+  });
+
   it("deduplicates the paths, so one file named twice is not two missing files", () => {
     expect(readDeliverableInput({ kind: "paths", paths: ["a.txt", " a.txt ", "b.txt"] }, OWNER)).toEqual({
       ok: true,
@@ -145,10 +155,13 @@ describe("reading a deliverable off a creation request", () => {
 });
 
 describe("reading a deliverable back off a stored record", () => {
-  it("round-trips the three kinds", () => {
+  it("round-trips every kind, `none` included", () => {
     expect(parseDeliverable({ kind: "pr" })).toEqual({ kind: "pr" });
     expect(parseDeliverable({ kind: "paths", paths: ["a.txt"] })).toEqual({ kind: "paths", paths: ["a.txt"] });
     expect(parseDeliverable({ kind: "command", command: "npm test" })).toEqual({ kind: "command", command: "npm test" });
+    // Read back as null, a `none` run re-read after a restart would get the
+    // implied pull-request bar it opted out of.
+    expect(parseDeliverable({ kind: "none" })).toEqual({ kind: "none" });
   });
 
   it("does NOT re-apply the owner gate, because the record is past it", () => {

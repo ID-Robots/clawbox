@@ -681,6 +681,23 @@ describe("the deliverable", () => {
     );
   });
 
+  it("sends the `none` kind for no_deliverable, and refuses it beside deliverable_files", async () => {
+    apiPost.mockResolvedValue({ started: true, run: { ...RUN, status: "running" } });
+    const out = await harness().call("coding_agent_run", { task: "verify", project_id: "site", no_deliverable: true });
+    expect(out.isError).toBe(false);
+    expect(apiPost).toHaveBeenCalledWith(
+      "/setup-api/coding-agent/run",
+      { task: "verify", projectId: "site", deliverable: { kind: "none" } },
+      expect.anything(),
+    );
+    apiPost.mockClear();
+    const refused = await harness().call("coding_agent_run", {
+      task: "verify", project_id: "site", no_deliverable: true, deliverable_files: "a.txt",
+    });
+    expect(refused.isError).toBe(true);
+    expect(apiPost).not.toHaveBeenCalled();
+  });
+
   it("offers the agent no command deliverable at all", async () => {
     // Not merely refused by the device: absent from the schema. A parameter that
     // always answered "only the owner" is a refusal a small model argues with,
@@ -734,11 +751,14 @@ describe("the deliverable", () => {
   });
 
   it("claims nothing about a record that carries no deliverable", async () => {
-    apiGet.mockResolvedValue({ run: RUN });
-    const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
-    expect(out.isError).toBe(false);
-    if (out.isError) return;
-    expect(out.text).not.toContain("[deliverable]");
+    // `none` included: its caller held it to nothing, so there is no bar to report.
+    for (const run of [RUN, { ...RUN, deliverable: { kind: "none" } }]) {
+      apiGet.mockResolvedValue({ run });
+      const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
+      expect(out.isError).toBe(false);
+      if (out.isError) return;
+      expect(out.text).not.toContain("[deliverable]");
+    }
   });
 });
 

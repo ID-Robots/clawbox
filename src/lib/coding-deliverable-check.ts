@@ -96,6 +96,9 @@ export async function checkDeliverable(
         return await checkPaths(subject.directory, deliverable.paths);
       case "command":
         return await checkCommand(subject.directory, deliverable.command, sandbox);
+      case "none":
+        // Nothing owed, so nothing missing. The runner never asks (deliverableFor).
+        return verdict(true, null);
     }
   } catch (err) {
     return verdict(false, `The deliverable could not be checked: ${err instanceof Error ? err.message : String(err)}`);

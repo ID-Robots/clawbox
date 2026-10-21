@@ -427,7 +427,8 @@ function describeReview(review: ReviewLoop | null | undefined): string | null {
  */
 function describeDeliverableState(run: RunPayload): string | null {
   const deliverable = run.deliverable;
-  if (!deliverable) return null;
+  // `none` holds the run to nothing, so the status is the harness's own.
+  if (!deliverable || deliverable.kind === "none") return null;
   const attempts = Array.isArray(run.attempts) ? run.attempts.length : 0;
   const made = attempts && run.completionAttempts ? ` after ${attempts} of ${run.completionAttempts} attempts` : "";
   const check = run.deliverableCheck;
@@ -811,7 +812,7 @@ function worktreeState(run: RunPayload): string | null {
 /** What the run had to leave behind and whether it did, as a row field. */
 function deliverableRow(run: RunPayload): Record<string, unknown> | null {
   const d = run.deliverable;
-  if (!d) return null;
+  if (!d || d.kind === "none") return null;
   const check = run.deliverableCheck;
   // Never the command's own output — see describeDeliverableState. For `pr`
   // and `paths` the missing sentence is the device's vocabulary.
@@ -1013,12 +1014,13 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
         `Comma-separated relative paths (at most ${MAX_DELIVERABLE_PATHS}) the run MUST leave behind, not empty, e.g. "src/app.js,index.html".`,
       ),
       fix_ci: zBool(false, "With resume_run_id: fix that run's FAILED pull-request checks; the box appends what failed to the task."),
+      no_deliverable: zBool(false, "A run whose result is no file or pull request of its own (a verdict, a CI pass): auto-PR does not hold it to one."),
     },
     { editions: ["openclaw", "hermes"], readOnly: false, openWorld: true, maxChars: 3_000 },
-    async ({ task, project_id, directory, resume_run_id, provider, model, deliverable_files, delivery_pipeline, input_files, fix_ci }: {
+    async ({ task, project_id, directory, resume_run_id, provider, model, deliverable_files, delivery_pipeline, input_files, fix_ci, no_deliverable }: {
       task: string; project_id?: string; directory?: string; resume_run_id?: string;
       provider?: string; model?: string; deliverable_files?: string; delivery_pipeline?: boolean;
-      input_files?: string; fix_ci?: boolean;
+      input_files?: string; fix_ci?: boolean; no_deliverable?: boolean;
     }) => {
       if (fix_ci === true && !resume_run_id) {
         throw new ToolError("BAD_ARGUMENT", "fix_ci continues the run whose pull request failed its checks.", "Pass that run's id as resume_run_id with fix_ci.");
@@ -1072,8 +1074,15 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
       // not otherwise hold on this edition, so it is the owner's alone. And no
       // `pr` kind either — the auto-PR switch already implies one when it is on,
       // and when it is off there is no branch for a pull request to exist on.
+      // `no_deliverable` is the `none` kind: it turns that implied bar off for a
+      // run that commits nothing on purpose, which widens nothing —
+      // `deliverable_files` already replaces the implied bar.
       const paths = (deliverable_files ?? "").split(",").map((p) => p.trim()).filter(Boolean);
+      if (paths.length && no_deliverable === true) {
+        throw new ToolError("BAD_ARGUMENT", "no_deliverable and deliverable_files contradict each other.", "Pass one of them, not both.");
+      }
       if (paths.length) body.deliverable = { kind: "paths", paths };
+      else if (no_deliverable === true) body.deliverable = { kind: "none" };
       // The same list-in-a-string shape, for the same schema reason. The device
       // decides what it will copy and from where; this end only splits.
       const inputs = (input_files ?? "").split(",").map((p) => p.trim()).filter(Boolean);

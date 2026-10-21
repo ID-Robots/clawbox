@@ -1530,7 +1530,8 @@ export default function CodingAgentApp() {
    */
   const deliverableCard = (run: Run) => {
     const deliverable = run.deliverable;
-    if (!deliverable) return null;
+    // `none` is no bar at all, so there is nothing to draw.
+    if (!deliverable || deliverable.kind === "none") return null;
     const check = run.deliverableCheck;
     const attempts = run.attempts?.length ?? 0;
     const what = deliverable.kind === "pr"

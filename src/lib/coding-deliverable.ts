@@ -18,7 +18,7 @@
  */
 
 /**
- * The three things a run can be held to.
+ * The three things a run can be held to, and the caller's "none of them".
  *
  * - `pr`     — a pull request exists for the run's branch. Implied when the
  *              owner has auto-PR on, because that switch already says "the
@@ -29,6 +29,15 @@
  *              part of the test rather than a refinement of it.
  * - `command`— a command the box runs itself, in the harness's own sandbox,
  *              which has to exit 0. The project's own verification, usually.
+ * - `none`   — the caller says this run owes no deliverable: its result is not
+ *              a pull request from its own branch (a verdict, a CI pass that
+ *              pushes to other pull requests). Without it the implied `pr` bar
+ *              ended such a run `gave_up` "Nothing was committed". It changes
+ *              the gate's verdict and nothing else: the branch, the worktree,
+ *              the pull-request step and the brief's draft-PR line stay, so a
+ *              `none` run that does commit still gets its pull request. It
+ *              grants the MCP bearer nothing — a `paths` deliverable already
+ *              replaces the implied bar.
  *
  * A union rather than one record with three optional halves: a deliverable is
  * ONE question, and a record that could carry two would need a rule about what
@@ -37,11 +46,12 @@
 export type Deliverable =
   | { kind: "pr" }
   | { kind: "paths"; paths: string[] }
-  | { kind: "command"; command: string };
+  | { kind: "command"; command: string }
+  | { kind: "none" };
 
 /** Every kind a stored record may carry — beside the type, for the reason
  *  RUN_STATUSES lives beside CodingRunStatus. */
-export const DELIVERABLE_KINDS = ["pr", "paths", "command"] as const;
+export const DELIVERABLE_KINDS = ["pr", "paths", "command", "none"] as const;
 
 export type DeliverableKind = (typeof DELIVERABLE_KINDS)[number];
 
@@ -215,6 +225,7 @@ export function readDeliverableInput(raw: unknown, owner: boolean): DeliverableI
   const value = raw as Record<string, unknown>;
 
   if (value.kind === "pr") return { ok: true, deliverable: { kind: "pr" } };
+  if (value.kind === "none") return { ok: true, deliverable: { kind: "none" } };
 
   if (value.kind === "paths") {
     if (!Array.isArray(value.paths) || value.paths.length === 0) {
@@ -292,6 +303,9 @@ export function parseDeliverable(raw: unknown): Deliverable | null {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
   const value = raw as Record<string, unknown>;
   if (value.kind === "pr") return { kind: "pr" };
+  // Kept, not degraded to null: null on an auto-PR box is the implied `pr`
+  // bar, the very one this run's caller opted out of.
+  if (value.kind === "none") return { kind: "none" };
   if (value.kind === "paths") {
     if (!Array.isArray(value.paths) || value.paths.length === 0) return null;
     // REJECTED, not trimmed to the cap and not filtered down to the safe ones.
@@ -395,6 +409,8 @@ export function describeDeliverable(deliverable: Deliverable): string {
         : `these files: ${deliverable.paths.join(", ")}`;
     case "command":
       return `\`${deliverable.command}\` exiting 0`;
+    case "none":
+      return "nothing in particular (its caller asked for no deliverable)";
   }
 }
 
