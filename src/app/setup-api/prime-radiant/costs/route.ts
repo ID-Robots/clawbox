@@ -4,8 +4,15 @@
  * (`basis: "estimate"`): totals, by operation, by model, by basis (`subscription`
  * rows are calls a Claude subscription answered: real tokens, $0) and by run (ingest
  * jobs and nightly passes). Never creates the state database.
+ *
+ * `&allowance=1` adds `allowance`: Prime Radiant's calls through ClawBox AI in
+ * the allowance's rolling week, beside the account's weekly pool and burst
+ * ceiling as the portal reports them (asked with the box's own sign-in,
+ * cached for half a minute). It is opt-in so the per-run token poll a running
+ * import makes never waits on the portal.
  */
 import { requireSession } from "@/lib/route-auth";
+import { readAllowanceMeter } from "@/lib/prime-radiant/allowance-meter";
 import { safeJobId } from "@/lib/prime-radiant/ingest";
 import { vaultDir } from "@/lib/prime-radiant/paths";
 import { fail, json, vaultFailure } from "@/lib/prime-radiant/route-helpers";
@@ -24,8 +31,10 @@ export async function GET(req: Request) {
   const rawRun = q.get("runId");
   const runId = rawRun === null ? null : (safeRunId(rawRun) ?? safeJobId(rawRun));
   if (rawRun !== null && !runId) return fail("invalid", "That is not a run id.", 400);
+  const withAllowance = q.get("allowance") === "1";
   try {
-    return json(readCostSummary(vaultDir(), effectiveCostRates(), { since: since ? new Date(since).toISOString() : null, runId }));
+    const summary = readCostSummary(vaultDir(), effectiveCostRates(), { since: since ? new Date(since).toISOString() : null, runId });
+    return json(withAllowance ? { ...summary, allowance: await readAllowanceMeter(vaultDir()) } : summary);
   } catch (err) {
     return vaultFailure("costs", err);
   }

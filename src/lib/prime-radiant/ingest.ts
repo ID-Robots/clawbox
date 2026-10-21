@@ -728,6 +728,18 @@ const FATAL_MESSAGES: Partial<Record<FlashCallError["kind"], string>> = {
 };
 
 /**
+ * Why a failed call stops the whole job, or null when only its batch fails.
+ * A spent allowance stops it: every later batch would be refused the same way
+ * until it frees up, so the rest are left as dead letters to retry then.
+ */
+function fatalMessage(e: FlashCallError): string | null {
+  if (e.kind === "allowance") {
+    return `${e.message} The remaining documents can be retried once it frees up; Settings → Providers shows when.`;
+  }
+  return FATAL_MESSAGES[e.kind] ?? null;
+}
+
+/**
  * The files of a batch a lint refusal blames: a finding on a page this batch
  * wrote names that page's file; a secret in index.md names every file whose
  * index line (its title) carries one. Empty when the refusal is about none of
@@ -796,7 +808,7 @@ async function processBatch(
       );
     } catch (err) {
       const e = err instanceof FlashCallError ? err : null;
-      const fatal = e ? (FATAL_MESSAGES[e.kind] ?? null) : null;
+      const fatal = e ? fatalMessage(e) : null;
       return failAll(
         e?.kind === "aborted" ? "stopped" : `model call failed${e ? ` (${e.kind})` : ""}`,
         fatal,
