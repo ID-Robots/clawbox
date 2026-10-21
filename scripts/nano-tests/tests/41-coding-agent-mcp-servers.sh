@@ -11,9 +11,13 @@
 #      unticked, and never the token; the MCP bearer may not tick it; the owner
 #      ticks it and "ClawBox read-only tools" for a fresh code project.
 #   3. A run in that project must call the board's tool and `device_status`:
-#      while it runs, its record — what the Coding Agent app draws — names both
-#      servers, and the harness's argv has --strict-mcp-config and
-#      --mcp-config <a 0600 file> with no token in it.
+#      while it runs, the Coding Agent app itself — /app/coding, rendered in a
+#      headless Chromium of the box's own with an owner session, the run opened
+#      through the app's own open-run event — shows the run live with both
+#      servers in its timeline; its record names them; and the harness's argv
+#      has --strict-mcp-config and --mcp-config <a 0600 file> with no token in
+#      it. The board's tool answers only after 30 s, so the run is still live
+#      while all of that is looked at.
 #   4. It completes with the value only the board's tool could have told it on
 #      disk, and the token is in no run record, history or evidence file, and
 #      the config file is gone.
@@ -92,11 +96,55 @@ const [marker, sdk] = process.argv.slice(2);
 const { McpServer } = await import(sdk + "/server/mcp.js");
 const { StdioServerTransport } = await import(sdk + "/server/stdio.js");
 const server = new McpServer({ name: "nanoboard", version: "1.0.0" });
-server.registerTool("nano_board_read", { description: "Read the project board: the ids of its open tasks." }, async () => ({
-  content: [{ type: "text", text: JSON.stringify({ tasks: [marker], signedIn: (process.env.BOARD_TOKEN || "").length > 0 }) }],
-}));
+server.registerTool("nano_board_read", { description: "Read the project board: the ids of its open tasks." }, async () => {
+  // A slow board, on purpose: the run stays live while the app is looked at.
+  await new Promise((resolve) => setTimeout(resolve, 30000));
+  return { content: [{ type: "text", text: JSON.stringify({ tasks: [marker], signedIn: (process.env.BOARD_TOKEN || "").length > 0 }) }] };
+});
 await server.connect(new StdioServerTransport());
 EOF
+# The Coding Agent app, as the owner sees it: a headless Chromium of the box
+# own (the one the browser route launches), a context of its own with the
+# owner cookie, /app/coding, the run opened by the app open-run event.
+cat > "$STUB_DIR/app-check.cjs" <<"EOF"
+const { chromium } = require("playwright");
+const [runId, name, exe] = process.argv.slice(2);
+const out = (line) => process.stdout.write(line + "\n");
+(async () => {
+  const browser = await chromium.launch({ headless: true, executablePath: exe, args: ["--no-sandbox"] });
+  try {
+    const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    await context.addCookies([{ name: "clawbox_session", value: process.env.OWNER_COOKIE, url: "http://127.0.0.1" }]);
+    const page = await context.newPage();
+    await page.goto("http://127.0.0.1/app/coding", { waitUntil: "domcontentloaded", timeout: 60000 });
+    const deadline = Date.now() + 150000;
+    while (Date.now() < deadline) {
+      await page.evaluate((id) => window.dispatchEvent(new CustomEvent("clawbox:open-coding-run", { detail: { runId: id } })), runId);
+      await page.waitForTimeout(2500);
+      const text = await page.evaluate(() => document.body ? document.body.innerText : "");
+      const status = await page.evaluate(async (id) => {
+        const r = await fetch("/setup-api/coding-agent/runs?id=" + encodeURIComponent(id), { cache: "no-store" });
+        return r.ok ? (await r.json()).run.status : "http-" + r.status;
+      }, runId);
+      const line = text.split("\n").find((l) => l.includes(name) && l.includes("ClawBox read-only tools"));
+      const card = await page.locator("[data-testid=coding-agent-live-card]").count();
+      if (line && status === "running" && card > 0) {
+        out("APP live " + line.trim().slice(0, 160));
+        return;
+      }
+      if (status !== "running") {
+        out("APP settled-before-seen status=" + status + " line=" + (line ? "yes" : "no") + " card=" + card);
+        return;
+      }
+    }
+    out("APP not-seen");
+  } finally {
+    await browser.close();
+  }
+})().catch((err) => out("APP error " + String((err && err.message) || err).slice(0, 200)));
+EOF
+EXE=$(find "$HOME/.cache/ms-playwright" -maxdepth 4 -type f \( -name headless_shell -o -name chrome \) -perm -u+x 2>/dev/null | sort -V | tail -n 1)
+
 ENTRY=$(python3 -c "import json,sys; print(json.dumps({\"command\": sys.argv[1], \"args\": [sys.argv[2], sys.argv[3], sys.argv[4]], \"env\": {\"BOARD_TOKEN\": sys.argv[5]}}))" "$NODE" "$STUB_DIR/board.mjs" "$MARKER" "$SDK" "$TOKEN")
 if openclaw mcp set "$NAME" "$ENTRY" >/dev/null 2>&1; then say "ok - registered a stand-in board server with the harness (openclaw mcp set)"; else say "not ok - openclaw mcp set refused the stand-in server"; exit 0; fi
 
@@ -132,6 +180,14 @@ say "ok - run $RUN_ID started in $PID"
 # One deadline for the watch and the wait, well inside the 900 s of the test,
 # so the cleanup on the way out always runs.
 RUN_END=$(( $(date +%s) + 600 ))
+APP_OUT="$STUB_DIR/app.out"
+APP_PID=""
+if [ -n "$EXE" ]; then
+  OWNER_COOKIE="$OWNER" NODE_PATH="$REPO/node_modules" timeout 240 node "$STUB_DIR/app-check.cjs" "$RUN_ID" "$NAME" "$EXE" > "$APP_OUT" 2>&1 &
+  APP_PID=$!
+else
+  echo "APP no-chromium" > "$APP_OUT"
+fi
 
 # While it runs: the record the app polls, and the harness argv.
 LIVE=""; ARGV=""
@@ -173,7 +229,13 @@ EOF
   [ -n "$NOW_STATUS" ] && [ "$NOW_STATUS" != running ] && break
   sleep 2
 done
-[ -n "$LIVE" ] && say "ok - while it ran, its record named the board and ClawBox read-only tools (what the Coding Agent app shows)" || say "not ok - no live record of the run named both servers while it ran"
+[ -n "$LIVE" ] && say "ok - while it ran, its record named the board and ClawBox read-only tools" || say "not ok - no live record of the run named both servers while it ran"
+[ -n "$APP_PID" ] && wait "$APP_PID"
+APP=$(grep "^APP " "$APP_OUT" | head -n 1)
+case "$APP" in
+  "APP live "*) say "ok - the Coding Agent app showed the run live, its timeline naming both servers: ${APP#APP live }" ;;
+  *) say "not ok - the Coding Agent app did not show the live run with both servers: ${APP:-$(tail -n 2 "$APP_OUT" | tr "\n" " " | head -c 200)}" ;;
+esac
 case "$ARGV" in
   "strict=yes file=streams mode=0o600 token=absent") say "ok - the harness argv keeps --strict-mcp-config and names a 0600 --mcp-config file, no token" ;;
   "") say "not ok - the harness process of $RUN_ID was never seen" ;;
