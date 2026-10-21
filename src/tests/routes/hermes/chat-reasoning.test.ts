@@ -235,6 +235,13 @@ describe("/setup-api/hermes/chat — the slim profile for small local models", (
       expect(argvFlag("-t")).toBe("web,computer_use,file");
     });
 
+    it("does not let `all` or a platform preset hand computer_use back", async () => {
+      process.env.CLAWBOX_SMALL_MODEL_TOOLSETS = "web,all,hermes-cli";
+      withSwitch(false);
+      await smallTurn();
+      expect(argvFlag("-t")).toBe("web");
+    });
+
     it("never sends an empty -t when the override named only computer_use", async () => {
       process.env.CLAWBOX_SMALL_MODEL_TOOLSETS = "computer_use";
       withSwitch(false);

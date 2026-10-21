@@ -842,7 +842,7 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "settings.pathGuard.applying": "Applying…",
     "settings.pathGuard.failed": "The switch could not be applied.",
     "settings.computerUse.title": "Computer use (desktop control)",
-    "settings.computerUse.hint": "Lets the assistant take screenshots of this ClawBox's desktop and use its mouse and keyboard. Hermes turns it on by default.",
+    "settings.computerUse.hint": "Lets the assistant take screenshots of this ClawBox's desktop and use its mouse and keyboard.",
     "settings.computerUse.on": "On",
     "settings.computerUse.off": "Off — the assistant cannot control the desktop",
     "settings.computerUse.default": "On (Hermes default)",

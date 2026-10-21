@@ -66,6 +66,13 @@ describe("computer-use-switch — the stored key", () => {
     expect(withoutComputerUse(list, "on")).toEqual(list);
     expect(withoutComputerUse(list, "unmanaged")).toEqual(list);
   });
+
+  it("also drops the -t names that expand to computer_use: all and the platform presets", async () => {
+    const { withoutComputerUse } = await load();
+    const list = ["web", "all", "hermes-cli", "hermes-telegram", "Computer_Use", "debugging"];
+    expect(withoutComputerUse(list, "off")).toEqual(["web", "debugging"]);
+    expect(withoutComputerUse(list, "on")).toEqual(list);
+  });
 });
 
 // ── register-mcp.sh §4: the boot-time apply ────────────────────────────────

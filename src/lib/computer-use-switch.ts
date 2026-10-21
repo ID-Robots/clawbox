@@ -48,11 +48,25 @@ export function readComputerUseSwitch(store: unknown): ComputerUseSwitch {
 }
 
 /**
- * A `hermes chat -t` whitelist with `computer_use` taken out when the owner
+ * A `-t` name that brings computer_use in, per Hermes' toolsets reference at
+ * the pinned version: the toolset itself, `all` ("everything"), and the
+ * platform presets — `hermes-cli` lists computer_use and most of the others
+ * (`hermes-telegram`, `hermes-cron`, …) are "the same set as hermes-cli". Every
+ * `hermes-*` preset counts, the cautious reading: the two that leave it out
+ * (acp, api-server) are full configurations a slim list has no use for anyway.
+ */
+function grantsComputerUse(name: string): boolean {
+  const n = name.trim().toLowerCase();
+  return n === COMPUTER_USE_TOOLSET || n === "all" || n.startsWith("hermes-");
+}
+
+/**
+ * A `hermes chat -t` whitelist with computer_use taken out when the owner
  * switched it off. `-t` names the built-in toolsets for that one turn and so
  * bypasses the platform selection `hermes tools disable` wrote; without this an
- * operator's CLAWBOX_SMALL_MODEL_TOOLSETS could hand the toolset back.
+ * operator's CLAWBOX_SMALL_MODEL_TOOLSETS could hand the toolset back, by name
+ * or through `all` or a platform preset.
  */
 export function withoutComputerUse(toolsets: readonly string[], state: ComputerUseSwitch): readonly string[] {
-  return state === "off" ? toolsets.filter((name) => name !== COMPUTER_USE_TOOLSET) : toolsets;
+  return state === "off" ? toolsets.filter((name) => !grantsComputerUse(name)) : toolsets;
 }
