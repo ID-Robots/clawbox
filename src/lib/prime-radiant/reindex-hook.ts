@@ -11,7 +11,10 @@
  * BESIDE the hook and never in its one slot: a refresh is started after the
  * hook, without being waited for, and only when there is a block to keep or
  * to take away — never on a box whose owner has not turned the `context`
- * setting on.
+ * setting on. Every commit on `main` follows it as well (vault.ts calls
+ * `followCoreContextAfterCommit`): the owner's and the assistant's own edits
+ * never come through `notifyVaultChanged`, and a page set to confidential or
+ * deleted must leave the block without waiting for the night.
  *
  * The hook lives in `processStore`: the boot layer that installs it and the
  * route that calls it are separate module copies (see process-store.ts).
@@ -46,6 +49,29 @@ export async function notifyVaultChanged(paths: readonly string[]): Promise<bool
   }
   followCoreContext();
   return ran;
+}
+
+/**
+ * Commits on `main` come in bursts — an ingest commits each answered batch — so
+ * a commit is followed once its burst settles: FOLLOW_DEBOUNCE_MS after the last
+ * one, and never later than FOLLOW_MAX_WAIT_MS after the first, so a long ingest
+ * costs one rebuild every half minute at most while an edit shows within seconds.
+ */
+const FOLLOW_DEBOUNCE_MS = 2_000;
+const FOLLOW_MAX_WAIT_MS = 30_000;
+const follow = processStore("prime-radiant:core-follow", () => ({ timer: null as NodeJS.Timeout | null, first: 0 }));
+
+/** A commit landed on the vault's `main`: the core block follows it, once the burst it belongs to settles. Never throws. */
+export function followCoreContextAfterCommit(): void {
+  const now = Date.now();
+  if (follow.timer) clearTimeout(follow.timer);
+  else follow.first = now;
+  const wait = Math.max(0, Math.min(FOLLOW_DEBOUNCE_MS, follow.first + FOLLOW_MAX_WAIT_MS - now));
+  follow.timer = setTimeout(() => {
+    follow.timer = null;
+    followCoreContext();
+  }, wait);
+  follow.timer.unref?.();
 }
 
 /** Start a refresh of the core block when the setting is on, or a block is still on disk to take away. */

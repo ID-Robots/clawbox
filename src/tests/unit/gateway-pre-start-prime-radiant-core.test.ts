@@ -36,7 +36,7 @@ function block(): string {
   const src = readFileSync(SCRIPT, "utf-8");
   return [
     section(src, "# ── Installing a ClawBox hook plugin into ~/.openclaw/extensions ", "# ── The protected-path deny hook "),
-    section(src, "# ── The Prime Radiant core block ", "# ── Default skills (TASK-1639)"),
+    section(src, "# ── The Prime Radiant core block ", "# ── Default skills ("),
   ].join("\n");
 }
 

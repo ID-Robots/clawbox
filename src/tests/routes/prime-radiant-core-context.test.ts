@@ -26,6 +26,7 @@ vi.mock("@/lib/prime-radiant/shard-index", () => ({
 
 import { GET as settingsGET, PUT as settingsPUT } from "@/app/setup-api/prime-radiant/settings/route";
 import { readCoreContextFile } from "@/lib/prime-radiant/core-context-file";
+import { editPage } from "@/lib/prime-radiant/edit";
 import { coreContextPath } from "@/lib/prime-radiant/paths";
 import { notifyVaultChanged, setVaultReindexHook } from "@/lib/prime-radiant/reindex-hook";
 import { readSettings } from "@/lib/prime-radiant/settings";
@@ -141,6 +142,16 @@ describe("the block follows main", () => {
     await notifyVaultChanged(["concepts/gamma.md"]);
     await vi.waitFor(() => expect(readCoreContextFile()?.text).toContain("- Gamma — Gamma is new tonight."), { timeout: 10_000 });
     expect(readCoreContextFile()!.pages).toBe(3);
+  });
+
+  it("drops a page the owner sets to confidential at once — no notify, no night", async () => {
+    await seed();
+    await put({ context: { enabled: true } });
+    expect(readCoreContextFile()!.text).toContain("- Alpha — Alpha is the first product.");
+
+    await editPage("concepts/alpha.md", { privacy: "confidential" }, { by: "owner", person: true });
+    await vi.waitFor(() => expect(readCoreContextFile()?.text).not.toContain("Alpha"), { timeout: 10_000 });
+    expect(readCoreContextFile()!.pages).toBe(1);
   });
 
   it("takes away a block left on disk once the setting is off", async () => {
