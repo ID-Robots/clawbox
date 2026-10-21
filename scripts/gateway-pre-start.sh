@@ -3383,6 +3383,28 @@ CLAWBOX_STT_CLIENT_SCRIPT = "stt-client.py"
 # globals() because the unit tests run this block extracted from the file.
 _clawbox_v2 = bool(globals().get("CLAWBOX_OPENCLAW_V2", False))
 
+# The ClawBox AI video row, recognised here and written by the video
+# understanding migration at the end of this heredoc. On OpenClaw 2 it sits in
+# the same shared tools.media.models list as the transcription rows, and it is
+# nobody's transcription route: left in the ownership question below, arming
+# video would read as "the owner has his own speech setup" and stand this block
+# down for good. Matched on the helper's name, like the on-box speech-to-text
+# row, and on its single capability: a row the owner retagged or pointed at a
+# script of his own is his.
+CLAWBOX_VIDEO_DESCRIBE_SCRIPT = "clawai-video-describe.py"
+
+
+def _is_clawbox_video_model(_entry):
+    """Is one models[] row the frames row the video migration writes?"""
+    if not isinstance(_entry, dict) or _entry.get("type") != "cli":
+        return False
+    _caps = _entry.get("capabilities")
+    if not isinstance(_caps, list) or _caps != ["video"]:
+        return False
+    _args = _entry.get("args")
+    _named = [_entry.get("command")] + (list(_args) if isinstance(_args, list) else [])
+    return any(isinstance(_v, str) and _v.endswith(CLAWBOX_VIDEO_DESCRIBE_SCRIPT) for _v in _named)
+
 
 def _is_clawbox_audio_model(_entry):
     """Is one models[] row one of the two ClawBox itself writes?
@@ -3593,6 +3615,15 @@ if _clawai_openai_route_is_ours:
         # list anyway — but the sentence has to match the code under it.
         _audio_models = _audio.get("models")
         _audio_models_move_in_flight = True
+    # Our own video rows share the v2 list (see `_is_clawbox_video_model`): set
+    # aside for every question below, and put back after the rows this block
+    # seeds. A list that held nothing else is no transcription list at all, so
+    # it reads as absent and gets the seed, not as the owner's deliberate `[]`.
+    _audio_video_rows = []
+    if _clawbox_v2 and not _audio_models_move_in_flight and isinstance(_audio_models, list):
+        _audio_video_rows = [_row for _row in _audio_models if _is_clawbox_video_model(_row)]
+        if _audio_video_rows:
+            _audio_models = [_row for _row in _audio_models if not _is_clawbox_video_model(_row)] or None
     _audio_has_base_url = isinstance(_audio_base_url, str) and bool(_audio_base_url.strip())
     _audio_route_taken = bool(
         (_audio_has_base_url and not _same_endpoint(_audio_base_url, _clawai_proxy_base_url))
@@ -3629,7 +3660,7 @@ if _clawai_openai_route_is_ours:
             if _clawbox_v2:
                 for _row in _seed:
                     _row["capabilities"] = ["audio"]
-                _media["models"] = _seed
+                _media["models"] = _seed + _audio_video_rows
             else:
                 _audio["models"] = _seed
         _media["audio"] = _audio
@@ -4048,6 +4079,197 @@ if isinstance(ds_models, list):
             model["input"] = ["text"]
             changed = True
 
+# Migration: ClawBox AI video understanding (frames on the vision model).
+#
+# OpenClaw describes an inbound video before the reply runs when a
+# tools.media.models[] row tagged capabilities: ["video"] can take it. Its
+# bundled video providers are Google, Qwen and Moonshot, none of which a
+# ClawBox talks to, and this adds no provider. The row is a `type: "cli"`
+# entry, the core's own CLI contract (the same one the on-box speech-to-text
+# row uses), and it runs scripts/openclaw/clawai-video-describe.py. That helper
+# pulls a few frames out of the clip with ffmpeg and asks the ClawBox AI vision
+# model this box already has (the deepseek provider entry the vision migration
+# above maintains: its proxy, its token, its image-capable model) for one
+# description. The sound track is not used. The per-clip frame budget is the
+# helper's (MAX_FRAMES there): one vision request per clip, however long the
+# clip, metered by the proxy as the vision request it is. Nothing is written
+# under tools.media.video, because there is no video endpoint to name.
+#
+# BEHIND A FLAG, off unless set: CLAWBOX_AI_VIDEO_UNDERSTANDING=1 in the
+# gateway's environment or in $CLAWBOX_ROOT/.env. Every boot recomputes the
+# answer, so turning the flag off takes the row back at the next gateway start.
+#
+# THE TIER GATE is the cloud-voice block's: the Max plan ("pro", see
+# CLAWBOX_SPEECH_DEVICE_TIER), armed on the plan or, before the portal has
+# answered for it, on the badge; withdrawn only on a plan that is on record and
+# is not Max, never on the badge alone.
+#
+# Ours to take back, and only ours: the row is recognised by
+# `_is_clawbox_video_model` (speech-to-text block) and nothing else in the list
+# is touched. A video route of the owner's, meaning any other row tagged for
+# video, stands this block down. Video GENERATION is a different surface and is
+# deliberately not wired here.
+CLAWBOX_VIDEO_FLAG = "CLAWBOX_AI_VIDEO_UNDERSTANDING"
+CLAWBOX_VIDEO_DEVICE_TIER = "pro"
+_video_v2 = bool(globals().get("CLAWBOX_OPENCLAW_V2", False))
+
+
+def _clawbox_video_flag_on():
+    """The flag from the environment, else from $CLAWBOX_ROOT/.env.
+
+    Off unless it is an explicit yes. One key is read, never the whole file,
+    and the bare except is the .env readers' usual precaution above: the file
+    is clawbox-writable, and one undecodable byte must not fail ExecStartPre.
+    """
+    _value = os.environ.get(CLAWBOX_VIDEO_FLAG)
+    if _value is None:
+        try:
+            with open(os.path.join(_clawbox_root, ".env"), encoding="utf-8", errors="replace") as _vf:
+                for _line in _vf:
+                    _line = _line.strip()
+                    if _line.startswith("export "):
+                        _line = _line[len("export "):].strip()
+                    _key, _sep, _raw = _line.partition("=")
+                    if not _sep or _key.strip() != CLAWBOX_VIDEO_FLAG:
+                        continue
+                    _raw = _raw.strip()
+                    if len(_raw) >= 2 and _raw[0] == _raw[-1] and _raw[0] in ("'", '"'):
+                        _raw = _raw[1:-1]
+                    _value = _raw
+        except Exception:
+            _value = None
+    return isinstance(_value, str) and _value.strip().lower() in ("1", "true", "yes", "on")
+
+
+_video_provider_models = deepseek_provider.get("models") if isinstance(deepseek_provider, dict) else None
+_video_token = deepseek_provider.get("apiKey") if isinstance(deepseek_provider, dict) else None
+_video_helper = os.path.join(_clawbox_root, "scripts", "openclaw", CLAWBOX_VIDEO_DESCRIBE_SCRIPT)
+# Each reason the row cannot be (or can no longer be) armed, in the order the
+# log names them. The first one is the sentence printed.
+_video_blockers = []
+_video_flag = _clawbox_video_flag_on()
+if not _video_flag:
+    _video_blockers.append("the %s flag is off" % CLAWBOX_VIDEO_FLAG)
+if not (isinstance(_video_token, str) and _video_token.startswith("claw_")):
+    _video_blockers.append("this box is not paired to ClawBox AI")
+elif not (
+    isinstance(_video_provider_models, list)
+    and any(
+        isinstance(_m, dict) and isinstance(_m.get("input"), list) and "image" in _m.get("input")
+        for _m in _video_provider_models
+    )
+):
+    _video_blockers.append("there is no ClawBox AI vision model to send the frames to")
+if _clawai_plan_tier and _clawai_plan_tier != CLAWBOX_VIDEO_DEVICE_TIER:
+    _video_blockers.append("this box's plan does not include it")
+if not shutil.which("ffmpeg"):
+    _video_blockers.append("ffmpeg is not installed")
+if not os.path.isfile(_video_helper):
+    _video_blockers.append("the frames helper is not installed")
+_video_entitled = (_clawai_plan_tier or _clawai_device_tier) == CLAWBOX_VIDEO_DEVICE_TIER
+
+_video_tools = cfg.get("tools")
+_video_media = _video_tools.get("media") if isinstance(_video_tools, dict) else None
+_video_cfg = _video_media.get("video") if isinstance(_video_media, dict) else None
+_video_home = _video_media if _video_v2 else _video_cfg
+_video_models = _video_home.get("models") if isinstance(_video_home, dict) else None
+
+if _video_blockers:
+    if isinstance(_video_models, list) and any(_is_clawbox_video_model(_r) for _r in _video_models):
+        _video_kept = [_r for _r in _video_models if not _is_clawbox_video_model(_r)]
+        if _video_kept:
+            _video_home["models"] = _video_kept
+        else:
+            # The list was ours alone. An emptied `models: []` would read as a
+            # deliberate "no models here" to the speech-to-text block, which
+            # would then never seed it again.
+            del _video_home["models"]
+        print("  Removed the ClawBox AI video row: %s" % _video_blockers[0])
+        changed = True
+    elif _video_flag:
+        # Asked for and not possible here. Silent when the flag is off: that is
+        # every box by default, and the line would be noise on all of them.
+        print("  Skipped ClawBox AI video understanding: %s" % _video_blockers[0])
+elif not _video_entitled:
+    # A plan not on record yet and a badge that is not Max: hold, neither arm
+    # nor withdraw, until the status poll says which.
+    print("  Skipped ClawBox AI video understanding: the portal has not confirmed a Max plan for this box")
+else:
+    _video_skip = None
+    if (_video_tools is not None and not isinstance(_video_tools, dict)) or (
+        _video_media is not None and not isinstance(_video_media, dict)
+    ) or (_video_cfg is not None and not isinstance(_video_cfg, dict)):
+        _video_skip = "tools.media is not an object this block can extend"
+    elif isinstance(_video_cfg, dict) and _video_cfg.get("enabled") is False:
+        _video_skip = "tools.media.video.enabled is false"
+    elif _video_v2 and isinstance(_video_cfg, dict) and "models" in _video_cfg:
+        # ON THE KEY, like the speech-to-text guard: a legacy list the core's
+        # own migration has not moved yet, `null` included. Seeding the v2
+        # home beside it is the dual-home write that guard stands down over.
+        _video_skip = "a legacy tools.media.video.models list is still waiting for the core's own migration"
+    elif _video_models is not None and not isinstance(_video_models, list):
+        _video_skip = "the media model list is not a list"
+    elif isinstance(_video_models, list) and not _video_models:
+        _video_skip = "the media model list is deliberately empty"
+    elif isinstance(_video_models, list) and any(
+        isinstance(_r, dict)
+        and not _is_clawbox_video_model(_r)
+        and isinstance(_r.get("capabilities"), list)
+        and "video" in _r.get("capabilities")
+        for _r in _video_models
+    ):
+        _video_skip = "tools.media already names its own video understanding route"
+    if _video_skip:
+        print("  Skipped ClawBox AI video understanding: %s" % _video_skip)
+    else:
+        _video_row = {
+            "type": "cli",
+            "command": sys.executable or "/usr/bin/python3",
+            "args": [
+                _video_helper,
+                "--max-chars",
+                "{{MaxChars}}",
+                "--prompt",
+                "{{Prompt}}",
+                "{{AttachmentPath}}",
+            ],
+            "capabilities": ["video"],
+        }
+        _video_list = list(_video_models) if isinstance(_video_models, list) else []
+        _video_ours = [_i for _i, _r in enumerate(_video_list) if _is_clawbox_video_model(_r)]
+        if not _video_ours:
+            _video_list.append(_video_row)
+            _video_note = (
+                "  Turned on ClawBox AI video understanding: frames from each clip go to the"
+                " ClawBox AI vision model"
+            )
+        else:
+            # Ours already: refresh it in place to what this build writes (a
+            # moved CLAWBOX_ROOT, a new interpreter, new arguments) and drop
+            # any duplicate, keeping the position the first one had.
+            _video_list[_video_ours[0]] = _video_row
+            _video_list = [
+                _r for _i, _r in enumerate(_video_list) if _i == _video_ours[0] or _i not in _video_ours
+            ]
+            _video_note = "  Refreshed the ClawBox AI video row"
+        if _video_list != _video_models:
+            if not isinstance(_video_tools, dict):
+                _video_tools = {}
+                cfg["tools"] = _video_tools
+            if not isinstance(_video_media, dict):
+                _video_media = {}
+                _video_tools["media"] = _video_media
+            if _video_v2:
+                _video_media["models"] = _video_list
+            else:
+                if not isinstance(_video_cfg, dict):
+                    _video_cfg = {}
+                    _video_media["video"] = _video_cfg
+                _video_cfg["models"] = _video_list
+            print(_video_note)
+            changed = True
+
+# Every migration above has run: write the config back once.
 if changed:
     # Atomic write so a crash mid-rewrite can't leave a half-written
     # file where the gateway would refuse to boot.

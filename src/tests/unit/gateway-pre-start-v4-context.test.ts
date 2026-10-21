@@ -28,7 +28,11 @@ const hasPython3 = spawnSync("python3", ["--version"], { stdio: "ignore" }).stat
 function extractPolicy(): string {
   const src = readFileSync(SCRIPT, "utf-8");
   const start = src.indexOf("if isinstance(ds_models, list):");
-  const end = src.indexOf("if changed:", start);
+  // The block ends where the next migration starts, or at the config write
+  // when nothing follows it. A migration appended after it is not part of it.
+  const next = start < 0 ? -1 : src.indexOf("\n# Migration:", start);
+  const write = start < 0 ? -1 : src.indexOf("if changed:", start);
+  const end = next >= 0 && (write < 0 || next < write) ? next : write;
   if (start < 0 || end < 0) throw new Error("deepseek V4 model block not found");
   return src.slice(start, end);
 }

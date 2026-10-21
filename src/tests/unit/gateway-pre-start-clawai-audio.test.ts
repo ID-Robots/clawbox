@@ -424,6 +424,67 @@ describe.skipIf(!hasPython3)("the same migration on OpenClaw 2 homes", () => {
     expect((cfg.tools as { media?: { models?: unknown } }).media?.models).toEqual(existing);
   });
 
+  describe("beside the ClawBox AI video row", () => {
+    // The video-understanding migration writes its frames row into the same
+    // shared list. It is nobody's transcription route, so it must neither stand
+    // this block down nor be dropped by it.
+    const VIDEO_ROW = {
+      type: "cli",
+      command: "/usr/bin/python3",
+      args: [
+        "/opt/clawbox/scripts/openclaw/clawai-video-describe.py",
+        "--max-chars",
+        "{{MaxChars}}",
+        "--prompt",
+        "{{Prompt}}",
+        "{{AttachmentPath}}",
+      ],
+      capabilities: ["video"],
+    };
+    const AUDIO_ROW = { ...CLOUD, capabilities: ["audio"] };
+
+    it("does not read it as the owner's own transcription route", () => {
+      const existing = [AUDIO_ROW, VIDEO_ROW];
+      const { cfg, changed, log } = migrate(
+        { tools: { media: { audio: { baseUrl: PROXY }, models: existing } } },
+        true,
+        true,
+      );
+
+      expect(changed).toBe(false);
+      expect(log).not.toContain("Skipped");
+      expect((cfg.tools as { media?: { models?: unknown } }).media?.models).toEqual(existing);
+    });
+
+    it("still gives the transcription row its profile, and keeps the video row where it was", () => {
+      const { cfg, changed } = migrate(
+        { tools: { media: { audio: { baseUrl: PROXY }, models: [VIDEO_ROW, { ...LEGACY_CLOUD, capabilities: ["audio"] }] } } },
+        true,
+        true,
+      );
+
+      expect(changed).toBe(true);
+      expect((cfg.tools as { media?: { models?: unknown } }).media?.models).toEqual([VIDEO_ROW, AUDIO_ROW]);
+    });
+
+    it("seeds the transcription row ahead of a video row that is alone in the list", () => {
+      const { cfg, changed } = migrate({ tools: { media: { models: [VIDEO_ROW] } } }, true, true);
+
+      expect(changed).toBe(true);
+      const m = (cfg.tools as { media?: { models?: unknown; audio?: AudioConfig } }).media;
+      expect(m?.models).toEqual([AUDIO_ROW, VIDEO_ROW]);
+      expect(m?.audio).toEqual({ baseUrl: PROXY });
+    });
+
+    it("still treats a CLI video row running some other script as the owner's", () => {
+      const owner = { ...VIDEO_ROW, args: ["/usr/local/bin/describe.py", "{{AttachmentPath}}"] };
+      const { changed, log } = migrate({ tools: { media: { models: [AUDIO_ROW, owner] } } }, true, true);
+
+      expect(changed).toBe(false);
+      expect(log).toContain("Skipped ClawBox AI speech to text");
+    });
+  });
+
   it("treats a foreign row in the shared list as the owner's own transcription route", () => {
     const foreign = [{ provider: "deepgram", model: "nova" }];
     const { cfg, changed } = migrate({ tools: { media: { models: foreign } } }, true, true);
