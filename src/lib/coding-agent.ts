@@ -8374,8 +8374,11 @@ function mayStartFollowUp(run: CodingRun, ended: "stop" | "pause" | null): boole
   if (reviewPassDue(run) || pipelineOwnsRun(run)) return true;
   // The deliverable gate judges the run that owes the deliverable — this one,
   // or the one this review pass reviewed — and goes again while it has attempts.
+  // Only for a deliverable: a run judged for an unused helper alone ends at the
+  // gate and starts nothing (failLeftBehind).
   const origin = run.reviewOf === null ? run : loadRuns().find((r) => r.id === run.reviewOf);
-  return origin !== undefined && deliverableGateApplies(origin) && origin.attempts.length < origin.completionAttempts;
+  return origin !== undefined && deliverableFor(origin) !== null && deliverableGateApplies(origin)
+    && origin.attempts.length < origin.completionAttempts;
 }
 
 /**
