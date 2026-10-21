@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@/tests/helpers/test-utils";
-import { PublicLinkMenuItems, shareableLinkUrl, type PublicLinkInfo } from "@/components/PublicAppLink";
+import { PublicLinkDialog, PublicLinkMenuItems, shareableLinkUrl, type PublicLinkInfo } from "@/components/PublicAppLink";
 
 /**
  * Anyone but the owner is answered a link's URL with its token masked
@@ -64,5 +64,48 @@ describe("the address a viewer can hand on", () => {
     renderMenu(live({}));
     fireEvent.click(screen.getByTestId("ctx-public-link-copy"));
     expect(writeText).toHaveBeenLastCalledWith("https://example.trycloudflare.com/apps/notes/?k=AbC123");
+  });
+});
+
+describe("the link dialog", () => {
+  function renderDialog(link: PublicLinkInfo) {
+    return render(
+      <PublicLinkDialog
+        open
+        appId="notes"
+        appName="Notes"
+        link={link}
+        onCreate={async () => null}
+        onSetPassword={async () => null}
+        onClose={() => {}}
+      />,
+    );
+  }
+
+  it("never shows a masked address in its address field", () => {
+    renderDialog(live({ url: MASKED, tokenMasked: true }));
+    expect(screen.queryByTestId("public-link-url")).toBeNull();
+    expect(document.body.textContent ?? "").not.toContain("••••");
+    cleanup();
+
+    renderDialog(live({ url: MASKED, tokenMasked: true, passwordProtected: true }));
+    expect((screen.getByTestId("public-link-url") as HTMLInputElement).value).toBe("https://example.trycloudflare.com/apps/notes/");
+    cleanup();
+
+    renderDialog(live({}));
+    expect((screen.getByTestId("public-link-url") as HTMLInputElement).value).toBe("https://example.trycloudflare.com/apps/notes/?k=AbC123");
+  });
+
+  it("says the app's data is open when a stored path covers its /api", () => {
+    for (const apiAllow of [["/"], ["/api/"], ["/api"]]) {
+      renderDialog(live({ apiAllow }));
+      expect(screen.getByTestId("public-link-api-status").textContent).not.toBe("");
+      const open = screen.getByTestId("public-link-api-status").textContent;
+      cleanup();
+      renderDialog(live({ apiAllow: ["/upload"] }));
+      const off = screen.getByTestId("public-link-api-status").textContent;
+      cleanup();
+      expect(open).not.toBe(off);
+    }
   });
 });

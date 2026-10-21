@@ -174,6 +174,21 @@ describe("publishing", () => {
     expect(serving.readLinks(ROOT)).toHaveLength(0);
   });
 
+  /** The serving side matches API paths by prefix, so "/" and "/api/" open the app's own /api as surely as "/api". */
+  it("refuses a typed path that would open the app's own /api again on a link whose API is off", async () => {
+    for (const apiAllow of [["/"], ["/api"], ["/api/"], ["/upload", "/api//"]]) {
+      const res = await POST(req("POST", { appId: "notes", mode: "permanent", apiAccess: "none", apiAllow }));
+      expect(res.status).toBe(400);
+      expect((await res.json()).code).toBe("bad_api_allow");
+      expect(serving.readLinks(ROOT)).toHaveLength(0);
+    }
+
+    // A path beside the app's own /api is still the owner's to open.
+    expect((await POST(req("POST", { appId: "notes", mode: "permanent", apiAccess: "none", apiAllow: ["/upload", "/apis"] }))).status).toBe(201);
+    expect((await listPublicLinks())[0]).toMatchObject({ apiAllow: ["/upload", "/apis"], apiReadOnly: false });
+    await disablePublicLink("notes");
+  });
+
   /** The serving side refuses a list longer than MAX_API_ALLOW: a link stored with one would be answered 201 here and never served. */
   it("counts the /api a new link opens against the cap on API paths, so it never stores a list the serving side refuses", async () => {
     const sixteen = Array.from({ length: MAX_API_ALLOW }, (_, i) => `/p${i}`);

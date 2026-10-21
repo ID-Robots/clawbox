@@ -156,12 +156,23 @@ export function parseApiAccess(input: unknown): PublicLinkApiAccess {
   throw new PublicLinkError("apiAccess must be full, read or none.", 400, "bad_api_access");
 }
 
+/** Does this prefix open the app's own /api tree? "/" opens everything, "/api/" is "/api". */
+export function opensAppApi(prefix: string): boolean {
+  const p = prefix.replace(/\/+$/, "");
+  return p === "" || p === DEFAULT_API_PREFIX;
+}
+
 /**
  * The prefixes a link opens: the app's `/api` for `full` and `read`, plus
  * whatever the owner typed. The cap counts the `/api` added here too: the
  * serving side refuses a longer list, and a link it refuses is never served.
  */
 export function apiAllowFor(access: PublicLinkApiAccess, typed: string[]): string[] {
+  // "Off" closes the app's own /api, so a typed path may not open it again:
+  // the serving side matches by prefix, and "/" or "/api/" covers that tree.
+  if (access === "none" && typed.some(opensAppApi)) {
+    throw new PublicLinkError("With the app's API off, a path cannot open the app's own /api or the whole app.", 400, "bad_api_allow");
+  }
   const out = access === "none" || typed.includes(DEFAULT_API_PREFIX) ? typed : [DEFAULT_API_PREFIX, ...typed];
   if (out.length > MAX_API_ALLOW) {
     throw new PublicLinkError(`At most ${MAX_API_ALLOW} API paths, the app's own /api included.`, 400, "bad_api_allow");

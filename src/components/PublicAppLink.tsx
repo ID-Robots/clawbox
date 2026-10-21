@@ -29,6 +29,12 @@ export interface PublicLinkInfo {
   tokenMasked?: boolean;
 }
 
+/** Does a stored prefix open the app's own /api tree? The serving side matches by prefix, so "/" and "/api/" do. */
+function opensAppApi(prefix: string): boolean {
+  const p = prefix.replace(/\/+$/, "");
+  return p === "" || p === "/api";
+}
+
 /**
  * The address this viewer can hand on, or null when there is none. The owner's
  * URL carries the token; anyone else is answered it masked, and a masked token
@@ -475,13 +481,14 @@ export function PublicLinkDialog({
           <div style={{ marginTop: 14 }}>
             {link.url ? (
               <>
-                <input readOnly value={shareableLinkUrl(link) ?? link.url} aria-label={t("publicLink.copy")} data-testid="public-link-url" onFocus={(e) => e.currentTarget.select()} style={{ ...field, width: "100%" }} />
+                {/* Only an address that works: a masked token is never shown to be copied by hand either. */}
+                {shareableLinkUrl(link) && <input readOnly value={shareableLinkUrl(link) ?? ""} aria-label={t("publicLink.copy")} data-testid="public-link-url" onFocus={(e) => e.currentTarget.select()} style={{ ...field, width: "100%" }} />}
                 {/* The note is about the address with the key in it, which only the owner is shown. */}
                 {!link.tokenMasked && <p data-testid="public-link-share-note" style={{ margin: "8px 0 0", fontSize: 12, lineHeight: 1.5, color: "rgba(255,255,255,0.75)" }}>{t(link.passwordProtected ? "publicLink.shareThisAddressPassword" : "publicLink.shareThisAddress")}</p>}
                 <p data-testid="public-link-address-note" style={{ margin: "6px 0 0", fontSize: 12, lineHeight: 1.5, color: "rgba(255,255,255,0.6)" }}>{t("publicLink.addressChanges")}</p>
                 <p data-testid="public-link-api-status" style={{ margin: "6px 0 0", fontSize: 12, lineHeight: 1.5, color: "rgba(255,255,255,0.6)" }}>
                   {/* The app's own /api is what the choice opens; a path typed on top of "Off" does not make it "read and write". */}
-                  {t(!link.apiAllow.includes("/api") ? "publicLink.apiAccess.statusNone" : link.apiReadOnly ? "publicLink.apiAccess.statusRead" : "publicLink.apiAccess.statusFull")}
+                  {t(!link.apiAllow.some(opensAppApi) ? "publicLink.apiAccess.statusNone" : link.apiReadOnly ? "publicLink.apiAccess.statusRead" : "publicLink.apiAccess.statusFull")}
                 </p>
               </>
             ) : (
