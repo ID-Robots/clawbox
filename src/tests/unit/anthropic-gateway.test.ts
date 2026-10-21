@@ -8,8 +8,9 @@
  *  1. THE POOL IN THE GATEWAY — every Claude account is its own profile, the
  *     access token only, in an order that follows the pool (the active account
  *     first, the chat's own sign-in last); a limited account out of the order
- *     while another can answer, so no session core pinned to it stays there,
- *     and back at its reset; never a restart.
+ *     while another can answer, or the chat's own subscription sign-in, so no
+ *     session core pinned to it stays there, and back at its reset; never a
+ *     restart.
  *  2. NOTHING TAKEN FOR NOTHING — a chat on another provider is never moved;
  *     an unreadable config removes nothing; the owner's own profiles are never
  *     written or removed; a write core refused is owed, not claimed.
@@ -247,7 +248,9 @@ describe("the pool in the gateway", () => {
     await pool.addApiKeyAccount({ label: "Key", key: "sk-ant-api03-a-key-000000000000000000000" });
     await pool.markLimited(work.id, Date.now() + H, "session");
     await swap.whenSwapsSettled();
-    expect(core.order).toEqual([p(work.id), "anthropic:default"]);
+    // The pool's key is never the gateway's; with its one Claude account
+    // limited, the chat's own subscription sign-in answers.
+    expect(core.order).toEqual(["anthropic:default"]);
     expect((await pool.describePool()).lastSwap?.consumers.gateway).toMatchObject({ status: "skipped", code: "not_transferable" });
   });
 
@@ -313,7 +316,7 @@ describe("a limited account and the sessions core pinned to it", () => {
     expect(core.order).toEqual([p(personal.id), p(work.id), "anthropic:default"]);
   });
 
-  it("keeps every limited account in, by its reset, when none can answer: the order is never emptied", async () => {
+  it("hands the order to the owner's own subscription sign-in when no account of the pool can answer, and takes the accounts back at their reset", async () => {
     const core = fakeCore();
     gw.startGatewaySwap();
     const { work, personal } = await twoClaudeAccounts();
@@ -321,8 +324,58 @@ describe("a limited account and the sessions core pinned to it", () => {
     await pool.markLimited(work.id, Date.now() + 2 * H, "weekly");
     await pool.markLimited(personal.id, Date.now() + H, "session");
     await swap.whenSwapsSettled();
+    const synced = await gw.syncGatewayNow();
+    // A session core pinned to a spent account drops that pin on its next
+    // turn, and the sign-in answers it.
+    expect(core.order).toEqual(["anthropic:default"]);
+    expect(synced.status).toBe("ok");
+    // Out of the order, not out of the store, and the chat is still the pool's.
+    expect(core.logouts).toEqual([]);
+    expect(core.profiles.has(p(work.id))).toBe(true);
+    expect(core.profiles.has(p(personal.id))).toBe(true);
+    expect((await pool.readPoolState()).gateway).toMatchObject({ accountId: personal.id, pending: false });
+    expect(await gw.keepGatewayMirror()).not.toBe("failed");
+    expect(core.order).toEqual(["anthropic:default"]);
+
+    await pool.clearLimit(personal.id);
     await gw.syncGatewayNow();
-    expect(core.order).toEqual([p(personal.id), p(work.id), "anthropic:default"]);
+    expect(core.order).toEqual([p(personal.id), "anthropic:default"]);
+  });
+
+  it("keeps every limited account in, by its reset and ahead of it, when the owner's other Anthropic credential is an API key or of a kind the store does not say", async () => {
+    for (const type of ["api_key", ""]) {
+      const core = fakeCore();
+      core.profiles.set("anthropic:default", { type, secret: OWN, expires: null });
+      gw.startGatewaySwap();
+      const { work, personal } = await twoClaudeAccounts();
+      await gw.keepGatewayMirror();
+      await pool.markLimited(work.id, Date.now() + 2 * H, "weekly");
+      await pool.markLimited(personal.id, Date.now() + H, "session");
+      await swap.whenSwapsSettled();
+      await gw.syncGatewayNow();
+      expect(core.order).toEqual([p(personal.id), p(work.id), "anthropic:default"]);
+      for (const account of [work, personal]) await pool.removeAccount(account.id);
+      await swap.whenSwapsSettled();
+    }
+  });
+
+  it("puts the owner's subscription sign-in ahead of an API key the store holds beside it, and a static token that has run out is no sign-in", async () => {
+    const core = fakeCore();
+    core.profiles.set("anthropic:key", { type: "api_key", secret: "sk-ant-api03-owner", expires: null });
+    core.order = ["anthropic:key", "anthropic:default"];
+    gw.startGatewaySwap();
+    const { work, personal } = await twoClaudeAccounts();
+    await gw.keepGatewayMirror();
+    expect(core.order).toEqual([p(work.id), p(personal.id), "anthropic:key", "anthropic:default"]);
+    await pool.markLimited(work.id, Date.now() + 2 * H, "weekly");
+    await pool.markLimited(personal.id, Date.now() + H, "session");
+    await swap.whenSwapsSettled();
+    await gw.syncGatewayNow();
+    expect(core.order).toEqual(["anthropic:default", "anthropic:key"]);
+
+    core.profiles.set("anthropic:default", { type: "token", secret: OWN, expires: Date.now() - 60_000 });
+    await gw.syncGatewayNow();
+    expect(core.order).toEqual([p(personal.id), p(work.id), "anthropic:default", "anthropic:key"]);
   });
 
   it("never empties the order on a box with no sign-in of the owner's: every account limited, or the one that can answer not held", async () => {
