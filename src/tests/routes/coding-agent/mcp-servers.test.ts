@@ -115,7 +115,7 @@ describe("the checklist", () => {
     expect(ids).toEqual(["clawbox", "board", "docs"]);
     expect(body.options[0]).toMatchObject({ kind: "clawbox", usable: true });
     expect(body.options[1]).toEqual({ id: "board", kind: "harness", harness: "openclaw", transport: "stdio", usable: true });
-    expect(body.options[2]).toMatchObject({ id: "docs", usable: false });
+    expect(body.options[2]).toMatchObject({ id: "docs", usable: false, reasonCode: "oauth" });
     expect(body.options[2].reason).toMatch(/OAuth/);
     expect(JSON.stringify(body)).not.toContain(BOARD_TOKEN);
   });
@@ -141,7 +141,7 @@ describe("the checklist", () => {
     await store.setProjectMcpAllowlist("site", ["gone"]);
     const body = await (await route.GET(request({ cookie: ownerCookie(), query: "?project=site" }))).json();
     expect(body.selected).toEqual(["gone"]);
-    expect(body.options.find((o: { id: string }) => o.id === "gone")).toMatchObject({ usable: false });
+    expect(body.options.find((o: { id: string }) => o.id === "gone")).toMatchObject({ usable: false, reasonCode: "notConfigured" });
     expect(await store.resolveRunMcpPlan("site")).toMatchObject({ names: [], missing: ["gone"] });
   });
 

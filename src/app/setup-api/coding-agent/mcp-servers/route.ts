@@ -63,6 +63,8 @@ interface Option {
   transport?: "stdio" | "http" | "sse" | null;
   usable: boolean;
   reason?: string;
+  /** For the page's own wording: an UnusableReason, or the two this route adds. */
+  reasonCode?: string;
 }
 
 async function payload(project: string) {
@@ -79,18 +81,18 @@ async function payload(project: string) {
       id: CLAWBOX_READ_ONLY_ENTRY,
       kind: "clawbox",
       usable: clawboxMcpEnabled,
-      ...(clawboxMcpEnabled ? {} : { reason: "the ClawBox MCP server is switched off in Settings" }),
+      ...(clawboxMcpEnabled ? {} : { reason: "the ClawBox MCP server is switched off in Settings", reasonCode: "switchOff" }),
     });
   }
   const configured = new Set<string>();
   for (const server of harness.servers) {
     const listing = listingOf(server);
     configured.add(listing.name);
-    options.push({ id: listing.name, kind: "harness", harness: listing.harness, transport: listing.transport, usable: listing.usable, ...(listing.reason ? { reason: listing.reason } : {}) });
+    options.push({ id: listing.name, kind: "harness", harness: listing.harness, transport: listing.transport, usable: listing.usable, ...(listing.reason ? { reason: listing.reason } : {}), ...(listing.reasonCode ? { reasonCode: listing.reasonCode } : {}) });
   }
   for (const name of selected) {
     if (name === CLAWBOX_READ_ONLY_ENTRY || configured.has(name)) continue;
-    options.push({ id: name, kind: "harness", transport: null, usable: false, reason: "not configured on this box any more" });
+    options.push({ id: name, kind: "harness", transport: null, usable: false, reason: "not configured on this box any more", reasonCode: "notConfigured" });
   }
   return { project, selected, options, unreadable: harness.unreadable, clawboxMcpEnabled, max: MAX_PROJECT_MCP_SERVERS };
 }

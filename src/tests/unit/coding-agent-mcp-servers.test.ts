@@ -369,6 +369,10 @@ describe("what the harness's config offers", () => {
       expect(servers[name].usable, name).toBe(false);
       expect(servers[name].reason, name).toBeTruthy();
     }
+    // The code the owner's page words in their language, one per kind of refusal.
+    expect(Object.fromEntries(["oauth", "placeholder", "folder", "globbed", "bad name"].map((n) => [n, servers[n].reasonCode]))).toEqual({
+      oauth: "oauth", placeholder: "placeholder", folder: "cwd", globbed: "toolFilter", "bad name": "badName",
+    });
     // No listing carries a value.
     expect(JSON.stringify(servers)).not.toContain(BOARD_TOKEN);
   });

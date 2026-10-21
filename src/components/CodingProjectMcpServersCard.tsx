@@ -16,7 +16,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTr } from "@/lib/i18n-floor";
 import { SECRET_SCOPE_RE } from "@/lib/project-secrets-shape";
-import { INSET_SURFACE } from "./coding-agent-ui";
+import { BTN_SECONDARY, INSET_SURFACE } from "./coding-agent-ui";
 
 interface Option {
   id: string;
@@ -24,7 +24,10 @@ interface Option {
   harness?: "openclaw" | "hermes";
   transport?: "stdio" | "http" | "sse" | null;
   usable: boolean;
+  /** The box's own English sentence, the floor when the code has no translation. */
   reason?: string;
+  /** Why a run cannot use it, as a stable code the card words in the owner's language. */
+  reasonCode?: string;
 }
 
 interface Answer {
@@ -130,6 +133,12 @@ export default function CodingProjectMcpServersCard({ project }: { project: stri
             "Servers this project's coding runs start with, beside the browser tools every run has. Nothing is ticked until you tick it. A server's credentials stay in the harness's own config: never in a run's prompt, log or evidence.",
           )}
         </p>
+        {answer === null && error && (
+          <button type="button" onClick={() => void load()} data-testid="coding-project-mcp-servers-retry" className={BTN_SECONDARY}>
+            <span className="material-symbols-rounded" style={{ fontSize: 14 }} aria-hidden="true">refresh</span>
+            {tr("retry", "Retry")}
+          </button>
+        )}
         {answer && answer.options.length === 0 && (
           <p className="text-[var(--text-muted)] italic" data-testid="coding-project-mcp-servers-empty">
             {tr("codingAgent.mcpServers.empty", "This box's harness has no other MCP server configured.")}
@@ -149,13 +158,13 @@ export default function CodingProjectMcpServersCard({ project }: { project: stri
                       disabled={disabled}
                       onChange={(e) => void toggle(option.id, e.target.checked)}
                       data-testid={`coding-project-mcp-server-${option.id}`}
-                      className="mt-0.5"
+                      className="mt-0.5 accent-[var(--coral-bright)]"
                     />
                     <span className="min-w-0">
                       <span className={option.kind === "clawbox" ? "text-[var(--text-primary)]" : "font-mono text-[var(--text-primary)]"}>{label(option)}</span>
                       {detail(option) && <span className="block text-[var(--text-muted)]">{detail(option)}</span>}
                       {!option.usable && option.reason && (
-                        <span className="block text-amber-300">{tr("codingAgent.mcpServers.unusable", "A run cannot use it: {reason}", { reason: option.reason })}</span>
+                        <span className="block text-amber-300">{tr("codingAgent.mcpServers.unusable", "A run cannot use it: {reason}", { reason: option.reasonCode ? tr(`codingAgent.mcpServers.reason.${option.reasonCode}`, option.reason) : option.reason })}</span>
                       )}
                     </span>
                   </label>

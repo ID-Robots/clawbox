@@ -76,8 +76,18 @@ export interface ConfiguredMcpServer {
   transport: "stdio" | "http" | "sse" | null;
   /** False when a run could not start it the way the harness does; `reason` says why. */
   usable: boolean;
+  /** Why a run cannot use it, in the box's own English — logs and API callers. */
   reason?: string;
+  /** The same, as a stable code the owner's page words in their language. */
+  reasonCode?: UnusableReason;
 }
+
+/**
+ * Why a configured server cannot be handed to a run, as codes the checklist
+ * translates: an English sentence alone would land untranslated in every other
+ * locale's line around it.
+ */
+export type UnusableReason = "notAServer" | "badName" | "oauth" | "tls" | "cwd" | "toolFilter" | "placeholder";
 
 /** The run half: the entry itself, the tool filter, and every value to redact. */
 interface UsableServer extends ConfiguredMcpServer {
@@ -90,8 +100,8 @@ interface UsableServer extends ConfiguredMcpServer {
 
 type ServerRead = ConfiguredMcpServer & Partial<Pick<UsableServer, "config" | "include" | "exclude" | "secrets">>;
 
-function unusable(name: string, harness: McpHarness, transport: ConfiguredMcpServer["transport"], reason: string): ServerRead {
-  return { name, harness, transport, usable: false, reason };
+function unusable(name: string, harness: McpHarness, transport: ConfiguredMcpServer["transport"], reasonCode: UnusableReason, reason: string): ServerRead {
+  return { name, harness, transport, usable: false, reason, reasonCode };
 }
 
 /** A string map whose values are what the harness would hand the server. Null = a value a run cannot reproduce. */
@@ -131,7 +141,7 @@ function toolList(raw: unknown): string[] | null | undefined {
  * server the owner did not configure.
  */
 function translate(name: string, harness: McpHarness, raw: unknown): ServerRead | null {
-  if (!isPlainObject(raw)) return unusable(name, harness, null, "its entry is not a server definition");
+  if (!isPlainObject(raw)) return unusable(name, harness, null, "notAServer", "its entry is not a server definition");
   // Switched off in the harness: not a server this box runs, so not offered.
   if (raw.enabled === false) return null;
   const command = typeof raw.command === "string" && raw.command.trim() ? raw.command : null;
@@ -146,31 +156,31 @@ function translate(name: string, harness: McpHarness, raw: unknown): ServerRead 
         // Hermes: an HTTP endpoint, unless the entry says SSE.
         : (transportField === "sse" ? "sse" : "http"))
       : null;
-  if (!isMcpServerName(name)) return unusable(name, harness, transport, "its name cannot be used in a run's tool names");
-  if (!transport) return unusable(name, harness, null, "it names neither a command nor a URL");
-  if (raw.auth !== undefined || raw.oauth !== undefined) return unusable(name, harness, transport, "it signs in through the harness (OAuth)");
+  if (!isMcpServerName(name)) return unusable(name, harness, transport, "badName", "its name cannot be used in a run's tool names");
+  if (!transport) return unusable(name, harness, null, "notAServer", "it names neither a command nor a URL");
+  if (raw.auth !== undefined || raw.oauth !== undefined) return unusable(name, harness, transport, "oauth", "it signs in through the harness (OAuth)");
   if (raw.clientCert !== undefined || raw.clientKey !== undefined || raw.client_cert !== undefined || raw.client_key !== undefined || raw.identity_header !== undefined || raw.sslVerify === false) {
-    return unusable(name, harness, transport, "it needs a client certificate or TLS setting a run cannot carry");
+    return unusable(name, harness, transport, "tls", "it needs a client certificate or TLS setting a run cannot carry");
   }
-  if (raw.cwd !== undefined) return unusable(name, harness, transport, "it names a working folder a run cannot carry");
+  if (raw.cwd !== undefined) return unusable(name, harness, transport, "cwd", "it names a working folder a run cannot carry");
   const filter = harness === "openclaw" ? raw.toolFilter : raw.tools;
   const include = isPlainObject(filter) ? toolList(filter.include) : undefined;
   const exclude = isPlainObject(filter) ? toolList(filter.exclude) : undefined;
-  if (include === null || exclude === null) return unusable(name, harness, transport, "its tool filter uses a pattern a run cannot reproduce");
+  if (include === null || exclude === null) return unusable(name, harness, transport, "toolFilter", "its tool filter uses a pattern a run cannot reproduce");
   const secrets: Array<{ name: string; value: string }> = [];
   let config: RunMcpServerConfig;
   if (transport === "stdio") {
     const args = raw.args === undefined ? [] : raw.args;
-    if (!Array.isArray(args) || !args.every((arg) => typeof arg === "string")) return unusable(name, harness, transport, "its arguments are not a list of words");
-    if (args.some((arg) => (arg as string).includes("${")) || command!.includes("${")) return unusable(name, harness, transport, "it uses a ${…} placeholder only the harness can fill in");
+    if (!Array.isArray(args) || !args.every((arg) => typeof arg === "string")) return unusable(name, harness, transport, "notAServer", "its arguments are not a list of words");
+    if (args.some((arg) => (arg as string).includes("${")) || command!.includes("${")) return unusable(name, harness, transport, "placeholder", "it uses a ${…} placeholder only the harness can fill in");
     const env = stringMap(raw.env);
-    if (env === null) return unusable(name, harness, transport, "its environment uses a value only the harness can fill in");
+    if (env === null) return unusable(name, harness, transport, "placeholder", "its environment uses a value only the harness can fill in");
     config = { command: command!, args: args as string[], ...(env && Object.keys(env).length > 0 ? { env } : {}) };
     for (const [key, value] of Object.entries(env ?? {})) secrets.push({ name: `${name}.${key}`, value });
   } else {
-    if (url!.includes("${")) return unusable(name, harness, transport, "it uses a ${…} placeholder only the harness can fill in");
+    if (url!.includes("${")) return unusable(name, harness, transport, "placeholder", "it uses a ${…} placeholder only the harness can fill in");
     const headers = stringMap(raw.headers);
-    if (headers === null) return unusable(name, harness, transport, "its headers use a value only the harness can fill in");
+    if (headers === null) return unusable(name, harness, transport, "placeholder", "its headers use a value only the harness can fill in");
     config = { type: transport, url: url!, ...(headers && Object.keys(headers).length > 0 ? { headers } : {}) };
     for (const [key, value] of Object.entries(headers ?? {})) {
       secrets.push({ name: `${name}.${key}`, value });
@@ -258,7 +268,7 @@ export async function readHarnessMcpServers(): Promise<HarnessMcpServers> {
 
 /** The listing the owner's checklist draws: names, transports, usability — no value. */
 export function listingOf(server: ServerRead): ConfiguredMcpServer {
-  return { name: server.name, harness: server.harness, transport: server.transport, usable: server.usable, ...(server.reason ? { reason: server.reason } : {}) };
+  return { name: server.name, harness: server.harness, transport: server.transport, usable: server.usable, ...(server.reason ? { reason: server.reason } : {}), ...(server.reasonCode ? { reasonCode: server.reasonCode } : {}) };
 }
 
 // ── the allowlist ───────────────────────────────────────────────────────────

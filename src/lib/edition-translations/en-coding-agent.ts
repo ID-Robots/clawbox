@@ -1010,6 +1010,15 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.mcpServers.empty": "This box's harness has no other MCP server configured.",
   "codingAgent.mcpServers.unusable": "A run cannot use it: {reason}",
   "codingAgent.mcpServers.unreadable": "Could not read the {harness} config, so its servers are not listed.",
+  "codingAgent.mcpServers.reason.notAServer": "its entry is not a server a run can start",
+  "codingAgent.mcpServers.reason.badName": "its name cannot be used in a run's tool names",
+  "codingAgent.mcpServers.reason.oauth": "it signs in through the harness (OAuth)",
+  "codingAgent.mcpServers.reason.tls": "it needs a client certificate or TLS setting a run cannot carry",
+  "codingAgent.mcpServers.reason.cwd": "it names a working folder a run cannot carry",
+  "codingAgent.mcpServers.reason.toolFilter": "its tool filter uses a pattern a run cannot reproduce",
+  "codingAgent.mcpServers.reason.placeholder": "it uses a value only the harness can fill in",
+  "codingAgent.mcpServers.reason.switchOff": "the ClawBox MCP server is switched off in Settings",
+  "codingAgent.mcpServers.reason.notConfigured": "it is not configured on this box any more",
   // Which of the owner's Anthropic accounts a run is on, and the moves between
   // them when one hits its usage limit (TASK-902). {label}, {from} and {to} are
   // the owner's own account names; {time} is the reset in the box's clock.
