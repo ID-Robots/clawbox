@@ -199,6 +199,20 @@ describe("one phone, from invite to its own code", () => {
     expect(stranger.status).toBe(404);
   });
 
+  it("answers a failed store write with a JSON 500 the phone can keep waiting through", async () => {
+    const inv = await openInvite();
+    const claim = await phoneAsks(inv);
+    const storeFile = path.join(process.env.CLAWBOX_ROOT as string, "data", "phone-pairing.json");
+    fs.rmSync(storeFile);
+    fs.mkdirSync(storeFile);
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const res = await askStatus(phone("/setup-api/nodes/request/status", { invite: inv, claim }));
+    expect(res.status).toBe(500);
+    expect(await res.json()).toMatchObject({ code: "store_write_failed" });
+    spy.mockRestore();
+  });
+
   it("hands out nothing when the core's code carries the shared key", async () => {
     mintedCode = coreCode({ token: SHARED_TOKEN });
     const inv = await openInvite();

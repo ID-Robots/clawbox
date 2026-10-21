@@ -22,7 +22,7 @@ import { MAX_PHONE_NAME_LENGTH, type PhoneRequestStatus } from "@/lib/phone-pair
 
 type Phase =
   | { kind: "loading" }
-  | { kind: "form" }
+  | { kind: "form"; error?: string }
   | { kind: "asking" }
   | { kind: "waiting"; expiresAtMs: number }
   | { kind: "approved"; setupCode: string; expiresAtMs: number }
@@ -34,6 +34,12 @@ type Phase =
   | { kind: "error"; message: string };
 
 const POLL_MS = 2_500;
+/**
+ * Checks in a row that get no answer (a 5xx, a dropped request) before the
+ * waiting page says so. One miss is a blip on a phone's network, never the
+ * end of the wait: the owner may approve a minute later.
+ */
+const MAX_POLL_MISSES = 5;
 /** How often a code on screen is checked with the box, which alone says when it has expired. */
 const RECHECK_MS = 15_000;
 const INVITE_RE = /^[A-Za-z0-9_-]{22}$/;
@@ -59,6 +65,7 @@ export default function PhonePairPage() {
   const [copied, setCopied] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const codeRef = useRef<HTMLTextAreaElement | null>(null);
+  const pollMisses = useRef(0);
 
   useEffect(() => {
     const fromHash = window.location.hash.replace(/^#/, "");
@@ -69,6 +76,18 @@ export default function PhonePairPage() {
     setInvite(fromHash);
     const stored = window.sessionStorage.getItem(claimKey(fromHash));
     setPhase(stored ? { kind: "waiting", expiresAtMs: Date.now() } : { kind: "form" });
+  }, []);
+
+  /** A check with no answer: keep waiting, and say so only after several in a row. */
+  const missedPoll = useCallback((message: string): boolean => {
+    pollMisses.current += 1;
+    if (pollMisses.current >= MAX_POLL_MISSES) {
+      setPhase({ kind: "error", message });
+      return false;
+    }
+    // A fresh phase object is what arms the next poll.
+    setPhase((p) => (p.kind === "waiting" ? { ...p } : p));
+    return true;
   }, []);
 
   const poll = useCallback(async (): Promise<boolean> => {
@@ -91,11 +110,9 @@ export default function PhonePairPage() {
         setPhase((p) => (p.kind === "waiting" ? { ...p } : p));
         return true;
       }
-      if (!res.ok) {
-        setPhase({ kind: "error", message: `HTTP ${res.status}` });
-        return false;
-      }
+      if (!res.ok) return missedPoll(`HTTP ${res.status}`);
       const status = (await res.json()) as PhoneRequestStatus;
+      pollMisses.current = 0;
       setNow(Date.now());
       if (status.state === "waiting") {
         setPhase({ kind: "waiting", expiresAtMs: status.expiresAtMs });
@@ -109,10 +126,9 @@ export default function PhonePairPage() {
       setPhase({ kind: status.state });
       return false;
     } catch (err) {
-      setPhase({ kind: "error", message: err instanceof Error ? err.message : String(err) });
-      return false;
+      return missedPoll(err instanceof Error ? err.message : String(err));
     }
-  }, [invite]);
+  }, [invite, missedPoll]);
 
   // While waiting: ask again every few seconds until the owner decides.
   useEffect(() => {
@@ -170,6 +186,7 @@ export default function PhonePairPage() {
       const body = (await res.json().catch(() => null)) as { claim?: string; expiresAtMs?: number; code?: string; error?: string } | null;
       if (res.ok && body?.claim && typeof body.expiresAtMs === "number") {
         window.sessionStorage.setItem(claimKey(invite), body.claim);
+        pollMisses.current = 0;
         setNow(Date.now());
         setPhase({ kind: "waiting", expiresAtMs: body.expiresAtMs });
         return;
@@ -177,9 +194,11 @@ export default function PhonePairPage() {
       if (res.status === 409) setPhase({ kind: "used" });
       else if (res.status === 410) setPhase({ kind: "expired" });
       else if (res.status === 404) setPhase(body?.code === "unavailable" ? { kind: "unavailable" } : { kind: "invalid" });
-      else setPhase({ kind: "error", message: body?.error ?? `HTTP ${res.status}` });
+      // Nothing was used up (rate limited, the box busy or unreachable): the
+      // form comes back with the name kept, so asking again is one tap.
+      else setPhase({ kind: "form", error: body?.error ?? `HTTP ${res.status}` });
     } catch (err) {
-      setPhase({ kind: "error", message: err instanceof Error ? err.message : String(err) });
+      setPhase({ kind: "form", error: err instanceof Error ? err.message : String(err) });
     }
   };
 
@@ -235,6 +254,7 @@ export default function PhonePairPage() {
             >
               {phase.kind === "asking" ? t("phonePair.asking") : t("phonePair.ask")}
             </button>
+            {phase.kind === "form" && phase.error && <Message testId="phone-pair-error" text={t("phonePair.error", { error: phase.error })} />}
             <p className="text-xs text-white/60 leading-relaxed">{t("phonePair.needApp")}</p>
           </form>
         )}

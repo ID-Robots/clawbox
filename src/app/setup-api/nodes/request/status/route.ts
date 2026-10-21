@@ -31,7 +31,15 @@ export async function POST(request: Request) {
     return refuse(404, "unknown", "This pairing request is not valid.");
   }
 
-  const status = requestStatus(invite, claim);
+  let status: ReturnType<typeof requestStatus>;
+  try {
+    status = requestStatus(invite, claim);
+  } catch (err) {
+    // Reading the status also records expiry in the store; a failed write is
+    // a JSON 500 the phone keeps waiting through, as its sibling route answers.
+    console.error("[nodes/request/status] the request could not be read:", err instanceof Error ? err.message : err);
+    return refuse(500, "store_write_failed", "The request could not be read.");
+  }
   if (!status) return refuse(404, "unknown", "This pairing request is not valid.");
   return noStore(status);
 }

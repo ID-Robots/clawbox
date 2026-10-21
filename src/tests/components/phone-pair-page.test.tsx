@@ -168,4 +168,62 @@ describe("the phone's pairing page", () => {
     fireEvent.click(await screen.findByTestId("phone-pair-ask"));
     expect(await screen.findByTestId("phone-pair-unavailable")).toBeInTheDocument();
   });
+
+  it("keeps waiting through a check the box does not answer, and says so only after several in a row", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    window.sessionStorage.setItem(`clawbox-phone-claim:${INVITE}`, CLAIM);
+    statusAnswer = { status: 500, body: { code: "store_write_failed" } };
+    render(<PhonePairPage />);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_000);
+    });
+    expect(screen.getByTestId("phone-pair-waiting")).toBeInTheDocument();
+
+    fetchMock.mockImplementationOnce(() => Promise.reject(new Error("network down")));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_000);
+    });
+    expect(screen.getByTestId("phone-pair-waiting")).toBeInTheDocument();
+
+    statusAnswer = { status: 200, body: { state: "approved", setupCode: "c2V0dXAtY29kZQ", expiresAtMs: Date.now() + 600_000 } };
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_000);
+    });
+    expect(await screen.findByTestId("phone-pair-code")).toHaveValue("c2V0dXAtY29kZQ");
+  });
+
+  it("says the box is not answering once several checks in a row went unanswered", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    window.sessionStorage.setItem(`clawbox-phone-claim:${INVITE}`, CLAIM);
+    statusAnswer = { status: 503, body: {} };
+    render(<PhonePairPage />);
+    for (let i = 0; i < 4; i += 1) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(3_000);
+      });
+      expect(screen.getByTestId("phone-pair-waiting")).toBeInTheDocument();
+    }
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_000);
+    });
+    expect(screen.getByTestId("phone-pair-error")).toBeInTheDocument();
+  });
+
+  it("gives the form back with the name kept when an ask gets no usable answer", async () => {
+    let asks = 0;
+    fetchMock.mockImplementation((url: string) => {
+      if (url !== "/setup-api/nodes/request") return json(404, {});
+      asks += 1;
+      return asks === 1 ? json(429, { code: "rate_limited", error: "Too many attempts." }) : json(200, { claim: CLAIM, expiresAtMs: Date.now() + 600_000 });
+    });
+    render(<PhonePairPage />);
+    fireEvent.change(await screen.findByTestId("phone-pair-name"), { target: { value: "Ada's phone" } });
+    fireEvent.click(screen.getByTestId("phone-pair-ask"));
+    expect(await screen.findByTestId("phone-pair-error")).toBeInTheDocument();
+    expect(screen.getByTestId("phone-pair-name")).toHaveValue("Ada's phone");
+
+    fireEvent.click(screen.getByTestId("phone-pair-ask"));
+    expect(await screen.findByTestId("phone-pair-waiting")).toBeInTheDocument();
+    expect(asks).toBe(2);
+  });
 });
