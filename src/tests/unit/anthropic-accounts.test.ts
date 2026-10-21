@@ -21,6 +21,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { saveEnv } from "@/tests/helpers/env";
+import { tokenFingerprint } from "@/lib/anthropic-gateway-auth";
 
 vi.mock("os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("os")>();
@@ -593,6 +594,62 @@ describe("asking Anthropic whether a refused credential is really dead", () => {
     expect(await pool.probeAccountCredential(account.id, async () => "ok")).toBe("ok");
     expect((await pool.readAccounts())[0].status).toBe("ok");
     expect((await pool.prepareAccount()).prepared?.credential).toEqual({ kind: "oauth", secret: "fresh-access" });
+  });
+
+  // F-N5': four runs on one account, each refused in turn, each re-check
+  // renewing the grant again — and each renewal retiring the token the run
+  // before it had just been handed. A token already replaced is not asked about.
+  const tokenEndpointCalls = (fetchMock: { mock: { calls: unknown[][] } }) =>
+    fetchMock.mock.calls.filter(([url]) => String(url).includes("/oauth/token")).length;
+  const renewsTo = (access: string) => vi.fn(async () => new Response(JSON.stringify({ access_token: access, refresh_token: `refresh-${access}`, expires_in: 28_800 }), { status: 200 }));
+
+  it("renews a grant ONCE when two holders of the same token are refused one after the other", async () => {
+    const account = await pool.addOAuthAccount({ label: "Max", email: "max@example.com", tokens: tokens("handed-out", 8 * 3_600_000) });
+    const fetchMock = renewsTo("renewed-once");
+    vi.stubGlobal("fetch", fetchMock);
+    const first = await pool.probeAccountCredential(account.id, async () => "ok", {}, tokenFingerprint("handed-out"));
+    // The second holder was refused with the token the first re-check replaced.
+    const second = await pool.probeAccountCredential(account.id, async () => "ok", {}, tokenFingerprint("handed-out"));
+    expect(tokenEndpointCalls(fetchMock)).toBe(1);
+    expect([first, second]).toEqual(["ok", "stale"]);
+    expect((await pool.prepareAccount()).prepared?.credential).toEqual({ kind: "oauth", secret: "renewed-once" });
+  });
+
+  it("renews a grant ONCE when two holders of the same token are refused at the same moment", async () => {
+    const account = await pool.addOAuthAccount({ label: "Max", email: "max@example.com", tokens: tokens("handed-out", 8 * 3_600_000) });
+    const fetchMock = renewsTo("renewed-once");
+    vi.stubGlobal("fetch", fetchMock);
+    const verdicts = await Promise.all([1, 2].map(() => pool.probeAccountCredential(account.id, async () => "ok", {}, tokenFingerprint("handed-out"))));
+    expect(tokenEndpointCalls(fetchMock)).toBe(1);
+    expect(verdicts.sort()).toEqual(["ok", "stale"]);
+  });
+
+  it("asks nothing when the refused token is not the one the pool holds, and the pool's still has life in it", async () => {
+    const account = await pool.addOAuthAccount({ label: "Max", email: "max@example.com", tokens: tokens("current", 8 * 3_600_000) });
+    const fetchMock = renewsTo("needless");
+    vi.stubGlobal("fetch", fetchMock);
+    const verdict = await pool.probeAccountCredential(account.id, async () => "ok", { source: "coding", runId: "run-x" }, tokenFingerprint("replaced-earlier"));
+    expect(tokenEndpointCalls(fetchMock)).toBe(0);
+    expect(verdict).toBe("stale");
+    expect((await pool.readAccounts())[0].status).toBe("ok");
+    expect((await pool.prepareAccount()).prepared?.credential).toEqual({ kind: "oauth", secret: "current" });
+  });
+
+  it("still renews when the refused token IS the one the pool holds", async () => {
+    const account = await pool.addOAuthAccount({ label: "Max", email: "max@example.com", tokens: tokens("current", 8 * 3_600_000) });
+    const fetchMock = renewsTo("fresh");
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await pool.probeAccountCredential(account.id, async () => "ok", {}, tokenFingerprint("current"))).toBe("ok");
+    expect(tokenEndpointCalls(fetchMock)).toBe(1);
+  });
+
+  it("renews a token that ran out, and says the refusal was only its age", async () => {
+    const account = await pool.addOAuthAccount({ label: "Max", email: "max@example.com", tokens: tokens("ran-out", -60_000) });
+    const fetchMock = renewsTo("fresh");
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await pool.probeAccountCredential(account.id, async () => "ok", {}, tokenFingerprint("ran-out"))).toBe("stale");
+    expect(tokenEndpointCalls(fetchMock)).toBe(1);
+    expect((await pool.prepareAccount()).prepared?.credential).toEqual({ kind: "oauth", secret: "fresh" });
   });
 
   it("marks a grant Anthropic refuses to renew as revoked", async () => {

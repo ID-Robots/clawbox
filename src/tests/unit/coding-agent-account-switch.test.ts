@@ -23,6 +23,7 @@ import os from "os";
 import path from "path";
 import { saveEnv } from "@/tests/helpers/env";
 import { readFirstTurn } from "@/tests/helpers/fake-harness";
+import { tokenFingerprint } from "@/lib/anthropic-gateway-auth";
 
 vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 
@@ -70,6 +71,8 @@ const AUTH_RESULT = JSON.stringify({ type: "result", subtype: "success", is_erro
 /** What a run on a subscription its organisation switched off ended with (TASK-1271): the line, untagged. */
 const DISABLED_LINE = "Your organization has disabled Claude subscription access for Claude Code";
 const DISABLED_RESULT = JSON.stringify({ type: "result", subtype: "success", is_error: true, result: DISABLED_LINE, num_turns: 1 });
+/** A real answer from the model: the spawn got somewhere before it was refused. */
+const MODEL_ANSWER = JSON.stringify({ type: "assistant", message: { model: "claude-opus-5", id: "msg-work", content: [{ type: "text", text: "Working on it." }] } });
 
 function callsLog(): string {
   return path.join(base, "calls.log");
@@ -89,7 +92,7 @@ function calls(): { n: number; cred: string; args: string }[] {
  * (works until something ends it). It reads — and deletes — the credential
  * handoff exactly as the real wrapper does, and logs what it was handed.
  */
-function installWrapper(plan: readonly ("limit" | "ok" | "hang" | "auth" | "disabled")[]): void {
+function installWrapper(plan: readonly ("limit" | "ok" | "hang" | "auth" | "disabled" | "gated-auth" | "gated-silent")[]): void {
   fs.writeFileSync(path.join(base, "plan"), `${plan.join("\n")}\n`);
   fs.writeFileSync(path.join(binDir, "claude"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
   fs.writeFileSync(
@@ -107,6 +110,8 @@ function installWrapper(plan: readonly ("limit" | "ok" | "hang" | "auth" | "disa
       `  limit) printf '%s\\n' ${sq(INIT)} ${sq(SYNTHETIC_LIMIT)} ${sq(LIMIT_RESULT)}; exit 1 ;;`,
       `  auth) printf '%s\\n' ${sq(INIT)} ${sq(SYNTHETIC_AUTH)} ${sq(AUTH_RESULT)}; exit 1 ;;`,
       `  disabled) printf '%s\\n' ${sq(INIT)} ${sq(DISABLED_RESULT)}; exit 1 ;;`,
+      // Refused once the test opens gate-N, so what the test did in between happened mid-turn: after a real answer, or before any.
+      `  gated-*) printf '%s\\n' ${sq(INIT)}; [ "$mode" = gated-auth ] && printf '%s\\n' ${sq(MODEL_ANSWER)}; for _ in $(seq 400); do [ -f ${sq(base)}/gate-$n ] && break; sleep 0.05; done; printf '%s\\n' ${sq(SYNTHETIC_AUTH)} ${sq(AUTH_RESULT)}; exit 1 ;;`,
       `  hang) printf '%s\\n' ${sq(INIT)}; sleep 30; exit 0 ;;`,
       `  *) printf '%s\\n' ${sq(INIT)} ${sq(OK_RESULT)}; exit 0 ;;`,
       "esac",
@@ -428,6 +433,48 @@ describe("an account Anthropic refuses mid-run (TASK-1260)", () => {
     expect(run.error).not.toMatch(/refused the credential of every account/);
     expect(run.error).toMatch(/could not be checked again/);
     expect((await pool.readAccounts())[0].status).toBe("ok");
+  });
+
+  /**
+   * One Claude account, and a run refused four times — more than
+   * MAX_AUTH_SWITCHES — each time just after another holder of the account
+   * was refused with the same token and renewed the grant, which retires the
+   * token the run is working with (F-N5').
+   */
+  async function refusedAfterEachRenewal(mode: "gated-auth" | "gated-silent") {
+    installWrapper([mode, mode, mode, mode, "ok"]);
+    makeProject("site");
+    const only = await pool.addOAuthAccount({ label: "Only", email: "only@example.com", tokens: { access: "token-0", refresh: "refresh-0", expires: Date.now() + 8 * 3_600_000 } });
+    let minted = 0;
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (!String(url).includes("/oauth/token")) return new Response("{}", { status: 200 });
+      minted += 1;
+      return new Response(JSON.stringify({ access_token: `token-${minted}`, refresh_token: `refresh-${minted}`, expires_in: 28_800 }), { status: 200 });
+    }));
+    const started = await lib.startRun({ task: "build", projectId: "site", source: "owner", provider: "anthropic" });
+    for (let n = 1; n <= 4; n += 1) {
+      await vi.waitFor(() => expect(calls()).toHaveLength(n), { timeout: 10_000 });
+      expect(await pool.probeAccountCredential(only.id, async () => "ok", {}, tokenFingerprint(`token-${n - 1}`))).toBe("ok");
+      fs.writeFileSync(path.join(base, `gate-${n}`), "");
+    }
+    return { run: await settled(started.id), minted: () => minted };
+  }
+
+  it("carries a long run on through every renewal that replaced its token, however many (F-N5')", async () => {
+    const { run, minted } = await refusedAfterEachRenewal("gated-auth");
+    // Each refusal is explained by a token already replaced: none is asked
+    // about again, none counts against the cap, and the run goes on.
+    expect(run.status).toBe("completed");
+    expect(run.accountSwitches).toEqual([]);
+    expect(calls().map((c) => c.cred)).toEqual(["oauth:token-0:", "oauth:token-1:", "oauth:token-2:", "oauth:token-3:", "oauth:token-4:"]);
+    expect(minted()).toBe(4);
+  });
+
+  it("still counts a stale-token refusal that came before the spawn got any answer, so nothing bounces for ever", async () => {
+    const { run, minted } = await refusedAfterEachRenewal("gated-silent");
+    expect(run.status).toBe("failed");
+    expect(calls()).toHaveLength(4);
+    expect(minted()).toBe(4);
   });
 
   it("does not bounce a run for ever on a refusal nobody can pin on the account", async () => {

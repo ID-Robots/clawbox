@@ -55,6 +55,7 @@ import crypto from "crypto";
 import fs from "fs";
 import path from "@/lib/runtime-path";
 import { DATA_DIR, get as configGet, set as configSet } from "@/lib/config-store";
+import { tokenFingerprint } from "@/lib/anthropic-gateway-auth";
 import { anthropicLoginChangedAt, anthropicLoginEmail, hasAnthropicLogin } from "@/lib/claude-login";
 import { ANTHROPIC_API_KEY_CONFIG_KEY } from "@/lib/coding-provider";
 import { OAUTH_PROVIDERS } from "@/lib/oauth-config";
@@ -1057,6 +1058,11 @@ export const OAUTH_REFRESH_MARGIN_MS = 3 * 60 * 60_000;
 
 const REFRESH_TIMEOUT_MS = 20_000;
 
+/** Is a stored access token still worth handing out: no end, or more than ten minutes left? */
+function hasLife(tokens: OAuthTokens, now: number): boolean {
+  return tokens.expires === null || tokens.expires > now + 10 * 60_000;
+}
+
 type RefreshResult =
   | { ok: true; tokens: OAuthTokens }
   | { ok: false; reason: "rejected" | "unreachable" };
@@ -1190,7 +1196,7 @@ async function readCredential(account: AnthropicAccount, now: number): Promise<A
     await markCredentialProblem(account.id, "revoked").catch(() => {});
     return null;
   }
-  const stillGood = tokens.expires === null || tokens.expires > now + 10 * 60_000;
+  const stillGood = hasLife(tokens, now);
   const wantsRefresh = tokens.refresh !== null && tokens.expires !== null && tokens.expires - now < OAUTH_REFRESH_MARGIN_MS;
   if (!wantsRefresh) {
     if (stillGood) return { kind: "oauth", secret: tokens.access };
@@ -1220,11 +1226,13 @@ async function readCredential(account: AnthropicAccount, now: number): Promise<A
 
 /**
  * What asking Anthropic about one account's credential answered (TASK-1260):
- * `ok` — it works (an OAuth grant renewed, a key accepted); `dead` — refused,
- * and the account is now marked so; `unknown` — Anthropic could not be asked,
- * and nothing was marked.
+ * `ok` — it works (an OAuth grant renewed, a key accepted); `stale` — the
+ * token the consumer was refused with was only out of date (the pool already
+ * holds a newer one, or it had run out and was renewed now), so the refusal
+ * says nothing against the account; `dead` — refused, and the account is now
+ * marked so; `unknown` — Anthropic could not be asked, and nothing was marked.
  */
-export type CredentialProbe = "ok" | "dead" | "unknown";
+export type CredentialProbe = "ok" | "stale" | "dead" | "unknown";
 
 export type KeyCheck = (key: string) => Promise<"ok" | "rejected" | "unreachable">;
 
@@ -1239,8 +1247,19 @@ export type KeyCheck = (key: string) => Promise<"ok" | "rejected" | "unreachable
  * caller's, since that check lives above this module). The `claude` sign-in
  * cannot be asked — this box never reads it — and a refusal that reached a
  * run is one Claude Code could not renew its way out of, so it is marked.
+ *
+ * `refusedFingerprint` (`tokenFingerprint` of the access token the consumer
+ * was refused with) is what keeps the renewal for the token that needs it.
+ * When the pool already holds a different token with life in it, a sibling,
+ * a spawn or the keeper has renewed the grant since that consumer was handed
+ * its copy: nothing is asked (`stale`). Renewing again would only retire the
+ * token every other holder had just been handed, and four runs on one
+ * account knocked each other out that way (F-N5'). This is OpenClaw's own
+ * rule for a stored OAuth token (2026.10.3, docs/concepts/oauth.md: one whose
+ * `expires` is in the future is used, not refreshed). Left out, the grant is
+ * renewed as before.
  */
-export async function probeAccountCredential(id: string, verifyKey: KeyCheck, context: FailureContext = {}): Promise<CredentialProbe> {
+export async function probeAccountCredential(id: string, verifyKey: KeyCheck, context: FailureContext = {}, refusedFingerprint?: string): Promise<CredentialProbe> {
   const account = (await readAccounts()).find((a) => a.id === id);
   if (!account) return "unknown";
   return credentialLock(account.id)(async (): Promise<CredentialProbe> => {
@@ -1259,6 +1278,8 @@ export async function probeAccountCredential(id: string, verifyKey: KeyCheck, co
     const tokens = parseOAuthSecret(stored.value);
     if (!tokens) return dead("revoked");
     const now = Date.now();
+    const alive = hasLife(tokens, now);
+    if (refusedFingerprint && alive && tokenFingerprint(tokens.access) !== refusedFingerprint) return "stale";
     if (!tokens.refresh) {
       // Nothing to renew with: a token past its end is dead, one with life in
       // it cannot be told apart from a stale copy without spending a request.
@@ -1271,7 +1292,8 @@ export async function probeAccountCredential(id: string, verifyKey: KeyCheck, co
       const row = file.accounts.find((a) => a.id === account.id);
       if (row) row.expiresAt = refreshed.tokens.expires;
     }).catch(() => {});
-    return "ok";
+    // A token that had run out explains its own refusal.
+    return alive ? "ok" : "stale";
   });
 }
 

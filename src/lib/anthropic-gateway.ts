@@ -688,7 +688,10 @@ async function noteCooldownsLocked(now: number): Promise<number> {
       if (seen.kind === "auth") {
         // Renewed when the grant is alive — the next sync puts the fresh
         // token in — and out of the pool when Anthropic refuses the grant.
-        const verdict = await probeAccountCredential(account.id, verifyAnthropicKey, { source: "chat" });
+        // Core was refused with the token it holds (or an older one): when the
+        // pool has renewed since, the next sync puts that in, with no renewal.
+        const held = store.profiles.find((p) => p.profileId === profileId)?.fingerprint ?? undefined;
+        const verdict = await probeAccountCredential(account.id, verifyAnthropicKey, { source: "chat" }, held);
         console.error(`[anthropic-gateway] core saw account ${account.id}'s credential refused in a gateway turn; asked again, it is ${verdict}`);
         acted += 1;
       } else {
