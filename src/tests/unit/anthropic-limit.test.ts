@@ -293,6 +293,14 @@ describe("the owner's pick: their order, or the most room", () => {
     expect(pickAccount(pool, NOW_P, new Set(["login", "a", "b"]), { mode: "most-room" })?.id).toBe("key");
   });
 
+  it("takes an account Anthropic reports spent after every subscription it knows nothing about, and still ahead of an API key", () => {
+    const pool = [of("key", "api_key"), of("a", "oauth"), of("b", "oauth"), of("login", "login")];
+    expect(pickAccount(pool, NOW_P, new Set(), { mode: "most-room", fullness: room({ a: 100, b: 40 }) })?.id).toBe("b");
+    expect(pickAccount(pool, NOW_P, new Set(["b"]), { mode: "most-room", fullness: room({ a: 100, b: 40 }) })?.id).toBe("login");
+    expect(pickAccount(pool, NOW_P, new Set(["b", "login"]), { mode: "most-room", fullness: room({ a: 100, b: 40 }) })?.id).toBe("a");
+    expect(pickAccount(pool, NOW_P, new Set(["a", "b", "login"]), { mode: "most-room", fullness: room({ a: 100, b: 40 }) })?.id).toBe("key");
+  });
+
   it("stays sticky: the most room decides only when the active account has to move, and the owner's reorder means the account they put first", () => {
     const pool = [of("a", "oauth"), of("b", "oauth"), of("c", "oauth")];
     const opts = { mode: "most-room" as const, fullness: room({ a: 90, b: 50, c: 5 }) };

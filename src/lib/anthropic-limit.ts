@@ -390,11 +390,17 @@ export interface PickOptions {
 /**
  * The "most room" ranking: the `oauth` accounts with a reading, the least
  * full first; then every other subscription (an `oauth` account with no
- * reading, the `login`), then the API keys — an API key never goes ahead of a
- * subscription. The owner's order breaks every tie.
+ * reading, the `login`); then the `oauth` accounts whose reading says they are
+ * spent (100: a move onto one is refused at the next turn, while an unread
+ * one may well have room); then the API keys — an API key never goes ahead of
+ * a subscription. The owner's order breaks every tie.
  */
 function byMostRoom<T extends PoolMember>(accounts: readonly T[], fullness: ReadonlyMap<string, number>): T[] {
-  const tier = (a: T) => (a.kind === "api_key" ? 2 : a.kind === "oauth" && fullness.has(a.id) ? 0 : 1);
+  const tier = (a: T) => {
+    if (a.kind === "api_key") return 3;
+    if (a.kind !== "oauth" || !fullness.has(a.id)) return 1;
+    return (fullness.get(a.id) ?? 0) >= 100 ? 2 : 0;
+  };
   return accounts
     .map((a, i) => ({ a, i }))
     .sort((x, y) => tier(x.a) - tier(y.a)
