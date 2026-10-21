@@ -7190,12 +7190,20 @@ install_clawbox_hook_plugin() {
   # `enabled: false` so the files stay installed but the gateway does not load
   # them, unknown (a device store that exists and cannot be read) leaves the
   # entry exactly as the last readable boot left it.
-  if ! CLAWBOX_HOOK_PLUGIN_ID="$plugin_id" CLAWBOX_HOOK_PLUGIN_WANT="${CLAWBOX_HOOK_PLUGIN_WANT:-on}" python3 - "$OPENCLAW_CONFIG" <<'PY'
+  #
+  # CLAWBOX_HOOK_PLUGIN_CONVERSATION_ACCESS=1 also writes the core's own grant
+  # `plugins.entries.<id>.hooks.allowConversationAccess: true`, without which a
+  # non-bundled plugin's prompt hooks (`before_prompt_build` among them) are
+  # not dispatched (docs/plugins/hooks.md, "Permissions and scope"). Only the
+  # plugin that needs it asks; the others' entries are untouched.
+  if ! CLAWBOX_HOOK_PLUGIN_ID="$plugin_id" CLAWBOX_HOOK_PLUGIN_WANT="${CLAWBOX_HOOK_PLUGIN_WANT:-on}" \
+    CLAWBOX_HOOK_PLUGIN_CONVERSATION_ACCESS="${CLAWBOX_HOOK_PLUGIN_CONVERSATION_ACCESS:-0}" python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, os, sys, tempfile
 
 cfg_path = sys.argv[1]
 plugin_id = os.environ["CLAWBOX_HOOK_PLUGIN_ID"]
 want = os.environ.get("CLAWBOX_HOOK_PLUGIN_WANT", "on")
+conversation_access = os.environ.get("CLAWBOX_HOOK_PLUGIN_CONVERSATION_ACCESS") == "1"
 try:
     with open(cfg_path) as f:
         cfg = json.load(f)
@@ -7229,11 +7237,22 @@ if want == "unknown":
     sys.exit(0)
 desired = want != "off"
 
-if entry.get("enabled") is desired:
+changed = []
+if entry.get("enabled") is not desired:
+    entry["enabled"] = desired
+    changed.append("enabled" if desired else "disabled (owner switch)")
+if conversation_access:
+    hooks = entry.get("hooks")
+    if not isinstance(hooks, dict):
+        hooks = {}
+        entry["hooks"] = hooks
+    if hooks.get("allowConversationAccess") is not True:
+        hooks["allowConversationAccess"] = True
+        changed.append("hooks.allowConversationAccess")
+
+if not changed:
     print(f"  {plugin_id} already {'enabled' if desired else 'disabled by the owner'}, skipping write")
     sys.exit(0)
-
-entry["enabled"] = desired
 tmp_fd, tmp_path = tempfile.mkstemp(dir=os.path.dirname(cfg_path), prefix=".openclaw.", suffix=".tmp")
 try:
     with os.fdopen(tmp_fd, "w") as f:
@@ -7245,7 +7264,7 @@ except Exception:
     except Exception:
         pass
     raise
-print(f"  {'Enabled' if desired else 'Disabled (owner switch)'} {plugin_id}")
+print(f"  {plugin_id}: wrote {', '.join(changed)}")
 PY
   then
     echo "  WARNING: could not enable the $plugin_id plugin in $OPENCLAW_CONFIG — $consequence" >&2
@@ -8216,6 +8235,51 @@ fi
 if [ -d "$CLAWBOX_WORKSPACE" ]; then
   mkdir -p "$CLAWBOX_WORKSPACE/skills" 2>/dev/null || true
 fi
+
+# ── The Prime Radiant core block ───────────────────────────────────────────
+#
+# The most-linked pages of the owner's Prime Radiant wiki, one line each, in
+# the owner's main agent's sessions (src/lib/prime-radiant/core-context.ts).
+# ClawBox writes the block to <data>/prime-radiant/core-context.json after
+# every nightly merge, and only while the owner has the Prime Radiant setting
+# `context.enabled` on (off by default); with no file the plugin adds nothing.
+#
+# HARNESS FIRST: the core's typed `before_prompt_build` hook, which runs on
+# every prompt build and returns `appendSystemContext` — a refreshed block
+# reaches the next turn with no gateway restart. Not a workspace file (cut at
+# `bootstrapMaxChars`, 20,000 by default, and the identity sync's and the
+# owner's to write) and not `agents.defaults.systemPromptSuffix` (removed
+# above on every boot). A non-bundled plugin's prompt hook needs the core's
+# `hooks.allowConversationAccess` grant, which the installer writes for this
+# plugin only. Installed on every box, like the others: the setting, not the
+# install, decides whether a block exists.
+CLAWBOX_PR_CORE_ID="clawbox-prime-radiant-core"
+CLAWBOX_PR_CORE_SRC="$CLAWBOX_ROOT/scripts/openclaw-plugins/$CLAWBOX_PR_CORE_ID"
+CLAWBOX_PR_CORE_DST="$OPENCLAW_HOME_DIR/extensions/$CLAWBOX_PR_CORE_ID"
+CLAWBOX_HOOK_PLUGIN_CONVERSATION_ACCESS=1 install_clawbox_hook_plugin "$CLAWBOX_PR_CORE_ID" "$CLAWBOX_PR_CORE_DST" \
+  "the owner's main agent does not get the Prime Radiant core block" \
+  "$CLAWBOX_PR_CORE_SRC/openclaw.plugin.json" \
+  "$CLAWBOX_PR_CORE_SRC/package.json" \
+  "$CLAWBOX_PR_CORE_SRC/index.mjs" \
+  "$CLAWBOX_PR_CORE_SRC/prime-radiant-core.mjs"
+
+# Cheap proof the installed copy loads and registers its hook, and that it
+# keeps the block out of a ClawBox user's chat — one `node` start, no CLI.
+CLAWBOX_PR_CORE_NODE="$(command -v node 2>/dev/null || true)"
+if [ "$CLAWBOX_HOOK_PLUGIN_READY" = "1" ] && [ -n "$CLAWBOX_PR_CORE_NODE" ]; then
+  if ! CLAWBOX_PR_CORE_DST="$CLAWBOX_PR_CORE_DST" "$CLAWBOX_PR_CORE_NODE" --input-type=module -e '
+    const dir = process.env.CLAWBOX_PR_CORE_DST;
+    const plugin = (await import(`${dir}/index.mjs`)).default;
+    const hooks = [];
+    plugin.register({ on: (name) => hooks.push(name), config: {} });
+    if (!hooks.includes("before_prompt_build")) throw new Error("no before_prompt_build hook");
+    const { isUserChatKey } = await import(`${dir}/prime-radiant-core.mjs`);
+    if (!isUserChatKey("agent:main:clawbox-user-alice")) throw new Error("a user chat would get the block");
+  ' 2>&1; then
+    echo "  WARNING: the installed $CLAWBOX_PR_CORE_ID plugin did not load or did not register its hook — the owner's main agent does not get the Prime Radiant core block" >&2
+  fi
+fi
+
 
 # ── Default skills (TASK-1639): ClawBox's own first-party skills, seeded ────
 #
