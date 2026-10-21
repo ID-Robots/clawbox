@@ -113,7 +113,7 @@ describe("clawbox-realtime-voice plugin", () => {
     expect(isProxyUrl(PROXY)).toBe(true);
     expect(isProxyUrl("http://127.0.0.1:3000/api/ai")).toBe(true);
     expect(isProxyUrl("http://clawbox.com/api/ai")).toBe(false);
-    expect(isProxyUrl("https://user:pass@clawbox.com/api/ai")).toBe(false);
+    expect(isProxyUrl("https://user:pass@proxy.example/api/ai")).toBe(false);
     expect(isProxyUrl("not a url")).toBe(false);
   });
 
