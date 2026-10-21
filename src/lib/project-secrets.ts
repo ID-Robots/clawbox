@@ -666,9 +666,15 @@ export interface ResolvedRunSecrets {
   unreadable: string[];
   /** Name → the scope its value came FROM, for the audit line (`recordRunSecretsHanded`). Names only. */
   scopes: Record<string, string>;
+  /**
+   * Name → the instant (ms) a DATED copy among `env` stops being handed, for
+   * the one continuation that cannot read the store again (`withoutPastDueSecrets`).
+   * No entry for an undated or a one-run copy.
+   */
+  expiresAt: Record<string, number>;
 }
 
-const NOTHING: ResolvedRunSecrets = { env: {}, names: [], unreadable: [], scopes: {} };
+const NOTHING: ResolvedRunSecrets = { env: {}, names: [], unreadable: [], scopes: {}, expiresAt: {} };
 
 /**
  * The secrets ONE run may have: the box-scoped ticked entries plus the ticked
@@ -732,6 +738,7 @@ async function resolveRunSecrets(run: { project?: string | null; runId?: string 
   const now = Date.now();
   const env: Record<string, string> = {};
   const scopes: Record<string, string> = {};
+  const expiresAt: Record<string, number> = {};
   const unreadable: string[] = [];
   /** The one-run copies this resolve hands out, by name — to be claimed for this run below. */
   const claims = new Map<string, StoredSecret>();
@@ -763,12 +770,15 @@ async function resolveRunSecrets(run: { project?: string | null; runId?: string 
         // review). Nothing, and a named reason, is the honest answer.
         delete env[entry.name];
         delete scopes[entry.name];
+        delete expiresAt[entry.name];
         claims.delete(entry.name);
         if (!unreadable.includes(entry.name)) unreadable.push(entry.name);
         continue;
       }
       env[entry.name] = value;
       scopes[entry.name] = scope;
+      if (typeof expiry === "number") expiresAt[entry.name] = expiry;
+      else delete expiresAt[entry.name];
       // Only the entry whose value the run actually gets is claimed: a
       // one-run box-wide copy overridden by the project's own entry stays
       // free for the next run.
@@ -795,11 +805,12 @@ async function resolveRunSecrets(run: { project?: string | null; runId?: string 
       for (const entry of unclaimed) {
         delete env[entry.name];
         delete scopes[entry.name];
+        delete expiresAt[entry.name];
         if (!unreadable.includes(entry.name)) unreadable.push(entry.name);
       }
     }
   }
-  return { env, names: Object.keys(env), unreadable, scopes };
+  return { env, names: Object.keys(env), unreadable, scopes, expiresAt };
 }
 
 /**
@@ -827,6 +838,26 @@ export async function withoutExpiredSecrets(
     const entry = entries.find((e) => e.name === name && e.scope === scope);
     const expiry = entry ? readSecretExpiry(entry.expiresAt) : undefined;
     if (typeof expiry === "number" && expiry <= now) continue;
+    out[name] = value;
+  }
+  return out;
+}
+
+/**
+ * The same cut without the store, for the carry that cannot wait on a read: the
+ * automatic transient retry, respawned synchronously from the child's `close`
+ * handler. `expiresAt` is what the resolve recorded for the dated copies among
+ * `env` (`ResolvedRunSecrets.expiresAt`); a name it does not list is undated.
+ */
+export function withoutPastDueSecrets(
+  env: Readonly<Record<string, string>>,
+  expiresAt: Readonly<Record<string, number>>,
+  now: number = Date.now(),
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(env)) {
+    const at = expiresAt[name];
+    if (typeof at === "number" && at <= now) continue;
     out[name] = value;
   }
   return out;

@@ -201,6 +201,7 @@ import {
   SECRET_NAME_RE,
   SECRETS_FILE_NAME,
   withoutExpiredSecrets,
+  withoutPastDueSecrets,
   type ResolvedRunSecrets,
 } from "@/lib/project-secrets";
 import { appendSecretAudit, SECRETS_AUDIT_FILE_NAME } from "@/lib/secrets-audit";
@@ -4970,6 +4971,8 @@ interface RunStore {
   runSecretEnv: Map<string, Record<string, string>>;
   /** Which scope each of those came from, names only — see runSecretScopes. Optional: a store from an older module. */
   runSecretScopes?: Map<string, Record<string, string>>;
+  /** When each dated one of those stops being handed — see runSecretExpiry. Optional: a store from an older module. */
+  runSecretExpiry?: Map<string, Record<string, number>>;
   /** The Anthropic account a run's next spawn uses, credential included — see runAnthropicCredential. */
   runAnthropicCredential: Map<string, RunAnthropicCredential>;
   /** The runs whose pull request or review is already being watched. */
@@ -6719,6 +6722,15 @@ const runSecretEnv = store.runSecretEnv;
 const runSecretScopes: Map<string, Record<string, string>> =
   store.runSecretScopes ?? (store.runSecretScopes = new Map<string, Record<string, string>>());
 
+/**
+ * Run id → when each DATED copy it was handed stops being handed, as the resolve
+ * read it (`ResolvedRunSecrets.expiresAt`). For the transient retry alone, which
+ * respawns from the child's `close` handler and cannot re-read the store the way
+ * the account switch does (`withoutExpiredSecrets`). Dropped with the scopes.
+ */
+const runSecretExpiry: Map<string, Record<string, number>> =
+  store.runSecretExpiry ?? (store.runSecretExpiry = new Map<string, Record<string, number>>());
+
 /** Statuses a run can still be handed its one-run secrets in (again). */
 const SECRET_HOLDING_STATUSES: ReadonlySet<CodingRunStatus> = new Set(["running", "paused", "queued", "draft"]);
 
@@ -6736,6 +6748,7 @@ function isRunGoing(runId: string): boolean {
  */
 function endRunSecrets(run: CodingRun): void {
   runSecretScopes.delete(run.id);
+  runSecretExpiry.delete(run.id);
   trackSettleWork(releaseRunSecrets((runId) => runId === run.id));
 }
 
@@ -6791,6 +6804,7 @@ async function prepareRunSecrets(run: CodingRun): Promise<ResolvedRunSecrets> {
   const resolved = await resolveSecretsForRun({ project: await projectScopeFor(run), runId: run.id });
   runSecretEnv.set(run.id, resolved.env);
   runSecretScopes.set(run.id, resolved.scopes);
+  runSecretExpiry.set(run.id, resolved.expiresAt);
   // The Anthropic account rides the same path: every async spawn comes through
   // here just before it, which is exactly where "which account is first in
   // line right now" should be asked (TASK-902).
@@ -11477,6 +11491,8 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // The owner's secrets, taken before the cleanup below drops them — for the
   // retry branch alone, which cannot re-resolve them. See restoreRunSecrets.
   const carriedSecrets = runSecretEnv.get(run.id);
+  // …with when each dated one of them stops being handed, for that branch.
+  const carriedExpiry = runSecretExpiry.get(run.id);
   // …and the Anthropic account it was on, for the same branch and for the
   // account switch below.
   const carriedAccount = runAnthropicCredential.get(run.id);
@@ -11571,8 +11587,11 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
       console.error(`[coding-agent] ${run.id} retrying once after a transient upstream failure`);
       // The same credentials and the same redaction table as the attempt that
       // got nowhere: this is one run making a second try at the same work, not
-      // a new decision by the owner.
-      if (carriedSecrets || carriedAccount) restoreRunSecrets(run.id, carriedSecrets ?? {}, carriedAccount);
+      // a new decision by the owner. Less a dated copy whose day ended while the
+      // first attempt ran: one is never handed after its day, whoever hands it.
+      if (carriedSecrets || carriedAccount) {
+        restoreRunSecrets(run.id, withoutPastDueSecrets(carriedSecrets ?? {}, carriedExpiry ?? {}), carriedAccount);
+      }
       try {
         spawnRun(run, null, state.tools, state.settings);
         // The retry is the same run's second try at the same work, seconds

@@ -204,3 +204,41 @@ describe("a one-run copy", () => {
     expect(fs.readFileSync(path.join(root, "data", "secrets-audit.log"), "utf-8")).not.toContain("imported-value-0000");
   });
 });
+
+describe("the automatic retry after a transient failure", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("is not handed a dated copy whose day ended while the first attempt ran", async () => {
+    const day = Date.now() + 60 * 60 * 1000;
+    await secrets.importSecret({ name: "DATED_TOKEN", value: "dated-value-00000000", scope: "@box", source: "hermes", expiresAt: new Date(day).toISOString() });
+    await secrets.setSecretInject({ name: "DATED_TOKEN", scope: "@box", inject: true });
+    const children: EventEmitter[] = [];
+    harnessSpawnsAs(() => {
+      const child = harnessChild();
+      children.push(child);
+      return child;
+    });
+    const harnessEnvs = () => spawnMock.mock.calls
+      .filter(([cmd, args]) => isHarness(cmd, args))
+      .map(([, , options]) => (options as { env?: Record<string, string> } | undefined)?.env ?? {});
+
+    const run = await lib.startRun({ task: "deploy the site", projectId: "site", source: "agent" });
+    expect(run.secretNames).toContain("DATED_TOKEN");
+    expect(harnessEnvs()[0]).toMatchObject({ DATED_TOKEN: "dated-value-00000000", DEPLOY_TOKEN: TOKEN });
+    children[0].emit("spawn");
+
+    // The day ends while the first attempt is out, which then dies of an upstream blink.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(day + 1_000);
+    // The harness writes its stderr to the run's log, which the settle reads.
+    fs.appendFileSync(path.join(root, "data", "coding-agent-streams", `${run.id}.err`), "API Error: 503 Service Unavailable\n");
+    children[0].emit("exit", 1, null);
+    children[0].emit("close", 1, null);
+
+    await until(() => harnessEnvs().length === 2, "the retry's spawn");
+    expect(harnessEnvs()[1]).not.toHaveProperty("DATED_TOKEN");
+    expect(harnessEnvs()[1]).toMatchObject({ DEPLOY_TOKEN: TOKEN });
+  });
+});

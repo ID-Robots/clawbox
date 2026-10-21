@@ -193,7 +193,7 @@ describe("what a run is given", () => {
 
   it("gives a run nothing at all while the owner's switch is off", async () => {
     switchOn(false);
-    expect(await store.resolveSecretsForRun({ project: "shop" })).toEqual({ env: {}, names: [], unreadable: [], scopes: {} });
+    expect(await store.resolveSecretsForRun({ project: "shop" })).toEqual({ env: {}, names: [], unreadable: [], scopes: {}, expiresAt: {} });
   });
 
   it("gives a run nothing while the switch has never been answered", async () => {
@@ -289,7 +289,7 @@ describe("what a run is given", () => {
     // tells the owner a credential did not arrive.
     fs.writeFileSync(secretsPath(), "{ not json");
     switchOn(true);
-    expect(await store.resolveSecretsForRun({ project: "shop" })).toEqual({ env: {}, names: [], unreadable: [], scopes: {} });
+    expect(await store.resolveSecretsForRun({ project: "shop" })).toEqual({ env: {}, names: [], unreadable: [], scopes: {}, expiresAt: {} });
   });
 
   it("re-checks the name on the way out, so an older build's row cannot reach a run", async () => {
@@ -568,6 +568,23 @@ describe("a copy that expires", () => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(Date.now() + 2 * DAY);
     expect(await store.withoutExpiredSecrets(resolved.env, resolved.scopes)).toEqual({ DEPLOY_TOKEN: "deploy-value-00000000" });
+  });
+
+  it("records when a dated copy stops being handed, so the retry that cannot read the store drops it past its day", async () => {
+    const until = Date.now() + DAY;
+    await importTicked(new Date(until).toISOString());
+    await store.setSecret({ name: "DEPLOY_TOKEN", value: "deploy-value-00000000", scope: store.BOX_SCOPE, inject: true });
+    const resolved = await store.resolveSecretsForRun({ project: null, runId: "run-0000aaaa" });
+    expect(resolved.expiresAt).toEqual({ IMPORT_ME_TOKEN: until });
+    expect(store.withoutPastDueSecrets(resolved.env, resolved.expiresAt, until - 1)).toEqual(resolved.env);
+    expect(store.withoutPastDueSecrets(resolved.env, resolved.expiresAt, until)).toEqual({ DEPLOY_TOKEN: "deploy-value-00000000" });
+  });
+
+  it("records no expiry for a one-run copy: its end is its run's, not a date", async () => {
+    await importTicked("run");
+    const resolved = await store.resolveSecretsForRun({ project: null, runId: "run-0000aaaa" });
+    expect(resolved.names).toEqual(["IMPORT_ME_TOKEN"]);
+    expect(resolved.expiresAt).toEqual({});
   });
 
   it.skipIf(process.getuid?.() === 0)("names a one-run copy it could not claim, and hands it to nobody", async () => {
