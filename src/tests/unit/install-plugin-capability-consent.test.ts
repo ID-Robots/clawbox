@@ -64,7 +64,7 @@ describe("install.sh plugin refresh", () => {
     // name — which is exactly what that whitelist exists to prevent.
     const built = LINES.findIndex((l) => l.includes("CAP_ARGS=(--accept-capabilities)"));
     const guard = LINES[built - 1];
-    expect(guard).toContain("codex|deepseek|discord|whatsapp|clawbox-email-directives)");
+    expect(guard).toContain("codex|deepseek|discord|whatsapp|slack|signal|msteams|clawbox-email-directives)");
   });
 
   it("matches the whitelist on the NORMALISED plugin id", () => {

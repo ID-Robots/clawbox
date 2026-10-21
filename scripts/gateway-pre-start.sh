@@ -2233,6 +2233,25 @@ if isinstance(channels, dict):
         if _channel.get("groupPolicy") not in (None, "open", "disabled", "allowlist"):
             _channel["groupPolicy"] = "disabled"
             changed = True
+    # The guided channels set up after that bug (Slack, …) never had a ClawBox
+    # writer that opened them, so a hand-written allowlist of specific ids is
+    # the owner's and stays. Only the OPEN shapes go — dmPolicy "open" and a
+    # "*" in allowFrom — the same rule the Settings writer applies on save
+    # (withoutOpenDmAccess in src/lib/openclaw-config.ts).
+    for _channel_name in ("slack", "signal", "msteams"):
+        _channel = channels.get(_channel_name)
+        if not isinstance(_channel, dict):
+            continue
+        if _channel.get("dmPolicy") == "open":
+            del _channel["dmPolicy"]
+            changed = True
+        if isinstance(_channel.get("allowFrom"), list) and "*" in _channel["allowFrom"]:
+            _kept = [_id for _id in _channel["allowFrom"] if _id != "*"]
+            if _kept:
+                _channel["allowFrom"] = _kept
+            else:
+                del _channel["allowFrom"]
+            changed = True
 
 # OpenClaw 2 split some formerly bundled channels into consent-gated external
 # plugins. A legacy config can retain plugins.entries.<channel>.enabled=true
@@ -4913,7 +4932,7 @@ clawbox_managed_plugin_spec() {
   local key="${1#@openclaw/}"
   key="${key#openclaw-}"
   case "$key" in
-    discord|whatsapp) ;;
+    discord|whatsapp|slack|signal|msteams) ;;
     *) return 0 ;;
   esac
   if [ -n "${CLAWBOX_OPENCLAW_EFFECTIVE:-}" ]; then
@@ -6062,7 +6081,7 @@ fi
 if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
   MANAGED_ENABLED_PLUGINS="$(python3 - "$OPENCLAW_CONFIG" <<'MANAGEDPY' || true
 import json, sys
-MANAGED = ("deepseek", "discord", "whatsapp", "clawbox-email-directives")
+MANAGED = ("deepseek", "discord", "whatsapp", "slack", "signal", "msteams", "clawbox-email-directives")
 
 
 def canonical(name):
@@ -6295,7 +6314,7 @@ import json, os, sys
 # boot-without) and `install_clawbox_hook_plugin` further down this script
 # writes `enabled: true` over it unconditionally, so a re-attempt would be
 # racing this same script run.
-REATTEMPTABLE = ("deepseek", "discord", "whatsapp")
+REATTEMPTABLE = ("deepseek", "discord", "whatsapp", "slack", "signal", "msteams")
 # `not-installed` is excluded on purpose. It records an entry an older core
 # BUNDLED and this one does not, and the repair for it is installing a package
 # nothing on this box has ever installed — which means accepting a plugin's

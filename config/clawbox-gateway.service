@@ -117,6 +117,12 @@ EnvironmentFile=-/home/clawbox/clawbox/data/network.env
 # writes this file at 0600 from the Discord section of Settings; the leading "-"
 # keeps the unit starting normally on a device where Discord was never set up.
 EnvironmentFile=-/home/clawbox/clawbox/data/discord.env
+# Slack the same way: channels.slack.botToken/appToken reference SLACK_BOT_TOKEN
+# and SLACK_APP_TOKEN, written at 0600 by the Slack section of Settings.
+EnvironmentFile=-/home/clawbox/clawbox/data/slack.env
+# Microsoft Teams (a preview channel): channels.msteams.appPassword references
+# MSTEAMS_APP_PASSWORD, written at 0600 by the Teams section of Settings.
+EnvironmentFile=-/home/clawbox/clawbox/data/msteams.env
 
 [Install]
 WantedBy=multi-user.target

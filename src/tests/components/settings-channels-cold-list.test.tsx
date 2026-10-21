@@ -95,6 +95,9 @@ function boxFetch(input: string | URL) {
   if (url.startsWith("/setup-api/discord/status")) {
     return jsonResponse({ configured: false, harness: "hermes" });
   }
+  if (url.startsWith("/setup-api/slack/status")) {
+    return jsonResponse({ configured: false });
+  }
   return jsonResponse({});
 }
 
@@ -158,6 +161,53 @@ describe("Settings → Channels on a cold open", () => {
     expect(discord).toHaveAttribute("data-state", "not-configured");
   });
 
+  it("lists Slack beside the others, unconfigured until its route says otherwise", async () => {
+    openHub();
+    const list = await screen.findByTestId("settings-channels-list");
+
+    const slack = within(list).getByTestId("settings-channel-slack");
+    expect(slack).toHaveTextContent("settings.slack");
+    await waitFor(() => expect(slack).toHaveAttribute("data-state", "not-configured"));
+    expect(slack).toHaveTextContent("settings.notConfigured");
+    expect(hasDot(slack)).toBe(false);
+  });
+
+  it("does not offer a preview channel the box has not switched on", async () => {
+    openHub();
+    const list = await screen.findByTestId("settings-channels-list");
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/setup-api/channels/preview", expect.anything()));
+    expect(within(list).queryByTestId("settings-channel-signal")).toBeNull();
+    const asked = (fetch as unknown as Mock).mock.calls.map(([input]) => String(input));
+    expect(asked.some((url) => url.startsWith("/setup-api/signal/"))).toBe(false);
+  });
+
+  it("offers Signal, marked as a preview, once the box switches it on", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((input: string | URL) => {
+        const url = input.toString();
+        if (url.startsWith("/setup-api/channels/preview")) return jsonResponse({ channels: ["signal"] });
+        if (url.startsWith("/setup-api/signal/status")) return jsonResponse({ configured: false, signalCli: true });
+        return boxFetch(input);
+      }),
+    );
+    openHub();
+    const list = await screen.findByTestId("settings-channels-list");
+    const signal = await within(list).findByTestId("settings-channel-signal");
+    expect(signal).toHaveTextContent("settings.signal");
+    expect(signal).toHaveTextContent("settings.channelPreviewBadge");
+    await waitFor(() => expect(signal).toHaveAttribute("data-state", "not-configured"));
+  });
+
+  it("says iMessage is Mac-only instead of offering it", async () => {
+    openHub();
+    await screen.findByTestId("settings-channels-list");
+    expect(screen.getByTestId("settings-channels-imessage-note")).toHaveTextContent(
+      "settings.channelsIMessageNote",
+    );
+    expect(screen.queryByTestId("settings-channel-imessage")).toBeNull();
+  });
+
   it("says 'still asking', not 'not configured', while a status is in flight", async () => {
     // A status route that never answers — the Jetson's WhatsApp probe shells
     // out and takes seconds. Nothing may be claimed about the channel yet.
@@ -195,7 +245,7 @@ describe("Settings → Channels on a cold open", () => {
 
     const statusCalls = (fetch as unknown as Mock).mock.calls
       .map(([input]) => String(input))
-      .filter((url) => /^\/setup-api\/(telegram|email|whatsapp|discord)\/status/.test(url));
+      .filter((url) => /^\/setup-api\/(telegram|email|whatsapp|discord|slack)\/status/.test(url));
     expect(statusCalls).toEqual([]);
   });
 

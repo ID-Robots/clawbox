@@ -37,7 +37,7 @@ const INSPECT_TIMEOUT_MS = 120_000;
  * specs that go stale when the core moves.
  *
  * `@openclaw/codex` is pinned by `scripts/gateway-pre-start.sh`'s codex block,
- * and the channel packages by `clawbox_managed_plugin_spec` — the same two
+ * and the channel packages by `clawbox_managed_plugin_spec` — the same ones
  * that are `OFFICIAL_CHANNEL_PLUGINS` in `openclaw-channels.ts`, which
  * `plugin-repair-run.test.ts` holds this list to. Not imported from there:
  * that module reads the config store at load, and the Retry route must not
@@ -49,6 +49,9 @@ export const CORE_PINNED_PLUGIN_PACKAGES: readonly string[] = [
   "@openclaw/codex",
   "@openclaw/discord",
   "@openclaw/whatsapp",
+  "@openclaw/slack",
+  "@openclaw/signal",
+  "@openclaw/msteams",
 ];
 
 const PINNED_SPEC_RE = /^(@openclaw\/[a-z0-9][a-z0-9._-]*)@(\d{4}\.\d+\.\d+)((?:[-+][0-9A-Za-z.-]+)?)$/;

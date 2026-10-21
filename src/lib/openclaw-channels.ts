@@ -100,6 +100,13 @@ import { clearPluginRepair } from "@/lib/plugin-repair";
 export const OFFICIAL_CHANNEL_PLUGINS: Readonly<Record<string, string>> = Object.freeze({
   discord: "@openclaw/discord",
   whatsapp: "@openclaw/whatsapp",
+  // Socket Mode only: the bot dials out to Slack over a WebSocket, so the box
+  // needs no public address. Same plugin-install + env SecretRef path as Discord.
+  slack: "@openclaw/slack",
+  // Talks to signal-cli, which the gateway starts itself (managed-native).
+  signal: "@openclaw/signal",
+  // Bot Framework traffic arrives on the gateway's own port at /api/messages.
+  msteams: "@openclaw/msteams",
 });
 
 /**
@@ -781,7 +788,7 @@ const epochs = new Map<string, number>();
  * no UI for has no business occupying a memo slot. {@link askedChannelIds}
  * covers anything asked for beyond it.
  */
-const MEMOISED_CHANNEL_IDS = ["telegram", "whatsapp", "discord"] as const;
+const MEMOISED_CHANNEL_IDS = ["telegram", "whatsapp", "discord", "slack", "signal", "msteams"] as const;
 
 /**
  * Channel ids some caller has asked the memo about, beyond the list above.

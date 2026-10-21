@@ -147,6 +147,46 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh channel security", () => {
     });
   });
 
+  it("treats msteams like slack", () => {
+    const out = applyPolicy({ channels: { msteams: { enabled: true, dmPolicy: "open", allowFrom: ["*"] } } });
+    expect(out.channels.msteams).toEqual({ enabled: true });
+  });
+
+  it("treats signal like slack: open shapes go, specific numbers stay", () => {
+    const out = applyPolicy({
+      channels: { signal: { dmPolicy: "open", allowFrom: ["*", "+15550000001"] } },
+    });
+    expect(out.channels.signal).toEqual({ allowFrom: ["+15550000001"] });
+  });
+
+  describe("the guided channels (slack)", () => {
+    // No ClawBox writer ever opened these, so only the OPEN shapes go: a
+    // hand-written allowlist of specific ids is the owner's and must survive
+    // every boot, exactly as it survives a Settings save.
+    it("strips an open DM policy and the wildcard", () => {
+      const out = applyPolicy({
+        channels: { slack: { enabled: true, dmPolicy: "open", allowFrom: ["*"] } },
+      });
+      expect(out.channels.slack).toEqual({ enabled: true });
+      expect(out.changed).toBe(true);
+    });
+
+    it("keeps specific ids when the wildcard sat beside them", () => {
+      const out = applyPolicy({
+        channels: { slack: { dmPolicy: "open", allowFrom: ["*", "U0123456789"] } },
+      });
+      expect(out.channels.slack).toEqual({ allowFrom: ["U0123456789"] });
+    });
+
+    it("keeps a hand-written allowlist policy untouched", () => {
+      const out = applyPolicy({
+        channels: { slack: { dmPolicy: "allowlist", allowFrom: ["U0123456789"] } },
+      });
+      expect(out.channels.slack).toEqual({ dmPolicy: "allowlist", allowFrom: ["U0123456789"] });
+      expect(out.changed).toBe(false);
+    });
+  });
+
   it("ignores a channels value that is not an object", () => {
     const out = applyPolicy({ channels: { discord: "nope" } });
     expect(out.changed).toBe(false);

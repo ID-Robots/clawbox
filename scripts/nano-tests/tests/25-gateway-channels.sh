@@ -3,6 +3,9 @@
 # parallel: probes
 # covers: src/lib/openclaw-channels.ts src/lib/gateway-health.ts src/app/setup-api/gateway/* src/app/setup-api/telegram/* src/app/setup-api/discord/*
 # covers: src/app/setup-api/whatsapp/* src/lib/openclaw-whatsapp.ts src/lib/whatsapp-pairing.ts src/lib/discord-api.ts src/lib/telegram-*.ts
+# covers: src/app/setup-api/slack/* src/lib/slack-api.ts src/lib/guided-channels.ts src/lib/hermes-channels.ts
+# covers: src/app/setup-api/signal/* src/lib/signal-cli.ts src/lib/channel-preview.ts
+# covers: src/app/setup-api/msteams/* src/lib/msteams-api.ts src/lib/msteams-endpoint.ts
 #
 # The gateway is ready, settled, and every chat channel it runs is healthy.
 #

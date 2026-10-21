@@ -6614,7 +6614,7 @@ for p in d.get("plugins", []):
       # the bare id, which is the caller's own plugin and its owner's business.
       if [ "$spec" = "$plugin" ] && [ -n "$TARGET" ]; then
         case "$PLUGIN_KEY" in
-          codex|discord|whatsapp) spec="@openclaw/$PLUGIN_KEY@$TARGET" ;;
+          codex|discord|whatsapp|slack|signal|msteams) spec="@openclaw/$PLUGIN_KEY@$TARGET" ;;
         esac
       fi
       echo "    - $spec"
@@ -6646,7 +6646,7 @@ for p in d.get("plugins", []):
       # what the CLI has to be given.
       local CAP_ARGS=()
       case "$PLUGIN_KEY" in
-        codex|deepseek|discord|whatsapp|clawbox-email-directives)
+        codex|deepseek|discord|whatsapp|slack|signal|msteams|clawbox-email-directives)
           openclaw_is_v2 && CAP_ARGS=(--accept-capabilities)
           ;;
         *)

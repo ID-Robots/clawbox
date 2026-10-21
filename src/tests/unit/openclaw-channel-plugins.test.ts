@@ -251,6 +251,22 @@ describe("ensureChannelPlugin", () => {
       .toEqual(["plugins", "install", "@openclaw/whatsapp", "--accept-capabilities"]);
   });
 
+  it("installs the official Slack plugin", async () => {
+    // Slack is one of OpenClaw's separate official packages, exactly like
+    // Discord: a box that writes `channels.slack` without it gets the
+    // no-channel-owner warning and a panel that says "saved".
+    mockSpawn
+      .mockResolvedValueOnce(pluginsListJson([{ id: "telegram" }]))
+      .mockResolvedValueOnce("Installed plugin: slack.");
+
+    const result = await lib.ensureChannelPlugin("slack");
+
+    expect(result).not.toEqual({ ok: false, reason: "unsupported_channel" });
+    expect(result).toEqual({ ok: true, installed: true });
+    expect(mockSpawn.mock.calls[1][0])
+      .toEqual(["plugins", "install", "@openclaw/slack", "--accept-capabilities"]);
+  });
+
   it("matches a plugin that OWNS the channel under a different plugin id", async () => {
     // The registry keys plugins by their own id; the channel they own is in
     // `channelIds`. Matching on the plugin id alone would reinstall forever.

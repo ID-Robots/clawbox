@@ -1,7 +1,7 @@
 ---
 title: "Messaging Channels"
 icon: "comments"
-summary: "Message your ClawBox from Telegram, Discord, WhatsApp, email or the web chat — all set up from Settings → Channels."
+summary: "Message your ClawBox from Telegram, Discord, WhatsApp, Slack, email or the web chat — all set up from Settings → Channels."
 ---
 
 Your ClawBox answers where you already are. **Settings → Channels** sets up each one, on
@@ -21,6 +21,9 @@ now rather than only whether it saved.
   </Card>
   <Card title="WhatsApp" icon="whatsapp">
     Pair the box with your account.
+  </Card>
+  <Card title="Slack" icon="slack">
+    Paste two tokens from a Slack app; no public address needed.
   </Card>
   <Card title="Email" icon="envelope">
     Send mail you approve; read mail on the Hermes edition.
@@ -85,6 +88,42 @@ cause you can act on.
 The invite the box builds grants: view channels, send messages, read history, attach
 files, embed links, add reactions.
 
+## Slack
+
+Slack connects in **Socket Mode**: the box opens the connection to Slack itself, so it
+needs no public address, port forwarding or tunnel. You need a Slack workspace where you
+may install apps.
+
+<Steps>
+  <Step title="Create the app from the manifest">
+    **Settings → Channels → Slack** shows an app manifest made for your edition. Copy it,
+    open [api.slack.com/apps](https://api.slack.com/apps), choose **Create New App → From a
+    manifest**, pick your workspace and paste it.
+  </Step>
+  <Step title="Generate the app-level token">
+    In the new app, **Basic Information → App-Level Tokens → Generate Token and Scopes**:
+    add the `connections:write` scope and copy the token (`xapp-…`).
+  </Step>
+  <Step title="Install the app and copy the bot token">
+    **Install App → Install to Workspace**, then copy the **Bot User OAuth Token**
+    (`xoxb-…`).
+  </Step>
+  <Step title="Paste both tokens">
+    Back in **Settings → Channels → Slack**, paste both and press **Connect**. The box
+    checks each token with Slack before saving and tells you which one is wrong, then waits
+    for the channel to come up.
+  </Step>
+  <Step title="Approve who may talk to it">
+    Message the bot directly in Slack. The first time, it replies with a pairing code;
+    enter it under **Approve a new sender** in the panel. Nobody gets an answer until you
+    do.
+  </Step>
+</Steps>
+
+The tokens are kept out of the assistant's configuration file: on the OpenClaw edition
+they are stored as environment references read only by the gateway, and on the Hermes
+edition in Hermes' own environment file.
+
 ## WhatsApp
 
 **Settings → Channels → WhatsApp** pairs the box with your WhatsApp account and shows
@@ -125,12 +164,79 @@ With [Spoken replies](/guides/chat#voice) on, a voice note sent to a channel get
 answer back. This is an OpenClaw-edition feature — on the Hermes edition the box still
 answers out loud in the desktop chat, and channel replies stay in text.
 
+## Preview channels
+
+Some channels have a guided setup that ships **switched off**, because something they
+need on the box is not settled yet. Each panel says exactly what is missing. To try one,
+add a line to `/home/clawbox/clawbox/.env` and restart the ClawBox service:
+
+```bash
+CLAWBOX_PREVIEW_CHANNELS=signal,msteams
+```
+
+Remove the line (and restart) to hide it again; nothing else changes.
+
+### Signal
+
+Signal needs **signal-cli** on the box, which ClawBox does not install yet (on the Jetson
+it needs a Java runtime). With signal-cli installed:
+
+<Steps>
+  <Step title="Use a separate number">
+    Give the assistant its own Signal number. On your personal number it ignores the
+    messages you send yourself.
+  </Step>
+  <Step title="Link the box">
+    **Settings → Channels → Signal → Show QR code**, then on that phone open **Signal →
+    Settings → Linked devices → Link new device** and scan it. The box finishes the setup
+    by itself once the phone confirms.
+  </Step>
+  <Step title="Approve who may talk to it">
+    A new sender gets a pairing code from the bot; enter it under **Approve a new sender**.
+  </Step>
+</Steps>
+
+On the OpenClaw edition the gateway starts and supervises signal-cli itself. The Hermes
+edition connects to a signal-cli service it does not start, so until the box runs one the
+panel says that the channel is saved but cannot reach Signal.
+
+### Microsoft Teams
+
+Teams delivers messages to the box over **public HTTPS**, and ClawBox does not open a
+public address by itself yet — you provide one (a reverse proxy or tunnel) that forwards
+to the box. The Teams panel shows the exact local port and path to forward to: the
+gateway's own port on the OpenClaw edition, Hermes' Teams port (3978 by default) on the
+Hermes edition.
+
+<Steps>
+  <Step title="Create the bot">
+    In the Azure portal create an **Azure Bot** (single tenant). Copy the **Microsoft App
+    ID** and the **Directory (tenant) ID**, then under **Certificates & secrets** create a
+    client secret and copy its **Value**.
+  </Step>
+  <Step title="Point the messaging endpoint at the box">
+    Set the bot's messaging endpoint to `https://<your public address>/api/messages`,
+    forwarded to the port the panel shows. Add the **Microsoft Teams** channel to the bot
+    and install the app in Teams.
+  </Step>
+  <Step title="Paste the three values">
+    **Settings → Channels → Microsoft Teams**. The box checks them with Microsoft before
+    saving, then reports the channel as *listening* — it cannot see from inside whether
+    Teams reaches it.
+  </Step>
+  <Step title="Approve who may talk to it">
+    A new sender gets a pairing code from the bot; enter it under **Approve a new sender**.
+  </Step>
+</Steps>
+
 ## Other OpenClaw channels
 
-OpenClaw supports more channels than ClawBox sets up for you — Slack, Signal, Matrix,
-Microsoft Teams, Google Chat and iMessage among them. Treat those as advanced
-configuration: they work where your installed OpenClaw version and its channel plugins
-support them, and they have no guided setup in the ClawBox UI.
+OpenClaw supports more channels than ClawBox sets up for you — Matrix and Google Chat
+among them. Treat those as advanced configuration: they
+work where your installed OpenClaw version and its channel plugins support them, and they
+have no guided setup in the ClawBox UI.
+
+iMessage works only on a Mac, so ClawBox does not offer it; the Channels page says so.
 
 ## Troubleshooting
 

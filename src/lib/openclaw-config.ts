@@ -3680,6 +3680,262 @@ export async function setDiscordToken(
   await writeDiscordGatewayEnv(botToken);
 }
 
+// === Guided channels beyond Discord (Slack, …) and the env files they use ===
+//
+// The Discord pattern, generalised once rather than copied per channel: the
+// credential is an env SecretRef in openclaw.json (envSecretRef installs the
+// provider in the same write), the value lives in `data/<channel>.env` at 0600,
+// and clawbox-gateway.service loads that file with `EnvironmentFile=-`. A file
+// per channel, not one shared file, so saving one channel can never rewrite —
+// or truncate — another channel's secret.
+
+// Characters a credential may carry into an EnvironmentFile line, unquoted.
+// Covers every published Slack token (`xoxb-…`, `xapp-…`) and Azure client
+// secrets (`[A-Za-z0-9~._-]`), and excludes everything that could split or
+// escape the line: whitespace, newlines, quotes, `$`, `\`, `#`. A leading "-"
+// is refused because the same value reaches the Hermes CLI as an argv element.
+const GATEWAY_ENV_VALUE_RE = /^[A-Za-z0-9._~+/=:-]{1,512}$/;
+const GATEWAY_ENV_KEY_RE = /^[A-Z][A-Z0-9_]*$/;
+
+/** Is `value` safe to write unquoted into a gateway EnvironmentFile line? */
+export function isSafeGatewayEnvValue(value: string): boolean {
+  return GATEWAY_ENV_VALUE_RE.test(value) && !value.startsWith("-");
+}
+
+/**
+ * Write one channel's EnvironmentFile at 0600, temp-then-rename — the
+ * {@link writeDiscordGatewayEnv} contract, for a set of keys.
+ *
+ * The guard is enforced HERE rather than trusted from the caller, for the same
+ * reason as Discord's: the interpolation is unquoted, and an exported writer
+ * whose safety lives in whoever calls it is one caller away from an env-file
+ * injection. The destination is always a module constant.
+ */
+async function writeChannelGatewayEnv(
+  filePath: string,
+  label: string,
+  values: Record<string, string>,
+): Promise<void> {
+  for (const [key, value] of Object.entries(values)) {
+    if (!GATEWAY_ENV_KEY_RE.test(key) || !isSafeGatewayEnvValue(value)) {
+      throw new Error(`Refusing to write an unsafe ${label} credential to the gateway env file`);
+    }
+  }
+  await fs.mkdir(DATA_DIR, { recursive: true });
+  const tmpPath = untraced(`${filePath}.tmp`);
+  const body =
+    "# Written by ClawBox. Loaded by clawbox-gateway.service (EnvironmentFile).\n" +
+    `# Do not edit by hand — the ${label} section of Settings rewrites this file.\n` +
+    Object.entries(values)
+      .map(([key, value]) => `${key}=${value}\n`)
+      .join("");
+  await fs.writeFile(tmpPath, body, { mode: 0o600, encoding: "utf-8" });
+  await fs.chmod(tmpPath, 0o600);
+  await fs.rename(tmpPath, filePath);
+}
+
+/**
+ * Drop an OPEN direct-message policy from a channel block, keep everything
+ * else the owner wrote.
+ *
+ * ClawBox never writes `dmPolicy`: OpenClaw's default is `pairing`, where the
+ * owner approves each new sender. "open" / `["*"]` would hand the agent's
+ * shell, file and power tools to anyone who finds the bot. Unlike the
+ * Telegram/Discord boot migration, a hand-written allowlist of specific ids
+ * (`dmPolicy: "allowlist"`) is the owner's choice and survives a save — only
+ * the open shapes go. gateway-pre-start.sh applies the same rule on boot.
+ */
+function withoutOpenDmAccess(block: Record<string, unknown>): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...block };
+  if (next.dmPolicy === "open") delete next.dmPolicy;
+  if (Array.isArray(next.allowFrom)) {
+    const kept = next.allowFrom.filter((entry) => entry !== "*");
+    if (kept.length === 0) delete next.allowFrom;
+    else next.allowFrom = kept;
+  }
+  return next;
+}
+
+/** Env vars the gateway resolves the Slack credentials from (OpenClaw's own names). */
+export const SLACK_BOT_TOKEN_ENV_VAR = "SLACK_BOT_TOKEN";
+export const SLACK_APP_TOKEN_ENV_VAR = "SLACK_APP_TOKEN";
+
+/** OpenClaw's id for the Slack channel — the config key's, and the plugin's. */
+const SLACK_CHANNEL_ID = "slack";
+
+/** EnvironmentFile the gateway unit loads the Slack tokens from. */
+export const SLACK_ENV_PATH = path.join(DATA_DIR, "slack.env");
+
+/**
+ * Register the Slack channel with the OpenClaw gateway, in Socket Mode.
+ *
+ * The shape is the pinned plugin's own recommended setup (channels/slack/
+ * setup.md, "Recommended SecretRef setup"): `enabled`, `mode: "socket"`, and
+ * both tokens as env references. Socket Mode is the only mode offered: the bot
+ * dials out to Slack over a WebSocket, so the box needs no public address —
+ * the HTTP Request URL mode would need an ingress ClawBox does not open.
+ *
+ * Every other key in an existing block is kept (a hand-tuned `channels` map,
+ * `requireMention`, …) except the open DM shapes ({@link withoutOpenDmAccess})
+ * and a literal token any other writer left behind, so the env reference is
+ * the only credential path.
+ */
+export async function setSlackTokens(botToken: string, appToken: string): Promise<void> {
+  // Checked before anything is written: a value the env file would refuse must
+  // not leave a config that references a secret that never lands.
+  if (!isSafeGatewayEnvValue(botToken) || !isSafeGatewayEnvValue(appToken)) {
+    throw new Error("Refusing to write an unsafe Slack token");
+  }
+  const config = await readConfigForWrite();
+  const channels = ensurePlainObject(asBag(config), "channels");
+  const {
+    botToken: _literalBotToken,
+    appToken: _literalAppToken,
+    ...rest
+  } = existingChannelBlock(channels, SLACK_CHANNEL_ID);
+  channels[SLACK_CHANNEL_ID] = withoutOpenDmAccess({
+    ...rest,
+    enabled: true,
+    mode: "socket",
+    botToken: envSecretRef(config, SLACK_BOT_TOKEN_ENV_VAR),
+    appToken: envSecretRef(config, SLACK_APP_TOKEN_ENV_VAR),
+  });
+  trustChannelPlugin(config, SLACK_CHANNEL_ID);
+  await writeConfig(config);
+  // Config first, secret second — the setDiscordToken order, for its reason.
+  await writeChannelGatewayEnv(SLACK_ENV_PATH, "Slack", {
+    [SLACK_BOT_TOKEN_ENV_VAR]: botToken,
+    [SLACK_APP_TOKEN_ENV_VAR]: appToken,
+  });
+}
+
+/** OpenClaw's id for the Signal channel — the config key's, and the plugin's. */
+const SIGNAL_CHANNEL_ID = "signal";
+
+/**
+ * How long the gateway waits for its managed signal-cli daemon to come up.
+ * The plugin's cap: on the Jetson signal-cli is a JVM build, whose cold start
+ * alone runs past the 30 s default.
+ */
+const SIGNAL_STARTUP_TIMEOUT_MS = 120_000;
+
+/**
+ * Register the Signal channel with the OpenClaw gateway, on the account
+ * signal-cli already holds (linked from Settings, or by hand).
+ *
+ * The shape is the pinned plugin's documented one (channels/signal.md): the
+ * bot's number as `account` and a `managed-native` transport, so the gateway
+ * starts and supervises signal-cli itself — no second service to install.
+ * `cliPath` is absolute because the gateway unit's PATH is not the shell's.
+ * Signal has no secret: the account's keys live in signal-cli's own data
+ * directory, owned by the same user as the gateway.
+ *
+ * Other keys the owner wrote survive, except the open DM shapes; a transport
+ * block of another kind (an external daemon, a container) is the owner's
+ * choice and is kept as it is, with only the account updated.
+ */
+export async function setSignalAccount(account: string, cliPath: string): Promise<void> {
+  if (!/^\+[1-9][0-9]{6,14}$/.test(account)) throw new Error("Refusing an invalid Signal account number");
+  if (!path.isAbsolute(cliPath)) throw new Error("Refusing a relative signal-cli path");
+  const config = await readConfigForWrite();
+  const channels = ensurePlainObject(asBag(config), "channels");
+  const existing = existingChannelBlock(channels, SIGNAL_CHANNEL_ID);
+  const previousTransport = isPlainObject(existing.transport) ? existing.transport : null;
+  const transport =
+    previousTransport && previousTransport.kind !== undefined && previousTransport.kind !== "managed-native"
+      ? previousTransport
+      : {
+          ...(previousTransport ?? {}),
+          kind: "managed-native",
+          cliPath,
+          startupTimeoutMs:
+            typeof previousTransport?.startupTimeoutMs === "number"
+              ? previousTransport.startupTimeoutMs
+              : SIGNAL_STARTUP_TIMEOUT_MS,
+        };
+  channels[SIGNAL_CHANNEL_ID] = withoutOpenDmAccess({
+    ...existing,
+    enabled: true,
+    account,
+    transport,
+  });
+  trustChannelPlugin(config, SIGNAL_CHANNEL_ID);
+  await writeConfig(config);
+}
+
+/** Env var the gateway resolves the Teams client secret from (OpenClaw's own name). */
+export const MSTEAMS_APP_PASSWORD_ENV_VAR = "MSTEAMS_APP_PASSWORD";
+
+/** OpenClaw's id for the Microsoft Teams channel — the config key's, and the plugin's. */
+const MSTEAMS_CHANNEL_ID = "msteams";
+
+/** EnvironmentFile the gateway unit loads the Teams client secret from. */
+export const MSTEAMS_ENV_PATH = path.join(DATA_DIR, "msteams.env");
+
+/** Where the gateway serves Bot Framework traffic (the plugin's documented path). */
+export const MSTEAMS_WEBHOOK_PATH = "/api/messages";
+
+/**
+ * Register the Microsoft Teams channel with the OpenClaw gateway.
+ *
+ * The pinned plugin's documented shape (channels/msteams/setup.md): `appId`,
+ * `tenantId`, the client secret as `appPassword`, and the webhook path the
+ * gateway serves on its own port. The secret is an env SecretRef with its
+ * value in data/msteams.env at 0600 — the Slack/Discord pattern — and the two
+ * IDs are not secrets, so they stay inline.
+ *
+ * What this cannot do is make the box reachable: Teams delivers to a public
+ * HTTPS endpoint, which ClawBox does not open by itself. The pane says so.
+ */
+export async function setTeamsCredentials(appId: string, appPassword: string, tenantId: string): Promise<void> {
+  if (!isSafeGatewayEnvValue(appPassword)) throw new Error("Refusing to write an unsafe Teams client secret");
+  if (!/^[0-9a-f-]{36}$/i.test(appId) || !/^[A-Za-z0-9.-]{1,253}$/.test(tenantId)) {
+    throw new Error("Refusing invalid Teams identifiers");
+  }
+  const config = await readConfigForWrite();
+  const channels = ensurePlainObject(asBag(config), "channels");
+  const { appPassword: _literalSecret, ...rest } = existingChannelBlock(channels, MSTEAMS_CHANNEL_ID);
+  const previousWebhook = isPlainObject(rest.webhook) ? rest.webhook : {};
+  channels[MSTEAMS_CHANNEL_ID] = withoutOpenDmAccess({
+    ...rest,
+    enabled: true,
+    appId,
+    appPassword: envSecretRef(config, MSTEAMS_APP_PASSWORD_ENV_VAR),
+    tenantId,
+    webhook: { ...previousWebhook, path: MSTEAMS_WEBHOOK_PATH },
+  });
+  trustChannelPlugin(config, MSTEAMS_CHANNEL_ID);
+  await writeConfig(config);
+  await writeChannelGatewayEnv(MSTEAMS_ENV_PATH, "Microsoft Teams", {
+    [MSTEAMS_APP_PASSWORD_ENV_VAR]: appPassword,
+  });
+}
+
+/** The guided channels whose DM pairing codes Settings can approve. */
+const PAIRING_APPROVAL_CHANNELS: ReadonlySet<string> = new Set([
+  SLACK_CHANNEL_ID,
+  SIGNAL_CHANNEL_ID,
+  MSTEAMS_CHANNEL_ID,
+]);
+
+/**
+ * Approve a DM pairing code on a guided channel and notify the sender there
+ * (`openclaw pairing approve <channel> <CODE> --notify`) — the Telegram
+ * approval, for channels whose senders cannot reach a terminal. The channel id
+ * is checked against the guided set here, not trusted from the route, because
+ * it becomes an argv element.
+ */
+export async function approveChannelPairing(channelId: string, code: string): Promise<void> {
+  if (!PAIRING_APPROVAL_CHANNELS.has(channelId)) {
+    throw new Error("Unsupported pairing channel");
+  }
+  const normalized = code.trim().toUpperCase();
+  if (!PAIRING_CODE_RE.test(normalized)) {
+    throw new Error("Invalid pairing code format");
+  }
+  await spawnOpenclaw(["pairing", "approve", channelId, normalized, "--notify"]);
+}
+
 // === Telegram pairing (DM sender approval) ===
 //
 // OpenClaw's default `dmPolicy: "pairing"` makes an unknown Telegram sender's

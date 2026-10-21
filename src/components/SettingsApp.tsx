@@ -52,6 +52,7 @@ import MonitorsPanel from "./MonitorsPanel";
 // marker file and would pull `fs` into the browser bundle.
 import { canonicalPluginId } from "@/lib/plugin-repair-id";
 import PluginRepairNotice, { type PluginRepairInfo } from "./PluginRepairNotice";
+import GuidedChannelPane, { PREVIEW_GUIDED_CHANNELS, type GuidedChannel, type GuidedChannelStatus, toGuidedChannelStatus } from "./GuidedChannelPane";
 import { customWallpaperId, customWallpaperIndex } from "@/lib/custom-wallpapers";
 
 /* ── Types ── */
@@ -233,7 +234,7 @@ interface SystemStats {
 
 // codingAgent is gone from this list on purpose: its settings moved into the
 // Coding Agent app itself (the owner asked for them back there).
-const SECTIONS = ["appearance", "monitors", "wifi", "ai", "localAi", "localModels", "harness", "voice", "channels", "telegram", "email", "whatsapp", "discord", "remote", "users", "system", "update", "about"] as const;
+const SECTIONS = ["appearance", "monitors", "wifi", "ai", "localAi", "localModels", "harness", "voice", "channels", "telegram", "email", "whatsapp", "discord", "slack", "signal", "msteams", "remote", "users", "system", "update", "about"] as const;
 
 /**
  * The channels that live behind the single "Messaging Channels" entry — the same idea
@@ -244,7 +245,7 @@ const SECTIONS = ["appearance", "monitors", "wifi", "ai", "localAi", "localModel
  * (`clawbox:open-settings`) and their status lines are unchanged; only the
  * sidebar stops carrying four near-identical entries.
  */
-const CHANNEL_SECTIONS = ["telegram", "email", "whatsapp", "discord"] as const;
+const CHANNEL_SECTIONS = ["telegram", "email", "whatsapp", "discord", "slack", "signal", "msteams"] as const;
 type ChannelSection = typeof CHANNEL_SECTIONS[number];
 
 const CHANNEL_ITEMS: { id: ChannelSection; icon: string; labelKey: string; hintKey: string }[] = [
@@ -252,7 +253,15 @@ const CHANNEL_ITEMS: { id: ChannelSection; icon: string; labelKey: string; hintK
   { id: "email", icon: "mail", labelKey: "settings.email", hintKey: "settings.channelsEmailHint" },
   { id: "whatsapp", icon: "chat", labelKey: "settings.whatsapp", hintKey: "settings.channelsWhatsappHint" },
   { id: "discord", icon: "forum", labelKey: "settings.discord", hintKey: "settings.channelsDiscordHint" },
+  { id: "slack", icon: "tag", labelKey: "settings.slack", hintKey: "settings.channelsSlackHint" },
+  { id: "signal", icon: "chat_bubble", labelKey: "settings.signal", hintKey: "settings.channelsSignalHint" },
+  { id: "msteams", icon: "groups", labelKey: "settings.msteams", hintKey: "settings.channelsTeamsHint" },
 ];
+
+/** A row the hub shows only when the box switched its preview on. */
+function isPreviewChannel(id: ChannelSection): boolean {
+  return (PREVIEW_GUIDED_CHANNELS as readonly string[]).includes(id);
+}
 
 function isChannelSection(id: string): id is ChannelSection {
   return (CHANNEL_SECTIONS as readonly string[]).includes(id);
@@ -1493,6 +1502,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     email: 0,
     whatsapp: 0,
     discord: 0,
+    slack: 0,
+    signal: 0,
+    msteams: 0,
   });
   const claimChannelRead = useCallback(
     (id: ChannelSection) => {
@@ -2766,6 +2778,82 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
     unsettleChannel("discord");
     refreshDiscordStatus();
   }, [section, isMobile, refreshDiscordStatus, unsettleChannel]);
+
+  // ─── Guided channels (Slack, …): one status slot each, one refresher ───
+  // `null` is "not read yet"; a failed read keeps the last answer, exactly as
+  // the Discord refresher does, and the settled mark tells the hub the
+  // difference between "still asking" and "could not ask".
+  const [guidedStatus, setGuidedStatus] = useState<Record<GuidedChannel, GuidedChannelStatus | null>>({
+    slack: null,
+    signal: null,
+    msteams: null,
+  });
+
+  // Preview channels (CLAWBOX_PREVIEW_CHANNELS) the box switched on. Read once:
+  // the flag lives in the service's environment and only a restart moves it.
+  // Until it answers, no preview row is offered — off is the default.
+  const [previewChannels, setPreviewChannels] = useState<ReadonlySet<string>>(() => new Set());
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch("/setup-api/channels/preview", { cache: "no-store" });
+        if (!r.ok) return;
+        const d: unknown = await r.json();
+        const list = typeof d === "object" && d !== null && Array.isArray((d as { channels?: unknown }).channels)
+          ? (d as { channels: unknown[] }).channels.filter((c): c is string => typeof c === "string")
+          : [];
+        if (!cancelled) setPreviewChannels(new Set(list));
+      } catch {
+        // stays off
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+  const visibleChannelItems = CHANNEL_ITEMS.filter((item) => !isPreviewChannel(item.id) || previewChannels.has(item.id));
+  const refreshGuidedStatus = useCallback(async (id: GuidedChannel) => {
+    const isCurrent = claimChannelRead(id);
+    try {
+      const r = await fetch(`/setup-api/${id}/status`, { cache: "no-store" });
+      if (!isCurrent()) return;
+      if (!r.ok) {
+        console.warn(`[${id}] /setup-api/${id}/status returned`, r.status);
+        return;
+      }
+      const d: unknown = await r.json();
+      if (!isCurrent()) return;
+      setGuidedStatus((prev) => ({ ...prev, [id]: toGuidedChannelStatus(d) }));
+    } catch (err) {
+      console.warn(`[${id}] refresh failed:`, err);
+    } finally {
+      if (isCurrent()) markChannelSettled(id);
+    }
+  }, [markChannelSettled, claimChannelRead]);
+  const refreshSlackStatus = useCallback(() => refreshGuidedStatus("slack"), [refreshGuidedStatus]);
+  const refreshSignalStatus = useCallback(() => refreshGuidedStatus("signal"), [refreshGuidedStatus]);
+  const signalEnabled = previewChannels.has("signal");
+  const refreshTeamsStatus = useCallback(() => refreshGuidedStatus("msteams"), [refreshGuidedStatus]);
+  const teamsEnabled = previewChannels.has("msteams");
+
+  useEffect(() => {
+    if (!isMobile && section !== "slack" && section !== "channels") return;
+    unsettleChannel("slack");
+    refreshSlackStatus();
+  }, [section, isMobile, refreshSlackStatus, unsettleChannel]);
+
+  useEffect(() => {
+    if (!signalEnabled) return;
+    if (!isMobile && section !== "signal" && section !== "channels") return;
+    unsettleChannel("signal");
+    refreshSignalStatus();
+  }, [section, isMobile, signalEnabled, refreshSignalStatus, unsettleChannel]);
+
+  useEffect(() => {
+    if (!teamsEnabled) return;
+    if (!isMobile && section !== "msteams" && section !== "channels") return;
+    unsettleChannel("msteams");
+    refreshTeamsStatus();
+  }, [section, isMobile, teamsEnabled, refreshTeamsStatus, unsettleChannel]);
 
   useEffect(() => {
     if (section !== "discord") return;
@@ -4230,7 +4318,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
               </div>
               <p className="text-[11px] text-[var(--text-muted)] mb-4 leading-relaxed">{t("settings.channelsHelper")}</p>
               <div className="rounded-xl border border-white/[0.08] overflow-hidden divide-y divide-white/[0.06]" data-testid="settings-channels-list">
-                {CHANNEL_ITEMS.map((item) => {
+                {visibleChannelItems.map((item) => {
                   const state = channelState(item.id);
                   // The account IS set up in both states; only one of them is
                   // carrying traffic. The icon follows the account, the dot
@@ -4242,6 +4330,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                     email: refreshEmailStatus,
                     whatsapp: refreshWhatsapp,
                     discord: refreshDiscordStatus,
+                    slack: refreshSlackStatus,
+                    signal: refreshSignalStatus,
+                    msteams: refreshTeamsStatus,
                   }[item.id];
                   // TASK-606: the boot script could not install or consent
                   // this channel's plugin and switched it off, which is why the
@@ -4277,7 +4368,14 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                           </span>
                         </span>
                         <span className="flex-1 min-w-0">
-                          <span className="block text-sm text-[var(--text-primary)] font-medium truncate">{t(item.labelKey)}</span>
+                          <span className="block text-sm text-[var(--text-primary)] font-medium truncate">
+                            {t(item.labelKey)}
+                            {isPreviewChannel(item.id) && (
+                              <span className="ml-2 text-[9px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-amber-500/10 text-amber-300 align-middle">
+                                {t("settings.channelPreviewBadge")}
+                              </span>
+                            )}
+                          </span>
                           {/* State first, subtitle second. A subtitle is only
                               ever a description of an ANSWER, so when there is
                               no answer it must not be allowed to speak: reading
@@ -4369,6 +4467,12 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
                   );
                 })}
               </div>
+              {/* iMessage is an OpenClaw channel too, but only on a Mac: say so
+                  rather than leave the owner wondering why it is missing. */}
+              <p className="flex items-start gap-2 text-[11px] text-[var(--text-muted)] mt-3 mb-0 leading-relaxed" data-testid="settings-channels-imessage-note">
+                <span className="material-symbols-rounded shrink-0" style={{ fontSize: 14 }} aria-hidden="true">info</span>
+                {t("settings.channelsIMessageNote")}
+              </p>
             </div>
           </div>
         )}
@@ -6089,6 +6193,29 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
           </div>
         )}
 
+        {/* ─── Guided channels (Slack, …) ─── */}
+        {activeSection === "slack" && (
+          <GuidedChannelPane channel="slack" status={guidedStatus.slack} onRefresh={refreshSlackStatus} />
+        )}
+        {activeSection === "signal" && (
+          signalEnabled ? (
+            <GuidedChannelPane channel="signal" status={guidedStatus.signal} onRefresh={refreshSignalStatus} />
+          ) : (
+            <div className="max-w-xl">
+              <StatusMessage type="info" message={t("settings.channelPreviewOff")} />
+            </div>
+          )
+        )}
+        {activeSection === "msteams" && (
+          teamsEnabled ? (
+            <GuidedChannelPane channel="msteams" status={guidedStatus.msteams} onRefresh={refreshTeamsStatus} />
+          ) : (
+            <div className="max-w-xl">
+              <StatusMessage type="info" message={t("settings.channelPreviewOff")} />
+            </div>
+          )
+        )}
+
         {/* ─── Harness ─── */}
         {activeSection === "harness" && (
           <div className="max-w-xl space-y-5" data-testid="settings-harness-page">
@@ -6654,6 +6781,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       case "email": return emailStatus?.configured === true;
       case "whatsapp": return waStatus?.state === "paired";
       case "discord": return dcConfigured === true;
+      case "slack": return guidedStatus.slack?.configured === true;
+      case "signal": return guidedStatus.signal?.configured === true;
+      case "msteams": return guidedStatus.msteams?.configured === true;
     }
   };
 
@@ -6668,6 +6798,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       case "email": return emailStatus !== null;
       case "whatsapp": return waStatus !== null;
       case "discord": return dcConfigured !== null;
+      case "slack": return guidedStatus.slack !== null;
+      case "signal": return guidedStatus.signal !== null;
+      case "msteams": return guidedStatus.msteams !== null;
     }
   };
 
@@ -6688,6 +6821,9 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
       case "email": return null;
       case "whatsapp": return waStatus?.receiving ?? null;
       case "discord": return dcReceiving;
+      case "slack": return guidedStatus.slack?.receiving ?? null;
+      case "signal": return guidedStatus.signal?.receiving ?? null;
+      case "msteams": return guidedStatus.msteams?.receiving ?? null;
     }
   };
 
@@ -6727,8 +6863,8 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
         // a deep link happened to load is the same lie with a different
         // number. So: silence while anything is still in flight, as `ai` and
         // `localAi` below already do.
-        const connected = CHANNEL_ITEMS.filter((a) => channelConnected(a.id)).length;
-        if (CHANNEL_ITEMS.every((a) => channelStatusKnown(a.id))) {
+        const connected = visibleChannelItems.filter((a) => channelConnected(a.id)).length;
+        if (visibleChannelItems.every((a) => channelStatusKnown(a.id))) {
           return {
             subtitle: connected > 0
               ? t("settings.channelsConnectedCount", { n: connected })
@@ -6740,7 +6876,7 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
         // confirmed rather than going silent for the rest of the session; the
         // count can only understate, and never says "Not configured" over a
         // channel nobody managed to read.
-        const allSettled = CHANNEL_ITEMS.every((a) => channelState(a.id) !== "unknown");
+        const allSettled = visibleChannelItems.every((a) => channelState(a.id) !== "unknown");
         if (allSettled && connected > 0) {
           return { subtitle: t("settings.channelsConnectedCount", { n: connected }) };
         }
@@ -6822,6 +6958,17 @@ export default function SettingsApp({ ui, asPage = false }: SettingsAppProps) {
         if (dcState === "denied-no-allowlist") return { subtitle: t("settings.discordStateDenied") };
         if (dcState === "offline") return { subtitle: t("settings.discordStateOffline") };
         return { subtitle: dcBotName || (t("settings.botConnected") || "Connected") };
+      }
+      case "slack":
+      case "signal":
+      case "msteams": {
+        const st = guidedStatus[id];
+        if (st === null) return { subtitle: null };
+        if (!st.configured) return { subtitle: t("settings.notConfigured") || "Not configured" };
+        if (st.tokenRejected) return { subtitle: t("settings.channelStateRejected", { channel: t(`settings.${id}`) }) };
+        if (st.state === "offline") return { subtitle: t("settings.channelStateOffline") };
+        if (st.state === "listening") return { subtitle: t("settings.channelStateListening", { channel: t(`settings.${id}`) }) };
+        return { subtitle: st.team ?? st.account ?? st.botName ?? (t("settings.botConnected") || "Connected") };
       }
       case "remote":
         return { subtitle: null };
