@@ -82,7 +82,7 @@ describe("phoneClientAddress", () => {
   it("names an address in one canonical spelling", () => {
     expect(phone.phoneClientAddress(req("127.0.0.1", { "cf-connecting-ip": "2001:DB8:0:0:0:0:0:7" }))).toBe("2001:db8::7");
     expect(phone.phoneClientAddress(req("127.0.0.1", { "cf-connecting-ip": "0:0:0:0:0:ffff:203.0.113.7" }))).toBe("203.0.113.7");
-    expect(phone.phoneClientAddress(req("fe80::1%wlan0"))).toBe("fe80::1%wlan0");
+    expect(phone.phoneClientAddress(req("fe80::1%wlan0"))).toBe("fe80::1%wlan0"); // public-hygiene: allow link-local test fixture, no real host
   });
 });
 
