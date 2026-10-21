@@ -236,6 +236,17 @@ describe("coding_run_list", () => {
 });
 
 describe("coding_agent_resume", () => {
+  it("points a failed, resumable run that owed nothing at a continuation that says so again", async () => {
+    apiGet.mockResolvedValue({ run: { ...RUN, status: "failed", resumable: true, sessionId: "sess-1", deliverable: { kind: "none" } } });
+    const out = await harness().call("coding_agent_resume", { run_id: RUN.id });
+    expect(out.isError).toBe(true);
+    if (!out.isError) return;
+    expect(out.error.code).toBe("CONFLICT");
+    expect(out.error.next).toMatch(/resume_run_id/);
+    expect(out.error.next).toMatch(/pass no_deliverable again/);
+    expect(apiPost).not.toHaveBeenCalled();
+  });
+
   it("resumes a paused run of the agent's own, and says so without polling", async () => {
     apiGet.mockResolvedValue({ run: { ...RUN, status: "paused", pauseReason: { kind: "owner" } } });
     apiPost.mockResolvedValue({ run: { ...RUN, status: "running" } });

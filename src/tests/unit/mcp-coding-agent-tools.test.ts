@@ -763,8 +763,18 @@ describe("the deliverable", () => {
 
     apiGet.mockResolvedValue({ run: { ...failed, deliverable: null } });
     const plain = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
+    expect(plain.isError).toBe(false);
     if (plain.isError) return;
     expect(plain.text).not.toMatch(/no_deliverable/);
+
+    // A `none` run can also end gave_up — its delivery pipeline stopped — and
+    // that branch offers a continuation too.
+    apiGet.mockResolvedValue({ run: { ...RUN, status: "gave_up", resumable: true, deliverable: { kind: "none" } } });
+    const stopped = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
+    expect(stopped.isError).toBe(false);
+    if (stopped.isError) return;
+    expect(stopped.text).toMatch(/resume_run_id/);
+    expect(stopped.text).toMatch(/pass no_deliverable again/);
   });
 
   it("says what is missing on a run that gave up, and NOT to start a fresh one", async () => {

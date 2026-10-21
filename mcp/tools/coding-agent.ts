@@ -710,6 +710,7 @@ function describeRun(run: RunPayload, tail: number): string {
       + " says what is missing. Its work so far is on disk and its session is intact. Do NOT start a fresh run for the same task:"
       + " tell the user what is missing and that Resume on the run's page in the Coding Agent app carries on in the same session."
       + " If they would rather you narrowed the task, call coding_agent_run with resume_run_id set to this id."
+      + continuationBar(run)
       + (run.source === "agent" ? " If they ask you to press Resume yourself, coding_agent_resume does it — with `message` to tell the run what it missed." : ""),
     );
   } else if (run.status === "failed" && run.failureKind === "harness_not_ready") {
