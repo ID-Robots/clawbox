@@ -49,6 +49,15 @@
  * the same few lines; each move is handed to the listeners (`onActiveChange`)
  * once the write has landed, and src/lib/anthropic-swap.ts fans it out to the
  * consumers and records what each did as `lastSwap`.
+ *
+ * THE PICK. When the active account has to move, the next one is the first
+ * usable one in the owner's order (`pickMode: "order"`, the default), or —
+ * the owner's choice, `most-room` — the subscription whose fullest usage
+ * window has the most room, an API key never ahead of a subscription
+ * (src/lib/anthropic-limit.ts). Anthropic's windows are read only then, just
+ * before the move or a spawn's pick, at most every ten minutes per account
+ * (`readRoom`), never on a timer; the gateway learns the pick only as the
+ * account its order leads with.
  */
 
 import crypto from "crypto";
@@ -76,8 +85,10 @@ import {
   resolveActiveAccount,
   type AnthropicAccountStatus,
   type AnthropicLimitKind,
+  type PickMode,
   type PoolHealth,
 } from "@/lib/anthropic-limit";
+import { fetchAnthropicUsage } from "@/lib/anthropic-usage";
 
 // ── the record ──────────────────────────────────────────────────────────────
 
@@ -190,6 +201,8 @@ interface PoolFile {
   activeId: string | null;
   /** The owner's preference: back to the first account in the order once it can answer again. */
   returnToPrimary: boolean;
+  /** How the next account is picked when the active one has to move (src/lib/anthropic-limit.ts); `order` unless the owner chose otherwise. */
+  pickMode: PickMode;
   lastSwap: SwapEvent | null;
   gateway: GatewayMirror | null;
 }
@@ -331,6 +344,7 @@ function normalizePool(raw: unknown): PoolFile {
     accounts,
     activeId,
     returnToPrimary: v.returnToPrimary === true,
+    pickMode: v.pickMode === "most-room" ? "most-room" : "order",
     lastSwap: normalizeSwapEvent(v.lastSwap),
     // A mirror of an account that is no longer on the list is no mirror at all.
     gateway: gateway && seen.has(gateway.accountId) ? gateway : null,
@@ -424,6 +438,8 @@ interface PoolRuntime {
   changeListeners: Set<(change: ActiveChange) => void>;
   wakeTimer: ReturnType<typeof setTimeout> | null;
   wakeAt: number | null;
+  /** Per account, how full its fullest usage window was and when that was asked (readRoom); `percent` null: no answer. */
+  room: Map<string, { percent: number | null; at: number }>;
 }
 
 function runtime(): PoolRuntime {
@@ -435,6 +451,7 @@ function runtime(): PoolRuntime {
     changeListeners: new Set(),
     wakeTimer: null,
     wakeAt: null,
+    room: new Map(),
   }));
 }
 
@@ -467,6 +484,8 @@ function settleActive(file: PoolFile, now: number, fallbackCause: SwapCause, ctx
   const next = resolveActiveAccount(file.accounts, stillListed ? previous : null, now, {
     returnToPrimary: file.returnToPrimary,
     reselect,
+    mode: file.pickMode,
+    fullness: roomNow(now),
   })?.id ?? null;
   if (next === previous) return null;
   file.activeId = next;
@@ -654,6 +673,7 @@ export interface PoolState {
   accounts: AnthropicAccount[];
   activeId: string | null;
   returnToPrimary: boolean;
+  pickMode: PickMode;
   lastSwap: SwapEvent | null;
   gateway: GatewayMirror | null;
   health: PoolHealth;
@@ -664,6 +684,7 @@ function stateOf(file: PoolFile, now: number): PoolState {
     accounts: file.accounts.map((a) => ({ ...a })),
     activeId: file.activeId,
     returnToPrimary: file.returnToPrimary,
+    pickMode: file.pickMode,
     lastSwap: file.lastSwap ? { ...file.lastSwap, consumers: { ...file.lastSwap.consumers } } : null,
     gateway: file.gateway ? { ...file.gateway } : null,
     health: poolHealth(file.accounts, now),
@@ -936,6 +957,7 @@ export interface FailureContext {
 }
 
 export async function markLimited(id: unknown, until: number, kind: AnthropicLimitKind, context: FailureContext = {}): Promise<LimitRecorded> {
+  if (typeof id === "string") await readRoom(new Set([id]));
   return mutate((file, now, ctx) => {
     const before = poolHealth(file.accounts, now);
     const account = find(file, id);
@@ -966,6 +988,7 @@ export async function clearLimit(id: unknown): Promise<AnthropicAccount> {
 
 /** An account's credential needs the owner (`revoked`) or a renewal (`expired`). */
 export async function markCredentialProblem(id: unknown, status: "expired" | "revoked", context: FailureContext = {}): Promise<void> {
+  if (typeof id === "string") await readRoom(new Set([id]));
   await mutate((file, now, ctx) => {
     const account = find(file, id);
     // A limit outranks a credential problem only while it runs: the owner
@@ -992,6 +1015,70 @@ export async function setReturnToPrimary(on: boolean): Promise<void> {
   await mutate((file) => {
     file.returnToPrimary = on === true;
   }, { cause: "owner" });
+}
+
+/**
+ * The owner's pick (src/lib/anthropic-limit.ts): `order`, the default, or
+ * `most-room`. Moves nothing by itself — the box is sticky either way — and
+ * decides the next time the active account has to move.
+ */
+export async function setPickMode(mode: PickMode): Promise<void> {
+  await mutate((file) => {
+    file.pickMode = mode === "most-room" ? "most-room" : "order";
+  }, { cause: "owner" });
+}
+
+// ── room ────────────────────────────────────────────────────────────────────
+
+/** A usage reading is good for ten minutes: not asked again sooner, and not used later. */
+const ROOM_TTL_MS = 10 * 60_000;
+
+/** How full each account's fullest window is, from the readings younger than ROOM_TTL_MS. */
+function roomNow(now: number): Map<string, number> {
+  const room = new Map<string, number>();
+  for (const [id, reading] of runtime().room) {
+    if (reading.percent !== null && now - reading.at < ROOM_TTL_MS) room.set(id, reading.percent);
+  }
+  return room;
+}
+
+/**
+ * Under the owner's "most room" pick, just before the active account moves
+ * or a spawn picks one (`leaving`: the account that is about to stop
+ * answering, or the ones a spawn has seen refuse): Anthropic's usage windows
+ * for every `oauth` account that could be picked and was not asked within
+ * ROOM_TTL_MS, all at once. A pool that is not about to move asks nothing,
+ * and nothing asks on a timer. Read with the access token the pool holds —
+ * never renewed for it: one at its end has no reading, and the pick takes it
+ * in the owner's order. Never throws.
+ */
+async function readRoom(leaving: ReadonlySet<string>): Promise<void> {
+  const state = runtime();
+  const file = state.snapshot;
+  if (!file || file.pickMode !== "most-room") return;
+  const now = Date.now();
+  const active = file.activeId ? file.accounts.find((a) => a.id === file.activeId) : undefined;
+  if (active && !leaving.has(active.id) && isUsable(active, now)) return;
+  const due = file.accounts.filter((a) => {
+    const asked = state.room.get(a.id)?.at;
+    return a.kind === "oauth" && !leaving.has(a.id) && isUsable(a, now) && (asked === undefined || now - asked >= ROOM_TTL_MS);
+  });
+  await Promise.all(due.map(async (account) => {
+    // Asked once per window, whatever the answer: a failure is not asked again at once.
+    state.room.set(account.id, { percent: null, at: now });
+    try {
+      const stored = await readDeviceSecret({ scope: ANTHROPIC_ACCOUNTS_SCOPE, name: secretName(account.id) });
+      const tokens = stored.found ? parseOAuthSecret(stored.value) : null;
+      if (!tokens || (tokens.expires !== null && tokens.expires <= Date.now())) return;
+      const reading = await fetchAnthropicUsage(tokens.access);
+      if (!reading) return;
+      const percents = [reading.utilization.fiveHour, reading.utilization.sevenDay].filter((p): p is number => p !== null);
+      const percent = reading.exhausted ? 100 : percents.length > 0 ? Math.max(...percents) : null;
+      state.room.set(account.id, { percent, at: now });
+    } catch {
+      // No reading: the pick takes this account in the owner's order.
+    }
+  }));
 }
 
 /** File the swap the listeners are fanning out, so the card can show it while it happens. */
@@ -1309,11 +1396,12 @@ export async function gatewayCredentialFor(id: string): Promise<{ access: string
  */
 export async function prepareAccount(opts: { exclude?: ReadonlySet<string>; fallback?: boolean } = {}): Promise<{ prepared: PreparedAccount | null; health: PoolHealth }> {
   const tried = new Set(opts.exclude ?? []);
+  await readRoom(tried);
   for (;;) {
     const now = Date.now();
     const file = await serialised(loadLocked);
     const accounts = file.accounts.map((a) => ({ ...a }));
-    const next = pickForSpawn(accounts, file.activeId, now, tried);
+    const next = pickForSpawn(accounts, file.activeId, now, tried, { mode: file.pickMode, fullness: roomNow(now) });
     if (!next) {
       if (opts.fallback) {
         for (const account of accounts) {
@@ -1507,6 +1595,8 @@ export interface AnthropicPoolView {
   loginAvailable: boolean;
   /** The owner's preference: back to the first account once its limit is over. */
   returnToPrimary: boolean;
+  /** How the next account is picked when the active one has to move: the owner's order, or the most room. */
+  pickMode: PickMode;
   /** The most recent move of the active account and what each consumer did about it — labels and times only. */
   lastSwap: SwapEvent | null;
   /** Whether the chat runs on the pool's Claude accounts, and which one the gateway's order leads with. */
@@ -1540,6 +1630,7 @@ export async function describePool(): Promise<AnthropicPoolView> {
     activeAccountId: active?.id ?? null,
     loginAvailable: !accounts.some((a) => a.kind === "login") && hasAnthropicLogin(),
     returnToPrimary: file.returnToPrimary,
+    pickMode: file.pickMode,
     lastSwap: file.lastSwap ? { ...file.lastSwap, consumers: { ...file.lastSwap.consumers } } : null,
     gateway: {
       following: mirrored !== null,
@@ -1579,6 +1670,7 @@ export function _resetAnthropicAccountsForTests(): void {
   state.wakeAt = null;
   state.wakeListeners.clear();
   state.changeListeners.clear();
+  state.room.clear();
 }
 
 export { isUsable };

@@ -262,6 +262,48 @@ describe("the active account", () => {
   });
 });
 
+describe("the owner's pick: their order, or the most room", () => {
+  const NOW_P = Date.UTC(2026, 9, 21, 12, 0);
+  const of = (id: string, kind: string, status: PoolMember["status"] = "ok"): PoolMember => ({ id, status, limitedUntil: status === "limited" ? NOW_P + 60_000 : null, kind });
+  const room = (entries: Record<string, number>) => new Map(Object.entries(entries));
+
+  it("is exactly the owner's order with no mode set — an API key the owner put first stays first, whatever the readings", () => {
+    const pool = [of("key", "api_key"), of("a", "oauth"), of("b", "oauth")];
+    const full = room({ a: 90, b: 10 });
+    expect(pickAccount(pool, NOW_P)?.id).toBe("key");
+    expect(pickAccount(pool, NOW_P, new Set(), { fullness: full })?.id).toBe("key");
+    expect(pickAccount(pool, NOW_P, new Set(), { mode: "order", fullness: full })?.id).toBe("key");
+    expect(pickAccount(pool, NOW_P, new Set(["key"]), { fullness: full })?.id).toBe("a");
+    expect(resolveActiveAccount(pool, null, NOW_P, { fullness: full })?.id).toBe("key");
+    expect(pickForSpawn(pool, "key", NOW_P, new Set(["key"]), { fullness: full })?.id).toBe("a");
+  });
+
+  it("takes the subscription whose fullest window has the most room, the owner's order breaking a tie", () => {
+    const pool = [of("a", "oauth"), of("b", "oauth"), of("c", "oauth")];
+    expect(pickAccount(pool, NOW_P, new Set(), { mode: "most-room", fullness: room({ a: 80, b: 35, c: 60 }) })?.id).toBe("b");
+    expect(pickAccount(pool, NOW_P, new Set(), { mode: "most-room", fullness: room({ a: 40, b: 40, c: 60 }) })?.id).toBe("a");
+    // A limited account is no candidate, however empty its reading.
+    expect(pickAccount([of("a", "oauth", "limited"), ...pool.slice(1)], NOW_P, new Set(), { mode: "most-room", fullness: room({ a: 0, b: 70, c: 60 }) })?.id).toBe("c");
+  });
+
+  it("never puts an API key ahead of a subscription, and takes an account with no reading after those with one, in the owner's order", () => {
+    const pool = [of("key", "api_key"), of("login", "login"), of("a", "oauth"), of("b", "oauth")];
+    expect(pickAccount(pool, NOW_P, new Set(), { mode: "most-room", fullness: room({ b: 99 }) })?.id).toBe("b");
+    expect(pickAccount(pool, NOW_P, new Set(), { mode: "most-room" })?.id).toBe("login");
+    expect(pickAccount(pool, NOW_P, new Set(["login", "a", "b"]), { mode: "most-room" })?.id).toBe("key");
+  });
+
+  it("stays sticky: the most room decides only when the active account has to move, and the owner's reorder means the account they put first", () => {
+    const pool = [of("a", "oauth"), of("b", "oauth"), of("c", "oauth")];
+    const opts = { mode: "most-room" as const, fullness: room({ a: 90, b: 50, c: 5 }) };
+    expect(resolveActiveAccount(pool, "a", NOW_P, opts)?.id).toBe("a");
+    expect(resolveActiveAccount([of("a", "oauth", "limited"), pool[1], pool[2]], "a", NOW_P, opts)?.id).toBe("c");
+    expect(resolveActiveAccount(pool, "b", NOW_P, { ...opts, reselect: true })?.id).toBe("a");
+    expect(pickForSpawn(pool, "a", NOW_P, new Set(), opts)?.id).toBe("a");
+    expect(pickForSpawn(pool, "a", NOW_P, new Set(["a"]), opts)?.id).toBe("c");
+  });
+});
+
 describe("a bare rate limit from something that does not retry it (TASK-1260 review)", () => {
   it("is a throttle, not yet a limit, when neither the words nor the reason give a reset time", () => {
     expect(classifyAnthropicFailure('HTTP 429: {"type":"error","error":{"type":"rate_limit_error"}}', AT_2227_SOFIA, { transientRate: true }))

@@ -162,7 +162,8 @@ async function twoClaudeAccounts() {
 }
 
 const p = (id: string) => `anthropic:clawbox-${id}`;
-const spent = (resetsAt: number): Usage => ({ exhausted: true, resetsAt, kind: "session" });
+const UNSAID = { fiveHour: null, sevenDay: null };
+const spent = (resetsAt: number): Usage => ({ exhausted: true, resetsAt, kind: "session", utilization: UNSAID });
 const rateLimited = (now = Date.now(), until = now + 30_000): Failure => ({
   cooldownUntil: until, cooldownReason: "rate_limit", disabledUntil: null, disabledReason: null, blockedUntil: null, lastFailureAt: now - 1_000,
 });
@@ -627,7 +628,7 @@ describe("what core saw", () => {
     const core = fakeCore();
     const { work } = await twoClaudeAccounts();
     await gw.keepGatewayMirror();
-    core.usage.set("sk-ant-oat01-work", { exhausted: false, resetsAt: null, kind: "session" });
+    core.usage.set("sk-ant-oat01-work", { exhausted: false, resetsAt: null, kind: "session", utilization: UNSAID });
     core.failures[p(work.id)] = rateLimited();
     expect(await gw.noteGatewayCooldowns()).toBe(0);
     expect((await pool.readAccounts()).every((a) => a.status === "ok")).toBe(true);
@@ -740,7 +741,7 @@ describe("failed gateway turns", () => {
     gw.startGatewaySwap();
     const { work } = await twoClaudeAccounts();
     await gw.keepGatewayMirror();
-    core.usage.set("sk-ant-oat01-work", { exhausted: true, resetsAt: Date.now() + 3 * 24 * H, kind: "weekly" });
+    core.usage.set("sk-ant-oat01-work", { exhausted: true, resetsAt: Date.now() + 3 * 24 * H, kind: "weekly", utilization: UNSAID });
     core.failures[p(work.id)] = rateLimited();
     const outcome = await gw.reportChatFailure({
       errorMessage: "⚠️ API rate limit reached. Please try again later.",
