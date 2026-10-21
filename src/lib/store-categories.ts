@@ -21,9 +21,65 @@ export const CATEGORY_COLORS: Record<string, string> = {
   // their tiles all fall to the grey default.
   "ai": "#eab308",
   "weather": "#06b6d4",
+  // Apps published from a ClawBox (src/lib/store-publish.ts).
+  "clawbox-apps": "#f97316",
 };
 
 export const DEFAULT_CATEGORY_COLOR = "#6b7280";
+
+// ── ClawBox Apps ─────────────────────────────────────────────────────────────
+//
+// The Store lists two things: ClawHub skills, installed through the OpenClaw
+// CLI, and ClawBox apps — Coding Agent projects another box published, with
+// `source: "clawbox"`, filed under the `clawbox-apps` category, installed by
+// downloading their package (src/lib/store-install.ts). The listing's
+// `source` is what tells them apart; the category is only where they are shown.
+
+export const CLAWBOX_APP_SOURCE = "clawbox";
+export const CLAWBOX_APPS_CATEGORY = "clawbox-apps";
+export const CLAWBOX_APPS_CATEGORY_NAME = "ClawBox Apps";
+
+export interface StoreCategory {
+  id: string;
+  name: string;
+  count: number;
+}
+
+/** True for a ClawBox app published from a box, false for a ClawHub skill. */
+export function isClawboxListing(listing: { source?: unknown } | null | undefined): boolean {
+  return listing?.source === CLAWBOX_APP_SOURCE;
+}
+
+/**
+ * The category tabs with "ClawBox Apps" among them, FIRST: named and counted
+ * even when the portal's category list does not carry it yet but the apps
+ * do, and never twice. No ClawBox app anywhere, no tab — an empty one would
+ * only be a dead end.
+ */
+export function mergeStoreCategories(
+  categories: readonly StoreCategory[],
+  apps: ReadonlyArray<{ source?: unknown; category?: unknown }>,
+): StoreCategory[] {
+  const listed = apps.filter((app) => isClawboxListing(app) || app.category === CLAWBOX_APPS_CATEGORY).length;
+  const seen = new Set<string>();
+  let clawbox: StoreCategory | null = null;
+  const rest: StoreCategory[] = [];
+  for (const category of categories) {
+    if (!category || typeof category.id !== "string" || seen.has(category.id)) continue;
+    seen.add(category.id);
+    if (category.id === CLAWBOX_APPS_CATEGORY) {
+      clawbox = {
+        id: CLAWBOX_APPS_CATEGORY,
+        name: category.name?.trim() ? category.name : CLAWBOX_APPS_CATEGORY_NAME,
+        count: Math.max(Number.isFinite(category.count) ? category.count : 0, listed),
+      };
+    } else {
+      rest.push(category);
+    }
+  }
+  if (!clawbox && listed > 0) clawbox = { id: CLAWBOX_APPS_CATEGORY, name: CLAWBOX_APPS_CATEGORY_NAME, count: listed };
+  return clawbox ? [clawbox, ...rest] : rest;
+}
 
 export interface InstalledMeta {
   name: string;

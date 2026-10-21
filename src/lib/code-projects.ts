@@ -608,42 +608,9 @@ export async function buildProject(
     );
   }
 
-  // Inline local CSS — lookaheads match both attribute orderings in one pass
-  let filesInlined = 0;
-  html = await replaceAsync(
-    html,
-    /<link\s+(?=[^>]*rel=["']stylesheet["'])(?=[^>]*href=["']([^"']+)["'])[^>]*\/?>/gi,
-    async (match, href) => {
-      if (isExternalUrl(href)) return match;
-      try {
-        const cssPath = safePath(projectId, href);
-        const css = await fs.readFile(cssPath, "utf-8");
-        filesInlined++;
-        return `<style>\n${css}\n</style>`;
-      } catch {
-        return match;
-      }
-    }
-  );
-
-  // Inline local JS: <script src="local.js"></script>
-  html = await replaceAsync(
-    html,
-    /<script\s+[^>]*src=["']([^"']+)["'][^>]*><\/script>/gi,
-    async (match, src) => {
-      if (isExternalUrl(src)) return match;
-      try {
-        const jsPath = safePath(projectId, src);
-        const js = await fs.readFile(jsPath, "utf-8");
-        filesInlined++;
-        // Neutralize any literal "</script>" in the source so it can't close
-        // the inlined block early and dump the remainder into the DOM.
-        return `<script>\n${escapeScriptClose(js)}\n</script>`;
-      } catch {
-        return match;
-      }
-    }
-  );
+  const inlined = await inlineLocalAssets(html, (href) => safePath(projectId, href));
+  html = inlined.html;
+  const filesInlined = inlined.filesInlined;
 
   // First build registers the app on the desktop via the shared chokepoint
   // (same on-disk layout + meta.json shape as the webapps POST route). A
@@ -673,6 +640,71 @@ export async function buildProject(
 
   const url = `/setup-api/webapps?app=${projectId}`;
   return { html, url, filesInlined };
+}
+
+/**
+ * Inline a page's local stylesheets and scripts, the one-file form a desktop
+ * web app is served as. `resolve` maps an href to a file inside the app's own
+ * folder and throws for one outside it; a reference it cannot read is left as
+ * it was.
+ */
+async function inlineLocalAssets(html: string, resolve: (href: string) => string): Promise<{ html: string; filesInlined: number }> {
+  // Inline local CSS — lookaheads match both attribute orderings in one pass
+  let filesInlined = 0;
+  html = await replaceAsync(
+    html,
+    /<link\s+(?=[^>]*rel=["']stylesheet["'])(?=[^>]*href=["']([^"']+)["'])[^>]*\/?>/gi,
+    async (match, href) => {
+      if (isExternalUrl(href)) return match;
+      try {
+        const cssPath = resolve(href);
+        const css = await fs.readFile(cssPath, "utf-8");
+        filesInlined++;
+        return `<style>\n${css}\n</style>`;
+      } catch {
+        return match;
+      }
+    }
+  );
+
+  // Inline local JS: <script src="local.js"></script>
+  html = await replaceAsync(
+    html,
+    /<script\s+[^>]*src=["']([^"']+)["'][^>]*><\/script>/gi,
+    async (match, src) => {
+      if (isExternalUrl(src)) return match;
+      try {
+        const jsPath = resolve(src);
+        const js = await fs.readFile(jsPath, "utf-8");
+        filesInlined++;
+        // Neutralize any literal "</script>" in the source so it can't close
+        // the inlined block early and dump the remainder into the DOM.
+        return `<script>\n${escapeScriptClose(js)}\n</script>`;
+      } catch {
+        return match;
+      }
+    }
+  );
+  return { html, filesInlined };
+}
+
+/**
+ * A folder's index.html with its local CSS and JS inlined — what
+ * `buildProject` makes of a code project, for any folder: a ClawBox app
+ * installed from the Store (src/lib/store-install.ts) is a folder project,
+ * not a code project. A query or fragment on a reference is dropped, and a
+ * root-relative one (`/style.css`) is read from the folder's root.
+ */
+export async function bundleFolderHtml(directory: string): Promise<string> {
+  const root = path.resolve(directory);
+  const html = await fs.readFile(path.join(root, "index.html"), "utf-8");
+  const resolve = (href: string): string => {
+    const file = href.split(/[?#]/)[0].replace(/^\/+/, "");
+    const resolved = path.resolve(root, file);
+    if (!resolved.startsWith(root + path.sep)) throw new ValidationError("Path traversal denied");
+    return resolved;
+  };
+  return (await inlineLocalAssets(html, resolve)).html;
 }
 
 /**

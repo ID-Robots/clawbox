@@ -9,6 +9,7 @@ import { kvDelete } from "@/lib/kv-store";
 import { WEBAPPS_DIR } from "@/lib/code-projects";
 import { safeAppId, webappIconPath } from "@/lib/webapp-icon";
 import { disablePublicLink } from "@/lib/public-app-links";
+import { removeStoreInstalledFolder } from "@/lib/store-install-receipt";
 
 export const dynamic = "force-dynamic";
 
@@ -228,6 +229,27 @@ export async function POST(req: Request) {
       }
     }
 
+    // A ClawBox app installed from the Store is also a project folder in the
+    // owner's project folder (src/lib/store-install.ts). Only a folder that
+    // carries the Store's receipt for exactly this id is removed — never one
+    // of the same name the owner made — and it goes BEFORE the web app and the
+    // desktop entry, for the reason the skill folder does: a removal that
+    // stops part-way must leave the owner the entry to retry from.
+    let projectRemoved = false;
+    try {
+      projectRemoved = await removeStoreInstalledFolder(appId);
+    } catch (err) {
+      console.warn("[uninstall] Failed to remove the app's project folder:", err instanceof Error ? err.message : err);
+      return NextResponse.json({
+        ok: false,
+        error: "The app's project folder could not be fully removed, so the uninstall was stopped and part of the folder may already be gone. Try again; if it keeps failing, remove the folder from the Files app.",
+        code: "project_remove_failed",
+        retryable: true,
+        appId,
+        skillRemoved,
+      }, { status: 503 });
+    }
+
     // Remove the deployed webapp, if this app is one. `webapp_create`,
     // `webapp_update` and `code_project_build` all deploy to
     // data/webapps/<appId>/, and /setup-api/webapps serves straight off that
@@ -358,6 +380,7 @@ export async function POST(req: Request) {
       appId,
       skillRemoved,
       ...(skillHalfChecked ? {} : { skillHalfChecked: false }),
+      ...(projectRemoved ? { projectRemoved: true } : {}),
     });
   } catch (err) {
     console.error("[uninstall] Uninstall failed:", err instanceof Error ? err.message : err);

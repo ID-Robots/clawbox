@@ -2012,7 +2012,10 @@ function ChromeDesktopInner() {
   // Install app handler — called after AppStore's server-side install completes
   const handleInstallApp = useCallback((app: StoreApp) => {
     setInstalledApps((prev) => prev.includes(app.id) ? prev : [...prev, app.id]);
-    setInstalledMeta((prev) => ({ ...prev, [app.id]: { name: app.name, color: app.color, iconUrl: app.iconUrl, developer: app.developer } }));
+    // A ClawBox app from the Store is a web app the install registered: its
+    // `webappUrl` is what makes a click open its window rather than a skill's
+    // settings (src/lib/store-install.ts).
+    setInstalledMeta((prev) => ({ ...prev, [app.id]: { name: app.name, color: app.color, iconUrl: app.iconUrl, developer: app.developer, ...(app.webappUrl ? { webappUrl: app.webappUrl } : {}) } }));
     setHiddenInstalledApps((prev) => prev.filter((id) => id !== app.id));
     setRecentlyInstalled(app.id);
     setTimeout(() => setRecentlyInstalled(null), 1000);

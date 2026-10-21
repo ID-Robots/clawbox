@@ -4,7 +4,7 @@ import { useState, useEffect, useLayoutEffect, useCallback, useId, useRef, useMe
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { useT } from "@/lib/i18n";
 import { useTr } from "@/lib/i18n-floor";
-import { CATEGORY_COLORS, DEFAULT_CATEGORY_COLOR } from "@/lib/store-categories";
+import { CATEGORY_COLORS, CLAWBOX_APP_SOURCE, DEFAULT_CATEGORY_COLOR, isClawboxListing, mergeStoreCategories } from "@/lib/store-categories";
 import { clawhubSkillUrl } from "@/lib/clawhub-url";
 import { categoryLabelFromKey } from "@/lib/hermes-skill-facets";
 import { announceSkillChange } from "@/lib/skill-change-message";
@@ -38,6 +38,12 @@ interface StoreApp {
   /** First-party app (ClawHub channel === "official"). The `verified` flag is
    *  true for every listing, so `channel` is the only meaningful trust signal. */
   official?: boolean;
+  /** "clawbox" for a ClawBox app published from a box; absent for a ClawHub skill. */
+  source?: typeof CLAWBOX_APP_SOURCE;
+  /** A ClawBox app's kind, from its clawbox.json (server, webapp, site, tool). */
+  kind?: string | null;
+  /** What the desktop opens for a ClawBox app the install put there. */
+  webappUrl?: string;
 }
 
 interface ApiApp {
@@ -52,6 +58,10 @@ interface ApiApp {
   url?: string;
   tags?: string[];
   channel?: string;
+  /** A ClawBox app's record (src/lib/store-install.ts): its own description, no rating or installs yet. */
+  source?: string;
+  kind?: string | null;
+  description?: string;
 }
 
 type SortBy = "popular" | "rating" | "name";
@@ -106,11 +116,12 @@ interface AppDetail {
 }
 
 function apiToStoreApp(app: ApiApp): StoreApp {
+  const clawbox = isClawboxListing(app);
   return {
     id: app.slug,
     name: app.name,
-    description: app.summary,
-    rating: app.rating,
+    description: typeof app.summary === "string" ? app.summary : (app.description ?? ""),
+    rating: typeof app.rating === "number" ? app.rating : 0,
     color: CATEGORY_COLORS[app.category] || DEFAULT_CATEGORY_COLOR,
     category: app.category,
     iconUrl: `${STORE_ICONS_BASE}/${app.slug}.png`,
@@ -120,6 +131,7 @@ function apiToStoreApp(app: ApiApp): StoreApp {
     url: app.url,
     tags: app.tags,
     official: app.channel === "official",
+    ...(clawbox ? { source: CLAWBOX_APP_SOURCE, kind: app.kind ?? null } : {}),
   };
 }
 
@@ -234,7 +246,10 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
         const fresh = sortApps(data.apps.map(apiToStoreApp), sortByRef.current);
         setApps(fresh);
         seenSlugsRef.current = new Set(fresh.map(a => a.id));
-        if (data.categories.length > 0) setCategories(data.categories);
+        // "ClawBox Apps" first, named even before the portal's category list
+        // carries it (src/lib/store-categories.ts).
+        const merged = mergeStoreCategories(data.categories ?? [], data.apps);
+        if (merged.length > 0) setCategories(merged);
         // The header's count is the CATALOGUE size; a search/category fetch
         // answers the filter's total and must not rewrite it.
         if (category === "All" && !search) setTotalApps(data.total);
@@ -298,13 +313,16 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
         if (res.status === 404) { unknownSlugsRef.current.add(id); return null; }
         if (!res.ok) return null;
         const app = await res.json() as Partial<ApiApp>;
+        // A ClawBox app has its own description and no rating or install
+        // count yet; a skill record without them is not one the Store wrote.
+        const clawbox = isClawboxListing(app);
         if (
           app.slug !== id
           || typeof app.name !== "string"
-          || typeof app.summary !== "string"
+          || (typeof app.summary !== "string" && !clawbox)
           || typeof app.category !== "string"
-          || typeof app.rating !== "number"
-          || typeof app.installs !== "string"
+          || (typeof app.rating !== "number" && !clawbox)
+          || (typeof app.installs !== "string" && !clawbox)
         ) return null;
         return apiToStoreApp(app as ApiApp);
       } catch (err) {
@@ -494,7 +512,10 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
       const res = await fetch("/setup-api/apps/install", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ appId: ref ?? app.id }),
+        // A ClawBox app is downloaded and unpacked as a project, not installed
+        // through ClawHub (src/lib/store-install.ts); the route reads its
+        // package and checksum from the Store itself.
+        body: JSON.stringify(app.source === CLAWBOX_APP_SOURCE ? { appId: app.id, source: CLAWBOX_APP_SOURCE } : { appId: ref ?? app.id }),
       });
       const data = await res.json().catch(() => null);
       if (!res.ok || data?.ok === false || (data?.clawhub && !data.clawhub.success)) {
@@ -521,6 +542,21 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
         // Linger longer on rate-limit so the user has time to read it before
         // hitting Retry — the typical ClawHub bucket refills within ~10s.
         setTimeout(() => clearProgress(app.id), rateLimited ? 12000 : 6000);
+        return;
+      }
+      if (app.source === CLAWBOX_APP_SOURCE) {
+        // The files are in the owner's projects either way; only a registered
+        // app is on the desktop. One that is not (its server would not start)
+        // is not reported as installed — Install again retries the
+        // registration over the files already there.
+        if (data?.registered === false) {
+          setInstallProgress(prev => ({ ...prev, [app.id]: { appId: app.id, status: "error", message: typeof data?.detail === "string" && data.detail ? data.detail : t("store.installFailed"), retryable: true } }));
+          setTimeout(() => clearProgress(app.id), 12000);
+          return;
+        }
+        setInstallProgress(prev => ({ ...prev, [app.id]: { appId: app.id, status: "success" } }));
+        onInstall(typeof data?.webappUrl === "string" ? { ...app, webappUrl: data.webappUrl } : app);
+        setTimeout(() => clearProgress(app.id), 2000);
         return;
       }
       setInstallProgress(prev => ({ ...prev, [app.id]: { appId: app.id, status: "success" } }));
@@ -690,7 +726,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
           <div className="flex gap-2">
             <span className="material-symbols-rounded text-yellow-400 shrink-0" style={{ fontSize: 18 }} aria-hidden="true">warning</span>
             <p className="text-sm text-yellow-200/80">
-              {t("store.confirmMessage")}
+              {confirmInstall.source === CLAWBOX_APP_SOURCE ? t("store.clawboxConfirmMessage") : t("store.confirmMessage")}
             </p>
           </div>
         </div>
@@ -708,7 +744,7 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
             className="px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors cursor-pointer"
             style={{ backgroundColor: BRAND_ORANGE }}
           >
-            {t("store.installAnyway")}
+            {confirmInstall.source === CLAWBOX_APP_SOURCE ? t("store.installClawboxApp") : t("store.installAnyway")}
           </button>
         </div>
       </div>
@@ -770,13 +806,21 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
                     {t("store.official")}
                   </span>
                 )}
+                {selectedApp.source === CLAWBOX_APP_SOURCE && (
+                  <span className="inline-flex items-center gap-0.5 text-[10px] text-white/60" title={t("store.clawboxAppHint")} data-testid="store-clawbox-app-badge">
+                    <span className="material-symbols-rounded" style={{ fontSize: 13, color: BRAND_ORANGE_LIGHT }}>deployed_code</span>
+                    {t("store.clawboxApp")}
+                  </span>
+                )}
               </div>
               <p className="text-sm text-white/50">{selectedApp.developer || t("store.unknownDeveloper")}</p>
               <div className="flex items-center gap-3 mt-2 flex-wrap">
-                <div className="flex items-center gap-1 text-yellow-400 text-sm">
-                  <span>★</span>
-                  <span className="font-semibold">{selectedApp.rating.toFixed(1)}</span>
-                </div>
+                {(selectedApp.source !== CLAWBOX_APP_SOURCE || selectedApp.rating > 0) && (
+                  <div className="flex items-center gap-1 text-yellow-400 text-sm">
+                    <span>★</span>
+                    <span className="font-semibold">{selectedApp.rating.toFixed(1)}</span>
+                  </div>
+                )}
                 {installDisplay && (
                   <span className="text-xs text-white/40">{t("store.installs", { count: installDisplay })}</span>
                 )}
@@ -1001,14 +1045,22 @@ export default function AppStore({ installedAppIds, onInstall, onUninstall }: Ap
                                 <span className="material-symbols-rounded" style={{ fontSize: 14 }}>verified</span>
                               </span>
                             )}
+                            {app.source === CLAWBOX_APP_SOURCE && (
+                              <span title={t("store.clawboxApp")} aria-label={t("store.clawboxApp")} className="shrink-0 inline-flex" style={{ color: BRAND_ORANGE_LIGHT }}>
+                                <span className="material-symbols-rounded" style={{ fontSize: 14 }}>deployed_code</span>
+                              </span>
+                            )}
                           </div>
                           <span className="block text-xs text-white/40 truncate">{categoryLabel(app.category)}</span>
                         </div>
                         <div className="flex flex-col items-end gap-0.5 shrink-0">
-                          <div className="flex items-center gap-0.5 text-yellow-400 text-xs">
-                            <span>★</span>
-                            <span>{app.rating.toFixed(1)}</span>
-                          </div>
+                          {/* A ClawBox app has no ratings yet: no star at all, rather than a 0.0 that reads as a bad one. */}
+                          {(app.source !== CLAWBOX_APP_SOURCE || app.rating > 0) && (
+                            <div className="flex items-center gap-0.5 text-yellow-400 text-xs">
+                              <span>★</span>
+                              <span>{app.rating.toFixed(1)}</span>
+                            </div>
+                          )}
                           {app.installs && <span className="text-[10px] text-white/40">{app.installs}</span>}
                         </div>
                       </div>

@@ -123,6 +123,7 @@ chronically-failing tool takes *every* ClawBox tool offline for the agent.
 | Coding family (`bash`, `job_status`, `job_stop`, `read_file`, `write_file`, `edit_file`, `notebook_edit`, `web_fetch`, `web_search`) | **no** by default — `CLAWBOX_MCP_CODING_TOOLS=1` registers it | **no** by default — the same variable registers it. Hermes ships its own, and a second unguarded shell doubles the attack surface for no gain |
 | Coding agent (`coding_agent_run/status/stop`, `coding_secret_list`) | when the owner switched it on | when the owner switched it on |
 | Coding team (`coding_team_run/status/stop`) | when the owner switched it on | when the owner switched it on |
+| Publishing to the ClawBox Store (`app_publish`) | when the owner switched the coding agent on | same |
 | Steering and following runs (`coding_run_message`, `coding_run_list`, `coding_agent_resume`, `coding_project_status`) | when the owner switched the coding agent on | same |
 | Device state reads (`memory_shard_status`, `local_ai_status`, `clawbox_ai_usage`, `anthropic_accounts`) | yes | yes |
 | Prime Radiant (`prime_radiant_*`, 37 tools) | yes | yes |
@@ -755,6 +756,15 @@ unnoticed is how a device ends up in a posture nobody chose.
 | `coding_agent_stop` | Stop a running run (detached ones included); close a paused one for good; with `end_leftovers`, end what a finished run left running. A queued run is not stopped: taking it out of the queue is the owner's. |
 | `coding_project_status` | The project matrix: kind, how to name it to `coding_agent_run`, last commit, desktop/server app, latest run, runs working / waiting / not merged / left running. Name one for its runs and pipeline default. |
 | `coding_secret_list` | Names — never values — of the owner's stored secrets and whether runs get them. |
+
+`app_publish` sits behind the same switch: it publishes one of the owner's
+projects that carries a `clawbox.json` to the ClawBox Store, through
+`POST /setup-api/apps/publish` and under the box's ClawBox account. The
+route's refusals come back typed — `coming_soon` (publishing is not open for
+that account yet: say so, never retry), `not_linked` / `token_rejected` (sign
+in to ClawBox AI in Settings), `slug_taken`, `package_too_large`,
+`no_manifest`, `store_unavailable` — with the route's own sentence as the
+message.
 
 A different thing from the coding family above. Instead of editing files
 itself, the agent hands a WHOLE task to a second harness — `claude-ds`, Claude

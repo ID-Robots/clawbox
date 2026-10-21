@@ -451,6 +451,15 @@ export function registerDesktopTools(reg: Registrar, ctx: McpContext): void {
               message: "The ClawBox stopped part-way through the removal: the app's skill folder could not be fully removed and some of it may already be gone. The app is still on the desktop.",
               next: "Wait a few seconds and call app_uninstall once more. If it refuses again, tell the user the app is still on the desktop, that part of its skill folder may already be deleted, and quote what the device said.",
             },
+            // A ClawBox app from the Store is also a project folder, removed
+            // the same way and with the same caveat (src/lib/store-install.ts).
+            {
+              status: 503,
+              match: /"code"\s*:\s*"project_remove_failed"/,
+              code: "ENDPOINT_DOWN",
+              message: "The ClawBox stopped part-way through the removal: the app's project folder could not be fully removed and some of it may already be gone. The app is still on the desktop.",
+              next: "Wait a few seconds and call app_uninstall once more. If it refuses again, tell the user the app is still on the desktop, that part of its project folder may already be deleted, and quote what the device said.",
+            },
             {
               status: 503,
               code: "ENDPOINT_DOWN",

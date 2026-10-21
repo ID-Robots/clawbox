@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { openclawAppsGuard } from "@/lib/openclaw-apps-server";
 import { clawhubSkillUrl, lookupClawhubOwner, pickClawhubMatch } from "@/lib/clawhub-url";
+import { isClawboxListing } from "@/lib/store-categories";
 
 export const dynamic = "force-dynamic";
 
@@ -50,6 +51,12 @@ async function detail(slug: string) {
       return NextResponse.json({ error: "Store API error" }, { status: res.status });
     }
     const app = await res.json() as Record<string, unknown>;
+    // A ClawBox app (`source: "clawbox"`, published from a box) has no ClawHub
+    // page and no ClawHub publisher: its record is the Store's alone.
+    if (isClawboxListing(app)) {
+      void lookup.catch(() => undefined);
+      return NextResponse.json(app, { headers: { "Cache-Control": "public, max-age=300" } });
+    }
     const owner = await lookup;
     let ownerHandle: string | null = null;
     if (owner.status === "found") {
