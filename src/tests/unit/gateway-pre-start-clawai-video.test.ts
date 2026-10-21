@@ -45,10 +45,17 @@ function slice(from: string, to: string): string {
 const VIDEO_ROW_RULE = hasPython3
   ? slice("# The ClawBox AI video row, recognised here", "def _is_clawbox_audio_model(_entry):")
   : "";
-/** The video migration, verbatim. */
-const MIGRATION = hasPython3
-  ? slice("# Migration: ClawBox AI video understanding", "# Every migration above has run")
-  : "";
+/** The video migration, verbatim: up to the next migration, or to the config write when it is the last. */
+function migrationSlice(): string {
+  const src = readFileSync(SCRIPT, "utf-8");
+  const start = src.indexOf("# Migration: ClawBox AI video understanding");
+  if (start < 0) return "";
+  const next = src.indexOf("\n# Migration:", start + 1);
+  const write = src.indexOf("# Every migration above has run", start);
+  const end = next >= 0 && (write < 0 || next < write) ? next : write;
+  return end < 0 ? "" : src.slice(start, end);
+}
+const MIGRATION = hasPython3 ? migrationSlice() : "";
 
 let dir: string;
 let root: string;
