@@ -374,7 +374,7 @@ describe.skipIf(!hasPython3)("gateway-pre-start.sh ClawBox AI realtime Talk", ()
     ]);
   });
 
-  it("is the only writer of talk.*: install.sh never sets it", () => {
+  it("install.sh never writes talk.*", () => {
     // install.sh's `step_openclaw_tts` writes the speech home on install and
     // update; a talk write there would race this boot-owned block.
     const install = readFileSync(path.resolve(process.cwd(), "install.sh"), "utf-8");

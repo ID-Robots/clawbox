@@ -177,6 +177,20 @@ describe("clawbox-realtime-voice plugin", () => {
       expect(big.sessionSeconds).toBe(MAX_SESSION_SECONDS);
       expect(none.sessionSeconds).toBe(MAX_SESSION_SECONDS);
     });
+
+    it("refuses a session the proxy granted no minutes for", async () => {
+      for (const session_seconds of [0, -5]) {
+        const err = (await fetchClientSecret({
+          baseUrl: PROXY,
+          token: TOKEN,
+          model: DEFAULT_MODEL,
+          fetchImpl: proxy(200, { value: SECRET, session_seconds }),
+        }).catch((e: Error) => e)) as Error;
+        expect(err).toBeInstanceOf(Error);
+        expect(err.message).toMatch(/minutes are used up/);
+        expect(err.message).not.toContain(SECRET);
+      }
+    });
   });
 
   describe("a Talk session", () => {

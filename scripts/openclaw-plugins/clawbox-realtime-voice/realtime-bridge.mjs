@@ -62,9 +62,16 @@ export function isClawToken(value) {
 }
 
 /**
- * Where the token may be sent: our proxy over HTTPS, or a loopback proxy in
- * development. Anything else would hand the box's ClawBox AI token to whoever
- * an edited config points at.
+ * Where the token may be sent: an HTTPS address with no credentials in it, or
+ * a loopback proxy in development. Never plain HTTP to another host, so the
+ * token cannot cross the network in the clear.
+ *
+ * The host is not checked against a list on purpose. The address and the token
+ * come from the same `talk.realtime.providers.clawbox` entry, which ClawBox
+ * writes with its proxy (a staging box names its staging host, an address the
+ * gateway's own environment does not carry), and the token is refreshed only
+ * where it already sits (`clawaiSpeechKeyRefresh`). Whoever can point the entry
+ * elsewhere can already read the token beside it.
  */
 export function isProxyUrl(value) {
   if (typeof value !== "string") return false;
@@ -145,8 +152,10 @@ export async function fetchClientSecret({ baseUrl, token, model, voice, fetchImp
   const value = body && typeof body.value === "string" ? body.value : "";
   if (!value) throw new Error("ClawBox AI answered without a realtime session secret.");
   const granted = Number(body.session_seconds);
-  const sessionSeconds =
-    Number.isFinite(granted) && granted > 0 ? Math.min(granted, MAX_SESSION_SECONDS) : MAX_SESSION_SECONDS;
+  // A grant the proxy names is the ceiling; zero or less means it granted no
+  // minutes, never "no limit". Only an absent or unreadable grant takes ours.
+  if (Number.isFinite(granted) && granted <= 0) throw new Error(refusalMessage(429, body));
+  const sessionSeconds = Number.isFinite(granted) ? Math.min(granted, MAX_SESSION_SECONDS) : MAX_SESSION_SECONDS;
 
   let url = `${DEFAULT_REALTIME_URL}?model=${encodeURIComponent(model)}`;
   if (typeof body.url === "string" && body.url) {
