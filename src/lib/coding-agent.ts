@@ -4973,6 +4973,8 @@ interface RunStore {
   pipelineAdvancing: Map<string, Promise<void>>;
   /** Starts past the gate and not yet visible to loadRuns() — see startingRuns. */
   startingRuns: number;
+  /** Slots held by a settling run for its own follow-up, by the run that owes it — see holdFollowUpSlot. */
+  followUpSlots: Map<string, FollowUpSlot>;
   /**
    * The runs file as this process last read or wrote it. A file that has moved
    * on since means somebody else writes it too; writeAll() checks rather than
@@ -5010,6 +5012,7 @@ const store = processStore<RunStore>(RUNS_PATH, () => ({
   transitions: new Map<string, Promise<CodingRun>>(),
   pipelineAdvancing: new Map<string, Promise<void>>(),
   startingRuns: 0,
+  followUpSlots: new Map<string, FollowUpSlot>(),
   signature: null,
   historyPolicy: null,
 }));
@@ -8336,6 +8339,26 @@ async function reviewAndShip(run: CodingRun, ended: "stop" | "pause" | null): Pr
 }
 
 /**
+ * Can `reviewAndShip` start one of this run's own follow-ups — the review
+ * pass, another go at the deliverable, the pipeline's next lap? `finishRun`
+ * holds a slot for it when it can (holdFollowUpSlot).
+ *
+ * Read off the same predicates the steps read. Errs towards yes: a slot held
+ * for nothing costs the queue the length of the settle chain, while a
+ * follow-up that finds its slot taken is dropped for good.
+ */
+function mayStartFollowUp(run: CodingRun, ended: "stop" | "pause" | null): boolean {
+  // The owner's gesture closes every step without starting anything; a pause
+  // comes back here when it resumes; a team's run is the team's.
+  if (ended !== null || run.status === "paused" || run.team) return false;
+  if (reviewPassDue(run) || pipelineOwnsRun(run)) return true;
+  // The deliverable gate judges the run that owes the deliverable — this one,
+  // or the one this review pass reviewed — and goes again while it has attempts.
+  const origin = run.reviewOf === null ? run : loadRuns().find((r) => r.id === run.reviewOf);
+  return origin !== undefined && deliverableGateApplies(origin) && origin.attempts.length < origin.completionAttempts;
+}
+
+/**
  * The last chance to give a project its icon, and the commit that ships it.
  *
  * A run that started before the picture could be drawn — an unlinked box that
@@ -9597,6 +9620,27 @@ export function reviewPassTask(finished: Pick<CodingRun, "filesTouched">): strin
 type ReviewPassOutcome = "started" | "skipped" | "refused";
 
 /**
+ * Is the automatic review pass due after this run? ONE predicate, because two
+ * readers have to agree on it: `maybeStartReviewPass` starts the pass, and
+ * `finishRun` holds the slot for it (see `mayStartFollowUp`).
+ */
+function reviewPassDue(finished: CodingRun): boolean {
+  if (finished.status !== "completed") return false;
+  if (finished.reviewOf !== null) return false;
+  // A review-loop turn has already had its work reviewed — by GitHub's own
+  // checks and by whoever left the comments it just answered. A pass over it
+  // would spend a run to review a fix to a review.
+  if (finished.reviewLoopOf !== null) return false;
+  if (finished.readOnly) return false;
+  // A team's worker is reviewed by the team's own reviewer, on the merged work.
+  if (finished.team) return false;
+  if (finished.filesTouched.length === 0) return false;
+  // The switch as it stood when THIS run started — the same decision its
+  // brief was written from — never the switch as it stands now.
+  return finished.reviewPass;
+}
+
+/**
  * One automatic follow-up run when the owner has switched the review pass on.
  *
  * The guards make it a pass and never a loop: only after a run that COMPLETED
@@ -9606,19 +9650,7 @@ type ReviewPassOutcome = "started" | "skipped" | "refused";
  * can — and a refusal is a logged line, never an error the settled run feels.
  */
 async function maybeStartReviewPass(finished: CodingRun): Promise<ReviewPassOutcome> {
-  if (finished.status !== "completed") return "skipped";
-  if (finished.reviewOf !== null) return "skipped";
-  // A review-loop turn has already had its work reviewed — by GitHub's own
-  // checks and by whoever left the comments it just answered. A pass over it
-  // would spend a run to review a fix to a review.
-  if (finished.reviewLoopOf !== null) return "skipped";
-  if (finished.readOnly) return "skipped";
-  // A team's worker is reviewed by the team's own reviewer, on the merged work.
-  if (finished.team) return "skipped";
-  if (finished.filesTouched.length === 0) return "skipped";
-  // The switch as it stood when THIS run started — the same decision its
-  // brief was written from — never the switch as it stands now.
-  if (!finished.reviewPass) return "skipped";
+  if (!reviewPassDue(finished)) return "skipped";
   try {
     const review = await startRun({
       task: reviewPassTask(finished),
@@ -9999,8 +10031,9 @@ async function startCompletionAttempt(
   try {
     // The same gates a start passes — the owner's switch, readiness, the
     // slot — because this IS a start, and the owner may have switched the
-    // agent off while the run worked.
-    releaseSlot = await assertCanSpawn(null);
+    // agent off while the run worked. The slot is the one the settle held
+    // for it, when it did (holdFollowUpSlot).
+    releaseSlot = await assertCanSpawn(null, undefined, run.id);
     tools = await requireSpawnTools();
     run.directory = await realDirectory(run.directory);
   } catch (err) {
@@ -10425,7 +10458,8 @@ async function startPipelineImprovement(run: CodingRun): Promise<StageOutcome | 
   let tools: SpawnTools;
   let releaseSlot: (() => void) | null = null;
   try {
-    releaseSlot = await assertCanSpawn(null);
+    // The slot the settle held for this lap, when it did (holdFollowUpSlot).
+    releaseSlot = await assertCanSpawn(null, undefined, run.id);
     tools = await requireSpawnTools();
     // The copy of the project this lap works in. A live pipeline holds it now
     // (`settleRunWorktree` steps aside for one), but a pipeline already in
@@ -11584,6 +11618,10 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // Until the wake below, a wait that begins now waits too (waitForRun): the
   // status already says settled, the branch does not have the work yet.
   store.unannounced.add(run.id);
+  // The slot this run has just freed, held for its own follow-ups — in this
+  // same synchronous turn, so nothing counts it free first — and given back
+  // once the chain below has decided, however it ends (holdFollowUpSlot).
+  const releaseFollowUpSlot = mayStartFollowUp(run, state.endRequested) ? holdFollowUpSlot(run.reviewOf ?? run.id) : null;
   trackSettleWork((async () => {
     try {
       await recordRunWork(run);
@@ -11625,7 +11663,7 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
     // that is gone. The planner works in the project itself and keeps them.
     if (run.team && run.team.role !== "planner") return;
     await reviewAndShip(run, state.endRequested);
-  })());
+  })().finally(() => releaseFollowUpSlot?.()));
   // A pause is the owner's own gesture — no finish notice for it.
   //
   // And neither is a run whose deliverable has not been looked at yet: "Coding
@@ -12671,8 +12709,9 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
   // `insertRun` — several awaits away (the spawn tools, the folder, the
   // settings, the worktree, the auto-PR read) — so two starts that arrive
   // together both saw room for one. The same answer `teamSpawnSlot` already
-  // gives with its `starting` count.
-  const releaseSlot = await assertCanSpawn(input.team ?? null, intendedProvider);
+  // gives with its `starting` count. A review pass takes the slot its run's
+  // settle held for it (holdFollowUpSlot).
+  const releaseSlot = await assertCanSpawn(input.team ?? null, intendedProvider, input.reviewOf ?? undefined);
   // Held beside the slot, and for the same span and the same reason: the folder
   // this run is starting in is claimed the moment `assertDirectoryFree` passes
   // and let go only once the record is visible, so a removal cannot slip
@@ -14210,6 +14249,43 @@ function holdSpawnSlot(): () => void {
 }
 
 /**
+ * The slot a settling run frees, held for its OWN follow-up: the automatic
+ * review pass, another go at its deliverable, its pipeline's next lap (F-N4).
+ *
+ * The run stops counting as a slot the moment `finishRun` takes it off
+ * `running`, and its follow-ups ask for one only after the commit, the assets,
+ * the icon and the pull request. The queue's pump at settle, a waiter woken
+ * there or any start on its way took the slot first, and the follow-up was
+ * refused and never tried again — a review pass logged and skipped, an attempt
+ * at the deliverable turned into `gave_up`. So `finishRun` takes this in the
+ * same synchronous turn as the status change, and the follow-up claims it
+ * through `assertCanSpawn(…, heldFor)`. Keyed by the run that owes the
+ * follow-up: a review pass's settle holds it for the run it reviewed.
+ *
+ * Answers the give-back, which the settle chain calls once it has decided,
+ * whatever it decided. A claimed slot is the claiming start's to give back
+ * (its own `finally`), so only an unclaimed one is released here. It pumps the
+ * queue either way: the pump at settle was refused this slot, and no other
+ * pump is due.
+ */
+function holdFollowUpSlot(runId: string): () => void {
+  const slot: FollowUpSlot = { release: holdSpawnSlot(), claimed: false };
+  store.followUpSlots.set(runId, slot);
+  return () => {
+    // Only our own: a later settle of the same run may have put its own here.
+    if (store.followUpSlots.get(runId) === slot) store.followUpSlots.delete(runId);
+    if (!slot.claimed) slot.release();
+    void pumpRunQueue();
+  };
+}
+
+/** A slot held for a follow-up, and whether one has taken it over — see holdFollowUpSlot. */
+interface FollowUpSlot {
+  release: () => void;
+  claimed: boolean;
+}
+
+/**
  * The gates every spawn passes: the owner's switch, readiness, the slot.
  *
  * Answers the slot's RELEASE. The reservation is taken here, synchronously
@@ -14217,8 +14293,11 @@ function holdSpawnSlot(): () => void {
  * resolved would still have raced another caller inside this function, whose
  * own awaits (the switch, readiness, the limit) are where the two starts read
  * the same number.
+ *
+ * `heldFor` names the settled run whose follow-up this is: the slot that run
+ * held for it (holdFollowUpSlot) is taken over rather than a second one held.
  */
-async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProvider): Promise<() => void> {
+async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProvider, heldFor?: string): Promise<() => void> {
   if (!(await isCodingAgentEnabled())) {
     throw new CodingAgentError("disabled", "The coding agent is switched off. The owner can turn it on in the Coding Agent app on the ClawBox desktop.");
   }
@@ -14281,15 +14360,23 @@ async function assertCanSpawn(team: RunTeam | null = null, provider?: CodingProv
   // run is missing from `active` AND from `startingRuns`, and the gate counts
   // it nowhere.
   const active = loadRuns().filter((r) => isLive(r.status));
+  // A follow-up's own held slot is already in `startingRuns`: counted once, as
+  // this start's, so the limit still applies to it like any other.
+  const held = heldFor === undefined ? undefined : store.followUpSlots.get(heldFor);
   // The runs already going PLUS the starts that have passed this gate and have
   // not reached their record yet — see `startingRuns`.
-  const going = active.length + store.startingRuns;
+  const going = active.length + store.startingRuns - (held ? 1 : 0);
   if (going >= limit) {
     throw new SlotsFullError(
       limit === 1 && active.length > 0
         ? `A coding run is already in progress (${active[0].id}). Wait for it or stop it first.`
         : `This ClawBox is already starting or running ${going} coding runs at once, which is all it allows. Wait for one to finish, stop one, or raise the limit in the Coding Agent settings.`,
     );
+  }
+  if (heldFor !== undefined && held) {
+    store.followUpSlots.delete(heldFor);
+    held.claimed = true;
+    return held.release;
   }
   return holdSpawnSlot();
 }
@@ -14485,6 +14572,7 @@ export function _resetCodingAgentStateForTests(): Promise<void> {
   // A start this reset interrupted would otherwise leave its slot held for the
   // life of the process, which is a permanent discount on the limit.
   store.startingRuns = 0;
+  store.followUpSlots.clear();
   if (store.queueRetry) clearTimeout(store.queueRetry);
   store.queueRetry = null;
   store.queuePumpAgain = false;
@@ -14566,6 +14654,7 @@ async function drainForTests(initial: ChildProcess[], timeoutMs: number): Promis
     killed = endEveryLiveRun();
     // A start this sweep interrupted must not keep its slot either.
     store.startingRuns = 0;
+    store.followUpSlots.clear();
     // A live run with no child yet — a spawn caught mid-flight — gives
     // `settleWork` nothing to wait on, and it would answer at once. Give the
     // spawn a turn rather than spinning on it.

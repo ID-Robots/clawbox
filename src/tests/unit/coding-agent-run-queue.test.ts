@@ -241,3 +241,106 @@ describe("a Fix CI continuation that waits in the queue", () => {
     expect(lib.ciFixAttempt(lib.getRun(p.run.id)!, null)).toBe(1);
   });
 });
+
+/**
+ * F-N4: a settling run's OWN follow-ups — another go at its deliverable, the
+ * automatic review pass — need a slot, and the run that frees one is the run
+ * they belong to. The queue's pump at settle used to take that slot first, so
+ * the follow-up was refused ("Another attempt could not be started", a review
+ * pass logged as refused) and never tried again. The slot is held for them
+ * from the settle until the settle has decided; the queue goes after.
+ */
+describe("a settling run's own follow-ups", () => {
+  let hold: string;
+  const INIT = '{"type":"system","subtype":"init","session_id":"sess-1","model":"m","permissionMode":"acceptEdits"}';
+  const WROTE = [
+    '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tu1","name":"Write","input":{"file_path":"app.js"}}]}}',
+    '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu1"}]}}',
+  ];
+
+  /** Every run waits for the flag; a run whose task says HOLD-B also waits for `hold`, so it keeps its slot while the test looks. */
+  function installHoldingWrapper(lines: string[]): void {
+    fs.writeFileSync(
+      path.join(binDir, "claude-ds"),
+      [
+        "#!/usr/bin/env bash",
+        "TURN=$(head -n 1)",
+        `case "$TURN" in *HOLD-B*) while [ ! -f "${hold}" ]; do sleep 0.05; done ;; esac`,
+        `while [ ! -f "${flag}" ]; do sleep 0.05; done`,
+        `printf '%s\\n' ${[INIT, ...lines, result("done")].map((l) => `'${l}'`).join(" ")}`,
+        "exit 0",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+  }
+
+  beforeEach(() => {
+    hold = path.join(base, "hold");
+  });
+
+  afterEach(() => {
+    fs.writeFileSync(hold, "go");
+  });
+
+  /** The queue still drains afterwards: with one slot, a reservation that leaked would leave C queued for good. */
+  async function expectQueueDrains(): Promise<void> {
+    const c = await lib.startOrQueueRun({ task: "after", directory: "gamma", source: "owner" });
+    fs.writeFileSync(hold, "go");
+    await vi.waitFor(() => { expect(lib.getRun(c.run.id)?.status).toBe("completed"); }, { timeout: 20_000 });
+  }
+
+  it("keeps the slot for another go at the deliverable, and the queued run waits for it", async () => {
+    writeConfig({ clawai_token: "claw_test_token", coding_agent_enabled: true, coding_agent_default_directory: projects, coding_agent_max_parallel_runs: 1, coding_agent_completion_attempts: 2 });
+    installHoldingWrapper([]);
+    const a = await lib.startOrQueueRun({ task: "build it", directory: "alpha", source: "owner", deliverable: { kind: "paths", paths: ["never.txt"] } });
+    const b = await lib.startOrQueueRun({ task: "HOLD-B next", directory: "beta", source: "owner" });
+    expect(b.queued).toBe(true);
+
+    fs.writeFileSync(flag, "go");
+    await vi.waitFor(() => { expect(lib.getRun(a.run.id)?.status).toBe("gave_up"); }, { timeout: 20_000 });
+    await vi.waitFor(() => { expect(lib.getRun(b.run.id)?.status).toBe("running"); }, { timeout: 20_000 });
+
+    const done = lib.getRun(a.run.id)!;
+    // Both attempts made: the second was not refused for want of the slot it had just freed.
+    expect(done.error ?? "").not.toMatch(/could not be started/);
+    expect(done.attempts).toHaveLength(2);
+    // …and the queued run started only once the second attempt was under way.
+    expect(lib.getRun(b.run.id)!.startedAt).toBeGreaterThanOrEqual(done.attempts[1].startedAt);
+
+    await expectQueueDrains();
+  });
+
+  it("gives the slot back to the queue when no follow-up turns out to be needed", async () => {
+    writeConfig({ clawai_token: "claw_test_token", coding_agent_enabled: true, coding_agent_default_directory: projects, coding_agent_max_parallel_runs: 1, coding_agent_completion_attempts: 2 });
+    installHoldingWrapper([]);
+    // Held at settle, because the gate MAY send it back — and then the deliverable is already there.
+    const a = await lib.startOrQueueRun({ task: "build it", directory: "alpha", source: "owner", deliverable: { kind: "paths", paths: ["README.md"] } });
+    const b = await lib.startOrQueueRun({ task: "next", directory: "beta", source: "owner" });
+    expect(b.queued).toBe(true);
+
+    fs.writeFileSync(flag, "go");
+    await vi.waitFor(() => { expect(lib.getRun(b.run.id)?.status).toBe("completed"); }, { timeout: 20_000 });
+    expect(lib.getRun(a.run.id)).toMatchObject({ status: "completed", attempts: [expect.objectContaining({ reason: null })] });
+
+    await expectQueueDrains();
+  });
+
+  it("keeps the slot for the automatic review pass, and the queued run waits for it", async () => {
+    writeConfig({ clawai_token: "claw_test_token", coding_agent_enabled: true, coding_agent_default_directory: projects, coding_agent_max_parallel_runs: 1, coding_agent_review_pass: true });
+    installHoldingWrapper(WROTE);
+    const a = await lib.startOrQueueRun({ task: "build it", directory: "alpha", source: "owner" });
+    const b = await lib.startOrQueueRun({ task: "HOLD-B next", directory: "beta", source: "owner" });
+    expect(b.queued).toBe(true);
+
+    fs.writeFileSync(flag, "go");
+    await vi.waitFor(() => { expect(lib.getRun(b.run.id)?.status).toBe("running"); }, { timeout: 20_000 });
+
+    const review = lib.listRuns().find((r) => r.reviewOf === a.run.id);
+    // The review pass ran, in the slot its run freed, before the queue's turn.
+    expect(review).toBeTruthy();
+    expect(review!.status).toBe("completed");
+    expect(lib.getRun(b.run.id)!.startedAt).toBeGreaterThanOrEqual(review!.startedAt);
+
+    await expectQueueDrains();
+  });
+});
