@@ -44,6 +44,9 @@ fi
 ctx="$(mktemp -d "${TMPDIR:-/tmp}/clawbox-sandbox-image-XXXXXX")"
 trap 'rm -rf "$ctx"' EXIT
 
+# The image's own unprivileged user and its home, inside the container only.
+SANDBOX_HOME="/home/sandbox" # public-hygiene: allow the container's own user, not an account on any host
+
 cat > "$ctx/Containerfile" <<CONTAINERFILE
 FROM $BASE
 ENV DEBIAN_FRONTEND=noninteractive
@@ -52,7 +55,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
     && rm -rf /var/lib/apt/lists/*
 RUN useradd --create-home --shell /bin/bash sandbox
 USER sandbox
-WORKDIR /home/sandbox
+WORKDIR $SANDBOX_HOME
 CMD ["sleep", "infinity"]
 CONTAINERFILE
 

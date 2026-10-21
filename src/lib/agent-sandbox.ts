@@ -6,6 +6,7 @@ import posture from "../../config/agent-sandbox.json";
 import { harnessesHere } from "@/lib/clawbox-mcp-registration";
 import { getKnown } from "@/lib/config-store";
 import { isPlainObject, readConfigStrict, restartGateway } from "@/lib/openclaw-config";
+import { untraced } from "@/lib/runtime-path";
 import { rootStepUnit } from "@/lib/root-step-journal";
 import { startRootStep } from "@/lib/root-step-runner";
 
@@ -67,7 +68,9 @@ const GATEWAY_SESSION_DROPIN = "/etc/systemd/system/clawbox-gateway.service.d/ag
 
 /** Has the gateway been given the user session the sandbox's cap needs? */
 export function agentSandboxGatewaySessionInPlace(): boolean {
-  const file = process.env.CLAWBOX_AGENT_SANDBOX_DROPIN || GATEWAY_SESSION_DROPIN;
+  // untraced: a path the build cannot resolve would otherwise make it trace
+  // every file in the project (see runtime-path).
+  const file = untraced(process.env.CLAWBOX_AGENT_SANDBOX_DROPIN || GATEWAY_SESSION_DROPIN);
   try {
     return /^Environment=XDG_RUNTIME_DIR=\/run\/user\/\d+$/m.test(fs.readFileSync(file, "utf-8"));
   } catch {
@@ -113,7 +116,7 @@ export async function readAgentSandboxRuntime(): Promise<AgentSandboxRuntime> {
   // Rootless Podman keeps its runtime state under XDG_RUNTIME_DIR, which a
   // system service does not get; the lingering user manager has the directory.
   if (!env.XDG_RUNTIME_DIR && typeof process.getuid === "function") {
-    const dir = `/run/user/${process.getuid()}`;
+    const dir = untraced(`/run/user/${process.getuid()}`);
     if (fs.existsSync(dir)) env.XDG_RUNTIME_DIR = dir;
   }
   try {
