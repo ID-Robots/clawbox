@@ -105,14 +105,20 @@ export function auditLine(event: SecretAuditEvent, at: Date = new Date()): strin
 
 /** Keep the newest half of the lines once the file has outgrown its bound. */
 async function trimIfLarge(): Promise<void> {
-  let size: number;
+  // Size and text from one open file, so the text is the file that was measured.
+  let handle: Awaited<ReturnType<typeof fs.open>>;
   try {
-    size = (await fs.stat(AUDIT_PATH)).size;
+    handle = await fs.open(AUDIT_PATH, "r");
   } catch {
     return;
   }
-  if (size <= MAX_AUDIT_BYTES) return;
-  const text = await fs.readFile(AUDIT_PATH, "utf-8");
+  let text: string;
+  try {
+    if ((await handle.stat()).size <= MAX_AUDIT_BYTES) return;
+    text = await handle.readFile("utf-8");
+  } finally {
+    await handle.close();
+  }
   const keepFrom = text.length - Math.floor(MAX_AUDIT_BYTES / 2);
   // From the start of a whole line, so the kept half still parses line by line.
   const cut = text.indexOf("\n", Math.max(0, keepFrom));
