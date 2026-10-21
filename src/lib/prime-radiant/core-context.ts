@@ -77,10 +77,16 @@ export function coreContextEligible(path: string, fm: PageFrontmatter): boolean 
   return summaryTier(path, fm) !== null;
 }
 
-/** Text as one line of plain words: no tags (our frame's among them), no control characters, no runs of space. */
+/**
+ * Text as one line of plain words: no tags (our frame's among them), no control characters, no runs of space.
+ * Taking a tag out can join the text around it into a new one (`</a<x>>`), so every angle bracket left after that
+ * becomes its lookalike: no spelling of a tag survives in a line.
+ */
 function plain(text: string): string {
   return text
     .replace(/<\/?[A-Za-z_][^<>]*>/g, " ")
+    .replace(/</g, "‹")
+    .replace(/>/g, "›")
     .replace(/[\u0000-\u001f\u007f]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
