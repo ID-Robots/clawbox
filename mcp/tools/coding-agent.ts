@@ -457,6 +457,17 @@ function describeDeliverableState(run: RunPayload): string | null {
 }
 
 /**
+ * What a continuation of this run must say about its bar. A continuation is
+ * held only to what its OWN call asks — `none` is never carried, because the
+ * same session may be continued as a fixer, and a fixer that commits nothing
+ * must still give up — so a run that owed nothing is continued with
+ * `no_deliverable` again.
+ */
+function continuationBar(run: RunPayload): string {
+  return run.deliverable?.kind === "none" ? " This run owed no deliverable: pass no_deliverable again if the continuation owes none either." : "";
+}
+
+/**
  * The delivery pipeline, said as the one thing a relaying model must not get
  * wrong: whether it is FINISHED.
  *
@@ -723,7 +734,8 @@ function describeRun(run: RunPayload, tail: number): string {
     // error says which, and the way on is the same session either way.
     parts.push(
       "Its work is on disk and its session is intact; the error says why it stopped. To carry on in the same session,"
-      + " call coding_agent_run with resume_run_id set to this id — with a narrower task if it stopped at a turn or cost ceiling.",
+      + " call coding_agent_run with resume_run_id set to this id — with a narrower task if it stopped at a turn or cost ceiling."
+      + continuationBar(run),
     );
   } else if (run.status === "failed") {
     parts.push("Do not resume this one — start a fresh run. Tell the user what failed if it looks like the device rather than the task.");
@@ -1022,7 +1034,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
         `Comma-separated relative paths (at most ${MAX_DELIVERABLE_PATHS}) the run MUST leave behind, not empty, e.g. "src/app.js,index.html".`,
       ),
       fix_ci: zBool(false, "With resume_run_id: fix that run's FAILED pull-request checks; the box appends what failed to the task."),
-      no_deliverable: zBool(false, "A run whose result is no file or pull request of its own (a verdict, a CI pass): auto-PR does not hold it to one."),
+      no_deliverable: zBool(false, "A run whose result is no file or pull request of its own (a verdict, a CI pass); pass it again on each continuation."),
     },
     { editions: ["openclaw", "hermes"], readOnly: false, openWorld: true, maxChars: 3_000 },
     async ({ task, project_id, directory, resume_run_id, provider, model, deliverable_files, delivery_pipeline, input_files, fix_ci, no_deliverable }: {
@@ -1420,7 +1432,7 @@ export function registerCodingAgentTools(reg: Registrar, ctx: Pick<McpContext, "
           run.status === "draft"
             ? "Do not retry. A draft is started by the owner in the Coding Agent app."
             : run.status === "failed" && run.resumable && run.sessionId
-              ? "Do not retry this tool. To carry that work on, call coding_agent_run with resume_run_id set to this id (a narrower task if it stopped at a ceiling)."
+              ? `Do not retry this tool. To carry that work on, call coding_agent_run with resume_run_id set to this id (a narrower task if it stopped at a ceiling).${continuationBar(run)}`
               : "Do not retry. Start a fresh run with coding_agent_run if more work is needed.",
         );
       }

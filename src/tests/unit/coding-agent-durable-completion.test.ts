@@ -586,29 +586,34 @@ describe("a run whose caller asked for no deliverable", () => {
     expect(stdinLog()).toHaveLength(1);
   });
 
-  it("carries `none` onto a continuation of that run that names no deliverable", async () => {
-    // The way on for a run that ended before it used a helper's result is a
-    // continuation (resumeRunId). Re-derived from that request alone, a refuter's
-    // second leg fell back to the implied pull-request bar and gave up.
+  it("holds a continuation to its own request's bar: `none` again, or the implied one", async () => {
+    // `none` is not carried: the same session may be continued as a fixer, and a
+    // fixer that commits nothing must still give up. A caller that continues a
+    // run owing nothing says so again.
     const first = await lib.startRun({
       task: "Refute the finding; change no files.", projectId: "site", source: "agent",
       deliverable: { kind: "none" },
     });
-    // The first run's whole chain is over — its PR step is the last before the
-    // gate — before the continuation works the same repository.
-    await vi.waitFor(() => expect(lib.getRun(first.id)?.pr?.phase).toBe("blocked"), { timeout: 25_000, interval: 50 });
-    await settledForGood(first.id);
-    const next = await lib.startRun({ task: "Finish the verdict.", resumeRunId: first.id, source: "agent" });
-    await vi.waitFor(() => {
-      expect(lib.getRun(next.id)?.pr?.phase).toBe("blocked");
-      expect(announceCodingAgent.mock.calls.some(([r]) => r.id === next.id)).toBe(true);
-    }, { timeout: 25_000, interval: 50 });
-    const run = lib.getRun(next.id)!;
+    // Each run's whole chain is over — its PR step is the last before the gate —
+    // before the next one works the same repository.
+    const settled = async (id: string) => {
+      await vi.waitFor(() => {
+        expect(lib.getRun(id)?.pr?.phase).toBe("blocked");
+        expect(announceCodingAgent.mock.calls.some(([r]) => r.id === id)).toBe(true);
+      }, { timeout: 25_000, interval: 50 });
+      return lib.getRun(id)!;
+    };
+    await settled(first.id);
+    const again = await settled((await lib.startRun({
+      task: "Finish the verdict.", resumeRunId: first.id, source: "agent", deliverable: { kind: "none" },
+    })).id);
+    expect(again.status).toBe("completed");
+    expect(again.deliverable).toEqual({ kind: "none" });
 
-    expect(run.status).toBe("completed");
-    expect(run.deliverable).toEqual({ kind: "none" });
-    expect(run.attempts).toEqual([]);
-    expect(announceCodingAgent.mock.calls.filter(([r]) => r.id === next.id)).toHaveLength(1);
+    const fixer = await settled((await lib.startRun({ task: "Now apply the fix.", resumeRunId: again.id, source: "agent" })).id);
+    expect(fixer.deliverable).toBeNull();
+    expect(fixer.status).toBe("gave_up");
+    expect(fixer.error).toContain("Nothing was committed");
   });
 
   it("control: without it, a run that commits nothing still gives up", async () => {

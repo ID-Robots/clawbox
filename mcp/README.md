@@ -901,7 +901,10 @@ shell tool, not less and not more:
   request from its own branch — a verdict, a CI pass on other pull requests —
   which would otherwise end `gave_up` "Nothing was committed"; it turns off the
   implied bar and nothing else, so a run that does commit still gets its pull
-  request, and it cannot be combined with `deliverable_files`. When the check fails
+  request, and it cannot be combined with `deliverable_files`. It is not carried
+  onto a continuation (`resume_run_id`): the same session may go on as a fixer,
+  which must still give up when it commits nothing, so a continuation that owes
+  nothing passes `no_deliverable` again. When the check fails
   the device resumes the run IN ITS OWN SESSION with a nudge naming what is
   missing, up to `coding_agent_completion_attempts` (default 1, the run's own
   first turn counted as one, so there is no nudge until the owner raises it),

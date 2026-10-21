@@ -748,6 +748,25 @@ describe("the deliverable", () => {
     expect(out.text).not.toMatch(/hit a ceiling/);
   });
 
+  it("tells a continuation of a run that owed nothing to say so again", async () => {
+    // `none` is not carried onto a continuation, so the relaying model is told
+    // to pass it — and only for a run that had it.
+    const failed = {
+      ...RUN, status: "failed", resumable: true,
+      error: "It ended before it used the result of its helper tester (run the full suite). Resume it to carry on in the same session.",
+    };
+    apiGet.mockResolvedValue({ run: { ...failed, deliverable: { kind: "none" } } });
+    const owedNothing = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
+    expect(owedNothing.isError).toBe(false);
+    if (owedNothing.isError) return;
+    expect(owedNothing.text).toMatch(/pass no_deliverable again/);
+
+    apiGet.mockResolvedValue({ run: { ...failed, deliverable: null } });
+    const plain = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
+    if (plain.isError) return;
+    expect(plain.text).not.toMatch(/no_deliverable/);
+  });
+
   it("says what is missing on a run that gave up, and NOT to start a fresh one", async () => {
     apiGet.mockResolvedValue({
       run: {
