@@ -467,7 +467,11 @@ export async function disconnectGoogle(config: OAuthAuthorizeConfig | null): Pro
     };
   }
   const revoked = await revokeAtGoogle(grant.refreshToken);
-  await fs.unlink(googleTokenPath()).catch(() => {});
+  // Gone already is fine. Any other failure leaves the grant on the box for
+  // the skill to load, so it is the route's disconnect_failed, never a 200.
+  await fs.unlink(googleTokenPath()).catch((err: NodeJS.ErrnoException) => {
+    if (err?.code !== "ENOENT") throw err;
+  });
   const secret = await readJsonObject(googleClientSecretPath());
   if (secret && isRecord(secret.installed) && secret.installed.client_id === config.clientId) {
     await fs.unlink(googleClientSecretPath()).catch(() => {});

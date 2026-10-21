@@ -452,6 +452,29 @@ withScript("connect and disconnect, through the real register-mcp.sh", () => {
     expect(JSON.parse(fs.readFileSync(secretPath(), "utf-8"))).toEqual(own);
   });
 
+  it("says so, never ok, when the grant could not be removed from the box", async () => {
+    const { state } = await started();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(tokenResponse()));
+    expect((await EXCHANGE(req("/exchange", { redirect: `http://127.0.0.1:1/?state=${state}&code=c` }))).status).toBe(200);
+    const kept = fs.readFileSync(tokenPath(), "utf-8");
+
+    const fsp = (await import("fs/promises")).default;
+    const realUnlink = fsp.unlink.bind(fsp);
+    const unlink = vi.spyOn(fsp, "unlink").mockImplementation(async (target) =>
+      String(target) === tokenPath()
+        ? Promise.reject(Object.assign(new Error("read-only file system"), { code: "EROFS" }))
+        : realUnlink(target),
+    );
+    const quiet = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(new Response("", { status: 200 })));
+    const res = await DISCONNECT(req("/disconnect", {}));
+    expect(res.status).toBe(500);
+    expect((await res.json()).code).toBe("disconnect_failed");
+    expect(fs.readFileSync(tokenPath(), "utf-8")).toBe(kept);
+    unlink.mockRestore();
+    quiet.mockRestore();
+  });
+
   it("leaves a grant made with the owner's own client alone", async () => {
     const grant = JSON.stringify({ refresh_token: "r", client_id: "owners-own-client" });
     fs.writeFileSync(tokenPath(), grant);
