@@ -1323,9 +1323,8 @@ describe("codex-auth-mirror.js", () => {
     // does not hold — one of the two tokens of a single-use family, which is
     // the `refresh_token_reused` shape this whole file exists to prevent.
     //
-    // Only the sqlite store is seeded: an auth-profiles.json would make `wrote`
-    // true through the untransactional legacy loop and prove nothing about this
-    // one (see the note at its `wrote = true`).
+    // Only the sqlite store is seeded; the same lock with an auth-profiles.json
+    // beside it is the "leaves the legacy JSON file alone" case below.
     seedAgentStore({
       "openai:chatgpt": {
         type: "oauth",
