@@ -1806,6 +1806,22 @@ describe("counting sub-agents", () => {
       expect(run.error).toContain("tester (run the full suite)");
     });
 
+    it("ends a run that owes nothing (`none`, F-N3) the same way: failed, resumable, told once", async () => {
+      // `none` turns the deliverable off, never the helper's question: the
+      // no-deliverable branch decides, and since `none` was never gated it
+      // records no attempt and sends the one notice itself.
+      installFakeWrapper([`echo '${INIT}'`, `echo '${TESTER}'`, `echo '${TESTER_RECEIPT}'`, `echo '${WAITING}'`, `echo '${SUCCESS}'`, "exit 0"].join("\n"));
+      makeProject("site");
+      const run = await announced((await lib.startRun({ task: "give a verdict", projectId: "site", source: "agent", deliverable: { kind: "none" } })).id);
+      expect(run.deliverable).toEqual({ kind: "none" });
+      expect(run.status).toBe("failed");
+      expect(run.resumable).toBe(true);
+      expect(run.error).toContain("tester (run the full suite)");
+      expect(run.attempts).toEqual([]);
+      expect(run.deliverableCheck).toBeNull();
+      expect(announce).toHaveBeenCalledTimes(1);
+    });
+
     it("goes back into the same session through the deliverable gate when the deliverable is there", async () => {
       writeConfig({ clawai_token: "claw_test_token", clawai_tier: "flash", coding_agent_enabled: true, coding_agent_completion_attempts: 2 });
       installFakeWrapper([`echo '${INIT}'`, `echo '${TESTER}'`, `echo '${TESTER_RECEIPT}'`, `echo '${WAITING}'`, `echo '${SUCCESS}'`, "exit 0"].join("\n"));
