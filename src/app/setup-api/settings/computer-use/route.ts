@@ -7,7 +7,7 @@ import {
   computerUseSupported,
   readStoredComputerUseSwitch,
 } from "@/lib/computer-use-apply";
-import { set } from "@/lib/config-store";
+import { readFailureKind, set } from "@/lib/config-store";
 import { COMPUTER_USE_KEY, computerUseSettingEnabled } from "@/lib/computer-use-switch";
 import { hasPersonSession } from "@/lib/owner-session";
 import { isSameOriginRequest } from "@/lib/same-origin";
@@ -79,7 +79,8 @@ export async function POST(req: Request) {
   try {
     await set(COMPUTER_USE_KEY, enabled);
   } catch (err) {
-    console.error("[computer-use] the switch could not be saved:", err instanceof Error ? err.message : err);
+    // The kind only, never the message: see readFailureKind.
+    console.error("[computer-use] the switch could not be saved:", readFailureKind(err));
     return refuse(500, "store_write_failed", "The switch could not be saved — the ClawBox settings file could not be written. Nothing was changed.");
   }
 

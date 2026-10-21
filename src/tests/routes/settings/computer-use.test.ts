@@ -149,4 +149,21 @@ describe("POST", () => {
     expect(await r.json()).toMatchObject({ state: "off", code: "apply_failed", error: "not yet", applied: { hermes: false } });
     expect(stored().clawbox_computer_use).toBe(false);
   });
+
+  it("is a 500 over a settings file it cannot parse, and logs the kind of failure, never a window of the file", async () => {
+    // V8 quotes the input around the fault: here, the bare token whole.
+    fs.writeFileSync(storePath(), '{"a": "x", "bot_token": zq7secret}');
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const r = await post({ enabled: false });
+      expect(r.status).toBe(500);
+      expect((await r.json()).code).toBe("store_write_failed");
+      const logged = JSON.stringify(errors.mock.calls);
+      expect(logged).toContain("the switch could not be saved");
+      expect(logged).not.toContain("zq7secret");
+      expect(h.apply).not.toHaveBeenCalled();
+    } finally {
+      errors.mockRestore();
+    }
+  });
 });

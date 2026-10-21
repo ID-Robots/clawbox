@@ -60,7 +60,9 @@ export async function applyComputerUseSwitch(enabled: boolean): Promise<Computer
       maxBuffer: 1024 * 1024,
     }));
   } catch (err) {
-    console.error("[computer-use] register-mcp.sh failed:", err instanceof Error ? err.message : err);
+    // Its exit status, never the message: that carries the script's stderr whole.
+    const failed = err as { code?: unknown; signal?: unknown } | null;
+    console.error("[computer-use] register-mcp.sh failed:", `exit ${String(failed?.code ?? "unknown")}${failed?.signal ? `, signal ${String(failed.signal)}` : ""}`);
     const partial = (err as { stdout?: unknown } | null)?.stdout;
     stdout = typeof partial === "string" ? partial : "";
   }
