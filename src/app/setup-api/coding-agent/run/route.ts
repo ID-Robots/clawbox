@@ -16,6 +16,13 @@ export const dynamic = "force-dynamic";
  * failure on record, for a failure a Fix CI was already started from, and past
  * the chain's MAX_CI_FIX_ATTEMPTS.
  *
+ * `deliverable` is what the run must leave behind before it counts as
+ * finished (src/lib/coding-deliverable.ts). `{ kind: "none" }` says it owes
+ * nothing: with auto-PR on, a run whose result is not a pull request from its
+ * own branch — a verdict, a CI pass on other pull requests — is otherwise held
+ * to the implied pull-request bar and ends `gave_up` "Nothing was committed".
+ * The pull-request step itself still runs.
+ *
  * `experience` is what the training cluster's dispatcher selected from its
  * experience store for this task — exactly the JSON its
  * `scripts/query-store.mjs` prints, `{ rules: [{ id, rule, applies, evidence?,

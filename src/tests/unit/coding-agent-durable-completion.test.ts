@@ -551,6 +551,53 @@ describe("the deliverable the auto-PR switch implies", () => {
 });
 
 /**
+ * A run whose result is not a pull request from its own branch — a refuter's
+ * verdict, a CI pass on other pull requests, a validator — commits nothing on
+ * purpose. With auto-PR on, the implied bar ended every one of them `gave_up`
+ * "Nothing was committed". `{ kind: "none" }` is the caller saying the
+ * run owes no deliverable; the control pins that a run which did NOT say so is
+ * still held to the bar, so a fixer that committed nothing stays honest.
+ */
+describe("a run whose caller asked for no deliverable", () => {
+  beforeEach(() => {
+    installHarnessThatNeverDelivers();
+    initGitRepo(projectDir);
+    writeConfig({ coding_agent_auto_pr: true, coding_agent_completion_attempts: 1 });
+  });
+
+  it("settles completed when it commits nothing, the pull-request flow untouched", async () => {
+    const started = await lib.startRun({
+      task: "Refute the finding; change no files.", projectId: "site", source: "agent",
+      deliverable: { kind: "none" },
+    });
+    // The pull-request step is the last thing before the gate, so once it has
+    // recorded its verdict the gate has had its say too.
+    await vi.waitFor(() => expect(lib.getRun(started.id)?.pr?.phase).toBe("blocked"), { timeout: 25_000, interval: 50 });
+    const run = await settledForGood(started.id);
+
+    expect(run.status).toBe("completed");
+    expect(run.deliverable).toEqual({ kind: "none" });
+    expect(run.deliverableCheck).toBeNull();
+    expect(run.attempts).toEqual([]);
+    // Only the gate's verdict changed: the flow still ran and found nothing to open.
+    expect(run.pr?.detail).toContain("Nothing was committed");
+    // Announced once, by `finishRun` — not a second time by the gate.
+    expect(announceCodingAgent).toHaveBeenCalledTimes(1);
+    expect(stdinLog()).toHaveLength(1);
+  });
+
+  it("control: without it, a run that commits nothing still gives up", async () => {
+    const started = await lib.startRun({ task: "Fix the bug.", projectId: "site", source: "agent" });
+    const run = await settledForGood(started.id);
+
+    expect(run.status).toBe("gave_up");
+    expect(run.error).toContain("Nothing was committed");
+    expect(run.pr?.phase).toBe("blocked");
+    expect(announceCodingAgent).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
  * Two properties of the attempt itself, each the kind of thing a loop gets
  * quietly wrong.
  */

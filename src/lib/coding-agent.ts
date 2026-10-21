@@ -9652,6 +9652,8 @@ async function maybeStartReviewPass(finished: CodingRun): Promise<ReviewPassOutc
  * the caller stated it, because that is an instruction rather than an inference.
  */
 function deliverableFor(run: CodingRun): Deliverable | null {
+  // The caller's explicit "this run owes nothing" also turns the implied bar off.
+  if (run.deliverable?.kind === "none") return null;
   if (run.deliverable) return run.deliverable;
   if (run.pr && run.pr.phase !== "failed") return { kind: "pr" };
   return null;
@@ -9696,7 +9698,8 @@ function deliverableGateApplies(run: CodingRun): boolean {
  * that was never gated, which `finishRun` announced itself.
  */
 function wasGated(run: CodingRun): boolean {
-  return run.deliverable !== null || run.attempts.length > 0;
+  // `none` was never gated: `finishRun` announced it, so the gate must not again.
+  return (run.deliverable !== null && run.deliverable.kind !== "none") || run.attempts.length > 0;
 }
 
 /** Open an attempt entry, for a run that has a deliverable to clear. */
