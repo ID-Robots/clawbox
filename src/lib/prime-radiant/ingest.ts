@@ -691,7 +691,9 @@ async function runJob(
     job.status = spent ? "interrupted" : fatal && job.done === 0 ? "failed" : "done";
     if (spent) {
       job.allowance = spent;
-      job.error = `${allowanceSpentText(spent)}. The documents not written yet wait for the next run${input.kind === "folders" ? " of these folders" : ""}, or Retry, once it frees up.`;
+      // A drop (and a retry of one) has no next run: only Retry reads its kept copies.
+      const takenBy = input.kind === "folders" ? "the next run of these folders, or Retry," : "Retry";
+      job.error = `${allowanceSpentText(spent)}. The documents not written yet wait for ${takenBy} once it frees up.`;
     } else if (fatal) job.error = fatal;
     else if (signal.aborted) job.error = "The ingest was stopped.";
   } catch (err) {
@@ -717,7 +719,7 @@ async function runJob(
       } catch {
         /* the tally stays as it was */
       }
-      if (job.queued > 0) job.notes.push(`${job.queued} document(s) wait for the ClawBox AI allowance; they were not tried and did not fail.`);
+      if (job.queued > 0) job.notes.push(`${job.queued} document(s) wait for the ClawBox AI allowance; they were not written and did not fail.`);
     }
     job.phase = "done";
     job.finishedAt = now().toISOString();

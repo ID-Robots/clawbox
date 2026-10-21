@@ -160,6 +160,8 @@ describe("an import meeting a spent allowance", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(fs.existsSync(drop)).toBe(false);
     expect(getIngestJob(started.id, vault)).toMatchObject({ status: "interrupted", failed: 0, queued: 3 });
+    // A drop has no next run: only Retry reads its kept copies.
+    expect(getIngestJob(started.id, vault)?.error).toMatch(/\. The documents not written yet wait for Retry once it frees up\.$/);
 
     const retried = await startIngest({ kind: "retry", retryOf: started.id }, { vault, client: writingClient(), retry: noSleep, parallel: 1 });
     await ingestFinished(retried.id);

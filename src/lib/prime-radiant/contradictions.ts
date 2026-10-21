@@ -826,6 +826,8 @@ export async function runContradictionPass(snapshot: Pick<VaultSnapshot, "pages"
     result.skipped = ALLOWANCE_SPENT;
     result.notes.push(`The judge stopped: ${allowanceSpentText(result.allowance, { now: now().getTime() })}. The pairs it did not judge are judged next pass.`);
   } else if (stop) {
+    // Another refusal stopped the pass first: it is that one's, not the allowance's.
+    result.allowance = null;
     result.skipped = stop === "aborted" ? "aborted" : "judge_unavailable";
     result.notes.push(`The judge stopped: ${stop}.`);
   }
