@@ -130,7 +130,9 @@ vi.mock("@/lib/openclaw-config", () => ({ readConfig: async () => openclawConfig
 import { writeEmbedderPin } from "@/lib/memory-embedder";
 import {
   EMBED_RETRY_MIN_WAIT_MS,
+  EmbeddingUnavailableError,
   IndexRebuildRequiredError,
+  embedDocumentsWithShardEmbedder,
   LOCAL_INDEX_PATH,
   _resetLocalMemoryCacheForTests,
   chunkText,
@@ -622,6 +624,23 @@ describe("the ClawBox AI cloud embedder", () => {
     expect(result.chunks).toBeGreaterThan(0);
     const hits = await searchLocalMemory("deposit", 3);
     expect(hits).not.toHaveLength(0);
+  });
+
+  it("stops at a spent memory-indexing allowance: the 429's body is read, the refusal named, never retried", async () => {
+    // A retry cannot get past `embeddings_weekly_limit_exceeded` before it frees
+    // up; three tries only took three times as long to say "HTTP 429".
+    boxState.clawaiToken = "claw_test";
+    await writeEmbedderPin("cloud");
+    embedFail.status = 429;
+    embedFail.retryAfter = "0";
+    embedFail.body = JSON.stringify({ error: { code: "embeddings_weekly_limit_exceeded", message: "Memory indexing allowance used up.", resetAt: "2026-10-25T00:00:00Z" } });
+    const fetchMock = vi.mocked(fetch);
+    const before = fetchMock.mock.calls.length;
+    const err = await embedDocumentsWithShardEmbedder(["The deposit is two months' rent."]).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(EmbeddingUnavailableError);
+    expect(err).toMatchObject({ retryable: false, retryAfterMs: null, allowance: { kind: "embeddings", resetAt: "2026-10-25T00:00:00Z" } });
+    expect((err as Error).message).toMatch(/HTTP 429: ClawBox AI's weekly memory-indexing allowance is used up/);
+    expect(fetchMock.mock.calls.length - before).toBe(1);
   });
 
   it("survives a dropped CONNECTION mid-rebuild, not only a refused one", async () => {

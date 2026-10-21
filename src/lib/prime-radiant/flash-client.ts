@@ -8,6 +8,14 @@
  * A 401/403 the proxy itself names as a refused credential is remembered
  * through the shared memo, exactly as the embedding and picture paths do.
  *
+ * The calls are counted against the box's ClawBox AI plan allowance, the
+ * same rolling weekly pool (and 5-hour burst ceiling) a chat turn draws on —
+ * the proxy does the counting, `allowance-meter.ts` shows Prime Radiant's
+ * share. A 429 that names a spent allowance (weekly or burst) is an
+ * `allowance` refusal, not a busy proxy: no retry gets past it before it frees
+ * up, so it is asked once, and every pass stops its step on it with that
+ * reason ({@link allowanceStopOf}), leaving the rest queued for the next run.
+ *
  * Which client answers, in order: an override a test installed
  * ({@link setFlashClientOverride}, kept in `processStore` because the routes
  * and the boot layer are separate module copies); the deterministic stub when
@@ -18,6 +26,13 @@
  * SERVER ONLY.
  */
 
+import {
+  CLAWAI_ALLOWANCE_KINDS,
+  formatFreesUpAt,
+  readClawaiAllowanceRefusal,
+  type ClawaiAllowanceKind,
+  type ClawaiAllowanceRefusal,
+} from "@/lib/clawai-allowance";
 import { CLAWBOX_AI_FLASH_MODEL_ID } from "@/lib/clawbox-ai-models";
 import { clawboxAiProxyUrl } from "@/lib/clawbox-ai-vision";
 import {
@@ -61,6 +76,7 @@ export type FlashErrorKind =
   | "auth"
   | "refused"
   | "rate_limited"
+  | "allowance"
   | "server"
   | "network"
   | "bad_response"
@@ -74,6 +90,8 @@ export class FlashCallError extends Error {
     message: string,
     readonly status: number | null = null,
     readonly retryAfterMs: number | null = null,
+    /** The spent allowance an `allowance` refusal names, with its "frees up at"; null for every other kind. */
+    readonly allowance: ClawaiAllowanceRefusal | null = null,
   ) {
     super(message);
     this.name = "FlashCallError";
@@ -82,6 +100,46 @@ export class FlashCallError extends Error {
   get retryable(): boolean {
     return RETRYABLE.has(this.kind);
   }
+}
+
+/** What a spent allowance is called where a job or a pass says why it stopped. */
+const ALLOWANCE_MESSAGES: Record<ClawaiAllowanceKind, string> = {
+  weekly: "ClawBox AI's weekly allowance is used up.",
+  burst: "ClawBox AI's 5-hour burst limit is reached.",
+  embeddings: "ClawBox AI's weekly memory-indexing allowance is used up.",
+};
+
+/** The reason a step records when a spent ClawBox AI allowance stopped it: neither done nor failed. */
+export const ALLOWANCE_SPENT = "allowance_spent";
+
+/** The spent allowance a step stopped on: which window, and when it frees up (ISO 8601, or null when the proxy did not say). */
+export interface AllowanceStop {
+  kind: ClawaiAllowanceKind;
+  resetAt: string | null;
+}
+
+/**
+ * The spent allowance `err` names — a Flash call's `allowance` refusal, or
+ * the embedder's (`EmbeddingUnavailableError.allowance`, read by shape so the
+ * embedder is not loaded to ask) — or null for any other failure.
+ */
+export function allowanceStopOf(err: unknown): AllowanceStop | null {
+  if (err instanceof FlashCallError && err.kind !== "allowance") return null;
+  const a = err && typeof err === "object" ? (err as { allowance?: unknown }).allowance : null;
+  if (!a || typeof a !== "object") return null;
+  const { kind, resetAt } = a as { kind?: unknown; resetAt?: unknown };
+  if (!(CLAWAI_ALLOWANCE_KINDS as readonly unknown[]).includes(kind)) return null;
+  return { kind: kind as ClawaiAllowanceKind, resetAt: typeof resetAt === "string" ? resetAt : null };
+}
+
+/**
+ * "ClawBox AI allowance spent, frees up at <when>" — the box's clock, in the
+ * words a pass's notes and a job's error are written in; without the instant
+ * when the refusal carried none.
+ */
+export function allowanceSpentText(stop: AllowanceStop, options: { now?: number; timeZone?: string | null } = {}): string {
+  const at = formatFreesUpAt(stop.resetAt, { locale: "en", now: options.now, timeZone: options.timeZone });
+  return at ? `ClawBox AI allowance spent, frees up at ${at}` : "ClawBox AI allowance spent";
 }
 
 /** One Flash call's ceiling: a 50-file batch measured ~133 s at the median. */
@@ -163,10 +221,13 @@ export function createClawboxAiFlashClient(options: ClawboxAiFlashOptions = {}):
           }
           throw new FlashCallError("refused", "ClawBox AI refused the request (plan or access).", status);
         }
-        await res.body?.cancel().catch(() => undefined);
         if (status === 429) {
+          // Read (bounded), never cancelled unread: the body is where the proxy names a spent allowance.
+          const refusal = await readClawaiAllowanceRefusal(res);
+          if (refusal) throw new FlashCallError("allowance", ALLOWANCE_MESSAGES[refusal.kind], status, null, refusal);
           throw new FlashCallError("rate_limited", "ClawBox AI is busy (429).", status, retryAfterMs(res.headers.get("retry-after")));
         }
+        await res.body?.cancel().catch(() => undefined);
         if (status >= 500) throw new FlashCallError("server", `ClawBox AI answered ${status}.`, status, retryAfterMs(res.headers.get("retry-after")));
         throw new FlashCallError("refused", `ClawBox AI answered ${status}.`, status);
       }
@@ -210,7 +271,12 @@ export function flashClient(): FlashClient {
   return createClawboxAiFlashClient();
 }
 
-/** Whether a real call could be made right now (a stub or override always can). */
+/**
+ * Whether a real call could be made right now (a stub or override always can).
+ * A credential, not an allowance: a spent one is the proxy's answer to the
+ * call itself — one request, then the step stops on `allowance` — never a
+ * remembered refusal that would keep turning a since-upgraded plan away.
+ */
 export async function flashAvailable(): Promise<boolean> {
   if (store.override || stubEnabled()) return true;
   return (await resolveClawaiToken()) !== null;
@@ -277,8 +343,8 @@ export interface CallOutcome {
 
 /**
  * One request with jittered exponential retries on 429, 5xx, a dropped connection and an
- * empty or non-JSON answer. A refused credential, a refused plan or an abort
- * is not retried. Throws the last {@link FlashCallError}.
+ * empty or non-JSON answer. A refused credential, a refused plan, a spent
+ * allowance or an abort is not retried. Throws the last {@link FlashCallError}.
  */
 export async function completeWithRetry(client: FlashClient, request: FlashRequest, options: RetryOptions = {}): Promise<CallOutcome> {
   const attempts = Math.max(1, options.attempts ?? 4);

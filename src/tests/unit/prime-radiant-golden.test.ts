@@ -10,7 +10,7 @@ import os from "os";
 import path from "path";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { FlashCallError, type FlashClient } from "@/lib/prime-radiant/flash-client";
-import { stubGoldenVerdict } from "@/lib/prime-radiant/flash-stub";
+import { createStubFlashClient, stubGoldenVerdict } from "@/lib/prime-radiant/flash-stub";
 import { git } from "@/lib/prime-radiant/git";
 import { revertCommit } from "@/lib/prime-radiant/history";
 import {
@@ -343,6 +343,58 @@ describe("golden questions: the nightly score", () => {
     const r = await runGoldenScore({ client: refusing, online: true });
     expect(r.skipped).toBe("model_unavailable");
     expect(readGoldenHistory()).toEqual([]);
+  });
+
+  const weeklySpent = () =>
+    new FlashCallError("allowance", "ClawBox AI's weekly allowance is used up.", 429, null, {
+      kind: "weekly",
+      resetAt: "2026-05-23T00:00:00.000Z",
+      message: "Weekly token allowance used up.",
+    });
+
+  it("stops at a spent ClawBox AI allowance after one call: no later call of the night can get past it", async () => {
+    await seedPages();
+    for (let i = 0; i < 18; i++) await addGoldenQuestion({ ...PRICE_Q, question: `What does the blue widget cost? (${i})` }, { domains: [] });
+    let calls = 0;
+    const spent: FlashClient = {
+      model: "deepseek-v4-flash",
+      async complete() {
+        calls++;
+        throw weeklySpent();
+      },
+    };
+    const r = await runGoldenScore({ runId: "run-0000000000f2", client: spent, online: true, now: () => NOW });
+    expect(r.skipped).toBe("allowance_spent");
+    expect(r.allowance).toEqual({ kind: "weekly", resetAt: "2026-05-23T00:00:00.000Z" });
+    expect(r.notes.join(" ")).toMatch(/The golden-question judge stopped: ClawBox AI allowance spent, frees up at .+\. Tonight's questions wait for the next night\./);
+    expect(calls).toBe(1);
+    expect(readGoldenHistory()).toEqual([]);
+  });
+
+  it("scores what it judged before a spent allowance, and leaves the rest their turn for the next night", async () => {
+    await seedPages();
+    for (let i = 0; i < 18; i++) await addGoldenQuestion({ ...PRICE_Q, question: `What does the blue widget cost? (${i})` }, { domains: [] });
+    const answering = createStubFlashClient();
+    let calls = 0;
+    const halfway: FlashClient = {
+      model: answering.model,
+      async complete(req) {
+        calls++;
+        if (calls > 1) throw weeklySpent();
+        return answering.complete(req);
+      },
+    };
+    const r = await runGoldenScore({ runId: "run-0000000000f3", client: halfway, online: true, now: () => NOW });
+    expect(calls).toBe(2);
+    expect(r.skipped).toBeNull();
+    expect(r.allowance).toMatchObject({ kind: "weekly" });
+    const judged = r.tally.asked;
+    expect(judged).toBeGreaterThan(0);
+    expect(judged).toBeLessThan(18);
+    expect(r.tally.failed).toBe(0);
+    expect(r.notes.join(" ")).toMatch(new RegExp(`The ${18 - judged} question\\(s\\) it did not judge wait for the next night`));
+    // Only the judged questions were stored: the others are asked first the next night.
+    expect(Object.keys(readLatestVerdicts())).toHaveLength(judged);
   });
 
   it("stores no score when no call judged anything, and stops after two calls in a row the provider failed", async () => {

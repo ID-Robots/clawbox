@@ -30,7 +30,12 @@
  * Failure scopes: a model answer that drops or garbles one item fails that
  * file; a call that keeps failing after its retries fails its batch; a refused
  * credential or plan stops the job (every further call would fail the same
- * way).
+ * way). A spent ClawBox AI allowance (weekly or burst) stops it too, after the
+ * one refused call, but fails nothing: the job ends `interrupted` with the
+ * allowance and when it frees up as its error, and every document it did not
+ * finish stays QUEUED (`pending`, counted as `queued`, never a dead letter) —
+ * the next run of the same folders, the nightly pass's included, or a retry
+ * takes it.
  *
  * SERVER ONLY.
  */
@@ -42,10 +47,14 @@ import path from "@/lib/runtime-path";
 import { processStore } from "@/lib/process-store";
 import { buildClaimIndex } from "./claims";
 import {
+  ALLOWANCE_SPENT,
   FlashCallError,
   abortableSleep,
+  allowanceSpentText,
+  allowanceStopOf,
   completeWithRetry,
   flashClient,
+  type AllowanceStop,
   type FlashClient,
   type RetryOptions,
 } from "./flash-client";
@@ -67,6 +76,7 @@ import { emptySkipCounts } from "./ingest-exclude";
 import { dropKeptCopies, keepFailedUploads, pruneKeptCopies } from "./ingest-dead-letter";
 import {
   claimDeadLetter,
+  countQueued,
   ingestedHashes,
   ingestLabels,
   insertFiles,
@@ -292,7 +302,7 @@ export async function startIngest(input: IngestInput, deps: IngestDeps = {}): Pr
   if (input.kind === "retry") {
     settleOrphanJobs(vault, liveIds(), now().toISOString());
     if (!readJob(vault, input.retryOf)) throw new UnknownJobError();
-    if (readDeadLetter(vault, input.retryOf, 1).length === 0) throw new NothingToRetryError();
+    if (readDeadLetter(vault, input.retryOf, 1).length === 0 && countQueued(vault, input.retryOf) === 0) throw new NothingToRetryError();
   }
 
   const at = now().toISOString();
@@ -324,6 +334,7 @@ export async function startIngest(input: IngestInput, deps: IngestDeps = {}): Pr
     retryOf: input.kind === "retry" ? input.retryOf : null,
     requeued: 0,
     deadLetter: 0,
+    queued: 0,
     skips: emptySkipCounts(),
   };
   settleOrphanJobs(vault, liveIds(), at);
@@ -333,7 +344,10 @@ export async function startIngest(input: IngestInput, deps: IngestDeps = {}): Pr
   if (input.kind === "retry") {
     // The original may still be held in memory for its late subscribers.
     const original = store.live.get(input.retryOf);
-    if (original) original.job.deadLetter = 0;
+    if (original) {
+      original.job.deadLetter = 0;
+      original.job.queued = 0;
+    }
   }
   // Registered before the next await: until it is, a second start passes the
   // busy check and an orphan sweep would settle this job as interrupted.
@@ -439,6 +453,8 @@ async function runJob(
   const scratch = path.join(primeRadiantRoot(), "tmp", job.id);
   const signal = live.abort.signal;
   let fatal: string | null = null;
+  /** The spent allowance that stopped the job: what it did not finish stays queued. */
+  let spent: AllowanceStop | null = null;
 
   const touch = () => {
     job.updatedAt = now().toISOString();
@@ -522,6 +538,8 @@ async function runJob(
     const dispatch = async (files: PreparedFile[], round: 1 | 2) => {
       if (files.length === 0) return;
       while (inFlight.size >= parallel) await Promise.race(inFlight);
+      // Past a spent allowance nothing more is asked: the files stay unsettled, queued below.
+      if (spent) return;
       if (fatal || signal.aborted) {
         settle(
           files.map((f) => ({ seq: f.seq, status: "failed" as const, sha256: f.sha256, bytes: f.bytes, error: fatal ?? "stopped", attempts: round - 1 })),
@@ -551,6 +569,7 @@ async function runJob(
         };
       }
       if (results.fatal && !fatal) fatal = results.fatal;
+      if (results.allowance && !spent) spent = results.allowance;
       let updates = results.updates.map((u) => ({ ...u, attempts: round }));
       if (round === 1 && !fatal && !signal.aborted && results.transient.size > 0) {
         const bySeq = new Map(files.map((f) => [f.seq, f]));
@@ -574,7 +593,7 @@ async function runJob(
     const gone: Array<{ seq: number; source: null }> = [];
     for (let seq = 0; seq < scan.files.length; seq++) {
       const file = scan.files[seq];
-      if (signal.aborted || fatal) break;
+      if (signal.aborted || fatal || spent) break;
       const read = await readFileOnce(file.abs);
       if (!read.ok) {
         // A file that is no longer there cannot be retried: it leaves the dead-letter list.
@@ -633,7 +652,7 @@ async function runJob(
     if (requeue.length > 0) {
       const queued = requeue.splice(0, requeue.length).sort((a, b) => a.seq - b.seq);
       job.requeued = queued.length;
-      if (!fatal && !signal.aborted) {
+      if (!fatal && !spent && !signal.aborted) {
         job.notes.push(`${queued.length} document(s) failed their first round and were tried once more.`);
         publish();
         try {
@@ -661,13 +680,19 @@ async function runJob(
     // Files the loop never reached (stopped, or a fatal error) are failed —
     // dead letters like any other; a document is skipped only once some job
     // wrote its pages, so the next run of the same folders picks them up too.
+    // Past a spent allowance they are QUEUED instead (`pending`), never failed:
+    // nothing was wrong with them, and the next run takes them once it frees up.
     const missing: FileUpdate[] = [];
     for (let seq = 0; seq < scan.files.length; seq++) {
-      if (!settledSeqs.has(seq)) missing.push({ seq, status: "failed", error: fatal ?? "stopped" });
+      if (settledSeqs.has(seq)) continue;
+      missing.push(spent ? { seq, status: "pending", error: ALLOWANCE_SPENT } : { seq, status: "failed", error: fatal ?? "stopped" });
     }
     settle(missing, labels);
-    job.status = fatal && job.done === 0 ? "failed" : "done";
-    if (fatal) job.error = fatal;
+    job.status = spent ? "interrupted" : fatal && job.done === 0 ? "failed" : "done";
+    if (spent) {
+      job.allowance = spent;
+      job.error = `${allowanceSpentText(spent)}. The documents not written yet wait for the next run${input.kind === "folders" ? " of these folders" : ""}, or Retry, once it frees up.`;
+    } else if (fatal) job.error = fatal;
     else if (signal.aborted) job.error = "The ingest was stopped.";
   } catch (err) {
     job.status = "failed";
@@ -686,6 +711,14 @@ async function runJob(
       /* the tally stays as it was */
     }
     if (job.deadLetter > 0) job.notes.push(`${job.deadLetter} document(s) still failed; they can be retried.`);
+    if (spent) {
+      try {
+        job.queued = countQueued(vault, job.id, { ended: true });
+      } catch {
+        /* the tally stays as it was */
+      }
+      if (job.queued > 0) job.notes.push(`${job.queued} document(s) wait for the ClawBox AI allowance; they were not tried and did not fail.`);
+    }
     job.phase = "done";
     job.finishedAt = now().toISOString();
     publish();
@@ -701,9 +734,10 @@ async function runJob(
 async function settleSources(vault: string, jobId: string, input: IngestInput): Promise<void> {
   const rows = readFileSources(vault, jobId);
   if (input.kind === "upload") {
-    const failed = rows.filter((r) => r.status === "failed");
-    const kept = await keepFailedUploads(jobId, input.dir, failed);
-    const cleared = rows.filter((r) => r.status !== "failed").map((r) => ({ seq: r.seq, source: null }));
+    // A queued file (left by a spent allowance) is kept like a failed one: a retry reads it from there.
+    const owed = rows.filter((r) => r.status === "failed" || r.status === "pending");
+    const kept = await keepFailedUploads(jobId, input.dir, owed);
+    const cleared = rows.filter((r) => r.status !== "failed" && r.status !== "pending").map((r) => ({ seq: r.seq, source: null }));
     setFileSources(vault, jobId, [...kept, ...cleared]);
   } else if (input.kind === "retry") {
     const done = rows.filter((r) => r.status !== "failed" && r.status !== "pending");
@@ -719,6 +753,8 @@ interface BatchResult {
   commit: string | null;
   cost: { calls: number; usd: number } | null;
   fatal: string | null;
+  /** A spent allowance refused the batch's call: it stops the job, and the batch's files (left out of `updates`) stay queued. */
+  allowance?: AllowanceStop | null;
 }
 
 const FATAL_MESSAGES: Partial<Record<FlashCallError["kind"], string>> = {
@@ -795,6 +831,9 @@ async function processBatch(
         deps.retry,
       );
     } catch (err) {
+      // A spent allowance fails nothing: the batch is left unsettled, queued with the rest of the job.
+      const allowance = allowanceStopOf(err);
+      if (allowance) return { updates: [], transient: new Set(), pagesWritten: 0, commit: null, cost: cost.calls ? cost : null, fatal: null, allowance };
       const e = err instanceof FlashCallError ? err : null;
       const fatal = e ? (FATAL_MESSAGES[e.kind] ?? null) : null;
       return failAll(

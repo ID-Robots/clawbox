@@ -456,9 +456,15 @@ export default function PrimeRadiantIngest({ onChanged }: { onChanged: () => voi
                   {t("primeRadiant.ingest.jobSummary", { pages: job.pages, done: job.done, total: job.total })}
                   {tokens(job.id) && ` · ${tokens(job.id)}`}
                 </span>
-                {job.deadLetter > 0 && (
+                {/* What a spent allowance left queued is retried with the dead letters, but never counted as one. */}
+                {(job.deadLetter > 0 || (job.queued ?? 0) > 0) && (
                   <button type="button" className={`${BTN_SECONDARY} ml-auto`} onClick={() => void showDeadLetter(job.id)} aria-expanded={openJob === job.id} data-testid="prime-radiant-dead-letter-toggle">
-                    {t("primeRadiant.ingest.deadLetter", { n: job.deadLetter })}
+                    {[
+                      job.deadLetter > 0 ? t("primeRadiant.ingest.deadLetter", { n: job.deadLetter }) : null,
+                      (job.queued ?? 0) > 0 ? t("primeRadiant.ingest.queued", { n: job.queued }) : null,
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
                   </button>
                 )}
               </div>

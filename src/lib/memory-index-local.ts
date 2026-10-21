@@ -40,6 +40,7 @@ import type { DatabaseSync as DatabaseSyncType } from "node:sqlite";
 import { openSqlite } from "@/lib/openclaw-session-store";
 import { getEmbedProvisioningStatus } from "@/lib/embed-server";
 import { getLocalAiToken } from "@/lib/local-ai-token";
+import { readClawaiAllowanceRefusal, type ClawaiAllowanceRefusal } from "@/lib/clawai-allowance";
 import {
   clawaiCredentialGeneration,
   clawaiCredentialRefused,
@@ -179,11 +180,19 @@ export class EmbeddingUnavailableError extends Error {
   readonly retryable: boolean;
   /** What `Retry-After` asked for, in milliseconds, when it asked for anything. */
   readonly retryAfterMs: number | null;
-  constructor(detail: string, retryable = false, retryAfterMs: number | null = null) {
+  /**
+   * The ClawBox AI allowance a cloud 429 named as spent (the memory-indexing
+   * one, `embeddings_weekly_limit_exceeded`), with its "frees up at"; null
+   * for every other failure. Never retryable: nothing gets past it before it
+   * frees up, so a caller stops on it and says so.
+   */
+  readonly allowance: ClawaiAllowanceRefusal | null;
+  constructor(detail: string, retryable = false, retryAfterMs: number | null = null, allowance: ClawaiAllowanceRefusal | null = null) {
     super(`The embedding model did not answer: ${detail}`);
     this.name = "EmbeddingUnavailableError";
-    this.retryable = retryable;
+    this.retryable = retryable && !allowance;
     this.retryAfterMs = retryAfterMs;
+    this.allowance = allowance;
   }
 }
 
@@ -789,7 +798,15 @@ async function embedBatchOnce(
     // only for a 401/403, so a 429 or a 5xx — the statuses the cloud arm
     // retries up to three times — would otherwise leave two unread bodies
     // holding their connection out of the fetch pool the next batch needs.
-    const refusalCopy = embedder.source === "cloud" ? res.clone() : null;
+    //
+    // A SPENT ALLOWANCE IS NAMED IN A CLOUD 429's BODY — the memory-indexing
+    // one, `embeddings_weekly_limit_exceeded`, with its "frees up at" — so that
+    // body is read (bounded, the response itself: a 429 needs no clone, the
+    // credential helper never reads one) before anything cancels it. It is not
+    // retried: nothing gets past it before it frees up, and three tries would
+    // only take three times as long to say so.
+    const allowance = embedder.source === "cloud" && res.status === 429 ? await readClawaiAllowanceRefusal(res) : null;
+    const refusalCopy = embedder.source === "cloud" && res.status !== 429 ? res.clone() : null;
     try {
       if (refusalCopy && (await proxyRefusedClawaiCredential(refusalCopy))) {
         await noteClawaiCredentialRefused(res.status, generation);
@@ -806,9 +823,10 @@ async function embedBatchOnce(
     // in `ensureLocalAiReady`, which is a real answer and not a bug: the box
     // is too busy to hold the model right now.
     throw new EmbeddingUnavailableError(
-      `HTTP ${res.status}`,
+      allowance ? `HTTP ${res.status}: ClawBox AI's ${allowance.kind === "embeddings" ? "weekly memory-indexing" : allowance.kind} allowance is used up` : `HTTP ${res.status}`,
       embedder.source === "cloud" && retryableStatus(res.status),
-      retryAfterMs(res),
+      allowance ? null : retryAfterMs(res),
+      allowance,
     );
   }
   let payload: unknown;
