@@ -6347,6 +6347,28 @@ remove_shadowing_system_openclaw() {
   return 0
 }
 
+# Is the Brave web-search plugin on this box ClawBox's to consent for?
+#
+# Only while its entry in openclaw.json carries a `claw_` token: that is what
+# gateway-pre-start.sh writes when it points the plugin at ClawBox AI web search
+# and installs it, and only ClawBox hands such tokens out. The plugin id says
+# nothing — an owner can install the very same plugin for a Brave key of their
+# own, and that one is theirs to answer for. Same rule as
+# `clawaiWebSearchEntryIsOurs` in src/lib/clawai-web-search.ts. TOTAL under
+# `set -euo pipefail`: an unreadable config, or any other shape, is not ours.
+clawbox_search_plugin_is_ours() {
+  [ "$(python3 - "$CLAWBOX_HOME/.openclaw/openclaw.json" <<'PY' 2>/dev/null || true
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        key = json.load(fh)["plugins"]["entries"]["brave"]["config"]["webSearch"].get("apiKey")
+    print("1" if isinstance(key, str) and key.startswith("claw_") else "0")
+except Exception:
+    print("0")
+PY
+)" = "1" ]
+}
+
 step_openclaw_install() {
   is_hermes_edition && { echo "  [hermes edition] skipping OpenClaw npm install"; return 0; }
   # Re-assert the .bashrc PATH stanza before the early-returns BELOW. The
@@ -6615,6 +6637,10 @@ for p in d.get("plugins", []):
       if [ "$spec" = "$plugin" ] && [ -n "$TARGET" ]; then
         case "$PLUGIN_KEY" in
           codex|discord|whatsapp) spec="@openclaw/$PLUGIN_KEY@$TARGET" ;;
+          # The Brave web-search plugin gateway-pre-start.sh installs for
+          # ClawBox AI web search. Same @openclaw scope, but its package is not
+          # named after its id, so it cannot share the arm above.
+          brave) spec="@openclaw/brave-plugin@$TARGET" ;;
         esac
       fi
       echo "    - $spec"
@@ -6648,6 +6674,15 @@ for p in d.get("plugins", []):
       case "$PLUGIN_KEY" in
         codex|deepseek|discord|whatsapp|clawbox-email-directives)
           openclaw_is_v2 && CAP_ARGS=(--accept-capabilities)
+          ;;
+        brave)
+          # ClawBox's only while the entry is ClawBox AI web search's, never
+          # by id: see `clawbox_search_plugin_is_ours`.
+          if clawbox_search_plugin_is_ours; then
+            openclaw_is_v2 && CAP_ARGS=(--accept-capabilities)
+          else
+            echo "      (the owner's own Brave plugin: refreshed without accepting new capabilities)"
+          fi
           ;;
         *)
           echo "      (not a ClawBox-managed plugin: refreshed without accepting new capabilities)"

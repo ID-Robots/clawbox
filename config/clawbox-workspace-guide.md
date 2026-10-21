@@ -49,6 +49,12 @@ The Chromium window is visible on the ClawBox desktop (accessible via the VNC vi
 
 ---
 
+## When web search is unavailable
+
+If `web_search` is missing, fails, or reports a limit or a refusal, search with the browser instead: `browser_navigate` to a search engine's results page for the query, then read it with `browser_screenshot`. Don't keep retrying `web_search` with different words — the same refusal will come back.
+
+---
+
 ## Apps and UI
 
 | Tool | Purpose |

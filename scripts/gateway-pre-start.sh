@@ -4048,6 +4048,226 @@ if isinstance(ds_models, list):
             model["input"] = ["text"]
             changed = True
 
+
+# Migration: ClawBox AI web search (Max only, behind a flag that is OFF by default).
+#
+# Max subscribers search the web through the ClawBox AI proxy, which serves a
+# Brave-compatible search route and adds the company's Brave key on the
+# server, so that key never reaches the box. OpenClaw's own Brave plugin
+# already speaks to such a route: `plugins.entries.brave.config.webSearch.baseUrl`
+# is its documented "trusted Brave-compatible proxy" override, it appends
+# /res/v1/web/search to it, and it sends `webSearch.apiKey` as the
+# X-Subscription-Token header. So this block writes exactly two fields — the
+# proxy's search base and the box's own `claw_` token — and the plugin install
+# further down puts the plugin itself on disk. src/lib/clawai-web-search.ts
+# holds the TypeScript side of every name used here; the suite pins the two.
+#
+# `tools.web.search.provider` is deliberately NOT written. Brave comes first in
+# OpenClaw's auto-detection, so an unset provider picks this entry up, and an
+# owner who picked a provider of their own keeps it. Over the proxy's monthly
+# cap, or on a plan without search, the proxy refuses, the plugin returns a
+# provider error and the agent searches with the browser instead: nothing on
+# the box hard-fails.
+#
+# THE FLAG. Search reaches customers only once the provider's terms allow it,
+# so nothing here runs unless the device store carries `clawai_web_search` as a
+# literal true. With the flag off, or on any plan but Max, openclaw.json is
+# left exactly as it was.
+#
+# THE PLAN, AND ONLY THE PLAN. `clawai_plan_tier` must read "pro", the tier of
+# the MAX plan (the two names are off by one on purpose). Unlike the cloud
+# voice, the device badge (`clawai_tier`) is never a fallback here: it is a
+# DEFAULT a Pro account can carry too, and the proxy would refuse every search
+# such a box sent.
+#
+# NO STAMP. The cloud voice marks its entry `clawboxManaged`; this one cannot.
+# @openclaw/brave-plugin declares `additionalProperties: false` on its config
+# AND on `webSearch` (apiKey, mode and baseUrl, nothing else), so one extra key
+# is a config the gateway refuses to load. Ownership is read off the two fields
+# themselves instead, and the withdrawal wants BOTH: a `claw_` token, which only
+# ClawBox hands out, on an address of ours.
+CLAWBOX_SEARCH_FLAG_KEY = "clawai_web_search"
+CLAWBOX_SEARCH_PLUGIN_ID = "brave"
+CLAWBOX_SEARCH_ROUTE = "/search"
+CLAWBOX_SEARCH_PLAN_TIER = "pro"
+
+
+def _clawai_search_stamps():
+    """(flag, plan) out of the device store, or (None, None).
+
+    `flag` is True for a literal true and False for anything else in a store we
+    could read — absent included, because absent is what OFF looks like. `plan`
+    is the plan stamp when it is one we recognise ("flash", "pro", or "free" for
+    an account with no paid plan — CLAWAI_PLAN_UNPAID), else None. Unreadable,
+    absent and malformed stores give (None, None): nobody has told us anything,
+    and that is never a reason to write or to take away.
+    """
+    _store_path = os.environ.get("CLAWBOX_DEVICE_STORE") or ""
+    if not _store_path:
+        return None, None
+    try:
+        with open(_store_path) as _fh:
+            _store = json.load(_fh)
+    except Exception:
+        return None, None
+    if not isinstance(_store, dict):
+        return None, None
+    _plan = _store.get("clawai_plan_tier")
+    _plan = _plan.strip().lower() if isinstance(_plan, str) else ""
+    return (
+        _store.get(CLAWBOX_SEARCH_FLAG_KEY) is True,
+        _plan if _plan in ("flash", CLAWBOX_SEARCH_PLAN_TIER, "free") else None,
+    )
+
+
+def _clawai_search_owner_env_key():
+    """Has the owner given the gateway a BRAVE_API_KEY of their own?
+
+    The plugin reads its config key FIRST and BRAVE_API_KEY only as a fallback,
+    so an entry of ours would silently shadow theirs. The gateway gets it from
+    its environment (this script runs in the same unit) or from the OpenClaw
+    home's `.env`. A name with no value is not a key.
+    """
+    if (os.environ.get("BRAVE_API_KEY") or "").strip():
+        return True
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(cfg_path)), ".env"), errors="replace") as _fh:
+            for _line in _fh:
+                _line = _line.strip()
+                if _line.startswith("export "):
+                    _line = _line[len("export "):].lstrip()
+                _name, _eq, _value = _line.partition("=")
+                if _eq and _name.strip() == "BRAVE_API_KEY" and _value.strip().strip("'\"").strip():
+                    return True
+    except Exception:
+        pass
+    return False
+
+
+# Behind the `claw_` gate, like every reader of `_clawbox_proxy_hosts`: on a box
+# running a raw provider key the proxy set would admit that provider's host.
+if isinstance(_clawai_token, str) and _clawai_token.startswith("claw_"):
+    _search_flag, _search_plan = _clawai_search_stamps()
+    _search_base = _clawai_image_base_url
+    _search_base = (_search_base[:-1] if _search_base.endswith("/") else _search_base) + CLAWBOX_SEARCH_ROUTE
+
+    _search_plugins = cfg.get("plugins")
+    _search_entries = _search_plugins.get("entries") if isinstance(_search_plugins, dict) else None
+    _search_entry = (
+        _search_entries.get(CLAWBOX_SEARCH_PLUGIN_ID) if isinstance(_search_entries, dict) else None
+    )
+    _search_config = _search_entry.get("config") if isinstance(_search_entry, dict) else None
+    _search_ws = _search_config.get("webSearch") if isinstance(_search_config, dict) else None
+
+    def _search_ws_is_ours_to_refresh(_ws):
+        """Is this `webSearch` block ours to point at the proxy?
+
+        An empty slot is. A key or an address held as a secret reference, a key
+        that is not a `claw_` token, or an address on a host of nobody's but the
+        owner's is the owner's own search setup, and every field of it is left
+        alone. Past that, `_clawai_route_is_ours` decides, with no stamp to offer.
+        """
+        if _ws is None:
+            return True
+        _base = _ws.get("baseUrl")
+        _key = _ws.get("apiKey")
+        if _base is not None and not isinstance(_base, str):
+            return False
+        if _key is not None and not isinstance(_key, str):
+            return False
+        if isinstance(_key, str) and _key.strip() and not _key.strip().startswith("claw_"):
+            return False
+        return _clawai_route_is_ours(_base, _key, False, _search_base)
+
+    def _search_ws_is_ours_to_remove(_ws):
+        """Did WE write this `webSearch` block? Both halves, or it stays."""
+        if not isinstance(_ws, dict):
+            return False
+        _base = _ws.get("baseUrl")
+        _key = _ws.get("apiKey")
+        return (
+            isinstance(_key, str)
+            and _key.startswith("claw_")
+            and isinstance(_base, str)
+            and bool(_base.strip())
+            and _clawai_host_is_ours(_base)
+        )
+
+    _search_owner_env = _clawai_search_owner_env_key()
+    _search_entitled = _search_flag is True and _search_plan == CLAWBOX_SEARCH_PLAN_TIER
+    if _search_owner_env:
+        _search_withdraw_reason = "the gateway has a BRAVE_API_KEY of the owner's own"
+    elif _search_flag is False:
+        _search_withdraw_reason = "the device flag is off"
+    elif _search_plan is not None and _search_plan != CLAWBOX_SEARCH_PLAN_TIER:
+        _search_withdraw_reason = "this box's plan no longer includes it"
+    else:
+        _search_withdraw_reason = None
+
+    if _search_entitled and not _search_owner_env:
+        _search_tools = cfg.get("tools")
+        _search_web = _search_tools.get("web") if isinstance(_search_tools, dict) else None
+        _search_tool = _search_web.get("search") if isinstance(_search_web, dict) else None
+        _search_provider = _search_tool.get("provider") if isinstance(_search_tool, dict) else None
+        _search_skip = None
+        if not bool(globals().get("CLAWBOX_OPENCLAW_V2", False)):
+            # OpenClaw 2 is where Brave became @openclaw/brave-plugin, and every
+            # build of it from 2026.8.1 on declares `webSearch.baseUrl`. An older
+            # core bundles its own Brave with a schema nobody here has checked,
+            # and under `additionalProperties: false` one unknown key is a
+            # config the gateway will not load.
+            _search_skip = "this OpenClaw core predates the Brave plugin it is verified against"
+        elif isinstance(_search_provider, str) and _search_provider.strip() and _search_provider.strip().lower() != CLAWBOX_SEARCH_PLUGIN_ID:
+            _search_skip = "tools.web.search.provider names a provider of the owner's choosing"
+        elif isinstance(_search_tool, dict) and _search_tool.get("enabled") is False:
+            _search_skip = "web search is switched off on this box"
+        elif isinstance(_search_entry, dict) and _search_entry.get("enabled") is False:
+            _search_skip = "the brave plugin is switched off on this box"
+        elif any(
+            _node is not None and not isinstance(_node, dict)
+            for _node in (_search_plugins, _search_entries, _search_entry, _search_config, _search_ws)
+        ):
+            # `plugins` carries every installed plugin's switches. A shape the
+            # gateway cannot read is not ours to replace, unlike a media slot.
+            _search_skip = "plugins.entries.brave is not a config object this script can edit"
+        elif not _search_ws_is_ours_to_refresh(_search_ws):
+            _search_skip = "plugins.entries.brave already holds the owner's own search setup"
+
+        if _search_skip:
+            print("  Skipped ClawBox AI web search: " + _search_skip)
+        else:
+            _search_plugins = _search_plugins if isinstance(_search_plugins, dict) else {}
+            _search_entries = _search_entries if isinstance(_search_entries, dict) else {}
+            _search_entry = _search_entry if isinstance(_search_entry, dict) else {}
+            _search_config = _search_config if isinstance(_search_config, dict) else {}
+            _search_ws = _search_ws if isinstance(_search_ws, dict) else {}
+            _search_ws_before = dict(_search_ws)
+            _search_ws["baseUrl"] = _search_base
+            _search_ws["apiKey"] = _clawai_token
+            if _search_ws != _search_ws_before:
+                _search_config["webSearch"] = _search_ws
+                _search_entry["config"] = _search_config
+                _search_entries[CLAWBOX_SEARCH_PLUGIN_ID] = _search_entry
+                _search_plugins["entries"] = _search_entries
+                cfg["plugins"] = _search_plugins
+                print("  Pointed web search at ClawBox AI (Brave-compatible proxy, Max plan)")
+                changed = True
+
+    elif _search_withdraw_reason and _search_ws_is_ours_to_remove(_search_ws):
+        # Only the two fields we write. The plugin's own switch and its install
+        # stay as they are: without a key it cannot win auto-detection, and an
+        # owner's `mode` is theirs. Containers emptied by the removal go with it.
+        del _search_ws["baseUrl"]
+        del _search_ws["apiKey"]
+        if not _search_ws:
+            del _search_config["webSearch"]
+        if not _search_config:
+            del _search_entry["config"]
+        if not _search_entry:
+            del _search_entries[CLAWBOX_SEARCH_PLUGIN_ID]
+        print("  Removed ClawBox AI web search: " + _search_withdraw_reason)
+        changed = True
+
 if changed:
     # Atomic write so a crash mid-rewrite can't leave a half-written
     # file where the gateway would refuse to boot.
@@ -7818,6 +8038,188 @@ elif [ "$CLAWBOX_OPENCLAW_V2" = "1" ] && [ "$(clawbox_deepseek_row_needs_switch_
   # See `clawbox_deepseek_switch_on_for_row`.
   clawbox_deepseek_switch_on_for_row
 fi
+
+# ClawBox AI web search: the Brave plugin the managed search entry needs.
+#
+# The config migration above points `plugins.entries.brave` at the ClawBox AI
+# proxy on a Max box whose device store turns search on — and on no other box,
+# because that flag is off by default. OpenClaw 2 ships Brave as an external
+# plugin (@openclaw/brave-plugin), so the entry has nothing behind it until the
+# plugin is on disk. Install it here only while the config carries OUR entry (a
+# `claw_` token on it), the device store does not say search is off or the plan
+# is not Max — the migration's own reading, so a stale entry it could not take
+# back never buys an install — and no payload for this core is on disk yet: a
+# box with the flag off never installs anything, and a box that has the plugin
+# pays nothing.
+#
+# PINNED to the running core from both registries, npm first (the package's
+# own default route), and never the unpinned spec: that resolves @latest, and a
+# build declaring a newer plugin API is one this core refuses. NON-FATAL, and
+# with no repair row for a plugin that was never installed: web search is
+# optional, an entry with no plugin behind it is a startup warning rather than
+# a refusal, and the agent searches with the browser instead, which is the
+# fallback the plan promises.
+#
+# A STALE PAYLOAD IS THE EXCEPTION. A core update leaves the build an older core
+# installed on disk, unreachable, with the install record that has the core
+# verify it at startup — and that verification refuses readiness. When the
+# reinstall fails over one, the entry is switched off and a repair row filed
+# (`clawbox_plugin_boot_without`, as for DeepSeek), so the gateway starts
+# without search instead of not at all. An entry that is off with that row on
+# file is ClawBox's to bring back, and this block does on a later start: it
+# installs again, or — when an update's plugin refresh or the owner's Retry has
+# put the payload back already — switches it on and clears the row. An entry
+# the OWNER switched off has no such row and stays off.
+CLAWBOX_SEARCH_PLUGIN_PACKAGE="@openclaw/brave-plugin"
+
+# Succeeds when the core bundles Brave, or <home> holds a payload the running
+# core can load — the same rule as `clawbox_deepseek_plugin_on_disk`: a ClawHub
+# payload is present when it is present, an npm one only when it is this core's
+# own release (any at all when that is unknown).
+clawbox_search_plugin_on_disk() {
+  local manifest version
+  [ ! -f "$(dirname "$OPENCLAW_BIN")/../lib/node_modules/openclaw/dist/extensions/brave/openclaw.plugin.json" ] || return 0
+  [ ! -f "$1/extensions/brave/openclaw.plugin.json" ] || return 0
+  for manifest in "$1"/npm/node_modules/"$CLAWBOX_SEARCH_PLUGIN_PACKAGE"/openclaw.plugin.json \
+    "$1"/npm/projects/*/node_modules/"$CLAWBOX_SEARCH_PLUGIN_PACKAGE"/openclaw.plugin.json; do
+    [ -f "$manifest" ] || continue
+    [ -n "${CLAWBOX_OPENCLAW_EFFECTIVE:-}" ] || return 0
+    version="$(python3 -c 'import json, sys; v = json.load(open(sys.argv[1])).get("version"); print(v if isinstance(v, str) else "")' \
+      "${manifest%/openclaw.plugin.json}/package.json" 2>/dev/null || true)"
+    case "$version" in
+      "$CLAWBOX_OPENCLAW_EFFECTIVE"|"$CLAWBOX_OPENCLAW_EFFECTIVE"-*|"$CLAWBOX_OPENCLAW_EFFECTIVE"+*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# Succeeds when <home> holds an npm payload of the plugin at all. Asked only
+# once `clawbox_search_plugin_on_disk` has said no, so what it finds is a build
+# an older core installed: present, unreachable, and on record.
+clawbox_search_plugin_stale_on_disk() {
+  local manifest
+  for manifest in "$1"/npm/node_modules/"$CLAWBOX_SEARCH_PLUGIN_PACKAGE"/openclaw.plugin.json \
+    "$1"/npm/projects/*/node_modules/"$CLAWBOX_SEARCH_PLUGIN_PACKAGE"/openclaw.plugin.json; do
+    [ ! -f "$manifest" ] || return 0
+  done
+  return 1
+}
+
+if [ "$CLAWBOX_OPENCLAW_V2" = "1" ]; then
+  SEARCH_PLUGIN_ON_DISK=0
+  if clawbox_search_plugin_on_disk "$OPENCLAW_HOME_DIR"; then SEARCH_PLUGIN_ON_DISK=1; fi
+  # A box that has the plugin and no row naming it pays one grep, not a python.
+  if [ "$SEARCH_PLUGIN_ON_DISK" = "0" ] || grep -q '"brave"' "$CLAWBOX_PLUGIN_REPAIR_FILE" 2>/dev/null; then
+    # TOTAL, like the DeepSeek reader above: an unhandled shape in a BLOCKING
+    # ExecStartPre under `set -euo pipefail` is no gateway, not a bad answer.
+    # "on" and "off" are our entry, switched on or off; anything else is "0".
+    NEEDS_SEARCH_PLUGIN="$(python3 - "$OPENCLAW_CONFIG" <<'PY' 2>/dev/null
+import json, os, sys
+
+
+def store_says_off():
+    """The migration's withdrawal reading of the device store, nothing looser.
+
+    Off for a readable store whose flag is not a literal true, or whose plan is
+    one we know and not Max ("pro"). A store that is absent, unreadable or
+    silent about the plan says nothing, and the migration keeps its entry then,
+    so the plugin behind that entry is still wanted.
+    """
+    try:
+        with open(os.environ.get("CLAWBOX_DEVICE_STORE") or "", encoding="utf-8") as fh:
+            store = json.load(fh)
+    except Exception:
+        return False
+    if not isinstance(store, dict):
+        return False
+    if store.get("clawai_web_search") is not True:
+        return True
+    plan = store.get("clawai_plan_tier")
+    plan = plan.strip().lower() if isinstance(plan, str) else ""
+    return plan in ("flash", "free")
+
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        entry = json.load(fh)["plugins"]["entries"]["brave"]
+    key = entry["config"]["webSearch"].get("apiKey")
+    ours = isinstance(key, str) and key.startswith("claw_")
+    if not ours or store_says_off():
+        print("0")
+    else:
+        print("off" if entry.get("enabled") is False else "on")
+except Exception:
+    print("0")
+PY
+)" || NEEDS_SEARCH_PLUGIN=0
+    SEARCH_PLUGIN_OFF_BY_US=0
+    if [ "$NEEDS_SEARCH_PLUGIN" = "off" ]; then
+      if [ "$(clawbox_plugin_still_switched_off_by_us brave)" = "1" ]; then SEARCH_PLUGIN_OFF_BY_US=1; fi
+    fi
+    if [ "$SEARCH_PLUGIN_ON_DISK" = "1" ]; then
+      # The payload is back and the entry is off because a previous start
+      # switched it off: put it back on, and the badge goes. Nothing else here
+      # is ours to touch on a box that has the plugin.
+      if [ "$SEARCH_PLUGIN_OFF_BY_US" = "1" ]; then
+        clawbox_plugin_repair_clear brave
+      fi
+    elif [ "$NEEDS_SEARCH_PLUGIN" = "on" ] || [ "$SEARCH_PLUGIN_OFF_BY_US" = "1" ]; then
+      if [ -z "$CLAWBOX_OPENCLAW_EFFECTIVE" ]; then
+        echo "  WARN: ClawBox AI web search needs $CLAWBOX_SEARCH_PLUGIN_PACKAGE, and without the running core's version no pinned build can be chosen; the agent searches with the browser" >&2
+      else
+        echo "  Installing $CLAWBOX_SEARCH_PLUGIN_PACKAGE@$CLAWBOX_OPENCLAW_EFFECTIVE (ClawBox AI web search)..."
+        SEARCH_PLUGIN_NPM_SPEC="npm:${CLAWBOX_SEARCH_PLUGIN_PACKAGE}@${CLAWBOX_OPENCLAW_EFFECTIVE}"
+        SEARCH_PLUGIN_INSTALLED=""
+        SEARCH_PLUGIN_RC=""
+        SEARCH_PLUGIN_OUT=""
+        for SEARCH_TRY_SPEC in "$SEARCH_PLUGIN_NPM_SPEC" \
+          "clawhub:${CLAWBOX_SEARCH_PLUGIN_PACKAGE}@${CLAWBOX_OPENCLAW_EFFECTIVE}"; do
+          SEARCH_TRY_RC=0
+          case "$SEARCH_TRY_SPEC" in
+            npm:*)
+              # `--force` on the npm spec only, as for DeepSeek: the CLI reads it
+              # as consent to a non-ClawHub source, and this runs only when no
+              # payload for the running core is on disk.
+              clawbox_run_openclaw_capture 180 plugins install "$SEARCH_TRY_SPEC" --force --accept-capabilities \
+                || SEARCH_TRY_RC=$?
+              ;;
+            *)
+              clawbox_run_openclaw_capture 180 plugins install "$SEARCH_TRY_SPEC" --accept-capabilities \
+                || SEARCH_TRY_RC=$?
+              ;;
+          esac
+          if [ "$SEARCH_TRY_RC" = "0" ]; then
+            SEARCH_PLUGIN_INSTALLED="$SEARCH_TRY_SPEC"
+            break
+          fi
+          SEARCH_PLUGIN_RC="$SEARCH_TRY_RC"
+          SEARCH_PLUGIN_OUT="$CLAWBOX_CLI_OUT"
+          # A registry that ran into its deadline means a box that is offline:
+          # the second registry would only spend this blocking start again.
+          case "$SEARCH_TRY_RC" in 124|137) break ;; esac
+        done
+        if [ -n "$SEARCH_PLUGIN_INSTALLED" ]; then
+          echo "  Brave web search plugin installed ($SEARCH_PLUGIN_INSTALLED)"
+          # `plugins install` keeps an explicit `enabled: false`; the clear puts
+          # back what a previous start switched off, and removes its row.
+          clawbox_plugin_repair_clear brave
+        else
+          SEARCH_PLUGIN_CAUSE="$(clawbox_plugin_cli_cause "openclaw plugins install" "${SEARCH_PLUGIN_RC:-1}" "$SEARCH_PLUGIN_OUT")"
+          if [ "$SEARCH_PLUGIN_OFF_BY_US" = "1" ] || clawbox_search_plugin_stale_on_disk "$OPENCLAW_HOME_DIR"; then
+            echo "  WARN: could not install $CLAWBOX_SEARCH_PLUGIN_PACKAGE for this core, and the build an older one installed would stop the gateway; the agent searches with the browser.$SEARCH_PLUGIN_CAUSE" >&2
+            clawbox_plugin_boot_without brave install \
+              "The Brave plugin ClawBox AI web search runs on could not be installed for this OpenClaw core. The device may be offline, or the package registry unreachable.$SEARCH_PLUGIN_CAUSE" \
+              "$SEARCH_PLUGIN_NPM_SPEC"
+          else
+            echo "  WARN: could not install $CLAWBOX_SEARCH_PLUGIN_PACKAGE; ClawBox AI web search waits for the next start and the agent searches with the browser.$SEARCH_PLUGIN_CAUSE" >&2
+          fi
+        fi
+      fi
+    fi
+  fi
+fi
+# End of the ClawBox AI web search plugin install
+
 # Resolve the workspace from agents.defaults.workspace in openclaw.json,
 # matching the same logic getSkillsDir() uses on the ClawBox API side —
 # falls back to ~/.openclaw/workspace when unset, handles absolute vs

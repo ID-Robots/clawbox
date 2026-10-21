@@ -107,6 +107,7 @@ import {
 } from "./drift-codes";
 import type { AuthProfileEntries } from "./subscription-surface";
 import { OFFICIAL_CHANNEL_PLUGINS } from "./openclaw-channels";
+import { CLAWAI_WEB_SEARCH_PLUGIN_ID, clawaiWebSearchEntryIsOurs } from "./clawai-web-search";
 import { readStateSchemaVersion, statePath } from "./openclaw-state-store";
 import {
   CHATGPT_AGENT_RUNTIME_ID,
@@ -2517,12 +2518,35 @@ const CLAWBOX_MANAGED_PLUGIN_IDS: ReadonlySet<string> = new Set([
   "codex",
   "deepseek",
   "clawbox-email-directives",
+  // (The Brave web-search plugin it also installs is NOT here: an owner can
+  // install the same plugin for a key of their own. `managedPluginIdsForRepair`
+  // adds it while its entry is ClawBox's.)
+  //
   // …and every channel the Settings panel can install, read from the map it
   // installs from rather than copied: a channel added there and forgotten here
   // would be classified as the OWNER's plugin and logged as one ClawBox may
   // not answer for, over a package ClawBox itself put on the box.
   ...Object.keys(OFFICIAL_CHANNEL_PLUGINS),
 ]);
+
+/**
+ * CLAWBOX_MANAGED_PLUGIN_IDS, plus the Brave web-search plugin while openclaw.json
+ * says it is ClawBox's (`clawaiWebSearchEntryIsOurs`): the boot script installs
+ * it, pinned to the core, only for an entry carrying our `claw_` token.
+ *
+ * Ours, a consent refusal naming it is answered like codex's, because ClawBox
+ * chose and pinned that package. Absent from MANAGED_PLUGIN_NPM_PACKAGES all the
+ * same: its reinstall is the pre-start's, pinned on both registries and never
+ * unpinned, and it has just run. Anyone else's, it takes the owner's path — no
+ * consent in their name, and the stranded-entry pass may switch it off when the
+ * core reports its package gone, exactly as for any plugin they installed.
+ */
+async function managedPluginIdsForRepair(journal: string): Promise<ReadonlySet<string>> {
+  // The config is read only for a journal that names the plugin at all.
+  if (!journal.includes(CLAWAI_WEB_SEARCH_PLUGIN_ID)) return CLAWBOX_MANAGED_PLUGIN_IDS;
+  if (!clawaiWebSearchEntryIsOurs(await readOpenclawConfigForRepair())) return CLAWBOX_MANAGED_PLUGIN_IDS;
+  return new Set([...CLAWBOX_MANAGED_PLUGIN_IDS, CLAWAI_WEB_SEARCH_PLUGIN_ID]);
+}
 
 /**
  * The npm package behind each managed plugin whose payload this file may
@@ -2564,6 +2588,7 @@ function normalizeManagedPluginId(id: string): string {
 function pluginsNamedInRefusals(
   journal: string,
   pattern: RegExp,
+  managedIds: ReadonlySet<string> = CLAWBOX_MANAGED_PLUGIN_IDS,
 ): { managed: string[]; unmanaged: string[] } {
   // A GLOBAL copy of the shared pattern, built here so the shared one keeps a
   // stable `lastIndex` for its `.test()` callers. Reading only the FIRST match
@@ -2584,7 +2609,7 @@ function pluginsNamedInRefusals(
   for (const match of journal.matchAll(namesRe)) {
     const id = match[1];
     const key = normalizeManagedPluginId(id);
-    const bucket = CLAWBOX_MANAGED_PLUGIN_IDS.has(key) ? managed : unmanaged;
+    const bucket = managedIds.has(key) ? managed : unmanaged;
     if (!bucket.has(key)) bucket.set(key, id);
   }
   return { managed: [...managed.values()], unmanaged: [...unmanaged.values()] };
@@ -3041,10 +3066,11 @@ async function repairPluginsBlockingReadiness(
   journal: string,
   options: PluginRepairOptions = {},
 ): Promise<void> {
+  const managedIds = await managedPluginIdsForRepair(journal);
   const payload = options.consentOnly
     ? { managed: [], unmanaged: [] }
-    : pluginsNamedInRefusals(journal, PLUGIN_PAYLOAD_VERIFICATION_RE);
-  const consent = pluginsNamedInRefusals(journal, PLUGIN_CAPABILITY_CONSENT_RE);
+    : pluginsNamedInRefusals(journal, PLUGIN_PAYLOAD_VERIFICATION_RE, managedIds);
+  const consent = pluginsNamedInRefusals(journal, PLUGIN_CAPABILITY_CONSENT_RE, managedIds);
   // A plugin ClawBox does not manage is still not something a box may be left
   // dark over. The core is asked which of them have no package at all, and
   // those entries — and only those — are switched off; the rest are the

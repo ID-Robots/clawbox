@@ -2125,6 +2125,71 @@ describe("updater", () => {
       expect(calls.some((call) => call.includes("plugins enable weatherbot"))).toBe(false);
     });
 
+    describe("the Brave web-search plugin, which is ClawBox's only while its entry is", () => {
+      // gateway-pre-start.sh installs @openclaw/brave-plugin for ClawBox AI web
+      // search, pinned to the core, for an entry carrying our `claw_` token. An
+      // owner can install the same plugin for a Brave key of their own, and
+      // consenting for that one would answer in their place.
+      function bootWithBrave(webSearch: Record<string, unknown>) {
+        setupExecFileMock({
+          "clawbox-run-root-step.sh post_update": { stdout: "", stderr: "" },
+          "/usr/bin/journalctl -u clawbox-gateway.service": {
+            stdout: 'Plugin "brave" requires capability consent; rerun with --accept-capabilities.\n',
+            stderr: "",
+          },
+          ping: { stdout: "", stderr: "" },
+          systemctl: { stdout: "", stderr: "" },
+          openclaw: { stdout: "1.0.0", stderr: "" },
+          "/bin/bash": { stdout: "", stderr: "" },
+        });
+        vi.resetModules();
+        mockGet.mockResolvedValue(true);
+        mockSet.mockResolvedValue();
+        mockSetMany.mockResolvedValue();
+        mockRebuiltBox();
+        mockReadFile.mockImplementation(async (file) => {
+          const name = String(file);
+          if (name.endsWith("BUILD_ID")) return "rebuilt-build-id\n";
+          if (name.endsWith("openclaw.json")) {
+            return JSON.stringify({ plugins: { entries: { brave: { enabled: true, config: { webSearch } } } } });
+          }
+          throw new Error("ENOENT");
+        });
+      }
+
+      const brave = () => mockExecFile.mock.calls
+        .map(([cmd, args]) => `${cmd} ${(args as string[]).join(" ")}`)
+        .filter((call) => call.includes("plugins enable brave"));
+
+      it("records consent for it while it carries our claw_ token", async () => {
+        bootWithBrave({ baseUrl: "https://clawbox.com/api/ai/search", apiKey: "claw_test_token" });
+        mockGatewayUp.mockImplementation(async () => brave().length > 0);
+        updater = await import("@/lib/updater");
+
+        updater.resetUpdateState();
+        expect(await updater.checkContinuation()).toBe(true);
+        await vi.waitFor(() => expect(updater.getUpdateState().phase).toBe("completed"));
+
+        expect(brave()).toEqual([expect.stringContaining("plugins enable brave --accept-capabilities")]);
+      });
+
+      it("leaves an owner's own Brave plugin to its owner", async () => {
+        bootWithBrave({ apiKey: "BSA-owner-key" });
+        mockGatewayUp.mockResolvedValue(false);
+        updater = await import("@/lib/updater");
+
+        updater.resetUpdateState();
+        expect(await updater.checkContinuation()).toBe(true);
+        await vi.waitFor(() => {
+          const state = updater.getUpdateState();
+          expect(state.phase).toBe("failed");
+          expect(state.error).toContain('Plugin "brave" requires capability consent');
+        });
+
+        expect(brave()).toEqual([]);
+      });
+    });
+
     it("reinstalls a managed plugin whose payload a core upgrade orphaned", async () => {
       // TASK-602. A core bump re-keys `~/.openclaw/npm/projects/` by the new
       // generation, so the payloads installed against the old one are no longer

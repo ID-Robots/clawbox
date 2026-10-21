@@ -28,7 +28,8 @@ const hasPython3 = spawnSync("python3", ["--version"], { stdio: "ignore" }).stat
 function extractPolicy(): string {
   const src = readFileSync(SCRIPT, "utf-8");
   const start = src.indexOf("if isinstance(ds_models, list):");
-  const end = src.indexOf("if changed:", start);
+  // Up to the next migration, which sits between this one and the write.
+  const end = src.indexOf("# Migration: ClawBox AI web search", start);
   if (start < 0 || end < 0) throw new Error("deepseek V4 model block not found");
   return src.slice(start, end);
 }

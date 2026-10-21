@@ -67,6 +67,21 @@ describe("install.sh plugin refresh", () => {
     expect(guard).toContain("codex|deepseek|discord|whatsapp|clawbox-email-directives)");
   });
 
+  it("builds it for the Brave web-search plugin only while its entry is ClawBox AI's", () => {
+    // gateway-pre-start.sh installs @openclaw/brave-plugin for ClawBox AI web
+    // search, but an owner can install the very same plugin for a Brave key of
+    // their own — so `brave` is never on the id whitelist above. Its arm asks
+    // `clawbox_search_plugin_is_ours` (run against real configs in
+    // gateway-pre-start-clawai-search.test.ts) and refreshes anyone else's
+    // without the flag.
+    const arm = LINES.findIndex((l) => /^\s+brave\)$/.test(l));
+    expect(arm, "the brave consent arm was not found").toBeGreaterThan(-1);
+    const end = LINES.findIndex((l, i) => i > arm && l.trim() === ";;");
+    const body = LINES.slice(arm, end).join("\n");
+    expect(body).toMatch(/if clawbox_search_plugin_is_ours; then\n\s+openclaw_is_v2 && CAP_ARGS=\(--accept-capabilities\)\n\s+else\n/);
+    expect(LINES.filter((l) => l.includes("CAP_ARGS=(--accept-capabilities)"))).toHaveLength(2);
+  });
+
   it("matches the whitelist on the NORMALISED plugin id", () => {
     // `plugins list --json` can key the Discord plugin as `openclaw-discord` or
     // `@openclaw/discord`. The raw name would fall through the case to the
@@ -110,6 +125,10 @@ describe("install.sh plugin refresh", () => {
     expect(arm, "the pin-repair case arm was not found").not.toBeNull();
     expect(arm?.[1].split("|").sort())
       .toEqual(["codex", ...Object.keys(OFFICIAL_CHANNEL_PLUGINS)].sort());
+    // The Brave web-search plugin the boot script installs is in the same
+    // scope under a package NOT named after its id, so it has an arm of its
+    // own — and a bare `brave` would resolve @latest like any other.
+    expect(region).toContain('brave) spec="@openclaw/brave-plugin@$TARGET" ;;');
   });
 
   it("has no `plugins install` or `plugins enable` that skips consent entirely", () => {
