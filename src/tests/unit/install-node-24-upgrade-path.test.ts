@@ -307,6 +307,10 @@ const AMBIENT = [
   // Stubbed, never lifted: the step calls it with no arguments, which means the
   // REAL /usr and /usr/local (install-shadowing-system-openclaw.test.ts).
   "remove_shadowing_system_openclaw() { :; }",
+  // The migration disk pre-flight and verdict record have suites of their own
+  // (install-openclaw-migration-preflight.test.ts); here they pass.
+  "openclaw_migration_disk_preflight() { return 0; }",
+  "openclaw_record_migration_verdict() { :; }",
 ];
 
 /** The promotion is lifted, not stubbed: the swap it performs is what puts the launcher doctor then runs in place. */

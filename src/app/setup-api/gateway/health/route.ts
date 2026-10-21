@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { envPort, isPortOpen } from "@/lib/port-probe";
 import { gatewayRestartInFlight } from "@/lib/gateway-restart-tracker";
+import { readOpenclawMigrationStatus } from "@/lib/openclaw-migration-status";
 
 export const dynamic = "force-dynamic";
 
@@ -16,8 +17,32 @@ const GATEWAY_PORT = envPort(process.env.GATEWAY_PORT, 18789);
 // still listening while systemd stops it, and a page that was answered before
 // the restart finished (TASK-1535) polls this route to learn when the gateway
 // is back — the old process answering would tell it "back" before it had gone.
+//
+// `migration` is the other half of "ready": a gateway can listen with every
+// agent degraded because its databases are not on the schema the core expects
+// (src/lib/openclaw-migration-status.ts). Carried beside `available`, never
+// folded into it — the gateway IS up, and a client waiting for a restart must
+// still see it come back. Only the reason and the byte counts: this route is
+// served before sign-in, so it names no agent and no path.
 export async function GET() {
   const restarting = gatewayRestartInFlight();
-  const available = restarting ? false : await isPortOpen(GATEWAY_PORT, "127.0.0.1", 1000);
-  return NextResponse.json({ available, port: GATEWAY_PORT, restarting });
+  const [available, migration] = await Promise.all([
+    restarting ? Promise.resolve(false) : isPortOpen(GATEWAY_PORT, "127.0.0.1", 1000),
+    readOpenclawMigrationStatus().catch(() => null),
+  ]);
+  return NextResponse.json({
+    available,
+    port: GATEWAY_PORT,
+    restarting,
+    ...(migration
+      ? {
+          migration: {
+            state: migration.state,
+            reason: migration.reason,
+            requiredBytes: migration.requiredBytes,
+            freeBytes: migration.freeBytes,
+          },
+        }
+      : {}),
+  });
 }

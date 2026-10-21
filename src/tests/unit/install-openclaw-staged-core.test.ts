@@ -319,6 +319,10 @@ exit 0
       // the REAL /usr and /usr/local. Its own suite hands it a tmp prefix
       // (install-shadowing-system-openclaw.test.ts).
       "remove_shadowing_system_openclaw() { :; }",
+      // The migration disk pre-flight and verdict record have suites of their own
+      // (install-openclaw-migration-preflight.test.ts); here they pass.
+      "openclaw_migration_disk_preflight() { return 0; }",
+      "openclaw_record_migration_verdict() { :; }",
       shellFunction("step_openclaw_install").replace(/\n  # Force-reinstall every externally-installed plugin[\s\S]*$/, "\n}"),
       "step_openclaw_install",
     ].join("\n");
