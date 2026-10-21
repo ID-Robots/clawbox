@@ -1614,6 +1614,14 @@ describe("showing that a quiet run is alive", () => {
 describe("counting sub-agents", () => {
   beforeEach(() => readyDevice());
 
+  /** Settled AND judged: the finish notice is what says the box has decided. */
+  async function announced(id: string) {
+    await vi.waitFor(() => {
+      expect(announce.mock.calls.some(([r]) => (r as { id: string }).id === id)).toBe(true);
+    }, { timeout: 25_000, interval: 50 });
+    return lib.getRun(id)!;
+  }
+
   /** A run that spawns two sub-agents and gets one of them back. */
   const TASK_A = JSON.stringify({
     type: "assistant",
@@ -1640,7 +1648,6 @@ describe("counting sub-agents", () => {
     const started = await lib.startRun({ task: "wide sweep", projectId: "site", source: "agent" });
     const run = await finished(started.id);
 
-    expect(run.status).toBe("completed");
     expect(run.subagentsTotal).toBe(2);
     // One never reported back, but the process tree is gone — nothing it
     // spawned can still be working, so a settled run shows none active.
@@ -1651,6 +1658,12 @@ describe("counting sub-agents", () => {
     expect(run.progressAt).toHaveLength(run.progress.length);
     expect(run.progressAt.every((at, i) => i === 0 || at >= run.progressAt[i - 1])).toBe(true);
     expect(run.progressAt.every((at) => at >= run.startedAt)).toBe(true);
+    // And the run is not `completed`: the helper that never reported back was
+    // never used (F-N1), which the gate decides after the settle's wake.
+    const judged = await announced(started.id);
+    expect(judged.status).toBe("failed");
+    expect(judged.resumable).toBe(true);
+    expect(judged.error).toContain("search the docs");
   });
 
   it("does not double-count a repeated tool_result", async () => {
@@ -1752,11 +1765,17 @@ describe("counting sub-agents", () => {
       `echo '{"type":"result","subtype":"success","num_turns":4,"result":"done"}'`,
       "exit 0",
     ].join("\n"));
-    const run = await finished((await lib.startRun({ task: "wide job", projectId: "site", source: "agent" })).id);
-    expect(run.status).toBe("completed");
+    const id = (await lib.startRun({ task: "wide job", projectId: "site", source: "agent" })).id;
+    const run = await finished(id);
     expect(run.subagentsTotal).toBe(2);
     expect(run.subagentsActive).toBe(0);
     expect(run.tokensUsed).toBe(2368);
+    // Back, but no model turn followed the notifications, so their results were
+    // never used (F-N1): the gate ends it failed and resumable, not completed.
+    const judged = await announced(id);
+    expect(judged.status).toBe("failed");
+    expect(judged.resumable).toBe(true);
+    expect(judged.error).toContain("map the router");
     const progress = run.progress.join("\n");
     expect(progress.match(/Workflow finished/g) ?? []).toHaveLength(1);
     expect(progress.match(/Sub-agent finished \(explorer\)/g) ?? []).toHaveLength(1);
@@ -1777,14 +1796,6 @@ describe("counting sub-agents", () => {
     const WAITING = JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "Still running: the tester, on the full suite." }] } });
     const TESTER_DONE = JSON.stringify({ type: "system", subtype: "task_notification", task_id: "t1", tool_use_id: "call_t", status: "completed" });
     const SUCCESS = '{"type":"result","subtype":"success","num_turns":4,"result":"Still running: the tester."}';
-
-    /** Settled AND judged: the finish notice is what says the box has decided. */
-    async function announced(id: string) {
-      await vi.waitFor(() => {
-        expect(announce.mock.calls.some(([r]) => (r as { id: string }).id === id)).toBe(true);
-      }, { timeout: 25_000, interval: 50 });
-      return lib.getRun(id)!;
-    }
 
     it("is not completed when the CLI exits with the helper still out", async () => {
       installFakeWrapper([`echo '${INIT}'`, `echo '${TESTER}'`, `echo '${TESTER_RECEIPT}'`, `echo '${WAITING}'`, `echo '${SUCCESS}'`, "exit 0"].join("\n"));
