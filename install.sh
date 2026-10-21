@@ -6080,6 +6080,50 @@ openclaw_migration_complete() {
   return 0
 }
 
+# scripts/openclaw-db-maintenance.py, run as the clawbox account: it only reads
+# the databases (read-only SQLite handles) and writes data/ files the web server
+# reads. Handed to python on stdin, so the account never needs to read the root
+# exec mirror the script may live in, and root runs none of it.
+openclaw_db_maintenance() {
+  local helper="$SRC_DIR/scripts/openclaw-db-maintenance.py"
+  [ -f "$helper" ] || { echo "  WARN: $helper is missing; the OpenClaw database checks are skipped" >&2; return 0; }
+  as_clawbox python3 -I - "$@" \
+    --state-dir "$CLAWBOX_HOME/.openclaw" \
+    --config "$CLAWBOX_HOME/.openclaw/openclaw.json" \
+    --data-dir "$PROJECT_DIR/data" <"$helper"
+}
+
+# Will the disk hold the schema migration the core at $1 (its package.json)
+# would run? A 9.x -> 10.x migration of a box with ~10 GB agent databases needed
+# 30-56 GB free for the copies `doctor --fix` keeps; started on a disk that
+# cannot hold them it ran out part-way, after the new core was live, and the
+# gateway came up with every agent degraded. Asked BEFORE the core is promoted
+# and before doctor runs, so a refusal changes nothing. Returns 1 only on that
+# proof (the helper's exit 3, its last line the owner-facing sentence, also
+# recorded for the web server in data/openclaw-migration-status.json); a check
+# that cannot run stands down, as the updater's schema pre-flight does.
+openclaw_migration_disk_preflight() {
+  local out rc=0
+  out="$(openclaw_db_maintenance preflight --core-pkg "$1" 2>&1)" || rc=$?
+  if [ -n "$out" ]; then printf '%s\n' "$out"; fi
+  case "$rc" in
+    0) return 0 ;;
+    3)
+      OPENCLAW_MIGRATION_REFUSAL="$(printf '%s\n' "$out" | tail -n 1)"
+      return 1
+      ;;
+    *)
+      echo "  WARN: the migration disk check could not run (exit $rc); continuing without it" >&2
+      return 0
+      ;;
+  esac
+}
+
+# What doctor's migration ended as, for the gateway's degraded report.
+openclaw_record_migration_verdict() {
+  openclaw_db_maintenance record-doctor --verdict "$1" --core-pkg "$2" || true
+}
+
 # Stop a gateway through the supplied service manager and verify it is quiescent.
 # A failed query is not evidence that the unit is absent; systemctl can fail
 # while a live service still owns the state we are about to migrate.
@@ -6510,6 +6554,19 @@ step_openclaw_install() {
         fi
         ;;
     esac
+    # …and the disk can hold the migration it brings. Asked of the STAGED
+    # core's own schema declaration, before anything is swapped: refused here,
+    # the box keeps the core and the databases it had, and gets its gateway
+    # back, which the composite step's own restore would not reach after this
+    # return.
+    if ! openclaw_migration_disk_preflight "$_oc_stage/lib/node_modules/openclaw/package.json"; then
+      rm -rf "$_oc_stage"
+      if has_openclaw_harness && [ "$_oc_gateway_stopped" -eq 1 ]; then
+        systemctl start clawbox-gateway.service 2>/dev/null || true
+      fi
+      echo "Error: ${OPENCLAW_MIGRATION_REFUSAL:-there is not enough free disk for the OpenClaw database migration; the core on the box is untouched}" >&2
+      return 1
+    fi
     promote_staged_openclaw_core "$_oc_stage" || return 1
     echo "  OpenClaw installed: $_oc_version_out"
   fi
@@ -6532,6 +6589,13 @@ step_openclaw_install() {
     # writing the very files being migrated; gateway_setup restarts it later.
     stop_openclaw_gateways_for_migration || return 1
     _oc_gateway_stopped=1
+    local _oc_live_pkg="$NPM_PREFIX/lib/node_modules/openclaw/package.json"
+    # A core already at the pin (a Retry after a migration that did not finish)
+    # was not checked above: ask now, before doctor starts copying.
+    if [ "$CORE_NEEDS_INSTALL" -eq 0 ] && ! openclaw_migration_disk_preflight "$_oc_live_pkg"; then
+      echo "Error: ${OPENCLAW_MIGRATION_REFUSAL:-there is not enough free disk for the OpenClaw database migration}; leaving the gateway stopped" >&2
+      return 1
+    fi
     local _oc_doctor_out
     local _oc_doctor_rc=0
     _oc_doctor_out="$(as_clawbox -H env \
@@ -6541,9 +6605,13 @@ step_openclaw_install() {
       "$OPENCLAW_BIN" doctor --fix --non-interactive </dev/null 2>&1)" || _oc_doctor_rc=$?
     printf '%s\n' "$_oc_doctor_out"
     if ! openclaw_migration_complete "$_oc_doctor_rc" "$_oc_doctor_out"; then
+      openclaw_record_migration_verdict incomplete "$_oc_live_pkg"
       echo "Error: OpenClaw migration did not complete; leaving the gateway stopped. Resolve the reported blocker and Retry before rebuilding." >&2
       return 1
     fi
+    # Complete: the gateway's next pre-start compacts what the migration left
+    # and, once every database passes its integrity check, retires the copies.
+    openclaw_record_migration_verdict complete "$_oc_live_pkg"
 
   fi
 

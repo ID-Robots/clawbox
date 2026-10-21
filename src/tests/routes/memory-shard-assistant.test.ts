@@ -96,6 +96,7 @@ vi.mock("@/lib/harness/credentials", () => ({ resolveClawaiToken: async () => "s
 vi.mock("@/lib/clawai-cloud-embeddings", () => ({
   CLOUD_EMBEDDING_PROVIDER: "openai",
   CLOUD_EMBEDDING_MODEL: "text-embedding-3-large",
+  OPENCLAW_CLOUD_EMBEDDING_MODEL: "text-embedding-3-small",
   CLOUD_EMBEDDING_ENGINE: "clawbox-ai",
   cloudEmbeddingsUrl: () => "https://embeddings.invalid/v1",
 }));

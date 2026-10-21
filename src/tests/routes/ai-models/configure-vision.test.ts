@@ -158,6 +158,7 @@ vi.mock("@/lib/local-ai-runtime", () => ({
 // generation is stated rather than inherited from wherever the suite runs.
 vi.mock("@/lib/openclaw-core-generation", () => ({
   installedOpenclawCoreGeneration: vi.fn(async () => "v2"),
+  installedOpenclawCoreAtLeast: vi.fn(async () => true),
 }));
 
 vi.mock("@/lib/local-ai-token", () => ({

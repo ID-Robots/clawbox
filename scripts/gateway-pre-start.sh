@@ -206,6 +206,25 @@ if [ -z "${CLAWBOX_OPENCLAW_V2:-}" ]; then
 fi
 export CLAWBOX_OPENCLAW_V2
 
+# OpenClaw 2026.10 or later. What this script drives for the agent databases —
+# the memory-index defaults (`memory.search.rememberAcrossConversations`,
+# `memory.search.sources`), the DeepSeek `contextTokens` cap and the offline
+# `doctor --session-sqlite/--state-sqlite compact` maintenance — is verified
+# against the 2026.10 core and NOT against older ones, and a config key an older
+# core does not know is a refused gateway, which the repair above (doctor --fix
+# drops unknown keys) and the next pass (writes them again) would turn into a
+# loop. A box can run this script on an older core: an update whose disk
+# pre-flight refused the new core leaves the new ClawBox on the old one. Same
+# precedence as CLAWBOX_OPENCLAW_V2: an explicit value wins; an unknown core is 0.
+if [ -z "${CLAWBOX_OPENCLAW_2026_10:-}" ]; then
+  CLAWBOX_OPENCLAW_2026_10=0
+  if [ -n "${CLAWBOX_OPENCLAW_EFFECTIVE:-}" ] \
+     && [ "$(printf '%s\n' 2026.10 "$CLAWBOX_OPENCLAW_EFFECTIVE" | sort -V | head -1)" = "2026.10" ]; then
+    CLAWBOX_OPENCLAW_2026_10=1
+  fi
+fi
+export CLAWBOX_OPENCLAW_2026_10
+
 # ── First boot on a NEW OpenClaw core: make the config loadable again ───────
 #
 # THE INCIDENT (TASK-737). A customer box was dark for 25 hours after the
@@ -1038,12 +1057,17 @@ export CLAWBOX_EXTRA_ORIGINS
 # lives there, and only there. Exported rather than passed as a second argv so
 # the block keeps the single-argument shape every other python heredoc here has.
 export CLAWBOX_DEVICE_STORE="$CLAWBOX_ROOT/data/config.json"
+# Where the memory-index block below asks for the one rebuild a change of the
+# index's identity needs (scripts/openclaw-db-maintenance.py memory-rebuild).
+export CLAWBOX_MEMORY_REBUILD_RECORD="$CLAWBOX_ROOT/data/openclaw-memory-rebuild.json"
 
 python3 - "$OPENCLAW_CONFIG" <<'PY'
 import json, os, re, sys, tempfile, secrets, shutil, time
 
 # OpenClaw 2 config homes — see the bash block that computes this.
 CLAWBOX_OPENCLAW_V2 = os.environ.get("CLAWBOX_OPENCLAW_V2") == "1"
+# OpenClaw 2026.10+: the keys the agent-database work writes (see the bash block).
+CLAWBOX_OPENCLAW_2026_10 = os.environ.get("CLAWBOX_OPENCLAW_2026_10") == "1"
 
 # Gateway auth token gates LAN access to the agent's privileged tools
 # (run_command / file_write / system_power). Earlier builds wrote the public
@@ -3999,6 +4023,112 @@ elif _clawai_openai_route_is_ours and _clawai_speech_withdrawable:
             changed = True
 
 
+# --- memory index defaults ---
+# The memory-search index lives in each agent's database
+# (agents/<id>/agent/openclaw-agent.sqlite). On a customer box with ~10 GB agent
+# databases it was 82 % of a 9.4 GB file — embedding cache, chunks and
+# 3,072-dimension vectors, ~155 KB a chunk — growing ~710 KB a request, and at
+# least 95 % of that growth was the index of SESSION TRANSCRIPTS:
+# `memory.search.rememberAcrossConversations` defaults ON for a personal
+# install and, on, adds `sessions` to the indexed sources, so `sources:
+# ["memory"]` alone does not stop it (OpenClaw's memory-config reference says
+# so). The box's defaults, written only where the key is ABSENT, so an owner who
+# asked for transcript recall keeps it:
+#   - rememberAcrossConversations: false, sources: ["memory"] — the index holds
+#     MEMORY.md, USER.md and memory/*.md, not every conversation again;
+#   - the ClawBox AI cloud embedder on text-embedding-3-small (1,536
+#     dimensions) instead of text-embedding-3-large (3,072): ONCE, and only the
+#     value the box itself wrote (the ClawBox AI token is the key) — see
+#     OPENCLAW_CLOUD_EMBEDDING_MODEL in src/lib/clawai-cloud-embeddings.ts.
+# OpenClaw has no index size cap to set (2026.10.3 has no memory.search cap key).
+#
+# Any of these changes the index's IDENTITY, and OpenClaw then pauses vector
+# search rather than re-embedding everything — there is no storm to fear from
+# the change itself, but there is a dead vector search until a rebuild. So a
+# change that lands asks for exactly one, recorded in CLAWBOX_MEMORY_REBUILD_RECORD
+# and run after the gateway starts (`memory reset` + `memory index --force`):
+# the old rows — 3,072-d vectors, transcript chunks, their embedding cache — are
+# dropped by the reset, only the memory files are embedded again, and the pages
+# they leave are compacted at the next gateway start.
+_memory_index_changes = []
+_memory_rebuild_record = os.environ.get("CLAWBOX_MEMORY_REBUILD_RECORD") or ""
+
+
+def _memory_rebuild_state():
+    if not _memory_rebuild_record:
+        return {}
+    try:
+        with open(_memory_rebuild_record, "r", encoding="utf-8") as _fh:
+            _state = json.load(_fh)
+        return _state if isinstance(_state, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        # Unreadable: claim the one-shot model move has happened, so a record
+        # this pass cannot read never repeats it.
+        return {"modelMigrated": True}
+
+
+def _record_memory_rebuild(changes):
+    """Ask for the rebuild — only once the config these changes are in landed."""
+    if not changes or not _memory_rebuild_record:
+        return
+    _state = _memory_rebuild_state()
+    _state.update({
+        "pending": True,
+        "reasons": sorted(set(list(_state.get("reasons") or []) + list(changes)) if _state.get("pending") else sorted(set(changes))),
+        "requestedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "attempts": 0,
+    })
+    _state.pop("resetAt", None)
+    _state.pop("doneAt", None)
+    _state.pop("lastError", None)
+    if "model" in changes:
+        _state["modelMigrated"] = True
+    _tmp = _memory_rebuild_record + ".tmp"
+    try:
+        os.makedirs(os.path.dirname(_memory_rebuild_record), exist_ok=True)
+        with open(_tmp, "w", encoding="utf-8") as _fh:
+            json.dump(_state, _fh, indent=2, sort_keys=True)
+        os.replace(_tmp, _memory_rebuild_record)
+        print("  Memory index: settings changed (%s); one rebuild runs after the gateway starts" % ", ".join(sorted(set(changes))))
+    except Exception as exc:
+        print("  WARN: could not record the memory index rebuild (%s: %s)" % (type(exc).__name__, exc), file=sys.stderr)
+
+
+# Read through globals() like the other migrations here, so a suite that runs a
+# neighbouring block verbatim without the flag gets a no-op, not a NameError.
+if bool(globals().get("CLAWBOX_OPENCLAW_2026_10", False)):
+    _memory_block = cfg.get("memory")
+    if _memory_block is None:
+        _memory_block = {}
+        cfg["memory"] = _memory_block
+    _memory_search = _memory_block.get("search") if isinstance(_memory_block, dict) else None
+    if isinstance(_memory_block, dict) and _memory_search is None:
+        _memory_search = {}
+        _memory_block["search"] = _memory_search
+    if isinstance(_memory_search, dict):
+        if "rememberAcrossConversations" not in _memory_search:
+            _memory_search["rememberAcrossConversations"] = False
+            _memory_index_changes.append("rememberAcrossConversations")
+        if "sources" not in _memory_search:
+            _memory_search["sources"] = ["memory"]
+            _memory_index_changes.append("sources")
+        _memory_remote = _memory_search.get("remote")
+        _memory_key = _memory_remote.get("apiKey") if isinstance(_memory_remote, dict) else None
+        if (
+            _memory_search.get("model") == "text-embedding-3-large"
+            and _memory_search.get("provider") == "openai-compatible"
+            and isinstance(_memory_key, str)
+            and _memory_key.startswith("claw_")
+            and not _memory_rebuild_state().get("modelMigrated")
+        ):
+            _memory_search["model"] = "text-embedding-3-small"
+            _memory_index_changes.append("model")
+    if _memory_index_changes:
+        changed = True
+# --- end memory index defaults ---
+
 if isinstance(ds_models, list):
     target_efforts = ["off", "high", "xhigh"]
     for model in ds_models:
@@ -4034,6 +4164,21 @@ if isinstance(ds_models, list):
         # written when absent or empty.
         if model.get("contextWindow") in (None, 128000, 131072, 200000):
             model["contextWindow"] = 1000000
+            changed = True
+        # contextTokens: the ACTIVE-input cap, OpenClaw's own key for it
+        # (models.providers.*.models[].contextTokens, explicit wins over the
+        # catalog). Its compaction threshold is the active window minus the
+        # built-in reserve, so with only the native 1M window a long session
+        # was never trimmed early: input per request grew from 0.7M to 1.4M
+        # tokens with session age on a box measured for this. 131,072 makes
+        # it compact near 128K. The native window above stays 1M: the cap
+        # limits what OpenClaw sends, it does not misdescribe the model.
+        # Written only when absent — a cap someone set is theirs, larger or
+        # smaller. Mirrors CLAWBOX_AI_CONTEXT_TOKENS in
+        # src/app/setup-api/ai-models/configure/route.ts.
+        # 2026.10+ only (CLAWBOX_OPENCLAW_2026_10): not a key to hand an older core.
+        if bool(globals().get("CLAWBOX_OPENCLAW_2026_10", False)) and model.get("contextTokens") is None:
+            model["contextTokens"] = 131072
             changed = True
         # maxTokens: filled in when absent, and corrected when it holds a
         # number this migration itself put there. 384000 shipped first and is
@@ -4074,6 +4219,7 @@ if changed:
             json.dump(cfg, f, indent=2)
         os.replace(tmp_path, cfg_path)
         print("  Updated gateway config")
+        _record_memory_rebuild(_memory_index_changes)
     except Exception as exc:
         if tmp_path is not None:
             try:
@@ -6634,6 +6780,30 @@ else
   echo "  WARN: $LOCAL_EMBEDDINGS missing; semantic memory keeps whatever embeddings provider is configured"
 fi
 
+# The one memory-index rebuild the defaults block in the config pass above asked
+# for (CLAWBOX_MEMORY_REBUILD_RECORD): `openclaw memory reset --yes`, then
+# `openclaw memory index --force`, once, after this gateway has started. Detached
+# for the same reason as the embeddings check above, and it waits on its own
+# while an update owns the box rather than being skipped — every gateway start
+# inside an update would otherwise skip it, and vector search stays paused until
+# it runs. It is niced, takes the embeddings check's lock (so the two forced
+# reindexes never overlap), bounds each command, and dies with this unit's
+# cgroup if the gateway is stopped; an unfinished rebuild stays pending for the
+# next start.
+CLAWBOX_DB_MAINTENANCE="$SCRIPT_DIR/openclaw-db-maintenance.py"
+MEMORY_REBUILD_LOG="$CLAWBOX_ROOT/data/openclaw-memory-rebuild.log"
+if [ "${CLAWBOX_OPENCLAW_2026_10:-0}" = "1" ] && [ -f "$CLAWBOX_MEMORY_REBUILD_RECORD" ] \
+   && grep -Eq '"pending"[[:space:]]*:[[:space:]]*true' "$CLAWBOX_MEMORY_REBUILD_RECORD" \
+   && [ -f "$CLAWBOX_DB_MAINTENANCE" ]; then
+  mkdir -p "$(dirname "$MEMORY_REBUILD_LOG")" 2>/dev/null || true
+  setsid nohup python3 -I "$CLAWBOX_DB_MAINTENANCE" memory-rebuild \
+    --data-dir "$CLAWBOX_ROOT/data" \
+    --openclaw-bin "$OPENCLAW_BIN" \
+    --device-store "$CLAWBOX_DEVICE_STORE" \
+    --gateway-port "${GATEWAY_PORT:-18789}" >>"$MEMORY_REBUILD_LOG" 2>&1 &
+  echo "  Memory index rebuild running in the background once the gateway is up (see $MEMORY_REBUILD_LOG)"
+fi
+
 # Ensure the per-install MCP bearer token exists and is wired into the
 # openclaw MCP server registration. The token lets the MCP subprocess
 # (mcp/clawbox-mcp.ts) authenticate back to /setup-api/* on port 80 —
@@ -9079,6 +9249,54 @@ if CLAWBOX_INSTALLED_CLAUDE_CODE="$(clawbox_installed_claude_code_version)"; the
   fi
 else
   echo "  Anthropic client version: no Claude Code on this box; the core's own number is kept"
+fi
+
+# ── Agent databases: migration status, compaction, migration copies ─────────
+#
+# The gateway is stopped here, which is the one moment OpenClaw's own offline
+# SQLite maintenance may run. scripts/openclaw-db-maintenance.py (`prestart`):
+#   - records in data/openclaw-migration-status.json whether every database is
+#     on the schema the installed core declares — the web server's health route
+#     reads it, so a gateway that starts with its agents degraded by an
+#     unfinished migration is reported instead of looking ready;
+#   - runs `openclaw doctor --session-sqlite compact --session-sqlite-agent <id>`
+#     (and `--state-sqlite compact`) for each database whose free pages are over
+#     30 %, or that a schema migration left a rollback copy beside, when the
+#     disk has the database's size free — a 9.x -> 10.x migration left ~48 % of
+#     a customer box's 9.8 GB agent database as free pages that incremental
+#     auto_vacuum never returns (5.0 GB after compaction, 4 min on a Nano);
+#   - removes the migration's rollback copies once every database is on the
+#     declared schema and has passed the compaction's integrity checks.
+#
+# LAST in the script, so it is budgeted against the time the rest of this
+# pre-start has already taken: the unit kills ExecStartPre at TimeoutStartSec
+# (600 s), and the updater waits for a pre-start no longer than that. A
+# database that does not fit what is left is logged and compacted at a later
+# start. Every failure is a WARN: the gateway starts on the databases as they are.
+CLAWBOX_DB_MAINTENANCE="$SCRIPT_DIR/openclaw-db-maintenance.py"
+CLAWBOX_PRESTART_CEILING_S="${CLAWBOX_PRESTART_CEILING_S:-600}"
+CLAWBOX_DB_COMPACT_BUDGET_S="${CLAWBOX_DB_COMPACT_BUDGET_S:-360}"
+if [ "${CLAWBOX_OPENCLAW_2026_10:-0}" = "1" ] && [ -f "$CLAWBOX_DB_MAINTENANCE" ] && command -v python3 >/dev/null 2>&1; then
+  # 90 s held back: 30 s of slack for the helper itself, a minute for systemd
+  # and the gateway's own start. Non-numeric overrides fall back to the defaults.
+  [[ "$CLAWBOX_PRESTART_CEILING_S" =~ ^[0-9]+$ ]] || CLAWBOX_PRESTART_CEILING_S=600
+  [[ "$CLAWBOX_DB_COMPACT_BUDGET_S" =~ ^[0-9]+$ ]] || CLAWBOX_DB_COMPACT_BUDGET_S=360
+  _dbm_left=$(( CLAWBOX_PRESTART_CEILING_S - 90 - SECONDS ))
+  _dbm_budget="$CLAWBOX_DB_COMPACT_BUDGET_S"
+  if [ "$_dbm_left" -lt "$_dbm_budget" ]; then _dbm_budget="$_dbm_left"; fi
+  if [ "$_dbm_budget" -lt 0 ]; then _dbm_budget=0; fi
+  echo "  Agent databases: checking (compaction budget ${_dbm_budget}s)"
+  _dbm_rc=0
+  timeout -k 10 "$(( _dbm_budget + 30 ))" python3 -I "$CLAWBOX_DB_MAINTENANCE" prestart \
+    --state-dir "$OPENCLAW_STATE_DIR" \
+    --config "$OPENCLAW_CONFIG" \
+    --data-dir "$CLAWBOX_ROOT/data" \
+    --openclaw-bin "$OPENCLAW_BIN" \
+    --core-pkg "$(dirname "$OPENCLAW_BIN")/../lib/node_modules/openclaw/package.json" \
+    --budget-seconds "$_dbm_budget" || _dbm_rc=$?
+  if [ "$_dbm_rc" -ne 0 ]; then
+    echo "  WARN: agent database housekeeping stopped (exit $_dbm_rc); the gateway starts on the databases as they are" >&2
+  fi
 fi
 
 # ── End of pre-start ────────────────────────────────────────────────────────

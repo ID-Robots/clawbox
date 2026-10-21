@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { findOpenclawBin } from "@/lib/openclaw-config";
-import { installedOpenclawCoreGeneration } from "@/lib/openclaw-core-generation";
+import { installedOpenclawCoreAtLeast, installedOpenclawCoreGeneration } from "@/lib/openclaw-core-generation";
 
 // Only the resolver, so the real module's own reading of the manifest is what
 // is under test here.
@@ -43,6 +43,25 @@ describe("which OpenClaw core generation is installed", () => {
     if (ambient === undefined) delete process.env.OPENCLAW_BIN;
     else process.env.OPENCLAW_BIN = ambient;
     rmSync(root, { recursive: true, force: true });
+  });
+
+  // The gate for config keys one release introduced (the DeepSeek contextTokens
+  // cap): an older or unreadable core is NOT handed a key it may refuse.
+  it.each([
+    ["2026.10.3", true],
+    ["2026.10.0", true],
+    ["2026.11.1", true],
+    ["2027.1.0", true],
+    ["2026.9.4", false],
+    ["2026.8.1", false],
+    ["next", false],
+  ])("answers %s as at least 2026.10: %s", async (version, expected) => {
+    installCore(version);
+    await expect(installedOpenclawCoreAtLeast(2026, 10)).resolves.toBe(expected);
+  });
+
+  it("answers false when there is no manifest to read", async () => {
+    await expect(installedOpenclawCoreAtLeast(2026, 10)).resolves.toBe(false);
   });
 
   it.each([

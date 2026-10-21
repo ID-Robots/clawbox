@@ -48,7 +48,9 @@ function run(claudeVersion: string | null): { out: string; bundle: string; aiBun
   } else {
     rmSync(path.join(localBin, "claude"), { force: true });
   }
-  const section = sliceScript("# ── Report the installed Claude Code to Anthropic", "# ── End of pre-start");
+  // Its section ends where the agent-database housekeeping begins (the last
+  // block of the pre-start, with suites of its own).
+  const section = sliceScript("# ── Report the installed Claude Code to Anthropic", "# ── Agent databases: migration status, compaction, migration copies");
   const script = `set -u\nHOME=${JSON.stringify(home)}\nOPENCLAW_BIN=${JSON.stringify(path.join(bin, "openclaw"))}\n${section}`;
   const res = spawnSync("bash", ["-c", script], { encoding: "utf8", timeout: 60_000, env: { ...process.env, PATH: "/usr/bin:/bin", HOME: home } });
   return { out: res.stdout + res.stderr, bundle: readFileSync(bundle, "utf8"), aiBundle: readFileSync(aiBundle, "utf8"), stray: readFileSync(stray, "utf8"), status: res.status };

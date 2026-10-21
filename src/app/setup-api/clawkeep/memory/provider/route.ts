@@ -223,7 +223,7 @@ async function assistantGate(source: EmbeddingSource, confirm: boolean): Promise
   }
   if (current.source === source || confirm) return null;
   const [status, cloud] = await Promise.all([getMemoryStatus(), import("@/lib/clawai-cloud-embeddings")]);
-  const model = source === "cloud" ? cloud.CLOUD_EMBEDDING_MODEL : LOCAL_EMBEDDING_MODEL;
+  const model = source === "cloud" ? await cloudModelForThisBox(cloud) : LOCAL_EMBEDDING_MODEL;
   return confirmRequired(
     `Moving the index ${source === "cloud" ? "to the ClawBox AI cloud" : "onto this box"} embeds every file again. Ask the owner first; nothing was changed.`,
     { from: current.source, to: source, model, estimate: estimateFullReindex(status, source, model) },
@@ -236,6 +236,17 @@ async function assistantGate(source: EmbeddingSource, confirm: boolean): Promise
  * cloud embedder does not answer would report a healthy index that finds
  * nothing.
  */
+/**
+ * The cloud model the index on THIS box is embedded with: OpenClaw's index (in
+ * the agent databases) is on the small model, ClawBox's own index — the edition
+ * without OpenClaw — keeps the shared one. The same split `switchToCloudEmbeddings`
+ * writes, so the answer names the model that was written.
+ */
+async function cloudModelForThisBox(cloud: typeof import("@/lib/clawai-cloud-embeddings")): Promise<string> {
+  const { openclawIsAbsent } = await import("@/lib/openclaw-config");
+  return openclawIsAbsent() ? cloud.CLOUD_EMBEDDING_MODEL : cloud.OPENCLAW_CLOUD_EMBEDDING_MODEL;
+}
+
 async function switchCloud(by: MemoryShardWriter): Promise<NextResponse> {
   const [{ readCloudDefaultsFacts }, { resolveClawaiToken }, cloud, { switchToCloudEmbeddings }] = await Promise.all([
     import("@/lib/clawai-cloud-defaults"),
@@ -257,13 +268,14 @@ async function switchCloud(by: MemoryShardWriter): Promise<NextResponse> {
   await noteOwnerChoice("embeddings");
   await switchToCloudEmbeddings(cloud.cloudEmbeddingsUrl(), token);
   invalidateMemoryStatusCache();
+  const model = await cloudModelForThisBox(cloud);
   console.error(
-    `[memory-shard] embedding provider set to ${cloud.CLOUD_EMBEDDING_PROVIDER}/${cloud.CLOUD_EMBEDDING_MODEL} (${cloud.CLOUD_EMBEDDING_ENGINE}) by the ${by}`,
+    `[memory-shard] embedding provider set to ${cloud.CLOUD_EMBEDDING_PROVIDER}/${model} (${cloud.CLOUD_EMBEDDING_ENGINE}) by the ${by}`,
   );
   return NextResponse.json({
     source: "cloud",
     provider: cloud.CLOUD_EMBEDDING_PROVIDER,
-    model: cloud.CLOUD_EMBEDDING_MODEL,
+    model,
     engine: cloud.CLOUD_EMBEDDING_ENGINE,
   });
 }

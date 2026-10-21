@@ -108,6 +108,7 @@ import {
 import type { AuthProfileEntries } from "./subscription-surface";
 import { OFFICIAL_CHANNEL_PLUGINS } from "./openclaw-channels";
 import { readStateSchemaVersion, statePath } from "./openclaw-state-store";
+import { describeOpenclawMigration, migrationBudgetMs, openclawDatabaseBytes, readOpenclawMigrationStatus } from "./openclaw-migration-status";
 import {
   CHATGPT_AGENT_RUNTIME_ID,
   hasChatgptOauthProfile,
@@ -1328,6 +1329,18 @@ export async function resolveEffectiveUpdateBranch(
  * one run (before the rebuild and again by the post-update verification) and a
  * doubled line reads like two separate problems.
  */
+/**
+ * After the gateway answers: is it a working assistant, or one whose agents'
+ * databases the migration did not reach? The pre-start that just ran wrote what
+ * it found (src/lib/openclaw-migration-status.ts). Said as a warning on the
+ * update's own result — the update did what it could, and a green "Completed"
+ * over agents that refuse every turn is the silent ready this replaces.
+ */
+async function warnIfOpenclawDatabasesDegraded(): Promise<void> {
+  const status = await readOpenclawMigrationStatus().catch(() => null);
+  if (status) warnUpdate("openclaw-migration-degraded", describeOpenclawMigration(status));
+}
+
 function warnUpdate(code: string, message: string): void {
   console.warn(`[Updater] WARNING: ${message}`);
   if (!runtime.state.warnings) runtime.state.warnings = [];
@@ -1952,6 +1965,36 @@ async function syncCheckoutToUpstream(local: string, upstream: string, savedCode
 // 2-3 min; shared across both UPDATE_STEPS and OPENCLAW_UPDATE_STEPS so the
 // two flows can't drift apart.
 const OPENCLAW_INSTALL_TIMEOUT_MS = 300_000;
+// What a schema migration costs on a Jetson Nano, per GiB of OpenClaw database:
+// the 9.x -> 10.x `doctor --fix` of a box with ~10 GB agent databases took
+// about 40 minutes. Rounded up to five minutes a GiB.
+const OPENCLAW_MIGRATION_MS_PER_GIB = 300_000;
+
+/**
+ * How long the updater waits for `openclaw_install` on the appliance, for a
+ * box whose OpenClaw databases weigh `databaseBytes`.
+ *
+ * The step runs the new core's schema migration, which is minutes per gigabyte
+ * of agent database, and this is only the CLIENT's wait: the root unit carries
+ * on past it (`TimeoutStartSec=7200`, config/clawbox-root-update@.service). With
+ * the flat five minutes a ~10 GB box's 40-minute migration was reported failed
+ * while it still ran, the gateway came back on a core whose agents' databases
+ * were half-way through — up, and every agent degraded — and a Retry met a core
+ * already replaced. The desktop integration's budget has the same reason
+ * (X64_DESKTOP_CORE_STEP_TIMEOUT_MS) and is the ceiling here too.
+ */
+export function openclawInstallTimeoutFor(databaseBytes: number): number {
+  return migrationBudgetMs(databaseBytes, {
+    baseMs: OPENCLAW_INSTALL_TIMEOUT_MS,
+    perGibMs: OPENCLAW_MIGRATION_MS_PER_GIB,
+    capMs: X64_DESKTOP_CORE_STEP_TIMEOUT_MS,
+  });
+}
+
+async function applianceOpenclawInstallTimeoutMs(): Promise<number> {
+  const bytes = await openclawDatabaseBytes(openclawTreePaths().openclawHome).catch(() => 0);
+  return openclawInstallTimeoutFor(bytes);
+}
 const GATEWAY_HEALTH_WAIT_MS = Number(process.env.GATEWAY_HEALTH_WAIT_MS || "30000");
 const GATEWAY_RECOVERY_WAIT_MS = Number(process.env.GATEWAY_RECOVERY_WAIT_MS || "45000");
 const GATEWAY_WAIT_INTERVAL_MS = Number(process.env.GATEWAY_WAIT_INTERVAL_MS || "1500");
@@ -3782,6 +3825,7 @@ const UPDATE_STEPS: UpdateStepDef[] = [
     customRun: async () => {
       await ensureGatewayHealthy();
       await retryPluginRepairsLeftByOlderCore();
+      await warnIfOpenclawDatabasesDegraded();
     },
     failFast: true,
     // The gateway is absent by design on this SKU — port 18789 is closed and
@@ -5084,6 +5128,7 @@ const OPENCLAW_UPDATE_STEPS: UpdateStepDef[] = [
     customRun: async () => {
       await ensureGatewayHealthy({ restartFirst: true });
       await retryPluginRepairsLeftByOlderCore();
+      await warnIfOpenclawDatabasesDegraded();
     },
   },
 ];
@@ -5534,7 +5579,9 @@ async function runUpdate(steps: UpdateStepDef[], startFrom: number, options: Run
           ? 900_000
           : desktopIntegration && step.id === "openclaw_install"
             ? X64_DESKTOP_CORE_STEP_TIMEOUT_MS
-            : step.timeoutMs;
+            : step.id === "openclaw_install"
+              ? await applianceOpenclawInstallTimeoutMs()
+              : step.timeoutMs;
         if (!desktopIntegration && GATEWAY_QUIESCED_ROOT_STEPS.has(step.id) && !gatewayIsAbsent()) {
           await execAsRootWithGatewayQuiesced(step.id, timeoutMs);
         } else {

@@ -1018,6 +1018,11 @@ export const desktopTranslations: Record<Locale, Record<string, string>> = {
     "openclaw.connecting": "Connecting to OpenClaw gateway...",
     "openclaw.offline": "OpenClaw Gateway Offline",
     "openclaw.notRunning": "The gateway service is not running.",
+    "openclaw.migrationTitle": "OpenClaw's agent data needs attention",
+    "openclaw.migrationInsufficientDisk": "Updating OpenClaw has to migrate the agents' data and needs about {required} of free disk, but only {free} is free. Free up space, then run the update again.",
+    "openclaw.migrationSchemaBehind": "OpenClaw has not finished moving the agents' data to its new format, so the agents may not answer. Run the update again from Settings.",
+    "openclaw.migrationIncomplete": "The last OpenClaw update did not finish migrating the agents' data. Run the update again from Settings.",
+    "openclaw.migrationSchemaNewer": "The agents' data was written by a newer OpenClaw than the one installed, so the agents cannot open it. Update ClawBox to bring OpenClaw up to date.",
     "openclaw.retry": "Retry",
     "openclaw.iframeTitle": "OpenClaw Control",
 

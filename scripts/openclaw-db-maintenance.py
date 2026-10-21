@@ -1,0 +1,1116 @@
+#!/usr/bin/env python3
+"""OpenClaw SQLite housekeeping for the gateway pre-start and the installer.
+
+The agent databases (`agents/<id>/agent/openclaw-agent.sqlite`) are where
+OpenClaw keeps sessions, transcripts AND its memory-search index. A customer box
+with ~10 GB agent databases showed three ways they grow past what a Jetson can
+carry, and this is ClawBox's half of each, driving OpenClaw's OWN commands:
+
+``prestart``  (run by scripts/gateway-pre-start.sh, gateway stopped)
+    1. Writes ``data/openclaw-migration-status.json``: whether every database
+       is on the schema the installed core declares
+       (``package.json`` → ``openclaw.schemaVersions``). A 10.x gateway on 9.x
+       agent databases reports ready while every agent is degraded; this file
+       is what the web server reads so the owner is told instead
+       (``src/lib/openclaw-migration-status.ts``).
+    2. Compacts, with ``openclaw doctor --session-sqlite compact
+       --session-sqlite-agent <id> --json`` (and ``--state-sqlite compact`` for
+       the shared state database), every database whose free pages are over
+       the threshold (30 %) — the pages a schema migration or a large delete
+       leaves behind, which OpenClaw's routine incremental auto_vacuum never
+       returns to the filesystem. Also every database a schema migration has
+       left a ``*.pre-startup-migration-*.bak`` group beside, whatever its
+       free pages: that run is the integrity check the clean-up below needs.
+       Only when the filesystem has at least the database's size free, and
+       only while the time budget the pre-start passes lasts.
+    3. Removes the migration's rollback copies (the ``.bak`` groups beside the
+       databases, and ``<state-dir>.update-captures/``) once the migration is
+       VERIFIED: every database on the declared schema, no incomplete doctor
+       run recorded for this core, and a successful compaction — which runs
+       OpenClaw's ``quick_check``/``integrity_check``/``foreign_key_check`` —
+       of the database AFTER its copy was taken.
+
+``preflight`` (run by install.sh before it promotes a new core / runs doctor)
+    Measures the databases the core would migrate and refuses (exit 3) when the
+    filesystem cannot hold the migration's copies.
+
+``record-doctor`` (run by install.sh after ``doctor --fix``)
+    Records the migration verdict for the status file.
+
+``memory-rebuild`` (detached from the pre-start, runs after the gateway starts)
+    Runs ``openclaw memory index --force`` once after the box changed the
+    memory index's identity (see the memory block in gateway-pre-start.sh),
+    preceded by ``openclaw memory reset --yes`` only when the MODEL changed;
+    bounded, niced, never twice at once, at most three attempts.
+
+Nothing here writes an OpenClaw database: measurements open them READ-ONLY,
+every change is the core's own command. The one thing deleted by hand is the
+migration's rollback copies, and only under the verification above — the core's
+own ``openclaw update cleanup`` is asked first, but it keeps every group until
+its OWN updater has recorded a later successful update, which ClawBox, which
+installs the pinned core with npm, never does.
+
+Exit status is 0 except ``preflight``'s refusal (3) and usage errors (2): this
+runs inside a blocking ExecStartPre, and a housekeeping failure must cost the
+box its housekeeping, never its gateway.
+"""
+
+import argparse
+import errno
+import fcntl
+import json
+import os
+import re
+import signal
+import sqlite3
+import stat
+import subprocess
+import sys
+import time
+import urllib.parse
+import urllib.request
+
+AGENT_DB_NAME = "openclaw-agent.sqlite"
+BACKUP_MARK = ".pre-startup-migration-"
+CAPTURE_MARKER = ".openclaw-private-update-capture"
+CAPTURE_MARKER_TEXT = "openclaw-private-update-capture-v1\n"
+AGENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+
+STATUS_FILE = "openclaw-migration-status.json"
+RECORD_FILE = "openclaw-db-maintenance.json"
+MEMORY_REBUILD_FILE = "openclaw-memory-rebuild.json"
+# The lock scripts/ensure-local-embeddings.sh holds for its own `memory index
+# --force`: shared, so the two rebuilds can never run at the same time.
+EMBED_LOCK_FILE = "local-embeddings.state.lock"
+
+# Free-page share above which a database is compacted.
+DEFAULT_THRESHOLD = 0.30
+# Compaction speed on a Jetson Orin Nano, measured on a 9.8 GB agent database
+# with 48 % free pages: 248 s for ~5.0 GB of live data, ~20 MB/s of what
+# VACUUM copies. Planned at 16 MiB/s (a fifth slower) plus the CLI's start.
+DEFAULT_LIVE_RATE_BPS = 16 * 1024 * 1024
+CLI_OVERHEAD_S = 20
+# A schema migration keeps a verified copy of every database it advances
+# (`<db>.pre-startup-migration-<id>.bak`), a pre-repair capture, and needs the
+# migrated database and its WAL beside them: the 9.x -> 10.x migration of a
+# ~10 GB box needed 30-56 GB free. Planned at six times the databases it
+# migrates plus a gigabyte, the top of that range.
+DEFAULT_MIGRATION_FACTOR = 6.0
+DEFAULT_MIGRATION_MARGIN = 1024 * 1024 * 1024
+
+
+def log(msg):
+    print("  [db-maintenance] " + msg, flush=True)
+
+
+def warn(msg):
+    print("  [db-maintenance] WARN: " + msg, file=sys.stderr, flush=True)
+
+
+def human(n):
+    if n is None:
+        return "?"
+    n = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(n) < 1000 or unit == "TB":
+            return ("%.0f %s" % (n, unit)) if unit in ("B", "KB") else ("%.1f %s" % (n, unit))
+        n /= 1000.0
+    return "%.1f TB" % n
+
+
+def iso(ts):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
+# ── reading ───────────────────────────────────────────────────────────────
+
+
+def read_json(path):
+    """The object in `path`, `{}` when there is none, None when it is unreadable."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return {}
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def write_json(path, data):
+    """Atomic replace; False (and a WARN) when the directory cannot take it."""
+    tmp = path + ".tmp-%d" % os.getpid()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2, sort_keys=True)
+            fh.write("\n")
+        os.replace(tmp, path)
+        return True
+    except Exception as exc:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        warn("could not write %s (%s: %s)" % (path, type(exc).__name__, exc))
+        return False
+
+
+def core_schema(pkg_path):
+    """`{version, agent, state}` the installed core declares, None when unknown."""
+    data = read_json(pkg_path) if pkg_path else None
+    if not data:
+        return None
+    sv = (data.get("openclaw") or {}).get("schemaVersions") if isinstance(data.get("openclaw"), dict) else None
+    sv = sv if isinstance(sv, dict) else {}
+    agent = sv.get("agent") if isinstance(sv.get("agent"), int) else None
+    state = sv.get("state") if isinstance(sv.get("state"), int) else None
+    version = data.get("version") if isinstance(data.get("version"), str) else None
+    return {"version": version, "agent": agent, "state": state}
+
+
+def regular_file(path):
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    return st if stat.S_ISREG(st.st_mode) else None
+
+
+def size_of(path):
+    st = regular_file(path)
+    return st.st_size if st else 0
+
+
+def header_facts(path):
+    """Page facts from the 100-byte SQLite header: the fallback when the file
+    cannot be opened (an older library, a hot WAL a read-only handle cannot
+    recover). Exact after a clean checkpoint, which a stopped gateway leaves."""
+    with open(path, "rb") as fh:
+        head = fh.read(100)
+    if len(head) < 100 or not head.startswith(b"SQLite format 3\x00"):
+        raise ValueError("not an SQLite database")
+    page_size = int.from_bytes(head[16:18], "big")
+    page_size = 65536 if page_size == 1 else page_size
+    change_counter = int.from_bytes(head[24:28], "big")
+    page_count = int.from_bytes(head[28:32], "big")
+    valid_for = int.from_bytes(head[92:96], "big")
+    if page_count == 0 or valid_for != change_counter:
+        page_count = os.path.getsize(path) // page_size
+    return {
+        "pageSize": page_size,
+        "pageCount": page_count,
+        "freelistCount": int.from_bytes(head[36:40], "big"),
+        "userVersion": int.from_bytes(head[60:64], "big"),
+        "source": "header",
+    }
+
+
+def sqlite_facts(path):
+    uri = "file:" + urllib.parse.quote(path) + "?mode=ro"
+    con = sqlite3.connect(uri, uri=True, timeout=2)
+    try:
+        def one(pragma):
+            return con.execute("PRAGMA " + pragma).fetchone()[0]
+
+        return {
+            "pageSize": one("page_size"),
+            "pageCount": one("page_count"),
+            "freelistCount": one("freelist_count"),
+            "userVersion": one("user_version"),
+            "autoVacuum": one("auto_vacuum"),
+            "source": "sqlite",
+        }
+    finally:
+        con.close()
+
+
+# Test seam: the free space every statvfs answers, so a suite can stand in
+# for a full disk. Set from --free-bytes-override; never on a box.
+_FREE_BYTES_OVERRIDE = None
+
+
+def free_bytes(directory):
+    if _FREE_BYTES_OVERRIDE is not None:
+        return _FREE_BYTES_OVERRIDE
+    try:
+        st = os.statvfs(directory)
+    except OSError:
+        return None
+    return st.f_bavail * st.f_frsize
+
+
+def temp_dir():
+    """Where SQLite builds VACUUM's temporary copy: the first usable directory
+    of its own search order on Unix."""
+    for candidate in (os.environ.get("SQLITE_TMPDIR"), os.environ.get("TMPDIR"), "/var/tmp", "/usr/tmp", "/tmp"):
+        if candidate and os.path.isdir(candidate) and os.access(candidate, os.W_OK | os.X_OK):
+            return candidate
+    return None
+
+
+def measure(db):
+    """Fill in a database entry's size, page facts and backups, in place."""
+    path = db["path"]
+    db["fileBytes"] = size_of(path)
+    db["walBytes"] = size_of(path + "-wal")
+    db["bytes"] = db["fileBytes"] + db["walBytes"]
+    try:
+        try:
+            facts = sqlite_facts(path)
+        except Exception as exc:
+            facts = header_facts(path)
+            facts["openError"] = "%s: %s" % (type(exc).__name__, exc)
+        db.update(facts)
+        page_bytes = db["pageSize"] * db["pageCount"]
+        db["freeBytes"] = db["pageSize"] * db["freelistCount"]
+        db["liveBytes"] = max(0, page_bytes - db["freeBytes"])
+        db["freeRatio"] = (db["freelistCount"] / float(db["pageCount"])) if db["pageCount"] else 0.0
+        db.pop("error", None)
+    except Exception as exc:
+        db["error"] = "%s: %s" % (type(exc).__name__, exc)
+    db["avail"] = free_bytes(os.path.dirname(path))
+    db["backups"], db["capturing"] = backups_beside(path)
+    return db
+
+
+def backups_beside(path):
+    """The migration's rollback copies of this database, and whether one is
+    still being written (`.bak.capturing`)."""
+    directory, base = os.path.split(path)
+    prefix = base + BACKUP_MARK
+    found, capturing = [], False
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return found, capturing
+    for name in sorted(names):
+        if not name.startswith(prefix):
+            continue
+        if name.endswith(".capturing"):
+            capturing = True
+            continue
+        full = os.path.join(directory, name)
+        st = regular_file(full)
+        if st:
+            # ctime as well as mtime: a copy can carry its source's mtime, and
+            # "taken after the compaction" must never be read off a preserved one.
+            found.append({"path": full, "bytes": st.st_size, "mtime": max(st.st_mtime, st.st_ctime)})
+    return found, capturing
+
+
+def configured_agent_dirs(config_path):
+    """`agents.entries.<id>.agentDir` for agents that live outside the default tree."""
+    cfg = read_json(config_path) if config_path else None
+    out = {}
+    entries = ((cfg or {}).get("agents") or {}).get("entries") if isinstance((cfg or {}).get("agents"), dict) else None
+    if not isinstance(entries, dict):
+        return out
+    for agent_id, entry in entries.items():
+        if not isinstance(entry, dict) or not AGENT_ID.match(str(agent_id)):
+            continue
+        agent_dir = entry.get("agentDir")
+        if isinstance(agent_dir, str) and agent_dir.strip():
+            out[agent_id] = os.path.expanduser(agent_dir.strip())
+    return out
+
+
+def discover(state_dir, config_path):
+    """Every agent database under the state directory (and any configured
+    elsewhere), plus the shared state database. Unmeasured."""
+    dbs, seen = [], set()
+
+    def add(kind, agent_id, path):
+        real = os.path.realpath(path)
+        if real in seen or not regular_file(path):
+            return
+        seen.add(real)
+        dbs.append({"kind": kind, "agentId": agent_id, "path": path})
+
+    agents_root = os.path.join(state_dir, "agents")
+    try:
+        ids = sorted(os.listdir(agents_root))
+    except OSError:
+        ids = []
+    for agent_id in ids:
+        if AGENT_ID.match(agent_id):
+            add("agent", agent_id, os.path.join(agents_root, agent_id, "agent", AGENT_DB_NAME))
+    for agent_id, agent_dir in sorted(configured_agent_dirs(config_path).items()):
+        add("agent", agent_id, os.path.join(agent_dir, AGENT_DB_NAME))
+    add("state", None, os.path.join(state_dir, "state", "openclaw.sqlite"))
+    return dbs
+
+
+def inventory(state_dir, config_path):
+    return [measure(db) for db in discover(state_dir, config_path)]
+
+
+def key_of(db):
+    return "state" if db["kind"] == "state" else "agent:" + db["agentId"]
+
+
+def label(db):
+    return "the shared state database" if db["kind"] == "state" else "agent %s" % db["agentId"]
+
+
+def declared(db, core):
+    if not core:
+        return None
+    return core.get("state") if db["kind"] == "state" else core.get("agent")
+
+
+def schema_position(db, core):
+    """'current' | 'behind' | 'newer' | 'unknown' against the core's declaration."""
+    want = declared(db, core)
+    have = db.get("userVersion")
+    if want is None or not isinstance(have, int) or db.get("error"):
+        return "unknown"
+    if have < want:
+        return "behind"
+    if have > want:
+        return "newer"
+    return "current"
+
+
+# ── the native commands ───────────────────────────────────────────────────
+
+
+# Seconds a stopped CLI is given to go: SIGTERM, then SIGKILL (see _run). Every
+# deadline below keeps this much in hand, so nothing it started outlives it.
+KILL_GRACE_S = 30
+_children = set()
+
+
+def _stop_group(pid, grace):
+    for sig, wait in ((signal.SIGTERM, grace * 2 // 3), (signal.SIGKILL, grace // 3)):
+        try:
+            os.killpg(pid, sig)
+        except OSError:
+            return
+        end = time.monotonic() + wait
+        while time.monotonic() < end:
+            try:
+                if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                    return
+            except ChildProcessError:
+                return
+            time.sleep(0.2)
+
+
+def _on_signal(signum, _frame):
+    """The pre-start's own `timeout`, or systemd, stopping THIS process: the
+    CLI it started runs in its own process group (so a deadline can stop the
+    whole of it) and would otherwise be left compacting beside a starting
+    gateway. Stop it first."""
+    for pid in list(_children):
+        _stop_group(pid, 6)
+    sys.exit(128 + signum)
+
+
+def _run(executable, argv, timeout):
+    """Run the core's CLI in its own process group; (rc, stdout, stderr).
+    rc is None when the deadline ran out (SIGTERM, then SIGKILL). Every caller
+    passes the argv as a literal list, which the harness-contract scan reads."""
+    try:
+        proc = subprocess.Popen(
+            [executable] + list(argv),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        return 127, "", "%s: %s" % (type(exc).__name__, exc)
+    _children.add(proc.pid)
+    try:
+        out, err = proc.communicate(timeout=max(1, timeout))
+        return proc.returncode, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
+    except subprocess.TimeoutExpired:
+        for sig, grace in ((signal.SIGTERM, KILL_GRACE_S * 2 // 3), (signal.SIGKILL, KILL_GRACE_S // 3)):
+            try:
+                os.killpg(proc.pid, sig)
+            except OSError:
+                pass
+            try:
+                out, err = proc.communicate(timeout=grace)
+                return None, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
+            except subprocess.TimeoutExpired:
+                continue
+        return None, "", ""
+    finally:
+        _children.discard(proc.pid)
+
+
+def last_json_object(text):
+    """The last top-level JSON object in a command's stdout, or None."""
+    decoder = json.JSONDecoder()
+    found, i = None, 0
+    while True:
+        i = text.find("{", i)
+        if i < 0:
+            return found
+        try:
+            obj, end = decoder.raw_decode(text, i)
+        except ValueError:
+            i += 1
+            continue
+        if isinstance(obj, dict):
+            found = obj
+        i = end
+
+
+CHECK_KEY = re.compile(r"^(quick_?check|integrity_?check|foreign_?key_?check)", re.IGNORECASE)
+
+
+def integrity_of(report):
+    """'ok' when every reported check says ok, 'failed' when one does not,
+    'unreported' when the report names none."""
+    verdicts = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if CHECK_KEY.match(str(k)) and isinstance(v, (str, bool)):
+                    verdicts.append(v is True or (isinstance(v, str) and v.strip().lower() in ("ok", "passed", "pass")))
+                else:
+                    walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    walk(report)
+    if not verdicts:
+        return "unreported"
+    return "ok" if all(verdicts) else "failed"
+
+
+def run_compact(binary, db, timeout):
+    # Every `_run(binary, [...])` below is written as a literal list on one line
+    # with the CLI named `binary`: that is the shape scripts/harness-contract
+    # reads, so each command and flag is checked against the pinned core.
+    if db["kind"] == "state":
+        rc, out, err = _run(binary, ["doctor", "--state-sqlite", "compact", "--json"], timeout)
+    else:
+        agent_id = db["agentId"]
+        rc, out, err = _run(binary, ["doctor", "--session-sqlite", "compact", "--session-sqlite-agent", agent_id, "--json"], timeout)
+    report = last_json_object(out)
+    integrity = integrity_of(report) if report is not None else "unreported"
+    tail = (err.strip().splitlines() or out.strip().splitlines() or [""])[-1][:300]
+    return rc, integrity, tail
+
+
+# ── prestart ──────────────────────────────────────────────────────────────
+
+
+def disk_needed(db, tmp):
+    """Free bytes compaction needs on the database's filesystem, and on the
+    temporary directory's when that is another one: VACUUM writes a copy of the
+    live pages there, then writes them back through the WAL."""
+    live = db.get("liveBytes", db["bytes"])
+    same = True
+    if tmp:
+        try:
+            same = os.stat(tmp).st_dev == os.stat(os.path.dirname(db["path"])).st_dev
+        except OSError:
+            same = True
+    if same:
+        return max(db["bytes"], 2 * live), None
+    return max(db["bytes"], live), live
+
+
+def plan_compaction(dbs, core, record, threshold, rate, overhead=CLI_OVERHEAD_S, capture_time=None):
+    """[(db, why)] to compact, in the order to do them, and [(db, reason)] skipped.
+    `capture_time`: when the newest update capture waiting to be retired was
+    written — a capture holds every database, so each must be checked after it."""
+    todo, skipped = [], []
+    tmp = temp_dir()
+    for db in dbs:
+        if db.get("error"):
+            skipped.append((db, "unreadable (%s)" % db["error"]))
+            continue
+        position = schema_position(db, core)
+        if position in ("behind", "newer"):
+            skipped.append((db, "on schema %s, the core declares %s — compaction needs the current schema" % (db.get("userVersion"), declared(db, core))))
+            continue
+        why = None
+        if db["freeRatio"] > threshold:
+            why = "%d%% free pages" % round(db["freeRatio"] * 100)
+        elif db["backups"] and not db["capturing"] and not verified_after_backup(db, record):
+            why = "migrated: its rollback copy waits for this integrity check"
+        elif capture_time is not None and not verified_since(db, record, capture_time):
+            why = "an update capture waits for this integrity check"
+        if not why:
+            skipped.append((db, None))
+            continue
+        need_here, need_tmp = disk_needed(db, tmp)
+        if db["avail"] is None or db["avail"] < need_here:
+            skipped.append((db, "low disk: needs %s free, %s is free" % (human(need_here), human(db["avail"]))))
+            continue
+        if need_tmp is not None:
+            avail_tmp = free_bytes(tmp)
+            if avail_tmp is None or avail_tmp < need_tmp:
+                skipped.append((db, "low disk in %s: needs %s free, %s is free" % (tmp, human(need_tmp), human(avail_tmp))))
+                continue
+        db["estimate"] = int(overhead + db.get("liveBytes", db["bytes"]) / float(rate))
+        todo.append((db, why))
+    todo.sort(key=lambda item: -item[0].get("freeBytes", 0))
+    return todo, skipped
+
+
+def verified_since(db, record, moment):
+    """A successful compaction — OpenClaw's integrity checks — recorded at or
+    after `moment`, of the database on the schema it is on now."""
+    entry = ((record.get("databases") or {}).get(key_of(db)) or {}).get("lastCompact") or {}
+    if not entry.get("ok") or entry.get("integrity") == "failed":
+        return False
+    if entry.get("userVersion") != db.get("userVersion"):
+        return False
+    return isinstance(entry.get("at"), (int, float)) and entry["at"] >= moment
+
+
+def verified_after_backup(db, record):
+    """Verified after the newest rollback copy beside it was taken."""
+    return verified_since(db, record, max([b["mtime"] for b in db["backups"]] or [0]))
+
+
+def compact_all(args, dbs, core, record, deadline):
+    _root, runs = capture_dirs(args.state_dir)
+    capture_time = max([tree_time(run) for run in runs]) if runs and dbs else None
+    todo, skipped = plan_compaction(
+        dbs, core, record, args.threshold, args.live_rate_bps, args.cli_overhead_seconds, capture_time,
+    )
+    for db, reason in skipped:
+        if reason:
+            log("%s not compacted: %s" % (label(db), reason))
+            entry = record.setdefault("databases", {}).setdefault(key_of(db), {})
+            entry["lastSkip"] = {"at": time.time(), "reason": reason}
+    for db, why in todo:
+        left = deadline - time.monotonic() - KILL_GRACE_S
+        if db["estimate"] > left:
+            reason = "about %d s of work, %d s of this start's budget left — next gateway start" % (db["estimate"], max(0, int(left)))
+            log("%s not compacted: %s" % (label(db), reason))
+            record.setdefault("databases", {}).setdefault(key_of(db), {})["lastSkip"] = {"at": time.time(), "reason": reason}
+            continue
+        timeout = int(min(left, db["estimate"] * 2))
+        before = db["bytes"]
+        log("compacting %s (%s, %s; about %d s, at most %d s)" % (label(db), human(before), why, db["estimate"], timeout))
+        started = time.monotonic()
+        rc, integrity, tail = run_compact(args.openclaw_bin, db, timeout)
+        seconds = int(time.monotonic() - started)
+        measure(db)
+        ok = rc == 0 and integrity != "failed"
+        entry = record.setdefault("databases", {}).setdefault(key_of(db), {})
+        entry["lastCompact"] = {
+            "at": time.time(),
+            "ok": ok,
+            "exit": rc,
+            "integrity": integrity,
+            "beforeBytes": before,
+            "afterBytes": db["bytes"],
+            "seconds": seconds,
+            "userVersion": db.get("userVersion"),
+        }
+        if ok:
+            log("compacted %s: %s -> %s in %d s (integrity %s)" % (label(db), human(before), human(db["bytes"]), seconds, integrity))
+        elif rc is None:
+            warn("compacting %s ran out of its %d s and was stopped; SQLite keeps the database as it was — next gateway start" % (label(db), timeout))
+        else:
+            warn("compacting %s failed (exit %s, integrity %s): %s" % (label(db), rc, integrity, tail))
+
+
+def migration_status(dbs, core, previous):
+    """The status file's body for what is on disk now."""
+    now = time.time()
+    behind = [db for db in dbs if schema_position(db, core) == "behind"]
+    newer = [db for db in dbs if schema_position(db, core) == "newer"]
+    version = (core or {}).get("version")
+    doctor = previous.get("doctor") if isinstance(previous.get("doctor"), dict) else None
+    preflight = previous.get("preflight") if isinstance(previous.get("preflight"), dict) else None
+    # A preflight refusal for a core that has since been installed is history.
+    if preflight and version and preflight.get("target") == version and not behind:
+        preflight = None
+    body = {
+        "version": 1,
+        "updatedAt": iso(now),
+        "source": "gateway-pre-start",
+        "core": version,
+        "databases": {"total": len(dbs), "behind": len(behind), "newer": len(newer)},
+        "doctor": doctor,
+        "preflight": preflight,
+        "requiredBytes": None,
+        "freeBytes": None,
+    }
+    if not core or core.get("agent") is None or core.get("state") is None:
+        # Nothing to compare against: say so rather than "ok".
+        body["state"] = "unknown"
+        body["reason"] = "core-schema-unknown"
+    elif behind:
+        need = migration_need(behind, DEFAULT_MIGRATION_FACTOR, DEFAULT_MIGRATION_MARGIN)
+        body["requiredBytes"] = need
+        body["freeBytes"] = behind[0].get("avail")
+        short = body["freeBytes"] is not None and body["freeBytes"] < need
+        body["state"] = "degraded"
+        body["reason"] = "insufficient-disk" if short else "schema-behind"
+    elif newer:
+        body["state"] = "degraded"
+        body["reason"] = "schema-newer"
+    elif doctor and doctor.get("core") == version and doctor.get("verdict") != "complete":
+        body["state"] = "degraded"
+        body["reason"] = "migration-incomplete"
+    elif preflight:
+        body["state"] = "blocked"
+        body["reason"] = "insufficient-disk"
+        body["requiredBytes"] = preflight.get("requiredBytes")
+        body["freeBytes"] = preflight.get("freeBytes")
+    else:
+        body["state"] = "ok"
+        body["reason"] = None
+    return body
+
+
+def migration_need(dbs, factor, margin):
+    return int(sum(db["bytes"] for db in dbs) * factor + margin)
+
+
+def migration_verified(dbs, core, status):
+    """Every database on the declared schema and no incomplete doctor run
+    recorded for this core — the half of the clean-up rule that is global."""
+    if not core or core.get("agent") is None or core.get("state") is None:
+        return False, "the installed core declares no schema versions"
+    for db in dbs:
+        if schema_position(db, core) != "current":
+            return False, "%s is not on the declared schema" % label(db)
+    doctor = status.get("doctor") or {}
+    if doctor.get("core") == core.get("version") and doctor.get("verdict") != "complete":
+        return False, "the last doctor --fix for this core did not complete"
+    return True, None
+
+
+def remove_files(paths):
+    removed = 0
+    for path in paths:
+        st = regular_file(path)
+        if not st:
+            continue
+        try:
+            os.unlink(path)
+            removed += st.st_size
+        except OSError as exc:
+            warn("could not remove %s (%s)" % (path, exc))
+    return removed
+
+
+def tree_bytes(root):
+    total = 0
+    for base, dirs, files in os.walk(root, followlinks=False):
+        for name in files:
+            st = regular_file(os.path.join(base, name))
+            if st:
+                total += st.st_size
+    return total
+
+
+def tree_time(root):
+    """The latest mtime or ctime of anything under `root`, `root` included:
+    when the capture was last written to."""
+    latest = 0.0
+    for base, dirs, files in os.walk(root, followlinks=False):
+        for name in [""] + files + dirs:
+            try:
+                st = os.lstat(os.path.join(base, name) if name else base)
+            except OSError:
+                continue
+            latest = max(latest, st.st_mtime, st.st_ctime)
+    return latest
+
+
+def capture_dirs(state_dir):
+    """Run directories under `<state-dir>.update-captures/` carrying the core's
+    private-capture marker (in the run directory or the root above it)."""
+    root = state_dir.rstrip("/") + ".update-captures"
+    try:
+        st = os.lstat(root)
+    except OSError:
+        return root, []
+    if not stat.S_ISDIR(st.st_mode):
+        return root, []
+
+    def marked(directory):
+        path = os.path.join(directory, CAPTURE_MARKER)
+        if not regular_file(path):
+            return False
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                return fh.read() == CAPTURE_MARKER_TEXT
+        except OSError:
+            return False
+
+    root_marked = marked(root)
+    runs = []
+    for name in sorted(os.listdir(root)):
+        full = os.path.join(root, name)
+        try:
+            if not stat.S_ISDIR(os.lstat(full).st_mode):
+                continue
+        except OSError:
+            continue
+        if root_marked or marked(full):
+            runs.append(full)
+    return root, runs
+
+
+def remove_tree(root):
+    import shutil
+
+    size = tree_bytes(root)
+    try:
+        shutil.rmtree(root)
+        return size
+    except OSError as exc:
+        warn("could not remove %s (%s)" % (root, exc))
+        return 0
+
+
+def cleanup(args, dbs, core, status, record, deadline):
+    """Retire the migration's rollback copies once the migration is verified."""
+    pending = [db for db in dbs if db["backups"]]
+    root, runs = capture_dirs(args.state_dir)
+    if not pending and not runs:
+        return
+    if deadline - time.monotonic() - KILL_GRACE_S < 30:
+        log("migration rollback copies kept for the next gateway start: no time left in this one")
+        return
+    ok, why = migration_verified(dbs, core, status)
+    if not ok:
+        log("migration rollback copies kept: %s" % why)
+        return
+    native_tried = False
+    removed = 0
+    for db in pending:
+        if db["capturing"]:
+            log("rollback copy of %s kept: a copy is still being written" % label(db))
+            continue
+        if not verified_after_backup(db, record):
+            log("rollback copy of %s kept until a compaction has checked its integrity" % label(db))
+            continue
+        if not native_tried:
+            native_tried = True
+            # The core's own retirement first. It keeps every group its own
+            # updater has not seen a later successful update for — on ClawBox
+            # that is all of them — but whatever it does retire is retired by
+            # its owner, manifests and all.
+            binary = args.openclaw_bin
+            rc, out, err = _run(binary, ["update", "cleanup", "--yes", "--json"], int(min(120, deadline - time.monotonic() - KILL_GRACE_S)))
+            report = last_json_object(out) or {}
+            totals = report.get("totals") if isinstance(report.get("totals"), dict) else {}
+            log("openclaw update cleanup: exit %s%s" % (rc, (", removed %s" % human(totals.get("removedBytes"))) if totals.get("removedBytes") else ""))
+            for other in pending:
+                other["backups"], other["capturing"] = backups_beside(other["path"])
+            if not db["backups"]:
+                continue
+        freed = remove_files([b["path"] for b in db["backups"]])
+        removed += freed
+        log("removed the pre-migration copy of %s (%s): the migrated database passed its integrity check" % (label(db), human(freed)))
+    for run in runs:
+        # A capture is a copy of the whole state: it goes only when EVERY
+        # database passed a compaction after it was written — and never when
+        # there are no databases left, where it may be the only copy there is.
+        written = tree_time(run)
+        unchecked = [db for db in dbs if not verified_since(db, record, written)]
+        if not dbs or unchecked:
+            log("update capture %s kept until %s has passed a compaction's integrity check" % (
+                os.path.basename(run), label(unchecked[0]) if unchecked else "a database"))
+            continue
+        freed = remove_tree(run)
+        removed += freed
+        log("removed the update capture %s (%s)" % (os.path.basename(run), human(freed)))
+    if runs and os.path.isdir(root):
+        try:
+            leftover = [n for n in os.listdir(root) if n != CAPTURE_MARKER]
+            if not leftover:
+                remove_files([os.path.join(root, CAPTURE_MARKER)])
+                os.rmdir(root)
+        except OSError:
+            pass
+    if removed:
+        record["cleanup"] = {"at": time.time(), "removedBytes": removed}
+
+
+def cmd_prestart(args):
+    started = time.monotonic()
+    deadline = started + max(0, args.budget_seconds)
+    data_dir = args.data_dir
+    status_path = os.path.join(data_dir, STATUS_FILE)
+    record_path = os.path.join(data_dir, RECORD_FILE)
+    core = core_schema(args.core_pkg)
+    record = read_json(record_path)
+    if record is None:
+        warn("%s is unreadable; starting a new record" % record_path)
+        record = {}
+    previous = read_json(status_path) or {}
+
+    dbs = inventory(args.state_dir, args.config)
+    if not dbs:
+        log("no OpenClaw databases under %s" % args.state_dir)
+    status = migration_status(dbs, core, previous)
+    write_json(status_path, status)
+    if status["state"] not in ("ok", "unknown"):
+        warn(
+            "OpenClaw databases need attention: %s (%d of %d behind the core's schema)%s"
+            % (
+                status["reason"],
+                status["databases"]["behind"],
+                status["databases"]["total"],
+                (" — the migration needs %s free, %s is free" % (human(status["requiredBytes"]), human(status["freeBytes"])))
+                if status.get("requiredBytes") else "",
+            )
+        )
+
+    if args.budget_seconds <= 0:
+        log("no time left in this gateway start for compaction")
+    else:
+        compact_all(args, dbs, core, record, deadline)
+    cleanup(args, dbs, core, status, record, deadline)
+    record["version"] = 1
+    record["updatedAt"] = iso(time.time())
+    write_json(record_path, record)
+    return 0
+
+
+# ── preflight / record-doctor (install.sh) ────────────────────────────────
+
+
+def cmd_preflight(args):
+    core = core_schema(args.core_pkg)
+    if not core or core.get("agent") is None or core.get("state") is None:
+        log("the core at %s declares no schema versions; the migration disk check stands down" % args.core_pkg)
+        return 0
+    dbs = inventory(args.state_dir, args.config)
+    behind = [db for db in dbs if schema_position(db, core) == "behind"]
+    unknown = [db for db in dbs if schema_position(db, core) == "unknown"]
+    for db in unknown:
+        warn("%s could not be read (%s); not counted" % (label(db), db.get("error") or "unknown schema"))
+    status_path = os.path.join(args.data_dir, STATUS_FILE)
+    status = read_json(status_path) or {}
+    if not behind:
+        log("no database needs a schema migration for OpenClaw %s" % (core.get("version") or "?"))
+        if status.get("preflight"):
+            status["preflight"] = None
+            status["updatedAt"] = iso(time.time())
+            write_json(status_path, status)
+        return 0
+    need = migration_need(behind, args.factor, args.margin_bytes)
+    avail = behind[0].get("avail")
+    total = sum(db["bytes"] for db in behind)
+    log(
+        "OpenClaw %s migrates %d database(s), %s in all; it needs about %s free and %s is free"
+        % (core.get("version") or "?", len(behind), human(total), human(need), human(avail))
+    )
+    if avail is not None and avail >= need:
+        if status.get("preflight"):
+            status["preflight"] = None
+            status["updatedAt"] = iso(time.time())
+            write_json(status_path, status)
+        return 0
+    if avail is None:
+        warn("the free space beside the databases could not be measured; the migration disk check stands down")
+        return 0
+    status.update({
+        "version": 1,
+        "updatedAt": iso(time.time()),
+        "source": "install",
+        "state": "blocked",
+        "reason": "insufficient-disk",
+        "requiredBytes": need,
+        "freeBytes": avail,
+        "preflight": {"target": core.get("version"), "requiredBytes": need, "freeBytes": avail, "at": iso(time.time())},
+    })
+    write_json(status_path, status)
+    print(
+        "OpenClaw %s has to migrate %s of agent data and needs about %s free on the disk, but only %s is free. "
+        "Free up %s and run the update again; nothing was changed."
+        % (core.get("version") or "this core", human(total), human(need), human(avail), human(need - avail)),
+        flush=True,
+    )
+    return 3
+
+
+def cmd_record_doctor(args):
+    status_path = os.path.join(args.data_dir, STATUS_FILE)
+    previous = read_json(status_path) or {}
+    core = core_schema(args.core_pkg)
+    previous["doctor"] = {"core": (core or {}).get("version"), "verdict": args.verdict, "at": iso(time.time())}
+    dbs = inventory(args.state_dir, args.config)
+    status = migration_status(dbs, core, previous)
+    status["source"] = "install"
+    write_json(status_path, status)
+    log("recorded the migration as %s (%s)" % (args.verdict, status["state"]))
+    return 0
+
+
+# ── memory-rebuild (after the gateway has started) ────────────────────────
+
+
+def update_owns_box(store_path):
+    """The updater's on-disk claim (src/lib/update-lock.ts, src/lib/updater.ts),
+    read the way gateway-pre-start.sh's `update_owns_box` reads it."""
+    data = read_json(store_path)
+    if not data:
+        return False
+    if data.get("update_in_progress") is True:
+        return True
+    cont = data.get("update_needs_continuation")
+    return isinstance(cont, str) and bool(cont)
+
+
+def gateway_started(port):
+    try:
+        with urllib.request.urlopen("http://127.0.0.1:%d/startupz" % port, timeout=3) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+def cmd_memory_rebuild(args):
+    path = os.path.join(args.data_dir, MEMORY_REBUILD_FILE)
+    rec = read_json(path)
+    if not rec or rec.get("pending") is not True:
+        return 0
+    store = args.device_store or os.path.join(args.data_dir, "config.json")
+    deadline = time.monotonic() + args.wait_seconds
+    while update_owns_box(store) or not gateway_started(args.gateway_port):
+        if time.monotonic() > deadline:
+            log("memory index rebuild waits for the next gateway start: the gateway did not settle in %d s" % args.wait_seconds)
+            return 0
+        time.sleep(args.poll_seconds)
+    lock_path = os.path.join(args.data_dir, EMBED_LOCK_FILE)
+    try:
+        lock = open(lock_path, "a")
+    except OSError as exc:
+        warn("cannot open %s (%s); memory index rebuild left for the next start" % (lock_path, exc))
+        return 0
+    lock_deadline = time.monotonic() + args.lock_wait_seconds
+    while True:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except OSError as exc:
+            if exc.errno not in (errno.EAGAIN, errno.EACCES) or time.monotonic() > lock_deadline:
+                log("another memory index run holds %s; this rebuild is left for the next start" % lock_path)
+                return 0
+            time.sleep(args.poll_seconds)
+    rec = read_json(path)
+    if not rec or rec.get("pending") is not True:
+        return 0
+    attempts = int(rec.get("attempts") or 0)
+    if attempts >= args.max_attempts:
+        # Bounded, so a rebuild that cannot finish on this box is not restarted
+        # at every gateway start for ever. Memory Shard's "Run a full reindex"
+        # is the owner's way to finish it.
+        log("memory index rebuild stopped after %d attempts (%s); a full reindex from Memory Shard finishes it"
+            % (attempts, rec.get("lastError") or "no error recorded"))
+        return 0
+    try:
+        os.nice(10)
+    except OSError:
+        pass
+    rec["attempts"] = attempts + 1
+    rec["lastAttemptAt"] = iso(time.time())
+    # The reset only for a NEW MODEL: its old vectors and embedding cache are
+    # dead weight (3,072-d, twice over). For a change of sources alone the
+    # cache is what lets `index --force` re-embed nothing it has seen — on a box
+    # embedding with its own model, a reset would make the rebuild re-embed every
+    # memory file and Memory Shard folder on the device itself.
+    binary = args.openclaw_bin
+    if "model" in (rec.get("reasons") or []) and not rec.get("resetAt"):
+        rc, out, err = _run(binary, ["memory", "reset", "--yes"], args.reset_timeout)
+        if rc != 0:
+            rec["lastError"] = "memory reset: %s" % ("timed out" if rc is None else "exit %s" % rc)
+            write_json(path, rec)
+            warn("memory reset failed (%s); retried at the next gateway start" % rec["lastError"])
+            return 0
+        rec["resetAt"] = iso(time.time())
+        write_json(path, rec)
+        log("memory index reset: the old vectors, transcript chunks and embedding cache are gone (sessions and memory files kept)")
+    rc, out, err = _run(binary, ["memory", "index", "--force"], args.index_timeout)
+    if rc != 0:
+        rec["lastError"] = "memory index: %s" % ("timed out" if rc is None else "exit %s" % rc)
+        write_json(path, rec)
+        warn("memory index rebuild failed (%s); retried at the next gateway start" % rec["lastError"])
+        return 0
+    rec["pending"] = False
+    rec["doneAt"] = iso(time.time())
+    rec.pop("lastError", None)
+    write_json(path, rec)
+    log("memory index rebuilt for the new settings (session transcripts no longer indexed); its freed pages are compacted at the next gateway start")
+    return 0
+
+
+# ── entry ─────────────────────────────────────────────────────────────────
+
+
+def main(argv=None):
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        # A signal the launcher set to be ignored (nohup's SIGHUP) stays ignored.
+        if signal.getsignal(signum) is not signal.SIG_IGN:
+            signal.signal(signum, _on_signal)
+    parser = argparse.ArgumentParser(prog="openclaw-db-maintenance")
+    sub = parser.add_subparsers(dest="cmd")
+
+    def common(p):
+        p.add_argument("--state-dir", required=True)
+        p.add_argument("--config", default=None)
+        p.add_argument("--data-dir", required=True)
+        p.add_argument("--core-pkg", default=None)
+        p.add_argument("--free-bytes-override", type=int, default=None, help=argparse.SUPPRESS)
+
+    p = sub.add_parser("prestart")
+    common(p)
+    p.add_argument("--openclaw-bin", required=True)
+    p.add_argument("--budget-seconds", type=int, default=360)
+    p.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
+    p.add_argument("--live-rate-bps", type=float, default=DEFAULT_LIVE_RATE_BPS)
+    p.add_argument("--cli-overhead-seconds", type=float, default=CLI_OVERHEAD_S)
+
+    p = sub.add_parser("preflight")
+    common(p)
+    p.add_argument("--factor", type=float, default=DEFAULT_MIGRATION_FACTOR)
+    p.add_argument("--margin-bytes", type=int, default=DEFAULT_MIGRATION_MARGIN)
+
+    p = sub.add_parser("record-doctor")
+    common(p)
+    p.add_argument("--verdict", choices=("complete", "incomplete"), required=True)
+
+    p = sub.add_parser("memory-rebuild")
+    p.add_argument("--data-dir", required=True)
+    p.add_argument("--openclaw-bin", required=True)
+    p.add_argument("--device-store", default=None)
+    p.add_argument("--gateway-port", type=int, default=18789)
+    p.add_argument("--wait-seconds", type=int, default=5400)
+    p.add_argument("--poll-seconds", type=float, default=15)
+    p.add_argument("--lock-wait-seconds", type=int, default=600)
+    p.add_argument("--reset-timeout", type=int, default=600)
+    p.add_argument("--index-timeout", type=int, default=1800)
+    p.add_argument("--max-attempts", type=int, default=3)
+
+    args = parser.parse_args(argv)
+    if not args.cmd:
+        parser.print_usage(sys.stderr)
+        return 2
+    global _FREE_BYTES_OVERRIDE
+    _FREE_BYTES_OVERRIDE = getattr(args, "free_bytes_override", None)
+    handler = {
+        "prestart": cmd_prestart,
+        "preflight": cmd_preflight,
+        "record-doctor": cmd_record_doctor,
+        "memory-rebuild": cmd_memory_rebuild,
+    }[args.cmd]
+    try:
+        return handler(args)
+    except Exception as exc:  # housekeeping never fails its caller
+        warn("%s stopped: %s: %s" % (args.cmd, type(exc).__name__, exc))
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
