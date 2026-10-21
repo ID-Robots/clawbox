@@ -303,6 +303,15 @@ describe("exchange — refusals", () => {
     expect((await EXCHANGE(req("/exchange", { redirect: "   " }))).status).toBe(400);
   });
 
+  it("answers an unprovisioned client before it reads the body, whatever was pasted", async () => {
+    delete process.env.CLAWBOX_GOOGLE_CLIENT_ID;
+    for (const body of [{}, { redirect: "   " }, { redirect: "http://127.0.0.1:1/?code=c" }]) {
+      const res = await EXCHANGE(req("/exchange", body));
+      expect(res.status).toBe(503);
+      expect((await res.json()).code).toBe("not_configured");
+    }
+  });
+
   it("refuses an address from another sign-in and drops the pending one", async () => {
     await started();
     const fetchMock = vi.fn();

@@ -21,6 +21,16 @@ export async function POST(req: Request) {
   const denied = await guardGoogleConnect(req, { write: true });
   if (denied) return denied;
 
+  // The box's own client first, as the sibling routes do: whether it is set up
+  // is the box's state, never something the request body decides.
+  const config = googleWorkspaceOAuth();
+  if (!config) {
+    return NextResponse.json(
+      { error: "ClawBox's Google sign-in is not set up on this box yet.", code: "not_configured" },
+      { status: 503 },
+    );
+  }
+
   let pasted: string;
   try {
     const body: unknown = await req.json();
@@ -33,14 +43,6 @@ export async function POST(req: Request) {
     pasted = value;
   } catch {
     return NextResponse.json({ error: "Invalid JSON.", code: "bad_body" }, { status: 400 });
-  }
-
-  const config = googleWorkspaceOAuth();
-  if (!config) {
-    return NextResponse.json(
-      { error: "ClawBox's Google sign-in is not set up on this box yet.", code: "not_configured" },
-      { status: 503 },
-    );
   }
 
   let result;
