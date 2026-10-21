@@ -116,6 +116,13 @@ describe("the MCP servers card", () => {
     }
   });
 
+  it("renders nothing for a signed-in user who is not the owner", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json({ error: "Only the owner of this ClawBox can choose a project's MCP servers.", code: "owner_only" }, 403)));
+    const { container } = render(<CodingProjectMcpServersCard project="site" />);
+    await waitFor(() => expect(container).toBeEmptyDOMElement());
+    expect(screen.queryByTestId("coding-project-mcp-servers-retry")).toBeNull();
+  });
+
   it("renders nothing for a folder that is no project scope", () => {
     const { container } = render(<CodingProjectMcpServersCard project="has space" />);
     expect(container).toBeEmptyDOMElement();

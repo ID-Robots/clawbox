@@ -95,6 +95,23 @@ describe("who may read and change a project's servers", () => {
     expect(configJson()).toEqual({});
   });
 
+  it("refuses a second ClawBox user on both verbs: the harness's servers and their credentials are the owner's", async () => {
+    const users = { clawbox_users: [{ username: "alice", sv: "a1b2c3d4e5f60718", createdAt: "" }] };
+    fs.writeFileSync(path.join(base, "clawbox", "data", "config.json"), JSON.stringify(users));
+    const guest = `clawbox_session=${createSessionCookie(3600, SESSION_SECRET, 0, { u: "alice", sv: "a1b2c3d4e5f60718" })}`;
+    // The cookie is a real person's: the harness's own route lets it in.
+    expect(await (await import("@/lib/owner-session")).hasPersonSession(request({ cookie: guest }))).toBe(true);
+    for (const [name, call] of [
+      ["GET", () => route.GET(request({ cookie: guest, query: "?project=site" }))],
+      ["POST", () => route.POST(request({ method: "POST", cookie: guest }))],
+    ] as const) {
+      const res = await call();
+      expect(res.status, name).toBe(403);
+      expect((await res.json()).code, name).toBe("owner_only");
+    }
+    expect(configJson()).toEqual(users);
+  });
+
   it("refuses another site's page even with the owner's cookie", async () => {
     const res = await route.POST(request({ method: "POST", cookie: ownerCookie(), origin: "https://evil.example" }));
     expect(res.status).toBe(403);
@@ -166,5 +183,18 @@ describe("the checklist", () => {
     const body = await (await route.GET(request({ cookie: ownerCookie(), query: "?project=site" }))).json();
     expect(body.clawboxMcpEnabled).toBe(false);
     expect(body.options.map((o: { id: string }) => o.id)).not.toContain("clawbox");
+  });
+});
+
+describe("a project named like an object's own machinery", () => {
+  it("keeps a list for __proto__ through the route, and reads none for constructor", async () => {
+    const res = await route.POST(request({ method: "POST", cookie: ownerCookie(), body: { project: "__proto__", servers: ["board"] } }));
+    expect(res.status).toBe(200);
+    expect((await res.json()).selected).toEqual(["board"]);
+    expect(Object.keys(configJson()[store.PROJECT_MCP_SERVERS_KEY] as object)).toEqual(["__proto__"]);
+    const read = await (await route.GET(request({ cookie: ownerCookie(), query: "?project=__proto__" }))).json();
+    expect(read.selected).toEqual(["board"]);
+    expect(await store.readProjectMcpAllowlist("constructor")).toEqual([]);
+    expect(await store.setProjectMcpAllowlist("constructor", [])).toEqual([]);
   });
 });

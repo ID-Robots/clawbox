@@ -170,9 +170,15 @@ function translate(name: string, harness: McpHarness, raw: unknown): ServerRead 
   const secrets: Array<{ name: string; value: string }> = [];
   let config: RunMcpServerConfig;
   if (transport === "stdio") {
-    const args = raw.args === undefined ? [] : raw.args;
-    if (!Array.isArray(args) || !args.every((arg) => typeof arg === "string")) return unusable(name, harness, transport, "notAServer", "its arguments are not a list of words");
-    if (args.some((arg) => (arg as string).includes("${")) || command!.includes("${")) return unusable(name, harness, transport, "placeholder", "it uses a ${…} placeholder only the harness can fill in");
+    const rawArgs = raw.args === undefined ? [] : raw.args;
+    // A YAML list item such as `- 8080` or `- true` parses as a number or a
+    // boolean, and the harness starts the server with it as a word; so does a
+    // run. Only an object or a null is no argument (as stringMap reads env).
+    if (!Array.isArray(rawArgs) || !rawArgs.every((arg) => typeof arg === "string" || typeof arg === "number" || typeof arg === "boolean")) {
+      return unusable(name, harness, transport, "notAServer", "its arguments are not a list of words");
+    }
+    const args = rawArgs.map(String);
+    if (args.some((arg) => arg.includes("${")) || command!.includes("${")) return unusable(name, harness, transport, "placeholder", "it uses a ${…} placeholder only the harness can fill in");
     const env = stringMap(raw.env);
     if (env === null) return unusable(name, harness, transport, "placeholder", "its environment uses a value only the harness can fill in");
     config = { command: command!, args: args as string[], ...(env && Object.keys(env).length > 0 ? { env } : {}) };
@@ -282,10 +288,15 @@ function isAllowlistEntry(name: unknown): name is string {
   return name === CLAWBOX_READ_ONLY_ENTRY || isMcpServerName(name);
 }
 
-/** The stored map, as far as it is one: a value that is not, or a row that is not, is no entry. */
+/**
+ * The stored map, as far as it is one: a value that is not, or a row that is not, is no entry.
+ * With no prototype, and read through {@link listOf}: a project folder may be called
+ * `__proto__` or `constructor`, and on a plain object the one would set the prototype
+ * instead of a key and the other read back a function.
+ */
 function storedMap(value: unknown): Record<string, string[]> {
-  if (!isPlainObject(value)) return {};
-  const out: Record<string, string[]> = {};
+  const out: Record<string, string[]> = Object.create(null);
+  if (!isPlainObject(value)) return out;
   for (const [project, names] of Object.entries(value)) {
     if (!isProjectScope(project) || !Array.isArray(names)) continue;
     const kept = [...new Set(names.filter(isAllowlistEntry))].sort();
@@ -294,12 +305,17 @@ function storedMap(value: unknown): Record<string, string[]> {
   return out;
 }
 
+/** One project's list out of a stored map: its own key only, never an inherited one. */
+function listOf(map: Record<string, string[]>, project: string): string[] {
+  return Object.hasOwn(map, project) ? map[project] : [];
+}
+
 /** A project's allowlist. Empty for an unknown project, a store that cannot be read, or a value that is not a list — a run then gets today's tools. */
 export async function readProjectMcpAllowlist(project: string | null): Promise<string[]> {
   if (!isProjectScope(project)) return [];
   const { value, known } = await getKnown(PROJECT_MCP_SERVERS_KEY);
   if (!known) return [];
-  return storedMap(value)[project] ?? [];
+  return listOf(storedMap(value), project);
 }
 
 export class ProjectMcpServersError extends Error {
@@ -347,7 +363,7 @@ export async function setProjectMcpAllowlist(project: unknown, servers: unknown)
     if (names.length > 0) current[project] = names;
     else delete current[project];
   });
-  return map[project] ?? [];
+  return listOf(map, project);
 }
 
 /** A deleted project's entry goes with it, the way its secrets do. Never throws. */

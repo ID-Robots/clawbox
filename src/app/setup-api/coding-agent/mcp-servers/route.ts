@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 
 import { readJsonObject } from "@/lib/bounded-json";
 import { readClawboxMcpEnabled } from "@/lib/clawbox-mcp-switch";
-import { hasPersonSession } from "@/lib/owner-session";
+import { hasOwnerSession } from "@/lib/owner-session";
 import {
   CLAWBOX_READ_ONLY_ENTRY,
   isProjectScope,
@@ -31,12 +31,17 @@ import { isSameOriginRequest } from "@/lib/same-origin";
  *
  * POST `{ project, servers }` replaces the project's list.
  *
- * OWNER ONLY, both verbs, the way `harness/mcp` POST and `secrets` are: the
- * middleware admits the MCP bearer everywhere under /setup-api, and an agent
- * that could tick a server for a project would be granting its own next run a
- * tool the owner never chose. Even the GET — which servers the box is wired to
- * is the owner's. The write also needs this box's own page, so a cross-site
- * page riding the owner's cookie cannot tick one either.
+ * THE OWNER ONLY, both verbs — `hasOwnerSession`, the gate `secrets/import`
+ * uses and narrower than `harness/mcp`'s `hasPersonSession`. The middleware
+ * admits the MCP bearer everywhere under /setup-api, and an agent that could
+ * tick a server for a project would be granting its own next run a tool the
+ * owner never chose. A second ClawBox user is refused for the same reason
+ * from the other side: a ticked harness server carries the credentials the
+ * owner wired into it (env, headers) into every run of that project, so a
+ * tick by anyone else would hand them the owner's tokens. Even the GET —
+ * which servers the box is wired to is the owner's. The write also needs this
+ * box's own page, so a cross-site page riding the owner's cookie cannot tick
+ * one either.
  */
 
 /** A project id and at most MAX_PROJECT_MCP_SERVERS short names: a few KB is generous. */
@@ -47,8 +52,8 @@ function refuse(status: number, code: string, error: string): NextResponse {
 }
 
 async function guard(req: Request, write: boolean): Promise<NextResponse | null> {
-  if (!(await hasPersonSession(req))) {
-    return refuse(403, "owner_only", "Choosing a project's MCP servers needs a signed-in browser session.");
+  if (!(await hasOwnerSession(req))) {
+    return refuse(403, "owner_only", "Only the owner of this ClawBox can choose a project's MCP servers, from a signed-in browser session.");
   }
   if (write && !isSameOriginRequest(req)) {
     return refuse(403, "cross_origin", "A project's MCP servers can only be changed from this ClawBox's own pages.");

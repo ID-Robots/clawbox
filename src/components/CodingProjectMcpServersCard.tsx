@@ -41,6 +41,8 @@ export default function CodingProjectMcpServersCard({ project }: { project: stri
   const [answer, setAnswer] = useState<Answer | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The route answers the owner alone: a second ClawBox user has no list here.
+  const [ownerOnly, setOwnerOnly] = useState(false);
   // A read that started for another project must not paint over this one.
   const scope = useRef(0);
 
@@ -57,6 +59,13 @@ export default function CodingProjectMcpServersCard({ project }: { project: stri
     try {
       const res = await fetch(`/setup-api/coding-agent/mcp-servers?project=${encodeURIComponent(project)}`, { cache: "no-store" });
       if (mine !== scope.current) return;
+      if (res.status === 403) {
+        const refusal = await res.json().catch(() => null) as { code?: unknown } | null;
+        if (mine === scope.current && refusal?.code === "owner_only") {
+          setOwnerOnly(true);
+          return;
+        }
+      }
       if (!res.ok) {
         setError(tr("codingAgent.mcpServers.loadFailed", "Could not read this project's MCP servers."));
         return;
@@ -111,7 +120,7 @@ export default function CodingProjectMcpServersCard({ project }: { project: stri
 
   // A folder whose name is no project scope (a space, a dot) cannot have a
   // list of its own — the same rule its secrets live under.
-  if (!SECRET_SCOPE_RE.test(project)) return null;
+  if (!SECRET_SCOPE_RE.test(project) || ownerOnly) return null;
 
   return (
     <details className={`mt-2 ${INSET_SURFACE} px-3 py-1.5 text-[11px]`} data-testid="coding-project-mcp-servers">

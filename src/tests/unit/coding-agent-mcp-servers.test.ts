@@ -401,6 +401,17 @@ describe("what the harness's config offers", () => {
     expect(plan?.secrets.map((s) => s.value)).toEqual([`Bearer ${HEADER_TOKEN}`, HEADER_TOKEN]);
   });
 
+  it("starts a Hermes server whose YAML arguments parse as a number or a boolean, as the harness does", async () => {
+    process.env.CLAWBOX_EDITION = "dual";
+    vi.resetModules();
+    store = await import("@/lib/project-mcp-servers");
+    seedHermes("mcp_servers:\n  web:\n    command: node\n    args:\n      - server.js\n      - --port\n      - 8080\n      - --verbose\n      - true\n");
+    const { servers } = await store.readHarnessMcpServers();
+    expect(servers.find((s) => s.name === "web")).toMatchObject({ usable: true });
+    seedAllowlist({ site: ["web"] });
+    expect((await store.resolveRunMcpPlan("site"))?.servers.web).toEqual({ command: "node", args: ["server.js", "--port", "8080", "--verbose", "true"] });
+  });
+
   it("says which harness it could not read rather than reporting no servers", async () => {
     fs.mkdirSync(path.join(home, ".openclaw"), { recursive: true });
     fs.writeFileSync(path.join(home, ".openclaw", "openclaw.json"), "{ half a file");

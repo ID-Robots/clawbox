@@ -11801,6 +11801,9 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
         // and will not run again, so without this the owner's plaintext would
         // sit in this process until it restarted (found in review).
         dropRunSecrets(run.id);
+        // …and on disk: the spawn may have written its MCP config, with the
+        // project's server credentials, before it threw.
+        removeRunMcpConfigs(run.id);
       }
     }
   }
