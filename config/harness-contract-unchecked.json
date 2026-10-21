@@ -37,6 +37,9 @@
   "runOpenclawConfigSet: the key is computed at runtime": 3,
   "runOpenclawConfigUnset: the key is computed at runtime": 1
  },
+ "src/lib/hermes-channels.ts": {
+  "config set: the key is computed at runtime": 1
+ },
  "src/lib/hermes-clawai.ts": {
   "runHermesCli: argv is computed at runtime": 1,
   "runOrThrow: argv is computed at runtime": 1
