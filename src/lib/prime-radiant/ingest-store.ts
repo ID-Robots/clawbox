@@ -12,10 +12,17 @@
  * a job over exactly those ({@link claimDeadLetter} hands them over in one
  * transaction, so two retries can never take the same file).
  *
+ * What a spent ClawBox AI allowance stopped a job before is QUEUED, not a
+ * dead letter: left `pending` with its source, counted as the job's `queued`
+ * (read from the rows, no column of its own) once the job has ended. The next
+ * run of the same folders takes it like any document not written yet, and a
+ * retry takes it over together with the dead letters.
+ *
  * SERVER ONLY.
  */
 
 import type { DatabaseSync } from "node:sqlite";
+import type { AllowanceStop } from "./flash-client";
 import { readSkipCounts, type SkipCounts } from "./ingest-exclude";
 import { withStateDb } from "./state-db";
 
@@ -59,8 +66,19 @@ export interface IngestJob {
   requeued: number;
   /** Files still failed after both rounds and not taken over by a later job. */
   deadLetter: number;
+  /**
+   * Files a spent ClawBox AI allowance left waiting (`pending`, never failed)
+   * and no later job has taken over; 0 while the job runs.
+   */
+  queued: number;
   /** Files and folders left out, by reason (see `SkipCounts`). */
   skips: SkipCounts;
+  /**
+   * The spent allowance that stopped the job, with when it frees up — held
+   * while the job is in this process's memory (the nightly pass reads it
+   * there); `error` says the same in words for good.
+   */
+  allowance?: AllowanceStop | null;
 }
 
 export interface FileRow {
@@ -99,6 +117,8 @@ interface JobRow {
   requeued: number;
   dead_letter: number;
   skips?: string | null;
+  /** Counted from the file rows by {@link JOB_SELECT}, not stored. */
+  queued?: number;
 }
 
 function jsonList(text: string): string[] {
@@ -119,10 +139,11 @@ function jsonObject(text: string | null | undefined): unknown {
 }
 
 function rowToJob(r: JobRow): IngestJob {
+  const status = (INGEST_STATUSES as readonly string[]).includes(r.status) ? (r.status as IngestStatus) : "failed";
   return {
     id: r.id,
     kind: r.kind === "upload" || r.kind === "retry" ? r.kind : "folders",
-    status: (INGEST_STATUSES as readonly string[]).includes(r.status) ? (r.status as IngestStatus) : "failed",
+    status,
     phase: (INGEST_PHASES as readonly string[]).includes(r.phase) ? (r.phase as IngestPhase) : "done",
     folders: jsonList(r.folders),
     total: r.total,
@@ -142,9 +163,15 @@ function rowToJob(r: JobRow): IngestJob {
     retryOf: r.retry_of ?? null,
     requeued: r.requeued ?? 0,
     deadLetter: r.dead_letter ?? 0,
+    // A running job's pending rows are its work in hand, not a queue.
+    queued: status === "running" ? 0 : (r.queued ?? 0),
     skips: readSkipCounts(jsonObject(r.skips)),
   };
 }
+
+/** A job row with its {@link IngestJob.queued} count. */
+const JOB_SELECT = `SELECT j.*, (SELECT COUNT(*) FROM ingest_files f WHERE f.job_id = j.id AND f.status = 'pending'
+  AND f.retried_by IS NULL AND f.source IS NOT NULL) AS queued FROM ingest_jobs j`;
 
 export function insertJob(vault: string, job: IngestJob): void {
   withStateDb(vault, (db) => {
@@ -212,14 +239,14 @@ export function saveJob(vault: string, job: IngestJob): void {
 
 export function readJob(vault: string, id: string): IngestJob | null {
   return withStateDb(vault, (db) => {
-    const row = db.prepare("SELECT * FROM ingest_jobs WHERE id = ?").get(id) as JobRow | undefined;
+    const row = db.prepare(`${JOB_SELECT} WHERE j.id = ?`).get(id) as JobRow | undefined;
     return row ? rowToJob(row) : null;
   });
 }
 
 export function listJobs(vault: string, limit = 20): IngestJob[] {
   return withStateDb(vault, (db) =>
-    (db.prepare("SELECT * FROM ingest_jobs ORDER BY created_at DESC, id DESC LIMIT ?").all(limit) as unknown as JobRow[]).map(rowToJob),
+    (db.prepare(`${JOB_SELECT} ORDER BY j.created_at DESC, j.id DESC LIMIT ?`).all(limit) as unknown as JobRow[]).map(rowToJob),
   );
 }
 
@@ -327,6 +354,9 @@ export function readFiles(vault: string, jobId: string): FileRow[] {
 // ── the dead-letter list ──────────────────────────────────────────────────
 
 const DEAD_LETTER_WHERE = "job_id = ? AND status = 'failed' AND retried_by IS NULL AND source IS NOT NULL";
+/** What a retry takes over from a job that has ended: its dead letters and what a spent allowance left queued. */
+const RETRYABLE_WHERE = "job_id = ? AND status IN ('failed', 'pending') AND retried_by IS NULL AND source IS NOT NULL";
+const QUEUED_WHERE = "job_id = ? AND status = 'pending' AND retried_by IS NULL AND source IS NOT NULL";
 
 /** A dead letter as a route may answer it: no absolute path. */
 export interface DeadLetter {
@@ -362,19 +392,34 @@ export function readDeadLetter(vault: string, jobId: string, limit = 500): DeadL
 }
 
 /**
- * Hand a job's dead letters to `retryJobId`: every row is marked
- * `retried_by` in one transaction and answered with its source, so a second
- * retry of the same job finds nothing left to take. The original job's
- * count drops to zero.
+ * The files a spent allowance left waiting in an ended job (0 for a running
+ * one: its pending rows are work in hand). `ended`: the job itself, settling,
+ * says it has ended before its row does.
+ */
+export function countQueued(vault: string, jobId: string, options: { ended?: boolean } = {}): number {
+  return withStateDb(vault, (db) => {
+    const job = db.prepare("SELECT status FROM ingest_jobs WHERE id = ?").get(jobId) as { status: string } | undefined;
+    if (!job || (job.status === "running" && !options.ended)) return 0;
+    return (db.prepare(`SELECT COUNT(*) AS n FROM ingest_files WHERE ${QUEUED_WHERE}`).get(jobId) as { n: number }).n;
+  });
+}
+
+/**
+ * Hand a job's dead letters — and, once it has ended, what a spent allowance
+ * left queued — to `retryJobId`: every row is marked `retried_by` in one
+ * transaction and answered with its source, so a second retry of the same job
+ * finds nothing left to take. The original job's counts drop to zero.
  */
 export function claimDeadLetter(vault: string, jobId: string, retryJobId: string): DeadLetterSource[] {
   return withStateDb(vault, (db) => {
     let rows: DeadLetterSource[] = [];
     inTransaction(db, () => {
+      const job = db.prepare("SELECT status FROM ingest_jobs WHERE id = ?").get(jobId) as { status: string } | undefined;
+      const where = job && job.status !== "running" ? RETRYABLE_WHERE : DEAD_LETTER_WHERE;
       rows = db
-        .prepare(`SELECT seq, label, error, attempts, bytes, source FROM ingest_files WHERE ${DEAD_LETTER_WHERE} ORDER BY seq`)
+        .prepare(`SELECT seq, label, error, attempts, bytes, source FROM ingest_files WHERE ${where} ORDER BY seq`)
         .all(jobId) as unknown as DeadLetterSource[];
-      db.prepare(`UPDATE ingest_files SET retried_by = ? WHERE ${DEAD_LETTER_WHERE}`).run(retryJobId, jobId);
+      db.prepare(`UPDATE ingest_files SET retried_by = ? WHERE ${where}`).run(retryJobId, jobId);
       recountDeadLetter(db, jobId);
     });
     return rows;

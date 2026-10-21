@@ -1,8 +1,11 @@
 /**
  * POST /setup-api/prime-radiant/ingest/<id>/retry — start a job over the
  * dead letters of job <id>: the files that still failed after its own second
- * round. They are handed over in one transaction, so the original job's list
- * empties and a second retry finds nothing (409 `nothing_to_retry`). 202
+ * round, and the ones a spent ClawBox AI allowance left queued (`queued`:
+ * never tried, never failed). They are handed over in one transaction, so the
+ * original job's list empties and a second retry finds nothing (409
+ * `nothing_to_retry`). A retry while the allowance is still spent asks once
+ * and queues them again, it does not dead-letter them. 202
  * `{ job }`, progress on `GET ingest/<new id>/events`; what fails again is
  * the new job's dead letters.
  *

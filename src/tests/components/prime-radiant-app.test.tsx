@@ -118,6 +118,16 @@ const PREVIEW = {
 };
 const RUNNING_JOB = { ...JOB_BASE, id: "job-run", status: "running", phase: "write" };
 const DEAD_JOB = { ...JOB_BASE, id: "job-dead", status: "done", phase: "done", done: 2, failed: 1, pages: 2, deadLetter: 1, finishedAt: "2026-01-05T10:00:00.000Z" };
+/** A job a spent allowance stopped: nothing failed, three documents wait. */
+const QUEUED_JOB = {
+  ...JOB_BASE,
+  id: "job-queued",
+  status: "interrupted",
+  phase: "done",
+  queued: 3,
+  error: "ClawBox AI allowance spent, frees up at Sat 00:00. The documents not written yet wait for the next run of these folders, or Retry, once it frees up.",
+  finishedAt: "2026-01-05T10:00:00.000Z",
+};
 
 /** A stand-in for the browser's EventSource: the test plays the server's frames. */
 class FakeEventSource {
@@ -269,6 +279,7 @@ function installFetch() {
     if (url === `${p}/ingest`) return ok({ running: null, jobs: ingestJobs });
     if (url === `${p}/ingest/job-dead/retry` && method === "POST") return ok({ job: { ...RUNNING_JOB, id: "job-retry", kind: "retry" } }, 202);
     if (url === `${p}/ingest/job-dead`) return ok({ job: DEAD_JOB, deadLetter: [{ seq: 1, label: "~/acme-docs/broken.pdf", error: "unreadable", attempts: 2, bytes: 10 }] });
+    if (url === `${p}/ingest/job-queued`) return ok({ job: QUEUED_JOB, deadLetter: [] });
     if (url.startsWith(`${p}/ingest/`) && method === "DELETE") {
       const refusal = stopRefusals.shift();
       if (refusal) return ok({ error: "The job could not be stopped", code: "stop_failed" }, refusal);
@@ -773,7 +784,10 @@ describe("PrimeRadiantApp", () => {
     const first = await mount();
     await openTab("settings");
     const meter = await screen.findByTestId("prime-radiant-usage-allowance");
-    expect(meter).toHaveTextContent("Last 7 days: 6.1K tokens in 6 model calls, counted against this box's ClawBox AI allowance like chat");
+    // Approximate, and said so: only the calls that answered are recorded.
+    expect(meter).toHaveTextContent(
+      "Last 7 days: about 6.1K tokens in 6 model calls, counted against this box's ClawBox AI allowance like chat (approximate: only calls that answered are recorded)",
+    );
     expect(screen.getByTestId("prime-radiant-usage-allowance-weekly")).toHaveTextContent(/^Weekly allowance 34% used · frees up .+/);
     expect(screen.queryByTestId("prime-radiant-usage-allowance-spent")).toBeNull();
     expect(calls.some((c) => c.url.endsWith("/costs?allowance=1"))).toBe(true);
@@ -1144,6 +1158,22 @@ describe("PrimeRadiantApp", () => {
     fireEvent.click(screen.getByTestId("prime-radiant-dead-letter-retry"));
     await waitFor(() => {
       expect(calls.some((c) => c.url.endsWith("/ingest/job-dead/retry") && c.method === "POST")).toBe(true);
+    });
+  });
+
+  it("shows what a spent allowance left waiting — never as failed — and retries it", async () => {
+    ingestJobs = [QUEUED_JOB];
+    await mount();
+    await openTab("ingest");
+    const job = await screen.findByTestId("prime-radiant-ingest-job");
+    expect(job).toHaveTextContent("Interrupted");
+    expect(job).toHaveTextContent("ClawBox AI allowance spent, frees up at Sat 00:00.");
+    const toggle = screen.getByTestId("prime-radiant-dead-letter-toggle");
+    expect(toggle).toHaveTextContent(/^Waiting for the allowance: 3$/);
+    fireEvent.click(toggle);
+    fireEvent.click(await screen.findByTestId("prime-radiant-dead-letter-retry"));
+    await waitFor(() => {
+      expect(calls.some((c) => c.url.endsWith("/ingest/job-queued/retry") && c.method === "POST")).toBe(true);
     });
   });
 });

@@ -490,6 +490,7 @@ describe("job records", () => {
       retryOf: null,
       requeued: 0,
       deadLetter: 0,
+      queued: 0,
       notes: [],
       skips: { ...emptySkipCounts(), codeProject: 2, unsupported: 7 },
     };

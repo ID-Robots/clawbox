@@ -282,20 +282,54 @@ describe("contradiction pass", () => {
     expect(q.findings).toEqual([]);
   });
 
-  it("stops the judge at a spent ClawBox AI allowance instead of failing batch after batch", async () => {
+  it("stops the judge at a spent ClawBox AI allowance, says when it frees up, and defers every pair it did not judge", async () => {
     const snap = await seedVault();
     let calls = 0;
     const spent: FlashClient = {
       model: "deepseek-v4-flash",
       complete: async () => {
         calls += 1;
-        throw new FlashCallError("allowance", "ClawBox AI's weekly allowance is used up.", 429);
+        throw new FlashCallError("allowance", "ClawBox AI's 5-hour burst limit is reached.", 429, null, {
+          kind: "burst",
+          resetAt: "2026-05-20T08:00:00.000Z",
+          message: "Short-term burst limit reached.",
+        });
       },
     };
     const r = await runContradictionPass(snap, { stateVault: vaultDir(), scope: null, client: spent, embedder: createHashEmbedder(), parallel: 1, k: 8 });
-    expect(r.skipped).toBe("judge_unavailable");
-    expect(r.notes.join(" ")).toMatch(/The judge stopped: allowance/);
+    expect(r.skipped).toBe("allowance_spent");
+    expect(r.allowance).toEqual({ kind: "burst", resetAt: "2026-05-20T08:00:00.000Z" });
+    expect(r.notes.join(" ")).toMatch(/The judge stopped: ClawBox AI allowance spent, frees up at .+\. The pairs it did not judge are judged next pass\./);
     expect(calls).toBe(1);
+    // Queued, not lost: nothing judged, every pair owed, and the pass is no full comparison.
+    expect(r.judged).toBe(0);
+    expect(r.deferredPairs).toBe(r.pairs);
+    expect(r.deferredClaims).toBeGreaterThan(0);
+    expect(r.complete).toBe(false);
+  });
+
+  it("stops at a spent memory-indexing allowance before the judge: its own reason, never a silent skip", async () => {
+    const snap = await seedVault();
+    let calls = 0;
+    const judge: FlashClient = {
+      model: "deepseek-v4-flash",
+      complete: async () => {
+        calls += 1;
+        throw new Error("the judge must not be asked");
+      },
+    };
+    // The shape memory-index-local's EmbeddingUnavailableError carries for an embeddings_weekly_limit_exceeded 429.
+    const refused = Object.assign(new Error("The embedding model did not answer: HTTP 429"), {
+      retryable: false,
+      allowance: { kind: "embeddings", resetAt: "2026-05-25T00:00:00.000Z", message: "Memory indexing allowance used up." },
+    });
+    const embedder = { identity: async () => "spent-embedder", embed: async () => Promise.reject(refused) };
+    const r = await runContradictionPass(snap, { stateVault: vaultDir(), scope: null, client: judge, embedder, parallel: 1 });
+    expect(r.skipped).toBe("allowance_spent");
+    expect(r.allowance).toEqual({ kind: "embeddings", resetAt: "2026-05-25T00:00:00.000Z" });
+    expect(r.notes.join(" ")).toMatch(/The claims could not be embedded: ClawBox AI allowance spent, frees up at .+\. They are compared on the next pass\./);
+    expect(r.deferredClaims).toBe(r.queried);
+    expect(calls).toBe(0);
   });
 
   it("works with the deterministic stub model", async () => {

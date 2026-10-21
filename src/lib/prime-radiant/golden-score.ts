@@ -15,7 +15,10 @@
  * night's check. SKIPPABLE: offline, with no question,
  * when the model refuses (no credential, auth) or when no call of the night
  * judged anything, the check is skipped, says why and stores no score — never
- * a failed night, never a 0 % in the history. A question answered `correct`
+ * a failed night, never a 0 % in the history. A spent ClawBox AI allowance
+ * stops the check at the one refused call (`allowance_spent`): what was judged
+ * before it is scored, the questions it did not reach are not stored, so they
+ * keep their turn for the next night. A question answered `correct`
  * last time and `wrong` now becomes a `lint` review item for its owner (no run
  * id: it never holds a night) — unless the search failed for it that night:
  * an answer from the claims' words alone is no proof the wiki changed. Such
@@ -34,7 +37,19 @@
 
 import crypto from "crypto";
 import type { CostRates } from "./cost-rates";
-import { completeWithRetry, estimateUsd, FlashCallError, flashClient, type FlashClient, type FlashResponse, type RetryOptions } from "./flash-client";
+import {
+  ALLOWANCE_SPENT,
+  allowanceSpentText,
+  allowanceStopOf,
+  completeWithRetry,
+  estimateUsd,
+  FlashCallError,
+  flashClient,
+  type AllowanceStop,
+  type FlashClient,
+  type FlashResponse,
+  type RetryOptions,
+} from "./flash-client";
 import {
   buildGoldenPrompt,
   GOLDEN_LIMITS,
@@ -67,8 +82,14 @@ export const GOLDEN_TREND_POINTS = 14;
 const MODEL_REFUSALS = new Set(["no_credential", "auth", "refused", "allowance", "aborted"]);
 
 export interface GoldenScoreResult {
-  /** Why nothing was asked: `offline`, `disabled`, `no_questions`, `model_unavailable`. */
+  /** Why nothing was asked: `offline`, `disabled`, `no_questions`, `model_unavailable`, `allowance_spent`. */
   skipped: string | null;
+  /**
+   * The spent ClawBox AI allowance the judge stopped on. The questions it did
+   * not judge are neither stored nor scored: they keep their turn, first in
+   * line the next night.
+   */
+  allowance: AllowanceStop | null;
   scoreId: string | null;
   tally: GoldenTally;
   /** Questions past the night's cap, left for the next nights. */
@@ -98,7 +119,7 @@ export interface GoldenScoreOptions {
 }
 
 function emptyResult(skipped: string | null, asked = 0): GoldenScoreResult {
-  return { skipped, scoreId: null, tally: goldenTally(new Array(asked).fill(null)), capped: 0, calls: 0, usdEstimate: 0, regressions: [], reviewItems: [], notes: [] };
+  return { skipped, allowance: null, scoreId: null, tally: goldenTally(new Array(asked).fill(null)), capped: 0, calls: 0, usdEstimate: 0, regressions: [], reviewItems: [], notes: [] };
 }
 
 /** Each question's baseline verdict (the regression check's) and when it was last asked. */
@@ -177,6 +198,7 @@ export async function runGoldenScore(options: GoldenScoreOptions = {}): Promise<
     retryOn: (err) => err.kind !== "bad_response" && (options.retry?.retryOn?.(err) ?? true),
   };
   let refusal: string | null = null;
+  let spent: AllowanceStop | null = null;
   let stop: string | null = null;
   let failuresInRow = 0;
   let askedAgain = 0;
@@ -216,7 +238,10 @@ export async function runGoldenScore(options: GoldenScoreOptions = {}): Promise<
       ({ response } = await completeWithRetry(client, { system, user, maxTokens, signal: options.signal }, retry));
     } catch (err) {
       const kind = err instanceof FlashCallError ? err.kind : "network";
-      if (MODEL_REFUSALS.has(kind)) refusal = kind;
+      if (MODEL_REFUSALS.has(kind)) {
+        refusal = kind;
+        spent = spent ?? allowanceStopOf(err);
+      }
       else if (kind === "bad_response") {
         // The provider answered (no outage), and an empty or capped answer still spent its tokens: no usage
         // came with it, so it is charged as the whole prompt (~4 characters a token) plus the whole output cap.
@@ -282,18 +307,31 @@ export async function runGoldenScore(options: GoldenScoreOptions = {}): Promise<
   if (askedAgain > 0) result.notes.push(`${askedAgain} golden-question judge answer(s) came back empty, cut off or unreadable; their questions were asked again in smaller calls.`);
   if (unanswered > 0) result.notes.push(`The golden-question judge gave no verdict for ${unanswered} question(s) even asked alone; they count as not judged.`);
   if (stop) result.notes.push(stop);
+  const spentText = spent ? allowanceSpentText(spent, { now: now().getTime() }) : "";
   if (verdicts.size === 0) {
     // Nothing judged is no score: an outage must not read as 0 % correct, nor hide the last real score.
-    const skipped = emptyResult("model_unavailable");
+    const skipped = emptyResult(spent ? ALLOWANCE_SPENT : "model_unavailable");
+    skipped.allowance = spent;
     skipped.calls = result.calls;
     skipped.usdEstimate = Math.round(result.usdEstimate * 1e6) / 1e6;
     skipped.notes.push(...result.notes);
-    skipped.notes.push(refusal ? `ClawBox AI refused the golden-question judge (${refusal}); the check was skipped.` : "No golden question could be judged tonight; the check was skipped.");
+    skipped.notes.push(
+      spent
+        ? `The golden-question judge stopped: ${spentText}. Tonight's questions wait for the next night.`
+        : refusal
+          ? `ClawBox AI refused the golden-question judge (${refusal}); the check was skipped.`
+          : "No golden question could be judged tonight; the check was skipped.",
+    );
     return skipped;
   }
-  if (refusal) result.notes.push(`ClawBox AI refused the golden-question judge part way (${refusal}); the rest count as not judged.`);
+  // Past a spent allowance the questions not judged keep their turn: neither stored nor scored tonight.
+  const scored = spent ? asked.filter((q) => verdicts.has(q.id)) : asked;
+  if (spent) {
+    result.allowance = spent;
+    result.notes.push(`The golden-question judge stopped part way: ${spentText}. The ${asked.length - scored.length} question(s) it did not judge wait for the next night.`);
+  } else if (refusal) result.notes.push(`ClawBox AI refused the golden-question judge part way (${refusal}); the rest count as not judged.`);
 
-  result.tally = goldenTally(asked.map((q) => verdicts.get(q.id)?.verdict ?? null));
+  result.tally = goldenTally(scored.map((q) => verdicts.get(q.id)?.verdict ?? null));
   const scoreId = options.runId ?? `gs-${crypto.randomBytes(6).toString("hex")}`;
   const atIso = now().toISOString();
 
@@ -341,7 +379,7 @@ export async function runGoldenScore(options: GoldenScoreOptions = {}): Promise<
         "INSERT OR REPLACE INTO golden_scores (id, run_id, at, asked, correct, wrong, missing, stale, failed, percent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       ).run(scoreId, options.runId ?? null, atIso, t.asked, t.correct, t.wrong, t.missing, t.stale, t.failed, t.percent);
       const put = db.prepare("INSERT OR REPLACE INTO golden_results (score_id, question_id, verdict, why, claim_ids, at, search_failed) VALUES (?, ?, ?, ?, ?, ?, ?)");
-      for (const q of asked) {
+      for (const q of scored) {
         const v = verdicts.get(q.id);
         put.run(scoreId, q.id, v?.verdict ?? null, v?.why ?? null, JSON.stringify((evidence.get(q.id) ?? []).map((e) => e.claimId)), atIso, searchFailed.has(q.id) ? 1 : 0);
       }

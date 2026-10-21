@@ -45,8 +45,13 @@
  * items, `mergeHeldNight` merges it by hand.
  *
  * Offline-safe: with no ClawBox AI the remote steps are skipped (and said to
- * be), the lint and the gate still run. `runNightly` NEVER throws: a failure
- * is the run's status and its note.
+ * be), the lint and the gate still run. A spent ClawBox AI allowance (weekly
+ * or burst) is neither: each model step it refuses stops at that one call
+ * with what it did not reach left queued for the next night, and is recorded
+ * as `allowance_spent` — in `summary.allowance` with the steps and when it
+ * frees up, and in a note — while the night goes on to lint, gate and merge
+ * what was written. `runNightly` NEVER throws: a failure is the run's status
+ * and its note.
  *
  * SERVER ONLY.
  */
@@ -57,7 +62,7 @@ import { resolveFolderInsideBrowseRoot } from "@/lib/browse-folder";
 import path from "@/lib/runtime-path";
 import { fullComparisonDone, readComparedThrough, runContradictionPass, type ClaimEmbedder, type ContradictionPassResult } from "./contradictions";
 import type { CostRates } from "./cost-rates";
-import { flashAvailable, type FlashClient } from "./flash-client";
+import { ALLOWANCE_SPENT, allowanceSpentText, flashAvailable, type AllowanceStop, type FlashClient } from "./flash-client";
 import { verifiedTouches, type VerifiedTouch } from "./gate";
 import { changedPaths, git, VAULT_MAIN_BRANCH, withVaultLock } from "./git";
 import { runGoldenScore, type GoldenScoreResult } from "./golden-score";
@@ -91,9 +96,10 @@ export interface NightlySummary {
   commits: number;
   changed: string[];
   changedCount: number;
-  ingest: { jobId: string; status: string; pages: number; failed: number } | { skipped: string };
+  /** `stopped: "allowance_spent"` with `queued`: a spent allowance stopped the import, and that many documents wait for the next night. */
+  ingest: { jobId: string; status: string; pages: number; failed: number; stopped?: string; queued?: number } | { skipped: string };
   lint: { errors: number; warnings: number; checked: number };
-  contradictions: Pick<ContradictionPassResult, "claims" | "queried" | "embedded" | "pairs" | "judged" | "calls" | "failedBatches" | "capped" | "deferredPairs" | "carried" | "deferredClaims" | "complete" | "usdEstimate" | "skipped"> & {
+  contradictions: Pick<ContradictionPassResult, "claims" | "queried" | "embedded" | "pairs" | "judged" | "calls" | "failedBatches" | "capped" | "deferredPairs" | "carried" | "deferredClaims" | "complete" | "usdEstimate" | "skipped" | "allowance"> & {
     findings: number;
   };
   opus: Pick<OpusTierResult, "queued" | "reviewed" | "pending" | "calls" | "usdEstimate" | "capUsd" | "maxPages" | "source" | "stopped"> | { skipped: string };
@@ -109,7 +115,14 @@ export interface NightlySummary {
       })
     | { skipped: string };
   gate: { touched: string[] };
-  golden: Pick<GoldenScoreResult, "scoreId" | "tally" | "capped" | "calls" | "usdEstimate" | "regressions"> | { skipped: string };
+  golden: Pick<GoldenScoreResult, "scoreId" | "tally" | "capped" | "calls" | "usdEstimate" | "regressions" | "allowance"> | { skipped: string };
+  /**
+   * The model steps a spent ClawBox AI allowance stopped tonight — each one
+   * "allowance spent", neither done nor failed, its remaining work queued —
+   * and the allowance with when it frees up (the latest any step was told).
+   * Null when none was.
+   */
+  allowance: (AllowanceStop & { steps: string[] }) | null;
   reviewItems: { raised: number };
   held: string[];
   notes: string[];
@@ -341,6 +354,7 @@ function emptySummary(): NightlySummary {
       complete: false,
       usdEstimate: 0,
       skipped: "not_run",
+      allowance: null,
       findings: 0,
     },
     opus: { skipped: "not_run" },
@@ -348,10 +362,28 @@ function emptySummary(): NightlySummary {
     summaries: { skipped: "not_run" },
     gate: { touched: [] },
     golden: { skipped: "not_run" },
+    allowance: null,
     reviewItems: { raised: 0 },
     held: [],
     notes: [],
   };
+}
+
+/**
+ * Record that a spent ClawBox AI allowance stopped `step`: the step joins
+ * `summary.allowance`, and — unless `waits` is null because the step wrote
+ * its own — a note says "ClawBox AI allowance spent, frees up at …" and what
+ * waits.
+ */
+function allowanceSpent(summary: NightlySummary, step: string, stop: AllowanceStop, now: Date, waits: string | null): void {
+  const prior = summary.allowance;
+  const later = !prior || (stop.resetAt !== null && (prior.resetAt === null || Date.parse(stop.resetAt) > Date.parse(prior.resetAt)));
+  summary.allowance = {
+    kind: later ? stop.kind : prior.kind,
+    resetAt: later ? stop.resetAt : prior.resetAt,
+    steps: [...(prior?.steps ?? []), step],
+  };
+  if (waits !== null) summary.notes.push(`The ${step} step stopped: ${allowanceSpentText(stop, { now: now.getTime() })}. ${waits}`);
 }
 
 async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDeps, vault: string): Promise<RunStatus> {
@@ -406,6 +438,10 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
           await ingestFinished(job.id);
           const done = getIngestJob(job.id, vault) ?? job;
           summary.ingest = { jobId: done.id, status: done.status, pages: done.pages, failed: done.failed };
+          if (done.allowance) {
+            summary.ingest = { ...summary.ingest, stopped: ALLOWANCE_SPENT, queued: done.queued };
+            allowanceSpent(summary, "ingest", done.allowance, now(), `${done.queued} document(s) wait for the next night.`);
+          }
         } catch (err) {
           summary.ingest = { skipped: err instanceof IngestBusyError ? "busy" : "failed" };
           if (!(err instanceof IngestBusyError)) notes.push(`The nightly ingest failed: ${err instanceof Error ? err.message.slice(0, 160) : "error"}.`);
@@ -457,10 +493,13 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
         complete: pass.complete,
         usdEstimate: pass.usdEstimate,
         skipped: pass.skipped,
+        allowance: pass.allowance,
         findings: pass.findings.length,
       };
       summary.reviewItems.raised += pass.reviewItems.length;
       notes.push(...pass.notes);
+      // The pass's own note says it, with what waits.
+      if (pass.allowance) allowanceSpent(summary, "contradictions", pass.allowance, now(), null);
       run.usdEstimate += pass.usdEstimate;
     }
 
@@ -551,6 +590,7 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
           model: s.model,
         };
         run.usdEstimate += s.model.usdEstimate;
+        if (s.model.allowance) allowanceSpent(summary, "structure", s.model.allowance, now(), "The record types it did not ask wait for the next night; the rest of the pass was written.");
         if (s.written > 0) notes.push(`The structure pass wrote ${s.written} page(s): ${s.recordHubs} record hub(s), ${s.domainHubs} domain hub(s), ${s.entitiesEnriched} enriched entit${s.entitiesEnriched === 1 ? "y" : "ies"}.`);
       } catch (err) {
         summary.structure = { skipped: "failed" };
@@ -584,6 +624,7 @@ async function runSteps(run: RunRecord, summary: NightlySummary, deps: NightlyDe
           domainMismatches: s.domainMismatches.length,
         };
         run.usdEstimate += s.model.usdEstimate;
+        if (s.model.allowance) allowanceSpent(summary, "summaries", s.model.allowance, now(), "The pages it did not reach got their facts' summary or kept theirs, and wait for the model the next night.");
         if (s.written > 0) notes.push(`The summaries pass wrote ${s.written} summar${s.written === 1 ? "y" : "ies"} (${s.byModel} by the model, ${s.byFacts} from facts).`);
         if (s.refused.length > 0) {
           const shown = s.refused.slice(0, 5).map((r) => `${r.path} (${r.reason})`).join(", ");
@@ -679,9 +720,11 @@ async function goldenStep(run: RunRecord, summary: NightlySummary, deps: Nightly
     });
     summary.golden = g.skipped
       ? { skipped: g.skipped }
-      : { scoreId: g.scoreId, tally: g.tally, capped: g.capped, calls: g.calls, usdEstimate: g.usdEstimate, regressions: g.regressions };
+      : { scoreId: g.scoreId, tally: g.tally, capped: g.capped, calls: g.calls, usdEstimate: g.usdEstimate, regressions: g.regressions, allowance: g.allowance };
     summary.reviewItems.raised += g.reviewItems.length;
     summary.notes.push(...g.notes);
+    // The check's own note says it, with what waits.
+    if (g.allowance) allowanceSpent(summary, "golden", g.allowance, (deps.now ?? (() => new Date()))(), null);
     if (g.capped > 0) summary.notes.push(`${g.capped} golden question(s) were left for the next nights (the cap is ${settings.golden.maxQuestions} a night).`);
     run.usdEstimate += g.usdEstimate;
   } catch (err) {

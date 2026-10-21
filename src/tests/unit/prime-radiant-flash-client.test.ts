@@ -106,6 +106,38 @@ describe("the ClawBox AI client", () => {
     expect(err).toMatchObject({ kind, status, retryAfterMs: retryAfter });
   });
 
+  it.each([
+    ["weekly_limit_exceeded", "weekly"],
+    ["burst_limit_exceeded", "burst"],
+  ])("reads a 429 naming %s as a spent allowance, asked once and never retried", async (code, allowanceKind) => {
+    const fetchImpl = vi.fn(async () => respond(429, { error: { code, resetAt: "2026-10-25T00:00:00Z" } }, { "retry-after": "7" }));
+    const client = createClawboxAiFlashClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    expect.soft(await client.complete(req).catch((e) => e)).toMatchObject({
+      kind: "allowance",
+      retryable: false,
+      status: 429,
+      allowance: { kind: allowanceKind, resetAt: "2026-10-25T00:00:00Z" },
+    });
+    fetchImpl.mockClear();
+    await expect.soft(completeWithRetry(client, req, { sleep: async () => {} })).rejects.toMatchObject({ kind: "allowance" });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a 429 that names no allowance a busy proxy, retried after its Retry-After", async () => {
+    const fetchImpl = vi.fn(async () => respond(429, { error: { code: "rate_limit_exceeded", message: "Too many requests" } }, { "retry-after": "3" }));
+    const client = createClawboxAiFlashClient({ fetchImpl: fetchImpl as unknown as typeof fetch });
+    expect(await client.complete(req).catch((e) => e)).toMatchObject({ kind: "rate_limited", retryable: true, retryAfterMs: 3000 });
+    fetchImpl.mockClear();
+    await expect(completeWithRetry(client, req, { sleep: async () => {} })).rejects.toMatchObject({ kind: "rate_limited" });
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+  });
+
+  it("reads no more of a 429's body than a refusal needs", async () => {
+    // A megabyte of something else, the allowance code past the read: still just busy.
+    const client = createClawboxAiFlashClient({ fetchImpl: (async () => respond(429, "x".repeat(1_000_000) + "weekly_limit_exceeded")) as unknown as typeof fetch });
+    expect(await client.complete(req).catch((e) => e)).toMatchObject({ kind: "rate_limited", retryable: true });
+  });
+
   it("remembers a credential the proxy itself refused, and nothing else", async () => {
     creds.proxyRefusedClawaiCredential.mockResolvedValueOnce(true);
     const client = createClawboxAiFlashClient({ fetchImpl: (async () => respond(401, { error: { code: "invalid_token" } })) as unknown as typeof fetch });

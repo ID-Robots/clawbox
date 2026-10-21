@@ -9,7 +9,7 @@ import os from "os";
 import path from "path";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHashEmbedder, fullComparisonDone, readComparedThrough, readDeferredClaims } from "@/lib/prime-radiant/contradictions";
-import type { FlashClient } from "@/lib/prime-radiant/flash-client";
+import { FlashCallError, type FlashClient } from "@/lib/prime-radiant/flash-client";
 import { git, headCommit } from "@/lib/prime-radiant/git";
 import { stubGoldenVerdict } from "@/lib/prime-radiant/flash-stub";
 import { readGoldenItems } from "@/lib/prime-radiant/golden";
@@ -462,6 +462,49 @@ describe("nightly pass", () => {
     const off = await runNightly("schedule", deps({ online: async () => false, settings: { ...settings(), golden: { enabled: false, maxQuestions: 50 } } }));
     expect((off!.summary as unknown as NightlySummary).golden).toEqual({ skipped: "disabled" });
     expect((await goldenStatus()).last).toBeNull();
+  });
+
+  it("a spent ClawBox AI allowance stops each model step after one call, recorded as 'allowance spent'; the next night takes what waited", async () => {
+    await ensureVault();
+    await vaultOperation("seed: prices", async (tx) => {
+      await tx.write("concepts/price-list.md", pageText({ type: "concept", title: "Price list", domain: "acme-sales", claims: [claim("acme-sales/price-list/widget", "The blue widget costs 10 EUR per unit.")] }, "Price list.\n"));
+      await tx.write("concepts/catalogue.md", pageText({ type: "concept", title: "Catalogue", domain: "acme-sales", claims: [claim("acme-sales/catalogue/widget", "The blue widget costs 12 EUR per unit.")] }, "Catalogue.\n"));
+    });
+    await addGoldenQuestion({ question: "What does the blue widget cost?", expected: "10 EUR per unit", domain: "acme-sales" }, { domains: [] });
+    const RESET = "2026-05-23T00:00:00.000Z";
+    const asked: string[] = [];
+    const spent: FlashClient = {
+      model: client.model,
+      async complete(request) {
+        asked.push(readJudgeItems(request.user) ? "judge" : readGoldenItems(request.user) ? "golden" : readWriterItems(request.user) ? "writer" : "summaries");
+        throw new FlashCallError("allowance", "ClawBox AI's weekly allowance is used up.", 429, null, { kind: "weekly", resetAt: RESET, message: null });
+      },
+    };
+    const run = await runNightly("schedule", deps({ client: spent, goldenSearch: async () => [] }));
+    expect(run?.status).not.toBe("failed");
+    const summary = run!.summary as unknown as NightlySummary;
+    // One request a step, never retried.
+    expect([...asked].sort()).toEqual(["golden", "judge", "summaries", "writer"]);
+    expect(summary.allowance).toEqual({ kind: "weekly", resetAt: RESET, steps: ["ingest", "contradictions", "summaries", "golden"] });
+    expect(summary.ingest).toMatchObject({ status: "interrupted", stopped: "allowance_spent", queued: 2, failed: 0, pages: 0 });
+    expect(summary.contradictions).toMatchObject({ skipped: "allowance_spent", allowance: { kind: "weekly", resetAt: RESET }, judged: 0, complete: false });
+    expect(summary.summaries).toMatchObject({ model: { skipped: "allowance_spent" } });
+    expect(summary.golden).toEqual({ skipped: "allowance_spent" });
+    const notes = summary.notes.join("\n");
+    expect(notes).toMatch(/The ingest step stopped: ClawBox AI allowance spent, frees up at .+\. 2 document\(s\) wait for the next night\./);
+    expect(notes).toMatch(/The summaries step stopped: ClawBox AI allowance spent, frees up at /);
+    expect(notes).toMatch(/The judge stopped: ClawBox AI allowance spent, frees up at /);
+    expect(notes).toMatch(/The golden-question judge stopped: ClawBox AI allowance spent, frees up at /);
+    expect(fullComparisonDone(vaultDir())).toBe(false);
+    expect(readDeferredClaims(vaultDir()).size).toBeGreaterThan(0);
+
+    // Once it frees up, the next night writes the documents that waited and judges the pairs that were deferred.
+    const next = await runNightly("schedule", deps({ now: () => new Date(2026, 4, 23, 3, 0), goldenSearch: async () => [] }));
+    const after = next!.summary as unknown as NightlySummary;
+    expect(after.allowance).toBeNull();
+    expect(after.ingest).toMatchObject({ status: "done", pages: 2, failed: 0 });
+    expect(after.contradictions.skipped).toBeNull();
+    expect(after.contradictions.judged).toBeGreaterThan(0);
   });
 
   it("runs one pass at a time", async () => {

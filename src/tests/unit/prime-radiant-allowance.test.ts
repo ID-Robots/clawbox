@@ -2,8 +2,10 @@
  * Prime Radiant on the ClawBox AI allowance: its model calls go through the
  * box's ClawBox AI sign-in, so they are counted against the plan's rolling
  * allowance like a chat turn. A spent allowance is therefore a refusal every
- * pass stops on (never a busy proxy to retry until the documents dead-letter),
- * and the Usage view meters what Prime Radiant took from the week.
+ * pass stops on after one call (never a busy proxy to retry), leaving what it
+ * did not reach queued rather than dead-lettered, and the Usage view meters
+ * what Prime Radiant took from the week. The Flash client's own reading of
+ * the 429 is proved in prime-radiant-flash-client.test.ts.
  */
 import fs from "fs";
 import os from "os";
@@ -29,10 +31,11 @@ import {
   allowanceAccountFrom,
   readAllowanceMeter,
 } from "@/lib/prime-radiant/allowance-meter";
-import { FlashCallError, completeWithRetry, createClawboxAiFlashClient } from "@/lib/prime-radiant/flash-client";
-import { getIngestJob, ingestFinished, listIngestJobs, startIngest, stopIngest } from "@/lib/prime-radiant/ingest";
-import { readFiles, recordCost } from "@/lib/prime-radiant/ingest-store";
+import { createClawboxAiFlashClient, type FlashClient } from "@/lib/prime-radiant/flash-client";
+import { getIngestJob, ingestFinished, listIngestJobs, NothingToRetryError, startIngest, stopIngest } from "@/lib/prime-radiant/ingest";
+import { readDeadLetter, readFiles, readJob, recordCost } from "@/lib/prime-radiant/ingest-store";
 import { ensureVault } from "@/lib/prime-radiant/vault";
+import { readWriterItems } from "@/lib/prime-radiant/writer";
 
 vi.setConfig({ testTimeout: 60_000, hookTimeout: 30_000 });
 
@@ -48,9 +51,7 @@ function allowanceRefusal(code: string, message: string, headers: Record<string,
 
 const WEEKLY = () => allowanceRefusal("weekly_limit_exceeded", "Weekly token allowance used up. Enough frees up in 2d 5h.", { "retry-after": "30" });
 const BURST = () => allowanceRefusal("burst_limit_exceeded", "Short-term burst limit reached.");
-const BUSY = () => new Response(JSON.stringify({ error: { message: "Too many requests" } }), { status: 429, headers: { "retry-after": "30" } });
 
-const req = { system: "sys", user: "user", maxTokens: 100 };
 const noSleep = { sleep: async () => undefined };
 
 function clientAnswering(answer: () => Response) {
@@ -58,50 +59,27 @@ function clientAnswering(answer: () => Response) {
   return { client: createClawboxAiFlashClient({ fetchImpl: fetchImpl as unknown as typeof fetch }), fetchImpl };
 }
 
-describe("the Flash client meeting a spent allowance", () => {
-  it("names a spent weekly allowance as an `allowance` refusal with its frees-up instant, not a busy proxy", async () => {
-    const { client } = clientAnswering(WEEKLY);
-    const err = await client.complete(req).then(() => null, (e: unknown) => e);
-    expect(err).toBeInstanceOf(FlashCallError);
-    const e = err as FlashCallError;
-    expect(e).toMatchObject({ kind: "allowance", status: 429 });
-    expect(e.retryable).toBe(false);
-    expect(e.allowance).toEqual({ kind: "weekly", resetAt: RESET, message: "Weekly token allowance used up. Enough frees up in 2d 5h." });
-    expect(e.message).toMatch(/weekly allowance is used up/i);
-  });
-
-  it("names the 5-hour burst ceiling the same way", async () => {
-    const { client } = clientAnswering(BURST);
-    const e = (await client.complete(req).then(() => null, (x: unknown) => x)) as FlashCallError;
-    expect(e).toMatchObject({ kind: "allowance", allowance: { kind: "burst", resetAt: RESET } });
-    expect(e.message).toMatch(/burst limit/i);
-  });
-
-  it("keeps a 429 that names no allowance a retryable busy proxy, Retry-After and all", async () => {
-    const { client } = clientAnswering(BUSY);
-    const e = (await client.complete(req).then(() => null, (x: unknown) => x)) as FlashCallError;
-    expect(e).toMatchObject({ kind: "rate_limited", status: 429, retryAfterMs: 30_000, allowance: null });
-    expect(e.retryable).toBe(true);
-  });
-
-  it("reads no more of a 429's body than a refusal needs", async () => {
-    // A megabyte of something else, the allowance code past the read: still just busy.
-    const huge = () => new Response("x".repeat(1_000_000) + "weekly_limit_exceeded", { status: 429 });
-    const { client } = clientAnswering(huge);
-    const e = (await client.complete(req).then(() => null, (x: unknown) => x)) as FlashCallError;
-    expect(e.kind).toBe("rate_limited");
-  });
-
-  it("sends a spent allowance once — retries are for a busy proxy, which still gets all four", async () => {
-    const spent = clientAnswering(WEEKLY);
-    await expect(completeWithRetry(spent.client, req, noSleep)).rejects.toMatchObject({ kind: "allowance" });
-    expect(spent.fetchImpl).toHaveBeenCalledTimes(1);
-
-    const busy = clientAnswering(BUSY);
-    await expect(completeWithRetry(busy.client, req, noSleep)).rejects.toMatchObject({ kind: "rate_limited" });
-    expect(busy.fetchImpl).toHaveBeenCalledTimes(4);
-  });
-});
+/** A writer that makes one page per document: the run after the allowance freed up. */
+function writingClient(): FlashClient {
+  return {
+    model: "deepseek-v4-flash",
+    async complete(request) {
+      const items = readWriterItems(request.user) ?? [];
+      const cards = items.map((it) => ({
+        i: it.i,
+        useful: true,
+        type: "concept",
+        title: `Acme ${path.basename(it.path).replace(/\.\w+$/, "")}`,
+        domain: "acme-sales",
+        summary: "A synthetic Acme document.",
+        facts: [{ fact: it.text.trim().slice(0, 200), confidence: 0.7 }],
+        sensitivity: "internal",
+        confidence: 0.7,
+      }));
+      return { text: JSON.stringify(cards), model: "deepseek-v4-flash", usage: { promptTokens: 100, completionTokens: 50, cacheHitTokens: 0 } };
+    },
+  };
+}
 
 // ── over a real vault ─────────────────────────────────────────────────────
 
@@ -136,19 +114,56 @@ afterAll(() => {
 });
 
 describe("an import meeting a spent allowance", () => {
-  it("stops at the first refusal, says so, and leaves every document to retry once it frees up", async () => {
+  it("stops at the one refused call, says when it frees up, and leaves every document queued — never a dead letter", async () => {
     for (let i = 0; i < 6; i++) fs.writeFileSync(path.join(docs, `f${i}.md`), `Doc ${i} about Acme.`);
     const { client, fetchImpl } = clientAnswering(WEEKLY);
     const started = await startIngest({ kind: "folders", folders: [docs] }, { vault, client, retry: noSleep, batchSize: 1, parallel: 1 });
     await ingestFinished(started.id);
     const job = getIngestJob(started.id, vault)!;
     expect(fetchImpl).toHaveBeenCalledTimes(1);
-    expect(job.status).toBe("failed");
-    expect(job.error).toMatch(/weekly allowance is used up/i);
-    expect(job.error).toMatch(/retried once it frees up/i);
-    expect(job.failed).toBe(6);
-    const files = readFiles(vault, job.id);
-    expect(files.every((f) => f.status === "failed" && /allowance/i.test(f.error ?? ""))).toBe(true);
+    expect(job).toMatchObject({ status: "interrupted", done: 0, failed: 0, deadLetter: 0, queued: 6, allowance: { kind: "weekly", resetAt: RESET } });
+    expect(job.error).toMatch(/^ClawBox AI allowance spent, frees up at .+\. The documents not written yet wait for the next run of these folders, or Retry, once it frees up\.$/);
+    expect(job.notes.join(" ")).toMatch(/6 document\(s\) wait for the ClawBox AI allowance/);
+    expect(readFiles(vault, job.id).map((f) => [f.status, f.error])).toEqual(new Array(6).fill(["pending", "allowance_spent"]));
+    expect(readDeadLetter(vault, job.id)).toEqual([]);
+    // From the database too, once the job is no longer held in memory.
+    expect(readJob(vault, job.id)).toMatchObject({ status: "interrupted", queued: 6, deadLetter: 0, failed: 0 });
+
+    // Once it frees up, the next run of the same folders writes them all.
+    const next = await startIngest({ kind: "folders", folders: [docs] }, { vault, client: writingClient(), retry: noSleep, batchSize: 3, parallel: 1 });
+    await ingestFinished(next.id);
+    expect(getIngestJob(next.id, vault)).toMatchObject({ status: "done", done: 6, failed: 0, queued: 0 });
+  });
+
+  it("stops on a spent burst ceiling the same way; Retry takes the queue over, once", async () => {
+    for (let i = 0; i < 4; i++) fs.writeFileSync(path.join(docs, `b${i}.md`), `Burst doc ${i} about Acme.`);
+    const { client, fetchImpl } = clientAnswering(BURST);
+    const started = await startIngest({ kind: "folders", folders: [docs] }, { vault, client, retry: noSleep, batchSize: 2, parallel: 1 });
+    await ingestFinished(started.id);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(getIngestJob(started.id, vault)).toMatchObject({ status: "interrupted", failed: 0, queued: 4, allowance: { kind: "burst" } });
+
+    const retried = await startIngest({ kind: "retry", retryOf: started.id }, { vault, client: writingClient(), retry: noSleep, parallel: 1 });
+    await ingestFinished(retried.id);
+    expect(getIngestJob(retried.id, vault)).toMatchObject({ kind: "retry", total: 4, done: 4, failed: 0, deadLetter: 0, queued: 0 });
+    expect(readJob(vault, started.id)).toMatchObject({ queued: 0, deadLetter: 0 });
+    await expect(startIngest({ kind: "retry", retryOf: started.id }, { vault, client: writingClient() })).rejects.toBeInstanceOf(NothingToRetryError);
+  });
+
+  it("keeps a dropped batch's queued files past the drop, so Retry can still read them", async () => {
+    const drop = path.join(root, "drop");
+    fs.mkdirSync(drop, { recursive: true });
+    for (let i = 0; i < 3; i++) fs.writeFileSync(path.join(drop, `d${i}.md`), `Dropped doc ${i} about Acme.`);
+    const { client, fetchImpl } = clientAnswering(WEEKLY);
+    const started = await startIngest({ kind: "upload", dir: drop, batch: "b-0001" }, { vault, client, retry: noSleep, batchSize: 3, parallel: 1 });
+    await ingestFinished(started.id);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fs.existsSync(drop)).toBe(false);
+    expect(getIngestJob(started.id, vault)).toMatchObject({ status: "interrupted", failed: 0, queued: 3 });
+
+    const retried = await startIngest({ kind: "retry", retryOf: started.id }, { vault, client: writingClient(), retry: noSleep, parallel: 1 });
+    await ingestFinished(retried.id);
+    expect(getIngestJob(retried.id, vault)).toMatchObject({ done: 3, failed: 0 });
   });
 });
 
