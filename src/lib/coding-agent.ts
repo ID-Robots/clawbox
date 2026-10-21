@@ -4844,6 +4844,13 @@ interface LiveRun {
    */
   openSubagents: Map<string, ActiveSubagent>;
   /**
+   * Helpers whose task_notification came back with no model turn after it: the
+   * CLI had their result, the model never acted on it. Emptied by the main
+   * loop's next assistant event; what is in it when the process ends counts
+   * as left behind, with `openSubagents` (see takeHelpersLeftBehind).
+   */
+  helpersUnseen: ActiveSubagent[];
+  /**
    * The API message billed last. The CLI streams one assistant event per
    * content block of a message, every one carrying the message's full usage
    * (measured on 2.1.259: thinking block, then the text or tool_use block,
@@ -4987,6 +4994,8 @@ interface RunStore {
   anthropicResume?: Promise<string[]>;
   /** How many times each run was carried on after a refused credential — see MAX_AUTH_SWITCHES. */
   anthropicAuthRetries?: Map<string, number>;
+  /** Run id → the helpers it left behind, from `finishRun` to `enforceDeliverable` — see takeHelpersLeftBehind. */
+  helpersLeftBehind?: Map<string, string[]>;
   /** The owner's history setting as last read — see rememberHistoryPolicy. */
   historyPolicy: HistoryPolicy | null;
   /** The run queue's pass in flight, and whether a slot freed while it ran — see pumpRunQueue. */
@@ -5161,6 +5170,7 @@ function detachedState(run: CodingRun, tools: SpawnTools, lostToRestart: boolean
     streamInputRefused: false,
     lostToRestart,
     openSubagents: new Map<string, ActiveSubagent>(),
+    helpersUnseen: [],
     billedMessageIds: new Set<string>(),
     outputBilledInSegment: 0,
     helperBilled: new Map<string, number>(),
@@ -6024,8 +6034,10 @@ const HEADLESS_BRIEF_TEMPLATE = [
   // The -p mechanics, measured on this box (2026-09-03): a helper is launched
   // in the background, the model's turn ends, and the CLI restarts the same
   // session with each result. Left unsaid, the model spent its steps asking
-  // itself how to wait.
-  "Sub-agents and workflows run in the background: launch independent ones together and keep working while they run; when nothing is left but waiting, end your turn with one line saying what is still out — you are restarted with each result as it arrives. Never poll for them, and never read their transcripts or session files.",
+  // itself how to wait. "Usually": on 2026-10-20 a box's CLI exited instead,
+  // and a run that ends before it used a result is not finished (F-N1, see
+  // takeHelpersLeftBehind).
+  "Sub-agents and workflows run in the background: launch independent ones together and keep working while they run; when nothing is left but waiting, end your turn with one line saying what is still out — you are usually restarted with each result as it arrives, but a run that ends before you have used a result is not finished. Never poll for them, and never read their transcripts or session files.",
   "Verify your work where you can (run the build or the tests you have).",
   "For live web verification, start your app as a background child in this working folder and use browser_open on http://127.0.0.1:PORT (an unprivileged port). Only a listener owned by this run is allowed; other local services stay blocked. `node \"$CLAWBOX_PREVIEW\" --ttl 900` does this for you when the project has no server of its own — it builds, serves the folder on an ephemeral loopback port and prints PREVIEW_PID and PREVIEW_URL. Verify the real API-backed UI, not a static shim. Stop test servers when finished; Team workers have their remaining process group cleaned up automatically.",
   "The clawbox browser tools drive this device's own Chromium. You cannot see images — browser_view_local, browser_open and browser_screenshot save a screenshot into the run's evidence folder and answer with a written description of it; the interaction tools (click, type, keypress, scroll) answer briefly without one. When you build something with a visible result, open its live app with browser_open, or use browser_view_local for a standalone HTML file and read the description of what actually renders before you report done.",
@@ -6076,7 +6088,7 @@ const LEAN_BRIEF_HEAD = [
 ];
 
 const LEAN_BRIEF_MIDDLE = [
-  "Helpers run in the background: when only waiting is left, end your turn with one line on what is out — you are restarted with each result. Never poll them or read their transcripts.",
+  "Helpers run in the background: when only waiting is left, end your turn with one line on what is out — you are usually restarted with each result, but a run that ends before you use one is not finished. Never poll them or read their transcripts.",
 ];
 
 /** The lean brief's browser and visual-verification block — a visual run's only. */
@@ -7882,11 +7894,15 @@ function handleEvent(run: CodingRun, state: LiveRun, event: StreamEvent): void {
     const id = typeof event.tool_use_id === "string" ? event.tool_use_id : "";
     if (!id) return;
     billWorkflowProgress(run, state, id, event.usage);
-    closeSubagent(run, state, id);
+    const back = closeSubagent(run, state, id);
+    if (back) state.helpersUnseen.push(back);
     return;
   }
 
   if (event.type === "assistant") {
+    // The main loop is answering again, so whatever came back before this is in
+    // front of the model. A sub-agent's own turns carry a parent and say nothing.
+    if (!event.parent_tool_use_id) state.helpersUnseen = [];
     // A model answered — unless the CLI wrote this message itself to carry an
     // API error, which is exactly the shape of a harness that never got one to
     // answer. First, ahead of the billing below and its early return.
@@ -9714,7 +9730,8 @@ function deliverableGateApplies(run: CodingRun): boolean {
   if (run.status !== "completed") return false;
   if (run.reviewOf !== null || run.reviewLoopOf !== null) return false;
   if (run.readOnly || run.team) return false;
-  return deliverableFor(run) !== null;
+  // A run that left a helper behind is judged too, deliverable or not.
+  return deliverableFor(run) !== null || (store.helpersLeftBehind?.has(run.id) ?? false);
 }
 
 /**
@@ -9735,6 +9752,38 @@ function deliverableGateApplies(run: CodingRun): boolean {
 function wasGated(run: CodingRun): boolean {
   // `none` was never gated: `finishRun` announced it, so the gate must not again.
   return (run.deliverable !== null && run.deliverable.kind !== "none") || run.attempts.length > 0;
+}
+
+/**
+ * The helpers a run left behind, taken once by the gate: still out when the
+ * process ended, or back with no model turn after them (F-N1).
+ *
+ * The brief tells a run to end its turn while helpers work, because Claude Code
+ * restarts the session with each result — usually. On 2026-10-20 a box's CLI
+ * exited 0 about ten minutes after such a turn, with no turn on the result, and
+ * nine fix runs settled `completed` with their tester's verdict never read.
+ * `finishRun` records them for the runs the gate judges; it cannot decide
+ * there, because the review pass and the pull request run only on `completed`.
+ */
+function takeHelpersLeftBehind(run: CodingRun): string[] | null {
+  const left = store.helpersLeftBehind?.get(run.id) ?? null;
+  store.helpersLeftBehind?.delete(run.id);
+  return left;
+}
+
+function leftBehindText(helpers: string[]): string {
+  const which = helpers.length === 1 ? "its helper" : "its helpers";
+  return `It ended before it used the result of ${which} ${helpers.join(", ")}.`.slice(0, MAX_MISSING_CHARS);
+}
+
+/** The ending for a run that left a helper behind with no attempt left to spend on it. */
+function failLeftBehind(run: CodingRun, why: string): void {
+  run.status = "failed";
+  run.resumable = true;
+  run.error = `${why} Resume it to carry on in the same session.`.slice(0, MAX_ERROR_CHARS);
+  pushProgress(run, RUNNER_STEP.finished(run.status));
+  persist(true);
+  announceGatedRun(run);
 }
 
 /** Open an attempt entry, for a run that has a deliverable to clear. */
@@ -9897,8 +9946,18 @@ async function enforceDeliverable(finished: CodingRun, ended: "stop" | "pause" |
   if (origin.reviewOf !== null || origin.reviewLoopOf !== null) return;
   if (origin.readOnly || origin.team) return;
 
+  const leftBehind = takeHelpersLeftBehind(origin);
   const deliverable = deliverableFor(origin);
   if (!deliverable) {
+    // No deliverable to send it back in for: `finishRun` held the notice for
+    // the helper alone, so the run ends here, resumable. Not over the owner's
+    // own stop of the review pass.
+    if (leftBehind && ended === null) {
+      const why = leftBehindText(leftBehind);
+      if (wasGated(origin)) closeAttempt(origin, why);
+      failLeftBehind(origin, why);
+      return;
+    }
     // The bar is GONE since the run settled. One way in: the deliverable was
     // the one the auto-PR switch implied, and `maybeOpenPullRequest` has just
     // recorded `pr.phase === "failed"` — the box's own flow could not run (no
@@ -9919,6 +9978,9 @@ async function enforceDeliverable(finished: CodingRun, ended: "stop" | "pause" |
     if (wasGated(origin)) {
       closeAttempt(origin, null);
       persist(true);
+      announceGatedRun(origin);
+    } else if (leftBehind) {
+      // Held for a helper, and the owner's stop of the review pass closed the question.
       announceGatedRun(origin);
     }
     return;
@@ -9941,22 +10003,28 @@ async function enforceDeliverable(finished: CodingRun, ended: "stop" | "pause" |
       deliverable.kind === "command" ? await deliverableSandbox(origin) : null,
     );
     origin.deliverableCheck = verdict;
-    closeAttempt(origin, verdict.ok ? null : verdict.missing);
+    // The deliverable can be there and the run still not done: a helper's
+    // result never used is one more thing to go back in for.
+    const unused = verdict.ok && leftBehind ? leftBehindText(leftBehind) : null;
+    closeAttempt(origin, verdict.ok ? unused : verdict.missing);
 
-    if (verdict.ok) {
+    if (verdict.ok && !unused) {
       pushProgress(origin, RUNNER_STEP.deliverableMet);
       persist(true);
       announceGatedRun(origin);
       return;
     }
 
-    pushProgress(origin, RUNNER_STEP.deliverableMissing(verdict.missing ?? ""));
+    const missing = unused ?? verdict.missing ?? "";
+    pushProgress(origin, RUNNER_STEP.deliverableMissing(missing));
     const made = origin.attempts.length;
     if (made >= origin.completionAttempts) {
-      giveUp(origin, verdict.missing ?? "", made);
+      // `gave_up` says the deliverable is not there, and here it is.
+      if (unused) failLeftBehind(origin, unused);
+      else giveUp(origin, missing, made);
       return;
     }
-    await startCompletionAttempt(origin, deliverable, verdict.missing ?? "", made + 1);
+    await startCompletionAttempt(origin, deliverable, missing, made + 1);
   } catch (err) {
     // The check itself broke. NOT a pass: that is the whole point of the
     // feature. The run is recorded as not having got there, with what went
@@ -11227,6 +11295,10 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
   // and the inbox goes — a respawn makes a fresh one.
   settleRunInbox(run, state);
   removeRunInbox(run.id);
+  // Read before the clear below, and scrubbed while the run's secrets are still
+  // known: a helper's description is the model's own words.
+  const leftBehind = [...state.openSubagents.values(), ...state.helpersUnseen]
+    .map((h) => redactForRun(run.id, h.description ? `${h.type} (${h.description})` : h.type));
   // The run's process tree is gone, so nothing it spawned is still working —
   // whatever the stream did or did not say about each sub-agent.
   state.openSubagents.clear();
@@ -11414,6 +11486,19 @@ function finishRun(run: CodingRun, state: LiveRun, exitCode: number | null): voi
         }
       }
     }
+  }
+  // `completed` with a helper the model never got to use: handed to the gate,
+  // which decides what the run is once the review pass and the pull request
+  // have had their turn (see takeHelpersLeftBehind). Not after the owner's own
+  // stop, and not for the runs the gate never judges.
+  const helpersLeft = store.helpersLeftBehind ?? (store.helpersLeftBehind = new Map<string, string[]>());
+  if (
+    run.status === "completed" && state.endRequested === null && leftBehind.length > 0
+    && run.reviewOf === null && run.reviewLoopOf === null && !run.readOnly && !run.team
+  ) {
+    helpersLeft.set(run.id, leftBehind);
+  } else {
+    helpersLeft.delete(run.id);
   }
   // Only a paused run has a pause to explain. A pause that raced the final
   // message and settled as "completed" instead must not keep a reason for a
@@ -12008,6 +12093,7 @@ function spawnRun(
     streamInputRefused: false,
     lostToRestart: false,
     openSubagents: new Map<string, ActiveSubagent>(),
+    helpersUnseen: [],
     billedMessageIds: new Set<string>(),
     outputBilledInSegment: 0,
     helperBilled: new Map<string, number>(),

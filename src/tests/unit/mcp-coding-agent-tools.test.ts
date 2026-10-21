@@ -725,6 +725,26 @@ describe("the deliverable", () => {
     expect(out.text).toMatch(/which is why this counts as finished/);
   });
 
+  it("does not call a run finished because its deliverable is there when the run is not (F-N1)", async () => {
+    apiGet.mockResolvedValue({
+      run: {
+        ...RUN,
+        status: "failed",
+        resumable: true,
+        error: "It ended before it used the result of its helper tester (run the full suite). Resume it to carry on in the same session.",
+        deliverable: { kind: "paths", paths: ["app.js"] },
+        deliverableCheck: { ok: true, missing: null, checkedAt: Date.now() },
+        attempts: [{ startedAt: 1, endedAt: 2, reason: "It ended before it used the result of its helper tester (run the full suite)." }],
+        completionAttempts: 1,
+      },
+    });
+    const out = await harness().call("coding_agent_status", { run_id: "run-k3x9q2ab" });
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    expect(out.text).toContain("[deliverable] It left behind the file app.js");
+    expect(out.text).not.toMatch(/counts as finished/);
+  });
+
   it("says what is missing on a run that gave up, and NOT to start a fresh one", async () => {
     apiGet.mockResolvedValue({
       run: {
