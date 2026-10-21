@@ -709,6 +709,23 @@ describe("prime_radiant_map", () => {
     if (out.isError) return;
     expect(JSON.parse(out.text).unconnected).toEqual({ count: 1, pages: ["concepts/listed.md"] });
   });
+
+  it("ranks the most connected pages by their links, not by shared sources and hints", async () => {
+    api.mockResolvedValue({
+      revision: SHA,
+      nodes: [
+        { id: "b.md", title: "B", degree: 8, links: 2, inbound: 2 },
+        { id: "a.md", title: "A", degree: 3, links: 3, inbound: 1 },
+      ],
+      edges: [],
+    });
+    const out = await harness().call("prime_radiant_map", {});
+    expect(out.isError).toBe(false);
+    if (out.isError) return;
+    const top = JSON.parse(out.text).most_connected;
+    expect(top[0]).toMatchObject({ path: "a.md", links: 3 });
+    expect(top.map((n: { path: string }) => n.path)).toEqual(["a.md", "b.md"]);
+  });
 });
 
 describe("prime_radiant_status", () => {
