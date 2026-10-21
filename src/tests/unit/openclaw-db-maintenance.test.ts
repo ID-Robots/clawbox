@@ -102,7 +102,7 @@ function calledWith(): string[] {
 }
 
 function env(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
-  return { PATH: `${binDir}:/usr/bin:/bin`, OC_CALLS: calls, OPENCLAW_STATE_DIR: stateDir, HOME: root, ...extra };
+  return { NODE_ENV: "test", PATH: `${binDir}:/usr/bin:/bin`, OC_CALLS: calls, OPENCLAW_STATE_DIR: stateDir, HOME: root, ...extra };
 }
 
 function run(cmd: string, args: string[], extra: Record<string, string> = {}) {
