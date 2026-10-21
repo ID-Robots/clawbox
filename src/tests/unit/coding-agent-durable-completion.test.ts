@@ -36,7 +36,7 @@ vi.setConfig({ testTimeout: 40_000, hookTimeout: 40_000 });
 // Typed through its real signature, so the assertions below can read the record
 // it was handed: a bare `vi.fn(async () => undefined)` has an empty argument
 // tuple and `mock.calls[0][0]` does not compile.
-const announceCodingAgent = vi.hoisted(() => vi.fn(async (run: { status: string }) => { void run; }));
+const announceCodingAgent = vi.hoisted(() => vi.fn(async (run: { id: string; status: string }) => { void run; }));
 vi.mock("@/lib/coding-agent-notify", () => ({ announceCodingAgent }));
 vi.mock("@/lib/mem-available", () => ({ memAvailableMb: vi.fn(async () => 8000) }));
 vi.mock("@/lib/project-icon", async (importOriginal) => ({
@@ -601,14 +601,14 @@ describe("a run whose caller asked for no deliverable", () => {
     const next = await lib.startRun({ task: "Finish the verdict.", resumeRunId: first.id, source: "agent" });
     await vi.waitFor(() => {
       expect(lib.getRun(next.id)?.pr?.phase).toBe("blocked");
-      expect(announceCodingAgent.mock.calls.some(([r]) => (r as { id: string }).id === next.id)).toBe(true);
+      expect(announceCodingAgent.mock.calls.some(([r]) => r.id === next.id)).toBe(true);
     }, { timeout: 25_000, interval: 50 });
     const run = lib.getRun(next.id)!;
 
     expect(run.status).toBe("completed");
     expect(run.deliverable).toEqual({ kind: "none" });
     expect(run.attempts).toEqual([]);
-    expect(announceCodingAgent.mock.calls.filter(([r]) => (r as { id: string }).id === next.id)).toHaveLength(1);
+    expect(announceCodingAgent.mock.calls.filter(([r]) => r.id === next.id)).toHaveLength(1);
   });
 
   it("control: without it, a run that commits nothing still gives up", async () => {
