@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { APP_API_EXPOSED_HEADERS, APP_API_PREFLIGHT_MAX_AGE_S, APP_API_PREFLIGHT_METHODS, APP_PROXY_CSP, appProxyAllowOrigin, isAppApiPath, resolveAppProxyTarget } from "@/lib/app-proxy";
+import { APP_API_PREFLIGHT_MAX_AGE_S, APP_API_PREFLIGHT_METHODS, APP_PROXY_CSP, appProxyAllowOrigin, isAppApiPath, mergeExposedHeaders, resolveAppProxyTarget } from "@/lib/app-proxy";
 
 export const dynamic = "force-dynamic";
 
@@ -135,12 +135,18 @@ async function proxy(request: NextRequest, params: Promise<{ id: string; path?: 
   const allowOrigin = appProxyAllowOrigin(requestOrigin, out.get("access-control-allow-origin"), out.get("content-type"), apiPath);
   if (allowOrigin) {
     out.set("access-control-allow-origin", allowOrigin);
-    // The app's API: a media player reads Content-Range off a 206, a list
-    // its paging headers — none of which a CORS response exposes by default.
-    if (apiPath && !out.has("access-control-expose-headers")) out.set("access-control-expose-headers", APP_API_EXPOSED_HEADERS);
     const vary = out.get("vary");
     if (!vary) out.set("vary", "Origin");
     else if (!/(^|,)\s*origin\s*(,|$)/i.test(vary)) out.set("vary", `${vary}, Origin`);
+  }
+  // The app's API: a media player reads Content-Range off a 206, a list its
+  // paging headers — none of which a CORS response exposes by default.
+  // Whenever the final answer lets the requesting origin read it (our grant
+  // or the app's own), those headers are exposed too, merged into any list
+  // the app sent rather than replacing it or being skipped because of it.
+  const finalAllow = out.get("access-control-allow-origin")?.trim();
+  if (apiPath && requestOrigin && (finalAllow === "*" || finalAllow === requestOrigin)) {
+    out.set("access-control-expose-headers", mergeExposedHeaders(out.get("access-control-expose-headers")));
   }
   return new NextResponse(method === "HEAD" ? null : upstream.body, { status: upstream.status, statusText: upstream.statusText, headers: out });
 }

@@ -152,6 +152,21 @@ export function isAppApiPath(rest: string): boolean {
 
 /** The headers of an API answer a sandboxed document may read: what a media player needs for range requests, and what a paged list needs. */
 export const APP_API_EXPOSED_HEADERS = "Content-Range, Content-Length, Accept-Ranges, Content-Type, ETag, Last-Modified, Location, Link, X-Total-Count";
+
+/**
+ * The app's own `Access-Control-Expose-Headers` with APP_API_EXPOSED_HEADERS
+ * added: its entries kept, ours appended where missing (names compare
+ * case-insensitively), a `*` left as it is since it already exposes them all.
+ */
+export function mergeExposedHeaders(existing: string | null): string {
+  const have = (existing ?? "").split(",").map((h) => h.trim()).filter(Boolean);
+  if (have.includes("*")) return have.join(", ");
+  const seen = new Set(have.map((h) => h.toLowerCase()));
+  for (const h of APP_API_EXPOSED_HEADERS.split(",").map((x) => x.trim())) {
+    if (!seen.has(h.toLowerCase())) have.push(h);
+  }
+  return have.join(", ");
+}
 /** The methods and headers a preflight for the app's API is answered with. */
 export const APP_API_PREFLIGHT_METHODS = "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS";
 export const APP_API_PREFLIGHT_MAX_AGE_S = 600;

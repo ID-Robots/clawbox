@@ -221,6 +221,17 @@ describe("the app proxy", () => {
     // An app that sets its own policy keeps it.
     handler = (_r, res) => { res.writeHead(200, { "content-type": "application/json", "access-control-allow-origin": "https://partner.example" }); res.end("{}"); };
     expect((await routes.GET(req("/apps/site/api/notes", { headers: { origin: "null" } }), ctx("site", ["api", "notes"]))).headers.get("access-control-allow-origin")).toBe("https://partner.example");
+    // …and the range and paging headers are readable whenever the final answer
+    // admits the caller, merged into whatever the app chose to expose.
+    handler = (_r, res) => { res.writeHead(206, { "content-type": "audio/mpeg", "content-range": "bytes 0-3/4", "access-control-allow-origin": "*" }); res.end("abcd"); };
+    expect((await routes.GET(req("/apps/site/api/track/1", { headers: { origin: "null" } }), ctx("site", ["api", "track", "1"]))).headers.get("access-control-expose-headers")).toContain("Content-Range");
+    handler = (_r, res) => { res.writeHead(200, { "content-type": "application/json", "access-control-allow-origin": "null", "access-control-expose-headers": "X-Request-Id" }); res.end("{}"); };
+    const merged = (await routes.GET(req("/apps/site/api/notes", { headers: { origin: "null" } }), ctx("site", ["api", "notes"]))).headers.get("access-control-expose-headers") ?? "";
+    expect(merged.split(", ")[0]).toBe("X-Request-Id");
+    expect(merged).toContain("Content-Range");
+    // An app answer that does not admit the caller exposes nothing extra.
+    handler = (_r, res) => { res.writeHead(200, { "content-type": "application/json", "access-control-allow-origin": "https://partner.example" }); res.end("{}"); };
+    expect((await routes.GET(req("/apps/site/api/notes", { headers: { origin: "null" } }), ctx("site", ["api", "notes"]))).headers.get("access-control-expose-headers")).toBeNull();
 
     // A JSON POST preflights; the proxy answers it so a server that never
     // heard of OPTIONS still works from inside the frame. Nothing reaches it.

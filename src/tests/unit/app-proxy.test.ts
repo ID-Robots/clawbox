@@ -298,3 +298,15 @@ describe("registerServerApp", () => {
     expect(lib.serverAppStubHtml("<b>&'\"", "x")).toContain("<title>&lt;b&gt;&amp;&#39;&quot;</title>");
   });
 });
+
+describe("mergeExposedHeaders", () => {
+  it("adds the API's headers to the app's own list, keeping its entries and order, without duplicates", () => {
+    expect(lib.mergeExposedHeaders(null)).toBe(lib.APP_API_EXPOSED_HEADERS);
+    expect(lib.mergeExposedHeaders("")).toBe(lib.APP_API_EXPOSED_HEADERS);
+    const merged = lib.mergeExposedHeaders("X-Request-Id, content-range");
+    expect(merged.startsWith("X-Request-Id, content-range, ")).toBe(true);
+    expect(merged.match(/content-range/gi)).toHaveLength(1);
+    expect(merged).toContain("X-Total-Count");
+    expect(lib.mergeExposedHeaders("*")).toBe("*");
+  });
+});
