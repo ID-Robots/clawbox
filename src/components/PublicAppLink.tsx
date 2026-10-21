@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useT } from "@/lib/i18n";
 import { useModalDialog } from "@/hooks/useModalDialog";
+import { opensAppApi, type PublicLinkApiAccess } from "@/lib/public-link-access";
 
 /**
  * The desktop's side of public app links (TASK-1478): the context-menu rows
@@ -29,12 +30,6 @@ export interface PublicLinkInfo {
   tokenMasked?: boolean;
 }
 
-/** Does a stored prefix open the app's own /api tree? The serving side matches by prefix, so "/" and "/api/" do. */
-function opensAppApi(prefix: string): boolean {
-  const p = prefix.replace(/\/+$/, "");
-  return p === "" || p === "/api";
-}
-
 /**
  * The address this viewer can hand on, or null when there is none. The owner's
  * URL carries the token; anyone else is answered it masked, and a masked token
@@ -55,8 +50,7 @@ export function shareableLinkUrl(link: Pick<PublicLinkInfo, "url" | "tokenMasked
   }
 }
 
-/** What visitors may do with the app's own `/api`: everything, read it (the default), or nothing. */
-export type PublicLinkApiAccess = "full" | "read" | "none";
+export type { PublicLinkApiAccess };
 
 /** Why the server refused: its message, and its code when it gave one. */
 export interface PublicLinkFailure {

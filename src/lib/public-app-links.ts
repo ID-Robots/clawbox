@@ -37,6 +37,7 @@ import { APP_ID_RE, webappPath } from "@/lib/code-projects";
 import { isReservedAppId } from "@/lib/webapp-registry";
 import { createSerialLock } from "@/lib/serial-lock";
 import { PASSWORD_CONTROL_CHAR_RE, verifyPassword } from "@/lib/auth";
+import { API_ACCESS_VALUES, DEFAULT_API_PREFIX, opensAppApi, type PublicLinkApiAccess } from "@/lib/public-link-access";
 
 export const MAX_LINKS = 5;
 export const MIN_TTL_MINUTES = 1;
@@ -50,15 +51,7 @@ const SCRYPT = { N: 32768, r: 8, p: 3, keyLength: 32, saltLength: 16 } as const;
 
 export type PublicLinkMode = "temporary" | "permanent";
 
-/**
- * What visitors may do with the app's own `/api` tree: use it (`full`, the
- * default — a new link lists `/api`), read it (`read`: GET/HEAD only), or
- * nothing beyond the prefixes the owner typed (`none`).
- */
-export type PublicLinkApiAccess = "full" | "read" | "none";
-export const API_ACCESS_VALUES: readonly PublicLinkApiAccess[] = ["full", "read", "none"];
-/** The prefix a new link opens by default: the app's own API, under its base path. */
-export const DEFAULT_API_PREFIX = "/api";
+export { API_ACCESS_VALUES, DEFAULT_API_PREFIX, opensAppApi, type PublicLinkApiAccess };
 
 export interface StoredPublicLink {
   id: string;
@@ -156,12 +149,6 @@ export function parseApiAccess(input: unknown): PublicLinkApiAccess {
   if (input === undefined || input === null) return "read";
   if (typeof input === "string" && (API_ACCESS_VALUES as readonly string[]).includes(input)) return input as PublicLinkApiAccess;
   throw new PublicLinkError("apiAccess must be full, read or none.", 400, "bad_api_access");
-}
-
-/** Does this prefix open the app's own /api tree? "/" opens everything, "/api/" is "/api". */
-export function opensAppApi(prefix: string): boolean {
-  const p = prefix.replace(/\/+$/, "");
-  return p === "" || p === DEFAULT_API_PREFIX;
 }
 
 /**
@@ -361,7 +348,7 @@ export interface CreatePublicLinkInput {
   ttlMinutes?: unknown;
   /** Extra prefixes below the app's base path, on top of what `apiAccess` opens. */
   apiAllow?: unknown;
-  /** `full` (default), `read` or `none` — see PublicLinkApiAccess. */
+  /** `read` (default), `full` or `none` — see PublicLinkApiAccess. */
   apiAccess?: unknown;
   /** A password for this link, or nothing for an open one. */
   password?: unknown;
