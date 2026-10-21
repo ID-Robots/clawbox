@@ -64,7 +64,7 @@ describe("chat-reasoning", () => {
     });
   });
 
-  describe("ClawBox AI legacy aliases serving Flash 4.1", () => {
+  describe("ClawBox AI legacy aliases serving DeepSeek V4 Flash", () => {
     const PRO = "deepseek/deepseek-v4-pro";
     const FLASH = "deepseek/deepseek-v4-flash";
 

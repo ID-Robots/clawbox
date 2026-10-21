@@ -89,7 +89,7 @@ describe("Hermes ClawBox AI chat model", () => {
     // ClawBox AI, and no read-only chip naming the model either. What the box
     // actually RUNS is asserted on the wire below, which is where it matters.
     await screen.findByLabelText(/^Chat provider:/);
-    expect(screen.queryByText("Flash 4.1")).toBeNull();
+    expect(screen.queryByText("DeepSeek V4 Flash")).toBeNull();
     expect(screen.queryByLabelText(/^Hermes model:/)).toBeNull();
     expect(screen.queryByText("Max Tier")).toBeNull();
 

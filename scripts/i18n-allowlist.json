@@ -9,6 +9,7 @@
     { "key": "ai.model", "locales": ["nl"], "reason": "\"Model\" is the Dutch word." },
     { "key": "ai.plan", "locales": ["es"], "reason": "\"Plan\" is the Spanish word." },
     { "key": "ai.planFeatureFlashModel", "locales": "*", "reason": "DeepSeek V4 Flash is a model name." },
+    { "key": "ai.planFeatureProModel", "locales": "*", "reason": "DeepSeek V4 Flash is a model name; it serves the Max plan too." },
     { "key": "app.chat", "locales": ["de", "es", "it", "nl"], "reason": "\"Chat\" is the everyday loanword in these languages." },
     { "key": "app.openclaw", "locales": "*", "reason": "OpenClaw is the product name." },
     { "key": "app.skills", "locales": ["de", "nl", "sv"], "reason": "\"Skills\" is the loanword these languages use for agent skills." },

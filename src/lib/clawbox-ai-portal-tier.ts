@@ -193,8 +193,9 @@ export function mapPortalAllowedModels(body: DeviceInfoResponse): string[] | nul
  * enum the UI badges already understand. Prefers the device-pair stamp
  * (`deviceTier`) when present; otherwise translates the user's plan
  * name (`tier`) to its corresponding device-tier. The local enum is
- * `"flash"` (Pro plan / V4 Flash model) and `"pro"` (Max plan / V4 Pro
- * model); Free / unpaid resolves to `null` (no paid badge rendered).
+ * `"flash"` (Pro plan / `deepseek-v4-flash` id) and `"pro"` (Max plan /
+ * `deepseek-v4-pro` id, served by the same V4 Flash model); Free / unpaid
+ * resolves to `null` (no paid badge rendered).
  *
  * @param body Parsed JSON from `/api/clawbox-ai/device-info`.
  * @returns The badge-facing tier, or `null` for Free.
