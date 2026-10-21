@@ -189,7 +189,7 @@ describe("publishing", () => {
 
   /** The serving side matches API paths by prefix, so "/" and "/api/" open the app's own /api as surely as "/api". */
   it("refuses a typed path that would open the app's own /api again on a link whose API is off", async () => {
-    for (const apiAllow of [["/"], ["/api"], ["/api/"], ["/upload", "/api//"]]) {
+    for (const apiAllow of [["/"], ["/api"], ["/api/"], ["/upload", "/api//"], ["/API"], ["/Api/"]]) {
       const res = await POST(req("POST", { appId: "notes", mode: "permanent", apiAccess: "none", apiAllow }));
       expect(res.status).toBe(400);
       expect((await res.json()).code).toBe("bad_api_allow");

@@ -14,8 +14,12 @@ export const API_ACCESS_VALUES: readonly PublicLinkApiAccess[] = ["full", "read"
 /** The prefix `full` and `read` open: the app's own API, under its base path. */
 export const DEFAULT_API_PREFIX = "/api";
 
-/** Does this prefix open the app's own /api tree? The serving side matches by prefix, so "/" opens everything and "/api/" is "/api". */
+/**
+ * Does this prefix open the app's own /api tree? The serving side matches by
+ * prefix, so "/" opens everything and "/api/" is "/api"; and it treats a path
+ * as the API whatever its case, so "/API" is "/api" too.
+ */
 export function opensAppApi(prefix: string): boolean {
   const p = prefix.replace(/\/+$/, "");
-  return p === "" || p === DEFAULT_API_PREFIX;
+  return p === "" || p.toLowerCase() === DEFAULT_API_PREFIX;
 }
