@@ -12928,7 +12928,7 @@ export async function startRun(input: StartRunInput): Promise<CodingRun> {
       source: input.source,
       status: "running",
       settings,
-      deliverable: requireDeliverable(input),
+      deliverable: startDeliverable(input, previous),
       reviewOf: typeof input.reviewOf === "string" ? input.reviewOf : null,
       reviewLoopOf: typeof input.reviewLoopOf === "string" ? input.reviewLoopOf : null,
       reviewRound: typeof input.reviewRound === "number" && input.reviewRound > 0 ? Math.floor(input.reviewRound) : null,
@@ -13237,6 +13237,24 @@ function requireDeliverable(input: StartRunInput): Deliverable | null {
   if (read === null) return null;
   if (!read.ok) throw new CodingAgentError("invalid", read.error);
   return read.deliverable;
+}
+
+/**
+ * The bar a new record is held to: the request's own, or — for a caller's own
+ * continuation that names none — the `none` of the run it continues.
+ *
+ * `none` says the TASK owes nothing, and a continuation carries on that task in
+ * the same session. Re-derived from the request alone, a refuter that ended
+ * `failed` over a helper it never used (whose way on is a continuation) fell
+ * back to the implied pull-request bar and ended `gave_up` over the nothing it
+ * commits on purpose. Only `none` carries: it removes a bar and adds none. Not
+ * for Fix CI, whose task IS to commit to the pull request, nor for the box's own
+ * follow-ups, which the gate never judges.
+ */
+function startDeliverable(input: StartRunInput, previous: CodingRun | null): Deliverable | null {
+  const asked = requireDeliverable(input);
+  if (asked !== null || previous?.deliverable?.kind !== "none") return asked;
+  return input.fixCi === true || isBoxWrittenTask(input) ? null : { kind: "none" };
 }
 
 /**
@@ -14140,8 +14158,8 @@ async function queueRun(input: StartRunInput): Promise<CodingRun> {
   let projectId: string | null;
   let inherited: { provider: CodingProvider; model: string | null } | null = null;
   let fixing: CodingRun | null = null;
+  const previous = resumeRunId ? loadRuns().find((r) => r.id === resumeRunId) ?? null : null;
   if (resumeRunId) {
-    const previous = loadRuns().find((r) => r.id === resumeRunId) ?? null;
     if (!previous) throw new CodingAgentError("not_found", "There is no coding run with that id to resume.");
     if (!previous.sessionId && input.freshSession !== true) {
       throw new CodingAgentError("invalid", "That run never started a Claude Code session, so it cannot be resumed. Start a new run instead.");
@@ -14158,7 +14176,7 @@ async function queueRun(input: StartRunInput): Promise<CodingRun> {
     ({ directory, projectId } = await resolveWorkingDirectory(input));
   }
   const settings = await applyProviderChoice(await readRunSettings(), input, inherited);
-  const run = newRunRecord({ task, directory, projectId, source: input.source, status: "queued", settings, deliverable: requireDeliverable(input) });
+  const run = newRunRecord({ task, directory, projectId, source: input.source, status: "queued", settings, deliverable: startDeliverable(input, previous) });
   // Claimed now, so the failure is not offered a second Fix CI while this one waits.
   if (fixing?.ci) fixing.ci = { ...fixing.ci, fixRunId: run.id };
   run.queued = {

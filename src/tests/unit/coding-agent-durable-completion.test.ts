@@ -586,6 +586,27 @@ describe("a run whose caller asked for no deliverable", () => {
     expect(stdinLog()).toHaveLength(1);
   });
 
+  it("carries `none` onto a continuation of that run that names no deliverable", async () => {
+    // The way on for a run that ended before it used a helper's result is a
+    // continuation (resumeRunId). Re-derived from that request alone, a refuter's
+    // second leg fell back to the implied pull-request bar and gave up.
+    const first = await lib.startRun({
+      task: "Refute the finding; change no files.", projectId: "site", source: "agent",
+      deliverable: { kind: "none" },
+    });
+    await settledForGood(first.id);
+    const next = await lib.startRun({ task: "Finish the verdict.", resumeRunId: first.id, source: "agent" });
+    await vi.waitFor(() => {
+      expect(announceCodingAgent.mock.calls.some(([r]) => (r as { id: string }).id === next.id)).toBe(true);
+    }, { timeout: 25_000, interval: 50 });
+    const run = lib.getRun(next.id)!;
+
+    expect(run.status).toBe("completed");
+    expect(run.deliverable).toEqual({ kind: "none" });
+    expect(run.attempts).toEqual([]);
+    expect(announceCodingAgent.mock.calls.filter(([r]) => (r as { id: string }).id === next.id)).toHaveLength(1);
+  });
+
   it("control: without it, a run that commits nothing still gives up", async () => {
     const started = await lib.startRun({ task: "Fix the bug.", projectId: "site", source: "agent" });
     const run = await settledForGood(started.id);
