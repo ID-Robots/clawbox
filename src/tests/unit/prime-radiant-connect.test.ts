@@ -128,6 +128,11 @@ describe("names and leaves", () => {
     expect(kept.has("Google Drive")).toBe(true);
     expect(kept.has("Northwind Depot")).toBe(true);
     expect(kept.has("Acme Widgets Ltd")).toBe(true);
+    // A street with no city is one where a punctuation mark ends it; a count before a name is no house number.
+    expect(candidateNames("Deliver to 77 Lakeview Road. Ask for Contoso Labs.").has("Lakeview Road")).toBe(false);
+    const counted = candidateNames("We moved 200 Google Drive files to Northwind Depot.");
+    expect(counted.has("Google Drive")).toBe(true);
+    expect(counted.has("Northwind Depot")).toBe(true);
   });
 
   it("creates no entity page for the street or city of an address many pages carry", async () => {

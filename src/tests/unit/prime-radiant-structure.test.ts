@@ -209,6 +209,8 @@ describe("record classification", () => {
 
   it("takes no postal address for a company, though its region code reads like a legal suffix", () => {
     expect(companyNames("Ship to 12 Maple Grove Drive Springfield AB T4N 1A1 for Hooli AB.")).toEqual(["Hooli AB"]);
+    // An amount before a company whose name ends in a street word is no house number.
+    expect(companyNames("Paid 1200 Acme Way Ltd for parts.")).toEqual(["Acme Way Ltd"]);
     const info = classifyRecord(
       "concepts/w.md",
       fm({ title: "Waybill WB-2026-004411 2026-09-03", claims: [claim("f/w/a", "Deliver to 77 Lakeview Road Red Rock AB T4N 1A1 by courier.")] }),
