@@ -1253,6 +1253,11 @@ def restore_database(db, backup, now, deadline):
     try:
         with open(backup["path"], "rb") as src, open(tmp, "wb") as dst:
             while True:
+                # The rate above is a plan; a slow card can miss it. A copy
+                # still running at the deadline is abandoned here, before the
+                # pre-start's own `timeout` kills it half-written.
+                if time.monotonic() > deadline - KILL_GRACE_S:
+                    raise TimeoutError("the copy outlived this start's budget")
                 chunk = src.read(8 * 1024 * 1024)
                 if not chunk:
                     break
@@ -1263,6 +1268,9 @@ def restore_database(db, backup, now, deadline):
         st = regular_file(path)
         if st:
             os.chmod(tmp, stat.S_IMODE(st.st_mode))
+    except TimeoutError:
+        remove_files([tmp])
+        return None, "no-time"
     except (OSError, ValueError) as exc:
         remove_files([tmp])
         warn("could not copy %s (%s: %s)" % (backup["path"], type(exc).__name__, exc))
@@ -1287,6 +1295,21 @@ def restore_database(db, backup, now, deadline):
         return None, "set-aside-failed"
     _fsync_dir(directory)
     return [src + suffix for src in moved], None
+
+
+def sweep_restoring(dbs):
+    """Copies on their way in that a killed start left half-written (power
+    lost, or a signal past the deadline). Only this guard's own names, and
+    never the only copy of anything: the backup they came from is untouched."""
+    for db in dbs:
+        directory, base = os.path.split(db["path"])
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            continue
+        stale = [os.path.join(directory, n) for n in names if n.startswith(base + RESTORING_MARK)]
+        if stale and remove_files(stale):
+            log("removed a half-written restore copy beside %s" % label(db))
 
 
 def restore_leg(guard, targets, now, deadline):
@@ -1339,6 +1362,7 @@ def cmd_start_guard(args):
     restarts = max(0, args.restarts)
     starts.append({"at": now, "restarts": restarts})
     guard["starts"] = starts[-STARTS_KEPT:]
+    sweep_restoring(discover(args.state_dir, args.config))
     episode = guard.get("episode") if isinstance(guard.get("episode"), dict) else None
 
     def save():

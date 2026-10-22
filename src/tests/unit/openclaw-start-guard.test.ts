@@ -375,6 +375,24 @@ describe.skipIf(!hasPython3)("openclaw-db-maintenance.py start-guard", () => {
     expect(guardFile().episode).toBeUndefined();
   });
 
+  it("removes a half-written restore copy a killed start left behind, and nothing else", () => {
+    // A copy of a few GB on a slow card, stopped by the pre-start's own
+    // `timeout` or a power cut: left there, every later attempt added another.
+    const bak = `${agentDb("main")}.pre-startup-migration-20261020T101010Z-abc.bak`;
+    makeDb(bak, [good("s1")]);
+    const partial = `${agentDb("main")}.clawbox-restoring-4242`;
+    writeFileSync(partial, "half a database");
+    const before = readFileSync(agentDb("main"));
+
+    const g = guard(0);
+
+    expect(g.status).toBe(0);
+    expect(g.out).toMatch(/removed a half-written restore copy beside agent main/);
+    expect(existsSync(partial)).toBe(false);
+    expect(existsSync(bak)).toBe(true);
+    expect(readFileSync(agentDb("main")).equals(before)).toBe(true);
+  });
+
   it("does nothing at an ordinary start but record it, and what the last run proved", () => {
     makeDb(agentDb("main"), [good("s1")]);
     expect(guard(0).status).toBe(0);
