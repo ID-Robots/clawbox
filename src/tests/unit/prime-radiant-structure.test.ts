@@ -206,6 +206,16 @@ describe("record classification", () => {
     const info = classifyRecord("concepts/i.md", fm({ title: "Invoice INV-2026-000777 2026-09-01", claims: [claim("f/i/a", "Issued by Acme Widgets Ltd to Initech GmbH.")] }), { ownCompany: OWN_COMPANY });
     expect(info?.counterparty).toBe("Initech GmbH");
   });
+
+  it("takes no postal address for a company, though its region code reads like a legal suffix", () => {
+    expect(companyNames("Ship to 12 Maple Grove Drive Springfield AB T4N 1A1 for Hooli AB.")).toEqual(["Hooli AB"]);
+    const info = classifyRecord(
+      "concepts/w.md",
+      fm({ title: "Waybill WB-2026-004411 2026-09-03", claims: [claim("f/w/a", "Deliver to 77 Lakeview Road Red Rock AB T4N 1A1 by courier.")] }),
+      { ownCompany: OWN_COMPANY },
+    );
+    expect(info?.counterparty).toBeNull();
+  });
 });
 
 describe("monthly record hubs", () => {

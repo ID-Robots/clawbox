@@ -69,7 +69,7 @@ import { addReviewItem, type ReviewItem } from "./review-store";
 import { runInTransaction, stateDbExists, withStateDb } from "./state-db";
 import { sideIdentifiers, type Identifiers } from "./identifiers";
 import { pairable } from "./pairing";
-import { recordHubKey } from "./records";
+import { recordHubKey, sideRecordType, type RecordType } from "./records";
 import { claimSubject, type ClaimSubject } from "./subject";
 import { fieldValidity, historicalClaim, pageValidity, textValidity, type Validity } from "./validity";
 import { ownerVerified, recordStaleClaims, type StaleClaimNote } from "./verify";
@@ -193,6 +193,8 @@ export interface PassClaim {
   deprecated?: boolean;
   /** Its page's record hub when the page is a record leaf (records.ts `recordHubKey`): never paired inside it. */
   hub?: string | null;
+  /** Its page's record type (records.ts `sideRecordType`): an invoice, a customs declaration …; null for a page that is no record. */
+  recordType?: RecordType | null;
 }
 
 /** Every active claim on a valid page, redacted, in page order. */
@@ -206,6 +208,7 @@ export function collectClaims(snapshot: Pick<VaultSnapshot, "pages">): PassClaim
     // A snapshot page's period, read once for all its claims (validity.ts claimValidity, the page step).
     const pagePeriod = pageValidity(title, type, fm.generated?.at ?? null);
     const hub = recordHubKey(page.path, fm);
+    const recordType = sideRecordType(title, type, hub);
     for (const c of fm.claims) {
       const text = redactText(c.text.slice(0, MAX_CLAIM_CHARS)).text;
       out.push({
@@ -221,13 +224,14 @@ export function collectClaims(snapshot: Pick<VaultSnapshot, "pages">): PassClaim
         historical: historicalClaim(c),
         deprecated: fm.status === "deprecated",
         hub,
+        recordType,
       });
     }
   }
   return out;
 }
 
-type Comparable = Pick<PassClaim, "text" | "subject" | "ids" | "version" | "validity" | "historical" | "deprecated" | "hub">;
+type Comparable = Pick<PassClaim, "text" | "subject" | "ids" | "version" | "validity" | "historical" | "deprecated" | "hub" | "recordType">;
 
 /**
  * Whether two claims of the pass may be judged as a pair: not the same

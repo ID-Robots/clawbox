@@ -7,8 +7,10 @@
  *  - "same document: draft vs final" — its two pages are versions of one
  *    document (versions.ts);
  *  - "different subjects" — different identifiers, days, months or records
- *    ({@link IDENTIFIER_FILTER_NOTE}, {@link RECORD_FILTER_NOTE}), or
- *    different subjects once template words are out;
+ *    ({@link IDENTIFIER_FILTER_NOTE}, {@link RECORD_FILTER_NOTE}), a
+ *    declaration dated a few days after the invoice it cites (the note names
+ *    the invoice, both dates and the days between), or different subjects
+ *    once template words are out;
  *  - "superseded" — an old fact against the current one: a deprecated page,
  *    a historical claim, or periods that do not overlap (validity.ts);
  *  - "verified claim wins" — one side is owner-verified: the other becomes a
@@ -25,7 +27,7 @@
 
 import { DIFFERENT_RECORDS, differentSubjectSides, IDENTIFIER_FILTER_NOTE, RECORD_FILTER_NOTE, sideIdentifiers } from "./identifiers";
 import { noPairFamily, noPairReason, type NoPair, type NoPairCode, type PairClaim } from "./pairing";
-import { recordHubKey } from "./records";
+import { recordHubKey, sideRecordType } from "./records";
 import { redactText } from "./redact";
 import { listReviewItems, MAX_REVIEW_LIST, settleReviewItem, type ReviewCandidate, type ReviewItem } from "./review-store";
 import type { Claim, PageFrontmatter } from "./schema";
@@ -170,6 +172,7 @@ function sideOf(c: ReviewCandidate, pages: ReadonlyMap<string, string | RejudgeP
   // A page the vault no longer holds is read by its path's slug.
   const title = info?.title ?? (c.page ? titleFromPath(c.page) : null);
   const claim = findClaim(info?.frontmatter, c);
+  const hub = info?.frontmatter && c.page ? recordHubKey(c.page, info.frontmatter) : null;
   const pageInfo = { title, type: info?.type ?? null, generatedAt: info?.generatedAt ?? null };
   const validity = claim ? claimValidity(claim, pageInfo) : (textValidity(c.text, written) ?? pageValidity(title, info?.type, info?.generatedAt ?? written));
   const claimId = c.claimId ?? claim?.id ?? null;
@@ -183,7 +186,9 @@ function sideOf(c: ReviewCandidate, pages: ReadonlyMap<string, string | RejudgeP
     validity,
     historical: claim ? historicalClaim(claim) : historicalClaim({ text: c.text }),
     deprecated: info?.status === "deprecated",
-    hub: info?.frontmatter && c.page ? recordHubKey(c.page, info.frontmatter) : null,
+    hub,
+    // Without its frontmatter (a gone page, a title-only map), by its title alone.
+    recordType: sideRecordType(title, info?.type ?? null, hub),
   };
 }
 
@@ -254,6 +259,7 @@ export function rejudgeNote(reason: string, context: { code?: RejudgeCode; pages
 const FAMILY: Readonly<Record<RejudgeCode, string>> = {
   "same-document": "same document",
   "same-hub": "different subjects",
+  "export-date": "different subjects",
   "different-identifiers": "different subjects",
   "different-dates": "different subjects",
   "different-months": "different subjects",
