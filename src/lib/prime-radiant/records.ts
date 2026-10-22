@@ -27,7 +27,7 @@
  * Pure.
  */
 
-import { claimIdentifiers, titleIdentifiers, topicTitle } from "./identifiers";
+import { claimIdentifiers, titleIdentifiers, topicTitle, withoutAddresses } from "./identifiers";
 import { isIsoDate, type PageFrontmatter } from "./schema";
 
 export const RECORD_TYPES = ["invoice", "credit-note", "receipt", "bank-transfer", "shipment", "customs", "ad-receipt"] as const;
@@ -261,11 +261,15 @@ function normName(name: string): string {
 /** Words that lead into a company's name without being part of it: a document's kind, a code, a preposition. */
 const NAME_LEAD = /^(?:the|from|to|by|for|and|of|with|at|paid|issued|invoice|invoices|inv|receipt|receipts|credit|debit|note|memo|bank|wire|sepa|transfer|payment|order|proforma|statement|waybill|awb|shipment|parcel|delivery|courier|customs|export|import|declaration|ads?|advertising|billing|фактура|проформа|разписка|товарителница|превод|плащане)$/iu;
 
-/** Company names with a legal suffix a text names, as written. */
+/**
+ * Company names with a legal suffix a text names, as written. A postal
+ * address is blanked first: its region code is no legal suffix ("12 Maple
+ * Grove Drive Springfield AB" names no company).
+ */
 export function companyNames(text: string): string[] {
   const out: string[] = [];
   ORG_RE.lastIndex = 0;
-  for (const m of text.matchAll(ORG_RE)) {
+  for (const m of withoutAddresses(text).matchAll(ORG_RE)) {
     const words = m[1].trim().split(/\s+/);
     // "Invoice INV-2026-001 Globex Ltd" names Globex Ltd: kind words and codes before the name are no part of it.
     while (words.length > 2 && (NAME_LEAD.test(words[0]) || /\d/.test(words[0]))) words.shift();
@@ -394,6 +398,19 @@ export function recordHubKey(path: string, fm: PageFrontmatter): string | null {
   if (!type) return null;
   const { month } = recordDate(fm);
   return month ? `${type}/${month}` : null;
+}
+
+/**
+ * The record type of one side of a contradiction pair (pairing.ts): its hub's
+ * type when its page is a record leaf ({@link recordHubKey}), else the type
+ * its title names — all a page the vault no longer holds has. Null for a page
+ * that is no record (an entity, a synthesis, a page about such documents).
+ */
+export function sideRecordType(title: string | null | undefined, type?: string | null, hub?: string | null): RecordType | null {
+  const ofHub = hub ? hub.slice(0, hub.indexOf("/")) : "";
+  if (isRecordType(ofHub)) return ofHub;
+  if (!title || (type && NON_RECORD_TYPES.has(type))) return null;
+  return titleRecordType(title);
 }
 
 /** Amounts summed per currency, currencies in alphabetical order, to the cent. */

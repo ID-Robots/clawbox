@@ -42,7 +42,7 @@
 
 import { slugify } from "./claims";
 import { pageSummary } from "./frontmatter";
-import { titleIdentifiers } from "./identifiers";
+import { titleIdentifiers, withoutAddresses } from "./identifiers";
 import { buildLexicalIndex } from "./lexical";
 import { buildLinkGraph, contentReach, isContentPage, isPathAlias } from "./links";
 import { ATOMIC_TYPES, LIMITS } from "./lint";
@@ -131,12 +131,18 @@ function cleanName(raw: string): string | null {
   return name;
 }
 
-/** Candidate entity names in a text: companies with a legal suffix, multi-word proper names, CamelCase names. */
+/**
+ * Candidate entity names in a text: companies with a legal suffix, multi-word
+ * proper names, CamelCase names. Never a postal address's street or city
+ * ("12 Maple Grove Drive, Springfield, AB T4N 1A1"): addresses are blanked
+ * first, so a region code read as a legal suffix makes no company either.
+ */
 export function candidateNames(text: string): Set<string> {
   const out = new Set<string>();
+  const rest = withoutAddresses(text);
   for (const re of [ORG_RE, PROPER_RE, CAMEL_RE]) {
     re.lastIndex = 0;
-    for (const m of text.matchAll(re)) {
+    for (const m of rest.matchAll(re)) {
       const name = cleanName(m[1]);
       if (name) out.add(name);
     }
