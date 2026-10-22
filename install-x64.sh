@@ -85,16 +85,16 @@ else
   BUN=""
 fi
 
-OPENCLAW_VERSION="2026.10.3"
+OPENCLAW_VERSION="2026.10.6"
 NPM_PREFIX="$CLAWBOX_HOME/.npm-global"
 OPENCLAW_BIN="$NPM_PREFIX/bin/openclaw"
 GATEWAY_DIST="$NPM_PREFIX/lib/node_modules/openclaw/dist"
 OPENCLAW_HOME="$CLAWBOX_HOME/.openclaw"
 UI_SERVICE="clawbox-setup.service"
 GATEWAY_SERVICE="clawbox-gateway.service"
-# Must satisfy $OPENCLAW_NODE_ENGINE below — 24.15.0 no longer does, and this
+# Must satisfy $OPENCLAW_NODE_ENGINE below — 24.21.0 no longer does, and this
 # fallback exists precisely for the machines where apt cannot deliver one.
-NODE_DIST_VERSION="24.21.0"
+NODE_DIST_VERSION="24.22.1"
 NODE_DIST_ROOT="/opt/clawbox/node"
 export PATH="$NODE_DIST_ROOT/bin:$PATH"
 
@@ -120,8 +120,10 @@ as_user_login() {
 # The pinned core's `engines.node`, and the same table install.sh carries: with
 # 2026.9.3 that became `>=24.16.0 <25 || >=26.1.0`, so Node 22 is rejected and
 # 24 must be at least 24.16.0 (`node:sqlite` truncates TEXT at an embedded NUL
-# below those builds).
-OPENCLAW_NODE_ENGINE=">=24.16.0 <25, or >=26.1.0"
+# below those builds). 2026.10.6 raised it to `>=24.22.1 <25 || >=26.12.1`, the
+# October 2026 Node.js security releases (TLS chains signed with compromised
+# certificate keys are rejected from those builds on).
+OPENCLAW_NODE_ENGINE=">=24.22.1 <25, or >=26.12.1"
 
 # The table itself, over a VERSION STRING rather than over whatever `node` is on
 # PATH — because two callers need it: the guard below asks about the installed
@@ -133,8 +135,8 @@ node_version_satisfies_openclaw_engine() {
   [ -n "$version" ] || return 1
   major="${version%%.*}"
   case "$major" in
-    24) dpkg --compare-versions "$version" ge "24.16.0" ;;
-    26) dpkg --compare-versions "$version" ge "26.1.0" ;;
+    24) dpkg --compare-versions "$version" ge "24.22.1" ;;
+    26) dpkg --compare-versions "$version" ge "26.12.1" ;;
     # Three digits and up as well: `[3-9][0-9]` alone made the open-ended half
     # of the range stop at 99, which is a ceiling nobody wrote down.
     2[7-9]|[3-9][0-9]|[1-9][0-9][0-9]*) return 0 ;;

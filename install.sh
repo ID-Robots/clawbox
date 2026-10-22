@@ -1182,7 +1182,7 @@ OPENCLAW_RETRY=/usr/bin/env
 if [ -n "${SRC_DIR:-}" ] && [ -x "$SRC_DIR/scripts/openclaw-maintenance-retry.sh" ]; then
   OPENCLAW_RETRY="$SRC_DIR/scripts/openclaw-maintenance-retry.sh"
 fi
-OPENCLAW_VERSION="2026.10.3"
+OPENCLAW_VERSION="2026.10.6"
 
 # Pinned Hermes agent release, in the same spirit as $OPENCLAW_VERSION above:
 # the fleet runs the build WE chose instead of whatever
@@ -1203,8 +1203,8 @@ OPENCLAW_VERSION="2026.10.3"
 # Bump the default in a PR, ship it through beta -> main, and the fleet
 # follows on its next update.
 #
-# Current pin: upstream tag v0.21.7 == "Hermes Agent v0.21.7".
-HERMES_PIN_COMMIT="${HERMES_PIN_COMMIT:-71d34bad1045610252eda02ee79549436896e784}"
+# Current pin: upstream tag v0.22.4 == "Hermes Agent v0.22.4".
+HERMES_PIN_COMMIT="${HERMES_PIN_COMMIT:-4d04303818b61bf3aa09278af48356315515965b}"
 
 # WHO OWNS THE GATEWAY SERVICE, said to the core rather than left for it to
 # guess. ClawBox supervises the gateway itself, as the SYSTEM unit
@@ -1627,7 +1627,14 @@ PATHEOF
 # and 26.1.0. ClawBox's own stores (src/lib/openclaw-session-store.ts,
 # src/lib/harness/hermes-turn-record.ts) use `node:sqlite` too, so the box wants
 # that fix regardless of the core.
-OPENCLAW_NODE_ENGINE=">=24.16.0 <25, or >=26.1.0"
+#
+# 2026.10.6 raised both floors to `>=24.22.1 <25 || >=26.12.1`: those are the
+# October 2026 Node.js security releases, which reject TLS chains signed with
+# the compromised certificate keys they address (upstream's changelog, "Patched
+# Node runtime required"). Every outbound HTTPS call the box makes — ClawBox's
+# own included — runs on this one Node, so a box on 24.16.0–24.22.0 takes the
+# apt transaction below on its next update like a box on 22 did.
+OPENCLAW_NODE_ENGINE=">=24.22.1 <25, or >=26.12.1"
 
 # The table itself, over a VERSION STRING rather than over whatever `node` is on
 # PATH — because two callers need it: the guard below asks about the installed
@@ -1640,8 +1647,8 @@ node_version_satisfies_openclaw_engine() {
   major="${version%%.*}"
 
   case "$major" in
-    24) dpkg --compare-versions "$version" ge "24.16.0" ;;
-    26) dpkg --compare-versions "$version" ge "26.1.0" ;;
+    24) dpkg --compare-versions "$version" ge "24.22.1" ;;
+    26) dpkg --compare-versions "$version" ge "26.12.1" ;;
     # Three digits and up as well: `[3-9][0-9]` alone made the open-ended half
     # of the range stop at 99, which is a ceiling nobody wrote down.
     2[7-9]|[3-9][0-9]|[1-9][0-9][0-9]*) return 0 ;;
@@ -1681,7 +1688,7 @@ node_engine_remedy() {
   echo "       somebody chooses one:" >&2
   if [ "$major" = "26" ]; then
     echo "         curl -fsSL https://deb.nodesource.com/setup_26.x | bash - && apt-get install -y nodejs" >&2
-    echo "           (26.1.0 and newer are accepted, so moving UP is the cheaper way out here)" >&2
+    echo "           (26.12.1 and newer are accepted, so moving UP is the cheaper way out here)" >&2
   fi
   # `apt-cache madison`, NOT `apt-cache policy`. On this very host the candidate
   # IS the broken runtime: apt will not select a LOWER version at NodeSource's
@@ -3315,13 +3322,16 @@ step_apt_update() {
   # `engines.node` ($OPENCLAW_NODE_ENGINE): 2026.9.3 refuses Node 22 outright,
   # so an older ClawBox image — every one of which shipped Node 22 — takes the
   # major upgrade here on the way through. A version that merely "looks like
-  # Node 24" is not enough either: 24.15.0 is below the floor.
+  # Node 24" is not enough either: 24.22.0 is below the floor 2026.10.6 sets.
   #
   # THIS STEP HAS NO EDITION GATE, DELIBERATELY, so a Hermes box takes the same
-  # Node — and it has its own reason to: the floor exists because `node:sqlite`
-  # truncates a TEXT value at an embedded NUL below 24.16.0 / 26.1.0, and both of
-  # ClawBox's own stores use it (src/lib/openclaw-session-store.ts on every
-  # edition, src/lib/harness/hermes-turn-record.ts on Hermes). A Hermes unit that
+  # Node — and it has its own reasons to: `node:sqlite` truncates a TEXT value at
+  # an embedded NUL below 24.16.0 / 26.1.0, and both of ClawBox's own stores use
+  # it (src/lib/openclaw-session-store.ts on every edition,
+  # src/lib/harness/hermes-turn-record.ts on Hermes); below 24.22.1 / 26.12.1 the
+  # runtime still accepts TLS chains signed with the compromised certificate keys
+  # the October 2026 Node.js security releases address, for every HTTPS call the
+  # dashboard makes. A Hermes unit that
   # cannot reach a satisfying Node fails this step like any other: the Next.js
   # server it runs is the dashboard, and a dashboard writing truncated turn
   # records is not a better outcome than a named failure.
@@ -3346,7 +3356,9 @@ step_apt_update() {
       echo "       Node $OPENCLAW_NODE_ENGINE is required — by the pinned OpenClaw core on an" >&2
       echo "       OpenClaw or dual box, and by ClawBox's own node:sqlite stores on every" >&2
       echo "       edition including Hermes (a TEXT value is truncated at an embedded NUL" >&2
-      echo "       below 24.16.0 / 26.1.0)." >&2
+      echo "       below 24.16.0 / 26.1.0, and below 24.22.1 / 26.12.1 TLS still accepts" >&2
+      echo "       chains signed with the compromised keys of the October 2026 Node.js" >&2
+      echo "       security releases)." >&2
       node_engine_remedy
       echo "       Otherwise, likely the NodeSource setup script lost a race for the apt lock" >&2
       echo "       (commonly held by packagekitd or unattended-upgrades on first boot)" >&2
@@ -4529,6 +4541,13 @@ PY
 #   * `gateway restart` drains the gateway (SIGUSR1, so a turn in flight finishes
 #     and chat hears "restarting", not "shutting down") and waits for the new
 #     one. The web server restarts this unit the same way (hermes-telegram.ts).
+#     From v0.22.4 it REFUSES while a turn, cron job or delegation is live
+#     ("Refusing to restart the gateway: N live session(s) would be
+#     interrupted", exit 1) unless given `--yes`; with it the in-band restart
+#     still drains turns, and what it interrupts is async delegations, which a
+#     restart interrupted before too. This restart is not optional — the gateway
+#     is on the replaced agent's files — so it passes `--yes`, and an agent older
+#     than the flag (argparse: "unrecognized arguments") is asked the old way.
 # Hermes answers 0 over a restart it could not confirm (a missing linger, a
 # wait that ran out), so whether the gateway is up is asked of systemd after
 # it: active, a main pid, the same pid a settle later.
@@ -4571,7 +4590,7 @@ hermes_gateway_refresh_after_install() {
       "$CLAWBOX_HOME/.local/bin/hermes" gateway "$@" </dev/null 2>&1
   }
   gw_warn() {
-    echo "CLAWBOX-WARN[hermes-gateway-not-restarted]: $unit $1 — Telegram and the other channels may be down; as the clawbox user, 'hermes gateway install --force && hermes gateway restart' repairs it"
+    echo "CLAWBOX-WARN[hermes-gateway-not-restarted]: $unit $1 — Telegram and the other channels may be down; as the clawbox user, 'hermes gateway install --force && hermes gateway restart --yes' repairs it"
   }
 
   before_unit="$(cat "$unit_file" 2>/dev/null || true)"
@@ -4594,9 +4613,14 @@ hermes_gateway_refresh_after_install() {
   esac
 
   before_pid="$(gw_systemctl show "$unit" -p MainPID --value 2>/dev/null || true)"
-  if ! out="$(gw_hermes restart)"; then
-    gw_warn "could not be restarted${out:+ ($(printf '%s\n' "$out" | tail -1))}"
-    return 0
+  if ! out="$(gw_hermes restart --yes)"; then
+    case "$out" in
+      *"unrecognized arguments"*) out="$(gw_hermes restart)" ;;
+      *) false ;;
+    esac || {
+      gw_warn "could not be restarted${out:+ ($(printf '%s\n' "$out" | tail -1))}"
+      return 0
+    }
   fi
   # The same settle resume_paused_engines and the dashboard restart use.
   settle="${CLAWBOX_ENGINE_SETTLE_S:-3}"
@@ -7759,7 +7783,7 @@ step_openclaw_tts() {
       # `--force` on these three paths, and only these. `tts.providers.<name>`
       # is where Hermes' TTS reads a command provider — its own guide
       # (website/docs/user-guide/features/tts.md) and the reader
-      # (tools/tts_command_provider.py, "canonical") at the v0.21.7 pin — but
+      # (tools/tts_command_provider.py, "canonical") at v0.21.7 and at the v0.22.4 pin — but
       # that `config set` validates against DEFAULT_CONFIG, which seeds no
       # `tts.providers`, and since `providers` is a top-level key it takes the
       # path for a wrong prefix and refuses BEFORE writing ("Did you mean:

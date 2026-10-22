@@ -35,8 +35,10 @@ def replace_once(text, old, new):
 # The pinned core's `engines.node` — the same table install.sh, install-x64.sh
 # and clawbox-x64-step.sh carry (install-node-engine-table.test.ts holds the
 # text to one range, test_integration.py runs this copy): with 2026.9.3 it
-# became `>=24.16.0 <25 || >=26.1.0`, so Node 22 is refused outright.
-OPENCLAW_NODE_ENGINE = ">=24.16.0 <25, or >=26.1.0"
+# became `>=24.16.0 <25 || >=26.1.0`, so Node 22 is refused outright, and
+# 2026.10.6 raised it to `>=24.22.1 <25 || >=26.12.1` (the October 2026 Node.js
+# security releases).
+OPENCLAW_NODE_ENGINE = ">=24.22.1 <25, or >=26.12.1"
 
 
 def node_version_satisfies_openclaw_engine(version):
@@ -46,9 +48,9 @@ def node_version_satisfies_openclaw_engine(version):
         return False
     major, minor, patch = (int(x) for x in parts.groups())
     if major == 24:
-        return (minor, patch) >= (16, 0)
+        return (minor, patch) >= (22, 1)
     if major == 26:
-        return (minor, patch) >= (1, 0)
+        return (minor, patch) >= (12, 1)
     return major >= 27
 
 

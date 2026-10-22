@@ -12,23 +12,29 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 /**
  * TASK-788 — the Node engine floor both installers hold the box to.
  *
- * The pinned core's `engines.node` moved with 2026.9.3:
+ * The pinned core's `engines.node` moved with 2026.9.3, and again with 2026.10.6:
  *
- *   2026.8.1  >=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0
- *   2026.9.3  >=24.16.0 <25 || >=26.1.0
+ *   2026.8.1   >=22.22.3 <23 || >=24.15.0 <25 || >=25.9.0
+ *   2026.9.3   >=24.16.0 <25 || >=26.1.0
+ *   2026.10.6  >=24.22.1 <25 || >=26.12.1
  *
- * (read off the registry, 2026-09-10). Node 22 is not merely deprecated there —
- * every `openclaw` command exits 1 under it with a requirement banner, because
- * `node:sqlite` truncates a TEXT value at an embedded NUL on 22.23.x, 24.15.0,
- * 25.9.0 and 26.0.0, and the first fixed builds are 24.16.0 and 26.1.0.
+ * (read off the registry, 2026-09-10 and 2026-10-22). Node 22 is not merely
+ * deprecated there — every `openclaw` command exits 1 under it with a
+ * requirement banner, because `node:sqlite` truncates a TEXT value at an
+ * embedded NUL on 22.23.x, 24.15.0, 25.9.0 and 26.0.0, and the first fixed
+ * builds are 24.16.0 and 26.1.0. 2026.10.6 then moved both floors to the
+ * October 2026 Node.js security releases, which reject TLS chains signed with
+ * compromised certificate keys, so 24.16.0–24.22.0 and 26.1.0–26.12.0 are
+ * refused too.
  *
  * So a guard that still accepts Node 22 does not just mis-report: it installs
  * Node 22 (`ensure_openclaw_node_engine`) and then installs a core that cannot
  * run on it, leaving the box with a gateway that never comes up. The three
  * versions that matter are therefore pinned as REJECTED here — `v22.23.2` (what
- * every shipped image has), `v24.15.0` (the old floor, and what install-x64's
- * verified tarball used to fetch) and `v26.0.0` — and the table is run, not
- * read, so a future edit to either installer's `case` is measured.
+ * every shipped image has), `v24.15.0` (an old floor, and what install-x64's
+ * verified tarball used to fetch), `v24.22.0` (one patch below today's floor)
+ * and `v26.0.0` — and the table is run, not read, so a future edit to either
+ * installer's `case` is measured.
  *
  * Both installers are held to the SAME table: arm64 boxes take install.sh and
  * the x64 dev/demo path takes install-x64.sh, and they install the same core.
@@ -162,17 +168,22 @@ const REJECTED = [
   "22.22.3", // the OLD floor: accepted by 2026.8.1, refused by 2026.9.3
   "22.23.2", // what every shipped ClawBox image runs today
   "23.11.0", // 23 was never in any of these ranges
-  "24.15.0", // the old 24 floor — one patch below the NUL fix
+  "24.15.0", // an old 24 floor — one patch below the NUL fix
+  "24.16.0", // the 2026.9.3 floor: has the NUL fix, not the TLS one
+  "24.21.0", // what the installers provisioned before 2026.10.6
+  "24.22.0", // one patch below the October 2026 security release
   "25.9.0", // inside the retired `>=25.9.0` arm; `<25` now excludes all of 25
-  "26.0.0", // 26 is allowed only from 26.1.0
+  "26.0.0", // 26 is allowed only from 26.12.1
+  "26.1.0", // the 2026.9.3 floor of the 26 line
+  "26.12.0", // one patch below the 26 line's security release
 ] as const;
 
 const ACCEPTED = [
-  "24.16.0", // the floor itself
-  "24.21.0", // the LTS build the installers provision
-  "26.1.0", // the floor of the other allowed line
-  "26.8.2", // current 26.x
-  "27.0.0", // the next major above the open-ended `>=26.1.0`
+  "24.22.1", // the floor itself, and the LTS build the installers provision
+  "24.23.0", // a later 24 minor
+  "26.12.1", // the floor of the other allowed line
+  "26.13.0", // a later 26 minor
+  "27.0.0", // the next major above the open-ended `>=26.12.1`
   "100.0.0", // three digits: the case a two-digit-only pattern rejected
 ] as const;
 
@@ -208,10 +219,22 @@ describe("install.sh / install-x64.sh / clawbox-x64-step.sh Node engine table", 
     // guard and its own error message come to disagree after a bump. One
     // variable, and the same text in both installers.
     for (const source of Object.values(INSTALLERS)) {
-      expect(source).toContain('OPENCLAW_NODE_ENGINE=">=24.16.0 <25, or >=26.1.0"');
+      expect(source).toContain('OPENCLAW_NODE_ENGINE=">=24.22.1 <25, or >=26.12.1"');
       expect(source).not.toMatch(/requires Node >=22/);
     }
-    expect(BUILDER).toContain('OPENCLAW_NODE_ENGINE = ">=24.16.0 <25, or >=26.1.0"');
+    expect(BUILDER).toContain('OPENCLAW_NODE_ENGINE = ">=24.22.1 <25, or >=26.12.1"');
+  });
+
+  it("holds the e2e-install runtime check to the same floors", () => {
+    // e2e-install/07-runtime-pin.spec.ts asks the installed box whether its Node
+    // is one the pinned core accepts, from a floor per major of its own. A floor
+    // left behind by a bump passes a box the core refuses.
+    const engineLine = /^OPENCLAW_NODE_ENGINE="([^"]*)"/m.exec(INSTALLERS["install.sh"])?.[1] ?? "";
+    const expected = [...engineLine.matchAll(/>=((\d+)\.\d+\.\d+)/g)].map((m) => `"${m[2]}": "${m[1]}"`);
+    expect(expected).toEqual(['"24": "24.22.1"', '"26": "26.12.1"']);
+    const spec = readFileSync(path.join(REPO, "e2e-install/07-runtime-pin.spec.ts"), "utf-8");
+    const table = /const ENGINE_FLOORS[^=]*=\s*\{([^}]*)\}/.exec(spec)?.[1] ?? "";
+    for (const pair of expected) expect(table, "ENGINE_FLOORS in e2e-install/07-runtime-pin.spec.ts").toContain(pair);
   });
 
   it("fetches the NodeSource channel of the major it accepts, and never the retired one", () => {

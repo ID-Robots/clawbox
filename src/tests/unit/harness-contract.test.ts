@@ -395,6 +395,7 @@ describe("the checker", () => {
     usages: Usage[]; allow?: unknown[]; stateRow?: number; unchecked?: Unchecked[];
     recorded?: Record<string, Record<string, number>>; event?: string;
     hermesConfig?: Record<string, unknown>; routes?: [string, string][];
+    hermesCli?: unknown[]; chatRules?: unknown; openrpc?: Record<string, string[]>;
   }) => {
     const dir = tree({
       "config/harness-contract-allowlist.json": JSON.stringify({ entries: opts.allow ?? [] }),
@@ -412,8 +413,8 @@ describe("the checker", () => {
         configPaths: ["agents.defaults.model.fallbacks", "plugins.entries.*.enabled"], rpcMethods: ["chat.send"], events: ["chat"], hooks: ["before_tool_call"],
       }),
       "hermes.json": JSON.stringify({
-        cli: [{ path: "hermes", aliases: [], options: [] }], chatRules: { present: false }, validatorRefusalRule: true,
-        config: opts.hermesConfig ?? {}, openrpc: {},
+        cli: opts.hermesCli ?? [{ path: "hermes", aliases: [], options: [] }], chatRules: opts.chatRules ?? { present: false },
+        validatorRefusalRule: true, config: opts.hermesConfig ?? {}, openrpc: opts.openrpc ?? {},
         // The pinned dashboard's real shape: specific routes plus the SPA's catch-all.
         routes: opts.routes ?? [["GET", "/api/model/options"], ["POST", "/api/auth/ws-ticket"], ["GET", "/{full_path:path}"]],
       }),
@@ -488,6 +489,37 @@ describe("the checker", () => {
     const grew = run({ usages: [], unchecked, recorded: { "src/lib/x.ts": { [why]: 1 } } });
     expect(grew.code).toBe(1);
     expect(grew.out).toMatch(/FAIL    openclaw@2026\.10\.3 unchecked src\/lib\/x\.ts: runOpenclawConfigSet.* 2 call site\(s\), 1 recorded .* ← src\/lib\/x\.ts:1, src\/lib\/x\.ts:2/);
+  });
+
+  it("holds a `hermes chat` flag to the launcher's refusals only on a call that routes to the launcher", () => {
+    // Hermes v0.22.4: `_UNSUPPORTED` (`--image` among it) is the transport launcher's, which
+    // `hermes chat` takes only for `--format stream-json`, `--safe-mode` or `--ignore-user-config`.
+    const opt = (...flags: string[]) => ({ flags, positional: false });
+    const hermesCli = [
+      { path: "hermes", aliases: [], options: [] },
+      { path: "hermes chat", aliases: [], options: [opt("-q", "--query"), opt("-Q", "--quiet"), opt("--image"), opt("--format"), opt("--resume"), opt("-m", "--model")] },
+    ];
+    const chat = (flags: string[], site: string): Usage => ({ harness: "hermes", kind: "cli", name: "chat", words: ["chat"], flags, site } as Usage);
+    const rules = { present: true, refused: ["--image"], launcherFlags: ["--format", "--ignore-user-config", "--safe-mode"], frozenOnResume: ["--model"] };
+    const usages = [chat(["-q", "-Q", "--image"], "src/a.ts:1"), chat(["-q", "--format", "--image"], "src/b.ts:2")];
+    const r = run({ usages, hermesCli, chatRules: rules });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("FAIL    hermes@v0.0.1 flag hermes chat --image — accepted by argparse but refused by the gateway-routed chat  ← src/b.ts:2");
+    expect(r.out).not.toMatch(/FAIL .*src\/a\.ts:1/);
+    // A routing the surface could not read refuses the flag everywhere, as before.
+    const unknown = run({ usages: [usages[0]], hermesCli, chatRules: { ...rules, launcherFlags: null } });
+    expect(unknown.out).toMatch(/FAIL .*hermes chat --image .*src\/a\.ts:1/);
+  });
+
+  it("does not count a method the OpenRPC lists only as canonical as one the dashboard serves", () => {
+    const rpc = (name: string, site: string): Usage => ({ harness: "hermes", kind: "rpc", name, site } as Usage);
+    const r = run({
+      usages: [rpc("prompt.submit", "src/a.ts:1"), rpc("clarify.respond", "src/b.ts:2")],
+      openrpc: { "prompt.submit": ["method", "x-canonical-methods"], "clarify.respond": ["x-canonical-methods"] },
+    });
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("FAIL    hermes@v0.0.1 rpc clarify.respond — only a canonical method of the gateway's session authority");
+    expect(r.out).not.toMatch(/rpc prompt\.submit/);
   });
 
   it("fails when the updater's state-schema row disagrees with the pinned package", () => {

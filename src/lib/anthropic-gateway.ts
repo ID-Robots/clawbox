@@ -20,7 +20,7 @@
  * with a model fallback.
  *
  * HARNESS FIRST — every mechanism here is core's own (OpenClaw 2026.10.2;
- * the order filtering below read in 2026.10.3, the pin):
+ * the order filtering below read in 2026.10.3, unchanged in 2026.10.6, the pin):
  *  - THE PROFILES: `anthropic:clawbox-<pool id>`, written by core's own writer,
  *    `openclaw models auth paste-token --provider anthropic --profile-id <id>
  *    --expires-in <n>s`, the token on stdin. A `token` profile is a bearer core

@@ -146,7 +146,11 @@ for (const u of tree.size ? uses("hermes", "cli") : []) {
     if (!flags.has(f)) fail("hermes", "flag", `${node} ${f}`, "no such option", u.site);
     else if (node === "hermes chat" && he.chatRules?.present) {
       const spellings = tree.get(node).options.find((o) => o.flags.includes(f)).flags;
-      if (spellings.some((s) => he.chatRules.refused.includes(s))) fail("hermes", "flag", `${node} ${f}`, "accepted by argparse but refused by the gateway-routed chat", u.site);
+      // The refusal is the transport launcher's; a call that never routes there (no launcher
+      // flag) keeps the option. Unknown routing (null) refuses it everywhere.
+      const launcher = he.chatRules.launcherFlags;
+      const viaLauncher = !Array.isArray(launcher) || u.flags.some((g) => launcher.includes(g));
+      if (viaLauncher && spellings.some((s) => he.chatRules.refused.includes(s))) fail("hermes", "flag", `${node} ${f}`, "accepted by argparse but refused by the gateway-routed chat", u.site);
       else if (u.flags.includes("--resume") && spellings.some((s) => he.chatRules.frozenOnResume.includes(s))) warn("hermes", "flag", `${node} ${f}`, "frozen on --resume: refused if it differs from the session's value", u.site);
     }
   }
@@ -170,7 +174,13 @@ if (!he.openrpc) fail("hermes", "surface", "apps/shared/src/gateway-contract.ope
 else {
   for (const u of uses("hermes", "rpc")) {
     const kinds = he.openrpc[u.name] ?? [];
-    if (!kinds.includes("method") && !kinds.includes("x-canonical-methods")) fail("hermes", "rpc", u.name, "not a method of the pinned dashboard's JSON-RPC contract", u.site);
+    // `x-canonical-methods` are served by the gateway's session authority only. The standalone
+    // `hermes dashboard` ClawBox talks to (clawbox-hermes-dashboard.service) has none attached and
+    // dispatches its registered methods, answering -32601 for the rest.
+    if (kinds.includes("method")) continue;
+    fail("hermes", "rpc", u.name, kinds.includes("x-canonical-methods")
+      ? "only a canonical method of the gateway's session authority; the standalone dashboard ClawBox uses does not serve it"
+      : "not a method of the pinned dashboard's JSON-RPC contract", u.site);
   }
   for (const u of uses("hermes", "event")) {
     const kinds = he.openrpc[u.name] ?? [];

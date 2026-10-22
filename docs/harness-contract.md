@@ -41,13 +41,18 @@ installed or executed beyond importing the modules that build its parser,
 config validator and web app):
 
 - every `hermes` subcommand and flag ClawBox runs exists in its argparse tree,
-  and no `hermes chat` flag is one the gateway-routed chat refuses;
+  and no `hermes chat` flag is one the gateway-routed chat refuses (the
+  transport launcher's refusals count only for a call that routes there:
+  `--format stream-json`, `--safe-mode`, `--ignore-user-config`);
 - every key ClawBox writes with `hermes config set` passes Hermes's own
   validator (refused = failure; accepted with a warning = warning); a key
   written or unset through ClawBox's own config.yaml editor must be one the
   validator knows (failure), and a key read back should be (warning);
 - every dashboard JSON-RPC method ClawBox sends, and every event it waits for,
-  is in the committed OpenRPC contract;
+  is in the committed OpenRPC contract — a method listed only under
+  `x-canonical-methods` does not count, because only the gateway's session
+  authority serves those and the standalone `hermes dashboard` ClawBox talks to
+  has none attached;
 - every dashboard REST or WebSocket route ClawBox calls exists;
 - the tag named beside the pin points at the pinned commit (asked of GitHub
   whenever the tag or the commit changes).
@@ -93,7 +98,7 @@ ClawBox file:line that uses it (also as an annotation on the PR diff).
 ## Running it
 
 `scripts/harness-contract/run.sh` runs the whole check. It needs a Node the
-pinned core accepts (its `engines.node`, `>=24.16.0 <25 || >=26.1.0` at
-2026.10.3 — not Node 25) and Python 3.11 or newer. It keeps the pinned harnesses in
+pinned core accepts (its `engines.node`, `>=24.22.1 <25 || >=26.12.1` at
+2026.10.6 — not Node 25) and Python 3.11 or newer. It keeps the pinned harnesses in
 `~/.cache/clawbox-harness-contract` (`HARNESS_CONTRACT_CACHE`), so only the
 first run after a pin moves uses the network; CI caches the same paths by pin.

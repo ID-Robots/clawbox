@@ -98,11 +98,14 @@ const BOX_OWN_PREFIXES: readonly string[] = [
   "TELEGRAM_", "DISCORD_", "SLACK_", "WHATSAPP_", "SIGNAL_", "MATRIX_", "TEAMS_", "MATTERMOST_",
   "GOOGLE_CHAT_", "EMAIL_", "SMS_", "TWILIO_", "LINE_", "WECOM_", "FEISHU_", "DINGTALK_", "QQ_", "QQBOT_",
   "IRC_", "NTFY_", "BLUEBUBBLES_", "SIMPLEX_", "PHOTON_", "BUZZ_", "A2A_", "WEBHOOK_",
+  // Platforms Hermes v0.22.4 added to that catalogue (Weixin, Yuanbao).
+  "WEIXIN_", "YUANBAO_",
 ];
 
 /**
  * The model-provider variables the assistant answers with: every name pinned
- * Hermes v0.21.7 files under `provider` in its env-var catalogue (87), less the
+ * Hermes v0.22.4 files under `provider` in its env-var catalogue (87, the same
+ * names as v0.21.7), less the
  * ones a prefix already refuses — the store's `ANTHROPIC_` / `CLAUDE_`
  * reservation, `HERMES_` above and `AWS_` below. Taken from the pin, not from
  * memory: a pin bump re-reads that category and updates this list and its test

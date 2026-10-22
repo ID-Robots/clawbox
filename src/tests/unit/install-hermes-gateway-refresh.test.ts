@@ -71,6 +71,10 @@ interface Scenario {
   gwAfter?: "active" | "activating";
   installRc?: number;
   restartRc?: number;
+  /** false: an agent older than v0.22.4, whose `gateway restart` has no `--yes`. */
+  knowsYes?: boolean;
+  /** Whether the gateway has a turn, cron job or delegation running (v0.22.4 refuses a bare restart then). */
+  liveWork?: boolean;
   /** Whether the reachability precheck for the upstream installer answers. */
   reachable?: boolean;
   /** false: the box's edition does not run Hermes (`unselected` carries the agent on disk). */
@@ -88,6 +92,8 @@ function run(s: Scenario) {
     gwAfter = "active",
     installRc = 0,
     restartRc = 0,
+    knowsYes = true,
+    liveWork = true,
     reachable = true,
     runsHermes = true,
     systemUnitStarts,
@@ -115,6 +121,13 @@ function run(s: Scenario) {
     '        printf "%s" "$r" > "$HOME/.config/systemd/user/hermes-gateway.service"',
     "        exit 0 ;;",
     "      restart)",
+    // v0.22.4's guard: `--yes` is a flag only from that release, and without it
+    // a gateway with live work is not restarted at all.
+    '        case " $* " in *" --yes "*) yes=1 ;; *) yes=0 ;; esac',
+    '        if [ "$yes" = 1 ] && [ "$GW_KNOWS_YES" != 1 ]; then echo "hermes: error: unrecognized arguments: --yes" >&2; exit 2; fi',
+    '        if [ "$yes" = 0 ] && [ "$GW_KNOWS_YES" = 1 ] && [ "$GW_LIVE_WORK" = 1 ]; then',
+    '          echo "✗ Refusing to restart the gateway: 1 live session(s) would be interrupted." >&2; exit 1',
+    "        fi",
     '        [ "$GW_RESTART_RC" = 0 ] || { echo "✗ Gateway service restart failed." >&2; exit "$GW_RESTART_RC"; }',
     '        touch "$SYSD/restarted"; exit 0 ;;',
     "    esac ;;",
@@ -199,6 +212,8 @@ function run(s: Scenario) {
         GW_LOG: path.join(tmp, "gw-log"),
         GW_INSTALL_RC: String(installRc),
         GW_RESTART_RC: String(restartRc),
+        GW_KNOWS_YES: knowsYes ? "1" : "0",
+        GW_LIVE_WORK: liveWork ? "1" : "0",
         GW_RENDERS: renders,
         GW_RENDERS_OFF_PIN: rendersOffPin,
         GW_STATE: gwState,
@@ -243,9 +258,10 @@ describe.skipIf(!hasBash)("the Hermes gateway follows the agent an update instal
     expect(r.installs, `the gateway unit was never re-rendered after the upgrade:\n${r.out}`).toEqual([call, call]);
     expect(r.unitNow).toBe(currentUnit());
     // Hermes' own drain-restart, once; never a raw systemctl bounce or a
-    // `start`, which is a no-op for a gateway on the deleted tree.
+    // `start`, which is a no-op for a gateway on the deleted tree. `--yes`,
+    // because the gateway has live work and v0.22.4 refuses a bare restart then.
     expect(r.restarts, `the gateway was left on the deleted agent:\n${r.out}`).toEqual([
-      `gateway restart|HOME=${tmp}|XDG=/run/user/${uid()}|stdin=closed`,
+      `gateway restart --yes|HOME=${tmp}|XDG=/run/user/${uid()}|stdin=closed`,
     ]);
     expect(r.userCalls.some((l) => /^--user (restart|start|try-restart) /.test(l))).toBe(false);
     for (const c of r.userCalls) expect(c).toContain(`XDG=/run/user/${uid()}`);
@@ -312,6 +328,16 @@ describe.skipIf(!hasBash)("the Hermes gateway follows the agent an update instal
 
     expect(r.code, r.out).toBe(0);
     expect(r.out).toMatch(/^CLAWBOX-WARN\[hermes-gateway-not-restarted\]: hermes-gateway\.service could not be restarted \(✗ Gateway service restart failed\.\)/m);
+    expect(r.restarts).toHaveLength(1);
+  });
+
+  it("asks an agent older than `--yes` the old way, once", () => {
+    const r = run({ head: OTHER_COMMIT, knowsYes: false });
+
+    expect(r.code, r.out).toBe(0);
+    expect(r.restarts.map((l) => l.split("|")[0])).toEqual(["gateway restart --yes", "gateway restart"]);
+    expect(r.out).toMatch(/Restarted hermes-gateway\.service on the current agent \(main pid 4444 -> 5555/);
+    expect(r.out).not.toMatch(/CLAWBOX-WARN\[hermes-gateway/);
   });
 
   it("leaves the gateway alone when Hermes could not re-render its unit", () => {

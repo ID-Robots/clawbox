@@ -7,8 +7,8 @@ import { logSafe } from "@/lib/log-safe";
  *
  * On 2026-10-15 a box's gateway was started by an update, the desktops reloaded
  * with it, and two timezone writes reached openclaw.json through the CLI while
- * the gateway was inside its startup admission. OpenClaw (2026.9.4, and the
- * pinned 2026.10.3) hashes the effective config, the plugin-doctor config and
+ * the gateway was inside its startup admission. OpenClaw (2026.9.4, 2026.10.3,
+ * and the pinned 2026.10.6) hashes the effective config, the plugin-doctor config and
  * the plugin migration fingerprint during that admission and refuses with
  * "migration inputs changed during startup; refusing to report the gateway
  * ready", exit 78, which its own unit (and ClawBox's) does not restart. The

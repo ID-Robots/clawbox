@@ -4040,7 +4040,7 @@ elif _clawai_openai_route_is_ours and _clawai_speech_withdrawable:
 #     dimensions) instead of text-embedding-3-large (3,072): ONCE, and only the
 #     value the box itself wrote (the ClawBox AI token is the key) — see
 #     OPENCLAW_CLOUD_EMBEDDING_MODEL in src/lib/clawai-cloud-embeddings.ts.
-# OpenClaw has no index size cap to set (2026.10.3 has no memory.search cap key).
+# OpenClaw has no index size cap to set (2026.10.6, like 2026.10.3, has no memory.search cap key).
 #
 # Any of these changes the index's IDENTITY, and OpenClaw then pauses vector
 # search rather than re-embedding everything — there is no storm to fear from
@@ -5743,7 +5743,9 @@ fi
 #                    cron job." the first time it runs.
 #   self-learning    `skills.workshop.autonomous.mode` — `auto` by default, and
 #                    the core's own table says `auto` "also enables weekly
-#                    collection review".
+#                    collection review" (up to 2026.10.3; 2026.10.6 retired that
+#                    cron, and `auto` is background review plus archiving learned
+#                    skills unused for 30 days).
 #
 # TASK-609 seeded the OPT-OUTS once per box — `0m`, `false`, `off` — and
 # recorded it in `data/background-optouts.json` as `{"seeded": [<key>...]}`.
@@ -5897,7 +5899,8 @@ def at_optout(value, literal):
 
 # Only a key still AT the literal ClawBox seeded is ClawBox's to take back.
 # Anything else — absent (the core's default, already on), the owner's own
-# cadence, `propose` — is his and is left exactly where it is. The seeded list
+# cadence, `propose` (up to 2026.10.3; 2026.10.6's doctor moves it to `off`) —
+# is the owner's and is left exactly where it is. The seeded list
 # is deliberately NOT the gate: a fresh box's config restored from an opted-out
 # backup carries the same literals with no record at all, and the two cases
 # want the same answer.

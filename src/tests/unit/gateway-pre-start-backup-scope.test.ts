@@ -14,10 +14,10 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
 // box's own archives in `<state>/backups/`) and what it must keep (the folders
 // there that `openclaw doctor` moves the owner's originals into) — ClawKeep's
 // snapshot is that command. The manifest is checked against the core's
-// documented contract for the field (docs/plugins/manifest/surfaces.md in the
-// pinned 2026.10.3 core), and the
-// SHIPPED boot step is run to see it installed and enabled on a 2026.10 core
-// and left alone on an older one.
+// documented contract for the field (docs/plugins/manifest/surfaces.md, the
+// same in 2026.10.3 and the pinned 2026.10.6 core), and the SHIPPED boot step
+// is run to see it installed and enabled on a 2026.10 core and left alone on an
+// older one.
 
 const REPO = path.resolve(process.cwd());
 const SCRIPT = path.join(REPO, "scripts/gateway-pre-start.sh");
@@ -56,7 +56,7 @@ describe("the clawbox-backup-scope manifest", () => {
       .filter((r) => r.disposition === disposition)
       .map((r) => `${r.scope}:${r.relativePath}`);
     // Only a path the pinned core writes: no `upgrades/`, no Codex cache
-    // folders — the 2026.10.3 package creates neither.
+    // folders — neither the 2026.10.3 nor the 2026.10.6 package creates them.
     expect(named("regenerable")).toEqual(["state:backups"]);
     // Its doctor MOVES each agent's TOOLS.md (doctor-tools-md-migration) and
     // heartbeat scratch (doctor-heartbeat-scratch-migration) into these and

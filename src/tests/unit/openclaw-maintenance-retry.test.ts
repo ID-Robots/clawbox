@@ -5,7 +5,7 @@ import type { ChildProcess } from "child_process";
 
 /**
  * OpenClaw's "undergoing offline maintenance; retry when it finishes" (F4,
- * 2026-10-15). The pinned core (2026.10.3) refuses every command that reads
+ * 2026-10-15). The pinned core (2026.10.6, as 2026.10.3) refuses every command that reads
  * its config while a gateway start's own CLI bootstrap or a doctor run holds
  * the state, and its config read turns the refusal into "config could not be
  * read". Measured in an isolated home with `doctor --fix` holding the state:
@@ -161,5 +161,15 @@ describe("isOpenclawMaintenanceRefusal", () => {
       "OpenClaw state owner could not be verified; retry after maintenance finishes.",
     )).toBe(true);
     expect(isOpenclawMaintenanceRefusal(new Error("Config validation failed"))).toBe(false);
+  });
+
+  it("leaves 2026.10.6's unverifiable-owner answer alone: it says restart, not retry", async () => {
+    // 2026.10.6 replaced 2026.10.3's "…could not be verified; retry after
+    // maintenance finishes." for an unreadable owner record with this sentence
+    // (dist/state/openclaw-state-lease-heartbeat.worker.js, both versions).
+    const { isOpenclawMaintenanceRefusal } = await import("@/lib/openclaw-maintenance");
+    expect(isOpenclawMaintenanceRefusal(
+      "OpenClaw state ownership at ~/.openclaw/state/openclaw.sqlite could not be verified from ~/.openclaw/state/openclaw.sqlite.owner; restart the Gateway.",
+    )).toBe(false);
   });
 });

@@ -930,7 +930,7 @@ describe.skipIf(!hasBash)("the health check verifies the Hermes box's voice too"
 });
 
 describe.skipIf(!hasBash)("the voice lands on a Hermes whose validator does not seed tts.providers", () => {
-  // Hermes v0.21.7 (the pin) refuses `config set tts.providers.clawbox-local.command`
+  // Hermes v0.21.7 (and the v0.22.4 pin) refuses `config set tts.providers.clawbox-local.command`
   // before writing — "not a recognized config key … Did you mean:
   // providers.clawbox-local.command" — because its DEFAULT_CONFIG has no
   // `tts.providers` and `providers` is a top-level key. That suggestion is the

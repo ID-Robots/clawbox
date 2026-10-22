@@ -58,7 +58,9 @@ export async function transcriptKeyFor(request: Request, raw: unknown): Promise<
 
 const SESSION_KEYS_PATH = path.join(DATA_DIR, "hermes-chat-sessions.json");
 const MAX_SESSION_KEYS = 2_000;
-const SESSION_ID_RE = /^[0-9]{8}_[0-9]{6}_[0-9a-f]{6}$/;
+// The dashboard's timestamped ids, and from Hermes v0.22.4 the gateway's
+// `local-` + 64 hex that a `hermes chat` turn opens (the chat route's rule).
+const SESSION_ID_RE = /^(?:[0-9]{8}_[0-9]{6}_[0-9a-f]{6}|local-[0-9a-f]{64})$/;
 
 function readSessionKeys(): Record<string, string> {
   try {

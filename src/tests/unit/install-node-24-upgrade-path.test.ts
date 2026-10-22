@@ -33,6 +33,11 @@ vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
  *
  * The second claim is the fresh-install one: a box flashed today must never
  * take the retired channel at all, on any path.
+ *
+ * The third came with 2026.10.6, whose floor is `>=24.22.1 <25 || >=26.12.1`
+ * (the October 2026 Node.js security releases): a box ALREADY on Node 24, on
+ * the 24.21.0 the installers provisioned until then, is below it, and takes the
+ * same transaction inside the same major before the core goes on.
  */
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const INSTALL_SH = readFileSync(path.join(REPO, "install.sh"), "utf-8");
@@ -160,8 +165,8 @@ case " $* " in
     channel="$(cat "$ST/channel" 2>/dev/null || true)"
     case "$channel" in
       22) offered='22.23.2' ;;
-      24) offered='24.21.0' ;;
-      26) offered='26.8.2' ;;
+      24) offered='24.22.1' ;;
+      26) offered='26.12.1' ;;
       # No NodeSource channel configured: apt serves the distro package, which
       # is what the comment in step_apt_update warns about.
       *) offered='12.22.9' ;;
@@ -240,8 +245,8 @@ case "$verb" in
   madison)
     case "$channel" in
       22) printf '   nodejs | 22.23.2-1nodesource1 | https://deb.nodesource.com/node_22.x nodistro/main arm64 Packages\\n' ;;
-      24) printf '   nodejs | 24.21.0-1nodesource1 | https://deb.nodesource.com/node_24.x nodistro/main arm64 Packages\\n' ;;
-      26) printf '   nodejs | 26.8.2-1nodesource1 | https://deb.nodesource.com/node_26.x nodistro/main arm64 Packages\\n' ;;
+      24) printf '   nodejs | 24.22.1-1nodesource1 | https://deb.nodesource.com/node_24.x nodistro/main arm64 Packages\\n' ;;
+      26) printf '   nodejs | 26.12.1-1nodesource1 | https://deb.nodesource.com/node_26.x nodistro/main arm64 Packages\\n' ;;
     esac
     # The installed one is on offer too, from the channel it came from, and it is
     # the highest — so a pick that is not filtered by the engine table lands on it.
@@ -378,9 +383,30 @@ describe("the Node 22 → 24 switch inside the updater", () => {
     expect(at(calls, "stop-gateways-for-migration")).toBeLessThan(core);
     // The pair that matters: the core went on under Node 24, not under 22.
     expect(calls[core]).toContain(`openclaw@${TARGET}`);
-    expect(calls[core]).toContain("node=24.21.0");
-    expect(box.nodeVersion()).toBe("24.21.0");
+    expect(calls[core]).toContain("node=24.22.1");
+    expect(box.nodeVersion()).toBe("24.22.1");
     expect(box.coreVersion()).toBe(TARGET);
+  });
+
+  it("moves a box on the previous floor's Node 24 up within 24 before the core", () => {
+    // A unit updated while 2026.10.3 was the pin: Node 24.21.0, which that
+    // core's `>=24.16.0` accepted and 2026.10.6's `>=24.22.1` does not. The
+    // major is right, so nothing about it "looks old" — the table is what moves
+    // it, and the core must go on only after the patched Node is in place.
+    const box = makeBox({ node: "24.21.0", core: "2026.10.3" });
+
+    const r = run(box, "step_openclaw_install");
+    const calls = box.calls();
+
+    expect(r.status, r.stderr).toBe(0);
+    const apt = at(calls, "apt-get install -y -qq nodejs");
+    const core = at(calls, "npm install -g openclaw@");
+    expect(at(calls, "deb.nodesource.com/setup_24.x")).toBeGreaterThanOrEqual(0);
+    expect(apt, `no apt transaction moved Node off 24.21.0:\n${calls.join("\n")}`).toBeGreaterThanOrEqual(0);
+    expect(core).toBeGreaterThan(apt);
+    expect(calls[core]).toContain(`openclaw@${TARGET}`);
+    expect(calls[core]).toContain("node=24.22.1");
+    expect(box.nodeVersion()).toBe("24.22.1");
   });
 
   it("runs the new core's first command on the new Node", () => {
@@ -395,7 +421,7 @@ describe("the Node 22 → 24 switch inside the updater", () => {
 
     const doctor = calls.findIndex((c) => c.startsWith("openclaw doctor --fix"));
     expect(doctor, `doctor never ran:\n${calls.join("\n")}`).toBeGreaterThanOrEqual(0);
-    expect(calls[doctor]).toContain("node=24.21.0");
+    expect(calls[doctor]).toContain("node=24.22.1");
     expect(doctor).toBeGreaterThan(at(calls, "npm install -g openclaw@"));
   });
 
@@ -415,14 +441,14 @@ describe("the Node 22 → 24 switch inside the updater", () => {
       expect(joined).not.toContain("setup_22.x");
       expect(joined).toContain("deb.nodesource.com/setup_24.x");
     }
-    expect(fresh.nodeVersion()).toBe("24.21.0");
+    expect(fresh.nodeVersion()).toBe("24.22.1");
   });
 
   it("leaves a box that already has a satisfying Node alone", () => {
     // Idempotence, and the reason this guard is cheap enough to sit in two
-    // steps: a unit already on 24.21.0 must not take an apt transaction on
+    // steps: a unit already on 24.22.1 must not take an apt transaction on
     // every update run.
-    const box = makeBox({ node: "24.21.0", core: TARGET });
+    const box = makeBox({ node: "24.22.1", core: TARGET });
 
     const r = run(box, "step_openclaw_install");
     const calls = box.calls();
@@ -441,7 +467,7 @@ describe("the Node 22 → 24 switch inside the updater", () => {
     // itself on its very first invocation — and that sentence used to go to
     // /dev/null behind `|| echo 'unknown version'`, leaving the step to walk on
     // into a WARN-only doctor and a gateway that never comes up.
-    const box = makeBox({ node: "24.21.0", core: "2026.8.1" });
+    const box = makeBox({ node: "24.22.1", core: "2026.8.1" });
     // A core that rejects this Node the way a real one does: the banner on
     // stderr and a non-zero exit on every subcommand.
     writeFileSync(box.openclawBin, `#!/usr/bin/env bash
@@ -487,23 +513,27 @@ exit 1
     // policy`'s candidate here is the installed 25.9.0 — apt cannot select a
     // lower one — so a remedy built from the candidate would hand the operator a
     // command that reinstalls the runtime the core refuses.
-    expect(r.stderr).toContain("--allow-downgrades nodejs=24.21.0-1nodesource1");
+    expect(r.stderr).toContain("--allow-downgrades nodejs=24.22.1-1nodesource1");
     expect(r.stderr).not.toContain("nodejs=25.9.0");
     // …and nothing was installed over it.
     expect(box.calls().join("\n")).not.toContain("npm install -g openclaw@");
     expect(box.coreVersion()).toBe("2026.8.1");
   });
 
-  it("points a 26.0.x host up rather than down", () => {
-    // 26.1.0 is inside the range, so the cheap way out of 26.0.x is the 26
-    // channel — an upgrade apt CAN perform — and the message says so first.
-    const box = makeBox({ node: "26.0.0", core: "2026.8.1" });
+  it("points a 26.x host below 26.12.1 up rather than down", () => {
+    // 26.12.1 is inside the range, so the cheap way out of an older 26 is the
+    // 26 channel — an upgrade apt CAN perform — and the message says so first.
+    // 26.8.2 is the case 2026.10.6 created: accepted by 2026.10.3's
+    // `>=26.1.0`, below the new floor.
+    for (const node of ["26.0.0", "26.8.2"]) {
+      const box = makeBox({ node, core: "2026.8.1" });
 
-    const r = run(box, "step_openclaw_install");
+      const r = run(box, "step_openclaw_install");
 
-    expect(r.status).not.toBe(0);
-    expect(r.stderr).toContain("deb.nodesource.com/setup_26.x");
-    expect(r.stderr).toContain("26.1.0 and newer are accepted");
+      expect(r.status, node).not.toBe(0);
+      expect(r.stderr, node).toContain("deb.nodesource.com/setup_26.x");
+      expect(r.stderr, node).toContain("26.12.1 and newer are accepted");
+    }
   });
 
   it("fails loudly when the apt transaction lands on a Node the core refuses", () => {
@@ -521,7 +551,7 @@ exit 1
 
     expect(r.status).not.toBe(0);
     expect(r.stderr).toContain("did not reach an OpenClaw-compatible version");
-    expect(r.stderr).toContain(">=24.16.0 <25, or >=26.1.0");
+    expect(r.stderr).toContain(">=24.22.1 <25, or >=26.12.1");
     expect(box.calls().join("\n")).not.toContain("npm install -g openclaw@");
     expect(box.coreVersion()).toBe("2026.8.1");
   });

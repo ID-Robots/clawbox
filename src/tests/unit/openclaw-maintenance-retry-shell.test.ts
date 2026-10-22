@@ -8,7 +8,7 @@ import { sliceScript } from "../helpers/gateway-pre-start";
 
 /**
  * The shell twin of `@/lib/openclaw-maintenance` (F4, 2026-10-15), and the boot
- * script's validator reader. The pinned core (2026.10.3) answers a config read
+ * script's validator reader. The pinned core (2026.10.6, as 2026.10.3) answers a config read
  * made while another process holds its state for maintenance with "…undergoing
  * offline maintenance; retry when it finishes." — exit 1, and for
  * `config validate --json` a `valid:false` payload on `<root>`. The pre-start
@@ -137,6 +137,17 @@ printf '%s\\n' "$f"
     const r = run([WRAPPER, bin, "config", "validate", "--json"]);
     expect(r.status).toBe(1);
     expect(r.stdout).toContain("Expected number");
+    expect(callCount()).toBe(1);
+  });
+
+  it("asks once when 2026.10.6 says to restart the Gateway, not to retry", () => {
+    // 2026.10.6's answer for an owner record it cannot read, where 2026.10.3
+    // said "…could not be verified; retry after maintenance finishes.".
+    const restart = "OpenClaw state ownership at ~/.openclaw/state/openclaw.sqlite could not be verified from ~/.openclaw/state/openclaw.sqlite.owner; restart the Gateway.";
+    const bin = stub(0, restart, 1);
+    const r = run([WRAPPER, bin, "config", "validate", "--json"]);
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain("restart the Gateway");
     expect(callCount()).toBe(1);
   });
 });

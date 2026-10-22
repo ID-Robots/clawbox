@@ -220,7 +220,7 @@ between Anthropic accounts get a long list of fixes.
   wherever the change can be applied live. Each of those used to cost about a
   minute of chat. Saving a model is quicker too, because the box makes one
   settings change instead of several.
-- OpenClaw is updated to 2026.10.3 and Hermes Agent to v0.21.7.
+- OpenClaw is updated to 2026.10.6 and Hermes Agent to v0.22.4.
 - Once setup is finished, the assistant answers your first chat message like
   any other, instead of starting a get-to-know-you conversation.
 - On OpenClaw, the assistant comes with a ClawBox handbook and a set of
@@ -447,8 +447,10 @@ between Anthropic accounts get a long list of fixes.
   named by its commit.
 - Your data is preserved, as in 4.2, and the edition lock is untouched.
 - On the OpenClaw edition, the update moves OpenClaw's data to the newer format
-  OpenClaw 2026.10.3 uses. The move is one-way, so the box cannot go back to an
+  OpenClaw 2026.10.6 uses. The move is one-way, so the box cannot go back to an
   earlier release afterwards.
+- The update moves the box to Node.js 24.22.1 or newer, the October 2026
+  Node.js security release that OpenClaw 2026.10.6 requires, on every edition.
 - Sites the assistant was signed in to in its old, separate browser need one
   sign-in in Agent Browser.
 

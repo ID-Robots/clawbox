@@ -36,6 +36,9 @@ describe("isImportableSecretName", () => {
     for (const name of [
       "TELEGRAM_BOT_TOKEN", "DISCORD_BOT_TOKEN", "SLACK_BOT_TOKEN", "WHATSAPP_ENABLED", "EMAIL_PASSWORD",
       "MATRIX_ACCESS_TOKEN", "TWILIO_AUTH_TOKEN", "LINE_CHANNEL_SECRET", "WEBHOOK_SECRET", "GOOGLE_CHAT_SERVICE_ACCOUNT_JSON",
+      // Platforms pinned Hermes v0.22.4 added to its `messaging` variables.
+      "WEIXIN_TOKEN", "WEIXIN_ACCOUNT_ID", "YUANBAO_APP_SECRET", "YUANBAO_APP_ID",
+      "WHATSAPP_CLOUD_ACCESS_TOKEN", "SIGNAL_HTTP_URL", "BLUEBUBBLES_WEBHOOK_PATH",
     ]) {
       expect(isImportableSecretName(name), name).toBe(false);
     }
@@ -48,7 +51,7 @@ describe("isImportableSecretName", () => {
   });
 
   it("never offers any provider credential of the pinned Hermes", () => {
-    // Every name pinned Hermes v0.21.7 files under the `provider` category of
+    // Every name pinned Hermes v0.22.4 (as v0.21.7) files under the `provider` category of
     // its env-var catalogue, taken from the pin rather than from memory. A pin
     // bump that adds a provider adds it here and to MODEL_PROVIDER_NAMES together.
     const pinned = [

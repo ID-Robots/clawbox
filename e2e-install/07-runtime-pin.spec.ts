@@ -42,7 +42,7 @@ const PINNED_CORE = readFileSync(
  * question. A major absent from this table is a pin whose engines changed
  * without this spec being looked at, which the last case fails on deliberately.
  */
-const ENGINE_FLOORS: Record<string, string> = { "24": "24.16.0", "26": "26.1.0" };
+const ENGINE_FLOORS: Record<string, string> = { "24": "24.22.1", "26": "26.12.1" };
 
 function atLeast(version: string, floor: string): boolean {
   const a = version.split(".").map(Number);
@@ -74,7 +74,7 @@ test.describe("the runtime and the core the install actually left behind", () =>
 
   test("has the pinned core installed, and it runs under that Node", async () => {
     // Not `|| true`: the exit status IS the runtime check. A core on a Node it
-    // refuses prints "Node.js >=24.16.0 <25, or >=26.1.0 is required (current: …)"
+    // refuses prints "Node.js >=24.22.1 <25, or >=26.12.1 is required (current: …)"
     // and exits 1, which dockerExec surfaces as a failure rather than an empty
     // string that a `toContain` could read past.
     const out = (await dockerExec(

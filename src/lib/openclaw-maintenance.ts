@@ -1,23 +1,31 @@
 /**
  * OpenClaw's "the state is under offline maintenance; retry when it finishes".
  *
- * The pinned core (2026.10.3) refuses every CLI command that reads its config
- * while another process holds the state database as `sqlite-maintenance`:
+ * The pinned core (2026.10.6, as 2026.10.3 before it) refuses every CLI command
+ * that reads its config while another process holds the state database as
+ * `sqlite-maintenance`:
  *
  *     OpenClaw state at …/openclaw.sqlite is undergoing offline maintenance;
  *     retry when it finishes.
  *
- * and, for an owner record caught half-written, "…could not be verified; retry
- * after maintenance finishes." The holders that ClawBox meets are every gateway
- * start's own CLI bootstrap (about 5 s on an x64 runner, 8.5 s measured on a
- * Jetson) and every `openclaw doctor --fix` ClawBox launches. The refusal comes
+ * 2026.10.3 also answered an owner record caught half-written with "…could not
+ * be verified; retry after maintenance finishes.", which a box still on that
+ * core can print, so it stays matched. 2026.10.6 answers that record with
+ * "…could not be verified from <owner file>; restart the Gateway." instead: an
+ * instruction to restart, not to ask again, so it is NOT matched and reaches
+ * the caller as the core wrote it.
+ *
+ * The holders that ClawBox meets are every gateway start's own CLI bootstrap
+ * (about 5 s on an x64 runner, 8.5 s measured on a Jetson) and every
+ * `openclaw doctor --fix` ClawBox launches. The refusal comes
  * from the config read, before the command acts, so asking again is safe; and
  * the core retries nothing itself except cold write admission for 5 s. Its
  * config read even turns the refusal into "OpenClaw config is invalid / could
  * not be read", which a caller then reports as a broken config.
  *
- * Nothing native exists at 2026.10.3 to wait for it: no flag, no environment
- * variable, no distinct exit code (validate exits 1 like a real refusal). The
+ * Nothing native exists at 2026.10.6 (nor at 2026.10.3) to wait for it: no
+ * flag, no environment variable, no distinct exit code (validate exits 1 like
+ * a real refusal). The
  * core's own instruction is "retry when it finishes", so this does exactly that,
  * keyed on its own words, bounded, inside the caller's timeout, and then says
  * so in a sentence an owner can act on rather than "config invalid".
@@ -29,7 +37,7 @@
 
 import { logSafe } from "@/lib/log-safe";
 
-/** Both of the core's admission refusals end in this instruction. */
+/** Both of 2026.10.3's admission refusals end in this instruction; 2026.10.6 keeps the first. */
 export const OPENCLAW_MAINTENANCE_RE = /retry (?:when it|after maintenance) finishes/i;
 
 /** How long one call keeps asking: past a Jetson gateway bootstrap, short of doctor's minutes. */

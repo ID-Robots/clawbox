@@ -114,6 +114,16 @@ describe("which Hermes session a turn may resume", () => {
     expect(scope.hermesSessionFor(ALICE, alicesSession)).toBe("");
   });
 
+  it("records a session a gateway-routed `hermes chat` opened (v0.22.4: `local-` + 64 hex)", async () => {
+    const scope = await import("@/lib/chat-scope-server");
+    const alicesSession = `local-${"a1b2c3d4".repeat(8)}`;
+    scope.noteHermesSession(alicesSession, "desktop-user-alice");
+    expect(scope.hermesSessionFor(ALICE, alicesSession)).toBe(alicesSession);
+    expect(scope.hermesSessionFor({ username: "bob", isOwner: false }, alicesSession)).toBe("");
+    expect(scope.hermesSessionFor(OWNER, alicesSession)).toBe("");
+    scope.forgetHermesSessionsOf("alice");
+  });
+
   it("names the caller's own transcript, and refuses someone else's or an unsafe one", async () => {
     const scope = await import("@/lib/chat-scope-server");
     const req = new Request("http://localhost/");
