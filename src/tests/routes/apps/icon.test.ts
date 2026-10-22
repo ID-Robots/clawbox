@@ -7,6 +7,10 @@ vi.mock("fs/promises", () => ({
     readFile: vi.fn(),
     mkdir: vi.fn().mockResolvedValue(undefined),
     writeFile: vi.fn().mockResolvedValue(undefined),
+    // placeIcon's temp-then-link write (src/lib/webapp-icon.ts).
+    chmod: vi.fn(async () => undefined),
+    link: vi.fn(async () => undefined),
+    unlink: vi.fn(async () => undefined),
   },
 }));
 
@@ -52,6 +56,14 @@ function noLocalIcon() {
 
 /** Let the fire-and-forget disk write (or its absence) settle. */
 const settle = () => new Promise((r) => setTimeout(r, 0));
+
+/** The smallest body that passes for a PNG: the 8-byte signature and a little after it. */
+const PNG = Buffer.concat([Buffer.from("89504e470d0a1a0a", "hex"), Buffer.alloc(8)]);
+
+/** The store answering 200 with `body`, a fresh Response per request. */
+function storeAnswers(body: Buffer<ArrayBuffer> | string, headers?: Record<string, string>) {
+  mockFetch.mockImplementation(async () => new Response(body, { status: 200, headers }));
+}
 
 describe("/setup-api/apps/icon/[appId]", () => {
   let GET: (req: Request, ctx: { params: Promise<{ appId: string }> }) => Promise<Response>;
@@ -109,33 +121,75 @@ describe("/setup-api/apps/icon/[appId]", () => {
 
   it("proxies a browsed icon from the store without persisting it", async () => {
     noLocalIcon();
-    mockFetch.mockResolvedValue({
-      ok: true,
-      status: 200,
-      arrayBuffer: () => Promise.resolve(new ArrayBuffer(4)),
-    });
+    storeAnswers(PNG);
     const res = await icon();
     expect(res.status).toBe(200);
     expect(res.headers.get("Content-Type")).toBe("image/png");
     expect(res.headers.get("Cache-Control")).toBe("public, max-age=86400");
+    expect(Buffer.from(await res.arrayBuffer()).equals(PNG)).toBe(true);
     await settle();
     // Not installed: one Store session used to leave 62 MB of these behind.
     expect(fs.writeFile).not.toHaveBeenCalled();
+    expect(fs.link).not.toHaveBeenCalled();
   });
 
   it("persists the proxied icon for an installed app, as the repair for a failed install-time download", async () => {
     noLocalIcon();
     vi.mocked(getAll).mockResolvedValue({ "pref:installed_apps": ["test"] });
-    mockFetch.mockResolvedValue({
-      ok: true,
-      status: 200,
-      arrayBuffer: () => Promise.resolve(new ArrayBuffer(4)),
-    });
+    storeAnswers(PNG);
     await icon();
     await settle();
+    // Through placeIcon: a temp file beside the icon, then a link that never
+    // replaces an icon that landed in the meantime.
     expect(fs.writeFile).toHaveBeenCalledTimes(1);
-    expect(String(vi.mocked(fs.writeFile).mock.calls[0][0]))
-      .toBe(`/tmp/test-data-${process.pid}/icons/test.png`);
+    const [tmp, written] = vi.mocked(fs.writeFile).mock.calls[0];
+    expect(String(tmp).startsWith(`/tmp/test-data-${process.pid}/icons/.test.png.`)).toBe(true);
+    expect(Buffer.from(written as Buffer).equals(PNG)).toBe(true);
+    expect(fs.link).toHaveBeenCalledWith(tmp, `/tmp/test-data-${process.pid}/icons/test.png`);
+  });
+
+  it("never keeps a 200 that is not a PNG as an installed app's icon", async () => {
+    // An error or placeholder page answered 200 would otherwise be served
+    // from disk as this app's icon for good: the local file always wins.
+    noLocalIcon();
+    vi.mocked(getAll).mockResolvedValue({ "pref:installed_apps": ["test"] });
+    storeAnswers("<html><body>Not found</body></html>");
+    await icon();
+    await settle();
+    expect(fs.writeFile).not.toHaveBeenCalled();
+    expect(fs.link).not.toHaveBeenCalled();
+  });
+
+  it("refuses a declared body larger than an icon before reading it", async () => {
+    noLocalIcon();
+    vi.mocked(getAll).mockResolvedValue({ "pref:installed_apps": ["test"] });
+    storeAnswers(PNG, { "Content-Length": String(1024 * 1024 + 1) });
+    const res = await icon();
+    expect(res.status).toBe(204);
+    await settle();
+    expect(fs.writeFile).not.toHaveBeenCalled();
+  });
+
+  it("stops reading a body that grows past an icon's size, and keeps none of it", async () => {
+    noLocalIcon();
+    vi.mocked(getAll).mockResolvedValue({ "pref:installed_apps": ["test"] });
+    // No Content-Length: only the running count can stop it.
+    const chunk = Buffer.concat([PNG, Buffer.alloc(256 * 1024 - PNG.length)]);
+    let pulled = 0;
+    mockFetch.mockImplementation(async () => new Response(new ReadableStream({
+      pull(controller) {
+        pulled += 1;
+        if (pulled > 64) controller.close();
+        else controller.enqueue(new Uint8Array(chunk));
+      },
+    }), { status: 200 }));
+    const res = await icon();
+    expect(res.status).toBe(204);
+    // Five quarter-megabyte chunks cross the cap; it did not drain all 16 MB.
+    expect(pulled).toBeLessThan(10);
+    await settle();
+    expect(fs.writeFile).not.toHaveBeenCalled();
+    expect(fs.link).not.toHaveBeenCalled();
   });
 
   it("remembers an icon the store does not have and stops asking for it", async () => {

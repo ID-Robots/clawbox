@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import fs from "fs/promises";
 import { getAll as configGetAll } from "@/lib/config-store";
-import { ICONS_DIR, safeAppId, webappIconPath } from "@/lib/webapp-icon";
+import { isPng, placeIcon, readIconBytes, safeAppId, webappIconPath } from "@/lib/webapp-icon";
 
 export const dynamic = "force-dynamic";
 
@@ -127,7 +127,10 @@ export async function GET(
       signal: AbortSignal.timeout(5000),
     });
     if (res.ok) {
-      const buffer = Buffer.from(await res.arrayBuffer());
+      // Read under the cap every store icon download applies: a body larger
+      // than a tile is no picture, and the letter tile stands in for it.
+      const buffer = await readIconBytes(res);
+      if (!buffer) return noIcon();
 
       // data/icons holds INSTALLED apps' icons — the install route downloads
       // one, uninstall removes it, webapp-icon.ts generates one. Persisting
@@ -135,10 +138,13 @@ export async function GET(
       // session, with nothing that ever pruned it. The write here is only the
       // repair for an install whose own download failed; a browsed icon is
       // served with `max-age` and left to the browser's cache.
-      if (await isInstalled(appId)) {
-        fs.mkdir(ICONS_DIR, { recursive: true })
-          .then(() => fs.writeFile(iconPath, buffer))
-          .catch(() => {});
+      //
+      // Only a PNG is kept, as the install-time downloads keep only a PNG: a
+      // 200 that is an error page would otherwise be served as this app's
+      // icon from disk for good. `placeIcon` never replaces a file, so an
+      // icon that landed meanwhile (a generated one, a finished install) wins.
+      if (isPng(buffer) && await isInstalled(appId)) {
+        placeIcon(iconPath, buffer).catch(() => {});
       }
 
       return new NextResponse(buffer, {
