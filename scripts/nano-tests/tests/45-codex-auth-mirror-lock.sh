@@ -34,9 +34,14 @@
 #     5 s busy_timeout — the step beta's write-back took — to show what
 #     queuing would have cost at that moment.
 #
+#   * Every other pass runs under a `node --require` recorder that logs each
+#     statement the script runs through node:sqlite and the file it runs on.
+#
 # Every pass must exit 0 in under 2 s, reach the write-back (its "could not
 # be updated" warning: nothing to record the rotation in), adopt nothing, and
-# leave the live store's row byte-for-byte as it was. At least one pass must
+# leave the live store's row byte-for-byte as it was. On the live store the
+# recorded passes may only open read-only and read — its auth_profile_store
+# row first, never a BEGIN IMMEDIATE or any write. At least one pass must
 # have run while the gateway held the lock; when the gateway never held it
 # during a pass the run cannot show that, and says so as a skip.
 # shellcheck source=scripts/nano-tests/lib.sh
@@ -122,8 +127,42 @@ function layout(work) {
     stateDir: path.join(work, "state-dir"),
     homeAuth: path.join(work, "home-auth.json"),
     done: path.join(work, "load-done"),
+    recorder: path.join(work, "sql-recorder.cjs"),
+    sqlLog: (i) => path.join(work, `sql-${i}.log`),
   };
 }
+
+// `node --require`d into every other pass: records each statement the script
+// runs through node:sqlite and the file it runs it on, and changes nothing
+// else. The script asks for node:sqlite at every call site, so this sees all.
+const RECORDER = `
+const Module = require("node:module");
+const fs = require("node:fs");
+const real = require("node:sqlite");
+const log = process.env.NANO_CI_SQL_LOG;
+const record = (file, sql) =>
+  fs.appendFileSync(log, JSON.stringify({ file: String(file), sql: String(sql).replace(/\\s+/g, " ").trim().slice(0, 80) }) + "\\n");
+// The arguments go through untouched: node:sqlite refuses an explicit
+// undefined \`options\`. The open is recorded before it is tried.
+function DatabaseSync(...args) {
+  const [file, options] = args;
+  record(file, options && options.readOnly ? "OPEN READONLY" : "OPEN READWRITE");
+  const db = new real.DatabaseSync(...args);
+  const exec = db.exec.bind(db);
+  const prepare = db.prepare.bind(db);
+  db.exec = (sql) => { record(file, sql); return exec(sql); };
+  db.prepare = (sql) => { record(file, sql); return prepare(sql); };
+  return db;
+}
+const recorded = { ...real, DatabaseSync };
+const load = Module.prototype.require;
+Module.prototype.require = function (id) {
+  return id === "node:sqlite" || id === "sqlite" ? recorded : load.apply(this, arguments);
+};
+`;
+
+// Anything on the live store but a read-only open and reads.
+const WRITE_PATH = /^(OPEN READWRITE|BEGIN|COMMIT|ROLLBACK|INSERT|UPDATE|DELETE|REPLACE|CREATE|DROP|ALTER|PRAGMA journal_mode)/i;
 
 function setup(live, work) {
   const at = layout(work);
@@ -154,6 +193,40 @@ function setup(live, work) {
     tokens: { access_token: token("rotated"), refresh_token: ROTATED_REFRESH, account_id: "nano-ci" },
   };
   fs.writeFileSync(at.rotated, JSON.stringify(rotation), { mode: 0o600 });
+  fs.writeFileSync(at.recorder, RECORDER);
+}
+
+// What the recorded passes ran on the live store (the symlink resolves to it).
+function statementsOnLive(live, logs) {
+  const target = fs.realpathSync(live);
+  const onLive = [];
+  let recorded = 0;
+  for (const log of logs) {
+    let lines = [];
+    try {
+      lines = fs.readFileSync(log, "utf8").split("\n").filter(Boolean);
+    } catch {
+      lines = [];
+    }
+    if (lines.length > 0) recorded += 1;
+    for (const line of lines) {
+      const { file, sql } = JSON.parse(line);
+      let real = file;
+      try {
+        real = fs.realpathSync(file);
+      } catch {
+        real = file;
+      }
+      if (real === target) onLive.push(sql);
+    }
+  }
+  return {
+    passes: logs.length,
+    recorded,
+    onLive: onLive.length,
+    looked: onLive.filter((sql) => /^SELECT store_json FROM auth_profile_store/i.test(sql)).length,
+    writes: [...new Set(onLive.filter((sql) => WRITE_PATH.test(sql)))].slice(0, 5),
+  };
 }
 
 function refreshIn(file) {
@@ -234,12 +307,18 @@ async function run(live, script, nodeBin, work, unitPath) {
     }
   })();
 
-  const pass = () =>
+  // Odd passes run under the statement recorder; even ones exactly as the
+  // unit runs the script.
+  const sqlLogs = [];
+  const pass = (i) =>
     new Promise((resolve) => {
+      const recorded = i % 2 === 1;
+      const argv = recorded ? ["--require", at.recorder, script, at.home, at.homeAuth] : [script, at.home, at.homeAuth];
+      if (recorded) sqlLogs.push(at.sqlLog(i));
       const t0 = Date.now();
       const started = process.hrtime.bigint();
-      const child = spawn(nodeBin, [script, at.home, at.homeAuth], {
-        env,
+      const child = spawn(nodeBin, argv, {
+        env: recorded ? { ...env, NANO_CI_SQL_LOG: at.sqlLog(i) } : env,
         stdio: ["ignore", "ignore", "pipe"],
       });
       let err = "";
@@ -266,7 +345,7 @@ async function run(live, script, nodeBin, work, unitPath) {
   for (;;) {
     const loadDone = fs.existsSync(at.done);
     if ((loadDone && passes.length >= MIN_PASSES) || Date.now() - began > CAP_MS) break;
-    passes.push(await pass());
+    passes.push(await pass(passes.length));
     await sleep(150);
   }
   stop = true;
@@ -314,6 +393,7 @@ async function run(live, script, nodeBin, work, unitPath) {
       timedOut: waits.filter((w) => !w.got).length,
       maxMs: waits.reduce((max, w) => Math.max(max, w.t1 - w.t0), 0),
     },
+    sql: statementsOnLive(live, sqlLogs),
     mirror: { [CORE_REFRESH]: "core", [ROTATED_REFRESH]: "rotated" }[refreshIn(at.homeAuth)] || "none",
     rotatedIntact: refreshIn(at.rotated) === ROTATED_REFRESH,
   };
@@ -455,6 +535,18 @@ if [ "$(jq -r '.sha' <<<"$before")" = "$(jq -r '.sha // empty' <<<"$after" 2>/de
   ok "the live store's auth_profile_store row is unchanged, nothing was adopted, and the app-server's rotation was left alone"
 else
   not_ok "something was written: row before $(jq -r '.sha' <<<"$before") after $(jq -r '.sha // "unreadable"' <<<"$after" 2>/dev/null), mirror carries the $(jq -r '.mirror' <<<"$result") token, rotation intact $(jq -r '.rotatedIntact' <<<"$result")"
+fi
+
+recorded=$(jq '.sql.passes // 0' <<<"$result")
+writes=$(jq -r '(.sql.writes // []) | join("; ")' <<<"$result")
+if [ "$recorded" -eq 0 ]; then
+  not_ok "no pass ran under the statement recorder"
+elif [ -n "$writes" ]; then
+  not_ok "the write-back took the write path on the live store that holds no such profile: $writes"
+elif [ "$(jq '.sql.recorded' <<<"$result")" -ne "$recorded" ] || [ "$(jq '.sql.looked' <<<"$result")" -lt "$recorded" ]; then
+  not_ok "the statement recorder saw $(jq '.sql.recorded' <<<"$result") of $recorded recorded passes and $(jq '.sql.looked' <<<"$result") reads of the live auth_profile_store row: it cannot vouch for the rest"
+else
+  ok "the $recorded recorded passes opened the live store read-only only and read its auth_profile_store row first: $(jq '.sql.onLive' <<<"$result") statements there, no BEGIN IMMEDIATE and no write"
 fi
 
 under=$(jq '[.passes[] | select(.held > 0)] | length' <<<"$result")
