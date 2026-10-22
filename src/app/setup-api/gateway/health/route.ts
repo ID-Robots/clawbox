@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { envPort, isPortOpen } from "@/lib/port-probe";
 import { gatewayRestartInFlight } from "@/lib/gateway-restart-tracker";
 import { readOpenclawMigrationStatus } from "@/lib/openclaw-migration-status";
+import { readOpenclawStartRecovery } from "@/lib/openclaw-start-recovery";
 
 export const dynamic = "force-dynamic";
 
@@ -24,11 +25,18 @@ const GATEWAY_PORT = envPort(process.env.GATEWAY_PORT, 18789);
 // folded into it — the gateway IS up, and a client waiting for a restart must
 // still see it come back. Only the reason and the byte counts: this route is
 // served before sign-in, so it names no agent and no path.
+//
+// `startRecovery` is the same kind of fact about the gateway's last starts: it
+// would not start over a database the core refused, and the pre-start repaired
+// it or put back its pre-update copy (src/lib/openclaw-start-recovery.ts). The
+// owner's data changed, so it is said. Outcome, reason and time only, for the
+// same reason as above.
 export async function GET() {
   const restarting = gatewayRestartInFlight();
-  const [available, migration] = await Promise.all([
+  const [available, migration, startRecovery] = await Promise.all([
     restarting ? Promise.resolve(false) : isPortOpen(GATEWAY_PORT, "127.0.0.1", 1000),
     readOpenclawMigrationStatus().catch(() => null),
+    readOpenclawStartRecovery().catch(() => null),
   ]);
   return NextResponse.json({
     available,
@@ -43,6 +51,9 @@ export async function GET() {
             freeBytes: migration.freeBytes,
           },
         }
+      : {}),
+    ...(startRecovery
+      ? { startRecovery: { outcome: startRecovery.outcome, reason: startRecovery.reason, at: startRecovery.at } }
       : {}),
   });
 }

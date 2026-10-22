@@ -67,6 +67,33 @@ describe("OpenClawApp and the agents' databases", () => {
     expect(await screen.findByTestId("openclaw-migration-notice")).toHaveTextContent(text);
   });
 
+  it.each([
+    ["repaired", null, "ClawBox ran OpenClaw's own repair on it"],
+    ["restored", null, "ClawBox put back that database's copy from before the last update"],
+    ["failed", "no-backup", "there is no copy from before the last update to put back"],
+    ["failed", "restore-did-not-help", "so ClawBox stopped trying"],
+  ])("says what the pre-start did about a %s start loop (%s), above a gateway that is up", async (outcome, reason, text) => {
+    health = { ...health, startRecovery: { outcome, reason, at: "2026-10-23T11:00:00Z" } };
+    render(<OpenClawApp />);
+    const notice = await screen.findByTestId("openclaw-start-recovery-notice");
+    expect(notice).toHaveTextContent("OpenClaw could not start over an agent database");
+    expect(notice).toHaveTextContent(text);
+    expect(notice).toHaveTextContent(/nothing was deleted/i);
+    expect(document.querySelector("iframe")).not.toBeNull();
+  });
+
+  it("says it on the offline screen too, where a gateway it could not recover leaves the owner", async () => {
+    health = { available: false, port: 18789, restarting: false, startRecovery: { outcome: "failed", reason: "no-backup", at: "2026-10-23T11:00:00Z" } };
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      render(<OpenClawApp />);
+      await vi.advanceTimersByTimeAsync(16 * 3000);
+      expect(await screen.findByTestId("openclaw-start-recovery-notice")).toHaveTextContent("Run the update again from Settings, or contact support");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("ignores a migration field it cannot read", async () => {
     health = { ...health, migration: { state: "fine", reason: 7 } };
     render(<OpenClawApp />);

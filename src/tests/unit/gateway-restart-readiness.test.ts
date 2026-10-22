@@ -44,6 +44,13 @@ vi.mock("@/lib/port-probe", async (orig) => ({
   waitForPortOpen: waitForPortOpenMock,
 }));
 
+// doctor's bound is sized by the agent databases on disk; that is a real read
+// these fake-timer cases cannot advance, and no case here is about the size.
+vi.mock("@/lib/openclaw-migration-status", async (orig) => ({
+  ...(await orig<typeof import("@/lib/openclaw-migration-status")>()),
+  openclawDatabaseBytes: async () => 0,
+}));
+
 describe("restartGateway waits for the gateway to listen again", () => {
   beforeEach(() => {
     vi.resetModules();

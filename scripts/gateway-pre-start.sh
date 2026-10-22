@@ -225,6 +225,51 @@ if [ -z "${CLAWBOX_OPENCLAW_2026_10:-}" ]; then
 fi
 export CLAWBOX_OPENCLAW_2026_10
 
+# ── Start-loop recovery: a database the core refuses at every start ─────────
+#
+# One session row the core refused in the default agent's database kept a box's
+# gateway from starting, and `Restart=always` restarted it a dozen times in
+# eight minutes with nothing in between ever changing. This is the in between:
+# when the unit has restarted itself three times running and the gateway's own
+# output names a database it refused, scripts/openclaw-db-maintenance.py
+# (`start-guard`) runs the core's own repair (`doctor --fix`, then `doctor
+# --session-sqlite recover`); if the next start still fails over a database it
+# puts back that database's newest pre-update copy, setting the refused one
+# aside. Nothing is deleted, and data/openclaw-start-guard.json says what was
+# done, for the owner. On every other start it only records the start, and
+# whether the last run reached `gateway ready` — which the rollback-copy
+# clean-up at the end of this script waits for.
+#
+# FIRST, before anything else here touches the state, and with most of the
+# unit's 600 s: a repair on a few GB of database takes minutes. 150 s are held
+# back for the rest of this script on a box whose config the core already
+# accepts. Every failure is a WARN: this never stops a start.
+CLAWBOX_START_GUARD="$SCRIPT_DIR/openclaw-db-maintenance.py"
+if [ "${CLAWBOX_OPENCLAW_2026_10:-0}" = "1" ] && [ -x "$OPENCLAW_BIN" ] && [ -f "$CLAWBOX_START_GUARD" ] \
+  && command -v python3 >/dev/null 2>&1; then
+  _sg_unit="${CLAWBOX_GATEWAY_UNIT:-clawbox-gateway.service}"
+  # systemd's own count of automatic restarts since the unit was last started
+  # by hand; anything that is not a number counts as none.
+  _sg_restarts="$(systemctl show "$_sg_unit" -p NRestarts --value 2>/dev/null || true)"
+  [[ "$_sg_restarts" =~ ^[0-9]+$ ]] || _sg_restarts=0
+  _sg_ceiling="${CLAWBOX_PRESTART_CEILING_S:-600}"
+  [[ "$_sg_ceiling" =~ ^[0-9]+$ ]] || _sg_ceiling=600
+  _sg_budget=$(( _sg_ceiling - 150 - SECONDS ))
+  if [ "$_sg_budget" -lt 0 ]; then _sg_budget=0; fi
+  _sg_rc=0
+  timeout -k 10 "$(( _sg_budget + 30 ))" python3 -I "$CLAWBOX_START_GUARD" start-guard \
+    --state-dir "$OPENCLAW_STATE_DIR" \
+    --config "$OPENCLAW_CONFIG" \
+    --data-dir "$CLAWBOX_ROOT/data" \
+    --openclaw-bin "$OPENCLAW_BIN" \
+    --unit "$_sg_unit" \
+    --restarts "$_sg_restarts" \
+    --budget-seconds "$_sg_budget" || _sg_rc=$?
+  if [ "$_sg_rc" -ne 0 ]; then
+    echo "  WARN: start-loop recovery stopped (exit $_sg_rc); the gateway starts as it is" >&2
+  fi
+fi
+
 # ── First boot on a NEW OpenClaw core: make the config loadable again ───────
 #
 # THE INCIDENT (TASK-737). A customer box was dark for 25 hours after the

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describeOpenclawMigration, migrationBudgetMs, openclawDatabaseBytes } from "@/lib/openclaw-migration-status";
+import { describeOpenclawMigration, doctorFixBudgetMs, migrationBudgetMs, openclawDatabaseBytes } from "@/lib/openclaw-migration-status";
 
 // The updater's half of the agent-database work: how long it waits for the
 // core's migration, and what it says when the gateway answers over agents the
@@ -32,10 +32,41 @@ describe("migrationBudgetMs", () => {
   });
 });
 
+describe("doctorFixBudgetMs", () => {
+  it("keeps the caller's flat bound for a box with no databases", () => {
+    expect(doctorFixBudgetMs(0, 90_000)).toBe(90_000);
+    expect(doctorFixBudgetMs(0, 180_000)).toBe(180_000);
+  });
+
+  it("gives a ~3 GB box two minutes a GiB on top, so its doctor is not cut off", () => {
+    // 3 GB is 2.79 GiB: three started GiB.
+    expect(doctorFixBudgetMs(3e9, 90_000)).toBe(450_000);
+  });
+
+  it("never passes twenty minutes, so the verify stays sane however large the databases", () => {
+    expect(doctorFixBudgetMs(500 * GiB, 90_000)).toBe(1_200_000);
+    expect(doctorFixBudgetMs(500 * GiB, 180_000)).toBe(1_200_000);
+  });
+
+  it("is never below its base, even one above the cap", () => {
+    expect(doctorFixBudgetMs(500 * GiB, 1_500_000)).toBe(1_500_000);
+  });
+
+  it.each([Number.NaN, -1, Number.POSITIVE_INFINITY])("reads %s as no databases", (bytes) => {
+    expect(doctorFixBudgetMs(bytes, 90_000)).toBe(90_000);
+  });
+});
+
 describe("the updater wiring", () => {
   it("waits for the appliance's openclaw_install by the databases it migrates", () => {
     expect(UPDATER).toMatch(/: step\.id === "openclaw_install"\n\s+\? await applianceOpenclawInstallTimeoutMs\(\)/);
     expect(UPDATER).toMatch(/baseMs: OPENCLAW_INSTALL_TIMEOUT_MS,\n\s+perGibMs: OPENCLAW_MIGRATION_MS_PER_GIB,\n\s+capMs: X64_DESKTOP_CORE_STEP_TIMEOUT_MS,/);
+  });
+
+  it("bounds the verify's doctor --fix by the databases it reads, from the old 90 s up", () => {
+    expect(UPDATER).toContain("const DOCTOR_FIX_TIMEOUT_MS = 90_000;");
+    expect(UPDATER).toContain("return doctorFixBudgetMs(databaseBytes, DOCTOR_FIX_TIMEOUT_MS);");
+    expect(UPDATER).toMatch(/const timeoutMs = doctorFixTimeoutFor\(\n\s+await openclawDatabaseBytes\(openclawTreePaths\(\)\.openclawHome\)\.catch\(\(\) => 0\),\n\s+\);/);
   });
 
   it("says so on the update's result when the gateway answers over degraded agents", () => {
