@@ -5,6 +5,7 @@
 // block is the owner's company wiki, and the cost of a missing one is a search
 // the agent can still make.
 
+import { constants as fsConstants } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -95,31 +96,43 @@ export function runsOnDevice(model) {
  * and time): ClawBox replaces it atomically after a nightly merge, so the
  * next prompt build sees the new one, with no restart. Null when there is no
  * file or it is not a block ClawBox wrote.
+ *
+ * The file is opened once and both checked and read through that handle, so
+ * the text taken is the one the checks passed, even when a replace lands in
+ * between. Non-blocking, so a FIFO in its place cannot hold the turn open.
  */
 export function createBlockReader(file) {
   let cached = null;
   return async function readBlock() {
-    let st;
+    let fh;
     try {
-      st = await fs.stat(file);
+      fh = await fs.open(file, fsConstants.O_RDONLY | (fsConstants.O_NONBLOCK ?? 0));
     } catch {
       cached = null;
       return null;
     }
-    if (!st.isFile() || st.size > MAX_FILE_BYTES) return null;
-    const key = `${st.ino}:${st.size}:${st.mtimeMs}`;
-    if (cached?.key === key) return cached.text;
-    let text = null;
     try {
-      const o = JSON.parse(await fs.readFile(file, "utf8"));
-      if (o && o.format === CORE_CONTEXT_FORMAT && typeof o.text === "string" && o.text.trim() !== "" && o.text.length <= MAX_BLOCK_CHARS) {
-        text = o.text;
+      const st = await fh.stat();
+      if (!st.isFile() || st.size > MAX_FILE_BYTES) return null;
+      const key = `${st.ino}:${st.size}:${st.mtimeMs}`;
+      if (cached?.key === key) return cached.text;
+      let text = null;
+      try {
+        const o = JSON.parse(await fh.readFile("utf8"));
+        if (o && o.format === CORE_CONTEXT_FORMAT && typeof o.text === "string" && o.text.trim() !== "" && o.text.length <= MAX_BLOCK_CHARS) {
+          text = o.text;
+        }
+      } catch {
+        text = null;
       }
+      cached = { key, text };
+      return text;
     } catch {
-      text = null;
+      cached = null;
+      return null;
+    } finally {
+      await fh.close().catch(() => {});
     }
-    cached = { key, text };
-    return text;
   };
 }
 

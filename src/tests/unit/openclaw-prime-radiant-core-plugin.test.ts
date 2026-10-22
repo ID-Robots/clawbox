@@ -5,6 +5,7 @@
  * rewrote the file, with no restart — and nothing in a ClawBox user's own
  * chat, for another agent, on a model running on the device, or with no file.
  */
+import { execFileSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
@@ -106,6 +107,15 @@ describe("the block on disk", () => {
     writeBlock("x".repeat(64_001));
     expect(await promptContext(OWNER, CLOUD, createBlockReader(file))).toBeUndefined();
     fs.writeFileSync(file, "not json");
+    expect(await promptContext(OWNER, CLOUD, createBlockReader(file))).toBeUndefined();
+  });
+
+  it.skipIf(process.platform === "win32")("adds nothing from a folder or a FIFO in the file's place, and does not wait on one", async () => {
+    fs.mkdirSync(file, { recursive: true });
+    expect(await promptContext(OWNER, CLOUD, createBlockReader(file))).toBeUndefined();
+    fs.rmSync(file, { recursive: true });
+    execFileSync("mkfifo", [file]);
+    // No writer ever opens the FIFO: a blocking open would hold the turn until the test times out.
     expect(await promptContext(OWNER, CLOUD, createBlockReader(file))).toBeUndefined();
   });
 
