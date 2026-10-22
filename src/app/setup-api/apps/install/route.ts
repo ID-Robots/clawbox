@@ -11,7 +11,7 @@ import { boundPreferenceText } from "@/lib/preference-schema";
 import { setPreferences } from "@/lib/preference-store";
 import { isClawhubHandle, lookupClawhubOwner, pickClawhubMatch } from "@/lib/clawhub-url";
 import { refreshSkillsCache } from "@/lib/openclaw-skill-info";
-import { ICONS_DIR, safeAppId, webappIconPath } from "@/lib/webapp-icon";
+import { ICONS_DIR, isPng, readIconBytes, safeAppId, webappIconPath } from "@/lib/webapp-icon";
 import { withOpenclawMaintenanceRetry } from "@/lib/openclaw-maintenance";
 import { CLAWBOX_APP_SOURCE } from "@/lib/store-categories";
 import { clawboxStoreAppFrom, installClawboxApp } from "@/lib/store-install";
@@ -200,7 +200,11 @@ async function downloadIcon(appId: string): Promise<{ saved: boolean }> {
       fs.mkdir(ICONS_DIR, { recursive: true }),
     ]);
     if (!res.ok) return { saved: false };
-    const buffer = Buffer.from(await res.arrayBuffer());
+    // A tile-sized PNG or nothing: the icon route serves this file as
+    // `image/png` from then on, so an error page answered 200, or a body of
+    // any size, must not become the app's icon.
+    const buffer = await readIconBytes(res);
+    if (!buffer || !isPng(buffer)) return { saved: false };
     await fs.writeFile(iconPath, buffer);
     return { saved: true };
   } catch (err) {
