@@ -1706,6 +1706,8 @@ export const ja: Record<string, string> = {
   "whatsNew.holdToTalkBody": "チャットのマイクボタンか F8 を押したまま話し、離すと送信します。音声での返答はダウンロードが数分の一の大きさになり、設定 → 音声 で、入力した質問への返答も含めてすべての返答を読み上げるようにできます。",
   "whatsNew.agentChartTitle": "コーディングエージェントをライブチャートで",
   "whatsNew.agentChartBody": "コーディングエージェントは、作業中のエージェントのチャートを開いて始まります。作業中の実行にメッセージを送れ、上限を超えた実行やチームは断られずに順番を待ちます。チェックが失敗したプルリクエストは「CI を修正」で修正に戻せます。",
+  "whatsNew.primeRadiantTitle": "Prime Radiant、生きたウィキ",
+  "whatsNew.primeRadiantBody": "あなたのためにウィキを書き続ける新しいアプリです。文書を指定すると、文書ごとに1ページを書き、見つけた事実をそれぞれの出典と確からしさとともに示します。毎晩ウィキを整理し、互いに矛盾する事実を探し、自分では決められないことをあなたに尋ねます。",
   "whatsNew.readMore": "4.3 の新機能を読む",
   "whatsNew.planTitle": "ClawBox AI プランで利用できます",
   "whatsNew.planPaidFeatures": "コーディングエージェントと Memory Shard には Pro または Max プランが必要です。",

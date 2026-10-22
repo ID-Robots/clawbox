@@ -1,13 +1,14 @@
 # ClawBox 4.3.0
 
-Previous release: v4.2.0, 5 October 2026. 122 commits.
+Previous release: v4.2.0, 5 October 2026. 424 commits.
 
 4.3 adds a Screenshot app and gives you and your assistant one shared browser.
 An app the Coding Agent built can now be shared through a public link. xAI Grok
 joins the AI providers, most model changes no longer restart the assistant, you
 can hold to talk, and the Coding Agent shows its agents at work on a live
-chart. Wi-Fi, updates, backups, first setup and switching between Anthropic
-accounts get a long list of fixes.
+chart. Prime Radiant, a new app, writes a wiki from your own documents and
+checks it every night. Wi-Fi, updates, backups, first setup and switching
+between Anthropic accounts get a long list of fixes.
 
 ## Highlights
 
@@ -34,8 +35,40 @@ accounts get a long list of fixes.
   its agents at work. You can message a run while it works, extra runs and
   teams wait in line instead of being refused, and Fix CI sends a pull request
   whose checks failed back to be fixed.
+- **Prime Radiant, a living wiki.** A new app that keeps a wiki for you. Point
+  it at your documents and it writes a page for each one, listing the facts it
+  found with where each came from and how sure it is. Every night it tidies the
+  wiki, looks for facts that contradict each other, and asks you about anything
+  it cannot settle alone.
 
 ## New features
+
+### Prime Radiant
+
+- **Prime Radiant** is a wiki the box keeps for you, on both editions. Open it
+  from its icon on the desktop, next to Memory Shard; the first time, the box
+  creates the wiki and there is nothing to set up. Adding documents needs the
+  box signed in to ClawBox AI, which writes the pages; reading, reviewing and
+  undoing work without it.
+- **Add** reads folders on the box, or your whole home folder in one click, and
+  files you drop on it. Text, Markdown, PDF, Word, OpenDocument and RTF files
+  are converted on the box, and a document already in the wiki is not written
+  twice. A folder import leaves out code projects, caches, boilerplate,
+  temporary files and machine-generated text; a file you drop is always read.
+  What looks like a secret is removed before any text leaves the box.
+- Each document gets a page that lists its facts, each with how sure it is,
+  where it came from and whether you verified it. **Map** draws the pages and
+  their links as a 3D picture, and **Pages** lists them and, with Memory Shard
+  switched on, searches inside them.
+- **Every night**, 03:00 by default, Prime Radiant reads new and changed
+  documents from the folders you chose, looks for facts that contradict each
+  other and runs its checks. A night that would change a page you verified, or
+  whose checks find an error, is held: its questions go to **Review**, where
+  you keep an answer, write the right one, or set the question aside, and
+  **Merge** then puts the night's work into the wiki.
+- **History** records every change to a page, and **Undo** reverses one. The
+  assistant can work the wiki for you too, and each change it makes shows in
+  History under its own name.
 
 ### Screenshot app
 
@@ -74,15 +107,20 @@ accounts get a long list of fixes.
 - Right-click an app the Coding Agent built, on the desktop, and choose
   **Create public link**: **Temporary**, which stops working after the time you
   choose, or **Permanent**, which stays on until you disable it.
-- Visitors reach only that app, never your desktop, files or other apps. By
-  default they can only view it; you can list the app's API paths they may use
-  as well.
+- Visitors reach only that app, never your desktop, files or other apps. For an
+  app with its own server, by default they can load its data from its own
+  `/api` but not change it: **The app's own data** in the dialog is **Read
+  only** unless you choose **Read and write**, or **Off** to serve only the
+  app's pages. You can list more of the app's paths visitors may use as well.
 - Choose **Require a password** or **No password**. A password belongs to that
   link alone, can be typed or generated, and can be changed or removed later
   without changing the link.
 - Each link has an address of its own, which changes when the box restarts. A
   disabled or expired link tells visitors it is gone for ten minutes, then
   stops answering.
+- On a link with a password, the plain address a visitor copies from the
+  browser asks for the password instead of answering "not found", and the
+  right password opens the app on that device.
 - Only the owner can create a link; the assistant cannot publish an app.
 
 ### xAI Grok
@@ -101,6 +139,9 @@ accounts get a long list of fixes.
 - **Auto-play every spoken reply**, a new switch in Settings → Voice that is
   off by default, plays the reply to a question you typed aloud as well, while
   you are at the chat.
+- **Short spoken answers**, another new switch in Settings → Voice that is off
+  by default, has a spoken reply say only the main answer, in at most three
+  sentences, so it starts sooner. The full reply still appears in the chat.
 
 ### Terminal
 
@@ -151,6 +192,24 @@ accounts get a long list of fixes.
 - **A fair share of the processor.** Coding runs work at a lower priority than
   the rest of the box and share a processor budget, smaller on battery, so the
   desktop stays responsive while they run.
+- **Token use.** The Coding Agent's settings have a new **Token use** group
+  under **Advanced**: **Run instructions** (**Short instructions** or **Full
+  instructions**), **Helper agents** (**Only when it pays off** or **Always
+  delegate**) and **Browser and media tools** (**Only for visual work** or
+  **Always**). The leaner choice is the default for each, so every run sends
+  fewer tokens, and a run keeps the choices it started with.
+- **Leaner defaults for new runs.** Unless you changed them, a run now takes at
+  most 200 steps instead of 400 and gets one attempt at what it had to deliver
+  instead of three; **Attempts at a run's deliverable** raises the attempts
+  again. A box with no effort saved starts runs at **Very high** instead of
+  **Ultracode**. Coding Agent setup saves the effort it shows, so a box set up
+  before this release keeps the Ultracode it saved there until you change it.
+- **ClawBox apps in the Store.** The Store app has a **ClawBox Apps**
+  category: **Install** downloads a published app, checks it, puts it in the
+  Coding Agent's project folder and on the desktop, and **Uninstall** removes
+  it again. A Coding Agent project with a `clawbox.json` gets **Publish to
+  ClawBox Store**; until publishing is open to your account, the dialog says it
+  is coming soon.
 
 ## Improvements
 
@@ -161,9 +220,26 @@ accounts get a long list of fixes.
   wherever the change can be applied live. Each of those used to cost about a
   minute of chat. Saving a model is quicker too, because the box makes one
   settings change instead of several.
-- OpenClaw is updated to 2026.10.2 and Hermes Agent to v0.21.7.
+- OpenClaw is updated to 2026.10.3 and Hermes Agent to v0.21.7.
 - Once setup is finished, the assistant answers your first chat message like
   any other, instead of starting a get-to-know-you conversation.
+- On OpenClaw, the assistant comes with a ClawBox handbook and a set of
+  everyday skills, such as email, documents, reminders and research. Each is
+  added once, and a skill you remove is not added back. A scheduled task that
+  keeps failing now says so in the chat.
+- The Coding Agent's **Let the assistant delegate coding work** switch is on
+  unless you switched it off, so once the Coding Agent is set up, the
+  assistant can hand it coding work from the chat.
+- **Protect ClawBox files from the agent**, a new switch in Settings →
+  Harness, is on by default and stops the assistant's own file and shell tools
+  deleting or overwriting ClawBox's own files and local AI models. On
+  OpenClaw, changing it restarts the assistant.
+- On OpenClaw, memory search reads the assistant's memory and no longer
+  indexes every past chat, which kept its databases growing. A box that set
+  this itself keeps its setting; on the others the index is rebuilt once after
+  the update.
+- On OpenClaw with ClawBox AI, a long chat is compacted at about 128K tokens,
+  so each message no longer sends more of the conversation as the chat grows.
 - What the assistant's tools hand back is scrubbed of tokens, keys and other
   credentials before the assistant sees it.
 - Spoken replies are sent compressed: a 15-second reply is about 90 KB instead
@@ -249,6 +325,9 @@ accounts get a long list of fixes.
 - On ClawBox installed on your own x64 machine, a Cloudflare Tunnel download
   that stalls no longer holds up the install or **Install Cloudflare Tunnel**:
   it gives up within minutes with a warning, and the button can try again.
+- Restoring a ClawKeep backup always turns remote access back on, so the box
+  can be reached afterwards, and it stays on after a reboot. This happens also
+  when remote access was off on the box before the restore.
 
 ### Updates
 
@@ -256,6 +335,16 @@ accounts get a long list of fixes.
   still running, so it is not left with new code under an old build. This also
   covers an update started from an older build.
 - The first start after an update no longer drops the remote desktop once.
+- A Jetson box no longer comes back from an update unable to boot because the
+  firmware moved its SSD down the boot order: the SSD is kept first at every
+  start and shutdown, and network boot is switched off.
+- On OpenClaw, an update that lacks the disk space to move the assistant's data
+  to the new format stops before it changes OpenClaw, and says how much space
+  it needs and how much is free. When an agent's data is left unfinished, the
+  OpenClaw app says **OpenClaw's agent data needs attention** and what to do,
+  instead of looking ready.
+- On OpenClaw, a restart or update gives the assistant up to five and a half
+  minutes to finish saving before it is stopped, instead of 30 seconds.
 
 ### Sign-ins and providers
 
@@ -267,6 +356,14 @@ accounts get a long list of fixes.
   no assistant: the cloud defaults wait until the assistant answers.
 - The ClawBox AI sign-in no longer reports a time-out for a sign-in that
   worked.
+- Saving ClawBox AI after its sign-in was revoked no longer leaves setup on
+  **Warming up**: the revoked sign-in is cleared and you are asked to sign in
+  again. A model save the box has not answered within 90 seconds stops and
+  says so.
+- When your ClawBox AI allowance is used up, a failed chat message says which
+  allowance is spent and when it frees up, instead of a generic rate limit, and
+  for the weekly allowance how to add an extra-usage pack. The usage card calls
+  the five-hour allowance **Short-term limit (5 hours)**.
 - The Telegram card no longer says the channel is active when the bot is not
   receiving messages, for example after its token was rejected.
 
@@ -296,6 +393,9 @@ accounts get a long list of fixes.
   every case that the run has to be started again. It no longer says every
   account refused it and asks you to sign in again over accounts the card shows
   as fine.
+- On OpenClaw, a chat whose account reached its usage limit moves to another
+  account on its next message, instead of answering with the limit message.
+  The account joins in again once its limit resets.
 
 ### Chat and voice
 
@@ -309,6 +409,10 @@ accounts get a long list of fixes.
   or device, now shows its card in the open chat within about half a minute,
   without a reload. One failed check no longer stops the chat from looking
   until the page is reloaded.
+- On OpenClaw, typing / in the chat lists the commands on a setup with more
+  than one agent too; the list used to stay empty.
+- On OpenClaw, a user other than the owner can start a new chat again; it used
+  to fail with "Could not start a new chat".
 
 ### Factory reset
 
@@ -321,17 +425,29 @@ accounts get a long list of fixes.
 
 - The desktop environment's own first-run assistant no longer starts in the
   background, which saves memory.
+- ClawKeep on a box set up before its portal moved switches to the new address
+  by itself, for backups and for a pairing already under way. Any other portal
+  address is left alone.
+- An app with its own server can load and save its data through its own `/api`
+  inside its desktop window; the browser used to block those calls.
+- A project a Coding Agent team builds no longer carries a link to the box's
+  own dependency folder, so it runs on other machines too.
+- The box's web server and the libraries it uses are updated with their
+  security fixes.
 
 ## Upgrade notes
 
 - Upgrade from 4.2.x, 4.1.x or 4.0.x in **Settings → System Update**, or over
   SSH by running `sudo bash install.sh` in the ClawBox checkout. On the Hermes
   edition System Update is the only route.
-- Updates are release-tag based: a box offers 4.3.0 once the `v4.3.0` tag is
-  published.
+- A box offers 4.3.0 once 4.3.0 reaches the branch the box follows: the branch
+  set for it, else the branch it is checked out on, else `main`, the release
+  channel. **System Update → Advanced options** shows which. On `main` the
+  update is offered by its release name, `v4.3.0`; on any other branch it is
+  named by its commit.
 - Your data is preserved, as in 4.2, and the edition lock is untouched.
 - On the OpenClaw edition, the update moves OpenClaw's data to the newer format
-  OpenClaw 2026.10.2 uses. The move is one-way, so the box cannot go back to an
+  OpenClaw 2026.10.3 uses. The move is one-way, so the box cannot go back to an
   earlier release afterwards.
 - Sites the assistant was signed in to in its old, separate browser need one
   sign-in in Agent Browser.
@@ -343,6 +459,10 @@ accounts get a long list of fixes.
   again.
 - The Coding Agent no longer merges a finished run's work into the project
   folder by hand; the work stays on the run's branch, as before.
+- A coding run whose task and folder do not look like something people see no
+  longer gets the browser, picture or speech tools, even with **Let runs draw
+  pictures** or **Let runs record speech** on. Set **Browser and media tools**
+  to **Always** to give them to every run again.
 - A dismissal of the 4.2 card is kept but no longer hides anything, and a tab
   still showing the 4.2 card cannot dismiss the 4.3 one.
 - The Projects app has been removed, together with its pinned folders and the

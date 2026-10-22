@@ -1714,6 +1714,8 @@ export const zh: Record<string, string> = {
   "whatsNew.holdToTalkBody": "说话时按住聊天的麦克风按钮或 F8，松开即发送。语音回复的下载体积缩小到原来的几分之一；在 设置 → 语音 中，还可以让每条回复都朗读出来，包括你打字提问得到的回复。",
   "whatsNew.agentChartTitle": "编程助手的实时图表",
   "whatsNew.agentChartBody": "编程助手打开时会显示其各个代理工作情况的图表。你可以在运行进行时给它发消息，超出上限的运行和团队会排队等候而不是被拒绝，检查失败的拉取请求可以用“修复 CI”退回修复。",
+  "whatsNew.primeRadiantTitle": "Prime Radiant，一个活的维基",
+  "whatsNew.primeRadiantBody": "一个为你维护维基的新应用。指定你的文档，它会为每份文档写一页，列出找到的事实，并标出每条事实的出处和可信程度。每天夜里它会整理维基、查找相互矛盾的事实，并就它自己无法确定的事情询问你。",
   "whatsNew.readMore": "阅读 4.3 新功能",
   "whatsNew.planTitle": "使用 ClawBox AI 计划解锁",
   "whatsNew.planPaidFeatures": "编码助手和 Memory Shard 需要 Pro 或 Max 计划。",

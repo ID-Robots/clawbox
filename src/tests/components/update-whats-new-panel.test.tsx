@@ -120,9 +120,10 @@ describe("UpdateWhatsNewPanel", () => {
     expect(panel).toHaveAttribute("data-kind", "bundled");
     const list = within(panel).getByRole("list");
     expect(list).not.toHaveAttribute("lang");
-    expect(within(list).getAllByRole("listitem")).toHaveLength(6);
+    expect(within(list).getAllByRole("listitem")).toHaveLength(7);
     expect(within(list).getByText(de["whatsNew.screenshotTitle"])).toBeInTheDocument();
     expect(within(list).getByText(de["whatsNew.agentChartBody"])).toBeInTheDocument();
+    expect(within(list).getByText(de["whatsNew.primeRadiantTitle"])).toBeInTheDocument();
     expect(within(panel).getByRole("link")).toHaveAttribute("href", releasePageUrl(NONE_ON_LINE.version));
   });
 
