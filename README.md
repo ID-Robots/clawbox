@@ -214,7 +214,7 @@ Full documentation lives at **[docs.clawbox.com](https://docs.clawbox.com)**:
 
 | | Supported |
 |---|---|
-| **Device** | NVIDIA Jetson Orin Nano Super (8 GB) |
+| **Device** | NVIDIA Jetson Orin Nano Super (8 GB), or an Orin Nano 8 GB Developer Kit flashed with JetPack 6.2 (which enables Super mode) |
 | **OS image** | **JetPack 6.2** (Ubuntu 22.04 / L4T R36.x) — [download](https://developer.nvidia.com/embedded/jetpack-sdk-62) |
 
 > ⚠️ **JetPack 7.x (Ubuntu 24.04) is not supported yet.** NVIDIA's newest images
