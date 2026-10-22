@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createHash } from "crypto";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "fs";
 import { createRequire } from "module";
 import os from "os";
 import path from "path";
@@ -18,6 +18,7 @@ import {
   reportFromDatabases,
   reportFromGateway,
   resolveStateDir,
+  usageCountedSessionId,
   usageWindow,
 } from "../../../scripts/openclaw-token-usage.mjs";
 
@@ -203,6 +204,27 @@ function coldArchive(
   return name;
 }
 
+/**
+ * The transcript a reset or delete leaves beside the database the way the
+ * pinned core writes it (its session artifacts module, OpenClaw 2026.10.3 and
+ * 2026.10.6): the session's plain transcript lines, zstd-compressed when the
+ * name ends in `.zst`, at `agents/<id>/sessions/<name>`.
+ */
+function transcriptArchive(agentId: string, name: string, events: Array<Call | "user">, { mtimeMs }: { mtimeMs?: number } = {}) {
+  const dir = path.join(stateDir, "agents", agentId, "sessions");
+  mkdirSync(dir, { recursive: true });
+  const lines = [
+    JSON.stringify({ type: "session", version: 4, id: name.split(".")[0], timestamp: new Date(IN).toISOString() }),
+    ...events.map((e) => JSON.stringify(e === "user"
+      ? { type: "message", id: `e${++ids}`, parentId: null, message: { role: "user", content: "ask the assistant" } }
+      : assistantEvent(e))),
+  ];
+  const text = Buffer.from(`${lines.join("\n")}\n`);
+  const file = path.join(dir, name);
+  writeFileSync(file, name.endsWith(".zst") ? zstdCompress!(text) : text);
+  if (mtimeMs !== undefined) utimesSync(file, mtimeMs / 1000, mtimeMs / 1000);
+}
+
 describe("arguments and window", () => {
   it("defaults to every agent over the last 7 days from the best source", () => {
     expect(parseArgs([])).toMatchObject({ days: 7, agent: null, json: false, source: "auto" });
@@ -342,6 +364,70 @@ describe("db source: the agent databases, read-only", () => {
     expect(report.scanned[0]).toMatchObject({ coldRead: 0, coldSkipped: 2 });
     expect(report.notes).toEqual([expect.stringMatching(/^agent main: 2 cold archive\(s\) not read: /)]);
     expect(report.complete).toBe(false);
+  });
+
+  it.skipIf(!zstdCompress)("counts a reset or deleted session from its transcript archive, as the core's own report does", () => {
+    agentDb("main", { live: [{ ts: IN, usage: anthropic(100, 10), responseId: "r-live" }] });
+    const hex = "0123456789abcdef".repeat(2);
+    // Deleted inside the window: the window's rows are gone, the archive stays.
+    transcriptArchive("main", `gone.jsonl.deleted.2026-10-21T08-00-00.000Z.${hex}.zst`, [
+      "user",
+      { ts: IN, usage: anthropic(30, 3, 300, 7), responseId: "r-del" },
+      { ts: BEFORE, usage: anthropic(9999, 9999), responseId: "r-before" },
+      // a fork of the live session copied r-live: one call, not two
+      { ts: IN, usage: anthropic(100, 10), responseId: "r-live" },
+    ]);
+    // Reset, written plain, no generation suffix.
+    transcriptArchive("main", "reset1.jsonl.reset.2026-10-21T09-00-00Z", [
+      { ts: IN + 5, provider: "deepseek", model: "deepseek-v4-pro", usage: { prompt_tokens: 50, completion_tokens: 5 }, responseId: "r-reset" },
+    ]);
+    // A file-era transcript the core still counts.
+    transcriptArchive("main", "legacy.jsonl", [{ ts: IN + 6, usage: anthropic(1, 1), responseId: "r-legacy" }]);
+    // The live session's own archive: the core reads its SQLite transcript instead.
+    transcriptArchive("main", `live.jsonl.reset.2026-10-21T10-00-00.000Z.zst`, [{ ts: IN, usage: anthropic(5000, 5000), responseId: "r-live-old" }]);
+    // Last written before the window began: nothing in it can be inside the window.
+    transcriptArchive("main", `old.jsonl.deleted.2026-10-01T08-00-00.000Z.zst`, [{ ts: IN, usage: anthropic(7000, 7000) }], { mtimeMs: BEFORE });
+    // Not transcripts the core counts in usage.
+    for (const name of ["t1.trajectory.jsonl", "c1.checkpoint.0b6f1a3e-2c4d-4e5f-8a9b-0c1d2e3f4a5b.jsonl", "b1.jsonl.bak.2026-10-21T08-00-00Z", "sessions.json"]) {
+      transcriptArchive("main", name, [{ ts: IN, usage: anthropic(8000, 8000) }]);
+    }
+
+    const report = reportFromDatabases({ stateDir, window: usageWindow(7, NOW), agent: null });
+
+    expect(report.models.map((m: { provider: string; model: string; sessions: number; calls: number }) => [`${m.provider}/${m.model}`, m.sessions, m.calls])).toEqual([
+      ["anthropic/claude-sonnet-4-6", 3, 3],
+      ["deepseek/deepseek-v4-pro", 1, 1],
+    ]);
+    // r-live once, r-del, r-reset, r-legacy.
+    expect(report.totals).toMatchObject({ sessions: 4, calls: 4, input: 181, output: 19, cacheRead: 300, cacheWrite: 7 });
+    expect(report.scanned[0]).toMatchObject({ archivesRead: 3, archivesSkipped: 0 });
+    expect(report.notes).toEqual([]);
+    expect(report.complete).toBe(true);
+  });
+
+  it.skipIf(!zstdCompress)("names a transcript archive it cannot read and calls the count short", () => {
+    agentDb("main", {});
+    const dir = path.join(stateDir, "agents", "main", "sessions");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, "bad.jsonl.deleted.2026-10-21T08-00-00.000Z.zst"), Buffer.from("not zstd"));
+
+    const report = reportFromDatabases({ stateDir, window: usageWindow(7, NOW), agent: null });
+
+    expect(report.totals).toMatchObject({ calls: 0 });
+    expect(report.scanned[0]).toMatchObject({ archivesRead: 0, archivesSkipped: 1 });
+    expect(report.notes).toEqual(["agent main: 1 reset/deleted transcript archive(s) not read: bad.jsonl.deleted.2026-10-21T08-00-00.000Z.zst"]);
+    expect(report.complete).toBe(false);
+  });
+
+  it("knows the transcript file names the core counts in usage", () => {
+    expect(usageCountedSessionId("s1.jsonl")).toBe("s1");
+    expect(usageCountedSessionId("s1.jsonl.reset.2026-10-21T08-00-00Z")).toBe("s1");
+    expect(usageCountedSessionId(`s1.jsonl.deleted.2026-10-21T08-00-00.123Z.${"a".repeat(32)}.zst`)).toBe("s1");
+    expect(usageCountedSessionId("s1.jsonl.deleted.2026-10-21T08-00-00Z.nothex.zst")).toBeNull();
+    expect(usageCountedSessionId("s1.jsonl.bak.2026-10-21T08-00-00Z")).toBeNull();
+    expect(usageCountedSessionId("s1.jsonl.zst")).toBeNull();
+    expect(usageCountedSessionId("s1.trajectory.jsonl")).toBeNull();
+    expect(usageCountedSessionId("s1.trajectory.jsonl.reset.2026-10-21T08-00-00Z")).toBeNull();
   });
 
   it("stops each session's newest-first walk soon after the window instead of reading its history", () => {

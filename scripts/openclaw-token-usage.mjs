@@ -34,7 +34,10 @@
  *   (a plain row without `"assistant"` in it, a compressed row whose
  *   navigation facts say it is not a message). Compressed rows (agent schema
  *   23+: `event_zstd`) are decoded with node:zlib's zstd; cold-archived
- *   windows archived inside the window are read from their archive.
+ *   windows archived inside the window are read from their archive. A session
+ *   the core reset or deleted is gone from the database but still counted, as
+ *   the core's own report counts it: from its transcript archive beside the
+ *   database (`sessions/<id>.jsonl.reset.<stamp>`, `.deleted.`, `.zst`).
  *
  * `auto` (the default) asks the gateway and takes its answer when it is
  * complete; when the gateway is down, or still computing, it counts from the
@@ -73,6 +76,21 @@ const DEFAULT_TIMEOUT_S = 120;
  * session-cold-storage worker), which it neither writes nor decodes past.
  */
 const COLD_ARCHIVE_MAX_BYTES = 64 * 1024 * 1024;
+/**
+ * A reset or deleted session's transcript archive bigger than this is not
+ * read (it is named in the notes): the whole archive is held in memory while
+ * it is counted, and a long-lived chat's can be hundreds of MB.
+ */
+const TRANSCRIPT_ARCHIVE_MAX_BYTES = 256 * 1024 * 1024;
+/**
+ * The transcript files the pinned core's usage report counts
+ * (isUsageCountedSessionTranscriptFileName in its session artifacts module):
+ * a file-era `<id>.jsonl` that is not a trajectory or compaction checkpoint,
+ * and the archive a reset or delete leaves, `<id>.jsonl.<reason>.<stamp>`
+ * with an optional `.<32 hex>` and `.zst`.
+ */
+const ARCHIVE_STAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}(?:\.\d{3})?Z(?:\.[0-9a-f]{32})?$/;
+const CHECKPOINT_TRANSCRIPT_RE = /^(.+)\.checkpoint\.[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.jsonl$/i;
 
 const USAGE = `Usage: clawbox tokens [--days N] [--agent ID] [--json] [--source auto|gateway|db]
                       [--state-dir DIR] [--timeout SECONDS]
@@ -568,6 +586,54 @@ function coldArchiveEvents(blob, sessionId) {
   return events;
 }
 
+const isPrimaryTranscriptName = (name) =>
+  name.endsWith(".jsonl") && !name.endsWith(".trajectory.jsonl") && !CHECKPOINT_TRANSCRIPT_RE.test(name);
+
+/** The session id of a transcript file the core counts in usage, else null. */
+export function usageCountedSessionId(name) {
+  if (isPrimaryTranscriptName(name)) return name.slice(0, -".jsonl".length);
+  const bare = name.endsWith(".zst") ? name.slice(0, -".zst".length) : name;
+  for (const reason of ["reset", "deleted"]) {
+    const marker = `.jsonl.${reason}.`;
+    const at = bare.lastIndexOf(marker);
+    if (at > 0 && ARCHIVE_STAMP_RE.test(bare.slice(at + marker.length))) {
+      const sessionId = bare.slice(0, at);
+      return isPrimaryTranscriptName(`${sessionId}.jsonl`) ? sessionId : null;
+    }
+  }
+  return null;
+}
+
+/**
+ * The counted transcript files in an agent's sessions directory that were
+ * written since `sinceMs` — the core skips older ones too: a file is written
+ * after its last event.
+ */
+function usageCountedTranscriptFiles(sessionsDir, sinceMs) {
+  let entries;
+  try {
+    entries = fs.readdirSync(sessionsDir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const files = [];
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const sessionId = usageCountedSessionId(entry.name);
+    if (!sessionId) continue;
+    const file = path.join(sessionsDir, entry.name);
+    let st;
+    try {
+      st = fs.statSync(file);
+    } catch {
+      continue;
+    }
+    if (st.mtimeMs < sinceMs) continue;
+    files.push({ name: entry.name, file, sessionId, size: st.size, packed: entry.name.endsWith(".zst") });
+  }
+  return files.sort((a, b) => a.name.localeCompare(b.name));
+}
+
 function tableColumns(db, table) {
   return new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name));
 }
@@ -578,7 +644,10 @@ function tableColumns(db, table) {
  */
 export function scanAgentDatabase({ db, agentId, window, acc, dbPath }) {
   const seen = new Set();
-  const stats = { windows: 0, sessions: 0, rowsRead: 0, decoded: 0, undecodable: 0, calls: 0, coldRead: 0, coldSkipped: [] };
+  const stats = {
+    windows: 0, sessions: 0, rowsRead: 0, decoded: 0, undecodable: 0, calls: 0,
+    coldRead: 0, coldSkipped: [], archivesRead: 0, archivesSkipped: [],
+  };
   const tables = new Set(
     db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((r) => r.name),
   );
@@ -690,6 +759,38 @@ export function scanAgentDatabase({ db, agentId, window, acc, dbPath }) {
       }
     }
   }
+  // A reset or deleted session has left the database; its transcript lives on
+  // as an archive file beside it, plain transcript lines (zstd with `.zst`).
+  // The core's usage report counts those files, and a file-era transcript,
+  // unless the session is still a live SQLite transcript it reads instead
+  // (listUsageCountedTranscriptSources): without them this source read less
+  // than the gateway on any box where a chat was reset.
+  const live = new Set(sessionIds.map(({ sessionId }) => sessionId));
+  const sessionsDir = path.join(path.dirname(path.dirname(dbPath)), "sessions");
+  for (const archive of usageCountedTranscriptFiles(sessionsDir, window.startMs)) {
+    if (live.has(archive.sessionId)) continue;
+    if ((archive.packed && !canDecode) || archive.size > TRANSCRIPT_ARCHIVE_MAX_BYTES) {
+      stats.archivesSkipped.push(archive.name);
+      continue;
+    }
+    try {
+      const bytes = fs.readFileSync(archive.file);
+      const text = archive.packed ? decodeZstd(bytes, TRANSCRIPT_ARCHIVE_MAX_BYTES) : bytes.toString("utf8");
+      stats.archivesRead += 1;
+      for (const line of text.split("\n")) {
+        if (!line.includes('"assistant"')) continue;
+        let event;
+        try {
+          event = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        count1(archive.sessionId, event, undefined);
+      }
+    } catch {
+      stats.archivesSkipped.push(archive.name);
+    }
+  }
   return stats;
 }
 
@@ -726,8 +827,11 @@ export function reportFromDatabases({ stateDir, window, agent, busyTimeoutMs }) 
       if (stats.missingTables) notes.push(`agent ${agentId}: no transcript tables (database not migrated to the SQLite session store)`);
       if (stats.undecodable) notes.push(`agent ${agentId}: ${stats.undecodable} compressed row(s) could not be decoded`);
       if (stats.coldSkipped.length) notes.push(`agent ${agentId}: ${stats.coldSkipped.length} cold archive(s) not read: ${stats.coldSkipped.slice(0, 3).join(", ")}`);
-      scanned.push({ agentId, ...stats, coldSkipped: stats.coldSkipped.length });
-      if (handle.immutable || stats.undecodable || stats.coldSkipped.length) complete = false;
+      if (stats.archivesSkipped.length) {
+        notes.push(`agent ${agentId}: ${stats.archivesSkipped.length} reset/deleted transcript archive(s) not read: ${stats.archivesSkipped.slice(0, 3).join(", ")}`);
+      }
+      scanned.push({ agentId, ...stats, coldSkipped: stats.coldSkipped.length, archivesSkipped: stats.archivesSkipped.length });
+      if (handle.immutable || stats.undecodable || stats.coldSkipped.length || stats.archivesSkipped.length) complete = false;
     } catch (err) {
       notes.push(`agent ${agentId}: ${err.message}`);
       complete = false;
