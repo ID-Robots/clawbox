@@ -50,6 +50,12 @@ const UPDATE_KEYS = [
   // Its "What's new" panel (TASK-1205).
   "update.whatsNewTitle", "update.whatsNewTitleGeneric", "update.whatsNewIntro",
   "update.whatsNewGeneric", "update.whatsNewReleaseNotes", "update.whatsNewChannel",
+  // A branch or an update refused for installing an older harness than the
+  // one that wrote the box's data, and its override.
+  "update.harnessDowngrade.titleBranch", "update.harnessDowngrade.titleUpdate",
+  "update.harnessDowngrade.versionLine", "update.harnessDowngrade.schemaLine",
+  "update.harnessDowngrade.body", "update.harnessDowngrade.backupFailed",
+  "update.harnessDowngrade.switchAnyway", "update.harnessDowngrade.updateAnyway",
 ];
 
 /** Settings → Providers and the ClawBox AI device-code card (sweep: settings #1). */

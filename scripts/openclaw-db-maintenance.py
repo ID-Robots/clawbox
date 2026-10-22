@@ -31,8 +31,12 @@ carry, and this is ClawBox's half of each, driving OpenClaw's OWN commands:
        of the database AFTER its copy was taken.
 
 ``preflight`` (run by install.sh before it promotes a new core / runs doctor)
-    Measures the databases the core would migrate and refuses (exit 3) when the
-    filesystem cannot hold the migration's copies.
+    Refuses (exit 3) a core OLDER than the databases on disk — one a newer core
+    has migrated, which every older core refuses and its doctor cannot repair —
+    unless the owner's override (``data/harness-downgrade.json``) names this
+    core, in which case exactly those databases are moved beside the backup the
+    override took first. Then measures the databases the core would migrate and
+    refuses (exit 3) when the filesystem cannot hold the migration's copies.
 
 ``record-doctor`` (run by install.sh after ``doctor --fix``)
     Records the migration verdict for the status file.
@@ -48,7 +52,14 @@ every change is the core's own command. The one thing deleted by hand is the
 migration's rollback copies, and only under the verification above — the core's
 own ``openclaw update cleanup`` is asked first, but it keeps every group until
 its OWN updater has recorded a later successful update, which ClawBox, which
-installs the pinned core with npm, never does.
+installs the pinned core with npm, never does. The one thing MOVED by hand is a
+database newer than the core being installed, under the owner's override only:
+OpenClaw has no downgrade of its own (its docs: install a build that supports
+the schema, restore a backup matching the older build, or give the older build
+a separate state dir; ``doctor --fix`` cannot repair a newer schema), so the
+files go, whole and unedited, beside the backup taken first, and the older core
+creates fresh ones — the separate state the core's own advice describes, for
+exactly the databases it cannot open.
 
 Exit status is 0 except ``preflight``'s refusal (3) and usage errors (2): this
 runs inside a blocking ExecStartPre, and a housekeeping failure must cost the
@@ -61,6 +72,7 @@ import fcntl
 import json
 import os
 import re
+import shutil
 import signal
 import sqlite3
 import stat
@@ -77,6 +89,11 @@ CAPTURE_MARKER_TEXT = "openclaw-private-update-capture-v1\n"
 AGENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 STATUS_FILE = "openclaw-migration-status.json"
+# The owner's override for installing an older core (src/lib/harness-downgrade-backup.ts),
+# how long it stands, and where under its backup the newer databases go.
+DOWNGRADE_AUTHORIZATION_FILE = "harness-downgrade.json"
+DOWNGRADE_AUTHORIZATION_TTL_S = 12 * 3600
+SET_ASIDE_DIR = "openclaw-newer-schema"
 RECORD_FILE = "openclaw-db-maintenance.json"
 MEMORY_REBUILD_FILE = "openclaw-memory-rebuild.json"
 # The lock scripts/ensure-local-embeddings.sh holds for its own `memory index
@@ -880,12 +897,113 @@ def cmd_prestart(args):
 # ── preflight / record-doctor (install.sh) ────────────────────────────────
 
 
+def downgrade_authorization(data_dir, core):
+    """The backup directory the owner's override recorded for THIS core, else None.
+
+    Written by the web server (src/lib/harness-downgrade-backup.ts) only after
+    it has backed the data up, for the one core version the owner chose to go
+    back to. Honoured only for that version, within its twelve hours, while the
+    directory exists: anything else is no authorisation at all.
+    """
+    body = read_json(os.path.join(data_dir, DOWNGRADE_AUTHORIZATION_FILE))
+    if not isinstance(body, dict) or body.get("version") != 1:
+        return None
+    if not core or not core.get("version") or body.get("openclaw") != core.get("version"):
+        return None
+    at = body.get("authorizedAtEpoch")
+    if not isinstance(at, (int, float)) or not (0 <= time.time() - at <= DOWNGRADE_AUTHORIZATION_TTL_S):
+        return None
+    backup = body.get("backupDir")
+    if not isinstance(backup, str) or not os.path.isabs(backup) or not os.path.isdir(backup):
+        return None
+    return backup
+
+
+def newer_schema_sentence(newer, core):
+    """The owner-facing refusal, the same sentence the updater says (src/lib/harness-downgrade.ts)."""
+    db = newer[0]
+    version = core.get("version") or "this core"
+    return (
+        "This box's OpenClaw data is newer than OpenClaw %s: %s is on %s schema %d, and OpenClaw %s supports schema %d. "
+        "An older OpenClaw cannot open data a newer one has written, so it was not installed and nothing was changed. "
+        "Stay on an update branch whose OpenClaw supports %s schema %d or newer, or choose \"Back up and update anyway\" "
+        "in Settings > System Update, which backs the data up first."
+        % (version, db["path"], db["kind"], db["userVersion"], version, declared(db, core), db["kind"], db["userVersion"])
+    )
+
+
+def set_aside(dbs, state_dir, dest):
+    """Move each database, with its SQLite sidecars, under `dest/openclaw-newer-schema/`
+    at its path relative to the state dir. Returns (moved, error): what moved before
+    any failure, so the caller can say so."""
+    moved = []
+    root = os.path.realpath(state_dir)
+    for db in dbs:
+        src = db["path"]
+        real = os.path.realpath(src)
+        if real.startswith(root + os.sep):
+            rel = os.path.relpath(real, root)
+        else:
+            rel = os.path.join("elsewhere", db.get("agentId") or "state", os.path.basename(src))
+        target = os.path.join(dest, SET_ASIDE_DIR, rel)
+        done = []
+        try:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            # The database last, and its sidecars put back if it cannot follow
+            # them: a database left in place without its WAL loses whatever was
+            # committed only there the next time a core opens it.
+            for suffix in ("-wal", "-shm", "-journal", ""):
+                if os.path.lexists(src + suffix):
+                    shutil.move(src + suffix, target + suffix)
+                    done.append(suffix)
+        except Exception as exc:
+            for suffix in reversed(done):
+                try:
+                    shutil.move(target + suffix, src + suffix)
+                except Exception as back:
+                    warn("could not put %s back beside %s (%s: %s); it is at %s"
+                         % (os.path.basename(src + suffix), src, type(back).__name__, back, target + suffix))
+            return moved, "%s: %s" % (type(exc).__name__, exc)
+        moved.append((src, target))
+    return moved, None
+
+
 def cmd_preflight(args):
     core = core_schema(args.core_pkg)
     if not core or core.get("agent") is None or core.get("state") is None:
         log("the core at %s declares no schema versions; the migration disk check stands down" % args.core_pkg)
         return 0
     dbs = inventory(args.state_dir, args.config)
+    # A database a NEWER core has migrated is refused outright by this one, and
+    # its `doctor --fix` cannot repair a newer schema: installing it is how a box
+    # switched to an older branch was left with its gateway stopped. Refused here,
+    # before the core is promoted, unless the owner chose to go back and the data
+    # was backed up first; then exactly those databases are set aside, beside that
+    # backup, and the older core starts on fresh ones.
+    newer = [db for db in dbs if schema_position(db, core) == "newer"]
+    if newer:
+        backup = downgrade_authorization(args.data_dir, core)
+        if not backup:
+            print(newer_schema_sentence(newer, core), flush=True)
+            return 3
+        moved, error = set_aside(newer, args.state_dir, backup)
+        for src, dst in moved:
+            log("set aside %s (newer than OpenClaw %s) as %s" % (src, core.get("version"), dst))
+        if error:
+            print(
+                "The OpenClaw databases this older version cannot open could not all be set aside (%s), so it was not "
+                "installed; %d of %d were moved into %s."
+                % (error, len(moved), len(newer), os.path.join(backup, SET_ASIDE_DIR)),
+                flush=True,
+            )
+            return 3
+        print(
+            "CLAWBOX-WARN[harness-downgrade-set-aside]: OpenClaw %s cannot open %d database(s) a newer OpenClaw wrote; "
+            "as you chose, they were moved into %s, beside the backup taken first, and it starts with fresh ones."
+            % (core.get("version"), len(moved), os.path.join(backup, SET_ASIDE_DIR)),
+            flush=True,
+        )
+        dbs = [db for db in dbs if all(db is not n for n in newer)]
     behind = [db for db in dbs if schema_position(db, core) == "behind"]
     unknown = [db for db in dbs if schema_position(db, core) == "unknown"]
     for db in unknown:

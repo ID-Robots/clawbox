@@ -9,6 +9,14 @@ import type { RemoteReachability, StepStatus, UpdateState } from "@/lib/updater"
 import { INTERRUPTED_MESSAGE_PREFIX, RESTART_STEP_ID } from "@/lib/update-constants";
 import { DRIFT_RESOLVED_CODE } from "@/lib/drift-codes";
 import { cleanVersion } from "@/lib/version-utils";
+import {
+  HARNESS_DOWNGRADE_BACKUP_FAILED_CODE,
+  HARNESS_DOWNGRADE_CODE,
+  HARNESS_DOWNGRADE_OVERRIDE_FLAG,
+  HARNESS_LABEL,
+  readHarnessDowngradeDetail,
+  type HarnessDowngradeDetail,
+} from "@/lib/harness-downgrade";
 
 export interface ComponentVersion {
   current: string | null;
@@ -221,6 +229,9 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
   const [branchInput, setBranchInput] = useState("");
   const [branchSaving, setBranchSaving] = useState(false);
   const [branchError, setBranchError] = useState<string | null>(null);
+  // A branch the server refused because following it would install an older
+  // harness than the one that wrote this box's data (src/lib/harness-downgrade.ts).
+  const [branchDowngrade, setBranchDowngrade] = useState<{ branch: string | null; detail: HarnessDowngradeDetail } | null>(null);
   const [betaConfirm, setBetaConfirm] = useState(false);
   const [forceConfirm, setForceConfirm] = useState(false);
 
@@ -365,7 +376,10 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
   // along inside the full update. The "openclaw" mode remains as a
   // server-side endpoint for SSH/MCP/admin triggers but no UI button
   // reaches it, so the type stays narrow to reflect actual call sites.
-  const triggerUpdate = useCallback(async () => {
+  //
+  // `allowDowngrade` is the owner's "Back up and update anyway", offered only on
+  // a run the server refused for installing an older harness.
+  const triggerUpdate = useCallback(async (allowDowngrade = false) => {
     setUpdateStarted(true);
     setUpdateError(null);
     setUpdateState(null);
@@ -373,7 +387,8 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
       const res = await fetch("/setup-api/update/run", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ force: true }),
+        // `=== true`: a handler that passes its click event must never be the override.
+        body: JSON.stringify(allowDowngrade === true ? { force: true, [HARNESS_DOWNGRADE_OVERRIDE_FLAG]: true } : { force: true }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -429,16 +444,26 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
     })();
   }, [stopPolling, startPolling, tr]);
 
-  const saveBranch = useCallback(async (next: string | null) => {
+  const saveBranch = useCallback(async (next: string | null, allowDowngrade = false) => {
     setBranchSaving(true);
     setBranchError(null);
+    setBranchDowngrade(null);
     try {
       const res = await fetch("/setup-api/system/update-branch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ branch: next }),
+        body: JSON.stringify(allowDowngrade === true ? { branch: next, [HARNESS_DOWNGRADE_OVERRIDE_FLAG]: true } : { branch: next }),
       });
       const data = await res.json().catch(() => ({}));
+      const downgrade = res.status === 409 && data.code === HARNESS_DOWNGRADE_CODE
+        ? readHarnessDowngradeDetail(data.downgrade)
+        : null;
+      if (downgrade) {
+        // Said in the owner's language from the detail, with the override
+        // beside it; the branch on record is unchanged.
+        setBranchDowngrade({ branch: next, detail: downgrade });
+        return;
+      }
       if (!res.ok) throw new Error(typeof data.error === "string" ? data.error : `HTTP ${res.status}`);
       setBranch(typeof data.branch === "string" ? data.branch : null);
       setEffectiveBranch(readEffectiveBranch(data.effective));
@@ -571,7 +596,13 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
         return {
           icon: "error", iconClass: "text-red-300",
           headline: tr("update.heroFailed", "Update failed"),
-          subhead: updateError || updateState?.error
+          // A refused downgrade is said in the owner's language below, from
+          // its detail; its English sentence is for the log and the MCP tools.
+          subhead: updateError
+            || (updateState?.errorCode === HARNESS_DOWNGRADE_CODE
+              || updateState?.errorCode === HARNESS_DOWNGRADE_BACKUP_FAILED_CODE
+              ? tr("update.harnessDowngrade.titleUpdate", "This update would install an older assistant")
+              : updateState?.error)
             || tr("update.heroFailedSub", "One step couldn't complete. See the steps below."),
           tone: "error" as const,
         };
@@ -711,6 +742,7 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
               // update button is hidden while a run is settled, so without
               // this the resume was reachable by no gesture at all.
               onResume={updateState?.error?.startsWith(INTERRUPTED_MESSAGE_PREFIX) ? () => void triggerUpdate() : undefined}
+              onOverrideDowngrade={() => void triggerUpdate(true)}
             />
           )}
 
@@ -808,6 +840,14 @@ export default function SystemUpdateApp({ embedded = false }: { embedded?: boole
                     )}
                     {branchError && (
                       <p className="mt-2 text-xs text-red-300">{branchError}</p>
+                    )}
+                    {branchDowngrade && (
+                      <HarnessDowngradeNotice
+                        detail={branchDowngrade.detail}
+                        kind="branch"
+                        busy={branchSaving}
+                        onOverride={() => void saveBranch(branchDowngrade.branch, true)}
+                      />
                     )}
                   </div>
 
@@ -1120,12 +1160,94 @@ function BetaToggle({
   );
 }
 
+/**
+ * "This would install an older assistant" — a branch or an update the box
+ * refused because the harness it installs is older than the one that wrote the
+ * assistant's data (src/lib/harness-downgrade.ts). Said from the refusal's
+ * detail, one line per harness, with the documented override beside it:
+ * back the data up first, then go ahead.
+ */
+function HarnessDowngradeNotice({
+  detail,
+  kind,
+  busy = false,
+  backupFailure,
+  onOverride,
+}: {
+  detail: HarnessDowngradeDetail;
+  kind: "branch" | "update";
+  busy?: boolean;
+  /** Present when the override's backup failed: the server's reason, shown as given. */
+  backupFailure?: string;
+  onOverride?: () => void;
+}) {
+  const tr = useTr();
+  return (
+    <div
+      role="alert"
+      data-testid="update-harness-downgrade"
+      className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-100"
+    >
+      <p className="font-semibold text-amber-50">
+        {kind === "branch" && detail.branch
+          ? tr("update.harnessDowngrade.titleBranch", "Branch {branch} would install an older assistant", { branch: detail.branch })
+          : tr("update.harnessDowngrade.titleUpdate", "This update would install an older assistant")}
+      </p>
+      <ul className="mt-1 space-y-0.5">
+        {detail.downgrades.map((d) => (
+          <li key={d.harness}>
+            {d.schema
+              ? tr(
+                "update.harnessDowngrade.schemaLine",
+                "{harness} data on this box is on schema {onDisk}; {harness} {target} supports up to schema {supported}.",
+                { harness: HARNESS_LABEL[d.harness], onDisk: d.schema.onDisk, target: d.target, supported: d.schema.supported },
+              )
+              : tr(
+                "update.harnessDowngrade.versionLine",
+                "{harness} {installed} is installed; this would install the older {target}.",
+                { harness: HARNESS_LABEL[d.harness], installed: d.installed ?? "?", target: d.target },
+              )}
+          </li>
+        ))}
+      </ul>
+      {backupFailure !== undefined ? (
+        <>
+          <p className="mt-1">
+            {tr("update.harnessDowngrade.backupFailed", "The backup could not be taken, so the older version was not installed and nothing was changed.")}
+          </p>
+          {backupFailure && <p className="mt-1 text-amber-200/80 break-words">{backupFailure}</p>}
+        </>
+      ) : (
+        <p className="mt-1">
+          {tr(
+            "update.harnessDowngrade.body",
+            "An older version cannot open data a newer one has written, so nothing was changed. Stay on your current update branch, or back up the assistant's data and continue anyway: whatever the older version cannot open is set aside in that backup.",
+          )}
+        </p>
+      )}
+      {onOverride && (
+        <button
+          type="button"
+          onClick={onOverride}
+          disabled={busy}
+          className="mt-2 px-3 py-1 rounded-md bg-amber-500/15 border border-amber-500/40 text-amber-200 text-xs font-semibold disabled:opacity-50 cursor-pointer hover:bg-amber-500/25"
+        >
+          {kind === "branch"
+            ? tr("update.harnessDowngrade.switchAnyway", "Back up and switch anyway")
+            : tr("update.harnessDowngrade.updateAnyway", "Back up and update anyway")}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function UpdateProgressCard({
   state,
   error,
   status,
   onDismiss,
   onResume,
+  onOverrideDowngrade,
 }: {
   state: UpdateState | null;
   error: string | null;
@@ -1133,9 +1255,17 @@ function UpdateProgressCard({
   onDismiss: () => void;
   /** Present only for an interrupted run: starts the fresh run that resumes it. */
   onResume?: () => void;
+  /** "Back up and update anyway", offered on a run refused for installing an older harness. */
+  onOverrideDowngrade?: () => void;
 }) {
   const tr = useTr();
   const failedSteps = state?.steps.filter((s) => s.status === "failed") ?? [];
+  // A refused downgrade (or the backup its override could not take) is said
+  // from its detail in the owner's language, never as the server's English.
+  const downgrade = status === "failed"
+    && (state?.errorCode === HARNESS_DOWNGRADE_CODE || state?.errorCode === HARNESS_DOWNGRADE_BACKUP_FAILED_CODE)
+    ? readHarnessDowngradeDetail(state.downgrade)
+    : null;
   // Non-fatal problems the update found and worked around — build drift, a
   // missing update pin it wrote for the owner. Krasi's ruling is that these
   // warn rather than block, which only means anything if they are visible;
@@ -1174,6 +1304,18 @@ function UpdateProgressCard({
           </div>
         )}
       </div>
+
+      {/* First, above the step list: a run refused before step 1 leaves every
+          step pending, and below ten of them the explanation and the override
+          were out of sight on a laptop-sized window. */}
+      {downgrade && state && (
+        <HarnessDowngradeNotice
+          detail={downgrade}
+          kind="update"
+          backupFailure={state.errorCode === HARNESS_DOWNGRADE_BACKUP_FAILED_CODE ? downgrade.backupFailure ?? "" : undefined}
+          onOverride={onOverrideDowngrade}
+        />
+      )}
 
       {!state && (
         <div className="mt-4 flex items-center gap-2 text-sm text-[var(--text-muted)]">
@@ -1255,7 +1397,9 @@ function UpdateProgressCard({
           {failedSteps.map((step) => (
             <li key={`${step.id}-err`} className="rounded-md border border-red-500/20 bg-red-500/10 px-3 py-2 text-xs text-red-200">
               <span className="font-semibold text-red-100">{step.label}:</span>{" "}
-              {step.error || tr("update.unknownError", "Unknown error")}
+              {downgrade && step.error === state?.error
+                ? tr("update.harnessDowngrade.titleUpdate", "This update would install an older assistant")
+                : step.error || tr("update.unknownError", "Unknown error")}
             </li>
           ))}
         </ul>

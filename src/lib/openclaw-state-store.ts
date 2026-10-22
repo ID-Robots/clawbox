@@ -185,6 +185,69 @@ export function readStateSchemaVersion(): number | null {
   });
 }
 
+const AGENT_DB_NAME = "openclaw-agent.sqlite";
+const AGENT_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+
+/** `agents.entries.<id>.agentDir` for agents kept outside the default tree. */
+function configuredAgentDirs(stateDir: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const configPath = process.env.OPENCLAW_CONFIG_PATH?.trim() || path.join(stateDir, "openclaw.json");
+  try {
+    const cfg = JSON.parse(fs.readFileSync(configPath, "utf-8")) as { agents?: { entries?: Record<string, unknown> } };
+    for (const [id, entry] of Object.entries(cfg.agents?.entries ?? {})) {
+      const dir = (entry as { agentDir?: unknown } | null)?.agentDir;
+      if (AGENT_ID.test(id) && typeof dir === "string" && dir.trim()) {
+        out.set(id, dir.trim().replace(/^~(?=$|[\\/])/, () => process.env.HOME || os.homedir()));
+      }
+    }
+  } catch {
+    // No config, or one this reader cannot parse: the default tree still counts.
+  }
+  return out;
+}
+
+/**
+ * Every agent database this OpenClaw keeps (`agents/<id>/agent/openclaw-agent.sqlite`
+ * under the state dir, and any agent configured elsewhere — the set
+ * scripts/openclaw-db-maintenance.py discovers) and the schema each is on,
+ * `PRAGMA user_version`, read through a read-only handle.
+ *
+ * For the guard that refuses to install a core older than this data: an
+ * agent database a newer core has migrated is refused outright by every older
+ * one. A database that could not be read is left out — no evidence of anything —
+ * exactly as readStateSchemaVersion answers null for an unreadable store.
+ */
+export function readAgentSchemaVersions(
+  home: string = OPENCLAW_HOME_DEFAULT,
+): { agentId: string; path: string; version: number }[] {
+  const stateDir = openclawStateDir(home);
+  const candidates: { agentId: string; path: string }[] = [];
+  try {
+    for (const id of fs.readdirSync(path.join(stateDir, "agents")).sort()) {
+      if (AGENT_ID.test(id)) candidates.push({ agentId: id, path: path.join(stateDir, "agents", id, "agent", AGENT_DB_NAME) });
+    }
+  } catch {
+    // No agents directory: a box whose OpenClaw has not created one.
+  }
+  for (const [id, dir] of configuredAgentDirs(stateDir)) candidates.push({ agentId: id, path: path.join(dir, AGENT_DB_NAME) });
+  const seen = new Set<string>();
+  const out: { agentId: string; path: string; version: number }[] = [];
+  for (const candidate of candidates) {
+    let real: string;
+    try {
+      if (!fs.statSync(candidate.path).isFile()) continue;
+      real = fs.realpathSync(candidate.path);
+    } catch {
+      continue;
+    }
+    if (seen.has(real)) continue;
+    seen.add(real);
+    const version = withOpenStore(candidate.path, true, `agent ${candidate.agentId} schema version read`, userVersion);
+    if (version !== null) out.push({ ...candidate, version });
+  }
+  return out;
+}
+
 /** OpenClaw stores account ids lowercased, and the default account as "default". */
 function accountKey(account: string): string {
   return account.trim().toLowerCase() || "default";

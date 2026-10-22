@@ -55,6 +55,8 @@ vi.mock("child_process", () => ({ exec: vi.fn(), execFile: vi.fn() }));
 vi.mock("@/lib/openclaw-state-store", () => ({
   statePath: vi.fn(),
   readStateSchemaVersion: vi.fn(),
+  // No agent databases: this suite is about the state store alone.
+  readAgentSchemaVersions: vi.fn(() => []),
 }));
 
 // No gateway to quiesce around `openclaw_install`: the cases that dispatch it

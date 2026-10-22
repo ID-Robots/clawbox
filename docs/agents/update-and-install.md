@@ -11,6 +11,18 @@ The in-app update (routes, lock, resume, what's new), `install.sh` steps, system
 ## Server Libraries (`src/lib/`)
 
 - **`updater.ts`** — multi-step system update orchestration (internet check → git fetch → checkout → build → restart).
+- **Harness downgrade guard (`harness-downgrade.ts`, `harness-downgrade-backup.ts`)** — a switch that would install an OLDER OpenClaw or Hermes than the one that wrote the box's data is refused before anything changes. For example, OpenClaw 2026.10.6 moves agent databases to schema 25 and 2026.10.3 refuses them, so a beta → main switch used to leave the gateway stopped. `assessHarnessDowngrade` is pure and refuses only on proof:
+  - a database newer than the target declares (`OPENCLAW_STATE_SCHEMA_BY_VERSION` and `OPENCLAW_AGENT_SCHEMA_BY_VERSION` in updater.ts, both held to the published package by `harness-contract`; `readAgentSchemaVersions` in openclaw-state-store.ts);
+  - an OpenClaw pin numerically older than the installed core;
+  - a Hermes pin older by release name or by `merge-base --is-ancestor`.
+
+  The guard runs in four places:
+  1. the `system/update-branch` route answers 409 `code: "harness_downgrade"` and keeps the pin. When clearing the pin would fall back to an older branch, it writes the pin back;
+  2. `runUpdate`'s pre-flight (target pins read off `origin/<branch>` by `readPinsAtBranch`, Hermes only when the run syncs) sets `UpdateState.errorCode`/`downgrade`. The pre-flight asks again at the `openclaw_install` boundary;
+  3. install.sh's `harness_downgrade_guard`, asked twice, each time after a fetch and before a reset. First in the bootstrap block at the top of the file: its `reset --hard origin/<branch>` and its re-exec of the target's own install.sh come before anything else a run does, and an older branch's install.sh has no guard. That covers a bare `sudo CLAWBOX_BRANCH=main bash install.sh` and a dispatched update step whose pre-flight could not reach origin. Then again in `sync_repo_to_update_target`, for runs the bootstrap does not refresh. The constants are not parsed yet in the bootstrap, so the guard takes the checkout, the clawbox home and the edition as arguments;
+  4. `openclaw-db-maintenance.py preflight` before the staged core is promoted. On a newer database it exits 3, the stage is dropped and the gateway restarted.
+
+  `SystemUpdateApp` localises the refusal from the detail (`update.harnessDowngrade.*`, ten locales). The override is `allowHarnessDowngrade: true` on update/run or update-branch. It backs up first (ClawKeep `runBackup` when paired, else `openclaw backup create --verify --no-include-workspace` / `hermes backup` into `~/clawbox-harness-backups/<stamp>/`), then writes `data/harness-downgrade.json` (versions + backup dir, 12 h). For exactly that core, the helper moves the newer databases into `<backup>/openclaw-newer-schema/` and the older core starts fresh. Every run clears that file before its pre-flight, and an override run writes its own after its backup. The guards act on version proof only while the harness has a database on disk (OpenClaw state/agent, Hermes `state.db`): with none, there is nothing an older version could fail to open. The upgrade e2e relies on this when it moves `~/.openclaw` aside to build its main baseline.
 
 ## System Integration (`scripts/`, `config/`)
 

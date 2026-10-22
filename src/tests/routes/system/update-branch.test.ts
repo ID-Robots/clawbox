@@ -10,8 +10,24 @@ vi.mock("fs/promises", () => ({
 // The effective branch is worked out with git; the route's own contract is
 // what it does with the answer, so the resolver is stubbed here and covered
 // against real repositories in updater-branch-resolution.test.ts.
-const { mockResolveEffective } = vi.hoisted(() => ({ mockResolveEffective: vi.fn() }));
-vi.mock("@/lib/updater", () => ({ resolveEffectiveUpdateBranch: mockResolveEffective }));
+const { mockResolveEffective, mockDowngrade } = vi.hoisted(() => ({ mockResolveEffective: vi.fn(), mockDowngrade: vi.fn() }));
+vi.mock("@/lib/updater", () => ({
+  resolveEffectiveUpdateBranch: mockResolveEffective,
+  // Read off origin with git in the updater (updater-harness-downgrade.test.ts);
+  // here, what the route does with the answer.
+  checkBranchHarnessDowngrade: mockDowngrade,
+}));
+
+/** What `main` would bring a box that ran OpenClaw 2026.10.6: the older 2026.10.3. */
+const DOWNGRADE = {
+  branch: "main",
+  downgrades: [{
+    harness: "openclaw",
+    installed: "2026.10.6",
+    target: "2026.10.3",
+    schema: { database: "agent", label: "/home/clawbox/.openclaw/agents/main/agent/openclaw-agent.sqlite", onDisk: 25, supported: 24 },
+  }],
+};
 
 const mockReadFile = vi.mocked(fsp.readFile);
 const mockWriteFile = vi.mocked(fsp.writeFile);
@@ -37,6 +53,7 @@ describe("/setup-api/system/update-branch", () => {
     mockWriteFile.mockResolvedValue();
     mockUnlink.mockResolvedValue();
     mockResolveEffective.mockResolvedValue({ branch: "main", source: "default" });
+    mockDowngrade.mockResolvedValue(null);
 
     const mod = await import("@/app/setup-api/system/update-branch/route");
     updateBranchGet = mod.GET;
@@ -216,6 +233,64 @@ describe("/setup-api/system/update-branch", () => {
 
       expect(res.status).toBe(500);
       expect(body.error).toBe("Disk full");
+    });
+  });
+
+  describe("POST: a branch that would install an older harness", () => {
+    it("is refused with 409 and the detail, and the branch on record is left alone", async () => {
+      mockDowngrade.mockResolvedValue(DOWNGRADE);
+
+      const res = await updateBranchPost(jsonRequest({ branch: "main" }));
+      const body = await res.json();
+
+      expect(res.status).toBe(409);
+      expect(body.code).toBe("harness_downgrade");
+      expect(body.downgrade).toEqual(DOWNGRADE);
+      expect(body.error).toMatch(/^Branch "main" would install an older assistant\. /);
+      expect(body.error).toContain("is on agent schema 25");
+      expect(body.error).toContain("the update branch was not changed");
+      expect(mockDowngrade).toHaveBeenCalledWith("main");
+      expect(mockWriteFile).not.toHaveBeenCalled();
+      expect(mockUnlink).not.toHaveBeenCalled();
+    });
+
+    it("is recorded on the owner's explicit override, without asking", async () => {
+      mockDowngrade.mockResolvedValue(DOWNGRADE);
+
+      const res = await updateBranchPost(jsonRequest({ branch: "main", allowHarnessDowngrade: true }));
+
+      expect(res.status).toBe(200);
+      expect(mockWriteFile).toHaveBeenCalledWith(expect.stringContaining(".update-branch"), "main\n", "utf-8");
+      expect(mockDowngrade).not.toHaveBeenCalled();
+    });
+
+    it("counts only a literal true as the override", async () => {
+      mockDowngrade.mockResolvedValue(DOWNGRADE);
+
+      const res = await updateBranchPost(jsonRequest({ branch: "main", allowHarnessDowngrade: "yes" }));
+
+      expect(res.status).toBe(409);
+      expect(mockWriteFile).not.toHaveBeenCalled();
+    });
+
+    it("puts the pin back when clearing it would fall back to an older branch", async () => {
+      mockReadFile.mockResolvedValue("beta\n");
+      mockDowngrade.mockResolvedValue(DOWNGRADE);
+
+      const res = await updateBranchPost(jsonRequest({ branch: null }));
+
+      expect(res.status).toBe(409);
+      // Asked of where clearing lands (the effective branch with no pin) …
+      expect(mockDowngrade).toHaveBeenCalledWith("main");
+      // … and the pin that was there is written back as it was.
+      expect(mockWriteFile).toHaveBeenCalledWith(expect.stringContaining(".update-branch"), "beta\n", "utf-8");
+    });
+
+    it("lets the same or a newer branch through, and a check that cannot run", async () => {
+      mockDowngrade.mockResolvedValue(null);
+      expect((await updateBranchPost(jsonRequest({ branch: "beta" }))).status).toBe(200);
+      mockDowngrade.mockRejectedValue(new Error("git exploded"));
+      expect((await updateBranchPost(jsonRequest({ branch: "beta" }))).status).toBe(200);
     });
   });
 });

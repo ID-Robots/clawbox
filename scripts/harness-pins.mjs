@@ -10,7 +10,8 @@
  *   older build must still find it there. The `OPENCLAW_VERSION` and
  *   `OPENCLAW_VERSION_FALLBACK` constants in the installers and the updater
  *   are fallbacks for a missing or unreadable file, and the updater's
- *   `OPENCLAW_STATE_SCHEMA_BY_VERSION` must carry the pin. The unit tests in
+ *   `OPENCLAW_STATE_SCHEMA_BY_VERSION` and `OPENCLAW_AGENT_SCHEMA_BY_VERSION`
+ *   must carry the pin. The unit tests in
  *   src/tests/unit/harness-pins.test.ts fail when one of them disagrees.
  *
  * Hermes — the default of `HERMES_PIN_COMMIT` in install.sh: the 40-character

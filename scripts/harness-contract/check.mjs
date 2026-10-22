@@ -93,14 +93,19 @@ if (need(oc.hooks, "the plugin hook names (pluginHookNameSet)")) {
 // The two facts ClawBox keeps about the pin that only the package can confirm.
 {
   const updater = fs.readFileSync(path.join(repo, "src/lib/updater.ts"), "utf-8");
-  const table = /OPENCLAW_STATE_SCHEMA_BY_VERSION[^{]*\{([^}]*)\}/.exec(updater)?.[1] ?? "";
   const pinPattern = meta.openclawPin.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const row = new RegExp(`"${pinPattern}"\\s*:\\s*(\\d+)`).exec(table);
-  const native = oc.schemaVersions?.state;
-  if (!row || Number(row[1]) !== native) {
-    const line = updater.split("\n").findIndex((l) => l.includes("OPENCLAW_STATE_SCHEMA_BY_VERSION:")) + 1;
-    fail("openclaw", "state-schema", `OPENCLAW_STATE_SCHEMA_BY_VERSION["${meta.openclawPin}"]`,
-      `is ${row ? row[1] : "missing"}; the pinned package.json says openclaw.schemaVersions.state = ${native}`, `src/lib/updater.ts:${line}`);
+  // Both schema tables the updater's downgrade pre-flight reads: a row that
+  // disagrees with the package lets an older core through, or refuses a box
+  // the pin can open.
+  for (const [kind, table] of [["state", "OPENCLAW_STATE_SCHEMA_BY_VERSION"], ["agent", "OPENCLAW_AGENT_SCHEMA_BY_VERSION"]]) {
+    const rows = new RegExp(`${table}[^{]*\\{([^}]*)\\}`).exec(updater)?.[1] ?? "";
+    const row = new RegExp(`"${pinPattern}"\\s*:\\s*(\\d+)`).exec(rows);
+    const native = oc.schemaVersions?.[kind];
+    if (!row || Number(row[1]) !== native) {
+      const line = updater.split("\n").findIndex((l) => l.includes(`${table}:`)) + 1;
+      fail("openclaw", `${kind}-schema`, `${table}["${meta.openclawPin}"]`,
+        `is ${row ? row[1] : "missing"}; the pinned package.json says openclaw.schemaVersions.${kind} = ${native}`, `src/lib/updater.ts:${line}`);
+    }
   }
   const installer = fs.readFileSync(path.join(repo, "install.sh"), "utf-8");
   const engineLine = installer.split("\n").findIndex((l) => l.startsWith("OPENCLAW_NODE_ENGINE="));

@@ -46,6 +46,9 @@ vi.mock("child_process", () => ({ exec: vi.fn(), execFile: vi.fn() }));
 vi.mock("@/lib/openclaw-state-store", () => ({
   statePath: vi.fn(),
   readStateSchemaVersion: vi.fn(),
+  // No agent databases: this suite is about the state store alone
+  // (updater-harness-downgrade.test.ts has the agent databases).
+  readAgentSchemaVersions: vi.fn(() => []),
 }));
 
 import { get, setMany } from "@/lib/config-store";
