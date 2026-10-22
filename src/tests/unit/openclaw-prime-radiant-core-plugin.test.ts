@@ -19,6 +19,7 @@ import {
   primaryModel,
   promptContext,
   runsOnDevice,
+  turnModel,
 } from "../../../scripts/openclaw-plugins/clawbox-prime-radiant-core/prime-radiant-core.mjs";
 import { coreContextPath } from "@/lib/prime-radiant/paths";
 import { CORE_CONTEXT_FORMAT } from "@/lib/prime-radiant/core-context-file";
@@ -99,6 +100,23 @@ describe("which turns get the block", () => {
     expect(primaryModel(own, "main")).toBe("llamacpp/gemma4");
     expect(await promptContext(OWNER, own, read)).toBeUndefined();
     expect(primaryModel({ agents: { defaults: { model: "anthropic/claude-opus-5-5" } } }, "main")).toBe("anthropic/claude-opus-5-5");
+  });
+
+  it("goes by the model the turn runs on when the core names it: a /model switch, a --model run, a fallback", async () => {
+    writeBlock(BLOCK);
+    const read = createBlockReader(file);
+    // The pinned core puts the attempt's own model in the hook context (`modelProviderId` / `modelId`).
+    for (const [modelProviderId, modelId] of [["llamacpp", "gemma4-e2b-it-q4_0"], ["ollama", "qwen2.5:3b"], ["llamacpp", ""]]) {
+      expect(turnModel({ ...OWNER, modelProviderId, modelId }, CLOUD, "main")).toBe(`${modelProviderId}/${modelId}`);
+      expect(await promptContext({ ...OWNER, modelProviderId, modelId }, CLOUD, read)).toBeUndefined();
+    }
+    // A cloud turn of an agent whose primary is on the device: the turn's model is what pays for the block.
+    const local = { agents: { defaults: { model: { primary: "llamacpp/gemma4" } } } };
+    expect(await promptContext({ ...OWNER, modelProviderId: "anthropic", modelId: "claude-opus-5-5" }, local, read)).toEqual({ appendSystemContext: BLOCK });
+    // No model in the context (or a blank one): the configured primary, as before.
+    expect(turnModel({ ...OWNER, modelProviderId: "  " }, local, "main")).toBe("llamacpp/gemma4");
+    expect(await promptContext({ ...OWNER, modelProviderId: "" }, local, read)).toBeUndefined();
+    expect(await promptContext(OWNER, CLOUD, read)).toEqual({ appendSystemContext: BLOCK });
   });
 });
 

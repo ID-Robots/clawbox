@@ -77,6 +77,19 @@ export function primaryModel(cfg, agentId) {
 }
 
 /**
+ * The model this turn runs on, `provider/model`. The pinned core names it in
+ * the hook context (`modelProviderId` / `modelId`, set from the attempt's own
+ * model), so a session switched with `/model`, a `--model` run and a fallback
+ * attempt all count as what they are; the agent's configured primary only
+ * when the core does not say. Null when neither is known.
+ */
+export function turnModel(ctx, cfg, agentId) {
+  const provider = typeof ctx?.modelProviderId === "string" ? ctx.modelProviderId.trim() : "";
+  if (provider) return `${provider}/${typeof ctx?.modelId === "string" ? ctx.modelId.trim() : ""}`;
+  return primaryModel(cfg, agentId);
+}
+
+/**
  * True when the model runs on this device — or is not known, which is
  * treated the same. src/lib/local-model-profile.ts `isSmallLocalModel` holds
  * that everything this hardware can host is small (its 8B line is above what
@@ -153,7 +166,7 @@ export async function promptContext(ctx, cfg, readBlock) {
   const main = mainAgentId(cfg);
   if (agentIdOfKey(key) !== main) return undefined;
   if (typeof ctx?.agentId === "string" && ctx.agentId && ctx.agentId.toLowerCase() !== main) return undefined;
-  if (runsOnDevice(primaryModel(cfg, main))) return undefined;
+  if (runsOnDevice(turnModel(ctx, cfg, main))) return undefined;
   const text = await readBlock();
   return text ? { appendSystemContext: text } : undefined;
 }

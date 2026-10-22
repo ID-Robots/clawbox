@@ -24,13 +24,14 @@
 // A non-bundled plugin's `before_prompt_build` needs
 // `plugins.entries.<id>.hooks.allowConversationAccess: true`; gateway-pre-start.sh
 // writes it when it installs this plugin. The handler never reads the
-// conversation: it looks at the session key, the agent and the configured
-// model, and a file.
+// conversation: it looks at the session key, the agent and the turn's model,
+// and a file.
 //
 // WHO GETS IT. The gateway's default agent only, never a ClawBox user's own
-// chat (src/lib/chat-scope.ts), and never while the primary model runs on the
-// device (a small local model would pay ~7.5k tokens a turn out of a 16k
-// window). See prime-radiant-core.mjs.
+// chat (src/lib/chat-scope.ts), and never a turn that runs on a model on the
+// device — the one the core names in the hook context, so a `/model` switch
+// or a fallback counts, else the configured primary (a small local model
+// would pay ~7.5k tokens a turn out of a 16k window). See prime-radiant-core.mjs.
 
 import { coreContextFile, createBlockReader, promptContext } from "./prime-radiant-core.mjs";
 
