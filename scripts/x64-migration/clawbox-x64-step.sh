@@ -25,16 +25,18 @@ as_owner() {
 
 # The pinned core's `engines.node` — the same table install.sh and install-x64.sh
 # carry (install-node-engine-table.test.ts runs all three): with 2026.9.3 it
-# became `>=24.16.0 <25 || >=26.1.0`, so Node 22 is refused outright.
-OPENCLAW_NODE_ENGINE=">=24.16.0 <25, or >=26.1.0"
+# became `>=24.16.0 <25 || >=26.1.0`, so Node 22 is refused outright, and
+# 2026.10.6 raised it to `>=24.22.1 <25 || >=26.12.1` (the October 2026 Node.js
+# security releases).
+OPENCLAW_NODE_ENGINE=">=24.22.1 <25, or >=26.12.1"
 
 node_version_satisfies_openclaw_engine() {
   local version="$1" major
   [ -n "$version" ] || return 1
   major="${version%%.*}"
   case "$major" in
-    24) dpkg --compare-versions "$version" ge "24.16.0" ;;
-    26) dpkg --compare-versions "$version" ge "26.1.0" ;;
+    24) dpkg --compare-versions "$version" ge "24.22.1" ;;
+    26) dpkg --compare-versions "$version" ge "26.12.1" ;;
     2[7-9]|[3-9][0-9]|[1-9][0-9][0-9]*) return 0 ;;
     *) return 1 ;;
   esac

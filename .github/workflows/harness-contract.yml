@@ -34,10 +34,12 @@ jobs:
         with:
           persist-credentials: false
 
-      # The pinned core runs under it: engines.node is `>=24.16.0 <25 || >=26.1.0`.
+      # The pinned core runs under it: engines.node is `>=24.22.1 <25 || >=26.12.1`.
+      # A range, not "24": "24" takes whatever 24.x the runner image has cached,
+      # and an image older than the floor hands the core a Node it refuses.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: "24"
+          node-version: ">=24.22.1 <25"
 
       - name: Read the pins
         id: pins

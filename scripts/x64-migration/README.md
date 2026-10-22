@@ -26,7 +26,7 @@ desktop. These non-secret paths live in root-owned
 configured desktop owner before loading the owner-writable OpenClaw package.
 `--node-dir` is the Node every core command and the staged core's own install
 and `--version` gate run on, so it has to satisfy the pinned core's
-`engines.node` (`>=24.16.0 <25 || >=26.1.0` since 2026.9.3). The builder
+`engines.node` (`>=24.22.1 <25 || >=26.12.1` since 2026.10.6). The builder
 refuses a `--node-dir` whose `node --version` the pinned core would refuse, and
 the core step checks the same table before npm stages anything — a package
 once rebuilt without the flag named the distro's Node 22, and the only word of

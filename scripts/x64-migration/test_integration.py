@@ -33,7 +33,7 @@ class IntegrationTest(unittest.TestCase):
         # The builder refuses a Node the pinned core refuses, so the package
         # under test names a Node that answers as one the core accepts — never
         # the runner's own /usr/bin/node, whose version is the runner's.
-        cls.node_dir=cls.node_stub(cls.base,'v24.18.0')
+        cls.node_dir=cls.node_stub(cls.base,'v24.22.1')
         args=SimpleNamespace(user=owner.pw_name,project=cls.project,node_dir=cls.node_dir,
                              npm_prefix=os.path.join(owner.pw_dir,'.nvm/versions/node/v24.0.0'),version='1.0.0',
                              staging=str(cls.stage),output=str(cls.deb))
@@ -51,8 +51,8 @@ class IntegrationTest(unittest.TestCase):
     # Exactly the published `engines.node` of the pinned core, as a table — the
     # same matrix install-node-engine-table.test.ts runs the installers' bash
     # copies over, so the builder's Python copy cannot drift from them.
-    NODE_REJECTED=['22.22.2','22.22.3','22.23.2','23.11.0','24.15.0','25.9.0','26.0.0']
-    NODE_ACCEPTED=['24.16.0','24.21.0','26.1.0','26.8.2','27.0.0','100.0.0']
+    NODE_REJECTED=['22.22.2','22.22.3','22.23.2','23.11.0','24.15.0','24.16.0','24.22.0','25.9.0','26.0.0','26.12.0']
+    NODE_ACCEPTED=['24.22.1','24.23.0','26.12.1','26.13.0','27.0.0','100.0.0']
 
     def test_builder_node_engine_table_matches_the_installers(self):
         for v in self.NODE_REJECTED:
@@ -67,7 +67,7 @@ class IntegrationTest(unittest.TestCase):
     def test_builder_refuses_a_node_dir_the_pinned_core_refuses(self):
         """Refused where the builder's output is read, not inside the next core update's root unit."""
         owner=pwd.getpwuid(os.getuid())
-        for version,accepted in [('v22.23.2',False),('v24.15.0',False),(None,False),('v24.16.0',True)]:
+        for version,accepted in [('v22.23.2',False),('v24.21.0',False),(None,False),('v24.22.1',True)]:
             with self.subTest(node=version):
                 node_dir=self.node_stub(self.base,version)
                 out=tempfile.mkdtemp(prefix='build-',dir=self.base)
@@ -82,7 +82,7 @@ class IntegrationTest(unittest.TestCase):
                 with self.assertRaises(ValueError) as refused:
                     builder.build(args)
                 self.assertIn('--node-dir',str(refused.exception))
-                self.assertIn('>=24.16.0 <25, or >=26.1.0',str(refused.exception))
+                self.assertIn('>=24.22.1 <25, or >=26.12.1',str(refused.exception))
                 if version: self.assertIn(version,str(refused.exception))
                 self.assertFalse(Path(out,'package.deb').exists())
 
@@ -277,7 +277,7 @@ esac
     # `node` answers `-p "require('<package.json>').version"` from that file.
     NODE = r"""#!/bin/sh
 case "$1" in
-  --version) printf 'v24.18.0\n' ;;
+  --version) printf 'v24.22.1\n' ;;
   -p) f=$(printf '%s' "$2" | sed -n "s/^require('\([^']*\)').version$/\1/p")
       [ -n "$f" ] && [ -f "$f" ] || exit 1
       sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$f" ;;
@@ -548,11 +548,11 @@ exit {code}
         root,worker,_=self.core_fixture()
         (root/'mirror/config/openclaw-target.txt').write_text('2026.9.1\n')
         node=root/'runtime/node'
-        node.write_text(self.NODE.replace("printf 'v24.18.0\\n'","printf 'v22.23.2\\n'"))
+        node.write_text(self.NODE.replace("printf 'v24.22.1\\n'","printf 'v22.23.2\\n'"))
         result=self.run_worker(worker,'openclaw_install')
         self.assertNotEqual(result.returncode,0)
         self.assertIn('v22.23.2',result.stderr)
-        self.assertIn('>=24.16.0 <25, or >=26.1.0',result.stderr)
+        self.assertIn('>=24.22.1 <25, or >=26.12.1',result.stderr)
         self.assertIn('--node-dir',result.stderr)
         self.assertIn('untouched',result.stderr)
         events=(root/'events').read_text()

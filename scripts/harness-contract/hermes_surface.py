@@ -220,8 +220,23 @@ else:
     flag = lambda n: ("-" if len(n) == 1 else "--") + n.replace("_", "-")  # noqa: E731
     # A rename upstream must not read as "nothing is refused": absent is null, which the check fails on.
     unsupported, policy = getattr(gateway_chat, "_UNSUPPORTED", None), getattr(gateway_chat, "_POLICY", None)
+    # The refusal lives in the transport launcher, and `hermes chat` takes that only for
+    # `--format stream-json` and for `--safe-mode` / `--ignore-user-config` (main.cmd_chat);
+    # the classic -q/-Q path accepts the rest (`--image` included). Null when either router
+    # moved, which makes the check apply the refusal to every `hermes chat` again.
+    launcher = None
+    try:
+        import inspect
+        from hermes_cli.stream_json import stream_json_requested
+        from hermes_cli.main_tui_launch import _bypass_chat_launch
+        if ("output_format" in inspect.getsource(stream_json_requested)
+                and all(d in inspect.getsource(_bypass_chat_launch) for d in ("safe_mode", "ignore_user_config"))):
+            launcher = ["--format", "--ignore-user-config", "--safe-mode"]
+    except Exception:
+        launcher = None
     out["chatRules"] = {"present": True,
                         "refused": None if unsupported is None else sorted(flag(n) for n in unsupported),
+                        "launcherFlags": launcher,
                         "frozenOnResume": None if policy is None else sorted(flag(n) for n in policy)}
 
 # ── config: Hermes's own validator, asked about every key ClawBox names ──────

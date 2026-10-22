@@ -921,13 +921,27 @@ async function restartHermesGatewayUnit(signal?: AbortSignal): Promise<boolean> 
  * non-zero exit — it only rejects on spawn failure, timeout or abort — so an
  * unchecked `await` here reads as success for every kind of failure the CLI
  * reports properly.
+ *
+ * `--yes`, from Hermes v0.22.4: without it a restart is REFUSED (exit 1,
+ * "Refusing to restart the gateway: N live session(s) would be interrupted")
+ * whenever a turn, cron job or delegation is live, and the channel the owner
+ * just configured would wait for an unrelated restart. With it the in-band
+ * restart still drains turns, as every earlier restart did. An agent older
+ * than the flag answers argparse's "unrecognized arguments" and is asked the
+ * old way.
  */
 async function restartHermesGatewayUserService(signal?: AbortSignal): Promise<boolean> {
   try {
-    const res = await runHermesCli(["gateway", "restart"], {
+    let res = await runHermesCli(["gateway", "restart", "--yes"], {
       timeoutMs: GATEWAY_TIMEOUT_MS,
       signal,
     });
+    if (res.code !== 0 && /unrecognized arguments/.test(`${res.stderr}\n${res.stdout}`)) {
+      res = await runHermesCli(["gateway", "restart"], {
+        timeoutMs: GATEWAY_TIMEOUT_MS,
+        signal,
+      });
+    }
     if (res.code !== 0) {
       console.error(`[hermes] gateway restart exited ${res.code}: ${res.stderr || res.stdout}`);
       return false;

@@ -32,7 +32,9 @@ import { readConfigStrict, restartGateway, runOpenclawConfigSet, runOpenclawConf
 //     plugins.entries.memory-core.config.dreaming.enabled        docs/concepts/dreaming.md
 //     skills.workshop.autonomous.mode                            docs/tools/self-learning.md
 //       ("auto also enables weekly collection review" — that IS the
-//        skill-collection-review cron the incident found enabled)
+//        skill-collection-review cron the incident found enabled; 2026.10.6
+//        retired that cron: `auto` there is background review plus archiving
+//        learned skills unused for 30 days, `off` disables both)
 //
 //   Hermes 0.20.5 (read off the installed package on the box)
 //     auxiliary.background_review.enabled   "Master switch for automatic
@@ -212,15 +214,17 @@ async function writeOpenclawJob(id: BackgroundJobId, enabled: boolean): Promise<
     await runOpenclawConfigSet([key, enabled ? "true" : "false", "--strict-json"]);
     return;
   }
-  // TERNARY, not boolean: the core's own values are `off | propose | auto`, and
-  // `propose` means "capture, but let me review every one before it applies".
-  // Switching OFF writes `off` and switching ON writes `auto`, which is the
-  // core's own default — so a box the owner had put on `propose` and then
-  // switched off here comes back as `auto`, a wider setting than he chose. That
-  // is stated rather than hidden: the row's own text says what ON means, and
-  // restoring `propose` would need ClawBox to remember a value the switch has
-  // no way to show. `propose` reads as ON while it is set, and this never
-  // rewrites it — a box already on `propose` is left exactly there.
+  // TERNARY, not boolean, up to 2026.10.3: that core's values are
+  // `off | propose | auto`, and `propose` means "capture, but let me review
+  // every one before it applies". Switching OFF writes `off` and switching ON
+  // writes `auto`, which is the core's own default — so a box the owner had put
+  // on `propose` and then switched off here comes back as `auto`, a wider
+  // setting than they chose. That is stated rather than hidden: the row's own
+  // text says what ON means, and restoring `propose` would need ClawBox to
+  // remember a value the switch has no way to show. `propose` reads as ON while
+  // it is set, and this never rewrites it — a box already on `propose` is left
+  // exactly there. 2026.10.6 retired proposals (`off | auto`), and its own
+  // `doctor --fix` moves `propose` to `off`, which then reads as OFF here.
   if (enabled) {
     const current = valueAt(await readConfigStrict(), key);
     const mode = typeof current === "string" ? current.trim().toLowerCase() : "";

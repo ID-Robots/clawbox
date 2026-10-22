@@ -1076,14 +1076,13 @@ export async function openDashboardTurn(req: DashboardTurnRequest): Promise<Dash
       // and because nothing in this process can prove the switch took.
       //
       // Throwing lands in the catch below, which returns null, and the route
-      // then spawns the CLI for this turn. That path passes `-m` and
-      // `--provider` as argv rather than re-pointing the session — it does
-      // carry `--resume <sid>` on a threaded turn, so it is not the fresh
-      // process this comment used to claim, and whether argv beats a
-      // per-session override there is the one thing about it still unverified
-      // on a box (`cliServedPair` in the route says the same). The turn is
-      // slower and not streamed, and it is ANSWERED BY THE MODEL THE CUSTOMER PICKED —
-      // which is the property that matters more.
+      // then spawns the CLI for this turn. Up to Hermes v0.21.7 that path
+      // passed `-m` and `--provider` with `--resume <sid>` and the turn was
+      // answered by the model the customer picked. From v0.22.4 the CLI runs
+      // through the gateway, which refuses a creation flag that differs from
+      // a resumed session's frozen launch, so the route resumes without them
+      // and the session's own route answers — the turn is not lost, and its
+      // record names no model (`cliServedPair` in the route).
       if (!modelSwitchTook(switched)) {
         throw new Error(`dashboard would not switch this session to ${req.model}`);
       }

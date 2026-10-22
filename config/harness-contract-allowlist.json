@@ -31,7 +31,7 @@
    "kind": "event",
    "name": "approval.request",
    "category": "known-gap",
-   "reason": "At v0.21.7 the dashboard asks for an approval with the server->client REQUEST `approval` (OpenRPC x-server-requests), sent only to a client that declares it can answer; ClawBox's dashboard client does not, so Hermes withdraws the approval and this event handler never fires.",
+   "reason": "At v0.22.4, as at v0.21.7, the dashboard asks for an approval with the server->client REQUEST `approval` (OpenRPC x-server-requests), sent only to a client that declares it can answer; ClawBox's dashboard client does not, so Hermes withdraws the approval and this event handler never fires.",
    "sites": ["src/lib/hermes-dashboard-turn.ts:122"],
    "expires": "2026-11-15"
   },
@@ -40,7 +40,7 @@
    "kind": "event",
    "name": "clarify.request",
    "category": "known-gap",
-   "reason": "At v0.21.7 a clarify question is the server->client REQUEST `clarify` (OpenRPC x-server-requests), not an event; ClawBox waits for an event that is never sent, and the question goes back to the agent undelivered.",
+   "reason": "At v0.22.4, as at v0.21.7, a clarify question is the server->client REQUEST `clarify` (OpenRPC x-server-requests), not an event; ClawBox waits for an event that is never sent, and the question goes back to the agent undelivered.",
    "sites": ["src/lib/hermes-dashboard-turn.ts:142"],
    "expires": "2026-11-15"
   },
@@ -49,7 +49,7 @@
    "kind": "event",
    "name": "clarify.expire",
    "category": "known-gap",
-   "reason": "Not in v0.21.7's dashboard contract at all; part of the same unimplemented clarify flow as clarify.request.",
+   "reason": "Not in the dashboard contract at v0.21.7 or v0.22.4; part of the same unimplemented clarify flow as clarify.request.",
    "sites": ["src/lib/hermes-dashboard-turn.ts:152"],
    "expires": "2026-11-15"
   },
@@ -58,7 +58,7 @@
    "kind": "rpc",
    "name": "clarify.respond",
    "category": "known-gap",
-   "reason": "Not a method at v0.21.7 (the answer to the server->client `clarify` request is its JSON-RPC result); a call answers -32601. v0.22.1 adds it under x-canonical-methods with different params.",
+   "reason": "Not a method at v0.21.7 (the answer to the server->client `clarify` request is its JSON-RPC result); a call answers -32601. v0.22.1 added it under x-canonical-methods only, which the gateway's session authority serves; the standalone `hermes dashboard` ClawBox uses has none attached, so at v0.22.4 a call still answers -32601.",
    "sites": ["src/app/setup-api/hermes/chat/clarify/route.ts:194", "src/lib/hermes-dashboard-turn.ts:1311", "src/lib/hermes-dashboard-turn.ts:1647"],
    "expires": "2026-11-15"
   }

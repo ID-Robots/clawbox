@@ -5,10 +5,12 @@
 #
 #   openclaw-maintenance-retry.sh <openclaw> <args...>
 #
-# The pinned core (2026.10.3) refuses every command that reads its config while
-# another process holds the state as `sqlite-maintenance` — a gateway start's
-# own CLI bootstrap, a `doctor --fix` — with "…undergoing offline maintenance;
-# retry when it finishes." (or "…retry after maintenance finishes."). It refuses
+# The pinned core (2026.10.6, as 2026.10.3) refuses every command that reads its
+# config while another process holds the state as `sqlite-maintenance` — a
+# gateway start's own CLI bootstrap, a `doctor --fix` — with "…undergoing offline
+# maintenance; retry when it finishes." (2026.10.3 also printed "…retry after
+# maintenance finishes." for a half-written owner record; 2026.10.6 says "restart
+# the Gateway" there, which is not a retry and is not matched). It refuses
 # before the command acts, so asking again is safe, and the core offers no flag,
 # variable or exit code to wait for it.
 #

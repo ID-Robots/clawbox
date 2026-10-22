@@ -288,9 +288,14 @@ export const __test = {
   HERMES_INTERRUPTED_EXIT_CODE,
 };
 
-// Hermes session ids are timestamped slugs: 20260810_194609_7568b9. Strict on
-// purpose — this value reaches argv, and anything looser could smuggle a flag.
-const SESSION_ID_RE = /^[0-9]{8}_[0-9]{6}_[0-9a-f]{6}$/;
+// Hermes session ids come in two shapes. The dashboard mints timestamped slugs
+// (20260810_194609_7568b9); from v0.22.4 `hermes chat` runs through the
+// gateway, whose `session.create` names a session `local-` + 64 hex
+// (hermes_state_keys.local_identity), and that is the id its `session_id:`
+// banner prints. Strict on purpose — this value reaches argv, and anything
+// looser could smuggle a flag.
+const SESSION_ID_SOURCE = "[0-9]{8}_[0-9]{6}_[0-9a-f]{6}|local-[0-9a-f]{64}";
+const SESSION_ID_RE = new RegExp(`^(?:${SESSION_ID_SOURCE})$`);
 
 /**
  * Pull the conversation id out of `chat -q`'s stderr banner (`session_id: …`).
@@ -298,7 +303,7 @@ const SESSION_ID_RE = /^[0-9]{8}_[0-9]{6}_[0-9a-f]{6}$/;
  * why one-shot mode cannot thread a conversation.)
  */
 function parseSessionId(stderr: string): string {
-  const match = /^\s*session_id:\s*([0-9]{8}_[0-9]{6}_[0-9a-f]{6})\s*$/m.exec(stderr);
+  const match = new RegExp(`^\\s*session_id:\\s*(${SESSION_ID_SOURCE})\\s*$`, "m").exec(stderr);
   return match ? match[1] : "";
 }
 
@@ -953,15 +958,14 @@ async function recordStoppedTurn(sessionKey: string, partial: string): Promise<v
  * named and nothing else: unknown beats wrong, the same rule the dashboard half
  * follows.
  *
- * What argv named IS recorded there, and that is not the same guess. This
- * fallback exists because the customer picked a model the dashboard would not
- * switch to (see hermes-dashboard-turn.ts, the `slash.exec` refusal), and its
- * whole justification is that the spawned run answers on the picked pair. If
- * `-m` lost to a session override the ROUTING would be wrong, not just the
- * label — a much larger defect than this function. So the record follows the
- * assumption the fallback already rests on, rather than inventing a second one.
- * Unverified on a box all the same, and it is one read: `hermes chat --help`
- * plus one resumed turn with `-m`.
+ * From Hermes v0.22.4 a resumed run's argv names no pair at all: the gateway
+ * refuses a `-m` / `--provider` that differs from the session's frozen launch
+ * (exit 2), so the route stopped sending them on a resume, and the caller passes
+ * an empty pair here — the session's own route answered, and nothing is
+ * recorded for it. That also ends the fallback this used to describe, a turn
+ * whose model the dashboard would not switch to (hermes-dashboard-turn.ts, the
+ * `slash.exec` refusal) being answered by `-m` on the CLI: at v0.22.4 a resumed
+ * CLI turn cannot change the session's model.
  *
  * The harness's billing record is deliberately NOT consulted here, though the
  * dashboard leg now reads it (`billedProviderFor`). Two cases blank the provider
@@ -1377,17 +1381,29 @@ export async function POST(request: Request) {
 
   const args = ["chat", "-q", promptWithImages, "-Q"];
   if (firstImage) args.push("--image", firstImage);
+  // The creation flags below go on a NEW conversation only. From Hermes v0.22.4
+  // `hermes chat` runs through the gateway, and a resume keeps the session's
+  // frozen launch: a `-m`, `--provider`, `--reasoning` or `-t` that differs
+  // from it is refused before the turn — exit 2, "Resume retains gateway
+  // session policy; creation overrides are unsupported on resume"
+  // (hermes_cli/gateway_chat.py check_resume_policy). A session the dashboard
+  // created has no frozen launch at all, so every flag differs from it, and a
+  // picture sent into an ongoing chat failed outright. Hermes' own way forward
+  // is to resume without them; switching a resumed session is the dashboard
+  // turn's `/model … --session`, and on this path the session's own route
+  // answers.
+  const creating = !rawSessionId;
   // No model → omit -m and let hermes use config.yaml's model.default, which is
   // by definition valid for the configured provider. (The previous hardcoded
   // `openai/gpt-4o-mini` fallback was actively wrong on a ClawBox AI device:
   // model.provider=clawai only accepts BARE deepseek ids and answers a
   // vendor-prefixed one with HTTP 400 "Model not allowed".)
-  if (rawModel) args.push("-m", rawModel);
+  if (creating && rawModel) args.push("-m", rawModel);
   // Names are charset-checked in smallLocalModelToolsets(), so this can never
   // carry a leading "-" into argv.
-  if (slimToolsets) args.push("-t", slimToolsets.join(","));
-  if (wantsProvider) args.push("--provider", rawProvider);
-  if (rawReasoning) args.push("--reasoning", rawReasoning);
+  if (creating && slimToolsets) args.push("-t", slimToolsets.join(","));
+  if (creating && wantsProvider) args.push("--provider", rawProvider);
+  if (creating && rawReasoning) args.push("--reasoning", rawReasoning);
   // Continue the SAME conversation. Without this every turn is a fresh `-z`
   // run with its own session, so the agent has no idea what "it" refers to in
   // a follow-up — asking "is it removed now?" got "what are we trying to
@@ -1453,17 +1469,22 @@ export async function POST(request: Request) {
   // Read BEFORE the run, not after: the default this turn used is the one on
   // disk when it was spawned, and a switch made during the turn — ai_set_model
   // does exactly that when told "switch to X" — must not become the record of
-  // the turn that was told.
-  const cliServed = await cliServedPair(rawModel, wantsProvider ? rawProvider : "", Boolean(rawSessionId));
+  // the turn that was told. A resumed run names no pair in argv (see above), so
+  // it records none: the session's own route answered, and unknown beats wrong.
+  const cliServed = await cliServedPair(
+    creating ? rawModel : "",
+    creating && wantsProvider ? rawProvider : "",
+    !creating,
+  );
 
   try {
     const { out: text, err } = await runHermes(args, request.signal);
     // The run reports its own session id on stderr — no DB race, no guessing
     // from `sessions list`. Hand it back so the next turn can resume it.
     const threaded = parseSessionId(err) || rawSessionId;
-    // The CLI path runs exactly what argv asked for — `-m` and `--provider` are
-    // passed straight to the command, with no session to drift from — so the
-    // request IS the record here. What it did NOT ask for, the run took from
+    // A NEW conversation on the CLI path runs exactly what argv asked for — `-m`
+    // and `--provider` are passed straight to the command, with no session to
+    // drift from — so the request IS the record here. What it did NOT ask for, the run took from
     // config.yaml's pairing, which is the same read the validation above makes
     // when it has a reason to: recorded too, because a blank under a reply the
     // box knows the model of is a false unknown, not modesty.
