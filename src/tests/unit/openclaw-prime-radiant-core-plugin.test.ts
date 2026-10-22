@@ -9,7 +9,7 @@ import { execFileSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import plugin from "../../../scripts/openclaw-plugins/clawbox-prime-radiant-core/index.mjs";
 import {
   coreContextFile,
@@ -22,6 +22,9 @@ import {
 } from "../../../scripts/openclaw-plugins/clawbox-prime-radiant-core/prime-radiant-core.mjs";
 import { coreContextPath } from "@/lib/prime-radiant/paths";
 import { CORE_CONTEXT_FORMAT } from "@/lib/prime-radiant/core-context-file";
+
+// A real process (`mkfifo`): see test-timeout-hygiene.test.ts.
+vi.setConfig({ testTimeout: 15_000, hookTimeout: 15_000 });
 
 const base = fs.mkdtempSync(path.join(os.tmpdir(), "prime-radiant-core-plugin-"));
 let n = 0;
