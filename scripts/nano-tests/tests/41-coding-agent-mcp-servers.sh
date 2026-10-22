@@ -135,8 +135,17 @@ const out = (line) => process.stdout.write(line + "\n");
       // drawn as a tool step, while the run waits for the answer.
       const call = cardText.includes("nano board read");
       if (line && status === "running" && call) {
-        const raw = cardText.split("\n").find((l) => l.includes("mcp__"));
-        out(raw ? "APP raw-tool-name " + raw.trim().slice(0, 160) : "APP live " + line.trim().slice(0, 160));
+        // A step drawn as the bare mcp__ name, not the agent prose that may
+        // mention one: an element of the timeline holding that name alone.
+        const raw = await card.first().evaluate((el) => {
+          const pane = el.querySelector("#coding-agent-live-pane-timeline") || el;
+          for (const node of pane.querySelectorAll("*")) {
+            const t = node.children.length === 0 ? (node.textContent || "").trim() : "";
+            if (/^mcp__\S+$/.test(t)) return t;
+          }
+          return "";
+        });
+        out(raw ? "APP raw-tool-name " + raw.slice(0, 160) : "APP live " + line.trim().slice(0, 160));
         return;
       }
       if (status !== "running") {
