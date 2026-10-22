@@ -186,17 +186,19 @@ const REGION = "[A-Z]{2}(?![\\p{L}\\p{N}])";
  * end in a region code or a postcode ("… Springfield AB T4N 1A1"), so the
  * capitalised words of a next sentence are never taken for a city. A full
  * stop ends it. A street with no city after it is one only where a punctuation
- * mark or the text's end follows ("ships to 12 Maple Grove Drive."): a count
- * or an amount before a name ("200 Google Drive files", "1200 Acme Way Ltd")
- * is no house number. Read by its shape, never from a list of places: a name
- * with no house number before it ("Google Drive") is no address.
+ * mark or the text's end follows ("ships to 12 Maple Grove Drive.", "… Drive
+ * (rear door)"): a count or an amount before a name ("200 Google Drive files",
+ * "1200 Acme Way Ltd") is no house number. A hyphen, an apostrophe or an
+ * ampersand goes on with a name ("Drive-in", "Acme Way & Sons") and ends no
+ * street. Read by its shape, never from a list of places: a name with no house
+ * number before it ("Google Drive") is no address.
  */
 const POSTAL_ADDRESS = new RegExp(
   `(?<![\\p{L}\\p{N}])\\d{1,6}[A-Za-z]?[ \\t]+(?:${STREET_WORD}[ \\t]+){1,4}${STREET_TYPE}(?![\\p{L}\\p{N}])` +
     `(?:[ \\t]+(?:NE|NW|SE|SW|N|S|E|W)(?![\\p{L}\\p{N}]))?` +
     `(?:(?:,[ \\t]*${PLACE}){1,3}(?:,?[ \\t]+${POSTCODE})?` +
     `|(?:,?[ \\t]+${PLACE_WORD}){0,3},?[ \\t]+(?:${REGION}(?:,?[ \\t]+${POSTCODE})?|${POSTCODE})` +
-    `|(?=[ \\t]*(?:[.,;:!?)\\]\\r\\n]|$)))`,
+    `|(?=[ \\t]*(?:[.,;:!?()\\[\\]{}"“”«»–—\\r\\n]|$)))`,
   "gu",
 );
 

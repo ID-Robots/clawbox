@@ -130,6 +130,8 @@ describe("names and leaves", () => {
     expect(kept.has("Acme Widgets Ltd")).toBe(true);
     // A street with no city is one where a punctuation mark ends it; a count before a name is no house number.
     expect(candidateNames("Deliver to 77 Lakeview Road. Ask for Contoso Labs.").has("Lakeview Road")).toBe(false);
+    expect(candidateNames("Ship to 12 Maple Grove Drive (rear door).").has("Maple Grove Drive")).toBe(false);
+    expect(candidateNames("Ship to 12 Maple Grove Drive – rear door").has("Maple Grove Drive")).toBe(false);
     const counted = candidateNames("We moved 200 Google Drive files to Northwind Depot.");
     expect(counted.has("Google Drive")).toBe(true);
     expect(counted.has("Northwind Depot")).toBe(true);
