@@ -1,14 +1,12 @@
 {
   "id": "clawbox-backup-scope",
   "name": "ClawBox backup scope",
-  "description": "Tells OpenClaw backups which state and agent folders can be left out and rebuilt: core update downloads, local backup archives and Codex caches.",
+  "description": "Tells OpenClaw backups they can leave out the box's own backup archives in backups/, while keeping the originals openclaw doctor moved there.",
   "activation": { "onStartup": true },
   "configSchema": { "type": "object", "additionalProperties": false },
   "backupResources": [
-    { "disposition": "regenerable", "scope": "state", "relativePath": "upgrades" },
     { "disposition": "regenerable", "scope": "state", "relativePath": "backups" },
-    { "disposition": "regenerable", "scope": "agent", "relativePath": "codex-home/.cache" },
-    { "disposition": "regenerable", "scope": "agent", "relativePath": "codex-home/cache" },
-    { "disposition": "regenerable", "scope": "agent", "relativePath": "codex-home/log" }
+    { "disposition": "include", "scope": "state", "relativePath": "backups/tools-md-migration" },
+    { "disposition": "include", "scope": "state", "relativePath": "backups/heartbeat-migration" }
   ]
 }

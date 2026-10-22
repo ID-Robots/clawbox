@@ -67,8 +67,12 @@ export const STOP_AFTER_OLD_ROWS = 8;
 /** The most sessions.usage may return in one answer; more is "incomplete". */
 const GATEWAY_SESSION_LIMIT = 100000;
 const DEFAULT_TIMEOUT_S = 120;
-/** A cold archive bigger than this is not decoded (it is named in the notes). */
-const COLD_ARCHIVE_MAX_BYTES = 512 * 1024 * 1024;
+/**
+ * A cold archive that decodes to more than this is not read (it is named in
+ * the notes): the pinned core's own cap (`MAX_COLD_ARCHIVE_BYTES`, its
+ * session-cold-storage worker), which it neither writes nor decodes past.
+ */
+const COLD_ARCHIVE_MAX_BYTES = 64 * 1024 * 1024;
 
 const USAGE = `Usage: clawbox tokens [--days N] [--agent ID] [--json] [--source auto|gateway|db]
                       [--state-dir DIR] [--timeout SECONDS]
@@ -536,6 +540,34 @@ function decodeZstd(blob, rawBytes) {
   return zlib.zstdDecompressSync(buf, options).toString("utf8");
 }
 
+/**
+ * The transcript events in one cold archive that can be assistant messages,
+ * each with its row's `created_at`. The pinned core's cold-storage worker
+ * writes an archive as zstd of JSON lines: a `header` record first
+ * (`version: 1`, the session id), one `event` record per transcript row —
+ * `row: { seq, event_json, created_at }`, the event itself a JSON STRING —
+ * then the `identity`, `active`, `index` and `fts` records it restores with.
+ * Its `raw_bytes` counts the events' JSON only, not the lines around them, so
+ * it does not bound the decoded size. Anything else throws, and the archive
+ * is named as not read: none of it is counted, rather than part of it.
+ */
+function coldArchiveEvents(blob, sessionId) {
+  const lines = decodeZstd(blob, COLD_ARCHIVE_MAX_BYTES).trimEnd().split("\n");
+  const header = JSON.parse(lines[0]);
+  if (header?.kind !== "header" || header.version !== 1 || header.sessionId !== sessionId) {
+    throw new Error("not a version-1 cold transcript archive of this session");
+  }
+  const events = [];
+  for (const line of lines.slice(1)) {
+    // Inside the record the event's quotes are escaped.
+    if (!line.includes('\\"assistant\\"')) continue;
+    const record = JSON.parse(line);
+    if (record?.kind !== "event") continue;
+    events.push({ event: JSON.parse(record.row.event_json), createdAt: Number(record.row.created_at) });
+  }
+  return events;
+}
+
 function tableColumns(db, table) {
   return new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name));
 }
@@ -650,16 +682,9 @@ export function scanAgentDatabase({ db, agentId, window, acc, dbPath }) {
         const blob = archive.storage === "sqlite"
           ? archive.blob
           : fs.readFileSync(path.join(path.dirname(path.dirname(dbPath)), "sessions", "cold", path.basename(archive.name)));
-        const text = decodeZstd(blob, rawBytes);
+        const events = coldArchiveEvents(blob, archive.sessionId);
         stats.coldRead += 1;
-        for (const line of text.split("\n")) {
-          if (!line.includes('"assistant"')) continue;
-          try {
-            count1(archive.sessionId, JSON.parse(line), undefined);
-          } catch {
-            /* a torn line is not a call */
-          }
-        }
+        for (const { event, createdAt } of events) count1(archive.sessionId, event, createdAt);
       } catch {
         stats.coldSkipped.push(archive.name);
       }
