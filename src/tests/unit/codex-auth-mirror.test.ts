@@ -1441,8 +1441,9 @@ describe("codex-auth-mirror.js", () => {
       release(blocker);
     }
 
-    // Well inside the 5 s busy_timeout a queued BEGIN IMMEDIATE would wait out.
-    expect(elapsedMs).toBeLessThan(2000);
+    // Well inside the 5 s busy_timeout a queued BEGIN IMMEDIATE would wait out,
+    // with room for a loaded CI runner starting the node child (~0.2 s idle).
+    expect(elapsedMs).toBeLessThan(3500);
     expect(result.status).toBe(0);
     // The shared store is never written, so there is still nowhere to record
     // the rotation: not adopted, and the app-server's live token left alone.
@@ -1486,7 +1487,9 @@ describe("codex-auth-mirror.js", () => {
 
     expect(JSON.parse(readFileSync(homeAuthPath, "utf-8")).tokens.access_token).toBe(live);
     expect(JSON.parse(readFileSync(codexHomeAuthPath, "utf-8")).tokens.access_token).toBe(live);
-    expect(elapsedMs).toBeLessThan(1000);
+    // A blocked read would wait out the 5 s busy_timeout; a loaded runner's
+    // node start (~0.2 s idle) stays far below this.
+    expect(elapsedMs).toBeLessThan(3500);
   }, 20_000);
 
   it("leaves the legacy JSON file alone, and adopts nothing, when core's SQLite store could not take the rotation", () => {
