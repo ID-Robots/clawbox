@@ -283,7 +283,11 @@ done
 LEAKS=""
 case "$RUN_JSON" in *"$TOKEN"*) LEAKS="$LEAKS run-record" ;; esac
 grep -rqF -- "$TOKEN" "$REPO/data/coding-agent-runs.json" 2>/dev/null && LEAKS="$LEAKS runs-file"
-grep -rqF -- "$TOKEN" "$REPO/data/coding-agent-artifacts/$RUN_ID" 2>/dev/null && LEAKS="$LEAKS artifacts"
+if [ -d "$REPO/data/coding-agent-artifacts/$RUN_ID" ]; then
+  grep -rqF -- "$TOKEN" "$REPO/data/coding-agent-artifacts/$RUN_ID" 2>/dev/null && LEAKS="$LEAKS artifacts"
+else
+  LEAKS="$LEAKS no-evidence-folder-to-scan"
+fi
 for d in coding-agent-history coding-agent-archive; do grep -rqF -- "$TOKEN" "$REPO/data/$d" 2>/dev/null && LEAKS="$LEAKS $d"; done
 [ -z "$LEAKS" ] && say "ok - the token is in no run record, history or evidence file" || say "not ok - the token is in:$LEAKS"
 ls "$REPO/data/coding-agent-streams/$RUN_ID".mcp-*.json >/dev/null 2>&1 && say "not ok - the run MCP config file outlived the run" || say "ok - the run MCP config file is gone"
