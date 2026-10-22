@@ -139,7 +139,7 @@ export default function CodingProjectMcpServersCard({ project }: { project: stri
         <p className="text-[var(--text-muted)] leading-relaxed">
           {tr(
             "codingAgent.mcpServers.help",
-            "Servers this project's coding runs start with, beside the browser tools every run has. Nothing is ticked until you tick it. A server's credentials stay in the harness's own config: never in a run's prompt, log or evidence.",
+            "Servers this project's coding runs start with, beside the browser tools every run has. Nothing is ticked until you tick it. A ticked server's credentials are copied into a private config file for each run, deleted when the run ends, and scrubbed from what the run prints. A server whose credential is too short to scrub (under 8 characters) is not offered.",
           )}
         </p>
         {answer === null && error && (

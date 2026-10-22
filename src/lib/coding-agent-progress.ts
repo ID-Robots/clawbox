@@ -200,10 +200,11 @@ const PLAN_RE = /^Plan: (\d+) tasks?, (\d+) done$/;
 /**
  * A tool name as the harness reports it: `mcp__<server>__<tool>` or bare. The
  * server is any name a project's allowlist admits (src/lib/project-mcp-servers.ts):
- * a single `_` or a `-` in it, never a double underscore — the first `__` after
- * the server ends it — and the tool may hold a `-` too.
+ * a single `_` or a `-` in it (even last: `mcp__srv___tool`), never a double
+ * underscore — the first `__` after the server ends it — and the tool starts
+ * with a letter or digit and may hold a `-` or `_` after it.
  */
-const MCP_TOOL_RE = /^mcp__(?:[A-Za-z0-9-]|_(?!_))+__([A-Za-z0-9_-]+)$/;
+const MCP_TOOL_RE = /^mcp__[A-Za-z0-9](?:[A-Za-z0-9-]|_(?!_))*_?__([A-Za-z0-9][A-Za-z0-9_-]*)$/;
 const BARE_TOOL_RE = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/;
 
 /** Where every run's folder lives on the box; a command echoing it is all noise. */

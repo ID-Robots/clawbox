@@ -6,7 +6,7 @@ import { readClawboxMcpEnabled } from "@/lib/clawbox-mcp-switch";
 import { getKnown, set } from "@/lib/config-store";
 import { hermesConfigPath } from "@/lib/hermes-config-yaml";
 import { isPlainObject, readConfigStrict } from "@/lib/openclaw-config";
-import { SECRET_SCOPE_RE } from "@/lib/project-secrets-shape";
+import { MIN_SECRET_VALUE_CHARS, SECRET_SCOPE_RE } from "@/lib/project-secrets-shape";
 
 /**
  * Which MCP servers a coding-agent run may use, project by project.
@@ -32,7 +32,9 @@ import { SECRET_SCOPE_RE } from "@/lib/project-secrets-shape";
  * THE STORE is one key in the box's config.json, `{ [project]: string[] }`,
  * keyed by the same project scope the secret store uses (the run's
  * `projectScopeFor`). Names only — a server's credentials stay in the
- * harness's own config and are read at each spawn. In config.json rather than
+ * harness's own config and are read at each spawn, copied into that run's own
+ * --mcp-config file (deleted when the run settles) and scrubbed from its
+ * output; a server with a credential too short to scrub is not offered. In config.json rather than
  * a file of its own because a run's file deny list names every entry of data/
  * it finds (fileDenyRules): a new file there would have changed the argv of
  * every run on the box, ticked or not, and config.json is denied already.
@@ -87,7 +89,7 @@ export interface ConfiguredMcpServer {
  * translates: an English sentence alone would land untranslated in every other
  * locale's line around it.
  */
-export type UnusableReason = "notAServer" | "badName" | "oauth" | "tls" | "cwd" | "toolFilter" | "placeholder";
+export type UnusableReason = "notAServer" | "badName" | "oauth" | "tls" | "cwd" | "toolFilter" | "placeholder" | "shortSecret";
 
 /** The run half: the entry itself, the tool filter, and every value to redact. */
 interface UsableServer extends ConfiguredMcpServer {
@@ -123,6 +125,21 @@ function stringMap(raw: unknown): Record<string, string> | null | undefined {
     }
   }
   return out;
+}
+
+/** An env or header NAME that holds a credential, whatever its value looks like. */
+const CREDENTIAL_NAME_RE = /(token|secret|passw|pwd|api[_-]?key|access[_-]?key|private[_-]?key|auth|credential|cookie|session)/i;
+/** A header VALUE in an auth scheme's syntax: `Bearer <token>`, `Basic <b64>`, `Token <t>`. */
+const AUTH_SCHEME_RE = /^\s*(bearer|basic|token|apikey)\s+(\S+)\s*$/i;
+
+/**
+ * True when a credential is too short for the run's redactor to scrub
+ * (MIN_SECRET_VALUE_CHARS, the redaction floor): such a value would reach a
+ * run's output verbatim, so the server is not offered rather than leaked.
+ * Only credentials are measured — a short ordinary setting (`PORT=80`) is fine.
+ */
+function tooShortCredential(value: string): boolean {
+  return value.trim().length > 0 && value.trim().length < MIN_SECRET_VALUE_CHARS;
 }
 
 function toolList(raw: unknown): string[] | null | undefined {
@@ -181,12 +198,21 @@ function translate(name: string, harness: McpHarness, raw: unknown): ServerRead 
     if (args.some((arg) => arg.includes("${")) || command!.includes("${")) return unusable(name, harness, transport, "placeholder", "it uses a ${…} placeholder only the harness can fill in");
     const env = stringMap(raw.env);
     if (env === null) return unusable(name, harness, transport, "placeholder", "its environment uses a value only the harness can fill in");
+    if (Object.entries(env ?? {}).some(([key, value]) => CREDENTIAL_NAME_RE.test(key) && tooShortCredential(value))) {
+      return unusable(name, harness, transport, "shortSecret", "one of its credentials is too short to be hidden from a run's output");
+    }
     config = { command: command!, args: args as string[], ...(env && Object.keys(env).length > 0 ? { env } : {}) };
     for (const [key, value] of Object.entries(env ?? {})) secrets.push({ name: `${name}.${key}`, value });
   } else {
     if (url!.includes("${")) return unusable(name, harness, transport, "placeholder", "it uses a ${…} placeholder only the harness can fill in");
     const headers = stringMap(raw.headers);
     if (headers === null) return unusable(name, harness, transport, "placeholder", "its headers use a value only the harness can fill in");
+    const shortHeader = Object.entries(headers ?? {}).some(([key, value]) => {
+      const scheme = AUTH_SCHEME_RE.exec(value);
+      if (scheme) return tooShortCredential(scheme[2]);
+      return CREDENTIAL_NAME_RE.test(key) && tooShortCredential(value);
+    });
+    if (shortHeader) return unusable(name, harness, transport, "shortSecret", "one of its credentials is too short to be hidden from a run's output");
     config = { type: transport, url: url!, ...(headers && Object.keys(headers).length > 0 ? { headers } : {}) };
     for (const [key, value] of Object.entries(headers ?? {})) {
       secrets.push({ name: `${name}.${key}`, value });

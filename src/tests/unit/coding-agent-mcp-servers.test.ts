@@ -377,6 +377,24 @@ describe("what the harness's config offers", () => {
     expect(JSON.stringify(servers)).not.toContain(BOARD_TOKEN);
   });
 
+  it("does not offer a server whose credential is too short to scrub, and keeps short ordinary settings", async () => {
+    seedOpenclaw({
+      clawbox: CLAWBOX_ENTRY,
+      shortenv: { command: "node", args: ["x.js"], env: { API_TOKEN: "abc123" } },
+      shortbearer: { url: "https://mcp.example.com/mcp", transport: "streamable-http", headers: { Authorization: "Bearer abc" } },
+      shortheader: { url: "https://mcp.example.com/mcp", transport: "streamable-http", headers: { "X-Api-Key": "k1" } },
+      plain: { command: "node", args: ["x.js"], env: { PORT: "80", DEBUG: "1" } },
+      plainheader: { url: "https://mcp.example.com/mcp", transport: "streamable-http", headers: { Accept: "json", Authorization: "Bearer a-long-enough-token" } },
+    });
+    const servers = await byName();
+    for (const name of ["shortenv", "shortbearer", "shortheader"]) {
+      expect(servers[name], name).toMatchObject({ usable: false, reasonCode: "shortSecret" });
+    }
+    expect(servers.plain).toMatchObject({ usable: true });
+    expect(servers.plainheader).toMatchObject({ usable: true });
+    expect(JSON.stringify(servers)).not.toContain("abc123");
+  });
+
   it("turns the harness's exclude filter into the run's deny rules", async () => {
     seedOpenclaw({ board: { ...BOARD_ENTRY, toolFilter: { exclude: ["board_delete"] } } });
     seedAllowlist({ site: ["board"] });

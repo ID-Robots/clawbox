@@ -1030,7 +1030,7 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.mcpServers.clawboxReadOnlyHint": "This box's device status, logs, apps, projects and runs — tools that read and change nothing.",
   "codingAgent.mcpServers.count": "{n} for this project's runs",
   "codingAgent.mcpServers.none": "browser tools only",
-  "codingAgent.mcpServers.help": "Servers this project's coding runs start with, beside the browser tools every run has. Nothing is ticked until you tick it. A server's credentials stay in the harness's own config: never in a run's prompt, log or evidence.",
+  "codingAgent.mcpServers.help": "Servers this project's coding runs start with, beside the browser tools every run has. Nothing is ticked until you tick it. A ticked server's credentials are copied into a private config file for each run, deleted when the run ends, and scrubbed from what the run prints. A server whose credential is too short to scrub (under 8 characters) is not offered.",
   "codingAgent.mcpServers.empty": "This box's harness has no other MCP server configured.",
   "codingAgent.mcpServers.unusable": "A run cannot use it: {reason}",
   "codingAgent.mcpServers.unreadable": "Could not read the {harness} config, so its servers are not listed.",
@@ -1041,6 +1041,7 @@ export const codingAgentEn: Record<string, string> = {
   "codingAgent.mcpServers.reason.cwd": "it names a working folder a run cannot carry",
   "codingAgent.mcpServers.reason.toolFilter": "its tool filter uses a pattern a run cannot reproduce",
   "codingAgent.mcpServers.reason.placeholder": "it uses a value only the harness can fill in",
+  "codingAgent.mcpServers.reason.shortSecret": "one of its credentials is too short to hide from a run's output (under 8 characters)",
   "codingAgent.mcpServers.reason.switchOff": "the ClawBox MCP server is switched off in Settings",
   "codingAgent.mcpServers.reason.notConfigured": "it is not configured on this box any more",
   // Which of the owner's Anthropic accounts a run is on, and the moves between

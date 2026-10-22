@@ -60,7 +60,7 @@ describe("describeProgressLine", () => {
     it("a project's own MCP server is a tool step too, whatever name its allowlist admits", () => {
       // src/lib/project-mcp-servers.ts takes a single `_` or a `-` in a server
       // name and a `-` in a tool name; only a double underscore never.
-      for (const line of ["mcp__admin_board__list_tasks", "mcp__admin-board__list_tasks", "mcp__board__list-tasks", "mcp__a_b-c__list_tasks"]) {
+      for (const line of ["mcp__admin_board__list_tasks", "mcp__admin-board__list_tasks", "mcp__board__list-tasks", "mcp__a_b-c__list_tasks", "mcp__board___list_tasks"]) {
         const d = describeProgressLine(line);
         expect(d.kind, line).toBe("tool");
         expect(d.label, line).toBe("list tasks");

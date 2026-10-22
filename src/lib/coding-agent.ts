@@ -1068,6 +1068,15 @@ export function writeRunMcpConfig(runId: string, json: string): string {
   return file;
 }
 
+/** Best effort: a file that will not go is logged, and the next one is still tried. `force` covers only ENOENT. */
+function removeRunMcpConfigFile(name: string): void {
+  try {
+    fs.rmSync(path.join(STREAM_DIR, name), { force: true });
+  } catch (err) {
+    console.warn(`[coding-agent] could not remove MCP config ${name}:`, err instanceof Error ? err.message : err);
+  }
+}
+
 /** Remove every MCP config this run's spawns were given. */
 export function removeRunMcpConfigs(runId: string): void {
   let names: string[];
@@ -1077,7 +1086,7 @@ export function removeRunMcpConfigs(runId: string): void {
     return;
   }
   for (const name of names) {
-    if (RUN_MCP_CONFIG_RE.exec(name)?.[1] === runId) fs.rmSync(path.join(STREAM_DIR, name), { force: true });
+    if (RUN_MCP_CONFIG_RE.exec(name)?.[1] === runId) removeRunMcpConfigFile(name);
   }
 }
 
@@ -1090,7 +1099,7 @@ function sweepRunMcpConfigs(): void {
     return;
   }
   for (const name of names) {
-    if (RUN_MCP_CONFIG_RE.test(name)) fs.rmSync(path.join(STREAM_DIR, name), { force: true });
+    if (RUN_MCP_CONFIG_RE.test(name)) removeRunMcpConfigFile(name);
   }
 }
 
