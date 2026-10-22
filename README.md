@@ -465,14 +465,17 @@ bun run test:e2e         # End-to-end tests (Playwright)
 bun run check:mcp-tools  # Assert the MCP tool matrix matches mcp/README.md
 ```
 
-**On real hardware:** every pull request of ours into `beta` or `main`, drafts
-included, runs [Nano hardware tests](.github/workflows/nano-hardware-tests.yml):
-the on-device suite on one free Jetson from the nano lab, after which the board
-is cleaned up and released. A PR runs the tests its changes reach plus a core
-smoke set (label `nano-full` for all of them); every push to `beta` and `main`
-runs the full suite. `skip-nano` opts a PR out, a docs-only PR is
-skipped, and a fork's PR never reaches the lab. What it checks, how cleanup
-works and how to add a test: [docs/nano-hardware-tests.md](docs/nano-hardware-tests.md).
+**On real hardware:** [Nano hardware tests](.github/workflows/nano-hardware-tests.yml)
+runs the on-device suite on one free Jetson from the nano lab, after which the
+board is cleaned up and released. It runs on every pull request of ours into
+`main` (drafts included: the tests its changes reach plus a core smoke set),
+on a pull request into `beta` labelled `nano-full` (all tests) or `nano-long`
+(all, the long tier too), and on a dispatch; pushes no longer start it. The
+every-second-night run on `beta` starts only once its schedule is on `main`,
+the default branch — until then, dispatch `beta` by hand. `skip-nano` opts a
+PR out, a docs-only PR is skipped, and a fork's PR never reaches the lab. What
+it checks, how cleanup works and how to add a test:
+[docs/nano-hardware-tests.md](docs/nano-hardware-tests.md).
 
 ### Environment Variables
 

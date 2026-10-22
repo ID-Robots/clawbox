@@ -11,11 +11,19 @@ Everything that does not need the hardware already runs in the container CI
 
 ## When it runs
 
-**Every pull request of ours into `beta` or `main`, drafts included,
-automatically** — no label needed. It is part of the PR's suite like `Tests`
-or `E2E`: the check is **On-device tests (nano-lab)**. The workflow
-(`.github/workflows/nano-hardware-tests.yml`) runs when a PR is opened or
-reopened and again on every push to it, as long as:
+In **batches** since 20 Oct 2026: a pull request into `beta` no longer takes a
+board of its own. The check is **On-device tests (nano-lab)**, the workflow
+`.github/workflows/nano-hardware-tests.yml`, and a board runs on
+
+| Event | Tests |
+|---|---|
+| a pull request into `main` (the `beta` → `main` promotion), drafts included, when it is opened or reopened and on every push to it | the ones its changes reach, plus the core smoke set ([Which tests a run picks](#which-tests-a-run-picks)) |
+| a pull request into `beta` labelled `nano-full` or `nano-long` | all of them (`nano-long`: the long tier too) |
+| a dispatch ([Dispatching a branch](#dispatching-a-branch)) | all of them (`long` ticked: the long tier too) |
+| every second night, 01:00 UTC, on `beta`'s head: `.github/workflows/nano-hardware-tests-schedule.yml` dispatches it | all of them — **only once that file is on `main`**, see [The night run](#the-night-run) |
+
+Pushes to `beta` or `main` no longer start it. A pull request that does take
+a board runs as long as:
 
 | Condition | Why |
 |---|---|
@@ -23,15 +31,34 @@ reopened and again on every push to it, as long as:
 | The PR does **not** carry the label `skip-nano` | The only opt-out. |
 | The PR changes something besides documentation | See [Docs-only pull requests](#docs-only-pull-requests). |
 
-It also runs on **every push to `beta` or `main`** (a merge), with the same
-docs-only rule applied to the commits pushed, and there it always runs the
-**full** suite — see [Which tests a run picks](#which-tests-a-run-picks).
-
 Since 2 Oct 2026 **On-device tests (nano-lab)** is a **required** check on
-`beta`, and a skipped run (a docs-only PR, `skip-nano`) counts as passing.
+`beta`, and a skipped run (a PR into `beta` without `nano-full`/`nano-long`, a
+docs-only PR, `skip-nano`) counts as passing.
 
-A **draft** runs like any other PR: the coding agent opens most of our PRs as
-drafts, and the board run is part of the checks it waits for. Marking a draft
+### The night run
+
+GitHub starts a `schedule:` trigger only from the workflow files on the
+repository's **default branch**, `main` — never from `beta`'s. Until a
+promotion carries `.github/workflows/nano-hardware-tests-schedule.yml` to
+`main`, GitHub does not know that workflow at all: no night run happens, and
+`beta`'s head reaches a board only through a dispatch or a labelled pull
+request. Whether it is live:
+
+```bash
+gh workflow list --all | grep 'every 2nd night'   # nothing: the night run is not live yet
+```
+
+Until it is, dispatch `beta` by hand after the merges that matter (add
+`-f long=true` for the long tier):
+
+```bash
+gh workflow run nano-hardware-tests.yml --ref beta -f ref=beta
+```
+
+### Drafts and labels
+
+A **draft** runs like any other PR that takes a board: the coding agent opens
+most of our PRs as drafts, and the board run is part of the checks it waits for. Marking a draft
 ready for review starts no second run — its head commit has already been
 tested, and the check stays on that commit. Labels start nothing either: the
 review bots' and auto-triage labels never cost a board.
@@ -81,7 +108,7 @@ To put a docs-only PR on a board anyway, dispatch its branch (below) —
 ### Which tests a run picks
 
 A pull request runs only the tests its changes reach, plus a core smoke set;
-everything else runs on the merge. `plan` hands the PR's changed files to
+everything else runs on a dispatch (the night run is one). `plan` hands the PR's changed files to
 `scripts/nano-tests/select-tests.sh`, which reads the map from the tests'
 own headers:
 
@@ -104,7 +131,7 @@ in the TAP output, the job summary and `summary.json` (`selection`).
 - the runner itself: `scripts/nano-tests/*.sh`, this workflow, and
   `scripts/public-hygiene.mjs`, which redacts the board's logs;
 - a list of changed files that is incomplete or empty;
-- a push to `beta` or `main`, a dispatch, and a pull request labelled
+- a dispatch (the night run included) and a pull request labelled
   **`nano-full`** (or `nano-long`). `plan` reads the PR's labels when it runs,
   so add the label and re-run the workflow (or push) to get the full suite.
 
