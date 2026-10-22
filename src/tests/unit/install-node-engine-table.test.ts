@@ -225,6 +225,18 @@ describe("install.sh / install-x64.sh / clawbox-x64-step.sh Node engine table", 
     expect(BUILDER).toContain('OPENCLAW_NODE_ENGINE = ">=24.22.1 <25, or >=26.12.1"');
   });
 
+  it("holds the e2e-install runtime check to the same floors", () => {
+    // e2e-install/07-runtime-pin.spec.ts asks the installed box whether its Node
+    // is one the pinned core accepts, from a floor per major of its own. A floor
+    // left behind by a bump passes a box the core refuses.
+    const engineLine = /^OPENCLAW_NODE_ENGINE="([^"]*)"/m.exec(INSTALLERS["install.sh"])?.[1] ?? "";
+    const expected = [...engineLine.matchAll(/>=((\d+)\.\d+\.\d+)/g)].map((m) => `"${m[2]}": "${m[1]}"`);
+    expect(expected).toEqual(['"24": "24.22.1"', '"26": "26.12.1"']);
+    const spec = readFileSync(path.join(REPO, "e2e-install/07-runtime-pin.spec.ts"), "utf-8");
+    const table = /const ENGINE_FLOORS[^=]*=\s*\{([^}]*)\}/.exec(spec)?.[1] ?? "";
+    for (const pair of expected) expect(table, "ENGINE_FLOORS in e2e-install/07-runtime-pin.spec.ts").toContain(pair);
+  });
+
   it("fetches the NodeSource channel of the major it accepts, and never the retired one", () => {
     // A guard that rejects 22 while the install line still pipes `setup_22.x`
     // is the worst of both: the box takes the apt transaction, lands on a Node
