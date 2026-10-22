@@ -2,6 +2,7 @@
 # timeout: 900
 # covers: src/lib/project-mcp-servers.ts src/lib/clawbox-run-read-tools.ts src/app/setup-api/coding-agent/mcp-servers/*
 # covers: mcp/lib/register.ts mcp/lib/profile.ts mcp/clawbox-mcp.ts src/components/CodingProjectMcpServersCard.tsx
+# covers: src/lib/coding-agent-progress.ts
 #
 # A project's MCP servers reaching a real delegated run (src/lib/project-mcp-servers.ts):
 #
@@ -14,7 +15,8 @@
 #      while it runs, the Coding Agent app itself — /app/coding, rendered in a
 #      headless Chromium of the box's own with an owner session, the run opened
 #      through the app's own open-run event — shows the run live with both
-#      servers in its timeline; its record names them; and the harness's argv
+#      servers in its timeline and the board's tool call on its live card, as
+#      a tool step and never a raw mcp__ name; its record names them; and the harness's argv
 #      has --strict-mcp-config and --mcp-config <a 0600 file> with no token in
 #      it. The board's tool answers only after 30 s, so the run is still live
 #      while all of that is looked at.
@@ -117,7 +119,7 @@ const out = (line) => process.stdout.write(line + "\n");
     await context.addCookies([{ name: "clawbox_session", value: process.env.OWNER_COOKIE, url: "http://127.0.0.1" }]);
     const page = await context.newPage();
     await page.goto("http://127.0.0.1/app/coding", { waitUntil: "domcontentloaded", timeout: 60000 });
-    const deadline = Date.now() + 150000;
+    const deadline = Date.now() + 240000;
     while (Date.now() < deadline) {
       await page.evaluate((id) => window.dispatchEvent(new CustomEvent("clawbox:open-coding-run", { detail: { runId: id } })), runId);
       await page.waitForTimeout(2500);
@@ -127,13 +129,18 @@ const out = (line) => process.stdout.write(line + "\n");
         return r.ok ? (await r.json()).run.status : "http-" + r.status;
       }, runId);
       const line = text.split("\n").find((l) => l.includes(name) && l.includes("ClawBox read-only tools"));
-      const card = await page.locator("[data-testid=coding-agent-live-card]").count();
-      if (line && status === "running" && card > 0) {
-        out("APP live " + line.trim().slice(0, 160));
+      const card = page.locator("[data-testid=coding-agent-live-card]");
+      const cardText = (await card.count()) > 0 ? await card.first().innerText() : "";
+      // The board tool answers after 30 s, so its call sits on the live card,
+      // drawn as a tool step, while the run waits for the answer.
+      const call = cardText.includes("nano board read");
+      if (line && status === "running" && call) {
+        const raw = cardText.split("\n").find((l) => l.includes("mcp__"));
+        out(raw ? "APP raw-tool-name " + raw.trim().slice(0, 160) : "APP live " + line.trim().slice(0, 160));
         return;
       }
       if (status !== "running") {
-        out("APP settled-before-seen status=" + status + " line=" + (line ? "yes" : "no") + " card=" + card);
+        out("APP settled-before-seen status=" + status + " line=" + (line ? "yes" : "no") + " card=" + (cardText ? "yes" : "no") + " call=" + (call ? "yes" : "no"));
         return;
       }
     }
@@ -183,7 +190,7 @@ RUN_END=$(( $(date +%s) + 600 ))
 APP_OUT="$STUB_DIR/app.out"
 APP_PID=""
 if [ -n "$EXE" ]; then
-  OWNER_COOKIE="$OWNER" NODE_PATH="$REPO/node_modules" timeout 240 node "$STUB_DIR/app-check.cjs" "$RUN_ID" "$NAME" "$EXE" > "$APP_OUT" 2>&1 &
+  OWNER_COOKIE="$OWNER" NODE_PATH="$REPO/node_modules" timeout 330 node "$STUB_DIR/app-check.cjs" "$RUN_ID" "$NAME" "$EXE" > "$APP_OUT" 2>&1 &
   APP_PID=$!
 else
   echo "APP no-chromium" > "$APP_OUT"
@@ -233,7 +240,7 @@ done
 [ -n "$APP_PID" ] && wait "$APP_PID"
 APP=$(grep "^APP " "$APP_OUT" | head -n 1)
 case "$APP" in
-  "APP live "*) say "ok - the Coding Agent app showed the run live, its timeline naming both servers: ${APP#APP live }" ;;
+  "APP live "*) say "ok - the Coding Agent app showed the run live, its timeline naming both servers and the board tool call as it ran: ${APP#APP live }" ;;
   *) say "not ok - the Coding Agent app did not show the live run with both servers: ${APP:-$(tail -n 2 "$APP_OUT" | tr "\n" " " | head -c 200)}" ;;
 esac
 case "$ARGV" in

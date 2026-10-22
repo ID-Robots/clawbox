@@ -197,8 +197,13 @@ const FILE_TOOLS: Record<string, { labelKey: ProgressLabelKey; label: string; ic
  */
 const PLAN_RE = /^Plan: (\d+) tasks?, (\d+) done$/;
 
-/** A tool name as the harness reports it: `mcp__<server>__<tool>` or bare. */
-const MCP_TOOL_RE = /^mcp__[A-Za-z0-9-]+__([A-Za-z0-9_]+)$/;
+/**
+ * A tool name as the harness reports it: `mcp__<server>__<tool>` or bare. The
+ * server is any name a project's allowlist admits (src/lib/project-mcp-servers.ts):
+ * a single `_` or a `-` in it, never a double underscore — the first `__` after
+ * the server ends it — and the tool may hold a `-` too.
+ */
+const MCP_TOOL_RE = /^mcp__(?:[A-Za-z0-9-]|_(?!_))+__([A-Za-z0-9_-]+)$/;
 const BARE_TOOL_RE = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/;
 
 /** Where every run's folder lives on the box; a command echoing it is all noise. */
@@ -594,7 +599,7 @@ export function describeProgressLine(raw: string): ProgressDescription {
     if (known) return { kind: "tool", ...known };
     // Not one of ours — still never the raw mcp__ name; the tool's own words
     // with the underscores taken out is the most honest label left.
-    return { kind: "tool", label: toolName.replace(/_/g, " "), icon: "extension" };
+    return { kind: "tool", label: toolName.replace(/[_-]+/g, " ").trim(), icon: "extension" };
   }
 
   // The runner's own vocabulary, last: a sentence the agent happens to write
