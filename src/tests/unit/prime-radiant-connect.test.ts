@@ -128,6 +128,9 @@ describe("names and leaves", () => {
     expect(kept.has("Google Drive")).toBe(true);
     expect(kept.has("Northwind Depot")).toBe(true);
     expect(kept.has("Acme Widgets Ltd")).toBe(true);
+    // A count before a name that ends in a street word is no house number; a street alone, ended, is an address.
+    expect(candidateNames("We share 3 Google Drive folders with the Northwind Depot.").has("Google Drive")).toBe(true);
+    expect(candidateNames("Ships to 12 Maple Grove Drive. Ships to 12 Maple Grove Drive, then on.").has("Maple Grove Drive")).toBe(false);
   });
 
   it("creates no entity page for the street or city of an address many pages carry", async () => {

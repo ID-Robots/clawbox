@@ -185,14 +185,17 @@ const REGION = "[A-Z]{2}(?![\\p{L}\\p{N}])";
  * postcode — by commas ("…, Springfield, AB T4N 1A1"), or by spaces when they
  * end in a region code or a postcode ("… Springfield AB T4N 1A1"), so the
  * capitalised words of a next sentence are never taken for a city. A full
- * stop ends it. Read by its shape, never from a list of places: a name with no
- * house number before it ("Google Drive") is no address.
+ * stop ends it. With no city after it, a street is an address only when no
+ * lowercase word follows: "3 Google Drive folders" is a count and a name.
+ * Read by its shape, never from a list of places: a name with no house number
+ * before it ("Google Drive") is no address.
  */
 const POSTAL_ADDRESS = new RegExp(
   `(?<![\\p{L}\\p{N}])\\d{1,6}[A-Za-z]?[ \\t]+(?:${STREET_WORD}[ \\t]+){1,4}${STREET_TYPE}(?![\\p{L}\\p{N}])` +
     `(?:[ \\t]+(?:NE|NW|SE|SW|N|S|E|W)(?![\\p{L}\\p{N}]))?` +
     `(?:(?:,[ \\t]*${PLACE}){1,3}(?:,?[ \\t]+${POSTCODE})?` +
-    `|(?:,?[ \\t]+${PLACE_WORD}){0,3},?[ \\t]+(?:${REGION}(?:,?[ \\t]+${POSTCODE})?|${POSTCODE}))?`,
+    `|(?:,?[ \\t]+${PLACE_WORD}){0,3},?[ \\t]+(?:${REGION}(?:,?[ \\t]+${POSTCODE})?|${POSTCODE})` +
+    `|(?![ \\t]+\\p{Ll}))`,
   "gu",
 );
 
