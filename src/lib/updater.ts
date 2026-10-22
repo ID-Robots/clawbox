@@ -2216,9 +2216,12 @@ async function runOpenclawDoctorFix(): Promise<void> {
   if (openclawIsAbsent()) return;
   // Measured per run, before doctor touches them: the verify's doctor reads
   // every agent database, and a flat 90 s stopped it on every ~3 GB box.
-  const timeoutMs = doctorFixTimeoutFor(
-    await openclawDatabaseBytes(openclawTreePaths().openclawHome).catch(() => 0),
-  );
+  const databaseBytes = await openclawDatabaseBytes(openclawTreePaths().openclawHome).catch(() => 0);
+  const timeoutMs = doctorFixTimeoutFor(databaseBytes);
+  // Said on every run, not only when doctor is cut off: the bound it was given
+  // is what tells a field log "not long enough" apart from "stuck".
+  console.log(`[Updater] openclaw doctor --fix: bound ${Math.round(timeoutMs / 1000)}s `
+    + `for ${(databaseBytes / 1024 ** 3).toFixed(2)} GiB of OpenClaw databases`);
   try {
     // Asked again while another holder has the state under maintenance: the
     // core refuses before it acts (`@/lib/openclaw-maintenance`).

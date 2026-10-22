@@ -3904,7 +3904,14 @@ describe("updater", () => {
     });
 
     it("lets doctor finish on a box with ~3 GB of agent databases", async () => {
+      const logged = vi.spyOn(console, "log");
       await verifyOnBoxWith(3e9);
+
+      // The bound is in the update's log, with the size it was scaled by.
+      expect(logged.mock.calls.map((c) => String(c[0]))).toContain(
+        "[Updater] openclaw doctor --fix: bound 450s for 2.79 GiB of OpenClaw databases",
+      );
+      logged.mockRestore();
 
       expect(doctorTimeouts.length).toBeGreaterThan(0);
       // Not cut off, so the update says nothing about it...
@@ -3919,8 +3926,13 @@ describe("updater", () => {
     });
 
     it("keeps the old 90 s for a box with no databases to read", async () => {
+      const logged = vi.spyOn(console, "log");
       await verifyOnBoxWith(0);
 
+      expect(logged.mock.calls.map((c) => String(c[0]))).toContain(
+        "[Updater] openclaw doctor --fix: bound 90s for 0.00 GiB of OpenClaw databases",
+      );
+      logged.mockRestore();
       expect(doctorTimeouts.length).toBeGreaterThan(0);
       expect(doctorTimeouts.every((t) => t === 90_000)).toBe(true);
       expect(killedWarning()).toBeUndefined();
