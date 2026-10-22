@@ -63,6 +63,7 @@ describe.skipIf(!canRun)("scripts/nano-tests/select-tests.sh", () => {
     expect(select(["src/lib/coding-agent.ts"]).tests).toEqual([...CORE, "40-coding-agent-run", "60-media-tools"]);
     expect(select(["src/lib/shared-browser.ts"]).tests).toEqual([...CORE, "78-one-browser", "79-browser-clean-start"]);
     expect(select(["scripts/setup-optimizations.sh"]).tests).toEqual([...CORE, "50-memory-pressure"]);
+    expect(select(["scripts/codex-auth-mirror.js"]).tests).toEqual([...CORE, "45-codex-auth-mirror-lock"]);
     expect(select(["config/clawbox-gateway.service", "src/components/Desktop.tsx"]).tests).toEqual([...CORE, "75-full-reboot", "78-one-browser", "79-browser-clean-start"]);
     expect(select(["src/lib/coding-agent.ts"]).reason).toMatch(/^the core smoke set and 40-coding-agent-run 60-media-tools, from 1 of 1 changed files/);
   });

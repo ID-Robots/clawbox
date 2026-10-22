@@ -592,6 +592,38 @@ function dedupePaths(files) {
 }
 
 /**
+ * Does this agent's own `auth_profile_store` hold `profileId`?
+ *
+ * Asked before the write-back takes core's write lock, and asked the way both
+ * readers ask: read-only, autocommit, the same busy_timeout. Core keeps the
+ * database in WAL mode, so this read does not queue behind the gateway's own
+ * writes — `BEGIN IMMEDIATE` does, for as long as each one takes, up to the
+ * whole busy_timeout. A store without the profile (the empty row a migrated
+ * `state-db` box keeps, or no row or table at all) has nothing to record and is
+ * never locked. Throws when it cannot tell; the caller counts that as a store
+ * it could not update.
+ */
+function agentStoreHolds(dbPath, profileId) {
+  const DatabaseSync = sqliteDatabase();
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    db.exec("PRAGMA busy_timeout = 5000");
+    const table = db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .get("auth_profile_store");
+    if (!table) return false;
+    const row = db
+      .prepare("SELECT store_json FROM auth_profile_store WHERE store_key = ?")
+      .get("primary");
+    if (!row || !row.store_json) return false;
+    const store = JSON.parse(row.store_json);
+    return Boolean(store && store.profiles && store.profiles[profileId]);
+  } finally {
+    db.close();
+  }
+}
+
+/**
  * Write an app-server rotation back into core's auth profile store, so core
  * stops handing out a refresh token that has already been spent.
  *
@@ -624,40 +656,22 @@ function dedupePaths(files) {
  */
 function writeBackToCore(agentDirs, tokens, profileId) {
   if (!tokens || !tokens.refresh_token || !profileId) return false;
+  // `wrote`: a store holding this profile now holds the rotation. `unsettled`:
+  // a sqlite store that holds it — or might, because it could not be read —
+  // still has the spent token, so nothing may report the rotation as recorded.
   let wrote = false;
-
-  // Legacy JSON store, still the source on some boxes.
-  for (const agentDir of agentDirs) {
-    const jsonPath = path.join(agentDir, "auth-profiles.json");
-    const data = readJson(jsonPath);
-    const profiles = data && data.profiles;
-    if (!profiles || !profiles[profileId]) continue;
-    const id = profileId;
-    profiles[id].access = tokens.access_token || profiles[id].access;
-    profiles[id].refresh = tokens.refresh_token;
-    if (tokens.id_token) profiles[id].id = tokens.id_token;
-    try {
-      fs.writeFileSync(jsonPath, JSON.stringify(data, null, 2), { mode: 0o600 });
-      // Same creation-only `mode`, on a file that always pre-exists here (the
-      // loop only runs when it already holds this profile) — and this one holds
-      // the REFRESH token, not the access-token mirror. Core's own audit flags
-      // it (`fs.auth_profiles.perms_readable`) and never repairs it, so this is
-      // the only place it gets repaired.
-      enforceMode(jsonPath, 0o600);
-      wrote = true;
-    } catch {
-      // Non-fatal; the sqlite store below is the one core reads.
-    }
-  }
+  let unsettled = false;
 
   for (const agentDir of agentDirs) {
     const dbPath = path.join(agentDir, "openclaw-agent.sqlite");
     if (!fs.existsSync(dbPath)) continue;
     try {
+      // Nothing to write, no write lock: see agentStoreHolds.
+      if (!agentStoreHolds(dbPath, profileId)) continue;
       const DatabaseSync = sqliteDatabase();
       const db = new DatabaseSync(dbPath);
       // Same timeout as both readers: without it a transient SQLITE_BUSY is
-      // swallowed below, becomes `wrote = false`, and is reported to the
+      // swallowed below, makes the pass `unsettled`, and is reported to the
       // operator as an unsettleable divergence — a false failure over a lock.
       db.exec("PRAGMA busy_timeout = 5000");
       let open = false;
@@ -694,15 +708,8 @@ function writeBackToCore(agentDirs, tokens, profileId) {
           .run(JSON.stringify(store), Date.now(), "primary");
         db.exec("COMMIT");
         open = false;
-        // Only after the COMMIT, and the guarantee is THIS loop's alone: a
-        // rotation reported as recorded but rolled back would leave main()
-        // adopting a token core does not hold. `wrote` is an OR across both
-        // stores, and the legacy auth-profiles.json loop above sets it with no
-        // transaction and no relation to this outcome — so on a box holding
-        // both stores a successful JSON write still reports true when the
-        // sqlite write is rolled back. Bounded rather than closed here: the
-        // divergence persists, the next tick retries, and readProfiles prefers
-        // that JSON file on exactly the boxes that have one.
+        // Only after the COMMIT: a rotation reported as recorded but rolled
+        // back would leave main() adopting a token core does not hold.
         wrote = true;
       } finally {
         if (open) {
@@ -716,6 +723,37 @@ function writeBackToCore(agentDirs, tokens, profileId) {
       }
     } catch {
       // Locked or unavailable — the next timer tick retries.
+      unsettled = true;
+    }
+  }
+
+  // Not even the legacy file below: it is the store readProfiles reads FIRST,
+  // so a rotation written there while the sqlite write was rolled back makes
+  // this script itself read the new token back as core's — no divergence on
+  // the next tick, no retry, and core keeps handing out the spent one.
+  if (unsettled) return false;
+
+  // Legacy JSON store, still the source on some boxes.
+  for (const agentDir of agentDirs) {
+    const jsonPath = path.join(agentDir, "auth-profiles.json");
+    const data = readJson(jsonPath);
+    const profiles = data && data.profiles;
+    if (!profiles || !profiles[profileId]) continue;
+    const id = profileId;
+    profiles[id].access = tokens.access_token || profiles[id].access;
+    profiles[id].refresh = tokens.refresh_token;
+    if (tokens.id_token) profiles[id].id = tokens.id_token;
+    try {
+      fs.writeFileSync(jsonPath, JSON.stringify(data, null, 2), { mode: 0o600 });
+      // Same creation-only `mode`, on a file that always pre-exists here (the
+      // loop only runs when it already holds this profile) — and this one holds
+      // the REFRESH token, not the access-token mirror. Core's own audit flags
+      // it (`fs.auth_profiles.perms_readable`) and never repairs it, so this is
+      // the only place it gets repaired.
+      enforceMode(jsonPath, 0o600);
+      wrote = true;
+    } catch {
+      // Non-fatal when the sqlite store above, the one core reads, took it.
     }
   }
 
