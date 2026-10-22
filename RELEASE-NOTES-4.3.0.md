@@ -1,6 +1,6 @@
 # ClawBox 4.3.0
 
-Previous release: v4.2.0, 5 October 2026. 420 commits.
+Previous release: v4.2.0, 5 October 2026. 426 commits.
 
 4.3 adds a Screenshot app and gives you and your assistant one shared browser.
 An app the Coding Agent built can now be shared through a public link. xAI Grok
@@ -204,6 +204,12 @@ between Anthropic accounts get a long list of fixes.
   again. A box with no effort saved starts runs at **Very high** instead of
   **Ultracode**. Coding Agent setup saves the effort it shows, so a box set up
   before this release keeps the Ultracode it saved there until you change it.
+- **ClawBox apps in the Store.** The Store app has a **ClawBox Apps**
+  category: **Install** downloads a published app, checks it, puts it in the
+  Coding Agent's project folder and on the desktop, and **Uninstall** removes
+  it again. A Coding Agent project with a `clawbox.json` gets **Publish to
+  ClawBox Store**; until publishing is open to your account, the dialog says it
+  is coming soon.
 
 ## Improvements
 
